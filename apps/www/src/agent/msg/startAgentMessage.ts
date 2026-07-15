@@ -44,7 +44,7 @@ import {
 } from "@terragon/agent/utils";
 import { handleSlashCommand } from "@/agent/slash-command-handler";
 import { tryAutoCompactThread } from "@/server-lib/compact";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { maybeProcessFollowUpQueue } from "@/server-lib/process-follow-up-queue";
 import { getUserCredentials } from "@/server-lib/user-credentials";
 import { getAccessInfoForUser } from "@/lib/subscription";

@@ -1,7 +1,7 @@
 "use server";
 
 import { userOnlyAction } from "@/lib/auth-server";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { db } from "@/lib/db";
 import { startAgentMessage } from "@/agent/msg/startAgentMessage";
 import { getPostHogServer } from "@/lib/posthog-server";

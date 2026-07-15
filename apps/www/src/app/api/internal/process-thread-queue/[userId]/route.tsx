@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { NextResponse } from "next/server";
 import { validInternalRequestOrThrow } from "@/lib/auth-server";
 import { isValidUserId } from "@terragon/shared/model/user";

@@ -5,7 +5,7 @@ import { User } from "@terragon/shared";
 import { withSandboxResource } from "@/agent/sandbox-resource";
 import { getSandboxOrNull } from "@terragon/sandbox";
 import { getDaemonLogs } from "@terragon/sandbox/daemon";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { maybeHibernateSandboxInternal } from "@/agent/sandbox";
 import Sandbox from "@e2b/code-interpreter";
 import type { SandboxProvider } from "@terragon/types/sandbox";

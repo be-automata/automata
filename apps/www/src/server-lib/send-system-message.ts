@@ -3,7 +3,7 @@ import { startAgentMessage } from "@/agent/msg/startAgentMessage";
 import { updateThreadChatWithTransition } from "@/agent/update-status";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { DBSystemMessage } from "@terragon/shared";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 
 export async function sendSystemMessage({
   userId,

@@ -16,7 +16,7 @@ import {
   updateThreadChat,
 } from "@terragon/shared/model/threads";
 import { updateThreadChatWithTransition } from "@/agent/update-status";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { startAgentMessage } from "@/agent/msg/startAgentMessage";
 import { getUserMessageToSend } from "@/lib/db-message-helpers";
 import { generateAndUpdateThreadName } from "@/server-lib/new-thread-shared";

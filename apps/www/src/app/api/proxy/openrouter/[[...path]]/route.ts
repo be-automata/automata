@@ -6,7 +6,7 @@ import { getUserCreditBalance } from "@terragon/shared/model/credits";
 import { isStripeConfigured } from "@/server-lib/stripe";
 import { maybeTriggerCreditAutoReload } from "@/server-lib/credit-auto-reload";
 import { logOpenRouterUsage } from "../log-usage";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { validateProxyRequestModel } from "@/server-lib/proxy-model-validation";
 
 const OPENROUTER_API_BASE = "https://openrouter.ai/api/";

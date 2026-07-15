@@ -10,7 +10,7 @@ import { withSandboxResource } from "./sandbox-resource";
 import { updateThreadChatWithTransition } from "./update-status";
 import { db } from "@/lib/db";
 import { getPostHogServer } from "@/lib/posthog-server";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { extendSandboxLife } from "@terragon/sandbox";
 import { trackUsageEvents } from "@/server-lib/usage-events";
 import { onThreadChatError } from "@/server-lib/thread-status-change";

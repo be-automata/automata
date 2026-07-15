@@ -2,7 +2,7 @@ import crypto from "crypto";
 import { env } from "@terragon/env/apps-www";
 import { NextRequest, NextResponse } from "next/server";
 import { handleAppMentionEvent } from "./handlers";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 
 function verifySlackSignature(req: NextRequest, body: string) {
   if (!env.SLACK_SIGNING_SECRET) {

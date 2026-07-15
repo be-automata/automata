@@ -1,5 +1,5 @@
 import { sendDaemonMessage } from "@/agent/daemon";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { withThreadSandboxSession } from "@/agent/thread-resource";
 import { updateThreadChatWithTransition } from "@/agent/update-status";
 import { onThreadChatStopped } from "./thread-status-change";

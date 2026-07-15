@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { DBUserMessage } from "@terragon/shared";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { startAgentMessage } from "@/agent/msg/startAgentMessage";
 import { getPostHogServer } from "@/lib/posthog-server";
 import {

@@ -6,7 +6,7 @@ import { getUserCreditBalance } from "@terragon/shared/model/credits";
 import { isStripeConfigured } from "@/server-lib/stripe";
 import { maybeTriggerCreditAutoReload } from "@/server-lib/credit-auto-reload";
 import { logGoogleUsage } from "../log-google-usage";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { validateProxyRequestModel } from "@/server-lib/proxy-model-validation";
 
 const GOOGLE_API_BASE = "https://generativelanguage.googleapis.com/";

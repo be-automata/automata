@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { updateThreadChatWithTransition } from "@/agent/update-status";
 import { getThreadChat } from "@terragon/shared/model/threads";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { startAgentMessage } from "@/agent/msg/startAgentMessage";
 
 export async function runScheduledThread({

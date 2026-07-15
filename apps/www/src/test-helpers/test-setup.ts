@@ -15,7 +15,9 @@ vi.mock("next/headers", async (importOriginal) => {
     headers: vi.fn(),
   };
 });
-vi.mock("@vercel/functions", () => ({
+// Background work now flows through the local waitUntil shim (@/lib/wait-until),
+// so that is the seam tests mock/drain — see mockWaitUntil/waitUntilResolved.
+vi.mock("@/lib/wait-until", () => ({
   waitUntil: vi.fn(),
 }));
 vi.mock("react", async (importOriginal) => {

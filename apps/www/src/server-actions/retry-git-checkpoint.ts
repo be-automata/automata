@@ -2,7 +2,7 @@
 
 import { userOnlyAction } from "@/lib/auth-server";
 import { db } from "@/lib/db";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { checkpointThread } from "../server-lib/checkpoint-thread";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { updateThreadChatWithTransition } from "@/agent/update-status";

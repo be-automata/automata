@@ -82,7 +82,7 @@ export async function mockLoggedInUser(session: Session) {
 const promises: Promise<any>[] = [];
 
 export async function mockWaitUntil() {
-  const { waitUntil } = await import("@vercel/functions");
+  const { waitUntil } = await import("@/lib/wait-until");
   (waitUntil as any).mockImplementation((promise: Promise<any>) => {
     promises.push(promise);
   });

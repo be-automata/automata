@@ -13,7 +13,7 @@ import {
   getThreadChat,
   getThreadMinimal,
 } from "@terragon/shared/model/threads";
-import { waitUntil } from "@vercel/functions";
+import { waitUntil } from "@/lib/wait-until";
 import { setActiveThreadChat } from "@/agent/sandbox-resource";
 import { extendSandboxLife } from "@terragon/sandbox";
 import { checkpointThread } from "@/server-lib/checkpoint-thread";
