@@ -5,7 +5,12 @@ import { createDb } from "../db";
 import { User } from "../db/types";
 import { nanoid } from "nanoid";
 import { eq } from "drizzle-orm";
-import { thread, threadChat, environment } from "../db/schema";
+import {
+  thread,
+  threadChat,
+  environment,
+  threadVisibility,
+} from "../db/schema";
 import {
   createOrganization,
   addOrganizationMember,
@@ -309,5 +314,97 @@ describe("forTenant accessor — environment tenant scoping", () => {
       .from(environment)
       .where(eq(environment.id, env.id));
     expect(updated!.setupScript).toBe("echo ok");
+  });
+});
+
+describe("forTenant accessor — thread visibility + github PR scoping (WI-5)", () => {
+  let alice: User;
+  let bob: User;
+  let carol: User;
+  let orgX: string;
+  let orgY: string;
+
+  beforeEach(async () => {
+    alice = (await createTestUser({ db })).user;
+    bob = (await createTestUser({ db })).user;
+    carol = (await createTestUser({ db })).user;
+    orgX = await createOrgWithMembers([alice.id, bob.id]);
+    orgY = await createOrgWithMembers([carol.id]);
+  });
+
+  it("setThreadVisibility stamps the thread's org and is owner-fenced", async () => {
+    const { threadId } = await forTenant({
+      db,
+      organizationId: orgX,
+      userId: alice.id,
+    }).createThread({
+      threadValues,
+      initialChatValues: { agent: "claudeCode" },
+    });
+
+    await forTenant({
+      db,
+      organizationId: orgX,
+      userId: alice.id,
+    }).setThreadVisibility(threadId, "repo");
+
+    const [vis] = await db
+      .select()
+      .from(threadVisibility)
+      .where(eq(threadVisibility.threadId, threadId));
+    expect(vis!.visibility).toBe("repo");
+    expect(vis!.organizationId).toBe(orgX);
+
+    // Same-org co-member cannot change it (owner fence → thread not found).
+    await expect(
+      forTenant({
+        db,
+        organizationId: orgX,
+        userId: bob.id,
+      }).setThreadVisibility(threadId, "private"),
+    ).rejects.toThrow();
+
+    // Cross-org member cannot either.
+    await expect(
+      forTenant({
+        db,
+        organizationId: orgY,
+        userId: carol.id,
+      }).setThreadVisibility(threadId, "private"),
+    ).rejects.toThrow();
+  });
+
+  it("getThreadForGithubPR is fenced to the owner within the org", async () => {
+    const { threadId } = await forTenant({
+      db,
+      organizationId: orgX,
+      userId: alice.id,
+    }).createThread({
+      threadValues: { ...threadValues, githubPRNumber: 4242 },
+      initialChatValues: { agent: "claudeCode" },
+    });
+
+    const asAlice = await forTenant({
+      db,
+      organizationId: orgX,
+      userId: alice.id,
+    }).getThreadForGithubPR(threadValues.githubRepoFullName, 4242);
+    expect(asAlice?.id).toBe(threadId);
+
+    // Same-org co-member: not their thread.
+    const asBob = await forTenant({
+      db,
+      organizationId: orgX,
+      userId: bob.id,
+    }).getThreadForGithubPR(threadValues.githubRepoFullName, 4242);
+    expect(asBob).toBeNull();
+
+    // Owner with the wrong active org: denied (fence is on org).
+    const aliceWrongOrg = await forTenant({
+      db,
+      organizationId: orgY,
+      userId: alice.id,
+    }).getThreadForGithubPR(threadValues.githubRepoFullName, 4242);
+    expect(aliceWrongOrg).toBeNull();
   });
 });

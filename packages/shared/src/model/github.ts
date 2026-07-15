@@ -183,11 +183,15 @@ export async function getThreadForGithubPRAndUser({
   repoFullName,
   prNumber,
   userId,
+  organizationId,
 }: {
   db: DB;
   repoFullName: string;
   prNumber: number;
   userId: string;
+  // Tenant fence (WI-5). Optional during the nullable phase; the forTenant
+  // accessor always supplies it.
+  organizationId?: string | null;
 }) {
   const threadOrNull = await db.query.thread.findFirst({
     where: and(
@@ -195,6 +199,9 @@ export async function getThreadForGithubPRAndUser({
       eq(schema.thread.githubPRNumber, prNumber),
       eq(schema.thread.userId, userId),
       isNull(schema.thread.automationId),
+      organizationId
+        ? eq(schema.thread.organizationId, organizationId)
+        : undefined,
     ),
     orderBy: [
       // Unarchived first
@@ -209,7 +216,12 @@ export async function getThreadForGithubPRAndUser({
   if (!threadOrNull) {
     return null;
   }
-  return await getThread({ db, threadId: threadOrNull.id, userId });
+  return await getThread({
+    db,
+    threadId: threadOrNull.id,
+    userId,
+    organizationId,
+  });
 }
 
 export async function getGithubPRForAdmin({

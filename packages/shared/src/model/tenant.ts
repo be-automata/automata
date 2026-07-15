@@ -1,5 +1,10 @@
 import { DB } from "../db";
-import { ThreadInsert, ThreadChatInsert, Environment } from "../db/types";
+import {
+  ThreadInsert,
+  ThreadChatInsert,
+  Environment,
+  ThreadVisibility,
+} from "../db/types";
 import {
   getThread,
   getThreads,
@@ -19,6 +24,8 @@ import {
   deleteEnvironmentById,
   getEnvironmentForUserRepo,
 } from "./environments";
+import { updateThreadVisibility } from "./thread-visibility";
+import { getThreadForGithubPRAndUser } from "./github";
 
 /**
  * Tenant-scoped repository accessor (ADR-001, WI-5 step 3).
@@ -185,6 +192,28 @@ export function forTenant({ db, organizationId, userId }: TenantContext) {
 
     deleteEnvironment(environmentId: string) {
       return deleteEnvironmentById({ db, userId, organizationId, environmentId });
+    },
+
+    // --- Thread visibility + GitHub PR (WI-5 batch 2, slice 1) ---
+
+    setThreadVisibility(threadId: string, visibility: ThreadVisibility) {
+      return updateThreadVisibility({
+        db,
+        userId,
+        organizationId,
+        threadId,
+        visibility,
+      });
+    },
+
+    getThreadForGithubPR(repoFullName: string, prNumber: number) {
+      return getThreadForGithubPRAndUser({
+        db,
+        userId,
+        organizationId,
+        repoFullName,
+        prNumber,
+      });
     },
   };
 }
