@@ -22,8 +22,11 @@ import {
 import { queueFollowUpInternal } from "@/server-lib/follow-up";
 import { getDiffContextStr } from "./utils";
 import { createAutomation } from "@terragon/shared/model/automations";
+import { createOrganization } from "@terragon/shared/model/organizations";
+import { bindGithubInstallationToOrg } from "@terragon/shared/model/github-installation";
 import { convertToPlainText } from "@/lib/db-message-helpers";
 import { redis } from "@/lib/redis";
+import { nanoid } from "nanoid";
 
 vi.mock("@/server-lib/new-thread-internal", () => ({
   newThreadInternal: vi.fn().mockResolvedValue({ id: "new-thread-created-id" }),
@@ -226,6 +229,51 @@ describe("handleAppMention", () => {
         `);
       // Verify new thread was NOT created
       expect(newThreadInternal).not.toHaveBeenCalled();
+    });
+
+    it("derives the thread's org from the GitHub App installation (WI-5)", async () => {
+      const org = await createOrganization({
+        db,
+        name: "Acme",
+        slug: `acme-${nanoid(8).toLowerCase()}`,
+      });
+      const installationId = Math.floor(Math.random() * 1_000_000_000);
+      await bindGithubInstallationToOrg({
+        db,
+        installationId,
+        organizationId: org.id,
+      });
+
+      await handleAppMention({
+        repoFullName: prWithNoThread.repoFullName,
+        issueOrPrNumber: prWithNoThread.number,
+        issueOrPrType: "pull_request",
+        commentId: 123457,
+        commentGitHubUsername: "commenter",
+        commentBody: "Hey @app, please help with this",
+        commentGitHubAccountId: githubAccountId,
+        installationId,
+      });
+
+      expect(newThreadInternal).toHaveBeenCalledWith(
+        expect.objectContaining({ organizationId: org.id }),
+      );
+    });
+
+    it("passes a null org when the installation is unmapped (nullable-safe)", async () => {
+      await handleAppMention({
+        repoFullName: prWithNoThread.repoFullName,
+        issueOrPrNumber: prWithNoThread.number,
+        issueOrPrType: "pull_request",
+        commentId: 123458,
+        commentGitHubUsername: "commenter",
+        commentBody: "Hey @app, please help with this",
+        commentGitHubAccountId: githubAccountId,
+        installationId: 999_999_999,
+      });
+
+      const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
+      expect(callArgs?.organizationId ?? null).toBeNull();
     });
 
     it("should create new thread when no existing thread is found", async () => {

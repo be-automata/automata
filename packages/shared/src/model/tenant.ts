@@ -46,10 +46,10 @@ import {
  *   - Slack webhook mentions: the workspace maps to one org → slackInstallation.organizationId
  *     (teamId → one installation).
  *   - Sandbox-agent proxy token (daemon.ts): acts for one thread → thread.organizationId.
- *   - GitHub app-mention webhook: NOT yet derivable — there is no schema-backed
- *     repo→org or GitHub-installation→org mapping, so a user in multiple orgs
- *     sharing a repo is ambiguous. Left nullable (user-only fence, today's
- *     behavior) pending a product-semantics decision on the mapping.
+ *   - GitHub app-mention webhook: the payload's installation id → githubInstallation
+ *     row → organizationId (getOrganizationIdForInstallation). One installation
+ *     binds to one org, so this is unambiguous; an unmapped installation → null.
+ *     An org admin binds the installation via bindGithubInstallation.
  * All rules are nullable-safe: a null derivation = today's user-only fence.
  */
 export type TenantContext = {

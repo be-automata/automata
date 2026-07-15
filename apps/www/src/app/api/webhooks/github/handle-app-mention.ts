@@ -13,6 +13,7 @@ import {
   getUserSettings,
 } from "@terragon/shared/model/user";
 import { db } from "@/lib/db";
+import { getOrganizationIdForInstallation } from "@terragon/shared/model/github-installation";
 import { getThreadForGithubPRAndUser } from "@terragon/shared/model/github";
 import { queueFollowUpInternal } from "@/server-lib/follow-up";
 import { getGitHubMentionAutomationsForRepo } from "@terragon/shared/model/automations";
@@ -46,6 +47,7 @@ export async function handleAppMention({
   diffContext,
   commentContext,
   issueContext,
+  installationId,
 }: {
   repoFullName: string;
   issueOrPrNumber: number;
@@ -58,6 +60,9 @@ export async function handleAppMention({
   diffContext?: string;
   commentContext?: string;
   issueContext?: string;
+  // GitHub App installation id from the webhook payload — resolves the tenant
+  // (WI-5). Optional/nullable-safe: unmapped or absent → null org.
+  installationId?: number | string | null;
 }): Promise<void> {
   // Get branch names upfront
   const [owner, repo] = parseRepoFullName(repoFullName);
@@ -141,6 +146,7 @@ export async function handleAppMention({
         userId,
         automation,
         repoFullName,
+        installationId,
         issueOrPrNumber,
         issueOrPrType,
         commentId,
@@ -284,6 +290,7 @@ async function triggerTasksForUser({
   userId,
   automation,
   repoFullName,
+  installationId,
   issueOrPrNumber,
   issueOrPrType,
   commentId,
@@ -298,6 +305,7 @@ async function triggerTasksForUser({
   userId: string;
   automation: Automation | null;
   repoFullName: string;
+  installationId?: number | string | null;
   issueOrPrNumber: number;
   issueOrPrType: "pull_request" | "issue";
   commentId: number | undefined;
@@ -414,8 +422,15 @@ async function triggerTasksForUser({
         repoFullName,
         userId,
       });
+      // Derive the tenant from the GitHub App installation (WI-5). One
+      // installation binds to one org (github-installation.ts); unmapped → null.
+      const organizationId = await getOrganizationIdForInstallation({
+        db,
+        installationId,
+      });
       const { threadId, threadChatId } = await newThreadInternal({
         userId,
+        organizationId,
         message: getUserMessageToSend({ forcedAgent: null, isFollowUp: false }),
         parentThreadId: undefined,
         parentToolId: undefined,

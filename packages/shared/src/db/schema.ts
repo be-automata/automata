@@ -573,6 +573,34 @@ export const githubCheckRun = pgTable(
   ],
 );
 
+// Maps a GitHub App installation to an org (WI-5). Parallels slackInstallation:
+// the tenant boundary for GitHub — one installation per customer org (the
+// orch-agents prod model). Nullable-safe: an unmapped installation → null org,
+// so a GitHub mention creates a thread without an org (today's behavior).
+export const githubInstallation = pgTable(
+  "github_installation",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    installationId: text("installation_id").notNull().unique(),
+    organizationId: text("organization_id").references(
+      () => organization.id,
+      { onDelete: "cascade" },
+    ),
+    accountLogin: text("account_login"),
+    accountType: text("account_type"), // "Organization" | "User"
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("github_installation_org_id_index").on(table.organizationId),
+  ],
+);
+
 export const userSettings = pgTable(
   "user_settings",
   {

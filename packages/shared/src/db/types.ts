@@ -35,6 +35,10 @@ export type MemberInsert = typeof schema.member.$inferInsert;
 export type Invitation = typeof schema.invitation.$inferSelect;
 export type InvitationInsert = typeof schema.invitation.$inferInsert;
 
+export type GithubInstallation = typeof schema.githubInstallation.$inferSelect;
+export type GithubInstallationInsert =
+  typeof schema.githubInstallation.$inferInsert;
+
 export type ThreadVisibility = "private" | "link" | "repo";
 
 export type ClaudeOrganizationType =

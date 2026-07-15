@@ -232,6 +232,7 @@ export async function handleIssueCommentEvent(
     // Handle the app mention (this will check for automations internally)
     await handleAppMention({
       repoFullName,
+      installationId: event.installation?.id,
       issueOrPrType: issueType,
       issueOrPrNumber: issueNumber,
       commentId: event.comment.id,
@@ -306,6 +307,7 @@ export async function handlePullRequestReviewCommentEvent(
     // Handle the app mention (this will check for automations internally)
     await handleAppMention({
       repoFullName,
+      installationId: event.installation?.id,
       issueOrPrNumber: prNumber,
       issueOrPrType: "pull_request",
       commentId: event.comment.id,
@@ -362,6 +364,7 @@ export async function handlePullRequestReviewEvent(
     // Handle the app mention (this will check for automations internally)
     await handleAppMention({
       repoFullName,
+      installationId: event.installation?.id,
       issueOrPrNumber: prNumber,
       issueOrPrType: "pull_request",
       commentId: event.review.id,
