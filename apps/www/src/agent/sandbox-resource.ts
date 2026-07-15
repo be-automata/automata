@@ -52,17 +52,25 @@ export async function withSandboxResource<T>({
   label: string;
   callback: () => Promise<T>;
 }): Promise<T> {
-  const pipeline = redis.pipeline();
-  pipeline.incr(`${ACTIVE_USERS_PREFIX}${sandboxId}`);
-  pipeline.expire(`${ACTIVE_USERS_PREFIX}${sandboxId}`, 10 * 60); // 10 minutes
-  const [activeUsersAfterIncrement, _] = await pipeline.exec();
-  if (!activeUsersAfterIncrement) {
-    throw new Error("Failed to acquire sandbox resource");
+  // Fail open: the sandbox-resource lock lives on the agent-run critical path, so a
+  // degraded or unconfigured Redis must never block a run. When Redis is healthy this
+  // behaves exactly as before (increment succeeds); only the error/empty-result path
+  // changed from throwing to proceeding without the lock.
+  try {
+    const pipeline = redis.pipeline();
+    pipeline.incr(`${ACTIVE_USERS_PREFIX}${sandboxId}`);
+    pipeline.expire(`${ACTIVE_USERS_PREFIX}${sandboxId}`, 10 * 60); // 10 minutes
+    const [activeUsersAfterIncrement] = await pipeline.exec();
+    console.log(
+      `withSandboxResource(${label}): activeUsers after increment`,
+      activeUsersAfterIncrement,
+    );
+  } catch (e) {
+    console.error(
+      `withSandboxResource(${label}): failed to acquire sandbox resource lock, proceeding without it`,
+      e,
+    );
   }
-  console.log(
-    `withSandboxResource(${label}): activeUsers after increment`,
-    activeUsersAfterIncrement,
-  );
   try {
     return await callback();
   } finally {

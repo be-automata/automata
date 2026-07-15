@@ -90,8 +90,10 @@ describe("sandbox-resource", () => {
       });
     });
 
-    it("should throw error if failed to acquire resource", async () => {
-      // Mock redis.pipeline to return null result
+    it("fails open and still runs the callback if the lock cannot be acquired", async () => {
+      // Fail-open quarantine: when the Redis-backed lock is unavailable (empty/errored
+      // pipeline result), withSandboxResource must NOT block the run — it proceeds
+      // without the lock so a degraded/unconfigured Redis never bricks the agent path.
       const originalPipeline = redis.pipeline;
       redis.pipeline = () =>
         ({
@@ -100,16 +102,26 @@ describe("sandbox-resource", () => {
           exec: async () => [null, null],
         }) as any;
 
-      await expect(
-        withSandboxResource({
+      let ran = false;
+      try {
+        const result = await withSandboxResource({
           label: "test-label",
           sandboxId: testSandboxId,
-          callback: async () => {},
-        }),
-      ).rejects.toThrow("Failed to acquire sandbox resource");
-
-      // Restore original pipeline
-      redis.pipeline = originalPipeline;
+          callback: async () => {
+            ran = true;
+            // Restore the real pipeline before withSandboxResource's finally block
+            // decrements: the client auto-pipelines every command through
+            // redis.pipeline(), so leaving the incomplete mock installed would corrupt
+            // the shared auto-pipeline executor for later tests.
+            redis.pipeline = originalPipeline;
+            return "ok";
+          },
+        });
+        expect(ran).toBe(true);
+        expect(result).toBe("ok");
+      } finally {
+        redis.pipeline = originalPipeline;
+      }
     });
   });
 

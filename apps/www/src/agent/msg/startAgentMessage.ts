@@ -21,7 +21,7 @@ import { withSandboxResource } from "@/agent/sandbox-resource";
 import { sendDaemonMessage } from "@/agent/daemon";
 import { ThreadError } from "@/agent/error";
 import { withThreadChat } from "@/agent/thread-resource";
-import { sandboxCreationRateLimit } from "@/lib/rate-limit";
+import { getSandboxCreationRemaining } from "@/lib/rate-limit";
 import { getMaxConcurrentTaskCountForUser } from "@/lib/subscription-tiers";
 import {
   getUserMessageToSend,
@@ -144,7 +144,7 @@ export async function startAgentMessage({
         console.log(`Active thread count: ${activeThreadCount}`);
         const [sandboxCreationRateLimitRemaining, maxConcurrentTasks] =
           await Promise.all([
-            sandboxCreationRateLimit.getRemaining(userId),
+            getSandboxCreationRemaining(userId),
             getMaxConcurrentTaskCountForUser(userId),
           ]);
         const sandboxCreationRateLimitReached =

@@ -28,6 +28,26 @@ export const sandboxCreationRateLimit = new Ratelimit({
   prefix: `${PREFIX}:sandbox-creation`,
 });
 
+/**
+ * Fail-open read of the sandbox-creation limiter's remaining tokens. This runs inside
+ * queue-admission / task-start on the core path, so if the limiter backend (Redis) is
+ * unconfigured or unreachable we treat the user as not rate-limited rather than letting
+ * the error stall the queue. Behavior is unchanged when Redis is healthy.
+ */
+export async function getSandboxCreationRemaining(
+  userId: string,
+): Promise<{ remaining: number; reset: number }> {
+  try {
+    return await sandboxCreationRateLimit.getRemaining(userId);
+  } catch (e) {
+    console.error(
+      "sandboxCreationRateLimit.getRemaining failed; treating user as not rate-limited",
+      e,
+    );
+    return { remaining: Number.MAX_SAFE_INTEGER, reset: 0 };
+  }
+}
+
 export async function trackSandboxCreation(userId: string) {
   const result = await sandboxCreationRateLimit.limit(userId);
   // Don't throw an error here, just log a warning because there might be a race condition

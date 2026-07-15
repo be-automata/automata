@@ -6,7 +6,7 @@ import {
 import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
 import { internalPOST } from "@/server-lib/internal-request";
-import { sandboxCreationRateLimit } from "@/lib/rate-limit";
+import { getSandboxCreationRemaining } from "@/lib/rate-limit";
 import { getPostHogServer } from "@/lib/posthog-server";
 
 async function sleep(ms: number = 1000) {
@@ -36,8 +36,7 @@ async function processOtherRateLimitedQueues() {
       batch.map(async (userId) => {
         // Check if the user is has tokens remaining before we kick off the request to
         // process the thread queue so we don't end up making a bunch of useless requests.
-        const rateLimitResult =
-          await sandboxCreationRateLimit.getRemaining(userId);
+        const rateLimitResult = await getSandboxCreationRemaining(userId);
         if (rateLimitResult.remaining === 0) {
           // TODO: If possible, we should update the attemptQueueAt for the threads to the new reset time.
           return;

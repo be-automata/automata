@@ -15,11 +15,17 @@ export const env = envsafe({
   DATABASE_URL: str({
     devDefault: devDefaultDatabaseUrl,
   }),
+  // Optional in production: when unset, apps/www/src/lib/redis.ts falls back to an
+  // in-memory single-node stand-in so a Redis-less deployment boots and fails open.
   REDIS_URL: str({
     devDefault: devDefaultRedisUrl,
+    default: "",
+    allowEmpty: true,
   }),
   REDIS_TOKEN: str({
     devDefault: devDefaultRedisToken,
+    default: "",
+    allowEmpty: true,
   }),
   BETTER_AUTH_SECRET: str({
     devDefault: devDefaultBetterAuthSecret,
