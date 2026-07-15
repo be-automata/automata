@@ -1,6 +1,6 @@
 "use server";
 
-import { userOnlyAction } from "@/lib/auth-server";
+import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { db } from "@/lib/db";
 import { AutomationInsert } from "@terragon/shared";
 import {
@@ -54,10 +54,13 @@ export const createAutomation = userOnlyAction(
       automationId: null,
       updates: automation,
     });
+    // Stamp the creator's active org (WI-5) so the automation's runs inherit it.
+    const tenant = await getTenantContextOrNull();
     await createAutomationModel({
       db,
       userId,
       accessTier: tier,
+      organizationId: tenant?.organizationId ?? null,
       automation,
     });
   },

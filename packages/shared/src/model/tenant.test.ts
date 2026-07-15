@@ -10,6 +10,7 @@ import {
   threadChat,
   environment,
   threadVisibility,
+  automations,
 } from "../db/schema";
 import {
   createOrganization,
@@ -406,5 +407,115 @@ describe("forTenant accessor — thread visibility + github PR scoping (WI-5)", 
       userId: alice.id,
     }).getThreadForGithubPR(threadValues.githubRepoFullName, 4242);
     expect(aliceWrongOrg).toBeNull();
+  });
+});
+
+const automationValues = {
+  name: "Nightly",
+  triggerType: "schedule" as const,
+  repoFullName: "acme/repo",
+  branchName: "main",
+  triggerConfig: { cron: "0 9 * * *", timezone: "UTC" },
+  action: {
+    type: "user_message" as const,
+    config: {
+      message: {
+        type: "user" as const,
+        model: null,
+        parts: [{ type: "text" as const, text: "run" }],
+      },
+    },
+  },
+};
+
+describe("forTenant accessor — automation tenant scoping (WI-5)", () => {
+  let alice: User;
+  let bob: User;
+  let carol: User;
+  let orgX: string;
+  let orgY: string;
+
+  beforeEach(async () => {
+    alice = (await createTestUser({ db })).user;
+    bob = (await createTestUser({ db })).user;
+    carol = (await createTestUser({ db })).user;
+    orgX = await createOrgWithMembers([alice.id, bob.id]);
+    orgY = await createOrgWithMembers([carol.id]);
+  });
+
+  it("createAutomation stamps the org and getAutomation is owner-fenced", async () => {
+    const created = await forTenant({
+      db,
+      organizationId: orgX,
+      userId: alice.id,
+    }).createAutomation("core", automationValues);
+    expect(created.organizationId).toBe(orgX);
+
+    const [row] = await db
+      .select()
+      .from(automations)
+      .where(eq(automations.id, created.id));
+    expect(row!.organizationId).toBe(orgX);
+
+    // Owner in the right org sees it.
+    expect(
+      (
+        await forTenant({
+          db,
+          organizationId: orgX,
+          userId: alice.id,
+        }).getAutomation(created.id)
+      )?.id,
+    ).toBe(created.id);
+
+    // Same-org co-member does not.
+    expect(
+      await forTenant({
+        db,
+        organizationId: orgX,
+        userId: bob.id,
+      }).getAutomation(created.id),
+    ).toBeUndefined();
+
+    // Owner with the wrong active org: denied.
+    expect(
+      await forTenant({
+        db,
+        organizationId: orgY,
+        userId: alice.id,
+      }).getAutomation(created.id),
+    ).toBeUndefined();
+  });
+
+  it("listAutomations is scoped and delete is fenced", async () => {
+    const aliceCtx = forTenant({ db, organizationId: orgX, userId: alice.id });
+    const created = await aliceCtx.createAutomation("core", automationValues);
+
+    const list = await aliceCtx.listAutomations();
+    expect(list.map((a) => a.id)).toContain(created.id);
+
+    // Cross-org delete is fenced (0 rows -> throws).
+    await expect(
+      forTenant({
+        db,
+        organizationId: orgY,
+        userId: carol.id,
+      }).deleteAutomation(created.id),
+    ).rejects.toThrow();
+
+    // Still present.
+    const [still] = await db
+      .select()
+      .from(automations)
+      .where(eq(automations.id, created.id));
+    expect(still).toBeDefined();
+
+    // Owner in the right org can delete it.
+    await aliceCtx.deleteAutomation(created.id);
+    const [gone] = await db
+      .select()
+      .from(automations)
+      .where(eq(automations.id, created.id));
+    expect(gone).toBeUndefined();
   });
 });

@@ -26,6 +26,14 @@ import {
 } from "./environments";
 import { updateThreadVisibility } from "./thread-visibility";
 import { getThreadForGithubPRAndUser } from "./github";
+import {
+  getAutomation,
+  getAutomations,
+  createAutomation,
+  updateAutomation,
+  deleteAutomation,
+} from "./automations";
+import { AccessTier, Automation, AutomationInsert } from "../db/types";
 
 /**
  * Tenant-scoped repository accessor (ADR-001, WI-5 step 3).
@@ -214,6 +222,50 @@ export function forTenant({ db, organizationId, userId }: TenantContext) {
         repoFullName,
         prNumber,
       });
+    },
+
+    // --- Automations (WI-5 batch 2, slice 2) ---
+
+    listAutomations(opts: { limit?: number; offset?: number } = {}) {
+      return getAutomations({ db, userId, organizationId, ...opts });
+    },
+
+    getAutomation(automationId: string) {
+      return getAutomation({ db, userId, organizationId, automationId });
+    },
+
+    createAutomation(
+      accessTier: AccessTier,
+      automation: Omit<AutomationInsert, "userId" | "organizationId">,
+    ) {
+      return createAutomation({
+        db,
+        userId,
+        organizationId,
+        accessTier,
+        automation,
+      });
+    },
+
+    updateAutomation(
+      accessTier: AccessTier,
+      automationId: string,
+      updates: Partial<
+        Omit<Automation, "id" | "userId" | "organizationId" | "createdAt" | "updatedAt">
+      >,
+    ) {
+      return updateAutomation({
+        db,
+        userId,
+        organizationId,
+        accessTier,
+        automationId,
+        updates,
+      });
+    },
+
+    deleteAutomation(automationId: string) {
+      return deleteAutomation({ db, userId, organizationId, automationId });
     },
   };
 }

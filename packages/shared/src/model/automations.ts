@@ -20,6 +20,17 @@ import {
 } from "../automations";
 import { getNextRunTime } from "../automations/cron";
 
+/**
+ * Tenant fence for owner-scoped automation access (WI-5). Optional during the
+ * nullable phase; the forTenant accessor always supplies it. drizzle's and()
+ * drops undefined.
+ */
+function automationOrgFence(organizationId?: string | null) {
+  return organizationId
+    ? eq(schema.automations.organizationId, organizationId)
+    : undefined;
+}
+
 async function getAutomationNextRunAt({
   accessTier,
   triggerType,
@@ -53,11 +64,14 @@ export async function createAutomation({
   userId,
   accessTier,
   automation,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   accessTier: AccessTier;
   automation: Omit<AutomationInsert, "userId">;
+  // Tenant to stamp on the new automation (WI-5). Its runs inherit this org.
+  organizationId?: string | null;
 }) {
   const nextRunAt = await getAutomationNextRunAt({
     accessTier,
@@ -69,6 +83,7 @@ export async function createAutomation({
     .values({
       ...automation,
       userId,
+      organizationId: organizationId ?? automation.organizationId ?? null,
       nextRunAt,
     })
     .returning();
@@ -89,6 +104,7 @@ export async function updateAutomation({
   accessTier,
   automationId,
   updates,
+  organizationId,
 }: {
   db: DB;
   userId: string;
@@ -97,11 +113,17 @@ export async function updateAutomation({
   updates: Partial<
     Omit<Automation, "id" | "userId" | "createdAt" | "updatedAt">
   >;
+  organizationId?: string | null;
 }) {
   // If trigger type or config is being updated, recalculate nextRunAt
   let nextRunAt: Date | null | undefined;
   if (updates.triggerType || updates.triggerConfig) {
-    const current = await getAutomation({ db, automationId, userId });
+    const current = await getAutomation({
+      db,
+      automationId,
+      userId,
+      organizationId,
+    });
     if (current) {
       const triggerType = updates.triggerType || current.triggerType;
       const triggerConfig = updates.triggerConfig || current.triggerConfig;
@@ -121,6 +143,7 @@ export async function updateAutomation({
       and(
         eq(schema.automations.id, automationId),
         eq(schema.automations.userId, userId),
+        automationOrgFence(organizationId),
       ),
     )
     .returning();
@@ -139,15 +162,18 @@ export async function getAutomation({
   db,
   userId,
   automationId,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   automationId: string;
+  organizationId?: string | null;
 }) {
   const automation = await db.query.automations.findFirst({
     where: and(
       eq(schema.automations.id, automationId),
       eq(schema.automations.userId, userId),
+      automationOrgFence(organizationId),
     ),
   });
   return automation;
@@ -158,16 +184,21 @@ export async function getAutomations({
   userId,
   limit = 100,
   offset = 0,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   limit?: number;
   offset?: number;
+  organizationId?: string | null;
 }) {
   return await db.query.automations.findMany({
     limit,
     offset,
-    where: eq(schema.automations.userId, userId),
+    where: and(
+      eq(schema.automations.userId, userId),
+      automationOrgFence(organizationId),
+    ),
     orderBy: [
       desc(schema.automations.enabled),
       desc(schema.automations.updatedAt),
@@ -179,9 +210,11 @@ export async function getAutomations({
 export async function getAutomationCount({
   db,
   userId,
+  organizationId,
 }: {
   db: DB;
   userId: string;
+  organizationId?: string | null;
 }) {
   const result = await db
     .select({ count: sql<number>`count(*)` })
@@ -191,6 +224,7 @@ export async function getAutomationCount({
         eq(schema.automations.userId, userId),
         eq(schema.automations.enabled, true),
         ne(schema.automations.triggerType, "manual"),
+        automationOrgFence(organizationId),
       ),
     );
   return result[0]?.count ?? 0;
@@ -200,10 +234,12 @@ export async function deleteAutomation({
   db,
   userId,
   automationId,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   automationId: string;
+  organizationId?: string | null;
 }) {
   const [deletedAutomation] = await db
     .delete(schema.automations)
@@ -211,6 +247,7 @@ export async function deleteAutomation({
       and(
         eq(schema.automations.id, automationId),
         eq(schema.automations.userId, userId),
+        automationOrgFence(organizationId),
       ),
     )
     .returning();
@@ -230,13 +267,20 @@ export async function incrementAutomationRunCount({
   userId,
   automationId,
   accessTier,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   automationId: string;
   accessTier: AccessTier;
+  organizationId?: string | null;
 }) {
-  const current = await getAutomation({ db, automationId, userId });
+  const current = await getAutomation({
+    db,
+    automationId,
+    userId,
+    organizationId,
+  });
   if (!current) {
     throw new Error("Automation not found");
   }
@@ -258,6 +302,7 @@ export async function incrementAutomationRunCount({
       and(
         eq(schema.automations.id, automationId),
         eq(schema.automations.userId, userId),
+        automationOrgFence(organizationId),
       ),
     )
     .returning();
