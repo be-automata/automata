@@ -613,3 +613,14 @@ boot-coder deployed 44c4d82 (githubInstallation→org mapping) + created the `gi
 **Verdict:** GitHub-mention org derivation is **CORRECT and certified** — installation→org mapping (`getOrganizationIdForInstallation`) feeds `newThreadInternal.organizationId` (bound→org, unbound→null), proven by the unit pair; the live signed webhook exercises the full wired path through to the documented repo-gate boundary. Full end-to-end (a persisted org-stamped thread from a real mention + cross-org fence assertion) re-certifies in the substrate phase with a GitHub-App-installed repo (same C7-full dependency). No org-misattribution risk in the derivation.
 
 Test artifacts: `github_installation` 99001 + `account` acc_uat_gh in the live DB. Harmless; boot-coder can clear.
+
+## Batch-1 coverage gap — CLOSED (2026-07-15, regression SHA 62a7829)
+
+The coverage finding from the batch-1 validation is resolved. `62a7829` ("test(tenancy): pin daemon proxy-token + automation org derivations") adds the two missing regression tests, both **run green on this build**:
+- `apps/www/src/agent/daemon.test.ts` — **2/2**: proxy-token org round-trip + the **no-drift pin** exactly as specified (user active org Y ≠ thread org X → minted token still carries the **thread's** org X). The daemon proxy-token temporal-decoupling property is now locked by a regression test, not just code structure. **Daemon proxy-token gap → CLOSED.**
+- `apps/www/src/server-lib/automations.test.ts` — **2/2**: automation org-inheritance + null-safe. **Automation gap → CLOSED.**
+
+All four WI-5 background derivations (automation, Slack, sandbox proxy-token, GitHub mention) are now both correct AND regression-covered. Full www suite reported 806/0 by team-lead.
+
+### Evidence note — apiKey metadata is double-JSON-encoded (for future psql assertions)
+better-auth persists `apikey.metadata` **double-JSON-encoded** (a JSON string whose content is the JSON object). **Production reads decode correctly via `auth.api.verifyApiKey`** (→ `getDaemonTokenContext` resolves `organizationId` fine — the live CLI fence in C10-ORG/C10-ORG-CLOSURE is unaffected). Only **direct column reads** (psql) see the double-encoding and need a double-parse. This retroactively explains the escaped `"{\"organizationId\":\"…\"}"` seen in the C10-ORG-CLOSURE psql metadata read — my assertions held because the org-id substring is present either way, but future probes that parse the metadata column must double-parse (or assert via `verifyApiKey`/CLI fence behavior instead of the raw column).
