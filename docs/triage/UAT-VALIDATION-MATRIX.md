@@ -573,3 +573,20 @@ Validated the WI-5 sweep batch 1 (background create/token paths derive org from 
 End-to-end live certification of the create paths (automation/slack producing a persisted org-stamped thread) is blocked by the GitHub-App/repo gate (`createNewThread`/`newThreadInternal` reject uninstalled repos — proven in R1c C7), and the proxy-token mint requires a live sandbox. So batch-1 live certification is bounded to the Slack unit tests + code/structural certification; full end-to-end re-certifies in the substrate phase with a real installed repo + running provider.
 
 **Batch-1 verdict:** derivation rules correct and session-appropriate on all four paths; Slack path tested green; sandbox proxy-token temporal-decoupling structurally guaranteed; two coverage gaps flagged with concrete test recommendations. No org-misattribution risk found in the derivation logic.
+
+## GitHub-mention org probe — STAGED (44c4d82 committed; HOLD for boot-coder deploy ping)
+
+44c4d82 (githubInstallation→org mapping fences GitHub mentions) is committed but the running instance is still 296307f — hold for boot-coder's rebuild ping, then execute. Path read at 44c4d82: webhook HMAC-SHA256 via `x-hub-signature-256` against `env.GITHUB_WEBHOOK_SECRET`; sender→platform user via `getUserIdByGitHubAccountId`; org via `getOrganizationIdForInstallation({installationId})` → `newThreadInternal.organizationId` (unmapped → null).
+
+**Fixtures:**
+1. Bind installation `99001` → orgA via `bindGithubInstallationToOrg` (or psql insert into `github_installation`). Verify the row (psql).
+2. Seed a Better Auth `account` row (providerId=github, accountId=`<sender gh id>`, userId=A) so `getUserIdByGitHubAccountId` resolves user A.
+
+**Probe steps (per team-lead brief):**
+1. Fire an `issue_comment`/`issues` app-mention webhook at `POST /api/webhooks/github`: payload `installation.id=99001`, sender mapped to A, `@bot` mention; sign `x-hub-signature-256 = sha256=HMAC(GITHUB_WEBHOOK_SECRET, body)`.
+2. Assert the created thread carries orgA (psql) **and** is fenced (cross-org read via orgB CLI token → NOT_FOUND).
+3. **Unmapped control:** same webhook with `installation.id=99999` (unbound) → thread created with **NULL** org (today's behavior, not an error).
+4. **Repo-gate contingency (expected, per team-lead):** the create funnels through `newThreadInternal` → GitHub-App-installed-repo gate (C7). If it stops there (no persisted thread), assert the derivation another way: (a) `github_installation` binding row present (psql); (b) `getOrganizationIdForInstallation(99001)==orgA` / `(99999)==null` derivation; (c) cite the **unit pair** — `handle-app-mention.test.ts:244/259/276` (bound→org.id on the thread; unbound→null) + `github-installation.test.ts` (mapping upsert/read). Record the repo-gate boundary explicitly.
+
+### Batch-1 coverage finding — UPDATE (fix in flight)
+The daemon no-drift regression test I recommended **is written** — `apps/www/src/agent/daemon.test.ts` (untracked WIP) has: "stamps the thread's org into the minted proxy-token metadata" (`metadata.organizationId === orgX`) and **"carries the THREAD's org even when the user's active org differs (no-drift pin)"** (sets user active org=orgY, asserts token still carries thread's orgX — the exact temporal-decoupling pin). When it commits, fold its SHA into the batch-1 coverage line and flip the daemon proxy-token gap to **closed**. (Still watch for the `automations.ts` org-inheritance test — not yet seen.)
