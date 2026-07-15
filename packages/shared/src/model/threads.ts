@@ -40,9 +40,32 @@ import { toUTC, validateTimezone } from "../utils/timezone";
 import { getUser } from "./user";
 import { AIAgent } from "@terragon/agent/types";
 
+/**
+ * Tenant fence for owner-scoped thread access (WI-5 / ADR-001).
+ *
+ * Threads are **private-to-creator within an org**: the ownership predicate is
+ * `and(userId, organizationId)`. That preserves today's per-user task list (a
+ * co-member does NOT see your threads) while adding the tenant boundary (another
+ * org never sees them). `organizationId` is optional during the nullable
+ * backfill phase — when omitted the query stays user-only (legacy behavior); the
+ * `forTenant` accessor (model/tenant.ts) always supplies it, so accessor-path
+ * reads and writes are always org-fenced. drizzle's `and()` ignores `undefined`.
+ */
+function threadOrgFence(organizationId?: string | null) {
+  return organizationId
+    ? eq(schema.thread.organizationId, organizationId)
+    : undefined;
+}
+function threadChatOrgFence(organizationId?: string | null) {
+  return organizationId
+    ? eq(schema.threadChat.organizationId, organizationId)
+    : undefined;
+}
+
 type GetThreadsArgs = {
   db: DB;
   userIdOrNull: string | null;
+  organizationId?: string | null;
   limit?: number;
   offset?: number;
   includeUser?: boolean;
@@ -61,6 +84,7 @@ type GetThreadsArgs = {
 async function getThreadsInner({
   db,
   userIdOrNull,
+  organizationId,
   limit = 20,
   offset = 0,
   includeUser,
@@ -74,6 +98,10 @@ async function getThreadsInner({
   const whereConditions = [];
   if (userIdOrNull) {
     whereConditions.push(eq(schema.thread.userId, userIdOrNull));
+  }
+  const orgCondition = threadOrgFence(organizationId);
+  if (orgCondition) {
+    whereConditions.push(orgCondition);
   }
   if (where?.archived !== undefined) {
     whereConditions.push(eq(schema.thread.archived, where.archived));
@@ -242,6 +270,7 @@ async function getThreadsInner({
 export async function getThreads({
   db,
   userId,
+  organizationId,
   limit = 20,
   offset = 0,
   archived,
@@ -251,6 +280,7 @@ export async function getThreads({
 }: {
   db: DB;
   userId: string;
+  organizationId?: string | null;
   limit?: number;
   offset?: number;
   archived?: boolean;
@@ -261,6 +291,7 @@ export async function getThreads({
   const threads = await getThreadsInner({
     db,
     userIdOrNull: userId,
+    organizationId,
     limit,
     offset,
     where: {
@@ -382,10 +413,12 @@ export async function getThreadMinimal({
   db,
   userId,
   threadId,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   threadId: string;
+  organizationId?: string | null;
 }) {
   // Omit certain columns
   const {
@@ -414,7 +447,11 @@ export async function getThreadMinimal({
     .select(minimalThreadColumns)
     .from(schema.thread)
     .where(
-      and(eq(schema.thread.id, threadId), eq(schema.thread.userId, userId)),
+      and(
+        eq(schema.thread.id, threadId),
+        eq(schema.thread.userId, userId),
+        threadOrgFence(organizationId),
+      ),
     );
   if (result.length === 0) {
     return null;
@@ -525,10 +562,12 @@ export async function getThread({
   db,
   threadId,
   userId,
+  organizationId,
 }: {
   db: DB;
   threadId: string;
   userId: string;
+  organizationId?: string | null;
 }): Promise<ThreadInfoFull | undefined> {
   const parentThread = alias(schema.thread, "parentThread");
   const [threads, childThreads, threadChats] = await Promise.all([
@@ -565,7 +604,11 @@ export async function getThread({
         ),
       )
       .where(
-        and(eq(schema.thread.id, threadId), eq(schema.thread.userId, userId)),
+        and(
+          eq(schema.thread.id, threadId),
+          eq(schema.thread.userId, userId),
+          threadOrgFence(organizationId),
+        ),
       ),
     db.query.thread.findMany({
       columns: {
@@ -647,11 +690,13 @@ export async function getThreadChat({
   threadId,
   threadChatId,
   userId,
+  organizationId,
 }: {
   db: DB;
   threadId: string;
   threadChatId: string;
   userId: string;
+  organizationId?: string | null;
 }): Promise<ThreadChatInfoFull | undefined> {
   if (threadChatId === LEGACY_THREAD_CHAT_ID) {
     const threadResult = await db
@@ -668,7 +713,11 @@ export async function getThreadChat({
         ),
       )
       .where(
-        and(eq(schema.thread.id, threadId), eq(schema.thread.userId, userId)),
+        and(
+          eq(schema.thread.id, threadId),
+          eq(schema.thread.userId, userId),
+          threadOrgFence(organizationId),
+        ),
       );
     if (threadResult.length === 0) {
       return undefined;
@@ -695,6 +744,7 @@ export async function getThreadChat({
         eq(schema.threadChat.id, threadChatId),
         eq(schema.threadChat.threadId, threadId),
         eq(schema.threadChat.userId, userId),
+        threadChatOrgFence(organizationId),
       ),
     );
   if (threadChatResult.length === 0) {
@@ -802,6 +852,9 @@ export async function createThread({
     const threadChatInsert: ThreadChatInsertRaw = {
       userId,
       threadId,
+      // Inherit the thread's tenant (WI-5). threadValues carries organizationId
+      // when created through the forTenant accessor; null in the legacy path.
+      organizationId: threadValues.organizationId ?? null,
       ...initialChatValues,
     };
     const [threadChatInsertResult] = await tx
@@ -837,12 +890,14 @@ export async function updateThreadChat({
   threadId,
   threadChatId,
   updates,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   threadId: string;
   threadChatId: string;
   updates: Omit<ThreadChatInsert, "threadChatId" | "status">;
+  organizationId?: string | null;
 }) {
   await db.transaction(async (tx) => {
     const {
@@ -885,7 +940,11 @@ export async function updateThreadChat({
         .update(schema.thread)
         .set(updateObject)
         .where(
-          and(eq(schema.thread.id, threadId), eq(schema.thread.userId, userId)),
+          and(
+            eq(schema.thread.id, threadId),
+            eq(schema.thread.userId, userId),
+            threadOrgFence(organizationId),
+          ),
         )
         .returning();
       if (result.length === 0) {
@@ -928,6 +987,7 @@ export async function updateThreadChat({
             eq(schema.threadChat.id, threadChatId),
             eq(schema.threadChat.threadId, threadId),
             eq(schema.threadChat.userId, userId),
+            threadChatOrgFence(organizationId),
           ),
         )
         .returning();
@@ -955,11 +1015,13 @@ export async function updateThread({
   userId,
   threadId,
   updates,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   threadId: string;
   updates: Partial<ThreadInsert>;
+  organizationId?: string | null;
 }) {
   const updatesObject: Partial<ThreadInsertRaw> = { ...updates };
   for (const stringKey in updatesObject) {
@@ -972,7 +1034,11 @@ export async function updateThread({
     .update(schema.thread)
     .set(updatesObject)
     .where(
-      and(eq(schema.thread.id, threadId), eq(schema.thread.userId, userId)),
+      and(
+        eq(schema.thread.id, threadId),
+        eq(schema.thread.userId, userId),
+        threadOrgFence(organizationId),
+      ),
     )
     .returning();
   if (result.length !== 0) {
@@ -1081,10 +1147,12 @@ export async function deleteThreadById({
   db,
   threadId,
   userId,
+  organizationId,
 }: {
   db: DB;
   threadId: string;
   userId: string;
+  organizationId?: string | null;
 }) {
   const result = await db
     .delete(schema.thread)
@@ -1092,6 +1160,7 @@ export async function deleteThreadById({
       and(
         eq(schema.thread.id, threadId),
         eq(schema.thread.userId, userId), // Extra safety check
+        threadOrgFence(organizationId),
       ),
     )
     .returning();

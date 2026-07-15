@@ -45,6 +45,32 @@ export async function getUserIdOrNull(): Promise<User["id"] | null> {
   return session?.user.id ?? null;
 }
 
+/**
+ * Tenant context for the request: the user plus their active organization (from
+ * `session.activeOrganizationId`, set by the Better Auth organization plugin).
+ *
+ * This is the guard-layer seam that threads `organizationId` alongside `userId`
+ * down to the tenant-scoped model layer (WI-5 / ADR-001). `organizationId` is
+ * nullable during the backfill phase — a session may not have an active org yet.
+ * The threads path passes both to `forTenant` (@terragon/shared) once an active
+ * org is present.
+ */
+export type TenantContext = {
+  userId: string;
+  organizationId: string | null;
+};
+
+export async function getTenantContextOrNull(): Promise<TenantContext | null> {
+  const session = await getSessionOrNull();
+  if (!session) {
+    return null;
+  }
+  return {
+    userId: session.user.id,
+    organizationId: session.session.activeOrganizationId ?? null,
+  };
+}
+
 export async function getUserIdOrRedirect(): Promise<User["id"]> {
   const userId = await getUserIdOrNull();
   if (!userId) {
