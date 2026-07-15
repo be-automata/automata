@@ -189,3 +189,18 @@ or the three biggest suites (≈1,300 cases) vanish from the pipeline while look
 
 Totals measured: **1,427 executed / 1,372 pass / 55 fail (≈96%)** — all failure classes
 identified and none indicate structural rot. Old baseline (orch-agents) remains 3543/3543.
+
+**Baseline corrections (post WI-1/WI-2 verification):** (1) `apps/docs` tsc-check fails on
+missing generated code (`@/.source`, Fumadocs codegen skipped by `--ignore-scripts`) — an
+install-mode artifact, not source rot; CI (WI-7) must either run the fumadocs codegen step
+explicitly or exclude apps/docs from the gate. All other packages remain tsc-green after the
+WI-1/WI-2 commits. (2) packages/sandbox Docker-dependent tests are environment-conditional
+(66 ran on first pass, 104 skipped on a later run with no Docker context) — CI needs a
+Docker-enabled runner for them to count.
+
+**Post-triage verification (2026-07-15, after commits bfe5d31…64c5067):** apps/www 787/796
+pass 0 fail (sandbox-resource suite reconciled with Redis fail-open; stop-thread stable);
+packages/shared 447/447; packages/sandbox 147 pass 0 fail (Docker-conditional cases skipped
+without Docker context); tsc-check green in all packages except the known apps/docs codegen
+artifact. Chassis quarantine work items WI-1–WI-4 complete; C1 (tsc) and the test-baseline
+portion of C-checks now PASS.
