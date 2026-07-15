@@ -756,3 +756,14 @@ Recorded for the Hatchet-substrate phase test design (not active now; batch-3a i
 4. **Deploy-gate standing check — cold-start vs ScheduleTimeout** measurement (elevated to program **P1 gate #5**): worker cold-start must stay within the Hatchet schedule timeout so tasks aren't dropped/re-queued spuriously.
 
 These join the existing product-path C10 (reads: CLI + dashboard + session-info, all live-certified) to form the full-stack tenant-isolation gate once execution is per-org.
+
+## Batch-3a slice 1 — VALIDATED (2026-07-15, 727add4): usage_events WRITE stamps org
+
+Flips the batch-2 close-out `usage_events` row from **read-fenced, write-pending** → **read + write fenced** (code-cert + unit; live-exercise deferred, see altitude).
+
+- **Derivation (code-cert):** the 4 LLM proxy writers (anthropic/google/openai/openrouter routes) thread the **daemon token's org metadata** (`daemonTokenContextFromApiKey` → AuthContext) into the usage write — no extra query; it's the **thread's org from batch-1 daemon-token stamping**. Cost/sandbox-time writers derive from the thread they already load. So the usage event inherits the **thread's** org.
+- **Rides a foundation I already certified:** this is the same daemon-token org metadata whose **no-drift property** I pinned in batch 1 (daemon.ts proxy token carries thread org, never the user's later active org). The usage-write correctness inherits that — a usage event can't be mis-attributed to an ambient/active org.
+- **Unit: PASS.** `usage-events.test.ts` **10/10** incl. "stamps organizationId on the written events (WI-5)" + "leaves organizationId null when unset (nullable-safe)". Proxy route assertion sites updated (shared 480 / www 810 green per tenancy-coder).
+- **Altitude (agreed with team-lead): code-cert + unit is the honest maximum.** The proxy write path's LIVE exercise requires a real sandbox agent making an LLM call through the proxy with a daemon token → substrate-phase territory (same dependency as C8/C7-full). Recorded as such; re-certify live when the substrate + a real agent run exist. No product-surface live probe is possible for this path today.
+
+Slice 1b (agent-runtime credential org derivation) in flight.
