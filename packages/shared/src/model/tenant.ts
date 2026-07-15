@@ -34,6 +34,17 @@ import {
   deleteAutomation,
 } from "./automations";
 import { AccessTier, Automation, AutomationInsert } from "../db/types";
+import {
+  AgentProviderCredentialsDecrypted,
+  getAllAgentProviderCredentialRecords,
+  getAgentProviderCredentialsRecord,
+  getAgentProviderCredentialsForAgent,
+  getAgentProviderCredentialsDecrypted,
+  insertAgentProviderCredentials,
+  updateAgentProviderCredentialsById,
+  deleteAgentProviderCredentialById,
+} from "./agent-provider-credentials";
+import { AIAgent } from "@terragon/agent/types";
 
 /**
  * Tenant-scoped repository accessor (ADR-001, WI-5 step 3).
@@ -266,6 +277,81 @@ export function forTenant({ db, organizationId, userId }: TenantContext) {
 
     deleteAutomation(automationId: string) {
       return deleteAutomation({ db, userId, organizationId, automationId });
+    },
+
+    // --- Agent provider credentials (WI-5 batch 2, slice 3) ---
+    // Per-user semantics fenced by org; encryptionKey stays a caller arg.
+
+    listCredentialRecords(isActive?: boolean) {
+      return getAllAgentProviderCredentialRecords({
+        db,
+        userId,
+        organizationId,
+        isActive,
+      });
+    },
+
+    getActiveCredentialRecord(agent: AIAgent) {
+      return getAgentProviderCredentialsRecord({
+        db,
+        userId,
+        organizationId,
+        agent,
+      });
+    },
+
+    getCredentialsForAgent(agent: AIAgent) {
+      return getAgentProviderCredentialsForAgent({
+        db,
+        userId,
+        organizationId,
+        agent,
+      });
+    },
+
+    getDecryptedCredentials(agent: AIAgent, encryptionKey: string) {
+      return getAgentProviderCredentialsDecrypted({
+        db,
+        userId,
+        organizationId,
+        agent,
+        encryptionKey,
+      });
+    },
+
+    insertCredential(
+      credentialData: Omit<
+        AgentProviderCredentialsDecrypted,
+        "id" | "userId" | "organizationId" | "createdAt" | "updatedAt"
+      >,
+      encryptionKey: string,
+    ) {
+      return insertAgentProviderCredentials({
+        db,
+        userId,
+        organizationId,
+        credentialData,
+        encryptionKey,
+      });
+    },
+
+    setCredentialActive(credentialId: string, isActive: boolean) {
+      return updateAgentProviderCredentialsById({
+        db,
+        userId,
+        organizationId,
+        credentialId,
+        updates: { isActive },
+      });
+    },
+
+    deleteCredential(credentialId: string) {
+      return deleteAgentProviderCredentialById({
+        db,
+        userId,
+        organizationId,
+        credentialId,
+      });
     },
   };
 }

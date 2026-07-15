@@ -10,6 +10,20 @@ import { publishBroadcastUserMessage } from "../broadcast-server";
 import { AIAgent } from "@terragon/agent/types";
 import { updateUserFlags } from "./user-flags";
 
+/**
+ * Tenant fence for owner-scoped agent-credential access (WI-5). We keep the
+ * existing PER-USER semantics — a credential belongs to (userId, organizationId)
+ * — for consistency with threads/environments. The "org-shared team credential"
+ * tier (a cred visible to all org members) is a separate product feature and is
+ * NOT introduced here. Optional during the nullable phase; the forTenant
+ * accessor always supplies it. drizzle's and() drops undefined.
+ */
+function credOrgFence(organizationId?: string | null) {
+  return organizationId
+    ? eq(schema.agentProviderCredentials.organizationId, organizationId)
+    : undefined;
+}
+
 export type AgentProviderCredentialsDecrypted = Omit<
   AgentProviderCredentials,
   | "userId"
@@ -29,6 +43,7 @@ export async function insertAgentProviderCredentials({
   userId,
   credentialData,
   encryptionKey,
+  organizationId,
 }: {
   db: DB;
   userId: string;
@@ -37,6 +52,8 @@ export async function insertAgentProviderCredentials({
     "id" | "userId" | "organizationId" | "createdAt" | "updatedAt"
   >;
   encryptionKey: string;
+  // Tenant to stamp on the new credential (WI-5).
+  organizationId?: string | null;
 }): Promise<AgentProviderCredentials> {
   // Encrypt the credential values
   const { apiKey, accessToken, refreshToken, idToken, ...restCredentialData } =
@@ -65,7 +82,12 @@ export async function insertAgentProviderCredentials({
   };
   const result = await db
     .insert(schema.agentProviderCredentials)
-    .values({ userId, agent: credentialData.agent, ...updateData })
+    .values({
+      userId,
+      organizationId: organizationId ?? null,
+      agent: credentialData.agent,
+      ...updateData,
+    })
     .returning();
   if (!result[0]) {
     throw new Error("Failed to store agent provider credentials");
@@ -76,6 +98,7 @@ export async function insertAgentProviderCredentials({
       userId,
       agent: credentialData.agent,
       credentialId: result[0].id,
+      organizationId,
     });
   }
   // Publish realtime update
@@ -132,16 +155,19 @@ export async function getAgentProviderCredentialsDecryptedById({
   userId,
   credentialId,
   encryptionKey,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   credentialId: string;
   encryptionKey: string;
+  organizationId?: string | null;
 }): Promise<AgentProviderCredentialsDecrypted | null> {
   const credentials = await getAgentProviderCredentialById({
     db,
     userId,
     credentialId,
+    organizationId,
   });
   if (!credentials) {
     return null;
@@ -155,16 +181,19 @@ export async function getAgentProviderCredentialsDecrypted({
   userId,
   agent,
   encryptionKey,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   agent: AIAgent;
   encryptionKey: string;
+  organizationId?: string | null;
 }): Promise<AgentProviderCredentialsDecrypted | null> {
   const credentials = await getAgentProviderCredentialsRecord({
     db,
     userId,
     agent,
+    organizationId,
   });
   if (!credentials) {
     return null;
@@ -177,14 +206,17 @@ export async function getAllAgentProviderCredentialRecords({
   db,
   userId,
   isActive,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   isActive?: boolean;
+  organizationId?: string | null;
 }): Promise<AgentProviderCredentials[]> {
   return await db.query.agentProviderCredentials.findMany({
     where: and(
       eq(schema.agentProviderCredentials.userId, userId),
+      credOrgFence(organizationId),
       isActive
         ? eq(schema.agentProviderCredentials.isActive, isActive)
         : undefined,
@@ -198,14 +230,17 @@ export async function getAgentProviderCredentialsRecord({
   db,
   userId,
   agent,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   agent: AIAgent;
+  organizationId?: string | null;
 }): Promise<AgentProviderCredentials | undefined> {
   return await db.query.agentProviderCredentials.findFirst({
     where: and(
       eq(schema.agentProviderCredentials.userId, userId),
+      credOrgFence(organizationId),
       eq(schema.agentProviderCredentials.agent, agent),
       eq(schema.agentProviderCredentials.isActive, true),
     ),
@@ -217,14 +252,17 @@ async function getAgentProviderCredentialById({
   db,
   userId,
   credentialId,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   credentialId: string;
+  organizationId?: string | null;
 }): Promise<AgentProviderCredentials | undefined> {
   return await db.query.agentProviderCredentials.findFirst({
     where: and(
       eq(schema.agentProviderCredentials.userId, userId),
+      credOrgFence(organizationId),
       eq(schema.agentProviderCredentials.id, credentialId),
     ),
   });
@@ -235,15 +273,18 @@ export async function deleteAgentProviderCredentialById({
   db,
   userId,
   credentialId,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   credentialId: string;
+  organizationId?: string | null;
 }): Promise<void> {
   const credential = await getAgentProviderCredentialById({
     db,
     userId,
     credentialId,
+    organizationId,
   });
   if (!credential) {
     throw new Error("Credential not found");
@@ -253,6 +294,7 @@ export async function deleteAgentProviderCredentialById({
     .where(
       and(
         eq(schema.agentProviderCredentials.userId, userId),
+        credOrgFence(organizationId),
         eq(schema.agentProviderCredentials.id, credentialId),
       ),
     );
@@ -283,14 +325,17 @@ export async function getAgentProviderCredentialsForAgent({
   db,
   userId,
   agent,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   agent: AIAgent;
+  organizationId?: string | null;
 }): Promise<AgentProviderCredentials[]> {
   return await db.query.agentProviderCredentials.findMany({
     where: and(
       eq(schema.agentProviderCredentials.userId, userId),
+      credOrgFence(organizationId),
       eq(schema.agentProviderCredentials.agent, agent),
     ),
     orderBy: [
@@ -305,11 +350,13 @@ async function deactivateOtherCredentialsForAgent({
   userId,
   agent,
   credentialId,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   agent: AIAgent;
   credentialId: string;
+  organizationId?: string | null;
 }): Promise<void> {
   await db
     .update(schema.agentProviderCredentials)
@@ -317,6 +364,7 @@ async function deactivateOtherCredentialsForAgent({
     .where(
       and(
         eq(schema.agentProviderCredentials.userId, userId),
+        credOrgFence(organizationId),
         eq(schema.agentProviderCredentials.agent, agent),
         ne(schema.agentProviderCredentials.id, credentialId),
       ),
@@ -329,16 +377,19 @@ export async function updateAgentProviderCredentialsById({
   userId,
   credentialId,
   updates,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   credentialId: string;
   updates: Partial<Pick<AgentProviderCredentials, "isActive">>;
+  organizationId?: string | null;
 }): Promise<void> {
   const credential = await getAgentProviderCredentialById({
     db,
     userId,
     credentialId,
+    organizationId,
   });
   if (!credential) {
     throw new Error("Credential not found");
@@ -349,11 +400,18 @@ export async function updateAgentProviderCredentialsById({
     userId,
     agent: credential.agent,
     credentialId,
+    organizationId,
   });
   const updatedCredential = await db
     .update(schema.agentProviderCredentials)
     .set(updates)
-    .where(eq(schema.agentProviderCredentials.id, credentialId))
+    .where(
+      and(
+        eq(schema.agentProviderCredentials.id, credentialId),
+        eq(schema.agentProviderCredentials.userId, userId),
+        credOrgFence(organizationId),
+      ),
+    )
     .returning();
   if (!updatedCredential[0]) {
     throw new Error("Failed to update credential");
@@ -376,12 +434,14 @@ export async function getValidAccessTokenForCredential({
   encryptionKey,
   refreshTokenCallback,
   forceRefresh = false,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   credentialId: string;
   encryptionKey: string;
   forceRefresh?: boolean;
+  organizationId?: string | null;
   refreshTokenCallback?: (tokenData: {
     refreshToken: string;
   }) => Promise<
@@ -396,6 +456,7 @@ export async function getValidAccessTokenForCredential({
     userId,
     credentialId,
     encryptionKey,
+    organizationId,
   });
   if (!credentialsDecrypted?.accessToken) {
     return null;
