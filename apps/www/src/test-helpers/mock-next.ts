@@ -91,9 +91,12 @@ export async function mockWaitUntil() {
 export async function waitUntilResolved() {
   console.log("waitUntilResolved", promises.length);
   while (promises.length > 0) {
-    // While we resolve, we may create more promises.
-    const promisesToResolve = [...promises];
+    // Remove the batch from the shared array *before* awaiting. If a captured
+    // promise rejects, awaiting first and splicing after would skip the splice
+    // and leave the settled promise in `promises`, leaking it into the next
+    // test — a rejection there surfaces as an unhandled rejection and fails an
+    // unrelated test. Draining first keeps each test's waitUntil work isolated.
+    const promisesToResolve = promises.splice(0, promises.length);
     await Promise.all(promisesToResolve);
-    promises.splice(0, promisesToResolve.length);
   }
 }
