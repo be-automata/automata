@@ -30,14 +30,27 @@ export const getHasReachedLimitOfAutomations = userOnlyAction(
 
 export const getAutomations = userOnlyAction(
   async function getAutomations(userId: string) {
-    return await getAutomationsModel({ db, userId });
+    // Fence the dashboard list on the active org (WI-5), mirroring the threads
+    // route wiring. Nullable-safe: no active org = user-only, today's behavior.
+    const tenant = await getTenantContextOrNull();
+    return await getAutomationsModel({
+      db,
+      userId,
+      organizationId: tenant?.organizationId ?? null,
+    });
   },
   { defaultErrorMessage: "Failed to get automations" },
 );
 
 export const getAutomation = userOnlyAction(
   async function getAutomation(userId: string, automationId: string) {
-    const automation = await getAutomationModel({ db, automationId, userId });
+    const tenant = await getTenantContextOrNull();
+    const automation = await getAutomationModel({
+      db,
+      automationId,
+      userId,
+      organizationId: tenant?.organizationId ?? null,
+    });
     return automation;
   },
   { defaultErrorMessage: "Failed to get automation" },
@@ -69,7 +82,13 @@ export const createAutomation = userOnlyAction(
 
 export const deleteAutomation = userOnlyAction(
   async function deleteAutomation(userId: string, automationId: string) {
-    await deleteAutomationModel({ db, automationId, userId });
+    const tenant = await getTenantContextOrNull();
+    await deleteAutomationModel({
+      db,
+      automationId,
+      userId,
+      organizationId: tenant?.organizationId ?? null,
+    });
   },
   { defaultErrorMessage: "Failed to delete automation" },
 );
@@ -84,11 +103,13 @@ export const enableOrDisableAutomation = userOnlyAction(
       automationId,
       updates: { enabled },
     });
+    const tenant = await getTenantContextOrNull();
     await updateAutomationModel({
       db,
       automationId,
       userId,
       accessTier: tier,
+      organizationId: tenant?.organizationId ?? null,
       updates: { enabled },
     });
   },
@@ -116,11 +137,13 @@ export const updateAutomation = userOnlyAction(
       automationId,
       updates,
     });
+    const tenant = await getTenantContextOrNull();
     await updateAutomationModel({
       db,
       automationId,
       userId,
       accessTier: tier,
+      organizationId: tenant?.organizationId ?? null,
       updates,
     });
   },
