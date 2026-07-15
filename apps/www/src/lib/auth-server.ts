@@ -23,6 +23,10 @@ import {
   ServerActionResult,
 } from "./server-actions";
 import { getUserCredentials } from "@/server-lib/user-credentials";
+import {
+  DaemonTokenContext,
+  daemonTokenContextFromApiKey,
+} from "./daemon-token-context";
 
 export const getSessionOrNull = cache(
   async (): Promise<{
@@ -49,9 +53,15 @@ export async function getUserIdOrRedirect(): Promise<User["id"]> {
   return userId;
 }
 
-export async function getUserIdOrNullFromDaemonToken(
+/**
+ * Resolve the full tenant context ({ userId, organizationId }) from an
+ * X-Daemon-Token API key. `organizationId` comes from the key's metadata (see
+ * daemon-token-context.ts); it is null for personal keys. Downstream code can
+ * read the org directly instead of inferring it from the user's active org.
+ */
+export async function getDaemonTokenContext(
   request: Pick<Request, "headers">,
-): Promise<string | null> {
+): Promise<DaemonTokenContext | null> {
   const token = request.headers.get("X-Daemon-Token");
   if (!token) {
     return null;
@@ -59,20 +69,22 @@ export async function getUserIdOrNullFromDaemonToken(
   const { valid, error, key } = await auth.api.verifyApiKey({
     body: { key: token },
   });
-  const userId = key?.userId;
-  if (error || !valid || !userId) {
-    console.log(
-      "Unauthorized",
-      "error",
-      error,
-      "valid",
-      valid,
-      "userId",
-      userId,
-    );
+  if (error || !valid) {
+    console.log("Unauthorized", "error", error, "valid", valid);
     return null;
   }
-  return userId;
+  const context = daemonTokenContextFromApiKey(key);
+  if (!context) {
+    console.log("Unauthorized", "reason", "no userId on verified key");
+    return null;
+  }
+  return context;
+}
+
+export async function getUserIdOrNullFromDaemonToken(
+  request: Pick<Request, "headers">,
+): Promise<string | null> {
+  return (await getDaemonTokenContext(request))?.userId ?? null;
 }
 
 export async function getUserOrNull(): Promise<User | null> {
