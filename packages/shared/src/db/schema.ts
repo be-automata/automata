@@ -524,12 +524,13 @@ export const githubPR = pgTable(
     threadId: text("thread_id").references(() => thread.id, {
       onDelete: "set null",
     }),
-    // Tenant fence (WI-5 step 2). Nullable; repo-global today, so two orgs on the
-    // same repo currently collide on repo_number_unique — that unique index moves
-    // to (organization_id, repo, number) when the column is tightened (ADR-001).
-    organizationId: text("organization_id").references(() => organization.id, {
-      onDelete: "cascade",
-    }),
+    // NO organizationId (WI-5 batch 3a, ADR-001 follow-up decision): github_pr is
+    // a GLOBAL mirror of GitHub's PR state (status/refs/mergeable/checks) — one PR
+    // on GitHub is one state, not tenant data. Tenant isolation lives on the
+    // THREAD (thread.organizationId + getThreadForGithubPRAndUser's fence), so
+    // repo_number_unique stays (repo, number) and no per-org row exists. This
+    // supersedes the step-2 speculative organizationId column: a mirror of
+    // external state is not something a single org can own.
     updatedAt: timestamp("updated_at")
       .notNull()
       .defaultNow()
@@ -537,7 +538,6 @@ export const githubPR = pgTable(
   },
   (table) => [
     uniqueIndex("repo_number_unique").on(table.repoFullName, table.number),
-    index("github_pr_org_id_index").on(table.organizationId),
   ],
 );
 

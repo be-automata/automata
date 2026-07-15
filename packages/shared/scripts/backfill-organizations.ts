@@ -158,15 +158,9 @@ export async function backfillOrganizations(
     `);
     bump("threadVisibility", tv.rowCount ?? 0);
 
-    const pr = await db.execute(sql`
-      UPDATE github_pr AS c
-      SET organization_id = t.organization_id
-      FROM thread AS t
-      WHERE c.thread_id = t.id
-        AND c.organization_id IS NULL
-        AND t.organization_id IS NOT NULL
-    `);
-    bump("githubPR", pr.rowCount ?? 0);
+    // github_pr is a GLOBAL GitHub-state mirror (ADR-001 follow-up, batch 3a) —
+    // it carries no organizationId; tenant isolation is thread-side. Nothing to
+    // stamp here.
 
     // Slack installations map to their installer's org when known.
     const slack = await db.execute(sql`
