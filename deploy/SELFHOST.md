@@ -60,6 +60,39 @@ with the dev stack (`packages/dev-env/docker-compose.yml`) or other local servic
 `SELFHOST_MINIO_CONSOLE_PORT` (9001). If you override a port, update the matching
 URL in the env (`DATABASE_URL`, `REDIS_URL`, `R2_ENDPOINT`, `R2_PUBLIC_URL`).
 
+## Upgrade / rebuild procedure
+
+When advancing to a newer HEAD (e.g. the tenancy work landing new commits), rebuild
+with **build → push → restart** — a restart alone runs the new app against a stale
+schema. Keep broadcast (`:1999`) up throughout.
+
+```bash
+set -a; . deploy/selfhost.env; set +a          # env loaded for BOTH build and runtime
+
+# 1. Build at the new HEAD (env must be present — envsafe validates at module load).
+cd apps/www && pnpm exec next build && cd ../..
+
+# 2. Push schema — REQUIRED whenever a commit adds or changes columns.
+cd packages/shared && pnpm exec drizzle-kit push --config drizzle.config.ts && cd ../..
+
+# 3. Restart the app (broadcast stays running).
+cd apps/www && pnpm exec next start
+```
+
+**Why the push is not optional:** the app at HEAD queries columns the migration adds
+(e.g. `thread.organization_id`, `environment.organization_id`); against a stale DB
+those org-fenced queries 500 with `column ... does not exist`. The new org columns are
+currently **nullable**, so `drizzle-kit push` applies cleanly over existing rows.
+
+**Once the NOT-NULL org tightening lands**, `drizzle-kit push` alone will fail on
+populated tables (existing rows have no org id). Run the backfill **between push and
+restart** to stamp existing rows first:
+
+```bash
+# 2b. Only after org columns become NOT NULL:
+cd packages/shared && pnpm exec tsx scripts/backfill-organizations.ts && cd ../..
+```
+
 ## First-user bootstrap (headless)
 
 > **`deploy/seed-selfhost.ts` is a dev/CI fixture bootstrap — real installs use the
