@@ -491,3 +491,17 @@ Three dispositions confirmed by team-lead; folded in so the round is recorded at
 3. **Finding #2 → documented migration semantics, NOT a defect.** "Creator can't see their null-org thread under an active org" is the intended behavior; the operator remedy for legacy rows is the **personal-org backfill script** (creates personal orgs + stamps `organizationId`), run at cutover. Both behaviors recorded (visible under null-org query; hidden under active org); not treated as a defect.
 
 **C10-ORG round CLOSED.** Org-level fence certified at the mechanism level; the two findings are tracked sweep items (one with a fix in flight, one resolved-by-backfill), not fails. No cross-user data leak observed in any probe.
+
+## C10-ORG-CLOSURE — STAGED (2026-07-15, HOLD for team-lead go)
+
+Closes C10-ORG fully at **product-path altitude**. Sequenced AFTER: (i) tenancy-coder's mint-stamp fix lands (createCliApiToken + dev daemon-token route stamp `metadata.organizationId` from the session's active org), (ii) team-lead orders boot-coder's rebuild (recipe includes drizzle push). Execute on team-lead's go only.
+
+**Test (a) — product-path CLI token now carries org (closes FINDING #1).** As user A with active org = orgA, mint a CLI token through the **real product path** (not the test-only `api-key/create` with hand-set metadata) — i.e. the `createCliApiToken` server action via the settings/CLI-token UI (browser-driven), or the dev daemon-token route if the build runs `NODE_ENV=development`. Then:
+- Assert the minted apiKey's `metadata.organizationId === orgA` (psql on the apikey row, or resolved via CLI behavior).
+- Use that token (no hand-injected metadata) on `threads.list` → expect **only orgA threads** (fence now bites on the real mint). Re-run the org-switch: mint while active=orgA2 → token scoped to orgA2.
+- PASS criterion: the production mint path produces an org-scoped token and the CLI fence is live without any test-minted token.
+
+**Test (b) — dashboard-path org read end-to-end (session-sourced fence).** Browser-driven (chrome tools), logged in as a real user with an active org: load `/dashboard` (+ a `/task/[id]` for a cross-org thread id) and assert the org fence on the surface real users touch — the dashboard lists only active-org threads; a cross-org task id is not visible. This certifies the `session.activeOrganizationId` → `forTenant` fence path (which FINDING #1 noted is already correct at the source, but was never exercised end-to-end through the rendered server-action surface). Include an org-switch (change active org in the UI, re-list) if reachable.
+- PASS criterion: dashboard shows only the active org's threads; cross-org resource not reachable; org-switch changes the visible set.
+
+**Method notes:** both tests are browser-driven (chrome-devtools / claude-in-chrome tools). Test (a) needs the product mint UI or dev token route; test (b) needs a rendered-page assertion (server actions aren't curl-able). Fixtures reuse the existing real users/orgs (A/orgA/orgA2, B/orgB) + their org-stamped threads; re-seed if the rebuild's drizzle push clears rows. On completion this marks C10-ORG **fully closed at product-path altitude** and flips FINDING #1 from fix-in-flight to verified-fixed (or re-opens it if the mint still doesn't stamp).
