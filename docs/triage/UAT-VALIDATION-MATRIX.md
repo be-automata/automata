@@ -624,3 +624,13 @@ All four WI-5 background derivations (automation, Slack, sandbox proxy-token, Gi
 
 ### Evidence note — apiKey metadata is double-JSON-encoded (for future psql assertions)
 better-auth persists `apikey.metadata` **double-JSON-encoded** (a JSON string whose content is the JSON object). **Production reads decode correctly via `auth.api.verifyApiKey`** (→ `getDaemonTokenContext` resolves `organizationId` fine — the live CLI fence in C10-ORG/C10-ORG-CLOSURE is unaffected). Only **direct column reads** (psql) see the double-encoding and need a double-parse. This retroactively explains the escaped `"{\"organizationId\":\"…\"}"` seen in the C10-ORG-CLOSURE psql metadata read — my assertions held because the org-id substring is present either way, but future probes that parse the metadata column must double-parse (or assert via `verifyApiKey`/CLI fence behavior instead of the raw column).
+
+## Batch-2 slice 1 — VALIDATED (2026-07-15, 71f3aa7)
+
+Method per team-lead: code-cert + unit evidence (both new fences are owner-scoped reads exercised by the tenant tests; a live probe adds nothing until these surfaces are route-reachable). Verdict: **PASS.**
+
+- `updateThreadVisibility` (thread-visibility.ts): org fence on the owner check; the visibility row inherits its thread's org. ✓
+- `getThreadForGithubPRAndUser` (github.ts): org fence on the owner-scoped thread read. ✓
+- `forTenant` (tenant.ts): gains `setThreadVisibility` + `getThreadForGithubPR` — reached only through the tenant seam (org supplied by construction). ✓
+- **`tenant.test.ts` 11/11 green** on this build. Titles confirm the +2: "is private-to-creator within an org: a co-member cannot read it" (co-member deny), "getThreadForGithubPR is fenced to the owner within the org" (cross-org PR-read fence), "setThreadVisibility stamps the thread" (visibility stamp), "fences environment reads to the owner within the org".
+- **`githubPR` rows deliberately UNSTAMPED — by design, not a gap.** Repo-global rows shared across orgs; deferred to batch 3 with the unique-index redesign. Global/admin reads (`getGithubPR`, `upsertGithubPR`, `*ForAdmin`) stay unfenced **by design, JSDoc-flagged**. Recorded as an intentional deferral to re-verify at batch 3 (watch that the unique-index redesign doesn't accidentally expose owner-scoped PR data cross-org).
