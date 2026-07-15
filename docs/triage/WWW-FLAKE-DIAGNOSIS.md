@@ -110,4 +110,27 @@ runs are unaffected.
 - Concurrent shared+www, 3 rounds (harsher than required): shared **453/453 every
   round**; www 802 pass in rounds 1 & 3, one Redis-residual failure in round 2
   (`batch-threads`, not Postgres). The Postgres corruption is gone.
-- Sequential shared→www in isolation, 3 rounds: _(results appended after the run)_.
+- Sequential shared→www in isolation, 3 rounds: shared **453/453 every round**;
+  www 802/802 in rounds 1 & 2, one failure in round 3
+  (`stop-thread > should handle thread owned by another user`,
+  `expected 'complete' to be 'working'`).
+
+**Conclusion:** the cross-run / cross-suite schema corruption (the cause of the
+385/68 and 740/53 divergence) is eliminated — `shared` is now 453/453 in all six
+runs, and www's mass FK/Unauthorized failures are gone. A **separate, milder
+intra-www-run flake remains**: within a single www run, files execute in parallel
+against that run's one database, and a `working` thread in `stop-thread.test.ts`
+is intermittently observed as `complete` (null `errorMessage`, so not the stalled
+sweep) — a concurrent worker in the same run completing it. This is the same class
+`packages/shared` already avoids by running with `--no-file-parallelism`.
+
+## Recommended remaining action
+
+Run **apps/www with `--no-file-parallelism`** (mirror `packages/shared`, whose
+`test` script already pins it and which is rock-solid at 453/453 ×6). That
+serializes files against the per-run database and removes the intra-run
+completion race. The cost is wall-clock time; determinism is worth it for an
+auth/lifecycle-critical suite. Left as a recommendation rather than applied here
+because it is a suite-wide execution-model change and `apps/www` is under active
+edit by tenancy-coder — flagging for the team to land deliberately. (Isolating
+Redis per run, per the residual above, is the other half.)
