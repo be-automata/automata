@@ -695,6 +695,11 @@ export const environment = pgTable(
       table.repoFullName,
     ),
     index("environment_org_id_index").on(table.organizationId),
+    // Serves getEnvironments' org-fenced list read (WHERE user_id AND org).
+    index("environment_user_id_org_id_index").on(
+      table.userId,
+      table.organizationId,
+    ),
   ],
 );
 
@@ -1170,6 +1175,11 @@ export const automations = pgTable(
     ),
     index("automations_next_run_at_index").on(table.nextRunAt),
     index("automations_org_id_index").on(table.organizationId),
+    // Serves getAutomations' org-fenced list read (WHERE user_id AND org).
+    index("automations_user_id_org_id_index").on(
+      table.userId,
+      table.organizationId,
+    ),
   ],
 );
 
@@ -1353,5 +1363,12 @@ export const agentProviderCredentials = pgTable(
       table.agent,
     ),
     index("agent_provider_credentials_org_id_index").on(table.organizationId),
+    // Serves the org-fenced credential reads (WHERE user_id AND org [AND agent]):
+    // getAllAgentProviderCredentialRecords, getAgentProviderCredentialsRecord.
+    index("agent_provider_credentials_user_org_agent_index").on(
+      table.userId,
+      table.organizationId,
+      table.agent,
+    ),
   ],
 );
