@@ -83,6 +83,11 @@ export async function setup() {
     console.log("Seeding feature flags into test database...");
     await seedFeatureFlags({ db });
     console.log("Feature flags seeded.");
+
+    // Close this setup connection so the teardown DROP DATABASE does not have to
+    // force-terminate it (which logs a noisy pg connection error). createDb uses
+    // a connection-string Pool, whose `end()` closes the pool.
+    await (db.$client as unknown as { end: () => Promise<void> }).end();
   } catch (error) {
     console.error("Error applying drizzle schema to test database.");
     console.error(
