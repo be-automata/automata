@@ -4,7 +4,7 @@
     "types": ["node"],
     // orch-agents' review code is written under `strict` WITHOUT
     // noUncheckedIndexedAccess. Keep it off here so the ported kernel + its
-    // node:test suite compile UNMODIFIED (the 178-case guarantee we're importing);
+    // node:test suite compile UNMODIFIED (the 164-case guarantee we're importing);
     // re-enabling it would mean editing proven code. See PORT-MAP.md.
     "noUncheckedIndexedAccess": false
   },
