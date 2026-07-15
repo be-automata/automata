@@ -47,6 +47,7 @@ import {
 } from "./handlers";
 import { Webhooks } from "@octokit/webhooks";
 import { env } from "@terragon/env/apps-www";
+import { findWebhookSkip } from "./webhook-skip";
 
 export async function POST(request: NextRequest) {
   const webhooks = new Webhooks({
@@ -131,6 +132,26 @@ export async function POST(request: NextRequest) {
     });
     return NextResponse.json({ success: true });
   } catch (error) {
+    // WI-8: a business rejection (app not installed, no mapped user, unmapped
+    // installation, unconfigured repo) fast-acks 2xx with a structured skip log
+    // — GitHub must NOT retry it (retries never help and eventually disable the
+    // webhook). Only genuine unexpected errors 5xx so GitHub retries transient
+    // infra failures until the ingress outbox lands.
+    const skip = findWebhookSkip(error);
+    if (skip) {
+      console.log("[github webhook] skipped", {
+        deliveryId: requestId,
+        eventType,
+        category: skip.category,
+        reason: skip.message,
+        ...skip.detail,
+      });
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        category: skip.category,
+      });
+    }
     console.error("[github webhook] error", error);
     return NextResponse.json(
       { success: false, error: "Internal server error" },

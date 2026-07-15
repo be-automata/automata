@@ -15,6 +15,7 @@ import {
 import { db } from "@/lib/db";
 import { getOrganizationIdForInstallation } from "@terragon/shared/model/github-installation";
 import { getThreadForGithubPRAndUser } from "@terragon/shared/model/github";
+import { requireAppAccess } from "./webhook-skip";
 import { queueFollowUpInternal } from "@/server-lib/follow-up";
 import { getGitHubMentionAutomationsForRepo } from "@terragon/shared/model/automations";
 import { GitHubMentionTriggerConfig } from "@terragon/shared/automations";
@@ -66,7 +67,13 @@ export async function handleAppMention({
 }): Promise<void> {
   // Get branch names upfront
   const [owner, repo] = parseRepoFullName(repoFullName);
-  const octokit = await getOctokitForApp({ owner, repo });
+  // WI-8: if the App can't get an installation client for this repo (not
+  // installed / bad creds), that's a business rejection — skip with a 2xx, not
+  // a 500 that GitHub retries and eventually disables the webhook over.
+  const octokit = await requireAppAccess(
+    () => getOctokitForApp({ owner, repo }),
+    { repoFullName, issueOrPrType, issueOrPrNumber },
+  );
   let branchName: string;
   let baseBranchName: string;
 

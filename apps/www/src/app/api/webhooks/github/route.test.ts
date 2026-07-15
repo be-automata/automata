@@ -6,6 +6,7 @@ import { createMockNextRequest } from "@/test-helpers/mock-next";
 import { db } from "@/lib/db";
 import { updateGitHubPR } from "@/lib/github";
 import { handleAppMention } from "./handle-app-mention";
+import { WebhookSkip } from "./webhook-skip";
 import {
   createTestUser,
   createTestGitHubPR,
@@ -273,6 +274,31 @@ describe("GitHub webhook route", () => {
         commentType: "issue_comment",
         issueContext: undefined,
       });
+    });
+
+    it("WI-8: fast-acks 2xx (not 500) when a mention handler business-rejects", async () => {
+      // e.g. App not installed on the repo / bad creds — a business rejection,
+      // not a transient failure. GitHub must not retry it.
+      vi.mocked(handleAppMention).mockRejectedValueOnce(
+        new WebhookSkip("app_access_unavailable", "not installed", {
+          repoFullName: "owner/repo",
+        }),
+      );
+      const request = await createMockRequest(
+        createValidIssueCommentBody({
+          repoFullName: "owner/repo",
+          prNumber: 123,
+          githubAccountId,
+          commentBody: "Hey @test-app, can you help fix this issue?",
+        }),
+        { "x-github-event": "issue_comment" },
+      );
+
+      const response = await POST(request);
+      const data = await response.json();
+      expect(response.status).toBe(200);
+      expect(data.skipped).toBe(true);
+      expect(data.category).toBe("app_access_unavailable");
     });
 
     it("should ignore comments without app mention", async () => {
