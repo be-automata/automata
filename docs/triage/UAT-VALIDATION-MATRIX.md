@@ -777,3 +777,14 @@ Operator revised ADR-002: the **execution plane is CUSTOMER-SUPPLIED (VPS/BYOC, 
 - **New validation surfaces (rev-2):** installer is the primary onboarding surface (validate: swap provisioning per capacity spec — 8GB+swap ⇒ 6 concurrent); **min-version gate at worker registration** (a stale/incompatible customer worker must be refused). Pricing decouples from capacity → platform-based (seats/orgs/repos), which REOPENS the deferred billing decision (batch-3 billing items may shift).
 
 Not active now (substrate/installer phase); recorded so the test design tracks the ADR revision.
+
+## Execution-plane C10 + substrate gates — CONSOLIDATED (per team-lead, ADR-002 rev 2)
+
+Supersedes the two prior rev-2 notes; this is the authoritative substrate-phase gate list. Record-only; not active (batch-3a is the active queue).
+
+1. **Worker-availability gate (REPLACES cold-start-vs-ScheduleTimeout).** No cold-start race under customer-supplied persistent runners. Instead: (a) `ScheduleTimeout` deliberately raised to tens of minutes — a "how long may a customer's box be down" decision, not a perf number; (b) **worker-offline state visible in the dashboard BEFORE work drops**; (c) **`SCHEDULING_TIMED_OUT` is loud + attributable** — a silently-dropped review is the WORST failure mode of rev 2, so the gate is that a drop is surfaced and traceable to the org/worker, never swallowed.
+2. **NEW execution-plane C10 assertion — installer/worker artifact must NOT contain the GitHub App private key.** Catastrophic anti-pattern rev 2 names: a customer in possession of the App key could mint tokens for OTHER customers' installations. Deploy-gate check: grep/inspect the installer + worker image/artifact for the App private key (and any `github-app.pem`-equivalent) → must be absent. App key + master key stay control-plane only.
+3. **Unchanged:** no Hatchet `-dev` images (`GET /api/v1/meta` not `authDisabled:true`; unauthenticated tenant/workers call 401/403); worker secret-isolation (org A's worker can't obtain org B's Anthropic key / GitHub token / worktree); task-routing isolation (org B's task never delivered to org A's worker).
+4. **NEW — minimum-version gate at worker registration.** A stale/incompatible customer worker must be REFUSED at registration; otherwise it becomes a worker that accepts assignments it can't execute → unassignable actions → silent `SCHEDULING_TIMED_OUT` (ties back to gate 1's silent-drop failure mode).
+
+Full-stack tenant gate = product-path C10 (reads: CLI + dashboard + session-info, all live-certified) + gates 1–4 above once execution is per-org/customer-supplied.
