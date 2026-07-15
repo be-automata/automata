@@ -19,11 +19,13 @@ export async function logOpenRouterUsage({
   path,
   usage,
   userId,
+  organizationId,
   model,
 }: {
   path: string;
   usage: UsagePayload | null | undefined;
   userId?: string;
+  organizationId?: string | null;
   model?: string;
 }) {
   console.log("OpenRouter usage", {
@@ -75,6 +77,7 @@ export async function logOpenRouterUsage({
   await trackUsageEventBatched({
     db,
     userId,
+    organizationId,
     events: [
       {
         eventType,

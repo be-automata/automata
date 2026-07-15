@@ -8,6 +8,7 @@ import { maybeTriggerCreditAutoReload } from "@/server-lib/credit-auto-reload";
 import { logGoogleUsage } from "../log-google-usage";
 import { waitUntil } from "@/lib/wait-until";
 import { validateProxyRequestModel } from "@/server-lib/proxy-model-validation";
+import { daemonTokenContextFromApiKey } from "@/lib/daemon-token-context";
 
 const GOOGLE_API_BASE = "https://generativelanguage.googleapis.com/";
 const DEFAULT_PATH = "v1beta/models/gemini-2.5-pro:streamGenerateContent";
@@ -15,7 +16,7 @@ const DEFAULT_PATH = "v1beta/models/gemini-2.5-pro:streamGenerateContent";
 export const dynamic = "force-dynamic";
 
 type HandlerArgs = { params: Promise<{ path?: string[] }> };
-type AuthContext = { userId: string };
+type AuthContext = { userId: string; organizationId: string | null };
 
 function getDaemonTokenFromHeaders(headers: Headers) {
   const directToken = headers.get("X-Daemon-Token");
@@ -107,11 +108,13 @@ async function logUsageFromEventStream({
   stream,
   targetUrl,
   userId,
+  organizationId,
   model,
 }: {
   stream: ReadableStream<Uint8Array>;
   targetUrl: URL;
   userId: string;
+  organizationId: string | null;
   model?: string;
 }) {
   const reader = stream.getReader();
@@ -142,6 +145,7 @@ async function logUsageFromEventStream({
               path: targetUrl.pathname,
               usage: parsed.usageMetadata,
               userId,
+              organizationId,
               model: model ?? parsed.modelVersion ?? undefined,
             });
             return true;
@@ -237,6 +241,7 @@ async function proxyRequest(
         stream: loggingStream,
         targetUrl,
         userId: authContext.userId,
+        organizationId: authContext.organizationId,
         model: authContext.model,
       }).catch((error) => {
         console.error(
@@ -256,6 +261,7 @@ async function proxyRequest(
             path: targetUrl.pathname,
             usage,
             userId: authContext.userId,
+            organizationId: authContext.organizationId,
             model: authContext.model ?? json?.modelVersion ?? undefined,
           });
         }
@@ -299,12 +305,14 @@ async function authorize(request: NextRequest): Promise<
   | {
       response: Response;
       userId?: undefined;
+      organizationId?: undefined;
       bodyBuffer?: undefined;
       model?: undefined;
     }
   | {
       response: null;
       userId: string;
+      organizationId: string | null;
       bodyBuffer?: ArrayBuffer;
       model?: string;
     }
@@ -377,7 +385,13 @@ async function authorize(request: NextRequest): Promise<
         };
       }
     }
-    return { response: null, userId, bodyBuffer, model };
+    return {
+      response: null,
+      userId,
+      organizationId: daemonTokenContextFromApiKey(key)?.organizationId ?? null,
+      bodyBuffer,
+      model,
+    };
   } catch (err) {
     console.error("Failed to verify Google proxy request", err);
     return { response: new Response("Unauthorized", { status: 401 }) };
@@ -399,6 +413,7 @@ async function handleWithAuth(
   }
   return handler(request, args, {
     userId: authResult.userId,
+    organizationId: authResult.organizationId,
     bodyBuffer: authResult.bodyBuffer,
     model: authResult.model,
   });

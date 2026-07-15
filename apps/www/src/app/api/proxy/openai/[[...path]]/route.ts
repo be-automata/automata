@@ -8,6 +8,7 @@ import { maybeTriggerCreditAutoReload } from "@/server-lib/credit-auto-reload";
 import { logOpenAIUsage } from "../log-openai-usage";
 import { waitUntil } from "@/lib/wait-until";
 import { validateProxyRequestModel } from "@/server-lib/proxy-model-validation";
+import { daemonTokenContextFromApiKey } from "@/lib/daemon-token-context";
 
 const OPENAI_API_BASE = "https://api.openai.com/";
 const DEFAULT_OPENAI_PATH = "v1/chat/completions";
@@ -15,7 +16,7 @@ const DEFAULT_OPENAI_PATH = "v1/chat/completions";
 export const dynamic = "force-dynamic";
 
 type HandlerArgs = { params: Promise<{ path?: string[] }> };
-type AuthContext = { userId: string };
+type AuthContext = { userId: string; organizationId: string | null };
 
 function getDaemonTokenFromHeaders(headers: Headers) {
   const directToken = headers.get("X-Daemon-Token");
@@ -94,10 +95,12 @@ async function logUsageFromEventStream({
   stream,
   targetUrl,
   userId,
+  organizationId,
 }: {
   stream: ReadableStream<Uint8Array>;
   targetUrl: URL;
   userId: string;
+  organizationId: string | null;
 }) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -130,6 +133,7 @@ async function logUsageFromEventStream({
               responseId: parsed.response?.id ?? undefined,
               usage,
               userId,
+              organizationId,
               model: parsed.response?.model ?? undefined,
             });
             return true;
@@ -140,6 +144,7 @@ async function logUsageFromEventStream({
               path: targetUrl.pathname,
               usage: parsed.usage,
               userId,
+              organizationId,
               model: parsed.model ?? undefined,
             });
             return true;
@@ -235,6 +240,7 @@ async function proxyRequest(
         stream: loggingStream,
         targetUrl,
         userId: authContext.userId,
+        organizationId: authContext.organizationId,
       }).catch((error) => {
         console.error(
           "Failed to log OpenAI usage (event-stream handler)",
@@ -253,6 +259,7 @@ async function proxyRequest(
             path: targetUrl.pathname,
             usage,
             userId: authContext.userId,
+            organizationId: authContext.organizationId,
             model: json?.model ?? undefined,
           });
         }
@@ -295,8 +302,8 @@ async function proxyRequest(
 async function authorize(
   request: NextRequest,
 ): Promise<
-  | { response: Response; userId?: undefined }
-  | { response: null; userId: string }
+  | { response: Response; userId?: undefined; organizationId?: undefined }
+  | { response: null; userId: string; organizationId: string | null }
 > {
   const token = getDaemonTokenFromHeaders(request.headers);
   if (!token) {
@@ -335,7 +342,11 @@ async function authorize(
         };
       }
     }
-    return { response: null, userId };
+    return {
+      response: null,
+      userId,
+      organizationId: daemonTokenContextFromApiKey(key)?.organizationId ?? null,
+    };
   } catch (err) {
     console.error("Failed to verify OpenAI proxy request", err);
     return { response: new Response("Unauthorized", { status: 401 }) };
@@ -355,7 +366,10 @@ async function handleWithAuth(
   if (authResult.response) {
     return authResult.response;
   }
-  return handler(request, args, { userId: authResult.userId });
+  return handler(request, args, {
+    userId: authResult.userId,
+    organizationId: authResult.organizationId,
+  });
 }
 
 export async function GET(request: NextRequest, args: HandlerArgs) {

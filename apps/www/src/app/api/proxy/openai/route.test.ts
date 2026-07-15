@@ -162,7 +162,7 @@ describe("OpenAI proxy route", () => {
       path: "/v1/chat/completions",
       usage: responsePayload.usage,
       userId: "user-123",
-      model: responsePayload.model,
+      organizationId: null,      model: responsePayload.model,
     });
   });
 
@@ -252,7 +252,7 @@ describe("OpenAI proxy route", () => {
       path: "/v1/responses",
       usage: responsePayload.usage,
       userId: "user-123",
-      model: responsePayload.model,
+      organizationId: null,      model: responsePayload.model,
     });
   });
 
@@ -401,7 +401,7 @@ describe("OpenAI proxy route", () => {
         total_tokens: 15,
       },
       userId: "user-123",
-      model: "gpt-5.1-2025-04-14",
+      organizationId: null,      model: "gpt-5.1-2025-04-14",
     });
 
     const bodyText = await response.text();
@@ -658,7 +658,7 @@ describe("OpenAI proxy route", () => {
         total_tokens: 48,
       },
       userId: "user-123",
-      model: "gpt-5",
+      organizationId: null,      model: "gpt-5",
     });
 
     const bodyText = await response.text();

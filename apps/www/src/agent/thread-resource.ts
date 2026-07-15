@@ -135,6 +135,9 @@ export async function withThreadSandboxSession<T>({
 }): Promise<T | undefined> {
   let sandboxSessionOrNull: ISandboxSession | null = null;
   let sandboxUsageStartTime: number | null = null;
+  // Captured when the thread loads (exec callback) and reused in onExit to stamp
+  // usage events with the thread's org (WI-5 batch 3a).
+  let threadOrganizationId: string | null = null;
   return withThreadChat({
     threadId,
     userId,
@@ -148,6 +151,7 @@ export async function withThreadSandboxSession<T>({
       }
 
       const thread = await getThreadMinimal({ db, threadId, userId });
+      threadOrganizationId = thread?.organizationId ?? null;
       if (!thread?.codesandboxId) {
         return await execOrThrow({ threadChat, session: null });
       }
@@ -200,6 +204,7 @@ export async function withThreadSandboxSession<T>({
               waitUntil(
                 trackUsageEvents({
                   userId,
+                  organizationId: threadOrganizationId,
                   applicationDurationMs: usageDuration,
                 }),
               );

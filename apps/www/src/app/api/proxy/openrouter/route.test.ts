@@ -157,7 +157,7 @@ describe("OpenRouter proxy route", () => {
       path: "/api/v1/chat/completions",
       usage: responsePayload.usage,
       userId: "user-123",
-      model: responsePayload.model,
+      organizationId: null,      model: responsePayload.model,
     });
   });
 
@@ -316,7 +316,7 @@ describe("OpenRouter proxy route", () => {
         total_tokens: 150,
       },
       userId: "user-123",
-      model: "qwen/qwen3-coder:exacto",
+      organizationId: null,      model: "qwen/qwen3-coder:exacto",
     });
   });
 

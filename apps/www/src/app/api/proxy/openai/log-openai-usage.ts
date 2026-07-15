@@ -20,12 +20,14 @@ export async function logOpenAIUsage({
   usage,
   responseId,
   userId,
+  organizationId,
   model,
 }: {
   path: string;
   usage: UsagePayload | null | undefined;
   responseId?: string;
   userId?: string;
+  organizationId?: string | null;
   model?: string;
 }) {
   console.log("OpenAI responses usage", {
@@ -78,6 +80,7 @@ export async function logOpenAIUsage({
   await trackUsageEventBatched({
     db,
     userId,
+    organizationId,
     events: [
       {
         eventType: "billable_openai_usd",

@@ -8,6 +8,7 @@ import { maybeTriggerCreditAutoReload } from "@/server-lib/credit-auto-reload";
 import { logAnthropicUsage } from "../log-anthropic-usage";
 import { waitUntil } from "@/lib/wait-until";
 import { validateProxyRequestModel } from "@/server-lib/proxy-model-validation";
+import { daemonTokenContextFromApiKey } from "@/lib/daemon-token-context";
 
 const ANTHROPIC_API_BASE = "https://api.anthropic.com/";
 const DEFAULT_ANTHROPIC_PATH = "v1/messages";
@@ -16,7 +17,7 @@ const ANTHROPIC_API_VERSION = "2023-06-01";
 export const dynamic = "force-dynamic";
 
 type HandlerArgs = { params: { path?: string[] } };
-type AuthContext = { userId: string };
+type AuthContext = { userId: string; organizationId: string | null };
 
 type StreamEvent = {
   eventType: string | null;
@@ -152,10 +153,12 @@ async function logMessagesUsageFromEventStream({
   stream,
   targetUrl,
   userId,
+  organizationId,
 }: {
   stream: ReadableStream<Uint8Array>;
   targetUrl: URL;
   userId: string;
+  organizationId: string | null;
 }) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -267,6 +270,7 @@ async function logMessagesUsageFromEventStream({
           path: targetUrl.pathname,
           usage: aggregatedUsageForLogging,
           userId,
+          organizationId,
           model: knownModel ?? null,
           messageId: knownMessageId ?? null,
         });
@@ -337,6 +341,7 @@ async function proxyRequest(
         stream: loggingStream,
         targetUrl,
         userId: authContext.userId,
+        organizationId: authContext.organizationId,
       }).catch((error) => {
         console.error(
           "Failed to log Anthropic messages usage (event-stream handler)",
@@ -358,6 +363,7 @@ async function proxyRequest(
             path: targetUrl.pathname,
             usage: json.usage,
             userId: authContext.userId,
+            organizationId: authContext.organizationId,
             model: json.model ?? null,
             messageId: json.id ?? null,
           });
@@ -401,8 +407,8 @@ async function proxyRequest(
 async function authorize(
   request: NextRequest,
 ): Promise<
-  | { response: Response; userId?: undefined }
-  | { response: null; userId: string }
+  | { response: Response; userId?: undefined; organizationId?: undefined }
+  | { response: null; userId: string; organizationId: string | null }
 > {
   const token = getDaemonTokenFromHeaders(request.headers);
 
@@ -442,7 +448,11 @@ async function authorize(
         };
       }
     }
-    return { response: null, userId };
+    return {
+      response: null,
+      userId,
+      organizationId: daemonTokenContextFromApiKey(key)?.organizationId ?? null,
+    };
   } catch (err) {
     console.error("Failed to verify Anthropic proxy request", err);
     return { response: new Response("Unauthorized", { status: 401 }) };
@@ -462,7 +472,10 @@ async function handleWithAuth(
   if (authResult.response) {
     return authResult.response;
   }
-  return handler(request, args, { userId: authResult.userId });
+  return handler(request, args, {
+    userId: authResult.userId,
+    organizationId: authResult.organizationId,
+  });
 }
 
 export async function GET(request: NextRequest, args: HandlerArgs) {

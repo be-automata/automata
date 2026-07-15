@@ -194,6 +194,7 @@ export async function handleDaemonEvent({
   waitUntil(
     trackUsageEvents({
       userId,
+      organizationId: thread?.organizationId ?? null,
       costUsd,
       agentDurationMs: durationMs,
     }),

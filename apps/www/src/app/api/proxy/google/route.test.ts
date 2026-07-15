@@ -159,7 +159,7 @@ describe("Google AI Studio proxy route", () => {
       path: fetchUrl.pathname,
       usage: responsePayload.usageMetadata,
       userId: "user-123",
-      model: "gemini-2.5-pro",
+      organizationId: null,      model: "gemini-2.5-pro",
     });
   });
 
@@ -319,7 +319,7 @@ describe("Google AI Studio proxy route", () => {
           totalTokenCount: 15,
         },
         userId: "user-123",
-        model: "gemini-2.5-pro",
+        organizationId: null,        model: "gemini-2.5-pro",
       }),
     );
   });

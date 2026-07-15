@@ -16,11 +16,13 @@ export async function logGoogleUsage({
   path,
   usage,
   userId,
+  organizationId,
   model,
 }: {
   path: string;
   usage: UsagePayload | null | undefined;
   userId?: string;
+  organizationId?: string | null;
   model?: string;
 }) {
   console.log("Google usage", {
@@ -72,6 +74,7 @@ export async function logGoogleUsage({
   await trackUsageEventBatched({
     db,
     userId,
+    organizationId,
     events: [
       {
         eventType,

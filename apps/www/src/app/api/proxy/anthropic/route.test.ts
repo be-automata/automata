@@ -151,7 +151,7 @@ describe("Anthropic proxy route", () => {
       path: "/v1/messages",
       usage: responsePayload.usage,
       userId: "user-123",
-      model: responsePayload.model,
+      organizationId: null,      model: responsePayload.model,
       messageId: responsePayload.id,
     });
   });
@@ -294,7 +294,7 @@ describe("Anthropic proxy route", () => {
       path: "/v1/messages",
       usage: events[2]!.data.usage,
       userId: "user-123",
-      model: "claude-3-5-sonnet-20241022",
+      organizationId: null,      model: "claude-3-5-sonnet-20241022",
       messageId: "msg_01j0h6rj5n7tfn0r5x0k2vqxga",
     });
 

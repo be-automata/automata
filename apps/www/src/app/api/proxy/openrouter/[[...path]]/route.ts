@@ -6,6 +6,7 @@ import { getUserCreditBalance } from "@terragon/shared/model/credits";
 import { isStripeConfigured } from "@/server-lib/stripe";
 import { maybeTriggerCreditAutoReload } from "@/server-lib/credit-auto-reload";
 import { logOpenRouterUsage } from "../log-usage";
+import { daemonTokenContextFromApiKey } from "@/lib/daemon-token-context";
 import { waitUntil } from "@/lib/wait-until";
 import { validateProxyRequestModel } from "@/server-lib/proxy-model-validation";
 
@@ -15,7 +16,7 @@ const DEFAULT_PATH = "v1/chat/completions";
 export const dynamic = "force-dynamic";
 
 type HandlerArgs = { params: Promise<{ path?: string[] }> };
-type AuthContext = { userId: string };
+type AuthContext = { userId: string; organizationId: string | null };
 
 function getDaemonTokenFromHeaders(headers: Headers) {
   const directToken = headers.get("X-Daemon-Token");
@@ -96,10 +97,12 @@ async function logUsageFromEventStream({
   stream,
   targetUrl,
   userId,
+  organizationId,
 }: {
   stream: ReadableStream<Uint8Array>;
   targetUrl: URL;
   userId: string;
+  organizationId: string | null;
 }) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -129,6 +132,7 @@ async function logUsageFromEventStream({
               path: targetUrl.pathname,
               usage: parsed.usage,
               userId,
+              organizationId,
               model: parsed.model ?? undefined,
             });
             return true;
@@ -228,6 +232,7 @@ async function proxyRequest(
         stream: loggingStream,
         targetUrl,
         userId: authContext.userId,
+        organizationId: authContext.organizationId,
       }).catch((error) => {
         console.error(
           "Failed to log OpenRouter usage (event-stream handler)",
@@ -246,6 +251,7 @@ async function proxyRequest(
             path: targetUrl.pathname,
             usage,
             userId: authContext.userId,
+            organizationId: authContext.organizationId,
             model: json?.model ?? undefined,
           });
         }
@@ -289,11 +295,13 @@ async function authorize(request: NextRequest): Promise<
   | {
       response: Response;
       userId?: undefined;
+      organizationId?: undefined;
       bodyBuffer?: undefined;
     }
   | {
       response: null;
       userId: string;
+      organizationId: string | null;
       bodyBuffer?: ArrayBuffer;
     }
 > {
@@ -354,7 +362,12 @@ async function authorize(request: NextRequest): Promise<
         };
       }
     }
-    return { response: null, userId, bodyBuffer };
+    return {
+      response: null,
+      userId,
+      organizationId: daemonTokenContextFromApiKey(key)?.organizationId ?? null,
+      bodyBuffer,
+    };
   } catch (err) {
     console.error("Failed to verify OpenRouter proxy request", err);
     return { response: new Response("Unauthorized", { status: 401 }) };
@@ -376,6 +389,7 @@ async function handleWithAuth(
   }
   return handler(request, args, {
     userId: authResult.userId,
+    organizationId: authResult.organizationId,
     bodyBuffer: authResult.bodyBuffer,
   });
 }

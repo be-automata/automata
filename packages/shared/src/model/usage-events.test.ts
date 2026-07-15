@@ -8,6 +8,8 @@ import {
   getUserUsageEventsAggregated,
   trackUsageEventBatched,
 } from "./usage-events";
+import { createOrganization } from "./organizations";
+import { nanoid } from "nanoid";
 import { set as setDateValues, subDays } from "date-fns";
 import { tz } from "@date-fns/tz";
 import { OPENAI_RESPONSES_GPT_5_SKU } from "./usage-pricing";
@@ -77,6 +79,41 @@ describe("usage-events", () => {
       expect(openAiEvents[0]!.cachedInputTokens).toBe(100);
       expect(openAiEvents[0]!.outputTokens).toBe(500);
       expect(openAiEvents[0]!.sku).toBe(OPENAI_RESPONSES_GPT_5_SKU);
+    });
+
+    it("stamps organizationId on the written events (WI-5)", async () => {
+      const org = await createOrganization({
+        db,
+        name: "Acme",
+        slug: `acme-${nanoid(8).toLowerCase()}`,
+      });
+      await trackUsageEventBatched({
+        db,
+        userId: user.id,
+        organizationId: org.id,
+        events: [{ eventType: "claude_cost_usd", value: 3 }],
+      });
+      const events = await getUserUsageEvents({
+        db,
+        userId: user.id,
+        eventType: "claude_cost_usd",
+      });
+      expect(events).toHaveLength(1);
+      expect(events[0]!.organizationId).toBe(org.id);
+    });
+
+    it("leaves organizationId null when unset (nullable-safe)", async () => {
+      await trackUsageEventBatched({
+        db,
+        userId: user.id,
+        events: [{ eventType: "claude_cost_usd", value: 1 }],
+      });
+      const events = await getUserUsageEvents({
+        db,
+        userId: user.id,
+        eventType: "claude_cost_usd",
+      });
+      expect(events[0]!.organizationId).toBeNull();
     });
   });
 

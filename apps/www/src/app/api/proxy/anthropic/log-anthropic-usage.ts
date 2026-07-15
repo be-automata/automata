@@ -16,12 +16,14 @@ export async function logAnthropicUsage({
   path,
   usage,
   userId,
+  organizationId,
   model,
   messageId,
 }: {
   path: string;
   usage: UsagePayload | null | undefined;
   userId?: string;
+  organizationId?: string | null;
   model?: string | null;
   messageId?: string | null;
 }) {
@@ -67,6 +69,7 @@ export async function logAnthropicUsage({
   await trackUsageEventBatched({
     db,
     userId,
+    organizationId,
     events: [
       {
         eventType: "billable_anthropic_usd",

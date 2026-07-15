@@ -12,11 +12,15 @@ export async function trackUsageEvents({
   costUsd,
   agentDurationMs,
   applicationDurationMs,
+  organizationId,
 }: {
   userId: string;
   costUsd?: number;
   agentDurationMs?: number;
   applicationDurationMs?: number;
+  // Tenant to stamp (WI-5 batch 3a). Derived from the thread these usage events
+  // belong to. Nullable-safe: null = unstamped, today's behavior.
+  organizationId?: string | null;
 }) {
   const events: {
     eventType: UsageEventType;
@@ -49,6 +53,6 @@ export async function trackUsageEvents({
     });
   }
   if (events.length > 0) {
-    await trackUsageEventBatched({ db, userId, events });
+    await trackUsageEventBatched({ db, userId, organizationId, events });
   }
 }

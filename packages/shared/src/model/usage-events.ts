@@ -10,6 +10,7 @@ export async function trackUsageEventBatched({
   db,
   userId,
   events,
+  organizationId,
 }: {
   db: DB;
   userId: string;
@@ -25,10 +26,15 @@ export async function trackUsageEventBatched({
     };
     sku?: UsageSku | null;
   }[];
+  // Tenant to stamp on the usage rows (WI-5 batch 3a). Derived from the daemon
+  // proxy token's org (= the thread's org). Nullable-safe: null = unstamped,
+  // today's behavior. Flips the slice-4 usage read fence live once populated.
+  organizationId?: string | null;
 }) {
   await db.insert(schema.usageEvents).values(
     events.map((e) => ({
       userId,
+      organizationId: organizationId ?? null,
       eventType: e.eventType,
       value: e.value.toString(),
       sku: e.sku ?? null,
