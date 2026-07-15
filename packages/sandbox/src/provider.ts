@@ -19,15 +19,7 @@ export function getSandboxProvider(
         "Mock sandbox provider is only available in test environments",
       );
     case "docker":
-      if (
-        process.env.NODE_ENV === "test" ||
-        process.env.NODE_ENV === "development"
-      ) {
-        return new DockerProvider();
-      }
-      throw new Error(
-        "Docker sandbox provider is only available in test/dev environments",
-      );
+      return new DockerProvider();
     case "daytona":
       return new DaytonaProvider();
     default:

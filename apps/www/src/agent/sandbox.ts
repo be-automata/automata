@@ -409,7 +409,9 @@ export async function getSandboxProvider({
 
   switch (userSetting) {
     case "default":
-      return "e2b";
+      // Without an E2B key the remote provider can never work; fall back to
+      // the local Docker provider so a SaaS-free install boots and runs.
+      return env.E2B_API_KEY ? "e2b" : "docker";
     case "e2b":
       return "e2b";
     case "daytona":

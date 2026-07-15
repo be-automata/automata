@@ -66,7 +66,7 @@ export const env = envsafe({
   R2_ENDPOINT: str({ allowEmpty: true, default: "" }),
 
   // Sandbox providers
-  E2B_API_KEY: str(),
+  E2B_API_KEY: str({ allowEmpty: true, default: "" }),
   DAYTONA_API_KEY: str({ default: "", allowEmpty: true }),
 
   // GitHub App
