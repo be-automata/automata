@@ -1,5 +1,5 @@
 import { DB } from "../db";
-import { ThreadInsert, ThreadChatInsert } from "../db/types";
+import { ThreadInsert, ThreadChatInsert, Environment } from "../db/types";
 import {
   getThread,
   getThreads,
@@ -10,6 +10,15 @@ import {
   updateThreadChat,
   deleteThreadById,
 } from "./threads";
+import {
+  getEnvironments,
+  getEnvironment,
+  getOrCreateEnvironment,
+  getOrCreateGlobalEnvironment,
+  updateEnvironment,
+  deleteEnvironmentById,
+  getEnvironmentForUserRepo,
+} from "./environments";
 
 /**
  * Tenant-scoped repository accessor (ADR-001, WI-5 step 3).
@@ -110,6 +119,58 @@ export function forTenant({ db, organizationId, userId }: TenantContext) {
 
     deleteThread(threadId: string) {
       return deleteThreadById({ db, threadId, userId, organizationId });
+    },
+
+    // --- Environments (WI-5 step 3, second reference port) ---
+
+    listEnvironments(includeGlobal = false) {
+      return getEnvironments({ db, userId, organizationId, includeGlobal });
+    },
+
+    getEnvironment(environmentId: string) {
+      return getEnvironment({ db, userId, environmentId, organizationId });
+    },
+
+    getEnvironmentForRepo(repoFullName: string) {
+      return getEnvironmentForUserRepo({
+        db,
+        userId,
+        organizationId,
+        repoFullName,
+      });
+    },
+
+    getOrCreateEnvironment(repoFullName: string, isGlobal = false) {
+      return getOrCreateEnvironment({
+        db,
+        userId,
+        organizationId,
+        repoFullName,
+        isGlobal,
+      });
+    },
+
+    getOrCreateGlobalEnvironment() {
+      return getOrCreateGlobalEnvironment({ db, userId, organizationId });
+    },
+
+    updateEnvironment(
+      environmentId: string,
+      updates: Partial<
+        Omit<Environment, "id" | "userId" | "repoFullName" | "organizationId">
+      >,
+    ) {
+      return updateEnvironment({
+        db,
+        userId,
+        organizationId,
+        environmentId,
+        updates,
+      });
+    },
+
+    deleteEnvironment(environmentId: string) {
+      return deleteEnvironmentById({ db, userId, organizationId, environmentId });
     },
   };
 }

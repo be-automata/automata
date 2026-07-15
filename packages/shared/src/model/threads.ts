@@ -463,12 +463,14 @@ export async function getThreadWithPermissions({
   db,
   threadId,
   userId,
+  organizationId,
   getHasRepoPermissions,
   allowAdmin = false,
 }: {
   db: DB;
   threadId: string;
   userId: string;
+  organizationId?: string | null;
   getHasRepoPermissions?: (repoFullName: string) => Promise<boolean>;
   allowAdmin?: boolean;
 }): Promise<ThreadInfoFull | undefined> {
@@ -493,9 +495,12 @@ export async function getThreadWithPermissions({
   }
   const threadResult = threadResultArr[0]!;
   const ownerUserId = threadResult.userId;
-  // Thread owners can view their own threads
+  // Thread owners can view their own threads. The tenant fence applies here: an
+  // owner viewing their own thread is scoped to their active org. Shared paths
+  // below (link/repo/admin) read as the OWNER and are governed by visibility
+  // rules, not the requester's org fence.
   if (ownerUserId === userId) {
-    const thread = await getThread({ db, threadId, userId });
+    const thread = await getThread({ db, threadId, userId, organizationId });
     if (!thread) {
       return undefined;
     }

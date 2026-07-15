@@ -5,7 +5,7 @@ import { createDb } from "../db";
 import { User } from "../db/types";
 import { nanoid } from "nanoid";
 import { eq } from "drizzle-orm";
-import { thread, threadChat } from "../db/schema";
+import { thread, threadChat, environment } from "../db/schema";
 import {
   createOrganization,
   addOrganizationMember,
@@ -186,5 +186,128 @@ describe("forTenant accessor — thread tenant scoping", () => {
       .from(thread)
       .where(eq(thread.id, threadId));
     expect(after!.name).toBe("renamed");
+  });
+});
+
+describe("forTenant accessor — environment tenant scoping", () => {
+  let alice: User;
+  let bob: User;
+  let carol: User;
+  let orgX: string;
+  let orgY: string;
+
+  beforeEach(async () => {
+    alice = (await createTestUser({ db })).user;
+    bob = (await createTestUser({ db })).user;
+    carol = (await createTestUser({ db })).user;
+    orgX = await createOrgWithMembers([alice.id, bob.id]);
+    orgY = await createOrgWithMembers([carol.id]);
+  });
+
+  it("getOrCreateEnvironment stamps the org and is idempotent within the tenant", async () => {
+    const ctx = forTenant({ db, organizationId: orgX, userId: alice.id });
+    const env1 = await ctx.getOrCreateEnvironment("acme/repo");
+    expect(env1.organizationId).toBe(orgX);
+    expect(env1.userId).toBe(alice.id);
+
+    const env2 = await ctx.getOrCreateEnvironment("acme/repo");
+    expect(env2.id).toBe(env1.id);
+
+    const [row] = await db
+      .select()
+      .from(environment)
+      .where(eq(environment.id, env1.id));
+    expect(row!.organizationId).toBe(orgX);
+  });
+
+  it("fences environment reads to the owner within the org", async () => {
+    const env = await forTenant({
+      db,
+      organizationId: orgX,
+      userId: alice.id,
+    }).getOrCreateEnvironment("acme/repo");
+
+    // Owner in the right org sees it.
+    const asAlice = await forTenant({
+      db,
+      organizationId: orgX,
+      userId: alice.id,
+    }).getEnvironment(env.id);
+    expect(asAlice?.id).toBe(env.id);
+
+    // Same-org co-member does not.
+    const asBob = await forTenant({
+      db,
+      organizationId: orgX,
+      userId: bob.id,
+    }).getEnvironment(env.id);
+    expect(asBob).toBeUndefined();
+
+    // Cross-org member does not.
+    const asCarol = await forTenant({
+      db,
+      organizationId: orgY,
+      userId: carol.id,
+    }).getEnvironment(env.id);
+    expect(asCarol).toBeUndefined();
+
+    // Owner with the wrong active org is denied (fence is on org, not just user).
+    const aliceWrongOrg = await forTenant({
+      db,
+      organizationId: orgY,
+      userId: alice.id,
+    }).getEnvironment(env.id);
+    expect(aliceWrongOrg).toBeUndefined();
+  });
+
+  it("listEnvironments only returns the caller's env within the org", async () => {
+    const aliceCtx = forTenant({ db, organizationId: orgX, userId: alice.id });
+    const bobCtx = forTenant({ db, organizationId: orgX, userId: bob.id });
+    const aliceEnv = await aliceCtx.getOrCreateEnvironment("acme/a");
+    await bobCtx.getOrCreateEnvironment("acme/b");
+
+    const aliceList = await aliceCtx.listEnvironments(true);
+    expect(aliceList.map((e) => e.id)).toContain(aliceEnv.id);
+    const bobList = await bobCtx.listEnvironments(true);
+    expect(bobList.map((e) => e.id)).not.toContain(aliceEnv.id);
+  });
+
+  it("does not update or delete across the tenant fence", async () => {
+    const env = await forTenant({
+      db,
+      organizationId: orgX,
+      userId: alice.id,
+    }).getOrCreateEnvironment("acme/repo");
+
+    // Co-member update is a no-op (fenced out).
+    await forTenant({ db, organizationId: orgX, userId: bob.id }).updateEnvironment(
+      env.id,
+      { setupScript: "hijacked" },
+    );
+    // Cross-org delete is a no-op.
+    await forTenant({
+      db,
+      organizationId: orgY,
+      userId: carol.id,
+    }).deleteEnvironment(env.id);
+
+    const [still] = await db
+      .select()
+      .from(environment)
+      .where(eq(environment.id, env.id));
+    expect(still).toBeDefined();
+    expect(still!.setupScript).toBeNull();
+
+    // The owner in the right org can update it.
+    await forTenant({
+      db,
+      organizationId: orgX,
+      userId: alice.id,
+    }).updateEnvironment(env.id, { setupScript: "echo ok" });
+    const [updated] = await db
+      .select()
+      .from(environment)
+      .where(eq(environment.id, env.id));
+    expect(updated!.setupScript).toBe("echo ok");
   });
 });

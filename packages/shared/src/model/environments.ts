@@ -4,18 +4,33 @@ import { and, eq, getTableColumns } from "drizzle-orm";
 import { publishBroadcastUserMessage } from "../broadcast-server";
 import { decryptValue } from "@terragon/utils/encryption";
 
+/**
+ * Tenant fence for environments (WI-5 / ADR-001). Like threads, environments are
+ * owner-scoped within an org: `and(userId, organizationId)`. Optional during the
+ * nullable backfill phase — omitted = user-only (legacy); the forTenant accessor
+ * always supplies it. drizzle's `and()` drops `undefined`.
+ */
+function environmentOrgFence(organizationId?: string | null) {
+  return organizationId
+    ? eq(schema.environment.organizationId, organizationId)
+    : undefined;
+}
+
 export function getEnvironments({
   db,
   userId,
   includeGlobal,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   includeGlobal: boolean;
+  organizationId?: string | null;
 }) {
   return db.query.environment.findMany({
     where: and(
       eq(schema.environment.userId, userId),
+      environmentOrgFence(organizationId),
       ...(includeGlobal ? [] : [eq(schema.environment.isGlobal, false)]),
     ),
   });
@@ -25,15 +40,18 @@ export function getEnvironment({
   db,
   environmentId,
   userId,
+  organizationId,
 }: {
   db: DB;
   environmentId: string;
   userId: string;
+  organizationId?: string | null;
 }) {
   return db.query.environment.findFirst({
     where: and(
       eq(schema.environment.userId, userId),
       eq(schema.environment.id, environmentId),
+      environmentOrgFence(organizationId),
     ),
   });
 }
@@ -41,13 +59,16 @@ export function getEnvironment({
 export async function getOrCreateGlobalEnvironment({
   db,
   userId,
+  organizationId,
 }: {
   db: DB;
   userId: string;
+  organizationId?: string | null;
 }) {
   return await getOrCreateEnvironment({
     db,
     userId,
+    organizationId,
     repoFullName: "",
     isGlobal: true,
   });
@@ -58,14 +79,19 @@ export async function getOrCreateEnvironment({
   userId,
   repoFullName,
   isGlobal = false,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   repoFullName: string;
   isGlobal?: boolean;
+  organizationId?: string | null;
 }) {
   const getEnvironmentInner = async () => {
-    const where = [eq(schema.environment.userId, userId)];
+    const where = [
+      eq(schema.environment.userId, userId),
+      environmentOrgFence(organizationId),
+    ];
     if (isGlobal) {
       where.push(eq(schema.environment.isGlobal, true));
     }
@@ -80,13 +106,15 @@ export async function getOrCreateEnvironment({
     return existingEnvironment;
   }
 
-  // Try to insert first with ON CONFLICT DO NOTHING to handle race conditions
+  // Try to insert first with ON CONFLICT DO NOTHING to handle race conditions.
+  // organizationId is stamped so the row is tenant-scoped from creation.
   const result = await db
     .insert(schema.environment)
     .values({
       userId,
       repoFullName,
       isGlobal,
+      organizationId: organizationId ?? null,
     })
     .onConflictDoNothing()
     .returning();
@@ -114,6 +142,7 @@ export async function updateEnvironment({
   userId,
   environmentId,
   updates,
+  organizationId,
 }: {
   db: DB;
   userId: string;
@@ -124,6 +153,7 @@ export async function updateEnvironment({
       "id" | "userId" | "repoFullName"
     >
   >;
+  organizationId?: string | null;
 }) {
   // @ts-expect-error - repoFullName and userId are not updatable
   if (updates.repoFullName || updates.userId) {
@@ -136,6 +166,7 @@ export async function updateEnvironment({
       and(
         eq(schema.environment.userId, userId),
         eq(schema.environment.id, environmentId),
+        environmentOrgFence(organizationId),
       ),
     );
   await publishBroadcastUserMessage({
@@ -151,15 +182,18 @@ export async function deleteEnvironmentById({
   db,
   userId,
   environmentId,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   environmentId: string;
+  organizationId?: string | null;
 }) {
   const environment = await getEnvironment({
     db,
     userId,
     environmentId,
+    organizationId,
   });
 
   if (!environment) {
@@ -172,6 +206,7 @@ export async function deleteEnvironmentById({
       and(
         eq(schema.environment.userId, userId),
         eq(schema.environment.id, environmentId),
+        environmentOrgFence(organizationId),
       ),
     );
 
@@ -302,15 +337,18 @@ export async function getEnvironmentForUserRepo({
   db,
   userId,
   repoFullName,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   repoFullName: string;
+  organizationId?: string | null;
 }) {
   return await db.query.environment.findFirst({
     where: and(
       eq(schema.environment.userId, userId),
       eq(schema.environment.repoFullName, repoFullName),
+      environmentOrgFence(organizationId),
     ),
   });
 }

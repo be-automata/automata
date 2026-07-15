@@ -15,26 +15,28 @@ import { isAppInstalledOnRepo } from "@terragon/shared/github-app";
 import { getClaudeSessionJSONLOrNull } from "@/server-lib/claude-session";
 import { checkCliTaskCreationRateLimit } from "@/lib/rate-limit";
 import { ensureAgent } from "@terragon/agent/utils";
-import { getUserIdOrNullFromDaemonToken } from "@/lib/auth-server";
+import { getDaemonTokenContext } from "@/lib/auth-server";
 import { combineThreadStatuses } from "@/agent/thread-status";
 
 const os = implement(cliAPIContract)
   .$context<{
     headers: Headers;
     userId: string;
+    // Tenant from the daemon token (WI-5). Nullable during the backfill phase;
+    // threaded into the thread fence on the CLI read path.
+    organizationId: string | null;
   }>()
   .use(async ({ context, next, errors }) => {
     const headers = (context?.headers || new Headers()) as Headers;
-    const userId = await getUserIdOrNullFromDaemonToken({
-      headers,
-    });
-    if (!userId) {
+    const tenant = await getDaemonTokenContext({ headers });
+    if (!tenant) {
       throw errors.UNAUTHORIZED();
     }
     return next({
       context: {
         headers,
-        userId,
+        userId: tenant.userId,
+        organizationId: tenant.organizationId,
       },
     });
   });
@@ -48,6 +50,7 @@ const listThreads = os.threads.list.handler(async ({ input, context }) => {
   const threads = await getThreads({
     db,
     userId: context.userId,
+    organizationId: context.organizationId,
     limit: 50,
     archived: false,
     githubRepoFullName: input.repo || undefined,
@@ -77,7 +80,12 @@ const threadDetail = os.threads.detail.handler(
       userId: context.userId,
     });
     const { threadId } = input;
-    const thread = await getThread({ db, threadId, userId: context.userId });
+    const thread = await getThread({
+      db,
+      threadId,
+      userId: context.userId,
+      organizationId: context.organizationId,
+    });
     if (!thread) {
       throw errors.NOT_FOUND({ message: "Thread not found" });
     }

@@ -5,7 +5,7 @@ import {
   markThreadChatAsRead,
 } from "@terragon/shared/model/thread-read-status";
 import { db } from "@/lib/db";
-import { userOnlyAction } from "@/lib/auth-server";
+import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { getThread } from "@terragon/shared/model/threads";
 
 export const readThread = userOnlyAction(
@@ -20,10 +20,12 @@ export const readThread = userOnlyAction(
     },
   ) {
     console.log("readThread", { threadId, threadChatIdOrNull });
+    const tenant = await getTenantContextOrNull();
     const thread = await getThread({
       db,
       userId,
       threadId,
+      organizationId: tenant?.organizationId ?? null,
     });
     if (!thread) {
       throw new Error("Thread not found");
