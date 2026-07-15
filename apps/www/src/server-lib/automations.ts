@@ -75,6 +75,9 @@ export async function runAutomation({
       case "user_message": {
         const newThreadResult = await createNewThread({
           userId: automation.userId,
+          // Derivation: an automation is org-owned, so its threads inherit the
+          // automation's org (WI-5 batch 1). Unambiguous. Nullable-safe.
+          organizationId: automation.organizationId,
           message: options?.transformMessage
             ? options.transformMessage(automation.action.config.message)
             : automation.action.config.message,

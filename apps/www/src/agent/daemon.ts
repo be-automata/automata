@@ -6,6 +6,8 @@ import { setActiveThreadChat } from "./sandbox-resource";
 import { wrapError } from "./error";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
 import { db } from "@/lib/db";
+import { thread as threadTable } from "@terragon/shared/db/schema";
+import { eq } from "drizzle-orm";
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends any
   ? Omit<T, K>
@@ -31,12 +33,21 @@ export async function sendDaemonMessage({
 }) {
   try {
     await setActiveThreadChat({ sandboxId, threadChatId, isActive: true });
+    // Derivation: the sandbox-agent proxy token acts for one thread, so it
+    // carries that thread's org (WI-5 batch 1). Unambiguous. Nullable-safe.
+    const [threadRow] = await db
+      .select({ organizationId: threadTable.organizationId })
+      .from(threadTable)
+      .where(eq(threadTable.id, threadId))
+      .limit(1);
+    const organizationId = threadRow?.organizationId ?? null;
     const [apiKey, featureFlags] = await Promise.all([
       auth.api.createApiKey({
         body: {
           name: sandboxId,
           expiresIn: 60 * 60 * 24 * 1, // 1 day,
           userId,
+          ...(organizationId ? { metadata: { organizationId } } : {}),
         },
       }),
       getFeatureFlagsForUser({ db, userId }),

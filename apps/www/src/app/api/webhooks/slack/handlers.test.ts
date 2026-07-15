@@ -11,6 +11,10 @@ import {
   upsertSlackInstallation,
   upsertSlackSettings,
 } from "@terragon/shared/model/slack";
+import { createOrganization } from "@terragon/shared/model/organizations";
+import { slackInstallation } from "@terragon/shared/db/schema";
+import { eq } from "drizzle-orm";
+import { nanoid } from "nanoid";
 import * as slackWebApi from "@slack/web-api";
 
 const getDefaultWebClientMock = (overrides?: {
@@ -546,6 +550,36 @@ describe("handleAppMentionEvent", () => {
       await handleAppMentionEvent(event);
       const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
       expect(callArgs?.message.model).toBe("gpt-5-codex-high");
+    });
+
+    it("derives the thread's org from the Slack installation (WI-5)", async () => {
+      const org = await createOrganization({
+        db,
+        name: "Acme",
+        slug: `acme-${nanoid(8).toLowerCase()}`,
+      });
+      await db
+        .update(slackInstallation)
+        .set({ organizationId: org.id })
+        .where(eq(slackInstallation.teamId, teamId));
+
+      await handleAppMentionEvent(createBasicEvent());
+
+      const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
+      expect(callArgs?.organizationId).toBe(org.id);
+    });
+
+    it("passes a null org when the installation has none (nullable-safe)", async () => {
+      // The installation row is shared across tests in this file (constant
+      // teamId); ensure no org so the nullable path is exercised.
+      await db
+        .update(slackInstallation)
+        .set({ organizationId: null })
+        .where(eq(slackInstallation.teamId, teamId));
+
+      await handleAppMentionEvent(createBasicEvent());
+      const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
+      expect(callArgs?.organizationId ?? null).toBeNull();
     });
   });
 });

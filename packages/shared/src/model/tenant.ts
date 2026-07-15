@@ -37,6 +37,20 @@ import {
  * The underlying threads.ts functions accept `organizationId` as an optional
  * argument (nullable-backfill back-compat); the accessor always supplies it, so
  * everything reached through `forTenant` is org-fenced by construction.
+ *
+ * Org-derivation rules for callers that create/mint WITHOUT a user session
+ * (WI-5 sweep batch 1) — each derives the tenant from its own context:
+ *   - Session request paths (dashboard actions, CLI): session.activeOrganizationId
+ *     / daemon-token metadata org, via getTenantContextOrNull / getDaemonTokenContext.
+ *   - Automation runs (runAutomation): the automation is org-owned → automation.organizationId.
+ *   - Slack webhook mentions: the workspace maps to one org → slackInstallation.organizationId
+ *     (teamId → one installation).
+ *   - Sandbox-agent proxy token (daemon.ts): acts for one thread → thread.organizationId.
+ *   - GitHub app-mention webhook: NOT yet derivable — there is no schema-backed
+ *     repo→org or GitHub-installation→org mapping, so a user in multiple orgs
+ *     sharing a repo is ambiguous. Left nullable (user-only fence, today's
+ *     behavior) pending a product-semantics decision on the mapping.
+ * All rules are nullable-safe: a null derivation = today's user-only fence.
  */
 export type TenantContext = {
   db: DB;

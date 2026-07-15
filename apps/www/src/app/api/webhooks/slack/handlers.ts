@@ -500,6 +500,9 @@ export async function handleAppMentionEvent(
 
     const { threadId } = await newThreadInternal({
       userId: slackAccount.userId,
+      // Derivation: a Slack workspace maps to one org via the installation
+      // (WI-5 batch 1). Unambiguous (teamId → one installation). Nullable-safe.
+      organizationId: slackInstallation.organizationId,
       message: {
         type: "user",
         model: defaultModel,
