@@ -544,3 +544,32 @@ C10-ORG is CLOSED (no DOM re-drive: per team-lead, Next-Action invocation certif
 3. **Sandbox-agent proxy token is scoped to its thread's org** — the proxy/daemon token minted for an in-sandbox agent resolves the org of *its thread*, not the user's active org at some later time (the temporal-decoupling case — active org can change after the run starts).
 
 Method will mirror C10-ORG: derive expected org from the trigger, assert the created row's `organization_id` (psql) + that reads through the fence are correctly scoped. Refine exact assertions against the documented derivation rules when batch 1 lands.
+
+## Sweep batch-1 validation — EXECUTED (2026-07-15, running instance 296307f)
+
+Validated the WI-5 sweep batch 1 (background create/token paths derive org from context). Derivation rules read from source at the **running commit 296307f** (working tree is dirty with next-batch `githubInstallation` WIP — validated against the committed/deployed code, not the WIP). Rules documented in `tenant.ts` JSDoc.
+
+### Derivation rules — all code-certified at 296307f
+
+| Path | Derives org from | File | Verdict |
+|---|---|---|---|
+| Automation run (`runAutomation`) | `automation.organizationId` (automation is org-owned) | `server-lib/automations.ts` | correct source ✓ |
+| Slack webhook mention | `slackInstallation.organizationId` (teamId→one installation→one org) | `webhooks/slack/handlers.ts` | correct source ✓ |
+| Sandbox-agent proxy token | `thread.organizationId` (acts for one thread) | `agent/daemon.ts` | correct source ✓ |
+| GitHub app-mention | **intentionally null** (no schema-backed repo→org / installation→org mapping yet) | `webhooks/github/handle-app-mention.ts` | correct/documented ✓ |
+
+### Probe verdicts
+
+- **Slack webhook → installation org → PASS (tested green).** `handlers.test.ts` runs **14/14 green** on this build, including the +2 batch-1 cases (derives org from installation; null-safe when none). This is the one background path with live test coverage.
+- **Sandbox proxy token → thread org → PASS by construction (temporal-decoupling STRUCTURALLY GUARANTEED).** `sendDaemonMessage` derives org via a direct `db.select(thread.organizationId).where(thread.id = threadId)` and stamps it into the apiKey metadata. It takes `userId`/`threadId` as params and reads **no auth session / activeOrganizationId** (the `session` params are `ISandboxSession`, the sandbox connection — not the Better Auth session). Therefore the proxy token **cannot drift** to the user's active-org-at-some-later-time — the value is never read. This is the sharpest probe the team-lead named, and the derivation makes the failure mode structurally impossible.
+- **Automation → automation org → PASS (code-certified).** `runAutomation` passes `automation.organizationId` into `createNewThread`. Correct source; session-independent (automation-owned).
+- **GitHub app-mention → null → correct for this batch.** Deliberately unstamped pending the `githubInstallation` table. That mapping is **uncommitted next-batch WIP** (`getOrganizationIdForInstallation` + `bind-github-installation.ts` + a `githubInstallation` schema change) — lands in the next rebuild; its impl reads `githubInstallation.organizationId` (looks correct). Validate after that rebuild.
+
+### FINDINGS (coverage gaps — record, recommend)
+
+1. **The two highest-value background paths have NO org-stamp test.** Slack got +2 tests, but **`runAutomation` has no `automations.test.ts` org case** and **the daemon proxy-token stamp has no `daemon.test.ts` org case**. The daemon proxy token is the temporal-decoupling path — currently certified only structurally (by code inspection), not by a regression test. **Recommend:** add a `daemon.test.ts` round-trip mirroring `cli-api-token.test.ts` (seed thread org → `sendDaemonMessage` → assert minted apiKey `metadata.organizationId === thread.organizationId`, and a case where the user's active org differs from the thread's org to lock the no-drift property), plus an `automations.test.ts` org-inheritance case. Without these, a future refactor could silently reintroduce active-org drift on the proxy token with no failing test.
+
+### Live-reachability limitation (same as C7-full)
+End-to-end live certification of the create paths (automation/slack producing a persisted org-stamped thread) is blocked by the GitHub-App/repo gate (`createNewThread`/`newThreadInternal` reject uninstalled repos — proven in R1c C7), and the proxy-token mint requires a live sandbox. So batch-1 live certification is bounded to the Slack unit tests + code/structural certification; full end-to-end re-certifies in the substrate phase with a real installed repo + running provider.
+
+**Batch-1 verdict:** derivation rules correct and session-appropriate on all four paths; Slack path tested green; sandbox proxy-token temporal-decoupling structurally guaranteed; two coverage gaps flagged with concrete test recommendations. No org-misattribution risk found in the derivation logic.
