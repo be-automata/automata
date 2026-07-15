@@ -326,3 +326,31 @@ Signup enablement is owned by **tenancy-coder** (`AUTH_EMAIL_PASSWORD_ENABLED` b
 **C10 pass standard (per team-lead):** user A gets **zero rows / 403** on every reachable org-B resource (threads, environments, api keys), recorded per-endpoint in this matrix.
 
 **Interpretation altitude (per team-lead, so we don't over-claim):** at this stage resources are still **USER-scoped** — the ADR-001 accessor sweep (WI-5, `threads.ts` first per the ADR rollout) has **not** run. So a passing smoke with 2 users in 2 orgs demonstrates **user-level isolation only**. Record the result as: **"C10-baseline: user-level isolation intact; org-level scoping semantics NOT yet exercised (pending WI-5 accessor sweep)."** The full C10 — org-shared resources correctly visible to co-members AND invisible cross-org — re-runs after the sweep. **Hard-FAIL override:** if any reachable path lets **user A read user B's data even now**, that is a hard FAIL regardless of the org layer (and regardless of the WI-5 caveat).
+
+## R1c — cross-org/user isolation + task-create, EXECUTED (2026-07-15)
+
+**Auth bootstrap:** boot-coder's `deploy/seed-selfhost.ts` (52c832d) seeded 2 org-scoped users with raw bearer session tokens (owner1@selfhost.local→`org_selfhost_1`, owner2@selfhost.local→`org_selfhost_2`) — this **seeds around** real self-serve signup (the better-auth `bearer` plugin authenticates a raw session row via `Authorization: Bearer <token>`). Verified both authenticate and are org-scoped (`/api/auth/get-session` returns the right `userId`+`activeOrganizationId`; no-auth → `null`).
+
+**C6 — org create (runtime) → PASS.** `POST /api/auth/organization/create` with owner1's bearer created "UAT Runtime Org" and persisted the `organization` + `member(role=owner)` rows. Upgrades C6 from schema-only to runtime-verified.
+
+**C7 — task create → PASS-TO-GATE (no run triggered, by design).** Self-minted a daemon-token via bearer (`POST /api/auth/api-key/create` → returns a Better Auth apiKey; note: any authenticated user can mint their own userId-bound daemon token — expected plugin behavior). Then `POST /api/cli/threads/create` (oRPC, `{"json":{...}}` envelope): the endpoint is reachable, authenticated (daemon token → userId context), rate-limit-checked, and input-validated; it rejected at the **GitHub-App/repo-access gate** ("Unable to access repository …") for the seeded fake repo, creating **no** thread and **no** sandbox (thread count for user1 unchanged). Task-create wiring is verified end-to-end up to the repo gate; a full create needs a real GitHub-App-installed repo.
+
+**C8 — stubbed run streams to dashboard → BLOCKED.** Requires a real installed repo + a running sandbox provider + the `apps/broadcast` PartyKit relay (unconfirmed running, still untested). Not headlessly achievable this round; deferred.
+
+**C10 — cross-org/user isolation smoke → PASS (C10-baseline, user-level).** Seeded `thr_uat_org1` (owner user1) and `thr_uat_org2` (owner user2); DB confirms both rows exist, one per user. Probed the **real CLI API read accessor** (`getThreads`, which filters `userId: context.userId`) per-endpoint:
+
+| # | Probe (endpoint) | Identity | Result | Verdict |
+|---|---|---|---|---|
+| 1 | `threads/list` | owner1 | `[thr_uat_org1]` only | PASS |
+| 2 | `threads/list` | owner2 | `[thr_uat_org2]` only | PASS |
+| 3 | `threads/detail(thr_uat_org2)` | owner1 | `NOT_FOUND` 404 | PASS — cross-read denied |
+| 4 | `threads/detail(thr_uat_org1)` | owner2 | `NOT_FOUND` 404 | PASS — cross-read denied |
+| 5 | `threads/detail(thr_uat_org1)` | owner1 (control) | `OK` (own thread) | PASS — authorized read works |
+
+**No path let user A read user B's data → the hard-FAIL override was NOT triggered.** Recorded per the approved altitude: **"C10-baseline: user-level isolation intact; org-level scoping semantics NOT yet exercised."** The accessor scopes by `userId`, not `organizationId` (WI-5 accessor sweep, `threads.ts`-first, has not run) — because each seeded user owns exactly one distinct org, user-level isolation here also happens to separate the two orgs, but this does **not** prove org-level semantics (co-member visibility of org-shared resources, cross-org invisibility of shared resources). Full C10 re-runs after WI-5.
+
+**Still untested (needs the rebuild cutover, which has NOT happened — old build still returns `EMAIL_AND_PASSWORD_SIGN_UP_IS_NOT_ENABLED`):**
+- **C5 real self-serve signup** — the seeded-session bootstrap deliberately bypasses it.
+- **Fresh-user-no-org (`activeOrganizationId=null`) dashboard state** — both seeded users already have an org, so this intermediate UAT state was not observable.
+
+**Pillar movement:** VERIFIED-adjacent tenant isolation now has real per-endpoint evidence at user-level (C10-baseline PASS); EXECUTED task-create path verified to the repo gate (C7); OBSERVED still 0 (C8 blocked on run streaming). Test artifacts left in the self-host DB (2 seeded threads, 1 runtime test org) — harmless, boot-coder can re-seed.
