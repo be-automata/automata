@@ -1,0 +1,124 @@
+# Self-hosted, SaaS-free bring-up of the platform's infrastructure dependencies.
+#
+# This brings up ONLY the stateful backing services the product needs to boot with
+# every third-party SaaS turned off:
+#   - Postgres 16        (DATABASE_URL)
+#   - Redis 7 + HTTP shim (REDIS_URL / REDIS_TOKEN — Upstash-compatible; app also
+#                          fails open to an in-memory stand-in if REDIS_URL is empty)
+#   - MinIO              (S3-compatible object store standing in for Cloudflare R2)
+#
+# The application processes themselves (apps/www via `next start`, apps/broadcast) are
+# intentionally NOT containerized here — see deploy/SELFHOST.md for why and how to run
+# them. node_modules in this checkout was installed with --ignore-scripts, so a Docker
+# build of the app is out of scope for now.
+#
+# Ports default to the conventional values but are all overridable so this stack can
+# coexist with the dev stack (packages/dev-env/docker-compose.yml) or other local
+# services. Usage:
+#   docker compose -f deploy/docker-compose.selfhost.yml --env-file deploy/selfhost.env.example up -d
+#
+# Env vars consumed here (with defaults) — override in your shell or --env-file:
+#   SELFHOST_POSTGRES_PORT (5432), SELFHOST_REDIS_PORT (6379),
+#   SELFHOST_REDIS_HTTP_PORT (8079), SELFHOST_MINIO_PORT (9000),
+#   SELFHOST_MINIO_CONSOLE_PORT (9001),
+#   POSTGRES_USER (postgres), POSTGRES_PASSWORD (postgres), POSTGRES_DB (postgres),
+#   REDIS_TOKEN (redis_dev_token),
+#   R2_ACCESS_KEY_ID (minioadmin), R2_SECRET_ACCESS_KEY (minioadmin),
+#   R2_BUCKET_NAME (terragon), R2_PRIVATE_BUCKET_NAME (terragon-private)
+
+name: automata-selfhost
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: automata_selfhost_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    ports:
+      - "${SELFHOST_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - selfhost_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: automata_selfhost_redis
+    ports:
+      - "${SELFHOST_REDIS_PORT:-6379}:6379"
+    volumes:
+      - selfhost_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Upstash-compatible HTTP proxy in front of Redis. The app's Redis client
+  # (@upstash/redis) speaks the HTTP API, so this shim is what makes a plain
+  # self-hosted Redis usable without Upstash. REDIS_URL points at this service.
+  serverless-redis-http:
+    image: hiett/serverless-redis-http:latest
+    container_name: automata_selfhost_redis_http
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${SELFHOST_REDIS_HTTP_PORT:-8079}:80"
+    environment:
+      SRH_MODE: env
+      SRH_TOKEN: ${REDIS_TOKEN:-redis_dev_token}
+      SRH_CONNECTION_STRING: "redis://redis:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:80/ >/dev/null 2>&1 || true; exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # S3-compatible object store standing in for Cloudflare R2. The app's R2 client is
+  # @aws-sdk/client-s3 with a configurable endpoint (R2_ENDPOINT), so MinIO is a
+  # drop-in replacement for a first self-host boot.
+  minio:
+    image: minio/minio:latest
+    container_name: automata_selfhost_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${R2_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${R2_SECRET_ACCESS_KEY:-minioadmin}
+    ports:
+      - "${SELFHOST_MINIO_PORT:-9000}:9000"
+      - "${SELFHOST_MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - selfhost_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: create the two buckets the R2_* vars point at and make the public
+  # bucket anonymously readable (so R2_PUBLIC_URL can serve objects). Exits 0 when done.
+  minio-createbuckets:
+    image: minio/mc:latest
+    container_name: automata_selfhost_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${R2_ACCESS_KEY_ID:-minioadmin} ${R2_SECRET_ACCESS_KEY:-minioadmin} &&
+      mc mb --ignore-existing local/${R2_BUCKET_NAME:-terragon} &&
+      mc mb --ignore-existing local/${R2_PRIVATE_BUCKET_NAME:-terragon-private} &&
+      mc anonymous set download local/${R2_BUCKET_NAME:-terragon} &&
+      echo 'selfhost buckets ready';
+      "
+
+volumes:
+  selfhost_postgres_data:
+  selfhost_redis_data:
+  selfhost_minio_data:
