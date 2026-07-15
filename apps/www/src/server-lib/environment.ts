@@ -9,15 +9,18 @@ export async function getSetupScriptFromRepo({
   db,
   userId,
   environmentId,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   environmentId: string;
+  organizationId?: string | null;
 }): Promise<string | null> {
   const environment = await getEnvironment({
     db,
     environmentId,
     userId,
+    organizationId,
   });
   if (!environment) {
     throw new Error("Environment not found");
@@ -57,15 +60,18 @@ export async function getSetupScriptFromEnvironment({
   db,
   userId,
   environmentId,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   environmentId: string;
+  organizationId?: string | null;
 }): Promise<string | null> {
   const environment = await getEnvironment({
     db,
     environmentId,
     userId,
+    organizationId,
   });
   if (!environment) {
     throw new Error("Environment not found");

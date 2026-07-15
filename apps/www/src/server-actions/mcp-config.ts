@@ -1,6 +1,6 @@
 "use server";
 
-import { userOnlyAction } from "@/lib/auth-server";
+import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { db } from "@/lib/db";
 import {
   getEnvironment,
@@ -23,11 +23,14 @@ export const updateMcpConfig = userOnlyAction(
       mcpConfig: McpConfig;
     },
   ) {
-    // Verify the user owns this environment
+    // Verify the user owns this environment (within the active org)
+    const tenant = await getTenantContextOrNull();
+    const organizationId = tenant?.organizationId ?? null;
     const existingEnvironment = await getEnvironment({
       db,
       environmentId,
       userId,
+      organizationId,
     });
     if (!existingEnvironment) {
       throw new UserFacingError("Environment not found");
@@ -50,6 +53,7 @@ export const updateMcpConfig = userOnlyAction(
       db,
       userId,
       environmentId,
+      organizationId,
       updates: {
         mcpConfigEncrypted: encryptedConfig,
       },

@@ -1,5 +1,8 @@
 import { Environments } from "@/components/environments/main";
-import { getUserIdOrRedirect } from "@/lib/auth-server";
+import {
+  getTenantContextOrNull,
+  getUserIdOrRedirect,
+} from "@/lib/auth-server";
 import { db } from "@/lib/db";
 import { getEnvironments } from "@terragon/shared/model/environments";
 import React from "react";
@@ -11,9 +14,11 @@ export const metadata: Metadata = {
 
 export default async function EnvironmentsPage() {
   const userId = await getUserIdOrRedirect();
+  const tenant = await getTenantContextOrNull();
   const environments = await getEnvironments({
     db,
     userId,
+    organizationId: tenant?.organizationId ?? null,
     includeGlobal: false,
   });
   return <Environments environments={environments} />;

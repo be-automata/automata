@@ -4,7 +4,11 @@ import {
   getEnvironment,
   getDecryptedMcpConfig,
 } from "@terragon/shared/model/environments";
-import { getUserIdOrNull, getUserIdOrRedirect } from "@/lib/auth-server";
+import {
+  getTenantContextOrNull,
+  getUserIdOrNull,
+  getUserIdOrRedirect,
+} from "@/lib/auth-server";
 import { notFound } from "next/navigation";
 import { db } from "@/lib/db";
 import { EnvironmentUI } from "@/components/environments/main";
@@ -21,10 +25,12 @@ export async function generateMetadata({
     return { title: "Environment | Terragon" };
   }
   const { id } = await params;
+  const tenant = await getTenantContextOrNull();
   const environment = await getEnvironment({
     db,
     environmentId: id,
     userId,
+    organizationId: tenant?.organizationId ?? null,
   });
   if (!environment) {
     return { title: "Environment | Terragon" };
@@ -41,10 +47,13 @@ export default async function EnvironmentPage({
 }) {
   const userId = await getUserIdOrRedirect();
   const { id } = await params;
+  const tenant = await getTenantContextOrNull();
+  const organizationId = tenant?.organizationId ?? null;
   const environment = await getEnvironment({
     db,
     environmentId: id,
     userId,
+    organizationId,
   });
   if (!environment) {
     return notFound();

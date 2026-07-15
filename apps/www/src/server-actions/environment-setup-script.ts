@@ -1,6 +1,6 @@
 "use server";
 
-import { userOnlyAction } from "@/lib/auth-server";
+import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { db } from "@/lib/db";
 import {
   getSetupScriptFromEnvironment,
@@ -23,10 +23,13 @@ export const updateEnvironmentSetupScript = userOnlyAction(
       setupScript: string | null;
     },
   ) {
+    const tenant = await getTenantContextOrNull();
+    const organizationId = tenant?.organizationId ?? null;
     const environment = await getEnvironment({
       db,
       environmentId,
       userId,
+      organizationId,
     });
     if (!environment) {
       throw new UserFacingError("Environment not found");
@@ -35,6 +38,7 @@ export const updateEnvironmentSetupScript = userOnlyAction(
       db,
       userId,
       environmentId,
+      organizationId,
       updates: {
         setupScript,
       },
@@ -55,10 +59,13 @@ export const getEnvironmentSetupScript = userOnlyAction(
     type: "environment" | "repo";
     content: string | null;
   } | null> {
+    const tenant = await getTenantContextOrNull();
+    const organizationId = tenant?.organizationId ?? null;
     const scriptFromEnvironment = await getSetupScriptFromEnvironment({
       db,
       userId,
       environmentId,
+      organizationId,
     });
     if (typeof scriptFromEnvironment === "string") {
       return {
@@ -71,6 +78,7 @@ export const getEnvironmentSetupScript = userOnlyAction(
       db,
       userId,
       environmentId,
+      organizationId,
     });
     if (typeof scriptFromRepo === "string") {
       return {

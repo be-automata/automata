@@ -1,4 +1,8 @@
-import { getUserIdOrNull, getUserIdOrRedirect } from "@/lib/auth-server";
+import {
+  getTenantContextOrNull,
+  getUserIdOrNull,
+  getUserIdOrRedirect,
+} from "@/lib/auth-server";
 import { notFound } from "next/navigation";
 import { db } from "@/lib/db";
 import { getEnvironment } from "@terragon/shared/model/environments";
@@ -15,10 +19,12 @@ export async function generateMetadata({
     return { title: "Setup Script | Terragon" };
   }
   const { id } = await params;
+  const tenant = await getTenantContextOrNull();
   const environment = await getEnvironment({
     db,
     environmentId: id,
     userId,
+    organizationId: tenant?.organizationId ?? null,
   });
   if (!environment) {
     return { title: "Setup Script | Terragon" };
@@ -35,10 +41,12 @@ export default async function SetupScriptPage({
 }) {
   const userId = await getUserIdOrRedirect();
   const { id } = await params;
+  const tenant = await getTenantContextOrNull();
   const environment = await getEnvironment({
     db,
     environmentId: id,
     userId,
+    organizationId: tenant?.organizationId ?? null,
   });
   if (!environment) {
     return notFound();

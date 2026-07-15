@@ -1,6 +1,6 @@
 "use server";
 
-import { userOnlyAction } from "@/lib/auth-server";
+import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { db } from "@/lib/db";
 import {
   deleteEnvironmentById,
@@ -14,10 +14,13 @@ export const deleteEnvironment = userOnlyAction(
     userId: string,
     { environmentId }: { environmentId: string },
   ) {
+    const tenant = await getTenantContextOrNull();
+    const organizationId = tenant?.organizationId ?? null;
     const environment = await getEnvironment({
       db,
       environmentId,
       userId,
+      organizationId,
     });
 
     if (!environment) {
@@ -37,6 +40,7 @@ export const deleteEnvironment = userOnlyAction(
       db,
       userId,
       environmentId,
+      organizationId,
     });
 
     return { success: true };
