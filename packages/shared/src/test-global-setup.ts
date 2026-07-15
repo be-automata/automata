@@ -5,6 +5,8 @@ import {
 } from "@terragon/dev-env/test-global-setup";
 import path from "path";
 import { execSync } from "child_process";
+import { createDb } from "./db";
+import { seedFeatureFlags } from "./model/feature-flags";
 
 let setupResult: SetupResult;
 
@@ -29,6 +31,15 @@ export async function setup() {
     });
     console.log("Drizzle schema applied to test database.");
     console.log("Command output:", result.toString());
+
+    // Seed the baseline feature-flag rows the suite assumes exist. In test mode
+    // `getFeatureFlags` does not auto-create flags, so a schema-only database
+    // makes any flag-by-name read (e.g. setUserFeatureFlagOverride) throw
+    // `Feature flag "X" does not exist`.
+    console.log("Seeding feature flags into test database...");
+    const db = createDb(setupResult.DATABASE_URL);
+    await seedFeatureFlags({ db });
+    console.log("Feature flags seeded.");
   } catch (error) {
     console.error("Error applying drizzle schema to test database.");
     console.error(

@@ -79,6 +79,39 @@ export async function getFeatureFlags({
 }
 
 /**
+ * Seed every feature flag defined in code into the database.
+ *
+ * In test mode `getFeatureFlags` intentionally does NOT auto-create missing
+ * flags (unlike production), so the test database must be seeded up front —
+ * otherwise any code path that reads a flag by name (e.g.
+ * `setUserFeatureFlagOverride`, which throws `Feature flag "X" does not exist`)
+ * fails against a schema-only database. Call this once after the schema is
+ * pushed so the baseline flag rows exist for the whole suite.
+ */
+export async function seedFeatureFlags({ db }: { db: DB }): Promise<void> {
+  const values = Object.entries(featureFlagsDefinitions).map(
+    ([name, { defaultValue, description }]) => ({
+      name,
+      defaultValue,
+      description,
+    }),
+  );
+  if (values.length === 0) {
+    return;
+  }
+  await db
+    .insert(schema.featureFlags)
+    .values(values)
+    .onConflictDoUpdate({
+      target: [schema.featureFlags.name],
+      set: {
+        defaultValue: sql`excluded.default_value`,
+        description: sql`excluded.description`,
+      },
+    });
+}
+
+/**
  * Get a specific feature flag by name
  */
 export async function getFeatureFlag({
