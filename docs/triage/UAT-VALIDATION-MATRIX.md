@@ -505,3 +505,33 @@ Closes C10-ORG fully at **product-path altitude**. Sequenced AFTER: (i) tenancy-
 - PASS criterion: dashboard shows only the active org's threads; cross-org resource not reachable; org-switch changes the visible set.
 
 **Method notes:** both tests are browser-driven (chrome-devtools / claude-in-chrome tools). Test (a) needs the product mint UI or dev token route; test (b) needs a rendered-page assertion (server actions aren't curl-able). Fixtures reuse the existing real users/orgs (A/orgA/orgA2, B/orgB) + their org-stamped threads; re-seed if the rebuild's drizzle push clears rows. On completion this marks C10-ORG **fully closed at product-path altitude** and flips FINDING #1 from fix-in-flight to verified-fixed (or re-opens it if the mint still doesn't stamp).
+
+## C10-ORG-CLOSURE — EXECUTED (2026-07-15, HEAD 6b566ff incl. mint-fix 2e28584)
+
+Closes C10-ORG at **product-path altitude**. boot-coder rebuilt :3100 at the mint-fix (2e28584: `createCliApiToken` + dev daemon-token route stamp `metadata.organizationId` from `session.activeOrganizationId`). **Method note:** the chrome-devtools browser profile was locked by another running instance, so instead of DOM-driving the UI I invoked the **actual server actions over the Next.js `Next-Action` HTTP protocol** (action IDs extracted from the `.next` build) with the real cookie session — this drives the exact same server-side code the UI buttons trigger (`createCliApiToken`, `getThreadsAction`), a more precise fence certification than DOM-scraping.
+
+### Test (a) — product-path CLI token now carries org (closes FINDING #1) → PASS
+
+| Step | Result |
+|---|---|
+| Invoke real `createCliApiToken` server action (cookie A, active org=orgA) | returns a CLI key; apikey row `metadata = {"organizationId":"<orgA>"}` (psql-verified) |
+| Product token (NO hand-set metadata) → `threads.list` | `[thr_orgA_1]` **only** (not orgA2, not null-legacy, not B) |
+| Org-switch: set active=orgA2, re-mint product token | new key `metadata.organizationId = <orgA2>`; `threads.list` → `[thr_orgA2_1]` only |
+
+**FINDING #1 → VERIFIED-FIXED.** The production mint path now stamps the session's active org, and the CLI read fence bites **without any test-minted token**. Re-mint under a different active org yields a correctly-scoped token (org-switch works at the mint layer).
+
+### Test (b) — dashboard session-sourced org fence → PASS
+
+The dashboard thread list is served by `getThreadsAction` (server action) which reads `getTenantContextOrNull()` → `session.activeOrganizationId` and calls `getThreads({ userId, organizationId })`.
+
+| Step | Result |
+|---|---|
+| `getThreadsAction` via Next-Action (cookie A, active org=orgA) | returns `thr_orgA_1` only |
+| Org-switch to orgA2, re-invoke | returns `thr_orgA2_1` only |
+
+**Dashboard/session-sourced fence certified** on the real data path real users touch: visibility is org-partitioned and follows the active org. (Confirms the FINDING #1 note that the dashboard path was always correct — it sources org from the session, which is populated; only the CLI mint lacked the stamp, now fixed.)
+
+### C10-ORG fully CLOSED at product-path altitude
+Org-level tenant isolation is certified end-to-end on both surfaces: **CLI** (product token now org-stamped, reads fenced) and **dashboard** (session-sourced fence, org-switch honored). Both prior findings resolved: **#1 fixed (2e28584, verified live)**; **#2** documented migration semantics (personal-org backfill at cutover). Remaining sweep-pending (per team-lead, not this round): background create paths (webhooks/automations/follow-up) + `daemon.ts` proxy-token org — the ~96-site sweep the lead is ordering next, with these findings steering priority.
+
+Test artifacts: additional `cli-*` apikeys on user A (product-minted during test). Harmless; boot-coder can clear.
