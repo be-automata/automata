@@ -381,3 +381,31 @@ Rebuild with `AUTH_EMAIL_PASSWORD_ENABLED=true` cut over on :3100 (login now ser
 | C10 cross-user isolation | **PASS (user-level baseline)** | Per-endpoint, no leakage, control OK; org-level pending WI-5 sweep |
 
 **Round-1 UAT status:** the executed pillars now have real evidence — signup/onboarding (C5), tenant identity + org-create (C6), task-create wiring (C7), and user-level cross-tenant isolation (C10) all PASS at their respective altitudes. Remaining open: C8 run-streaming (needs the execution substrate + a real repo), the full org-level C10 (post-WI-5 accessor sweep), and the two test-harness baseline regressions (shared/www — under triage-tester, confirmed harness-only). Test artifacts left in the self-host DB (users `uat-c5-real`, seeded owner1/2; orgs `uat-c5-org`, `uat-runtime-org`, 2 seeded; threads `thr_uat_org1/2`) — harmless, boot-coder can re-seed.
+
+## R1c-Extended — 4-way cross-tenant isolation, all REAL signups (2026-07-15)
+
+The rebuild/re-seed wiped boot-coder's earlier seeded users (their bearer tokens no longer authenticate), so the 4-way matrix was built entirely from **four real self-serve signups** (A/B/C/D) — stronger than the planned 2-seeded + 2-real mix, since every tenant is a genuine product-path account. Each: real signup (`POST /api/auth/sign-up/email`, autoSignIn) → confirmed `activeOrganizationId=null` → `organization.create` (owner) → one distinct seeded thread → self-minted daemon token.
+
+**LIST probe — each user sees ONLY their own thread:**
+
+| User | `threads.list` result | Expected | Verdict |
+|---|---|---|---|
+| A | `[thr_uat_realA]` | own only | PASS |
+| B | `[thr_uat_realB]` | own only | PASS |
+| C | `[thr_uat_realC]` | own only | PASS |
+| D | `[thr_uat_realD]` | own only | PASS |
+
+**4×4 DETAIL grid — requester (row) reads target thread (col); own=OK, cross=NOT_FOUND:**
+
+| | →A | →B | →C | →D |
+|---|---|---|---|---|
+| **A** | OK | NOT_FOUND | NOT_FOUND | NOT_FOUND |
+| **B** | NOT_FOUND | OK | NOT_FOUND | NOT_FOUND |
+| **C** | NOT_FOUND | NOT_FOUND | OK | NOT_FOUND |
+| **D** | NOT_FOUND | NOT_FOUND | NOT_FOUND | OK |
+
+Perfect isolation diagonal: all 4 own-reads succeed, all **12 cross-reads denied (404)**. **No path let any user read another user's data → hard-FAIL override NOT triggered.** Altitude unchanged — this certifies **user-level** isolation across 4 real tenants; org-level scoping semantics (co-member visibility, org-shared resources) still await the WI-5 accessor sweep (`getThreads` filters by `userId`, not `organizationId`).
+
+**C5 corroboration (2nd+ real signups):** users B/C/D each reproduced the exact C5 behavior from R1c-final — form endpoint → 200 + real user row + autoSignIn signed cookie → `activeOrganizationId=null` → onboarding-capable → org-create sets active org. Signup is deterministic across repeated real accounts.
+
+Test artifacts left in the self-host DB: real users A–D (`uat-c5-real{,b,c,d}@selfhost.local`), 4 orgs (`uat-c5-org{,-b,-c,-d}`), 4 threads (`thr_uat_real{A,B,C,D}`). Harmless; boot-coder can re-seed/clear.
