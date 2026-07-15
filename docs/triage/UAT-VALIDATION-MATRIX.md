@@ -204,3 +204,70 @@ packages/shared 447/447; packages/sandbox 147 pass 0 fail (Docker-conditional ca
 without Docker context); tsc-check green in all packages except the known apps/docs codegen
 artifact. Chassis quarantine work items WI-1–WI-4 complete; C1 (tsc) and the test-baseline
 portion of C-checks now PASS.
+
+---
+
+# UAT Round 1 (2026-07-15)
+
+**Executed against:** `feat/p05-chassis-triage` @ HEAD `64fe09a` (13 commits: quarantine WI-1–4, test-infra fixes, tenancy foundation ADR-001 + Better Auth `organization` plugin + org-scoped daemon tokens). Deps installed via `pnpm install --ignore-scripts` (operator-cleared). Suites/tsc/static run directly with per-package `node_modules/.bin/{vitest,tsc}` — no `pnpm install`.
+
+**App-runtime status:** NOT confirmed listening this round. boot-coder is still standing up the compose; `deploy/docker-compose.selfhost.yml` provisions **postgres + redis + serverless-redis-http + minio only — there is no `app` service**, so the Next.js app runs out-of-band. Ports :3000/:8080 are occupied by unrelated local dev processes (plaintext 404 / 307, not Next). All app-runtime cases below are therefore **BLOCKED-pending-boot**; test/tsc/static cases were executed.
+
+## R1.1 Measured test baselines at HEAD
+
+| Package | Prior recorded (@ `64c5067`) | Round-1 measured (@ `64fe09a`) | Verdict |
+|---|---|---|---|
+| `packages/utils` | green | **31 pass / 0 fail** | PASS |
+| `packages/agent` | green | **20 pass / 0 fail** | PASS |
+| `packages/sandbox` | 147 pass, Docker-cond. skipped | **147 pass / 0 fail / 104 skipped** (image tests need `SANDBOX_IMAGE_TEST=true`) | PASS |
+| `packages/daemon` | — | **129 pass / 4 fail / 133** | PASS-WITH-KNOWN — the 4 failures are `runtime.test.ts` `spawnCommandLine`/`spawnCommand` cases (spy never invoked); host-shell/env dependent, matches the "4 known host-env failures" note |
+| `packages/shared` (`--no-file-parallelism`) | **447 / 447** | **385 pass / 68 fail / 453** | **FAIL — REGRESSION** |
+| `apps/www` | **787 / 796, 0 fail** | **740 pass / 53 fail / 9 skipped / 802** | **FAIL — REGRESSION** |
+
+**Headline: the tenancy-foundation commits (decdca1 / 0457891 / 796783f / 64fe09a) regressed two previously-green suites that were 447/447 and 787/796 at `64c5067`.** Both regressions are test-plumbing/fixture drift, not product-logic breakage — `tsc --noEmit` is clean in every package (incl. `apps/www`), and sandbox/agent/utils are fully green.
+
+**Root cause — `packages/shared` (68 fail, isolated to 2 files):** `automations.test.ts` (46) and `feature-flags.test.ts` (14 + a few in setup). The test container came up healthy (`terragon_postgres_test` on :15432) and `test-global-setup.ts` ran `pnpm drizzle-kit-push-test`, but the push did **not create the `automations` and `user_feature_flags` tables** — both are still declared in `schema.ts:1025` / `schema.ts:933`. Every failure is `relation "automations"/"user_feature_flags" does not exist`; the feature-flag seed step then throws on the missing table. Mechanism: non-interactive `drizzle-kit push` silently skipping ambiguous create/rename statements. The other 385 shared tests pass, so it is a schema-push plumbing bug, not model-logic breakage.
+
+**Root cause — `apps/www` (53 fail):** clustered in `e2e` (18), `handle-app-mention` (10), `credit-auto-reload` (4), `stop-thread` (4), `get-thread` (4), `slack/handlers` (4), `admin/user` (3), `auth-server` (3), `credits` (2), `stripe-credit-top-ups` (1). Signatures: FK violations `insert on {session,account,automations,user_settings,slack_account} violates *_user_id_user_id_fk`, plus `UserFacingError: Unauthorized` and `User is not part of this team`. The Better Auth `organization` plugin (`auth.ts:290`) + org-scoping landed **without updating the test fixtures** — `createTestUser`/`mockLoggedInUser` don't seed an organization/membership, so org-scoped reads return Unauthorized and dependent inserts FK against a missing user row; the shared missing-`automations`-table also bleeds through. Regressed the www floor from ~787 to 740.
+
+**CI impact:** `.github/workflows/ci.yml` runs `pnpm turbo test` — it is **RED at HEAD** for the two reasons above. Separately, CI pins **Node 20** (`setup-node@v4`, `node-version: "20"`); the migrating orch-agents packages require **Node ≥22** (`node:sqlite`, worker_threads, `--env-file`) — flag before mounting them.
+
+## R1.2 C1–C12 checklist status (this round)
+
+| # | Item | Status | Evidence |
+|---|---|---|---|
+| C1 | Dead-SaaS excision compiles (`tsc-check`) | **PASS** | `tsc --noEmit` exit 0 in shared, sandbox, agent, utils, daemon, apps/www. apps/docs codegen artifact excluded per note |
+| C2 | Boots with no billing/analytics env | **PASS (static) / runtime BLOCKED** | `isStripeConfigured()` gate present (`server-lib/stripe.ts`); no hardcoded PostHog key anywhere (`phc_…` grep empty); `selfhost.env.example` documents `STRIPE_*`/`POSTHOG`/`E2B`/`DAYTONA` empty = disabled, "lifecycle never blocks on credits". Runtime boot assertion needs the app |
+| C3 | Dependency/security patch level | **NOT RUN** | `pnpm audit` deferred (would be run in a trusted pass); not executed this round |
+| C4 | docker-compose boot (app + Postgres health) | **BLOCKED** | Compose provisions infra only (no `app` service); boot-coder owns bring-up |
+| C5 | Signup | **BLOCKED** | App not listening |
+| C6 | Org create → Hatchet tenant + org-scoped rows | **PASS (schema) / runtime BLOCKED** | `organization` pgTable (`schema.ts:117`) + `organization()` plugin (`auth.ts:290`) present. Live create needs app; Hatchet not in branch |
+| C7 | Task create | **BLOCKED** | App not listening |
+| C8 | Stubbed run streams to dashboard | **BLOCKED** | App not listening; `apps/broadcast` still untested |
+| C9 | First migrated orch-agents package compiles + green | **NOT STARTED** | No `review`/`webhook`/`intake` package mounted in this branch — chassis triage + tenancy only |
+| C10 | Cross-org isolation smoke (T1 minimal) | **OPEN (now also fixture-blocked)** | Accessor per ADR-001 not exercised; www org-membership fixtures currently broken (R1.1) |
+| C11 | CI bring-up | **PARTIAL** | `ci.yml` wired (tsc-check, lint, format-check, `turbo test`) but RED at HEAD; Node pinned 20 (needs ≥22 for orch-agents pkgs) |
+| C12 | Characterization test for P5-critical untested code | **PASS (docker-provider)** | Round-0's "docker-provider has ZERO tests" gap is **CLOSED** — `sandbox.test.ts` imports `DockerProvider`, defaults `providerName="docker"`, 147 provider/lifecycle cases green |
+
+## R1.3 UAT case status updates (deltas from Round 0)
+
+- **E12 (sandbox isolation / Docker provider):** uncovered → **now-partially-covered.** The Docker `ISandboxProvider` mechanics are exercised green under `sandbox.test.ts` (147 cases). End-to-end agent-in-sandbox still gated to P5.
+- **T1 / T2 / T4 (org-scoped isolation) and C6:** uncovered → **now-partially-verifiable (schema level).** `organization` table + Better Auth org plugin exist statically; live cross-org enforcement (T1/C10) remains open and is currently blocked by the www fixture regression.
+- **T7 (per-org concurrency neutral default):** uncovered → **partially-verifiable.** Billing quarantine (`isStripeConfigured` gate, empty-env = disabled) removes the subscription-tiered cap dependency at the config layer.
+- **V1–V7 (Verified pillar):** **unchanged — 0% in-branch.** No review package migrated (C9 not started).
+- **E2/E3/E5/E6/E9/E10/E11 (durable substrate):** **unchanged — uncovered.** Hatchet not in this branch.
+- **O1–O7 (Observed pillar):** **unchanged — uncovered/blocked;** nothing observable until the app boots.
+- All other cases retain their Round-0 status.
+
+Rollup: of 33 cases, **3 moved uncovered→partially-covered/verifiable** (E12, T1/T2/T4 schema, T7), **0 newly fully-covered**, the rest unchanged. Net still ~13 uncovered / ~13 partial / ~7 covered, with the Verified pillar untouched.
+
+## R1.4 Verdict — what Executed / Observed / Verified mean for this chassis today
+
+- **EXECUTED:** chassis-only. Core packages (sandbox, daemon, agent, utils) compile and their unit suites are green, and the **Docker sandbox provider is now proven under test** (the biggest Round-0 untested gap). But the durable substrate (Hatchet) and every orch-agents execution package are absent from this branch, and the tenancy foundation **regressed the shared + www baselines** — so "executed" is chassis mechanics passing in isolation, on top of a currently-red integration baseline.
+- **OBSERVED:** nothing observable this round. The app is not booted, the compose has no `app` service, and `apps/broadcast` (live transcript) remains untested. The entire pillar is blocked on app bring-up.
+- **VERIFIED:** 0%. No verification/review layer exists in-branch (unmigrated). This is the differentiator and it has not started.
+
+**Top 3 gaps to close next:**
+1. **Fix the tenancy-foundation test regressions** — (a) make `test-global-setup` `drizzle-kit push` create `automations` + `user_feature_flags` (or switch to `drizzle-kit migrate`); (b) update `createTestUser`/`mockLoggedInUser` to seed an organization + membership so org-scoped paths authorize. CI is red until both land; the migrating baseline must be green before more packages stack on top.
+2. **Boot the app** (add an `app` service to the self-host compose or publish a documented run recipe) so C4–C8 and live cross-org isolation (C10/T1) become executable — the whole OBSERVED pillar and half the tenancy cases are blocked on this.
+3. **Mount the first orch-agents package — `review`, the differentiator** — to start the VERIFIED pillar and give C9 something to check; nothing is migrated yet. En route, resolve the CI Node 20 → ≥22 pin.
