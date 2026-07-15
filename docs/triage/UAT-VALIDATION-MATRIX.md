@@ -818,3 +818,36 @@ Net: not a gap. Dashboard hints org-scoped (correct, live-verified); background 
 **BATCH-3B (NOT-NULL tightening) → DEFERRED OUTRIGHT.** Not "held for a later go" — null-org is a **legitimate designed state** until the GitHub-App phase makes installation→org mandatory. Dropped from the batch-3 remainder as a standing design decision.
 
 **Revised batch-3a close-out gate (down to 2 commits):** the item-3(b) github_pr column-drop commit (fence-intact + backfill-green check) + the org-aware-error polish commit (mitigation for the surface-2 background hints). Then batch-3a closes. usage_events write (3a-1) and agent-runtime credential resolution (1b) already PASS.
+
+# BATCH-3A CLOSE-OUT + TENANCY WORKSTREAM FINAL VERDICT (2026-07-15)
+
+All batch-3a slices validated. This ends the WI-5 tenancy validation queue.
+
+## Slice roll-up
+| Slice | Commit | Verdict | Altitude |
+|---|---|---|---|
+| usage_events WRITE stamp | 727add4 | **PASS** | code-cert + unit (proxy live = C8 territory); rides batch-1 daemon-token no-drift |
+| agent-runtime credential RESOLUTION fence | 6b8b8a9 | **PASS** | code-cert + unit (no-drift pin: orgX cred won't resolve for orgY); hint two-surface flag raised + resolved |
+| surgical org indexes | 3cb1b35 | **PASS** | code-cert; live-verified composites on environment/automations/agent_provider_credentials |
+| github_pr = global mirror, org column DROPPED | 73c126d | **PASS** | fence intact (`getThreadForGithubPRAndUser` still `and(userId, org)`); github + github-installation tests **9/9 no-ripple**; column drop confirmed (`schema.ts:527`). My watch-item resolved best-case (no redesign, thread fence untouched → live probe stood down) |
+| org-aware credential-resolution error | 4ef6b1b | **PASS** | code-cert + unit (org-less message + no-drift pin); mitigation for the surface-2 user-level background hints |
+
+## Per-table org coverage (post-github_pr-drop)
+Count reconciliation: live DB currently shows **16** tables with an `organization_id` column — the `73c126d` drop is committed but **not yet deployed to :3100** (deploys with the next rebuild; it's a schema migration, no live probe needed). Committed schema drops `github_pr` → the flagged-domain set is **14** per team-lead (my `github_installation` mapping ADR added one; `github_pr` removed one). Categorized:
+- **Fenced domain reads (forTenant seam):** thread, thread_chat, thread_visibility, environment, automations, agent_provider_credentials, usage_events (read + write since 3a-1).
+- **Org-source / mapping:** github_installation (installation→org), slack_installation (workspace→org).
+- **Org-native (Better Auth):** member, invitation (+ organization; `session.active_organization_id` is the session's active org, not a domain stamp).
+- **Token metadata:** apikey (org in key metadata; daemon-token resolution).
+- **Deferred (billing, operator decision):** subscription (referenceId flip), user_credits (org-pooled balance), usage_events_agg_cache_sku (feeds getUserCreditBalance).
+- **Dropped by design:** github_pr (global GitHub-state mirror; isolation stays on the thread fence).
+
+## FINAL TENANCY VERDICT
+**WI-5 tenant isolation is COMPLETE and CERTIFIED for the current phase.** C10 exit met at product-path altitude across every domain (CLI + dashboard/RSC + session-info, all live-verified); background create/token/write derivations certified; the one live gap found (getAutomations) was fixed and re-verified; the getAutomations gap-class swept across all domains and confirmed live on environments + credentials. No cross-user or cross-org data leak was found in any exercised read across the entire workstream. Two design decisions recorded as intentional (not gaps): background feature-detection hints stay user-level (resolution is the gate), and github_pr stays a global mirror (thread-fenced).
+
+## Phase-gated remainder (handed off — NOT open validation items)
+- **Batch-3b (organization_id NOT-NULL):** deferred to the **GitHub-App phase** (installation→org becomes mandatory then). null-org is a legitimate designed state until then.
+- **Billing model:** subscription referenceId flip + org-pooled user_credits + agg-cache fence — **operator product decisions**, move with the billing feature (reopened by ADR-002 rev-2 platform-based pricing).
+- **Execution-plane C10 gates** (worker secret/task-routing isolation, no-App-key-in-installer, worker-availability/SCHEDULING_TIMED_OUT, min-version gate): activate at the **Hatchet substrate phase** — recorded above.
+
+## Next standing assignment
+The tenancy validation queue is CLOSED. Next arrives with the program's next phase: **review-package mount (Verified pillar) → GitHub App → Hatchet substrate**, where C8/C7-full become live-runnable and my recorded execution-plane gates activate.
