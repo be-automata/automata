@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { signInWithGithub } from "@/components/auth";
+import { EmailPasswordAuth } from "@/components/email-password-auth";
 import { Wordmark } from "@/components/shared/wordmark";
 import {
   testimonialColumn1,
@@ -19,7 +20,13 @@ import TestimonialCard from "@/components/landing/shared/TestimonialCard";
 const allTestimonials = [...testimonialColumn1, ...testimonialColumn2];
 const mobileTestimonial = testimonialColumn2[0];
 
-export default function Login({ returnUrl }: { returnUrl: string }) {
+export default function Login({
+  returnUrl,
+  emailPasswordEnabled = false,
+}: {
+  returnUrl: string;
+  emailPasswordEnabled?: boolean;
+}) {
   const [isLoading, setIsLoading] = useState(false);
 
   const handleGithubSignIn = async () => {
@@ -85,6 +92,22 @@ export default function Login({ returnUrl }: { returnUrl: string }) {
                 </>
               )}
             </Button>
+
+            {emailPasswordEnabled && (
+              <>
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center">
+                    <span className="w-full border-t border-border" />
+                  </div>
+                  <div className="relative flex justify-center text-xs uppercase">
+                    <span className="bg-background px-2 text-muted-foreground">
+                      Or
+                    </span>
+                  </div>
+                </div>
+                <EmailPasswordAuth returnUrl={returnUrl} />
+              </>
+            )}
           </div>
 
           <p className="px-8 text-center text-sm text-muted-foreground">

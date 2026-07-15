@@ -111,6 +111,11 @@ export const env = envsafe({
   RESEND_API_KEY: str({ allowEmpty: true, default: "" }),
   DISABLE_ONE_TIME_TOKEN_SIGNIN: bool({ default: true }),
 
+  // Email/password sign-in. Off by default (hosted deployments are OAuth-only).
+  // Self-host turns this ON so a fresh instance can bootstrap the first account
+  // without SMTP (magic link) or a GitHub OAuth handshake. See auth.ts.
+  AUTH_EMAIL_PASSWORD_ENABLED: bool({ default: false }),
+
   // Stripe
   STRIPE_SECRET_KEY: str({ allowEmpty: true, default: "" }),
   STRIPE_WEBHOOK_SECRET: str({ allowEmpty: true, default: "" }),

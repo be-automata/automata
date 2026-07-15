@@ -142,6 +142,16 @@ export const auth = betterAuth({
       },
     },
   },
+  // Email/password is off by default (hosted = OAuth-only). Self-host enables it
+  // (AUTH_EMAIL_PASSWORD_ENABLED=true) so a fresh instance can bootstrap the
+  // first account with no SMTP and no GitHub OAuth handshake. Email verification
+  // is deliberately OFF here — requiring it would gate first sign-in behind the
+  // same SMTP that self-host doesn't have. autoSignIn (default) means sign-up
+  // yields a session immediately.
+  emailAndPassword: {
+    enabled: env.AUTH_EMAIL_PASSWORD_ENABLED,
+    requireEmailVerification: false,
+  },
   session: {
     expiresIn: 60 * 60 * 24 * 60, // 60 days (2 months)
     updateAge: 60 * 60 * 24, // Update session if it's older than 1 day
