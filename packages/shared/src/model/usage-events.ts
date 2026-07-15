@@ -56,14 +56,22 @@ export async function getUserUsageEvents({
   eventType,
   startDate,
   endDate,
+  organizationId,
 }: {
   db: DB;
   userId: string;
   eventType?: UsageEventType;
   startDate?: Date;
   endDate?: Date;
+  // Tenant fence (WI-5). Optional; the forTenant accessor supplies it. Inert
+  // until the usage WRITE path stamps org from the thread context (billing
+  // rollup wiring, later) — null = user-only, today's behavior.
+  organizationId?: string | null;
 }) {
   const conditions = [eq(schema.usageEvents.userId, userId)];
+  if (organizationId) {
+    conditions.push(eq(schema.usageEvents.organizationId, organizationId));
+  }
   if (eventType) {
     conditions.push(eq(schema.usageEvents.eventType, eventType));
   }
@@ -86,12 +94,15 @@ export async function getUserUsageEventsAggregated({
   startDate,
   endDate,
   timezone = "UTC",
+  organizationId,
 }: {
   db: DB;
   userId: string;
   startDate: Date;
   endDate: Date;
   timezone?: string;
+  // Tenant fence (WI-5). Optional; inert until usage writes stamp org.
+  organizationId?: string | null;
 }) {
   const validatedTimezone = validateTimezone(timezone);
   const dateExpression = sql<string>`DATE((${schema.usageEvents.createdAt} AT TIME ZONE 'UTC') AT TIME ZONE '${sql.raw(validatedTimezone)}')`;
@@ -107,6 +118,9 @@ export async function getUserUsageEventsAggregated({
     .where(
       and(
         eq(schema.usageEvents.userId, userId),
+        organizationId
+          ? eq(schema.usageEvents.organizationId, organizationId)
+          : undefined,
         gte(schema.usageEvents.createdAt, toUTC(startDate)),
         lte(schema.usageEvents.createdAt, toUTC(endDate)),
       ),

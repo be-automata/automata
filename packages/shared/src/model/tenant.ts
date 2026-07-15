@@ -45,6 +45,11 @@ import {
   deleteAgentProviderCredentialById,
 } from "./agent-provider-credentials";
 import { AIAgent } from "@terragon/agent/types";
+import {
+  getUserUsageEvents,
+  getUserUsageEventsAggregated,
+} from "./usage-events";
+import { UsageEventType } from "../db/types";
 
 /**
  * Tenant-scoped repository accessor (ADR-001, WI-5 step 3).
@@ -351,6 +356,35 @@ export function forTenant({ db, organizationId, userId }: TenantContext) {
         userId,
         organizationId,
         credentialId,
+      });
+    },
+
+    // --- Usage reads (WI-5 batch 2, slice 4) ---
+    // Fenced now; inert until the usage WRITE path stamps org from the thread
+    // context. subscription/credits (org-pooled billing) and the apiKey table
+    // (managed by Better Auth; the daemon resolver is already org-aware) are
+    // NOT here — those are billing-model decisions for batch 3.
+
+    getUsageEvents(
+      opts: {
+        eventType?: UsageEventType;
+        startDate?: Date;
+        endDate?: Date;
+      } = {},
+    ) {
+      return getUserUsageEvents({ db, userId, organizationId, ...opts });
+    },
+
+    getUsageEventsAggregated(opts: {
+      startDate: Date;
+      endDate: Date;
+      timezone?: string;
+    }) {
+      return getUserUsageEventsAggregated({
+        db,
+        userId,
+        organizationId,
+        ...opts,
       });
     },
   };

@@ -12,6 +12,7 @@ import {
   threadVisibility,
   automations,
   agentProviderCredentials,
+  usageEvents,
 } from "../db/schema";
 import {
   createOrganization,
@@ -623,5 +624,55 @@ describe("forTenant accessor — agent credential tenant scoping (WI-5)", () => 
       .from(agentProviderCredentials)
       .where(eq(agentProviderCredentials.id, created.id));
     expect(gone).toBeUndefined();
+  });
+});
+
+describe("forTenant accessor — usage read tenant scoping (WI-5)", () => {
+  let alice: User;
+  let carol: User;
+  let orgX: string;
+  let orgY: string;
+
+  beforeEach(async () => {
+    alice = (await createTestUser({ db })).user;
+    carol = (await createTestUser({ db })).user;
+    orgX = await createOrgWithMembers([alice.id]);
+    orgY = await createOrgWithMembers([carol.id]);
+  });
+
+  it("getUsageEvents fences on the active org (once events carry one)", async () => {
+    // Usage writes don't stamp org yet, so seed events directly to exercise the
+    // read fence: one for alice under orgX, one under orgY.
+    await db.insert(usageEvents).values([
+      {
+        userId: alice.id,
+        organizationId: orgX,
+        eventType: "claude_cost_usd",
+        value: "1",
+      },
+      {
+        userId: alice.id,
+        organizationId: orgY,
+        eventType: "claude_cost_usd",
+        value: "2",
+      },
+    ]);
+
+    const inX = await forTenant({
+      db,
+      organizationId: orgX,
+      userId: alice.id,
+    }).getUsageEvents();
+    expect(inX).toHaveLength(1);
+    expect(inX[0]!.organizationId).toBe(orgX);
+
+    // The same user viewed under a different active org sees only that org's.
+    const inY = await forTenant({
+      db,
+      organizationId: orgY,
+      userId: alice.id,
+    }).getUsageEvents();
+    expect(inY).toHaveLength(1);
+    expect(inY[0]!.organizationId).toBe(orgY);
   });
 });
