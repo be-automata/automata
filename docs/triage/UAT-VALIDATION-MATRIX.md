@@ -724,3 +724,24 @@ The `getAutomations` gap I found was a **gap-class present in every batch-2 doma
 **Live probes queued (my call on which merit live):** environments-list org-switch (directly analogous to the getAutomations gap — confirm the sweep closed it on a second domain) + credentials hasClaude flip (session-info hot path, broad blast radius). thread-visibility (owner-scoped write) + github-mention (repo-gated, batch-1-covered) = code-cert. Running instance is 519fc3d; deploy to HEAD e837d9e requested. Will finalize the sweep verdict after both live probes.
 
 **Impact note:** this validates the value of the live-probe-on-route-reachable-reads rule — one empirically-proven gap (getAutomations) surfaced a whole class the model-level fences hid, triggering a domain-wide route audit.
+
+## Route-wiring sweep — LIVE PROBES COMPLETE (2026-07-15, on e837d9e)
+
+boot-coder deployed HEAD (clean e837d9e). Ran the two route-reachable live probes I flagged. Both PASS — the getAutomations gap-class is closed and live-verified across domains.
+
+| Domain | Live probe | Result | Verdict |
+|---|---|---|---|
+| automations (b41bfb9) | getAutomations @orgA vs @orgA2 | @orgA=[automation], @orgA2=**[]** | PASS (earlier re-probe) |
+| **environments (d02a9c3)** | getEnvironments @orgA vs @orgA2 (seeded env in orgA) | @orgA=[selfhost/orgA-env-repo], @orgA2=**[]** | **PASS** |
+| **credentials hasClaude (4613e4d)** | getUserCredentialsAction @orgA vs @orgA2 (seeded claudeCode cred in orgA) | hasClaude @orgA=**true**, @orgA2=**false** | **PASS** — session-info hot path org-fences live |
+| thread-visibility (4613e4d) | — | owner-scoped write, unit-tested | code-cert |
+| github-mention (e837d9e) | — | repo-gated; batch-1 mention probe exercised path | code-cert |
+
+**hasClaude flip is the strongest of the two** — it's the `getUserInfoOrNull` session-info path, so its correct org-fencing (same user, credential present in orgA → true, absent in orgA2 → false) confirms the fence holds on the highest-fan-out read surface.
+
+### FINAL SWEEP VERDICT — WI-5 route-wiring COMPLETE
+The gap-class (`getAutomations`-style: model fenced but server-action read unwired) is **eliminated across all batch-2 domains**, verified live on the two highest-value route-reachable surfaces (environments, credentials/session-info) plus automations. Combined with the batch-2 model-fence close-out and the batch-1 background derivations: **every exercised read on the platform's product surfaces (CLI + dashboard/RSC + session-info) is org-fenced; no cross-user or cross-active-org leak found in any probe.** C10 tenant-isolation exit criterion holds at product-path altitude across domains. Batch 2 (incl. the route-wiring self-audit) is CLOSED.
+
+Batch-3 remainder unchanged (NOT-NULL + indexes + github_pr row-stamp/redesign [my watch-item] + usage-write org-stamp + billing referenceId flip + agent-runtime credential background-stamp + usage_events_agg_cache_sku confirm).
+
+Test artifacts (org=orgA, user A): env `env_uat_orgA`, credential `cred_uat_claude_orgA`, automation "UAT Slice2 orgA" — harmless, boot-coder to clear.
