@@ -447,3 +447,35 @@ Fixtures — 2 real users, each with an org; threads carrying `organizationId` (
 - **App-create needs a GitHub-App-installed repo** (create rejects at the repo-access gate for fake repos — proven in R1c C7). If no real installed repo is available headlessly, thread rows will be **org-stamped seed rows** to exercise the read fence, and the create-path org-stamp certified at code level (`tenant.ts:95`, `cli-router` create passes `context.organizationId`, commit 6d893ad) rather than end-to-end. Flag to team-lead which applies.
 - **Org-scoped daemon tokens:** self-mint via `POST /api/auth/api-key/create` with `metadata:{organizationId}` (bearer/cookie session). Confirms the fence READ mechanism independent of the product mint gap (finding #1).
 - **Background create paths** (webhooks/automations/follow-up) don't stamp org — per team-lead, recorded as sweep-pending, not failed.
+
+## C10-ORG round — EXECUTED (2026-07-15, HEAD 6d893ad)
+
+boot-coder rebuilt :3100 at 6d893ad and pushed the `organization_id` columns (thread + environment). My earlier real users/sessions survived (org column nullable). App-create is repo-gated (R1c C7), so per boot-coder's guidance threads were **org-stamped seed rows** (the create-path stamp is certified at code level: `tenant.ts:95`, `cli-router` create passes `context.organizationId`, commit 6d893ad); the **read fence** was exercised over the real CLI accessor with **org-scoped daemon tokens** (self-minted with `metadata.organizationId` — the endpoint accepts + stores it).
+
+**Fixtures:** user A (org A `JnUhW…`, org A2 `SEbP…` — A is in 2 orgs), user B (org B `qsLpeM…`). Threads: `thr_orgA_1`(A,orgA), `thr_orgA2_1`(A,orgA2), `thr_orgB_1`(B,orgB), `thr_uat_realA`(A, **null-org legacy**). Row-level `organization_id` stamp verified per row via psql.
+
+### Results
+
+| # | Case | Probe | Result | Verdict |
+|---|---|---|---|---|
+| 1 | Row-level org stamp | psql on seeded rows | each carries correct `organization_id` | PASS |
+| 2 | Org-fence LIST | A/orgA list | `[thr_orgA_1]` only | PASS |
+| 3 | Org-fence LIST | A/orgA2 list | `[thr_orgA2_1]` only | PASS |
+| 4 | Org-fence LIST | B/orgB list | `[thr_orgB_1]` only | PASS |
+| 5 | **Same-user cross-org detail** | A/orgA detail(`thr_orgA2_1`) | **NOT_FOUND** | **PASS — org-level proof** |
+| 6 | Cross-org+user detail | A/orgA detail(`thr_orgB_1`) | NOT_FOUND | PASS |
+| 7 | Own-org control | A/orgA detail(`thr_orgA_1`) | OK | PASS |
+| 8 | **ORG SWITCH** | A/orgA can't see orgA2 thread; A/orgA2 can't see orgA thread | both NOT_FOUND | PASS — visibility follows active org |
+
+**Decisive org-altitude evidence:** the *same user A* sees `thr_orgA_1` under the orgA token but `thr_orgA2_1` under the orgA2 token, and each denies the other's thread — org-partitioned reads, not user-level. This is the certification that was pending WI-5 in prior rounds.
+
+### Findings (both predicted from source, now CONFIRMED — record-not-fail per team-lead)
+
+**FINDING #1 — CLI/daemon read fence is INERT in production (no mint stamps org).** A token minted with **no** `metadata.organizationId` (exactly what `createCliApiToken` and the dev daemon-token route produce) returned **all of user A's threads across both orgs + the null-org legacy** (`['thr_orgA2_1','thr_orgA_1','thr_uat_realA']`) — `threadOrgFence(null)` is a no-op, so the CLI path falls back to user-level. The fence *mechanism* is correct (proven in tests 2–8 with an org-carrying token), but the **product mint paths never populate the org metadata**, so on the real CLI surface the org fence does not bite. Read-side sibling of the known background-create gap. **Remediation:** stamp `metadata.organizationId` at token mint (from the minting session's active org). NOTE: the **dashboard** path is unaffected — it sources org from `session.activeOrganizationId` (populated), so dashboard reads are genuinely org-fenced; the gap is CLI/daemon-token-specific.
+
+**FINDING #2 — legacy null-org threads are hidden under an active org.** `thr_uat_realA` (null-org) is **visible** under a null-org query (A/null list includes it) but **NOT_FOUND** under an active-org read (A/orgA detail → NOT_FOUND; absent from A/orgA list). `threadOrgFence` uses `eq`, which excludes NULL. So "null-org visible to creator" holds **only for a null-org query context**. This is mitigated by design: the **personal-org backfill script (commit db2c10b)** stamps existing rows with the user's personal org — after backfill, legacy threads appear under that org. Unbackfilled null-org rows are hidden the moment a user has an active org. **Record:** as-designed *given the backfill runs*; flag that any unbackfilled rows (or background-created null-org rows) silently disappear from an org-scoped view.
+
+### Verdict
+Org-level tenant isolation **PASSES at the mechanism level** (row stamp + org-partitioned reads + same-user cross-org denial + org-switch). Two confirmed gaps for the sweep: (#1) daemon-token mints don't stamp org → CLI fence inert in prod; (#2) unbackfilled null-org threads vanish under an active org. Neither is a data-leak (no user saw another's data; if anything #1 is *under*-fencing within a single user's own orgs, not cross-user leakage). Background create paths (webhooks/automations/follow-up) not stamping org remain sweep-pending per team-lead.
+
+Test artifacts added: org A2 (`uat-org-a2`), threads `thr_orgA_1/thr_orgA2_1/thr_orgB_1`, several daemon tokens. Harmless; boot-coder can clear.
