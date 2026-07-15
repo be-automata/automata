@@ -308,7 +308,12 @@ boot-coder brought the app up: `next start` on **http://localhost:3100**, compos
 
 Signup enablement is owned by **tenancy-coder** (`AUTH_EMAIL_PASSWORD_ENABLED` bool env, default false → true in `deploy/selfhost.env.example`, login UI gated to show the form). As of this writing it is **in the working tree, uncommitted** (`apps/www/src/lib/auth.ts:152`, `app/login/page.tsx:25`, new `components/email-password-auth.tsx`, `packages/env/src/apps-www.ts:117`). Enablement requires a **rebuild** (new component + login-page changes are not in the running `.next` build) with `AUTH_EMAIL_PASSWORD_ENABLED=true` in the build+runtime env, then restart on :3100 — coordinated with boot-coder once tenancy-coder commits.
 
-**Execution order when unblocked:** signup 2 users → each creates/owns an org (A, B) → C7 task create (user A, org A) → C8 stubbed run streams → **C10 cross-org isolation smoke.**
+**Execution order when unblocked (scripting notes per team-lead):**
+1. **Signup A** via `signUp.email` — `autoSignIn` defaults true, so this returns a session directly (no separate login); display name derives from the email local-part.
+2. **Signup B** likewise (fresh session).
+3. **Capture the intermediate "fresh user, no org yet" state** — the org plugin does **not** auto-create an organization on signup, so both accounts have `activeOrganizationId=null` until an org is created explicitly. Record what `/dashboard` does for a null-org user (renders? empty state? errors? forces org creation?) — that is itself a UAT-relevant state.
+4. **Create org A** (as user A) and **create org B** (as user B) via the org-create client call (`authClient.organization.create`) — through the app UI/server action if reachable, else the auth API route.
+5. **C7** task create (user A, org A) → **C8** stubbed run streams → **C10** cross-org isolation smoke.
 
 **C10 methodology reality:** the data layer is **Next.js server actions, not REST GET routes** (the only `app/api/*` routes are auth/proxy/webhook/cron/internal). So cross-org isolation cannot be a curl-per-REST-endpoint check. Evidence will be gathered two ways, recorded per-resource:
 1. **Browser-driven, user A's session against org-B resource IDs** (via the chrome automation tools) on the resource-view page routes:
