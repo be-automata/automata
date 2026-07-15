@@ -788,3 +788,13 @@ Supersedes the two prior rev-2 notes; this is the authoritative substrate-phase 
 4. **NEW — minimum-version gate at worker registration.** A stale/incompatible customer worker must be REFUSED at registration; otherwise it becomes a worker that accepts assignments it can't execute → unassignable actions → silent `SCHEDULING_TIMED_OUT` (ties back to gate 1's silent-drop failure mode).
 
 Full-stack tenant gate = product-path C10 (reads: CLI + dashboard + session-info, all live-certified) + gates 1–4 above once execution is per-org/customer-supplied.
+
+## Batch-3a slice 1b — VALIDATED w/ a reconciliation flag (2026-07-15, 6b8b8a9)
+
+**Resolution path → PASS (code-cert + unit; live = C8 territory, agreed).** `getAndVerifyCredentials` + `getClaudeCredentialsJSONOrNull` + codex creds derive org from the **thread** (`thread.organizationId`) in `agent/sandbox.ts` + broadcast sandbox-env route — the daemon.ts pattern. `credentials.test.ts` **2/2**: "resolves the credential for the thread" + **"does NOT resolve a credential from another org (no-drift pin)"** — an Amp cred in orgX resolves for an orgX thread, not orgY. The real security gate (which credential actually runs an agent) is org-fenced by thread, session-independent. Solid.
+
+**⚠️ RECONCILIATION FLAG — the hint decision doesn't match current code + my prior live evidence.** Team-lead's recorded decision: "hasClaude/hasAmp feature-detection HINTS stay user-level deliberately (hot path, hint not gate)." But at HEAD the hint is **org-scoped, not user-level**:
+- `getUserInfoOrNull` (the session-info hot path) computes `userCredentials` via `getUserCredentials({ …, organizationId: session.session.activeOrganizationId ?? null })` (`auth-server.ts:30`) — org-scoped.
+- `getUserCredentialsAction` passes the active org too (`server-actions/user-credentials.ts:12`).
+- I **live-verified** this org-scoping in the route-wiring sweep: hasClaude = true@orgA, false@orgA2 (4613e4d probe).
+So the current hint IS org-scoped. "Stays user-level" is either (a) a **forward** change not yet made (revert the 4613e4d hint org-scoping → then my route-sweep hasClaude PASS is moot and needs a user-level re-probe), or (b) a description that diverged from the code. **Not recording as intentional-with-mitigation until reconciled** — asked team-lead which way it goes. The resolution/hint asymmetry is fine as a *design*; the issue is the code currently org-scopes the hint, opposite the stated decision. (Note: org-scoped hint is the *safer* direction — worst case is a hidden UI affordance, never a cred leak — so this is a correctness-of-record question, not a security gap.)
