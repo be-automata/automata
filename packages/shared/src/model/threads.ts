@@ -127,6 +127,7 @@ async function getThreadsInner({
     .select({
       id: schema.thread.id,
       userId: schema.thread.userId,
+      organizationId: schema.thread.organizationId,
       name: schema.thread.name,
       githubRepoFullName: schema.thread.githubRepoFullName,
       githubPRNumber: schema.thread.githubPRNumber,
@@ -603,6 +604,7 @@ export async function getThread({
   return {
     id: thread.id,
     userId: thread.userId,
+    organizationId: thread.organizationId,
     name: thread.name,
     branchName: thread.branchName,
     repoBaseBranchName: thread.repoBaseBranchName,
@@ -705,6 +707,7 @@ type ThreadForThreadChatInfoFull = Pick<
   Thread,
   | "id"
   | "userId"
+  | "organizationId"
   | "createdAt"
   | "updatedAt"
   | "agent"
@@ -741,6 +744,7 @@ function createLegacyThreadChatFull(
   return {
     id: LEGACY_THREAD_CHAT_ID,
     userId: thread.userId,
+    organizationId: thread.organizationId,
     threadId: thread.id,
     title: thread.name ?? null,
     createdAt: thread.createdAt,

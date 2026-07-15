@@ -218,6 +218,12 @@ export const apikey = pgTable("apikey", {
   updatedAt: timestamp("updated_at").notNull(),
   permissions: text("permissions"),
   metadata: text("metadata"),
+  // Tenant fence (WI-5 step 2). Nullable during additive/backfill phase. The
+  // daemon-token resolver still reads organizationId from `metadata` today; this
+  // typed column is the target the resolver switches to once keys are re-stamped.
+  organizationId: text("organization_id").references(() => organization.id, {
+    onDelete: "cascade",
+  }),
 });
 
 export type SubscriptionStatus =
@@ -250,6 +256,11 @@ export const subscription = pgTable(
     trialEnd: timestamp("trial_end"),
     cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
     seats: integer("seats").default(1),
+    // Tenant fence (WI-5 step 2). Org-level billing: referenceId flips from
+    // user.id to organizationId in a later phase; this column is the seam.
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()
@@ -262,6 +273,7 @@ export const subscription = pgTable(
     index("subscription_stripe_subscription_id_idx").on(
       table.stripeSubscriptionId,
     ),
+    index("subscription_organization_id_idx").on(table.organizationId),
   ],
 );
 
@@ -333,6 +345,11 @@ export const thread = pgTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
+    // Tenant fence (WI-5 step 2). Nullable during the additive/backfill phase;
+    // tightened to NOT NULL after the backfill + query sweep (ADR-001 step 5).
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     name: text("name"),
     githubRepoFullName: text("github_repo_full_name").notNull(),
     repoBaseBranchName: text("repo_base_branch_name").notNull(),
@@ -383,6 +400,30 @@ export const thread = pgTable(
     index("user_id_updated_at_index").on(table.userId, table.updatedAt),
     index("user_id_status_index").on(table.userId, table.status),
     index("user_id_archived_index").on(table.userId, table.archived),
+    // Tenant-scoped access paths (WI-5). Mirror the user_id_* composites so the
+    // forTenant accessor's and(organizationId, userId) reads stay index-covered.
+    index("org_id_index").on(table.organizationId),
+    index("org_id_user_id_index").on(table.organizationId, table.userId),
+    index("org_id_user_id_created_at_index").on(
+      table.organizationId,
+      table.userId,
+      table.createdAt,
+    ),
+    index("org_id_user_id_updated_at_index").on(
+      table.organizationId,
+      table.userId,
+      table.updatedAt,
+    ),
+    index("org_id_user_id_status_index").on(
+      table.organizationId,
+      table.userId,
+      table.status,
+    ),
+    index("org_id_user_id_archived_index").on(
+      table.organizationId,
+      table.userId,
+      table.archived,
+    ),
     index("parent_thread_id_index").on(table.parentThreadId),
     index("user_id_automation_id_index").on(table.userId, table.automationId),
     index("github_repo_full_name_github_pr_number_index").on(
@@ -414,6 +455,10 @@ export const threadChat = pgTable(
     threadId: text("thread_id")
       .notNull()
       .references(() => thread.id, { onDelete: "cascade" }),
+    // Tenant fence (WI-5 step 2). Nullable; inherits its thread's org on backfill.
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     title: text("title"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
@@ -427,6 +472,7 @@ export const threadChat = pgTable(
       table.userId,
       table.threadId,
     ),
+    index("thread_chat_org_id_index").on(table.organizationId),
   ],
 );
 
@@ -443,13 +489,20 @@ export const threadVisibility = pgTable(
         onDelete: "cascade",
       }),
     visibility: text("visibility").$type<ThreadVisibility>().notNull(),
+    // Tenant fence (WI-5 step 2). Nullable; inherits its thread's org on backfill.
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()
       .defaultNow()
       .$onUpdate(() => new Date()),
   },
-  (table) => [index("thread_visibility_thread_id_index").on(table.threadId)],
+  (table) => [
+    index("thread_visibility_thread_id_index").on(table.threadId),
+    index("thread_visibility_org_id_index").on(table.organizationId),
+  ],
 );
 
 export const githubPR = pgTable(
@@ -471,6 +524,12 @@ export const githubPR = pgTable(
     threadId: text("thread_id").references(() => thread.id, {
       onDelete: "set null",
     }),
+    // Tenant fence (WI-5 step 2). Nullable; repo-global today, so two orgs on the
+    // same repo currently collide on repo_number_unique — that unique index moves
+    // to (organization_id, repo, number) when the column is tightened (ADR-001).
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     updatedAt: timestamp("updated_at")
       .notNull()
       .defaultNow()
@@ -478,6 +537,7 @@ export const githubPR = pgTable(
   },
   (table) => [
     uniqueIndex("repo_number_unique").on(table.repoFullName, table.number),
+    index("github_pr_org_id_index").on(table.organizationId),
   ],
 );
 
@@ -580,6 +640,11 @@ export const environment = pgTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
+    // Tenant fence (WI-5 step 2). Nullable; the user_id_repo_full_name unique
+    // index becomes (organization_id, repo) when tightened (ADR-001 step 5).
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     isGlobal: boolean("is_global").notNull().default(false),
     repoFullName: text("repo_full_name").notNull(),
     environmentVariables: jsonb("environment_variables")
@@ -601,6 +666,7 @@ export const environment = pgTable(
       table.userId,
       table.repoFullName,
     ),
+    index("environment_org_id_index").on(table.organizationId),
   ],
 );
 
@@ -699,6 +765,11 @@ export const slackInstallation = pgTable(
       .default(sql`gen_random_uuid()`)
       .primaryKey(),
     teamId: text("team_id").notNull().unique(), // Slack workspace ID
+    // Tenant fence (WI-5 step 2). Nullable; a Slack workspace maps to an org so
+    // mentions route to the right tenant once backfilled.
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     teamName: text("team_name").notNull(),
     botUserId: text("bot_user_id").notNull(), // Bot user ID for mentions
     botAccessTokenEncrypted: text("bot_access_token_encrypted").notNull(), // xoxb- token
@@ -717,7 +788,10 @@ export const slackInstallation = pgTable(
       .notNull()
       .$onUpdate(() => new Date()),
   },
-  (table) => [index("slack_installation_team_id").on(table.teamId)],
+  (table) => [
+    index("slack_installation_team_id").on(table.teamId),
+    index("slack_installation_org_id_index").on(table.organizationId),
+  ],
 );
 
 export const slackAccount = pgTable(
@@ -1031,6 +1105,10 @@ export const automations = pgTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
+    // Tenant fence (WI-5 step 2). Nullable; org-owned automations on backfill.
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     name: text("name").notNull(),
     description: text("description"),
     enabled: boolean("enabled").notNull().default(true),
@@ -1063,6 +1141,7 @@ export const automations = pgTable(
       table.repoFullName,
     ),
     index("automations_next_run_at_index").on(table.nextRunAt),
+    index("automations_org_id_index").on(table.organizationId),
   ],
 );
 
@@ -1079,11 +1158,16 @@ export const userCredits = pgTable(
     description: text("description"),
     referenceId: text("reference_id"),
     grantType: text("grant_type").$type<UserCreditGrantType>(),
+    // Tenant fence (WI-5 step 2). Nullable; credits become an org-pooled balance.
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (table) => [
     index("user_credits_user_id_index").on(table.userId),
     uniqueIndex("user_credits_reference_id_unique").on(table.referenceId),
+    index("user_credits_org_id_index").on(table.organizationId),
   ],
 );
 
@@ -1107,10 +1191,16 @@ export const usageEvents = pgTable(
     cacheCreationInputTokens: integer("cache_creation_input_tokens"),
     // Tokens that are billed at the output rate
     outputTokens: integer("output_tokens"),
+    // Tenant fence (WI-5 step 2). Nullable; usage rolls up to the org (Hatchet
+    // tenant billing) on backfill.
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (table) => [
     index("usage_events_user_id_index").on(table.userId),
+    index("usage_events_org_id_index").on(table.organizationId),
     index("usage_events_user_id_created_at_index").on(
       table.userId,
       table.createdAt,
@@ -1138,6 +1228,10 @@ export const usageEventsAggCacheSku = pgTable(
       .primaryKey()
       .default(sql`gen_random_uuid()`),
     userId: text("user_id").notNull(),
+    // Tenant fence (WI-5 step 2). Nullable; matches usageEvents rollup on backfill.
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     sku: text("sku").$type<UsageSku>().notNull(),
     eventType: text("event_type").$type<UsageEventType>().notNull(),
     inputTokens: bigint("input_tokens", { mode: "bigint" })
@@ -1171,6 +1265,7 @@ export const usageEventsAggCacheSku = pgTable(
     ),
     index("usage_events_agg_cache_sku_user_index").on(t.userId),
     index("usage_events_agg_cache_sku_user_sku_index").on(t.userId, t.sku),
+    index("usage_events_agg_cache_sku_org_index").on(t.organizationId),
   ],
 );
 
@@ -1201,6 +1296,12 @@ export const agentProviderCredentials = pgTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
+    // Tenant fence (WI-5 step 2). Nullable = "user-personal vs org-shared" team
+    // credentials; the null/non-null distinction is a real product decision, not
+    // just a retrofit (ADR-001 follow-ups).
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     agent: text("agent").$type<AIAgent>().notNull(),
     type: text("type").$type<"api-key" | "oauth">().notNull(),
     isActive: boolean("is_active").notNull().default(true),
@@ -1223,5 +1324,6 @@ export const agentProviderCredentials = pgTable(
       table.userId,
       table.agent,
     ),
+    index("agent_provider_credentials_org_id_index").on(table.organizationId),
   ],
 );

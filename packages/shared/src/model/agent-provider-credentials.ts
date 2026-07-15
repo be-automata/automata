@@ -34,7 +34,7 @@ export async function insertAgentProviderCredentials({
   userId: string;
   credentialData: Omit<
     AgentProviderCredentialsDecrypted,
-    "id" | "userId" | "createdAt" | "updatedAt"
+    "id" | "userId" | "organizationId" | "createdAt" | "updatedAt"
   >;
   encryptionKey: string;
 }): Promise<AgentProviderCredentials> {
