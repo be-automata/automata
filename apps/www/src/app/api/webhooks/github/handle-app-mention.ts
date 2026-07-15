@@ -323,6 +323,12 @@ async function triggerTasksForUser({
       console.error(`No github access token found for user ${userId}`);
       return;
     }
+    // Derive the tenant once from the GitHub App installation (WI-5); reuse it
+    // for both the existing-thread lookup and thread creation. Unmapped -> null.
+    const organizationId = await getOrganizationIdForInstallation({
+      db,
+      installationId,
+    });
     const [isIssueOrPrAuthor, userSettings, batchingEnabled] =
       await Promise.all([
         getIsIssueOrPrAuthor({
@@ -422,12 +428,6 @@ async function triggerTasksForUser({
         repoFullName,
         userId,
       });
-      // Derive the tenant from the GitHub App installation (WI-5). One
-      // installation binds to one org (github-installation.ts); unmapped → null.
-      const organizationId = await getOrganizationIdForInstallation({
-        db,
-        installationId,
-      });
       const { threadId, threadChatId } = await newThreadInternal({
         userId,
         organizationId,
@@ -468,6 +468,7 @@ async function triggerTasksForUser({
         repoFullName,
         prNumber: issueOrPrNumber,
         userId,
+        organizationId,
       });
       if (threadOrNull) {
         const threadChat = getPrimaryThreadChat(threadOrNull);
