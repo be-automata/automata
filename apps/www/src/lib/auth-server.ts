@@ -165,6 +165,7 @@ export const getUserInfoOrNull = cache(async (): Promise<UserInfo | null> => {
     getUserCookies(),
     getUserCredentials({
       userId: session.user.id,
+      organizationId: session.session.activeOrganizationId ?? null,
     }),
   ]);
   return {

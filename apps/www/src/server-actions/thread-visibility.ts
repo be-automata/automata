@@ -1,7 +1,7 @@
 "use server";
 
 import { updateThreadVisibility } from "@terragon/shared/model/thread-visibility";
-import { userOnlyAction } from "@/lib/auth-server";
+import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { db } from "@/lib/db";
 import { ThreadVisibility } from "@terragon/shared/db/types";
 
@@ -16,7 +16,14 @@ export const updateThreadVisibilityAction = userOnlyAction(
       visibility: ThreadVisibility;
     },
   ) {
-    await updateThreadVisibility({ db, userId, threadId, visibility });
+    const tenant = await getTenantContextOrNull();
+    await updateThreadVisibility({
+      db,
+      userId,
+      threadId,
+      visibility,
+      organizationId: tenant?.organizationId ?? null,
+    });
   },
   { defaultErrorMessage: "Failed to update task visibility" },
 );

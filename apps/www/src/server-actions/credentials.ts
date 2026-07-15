@@ -1,7 +1,7 @@
 "use server";
 
 import { db } from "@/lib/db";
-import { userOnlyAction } from "@/lib/auth-server";
+import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import {
   insertAgentProviderCredentials,
   updateAgentProviderCredentialsById,
@@ -15,7 +15,11 @@ import { getAgentProviderCredentials } from "@/server-lib/credentials";
 
 export const getAgentProviderCredentialsAction = userOnlyAction(
   async function getAgentProviderCredentialsAction(userId: string) {
-    return getAgentProviderCredentials({ userId });
+    const tenant = await getTenantContextOrNull();
+    return getAgentProviderCredentials({
+      userId,
+      organizationId: tenant?.organizationId ?? null,
+    });
   },
   { defaultErrorMessage: "Failed to fetch credentials" },
 );
@@ -69,9 +73,11 @@ export const saveAgentProviderApiKey = userOnlyAction(
         agent,
       },
     });
+    const tenant = await getTenantContextOrNull();
     await insertAgentProviderCredentials({
       db,
       userId,
+      organizationId: tenant?.organizationId ?? null,
       credentialData: {
         type: "api-key",
         agent,
@@ -99,7 +105,13 @@ export const deleteAgentProviderCredential = userOnlyAction(
         credentialId,
       },
     });
-    await deleteAgentProviderCredentialById({ db, userId, credentialId });
+    const tenant = await getTenantContextOrNull();
+    await deleteAgentProviderCredentialById({
+      db,
+      userId,
+      credentialId,
+      organizationId: tenant?.organizationId ?? null,
+    });
   },
   { defaultErrorMessage: "Failed to delete" },
 );
@@ -117,10 +129,12 @@ export const setAgentProviderCredentialActive = userOnlyAction(
         isActive,
       },
     });
+    const tenant = await getTenantContextOrNull();
     await updateAgentProviderCredentialsById({
       db,
       userId,
       credentialId,
+      organizationId: tenant?.organizationId ?? null,
       updates: { isActive },
     });
   },

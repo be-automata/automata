@@ -4,12 +4,15 @@ import { UserCredentials } from "@terragon/shared";
 
 export async function getUserCredentials({
   userId,
+  organizationId,
 }: {
   userId: string;
+  organizationId?: string | null;
 }): Promise<UserCredentials> {
   const agentProviderCredentials = await getAllAgentProviderCredentialRecords({
     db,
     userId,
+    organizationId,
     isActive: true,
   });
   const result: UserCredentials = {

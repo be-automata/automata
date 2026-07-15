@@ -51,12 +51,15 @@ function parseJwtPayload(idToken: string): {
 
 export async function getAgentProviderCredentials({
   userId,
+  organizationId,
 }: {
   userId: string;
+  organizationId?: string | null;
 }) {
   const agentProviderCredentials = await getAllAgentProviderCredentialRecords({
     db,
     userId,
+    organizationId,
   });
   // Group credentials by agent and sort by createdAt (earliest first)
   const grouped = agentProviderCredentials.reduce(

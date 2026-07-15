@@ -1,6 +1,6 @@
 "use server";
 
-import { userOnlyAction } from "@/lib/auth-server";
+import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
 import { refreshAccessToken } from "@/lib/openai-oauth";
@@ -43,9 +43,11 @@ export const saveCodexAuthJson = userOnlyAction(
         event: "codex_oauth_tokens_saved",
         properties: {},
       });
+      const tenant = await getTenantContextOrNull();
       await insertAgentProviderCredentials({
         db,
         userId,
+        organizationId: tenant?.organizationId ?? null,
         credentialData: {
           type: "oauth",
           agent: "codex",
