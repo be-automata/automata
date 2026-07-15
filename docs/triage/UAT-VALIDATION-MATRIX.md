@@ -421,3 +421,29 @@ boot-coder surfaced (and started) a previously-missing dependency: the **PartyKi
 **Impact on C8 (stubbed run → dashboard):** the broadcast **transport** (one of C8's three blockers) is now confirmed running. Remaining C8 blockers: a real **GitHub-App-installed repo** (fake repos reject at the create gate) + a **running sandbox provider** + an **actual agent run** (spends Anthropic credits). C8 stays deferred as a non-headless case, but the streaming substrate is no longer missing. This is also a partial **OBSERVED-pillar (O2)** datapoint: the live-transcript relay transport is alive, though no transcript has been streamed end-to-end yet.
 
 **Env at round close:** app :3100, broadcast :1999, Postgres :55432, Redis :58079, MinIO :9000. DB holds my 4 test users / 5 orgs / 4 threads (boot-coder cleaned its own seeds, left mine).
+
+## C10-ORG round — STAGED design (2026-07-15, pending boot-coder rebuild ping @ 6d893ad)
+
+WI-5 landed (HEAD 6d893ad): `forTenant` accessor (`model/tenant.ts`), org fence on thread reads, org stamp on create. Certifies tenant isolation at **ORG altitude** on app-created threads. Executes on boot-coder's ping (app was responding but may be mid-rebuild — not executed yet).
+
+### Fence semantics (read from source, not assumed)
+- **`forTenant` fence = `and(userId, organizationId)`** — threads are **private-to-creator within an org** (`tenant.ts:33-35`). A co-member of the same org does NOT see your threads (per-user list preserved); another org never sees them.
+- **`threadOrgFence(orgId)` (`threads.ts:54`)** = `orgId ? eq(thread.organizationId, orgId) : undefined`. Asymmetric and load-bearing: when the query carries an active org, the predicate is `eq(...)`, which **excludes NULL** → **legacy null-org threads are hidden whenever the caller has an active org**. When the query org is null, no org predicate is applied → userId-only.
+- **Dashboard** reads get org from `session.activeOrganizationId` (`auth-server.ts:70`). **CLI** reads get org from the daemon token's `metadata.organizationId` (`daemon-token-context.ts` → `daemonTokenContextFromApiKey`).
+
+### Two predicted findings to VERIFY (per team-lead: record actual, finding-not-fail)
+1. **CLI/daemon tokens are minted WITHOUT org metadata.** `createCliApiToken` (product) and the dev `/api/internal/daemon-token` route both call `auth.api.createApiKey({ body: { userId } })` with **no `metadata.organizationId`**. So `daemonTokenContextFromApiKey` resolves `organizationId=null` → `threadOrgFence(null)` no-ops → **the CLI read path is org-fenced in name only; in production it falls back to user-level**. This is a read-side sibling of the known background-create gap. → Verify by minting a token via the product path and reading its resolved org; certify the *fence mechanism* separately by minting a token WITH `metadata.organizationId` (test-only) and confirming it isolates.
+2. **Null-org legacy threads vanish under an active org.** Because the fence uses `eq`, a creator who now has an active org will NOT see their own pre-fence (null-org) threads via an org-scoped read. The "null-org visible to creator" back-compat claim holds **only for a null-org query context**. → Verify: seed a null-org thread for a user, read it (a) with a null-org token/session (expect visible) and (b) with an org-scoped token/session (expect hidden). Record which; flag as sweep semantics question if it contradicts ADR-001 intent.
+
+### Test matrix (execute on ping)
+Fixtures — 2 real users, each with an org; threads carrying `organizationId` (via real app create if a GitHub-App-installed repo is available, else org-stamped seed rows — see feasibility). Probe via CLI with **org-scoped** daemon tokens (self-minted with `metadata.organizationId`).
+1. **Row-level stamp:** each app-created/seeded thread row carries the creator's `organizationId` (psql assertion).
+2. **Cross-org list:** user A (active org A) list → only org-A threads; zero org-B rows.
+3. **Cross-org detail:** A reads a org-B thread → 404; own-org read → OK (control).
+4. **Org switch:** a user in 2 orgs creates a thread in org1, switches active org to org2, lists → org1 thread should NOT appear while org2 active (per private-to-creator-within-org fence). Record actual.
+5. **Legacy/null-org back-compat:** null-org thread visible to creator under a null-org read; behavior under an org-scoped read recorded per finding #2.
+
+### Feasibility notes / dependencies
+- **App-create needs a GitHub-App-installed repo** (create rejects at the repo-access gate for fake repos — proven in R1c C7). If no real installed repo is available headlessly, thread rows will be **org-stamped seed rows** to exercise the read fence, and the create-path org-stamp certified at code level (`tenant.ts:95`, `cli-router` create passes `context.organizationId`, commit 6d893ad) rather than end-to-end. Flag to team-lead which applies.
+- **Org-scoped daemon tokens:** self-mint via `POST /api/auth/api-key/create` with `metadata:{organizationId}` (bearer/cookie session). Confirms the fence READ mechanism independent of the product mint gap (finding #1).
+- **Background create paths** (webhooks/automations/follow-up) don't stamp org — per team-lead, recorded as sweep-pending, not failed.
