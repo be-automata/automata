@@ -5,6 +5,11 @@ off**: no Stripe, PostHog, E2B/Daytona, Resend, Loops, or Slack. Only the statef
 backing services (Postgres, Redis, object storage) run in containers; the app
 processes run on the host.
 
+**The full stack is five services**: `apps/www` + `apps/broadcast` (host processes)
+and Postgres + Redis(+shim) + MinIO (containers). `apps/broadcast` is **not**
+optional once you exercise auth/user-lifecycle — signup and other user hooks POST
+to it, so a stack without it 500s on signup (see [Troubleshooting](#troubleshooting)).
+
 Files:
 - `deploy/docker-compose.selfhost.yml` — Postgres 16, Redis 7 + Upstash HTTP shim, MinIO (R2 stand-in).
 - `deploy/selfhost.env.example` — the complete minimal env, every deferred service empty.
@@ -17,7 +22,7 @@ Files:
 | Redis 7 + `serverless-redis-http` | container | `REDIS_URL`/`REDIS_TOKEN`. The shim exposes the Upstash-compatible HTTP API `@upstash/redis` expects. Leaving `REDIS_URL` empty is also valid — the app falls open to an in-memory single-node stand-in (`apps/www/src/lib/redis.ts`). |
 | MinIO (+ one-shot bucket init) | container | S3-compatible store for the `R2_*` vars. `R2_ENDPOINT` points the `@aws-sdk/client-s3` client at MinIO. The init job creates both buckets and makes the public one anonymously readable. |
 | **`apps/www`** | **host** (`next start`) | Not containerized here — `node_modules` was installed with `--ignore-scripts`, so a Docker image build of the app is out of scope for now. Run it on the host. |
-| **`apps/broadcast`** | **host** (`tsx`/PartyKit) | PartyKit realtime relay on port 1999. Needed for the live-transcript surface; the www app points at it via `NEXT_PUBLIC_BROADCAST_URL`/`_HOST`. Not required for a bare `GET /` boot. |
+| **`apps/broadcast`** | **host** (`partykit dev`) | PartyKit realtime relay on port 1999. **Required for auth/user-lifecycle**, not just live transcripts: signup and other user hooks POST to `/parties/main/user:<id>`, so with it down signup returns 500 (see [Troubleshooting](#troubleshooting)). The www app points at it via `NEXT_PUBLIC_BROADCAST_URL`/`_HOST`. Optional only for an anonymous `GET /`. |
 | Crons | not run here | Vercel Cron is being replaced by Hatchet. The four `/api/internal/cron/*` endpoints auth via `Bearer CRON_SECRET` and can be driven by any scheduler. |
 
 ## Boot procedure
@@ -33,12 +38,16 @@ docker compose -f deploy/docker-compose.selfhost.yml --env-file deploy/selfhost.
 set -a; . deploy/selfhost.env; set +a
 cd packages/shared && pnpm exec drizzle-kit push --config drizzle.config.ts && cd ../..
 
-# 4a. Boot the app for production (the real self-host path).
+# 4. Start the broadcast relay (host process, port 1999) — required for
+#    auth/user-lifecycle, not just live transcripts. Leave it running.
+cd apps/broadcast && pnpm exec partykit dev &   # then cd back
+
+# 5a. Boot the app for production (the real self-host path).
 cd apps/www && pnpm exec next build && pnpm exec next start
-# 4b. …or for development.
+# 5b. …or for development.
 cd apps/www && pnpm exec next dev
 
-# 5. Verify.
+# 6. Verify.
 curl -i http://localhost:3000/
 ```
 
@@ -53,11 +62,17 @@ URL in the env (`DATABASE_URL`, `REDIS_URL`, `R2_ENDPOINT`, `R2_PUBLIC_URL`).
 
 ## First-user bootstrap (headless)
 
-A fresh self-host has **no first-user path**: email/password sign-up is disabled
-(`EMAIL_AND_PASSWORD_SIGN_UP_IS_NOT_ENABLED`), the magic-link route needs a real
-Resend key (it calls Resend's HTTP API, not SMTP), and GitHub OAuth needs a browser
-handshake. For headless dev/UAT, `deploy/seed-selfhost.ts` seeds authenticated
-user(s) + org(s) + session(s) straight into Postgres.
+> **`deploy/seed-selfhost.ts` is a dev/CI fixture bootstrap — real installs use the
+> signup form.** With `AUTH_EMAIL_PASSWORD_ENABLED=true` (set in `selfhost.env.example`)
+> a fresh box makes
+> its first user through the normal `/login` email/password flow. This seed exists to
+> mint users/orgs/sessions fast for CI fixtures and multi-org isolation probes, not to
+> replace that path.
+
+A headless flow still needs a shortcut when email/password is off: sign-up is disabled
+by default, the magic-link route needs a real Resend key (it calls Resend's HTTP API,
+not SMTP), and GitHub OAuth needs a browser handshake. `deploy/seed-selfhost.ts` seeds
+authenticated user(s) + org(s) + session(s) straight into Postgres.
 
 It works because better-auth's `bearer` plugin (enabled in `apps/www/src/lib/auth.ts`,
 no `requireSignature`) signs a *raw* token itself — so a plain `session` row is
@@ -131,8 +146,11 @@ Step-by-step:
    not a self-host defect**, so it was left untouched. To exercise the production
    runtime regardless, the type/lint gate was bypassed **temporarily** via
    `typescript.ignoreBuildErrors` in `next.config.ts` for the smoke build only —
-   that change was reverted and is **not** committed. Once the org-plugin Session
-   type reconciles in those two files, `next build` should pass the gate cleanly.
+   that change was reverted and is **not** committed. **Since resolved:** the
+   org-plugin Session type reconciled in those two files, and `next build` now
+   exits 0 with the type gate ON when the env is loaded (see [Build-time env
+   requirement](#build-time-env-requirement-verified-2026-07-15)). The bypass is no
+   longer needed for any purpose.
 
 No self-host env fix was required — `selfhost.env.example` validated as-is.
 
@@ -161,3 +179,24 @@ Verified at HEAD (post org-plugin commits): with env loaded, `next build` exits 
 type gate ON — the temporary `ignoreBuildErrors` bypass used during the first smoke is no
 longer needed for any purpose. CI note (WI-7): the build job needs the full env var set,
 not just test vars.
+
+## Troubleshooting
+
+**Signup returns HTTP 500 (`fetch failed` / `ECONNREFUSED` in the logs).** The
+broadcast relay isn't running. A post-create user hook POSTs to
+`/parties/main/user:<userId>` on `NEXT_PUBLIC_BROADCAST_URL` (port 1999); when
+nothing is listening the hook throws and the signup response becomes 500 — even
+though the `user` row is already committed. **Fix:** start `apps/broadcast`
+(`cd apps/broadcast && pnpm exec partykit dev`) and retry; signup then returns 200
+with a session. (`apps/broadcast` is one of the five stack services — it is not
+optional once auth/user-lifecycle is exercised. A product-side fail-soft so signup
+degrades gracefully when the relay is down is tracked separately.)
+
+**`GET /` returns 500 only under `next dev`** (`EvalError: Code generation from
+strings disallowed`). A dev-mode-only webpack `eval`-devtool interaction with the
+Next edge runtime; `next start` (the real self-host path) serves 200. Use
+`next start`.
+
+**`next build` fails collecting page data with an envsafe banner.** The build
+evaluates route modules, which triggers envsafe at module load — load the full env
+before building (see [Build-time env requirement](#build-time-env-requirement-verified-2026-07-15)).
