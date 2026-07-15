@@ -535,3 +535,12 @@ The dashboard thread list is served by `getThreadsAction` (server action) which 
 Org-level tenant isolation is certified end-to-end on both surfaces: **CLI** (product token now org-stamped, reads fenced) and **dashboard** (session-sourced fence, org-switch honored). Both prior findings resolved: **#1 fixed (2e28584, verified live)**; **#2** documented migration semantics (personal-org backfill at cutover). Remaining sweep-pending (per team-lead, not this round): background create paths (webhooks/automations/follow-up) + `daemon.ts` proxy-token org — the ~96-site sweep the lead is ordering next, with these findings steering priority.
 
 Test artifacts: additional `cli-*` apikeys on user A (product-minted during test). Harmless; boot-coder can clear.
+
+## Sweep batch-1 validation — STAGED placeholder (HOLD for tenancy-coder report)
+
+C10-ORG is CLOSED (no DOM re-drive: per team-lead, Next-Action invocation certifies the fence = identical server code; a rendered-UI pass tests UI wiring, not tenancy — deferred to a later UX round). Next: validate the ~96-site sweep per batch. **Batch 1 = background create paths + `daemon.ts` proxy-token org.** Hold until tenancy-coder reports; design the probes around the **derivation rules it documents** (org is NOT the user's active-org-at-read-time for background paths — it must derive from the triggering resource). Three probes the round must cover (per team-lead):
+1. **Webhook-created thread lands in the RIGHT org** — a GitHub-webhook-driven thread gets `organizationId` derived from the repo/installation→org mapping, not from any ambient session.
+2. **Automation-created thread inherits its automation's org** — a thread created by an automation carries the automation row's `organizationId`.
+3. **Sandbox-agent proxy token is scoped to its thread's org** — the proxy/daemon token minted for an in-sandbox agent resolves the org of *its thread*, not the user's active org at some later time (the temporal-decoupling case — active org can change after the run starts).
+
+Method will mirror C10-ORG: derive expected org from the trigger, assert the created row's `organization_id` (psql) + that reads through the fence are correctly scoped. Refine exact assertions against the documented derivation rules when batch 1 lands.
