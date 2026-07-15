@@ -112,3 +112,20 @@ No self-host env fix was required — `selfhost.env.example` validated as-is.
 | C3 | Dependency/security patch level | **NOT ASSESSED here** | Next 15.4.8 / React 19 build clean; `pnpm audit` not run (no install permitted this session). Track separately. |
 | C4 | docker-compose boot | **PASS** | `docker-compose.selfhost.yml` brings up Postgres + Redis(+shim) + MinIO, all healthchecked green; app serves 200. (Hatchet not yet wired.) |
 | C5 | Signup | **PARTIAL** | `/login` (the Better Auth entry) renders 200 against the compose Postgres; an actual account-create round-trip was not driven this session — needs a UI/API signup POST to fully close C5. |
+
+## Build-time env requirement (verified 2026-07-15)
+
+`next build` evaluates route modules during page-data collection, which triggers envsafe
+validation at module load — **a build without the runtime env present fails** with a
+`Failed to collect page data for /api/internal/cron/...` error wrapping the envsafe banner.
+Load the selfhost env (or CI equivalents) before building:
+
+```bash
+set -a; source deploy/selfhost.env.example; set +a   # or your real env file
+pnpm --filter terragon-www build
+```
+
+Verified at HEAD (post org-plugin commits): with env loaded, `next build` exits 0 with the
+type gate ON — the temporary `ignoreBuildErrors` bypass used during the first smoke is no
+longer needed for any purpose. CI note (WI-7): the build job needs the full env var set,
+not just test vars.
