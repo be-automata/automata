@@ -670,3 +670,40 @@ Junk fixture: 1 org-stamped automation "UAT Slice2 orgA" (org=orgA) on user A �
 **Slice 4 — usage reads onto forTenant → PASS (code-cert + unit).** `getUserUsageEvents` + `getUserUsageEventsAggregated` gain optional `organizationId` with `and(userId, organizationId)`; forTenant gains `getUsageEvents` + `getUsageEventsAggregated`. **Not route-reachable** (no usage-read server action) and **inert until the usage WRITE path stamps org** (billing-rollup, later) — so code-cert + unit is the right altitude, no live probe. `tenant.test.ts` green incl. "getUsageEvents fences on the active org". **Deferred by design (billing territory, batch 3+):** `subscription` (referenceId=user.id) + `credits`/`getUserCreditBalance` — the org-pooled-billing model (referenceId flip, org-shared balance) is a product/billing decision, explicitly NOT a read fence. Recorded as intentional.
 
 **Slice-2 amendment (b41bfb9) — the getAutomations read-fence gap I found is FIXED.** `getAutomations` server action now threads `getTenantContextOrNull().organizationId` into the fence (`automations.ts:33` "Fence the dashboard list on the active org (WI-5), mirroring the threads route wiring"); update/delete routes fenced too. `automations.test.ts` (server-actions) **2/2 green**: "getAutomations returns only the active org" + "deleteAutomation is fenced to the active org". Code + unit PASS. **LIVE re-probe pending deploy** — HEAD is b41bfb9 but the running instance is still 61705eb; after boot-coder deploys, re-run getAutomations @orgA vs @orgA2 to confirm the orgA automation no longer leaks under orgA2 (the exact live gap from 8bb74ff).
+
+## BATCH-2 CLOSE-OUT (2026-07-15) — WI-5 query sweep
+
+Slice-2 amendment re-probe (live on 519fc3d): `getAutomations` @orgA → `[UAT Slice2 orgA]`; @orgA2 → **`[]`** (leak CLOSED). The read-fence gap I found is fixed and verified live.
+
+### Per-table fence coverage vs the flagged set (16 tables carry `organization_id`)
+
+| Table | Status | Note |
+|---|---|---|
+| `thread` | **FENCED** | forTenant get/list/create/update/delete; C10-ORG + C10-ORG-CLOSURE live-certified |
+| `thread_chat` | **FENCED** | `threadChatOrgFence`; updateThreadChat |
+| `thread_visibility` | **FENCED** | slice 1: setThreadVisibility, row inherits thread org |
+| `environment` | **FENCED** | forTenant environment reads/writes |
+| `automations` | **FENCED (live-verified)** | slice 2 create-stamp + slice-2 amendment read/update/delete routes; re-probe confirms cross-active-org leak closed |
+| `agent_provider_credentials` | **FENCED** | slice 3: per-user fenced by org; org-shared tier deferred (billing) |
+| `usage_events` | **READ-FENCED, write-pending** | slice 4: reads via forTenant; INERT until the usage WRITE path stamps org (billing-rollup) |
+| `github_pr` | **BY-DESIGN unstamped** | repo-global row; owner-scoped access is fenced via `getThreadForGithubPR`; row stamp deferred to batch-3 unique-index redesign |
+| `github_installation` | **ORG-SOURCE (mapping)** | installation→org mapping; drives GitHub-mention derivation (batch-1 probe) |
+| `slack_installation` | **ORG-SOURCE (mapping)** | workspace→org; drives Slack-mention derivation (batch 1) |
+| `apikey` | **FENCED (metadata)** | org in key metadata (double-JSON); getDaemonTokenContext resolves; CLI mint stamps (batch 1 + createCliApiToken, C10-ORG-CLOSURE live-verified) |
+| `member`, `invitation` | **ORG-NATIVE** | Better Auth organization plugin tables |
+| `subscription` | **DEFERRED (billing)** | referenceId=user.id → org flip is a billing-model product decision (batch 3+) |
+| `user_credits` | **DEFERRED (billing)** | org-pooled credit balance = billing-model decision (batch 3+) |
+| `usage_events_agg_cache_sku` | **WATCH** | carries org_id; confirm it's read through the org-scoped aggregate in batch 3 |
+
+### Sweep-completion verdict
+**Batch 2 COMPLETE for the in-scope domain reads.** All user-facing model reads that gate the tenant boundary are org-fenced through the `forTenant` seam (threads, thread-chat, visibility, environments, automations incl. live-verified server-action reads, credentials, usage-reads). Background create/token derivations (batch 1) are certified. The one gap surfaced by live probing (`getAutomations` route) was found, fixed (b41bfb9), and re-verified live. **No cross-user/cross-org data leak remains in any exercised read.**
+
+### Batch-3 remainder (explicit)
+1. **`organization_id` NOT-NULL tightening** — currently nullable for backfill; tighten after the personal-org backfill (db2c10b) completes across all rows.
+2. **Org indexes** — add `organization_id` indexes on the fenced tables for query perf (thread has one; audit the rest).
+3. **`github_pr` row stamp + unique-index redesign** — WATCH-ITEM (mine): ensure `getThreadForGithubPR` stays owner+org fenced through the redesign; verify repo-global reads don't expose owner-scoped PR data cross-org.
+4. **`usage_events` WRITE path** stamps org from thread context (billing-rollup) — flips slice-4 reads from inert to live.
+5. **Billing model** — `subscription.referenceId` user→org flip + `user_credits` org-pooled balance (product decision).
+6. **`usage_events_agg_cache_sku`** fence confirmation.
+
+**C10 exit criterion (WI-5): MET** at product-path altitude on both surfaces (CLI + dashboard), cross-org isolation live-certified, no leak. Batch 2 sweep closed.
