@@ -358,3 +358,26 @@ Signup enablement is owned by **tenancy-coder** (`AUTH_EMAIL_PASSWORD_ENABLED` b
 ### R1c — C5 evidence standard (per team-lead)
 
 **A seeded session does NOT count as C5 evidence.** boot-coder's `seed-selfhost.ts` bearer sessions authenticate around signup and are treated strictly as **supplementary fixtures** — valid for widening C10 probes (up to 4 orgs) and fast API-level assertions (as used above for C6/C7/C10), but they do **not** certify the product's self-serve signup behavior. **C5 must be exercised via the real email/password signup form** (rendered after the `AUTH_EMAIL_PASSWORD_ENABLED` rebuild cuts over on :3100), driving `POST /api/auth/sign-up/email` through the actual UI flow and observing: account creation, `autoSignIn` session, and the resulting fresh-user-no-org (`activeOrganizationId=null`) dashboard state. Status: **PENDING rebuild cutover** (boot-coder re-ordered to rebuild now; execute on its ping).
+
+## R1c-final — real self-serve signup (C5) EXECUTED, post-rebuild (2026-07-15)
+
+Rebuild with `AUTH_EMAIL_PASSWORD_ENABLED=true` cut over on :3100 (login now serves the email/password form). C5 exercised via the **real product path as a brand-new, non-seeded user** (not a seeded fixture — per the recorded evidence standard).
+
+| Case | Verdict | Evidence |
+|---|---|---|
+| **C5 — real self-serve signup** | **PASS** | `/login` renders the form (`type="email"`, `type="password"`, "create an account" toggle, GitHub button intact). `POST /api/auth/sign-up/email` as new user `uat-c5-real@selfhost.local` → **200**, real `user` row minted (id `bOZeH…`), `autoSignIn` set a **signed** `better-auth.session_token` cookie. `get-session` via that cookie → correct `userId`, `emailVerified=false`. This is product-behavior signup, not a seeded session. |
+| **Fresh-user-no-org state** | **PASS (characterized)** | Immediately post-signup, `activeOrganizationId=null` (org plugin does not auto-create an org). `GET /dashboard` for this authed null-org user → **HTTP 200**, renders an **Onboarding/welcome/setup** state (graceful — no crash, no redirect loop, no error). `/welcome` → 200. So a fresh user with no org lands in onboarding, as intended. |
+| **C6 — org-create (runtime), real user** | **PASS** | `POST /api/auth/organization/create` with the real user's session → org created (`JnUhW…`), user persisted as `owner`, and the session's `activeOrganizationId` **updated** to the new org (null → set). Loop closed. |
+
+### R1c consolidated verdict table (all cases this round)
+
+| Case | Verdict | Altitude / note |
+|---|---|---|
+| C5 real self-serve signup | **PASS** | Real product path, new user, autoSignIn |
+| Fresh-user-no-org dashboard | **PASS (characterized)** | Graceful onboarding state, HTTP 200 |
+| C6 org-create runtime | **PASS** | Real user + seeded user both; owner membership + active-org update |
+| C7 task-create | **PASS-to-gate** | Reachable/authed/validated; stops at GitHub-repo gate; no provisioning, no run |
+| C8 stubbed run → dashboard | **BLOCKED** | Needs real installed repo + running provider + `apps/broadcast` relay |
+| C10 cross-user isolation | **PASS (user-level baseline)** | Per-endpoint, no leakage, control OK; org-level pending WI-5 sweep |
+
+**Round-1 UAT status:** the executed pillars now have real evidence — signup/onboarding (C5), tenant identity + org-create (C6), task-create wiring (C7), and user-level cross-tenant isolation (C10) all PASS at their respective altitudes. Remaining open: C8 run-streaming (needs the execution substrate + a real repo), the full org-level C10 (post-WI-5 accessor sweep), and the two test-harness baseline regressions (shared/www — under triage-tester, confirmed harness-only). Test artifacts left in the self-host DB (users `uat-c5-real`, seeded owner1/2; orgs `uat-c5-org`, `uat-runtime-org`, 2 seeded; threads `thr_uat_org1/2`) — harmless, boot-coder can re-seed.
