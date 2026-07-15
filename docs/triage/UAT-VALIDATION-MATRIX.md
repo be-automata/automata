@@ -479,3 +479,15 @@ boot-coder rebuilt :3100 at 6d893ad and pushed the `organization_id` columns (th
 Org-level tenant isolation **PASSES at the mechanism level** (row stamp + org-partitioned reads + same-user cross-org denial + org-switch). Two confirmed gaps for the sweep: (#1) daemon-token mints don't stamp org → CLI fence inert in prod; (#2) unbackfilled null-org threads vanish under an active org. Neither is a data-leak (no user saw another's data; if anything #1 is *under*-fencing within a single user's own orgs, not cross-user leakage). Background create paths (webhooks/automations/follow-up) not stamping org remain sweep-pending per team-lead.
 
 Test artifacts added: org A2 (`uat-org-a2`), threads `thr_orgA_1/thr_orgA2_1/thr_orgB_1`, several daemon tokens. Harmless; boot-coder can clear.
+
+### C10-ORG — recording refinements (team-lead adjudication, 2026-07-15)
+
+Three dispositions confirmed by team-lead; folded in so the round is recorded at the right altitude:
+
+1. **Create-stamp certification (seeding accepted).** No real GitHub-App-installed repo exists for this platform yet (smoke env has dummy `GITHUB_*` keys; the platform's own GitHub App is a later-phase deliverable), so org-stamped seed rows are the accepted method for exercising the **read** fence. The **create-path org-stamp** is certified at **action level** by `apps/www/src/server-actions/new-thread.test.ts:97-147` ("organization tenant scoping (WI-5)" — real `newThread` action + `session.activeOrganizationId` → `thread.organizationId === org.id`, plus a null-org case), committed with 6d893ad. **`app-path create with a real installed repo re-certifies in the substrate phase (C7-full).`**
+
+2. **Finding #1 → FINDING, fix-in-flight.** Confirmed REAL and **pre-known**: tenancy-coder flagged the daemon/CLI key-creation rewiring in its WI-5 report; team-lead is dispatching that fix now. The CLI fence **mechanism** is certified here (org-carrying test token isolates correctly); the production gap is the mint not stamping `metadata.organizationId`. Re-verify after the mint-stamps-org fix lands.
+
+3. **Finding #2 → documented migration semantics, NOT a defect.** "Creator can't see their null-org thread under an active org" is the intended behavior; the operator remedy for legacy rows is the **personal-org backfill script** (creates personal orgs + stamps `organizationId`), run at cutover. Both behaviors recorded (visible under null-org query; hidden under active org); not treated as a defect.
+
+**C10-ORG round CLOSED.** Org-level fence certified at the mechanism level; the two findings are tracked sweep items (one with a fix in flight, one resolved-by-backfill), not fails. No cross-user data leak observed in any probe.
