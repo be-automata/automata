@@ -6,9 +6,12 @@ let posthogInstance: PostHog | null = null;
 
 export function getPostHogServer() {
   if (!posthogInstance) {
-    posthogInstance = new PostHog(env.NEXT_PUBLIC_POSTHOG_KEY!, {
+    posthogInstance = new PostHog(env.NEXT_PUBLIC_POSTHOG_KEY || "disabled", {
       host: env.NEXT_PUBLIC_POSTHOG_HOST!,
-      disabled: process.env.NODE_ENV !== "production" || !!process.env.CI,
+      disabled:
+        !env.NEXT_PUBLIC_POSTHOG_KEY ||
+        process.env.NODE_ENV !== "production" ||
+        !!process.env.CI,
       flushAt: 1,
       flushInterval: 0, // Server-side functions in Next.js can be short-lived we flush regularly
     });
