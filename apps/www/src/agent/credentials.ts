@@ -2,9 +2,31 @@ import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
 import { AIAgent, AIAgentCredentials, AIModel } from "@terragon/agent/types";
 import { getAgentProviderCredentialsDecrypted } from "@terragon/shared/model/agent-provider-credentials";
+import { getOrganizationById } from "@terragon/shared/model/organizations";
 import { getCodexCredentialsJSONOrNull } from "@/agent/msg/codexCredentials";
 import { getClaudeCredentialsJSONOrNull } from "@/agent/msg/claudeCredentials";
 import { ThreadError } from "./error";
+
+/**
+ * When credential resolution is org-scoped (WI-5), a missing credential means
+ * "missing IN THIS org" — not globally. Surface that so the hint/resolution
+ * mismatch self-explains (the feature-detection hints stay user-level by design).
+ * Returns e.g. ` in organization "Acme"`, or "" when org-less. Best-effort: on a
+ * lookup miss it degrades to a bare org id rather than throwing on the error path.
+ */
+async function orgScopeSuffix(
+  organizationId: string | null | undefined,
+): Promise<string> {
+  if (!organizationId) {
+    return "";
+  }
+  try {
+    const org = await getOrganizationById({ db, organizationId });
+    return org ? ` in organization "${org.name}"` : ` in organization ${organizationId}`;
+  } catch {
+    return ` in organization ${organizationId}`;
+  }
+}
 
 export async function getAndVerifyCredentials({
   agent,
@@ -32,7 +54,7 @@ export async function getAndVerifyCredentials({
       if (!ampApiKey) {
         throw new ThreadError(
           "missing-amp-credentials",
-          "User does not have Amp API key.",
+          `No Amp API key configured${await orgScopeSuffix(organizationId)}.`,
           null,
         );
       }
@@ -56,7 +78,7 @@ export async function getAndVerifyCredentials({
       if (codexCredentials.error) {
         throw new ThreadError(
           "invalid-codex-credentials",
-          codexCredentials.error,
+          `${codexCredentials.error}${await orgScopeSuffix(organizationId)}`,
           null,
         );
       }
@@ -78,7 +100,7 @@ export async function getAndVerifyCredentials({
       if (claudeCredentials.error) {
         throw new ThreadError(
           "invalid-claude-credentials",
-          claudeCredentials.error,
+          `${claudeCredentials.error}${await orgScopeSuffix(organizationId)}`,
           null,
         );
       }

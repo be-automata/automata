@@ -62,10 +62,11 @@ describe("getAndVerifyCredentials — org fence (WI-5 batch 3a)", () => {
     });
   });
 
-  it("does NOT resolve a credential from another org (no-drift pin)", async () => {
+  it("does NOT resolve a credential from another org (no-drift pin) with an org-aware error", async () => {
     // The agent run belongs to a thread in orgY; the orgX credential must not
     // leak. This pins the tenant fence — the credential is chosen by the thread's
-    // org, never the user's other orgs.
+    // org, never the user's other orgs — AND the failure names the org so the
+    // hint/resolution mismatch self-explains.
     await expect(
       getAndVerifyCredentials({
         agent: "amp",
@@ -73,6 +74,14 @@ describe("getAndVerifyCredentials — org fence (WI-5 batch 3a)", () => {
         userId: user.id,
         organizationId: orgY,
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/No Amp API key configured in organization "Org"/);
+  });
+
+  it("keeps the error org-less when resolution is not org-scoped", async () => {
+    // A user with no amp credential and no active org gets the plain message.
+    const other = (await createTestUser({ db })).user;
+    await expect(
+      getAndVerifyCredentials({ agent: "amp", model: null, userId: other.id }),
+    ).rejects.toThrow(/No Amp API key configured\./);
   });
 });
