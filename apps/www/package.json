@@ -8,7 +8,7 @@
     "dev:stripe": "stripe listen --forward-to localhost:3000/api/auth/stripe/webhook",
     "build": "pnpm --filter bundled build && next build",
     "start": "next start",
-    "test": "vitest",
+    "test": "vitest --no-file-parallelism",
     "storybook": "ladle serve",
     "tsc-watch": "tsc --noEmit --watch --preserveWatchOutput",
     "tsc-check": "tsc --noEmit",
