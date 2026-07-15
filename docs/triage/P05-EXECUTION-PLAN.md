@@ -78,3 +78,12 @@ permission-blocked — operator must clear `pnpm install`, ideally `--ignore-scr
 2. Product name (TRADEMARKS.md bars "Terragon"; workspace name "automata-platform" is a
    placeholder).
 3. WI-5 ADR choice: RLS vs repository accessor (recommendation will follow with the ADR).
+
+## Follow-up work items (post-batch-1, discovered by validation)
+
+- **WI-8: webhook endpoints must not 5xx on business rejections.** The GitHub mention probe
+  (f7974bc) showed /api/webhooks/github returns HTTP 500 when the repo-access gate rejects a
+  mention (dummy creds). GitHub marks 5xx deliveries failed and retries; business rejections
+  (repo not installed, unmapped user) should fast-ack 2xx with a structured skip log —
+  orch-agents' gateway semantics. Audit slack webhook for the same. Small, high-value before
+  any real GitHub App points at the platform.
