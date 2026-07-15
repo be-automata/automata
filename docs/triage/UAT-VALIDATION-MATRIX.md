@@ -806,3 +806,15 @@ Two hint surfaces, both correct — the "user-level" decision applied only to su
 - **Surface (2) BACKGROUND/pre-run hints → USER-level, INTENTIONAL-with-mitigation.** Verified in code: `startAgentMessage.ts:97` (`getUserCredentials({ userId })`, pre-thread-load) and `slack/handlers.ts:486` (`getUserCredentials({ userId: slackAccount.userId })`) call with **no** org, and `default-ai-model` consumes that user-level result. No session/thread context is loaded at these points, so there's no org to scope to; kept user-level deliberately (hot path, **hint not gate**). Mitigation: the org-aware **resolution-failure error** (end-of-3a polish) — the real gate (slice-1b resolution) is org-fenced by thread, so a user-level hint can at worst show a UI affordance, never leak or run a cross-org credential.
 
 Net: not a gap. Dashboard hints org-scoped (correct, live-verified); background hints user-level by design with the resolution gate as the true boundary. Slice-1b resolution PASS stands. Flag closed.
+
+## Batch-3a queue — updates (2026-07-15): indexes DONE, github_pr resolved (b), agg-cache parked
+
+**Indexes (3cb1b35) → VALIDATED (code-cert).** Surgical composites for the org-scoped list reads. Live-verified the org indexes exist on exactly the 3 list-read tables: `environment_org_id_index`, `automations_org_id_index`, `agent_provider_credentials_org_id_index` (everything else skipped by design). Perf concern, right tables — PASS at code-cert altitude.
+
+**github_pr → team-lead ruled OPTION (b): NO redesign, NO row-stamp. MY WATCH-ITEM RESOLVES FAVORABLY.** The row stays a global GitHub-state mirror (`repo_number_unique` unchanged); isolation stays on the **thread fence** (untouched); the vestigial `github_pr.organizationId` column is DROPPED (backfill stamping removed). Because there is no redesign, **the owner+org fence I was guarding is not touched — my planned live cross-org PR-read probe is CANCELLED (nothing changed on that path).** Confirmed at current HEAD: `getThreadForGithubPRAndUser` still takes `userId` + `organizationId` (owner+org fenced). Reduced validation at the item-3(b) commit: (1) `getThreadForGithubPRAndUser` still owner+org fenced; (2) the column drop didn't ripple (backfill tests still green). No live probe.
+
+**agg-cache (`usage_events_agg_cache_sku`) → billing-PARKED (nothing to validate).** Feeds `getUserCreditBalance`; fencing it would half-implement org-billing, so it moves with the operator's billing decision. Removed from my active remainder.
+
+**BATCH-3B (NOT-NULL tightening) → DEFERRED OUTRIGHT.** Not "held for a later go" — null-org is a **legitimate designed state** until the GitHub-App phase makes installation→org mandatory. Dropped from the batch-3 remainder as a standing design decision.
+
+**Revised batch-3a close-out gate (down to 2 commits):** the item-3(b) github_pr column-drop commit (fence-intact + backfill-green check) + the org-aware-error polish commit (mitigation for the surface-2 background hints). Then batch-3a closes. usage_events write (3a-1) and agent-runtime credential resolution (1b) already PASS.
