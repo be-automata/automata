@@ -271,3 +271,28 @@ Rollup: of 33 cases, **3 moved uncovered→partially-covered/verifiable** (E12, 
 1. **Fix the tenancy-foundation test regressions** — (a) make `test-global-setup` `drizzle-kit push` create `automations` + `user_feature_flags` (or switch to `drizzle-kit migrate`); (b) update `createTestUser`/`mockLoggedInUser` to seed an organization + membership so org-scoped paths authorize. CI is red until both land; the migrating baseline must be green before more packages stack on top.
 2. **Boot the app** (add an `app` service to the self-host compose or publish a documented run recipe) so C4–C8 and live cross-org isolation (C10/T1) become executable — the whole OBSERVED pillar and half the tenancy cases are blocked on this.
 3. **Mount the first orch-agents package — `review`, the differentiator** — to start the VERIFIED pillar and give C9 something to check; nothing is migrated yet. En route, resolve the CI Node 20 → ≥22 pin.
+
+## R1b — App-runtime execution (2026-07-15, app confirmed UP)
+
+boot-coder brought the app up: `next start` on **http://localhost:3100**, compose Postgres on **:55432** (`automata_selfhost_postgres`, 43 public tables). Ran the app-runtime cases that don't need a GitHub/agent run.
+
+| Case | Status | Evidence |
+|---|---|---|
+| **C4 — compose boot / app serves** | **PASS** | `GET /` and `GET /login` → 200, real Next HTML (`_next/static` present). Postgres container healthy |
+| **C2 — boots with deferred services unset** | **PASS (runtime)** | App booted from `smoke.env` with `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `NEXT_PUBLIC_POSTHOG_KEY`, `E2B_API_KEY`, `DAYTONA_API_KEY` all **empty**, and still serves; no PostHog key in page HTML; no boot crash / no credit-gate on the lifecycle |
+| **C6 — org/tenant schema in live DB** | **PASS (schema)** | Live DB has `organization`, `member`, `invitation`, `apikey`, `session`, `account`, `user`. Runtime "create org via UI" not driven (needs a session) |
+| **C5 — signup** | **PARTIAL / BLOCKED on external auth** | Signup surface live; Better Auth mounted (`/api/auth/ok` → 200; `/api/auth/get-session` → 200 `null`, correct unauth response). But **email/password is disabled by design** (`EMAIL_AND_PASSWORD_SIGN_UP_IS_NOT_ENABLED`), **magic-link 500s** (no SMTP configured), and **GitHub OAuth** (configured) needs a real external handshake not drivable headlessly. **No account could be created this round** — 0 rows in `user` |
+| **C8 — stubbed run streams to dashboard** | **BLOCKED** | Requires an authenticated session + a task; unreachable without a completed signup |
+| **C10 — cross-org isolation smoke** | **OPEN** | Cannot create two orgs headlessly (signup blocked) and the org-scoping accessor (ADR-001) is not yet exercised |
+
+**Corroborating finding (clarifies R1.1):** the **identical Drizzle schema pushed cleanly to the live self-host DB** — `automations` and `user_feature_flags` both exist there (`to_regclass` non-null). Since the same `schema.ts` produces those tables against the self-host Postgres but **not** against the vitest test container, the shared 68-failure regression is confirmed as a **test-harness defect** (non-interactive `drizzle-kit push` in `test-global-setup.ts` silently skipping statements), **not** a schema-definition defect. Fix is scoped to the test setup, not the model.
+
+**Case-status deltas from R1:**
+- **T1 / T2 / T4:** schema-level → **verified-in-live-DB** (tenant tables incl. the `member` join present in the running database). Enforcement (C10) still OPEN.
+- **T7 (per-org concurrency neutral default):** → **partially-verified at runtime** — the booted app carries `MAX_CONCURRENT_TASKS_PER_USER` / `MAX_AUTOMATIONS_PER_USER` as plain env defaults (neutral, not subscription-tiered).
+- **C5:** BLOCKED-pending-boot → **PARTIAL** (surface + Better Auth verified live; account creation still blocked on SMTP-or-OAuth).
+- **C2 / C4 / C6:** BLOCKED-pending-boot → **PASS** (as above).
+
+**Two new gaps surfaced this round:**
+1. **No headless signup path in self-host.** Email/password off + magic-link 500 (no SMTP) + GitHub OAuth-only means a fresh self-host has **no way to create the first account without either configuring SMTP or completing a GitHub OAuth handshake.** This blocks C5/C7/C8/C10 and any UAT that needs a session. Needs an operator decision (enable email/password or a dev-only bootstrap admin, or wire SMTP) before the Observed pillar is testable.
+2. **`next build` TS gate fails at `auth-server.ts:35`** (`activeOrganizationId` `string|null|undefined` vs `string|null`) — this is in the tenancy agent's **uncommitted working-tree edits**; committed HEAD `apps/www` `tsc --noEmit` was clean in R1. Flag so it lands green before the next baseline.
