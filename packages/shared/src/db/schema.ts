@@ -103,7 +103,69 @@ export const session = pgTable("session", {
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
   impersonatedBy: text("impersonated_by"), // admin plugin field
+  // organization plugin field: request-time tenant selector. Everything
+  // org-scoped keys off this. Nullable — a session may have no active org.
+  activeOrganizationId: text("active_organization_id"),
 });
+
+// ---------------------------------------------------------------------------
+// Better Auth `organization` plugin tables (tenant boundary).
+// Columns mirror the plugin's expected schema (better-auth@1.3.25). The plugin
+// manages these rows via its API; this is the Drizzle mapping drizzle-kit push
+// applies. See docs/adr/ADR-001-tenant-scoping-enforcement.md.
+// ---------------------------------------------------------------------------
+export const organization = pgTable("organization", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  slug: text("slug").notNull().unique(),
+  logo: text("logo"),
+  createdAt: timestamp("created_at").notNull(),
+  metadata: text("metadata"),
+});
+
+export const member = pgTable(
+  "member",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    role: text("role").notNull().default("member"),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (table) => [
+    index("member_organization_id_idx").on(table.organizationId),
+    index("member_user_id_idx").on(table.userId),
+    uniqueIndex("member_org_user_unique").on(
+      table.organizationId,
+      table.userId,
+    ),
+  ],
+);
+
+export const invitation = pgTable(
+  "invitation",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    role: text("role"),
+    status: text("status").notNull().default("pending"),
+    expiresAt: timestamp("expires_at").notNull(),
+    inviterId: text("inviter_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    index("invitation_organization_id_idx").on(table.organizationId),
+    index("invitation_email_idx").on(table.email),
+  ],
+);
 
 export const account = pgTable("account", {
   id: text("id").primaryKey(),

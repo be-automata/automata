@@ -20,12 +20,20 @@ export type User = WithOptional<
 >;
 export type Session = WithOptional<
   SessionInner,
-  "ipAddress" | "userAgent" | "impersonatedBy"
+  "ipAddress" | "userAgent" | "impersonatedBy" | "activeOrganizationId"
 >;
 export type UserStripePromotionCode =
   typeof schema.userStripePromotionCode.$inferSelect;
 export type UserStripePromotionCodeInsert =
   typeof schema.userStripePromotionCode.$inferInsert;
+
+// Better Auth `organization` plugin tables (tenant boundary).
+export type Organization = typeof schema.organization.$inferSelect;
+export type OrganizationInsert = typeof schema.organization.$inferInsert;
+export type Member = typeof schema.member.$inferSelect;
+export type MemberInsert = typeof schema.member.$inferInsert;
+export type Invitation = typeof schema.invitation.$inferSelect;
+export type InvitationInsert = typeof schema.invitation.$inferInsert;
 
 export type ThreadVisibility = "private" | "link" | "repo";
 

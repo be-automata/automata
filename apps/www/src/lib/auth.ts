@@ -5,6 +5,7 @@ import {
   magicLink,
   apiKey,
   admin,
+  organization,
   createAuthMiddleware,
 } from "better-auth/plugins";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
@@ -278,7 +279,15 @@ export const auth = betterAuth({
       rateLimit: {
         enabled: false,
       },
+      // Enable per-key metadata so the daemon-token path can carry an
+      // organizationId alongside the userId (see auth-server.ts). The
+      // dedicated column retrofit lands with the WI-5c schema sweep.
+      enableMetadata: true,
     }),
+    // Tenant boundary. Each org maps to a Hatchet tenant + org-scoped rows.
+    // Adds organization/member/invitation tables + session.activeOrganizationId
+    // (Drizzle mapping in @terragon/shared/db/schema). See ADR-001.
+    organization(),
     magicLink({
       expiresIn: 15 * 60, // 15 minutes
       sendMagicLink: async ({ email, url: rawUrl }) => {
