@@ -745,3 +745,14 @@ The gap-class (`getAutomations`-style: model fenced but server-action read unwir
 Batch-3 remainder unchanged (NOT-NULL + indexes + github_pr row-stamp/redesign [my watch-item] + usage-write org-stamp + billing referenceId flip + agent-runtime credential background-stamp + usage_events_agg_cache_sku confirm).
 
 Test artifacts (org=orgA, user A): env `env_uat_orgA`, credential `cred_uat_claude_orgA`, automation "UAT Slice2 orgA" — harmless, boot-coder to clear.
+
+## FUTURE — C10 extends to the execution plane (ADR-002, accepted 16ff884)
+
+Recorded for the Hatchet-substrate phase test design (not active now; batch-3a is the active queue). ADR-002 (per-org execution plane) is accepted. When the substrate lands, the **C10 exit gate extends beyond reads to the execution plane** — new validation cases:
+
+1. **Worker secret isolation:** org A's worker cannot obtain org B's Anthropic key, GitHub token, or worktree.
+2. **Task routing isolation:** a task for org B is never delivered to org A's worker.
+3. **Deploy-gate standing check — no Hatchet -dev images:** `GET /api/v1/meta` must NOT report `authDisabled:true`; an unauthenticated tenant/workers API call must 401/403.
+4. **Deploy-gate standing check — cold-start vs ScheduleTimeout** measurement (elevated to program **P1 gate #5**): worker cold-start must stay within the Hatchet schedule timeout so tasks aren't dropped/re-queued spuriously.
+
+These join the existing product-path C10 (reads: CLI + dashboard + session-info, all live-certified) to form the full-stack tenant-isolation gate once execution is per-org.
