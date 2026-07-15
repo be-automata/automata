@@ -634,3 +634,15 @@ Method per team-lead: code-cert + unit evidence (both new fences are owner-scope
 - `forTenant` (tenant.ts): gains `setThreadVisibility` + `getThreadForGithubPR` — reached only through the tenant seam (org supplied by construction). ✓
 - **`tenant.test.ts` 11/11 green** on this build. Titles confirm the +2: "is private-to-creator within an org: a co-member cannot read it" (co-member deny), "getThreadForGithubPR is fenced to the owner within the org" (cross-org PR-read fence), "setThreadVisibility stamps the thread" (visibility stamp), "fences environment reads to the owner within the org".
 - **`githubPR` rows deliberately UNSTAMPED — by design, not a gap.** Repo-global rows shared across orgs; deferred to batch 3 with the unique-index redesign. Global/admin reads (`getGithubPR`, `upsertGithubPR`, `*ForAdmin`) stay unfenced **by design, JSDoc-flagged**. Recorded as an intentional deferral to re-verify at batch 3 (watch that the unique-index redesign doesn't accidentally expose owner-scoped PR data cross-org).
+
+## Batch-2 slice 2 — INTERIM (2026-07-15, 6d57f2f): code PASS, live probe pending redeploy
+
+Slice 2 (`6d57f2f`, automations model onto forTenant + create-stamp) is **route-reachable** (dashboard `createAutomation` stamps the creator's active org), so per method it warrants a **live probe**. Status split:
+
+**Code-level: PASS.** `tenant.test.ts` **15/15 green** (11→15; +4 for slice 2), incl. "createAutomation stamps the org and getAutomation is owner-fenced" and "listAutomations is scoped and delete is fenced". `createAutomationModel` persists `organizationId ?? automation.organizationId ?? null`; the `createAutomation` server action passes `getTenantContextOrNull().organizationId`.
+
+**Live probe: PENDING REDEPLOY.** A premature live run (before confirming the deploy) produced a **NULL-org** automation. Root-caused as a **stale deploy**, not a bug: `:3100` is still running `44c4d82`, not `6d57f2f` (no boot-coder ready-ping for slice 2; `createAutomation` gained its org-stamp only in `6d57f2f`, so NULL = pre-slice-2 behavior). Ruled out a session bug — under the identical session `createCliApiToken` stamped orgA correctly (session read works). boot-coder asked to rebuild at `6d57f2f`; re-run the live create-stamp + read-fence after its ping. **Process note: confirm the deployed SHA before live probes.**
+
+**Read-side observation to verify live post-deploy:** the `getAutomations` **server action** (`server-actions/automations.ts:33`) still calls `getAutomationsModel({ db, userId })` with **no** `organizationId` — so even at `6d57f2f` the dashboard automations LIST read is not org-fenced at the route level (model CAN fence, but the read route doesn't pass the active org). Open question: is the `getAutomations`→forTenant read migration in-slice or a later sweep step? Confirm empirically (getAutomations under orgA vs orgA2) once `6d57f2f` is live; record as gap or intentional-deferral accordingly.
+
+Junk fixtures from the premature probe: 2 NULL-org automations on user A ("UAT Org Probe"/"…2") — harmless, boot-coder to clear.
