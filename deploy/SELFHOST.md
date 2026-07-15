@@ -51,6 +51,38 @@ with the dev stack (`packages/dev-env/docker-compose.yml`) or other local servic
 `SELFHOST_MINIO_CONSOLE_PORT` (9001). If you override a port, update the matching
 URL in the env (`DATABASE_URL`, `REDIS_URL`, `R2_ENDPOINT`, `R2_PUBLIC_URL`).
 
+## First-user bootstrap (headless)
+
+A fresh self-host has **no first-user path**: email/password sign-up is disabled
+(`EMAIL_AND_PASSWORD_SIGN_UP_IS_NOT_ENABLED`), the magic-link route needs a real
+Resend key (it calls Resend's HTTP API, not SMTP), and GitHub OAuth needs a browser
+handshake. For headless dev/UAT, `deploy/seed-selfhost.ts` seeds authenticated
+user(s) + org(s) + session(s) straight into Postgres.
+
+It works because better-auth's `bearer` plugin (enabled in `apps/www/src/lib/auth.ts`,
+no `requireSignature`) signs a *raw* token itself — so a plain `session` row is
+enough to authenticate with `Authorization: Bearer <session.token>`, with no
+password and no cookie signing.
+
+```bash
+# Seeds 2 orgs (default), one owner each — covers cross-org isolation checks.
+set -a; . deploy/selfhost.env; set +a
+pnpm --filter @terragon/www exec tsx deploy/seed-selfhost.ts   # or: [orgCount]
+```
+
+It prints, per org, the user email, orgId, and a ready-to-use
+`Authorization: Bearer <token>`. Verify:
+
+```bash
+curl -s -H "Authorization: Bearer <token>" http://localhost:3000/api/auth/get-session
+# → {"session":{...,"activeOrganizationId":"org_selfhost_1"},"user":{...}}
+```
+
+Idempotent: user/org/member rows are deterministic per index and upserted; a fresh
+session token is minted each run. The script imports the schema source directly
+(not the `@terragon/shared/db` subpath export) because pnpm hoists a store copy
+of that package whose exports map doesn't expose `./db` under tsx.
+
 ## First boot smoke (2026-07-15)
 
 Ran end-to-end on macOS (Docker 29.4.0). Because 5432/6379/3000 were already taken
@@ -111,7 +143,7 @@ No self-host env fix was required — `selfhost.env.example` validated as-is.
 | C2 | Boots with no billing/analytics env | **PASS** | Stripe/PostHog/Loops/Resend/Slack all empty; app boots, logs "Stripe is not configured", lifecycle not blocked. |
 | C3 | Dependency/security patch level | **NOT ASSESSED here** | Next 15.4.8 / React 19 build clean; `pnpm audit` not run (no install permitted this session). Track separately. |
 | C4 | docker-compose boot | **PASS** | `docker-compose.selfhost.yml` brings up Postgres + Redis(+shim) + MinIO, all healthchecked green; app serves 200. (Hatchet not yet wired.) |
-| C5 | Signup | **PARTIAL** | `/login` (the Better Auth entry) renders 200 against the compose Postgres; an actual account-create round-trip was not driven this session — needs a UI/API signup POST to fully close C5. |
+| C5 | Signup | **PARTIAL** | `/login` (the Better Auth entry) renders 200 against the compose Postgres, but a real self-serve signup can't complete on a SaaS-free box: email/password sign-up is disabled, magic-link needs a Resend key, GitHub OAuth needs a browser. The "First-user bootstrap" above seeds an authenticated user+org+session directly (verified via `/api/auth/get-session`), which unblocks downstream task/isolation checks; enabling a true self-serve signup path is an auth-config change (owned in `auth.ts`), out of this deploy scope. |
 
 ## Build-time env requirement (verified 2026-07-15)
 
