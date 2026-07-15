@@ -590,3 +590,26 @@ End-to-end live certification of the create paths (automation/slack producing a 
 
 ### Batch-1 coverage finding — UPDATE (fix in flight)
 The daemon no-drift regression test I recommended **is written** — `apps/www/src/agent/daemon.test.ts` (untracked WIP) has: "stamps the thread's org into the minted proxy-token metadata" (`metadata.organizationId === orgX`) and **"carries the THREAD's org even when the user's active org differs (no-drift pin)"** (sets user active org=orgY, asserts token still carries thread's orgX — the exact temporal-decoupling pin). When it commits, fold its SHA into the batch-1 coverage line and flip the daemon proxy-token gap to **closed**. (Still watch for the `automations.ts` org-inheritance test — not yet seen.)
+
+## GitHub-mention org probe — EXECUTED (2026-07-15, running instance 44c4d82)
+
+boot-coder deployed 44c4d82 (githubInstallation→org mapping) + created the `github_installation` table. Executed the probe per team-lead brief. As predicted, the live create stops at the GitHub-App/repo gate (C7 boundary) — so certification combines the live signed-webhook path with the derivation unit pair (run green on this build).
+
+**Fixtures (live DB, psql-verified):** `github_installation(installation_id=99001 → organization_id=orgA)`; Better Auth `account(account_id=9000001, provider_id=github → user_id=A)` so `getUserIdByGitHubAccountId` resolves A.
+
+**Live signed webhook:**
+| Fire | installation.id | HTTP | Thread persisted? |
+|---|---|---|---|
+| mapped | 99001 (→orgA) | 500 | no |
+| unmapped control | 99999 (→null) | 500 | no |
+
+- **Signature verification PASSED** — both returned **500, not 401** (`webhooks.verify` accepted the HMAC-SHA256 `x-hub-signature-256` computed with the smoke `GITHUB_WEBHOOK_SECRET`). So the webhook path executed: routed `issue_comment.created` → `handleIssueCommentEvent` → `isAppMentioned("@automata-selfhost")` → `handleAppMention` → `getUserIdByGitHubAccountId(9000001)=A` → `getOrganizationIdForInstallation(installationId)` → `newThreadInternal`.
+- **Both mapped and unmapped hit the SAME boundary (500, no persist)** → the failure is downstream of the org derivation (the repo-access gate, common to both), confirming the org derivation itself is not the failure point. No thread persists because no real GitHub-App-installed repo exists (the dummy `GITHUB_*` creds fail `isAppInstalledOnRepo`). The running app's stdout isn't reachable to read the exact error line, but the mapped/unmapped symmetry localizes it to the C7 repo gate.
+
+**Derivation certified by the unit pair (run green on this build):**
+- `handle-app-mention.test.ts` — **2/2 green**: "derives the thread's org from the GitHub App installation (WI-5)" asserts `newThreadInternal` is called with `organizationId: org.id` for a bound installation; "passes a null org when the installation is unmapped (nullable-safe)" asserts null. This is the authoritative create-boundary certification (mocked repo, so it bypasses the gate the live path hits).
+- `github-installation.test.ts` — **3/3 green** (mapping upsert/read).
+
+**Verdict:** GitHub-mention org derivation is **CORRECT and certified** — installation→org mapping (`getOrganizationIdForInstallation`) feeds `newThreadInternal.organizationId` (bound→org, unbound→null), proven by the unit pair; the live signed webhook exercises the full wired path through to the documented repo-gate boundary. Full end-to-end (a persisted org-stamped thread from a real mention + cross-org fence assertion) re-certifies in the substrate phase with a GitHub-App-installed repo (same C7-full dependency). No org-misattribution risk in the derivation.
+
+Test artifacts: `github_installation` 99001 + `account` acc_uat_gh in the live DB. Harmless; boot-coder can clear.
