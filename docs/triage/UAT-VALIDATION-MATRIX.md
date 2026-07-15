@@ -303,3 +303,19 @@ boot-coder brought the app up: `next start` on **http://localhost:3100**, compos
 - **The shared (68) / www (53) RED baseline vs the previously-recorded green counts at the same HEAD is under active root-cause by triage-tester** (nondeterministic Drizzle schema application — `drizzle-kit push` silently skipping relations in the vitest test container). **Per team-lead direction, those suites are NOT re-run here to avoid concurrent-run interference with that investigation.** This validator's corroborating datapoint stands: a clean `drizzle-kit push` of the current committed `schema.ts` against the live self-host Postgres creates all 43 tables including `automations` + `user_feature_flags`, so the failure surface is the **test harness's push path**, not the schema definition. Treat the R1 RED counts as provisional pending triage-tester's root cause.
 - **CI Node 20→22 pin** is being fixed by team-lead directly (commit `fb1a797` already on branch).
 - Signup/observed-pillar cases (C5/C7/C8/C10) remain gated on a headless signup path (email/password disabled, magic-link 500 without SMTP, GitHub-OAuth-only) — unchanged from the R1b table; awaiting boot-coder's dev-bootstrap/SMTP decision before Round 1c.
+
+## R1c — pre-staged plan (pending signup path; 2026-07-15)
+
+Signup enablement is owned by **tenancy-coder** (`AUTH_EMAIL_PASSWORD_ENABLED` bool env, default false → true in `deploy/selfhost.env.example`, login UI gated to show the form). As of this writing it is **in the working tree, uncommitted** (`apps/www/src/lib/auth.ts:152`, `app/login/page.tsx:25`, new `components/email-password-auth.tsx`, `packages/env/src/apps-www.ts:117`). Enablement requires a **rebuild** (new component + login-page changes are not in the running `.next` build) with `AUTH_EMAIL_PASSWORD_ENABLED=true` in the build+runtime env, then restart on :3100 — coordinated with boot-coder once tenancy-coder commits.
+
+**Execution order when unblocked:** signup 2 users → each creates/owns an org (A, B) → C7 task create (user A, org A) → C8 stubbed run streams → **C10 cross-org isolation smoke.**
+
+**C10 methodology reality:** the data layer is **Next.js server actions, not REST GET routes** (the only `app/api/*` routes are auth/proxy/webhook/cron/internal). So cross-org isolation cannot be a curl-per-REST-endpoint check. Evidence will be gathered two ways, recorded per-resource:
+1. **Browser-driven, user A's session against org-B resource IDs** (via the chrome automation tools) on the resource-view page routes:
+   - `/task/[id]` — org-B thread id → expect 404 / redirect / empty, not org-B content
+   - `/environments/[id]` and `/environments/global` — org-B environment id → expect denied/empty
+   - `/settings/integrations` + `/cli/auth` (cli-api-token) — org-B API key must not be listed/usable
+   - `/dashboard` (task list) — user A sees only org-A tasks (zero org-B rows)
+2. **Data-layer assertion via `docker exec` psql** on `automata_selfhost_postgres`: confirm the read server-actions (`get-threads`, `get-environments`, `cli-api-token`) filter by the active organization — i.e., a direct query proves org-B rows exist but user A's scoped read returns none.
+
+**C10 pass standard (per team-lead):** user A gets **zero rows / 403** on every reachable org-B resource (threads, environments, api keys), recorded per-endpoint in this matrix. NOTE: whether enforcement is present depends on the ADR-001 accessor being wired into these read paths — if it is not yet, C10 will FAIL loudly here (that is the point of the smoke).
