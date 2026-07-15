@@ -707,3 +707,20 @@ Slice-2 amendment re-probe (live on 519fc3d): `getAutomations` @orgA → `[UAT S
 6. **`usage_events_agg_cache_sku`** fence confirmation.
 
 **C10 exit criterion (WI-5): MET** at product-path altitude on both surfaces (CLI + dashboard), cross-org isolation live-certified, no leak. Batch 2 sweep closed.
+
+## BATCH-2 CLOSE-OUT — AMENDMENT: route-wiring sweep (2026-07-15)
+
+The `getAutomations` gap I found was a **gap-class present in every batch-2 domain** — tenancy-coder ran a route-wiring self-audit and swept all of it. The batch-2 close-out coverage is updated: the read-fences are now wired not just in the model but through the **server actions / RSC pages** for every domain. Four commits (all org-switch-tested at action level; www 810/0):
+
+| Commit | Scope | Validation |
+|---|---|---|
+| `b41bfb9` | automations read/update/delete routes | **LIVE-verified** (re-probe: @orgA2 → []) |
+| `d02a9c3` | environment actions + RSC pages | code-cert (getEnvironments/getEnvironment pass org); **live probe pending deploy** |
+| `4613e4d` | credentials + thread-visibility + `getUserInfoOrNull` session-info hot path | code-cert (credentials.test "reflects only the active org" green); **live probe pending deploy** (hasClaude flip) |
+| `e837d9e` | single-thread github-mention lookup | code-cert (repo-gated live; batch-1 mention probe already exercised the path) |
+
+**Deliberately left (recorded, NOT leaks):** agent-runtime credential paths — thread-org-derived background items (e.g. `daemon.ts`) pending a background-stamp slice. Consistent with the batch-1 pattern (background paths derive org from their own context); added to the batch-3 remainder.
+
+**Live probes queued (my call on which merit live):** environments-list org-switch (directly analogous to the getAutomations gap — confirm the sweep closed it on a second domain) + credentials hasClaude flip (session-info hot path, broad blast radius). thread-visibility (owner-scoped write) + github-mention (repo-gated, batch-1-covered) = code-cert. Running instance is 519fc3d; deploy to HEAD e837d9e requested. Will finalize the sweep verdict after both live probes.
+
+**Impact note:** this validates the value of the live-probe-on-route-reachable-reads rule — one empirically-proven gap (getAutomations) surfaced a whole class the model-level fences hid, triggering a domain-wide route audit.
