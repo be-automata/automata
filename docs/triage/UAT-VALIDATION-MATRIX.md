@@ -409,3 +409,15 @@ Perfect isolation diagonal: all 4 own-reads succeed, all **12 cross-reads denied
 **C5 corroboration (2nd+ real signups):** users B/C/D each reproduced the exact C5 behavior from R1c-final — form endpoint → 200 + real user row + autoSignIn signed cookie → `activeOrganizationId=null` → onboarding-capable → org-create sets active org. Signup is deterministic across repeated real accounts.
 
 Test artifacts left in the self-host DB: real users A–D (`uat-c5-real{,b,c,d}@selfhost.local`), 4 orgs (`uat-c5-org{,-b,-c,-d}`), 4 threads (`thr_uat_real{A,B,C,D}`). Harmless; boot-coder can re-seed/clear.
+
+## R1c — infra addendum: broadcast/streaming transport (2026-07-15)
+
+boot-coder surfaced (and started) a previously-missing dependency: the **PartyKit broadcast server on :1999**. Signup POSTs to it in a post-create hook (`/parties/main/user:<userId>`); with broadcast **down**, that hook throws ECONNREFUSED and signup returns **500** even though the user row persists — this was the true cause of the earlier "signup 500 on bare app-only boot" (not an auth-config issue).
+
+**Verified this round:**
+- Broadcast :1999 is **UP** (`GET /` → 404, `/parties/main/health` → 401 — i.e. listening + auth-enforcing, not ECONNREFUSED).
+- All 4 R1c-Extended real signups returned **200**, which means the signup→broadcast post-create hook succeeded — so the **signup↔broadcast integration is exercised and working** (a 500 would have proven it broken).
+
+**Impact on C8 (stubbed run → dashboard):** the broadcast **transport** (one of C8's three blockers) is now confirmed running. Remaining C8 blockers: a real **GitHub-App-installed repo** (fake repos reject at the create gate) + a **running sandbox provider** + an **actual agent run** (spends Anthropic credits). C8 stays deferred as a non-headless case, but the streaming substrate is no longer missing. This is also a partial **OBSERVED-pillar (O2)** datapoint: the live-transcript relay transport is alive, though no transcript has been streamed end-to-end yet.
+
+**Env at round close:** app :3100, broadcast :1999, Postgres :55432, Redis :58079, MinIO :9000. DB holds my 4 test users / 5 orgs / 4 threads (boot-coder cleaned its own seeds, left mine).
