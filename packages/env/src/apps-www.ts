@@ -102,6 +102,11 @@ export const env = envsafe({
   // Port used by the CLI tool for auth
   CLI_PORT: num({ default: 8742 }),
 
+  // Per-user resource caps (neutral defaults; no paid tier required to raise them).
+  // Self-hosted operators override these when Stripe/subscription tiers are off.
+  MAX_CONCURRENT_TASKS_PER_USER: num({ default: 3 }),
+  MAX_AUTOMATIONS_PER_USER: num({ default: 20 }),
+
   // Others
   RESEND_API_KEY: str({ allowEmpty: true, default: "" }),
   DISABLE_ONE_TIME_TOKEN_SIGNIN: bool({ default: true }),

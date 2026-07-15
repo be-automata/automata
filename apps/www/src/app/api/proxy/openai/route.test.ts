@@ -4,6 +4,7 @@ import * as aiSdkRoute from "./[[...path]]/route";
 import { logOpenAIUsage } from "./log-openai-usage";
 import { auth } from "@/lib/auth";
 import { getUserCreditBalance } from "@terragon/shared/model/credits";
+import { isStripeConfigured } from "@/server-lib/stripe";
 
 vi.mock("@/lib/auth", () => ({
   auth: {
@@ -21,6 +22,10 @@ vi.mock("@terragon/env/apps-www", () => ({
 
 vi.mock("@terragon/shared/model/credits", () => ({
   getUserCreditBalance: vi.fn(),
+}));
+
+vi.mock("@/server-lib/stripe", () => ({
+  isStripeConfigured: vi.fn(() => true),
 }));
 
 vi.mock("@/server-lib/credit-auto-reload", () => ({
@@ -296,6 +301,23 @@ describe("OpenAI proxy route", () => {
     expect(response.status).toBe(402);
     expect(await response.text()).toBe("Insufficient credits");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("skips the credit check and does not 402 when Stripe is not configured", async () => {
+    vi.mocked(isStripeConfigured).mockReturnValueOnce(false);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("ok", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const request = createRequest();
+    const response = await POST(request, { params: Promise.resolve({}) });
+
+    // Fail open: with billing off the zero-credit gate is skipped entirely — the
+    // credit balance is never read and the request is not 402'd.
+    expect(response.status).not.toBe(402);
+    expect(getUserCreditBalanceMock).not.toHaveBeenCalled();
   });
 
   it("logs usage for chat completions event streams", async () => {

@@ -1,23 +1,23 @@
 import { db } from "@/lib/db";
+import { env } from "@terragon/env/apps-www";
 import { getUserSettings } from "@terragon/shared/model/user";
 import type { AccessTier } from "@terragon/shared/db/types";
 import { getAccessInfoForUser } from "./subscription";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import type { SandboxSize } from "@terragon/types/sandbox";
 
-const productionMaxConcurrentTasks = 3;
-const developmentMaxConcurrentTasks = 3;
 const proMaxConcurrentTasks = 10;
 
 export const DEFAULT_SANDBOX_SIZE: SandboxSize = "small";
 
-// Maximum number of automations allowed per user (without unlimited feature flag)
-export const DEFAULT_MAX_AUTOMATIONS = 20;
+// Maximum number of automations allowed per user (without unlimited feature flag).
+// Env-overridable neutral default so a self-hosted operator can raise it without a
+// paid tier (with Stripe off every user is the baseline "core" tier).
+export const DEFAULT_MAX_AUTOMATIONS = env.MAX_AUTOMATIONS_PER_USER;
 
-const DEFAULT_MAX_CONCURRENT_TASK_COUNT =
-  process.env.NODE_ENV === "production"
-    ? productionMaxConcurrentTasks
-    : developmentMaxConcurrentTasks;
+// Per-user concurrency cap for the baseline tier. Env-overridable neutral default;
+// no paid tier required to raise it.
+const DEFAULT_MAX_CONCURRENT_TASK_COUNT = env.MAX_CONCURRENT_TASKS_PER_USER;
 
 function getSandboxSizeForTier({
   tier,

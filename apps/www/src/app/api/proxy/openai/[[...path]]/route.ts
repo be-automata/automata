@@ -3,6 +3,7 @@ import { env } from "@terragon/env/apps-www";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { getUserCreditBalance } from "@terragon/shared/model/credits";
+import { isStripeConfigured } from "@/server-lib/stripe";
 import { maybeTriggerCreditAutoReload } from "@/server-lib/credit-auto-reload";
 import { logOpenAIUsage } from "../log-openai-usage";
 import { waitUntil } from "@vercel/functions";
@@ -314,20 +315,25 @@ async function authorize(
       return { response: new Response("Unauthorized", { status: 401 }) };
     }
 
-    const { balanceCents } = await getUserCreditBalance({
-      db,
-      userId,
-      skipAggCache: false,
-    });
-    waitUntil(maybeTriggerCreditAutoReload({ userId, balanceCents }));
-    if (balanceCents <= 0) {
-      console.log("OpenAI proxy access denied: insufficient credits", {
+    // Credit gate only applies when billing is enabled. With Stripe off there is no
+    // credit system, so skip the balance check entirely and fail open — otherwise a
+    // fresh user (0 credits) would be 402'd off the platform proxy, breaking agent runs.
+    if (isStripeConfigured()) {
+      const { balanceCents } = await getUserCreditBalance({
+        db,
         userId,
-        balanceCents,
+        skipAggCache: false,
       });
-      return {
-        response: new Response("Insufficient credits", { status: 402 }),
-      };
+      waitUntil(maybeTriggerCreditAutoReload({ userId, balanceCents }));
+      if (balanceCents <= 0) {
+        console.log("OpenAI proxy access denied: insufficient credits", {
+          userId,
+          balanceCents,
+        });
+        return {
+          response: new Response("Insufficient credits", { status: 402 }),
+        };
+      }
     }
     return { response: null, userId };
   } catch (err) {
