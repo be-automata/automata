@@ -65,6 +65,7 @@ export async function POST(request: Request) {
             agent: threadChat.agent,
             model: null,
             userId,
+            organizationId: thread.organizationId,
           });
         } catch (error) {
           // Ignore errors if credentials are not found so that the user can still

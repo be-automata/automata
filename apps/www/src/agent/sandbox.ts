@@ -168,13 +168,15 @@ async function getOrCreateSandboxForThread({
             agent: agentOrNull,
             model: modelOrNull,
             userId,
+            organizationId: thread.organizationId,
           })
         : null;
     })(),
-    // Fetch the environment to get environment variables
+    // Fetch the environment to get environment variables (org-scoped)
     getOrCreateEnvironment({
       db,
       userId,
+      organizationId: thread.organizationId,
       repoFullName: thread.githubRepoFullName,
     }),
   ]);

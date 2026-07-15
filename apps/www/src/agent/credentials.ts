@@ -10,16 +10,21 @@ export async function getAndVerifyCredentials({
   agent,
   model: _model,
   userId,
+  organizationId,
 }: {
   agent: AIAgent;
   model: AIModel | null;
   userId: string;
+  // Tenant of the thread this agent run belongs to (WI-5 batch 3a). Fences the
+  // credential lookup to this org's credential.
+  organizationId?: string | null;
 }): Promise<AIAgentCredentials> {
   switch (agent) {
     case "amp": {
       const ampCredentials = await getAgentProviderCredentialsDecrypted({
         db,
         userId,
+        organizationId,
         agent: "amp",
         encryptionKey: env.ENCRYPTION_MASTER_KEY,
       });
@@ -38,7 +43,10 @@ export async function getAndVerifyCredentials({
       };
     }
     case "codex": {
-      const codexCredentials = await getCodexCredentialsJSONOrNull({ userId });
+      const codexCredentials = await getCodexCredentialsJSONOrNull({
+        userId,
+        organizationId,
+      });
       if (codexCredentials.contents) {
         return {
           type: "json-file",
@@ -59,6 +67,7 @@ export async function getAndVerifyCredentials({
     case "claudeCode": {
       const claudeCredentials = await getClaudeCredentialsJSONOrNull({
         userId,
+        organizationId,
       });
       if (claudeCredentials.contents) {
         return {

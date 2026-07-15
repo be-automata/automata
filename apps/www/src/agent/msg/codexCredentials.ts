@@ -85,8 +85,12 @@ export async function forceRefreshCodexCredentials({
  */
 export async function getCodexCredentialsJSONOrNull({
   userId,
+  organizationId,
 }: {
   userId: string;
+  // Tenant of the thread this agent run belongs to (WI-5 batch 3a). Fences the
+  // primary credential lookup to this org.
+  organizationId?: string | null;
 }): Promise<{
   contents: string | null;
   error: string | null;
@@ -95,6 +99,7 @@ export async function getCodexCredentialsJSONOrNull({
     const credentials = await getAgentProviderCredentialsDecrypted({
       db,
       userId,
+      organizationId,
       agent: "codex",
       encryptionKey: env.ENCRYPTION_MASTER_KEY,
     });

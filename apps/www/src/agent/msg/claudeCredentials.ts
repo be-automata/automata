@@ -282,14 +282,20 @@ function orgTypeToSubscriptionType(
  */
 export async function getClaudeCredentialsJSONOrNull({
   userId,
+  organizationId,
 }: {
   userId: string;
+  // Tenant of the thread this agent run belongs to (WI-5 batch 3a). Fences the
+  // primary credential lookup so the agent uses THIS org's credential. The
+  // downstream by-credentialId refresh reads are already gated by that id.
+  organizationId?: string | null;
 }): Promise<{ contents: string | null; error: string | null }> {
   try {
     // Get the stored tokens
     const credentials = await getAgentProviderCredentialsDecrypted({
       db,
       userId,
+      organizationId,
       agent: "claudeCode",
       encryptionKey: env.ENCRYPTION_MASTER_KEY,
     });
