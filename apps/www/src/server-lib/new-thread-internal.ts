@@ -12,6 +12,7 @@ import { createNewThread } from "./new-thread-shared";
  */
 export async function newThreadInternal({
   userId,
+  organizationId,
   message,
   githubRepoFullName,
   baseBranchName,
@@ -25,6 +26,9 @@ export async function newThreadInternal({
   sourceMetadata,
 }: {
   userId: string;
+  // Tenant to stamp on the created thread (WI-5). Optional — background callers
+  // (webhooks/automations) without a resolved org omit it (null = legacy).
+  organizationId?: string | null;
   message: DBUserMessage;
   githubRepoFullName: string;
   baseBranchName?: string | null;
@@ -45,6 +49,7 @@ export async function newThreadInternal({
   // Use the shared function to create the thread
   return await createNewThread({
     userId,
+    organizationId,
     message,
     githubRepoFullName,
     baseBranchName,

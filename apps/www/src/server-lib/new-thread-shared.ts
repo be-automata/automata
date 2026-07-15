@@ -43,6 +43,9 @@ import { getThreadChatHistory } from "./compact";
 
 export interface CreateThreadOptions {
   userId: string;
+  // Tenant to stamp on the new thread + its env (WI-5). Nullable during the
+  // backfill phase — null = today's behavior (thread created without an org).
+  organizationId?: string | null;
   message: DBUserMessage;
   githubRepoFullName: string;
   baseBranchName?: string | null;
@@ -68,6 +71,7 @@ export interface CreateThreadOptions {
  */
 export async function createNewThread({
   userId,
+  organizationId = null,
   message,
   githubRepoFullName,
   baseBranchName,
@@ -120,8 +124,13 @@ export async function createNewThread({
       userId,
       flagName: "enableThreadChatCreation",
     }),
-    // Ensure the environment exists for this repo
-    getOrCreateEnvironment({ db, userId, repoFullName: githubRepoFullName }),
+    // Ensure the environment exists for this repo (stamped with the tenant)
+    getOrCreateEnvironment({
+      db,
+      userId,
+      organizationId,
+      repoFullName: githubRepoFullName,
+    }),
     // Make sure that the repo base branch exists in the repo
     ensureBranchExists({
       userId,
@@ -199,6 +208,7 @@ export async function createNewThread({
     db,
     userId,
     threadValues: {
+      organizationId,
       githubRepoFullName,
       repoBaseBranchName: baseBranchName,
       branchName: headBranchName,

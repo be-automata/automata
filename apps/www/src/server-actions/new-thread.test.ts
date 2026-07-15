@@ -9,6 +9,13 @@ import {
   waitUntilResolved,
 } from "@/test-helpers/mock-next";
 import { getThread } from "@terragon/shared/model/threads";
+import {
+  createOrganization,
+  addOrganizationMember,
+} from "@terragon/shared/model/organizations";
+import { session as sessionTable } from "@terragon/shared/db/schema";
+import { eq } from "drizzle-orm";
+import { nanoid } from "nanoid";
 import { unwrapResult } from "@/lib/server-actions";
 
 const repoFullName = "terragon/test-repo";
@@ -84,6 +91,60 @@ describe("newThread", () => {
       expect(thread).toBeDefined();
       expect(thread!.repoBaseBranchName).toBe("main");
       expect(thread!.branchName).toBeNull();
+    });
+  });
+
+  describe("organization tenant scoping (WI-5)", () => {
+    it("stamps the creator's active organization onto the created thread", async () => {
+      // Give the user an active org, mirroring session.activeOrganizationId set
+      // by the Better Auth organization plugin after selecting an org.
+      const org = await createOrganization({
+        db,
+        name: "Acme",
+        slug: `acme-${nanoid(8).toLowerCase()}`,
+      });
+      await addOrganizationMember({
+        db,
+        organizationId: org.id,
+        userId: user.id,
+        role: "owner",
+      });
+      await db
+        .update(sessionTable)
+        .set({ activeOrganizationId: org.id })
+        .where(eq(sessionTable.id, session.id));
+
+      await mockWaitUntil();
+      await mockLoggedInUser(session);
+
+      const result = await newThread({
+        message: mockMessage,
+        githubRepoFullName: repoFullName,
+        branchName: "main",
+      });
+      const { threadId } = unwrapResult(result);
+      await waitUntilResolved();
+
+      const thread = await getThread({ db, userId: user.id, threadId });
+      expect(thread).toBeDefined();
+      expect(thread!.organizationId).toBe(org.id);
+    });
+
+    it("creates a thread without an org when the session has no active org", async () => {
+      await mockWaitUntil();
+      await mockLoggedInUser(session);
+
+      const result = await newThread({
+        message: mockMessage,
+        githubRepoFullName: repoFullName,
+        branchName: "main",
+      });
+      const { threadId } = unwrapResult(result);
+      await waitUntilResolved();
+
+      const thread = await getThread({ db, userId: user.id, threadId });
+      expect(thread).toBeDefined();
+      expect(thread!.organizationId).toBeNull();
     });
   });
 });

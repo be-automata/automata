@@ -1,6 +1,6 @@
 "use server";
 
-import { userOnlyAction } from "@/lib/auth-server";
+import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { SelectedAIModels } from "@terragon/agent/types";
 import { DBUserMessage, ThreadSource } from "@terragon/shared";
 import { createNewThread } from "../server-lib/new-thread-shared";
@@ -49,10 +49,16 @@ export const newThread = userOnlyAction(
       throw new UserFacingError(SUBSCRIPTION_MESSAGES.CREATE_TASK);
     }
 
+    // Stamp the creator's active org onto the thread (WI-5). Nullable during the
+    // backfill phase — null = thread created without an org (today's behavior).
+    const tenant = await getTenantContextOrNull();
+    const organizationId = tenant?.organizationId ?? null;
+
     const baseBranchName = createNewBranch ? branchName : null;
     const headBranchName = createNewBranch ? null : branchName;
     const { threadId, threadChatId } = await createNewThread({
       userId,
+      organizationId,
       message,
       githubRepoFullName,
       baseBranchName,
@@ -69,6 +75,7 @@ export const newThread = userOnlyAction(
     if (selectedModels && !saveAsDraft) {
       await newThreadsMultiModel({
         userId,
+        organizationId,
         message,
         selectedModels,
         parentThreadId,

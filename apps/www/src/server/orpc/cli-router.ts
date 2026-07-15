@@ -211,6 +211,7 @@ const createThread = os.threads.create.handler(
     try {
       const { threadId } = await newThreadInternal({
         userId: context.userId,
+        organizationId: context.organizationId,
         message: userMessage,
         githubRepoFullName,
         baseBranchName,
@@ -221,6 +222,7 @@ const createThread = os.threads.create.handler(
         db,
         threadId,
         userId: context.userId,
+        organizationId: context.organizationId,
       });
       if (!thread) {
         throw errors.INTERNAL_ERROR({ message: "Failed to create thread" });
