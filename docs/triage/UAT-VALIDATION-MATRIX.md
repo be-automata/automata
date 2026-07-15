@@ -767,3 +767,13 @@ Flips the batch-2 close-out `usage_events` row from **read-fenced, write-pending
 - **Altitude (agreed with team-lead): code-cert + unit is the honest maximum.** The proxy write path's LIVE exercise requires a real sandbox agent making an LLM call through the proxy with a daemon token → substrate-phase territory (same dependency as C8/C7-full). Recorded as such; re-certify live when the substrate + a real agent run exist. No product-surface live probe is possible for this path today.
 
 Slice 1b (agent-runtime credential org derivation) in flight.
+
+## FUTURE — C10 execution-plane note, REV-2 correction (ADR-002 rev 2, be46454)
+
+Operator revised ADR-002: the **execution plane is CUSTOMER-SUPPLIED (VPS/BYOC, self-hosted-runner model)** — platform-hosted containers (Option C) withdrawn (cgroups don't cap commit; CommitLimit is host-wide). This supersedes two items in the execution-plane C10 note above:
+
+- **Item 4 (cold-start vs ScheduleTimeout) is REFRAMED, not a cold-start race.** With customer-supplied persistent runners there's no platform cold-start. The real failure mode: **`schedule_timeout` (5m default) is a customer-outage grace period that silently DROPS work** if the customer's worker is offline past it. New validation: (a) `schedule_timeout` is raised deliberately (not left at 5m); (b) **worker-offline dashboard visibility** — the #1 observability requirement — so a silent drop is surfaced, not swallowed. This replaces the "cold-start measurement" framing.
+- **Still standing (unchanged):** control/execution split; credential rules (App key + master key NEVER leave the control plane; never shipped in installer/worker); BYO Anthropic = API-keys-only at write; no Hatchet `-dev` images deploy gate (authDisabled/meta 401-403); C10 worker secret + task-routing isolation (items 1-2).
+- **New validation surfaces (rev-2):** installer is the primary onboarding surface (validate: swap provisioning per capacity spec — 8GB+swap ⇒ 6 concurrent); **min-version gate at worker registration** (a stale/incompatible customer worker must be refused). Pricing decouples from capacity → platform-based (seats/orgs/repos), which REOPENS the deferred billing decision (batch-3 billing items may shift).
+
+Not active now (substrate/installer phase); recorded so the test design tracks the ADR revision.
