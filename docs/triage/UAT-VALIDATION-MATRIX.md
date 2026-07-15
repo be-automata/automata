@@ -851,3 +851,21 @@ Count reconciliation: live DB currently shows **16** tables with an `organizatio
 
 ## Next standing assignment
 The tenancy validation queue is CLOSED. Next arrives with the program's next phase: **review-package mount (Verified pillar) → GitHub App → Hatchet substrate**, where C8/C7-full become live-runnable and my recorded execution-plane gates activate.
+
+# NEXT QUEUE — C9 REVIEW-PACKAGE MOUNT: pre-staged validation (2026-07-15)
+
+New standing assignment (tenancy queue closed). tenancy-coder is porting orch-agents' review kernel + SQLite state → `packages/review` **with the original node:test suites kept unmodified** (the ~260-case suite is the imported guarantee). Pre-staged; executes when its slices commit.
+
+## C9 baseline (captured read-only from orch-agents — the source of truth to diff against)
+**15 source files** in `src/review` — PORT-MAP.md must account for EVERY one (ported OR deferred-with-reason; no silent omissions):
+`break-glass-handler.ts, claude-diff-reviewer.ts, cli-test-runner.ts, diff-review-parser.ts, diff-review-prompts.ts, finding-verifier.ts, package-manager.ts, review-gate.ts, review-pipeline.ts, severity-policy.ts, types.ts` + state/: `break-glass-matcher.ts, head-review-guard.ts, outstanding-review-finder.ts, types.ts`.
+**Test suite: 20 files, 260 cases** (node:test) — the C9 old-baseline-stays-green guarantee.
+
+## Validation checks (on commit)
+1. **Ported suites green under the package's `node --test` script** — the 260-case suite runs and passes unmodified. This is the HEART of C9 (old baseline stays green through the port). Report pass/fail vs 260.
+2. **PORT-MAP.md completeness** — diff its file list against the 15 baseline files above (`ls /Users/senior/.superset/projects/orch-agents/src/review/**`, read-only). Every source file ported or deferred-with-reason; flag any silent omission.
+3. **No vitest conversion drift** — the ported tests must stay **`node:test`** (NOT converted to vitest — that's the "kept unmodified" guarantee inside a vitest monorepo). Spot-check 1–2 ported test files against their orch-agents originals for near-verbatim match.
+4. **Monorepo still healthy** — `tsc` clean; existing chassis suites unaffected by the new package.
+
+## Explicitly NOT a gap (per team-lead)
+Integration/wiring (review pipeline hooked into the task lifecycle) is **deferred to the Hatchet/GitHub-App phase** — do NOT flag its absence. **PORT-MAP's deferred list IS the phase-2 work list.** C9 here is the *port + baseline-preservation* step only; the review pipeline going live (C8/C7-full territory) comes with the substrate + GitHub App.
