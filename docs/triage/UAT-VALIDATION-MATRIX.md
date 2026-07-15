@@ -354,3 +354,7 @@ Signup enablement is owned by **tenancy-coder** (`AUTH_EMAIL_PASSWORD_ENABLED` b
 - **Fresh-user-no-org (`activeOrganizationId=null`) dashboard state** — both seeded users already have an org, so this intermediate UAT state was not observable.
 
 **Pillar movement:** VERIFIED-adjacent tenant isolation now has real per-endpoint evidence at user-level (C10-baseline PASS); EXECUTED task-create path verified to the repo gate (C7); OBSERVED still 0 (C8 blocked on run streaming). Test artifacts left in the self-host DB (2 seeded threads, 1 runtime test org) — harmless, boot-coder can re-seed.
+
+### R1c — C5 evidence standard (per team-lead)
+
+**A seeded session does NOT count as C5 evidence.** boot-coder's `seed-selfhost.ts` bearer sessions authenticate around signup and are treated strictly as **supplementary fixtures** — valid for widening C10 probes (up to 4 orgs) and fast API-level assertions (as used above for C6/C7/C10), but they do **not** certify the product's self-serve signup behavior. **C5 must be exercised via the real email/password signup form** (rendered after the `AUTH_EMAIL_PASSWORD_ENABLED` rebuild cuts over on :3100), driving `POST /api/auth/sign-up/email` through the actual UI flow and observing: account creation, `autoSignIn` session, and the resulting fresh-user-no-org (`activeOrganizationId=null`) dashboard state. Status: **PENDING rebuild cutover** (boot-coder re-ordered to rebuild now; execute on its ping).
