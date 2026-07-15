@@ -1,0 +1,31 @@
+{
+  "name": "@terragon/review",
+  "version": "1.0.0",
+  "description": "Review kernel + state layer ported from orch-agents — the Verified pillar (severity policy, diff-review parsing, break-glass matching, review audit log, per-repo review tolerance). Pure logic + SQLite state only; pipeline/executors integrate in a later phase.",
+  "type": "module",
+  "exports": {
+    "./severity-policy": "./src/review/severity-policy.ts",
+    "./diff-review-parser": "./src/review/diff-review-parser.ts",
+    "./state/types": "./src/review/state/types.ts",
+    "./state/break-glass-matcher": "./src/review/state/break-glass-matcher.ts",
+    "./audit/review-audit-log": "./src/audit/review-audit-log.ts",
+    "./settings/repo-review-settings-store": "./src/settings/repo-review-settings-store.ts",
+    "./settings/repo-review-settings-audit": "./src/settings/repo-review-settings-audit.ts",
+    "./settings/review-floor-resolver": "./src/settings/review-floor-resolver.ts",
+    "./settings/types": "./src/settings/types.ts",
+    "./types": "./src/types.ts"
+  },
+  "scripts": {
+    "test": "node --import tsx --test 'tests/**/*.test.ts'",
+    "tsc-check": "tsc --noEmit",
+    "format": "prettier --write . --ignore-path ../../.prettierignore --config ../../.prettierrc",
+    "format-check": "prettier --check . --ignore-path ../../.prettierignore --config ../../.prettierrc"
+  },
+  "packageManager": "pnpm@10.14.0",
+  "devDependencies": {
+    "@terragon/tsconfig": "workspace:*",
+    "@types/node": "^22.15.29",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

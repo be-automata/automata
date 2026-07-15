@@ -821,6 +821,21 @@ importers:
         specifier: 5.8.3
         version: 5.8.3
 
+  packages/review:
+    devDependencies:
+      '@terragon/tsconfig':
+        specifier: workspace:*
+        version: link:../tsconfig
+      '@types/node':
+        specifier: 24.0.1
+        version: 24.0.1
+      tsx:
+        specifier: 4.20.3
+        version: 4.20.3
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+
   packages/sandbox:
     dependencies:
       '@daytonaio/sdk':
