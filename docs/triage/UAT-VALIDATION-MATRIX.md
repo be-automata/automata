@@ -653,3 +653,14 @@ Owner-scoped model fns, not newly route-reachable → per team-lead, code-cert +
 - `agentProviderCredentials` onto forTenant: **per-user semantics fenced by org** `(userId, organizationId)` — consistent with threads/environments. Insert stamps org; reads owner-fenced within the org.
 - **Org-shared team-credential tier deliberately NOT invented** — JSDoc-flagged as a future product/billing feature, deferred beyond this sweep. Recorded as intentional (not a gap).
 - `tenant.test.ts` **16/16 green** incl. "insertCredential stamps org; reads are owner-fenced within the org". (Note: I observe 16 total; if the slice expected 17, minor delta to reconcile — all present tests green, the credential fence case is covered.)
+
+## Batch-2 slice 2 — LIVE probe COMPLETE (2026-07-15, on 61705eb build)
+
+boot-coder rebuilt :3100 to HEAD 61705eb (slices 2+3). Re-ran the slice-2 live probe (via the real `createAutomation`/`getAutomations` server actions over Next-Action + cookie session). Split verdict:
+
+- **Create-stamp → PASS.** `createAutomation` under active org=orgA now persists `organization_id=orgA` (psql-verified; was NULL on the stale 44c4d82 build). The batch-1 automation→thread inheritance chain (`runAutomation` → `automation.organizationId`) is now live end-to-end.
+- **Read-fence → GAP CONFIRMED (empirical).** `getAutomations` @orgA lists the automation; `getAutomations` @orgA2 **still lists the same orgA automation**. So the dashboard automations LIST read is **not org-fenced at the route level** — a user in 2 orgs sees all their automations regardless of active org. Root cause: the `getAutomations` server action (`server-actions/automations.ts:33`) calls `getAutomationsModel({ db, userId })` with **no** `organizationId`, so `automationOrgFence(undefined)` no-ops. The model CAN fence; the read route doesn't pass the active org.
+  - **Inconsistency signal (strengthens "miss" over "deferral"):** the analogous `getThreadsAction` DOES thread `getTenantContextOrNull().organizationId` into the fence (certified in C10-ORG-CLOSURE test b). Threads got the read-side org; automations didn't. Looks like an oversight in the automations server-action migration, not an intentional deferral.
+  - **Recommendation:** pass the active org into `getAutomations` (mirror `getThreadsAction`) — one-line fix. Until then the automation create-stamp is fenced but the dashboard list read leaks cross-active-org (within a single user's own orgs; not cross-user). Team-lead to confirm in-scope-now vs deferred.
+
+Junk fixture: 1 org-stamped automation "UAT Slice2 orgA" (org=orgA) on user A — harmless, boot-coder can clear.
