@@ -869,3 +869,21 @@ New standing assignment (tenancy queue closed). tenancy-coder is porting orch-ag
 
 ## Explicitly NOT a gap (per team-lead)
 Integration/wiring (review pipeline hooked into the task lifecycle) is **deferred to the Hatchet/GitHub-App phase** — do NOT flag its absence. **PORT-MAP's deferred list IS the phase-2 work list.** C9 here is the *port + baseline-preservation* step only; the review pipeline going live (C8/C7-full territory) comes with the substrate + GitHub App.
+
+# C9 REVIEW-PACKAGE MOUNT step 1 — VERDICT: PASS (2026-07-15, d10ff92)
+
+Validated `packages/review` (review kernel + SQLite state port) with the lead's two calibrations applied (164 ≠ 260 by design; the 4 phantom module names are embedded concepts).
+
+| Check | Result |
+|---|---|
+| **1. Ported suites green under `node --test`** | **164/164 PASS** (`node --import tsx --test`, node:test — NOT vitest). The heart of C9: the imported kernel suite runs green unmodified. |
+| **2. PORT-MAP completeness — no silent drop** | **PASS.** All 15 `src/review` baseline files accounted: 4 ported (severity-policy, diff-review-parser, state/break-glass-matcher, state/types) + 11 deferred-with-reason (review-gate, review-pipeline, claude-diff-reviewer, finding-verifier, break-glass-handler, cli-test-runner, package-manager, diff-review-prompts, review-local types, head-review-guard, outstanding-review-finder). Cross-checked all **20 `tests/review` files** → every one PORTED or DEFERRED(PORT-MAP), **zero unaccounted**. Audit + settings tests also ported (164 = review-subset + audit + settings). Deferred review tests travel with their phase-2 modules. |
+| **3. No vitest conversion drift** | **PASS.** Runner is node:test. `severity-policy.test.ts` diffs **byte-identical** to the orch-agents original (verbatim port). |
+| **4. Monorepo healthy** | **PASS.** `packages/review tsc-check` clean (exit 0); new isolated package, existing chassis suites unaffected. |
+| **5. Phantom modules verified vs upstream** | **PASS.** `finding-fingerprint`, `verdict-decision`, `review-body-composer`, `lifecycle-resolver` are NOT files in orch-agents `src/review` (confirmed against my 15-file baseline); PORT-MAP documents them as embedded (verdict→severity-policy, finding→types, state store→audit/review-audit-log). `lifecycle-resolver` exists only in `execution/workspace` (worktree lifecycle, out of scope) — correctly excluded. |
+| **6. tsconfig carve-out** | **PASS (documented)** — `noUncheckedIndexedAccess: false`, with a tsconfig comment + PORT-MAP Adaptation #2 explaining orch-agents compiles review under `strict` without that flag; leaving it on would edit proven code. **Cosmetic nit:** the tsconfig comment says "178-case guarantee" but the actual is 164 — stale number, worth a one-word fix. |
+| **7. Lockfile** | **PASS.** `pnpm-lock.yaml` = **+15 additive lines** (workspace link only), no rewrites. |
+
+**Integration/wiring correctly ABSENT (not a gap):** review-gate/pipeline/executors/GitHub/event-bus/SDK deferred to the Hatchet/GitHub-App phase. **PORT-MAP's deferred table IS the phase-2 work list** (each with its dependency reason). C9 here is port + baseline-preservation; the pipeline goes live with the substrate + GitHub App (C8/C7-full territory).
+
+**C9-step-1 VERDICT: PASS.** The ~260-case review guarantee is preserved with zero silent drops — 164 ported+green now, the remainder explicitly deferred with modules+tests+reasons. One cosmetic nit (tsconfig "178"→"164").
