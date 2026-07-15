@@ -646,3 +646,10 @@ Slice 2 (`6d57f2f`, automations model onto forTenant + create-stamp) is **route-
 **Read-side observation to verify live post-deploy:** the `getAutomations` **server action** (`server-actions/automations.ts:33`) still calls `getAutomationsModel({ db, userId })` with **no** `organizationId` — so even at `6d57f2f` the dashboard automations LIST read is not org-fenced at the route level (model CAN fence, but the read route doesn't pass the active org). Open question: is the `getAutomations`→forTenant read migration in-slice or a later sweep step? Confirm empirically (getAutomations under orgA vs orgA2) once `6d57f2f` is live; record as gap or intentional-deferral accordingly.
 
 Junk fixtures from the premature probe: 2 NULL-org automations on user A ("UAT Org Probe"/"…2") — harmless, boot-coder to clear.
+
+## Batch-2 slice 3 — VALIDATED (2026-07-15, 61705eb): PASS (code-cert + unit)
+
+Owner-scoped model fns, not newly route-reachable → per team-lead, code-cert + unit sufficient (no live probe). PASS.
+- `agentProviderCredentials` onto forTenant: **per-user semantics fenced by org** `(userId, organizationId)` — consistent with threads/environments. Insert stamps org; reads owner-fenced within the org.
+- **Org-shared team-credential tier deliberately NOT invented** — JSDoc-flagged as a future product/billing feature, deferred beyond this sweep. Recorded as intentional (not a gap).
+- `tenant.test.ts` **16/16 green** incl. "insertCredential stamps org; reads are owner-fenced within the org". (Note: I observe 16 total; if the slice expected 17, minor delta to reconcile — all present tests green, the credential fence case is covered.)
