@@ -38,6 +38,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
     "@date-fns/tz": "^1.2.0",
+    "@neondatabase/serverless": "^1.1.0",
     "@octokit/app": "^16.0.1",
     "@terragon/agent": "workspace:*",
     "@terragon/daemon": "workspace:*",
