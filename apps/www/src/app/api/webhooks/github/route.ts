@@ -111,6 +111,26 @@ export async function POST(request: NextRequest) {
     if ("repository" in payload && payload.repository) {
       payloadInfo.push(`repository: ${payload.repository.full_name}`);
     }
+    // Surface the installation id + account on EVERY delivery. This is how an
+    // operator captures the installation id during pilot bring-up (Somnio): the
+    // id isn't obtainable via the user-token API, so we read it off the first
+    // delivery, then bind it to the org (see deploy/SOMNIO-PILOT.md). Account
+    // login disambiguates which org the delivery belongs to.
+    if ("installation" in payload && payload.installation) {
+      payloadInfo.push(`installation.id: ${payload.installation.id}`);
+    }
+    const accountLogin =
+      ("installation" in payload &&
+        payload.installation &&
+        "account" in payload.installation &&
+        payload.installation.account &&
+        "login" in payload.installation.account &&
+        payload.installation.account.login) ||
+      ("repository" in payload && payload.repository?.owner?.login) ||
+      undefined;
+    if (accountLogin) {
+      payloadInfo.push(`account: ${accountLogin}`);
+    }
 
     console.log("[github webhook] event received", name, ...payloadInfo);
   });

@@ -63,6 +63,67 @@ Implementation seams:
 
 ---
 
+## Intake parity — event coverage matrix
+
+Prod orch-agents routes these marketplace-monorepo event classes (from its
+`WORKFLOW.md`) to skills. The pilot needs **intake parity**: every routed event
+class must produce a correctly-attributed shadow task/thread in the bound org.
+Execution (running the named skill) comes later; the pilot proves intake.
+
+| # | Event class | Prod skill (intent) | Chassis today | Gap → plan |
+|---|---|---|---|---|
+| 1 | `pull_request.opened` | github-ops (PR review) | `handlePullRequestUpdated` runs a PR **automation** only if a user created one (`on.open`); otherwise just a PR-status DB update — **no task** | Not unconditional. **Mirror-intake** creates a shadow "Review PR #N (opened)" task per bound repo |
+| 2 | `pull_request.synchronize` | github-ops | PR automation only, `on.update` | Same → mirror-intake "Review PR #N (updated)" |
+| 3 | `pull_request.review_requested` | github-ops | **Not handled** (action absent from route) | New intake → "Review PR #N (review requested)" |
+| 4 | `pull_request.closed` (merged=true) | github-pr-merged-jira | `handlePullRequestStatusChange` → status DB update only, **no task** | New intake, `merged===true` only → "Post-merge follow-up for PR #N" |
+| 5 | `pull_request_review.changes_requested` | github-ops (re-review) | `handlePullRequestReviewEvent` fires only on `submitted` **and** is mention-gated; review state not inspected → **no task** | New intake, `review.state==="changes_requested"` → "Address changes requested on PR #N" |
+| 6 | `workflow_run` failure | gh-fix-ci | **Not handled** (event absent from route) | New event subscription + intake → "Fix CI: run '<name>' failed" |
+| 7 | `issues.opened` | github-deep-research | `handleIssueEvent` runs an issue **automation** only if a user created one (`on.open`); else **no task** | Not unconditional → mirror-intake "Research issue #N" |
+| 8 | `issues.labeled` [`bug`\|`enhancement`] | github-ops | **Not handled** (only `issues.opened` subscribed) | New action + label filter → "Handle issue #N (labeled <label>)" |
+| 9 | `issue_comment.created` + bot mention | github-mention-respond (chassis-native) | `handleIssueCommentEvent` → `handleAppMention` | **COVERED** (native; shadow-aware) |
+| 10 | `pull_request_review_comment.created` + bot mention | github-review-comment-respond (chassis-native) | `handlePullRequestReviewCommentEvent` → `handleAppMention` | **COVERED** (native; shadow-aware) |
+
+Automation-model coverage (why rows 1–2, 7 aren't "free"): the automation
+trigger schema (`packages/shared/src/automations/index.ts`) only expresses
+`pull_request` (`on.open` = opened/ready_for_review, `on.update` = synchronize)
+and `issue` (`on.open`) — and only when a **user has created the automation row**
+(opt-in). It has **no** `review_requested`, `merged`-close, `changes_requested`,
+`issues.labeled`, or `workflow_run` trigger. Prod's `WORKFLOW.md` routes
+**unconditionally per repo**; the chassis routes per user-automation. Mirror
+parity therefore needs a repo-level intake layer, not just seeded automations.
+
+**Attribution.** A mirror task isn't triggered by a specific user action (a PR
+opening has no "commenter"), so it's attributed to the **bound org's owner**
+(`role: "owner"` member) + the org id. Mention tasks keep their existing
+commenter attribution.
+
+**Tracker note (out of pilot scope):** prod's marketplace-monorepo config names
+Linear team **AUT** as the tracker. The pilot proves GitHub intake only; no
+Linear/Jira wiring is in scope here.
+
+## Capturing the installation id (first delivery)
+
+The installation id is **not** obtainable via the user-token GitHub API, so the
+bind step (below) needs it from a real delivery. Every webhook delivery is
+logged by the intake route with the id and account, e.g.:
+
+```
+[github webhook] event received pull_request action: opened repository: somnio-projects/marketplace-monorepo installation.id: 12345678 account: somnio-projects
+```
+
+Additionally, the first delivery for an **unbound** installation is fast-acked
+(WI-8 2xx) with an explicit skip log naming the id + account, so the operator
+can read it and bind:
+
+```
+[github webhook] skipped { category: 'unmapped_installation', installationId: 12345678, accountLogin: 'somnio-projects', ... }
+```
+
+Flow: wire the repo-level webhook (step 3) **first**, trigger any event (open a
+throwaway PR or re-deliver from the repo's webhook "Recent Deliveries"), read the
+`installation.id` from the log, run the bind (step 2), then **re-deliver** the
+same payload from GitHub's webhook UI so it now lands against the bound org.
+
 ## Operator steps
 
 Prerequisites: `DATABASE_URL` points at the platform Postgres; the Somnio org
