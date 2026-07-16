@@ -167,6 +167,26 @@ async function handlePullRequestAutomation(
     return;
   }
   const prAuthorUserName = event.pull_request.user?.login;
+  // Unconditional routing (mirror parity): match every PR regardless of author.
+  if (config.filter.includeAllAuthors) {
+    console.log(
+      `Triggering automation ${automation.id} for PR #${prNumber} in ${repoFullName} (${event.action}, all-authors)`,
+    );
+    await runPullRequestAutomation({
+      automationId: automation.id,
+      userId: automation.userId,
+      prEventAction: event.action,
+      repoFullName,
+      prNumber,
+      source: "automated",
+    }).catch((error) => {
+      console.error(
+        `Error running automation ${automation.id} for PR #${prNumber} in ${repoFullName}:`,
+        error,
+      );
+    });
+    return;
+  }
   const isPRAuthor = await getIsPRAuthor({
     userId: automation.userId,
     repoFullName,
@@ -529,6 +549,26 @@ async function handleIssueAutomation(
     return;
   }
   const issueAuthorUserName = event.issue.user?.login;
+  // Unconditional routing (mirror parity): match every issue regardless of author.
+  if (config.filter.includeAllAuthors) {
+    console.log(
+      `Triggering automation ${automation.id} for issue #${issueNumber} in ${repoFullName} (${event.action}, all-authors)`,
+    );
+    await runIssueAutomation({
+      automationId: automation.id,
+      userId: automation.userId,
+      issueEventAction: event.action,
+      repoFullName,
+      issueNumber,
+      source: "automated",
+    }).catch((error) => {
+      console.error(
+        `Error running automation ${automation.id} for issue #${issueNumber} in ${repoFullName}:`,
+        error,
+      );
+    });
+    return;
+  }
   const isIssueAuthor = await getIsIssueAuthor({
     userId: automation.userId,
     repoFullName,

@@ -5,6 +5,7 @@ import {
   createTestAutomation,
 } from "@terragon/shared/model/test-helpers";
 import { createOrganization } from "@terragon/shared/model/organizations";
+import { bindGithubInstallationToOrg } from "@terragon/shared/model/github-installation";
 import { automations as automationsTable } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
@@ -66,5 +67,63 @@ describe("runAutomation — org inheritance (WI-5)", () => {
 
     const callArgs = vi.mocked(createNewThread).mock.calls[0]?.[0];
     expect(callArgs?.organizationId ?? null).toBeNull();
+  });
+
+  it("shadow: runs as a shadow thread when the org's installation is in shadow mode", async () => {
+    const org = await createOrganization({
+      db,
+      name: "ShadowOrg",
+      slug: `shadow-${nanoid(8).toLowerCase()}`,
+    });
+    await bindGithubInstallationToOrg({
+      db,
+      installationId: Math.floor(Math.random() * 1_000_000_000),
+      organizationId: org.id,
+      mode: "shadow",
+    });
+    const automation = await createTestAutomation({ db, userId: user.id });
+    await db
+      .update(automationsTable)
+      .set({ organizationId: org.id })
+      .where(eq(automationsTable.id, automation.id));
+
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "manual",
+    });
+
+    expect(createNewThread).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: org.id, shadow: true }),
+    );
+  });
+
+  it("active/none: runs as a non-shadow thread when the org has no shadow installation", async () => {
+    const org = await createOrganization({
+      db,
+      name: "ActiveOrg",
+      slug: `active-${nanoid(8).toLowerCase()}`,
+    });
+    await bindGithubInstallationToOrg({
+      db,
+      installationId: Math.floor(Math.random() * 1_000_000_000),
+      organizationId: org.id,
+      mode: "active",
+    });
+    const automation = await createTestAutomation({ db, userId: user.id });
+    await db
+      .update(automationsTable)
+      .set({ organizationId: org.id })
+      .where(eq(automationsTable.id, automation.id));
+
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "manual",
+    });
+
+    expect(createNewThread).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: org.id, shadow: false }),
+    );
   });
 });

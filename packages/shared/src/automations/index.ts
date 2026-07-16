@@ -23,6 +23,8 @@ export const AutomationTriggerSchema = z.discriminatedUnion("type", [
           .string()
           .optional()
           .describe("Comma-separated list of authors to include"),
+        // Match PRs from ANY author (unconditional routing — mirror parity).
+        includeAllAuthors: z.boolean().optional(),
       }),
       // The events to trigger on.
       on: z.object({
@@ -45,6 +47,8 @@ export const AutomationTriggerSchema = z.discriminatedUnion("type", [
           .string()
           .optional()
           .describe("Comma-separated list of authors to include"),
+        // Match issues from ANY author (unconditional routing — mirror parity).
+        includeAllAuthors: z.boolean().optional(),
       }),
       // The events to trigger on.
       on: z.object({

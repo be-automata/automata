@@ -18,6 +18,7 @@ import {
   AutomationTriggerType,
 } from "@terragon/shared/automations";
 import { AccessTier, DBUserMessage } from "@terragon/shared";
+import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
 import {
   PullRequestEvent,
   IssueEvent,
@@ -71,6 +72,14 @@ export async function runAutomation({
   try {
     let threadId: string | undefined;
     let threadChatId: string | undefined;
+    // Shadow mode (Somnio pilot): if the automation's org is in shadow, its
+    // seeded automations create dashboard-visible tasks but never boot the agent
+    // — so they light up on flip-to-active without acting during observation.
+    const shadow =
+      (await getOrganizationInstallationMode({
+        db,
+        organizationId: automation.organizationId,
+      })) === "shadow";
     switch (automation.action.type) {
       case "user_message": {
         const newThreadResult = await createNewThread({
@@ -78,6 +87,7 @@ export async function runAutomation({
           // Derivation: an automation is org-owned, so its threads inherit the
           // automation's org (WI-5 batch 1). Unambiguous. Nullable-safe.
           organizationId: automation.organizationId,
+          shadow,
           message: options?.transformMessage
             ? options.transformMessage(automation.action.config.message)
             : automation.action.config.message,

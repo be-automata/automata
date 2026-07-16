@@ -8,6 +8,7 @@ import {
   getGithubInstallation,
   getInstallationOrgAndMode,
   getOrganizationIdForInstallation,
+  getOrganizationInstallationMode,
 } from "./github-installation";
 
 const db = createDb(env.DATABASE_URL!);
@@ -162,6 +163,38 @@ describe("github-installation", () => {
       expect(
         await getInstallationOrgAndMode({ db, installationId: null }),
       ).toEqual({ organizationId: null, mode: "active" });
+    });
+
+    it("reverse org→mode: shadow only when every binding is shadow; active on any active binding or none", async () => {
+      // No binding → active (migration-safe).
+      expect(
+        await getOrganizationInstallationMode({ db, organizationId: orgId }),
+      ).toBe("active");
+      expect(
+        await getOrganizationInstallationMode({ db, organizationId: null }),
+      ).toBe("active");
+
+      // One shadow binding → shadow.
+      await bindGithubInstallationToOrg({
+        db,
+        installationId: installationId(),
+        organizationId: orgId,
+        mode: "shadow",
+      });
+      expect(
+        await getOrganizationInstallationMode({ db, organizationId: orgId }),
+      ).toBe("shadow");
+
+      // Add an active binding for the same org → active wins (someone went live).
+      await bindGithubInstallationToOrg({
+        db,
+        installationId: installationId(),
+        organizationId: orgId,
+        mode: "active",
+      });
+      expect(
+        await getOrganizationInstallationMode({ db, organizationId: orgId }),
+      ).toBe("active");
     });
   });
 });

@@ -76,6 +76,35 @@ export async function getInstallationOrgAndMode({
 }
 
 /**
+ * Reverse lookup: the effective mode for an ORG (not an installation) — used by
+ * the automation run path, which is keyed by org, not installation. An org is
+ * treated as 'shadow' only when it has at least one bound installation and NONE
+ * of them is active (i.e. every binding is shadow). Any active binding — or no
+ * binding at all — resolves to 'active', so this never suppresses an org that
+ * isn't deliberately in a shadow pilot (migration-safe, mirrors
+ * getInstallationOrgAndMode's no-row default).
+ */
+export async function getOrganizationInstallationMode({
+  db,
+  organizationId,
+}: {
+  db: DB;
+  organizationId: string | null | undefined;
+}): Promise<InstallationMode> {
+  if (!organizationId) {
+    return "active";
+  }
+  const rows = await db
+    .select({ mode: githubInstallation.mode })
+    .from(githubInstallation)
+    .where(eq(githubInstallation.organizationId, organizationId));
+  if (rows.length === 0) {
+    return "active";
+  }
+  return rows.every((r) => r.mode === "shadow") ? "shadow" : "active";
+}
+
+/**
  * Registration seam: bind (or rebind) a GitHub App installation to an org.
  * Minimal now — an org admin calls this to claim an installation; it grows a UI
  * in the GitHub-App phase. Upserts on the unique installationId.

@@ -72,25 +72,35 @@ Execution (running the named skill) comes later; the pilot proves intake.
 
 | # | Event class | Prod skill (intent) | Chassis today | Gap → plan |
 |---|---|---|---|---|
-| 1 | `pull_request.opened` | github-ops (PR review) | `handlePullRequestUpdated` runs a PR **automation** only if a user created one (`on.open`); otherwise just a PR-status DB update — **no task** | Not unconditional. **Mirror-intake** creates a shadow "Review PR #N (opened)" task per bound repo |
-| 2 | `pull_request.synchronize` | github-ops | PR automation only, `on.update` | Same → mirror-intake "Review PR #N (updated)" |
-| 3 | `pull_request.review_requested` | github-ops | **Not handled** (action absent from route) | New intake → "Review PR #N (review requested)" |
-| 4 | `pull_request.closed` (merged=true) | github-pr-merged-jira | `handlePullRequestStatusChange` → status DB update only, **no task** | New intake, `merged===true` only → "Post-merge follow-up for PR #N" |
-| 5 | `pull_request_review.changes_requested` | github-ops (re-review) | `handlePullRequestReviewEvent` fires only on `submitted` **and** is mention-gated; review state not inspected → **no task** | New intake, `review.state==="changes_requested"` → "Address changes requested on PR #N" |
-| 6 | `workflow_run` failure | gh-fix-ci | **Not handled** (event absent from route) | New event subscription + intake → "Fix CI: run '<name>' failed" |
-| 7 | `issues.opened` | github-deep-research | `handleIssueEvent` runs an issue **automation** only if a user created one (`on.open`); else **no task** | Not unconditional → mirror-intake "Research issue #N" |
-| 8 | `issues.labeled` [`bug`\|`enhancement`] | github-ops | **Not handled** (only `issues.opened` subscribed) | New action + label filter → "Handle issue #N (labeled <label>)" |
+| 1 | `pull_request.opened` | github-ops (PR review) | `handlePullRequestUpdated` runs a PR **automation** only if a user created one (`on.open`); else PR-status DB update — **no task** | **Seeded automation** (`on.open`, `includeAllAuthors`, shadow-aware) → "Review PR" for every PR |
+| 2 | `pull_request.synchronize` | github-ops | PR automation only, `on.update` | Same seeded automation (`on.update`) |
+| 3 | `pull_request.review_requested` | github-ops | **Not handled** (action absent from route) | **Mirror-intake** → "Review PR #N (review requested)" |
+| 4 | `pull_request.closed` (merged=true) | github-pr-merged-jira | `handlePullRequestStatusChange` → status DB update only, **no task** | Mirror-intake, `merged===true` only → "Post-merge follow-up for PR #N" |
+| 5 | `pull_request_review.changes_requested` | github-ops (re-review) | `handlePullRequestReviewEvent` fires only on `submitted` **and** is mention-gated; state not inspected → **no task** | Mirror-intake, `review.state==="changes_requested"` → "Address changes requested on PR #N" |
+| 6 | `workflow_run` failure | gh-fix-ci | **Not handled** (event absent from route) | Mirror-intake, new `workflow_run.completed` sub, `conclusion==="failure"` → "Fix CI: run '<name>' failed" |
+| 7 | `issues.opened` | github-deep-research | `handleIssueEvent` runs an issue **automation** only if a user created one (`on.open`); else **no task** | **Seeded automation** (`on.open`, `includeAllAuthors`, shadow-aware) → "Research issue" |
+| 8 | `issues.labeled` [`bug`\|`enhancement`] | github-ops | **Not handled** (only `issues.opened` subscribed) | Mirror-intake, new `issues.labeled` sub + label allowlist → "Handle issue #N (labeled <label>)" |
 | 9 | `issue_comment.created` + bot mention | github-mention-respond (chassis-native) | `handleIssueCommentEvent` → `handleAppMention` | **COVERED** (native; shadow-aware) |
 | 10 | `pull_request_review_comment.created` + bot mention | github-review-comment-respond (chassis-native) | `handlePullRequestReviewCommentEvent` → `handleAppMention` | **COVERED** (native; shadow-aware) |
 
-Automation-model coverage (why rows 1–2, 7 aren't "free"): the automation
-trigger schema (`packages/shared/src/automations/index.ts`) only expresses
-`pull_request` (`on.open` = opened/ready_for_review, `on.update` = synchronize)
-and `issue` (`on.open`) — and only when a **user has created the automation row**
-(opt-in). It has **no** `review_requested`, `merged`-close, `changes_requested`,
-`issues.labeled`, or `workflow_run` trigger. Prod's `WORKFLOW.md` routes
-**unconditionally per repo**; the chassis routes per user-automation. Mirror
-parity therefore needs a repo-level intake layer, not just seeded automations.
+**Two implementation mechanisms.** The automation trigger schema
+(`packages/shared/src/automations/index.ts`) expresses only `pull_request`
+(`on.open` = opened/ready_for_review, `on.update` = synchronize) and `issue`
+(`on.open`). For those three classes (rows 1–2, 7) mirror parity is achieved by
+**seeding automations** with a new `includeAllAuthors` filter (prod routes
+unconditionally per repo; the stock automation author-filter only matched the
+owner/an allowlist, so `includeAllAuthors` was added to route every author).
+`runAutomation` is shadow-aware, so a seeded automation in a shadow org creates a
+dashboard-visible task without booting. The remaining five classes (rows 3–6, 8)
+have **no** automation trigger, so they are handled by the webhook
+**mirror-intake** layer (`mirror-intake.ts`). Both paths attribute to the org
+owner and honor shadow mode.
+
+> Interaction note: seeded automations (rows 1–2, 7) fire via the existing
+> `handlePullRequestUpdated`/`handleIssueEvent` automation routing; mirror-intake
+> (rows 3–6, 8) covers disjoint event classes, so the two never double-fire on
+> the same delivery. If an org later hand-creates its own automation for the same
+> class, both would fire — the pilot org has none.
 
 **Attribution.** A mirror task isn't triggered by a specific user action (a PR
 opening has no "commenter"), so it's attributed to the **bound org's owner**
@@ -158,14 +168,31 @@ On the **pilot repo** → Settings → Webhooks → Add webhook:
 - **Content type**: `application/json`
 - **Secret**: the **GitHub App's webhook secret** (`GITHUB_WEBHOOK_SECRET` — the
   same secret the platform verifies HMAC-SHA256 against). Do not invent a new one.
-- **Events**: issue comments, pull request review comments (whatever the mention
-  intake consumes).
+- **Events** (to cover the full parity matrix): Pull requests, Pull request
+  reviews, Pull request review comments, Issues, Issue comments, Workflow runs.
 
 Leave the **App-level** webhook exactly as it is (pointing at prod).
 
+### 3b. Seed the mirror automations
+
+Provision the automation-expressible rows (PR open/update review, issue-open
+research) for the bound org. Idempotent; binds the installation in shadow if you
+pass its id.
+
+```bash
+DATABASE_URL=postgres://... pnpm exec tsx deploy/seed-somnio-mirror.ts \
+  somnio-software somnio-projects/marketplace-monorepo <installationId>
+```
+
+The remaining classes (review_requested, merged, changes_requested,
+workflow_run, labeled) need no seeding — the webhook mirror-intake layer handles
+them for any bound installation.
+
 ### 4. Shadow-verify
 
-Comment `@<bot>` on a PR in the pilot repo, then confirm from the dashboard:
+Exercise both intake paths: comment `@<bot>` on a PR (mention path) and trigger a
+mirror class — open a PR or push to one (→ "Review PR" task), or label an issue
+`bug` (→ "Handle issue" task). Then confirm from the dashboard:
 
 - A thread appears under the **Somnio Software** org, badged **shadow**.
 - **On GitHub, nothing happened** — no eyes reaction, no comment, no check, no
