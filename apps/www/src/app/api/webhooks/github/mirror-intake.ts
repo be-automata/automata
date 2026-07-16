@@ -7,7 +7,7 @@ import { effectiveShadow } from "@/lib/github-side-effects";
 import { WebhookSkip } from "./webhook-skip";
 
 /**
- * Mirror-intake (Somnio pilot). Prod orch-agents' WORKFLOW.md routes marketplace
+ * Mirror-intake (pilot). Prod orch-agents' WORKFLOW.md routes marketplace
  * events to skills UNCONDITIONALLY per repo; the chassis only routes PR/issue
  * events through opt-in user automations and mention events natively. This module
  * closes the gap for the event classes the chassis has no task-creation path for:
@@ -19,7 +19,7 @@ import { WebhookSkip } from "./webhook-skip";
  *   - issues.labeled [bug|enhancement]     -> "Handle issue #N (labeled <label>)"
  *
  * (opened/synchronize/issues.opened are mirrored via seeded automations, not here,
- * to avoid double-firing — see deploy/SOMNIO-PILOT.md.)
+ * to avoid double-firing — see deploy/PILOT-RUNBOOK.md.)
  *
  * Each event produces one task in the bound org, attributed to the org owner (a
  * PR opening has no "commenter"), created SHADOW when the installation is in

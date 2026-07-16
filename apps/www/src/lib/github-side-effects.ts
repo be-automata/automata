@@ -2,11 +2,11 @@ import { env } from "@terragon/env/apps-www";
 import { InstallationMode } from "@terragon/shared/model/github-installation";
 
 /**
- * Deployment-level kill-switch for ALL GitHub side effects (Somnio pilot).
+ * Deployment-level kill-switch for ALL GitHub side effects (pilot).
  *
  * `GITHUB_SIDE_EFFECTS_ENABLED` defaults TRUE (back-compat: existing prod /
  * self-host are unaffected). When FALSE — set on the pilot Workers deployment
- * until the Somnio binding is verified in shadow — every GitHub-processing path
+ * until the pilot binding is verified in shadow — every GitHub-processing path
  * is forced into shadow behavior regardless of the per-installation mode. This
  * closes the id-capture window: between wiring the pilot webhook and binding the
  * installation, an event from a resolvable sender would otherwise resolve to

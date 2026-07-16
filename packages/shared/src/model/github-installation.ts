@@ -48,7 +48,7 @@ export type InstallationMode = "shadow" | "active";
 
 /**
  * Resolve both the org AND the mode for an installation in one read — the shape
- * the GitHub webhook needs (Somnio pilot). Unmapped/unknown installation → org
+ * the GitHub webhook needs (pilot). Unmapped/unknown installation → org
  * null.
  *
  * Mode defaults to 'active' when there's NO row — this preserves today's

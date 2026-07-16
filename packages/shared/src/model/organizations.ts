@@ -116,7 +116,7 @@ export async function getOrganizationMembers({
 
 /**
  * The userId to attribute an org-level (non-user-initiated) task to — e.g. a
- * mirror-intake task from a PR opening, which has no "commenter" (Somnio pilot).
+ * mirror-intake task from a PR opening, which has no "commenter" (pilot).
  * Prefers the earliest `owner`; falls back to the earliest member of any role so
  * an org seeded without an explicit owner role still resolves. Null when the org
  * has no members at all.

@@ -83,7 +83,7 @@ export async function POST(request: NextRequest) {
       await handlePullRequestUpdated(payload);
     },
   );
-  // Mirror-intake (Somnio pilot): event classes prod routes to a skill but the
+  // Mirror-intake (pilot): event classes prod routes to a skill but the
   // chassis has no task-creation path for. Each creates an org-attributed shadow
   // task (see mirror-intake.ts).
   webhooks.on(
@@ -134,9 +134,9 @@ export async function POST(request: NextRequest) {
       payloadInfo.push(`repository: ${payload.repository.full_name}`);
     }
     // Surface the installation id + account on EVERY delivery. This is how an
-    // operator captures the installation id during pilot bring-up (Somnio): the
+    // operator captures the installation id during pilot bring-up: the
     // id isn't obtainable via the user-token API, so we read it off the first
-    // delivery, then bind it to the org (see deploy/SOMNIO-PILOT.md). Account
+    // delivery, then bind it to the org (see deploy/PILOT-RUNBOOK.md). Account
     // login disambiguates which org the delivery belongs to.
     if ("installation" in payload && payload.installation) {
       payloadInfo.push(`installation.id: ${payload.installation.id}`);

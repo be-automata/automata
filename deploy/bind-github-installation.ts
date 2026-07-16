@@ -1,5 +1,5 @@
 /**
- * Bind a GitHub App installation to an org (Somnio pilot / operator tool).
+ * Bind a GitHub App installation to an org (pilot / operator tool).
  *
  * This is the registration seam for GitHub mentions (WI-5): the webhook's
  * installation id resolves to an org, and its `mode` decides whether the
@@ -15,14 +15,14 @@
  *   DATABASE_URL=postgres://... pnpm exec tsx deploy/bind-github-installation.ts \
  *     <installationId> <orgSlug> [shadow|active]
  *
- * Example — onboard Somnio in shadow, then later flip to active:
- *   ... deploy/bind-github-installation.ts 12345678 somnio-software        # shadow (default)
- *   ... deploy/bind-github-installation.ts 12345678 somnio-software active  # go live
+ * Example — onboard the dogfooding pilot in shadow, then flip to active:
+ *   ... deploy/bind-github-installation.ts 12345678 beautomata        # shadow (default)
+ *   ... deploy/bind-github-installation.ts 12345678 beautomata active  # go live
  *
  * SAFETY: this only writes the github_installation → org mapping row. It never
  * touches the GitHub App's own webhook configuration. The pilot repo uses a
  * separate repo-level webhook; the App's global webhook URL is left pointing at
- * prod (see deploy/SOMNIO-PILOT.md).
+ * prod (see deploy/PILOT-RUNBOOK.md).
  */
 import { createDb } from "../packages/shared/src/db";
 import { getOrganizationBySlug } from "../packages/shared/src/model/organizations";

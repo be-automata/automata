@@ -63,7 +63,7 @@ export interface CreateThreadOptions {
   sourceType: ThreadSource;
   sourceMetadata?: ThreadSourceMetadata;
   delayMs?: number;
-  // Shadow mode (Somnio pilot): create the thread row (org-stamped, dashboard-
+  // Shadow mode (pilot): create the thread row (org-stamped, dashboard-
   // visible) but do NOT boot a sandbox or run the agent — so the installation
   // produces zero GitHub side effects (no comments/checks/reviews) while an org
   // is being validated. Flipped to active per-installation via githubInstallation.mode.

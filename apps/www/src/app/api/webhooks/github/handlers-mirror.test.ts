@@ -12,8 +12,8 @@ vi.mock("./mirror-intake", () => ({
 }));
 
 const repo = {
-  full_name: "somnio-projects/marketplace-monorepo",
-  owner: { login: "somnio-projects" },
+  full_name: "be-automata/automata",
+  owner: { login: "be-automata" },
 };
 const installation = { id: 12345678 };
 const pr = (over: Record<string, unknown> = {}) => ({

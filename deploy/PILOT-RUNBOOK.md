@@ -1,33 +1,44 @@
-# Somnio pilot — intake readiness & operator runbook
+# Pilot runbook — intake readiness & operator steps
 
-How to onboard the Somnio Software org onto the Automata platform **without any
-risk of two bots acting on the same PR**. The pilot installation is brought up
-in **shadow mode** first (ingest-only, zero GitHub side effects), verified from
-the dashboard, then flipped to **active** once we trust it.
+How to onboard a repo onto the Automata platform. The **first pilot is
+dogfooding**: org **BeAutomata** (slug `beautomata`), repo
+**`be-automata/automata`** — our own platform repo.
+
+**No double-bot risk here.** Prod orch-agents does **not** serve
+`be-automata/automata` (its `WORKFLOW.md` routes only the two live customer orgs),
+so even though the shared GitHub App delivers this repo's events to prod, prod
+takes no action on them. That means the staged rollout below can proceed to
+**FULL ACTIVE quickly** — including real bot comments/checks/reviews on our own
+PRs — after a short shadow-verify sanity pass. Shadow mode + the kill-switch are
+still used during bring-up as guardrails, not because a second bot is competing.
+
+> The customer-repo case is different: onboarding a repo that prod DOES act on
+> (e.g. Somnio's `marketplace-monorepo`) reintroduces the two-bots-on-one-PR
+> hazard. Those steps and cautions live in **[Second onboarding: a customer
+> repo](#second-onboarding-a-customer-repo)** at the bottom — read that section
+> in full before onboarding any non-dogfooding repo.
 
 ---
 
-## The safety model (read this first)
+## Prerequisite — install the GitHub App on the `be-automata` org
 
-Two independent things must never fight over one PR:
+The pilot re-uses the **current prod GitHub App** (slug likely `automata`, bot
+`automata-ai-bot`). For the platform's repo-access gate and API calls to work,
+that App must be **installed on the `be-automata` org**. This is an operator
+browser step, not a script:
 
-1. **Prod orch-agents** — the existing bot, driven by the GitHub App's *own*
-   webhook (the App-level webhook URL, which points at prod).
-2. **The new Automata platform** — driven by a **separate, repo-level webhook**
-   we add to the pilot repo, pointing at the Workers URL.
+1. Go to `https://github.com/apps/<app-slug>/installations/new`.
+2. Select the **be-automata** org and grant it the repo(s) (at least
+   `be-automata/automata`).
 
-> **CRITICAL SAFETY — the GitHub App's own webhook URL is NEVER touched.** It
-> keeps pointing at prod for the entire pilot. The pilot uses a *separate
-> repo-level webhook* (Settings → Webhooks on the pilot repo). Never repoint,
-> disable, or edit the App-level webhook to run this pilot. If the only way you
-> can think of to route events to the platform is to change the App's webhook
-> URL, stop — that would hijack every repo the App is installed on.
+Installing the App is what mints the **installation id** that the id-capture flow
+(below) binds to the BeAutomata org.
 
-Shadow mode is the second guardrail. Even with the repo-level webhook wired and
-delivering, a **shadow** installation produces **zero GitHub side effects**: no
-comments, no checks, no reviews, no reactions, and the agent never runs. So even
-if both webhooks fire for the same PR during the pilot, only prod acts; the
-platform merely records a shadow thread you can inspect.
+> **SAFETY (every pilot, universal): never touch the App's OWN webhook URL.** It
+> points at prod, which serves two live customer orgs; repointing/disabling it
+> would cut them off. Pilot intake is always a **separate repo-level webhook** on
+> the pilot repo. If the only way you can see to route events to the platform is
+> editing the App-level webhook, stop.
 
 ---
 
@@ -65,7 +76,7 @@ Implementation seams:
 
 Per-installation shadow mode has one gap: between wiring the pilot webhook and
 running the bind step, an event from a *resolvable* sender resolves to `active`
-(the migration-safe no-row default) and would act on a live customer PR — the
+(the migration-safe no-row default) and would act before the binding exists — the
 id-capture chicken/egg. The env var **`GITHUB_SIDE_EFFECTS_ENABLED`** closes it.
 It defaults `true` (back-compat), but the pilot Worker sets it **`false`**, which
 forces shadow behavior for **every** GitHub-processing path — mention intake,
@@ -79,10 +90,9 @@ platform is globally inert on GitHub no matter what state the binding is in.
 
 ## Intake parity — event coverage matrix
 
-Prod orch-agents routes these marketplace-monorepo event classes (from its
-`WORKFLOW.md`) to skills. The pilot needs **intake parity**: every routed event
-class must produce a correctly-attributed shadow task/thread in the bound org.
-Execution (running the named skill) comes later; the pilot proves intake.
+Prod orch-agents routes these repo event classes (from its `WORKFLOW.md`) to
+skills. The pilot needs **intake parity**: every routed event class must produce
+a correctly-attributed task/thread in the bound org.
 
 | # | Event class | Prod skill (intent) | Chassis today | Gap → plan |
 |---|---|---|---|---|
@@ -114,16 +124,16 @@ owner and honor shadow mode.
 > `handlePullRequestUpdated`/`handleIssueEvent` automation routing; mirror-intake
 > (rows 3–6, 8) covers disjoint event classes, so the two never double-fire on
 > the same delivery. If an org later hand-creates its own automation for the same
-> class, both would fire — the pilot org has none.
+> class, both would fire — a fresh pilot org has none.
 
 **Attribution.** A mirror task isn't triggered by a specific user action (a PR
 opening has no "commenter"), so it's attributed to the **bound org's owner**
 (`role: "owner"` member) + the org id. Mention tasks keep their existing
 commenter attribution.
 
-**Tracker note (out of pilot scope):** prod's marketplace-monorepo config names
-Linear team **AUT** as the tracker. The pilot proves GitHub intake only; no
-Linear/Jira wiring is in scope here.
+**Tracker note (out of pilot scope):** prod's per-repo config names a Linear team
+as the tracker. The pilot proves GitHub intake only; no Linear/Jira wiring is in
+scope here.
 
 ## Capturing the installation id (first delivery)
 
@@ -132,7 +142,7 @@ bind step (below) needs it from a real delivery. Every webhook delivery is
 logged by the intake route with the id and account, e.g.:
 
 ```
-[github webhook] event received pull_request action: opened repository: somnio-projects/marketplace-monorepo installation.id: 12345678 account: somnio-projects
+[github webhook] event received pull_request action: opened repository: be-automata/automata installation.id: 12345678 account: be-automata
 ```
 
 Additionally, the first delivery for an **unbound** installation is fast-acked
@@ -140,7 +150,7 @@ Additionally, the first delivery for an **unbound** installation is fast-acked
 can read it and bind:
 
 ```
-[github webhook] skipped { category: 'unmapped_installation', installationId: 12345678, accountLogin: 'somnio-projects', ... }
+[github webhook] skipped { category: 'unmapped_installation', installationId: 12345678, accountLogin: 'be-automata', ... }
 ```
 
 Flow: wire the repo-level webhook (step 3) **first**, trigger any event (open a
@@ -148,12 +158,12 @@ throwaway PR or re-deliver from the repo's webhook "Recent Deliveries"), read th
 `installation.id` from the log, run the bind (step 2), then **re-deliver** the
 same payload from GitHub's webhook UI so it now lands against the bound org.
 
-## Operator steps
+## Operator steps (dogfooding: `be-automata/automata`)
 
-Prerequisites: `DATABASE_URL` points at the platform Postgres; the Somnio org
-exists (create it in the dashboard, or via `deploy/seed-selfhost.ts` for a dev
-box). You need the pilot repo's admin settings and the GitHub App's webhook
-secret.
+Prerequisites: the App is installed on the `be-automata` org (see above);
+`DATABASE_URL` points at the platform Postgres; the BeAutomata org exists (create
+it in the dashboard, or via `deploy/seed-selfhost.ts` for a dev box). You need the
+repo's admin settings.
 
 ### 0. Set the kill-switch OFF (before anything reaches the Worker)
 
@@ -165,18 +175,18 @@ first; it stays off through shadow-verify.
 
 ### 1. Create / confirm the org
 
-Create **"Somnio Software"** in the dashboard and note its **slug** (e.g.
-`somnio-software`). The bind step resolves the org by slug.
+Create **"BeAutomata"** in the dashboard and note its **slug** (`beautomata`).
+The bind + seed steps resolve the org by slug.
 
 ### 2. Bind the installation in shadow mode
 
-Get the installation id (GitHub → org settings → Installed GitHub Apps → the
-Automata app → the URL ends in `/installations/<id>`; or read it from a webhook
-delivery payload's `installation.id`).
+Get the installation id from the delivery log (see "Capturing the installation
+id" above), or from GitHub → org settings → Installed GitHub Apps → the Automata
+app → the URL ends in `/installations/<id>`.
 
 ```bash
 DATABASE_URL=postgres://... pnpm exec tsx deploy/bind-github-installation.ts \
-  <installationId> somnio-software        # mode defaults to shadow
+  <installationId> beautomata        # mode defaults to shadow
 ```
 
 The script prints the bound row and confirms `mode: shadow`. It **only** writes
@@ -184,7 +194,7 @@ the `github_installation → org` mapping — it never touches any webhook confi
 
 ### 3. Add the repo-level webhook (NOT the App webhook)
 
-On the **pilot repo** → Settings → Webhooks → Add webhook:
+On **`be-automata/automata`** → Settings → Webhooks → Add webhook:
 
 - **Payload URL**: the platform's Workers endpoint, `https://<workers-host>/api/webhooks/github`
 - **Content type**: `application/json`
@@ -201,11 +211,12 @@ Leave the **App-level** webhook exactly as it is (pointing at prod).
 
 Provision the automation-expressible rows (PR open/update review, issue-open
 research) for the bound org. Idempotent; binds the installation in shadow if you
-pass its id.
+pass its id. Args default to the pilot org, so for BeAutomata you can omit them:
 
 ```bash
-DATABASE_URL=postgres://... pnpm exec tsx deploy/seed-somnio-mirror.ts \
-  somnio-software somnio-projects/marketplace-monorepo <installationId>
+DATABASE_URL=postgres://... pnpm exec tsx deploy/seed-pilot-mirror.ts \
+  beautomata be-automata/automata <installationId>
+# or simply (defaults): pnpm exec tsx deploy/seed-pilot-mirror.ts
 ```
 
 The remaining classes (review_requested, merged, changes_requested,
@@ -218,38 +229,35 @@ Exercise both intake paths: comment `@<bot>` on a PR (mention path) and trigger 
 mirror class — open a PR or push to one (→ "Review PR" task), or label an issue
 `bug` (→ "Handle issue" task). Then confirm from the dashboard:
 
-- A thread appears under the **Somnio Software** org, badged **shadow**.
+- A thread appears under the **BeAutomata** org, badged **shadow**.
 - **On GitHub, nothing happened** — no eyes reaction, no comment, no check, no
   review. This is the whole point of shadow mode.
 - If webhook deliveries show non-2xx, that's a bug, not a rejection — the intake
   endpoint fast-acks business rejections with a 2xx skip (WI-8) so GitHub never
   disables the webhook. A genuine 5xx needs investigating.
 
-### 5. Go live — two ordered flips (only when verified)
+### 5. Go live (dogfooding — move fast)
 
-Two switches gate side effects; flip them in this order so there is never a
-moment where an *unintended* installation could act:
+Because prod does not act on `be-automata/automata`, there is no two-bots
+contention, so once shadow-verify passes you can go straight to full active and
+let the bot comment on our own PRs. Still flip in this order so an *unintended*
+installation can't act during the transition:
 
 **5a. Flip the global kill-switch ON.** Set `GITHUB_SIDE_EFFECTS_ENABLED=true`
 (or remove it) on the pilot Worker and redeploy. Per-installation mode now
-governs — and Somnio is still **shadow**-bound, so it *still* produces no side
-effects. Re-verify shadow behavior once more here: this proves the switch flip
-alone didn't wake anything up.
+governs — and BeAutomata is still **shadow**-bound, so it *still* produces no
+side effects. A quick re-verify here proves the switch flip alone didn't wake
+anything up.
 
-**5b. Flip the Somnio binding to active** (the final step):
+**5b. Flip the BeAutomata binding to active** (the final step):
 
 ```bash
 DATABASE_URL=postgres://... pnpm exec tsx deploy/bind-github-installation.ts \
-  <installationId> somnio-software active
+  <installationId> beautomata active
 ```
 
-Now — and only now — the platform boots the agent and acts on PRs for this
-installation.
-
-> Before 5b, decide how prod orch-agents stops acting on the pilot repo
-> (otherwise you re-introduce the two-bots problem — now both *acting*).
-> Coordinate the prod cutover (remove the repo from prod's scope, or stop the
-> App-level delivery for it) as a separate, deliberate step.
+Now the platform boots the agent and acts on `be-automata/automata` PRs — real
+bot comments/checks/reviews on our own repo. That is the dogfooding goal.
 
 ### Rollback
 
@@ -257,12 +265,70 @@ Fastest, global (all installations at once): set
 `GITHUB_SIDE_EFFECTS_ENABLED=false` on the Worker and redeploy — the platform
 goes inert on GitHub immediately, no DB change needed.
 
-Per-installation: flip the Somnio binding back to shadow at any time:
+Per-installation: flip the binding back to shadow at any time:
 
 ```bash
 DATABASE_URL=postgres://... pnpm exec tsx deploy/bind-github-installation.ts \
-  <installationId> somnio-software shadow
+  <installationId> beautomata shadow
 ```
 
 Either way the platform immediately stops producing GitHub side effects;
 existing shadow threads remain visible for inspection.
+
+---
+
+## Second onboarding: a customer repo
+
+**This section applies when onboarding a repo that prod orch-agents DOES act on**
+— e.g. Somnio's `somnio-projects/marketplace-monorepo`. Unlike the dogfooding
+pilot, here two bots can fight over one PR, so the double-bot cautions below are
+mandatory and the rollout must NOT rush to active.
+
+### The safety model (read this first)
+
+Two independent things must never fight over one PR:
+
+1. **Prod orch-agents** — the existing bot, driven by the GitHub App's *own*
+   webhook (the App-level webhook URL, which points at prod).
+2. **The new Automata platform** — driven by a **separate, repo-level webhook**
+   we add to the customer repo, pointing at the Workers URL.
+
+> **CRITICAL SAFETY — the GitHub App's own webhook URL is NEVER touched.** It
+> keeps pointing at prod for the entire pilot. The pilot uses a *separate
+> repo-level webhook* (Settings → Webhooks on the customer repo). Never repoint,
+> disable, or edit the App-level webhook to run this pilot. If the only way you
+> can think of to route events to the platform is to change the App's webhook
+> URL, stop — that would hijack every repo the App is installed on (including the
+> two live customer orgs it serves).
+
+Shadow mode is the second guardrail. Even with the repo-level webhook wired and
+delivering, a **shadow** installation produces **zero GitHub side effects**: no
+comments, no checks, no reviews, no reactions, and the agent never runs. So even
+if both webhooks fire for the same PR during the pilot, only prod acts; the
+platform merely records a shadow thread you can inspect.
+
+### Steps (customer repo)
+
+Follow the same operator steps 0–4 above, but with the customer's org slug and
+repo, e.g.:
+
+```bash
+DATABASE_URL=postgres://... pnpm exec tsx deploy/bind-github-installation.ts \
+  <installationId> somnio-software        # shadow
+DATABASE_URL=postgres://... pnpm exec tsx deploy/seed-pilot-mirror.ts \
+  somnio-software somnio-projects/marketplace-monorepo <installationId>
+```
+
+Then **stay in shadow** and verify for as long as it takes to trust the platform
+on live traffic — the whole point of shadow here is that only prod acts while you
+watch.
+
+### Going active (customer repo) — the extra gate
+
+> **Before flipping the customer binding to active, decide how prod orch-agents
+> stops acting on that repo** (otherwise you re-introduce the two-bots problem —
+> now both *acting*). Coordinate the prod cutover (remove the repo from prod's
+> scope, or stop the App-level delivery routing for it — but **never** by
+> repointing the shared App webhook) as a separate, deliberate step. Only after
+> prod is confirmed out of the loop do you run steps 5a → 5b for the customer
+> binding.

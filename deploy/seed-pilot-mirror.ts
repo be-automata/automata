@@ -1,25 +1,32 @@
 /**
- * Provision the Somnio pilot org's mirror automations (WORKFLOW.md parity).
+ * Provision a pilot org's mirror automations (prod WORKFLOW.md parity).
  *
- * Prod orch-agents' WORKFLOW.md routes marketplace events to skills. This seeds
- * the automation-expressible half of that table for the bound org so that, once
- * the installation is flipped to active, PR-open/update and issue-open events
- * execute (github-ops / github-deep-research equivalents). While the
- * installation is in shadow mode these automations create dashboard-visible
- * tasks but never boot the agent (runAutomation is shadow-aware). The other
- * event classes (review_requested, merged, changes_requested, workflow_run,
- * labeled) are handled by the webhook mirror-intake layer — see mirror-intake.ts.
+ * Defaults target the dogfooding pilot — org slug `beautomata`, repo
+ * `be-automata/automata` — but every field is a parameter, so the same script
+ * onboards the next org (e.g. Somnio) with different args. Prod orch-agents'
+ * WORKFLOW.md routes repo events to skills; this seeds the automation-expressible
+ * half of that table for the bound org so that, once the installation is flipped
+ * to active, PR-open/update and issue-open events execute (github-ops /
+ * github-deep-research equivalents). While the installation is in shadow mode
+ * these automations create dashboard-visible tasks but never boot the agent
+ * (runAutomation is shadow-aware). The other event classes (review_requested,
+ * merged, changes_requested, workflow_run, labeled) are handled by the webhook
+ * mirror-intake layer — see mirror-intake.ts.
  *
  * The automations use the `includeAllAuthors` filter so they fire for EVERY PR /
  * issue (unconditional routing), not just the owner's — matching prod's per-repo
  * routing. Tasks are attributed to the org owner.
  *
- * Usage (DATABASE_URL must point at the target Postgres):
- *   DATABASE_URL=postgres://... pnpm exec tsx deploy/seed-somnio-mirror.ts \
- *     <orgSlug> <repoFullName> [installationId]
+ * Usage (DATABASE_URL must point at the target Postgres). Positional args and
+ * env vars both work; positional wins. Args default to the pilot org:
+ *   DATABASE_URL=postgres://... pnpm exec tsx deploy/seed-pilot-mirror.ts \
+ *     [orgSlug] [repoFullName] [installationId]
+ *   # or: ORG_SLUG=... REPO_FULL_NAME=... INSTALLATION_ID=... pnpm exec tsx deploy/seed-pilot-mirror.ts
  *
- * Example:
- *   ... deploy/seed-somnio-mirror.ts somnio-software somnio-projects/marketplace-monorepo 12345678
+ * Examples:
+ *   ... deploy/seed-pilot-mirror.ts                                   # beautomata / be-automata/automata
+ *   ... deploy/seed-pilot-mirror.ts beautomata be-automata/automata 12345678
+ *   ... deploy/seed-pilot-mirror.ts somnio-software somnio-projects/marketplace-monorepo 67890
  *
  * Idempotent: automations are keyed by name per org+user and skipped if present;
  * an installation id (optional) is bound in shadow mode via upsert.
@@ -34,26 +41,32 @@ import {
 } from "../packages/shared/src/model/automations";
 import { DBUserMessage } from "../packages/shared/src/db/db-message";
 
+// Dogfooding pilot defaults (BeAutomata org, our own platform repo).
+const DEFAULT_ORG_SLUG = "beautomata";
+const DEFAULT_REPO_FULL_NAME = "be-automata/automata";
+
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
   console.error(
     "DATABASE_URL is not set. Point it at the target Postgres, e.g.\n" +
-      "  DATABASE_URL=postgres://... pnpm exec tsx deploy/seed-somnio-mirror.ts <orgSlug> <repoFullName> [installationId]",
+      "  DATABASE_URL=postgres://... pnpm exec tsx deploy/seed-pilot-mirror.ts [orgSlug] [repoFullName] [installationId]",
   );
   process.exit(1);
 }
 
-const [orgSlug, repoFullName, installationIdArg] = process.argv.slice(2);
-if (!orgSlug || !repoFullName) {
-  console.error(
-    "Usage: pnpm exec tsx deploy/seed-somnio-mirror.ts <orgSlug> <repoFullName> [installationId]",
-  );
-  process.exit(1);
-}
+const [orgSlugArg, repoFullNameArg, installationIdArg2] = process.argv.slice(2);
+const orgSlug = orgSlugArg ?? process.env.ORG_SLUG ?? DEFAULT_ORG_SLUG;
+const repoFullName =
+  repoFullNameArg ?? process.env.REPO_FULL_NAME ?? DEFAULT_REPO_FULL_NAME;
+const installationIdArg = installationIdArg2 ?? process.env.INSTALLATION_ID;
 if (installationIdArg !== undefined && !/^\d+$/.test(installationIdArg)) {
   console.error(`installationId must be numeric, got: ${installationIdArg}`);
   process.exit(1);
 }
+console.log(
+  `Seeding mirror automations for org '${orgSlug}', repo '${repoFullName}'` +
+    (installationIdArg ? ` (installation ${installationIdArg})` : ""),
+);
 
 const db = createDb(databaseUrl);
 
@@ -70,7 +83,7 @@ const PR_AUTOMATION_NAME = "Mirror: PR review (github-ops)";
 const ISSUE_AUTOMATION_NAME = "Mirror: issue research (github-deep-research)";
 
 async function main() {
-  const org = await getOrganizationBySlug({ db, slug: orgSlug! });
+  const org = await getOrganizationBySlug({ db, slug: orgSlug });
   if (!org) {
     console.error(
       `No organization found with slug '${orgSlug}'. Create it first (dashboard).`,

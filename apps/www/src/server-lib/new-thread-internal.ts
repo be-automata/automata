@@ -30,7 +30,7 @@ export async function newThreadInternal({
   // Tenant to stamp on the created thread (WI-5). Optional — background callers
   // (webhooks/automations) without a resolved org omit it (null = legacy).
   organizationId?: string | null;
-  // Shadow mode (Somnio pilot): create the thread row but don't boot the agent.
+  // Shadow mode (pilot): create the thread row but don't boot the agent.
   shadow?: boolean;
   message: DBUserMessage;
   githubRepoFullName: string;

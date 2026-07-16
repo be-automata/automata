@@ -17,7 +17,7 @@ vi.mock("@/server-lib/new-thread-internal", () => ({
     .mockResolvedValue({ threadId: "t", threadChatId: "c" }),
 }));
 
-const repoFullName = "somnio-projects/marketplace-monorepo";
+const repoFullName = "be-automata/automata";
 
 function installationId() {
   return Math.floor(Math.random() * 1_000_000_000);
@@ -27,8 +27,8 @@ async function seedBoundOrg(mode: "shadow" | "active") {
   const { user } = await createTestUser({ db });
   const org = await createOrganization({
     db,
-    name: "Somnio Software",
-    slug: `somnio-${nanoid(8).toLowerCase()}`,
+    name: "BeAutomata",
+    slug: `beautomata-${nanoid(8).toLowerCase()}`,
   });
   await addOrganizationMember({
     db,
@@ -46,7 +46,7 @@ async function seedBoundOrg(mode: "shadow" | "active") {
   return { user, org, instId };
 }
 
-describe("createMirrorTask (Somnio mirror-intake)", () => {
+describe("createMirrorTask (mirror-intake)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -57,7 +57,7 @@ describe("createMirrorTask (Somnio mirror-intake)", () => {
     await createMirrorTask({
       repoFullName,
       installationId: instId,
-      accountLogin: "somnio-projects",
+      accountLogin: "be-automata",
       intent: {
         kind: "pr-review-requested",
         prNumber: 42,
@@ -110,7 +110,7 @@ describe("createMirrorTask (Somnio mirror-intake)", () => {
       createMirrorTask({
         repoFullName,
         installationId: 999_999_999,
-        accountLogin: "somnio-projects",
+        accountLogin: "be-automata",
         intent: { kind: "ci-failure", runName: "CI", runId: 5 },
       }),
     ).rejects.toSatisfy((e: unknown) => {
@@ -118,7 +118,7 @@ describe("createMirrorTask (Somnio mirror-intake)", () => {
       return (
         skip?.category === "unmapped_installation" &&
         skip.detail?.installationId === 999_999_999 &&
-        skip.detail?.accountLogin === "somnio-projects"
+        skip.detail?.accountLogin === "be-automata"
       );
     });
     expect(newThreadInternal).not.toHaveBeenCalled();

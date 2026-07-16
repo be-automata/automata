@@ -40,7 +40,7 @@ export type CheckRunEvent = EmitterWebhookEvent<"check_run">["payload"];
 export type CheckSuiteEvent = EmitterWebhookEvent<"check_suite">["payload"];
 export type WorkflowRunEvent = EmitterWebhookEvent<"workflow_run">["payload"];
 
-// Issue labels prod's WORKFLOW.md routes to a task (mirror-intake, Somnio pilot).
+// Issue labels prod's WORKFLOW.md routes to a task (mirror-intake, pilot).
 const MIRRORED_ISSUE_LABELS = new Set(["bug", "enhancement"]);
 
 // octokit types `installation` on some event payloads but not others (e.g. it's
@@ -614,10 +614,10 @@ async function handleIssueAutomation(
 }
 
 // ---------------------------------------------------------------------------
-// Mirror-intake (Somnio pilot). Event classes prod's WORKFLOW.md routes to a
+// Mirror-intake (pilot). Event classes prod's WORKFLOW.md routes to a
 // skill but the chassis has no task-creation path for. Each creates one org-
 // attributed task (shadow when the installation is in shadow mode). See
-// mirror-intake.ts + deploy/SOMNIO-PILOT.md. These intentionally propagate a
+// mirror-intake.ts + deploy/PILOT-RUNBOOK.md. These intentionally propagate a
 // WebhookSkip for an unbound installation so the route fast-acks 2xx (WI-8).
 // ---------------------------------------------------------------------------
 

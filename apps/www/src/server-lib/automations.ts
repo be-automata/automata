@@ -73,7 +73,7 @@ export async function runAutomation({
   try {
     let threadId: string | undefined;
     let threadChatId: string | undefined;
-    // Shadow mode (Somnio pilot): if the automation's org is in shadow, its
+    // Shadow mode (pilot): if the automation's org is in shadow, its
     // seeded automations create dashboard-visible tasks but never boot the agent
     // — so they light up on flip-to-active without acting during observation.
     // Folded with the deployment-level side-effects kill-switch.

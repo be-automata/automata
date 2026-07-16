@@ -82,12 +82,12 @@ export const env = envsafe({
   GITHUB_WEBHOOK_SECRET: str(),
   GITHUB_APP_ID: str(),
   GITHUB_APP_PRIVATE_KEY: str(),
-  // Deployment-level kill-switch for ALL GitHub side effects (Somnio pilot).
+  // Deployment-level kill-switch for ALL GitHub side effects (pilot).
   // Default TRUE for back-compat: existing prod/self-host behave as before. When
   // FALSE, every GitHub-processing path is forced into shadow behavior (thread
   // rows created + dashboard-visible, but no agent boot and no comments/checks/
   // reviews/reactions) regardless of per-installation mode. The pilot Workers
-  // deployment sets this FALSE until the Somnio binding is verified in shadow.
+  // deployment sets this FALSE until the pilot binding is verified in shadow.
   GITHUB_SIDE_EFFECTS_ENABLED: bool({ default: true }),
 
   // Posthog

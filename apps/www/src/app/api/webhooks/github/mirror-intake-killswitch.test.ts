@@ -51,7 +51,7 @@ describe("mirror-intake with side-effects kill-switch OFF", () => {
     });
 
     await createMirrorTask({
-      repoFullName: "somnio-projects/marketplace-monorepo",
+      repoFullName: "be-automata/automata",
       installationId,
       intent: { kind: "pr-merged", prNumber: 3, baseBranch: "main" },
     });
