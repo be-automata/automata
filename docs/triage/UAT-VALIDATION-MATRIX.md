@@ -887,3 +887,28 @@ Validated `packages/review` (review kernel + SQLite state port) with the lead's 
 **Integration/wiring correctly ABSENT (not a gap):** review-gate/pipeline/executors/GitHub/event-bus/SDK deferred to the Hatchet/GitHub-App phase. **PORT-MAP's deferred table IS the phase-2 work list** (each with its dependency reason). C9 here is port + baseline-preservation; the pipeline goes live with the substrate + GitHub App (C8/C7-full territory).
 
 **C9-step-1 VERDICT: PASS.** The ~260-case review guarantee is preserved with zero silent drops — 164 ported+green now, the remainder explicitly deferred with modules+tests+reasons. One cosmetic nit (tsconfig "178"→"164").
+
+# ARBITRATION + HARNESS-HARDENING + KILL-SWITCH VERDICT (2026-07-15) — last gate before pilot GO
+
+## The 253-vs-845 contradiction: RESOLVED as env-contamination (tenancy-coder correct)
+Root cause (tenancy-coder, fix `e8690aa`): `apps/www/vite.config.ts` gated `stubServerActions()` on `NODE_ENV !== "test"` at **config-load**. A leaked non-test `NODE_ENV` (production, from boot-coder's OpenNext-build shell) stubbed EVERY server action to `undefined` → 92× "reading 'success'"; the same leak tripped the sandbox mock guard (28×) + e2e provider (8) = the ~253. Both agents' measurements were correct **for their env**.
+
+## Authoritative measurements (my shell verified clean; env hygiene per run noted)
+| # | Commit | Shell env | Result |
+|---|---|---|---|
+| 1 | f2f5027 (pre-fix) | CLEAN (no smoke.env vars; `env -u` belt-and-suspenders) | **845 pass / 0 fail / 9 skip** |
+| 2 | e8690aa (fix) | CLEAN | **845 / 0 / 9** |
+| 3 | **e8690aa (fix)** | **boot-coder's contaminated shell — full `smoke.env` sourced (NODE_ENV=production + SANDBOX_PROVIDER=docker + INTERNAL_SHARED_SECRET + selfhost DATABASE_URL)** | **845 / 0 / 9** — zero stub/mock/e2e failure signatures |
+
+Measurement note: an intermediate `NODE_ENV=production`-**only** poison run failed in the global-setup's `drizzle-kit-push-test` child on missing `INTERNAL_SHARED_SECRET` (prod envsafe) — a **methodology artifact** (that child inherits the shell and is separate from the stub bug), NOT a fix failure. The full-smoke.env reproduction (row 3) is the accurate boot-coder condition and is the definitive cert.
+
+**HARDENING CERTIFIED:** the exact env that produced boot-coder's 253 now yields 845/0. Fix mechanism (code-cert, `vite.config.ts:15,33`): stub gated on `NODE_ENV !== "test" && !process.env.VITEST` — `VITEST` is always set during a run, so the stub can never activate under vitest regardless of leaked NODE_ENV; plus `NODE_ENV: "test"` forced in the test.env block. Two-layer, robust.
+
+## Kill-switch slice `f2f5027` — PASS
+`effectiveShadow(mode)` = `!githubSideEffectsEnabled() ? true : mode === "shadow"`. Truth table complete + unit-tested (`github-side-effects.test.ts` **2/2 green**: switch-ON → per-installation mode governs (active boots, shadow suppresses); switch-OFF → forces shadow for EVERY mode incl. active). Env default `true` (back-compat, `apps-www.ts:91`). `WORKERS-ENV-MAP.md:90` **mandates `false` on the pilot Worker** with the exact id-capture-window rationale (unbound installation would resolve `active` and act on a live customer PR). Correct.
+
+## PROCESS LESSON (recorded per team-lead)
+**Suite results are env-sensitive at config-load, not just at runtime.** A leaked `NODE_ENV`/`SANDBOX_PROVIDER` from an operator's shell silently flips test-harness behavior (stub injection, mock guards). `e8690aa` makes the www harness **self-defending** (gates on `VITEST`, forces `NODE_ENV=test`). **Recommendation:** (a) CI runs the suite with a controlled env (`env -i` preserving only PATH/HOME, or an explicit allowlist) — never an operator's ambient shell; (b) a thin `pnpm test` wrapper that `unset`s NODE_ENV/SANDBOX_PROVIDER/DATABASE_URL/REDIS_URL before invoking vitest, so a contaminated interactive shell can't produce phantom failures; (c) keep the `VITEST`-gate pattern for any future config-load env branch.
+
+## VERDICT: GO-clear on the test-health axis
+845/0 certified under BOTH a clean env and boot-coder's exact failure-condition env; the harness hardening holds; the kill-switch is correct and the pilot-must-set-FALSE requirement is documented. No regression. This gate does not block the pilot deploy.
