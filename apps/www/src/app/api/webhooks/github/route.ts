@@ -44,6 +44,10 @@ import {
   handleCheckSuiteEvent,
   handlePullRequestUpdated,
   handleIssueEvent,
+  handlePullRequestMirror,
+  handlePullRequestReviewMirror,
+  handleWorkflowRunEvent,
+  handleIssueLabeledMirror,
 } from "./handlers";
 import { Webhooks } from "@octokit/webhooks";
 import { env } from "@terragon/env/apps-www";
@@ -79,6 +83,24 @@ export async function POST(request: NextRequest) {
       await handlePullRequestUpdated(payload);
     },
   );
+  // Mirror-intake (Somnio pilot): event classes prod routes to a skill but the
+  // chassis has no task-creation path for. Each creates an org-attributed shadow
+  // task (see mirror-intake.ts).
+  webhooks.on(
+    ["pull_request.review_requested", "pull_request.closed"],
+    async ({ payload }) => {
+      await handlePullRequestMirror(payload);
+    },
+  );
+  webhooks.on("pull_request_review.submitted", async ({ payload }) => {
+    await handlePullRequestReviewMirror(payload);
+  });
+  webhooks.on("workflow_run.completed", async ({ payload }) => {
+    await handleWorkflowRunEvent(payload);
+  });
+  webhooks.on("issues.labeled", async ({ payload }) => {
+    await handleIssueLabeledMirror(payload);
+  });
   webhooks.on("issue_comment.created", async ({ payload }) => {
     await handleIssueCommentEvent(payload);
   });

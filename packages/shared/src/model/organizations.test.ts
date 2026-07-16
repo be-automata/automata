@@ -11,6 +11,7 @@ import {
   getOrganizationById,
   getOrganizationBySlug,
   getOrganizationMembers,
+  getOrganizationOwnerUserId,
   getOrganizationsForUser,
   removeOrganizationMember,
 } from "./organizations";
@@ -82,6 +83,53 @@ describe("organizations", () => {
     expect(members).toHaveLength(2);
     const defaultMember = members.find((m) => m.userId === second.user.id);
     expect(defaultMember?.role).toBe("member");
+  });
+
+  it("resolves the owner userId, preferring role 'owner', else the earliest member; null when empty", async () => {
+    const org = await createOrganization({
+      db,
+      name: "Attrib",
+      slug: uniqueSlug(),
+    });
+    // No members yet.
+    expect(
+      await getOrganizationOwnerUserId({ db, organizationId: org.id }),
+    ).toBeNull();
+
+    // Earliest member is added as a plain member; a later user is the owner.
+    const earliest = await createTestUser({ db });
+    await addOrganizationMember({
+      db,
+      organizationId: org.id,
+      userId: earliest.user.id,
+    });
+    await addOrganizationMember({
+      db,
+      organizationId: org.id,
+      userId: owner.id,
+      role: "owner",
+    });
+
+    // Prefers the owner role over the earliest-created member.
+    expect(
+      await getOrganizationOwnerUserId({ db, organizationId: org.id }),
+    ).toBe(owner.id);
+  });
+
+  it("falls back to the earliest member when no owner role exists", async () => {
+    const org = await createOrganization({
+      db,
+      name: "NoOwner",
+      slug: uniqueSlug(),
+    });
+    await addOrganizationMember({
+      db,
+      organizationId: org.id,
+      userId: owner.id,
+    });
+    expect(
+      await getOrganizationOwnerUserId({ db, organizationId: org.id }),
+    ).toBe(owner.id);
   });
 
   it("prevents duplicate membership for the same user in one org", async () => {

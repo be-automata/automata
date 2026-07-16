@@ -27,6 +27,7 @@ import {
   runIssueAutomation,
 } from "@/server-lib/automations";
 import { Automation } from "@terragon/shared/db/types";
+import { createMirrorTask } from "./mirror-intake";
 // publicAppUrl is used within utils via postBillingLinkComment
 export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
 export type IssueEvent = EmitterWebhookEvent<"issues">["payload"];
@@ -37,6 +38,17 @@ export type PullRequestReviewEvent =
   EmitterWebhookEvent<"pull_request_review">["payload"];
 export type CheckRunEvent = EmitterWebhookEvent<"check_run">["payload"];
 export type CheckSuiteEvent = EmitterWebhookEvent<"check_suite">["payload"];
+export type WorkflowRunEvent = EmitterWebhookEvent<"workflow_run">["payload"];
+
+// Issue labels prod's WORKFLOW.md routes to a task (mirror-intake, Somnio pilot).
+const MIRRORED_ISSUE_LABELS = new Set(["bug", "enhancement"]);
+
+// octokit types `installation` on some event payloads but not others (e.g. it's
+// on issue_comment but not issues/pull_request); it is present on every real
+// delivery from a GitHub App install. Read it uniformly.
+function installationIdOf(event: unknown): number | undefined {
+  return (event as { installation?: { id?: number } } | null)?.installation?.id;
+}
 
 // Handle pull request events
 export async function handlePullRequestStatusChange(
@@ -232,7 +244,7 @@ export async function handleIssueCommentEvent(
     // Handle the app mention (this will check for automations internally)
     await handleAppMention({
       repoFullName,
-      installationId: event.installation?.id,
+      installationId: installationIdOf(event),
       issueOrPrType: issueType,
       issueOrPrNumber: issueNumber,
       commentId: event.comment.id,
@@ -307,7 +319,7 @@ export async function handlePullRequestReviewCommentEvent(
     // Handle the app mention (this will check for automations internally)
     await handleAppMention({
       repoFullName,
-      installationId: event.installation?.id,
+      installationId: installationIdOf(event),
       issueOrPrNumber: prNumber,
       issueOrPrType: "pull_request",
       commentId: event.comment.id,
@@ -364,7 +376,7 @@ export async function handlePullRequestReviewEvent(
     // Handle the app mention (this will check for automations internally)
     await handleAppMention({
       repoFullName,
-      installationId: event.installation?.id,
+      installationId: installationIdOf(event),
       issueOrPrNumber: prNumber,
       issueOrPrType: "pull_request",
       commentId: event.review.id,
@@ -558,5 +570,118 @@ async function handleIssueAutomation(
       `Error running automation ${automation.id} for issue #${issueNumber} in ${repoFullName}:`,
       error,
     );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Mirror-intake (Somnio pilot). Event classes prod's WORKFLOW.md routes to a
+// skill but the chassis has no task-creation path for. Each creates one org-
+// attributed task (shadow when the installation is in shadow mode). See
+// mirror-intake.ts + deploy/SOMNIO-PILOT.md. These intentionally propagate a
+// WebhookSkip for an unbound installation so the route fast-acks 2xx (WI-8).
+// ---------------------------------------------------------------------------
+
+// pull_request.review_requested + pull_request.closed(merged=true)
+export async function handlePullRequestMirror(
+  event: PullRequestEvent,
+): Promise<void> {
+  const repoFullName = event.repository.full_name;
+  const installationId = installationIdOf(event);
+  const accountLogin = event.repository.owner?.login;
+  const pr = event.pull_request;
+  if (event.action === "review_requested") {
+    await createMirrorTask({
+      repoFullName,
+      installationId,
+      accountLogin,
+      intent: {
+        kind: "pr-review-requested",
+        prNumber: pr.number,
+        headBranch: pr.head?.ref,
+        baseBranch: pr.base?.ref,
+      },
+    });
+    return;
+  }
+  if (event.action === "closed" && pr.merged) {
+    await createMirrorTask({
+      repoFullName,
+      installationId,
+      accountLogin,
+      intent: {
+        kind: "pr-merged",
+        prNumber: pr.number,
+        baseBranch: pr.base?.ref,
+      },
+    });
+  }
+}
+
+// pull_request_review.submitted with state === "changes_requested"
+export async function handlePullRequestReviewMirror(
+  event: PullRequestReviewEvent,
+): Promise<void> {
+  if (event.action !== "submitted") {
+    return;
+  }
+  if (event.review.state !== "changes_requested") {
+    return;
+  }
+  await createMirrorTask({
+    repoFullName: event.repository.full_name,
+    installationId: installationIdOf(event),
+    accountLogin: event.repository.owner?.login,
+    intent: {
+      kind: "pr-changes-requested",
+      prNumber: event.pull_request.number,
+      headBranch: event.pull_request.head?.ref,
+      baseBranch: event.pull_request.base?.ref,
+    },
+  });
+}
+
+// workflow_run.completed with conclusion === "failure"
+export async function handleWorkflowRunEvent(
+  event: WorkflowRunEvent,
+): Promise<void> {
+  if (event.action !== "completed") {
+    return;
+  }
+  if (event.workflow_run.conclusion !== "failure") {
+    return;
+  }
+  await createMirrorTask({
+    repoFullName: event.repository.full_name,
+    installationId: installationIdOf(event),
+    accountLogin: event.repository.owner?.login,
+    intent: {
+      kind: "ci-failure",
+      runName: event.workflow_run.name ?? "workflow",
+      runId: event.workflow_run.id,
+      headBranch: event.workflow_run.head_branch,
+    },
+  });
+}
+
+// issues.labeled with a mirrored label (bug|enhancement)
+export async function handleIssueLabeledMirror(
+  event: IssueEvent,
+): Promise<void> {
+  if (event.action !== "labeled") {
+    return;
+  }
+  const label = "label" in event ? event.label?.name : undefined;
+  if (!label || !MIRRORED_ISSUE_LABELS.has(label.toLowerCase())) {
+    return;
+  }
+  await createMirrorTask({
+    repoFullName: event.repository.full_name,
+    installationId: installationIdOf(event),
+    accountLogin: event.repository.owner?.login,
+    intent: {
+      kind: "issue-labeled",
+      issueNumber: event.issue.number,
+      label,
+    },
   });
 }

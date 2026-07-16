@@ -114,6 +114,28 @@ export async function getOrganizationMembers({
     .orderBy(member.createdAt);
 }
 
+/**
+ * The userId to attribute an org-level (non-user-initiated) task to — e.g. a
+ * mirror-intake task from a PR opening, which has no "commenter" (Somnio pilot).
+ * Prefers the earliest `owner`; falls back to the earliest member of any role so
+ * an org seeded without an explicit owner role still resolves. Null when the org
+ * has no members at all.
+ */
+export async function getOrganizationOwnerUserId({
+  db,
+  organizationId,
+}: {
+  db: DB;
+  organizationId: string;
+}): Promise<string | null> {
+  const members = await getOrganizationMembers({ db, organizationId });
+  if (members.length === 0) {
+    return null;
+  }
+  const owner = members.find((m) => m.role === "owner");
+  return (owner ?? members[0]!).userId;
+}
+
 export async function getMembership({
   db,
   organizationId,
