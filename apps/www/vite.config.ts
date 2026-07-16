@@ -5,7 +5,16 @@ import { Plugin } from "vite";
 export default defineConfig({
   plugins: [
     stubNextNavigation(),
-    process.env.NODE_ENV !== "test" ? stubServerActions() : undefined,
+    // Only stub server actions for the Ladle/prod build, never under Vitest.
+    // vitest sets NODE_ENV=test itself, but if a non-test NODE_ENV leaks in from
+    // the invoking environment (a build tool, a shell, an isolated CI worktree)
+    // it is present at *config-load* time before vitest normalizes it — which
+    // would stub every server action into `undefined` and break ~all action
+    // tests with "reading 'success'". `VITEST` is always set during a run, so
+    // gate on it to make the harness robust to NODE_ENV timing.
+    process.env.NODE_ENV !== "test" && !process.env.VITEST
+      ? stubServerActions()
+      : undefined,
   ].filter(Boolean),
   optimizeDeps: {
     exclude: ["next/navigation"],
@@ -17,6 +26,11 @@ export default defineConfig({
   test: {
     silent: "passed-only",
     env: {
+      // Force the test NODE_ENV for the whole run so a non-test value leaking in
+      // from the invoking environment can't reach runtime code (sandbox mock
+      // guard, e2e provider selection, etc.). Config-load-time checks that run
+      // before this applies are guarded separately via `process.env.VITEST`.
+      NODE_ENV: "test",
       GITHUB_CLIENT_ID: "GITHUB_CLIENT_ID_TEST",
       GITHUB_CLIENT_SECRET: "GITHUB_CLIENT_SECRET_TEST",
       ANTHROPIC_API_KEY: "ANTHROPIC_API_KEY_TEST",
