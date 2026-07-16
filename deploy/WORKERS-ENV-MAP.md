@@ -86,7 +86,8 @@ but `packages/r2` must be refactored to use `env.<BINDING>` instead of the S3 cl
 | `GITHUB_APP_PRIVATE_KEY` | **[operator-secret]** | secret | PEM (single-line escaped or multiline). |
 | `GITHUB_CLIENT_ID` | **[operator-secret]** | secret | |
 | `GITHUB_CLIENT_SECRET` | **[operator-secret]** | secret | |
-| `GITHUB_WEBHOOK_SECRET` | **[new-generated]** | secret | **Pilot uses a FRESH secret** for the new repo-level webhook (do not reuse the prod App webhook secret; prod webhook URL stays pointed at prod — pilot = separate shadow-mode webhook). |
+| `GITHUB_WEBHOOK_SECRET` | **[new-generated]** | secret | **Pilot uses a FRESH secret** for the new repo-level webhook (do not reuse the prod App webhook secret; prod webhook URL stays pointed at prod — pilot = separate shadow-mode webhook). The **same** fresh value goes on both sides: this Worker secret AND the repo webhook's "Secret" field. |
+| `GITHUB_SIDE_EFFECTS_ENABLED` | **[deploy-config]** | secret (`"false"`) | **Kill-switch. MUST be set `false` on the pilot Worker.** Code default is `true` (back-compat for prod/self-host), so leaving it **unset is unsafe on the pilot** — an event from a resolvable sender before the installation is bound would resolve to `active` (the migration-safe no-row default) and act on a live customer PR. `false` forces shadow behavior (thread rows created + dashboard-visible, no boot, no comments/checks/reviews/reactions) for **every** installation regardless of its per-binding mode. Flip to `true` (or remove) only after the Somnio binding is verified in shadow — see SOMNIO-PILOT.md sequencing. |
 
 ### Deferred SaaS — leave UNSET (app degrades gracefully)
 

@@ -3,6 +3,7 @@ import { newThreadInternal } from "@/server-lib/new-thread-internal";
 import { getInstallationOrgAndMode } from "@terragon/shared/model/github-installation";
 import { getOrganizationOwnerUserId } from "@terragon/shared/model/organizations";
 import { DBUserMessage } from "@terragon/shared/db/db-message";
+import { effectiveShadow } from "@/lib/github-side-effects";
 import { WebhookSkip } from "./webhook-skip";
 
 /**
@@ -142,7 +143,8 @@ export async function createMirrorTask({
     timestamp: new Date().toISOString(),
   };
 
-  const shadow = mode === "shadow";
+  // Per-installation mode, folded with the deployment-level side-effects switch.
+  const shadow = effectiveShadow(mode);
   console.log("[mirror-intake] creating task", {
     repoFullName,
     organizationId,

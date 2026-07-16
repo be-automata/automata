@@ -14,6 +14,7 @@ import {
 } from "@terragon/shared/model/user";
 import { db } from "@/lib/db";
 import { getInstallationOrgAndMode } from "@terragon/shared/model/github-installation";
+import { effectiveShadow } from "@/lib/github-side-effects";
 import { getThreadForGithubPRAndUser } from "@terragon/shared/model/github";
 import { requireAppAccess } from "./webhook-skip";
 import { queueFollowUpInternal } from "@/server-lib/follow-up";
@@ -75,7 +76,9 @@ export async function handleAppMention({
     db,
     installationId,
   });
-  const shadow = mode === "shadow";
+  // Per-installation mode, folded with the deployment-level side-effects
+  // kill-switch (switch off → force shadow for every install).
+  const shadow = effectiveShadow(mode);
   // WI-8: if the App can't get an installation client for this repo (not
   // installed / bad creds), that's a business rejection — skip with a 2xx, not
   // a 500 that GitHub retries and eventually disables the webhook over.

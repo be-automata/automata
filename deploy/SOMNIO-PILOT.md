@@ -61,6 +61,20 @@ Implementation seams:
   to drain the follow-up queue for a shadow thread, so a *second* mention on an
   already-shadow thread still never boots the agent.
 
+### The deployment-level kill-switch (defense in depth)
+
+Per-installation shadow mode has one gap: between wiring the pilot webhook and
+running the bind step, an event from a *resolvable* sender resolves to `active`
+(the migration-safe no-row default) and would act on a live customer PR — the
+id-capture chicken/egg. The env var **`GITHUB_SIDE_EFFECTS_ENABLED`** closes it.
+It defaults `true` (back-compat), but the pilot Worker sets it **`false`**, which
+forces shadow behavior for **every** GitHub-processing path — mention intake,
+mirror-intake, and seeded automations — regardless of any installation's mode.
+It's folded in at each path's single `shadow`-derivation point via
+`effectiveShadow(mode)` (`apps/www/src/lib/github-side-effects.ts`): switch off →
+always shadow; switch on → per-installation mode governs. So during bring-up the
+platform is globally inert on GitHub no matter what state the binding is in.
+
 ---
 
 ## Intake parity — event coverage matrix
@@ -141,6 +155,14 @@ exists (create it in the dashboard, or via `deploy/seed-selfhost.ts` for a dev
 box). You need the pilot repo's admin settings and the GitHub App's webhook
 secret.
 
+### 0. Set the kill-switch OFF (before anything reaches the Worker)
+
+On the pilot Worker set `GITHUB_SIDE_EFFECTS_ENABLED=false` (see
+`deploy/WORKERS-ENV-MAP.md`). This makes the platform globally inert on GitHub —
+no boot, no comments/checks/reviews/reactions — for **every** installation
+regardless of binding, closing the window before the binding exists. Do this
+first; it stays off through shadow-verify.
+
 ### 1. Create / confirm the org
 
 Create **"Somnio Software"** in the dashboard and note its **slug** (e.g.
@@ -166,8 +188,10 @@ On the **pilot repo** → Settings → Webhooks → Add webhook:
 
 - **Payload URL**: the platform's Workers endpoint, `https://<workers-host>/api/webhooks/github`
 - **Content type**: `application/json`
-- **Secret**: the **GitHub App's webhook secret** (`GITHUB_WEBHOOK_SECRET` — the
-  same secret the platform verifies HMAC-SHA256 against). Do not invent a new one.
+- **Secret**: a **fresh pilot secret** — the value set as `GITHUB_WEBHOOK_SECRET`
+  on the pilot Worker (a NEW value per `deploy/WORKERS-ENV-MAP.md`, **not** the
+  prod App's webhook secret). The same fresh value goes on both sides (the Worker
+  secret and this "Secret" field); the platform verifies HMAC-SHA256 against it.
 - **Events** (to cover the full parity matrix): Pull requests, Pull request
   reviews, Pull request review comments, Issues, Issue comments, Workflow runs.
 
@@ -201,28 +225,44 @@ mirror class — open a PR or push to one (→ "Review PR" task), or label an is
   endpoint fast-acks business rejections with a 2xx skip (WI-8) so GitHub never
   disables the webhook. A genuine 5xx needs investigating.
 
-### 5. Flip to active (only when verified)
+### 5. Go live — two ordered flips (only when verified)
+
+Two switches gate side effects; flip them in this order so there is never a
+moment where an *unintended* installation could act:
+
+**5a. Flip the global kill-switch ON.** Set `GITHUB_SIDE_EFFECTS_ENABLED=true`
+(or remove it) on the pilot Worker and redeploy. Per-installation mode now
+governs — and Somnio is still **shadow**-bound, so it *still* produces no side
+effects. Re-verify shadow behavior once more here: this proves the switch flip
+alone didn't wake anything up.
+
+**5b. Flip the Somnio binding to active** (the final step):
 
 ```bash
 DATABASE_URL=postgres://... pnpm exec tsx deploy/bind-github-installation.ts \
   <installationId> somnio-software active
 ```
 
-Now the platform boots the agent and acts on PRs for this installation.
+Now — and only now — the platform boots the agent and acts on PRs for this
+installation.
 
-> Before flipping to active, decide how prod orch-agents stops acting on the
-> pilot repo (otherwise you re-introduce the two-bots problem — now both
-> *acting*). Coordinate the prod cutover (remove the repo from prod's scope, or
-> stop the App-level delivery for it) as a separate, deliberate step.
+> Before 5b, decide how prod orch-agents stops acting on the pilot repo
+> (otherwise you re-introduce the two-bots problem — now both *acting*).
+> Coordinate the prod cutover (remove the repo from prod's scope, or stop the
+> App-level delivery for it) as a separate, deliberate step.
 
 ### Rollback
 
-Flip straight back to shadow at any time:
+Fastest, global (all installations at once): set
+`GITHUB_SIDE_EFFECTS_ENABLED=false` on the Worker and redeploy — the platform
+goes inert on GitHub immediately, no DB change needed.
+
+Per-installation: flip the Somnio binding back to shadow at any time:
 
 ```bash
 DATABASE_URL=postgres://... pnpm exec tsx deploy/bind-github-installation.ts \
   <installationId> somnio-software shadow
 ```
 
-The platform immediately stops producing GitHub side effects for the
-installation; existing shadow threads remain visible for inspection.
+Either way the platform immediately stops producing GitHub side effects;
+existing shadow threads remain visible for inspection.

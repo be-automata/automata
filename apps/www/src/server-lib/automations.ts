@@ -19,6 +19,7 @@ import {
 } from "@terragon/shared/automations";
 import { AccessTier, DBUserMessage } from "@terragon/shared";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
+import { effectiveShadow } from "@/lib/github-side-effects";
 import {
   PullRequestEvent,
   IssueEvent,
@@ -75,11 +76,13 @@ export async function runAutomation({
     // Shadow mode (Somnio pilot): if the automation's org is in shadow, its
     // seeded automations create dashboard-visible tasks but never boot the agent
     // — so they light up on flip-to-active without acting during observation.
-    const shadow =
-      (await getOrganizationInstallationMode({
+    // Folded with the deployment-level side-effects kill-switch.
+    const shadow = effectiveShadow(
+      await getOrganizationInstallationMode({
         db,
         organizationId: automation.organizationId,
-      })) === "shadow";
+      }),
+    );
     switch (automation.action.type) {
       case "user_message": {
         const newThreadResult = await createNewThread({
