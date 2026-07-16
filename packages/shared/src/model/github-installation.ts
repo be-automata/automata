@@ -44,6 +44,37 @@ export async function getOrganizationIdForInstallation({
   return row?.organizationId ?? null;
 }
 
+export type InstallationMode = "shadow" | "active";
+
+/**
+ * Resolve both the org AND the mode for an installation in one read — the shape
+ * the GitHub webhook needs (Somnio pilot). Unmapped/unknown installation → org
+ * null.
+ *
+ * Mode defaults to 'active' when there's NO row — this preserves today's
+ * behavior for every installation that predates the binding table (migration
+ * safety: an unbound installation must keep working, not silently stop). Shadow
+ * is opt-in: a *new binding* starts in 'shadow' (see bindGithubInstallationToOrg
+ * / the column default), so onboarding an org is safe-by-default, but the mere
+ * absence of a binding never suppresses an existing installation.
+ */
+export async function getInstallationOrgAndMode({
+  db,
+  installationId,
+}: {
+  db: DB;
+  installationId: string | number | null | undefined;
+}): Promise<{ organizationId: string | null; mode: InstallationMode }> {
+  if (installationId === null || installationId === undefined) {
+    return { organizationId: null, mode: "active" };
+  }
+  const row = await getGithubInstallation({ db, installationId });
+  return {
+    organizationId: row?.organizationId ?? null,
+    mode: row?.mode ?? "active",
+  };
+}
+
 /**
  * Registration seam: bind (or rebind) a GitHub App installation to an org.
  * Minimal now — an org admin calls this to claim an installation; it grows a UI
@@ -55,12 +86,16 @@ export async function bindGithubInstallationToOrg({
   organizationId,
   accountLogin,
   accountType,
+  mode,
 }: {
   db: DB;
   installationId: string | number;
   organizationId: string | null;
   accountLogin?: string | null;
   accountType?: string | null;
+  // Omitted → 'shadow' for a new binding (safe pilot default); on rebind, an
+  // omitted mode is left unchanged so a flip to 'active' isn't reverted.
+  mode?: "shadow" | "active";
 }): Promise<GithubInstallation> {
   const installationIdStr = String(installationId);
   const [row] = await db
@@ -70,6 +105,7 @@ export async function bindGithubInstallationToOrg({
       organizationId,
       accountLogin,
       accountType,
+      ...(mode !== undefined ? { mode } : {}),
     })
     .onConflictDoUpdate({
       target: githubInstallation.installationId,
@@ -77,6 +113,7 @@ export async function bindGithubInstallationToOrg({
         organizationId,
         ...(accountLogin !== undefined ? { accountLogin } : {}),
         ...(accountType !== undefined ? { accountType } : {}),
+        ...(mode !== undefined ? { mode } : {}),
         updatedAt: new Date(),
       },
     })

@@ -367,6 +367,10 @@ export const thread = pgTable(
     gitDiff: text("git_diff"),
     gitDiffStats: jsonb("git_diff_stats").$type<GitDiffStats>(),
     archived: boolean("archived").notNull().default(false),
+    // Shadow-mode task (Somnio pilot): created from a shadow-mode installation —
+    // ingested + visible in the dashboard, but NO sandbox boot and NO GitHub side
+    // effects. The UI badges it. Defaults false (normal task).
+    shadow: boolean("shadow").notNull().default(false),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()
@@ -588,6 +592,11 @@ export const githubInstallation = pgTable(
       () => organization.id,
       { onDelete: "cascade" },
     ),
+    // Shadow-mode pilot gate (Somnio pilot): 'shadow' = ingest + create task
+    // rows (org-stamped), NO sandbox boot, NO GitHub side effects — proves E2E
+    // with zero footprint on a live PR (two bots must never act on one PR).
+    // 'active' behaves as today. New bindings default to 'shadow'.
+    mode: text("mode").$type<"shadow" | "active">().notNull().default("shadow"),
     accountLogin: text("account_login"),
     accountType: text("account_type"), // "Organization" | "User"
     createdAt: timestamp("created_at").notNull().defaultNow(),

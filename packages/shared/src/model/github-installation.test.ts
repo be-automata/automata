@@ -6,6 +6,7 @@ import { createOrganization } from "./organizations";
 import {
   bindGithubInstallationToOrg,
   getGithubInstallation,
+  getInstallationOrgAndMode,
   getOrganizationIdForInstallation,
 } from "./github-installation";
 
@@ -91,5 +92,76 @@ describe("github-installation", () => {
     // Still a single row for that installation.
     expect(await getOrganizationIdForInstallation({ db, installationId: instId }))
       .toBe(other.id);
+  });
+
+  describe("mode (Somnio pilot shadow/active)", () => {
+    it("a new binding defaults to shadow mode", async () => {
+      const instId = installationId();
+      await bindGithubInstallationToOrg({
+        db,
+        installationId: instId,
+        organizationId: orgId,
+      });
+      const row = await getGithubInstallation({ db, installationId: instId });
+      expect(row?.mode).toBe("shadow");
+
+      const resolved = await getInstallationOrgAndMode({
+        db,
+        installationId: instId,
+      });
+      expect(resolved).toEqual({ organizationId: orgId, mode: "shadow" });
+    });
+
+    it("an explicit mode is honored, and a rebind can flip shadow -> active", async () => {
+      const instId = installationId();
+      await bindGithubInstallationToOrg({
+        db,
+        installationId: instId,
+        organizationId: orgId,
+        mode: "shadow",
+      });
+      expect(
+        (await getInstallationOrgAndMode({ db, installationId: instId })).mode,
+      ).toBe("shadow");
+
+      await bindGithubInstallationToOrg({
+        db,
+        installationId: instId,
+        organizationId: orgId,
+        mode: "active",
+      });
+      expect(
+        (await getInstallationOrgAndMode({ db, installationId: instId })).mode,
+      ).toBe("active");
+    });
+
+    it("a rebind without a mode leaves the existing mode unchanged (no accidental revert)", async () => {
+      const instId = installationId();
+      await bindGithubInstallationToOrg({
+        db,
+        installationId: instId,
+        organizationId: orgId,
+        mode: "active",
+      });
+      // Rebind (e.g. account metadata refresh) without passing mode.
+      await bindGithubInstallationToOrg({
+        db,
+        installationId: instId,
+        organizationId: orgId,
+        accountLogin: "acme-inc",
+      });
+      expect(
+        (await getInstallationOrgAndMode({ db, installationId: instId })).mode,
+      ).toBe("active");
+    });
+
+    it("an unmapped or absent installation resolves to active (migration-safe: never suppress an unknown install)", async () => {
+      expect(
+        await getInstallationOrgAndMode({ db, installationId: installationId() }),
+      ).toEqual({ organizationId: null, mode: "active" });
+      expect(
+        await getInstallationOrgAndMode({ db, installationId: null }),
+      ).toEqual({ organizationId: null, mode: "active" });
+    });
   });
 });

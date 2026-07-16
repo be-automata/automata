@@ -13,7 +13,7 @@ import {
   getUserSettings,
 } from "@terragon/shared/model/user";
 import { db } from "@/lib/db";
-import { getOrganizationIdForInstallation } from "@terragon/shared/model/github-installation";
+import { getInstallationOrgAndMode } from "@terragon/shared/model/github-installation";
 import { getThreadForGithubPRAndUser } from "@terragon/shared/model/github";
 import { requireAppAccess } from "./webhook-skip";
 import { queueFollowUpInternal } from "@/server-lib/follow-up";
@@ -67,6 +67,15 @@ export async function handleAppMention({
 }): Promise<void> {
   // Get branch names upfront
   const [owner, repo] = parseRepoFullName(repoFullName);
+  // Resolve the tenant AND its mode from the installation once (WI-5 + shadow
+  // mode). Shadow: ingest the mention and create the (dashboard-visible) thread
+  // row, but produce ZERO GitHub side effects — no eyes reaction, no billing
+  // comment, and no agent run. Reads (branch lookup) are fine.
+  const { organizationId, mode } = await getInstallationOrgAndMode({
+    db,
+    installationId,
+  });
+  const shadow = mode === "shadow";
   // WI-8: if the App can't get an installation client for this repo (not
   // installed / bad creds), that's a business rejection — skip with a 2xx, not
   // a 500 that GitHub retries and eventually disables the webhook over.
@@ -105,6 +114,12 @@ export async function handleAppMention({
     gitHubAccountId: commentGitHubAccountId,
   });
   if (accessInfoOrNull?.tier === "none") {
+    if (shadow) {
+      console.log(
+        `[shadow] GitHub user ${commentGitHubUsername} has no access — suppressing billing link comment`,
+      );
+      return;
+    }
     console.log(
       `GitHub user ${commentGitHubUsername} has no access, posting billing link comment`,
     );
@@ -137,7 +152,8 @@ export async function handleAppMention({
   console.log(
     `Found ${usersToTriggerTasks.length} users to trigger tasks for mention on ${issueOrPrType} #${issueOrPrNumber} in ${repoFullName}`,
   );
-  if (commentType) {
+  // The eyes reaction is a GitHub side effect — suppress in shadow mode.
+  if (commentType && !shadow) {
     await addEyesReactionToComment({
       octokit,
       owner,
@@ -153,7 +169,8 @@ export async function handleAppMention({
         userId,
         automation,
         repoFullName,
-        installationId,
+        organizationId,
+        shadow,
         issueOrPrNumber,
         issueOrPrType,
         commentId,
@@ -297,7 +314,8 @@ async function triggerTasksForUser({
   userId,
   automation,
   repoFullName,
-  installationId,
+  organizationId,
+  shadow,
   issueOrPrNumber,
   issueOrPrType,
   commentId,
@@ -312,7 +330,10 @@ async function triggerTasksForUser({
   userId: string;
   automation: Automation | null;
   repoFullName: string;
-  installationId?: number | string | null;
+  // Tenant + mode resolved once from the installation by handleAppMention (WI-5
+  // + shadow mode). organizationId is null when the installation is unmapped.
+  organizationId: string | null;
+  shadow: boolean;
   issueOrPrNumber: number;
   issueOrPrType: "pull_request" | "issue";
   commentId: number | undefined;
@@ -330,12 +351,6 @@ async function triggerTasksForUser({
       console.error(`No github access token found for user ${userId}`);
       return;
     }
-    // Derive the tenant once from the GitHub App installation (WI-5); reuse it
-    // for both the existing-thread lookup and thread creation. Unmapped -> null.
-    const organizationId = await getOrganizationIdForInstallation({
-      db,
-      installationId,
-    });
     const [isIssueOrPrAuthor, userSettings, batchingEnabled] =
       await Promise.all([
         getIsIssueOrPrAuthor({
@@ -438,6 +453,7 @@ async function triggerTasksForUser({
       const { threadId, threadChatId } = await newThreadInternal({
         userId,
         organizationId,
+        shadow,
         message: getUserMessageToSend({ forcedAgent: null, isFollowUp: false }),
         parentThreadId: undefined,
         parentToolId: undefined,

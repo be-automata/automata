@@ -63,6 +63,11 @@ export interface CreateThreadOptions {
   sourceType: ThreadSource;
   sourceMetadata?: ThreadSourceMetadata;
   delayMs?: number;
+  // Shadow mode (Somnio pilot): create the thread row (org-stamped, dashboard-
+  // visible) but do NOT boot a sandbox or run the agent — so the installation
+  // produces zero GitHub side effects (no comments/checks/reviews) while an org
+  // is being validated. Flipped to active per-installation via githubInstallation.mode.
+  shadow?: boolean;
 }
 
 /**
@@ -89,6 +94,7 @@ export async function createNewThread({
   sourceType,
   sourceMetadata,
   delayMs = 0,
+  shadow = false,
 }: CreateThreadOptions): Promise<{ threadId: string; threadChatId: string }> {
   // Enforce per-user shadow-ban rate limit if applicable
   await checkShadowBanTaskCreationRateLimit(userId);
@@ -224,6 +230,7 @@ export async function createNewThread({
       skipSetup,
       sourceType,
       sourceMetadata,
+      shadow,
     },
     initialChatValues: {
       agent,
@@ -328,6 +335,20 @@ export async function createNewThread({
         ],
       },
     });
+  }
+
+  // Shadow mode: the thread row exists and is dashboard-visible, but we never
+  // boot a sandbox / run the agent — so the installation produces zero GitHub
+  // side effects. updateThreadMetadata() still runs (name generation + internal
+  // PR association are reads only, no comments/checks/reviews).
+  if (shadow) {
+    console.log("[shadow] thread created without booting agent", {
+      threadId,
+      organizationId,
+      githubRepoFullName,
+    });
+    updateThreadMetadata();
+    return { threadId, threadChatId };
   }
 
   // Start processing the message

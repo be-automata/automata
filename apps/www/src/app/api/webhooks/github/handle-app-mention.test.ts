@@ -88,6 +88,12 @@ describe("handleAppMention", () => {
             },
           }),
         },
+        reactions: {
+          createForIssueComment: vi.fn().mockResolvedValue({ data: {} }),
+          createForPullRequestReviewComment: vi
+            .fn()
+            .mockResolvedValue({ data: {} }),
+        },
       },
     };
     vi.clearAllMocks();
@@ -274,6 +280,75 @@ describe("handleAppMention", () => {
 
       const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
       expect(callArgs?.organizationId ?? null).toBeNull();
+    });
+
+    it("shadow-mode installation: creates the thread as shadow (no boot) and suppresses the eyes reaction", async () => {
+      const org = await createOrganization({
+        db,
+        name: "Shadow Org",
+        slug: `shadow-${nanoid(8).toLowerCase()}`,
+      });
+      const installationId = Math.floor(Math.random() * 1_000_000_000);
+      await bindGithubInstallationToOrg({
+        db,
+        installationId,
+        organizationId: org.id,
+        mode: "shadow",
+      });
+
+      await handleAppMention({
+        repoFullName: prWithNoThread.repoFullName,
+        issueOrPrNumber: prWithNoThread.number,
+        issueOrPrType: "pull_request",
+        commentId: 123459,
+        commentType: "issue_comment",
+        commentGitHubUsername: "commenter",
+        commentBody: "Hey @app, please help with this",
+        commentGitHubAccountId: githubAccountId,
+        installationId,
+      });
+
+      expect(newThreadInternal).toHaveBeenCalledWith(
+        expect.objectContaining({ organizationId: org.id, shadow: true }),
+      );
+      // Zero GitHub side effects in shadow mode: no eyes reaction.
+      expect(
+        mockOctokit.rest.reactions.createForIssueComment,
+      ).not.toHaveBeenCalled();
+    });
+
+    it("active-mode installation: creates the thread non-shadow (boots) and adds the eyes reaction", async () => {
+      const org = await createOrganization({
+        db,
+        name: "Active Org",
+        slug: `active-${nanoid(8).toLowerCase()}`,
+      });
+      const installationId = Math.floor(Math.random() * 1_000_000_000);
+      await bindGithubInstallationToOrg({
+        db,
+        installationId,
+        organizationId: org.id,
+        mode: "active",
+      });
+
+      await handleAppMention({
+        repoFullName: prWithNoThread.repoFullName,
+        issueOrPrNumber: prWithNoThread.number,
+        issueOrPrType: "pull_request",
+        commentId: 123460,
+        commentType: "issue_comment",
+        commentGitHubUsername: "commenter",
+        commentBody: "Hey @app, please help with this",
+        commentGitHubAccountId: githubAccountId,
+        installationId,
+      });
+
+      expect(newThreadInternal).toHaveBeenCalledWith(
+        expect.objectContaining({ organizationId: org.id, shadow: false }),
+      );
+      expect(
+        mockOctokit.rest.reactions.createForIssueComment,
+      ).toHaveBeenCalled();
     });
 
     it("should create new thread when no existing thread is found", async () => {

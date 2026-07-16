@@ -13,6 +13,7 @@ import { createNewThread } from "./new-thread-shared";
 export async function newThreadInternal({
   userId,
   organizationId,
+  shadow,
   message,
   githubRepoFullName,
   baseBranchName,
@@ -29,6 +30,8 @@ export async function newThreadInternal({
   // Tenant to stamp on the created thread (WI-5). Optional — background callers
   // (webhooks/automations) without a resolved org omit it (null = legacy).
   organizationId?: string | null;
+  // Shadow mode (Somnio pilot): create the thread row but don't boot the agent.
+  shadow?: boolean;
   message: DBUserMessage;
   githubRepoFullName: string;
   baseBranchName?: string | null;
@@ -50,6 +53,7 @@ export async function newThreadInternal({
   return await createNewThread({
     userId,
     organizationId,
+    shadow,
     message,
     githubRepoFullName,
     baseBranchName,

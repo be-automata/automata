@@ -169,6 +169,14 @@ export async function queueFollowUpInternal({
         appendOrReplace === "replace" ? messages : undefined,
     },
   });
+  // Shadow mode (Somnio pilot): a shadow thread must never boot the agent, on
+  // any path. The follow-up message is still queued + dashboard-visible, but we
+  // don't drain the queue (which would run the agent → GitHub side effects).
+  const thread = await getThreadMinimal({ db, userId, threadId });
+  if (thread?.shadow) {
+    console.log("[shadow] queued follow-up without booting agent", { threadId });
+    return;
+  }
   if (!isAgentWorking(threadChat.status)) {
     waitUntil(maybeProcessFollowUpQueue({ userId, threadId, threadChatId }));
   }
