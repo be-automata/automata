@@ -87,3 +87,9 @@ permission-blocked — operator must clear `pnpm install`, ideally `--ignore-scr
   (repo not installed, unmapped user) should fast-ack 2xx with a structured skip log —
   orch-agents' gateway semantics. Audit slack webhook for the same. Small, high-value before
   any real GitHub App points at the platform.
+
+- **WI-9: env-controlled test invocation.** Suite results were env-sensitive at config-load
+  (NODE_ENV leak → 253 phantom failures; fixed structurally in e8690aa via VITEST-gate +
+  forced test.env). Remaining hardening: CI runs tests with a controlled env (explicit
+  allowlist), and a thin local wrapper that unsets NODE_ENV/SANDBOX_PROVIDER/DATABASE_URL/
+  REDIS_URL before vitest. Keep the VITEST-gate pattern for any config-load env branch.
