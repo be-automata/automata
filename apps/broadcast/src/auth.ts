@@ -2,10 +2,12 @@ import {
   getInternalSharedSecret,
   getPublicAppUrl,
 } from "@terragon/env/apps-broadcast";
-import type * as Party from "partykit/server";
 
+// Uses the platform `Request` type so this validator works under both the
+// PartyKit runtime (server.ts) and the Workers/partyserver entrypoint
+// (worker.ts) — `partykit/server`'s `Party.Request` is just `Request & { cf }`.
 export async function validateRequest(
-  request: Party.Request,
+  request: Request,
   channel: string | null,
   env: Record<string, unknown>,
 ) {

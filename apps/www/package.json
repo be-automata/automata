@@ -127,6 +127,7 @@
   },
   "devDependencies": {
     "@ladle/react": "^5.0.3",
+    "@opennextjs/cloudflare": "^1.20.1",
     "@slack/web-api": "^7.10.0",
     "@tailwindcss/postcss": "^4.1.10",
     "@terragon/dev-env": "workspace:*",
@@ -146,6 +147,7 @@
     "typescript": "^5.8.3",
     "vercel-cron": "^1.3.0",
     "vite": "^6.3.5",
-    "vitest": "^3.1.4"
+    "vitest": "^3.1.4",
+    "wrangler": "^4.111.0"
   }
 }

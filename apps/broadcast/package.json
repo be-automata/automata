@@ -16,6 +16,7 @@
     "@terragon/types": "workspace:*",
     "@types/lodash.debounce": "^4.0.9",
     "lodash.debounce": "^4.0.8",
+    "partyserver": "^0.5.8",
     "partysocket": "^1.0.2"
   },
   "devDependencies": {
@@ -24,6 +25,7 @@
     "partykit": "^0.0.110",
     "strip-ansi": "^7.1.0",
     "tsx": "^4.20.3",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "wrangler": "^4.111.0"
   }
 }

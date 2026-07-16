@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "automata-broadcast",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-06-05",
+  "compatibility_flags": ["nodejs_compat"],
+  // partyserver rooms are SQLite-backed Durable Objects. Party "main" (the room
+  // namespace www posts to at /parties/main/<room>) maps to the "Main" binding.
+  "durable_objects": {
+    "bindings": [{ "name": "Main", "class_name": "Main" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Main"] }],
+  "observability": {
+    "enabled": true
+  }
+  // Secrets (INTERNAL_SHARED_SECRET, etc.) set via `wrangler secret put` — see
+  // deploy/WORKERS-ENV-MAP.md. NEXT_PUBLIC_APP_URL/BETTER_AUTH_URL needed for the
+  // token-verification callback to www's /api/internal/broadcast.
+}
