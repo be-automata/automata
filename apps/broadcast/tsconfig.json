@@ -12,7 +12,11 @@
 
     /* Language and Environment */
     "target": "es2020" /* Set the JavaScript language version for emitted JavaScript and include compatible library declarations. */,
-    // "lib": [],                                        /* Specify a set of bundled library declaration files that describe the target runtime environment. */
+    // Workers runtime: use ES2020 lib (NOT DOM) so Request/Response come from
+    // @cloudflare/workers-types (the workerd/partykit/partyserver types), and
+    // DurableObjectNamespace etc. resolve. Mixing DOM's Request with the CF
+    // Request is what broke tsc on the partyserver port.
+    "lib": ["ES2020"],
     "jsx": "react-jsx" /* Specify what JSX code is generated. */,
     // "experimentalDecorators": true,                   /* Enable experimental support for legacy experimental decorators. */
     // "emitDecoratorMetadata": true,                    /* Emit design-type metadata for decorated declarations in source files. */
@@ -32,7 +36,7 @@
     // "paths": {},                                      /* Specify a set of entries that re-map imports to additional lookup locations. */
     // "rootDirs": [],                                   /* Allow multiple folders to be treated as one when resolving modules. */
     // "typeRoots": [],                                  /* Specify multiple folders that act like './node_modules/@types'. */
-    // "types": [],                                      /* Specify type package names to be included without being referenced in a source file. */
+    "types": ["@cloudflare/workers-types", "node"] /* Workers + Node globals (DurableObjectNamespace, Request/Response, process). */,
     // "allowUmdGlobalAccess": true,                     /* Allow accessing UMD globals from modules. */
     // "moduleSuffixes": [],                             /* List of file name suffixes to search when resolving a module. */
     // "allowImportingTsExtensions": true,               /* Allow imports to include TypeScript file extensions. Requires '--moduleResolution bundler' and either '--noEmit' or '--emitDeclarationOnly' to be set. */

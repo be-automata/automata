@@ -215,7 +215,9 @@ export default class SandboxParty implements Party.Server {
         headers: { Authorization: `Bearer ${token}` },
       },
     );
-    const json = await response.json();
+    const json = (await response.json()) as {
+      environmentVariables: Record<string, string>;
+    };
     if (!response.ok) {
       throw new Error("Failed to get environment variables to start sandbox");
     }

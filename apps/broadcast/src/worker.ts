@@ -41,9 +41,9 @@ export default {
     const res = await routePartykitRequest(request, env, {
       // HTTP requests (incl. www's POST broadcast) authenticate channel-less via
       // the shared secret — mirrors PartyKit `onBeforeRequest`.
-      onBeforeRequest: async (req: Request, lobby: Lobby<Env>) => {
+      onBeforeRequest: async (req: Request, _lobby: Lobby<Env>) => {
         try {
-          await validateRequest(req, null, lobby.env as Record<string, unknown>);
+          await validateRequest(req, null, env as unknown as Record<string, unknown>);
           return req;
         } catch (e) {
           console.error(e);
@@ -52,12 +52,12 @@ export default {
       },
       // WebSocket connects authenticate against the room/channel via token/apiKey
       // — mirrors PartyKit `onBeforeConnect`.
-      onBeforeConnect: async (req: Request, lobby: Lobby<Env>) => {
+      onBeforeConnect: async (req: Request, _lobby: Lobby<Env>) => {
         try {
           await validateRequest(
             req,
             roomFromUrl(req),
-            lobby.env as Record<string, unknown>,
+            env as unknown as Record<string, unknown>,
           );
           return req;
         } catch (e) {
