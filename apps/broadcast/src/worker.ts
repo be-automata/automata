@@ -43,7 +43,11 @@ export default {
       // the shared secret — mirrors PartyKit `onBeforeRequest`.
       onBeforeRequest: async (req: Request, _lobby: Lobby<Env>) => {
         try {
-          await validateRequest(req, null, env as unknown as Record<string, unknown>);
+          await validateRequest(
+            req,
+            null,
+            env as unknown as Record<string, unknown>,
+          );
           return req;
         } catch (e) {
           console.error(e);
