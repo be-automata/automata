@@ -301,6 +301,38 @@ export async function getOctokitForBackground({
   return getOctokitForApp({ owner, repo });
 }
 
+/**
+ * Raw GitHub token STRING for BACKGROUND sandbox git operations (repo clone /
+ * env resolution) — the token-string sibling of getOctokitForBackground. Prefers
+ * the acting user's GitHub token; when that user has no GitHub identity (e.g. an
+ * email/password org owner an org-level task is attributed to), falls back to the
+ * App INSTALLATION token for the thread's repo. Installation tokens authenticate
+ * git over HTTPS as `x-access-token:<token>`, so they clone fine. User-facing
+ * flows are unaffected — the fallback only fires when there is no user token.
+ */
+export async function getGitHubTokenForBackground({
+  userId,
+  repoFullName,
+}: {
+  userId: string;
+  repoFullName: string;
+}): Promise<string> {
+  try {
+    const userToken = await getGitHubUserAccessTokenOrThrow({
+      db,
+      userId,
+      encryptionKey: env.ENCRYPTION_MASTER_KEY,
+    });
+    if (userToken) {
+      return userToken;
+    }
+  } catch {
+    // No user GitHub identity → fall back to the App installation token below.
+  }
+  const [owner, repo] = parseRepoFullName(repoFullName);
+  return getInstallationToken(owner, repo);
+}
+
 export async function getIsPRAuthor({
   userId,
   repoFullName,

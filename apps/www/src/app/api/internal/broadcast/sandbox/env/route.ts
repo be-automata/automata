@@ -10,7 +10,7 @@ import {
   getDecryptedEnvironmentVariables,
   getOrCreateEnvironment,
 } from "@terragon/shared/model/environments";
-import { getGitHubUserAccessTokenOrThrow } from "@terragon/shared/model/user";
+import { getGitHubTokenForBackground } from "@/lib/github";
 import { getEnv } from "@terragon/sandbox/env";
 import { getAndVerifyCredentials } from "@/agent/credentials";
 import { isSandboxTerminalSupported } from "@/lib/sandbox-terminal";
@@ -50,10 +50,10 @@ export async function POST(request: Request) {
         environmentId: environment.id,
         encryptionMasterKey: env.ENCRYPTION_MASTER_KEY,
       }),
-      getGitHubUserAccessTokenOrThrow({
-        db,
+      // Background-capable: App installation token fallback for identity-less owners.
+      getGitHubTokenForBackground({
         userId,
-        encryptionKey: env.ENCRYPTION_MASTER_KEY,
+        repoFullName: thread.githubRepoFullName,
       }),
       (async () => {
         const threadChat = getPrimaryThreadChat(thread);

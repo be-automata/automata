@@ -5,17 +5,17 @@ import {
   getEnvironment,
 } from "@terragon/shared/model/environments";
 import { db } from "@/lib/db";
-import {
-  getGitHubUserAccessTokenOrThrow,
-  getUserSettings,
-} from "@terragon/shared/model/user";
+import { getUserSettings } from "@terragon/shared/model/user";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
 import { env } from "@terragon/env/apps-www";
 import { getOrCreateSandbox, getSandboxProvider } from "@/agent/sandbox";
 import { CreateSandboxOptions } from "@terragon/sandbox/types";
 import { runSetupScript } from "@terragon/sandbox";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
-import { getDefaultBranchForRepo } from "@/lib/github";
+import {
+  getDefaultBranchForRepo,
+  getGitHubTokenForBackground,
+} from "@/lib/github";
 import { SandboxOutput } from "@/hooks/use-setup-script";
 import * as z from "zod/v4";
 import { getSandboxSizeForUser } from "@/lib/subscription-tiers";
@@ -98,10 +98,10 @@ export async function POST(request: NextRequest) {
         defaultBranch,
       ] = await Promise.all([
         getUserSettings({ db, userId }),
-        getGitHubUserAccessTokenOrThrow({
-          db,
+        // Background-capable: App installation token fallback for identity-less owners.
+        getGitHubTokenForBackground({
           userId,
-          encryptionKey: env.ENCRYPTION_MASTER_KEY,
+          repoFullName: environment.repoFullName,
         }),
         getSandboxSizeForUser(userId),
         getFeatureFlagsForUser({ db, userId }),

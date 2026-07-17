@@ -6,11 +6,10 @@ import { account as accountTable } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 import { getInstallationToken } from "@terragon/shared/github-app";
 
-// Use the REAL getOctokitForBackground (bypassing the test-setup @/lib/github
-// mock) so its user-token→App-installation-token fallback is exercised for real.
-const { getOctokitForBackground } = (await vi.importActual(
-  "@/lib/github",
-)) as typeof import("@/lib/github");
+// Use the REAL helpers (bypassing the test-setup @/lib/github mock) so their
+// user-token→App-installation-token fallback is exercised for real.
+const { getOctokitForBackground, getGitHubTokenForBackground } =
+  (await vi.importActual("@/lib/github")) as typeof import("@/lib/github");
 
 describe("getOctokitForBackground — App installation token fallback", () => {
   beforeEach(() => {
@@ -42,6 +41,37 @@ describe("getOctokitForBackground — App installation token fallback", () => {
     // Fallback succeeded — an Octokit is returned (no "No github access token" throw)…
     expect(octokit).toBeInstanceOf(Octokit);
     // …minted via the App installation token for the repo's owner.
+    expect(getInstallationToken).toHaveBeenCalledWith("be-automata", "automata");
+  });
+});
+
+describe("getGitHubTokenForBackground — sandbox git-clone token fallback", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getInstallationToken).mockResolvedValue("mock-github-token");
+  });
+
+  it("owner WITH a GitHub token: returns the user token, no App mint", async () => {
+    const { user } = await createTestUser({ db });
+    const token = await getGitHubTokenForBackground({
+      userId: user.id,
+      repoFullName: "be-automata/automata",
+    });
+    expect(typeof token).toBe("string");
+    expect(token.length).toBeGreaterThan(0);
+    expect(getInstallationToken).not.toHaveBeenCalled();
+  });
+
+  it("owner WITHOUT a GitHub identity: falls back to the App installation token string (git clone as x-access-token)", async () => {
+    const { user } = await createTestUser({ db });
+    await db.delete(accountTable).where(eq(accountTable.userId, user.id));
+
+    const token = await getGitHubTokenForBackground({
+      userId: user.id,
+      repoFullName: "be-automata/automata",
+    });
+
+    expect(token).toBe("mock-github-token");
     expect(getInstallationToken).toHaveBeenCalledWith("be-automata", "automata");
   });
 });

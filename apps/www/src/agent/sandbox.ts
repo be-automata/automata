@@ -6,11 +6,8 @@ import {
   updateThread,
   getThreadChat,
 } from "@terragon/shared/model/threads";
-import {
-  getGitHubUserAccessTokenOrThrow,
-  getUser,
-  getUserSettings,
-} from "@terragon/shared/model/user";
+import { getUser, getUserSettings } from "@terragon/shared/model/user";
+import { getGitHubTokenForBackground } from "@/lib/github";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
 import {
   getOrCreateEnvironment,
@@ -203,10 +200,12 @@ async function getOrCreateSandboxForThread({
       environmentId: repositoryEnvironment.id,
       encryptionMasterKey: env.ENCRYPTION_MASTER_KEY,
     }),
-    getGitHubUserAccessTokenOrThrow({
-      db,
+    // Background-capable: falls back to the App installation token for the
+    // thread's repo when the owner has no GitHub identity (git clone uses it as
+    // x-access-token). This is the sandbox boot path (getOrCreateSandboxForThread).
+    getGitHubTokenForBackground({
       userId,
-      encryptionKey: env.ENCRYPTION_MASTER_KEY,
+      repoFullName: thread.githubRepoFullName,
     }),
   ]);
 
