@@ -215,7 +215,12 @@ export function forTenant({ db, organizationId, userId }: TenantContext) {
     },
 
     deleteEnvironment(environmentId: string) {
-      return deleteEnvironmentById({ db, userId, organizationId, environmentId });
+      return deleteEnvironmentById({
+        db,
+        userId,
+        organizationId,
+        environmentId,
+      });
     },
 
     // --- Thread visibility + GitHub PR (WI-5 batch 2, slice 1) ---
@@ -267,7 +272,10 @@ export function forTenant({ db, organizationId, userId }: TenantContext) {
       accessTier: AccessTier,
       automationId: string,
       updates: Partial<
-        Omit<Automation, "id" | "userId" | "organizationId" | "createdAt" | "updatedAt">
+        Omit<
+          Automation,
+          "id" | "userId" | "organizationId" | "createdAt" | "updatedAt"
+        >
       >,
     ) {
       return updateAutomation({

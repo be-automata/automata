@@ -4,12 +4,17 @@
  * REPO_SETTINGS_DB_PATH override moves both.
  */
 
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { openDatabase } from '../shared/sqlite';
-import type { RepoReviewSettingsAudit, RepoReviewSettingsAuditRecord } from './types';
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { openDatabase } from "../shared/sqlite";
+import type {
+  RepoReviewSettingsAudit,
+  RepoReviewSettingsAuditRecord,
+} from "./types";
 
-export function createRepoReviewSettingsAudit(dbPath: string): RepoReviewSettingsAudit {
+export function createRepoReviewSettingsAudit(
+  dbPath: string,
+): RepoReviewSettingsAudit {
   mkdirSync(dirname(dbPath), { recursive: true });
 
   const db = openDatabase(dbPath);

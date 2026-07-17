@@ -17,7 +17,9 @@ import * as schema from "./schema";
  * neon-http cannot do. Node 22+ and workerd both provide a global WebSocket, so no
  * `ws` polyfill is imported (keeping the Workers bundle free of node-only modules).
  */
-function selectDriver(databaseUrl: string): "neon-serverless" | "node-postgres" {
+function selectDriver(
+  databaseUrl: string,
+): "neon-serverless" | "node-postgres" {
   const explicit = process.env.DB_DRIVER;
   if (explicit === "neon-serverless" || explicit === "node-postgres") {
     return explicit;

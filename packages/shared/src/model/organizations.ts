@@ -149,10 +149,7 @@ export async function getMembership({
     .select()
     .from(member)
     .where(
-      and(
-        eq(member.organizationId, organizationId),
-        eq(member.userId, userId),
-      ),
+      and(eq(member.organizationId, organizationId), eq(member.userId, userId)),
     )
     .limit(1);
   return row;
@@ -190,9 +187,6 @@ export async function removeOrganizationMember({
   await db
     .delete(member)
     .where(
-      and(
-        eq(member.organizationId, organizationId),
-        eq(member.userId, userId),
-      ),
+      and(eq(member.organizationId, organizationId), eq(member.userId, userId)),
     );
 }

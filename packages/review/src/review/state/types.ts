@@ -9,18 +9,22 @@
  * the lifecycle classification shape.
  */
 
-import type { Finding } from '../../types';
+import type { Finding } from "../../types";
 
 // ---------------------------------------------------------------------------
 // Enumerations
 // ---------------------------------------------------------------------------
 
-export type LifecycleStatus = 'active' | 'fixed' | 'user_resolved' | 'regressed';
+export type LifecycleStatus =
+  | "active"
+  | "fixed"
+  | "user_resolved"
+  | "regressed";
 
-export type Severity = 'info' | 'warning' | 'error' | 'critical';
+export type Severity = "info" | "warning" | "error" | "critical";
 
 /** v0.3 binary verdict; 4-tier rubric is deferred to v0.5 per Spec §2. */
-export type ReviewVerdictBinary = 'APPROVE' | 'REQUEST_CHANGES';
+export type ReviewVerdictBinary = "APPROVE" | "REQUEST_CHANGES";
 
 // ---------------------------------------------------------------------------
 // FindingRecord — one row in `review_state` (Phase 3 §4.1)
@@ -76,17 +80,17 @@ export interface BreakGlassMatch {
 // ---------------------------------------------------------------------------
 
 export type GitHubPermission =
-  | 'admin'
-  | 'maintain'
-  | 'write'
-  | 'triage'
-  | 'read'
-  | 'none';
+  | "admin"
+  | "maintain"
+  | "write"
+  | "triage"
+  | "read"
+  | "none";
 
 export interface PermissionCheck {
   allowed: boolean;
-  permission: GitHubPermission | 'unknown';
-  reason?: 'api_error' | 'insufficient_permission';
+  permission: GitHubPermission | "unknown";
+  reason?: "api_error" | "insufficient_permission";
 }
 
 // ---------------------------------------------------------------------------

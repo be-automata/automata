@@ -11,35 +11,88 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ci:
+  # ── Static checks: tsc (all packages), lint, format ──────────────────────────
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Cache turbo build setup
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+      - name: Cache turbo
         uses: actions/cache@v4
         with:
           path: .turbo
           key: ${{ runner.os }}-turbo-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-turbo-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+          restore-keys: ${{ runner.os }}-turbo-
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      # The .pnpmfile.cjs strips drizzle-orm's optional peers so pnpm keeps ONE
+      # hoisted copy — without it, drizzle's branded types stop crossing the
+      # shared→www boundary and tsc breaks. Fail loudly if that regresses.
+      - name: Verify single drizzle-orm resolution (.pnpmfile.cjs)
+        run: |
+          shared=$(readlink -f node_modules/.pnpm/*/node_modules/drizzle-orm 2>/dev/null | head -1)
+          s=$(readlink packages/shared/node_modules/drizzle-orm | sed -E 's#.*/(drizzle-orm@[^/]*)/.*#\1#')
+          w=$(readlink apps/www/node_modules/drizzle-orm | sed -E 's#.*/(drizzle-orm@[^/]*)/.*#\1#')
+          echo "shared -> $s ; www -> $w"
+          if [ "$s" != "$w" ]; then echo "::error::drizzle-orm forked ($s vs $w) — .pnpmfile.cjs not applied"; exit 1; fi
+
+      # apps/docs (Fumadocs) generates `.source` via fumadocs-mdx; without it
+      # tsc-check fails on missing `@/.source`. Run it before the type check.
+      - name: Fumadocs codegen (apps/docs)
+        run: pnpm --filter @terragon/docs exec fumadocs-mdx
+
+      - name: Type check (all packages)
+        run: pnpm turbo tsc-check
+      - name: Lint
+        run: pnpm turbo lint
+      - name: Format check
+        run: pnpm turbo format-check
+
+  # ── Tests: serialized `vitest run` per package + review (node --test) ─────────
+  # Bare `turbo test` runs the packages' watch-mode `vitest` scripts, which in CI
+  # silently no-op several suites. We invoke `vitest run --no-file-parallelism`
+  # explicitly per package. The Postgres-backed suites (shared, www) provision
+  # their own throwaway DB via packages/dev-env test-global-setup, which uses
+  # `docker compose` (available on ubuntu-latest) — no `services:` container.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
         with:
           run_install: false
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: "pnpm"
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
-      # Checks
-      - name: Type check
-        run: pnpm turbo tsc-check
-      - name: Lint
-        run: pnpm turbo lint
-      - name: Check formatting
-        run: pnpm turbo format-check
-      # Run tests
-      - name: Tests
-        run: pnpm turbo test --concurrency=1
+
+      - name: Tests (serialized, controlled env)
+        env:
+          CI: "true"
+        run: |
+          set -eo pipefail
+          # WI-9 controlled env: drop any host/runner leaks that would misdirect
+          # the driver / DB / sandbox provider. The harness sets its own DATABASE_URL.
+          unset DATABASE_URL DB_DRIVER SANDBOX_PROVIDER NODE_ENV NEXT_PUBLIC_APP_URL
+
+          run_pkg() { echo "::group::vitest $1"; pnpm --filter "$1" exec vitest run --no-file-parallelism; echo "::endgroup::"; }
+
+          run_pkg @terragon/utils
+          run_pkg @terragon/agent
+          run_pkg @terragon/shared
+          run_pkg @terragon/www
+          run_pkg @terragon/daemon
+          run_pkg @terragon/sandbox
+
+          echo "::group::review (node --test)"
+          pnpm --filter @terragon/review test
+          echo "::endgroup::"

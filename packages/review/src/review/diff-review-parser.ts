@@ -7,8 +7,8 @@
  * Bounded context: Review
  */
 
-import { randomUUID } from 'node:crypto';
-import type { Finding } from '../types';
+import { randomUUID } from "node:crypto";
+import type { Finding } from "../types";
 
 // ---------------------------------------------------------------------------
 // JSON extraction
@@ -17,18 +17,22 @@ import type { Finding } from '../types';
 /**
  * Try to extract a JSON object containing a "findings" array from text.
  */
-export function tryExtractJson(text: string): Record<string, unknown> | undefined {
+export function tryExtractJson(
+  text: string,
+): Record<string, unknown> | undefined {
   // Try fenced code block first
   const fenced = text.match(/```json\s*\n?([\s\S]*?)```/);
   if (fenced?.[1]) {
     try {
       const parsed = JSON.parse(fenced[1].trim());
-      if (typeof parsed === 'object' && parsed !== null) return parsed;
-    } catch { /* not valid JSON */ }
+      if (typeof parsed === "object" && parsed !== null) return parsed;
+    } catch {
+      /* not valid JSON */
+    }
   }
 
   // Try balanced brace extraction
-  const start = text.indexOf('{');
+  const start = text.indexOf("{");
   if (start === -1) return undefined;
 
   let depth = 0;
@@ -38,20 +42,31 @@ export function tryExtractJson(text: string): Record<string, unknown> | undefine
   for (let i = start; i < text.length; i++) {
     const ch = text[i];
 
-    if (escape) { escape = false; continue; }
-    if (ch === '\\' && inString) { escape = true; continue; }
-    if (ch === '"') { inString = !inString; continue; }
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\" && inString) {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
     if (inString) continue;
 
-    if (ch === '{') depth++;
-    else if (ch === '}') {
+    if (ch === "{") depth++;
+    else if (ch === "}") {
       depth--;
       if (depth === 0) {
         const jsonStr = text.slice(start, i + 1);
         try {
           const parsed = JSON.parse(jsonStr);
-          if (typeof parsed === 'object' && parsed !== null) return parsed;
-        } catch { /* not valid JSON */ }
+          if (typeof parsed === "object" && parsed !== null) return parsed;
+        } catch {
+          /* not valid JSON */
+        }
         break;
       }
     }
@@ -69,32 +84,36 @@ export function tryExtractJson(text: string): Record<string, unknown> | undefine
  * Normalizes severity to lowercase.
  */
 export function toFinding(raw: unknown): Finding {
-  if (typeof raw !== 'object' || raw === null) {
+  if (typeof raw !== "object" || raw === null) {
     return {
       id: randomUUID(),
-      severity: 'info',
-      category: 'diff-review',
+      severity: "info",
+      category: "diff-review",
       message: String(raw),
     };
   }
 
   const obj = raw as Record<string, unknown>;
-  const rawSeverity = String(obj.severity ?? 'info').toLowerCase();
-  const severity = (['info', 'warning', 'error', 'critical'].includes(rawSeverity)
-    ? rawSeverity
-    : 'info') as Finding['severity'];
+  const rawSeverity = String(obj.severity ?? "info").toLowerCase();
+  const severity = (
+    ["info", "warning", "error", "critical"].includes(rawSeverity)
+      ? rawSeverity
+      : "info"
+  ) as Finding["severity"];
 
   const finding: Finding = {
     id: obj.id ? String(obj.id) : randomUUID(),
     severity,
-    category: String(obj.category ?? 'diff-review'),
-    message: String(obj.message ?? ''),
+    category: String(obj.category ?? "diff-review"),
+    message: String(obj.message ?? ""),
     ...(obj.location ? { location: String(obj.location) } : {}),
   };
 
   // Extract structured file/line from explicit fields or parse from location
   if (obj.filePath || obj.file_path || obj.file || obj.path) {
-    finding.filePath = String(obj.filePath ?? obj.file_path ?? obj.file ?? obj.path);
+    finding.filePath = String(
+      obj.filePath ?? obj.file_path ?? obj.file ?? obj.path,
+    );
   }
   if (obj.lineNumber != null || obj.line_number != null || obj.line != null) {
     const rawLine = Number(obj.lineNumber ?? obj.line_number ?? obj.line);
@@ -130,12 +149,15 @@ export function toFinding(raw: unknown): Finding {
  */
 export function parseFindings(rawOutput: string): Finding[] {
   if (!rawOutput || rawOutput.trim().length === 0) {
-    return [{
-      id: randomUUID(),
-      severity: 'info',
-      category: 'diff-review',
-      message: 'Review completed but output could not be parsed into structured findings',
-    }];
+    return [
+      {
+        id: randomUUID(),
+        severity: "info",
+        category: "diff-review",
+        message:
+          "Review completed but output could not be parsed into structured findings",
+      },
+    ];
   }
 
   // Attempt 1: JSON parsing
@@ -145,14 +167,16 @@ export function parseFindings(rawOutput: string): Finding[] {
   }
 
   // Attempt 2: Markdown parsing
-  const lines = rawOutput.split('\n');
+  const lines = rawOutput.split("\n");
   const findings: Finding[] = [];
   for (const line of lines) {
-    const match = line.match(/\[(INFO|WARNING|ERROR|CRITICAL)\]\s*(\w[\w-]*):\s*(.+)/i);
+    const match = line.match(
+      /\[(INFO|WARNING|ERROR|CRITICAL)\]\s*(\w[\w-]*):\s*(.+)/i,
+    );
     if (match) {
       const finding: Finding = {
         id: randomUUID(),
-        severity: match[1].toLowerCase() as Finding['severity'],
+        severity: match[1].toLowerCase() as Finding["severity"],
         category: match[2],
         message: match[3].trim(),
       };
@@ -169,12 +193,15 @@ export function parseFindings(rawOutput: string): Finding[] {
   if (findings.length > 0) return findings;
 
   // Attempt 3: Unstructured fallback
-  return [{
-    id: randomUUID(),
-    severity: 'info',
-    category: 'diff-review',
-    message: 'Review completed but output could not be parsed into structured findings',
-  }];
+  return [
+    {
+      id: randomUUID(),
+      severity: "info",
+      category: "diff-review",
+      message:
+        "Review completed but output could not be parsed into structured findings",
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -190,7 +217,7 @@ export function deduplicateFindings(findings: Finding[]): Finding[] {
   const result: Finding[] = [];
 
   for (const f of findings) {
-    const key = `${f.message}::${f.location ?? ''}`;
+    const key = `${f.message}::${f.location ?? ""}`;
     if (!seen.has(key)) {
       seen.add(key);
       result.push(f);

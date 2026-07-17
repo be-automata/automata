@@ -33,7 +33,9 @@ export interface AuditWriterQueue<T> {
   size(): number;
 }
 
-export function createAuditWriterQueue<T>(deps: AuditWriterQueueDeps<T>): AuditWriterQueue<T> {
+export function createAuditWriterQueue<T>(
+  deps: AuditWriterQueueDeps<T>,
+): AuditWriterQueue<T> {
   const { write, onError } = deps;
 
   const queue: T[] = [];

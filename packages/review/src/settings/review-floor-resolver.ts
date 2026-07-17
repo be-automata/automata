@@ -13,11 +13,11 @@ import {
   DEFAULT_APPROVE_SEVERITY_POLICY,
   toleranceToPolicy,
   type ApproveSeverityPolicy,
-} from '../review/severity-policy';
-import type { RepoReviewSettingsStore } from './types';
+} from "../review/severity-policy";
+import type { RepoReviewSettingsStore } from "./types";
 
 export interface ReviewFloorResolverDeps {
-  store: Pick<RepoReviewSettingsStore, 'get'>;
+  store: Pick<RepoReviewSettingsStore, "get">;
   /** The env-derived policy assembled from loadConfig (absent ⇒ locked default). */
   envPolicy?: ApproveSeverityPolicy;
 }

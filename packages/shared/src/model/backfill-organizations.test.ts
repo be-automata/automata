@@ -77,17 +77,13 @@ describe("backfill-organizations", () => {
   it("is idempotent — re-running creates no new orgs and leaves stamps intact", async () => {
     const { threadId } = await createTestThread({ db, userId: userA.id });
     const first = await backfillOrganizations(db);
-    const orgCountAfterFirst = (
-      await db.select().from(organization)
-    ).length;
+    const orgCountAfterFirst = (await db.select().from(organization)).length;
 
     const second = await backfillOrganizations(db);
     expect(second.orgsCreated).toBe(0);
     expect(Object.keys(second.rowsStamped)).toHaveLength(0);
 
-    const orgCountAfterSecond = (
-      await db.select().from(organization)
-    ).length;
+    const orgCountAfterSecond = (await db.select().from(organization)).length;
     expect(orgCountAfterSecond).toBe(orgCountAfterFirst);
 
     // A single membership per user (no duplicate).

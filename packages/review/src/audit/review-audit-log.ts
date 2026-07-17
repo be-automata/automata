@@ -15,26 +15,26 @@
  *   • `flush()` is bound to `process.beforeExit` by the composition root.
  */
 
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { openDatabase } from '../shared/sqlite';
-import { redactSecrets } from './redact-secrets';
-import { createAuditWriterQueue } from './audit-writer-queue';
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { openDatabase } from "../shared/sqlite";
+import { redactSecrets } from "./redact-secrets";
+import { createAuditWriterQueue } from "./audit-writer-queue";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export type ReviewAuditEventType =
-  | 'review.started'
-  | 'review.completed'
-  | 'review.finding_lifecycle'
-  | 'review.dismissed'
-  | 'review.break_glass'
-  | 'review.token_usage'
+  | "review.started"
+  | "review.completed"
+  | "review.finding_lifecycle"
+  | "review.dismissed"
+  | "review.break_glass"
+  | "review.token_usage"
   // O1: work-blocked parity with review.break_glass — single audit log,
   // shared invariants (append-only, redacted payload, async drain).
-  | 'work.blocked';
+  | "work.blocked";
 
 export interface ReviewAuditEvent {
   ts: string;
@@ -49,7 +49,7 @@ export interface ReviewAuditEvent {
 
 export interface ReviewAuditLog {
   /** Async fire-and-forget enqueue. Never throws to the caller (NFR-2). */
-  emit(event: Omit<ReviewAuditEvent, 'ts'>): void;
+  emit(event: Omit<ReviewAuditEvent, "ts">): void;
   /** Resolve once pending writes have drained. */
   flush(): Promise<void>;
   list(
@@ -73,7 +73,7 @@ export function createReviewAuditLog(
   dbPath: string,
   deps: ReviewAuditLogDeps = {},
 ): ReviewAuditLog {
-  if (dbPath !== ':memory:') {
+  if (dbPath !== ":memory:") {
     mkdirSync(dirname(dbPath), { recursive: true });
   }
 
@@ -171,7 +171,7 @@ export function createReviewAuditLog(
     ORDER BY id DESC
     LIMIT ?
   `);
-  const countStmt = db.prepare('SELECT COUNT(*) AS n FROM review_audit_log');
+  const countStmt = db.prepare("SELECT COUNT(*) AS n FROM review_audit_log");
 
   function rowToEvent(row: Record<string, unknown>): ReviewAuditEvent {
     return {
@@ -182,7 +182,10 @@ export function createReviewAuditLog(
       findingId: (row.finding_id as string | null) ?? null,
       actor: (row.actor as string | null) ?? null,
       auditId: (row.audit_id as string | null) ?? null,
-      payload: JSON.parse(row.payload_json as string) as Record<string, unknown>,
+      payload: JSON.parse(row.payload_json as string) as Record<
+        string,
+        unknown
+      >,
     };
   }
 
@@ -238,13 +241,27 @@ export function createReviewAuditLog(
       const lim = Math.max(1, Math.min(10_000, limit));
       let rows: Record<string, unknown>[];
       if (filter?.repo && filter?.prNumber !== undefined && filter?.type) {
-        rows = listByPrAndTypeStmt.all(filter.repo, filter.prNumber, filter.type, lim) as Record<string, unknown>[];
+        rows = listByPrAndTypeStmt.all(
+          filter.repo,
+          filter.prNumber,
+          filter.type,
+          lim,
+        ) as Record<string, unknown>[];
       } else if (filter?.repo && filter?.prNumber !== undefined) {
-        rows = listByPrStmt.all(filter.repo, filter.prNumber, lim) as Record<string, unknown>[];
+        rows = listByPrStmt.all(filter.repo, filter.prNumber, lim) as Record<
+          string,
+          unknown
+        >[];
       } else if (filter?.repo) {
-        rows = listByRepoStmt.all(filter.repo, lim) as Record<string, unknown>[];
+        rows = listByRepoStmt.all(filter.repo, lim) as Record<
+          string,
+          unknown
+        >[];
       } else if (filter?.type) {
-        rows = listByTypeStmt.all(filter.type, lim) as Record<string, unknown>[];
+        rows = listByTypeStmt.all(filter.type, lim) as Record<
+          string,
+          unknown
+        >[];
       } else {
         rows = listAllStmt.all(lim) as Record<string, unknown>[];
       }
@@ -270,11 +287,15 @@ export function createReviewAuditLog(
  * Idempotent — does nothing on fresh installs (the new schema is already
  * in place via the CREATE TABLE IF NOT EXISTS above).
  */
-function migrateAuditSchemaIfNeeded(db: import('node:sqlite').DatabaseSync): void {
+function migrateAuditSchemaIfNeeded(
+  db: import("node:sqlite").DatabaseSync,
+): void {
   const row = db
-    .prepare(`SELECT sql FROM sqlite_schema WHERE type='table' AND name='review_audit_log'`)
+    .prepare(
+      `SELECT sql FROM sqlite_schema WHERE type='table' AND name='review_audit_log'`,
+    )
     .get() as { sql?: string } | undefined;
-  if (!row || typeof row.sql !== 'string') return;
+  if (!row || typeof row.sql !== "string") return;
   if (row.sql.includes("'work.blocked'")) return; // already migrated.
 
   db.exec(`

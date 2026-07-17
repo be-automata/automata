@@ -25,7 +25,7 @@
  * blocking. An untagged comment defaults to `info` (non-gating).
  */
 
-import type { Severity } from './state/types';
+import type { Severity } from "./state/types";
 
 export type { Severity };
 
@@ -33,14 +33,22 @@ export type { Severity };
  * Severity tiers in ascending order — the array index IS the rank. The single
  * source of truth for "is X at least as severe as Y".
  */
-export const SEVERITY_ORDER: readonly Severity[] = ['info', 'warning', 'error', 'critical'];
+export const SEVERITY_ORDER: readonly Severity[] = [
+  "info",
+  "warning",
+  "error",
+  "critical",
+];
 
 /** An untagged comment / absent `severity` defaults to `info`. */
-export const DEFAULT_SEVERITY: Severity = 'info';
+export const DEFAULT_SEVERITY: Severity = "info";
 
 /** Membership guard over the severity vocabulary (for untrusted strings). */
 export function isSeverity(value: unknown): value is Severity {
-  return typeof value === 'string' && (SEVERITY_ORDER as readonly string[]).includes(value);
+  return (
+    typeof value === "string" &&
+    (SEVERITY_ORDER as readonly string[]).includes(value)
+  );
 }
 
 /** Rank of a severity (higher = more severe). Unknown values fall back to `info`. */
@@ -50,7 +58,7 @@ export function severityRank(severity: Severity): number {
 }
 
 /** The neutral kernel tier — deliberately free of gate/verdict/GitHub vocabulary. */
-export type SeverityTier = 'block' | 'surface' | 'clean';
+export type SeverityTier = "block" | "surface" | "clean";
 
 /**
  * The per-repository REQUESTED_CHANGES tolerance an operator can pick from the
@@ -58,12 +66,19 @@ export type SeverityTier = 'block' | 'surface' | 'clean';
  * `error` = only error/critical block; `warning` = today's default;
  * `info` = every finding blocks. `critical`-only is deliberately not offered.
  */
-export type BlockTolerance = 'info' | 'warning' | 'error';
+export type BlockTolerance = "info" | "warning" | "error";
 
-export const BLOCK_TOLERANCES: readonly BlockTolerance[] = ['info', 'warning', 'error'];
+export const BLOCK_TOLERANCES: readonly BlockTolerance[] = [
+  "info",
+  "warning",
+  "error",
+];
 
 export function isBlockTolerance(value: unknown): value is BlockTolerance {
-  return typeof value === 'string' && (BLOCK_TOLERANCES as readonly string[]).includes(value);
+  return (
+    typeof value === "string" &&
+    (BLOCK_TOLERANCES as readonly string[]).includes(value)
+  );
 }
 
 /**
@@ -77,14 +92,16 @@ export function isBlockTolerance(value: unknown): value is BlockTolerance {
  * A tolerance is a COMPLETE policy: when a repo has one, the env surface
  * override is intentionally ignored for that repo.
  */
-export function toleranceToPolicy(tolerance: BlockTolerance): ApproveSeverityPolicy {
+export function toleranceToPolicy(
+  tolerance: BlockTolerance,
+): ApproveSeverityPolicy {
   switch (tolerance) {
-    case 'error':
-      return { blockSeverity: 'error', surfaceSeverity: 'warning' };
-    case 'warning':
-      return { blockSeverity: 'warning', surfaceSeverity: 'warning' };
-    case 'info':
-      return { blockSeverity: 'info', surfaceSeverity: 'info' };
+    case "error":
+      return { blockSeverity: "error", surfaceSeverity: "warning" };
+    case "warning":
+      return { blockSeverity: "warning", surfaceSeverity: "warning" };
+    case "info":
+      return { blockSeverity: "info", surfaceSeverity: "info" };
   }
 }
 
@@ -97,7 +114,10 @@ export function isBlockingUnderPolicy(
   severity: Severity | undefined,
   policy: ApproveSeverityPolicy,
 ): boolean {
-  return severityRank(severity ?? DEFAULT_SEVERITY) >= severityRank(policy.blockSeverity);
+  return (
+    severityRank(severity ?? DEFAULT_SEVERITY) >=
+    severityRank(policy.blockSeverity)
+  );
 }
 
 /**
@@ -120,8 +140,8 @@ export interface ApproveSeverityPolicy {
  * `emit_review` approve floor.
  */
 export const DEFAULT_APPROVE_SEVERITY_POLICY: ApproveSeverityPolicy = {
-  blockSeverity: 'warning',
-  surfaceSeverity: 'warning',
+  blockSeverity: "warning",
+  surfaceSeverity: "warning",
 };
 
 /**
@@ -139,8 +159,8 @@ export const DEFAULT_APPROVE_SEVERITY_POLICY: ApproveSeverityPolicy = {
  * explicitly named setting.
  */
 export const GATE_SEVERITY_POLICY: ApproveSeverityPolicy = {
-  blockSeverity: 'warning',
-  surfaceSeverity: 'warning',
+  blockSeverity: "warning",
+  surfaceSeverity: "warning",
 };
 
 /**
@@ -151,37 +171,39 @@ export function classifySeverities(
   severities: readonly Severity[],
   policy: ApproveSeverityPolicy,
 ): SeverityTier {
-  if (severities.length === 0) return 'clean';
+  if (severities.length === 0) return "clean";
   const maxRank = Math.max(...severities.map(severityRank));
-  if (maxRank >= severityRank(policy.blockSeverity)) return 'block';
-  if (maxRank >= severityRank(policy.surfaceSeverity)) return 'surface';
-  return 'clean';
+  if (maxRank >= severityRank(policy.blockSeverity)) return "block";
+  if (maxRank >= severityRank(policy.surfaceSeverity)) return "surface";
+  return "clean";
 }
 
 /** Gate adapter: neutral tier → the gate's `fail | conditional | pass` status. */
-export function tierToGateStatus(tier: SeverityTier): 'pass' | 'conditional' | 'fail' {
+export function tierToGateStatus(
+  tier: SeverityTier,
+): "pass" | "conditional" | "fail" {
   switch (tier) {
-    case 'block':
-      return 'fail';
-    case 'surface':
-      return 'conditional';
-    case 'clean':
-      return 'pass';
+    case "block":
+      return "fail";
+    case "surface":
+      return "conditional";
+    case "clean":
+      return "pass";
   }
 }
 
 /** The three review verdicts the approve floor may resolve to (no GitHub vocabulary). */
-export type FloorVerdict = 'approve' | 'request_changes' | 'comment';
+export type FloorVerdict = "approve" | "request_changes" | "comment";
 
 /** Verdict adapter: neutral tier → `request_changes | comment | approve`. */
 export function tierToVerdict(tier: SeverityTier): FloorVerdict {
   switch (tier) {
-    case 'block':
-      return 'request_changes';
-    case 'surface':
-      return 'comment';
-    case 'clean':
-      return 'approve';
+    case "block":
+      return "request_changes";
+    case "surface":
+      return "comment";
+    case "clean":
+      return "approve";
   }
 }
 
@@ -221,7 +243,7 @@ export function applyApproveSeverityFloor<T extends SeverityFloorIntent>(
   opts?: { isDraft?: boolean },
 ): T {
   // Invariant: only downgrade an `approve`. Leave comment/request_changes alone.
-  if (intent.verdict !== 'approve') return intent;
+  if (intent.verdict !== "approve") return intent;
 
   const severities = (intent.comments ?? [])
     .filter((c) => !c.suppressGating)
@@ -229,8 +251,8 @@ export function applyApproveSeverityFloor<T extends SeverityFloorIntent>(
   let nextVerdict = tierToVerdict(classifySeverities(severities, policy));
 
   // Draft cap: never promote approve → request_changes on a draft PR.
-  if (opts?.isDraft && nextVerdict === 'request_changes') {
-    nextVerdict = 'comment';
+  if (opts?.isDraft && nextVerdict === "request_changes") {
+    nextVerdict = "comment";
   }
 
   if (nextVerdict === intent.verdict) return intent;

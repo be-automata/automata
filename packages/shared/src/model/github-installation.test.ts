@@ -91,8 +91,9 @@ describe("github-installation", () => {
     const row = await getGithubInstallation({ db, installationId: instId });
     expect(row?.organizationId).toBe(other.id);
     // Still a single row for that installation.
-    expect(await getOrganizationIdForInstallation({ db, installationId: instId }))
-      .toBe(other.id);
+    expect(
+      await getOrganizationIdForInstallation({ db, installationId: instId }),
+    ).toBe(other.id);
   });
 
   describe("mode (Somnio pilot shadow/active)", () => {
@@ -158,7 +159,10 @@ describe("github-installation", () => {
 
     it("an unmapped or absent installation resolves to active (migration-safe: never suppress an unknown install)", async () => {
       expect(
-        await getInstallationOrgAndMode({ db, installationId: installationId() }),
+        await getInstallationOrgAndMode({
+          db,
+          installationId: installationId(),
+        }),
       ).toEqual({ organizationId: null, mode: "active" });
       expect(
         await getInstallationOrgAndMode({ db, installationId: null }),

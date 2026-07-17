@@ -3,16 +3,19 @@
  * surface failures to the caller. Pending writes flush on demand.
  */
 
-import { describe, it, beforeEach, afterEach } from 'node:test';
-import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { createAuditWriterQueue } from '../../src/audit/audit-writer-queue';
-import { createReviewAuditLog, type ReviewAuditLog } from '../../src/audit/review-audit-log';
+import { describe, it, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createAuditWriterQueue } from "../../src/audit/audit-writer-queue";
+import {
+  createReviewAuditLog,
+  type ReviewAuditLog,
+} from "../../src/audit/review-audit-log";
 
-describe('AuditWriterQueue non-blocking semantics', () => {
-  it('NFR-2: enqueue returns synchronously even when writer is slow', async () => {
+describe("AuditWriterQueue non-blocking semantics", () => {
+  it("NFR-2: enqueue returns synchronously even when writer is slow", async () => {
     const seen: number[] = [];
     let writes = 0;
     const queue = createAuditWriterQueue<number>({
@@ -32,7 +35,10 @@ describe('AuditWriterQueue non-blocking semantics', () => {
     const elapsed = Date.now() - start;
     // Enqueue is O(1) array push + microtask schedule. Even on a slow CI
     // box, 10 pushes should complete well under 50ms.
-    assert.ok(elapsed < 50, `enqueue should be near-instant, took ${elapsed}ms`);
+    assert.ok(
+      elapsed < 50,
+      `enqueue should be near-instant, took ${elapsed}ms`,
+    );
 
     // The writes happen on a microtask after the synchronous enqueues.
     // At this point, before flush(), some/all may not have run yet.
@@ -41,11 +47,11 @@ describe('AuditWriterQueue non-blocking semantics', () => {
     assert.deepEqual(seen, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 
-  it('AC-12 / EC-17: a thrown writer error does not surface to the producer', async () => {
+  it("AC-12 / EC-17: a thrown writer error does not surface to the producer", async () => {
     const errors: Array<{ err: unknown; item: number }> = [];
     const queue = createAuditWriterQueue<number>({
       write: (n) => {
-        if (n === 3) throw new Error('boom');
+        if (n === 3) throw new Error("boom");
       },
       onError: (err, item) => {
         errors.push({ err, item });
@@ -66,7 +72,7 @@ describe('AuditWriterQueue non-blocking semantics', () => {
     assert.match((errors[0].err as Error).message, /boom/);
   });
 
-  it('flush() resolves even when called multiple times concurrently', async () => {
+  it("flush() resolves even when called multiple times concurrently", async () => {
     const queue = createAuditWriterQueue<number>({
       write: () => {},
     });
@@ -78,13 +84,13 @@ describe('AuditWriterQueue non-blocking semantics', () => {
   });
 });
 
-describe('ReviewAuditLog non-blocking semantics (integration)', () => {
+describe("ReviewAuditLog non-blocking semantics (integration)", () => {
   let tmp: string;
   let log: ReviewAuditLog;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), 'review-audit-nonblock-'));
-    log = createReviewAuditLog(join(tmp, 'review-audit.db'));
+    tmp = mkdtempSync(join(tmpdir(), "review-audit-nonblock-"));
+    log = createReviewAuditLog(join(tmp, "review-audit.db"));
   });
 
   afterEach(async () => {
@@ -93,28 +99,28 @@ describe('ReviewAuditLog non-blocking semantics (integration)', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('EC-17: emit never throws even with malformed payload', () => {
+  it("EC-17: emit never throws even with malformed payload", () => {
     // Circular reference would normally cause JSON.stringify to throw.
     const circular: Record<string, unknown> = { self: null };
     circular.self = circular;
     assert.doesNotThrow(() => {
       log.emit({
-        type: 'review.started',
-        repo: 'a/b',
+        type: "review.started",
+        repo: "a/b",
         prNumber: 1,
         payload: circular,
       });
     });
   });
 
-  it('EC-14: handles a 200-event burst without dropping events on flush', async () => {
+  it("EC-14: handles a 200-event burst without dropping events on flush", async () => {
     for (let i = 0; i < 200; i++) {
       log.emit({
-        type: 'review.finding_lifecycle',
-        repo: 'a/b',
+        type: "review.finding_lifecycle",
+        repo: "a/b",
         prNumber: 1,
         findingId: `fp-${i}`,
-        payload: { before: 'active', after: 'fixed' },
+        payload: { before: "active", after: "fixed" },
       });
     }
     await log.flush();

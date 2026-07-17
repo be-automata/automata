@@ -10,11 +10,11 @@
  * GitHub web UI is stripped before matching.
  */
 
-import type { BreakGlassMatch } from './types';
+import type { BreakGlassMatch } from "./types";
 
 const MAX_REASON_LENGTH = 500;
-const PREFIX_BARE = 'break glass';
-const PREFIX_WITH_COLON = 'break glass:';
+const PREFIX_BARE = "break glass";
+const PREFIX_WITH_COLON = "break glass:";
 
 export interface BreakGlassMatcher {
   match(commentBody: string): BreakGlassMatch;
@@ -29,7 +29,7 @@ export function createBreakGlassMatcher(): BreakGlassMatcher {
 }
 
 function matchBreakGlass(rawBody: string): BreakGlassMatch {
-  if (typeof rawBody !== 'string' || rawBody.length === 0) {
+  if (typeof rawBody !== "string" || rawBody.length === 0) {
     return { matched: false, reason: null };
   }
 
@@ -49,11 +49,11 @@ function matchBreakGlass(rawBody: string): BreakGlassMatch {
 
   // The remainder must match `\s*(.+)` where `.` does NOT span newlines —
   // multi-line bodies fail the grammar.
-  if (remainder.includes('\n') || remainder.includes('\r')) {
+  if (remainder.includes("\n") || remainder.includes("\r")) {
     return { matched: false, reason: null };
   }
 
-  const reasonTrimmed = remainder.replace(/^\s+/, '');
+  const reasonTrimmed = remainder.replace(/^\s+/, "");
   if (reasonTrimmed.length === 0) {
     return { matched: false, reason: null };
   }
@@ -67,7 +67,7 @@ function matchBreakGlass(rawBody: string): BreakGlassMatch {
 }
 
 function stripSingleTrailingNewline(s: string): string {
-  if (s.endsWith('\r\n')) return s.slice(0, -2);
-  if (s.endsWith('\n')) return s.slice(0, -1);
+  if (s.endsWith("\r\n")) return s.slice(0, -2);
+  if (s.endsWith("\n")) return s.slice(0, -1);
   return s;
 }

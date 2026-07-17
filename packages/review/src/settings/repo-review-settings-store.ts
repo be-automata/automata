@@ -8,12 +8,18 @@
  * case-mismatched override must never silently stop matching.
  */
 
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { openDatabase } from '../shared/sqlite';
-import type { BlockTolerance, RepoReviewSetting, RepoReviewSettingsStore } from './types';
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { openDatabase } from "../shared/sqlite";
+import type {
+  BlockTolerance,
+  RepoReviewSetting,
+  RepoReviewSettingsStore,
+} from "./types";
 
-export function createRepoReviewSettingsStore(dbPath: string): RepoReviewSettingsStore {
+export function createRepoReviewSettingsStore(
+  dbPath: string,
+): RepoReviewSettingsStore {
   mkdirSync(dirname(dbPath), { recursive: true });
 
   const db = openDatabase(dbPath);
@@ -36,13 +42,15 @@ export function createRepoReviewSettingsStore(dbPath: string): RepoReviewSetting
   `);
 
   const getStmt = db.prepare(
-    'SELECT repo, block_tolerance, created_at, updated_at FROM repo_review_settings WHERE repo = ?',
+    "SELECT repo, block_tolerance, created_at, updated_at FROM repo_review_settings WHERE repo = ?",
   );
 
-  const removeStmt = db.prepare('DELETE FROM repo_review_settings WHERE repo = ?');
+  const removeStmt = db.prepare(
+    "DELETE FROM repo_review_settings WHERE repo = ?",
+  );
 
   const listStmt = db.prepare(
-    'SELECT repo, block_tolerance, created_at, updated_at FROM repo_review_settings ORDER BY repo',
+    "SELECT repo, block_tolerance, created_at, updated_at FROM repo_review_settings ORDER BY repo",
   );
 
   function toSetting(row: Record<string, unknown>): RepoReviewSetting {
@@ -56,7 +64,9 @@ export function createRepoReviewSettingsStore(dbPath: string): RepoReviewSetting
 
   return {
     get(repo: string): RepoReviewSetting | undefined {
-      const row = getStmt.get(repo.toLowerCase()) as Record<string, unknown> | undefined;
+      const row = getStmt.get(repo.toLowerCase()) as
+        | Record<string, unknown>
+        | undefined;
       return row ? toSetting(row) : undefined;
     },
 

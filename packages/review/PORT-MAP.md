@@ -13,21 +13,21 @@ resolve unchanged. The only source adaptations were the two external type reache
 
 ## Ported (13 modules + local types) — all with their tests, 164 cases green
 
-| Source file | Ported to | Notes |
-|---|---|---|
-| `src/review/severity-policy.ts` | `src/review/severity-policy.ts` | Verdict/severity decision + tolerance→policy. The "verdict-decision" logic lives here. |
-| `src/review/diff-review-parser.ts` | `src/review/diff-review-parser.ts` | Pure parser (node:crypto only). |
-| `src/review/state/types.ts` | `src/review/state/types.ts` | Break-glass / review-state types. |
-| `src/review/state/break-glass-matcher.ts` | `src/review/state/break-glass-matcher.ts` | Pure matcher (+ property test). |
-| `src/shared/sqlite.ts` | `src/shared/sqlite.ts` | `openDatabase` (node:sqlite) — the SQLite state seam. |
-| `src/audit/review-audit-log.ts` | `src/audit/review-audit-log.ts` | The review-state store: submission + work-blocked + inline-resolution audit events (append-only, non-blocking). |
-| `src/audit/redact-secrets.ts` | `src/audit/redact-secrets.ts` | Helper for the audit log. |
-| `src/audit/audit-writer-queue.ts` | `src/audit/audit-writer-queue.ts` | Async write queue for the audit log. |
-| `src/settings/types.ts` | `src/settings/types.ts` | Per-repo review-tolerance types. |
-| `src/settings/repo-review-settings-store.ts` | `src/settings/repo-review-settings-store.ts` | Per-repo review tolerance SQLite store (`feat/repo-review-tolerance`). |
-| `src/settings/repo-review-settings-audit.ts` | `src/settings/repo-review-settings-audit.ts` | Settings-change audit log (SQLite). |
-| `src/settings/review-floor-resolver.ts` | `src/settings/review-floor-resolver.ts` | Resolves the per-repo approve-severity floor. |
-| `src/types.ts` (global, 481 lines) | `src/types.ts` (NEW, minimal) | Only `Finding` is reached by the ported set; copied verbatim rather than dragging the global types file (which pulls webhook/intake/kernel deps). |
+| Source file                                  | Ported to                                    | Notes                                                                                                                                             |
+| -------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/review/severity-policy.ts`              | `src/review/severity-policy.ts`              | Verdict/severity decision + tolerance→policy. The "verdict-decision" logic lives here.                                                            |
+| `src/review/diff-review-parser.ts`           | `src/review/diff-review-parser.ts`           | Pure parser (node:crypto only).                                                                                                                   |
+| `src/review/state/types.ts`                  | `src/review/state/types.ts`                  | Break-glass / review-state types.                                                                                                                 |
+| `src/review/state/break-glass-matcher.ts`    | `src/review/state/break-glass-matcher.ts`    | Pure matcher (+ property test).                                                                                                                   |
+| `src/shared/sqlite.ts`                       | `src/shared/sqlite.ts`                       | `openDatabase` (node:sqlite) — the SQLite state seam.                                                                                             |
+| `src/audit/review-audit-log.ts`              | `src/audit/review-audit-log.ts`              | The review-state store: submission + work-blocked + inline-resolution audit events (append-only, non-blocking).                                   |
+| `src/audit/redact-secrets.ts`                | `src/audit/redact-secrets.ts`                | Helper for the audit log.                                                                                                                         |
+| `src/audit/audit-writer-queue.ts`            | `src/audit/audit-writer-queue.ts`            | Async write queue for the audit log.                                                                                                              |
+| `src/settings/types.ts`                      | `src/settings/types.ts`                      | Per-repo review-tolerance types.                                                                                                                  |
+| `src/settings/repo-review-settings-store.ts` | `src/settings/repo-review-settings-store.ts` | Per-repo review tolerance SQLite store (`feat/repo-review-tolerance`).                                                                            |
+| `src/settings/repo-review-settings-audit.ts` | `src/settings/repo-review-settings-audit.ts` | Settings-change audit log (SQLite).                                                                                                               |
+| `src/settings/review-floor-resolver.ts`      | `src/settings/review-floor-resolver.ts`      | Resolves the per-repo approve-severity floor.                                                                                                     |
+| `src/types.ts` (global, 481 lines)           | `src/types.ts` (NEW, minimal)                | Only `Finding` is reached by the ported set; copied verbatim rather than dragging the global types file (which pulls webhook/intake/kernel deps). |
 
 Tests ported (unmodified): `severity-policy`, `diff-review-parser`,
 `state/break-glass-matcher` (+ `.property`), `audit/review-audit-log` (base +
@@ -36,19 +36,19 @@ Tests ported (unmodified): `severity-policy`, `diff-review-parser`,
 
 ## Deferred (phase-2 integration work list) — need executor / GitHub / event-bus / SDK wiring
 
-| Source file | Why deferred |
-|---|---|
-| `src/review/review-gate.ts` | Pipeline orchestrator; depends on `shared/logger`, `shared/errors`, executor interfaces (DiffReviewer/TestRunner/SecurityScanner). |
-| `src/review/review-pipeline.ts` | Pipeline; event-bus + executors. |
-| `src/review/claude-diff-reviewer.ts` | Claude Agent SDK executor. |
-| `src/review/finding-verifier.ts` | verify-before-block; needs GitHub quote-at-HEAD. |
-| `src/review/break-glass-handler.ts` | Handler; event-bus + GitHub. |
-| `src/review/cli-test-runner.ts` | Runs the target repo's test suite (child process). |
-| `src/review/package-manager.ts` | Target-repo PM detection; intentionally multi-PM (orch-agents CLAUDE.md keeps it out of scope). |
-| `src/review/diff-review-prompts.ts` | Pure-ish, but imports `ReviewContext` (a pipeline type) from `review-gate`; belongs with the reviewer executor. |
-| `src/review/types.ts` (review-local) | `ReviewOutcome`/`ReviewVerdict`; only consumed by deferred pipeline modules + their tests; imports `WorkBlockedReason` from `kernel/event-types`. |
-| `src/review/state/head-review-guard.ts` | Depends on `integration/github-client` + `kernel/agent-identity`. |
-| `src/review/state/outstanding-review-finder.ts` | Same GitHub-client dependency. |
+| Source file                                     | Why deferred                                                                                                                                      |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/review/review-gate.ts`                     | Pipeline orchestrator; depends on `shared/logger`, `shared/errors`, executor interfaces (DiffReviewer/TestRunner/SecurityScanner).                |
+| `src/review/review-pipeline.ts`                 | Pipeline; event-bus + executors.                                                                                                                  |
+| `src/review/claude-diff-reviewer.ts`            | Claude Agent SDK executor.                                                                                                                        |
+| `src/review/finding-verifier.ts`                | verify-before-block; needs GitHub quote-at-HEAD.                                                                                                  |
+| `src/review/break-glass-handler.ts`             | Handler; event-bus + GitHub.                                                                                                                      |
+| `src/review/cli-test-runner.ts`                 | Runs the target repo's test suite (child process).                                                                                                |
+| `src/review/package-manager.ts`                 | Target-repo PM detection; intentionally multi-PM (orch-agents CLAUDE.md keeps it out of scope).                                                   |
+| `src/review/diff-review-prompts.ts`             | Pure-ish, but imports `ReviewContext` (a pipeline type) from `review-gate`; belongs with the reviewer executor.                                   |
+| `src/review/types.ts` (review-local)            | `ReviewOutcome`/`ReviewVerdict`; only consumed by deferred pipeline modules + their tests; imports `WorkBlockedReason` from `kernel/event-types`. |
+| `src/review/state/head-review-guard.ts`         | Depends on `integration/github-client` + `kernel/agent-identity`.                                                                                 |
+| `src/review/state/outstanding-review-finder.ts` | Same GitHub-client dependency.                                                                                                                    |
 
 Deferred tests (move with their modules): `review-gate`, `review-pipeline.*`,
 `claude-diff-reviewer`, `finding-verifier`, `break-glass-handler.*`,

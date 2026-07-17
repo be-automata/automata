@@ -6,10 +6,10 @@
  * text — no encryption.
  */
 
-import type { BlockTolerance } from '../review/severity-policy';
+import type { BlockTolerance } from "../review/severity-policy";
 
 export type { BlockTolerance };
-export { BLOCK_TOLERANCES, isBlockTolerance } from '../review/severity-policy';
+export { BLOCK_TOLERANCES, isBlockTolerance } from "../review/severity-policy";
 
 /** One per-repo review-tolerance override row. `repo` is a lowercased 'owner/name' slug. */
 export interface RepoReviewSetting {
@@ -34,7 +34,7 @@ export interface RepoReviewSettingsStore {
 export interface RepoReviewSettingsAuditRecord {
   tokenId: string | null;
   repo: string;
-  action: 'set' | 'delete';
+  action: "set" | "delete";
   beforeValue: BlockTolerance | null;
   afterValue: BlockTolerance | null;
 }

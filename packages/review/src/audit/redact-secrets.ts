@@ -8,7 +8,7 @@
  * independence between `src/audit/` and `src/review/`.
  */
 
-const REDACTED = '<REDACTED>';
+const REDACTED = "<REDACTED>";
 
 const SECRET_PATTERNS: RegExp[] = [
   /AKIA[0-9A-Z]{16}/,
@@ -39,13 +39,13 @@ export function redactSecrets(payload: unknown): unknown {
 }
 
 function walk(value: unknown): unknown {
-  if (typeof value === 'string') {
+  if (typeof value === "string") {
     return leafIsSecret(value) ? REDACTED : value;
   }
   if (Array.isArray(value)) {
     return value.map((item) => walk(item));
   }
-  if (value !== null && typeof value === 'object') {
+  if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
       out[k] = walk(v);

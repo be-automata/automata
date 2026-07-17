@@ -14,10 +14,7 @@ import {
   agentProviderCredentials,
   usageEvents,
 } from "../db/schema";
-import {
-  createOrganization,
-  addOrganizationMember,
-} from "./organizations";
+import { createOrganization, addOrganizationMember } from "./organizations";
 import { forTenant } from "./tenant";
 
 const db = createDb(env.DATABASE_URL!);
@@ -288,10 +285,11 @@ describe("forTenant accessor — environment tenant scoping", () => {
     }).getOrCreateEnvironment("acme/repo");
 
     // Co-member update is a no-op (fenced out).
-    await forTenant({ db, organizationId: orgX, userId: bob.id }).updateEnvironment(
-      env.id,
-      { setupScript: "hijacked" },
-    );
+    await forTenant({
+      db,
+      organizationId: orgX,
+      userId: bob.id,
+    }).updateEnvironment(env.id, { setupScript: "hijacked" });
     // Cross-org delete is a no-op.
     await forTenant({
       db,

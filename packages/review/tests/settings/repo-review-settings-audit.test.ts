@@ -10,15 +10,15 @@
  * one db per the module contract). node:test + node:assert/strict only.
  */
 
-import { test, describe, beforeEach, afterEach } from 'node:test';
-import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { test, describe, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
-import { createRepoReviewSettingsAudit } from '../../src/settings/repo-review-settings-audit';
-import type { RepoReviewSettingsAudit } from '../../src/settings/types';
+import { createRepoReviewSettingsAudit } from "../../src/settings/repo-review-settings-audit";
+import type { RepoReviewSettingsAudit } from "../../src/settings/types";
 
 interface AuditRow {
   id: number;
@@ -30,14 +30,14 @@ interface AuditRow {
   at: string;
 }
 
-describe('repo-review-settings-audit', () => {
+describe("repo-review-settings-audit", () => {
   let tmp: string;
   let dbPath: string;
   let audit: RepoReviewSettingsAudit;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), 'repo-review-audit-'));
-    dbPath = join(tmp, 'repo-settings.db');
+    tmp = mkdtempSync(join(tmpdir(), "repo-review-audit-"));
+    dbPath = join(tmp, "repo-settings.db");
     audit = createRepoReviewSettingsAudit(dbPath);
   });
 
@@ -51,94 +51,94 @@ describe('repo-review-settings-audit', () => {
     const db = new DatabaseSync(dbPath);
     try {
       return db
-        .prepare('SELECT * FROM repo_review_settings_audit ORDER BY id')
+        .prepare("SELECT * FROM repo_review_settings_audit ORDER BY id")
         .all() as unknown as AuditRow[];
     } finally {
       db.close();
     }
   }
 
-  test('a set writes one row with tokenId, before/after values and a timestamp', () => {
+  test("a set writes one row with tokenId, before/after values and a timestamp", () => {
     audit.record({
-      tokenId: 'tok-123',
-      repo: 'owner/repo',
-      action: 'set',
+      tokenId: "tok-123",
+      repo: "owner/repo",
+      action: "set",
       beforeValue: null,
-      afterValue: 'error',
+      afterValue: "error",
     });
 
     const rows = readRows();
     assert.equal(rows.length, 1);
     const row = rows[0];
-    assert.equal(row.token_id, 'tok-123');
-    assert.equal(row.repo, 'owner/repo');
-    assert.equal(row.action, 'set');
+    assert.equal(row.token_id, "tok-123");
+    assert.equal(row.repo, "owner/repo");
+    assert.equal(row.action, "set");
     assert.equal(row.before_value, null);
-    assert.equal(row.after_value, 'error');
-    assert.ok(row.at, 'a timestamp is written');
-    assert.ok(!Number.isNaN(Date.parse(row.at)), 'timestamp is ISO-parseable');
+    assert.equal(row.after_value, "error");
+    assert.ok(row.at, "a timestamp is written");
+    assert.ok(!Number.isNaN(Date.parse(row.at)), "timestamp is ISO-parseable");
   });
 
-  test('a delete writes a row with the prior value in before_value and null after_value', () => {
+  test("a delete writes a row with the prior value in before_value and null after_value", () => {
     audit.record({
-      tokenId: 'tok-9',
-      repo: 'owner/repo',
-      action: 'delete',
-      beforeValue: 'warning',
+      tokenId: "tok-9",
+      repo: "owner/repo",
+      action: "delete",
+      beforeValue: "warning",
       afterValue: null,
     });
 
     const rows = readRows();
     assert.equal(rows.length, 1);
-    assert.equal(rows[0].action, 'delete');
-    assert.equal(rows[0].before_value, 'warning');
+    assert.equal(rows[0].action, "delete");
+    assert.equal(rows[0].before_value, "warning");
     assert.equal(rows[0].after_value, null);
   });
 
-  test('repo slug is lowercased before storage', () => {
+  test("repo slug is lowercased before storage", () => {
     audit.record({
-      tokenId: 'tok-1',
-      repo: 'Owner/Repo',
-      action: 'set',
+      tokenId: "tok-1",
+      repo: "Owner/Repo",
+      action: "set",
       beforeValue: null,
-      afterValue: 'info',
+      afterValue: "info",
     });
-    assert.equal(readRows()[0].repo, 'owner/repo');
+    assert.equal(readRows()[0].repo, "owner/repo");
   });
 
-  test('a null tokenId (unauthenticated / missing) is stored as NULL', () => {
+  test("a null tokenId (unauthenticated / missing) is stored as NULL", () => {
     audit.record({
       tokenId: null,
-      repo: 'owner/repo',
-      action: 'set',
+      repo: "owner/repo",
+      action: "set",
       beforeValue: null,
-      afterValue: 'info',
+      afterValue: "info",
     });
     assert.equal(readRows()[0].token_id, null);
   });
 
-  test('append-only: two records produce two distinct rows (never an update)', () => {
+  test("append-only: two records produce two distinct rows (never an update)", () => {
     audit.record({
-      tokenId: 'tok-1',
-      repo: 'owner/repo',
-      action: 'set',
+      tokenId: "tok-1",
+      repo: "owner/repo",
+      action: "set",
       beforeValue: null,
-      afterValue: 'warning',
+      afterValue: "warning",
     });
     audit.record({
-      tokenId: 'tok-2',
-      repo: 'owner/repo',
-      action: 'set',
-      beforeValue: 'warning',
-      afterValue: 'error',
+      tokenId: "tok-2",
+      repo: "owner/repo",
+      action: "set",
+      beforeValue: "warning",
+      afterValue: "error",
     });
 
     const rows = readRows();
-    assert.equal(rows.length, 2, 'two mutations → two rows');
+    assert.equal(rows.length, 2, "two mutations → two rows");
     // Monotonic autoincrement ids, distinct.
     assert.ok(rows[1].id > rows[0].id);
-    assert.equal(rows[0].after_value, 'warning');
-    assert.equal(rows[1].before_value, 'warning');
-    assert.equal(rows[1].after_value, 'error');
+    assert.equal(rows[0].after_value, "warning");
+    assert.equal(rows[1].before_value, "warning");
+    assert.equal(rows[1].after_value, "error");
   });
 });

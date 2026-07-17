@@ -588,10 +588,9 @@ export const githubInstallation = pgTable(
       .primaryKey()
       .default(sql`gen_random_uuid()`),
     installationId: text("installation_id").notNull().unique(),
-    organizationId: text("organization_id").references(
-      () => organization.id,
-      { onDelete: "cascade" },
-    ),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
     // Shadow-mode pilot gate (pilot): 'shadow' = ingest + create task
     // rows (org-stamped), NO sandbox boot, NO GitHub side effects — proves E2E
     // with zero footprint on a live PR (two bots must never act on one PR).
