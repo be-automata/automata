@@ -1033,3 +1033,20 @@ Read ADR-003 (4a942cb) against ADR-002 §3 credential-placement rules. **Named h
 **F5 [MEDIUM — lead focus #2: no-prompt-logging].** `next-message` returns the prompt (repo code, diffs, user messages). Enforce **no-prompt-logging on BOTH www (endpoint request/response) and the daemon**. Also it's a **GET with `?threadChatId=`** → the id lands in access/tunnel logs; prefer POST-body or guarantee URL-logging exclusion (the id is also the F2 enumeration key).
 
 **Escalation:** none are the named pilot-blocking hard-block. F1 flagged to the lead immediately because it makes ADR-003 §3's stated risk inaccurate and is a hard-block-grade breach at the 2nd onboarding. F2 is the lead's own required binding, unimplemented. Verify F2/F5 land in the slice-1 next-message endpoint when it commits.
+
+## ADR-003 findings — DISPOSITIONS (team-lead rulings 2026-07-17)
+
+| Finding | Ruling | My verification (when slice-1 commits) |
+|---|---|---|
+| **F1** daemon-token general-apiKey blast radius | **FIX NOW in slice 1** (purpose-scope; cheap while mint code is open; CLI router rejects daemon-scoped tokens) | Live: mint a daemon-scoped token → `/api/cli/threads.list` MUST be rejected (401/403), while `/api/daemon-event` + next-message accept it |
+| **F2** no token↔thread binding | **FIX in slice 1** | `metadata.threadChatId` present; `/api/daemon-event` AND `/api/daemon/next-message` reject a token whose bound threadChatId ≠ requested |
+| **F3** expiry 1 day vs "short" | **FIX in slice 1** | expiry task-duration-scoped (not 24h) + revoke-on-terminal-state |
+| **F4** tokens in Hatchet plain input | **ACCEPTED-RISK pilot v1** — documented in ADR-003 with trigger (Hatchet secret-injection before ANY non-single-org deployment) | confirm the ADR-003 note lands; no fix for v1 |
+| **F5** next-message prompt-logging + GET-query id | **FIX in slice 1** | no-prompt-logging on www + daemon; threadChatId not in access/tunnel logs (POST-body or exclusion) |
+
+## SOMNIO-GATES (onboarding-#2 round — formal blocking gates, per team-lead)
+These two MUST be verified live before the second onboarding (Somnio/marketplace, multi-user/less-trusted box):
+- **SOMNIO-GATE-1 (F1):** daemon-token **purpose-scoping verified LIVE** — a daemon-scoped token is REJECTED by the CLI router (`/api/cli/*` → 401/403), so a compromised customer worker box cannot list/read/create the org-user's threads via the CLI API. (Pilot v1 exempt: single-org own-box own-data, no cross-tenant boundary; but this gate blocks onboarding #2.)
+- **SOMNIO-GATE-2 (F4):** **tokens moved out of Hatchet's plain workflow input** (secret-injection or equivalent) — no installation/daemon token readable in the persisted Hatchet payload / dashboard, because a shared/multi-org Hatchet makes that a cross-tenant exposure.
+
+Both added to the execution-plane UAT program as blocking items for the Somnio round (alongside the exec-plane C10 gates). Slice-1 lands F1's *mechanism*; SOMNIO-GATE-1 is the *live re-verification* on the onboarding-#2 topology.
