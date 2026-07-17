@@ -55,6 +55,19 @@ actually use object storage, either mint an R2 S3 API token and set
 `R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY`, or (preferred) refactor `packages/r2`
 to the native R2 binding (`env.R2_BUCKET`) — a small code change, no token.
 
+## 4. Add Checks permission to the App (REQUIRED for Check Runs)
+
+The active-mode run hits `Resource not accessible by integration` on
+list/create check-runs. Confirmed cause: the **automata-ai-bot** App's declared
+permissions are `actions/contents/issues/pull_requests/repository_hooks: write`,
+`metadata/repository_advisories/vulnerability_alerts: read` — **`checks` is
+absent**. To publish GitHub Check Runs (the Verified-pillar surface), the operator
+must, in the App settings
+(`https://github.com/settings/apps/automata-ai-bot/permissions`):
+add **Checks: Read and write**, save, then **re-approve the new permission on the
+be-automata installation** (GitHub prompts the org owner to accept). Until then,
+check-run publication is expected to fail — task creation/intake is unaffected.
+
 ## Runbook note (deploy lesson)
 
 Never `source`/`set -a; . file` an env file whose values contain `&` (query
