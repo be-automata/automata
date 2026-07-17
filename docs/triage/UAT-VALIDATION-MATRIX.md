@@ -998,3 +998,22 @@ Plus the exec-plane C10 gates (C) run alongside stage 2-3, and the ADR-003 adver
 - **Exec-plane C10 gates:** 7 standing gates.
 - **Validation sequence:** 4 staged rounds.
 **Total: 26 UAT items** for the execution-plane phase. Runnable NOW: the 5 ADR-036 kernel-logic cases (packages/review). Everything else gates on boot-coder's substrate + tenancy-coder's seam (+ ADR-003 for the credential audit).
+
+## ADR-036 kernel parity — OPENING EVIDENCE (2026-07-17) + a correction to my own classification
+
+Ran the parity-substrate test files in `packages/review`: **117/117 green** (severity-policy + review-audit-log family + review-floor-resolver + diff-review-parser; part of the 164/164 whole-package suite). What this certifies — and, on closer read, what it does NOT (correcting my earlier over-claim that #3/#5/#8 were "fully kernel-covered"):
+
+**NOW-green (the migrated review DECISION + AUDIT substrate):**
+- **Verdict DECISION** (underlies #1, #2, #7): `tierToVerdict: block→request_changes / surface→comment / clean→approve`; `approve + [error] → request_changes`; per-repo tolerance floor (`review-floor-resolver`); draft caps. The "what verdict" brain is ported and green.
+- **Severity invariants** (the *spirit* of #8, not its mechanism): "only-downgrade invariant holds under all three tolerances" + "an LLM comment is never upgraded even with critical findings". NOTE: this is **severity-floor monotonicity**, NOT the review-object supersede.
+- **Audit trail behind ALL scenarios**: `review.*` append-only (triggers raise on UPDATE/DELETE) + secret redaction (`redacts secret-shaped strings inside payload`).
+- Finding parsing (`diff-review-parser` 47 cases) + break-glass matcher.
+
+**CORRECTION — NOT kernel-runnable now (deferred effect-channel/state modules, → EXEC):** the actual **supersede-dismiss DECISION** (#3 approve-dismisses-CR; **#8 CR-over-APPROVE dismisses the APPROVE** — the marquee verdict-aware-idempotency fix), the **verdict-dedup on re-review** (#5), and the **one-review-OBJECT posting** (#14) live in the DEFERRED modules (`outstanding-review-finder`, `head-review-guard`, `review-gate`/effect channel) — they need the pipeline + a live run. My earlier "5 fully NOW" was too generous; the honest count is below.
+
+**Corrected parity split:**
+- **NOW-green (decision+audit substrate):** the verdict-decision/tolerance/audit logic behind #1, #2, #7 — a real down-payment that the migrated review *brain* matches prod semantics (117/117).
+- **EXEC (supersede/no-dup EFFECT + all live posting):** #1-9, #12, #14 — including #8's supersede mechanism (only its verdict-decision substrate is NOW).
+- **SOMNIO:** #10, #11, #13.
+
+**Opening-evidence verdict:** the review kernel's decision + audit layer is green on the new platform — meaningful parity for the "what verdict / append-only audit / redaction" semantics. The verdict-UPGRADE *effect* (#8) and the no-dup *object* guarantee (#14) re-certify at EXEC when the effect channel + live agent land. Recorded with the correction so the record doesn't overstate what the port covers.
