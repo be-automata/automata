@@ -912,3 +912,29 @@ Measurement note: an intermediate `NODE_ENV=production`-**only** poison run fail
 
 ## VERDICT: GO-clear on the test-health axis
 845/0 certified under BOTH a clean env and boot-coder's exact failure-condition env; the harness hardening holds; the kill-switch is correct and the pilot-must-set-FALSE requirement is documented. No regression. This gate does not block the pilot deploy.
+
+# PILOT E2E ROUND — LIVE chain PROVEN (2026-07-17)
+
+Evidence provided by team-lead / pilot run on **production pilot infra** (Cloudflare Workers + Neon + real GitHub). This validator did **not** independently re-verify (that infra — GitHub webhook deliveries, the deployed Worker, Neon — is outside my self-host :3100 reach; re-verification welcome-but-optional per team-lead). Recorded as attributed pilot evidence; internally consistent and maps cleanly to the UAT cases.
+
+## The live chain (real PR, shadow mode, zero GitHub footprint)
+real PR **be-automata/automata #1** → repo webhook **653902967** (fresh secret; **all deliveries 200 incl. redeliveries**) → deployed Worker **automata-www** (version 84458b55 @ `a55dc7a`) → all-authors mirror automation → **App-installation-token background create** (the fallback slice) → **Neon thread row** `{name: "Mirror: PR review (github-ops) / #1", org: BeAutomata, shadow: true, status: queued}` → **GitHub footprint ZERO** (0 comments, 0 reviews).
+
+## UAT cases CLOSED by this round
+| Case | Status | Evidence |
+|---|---|---|
+| **C4 — app serves on Workers** | **PROVEN** | Worker automata-www deployed + serving (workerd runtime) |
+| **C5 — signup on Workers** | **PROVEN** | signup DB-write on workerd passed — real user row in Neon |
+| **C7 — task create (to-create)** | **PROVEN** | thread row persisted, **org-stamped (BeAutomata)**, shadow=true, status=queued — the WI-5 org-stamp certified now live on real infra |
+| **Intake E2E (webhook→task)** | **PROVEN** | PR #1 → repo webhook → mirror automation → background create → Neon row |
+| **WI-8 — webhook not 5xx on business rejection** | **LIVE-CERTIFIED** | all deliveries 200 incl. redeliveries (my batch-1 mention-probe finding, now proven live) |
+
+## Finding → fixed → verified (shadow-seam leak, live)
+**1 `eyes` reaction posted pre-fix** on PR #1 = a shadow-seam leak (a GitHub side effect escaped while shadow). **Found live → sealed in `a55dc7a` → verified** (post-fix footprint = 0 comments / 0 reviews / 0 reactions). This is the id-capture-window class the `GITHUB_SIDE_EFFECTS_ENABLED` kill-switch (f2f5027, which I validated) exists to close — the live run caught a residual seam the switch didn't cover, and it's now sealed. Record: real finding, fixed, re-verified zero-footprint.
+
+## Still OPEN (later rounds)
+- **C8 (agent run)** — needs AI keys + active-mode flip + the execution plane (customer-supplied per ADR-002 rev-2). My recorded execution-plane C10 gates activate here.
+- **Full C7 with side effects (active mode)** — comments/reviews/checks on a real PR; requires flipping `GITHUB_SIDE_EFFECTS_ENABLED=true` after the Somnio binding is verified in shadow (per WORKERS-ENV-MAP + SOMNIO-PILOT.md sequencing).
+
+## Pillar status after this round
+**EXECUTED**: intake→create proven live on the pilot substrate (shadow). **OBSERVED**: thread row dashboard-visible (shadow rows created + visible). **VERIFIED**: review *pipeline* still deferred (packages/review mounted step-1; goes live with the substrate + active mode). The safety story — org-stamped, shadow-fenced, zero-footprint, WI-8-clean webhook — is proven on real infra.
