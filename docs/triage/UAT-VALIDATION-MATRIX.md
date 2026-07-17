@@ -938,3 +938,63 @@ real PR **be-automata/automata #1** → repo webhook **653902967** (fresh secret
 
 ## Pillar status after this round
 **EXECUTED**: intake→create proven live on the pilot substrate (shadow). **OBSERVED**: thread row dashboard-visible (shadow rows created + visible). **VERIFIED**: review *pipeline* still deferred (packages/review mounted step-1; goes live with the substrate + active mode). The safety story — org-stamped, shadow-fenced, zero-footprint, WI-8-clean webhook — is proven on real infra.
+
+# ═══ EXECUTION-PLANE UAT PROGRAM (Hatchet phase, opened 2026-07-17) ═══
+
+Owner: production-validator. Combines OLD (ADR-036 review-effect parity from prod orch-agents) + NEW (C8 agent-run E2E + exec-plane C10 gates). Pilot repo: **be-automata/automata** (BeAutomata org, dogfood, can go full ACTIVE — no double-bot risk). Bot: `automata-ai-bot[bot]`, installation `147206841`.
+
+## A. REVIEW-EFFECT PARITY — ADR-036 cases (source: orch-agents/docs/UAT-adr-036-effect-intent.md, READ-ONLY)
+Certifies migrated review behavior (packages/review + the agent's review posting) matches prod semantics. **Runnability:** NOW = decision logic already unit-covered in packages/review; EXEC = needs a live agent run posting reviews; SOMNIO = needs prod-shaped repos / Phase-2.
+
+| # | Scenario | Core assertion | Runnability |
+|---|---|---|---|
+| 1 | opened → REQUEST_CHANGES | one CR at HEAD naming security+correctness w/ file:line; no-dup | **EXEC** (kernel severity/verdict decision NOW-covered: severity-policy 40 cases) |
+| 2 | synchronize partial-fix → still CR | still CR at new HEAD; `Resolved 1/N`; fixed item not re-raised | **EXEC** |
+| 3 | synchronize full-fix → APPROVE+dismiss | APPROVE at HEAD; prior CR dismissedAt≠null; exactly 1 non-dismissed | **EXEC** (kernel approve-then-dismiss idempotency NOW-covered: review-audit-log) |
+| 4 | mention ANSWER → one reply | exactly 1 bot reply `reply-to:$CID`; idempotent on redelivery | **EXEC** |
+| 5 | mention RE-REVIEW (deduped) → still replies | verdict deduped (no-dup stays 1) AND a reply still lands | **EXEC** (kernel dedupe NOW-covered) |
+| 6 | mention CODE-FIX → edit+push+reply | HEAD advanced w/ bot commit `>`→`>=`; 1 reply | **EXEC** |
+| 7 | `/request-changes` command path | ruleKey `command:request-changes`; CR at HEAD; no-dup | **EXEC** (kernel command→verdict NOW-partial) |
+| 8 | **verdict UPGRADE (regression guard)** | CR over prior APPROVE at same commit dismisses the APPROVE; no-dup==1 | **EXEC** (kernel **verdict-aware idempotency** — THE ADR-036 fix — NOW-covered) |
+| 9 | unknown `/review` fall-through | some response lands (never silent drop); no-dup | **EXEC** |
+| 10 | inline review threads (Phase-2) | line-level inline comment + unresolved reviewThread | **SOMNIO** (Phase-2 opt-in `REVIEW_POST_INLINE_COMMENTS`; deferred module) |
+| 11 | reply-then-resolve (Phase-2) | reviewer-voice `Verified:` reply + isResolved→true | **SOMNIO** (Phase-2) |
+| 12 | intake-failure reply: capacity gate (P3) | at-capacity mention still gets a reply; run `failed` not silent | **EXEC** (needs org concurrency load) |
+| 13 | follow-up must NOT re-raise fixed-unresolved finding | Read file at HEAD before re-raise; item marked addressed | **SOMNIO** (reproduces marketplace-ai-services#12; defensive) |
+| 14 | one review OBJECT per cycle (inline default-OFF) | exactly 1 review object, findings folded into body; 0 inline | **EXEC** (kernel no-dup-object logic NOW-partial) |
+
+**Parity split:** 14 cases → NOW-kernel-covered (decision logic, already green in packages/review): 5 (#3,5,8 fully + #1,7,14 partial). Full-E2E EXEC (live agent on be-automata): 10 (#1-9, 12, 14). SOMNIO (Phase-2 / prod-shaped): 3 (#10,11,13). Note: `flutter-pr-review` E2E lives on marketplace-resident-app (SOMNIO+).
+
+## B. C8 — AGENT-RUN E2E (NEW, pilot)
+| Case | Assertion | Gate |
+|---|---|---|
+| C8.1 hello-world round-trip | Hatchet engine up (via cloudflared tunnel) + worker registered + a trivial workflow dispatched→completed | boot-coder engine + tunnel |
+| C8.2 seam dispatch | www dispatch (behind `HATCHET_ENABLED`) → Hatchet trigger; **reference-only payload** (planId/repo/commitSha — NO prompts/secrets) | tenancy-coder www seam |
+| C8.3 **full C8 run** | PR event → Hatchet dispatch → worker clones be-automata/automata via **short-lived installation token** → agent runs w/ real Anthropic key → daemon POSTs `/api/daemon-event` w/ org-scoped `X-Daemon-Token` → thread queued→booting→running→completed → (active) bot output on PR | full stack |
+| C8.4 daemon-event streaming (OBSERVED) | daemon events stream to www live transcript; boot substatus visible | C8.3 |
+| C8.5 lifecycle terminal states | completed AND failure paths (agent error → thread failed + reply, not silent) | C8.3 |
+
+## C. EXEC-PLANE C10 GATES (from ADR-002 rev-2 consolidated list — the tenant boundary on execution)
+| Gate | Assertion |
+|---|---|
+| Worker secret isolation | worker env/artifact holds ONLY that org's creds — **NO App private key, NO master key** (grep worker image + env). Control plane never ships the App key. |
+| Task-routing isolation | org B's task never dispatched to org A's worker |
+| No `-dev` images | `GET /api/v1/meta` not `authDisabled:true`; unauthenticated tenant/workers call 401/403 |
+| Worker-availability | ScheduleTimeout raised deliberately; worker-offline dashboard-visible BEFORE drop; `SCHEDULING_TIMED_OUT` loud+attributable |
+| Min-version gate | stale/incompatible customer worker refused at registration |
+| **Reference-only payload** | **NO App private key (or any secret/prompt) in ANY Hatchet payload** — inspect via psql/API (this is the C8.2 seam check, elevated to a standing gate) |
+| ADR-003 credential-placement audit | when tenancy-coder's ADR-003 lands, review it adversarially against **ADR-002 §3** (App key + master key never leave control plane; BYO Anthropic = API-keys-only at write) |
+
+## D. STAGED VALIDATION SEQUENCE (execute as substrate + seam land)
+1. **hello-world round-trip** (C8.1) — engine reachable, worker registered, trivial workflow completes.
+2. **seam dispatch verify** (C8.2 + reference-only gate) — dispatch a real event, **inspect the Hatchet payload (psql/API): assert NO App private key / no secret / no prompt** — reference-only (planId/repo/commitSha). This is the credential-placement live proof.
+3. **full C8 run** (C8.3-5) — end-to-end agent run on be-automata/automata; lifecycle + daemon streaming + (active) bot output.
+4. **ADR-036 parity cases that become runnable** — run the 10 EXEC cases against be-automata (active mode); the 5 NOW-kernel cases are already green in packages/review; SOMNIO cases wait for the second onboarding.
+Plus the exec-plane C10 gates (C) run alongside stage 2-3, and the ADR-003 adversarial review when that ADR commits.
+
+## Case-count summary
+- **ADR-036 parity:** 14 cases (5 NOW-kernel-covered · 10 EXEC · 3 SOMNIO; overlaps where a case is both kernel-partial + EXEC-full).
+- **C8 E2E:** 5 cases (all gated on the execution plane).
+- **Exec-plane C10 gates:** 7 standing gates.
+- **Validation sequence:** 4 staged rounds.
+**Total: 26 UAT items** for the execution-plane phase. Runnable NOW: the 5 ADR-036 kernel-logic cases (packages/review). Everything else gates on boot-coder's substrate + tenancy-coder's seam (+ ADR-003 for the credential audit).
