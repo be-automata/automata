@@ -41,7 +41,9 @@ export async function ensureBranchExists({
   branchName: string;
 }) {
   const [owner, repoName] = parseRepoFullName(repoFullName);
-  const octokit = await getOctokitForUserOrThrow({ userId });
+  // Background-capable: falls back to the App installation token when the acting
+  // user has no GitHub identity (automation / mirror creates).
+  const octokit = await getOctokitForBackground({ userId, repoFullName });
   try {
     const branch = await octokit.rest.repos.getBranch({
       owner,
@@ -275,6 +277,30 @@ export async function getOctokitForUserOrThrow({
   return octokit;
 }
 
+/**
+ * Octokit for BACKGROUND creates (automation / mirror-intake): prefer the acting
+ * user's GitHub token, but fall back to the App INSTALLATION token when that user
+ * has no GitHub identity — e.g. an email/password org owner an org-level task is
+ * attributed to. User-facing flows keep using getOctokitForUser(OrThrow); the
+ * fallback only fires when there is no user token, so a caller that passes a real
+ * GitHub user is unaffected. The App token is installation-scoped (resolved from
+ * owner/repo, the same seam the eyes-reaction / PR-read paths already use).
+ */
+export async function getOctokitForBackground({
+  userId,
+  repoFullName,
+}: {
+  userId: string;
+  repoFullName: string;
+}): Promise<Octokit> {
+  const userOctokit = await getOctokitForUser({ userId });
+  if (userOctokit) {
+    return userOctokit;
+  }
+  const [owner, repo] = parseRepoFullName(repoFullName);
+  return getOctokitForApp({ owner, repo });
+}
+
 export async function getIsPRAuthor({
   userId,
   repoFullName,
@@ -382,7 +408,9 @@ export async function getDefaultBranchForRepo({
   userId: string;
   repoFullName: string;
 }): Promise<string> {
-  const octokit = await getOctokitForUserOrThrow({ userId });
+  // Background-capable: falls back to the App installation token (automation /
+  // mirror creates where the org owner has no GitHub identity).
+  const octokit = await getOctokitForBackground({ userId, repoFullName });
   const [owner, repo] = parseRepoFullName(repoFullName);
   try {
     const { data: repoData } = await octokit.rest.repos.get({

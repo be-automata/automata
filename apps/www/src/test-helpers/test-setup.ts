@@ -35,6 +35,7 @@ vi.mock("@/lib/github", async (importOriginal) => {
     updateGitHubPR: vi.fn(),
     getOctokitForApp: vi.fn(),
     getOctokitForUser: vi.fn(),
+    getOctokitForBackground: vi.fn(),
     getIsPRAuthor: vi.fn(),
     getIsIssueAuthor: vi.fn(),
     getPRAuthorGitHubUsername: vi.fn(),

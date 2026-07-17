@@ -26,7 +26,7 @@ import {
 } from "@/app/api/webhooks/github/handlers";
 import { addEyesReactionToPullRequest } from "@/app/api/webhooks/github/utils";
 import {
-  getOctokitForUserOrThrow,
+  getOctokitForBackground,
   parseRepoFullName,
   getIsPRAuthor,
 } from "@/lib/github";
@@ -41,6 +41,20 @@ import { SUBSCRIPTION_MESSAGES } from "@/lib/subscription-msgs";
 import { getMaxAutomationsForUser } from "@/lib/subscription-tiers";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import { UserFacingError } from "@/lib/server-actions";
+
+/**
+ * Effective shadow state for an automation's org: the org's installation mode
+ * folded with the deployment-level side-effects kill-switch. When true, the
+ * automation must produce ZERO GitHub side effects (no eyes reaction, no check
+ * runs, no boot) — the same suppression the mention + mirror-intake paths honor.
+ */
+async function isAutomationShadow(
+  organizationId: string | null | undefined,
+): Promise<boolean> {
+  return effectiveShadow(
+    await getOrganizationInstallationMode({ db, organizationId }),
+  );
+}
 
 export async function runAutomation({
   userId,
@@ -77,12 +91,7 @@ export async function runAutomation({
     // seeded automations create dashboard-visible tasks but never boot the agent
     // — so they light up on flip-to-active without acting during observation.
     // Folded with the deployment-level side-effects kill-switch.
-    const shadow = effectiveShadow(
-      await getOrganizationInstallationMode({
-        db,
-        organizationId: automation.organizationId,
-      }),
-    );
+    const shadow = await isAutomationShadow(automation.organizationId);
     switch (automation.action.type) {
       case "user_message": {
         const newThreadResult = await createNewThread({
@@ -376,13 +385,19 @@ export async function runPullRequestAutomation({
   if (automation.repoFullName !== repoFullName) {
     throw new Error("Automation is not configured for this repository");
   }
-  // Add eyes reaction to the PR
+  // Shadow mode / kill-switch: an automation in a shadow org must produce ZERO
+  // GitHub side effects. Suppress the eyes reaction + check runs here (the boot
+  // is suppressed downstream in runAutomation → createNewThread).
+  const shadow = await isAutomationShadow(automation.organizationId);
   const [owner, repo] = parseRepoFullName(repoFullName);
-  await addEyesReactionToPullRequest({
-    owner,
-    repo,
-    issueNumber: prNumber,
-  });
+  if (!shadow) {
+    // Add eyes reaction to the PR
+    await addEyesReactionToPullRequest({
+      owner,
+      repo,
+      issueNumber: prNumber,
+    });
+  }
 
   // Check if GitHub checks should be created for automations
   // Only create checks if the feature flag is enabled AND the automation owner is the PR author
@@ -400,7 +415,7 @@ export async function runPullRequestAutomation({
   ]);
 
   let checkRunId: number | null = null;
-  if (shouldCreateGitHubChecks && isPRAuthor) {
+  if (!shadow && shouldCreateGitHubChecks && isPRAuthor) {
     checkRunId = await createGitHubCheckRunForAutomation({
       userId,
       automationId,
@@ -409,7 +424,9 @@ export async function runPullRequestAutomation({
   }
 
   try {
-    const octokit = await getOctokitForUserOrThrow({ userId });
+    // Background-capable token: falls back to the App installation token when the
+    // automation owner has no GitHub identity (e.g. an email/password org owner).
+    const octokit = await getOctokitForBackground({ userId, repoFullName });
     const pr = await octokit.rest.pulls.get({
       owner,
       repo,
@@ -520,14 +537,21 @@ export async function runIssueAutomation({
   if (automation.repoFullName !== repoFullName) {
     throw new Error("Automation is not configured for this repository");
   }
-  // Add eyes reaction to the issue
+  // Shadow mode / kill-switch: suppress the eyes reaction in a shadow org (zero
+  // GitHub side effects); the boot is suppressed downstream in runAutomation.
+  const shadow = await isAutomationShadow(automation.organizationId);
   const [owner, repo] = parseRepoFullName(repoFullName);
-  await addEyesReactionToPullRequest({
-    owner,
-    repo,
-    issueNumber,
-  });
-  const octokit = await getOctokitForUserOrThrow({ userId });
+  if (!shadow) {
+    // Add eyes reaction to the issue
+    await addEyesReactionToPullRequest({
+      owner,
+      repo,
+      issueNumber,
+    });
+  }
+  // Background-capable token: falls back to the App installation token when the
+  // automation owner has no GitHub identity.
+  const octokit = await getOctokitForBackground({ userId, repoFullName });
   // Use the default branch for issues
   const defaultBranch = await octokit.rest.repos.get({ owner, repo });
   const branchName = defaultBranch.data.default_branch;
