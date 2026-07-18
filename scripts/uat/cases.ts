@@ -182,7 +182,16 @@ export async function S12(N = 4): Promise<CaseResult> {
       const url = sh(`gh issue create --repo ${P.REPO} --title ${JSON.stringify(`Question about the codebase [${P.RUN_ID}-${n}]`)} --body ${JSON.stringify(`Could someone help me understand this? ${q} (I'll follow up with a mention.)`)}`);
       issues.push(Number(url.match(/(\d+)\s*$/)?.[1]));
     }
-    await sleep(90_000); // let the issue-research automation dispatch + settle before the mention burst
+    // Wait for the issue-research automation to SETTLE (each issue got its research reply) before the
+    // mention burst — a fixed sleep is too short when research is slow / the worker is concurrency-1.
+    // Bounded by the settle window; on a throughput-limited pilot this (and the whole case) is slow by
+    // design — size UAT_SETTLE_TRIES/MS to the plane. Isolating research first keeps the mention count clean.
+    await poll(
+      () => issues.filter((iu) => botCommentsSince(iu, new Date(0).toISOString()).length >= 1).length,
+      (c) => c === N,
+      P.SETTLE_TRIES + 8,
+    );
+    await sleep(5_000);
     const mentionAt = new Date(Date.now() - 3_000).toISOString();
     for (let n = 0; n < N; n++) postComment(issues[n], `@${P.BOT_HANDLE} ${qs[n % qs.length]}`);
     r.evidence = { issues, N, mentionAt };
