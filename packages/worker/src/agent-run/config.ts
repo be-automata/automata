@@ -1,0 +1,74 @@
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * Execution-plane worker box configuration (ADR-003). Unlike the control plane
+ * (apps/www) this runs as an ordinary long-lived Node process on a customer-
+ * supplied box, so it reads process.env directly rather than the validated
+ * Workers env — there is no workerd/getCloudflareContext here.
+ *
+ * None of these are secrets that belong to the control plane: ANTHROPIC_API_KEY
+ * is the org's own agent key; the GitHub installation token and daemon token
+ * arrive per-run as workflow input, never from here (ADR-002 §3).
+ */
+export interface WorkerConfig {
+  /** Absolute path to node used to spawn the daemon (defaults to this runtime). */
+  nodeBin: string;
+  /** Absolute path to the built daemon bundle (packages/daemon/dist/index.js). */
+  daemonDist: string;
+  /**
+   * Directory holding the `claude` binary. Prepended to the spawned daemon's
+   * PATH so its `bash -lc "... | claude ..."` resolves the agent CLI without the
+   * daemon bundle hardcoding an absolute path (team-lead: PATH-resolved override).
+   * Empty → rely on the daemon's login-shell PATH.
+   */
+  claudeBinDir: string;
+  /** ANTHROPIC_API_KEY passed to the daemon when the box has no Claude creds file. */
+  anthropicApiKey: string;
+  /** Root under which each run gets an isolated clone directory. */
+  workdirRoot: string;
+  /** thread-status poll interval, ms (5-10s; runs are minutes-long — ADR-003). */
+  pollIntervalMs: number;
+}
+
+function defaultDaemonDist(): string {
+  // Locate the sibling @terragon/daemon package's built bundle. The daemon must be
+  // built (`pnpm --filter @terragon/daemon build`) as a worker-box setup step;
+  // provisioning documents this. We can't require.resolve the dist path — the
+  // daemon package's "." export is the TS source and its exports map blocks
+  // package.json — so we derive it from this file's monorepo location. On a bundled
+  // deploy set WORKER_DAEMON_DIST explicitly to override this.
+  // this file: packages/worker/src/agent-run/config.ts → up 3 = packages/worker.
+  const workerPkgRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+  );
+  return path.join(workerPkgRoot, "..", "daemon", "dist", "index.js");
+}
+
+function resolveClaudeBinDir(explicit: string | undefined): string {
+  if (explicit && explicit.trim()) {
+    // Accept either the binary path or its directory.
+    return explicit.endsWith("/claude") ? path.dirname(explicit) : explicit;
+  }
+  return "";
+}
+
+export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
+  const pollIntervalMs = Number(env.WORKER_POLL_INTERVAL_MS ?? "7000");
+  return {
+    nodeBin: env.WORKER_NODE_BIN?.trim() || process.execPath,
+    daemonDist: env.WORKER_DAEMON_DIST?.trim() || defaultDaemonDist(),
+    claudeBinDir: resolveClaudeBinDir(env.CLAUDE_BIN),
+    anthropicApiKey: env.ANTHROPIC_API_KEY ?? "",
+    workdirRoot:
+      env.WORKER_WORKDIR_ROOT?.trim() ||
+      path.join(os.tmpdir(), "automata-worker-runs"),
+    pollIntervalMs:
+      Number.isFinite(pollIntervalMs) && pollIntervalMs > 0
+        ? pollIntervalMs
+        : 7000,
+  };
+}
