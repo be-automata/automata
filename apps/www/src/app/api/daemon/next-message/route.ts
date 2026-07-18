@@ -50,10 +50,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   // F2: the token is bound to ONE threadChat; reject a request for any other.
   if (ctx.threadChatId !== threadChatId) {
-    console.log("[daemon next-message] forbidden: token↔thread mismatch", {
+    console.log("[daemon next-message] forbidden: token↔threadChat mismatch", {
       threadId,
       requestedThreadChatId: threadChatId,
       tokenThreadChatId: ctx.threadChatId,
+      org: ctx.organizationId,
+    });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  // F2 anchor: bind on threadId too. threadChatId is the shared legacy sentinel
+  // when enableThreadChatCreation is off, so the check above alone collapses to
+  // org-level; threadId is unique per thread. (Legacy tokens with no threadId
+  // bound are allowed through for back-compat during rollout.)
+  if (ctx.threadId !== null && ctx.threadId !== threadId) {
+    console.log("[daemon next-message] forbidden: token↔thread mismatch", {
+      requestedThreadId: threadId,
+      tokenThreadId: ctx.threadId,
       org: ctx.organizationId,
     });
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });

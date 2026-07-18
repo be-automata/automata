@@ -167,6 +167,7 @@ export async function pollUntilTerminal(
 
     hadSuccessfulPoll = true;
     lastStatus = poll.status;
+    ctx.log(`thread-status: ${poll.status} (terminal=${poll.terminal})`);
     if (poll.terminal) {
       return { outcome: "completed", finalStatus: poll.status };
     }

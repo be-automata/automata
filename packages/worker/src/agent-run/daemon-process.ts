@@ -85,14 +85,21 @@ export class DaemonProcess {
    * needs) and write it to the daemon's socket to start the run. Never logs the
    * message (H2 — it carries the prompt).
    */
-  async sendMessage(pulled: PulledDaemonMessage): Promise<void> {
+  async sendMessage(pulled: PulledDaemonMessage): Promise<number> {
     const message = {
       ...pulled,
       token: this.input.daemonToken,
       threadId: this.input.threadId,
       threadChatId: this.input.threadChatId,
     };
-    await this.writeToSocket(JSON.stringify(message));
+    const dataStr = JSON.stringify(message);
+    await this.writeToSocket(dataStr);
+    return dataStr.length; // byte count for step logging (not the content — H2)
+  }
+
+  /** The spawned daemon's pid (undefined before start / after teardown). */
+  get pid(): number | undefined {
+    return this.child?.pid;
   }
 
   /** SIGKILL the daemon's process group. Best-effort and idempotent. */

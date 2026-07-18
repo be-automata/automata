@@ -21,6 +21,13 @@ export type DaemonTokenContext = {
    */
   threadChatId: string | null;
   /**
+   * The specific thread this token was minted for (ADR-003 F2, threadId anchor).
+   * threadChatId is the SHARED legacy sentinel when enableThreadChatCreation is
+   * off, which would collapse the F2 binding to org-level; threadId is always
+   * unique per thread, so daemon endpoints ALSO bind on it. Null for legacy keys.
+   */
+  threadId: string | null;
+  /**
    * Purpose scope (ADR-003 F1). 'daemon' = minted for a sandbox/worker daemon
    * (agent-run only); null = a general user token (e.g. CLI). The CLI router
    * REJECTS 'daemon' tokens; daemon endpoints REQUIRE them.
@@ -52,6 +59,11 @@ export function daemonTokenContextFromApiKey(
     typeof rawThreadChatId === "string" && rawThreadChatId.length > 0
       ? rawThreadChatId
       : null;
+  const rawThreadId = key?.metadata?.threadId;
+  const threadId =
+    typeof rawThreadId === "string" && rawThreadId.length > 0
+      ? rawThreadId
+      : null;
   const tokenType = key?.metadata?.tokenType === "daemon" ? "daemon" : null;
-  return { userId, organizationId, threadChatId, tokenType };
+  return { userId, organizationId, threadChatId, threadId, tokenType };
 }

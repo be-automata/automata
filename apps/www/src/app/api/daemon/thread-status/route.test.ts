@@ -35,6 +35,7 @@ describe("POST /api/daemon/thread-status", () => {
       userId: user.id,
       organizationId: orgId,
       threadChatId,
+      threadId,
       tokenType: "daemon",
       ...over,
     };

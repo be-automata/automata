@@ -21,6 +21,7 @@ describe("cli-router middleware — F1 daemon-token purpose scope", () => {
       userId: "u1",
       organizationId: null,
       threadChatId: "tc1",
+      threadId: "t1",
       tokenType: "daemon",
     });
     await expect(client.auth.whoami()).rejects.toThrow();
@@ -31,6 +32,7 @@ describe("cli-router middleware — F1 daemon-token purpose scope", () => {
       userId: "u1",
       organizationId: null,
       threadChatId: null,
+      threadId: null,
       tokenType: null,
     });
     await expect(client.auth.whoami()).resolves.toEqual({ userId: "u1" });

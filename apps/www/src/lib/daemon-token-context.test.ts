@@ -17,6 +17,7 @@ describe("daemonTokenContextFromApiKey", () => {
       userId: "user_1",
       organizationId: null,
       threadChatId: null,
+      threadId: null,
       tokenType: null,
     });
   });
@@ -31,6 +32,7 @@ describe("daemonTokenContextFromApiKey", () => {
       userId: "user_1",
       organizationId: "org_1",
       threadChatId: null,
+      threadId: null,
       tokenType: null,
     });
   });
@@ -45,6 +47,7 @@ describe("daemonTokenContextFromApiKey", () => {
       userId: "user_1",
       organizationId: null,
       threadChatId: null,
+      threadId: null,
       tokenType: null,
     });
   });
@@ -59,17 +62,19 @@ describe("daemonTokenContextFromApiKey", () => {
       userId: "user_1",
       organizationId: null,
       threadChatId: null,
+      threadId: null,
       tokenType: null,
     });
   });
 
-  it("F1/F2: resolves threadChatId and tokenType='daemon' from metadata", () => {
+  it("F1/F2: resolves threadChatId, threadId and tokenType='daemon' from metadata", () => {
     expect(
       daemonTokenContextFromApiKey({
         userId: "user_1",
         metadata: {
           organizationId: "org_1",
           threadChatId: "tc_1",
+          threadId: "t_1",
           tokenType: "daemon",
         },
       }),
@@ -77,6 +82,7 @@ describe("daemonTokenContextFromApiKey", () => {
       userId: "user_1",
       organizationId: "org_1",
       threadChatId: "tc_1",
+      threadId: "t_1",
       tokenType: "daemon",
     });
   });
@@ -91,6 +97,7 @@ describe("daemonTokenContextFromApiKey", () => {
       userId: "user_1",
       organizationId: null,
       threadChatId: null,
+      threadId: null,
       tokenType: null,
     });
   });

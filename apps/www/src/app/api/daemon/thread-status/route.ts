@@ -43,6 +43,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (ctx.threadChatId !== threadChatId) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+  // F2 anchor: bind on threadId too (threadChatId is the shared legacy sentinel
+  // when enableThreadChatCreation is off). Legacy tokens (no threadId) pass through.
+  if (ctx.threadId !== null && ctx.threadId !== threadId) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   // getThreadChat is fenced by userId; null → the token's user doesn't own it.
   const threadChat = await getThreadChat({

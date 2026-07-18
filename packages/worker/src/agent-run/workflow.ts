@@ -54,6 +54,12 @@ export const agentRun = hatchet.task({
       signal,
     };
 
+    // Step logging (boot-coder): each boot step is logged so a stalled re-fire
+    // pinpoints exactly where the agent fails to launch. Never logs the prompt (H2)
+    // — only ids, pids, counts, and thread status.
+    const step = (msg: string) =>
+      ctx.log(`[agent-run ${input.threadId}] ${msg}`);
+
     // Provision: clone into a per-run workdir keyed on threadId. threadId is unique
     // per thread; threadChatId is the shared legacy sentinel when
     // enableThreadChatCreation is off, so it would collide every run onto one dir.
@@ -64,22 +70,27 @@ export const agentRun = hatchet.task({
       workdirRoot: config.workdirRoot,
       runId: input.threadId,
     });
+    step(`clone complete: ${input.repoFullName}@${input.branch}`);
 
     const daemon = new DaemonProcess(config, input, workdir);
     try {
       // Run: bring up the daemon, then pull the message it should execute.
       await daemon.start();
+      step(`daemon spawned: pid=${daemon.pid ?? "unknown"}`);
       const message = await pullNextMessage(wwwOpts, signal);
       if (!message) {
         // Nothing to run (no pending user message / empty prompt).
+        step("next-message: 204 (nothing to run)");
         return {
           threadId: input.threadId,
           threadChatId: input.threadChatId,
           outcome: "nothing-to-run",
         };
       }
-      // H2: `message` carries the prompt — never logged here.
-      await daemon.sendMessage(message);
+      // H2: log only non-sensitive shape, never the prompt.
+      step(`next-message: got message (agent=${message.agent}, model=${message.model})`);
+      const bytes = await daemon.sendMessage(message);
+      step(`socket write ok: ${bytes} bytes → daemon ACKed`);
 
       // Poll www for terminal. The daemon streams events to www, which owns the
       // thread status; the worker asks www, not the daemon. Revoke-race ruling and

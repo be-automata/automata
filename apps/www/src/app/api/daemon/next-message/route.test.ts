@@ -51,6 +51,7 @@ describe("POST /api/daemon/next-message", () => {
       userId: user.id,
       organizationId: orgId,
       threadChatId,
+      threadId,
       tokenType: "daemon",
       ...over,
     };
@@ -102,6 +103,33 @@ describe("POST /api/daemon/next-message", () => {
     const res = await POST(req({ threadId, threadChatId }));
     expect(res.status).toBe(403);
     expect(buildRemoteDaemonMessage).not.toHaveBeenCalled();
+  });
+
+  it("F2 anchor: 403 when a token minted for thread A pulls thread B (same shared threadChat sentinel)", async () => {
+    // The security case: with enableThreadChatCreation off, thread A and thread B
+    // both carry the shared legacy threadChat sentinel, so the threadChatId check
+    // alone passes. The threadId anchor rejects thread A's token on thread B.
+    const other = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { organizationId: orgId },
+    });
+    vi.mocked(getDaemonTokenContext).mockResolvedValue(
+      // Token minted for thread A (this test's threadId), same threadChatId…
+      ctx({ threadId }),
+    );
+    // …used to pull thread B (other.threadId) with the SAME threadChatId.
+    const res = await POST(
+      req({ threadId: other.threadId, threadChatId }),
+    );
+    expect(res.status).toBe(403);
+    expect(buildRemoteDaemonMessage).not.toHaveBeenCalled();
+  });
+
+  it("F2 anchor: a legacy token with no bound threadId passes through (rollout back-compat)", async () => {
+    vi.mocked(getDaemonTokenContext).mockResolvedValue(ctx({ threadId: null }));
+    const res = await POST(req({ threadId, threadChatId }));
+    expect(res.status).toBe(200);
   });
 
   it("403 when the token's user does not own the thread", async () => {

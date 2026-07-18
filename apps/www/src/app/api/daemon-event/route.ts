@@ -27,6 +27,12 @@ export async function POST(request: Request) {
   if (ctx.threadChatId !== null && ctx.threadChatId !== threadChatId) {
     return new Response("Forbidden", { status: 403 });
   }
+  // F2 anchor: bind on threadId too (threadChatId is the shared legacy sentinel
+  // when enableThreadChatCreation is off, which alone collapses F2 to org-level).
+  // Legacy tokens with no threadId bound pass through during rollout.
+  if (ctx.threadId !== null && ctx.threadId !== threadId) {
+    return new Response("Forbidden", { status: 403 });
+  }
   const userId = ctx.userId;
 
   // Prefer computing context usage from the last non-result message's usage

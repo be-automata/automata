@@ -9,7 +9,10 @@ import { and, eq } from "drizzle-orm";
  * metadata so the in-process (sendDaemonMessage) and remote (Hatchet dispatch)
  * paths mint identically:
  *   - metadata.organizationId  — the THREAD's org (WI-5; unambiguous, nullable-safe)
- *   - metadata.threadChatId    — F2 binding: the endpoints reject any other thread
+ *   - metadata.threadChatId    — F2 binding: the endpoints reject any other threadChat
+ *   - metadata.threadId        — F2 anchor: unique per thread (threadChatId is the
+ *                                shared legacy sentinel when enableThreadChatCreation
+ *                                is off), so endpoints bind per-thread, not org-level
  *   - metadata.tokenType='daemon' — F1 scope: CLI rejects, daemon endpoints require
  * `name` is the revoke key (revokeDaemonTokensForSandbox deletes by it on terminal);
  * expiresIn is the plugin-minimum 1-day backstop (F3 — revocation is primary).
@@ -61,6 +64,10 @@ export async function mintDaemonToken({
       metadata: {
         ...(organizationId ? { organizationId } : {}),
         threadChatId,
+        // F2 anchor (ADR-003): threadChatId is the shared legacy sentinel when
+        // enableThreadChatCreation is off, collapsing the binding to org-level;
+        // threadId is unique per thread, so endpoints bind on it too.
+        threadId,
         tokenType: "daemon",
       },
     },

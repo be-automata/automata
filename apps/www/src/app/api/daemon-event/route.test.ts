@@ -18,6 +18,9 @@ function ctx(over: Partial<DaemonTokenContext> = {}): DaemonTokenContext {
     userId: "user_1",
     organizationId: "org_1",
     threadChatId: THREAD_CHAT_ID,
+    // Default null (legacy token) so existing cases pass the threadId anchor;
+    // the threadId-binding case sets it explicitly.
+    threadId: null,
     tokenType: "daemon",
     ...over,
   };
