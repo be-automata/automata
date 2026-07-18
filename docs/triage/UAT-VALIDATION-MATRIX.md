@@ -1362,3 +1362,11 @@ Command "@automata-ai-bot /review" on PR #4 (CID 5011101795, 11:36:07Z) → run 
 
 ### S12 (capacity-gate intake reply) — attempt
 Attempting while the worker (agent-run concurrency=1) is saturated with queued S6/S7/S9 runs. Firing a fresh ISSUE mention (distinct work item) to hit the intake capacity gate (maxConcurrentPerOrg).
+
+### S12 (capacity-gate intake reply) — INCONCLUSIVE + FINDING (needs log triage)
+S12's OLD trigger (fill per-ORG slots `maxConcurrentPerOrg=2`, over-limit mention dropped at intake → "at capacity, re-mention" reply) does NOT map to the NEW model:
+- **Model difference:** NEW uses **`MAX_CONCURRENT_TASKS_PER_USER` (default 3, per-USER)**, not per-org. And worker `agent-run` concurrency=1 → over-limit work **QUEUES/serializes**, it is not intake-dropped.
+- **Burst test:** fired 4 near-simultaneous @-mentions (issues #6-9, 11:40:29→11:40:37) as the founder. Result: **all 4 got an eyes-reaction + a dispatched agent-run (4 runs), but only #6 replied**; #7/#8/#9 ran to **COMPLETED with NO reply** and **no capacity message**.
+- So there is **no intake capacity-drop-with-reply mechanism** observed (nothing was gated at intake — all 4 dispatched), i.e. the OLD S12 assertion has no direct analogue. Instead the burst surfaced a **NEW finding: concurrent-mention reply-reliability** — 3 of 4 dispatched runs COMPLETED but emitted no reply (silent no-output under burst on the concurrency=1 worker; NOT SCHEDULING_TIMED_OUT since status=COMPLETED, and NOT the worker-down window since #5/#6 replied).
+
+**S12 VERDICT: INCONCLUSIVE** — not a clean PASS (the capacity-drop-reply doesn't exist to test) and not scored FAIL yet (the 3 silent-no-reply runs need `wrangler tail` on runs for issues #7-9 to classify: agent error / emit failure / socket contention on concurrency=1 vs a benign timing artifact). FLAGGED to team-lead. The per-user-vs-per-org capacity MODEL difference is itself a parity note for onboarding.
