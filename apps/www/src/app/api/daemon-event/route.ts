@@ -30,6 +30,8 @@ export async function POST(request: Request) {
   // F2 anchor: bind on threadId too (threadChatId is the shared legacy sentinel
   // when enableThreadChatCreation is off, which alone collapses F2 to org-level).
   // Legacy tokens with no threadId bound pass through during rollout.
+  // TODO(f2-threadid-unconditional): drop the `ctx.threadId !== null` clause once
+  // pre-anchor tokens have cycled (1-day expiry) — see next-message route marker.
   if (ctx.threadId !== null && ctx.threadId !== threadId) {
     return new Response("Forbidden", { status: 403 });
   }

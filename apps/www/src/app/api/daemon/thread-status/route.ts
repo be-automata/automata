@@ -45,6 +45,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
   // F2 anchor: bind on threadId too (threadChatId is the shared legacy sentinel
   // when enableThreadChatCreation is off). Legacy tokens (no threadId) pass through.
+  // TODO(f2-threadid-unconditional): drop the `ctx.threadId !== null` clause once
+  // pre-anchor tokens have cycled (1-day expiry) — see next-message route marker.
   if (ctx.threadId !== null && ctx.threadId !== threadId) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }

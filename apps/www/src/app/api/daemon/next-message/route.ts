@@ -62,6 +62,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // when enableThreadChatCreation is off, so the check above alone collapses to
   // org-level; threadId is unique per thread. (Legacy tokens with no threadId
   // bound are allowed through for back-compat during rollout.)
+  // TODO(f2-threadid-unconditional): once all pre-anchor tokens have cycled (1-day
+  // expiry backstop after 44bfa7d ships), drop the `ctx.threadId !== null` clause so
+  // the threadId binding is UNCONDITIONAL (a daemon token with no threadId is then
+  // rejected). Same marker in thread-status + daemon-event routes.
   if (ctx.threadId !== null && ctx.threadId !== threadId) {
     console.log("[daemon next-message] forbidden: token↔thread mismatch", {
       requestedThreadId: threadId,
