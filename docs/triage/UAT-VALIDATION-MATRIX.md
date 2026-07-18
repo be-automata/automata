@@ -1414,3 +1414,20 @@ My attempt-2 "concurrency mis-routing / collapse onto #15 / sentinel" verdict (6
 **META (my third S12 root-cause miss):** the observable (over-capacity work unanswered) was right each time; my two root-cause theories (token-revocation, then mis-routing/sentinel) were both wrong. Lesson recorded in the suite: the GitHub-side validator reports the OBSERVABLE and defers www-internal root cause to whoever has the trace; do not over-commit.
 
 **BLOCK: 9 PASS / 1 FAIL (S12 = queue starvation).** Closes 10/10 when the drain fix deploys, the 14-deep starved queue clears, and the mention-path-isolated burst re-run shows all N answered.
+
+## S12 DEFINITIVE root cause (boot-coder, Neon thread table) + verdict reconciliation (2026-07-18)
+
+boot-coder root-caused via the Neon thread table — this is the authoritative mechanism and it SEPARATES two things I'd conflated:
+
+**1. Harness confound (why the mention-burst assertion was invalid):** TWO enabled automations both match each fixture — `8304af2f` "Mirror: issue research" (trigger=ISSUE, fires because the harness OPENS an issue) AND `d24bfe58` "Mirror: GitHub mention" (fires on the @mention). So the burst created **8 threads from 4 issues**, not 4. Cap `MAX_CONCURRENT_TASKS_PER_USER=3` let 3 run (both #15 threads → #15's 2 replies, + #16's research thread); the other 5 queued. So "N mentions → N replies" was never cleanly measured — the harness fired a second automation per fixture. **Harness fix (committed 993a7f7 + refine): isolate the mention path — pre-create/settle issues so only the mention automation fires in the burst window, size under the effective cap, and assert on the mention-automation reply specifically (post-mention timestamp), not "any bot comment."**
+
+**2. Mention-path code is CORRECT (verified):** boot-coder confirmed `next-message` + `getThreadChat` are correctly threadId-keyed — NO routing race, NO sentinel collapse, NO duplication bug in the mention path. My mis-routing/sentinel hypothesis is fully dead.
+
+**3. Real separable defect (surfaced incidentally):** the 5 over-cap threads sit in `queued-tasks-concurrency` and **do not promote/drain** (queue 10-deep pre-burst → 14). Flagged to tenancy-coder (quarantined-Redis/cron drain). This is real regardless of the harness confound.
+
+**VERDICT — reconciling the two leads (deferring the label to team-lead):**
+- The **mention-burst reliability case (S12 as written)** = **INCONCLUSIVE** — the specific assertion was confounded by the 2nd automation; needs the isolated re-run for a clean measure (boot-coder's recommendation).
+- The **queue-drain starvation** = a **real BUG finding** (team-lead's FAIL basis), tracked separately to tenancy-coder; independent of the harness confound.
+- **Awaiting team-lead's call on the S12 label** (FAIL-on-queue-drain vs INCONCLUSIVE-on-harness). Both leads are recording the SAME facts; only the label differs. I will not flip it a 4th time unilaterally.
+
+**Block: 9 PASS + S12 (label pending: real queue-drain bug behind it either way). Does NOT close 10/10** until the queue-drain fix + a clean mention-path-isolated re-run.
