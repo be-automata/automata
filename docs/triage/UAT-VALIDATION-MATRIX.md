@@ -1443,8 +1443,9 @@ until the mention-path-isolated harness runs cleanly after the drain fix.
 ### BUG-EXEC-01 — over-capacity work queues and never drains — OPEN, **BLOCKS-S12 / BLOCKS-BLOCK-CLOSE**
 - **Symptom:** intents beyond `MAX_CONCURRENT_TASKS_PER_USER=3` transition `[system.concurrency-limit] queued → queued-tasks-concurrency` and **never promote/execute**; no user "at capacity" feedback. Silent, permanent work loss under load.
 - **Evidence:** 5 starved threads from the 2026-07-18 burst — `361538f8`, `b6148530`, `bc248f0e`, `61404487`, `a393188b`. Queue depth **10 before** the burst (accumulated silently across ALL prior testing) → **14 after**.
-- **Both promotion paths dead:** (1) the internal-POST self-fetch promotion, and (2) the unwired cron(s) that should drain the queue (quarantined-Redis/cron machinery; `evalsha` TypeError fingerprint). Owner: tenancy-coder.
-- **Close condition:** drain fix + stale-retirement deploy → the 14 starved tasks retire → a mention-path-isolated `pnpm uat S12` shows all N answered → S12 flips to PASS.
+- **Both promotion paths dead:** (1) the internal-POST self-fetch promotion, and (2) the unwired cron(s) that should drain the queue (quarantined-Redis/cron machinery; `evalsha` TypeError fingerprint).
+- **Fix = two required halves (both must land + a backlog flush):** Part 1 (boot-coder) — cron wiring that flushes the EXISTING 14-deep backlog via `getUserIdsWithThreadsStuckInQueue`; Part 2 (tenancy-coder) — internalPOST in-process fix so FUTURE bursts promote on slot-free. Neither alone suffices.
+- **Close condition:** Part 1 + Part 2 deploy → the 14 starved tasks clear `queued-tasks-concurrency` → mention-path-isolated `pnpm uat S12` shows all N answered (+ boot-coder's one-run-per-issue OLAP check) → S12 PASS → block 10/10.
 
 ### BLOCK FINAL STATE (2026-07-18)
 **9 PASS** (S1re-run, S2, S3, S4, S5, S6, S7, S8, S9) **+ S12 = INCONCLUSIVE-pending-rerun + BUG-EXEC-01 OPEN/BLOCKING.**
