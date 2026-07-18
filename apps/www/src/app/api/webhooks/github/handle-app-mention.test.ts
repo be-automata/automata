@@ -12,7 +12,7 @@ import { db } from "@/lib/db";
 import * as schema from "@terragon/shared/db/schema";
 import { newThreadInternal } from "@/server-lib/new-thread-internal";
 import {
-  getOctokitForUser,
+  getOctokitForBackground,
   getOctokitForApp,
   getIsPRAuthor,
   getIsIssueAuthor,
@@ -97,7 +97,7 @@ describe("handleAppMention", () => {
       },
     };
     vi.clearAllMocks();
-    vi.mocked(getOctokitForUser).mockResolvedValue(mockOctokit as any);
+    vi.mocked(getOctokitForBackground).mockResolvedValue(mockOctokit as any);
     vi.mocked(getOctokitForApp).mockResolvedValue(mockOctokit as any);
     // Reset newThreadInternal to successful state
     vi.mocked(newThreadInternal).mockResolvedValue({
@@ -116,7 +116,7 @@ describe("handleAppMention", () => {
       commentBody: "Hey @app, please help",
       commentGitHubAccountId: 999999, // Non-existent user ID
     });
-    expect(getOctokitForUser).not.toHaveBeenCalled();
+    expect(getOctokitForBackground).not.toHaveBeenCalled();
     expect(newThreadInternal).not.toHaveBeenCalled();
   });
 
@@ -130,12 +130,16 @@ describe("handleAppMention", () => {
       commentBody: "Hey @app, please help",
       commentGitHubAccountId: undefined, // No user ID
     });
-    expect(getOctokitForUser).not.toHaveBeenCalled();
+    expect(getOctokitForBackground).not.toHaveBeenCalled();
     expect(newThreadInternal).not.toHaveBeenCalled();
   });
 
-  it("should not create thread when user has no GitHub access token", async () => {
-    vi.mocked(getOctokitForUser).mockResolvedValue(null);
+  it("should not create thread when there is NO GitHub access (neither user nor App installation)", async () => {
+    // getOctokitForBackground throws when neither a user token nor an App
+    // installation is available; the handler's try/catch aborts without a task.
+    vi.mocked(getOctokitForBackground).mockRejectedValue(
+      new Error("no installation for repo"),
+    );
     await handleAppMention({
       repoFullName: pr.repoFullName,
       issueOrPrNumber: pr.number,
@@ -488,8 +492,11 @@ describe("handleAppMention", () => {
         commentBody: "Hey @app, please fix this bug",
         commentGitHubAccountId: githubAccountId,
       });
-      // Verify getOctokitForUser was called
-      expect(getOctokitForUser).toHaveBeenCalledWith({ userId: user.id });
+      // Verify the background (user → App fallback) helper was called, keyed by repo
+      expect(getOctokitForBackground).toHaveBeenCalledWith({
+        userId: user.id,
+        repoFullName: pr.repoFullName,
+      });
       // Verify PR details were fetched
       expect(mockOctokit.rest.pulls.get).toHaveBeenCalledWith({
         owner: pr.repoFullName.split("/")[0],

@@ -1,6 +1,6 @@
 import { newThreadInternal } from "@/server-lib/new-thread-internal";
 import {
-  getOctokitForUser,
+  getOctokitForBackground,
   parseRepoFullName,
   getOctokitForApp,
   getIssueAuthorGitHubUsername,
@@ -349,11 +349,14 @@ async function triggerTasksForUser({
   issueContext?: string;
 }): Promise<void> {
   try {
-    const octokit = await getOctokitForUser({ userId });
-    if (!octokit) {
-      console.error(`No github access token found for user ${userId}`);
-      return;
-    }
+    // GitHub-access precondition. Use the BACKGROUND octokit (user token → App
+    // installation-token fallback): a mention can be attributed to a user with no
+    // user OAuth token (e.g. an email/password founder linked via the account
+    // table), and such a mention must still create the task via the App
+    // installation — same identity-seam fix as the background create/clone paths.
+    // Resolves to an octokit when there is access (user OR App installation); throws
+    // (→ caught below, task aborted) when there is neither.
+    await getOctokitForBackground({ userId, repoFullName });
     const [isIssueOrPrAuthor, userSettings, batchingEnabled] =
       await Promise.all([
         getIsIssueOrPrAuthor({
