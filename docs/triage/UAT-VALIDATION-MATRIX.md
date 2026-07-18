@@ -1354,3 +1354,11 @@ Command "@automata-ai-bot /request-changes …" on PR #4 (CID 5011096507, 11:34:
 - ✅ **CHANGES_REQUESTED verdict at HEAD** via the command; ✅ **no-dup = 1** (states=[CHANGES_REQUESTED] — same-verdict dedup held, no 2nd CR); ✅ reply landed.
 - Caveat: ran on a PR that already carried a CR (from S8), so "command POSTS a fresh CR" is inferred from the reply + maintained-CR + no-dup rather than a clean first-post; `ruleKey command:request-changes` not directly observable (api/runs behind CF Access). Outcome matches OLD baseline S7 (command → CR + no-dup).
 **S7 VERDICT: PASS** (command path → CHANGES_REQUESTED, no-dup, reply).
+
+### S9 (unknown /review fall-through) — PASS
+Command "@automata-ai-bot /review" on PR #4 (CID 5011101795, 11:36:07Z) → run `9df126c0` dispatched.
+- ✅ **Responded** (1 new bot reply) — the unknown slash command fell through to github-mention-respond and produced a response; **NO silent drop**. no-dup holds (no spurious verdict).
+**S9 VERDICT: PASS** — matches OLD baseline (unknown /review → some response, never silence).
+
+### S12 (capacity-gate intake reply) — attempt
+Attempting while the worker (agent-run concurrency=1) is saturated with queued S6/S7/S9 runs. Firing a fresh ISSUE mention (distinct work item) to hit the intake capacity gate (maxConcurrentPerOrg).
