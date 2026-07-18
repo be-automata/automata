@@ -1316,3 +1316,13 @@ Two corrections from team-lead's live wrangler tail (authoritative — I couldn'
 **Housekeeping:** team-lead's diagnostic mention comments on PR #1 (ids 5011029799, 5011033156) are noise — excluded from evidence. Worker-down window (boot-coder's session died): S1-rerun/S2/S3 all COMPLETED (worker was live for them), so no SCHEDULING_TIMED_OUT to void.
 
 **Net block status:** review-path S1(re-run)/S2/S3 = PASS with the reconciler's full contract proven. 7 mention/command cases (S4/S5/S6/S7/S8/S9/S12) blocked solely on tenancy-coder's mention-path token fix (App-installation fallback).
+
+## MENTION CASES (token-fix 0193ee40 deployed) — token gate CLEARED (2026-07-18)
+
+Mention path now dispatches from espinozasenior (getOctokitForBackground App-install fallback works).
+
+### S4 (mention ANSWER → one reply) — PASS
+Mention "@automata-ai-bot what does the isAdult function do?" on PR #4 (CID 5011071696, 11:24:49Z) → run `d96c991f` COMPLETED → bot reply id 5011073567 @11:25:34Z.
+- ✅ Exactly ONE new bot comment (no reply-dup); ✅ answers correctly (describes isAdult, references current `>=18` code); ✅ identity automata-ai-bot[bot]; ✅ did not perturb PR #4's APPROVED review state.
+- KNOWN-GAP annotation: the reply lacks the OLD `reply-to:<CID>` marker (an emit_reply trace tag). NEW tags by @-mentioning the author (`@espinozasenior`) instead. Surface/traceability delta, not an effect-intent FAIL — but note the OLD reply-idempotency-on-redelivery keyed on that marker; NEW's redelivery-dedup mechanism is unverified here (would need a forced redelivery). Flag for the reply-idempotency check.
+**S4 VERDICT: PASS** (effect-intent: single answering reply; surface marker delta annotated).
