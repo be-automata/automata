@@ -1207,3 +1207,11 @@ boot-coder pinged 2-part ready (worker 3352b7c/355bf14 + automation live). Indep
 - **Organic chain live:** automation c95b9307 → dispatch → worker; runs 264564ba + 4c4fe636 COMPLETED, addec811 RUNNING. `triggered_by` is now organic (webhook→automation), not manual.
 
 **GATE-1 (F1/F2) already closed live (9a8f159); posting-identity residual now also closed.** Starting the 10-case parity block. Fixture PR next (S1).
+
+## INCIDENT LOG — stray fixture commit on main + push convention (2026-07-18)
+
+While staging the S1 parity fixture I pushed a commit directly to `be-automata/automata` main by accident. Recording it so the parity record explains the stray commit pair on main.
+- **Cause:** created the fixture in a worktree branched off `origin/main` (which set the branch's upstream to origin/main), then pushed with `git push -u origin <branch>`. This repo's shared-main convention sets `push.default=upstream` on the checkout whose branch `feat/p05-chassis-triage` IS main — so that push targeted `refs/heads/main`, not a new branch ref. Commit **c4de23c** ("uat: ADR-036 parity fixture (do not merge)") landed on main; the operator's R3.8 (**5009a43**) then stacked on top.
+- **Blast radius:** one file, `scripts/uat/adr036-sample.ts` (14 lines, fake seeded defects — off-by-one, `console.log` of a fake key string, false attestation), outside `src/`, no build/lint/tsc impact, no real secrets (team-lead: no rotation needed).
+- **Fix:** forward-fix removal (NO history rewrite — commits sit on top and main is shared). Commit **ba5e77d** "chore: remove accidentally-pushed UAT fixture" FF-pushed to main; verified `origin/main:scripts/uat/adr036-sample.ts` is gone. The `c4de23c … ba5e77d` add/remove pair on main is this incident.
+- **Standing mitigation (all agents):** for fixture/scratch branches on this repo, push with explicit `git push origin HEAD:refs/heads/<branch>` and verify (`git ls-remote origin refs/heads/<branch>` present + `refs/heads/main` unchanged) BEFORE `gh pr create`. Never `git push -u origin <branch>` from a branch whose upstream is origin/main.
