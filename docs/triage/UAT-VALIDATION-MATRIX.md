@@ -1148,3 +1148,18 @@ boot-coder reported C8 green end-to-end (run `agent-run 6c944c1d-ea77-420a-9d66-
 - **Timeline note on the inspected runs:** the C8 winning run `6c944c1d` posted its artifact at 08:42:19Z; **44bfa7d landed at 08:45:22Z — ~3 min later.** So that run's daemon token was minted pre-fix (legacy null-threadId → org-level for that token specifically). That is why the org-level exposure looked *live* on the token I probed — it is a pre-fix legacy token in the rollout window, NOT evidence that the current design collapses F2.
 
 **Net:** the go-forward F2 posture is sound (threadId-anchored). No unique-threadChatId change is needed or desired for security. The only open item is letting pre-44bfa7d tokens cycle out, then removing the null-threadId passthrough (9d49bcb). SOMNIO-GATE-1's F2 half is effectively CLOSED-BY-DESIGN in HEAD; only the F1 *purpose-scoping* live-probe half (needs a non-revoked daemon token) remains genuinely open.
+
+## ADR-036 EXEC-PARITY BLOCK — plan + scaffold (execution pending F1/F2) (2026-07-18)
+
+Plane: www f1944494 + worker ACTIVE (step logging) + named tunnel `hatchet.beautomata.com` (cutover done, trigger path 200). Target repo: `be-automata/automata`. Baseline: orch-agents `docs/UAT-adr-036-effect-intent.md` (14 scenarios, READ-ONLY).
+
+**Scoring rule (team-lead ruling):** score at EFFECT-INTENT level — which intent fired (`emit_review`/`emit_reply`/`emit_resolve_thread`), verdict semantics, no-dup idempotency, severity floor. The formal-review-vs-comment surface delta is a **KNOWN GAP annotation per case, NOT a FAIL**. A case FAILS only if intent/verdict/idempotency diverges from the OLD baseline. Formal APPROVED/CHANGES_REQUESTED posting is review-package phase-2 → its own later parity re-check. Record posting IDENTITY per case (espinozasenior [ambient-creds leak, tenancy-coder fixing] → expected flip to `automata-ai-bot[bot]` post-fix; worker may restart mid-block, expected).
+
+**Case set (COUNT TO CONFIRM with team-lead — I read 11, lead said 10):**
+- IN-SCOPE (effect-intent, non-Phase-2): S1 opened→CR, S2 partial-fix→still-CR, S3 full-fix→APPROVE+dismiss, S4 mention ANSWER→one reply, S5 mention RE-REVIEW deduped-but-still-replies, S6 mention CODE-FIX→edit+push+reply, S7 `/request-changes` command path, S8 verdict UPGRADE (regression guard), S9 unknown-slash `/review` fall-through, S12 intake-failure capacity-gate reply. = **10**.
+- The 11th candidate: **S14** (one-review-object / inline-comments default-OFF). It is effect-intent-adjacent (no-dup strengthened to "one review OBJECT") but its assertion is about the inline-comment wrapper, which is Phase-2 surface. **Likely lead's "10" excludes S14 into the phase-2 surface re-check** — CONFIRMING.
+- DEFERRED SOMNIO / Phase-2 (not this block): S10 inline threads, S11 reply-then-resolve, S13 stale-thread re-raise guard.
+
+**Per-case template (fill on execution):** trigger (event on be-automata/automata) → observe (api/runs or hatchet OLAP tool-calls: which emit_* fired) → verify effect-intent vs OLD → KNOWN-GAP surface note (comment vs formal review) → posting identity → no-dup invariant → verdict PASS/FAIL/GAP.
+
+**Gating:** run AFTER F1/F2 live probes close (team-lead sequence). Fixture = throwaway PR on be-automata/automata with seeded defects (off-by-one `>` + `console.log` secret + false attestation), mirroring the OLD Setup fixture. Status: SCAFFOLDED, awaiting F1/F2 + case-count confirm.
