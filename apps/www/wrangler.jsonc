@@ -18,6 +18,15 @@
     "directory": ".open-next/assets",
     "binding": "ASSETS",
   },
+  // S12: the background maintenance jobs were Vercel crons (apps/www/vercel.json)
+  // which never fire on Workers. These native triggers fire the worker's scheduled()
+  // handler → runScheduledCron(event.cron) → the IN-PROCESS runners (server-lib/cron.ts).
+  // stalled-tasks (hourly) frees stuck concurrency slots; queued-tasks (every 10m)
+  // drains the per-user queue. (scheduled-tasks/automations crons still need their
+  // internalPOST self-fetch ported to in-process before wiring — fast-follow.)
+  "triggers": {
+    "crons": ["0 * * * *", "*/10 * * * *"],
+  },
   "observability": {
     "enabled": true,
   },

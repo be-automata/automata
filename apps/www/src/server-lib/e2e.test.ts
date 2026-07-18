@@ -368,9 +368,9 @@ describe("end-to-end", () => {
       messages: [getClaudeResultMessage()],
     });
     await waitUntilResolved();
-    expect(internalPOST).toHaveBeenCalledWith(
-      `process-thread-queue/${user.id}`,
-    );
+    // The concurrency-queued thread is promoted IN-PROCESS on finish (no more
+    // internalPOST self-fetch) — proven end-to-end by the booting status +
+    // sendDaemonMessage below.
 
     const threadUpdated = await getThread({ db, userId: user.id, threadId });
     const threadChatUpdated = await getThreadChat({

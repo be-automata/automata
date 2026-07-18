@@ -1,68 +1,22 @@
 import type { NextRequest } from "next/server";
-import {
-  getStalledThreads,
-  stopStalledThreads,
-} from "@terragon/shared/model/threads";
-import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
-import { maybeHibernateSandboxById } from "@/agent/sandbox";
+import { runStalledTasksCron } from "@/server-lib/cron";
 
-async function sleep(ms: number = 1000) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function stopStalledThreadsTask() {
-  console.log("Processing stalled threads");
-  const stalledThreads = await getStalledThreads({ db });
-  console.log(`Found ${stalledThreads.length} stalled threads`);
-  if (stalledThreads.length === 0) {
-    return;
-  }
-
-  console.log("Stopping stalled threads");
-  console.log(stalledThreads.map((thread) => thread.id).join(", "));
-  await stopStalledThreads({
-    db,
-    threadIds: stalledThreads.map((thread) => thread.id),
-  });
-
-  // Hibernate the sandboxes in batches of 10
-  console.log("Hibernating sandboxes");
-  for (let i = 0; i < stalledThreads.length; i += 10) {
-    const batch = stalledThreads.slice(i, i + 10);
-    await Promise.all(
-      batch.map(async (thread) => {
-        if (thread.codesandboxId) {
-          try {
-            await maybeHibernateSandboxById({
-              threadId: thread.id,
-              userId: thread.userId,
-              sandboxId: thread.codesandboxId,
-              sandboxProvider: thread.sandboxProvider,
-            });
-          } catch (error) {
-            // Ignore errors
-          }
-        }
-      }),
-    );
-    await sleep();
-  }
-}
-
-// This is run every 5 minutes, see vercel.json.
+/**
+ * Vercel-cron mirror (does not fire on Workers — see server-lib/cron.ts). The real
+ * trigger on Workers is scheduled() → runScheduledCron("0 * * * *"). This GET route
+ * stays for external hits / manual pokes; both share the IN-PROCESS runner.
+ */
 export async function GET(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
   if (
     process.env.NODE_ENV === "production" &&
     authHeader !== `Bearer ${env.CRON_SECRET}`
   ) {
-    return new Response("Unauthorized", {
-      status: 401,
-    });
+    return new Response("Unauthorized", { status: 401 });
   }
   console.log("Stalled tasks cron task triggered");
-  await stopStalledThreadsTask();
+  await runStalledTasksCron();
   console.log("Stalled tasks cron task completed");
   return Response.json({ success: true });
 }

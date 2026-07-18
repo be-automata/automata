@@ -17,10 +17,7 @@ import { waitUntil } from "@/lib/wait-until";
 import { setActiveThreadChat } from "@/agent/sandbox-resource";
 import { extendSandboxLife } from "@terragon/sandbox";
 import { checkpointThread } from "@/server-lib/checkpoint-thread";
-import {
-  internalPOST,
-  isAnthropicDownPOST,
-} from "@/server-lib/internal-request";
+import { isAnthropicDownPOST } from "@/server-lib/internal-request";
 import { updateThreadChatWithTransition } from "@/agent/update-status";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { maybeProcessFollowUpQueue } from "@/server-lib/process-follow-up-queue";
@@ -33,7 +30,7 @@ import {
   parseCodexRateLimitMessage,
   parseClaudeOAuthTokenRevokedMessage,
 } from "@/agent/msg/helpers";
-import { getEligibleQueuedThreadChats } from "./process-queued-thread";
+import { maybeStartQueuedThreadChat } from "./process-queued-thread";
 import { reconcilePrReviews } from "./reconcile-pr-reviews";
 import { trackUsageEvents } from "./usage-events";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
@@ -591,9 +588,15 @@ async function handleThreadFinish({
     waitUntil(
       setActiveThreadChat({ sandboxId, threadChatId, isActive: false }),
     );
-    const queuedThreadChats = await getEligibleQueuedThreadChats({ userId });
-    if (queuedThreadChats.length > 0) {
-      waitUntil(internalPOST(`process-thread-queue/${userId}`));
-    }
+    // Promote the next eligible queued task IN-PROCESS (S12 fix): the old
+    // internalPOST("process-thread-queue/…") fetched this worker's OWN public URL,
+    // which 404s on Workers (same-account worker-to-worker limitation, same class as
+    // the broadcast self-fetch). So a freed slot never drained the concurrency queue.
+    // Call the processor directly. maybeStartQueuedThreadChat re-checks eligibility.
+    waitUntil(
+      maybeStartQueuedThreadChat({ userId }).catch((error) =>
+        console.error("[queue] finish-hook promotion failed", { userId, error }),
+      ),
+    );
   }
 }
