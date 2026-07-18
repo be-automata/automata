@@ -38,7 +38,9 @@ describe("pullNextMessage", () => {
       permissionMode: "allowAll",
       featureFlags: {},
     };
-    const fetchMock = vi.fn(async () => jsonResponse(200, message));
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse(200, message),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await pullNextMessage(opts);

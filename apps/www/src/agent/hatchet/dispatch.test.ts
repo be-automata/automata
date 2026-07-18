@@ -5,8 +5,14 @@ import {
   createTestThread,
 } from "@terragon/shared/model/test-helpers";
 import { createOrganization } from "@terragon/shared/model/organizations";
+import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 import { nanoid } from "nanoid";
 import { User } from "@terragon/shared";
+import {
+  mintDaemonToken,
+  hasActiveDaemonToken,
+  daemonRunKey,
+} from "@/lib/daemon-token";
 import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
 
 describe("hatchetDispatchEnabled", () => {
@@ -101,13 +107,12 @@ describe("dispatchAgentRun", () => {
   });
 
   it("skips the trigger (double-dispatch guard) when a dispatch is already in flight", async () => {
-    // A daemon token named threadChatId already exists = a dispatch in flight.
-    const { mintDaemonToken } = await import("@/lib/daemon-token");
+    // A daemon token named by the per-run key already exists = a dispatch in flight.
     await mintDaemonToken({
       userId: user.id,
       threadId,
       threadChatId,
-      name: threadChatId,
+      name: daemonRunKey({ threadId, threadChatId }),
     });
 
     const fetchMock = vi.fn();
@@ -122,6 +127,65 @@ describe("dispatchAgentRun", () => {
     });
 
     expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("does NOT dedup across two threads that share the legacy threadChat sentinel", async () => {
+    // Regression: with enableThreadChatCreation OFF (its default) every thread's
+    // threadChatId is the shared sentinel. Keying the dedup guard on threadChatId
+    // alone made one thread's in-flight token block ALL other threads' dispatches.
+    // The per-run key is threadId-scoped, so two distinct threads dispatch
+    // independently even with identical (sentinel) threadChatIds.
+    const other = await createTestThread({ db, userId: user.id });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ externalId: "run" }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId,
+      threadChatId: LEGACY_THREAD_CHAT_ID,
+      repoFullName: "be-automata/automata",
+      branch: "main",
+    });
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: other.threadId,
+      threadChatId: LEGACY_THREAD_CHAT_ID,
+      repoFullName: "be-automata/automata",
+      branch: "main",
+    });
+
+    // Both dispatched — the second was not falsely deduped by the first.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.unstubAllGlobals();
+  });
+
+  it("revokes the just-minted daemon token when the trigger fails (no stale token)", async () => {
+    const runKey = daemonRunKey({ threadId, threadChatId });
+    // The trigger returns a non-2xx → triggerAgentRun throws → dispatch must revoke.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("boom", { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId,
+      threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "main",
+    });
+
+    // The revoke runs in the background (registered on the waitUntil seam); poll.
+    await vi.waitFor(async () => {
+      expect(await hasActiveDaemonToken({ userId: user.id, name: runKey })).toBe(
+        false,
+      );
+    });
     vi.unstubAllGlobals();
   });
 });

@@ -1,7 +1,10 @@
 import { toDBMessage } from "@/agent/msg/toDBMessage";
 import { getPendingToolCallErrorMessages } from "@/lib/db-message-helpers";
 import { db } from "@/lib/db";
-import { revokeDaemonTokensForSandbox } from "@/lib/daemon-token";
+import {
+  revokeDaemonTokensForSandbox,
+  daemonRunKey,
+} from "@/lib/daemon-token";
 import { ClaudeMessage } from "@terragon/daemon/shared";
 import {
   DBMessage,
@@ -537,11 +540,16 @@ async function handleThreadFinish({
   // daemon token immediately. Any follow-up turn re-mints its own. Non-blocking;
   // the 1-day expiry (plugin minimum) is the backstop if this fails. Revoke by
   // BOTH names: the in-process path names the token by sandboxId, the remote
-  // (Hatchet) path names it by threadChatId (no sandbox on that path).
+  // (Hatchet) path names it by the per-run key daemonRunKey(threadId, threadChatId)
+  // (no sandbox on that path; keyed on threadId so it can't collide across the
+  // shared legacy threadChat sentinel).
   waitUntil(
     Promise.all([
       revokeDaemonTokensForSandbox({ userId, sandboxId }),
-      revokeDaemonTokensForSandbox({ userId, sandboxId: threadChatId }),
+      revokeDaemonTokensForSandbox({
+        userId,
+        sandboxId: daemonRunKey({ threadId, threadChatId }),
+      }),
     ]).catch((error) =>
       console.error("[daemon-token] revoke-on-terminal failed", {
         sandboxId,

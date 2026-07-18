@@ -19,6 +19,10 @@ vi.mock("next/headers", async (importOriginal) => {
 // so that is the seam tests mock/drain — see mockWaitUntil/waitUntilResolved.
 vi.mock("@/lib/wait-until", () => ({
   waitUntil: vi.fn(),
+  // No-op: the promise passed to it is already executing (its own chain runs to
+  // completion in the microtask queue), so background work still happens — tests
+  // that assert on it drain via vi.waitFor on the observable effect.
+  waitUntilOutlivesRequest: vi.fn(),
 }));
 vi.mock("react", async (importOriginal) => {
   const actual = (await importOriginal()) as any;

@@ -15,6 +15,27 @@ import { and, eq } from "drizzle-orm";
  * expiresIn is the plugin-minimum 1-day backstop (F3 — revocation is primary).
  * Returns the raw token string.
  */
+/**
+ * The per-run key used to NAME the remote (Hatchet) daemon token — the revoke key
+ * AND the double-dispatch dedup key (ADR-003 F3 / idempotency).
+ *
+ * It MUST be unique per thread run. threadChatId alone is NOT: when the
+ * `enableThreadChatCreation` feature flag is off (its default), createThread
+ * returns the shared sentinel LEGACY_THREAD_CHAT_ID for EVERY thread, so keying on
+ * threadChatId made one thread's leftover token block all future dispatches. threadId
+ * is always unique per thread; the composite is unique in both flag states (flag on:
+ * threadChatId already unique; flag off: threadId disambiguates the sentinel).
+ */
+export function daemonRunKey({
+  threadId,
+  threadChatId,
+}: {
+  threadId: string;
+  threadChatId: string;
+}): string {
+  return `${threadId}:${threadChatId}`;
+}
+
 export async function mintDaemonToken({
   userId,
   threadId,

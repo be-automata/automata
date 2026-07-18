@@ -31,7 +31,7 @@ describe("triggerAgentRun (Hatchet REST v1)", () => {
     const res = await triggerAgentRun(INPUT, CONFIG);
     expect(res.externalId).toBe("run-123");
 
-    const [url, init] = fetchMock.mock.calls[0];
+    const [url, init] = fetchMock.mock.calls[0]!;
     // Trailing slash on apiUrl is normalized.
     expect(url).toBe(
       "https://tunnel.example.com/api/v1/stable/tenants/tenant-1/workflow-runs/trigger",

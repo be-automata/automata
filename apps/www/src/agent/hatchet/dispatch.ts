@@ -1,8 +1,14 @@
 import { env } from "@terragon/env/apps-www";
 import { getInstallationToken } from "@terragon/shared/github-app";
 import { parseRepoFullName } from "@/lib/github";
-import { mintDaemonToken, hasActiveDaemonToken } from "@/lib/daemon-token";
+import {
+  mintDaemonToken,
+  hasActiveDaemonToken,
+  revokeDaemonTokensForSandbox,
+  daemonRunKey,
+} from "@/lib/daemon-token";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
+import { waitUntilOutlivesRequest } from "@/lib/wait-until";
 import { triggerAgentRun } from "./transport";
 
 /**
@@ -41,8 +47,9 @@ export function hatchetDispatchEnabled(thread: {
 
 /**
  * Mint the short-lived tokens, assemble the reference-only input, and trigger the
- * remote agent-run. The daemon token is named by threadChatId so the terminal
- * revoke (handleThreadFinish) covers the remote run (no sandboxId on this path).
+ * remote agent-run. The daemon token is named by the per-run key (daemonRunKey) so
+ * the terminal revoke (handleThreadFinish) covers the remote run (no sandboxId on
+ * this path) AND the dedup guard is per-thread-unique.
  */
 export async function dispatchAgentRun({
   userId,
@@ -57,10 +64,14 @@ export async function dispatchAgentRun({
   repoFullName: string;
   branch: string;
 }): Promise<void> {
+  const runKey = daemonRunKey({ threadId, threadChatId });
+
   // Double-dispatch guard (idempotency): the Hatchet v1 trigger has no server-side
-  // dedup, so if a dispatch for this threadChat is already in flight (its daemon
-  // token, named threadChatId, still exists — revoked on terminal), skip.
-  if (await hasActiveDaemonToken({ userId, name: threadChatId })) {
+  // dedup, so if a dispatch for this run is already in flight (its daemon token,
+  // named by runKey, still exists — revoked on terminal), skip. runKey is keyed on
+  // threadId so it does NOT collide across threads that share the legacy threadChat
+  // sentinel (the bug that made one stale token block all future dispatches).
+  if (await hasActiveDaemonToken({ userId, name: runKey })) {
     console.log("[hatchet] skipping duplicate dispatch — already in flight", {
       threadId,
       threadChatId,
@@ -71,7 +82,7 @@ export async function dispatchAgentRun({
   const [owner, repo] = parseRepoFullName(repoFullName);
   const [installationToken, daemonToken] = await Promise.all([
     getInstallationToken(owner, repo),
-    mintDaemonToken({ userId, threadId, threadChatId, name: threadChatId }),
+    mintDaemonToken({ userId, threadId, threadChatId, name: runKey }),
   ]);
   const input: AgentRunInput = {
     threadId,
@@ -88,9 +99,32 @@ export async function dispatchAgentRun({
     repoFullName,
     branch,
   });
-  await triggerAgentRun(input, {
+
+  // The token is minted BEFORE the trigger (the input carries its value), so on a
+  // trigger failure we must revoke it — otherwise a stale token blocks the dedup
+  // guard and the run can never be re-dispatched.
+  const triggerAndRollback = triggerAgentRun(input, {
     apiUrl: env.HATCHET_API_URL,
     tenantId: env.HATCHET_TENANT_ID,
     apiToken: env.HATCHET_API_TOKEN,
+  }).catch(async (error) => {
+    // Terminal background work: log + revoke so a stale token can't block the
+    // dedup guard, then swallow (no caller is awaiting this — re-throwing would
+    // only surface as an unhandled rejection). A retry re-dispatches cleanly.
+    console.error("[hatchet] trigger failed — revoking daemon token", {
+      threadId,
+      threadChatId,
+      error,
+    });
+    await revokeDaemonTokensForSandbox({ userId, sandboxId: runKey }).catch(
+      () => {},
+    );
   });
+
+  // Register the trigger on the Workers ExecutionContext so the outbound fetch
+  // through the tunnel survives after the webhook Response returns. Awaiting it in
+  // the request scope let it die with "Network connection lost" (ADR-003; see
+  // waitUntilOutlivesRequest). The fetch is invoked synchronously here; only its
+  // completion is deferred.
+  waitUntilOutlivesRequest(triggerAndRollback);
 }
