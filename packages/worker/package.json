@@ -9,7 +9,8 @@
     "hatchet:up": "docker compose -f docker-compose.hatchet.yml up -d",
     "hatchet:down": "docker compose -f docker-compose.hatchet.yml down",
     "hatchet:logs": "docker compose -f docker-compose.hatchet.yml logs -f hatchet-lite",
-    "worker": "tsx src/hello/worker.ts",
+    "daemon:build": "pnpm --filter @terragon/daemon run build",
+    "worker": "pnpm run daemon:build && tsx src/hello/worker.ts",
     "trigger": "tsx src/hello/trigger.ts",
     "test": "vitest --no-file-parallelism --passWithNoTests",
     "tsc-check": "tsc --noEmit",
@@ -27,7 +28,8 @@
   "keywords": [],
   "packageManager": "pnpm@10.14.0",
   "dependencies": {
-    "@hatchet-dev/typescript-sdk": "^1.26.0"
+    "@hatchet-dev/typescript-sdk": "^1.26.0",
+    "@terragon/daemon": "workspace:*"
   },
   "devDependencies": {
     "@terragon/tsconfig": "workspace:*",
