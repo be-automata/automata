@@ -163,11 +163,22 @@ export async function S12(N = 4): Promise<CaseResult> {
   const r = mk("S12", "burst reliability: N mentions → ALL N reply");
   const issues: number[] = [];
   try {
+    // PITFALL (see docs/uat S12): fixtures must NOT signal "test / do not action" — agents read
+    // titles+bodies as context and correctly decline test-looking work, which looks like silent
+    // failure. Fixtures must read as GENUINE user questions. RUN_ID is only a bracketed cleanup tag.
+    const qs = [
+      "what are the main packages in this repository and what does each one do?",
+      "which package holds the GitHub webhook handling code?",
+      "where does the agent-run worker live and what is its entry point?",
+      "what database does the app use and where is the schema defined?",
+      "how is authentication implemented in this codebase?",
+    ];
     for (let n = 1; n <= N; n++) {
-      const url = sh(`gh issue create --repo ${P.REPO} --title ${JSON.stringify(`UAT S12 burst ${n} ${P.RUN_ID}`)} --body x`);
+      const q = qs[(n - 1) % qs.length];
+      const url = sh(`gh issue create --repo ${P.REPO} --title ${JSON.stringify(`Question about the codebase [${P.RUN_ID}-${n}]`)} --body ${JSON.stringify(`Could someone help me understand this? ${q}`)}`);
       const iu = Number(url.match(/(\d+)\s*$/)?.[1]);
       issues.push(iu);
-      postComment(iu, `@${P.BOT_HANDLE} analyze this repository structure in detail and summarize the main packages.`);
+      postComment(iu, `@${P.BOT_HANDLE} ${q}`);
     }
     r.evidence = { issues, N };
     const t0 = new Date(Date.now() - 5_000).toISOString();

@@ -116,22 +116,24 @@ export function stageFixturePR(slug: string): Fixture {
   sh(`rm -rf ${wt}; git worktree add --detach ${wt} origin/${P.BASE} --quiet`);
   sh(`mkdir -p ${wt}/scripts/uat/fixtures`);
   execSync(`cat > ${wt}/${file}`, { input: FIXTURE });
-  sh(`git -C ${wt} add ${file}`);
-  sh(`git -C ${wt} -c user.name=uat -c user.email=uat@local commit -q -m "uat ${slug}: fixture (do not merge)"`);
+  sh(`git -C ${wt} add -f ${file}`); // -f: fixture path is gitignored on main; force onto the throwaway branch
+  // NEUTRAL framing (see docs/uat pitfall): the bot reads commit msg + PR title/body as context;
+  // "UAT/test/do-not-merge/throwaway" language makes it soften/decline. Present a genuine code change.
+  sh(`git -C ${wt} -c user.name=uat -c user.email=uat@local commit -q -m "Add isAdult age helper (${P.RUN_ID})"`);
   const sha = sh(`git -C ${wt} rev-parse HEAD`);
   sh(`git -C ${wt} push origin HEAD:refs/heads/${branch}`);
   const onOrigin = sh(`git ls-remote origin refs/heads/${branch}`).split(/\s+/)[0];
   const baseAfter = sh(`git ls-remote origin refs/heads/${P.BASE}`).split(/\s+/)[0];
   if (onOrigin !== sha) throw new Error(`branch push failed for ${branch}`);
   if (baseAfter !== baseBefore) throw new Error(`SAFETY: ${P.BASE} changed during fixture push — ABORT`);
-  const url = sh(`gh pr create --repo ${P.REPO} --base ${P.BASE} --head ${branch} --title ${JSON.stringify(`UAT ${slug} (do not merge) ${P.RUN_ID}`)} --body "throwaway UAT fixture"`);
+  const url = sh(`gh pr create --repo ${P.REPO} --base ${P.BASE} --head ${branch} --title ${JSON.stringify(`Add isAdult age helper [${P.RUN_ID}]`)} --body ${JSON.stringify("Adds a small `isAdult(age)` helper and a `logKey` utility under scripts/uat/. Please review for correctness and any issues.")}`);
   const pr = Number(url.match(/(\d+)\s*$/)?.[1]);
   return { pr, branch, sha, wt, file };
 }
 // push a new content to the fixture branch (a synchronize)
 export function pushFixContent(f: Fixture, content: string, msg: string): string {
   execSync(`cat > ${f.wt}/${f.file}`, { input: content });
-  sh(`git -C ${f.wt} add ${f.file}`);
+  sh(`git -C ${f.wt} add -f ${f.file}`); // -f: fixture path is gitignored on main; force onto the throwaway branch
   sh(`git -C ${f.wt} -c user.name=uat -c user.email=uat@local commit -q -m ${JSON.stringify(msg)}`);
   sh(`git -C ${f.wt} push origin HEAD:refs/heads/${f.branch}`);
   return sh(`git -C ${f.wt} rev-parse HEAD`);
