@@ -1,1 +1,1 @@
-C8 green run: org account funded — full agent execution expected.
+C8 re-fire: dispatch fixes + funded org key + clean state. This is the run.
