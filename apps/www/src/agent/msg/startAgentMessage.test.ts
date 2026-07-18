@@ -6,7 +6,7 @@ import {
 } from "@terragon/shared/model/test-helpers";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 import { User } from "@terragon/shared";
-import type { SandboxProvider } from "@terragon/types/sandbox";
+import { getThreadChat } from "@terragon/shared/model/threads";
 import { startAgentMessage } from "./startAgentMessage";
 import { hasActiveDaemonToken, daemonRunKey } from "@/lib/daemon-token";
 
@@ -45,10 +45,8 @@ describe("startAgentMessage — flag-on (remote) dispatch seam", () => {
       db,
       userId: user.id,
       overrides: {
-        // "hatchet-remote" is the per-thread opt-in read by hatchetDispatchEnabled;
-        // it is not in the SandboxProvider union (env HATCHET_ENABLED is the prod
-        // enabler), so cast to drive the seam here without HATCHET_* env.
-        sandboxProvider: "hatchet-remote" as SandboxProvider,
+        // "hatchet-remote" drives hatchetDispatchEnabled without HATCHET_* env.
+        sandboxProvider: "hatchet-remote",
         githubRepoFullName: "be-automata/automata",
         repoBaseBranchName: "main",
       },
@@ -71,6 +69,51 @@ describe("startAgentMessage — flag-on (remote) dispatch seam", () => {
         name: daemonRunKey({ threadId, threadChatId }),
       }),
     ).toBe(true);
+  });
+
+  it("fails the thread to a terminal error (not a stuck 'booting' zombie) when the dispatch fails", async () => {
+    // FINDING #4: a dispatch that never creates a Hatchet run must surface a
+    // terminal error, mirroring in-process sandbox-creation-failed — otherwise the
+    // thread sits in `booting` forever (the b3ee96a5 zombie).
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("boom", { status: 500 })),
+    );
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        sandboxProvider: "hatchet-remote",
+        githubRepoFullName: "be-automata/automata",
+        repoBaseBranchName: "main",
+      },
+    });
+
+    await startAgentMessage({
+      db,
+      userId: user.id,
+      message: null,
+      threadId,
+      threadChatId,
+      isNewThread: true,
+    });
+
+    const threadChat = await getThreadChat({
+      db,
+      threadId,
+      threadChatId,
+      userId: user.id,
+    });
+    // Terminal error surfaced (withThreadChat → system.error), NOT stuck booting.
+    expect(threadChat!.status).not.toBe("booting");
+    expect(threadChat!.errorMessage).toBe("sandbox-creation-failed");
+    // And the just-minted token was revoked (no stale dedup block).
+    expect(
+      await hasActiveDaemonToken({
+        userId: user.id,
+        name: daemonRunKey({ threadId, threadChatId }),
+      }),
+    ).toBe(false);
   });
 
   it("does NOT dispatch remotely for a normal (in-process) thread", async () => {

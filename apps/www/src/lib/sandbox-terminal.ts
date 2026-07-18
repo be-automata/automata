@@ -11,6 +11,9 @@ export function isSandboxTerminalSupported(sandboxProvider: SandboxProvider) {
     case "docker":
     case "mock":
       return false;
+    case "hatchet-remote":
+      // ADR-003: remote execution plane — no local sandbox terminal.
+      return false;
     default:
       const _exhaustiveCheck: never = sandboxProvider;
       console.error(`Unknown sandbox provider: ${_exhaustiveCheck}`);

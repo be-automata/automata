@@ -8,8 +8,52 @@ import {
   daemonRunKey,
 } from "@/lib/daemon-token";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
-import { waitUntilOutlivesRequest } from "@/lib/wait-until";
+import { ThreadError } from "@/agent/error";
 import { triggerAgentRun } from "./transport";
+
+/** Trigger-fetch retry policy — a transient network blip must not fail dispatch. */
+const TRIGGER_MAX_ATTEMPTS = 3;
+const TRIGGER_BACKOFF_MS = 400;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Trigger the agent-run with a small bounded retry. Each failed attempt is logged
+ * with the actual error; only the FINAL failure propagates (the caller then
+ * revokes the token + fails the thread). A transient (cold first-dispatch, socket
+ * blip) is absorbed silently.
+ */
+async function triggerWithRetry(
+  input: AgentRunInput,
+  threadId: string,
+  threadChatId: string,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= TRIGGER_MAX_ATTEMPTS; attempt++) {
+    try {
+      await triggerAgentRun(input, {
+        apiUrl: env.HATCHET_API_URL,
+        tenantId: env.HATCHET_TENANT_ID,
+        apiToken: env.HATCHET_API_TOKEN,
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+      console.error("[hatchet] trigger attempt failed", {
+        threadId,
+        threadChatId,
+        attempt,
+        maxAttempts: TRIGGER_MAX_ATTEMPTS,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (attempt < TRIGGER_MAX_ATTEMPTS) {
+        await sleep(TRIGGER_BACKOFF_MS * attempt);
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
 
 /**
  * www → Hatchet dispatch (ADR-003). When HATCHET_ENABLED, a booting thread runs
@@ -67,12 +111,13 @@ export async function dispatchAgentRun({
   const runKey = daemonRunKey({ threadId, threadChatId });
 
   // Double-dispatch guard (idempotency): the Hatchet v1 trigger has no server-side
-  // dedup, so if a dispatch for this run is already in flight (its daemon token,
-  // named by runKey, still exists — revoked on terminal), skip. runKey is keyed on
-  // threadId so it does NOT collide across threads that share the legacy threadChat
-  // sentinel (the bug that made one stale token block all future dispatches).
+  // dedup. runKey is keyed on threadId, so a live token means a run for THIS thread
+  // is already in flight (tokens are revoked on terminal AND on trigger failure) —
+  // it will drive the thread, so skipping is correct and NOT a zombie. (This is no
+  // longer the cross-thread collision that stranded threads under the shared legacy
+  // sentinel — that was the per-run-key fix.) Benign: do not fail the thread here.
   if (await hasActiveDaemonToken({ userId, name: runKey })) {
-    console.log("[hatchet] skipping duplicate dispatch — already in flight", {
+    console.log("[hatchet] skipping duplicate dispatch — a run is already in flight", {
       threadId,
       threadChatId,
     });
@@ -100,31 +145,28 @@ export async function dispatchAgentRun({
     branch,
   });
 
-  // The token is minted BEFORE the trigger (the input carries its value), so on a
-  // trigger failure we must revoke it — otherwise a stale token blocks the dedup
-  // guard and the run can never be re-dispatched.
-  const triggerAndRollback = triggerAgentRun(input, {
-    apiUrl: env.HATCHET_API_URL,
-    tenantId: env.HATCHET_TENANT_ID,
-    apiToken: env.HATCHET_API_TOKEN,
-  }).catch(async (error) => {
-    // Terminal background work: log + revoke so a stale token can't block the
-    // dedup guard, then swallow (no caller is awaiting this — re-throwing would
-    // only surface as an unhandled rejection). A retry re-dispatches cleanly.
-    console.error("[hatchet] trigger failed — revoking daemon token", {
+  try {
+    // The token is minted BEFORE the trigger (the input carries its value). Retry
+    // absorbs transients; only a FINAL failure lands here.
+    await triggerWithRetry(input, threadId, threadChatId);
+  } catch (error) {
+    // Dispatch failed for good. Revoke the just-minted token so it can't block the
+    // dedup guard (a retry re-dispatches cleanly), then throw so withThreadChat
+    // transitions the thread to a terminal error — the remote path's equivalent of
+    // in-process sandbox-creation-failed handling. Without this the thread would
+    // sit in `booting` forever with no surfaced error (zombie thread).
+    console.error("[hatchet] dispatch failed after retries — revoking token + failing thread", {
       threadId,
       threadChatId,
-      error,
+      error: error instanceof Error ? error.message : String(error),
     });
     await revokeDaemonTokensForSandbox({ userId, sandboxId: runKey }).catch(
       () => {},
     );
-  });
-
-  // Register the trigger on the Workers ExecutionContext so the outbound fetch
-  // through the tunnel survives after the webhook Response returns. Awaiting it in
-  // the request scope let it die with "Network connection lost" (ADR-003; see
-  // waitUntilOutlivesRequest). The fetch is invoked synchronously here; only its
-  // completion is deferred.
-  waitUntilOutlivesRequest(triggerAndRollback);
+    throw new ThreadError(
+      "sandbox-creation-failed",
+      "Failed to dispatch the remote agent run.",
+      error instanceof Error ? error : null,
+    );
+  }
 }

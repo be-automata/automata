@@ -421,6 +421,10 @@ export async function getSandboxProvider({
       return "docker";
     case "mock":
       return "mock";
+    case "hatchet-remote":
+      // ADR-003: a thread pinned to remote dispatch keeps that provider; the local
+      // boot path is never taken for it.
+      return "hatchet-remote";
     default:
       const _exhaustiveCheck: never = userSetting;
       throw new Error(`Unknown sandbox provider: ${_exhaustiveCheck}`);

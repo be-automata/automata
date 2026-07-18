@@ -164,12 +164,43 @@ describe("dispatchAgentRun", () => {
     vi.unstubAllGlobals();
   });
 
-  it("revokes the just-minted daemon token when the trigger fails (no stale token)", async () => {
+  it("retries, then revokes the token and throws when the trigger keeps failing", async () => {
     const runKey = daemonRunKey({ threadId, threadChatId });
-    // The trigger returns a non-2xx → triggerAgentRun throws → dispatch must revoke.
+    // Every attempt is a non-2xx → triggerAgentRun throws → after the retry budget
+    // dispatch revokes the token and throws (so withThreadChat fails the thread).
     const fetchMock = vi
       .fn()
       .mockResolvedValue(new Response("boom", { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      dispatchAgentRun({
+        userId: user.id,
+        threadId,
+        threadChatId,
+        repoFullName: "be-automata/automata",
+        branch: "main",
+      }),
+    ).rejects.toThrow();
+
+    // Retried up to the budget, then gave up.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // Token revoked (revoke is awaited before the throw) — no stale block.
+    expect(
+      await hasActiveDaemonToken({ userId: user.id, name: runKey }),
+    ).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it("absorbs a transient trigger failure via retry (no throw, token kept)", async () => {
+    const runKey = daemonRunKey({ threadId, threadChatId });
+    // First attempt fails, second succeeds — dispatch must NOT throw or revoke.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("blip", { status: 502 }))
+      .mockResolvedValue(
+        new Response(JSON.stringify({ externalId: "run" }), { status: 200 }),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     await dispatchAgentRun({
@@ -180,12 +211,10 @@ describe("dispatchAgentRun", () => {
       branch: "main",
     });
 
-    // The revoke runs in the background (registered on the waitUntil seam); poll.
-    await vi.waitFor(async () => {
-      expect(await hasActiveDaemonToken({ userId: user.id, name: runKey })).toBe(
-        false,
-      );
-    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      await hasActiveDaemonToken({ userId: user.id, name: runKey }),
+    ).toBe(true);
     vi.unstubAllGlobals();
   });
 });

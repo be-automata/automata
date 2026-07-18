@@ -22,6 +22,12 @@ export function getSandboxProvider(
       return new DockerProvider();
     case "daytona":
       return new DaytonaProvider();
+    case "hatchet-remote":
+      // ADR-003: dispatched to the execution plane, never instantiated as a local
+      // sandbox. Reaching here means a remote thread wrongly took the boot path.
+      throw new Error(
+        "hatchet-remote is dispatched to the execution plane, not instantiated as a local sandbox provider",
+      );
     default:
       const _exhaustiveCheck: never = provider;
       throw new Error(`Unknown sandbox provider: ${_exhaustiveCheck}`);
