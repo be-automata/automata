@@ -12,6 +12,13 @@ describe("loadWorkerConfig", () => {
     expect(path.isAbsolute(cfg.daemonDist)).toBe(true);
     expect(cfg.daemonDist).toMatch(/daemon\/dist\/index\.js$/);
     expect(cfg.workdirRoot).toMatch(/automata-worker-runs$/);
+    expect(cfg.botLogin).toBe("automata-ai-bot[bot]");
+  });
+
+  it("honours WORKER_BOT_LOGIN override", () => {
+    expect(loadWorkerConfig({ WORKER_BOT_LOGIN: "somnio-bot[bot]" }).botLogin).toBe(
+      "somnio-bot[bot]",
+    );
   });
 
   it("honours explicit env overrides", () => {

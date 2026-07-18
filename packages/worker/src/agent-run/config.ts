@@ -30,6 +30,8 @@ export interface WorkerConfig {
   workdirRoot: string;
   /** thread-status poll interval, ms (5-10s; runs are minutes-long — ADR-003). */
   pollIntervalMs: number;
+  /** GitHub App bot login the run's git commits are authored as (never the operator). */
+  botLogin: string;
 }
 
 function defaultDaemonDist(): string {
@@ -70,5 +72,6 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
       Number.isFinite(pollIntervalMs) && pollIntervalMs > 0
         ? pollIntervalMs
         : 7000,
+    botLogin: env.WORKER_BOT_LOGIN?.trim() || "automata-ai-bot[bot]",
   };
 }

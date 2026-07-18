@@ -2,8 +2,10 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { defaultUnixSocketPath } from "@terragon/daemon/shared";
+import { buildDaemonEnv } from "./daemon-env";
 import type { WorkerConfig } from "./config";
 import type { AgentRunInput, PulledDaemonMessage } from "./types";
 
@@ -25,6 +27,7 @@ import type { AgentRunInput, PulledDaemonMessage } from "./types";
  */
 export class DaemonProcess {
   private child: ChildProcess | null = null;
+  private ghConfigDir: string | null = null;
   private readonly socketPath = defaultUnixSocketPath;
   // PID of the daemon's process group, persisted so a daemon leaked by a prior
   // worker-process death (which never ran teardown) can be reclaimed on next start.
@@ -46,13 +49,18 @@ export class DaemonProcess {
     // may outlive its run. Safe under concurrency=1: at most one daemon at a time.
     this.reclaimOrphanDaemon();
 
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      ANTHROPIC_API_KEY: this.config.anthropicApiKey,
-    };
-    if (this.config.claudeBinDir) {
-      env.PATH = `${this.config.claudeBinDir}:${process.env.PATH ?? ""}`;
-    }
+    // Isolated, EMPTY gh config dir so the agent's `gh` can't read the operator's
+    // stored OAuth (hosts.yml) and post as the human — it must use the installation
+    // token (GH_TOKEN) → the App bot. Cleaned up in teardown.
+    this.ghConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "automata-gh-"));
+    const env = buildDaemonEnv({
+      baseEnv: process.env,
+      anthropicApiKey: this.config.anthropicApiKey,
+      claudeBinDir: this.config.claudeBinDir,
+      installationToken: this.input.installationToken,
+      ghConfigDir: this.ghConfigDir,
+      botLogin: this.config.botLogin,
+    });
 
     this.child = spawn(
       this.config.nodeBin,
@@ -111,6 +119,14 @@ export class DaemonProcess {
       fs.rmSync(this.pidFilePath, { force: true });
     } catch {
       // ignore
+    }
+    if (this.ghConfigDir) {
+      try {
+        fs.rmSync(this.ghConfigDir, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+      this.ghConfigDir = null;
     }
     if (pid == null) {
       return;
