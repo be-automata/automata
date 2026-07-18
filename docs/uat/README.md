@@ -140,6 +140,7 @@ PR=$(gh pr create --repo "$REPO" --base "$BASE" --head "$BR" --title "UAT: ADR-0
 
 | case | path | invariant | last verdict (2026-07-18) |
 |---|---|---|---|
+<!-- BLOCK 10/10 as of 2026-07-18: all 10 cases PASS, BUG-EXEC-01 closed, zero open blocking bugs -->
 | S1 | review | opened → CHANGES_REQUESTED, no-dup | PASS (via interim reconciler) |
 | S2 | review | partial-fix → still-CR at new HEAD, no-dup | PASS |
 | S3 | review | full-fix → APPROVE + dismiss prior | PASS (supersede-dismiss proven) |
@@ -149,7 +150,7 @@ PR=$(gh pr create --repo "$REPO" --base "$BASE" --head "$BR" --title "UAT: ADR-0
 | S7 | command | `/request-changes` → CR via command path | PASS |
 | S8 | command | verdict upgrade dismisses prior APPROVED | PASS |
 | S9 | mention | unknown `/review` → some response | PASS |
-| S12 | mention | burst reliability: N mentions → ALL N eventually answered | INCONCLUSIVE (harness-confounded: 2nd automation fired per fixture) — blocked by **BUG-EXEC-01** (over-cap work queues, never drains); mention-path code verified correct |
+| S12 | mention | burst reliability: N mentions → ALL N eventually answered | ✅ PASS (every over-cap mention promoted + answered; BUG-EXEC-01 fixed). ~13min = concurrency=1 pilot throughput (ADR-002 §6) |
 | S10, S11, S13, S14 | phase-2 | inline threads / resolve / stale-guard / one-review-object | PARKED (phase-2 surface) |
 
 **Known-gaps carried** (not FAILs; upgrade pointers in each case):
