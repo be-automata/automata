@@ -68,6 +68,23 @@ add **Checks: Read and write**, save, then **re-approve the new permission on th
 be-automata installation** (GitHub prompts the org owner to accept). Until then,
 check-run publication is expected to fail — task creation/intake is unaffected.
 
+## 5. Hatchet execution-plane tunnel is EPHEMERAL (pilot)
+
+The control plane (www on Workers) reaches the Hatchet engine through a **cloudflared
+quick tunnel** (`*.trycloudflare.com`), and `HATCHET_API_URL` is a www Worker secret
+pointing at it. A probe confirmed Worker→tunnel fetch is reliable, so a quick tunnel is
+fine for the pilot — BUT a quick tunnel has **no uptime guarantee** and its hostname
+changes every launch. If it drops mid-operation, dispatch fetches fail and no agent-run
+is triggered. Recovery drill:
+
+1. `cloudflared tunnel --url http://localhost:8888` → grab the new `*.trycloudflare.com` URL.
+2. `wrangler secret put HATCHET_API_URL` on `automata-www` with the new URL (no rebuild
+   needed — it's a runtime secret; the change is live on the next request).
+3. Verify `edge → {url}/api/v1/meta` returns 200.
+
+A **named tunnel** on the `beautomata.com` zone (`hatchet.beautomata.com → localhost:8888`)
+is the stable production replacement — deferred until after the C8 proof.
+
 ## Runbook note (deploy lesson)
 
 Never `source`/`set -a; . file` an env file whose values contain `&` (query
