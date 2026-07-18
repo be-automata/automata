@@ -1,0 +1,39 @@
+{
+  "name": "@terragon/worker",
+  "version": "1.0.0",
+  "description": "Execution-plane worker runtime (Hatchet) — customer-supplied box per ADR-002.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "hatchet:up": "docker compose -f docker-compose.hatchet.yml up -d",
+    "hatchet:down": "docker compose -f docker-compose.hatchet.yml down",
+    "hatchet:logs": "docker compose -f docker-compose.hatchet.yml logs -f hatchet-lite",
+    "worker": "tsx src/hello/worker.ts",
+    "trigger": "tsx src/hello/trigger.ts",
+    "test": "vitest --no-file-parallelism --passWithNoTests",
+    "tsc-check": "tsc --noEmit",
+    "format": "prettier --write . --ignore-path ../../.prettierignore --config ../../.prettierrc",
+    "format-check": "prettier --check . --ignore-path ../../.prettierignore --config ../../.prettierrc"
+  },
+  "exports": {
+    ".": {
+      "import": "./src/index.ts"
+    },
+    "./*": {
+      "import": "./src/*.ts"
+    }
+  },
+  "keywords": [],
+  "packageManager": "pnpm@10.14.0",
+  "dependencies": {
+    "@hatchet-dev/typescript-sdk": "^1.26.0"
+  },
+  "devDependencies": {
+    "@terragon/tsconfig": "workspace:*",
+    "@types/node": "^22.15.21",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  }
+}

@@ -1,0 +1,61 @@
+# Hatchet execution-plane substrate for the Automata pilot (ADR-002).
+#
+# Pilot topology: THIS box plays the BeAutomata "customer-supplied" execution box.
+# hatchet-lite bundles engine + REST API + dashboard in one container against its
+# OWN dedicated Postgres (internal to this compose network — no host port, so no
+# collision with the :3100 self-host stack's Postgres on 55432).
+#
+# Image is PINNED to a non-dev tag (ADR-002 §Deployment guard): the `-dev` images
+# embed a publicly-known JWT signing key (authdisabled build tag) which voids tenant
+# isolation. Never switch this to `hatchet-lite-dev` or add `--disable-auth`.
+#
+# SERVER_GRPC_INSECURE=t is a PILOT-ONLY concession: the worker and engine both run
+# on localhost here, so the token never crosses the public internet. ADR-002 §Option D
+# requires SERVER_GRPC_INSECURE=false for real customer boxes (the worker token is
+# sniffable in plaintext transport). Do not copy this value into a customer installer.
+version: "3.8"
+name: automata-hatchet
+services:
+  postgres:
+    image: postgres:15.6
+    command: postgres -c 'max_connections=200'
+    restart: always
+    environment:
+      - POSTGRES_USER=hatchet
+      - POSTGRES_PASSWORD=hatchet
+      - POSTGRES_DB=hatchet
+    volumes:
+      - automata_hatchet_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d hatchet -U hatchet"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+  hatchet-lite:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.94.10
+    restart: always
+    ports:
+      - "8888:8888" # dashboard + REST API
+      - "7077:7077" # engine gRPC
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://hatchet:hatchet@postgres:5432/hatchet?sslmode=disable"
+      SERVER_AUTH_COOKIE_DOMAIN: localhost
+      SERVER_AUTH_COOKIE_INSECURE: "t"
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_GRPC_INSECURE: "t"
+      SERVER_GRPC_BROADCAST_ADDRESS: localhost:7077
+      SERVER_GRPC_PORT: "7077"
+      SERVER_URL: http://localhost:8888
+      SERVER_AUTH_SET_EMAIL_VERIFIED: "t"
+      SERVER_DEFAULT_ENGINE_VERSION: "V1"
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: localhost:7077
+    volumes:
+      - "automata_hatchet_config:/config"
+
+volumes:
+  automata_hatchet_postgres_data:
+  automata_hatchet_config:
