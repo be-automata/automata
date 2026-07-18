@@ -498,3 +498,42 @@ branches (each review in a throwaway microVM). Tier C's thin-worker variant is a
 stone to a fully-hosted offering — we run the thin worker, the customer's sandbox account runs
 the compute — reaching the Heroku/Vercel feel without the platform ever hosting agent compute.
 
+### R3.9 Pluggable agent runtimes — Layer 1 is plural, by re-use
+
+The chassis was multi-agent from birth, and the capacity is present, not aspirational:
+`packages/daemon` ships runtime adapters for **claude, amp, codex, gemini, opencode**, each with
+its own test suite, dispatched by agent type inside the daemon's runtime layer; and
+`apps/www/src/agent/credentials.ts` already resolves **per-agent, per-org** credentials from
+`agentProviderCredentials`. The Claude-only shape of the pilot is a *worker configuration*
+(`CLAUDE_BIN` pinned, `CLAUDE_CODE_SIMPLE`), not a daemon limitation. Supporting more runtimes is
+therefore **un-pinning and certifying**, not building:
+
+1. **Worker un-pinning.** Thread's agent type flows through the dispatch input; the worker stops
+   hardcoding the claude spawn path and defers to the daemon's existing runtime dispatch. The
+   sealed env (R3.4) gains each runtime's *declared* intentional keys (`OPENAI_API_KEY`, AMP key,
+   …) — the whitelist model makes this an explicit, reviewable delta per runtime.
+2. **Box capability advertising.** Runtime binaries are a box property: the base image (R3.8)
+   pre-bakes them, `worker doctor` reports which are present and at what version, and worker
+   registration advertises them — the control plane routes an amp thread only to a box that has
+   amp. A thread for a runtime the box lacks is a loud registration-level mismatch, not a
+   mid-run failure.
+3. **Decision §4 applies per provider, at the same seam.** Some chassis credential paths are
+   OAuth/subscription-shaped (Terragon custodied subscription credentials; we do not). The
+   write-time rule extends provider-by-provider: API keys storable in `agentProviderCredentials`;
+   subscription-shaped credentials rejected from **our** store — customers may still use them
+   box-side under the R3.2 tolerated tier, with auth-mode telemetry naming the mode per runtime.
+4. **Certification is per-runtime — presence is not parity.** The UAT baseline (C8, the ADR-036
+   effect-intent block) certifies the *Claude* runtime only. Every other runtime enters at
+   **Tier C behind flags** and promotes only after passing its own parity gate; capacity specs
+   (§6) are re-measured per runtime before its tier promotes. Run provenance and registration
+   telemetry name the runtime + version that produced every review — same trust rule as packs
+   (R3.3).
+
+**Milestone constraint, restated:** the current milestone remains claude-agent-sdk only (the
+orch-agents Codex/Gemini executor adapters stay frozen). R3.9's point is that the architecture is
+pluggable **by design and by existing code**, so un-freezing is a roadmap step — worker
+un-pinning + a parity gate — not an architecture change. Product upside worth naming: multi-
+runtime × customer box means an org can run Claude for reviews and Codex for other work, each on
+its own keys, on its own hardware — a combination sealed-sandbox, single-runtime products cannot
+offer.
+
