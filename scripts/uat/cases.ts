@@ -188,7 +188,7 @@ export async function S12(N = 4): Promise<CaseResult> {
       P.SETTLE_TRIES + 6,
     );
     if (answered === N) return pass(r, `all ${N} mentions replied (no silent loss)`);
-    return fail(r, `burst reliability: only ${answered}/${N} replied — ${N - answered} silent (mid-run token revocation class; see docs/uat S12)`);
+    return fail(r, `burst reliability: only ${answered}/${N} issues answered — ${N - answered} unanswered (see docs/uat S12 for known concurrency mis-routing/under-dispatch under burst)`);
   } catch (e: any) { return fail(r, `error: ${e.message}`); }
   finally { for (const i of issues) cleanup({ issues: [i] }); }
 }

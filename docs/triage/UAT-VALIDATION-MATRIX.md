@@ -1387,3 +1387,19 @@ Supersedes the earlier "shared revocation key" hypothesis on two points; S12=FAI
 - **Confirmed mechanism:** the silent siblings each got a **401/403 on a thread-status poll while STILL WORKING**. Worker `pollUntilTerminal` (`packages/worker/src/agent-run/www-client.ts`) applies the ADR-003 revoke-race ruling → any post-first-poll 401/403 becomes `terminal-inferred-from-revocation` = reported to Hatchet as **normal COMPLETION**. Hence the signature (COMPLETED + no reply + no capacity msg + not SCHEDULING_TIMED_OUT): a mid-work cut-off **mislabeled as success**. Ruled out: socket contention (→ECONNREFUSED→FAILED) and agent error (→FAILED); only a 401/403 launders into COMPLETED.
 - **Correction:** burst-time www `f03cf6f` ALREADY had the F2 threadId anchor `44bfa7d` (ancestry-verified) → sibling tokens were **per-run distinct**, so "shared revocation key" is not the whole story. WHY the distinct in-flight tokens got 401/403 mid-work is OPEN (team-lead + tenancy-coder). Two fixes implied: (a) worker must not launder a mid-work 401/403 into COMPLETED (distinguish revoked-after-working-done from revoked-during-working); (b) stop whatever revokes in-flight tokens under concurrency.
 - **Unchanged:** S12 = FAIL (concurrent-reply reliability), independent of the per-org-vs-per-user capacity-model difference. Flips to PASS on the burst re-run (all N reply) after the fix.
+
+## S12 NEUTRAL RE-RUN — VERDICT: FAIL (REAL concurrency mis-routing) — retracts all prior S12 root causes (2026-07-18)
+
+Ran `pnpm uat S12` with NEUTRAL fixtures (issues #15-18, genuine questions, zero test framing). Harness asserted **FAIL 1/4**. Independently verified GitHub-side AND via boot-coder's OLAP correlation:
+- 4 distinct neutral mentions (#15 main-packages, #16 webhook-pkg, #17 agent-run-worker, #18 database) — all got the eyes-ack.
+- **Only 3 agent-runs dispatched** (6056777d, 5a609c2b, 82605703; all COMPLETED). **Two collapsed onto issue #15** (replies @15:45:08Z + @15:46:18Z, different content, two runs). **#16/#17/#18 = ZERO run, ZERO reply.** The 3rd run posted nothing. Net **1/4 issues answered**.
+
+**This is a REAL bug, and it retracts the entire prior S12 root-cause chain.** Sequence of (mis)understanding, kept as a caution:
+1. My mid-run-token-revocation / worker-laundering theory — WRONG (retracted).
+2. Team-lead's premature-`handleThreadFinish` theory — fell with #1.
+3. Attempt-1 re-triage: INVALID-FIXTURE — the "(do not action)"/test framing made agents correctly DECLINE (transcripts show `result: success`). Real, but masked #4.
+4. **Attempt-2 (neutral): the actual bug — burst concurrency MIS-ROUTING / UNDER-DISPATCH.** 4 mentions → 3 runs, 2 collapse onto one issue, siblings get no run.
+
+**Root cause (hypothesis, www confirmation pending — boot-coder + tenancy-coder):** shared `legacy-thread-chat-id` sentinel collapsing thread/message routing under burst (thread creation / `getThreadChat` userId+threadChatId fencing, upstream of the threadId-keyed next-message pull), possibly compounded by `MAX_CONCURRENT_TASKS_PER_USER=3` truncating the 4th. NOT revocation, NOT laundering, NOT fixture-framing.
+
+**BLOCK STATUS: 9 PASS / 1 FAIL (S12 = real concurrency mis-routing). Does NOT close 10/10** until the mis-routing/under-dispatch fix deploys and a neutral-fixture burst re-run yields all N answered (one run per issue). The deferred worker loud-fail backstop (mid-work revocation → LOUD) remains a separate latent-robustness item, NOT the S12 cause.
