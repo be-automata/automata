@@ -16,6 +16,14 @@
   decision below — the control/execution split and the credential-placement rules — is unchanged
   and is the reason the swap is cheap. Amended in place rather than superseded because nothing was
   built against rev 1. Rationale: see Options C (withdrawn) and D (chosen).
+- **Revision 3 (2026-07-18, operator + platform-convergence lead):** the customer box is promoted
+  from "compute we do not pay for" to a **first-class customization surface** — the layered
+  runtime, the two-tier Anthropic auth posture, curated customization packs, and the
+  resource-metrics surface. See "Revision 3" section at the end. Written after C8 (first live
+  end-to-end agent run through this plane, 2026-07-18) and after the ambient-credential identity
+  leak found in that run was closed — both inform the rules below. Core split and credential
+  placement (Decision §3) remain unchanged; §4's write-time rule is unchanged, its scope is
+  clarified.
 
 ## Context
 
@@ -326,3 +334,118 @@ org B is never delivered to org A's worker.
   (ADR-001 already flags user-personal vs org-shared as a real product decision). Confirm the
   published release image matches the source read here — the spike verified source at `301391d`,
   not the shipped artifact.
+
+## Revision 3 — the customer box as a customization surface (2026-07-18)
+
+Rev 2 made the execution plane customer-supplied for isolation and cost reasons. Rev 3 recognizes
+what that box *also* is: the place where a customer can run tooling we could never host. Sealed-
+sandbox competitors give agents whatever the vendor baked in; on a customer box, the org installs
+its internal CLIs, MCP servers pointing at internal systems, and its own skills — and those
+internal credentials **never touch the control plane**. Toolchain sovereignty on top of data
+sovereignty. This is a differentiator, and the orch-agents production VPS is the working proof:
+`/home/orch/.claude/{skills,commands,agents,plugins}` with GSD + ruflo installed by
+`provision.sh` and resolved by the SDK from `HOME`, serving two live orgs today. Rev 3 codifies
+an operated pattern, not a speculative one.
+
+### R3.1 The layered runtime
+
+The box is specified as four layers, each with a distinct owner and support posture:
+
+| Layer | What | Owner | Posture |
+|---|---|---|---|
+| 0 | worker (registration, provisioning, daemon protocol) | us | versioned; min-version gate at registration (Decision §7) |
+| 1 | agent runtime (Claude Code / SDK) | customer-installed | version reported at registration |
+| 2 | Anthropic auth | customer | two-tier (R3.2) |
+| 3 | customization packs (`~/.claude`: skills, commands, agents, plugins, MCP config) | customer, with curated batteries from us | R3.3 |
+
+### R3.2 Two-tier Anthropic auth — §4 scope clarified
+
+Decision §4's write-time rejection of `type='oauth'` stands **unchanged**: the control plane never
+stores, transports, or configures a subscription credential. What rev 3 clarifies is the case §4
+was never about — auth material that lives **only on the customer's box** and never transits us:
+
+- **Supported tier: BYO API key, configured on the customer's instance.** Env var on their box.
+  Strictly stronger than rev 2's baseline (where the org key sat in worker env we provisioned):
+  the credential never transits the control plane at all. This is the path we test, document, and
+  warrant.
+- **Tolerated tier: subscription auth (`claude setup-token` / CC login) on their instance, at
+  their own risk.** We do not custody it, do not configure it, and could not reliably block it —
+  it is their box. Custody blast radius, cost attribution, and rate-limit contention (three of
+  §4's four original objections) are resolved by construction: their box, their token, their
+  bill, their limits. The fourth — Anthropic's subscription terms tying usage to an individual —
+  is **relocated to the customer, not resolved**, and the ADR says so plainly rather than
+  pretending the tier does not exist. Installing CC and logging in is, mechanically, just another
+  Layer-3 customization.
+- **Auth-mode telemetry is mandatory.** The worker reports its auth mode (api-key vs
+  subscription vs unknown) in run/registration telemetry, so a rate-limited or ToS-suspended
+  subscription setup triages as "unsupported configuration," not a platform bug.
+
+### R3.3 Customization packs and the installer
+
+The "easy way" is the product. Three mechanisms:
+
+1. **Installer CLI verbs:** `automata worker init` (rev 2 §Rollout-4, unchanged),
+   `automata packs install <gsd|ruflo|mcp-…>` (curated batteries, mirroring what `provision.sh`
+   does on the VPS today), and `automata worker doctor` — validates box state: worker version,
+   agent-runtime version, auth mode, gh reachability, swap per the §6 capacity spec, pack
+   versions (the `assert-auth-enabled.sh` pattern generalized to the whole box).
+2. **Pack/version telemetry at registration** — the dashboard shows what each org's box runs;
+   support triage starts from data, not from "what is on your box" (rev 2's inverted-support Con,
+   partially answered).
+3. **Run provenance** — a run's record names the packs active when it executed. A review
+   generated with custom skills must say so; the Verified pillar's trust story depends on it.
+
+**SDK loading gotcha, encoded so it does not bite:** skills/commands/agents resolve from `HOME`
+via `settingSources`, but **plugins load only via an explicit `query()`
+`plugins:[{type:'local'}]`** — runtime-proven on the VPS. The worker must pass the plugin list
+explicitly; a customer dropping a plugin into `~/.claude/plugins` and seeing nothing happen is
+otherwise this feature's first support ticket.
+
+### R3.4 The security rule: customization adds capability, never identity
+
+C8's live run exposed the exact failure this rule exists to prevent: the agent inherited the
+operator box's ambient `gh` credentials and posted as a personal account instead of the App bot.
+Closed by the worker's sealed environment (whitelist-only env, isolated per-run `GH_CONFIG_DIR`,
+installation token as the sole gh/git credential, bot commit identity, fail-closed
+`gh auth status` precondition before every spawn). Rev 3 makes the general rule explicit:
+
+- **GitHub identity is always ours-scoped:** actions on GitHub happen only via the short-lived
+  installation token the control plane minted. No pack, plugin, or box profile may substitute
+  another identity; the fail-closed precondition blocks the run if bot auth cannot be confirmed.
+- **Customer credentials enter by declaration, not ambience.** Packs and MCP servers that need
+  the customer's own secrets (their Jira token, their internal API keys) get them via an explicit
+  per-key passthrough allowlist in the worker's own config — the "intentional secret" mechanism —
+  visible in `worker doctor` output. The sealed whitelist env stays the default; nothing ambient
+  leaks in.
+- **Known residual:** the daemon's login-shell spawn (`bash -lc`) sources the box profile after
+  env construction; a profile that re-exports `GH_TOKEN` is currently *detected* (fail-closed
+  gate) rather than *prevented*. The structural close — non-login-shell spawn or post-sourcing
+  env re-application — is a daemon-bundle change, tracked.
+
+### R3.5 Resource metrics and alerts
+
+Rev 2 named worker-offline visibility the #1 observability requirement. Rev 3 extends it to
+capacity: the worker heartbeat carries periodic RAM/CPU/disk/swap samples; the dashboard alerts
+on thresholds ("your instance is running out of memory") *before* the box hits the ENOMEM wall
+already debugged on the VPS. Operationally required, not a nice-to-have: once compute is the
+customer's, "why is my run slow" is their hardware, and we need the data to show it.
+
+### R3.6 Support boundary
+
+Curated packs (GSD, ruflo, our MCP batteries) = supported. Arbitrary customer packs = best-effort:
+telemetry-reported, named in run provenance, and a standing triage rule that a misbehaving run
+with unsupported packs active is investigated as customer-configuration first. Without this line
+every broken custom MCP server becomes our support ticket, which rev 2's Consequences already
+warned about.
+
+### R3.7 Consequences delta
+
+- **Positive:** a differentiator sealed-sandbox products structurally cannot copy; the
+  subscription-auth question gets an honest disposition instead of a silent gap; the billing
+  posture simplifies further (we never meter model spend we never see); enterprise objections
+  about tool access to internal systems are answered without widening our trust boundary.
+- **Negative / residual:** the ToS exposure of the tolerated tier sits with the customer but
+  adjacent to our product — the tier must stay documented-as-tolerated, never marketed; Layer-3
+  freedom raises variance between boxes, which telemetry and `worker doctor` mitigate but do not
+  eliminate; the login-shell residual (R3.4) stays open until the daemon-bundle change lands.
+
