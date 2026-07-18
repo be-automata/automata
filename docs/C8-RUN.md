@@ -1,1 +1,1 @@
-C8: first agent run through the Hatchet execution plane.
+C8 green run: org account funded — full agent execution expected.
