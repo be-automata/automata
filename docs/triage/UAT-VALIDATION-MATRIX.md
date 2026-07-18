@@ -1461,3 +1461,13 @@ The block does **NOT** report 10/10 while BUG-EXEC-01 is open. **Close-out path:
 
 ### 🎯 BLOCK FINAL: 10/10 — ZERO OPEN BLOCKING BUGS
 S1(re-run) S2 S3 S4 S5 S6 S7 S8 S9 = PASS; **S12 = PASS**. BUG-EXEC-01 CLOSED. The ADR-036 EXEC-parity block is COMPLETE. The block found and drove the fix of **two genuine production-class defects before any customer hit them**: (1) the review no-dup channel gap (agent posts via raw `gh`, no idempotency → interim reconciler) and (2) the dead background-job layer (concurrency-queue never drained → BUG-EXEC-01). Durable narrative suite (`docs/uat/`) + self-contained executable harness (`scripts/uat/`, `pnpm uat`) shipped and battle-tested.
+
+## S12 two-sided confirm COMPLETE — boot-coder OLAP corroboration (2026-07-18)
+
+boot-coder's authoritative OLAP/Neon per-mention-thread map corroborates the GitHub-side PASS (corroboration, not a gate — the 2-replies-per-issue observable was already conclusive):
+- #19 → mention thread `4a9978ed`: queued-tasks-concurrency → booting → working → complete → replied ✓
+- #20 → mention thread `01d5971d`: queued → booting → working → complete → replied ✓
+- #21 → mention thread `f13488a7`: queued → booting → working → complete → replied ✓
+- #22 → mention thread `fff991d7`: queued (held behind cap-3, promoted last) → booting → working → complete → replied ✓
+
+One mention run per issue, each posted exactly once — **no skew, no doubling, no stranding** (contrast the pre-fix skew where #15 got 2 and #16-18 got 0). Final queue depth = 0 (queued-tasks-concurrency=0, booting/working=0; 29 complete). Burst 17:04 → full drain ~17:19 (~15min, concurrency=1 pilot serial worker). **S12 PASS confirmed both sides. Parity block 10/10 — CLOSED.**
