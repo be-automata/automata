@@ -1286,3 +1286,21 @@ Pushed partial fix to PR #4 (removed console.log secret; off-by-one + attestatio
 - Note: n=1 at new HEAD, 0 dismissed → again no dup this run (reconciler dismiss-path still needs a caught-dup run or dup_reconciled telemetry).
 
 **S2 VERDICT: PASS** — matches OLD baseline (partial-fix → still-CR, Resolved:N, fixed item not re-raised, no-dup at new HEAD).
+
+## S3 (synchronize full-fix → APPROVE + dismiss prior) — PASS; reconciler supersede-dismiss PROVEN (2026-07-18)
+
+Pushed full fix to PR #4 (off-by-one → `>=`, false attestation removed). New HEAD f952793, run `5c2df542` COMPLETED. Final review state (stable across 4 polls):
+- `dcf933b` (S1-rerun HEAD): **DISMISSED**
+- `d4a9a5e` (S2 HEAD): **DISMISSED**
+- `f952793` (S3 HEAD): **APPROVED**, non-dismissed
+- ✅ **APPROVED at new HEAD**; ✅ **both prior CHANGES_REQUESTED dismissed**; ✅ non-dismissed blocking verdicts = 0; ✅ no-dup = exactly 1 non-dismissed review (the APPROVE).
+
+**This DEMONSTRATES the reconciler's supersede-dismiss live** — on the verdict change CR→APPROVE, all prior same-thread CHANGES_REQUESTED across commits were dismissed, leaving one APPROVE. Matches OLD baseline S3 (approve-then-dismiss inside runEffects). **S3 VERDICT: PASS.**
+
+Reconciler status: **supersede-dismiss path PROVEN (S3)**. The same-verdict DEDUP path (dismiss an identical duplicate CR, i.e. S1's original 2×CR) is still unproven live — no run has re-triggered the non-deterministic tool-layer double-post; confirm via `dup_reconciled` telemetry.
+
+## S1-group review-path cases COMPLETE; remaining 7 gated on the mention identity gate
+
+Review-path parity (no mention needed): **S1 re-run PASS, S2 PASS, S3 PASS.** All three match the OLD baseline at effect-intent level with the formal-review surface MATCHED and no-dup holding (reconciled end-state). Verdict quality is high (correct verdicts, full defect coverage, cross-cycle state awareness, Fixed/Still-outstanding structure).
+
+**The remaining 7 cases are ALL mention/command-path** — S4 (mention answer), S5 (mention re-review), S6 (mention code-fix), S7 (`/request-changes` command), S8 (verdict-upgrade via `/request-changes`), S9 (`/review` fall-through), S12 (capacity-gate mention) — and every one is BLOCKED on the mentioner-identity gate (`getUsersToTriggerTasks`=0 for espinozasenior). The mention gate is now the SOLE blocker for the rest of the block.
