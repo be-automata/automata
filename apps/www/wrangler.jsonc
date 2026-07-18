@@ -1,7 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "automata-www",
-  "main": ".open-next/worker.js",
+  // Custom entry: passes fetch through to the OpenNext-generated .open-next/worker.js
+  // and adds a scheduled() handler for the cron triggers below.
+  "main": "worker-entry.ts",
   // nodejs_compat + a recent compat date are REQUIRED by @opennextjs/cloudflare.
   "compatibility_date": "2026-06-05",
   // no_handle_cross_request_promise_resolution: the neon-serverless Pool is a
@@ -20,12 +22,14 @@
   },
   // S12: the background maintenance jobs were Vercel crons (apps/www/vercel.json)
   // which never fire on Workers. These native triggers fire the worker's scheduled()
-  // handler → runScheduledCron(event.cron) → the IN-PROCESS runners (server-lib/cron.ts).
-  // stalled-tasks (hourly) frees stuck concurrency slots; queued-tasks (every 10m)
-  // drains the per-user queue. (scheduled-tasks/automations crons still need their
-  // internalPOST self-fetch ported to in-process before wiring — fast-follow.)
+  // handler (worker-entry.ts), which routes each cron through openNext.fetch to the
+  // matching in-process route (server-lib/cron.ts runners). All four are in-process:
+  // stalled-tasks (hourly) frees stuck concurrency slots, scheduled-tasks (every 1m)
+  // runs due scheduled chats, queued-tasks (every 10m) drains the per-user concurrency
+  // queue, automations (every 30m) runs due automations. Keep in sync with
+  // CRON_TO_PATH in worker-entry.ts.
   "triggers": {
-    "crons": ["0 * * * *", "*/10 * * * *"],
+    "crons": ["0 * * * *", "*/1 * * * *", "*/10 * * * *", "*/30 * * * *"],
   },
   "observability": {
     "enabled": true,
