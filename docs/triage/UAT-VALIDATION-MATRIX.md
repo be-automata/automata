@@ -1471,3 +1471,16 @@ boot-coder's authoritative OLAP/Neon per-mention-thread map corroborates the Git
 - #22 → mention thread `fff991d7`: queued (held behind cap-3, promoted last) → booting → working → complete → replied ✓
 
 One mention run per issue, each posted exactly once — **no skew, no doubling, no stranding** (contrast the pre-fix skew where #15 got 2 and #16-18 got 0). Final queue depth = 0 (queued-tasks-concurrency=0, booting/working=0; 29 complete). Burst 17:04 → full drain ~17:19 (~15min, concurrency=1 pilot serial worker). **S12 PASS confirmed both sides. Parity block 10/10 — CLOSED.**
+
+## Stale-RETIREMENT branch — live-verified (non-blocking addendum, 2026-07-18)
+
+Precision note: the S12 burst above exercised **promotion/drain**, not the stale-**retirement** branch — all burst threads were fresh with open issues, so none hit the `>1h-or-closed-source` guard. The "14→0 backlog retired" in the CLOSED record was boot-coder's manual Neon cleanup of the pre-fix stranded fixtures, not the cron's retirement code path. Block close stands on the unit tests (`process-queued-thread.test.ts`); this probe adds live coverage of the safety branch (it's what prevents arbitrarily-old queued work from suddenly executing after a real outage).
+
+**Method:** seeded one `thread` row (`s12-retire-probe-001`, founder, `status=queued-tasks-concurrency`, `created_at` back-dated 48h so `isStaleQueuedThread` trips on age alone — issue/PR numbers null so the octokit closed-check is never called) directly in Neon; founder had 0 active threads so the queue was eligible; watched the next `*/10` `queued-tasks` tick; cleaned up the seed after.
+
+**Result: RETIRED, not executed — verified on all three layers:**
+1. **Decision log** (team-lead's www wrangler tail, tick @ ts 1784395860488): `[queue] RETIRING stale queued thread (archived, not run)` `{ threadId: 's12-retire-probe-001', threadChatId: 'legacy-thread-chat-id', reason: 'queued-age 2886m > 60m' }`.
+2. **DB end-state** (tenancy-coder Neon poll): `queued-tasks-concurrency → complete` + `archived=true`, `codesandbox_id` stayed null (transition observed between 17:25 and 17:31 probe-clock).
+3. **Execution absence** (boot-coder OLAP): zero runs in `v1_tasks_olap` referencing `s12-retire-probe-001` — no `startAgentMessage` → no Hatchet dispatch → no sandbox.
+
+Seed row deleted post-verification (queue depth back to 0). **`retirement: live-verified`.** This was the last open engineering item from the parity program.
