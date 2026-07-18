@@ -5,12 +5,8 @@
   "type": "module",
   "main": "src/index.ts",
   "exports": {
-    ".": {
-      "import": "./src/index.ts"
-    },
-    "./shared": {
-      "import": "./src/shared.ts"
-    },
+    ".": "./src/index.ts",
+    "./shared": "./src/shared.ts",
     "./raw-txt": {
       "import": "./dist/raw.txt",
       "types": "./src/raw-txt.d.ts"
