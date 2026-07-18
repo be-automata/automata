@@ -34,6 +34,7 @@ function headers(daemonToken: string): Record<string, string> {
  */
 export async function pullNextMessage(
   opts: WwwClientOpts,
+  signal?: AbortSignal,
 ): Promise<PulledDaemonMessage | null> {
   const res = await fetch(endpoint(opts.baseUrl, "/api/daemon/next-message"), {
     method: "POST",
@@ -42,6 +43,7 @@ export async function pullNextMessage(
       threadId: opts.threadId,
       threadChatId: opts.threadChatId,
     }),
+    signal,
   });
   if (res.status === 204) {
     return null;
@@ -65,6 +67,7 @@ export type ThreadStatusPoll =
  */
 export async function pollThreadStatus(
   opts: WwwClientOpts,
+  signal?: AbortSignal,
 ): Promise<ThreadStatusPoll> {
   const res = await fetch(endpoint(opts.baseUrl, "/api/daemon/thread-status"), {
     method: "POST",
@@ -73,6 +76,7 @@ export async function pollThreadStatus(
       threadId: opts.threadId,
       threadChatId: opts.threadChatId,
     }),
+    signal,
   });
   if (res.status === 401 || res.status === 403) {
     return { kind: "auth-error", httpStatus: res.status };
@@ -90,6 +94,8 @@ export async function pollThreadStatus(
 export interface PollContext {
   readonly cancelled: boolean;
   log: (message: string) => unknown;
+  /** Aborted when Hatchet cancels the run (scheduleTimeout/executionTimeout). */
+  signal?: AbortSignal;
 }
 
 export interface PollResult {
@@ -98,30 +104,57 @@ export interface PollResult {
 }
 
 /**
+ * Sleep that returns EARLY the moment the run is cancelled, so the poll loop reacts
+ * to a Hatchet cancel within ~250ms instead of a full poll interval — the daemon
+ * teardown must not wait out a 7s sleep after cancellation.
+ */
+async function cancellableSleep(ms: number, ctx: PollContext): Promise<void> {
+  const step = 250;
+  let elapsed = 0;
+  while (elapsed < ms) {
+    if (ctx.cancelled || ctx.signal?.aborted) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(step, ms - elapsed)));
+    elapsed += step;
+  }
+}
+
+/**
  * Poll thread-status until terminal, applying the revoke-race ruling (ADR-003):
  * handleThreadFinish revokes the daemon token AT terminal, so a poll may get
  * 401/403 before it ever observes {terminal:true}. A 401/403 AFTER at least one
  * successful poll IS the terminal signal (the token's revocation == completion) —
  * logged as 'terminal-inferred-from-revocation'. A 401/403 on the FIRST poll is a
- * real auth error and throws (the step fails loudly). A Hatchet cancellation ends
- * the loop with outcome 'cancelled'.
+ * real auth error and throws (the step fails loudly). A Hatchet cancellation
+ * (ctx.cancelled / aborted signal) ends the loop PROMPTLY with outcome 'cancelled'
+ * so the caller can tear the daemon down — no orphan survives a cancelled run.
  */
 export async function pollUntilTerminal(
   ctx: PollContext,
   opts: WwwClientOpts,
   pollIntervalMs: number,
-  sleep: (ms: number) => Promise<void> = (ms) =>
-    new Promise((resolve) => setTimeout(resolve, ms)),
+  sleep: (ms: number) => Promise<void> = (ms) => cancellableSleep(ms, ctx),
 ): Promise<PollResult> {
   let hadSuccessfulPoll = false;
   let lastStatus: string | undefined;
 
   for (;;) {
-    if (ctx.cancelled) {
+    if (ctx.cancelled || ctx.signal?.aborted) {
       return { outcome: "cancelled", finalStatus: lastStatus };
     }
 
-    const poll = await pollThreadStatus(opts);
+    let poll: ThreadStatusPoll;
+    try {
+      poll = await pollThreadStatus(opts, ctx.signal);
+    } catch (error) {
+      // A cancel-aborted fetch throws AbortError — treat as cancellation, not a
+      // hard failure, so the finally-block teardown runs cleanly.
+      if (ctx.cancelled || ctx.signal?.aborted) {
+        return { outcome: "cancelled", finalStatus: lastStatus };
+      }
+      throw error;
+    }
     if (poll.kind === "auth-error") {
       if (hadSuccessfulPoll) {
         ctx.log("terminal-inferred-from-revocation");

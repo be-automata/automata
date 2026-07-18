@@ -42,20 +42,34 @@ export const agentRun = hatchet.task({
       threadChatId: input.threadChatId,
     };
 
-    // Provision: clone the target branch into an isolated per-run workdir.
+    // Cancellation signal (Hatchet cancel: scheduleTimeout/executionTimeout). Used
+    // to abort in-flight pulls/polls so the finally-block daemon teardown runs
+    // promptly — no orphan daemon survives a cancelled run.
+    const signal: AbortSignal | undefined = ctx.abortController?.signal;
+    const pollCtx = {
+      get cancelled() {
+        return ctx.cancelled;
+      },
+      log: (message: string) => ctx.log(message),
+      signal,
+    };
+
+    // Provision: clone into a per-run workdir keyed on threadId. threadId is unique
+    // per thread; threadChatId is the shared legacy sentinel when
+    // enableThreadChatCreation is off, so it would collide every run onto one dir.
     const workdir = await provisionWorkdir({
       repoFullName: input.repoFullName,
       branch: input.branch,
       installationToken: input.installationToken,
       workdirRoot: config.workdirRoot,
-      threadChatId: input.threadChatId,
+      runId: input.threadId,
     });
 
     const daemon = new DaemonProcess(config, input, workdir);
     try {
       // Run: bring up the daemon, then pull the message it should execute.
       await daemon.start();
-      const message = await pullNextMessage(wwwOpts);
+      const message = await pullNextMessage(wwwOpts, signal);
       if (!message) {
         // Nothing to run (no pending user message / empty prompt).
         return {
@@ -70,7 +84,11 @@ export const agentRun = hatchet.task({
       // Poll www for terminal. The daemon streams events to www, which owns the
       // thread status; the worker asks www, not the daemon. Revoke-race ruling and
       // the poll loop live in www-client (pollUntilTerminal).
-      const result = await pollUntilTerminal(ctx, wwwOpts, config.pollIntervalMs);
+      const result = await pollUntilTerminal(
+        pollCtx,
+        wwwOpts,
+        config.pollIntervalMs,
+      );
       return {
         threadId: input.threadId,
         threadChatId: input.threadChatId,
@@ -78,6 +96,9 @@ export const agentRun = hatchet.task({
         finalStatus: result.finalStatus,
       };
     } finally {
+      // Terminal OR cancel (incl. scheduleTimeout): SIGKILL the daemon's process
+      // group so no orphan survives, then remove the workdir. Runs on normal return,
+      // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
       daemon.teardown();
       await cleanupWorkdir(workdir);
     }

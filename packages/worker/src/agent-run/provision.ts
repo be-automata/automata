@@ -17,15 +17,16 @@ export async function provisionWorkdir({
   branch,
   installationToken,
   workdirRoot,
-  threadChatId,
+  runId,
 }: {
   repoFullName: string;
   branch: string;
   installationToken: string;
   workdirRoot: string;
-  threadChatId: string;
+  /** Unique per-run directory key — pass threadId, NOT the shared legacy sentinel. */
+  runId: string;
 }): Promise<string> {
-  const workdir = path.join(workdirRoot, threadChatId);
+  const workdir = path.join(workdirRoot, runId);
   await fs.rm(workdir, { recursive: true, force: true });
   await fs.mkdir(workdir, { recursive: true });
 

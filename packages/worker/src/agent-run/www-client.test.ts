@@ -149,4 +149,46 @@ describe("pollUntilTerminal — revoke-race ruling", () => {
     const result = await pollUntilTerminal(cancelledCtx, opts, 1, noSleep);
     expect(result.outcome).toBe("cancelled");
   });
+
+  it("stops with outcome cancelled when the abort signal fires (Hatchet cancel/timeout)", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(200, { status: "working", terminal: false })),
+    );
+    const abortedCtx: PollContext = {
+      cancelled: false,
+      log: () => {},
+      signal: controller.signal,
+    };
+    const result = await pollUntilTerminal(abortedCtx, opts, 1, noSleep);
+    expect(result.outcome).toBe("cancelled");
+  });
+
+  it("treats a mid-poll AbortError as cancellation (not a hard failure) so teardown runs", async () => {
+    const controller = new AbortController();
+    // First poll works; then cancel + make the next fetch reject as if aborted.
+    let call = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        call++;
+        if (call === 1) {
+          return jsonResponse(200, { status: "working", terminal: false });
+        }
+        controller.abort();
+        throw new DOMException("Aborted", "AbortError");
+      }),
+    );
+    const abortCtx: PollContext = {
+      cancelled: false,
+      get signal() {
+        return controller.signal;
+      },
+      log: () => {},
+    };
+    const result = await pollUntilTerminal(abortCtx, opts, 1, noSleep);
+    expect(result.outcome).toBe("cancelled");
+  });
 });

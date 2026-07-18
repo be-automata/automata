@@ -1,5 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import net from "node:net";
+import path from "node:path";
 import { defaultUnixSocketPath } from "@terragon/daemon/shared";
 import type { WorkerConfig } from "./config";
 import type { AgentRunInput, PulledDaemonMessage } from "./types";
@@ -23,6 +26,12 @@ import type { AgentRunInput, PulledDaemonMessage } from "./types";
 export class DaemonProcess {
   private child: ChildProcess | null = null;
   private readonly socketPath = defaultUnixSocketPath;
+  // PID of the daemon's process group, persisted so a daemon leaked by a prior
+  // worker-process death (which never ran teardown) can be reclaimed on next start.
+  private readonly pidFilePath = path.join(
+    path.dirname(defaultUnixSocketPath),
+    "agent-run-daemon.pid",
+  );
 
   constructor(
     private readonly config: WorkerConfig,
@@ -32,6 +41,11 @@ export class DaemonProcess {
 
   /** Spawn the daemon (own process group) and wait until its socket accepts. */
   async start(): Promise<void> {
+    // Reclaim a daemon orphaned by a prior worker-process death before we bind the
+    // fixed socket — no rogue daemon (still running the agent in an old workdir)
+    // may outlive its run. Safe under concurrency=1: at most one daemon at a time.
+    this.reclaimOrphanDaemon();
+
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       ANTHROPIC_API_KEY: this.config.anthropicApiKey,
@@ -55,6 +69,14 @@ export class DaemonProcess {
     this.child.stdout?.resume();
     this.child.stderr?.resume();
 
+    if (this.child.pid != null) {
+      try {
+        fs.writeFileSync(this.pidFilePath, String(this.child.pid));
+      } catch {
+        // best-effort — reclaim just won't fire if we can't persist the pid
+      }
+    }
+
     await this.waitForSocket();
   }
 
@@ -76,6 +98,13 @@ export class DaemonProcess {
   /** SIGKILL the daemon's process group. Best-effort and idempotent. */
   teardown(): void {
     const pid = this.child?.pid;
+    this.child = null;
+    // Clear the pid file first so a later reclaim doesn't target a recycled pid.
+    try {
+      fs.rmSync(this.pidFilePath, { force: true });
+    } catch {
+      // ignore
+    }
     if (pid == null) {
       return;
     }
@@ -84,7 +113,36 @@ export class DaemonProcess {
     } catch {
       // already gone
     }
-    this.child = null;
+  }
+
+  /**
+   * Kill a daemon left behind by a prior worker-process death (its worker never ran
+   * teardown, so its process group is still alive holding resources / the agent).
+   * Best-effort: reads the persisted pid, SIGKILLs that group, clears the file, and
+   * removes a stale socket file so the new daemon binds clean.
+   */
+  private reclaimOrphanDaemon(): void {
+    try {
+      const raw = fs.readFileSync(this.pidFilePath, "utf8").trim();
+      const stalePid = Number(raw);
+      if (Number.isInteger(stalePid) && stalePid > 0) {
+        try {
+          process.kill(-stalePid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+      fs.rmSync(this.pidFilePath, { force: true });
+    } catch {
+      // no pid file — nothing to reclaim
+    }
+    try {
+      if (fs.existsSync(this.socketPath)) {
+        fs.rmSync(this.socketPath, { force: true });
+      }
+    } catch {
+      // the daemon unlinks/rebinds the socket itself; this is belt-and-suspenders
+    }
   }
 
   private async waitForSocket(timeoutMs = 15_000): Promise<void> {
@@ -124,25 +182,81 @@ export class DaemonProcess {
   }
 
   private writeToSocket(dataStr: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const sock = net.createConnection(this.socketPath);
-      sock.once("connect", () => {
-        sock.write(dataStr, (err) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-          sock.end();
-        });
-      });
-      sock.once("end", () => resolve());
-      sock.once("close", () => resolve());
-      sock.once("error", (err) => {
-        sock.destroy();
-        reject(err);
-      });
-    });
+    return writeDaemonMessage(this.socketPath, dataStr);
   }
+}
+
+/**
+ * Write one DaemonMessage over the daemon's unix-socket protocol and wait for its
+ * ACK. The daemon's socket server (DaemonRuntime.listenToUnixSocket) expects a
+ * WRAPPED envelope `{ id, data }` where `data` is the STRINGIFIED DaemonMessage —
+ * it JSON.parses the frame, hands the inner `data` to the message parser, and
+ * replies `{ status: "ACK"|"ERROR", id }`. Writing the raw message instead makes
+ * the daemon read `payloadData: undefined` → it never runs the agent and the run
+ * idles to the schedule timeout. This mirrors the daemon's own writeToUnixSocket.
+ */
+export function writeDaemonMessage(
+  socketPath: string,
+  dataStr: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const msgId = randomUUID();
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (!settled) {
+        settled = true;
+        fn();
+      }
+    };
+
+    const sock = net.createConnection(socketPath);
+    const timer = setTimeout(() => {
+      sock.destroy();
+      finish(() =>
+        reject(new Error(`daemon socket write timed out after ${timeoutMs}ms`)),
+      );
+    }, timeoutMs);
+
+    sock.once("connect", () => {
+      sock.write(JSON.stringify({ id: msgId, data: dataStr }));
+    });
+    sock.on("data", (buffer) => {
+      let response: { id?: string; status?: string; error?: string };
+      try {
+        response = JSON.parse(buffer.toString());
+      } catch {
+        return; // partial/other frame — keep waiting
+      }
+      if (response.id !== msgId) {
+        return;
+      }
+      clearTimeout(timer);
+      sock.end();
+      if (response.status === "ACK") {
+        finish(resolve);
+      } else {
+        finish(() =>
+          reject(
+            new Error(
+              `daemon rejected the message: ${response.error ?? response.status ?? "unknown"}`,
+            ),
+          ),
+        );
+      }
+    });
+    sock.once("error", (err) => {
+      clearTimeout(timer);
+      sock.destroy();
+      finish(() => reject(err));
+    });
+    sock.once("close", () => {
+      clearTimeout(timer);
+      finish(() =>
+        reject(new Error("daemon socket closed before ACK was received")),
+      );
+    });
+  });
 }
 
 function delay(ms: number): Promise<void> {
