@@ -90,6 +90,18 @@ export const env = envsafe({
   // deployment sets this FALSE until the pilot binding is verified in shadow.
   GITHUB_SIDE_EFFECTS_ENABLED: bool({ default: true }),
 
+  // Execution plane — Hatchet (ADR-003). When HATCHET_ENABLED, a booting thread
+  // dispatches to the Hatchet `agent-run` workflow (remote worker) instead of the
+  // in-process sandbox. All optional: unset/false = today's in-process behavior
+  // exactly (nullable-safe). HATCHET_API_URL is the engine's REST base reached
+  // through the cloudflared tunnel — it CHANGES per quick-tunnel run, so it is an
+  // env/secret, never hardcoded. HATCHET_API_TOKEN is the tenant-scoped Bearer
+  // token for the REST trigger; HATCHET_TENANT_ID is the tenant path segment.
+  HATCHET_ENABLED: bool({ default: false }),
+  HATCHET_API_URL: str({ default: "", allowEmpty: true }),
+  HATCHET_TENANT_ID: str({ default: "", allowEmpty: true }),
+  HATCHET_API_TOKEN: str({ default: "", allowEmpty: true }),
+
   // Posthog
   NEXT_PUBLIC_POSTHOG_KEY: str({
     default: "",

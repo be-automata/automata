@@ -534,12 +534,18 @@ async function handleThreadFinish({
   shouldSkipCheckpoint: boolean;
 }) {
   // ADR-003 F3: the thread turn has reached a terminal event — revoke this run's
-  // daemon token immediately (name = sandboxId). Any follow-up turn re-mints its
-  // own. Non-blocking; the 1-day expiry (plugin minimum) is the backstop if this fails.
+  // daemon token immediately. Any follow-up turn re-mints its own. Non-blocking;
+  // the 1-day expiry (plugin minimum) is the backstop if this fails. Revoke by
+  // BOTH names: the in-process path names the token by sandboxId, the remote
+  // (Hatchet) path names it by threadChatId (no sandbox on that path).
   waitUntil(
-    revokeDaemonTokensForSandbox({ userId, sandboxId }).catch((error) =>
+    Promise.all([
+      revokeDaemonTokensForSandbox({ userId, sandboxId }),
+      revokeDaemonTokensForSandbox({ userId, sandboxId: threadChatId }),
+    ]).catch((error) =>
       console.error("[daemon-token] revoke-on-terminal failed", {
         sandboxId,
+        threadChatId,
         error,
       }),
     ),

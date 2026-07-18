@@ -51,6 +51,12 @@ export default defineConfig({
       GITHUB_APP_ID: "GITHUB_APP_ID_TEST",
       GITHUB_APP_PRIVATE_KEY: "GITHUB_APP_PRIVATE_KEY_TEST",
 
+      // Hatchet dispatch config (HATCHET_ENABLED stays unset/false so tests never
+      // auto-dispatch; these let the transport be exercised against a mocked fetch).
+      HATCHET_API_URL: "https://hatchet-test.example.com",
+      HATCHET_TENANT_ID: "TENANT_TEST",
+      HATCHET_API_TOKEN: "HATCHET_API_TOKEN_TEST",
+
       // Make sure all the codepaths for isStripeConfigured are covered.
       STRIPE_SECRET_KEY: "STRIPE_SECRET_KEY_TEST",
       STRIPE_WEBHOOK_SECRET: "STRIPE_WEBHOOK_SECRET_TEST",

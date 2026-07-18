@@ -43,6 +43,10 @@ import {
   modelRequiresChatGptOAuth,
 } from "@terragon/agent/utils";
 import { handleSlashCommand } from "@/agent/slash-command-handler";
+import {
+  hatchetDispatchEnabled,
+  dispatchAgentRun,
+} from "@/agent/hatchet/dispatch";
 import { tryAutoCompactThread } from "@/server-lib/compact";
 import { waitUntil } from "@/lib/wait-until";
 import { maybeProcessFollowUpQueue } from "@/server-lib/process-follow-up-queue";
@@ -254,6 +258,23 @@ export async function startAgentMessage({
           appendMessages: uploadedMessage ? [uploadedMessage] : undefined,
         },
       });
+
+      // ADR-003: when the execution plane is on, dispatch to the remote Hatchet
+      // agent-run workflow instead of booting an in-process sandbox. The thread is
+      // already `booting`; from here the daemon's events drive the state exactly
+      // like a sandbox boot. Flag-off (no HATCHET_*) = the in-process path below,
+      // unchanged.
+      if (hatchetDispatchEnabled(thread!)) {
+        await dispatchAgentRun({
+          userId,
+          threadId,
+          threadChatId,
+          repoFullName: thread!.githubRepoFullName,
+          branch: branchName ?? thread!.branchName ?? thread!.repoBaseBranchName,
+        });
+        return;
+      }
+
       // Get or create sandbox for the thread
       const startTime = Date.now();
       // We need to provide onStatusUpdate for both new and resumed threads
