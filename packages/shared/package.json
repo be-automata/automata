@@ -20,18 +20,10 @@
     "format-check": "prettier --check . --ignore-path ../../.prettierignore --config ../../.prettierrc"
   },
   "exports": {
-    ".": {
-      "import": "./src/index.ts"
-    },
-    "./*": {
-      "import": "./src/*.ts"
-    },
-    "./automations": {
-      "import": "./src/automations/index.ts"
-    },
-    "./db": {
-      "import": "./src/db/index.ts"
-    }
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts",
+    "./automations": "./src/automations/index.ts",
+    "./db": "./src/db/index.ts"
   },
   "keywords": [],
   "packageManager": "pnpm@10.14.0",
