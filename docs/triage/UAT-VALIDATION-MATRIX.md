@@ -1197,3 +1197,13 @@ boot-coder minted a LIVE mint-only daemon token (never tied to a run → F3 neve
 **F2 VERDICT: PASS — closed-with-live-evidence.** A live token bound to thread A is accepted on A (204/200) but **403'd on thread B** — a DIFFERENT thread in the SAME org sharing the SAME legacy sentinel threadChatId. That is precisely the org-level-collapse case: pre-44bfa7d the binding keyed only on the shared sentinel and would have accepted B; post-44bfa7d it rejects on the threadId mismatch (route.ts:69). Upgrades the earlier "closed-by-design in HEAD" to **closed-with-live-evidence** for the Somnio gate record. Both daemon surfaces (next-message + thread-status) enforce it.
 
 **Net GATE-1 state:** F1 mechanism-half CLOSED (live) + F2 org-collapse CLOSED (live). Remaining GATE-1 item is only the bounded rollout cleanup (9d49bcb: age out pre-44bfa7d legacy null-threadId tokens, then drop the passthrough) — token-lifecycle, not a fence gap. F1 purpose-scoping re-verify on the onboarding-#2 (Somnio) topology remains the ONLY open GATE-1 sub-item, deferred to that onboarding.
+
+## PARITY PLANE READY — residuals #1 (surface) + #2 (identity) CLOSED, verified live (2026-07-18)
+
+boot-coder pinged 2-part ready (worker 3352b7c/355bf14 + automation live). Independently verified on PR #1 (`gh api`), NOT taken on report:
+- **Residual #2 (posting identity) CLOSED:** both formal reviews on PR #1 authored by `automata-ai-bot[bot]` (type **Bot**) — the espinozasenior ambient-creds leak is fixed live (3352b7c GH_TOKEN=installationToken + env sanitization).
+- **Residual #1 (effect surface) RESOLVED:** the plane now posts **FORMAL reviews via the reviews API** — COMMENTED (09:17:11Z) + APPROVED (09:19:11Z) — NOT issue comments. So the NEW effect surface now MATCHES the OLD baseline (formal APPROVED/CHANGES_REQUESTED/COMMENTED review). **Scoring impact: the per-case comment-vs-formal-review KNOWN-GAP annotation becomes a known-MATCH** — I can score direct surface-match on S1-S9/S12 rather than annotating a gap. (S14/S10/S11 inline-thread surface is a DIFFERENT path — `REVIEW_POST_INLINE_COMMENTS` / inline review comments, still 0 on PR #1 — so their phase-2 parking stands.)
+- **No-dup invariant holds:** exactly 1 non-dismissed APPROVED at commit 76546ebe.
+- **Organic chain live:** automation c95b9307 → dispatch → worker; runs 264564ba + 4c4fe636 COMPLETED, addec811 RUNNING. `triggered_by` is now organic (webhook→automation), not manual.
+
+**GATE-1 (F1/F2) already closed live (9a8f159); posting-identity residual now also closed.** Starting the 10-case parity block. Fixture PR next (S1).
