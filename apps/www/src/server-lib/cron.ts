@@ -4,9 +4,21 @@ import {
   stopStalledThreads,
   getUserIdsWithThreadsStuckInQueue,
   getUserIdsWithThreadsReadyToProcess,
+  getScheduledThreadChatsDueToRun,
 } from "@terragon/shared/model/threads";
+import { getScheduledAutomationsDueToRun } from "@terragon/shared/model/automations";
 import { maybeHibernateSandboxById } from "@/agent/sandbox";
 import { maybeStartQueuedThreadChat } from "@/server-lib/process-queued-thread";
+
+// NOTE: runScheduledThread and runAutomation are imported dynamically inside the
+// runner bodies below (not at module top). This cron module is eagerly loaded by the
+// test harness via the scheduled-tasks route; a static import of automations.ts /
+// scheduled-thread.ts would drag their transitive deps (new-thread-shared,
+// startAgentMessage) into the global test setup graph and bind real references
+// BEFORE per-file vi.mock() can intercept, breaking unrelated suites. The dynamic
+// import defers that load until the runner actually executes.
+
+const BATCH_SIZE = 5;
 
 /**
  * In-process cron runners (S12). The background maintenance jobs were declared ONLY
@@ -87,8 +99,69 @@ export async function runQueuedTasksCron(): Promise<void> {
 }
 
 /**
+ * Fire due scheduled thread-chats (recurring/one-shot user schedules). Runs each
+ * IN-PROCESS via runScheduledThread — the route used to internalPOST
+ * process-scheduled-task/<user>/<thread>/<chat> per thread, which self-fetched this
+ * worker's own public URL and 404'd on Workers (the last of the four dead self-fetches).
+ */
+export async function runScheduledTasksCron(): Promise<void> {
+  const { runScheduledThread } = await import("@/server-lib/scheduled-thread");
+  const dueThreadChats = await getScheduledThreadChatsDueToRun({ db });
+  console.log(`[cron:scheduled] ${dueThreadChats.length} thread chats due`);
+  for (let i = 0; i < dueThreadChats.length; i += BATCH_SIZE) {
+    const batch = dueThreadChats.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map((threadChat) =>
+        runScheduledThread({
+          userId: threadChat.userId,
+          threadId: threadChat.threadId,
+          threadChatId: threadChat.threadChatId,
+        }),
+      ),
+    );
+    for (const result of results) {
+      if (result.status === "rejected") {
+        console.error("[cron:scheduled] run failed", result.reason);
+      }
+    }
+    await sleep();
+  }
+}
+
+/**
+ * Fire due scheduled automations (recurring event-triggered workflows). Already
+ * in-process (runAutomation) — extracted here so the scheduled() worker-entry can
+ * dispatch it too; on Workers the every-30m Vercel cron never fired.
+ */
+export async function runAutomationsCron(): Promise<void> {
+  const { runAutomation } = await import("@/server-lib/automations");
+  const dueAutomations = await getScheduledAutomationsDueToRun({ db });
+  console.log(`[cron:automations] ${dueAutomations.length} automations due`);
+  for (let i = 0; i < dueAutomations.length; i += BATCH_SIZE) {
+    const batch = dueAutomations.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map((automation) =>
+        runAutomation({
+          automationId: automation.id,
+          userId: automation.userId,
+          source: "automated",
+        }),
+      ),
+    );
+    for (const result of results) {
+      if (result.status === "rejected") {
+        console.error("[cron:automations] run failed", result.reason);
+      }
+    }
+    await sleep();
+  }
+}
+
+/**
  * Dispatch a Cloudflare scheduled() event to the right runner by its cron pattern
  * (the patterns declared in wrangler.jsonc triggers.crons — mirror of vercel.json).
+ * ALL four Vercel crons must be mapped here, else scheduled-tasks/automations
+ * silently never fire on Workers (same S12 bug class as the queue drain).
  */
 export async function runScheduledCron(cron: string): Promise<void> {
   console.log(`[cron] scheduled trigger: ${cron}`);
@@ -96,8 +169,14 @@ export async function runScheduledCron(cron: string): Promise<void> {
     case "0 * * * *": // hourly — stalled-task recovery
       await runStalledTasksCron();
       return;
+    case "*/1 * * * *": // every 1m — fire due scheduled thread-chats
+      await runScheduledTasksCron();
+      return;
     case "*/10 * * * *": // every 10m — queue drain
       await runQueuedTasksCron();
+      return;
+    case "*/30 * * * *": // every 30m — fire due automations
+      await runAutomationsCron();
       return;
     default:
       console.warn(`[cron] no runner mapped for pattern: ${cron}`);

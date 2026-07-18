@@ -1,11 +1,12 @@
 import type { NextRequest } from "next/server";
-import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
-import { getScheduledAutomationsDueToRun } from "@terragon/shared/model/automations";
-import { runAutomation } from "@/server-lib/automations";
+import { runAutomationsCron } from "@/server-lib/cron";
 
-const BATCH_SIZE = 5;
-
+/**
+ * External cron entrypoint (Vercel schedule / manual hit). The real work lives in
+ * runAutomationsCron so the Workers scheduled() handler dispatches the identical
+ * in-process path.
+ */
 export async function GET(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
   if (
@@ -16,34 +17,8 @@ export async function GET(request: NextRequest) {
   }
   console.log("Automations cron task triggered");
   try {
-    const dueAutomations = await getScheduledAutomationsDueToRun({ db });
-    console.log(`Found ${dueAutomations.length} automations due to run`);
-
-    for (let i = 0; i < dueAutomations.length; i += BATCH_SIZE) {
-      const batch = dueAutomations.slice(i, i + BATCH_SIZE);
-      const results = await Promise.allSettled(
-        batch.map(async (automation) => {
-          await runAutomation({
-            automationId: automation.id,
-            userId: automation.userId,
-            source: "automated",
-          });
-        }),
-      );
-      const successCount = results.filter(
-        (r) => r.status === "fulfilled",
-      ).length;
-      const failureCount = results.filter(
-        (r) => r.status === "rejected",
-      ).length;
-      console.log(
-        `Automations cron task batch completed. Success: ${successCount}, Failed: ${failureCount}`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-    return Response.json({
-      success: true,
-    });
+    await runAutomationsCron();
+    return Response.json({ success: true });
   } catch (error) {
     console.error("Error in automations cron task:", error);
     return Response.json(

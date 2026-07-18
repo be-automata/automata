@@ -1559,11 +1559,11 @@ describe("end-to-end", () => {
       },
     });
 
+    // The cron route now runs scheduled threads IN-PROCESS (runScheduledTasksCron →
+    // runScheduledThread) with no nested internalPOST self-fetch — the booting status
+    // and sendDaemonMessage assertions below prove the scheduled thread ran.
     await internalPOST("cron/scheduled-tasks");
     await waitUntilResolved();
-    expect(internalPOST).toHaveBeenCalledWith(
-      `process-scheduled-task/${user.id}/${threadId}/${threadChatId}`,
-    );
     await waitUntilResolved();
 
     // Verify thread is now running

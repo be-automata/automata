@@ -1,11 +1,12 @@
 import type { NextRequest } from "next/server";
-import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
-import { getScheduledThreadChatsDueToRun } from "@terragon/shared/model/threads";
-import { internalPOST } from "@/server-lib/internal-request";
+import { runScheduledTasksCron } from "@/server-lib/cron";
 
-const BATCH_SIZE = 5;
-
+/**
+ * External cron entrypoint (Vercel schedule / manual hit). The real work lives in
+ * runScheduledTasksCron so the Workers scheduled() handler dispatches the identical
+ * in-process path (no internalPOST self-fetch, which 404s on Workers).
+ */
 export async function GET(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
   if (
@@ -16,37 +17,8 @@ export async function GET(request: NextRequest) {
   }
   console.log("Scheduled tasks cron task triggered");
   try {
-    const dueThreadChats = await getScheduledThreadChatsDueToRun({ db });
-    console.log(`Found ${dueThreadChats.length} thread chats due to run`);
-
-    for (let i = 0; i < dueThreadChats.length; i += BATCH_SIZE) {
-      const batch = dueThreadChats.slice(i, i + BATCH_SIZE);
-      const results = await Promise.allSettled(
-        batch.map(async (threadChat) => {
-          await internalPOST(
-            `process-scheduled-task/${threadChat.userId}/${threadChat.threadId}/${threadChat.threadChatId}`,
-          );
-        }),
-      );
-      const successCount = results.filter(
-        (r) => r.status === "fulfilled",
-      ).length;
-      const failureCount = results.filter(
-        (r) => r.status === "rejected",
-      ).length;
-      console.log(
-        `Scheduled tasks cron task batch completed. Success: ${successCount}, Failed: ${failureCount}`,
-      );
-      for (const result of results) {
-        if (result.status === "rejected") {
-          console.error("Error in scheduled tasks cron task:", result.reason);
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-    return Response.json({
-      success: true,
-    });
+    await runScheduledTasksCron();
+    return Response.json({ success: true });
   } catch (error) {
     console.error("Error in scheduled tasks cron task:", error);
     return Response.json(
