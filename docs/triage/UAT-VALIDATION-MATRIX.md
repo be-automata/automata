@@ -1431,3 +1431,21 @@ boot-coder root-caused via the Neon thread table — this is the authoritative m
 - **Awaiting team-lead's call on the S12 label** (FAIL-on-queue-drain vs INCONCLUSIVE-on-harness). Both leads are recording the SAME facts; only the label differs. I will not flip it a 4th time unilaterally.
 
 **Block: 9 PASS + S12 (label pending: real queue-drain bug behind it either way). Does NOT close 10/10** until the queue-drain fix + a clean mention-path-isolated re-run.
+
+## S12 FINAL RESOLUTION (team-lead ruling) + BUG-EXEC-01 (2026-07-18)
+
+**S12 attempt #2 = INCONCLUSIVE-ON-HARNESS.** The measurement was confounded — a second automation
+(issue-research `8304af2f`, on issue-open) fired per fixture alongside the mention (`d24bfe58`), so
+"N mentions → N replies" was never cleanly measured (8 threads from 4 issues). Mention-path code is
+verified correct (threadId-keyed; no routing/sentinel/dup bug). S12 stays **INCONCLUSIVE-pending-rerun**
+until the mention-path-isolated harness runs cleanly after the drain fix.
+
+### BUG-EXEC-01 — over-capacity work queues and never drains — OPEN, **BLOCKS-S12 / BLOCKS-BLOCK-CLOSE**
+- **Symptom:** intents beyond `MAX_CONCURRENT_TASKS_PER_USER=3` transition `[system.concurrency-limit] queued → queued-tasks-concurrency` and **never promote/execute**; no user "at capacity" feedback. Silent, permanent work loss under load.
+- **Evidence:** 5 starved threads from the 2026-07-18 burst — `361538f8`, `b6148530`, `bc248f0e`, `61404487`, `a393188b`. Queue depth **10 before** the burst (accumulated silently across ALL prior testing) → **14 after**.
+- **Both promotion paths dead:** (1) the internal-POST self-fetch promotion, and (2) the unwired cron(s) that should drain the queue (quarantined-Redis/cron machinery; `evalsha` TypeError fingerprint). Owner: tenancy-coder.
+- **Close condition:** drain fix + stale-retirement deploy → the 14 starved tasks retire → a mention-path-isolated `pnpm uat S12` shows all N answered → S12 flips to PASS.
+
+### BLOCK FINAL STATE (2026-07-18)
+**9 PASS** (S1re-run, S2, S3, S4, S5, S6, S7, S8, S9) **+ S12 = INCONCLUSIVE-pending-rerun + BUG-EXEC-01 OPEN/BLOCKING.**
+The block does **NOT** report 10/10 while BUG-EXEC-01 is open. **Close-out path:** BUG-EXEC-01 fix (drain + stale-retirement) deploys → 14 retire → mention-isolated `pnpm uat S12` → all N answered → S12 PASS → **block 10/10 with zero open blocking bugs.** No further validator action until the fix deploys.

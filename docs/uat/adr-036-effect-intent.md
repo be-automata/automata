@@ -85,7 +85,7 @@ Scoring is at the **effect-intent level** (which intent fired, verdict semantics
 - **Expected + where:** ≥1 new reply OR a new review after the mention; no spurious duplicate verdict.
 - **Verdict rubric:** PASS if a response lands (no silence). (With GSD skills at `~/.claude`, the agent may semantically run the global `/review` skill — either way a response must land.)
 
-## S12 — Burst reliability (replaces OLD capacity-gate) — currently FAIL
+## S12 — Burst reliability (replaces OLD capacity-gate) — INCONCLUSIVE-pending-rerun (blocked by BUG-EXEC-01)
 - **Invariant (NEW, burst-reliability):** N near-simultaneous @-mentions on N distinct work items → **ALL N eventually reply. No silent work loss.** ("What happens when more work arrives than the plane can run at once?")
 - **Why the OLD assertion is replaced:** OLD S12 tested a per-ORG intake capacity gate (`maxConcurrentPerOrg=2` → drop + "at capacity" reply). NEW has **no per-org intake gate** — it uses a per-USER limit (`MAX_CONCURRENT_TASKS_PER_USER`, default 3) and the worker `agent-run` concurrency=1 **queues/serializes** over-limit work rather than dropping it. So there is no capacity-drop-reply to assert; the same underlying risk (overload) is tested by the burst-reliability invariant instead — arguably a stronger test.
 - **Preconditions:** github_mention automation; linked identity.
