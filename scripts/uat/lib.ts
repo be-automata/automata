@@ -161,7 +161,12 @@ export function preflight(): { ok: boolean; problems: string[]; notes: string[] 
   else if (sh(`gh auth status 2>&1 || true`).includes("not logged")) problems.push("`gh` not authenticated");
   const html = sh(`curl -s ${P.WORKER_URL}/`, { allowFail: true });
   if (!html) problems.push(`www unreachable at ${P.WORKER_URL}`);
-  else if (!html.includes(P.BOT_HANDLE)) problems.push(`BOT_HANDLE '${P.BOT_HANDLE}' not inlined in www bundle — mentions will no-op (check NEXT_PUBLIC_GITHUB_APP_NAME)`);
+  else if (!html.includes(P.BOT_HANDLE))
+    // NOT a hard-block: NEXT_PUBLIC_GITHUB_APP_NAME is used server-side (isAppMentioned on the Worker)
+    // and is not reliably present in the landing-page HTML/chunks. The FIRST mention case validates the
+    // handle functionally (dispatch, or a loud FAIL with the gate-disambiguation table). Verify via a
+    // `wrangler tail`: "does not mention the app" = wrong handle.
+    notes.push(`could not confirm BOT_HANDLE '${P.BOT_HANDLE}' in the www landing bundle (it is primarily a server-side value) — mention cases will validate it functionally; if they no-op, use the gate-disambiguation table (handle vs identity vs token)`);
   const tun = sh(`curl -s -o /dev/null -w '%{http_code}' https://hatchet.beautomata.com/ || true`, { allowFail: true });
   if (tun !== "200") notes.push(`tunnel hatchet.beautomata.com returned ${tun || "n/a"} (worker dispatch may be down → SCHEDULING_TIMED_OUT is infra-void, re-fire)`);
   if (!has("docker") || recentRuns() === null) notes.push("OLAP not reachable — run-id evidence degrades to EVIDENCE-PARTIAL (assertions still use GitHub-as-record)");
