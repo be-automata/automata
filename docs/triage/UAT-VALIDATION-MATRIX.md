@@ -1065,3 +1065,20 @@ Slice 1+1b (4de39ae + d07d45e; www 890/0). Verified F1/F2/F3/F5 at code+unit lev
 **Cosmetic nit (non-blocking):** the F3 revoke comments in `daemon-token.ts:11` and `handle-daemon-event.ts:538` say "the **6h** expiry is the backstop", but the actual value is **1 day** (`daemon.ts:53`, "1 day (plugin minimum) — backstop only"). Two stale "6h" comment strings → one-line fix; substance is correct.
 
 **Net:** all four ADR-003 slice-1 fold-ins are code+unit verified; F1's blast-radius mechanism (CLI router rejects daemon tokens) is in place, its live proof queued for the next deploy. SOMNIO-GATE-1 (F1 live) + SOMNIO-GATE-2 (F4 tokens-out-of-payload) remain the onboarding-#2 blockers.
+
+## EXEC-PLANE STAGE 1 (hello-world) + deploy-guard gates — VERIFIED LIVE (2026-07-17, substrate 00fe4f2)
+
+Hatchet substrate slice-1 (packages/worker) running on the pilot box (localhost:8888). Independently re-verified boot-coder's claims (not accepted on report).
+
+| Gate / case | Result |
+|---|---|
+| **C10 deploy-guard: `authDisabled`** | `/api/v1/meta` → **`authDisabled: false`** ✓ |
+| **C10 deploy-guard: unauth workers 401/403** | unauth `GET /api/v1/tenants/707d…/workers` → **HTTP 403** ✓ |
+| **C10 deploy-guard: NO `-dev` image** | image = `ghcr.io/hatchet-dev/hatchet/hatchet-lite:**v0.94.10**` (pinned, non-dev) ✓ |
+| **REST trigger contract (www→engine path)** | `POST /api/v1/stable/tenants/707d…/workflow-runs/trigger` (Bearer) → **HTTP 200**, QUEUED run `e96ce9ca` created ✓ |
+| **C10 worker-availability: scheduleTimeout raised** | trigger response `workflowConfig…ScheduleTimeout = **30m**` (not the 5m default that silently drops work) ✓ |
+| **Hello-world ROUND TRIP (stage 1)** | started `@terragon/worker` hello worker → registered (LISTEN_STRATEGY_V2) → my run `e96ce9ca` **"Task run starting → completed"** in worker log → **OLAP `v1_task_events_olap` COMPLETED** with output `{"message":"hello uat-validator"}` — **echoes my REST input** ✓ |
+
+**Caveats (recorded, pilot-only, non-blocking):** (a) `SERVER_GRPC_INSECURE=t` is a documented localhost-only pilot concession; (b) the SDK's blocking `run()` result-stream stalls under `TLS_STRATEGY=none` locally — I confirmed completion via **REST + OLAP** (the documented workaround), not the blocking stream. Both in packages/worker/README.md.
+
+**STAGE-1 VERDICT: PASS.** The execution-plane substrate is live, the deploy guard holds (no -dev image / auth enforced / 30m timeout), the REST trigger contract works, and a hello-world round-trip completes end-to-end with input→output fidelity. Cleaned up my worker instance after verification. Next: stage 2 (seam dispatch + reference-only payload inspection) when tenancy-coder's dispatch seam wires to this substrate, then full C8.
