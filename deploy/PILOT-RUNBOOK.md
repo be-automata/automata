@@ -332,3 +332,19 @@ watch.
 > repointing the shared App webhook) as a separate, deliberate step. Only after
 > prod is confirmed out of the loop do you run steps 5a → 5b for the customer
 > binding.
+
+## Execution-plane tunnel (Hatchet) — NAMED tunnel is current
+
+The control plane reaches the Hatchet engine over a **named cloudflared tunnel**:
+`hatchet.beautomata.com → localhost:8888` (tunnel `automata-hatchet`, id
+`73d79054-70f6-40f8-901a-d445eff83577`; `HATCHET_API_URL` = `https://hatchet.beautomata.com`).
+Run it with `cloudflared tunnel run --url http://localhost:8888 automata-hatchet` and
+keep that process alive on the engine box. The hostname is **stable** — a process
+restart needs no re-secret. Credentials live at `~/.cloudflared/73d79054-*.json`
+(keep out of the repo; delete the tunnel to revoke). Full detail + the recovery drill
+are in `deploy/PILOT-OPERATOR-STEPS.md` §5.
+
+> The earlier **ephemeral quick-tunnel** recipe (`cloudflared tunnel --url …` →
+> `*.trycloudflare.com` → re-`wrangler secret put HATCHET_API_URL` on every launch)
+> is **SUPERSEDED** by the named tunnel above. It remains only as a break-glass
+> fallback in PILOT-OPERATOR-STEPS §5.
