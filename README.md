@@ -19,6 +19,34 @@ For trademark use, see `TRADEMARKS.md`.
 - **Integrates with Existing Workflows**: @-mention Terragon tools like Slack or GitHub to kick off tasks directly where context already exists.
 - **Real-time Management**: Task status and agent progress stream to your browser in real-time. Browser notifications keep you informed when tasks complete.
 
+## GitHub intake: webhook → automation → instruction
+
+How a GitHub event becomes an agent run — the routing is **data, not config files**:
+
+1. **Webhook** — GitHub delivers to `apps/www/src/app/api/webhooks/github/route.ts`
+   (HMAC-verified). Handlers in `handlers.ts` classify the event (`pull_request`,
+   `issue`, `issue_comment` mention, review comment).
+2. **Automation** — the handler looks up matching rows in the `automations` DB table
+   (`packages/shared/src/db/schema.ts`): per-repo, per-org rows keyed by `triggerType`
+   (`pull_request` | `issue` | `github_mention` | `schedule` | `manual`) with a
+   `triggerConfig` filter (authors, drafts, open/update). **No matching enabled row →
+   the event is a no-op** — a repo needs its automation rows configured before the bot
+   reacts to anything (see `deploy/seed-pilot-mirror.ts` for the canonical set).
+   Mentions additionally require `NEXT_PUBLIC_GITHUB_APP_NAME` (build-time inlined) to
+   match the App slug, or `isAppMentioned` never fires.
+3. **Instruction** — an automation's `action` is a stored `user_message`
+   (`packages/shared/src/automations/index.ts`): the opening prompt of the thread it
+   creates, e.g. *"A pull request was opened or updated in {repo}. Perform a PR
+   review."* The thread then dispatches to the execution plane
+   (`docs/adr/ADR-003-execution-plane-www-dispatch-seam.md`).
+4. **Skill** — the agent runtime resolves skills semantically from its own environment
+   on the execution box (`~/.claude` — see ADR-002 rev 3, Layer 3); the instruction
+   names the intended skill, it does not invoke it through a registry.
+
+Trigger taxonomy + action schema: `packages/shared/src/automations/index.ts`.
+Automation rows are runtime-editable (dashboard/DB) and are **not** version-controlled —
+the seed script is the reviewable source of truth for a repo's intake behavior.
+
 ## Prerequisites
 
 - **Node.js**: v20 or higher
