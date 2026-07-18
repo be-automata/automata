@@ -13,7 +13,8 @@
     "install-cli:dev": "cd apps/cli && ./scripts/install-cli-dev.sh",
     "worktree:new": "bun scripts/new-worktree.ts",
     "worktree:cleanup": "bun scripts/cleanup-worktree.ts",
-    "worktree:list": "bun scripts/cleanup-worktree.ts --list"
+    "worktree:list": "bun scripts/cleanup-worktree.ts --list",
+    "uat": "tsx scripts/uat/run.ts"
   },
   "keywords": [],
   "packageManager": "pnpm@10.14.0",
@@ -23,7 +24,8 @@
     "husky": "^9.1.7",
     "lint-staged": "^16.1.0",
     "prettier": "^3.5.3",
-    "turbo": "^2.5.4"
+    "turbo": "^2.5.4",
+    "tsx": "^4.19.2"
   },
   "pnpm": {
     "patchedDependencies": {
