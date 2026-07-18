@@ -1333,3 +1333,11 @@ Precondition: PR #4 had 1 non-dismissed APPROVED at HEAD. Mention "@automata-ai-
 - ✅ **A reply still landed** (1 new bot comment) — the mention-always-replies guarantee holds even on a deduped re-review.
 - Same reply-to-marker known-gap as S4 (NEW uses @-mention, not reply-to:<id>).
 **S5 VERDICT: PASS** — matches OLD baseline (deduped verdict + reply-not-silenced).
+
+### S8 (verdict UPGRADE via /request-changes over APPROVED) — PASS
+Precondition: PR #4 had 1 non-dismissed APPROVED at HEAD f952793. Command "@automata-ai-bot /request-changes …" (CID 5011084324, 11:29:36Z) → run `fb3efd23` COMPLETED.
+- ✅ **CHANGES_REQUESTED posted at HEAD** f952793 (11:30:17Z, non-dismissed).
+- ✅ **Prior APPROVED now DISMISSED** (state flipped APPROVED→DISMISSED).
+- ✅ **no-dup at HEAD = 1** (states=[CHANGES_REQUESTED]) — the stronger verdict was NOT swallowed as a duplicate. This is the verdict-aware-idempotency regression guard working live.
+- ✅ Reply landed (command path replies). Also exercises the /request-changes COMMAND path → emit_review verdict.
+**S8 VERDICT: PASS** — matches OLD baseline (verdict upgrade posts + dismisses prior + no-dup=1).
