@@ -4,7 +4,16 @@
   "main": ".open-next/worker.js",
   // nodejs_compat + a recent compat date are REQUIRED by @opennextjs/cloudflare.
   "compatibility_date": "2026-06-05",
-  "compatibility_flags": ["nodejs_compat"],
+  // no_handle_cross_request_promise_resolution: the neon-serverless Pool is a
+  // module singleton (apps/www/src/lib/db.ts) shared across requests on workerd,
+  // so its WebSocket promises can resolve in a different request context than they
+  // were created in — which workerd otherwise treats as a hang and cancels the
+  // request ("A promise was resolved or rejected from a different request context").
+  // This flag is the runtime-sanctioned allowance for that shared-resource pattern.
+  "compatibility_flags": [
+    "nodejs_compat",
+    "no_handle_cross_request_promise_resolution",
+  ],
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS",
