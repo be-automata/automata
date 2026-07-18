@@ -449,3 +449,52 @@ warned about.
   freedom raises variance between boxes, which telemetry and `worker doctor` mitigate but do not
   eliminate; the login-shell residual (R3.4) stays open until the daemon-bundle change lands.
 
+### R3.8 Instance definition, packaging tiers, and the sandbox setting
+
+**"Instance" is a requirements spec, not a form factor:** any long-lived compute the customer
+controls that meets the spec is an instance. The spec: **outbound-only** HTTPS/gRPC (the worker
+pulls work and posts daemon events; no inbound ports — works behind any corporate firewall);
+**always-on** (a registered worker; the ScheduleTimeout grace period punishes downtime, see
+"Worker availability"); Linux x86_64/arm64; Node 22 + git + gh + Claude Code; RAM+swap per the
+Decision §6 capacity spec; a **persistent `HOME`** for the `~/.claude` customization surface
+(R3.3). A VPS, a cloud VM, bare metal, a container on their Kubernetes, or a Fly-style microVM
+all qualify. (The pilot ran on macOS — proof of portability, not a supported target.)
+
+**Packaging: the official base image is the flagship.** We publish `automata/worker` with Layers
+0–1 pre-baked (worker, Node, git, gh, Claude Code) plus the curated packs preinstalled — and the
+customer's "batteries included" story is the mechanism every dev team already knows:
+
+```dockerfile
+FROM automata/worker:1
+RUN install-internal-cli …
+COPY mcp-config/ /home/agent/.claude/
+# auth: ANTHROPIC_API_KEY via env (supported tier), or volume-mount ~/.claude
+# to persist a subscription login across restarts (tolerated tier, R3.2)
+```
+
+A customer-extended image makes Layer-3 customization **reproducible and reviewable** (an image
+in their registry, not drift on a box), makes the base known-good by construction, and runs
+identically on every OCI runtime — one artifact answers most infra questions. The raw-VPS
+installer (Rollout §4, the `provision.sh` lineage) remains for customers who want a plain box.
+
+**Support matrix:**
+
+| Tier | Target | Posture |
+|---|---|---|
+| A — supported | Ubuntu/Debian x86_64/arm64 VPS via installer (proven lineage: prod OVH); official `automata/worker` image via compose | tested, documented, warranted |
+| B — best-effort | customer images `FROM automata/worker`; any OCI runtime (k8s, Fly, Fargate) running the official image; macOS | telemetry-reported, `worker doctor`-validated |
+| C — roadmap | `WORKER_SANDBOX=e2b` / Daytona per-run sandboxes on the **customer's own provider account**; platform-hosted thin-worker tier | behind flags, after pilot |
+
+**Managed sandboxes (E2B/Daytona) are a run-isolation layer, not an instance.** An E2B sandbox
+is ephemeral and per-run — it cannot hold the Hatchet worker registration. The composition that
+works: the customer's always-on worker (small, pure orchestration) provisions a **per-run
+sandbox** from a **customer-defined E2B template** (E2B's native pre-configured-image mechanism —
+"batteries included" applies there too) using the **customer's own E2B key**, so compute cost and
+account custody stay theirs. The chassis is already shaped for this: the `E2BProvider` is
+quarantined-not-deleted, and the daemon protocol was designed for in-sandbox execution. Expressed
+as a worker setting: `WORKER_SANDBOX=host | docker | e2b` — `host` is the C8-proven default;
+`e2b` buys per-run isolation, a materially better posture for reviewing outside contributors'
+branches (each review in a throwaway microVM). Tier C's thin-worker variant is also the stepping
+stone to a fully-hosted offering — we run the thin worker, the customer's sandbox account runs
+the compute — reaching the Heroku/Vercel feel without the platform ever hosting agent compute.
+
