@@ -1082,3 +1082,20 @@ Hatchet substrate slice-1 (packages/worker) running on the pilot box (localhost:
 **Caveats (recorded, pilot-only, non-blocking):** (a) `SERVER_GRPC_INSECURE=t` is a documented localhost-only pilot concession; (b) the SDK's blocking `run()` result-stream stalls under `TLS_STRATEGY=none` locally — I confirmed completion via **REST + OLAP** (the documented workaround), not the blocking stream. Both in packages/worker/README.md.
 
 **STAGE-1 VERDICT: PASS.** The execution-plane substrate is live, the deploy guard holds (no -dev image / auth enforced / 30m timeout), the REST trigger contract works, and a hello-world round-trip completes end-to-end with input→output fidelity. Cleaned up my worker instance after verification. Next: stage 2 (seam dispatch + reference-only payload inspection) when tenancy-coder's dispatch seam wires to this substrate, then full C8.
+
+## EXEC-PLANE STAGE 2 — reference-only payload inspection: PRE-STAGED (2026-07-18)
+
+The dispatch seam is LIVE (www 3bb0e3b5, HATCHET_ENABLED=true + 4 secrets; worker automata-worker registered agent-run + hello; cloudflared tunnel → :8888, edge trigger verified 200 by boot-coder). The lead fires the C8 event; boot-coder pings the run id when www dispatches an `agent-run`; I pull the payload.
+
+**Inspection path (pre-established):** REST `GET workflow-runs/{id}` is **403 with the worker token** (wrong scope) → my path is the pilot Hatchet-lite **Postgres**: `v1_dags_olap.input` (the multi-step agent-run is a DAG, so its input lands there; the tables are empty now because hello is task-only). Query on boot-coder's `external_id`.
+
+**ASSERTION (ADR-002 §3 credential-placement invariant):**
+- **MUST be PRESENT (reference-only, OK):** `threadId, threadChatId, repoFullName, branch, daemonCallbackUrl` + the two **short-lived tokens** `installationToken` (per-run, org-scoped — EXPECTED per ADR-002 §3) and `daemonToken` (per-thread, tokenType='daemon' post-F1).
+- **MUST be ABSENT (HARD violation → escalate immediately):**
+  1. **GitHub App private key** (`BEGIN … PRIVATE KEY`, `github-app.pem`, the raw PEM) — the named hard-block.
+  2. **Secret-store master key** (`ENCRYPTION_MASTER_KEY`).
+  3. **The assembled prompt** — F5/fork-3 moved it to the `next-message` pull; if it's in the input that's an F5 regression (info-hygiene, not hard-block).
+  4. Any other standing secret (Anthropic key — must be the box's own env, never in payload).
+- **F4 note:** the two short-lived tokens DO persist in this payload (accepted-risk pilot v1). Do NOT flag them; the violation is the App key / master key / prompt. F4's "move tokens out" is SOMNIO-GATE-2.
+
+Grep plan on the payload text: `-iE "BEGIN.*PRIVATE KEY|github-app|\.pem|ENCRYPTION_MASTER_KEY|sk-ant|ANTHROPIC"` → must be ZERO; plus a positive check that the reference fields + the 2 tokens are the ONLY keys. Held for the run id.
