@@ -8,7 +8,7 @@ import { and, eq } from "drizzle-orm";
  * Daemon tokens are created with `name = sandboxId` (see sendDaemonMessage), a
  * value used only for daemon tokens — so deleting the user's apikeys with that
  * name revokes exactly this run's daemon token(s), immediately, on thread
- * terminal. The 6h expiry is only a backstop for runs that never reach terminal.
+ * terminal. The 1-day expiry (better-auth plugin minimum) is only a backstop for runs that never reach terminal.
  * Returns how many were revoked (0 is normal — e.g. resumed threads or the
  * remote path once it mints per-run).
  */
