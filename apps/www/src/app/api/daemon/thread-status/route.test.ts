@@ -13,8 +13,13 @@ import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { User } from "@terragon/shared";
 import { DaemonTokenContext } from "@/lib/daemon-token-context";
+import { revokeDaemonTokenById } from "@/lib/daemon-token";
 
 vi.mock("@/lib/auth-server", () => ({ getDaemonTokenContext: vi.fn() }));
+vi.mock("@/lib/daemon-token", async (importOriginal) => {
+  const actual = (await importOriginal()) as object;
+  return { ...actual, revokeDaemonTokenById: vi.fn().mockResolvedValue(1) };
+});
 
 function req(body: Record<string, unknown>) {
   return new NextRequest("http://localhost/api/daemon/thread-status", {
@@ -97,5 +102,36 @@ describe("POST /api/daemon/thread-status", () => {
       .where(eq(threadTable.id, threadId));
     res = await POST(req({ threadId, threadChatId }));
     expect(await res.json()).toEqual({ status: "complete", terminal: true });
+  });
+
+  it("revoke-on-terminal-READ: revokes the token ONLY when serving terminal=true", async () => {
+    // While working → terminal=false → token stays live (worker keeps polling).
+    await db
+      .update(threadTable)
+      .set({ status: "working" })
+      .where(eq(threadTable.id, threadId));
+    await POST(req({ threadId, threadChatId }));
+    expect(revokeDaemonTokenById).not.toHaveBeenCalled();
+
+    // Terminal → the worker observes terminal=true, THEN the token is revoked.
+    await db
+      .update(threadTable)
+      .set({ status: "complete" })
+      .where(eq(threadTable.id, threadId));
+    await POST(req({ threadId, threadChatId }));
+    expect(revokeDaemonTokenById).toHaveBeenCalledWith({
+      userId: user.id,
+      apiKeyId: "apikey_test",
+    });
+  });
+
+  it("does NOT revoke on terminal read for a legacy token with no apiKeyId", async () => {
+    vi.mocked(getDaemonTokenContext).mockResolvedValue(ctx({ apiKeyId: null }));
+    await db
+      .update(threadTable)
+      .set({ status: "complete" })
+      .where(eq(threadTable.id, threadId));
+    await POST(req({ threadId, threadChatId }));
+    expect(revokeDaemonTokenById).not.toHaveBeenCalled();
   });
 });

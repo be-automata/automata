@@ -1,7 +1,6 @@
 import { toDBMessage } from "@/agent/msg/toDBMessage";
 import { getPendingToolCallErrorMessages } from "@/lib/db-message-helpers";
 import { db } from "@/lib/db";
-import { revokeDaemonTokenById } from "@/lib/daemon-token";
 import { ClaudeMessage } from "@terragon/daemon/shared";
 import {
   DBMessage,
@@ -47,7 +46,6 @@ export async function handleDaemonEvent({
   userId,
   timezone,
   contextUsage,
-  apiKeyId = null,
 }: {
   messages: ClaudeMessage[];
   threadId: string;
@@ -55,8 +53,6 @@ export async function handleDaemonEvent({
   userId: string;
   timezone: string;
   contextUsage: number | null;
-  /** apikey id of the run's own token (revoked at thread-finish — burst-safe). */
-  apiKeyId?: string | null;
 }) {
   console.log(
     "Daemon event",
@@ -516,7 +512,6 @@ export async function handleDaemonEvent({
         shouldSkipCheckpoint,
         repoFullName: thread.githubRepoFullName ?? null,
         prNumber: thread.githubPRNumber ?? null,
-        apiKeyId,
       }),
     );
   }
@@ -533,7 +528,6 @@ async function handleThreadFinish({
   shouldSkipCheckpoint,
   repoFullName,
   prNumber,
-  apiKeyId,
 }: {
   userId: string;
   threadId: string;
@@ -544,7 +538,6 @@ async function handleThreadFinish({
   shouldSkipCheckpoint: boolean;
   repoFullName: string | null;
   prNumber: number | null;
-  apiKeyId: string | null;
 }) {
   // ADR-036 (INTERIM): a PR-associated thread's agent posts its review directly via
   // gh with no idempotency, so a retry/dual-path can leave duplicate non-dismissed
@@ -563,23 +556,13 @@ async function handleThreadFinish({
     );
   }
 
-  // ADR-003 F3 (burst-safe): the thread turn reached terminal — revoke THIS run's
-  // OWN token, identified by the apikey id that authenticated this very event
-  // (ctx.apiKeyId). Revoking by exact id (not by name/thread) is what stops a burst
-  // regression: with worker concurrency=1 and the shared legacy threadChat sentinel,
-  // a delayed thread-finish for run A previously deleted run B's freshly-minted
-  // same-named token, killing B mid-work (S12 — only the first of N mentions
-  // replied). The 1-day expiry (plugin minimum) is the backstop if this fails.
-  if (apiKeyId) {
-    waitUntil(
-      revokeDaemonTokenById({ userId, apiKeyId }).catch((error) =>
-        console.error("[daemon-token] revoke-on-terminal (by id) failed", {
-          apiKeyId,
-          error,
-        }),
-      ),
-    );
-  }
+  // ADR-003 F3 (S12 fix — DECOUPLED): the daemon token is NO LONGER revoked here.
+  // Revoking at thread-finish let the background revoke beat the worker's next
+  // thread-status poll, so the worker only ever saw a 401 and laundered it into a
+  // silent COMPLETED (S12: burst siblings killed mid-work). Revocation now happens
+  // on the worker's terminal-READ (GET-style /api/daemon/thread-status returning
+  // terminal=true), which guarantees the worker observes terminal=true once before
+  // the token dies. Dead-worker backstop: the 1-day token expiry (plugin minimum).
   let shouldProcessFollowUpQueue = !isRateLimited;
   if (shouldProcessFollowUpQueue) {
     const threadChat = await getThreadChat({

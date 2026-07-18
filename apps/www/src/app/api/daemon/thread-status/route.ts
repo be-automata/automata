@@ -3,6 +3,8 @@ import { db } from "@/lib/db";
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import { getThreadChat } from "@terragon/shared/model/threads";
 import { isAgentWorking } from "@/agent/thread-status";
+import { revokeDaemonTokenById } from "@/lib/daemon-token";
+import { waitUntil } from "@/lib/wait-until";
 
 /**
  * POST /api/daemon/thread-status   body: { threadId, threadChatId }
@@ -65,8 +67,31 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  const terminal = !isAgentWorking(threadChat.status);
+
+  // Revoke-on-terminal-READ (ADR-003 F3, S12 fix): revoke THIS token only AFTER we
+  // have served terminal=true to it — so the worker is GUARANTEED to observe
+  // terminal=true at least once before the token dies. Revoking at thread-finish
+  // instead (the old path) let the background revoke beat the worker's next poll, so
+  // the worker only ever saw a 401 and laundered it into a silent COMPLETED. With
+  // the revoke moved here, terminal=true is the normal worker signal and a
+  // 401/403-without-terminal is genuinely anomalous (the worker backstop keys on
+  // that). Dead-worker backstop: the 1-day token expiry (plugin minimum).
+  if (terminal && ctx.apiKeyId) {
+    const apiKeyId = ctx.apiKeyId;
+    const userId = ctx.userId;
+    waitUntil(
+      revokeDaemonTokenById({ userId, apiKeyId }).catch((error) =>
+        console.error("[daemon-token] revoke-on-terminal-read failed", {
+          apiKeyId,
+          error,
+        }),
+      ),
+    );
+  }
+
   return NextResponse.json({
     status: threadChat.status,
-    terminal: !isAgentWorking(threadChat.status),
+    terminal,
   });
 }
