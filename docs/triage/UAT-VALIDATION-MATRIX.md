@@ -1326,3 +1326,10 @@ Mention "@automata-ai-bot what does the isAdult function do?" on PR #4 (CID 5011
 - ✅ Exactly ONE new bot comment (no reply-dup); ✅ answers correctly (describes isAdult, references current `>=18` code); ✅ identity automata-ai-bot[bot]; ✅ did not perturb PR #4's APPROVED review state.
 - KNOWN-GAP annotation: the reply lacks the OLD `reply-to:<CID>` marker (an emit_reply trace tag). NEW tags by @-mentioning the author (`@espinozasenior`) instead. Surface/traceability delta, not an effect-intent FAIL — but note the OLD reply-idempotency-on-redelivery keyed on that marker; NEW's redelivery-dedup mechanism is unverified here (would need a forced redelivery). Flag for the reply-idempotency check.
 **S4 VERDICT: PASS** (effect-intent: single answering reply; surface marker delta annotated).
+
+### S5 (mention RE-REVIEW deduped → still replies) — PASS
+Precondition: PR #4 had 1 non-dismissed APPROVED at HEAD. Mention "@automata-ai-bot please re-review this PR" (CID 5011079361, 11:27:44Z) → run `8940b0f0` COMPLETED.
+- ✅ **Formal review DEDUPED** — non-dismissed verdicts stayed **1 (APPROVED)**, no new verdict row (no-dup holds).
+- ✅ **A reply still landed** (1 new bot comment) — the mention-always-replies guarantee holds even on a deduped re-review.
+- Same reply-to-marker known-gap as S4 (NEW uses @-mention, not reply-to:<id>).
+**S5 VERDICT: PASS** — matches OLD baseline (deduped verdict + reply-not-silenced).
