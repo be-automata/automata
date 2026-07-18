@@ -74,6 +74,12 @@ export const agentRun = hatchet.task({
 
     const daemon = new DaemonProcess(config, input, workdir);
     try {
+      // Fail-closed identity precondition (ADR-002): confirm gh authenticates as the
+      // bot (installation token + isolated config) in the workdir BEFORE spawning —
+      // a misconfigured box must block, never silently post as the wrong identity.
+      await daemon.preflightGhAuth();
+      step("gh auth precondition ok (bot identity)");
+
       // Run: bring up the daemon, then pull the message it should execute.
       await daemon.start();
       step(`daemon spawned: pid=${daemon.pid ?? "unknown"}`);

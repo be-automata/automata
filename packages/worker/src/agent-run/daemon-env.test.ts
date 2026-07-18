@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDaemonEnv, STRIPPED_ENV_KEYS } from "./daemon-env";
+import { buildDaemonEnv, SAFE_ENV_KEYS } from "./daemon-env";
 
 const INSTALL_TOKEN = "ghs_installationtoken123";
 
@@ -9,7 +9,7 @@ function build(overrides: Record<string, string | undefined> = {}) {
       PATH: "/usr/bin:/bin",
       HOME: "/home/op",
       LANG: "en_US.UTF-8",
-      // Ambient operator credentials that MUST NOT reach the agent:
+      // Ambient operator credentials/identity that MUST NOT reach the agent:
       GH_TOKEN: "gho_operatorpersonaltoken",
       GITHUB_TOKEN: "gho_operatorpersonaltoken",
       GH_CONFIG_DIR: "/home/op/.config/gh",
@@ -19,6 +19,11 @@ function build(overrides: Record<string, string | undefined> = {}) {
       GIT_ASKPASS: "/usr/bin/op-askpass",
       GIT_CONFIG_GLOBAL: "/home/op/.gitconfig",
       GITHUB_ENTERPRISE_TOKEN: "ent_token",
+      // Unknown ambient secrets a whitelist blocks by default (a denylist would miss):
+      AWS_SECRET_ACCESS_KEY: "aws_secret_xyz",
+      NPM_TOKEN: "npm_secret_xyz",
+      STRIPE_API_KEY: "sk_live_xyz",
+      SOME_RANDOM_VAR: "whatever",
       ...overrides,
     },
     anthropicApiKey: "sk-ant-xxx",
@@ -30,21 +35,54 @@ function build(overrides: Record<string, string | undefined> = {}) {
 }
 
 describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () => {
-  it("strips every ambient GitHub/git credential + identity var from the child env", () => {
+  it("whitelists: only known-safe keys are forwarded; every ambient secret/unknown var is dropped", () => {
     const env = build();
-    // None of the operator's ambient credential vars survive as the operator value.
+    // Ambient GitHub/git identity + credential vars: gone.
     expect(env.GITHUB_ACTOR).toBeUndefined();
     expect(env.SSH_AUTH_SOCK).toBeUndefined();
     expect(env.GIT_ASKPASS).toBeUndefined();
     expect(env.GITHUB_ENTERPRISE_TOKEN).toBeUndefined();
     expect(env.GH_HOST).toBeUndefined();
-    // The operator's personal token value is nowhere in the env.
-    expect(JSON.stringify(env)).not.toContain("gho_operatorpersonaltoken");
-    // Every declared stripped key is either gone or overwritten (never the operator's).
-    for (const key of STRIPPED_ENV_KEYS) {
-      const v = env[key];
-      expect(v === undefined || !String(v).startsWith("gho_")).toBe(true);
+    // The strength of the whitelist: UNKNOWN ambient secrets a denylist would miss.
+    expect(env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+    expect(env.NPM_TOKEN).toBeUndefined();
+    expect(env.STRIPE_API_KEY).toBeUndefined();
+    expect(env.SOME_RANDOM_VAR).toBeUndefined();
+    // None of the ambient secret VALUES appear anywhere in the child env.
+    const serialized = JSON.stringify(env);
+    expect(serialized).not.toContain("gho_operatorpersonaltoken");
+    expect(serialized).not.toContain("aws_secret_xyz");
+    expect(serialized).not.toContain("sk_live_xyz");
+    // Only whitelisted keys or the explicitly-injected run keys survive.
+    const injected = new Set([
+      "ANTHROPIC_API_KEY",
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "GH_CONFIG_DIR",
+      "GIT_CONFIG_GLOBAL",
+      "GIT_CONFIG_SYSTEM",
+      "GIT_CONFIG_COUNT",
+      "GIT_TERMINAL_PROMPT",
+      "GIT_AUTHOR_NAME",
+      "GIT_AUTHOR_EMAIL",
+      "GIT_COMMITTER_NAME",
+      "GIT_COMMITTER_EMAIL",
+    ]);
+    for (const key of Object.keys(env)) {
+      const ok =
+        SAFE_ENV_KEYS.has(key) ||
+        injected.has(key) ||
+        /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(key);
+      expect(ok, `unexpected key leaked into child env: ${key}`).toBe(true);
     }
+  });
+
+  it("defense-in-depth: a secret-looking key is never forwarded even if whitelisted", () => {
+    // Sanity: no whitelisted key matches the secret pattern (would be dropped).
+    const secretish = [...SAFE_ENV_KEYS].filter((k) =>
+      /TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL/i.test(k),
+    );
+    expect(secretish).toEqual([]);
   });
 
   it("wires the installation token as THE gh credential with an isolated config dir", () => {

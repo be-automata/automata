@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { defaultUnixSocketPath } from "@terragon/daemon/shared";
 import { buildDaemonEnv } from "./daemon-env";
+import { verifyGhAuth } from "./verify-gh-auth";
 import type { WorkerConfig } from "./config";
 import type { AgentRunInput, PulledDaemonMessage } from "./types";
 
@@ -28,6 +29,7 @@ import type { AgentRunInput, PulledDaemonMessage } from "./types";
 export class DaemonProcess {
   private child: ChildProcess | null = null;
   private ghConfigDir: string | null = null;
+  private env: NodeJS.ProcessEnv | null = null;
   private readonly socketPath = defaultUnixSocketPath;
   // PID of the daemon's process group, persisted so a daemon leaked by a prior
   // worker-process death (which never ran teardown) can be reclaimed on next start.
@@ -42,18 +44,18 @@ export class DaemonProcess {
     private readonly workdir: string,
   ) {}
 
-  /** Spawn the daemon (own process group) and wait until its socket accepts. */
-  async start(): Promise<void> {
-    // Reclaim a daemon orphaned by a prior worker-process death before we bind the
-    // fixed socket — no rogue daemon (still running the agent in an old workdir)
-    // may outlive its run. Safe under concurrency=1: at most one daemon at a time.
-    this.reclaimOrphanDaemon();
-
-    // Isolated, EMPTY gh config dir so the agent's `gh` can't read the operator's
-    // stored OAuth (hosts.yml) and post as the human — it must use the installation
-    // token (GH_TOKEN) → the App bot. Cleaned up in teardown.
+  /**
+   * Build the sanitized child env once (idempotent). Creates the isolated EMPTY gh
+   * config dir so the agent's `gh` can't read the operator's stored OAuth (hosts.yml)
+   * and post as the human — it must use the installation token → the App bot. The dir
+   * is cleaned up in teardown.
+   */
+  private ensureEnv(): NodeJS.ProcessEnv {
+    if (this.env) {
+      return this.env;
+    }
     this.ghConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "automata-gh-"));
-    const env = buildDaemonEnv({
+    this.env = buildDaemonEnv({
       baseEnv: process.env,
       anthropicApiKey: this.config.anthropicApiKey,
       claudeBinDir: this.config.claudeBinDir,
@@ -61,6 +63,38 @@ export class DaemonProcess {
       ghConfigDir: this.ghConfigDir,
       botLogin: this.config.botLogin,
     });
+    return this.env;
+  }
+
+  /**
+   * Fail-closed gh-auth precondition (ADR-002 F3). Run BEFORE start(): confirm `gh`
+   * authenticates (as the bot, via the injected token + isolated config) inside the
+   * workdir with the sanitized env. Throws if it can't — the run is blocked rather
+   * than spawning an agent that would post as the wrong identity or fail to push.
+   */
+  async preflightGhAuth(
+    exec?: Parameters<typeof verifyGhAuth>[0]["exec"],
+  ): Promise<void> {
+    const result = await verifyGhAuth({
+      workdir: this.workdir,
+      env: this.ensureEnv(),
+      exec,
+    });
+    if (!result.ok) {
+      throw new Error(
+        `gh auth precondition failed — blocking run (agent would post as the wrong identity): ${result.detail}`,
+      );
+    }
+  }
+
+  /** Spawn the daemon (own process group) and wait until its socket accepts. */
+  async start(): Promise<void> {
+    // Reclaim a daemon orphaned by a prior worker-process death before we bind the
+    // fixed socket — no rogue daemon (still running the agent in an old workdir)
+    // may outlive its run. Safe under concurrency=1: at most one daemon at a time.
+    this.reclaimOrphanDaemon();
+
+    const env = this.ensureEnv();
 
     this.child = spawn(
       this.config.nodeBin,
@@ -128,6 +162,7 @@ export class DaemonProcess {
       }
       this.ghConfigDir = null;
     }
+    this.env = null;
     if (pid == null) {
       return;
     }
