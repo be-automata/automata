@@ -1,6 +1,7 @@
 # ADR-003: Execution-plane integration — the www→Hatchet dispatch seam
 
-- **Status:** Proposed (2026-07-17 — pending platform-convergence lead review before build)
+- **Status:** Accepted (2026-07-17 — reviewed and approved by the platform-convergence lead;
+  all three forks confirmed, two endpoint-hardening notes added)
 - **Date:** 2026-07-17
 - **Context source:** ADR-002 (per-org execution plane, rev 2), the chassis daemon protocol
   (`packages/daemon`, `apps/www/src/app/api/daemon-event/route.ts`), the boot seam
@@ -74,6 +75,18 @@ token (same `X-Daemon-Token` custody as the event ingestion), returns the prepar
 threadChat. www builds it with the **same** logic `startAgentMessage` uses today
 (`getUserMessageToSend` → `preparePromptForModel` → compaction), factored into a shared function.
 
+**Endpoint hardening (lead notes, mandatory):**
+
+- **(H1) Assert the token↔thread binding, not just token validity.** The daemon token resolves to
+  `{ userId, organizationId }` (its API-key metadata). The endpoint MUST load the requested
+  `threadChatId`'s thread and assert **both** that thread's `userId` matches the token's user
+  **and** its `organizationId` matches the token's org — a *valid* daemon token for a *different*
+  thread/org must be rejected (403), not served. Tested explicitly.
+- **(H2) The response body is sensitive.** It carries the prompt (repo content + user text).
+  **Never log the body.** Structure the handler so a future access log can record
+  `key`/`threadChatId`/`org` — never content. (Same reason the prompt is kept out of the workflow
+  input; see fork 3.)
+
 - **Symmetry:** the daemon already authenticates to www with this token for events; reading its
   own next message is the same custody, no new secret.
 - **Input hygiene:** Hatchet persists workflow input; keeping the (large, mutable) prompt out of
@@ -109,20 +122,22 @@ Plain Node 22 on the customer box (no workerd constraints — `node:sqlite` etc.
 `ScheduleTimeout` 30m+; step timeouts hour-scale (agent runs are long). Reuse `packages/daemon`
 and `packages/sandbox` code where importable.
 
-## Design forks (escalated to the lead; ADR carries the lead's stated defaults)
+## Design forks — RESOLVED (lead rulings 2026-07-17, with reasons)
 
-1. **Daemon sandboxing on the box — bare workdir vs Docker.** *Lead default adopted:* **bare
-   workdir for pilot v1**, Docker provider as the next iteration. Rationale: fastest path to a
-   real run; the box is single-tenant per ADR-002 so the isolation ADR-002 buys is at the *box*
-   boundary, not per-task. Revisit before multi-repo / untrusted-PR execution hardening.
-2. **How the worker learns www's base URL.** Resolved within this ADR: it is the
-   `daemonCallbackUrl` reference field in the workflow input (www's configured public base URL).
-   No worker-side config of the www URL — the control plane tells the worker per task. Flagging
-   in case the lead wants a worker-pinned URL instead.
-3. **Message delivery: pull-endpoint (chosen) vs prompt-in-input.** Chosen: pull, per the
-   reference-only input decision. The simpler alternative (embed the `DaemonMessage` in the
-   workflow input — the daemon token is already short-lived and in the input) is noted for the
-   lead to override if input hygiene is not worth the extra endpoint.
+1. **Daemon sandboxing on the box — bare workdir vs Docker. → BARE workdir for pilot v1**
+   confirmed; Docker provider next. Reason: fastest path to a real run; the box is single-tenant
+   per ADR-002, so the isolation ADR-002 buys is at the *box* boundary, not per-task. Revisit
+   before multi-repo / untrusted-PR execution hardening.
+2. **How the worker learns www's base URL. → per-task `daemonCallbackUrl` reference field**
+   confirmed; **no worker-pinned URLs.** Reason: the control plane tells the worker where to call
+   back per task, so www can move (deploy URL / custom domain) without reconfiguring every box.
+3. **Message delivery: pull-endpoint vs prompt-in-input. → PULL-ENDPOINT** confirmed. Reason (the
+   decisive one, and it is not code volume): **Hatchet persists workflow payloads in its Postgres.**
+   The reference-only-input rule exists precisely to keep prompts — repo content and user text —
+   **out of durable third-plane storage.** Embedding the `DaemonMessage` in the input would violate
+   that. The short-lived, installation-scoped GitHub token in the input is the **ADR-002-sanctioned
+   exception** (it expires and is scoped to one org's repos); a prompt is not. This is the same
+   principle as endpoint hardening H2 (the prompt body is sensitive).
 
 ## Options considered
 

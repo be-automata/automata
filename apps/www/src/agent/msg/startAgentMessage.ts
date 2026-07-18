@@ -484,7 +484,7 @@ export async function startAgentMessage({
   });
 }
 
-async function preparePromptForModel({
+export async function preparePromptForModel({
   model,
   agent,
   agentVersion,
@@ -497,7 +497,10 @@ async function preparePromptForModel({
   agentVersion: number;
   userMessageToSend: DBUserMessage;
   threadMessages: Thread["messages"];
-  session: ISandboxSession;
+  // Null for the remote (Hatchet) path: there is no in-process sandbox session to
+  // write image attachments to. Pilot v1 is text-only, so an image part fails
+  // loudly rather than silently dropping (see ADR-003 §2).
+  session: ISandboxSession | null;
 }): Promise<{
   prompt: string;
 }> {
@@ -509,6 +512,11 @@ async function preparePromptForModel({
       fileName: string;
       content: Buffer;
     }) => {
+      if (!session) {
+        throw new Error(
+          "Image attachments are not supported for remote (Hatchet) agent runs in pilot v1 (ADR-003 §2)",
+        );
+      }
       await session.writeFile(fileName, content);
       return fileName;
     },
