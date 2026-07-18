@@ -1,7 +1,6 @@
 // UAT fixture for ADR-036 effect-intent parity (throwaway — do NOT merge).
-// S2 partial fix: security issue (console.log secret) REMOVED. Off-by-one + false attestation REMAIN.
+// S3 full fix: off-by-one corrected (>=), false attestation removed, console.log already removed.
 
-/** Validated, safe. */
 export function isAdult(age: number): boolean {
-  return age > 18; // BUG: should be >= 18
+  return age >= 18;
 }
