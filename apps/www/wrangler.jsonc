@@ -7,16 +7,21 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "directory": ".open-next/assets",
-    "binding": "ASSETS"
+    "binding": "ASSETS",
   },
   "observability": {
-    "enabled": true
+    "enabled": true,
   },
   // Native R2 bindings — packages/r2 uses these on Workers (no S3 credentials).
   // Buckets provisioned by the operator: `automata` (public) + `automata-private`.
   "r2_buckets": [
     { "binding": "R2_BUCKET", "bucket_name": "automata" },
-    { "binding": "R2_PRIVATE_BUCKET", "bucket_name": "automata-private" }
-  ]
+    { "binding": "R2_PRIVATE_BUCKET", "bucket_name": "automata-private" },
+  ],
+  // Service binding to the broadcast (partyserver) Worker. A Worker cannot
+  // reliably fetch a sibling Worker's public workers.dev URL on the same account
+  // (the request 404s at the edge); the binding routes worker-to-worker directly.
+  // packages/shared/broadcast-server.ts resolves env.BROADCAST via getCloudflareContext.
+  "services": [{ "binding": "BROADCAST", "service": "automata-broadcast" }],
   // Other bindings/secrets set via `wrangler secret put` (see deploy/WORKERS-ENV-MAP.md)
 }
