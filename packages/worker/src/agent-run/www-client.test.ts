@@ -102,7 +102,7 @@ describe("pollThreadStatus", () => {
   });
 });
 
-describe("pollUntilTerminal — revoke-race ruling", () => {
+describe("pollUntilTerminal — terminal via terminal=true; auth-error is failure", () => {
   const noSleep = async () => {};
   function ctx(): PollContext & { logs: string[] } {
     const logs: string[] = [];
@@ -120,17 +120,33 @@ describe("pollUntilTerminal — revoke-race ruling", () => {
     expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
   });
 
-  it("treats a 401 AFTER a successful poll as terminal-inferred-from-revocation", async () => {
+  it("throws on a 401 AFTER a successful poll without terminal=true (premature revocation, not completion)", async () => {
+    // Under revoke-on-terminal-read www revokes only after serving terminal=true (which
+    // the loop returns on). A 401 here means the token died mid-run without the worker
+    // observing terminal — a premature revocation → LOUD failure, never silent completed.
     const responses = [
       jsonResponse(200, { status: "working", terminal: false }),
       jsonResponse(401, { error: "revoked" }),
     ];
     vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!));
 
-    const c = ctx();
-    const result = await pollUntilTerminal(c, opts, 1, noSleep);
-    expect(result).toEqual({ outcome: "completed", finalStatus: "working" });
-    expect(c.logs).toContain("terminal-inferred-from-revocation");
+    await expect(pollUntilTerminal(ctx(), opts, 1, noSleep)).rejects.toThrow(
+      /premature revocation/,
+    );
+  });
+
+  it("returns completed on terminal=true even if the token is revoked immediately after (revoke-on-read happy path)", async () => {
+    // The terminal=true poll returns before the next poll would see the 401, so the
+    // revoke-on-read revocation never reaches the worker's loop.
+    const responses = [
+      jsonResponse(200, { status: "working", terminal: false }),
+      jsonResponse(200, { status: "complete", terminal: true }),
+      jsonResponse(401, { error: "revoked" }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!));
+
+    const result = await pollUntilTerminal(ctx(), opts, 1, noSleep);
+    expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
   });
 
   it("throws when the FIRST poll is a 401 (a real auth error)", async () => {

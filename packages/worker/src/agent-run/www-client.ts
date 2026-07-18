@@ -121,14 +121,17 @@ async function cancellableSleep(ms: number, ctx: PollContext): Promise<void> {
 }
 
 /**
- * Poll thread-status until terminal, applying the revoke-race ruling (ADR-003):
- * handleThreadFinish revokes the daemon token AT terminal, so a poll may get
- * 401/403 before it ever observes {terminal:true}. A 401/403 AFTER at least one
- * successful poll IS the terminal signal (the token's revocation == completion) —
- * logged as 'terminal-inferred-from-revocation'. A 401/403 on the FIRST poll is a
- * real auth error and throws (the step fails loudly). A Hatchet cancellation
- * (ctx.cancelled / aborted signal) ends the loop PROMPTLY with outcome 'cancelled'
- * so the caller can tear the daemon down — no orphan survives a cancelled run.
+ * Poll thread-status until terminal. Completion is observed directly: www revokes the
+ * daemon token only on the terminal-READ (ADR-003 revoke-on-terminal-read) — i.e. right
+ * after serving {terminal:true} — so the worker reliably sees terminal=true and returns
+ * before the token dies. Therefore a 401/403 (auth-error) at ANY point is a FAILURE, not
+ * a completion: on the first poll it's a bad/invalid token; after a successful poll it
+ * means the token was revoked WITHOUT this worker ever observing terminal=true — a
+ * premature/anomalous revocation mid-run. Both throw (Hatchet FAILED), never a silent
+ * COMPLETED-with-no-reply. (This closes the S12 laundering: the prior ruling treated a
+ * mid-work 401/403 as 'terminal-inferred-from-revocation'→completed, which masked any
+ * mid-run revocation as success.) A Hatchet cancellation (ctx.cancelled / aborted signal)
+ * ends the loop PROMPTLY with outcome 'cancelled' so the caller can tear the daemon down.
  */
 export async function pollUntilTerminal(
   ctx: PollContext,
@@ -156,9 +159,19 @@ export async function pollUntilTerminal(
       throw error;
     }
     if (poll.kind === "auth-error") {
+      // Under revoke-on-terminal-READ (ADR-003), www revokes the daemon token only
+      // AFTER serving terminal=true — which this loop returns on below (the poll.terminal
+      // branch). So a 401/403 here, even after a prior successful poll, means the token
+      // was revoked WITHOUT this worker ever observing a terminal status: a premature /
+      // anomalous revocation while the run was still in flight, NOT a completion. Fail
+      // LOUD (Hatchet FAILED) rather than silently reporting COMPLETED with no reply —
+      // that silent-completion laundering is the S12 class this closes.
       if (hadSuccessfulPoll) {
-        ctx.log("terminal-inferred-from-revocation");
-        return { outcome: "completed", finalStatus: lastStatus };
+        throw new Error(
+          `thread-status auth error (HTTP ${poll.httpStatus}) after last status ` +
+            `'${lastStatus ?? "unknown"}' without observing terminal=true — token ` +
+            `revoked before completion (premature revocation; run did not finish)`,
+        );
       }
       throw new Error(
         `thread-status auth error on first poll: HTTP ${poll.httpStatus} — daemon token invalid`,
