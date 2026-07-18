@@ -68,22 +68,25 @@ add **Checks: Read and write**, save, then **re-approve the new permission on th
 be-automata installation** (GitHub prompts the org owner to accept). Until then,
 check-run publication is expected to fail — task creation/intake is unaffected.
 
-## 5. Hatchet execution-plane tunnel is EPHEMERAL (pilot)
+## 5. Hatchet execution-plane tunnel — NAMED tunnel (live)
 
-The control plane (www on Workers) reaches the Hatchet engine through a **cloudflared
-quick tunnel** (`*.trycloudflare.com`), and `HATCHET_API_URL` is a www Worker secret
-pointing at it. A probe confirmed Worker→tunnel fetch is reliable, so a quick tunnel is
-fine for the pilot — BUT a quick tunnel has **no uptime guarantee** and its hostname
-changes every launch. If it drops mid-operation, dispatch fetches fail and no agent-run
-is triggered. Recovery drill:
+The control plane (www on Workers) reaches the Hatchet engine through a **named
+cloudflared tunnel**: `automata-hatchet` (id `73d79054-70f6-40f8-901a-d445eff83577`),
+routing **`hatchet.beautomata.com → localhost:8888`**. `HATCHET_API_URL` = `https://hatchet.beautomata.com`
+(a www Worker secret). Promoted from the ephemeral quick-tunnel before the ADR-036
+parity block for stability. Its key advantage over the quick tunnel: the **hostname is
+stable** — restarting the tunnel process reconnects to the same hostname, so NO re-secret
+is needed.
 
-1. `cloudflared tunnel --url http://localhost:8888` → grab the new `*.trycloudflare.com` URL.
-2. `wrangler secret put HATCHET_API_URL` on `automata-www` with the new URL (no rebuild
-   needed — it's a runtime secret; the change is live on the next request).
-3. Verify `edge → {url}/api/v1/meta` returns 200.
+Run it: `cloudflared tunnel run --url http://localhost:8888 automata-hatchet` (keep this
+process alive on the engine box). Recovery if the tunnel PROCESS dies: just restart that
+one command — the hostname and `HATCHET_API_URL` are unchanged. Verify with
+`curl https://hatchet.beautomata.com/api/v1/meta` → 200. Credentials at
+`~/.cloudflared/73d79054-*.json` (keep secret; delete the tunnel to revoke).
 
-A **named tunnel** on the `beautomata.com` zone (`hatchet.beautomata.com → localhost:8888`)
-is the stable production replacement — deferred until after the C8 proof.
+(Legacy ephemeral drill, if you ever fall back to a quick tunnel: `cloudflared tunnel
+--url http://localhost:8888` → new `*.trycloudflare.com` URL → `wrangler secret put
+HATCHET_API_URL` with it, no rebuild.)
 
 ## Runbook note (deploy lesson)
 
