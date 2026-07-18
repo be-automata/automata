@@ -149,7 +149,7 @@ PR=$(gh pr create --repo "$REPO" --base "$BASE" --head "$BR" --title "UAT: ADR-0
 | S7 | command | `/request-changes` → CR via command path | PASS |
 | S8 | command | verdict upgrade dismisses prior APPROVED | PASS |
 | S9 | mention | unknown `/review` → some response | PASS |
-| S12 | mention | intake capacity → reply (never silent) | INCONCLUSIVE — model differs; concurrent-reply finding |
+| S12 | mention | burst reliability: N mentions → ALL N reply (no silent loss) | FAIL — 3/4 silent (mid-run token revocation); fix pending → re-run flips to PASS |
 | S10, S11, S13, S14 | phase-2 | inline threads / resolve / stale-guard / one-review-object | PARKED (phase-2 surface) |
 
 **Known-gaps carried** (not FAILs; upgrade pointers in each case):

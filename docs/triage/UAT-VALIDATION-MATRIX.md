@@ -1370,3 +1370,13 @@ S12's OLD trigger (fill per-ORG slots `maxConcurrentPerOrg=2`, over-limit mentio
 - So there is **no intake capacity-drop-with-reply mechanism** observed (nothing was gated at intake — all 4 dispatched), i.e. the OLD S12 assertion has no direct analogue. Instead the burst surfaced a **NEW finding: concurrent-mention reply-reliability** — 3 of 4 dispatched runs COMPLETED but emitted no reply (silent no-output under burst on the concurrency=1 worker; NOT SCHEDULING_TIMED_OUT since status=COMPLETED, and NOT the worker-down window since #5/#6 replied).
 
 **S12 VERDICT: INCONCLUSIVE** — not a clean PASS (the capacity-drop-reply doesn't exist to test) and not scored FAIL yet (the 3 silent-no-reply runs need `wrangler tail` on runs for issues #7-9 to classify: agent error / emit failure / socket contention on concurrency=1 vs a benign timing artifact). FLAGGED to team-lead. The per-user-vs-per-org capacity MODEL difference is itself a parity note for onboarding.
+
+## S12 TRIAGE — VERDICT: FAIL (burst reliability; mid-run token revocation) (2026-07-18)
+
+Team-lead triaged the 3/4 silent-no-reply from the worker step logs — it's a REAL reliability bug, not an artifact.
+- **Signature:** the silent runs (issues #7-9) show thread-status `working` for ~60-90s then **`terminal-inferred-from-revocation` WITHOUT ever reaching `working-done`** — their daemon tokens were **revoked MID-RUN** (claude killed before replying). The one healthy run (#6) shows the correct `working → working-done → revocation` order.
+- **Root cause (hypothesis, tenancy-coder verifying/fixing):** the thread-finish revocation call uses a **key shared across runs** (the `threadChatId` sentinel or org) instead of the exact thread → under serial execution each completing run **revokes the NEXT in-flight run's token**. Same sentinel-shared-key class as the F2 finding.
+- **Ruling:** score **S12 = FAIL (burst reliability: silent work loss under concurrency)**. The OLD per-org intake capacity-gate assertion is **REPLACED** by the burst-reliability assertion (N near-simultaneous mentions → ALL N reply, no silent loss) — NEW has no per-org intake gate (per-user limit + queueing instead), so this is the honest, and arguably stronger, mapping of the same overload risk.
+- **Flip condition:** after tenancy-coder's revocation-key fix deploys, a burst re-run with all N replying flips S12 → PASS and **the block closes 10/10**. Suite S12 case rewritten as the burst-reliability assertion (docs/uat/adr-036-effect-intent.md).
+
+**BLOCK STATUS: 9 PASS / 1 FAIL (S12, fix pending) — block closes 10/10 on the S12 burst re-run.**

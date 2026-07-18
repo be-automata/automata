@@ -85,19 +85,22 @@ Scoring is at the **effect-intent level** (which intent fired, verdict semantics
 - **Expected + where:** ≥1 new reply OR a new review after the mention; no spurious duplicate verdict.
 - **Verdict rubric:** PASS if a response lands (no silence). (With GSD skills at `~/.claude`, the agent may semantically run the global `/review` skill — either way a response must land.)
 
-## S12 — Intake-failure reply: capacity gate (INCONCLUSIVE — model differs)
-- **OLD invariant:** a mention dropped at INTAKE (capacity) must still get an "at capacity — re-mention" reply (never a silent drop).
-- **NEW-model caveat (READ THIS):** the OLD trigger (per-ORG `maxConcurrentPerOrg=2` → intake-drop + reply) does **not** map. NEW uses **per-USER `MAX_CONCURRENT_TASKS_PER_USER` (default 3)**, and the worker `agent-run` concurrency=1 → over-limit work **QUEUES/serializes**, it is not intake-dropped. So there is no capacity-drop-reply to assert.
+## S12 — Burst reliability (replaces OLD capacity-gate) — currently FAIL
+- **Invariant (NEW, burst-reliability):** N near-simultaneous @-mentions on N distinct work items → **ALL N eventually reply. No silent work loss.** ("What happens when more work arrives than the plane can run at once?")
+- **Why the OLD assertion is replaced:** OLD S12 tested a per-ORG intake capacity gate (`maxConcurrentPerOrg=2` → drop + "at capacity" reply). NEW has **no per-org intake gate** — it uses a per-USER limit (`MAX_CONCURRENT_TASKS_PER_USER`, default 3) and the worker `agent-run` concurrency=1 **queues/serializes** over-limit work rather than dropping it. So there is no capacity-drop-reply to assert; the same underlying risk (overload) is tested by the burst-reliability invariant instead — arguably a stronger test.
 - **Preconditions:** github_mention automation; linked identity.
-- **Trigger (saturation burst):**
+- **Trigger (saturation burst — parameterize N):**
   ```bash
   for n in 1 2 3 4; do
-    IU=$(gh issue create --repo "$REPO" --title "UAT S12 burst $n" --body x | grep -oE '[0-9]+$')
+    IU=$(gh issue create --repo "$REPO" --title "UAT S12 burst $n <RUN_ID>" --body x | grep -oE '[0-9]+$')
     gh api repos/$REPO/issues/$IU/comments -f body="@${BOT_HANDLE} analyze this repo structure in detail."
   done
   ```
-- **Expected + where:** the OPEN QUESTION — do all N eventually reply (queued, none dropped)? Scan each burst issue for a bot reply; scan for any `capacity/dropped/re-mention` message.
-- **Verdict rubric:** currently **INCONCLUSIVE**. 2026-07-18 run: all 4 got eyes + a dispatched run, but only 1 replied; 3 ran to COMPLETED with NO reply and no capacity message (not `SCHEDULING_TIMED_OUT`). Needs a `wrangler tail` on the non-replying runs to classify: **concurrent-mention reply-reliability FAIL** (dispatched+completed but silent no-output under burst on the concurrency=1 worker) vs benign artifact. **TODO: finalize verdict on the tail.** Record the per-user-vs-per-org model difference as an onboarding parity note regardless.
+- **Expected + where:** every burst issue gets a bot reply within the settle window; zero silent-no-reply. Scan each issue's comments for a `$BOT_LOGIN` reply; cross-check the OLAP for one dispatched+COMPLETED run per mention.
+- **Verdict rubric:** PASS iff **all N reply**. Currently **FAIL**.
+  - **2026-07-18 result: FAIL (burst reliability — silent work loss under concurrency).** 4-mention burst (issues #6-9): all 4 got eyes + a dispatched run, but only 1 replied; 3 ran to COMPLETED **with no reply**.
+  - **Root cause (team-lead triage from worker step logs; tenancy-coder verifying/fixing):** the silent runs show thread-status `working` for ~60-90s then **`terminal-inferred-from-revocation` WITHOUT ever reaching `working-done`** — their daemon tokens were **revoked MID-RUN** (claude killed before replying), while the one healthy run shows the correct `working → working-done → revocation` order. Hypothesis: the thread-finish revocation call uses a **key shared across runs** (the `threadChatId` sentinel or org) instead of the exact thread, so under serial execution each completing run **revokes the NEXT in-flight run's token**. (Cross-references the F2 sentinel class — [[dispatch-gating]].)
+  - **Flip to PASS when:** tenancy-coder's revocation-key fix deploys and a burst re-run has all N reply. Then the block closes 10/10.
 
 ---
 
