@@ -1050,3 +1050,18 @@ These two MUST be verified live before the second onboarding (Somnio/marketplace
 - **SOMNIO-GATE-2 (F4):** **tokens moved out of Hatchet's plain workflow input** (secret-injection or equivalent) — no installation/daemon token readable in the persisted Hatchet payload / dashboard, because a shared/multi-org Hatchet makes that a cross-tenant exposure.
 
 Both added to the execution-plane UAT program as blocking items for the Somnio round (alongside the exec-plane C10 gates). Slice-1 lands F1's *mechanism*; SOMNIO-GATE-1 is the *live re-verification* on the onboarding-#2 topology.
+
+## ADR-003 slice-1 fold-ins — VERIFIED (code+unit) at d07d45e (2026-07-17)
+
+Slice 1+1b (4de39ae + d07d45e; www 890/0). Verified F1/F2/F3/F5 at code+unit level; F1's live half is pending-deploy (per team-lead). **Daemon/F-related unit tests: 29/29 green** across 6 files (daemon-token, daemon-token-context, cli-router, daemon-event route, next-message route, daemon).
+
+| Finding | Verdict | Evidence |
+|---|---|---|
+| **F1** purpose-scope daemon token | **VERIFIED (code+unit); live half pending-deploy** | daemon token minted with `tokenType: 'daemon'`; `cli-router.ts:39` **rejects `tokenType === "daemon"` → UNAUTHORIZED**; both daemon endpoints REQUIRE `tokenType === "daemon"`. cli-router.test covers the reject. LIVE probe (deployed Worker: daemon token → `/api/cli/threads.list` 401/403) lands with the next www deploy — I'll run it then. |
+| **F2** token↔thread binding | **VERIFIED (code+unit)** | `/api/daemon/next-message` (POST) + `/api/daemon-event` both enforce `ctx.threadChatId === requested` — "thread A's token cannot pull/inject thread B even in the same org" (routes' F2 comments + `token↔thread mismatch` 403). Legacy null-threadChatId tokens back-compat-allowed. Both route.tests cover mismatch. |
+| **F3** revoke-on-terminal (not sub-day expiry) | **VERIFIED (code+unit)** | `handleThreadFinish` (handle-daemon-event.ts:519) calls `revokeDaemonTokensForSandbox({userId, sandboxId})` on terminal (non-blocking `waitUntil`, line 540); revoke deletes the apikey by `name=sandboxId`. 1-day expiry kept as backstop (better-auth plugin minimum — accepted per ruling). daemon-token.test covers mint+revoke. |
+| **F5** no-prompt-logging + id hygiene | **VERIFIED (code)** | next-message is now **POST with ids in the body** (was GET `?threadChatId=`); `route:91 "H2: do NOT log message — it contains the prompt"`; rejection logs carry threadChatId/user/org but NOT the prompt. |
+
+**Cosmetic nit (non-blocking):** the F3 revoke comments in `daemon-token.ts:11` and `handle-daemon-event.ts:538` say "the **6h** expiry is the backstop", but the actual value is **1 day** (`daemon.ts:53`, "1 day (plugin minimum) — backstop only"). Two stale "6h" comment strings → one-line fix; substance is correct.
+
+**Net:** all four ADR-003 slice-1 fold-ins are code+unit verified; F1's blast-radius mechanism (CLI router rejects daemon tokens) is in place, its live proof queued for the next deploy. SOMNIO-GATE-1 (F1 live) + SOMNIO-GATE-2 (F4 tokens-out-of-payload) remain the onboarding-#2 blockers.
