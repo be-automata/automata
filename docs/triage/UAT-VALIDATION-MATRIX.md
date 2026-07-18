@@ -1215,3 +1215,20 @@ While staging the S1 parity fixture I pushed a commit directly to `be-automata/a
 - **Blast radius:** one file, `scripts/uat/adr036-sample.ts` (14 lines, fake seeded defects — off-by-one, `console.log` of a fake key string, false attestation), outside `src/`, no build/lint/tsc impact, no real secrets (team-lead: no rotation needed).
 - **Fix:** forward-fix removal (NO history rewrite — commits sit on top and main is shared). Commit **ba5e77d** "chore: remove accidentally-pushed UAT fixture" FF-pushed to main; verified `origin/main:scripts/uat/adr036-sample.ts` is gone. The `c4de23c … ba5e77d` add/remove pair on main is this incident.
 - **Standing mitigation (all agents):** for fixture/scratch branches on this repo, push with explicit `git push origin HEAD:refs/heads/<branch>` and verify (`git ls-remote origin refs/heads/<branch>` present + `refs/heads/main` unchanged) BEFORE `gh pr create`. Never `git push -u origin <branch>` from a branch whose upstream is origin/main.
+
+## S1 (opened → CHANGES_REQUESTED) — VERDICT: FAIL (no-dup / idempotency divergence) (2026-07-18)
+
+Fixture PR #3 (be-automata/automata, HEAD 79f3cff, 1 commit, opened 09:33:08Z). Automation c95b9307 dispatched on `pull_request.opened`.
+
+**What PASSED (effect-intent quality is strong):**
+- ✅ **Verdict CHANGES_REQUESTED at HEAD** — correct (defects present).
+- ✅ **Findings** — the review names ALL THREE seeded defects with correct severity: off-by-one in `isAdult` (Medium/correctness), `console.log` secret in `logKey` (High/security), false "validated safe" attestation (Medium/integrity), each with `file` and a code quote.
+- ✅ **Identity** — `automata-ai-bot[bot]` (Bot). Residual #2 holds under load.
+- ✅ **Surface = MATCHED** — a FORMAL `CHANGES_REQUESTED` review (reviews API), same surface as the OLD baseline. No known-gap annotation needed (per team-lead's refined scoring).
+
+**What FAILED — the no-dup invariant (the OLD baseline's rollback trigger):**
+- ❌ **TWO non-dismissed `CHANGES_REQUESTED` reviews at the SAME commit** 79f3cff — ids `4728240823` (09:33:58Z) + `4728240904` (09:34:03Z), 5s apart, near-identical bodies, neither dismissed. no-dup check: `{commit:79f3cff1, count:2, states:[CHANGES_REQUESTED,CHANGES_REQUESTED]}`. OLD invariant = at most ONE non-dismissed blocking verdict per commit; **count 2 is the documented rollback trigger.**
+
+**Root cause (characterized):** ONE `pull_request.opened` webhook delivery (status 200, `redelivery=false`), ONE agent run in the Hatchet OLAP (`46a51913`, COMPLETED) → yet TWO identical formal review posts. So a **single run posted the review twice**; the NEW plane's review **effect channel is not enforcing ADR-036 verdict-aware idempotency** (same commit+verdict should dedup / supersede-dismiss, leaving exactly one). This is not GitHub double-delivery and not two dispatches. (Could not read the run's internal tool calls — `v1_task_events_olap` schema query came back empty — so "double emit_review vs double post within one emit" is unconfirmed, but the observable outcome is a non-idempotent duplicate blocking review.)
+
+**Impact + block implication:** this is a real bug — the plane ships DUPLICATE blocking reviews. It directly contaminates the idempotency/supersede-dependent parity cases: **S2** (still-CR at new HEAD, no-dup), **S3** (APPROVE + dismiss prior CR), **S5** (deduped re-review verdict), **S8** (verdict-upgrade dismisses prior). Running those now would mostly re-confirm the same broken idempotency. **S1 VERDICT: FAIL** (idempotency diverges from OLD). Surfacing to team-lead/boot-coder for a triage decision: pause for a review-effect-idempotency fix vs. continue documenting each divergence.
