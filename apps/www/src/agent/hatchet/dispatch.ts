@@ -116,6 +116,14 @@ export async function dispatchAgentRun({
   // it will drive the thread, so skipping is correct and NOT a zombie. (This is no
   // longer the cross-thread collision that stranded threads under the shared legacy
   // sentinel — that was the per-run-key fix.) Benign: do not fail the thread here.
+  //
+  // FUTURE HARDENING: one residual zombie window remains — if the process crashes
+  // between minting the token and the trigger's revoke-on-final-failure, the token
+  // is stale and this skip strands the thread until the 1-day token expiry. To close
+  // it, add stale-token detection here (e.g. cross-check that a Hatchet run actually
+  // exists for runKey, or stamp the token with a dispatch-started timestamp and treat
+  // an old-but-unconfirmed token as stale → clean up + re-dispatch). Accepted for now
+  // as a 1-day-bounded edge (team-lead ruling).
   if (await hasActiveDaemonToken({ userId, name: runKey })) {
     console.log("[hatchet] skipping duplicate dispatch — a run is already in flight", {
       threadId,
