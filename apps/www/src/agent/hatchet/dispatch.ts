@@ -1,7 +1,7 @@
 import { env } from "@terragon/env/apps-www";
 import { getInstallationToken } from "@terragon/shared/github-app";
 import { parseRepoFullName } from "@/lib/github";
-import { mintDaemonToken } from "@/lib/daemon-token";
+import { mintDaemonToken, hasActiveDaemonToken } from "@/lib/daemon-token";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
 import { triggerAgentRun } from "./transport";
 
@@ -57,6 +57,17 @@ export async function dispatchAgentRun({
   repoFullName: string;
   branch: string;
 }): Promise<void> {
+  // Double-dispatch guard (idempotency): the Hatchet v1 trigger has no server-side
+  // dedup, so if a dispatch for this threadChat is already in flight (its daemon
+  // token, named threadChatId, still exists — revoked on terminal), skip.
+  if (await hasActiveDaemonToken({ userId, name: threadChatId })) {
+    console.log("[hatchet] skipping duplicate dispatch — already in flight", {
+      threadId,
+      threadChatId,
+    });
+    return;
+  }
+
   const [owner, repo] = parseRepoFullName(repoFullName);
   const [installationToken, daemonToken] = await Promise.all([
     getInstallationToken(owner, repo),

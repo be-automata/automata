@@ -6,7 +6,10 @@ import { apikey as apikeyTable } from "@terragon/shared/db/schema";
 import { createTestUser } from "@terragon/shared/model/test-helpers";
 import { User } from "@terragon/shared";
 import { nanoid } from "nanoid";
-import { revokeDaemonTokensForSandbox } from "./daemon-token";
+import {
+  revokeDaemonTokensForSandbox,
+  hasActiveDaemonToken,
+} from "./daemon-token";
 
 async function keysNamed(userId: string, name: string) {
   return db
@@ -54,5 +57,16 @@ describe("revokeDaemonTokensForSandbox (ADR-003 F3)", () => {
         sandboxId: "no-such-sandbox",
       }),
     ).toBe(0);
+  });
+
+  it("hasActiveDaemonToken: true while a token with that name exists, false after revoke", async () => {
+    const name = `tc-${nanoid(8)}`;
+    expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(false);
+    await auth.api.createApiKey({
+      body: { name, userId: user.id, metadata: { tokenType: "daemon" } },
+    });
+    expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(true);
+    await revokeDaemonTokensForSandbox({ userId: user.id, sandboxId: name });
+    expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(false);
   });
 });

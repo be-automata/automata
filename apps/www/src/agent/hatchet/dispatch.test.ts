@@ -99,4 +99,29 @@ describe("dispatchAgentRun", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("skips the trigger (double-dispatch guard) when a dispatch is already in flight", async () => {
+    // A daemon token named threadChatId already exists = a dispatch in flight.
+    const { mintDaemonToken } = await import("@/lib/daemon-token");
+    await mintDaemonToken({
+      userId: user.id,
+      threadId,
+      threadChatId,
+      name: threadChatId,
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId,
+      threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "main",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
 });

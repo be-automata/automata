@@ -57,6 +57,29 @@ export async function mintDaemonToken({
  * Returns how many were revoked (0 is normal — e.g. resumed threads or the
  * remote path once it mints per-run).
  */
+/**
+ * Whether a live daemon token exists for the given name (ADR-003 double-dispatch
+ * guard). Daemon tokens are minted with `name = threadChatId` on the remote path
+ * and revoked on thread-terminal, so an existing one means a dispatch/run is
+ * already in flight for that threadChat — the caller skips re-triggering. Best-
+ * effort (a tight race can still double-mint; the Hatchet v1 trigger has no
+ * server-side dedup, so this is the www-side guard).
+ */
+export async function hasActiveDaemonToken({
+  userId,
+  name,
+}: {
+  userId: string;
+  name: string;
+}): Promise<boolean> {
+  const rows = await db
+    .select({ id: apikey.id })
+    .from(apikey)
+    .where(and(eq(apikey.userId, userId), eq(apikey.name, name)))
+    .limit(1);
+  return rows.length > 0;
+}
+
 export async function revokeDaemonTokensForSandbox({
   userId,
   sandboxId,
