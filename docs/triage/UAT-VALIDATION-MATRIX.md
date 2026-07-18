@@ -1276,3 +1276,13 @@ Fresh fixture PR #4 (HEAD dcf933b0, opened 11:07:47Z), run `b0e3468c` COMPLETED.
 **Evidence caveat (honest):** PR #4 has 1 review and **ZERO dismissed** rows — so this run **posted once** (the tool-layer retry that caused S1's dup is non-deterministic and didn't fire here). The reconciler runs fail-soft at thread-finish regardless, but with no dup present it had nothing to dismiss. So PR #4 validates the **clean end-state** but does NOT by itself demonstrate the reconciler's dismiss-on-dup path (that needs a caught-dup run, or the `dup_reconciled` www telemetry for b0e3468c — requested from team-lead, who has Worker log access). PR#3=2 vs PR#4=1 is suggestive but not conclusive on its own.
 
 **S1 RE-RUN VERDICT: PASS (reconciled end-state, no-dup=1) — INTERIM-RECONCILER mechanism.** Durable single-writer close (emit_review channel) remains phase-2. Proceeding to S2 (synchronize) for another dup chance + no-dup-at-new-HEAD.
+
+## S2 (synchronize partial-fix → still CR) — PASS (2026-07-18)
+
+Pushed partial fix to PR #4 (removed console.log secret; off-by-one + attestation remain). New HEAD d4a9a5e, run `6552b40e` COMPLETED.
+- ✅ **Still CHANGES_REQUESTED at new HEAD**, no-dup at new HEAD = 1 (stable across polls).
+- ✅ Body acknowledges the fix ("**Fixed:** ✅ console.log secret/API-key leak removed") and re-raises ONLY the still-outstanding items (off-by-one, false attestation) — does NOT re-raise the fixed security item. Resolved-header present. Strong cross-cycle STATE AWARENESS (references dcf933b0→d4a9a5e explicitly).
+- ✅ Identity bot; formal-review surface (MATCHED). The prior-commit review (dcf933b0) lingers non-dismissed — correct (per-commit invariant; dismissal of prior happens on verdict change in S3).
+- Note: n=1 at new HEAD, 0 dismissed → again no dup this run (reconciler dismiss-path still needs a caught-dup run or dup_reconciled telemetry).
+
+**S2 VERDICT: PASS** — matches OLD baseline (partial-fix → still-CR, Resolved:N, fixed item not re-raised, no-dup at new HEAD).
