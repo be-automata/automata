@@ -1134,3 +1134,17 @@ boot-coder reported C8 green end-to-end (run `agent-run 6c944c1d-ea77-420a-9d66-
 4. **F2 sentinel still in use:** `threadChatId = "legacy-thread-chat-id"` on the green run too — the open security item with tenancy-coder (F2 binding degrades to org-level, see STAGE-2 finding). Green run confirms it does NOT block execution; the fix remains security-load-bearing, not cosmetic.
 
 **C8 VERDICT: PASS (execution GREEN).** Full dispatch→Hatchet→worker→daemon→claude→terminal chain completes; winning-run payload upholds ADR-002 §3; real PR artifact posted. Residuals carried forward (not C8 blockers): F1 live proof (GATE-1), F2 real-threadChatId (GATE-1 adjacent + tenancy-coder), ADR-036 EXEC-parity on the comment-vs-formal-review effect surface.
+
+## CORRECTION (self-issued) — F2 framing in STAGE-2 + C8 was STALE (2026-07-18)
+
+**Retracting the "threadChatId sentinel degrades F2 to org-level → the threadChatId fix is security-load-bearing" claim I made in the STAGE-2 and C8 sections above.** It was true of the design I had in view but is NOT true of the live/HEAD code, and I failed to reconcile against a fix that had already merged (it's even recorded in my own session memory).
+
+**Live-code truth (verified in HEAD):**
+- Commit **`44bfa7d`** ("anchor F2 daemon-token binding on threadId — close the sentinel org-level collapse") is merged and an ancestor of HEAD. `apps/www/src/agent/daemon.ts` → `mintDaemonToken` stamps `metadata.threadId`; `apps/www/src/app/api/daemon/next-message/route.ts:69` rejects on `ctx.threadId !== null && ctx.threadId !== threadId`. The route comment explicitly states threadChatId is the shared legacy sentinel and that is *why* the binding anchors on the per-thread-unique `threadId` instead.
+- **Therefore F2 does NOT degrade to org-level, and the LEGACY `threadChatId` sentinel is intentional and correct** — it must NOT be "fixed" to a unique UUID (that would break `getThreadChat` lookups unless a real threadChat row exists, which needs `enableThreadChatCreation`). The dispatch payload carrying `threadChatId="legacy-thread-chat-id"` is BY DESIGN, not a security gap.
+
+**What remains true (bounded, not the permanent design):**
+- **Rollout-window residual only:** legacy daemon tokens minted *before* 44bfa7d carry a null `threadId` and still pass the binding unconditionally (org-level) until they expire/cycle out. Tracked by `9d49bcb` ("mark the F2 legacy null-threadId passthrough for removal after tokens cycle"); the `ctx.threadId !== null` guard clause is to be dropped once old tokens age out.
+- **Timeline note on the inspected runs:** the C8 winning run `6c944c1d` posted its artifact at 08:42:19Z; **44bfa7d landed at 08:45:22Z — ~3 min later.** So that run's daemon token was minted pre-fix (legacy null-threadId → org-level for that token specifically). That is why the org-level exposure looked *live* on the token I probed — it is a pre-fix legacy token in the rollout window, NOT evidence that the current design collapses F2.
+
+**Net:** the go-forward F2 posture is sound (threadId-anchored). No unique-threadChatId change is needed or desired for security. The only open item is letting pre-44bfa7d tokens cycle out, then removing the null-threadId passthrough (9d49bcb). SOMNIO-GATE-1's F2 half is effectively CLOSED-BY-DESIGN in HEAD; only the F1 *purpose-scoping* live-probe half (needs a non-revoked daemon token) remains genuinely open.
