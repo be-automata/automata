@@ -81,6 +81,7 @@ function userMessage(text: string): DBUserMessage {
 
 const PR_AUTOMATION_NAME = "Mirror: PR review (github-ops)";
 const ISSUE_AUTOMATION_NAME = "Mirror: issue research (github-deep-research)";
+const MENTION_AUTOMATION_NAME = "Mirror: GitHub mention (github-mention-respond)";
 
 async function main() {
   const org = await getOrganizationBySlug({ db, slug: orgSlug });
@@ -179,6 +180,33 @@ async function main() {
     console.log(`Created automation: ${ISSUE_AUTOMATION_NAME}`);
   } else {
     console.log(`Skipped (exists): ${ISSUE_AUTOMATION_NAME}`);
+  }
+
+  if (!existingNames.has(MENTION_AUTOMATION_NAME)) {
+    await createAutomation({
+      db,
+      userId: ownerUserId,
+      accessTier: "pro",
+      organizationId: org.id,
+      automation: {
+        name: MENTION_AUTOMATION_NAME,
+        triggerType: "github_mention",
+        // All-authors mention routing (the mention analogue of the PR automation):
+        // fire for @-mentions from any author; the comment body is the agent's input.
+        triggerConfig: {
+          filter: { includeOtherAuthors: true, includeBotMentions: false },
+        },
+        repoFullName,
+        branchName: "main",
+        action: {
+          type: "user_message",
+          config: { message: userMessage("Respond to the GitHub mention.") },
+        },
+      },
+    });
+    console.log(`Created automation: ${MENTION_AUTOMATION_NAME}`);
+  } else {
+    console.log(`Skipped (exists): ${MENTION_AUTOMATION_NAME}`);
   }
 
   console.log(
