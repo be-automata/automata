@@ -1341,3 +1341,10 @@ Precondition: PR #4 had 1 non-dismissed APPROVED at HEAD f952793. Command "@auto
 - ✅ **no-dup at HEAD = 1** (states=[CHANGES_REQUESTED]) — the stronger verdict was NOT swallowed as a duplicate. This is the verdict-aware-idempotency regression guard working live.
 - ✅ Reply landed (command path replies). Also exercises the /request-changes COMMAND path → emit_review verdict.
 **S8 VERDICT: PASS** — matches OLD baseline (verdict upgrade posts + dismisses prior + no-dup=1).
+
+### S6 (mention CODE-FIX → edit + push + reply) — PASS
+Mention "@automata-ai-bot please fix the off-by-one … use >=" on PR #3 (CID 5011090361, 11:31:54Z, HEAD 79f3cff) → run `49a5dda9` COMPLETED.
+- ✅ **PR #3 HEAD advanced** 79f3cff → a367d0e with a **bot-authored commit** (author `automata-ai-bot[bot]`, msg "uat: fix off-by-one in isAdult (>= 18) per PR feedback").
+- ✅ **One reply** summarizing the change. ✅ identity bot.
+- (The fix push is a synchronize → triggered a follow-up review run 4ae1c0a3, expected.)
+**S6 VERDICT: PASS** — matches OLD baseline (bot commit >→>= + reply).
