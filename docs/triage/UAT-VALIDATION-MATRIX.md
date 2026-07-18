@@ -1266,3 +1266,13 @@ After boot-coder wired the github_mention automation (d24bfe58), S4 STILL did no
 
 **Diagnosis:** the gate is the mention-detection, not the automation. `isAppMentioned` (`utils.ts:15`) matches `@${NEXT_PUBLIC_GITHUB_APP_NAME}\b`; if it returns false, `handlers.ts:254` logs "does not mention the app" and returns before `handleAppMention`. The bot POSTS as `automata-ai-bot[bot]` but the MENTION handle is the configured `NEXT_PUBLIC_GITHUB_APP_NAME` (a different string). Neither guess dispatched, so I don't yet have the correct handle — OR `isAppMentioned` passes and `getUsersToTriggerTasks` returns 0 (a deeper user/access gate). Can't disambiguate without the Worker log (wrangler tail) or the env value — requested both from boot-coder. Stopped firing guesses to avoid noise/wasted runs.
 **S4/S6/S9/S12 status: BLOCKED pending the correct mention handle + confirmation the mention path dispatches.** (Observation for onboarding UX: the mention handle differing from the bot's posting login is a real footgun — users will @ the bot's visible name and get silence. Not a parity FAIL; an onboarding note.)
+
+## S1 RE-RUN (post-reconciler 57d1cda) — PASS on end-state (2026-07-18)
+
+Fresh fixture PR #4 (HEAD dcf933b0, opened 11:07:47Z), run `b0e3468c` COMPLETED. Post the interim reconciler deploy (dad8e871).
+- ✅ Verdict CHANGES_REQUESTED at HEAD; ✅ identity automata-ai-bot[bot]; ✅ formal-review surface (MATCHED).
+- ✅ **no-dup invariant HOLDS: exactly 1 non-dismissed CHANGES_REQUESTED** at dcf933b0 (stable across 4 polls 11:09:01→11:09:54). Contrast: pre-reconciler PR #3 = 2 non-dismissed.
+
+**Evidence caveat (honest):** PR #4 has 1 review and **ZERO dismissed** rows — so this run **posted once** (the tool-layer retry that caused S1's dup is non-deterministic and didn't fire here). The reconciler runs fail-soft at thread-finish regardless, but with no dup present it had nothing to dismiss. So PR #4 validates the **clean end-state** but does NOT by itself demonstrate the reconciler's dismiss-on-dup path (that needs a caught-dup run, or the `dup_reconciled` www telemetry for b0e3468c — requested from team-lead, who has Worker log access). PR#3=2 vs PR#4=1 is suggestive but not conclusive on its own.
+
+**S1 RE-RUN VERDICT: PASS (reconciled end-state, no-dup=1) — INTERIM-RECONCILER mechanism.** Durable single-writer close (emit_review channel) remains phase-2. Proceeding to S2 (synchronize) for another dup chance + no-dup-at-new-HEAD.
