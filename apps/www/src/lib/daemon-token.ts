@@ -108,6 +108,34 @@ export async function hasActiveDaemonToken({
   return rows.length > 0;
 }
 
+/**
+ * Revoke ONE daemon token by its exact apikey id (ADR-003 F3, burst-safe). Used at
+ * thread-finish to revoke the run's OWN token — the one that authenticated the
+ * terminal daemon-event (ctx.apiKeyId). This can never delete a sibling run's token,
+ * unlike revoke-by-name/thread, which under a burst let a delayed finish for run A
+ * delete run B's freshly-minted same-keyed token, killing B mid-work (S12). userId
+ * is an extra fence. Returns how many were deleted (0 or 1).
+ */
+export async function revokeDaemonTokenById({
+  userId,
+  apiKeyId,
+}: {
+  userId: string;
+  apiKeyId: string;
+}): Promise<number> {
+  const deleted = await db
+    .delete(apikey)
+    .where(and(eq(apikey.userId, userId), eq(apikey.id, apiKeyId)))
+    .returning({ id: apikey.id });
+  if (deleted.length > 0) {
+    console.log("[daemon-token] revoked run token on terminal (by id)", {
+      userId,
+      apiKeyId,
+    });
+  }
+  return deleted.length;
+}
+
 export async function revokeDaemonTokensForSandbox({
   userId,
   sandboxId,

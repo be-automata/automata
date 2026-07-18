@@ -16,6 +16,7 @@ const THREAD_CHAT_ID = "tc_1";
 function ctx(over: Partial<DaemonTokenContext> = {}): DaemonTokenContext {
   return {
     userId: "user_1",
+    apiKeyId: "apikey_test",
     organizationId: "org_1",
     threadChatId: THREAD_CHAT_ID,
     // Default null (legacy token) so existing cases pass the threadId anchor;

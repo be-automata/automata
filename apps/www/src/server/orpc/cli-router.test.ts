@@ -19,6 +19,7 @@ describe("cli-router middleware — F1 daemon-token purpose scope", () => {
   it("REJECTS a daemon-scoped token (a compromised box gets no CLI access)", async () => {
     vi.mocked(getDaemonTokenContext).mockResolvedValue({
       userId: "u1",
+      apiKeyId: "apikey_test",
       organizationId: null,
       threadChatId: "tc1",
       threadId: "t1",
@@ -30,6 +31,7 @@ describe("cli-router middleware — F1 daemon-token purpose scope", () => {
   it("accepts a non-daemon (CLI) token", async () => {
     vi.mocked(getDaemonTokenContext).mockResolvedValue({
       userId: "u1",
+      apiKeyId: "apikey_test",
       organizationId: null,
       threadChatId: null,
       threadId: null,

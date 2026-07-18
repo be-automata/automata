@@ -1,10 +1,7 @@
 import { toDBMessage } from "@/agent/msg/toDBMessage";
 import { getPendingToolCallErrorMessages } from "@/lib/db-message-helpers";
 import { db } from "@/lib/db";
-import {
-  revokeDaemonTokensForSandbox,
-  daemonRunKey,
-} from "@/lib/daemon-token";
+import { revokeDaemonTokenById } from "@/lib/daemon-token";
 import { ClaudeMessage } from "@terragon/daemon/shared";
 import {
   DBMessage,
@@ -50,6 +47,7 @@ export async function handleDaemonEvent({
   userId,
   timezone,
   contextUsage,
+  apiKeyId = null,
 }: {
   messages: ClaudeMessage[];
   threadId: string;
@@ -57,6 +55,8 @@ export async function handleDaemonEvent({
   userId: string;
   timezone: string;
   contextUsage: number | null;
+  /** apikey id of the run's own token (revoked at thread-finish — burst-safe). */
+  apiKeyId?: string | null;
 }) {
   console.log(
     "Daemon event",
@@ -516,6 +516,7 @@ export async function handleDaemonEvent({
         shouldSkipCheckpoint,
         repoFullName: thread.githubRepoFullName ?? null,
         prNumber: thread.githubPRNumber ?? null,
+        apiKeyId,
       }),
     );
   }
@@ -532,6 +533,7 @@ async function handleThreadFinish({
   shouldSkipCheckpoint,
   repoFullName,
   prNumber,
+  apiKeyId,
 }: {
   userId: string;
   threadId: string;
@@ -542,6 +544,7 @@ async function handleThreadFinish({
   shouldSkipCheckpoint: boolean;
   repoFullName: string | null;
   prNumber: number | null;
+  apiKeyId: string | null;
 }) {
   // ADR-036 (INTERIM): a PR-associated thread's agent posts its review directly via
   // gh with no idempotency, so a retry/dual-path can leave duplicate non-dismissed
@@ -560,28 +563,23 @@ async function handleThreadFinish({
     );
   }
 
-  // ADR-003 F3: the thread turn has reached a terminal event — revoke this run's
-  // daemon token immediately. Any follow-up turn re-mints its own. Non-blocking;
-  // the 1-day expiry (plugin minimum) is the backstop if this fails. Revoke by
-  // BOTH names: the in-process path names the token by sandboxId, the remote
-  // (Hatchet) path names it by the per-run key daemonRunKey(threadId, threadChatId)
-  // (no sandbox on that path; keyed on threadId so it can't collide across the
-  // shared legacy threadChat sentinel).
-  waitUntil(
-    Promise.all([
-      revokeDaemonTokensForSandbox({ userId, sandboxId }),
-      revokeDaemonTokensForSandbox({
-        userId,
-        sandboxId: daemonRunKey({ threadId, threadChatId }),
-      }),
-    ]).catch((error) =>
-      console.error("[daemon-token] revoke-on-terminal failed", {
-        sandboxId,
-        threadChatId,
-        error,
-      }),
-    ),
-  );
+  // ADR-003 F3 (burst-safe): the thread turn reached terminal — revoke THIS run's
+  // OWN token, identified by the apikey id that authenticated this very event
+  // (ctx.apiKeyId). Revoking by exact id (not by name/thread) is what stops a burst
+  // regression: with worker concurrency=1 and the shared legacy threadChat sentinel,
+  // a delayed thread-finish for run A previously deleted run B's freshly-minted
+  // same-named token, killing B mid-work (S12 — only the first of N mentions
+  // replied). The 1-day expiry (plugin minimum) is the backstop if this fails.
+  if (apiKeyId) {
+    waitUntil(
+      revokeDaemonTokenById({ userId, apiKeyId }).catch((error) =>
+        console.error("[daemon-token] revoke-on-terminal (by id) failed", {
+          apiKeyId,
+          error,
+        }),
+      ),
+    );
+  }
   let shouldProcessFollowUpQueue = !isRateLimited;
   if (shouldProcessFollowUpQueue) {
     const threadChat = await getThreadChat({

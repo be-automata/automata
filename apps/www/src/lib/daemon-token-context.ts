@@ -12,6 +12,14 @@
  */
 export type DaemonTokenContext = {
   userId: string;
+  /**
+   * The apikey row id of THIS token (ADR-003 F3, burst-safe revocation). The
+   * daemon authenticates every event — including the terminal one — with its run's
+   * own token, so revoking exactly this id at thread-finish can never delete a
+   * sibling run's token (which by-name/by-thread revocation could, under a burst
+   * where a delayed finish races a later same-keyed run). Null for keys with no id.
+   */
+  apiKeyId: string | null;
   /** Null for personal (org-less) keys until the WI-5c apiKey retrofit. */
   organizationId: string | null;
   /**
@@ -36,6 +44,7 @@ export type DaemonTokenContext = {
 };
 
 type VerifiedApiKeyLike = {
+  id?: string | null;
   userId?: string | null;
   metadata?: Record<string, unknown> | null;
 } | null;
@@ -65,5 +74,7 @@ export function daemonTokenContextFromApiKey(
       ? rawThreadId
       : null;
   const tokenType = key?.metadata?.tokenType === "daemon" ? "daemon" : null;
-  return { userId, organizationId, threadChatId, threadId, tokenType };
+  const apiKeyId =
+    typeof key?.id === "string" && key.id.length > 0 ? key.id : null;
+  return { userId, apiKeyId, organizationId, threadChatId, threadId, tokenType };
 }

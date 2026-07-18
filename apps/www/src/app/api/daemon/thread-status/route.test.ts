@@ -33,6 +33,7 @@ describe("POST /api/daemon/thread-status", () => {
   function ctx(over: Partial<DaemonTokenContext> = {}): DaemonTokenContext {
     return {
       userId: user.id,
+      apiKeyId: "apikey_test",
       organizationId: orgId,
       threadChatId,
       threadId,

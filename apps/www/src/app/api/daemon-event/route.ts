@@ -66,6 +66,9 @@ export async function POST(request: Request) {
     userId,
     timezone,
     contextUsage: computedContextUsage ?? null,
+    // F3 burst-safe revocation: the id of the token that authenticated THIS event
+    // (the run's own token) — revoked exactly at thread-finish, never by name.
+    apiKeyId: ctx.apiKeyId,
   });
 
   if (!result.success) {
