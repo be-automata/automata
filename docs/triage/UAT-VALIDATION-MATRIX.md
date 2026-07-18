@@ -1179,3 +1179,21 @@ Plane: www f1944494 + worker ACTIVE (step logging) + named tunnel `hatchet.beaut
 **HOLD until boot-coder's 2-part ping:** (1) worker restarted on **3352b7c** (posting-identity fix — ambient host gh creds → GH_TOKEN=installationToken; expected to flip posting identity to `automata-ai-bot[bot]`), AND (2) the review automation is LIVE on be-automata/automata. THEN: fire case S1 (open the fixture PR) and piggyback F1/F2 on its live daemon token as planned (read-only non-perturbing probes).
 
 **Execution order once unblocked:** S1 (open fixture PR → grab token → F1/F2 probes → observe S1 effect-intent) → S2 (partial-fix push) → S3 (full-fix push) → S4-S6, S9 (mentions) → S7 (/request-changes) → S8 (verdict upgrade) → S12 (capacity gate: 2 PRs fill slots + fresh-issue mention). Per case: trigger → observe (api/runs or hatchet OLAP emit_* tool calls) → verify effect-intent vs OLD → record posting identity → known-gap surface note → no-dup invariant → PASS/FAIL/GAP. Fixture content staged (defects: off-by-one `>`→`>=`, console.log secret, false "validated safe" attestation).
+
+## F1 + F2 LIVE GATE PROBES — BOTH PASS (clean, on a live mint-only token) (2026-07-18)
+
+boot-coder minted a LIVE mint-only daemon token (never tied to a run → F3 never revokes it → unlimited probe window), post-44bfa7d so `metadata.threadId` IS stamped. Bound thread A = `a2816638`; foreign thread B = `3d9da1c3` (a real, different thread in the SAME pilot org); both carry the shared `legacy-thread-chat-id` sentinel. Surface: www f1944494 (dark-water-9247.workers.dev). I ran the authoritative probes myself (raw curl HTTP codes):
+
+| probe | request | result | meaning |
+|---|---|---|---|
+| liveness | `POST /api/daemon/next-message` {threadId:A} + `X-Daemon-Token` | **204** | token LIVE, accepted on its purpose surface (bound thread) |
+| liveness | `POST /api/daemon/thread-status` {threadId:A} | **200** `{status:complete,terminal:true}` | token LIVE (read succeeds); thread A itself is terminal but the TOKEN is a fresh mint, unaffected |
+| **F1** | `POST /api/cli/threads/list` + `Authorization: Bearer` | **401** UNAUTHORIZED | **purpose-scoping** — a LIVE token is rejected on the CLI surface |
+| **F2** | `POST /api/daemon/next-message` {threadId:**B**} | **403** Forbidden | **org-collapse fix** — same-org cross-thread denial |
+| **F2** | `POST /api/daemon/thread-status` {threadId:**B**} | **403** Forbidden | second surface confirms the threadId-binding reject |
+
+**F1 VERDICT: PASS — clean.** The token is provably LIVE (204/200 on thread A), so the CLI 401 is **purpose-scoping (tokenType==='daemon' reject), NOT F3 revocation**. This is exactly the separation the earlier revoked-token probe could not make (a dead token 401s everywhere). **SOMNIO-GATE-1 mechanism-half is now CLOSED WITH LIVE EVIDENCE.** (The purpose-scoping F1 fix — daemon tokens rejected on the CLI blast-radius surface — bites on a live token.)
+
+**F2 VERDICT: PASS — closed-with-live-evidence.** A live token bound to thread A is accepted on A (204/200) but **403'd on thread B** — a DIFFERENT thread in the SAME org sharing the SAME legacy sentinel threadChatId. That is precisely the org-level-collapse case: pre-44bfa7d the binding keyed only on the shared sentinel and would have accepted B; post-44bfa7d it rejects on the threadId mismatch (route.ts:69). Upgrades the earlier "closed-by-design in HEAD" to **closed-with-live-evidence** for the Somnio gate record. Both daemon surfaces (next-message + thread-status) enforce it.
+
+**Net GATE-1 state:** F1 mechanism-half CLOSED (live) + F2 org-collapse CLOSED (live). Remaining GATE-1 item is only the bounded rollout cleanup (9d49bcb: age out pre-44bfa7d legacy null-threadId tokens, then drop the passthrough) — token-lifecycle, not a fence gap. F1 purpose-scoping re-verify on the onboarding-#2 (Somnio) topology remains the ONLY open GATE-1 sub-item, deferred to that onboarding.
