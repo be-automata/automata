@@ -8,6 +8,7 @@
     "./diff-review-parser": "./src/review/diff-review-parser.ts",
     "./state/types": "./src/review/state/types.ts",
     "./state/break-glass-matcher": "./src/review/state/break-glass-matcher.ts",
+    "./state/review-reconciler": "./src/review/state/review-reconciler.ts",
     "./audit/review-audit-log": "./src/audit/review-audit-log.ts",
     "./settings/repo-review-settings-store": "./src/settings/repo-review-settings-store.ts",
     "./settings/repo-review-settings-audit": "./src/settings/repo-review-settings-audit.ts",

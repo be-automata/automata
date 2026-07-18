@@ -55,6 +55,7 @@
     "@terragon/daemon": "workspace:*",
     "@terragon/env": "workspace:*",
     "@terragon/r2": "workspace:*",
+    "@terragon/review": "workspace:*",
     "@terragon/sandbox": "workspace:*",
     "@terragon/sandbox-image": "workspace:*",
     "@terragon/shared": "workspace:*",

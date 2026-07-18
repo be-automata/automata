@@ -79,6 +79,10 @@ export const env = envsafe({
   GITHUB_CLIENT_ID: str(),
   GITHUB_CLIENT_SECRET: str(),
   NEXT_PUBLIC_GITHUB_APP_NAME: str({ devDefault: "" }),
+  // The App bot's review author login for the ADR-036 review reconciler. Defaults
+  // to `${NEXT_PUBLIC_GITHUB_APP_NAME}[bot]`; set explicitly when the app slug (the
+  // GitHub `[bot]` login) differs from the display name (pilot: automata-ai-bot[bot]).
+  GITHUB_BOT_LOGIN: str({ default: "", allowEmpty: true }),
   GITHUB_WEBHOOK_SECRET: str(),
   GITHUB_APP_ID: str(),
   GITHUB_APP_PRIVATE_KEY: str(),

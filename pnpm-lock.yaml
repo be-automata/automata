@@ -344,6 +344,9 @@ importers:
       '@terragon/r2':
         specifier: workspace:*
         version: link:../../packages/r2
+      '@terragon/review':
+        specifier: workspace:*
+        version: link:../../packages/review
       '@terragon/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox

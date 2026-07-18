@@ -38,6 +38,7 @@ import {
   parseClaudeOAuthTokenRevokedMessage,
 } from "@/agent/msg/helpers";
 import { getEligibleQueuedThreadChats } from "./process-queued-thread";
+import { reconcilePrReviews } from "./reconcile-pr-reviews";
 import { trackUsageEvents } from "./usage-events";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import { compactThreadChat } from "./compact";
@@ -513,6 +514,8 @@ export async function handleDaemonEvent({
         statusBeforeUpdate: threadChat.status,
         isRateLimited,
         shouldSkipCheckpoint,
+        repoFullName: thread.githubRepoFullName ?? null,
+        prNumber: thread.githubPRNumber ?? null,
       }),
     );
   }
@@ -527,6 +530,8 @@ async function handleThreadFinish({
   statusBeforeUpdate,
   isRateLimited,
   shouldSkipCheckpoint,
+  repoFullName,
+  prNumber,
 }: {
   userId: string;
   threadId: string;
@@ -535,7 +540,26 @@ async function handleThreadFinish({
   statusBeforeUpdate: ThreadStatus;
   isRateLimited: boolean;
   shouldSkipCheckpoint: boolean;
+  repoFullName: string | null;
+  prNumber: number | null;
 }) {
+  // ADR-036 (INTERIM): a PR-associated thread's agent posts its review directly via
+  // gh with no idempotency, so a retry/dual-path can leave duplicate non-dismissed
+  // bot reviews (parity S1). Reconcile GitHub state to the no-dup invariant now that
+  // the run is terminal. Fail-soft + a no-op when there are ≤1 bot reviews, so it is
+  // safe to run for any PR thread. (The durable single-writer channel is phase-2.)
+  if (prNumber !== null && repoFullName) {
+    waitUntil(
+      reconcilePrReviews({ repoFullName, prNumber }).catch((error) =>
+        console.error("[review-reconciler] finish-hook failed (non-fatal)", {
+          repoFullName,
+          prNumber,
+          error,
+        }),
+      ),
+    );
+  }
+
   // ADR-003 F3: the thread turn has reached a terminal event — revoke this run's
   // daemon token immediately. Any follow-up turn re-mints its own. Non-blocking;
   // the 1-day expiry (plugin minimum) is the backstop if this fails. Revoke by
