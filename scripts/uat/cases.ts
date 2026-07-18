@@ -173,22 +173,26 @@ export async function S12(N = 4): Promise<CaseResult> {
       "what database does the app use and where is the schema defined?",
       "how is authentication implemented in this codebase?",
     ];
+    // ISOLATE the mention path (see docs/uat S12): creating an issue ALSO fires the issue-research
+    // automation (on open), which confounds a mention burst (double intents). Phase 1: create the N
+    // issues WITHOUT mentions and let their issue-research settle. Phase 2: fire the N mentions as the
+    // burst, and count ONLY replies posted after the mention timestamp.
     for (let n = 1; n <= N; n++) {
       const q = qs[(n - 1) % qs.length];
-      const url = sh(`gh issue create --repo ${P.REPO} --title ${JSON.stringify(`Question about the codebase [${P.RUN_ID}-${n}]`)} --body ${JSON.stringify(`Could someone help me understand this? ${q}`)}`);
-      const iu = Number(url.match(/(\d+)\s*$/)?.[1]);
-      issues.push(iu);
-      postComment(iu, `@${P.BOT_HANDLE} ${q}`);
+      const url = sh(`gh issue create --repo ${P.REPO} --title ${JSON.stringify(`Question about the codebase [${P.RUN_ID}-${n}]`)} --body ${JSON.stringify(`Could someone help me understand this? ${q} (I'll follow up with a mention.)`)}`);
+      issues.push(Number(url.match(/(\d+)\s*$/)?.[1]));
     }
-    r.evidence = { issues, N };
-    const t0 = new Date(Date.now() - 5_000).toISOString();
+    await sleep(90_000); // let the issue-research automation dispatch + settle before the mention burst
+    const mentionAt = new Date(Date.now() - 3_000).toISOString();
+    for (let n = 0; n < N; n++) postComment(issues[n], `@${P.BOT_HANDLE} ${qs[n % qs.length]}`);
+    r.evidence = { issues, N, mentionAt };
     const answered = await poll(
-      () => issues.filter((iu) => botCommentsSince(iu, t0).length >= 1).length,
+      () => issues.filter((iu) => botCommentsSince(iu, mentionAt).length >= 1).length,
       (c) => c === N,
-      P.SETTLE_TRIES + 6,
+      P.SETTLE_TRIES + 8,
     );
-    if (answered === N) return pass(r, `all ${N} mentions replied (no silent loss)`);
-    return fail(r, `burst reliability: only ${answered}/${N} issues answered — ${N - answered} unanswered (see docs/uat S12 for known concurrency mis-routing/under-dispatch under burst)`);
+    if (answered === N) return pass(r, `all ${N} mention-burst replies landed (no starvation)`);
+    return fail(r, `burst reliability: only ${answered}/${N} mention replies within window — ${N - answered} unanswered (see docs/uat S12: over-capacity work queues and never drains)`);
   } catch (e: any) { return fail(r, `error: ${e.message}`); }
   finally { for (const i of issues) cleanup({ issues: [i] }); }
 }

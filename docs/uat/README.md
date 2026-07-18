@@ -149,7 +149,7 @@ PR=$(gh pr create --repo "$REPO" --base "$BASE" --head "$BR" --title "UAT: ADR-0
 | S7 | command | `/request-changes` → CR via command path | PASS |
 | S8 | command | verdict upgrade dismisses prior APPROVED | PASS |
 | S9 | mention | unknown `/review` → some response | PASS |
-| S12 | mention | burst reliability: N mentions → ALL N answered, one run per issue | FAIL — neutral re-run: 3 runs for 4 mentions, 2 collapse onto one issue, 3/4 unanswered (concurrency mis-routing) |
+| S12 | mention | burst reliability: N mentions → ALL N eventually answered | FAIL — over-capacity work queues (`queued-tasks-concurrency`) and never drains (queue 14-deep, no feedback); mis-routing hypothesis retracted |
 | S10, S11, S13, S14 | phase-2 | inline threads / resolve / stale-guard / one-review-object | PARKED (phase-2 surface) |
 
 **Known-gaps carried** (not FAILs; upgrade pointers in each case):
