@@ -1348,3 +1348,9 @@ Mention "@automata-ai-bot please fix the off-by-one … use >=" on PR #3 (CID 50
 - ✅ **One reply** summarizing the change. ✅ identity bot.
 - (The fix push is a synchronize → triggered a follow-up review run 4ae1c0a3, expected.)
 **S6 VERDICT: PASS** — matches OLD baseline (bot commit >→>= + reply).
+
+### S7 (/request-changes registered command path) — PASS
+Command "@automata-ai-bot /request-changes …" on PR #4 (CID 5011096507, 11:34:10Z; PR #4 already had 1 CR at HEAD from S8). Run dispatched (21f7b553).
+- ✅ **CHANGES_REQUESTED verdict at HEAD** via the command; ✅ **no-dup = 1** (states=[CHANGES_REQUESTED] — same-verdict dedup held, no 2nd CR); ✅ reply landed.
+- Caveat: ran on a PR that already carried a CR (from S8), so "command POSTS a fresh CR" is inferred from the reply + maintained-CR + no-dup rather than a clean first-post; `ruleKey command:request-changes` not directly observable (api/runs behind CF Access). Outcome matches OLD baseline S7 (command → CR + no-dup).
+**S7 VERDICT: PASS** (command path → CHANGES_REQUESTED, no-dup, reply).
