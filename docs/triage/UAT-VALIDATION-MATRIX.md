@@ -1248,3 +1248,12 @@ Posted `@automata-ai-bot what does isAdult do?` on PR #3 (comment 5010785921, 09
 **Consequence:** ALL FOUR idempotency-independent cases (**S4, S6, S9, S12**) route through this same mention path and are **BLOCKED** on a github-mention automation being configured (all-authors, enabled) — the mention analogue of the c95b9307 review automation. Not a plane bug; a missing automation config (same class as the S1-S3 review-automation precondition).
 
 **Block status:** S1-S3/S5/S8 blocked on tenancy-coder's review-idempotency fix; S4/S6/S9/S12 blocked on a github-mention automation. The remaining block is gated on those two setup/fix items. Requesting the mention automation from boot-coder so S4/S6/S9/S12 can proceed in parallel with the idempotency fix (keeps the hybrid alive).
+
+## S1 root cause — DEFINITIVELY NAILED (boot-coder trace of run 46a51913) (2026-07-18)
+
+boot-coder pulled the run's tool calls; the S1 no-dup mechanism is now unambiguous:
+- The agent posts the review via **raw Bash `gh`**, not the ADR-036 `emit_review` effect. Trace = 6 Bash calls, **ZERO emit_review**: `gh pr view` → `gh pr diff` → `cat > review_body.md` → **`gh pr review 3 --request-changes --body-file review_body.md`** (invoked ONCE) → `ls/pwd` (agent checking the file landed) → `gh pr view --json reviews` (verifying).
+- The two CHANGES_REQUESTED reviews are **byte-identical** (both exactly 1870 bytes, same sha256 `736f1c2d…`). Identical body + single `gh pr review` invocation + daemon spawned the command once ⇒ **double-FIRE at the tool/SDK layer** (a retry of one slow tool call re-ran the post), **NOT** a double-emit and **NOT** a dual post-path.
+- **So: 1 webhook → 1 run → 1 review-post command → 2 identical posts via a tool-layer retry.** Because the post goes through raw `gh`, it bypasses the ADR-036 verdict-aware no-dup channel entirely — nothing dedups a retried identical post.
+
+**Durable fix (tenancy-coder, diagnosis cb702ee9 / flag f6eabd65):** a **pre-post outstanding-review guard** — query GitHub's reviews API for a same-commit non-dismissed verdict BEFORE posting; skip or supersede-dismiss. This is the OLD baseline's mechanism, ports cleanly, and is idempotent against exactly a retried identical post (so it's robust regardless of WHY the tool retried). Bounded change in the review-post path. The 4 idempotency-dependent cases (S2/S3/S5/S8) all need it. Substrate confirmed clean — purely the review effect channel.
