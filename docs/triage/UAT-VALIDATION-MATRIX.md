@@ -1099,3 +1099,18 @@ The dispatch seam is LIVE (www 3bb0e3b5, HATCHET_ENABLED=true + 4 secrets; worke
 - **F4 note:** the two short-lived tokens DO persist in this payload (accepted-risk pilot v1). Do NOT flag them; the violation is the App key / master key / prompt. F4's "move tokens out" is SOMNIO-GATE-2.
 
 Grep plan on the payload text: `-iE "BEGIN.*PRIVATE KEY|github-app|\.pem|ENCRYPTION_MASTER_KEY|sk-ant|ANTHROPIC"` → must be ZERO; plus a positive check that the reference fields + the 2 tokens are the ONLY keys. Held for the run id.
+
+## EXEC-PLANE STAGE 2 — reference-only payload: VERIFIED LIVE — PASS (2026-07-18)
+
+Independently pulled `agent-run f60135ed-6851-4951-a5ef-665b890cea69` input from Postgres `v1_tasks_olap` (boot-coder found it lands there, not `v1_dags_olap` — it's a task-level workflow). Confirmed boot-coder's PASS.
+
+**Nested workflow input keys (EXACTLY these 7, nothing else):** `threadId` (3d9da1c3…), `threadChatId`, `repoFullName` (be-automata/automata), `branch` (pilot/e2e-shadow-probe), `daemonCallbackUrl` (automata-www…workers.dev), `installationToken` (40 chars), `daemonToken` (64 chars).
+
+**Credential-placement invariant (ADR-002 §3) — HOLDS:**
+- ✅ Reference fields + the 2 short-lived tokens only (installationToken + daemonToken EXPECTED per ADR-002 §3 / ADR-003 §1c / F4 accepted-risk — not flagged).
+- ✅ **App private key: ABSENT.** **Master key: ABSENT.** Forbidden-set grep (`BEGIN…PRIVATE KEY|github-app|.pem|ENCRYPTION_MASTER_KEY|sk-ant-|ANTHROPIC|CLAUDE_CODE_OAUTH`) = **0 hits** on the raw payload.
+- ✅ **Assembled prompt: ABSENT** (`prompt/message/preparePromptForModel/"You are"` = 0) — the **F5 prompt-moved-to-pull invariant holds** on the real dispatched payload.
+
+**STAGE-2 VERDICT: PASS** — the named hard-block (App key in Hatchet payload) is proven absent on a real live dispatch; no secret/prompt leaks; only reference + short-lived tokens.
+
+**Caveat + a SECONDARY finding (not a stage-2 failure):** `threadChatId = "legacy-thread-chat-id"` — boot-coder flagged this as an execution bug (placeholder stalls the agent; handed to tenancy-coder). **Security-relevant side effect I add:** F2's token↔thread binding keys on `threadChatId`; with every run sharing the `legacy-thread-chat-id` placeholder, the F2 binding **degrades to effectively org-level** (a daemon token bound to the placeholder matches any run bound to the same placeholder). Not a credential-placement violation, but the threadChatId fix must land a REAL unique threadChatId for F2's per-thread binding (verified at d07d45e) to actually bite in production — flag for tenancy-coder's fix so it's not treated as purely cosmetic.
