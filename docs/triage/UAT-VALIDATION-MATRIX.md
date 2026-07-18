@@ -1257,3 +1257,12 @@ boot-coder pulled the run's tool calls; the S1 no-dup mechanism is now unambiguo
 - **So: 1 webhook → 1 run → 1 review-post command → 2 identical posts via a tool-layer retry.** Because the post goes through raw `gh`, it bypasses the ADR-036 verdict-aware no-dup channel entirely — nothing dedups a retried identical post.
 
 **Durable fix (tenancy-coder, diagnosis cb702ee9 / flag f6eabd65):** a **pre-post outstanding-review guard** — query GitHub's reviews API for a same-commit non-dismissed verdict BEFORE posting; skip or supersede-dismiss. This is the OLD baseline's mechanism, ports cleanly, and is idempotent against exactly a retried identical post (so it's robust regardless of WHY the tool retried). Bounded change in the review-post path. The 4 idempotency-dependent cases (S2/S3/S5/S8) all need it. Substrate confirmed clean — purely the review effect channel.
+
+## S4/S6/S9/S12 — still blocked on mention HANDLE (not the automation) (2026-07-18)
+
+After boot-coder wired the github_mention automation (d24bfe58), S4 STILL did not dispatch on two attempts:
+- `@automata-ai-bot ...` (CID 5010809620, 09:49Z) → webhook 200, no run, no reply.
+- `@terragon-labs ...` (CID 5010821753, 09:53Z) → webhook 200, no run, no reply.
+
+**Diagnosis:** the gate is the mention-detection, not the automation. `isAppMentioned` (`utils.ts:15`) matches `@${NEXT_PUBLIC_GITHUB_APP_NAME}\b`; if it returns false, `handlers.ts:254` logs "does not mention the app" and returns before `handleAppMention`. The bot POSTS as `automata-ai-bot[bot]` but the MENTION handle is the configured `NEXT_PUBLIC_GITHUB_APP_NAME` (a different string). Neither guess dispatched, so I don't yet have the correct handle — OR `isAppMentioned` passes and `getUsersToTriggerTasks` returns 0 (a deeper user/access gate). Can't disambiguate without the Worker log (wrangler tail) or the env value — requested both from boot-coder. Stopped firing guesses to avoid noise/wasted runs.
+**S4/S6/S9/S12 status: BLOCKED pending the correct mention handle + confirmation the mention path dispatches.** (Observation for onboarding UX: the mention handle differing from the bot's posting login is a real footgun — users will @ the bot's visible name and get silence. Not a parity FAIL; an onboarding note.)
