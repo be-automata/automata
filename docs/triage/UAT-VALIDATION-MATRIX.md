@@ -1380,3 +1380,10 @@ Team-lead triaged the 3/4 silent-no-reply from the worker step logs — it's a R
 - **Flip condition:** after tenancy-coder's revocation-key fix deploys, a burst re-run with all N replying flips S12 → PASS and **the block closes 10/10**. Suite S12 case rewritten as the burst-reliability assertion (docs/uat/adr-036-effect-intent.md).
 
 **BLOCK STATUS: 9 PASS / 1 FAIL (S12, fix pending) — block closes 10/10 on the S12 burst re-run.**
+
+## S12 ROOT-CAUSE CORRECTION (boot-coder code-grounded classification) (2026-07-18)
+
+Supersedes the earlier "shared revocation key" hypothesis on two points; S12=FAIL is unchanged.
+- **Confirmed mechanism:** the silent siblings each got a **401/403 on a thread-status poll while STILL WORKING**. Worker `pollUntilTerminal` (`packages/worker/src/agent-run/www-client.ts`) applies the ADR-003 revoke-race ruling → any post-first-poll 401/403 becomes `terminal-inferred-from-revocation` = reported to Hatchet as **normal COMPLETION**. Hence the signature (COMPLETED + no reply + no capacity msg + not SCHEDULING_TIMED_OUT): a mid-work cut-off **mislabeled as success**. Ruled out: socket contention (→ECONNREFUSED→FAILED) and agent error (→FAILED); only a 401/403 launders into COMPLETED.
+- **Correction:** burst-time www `f03cf6f` ALREADY had the F2 threadId anchor `44bfa7d` (ancestry-verified) → sibling tokens were **per-run distinct**, so "shared revocation key" is not the whole story. WHY the distinct in-flight tokens got 401/403 mid-work is OPEN (team-lead + tenancy-coder). Two fixes implied: (a) worker must not launder a mid-work 401/403 into COMPLETED (distinguish revoked-after-working-done from revoked-during-working); (b) stop whatever revokes in-flight tokens under concurrency.
+- **Unchanged:** S12 = FAIL (concurrent-reply reliability), independent of the per-org-vs-per-user capacity-model difference. Flips to PASS on the burst re-run (all N reply) after the fix.
