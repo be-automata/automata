@@ -69,7 +69,8 @@ domain). The worker reaches www there through the tunnel.
 Because www cannot push, and the workflow input is deliberately reference-only, the worker's
 daemon **fetches** its `DaemonMessage` from www. Add one www endpoint:
 
-`GET {daemonCallbackUrl}/api/daemon/next-message?threadChatId=…` — authenticated by the daemon
+`POST {daemonCallbackUrl}/api/daemon/next-message` with `{ threadId, threadChatId }` in the body
+(F5 — the enumeration key stays off the URL) — authenticated by the daemon
 token (same `X-Daemon-Token` custody as the event ingestion), returns the prepared message
 `{ prompt, model, agent, agentVersion, sessionId, permissionMode, featureFlags }` for that
 threadChat. www builds it with the **same** logic `startAgentMessage` uses today
@@ -103,10 +104,41 @@ threadChat. www builds it with the **same** logic `startAgentMessage` uses today
 - App private key: **control plane only.** The worker receives an installation-scoped token that
   expires; a compromised worker holds an expiring token for its own org's repos, nothing more.
 - Daemon token: short-lived, **org-scoped** better-auth API key; authorizes daemon→www events and
-  the next-message pull, fenced to the thread's org.
+  the next-message pull, fenced to the thread's org **and** — after the validator findings below —
+  to the specific threadChat and the daemon purpose.
 - Anthropic credential: **the org's own, in the worker's env on the box** — never transits www or
   the workflow input (ADR-002 §2/§3). The daemon uses `agent=claude` with the worker box's
   `ANTHROPIC_API_KEY`.
+
+**Validator findings folded into slice 1 (adversarial §3 read, 2026-07-17).** The daemon token as
+originally built was **weaker than §3 above claimed** — it was a *general* better-auth API key
+that the CLI router (`cli-router.ts`) also accepted, so a compromised box could call
+`threads.list/detail/CREATE` (full CLI + agent-spawn), not just "post its own thread's events".
+Corrected here:
+
+- **F1 (purpose scope).** The mint stamps `metadata.tokenType = 'daemon'`. The **CLI router now
+  REJECTS** daemon-scoped tokens; the **daemon endpoints require** them. Blast radius of a leaked
+  daemon token is now bounded to one thread's daemon protocol, matching the §3 claim.
+- **F2 (thread binding, mandatory).** The mint stamps `metadata.threadChatId`. **Both**
+  `/api/daemon-event` **and** `/api/daemon/next-message` assert the token's `threadChatId` matches
+  the request — an org-scoped token can no longer pull or inject for *any* thread in the org, only
+  its own. (Legacy tokens minted without a `threadChatId` are allowed through `/api/daemon-event`
+  during the rollout window; new tokens always bind.)
+- **F3 (task-scoped lifetime).** The token is **revoked on thread-terminal** — `handleThreadFinish`
+  (the daemon-event terminal handler) deletes the run's daemon token(s) by `name = sandboxId`.
+  Revocation is the task-scoping mechanism; effective lifetime = task duration. Expiry stays at the
+  better-auth apiKey plugin's **1-day minimum** as a backstop for a run that never reaches terminal
+  (the plugin rejects an `expiresIn` below its minimum; lowering the backstop needs a plugin
+  `keyExpiration` config change — deferred, not load-bearing since revocation is primary).
+- **F4 (tokens in Hatchet step input) — ACCEPTED RISK for single-org pilot v1.** The short-lived
+  installation + daemon tokens are passed as workflow step input, which Hatchet persists in its
+  Postgres. Accepted because both are short-lived and org-scoped and the pilot is single-org.
+  **Trigger to revisit:** before **any non-single-org deployment**, move token delivery to
+  Hatchet secret-injection (out of persisted input). The *prompt* is never in the input regardless
+  (fork 3) — only these expiring tokens are.
+- **F5 (enumeration key off the wire).** `/api/daemon/next-message` is **POST with `threadChatId`
+  in the body**, not a query param, so the enumeration key stays out of URLs and access logs. The
+  worker side must likewise not log the pulled body (H2).
 
 ### 4. `packages/worker` — the `agent-run` workflow (ADR-003 §2, built after the seam)
 

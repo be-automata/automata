@@ -1,4 +1,4 @@
-import { getUserIdOrNullFromDaemonToken } from "@/lib/auth-server";
+import { getDaemonTokenContext } from "@/lib/auth-server";
 import { handleDaemonEvent } from "@/server-lib/handle-daemon-event";
 import { DaemonEventAPIBody } from "@terragon/daemon/shared";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
@@ -12,10 +12,22 @@ export async function POST(request: Request) {
     // Old clients don't send the timezone, so we fallback to UTC
     timezone = "UTC",
   } = json;
-  const userId = await getUserIdOrNullFromDaemonToken(request);
-  if (!userId) {
+  const ctx = await getDaemonTokenContext(request);
+  if (!ctx) {
     return new Response("Unauthorized", { status: 401 });
   }
+  // ADR-003 F1: daemon-purpose tokens only (a general/CLI token cannot ingest
+  // daemon events).
+  if (ctx.tokenType !== "daemon") {
+    return new Response("Forbidden", { status: 403 });
+  }
+  // ADR-003 F2: the token is bound to one threadChat — it cannot inject events
+  // for a different thread in the org. (Legacy tokens with no threadChatId bound
+  // are allowed through for back-compat during rollout; new tokens always bind.)
+  if (ctx.threadChatId !== null && ctx.threadChatId !== threadChatId) {
+    return new Response("Forbidden", { status: 403 });
+  }
+  const userId = ctx.userId;
 
   // Prefer computing context usage from the last non-result message's usage
   // fields when available. Do not sum across all messages.

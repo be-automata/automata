@@ -16,6 +16,8 @@ describe("daemonTokenContextFromApiKey", () => {
     expect(daemonTokenContextFromApiKey({ userId: "user_1" })).toEqual({
       userId: "user_1",
       organizationId: null,
+      threadChatId: null,
+      tokenType: null,
     });
   });
 
@@ -25,7 +27,12 @@ describe("daemonTokenContextFromApiKey", () => {
         userId: "user_1",
         metadata: { organizationId: "org_1" },
       }),
-    ).toEqual({ userId: "user_1", organizationId: "org_1" });
+    ).toEqual({
+      userId: "user_1",
+      organizationId: "org_1",
+      threadChatId: null,
+      tokenType: null,
+    });
   });
 
   it("treats a non-string organizationId as null", () => {
@@ -34,7 +41,12 @@ describe("daemonTokenContextFromApiKey", () => {
         userId: "user_1",
         metadata: { organizationId: 123 as unknown as string },
       }),
-    ).toEqual({ userId: "user_1", organizationId: null });
+    ).toEqual({
+      userId: "user_1",
+      organizationId: null,
+      threadChatId: null,
+      tokenType: null,
+    });
   });
 
   it("treats an empty-string organizationId as null", () => {
@@ -43,6 +55,43 @@ describe("daemonTokenContextFromApiKey", () => {
         userId: "user_1",
         metadata: { organizationId: "" },
       }),
-    ).toEqual({ userId: "user_1", organizationId: null });
+    ).toEqual({
+      userId: "user_1",
+      organizationId: null,
+      threadChatId: null,
+      tokenType: null,
+    });
+  });
+
+  it("F1/F2: resolves threadChatId and tokenType='daemon' from metadata", () => {
+    expect(
+      daemonTokenContextFromApiKey({
+        userId: "user_1",
+        metadata: {
+          organizationId: "org_1",
+          threadChatId: "tc_1",
+          tokenType: "daemon",
+        },
+      }),
+    ).toEqual({
+      userId: "user_1",
+      organizationId: "org_1",
+      threadChatId: "tc_1",
+      tokenType: "daemon",
+    });
+  });
+
+  it("F1: an unknown tokenType is treated as null (not daemon-scoped)", () => {
+    expect(
+      daemonTokenContextFromApiKey({
+        userId: "user_1",
+        metadata: { tokenType: "something-else" },
+      }),
+    ).toEqual({
+      userId: "user_1",
+      organizationId: null,
+      threadChatId: null,
+      tokenType: null,
+    });
   });
 });

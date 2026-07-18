@@ -32,6 +32,13 @@ const os = implement(cliAPIContract)
     if (!tenant) {
       throw errors.UNAUTHORIZED();
     }
+    // ADR-003 F1: a daemon-scoped token (minted for a sandbox/worker agent run)
+    // must NOT grant CLI access — threads.list/detail/CREATE + agent-spawn. A
+    // compromised execution box holds a daemon token; reject it here so its blast
+    // radius stays "one thread's events", not "the whole account's CLI".
+    if (tenant.tokenType === "daemon") {
+      throw errors.UNAUTHORIZED();
+    }
     return next({
       context: {
         headers,

@@ -5,29 +5,42 @@ import { getThreadMinimal } from "@terragon/shared/model/threads";
 import { buildRemoteDaemonMessage } from "@/server-lib/remote-daemon-message";
 
 /**
- * GET /api/daemon/next-message?threadId=…&threadChatId=…
+ * POST /api/daemon/next-message   body: { threadId, threadChatId }
  *
  * The remote (Hatchet) execution plane's pull for the DaemonMessage www would
  * otherwise PUSH to an in-sandbox daemon (ADR-003 §2). Authenticated by the same
- * X-Daemon-Token as the event ingestion.
+ * X-Daemon-Token as event ingestion.
  *
- * H1 (ADR-003): assert the token↔thread binding — a *valid* daemon token for a
- * *different* thread/org is rejected (not just "any valid token"): the token's
- * user must own the thread AND the token's org must equal the thread's org.
- *
- * H2 (ADR-003): the response body carries the prompt (repo content + user text) —
- * it is SENSITIVE. Never log the body; logs record threadChatId/org only, so a
- * future access log can be added without leaking content.
+ * F5 (ADR-003): POST with the ids in the BODY — threadChatId is the enumeration
+ * key and must stay out of URLs / access logs.
+ * F1: the token must be daemon-scoped (tokenType 'daemon'); a general user/CLI
+ * token is rejected here.
+ * F2: the token↔thread binding is enforced on the token's OWN threadChatId — a
+ * daemon token minted for thread A cannot pull thread B even in the same org.
+ * Also require the token's user to own the thread and its org to match (defense
+ * in depth).
+ * H2: the response body carries the prompt (repo content + user text) — SENSITIVE.
+ * Never log the body; logs record ids/org only.
  */
-export async function GET(request: NextRequest): Promise<NextResponse> {
+export async function POST(request: NextRequest): Promise<NextResponse> {
   const ctx = await getDaemonTokenContext(request);
   if (!ctx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // F1: daemon-purpose tokens only.
+  if (ctx.tokenType !== "daemon") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
-  const { searchParams } = new URL(request.url);
-  const threadId = searchParams.get("threadId");
-  const threadChatId = searchParams.get("threadChatId");
+  let body: { threadId?: unknown; threadChatId?: unknown };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
+  }
+  const threadId = typeof body.threadId === "string" ? body.threadId : null;
+  const threadChatId =
+    typeof body.threadChatId === "string" ? body.threadChatId : null;
   if (!threadId || !threadChatId) {
     return NextResponse.json(
       { error: "Missing threadId or threadChatId" },
@@ -35,9 +48,18 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // H1: token↔thread binding. getThreadMinimal fences by userId, so a null result
-  // means the token's user does not own this thread. Then require the org to match
-  // the token's org too.
+  // F2: the token is bound to ONE threadChat; reject a request for any other.
+  if (ctx.threadChatId !== threadChatId) {
+    console.log("[daemon next-message] forbidden: token↔thread mismatch", {
+      threadId,
+      requestedThreadChatId: threadChatId,
+      tokenThreadChatId: ctx.threadChatId,
+      org: ctx.organizationId,
+    });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // Defense in depth: the token's user must own the thread, and its org must match.
   const thread = await getThreadMinimal({ db, userId: ctx.userId, threadId });
   if (!thread) {
     console.log("[daemon next-message] forbidden: token user does not own thread", {
@@ -63,7 +85,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     threadChatId,
   });
   if (!message) {
-    // Nothing to send yet (no pending user message / empty prompt).
     return new NextResponse(null, { status: 204 });
   }
 

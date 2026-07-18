@@ -45,9 +45,21 @@ export async function sendDaemonMessage({
       auth.api.createApiKey({
         body: {
           name: sandboxId,
-          expiresIn: 60 * 60 * 24 * 1, // 1 day,
+          // ADR-003 F3: task-scoping is done by REVOKING this token on thread-
+          // terminal (handleThreadFinish, by name=sandboxId). expiresIn stays at
+          // the better-auth apiKey plugin's 1-day MINIMUM as the backstop for a
+          // run that never reaches terminal (crashed daemon); lowering the
+          // backstop further needs a plugin keyExpiration config change (deferred).
+          expiresIn: 60 * 60 * 24 * 1, // 1 day (plugin minimum) — backstop only
           userId,
-          ...(organizationId ? { metadata: { organizationId } } : {}),
+          // ADR-003 F1/F2: bind the token to this specific threadChat and scope
+          // it to the daemon purpose. Daemon endpoints REQUIRE tokenType 'daemon'
+          // + a matching threadChatId; the CLI router REJECTS 'daemon' tokens.
+          metadata: {
+            ...(organizationId ? { organizationId } : {}),
+            threadChatId,
+            tokenType: "daemon",
+          },
         },
       }),
       getFeatureFlagsForUser({ db, userId }),

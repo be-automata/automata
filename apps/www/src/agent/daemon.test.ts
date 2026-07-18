@@ -40,8 +40,12 @@ async function createOrg(userId: string) {
   return org.id;
 }
 
-/** Read the organizationId persisted in the minted key's metadata. */
-async function mintedOrgId(sandboxId: string): Promise<string | null> {
+/** Read the full metadata persisted in the minted key. */
+async function mintedMetadata(sandboxId: string): Promise<{
+  organizationId?: string;
+  threadChatId?: string;
+  tokenType?: string;
+} | null> {
   const [row] = await db
     .select({ metadata: apikeyTable.metadata })
     .from(apikeyTable)
@@ -52,7 +56,15 @@ async function mintedOrgId(sandboxId: string): Promise<string | null> {
   // content is the stringified object), so parse until we get an object.
   let parsed: unknown = JSON.parse(row.metadata);
   if (typeof parsed === "string") parsed = JSON.parse(parsed);
-  return (parsed as { organizationId?: string }).organizationId ?? null;
+  return parsed as {
+    organizationId?: string;
+    threadChatId?: string;
+    tokenType?: string;
+  };
+}
+
+async function mintedOrgId(sandboxId: string): Promise<string | null> {
+  return (await mintedMetadata(sandboxId))?.organizationId ?? null;
 }
 
 describe("sendDaemonMessage — proxy token org derivation (WI-5)", () => {
@@ -92,6 +104,14 @@ describe("sendDaemonMessage — proxy token org derivation (WI-5)", () => {
     const sandboxId = `sbx-${nanoid(8)}`;
     await invoke(sandboxId);
     expect(await mintedOrgId(sandboxId)).toBe(orgX);
+  });
+
+  it("F1/F2: binds the token to the threadChat and scopes it 'daemon'", async () => {
+    const sandboxId = `sbx-${nanoid(8)}`;
+    await invoke(sandboxId);
+    const meta = await mintedMetadata(sandboxId);
+    expect(meta?.threadChatId).toBe(threadChatId);
+    expect(meta?.tokenType).toBe("daemon");
   });
 
   it("carries the THREAD's org even when the user's active org differs (no-drift pin)", async () => {

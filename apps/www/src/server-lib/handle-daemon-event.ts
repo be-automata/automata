@@ -1,6 +1,7 @@
 import { toDBMessage } from "@/agent/msg/toDBMessage";
 import { getPendingToolCallErrorMessages } from "@/lib/db-message-helpers";
 import { db } from "@/lib/db";
+import { revokeDaemonTokensForSandbox } from "@/lib/daemon-token";
 import { ClaudeMessage } from "@terragon/daemon/shared";
 import {
   DBMessage,
@@ -532,6 +533,17 @@ async function handleThreadFinish({
   isRateLimited: boolean;
   shouldSkipCheckpoint: boolean;
 }) {
+  // ADR-003 F3: the thread turn has reached a terminal event — revoke this run's
+  // daemon token immediately (name = sandboxId). Any follow-up turn re-mints its
+  // own. Non-blocking; the 6h expiry is the backstop if this fails.
+  waitUntil(
+    revokeDaemonTokensForSandbox({ userId, sandboxId }).catch((error) =>
+      console.error("[daemon-token] revoke-on-terminal failed", {
+        sandboxId,
+        error,
+      }),
+    ),
+  );
   let shouldProcessFollowUpQueue = !isRateLimited;
   if (shouldProcessFollowUpQueue) {
     const threadChat = await getThreadChat({
