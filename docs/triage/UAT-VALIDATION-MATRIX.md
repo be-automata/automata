@@ -1238,3 +1238,13 @@ Fixture PR #3 (be-automata/automata, HEAD 79f3cff, 1 commit, opened 09:33:08Z). 
 **S1 FAIL stands** (no-dup=2). boot-coder confirmed run `46a51913` / thread `ccdc6398` = the ONLY dispatch for PR #3 → single run posted CHANGES_REQUESTED twice (emit double-fire or post-retry). **Team-lead context:** this is the KNOWN phase-2 gap surfacing as a live defect, NOT a port regression — `packages/review` (with ADR-036 idempotency/supersede) is mounted but NOT integrated into the posting path; the pilot's reviews are posted by the agent directly, so nothing dedups. My FAIL upgrades that phase-2 integration item from 'queued' → **'demonstrated-blocking'**.
 
 **Triage ruling (hybrid):** (1) CONTINUE now with idempotency-independent cases **S4, S6, S9, S12**; (2) tenancy-coder assigned the review-idempotency integration fix in parallel; (3) **S1, S2, S3, S5, S8 re-run as a group after the fix deploys** (all depend on the review-verdict idempotency/supersede). PR #3 stays open as the S1/S2/S3 fixture for the post-fix regroup.
+
+## S4 (mention → one reply) — BLOCKED (no github-mention automation) (2026-07-18)
+
+Posted `@automata-ai-bot what does isAdult do?` on PR #3 (comment 5010785921, 09:40:11Z). Result after 2+ min: **no agent-run dispatched, no bot reply.**
+- ✅ `issue_comment.created` webhook DELIVERED to the plane (status 200, redelivery=false, 09:40:16Z); hook IS subscribed to `issue_comment`.
+- ❌ No dispatch. **Mechanism:** `apps/www/src/app/api/webhooks/github/handle-app-mention.ts` is **automation-gated** — it calls `getUsersToTriggerTasks` (backed by `getGitHubMentionAutomationsForRepo`), and when that returns 0 it logs "No users to create tasks for mention" and **returns without dispatching**. Only a **PR-review** automation (`c95b9307`, `pull_request`) is configured on be-automata/automata; there is **no github-mention automation**, so every @-mention silently no-ops.
+
+**Consequence:** ALL FOUR idempotency-independent cases (**S4, S6, S9, S12**) route through this same mention path and are **BLOCKED** on a github-mention automation being configured (all-authors, enabled) — the mention analogue of the c95b9307 review automation. Not a plane bug; a missing automation config (same class as the S1-S3 review-automation precondition).
+
+**Block status:** S1-S3/S5/S8 blocked on tenancy-coder's review-idempotency fix; S4/S6/S9/S12 blocked on a github-mention automation. The remaining block is gated on those two setup/fix items. Requesting the mention automation from boot-coder so S4/S6/S9/S12 can proceed in parallel with the idempotency fix (keeps the hybrid alive).
