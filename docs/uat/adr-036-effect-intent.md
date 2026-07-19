@@ -154,6 +154,13 @@ inline-comment / formal-review-thread surface + the single-writer posting model 
 - Verify executor-posts-one: `gh api repos/$REPO/pulls/<PR>/reviews` = exactly one bot review for the cycle, authored via the App installation, correct verdict.
 - FAIL if the agent still posts (dual-writer — flag not truly cutover) OR the executor posts zero (intent dropped) OR more than one (single-writer invariant broken).
 
+**ADVERSARIAL DESIGN-REVIEW PROBES (run against tenancy-coder's design note when it lands — team-lead-directed).**
+Goal: find the run that PASSES their tests but FAILS the flag-flip gate. Four attack surfaces:
+1. **Residual agent posting paths** — can the agent still reach ANY posting path the design doesn't close? Probe: raw `gh` in review runs, direct GitHub API via `curl`, or the interim reconciler RACING the executor (double-post). The design must close every path, not just the emit_review one.
+2. **Intent survival across transport hops** — does the review intent survive sink → daemon-event → www parse with a LOUD failure at each hop, never a silent drop? Probe each hop for a dropped/malformed intent → does it fail loudly (surfaced, retried) or vanish (executor posts 0)?
+3. **Zero-effects fallback vs reviews-count==1** — when the agent emits zero effects and the fallback posts the agent's text, does that preserve or VIOLATE the "exactly one review" gate? Probe: a run that produces no emit_review → is the fallback a formal review (counts as 1, OK) or an extra comment/second object (violates no-dup)?
+4. **Version skew (flag-ON + OLD worker)** — flag on, but a worker build that doesn't expose the emit tool. Probe: does the agent fall back to posting itself (dual-writer regression) or does the plane detect the skew and fail closed? This is the [[project_prod_sdk_0_3_199]] / worker-un-pinning risk class.
+
 **Harness:** `scripts/uat/cases.ts` `phase2()` currently self-reports `SKIPPED(phase-2-gated)`. When the flag lands, wire S10/S11/S13/S14 as real cases (fixtures above) + add the flag-flip gate as a dedicated assertion (agent-tool-calls-have-no-gh-review + reviews-count==1). Keep them SKIPPED until then.
 
 ---
