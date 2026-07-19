@@ -29,7 +29,9 @@ export async function findOutstandingBotChangesRequested(
   opts: FindOutstandingBotChangesRequestedOpts,
 ): Promise<GitHubReview | null> {
   const all = await findAllOutstandingBotChangesRequested(opts);
-  return all.length > 0 ? all[0] : null;
+  // `?? null` (not `all.length > 0 ? all[0] : null`) so this stays valid under the
+  // chassis' noUncheckedIndexedAccess:true — www compiles this source directly.
+  return all[0] ?? null;
 }
 
 /**

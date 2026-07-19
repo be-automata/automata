@@ -27,7 +27,7 @@ export const DaemonMessageClaudeSchema = z.object({
   featureFlags: z.record(z.string(), z.boolean()).optional() as z.ZodOptional<
     z.ZodType<FeatureFlags>
   >,
-  permissionMode: z.enum(["allowAll", "plan"]).optional(),
+  permissionMode: z.enum(["allowAll", "plan", "review"]).optional(),
   useCredits: z.boolean().optional(),
 });
 

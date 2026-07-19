@@ -188,7 +188,7 @@ export function claudeCommand({
   sessionId: string | null;
   model: string;
   mcpConfigPath: string | null;
-  permissionMode?: "allowAll" | "plan";
+  permissionMode?: "allowAll" | "plan" | "review";
   enableMcpPermissionPrompt?: boolean;
 }) {
   // Write prompt to a file.
@@ -230,7 +230,28 @@ export function claudeCommand({
           "Read",
           "Bash",
         ]
-      : ["--dangerously-skip-permissions"]),
+      : permissionMode === "review"
+        ? // Single-writer review runs (ADR phase-2): the agent produces a structured
+          // review result and the executor is the sole poster — the agent must have
+          // NO GitHub-write outlet. --dangerously-skip-permissions bypasses ALL
+          // permission checks (so --disallowedTools would be ignored), so it is
+          // DROPPED here; a scoped default-mode policy denies gh entirely (read+write)
+          // and git push, while keeping repo Read/Grep/Glob + Bash for tests + git
+          // diff for the PR diff. The token is separately withheld from the run env
+          // (see daemon-env), so a raw curl bypass also has no credential.
+          [
+            "--permission-mode",
+            "default",
+            "--allowedTools",
+            "Read",
+            "Grep",
+            "Glob",
+            "Bash",
+            "--disallowedTools",
+            "Bash(gh:*)",
+            "Bash(git push:*)",
+          ]
+        : ["--dangerously-skip-permissions"]),
     "--output-format",
     "stream-json",
     ...(mcpConfigPath ? ["--mcp-config", mcpConfigPath] : []),
