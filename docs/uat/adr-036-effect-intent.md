@@ -113,9 +113,16 @@ Scoring is at the **effect-intent level** (which intent fired, verdict semantics
 
 ---
 
-## Parked — phase-2 surface re-check set (NOT run in the effect-intent block)
-These assert the inline-comment / formal-review-thread surface that only exists once review-package
-**phase-2** mounts the formal review path into the posting path. Run them at the phase-2 re-check.
+## Phase-2 acceptance set (UN-PARKED 2026-07-19 — review-package single-writer effect channel)
+
+**Status: PREP — do NOT run until team-lead signals the phase-2 flag is live.** These assert the
+inline-comment / formal-review-thread surface + the single-writer posting model that phase-2 introduces.
+
+**Single-writer world — how the model changes (applies to ALL cases below + the S1-S3 regression):**
+- **The CONTROL PLANE (executor) posts the formal review AFTER thread-finish — NOT the agent mid-run.** Today the agent posts via raw `gh` during the run; phase-2 moves posting to a single writer in the control plane, keyed on the emitted review intent. This is the durable close of the S1 no-dup gap (the INTERIM-RECONCILER becomes a structural SINGLE-WRITER).
+- **"Who posted" assertions expect the App/executor identity**, not the agent's ambient gh identity. Assert the review/comment author is `$BOT_LOGIN` posted by the executor (App-installation), and that the agent's run shows the `emit_review` INTENT with NO raw `gh pr review` in its tool calls.
+- **Settle windows shift LATER**: the review lands at/after thread-finish (post-run), so poll from thread-finish, not from mid-run. Size the settle to the executor's post-finish latency.
+- **No-dup becomes structural**: exactly one review object per commit+verdict by construction (single writer), so a same-verdict retry cannot double-post — assert the reconciler is NO LONGER needed (0 `dup_reconciled` because 0 dups produced).
 
 ## S10 — Inline review threads
 - **Invariant:** a defect on a specific diff line gets a line-level INLINE comment (review thread), not just a summary. `gh api repos/$REPO/pulls/$PR/comments` shows a bot comment with `path`+`line`; GraphQL `reviewThreads` has one `isResolved:false`.
@@ -131,7 +138,23 @@ These assert the inline-comment / formal-review-thread surface that only exists 
 
 ## S14 — One review object per cycle (inline-comments default-OFF)
 - **Invariant:** default `REVIEW_POST_INLINE_COMMENTS` unset → findings fold into the verdict body; a cycle produces exactly ONE review object (no separate empty-body `COMMENTED` wrapper). no-dup strengthened to "one review *object*".
-- **Precondition:** phase-2 formal-review surface (the wrapper behavior only exists once inline comments can post). Parked here (not in the effect-intent block) because a single formal review posting does not exercise the wrapper.
+- **Precondition:** phase-2 formal-review surface. **Single-writer note:** with one writer, S14's "exactly one review object per cycle" becomes structural (not a reconciler side-effect) — assert one review object AND zero inline `COMMENTED` wrappers with the flag default-off.
+
+---
+
+## PHASE-2 ACCEPTANCE PLAN (prep; execute only when team-lead signals the flag live)
+
+**Order once the flag is live:**
+1. **Regression first — S1/S2/S3 via `pnpm uat S1` on the single-writer path.** Proves the executor preserves the proven review lifecycle (opened→CR, partial→still-CR, full→APPROVE+dismiss) with posting moved to the control plane. On PASS, the record's **INTERIM-RECONCILER mechanism note flips to SINGLE-WRITER** for S1-S3. Watch: the agent run shows `emit_review` intent + NO raw `gh pr review`; the review author is the executor/App identity; no-dup holds structurally (0 `dup_reconciled`).
+2. **Then the new surface — S10, S11, S13, S14** (inline threads, reply-then-resolve reviewer-voice, stale-thread re-raise guard, one-review-object). Fixtures per each case above; settle windows sized to post-thread-finish executor latency.
+
+**FLAG-FLIP ACCEPTANCE GATE (the single go/no-go for the flag):**
+> One real review run where the **agent posts NOTHING** (its tool calls contain NO `gh pr review` / no direct review post) **AND the executor posts EXACTLY ONE formal review** (correct verdict, `$BOT_LOGIN`/App identity, at HEAD, no-dup=1).
+- Verify agent-posts-nothing: pull the run's tool calls (OLAP/tail) — zero raw review posts; only the `emit_review` intent.
+- Verify executor-posts-one: `gh api repos/$REPO/pulls/<PR>/reviews` = exactly one bot review for the cycle, authored via the App installation, correct verdict.
+- FAIL if the agent still posts (dual-writer — flag not truly cutover) OR the executor posts zero (intent dropped) OR more than one (single-writer invariant broken).
+
+**Harness:** `scripts/uat/cases.ts` `phase2()` currently self-reports `SKIPPED(phase-2-gated)`. When the flag lands, wire S10/S11/S13/S14 as real cases (fixtures above) + add the flag-flip gate as a dedicated assertion (agent-tool-calls-have-no-gh-review + reviews-count==1). Keep them SKIPPED until then.
 
 ---
 

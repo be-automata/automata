@@ -209,5 +209,9 @@ export async function S12(N = 4): Promise<CaseResult> {
 // Phase-2-gated cases: exist as self-reporting SKIPPED.
 export const phase2 = (): CaseResult[] => (["S10", "S11", "S13", "S14"] as const).map((id) => {
   const r = mk(id, "phase-2 surface (inline threads / resolve / stale-guard / one-review-object)");
-  return skip(r, "phase-2-gated: requires the formal-review/inline-comment surface (review-package phase-2). See docs/uat/adr-036-effect-intent.md.");
+  // PHASE-2 PREP (2026-07-19): un-parked in the doc with single-writer preconditions (executor posts
+  // after thread-finish; App identity; poll from thread-finish; no-dup structural). Stays SKIPPED here
+  // until the flag is live — then wire these as real cases + the flag-flip gate (agent posts nothing,
+  // executor posts exactly one review). See the "PHASE-2 ACCEPTANCE PLAN" in docs/uat/adr-036-effect-intent.md.
+  return skip(r, "phase-2-gated (single-writer effect channel): un-parked in doc, awaiting flag-live signal. See PHASE-2 ACCEPTANCE PLAN in docs/uat/adr-036-effect-intent.md.");
 });
