@@ -25,7 +25,7 @@ export interface RemoteDaemonMessage {
   agentVersion: number;
   prompt: string;
   sessionId: string | null;
-  permissionMode: "allowAll" | "plan";
+  permissionMode: "allowAll" | "plan" | "review";
   useCredits?: boolean;
   featureFlags: Record<string, boolean>;
 }
