@@ -94,6 +94,15 @@ export const env = envsafe({
   // deployment sets this FALSE until the pilot binding is verified in shadow.
   GITHUB_SIDE_EFFECTS_ENABLED: bool({ default: true }),
 
+  // ADR-036 phase-2: the durable single-writer review channel. When TRUE, review
+  // threads run emit-only (no gh-write; the tool-policy + token-withhold enforce it)
+  // and the control-plane executor posts the review exactly once at thread-finish
+  // (+ a grace-period sweep backstop). Default FALSE — deploy dark, flip only after
+  // the emit-only skill + tool-policy are live on the box (the flag-flip preflight
+  // checks that). When FALSE: today's behavior + the interim reconciler.
+  // GITHUB_SIDE_EFFECTS_ENABLED still gates ALL GitHub mutation regardless.
+  REVIEW_SINGLE_WRITER: bool({ default: false }),
+
   // Execution plane — Hatchet (ADR-003). When HATCHET_ENABLED, a booting thread
   // dispatches to the Hatchet `agent-run` workflow (remote worker) instead of the
   // in-process sandbox. All optional: unset/false = today's in-process behavior
