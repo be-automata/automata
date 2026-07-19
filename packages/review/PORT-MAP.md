@@ -34,6 +34,28 @@ Tests ported (unmodified): `severity-policy`, `diff-review-parser`,
 `.append-only` + `.work-blocked` + `-nonblocking`), `settings/repo-review-settings-store`,
 `settings/repo-review-settings-audit`, `settings/review-floor-resolver`.
 
+## Phase-2 ported (single-writer effect channel, ADR-036) — pure core
+
+The single-writer review executor + its two GitHub-state finders, ported as PURE
+logic (dependency-injected on a narrow `ReviewGitHubClient`; www implements it via
+octokit). The only source adaptation: `botLogin` is a REQUIRED param (the
+orch-agents originals defaulted it via `kernel/agent-identity` — an env/identity
+dependency the pure package must not carry; the www caller passes the resolved bot
+login, as `reconcile-pr-reviews.ts` already does).
+
+| Source file                                     | Ported to                                          | Notes                                                                                     |
+| ----------------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `src/integration/github-client.ts` (subset)     | `src/review/state/review-github-client.ts` (NEW)   | Minimal `ReviewGitHubClient` (5 methods) + `GitHubReview` + `ReviewLogger` + `getErrorMessage`. |
+| `src/review/state/head-review-guard.ts`         | `src/review/state/head-review-guard.ts`            | `findBotReviewAtHead`; `botLogin` now required.                                            |
+| `src/review/state/outstanding-review-finder.ts` | `src/review/state/outstanding-review-finder.ts`    | `find(All)OutstandingBotChangesRequested`; `botLogin` now required.                        |
+| `src/execution/effects/review-intent-executor.ts` | `src/review/state/review-intent-executor.ts`     | `executeReviewIntent` + `dismissOutstandingBotChangeRequests`; DI on `ReviewGitHubClient`. |
+
+Tests ported (adapted for required `botLogin` + explicit `commitId` on fixtures):
+`state/head-review-guard`, `state/outstanding-review-finder`,
+`state/review-intent-executor`. Verified: 203/203 `node:test` pass, `tsc-check` clean.
+The www octokit adapter + the thread-finish/sweep wiring + the emit-only skill +
+tool-policy live in apps/www (control-plane I/O), not here.
+
 ## Deferred (phase-2 integration work list) — need executor / GitHub / event-bus / SDK wiring
 
 | Source file                                     | Why deferred                                                                                                                                      |
@@ -47,8 +69,8 @@ Tests ported (unmodified): `severity-policy`, `diff-review-parser`,
 | `src/review/package-manager.ts`                 | Target-repo PM detection; intentionally multi-PM (orch-agents CLAUDE.md keeps it out of scope).                                                   |
 | `src/review/diff-review-prompts.ts`             | Pure-ish, but imports `ReviewContext` (a pipeline type) from `review-gate`; belongs with the reviewer executor.                                   |
 | `src/review/types.ts` (review-local)            | `ReviewOutcome`/`ReviewVerdict`; only consumed by deferred pipeline modules + their tests; imports `WorkBlockedReason` from `kernel/event-types`. |
-| `src/review/state/head-review-guard.ts`         | Depends on `integration/github-client` + `kernel/agent-identity`.                                                                                 |
-| `src/review/state/outstanding-review-finder.ts` | Same GitHub-client dependency.                                                                                                                    |
+
+(`state/head-review-guard.ts` + `state/outstanding-review-finder.ts` are no longer deferred — ported in the "Phase-2 ported" section above.)
 
 Deferred tests (move with their modules): `review-gate`, `review-pipeline.*`,
 `claude-diff-reviewer`, `finding-verifier`, `break-glass-handler.*`,
