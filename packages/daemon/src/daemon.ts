@@ -61,6 +61,28 @@ type ActiveProcessState = {
   pollInterval: NodeJS.Timeout | null;
 };
 
+/**
+ * Strip every GitHub credential from a review-run agent env (single-writer, ADR-036
+ * phase-2): the installation token (GH_TOKEN/GITHUB_TOKEN) and the git http.extraheader
+ * that base64-carries it (the indexed GIT_CONFIG_COUNT/KEY_n/VALUE_n auth entries that
+ * buildDaemonEnv injects). GIT_CONFIG_GLOBAL/SYSTEM (=/dev/null host isolation, which
+ * keeps the osxkeychain helper unreachable) are intentionally KEPT. Combined with the
+ * worktree already being cloned token-free (provision.ts one-shot -c extraheader), the
+ * review agent then has NO reachable GitHub credential — gh/curl/git-push all lack auth.
+ * Pure; returns a new object.
+ */
+export function stripGithubCredentials(
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (key === "GH_TOKEN" || key === "GITHUB_TOKEN") continue;
+    if (/^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$/.test(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 export class TerragonDaemon {
   private startTime: number = 0;
   private messageBuffer: MessageBufferEntry[] = [];
@@ -493,6 +515,7 @@ export class TerragonDaemon {
     command,
     env,
     input,
+    withholdGitCredentials,
     onStdoutLine,
     onClose,
     getMockSuccessResult,
@@ -501,6 +524,10 @@ export class TerragonDaemon {
     input: DaemonMessageClaude;
     command: string;
     env?: Record<string, string | undefined>;
+    // Single-writer review runs (permissionMode="review"): withhold every GitHub
+    // credential from the agent's env so it has NO write outlet (the executor is the
+    // sole poster). See the strip below.
+    withholdGitCredentials?: boolean;
     onStdoutLine: (line: string) => void;
     onClose?: (code: number | null) => void;
     getMockSuccessResult?: () => string;
@@ -553,14 +580,18 @@ export class TerragonDaemon {
         },
       });
 
+      const baseChildEnv: Record<string, string | undefined> = {
+        ...process.env,
+        ...env,
+        DAEMON_TOKEN: input.token,
+      };
+      const childEnv = withholdGitCredentials
+        ? stripGithubCredentials(baseChildEnv)
+        : baseChildEnv;
       const { processId, pollInterval } = this.runtime.spawnCommandLine(
         command,
         {
-          env: {
-            ...process.env,
-            ...env,
-            DAEMON_TOKEN: input.token,
-          },
+          env: childEnv,
           onStdoutLine: (line) => {
             this.runtime.logger.debug("Agent output", { processId, line });
             if (line) {
@@ -621,6 +652,8 @@ export class TerragonDaemon {
     return this.spawnAgentProcess({
       agentName: "Claude",
       input,
+      // Review runs (single-writer): strip every GitHub credential from the agent env.
+      withholdGitCredentials: input.permissionMode === "review",
       command: claudeCommand({
         runtime: this.runtime,
         prompt: input.prompt,

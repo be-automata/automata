@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { claudeCommand } from "./claude";
+import { stripGithubCredentials } from "./daemon";
 import type { IDaemonRuntime } from "./runtime";
 
 // Minimal runtime: claudeCommand only writes the prompt file + (for a non-null
@@ -46,5 +47,50 @@ describe("claudeCommand — permissionMode policy (phase-2 single-writer)", () =
     expect(cmd).toContain("--allowedTools WebSearch WebFetch Read Bash");
     expect(cmd).not.toContain("--dangerously-skip-permissions");
     expect(cmd).not.toContain("Bash(gh:*)");
+  });
+});
+
+describe("stripGithubCredentials — review-run token withhold (single-writer)", () => {
+  const fullEnv = {
+    PATH: "/usr/bin",
+    HOME: "/home/x",
+    ANTHROPIC_API_KEY: "sk-ant-xxx",
+    GH_TOKEN: "ghs_write_token",
+    GITHUB_TOKEN: "ghs_write_token",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_COUNT: "4",
+    GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+    GIT_CONFIG_VALUE_0: "AUTHORIZATION: basic <base64-token>",
+    GIT_CONFIG_KEY_1: "credential.helper",
+    GIT_CONFIG_VALUE_1: "",
+    GIT_AUTHOR_NAME: "automata-ai-bot[bot]",
+  };
+
+  it("removes every GitHub credential vector (token + git extraheader auth)", () => {
+    const out = stripGithubCredentials(fullEnv);
+    expect(out.GH_TOKEN).toBeUndefined();
+    expect(out.GITHUB_TOKEN).toBeUndefined();
+    expect(out.GIT_CONFIG_COUNT).toBeUndefined();
+    expect(out.GIT_CONFIG_KEY_0).toBeUndefined();
+    expect(out.GIT_CONFIG_VALUE_0).toBeUndefined();
+    expect(out.GIT_CONFIG_KEY_1).toBeUndefined();
+    expect(out.GIT_CONFIG_VALUE_1).toBeUndefined();
+  });
+
+  it("keeps host-isolation + identity + runtime env (does not over-strip)", () => {
+    const out = stripGithubCredentials(fullEnv);
+    expect(out.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+    expect(out.GIT_CONFIG_SYSTEM).toBe("/dev/null");
+    expect(out.PATH).toBe("/usr/bin");
+    expect(out.HOME).toBe("/home/x");
+    expect(out.ANTHROPIC_API_KEY).toBe("sk-ant-xxx");
+    expect(out.GIT_AUTHOR_NAME).toBe("automata-ai-bot[bot]");
+  });
+
+  it("is pure (does not mutate the input)", () => {
+    const copy = { ...fullEnv };
+    stripGithubCredentials(fullEnv);
+    expect(fullEnv).toEqual(copy);
   });
 });
