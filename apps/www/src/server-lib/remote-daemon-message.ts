@@ -1,5 +1,7 @@
 import { db } from "@/lib/db";
-import { getThreadChat } from "@terragon/shared/model/threads";
+import { env } from "@terragon/env/apps-www";
+import { getThreadChat, getThreadMinimal } from "@terragon/shared/model/threads";
+import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
 import { getUserMessageToSend } from "@/lib/db-message-helpers";
 import { tryAutoCompactThread } from "@/server-lib/compact";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
@@ -108,6 +110,23 @@ export async function buildRemoteDaemonMessage({
 
   const featureFlags = await getFeatureFlagsForUser({ db, userId });
 
+  // ADR-036 phase-2: under REVIEW_SINGLE_WRITER, a review thread (pull_request
+  // automation) spawns with permissionMode="review" — the daemon then applies the
+  // no-gh-write tool-policy + strips all GitHub credentials from the agent env, so
+  // the agent can only EMIT its verdict (the executor posts it at thread-finish).
+  // Gated by the flag so the extra lookups are zero-cost while deployed dark, and
+  // flag-off review threads keep today's behavior (agent posts via gh + reconciler).
+  let applyReviewPolicy = false;
+  if (env.REVIEW_SINGLE_WRITER) {
+    const thread = await getThreadMinimal({ db, userId, threadId });
+    applyReviewPolicy = await isReviewThread({
+      db,
+      userId,
+      automationId: thread?.automationId ?? null,
+      organizationId: thread?.organizationId ?? null,
+    });
+  }
+
   return {
     type: "claude",
     model: normalizedModelForDaemon(model),
@@ -115,7 +134,9 @@ export async function buildRemoteDaemonMessage({
     agentVersion: threadChat.agentVersion,
     prompt: finalPrompt,
     sessionId,
-    permissionMode: threadChat.permissionMode || "allowAll",
+    permissionMode: applyReviewPolicy
+      ? "review"
+      : threadChat.permissionMode || "allowAll",
     ...(shouldUseCredits ? { useCredits: true } : {}),
     featureFlags,
   };
