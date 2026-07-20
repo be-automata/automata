@@ -140,8 +140,22 @@ async function main() {
         action: {
           type: "user_message",
           config: {
+            // ADR-036 single-writer channel. The instruction INLINES the minimal
+            // wire contract (verdict enum + fenced-json + commit field) so a run
+            // that fails to Read the methodology file still emits something the
+            // parser (emittedReviewIntentSchema) accepts — the SKILL.md is the deep
+            // methodology, the instruction is the contract.
+            // TODO(rev3-skill-path-portable): the SKILL.md path is hardcoded to the
+            // pilot box HOME (/Users/senior). This is read TEXT (no $HOME expansion),
+            // so a customer box (different HOME, ADR-002) breaks it — rev-3 stamps
+            // the run's HOME-resolved skill path in here, or the daemon exposes a
+            // SKILL_DIR env the instruction references.
             message: userMessage(
-              `A pull request was opened or updated in ${repoFullName}. Perform a PR review (prod skill: github-ops).`,
+              `A pull request was opened or updated in ${repoFullName}. Perform a substantive PR review.\n\n` +
+                `You are running as a REVIEW agent: you have NO gh and NO GitHub token, so you cannot post to GitHub. You deliver your verdict by EMITTING it as your FINAL message — a single fenced \`\`\`json block with EXACTLY this shape:\n` +
+                `{ "verdict": "approve" | "request_changes" | "comment", "commit": "<the HEAD sha you reviewed, from \`git rev-parse HEAD\`>", "summary": "<verdict rationale>", "findings": [ { "severity": "info" | "warning" | "error" | "critical", "path": "<file>", "line": <number>, "body": "<one concrete finding>", "quote": "<verbatim source line(s) at path:line, from a fresh Read at HEAD>" } ] }\n` +
+                `The control plane posts your review exactly once from that block.\n\n` +
+                `First, Read the full review methodology and rules at /Users/senior/.claude/skills/github-ops/SKILL.md and follow it (verify-before-block quote rules, severity→verdict mapping, the six review dimensions). Use \`git diff\` and Read/Grep/Glob to inspect the diff and the files at HEAD. Do NOT run gh. Emit the fenced-json block exactly once, then stop.`,
             ),
           },
         },
