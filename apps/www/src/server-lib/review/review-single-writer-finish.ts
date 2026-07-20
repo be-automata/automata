@@ -1,0 +1,164 @@
+import { env } from "@terragon/env/apps-www";
+import type { DB } from "@terragon/shared/db";
+import type { DBMessage } from "@terragon/shared/db/db-message";
+import { getThreadChat, getThreadMinimal } from "@terragon/shared/model/threads";
+import { getAutomation } from "@terragon/shared/model/automations";
+import { getPostHogServer } from "@/lib/posthog-server";
+import { getOctokitForApp } from "@/lib/github";
+import { reconcilePrReviews } from "@/server-lib/reconcile-pr-reviews";
+import {
+  createOctokitReviewClient,
+  getPrHeadSha,
+} from "./octokit-review-client";
+import { executeReviewFromIntent } from "./execute-review-from-intent";
+
+/**
+ * Review-effect dispatch at thread-finish (ADR-036 phase-2). One entry the
+ * daemon-event finish hook calls for a terminal PR thread; it routes:
+ *   - REVIEW_SINGLE_WRITER on + a review thread → the control-plane executor
+ *     (the agent posted nothing; www posts exactly once from the emitted intent),
+ *   - otherwise → the interim post-run reconciler (today's behavior).
+ * GITHUB_SIDE_EFFECTS_ENABLED gates all of it (a shadow thread never boots, but
+ * this guards the global switch regardless).
+ */
+
+/** The App bot's review-author login (mirrors reconcile-pr-reviews.resolveBotLogin). */
+function resolveBotLogin(): string {
+  const explicit = env.GITHUB_BOT_LOGIN.trim();
+  return explicit || `${env.NEXT_PUBLIC_GITHUB_APP_NAME}[bot]`;
+}
+
+/**
+ * A review thread = one dispatched from a `pull_request`-triggered automation
+ * (the PR-review path). Mention threads are `github_mention`; those keep the
+ * mention-reply path and must NOT run the review executor.
+ */
+export async function isReviewThread({
+  db,
+  userId,
+  automationId,
+  organizationId,
+}: {
+  db: DB;
+  userId: string;
+  automationId: string | null;
+  organizationId?: string | null;
+}): Promise<boolean> {
+  if (!automationId) return false;
+  const automation = await getAutomation({
+    db,
+    userId,
+    automationId,
+    organizationId,
+  });
+  return automation?.triggerType === "pull_request";
+}
+
+/** Concatenate the LAST agent message's text parts — where the emitted intent lives. */
+export function extractTerminalAgentText(messages: DBMessage[] | null): string {
+  if (!messages) return "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.type === "agent") {
+      return m.parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("\n");
+    }
+  }
+  return "";
+}
+
+export async function handleReviewEffectAtFinish({
+  db,
+  userId,
+  threadId,
+  threadChatId,
+  repoFullName,
+  prNumber,
+}: {
+  db: DB;
+  userId: string;
+  threadId: string;
+  threadChatId: string;
+  repoFullName: string;
+  prNumber: number;
+}): Promise<void> {
+  if (!env.GITHUB_SIDE_EFFECTS_ENABLED) return;
+
+  // Flag off → interim reconciler (unchanged behavior).
+  if (!env.REVIEW_SINGLE_WRITER) {
+    await reconcilePrReviews({ repoFullName, prNumber });
+    return;
+  }
+
+  // automationId/organizationId live on the thread (getThreadMinimal); the agent's
+  // terminal messages live on the thread-chat (getThreadChat).
+  const thread = await getThreadMinimal({ db, userId, threadId });
+  if (!thread) {
+    await reconcilePrReviews({ repoFullName, prNumber });
+    return;
+  }
+
+  const review = await isReviewThread({
+    db,
+    userId,
+    automationId: thread.automationId ?? null,
+    organizationId: thread.organizationId ?? null,
+  });
+  if (!review) {
+    // A PR thread that isn't a review (e.g. a mention) → reconciler, not executor.
+    await reconcilePrReviews({ repoFullName, prNumber });
+    return;
+  }
+
+  const threadChat = await getThreadChat({ db, threadId, threadChatId, userId });
+
+  // Single-writer path: post exactly once from the agent's emitted intent.
+  const octokit = await getOctokitForApp({
+    owner: repoFullName.split("/")[0]!,
+    repo: repoFullName.split("/")[1]!,
+  });
+  const github = createOctokitReviewClient(octokit);
+  const currentHeadSha = await getPrHeadSha(octokit, repoFullName, prNumber);
+  const terminalText = extractTerminalAgentText(threadChat?.messages ?? null);
+
+  const outcome = await executeReviewFromIntent({
+    github,
+    repoFullName,
+    prNumber,
+    botLogin: resolveBotLogin(),
+    currentHeadSha,
+    terminalText,
+    logger: {
+      info: (message, meta) => console.log(`[review-single-writer] ${message}`, meta),
+      warn: (message, meta) => console.warn(`[review-single-writer] ${message}`, meta),
+      error: (message, meta) => console.error(`[review-single-writer] ${message}`, meta),
+    },
+  });
+
+  // Loud telemetry; WorkFailed (degraded/post_failed) pages so a human doesn't
+  // mistake a lost verdict for a clean pass.
+  getPostHogServer().capture({
+    distinctId: userId,
+    event: "review_single_writer_outcome",
+    properties: { threadId, repoFullName, prNumber, outcome: outcome.outcome },
+  });
+  if (outcome.outcome === "degraded_comment" || outcome.outcome === "post_failed") {
+    console.error("[review-single-writer] WorkFailed — review not cleanly applied", {
+      threadId,
+      repoFullName,
+      prNumber,
+      outcome,
+    });
+    getPostHogServer().capture({
+      distinctId: userId,
+      event: "review_single_writer_work_failed",
+      properties: { threadId, repoFullName, prNumber, ...outcome },
+    });
+  }
+
+  // Fail-safe audit BEHIND the executor: converge any residue (e.g. a straddling
+  // run that agent-posted during a flag-flip skew). Idempotent no-op when clean.
+  await reconcilePrReviews({ repoFullName, prNumber });
+}

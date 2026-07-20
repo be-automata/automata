@@ -31,7 +31,7 @@ import {
   parseClaudeOAuthTokenRevokedMessage,
 } from "@/agent/msg/helpers";
 import { maybeStartQueuedThreadChat } from "./process-queued-thread";
-import { reconcilePrReviews } from "./reconcile-pr-reviews";
+import { handleReviewEffectAtFinish } from "./review/review-single-writer-finish";
 import { trackUsageEvents } from "./usage-events";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import { compactThreadChat } from "./compact";
@@ -536,15 +536,23 @@ async function handleThreadFinish({
   repoFullName: string | null;
   prNumber: number | null;
 }) {
-  // ADR-036 (INTERIM): a PR-associated thread's agent posts its review directly via
-  // gh with no idempotency, so a retry/dual-path can leave duplicate non-dismissed
-  // bot reviews (parity S1). Reconcile GitHub state to the no-dup invariant now that
-  // the run is terminal. Fail-soft + a no-op when there are ≤1 bot reviews, so it is
-  // safe to run for any PR thread. (The durable single-writer channel is phase-2.)
+  // ADR-036: dispatch the review effect for a terminal PR thread. With
+  // REVIEW_SINGLE_WRITER on + a review thread, the control-plane executor posts
+  // exactly once from the agent's emitted intent (the agent has no gh-write
+  // outlet); otherwise the interim post-run reconciler converges GitHub state to
+  // the no-dup invariant. Both fail-soft (waitUntil + catch) — a review-effect
+  // failure must never fail the thread.
   if (prNumber !== null && repoFullName) {
     waitUntil(
-      reconcilePrReviews({ repoFullName, prNumber }).catch((error) =>
-        console.error("[review-reconciler] finish-hook failed (non-fatal)", {
+      handleReviewEffectAtFinish({
+        db,
+        userId,
+        threadId,
+        threadChatId,
+        repoFullName,
+        prNumber,
+      }).catch((error) =>
+        console.error("[review-effect] finish-hook failed (non-fatal)", {
           repoFullName,
           prNumber,
           error,
