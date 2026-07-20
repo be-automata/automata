@@ -115,50 +115,68 @@ export async function handleReviewEffectAtFinish({
   const threadChat = await getThreadChat({ db, threadId, threadChatId, userId });
 
   // Single-writer path: post exactly once from the agent's emitted intent.
-  const octokit = await getOctokitForApp({
-    owner: repoFullName.split("/")[0]!,
-    repo: repoFullName.split("/")[1]!,
-  });
-  const github = createOctokitReviewClient(octokit);
-  const currentHeadSha = await getPrHeadSha(octokit, repoFullName, prNumber);
-  const terminalText = extractTerminalAgentText(threadChat?.messages ?? null);
+  // DEFENSIVE ISOLATION: the whole single-writer path is wrapped so ANY unexpected
+  // throw (octokit/HEAD fetch/etc.) degrades to the interim reconciler rather than
+  // propagating. This runs in the finish hook alongside the queue-drain promotion
+  // (BUG-EXEC-01) — a phase-2 bug must never regress that. The caller also
+  // waitUntil-catches; this is belt-and-suspenders + a state-converging fallback.
+  try {
+    const octokit = await getOctokitForApp({
+      owner: repoFullName.split("/")[0]!,
+      repo: repoFullName.split("/")[1]!,
+    });
+    const github = createOctokitReviewClient(octokit);
+    const currentHeadSha = await getPrHeadSha(octokit, repoFullName, prNumber);
+    const terminalText = extractTerminalAgentText(threadChat?.messages ?? null);
 
-  const outcome = await executeReviewFromIntent({
-    github,
-    repoFullName,
-    prNumber,
-    botLogin: resolveBotLogin(),
-    currentHeadSha,
-    terminalText,
-    logger: {
-      info: (message, meta) => console.log(`[review-single-writer] ${message}`, meta),
-      warn: (message, meta) => console.warn(`[review-single-writer] ${message}`, meta),
-      error: (message, meta) => console.error(`[review-single-writer] ${message}`, meta),
-    },
-  });
+    const outcome = await executeReviewFromIntent({
+      github,
+      repoFullName,
+      prNumber,
+      botLogin: resolveBotLogin(),
+      currentHeadSha,
+      terminalText,
+      logger: {
+        info: (message, meta) => console.log(`[review-single-writer] ${message}`, meta),
+        warn: (message, meta) => console.warn(`[review-single-writer] ${message}`, meta),
+        error: (message, meta) => console.error(`[review-single-writer] ${message}`, meta),
+      },
+    });
 
-  // Loud telemetry; WorkFailed (degraded/post_failed) pages so a human doesn't
-  // mistake a lost verdict for a clean pass.
-  getPostHogServer().capture({
-    distinctId: userId,
-    event: "review_single_writer_outcome",
-    properties: { threadId, repoFullName, prNumber, outcome: outcome.outcome },
-  });
-  if (outcome.outcome === "degraded_comment" || outcome.outcome === "post_failed") {
-    console.error("[review-single-writer] WorkFailed — review not cleanly applied", {
+    // Loud telemetry; WorkFailed (degraded/post_failed) pages so a human doesn't
+    // mistake a lost verdict for a clean pass.
+    getPostHogServer().capture({
+      distinctId: userId,
+      event: "review_single_writer_outcome",
+      properties: { threadId, repoFullName, prNumber, outcome: outcome.outcome },
+    });
+    if (
+      outcome.outcome === "degraded_comment" ||
+      outcome.outcome === "post_failed"
+    ) {
+      console.error("[review-single-writer] WorkFailed — review not cleanly applied", {
+        threadId,
+        repoFullName,
+        prNumber,
+        outcome,
+      });
+      getPostHogServer().capture({
+        distinctId: userId,
+        event: "review_single_writer_work_failed",
+        properties: { threadId, repoFullName, prNumber, ...outcome },
+      });
+    }
+  } catch (err) {
+    console.error("[review-single-writer] executor path threw — falling back to reconciler", {
       threadId,
       repoFullName,
       prNumber,
-      outcome,
-    });
-    getPostHogServer().capture({
-      distinctId: userId,
-      event: "review_single_writer_work_failed",
-      properties: { threadId, repoFullName, prNumber, ...outcome },
+      error: err instanceof Error ? err.message : String(err),
     });
   }
 
   // Fail-safe audit BEHIND the executor: converge any residue (e.g. a straddling
-  // run that agent-posted during a flag-flip skew). Idempotent no-op when clean.
+  // run that agent-posted during a flag-flip skew, or an executor throw above).
+  // Idempotent no-op when clean.
   await reconcilePrReviews({ repoFullName, prNumber });
 }
