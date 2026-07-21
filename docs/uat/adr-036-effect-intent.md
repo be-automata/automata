@@ -229,3 +229,28 @@ Flag live (www b416fede, box preflight PASS). Fired the fresh-run gate: fixture 
 - **Implication:** left as-is, every review posts a non-blocking degraded COMMENT — SAFE (marked, human-should-review) but no real verdict → defective PRs unblocked. A review-functionality regression, caught pre-customer.
 - **Root cause = OPEN (boot-coder forensics on run 2407ed50 — deferred per discipline):** did the agent Read github-ops SKILL.md? try gh (denied) then give up? actually review, or short-circuit fast because permissionMode=review+no-token starved it of context it (wrongly) tried to fetch via gh? terminal output?
 - **GATE VERDICT: FRESH-RUN GATE FAILS (correct-verdict); single-writer safety + no-dup PASS.** Recommendation: keep the flag ON (degraded is SAFE, not silent) while boot-coder + tenancy-coder diagnose the emit path; then re-run the gate + S1-S3 + S10/S11/S13/S14. PR #23 kept open as evidence. Phase-2 does NOT close until the agent emits a real verdict.
+
+## FLAG-FLIP ACCEPTANCE — RUN 4 (swaccept5/PR#27): FRESH-RUN GATE PASSES + full S1-S3 lifecycle (2026-07-21)
+The RUN-1 emit failure was root-caused to TWO daemon-launch blockers (both fixed), NOT the emit path itself: (1) a shell-quote bug in the daemon's `bash -c` claude invocation — unquoted `--disallowedTools Bash(gh:*)` parens caused `bash: -c: syntax error` so the agent never launched (fix 41e8f3a, quoted matchers); (2) the launchd worker's minimal PATH lacked `/Users/senior/.local/bin` so the real `claude` binary wasn't found ("Superset: claude not found in PATH") → sandbox-not-found → degrade (fix: PATH added to run-worker.sh + worker kickstarted 00:44:36Z). The RUN-1 "agent emitted nothing" was the agent never running, not an emit-path defect. Verified live: worker pid 55661 env PATH carries `.local/bin`, `claude` resolves, no "not found" in logs; boot-coder ran a direct daemon-level spawn test → claude LAUNCH-OK. (Note: swaccept4/PR#26 degraded because it RACED the PATH-fix kickstart — dispatched pre-fix; closed, not a bug.)
+
+Fresh clean run swaccept5 = PR #27 (opened 00:47:06Z, after the fixed worker; 3 seeded defects), thread 8830e00e.
+
+**FRESH-RUN GATE (S1 opened): PASS — two-sided close (my GitHub assertion + boot-coder's process forensics reconcile).**
+- no-dup: exactly ONE review (id 4740184706), structural. ✓
+- verdict: CHANGES_REQUESTED, degraded-marker absent (grep=0), substantive 4-finding body — `[error]` off-by-one `age > 18` (line 3), `[critical]` secret/API-key logged (line 6), `[warning]` no tests, `[info]` misleading doc; severity floor correctly forced request_changes. ✓
+- identity: automata-ai-bot[bot] (App), at reviewed commit 1279eb2b (=HEAD when posted). ✓
+- agent-posts-zero: 0 bot issue-comments, 0 inline; agent ran token-withheld (boot-coder: no GH_TOKEN/GITHUB_TOKEN/GIT_CONFIG auth in env, no `http.extraheader` in worktree .git/config, curl→401), emitted the fenced-JSON intent {verdict:request_changes, commit:1279eb2b}, made ZERO gh-write calls; executor posted the one real verdict. ✓
+- single dispatch (thread 8830e00e = one run), drain healthy (queued-tasks-concurrency=0). ✓
+
+**FULL S1-S3 lifecycle (harness swaccept5, PASS:2 FAIL:1):**
+- **S1 opened → CR:** PASS (above).
+- **S2 partial-fix → still-CR @ de85626e:** FAIL — verdict came back COMMENTED, NOT a degrade (parse-clean). Body: the agent's review worktree was "a single orphan commit (de85626, no parent) with no cached remote refs" and `git fetch origin` timed out (no sandbox network), so `git diff origin/main...HEAD` / `HEAD~1...HEAD` were both unavailable → agent correctly REFUSED to guess findings (skill rule) → honest COMMENTED. Channel correct (one review, App identity, not degraded); only the verdict-fidelity was blocked.
+- **S3 full-fix → APPROVE + dismiss prior @ 50129b47:** PASS — substantive APPROVE landed; prior S1 CHANGES_REQUESTED now DISMISSED; 0 lingering non-dismissed blocking verdicts. **Supersede-dismiss proven.**
+
+**Key correction (recorded against over-extrapolation):** S3 PASSED, so the re-review path is NOT universally broken. The no-diff condition that hit S2 is **INTERMITTENT** (S2 hit it, S3 ~4.5 min later had a working diff and approved). Reported as observable; deterministic root-cause (daemon git-object-cache warming vs a transient fetch timeout on the S2 checkout) deferred to boot-coder. It is a daemon worktree-prep/network issue, NOT a harness artifact (harness commits carry full parentage from origin/main — verified) and NOT the single-writer token-strip (parentage loss is fetch-depth, not auth).
+
+**MECHANISM FLIP: INTERIM-RECONCILER → SINGLE-WRITER.** The channel invariants — exactly-one-review-per-commit, structural no-dup, no-degrade, App identity, agent-posts-zero, and supersede-dismiss-on-approve — all HOLD and are independently verified across the full opened→partial→full lifecycle. Posting is a single control-plane writer keyed on the emitted intent; the agent has no gh-write outlet. The S1 no-dup gap is structurally closed (no `dup_reconciled` reliance).
+
+**OPEN ITEMS (non-blocking, phase-2 does NOT reopen for these):**
+- S2 intermittent no-diff re-review (boot-coder tracing worktree-prep depth / fetch reliability) — agent degrades SAFELY to COMMENT, never a false verdict.
+- S10/S11/S13/S14 (inline-thread surface) remain gated on a SEPARATE flag, REVIEW_POST_INLINE_COMMENTS — PR#27 posted 0 inline comments (findings folded into the review body), so that surface is not live; these stay SKIPPED, NOT force-passed by the single-writer flip.
