@@ -1380,3 +1380,53 @@ export const agentProviderCredentials = pgTable(
     ),
   ],
 );
+
+/**
+ * Per-repository REQUESTED_CHANGES severity tolerance (ADR-036 review floor).
+ *
+ * An operator-selectable floor deciding at which finding severity a PR review's
+ * verdict is forced to `request_changes`: `error` (only error/critical block),
+ * `warning` (the default when no row exists), or `info` (every finding blocks).
+ * Resolved LIVE per dispatched review run (no restart) and applied server-side
+ * by `applyApproveSeverityFloor`, so it is the single source of truth for the
+ * external PR verdict floor.
+ *
+ * MULTI-TENANT: scoped to `(organizationId, repoFullName)` — the same repo slug
+ * reviewed under two different orgs carries two independent tolerances, never a
+ * cross-tenant bleed. `organizationId` is the tenant fence; the unique index on
+ * the pair makes the store an upsert. `updatedByUserId` records provenance for
+ * the audit trail. Distinct from the deterministic ReviewGate's internal quality
+ * bar, which deliberately does NOT follow this per-repo setting.
+ */
+export const repoReviewSettings = pgTable(
+  "repo_review_settings",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    /** Lowercased 'owner/name' slug — GitHub slugs are case-insensitive. */
+    repoFullName: text("repo_full_name").notNull(),
+    /** 'info' | 'warning' | 'error' — the lowest severity that blocks. */
+    blockTolerance: text("block_tolerance").notNull(),
+    /** Provenance: the user who last wrote this override (audit trail). */
+    updatedByUserId: text("updated_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    // One tolerance per (org, repo) — the upsert conflict target + live-read key.
+    uniqueIndex("repo_review_settings_org_repo_index").on(
+      table.organizationId,
+      table.repoFullName,
+    ),
+    index("repo_review_settings_org_id_index").on(table.organizationId),
+  ],
+);

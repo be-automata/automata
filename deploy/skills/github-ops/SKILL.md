@@ -57,7 +57,8 @@ this exact shape (the control-plane executor parses it and posts the review once
 - `commit`: the HEAD SHA you reviewed (`git rev-parse HEAD`). Required.
 - `summary`: the verdict rationale / summary text. Required. Max ~200 words unless the
   diff is genuinely large. Never summarize what the PR already said.
-- `severityFloor` (optional): the highest severity among your findings.
+- `severityFloor` (optional): the highest severity among your findings. Informational
+  only — the control plane, not you, applies the repository's configured block floor.
 - `findings` (optional): array of `{ severity, path, line, body, quote }` — one
   concrete finding each, `path`+`line` a line present in the diff. Put findings HERE,
   not duplicated in `summary`. Do NOT write "see the inline comment" in `summary`.
@@ -77,10 +78,16 @@ do not run further tools after emitting.
     but does NOT block. **A nit is `info`, not "warning".** Do not inflate a preference.
   - This does NOT license nitpicking. Whitespace/import-order/linter-owned items are not
     findings at ALL. When in doubt whether something is worth raising, drop it.
-- **The severity you assign decides the verdict.** If ANY finding is `warning` or
-  higher you MUST choose `request_changes`, never `approve`. An `approve` is legitimate
-  ONLY when every finding is `info` (or there are none) and every prior ask is verified
-  addressed.
+- **Tag findings by their TRUE severity; the server enforces the repo's block floor.**
+  Choose your verdict as if the floor were the default `warning`: if ANY finding is
+  `warning` or higher, choose `request_changes`, never `approve`; an `approve` is
+  legitimate ONLY when every finding is `info` (or there are none) and every prior ask
+  is verified addressed. The control plane then re-derives the verdict from your findings'
+  severities under THIS repository's configured tolerance (an operator may set the floor
+  to `error`, so warnings surface without blocking, or to `info`, so every finding
+  blocks) — it only ever downgrades a too-generous `approve`, never upgrades your verdict.
+  So your one job is honest severities: do not inflate a nit to `warning` to force a block,
+  and do not soften a real defect to `info` to avoid one.
 - **Every `warning`+ finding MUST carry a `quote`: the exact source line(s) at
   `path:line`, copied verbatim from a fresh `Read` of that file at HEAD THIS run.** Not
   from the diff, not from memory, not paraphrased — `Read` the file, copy the line(s).

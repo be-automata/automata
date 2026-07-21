@@ -8,9 +8,10 @@ import { getOctokitForApp } from "@/lib/github";
 import { reconcilePrReviews } from "@/server-lib/reconcile-pr-reviews";
 import {
   createOctokitReviewClient,
-  getPrHeadSha,
+  getPrHeadState,
 } from "./octokit-review-client";
 import { executeReviewFromIntent } from "./execute-review-from-intent";
+import { resolveApproveFloor } from "./resolve-approve-floor";
 
 /**
  * Review-effect dispatch at thread-finish (ADR-036 phase-2). One entry the
@@ -125,8 +126,21 @@ export async function handleReviewEffectAtFinish({
         repo: repoFullName.split("/")[1]!,
       });
       const github = createOctokitReviewClient(octokit);
-      const currentHeadSha = await getPrHeadSha(octokit, repoFullName, prNumber);
+      const { headSha: currentHeadSha, isDraft } = await getPrHeadState(
+        octokit,
+        repoFullName,
+        prNumber,
+      );
       const terminalText = extractTerminalAgentText(threadChat?.messages ?? null);
+
+      // Resolve ONE approve-floor snapshot for this run, fenced to the thread's
+      // org (ADR-036 review floor). Read live from Neon — a dashboard change
+      // takes effect on the next review with no restart.
+      const approveFloorPolicy = await resolveApproveFloor({
+        db,
+        organizationId: thread?.organizationId ?? null,
+        repoFullName,
+      });
 
       const outcome = await executeReviewFromIntent({
         github,
@@ -135,6 +149,8 @@ export async function handleReviewEffectAtFinish({
         botLogin: resolveBotLogin(),
         currentHeadSha,
         terminalText,
+        approveFloorPolicy,
+        isDraft,
         logger: {
           info: (message, meta) =>
             console.log(`[review-single-writer] ${message}`, meta),

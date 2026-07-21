@@ -7,6 +7,11 @@ import {
   type ReviewIntentOutcome,
 } from "@terragon/review/state/review-intent-executor";
 import { findBotReviewAtHead } from "@terragon/review/state/head-review-guard";
+import {
+  applyApproveSeverityFloor,
+  DEFAULT_APPROVE_SEVERITY_POLICY,
+  type ApproveSeverityPolicy,
+} from "@terragon/review/severity-policy";
 import { parseReviewIntent, toExecutorIntent } from "./parse-review-intent";
 
 /**
@@ -48,6 +53,16 @@ export interface ExecuteReviewFromIntentOpts {
   /** The agent's terminal output (from the persisted thread messages). */
   terminalText: string;
   postInlineComments?: boolean;
+  /**
+   * The ONE per-repo approve-severity-floor snapshot for this run (ADR-036
+   * review floor). Downgrades a too-generous `approve` to `request_changes` /
+   * `comment` server-side per the repo's tolerance. Defaults to the locked
+   * `warning` floor when the caller does not resolve one, so the floor is
+   * enforced even absent a per-repo override — never a verbatim pass-through.
+   */
+  approveFloorPolicy?: ApproveSeverityPolicy;
+  /** Draft PR → the floor caps at `comment` (never a formal request_changes). */
+  isDraft?: boolean;
   logger?: ReviewLogger;
 }
 
@@ -80,7 +95,18 @@ export async function executeReviewFromIntent(
   }
 
   const emitted = parsed.intent;
-  const execIntent = toExecutorIntent(emitted);
+  // Apply the per-repo approve-severity floor server-side BEFORE anything is
+  // posted — the load-bearing guarantee. `applyApproveSeverityFloor` only ever
+  // downgrades a too-generous `approve` (comment/request_changes pass through),
+  // recomputing the verdict from the findings' severities under this repo's
+  // tolerance. This runs identically for the fresh and stale paths so the
+  // effective verdict is consistent regardless of HEAD movement.
+  const execIntent = applyApproveSeverityFloor(
+    toExecutorIntent(emitted),
+    opts.approveFloorPolicy ?? DEFAULT_APPROVE_SEVERITY_POLICY,
+    { isDraft: opts.isDraft },
+  );
+  const effectiveVerdict = execIntent.verdict;
   const isStale = emitted.commit !== currentHeadSha;
 
   if (isStale) {
@@ -113,7 +139,7 @@ export async function executeReviewFromIntent(
       });
       return { outcome: "skipped_superseded" };
     }
-    const staleBody = `_Intended verdict: **${emitted.verdict}**, reviewed at \`${emitted.commit}\`; the PR has since advanced to \`${currentHeadSha}\`, so this is posted as a COMMENT rather than a formal verdict._\n\n${execIntent.body}`;
+    const staleBody = `_Intended verdict: **${effectiveVerdict}**, reviewed at \`${emitted.commit}\`; the PR has since advanced to \`${currentHeadSha}\`, so this is posted as a COMMENT rather than a formal verdict._\n\n${execIntent.body}`;
     try {
       await github.submitReviewWithComments(
         repoFullName,
@@ -139,7 +165,7 @@ export async function executeReviewFromIntent(
       });
       return { outcome: "post_failed", failureReason, workFailed: true };
     }
-    return { outcome: "posted_stale_comment", intendedVerdict: emitted.verdict };
+    return { outcome: "posted_stale_comment", intendedVerdict: effectiveVerdict };
   }
 
   const outcome = await runExecutor({

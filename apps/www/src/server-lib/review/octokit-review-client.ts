@@ -115,11 +115,25 @@ export async function getPrHeadSha(
   repoFullName: string,
   prNumber: number,
 ): Promise<string> {
+  return (await getPrHeadState(octokit, repoFullName, prNumber)).headSha;
+}
+
+/**
+ * HEAD sha AND draft state of a PR in one call. The draft flag feeds the
+ * approve-floor draft cap (a draft PR must never receive a formal
+ * `request_changes`), fetched alongside the head sha to avoid a second API round
+ * trip in the finish hook.
+ */
+export async function getPrHeadState(
+  octokit: Octokit,
+  repoFullName: string,
+  prNumber: number,
+): Promise<{ headSha: string; isDraft: boolean }> {
   const [owner, repo] = parseRepoFullName(repoFullName);
   const { data } = await octokit.rest.pulls.get({
     owner,
     repo,
     pull_number: prNumber,
   });
-  return data.head.sha;
+  return { headSha: data.head.sha, isDraft: data.draft === true };
 }

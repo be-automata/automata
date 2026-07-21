@@ -1,33 +1,49 @@
 /**
- * Composes the per-repo approve-floor resolver injected into the coordinator
- * dispatcher (`resolveReviewApproveFloor`). Extracted from index.ts so the
- * precedence chain is unit-testable:
+ * Pure resolution of the per-repo approve-severity floor from a (possibly
+ * absent) stored tolerance override, with a well-defined precedence:
  *
- *   settings-store row (dashboard) > env-derived policy > locked default
+ *   stored per-repo row (dashboard)  >  env-derived policy  >  locked default
  *
- * The store is read LIVE on every call — a dashboard write applies to the
- * next dispatched run with no restart.
+ * This module is deliberately I/O-free: the caller (apps/www) reads the Neon
+ * `repo_review_settings` row for the run's `(organizationId, repoFullName)` and
+ * hands the result here. Keeping it pure means the precedence is unit-testable in
+ * the review package without a database, and `@terragon/shared` never has to
+ * depend on `@terragon/review`.
+ *
+ * The store is read LIVE on every dispatched review run — a dashboard write
+ * applies to the next run with no restart.
  */
 
 import {
   DEFAULT_APPROVE_SEVERITY_POLICY,
+  isBlockTolerance,
   toleranceToPolicy,
   type ApproveSeverityPolicy,
 } from "../review/severity-policy";
-import type { RepoReviewSettingsStore } from "./types";
 
-export interface ReviewFloorResolverDeps {
-  store: Pick<RepoReviewSettingsStore, "get">;
-  /** The env-derived policy assembled from loadConfig (absent ⇒ locked default). */
-  envPolicy?: ApproveSeverityPolicy;
+/** The minimal shape of a stored override this resolver reads. */
+export interface StoredReviewTolerance {
+  /** The persisted tolerance string; validated here (untrusted DB text). */
+  blockTolerance: string;
 }
 
-export function createReviewApproveFloorResolver(
-  deps: ReviewFloorResolverDeps,
-): (repo: string) => ApproveSeverityPolicy {
-  const fallback = deps.envPolicy ?? DEFAULT_APPROVE_SEVERITY_POLICY;
-  return (repo: string): ApproveSeverityPolicy => {
-    const setting = deps.store.get(repo);
-    return setting ? toleranceToPolicy(setting.blockTolerance) : fallback;
-  };
+/**
+ * Resolve the effective approve-floor policy for one review run.
+ *
+ * - A stored row with a VALID tolerance wins — it is a complete policy, so the
+ *   env surface override is intentionally ignored for that repo.
+ * - A stored row with an unrecognized tolerance string (corruption / a value
+ *   written by a newer version) is treated as absent — we fall back rather than
+ *   crash the review.
+ * - No row → the env-derived policy if provided, else the locked default.
+ */
+export function resolveApproveFloorPolicy(
+  setting: StoredReviewTolerance | null | undefined,
+  envPolicy?: ApproveSeverityPolicy,
+): ApproveSeverityPolicy {
+  const fallback = envPolicy ?? DEFAULT_APPROVE_SEVERITY_POLICY;
+  if (setting && isBlockTolerance(setting.blockTolerance)) {
+    return toleranceToPolicy(setting.blockTolerance);
+  }
+  return fallback;
 }

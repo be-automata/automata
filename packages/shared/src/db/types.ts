@@ -342,6 +342,10 @@ export type AutomationInsert<T = AutomationTriggerType> = Omit<
   triggerConfig: Extract<AutomationTrigger, { type: T }>["config"];
 };
 
+export type RepoReviewSetting = typeof schema.repoReviewSettings.$inferSelect;
+export type RepoReviewSettingInsert =
+  typeof schema.repoReviewSettings.$inferInsert;
+
 export type UserCreditGrantType =
   | "signup_bonus"
   | "stripe_top_up"

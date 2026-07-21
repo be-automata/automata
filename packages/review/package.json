@@ -14,8 +14,6 @@
     "./state/outstanding-review-finder": "./src/review/state/outstanding-review-finder.ts",
     "./state/review-intent-executor": "./src/review/state/review-intent-executor.ts",
     "./audit/review-audit-log": "./src/audit/review-audit-log.ts",
-    "./settings/repo-review-settings-store": "./src/settings/repo-review-settings-store.ts",
-    "./settings/repo-review-settings-audit": "./src/settings/repo-review-settings-audit.ts",
     "./settings/review-floor-resolver": "./src/settings/review-floor-resolver.ts",
     "./settings/types": "./src/settings/types.ts",
     "./types": "./src/types.ts"
