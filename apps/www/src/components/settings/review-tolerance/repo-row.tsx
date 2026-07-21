@@ -2,6 +2,7 @@ import type { BlockTolerance } from "@terragon/review/severity-policy";
 import { Check, ChevronDown, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { DEFAULT_TOLERANCE, TOLERANCE_ORDER } from "./constants";
 import { ToleranceRadioCard } from "./tolerance-radio-card";
@@ -10,6 +11,8 @@ interface RepoRowProps {
   repoFullName: string;
   /** The persisted tolerance in effect for this repo (override or the default). */
   tolerance: BlockTolerance;
+  /** Whether Automata engages this repo's draft PRs (override or the `true` default). */
+  reviewDraftPrs: boolean;
   /** Whether this repo has an explicit override (vs. running on the default). */
   hasOverride: boolean;
   /** Draft selection (may differ from the persisted value). */
@@ -19,16 +22,20 @@ interface RepoRowProps {
   saving: boolean;
   saved: boolean;
   saveError: string | null;
+  /** The draft-PR toggle is mid-save (it persists immediately, no explicit Save). */
+  draftSaving: boolean;
   onToggle(): void;
   onSelect(tolerance: BlockTolerance): void;
   onSave(): void;
   onDiscard(): void;
   onReset(): void;
+  onToggleDraft(reviewDraftPrs: boolean): void;
 }
 
 export function RepoRow({
   repoFullName,
   tolerance,
+  reviewDraftPrs,
   hasOverride,
   draft,
   expanded,
@@ -36,11 +43,13 @@ export function RepoRow({
   saving,
   saved,
   saveError,
+  draftSaving,
   onToggle,
   onSelect,
   onSave,
   onDiscard,
   onReset,
+  onToggleDraft,
 }: RepoRowProps) {
   return (
     <div>
@@ -154,6 +163,35 @@ export function RepoRow({
                 Reset to default ({DEFAULT_TOLERANCE})
               </Button>
             )}
+          </div>
+
+          <div className="mt-4 flex items-start justify-between gap-4 border-t pt-4">
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium">Review draft PRs</span>
+                {draftSaving && (
+                  <Loader2
+                    className="h-3 w-3 animate-spin text-muted-foreground"
+                    aria-hidden
+                  />
+                )}
+                {!reviewDraftPrs && (
+                  <span className="rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    Off
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                When off, Automata ignores this repo&apos;s draft PRs until
+                they&apos;re marked ready for review. On by default.
+              </p>
+            </div>
+            <Switch
+              checked={reviewDraftPrs}
+              disabled={draftSaving || saving}
+              onCheckedChange={onToggleDraft}
+              aria-label={`Review draft PRs for ${repoFullName}`}
+            />
           </div>
         </div>
       )}

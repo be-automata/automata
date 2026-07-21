@@ -13,7 +13,14 @@ import type { BlockTolerance } from "@terragon/review/severity-policy";
 export interface RepoReviewSettingDto {
   repoFullName: string;
   blockTolerance: BlockTolerance;
+  reviewDraftPrs: boolean;
   updatedAt: string;
+}
+
+/** Partial patch — send only the field(s) being changed (at least one). */
+export interface RepoReviewSettingPatch {
+  blockTolerance?: BlockTolerance;
+  reviewDraftPrs?: boolean;
 }
 
 export const reviewSettingsQueryKeys = {
@@ -72,15 +79,15 @@ export function useReviewSettingsQuery() {
   return useQuery(reviewSettingsQueryOptions());
 }
 
-export function useSetReviewToleranceMutation() {
+export function useSetReviewSettingMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
       repoFullName,
-      blockTolerance,
+      patch,
     }: {
       repoFullName: string;
-      blockTolerance: BlockTolerance;
+      patch: RepoReviewSettingPatch;
     }): Promise<RepoReviewSettingDto> => {
       const [owner, repo] = splitRepoFullName(repoFullName);
       const res = await fetch(
@@ -88,7 +95,7 @@ export function useSetReviewToleranceMutation() {
         {
           method: "PUT",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ blockTolerance }),
+          body: JSON.stringify(patch),
         },
       );
       if (!res.ok) {

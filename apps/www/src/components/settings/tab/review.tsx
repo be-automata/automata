@@ -12,7 +12,7 @@ import { useUserReposQuery } from "@/queries/user-repo-queries";
 import {
   useClearReviewToleranceMutation,
   useReviewSettingsQuery,
-  useSetReviewToleranceMutation,
+  useSetReviewSettingMutation,
 } from "@/queries/review-settings-queries";
 import { ToleranceMatrix } from "@/components/settings/review-tolerance/tolerance-matrix";
 import { RepoRow } from "@/components/settings/review-tolerance/repo-row";
@@ -32,13 +32,15 @@ interface RepoRowData {
   key: string;
   /** Persisted tolerance in effect (override or the locked default). */
   tolerance: BlockTolerance;
+  /** Whether Automata engages this repo's draft PRs (override or the `true` default). */
+  reviewDraftPrs: boolean;
   hasOverride: boolean;
 }
 
 export function ReviewSettings() {
   const settingsQuery = useReviewSettingsQuery();
   const reposQuery = useUserReposQuery();
-  const setMutation = useSetReviewToleranceMutation();
+  const setMutation = useSetReviewSettingMutation();
   const clearMutation = useClearReviewToleranceMutation();
 
   const [drafts, setDrafts] = useState<Record<string, BlockTolerance>>({});
@@ -49,6 +51,7 @@ export function ReviewSettings() {
     {},
   );
   const [pending, setPending] = useState<PendingLoosen | null>(null);
+  const [savingDraft, setSavingDraft] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState("");
 
   const rows = useMemo<RepoRowData[]>(() => {
@@ -65,6 +68,7 @@ export function ReviewSettings() {
         repoFullName: repo.full_name,
         key,
         tolerance: override?.blockTolerance ?? DEFAULT_TOLERANCE,
+        reviewDraftPrs: override?.reviewDraftPrs ?? true,
         hasOverride: Boolean(override),
       });
     }
@@ -77,6 +81,7 @@ export function ReviewSettings() {
           repoFullName: s.repoFullName,
           key,
           tolerance: s.blockTolerance,
+          reviewDraftPrs: s.reviewDraftPrs,
           hasOverride: true,
         });
       }
@@ -144,7 +149,7 @@ export function ReviewSettings() {
     runMutation(row, () =>
       setMutation.mutateAsync({
         repoFullName: row.repoFullName,
-        blockTolerance: target,
+        patch: { blockTolerance: target },
       }),
     );
 
@@ -152,6 +157,24 @@ export function ReviewSettings() {
     runMutation(row, () =>
       clearMutation.mutateAsync({ repoFullName: row.repoFullName }),
     );
+
+  /** The draft-PR toggle saves immediately (partial patch) — no explicit Save. */
+  async function toggleDraft(
+    row: RepoRowData,
+    reviewDraftPrs: boolean,
+  ): Promise<void> {
+    setSavingDraft((s) => ({ ...s, [row.key]: true }));
+    try {
+      await setMutation.mutateAsync({
+        repoFullName: row.repoFullName,
+        patch: { reviewDraftPrs },
+      });
+    } catch {
+      // useSetReviewSettingMutation toasts the error; the switch reverts on refetch.
+    } finally {
+      setSavingDraft((s) => ({ ...s, [row.key]: false }));
+    }
+  }
 
   function requestSave(row: RepoRowData): void {
     const target = drafts[row.key];
@@ -263,6 +286,7 @@ export function ReviewSettings() {
                     key={row.key}
                     repoFullName={row.repoFullName}
                     tolerance={row.tolerance}
+                    reviewDraftPrs={row.reviewDraftPrs}
                     hasOverride={row.hasOverride}
                     draft={draftFor(row)}
                     expanded={expanded === row.key}
@@ -270,6 +294,7 @@ export function ReviewSettings() {
                     saving={Boolean(saving[row.key])}
                     saved={saved === row.key}
                     saveError={saveErrors[row.key] ?? null}
+                    draftSaving={Boolean(savingDraft[row.key])}
                     onToggle={() =>
                       setExpanded((e) => (e === row.key ? null : row.key))
                     }
@@ -277,6 +302,7 @@ export function ReviewSettings() {
                     onSave={() => requestSave(row)}
                     onDiscard={() => discard(row)}
                     onReset={() => requestReset(row)}
+                    onToggleDraft={(v) => void toggleDraft(row, v)}
                   />
                 ))}
               </div>
