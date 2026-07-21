@@ -81,8 +81,10 @@ export async function upsertRepoReviewSetting({
     updatedByUserId: string | null;
     updatedAt: Date;
   } = { updatedByUserId: updatedByUserId ?? null, updatedAt: new Date() };
-  if (patch.blockTolerance !== undefined) set.blockTolerance = patch.blockTolerance;
-  if (patch.reviewDraftPrs !== undefined) set.reviewDraftPrs = patch.reviewDraftPrs;
+  if (patch.blockTolerance !== undefined)
+    set.blockTolerance = patch.blockTolerance;
+  if (patch.reviewDraftPrs !== undefined)
+    set.reviewDraftPrs = patch.reviewDraftPrs;
 
   const [row] = await db
     .insert(repoReviewSettings)

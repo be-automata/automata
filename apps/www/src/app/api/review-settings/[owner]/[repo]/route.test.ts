@@ -73,7 +73,9 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
   });
 
   it("400 on an invalid tolerance value (rejected before any write)", async () => {
-    const res = await PUT(putReq({ blockTolerance: "catastrophic" }), { params });
+    const res = await PUT(putReq({ blockTolerance: "catastrophic" }), {
+      params,
+    });
     expect(res.status).toBe(400);
     expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
   });
@@ -138,7 +140,10 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
     const res = await DELETE(putReq({ blockTolerance: "error" }), { params });
     expect(res.status).toBe(200);
     expect(removeRepoReviewSetting).toHaveBeenCalledWith(
-      expect.objectContaining({ organizationId: ORG, repoFullName: "acme/widgets" }),
+      expect.objectContaining({
+        organizationId: ORG,
+        repoFullName: "acme/widgets",
+      }),
     );
     const json = (await res.json()) as { removed: boolean };
     expect(json.removed).toBe(true);

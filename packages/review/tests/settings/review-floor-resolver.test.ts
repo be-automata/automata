@@ -29,7 +29,10 @@ describe("resolveApproveFloorPolicy — precedence matrix", () => {
       envPolicy,
     );
     assert.deepEqual(policy, toleranceToPolicy("error"));
-    assert.deepEqual(policy, { blockSeverity: "error", surfaceSeverity: "warning" });
+    assert.deepEqual(policy, {
+      blockSeverity: "error",
+      surfaceSeverity: "warning",
+    });
   });
 
   test("no row + envPolicy → envPolicy", () => {
@@ -37,7 +40,10 @@ describe("resolveApproveFloorPolicy — precedence matrix", () => {
       blockSeverity: "error",
       surfaceSeverity: "warning",
     };
-    assert.deepEqual(resolveApproveFloorPolicy(undefined, envPolicy), envPolicy);
+    assert.deepEqual(
+      resolveApproveFloorPolicy(undefined, envPolicy),
+      envPolicy,
+    );
     assert.deepEqual(resolveApproveFloorPolicy(null, envPolicy), envPolicy);
   });
 

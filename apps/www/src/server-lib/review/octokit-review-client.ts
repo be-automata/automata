@@ -42,7 +42,9 @@ function mapReview(r: {
 }
 
 /** Build a ReviewGitHubClient bound to an App-scoped octokit instance. */
-export function createOctokitReviewClient(octokit: Octokit): ReviewGitHubClient {
+export function createOctokitReviewClient(
+  octokit: Octokit,
+): ReviewGitHubClient {
   return {
     async listReviews(repo, prNumber) {
       const [owner, name] = parseRepoFullName(repo);
@@ -66,7 +68,14 @@ export function createOctokitReviewClient(octokit: Octokit): ReviewGitHubClient 
       });
     },
 
-    async submitReviewWithComments(repo, prNumber, commitSha, verdict, body, comments) {
+    async submitReviewWithComments(
+      repo,
+      prNumber,
+      commitSha,
+      verdict,
+      body,
+      comments,
+    ) {
       const [owner, name] = parseRepoFullName(repo);
       await octokit.rest.pulls.createReview({
         owner,

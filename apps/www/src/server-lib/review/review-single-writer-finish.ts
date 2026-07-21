@@ -1,7 +1,10 @@
 import { env } from "@terragon/env/apps-www";
 import type { DB } from "@terragon/shared/db";
 import type { DBMessage } from "@terragon/shared/db/db-message";
-import { getThreadChat, getThreadMinimal } from "@terragon/shared/model/threads";
+import {
+  getThreadChat,
+  getThreadMinimal,
+} from "@terragon/shared/model/threads";
 import { getAutomation } from "@terragon/shared/model/automations";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { getOctokitForApp } from "@/lib/github";
@@ -131,7 +134,9 @@ export async function handleReviewEffectAtFinish({
         repoFullName,
         prNumber,
       );
-      const terminalText = extractTerminalAgentText(threadChat?.messages ?? null);
+      const terminalText = extractTerminalAgentText(
+        threadChat?.messages ?? null,
+      );
 
       // Resolve ONE approve-floor snapshot for this run, fenced to the thread's
       // org (ADR-036 review floor). Read live from Neon — a dashboard change
@@ -166,7 +171,12 @@ export async function handleReviewEffectAtFinish({
       getPostHogServer().capture({
         distinctId: userId,
         event: "review_single_writer_outcome",
-        properties: { threadId, repoFullName, prNumber, outcome: outcome.outcome },
+        properties: {
+          threadId,
+          repoFullName,
+          prNumber,
+          outcome: outcome.outcome,
+        },
       });
       if (
         outcome.outcome === "degraded_comment" ||

@@ -131,12 +131,15 @@ export async function executeReviewFromIntent(
       // read failure → fall through and post (missed verdict worse than rare dup).
     }
     if (newerAtHead) {
-      logger?.info("review-from-intent: stale intent superseded by review at HEAD", {
-        repoFullName,
-        prNumber,
-        intentCommit: emitted.commit,
-        currentHeadSha,
-      });
+      logger?.info(
+        "review-from-intent: stale intent superseded by review at HEAD",
+        {
+          repoFullName,
+          prNumber,
+          intentCommit: emitted.commit,
+          currentHeadSha,
+        },
+      );
       return { outcome: "skipped_superseded" };
     }
     const staleBody = `_Intended verdict: **${effectiveVerdict}**, reviewed at \`${emitted.commit}\`; the PR has since advanced to \`${currentHeadSha}\`, so this is posted as a COMMENT rather than a formal verdict._\n\n${execIntent.body}`;
@@ -149,13 +152,16 @@ export async function executeReviewFromIntent(
         staleBody,
         [],
       );
-      logger?.info("review-from-intent: posted stale intent as a COMMENT at reviewed commit", {
-        repoFullName,
-        prNumber,
-        intentCommit: emitted.commit,
-        currentHeadSha,
-        intendedVerdict: emitted.verdict,
-      });
+      logger?.info(
+        "review-from-intent: posted stale intent as a COMMENT at reviewed commit",
+        {
+          repoFullName,
+          prNumber,
+          intentCommit: emitted.commit,
+          currentHeadSha,
+          intendedVerdict: emitted.verdict,
+        },
+      );
     } catch (err) {
       const failureReason = err instanceof Error ? err.message : String(err);
       logger?.error("review-from-intent: stale COMMENT post failed", {
@@ -165,7 +171,10 @@ export async function executeReviewFromIntent(
       });
       return { outcome: "post_failed", failureReason, workFailed: true };
     }
-    return { outcome: "posted_stale_comment", intendedVerdict: effectiveVerdict };
+    return {
+      outcome: "posted_stale_comment",
+      intendedVerdict: effectiveVerdict,
+    };
   }
 
   const outcome = await runExecutor({
@@ -231,18 +240,24 @@ async function postDegradedComment(args: {
       body,
       [],
     );
-    args.logger?.error("review-from-intent: DEGRADED — no parseable intent, posted marked COMMENT", {
-      repoFullName: args.repoFullName,
-      prNumber: args.prNumber,
-      reason: args.reason,
-    });
+    args.logger?.error(
+      "review-from-intent: DEGRADED — no parseable intent, posted marked COMMENT",
+      {
+        repoFullName: args.repoFullName,
+        prNumber: args.prNumber,
+        reason: args.reason,
+      },
+    );
   } catch (err) {
-    args.logger?.error("review-from-intent: degraded COMMENT post ALSO failed", {
-      repoFullName: args.repoFullName,
-      prNumber: args.prNumber,
-      reason: args.reason,
-      error: err instanceof Error ? err.message : String(err),
-    });
+    args.logger?.error(
+      "review-from-intent: degraded COMMENT post ALSO failed",
+      {
+        repoFullName: args.repoFullName,
+        prNumber: args.prNumber,
+        reason: args.reason,
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
   }
   return { outcome: "degraded_comment", reason: args.reason, workFailed: true };
 }

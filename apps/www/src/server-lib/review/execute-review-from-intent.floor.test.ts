@@ -100,19 +100,31 @@ describe("executeReviewFromIntent — per-repo approve floor", () => {
   });
 
   it("info tolerance: the SAME approve + info finding is DOWNGRADED to REQUEST_CHANGES", async () => {
-    const { github, res } = await run(approveWith("info"), toleranceToPolicy("info"));
-    expect(res).toMatchObject({ outcome: "posted", verdict: "request_changes" });
+    const { github, res } = await run(
+      approveWith("info"),
+      toleranceToPolicy("info"),
+    );
+    expect(res).toMatchObject({
+      outcome: "posted",
+      verdict: "request_changes",
+    });
     expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
   });
 
   it("default (warning) floor: approve + warning finding is DOWNGRADED to REQUEST_CHANGES", async () => {
     const { github, res } = await run(approveWith("warning"));
-    expect(res).toMatchObject({ outcome: "posted", verdict: "request_changes" });
+    expect(res).toMatchObject({
+      outcome: "posted",
+      verdict: "request_changes",
+    });
     expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
   });
 
   it("error tolerance: approve + warning finding SURFACES as COMMENT (not blocking, not approve)", async () => {
-    const { github, res } = await run(approveWith("warning"), toleranceToPolicy("error"));
+    const { github, res } = await run(
+      approveWith("warning"),
+      toleranceToPolicy("error"),
+    );
     expect(res).toMatchObject({ outcome: "posted", verdict: "comment" });
     // COMMENT routes through submitReviewWithComments, never the verdict path.
     expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
@@ -121,8 +133,14 @@ describe("executeReviewFromIntent — per-repo approve floor", () => {
   });
 
   it("error tolerance: approve + error finding still BLOCKS (REQUEST_CHANGES)", async () => {
-    const { github, res } = await run(approveWith("error"), toleranceToPolicy("error"));
-    expect(res).toMatchObject({ outcome: "posted", verdict: "request_changes" });
+    const { github, res } = await run(
+      approveWith("error"),
+      toleranceToPolicy("error"),
+    );
+    expect(res).toMatchObject({
+      outcome: "posted",
+      verdict: "request_changes",
+    });
     expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
   });
 
@@ -131,10 +149,15 @@ describe("executeReviewFromIntent — per-repo approve floor", () => {
       verdict: "request_changes",
       commit: HEAD,
       summary: "Real bug.",
-      findings: [{ severity: "info", path: "a.ts", line: 3, body: "still blocking" }],
+      findings: [
+        { severity: "info", path: "a.ts", line: 3, body: "still blocking" },
+      ],
     });
     const { github, res } = await run(rc, toleranceToPolicy("error"));
-    expect(res).toMatchObject({ outcome: "posted", verdict: "request_changes" });
+    expect(res).toMatchObject({
+      outcome: "posted",
+      verdict: "request_changes",
+    });
     expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
   });
 
@@ -160,6 +183,9 @@ describe("executeReviewFromIntent — per-repo approve floor", () => {
       currentHeadSha: HEAD,
       terminalText: approveWith("warning"),
     });
-    expect(res).toMatchObject({ outcome: "posted", verdict: "request_changes" });
+    expect(res).toMatchObject({
+      outcome: "posted",
+      verdict: "request_changes",
+    });
   });
 });

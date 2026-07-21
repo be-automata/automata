@@ -119,7 +119,10 @@ describe("review-tolerance booted-stack integration (real DB → resolve → exe
       organizationId: orgId,
       terminalText: emittedApproveWith("warning"),
     });
-    expect(outcome).toMatchObject({ outcome: "posted", verdict: "request_changes" });
+    expect(outcome).toMatchObject({
+      outcome: "posted",
+      verdict: "request_changes",
+    });
     expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
   });
 
@@ -150,7 +153,10 @@ describe("review-tolerance booted-stack integration (real DB → resolve → exe
       organizationId: orgId,
       terminalText: emittedApproveWith("info"),
     });
-    expect(outcome).toMatchObject({ outcome: "posted", verdict: "request_changes" });
+    expect(outcome).toMatchObject({
+      outcome: "posted",
+      verdict: "request_changes",
+    });
     expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
   });
 
@@ -172,7 +178,11 @@ describe("review-tolerance booted-stack integration (real DB → resolve → exe
 
   it("DRAFT-1: default (no row) → intake engages drafts (policy true)", async () => {
     expect(
-      await resolveReviewDraftPolicy({ db, organizationId: orgId, repoFullName: REPO }),
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      }),
     ).toBe(true);
   });
 
@@ -200,7 +210,11 @@ describe("review-tolerance booted-stack integration (real DB → resolve → exe
       patch: { blockTolerance: "error" },
     });
     expect(
-      await resolveReviewDraftPolicy({ db, organizationId: orgId, repoFullName: REPO }),
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      }),
     ).toBe(false);
 
     // Re-enable → engages again on the next webhook.
@@ -211,7 +225,11 @@ describe("review-tolerance booted-stack integration (real DB → resolve → exe
       patch: { reviewDraftPrs: true },
     });
     expect(
-      await resolveReviewDraftPolicy({ db, organizationId: orgId, repoFullName: REPO }),
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      }),
     ).toBe(true);
   });
 });

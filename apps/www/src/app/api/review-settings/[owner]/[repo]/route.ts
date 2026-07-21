@@ -51,7 +51,9 @@ export async function PUT(
   if (body.blockTolerance !== undefined) {
     if (!isBlockTolerance(body.blockTolerance)) {
       return NextResponse.json(
-        { error: `blockTolerance must be one of ${BLOCK_TOLERANCES.join(", ")}` },
+        {
+          error: `blockTolerance must be one of ${BLOCK_TOLERANCES.join(", ")}`,
+        },
         { status: 400 },
       );
     }
@@ -66,7 +68,10 @@ export async function PUT(
     }
     patch.reviewDraftPrs = body.reviewDraftPrs;
   }
-  if (patch.blockTolerance === undefined && patch.reviewDraftPrs === undefined) {
+  if (
+    patch.blockTolerance === undefined &&
+    patch.reviewDraftPrs === undefined
+  ) {
     return NextResponse.json(
       { error: "provide blockTolerance and/or reviewDraftPrs" },
       { status: 400 },

@@ -119,8 +119,12 @@ describe("repo-review-settings (Neon, org-fenced)", () => {
     expect(b?.blockTolerance).toBe("error");
 
     // orgB never sees orgA's row in a list, and vice versa.
-    expect(await listRepoReviewSettings({ db, organizationId: orgA })).toHaveLength(1);
-    expect(await listRepoReviewSettings({ db, organizationId: orgB })).toHaveLength(1);
+    expect(
+      await listRepoReviewSettings({ db, organizationId: orgA }),
+    ).toHaveLength(1);
+    expect(
+      await listRepoReviewSettings({ db, organizationId: orgB }),
+    ).toHaveLength(1);
   });
 
   it("remove deletes the override and reports whether a row was removed", async () => {
@@ -204,7 +208,9 @@ describe("repo-review-settings (Neon, org-fenced)", () => {
     expect(afterDraft.blockTolerance).toBe("info");
 
     // Still exactly one row.
-    expect(await listRepoReviewSettings({ db, organizationId: orgA })).toHaveLength(1);
+    expect(
+      await listRepoReviewSettings({ db, organizationId: orgA }),
+    ).toHaveLength(1);
   });
 
   it("remove is org-fenced: org A cannot delete org B's override", async () => {
