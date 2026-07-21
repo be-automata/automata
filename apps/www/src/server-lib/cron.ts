@@ -41,6 +41,18 @@ const sleep = (ms = 1000) => new Promise((r) => setTimeout(r, ms));
  * slot, so without this the queue never becomes eligible and never drains (S12).
  */
 export async function runStalledTasksCron(): Promise<void> {
+  // ADR-036 GAP-1 backstop: post reviews for terminal PR review-threads that never
+  // reached the finish-hook (hung → force-stopped, or dropped finish event). Runs on
+  // this hourly recovery cron; no-op unless REVIEW_SINGLE_WRITER is on. Dynamic import
+  // (like the other runners) so the heavy review deps don't poison the test harness's
+  // eager cron-module load. Fail-soft — a sweep error must not skip stalled recovery.
+  try {
+    const { runReviewSweep } = await import("@/server-lib/review/review-sweep");
+    await runReviewSweep();
+  } catch (error) {
+    console.error("[cron:stalled] review sweep failed (non-fatal)", error);
+  }
+
   const stalledThreads = await getStalledThreads({ db });
   console.log(`[cron:stalled] found ${stalledThreads.length} stalled threads`);
   if (stalledThreads.length === 0) {
