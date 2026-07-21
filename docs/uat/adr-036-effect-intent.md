@@ -215,3 +215,8 @@ Read the assembled seam (origin/main a03479f) against the 6 must-verify focus ar
 
 **Boot-coder's at flag-flip (not code-verifiable):** the live curl-401/no-credential artifact + the fresh-run "agent posts 0 / executor posts 1" forensics.
 **Close-out from here:** deploy dark → box preflight → flip → fresh-run flag-flip gate + S1-S3 single-writer regression + S10/S11/S13/S14.
+
+### Phase-2 tracked post-freeze follow-ups (dispositions agreed, none gate the flip)
+1. **getThreadChat/getThreadMinimal outside the executor try** (review-single-writer-finish.ts:97,115) → post-acceptance restructure: wrap the lookups+executor in one try with the reconciler-behind ALWAYS running, so a lookup blip still converges. Deferred (frozen code untouched pre-flip; dark deploy doesn't enter the branch; sweep backstops). Owner: tenancy-coder.
+2. **rev-3 skill-path HOME-portability** — the pilot HOME hardcode won't port to a customer box; TODO'd at seed-pilot-mirror.ts + the preflight. **Pre-Somnio onboarding item**, not pre-pilot. Owner: tenancy-coder / boot-coder (real resolution path).
+3. **PostHog alert on `review_single_writer_work_failed`** — **PRE-RELIANCE OPS action.** The code EMITS the signal (+ console.error); paging only works once an alert is wired on that event. During dark/acceptance we watch logs; before RELYING on WorkFailed paging in steady state, the alert must exist. Owner: team-lead/ops.
