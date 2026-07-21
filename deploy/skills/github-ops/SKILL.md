@@ -18,7 +18,12 @@ and there is **no GitHub token in your environment**, so you cannot post to GitH
 push. Obtain the diff yourself with git:
 
 - `git rev-parse HEAD` — the commit SHA you are reviewing (put it in the `commit` field).
-- `git diff origin/<base>...HEAD` (or `git diff HEAD~1...HEAD` if base is unknown) — the change under review.
+- `git diff origin/<base>...HEAD` — the change under review, where `<base>` is the PR's
+  base branch (named in your task instruction). The base ref is pre-fetched to
+  `origin/<base>` and the clone is deepened to the merge-base, so this three-dot diff
+  resolves OFFLINE (no gh, no token). Do NOT use `git diff HEAD~1...HEAD` — the clone is
+  shallow (head-only) and HEAD~1 is the wrong delta for a re-review. If you genuinely
+  cannot obtain a diff (base ref missing), say so and choose `comment`.
 - `Read`/`Grep`/`Glob` — inspect any file at HEAD, not just the diffed lines.
 
 Do **not** attempt `gh` (it is denied and you have no credentials) and do **not**

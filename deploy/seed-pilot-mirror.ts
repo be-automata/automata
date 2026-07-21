@@ -181,7 +181,7 @@ async function main() {
             `You are running as a REVIEW agent: you have NO gh and NO GitHub token, so you cannot post to GitHub. You deliver your verdict by EMITTING it as your FINAL message — a single fenced \`\`\`json block with EXACTLY this shape:\n` +
             `{ "verdict": "approve" | "request_changes" | "comment", "commit": "<the HEAD sha you reviewed, from \`git rev-parse HEAD\`>", "summary": "<verdict rationale>", "findings": [ { "severity": "info" | "warning" | "error" | "critical", "path": "<file>", "line": <number>, "body": "<one concrete finding>", "quote": "<verbatim source line(s) at path:line, from a fresh Read at HEAD>" } ] }\n` +
             `The control plane posts your review exactly once from that block.\n\n` +
-            `First, Read the full review methodology and rules at /Users/senior/.claude/skills/github-ops/SKILL.md and follow it (verify-before-block quote rules, severity→verdict mapping, the six review dimensions). Use \`git diff\` and Read/Grep/Glob to inspect the diff and the files at HEAD. Do NOT run gh. Emit the fenced-json block exactly once, then stop.`,
+            `First, Read the full review methodology and rules at /Users/senior/.claude/skills/github-ops/SKILL.md and follow it (verify-before-block quote rules, severity→verdict mapping, the six review dimensions). Compute the PR delta with \`git diff origin/main...HEAD\` (the base branch is \`main\`; its ref is pre-fetched + deepened to the merge-base so this resolves OFFLINE) and Read/Grep/Glob to inspect files at HEAD. Do NOT use \`git diff HEAD~1...HEAD\` (the clone is shallow) and do NOT run gh. Emit the fenced-json block exactly once, then stop.`,
         ),
       },
     },

@@ -1,5 +1,7 @@
 import { env } from "@terragon/env/apps-www";
+import { db } from "@/lib/db";
 import { getInstallationToken } from "@terragon/shared/github-app";
+import { getThreadMinimal } from "@terragon/shared/model/threads";
 import { parseRepoFullName } from "@/lib/github";
 import {
   mintDaemonToken,
@@ -74,6 +76,13 @@ export interface AgentRunInput {
   threadChatId: string;
   repoFullName: string;
   branch: string;
+  /**
+   * The PR's base branch (thread.repoBaseBranchName). ADR-036 BUG-EXEC-02: the worker
+   * (provision.ts) shallow-fetches `origin/<baseBranch>` + deepens to the merge-base
+   * so the review agent can run `git diff origin/<baseBranch>...HEAD` OFFLINE (no
+   * gh/token). Undefined → provision skips the base fetch (degrades to head-only).
+   */
+  baseBranch?: string;
   /** www's public base URL the daemon calls back to (events + next-message). */
   daemonCallbackUrl: string;
   /** Short-lived, installation-scoped GitHub token for the clone (x-access-token). */
@@ -133,15 +142,22 @@ export async function dispatchAgentRun({
   }
 
   const [owner, repo] = parseRepoFullName(repoFullName);
-  const [installationToken, daemonToken] = await Promise.all([
+  const [installationToken, daemonToken, thread] = await Promise.all([
     getInstallationToken(owner, repo),
     mintDaemonToken({ userId, threadId, threadChatId, name: runKey }),
+    getThreadMinimal({ db, userId, threadId }),
   ]);
   const input: AgentRunInput = {
     threadId,
     threadChatId,
     repoFullName,
     branch,
+    // Base branch for the offline re-review diff (BUG-EXEC-02). null-safe: undefined
+    // when the base equals the head (nothing to fetch) → provision skips.
+    baseBranch:
+      thread?.repoBaseBranchName && thread.repoBaseBranchName !== branch
+        ? thread.repoBaseBranchName
+        : undefined,
     daemonCallbackUrl: nonLocalhostPublicAppUrl(),
     installationToken,
     daemonToken,
