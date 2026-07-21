@@ -10,6 +10,7 @@ import {
   Bot,
   Package,
   CreditCard,
+  ShieldCheck,
 } from "lucide-react";
 import { useFeatureFlag } from "@/hooks/use-feature-flag";
 import { useRealtimeUser } from "@/hooks/useRealtime";
@@ -45,6 +46,11 @@ export function SettingsLayout({ children }: { children: React.ReactNode }) {
       href: "/settings/agent",
       label: "Agent",
       icon: <Bot className="w-4 h-4" />,
+    },
+    {
+      href: "/settings/review",
+      label: "PR Review",
+      icon: <ShieldCheck className="w-4 h-4" />,
     },
     {
       href: "/settings/integrations",
