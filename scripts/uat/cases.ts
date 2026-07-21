@@ -2,6 +2,7 @@
 import {
   P, mk, CaseResult, poll, sleep, botReviews, noDupMax, botCommentsSince,
   stageFixturePR, pushFixContent, PARTIAL_FIX, FULL_FIX, postComment, cleanup, ghJson, sh,
+  stageMultiFilePR, pushMfAFix,
 } from "./lib";
 
 const nowISO = () => new Date().toISOString();
@@ -204,6 +205,52 @@ export async function S12(N = 4): Promise<CaseResult> {
     return fail(r, `burst reliability: only ${answered}/${N} mention replies within window — ${N - answered} unanswered (see docs/uat S12: over-capacity work queues and never drains)`);
   } catch (e: any) { return fail(r, `error: ${e.message}`); }
   finally { for (const i of issues) cleanup({ issues: [i] }); }
+}
+
+// S15 (BUG-EXEC-02 regression guard): multi-file re-review must still block on a defect in an
+// UNTOUCHED file. Opened PR = mf-a (off-by-one) + mf-b (secret-log), both flagged. Synchronize =
+// partial fix of mf-a ONLY (commit does not touch mf-b). A re-review that lacks the base delta
+// sees only the latest commit (mf-a, now clean) and can FALSE-APPROVE, missing mf-b. Correct
+// behavior: still CHANGES_REQUESTED, naming mf-b. PRE base-fetch-fix this FAILS (the false-approve
+// / missed-delta is the observed baseline); POST-fix this PASSES. Permanent guard against the
+// diff-gap reintroducing. See docs/uat/adr-036-effect-intent.md "BUG-EXEC-02 RE-RUN TEST DESIGN".
+export async function S15(): Promise<CaseResult> {
+  const r = mk("S15", "multi-file partial-fix re-review must still block on the untouched-file defect (BUG-EXEC-02 guard)");
+  let f;
+  try {
+    f = stageMultiFilePR("s15");
+    r.evidence = { pr: f.pr, openedSha: f.sha };
+    // opened → expect CR naming both defects (both files are new in the single PR commit)
+    const opened = await poll(() => botReviews(f.pr),
+      (rs) => rs.some((x) => x.commit_id === f.sha && (x.state === "CHANGES_REQUESTED" || x.state === "APPROVED" || x.state === "COMMENTED")));
+    const openedV = opened.find((x) => x.commit_id === f.sha);
+    (r.evidence as any).openedVerdict = openedV?.state ?? "none";
+    if (openedV?.state !== "CHANGES_REQUESTED")
+      r.reasons.push(`NOTE: opened verdict was ${openedV?.state ?? "none"} (expected CR on both defects) — the guard is the synchronize assertion below`);
+
+    // synchronize: partial-fix mf-a ONLY; mf-b's secret-log remains, and this commit does not touch mf-b
+    const sha2 = pushMfAFix(f);
+    (r.evidence as any).partialHead = sha2;
+    const revs2 = await poll(() => botReviews(f.pr), (rs) => rs.some((x) => x.commit_id === sha2 && !x.dismissed_at));
+    const v2 = revs2.filter((x) => x.commit_id === sha2 && !x.dismissed_at);
+    const verdict = v2.map((x) => x.state).sort().join("+") || "none";
+    const cr2 = v2.filter((x) => x.state === "CHANGES_REQUESTED");
+    const catchesB = cr2.some((x) => /mf-b|logkey|console\.log|secret|api key/i.test(x.body));
+    (r.evidence as any).partialVerdict = verdict;
+    (r.evidence as any).catchesMfB = catchesB;
+
+    if (cr2.length >= 1 && catchesB)
+      return pass(r, `re-review CORRECTLY blocked on the untouched-file defect (mf-b) — verdict ${verdict}`,
+        "BUG-EXEC-02 base-diff working: the review saw mf-b via base...HEAD despite the fix commit not touching it");
+
+    // Not a correct still-CR → the false-approve / missed-delta is OBSERVED. This is the PRE-FIX baseline (expected FAIL).
+    const mode = verdict.includes("APPROVED") ? "FALSE-APPROVE (blessed a PR whose mf-b secret-log is unaddressed)"
+      : cr2.length >= 1 ? "CR-but-did-not-name-mf-b (missed the untouched-file defect)"
+      : `no-block (verdict ${verdict})`;
+    return fail(r, `BUG-EXEC-02 OBSERVED at re-review: ${mode}`,
+      "PRE-FIX baseline: the base-less agent could not see mf-b as part of base...HEAD → missed the untouched-file defect. Expected to FLIP to PASS once the worker base-fetch fix lands.");
+  } catch (e: any) { return fail(r, `error: ${e.message}`); }
+  finally { if (f) cleanup(f); }
 }
 
 // Inline-thread-surface cases: exist as self-reporting SKIPPED.

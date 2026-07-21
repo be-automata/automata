@@ -9,7 +9,7 @@ import { P, preflight, CaseResult, poll, botReviews, stageFixturePR, pushFixCont
 import * as C from "./cases";
 import { writeFileSync, mkdirSync } from "node:fs";
 
-const ALL = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S12", "S10", "S11", "S13", "S14"];
+const ALL = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S12", "S15", "S10", "S11", "S13", "S14"];
 const args = process.argv.slice(2);
 if (args.includes("--list")) { console.log(ALL.join(" ")); process.exit(0); }
 const want = new Set(args.filter((a) => !a.startsWith("--")).map((a) => a.toUpperCase()));
@@ -38,6 +38,9 @@ const wants = (id: string) => runAll || want.has(id);
 
   // S12 — its own burst issues.
   if (wants("S12")) add(await C.S12());
+
+  // S15 — its own multi-file PR (BUG-EXEC-02 false-approve regression guard).
+  if (wants("S15")) add(await C.S15());
 
   // Mention/command cases that need a PR context — one shared, driven through states.
   if (["S4", "S5", "S7", "S8", "S9"].some(wants)) {

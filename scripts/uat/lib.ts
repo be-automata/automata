@@ -148,6 +148,55 @@ export const FULL_FIX = `export function isAdult(age: number): boolean {
 }
 `; // off-by-one fixed, attestation removed
 
+// ---------- multi-file false-approve fixture (S15 / BUG-EXEC-02 regression guard) ----------
+// Two files, each with a distinct defect. The synchronize fixes ONLY mf-a in a commit that does
+// not touch mf-b — so a re-review that lacks the base delta (BUG-EXEC-02) sees only the latest
+// commit (mf-a, now clean) and can FALSE-APPROVE, missing mf-b's still-present secret-log. With
+// the base fetched, base...HEAD shows BOTH files and the review must still block on mf-b.
+const MF_DIR = "scripts/uat/fixtures";
+export const MF_A_DEFECTIVE = `export function isAdult(age: number): boolean {
+  return age > 18; // BUG: off-by-one, should be >= 18
+}
+`;
+export const MF_A_FIXED = `export function isAdult(age: number): boolean {
+  return age >= 18;
+}
+`;
+export const MF_B_DEFECTIVE = `export function logKey(k: string): void {
+  console.log("API key:", k); // SECURITY: logs a secret
+}
+`;
+// Stage a 2-file PR (mf-a + mf-b both defective) in one commit → opened review sees both.
+export function stageMultiFilePR(slug: string): Fixture {
+  const branch = `uat/adr036-${slug}-${P.RUN_ID}`;
+  const wt = `/tmp/uat-wt-${slug}-${P.RUN_ID}`;
+  sh(`git -C . fetch origin ${P.BASE} --quiet`, { allowFail: true });
+  const baseBefore = sh(`git ls-remote origin refs/heads/${P.BASE}`).split(/\s+/)[0];
+  sh(`rm -rf ${wt}; git worktree add --detach ${wt} origin/${P.BASE} --quiet`);
+  sh(`mkdir -p ${wt}/${MF_DIR}`);
+  execSync(`cat > ${wt}/${MF_DIR}/mf-a.ts`, { input: MF_A_DEFECTIVE });
+  execSync(`cat > ${wt}/${MF_DIR}/mf-b.ts`, { input: MF_B_DEFECTIVE });
+  sh(`git -C ${wt} add -f ${MF_DIR}/mf-a.ts ${MF_DIR}/mf-b.ts`);
+  sh(`git -C ${wt} -c user.name=uat -c user.email=uat@local commit -q -m "Add age + key-logging helpers (${P.RUN_ID})"`);
+  const sha = sh(`git -C ${wt} rev-parse HEAD`);
+  sh(`git -C ${wt} push origin HEAD:refs/heads/${branch}`);
+  const onOrigin = sh(`git ls-remote origin refs/heads/${branch}`).split(/\s+/)[0];
+  const baseAfter = sh(`git ls-remote origin refs/heads/${P.BASE}`).split(/\s+/)[0];
+  if (onOrigin !== sha) throw new Error(`branch push failed for ${branch}`);
+  if (baseAfter !== baseBefore) throw new Error(`SAFETY: ${P.BASE} changed during fixture push — ABORT`);
+  const url = sh(`gh pr create --repo ${P.REPO} --base ${P.BASE} --head ${branch} --title ${JSON.stringify(`Add age + key helpers [${P.RUN_ID}]`)} --body ${JSON.stringify("Adds isAdult(age) in mf-a.ts and logKey(k) in mf-b.ts under scripts/uat/fixtures. Please review both files for correctness and safety.")}`);
+  const pr = Number(url.match(/(\d+)\s*$/)?.[1]);
+  return { pr, branch, sha, wt, file: `${MF_DIR}/mf-a.ts` };
+}
+// Push a partial fix touching ONLY mf-a; mf-b's defect is left, and the commit does not touch mf-b.
+export function pushMfAFix(f: Fixture): string {
+  execSync(`cat > ${f.wt}/${MF_DIR}/mf-a.ts`, { input: MF_A_FIXED });
+  sh(`git -C ${f.wt} add -f ${MF_DIR}/mf-a.ts`);
+  sh(`git -C ${f.wt} -c user.name=uat -c user.email=uat@local commit -q -m "Fix isAdult off-by-one in mf-a"`);
+  sh(`git -C ${f.wt} push origin HEAD:refs/heads/${f.branch}`);
+  return sh(`git -C ${f.wt} rev-parse HEAD`);
+}
+
 // ---------- cleanup (idempotent) ----------
 export function cleanup(f: Partial<Fixture> & { issues?: number[] }): void {
   if (f.pr) sh(`gh pr close ${f.pr} --repo ${P.REPO} --comment "Closing UAT artifact." --delete-branch`, { allowFail: true });
