@@ -48,6 +48,7 @@ describe("GET /api/review-settings", () => {
         organizationId: ORG,
         repoFullName: "acme/widgets",
         blockTolerance: "info",
+        reviewDraftPrs: false,
         updatedByUserId: USER,
         createdAt: new Date(),
         updatedAt: new Date("2026-07-20T00:00:00Z"),
@@ -58,10 +59,15 @@ describe("GET /api/review-settings", () => {
       expect.objectContaining({ organizationId: ORG }),
     );
     const json = (await res.json()) as {
-      settings: Array<{ repoFullName: string; blockTolerance: string }>;
+      settings: Array<{
+        repoFullName: string;
+        blockTolerance: string;
+        reviewDraftPrs: boolean;
+      }>;
     };
     expect(json.settings).toHaveLength(1);
     expect(json.settings[0]!.repoFullName).toBe("acme/widgets");
     expect(json.settings[0]!.blockTolerance).toBe("info");
+    expect(json.settings[0]!.reviewDraftPrs).toBe(false);
   });
 });

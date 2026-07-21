@@ -8,6 +8,7 @@ import {
 } from "@/lib/github";
 import { getGithubPR } from "@terragon/shared/model/github";
 import { handleAppMention } from "./handle-app-mention";
+import { resolveReviewDraftPolicy } from "@/server-lib/review/resolve-review-draft-policy";
 import {
   isAppMentioned,
   getDiffContextStr,
@@ -159,12 +160,22 @@ async function handlePullRequestAutomation(
     );
     return;
   }
-  // Check filter conditions
-  if (event.pull_request.draft && !config.filter.includeDraftPRs) {
-    console.log(
-      `Skipping automation ${automation.id} for draft PR #${prNumber} in ${repoFullName}`,
-    );
-    return;
+  // Draft-PR gate. Automata works on drafts by DEFAULT; a repo is opted out via
+  // the dashboard per-repo setting (or, legacy, the automation's includeDraftPRs
+  // filter). Resolved live so a dashboard change applies to the next webhook.
+  if (event.pull_request.draft) {
+    const reviewDrafts = await resolveReviewDraftPolicy({
+      db,
+      organizationId: automation.organizationId,
+      repoFullName,
+      automationIncludeDraftPrs: config.filter.includeDraftPRs,
+    });
+    if (!reviewDrafts) {
+      console.log(
+        `Skipping automation ${automation.id} for draft PR #${prNumber} in ${repoFullName} (repo draft policy = ignore)`,
+      );
+      return;
+    }
   }
   const prAuthorUserName = event.pull_request.user?.login;
   // Unconditional routing (mirror parity): match every PR regardless of author.

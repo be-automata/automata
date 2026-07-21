@@ -28,6 +28,7 @@ export async function GET(): Promise<NextResponse> {
     settings: rows.map((r) => ({
       repoFullName: r.repoFullName,
       blockTolerance: r.blockTolerance,
+      reviewDraftPrs: r.reviewDraftPrs,
       updatedAt: r.updatedAt,
     })),
   });

@@ -1410,7 +1410,14 @@ export const repoReviewSettings = pgTable(
     /** Lowercased 'owner/name' slug — GitHub slugs are case-insensitive. */
     repoFullName: text("repo_full_name").notNull(),
     /** 'info' | 'warning' | 'error' — the lowest severity that blocks. */
-    blockTolerance: text("block_tolerance").notNull(),
+    blockTolerance: text("block_tolerance").notNull().default("warning"),
+    /**
+     * Whether Automata engages DRAFT pull requests for this repo. Default true —
+     * Automata works on drafts by default; an operator sets this false to have it
+     * ignore drafts until they are marked ready. Enforced at the webhook intake
+     * gate, so a draft-skipped PR never dispatches a run at all.
+     */
+    reviewDraftPrs: boolean("review_draft_prs").notNull().default(true),
     /** Provenance: the user who last wrote this override (audit trail). */
     updatedByUserId: text("updated_by_user_id").references(() => user.id, {
       onDelete: "set null",

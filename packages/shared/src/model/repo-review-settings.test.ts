@@ -6,6 +6,7 @@ import { createOrganization } from "./organizations";
 import {
   getRepoReviewSetting,
   setRepoReviewSetting,
+  upsertRepoReviewSetting,
   removeRepoReviewSetting,
   listRepoReviewSettings,
 } from "./repo-review-settings";
@@ -151,6 +152,59 @@ describe("repo-review-settings (Neon, org-fenced)", () => {
         repoFullName: "acme/widgets",
       }),
     ).toBe(false);
+  });
+
+  it("defaults: a tolerance-only insert leaves reviewDraftPrs TRUE", async () => {
+    const row = await setRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      blockTolerance: "error",
+    });
+    expect(row.reviewDraftPrs).toBe(true);
+    expect(row.blockTolerance).toBe("error");
+  });
+
+  it("defaults: a draft-only insert leaves blockTolerance at 'warning'", async () => {
+    const row = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { reviewDraftPrs: false },
+    });
+    expect(row.blockTolerance).toBe("warning");
+    expect(row.reviewDraftPrs).toBe(false);
+  });
+
+  it("partial upsert: writing one field PRESERVES the other's stored value", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { blockTolerance: "error", reviewDraftPrs: false },
+    });
+    // Update ONLY the tolerance — draft policy must survive.
+    const afterTol = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { blockTolerance: "info" },
+    });
+    expect(afterTol.blockTolerance).toBe("info");
+    expect(afterTol.reviewDraftPrs).toBe(false);
+
+    // Update ONLY the draft policy — tolerance must survive.
+    const afterDraft = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { reviewDraftPrs: true },
+    });
+    expect(afterDraft.reviewDraftPrs).toBe(true);
+    expect(afterDraft.blockTolerance).toBe("info");
+
+    // Still exactly one row.
+    expect(await listRepoReviewSettings({ db, organizationId: orgA })).toHaveLength(1);
   });
 
   it("remove is org-fenced: org A cannot delete org B's override", async () => {

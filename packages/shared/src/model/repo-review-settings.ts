@@ -53,11 +53,63 @@ export async function getRepoReviewSetting({
 }
 
 /**
- * Upsert the tolerance override for one `(org, repo)`. Conflict target is the
- * `(organization_id, repo_full_name)` unique index, so a repeat write updates in
- * place. Returns the stored row. `blockTolerance` MUST be pre-validated by the
- * caller (the route validates against `BLOCK_TOLERANCES`).
+ * Upsert one or more fields of the `(org, repo)` review-settings row. Conflict
+ * target is the `(organization_id, repo_full_name)` unique index, so a repeat
+ * write updates in place. Only the fields present in `patch` are written — an
+ * absent field keeps its stored value (or its column default on first insert:
+ * `blockTolerance` → 'warning', `reviewDraftPrs` → true). Returns the stored row.
+ * `blockTolerance`, when present, MUST be pre-validated by the caller (the route
+ * validates against `BLOCK_TOLERANCES`).
  */
+export async function upsertRepoReviewSetting({
+  db,
+  organizationId,
+  repoFullName,
+  patch,
+  updatedByUserId,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  patch: { blockTolerance?: string; reviewDraftPrs?: boolean };
+  updatedByUserId?: string | null;
+}): Promise<RepoReviewSetting> {
+  const repo = normalizeRepo(repoFullName);
+  const set: {
+    blockTolerance?: string;
+    reviewDraftPrs?: boolean;
+    updatedByUserId: string | null;
+    updatedAt: Date;
+  } = { updatedByUserId: updatedByUserId ?? null, updatedAt: new Date() };
+  if (patch.blockTolerance !== undefined) set.blockTolerance = patch.blockTolerance;
+  if (patch.reviewDraftPrs !== undefined) set.reviewDraftPrs = patch.reviewDraftPrs;
+
+  const [row] = await db
+    .insert(repoReviewSettings)
+    .values({
+      organizationId,
+      repoFullName: repo,
+      // Omitted fields fall to the column defaults on first insert.
+      ...(patch.blockTolerance !== undefined
+        ? { blockTolerance: patch.blockTolerance }
+        : {}),
+      ...(patch.reviewDraftPrs !== undefined
+        ? { reviewDraftPrs: patch.reviewDraftPrs }
+        : {}),
+      updatedByUserId: updatedByUserId ?? null,
+    })
+    .onConflictDoUpdate({
+      target: [
+        repoReviewSettings.organizationId,
+        repoReviewSettings.repoFullName,
+      ],
+      set,
+    })
+    .returning();
+  return row!;
+}
+
+/** Convenience: set only the tolerance, preserving any draft-policy field. */
 export async function setRepoReviewSetting({
   db,
   organizationId,
@@ -71,28 +123,13 @@ export async function setRepoReviewSetting({
   blockTolerance: string;
   updatedByUserId?: string | null;
 }): Promise<RepoReviewSetting> {
-  const repo = normalizeRepo(repoFullName);
-  const [row] = await db
-    .insert(repoReviewSettings)
-    .values({
-      organizationId,
-      repoFullName: repo,
-      blockTolerance,
-      updatedByUserId: updatedByUserId ?? null,
-    })
-    .onConflictDoUpdate({
-      target: [
-        repoReviewSettings.organizationId,
-        repoReviewSettings.repoFullName,
-      ],
-      set: {
-        blockTolerance,
-        updatedByUserId: updatedByUserId ?? null,
-        updatedAt: new Date(),
-      },
-    })
-    .returning();
-  return row!;
+  return upsertRepoReviewSetting({
+    db,
+    organizationId,
+    repoFullName,
+    patch: { blockTolerance },
+    updatedByUserId,
+  });
 }
 
 /**

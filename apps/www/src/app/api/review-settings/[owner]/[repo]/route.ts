@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getTenantContextOrNull } from "@/lib/auth-server";
 import {
-  setRepoReviewSetting,
+  upsertRepoReviewSetting,
   removeRepoReviewSetting,
 } from "@terragon/shared/model/repo-review-settings";
 import {
@@ -40,17 +40,35 @@ export async function PUT(
     );
   }
 
-  let body: { blockTolerance?: unknown };
+  let body: { blockTolerance?: unknown; reviewDraftPrs?: unknown };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid body" }, { status: 400 });
   }
-  if (!isBlockTolerance(body.blockTolerance)) {
+
+  const patch: { blockTolerance?: string; reviewDraftPrs?: boolean } = {};
+  if (body.blockTolerance !== undefined) {
+    if (!isBlockTolerance(body.blockTolerance)) {
+      return NextResponse.json(
+        { error: `blockTolerance must be one of ${BLOCK_TOLERANCES.join(", ")}` },
+        { status: 400 },
+      );
+    }
+    patch.blockTolerance = body.blockTolerance;
+  }
+  if (body.reviewDraftPrs !== undefined) {
+    if (typeof body.reviewDraftPrs !== "boolean") {
+      return NextResponse.json(
+        { error: "reviewDraftPrs must be a boolean" },
+        { status: 400 },
+      );
+    }
+    patch.reviewDraftPrs = body.reviewDraftPrs;
+  }
+  if (patch.blockTolerance === undefined && patch.reviewDraftPrs === undefined) {
     return NextResponse.json(
-      {
-        error: `blockTolerance must be one of ${BLOCK_TOLERANCES.join(", ")}`,
-      },
+      { error: "provide blockTolerance and/or reviewDraftPrs" },
       { status: 400 },
     );
   }
@@ -58,11 +76,11 @@ export async function PUT(
   const { owner, repo } = await params;
   const repoFullName = repoFromParams(owner, repo);
 
-  const row = await setRepoReviewSetting({
+  const row = await upsertRepoReviewSetting({
     db,
     organizationId: ctx.organizationId,
     repoFullName,
-    blockTolerance: body.blockTolerance,
+    patch,
     updatedByUserId: ctx.userId,
   });
 
@@ -73,6 +91,7 @@ export async function PUT(
       organizationId: ctx.organizationId,
       repoFullName: row.repoFullName,
       blockTolerance: row.blockTolerance,
+      reviewDraftPrs: row.reviewDraftPrs,
     },
   });
 
@@ -80,6 +99,7 @@ export async function PUT(
     setting: {
       repoFullName: row.repoFullName,
       blockTolerance: row.blockTolerance,
+      reviewDraftPrs: row.reviewDraftPrs,
       updatedAt: row.updatedAt,
     },
   });
