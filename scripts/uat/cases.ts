@@ -235,13 +235,25 @@ export async function S15(): Promise<CaseResult> {
     const v2 = revs2.filter((x) => x.commit_id === sha2 && !x.dismissed_at);
     const verdict = v2.map((x) => x.state).sort().join("+") || "none";
     const cr2 = v2.filter((x) => x.state === "CHANGES_REQUESTED");
-    const catchesB = cr2.some((x) => /mf-b|logkey|console\.log|secret|api key/i.test(x.body));
+    // MECHANISM guard (learned 2026-07-21): the agent ADMITS in the body when it could not compute the
+    // base diff ("origin/main is not present", "could not compute git diff origin/main...HEAD"). A CR that
+    // names mf-b while ALSO admitting the diff failed caught mf-b by CONTENT-READ LUCK (reading mf-b.ts at
+    // HEAD), NOT via base...HEAD — that is a FALSE-PASS of this guard (observed on PR#30 when the deploy was
+    // ineffective). A TRUE mechanism pass = CR names mf-b AND the body does NOT admit the diff failed.
+    const diffFailed = (b: string) => /could not compute|origin\/main is not present|not present in this clone|not present locally|base ref.*(unobtainable|cannot|fails)|git fetch.*(timed out|blocked)|no token/i.test(b);
+    const crNamingB = cr2.filter((x) => /mf-b|logkey|console\.log|secret|api key/i.test(x.body));
+    const mechanismProven = crNamingB.filter((x) => !diffFailed(x.body));
     (r.evidence as any).partialVerdict = verdict;
-    (r.evidence as any).catchesMfB = catchesB;
+    (r.evidence as any).catchesMfB = crNamingB.length >= 1;
+    (r.evidence as any).baseDiffAdmittedFailed = crNamingB.some((x) => diffFailed(x.body));
+    (r.evidence as any).mechanismProven = mechanismProven.length >= 1;
 
-    if (cr2.length >= 1 && catchesB)
-      return pass(r, `re-review CORRECTLY blocked on the untouched-file defect (mf-b) — verdict ${verdict}`,
-        "BUG-EXEC-02 base-diff working: the review saw mf-b via base...HEAD despite the fix commit not touching it");
+    if (mechanismProven.length >= 1)
+      return pass(r, `re-review blocked on the untouched-file defect (mf-b) via a WORKING base diff — verdict ${verdict}`,
+        "BUG-EXEC-02 base-diff mechanism PROVEN: blocking review names mf-b AND does not admit a diff failure (base...HEAD resolved)");
+    if (crNamingB.length >= 1)
+      return fail(r, `MECHANISM NOT PROVEN — false-pass guarded: re-review named mf-b but the CR body ADMITS the base diff failed (origin/main absent)`,
+        "mf-b was caught by CONTENT-READ luck (reading mf-b.ts at HEAD), NOT base...HEAD. S15 outcome green / mechanism red — BUG-EXEC-02 still open. This is exactly the false-pass the mechanism bar guards against.");
 
     // Not a correct still-CR → the false-approve / missed-delta is OBSERVED. This is the PRE-FIX baseline (expected FAIL).
     const mode = verdict.includes("APPROVED") ? "FALSE-APPROVE (blessed a PR whose mf-b secret-log is unaddressed)"
