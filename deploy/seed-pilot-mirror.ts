@@ -37,6 +37,7 @@ import { getOrganizationOwnerUserId } from "../packages/shared/src/model/organiz
 import { bindGithubInstallationToOrg } from "../packages/shared/src/model/github-installation";
 import {
   createAutomation,
+  updateAutomation,
   getAutomations,
 } from "../packages/shared/src/model/automations";
 import { DBUserMessage } from "../packages/shared/src/db/db-message";
@@ -120,108 +121,106 @@ async function main() {
     userId: ownerUserId,
     organizationId: org.id,
   });
-  const existingNames = new Set(existing.map((a) => a.name));
+  const existingByName = new Map(existing.map((a) => [a.name, a]));
 
-  if (!existingNames.has(PR_AUTOMATION_NAME)) {
-    await createAutomation({
-      db,
-      userId: ownerUserId,
-      accessTier: "pro",
-      organizationId: org.id,
-      automation: {
-        name: PR_AUTOMATION_NAME,
-        triggerType: "pull_request",
-        triggerConfig: {
-          filter: { includeAllAuthors: true, includeDraftPRs: false },
-          on: { open: true, update: true },
-        },
-        repoFullName,
-        branchName: "main",
-        action: {
-          type: "user_message",
-          config: {
-            // ADR-036 single-writer channel. The instruction INLINES the minimal
-            // wire contract (verdict enum + fenced-json + commit field) so a run
-            // that fails to Read the methodology file still emits something the
-            // parser (emittedReviewIntentSchema) accepts — the SKILL.md is the deep
-            // methodology, the instruction is the contract.
-            // TODO(rev3-skill-path-portable): the SKILL.md path is hardcoded to the
-            // pilot box HOME (/Users/senior). This is read TEXT (no $HOME expansion),
-            // so a customer box (different HOME, ADR-002) breaks it — rev-3 stamps
-            // the run's HOME-resolved skill path in here, or the daemon exposes a
-            // SKILL_DIR env the instruction references.
-            message: userMessage(
-              `A pull request was opened or updated in ${repoFullName}. Perform a substantive PR review.\n\n` +
-                `You are running as a REVIEW agent: you have NO gh and NO GitHub token, so you cannot post to GitHub. You deliver your verdict by EMITTING it as your FINAL message — a single fenced \`\`\`json block with EXACTLY this shape:\n` +
-                `{ "verdict": "approve" | "request_changes" | "comment", "commit": "<the HEAD sha you reviewed, from \`git rev-parse HEAD\`>", "summary": "<verdict rationale>", "findings": [ { "severity": "info" | "warning" | "error" | "critical", "path": "<file>", "line": <number>, "body": "<one concrete finding>", "quote": "<verbatim source line(s) at path:line, from a fresh Read at HEAD>" } ] }\n` +
-                `The control plane posts your review exactly once from that block.\n\n` +
-                `First, Read the full review methodology and rules at /Users/senior/.claude/skills/github-ops/SKILL.md and follow it (verify-before-block quote rules, severity→verdict mapping, the six review dimensions). Use \`git diff\` and Read/Grep/Glob to inspect the diff and the files at HEAD. Do NOT run gh. Emit the fenced-json block exactly once, then stop.`,
-            ),
-          },
-        },
-      },
-    });
-    console.log(`Created automation: ${PR_AUTOMATION_NAME}`);
-  } else {
-    console.log(`Skipped (exists): ${PR_AUTOMATION_NAME}`);
+  // Idempotent on action content (ADR-036): the old create-if-not-exists guard
+  // SKIPPED an existing automation entirely, so a changed review instruction silently
+  // never reached an already-onboarded repo — the deployed row kept the old
+  // "prod skill: github-ops" text while the seed had the new inlined-contract
+  // instruction (the phase-2 acceptance gap that cost two runs). Now: CREATE if
+  // missing, else UPDATE the action to match. This is what makes an instruction /
+  // skill / review-contract change actually reach onboarded repos — load-bearing for
+  // Somnio onboarding and every future contract change.
+  async function upsertAutomation(
+    automation: Parameters<typeof createAutomation>[0]["automation"],
+  ) {
+    const existingA = existingByName.get(automation.name);
+    if (!existingA) {
+      await createAutomation({
+        db,
+        userId: ownerUserId,
+        accessTier: "pro",
+        organizationId: org.id,
+        automation,
+      });
+      console.log(`Created automation: ${automation.name}`);
+    } else {
+      await updateAutomation({
+        db,
+        userId: ownerUserId,
+        accessTier: "pro",
+        automationId: existingA.id,
+        organizationId: org.id,
+        updates: { action: automation.action },
+      });
+      console.log(`Updated automation action: ${automation.name}`);
+    }
   }
 
-  if (!existingNames.has(ISSUE_AUTOMATION_NAME)) {
-    await createAutomation({
-      db,
-      userId: ownerUserId,
-      accessTier: "pro",
-      organizationId: org.id,
-      automation: {
-        name: ISSUE_AUTOMATION_NAME,
-        triggerType: "issue",
-        triggerConfig: {
-          filter: { includeAllAuthors: true },
-          on: { open: true },
-        },
-        repoFullName,
-        branchName: "main",
-        action: {
-          type: "user_message",
-          config: {
-            message: userMessage(
-              `An issue was opened in ${repoFullName}. Research it (prod skill: github-deep-research).`,
-            ),
-          },
-        },
+  await upsertAutomation({
+    name: PR_AUTOMATION_NAME,
+    triggerType: "pull_request",
+    triggerConfig: {
+      filter: { includeAllAuthors: true, includeDraftPRs: false },
+      on: { open: true, update: true },
+    },
+    repoFullName,
+    branchName: "main",
+    action: {
+      type: "user_message",
+      config: {
+        // The instruction INLINES the minimal wire contract (verdict enum +
+        // fenced-json + commit field) so a run that fails to Read the methodology
+        // file still emits something the parser (emittedReviewIntentSchema) accepts.
+        // TODO(rev3-skill-path-portable): the SKILL.md path is hardcoded to the pilot
+        // box HOME (/Users/senior); read as TEXT (no $HOME expansion) so a customer
+        // box breaks it — rev-3 stamps the run's HOME-resolved skill path or a
+        // daemon SKILL_DIR env.
+        message: userMessage(
+          `A pull request was opened or updated in ${repoFullName}. Perform a substantive PR review.\n\n` +
+            `You are running as a REVIEW agent: you have NO gh and NO GitHub token, so you cannot post to GitHub. You deliver your verdict by EMITTING it as your FINAL message — a single fenced \`\`\`json block with EXACTLY this shape:\n` +
+            `{ "verdict": "approve" | "request_changes" | "comment", "commit": "<the HEAD sha you reviewed, from \`git rev-parse HEAD\`>", "summary": "<verdict rationale>", "findings": [ { "severity": "info" | "warning" | "error" | "critical", "path": "<file>", "line": <number>, "body": "<one concrete finding>", "quote": "<verbatim source line(s) at path:line, from a fresh Read at HEAD>" } ] }\n` +
+            `The control plane posts your review exactly once from that block.\n\n` +
+            `First, Read the full review methodology and rules at /Users/senior/.claude/skills/github-ops/SKILL.md and follow it (verify-before-block quote rules, severity→verdict mapping, the six review dimensions). Use \`git diff\` and Read/Grep/Glob to inspect the diff and the files at HEAD. Do NOT run gh. Emit the fenced-json block exactly once, then stop.`,
+        ),
       },
-    });
-    console.log(`Created automation: ${ISSUE_AUTOMATION_NAME}`);
-  } else {
-    console.log(`Skipped (exists): ${ISSUE_AUTOMATION_NAME}`);
-  }
+    },
+  });
 
-  if (!existingNames.has(MENTION_AUTOMATION_NAME)) {
-    await createAutomation({
-      db,
-      userId: ownerUserId,
-      accessTier: "pro",
-      organizationId: org.id,
-      automation: {
-        name: MENTION_AUTOMATION_NAME,
-        triggerType: "github_mention",
-        // All-authors mention routing (the mention analogue of the PR automation):
-        // fire for @-mentions from any author; the comment body is the agent's input.
-        triggerConfig: {
-          filter: { includeOtherAuthors: true, includeBotMentions: false },
-        },
-        repoFullName,
-        branchName: "main",
-        action: {
-          type: "user_message",
-          config: { message: userMessage("Respond to the GitHub mention.") },
-        },
+  await upsertAutomation({
+    name: ISSUE_AUTOMATION_NAME,
+    triggerType: "issue",
+    triggerConfig: {
+      filter: { includeAllAuthors: true },
+      on: { open: true },
+    },
+    repoFullName,
+    branchName: "main",
+    action: {
+      type: "user_message",
+      config: {
+        message: userMessage(
+          `An issue was opened in ${repoFullName}. Research it (prod skill: github-deep-research).`,
+        ),
       },
-    });
-    console.log(`Created automation: ${MENTION_AUTOMATION_NAME}`);
-  } else {
-    console.log(`Skipped (exists): ${MENTION_AUTOMATION_NAME}`);
-  }
+    },
+  });
+
+  await upsertAutomation({
+    name: MENTION_AUTOMATION_NAME,
+    triggerType: "github_mention",
+    // All-authors mention routing: fire for @-mentions from any author; the comment
+    // body is the agent's input.
+    triggerConfig: {
+      filter: { includeOtherAuthors: true, includeBotMentions: false },
+    },
+    repoFullName,
+    branchName: "main",
+    action: {
+      type: "user_message",
+      config: { message: userMessage("Respond to the GitHub mention.") },
+    },
+  });
 
   console.log(
     `\nSeeded mirror automations for '${org.name}' (${repoFullName}). While the` +

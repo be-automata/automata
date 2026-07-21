@@ -95,3 +95,50 @@ params, e.g. Neon pooler URLs) — bash treats `&` as a background operator and
 the assignment silently fails, falling back to devDefaults (which once sent a
 `drizzle-kit push` to the wrong local DB). Parse env files with `dotenv`/node,
 never bash-source, for anything with URLs.
+
+## 6. Phase-2: enable the single-writer review channel (`REVIEW_SINGLE_WRITER`)
+
+ADR-036. The review agent runs with **no gh-write and no GitHub token**; it EMITS a
+fenced-JSON verdict and the control-plane executor posts it exactly once. Enable it
+in **policy-first order** — the box (skill + daemon policy) must be current BEFORE the
+www flag flips, or a review run under the flag has no emit-skill / no executor.
+
+```bash
+# (a) Install/refresh the emit-only review skill on the daemon box (readable file —
+#     the daemon claude -p does NOT auto-load skills; the instruction Reads this path).
+mkdir -p ~/.claude/skills/github-ops
+cp deploy/skills/github-ops/SKILL.md ~/.claude/skills/github-ops/SKILL.md
+
+# (b) UPDATE the review automation instruction on already-onboarded repos.
+#     REQUIRED and easy to miss: the seed is now idempotent (upserts the action), so
+#     re-running it UPDATES the deployed automation row to the current inlined-contract
+#     instruction. A create-only seed silently leaves a STALE instruction on an
+#     existing repo (this shipped the old "prod skill: github-ops" text once and cost
+#     two acceptance runs). Re-run the seed for every onboarded org/repo:
+DATABASE_URL=postgres://... pnpm exec tsx deploy/seed-pilot-mirror.ts <orgSlug> <repoFullName> <installationId>
+#     → expect "Updated automation action: Mirror: PR review (github-ops)".
+
+# (c) Preflight on the box (fails closed if the skill is absent / wrong):
+pnpm exec tsx deploy/review-single-writer-preflight.ts    # expect PASS / exit 0
+
+# (d) Kickstart the worker so daemon+worker run current-HEAD phase-2 code
+#     (run-worker.sh rebuilds the daemon dist on start):
+launchctl kickstart -k com.automata.worker
+
+# (e) Dark-deploy www (ships the executor/finish-wiring/sweep). SAFE-DARK: with the
+#     flag unset=false every new path is a no-op (reconciler-only, today's behavior).
+cd apps/www && (opennextjs-cloudflare build && wrangler deploy)
+#     Bundle-verify: grep the built bundle for executeReviewFromIntent +
+#     handleReviewEffectAtFinish (executor present) and confirm worker-entry.ts + the
+#     4 triggers.crons survived the OpenNext build (the review sweep piggybacks the
+#     hourly stalled-tasks cron).
+
+# (f) FLIP the flag (runtime Worker secret, NO rebuild):
+cd apps/www && wrangler secret put REVIEW_SINGLE_WRITER    # enter: true
+#     Flip back: wrangler secret put REVIEW_SINGLE_WRITER → false (default is false).
+```
+
+`GITHUB_SIDE_EFFECTS_ENABLED=true` is still required for the executor to post (it
+gates all GitHub mutation). A degraded/failed verdict fires the PostHog event
+`review_single_writer_work_failed` + a `console.error`; wire a PostHog **alert** on
+that event before relying on it to page (the code emits the signal; alerting is ops).

@@ -92,87 +92,91 @@ export async function handleReviewEffectAtFinish({
     return;
   }
 
-  // automationId/organizationId live on the thread (getThreadMinimal); the agent's
-  // terminal messages live on the thread-chat (getThreadChat).
-  const thread = await getThreadMinimal({ db, userId, threadId });
-  if (!thread) {
-    await reconcilePrReviews({ repoFullName, prNumber });
-    return;
-  }
-
-  const review = await isReviewThread({
-    db,
-    userId,
-    automationId: thread.automationId ?? null,
-    organizationId: thread.organizationId ?? null,
-  });
-  if (!review) {
-    // A PR thread that isn't a review (e.g. a mention) → reconciler, not executor.
-    await reconcilePrReviews({ repoFullName, prNumber });
-    return;
-  }
-
-  const threadChat = await getThreadChat({ db, threadId, threadChatId, userId });
-
-  // Single-writer path: post exactly once from the agent's emitted intent.
-  // DEFENSIVE ISOLATION: the whole single-writer path is wrapped so ANY unexpected
-  // throw (octokit/HEAD fetch/etc.) degrades to the interim reconciler rather than
-  // propagating. This runs in the finish hook alongside the queue-drain promotion
-  // (BUG-EXEC-01) — a phase-2 bug must never regress that. The caller also
-  // waitUntil-catches; this is belt-and-suspenders + a state-converging fallback.
+  // Single-writer path (flag on). The ENTIRE path — thread lookups + review
+  // determination + intent parse + post — is wrapped so ANY unexpected throw
+  // (db/octokit/HEAD) degrades to the interim reconciler rather than propagating.
+  // This runs in the finish hook alongside the BUG-EXEC-01 queue-drain — a phase-2
+  // bug must never regress it. The reconciler ALWAYS runs at the end: the executor's
+  // straddle-backstop audit on success, AND the converging fallback for a non-review
+  // thread or a mid-fetch throw (nit: the lookups used to sit OUTSIDE the try, so a
+  // db blip there skipped the reconciler too).
   try {
-    const octokit = await getOctokitForApp({
-      owner: repoFullName.split("/")[0]!,
-      repo: repoFullName.split("/")[1]!,
-    });
-    const github = createOctokitReviewClient(octokit);
-    const currentHeadSha = await getPrHeadSha(octokit, repoFullName, prNumber);
-    const terminalText = extractTerminalAgentText(threadChat?.messages ?? null);
+    // automationId/organizationId live on the thread; terminal messages on the chat.
+    const thread = await getThreadMinimal({ db, userId, threadId });
+    const review = thread
+      ? await isReviewThread({
+          db,
+          userId,
+          automationId: thread.automationId ?? null,
+          organizationId: thread.organizationId ?? null,
+        })
+      : false;
 
-    const outcome = await executeReviewFromIntent({
-      github,
-      repoFullName,
-      prNumber,
-      botLogin: resolveBotLogin(),
-      currentHeadSha,
-      terminalText,
-      logger: {
-        info: (message, meta) => console.log(`[review-single-writer] ${message}`, meta),
-        warn: (message, meta) => console.warn(`[review-single-writer] ${message}`, meta),
-        error: (message, meta) => console.error(`[review-single-writer] ${message}`, meta),
-      },
-    });
+    // A PR thread that isn't a review (e.g. a mention) → reconciler only (below).
+    if (review) {
+      const threadChat = await getThreadChat({
+        db,
+        threadId,
+        threadChatId,
+        userId,
+      });
+      const octokit = await getOctokitForApp({
+        owner: repoFullName.split("/")[0]!,
+        repo: repoFullName.split("/")[1]!,
+      });
+      const github = createOctokitReviewClient(octokit);
+      const currentHeadSha = await getPrHeadSha(octokit, repoFullName, prNumber);
+      const terminalText = extractTerminalAgentText(threadChat?.messages ?? null);
 
-    // Loud telemetry; WorkFailed (degraded/post_failed) pages so a human doesn't
-    // mistake a lost verdict for a clean pass.
-    getPostHogServer().capture({
-      distinctId: userId,
-      event: "review_single_writer_outcome",
-      properties: { threadId, repoFullName, prNumber, outcome: outcome.outcome },
-    });
-    if (
-      outcome.outcome === "degraded_comment" ||
-      outcome.outcome === "post_failed"
-    ) {
-      console.error("[review-single-writer] WorkFailed — review not cleanly applied", {
+      const outcome = await executeReviewFromIntent({
+        github,
+        repoFullName,
+        prNumber,
+        botLogin: resolveBotLogin(),
+        currentHeadSha,
+        terminalText,
+        logger: {
+          info: (message, meta) =>
+            console.log(`[review-single-writer] ${message}`, meta),
+          warn: (message, meta) =>
+            console.warn(`[review-single-writer] ${message}`, meta),
+          error: (message, meta) =>
+            console.error(`[review-single-writer] ${message}`, meta),
+        },
+      });
+
+      // Loud telemetry; WorkFailed (degraded/post_failed) pages so a human doesn't
+      // mistake a lost verdict for a clean pass.
+      getPostHogServer().capture({
+        distinctId: userId,
+        event: "review_single_writer_outcome",
+        properties: { threadId, repoFullName, prNumber, outcome: outcome.outcome },
+      });
+      if (
+        outcome.outcome === "degraded_comment" ||
+        outcome.outcome === "post_failed"
+      ) {
+        console.error(
+          "[review-single-writer] WorkFailed — review not cleanly applied",
+          { threadId, repoFullName, prNumber, outcome },
+        );
+        getPostHogServer().capture({
+          distinctId: userId,
+          event: "review_single_writer_work_failed",
+          properties: { threadId, repoFullName, prNumber, ...outcome },
+        });
+      }
+    }
+  } catch (err) {
+    console.error(
+      "[review-single-writer] path threw — falling back to reconciler",
+      {
         threadId,
         repoFullName,
         prNumber,
-        outcome,
-      });
-      getPostHogServer().capture({
-        distinctId: userId,
-        event: "review_single_writer_work_failed",
-        properties: { threadId, repoFullName, prNumber, ...outcome },
-      });
-    }
-  } catch (err) {
-    console.error("[review-single-writer] executor path threw — falling back to reconciler", {
-      threadId,
-      repoFullName,
-      prNumber,
-      error: err instanceof Error ? err.message : String(err),
-    });
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
   }
 
   // Fail-safe audit BEHIND the executor: converge any residue (e.g. a straddling
