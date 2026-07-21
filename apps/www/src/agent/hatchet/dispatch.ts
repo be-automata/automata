@@ -2,7 +2,7 @@ import { env } from "@terragon/env/apps-www";
 import { db } from "@/lib/db";
 import { getInstallationToken } from "@terragon/shared/github-app";
 import { getThreadMinimal } from "@terragon/shared/model/threads";
-import { parseRepoFullName } from "@/lib/github";
+import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import {
   mintDaemonToken,
   hasActiveDaemonToken,
@@ -147,17 +147,41 @@ export async function dispatchAgentRun({
     mintDaemonToken({ userId, threadId, threadChatId, name: runKey }),
     getThreadMinimal({ db, userId, threadId }),
   ]);
+
+  // BUG-EXEC-02: the review agent needs the PR's BASE branch to compute the delta
+  // offline (`git diff origin/<base>...HEAD`). thread.repoBaseBranchName is NOT the
+  // base — for a thread working on an existing branch it holds the HEAD/working branch
+  // (cli-router.ts: headBranchName = createNewBranch ? null : repoBaseBranchName), so
+  // sourcing from it left baseBranch undefined and the worker never fetched origin/main.
+  // Resolve the REAL, per-PR base from the PR itself (App octokit). Undefined (non-PR
+  // thread, fetch fails, or base==head) → provision skips the base-fetch (head-only).
+  let baseBranch: string | undefined;
+  if (thread?.githubPRNumber) {
+    try {
+      const octokit = await getOctokitForApp({ owner, repo });
+      const { data: pr } = await octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: thread.githubPRNumber,
+      });
+      if (pr.base?.ref && pr.base.ref !== branch) {
+        baseBranch = pr.base.ref;
+      }
+    } catch (err) {
+      console.warn("[hatchet] could not resolve PR base branch — baseBranch unset", {
+        threadId,
+        prNumber: thread.githubPRNumber,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   const input: AgentRunInput = {
     threadId,
     threadChatId,
     repoFullName,
     branch,
-    // Base branch for the offline re-review diff (BUG-EXEC-02). null-safe: undefined
-    // when the base equals the head (nothing to fetch) → provision skips.
-    baseBranch:
-      thread?.repoBaseBranchName && thread.repoBaseBranchName !== branch
-        ? thread.repoBaseBranchName
-        : undefined,
+    baseBranch,
     daemonCallbackUrl: nonLocalhostPublicAppUrl(),
     installationToken,
     daemonToken,
