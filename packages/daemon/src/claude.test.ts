@@ -27,7 +27,8 @@ describe("claudeCommand — permissionMode policy (phase-2 single-writer)", () =
     expect(cmd).not.toContain("--dangerously-skip-permissions");
     expect(cmd).toContain("--permission-mode default");
     expect(cmd).toContain("--allowedTools Read Grep Glob Bash");
-    expect(cmd).toContain("--disallowedTools Bash(gh:*) Bash(git push:*)");
+    // shell-quoted so `bash -c` doesn't choke on the parens/space/glob
+    expect(cmd).toContain("--disallowedTools 'Bash(gh:*)' 'Bash(git push:*)'");
   });
 
   it('permissionMode "allowAll" (default) still uses --dangerously-skip-permissions', () => {

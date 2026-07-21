@@ -247,9 +247,13 @@ export function claudeCommand({
             "Grep",
             "Glob",
             "Bash",
+            // SHELL-QUOTED: the whole command is joined into a string and run via a
+            // shell (`cat prompt | claude ...`), so the parentheses/space/glob in these
+            // matchers MUST be single-quoted or the shell errors ("syntax error near
+            // unexpected token '('") and the agent never launches.
             "--disallowedTools",
-            "Bash(gh:*)",
-            "Bash(git push:*)",
+            "'Bash(gh:*)'",
+            "'Bash(git push:*)'",
           ]
         : ["--dangerously-skip-permissions"]),
     "--output-format",
