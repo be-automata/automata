@@ -206,12 +206,15 @@ export async function S12(N = 4): Promise<CaseResult> {
   finally { for (const i of issues) cleanup({ issues: [i] }); }
 }
 
-// Phase-2-gated cases: exist as self-reporting SKIPPED.
+// Inline-thread-surface cases: exist as self-reporting SKIPPED.
 export const phase2 = (): CaseResult[] => (["S10", "S11", "S13", "S14"] as const).map((id) => {
   const r = mk(id, "phase-2 surface (inline threads / resolve / stale-guard / one-review-object)");
-  // PHASE-2 PREP (2026-07-19): un-parked in the doc with single-writer preconditions (executor posts
-  // after thread-finish; App identity; poll from thread-finish; no-dup structural). Stays SKIPPED here
-  // until the flag is live — then wire these as real cases + the flag-flip gate (agent posts nothing,
-  // executor posts exactly one review). See the "PHASE-2 ACCEPTANCE PLAN" in docs/uat/adr-036-effect-intent.md.
-  return skip(r, "phase-2-gated (single-writer effect channel): un-parked in doc, awaiting flag-live signal. See PHASE-2 ACCEPTANCE PLAN in docs/uat/adr-036-effect-intent.md.");
+  // STATUS (2026-07-21): REVIEW_SINGLE_WRITER is LIVE and PROVEN (RUN 4 swaccept5/PR#27: one-review-object
+  // + supersede-dismiss verified across S1-S3 — S14/S13 substance is largely covered there). But S10/S11
+  // test INLINE review threads (line comments / reply-then-resolve), which are gated on a SEPARATE flag,
+  // REVIEW_POST_INLINE_COMMENTS. PR#27 posted 0 inline comments (findings folded into the review body),
+  // so the inline surface is NOT live — these cannot be validated yet and are NOT force-passed by the
+  // single-writer flip. Wire them as real cases once REVIEW_POST_INLINE_COMMENTS is enabled.
+  // See "PHASE-2 ACCEPTANCE PLAN" + "RUN 4" in docs/uat/adr-036-effect-intent.md.
+  return skip(r, "gated on REVIEW_POST_INLINE_COMMENTS (inline-thread surface), a SEPARATE flag from the now-live REVIEW_SINGLE_WRITER; PR#27 posted 0 inline comments so the surface is off. NOT force-passed by the single-writer flip. See RUN 4 in docs/uat/adr-036-effect-intent.md.");
 });
