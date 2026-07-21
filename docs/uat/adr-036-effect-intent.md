@@ -201,3 +201,17 @@ Two residuals from the revised-design re-read, both accepted + resolved; design 
 - **FRAMING (locked):** the GUARANTEE is no-credential-anywhere (token-withhold + worktree-clean + no-helper). The tool-policy denylist (`--disallowedTools "Bash(gh:*)"`, no `--dangerously-skip-permissions`) is DEFENSE-IN-DEPTH (fast local denial + UX) and explicitly does NOT block `python`/`node`/`curl` HTTP posts — those die on 401 for lack of any credential. curl-401 spike artifact = the direct-API half of the evidence.
 
 **Status: design CONVERGED → step-2 code in progress (pure-core port + executor + grace-period sweep + degraded fallback + permissionMode="review" + flag-flip preflight).** Final pre-freeze read pending the code + curl-401 artifact + the 3-part no-credential assertion.
+
+## PRE-FREEZE CODE READ — ✅ CLEARED (freeze gate, 2026-07-20)
+Read the assembled seam (origin/main a03479f) against the 6 must-verify focus areas — all CODE-BACKED, not claim-only. Freeze cleared.
+1. **Sweep TOCTOU grace ✓** — `review-sweep.ts` REVIEW_SWEEP_GRACE_MS=10min; candidate query filters `updatedAt ≤ now-grace` → only >10min-terminal threads (finish-hook is seconds → unraceable); + pre-checks findBotReviewAtHead; flag-gated; per-thread fail-soft.
+2. **Token-withhold (3-part) ✓** — `daemon.ts` stripGithubCredentials removes GH_TOKEN/GITHUB_TOKEN + GIT_CONFIG_COUNT/KEY_n/VALUE_n (the http.extraHeader token carrier); KEEPS GIT_CONFIG_GLOBAL/SYSTEM=/dev/null → credential helper unreachable; applied only for permissionMode="review"; + worktree token-free clone. (i)env (ii)worktree-url (iii)no-helper all in code.
+3. **Degraded fallback ✓** — DEGRADED_INTENT_MARKER exact; `parse-review-intent.ts` THROW-FREE (JSON.parse try/catch + Zod safeParse; truncated/unclosed fence → degraded COMMENT, no crash) — closes the executor's unguarded-parse risk. Stale → posted-at-reviewed-commit; read-failure → post anyway. Never silent-drop.
+4. **Preflight ✓** — statSync real skill file + VALIDATES the fenced-json verdict contract (rejects the wrong/generic skill = the acceptance datum) + fail-closed; env override; rev-3 HOME-portability TODO flagged. Emit-correctness rests on the inlined contract + tool-policy, not skill-resolution.
+5. **workFailed surfacing ✓** — degraded_comment/post_failed → console.error "WorkFailed" + PostHog `review_single_writer_work_failed`.
+6. **BUG-EXEC-01 isolation ✓** — `handle-daemon-event.ts` review-effect finish-hook (waitUntil+catch :546) and queue-drain promotion (waitUntil+catch :604) are INDEPENDENT waitUntils; a review throw is caught at :554 and can't touch the drain. (The structural assertion tenancy-coder couldn't unit-test — verified by reading.)
+
+**3 minor non-blocking notes (fold post-freeze):** (a) getThreadMinimal/getThreadChat (review-single-writer-finish.ts:97,115) sit outside the executor try → a db throw skips executor+reconciler (sweep backstops; moving getThreadChat inside would let the reconciler run); (b) rev-3 skill-path HOME-portability = a pre-Somnio item (TODO'd); (c) confirm a PostHog ALERT is wired on review_single_writer_work_failed so it actually pages.
+
+**Boot-coder's at flag-flip (not code-verifiable):** the live curl-401/no-credential artifact + the fresh-run "agent posts 0 / executor posts 1" forensics.
+**Close-out from here:** deploy dark → box preflight → flip → fresh-run flag-flip gate + S1-S3 single-writer regression + S10/S11/S13/S14.
