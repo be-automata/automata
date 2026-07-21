@@ -66,11 +66,15 @@ export const agentRun = hatchet.task({
     const workdir = await provisionWorkdir({
       repoFullName: input.repoFullName,
       branch: input.branch,
+      baseBranch: input.baseBranch,
       installationToken: input.installationToken,
       workdirRoot: config.workdirRoot,
       runId: input.threadId,
     });
-    step(`clone complete: ${input.repoFullName}@${input.branch}`);
+    step(
+      `clone complete: ${input.repoFullName}@${input.branch}` +
+        (input.baseBranch ? ` (base ${input.baseBranch} fetched)` : ""),
+    );
 
     const daemon = new DaemonProcess(config, input, workdir);
     try {

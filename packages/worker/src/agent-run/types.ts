@@ -20,6 +20,13 @@ export type AgentRunInput = {
   threadChatId: string;
   repoFullName: string;
   branch: string;
+  /**
+   * The PR base branch (e.g. "main"), when this run is a PR review. Provision fetches
+   * it alongside the head so the token-withheld review agent can run
+   * `git diff origin/<base>...HEAD` offline on a re-review (BUG-EXEC-02). Optional:
+   * absent for non-PR runs, in which case no base fetch happens.
+   */
+  baseBranch?: string;
   /** www's public base URL the daemon calls back to (events + next-message). */
   daemonCallbackUrl: string;
   /** Short-lived, installation-scoped GitHub token for the clone (x-access-token). */
