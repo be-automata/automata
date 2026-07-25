@@ -196,9 +196,10 @@ export interface AgentRunInput {
   /** The PR number when this run is a PR review (thread.githubPRNumber). #8 cancel key, #2/#7 context. */
   prNumber?: number;
   /**
-   * W3C `traceparent` for the end-to-end OTel trace join (#7). Populated when #7
-   * wires the tracer at dispatch; undefined for now — the field exists so the wire
-   * contract (mirrored in packages/worker/src/agent-run/types.ts) is stable.
+   * W3C `traceparent` for the end-to-end OTel trace join (#7). Populated by
+   * generateTraceparent() on every dispatch below; the field is optional only
+   * because the wire contract (mirrored in packages/worker/src/agent-run/types.ts)
+   * is shared with pre-#7 / non-dispatch inputs.
    */
   traceparent?: string;
 }

@@ -45,8 +45,10 @@ export type AgentRunInput = {
   prNumber?: number;
   /**
    * W3C `traceparent` for the end-to-end OTel trace join (#7). Injected at
-   * dispatch; the worker starts its run span from it. Undefined until #7 wires
-   * the tracer — the field exists now so the wire contract is stable.
+   * dispatch (generateTraceparent) on every remote run and stamped on the worker's
+   * run-span logs + forwarded on every www call. Optional only because the wire
+   * type is shared with pre-#7 / non-dispatch inputs; a live remote dispatch always
+   * sets it.
    */
   traceparent?: string;
 };

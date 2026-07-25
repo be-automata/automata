@@ -109,8 +109,8 @@ agentRunWorkflow.task({
       threadId: input.threadId,
       threadChatId: input.threadChatId,
       // #7 trace join: forwarded as a `traceparent` header on every www call so the
-      // daemon-event → GitHub-post continues the dispatch-minted trace. undefined
-      // until dispatch wires #7 (then the header is simply omitted).
+      // daemon-event → GitHub-post continues the dispatch-minted trace. Dispatch sets
+      // it on every remote run; if ever absent the header is simply omitted (no-op).
       traceparent: input.traceparent,
     };
 
