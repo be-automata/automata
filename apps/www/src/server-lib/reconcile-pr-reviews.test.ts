@@ -2,11 +2,14 @@ import { describe, it, vi, beforeEach, expect } from "vitest";
 import { reconcilePrReviews } from "./reconcile-pr-reviews";
 import { getOctokitForApp } from "@/lib/github";
 
-// Keep parseRepoFullName real; mock only the App-octokit factory (the GitHub seam).
-vi.mock("@/lib/github", async (importOriginal) => {
-  const actual = (await importOriginal()) as object;
-  return { ...actual, getOctokitForApp: vi.fn() };
-});
+// The GLOBAL test-setup (src/test-helpers/test-setup.ts) already vi.mock's
+// "@/lib/github" with an unconfigured `getOctokitForApp: vi.fn()`. Do NOT
+// register a competing local vi.mock for the same module: the setup-file
+// registration is the one the SUT resolves, so a local factory only produces a
+// SECOND, shadowed mock instance — the test would configure an instance the SUT
+// never calls (getOctokitForApp then resolves undefined → paginate crash).
+// Instead, configure the GLOBAL mock instance per test via vi.mocked(...) below.
+// parseRepoFullName stays real (the setup factory spreads the actual module).
 
 const BOT = "test-app[bot]"; // NEXT_PUBLIC_GITHUB_APP_NAME=test-app → `${name}[bot]`
 
