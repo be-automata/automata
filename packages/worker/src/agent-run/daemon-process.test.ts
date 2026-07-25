@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { DaemonProcess, writeDaemonMessage } from "./daemon-process";
 import { loadWorkerConfig } from "./config";
 import {
@@ -87,10 +88,15 @@ describe("writeDaemonMessage", () => {
     expect(JSON.parse(received!.data)).toMatchObject({ type: "claude", token: "t" });
   });
 
-  it("rejects when the daemon replies ERROR", async () => {
+  it("rejects with a NonRetryableError when the daemon replies ERROR (#6)", async () => {
     const p = socketPath();
     await fakeDaemon(p, "error");
+    // A daemon-reject is a terminal contract error → NonRetryableError so it routes
+    // straight to onFailure instead of burning a retry.
     await expect(writeDaemonMessage(p, "{}")).rejects.toThrow(/daemon rejected/);
+    await expect(writeDaemonMessage(p, "{}")).rejects.toBeInstanceOf(
+      NonRetryableError,
+    );
   });
 
   it("rejects when the socket cannot be reached", async () => {

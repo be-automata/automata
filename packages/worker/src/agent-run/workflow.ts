@@ -3,6 +3,10 @@ import { hatchet } from "../hatchet-client";
 import { loadWorkerConfig } from "./config";
 import { DaemonProcess } from "./daemon-process";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
+import {
+  classifyNextMessageError,
+  nonRetryablePreflight,
+} from "./retry-classification";
 import { pollUntilTerminal, postRunFailed, pullNextMessage } from "./www-client";
 import type { AgentRunInput, AgentRunOutput } from "./types";
 
@@ -101,13 +105,26 @@ agentRunWorkflow.task({
       // Fail-closed identity precondition (ADR-002): confirm gh authenticates as the
       // bot (installation token + isolated config) in the workdir BEFORE spawning —
       // a misconfigured box must block, never silently post as the wrong identity.
-      await daemon.preflightGhAuth();
+      // #6: an auth-precondition failure is a MISCONFIG (never transient) → mark it
+      // NonRetryableError so it routes straight to onFailure, not backoff.
+      try {
+        await daemon.preflightGhAuth();
+      } catch (err) {
+        throw nonRetryablePreflight(err);
+      }
       step("gh auth precondition ok (bot identity)");
 
       // Run: bring up the daemon, then pull the message it should execute.
       await daemon.start();
       step(`daemon spawned: pid=${daemon.pid ?? "unknown"}`);
-      const message = await pullNextMessage(wwwOpts, signal);
+      // #6: a 4xx next-message (PR gone / permission / bad token) is terminal →
+      // NonRetryableError; a 5xx/network stays retryable (classifyNextMessageError).
+      let message: Awaited<ReturnType<typeof pullNextMessage>>;
+      try {
+        message = await pullNextMessage(wwwOpts, signal);
+      } catch (err) {
+        throw classifyNextMessageError(err);
+      }
       if (!message) {
         // Nothing to run (no pending user message / empty prompt).
         step("next-message: 204 (nothing to run)");

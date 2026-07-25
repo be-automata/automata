@@ -4,6 +4,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { buildDaemonEnv } from "./daemon-env";
 import {
   getProcessWorkerId,
@@ -314,9 +315,12 @@ export function writeDaemonMessage(
       if (response.status === "ACK") {
         finish(resolve);
       } else {
+        // #6: the daemon rejecting the message is a terminal contract error (the
+        // message won't parse/run), not a transient blip → NonRetryableError so it
+        // routes straight to onFailure instead of burning a retry.
         finish(() =>
           reject(
-            new Error(
+            new NonRetryableError(
               `daemon rejected the message: ${response.error ?? response.status ?? "unknown"}`,
             ),
           ),

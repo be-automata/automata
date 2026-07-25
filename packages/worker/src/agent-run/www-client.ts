@@ -26,6 +26,21 @@ function headers(daemonToken: string): Record<string, string> {
 }
 
 /**
+ * A next-message HTTP failure that carries the status code so the workflow can
+ * classify it (#6): a 4xx (PR gone / permission / bad token) is a NonRetryableError;
+ * a 5xx / network error stays retryable.
+ */
+export class NextMessageHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "NextMessageHttpError";
+  }
+}
+
+/**
  * Pull the DaemonMessage to run. Returns null when www has nothing to send (204):
  * the run is a no-op and the worker cleans up without spawning the agent.
  *
@@ -50,7 +65,8 @@ export async function pullNextMessage(
     return null;
   }
   if (!res.ok) {
-    throw new Error(
+    throw new NextMessageHttpError(
+      res.status,
       `next-message failed: HTTP ${res.status} (${res.statusText})`,
     );
   }
