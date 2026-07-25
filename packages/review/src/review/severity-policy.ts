@@ -207,6 +207,44 @@ export function tierToVerdict(tier: SeverityTier): FloorVerdict {
   }
 }
 
+/**
+ * Render the per-repo tolerance as an instruction block injected into the review
+ * agent's prompt (ADR-036). This is the PRIMARY mechanism by which a tolerance
+ * takes effect: the agent chooses its verdict per the repo's floor. The
+ * server-side `applyApproveSeverityFloor` is only a backstop for a too-generous
+ * `approve` — it deliberately never relaxes an agent's `request_changes`, so
+ * WITHOUT this directive an `error` tolerance could never turn a warning-only
+ * block into a `comment`. Mirrors orch-agents' `buildEmitReviewDescription`.
+ */
+export function buildReviewToleranceDirective(
+  policy: ApproveSeverityPolicy,
+): string {
+  const block = policy.blockSeverity;
+  const lines: string[] = [
+    `## Repository review tolerance: \`${block}\``,
+    `The operator has set this repository's REQUESTED_CHANGES tolerance to \`${block}\`. This OVERRIDES any default "warning blocks" rule — apply THIS floor when you choose your verdict.`,
+  ];
+  if (block === "info") {
+    lines.push(
+      "- EVERY finding — including `info` nits — forces `request_changes`. `approve` is legitimate ONLY when the review is completely clean and every prior ask is addressed.",
+    );
+  } else if (block === "error") {
+    lines.push(
+      "- Only `error` and `critical` findings force `request_changes`.",
+      "- Findings tagged `warning` are SURFACED as a `comment` verdict — they withhold approval but MUST NOT block. Do NOT choose `request_changes` for warning-only findings; choose `comment`.",
+      "- `info` findings are non-blocking.",
+    );
+  } else {
+    lines.push(
+      "- Findings at `warning` or higher force `request_changes`. `info` findings are non-blocking (they still allow `approve`).",
+    );
+  }
+  lines.push(
+    `Choose \`approve\` only when no finding is at or above \`${block}\` and every prior change request is addressed; \`request_changes\` when any finding is at or above \`${block}\`; \`comment\` when your only findings are below \`${block}\` but still worth surfacing.`,
+  );
+  return lines.join("\n");
+}
+
 /** The minimal intent shape the approve floor reads/rewrites. */
 export interface SeverityFloorIntent {
   verdict: FloorVerdict;

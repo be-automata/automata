@@ -1,7 +1,12 @@
 import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
-import { getThreadChat, getThreadMinimal } from "@terragon/shared/model/threads";
+import {
+  getThreadChat,
+  getThreadMinimal,
+} from "@terragon/shared/model/threads";
 import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
+import { resolveApproveFloor } from "@/server-lib/review/resolve-approve-floor";
+import { buildReviewToleranceDirective } from "@terragon/review/severity-policy";
 import { getUserMessageToSend } from "@/lib/db-message-helpers";
 import { tryAutoCompactThread } from "@/server-lib/compact";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
@@ -117,6 +122,11 @@ export async function buildRemoteDaemonMessage({
   // Gated by the flag so the extra lookups are zero-cost while deployed dark, and
   // flag-off review threads keep today's behavior (agent posts via gh + reconciler).
   let applyReviewPolicy = false;
+  // The per-repo tolerance directive injected into a review agent's prompt so it
+  // chooses the tolerance-correct verdict (the PRIMARY tolerance mechanism; the
+  // server floor only backstops a too-generous approve and cannot relax an
+  // agent's request_changes). Empty for non-review threads.
+  let reviewToleranceDirective = "";
   if (env.REVIEW_SINGLE_WRITER) {
     const thread = await getThreadMinimal({ db, userId, threadId });
     applyReviewPolicy = await isReviewThread({
@@ -125,6 +135,15 @@ export async function buildRemoteDaemonMessage({
       automationId: thread?.automationId ?? null,
       organizationId: thread?.organizationId ?? null,
     });
+    if (applyReviewPolicy && thread?.githubRepoFullName) {
+      const policy = await resolveApproveFloor({
+        db,
+        organizationId: thread.organizationId ?? null,
+        repoFullName: thread.githubRepoFullName,
+      });
+      reviewToleranceDirective =
+        "\n\n---\n\n" + buildReviewToleranceDirective(policy) + "\n";
+    }
   }
 
   return {
@@ -132,7 +151,7 @@ export async function buildRemoteDaemonMessage({
     model: normalizedModelForDaemon(model),
     agent: threadChat.agent,
     agentVersion: threadChat.agentVersion,
-    prompt: finalPrompt,
+    prompt: finalPrompt + reviewToleranceDirective,
     sessionId,
     permissionMode: applyReviewPolicy
       ? "review"

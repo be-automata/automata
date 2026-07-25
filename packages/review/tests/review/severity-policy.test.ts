@@ -522,3 +522,21 @@ describe("severity-policy — applyApproveSeverityFloor (per-tolerance)", () => 
     assert.equal(out.verdict, "request_changes");
   });
 });
+
+import { buildReviewToleranceDirective } from "../../src/review/severity-policy";
+describe("buildReviewToleranceDirective — tolerance-aware verdict guidance", () => {
+  test("error tolerance tells the agent warnings are COMMENT, not request_changes", () => {
+    const d = buildReviewToleranceDirective(toleranceToPolicy("error"));
+    assert.match(d, /tolerance: `error`/);
+    assert.match(d, /warning` are SURFACED as a `comment`/);
+    assert.match(d, /MUST NOT block/);
+  });
+  test("warning tolerance keeps warning as blocking", () => {
+    const d = buildReviewToleranceDirective(toleranceToPolicy("warning"));
+    assert.match(d, /at `warning` or higher force `request_changes`/);
+  });
+  test("info tolerance blocks every finding", () => {
+    const d = buildReviewToleranceDirective(toleranceToPolicy("info"));
+    assert.match(d, /EVERY finding — including `info`/);
+  });
+});
