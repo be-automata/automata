@@ -15,24 +15,44 @@ export type { AgentRunInput, AgentRunOutput } from "./types";
  * DaemonMessage over /api/daemon/next-message, writes it to the daemon socket, and
  * polls /api/daemon/thread-status until the thread is terminal — then tears down.
  *
+ * WHY a `hatchet.workflow` (not a standalone `hatchet.task`): the enterprise-
+ * hardening plan needs two WORKFLOW-level features — `onFailure` (a terminal
+ * www callback when the run fails; Phase 1.2) and stacked per-org concurrency
+ * (Phase 2). Both are methods on a workflow declaration, not options on a
+ * standalone task. The workflow name stays "agent-run" so the www REST trigger
+ * contract (transport.ts `workflowName: "agent-run"`) is unchanged.
+ *
  * scheduleTimeout 30m (not Hatchet's 5m default): on a customer box the schedule-
  * timeout window is the grace period for THEIR infra being down; 5m would silently
  * drop queued work during a brief outage (ADR-002 §Worker availability).
  *
- * Concurrency maxRuns 1 (GROUP_ROUND_ROBIN, constant key): the chassis daemon binds
- * a FIXED unix socket with no override, so two daemons on one box collide. Serialise
- * runs until the daemon accepts a socket-path flag (see DaemonProcess doc). Later
- * runs QUEUE rather than cancel — an in-flight agent turn must never be killed.
+ * Concurrency maxRuns 1 (GROUP_ROUND_ROBIN, constant key): protects the box while
+ * the global cap stays at 1 (per-run daemon isolation is enabled by the daemon
+ * `--socket-path` flag, but raising the cap above 1 is gated on a memory-headroom
+ * check — see the plan's "Concurrency > 1 is gated on memory"). Later runs QUEUE
+ * rather than cancel — an in-flight agent turn must never be killed.
  */
-export const agentRun = hatchet.task({
+export const agentRunWorkflow = hatchet.workflow<AgentRunInput>({
   name: "agent-run",
-  scheduleTimeout: "30m",
-  executionTimeout: "30m",
   concurrency: {
     expression: "'agent-run-shared-daemon-socket'",
     maxRuns: 1,
     limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
   },
+});
+
+agentRunWorkflow.task({
+  name: "run",
+  scheduleTimeout: "30m",
+  executionTimeout: "30m",
+  // EXPLICIT retries: 0 (the SDK default is already 0). A single agent-run is a
+  // minutes-long, NON-idempotent side-effecting operation (it clones, runs the
+  // agent, and posts a GitHub review) — auto-retrying it would re-execute the
+  // agent and risk a double side-effect. Keep this explicit so a future edit
+  // can't silently enable retries. This is Phase 1.4 mechanism #1 (exactly-once):
+  // at retries:0 + workflow maxRuns:1 the only at-least-once window is engine
+  // redelivery, which the www single-writer (HEAD+verdict idempotency) absorbs.
+  retries: 0,
   fn: async (input: AgentRunInput, ctx): Promise<AgentRunOutput> => {
     const config = loadWorkerConfig();
     const wwwOpts = {

@@ -21,10 +21,15 @@ describe("triggerAgentRun (Hatchet REST v1)", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("POSTs the v1 stable trigger with Bearer auth and the agent-run envelope", async () => {
+    // The v1 stable trigger returns a V1WorkflowRunDetails body; the run id lives
+    // at run.metadata.id (NOT a top-level externalId).
     const fetchMock = vi
       .fn()
       .mockResolvedValue(
-        new Response(JSON.stringify({ externalId: "run-123" }), { status: 200 }),
+        new Response(
+          JSON.stringify({ run: { metadata: { id: "run-123" } } }),
+          { status: 200 },
+        ),
       );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -45,6 +50,18 @@ describe("triggerAgentRun (Hatchet REST v1)", () => {
       threadId: "thr_1",
       threadChatId: "tc_1",
     });
+    vi.unstubAllGlobals();
+  });
+
+  it("returns externalId undefined when the response has no run.metadata.id", async () => {
+    // A body that isn't the expected V1WorkflowRunDetails shape must not throw —
+    // it degrades to undefined (callers ignore it today; #8 will require it later).
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await triggerAgentRun(INPUT, CONFIG);
+    expect(res.externalId).toBeUndefined();
     vi.unstubAllGlobals();
   });
 

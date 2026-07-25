@@ -89,6 +89,22 @@ export interface AgentRunInput {
   installationToken: string;
   /** Short-lived, org+thread-scoped daemon token (events + next-message auth). */
   daemonToken: string;
+  /**
+   * The run's org identity, NEVER null: `thread.organizationId ?? \`u:${userId}\``.
+   * A concurrency CEL key on `input.orgId` (Phase 2 per-org fairness) must resolve
+   * to a stable non-empty string for EVERY run — personal/no-org threads included —
+   * else round-robin grouping is undefined. Dispatch computes the fallback so the
+   * worker never dereferences null. Also the #7 SLO dimension.
+   */
+  orgId: string;
+  /** The PR number when this run is a PR review (thread.githubPRNumber). #8 cancel key, #2/#7 context. */
+  prNumber?: number;
+  /**
+   * W3C `traceparent` for the end-to-end OTel trace join (#7). Populated when #7
+   * wires the tracer at dispatch; undefined for now — the field exists so the wire
+   * contract (mirrored in packages/worker/src/agent-run/types.ts) is stable.
+   */
+  traceparent?: string;
 }
 
 /** True when a thread should dispatch to the remote execution plane. */
@@ -176,6 +192,12 @@ export async function dispatchAgentRun({
     }
   }
 
+  // #3/#7 wire contract: orgId is NEVER null (a personal/no-org thread falls back
+  // to a per-user key) so the Phase-2 per-org concurrency CEL never dereferences
+  // null. prNumber comes from the same thread row already loaded for baseBranch.
+  const orgId = thread?.organizationId ?? `u:${userId}`;
+  const prNumber = thread?.githubPRNumber ?? undefined;
+
   const input: AgentRunInput = {
     threadId,
     threadChatId,
@@ -185,6 +207,9 @@ export async function dispatchAgentRun({
     daemonCallbackUrl: nonLocalhostPublicAppUrl(),
     installationToken,
     daemonToken,
+    orgId,
+    prNumber,
+    // traceparent: populated in Phase 4 (#7); undefined for now.
   };
   console.log("[hatchet] dispatching agent-run", {
     threadId,

@@ -33,6 +33,22 @@ export type AgentRunInput = {
   installationToken: string;
   /** Short-lived, org+thread-scoped daemon token (events + next-message auth). */
   daemonToken: string;
+  /**
+   * The run's org identity — NON-EMPTY for every run (dispatch computes
+   * `thread.organizationId ?? \`u:${userId}\`` so a personal/no-org thread still
+   * has a stable key). It is the per-org fairness dimension for the workflow
+   * concurrency key (Phase 2) and the #7 SLO dimension. The worker never has to
+   * synthesise a fallback — dispatch guarantees it.
+   */
+  orgId: string;
+  /** The PR number when this run is a PR review (from thread.githubPRNumber). */
+  prNumber?: number;
+  /**
+   * W3C `traceparent` for the end-to-end OTel trace join (#7). Injected at
+   * dispatch; the worker starts its run span from it. Undefined until #7 wires
+   * the tracer — the field exists now so the wire contract is stable.
+   */
+  traceparent?: string;
 };
 
 export type AgentRunOutput = {

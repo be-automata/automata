@@ -54,7 +54,10 @@ describe("dispatchAgentRun", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValue(
-        new Response(JSON.stringify({ externalId: "run-1" }), { status: 200 }),
+        new Response(
+          JSON.stringify({ run: { metadata: { id: "run-1" } } }),
+          { status: 200 },
+        ),
       );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -75,13 +78,16 @@ describe("dispatchAgentRun", () => {
     expect(body.workflowName).toBe("agent-run");
     const input = body.input;
 
-    // Exactly the reference-only fields — nothing more.
+    // Exactly the reference-only fields — nothing more. `orgId` is always present
+    // (never null); `prNumber`/`traceparent` are omitted here (undefined → dropped
+    // by JSON.stringify) because this fixture thread has no PR and #7 is unwired.
     expect(Object.keys(input).sort()).toEqual(
       [
         "branch",
         "daemonCallbackUrl",
         "daemonToken",
         "installationToken",
+        "orgId",
         "repoFullName",
         "threadChatId",
         "threadId",
@@ -90,6 +96,10 @@ describe("dispatchAgentRun", () => {
     expect(input.threadId).toBe(threadId);
     expect(input.threadChatId).toBe(threadChatId);
     expect(input.repoFullName).toBe("be-automata/automata");
+    // orgId is the thread's org id (a non-empty string), not the u:<userId> fallback.
+    expect(typeof input.orgId).toBe("string");
+    expect(input.orgId.length).toBeGreaterThan(0);
+    expect(input.orgId.startsWith("u:")).toBe(false);
     // The short-lived tokens are present…
     expect(typeof input.installationToken).toBe("string");
     expect(input.installationToken.length).toBeGreaterThan(0);
@@ -103,6 +113,33 @@ describe("dispatchAgentRun", () => {
     expect(serialized.toLowerCase()).not.toContain("privatekey");
     expect(serialized.toLowerCase()).not.toContain("masterkey");
 
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back orgId to u:<userId> for a personal (no-org) thread", async () => {
+    // A thread with no organizationId must still carry a stable, non-empty orgId so
+    // the Phase-2 per-org concurrency CEL never dereferences null.
+    const personal = await createTestThread({ db, userId: user.id });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ run: { metadata: { id: "run" } } }),
+          { status: 200 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: personal.threadId,
+      threadChatId: personal.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "main",
+    });
+
+    const input = JSON.parse(fetchMock.mock.calls[0]![1].body).input;
+    expect(input.orgId).toBe(`u:${user.id}`);
     vi.unstubAllGlobals();
   });
 

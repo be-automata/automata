@@ -18,10 +18,18 @@ export interface HatchetTriggerConfig {
  * caller guarantees it holds no long-lived secret. `additionalMetadata` carries
  * the ids for traceability (the REST v1 trigger has no idempotency-key field —
  * double-dispatch is guarded by the caller). Returns the created run's externalId.
+ *
+ * The v1 stable trigger responds with a `V1WorkflowRunDetails` body, whose run id
+ * lives at `run.metadata.id` — NOT a top-level `externalId` (the old cast to
+ * `{externalId?}` always read undefined). This id is the handle #8 uses to cancel
+ * a superseded in-flight review, so parse it correctly from first dispatch.
  */
 export async function triggerAgentRun<
   T extends { threadId: string; threadChatId: string },
->(input: T, config: HatchetTriggerConfig): Promise<{ externalId?: string }> {
+>(
+  input: T,
+  config: HatchetTriggerConfig,
+): Promise<{ externalId: string | undefined }> {
   const { apiUrl, tenantId, apiToken } = config;
   if (!apiUrl || !tenantId || !apiToken) {
     throw new Error(
@@ -50,5 +58,8 @@ export async function triggerAgentRun<
     const body = await res.text().catch(() => "");
     throw new Error(`Hatchet trigger failed: ${res.status} ${body}`);
   }
-  return (await res.json().catch(() => ({}))) as { externalId?: string };
+  const json = (await res.json().catch(() => ({}))) as {
+    run?: { metadata?: { id?: string } };
+  };
+  return { externalId: json.run?.metadata?.id };
 }
