@@ -1,12 +1,7 @@
 import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
-import {
-  getThreadChat,
-  getThreadMinimal,
-} from "@terragon/shared/model/threads";
-import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
-import { resolveApproveFloor } from "@/server-lib/review/resolve-approve-floor";
-import { buildReviewToleranceDirective } from "@terragon/review/severity-policy";
+import { getThreadChat } from "@terragon/shared/model/threads";
+import { computeReviewToleranceDirective } from "@/server-lib/review/review-tolerance-directive";
 import { getUserMessageToSend } from "@/lib/db-message-helpers";
 import { tryAutoCompactThread } from "@/server-lib/compact";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
@@ -115,31 +110,12 @@ export async function buildRemoteDaemonMessage({
 
   const featureFlags = await getFeatureFlagsForUser({ db, userId });
 
-  // Per-repo review tolerance (ADR-036) is MODE-AGNOSTIC: the directive that tells
-  // the agent which verdict its findings imply under the repo's floor is PURE
-  // PROMPT GUIDANCE — it does not depend on WHO posts the review, so it is injected
-  // for EVERY review thread (a pull_request automation), whether REVIEW_SINGLE_WRITER
-  // is on or off. Without it the agent falls back to its static "warning blocks"
-  // rule and a per-repo `error`/`info` floor never takes effect (the server floor
-  // can only downgrade a too-generous approve, never relax an agent request_changes).
-  // review-thread determination is therefore hoisted OUT of the flag gate.
-  const reviewThread = await getThreadMinimal({ db, userId, threadId });
-  const isReview = await isReviewThread({
-    db,
-    userId,
-    automationId: reviewThread?.automationId ?? null,
-    organizationId: reviewThread?.organizationId ?? null,
-  });
-  let reviewToleranceDirective = "";
-  if (isReview && reviewThread?.githubRepoFullName) {
-    const policy = await resolveApproveFloor({
-      db,
-      organizationId: reviewThread.organizationId ?? null,
-      repoFullName: reviewThread.githubRepoFullName,
-    });
-    reviewToleranceDirective =
-      "\n\n---\n\n" + buildReviewToleranceDirective(policy) + "\n";
-  }
+  // Per-repo review tolerance (ADR-036) is MODE-AGNOSTIC: the directive telling the
+  // agent which verdict its findings imply under the repo's floor is pure prompt
+  // guidance, injected for EVERY review thread regardless of REVIEW_SINGLE_WRITER
+  // (see computeReviewToleranceDirective — it never reads the flag).
+  const { directive: reviewToleranceDirective, isReview } =
+    await computeReviewToleranceDirective({ db, userId, threadId });
 
   // SINGLE-WRITER ONLY: permissionMode="review" makes the daemon strip all GitHub
   // credentials + apply the no-gh-write tool-policy (agent EMITs; the executor posts
