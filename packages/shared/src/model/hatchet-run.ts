@@ -2,6 +2,7 @@ import { DB } from "../db";
 import { hatchetRun } from "../db/schema";
 import { HatchetRun } from "../db/types";
 import { and, eq, gte, inArray, ne } from "drizzle-orm";
+import { normalizeRepo } from "./repo-review-settings";
 
 /**
  * Per-dispatch tracking of the Hatchet `agent-run` externalId, for #8 supersede.
@@ -16,11 +17,6 @@ import { and, eq, gte, inArray, ne } from "drizzle-orm";
 
 /** Only in_flight rows this recent are supersede candidates (≈ the 75m stalled cutoff). */
 export const SUPERSEDE_FRESHNESS_MS = 75 * 60 * 1000;
-
-/** Normalize a repo slug for storage/lookup (case-insensitive GitHub slugs). */
-function normalizeRepo(repoFullName: string): string {
-  return repoFullName.trim().toLowerCase();
-}
 
 /**
  * Record a freshly-dispatched review run as `in_flight`. Called AFTER a successful

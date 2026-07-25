@@ -1189,6 +1189,20 @@ export async function deleteThreadById({
   return result[0]!;
 }
 
+/**
+ * The non-terminal statuses a system reap (stall watchdog, supersede) may act on.
+ * ONE definition shared by `getStalledThreads` and `markThreadsSuperseded` — a
+ * future status added here reaches both sweeps, never one silently.
+ */
+const reapableThreadStatuses: ThreadStatus[] = [
+  "booting",
+  "stopping",
+  "working",
+  "working-done",
+  "working-error",
+  "checkpointing",
+];
+
 export async function getStalledThreads({
   db,
   cutoffSecs = 60 * 60, // Default to 1 hour
@@ -1198,14 +1212,7 @@ export async function getStalledThreads({
 }) {
   const threads = await db.query.thread.findMany({
     where: and(
-      inArray(schema.thread.status, [
-        "booting",
-        "stopping",
-        "working",
-        "working-done",
-        "working-error",
-        "checkpointing",
-      ]),
+      inArray(schema.thread.status, reapableThreadStatuses),
       lte(schema.thread.updatedAt, new Date(Date.now() - cutoffSecs * 1000)),
     ),
     orderBy: (thread) => [desc(thread.updatedAt)],
@@ -1253,14 +1260,7 @@ export async function markThreadsSuperseded({
     .where(
       and(
         inArray(schema.thread.id, threadIds),
-        inArray(schema.thread.status, [
-          "booting",
-          "stopping",
-          "working",
-          "working-done",
-          "working-error",
-          "checkpointing",
-        ]),
+        inArray(schema.thread.status, reapableThreadStatuses),
       ),
     )
     .returning({ id: schema.thread.id, userId: schema.thread.userId });

@@ -77,22 +77,26 @@ async function supersedePriorReviewRuns({
     });
 
     // Cancel the remote runs (best-effort — a cancelled/already-finished run is a
-    // harmless no-op we swallow), then mark the rows + threads terminally so the old
-    // threads stop zombieing regardless of the cancel outcome.
-    await cancelAgentRun(
-      prior.map((r) => r.externalId),
-      hatchetConfig(),
-    ).catch((error) => {
-      console.error("[hatchet] supersede cancel failed (non-fatal)", {
-        prNumber,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-    await markHatchetRunsSuperseded({ db, ids: prior.map((r) => r.id) });
-    await markThreadsSuperseded({
-      db,
-      threadIds: prior.map((r) => r.threadId),
-    });
+    // harmless no-op we swallow) and mark the rows + threads terminally so the old
+    // threads stop zombieing regardless of the cancel outcome. The three ops are
+    // independent (neither mark depends on the cancel result or on each other), so
+    // they run concurrently.
+    await Promise.all([
+      cancelAgentRun(
+        prior.map((r) => r.externalId),
+        hatchetConfig(),
+      ).catch((error) => {
+        console.error("[hatchet] supersede cancel failed (non-fatal)", {
+          prNumber,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }),
+      markHatchetRunsSuperseded({ db, ids: prior.map((r) => r.id) }),
+      markThreadsSuperseded({
+        db,
+        threadIds: prior.map((r) => r.threadId),
+      }),
+    ]);
   } catch (error) {
     console.error("[hatchet] supersede pass failed (non-fatal)", {
       prNumber,

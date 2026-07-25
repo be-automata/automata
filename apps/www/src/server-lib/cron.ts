@@ -28,6 +28,11 @@ const BATCH_SIZE = 5;
  * the cron only reaps genuinely-stuck threads. This slow watchdog (≤1h) is the
  * BACKSTOP for the revoked-token failure class the fast onFailure path can't cover
  * (its daemonToken is already dead → the callback 401s).
+ *
+ * TODO(remote-aware cutoff): this widened cutoff applies to EVERY thread, so a
+ * stuck IN-PROCESS thread now zombies +15m over the old 60m before its slot frees.
+ * Acceptable at pilot volume; when it matters, derive the cutoff per row from
+ * `sandboxProvider` (remote 75m, in-process 60m) instead of widening the constant.
  */
 export const STALLED_CUTOFF_SECS = 75 * 60;
 

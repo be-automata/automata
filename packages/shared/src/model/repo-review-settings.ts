@@ -20,8 +20,12 @@ import { and, eq } from "drizzle-orm";
  * apps/www boundary via `isBlockTolerance` before it maps to a policy.
  */
 
-/** Normalize a repo slug for storage/lookup (case-insensitive GitHub slugs). */
-function normalizeRepo(repoFullName: string): string {
+/**
+ * Normalize a repo slug for storage/lookup (case-insensitive GitHub slugs).
+ * Exported so every model keying on a repo slug (e.g. `hatchet-run`) shares ONE
+ * normalization — divergent copies would silently miss rows on case mismatch.
+ */
+export function normalizeRepo(repoFullName: string): string {
   return repoFullName.trim().toLowerCase();
 }
 

@@ -1473,10 +1473,15 @@ export const hatchetRun = pgTable(
     prNumber: integer("pr_number").notNull(),
     /** Hatchet workflow-run id (`run.metadata.id`) — the handle passed to cancel. */
     externalId: text("external_id").notNull(),
-    /** 'in_flight' at dispatch → 'superseded' when a newer review cancels it. */
+    /**
+     * 'in_flight' at dispatch → 'superseded' when a newer review cancels it.
+     * There is deliberately NO 'finished' state: rows are never eagerly marked
+     * done (the supersede finder bounds candidates by a freshness window
+     * instead); widen this union only when something actually writes a value.
+     */
     status: text("status")
       .notNull()
-      .$type<"in_flight" | "superseded" | "finished">()
+      .$type<"in_flight" | "superseded">()
       .default("in_flight"),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })

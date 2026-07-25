@@ -14,6 +14,23 @@ export interface HatchetTriggerConfig {
 }
 
 /**
+ * Fail loudly when Hatchet is enabled but the transport env is incomplete —
+ * shared by trigger and cancel so the two error messages can't drift.
+ */
+function requireHatchetConfig(
+  config: HatchetTriggerConfig,
+  verb: "dispatch" | "cancel",
+): HatchetTriggerConfig {
+  const { apiUrl, tenantId, apiToken } = config;
+  if (!apiUrl || !tenantId || !apiToken) {
+    throw new Error(
+      `Hatchet ${verb} is enabled but HATCHET_API_URL / HATCHET_TENANT_ID / HATCHET_API_TOKEN are not all configured`,
+    );
+  }
+  return config;
+}
+
+/**
  * POST the v1 stable trigger. `input` is the reference-only workflow input; the
  * caller guarantees it holds no long-lived secret. `additionalMetadata` carries
  * the ids for traceability (the REST v1 trigger has no idempotency-key field —
@@ -30,12 +47,10 @@ export async function triggerAgentRun<
   input: T,
   config: HatchetTriggerConfig,
 ): Promise<{ externalId: string | undefined }> {
-  const { apiUrl, tenantId, apiToken } = config;
-  if (!apiUrl || !tenantId || !apiToken) {
-    throw new Error(
-      "Hatchet dispatch is enabled but HATCHET_API_URL / HATCHET_TENANT_ID / HATCHET_API_TOKEN are not all configured",
-    );
-  }
+  const { apiUrl, tenantId, apiToken } = requireHatchetConfig(
+    config,
+    "dispatch",
+  );
   const res = await fetch(
     `${apiUrl.replace(/\/$/, "")}/api/v1/stable/tenants/${tenantId}/workflow-runs/trigger`,
     {
@@ -84,12 +99,7 @@ export async function cancelAgentRun(
   if (externalIds.length === 0) {
     return;
   }
-  const { apiUrl, tenantId, apiToken } = config;
-  if (!apiUrl || !tenantId || !apiToken) {
-    throw new Error(
-      "Hatchet cancel is enabled but HATCHET_API_URL / HATCHET_TENANT_ID / HATCHET_API_TOKEN are not all configured",
-    );
-  }
+  const { apiUrl, tenantId, apiToken } = requireHatchetConfig(config, "cancel");
   const res = await fetch(
     `${apiUrl.replace(/\/$/, "")}/api/v1/stable/tenants/${tenantId}/tasks/cancel`,
     {

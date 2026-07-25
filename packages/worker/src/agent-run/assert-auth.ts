@@ -94,19 +94,28 @@ export async function assertAuthEnabled(
   }
   const url = probeEndpoint(config);
 
+  // Shared request plumbing: fetch with a bearer token, fail-closed on ANY
+  // network/transport error. The status ASSERTIONS stay at the call sites —
+  // they are what differ between the two probes.
+  const probeStatus = async (
+    token: string,
+    label: "negative" | "positive",
+  ): Promise<number> => {
+    try {
+      const res = await fetchImpl(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      return res.status;
+    } catch (err) {
+      throw new Error(
+        `auth-enabled gate: ${label} probe request failed (${err instanceof Error ? err.message : String(err)}) — refusing to boot`,
+      );
+    }
+  };
+
   // 1. NEGATIVE probe — a garbage token MUST be rejected.
-  let negStatus: number;
-  try {
-    const res = await fetchImpl(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${GARBAGE_TOKEN}` },
-    });
-    negStatus = res.status;
-  } catch (err) {
-    throw new Error(
-      `auth-enabled gate: negative probe request failed (${err instanceof Error ? err.message : String(err)}) — refusing to boot`,
-    );
-  }
+  const negStatus = await probeStatus(GARBAGE_TOKEN, "negative");
   if (negStatus >= 200 && negStatus < 300) {
     throw new Error(
       "auth-enabled gate: a GARBAGE token was ACCEPTED (2xx) — the engine is auth-DISABLED " +
@@ -121,18 +130,7 @@ export async function assertAuthEnabled(
   }
 
   // 2. POSITIVE probe — the real token MUST be accepted.
-  let posStatus: number;
-  try {
-    const res = await fetchImpl(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${config.realToken}` },
-    });
-    posStatus = res.status;
-  } catch (err) {
-    throw new Error(
-      `auth-enabled gate: positive probe request failed (${err instanceof Error ? err.message : String(err)}) — refusing to boot`,
-    );
-  }
+  const posStatus = await probeStatus(config.realToken, "positive");
   if (posStatus < 200 || posStatus >= 300) {
     throw new Error(
       `auth-enabled gate: the REAL token was REJECTED (${posStatus}) — the box is misconfigured. Refusing to boot.`,
