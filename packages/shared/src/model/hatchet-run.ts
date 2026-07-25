@@ -86,7 +86,10 @@ export async function findSupersedableReviewRuns({
         eq(hatchetRun.prNumber, prNumber),
         eq(hatchetRun.status, "in_flight"),
         ne(hatchetRun.threadId, excludeThreadId),
-        gte(hatchetRun.createdAt, new Date(now.getTime() - SUPERSEDE_FRESHNESS_MS)),
+        gte(
+          hatchetRun.createdAt,
+          new Date(now.getTime() - SUPERSEDE_FRESHNESS_MS),
+        ),
       ),
     );
 }

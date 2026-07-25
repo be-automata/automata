@@ -18,9 +18,9 @@ import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
  */
 
 function fakeHatchetToken(): string {
-  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString(
-    "base64url",
-  );
+  const header = Buffer.from(
+    JSON.stringify({ alg: "none", typ: "JWT" }),
+  ).toString("base64url");
   const claims = Buffer.from(
     JSON.stringify({
       sub: "tenant-test",
@@ -114,7 +114,9 @@ describe("agentRunWorkflow onFailure (#2)", () => {
   };
 
   it("posts exactly one custom-error with the Hatchet error summary — no prompt", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("OK", { status: 200 }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("OK", { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
     // ctx.errors() is Hatchet's per-task error map (error class/message, NOT agent
@@ -138,13 +140,13 @@ describe("agentRunWorkflow onFailure (#2)", () => {
   });
 
   it("does not throw when ctx.errors() is empty (falls back to a generic reason)", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("OK", { status: 200 }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("OK", { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const ctx = { errors: () => ({}) };
-    await expect(
-      workflowDef.onFailure.fn(INPUT, ctx),
-    ).resolves.toBeUndefined();
+    await expect(workflowDef.onFailure.fn(INPUT, ctx)).resolves.toBeUndefined();
     const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
     expect(body.messages[0].error_info).toMatch(/agent-run failed/);
   });

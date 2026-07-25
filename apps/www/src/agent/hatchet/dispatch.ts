@@ -246,10 +246,13 @@ export async function dispatchAgentRun({
   // an old-but-unconfirmed token as stale → clean up + re-dispatch). Accepted for now
   // as a 1-day-bounded edge (team-lead ruling).
   if (await hasActiveDaemonToken({ userId, name: runKey })) {
-    console.log("[hatchet] skipping duplicate dispatch — a run is already in flight", {
-      threadId,
-      threadChatId,
-    });
+    console.log(
+      "[hatchet] skipping duplicate dispatch — a run is already in flight",
+      {
+        threadId,
+        threadChatId,
+      },
+    );
     return;
   }
 
@@ -280,11 +283,14 @@ export async function dispatchAgentRun({
         baseBranch = pr.base.ref;
       }
     } catch (err) {
-      console.warn("[hatchet] could not resolve PR base branch — baseBranch unset", {
-        threadId,
-        prNumber: thread.githubPRNumber,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      console.warn(
+        "[hatchet] could not resolve PR base branch — baseBranch unset",
+        {
+          threadId,
+          prNumber: thread.githubPRNumber,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
     }
   }
 
@@ -354,7 +360,11 @@ export async function dispatchAgentRun({
   try {
     // The token is minted BEFORE the trigger (the input carries its value). Retry
     // absorbs transients; only a FINAL failure lands here.
-    const { externalId } = await triggerWithRetry(input, threadId, threadChatId);
+    const { externalId } = await triggerWithRetry(
+      input,
+      threadId,
+      threadChatId,
+    );
 
     // Record this review run so a LATER push can supersede it. Only reviews are
     // tracked; a missing externalId (unexpected trigger-response shape) just skips
@@ -382,11 +392,14 @@ export async function dispatchAgentRun({
     // transitions the thread to a terminal error — the remote path's equivalent of
     // in-process sandbox-creation-failed handling. Without this the thread would
     // sit in `booting` forever with no surfaced error (zombie thread).
-    console.error("[hatchet] dispatch failed after retries — revoking token + failing thread", {
-      threadId,
-      threadChatId,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    console.error(
+      "[hatchet] dispatch failed after retries — revoking token + failing thread",
+      {
+        threadId,
+        threadChatId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
     await revokeDaemonTokensForSandbox({ userId, sandboxId: runKey }).catch(
       () => {},
     );

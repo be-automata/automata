@@ -7,7 +7,11 @@ import {
   classifyNextMessageError,
   nonRetryablePreflight,
 } from "./retry-classification";
-import { pollUntilTerminal, postRunFailed, pullNextMessage } from "./www-client";
+import {
+  pollUntilTerminal,
+  postRunFailed,
+  pullNextMessage,
+} from "./www-client";
 import type { AgentRunInput, AgentRunOutput } from "./types";
 
 export type { AgentRunInput, AgentRunOutput } from "./types";
@@ -181,7 +185,9 @@ agentRunWorkflow.task({
         };
       }
       // H2: log only non-sensitive shape, never the prompt.
-      step(`next-message: got message (agent=${message.agent}, model=${message.model})`);
+      step(
+        `next-message: got message (agent=${message.agent}, model=${message.model})`,
+      );
       const bytes = await daemon.sendMessage(message);
       step(`socket write ok: ${bytes} bytes → daemon ACKed`);
 

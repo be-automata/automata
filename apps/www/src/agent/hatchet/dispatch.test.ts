@@ -54,14 +54,11 @@ describe("dispatchAgentRun", () => {
   });
 
   it("triggers agent-run with REFERENCE-ONLY input and NO long-lived secret", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({ run: { metadata: { id: "run-1" } } }),
-          { status: 200 },
-        ),
-      );
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ run: { metadata: { id: "run-1" } } }), {
+        status: 200,
+      }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     await dispatchAgentRun({
@@ -127,14 +124,11 @@ describe("dispatchAgentRun", () => {
     // A thread with no organizationId must still carry a stable, non-empty orgId so
     // the Phase-2 per-org concurrency CEL never dereferences null.
     const personal = await createTestThread({ db, userId: user.id });
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({ run: { metadata: { id: "run" } } }),
-          { status: 200 },
-        ),
-      );
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ run: { metadata: { id: "run" } } }), {
+        status: 200,
+      }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     await dispatchAgentRun({
@@ -230,9 +224,9 @@ describe("dispatchAgentRun", () => {
     // Retried up to the budget, then gave up.
     expect(fetchMock).toHaveBeenCalledTimes(3);
     // Token revoked (revoke is awaited before the throw) — no stale block.
-    expect(
-      await hasActiveDaemonToken({ userId: user.id, name: runKey }),
-    ).toBe(false);
+    expect(await hasActiveDaemonToken({ userId: user.id, name: runKey })).toBe(
+      false,
+    );
     vi.unstubAllGlobals();
   });
 
@@ -256,9 +250,9 @@ describe("dispatchAgentRun", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(
-      await hasActiveDaemonToken({ userId: user.id, name: runKey }),
-    ).toBe(true);
+    expect(await hasActiveDaemonToken({ userId: user.id, name: runKey })).toBe(
+      true,
+    );
     vi.unstubAllGlobals();
   });
 });
@@ -278,7 +272,9 @@ describe("dispatchAgentRun — #8 supersede stale in-flight review", () => {
     orgId = org.id;
   });
 
-  async function makeAutomation(triggerType: "pull_request" | "github_mention") {
+  async function makeAutomation(
+    triggerType: "pull_request" | "github_mention",
+  ) {
     const automation = await createAutomation({
       db,
       userId: user.id,

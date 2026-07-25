@@ -23,14 +23,11 @@ describe("triggerAgentRun (Hatchet REST v1)", () => {
   it("POSTs the v1 stable trigger with Bearer auth and the agent-run envelope", async () => {
     // The v1 stable trigger returns a V1WorkflowRunDetails body; the run id lives
     // at run.metadata.id (NOT a top-level externalId).
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({ run: { metadata: { id: "run-123" } } }),
-          { status: 200 },
-        ),
-      );
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ run: { metadata: { id: "run-123" } } }), {
+        status: 200,
+      }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const res = await triggerAgentRun(INPUT, CONFIG);

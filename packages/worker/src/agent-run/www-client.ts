@@ -138,10 +138,13 @@ export async function postRunFailed(
   if (!res.ok) {
     // 401 here = the revoked-token failure class (daemonToken already dead); the
     // stalled-thread watchdog is the backstop. Log, never throw.
-    console.error("[agent-run] postRunFailed non-2xx — thread not marked failed here", {
-      threadId: opts.threadId,
-      status: res.status,
-    });
+    console.error(
+      "[agent-run] postRunFailed non-2xx — thread not marked failed here",
+      {
+        threadId: opts.threadId,
+        status: res.status,
+      },
+    );
   }
 }
 
@@ -204,7 +207,9 @@ async function cancellableSleep(ms: number, ctx: PollContext): Promise<void> {
     if (ctx.cancelled || ctx.signal?.aborted) {
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(step, ms - elapsed)));
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(step, ms - elapsed)),
+    );
     elapsed += step;
   }
 }
