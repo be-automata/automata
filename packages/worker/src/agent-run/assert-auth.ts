@@ -76,7 +76,11 @@ export function loadAuthProbeConfig(
 }
 
 function probeEndpoint(config: AuthProbeConfig): string {
-  return `${config.apiUrl.replace(/\/+$/, "")}/api/v1/stable/tenants/${config.tenantId}/workflow-runs?limit=1`;
+  // `since` + `only_tasks` are REQUIRED query params (live-verified against
+  // hatchet-lite v0.94.10: omitting only_tasks → 400 even with a valid token,
+  // which would trip the positive probe). Keep in sync with assert-auth-enabled.sh.
+  const since = new Date().toISOString();
+  return `${config.apiUrl.replace(/\/+$/, "")}/api/v1/stable/tenants/${config.tenantId}/workflow-runs?since=${encodeURIComponent(since)}&only_tasks=false&limit=1`;
 }
 
 /**

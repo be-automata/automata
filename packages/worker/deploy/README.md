@@ -34,10 +34,21 @@ signing key → tenancy void) never gets a worker:
 #!/bin/bash
 export PATH="…"                       # node/pnpm on PATH
 cd <repo>/packages/worker
+set -a; source ~/.automata/worker-box.env; set +a
 # #5 fail-closed gate — exits non-zero (blocks boot) if auth is off or the image drifted.
-pnpm exec dotenv -e ~/.automata/worker-box.env -- bash scripts/assert-auth-enabled.sh
-exec pnpm exec dotenv -e ~/.automata/worker-box.env -- pnpm run worker
+bash scripts/assert-auth-enabled.sh || exit 1
+# Daemon bundle must be current (worker consumes packages/daemon/dist).
+pnpm run daemon:build || exit 1
+exec node --import tsx src/hello/worker.ts
 ```
+
+> **SIGNAL CONTRACT (gap #4) — the script MUST end in `exec node …`.** A
+> `pnpm run` / `dotenv --` wrapper chain (launchd → pnpm → pnpm → sh → tsx → node)
+> swallows launchd's SIGTERM at the top pnpm layer, so `launchctl kill TERM` never
+> reaches the worker and the drain contract silently breaks — live-verified
+> 2026-07-25. Sourcing the env in-shell and loading tsx IN-PROCESS
+> (`node --import tsx`) leaves the worker as the service's direct process, so the
+> SDK's own SIGTERM handler receives the signal and drains.
 
 `assert-auth-enabled.sh` needs `HATCHET_API_URL`, `HATCHET_TENANT_ID`, and
 `HATCHET_API_TOKEN` (or `HATCHET_CLIENT_TOKEN`) in the env — the same
