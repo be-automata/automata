@@ -115,36 +115,37 @@ export async function buildRemoteDaemonMessage({
 
   const featureFlags = await getFeatureFlagsForUser({ db, userId });
 
-  // ADR-036 phase-2: under REVIEW_SINGLE_WRITER, a review thread (pull_request
-  // automation) spawns with permissionMode="review" — the daemon then applies the
-  // no-gh-write tool-policy + strips all GitHub credentials from the agent env, so
-  // the agent can only EMIT its verdict (the executor posts it at thread-finish).
-  // Gated by the flag so the extra lookups are zero-cost while deployed dark, and
-  // flag-off review threads keep today's behavior (agent posts via gh + reconciler).
-  let applyReviewPolicy = false;
-  // The per-repo tolerance directive injected into a review agent's prompt so it
-  // chooses the tolerance-correct verdict (the PRIMARY tolerance mechanism; the
-  // server floor only backstops a too-generous approve and cannot relax an
-  // agent's request_changes). Empty for non-review threads.
+  // Per-repo review tolerance (ADR-036) is MODE-AGNOSTIC: the directive that tells
+  // the agent which verdict its findings imply under the repo's floor is PURE
+  // PROMPT GUIDANCE — it does not depend on WHO posts the review, so it is injected
+  // for EVERY review thread (a pull_request automation), whether REVIEW_SINGLE_WRITER
+  // is on or off. Without it the agent falls back to its static "warning blocks"
+  // rule and a per-repo `error`/`info` floor never takes effect (the server floor
+  // can only downgrade a too-generous approve, never relax an agent request_changes).
+  // review-thread determination is therefore hoisted OUT of the flag gate.
+  const reviewThread = await getThreadMinimal({ db, userId, threadId });
+  const isReview = await isReviewThread({
+    db,
+    userId,
+    automationId: reviewThread?.automationId ?? null,
+    organizationId: reviewThread?.organizationId ?? null,
+  });
   let reviewToleranceDirective = "";
-  if (env.REVIEW_SINGLE_WRITER) {
-    const thread = await getThreadMinimal({ db, userId, threadId });
-    applyReviewPolicy = await isReviewThread({
+  if (isReview && reviewThread?.githubRepoFullName) {
+    const policy = await resolveApproveFloor({
       db,
-      userId,
-      automationId: thread?.automationId ?? null,
-      organizationId: thread?.organizationId ?? null,
+      organizationId: reviewThread.organizationId ?? null,
+      repoFullName: reviewThread.githubRepoFullName,
     });
-    if (applyReviewPolicy && thread?.githubRepoFullName) {
-      const policy = await resolveApproveFloor({
-        db,
-        organizationId: thread.organizationId ?? null,
-        repoFullName: thread.githubRepoFullName,
-      });
-      reviewToleranceDirective =
-        "\n\n---\n\n" + buildReviewToleranceDirective(policy) + "\n";
-    }
+    reviewToleranceDirective =
+      "\n\n---\n\n" + buildReviewToleranceDirective(policy) + "\n";
   }
+
+  // SINGLE-WRITER ONLY: permissionMode="review" makes the daemon strip all GitHub
+  // credentials + apply the no-gh-write tool-policy (agent EMITs; the executor posts
+  // once at thread-finish, with the server-floor approve backstop). This stays gated
+  // on REVIEW_SINGLE_WRITER — it governs WHO posts, not the tolerance verdict.
+  const applyReviewPolicy = env.REVIEW_SINGLE_WRITER && isReview;
 
   return {
     type: "claude",
