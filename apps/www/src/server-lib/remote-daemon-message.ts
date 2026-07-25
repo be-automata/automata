@@ -45,10 +45,22 @@ export async function buildRemoteDaemonMessage({
   userId,
   threadId,
   threadChatId,
+  thread,
 }: {
   userId: string;
   threadId: string;
   threadChatId: string;
+  /**
+   * The already-fetched thread (getThreadMinimal), when the caller loaded it just
+   * before calling here (the next-message route does, for its ownership check).
+   * Passed to computeReviewToleranceDirective so the always-on directive adds no
+   * extra read. Omitted → the directive helper fetches the thread itself.
+   */
+  thread?: {
+    automationId: string | null;
+    organizationId: string | null;
+    githubRepoFullName: string;
+  } | null;
 }): Promise<RemoteDaemonMessage | null> {
   const threadChat = await getThreadChat({
     db,
@@ -115,7 +127,7 @@ export async function buildRemoteDaemonMessage({
   // guidance, injected for EVERY review thread regardless of REVIEW_SINGLE_WRITER
   // (see computeReviewToleranceDirective — it never reads the flag).
   const { directive: reviewToleranceDirective, isReview } =
-    await computeReviewToleranceDirective({ db, userId, threadId });
+    await computeReviewToleranceDirective({ db, userId, threadId, thread });
 
   // SINGLE-WRITER ONLY: permissionMode="review" makes the daemon strip all GitHub
   // credentials + apply the no-gh-write tool-policy (agent EMITs; the executor posts

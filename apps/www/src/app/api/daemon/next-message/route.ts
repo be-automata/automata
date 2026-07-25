@@ -78,11 +78,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // Defense in depth: the token's user must own the thread, and its org must match.
   const thread = await getThreadMinimal({ db, userId: ctx.userId, threadId });
   if (!thread) {
-    console.log("[daemon next-message] forbidden: token user does not own thread", {
-      threadId,
-      threadChatId,
-      org: ctx.organizationId,
-    });
+    console.log(
+      "[daemon next-message] forbidden: token user does not own thread",
+      {
+        threadId,
+        threadChatId,
+        org: ctx.organizationId,
+      },
+    );
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   if ((thread.organizationId ?? null) !== (ctx.organizationId ?? null)) {
@@ -99,6 +102,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     userId: ctx.userId,
     threadId,
     threadChatId,
+    // Reuse the thread we already loaded above (ownership check) so the always-on
+    // review-tolerance directive computation adds zero extra reads.
+    thread,
   });
   if (!message) {
     return new NextResponse(null, { status: 204 });

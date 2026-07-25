@@ -86,7 +86,9 @@ describe("POST /api/daemon/next-message", () => {
   });
 
   it("F1: 403 for a non-daemon (e.g. CLI) token", async () => {
-    vi.mocked(getDaemonTokenContext).mockResolvedValue(ctx({ tokenType: null }));
+    vi.mocked(getDaemonTokenContext).mockResolvedValue(
+      ctx({ tokenType: null }),
+    );
     const res = await POST(req({ threadId, threadChatId }));
     expect(res.status).toBe(403);
     expect(buildRemoteDaemonMessage).not.toHaveBeenCalled();
@@ -120,9 +122,7 @@ describe("POST /api/daemon/next-message", () => {
       ctx({ threadId }),
     );
     // …used to pull thread B (other.threadId) with the SAME threadChatId.
-    const res = await POST(
-      req({ threadId: other.threadId, threadChatId }),
-    );
+    const res = await POST(req({ threadId: other.threadId, threadChatId }));
     expect(res.status).toBe(403);
     expect(buildRemoteDaemonMessage).not.toHaveBeenCalled();
   });
@@ -154,11 +154,16 @@ describe("POST /api/daemon/next-message", () => {
     const res = await POST(req({ threadId, threadChatId }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(CANNED);
-    expect(buildRemoteDaemonMessage).toHaveBeenCalledWith({
-      userId: user.id,
-      threadId,
-      threadChatId,
-    });
+    expect(buildRemoteDaemonMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: user.id,
+        threadId,
+        threadChatId,
+        // The route reuses the thread it already loaded (ownership check) so the
+        // always-on tolerance directive adds no extra read.
+        thread: expect.objectContaining({ id: threadId }),
+      }),
+    );
   });
 
   it("204 when there is nothing to send yet", async () => {
