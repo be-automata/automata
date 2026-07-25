@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { hatchet } from "../hatchet-client";
+import { assertAuthEnabledFromEnv } from "../agent-run/assert-auth";
 import { loadWorkerConfig } from "../agent-run/config";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
 import {
@@ -41,6 +42,20 @@ function claimNamespaceAndReclaim(): void {
  * installer runs and keeps alive. Run locally with `pnpm --filter @terragon/worker worker`.
  */
 async function main() {
+  // #5 fail-closed gate: refuse to boot against an auth-DISABLED engine (a
+  // -dev/auth-off hatchet-lite embeds a public signing key → tenancy void). Runs
+  // BEFORE anything else so a misconfigured box never registers a worker.
+  try {
+    await assertAuthEnabledFromEnv();
+    console.log("[worker-boot] auth-enabled probe OK");
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: auth-enabled probe failed — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
+
   claimNamespaceAndReclaim();
   const worker = await hatchet.worker("automata-worker", {
     workflows,
