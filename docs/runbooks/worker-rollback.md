@@ -14,6 +14,6 @@ To roll back a bad `automata-www` Worker deploy:
 After every deploy, run the canary before declaring success:
 
 1. Confirm the new version id: `wrangler deployments list | head`.
-2. Hit five health endpoints and assert 200/401 as documented above.
+2. Re-run the two verification checks documented above (the `/api/review-settings` 401 probe and the site-root 200 check).
 3. Watch the error rate in the dashboard for 10 minutes; if it climbs, roll back immediately per the steps above.
 4. Record the deployed version id and canary result in the deploy log.
