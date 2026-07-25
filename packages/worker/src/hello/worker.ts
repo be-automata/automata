@@ -61,6 +61,20 @@ async function main() {
     workflows,
     slots: 5,
   });
+
+  // Graceful-drain semantics (Phase 3.1 / plan amendment 8). We deliberately install
+  // NO custom SIGTERM/SIGINT handler: the Hatchet SDK already registers
+  // `process.on('SIGTERM'|'SIGINT') → exitGracefully()`, which PAUSES task assignment
+  // on the engine (stops picking up new runs) and then awaits the in-flight run to
+  // completion before the process exits. A second handler of ours would RACE the
+  // SDK's and risk tearing the daemon down mid-run — the exact drop we're preventing.
+  // The operator restart procedure MUST therefore be SIGTERM + wait (never
+  // `launchctl kickstart -k`, which is SIGKILL) — see packages/worker/deploy/README.md.
+  // This log line lets an operator confirm the drain contract from worker.log.
+  console.log(
+    "[worker-boot] SIGTERM/SIGINT → SDK graceful drain (in-flight agent-run completes before exit; no custom handler by design)",
+  );
+
   await worker.start();
 }
 
