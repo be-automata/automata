@@ -20,6 +20,26 @@ const TRIGGER_BACKOFF_MS = 400;
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Lowercase hex for `n` random bytes (crypto.getRandomValues — Workers + Node). */
+function randomHex(bytes: number): string {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Generate a fresh W3C `traceparent` for the #7 end-to-end trace join:
+ *   `00-<32hex traceId>-<16hex spanId>-01`   (version 00, sampled flag 01).
+ *
+ * DELIBERATELY dependency-light: no OpenTelemetry SDK is added to www (CF Workers
+ * bundle-size budget). A well-formed traceparent is enough for a collector to join
+ * the dispatch → worker → daemon-event → GitHub-post spans later; full OTLP export
+ * is NEEDS-INFRA (operator checklist). The traceId/spanId are just random ids here.
+ */
+export function generateTraceparent(): string {
+  return `00-${randomHex(16)}-${randomHex(8)}-01`;
+}
+
 /**
  * Trigger the agent-run with a small bounded retry. Each failed attempt is logged
  * with the actual error; only the FINAL failure propagates (the caller then
@@ -198,6 +218,11 @@ export async function dispatchAgentRun({
   const orgId = thread?.organizationId ?? `u:${userId}`;
   const prNumber = thread?.githubPRNumber ?? undefined;
 
+  // #7 trace join: mint a W3C traceparent at the dispatch boundary so the worker's
+  // run span and the daemon-event → GitHub-post can be stitched into one trace by a
+  // collector later. Never carries the tokens/prompt — it is opaque random ids.
+  const traceparent = generateTraceparent();
+
   const input: AgentRunInput = {
     threadId,
     threadChatId,
@@ -209,13 +234,16 @@ export async function dispatchAgentRun({
     daemonToken,
     orgId,
     prNumber,
-    // traceparent: populated in Phase 4 (#7); undefined for now.
+    traceparent,
   };
   console.log("[hatchet] dispatching agent-run", {
     threadId,
     threadChatId,
     repoFullName,
     branch,
+    orgId,
+    prNumber,
+    traceparent,
   });
 
   try {

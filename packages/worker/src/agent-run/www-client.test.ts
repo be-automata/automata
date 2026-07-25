@@ -122,6 +122,34 @@ describe("pullNextMessage", () => {
     expect(await pullNextMessage(opts)).toBeNull();
   });
 
+  it("forwards the traceparent header when set (#7), and omits it when unset", async () => {
+    // With a traceparent on the opts, every www call carries it so the control-plane
+    // handler + GitHub post join the dispatch-minted trace.
+    const withTrace: WwwClientOpts = {
+      ...opts,
+      traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+    };
+    const fetchWith = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse(200, { status: "working", terminal: false }),
+    );
+    vi.stubGlobal("fetch", fetchWith);
+    await pollThreadStatus(withTrace);
+    expect(
+      (fetchWith.mock.calls[0]![1]!.headers as Record<string, string>).traceparent,
+    ).toBe("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
+
+    // Without one (the pre-#7 / in-sandbox path) the header is simply absent.
+    const fetchWithout = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse(200, { status: "working", terminal: false }),
+    );
+    vi.stubGlobal("fetch", fetchWithout);
+    await pollThreadStatus(opts);
+    expect(
+      (fetchWithout.mock.calls[0]![1]!.headers as Record<string, string>)
+        .traceparent,
+    ).toBeUndefined();
+  });
+
   it("throws on a non-2xx that is not 204", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(500, { error: "x" })));
     await expect(pullNextMessage(opts)).rejects.toThrow(/HTTP 500/);

@@ -104,6 +104,10 @@ agentRunWorkflow.task({
       daemonToken: input.daemonToken,
       threadId: input.threadId,
       threadChatId: input.threadChatId,
+      // #7 trace join: forwarded as a `traceparent` header on every www call so the
+      // daemon-event → GitHub-post continues the dispatch-minted trace. undefined
+      // until dispatch wires #7 (then the header is simply omitted).
+      traceparent: input.traceparent,
     };
 
     // Cancellation signal (Hatchet cancel: scheduleTimeout/executionTimeout). Used
@@ -120,9 +124,11 @@ agentRunWorkflow.task({
 
     // Step logging (boot-coder): each boot step is logged so a stalled re-fire
     // pinpoints exactly where the agent fails to launch. Never logs the prompt (H2)
-    // — only ids, pids, counts, and thread status.
+    // — only ids, pids, counts, and thread status. #7: the run's traceparent is
+    // stamped on every line (`trace=…`) so worker logs join the end-to-end trace.
+    const tracePrefix = input.traceparent ? ` trace=${input.traceparent}` : "";
     const step = (msg: string) =>
-      ctx.log(`[agent-run ${input.threadId}] ${msg}`);
+      ctx.log(`[agent-run ${input.threadId}${tracePrefix}] ${msg}`);
 
     // Provision: clone into a per-run workdir keyed on threadId. threadId is unique
     // per thread; threadChatId is the shared legacy sentinel when

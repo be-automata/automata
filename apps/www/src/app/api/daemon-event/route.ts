@@ -66,6 +66,8 @@ export async function POST(request: Request) {
     userId,
     timezone,
     contextUsage: computedContextUsage ?? null,
+    // #7 trace join: continue the trace the remote worker forwards on the header.
+    traceparent: request.headers.get("traceparent") ?? undefined,
   });
 
   if (!result.success) {

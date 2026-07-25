@@ -12,17 +12,28 @@ export interface WwwClientOpts {
   daemonToken: string;
   threadId: string;
   threadChatId: string;
+  /**
+   * W3C `traceparent` for the #7 end-to-end trace join. When present it is sent as a
+   * `traceparent` header on every www call so the control-plane handler (and the
+   * GitHub post it triggers) continue the dispatch-minted trace. Undefined → the
+   * header is simply omitted (trace join is a no-op, no behaviour change).
+   */
+  traceparent?: string;
 }
 
 function endpoint(baseUrl: string, pathname: string): string {
   return `${baseUrl.replace(/\/+$/, "")}${pathname}`;
 }
 
-function headers(daemonToken: string): Record<string, string> {
-  return {
+function headers(opts: WwwClientOpts): Record<string, string> {
+  const h: Record<string, string> = {
     "content-type": "application/json",
-    "x-daemon-token": daemonToken,
+    "x-daemon-token": opts.daemonToken,
   };
+  if (opts.traceparent) {
+    h.traceparent = opts.traceparent;
+  }
+  return h;
 }
 
 /**
@@ -54,7 +65,7 @@ export async function pullNextMessage(
 ): Promise<PulledDaemonMessage | null> {
   const res = await fetch(endpoint(opts.baseUrl, "/api/daemon/next-message"), {
     method: "POST",
-    headers: headers(opts.daemonToken),
+    headers: headers(opts),
     body: JSON.stringify({
       threadId: opts.threadId,
       threadChatId: opts.threadChatId,
@@ -114,7 +125,7 @@ export async function postRunFailed(
   try {
     res = await fetch(endpoint(opts.baseUrl, "/api/daemon-event"), {
       method: "POST",
-      headers: headers(opts.daemonToken),
+      headers: headers(opts),
       body: JSON.stringify(body),
     });
   } catch (error) {
@@ -149,7 +160,7 @@ export async function pollThreadStatus(
 ): Promise<ThreadStatusPoll> {
   const res = await fetch(endpoint(opts.baseUrl, "/api/daemon/thread-status"), {
     method: "POST",
-    headers: headers(opts.daemonToken),
+    headers: headers(opts),
     body: JSON.stringify({
       threadId: opts.threadId,
       threadChatId: opts.threadChatId,

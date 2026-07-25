@@ -78,9 +78,9 @@ describe("dispatchAgentRun", () => {
     expect(body.workflowName).toBe("agent-run");
     const input = body.input;
 
-    // Exactly the reference-only fields — nothing more. `orgId` is always present
-    // (never null); `prNumber`/`traceparent` are omitted here (undefined → dropped
-    // by JSON.stringify) because this fixture thread has no PR and #7 is unwired.
+    // Exactly the reference-only fields — nothing more. `orgId` and `traceparent`
+    // are always present; `prNumber` is omitted here (undefined → dropped by
+    // JSON.stringify) because this fixture thread has no PR.
     expect(Object.keys(input).sort()).toEqual(
       [
         "branch",
@@ -91,8 +91,12 @@ describe("dispatchAgentRun", () => {
         "repoFullName",
         "threadChatId",
         "threadId",
+        "traceparent",
       ].sort(),
     );
+    // #7: a well-formed W3C traceparent (version 00, 32-hex trace, 16-hex span,
+    // sampled flag 01) is minted at dispatch for the end-to-end trace join.
+    expect(input.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
     expect(input.threadId).toBe(threadId);
     expect(input.threadChatId).toBe(threadChatId);
     expect(input.repoFullName).toBe("be-automata/automata");

@@ -43,6 +43,7 @@ export async function handleDaemonEvent({
   userId,
   timezone,
   contextUsage,
+  traceparent,
 }: {
   messages: ClaudeMessage[];
   threadId: string;
@@ -50,6 +51,13 @@ export async function handleDaemonEvent({
   userId: string;
   timezone: string;
   contextUsage: number | null;
+  /**
+   * W3C `traceparent` from the inbound daemon-event request (#7 trace join). The
+   * remote worker forwards the run's traceparent header so this handler — and the
+   * GitHub review post it triggers — log inside the dispatch-minted trace. Optional:
+   * absent for in-sandbox daemons and pre-#7 runs.
+   */
+  traceparent?: string;
 }) {
   console.log(
     "Daemon event",
@@ -59,6 +67,8 @@ export async function handleDaemonEvent({
     threadChatId,
     "timezone",
     timezone,
+    "traceparent",
+    traceparent ?? "(none)",
     "messages",
     JSON.stringify(messages, null, 2),
   );
