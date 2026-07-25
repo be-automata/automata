@@ -3,7 +3,7 @@ import { hatchet } from "../hatchet-client";
 import { loadWorkerConfig } from "./config";
 import { DaemonProcess } from "./daemon-process";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
-import { pollUntilTerminal, pullNextMessage } from "./www-client";
+import { pollUntilTerminal, postRunFailed, pullNextMessage } from "./www-client";
 import type { AgentRunInput, AgentRunOutput } from "./types";
 
 export type { AgentRunInput, AgentRunOutput } from "./types";
@@ -145,3 +145,62 @@ agentRunWorkflow.task({
     }
   },
 });
+
+/**
+ * #2 on-failure handler. Fires ONLY when the workflow FAILED (Hatchet guarantees
+ * this), so it can never post a false failure on a successful run. It POSTs a
+ * synthetic terminal `custom-error` to www (postRunFailed) so the thread flips to a
+ * surfaced error + runs the finish pipeline, instead of hanging as a silent
+ * "working…". The www transition is terminal-idempotent, so a race with a real
+ * terminal event is absorbed (CAS no-op). No `name` option — CreateOnFailureTaskOpts
+ * omits it (SDK amendment 3).
+ *
+ * BACKSTOP CAVEAT (amendment 4): this auths with `input.daemonToken`. For the
+ * revoked-token failure class (S12 family) that token is ALREADY dead, so the POST
+ * 401s and this cannot mark the thread failed — the www-side stalled-thread watchdog
+ * (raised to 75m in cron.ts) is the ONLY backstop there.
+ *
+ * H2: the reason is built ONLY from Hatchet's own error summary (ctx.errors()),
+ * never agent output or the prompt. Wrapped so onFailure never throws uncaught.
+ */
+agentRunWorkflow.onFailure({
+  fn: async (input: AgentRunInput, ctx): Promise<void> => {
+    try {
+      await postRunFailed(
+        {
+          baseUrl: input.daemonCallbackUrl,
+          daemonToken: input.daemonToken,
+          threadId: input.threadId,
+          threadChatId: input.threadChatId,
+        },
+        { reason: summarizeHatchetErrors(ctx) },
+      );
+    } catch (err) {
+      // postRunFailed already swallows its own errors; this is defense-in-depth so
+      // a summarise/build throw can't escape the on-failure task.
+      console.error(
+        `[agent-run ${input.threadId}] onFailure handler threw (swallowed)`,
+        err,
+      );
+    }
+  },
+});
+
+/**
+ * Build the failure reason from Hatchet's per-task error map (ctx.errors()): the
+ * error class/message the run task threw — NOT agent output (H2). `ctx.errors()`
+ * logs a warning when empty, so it's guarded.
+ */
+function summarizeHatchetErrors(ctx: {
+  errors?: () => Record<string, string>;
+}): string {
+  try {
+    const errs = ctx.errors?.() ?? {};
+    const summary = Object.entries(errs)
+      .map(([task, message]) => `${task}: ${message}`)
+      .join("; ");
+    return summary || "agent-run failed (no error detail from Hatchet)";
+  } catch {
+    return "agent-run failed";
+  }
+}

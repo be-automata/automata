@@ -1,3 +1,4 @@
+import type { DaemonEventAPIBody } from "@terragon/daemon/shared";
 import type { PulledDaemonMessage } from "./types";
 
 /**
@@ -54,6 +55,67 @@ export async function pullNextMessage(
     );
   }
   return (await res.json()) as PulledDaemonMessage;
+}
+
+/** Max length of the failure reason forwarded to www (bounds accidental leakage). */
+const MAX_REASON_LEN = 500;
+
+/**
+ * #2 terminal-failure callback. On a FAILED run, POST a SYNTHETIC `custom-error`
+ * daemon-event to /api/daemon-event so www runs its existing terminal-error finish
+ * pipeline (marks the thread failed, review reconciler posts a "couldn't complete"
+ * comment, queue drains) instead of leaving a silent "working…" hang. Reuses the
+ * daemon-event path + the run's daemonToken — no new endpoint, no new terminal path
+ * (a second terminal transition on an already-terminal thread is a CAS no-op).
+ *
+ * H2: `reason` must ONLY ever be a Hatchet error summary (error class/message from
+ * ctx.errors() or a caught error) — NEVER agent output or the prompt. Truncated to
+ * MAX_REASON_LEN as belt-and-suspenders.
+ *
+ * NEVER throws: onFailure must not throw uncaught. A revoked-token failure class
+ * (S12 family) 401s here — the daemonToken is already dead — in which case the
+ * www-side stalled-thread watchdog is the only backstop (documented at the call
+ * site in workflow.ts). Both a request error and a non-2xx are logged, not thrown.
+ */
+export async function postRunFailed(
+  opts: WwwClientOpts,
+  { reason }: { reason: string },
+): Promise<void> {
+  const body: DaemonEventAPIBody = {
+    threadId: opts.threadId,
+    threadChatId: opts.threadChatId,
+    timezone: "UTC",
+    messages: [
+      {
+        type: "custom-error",
+        session_id: null,
+        duration_ms: 0,
+        error_info: reason.slice(0, MAX_REASON_LEN),
+      },
+    ],
+  };
+  let res: Response;
+  try {
+    res = await fetch(endpoint(opts.baseUrl, "/api/daemon-event"), {
+      method: "POST",
+      headers: headers(opts.daemonToken),
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    console.error("[agent-run] postRunFailed request failed (swallowed)", {
+      threadId: opts.threadId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  if (!res.ok) {
+    // 401 here = the revoked-token failure class (daemonToken already dead); the
+    // stalled-thread watchdog is the backstop. Log, never throw.
+    console.error("[agent-run] postRunFailed non-2xx — thread not marked failed here", {
+      threadId: opts.threadId,
+      status: res.status,
+    });
+  }
 }
 
 export type ThreadStatusPoll =

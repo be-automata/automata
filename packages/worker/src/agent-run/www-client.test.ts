@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   pollThreadStatus,
   pollUntilTerminal,
+  postRunFailed,
   pullNextMessage,
   type PollContext,
   type WwwClientOpts,
@@ -24,6 +25,63 @@ function jsonResponse(status: number, body: unknown): Response {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe("postRunFailed (#2 terminal-failure callback)", () => {
+  it("POSTs exactly one custom-error with the reason + the daemon-token header", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("OK", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await postRunFailed(opts, { reason: "run: daemon rejected the message" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://www.example.com/api/daemon-event");
+    expect(init.method).toBe("POST");
+    expect(init.headers["x-daemon-token"]).toBe("daemon-token-abc");
+    const body = JSON.parse(init.body);
+    expect(body.threadId).toBe("thread-1");
+    expect(body.threadChatId).toBe("chat-1");
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0]).toMatchObject({
+      type: "custom-error",
+      error_info: "run: daemon rejected the message",
+    });
+  });
+
+  it("truncates a long reason and never carries prompt/agent content", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("OK", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const reason = "E".repeat(2000);
+    await postRunFailed(opts, { reason });
+
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
+    expect(body.messages[0].error_info.length).toBe(500);
+    // Nothing prompt-shaped is ever in the payload — it's a bare error summary.
+    expect(JSON.stringify(body)).not.toContain("prompt");
+  });
+
+  it("a 401 (revoked token) is logged, NOT thrown (watchdog is the backstop)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("no", { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(
+      postRunFailed(opts, { reason: "run: revoked" }),
+    ).resolves.toBeUndefined();
+    expect(errSpy).toHaveBeenCalled();
+  });
+
+  it("a network error is swallowed (onFailure must never throw)", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(
+      postRunFailed(opts, { reason: "run: boom" }),
+    ).resolves.toBeUndefined();
+  });
 });
 
 describe("pullNextMessage", () => {

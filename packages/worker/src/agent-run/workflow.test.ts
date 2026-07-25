@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
 import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
 
 /**
@@ -43,6 +43,11 @@ beforeAll(async () => {
     .definition;
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
 describe("agentRunWorkflow registration shape", () => {
   it('keeps the workflow name "agent-run" (REST trigger contract)', () => {
     expect(workflowDef.name).toBe("agent-run");
@@ -75,5 +80,59 @@ describe("agentRunWorkflow registration shape", () => {
     expect(run.retries).toBe(0);
     expect(run.scheduleTimeout).toBe("30m");
     expect(run.executionTimeout).toBe("30m");
+  });
+
+  it("registers an onFailure handler (no name — SDK amendment 3)", () => {
+    expect(typeof workflowDef.onFailure?.fn).toBe("function");
+    expect(workflowDef.onFailure?.name).toBeUndefined();
+  });
+});
+
+describe("agentRunWorkflow onFailure (#2)", () => {
+  const INPUT = {
+    threadId: "thr_fail_1",
+    threadChatId: "tc_1",
+    repoFullName: "o/r",
+    branch: "main",
+    daemonCallbackUrl: "https://www.example.com",
+    installationToken: "inst-secret",
+    daemonToken: "daemon-tok",
+    orgId: "org-1",
+  };
+
+  it("posts exactly one custom-error with the Hatchet error summary — no prompt", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("OK", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // ctx.errors() is Hatchet's per-task error map (error class/message, NOT agent
+    // output). The handler forwards ONLY this as the reason.
+    const ctx = { errors: () => ({ run: "daemon rejected the message" }) };
+    await workflowDef.onFailure.fn(INPUT, ctx);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://www.example.com/api/daemon-event");
+    const body = JSON.parse(init.body);
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0].type).toBe("custom-error");
+    expect(body.messages[0].error_info).toContain(
+      "run: daemon rejected the message",
+    );
+    // No prompt / installation secret ever leaves in the failure callback (H2).
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("inst-secret");
+    expect(serialized.toLowerCase()).not.toContain("prompt");
+  });
+
+  it("does not throw when ctx.errors() is empty (falls back to a generic reason)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("OK", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const ctx = { errors: () => ({}) };
+    await expect(
+      workflowDef.onFailure.fn(INPUT, ctx),
+    ).resolves.toBeUndefined();
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
+    expect(body.messages[0].error_info).toMatch(/agent-run failed/);
   });
 });

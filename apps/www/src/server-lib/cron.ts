@@ -21,6 +21,17 @@ import { maybeStartQueuedThreadChat } from "@/server-lib/process-queued-thread";
 const BATCH_SIZE = 5;
 
 /**
+ * Stalled-thread cutoff (enterprise-hardening #2 watchdog delta, amendment 5). The
+ * default 60m EQUALS a remote agent-run's worst-case wall time (30m Hatchet schedule
+ * timeout + 30m execution timeout), so a legitimately late-starting REMOTE run could
+ * be reaped right at the boundary. Raise it to 75m (60m worst case + 15m margin) so
+ * the cron only reaps genuinely-stuck threads. This slow watchdog (≤1h) is the
+ * BACKSTOP for the revoked-token failure class the fast onFailure path can't cover
+ * (its daemonToken is already dead → the callback 401s).
+ */
+export const STALLED_CUTOFF_SECS = 75 * 60;
+
+/**
  * In-process cron runners (S12). The background maintenance jobs were declared ONLY
  * in apps/www/vercel.json (Vercel crons) and NEVER fire on the Cloudflare Workers
  * (OpenNext) deployment — no wrangler triggers.crons, no scheduled() handler. On top
@@ -53,7 +64,10 @@ export async function runStalledTasksCron(): Promise<void> {
     console.error("[cron:stalled] review sweep failed (non-fatal)", error);
   }
 
-  const stalledThreads = await getStalledThreads({ db });
+  const stalledThreads = await getStalledThreads({
+    db,
+    cutoffSecs: STALLED_CUTOFF_SECS,
+  });
   console.log(`[cron:stalled] found ${stalledThreads.length} stalled threads`);
   if (stalledThreads.length === 0) {
     return;
