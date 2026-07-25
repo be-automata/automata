@@ -42,7 +42,10 @@ const REVIEW_SWEEP_LOOKBACK_MS = 6 * 60 * 60 * 1000; // 6 h
 const TERMINAL_STATUSES: ThreadStatus[] = ["complete", "stopped"];
 
 export async function runReviewSweep(): Promise<void> {
-  if (!env.REVIEW_SINGLE_WRITER || !env.GITHUB_SIDE_EFFECTS_ENABLED) return;
+  // The single-writer review channel is unconditional (see handleReviewEffectAtFinish),
+  // so its grace-period sweep backstop always runs (still gated on the global
+  // GitHub-side-effects switch).
+  if (!env.GITHUB_SIDE_EFFECTS_ENABLED) return;
 
   const now = Date.now();
   const candidates = await db
@@ -66,7 +69,9 @@ export async function runReviewSweep(): Promise<void> {
     );
 
   if (candidates.length === 0) return;
-  console.log(`[review-sweep] ${candidates.length} terminal PR threads in window`);
+  console.log(
+    `[review-sweep] ${candidates.length} terminal PR threads in window`,
+  );
 
   for (const c of candidates) {
     if (c.prNumber === null) continue;
@@ -84,7 +89,11 @@ export async function runReviewSweep(): Promise<void> {
         repo: c.repoFullName.split("/")[1]!,
       });
       const github = createOctokitReviewClient(octokit);
-      const currentHeadSha = await getPrHeadSha(octokit, c.repoFullName, c.prNumber);
+      const currentHeadSha = await getPrHeadSha(
+        octokit,
+        c.repoFullName,
+        c.prNumber,
+      );
 
       // Already has a bot review at HEAD → the finish-hook handled it; skip.
       const existing = await findBotReviewAtHead({
@@ -102,7 +111,9 @@ export async function runReviewSweep(): Promise<void> {
         threadChatId: LEGACY_THREAD_CHAT_ID,
         userId: c.userId,
       });
-      const terminalText = extractTerminalAgentText(threadChat?.messages ?? null);
+      const terminalText = extractTerminalAgentText(
+        threadChat?.messages ?? null,
+      );
 
       const outcome = await executeReviewFromIntent({
         github,

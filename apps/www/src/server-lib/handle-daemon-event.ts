@@ -536,10 +536,10 @@ async function handleThreadFinish({
   repoFullName: string | null;
   prNumber: number | null;
 }) {
-  // ADR-036: dispatch the review effect for a terminal PR thread. With
-  // REVIEW_SINGLE_WRITER on + a review thread, the control-plane executor posts
-  // exactly once from the agent's emitted intent (the agent has no gh-write
-  // outlet); otherwise the interim post-run reconciler converges GitHub state to
+  // ADR-036: dispatch the review effect for a terminal PR thread. For a review
+  // thread the control-plane executor posts exactly once from the agent's emitted
+  // intent (the agent has no gh-write outlet) — unconditional single-writer; the
+  // post-run reconciler still runs as the straddle-backstop, converging GitHub to
   // the no-dup invariant. Both fail-soft (waitUntil + catch) — a review-effect
   // failure must never fail the thread.
   if (prNumber !== null && repoFullName) {
@@ -603,7 +603,10 @@ async function handleThreadFinish({
     // Call the processor directly. maybeStartQueuedThreadChat re-checks eligibility.
     waitUntil(
       maybeStartQueuedThreadChat({ userId }).catch((error) =>
-        console.error("[queue] finish-hook promotion failed", { userId, error }),
+        console.error("[queue] finish-hook promotion failed", {
+          userId,
+          error,
+        }),
       ),
     );
   }

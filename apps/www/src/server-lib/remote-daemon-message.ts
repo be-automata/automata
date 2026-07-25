@@ -1,5 +1,4 @@
 import { db } from "@/lib/db";
-import { env } from "@terragon/env/apps-www";
 import { getThreadChat } from "@terragon/shared/model/threads";
 import { computeReviewToleranceDirective } from "@/server-lib/review/review-tolerance-directive";
 import { getUserMessageToSend } from "@/lib/db-message-helpers";
@@ -129,11 +128,14 @@ export async function buildRemoteDaemonMessage({
   const { directive: reviewToleranceDirective, isReview } =
     await computeReviewToleranceDirective({ db, userId, threadId, thread });
 
-  // SINGLE-WRITER ONLY: permissionMode="review" makes the daemon strip all GitHub
-  // credentials + apply the no-gh-write tool-policy (agent EMITs; the executor posts
-  // once at thread-finish, with the server-floor approve backstop). This stays gated
-  // on REVIEW_SINGLE_WRITER — it governs WHO posts, not the tolerance verdict.
-  const applyReviewPolicy = env.REVIEW_SINGLE_WRITER && isReview;
+  // Every review thread runs emit-only: permissionMode="review" makes the daemon
+  // strip all GitHub credentials + apply the no-gh-write tool-policy, so the agent
+  // EMITs its verdict and the control plane posts it once at thread-finish (with
+  // the tolerance floor + approve backstop). This is unconditional now — the review
+  // channel is single-writer in every mode (the retired REVIEW_SINGLE_WRITER=false
+  // path posted nothing), and withholding gh creds here is what prevents a
+  // double-post now that the finish hook always posts the intent.
+  const applyReviewPolicy = isReview;
 
   return {
     type: "claude",

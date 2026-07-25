@@ -43,7 +43,7 @@ const sleep = (ms = 1000) => new Promise((r) => setTimeout(r, ms));
 export async function runStalledTasksCron(): Promise<void> {
   // ADR-036 GAP-1 backstop: post reviews for terminal PR review-threads that never
   // reached the finish-hook (hung → force-stopped, or dropped finish event). Runs on
-  // this hourly recovery cron; no-op unless REVIEW_SINGLE_WRITER is on. Dynamic import
+  // this hourly recovery cron (the single-writer channel is unconditional). Dynamic import
   // (like the other runners) so the heavy review deps don't poison the test harness's
   // eager cron-module load. Fail-soft — a sweep error must not skip stalled recovery.
   try {

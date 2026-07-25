@@ -17,11 +17,13 @@ import { executeReviewFromIntent } from "./execute-review-from-intent";
 import { resolveApproveFloor } from "./resolve-approve-floor";
 
 /**
- * Review-effect dispatch at thread-finish (ADR-036 phase-2). One entry the
- * daemon-event finish hook calls for a terminal PR thread; it routes:
- *   - REVIEW_SINGLE_WRITER on + a review thread → the control-plane executor
- *     (the agent posted nothing; www posts exactly once from the emitted intent),
- *   - otherwise → the interim post-run reconciler (today's behavior).
+ * Review-effect dispatch at thread-finish (ADR-036). One entry the daemon-event
+ * finish hook calls for a terminal PR thread:
+ *   - a review thread (pull_request automation) → the control-plane executor posts
+ *     exactly once from the agent's emitted intent (the agent has no gh-write
+ *     outlet), with the per-repo tolerance floor applied — unconditional
+ *     single-writer (the retired REVIEW_SINGLE_WRITER flag no longer gates this),
+ *   - any PR thread → the post-run reconciler runs at the end as the backstop.
  * GITHUB_SIDE_EFFECTS_ENABLED gates all of it (a shadow thread never boots, but
  * this guards the global switch regardless).
  */
@@ -90,15 +92,21 @@ export async function handleReviewEffectAtFinish({
 }): Promise<void> {
   if (!env.GITHUB_SIDE_EFFECTS_ENABLED) return;
 
-  // Flag off → interim reconciler (unchanged behavior).
-  if (!env.REVIEW_SINGLE_WRITER) {
-    await reconcilePrReviews({ repoFullName, prNumber });
-    return;
-  }
-
-  // Single-writer path (flag on). The ENTIRE path — thread lookups + review
-  // determination + intent parse + post — is wrapped so ANY unexpected throw
-  // (db/octokit/HEAD) degrades to the interim reconciler rather than propagating.
+  // The review channel is UNCONDITIONALLY single-writer (ADR-036): the review
+  // agent emits its verdict as a fenced-JSON intent (the deployed skill is
+  // emit-only in every mode) and the control plane posts it here, exactly once,
+  // with the per-repo tolerance floor applied. The old REVIEW_SINGLE_WRITER=false
+  // path (agent posts directly via gh + reconciler dedup) is retired: it was
+  // unwired once the skill went emit-only — the agent emitted but nothing parsed
+  // or posted the intent, so no review landed. Making this unconditional is a
+  // no-op in prod (already single-writer) and makes the tolerance reach GitHub
+  // regardless of the vestigial flag. The reconciler still runs at the end as the
+  // straddle-backstop (and the converging fallback for a non-review thread or a
+  // mid-fetch throw).
+  //
+  // The ENTIRE path — thread lookups + review determination + intent parse + post
+  // — is wrapped so ANY unexpected throw (db/octokit/HEAD) degrades to the
+  // reconciler rather than propagating.
   // This runs in the finish hook alongside the BUG-EXEC-01 queue-drain — a phase-2
   // bug must never regress it. The reconciler ALWAYS runs at the end: the executor's
   // straddle-backstop audit on success, AND the converging fallback for a non-review
