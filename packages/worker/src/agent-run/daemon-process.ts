@@ -4,8 +4,13 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { defaultUnixSocketPath } from "@terragon/daemon/shared";
 import { buildDaemonEnv } from "./daemon-env";
+import {
+  getProcessWorkerId,
+  runPidPath,
+  runSocketPath,
+  workerRunDir,
+} from "./run-namespace";
 import { verifyGhAuth } from "./verify-gh-auth";
 import type { WorkerConfig } from "./config";
 import type { AgentRunInput, PulledDaemonMessage } from "./types";
@@ -20,29 +25,41 @@ import type { AgentRunInput, PulledDaemonMessage } from "./types";
  * process-group leader of a sandbox), so it is spawned `detached` in its OWN
  * process group and torn down by signalling that group — never embedded in-process.
  *
- * Single shared socket path: the daemon bundle binds a FIXED socket
- * (defaultUnixSocketPath) with no override flag, so two daemons on one box would
- * collide. The agent-run workflow serialises runs (Hatchet concurrency, maxRuns 1)
- * to keep exactly one daemon alive at a time. Lifting that requires a daemon
- * `--socket-path` flag (tracked for post-pilot).
+ * Per-run socket + pidfile (Phase 0.2b): the daemon `--socket-path` flag lets each
+ * run bind a DISTINCT socket under `<runNamespaceRoot>/<workerId>/<threadId>.sock`,
+ * so N daemons no longer collide on the fixed default socket. The matching
+ * `<threadId>.pid` records the daemon's process-group pid; boot-time reclaim (see
+ * reclaim.ts) — NOT this class — reaps daemons orphaned by a worker-process death.
+ * start() only cleans THIS run's own stale socket/pid (e.g. a same-threadId retry).
  */
 export class DaemonProcess {
   private child: ChildProcess | null = null;
   private ghConfigDir: string | null = null;
   private env: NodeJS.ProcessEnv | null = null;
-  private readonly socketPath = defaultUnixSocketPath;
-  // PID of the daemon's process group, persisted so a daemon leaked by a prior
-  // worker-process death (which never ran teardown) can be reclaimed on next start.
-  private readonly pidFilePath = path.join(
-    path.dirname(defaultUnixSocketPath),
-    "agent-run-daemon.pid",
-  );
+  private readonly runDir: string;
+  private readonly socketPath: string;
+  // PID of the daemon's process group, persisted under this worker's namespaced dir
+  // so boot-reclaim can reap it if this worker process dies without running teardown.
+  private readonly pidFilePath: string;
 
   constructor(
     private readonly config: WorkerConfig,
     private readonly input: AgentRunInput,
     private readonly workdir: string,
-  ) {}
+  ) {
+    const workerId = getProcessWorkerId();
+    this.runDir = workerRunDir(config.runNamespaceRoot, workerId);
+    this.socketPath = runSocketPath(
+      config.runNamespaceRoot,
+      workerId,
+      input.threadId,
+    );
+    this.pidFilePath = runPidPath(
+      config.runNamespaceRoot,
+      workerId,
+      input.threadId,
+    );
+  }
 
   /**
    * Build the sanitized child env once (idempotent). Creates the isolated EMPTY gh
@@ -89,16 +106,24 @@ export class DaemonProcess {
 
   /** Spawn the daemon (own process group) and wait until its socket accepts. */
   async start(): Promise<void> {
-    // Reclaim a daemon orphaned by a prior worker-process death before we bind the
-    // fixed socket — no rogue daemon (still running the agent in an old workdir)
-    // may outlive its run. Safe under concurrency=1: at most one daemon at a time.
-    this.reclaimOrphanDaemon();
+    // Ensure this worker's namespaced run dir exists, then clean only THIS run's
+    // own stale socket/pid (a prior crashed run of the SAME threadId under this
+    // worker). Cross-worker orphans are handled by boot-reclaim (reclaim.ts), never
+    // here — this method must never touch another run's or worker's resources.
+    fs.mkdirSync(this.runDir, { recursive: true });
+    this.cleanOwnStaleFiles();
 
     const env = this.ensureEnv();
 
     this.child = spawn(
       this.config.nodeBin,
-      [this.config.daemonDist, "--url", this.input.daemonCallbackUrl],
+      [
+        this.config.daemonDist,
+        "--url",
+        this.input.daemonCallbackUrl,
+        "--socket-path",
+        this.socketPath,
+      ],
       {
         cwd: this.workdir,
         env,
@@ -148,9 +173,15 @@ export class DaemonProcess {
   teardown(): void {
     const pid = this.child?.pid;
     this.child = null;
-    // Clear the pid file first so a later reclaim doesn't target a recycled pid.
+    // Clear this run's own pid + socket file first so a later reclaim doesn't target
+    // a recycled pid and the next same-threadId run binds clean.
     try {
       fs.rmSync(this.pidFilePath, { force: true });
+    } catch {
+      // ignore
+    }
+    try {
+      fs.rmSync(this.socketPath, { force: true });
     } catch {
       // ignore
     }
@@ -174,30 +205,19 @@ export class DaemonProcess {
   }
 
   /**
-   * Kill a daemon left behind by a prior worker-process death (its worker never ran
-   * teardown, so its process group is still alive holding resources / the agent).
-   * Best-effort: reads the persisted pid, SIGKILLs that group, clears the file, and
-   * removes a stale socket file so the new daemon binds clean.
+   * Remove only THIS run's own stale socket/pid before spawning — e.g. a prior
+   * crashed run of the SAME threadId under this worker left files behind. It must
+   * NOT touch any other run's or worker's resources; cross-worker orphan reaping is
+   * boot-reclaim's job (reclaim.ts, which group-SIGKILLs a dead worker's daemons).
    */
-  private reclaimOrphanDaemon(): void {
+  private cleanOwnStaleFiles(): void {
     try {
-      const raw = fs.readFileSync(this.pidFilePath, "utf8").trim();
-      const stalePid = Number(raw);
-      if (Number.isInteger(stalePid) && stalePid > 0) {
-        try {
-          process.kill(-stalePid, "SIGKILL");
-        } catch {
-          // already gone
-        }
-      }
       fs.rmSync(this.pidFilePath, { force: true });
     } catch {
-      // no pid file — nothing to reclaim
+      // ignore
     }
     try {
-      if (fs.existsSync(this.socketPath)) {
-        fs.rmSync(this.socketPath, { force: true });
-      }
+      fs.rmSync(this.socketPath, { force: true });
     } catch {
       // the daemon unlinks/rebinds the socket itself; this is belt-and-suspenders
     }

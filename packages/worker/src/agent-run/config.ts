@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
 
 /**
  * Execution-plane worker box configuration (ADR-003). Unlike the control plane
@@ -32,6 +33,12 @@ export interface WorkerConfig {
   pollIntervalMs: number;
   /** GitHub App bot login the run's git commits are authored as (never the operator). */
   botLogin: string;
+  /**
+   * Root dir for per-run daemon resources (socket + pidfile) namespaced by workerId
+   * (Phase 0.2b). Each worker owns `<root>/<workerId>/`; boot-reclaim only reaps
+   * SIBLING dirs whose worker pid is dead. Default /tmp keeps socket paths short.
+   */
+  runNamespaceRoot: string;
 }
 
 function defaultDaemonDist(): string {
@@ -73,5 +80,7 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
         ? pollIntervalMs
         : 7000,
     botLogin: env.WORKER_BOT_LOGIN?.trim() || "automata-ai-bot[bot]",
+    runNamespaceRoot:
+      env.WORKER_RUN_NAMESPACE_ROOT?.trim() || DEFAULT_RUN_NAMESPACE_ROOT,
   };
 }
