@@ -474,6 +474,47 @@ conflict:
     round-robin-across-orgs behavior is scheduler-side. #3a is "delivered" only when the
     2-org interleave UAT is observed, not on merge.
 
+## LIVE UAT RESULTS (2026-07-25) — executed, observed, verified
+
+Deployed www (wrangler versions ff5e770d → fe9f1da7) + rolled both workers on the pilot
+Mac. Evidence per gap:
+
+- **E2E ×3 through the new plane** (UAT PR be-automata/automata#1, pushes 4374fee /
+  e3505a2 / db21417): webhook → new www (orgId/prNumber/traceparent) → REST trigger →
+  workflow `agent-run` child task `run` → stacked CEL concurrency (0 rows in
+  `v1_cel_evaluation_failures_olap`) → per-run socket daemon → review posted by
+  `automata-ai-bot[bot]`. Exactly ONE review at every HEAD.
+- **#1 exactly-once under REAL redelivery:** worker SIGKILLed mid-run (probe db21417) →
+  engine re-assigned the SAME task run to the relaunched worker → agent re-executed →
+  exactly ONE review at HEAD. (Lost-worker reassignment is at-least-once at the
+  ASSIGNMENT layer — `retries: 0` does not gate it; the single-writer HEAD-guard is
+  what held.)
+- **#4 drain + HA:** SIGTERM → SDK "Gracefully exiting… Successfully finished pending
+  tasks" observed twice; KeepAlive relaunch; TWO units co-running (A+B), both
+  listeners connected. Worker death mid-run did NOT lose the review (reassignment).
+- **#2b reclaim:** relaunched worker logged `reclaim: removed dead worker dir
+  w-51246-…`/`w-67671-…` — dead sibling reaped (orphan daemon group-killed), live
+  worker's dir untouched by unit B.
+- **#5 auth gate:** shell+TS gates both pass live (`garbage=403, real=200`, image pin
+  clean); worker refused to boot until the gate passed (fail-closed proven by the
+  three boot failures during fixing).
+- **#7 trace join:** traceparent minted at dispatch, observed in worker step logs
+  (`trace=00-…`) across all three runs, forwarded on www-client calls.
+- **Frontend e2e (chrome-devtools):** landing + login render on the final deploy, zero
+  console errors, authed API 401s unauthenticated.
+- **Live-caught fix-forwards (commit 587bf75):** run-worker.sh signal chain (pnpm
+  swallows SIGTERM → exec-direct `node --import tsx`), .sh JWT-claim fallback, probe
+  endpoint `since`+`only_tasks` required, image-tag-scoped `-dev` check, comment-line
+  exclusion. Plus the NEXT_PUBLIC build-inlining regression (raw-process.env vars
+  envsafe never flags → client throw) caught by the browser e2e and redeployed.
+
+**Still open (operator-gated):**
+- `hatchet_run` DDL on prod Neon (needs DATABASE_URL) → then the #8 double-push live
+  UAT. Until applied, supersede no-ops safely (fail-soft) and logs per review dispatch.
+- #3a ROUND-ROBIN fairness ORDERING across orgs: config live-validated; the 2-org
+  interleave observation awaits a second live org (amendment 11).
+- #7 OTLP collector export + per-org SLO alerts (NEEDS-INFRA).
+
 ## Verification-caveat reads before building (from the research doc)
 - ~~Task-level idempotency~~ — settled: does not exist at task level in 1.26.0; DROPPED (amendment 1).
 - ~~`worker.stop()` drains vs aborts~~ — settled: drains (amendment 8).
