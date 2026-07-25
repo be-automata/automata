@@ -53,17 +53,30 @@ describe("agentRunWorkflow registration shape", () => {
     expect(workflowDef.name).toBe("agent-run");
   });
 
-  it("carries a single GROUP_ROUND_ROBIN concurrency key (maxRuns 1, unchanged)", () => {
-    // Normalise: the SDK may store it as an object or a one-element array.
+  it("carries the stacked [per-org, global] GROUP_ROUND_ROBIN concurrency keys (Phase 2 #3a)", () => {
+    // Normalise: the SDK may store it as an object or an array.
     const keys = Array.isArray(workflowDef.concurrency)
       ? workflowDef.concurrency
       : [workflowDef.concurrency];
-    expect(keys).toHaveLength(1);
-    expect(keys[0].expression).toBe("'agent-run-shared-daemon-socket'");
+    expect(keys).toHaveLength(2);
+
+    // Key 1: per-ORG fair ordering on input.orgId.
+    expect(keys[0].expression).toBe("input.orgId");
     expect(keys[0].maxRuns).toBe(1);
     expect(keys[0].limitStrategy).toBe(
       ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
     );
+
+    // Key 2: global single-daemon-socket / memory-budget cap.
+    expect(keys[1].expression).toBe("'agent-run-shared-daemon-socket'");
+    expect(keys[1].maxRuns).toBe(1);
+    expect(keys[1].limitStrategy).toBe(
+      ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
+    );
+
+    // Invariant: per-org cap must never exceed the global cap (no org can hold
+    // every slot).
+    expect(keys[0].maxRuns).toBeLessThanOrEqual(keys[1].maxRuns);
   });
 
   it("registers exactly one run task with EXPLICIT retries:0 and the 30m timeouts", () => {

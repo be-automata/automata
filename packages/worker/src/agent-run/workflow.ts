@@ -30,19 +30,55 @@ export type { AgentRunInput, AgentRunOutput } from "./types";
  * timeout window is the grace period for THEIR infra being down; 5m would silently
  * drop queued work during a brief outage (ADR-002 §Worker availability).
  *
- * Concurrency maxRuns 1 (GROUP_ROUND_ROBIN, constant key): protects the box while
- * the global cap stays at 1 (per-run daemon isolation is enabled by the daemon
- * `--socket-path` flag, but raising the cap above 1 is gated on a memory-headroom
- * check — see the plan's "Concurrency > 1 is gated on memory"). Later runs QUEUE
- * rather than cancel — an in-flight agent turn must never be killed.
+ * Concurrency is a STACKED array of two GROUP_ROUND_ROBIN keys (Phase 2, #3a
+ * per-org fair ordering). Both cap at 1 today; the ordering, not the throughput,
+ * is what changes:
+ *   1. per-ORG key (`input.orgId`): GROUP_ROUND_ROBIN makes the scheduler pick the
+ *      next waiting ORG fairly when the slot frees, so one org's backlog can never
+ *      head-of-line-block another (the direct "one org can't starve another"
+ *      answer at pilot volume). orgId is guaranteed non-empty by dispatch (the
+ *      `u:${userId}` fallback) so the CEL key never dereferences null.
+ *   2. global constant key: the single-box daemon memory budget — only ONE
+ *      agent-run executes at a time across ALL orgs and BOTH workers.
+ * Later runs QUEUE rather than cancel — an in-flight agent turn must never be killed.
+ *
+ * FAIRNESS IS ONLY PROVEN LIVE (plan amendment 11): this config type-checks and
+ * locks the shape, but round-robin-across-orgs is scheduler-side behaviour — it is
+ * "delivered" only when the 2-org interleave UAT is observed, not on merge.
  */
+
+/**
+ * Per-org concurrency cap. GROUP_ROUND_ROBIN on `input.orgId` gives fair ORDERING
+ * across orgs; the cap itself is 1 and MUST stay ≤ the global cap so no single org
+ * can ever hold every slot. Raising this is gated on #3b (real per-org parallelism).
+ */
+const PER_ORG_MAX_RUNS = 1;
+
+/**
+ * Global concurrency cap = the single-box daemon memory budget. Held at 1: N
+ * concurrent agents each spawn a full `claude` process, and the orch-agents ENOMEM
+ * wall (4+ SDK sessions tripped fork/posix_spawn on a 7.6GB box, safe only after an
+ * 8GiB swap file) is the precedent. Raise ONLY after per-agent RSS × N + headroom is
+ * validated on the pilot box (plan's "Concurrency > 1 is gated on memory"), and set
+ * `slotCost` to reflect the weight at the same time. Per-run daemon isolation (the
+ * `--socket-path` flag) removes the socket-collision blocker but NOT the memory one.
+ */
+const GLOBAL_MAX_RUNS = 1;
+
 export const agentRunWorkflow = hatchet.workflow<AgentRunInput>({
   name: "agent-run",
-  concurrency: {
-    expression: "'agent-run-shared-daemon-socket'",
-    maxRuns: 1,
-    limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
-  },
+  concurrency: [
+    {
+      expression: "input.orgId",
+      maxRuns: PER_ORG_MAX_RUNS,
+      limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
+    },
+    {
+      expression: "'agent-run-shared-daemon-socket'",
+      maxRuns: GLOBAL_MAX_RUNS,
+      limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
+    },
+  ],
 });
 
 agentRunWorkflow.task({
@@ -57,6 +93,10 @@ agentRunWorkflow.task({
   // at retries:0 + workflow maxRuns:1 the only at-least-once window is engine
   // redelivery, which the www single-writer (HEAD+verdict idempotency) absorbs.
   retries: 0,
+  // slotCost DEFERRED (#8): meaningless at GLOBAL_MAX_RUNS=1 (one run at a time), so
+  // it stays unset until #3b raises the global cap — at which point set slotCost to
+  // model each agent-run's memory weight so a worker's physical slots reflect real
+  // capacity. Wiring it now would have no effect. See workflow-level concurrency doc.
   fn: async (input: AgentRunInput, ctx): Promise<AgentRunOutput> => {
     const config = loadWorkerConfig();
     const wwwOpts = {
