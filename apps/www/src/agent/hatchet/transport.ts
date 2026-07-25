@@ -63,3 +63,46 @@ export async function triggerAgentRun<
   };
   return { externalId: json.run?.metadata?.id };
 }
+
+/**
+ * Cancel one or more in-flight workflow runs by their externalId (#8 supersede). The
+ * REST v1 stable cancel endpoint takes a batch of externalIds — the same
+ * `run.metadata.id` values `triggerAgentRun` returns. Used when a NEW review run is
+ * dispatched for a PR that already has a live review in flight: the prior run is
+ * cancelled so only the newest verdict is posted (a cancelled run emits no terminal
+ * daemon-event, so it never posts a stale verdict — dispatch transitions the
+ * superseded thread terminally itself).
+ *
+ * A no-op when `externalIds` is empty (nothing to cancel). Throws on a non-2xx so the
+ * caller can log/decide; the caller MUST NOT let a cancel failure block the new
+ * dispatch — superseding is best-effort (the watchdog is the backstop).
+ */
+export async function cancelAgentRun(
+  externalIds: string[],
+  config: HatchetTriggerConfig,
+): Promise<void> {
+  if (externalIds.length === 0) {
+    return;
+  }
+  const { apiUrl, tenantId, apiToken } = config;
+  if (!apiUrl || !tenantId || !apiToken) {
+    throw new Error(
+      "Hatchet cancel is enabled but HATCHET_API_URL / HATCHET_TENANT_ID / HATCHET_API_TOKEN are not all configured",
+    );
+  }
+  const res = await fetch(
+    `${apiUrl.replace(/\/$/, "")}/api/v1/stable/tenants/${tenantId}/tasks/cancel`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ externalIds }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Hatchet cancel failed: ${res.status} ${body}`);
+  }
+}

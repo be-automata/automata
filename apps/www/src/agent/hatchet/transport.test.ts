@@ -1,5 +1,5 @@
 import { describe, it, vi, beforeEach, expect } from "vitest";
-import { triggerAgentRun } from "./transport";
+import { triggerAgentRun, cancelAgentRun } from "./transport";
 
 const CONFIG = {
   apiUrl: "https://tunnel.example.com/",
@@ -77,6 +77,46 @@ describe("triggerAgentRun (Hatchet REST v1)", () => {
       .mockResolvedValue(new Response("boom", { status: 500 }));
     vi.stubGlobal("fetch", fetchMock);
     await expect(triggerAgentRun(INPUT, CONFIG)).rejects.toThrow(/500/);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("cancelAgentRun (#8 supersede)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("POSTs the v1 stable tasks/cancel with Bearer auth and the externalIds batch", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await cancelAgentRun(["run-a", "run-b"], CONFIG);
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    // Trailing slash on apiUrl is normalized.
+    expect(url).toBe(
+      "https://tunnel.example.com/api/v1/stable/tenants/tenant-1/tasks/cancel",
+    );
+    expect(init.method).toBe("POST");
+    expect(init.headers.Authorization).toBe("Bearer secret-token");
+    expect(JSON.parse(init.body)).toEqual({ externalIds: ["run-a", "run-b"] });
+    vi.unstubAllGlobals();
+  });
+
+  it("is a no-op (no fetch) when the externalIds list is empty", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await cancelAgentRun([], CONFIG);
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("throws on a non-2xx so the caller can log (supersede stays best-effort)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("nope", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(cancelAgentRun(["run-a"], CONFIG)).rejects.toThrow(/404/);
     vi.unstubAllGlobals();
   });
 });

@@ -13,6 +13,9 @@ import {
   hasActiveDaemonToken,
   daemonRunKey,
 } from "@/lib/daemon-token";
+import { createAutomation } from "@terragon/shared/model/automations";
+import { thread as threadTable } from "@terragon/shared/db/schema";
+import { eq } from "drizzle-orm";
 import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
 
 describe("hatchetDispatchEnabled", () => {
@@ -256,6 +259,166 @@ describe("dispatchAgentRun", () => {
     expect(
       await hasActiveDaemonToken({ userId: user.id, name: runKey }),
     ).toBe(true);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("dispatchAgentRun — #8 supersede stale in-flight review", () => {
+  let user: User;
+  let orgId: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    user = (await createTestUser({ db })).user;
+    const org = await createOrganization({
+      db,
+      name: "Org",
+      slug: `org-${nanoid(8).toLowerCase()}`,
+    });
+    orgId = org.id;
+  });
+
+  async function makeAutomation(triggerType: "pull_request" | "github_mention") {
+    const automation = await createAutomation({
+      db,
+      userId: user.id,
+      accessTier: "pro",
+      organizationId: orgId,
+      automation: {
+        name: `${triggerType} automation`,
+        repoFullName: "be-automata/automata",
+        branchName: "main",
+        enabled: true,
+        triggerType,
+        triggerConfig: {},
+        action: {
+          type: "user_message",
+          config: {
+            message: {
+              type: "user",
+              model: null,
+              parts: [],
+              timestamp: new Date().toISOString(),
+            },
+          },
+        },
+      },
+    });
+    return automation.id;
+  }
+
+  async function makePRThread(automationId: string, prNumber: number) {
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        organizationId: orgId,
+        githubRepoFullName: "be-automata/automata",
+        githubPRNumber: prNumber,
+        automationId,
+      },
+    });
+    // In production dispatch runs only after startAgentMessage transitions the thread
+    // to `booting`, so a superseded prior run is in the active set that
+    // markThreadsSuperseded targets (mirrors stopStalledThreads). ThreadInsert omits
+    // `status`, so set it directly.
+    await db
+      .update(threadTable)
+      .set({ status: "booting" })
+      .where(eq(threadTable.id, t.threadId));
+    return t;
+  }
+
+  /** A fetch mock that routes trigger vs cancel and records the cancel bodies. */
+  function routedFetch(triggerRunId: string) {
+    const cancelBodies: unknown[] = [];
+    const mock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/tasks/cancel")) {
+        cancelBodies.push(JSON.parse(String(init?.body)));
+        return new Response("{}", { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({ run: { metadata: { id: triggerRunId } } }),
+        { status: 200 },
+      );
+    });
+    return { mock, cancelBodies };
+  }
+
+  it("a second review dispatch cancels the prior run's externalId and supersedes its thread", async () => {
+    const reviewAutomation = await makeAutomation("pull_request");
+    const old = await makePRThread(reviewAutomation, 100);
+    const fresh = await makePRThread(reviewAutomation, 100);
+
+    // First (old) review dispatch records run 'run-old'.
+    const first = routedFetch("run-old");
+    vi.stubGlobal("fetch", first.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: old.threadId,
+      threadChatId: old.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "feature",
+    });
+    expect(first.cancelBodies).toHaveLength(0); // nothing prior to supersede
+    vi.unstubAllGlobals();
+
+    // Second (fresh) review dispatch for the SAME PR must cancel 'run-old'.
+    const second = routedFetch("run-new");
+    vi.stubGlobal("fetch", second.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: fresh.threadId,
+      threadChatId: fresh.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "feature",
+    });
+
+    // The prior run was cancelled by externalId.
+    expect(second.cancelBodies).toEqual([{ externalIds: ["run-old"] }]);
+    // …and the OLD thread was terminally transitioned (no longer zombie "working").
+    const [oldRow] = await db.query.thread.findMany({
+      where: (t, { eq }) => eq(t.id, old.threadId),
+    });
+    expect(oldRow!.status).toBe("complete");
+    expect(oldRow!.errorMessage).toBe("superseded");
+    vi.unstubAllGlobals();
+  });
+
+  it("a MENTION dispatch never cancels/supersedes anything", async () => {
+    const mentionAutomation = await makeAutomation("github_mention");
+    const reviewAutomation = await makeAutomation("pull_request");
+    // A prior in-flight REVIEW run exists for PR 200…
+    const priorReview = await makePRThread(reviewAutomation, 200);
+    const firstReview = routedFetch("run-review");
+    vi.stubGlobal("fetch", firstReview.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: priorReview.threadId,
+      threadChatId: priorReview.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "feature",
+    });
+    vi.unstubAllGlobals();
+
+    // …but a MENTION on the same PR must NOT cancel it.
+    const mention = await makePRThread(mentionAutomation, 200);
+    const mentionFetch = routedFetch("run-mention");
+    vi.stubGlobal("fetch", mentionFetch.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: mention.threadId,
+      threadChatId: mention.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "feature",
+    });
+
+    expect(mentionFetch.cancelBodies).toHaveLength(0);
+    // The prior review thread is untouched (still active).
+    const [reviewRow] = await db.query.thread.findMany({
+      where: (t, { eq }) => eq(t.id, priorReview.threadId),
+    });
+    expect(reviewRow!.errorMessage).not.toBe("superseded");
     vi.unstubAllGlobals();
   });
 });

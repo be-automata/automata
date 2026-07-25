@@ -11,7 +11,14 @@ import {
 } from "@/lib/daemon-token";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
 import { ThreadError } from "@/agent/error";
-import { triggerAgentRun } from "./transport";
+import { markThreadsSuperseded } from "@terragon/shared/model/threads";
+import {
+  recordHatchetRun,
+  findSupersedableReviewRuns,
+  markHatchetRunsSuperseded,
+} from "@terragon/shared/model/hatchet-run";
+import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
+import { triggerAgentRun, cancelAgentRun } from "./transport";
 
 /** Trigger-fetch retry policy — a transient network blip must not fail dispatch. */
 const TRIGGER_MAX_ATTEMPTS = 3;
@@ -19,6 +26,80 @@ const TRIGGER_BACKOFF_MS = 400;
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The Hatchet REST transport config, read from env (shared by trigger + cancel). */
+function hatchetConfig() {
+  return {
+    apiUrl: env.HATCHET_API_URL,
+    tenantId: env.HATCHET_TENANT_ID,
+    apiToken: env.HATCHET_API_TOKEN,
+  };
+}
+
+/**
+ * #8 supersede: before a NEW review run is dispatched for a PR, cancel any prior
+ * in-flight review run for the same (org, repo, PR) so only the newest verdict posts.
+ * A cancelled Hatchet run emits NO terminal daemon-event, so we ALSO transition the
+ * superseded threads terminally (amendment 7) — else they zombie as "working" until
+ * the 75m watchdog and keep occupying a concurrency slot.
+ *
+ * Entirely BEST-EFFORT: a cancel/transition failure must never block the new dispatch
+ * (the stalled-thread watchdog is the backstop). Only ever called for review threads
+ * in a real org (mentions and personal/no-org threads never supersede).
+ */
+async function supersedePriorReviewRuns({
+  organizationId,
+  repoFullName,
+  prNumber,
+  currentThreadId,
+}: {
+  organizationId: string;
+  repoFullName: string;
+  prNumber: number;
+  currentThreadId: string;
+}): Promise<void> {
+  try {
+    const prior = await findSupersedableReviewRuns({
+      db,
+      organizationId,
+      repoFullName,
+      prNumber,
+      excludeThreadId: currentThreadId,
+    });
+    if (prior.length === 0) return;
+
+    console.log("[hatchet] superseding prior in-flight review run(s)", {
+      organizationId,
+      repoFullName,
+      prNumber,
+      currentThreadId,
+      superseding: prior.map((r) => r.threadId),
+    });
+
+    // Cancel the remote runs (best-effort — a cancelled/already-finished run is a
+    // harmless no-op we swallow), then mark the rows + threads terminally so the old
+    // threads stop zombieing regardless of the cancel outcome.
+    await cancelAgentRun(
+      prior.map((r) => r.externalId),
+      hatchetConfig(),
+    ).catch((error) => {
+      console.error("[hatchet] supersede cancel failed (non-fatal)", {
+        prNumber,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    await markHatchetRunsSuperseded({ db, ids: prior.map((r) => r.id) });
+    await markThreadsSuperseded({
+      db,
+      threadIds: prior.map((r) => r.threadId),
+    });
+  } catch (error) {
+    console.error("[hatchet] supersede pass failed (non-fatal)", {
+      prNumber,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 /** Lowercase hex for `n` random bytes (crypto.getRandomValues — Workers + Node). */
 function randomHex(bytes: number): string {
@@ -50,16 +131,11 @@ async function triggerWithRetry(
   input: AgentRunInput,
   threadId: string,
   threadChatId: string,
-): Promise<void> {
+): Promise<{ externalId: string | undefined }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= TRIGGER_MAX_ATTEMPTS; attempt++) {
     try {
-      await triggerAgentRun(input, {
-        apiUrl: env.HATCHET_API_URL,
-        tenantId: env.HATCHET_TENANT_ID,
-        apiToken: env.HATCHET_API_TOKEN,
-      });
-      return;
+      return await triggerAgentRun(input, hatchetConfig());
     } catch (error) {
       lastError = error;
       console.error("[hatchet] trigger attempt failed", {
@@ -246,10 +322,60 @@ export async function dispatchAgentRun({
     traceparent,
   });
 
+  // #8 supersede eligibility: ONLY a PR-REVIEW run (a `pull_request`-triggered
+  // automation) in a REAL org supersedes a prior review. Mentions (`github_mention`)
+  // and personal/no-org threads never do — and the hatchet_run FK needs a real org id,
+  // not the `u:${userId}` concurrency fallback. Determined from the already-loaded
+  // thread (its automationId), so no extra fetch. The narrowed object is null unless
+  // all conditions hold (so `organizationId`/`prNumber` are non-null downstream).
+  const reviewContext =
+    thread?.organizationId != null &&
+    prNumber !== undefined &&
+    (await isReviewThread({
+      db,
+      userId,
+      automationId: thread.automationId ?? null,
+      organizationId: thread.organizationId,
+    }))
+      ? { organizationId: thread.organizationId, prNumber }
+      : null;
+
+  // Cancel + terminally-transition any prior in-flight review run for this PR BEFORE
+  // triggering the new one (best-effort; never blocks the dispatch).
+  if (reviewContext) {
+    await supersedePriorReviewRuns({
+      organizationId: reviewContext.organizationId,
+      repoFullName,
+      prNumber: reviewContext.prNumber,
+      currentThreadId: threadId,
+    });
+  }
+
   try {
     // The token is minted BEFORE the trigger (the input carries its value). Retry
     // absorbs transients; only a FINAL failure lands here.
-    await triggerWithRetry(input, threadId, threadChatId);
+    const { externalId } = await triggerWithRetry(input, threadId, threadChatId);
+
+    // Record this review run so a LATER push can supersede it. Only reviews are
+    // tracked; a missing externalId (unexpected trigger-response shape) just skips
+    // tracking — the run still executes, it simply can't be superseded (watchdog
+    // remains the backstop). Best-effort: a bookkeeping failure must not fail dispatch.
+    if (reviewContext && externalId) {
+      await recordHatchetRun({
+        db,
+        threadId,
+        organizationId: reviewContext.organizationId,
+        repoFullName,
+        prNumber: reviewContext.prNumber,
+        externalId,
+      }).catch((error) => {
+        console.error("[hatchet] recordHatchetRun failed (non-fatal)", {
+          threadId,
+          prNumber,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
   } catch (error) {
     // Dispatch failed for good. Revoke the just-minted token so it can't block the
     // dedup guard (a retry re-dispatches cleanly), then throw so withThreadChat
