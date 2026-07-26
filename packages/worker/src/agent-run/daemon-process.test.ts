@@ -6,11 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { DaemonProcess, writeDaemonMessage } from "./daemon-process";
 import { loadWorkerConfig } from "./config";
-import {
-  getProcessWorkerId,
-  runPidPath,
-  runSocketPath,
-} from "./run-namespace";
+import { getProcessWorkerId, runPidPath, runSocketPath } from "./run-namespace";
 import type { AgentRunInput } from "./types";
 
 /**
@@ -24,7 +20,10 @@ let servers: net.Server[] = [];
 let socketPaths: string[] = [];
 
 function socketPath(): string {
-  const p = path.join(os.tmpdir(), `daemon-test-${Math.random().toString(36).slice(2)}.sock`);
+  const p = path.join(
+    os.tmpdir(),
+    `daemon-test-${Math.random().toString(36).slice(2)}.sock`,
+  );
   socketPaths.push(p);
   return p;
 }
@@ -78,14 +77,21 @@ describe("writeDaemonMessage", () => {
       received = frame;
     });
 
-    const message = JSON.stringify({ type: "claude", prompt: "hi", token: "t" });
+    const message = JSON.stringify({
+      type: "claude",
+      prompt: "hi",
+      token: "t",
+    });
     await expect(writeDaemonMessage(p, message)).resolves.toBeUndefined();
 
     expect(received).not.toBeNull();
     // The envelope carries the STRINGIFIED message in `data` (not the raw message).
     expect(typeof received!.id).toBe("string");
     expect(received!.data).toBe(message);
-    expect(JSON.parse(received!.data)).toMatchObject({ type: "claude", token: "t" });
+    expect(JSON.parse(received!.data)).toMatchObject({
+      type: "claude",
+      token: "t",
+    });
   });
 
   it("rejects with a NonRetryableError when the daemon replies ERROR (#6)", async () => {
@@ -93,7 +99,9 @@ describe("writeDaemonMessage", () => {
     await fakeDaemon(p, "error");
     // A daemon-reject is a terminal contract error → NonRetryableError so it routes
     // straight to onFailure instead of burning a retry.
-    await expect(writeDaemonMessage(p, "{}")).rejects.toThrow(/daemon rejected/);
+    await expect(writeDaemonMessage(p, "{}")).rejects.toThrow(
+      /daemon rejected/,
+    );
     await expect(writeDaemonMessage(p, "{}")).rejects.toBeInstanceOf(
       NonRetryableError,
     );

@@ -125,7 +125,10 @@ describe("reclaimDeadWorkerRuns", () => {
 
   it("tolerates a missing or malformed worker.lock (skips, never throws)", () => {
     const root = tmpRoot();
-    const noLock = makeWorkerDir(root, "w-nolock", { lockPid: null, daemonPids: [1] });
+    const noLock = makeWorkerDir(root, "w-nolock", {
+      lockPid: null,
+      daemonPids: [1],
+    });
     const badLock = makeWorkerDir(root, "w-badlock", {
       lockPid: "not-a-pid",
       daemonPids: [2],

@@ -20,7 +20,10 @@ const runtimes: DaemonRuntime[] = [];
 const socketPaths: string[] = [];
 
 function socketPath(): string {
-  const p = path.join(os.tmpdir(), `daemon-sockpath-${randomUUID().slice(0, 8)}.sock`);
+  const p = path.join(
+    os.tmpdir(),
+    `daemon-sockpath-${randomUUID().slice(0, 8)}.sock`,
+  );
   socketPaths.push(p);
   return p;
 }
@@ -47,7 +50,10 @@ function sendAndAwaitAck(p: string, data: string): Promise<string> {
     }, 2000);
     sock.once("connect", () => sock.write(JSON.stringify({ id, data })));
     sock.on("data", (buf) => {
-      const res = JSON.parse(buf.toString()) as { id?: string; status?: string };
+      const res = JSON.parse(buf.toString()) as {
+        id?: string;
+        status?: string;
+      };
       if (res.id !== id) return;
       clearTimeout(timer);
       sock.end();

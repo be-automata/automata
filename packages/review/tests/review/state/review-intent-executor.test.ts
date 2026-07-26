@@ -233,7 +233,12 @@ describe("executeReviewIntent — inline-comment flag (dedup the COMMENTED wrapp
       verdict: "request_changes",
       body: "Findings below.",
       comments: [
-        { path: "src/a.ts", line: 10, body: "unguarded null", severity: "warning" },
+        {
+          path: "src/a.ts",
+          line: 10,
+          body: "unguarded null",
+          severity: "warning",
+        },
         { path: "src/b.ts", line: 22, body: "nit" },
       ],
     });

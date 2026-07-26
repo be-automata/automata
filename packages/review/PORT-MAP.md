@@ -43,12 +43,12 @@ orch-agents originals defaulted it via `kernel/agent-identity` — an env/identi
 dependency the pure package must not carry; the www caller passes the resolved bot
 login, as `reconcile-pr-reviews.ts` already does).
 
-| Source file                                     | Ported to                                          | Notes                                                                                     |
-| ----------------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `src/integration/github-client.ts` (subset)     | `src/review/state/review-github-client.ts` (NEW)   | Minimal `ReviewGitHubClient` (5 methods) + `GitHubReview` + `ReviewLogger` + `getErrorMessage`. |
-| `src/review/state/head-review-guard.ts`         | `src/review/state/head-review-guard.ts`            | `findBotReviewAtHead`; `botLogin` now required.                                            |
-| `src/review/state/outstanding-review-finder.ts` | `src/review/state/outstanding-review-finder.ts`    | `find(All)OutstandingBotChangesRequested`; `botLogin` now required.                        |
-| `src/execution/effects/review-intent-executor.ts` | `src/review/state/review-intent-executor.ts`     | `executeReviewIntent` + `dismissOutstandingBotChangeRequests`; DI on `ReviewGitHubClient`. |
+| Source file                                       | Ported to                                        | Notes                                                                                           |
+| ------------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `src/integration/github-client.ts` (subset)       | `src/review/state/review-github-client.ts` (NEW) | Minimal `ReviewGitHubClient` (5 methods) + `GitHubReview` + `ReviewLogger` + `getErrorMessage`. |
+| `src/review/state/head-review-guard.ts`           | `src/review/state/head-review-guard.ts`          | `findBotReviewAtHead`; `botLogin` now required.                                                 |
+| `src/review/state/outstanding-review-finder.ts`   | `src/review/state/outstanding-review-finder.ts`  | `find(All)OutstandingBotChangesRequested`; `botLogin` now required.                             |
+| `src/execution/effects/review-intent-executor.ts` | `src/review/state/review-intent-executor.ts`     | `executeReviewIntent` + `dismissOutstandingBotChangeRequests`; DI on `ReviewGitHubClient`.      |
 
 Tests ported (adapted for required `botLogin` + explicit `commitId` on fixtures):
 `state/head-review-guard`, `state/outstanding-review-finder`,
@@ -58,17 +58,17 @@ tool-policy live in apps/www (control-plane I/O), not here.
 
 ## Deferred (phase-2 integration work list) — need executor / GitHub / event-bus / SDK wiring
 
-| Source file                                     | Why deferred                                                                                                                                      |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/review/review-gate.ts`                     | Pipeline orchestrator; depends on `shared/logger`, `shared/errors`, executor interfaces (DiffReviewer/TestRunner/SecurityScanner).                |
-| `src/review/review-pipeline.ts`                 | Pipeline; event-bus + executors.                                                                                                                  |
-| `src/review/claude-diff-reviewer.ts`            | Claude Agent SDK executor.                                                                                                                        |
-| `src/review/finding-verifier.ts`                | verify-before-block; needs GitHub quote-at-HEAD.                                                                                                  |
-| `src/review/break-glass-handler.ts`             | Handler; event-bus + GitHub.                                                                                                                      |
-| `src/review/cli-test-runner.ts`                 | Runs the target repo's test suite (child process).                                                                                                |
-| `src/review/package-manager.ts`                 | Target-repo PM detection; intentionally multi-PM (orch-agents CLAUDE.md keeps it out of scope).                                                   |
-| `src/review/diff-review-prompts.ts`             | Pure-ish, but imports `ReviewContext` (a pipeline type) from `review-gate`; belongs with the reviewer executor.                                   |
-| `src/review/types.ts` (review-local)            | `ReviewOutcome`/`ReviewVerdict`; only consumed by deferred pipeline modules + their tests; imports `WorkBlockedReason` from `kernel/event-types`. |
+| Source file                          | Why deferred                                                                                                                                      |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/review/review-gate.ts`          | Pipeline orchestrator; depends on `shared/logger`, `shared/errors`, executor interfaces (DiffReviewer/TestRunner/SecurityScanner).                |
+| `src/review/review-pipeline.ts`      | Pipeline; event-bus + executors.                                                                                                                  |
+| `src/review/claude-diff-reviewer.ts` | Claude Agent SDK executor.                                                                                                                        |
+| `src/review/finding-verifier.ts`     | verify-before-block; needs GitHub quote-at-HEAD.                                                                                                  |
+| `src/review/break-glass-handler.ts`  | Handler; event-bus + GitHub.                                                                                                                      |
+| `src/review/cli-test-runner.ts`      | Runs the target repo's test suite (child process).                                                                                                |
+| `src/review/package-manager.ts`      | Target-repo PM detection; intentionally multi-PM (orch-agents CLAUDE.md keeps it out of scope).                                                   |
+| `src/review/diff-review-prompts.ts`  | Pure-ish, but imports `ReviewContext` (a pipeline type) from `review-gate`; belongs with the reviewer executor.                                   |
+| `src/review/types.ts` (review-local) | `ReviewOutcome`/`ReviewVerdict`; only consumed by deferred pipeline modules + their tests; imports `WorkBlockedReason` from `kernel/event-types`. |
 
 (`state/head-review-guard.ts` + `state/outstanding-review-finder.ts` are no longer deferred — ported in the "Phase-2 ported" section above.)
 

@@ -38,8 +38,24 @@ describe("findOutstandingBotChangesRequested", () => {
 
   it("returns the bot CHANGES_REQUESTED that is not dismissed", async () => {
     const reviews: GitHubReview[] = [
-      { id: 1, user: { login: "someone-else" }, state: "CHANGES_REQUESTED", submittedAt: "2026-04-01T00:00:00Z", dismissedAt: null, commitId: null, body: "" },
-      { id: 2, user: { login: BOT }, state: "CHANGES_REQUESTED", submittedAt: "2026-05-01T00:00:00Z", dismissedAt: null, commitId: null, body: "" },
+      {
+        id: 1,
+        user: { login: "someone-else" },
+        state: "CHANGES_REQUESTED",
+        submittedAt: "2026-04-01T00:00:00Z",
+        dismissedAt: null,
+        commitId: null,
+        body: "",
+      },
+      {
+        id: 2,
+        user: { login: BOT },
+        state: "CHANGES_REQUESTED",
+        submittedAt: "2026-05-01T00:00:00Z",
+        dismissedAt: null,
+        commitId: null,
+        body: "",
+      },
     ];
     const result = await findOutstandingBotChangesRequested({
       github: fakeClient(reviews),
@@ -53,7 +69,15 @@ describe("findOutstandingBotChangesRequested", () => {
 
   it("skips bot reviews that are already DISMISSED (state)", async () => {
     const reviews: GitHubReview[] = [
-      { id: 1, user: { login: BOT }, state: "DISMISSED", submittedAt: "2026-05-01T00:00:00Z", dismissedAt: null, commitId: null, body: "" },
+      {
+        id: 1,
+        user: { login: BOT },
+        state: "DISMISSED",
+        submittedAt: "2026-05-01T00:00:00Z",
+        dismissedAt: null,
+        commitId: null,
+        body: "",
+      },
     ];
     const result = await findOutstandingBotChangesRequested({
       github: fakeClient(reviews),
@@ -66,7 +90,15 @@ describe("findOutstandingBotChangesRequested", () => {
 
   it("skips bot reviews with non-null dismissedAt", async () => {
     const reviews: GitHubReview[] = [
-      { id: 1, user: { login: BOT }, state: "CHANGES_REQUESTED", submittedAt: "2026-05-01T00:00:00Z", dismissedAt: "2026-05-02T00:00:00Z", commitId: null, body: "" },
+      {
+        id: 1,
+        user: { login: BOT },
+        state: "CHANGES_REQUESTED",
+        submittedAt: "2026-05-01T00:00:00Z",
+        dismissedAt: "2026-05-02T00:00:00Z",
+        commitId: null,
+        body: "",
+      },
     ];
     const result = await findOutstandingBotChangesRequested({
       github: fakeClient(reviews),
@@ -79,7 +111,15 @@ describe("findOutstandingBotChangesRequested", () => {
 
   it("skips reviews from other users", async () => {
     const reviews: GitHubReview[] = [
-      { id: 1, user: { login: "someone-else" }, state: "CHANGES_REQUESTED", submittedAt: "2026-05-01T00:00:00Z", dismissedAt: null, commitId: null, body: "" },
+      {
+        id: 1,
+        user: { login: "someone-else" },
+        state: "CHANGES_REQUESTED",
+        submittedAt: "2026-05-01T00:00:00Z",
+        dismissedAt: null,
+        commitId: null,
+        body: "",
+      },
     ];
     const result = await findOutstandingBotChangesRequested({
       github: fakeClient(reviews),
@@ -92,9 +132,33 @@ describe("findOutstandingBotChangesRequested", () => {
 
   it("returns the most recent of multiple bot CHANGES_REQUESTED reviews", async () => {
     const reviews: GitHubReview[] = [
-      { id: 1, user: { login: BOT }, state: "CHANGES_REQUESTED", submittedAt: "2026-04-01T00:00:00Z", dismissedAt: null, commitId: null, body: "" },
-      { id: 2, user: { login: BOT }, state: "CHANGES_REQUESTED", submittedAt: "2026-05-01T00:00:00Z", dismissedAt: null, commitId: null, body: "" },
-      { id: 3, user: { login: BOT }, state: "CHANGES_REQUESTED", submittedAt: "2026-04-15T00:00:00Z", dismissedAt: null, commitId: null, body: "" },
+      {
+        id: 1,
+        user: { login: BOT },
+        state: "CHANGES_REQUESTED",
+        submittedAt: "2026-04-01T00:00:00Z",
+        dismissedAt: null,
+        commitId: null,
+        body: "",
+      },
+      {
+        id: 2,
+        user: { login: BOT },
+        state: "CHANGES_REQUESTED",
+        submittedAt: "2026-05-01T00:00:00Z",
+        dismissedAt: null,
+        commitId: null,
+        body: "",
+      },
+      {
+        id: 3,
+        user: { login: BOT },
+        state: "CHANGES_REQUESTED",
+        submittedAt: "2026-04-15T00:00:00Z",
+        dismissedAt: null,
+        commitId: null,
+        body: "",
+      },
     ];
     const result = await findOutstandingBotChangesRequested({
       github: fakeClient(reviews),
@@ -107,7 +171,15 @@ describe("findOutstandingBotChangesRequested", () => {
 
   it("uses the configured bot login (a rename loses the prior review)", async () => {
     const reviews: GitHubReview[] = [
-      { id: 1, user: { login: BOT }, state: "CHANGES_REQUESTED", submittedAt: "2026-04-01T00:00:00Z", dismissedAt: null, commitId: null, body: "" },
+      {
+        id: 1,
+        user: { login: BOT },
+        state: "CHANGES_REQUESTED",
+        submittedAt: "2026-04-01T00:00:00Z",
+        dismissedAt: null,
+        commitId: null,
+        body: "",
+      },
     ];
     const result = await findOutstandingBotChangesRequested({
       github: fakeClient(reviews),
@@ -120,7 +192,15 @@ describe("findOutstandingBotChangesRequested", () => {
 
   it("honors a botLogin targeting a specific identity", async () => {
     const reviews: GitHubReview[] = [
-      { id: 7, user: { login: "custom-bot[bot]" }, state: "CHANGES_REQUESTED", submittedAt: "2026-05-01T00:00:00Z", dismissedAt: null, commitId: null, body: "" },
+      {
+        id: 7,
+        user: { login: "custom-bot[bot]" },
+        state: "CHANGES_REQUESTED",
+        submittedAt: "2026-05-01T00:00:00Z",
+        dismissedAt: null,
+        commitId: null,
+        body: "",
+      },
     ];
     const result = await findOutstandingBotChangesRequested({
       github: fakeClient(reviews),

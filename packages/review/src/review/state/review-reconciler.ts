@@ -53,8 +53,15 @@ const DUPLICATE_REASON = (keeperId: number) =>
   `Duplicate of review ${keeperId} — auto-reconciled`;
 const SUPERSEDE_REASON = "Superseded — bot verdict updated for this commit.";
 
-function bySubmittedAtAsc(a: ReconcilableReview, b: ReconcilableReview): number {
-  return a.submittedAt < b.submittedAt ? -1 : a.submittedAt > b.submittedAt ? 1 : 0;
+function bySubmittedAtAsc(
+  a: ReconcilableReview,
+  b: ReconcilableReview,
+): number {
+  return a.submittedAt < b.submittedAt
+    ? -1
+    : a.submittedAt > b.submittedAt
+      ? 1
+      : 0;
 }
 
 /**

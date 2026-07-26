@@ -17,7 +17,12 @@ export interface GitHubReview {
   id: number;
   /** review.user — matched against the bot login. */
   user: { login: string } | null;
-  state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | "PENDING";
+  state:
+    | "APPROVED"
+    | "CHANGES_REQUESTED"
+    | "COMMENTED"
+    | "DISMISSED"
+    | "PENDING";
   /** review.submitted_at (ISO). Ordering key for most-recent. */
   submittedAt: string | null;
   /** review.dismissed_at (ISO) — a dismissed review is no longer in force. */

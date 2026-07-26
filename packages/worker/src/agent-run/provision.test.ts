@@ -49,7 +49,16 @@ describe("ensureBaseDiffable (BUG-EXEC-02)", () => {
     // Reproduce the daemon's shallow head-only clone.
     await execFileAsync(
       "git",
-      ["clone", "-q", "--depth", "1", "--branch", "feature", `file://${origin}`, workdir],
+      [
+        "clone",
+        "-q",
+        "--depth",
+        "1",
+        "--branch",
+        "feature",
+        `file://${origin}`,
+        workdir,
+      ],
       { maxBuffer: 16 * 1024 * 1024 },
     );
   });
@@ -59,7 +68,9 @@ describe("ensureBaseDiffable (BUG-EXEC-02)", () => {
   });
 
   it("shallow head-only clone cannot diff the base (the pre-fix failure)", async () => {
-    await expect(git(workdir, ["diff", "origin/main...HEAD"])).rejects.toThrow();
+    await expect(
+      git(workdir, ["diff", "origin/main...HEAD"]),
+    ).rejects.toThrow();
   });
 
   it("makes an offline, merge-base-accurate base diff possible", async () => {
@@ -72,9 +83,18 @@ describe("ensureBaseDiffable (BUG-EXEC-02)", () => {
     expect(ok).toBe(true);
 
     // Simulate the single-writer token strip: break the remote so no further fetch works.
-    await git(workdir, ["remote", "set-url", "origin", "file:///nonexistent-after-strip"]);
+    await git(workdir, [
+      "remote",
+      "set-url",
+      "origin",
+      "file:///nonexistent-after-strip",
+    ]);
 
-    const { stdout } = await git(workdir, ["diff", "--no-color", "origin/main...HEAD"]);
+    const { stdout } = await git(workdir, [
+      "diff",
+      "--no-color",
+      "origin/main...HEAD",
+    ]);
     // Three-dot merge-base diff shows ONLY the PR's additions...
     expect(stdout).toContain("+FEATURE");
     expect(stdout).toContain("+MORE");

@@ -65,7 +65,9 @@ function resolveClaudeBinDir(explicit: string | undefined): string {
   return "";
 }
 
-export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
+export function loadWorkerConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): WorkerConfig {
   const pollIntervalMs = Number(env.WORKER_POLL_INTERVAL_MS ?? "7000");
   return {
     nodeBin: env.WORKER_NODE_BIN?.trim() || process.execPath,

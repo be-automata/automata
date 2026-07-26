@@ -114,9 +114,13 @@ export async function ensureBaseDiffable({
   ]).catch(() => {});
   for (const depth of [0, 5, 20, 100]) {
     if (depth > 0) {
-      await gitFetch(["--deepen", String(depth), "origin", branch, baseBranch]).catch(
-        () => {},
-      );
+      await gitFetch([
+        "--deepen",
+        String(depth),
+        "origin",
+        branch,
+        baseBranch,
+      ]).catch(() => {});
     }
     if (await mergeBaseResolves(workdir, baseBranch)) return true;
   }

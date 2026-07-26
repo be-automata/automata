@@ -87,9 +87,7 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
     // Dead worker: SIGKILL every recorded daemon process group, then remove the dir.
     let daemonFiles: string[] = [];
     try {
-      daemonFiles = fs
-        .readdirSync(dir)
-        .filter((f) => f.endsWith(".pid")); // *.pid = per-run daemon group pids
+      daemonFiles = fs.readdirSync(dir).filter((f) => f.endsWith(".pid")); // *.pid = per-run daemon group pids
     } catch {
       daemonFiles = [];
     }
@@ -100,7 +98,9 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
       }
       try {
         kill(-daemonPid, "SIGKILL"); // negative pid → the whole process group
-        log(`reclaim: SIGKILLed orphan daemon group ${daemonPid} (${entry.name})`);
+        log(
+          `reclaim: SIGKILLed orphan daemon group ${daemonPid} (${entry.name})`,
+        );
       } catch {
         // already gone
       }

@@ -14,10 +14,7 @@ import { FeatureFlagName } from "./feature-flags-definitions";
 import { getGithubPR, upsertGithubPR } from "./github";
 import { setUserFeatureFlagOverride, upsertFeatureFlag } from "./feature-flags";
 import { createAutomation } from "./automations";
-import {
-  createOrganization,
-  addOrganizationMember,
-} from "./organizations";
+import { createOrganization, addOrganizationMember } from "./organizations";
 
 export async function createTestUser({
   db,
