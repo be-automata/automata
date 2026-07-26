@@ -42,8 +42,22 @@ export async function checkpointThread({
       });
       return didUpdateStatus;
     },
-    execOrThrow: async ({ threadChat, session }) => {
+    execOrThrow: async ({ threadChat, session, thread }) => {
       if (!session) {
+        if (thread && !thread.codesandboxId) {
+          // ADR-003 remote-plane thread: nothing to checkpoint on the control
+          // plane (the worker already committed and pushed). Finish the
+          // transition instead of stamping a false "sandbox-not-found" —
+          // reachable via the retry-git-checkpoint action even though the
+          // daemon-event path skips checkpointing for these threads.
+          await updateThreadChatWithTransition({
+            userId,
+            threadId,
+            threadChatId,
+            eventType: "system.checkpoint-done",
+          });
+          return;
+        }
         throw new ThreadError("sandbox-not-found", "", null);
       }
       try {

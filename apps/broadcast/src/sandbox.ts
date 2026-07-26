@@ -91,6 +91,9 @@ async function resumeSandboxSession({
     }
     case "docker":
     case "mock":
+    // hatchet-remote threads have no attachable sandbox; www never offers the
+    // terminal for them (apps/www/src/lib/sandbox-terminal.ts).
+    case "hatchet-remote":
       throw new Error("Unsupported sandbox provider");
     default:
       const _exhaustiveCheck: never = sandboxProvider;

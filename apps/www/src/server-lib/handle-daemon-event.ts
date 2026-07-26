@@ -227,13 +227,16 @@ export async function handleDaemonEvent({
       },
     });
   }
-  // Extend the life of the sandbox.
-  waitUntil(
-    extendSandboxLife({
-      sandboxId: thread.codesandboxId!,
-      sandboxProvider: thread.sandboxProvider!,
-    }),
-  );
+  // Extend the life of the sandbox. Remote-plane threads (ADR-003) never have
+  // a control-plane sandbox to extend.
+  if (thread.codesandboxId && thread.sandboxProvider) {
+    waitUntil(
+      extendSandboxLife({
+        sandboxId: thread.codesandboxId,
+        sandboxProvider: thread.sandboxProvider,
+      }),
+    );
+  }
   if (isOverloaded) {
     waitUntil(isAnthropicDownPOST());
   }
@@ -482,8 +485,14 @@ export async function handleDaemonEvent({
   // Check if we should skip checkpoint when done
   let shouldSkipCheckpoint = false;
   if (isDone && !isError) {
-    // Source of truth is the thread setting
-    shouldSkipCheckpoint = isStop || !!thread.disableGitCheckpointing;
+    // Source of truth is the thread setting. Threads without a control-plane
+    // sandbox (ADR-003 remote plane — the worker commits and pushes in its own
+    // workdir) can never checkpoint here; running it would only stamp a false
+    // "sandbox-not-found" error on a completed thread. The isError path still
+    // schedules checkpointThread — that relies on checkpointThread's own
+    // remote-plane early-complete branch; keep the two in sync.
+    shouldSkipCheckpoint =
+      isStop || !!thread.disableGitCheckpointing || !thread.codesandboxId;
   }
 
   const { didUpdateStatus } = await updateThreadChatWithTransition({
@@ -513,7 +522,7 @@ export async function handleDaemonEvent({
         userId,
         threadId,
         threadChatId: threadChat.id,
-        sandboxId: thread.codesandboxId!,
+        sandboxId: thread.codesandboxId,
         statusBeforeUpdate: threadChat.status,
         isRateLimited,
         shouldSkipCheckpoint,
@@ -539,7 +548,7 @@ async function handleThreadFinish({
   userId: string;
   threadId: string;
   threadChatId: string;
-  sandboxId: string;
+  sandboxId: string | null;
   statusBeforeUpdate: ThreadStatus;
   isRateLimited: boolean;
   shouldSkipCheckpoint: boolean;
@@ -603,9 +612,11 @@ async function handleThreadFinish({
     if (!skipCheckpoint) {
       waitUntil(checkpointThread({ threadId, threadChatId, userId }));
     }
-    waitUntil(
-      setActiveThreadChat({ sandboxId, threadChatId, isActive: false }),
-    );
+    if (sandboxId) {
+      waitUntil(
+        setActiveThreadChat({ sandboxId, threadChatId, isActive: false }),
+      );
+    }
     // Promote the next eligible queued task IN-PROCESS (S12 fix): the old
     // internalPOST("process-thread-queue/…") fetched this worker's OWN public URL,
     // which 404s on Workers (same-account worker-to-worker limitation, same class as
