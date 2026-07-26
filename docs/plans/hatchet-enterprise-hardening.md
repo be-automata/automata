@@ -508,9 +508,23 @@ Mac. Evidence per gap:
   exclusion. Plus the NEXT_PUBLIC build-inlining regression (raw-process.env vars
   envsafe never flags → client throw) caught by the browser e2e and redeployed.
 
+**#8 double-push UAT (2026-07-26) — LIVE-PROVEN.** `hatchet_run` DDL applied to prod
+Neon (scoped single-table, verified 9 columns + 2 indexes). Triple-push sequence
+(2b1485f → 81d97b3 → edae896, PR be-automata/automata#1) produced a DOUBLE supersede
+chain: each newer dispatch REST-cancelled the prior in-flight run (engine logged
+`Task run cancelling… → cancelled` twice, 13s from push to cancel), rows flipped
+`in_flight → superseded`, the superseded thread transitioned terminal
+(`complete`/`errorMessage="superseded"` observed in prod), and the final HEAD got
+exactly ONE review with ZERO reviews at both superseded HEADs. Round-robin even
+alternated the runs A→B→A across the two workers.
+- Minor nit (non-blocking): one superseded thread ended `errorMessage=null` — a later
+  write overwrote the supersede reason after the terminal transition (thread correctly
+  terminal, purely cosmetic; trace which writer clears errorMessage post-terminal).
+- External anomaly observed (NOT ours): GitHub delivered probe A's `synchronize`
+  webhook ~12h after the push (hook deliveries log shows the gap; all 200s, no
+  redeliveries). Our plane dispatched within 3s of delivery.
+
 **Still open (operator-gated):**
-- `hatchet_run` DDL on prod Neon (needs DATABASE_URL) → then the #8 double-push live
-  UAT. Until applied, supersede no-ops safely (fail-soft) and logs per review dispatch.
 - #3a ROUND-ROBIN fairness ORDERING across orgs: config live-validated; the 2-org
   interleave observation awaits a second live org (amendment 11).
 - #7 OTLP collector export + per-org SLO alerts (NEEDS-INFRA).
