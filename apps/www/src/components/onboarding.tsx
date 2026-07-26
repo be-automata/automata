@@ -22,6 +22,7 @@ import { cn } from "@/lib/utils";
 import { VisuallyHidden } from "@radix-ui/react-visually-hidden";
 import posthog from "posthog-js";
 import { GithubIcon } from "./icons/github";
+import { signInWithGithub } from "./auth";
 import { userCredentialsRefetchAtom } from "@/atoms/user-credentials";
 import { userFlagsRefetchAtom } from "@/atoms/user-flags";
 import { useServerActionQuery } from "@/queries/server-action-helpers";
@@ -113,6 +114,7 @@ export function Onboarding({ forceIsDone }: { forceIsDone?: boolean }) {
         ) : (
           <GithubStep
             repos={repos ?? null}
+            githubTokenMissing={reposResult?.githubTokenMissing === true}
             onContinue={() => {
               setIsAnimating(true);
               setTimeout(() => {
@@ -128,28 +130,34 @@ export function Onboarding({ forceIsDone }: { forceIsDone?: boolean }) {
   );
 }
 
+function openGHAppInstallPopup(onClosed: () => void) {
+  const popup = window.open(
+    getGHAppInstallUrl() + "?state=close",
+    "github-app-permissions",
+    "width=700,height=600,left=100,top=100",
+  );
+
+  // Check if popup is closed every 500ms
+  if (popup) {
+    const checkClosed = setInterval(() => {
+      if (popup.closed) {
+        clearInterval(checkClosed);
+        onClosed();
+      }
+    }, 500);
+  }
+}
+
 function AdjustGitHubAppPermissions() {
   const queryClient = useQueryClient();
 
   return (
     <a
       onClick={() => {
-        const popup = window.open(
-          getGHAppInstallUrl() + "?state=close",
-          "github-app-permissions",
-          "width=700,height=600,left=100,top=100",
-        );
-
-        // Check if popup is closed every 500ms
-        if (popup) {
-          const checkClosed = setInterval(() => {
-            if (popup.closed) {
-              clearInterval(checkClosed);
-              // Invalidate the repos query to trigger a refetch
-              queryClient.invalidateQueries({ queryKey: ["repos-onboarding"] });
-            }
-          }, 500);
-        }
+        openGHAppInstallPopup(() => {
+          // Invalidate the repos query to trigger a refetch
+          queryClient.invalidateQueries({ queryKey: ["repos-onboarding"] });
+        });
       }}
       className="font-medium underline cursor-pointer inline-flex items-center gap-1"
     >
@@ -164,9 +172,11 @@ function AdjustGitHubAppPermissions() {
 function GithubStep({
   onContinue,
   repos,
+  githubTokenMissing,
 }: {
   onContinue: () => void;
   repos: UserRepo[] | null;
+  githubTokenMissing: boolean;
 }) {
   const hasRepos = repos && repos.length > 0;
 
@@ -187,7 +197,11 @@ function GithubStep({
         </DialogDescription>
       </DialogHeader>
       <div className={cn("mt-6", hasRepos ? "h-[350px]" : "h-auto")}>
-        <GithubStepContents onContinue={onContinue} repos={repos ?? null} />
+        <GithubStepContents
+          onContinue={onContinue}
+          repos={repos ?? null}
+          githubTokenMissing={githubTokenMissing}
+        />
       </div>
     </OnboardingDialogContent>
   );
@@ -196,11 +210,45 @@ function GithubStep({
 function GithubStepContents({
   onContinue,
   repos,
+  githubTokenMissing,
 }: {
   onContinue: () => void;
   repos: UserRepo[] | null;
+  githubTokenMissing: boolean;
 }) {
   const hasRepos = repos && repos.length > 0;
+  const queryClient = useQueryClient();
+  const [isConnectingGithub, setIsConnectingGithub] = useState(false);
+
+  const onPrimaryClick = () => {
+    if (hasRepos) {
+      onContinue();
+      return;
+    }
+    if (githubTokenMissing) {
+      // Email/password (or magic-link) accounts have no GitHub OAuth token,
+      // so the App-install flow can't help — repos are listed with the USER
+      // token. Send them through GitHub sign-in; better-auth matches the
+      // existing github account row and stores the token on callback.
+      void signInWithGithub({
+        setLoading: setIsConnectingGithub,
+        returnUrl: "/welcome",
+        location: "onboarding",
+      });
+      return;
+    }
+    // Token is fine but no repos yet: the GitHub App isn't installed (or has
+    // no repositories selected). Open the install popup and refetch on close.
+    openGHAppInstallPopup(() => {
+      queryClient.invalidateQueries({ queryKey: ["repos-onboarding"] });
+    });
+  };
+
+  const primaryLabel = hasRepos
+    ? "Continue"
+    : githubTokenMissing
+      ? "Connect GitHub Account"
+      : "Grant Repository Access";
 
   return (
     <div
@@ -231,15 +279,27 @@ function GithubStepContents({
       ) : null}
       <div className="space-y-3">
         <div className="text-sm text-muted-foreground text-center">
-          Don't see one of your repositories? <AdjustGitHubAppPermissions />
+          {githubTokenMissing ? (
+            <>
+              Your account isn't connected to GitHub yet. Connect it so
+              Terragon can list your repositories.
+            </>
+          ) : (
+            <>
+              Don't see one of your repositories? <AdjustGitHubAppPermissions />
+            </>
+          )}
         </div>
         <Button
           className="w-full group"
           size="lg"
-          disabled={!hasRepos}
-          onClick={onContinue}
+          disabled={isConnectingGithub}
+          onClick={onPrimaryClick}
         >
-          <span>{hasRepos ? "Continue" : "Grant Repository Access"}</span>
+          {isConnectingGithub ? (
+            <Loader2 className="mr-2 w-4 h-4 animate-spin" />
+          ) : null}
+          <span>{primaryLabel}</span>
           <ArrowRight className="ml-2 w-4 h-4 transition-transform group-hover:translate-x-1" />
         </Button>
       </div>

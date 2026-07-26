@@ -15,7 +15,8 @@ type Location =
   | "header"
   | "header_mobile_menu"
   | "hero_section"
-  | "login_page";
+  | "login_page"
+  | "onboarding";
 
 export async function signOut() {
   await authClient.signOut({

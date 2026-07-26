@@ -3,7 +3,7 @@
 import { userOnlyAction } from "@/lib/auth-server";
 import {
   getOctokitForApp,
-  getOctokitForUserOrThrow,
+  getOctokitForUser,
   parseRepoFullName,
 } from "@/lib/github";
 import { Endpoints } from "@octokit/types";
@@ -11,9 +11,22 @@ import { Endpoints } from "@octokit/types";
 export type UserRepo =
   Endpoints["GET /installation/repositories"]["response"]["data"]["repositories"][number];
 
+export type UserReposResult = {
+  repos: UserRepo[];
+  // The signed-in user has no usable GitHub OAuth token — e.g. an
+  // email/password account, or a github account row created without ever
+  // completing the OAuth flow. Distinct from "token is fine but the GitHub
+  // App has no repositories": the first is fixed by signing in with GitHub,
+  // the second by installing the App.
+  githubTokenMissing?: boolean;
+};
+
 export const getUserRepos = userOnlyAction(
-  async function getUserRepos(userId: string) {
-    const octokit = await getOctokitForUserOrThrow({ userId });
+  async function getUserRepos(userId: string): Promise<UserReposResult> {
+    const octokit = await getOctokitForUser({ userId });
+    if (!octokit) {
+      return { repos: [], githubTokenMissing: true };
+    }
     try {
       // Try to get installations if GitHub App is configured
       const { data } =
