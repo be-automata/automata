@@ -69,6 +69,22 @@ export async function runStalledTasksCron(): Promise<void> {
     console.error("[cron:stalled] review sweep failed (non-fatal)", error);
   }
 
+  // Bound hatchet_run growth: rows are never eagerly marked finished (the supersede
+  // finder uses a freshness window instead), so this hourly age-based prune is the
+  // only thing keeping the table finite. Fail-soft — a prune error must not skip
+  // stalled recovery.
+  try {
+    const { pruneHatchetRuns } = await import(
+      "@terragon/shared/model/hatchet-run"
+    );
+    const pruned = await pruneHatchetRuns({ db });
+    if (pruned > 0) {
+      console.log(`[cron:stalled] pruned ${pruned} aged hatchet_run rows`);
+    }
+  } catch (error) {
+    console.error("[cron:stalled] hatchet_run prune failed (non-fatal)", error);
+  }
+
   const stalledThreads = await getStalledThreads({
     db,
     cutoffSecs: STALLED_CUTOFF_SECS,

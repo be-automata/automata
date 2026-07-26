@@ -12,8 +12,11 @@ import {
   recordHatchetRun,
   findSupersedableReviewRuns,
   markHatchetRunsSuperseded,
+  pruneHatchetRuns,
+  HATCHET_RUN_PRUNE_AFTER_MS,
   SUPERSEDE_FRESHNESS_MS,
 } from "./hatchet-run";
+import { hatchetRun as hatchetRunTable } from "../db/schema";
 
 const db = createDb(env.DATABASE_URL!);
 
@@ -169,6 +172,43 @@ describe("hatchet-run (#8 supersede tracking, org-fenced)", () => {
       now: new Date(Date.now() + SUPERSEDE_FRESHNESS_MS + 60_000),
     });
     expect(found).toHaveLength(0);
+  });
+
+  it("pruneHatchetRuns deletes rows past the prune age and keeps fresh ones", async () => {
+    const t = await makeThread(orgA, 21);
+    const aged = await recordHatchetRun({
+      db,
+      threadId: t,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      prNumber: 21,
+      externalId: "run-aged",
+    });
+    const fresh = await recordHatchetRun({
+      db,
+      threadId: t,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      prNumber: 21,
+      externalId: "run-fresh",
+    });
+    // Backdate ONE row past the prune age (prune with default `now` — backdating,
+    // not a future clock, so concurrent tests' fresh rows are never collateral).
+    await db
+      .update(hatchetRunTable)
+      .set({
+        createdAt: new Date(Date.now() - HATCHET_RUN_PRUNE_AFTER_MS - 60_000),
+      })
+      .where(eq(hatchetRunTable.id, aged.id));
+
+    const pruned = await pruneHatchetRuns({ db });
+    expect(pruned).toBeGreaterThanOrEqual(1);
+
+    const remaining = await db
+      .select()
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.threadId, t));
+    expect(remaining.map((r) => r.id)).toEqual([fresh.id]);
   });
 
   it("markHatchetRunsSuperseded drops rows out of the supersedable set", async () => {

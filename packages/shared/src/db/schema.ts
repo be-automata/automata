@@ -1451,8 +1451,9 @@ export const repoReviewSettings = pgTable(
  *
  * Rows are NOT eagerly marked finished — the supersede finder only considers rows
  * within a freshness window (≈ the 75m stalled-cutoff), so a long-completed run is
- * never a cancel target. Unbounded growth is acceptable at pilot volume; a future
- * prune cron (or the operator) can delete rows older than the window.
+ * never a cancel target. Growth is bounded by an age-based prune: the hourly
+ * stalled-tasks cron deletes rows older than HATCHET_RUN_PRUNE_AFTER_MS via
+ * pruneHatchetRuns (see model/hatchet-run.ts).
  */
 export const hatchetRun = pgTable(
   "hatchet_run",

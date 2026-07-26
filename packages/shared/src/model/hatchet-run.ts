@@ -1,7 +1,7 @@
 import { DB } from "../db";
 import { hatchetRun } from "../db/schema";
 import { HatchetRun } from "../db/types";
-import { and, eq, gte, inArray, ne } from "drizzle-orm";
+import { and, eq, gte, inArray, lt, ne } from "drizzle-orm";
 import { normalizeRepo } from "./repo-review-settings";
 
 /**
@@ -17,6 +17,13 @@ import { normalizeRepo } from "./repo-review-settings";
 
 /** Only in_flight rows this recent are supersede candidates (≈ the 75m stalled cutoff). */
 export const SUPERSEDE_FRESHNESS_MS = 75 * 60 * 1000;
+
+/**
+ * Rows older than this are dead weight: far past SUPERSEDE_FRESHNESS_MS, they can
+ * never again be a supersede candidate, so the hourly prune deletes them to bound
+ * table growth. 24h keeps a generous debugging window (~19x the freshness window).
+ */
+export const HATCHET_RUN_PRUNE_AFTER_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Record a freshly-dispatched review run as `in_flight`. Called AFTER a successful
@@ -88,6 +95,32 @@ export async function findSupersedableReviewRuns({
         ),
       ),
     );
+}
+
+/**
+ * Delete rows older than HATCHET_RUN_PRUNE_AFTER_MS (any status). Rows are never
+ * eagerly marked finished, so age is the only growth bound — the hourly
+ * stalled-tasks cron calls this to keep the table from growing without limit.
+ * Deliberately NOT org-fenced: it is maintenance over all orgs. Returns the
+ * number of rows deleted.
+ */
+export async function pruneHatchetRuns({
+  db,
+  now = new Date(),
+}: {
+  db: DB;
+  now?: Date;
+}): Promise<number> {
+  const deleted = await db
+    .delete(hatchetRun)
+    .where(
+      lt(
+        hatchetRun.createdAt,
+        new Date(now.getTime() - HATCHET_RUN_PRUNE_AFTER_MS),
+      ),
+    )
+    .returning({ id: hatchetRun.id });
+  return deleted.length;
 }
 
 /** Mark rows `superseded` (their runs were cancelled by a newer review dispatch). */
