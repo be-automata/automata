@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Automata execution-plane worker — SECOND launchd unit (unit B), for HA / rolling
+  restarts. It runs the SAME run-worker.sh as unit A: a second worker is a warm
+  standby that keeps serving while unit A drains during a deploy. It is NOT extra
+  throughput — the workflow's global concurrency cap (GLOBAL_MAX_RUNS=1) still lets
+  only ONE agent-run execute at a time across BOTH units. Extra throughput is #3b
+  (raise the global cap), gated on a memory-headroom check.
+
+  Safe to co-run ONLY because of Phase 0.2b per-worker namespacing: each worker
+  process owns /tmp/automata-agent-run/<workerId>/ (workerId = w-<pid>-<uuid>, unique
+  per process), and boot-time reclaim only ever reaps orphans under a SIBLING dir
+  whose lock pid is DEAD — a live worker's daemons are never touched.
+
+  This is a TEMPLATE. Replace the __PLACEHOLDER__ tokens (same as unit A) and install
+  to ~/Library/LaunchAgents/com.automata.worker-2.plist. DISTINCT Label + log paths
+  from unit A (below); everything else mirrors it. See ./README.md.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.automata.worker-2</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>__HOME__/.automata/run-worker.sh</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>15</integer>
+  <key>StandardOutPath</key><string>__HOME__/.automata/worker-2.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.automata/worker-2.err</string>
+  <key>WorkingDirectory</key><string>__REPO__/packages/worker</string>
+</dict>
+</plist>

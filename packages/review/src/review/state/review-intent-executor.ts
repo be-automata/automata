@@ -103,11 +103,14 @@ export async function dismissOutstandingBotChangeRequests(opts: {
     for (const review of outstanding) {
       try {
         await github.dismissReview(repo, prNumber, review.id, reason);
-        logger?.info("review-executor: dismissed outstanding bot CR on approve", {
-          repo,
-          prNumber,
-          reviewId: review.id,
-        });
+        logger?.info(
+          "review-executor: dismissed outstanding bot CR on approve",
+          {
+            repo,
+            prNumber,
+            reviewId: review.id,
+          },
+        );
       } catch (err) {
         logger?.warn(
           "review-executor: dismiss outstanding bot CR failed (best-effort)",
@@ -144,7 +147,8 @@ function foldFindingsIntoBody(
   comments: ReadonlyArray<ReviewIntentComment>,
 ): string {
   const lines = comments.map(
-    (c) => `- **[${c.severity ?? "info"}]** \`${c.path}:${c.line}\` — ${c.body}`,
+    (c) =>
+      `- **[${c.severity ?? "info"}]** \`${c.path}:${c.line}\` — ${c.body}`,
   );
   const heading = `**Findings (${comments.length}):**`;
   const base = body.trim();

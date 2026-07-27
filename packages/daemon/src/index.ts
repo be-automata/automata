@@ -20,6 +20,7 @@ function parseCliArgs(): {
   outputFormat: "text" | "json";
   mcpConfigPath: string | undefined;
   skipReportingDaemonEvents: boolean;
+  socketPath: string | undefined;
 } {
   const { values } = parseArgs({
     args: process.argv.slice(2),
@@ -32,6 +33,13 @@ function parseCliArgs(): {
         type: "string",
         short: "u",
         default: "http://localhost:3000",
+      },
+      // Override the unix socket path (default: /tmp/terragon-daemon.sock). The
+      // execution-plane worker passes a PER-RUN path so N daemons on one box no
+      // longer collide on the fixed socket — the single unlock for per-run daemon
+      // isolation (enterprise-hardening Phase 0.2). Additive: default unchanged.
+      "socket-path": {
+        type: "string",
       },
       "output-format": {
         type: "string",
@@ -71,6 +79,7 @@ Options:
   -u, --url <url>                  Server URL (default: http://localhost:3000)
   -w, --write                      Write a message to the unix socket (default: false)
   -t, --timeout <timeout>          Timeout in milliseconds (default: 2000)
+  --socket-path <path>             Unix socket path (default: /tmp/terragon-daemon.sock)
   --skip-reporting-daemon-events   Skip reporting daemon events (default: false)
   --output-format <format>         Output format: text or json (default: text)
   --mcp-config-path <path>         MCP config path
@@ -112,6 +121,7 @@ Examples:
     outputFormat: outputFormat as "text" | "json",
     mcpConfigPath: values["mcp-config-path"] as string | undefined,
     skipReportingDaemonEvents: !!values["skip-reporting-daemon-events"],
+    socketPath: (values["socket-path"] as string | undefined) || undefined,
     timeout: parseInt(values["timeout"] as string, 10) || 2000,
   };
 }
@@ -147,13 +157,14 @@ try {
     console.log(`Terragon Daemon v${DAEMON_VERSION}`);
     process.exit(0);
   }
+  const unixSocketPath = cliArgs.socketPath ?? defaultUnixSocketPath;
   if (cliArgs.write) {
     const timeoutMs = cliArgs.timeout;
     const startTime = Date.now();
     readStdinOrTimeout(timeoutMs)
       .then((stdinData) => {
         return writeToUnixSocket({
-          unixSocketPath: defaultUnixSocketPath,
+          unixSocketPath,
           dataStr: stdinData,
           timeout: timeoutMs,
         });
@@ -172,7 +183,7 @@ try {
     const runtime = new DaemonRuntime({
       url: cliArgs.url,
       outputFormat: cliArgs.outputFormat,
-      unixSocketPath: defaultUnixSocketPath,
+      unixSocketPath,
       skipReportingDaemonEvents: cliArgs.skipReportingDaemonEvents,
     });
     const daemon = new TerragonDaemon({

@@ -1437,3 +1437,66 @@ export const repoReviewSettings = pgTable(
     index("repo_review_settings_org_id_index").on(table.organizationId),
   ],
 );
+
+/**
+ * Per-dispatch tracking of the Hatchet `agent-run` externalId (enterprise-hardening
+ * #8 supersede). One row per remote dispatch. When a NEW PR-review run is dispatched
+ * for a PR that already has a live `in_flight` review run, dispatch cancels the prior
+ * run by its `externalId` and marks that row `superseded` — so only the newest verdict
+ * posts. Mentions never supersede, so only review dispatches write rows here.
+ *
+ * MULTI-TENANT: every read/write is fenced by `organizationId`; the same repo slug
+ * under two orgs never collides. `repoFullName` is lowercased (case-insensitive GitHub
+ * slugs), matching `repoReviewSettings`.
+ *
+ * Rows are NOT eagerly marked finished — the supersede finder only considers rows
+ * within a freshness window (≈ the 75m stalled-cutoff), so a long-completed run is
+ * never a cancel target. Growth is bounded by an age-based prune: the hourly
+ * stalled-tasks cron deletes rows older than HATCHET_RUN_PRUNE_AFTER_MS via
+ * pruneHatchetRuns (see model/hatchet-run.ts).
+ */
+export const hatchetRun = pgTable(
+  "hatchet_run",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** The thread this dispatch drives (its run is what gets cancelled/superseded). */
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => thread.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    /** Lowercased 'owner/name' slug — GitHub slugs are case-insensitive. */
+    repoFullName: text("repo_full_name").notNull(),
+    /** The PR under review — the supersede key is (org, repo, pr). */
+    prNumber: integer("pr_number").notNull(),
+    /** Hatchet workflow-run id (`run.metadata.id`) — the handle passed to cancel. */
+    externalId: text("external_id").notNull(),
+    /**
+     * 'in_flight' at dispatch → 'superseded' when a newer review cancels it.
+     * There is deliberately NO 'finished' state: rows are never eagerly marked
+     * done (the supersede finder bounds candidates by a freshness window
+     * instead); widen this union only when something actually writes a value.
+     */
+    status: text("status")
+      .notNull()
+      .$type<"in_flight" | "superseded">()
+      .default("in_flight"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    // The live-supersede lookup key: find in_flight review runs for one PR.
+    index("hatchet_run_org_repo_pr_index").on(
+      table.organizationId,
+      table.repoFullName,
+      table.prNumber,
+    ),
+    index("hatchet_run_thread_id_index").on(table.threadId),
+  ],
+);

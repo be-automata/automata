@@ -2,6 +2,7 @@ import { ThreadErrorType, ThreadChat } from "@terragon/shared";
 import {
   getThreadChat,
   getThreadMinimal,
+  type ThreadMinimal,
 } from "@terragon/shared/model/threads";
 import { ThreadError } from "./error";
 import { getSandboxForThreadOrNull, maybeHibernateSandbox } from "./sandbox";
@@ -121,9 +122,14 @@ export async function withThreadSandboxSession<T>({
   execOrThrow: ({
     threadChat,
     session,
+    thread,
   }: {
     threadChat: ThreadChat | null;
     session: ISandboxSession | null;
+    // The thread as loaded for sandbox resolution. Lets callers tell "no
+    // sandbox by design" (ADR-003 remote plane: codesandboxId null) apart
+    // from a failed sandbox lookup — both arrive as session: null.
+    thread: ThreadMinimal | null;
   }) => Promise<T>;
   onExit?: ({
     threadChat,
@@ -153,7 +159,7 @@ export async function withThreadSandboxSession<T>({
       const thread = await getThreadMinimal({ db, threadId, userId });
       threadOrganizationId = thread?.organizationId ?? null;
       if (!thread?.codesandboxId) {
-        return await execOrThrow({ threadChat, session: null });
+        return await execOrThrow({ threadChat, session: null, thread });
       }
       return await withSandboxResource({
         label,
@@ -177,6 +183,7 @@ export async function withThreadSandboxSession<T>({
           return await execOrThrow({
             threadChat,
             session: sandboxSessionOrNull,
+            thread,
           });
         },
       });

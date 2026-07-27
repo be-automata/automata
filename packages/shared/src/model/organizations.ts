@@ -171,7 +171,9 @@ export async function getOrganizationsForUser({
     .from(member)
     .innerJoin(organization, eq(member.organizationId, organization.id))
     .where(eq(member.userId, userId))
-    .orderBy(organization.createdAt);
+    // Secondary key makes the "oldest org first" contract deterministic even
+    // when createdAt ties (bulk backfills create orgs in the same instant).
+    .orderBy(organization.createdAt, organization.id);
   return rows.map((row) => row.organization);
 }
 

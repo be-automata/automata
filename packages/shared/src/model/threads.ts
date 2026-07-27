@@ -1189,6 +1189,20 @@ export async function deleteThreadById({
   return result[0]!;
 }
 
+/**
+ * The non-terminal statuses a system reap (stall watchdog, supersede) may act on.
+ * ONE definition shared by `getStalledThreads` and `markThreadsSuperseded` — a
+ * future status added here reaches both sweeps, never one silently.
+ */
+const reapableThreadStatuses: ThreadStatus[] = [
+  "booting",
+  "stopping",
+  "working",
+  "working-done",
+  "working-error",
+  "checkpointing",
+];
+
 export async function getStalledThreads({
   db,
   cutoffSecs = 60 * 60, // Default to 1 hour
@@ -1198,14 +1212,7 @@ export async function getStalledThreads({
 }) {
   const threads = await db.query.thread.findMany({
     where: and(
-      inArray(schema.thread.status, [
-        "booting",
-        "stopping",
-        "working",
-        "working-done",
-        "working-error",
-        "checkpointing",
-      ]),
+      inArray(schema.thread.status, reapableThreadStatuses),
       lte(schema.thread.updatedAt, new Date(Date.now() - cutoffSecs * 1000)),
     ),
     orderBy: (thread) => [desc(thread.updatedAt)],
@@ -1225,6 +1232,49 @@ export async function stopStalledThreads({
     .set({ status: "complete", errorMessage: "request-timeout" })
     .where(inArray(schema.thread.id, threadIds))
     .returning();
+}
+
+/**
+ * Terminally transition threads whose remote review run was SUPERSEDED by a newer
+ * push (enterprise-hardening #8, amendment 7). A cancelled Hatchet run emits NO
+ * terminal daemon-event (the worker SIGKILLs its daemon in `finally`), so without an
+ * explicit transition the old review thread would zombie as "working" until the 75m
+ * watchdog reaps it — and keep occupying a concurrency slot. This flips it to a
+ * terminal state with a DISTINCT reason ("superseded") so it's visibly not an error.
+ *
+ * Only ACTIVE (non-terminal) threads are transitioned, so a thread that legitimately
+ * completed in the race window keeps its real terminal state/errorMessage. Broadcasts
+ * per updated thread so the UI reflects the stop in realtime. Returns the count moved.
+ */
+export async function markThreadsSuperseded({
+  db,
+  threadIds,
+}: {
+  db: DB;
+  threadIds: string[];
+}): Promise<number> {
+  if (threadIds.length === 0) return 0;
+  const updated = await db
+    .update(schema.thread)
+    .set({ status: "complete", errorMessage: "superseded" })
+    .where(
+      and(
+        inArray(schema.thread.id, threadIds),
+        inArray(schema.thread.status, reapableThreadStatuses),
+      ),
+    )
+    .returning({ id: schema.thread.id, userId: schema.thread.userId });
+
+  await Promise.all(
+    updated.map((t) =>
+      publishBroadcastUserMessage({
+        type: "user",
+        id: t.userId,
+        data: { threadId: t.id, threadStatusUpdated: "complete" },
+      }),
+    ),
+  );
+  return updated.length;
 }
 
 export async function hasOtherUnarchivedThreadsWithSamePR({

@@ -27,9 +27,7 @@ export interface VerifyGhAuthArgs {
   ) => Promise<{ stdout: string; stderr: string }>;
 }
 
-export type VerifyGhAuthResult =
-  | { ok: true }
-  | { ok: false; detail: string };
+export type VerifyGhAuthResult = { ok: true } | { ok: false; detail: string };
 
 export async function verifyGhAuth(
   args: VerifyGhAuthArgs,

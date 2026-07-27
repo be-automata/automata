@@ -111,7 +111,15 @@ describe("reconcileReviews", () => {
 
   test("no bot reviews → no-op (keepId null)", () => {
     const result = reconcileReviews({
-      reviews: [rv(1, "CHANGES_REQUESTED", "2026-07-18T09:00:00Z", "sha1", "someone-else")],
+      reviews: [
+        rv(
+          1,
+          "CHANGES_REQUESTED",
+          "2026-07-18T09:00:00Z",
+          "sha1",
+          "someone-else",
+        ),
+      ],
       botLogin: BOT,
     });
     assert.equal(result.keepId, null);

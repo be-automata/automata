@@ -111,7 +111,9 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
     expect(keys).toContain("credential.helper");
     expect(keys).toContain("user.name");
     // The extraheader encodes x-access-token:<installationToken> (base64 Basic).
-    const b64 = Buffer.from(`x-access-token:${INSTALL_TOKEN}`).toString("base64");
+    const b64 = Buffer.from(`x-access-token:${INSTALL_TOKEN}`).toString(
+      "base64",
+    );
     expect(values.some((v) => v.includes(b64))).toBe(true);
     // credential.helper is reset to empty (disables inherited osxkeychain/gh helpers).
     const helperIdx = keys.indexOf("credential.helper");

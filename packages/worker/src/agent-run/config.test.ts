@@ -13,12 +13,20 @@ describe("loadWorkerConfig", () => {
     expect(cfg.daemonDist).toMatch(/daemon\/dist\/index\.js$/);
     expect(cfg.workdirRoot).toMatch(/automata-worker-runs$/);
     expect(cfg.botLogin).toBe("automata-ai-bot[bot]");
+    expect(cfg.runNamespaceRoot).toBe("/tmp/automata-agent-run");
+  });
+
+  it("honours WORKER_RUN_NAMESPACE_ROOT override", () => {
+    expect(
+      loadWorkerConfig({ WORKER_RUN_NAMESPACE_ROOT: "/data/agent-runs" })
+        .runNamespaceRoot,
+    ).toBe("/data/agent-runs");
   });
 
   it("honours WORKER_BOT_LOGIN override", () => {
-    expect(loadWorkerConfig({ WORKER_BOT_LOGIN: "somnio-bot[bot]" }).botLogin).toBe(
-      "somnio-bot[bot]",
-    );
+    expect(
+      loadWorkerConfig({ WORKER_BOT_LOGIN: "somnio-bot[bot]" }).botLogin,
+    ).toBe("somnio-bot[bot]");
   });
 
   it("honours explicit env overrides", () => {
@@ -40,13 +48,15 @@ describe("loadWorkerConfig", () => {
     expect(loadWorkerConfig({ CLAUDE_BIN: "/x/bin/claude" }).claudeBinDir).toBe(
       "/x/bin",
     );
-    expect(loadWorkerConfig({ CLAUDE_BIN: "/x/bin" }).claudeBinDir).toBe("/x/bin");
+    expect(loadWorkerConfig({ CLAUDE_BIN: "/x/bin" }).claudeBinDir).toBe(
+      "/x/bin",
+    );
   });
 
   it("ignores a non-positive or non-numeric poll interval", () => {
-    expect(loadWorkerConfig({ WORKER_POLL_INTERVAL_MS: "0" }).pollIntervalMs).toBe(
-      7000,
-    );
+    expect(
+      loadWorkerConfig({ WORKER_POLL_INTERVAL_MS: "0" }).pollIntervalMs,
+    ).toBe(7000);
     expect(
       loadWorkerConfig({ WORKER_POLL_INTERVAL_MS: "nope" }).pollIntervalMs,
     ).toBe(7000);

@@ -14,6 +14,7 @@ import { FeatureFlagName } from "./feature-flags-definitions";
 import { getGithubPR, upsertGithubPR } from "./github";
 import { setUserFeatureFlagOverride, upsertFeatureFlag } from "./feature-flags";
 import { createAutomation } from "./automations";
+import { createOrganization, addOrganizationMember } from "./organizations";
 
 export async function createTestUser({
   db,
@@ -243,4 +244,29 @@ export async function createTestAutomation({
     },
   });
   return automation;
+}
+
+export async function createTestOrganization({
+  db,
+  userId,
+  name = "Test Org",
+  role = "owner",
+}: {
+  db: DB;
+  userId: string;
+  name?: string;
+  role?: "owner" | "admin" | "member";
+}) {
+  const organization = await createOrganization({
+    db,
+    name,
+    slug: `${name.toLowerCase().replace(/\s+/g, "-")}-${nanoid(8)}`,
+  });
+  const member = await addOrganizationMember({
+    db,
+    organizationId: organization.id,
+    userId,
+    role,
+  });
+  return { organization, member };
 }

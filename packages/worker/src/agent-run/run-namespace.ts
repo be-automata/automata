@@ -1,0 +1,71 @@
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+
+/**
+ * Per-run resource namespacing for the execution-plane worker (enterprise-hardening
+ * Phase 0.2b). Each worker process owns a directory
+ *   <root>/<workerId>/
+ * holding a boot lock-file `worker.lock` (the worker's own pid) plus, per in-flight
+ * run, `<threadId>.sock` (the daemon's unix socket) and `<threadId>.pid` (the
+ * daemon's process-group pid). Namespacing by workerId lets ≥2 workers coexist on
+ * ONE box: a worker only ever reaps orphans under a SIBLING workerId whose lock pid
+ * is dead — never a live worker's daemons (the rogue-daemon guard, preserved).
+ *
+ * Root default is /tmp (like the daemon's own defaultUnixSocketPath) to keep unix
+ * socket paths well under the ~104-char sun_path limit.
+ */
+
+export const DEFAULT_RUN_NAMESPACE_ROOT = "/tmp/automata-agent-run";
+
+export const WORKER_LOCK_FILENAME = "worker.lock";
+
+let cachedWorkerId: string | undefined;
+
+/**
+ * A stable id for THIS worker process, memoised for the process lifetime. Both the
+ * boot code (worker.ts, which writes the lock + runs reclaim) and every DaemonProcess
+ * in this process resolve the same id, so all of a worker's runs land under one dir.
+ * Includes the pid for human-readability; the uuid suffix guarantees uniqueness even
+ * if a pid is recycled across worker restarts.
+ */
+export function getProcessWorkerId(): string {
+  if (!cachedWorkerId) {
+    cachedWorkerId = `w-${process.pid}-${randomUUID().slice(0, 8)}`;
+  }
+  return cachedWorkerId;
+}
+
+/** Filename-safe threadId (threadIds are already `thr_<nanoid>`; defensive only). */
+function sanitizeThreadId(threadId: string): string {
+  return threadId.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+export function workerRunDir(root: string, workerId: string): string {
+  return path.join(root, workerId);
+}
+
+export function workerLockPath(root: string, workerId: string): string {
+  return path.join(workerRunDir(root, workerId), WORKER_LOCK_FILENAME);
+}
+
+export function runSocketPath(
+  root: string,
+  workerId: string,
+  threadId: string,
+): string {
+  return path.join(
+    workerRunDir(root, workerId),
+    `${sanitizeThreadId(threadId)}.sock`,
+  );
+}
+
+export function runPidPath(
+  root: string,
+  workerId: string,
+  threadId: string,
+): string {
+  return path.join(
+    workerRunDir(root, workerId),
+    `${sanitizeThreadId(threadId)}.pid`,
+  );
+}

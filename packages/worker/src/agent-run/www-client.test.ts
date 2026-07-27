@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   pollThreadStatus,
   pollUntilTerminal,
+  postRunFailed,
   pullNextMessage,
   type PollContext,
   type WwwClientOpts,
@@ -24,6 +25,69 @@ function jsonResponse(status: number, body: unknown): Response {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe("postRunFailed (#2 terminal-failure callback)", () => {
+  it("POSTs exactly one custom-error with the reason + the daemon-token header", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("OK", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await postRunFailed(opts, { reason: "run: daemon rejected the message" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://www.example.com/api/daemon-event");
+    expect(init.method).toBe("POST");
+    expect(init.headers["x-daemon-token"]).toBe("daemon-token-abc");
+    const body = JSON.parse(init.body);
+    expect(body.threadId).toBe("thread-1");
+    expect(body.threadChatId).toBe("chat-1");
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0]).toMatchObject({
+      type: "custom-error",
+      error_info: "run: daemon rejected the message",
+    });
+  });
+
+  it("truncates a long reason and never carries prompt/agent content", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("OK", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const reason = "E".repeat(2000);
+    await postRunFailed(opts, { reason });
+
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
+    expect(body.messages[0].error_info.length).toBe(500);
+    // Nothing prompt-shaped is ever in the payload — it's a bare error summary.
+    expect(JSON.stringify(body)).not.toContain("prompt");
+  });
+
+  it("a 401 (revoked token) is logged, NOT thrown (watchdog is the backstop)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("no", { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(
+      postRunFailed(opts, { reason: "run: revoked" }),
+    ).resolves.toBeUndefined();
+    expect(errSpy).toHaveBeenCalled();
+  });
+
+  it("a network error is swallowed (onFailure must never throw)", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(
+      postRunFailed(opts, { reason: "run: boom" }),
+    ).resolves.toBeUndefined();
+  });
 });
 
 describe("pullNextMessage", () => {
@@ -60,12 +124,47 @@ describe("pullNextMessage", () => {
   });
 
   it("returns null on 204 (nothing to run)", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(204, null)));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(204, null)),
+    );
     expect(await pullNextMessage(opts)).toBeNull();
   });
 
+  it("forwards the traceparent header when set (#7), and omits it when unset", async () => {
+    // With a traceparent on the opts, every www call carries it so the control-plane
+    // handler + GitHub post join the dispatch-minted trace.
+    const withTrace: WwwClientOpts = {
+      ...opts,
+      traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+    };
+    const fetchWith = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse(200, { status: "working", terminal: false }),
+    );
+    vi.stubGlobal("fetch", fetchWith);
+    await pollThreadStatus(withTrace);
+    expect(
+      (fetchWith.mock.calls[0]![1]!.headers as Record<string, string>)
+        .traceparent,
+    ).toBe("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
+
+    // Without one (the pre-#7 / in-sandbox path) the header is simply absent.
+    const fetchWithout = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse(200, { status: "working", terminal: false }),
+    );
+    vi.stubGlobal("fetch", fetchWithout);
+    await pollThreadStatus(opts);
+    expect(
+      (fetchWithout.mock.calls[0]![1]!.headers as Record<string, string>)
+        .traceparent,
+    ).toBeUndefined();
+  });
+
   it("throws on a non-2xx that is not 204", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(500, { error: "x" })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(500, { error: "x" })),
+    );
     await expect(pullNextMessage(opts)).rejects.toThrow(/HTTP 500/);
   });
 });
@@ -74,7 +173,9 @@ describe("pollThreadStatus", () => {
   it("returns the status body on 200", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse(200, { status: "working", terminal: false })),
+      vi.fn(async () =>
+        jsonResponse(200, { status: "working", terminal: false }),
+      ),
     );
     expect(await pollThreadStatus(opts)).toEqual({
       kind: "status",
@@ -84,12 +185,18 @@ describe("pollThreadStatus", () => {
   });
 
   it("maps 401 and 403 to auth-error (candidate revocation signal)", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(401, { error: "x" })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(401, { error: "x" })),
+    );
     expect(await pollThreadStatus(opts)).toEqual({
       kind: "auth-error",
       httpStatus: 401,
     });
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(403, { error: "x" })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(403, { error: "x" })),
+    );
     expect(await pollThreadStatus(opts)).toEqual({
       kind: "auth-error",
       httpStatus: 403,
@@ -97,7 +204,10 @@ describe("pollThreadStatus", () => {
   });
 
   it("throws on other non-2xx (e.g. 500)", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(500, {})));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(500, {})),
+    );
     await expect(pollThreadStatus(opts)).rejects.toThrow(/HTTP 500/);
   });
 });
@@ -114,7 +224,10 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
       jsonResponse(200, { status: "working", terminal: false }),
       jsonResponse(200, { status: "complete", terminal: true }),
     ];
-    vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responses.shift()!),
+    );
 
     const result = await pollUntilTerminal(ctx(), opts, 1, noSleep);
     expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
@@ -128,7 +241,10 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
       jsonResponse(200, { status: "working", terminal: false }),
       jsonResponse(401, { error: "revoked" }),
     ];
-    vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responses.shift()!),
+    );
 
     await expect(pollUntilTerminal(ctx(), opts, 1, noSleep)).rejects.toThrow(
       /premature revocation/,
@@ -143,14 +259,20 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
       jsonResponse(200, { status: "complete", terminal: true }),
       jsonResponse(401, { error: "revoked" }),
     ];
-    vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responses.shift()!),
+    );
 
     const result = await pollUntilTerminal(ctx(), opts, 1, noSleep);
     expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
   });
 
   it("throws when the FIRST poll is a 401 (a real auth error)", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(401, { error: "x" })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(401, { error: "x" })),
+    );
     await expect(pollUntilTerminal(ctx(), opts, 1, noSleep)).rejects.toThrow(
       /first poll/,
     );
@@ -159,7 +281,9 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
   it("stops with outcome cancelled when the context is cancelled", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse(200, { status: "working", terminal: false })),
+      vi.fn(async () =>
+        jsonResponse(200, { status: "working", terminal: false }),
+      ),
     );
     const cancelledCtx: PollContext = { cancelled: true, log: () => {} };
     const result = await pollUntilTerminal(cancelledCtx, opts, 1, noSleep);
@@ -171,7 +295,9 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
     controller.abort();
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse(200, { status: "working", terminal: false })),
+      vi.fn(async () =>
+        jsonResponse(200, { status: "working", terminal: false }),
+      ),
     );
     const abortedCtx: PollContext = {
       cancelled: false,

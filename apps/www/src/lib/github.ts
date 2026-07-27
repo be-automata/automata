@@ -245,24 +245,42 @@ export async function getOctokitForApp({
   return new Octokit({ auth: githubAccessToken });
 }
 
+/**
+ * Usable GitHub user access token, or null. getGitHubUserAccessTokenOrThrow
+ * rejects EXPIRED tokens (GitHub App user tokens live 8h), which is what makes
+ * the App-installation fallback in the background helpers below correct: a dead
+ * user token must never win over a working installation token.
+ *
+ * Note we do NOT route this through better-auth's refresh: this app encrypts
+ * account tokens in its own databaseHooks, so better-auth would hand GitHub the
+ * ciphertext. Re-linking GitHub mints a fresh token.
+ */
+async function getUsableGitHubUserToken({
+  userId,
+}: {
+  userId: string;
+}): Promise<string | null> {
+  try {
+    return await getGitHubUserAccessTokenOrThrow({
+      db,
+      userId,
+      encryptionKey: env.ENCRYPTION_MASTER_KEY,
+    });
+  } catch {
+    return null;
+  }
+}
+
 export async function getOctokitForUser({
   userId,
 }: {
   userId: string;
 }): Promise<Octokit | null> {
-  try {
-    const userAccessToken = await getGitHubUserAccessTokenOrThrow({
-      db,
-      userId,
-      encryptionKey: env.ENCRYPTION_MASTER_KEY,
-    });
-    if (userAccessToken) {
-      return new Octokit({ auth: userAccessToken });
-    }
-    return null;
-  } catch (error) {
+  const userAccessToken = await getUsableGitHubUserToken({ userId });
+  if (!userAccessToken) {
     return null;
   }
+  return new Octokit({ auth: userAccessToken });
 }
 
 export async function getOctokitForUserOrThrow({
@@ -317,17 +335,11 @@ export async function getGitHubTokenForBackground({
   userId: string;
   repoFullName: string;
 }): Promise<string> {
-  try {
-    const userToken = await getGitHubUserAccessTokenOrThrow({
-      db,
-      userId,
-      encryptionKey: env.ENCRYPTION_MASTER_KEY,
-    });
-    if (userToken) {
-      return userToken;
-    }
-  } catch {
-    // No user GitHub identity → fall back to the App installation token below.
+  // Same refresh-first rule as getOctokitForUser: an EXPIRED stored token must
+  // not win over the App installation fallback.
+  const userToken = await getUsableGitHubUserToken({ userId });
+  if (userToken) {
+    return userToken;
   }
   const [owner, repo] = parseRepoFullName(repoFullName);
   return getInstallationToken(owner, repo);

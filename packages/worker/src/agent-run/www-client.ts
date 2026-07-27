@@ -1,3 +1,4 @@
+import type { DaemonEventAPIBody } from "@terragon/daemon/shared";
 import type { PulledDaemonMessage } from "./types";
 
 /**
@@ -11,17 +12,43 @@ export interface WwwClientOpts {
   daemonToken: string;
   threadId: string;
   threadChatId: string;
+  /**
+   * W3C `traceparent` for the #7 end-to-end trace join. When present it is sent as a
+   * `traceparent` header on every www call so the control-plane handler (and the
+   * GitHub post it triggers) continue the dispatch-minted trace. Undefined → the
+   * header is simply omitted (trace join is a no-op, no behaviour change).
+   */
+  traceparent?: string;
 }
 
 function endpoint(baseUrl: string, pathname: string): string {
   return `${baseUrl.replace(/\/+$/, "")}${pathname}`;
 }
 
-function headers(daemonToken: string): Record<string, string> {
-  return {
+function headers(opts: WwwClientOpts): Record<string, string> {
+  const h: Record<string, string> = {
     "content-type": "application/json",
-    "x-daemon-token": daemonToken,
+    "x-daemon-token": opts.daemonToken,
   };
+  if (opts.traceparent) {
+    h.traceparent = opts.traceparent;
+  }
+  return h;
+}
+
+/**
+ * A next-message HTTP failure that carries the status code so the workflow can
+ * classify it (#6): a 4xx (PR gone / permission / bad token) is a NonRetryableError;
+ * a 5xx / network error stays retryable.
+ */
+export class NextMessageHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "NextMessageHttpError";
+  }
 }
 
 /**
@@ -38,7 +65,7 @@ export async function pullNextMessage(
 ): Promise<PulledDaemonMessage | null> {
   const res = await fetch(endpoint(opts.baseUrl, "/api/daemon/next-message"), {
     method: "POST",
-    headers: headers(opts.daemonToken),
+    headers: headers(opts),
     body: JSON.stringify({
       threadId: opts.threadId,
       threadChatId: opts.threadChatId,
@@ -49,11 +76,76 @@ export async function pullNextMessage(
     return null;
   }
   if (!res.ok) {
-    throw new Error(
+    throw new NextMessageHttpError(
+      res.status,
       `next-message failed: HTTP ${res.status} (${res.statusText})`,
     );
   }
   return (await res.json()) as PulledDaemonMessage;
+}
+
+/** Max length of the failure reason forwarded to www (bounds accidental leakage). */
+const MAX_REASON_LEN = 500;
+
+/**
+ * #2 terminal-failure callback. On a FAILED run, POST a SYNTHETIC `custom-error`
+ * daemon-event to /api/daemon-event so www runs its existing terminal-error finish
+ * pipeline (marks the thread failed, review reconciler posts a "couldn't complete"
+ * comment, queue drains) instead of leaving a silent "working…" hang. Reuses the
+ * daemon-event path + the run's daemonToken — no new endpoint, no new terminal path
+ * (a second terminal transition on an already-terminal thread is a CAS no-op).
+ *
+ * H2: `reason` must ONLY ever be a Hatchet error summary (error class/message from
+ * ctx.errors() or a caught error) — NEVER agent output or the prompt. Truncated to
+ * MAX_REASON_LEN as belt-and-suspenders.
+ *
+ * NEVER throws: onFailure must not throw uncaught. A revoked-token failure class
+ * (S12 family) 401s here — the daemonToken is already dead — in which case the
+ * www-side stalled-thread watchdog is the only backstop (documented at the call
+ * site in workflow.ts). Both a request error and a non-2xx are logged, not thrown.
+ */
+export async function postRunFailed(
+  opts: WwwClientOpts,
+  { reason }: { reason: string },
+): Promise<void> {
+  const body: DaemonEventAPIBody = {
+    threadId: opts.threadId,
+    threadChatId: opts.threadChatId,
+    timezone: "UTC",
+    messages: [
+      {
+        type: "custom-error",
+        session_id: null,
+        duration_ms: 0,
+        error_info: reason.slice(0, MAX_REASON_LEN),
+      },
+    ],
+  };
+  let res: Response;
+  try {
+    res = await fetch(endpoint(opts.baseUrl, "/api/daemon-event"), {
+      method: "POST",
+      headers: headers(opts),
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    console.error("[agent-run] postRunFailed request failed (swallowed)", {
+      threadId: opts.threadId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  if (!res.ok) {
+    // 401 here = the revoked-token failure class (daemonToken already dead); the
+    // stalled-thread watchdog is the backstop. Log, never throw.
+    console.error(
+      "[agent-run] postRunFailed non-2xx — thread not marked failed here",
+      {
+        threadId: opts.threadId,
+        status: res.status,
+      },
+    );
+  }
 }
 
 export type ThreadStatusPoll =
@@ -71,7 +163,7 @@ export async function pollThreadStatus(
 ): Promise<ThreadStatusPoll> {
   const res = await fetch(endpoint(opts.baseUrl, "/api/daemon/thread-status"), {
     method: "POST",
-    headers: headers(opts.daemonToken),
+    headers: headers(opts),
     body: JSON.stringify({
       threadId: opts.threadId,
       threadChatId: opts.threadChatId,
@@ -115,7 +207,9 @@ async function cancellableSleep(ms: number, ctx: PollContext): Promise<void> {
     if (ctx.cancelled || ctx.signal?.aborted) {
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(step, ms - elapsed)));
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(step, ms - elapsed)),
+    );
     elapsed += step;
   }
 }

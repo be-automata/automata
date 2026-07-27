@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Automata execution-plane worker — PRIMARY launchd unit (unit A).
+
+  This is a TEMPLATE. Replace the __PLACEHOLDER__ tokens for the target box, then
+  install to ~/Library/LaunchAgents/com.automata.worker.plist. See ./README.md.
+
+  Tokens:
+    __HOME__            absolute home dir of the service user (e.g. /Users/automata)
+    __REPO__            absolute path to the automata-platform checkout
+                        (WorkingDirectory is <repo>/packages/worker)
+
+  KeepAlive relaunches the worker after a GRACEFUL exit (SIGTERM drain, see README),
+  so a rolling restart is: SIGTERM this unit, wait for it to drain + exit, and
+  launchd brings it back on the new code. ThrottleInterval 15 rate-limits crash
+  loops. Runtime drain is owned by the Hatchet SDK (no custom signal handler) —
+  never SIGKILL (`launchctl kickstart -k`) mid-run.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.automata.worker</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>__HOME__/.automata/run-worker.sh</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>15</integer>
+  <key>StandardOutPath</key><string>__HOME__/.automata/worker.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.automata/worker.err</string>
+  <key>WorkingDirectory</key><string>__REPO__/packages/worker</string>
+</dict>
+</plist>

@@ -33,6 +33,19 @@ export async function getGitHubUserAccessTokenOrThrow({
     throw new Error("No GitHub access token found");
   }
 
+  // GitHub App user tokens expire (8h). An expired token is NOT a usable
+  // credential: passing it to the API yields "Bad credentials", and callers that
+  // prefer a user token over the App installation token (getOctokitForBackground,
+  // getGitHubTokenForBackground) would pick the dead one and break background
+  // work. Treat it as absent so those callers fall back. A NULL expiry means the
+  // provider issues non-expiring tokens — those stay valid.
+  if (
+    githubAccount.accessTokenExpiresAt &&
+    githubAccount.accessTokenExpiresAt.getTime() <= Date.now()
+  ) {
+    throw new Error("GitHub access token expired");
+  }
+
   // Decrypt the token if it's encrypted, otherwise return as-is (backwards compatibility)
   return decryptTokenWithBackwardsCompatibility(
     githubAccount.accessToken,

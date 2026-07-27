@@ -27,6 +27,7 @@ import {
   STRIPE_PLAN_CONFIGS,
   getStripeWebhookSecret,
 } from "@/server-lib/stripe";
+import { withDefaultActiveOrganization } from "./active-org";
 import { getStripeClient } from "@/server-lib/stripe";
 import { isStripeConfigured } from "@/server-lib/stripe";
 
@@ -177,6 +178,15 @@ export const auth = betterAuth({
     }),
   },
   databaseHooks: {
+    session: {
+      create: {
+        // Default the tenant: without this, activeOrganizationId stays NULL
+        // (nothing calls organization.setActive) and every org-gated write —
+        // review settings included — 400s with "No active organization".
+        before: async (session) =>
+          withDefaultActiveOrganization({ db, session }),
+      },
+    },
     user: {
       create: {
         after: async (user) => {

@@ -346,6 +346,9 @@ export type RepoReviewSetting = typeof schema.repoReviewSettings.$inferSelect;
 export type RepoReviewSettingInsert =
   typeof schema.repoReviewSettings.$inferInsert;
 
+export type HatchetRun = typeof schema.hatchetRun.$inferSelect;
+export type HatchetRunInsert = typeof schema.hatchetRun.$inferInsert;
+
 export type UserCreditGrantType =
   | "signup_bonus"
   | "stripe_top_up"
