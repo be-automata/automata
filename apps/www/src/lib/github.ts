@@ -22,6 +22,7 @@ import {
 } from "@terragon/shared/model/user";
 import { env } from "@terragon/env/apps-www";
 import { UserFacingError } from "./server-actions";
+import { auth } from "./auth";
 
 export function parseRepoFullName(repoFullName: string): [string, string] {
   const [owner, repo] = repoFullName.split("/");
@@ -245,24 +246,51 @@ export async function getOctokitForApp({
   return new Octokit({ auth: githubAccessToken });
 }
 
+/**
+ * Fresh GitHub user access token, or null when the user has no usable GitHub
+ * identity. GitHub App user tokens EXPIRE (8h), and the stored column keeps the
+ * dead value — handing that to Octokit yields "Bad credentials" and, worse,
+ * makes getOctokitForBackground prefer it over the App installation fallback.
+ * better-auth owns the refresh (it re-encrypts and persists the new token), so
+ * ask it first and only fall back to the stored column when it can't help
+ * (no refresh token, revoked grant, or a provider without expiry).
+ */
+async function getFreshGitHubUserToken({
+  userId,
+}: {
+  userId: string;
+}): Promise<string | null> {
+  try {
+    const { accessToken } = await auth.api.getAccessToken({
+      body: { providerId: "github", userId },
+    });
+    if (accessToken) {
+      return accessToken;
+    }
+  } catch (error) {
+    console.warn("[github] user token refresh failed", { userId, error });
+  }
+  try {
+    return await getGitHubUserAccessTokenOrThrow({
+      db,
+      userId,
+      encryptionKey: env.ENCRYPTION_MASTER_KEY,
+    });
+  } catch {
+    return null;
+  }
+}
+
 export async function getOctokitForUser({
   userId,
 }: {
   userId: string;
 }): Promise<Octokit | null> {
-  try {
-    const userAccessToken = await getGitHubUserAccessTokenOrThrow({
-      db,
-      userId,
-      encryptionKey: env.ENCRYPTION_MASTER_KEY,
-    });
-    if (userAccessToken) {
-      return new Octokit({ auth: userAccessToken });
-    }
-    return null;
-  } catch (error) {
+  const userAccessToken = await getFreshGitHubUserToken({ userId });
+  if (!userAccessToken) {
     return null;
   }
+  return new Octokit({ auth: userAccessToken });
 }
 
 export async function getOctokitForUserOrThrow({
@@ -317,17 +345,11 @@ export async function getGitHubTokenForBackground({
   userId: string;
   repoFullName: string;
 }): Promise<string> {
-  try {
-    const userToken = await getGitHubUserAccessTokenOrThrow({
-      db,
-      userId,
-      encryptionKey: env.ENCRYPTION_MASTER_KEY,
-    });
-    if (userToken) {
-      return userToken;
-    }
-  } catch {
-    // No user GitHub identity → fall back to the App installation token below.
+  // Same refresh-first rule as getOctokitForUser: an EXPIRED stored token must
+  // not win over the App installation fallback.
+  const userToken = await getFreshGitHubUserToken({ userId });
+  if (userToken) {
+    return userToken;
   }
   const [owner, repo] = parseRepoFullName(repoFullName);
   return getInstallationToken(owner, repo);
