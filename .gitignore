@@ -47,10 +47,20 @@ data/
 output.txt
 
 # claude code
+apps/www/.claude-flow
 .claude/settings.local.json
+
+# ruflo / claude-flow per-checkout runtime state (daemon pid, logs, metrics)
+# and generated config. Regenerated on demand; never shared between worktrees.
+.claude-flow/
+.swarm/
+.claude/proven-config.json
+.claude/.proven-config-version
+.claude/security-scans/
 
 # turborepo
 .turbo
 
 # vscode-extension local workspace settings
 apps/vscode-extension/.vscode/
+.gstack/
