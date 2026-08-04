@@ -161,11 +161,11 @@ export const auth = betterAuth({
     // kept an active session permanently "fresh". 0 disables the check, which
     // preserves the pre-upgrade behaviour exactly and keeps this upgrade
     // behaviour-neutral.
-    //
-    // SECURITY FOLLOW-UP: 0 means no re-authentication is required before a
-    // sensitive operation. That was already the effective state pre-1.6, but if
-    // we want a real re-auth window, set this to a value that fits a 60-day
-    // session (e.g. 60 * 60 * 24 * 7) and verify the admin flows still work.
+    // SECURITY FOLLOW-UP (tracked in #40): 0 means no re-authentication is ever
+    // required before a sensitive operation. That was already the effective
+    // state pre-1.6, so this is not a regression, but it does opt us out of the
+    // new gate entirely rather than tuning it. Raising it needs a re-auth
+    // prompt flow first, which does not exist today — see #40 for the plan.
     freshAge: 0,
   },
   hooks: {
