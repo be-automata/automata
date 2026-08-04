@@ -41,6 +41,7 @@ import {
   getAutomations,
 } from "../packages/shared/src/model/automations";
 import { DBUserMessage } from "../packages/shared/src/db/db-message";
+import { loadReviewSkillBody } from "../apps/www/src/server-lib/review/review-skill";
 
 // Dogfooding pilot defaults (BeAutomata org, our own platform repo).
 const DEFAULT_ORG_SLUG = "beautomata";
@@ -70,6 +71,11 @@ console.log(
 );
 
 const db = createDb(databaseUrl);
+
+// Load BEFORE touching the DB: seeding a review automation whose instruction is
+// missing its methodology degrades every subsequent review, so a bad/absent
+// skill must abort the seed rather than write a half-formed action.
+const reviewSkillBody = loadReviewSkillBody();
 
 function userMessage(text: string): DBUserMessage {
   return {
@@ -170,18 +176,23 @@ async function main() {
       type: "user_message",
       config: {
         // The instruction INLINES the minimal wire contract (verdict enum +
-        // fenced-json + commit field) so a run that fails to Read the methodology
-        // file still emits something the parser (emittedReviewIntentSchema) accepts.
-        // TODO(rev3-skill-path-portable): the SKILL.md path is hardcoded to the pilot
-        // box HOME (/Users/senior); read as TEXT (no $HOME expansion) so a customer
-        // box breaks it — rev-3 stamps the run's HOME-resolved skill path or a
-        // daemon SKILL_DIR env.
+        // fenced-json + commit field) AND the full methodology body, read at seed
+        // time from the tracked deploy/skills/github-ops/SKILL.md.
+        //
+        // Resolves TODO(rev3-skill-path-portable): the methodology used to be an
+        // absolute per-box HOME path read as TEXT (no $HOME expansion), so it only
+        // resolved on the pilot box, and the installed copy could drift from the
+        // tracked one with nothing comparing them. Inlining
+        // means the agent needs no box-local file and there is exactly one copy.
+        // Skill edits reach onboarded repos via upsertAutomation's action update.
         message: userMessage(
           `A pull request was opened or updated in ${repoFullName}. Perform a substantive PR review.\n\n` +
             `You are running as a REVIEW agent: you have NO gh and NO GitHub token, so you cannot post to GitHub. You deliver your verdict by EMITTING it as your FINAL message — a single fenced \`\`\`json block with EXACTLY this shape:\n` +
             `{ "verdict": "approve" | "request_changes" | "comment", "commit": "<the HEAD sha you reviewed, from \`git rev-parse HEAD\`>", "summary": "<verdict rationale>", "findings": [ { "severity": "info" | "warning" | "error" | "critical", "path": "<file>", "line": <number>, "body": "<one concrete finding>", "quote": "<verbatim source line(s) at path:line, from a fresh Read at HEAD>" } ] }\n` +
             `The control plane posts your review exactly once from that block.\n\n` +
-            `First, Read the full review methodology and rules at /Users/senior/.claude/skills/github-ops/SKILL.md and follow it (verify-before-block quote rules, severity→verdict mapping, the six review dimensions). Compute the PR delta with \`git diff origin/main...HEAD\` (the base branch is \`main\`; its ref is pre-fetched + deepened to the merge-base so this resolves OFFLINE) and Read/Grep/Glob to inspect files at HEAD. Do NOT use \`git diff HEAD~1...HEAD\` (the clone is shallow) and do NOT run gh. Emit the fenced-json block exactly once, then stop.`,
+            `Compute the PR delta with \`git diff origin/main...HEAD\` (the base branch is \`main\`; its ref is pre-fetched + deepened to the merge-base so this resolves OFFLINE) and Read/Grep/Glob to inspect files at HEAD. Do NOT use \`git diff HEAD~1...HEAD\` (the clone is shallow) and do NOT run gh. Emit the fenced-json block exactly once, then stop.\n\n` +
+            `Follow the review methodology below in full (verify-before-block quote rules, severity→verdict mapping, the six review dimensions).\n\n` +
+            `----- BEGIN REVIEW METHODOLOGY -----\n${reviewSkillBody}\n----- END REVIEW METHODOLOGY -----`,
         ),
       },
     },

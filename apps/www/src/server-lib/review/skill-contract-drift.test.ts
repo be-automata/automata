@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseReviewIntent } from "./parse-review-intent";
+import { loadReviewSkillBody, stripFrontmatter } from "./review-skill";
 
 /**
  * Anti-drift guard (ADR-036 rider): the emit-skill's fenced-JSON EXAMPLE must parse
@@ -36,5 +37,63 @@ describe("emit-skill contract ↔ parser (no drift)", () => {
         quote: expect.any(String),
       });
     }
+  });
+});
+
+/**
+ * Anti-drift guard #2: the seed must INLINE the methodology from the tracked
+ * skill, never point the agent at a box-local path. The previous instruction
+ * embedded `/Users/senior/.claude/skills/github-ops/SKILL.md` as literal text,
+ * which (a) only resolved on the pilot box and (b) let the installed copy drift
+ * from the tracked one with nothing comparing them — a silently degraded review
+ * on every run. These tests fail CI the instant either regression returns.
+ */
+describe("seed inlines the tracked review skill (no box-local path)", () => {
+  const SEED_TS = fileURLToPath(
+    new URL("../../../../../deploy/seed-pilot-mirror.ts", import.meta.url),
+  );
+
+  it("the seed contains no absolute home-directory skill path", () => {
+    const seed = readFileSync(SEED_TS, "utf8");
+    // Any absolute /Users/... or /home/... path would be box-specific.
+    const absHomePaths = seed.match(/["'`][^"'`\n]*\/(?:Users|home)\/[^"'`\n]*/g);
+    expect(absHomePaths, `seed must not hardcode a box path: ${absHomePaths}`)
+      .toBeNull();
+  });
+
+  it("the seed references the skill via the shared loader, not a literal path", () => {
+    const seed = readFileSync(SEED_TS, "utf8");
+    expect(seed).toContain("loadReviewSkillBody");
+    expect(seed).toContain("reviewSkillBody");
+  });
+
+  it("the loader returns the tracked methodology with its verdict contract", () => {
+    const body = loadReviewSkillBody();
+    expect(body.length).toBeGreaterThan(500);
+    // Frontmatter stripped: no leading fence, and the registry metadata is gone.
+    expect(body.startsWith("---")).toBe(false);
+    expect(body).not.toContain("\nname: github-ops");
+    // Still carries the wire contract the parser depends on.
+    expect(parseReviewIntent(body).ok).toBe(true);
+  });
+
+  it("the loader rejects a skill missing the verdict contract", () => {
+    const bogus = fileURLToPath(new URL("./parse-review-intent.ts", import.meta.url));
+    expect(() => loadReviewSkillBody(bogus)).toThrow(
+      /no fenced-json verdict contract/,
+    );
+  });
+
+  it("the loader reports a missing skill file rather than seeding without it", () => {
+    expect(() => loadReviewSkillBody("/nonexistent/SKILL.md")).toThrow(
+      /not readable/,
+    );
+  });
+
+  it("stripFrontmatter does not terminate early on a --- inside the frontmatter", () => {
+    const md = ["---", "name: x", "desc: a --- b", "---", "# Body", "text"].join(
+      "\n",
+    );
+    expect(stripFrontmatter(md)).toBe("# Body\ntext");
   });
 });
