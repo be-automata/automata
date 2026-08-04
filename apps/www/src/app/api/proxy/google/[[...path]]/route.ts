@@ -356,9 +356,7 @@ async function authorize(request: NextRequest): Promise<
     });
 
     // better-auth 1.5 renamed ApiKey.userId -> referenceId; we always mint keys
-
     // referencing the owning user, so this still holds a userId.
-
     const userId = key?.referenceId;
 
     if (error || !valid || !userId) {
