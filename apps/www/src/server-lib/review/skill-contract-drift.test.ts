@@ -90,10 +90,49 @@ describe("seed inlines the tracked review skill (no box-local path)", () => {
     );
   });
 
-  it("stripFrontmatter does not terminate early on a --- inside the frontmatter", () => {
-    const md = ["---", "name: x", "desc: a --- b", "---", "# Body", "text"].join(
+  it("stripFrontmatter does not terminate early on an inline --- in a value", () => {
+    const md = [
+      "---",
+      "name: x",
+      "desc: a --- b",
+      "---",
+      "# Body",
+      "text",
+    ].join("\n");
+    expect(stripFrontmatter(md)).toBe("# Body\ntext");
+  });
+
+  /**
+   * The inline case above never exercised the fence check: the old
+   * `indexOf("\n---")` needs the `---` at a LINE START, which `desc: a --- b`
+   * never is. The real hazard is a frontmatter line that BEGINS with `---` and
+   * continues with other text — a prefix match reads it as the closing fence
+   * and truncates the body. These pin the whole-line requirement.
+   */
+  it("stripFrontmatter does not treat a line merely STARTING with --- as the fence", () => {
+    const md = [
+      "---",
+      "name: x",
+      "summary: >-",
+      "---draft, not a fence",
+      "---",
+      "# Body",
+      "text",
+    ].join("\n");
+    expect(stripFrontmatter(md)).toBe("# Body\ntext");
+  });
+
+  it("stripFrontmatter keeps a --- line in the BODY intact", () => {
+    const md = ["---", "name: x", "---", "# Body", "---", "after rule"].join(
       "\n",
     );
-    expect(stripFrontmatter(md)).toBe("# Body\ntext");
+    // Only the first fence pair is frontmatter; a horizontal rule in the body
+    // must survive verbatim.
+    expect(stripFrontmatter(md)).toBe("# Body\n---\nafter rule");
+  });
+
+  it("stripFrontmatter accepts a fence with trailing whitespace and CRLF", () => {
+    const md = ["---", "name: x", "---  ", "# Body", "text"].join("\r\n");
+    expect(stripFrontmatter(md)).toBe("# Body\r\ntext");
   });
 });
