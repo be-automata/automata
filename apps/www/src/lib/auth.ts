@@ -1,13 +1,10 @@
 import * as schema from "@terragon/shared/db/schema";
 import { betterAuth } from "better-auth";
-import {
-  bearer,
-  magicLink,
-  apiKey,
-  admin,
-  organization,
-  createAuthMiddleware,
-} from "better-auth/plugins";
+import { bearer, magicLink, admin, organization } from "better-auth/plugins";
+// better-auth 1.5 extracted the api-key plugin into its own package and moved
+// createAuthMiddleware from `better-auth/plugins` to `better-auth/api`.
+import { createAuthMiddleware } from "better-auth/api";
+import { apiKey } from "@better-auth/api-key";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { stripe as createStripePlugin } from "@better-auth/stripe";
 import { db } from "./db";
@@ -156,6 +153,20 @@ export const auth = betterAuth({
   session: {
     expiresIn: 60 * 60 * 24 * 60, // 60 days (2 months)
     updateAge: 60 * 60 * 24, // Update session if it's older than 1 day
+    // better-auth 1.6 BREAKING: freshAge is now measured from the session's
+    // createdAt instead of its rolling update time, and defaults to 24h.
+    // `freshSessionMiddleware` gates the sensitive endpoints (delete user,
+    // change email/password, admin plugin ops), so with 60-day sessions every
+    // user would start failing those on day 2 — previously `updateAge: 1 day`
+    // kept an active session permanently "fresh". 0 disables the check, which
+    // preserves the pre-upgrade behaviour exactly and keeps this upgrade
+    // behaviour-neutral.
+    //
+    // SECURITY FOLLOW-UP: 0 means no re-authentication is required before a
+    // sensitive operation. That was already the effective state pre-1.6, but if
+    // we want a real re-auth window, set this to a value that fits a 60-day
+    // session (e.g. 60 * 60 * 24 * 7) and verify the admin flows still work.
+    freshAge: 0,
   },
   hooks: {
     after: createAuthMiddleware(async (context) => {

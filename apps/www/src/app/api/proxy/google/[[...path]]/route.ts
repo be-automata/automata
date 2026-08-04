@@ -355,7 +355,11 @@ async function authorize(request: NextRequest): Promise<
       body: { key: token },
     });
 
-    const userId = key?.userId;
+    // better-auth 1.5 renamed ApiKey.userId -> referenceId; we always mint keys
+
+    // referencing the owning user, so this still holds a userId.
+
+    const userId = key?.referenceId;
 
     if (error || !valid || !userId) {
       console.log("Unauthorized Google proxy request", {

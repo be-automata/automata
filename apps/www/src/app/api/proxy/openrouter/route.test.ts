@@ -86,7 +86,7 @@ describe("OpenRouter proxy route", () => {
     verifyApiKeyMock.mockResolvedValue({
       valid: true,
       error: null,
-      key: { userId: "user-123" } as any,
+      key: { referenceId: "user-123" } as any,
     });
     getUserCreditBalanceMock.mockResolvedValue({
       totalCreditsCents: 1_000,

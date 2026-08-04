@@ -43,8 +43,19 @@ export type DaemonTokenContext = {
   tokenType: "daemon" | null;
 };
 
+/**
+ * NOTE: every field is optional here, so this structural type will accept a
+ * better-auth key object whose owner field has been RENAMED — the read just
+ * yields `undefined` and every daemon token is silently rejected. That is
+ * exactly what happened on the 1.3 -> 1.6 upgrade, which renamed
+ * `userId` -> `referenceId`; `tsc` stayed green and only a DB-backed test
+ * caught it. Keep both fields declared, and keep the fallback below.
+ */
 type VerifiedApiKeyLike = {
   id?: string | null;
+  /** better-auth >= 1.5. */
+  referenceId?: string | null;
+  /** better-auth <= 1.4. Retained so a mixed-version rollout can't 401 everyone. */
   userId?: string | null;
   metadata?: Record<string, unknown> | null;
 } | null;
@@ -56,7 +67,8 @@ type VerifiedApiKeyLike = {
 export function daemonTokenContextFromApiKey(
   key: VerifiedApiKeyLike,
 ): DaemonTokenContext | null {
-  const userId = key?.userId;
+  // The api-key plugin only ever references users, so referenceId IS the userId.
+  const userId = key?.referenceId ?? key?.userId;
   if (!userId) {
     return null;
   }

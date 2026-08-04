@@ -41,7 +41,9 @@ const USER_KEYED_TABLES: ReadonlyArray<{
   { name: "threadChat", table: "thread_chat", userCol: "user_id" },
   { name: "environment", table: "environment", userCol: "user_id" },
   { name: "automations", table: "automations", userCol: "user_id" },
-  { name: "apikey", table: "apikey", userCol: "user_id" },
+  // better-auth 1.5 renamed this column user_id -> reference_id. The value is
+  // still a user id; only the column name changed.
+  { name: "apikey", table: "apikey", userCol: "reference_id" },
   { name: "userCredits", table: "user_credits", userCol: "user_id" },
   { name: "usageEvents", table: "usage_events", userCol: "user_id" },
   {
