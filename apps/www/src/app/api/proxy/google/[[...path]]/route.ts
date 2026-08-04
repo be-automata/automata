@@ -355,9 +355,15 @@ async function authorize(request: NextRequest): Promise<
       body: { key: token },
     });
 
-    // better-auth 1.5 renamed ApiKey.userId -> referenceId; we always mint keys
-    // referencing the owning user, so this still holds a userId.
-    const userId = key?.referenceId;
+    // Resolve the tenant context ONCE through the shared helper: it owns the
+
+    // better-auth 1.5 `referenceId` rename (with a legacy `userId` fallback so a
+
+    // mixed-version rollout cannot 401 the fleet) and the organizationId decode.
+
+    const daemonContext = daemonTokenContextFromApiKey(key);
+
+    const userId = daemonContext?.userId;
 
     if (error || !valid || !userId) {
       console.log("Unauthorized Google proxy request", {
@@ -390,7 +396,7 @@ async function authorize(request: NextRequest): Promise<
     return {
       response: null,
       userId,
-      organizationId: daemonTokenContextFromApiKey(key)?.organizationId ?? null,
+      organizationId: daemonContext?.organizationId ?? null,
       bodyBuffer,
       model,
     };
