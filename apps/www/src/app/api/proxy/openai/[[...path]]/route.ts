@@ -316,13 +316,9 @@ async function authorize(
     });
 
     // Resolve the tenant context ONCE through the shared helper: it owns the
-
     // better-auth 1.5 `referenceId` rename (with a legacy `userId` fallback so a
-
     // mixed-version rollout cannot 401 the fleet) and the organizationId decode.
-
     const daemonContext = daemonTokenContextFromApiKey(key);
-
     const userId = daemonContext?.userId;
 
     if (error || !valid || !userId) {
