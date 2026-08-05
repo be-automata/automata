@@ -8,6 +8,11 @@ import { apiKey } from "@better-auth/api-key";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { stripe as createStripePlugin } from "@better-auth/stripe";
 import { db } from "./db";
+import {
+  SESSION_EXPIRES_IN_SECONDS,
+  SESSION_FRESH_AGE_SECONDS,
+  SESSION_UPDATE_AGE_SECONDS,
+} from "./auth-session-config";
 import { env } from "@terragon/env/apps-www";
 import { Resend } from "resend";
 import { encryptToken } from "@terragon/utils/encryption";
@@ -151,22 +156,12 @@ export const auth = betterAuth({
     requireEmailVerification: false,
   },
   session: {
-    expiresIn: 60 * 60 * 24 * 60, // 60 days (2 months)
-    updateAge: 60 * 60 * 24, // Update session if it's older than 1 day
-    // better-auth 1.6 BREAKING: freshAge is now measured from the session's
-    // createdAt instead of its rolling update time, and defaults to 24h.
-    // `freshSessionMiddleware` gates the sensitive endpoints (delete user,
-    // change email/password, admin plugin ops), so with 60-day sessions every
-    // user would start failing those on day 2 — previously `updateAge: 1 day`
-    // kept an active session permanently "fresh". 0 disables the check, which
-    // preserves the pre-upgrade behaviour exactly and keeps this upgrade
-    // behaviour-neutral.
-    // SECURITY FOLLOW-UP (tracked in #40): 0 means no re-authentication is ever
-    // required before a sensitive operation. That was already the effective
-    // state pre-1.6, so this is not a regression, but it does opt us out of the
-    // new gate entirely rather than tuning it. Raising it needs a re-auth
-    // prompt flow first, which does not exist today — see #40 for the plan.
-    freshAge: 0,
+    expiresIn: SESSION_EXPIRES_IN_SECONDS, // 60 days (2 months)
+    updateAge: SESSION_UPDATE_AGE_SECONDS, // Update session if it's older than 1 day
+    // 7-day re-auth window for the endpoints better-auth gates on session
+    // freshness. See auth-session-config.ts for exactly which routes that is
+    // (it is a shorter list than the docs imply) and why this is safe here.
+    freshAge: SESSION_FRESH_AGE_SECONDS,
   },
   hooks: {
     after: createAuthMiddleware(async (context) => {
