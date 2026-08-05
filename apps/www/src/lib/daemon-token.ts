@@ -103,7 +103,7 @@ export async function hasActiveDaemonToken({
   const rows = await db
     .select({ id: apikey.id })
     .from(apikey)
-    .where(and(eq(apikey.userId, userId), eq(apikey.name, name)))
+    .where(and(eq(apikey.referenceId, userId), eq(apikey.name, name)))
     .limit(1);
   return rows.length > 0;
 }
@@ -125,7 +125,7 @@ export async function revokeDaemonTokenById({
 }): Promise<number> {
   const deleted = await db
     .delete(apikey)
-    .where(and(eq(apikey.userId, userId), eq(apikey.id, apiKeyId)))
+    .where(and(eq(apikey.referenceId, userId), eq(apikey.id, apiKeyId)))
     .returning({ id: apikey.id });
   if (deleted.length > 0) {
     console.log("[daemon-token] revoked run token on terminal (by id)", {
@@ -145,7 +145,7 @@ export async function revokeDaemonTokensForSandbox({
 }): Promise<number> {
   const deleted = await db
     .delete(apikey)
-    .where(and(eq(apikey.userId, userId), eq(apikey.name, sandboxId)))
+    .where(and(eq(apikey.referenceId, userId), eq(apikey.name, sandboxId)))
     .returning({ id: apikey.id });
   if (deleted.length > 0) {
     console.log("[daemon-token] revoked on thread terminal", {

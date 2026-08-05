@@ -16,7 +16,7 @@ async function keysNamed(userId: string, name: string) {
   return db
     .select({ id: apikeyTable.id })
     .from(apikeyTable)
-    .where(and(eq(apikeyTable.userId, userId), eq(apikeyTable.name, name)));
+    .where(and(eq(apikeyTable.referenceId, userId), eq(apikeyTable.name, name)));
 }
 
 describe("revokeDaemonTokensForSandbox (ADR-003 F3)", () => {
@@ -101,7 +101,7 @@ describe("revokeDaemonTokensForSandbox (ADR-003 F3)", () => {
     const survivors = await db
       .select({ id: apikeyTable.id })
       .from(apikeyTable)
-      .where(and(eq(apikeyTable.userId, user.id), eq(apikeyTable.id, b.id)));
+      .where(and(eq(apikeyTable.referenceId, user.id), eq(apikeyTable.id, b.id)));
     expect(survivors).toHaveLength(1);
   });
 

@@ -200,9 +200,13 @@ export const apikey = pgTable("apikey", {
   start: text("start"),
   prefix: text("prefix"),
   key: text("key").notNull(),
-  userId: text("user_id")
+  // better-auth 1.5 renamed the api-key owner column `userId` -> `referenceId`
+  // and added `configId` (defaults to "default"). The plugin only ever
+  // references users here, so the FK to user.id is preserved.
+  referenceId: text("reference_id")
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
+  configId: text("config_id").notNull().default("default"),
   refillInterval: integer("refill_interval"),
   refillAmount: integer("refill_amount"),
   lastRefillAt: timestamp("last_refill_at"),

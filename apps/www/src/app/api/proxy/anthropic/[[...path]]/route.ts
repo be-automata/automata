@@ -421,7 +421,11 @@ async function authorize(
       body: { key: token },
     });
 
-    const userId = key?.userId;
+    // Resolve the tenant context ONCE through the shared helper: it owns the
+    // better-auth 1.5 `referenceId` rename (with a legacy `userId` fallback so a
+    // mixed-version rollout cannot 401 the fleet) and the organizationId decode.
+    const daemonContext = daemonTokenContextFromApiKey(key);
+    const userId = daemonContext?.userId;
 
     if (error || !valid || !userId) {
       console.log("Unauthorized Anthropic proxy request", { error, valid });
@@ -451,7 +455,7 @@ async function authorize(
     return {
       response: null,
       userId,
-      organizationId: daemonTokenContextFromApiKey(key)?.organizationId ?? null,
+      organizationId: daemonContext?.organizationId ?? null,
     };
   } catch (err) {
     console.error("Failed to verify Anthropic proxy request", err);
