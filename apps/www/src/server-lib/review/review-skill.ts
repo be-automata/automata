@@ -31,12 +31,15 @@ export const TRACKED_REVIEW_SKILL_PATH = fileURLToPath(
  */
 export function stripFrontmatter(md: string): string {
   if (!md.startsWith("---")) return md.trim();
-  // Match the CLOSING fence only at a line start, so a `---` inside the
-  // frontmatter body cannot terminate it early.
-  const end = md.indexOf("\n---", 3);
-  if (end === -1) return md.trim();
-  const afterFence = md.indexOf("\n", end + 1);
-  return afterFence === -1 ? "" : md.slice(afterFence + 1).trim();
+  // The closing fence must be a line that is EXACTLY `---` (trailing spaces/tabs
+  // allowed), not merely one STARTING with it. A prefix match — the old
+  // `indexOf("\n---")` — let a frontmatter value such as `summary: ---draft`
+  // read as the fence and silently truncate the body from there on.
+  // The trailing `(?:\r?\n|$)` is what pins it to a whole line, and tolerates
+  // CRLF checkouts and a fence with no trailing newline.
+  const fence = /\n---[ \t]*(?:\r?\n|$)/.exec(md.slice(3));
+  if (!fence) return md.trim();
+  return md.slice(3 + fence.index + fence[0].length).trim();
 }
 
 /**
