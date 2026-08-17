@@ -8,7 +8,45 @@ import {
   useUserReposQuery,
 } from "@/queries/user-repo-queries";
 import { getGHAppInstallUrl } from "@/lib/gh-app-url";
+import { signInWithGithub } from "@/components/auth";
 import { cn } from "@/lib/utils";
+
+/**
+ * The repo list comes from the user's GitHub OAuth token; the branch list comes
+ * from the App INSTALLATION token (see server-actions/user-repos.ts). GitHub App
+ * user tokens expire after 8h and this app deliberately does not refresh them
+ * (lib/github.ts) — so the repo picker empties out while the branch picker keeps
+ * working, and the fix is re-linking GitHub, NOT installing the App again.
+ *
+ * Without this, the expired-token state renders as the generic "Add a repo to get
+ * started." + "Manage repository access", which sends the user to the App install
+ * page and cannot fix it. Onboarding already branches on the same flag.
+ */
+function githubReconnectActionItem() {
+  return {
+    value: "reconnect-github",
+    label: "Reconnect GitHub",
+    icon: <Github className="size-4 shrink-0" />,
+    action: () => {
+      void signInWithGithub({
+        returnUrl: "/dashboard",
+        location: "repo_picker",
+      });
+    },
+  };
+}
+
+export function repoEmptyText(githubTokenMissing: boolean) {
+  return (didSearch: boolean) => {
+    if (githubTokenMissing) {
+      return "Your GitHub connection expired. Reconnect to list your repos.";
+    }
+    if (!didSearch) {
+      return "Add a repo to get started.";
+    }
+    return "No repositories found.";
+  };
+}
 
 function RepoSelectorInner({
   selectedRepoFullName,
@@ -19,6 +57,7 @@ function RepoSelectorInner({
 }) {
   const { data: repoData, isLoading: isLoadingRepos } = useUserReposQuery();
   const repos = repoData?.repos;
+  const githubTokenMissing = repoData?.githubTokenMissing === true;
   const repoItems = React.useMemo(() => {
     const items = [];
     if (repos) {
@@ -53,6 +92,7 @@ function RepoSelectorInner({
     <ResponsiveCombobox
       items={repoItems}
       actionItems={[
+        ...(githubTokenMissing ? [githubReconnectActionItem()] : []),
         {
           value: "manage-github-apps",
           label: "Manage repository access",
@@ -71,12 +111,7 @@ function RepoSelectorInner({
       }}
       placeholder="Select a Repo"
       searchPlaceholder="Search repositories"
-      emptyText={(didSearch) => {
-        if (!didSearch) {
-          return "Add a repo to get started.";
-        }
-        return "No repositories found.";
-      }}
+      emptyText={repoEmptyText(githubTokenMissing)}
       isLoading={isLoadingRepos}
       loadingText="Loading repositories..."
       disabled={false}
@@ -106,6 +141,7 @@ function RepoBranchSelectorInner({
 }) {
   const { data: repoData, isLoading: isLoadingRepos } = useUserReposQuery();
   const repos = repoData?.repos;
+  const githubTokenMissing = repoData?.githubTokenMissing === true;
 
   const [loadBranches, setLoadBranches] = useState(false);
   const { data: branches, isLoading: isLoadingBranches } =
@@ -156,6 +192,7 @@ function RepoBranchSelectorInner({
           icon={<Github className="size-4 shrink-0 hidden sm:block" />}
           items={repoItems}
           actionItems={[
+            ...(githubTokenMissing ? [githubReconnectActionItem()] : []),
             {
               value: "manage-github-apps",
               label: "Manage repository access",
@@ -186,12 +223,7 @@ function RepoBranchSelectorInner({
           }}
           placeholder="Select a Repo"
           searchPlaceholder="Search repositories"
-          emptyText={(didSearch) => {
-            if (!didSearch) {
-              return "Add a repo to get started.";
-            }
-            return "No repositories found.";
-          }}
+          emptyText={repoEmptyText(githubTokenMissing)}
           isLoading={isLoadingRepos}
           loadingText="Loading repositories..."
           disabled={false}
