@@ -7,7 +7,7 @@ import {
   exchangeAuthorizationCode,
 } from "@/lib/claude-oauth";
 import { saveClaudeTokens } from "@/agent/msg/claudeCredentials";
-import { userOnlyAction } from "@/lib/auth-server";
+import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { getPostHogServer } from "@/lib/posthog-server";
 
 export const getAuthorizationURL = userOnlyAction(
@@ -41,8 +41,10 @@ export const exchangeCode = userOnlyAction(
       codeVerifier,
       state,
     });
+    const tenant = await getTenantContextOrNull();
     await saveClaudeTokens({
       userId,
+      organizationId: tenant?.organizationId ?? null,
       tokenData: {
         accessToken: tokenResponse.access_token,
         refreshToken: tokenResponse.refresh_token,

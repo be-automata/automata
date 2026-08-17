@@ -129,9 +129,14 @@ type TokenData = {
  */
 export async function saveClaudeTokens({
   userId,
+  organizationId,
   tokenData,
 }: {
   userId: string;
+  // Tenant to stamp on the credential (WI-5). The credential list reads are
+  // org-fenced, so a credential saved with a null org while the session has an
+  // active org is invisible in the UI.
+  organizationId?: string | null;
   tokenData: TokenData;
 }): Promise<void> {
   const additionalClaudeMetadata = await checkAndUpdateClaudeStatus({
@@ -143,6 +148,7 @@ export async function saveClaudeTokens({
   await insertAgentProviderCredentials({
     db,
     userId,
+    organizationId: organizationId ?? null,
     credentialData: {
       type: isApiKey ? "api-key" : "oauth",
       agent: "claudeCode",
