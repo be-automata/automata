@@ -14,7 +14,24 @@ import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { mockLoggedInUser } from "@/test-helpers/mock-next";
 import { getUserCredentialsAction } from "./user-credentials";
+import { getAgentProviderCredentialsAction } from "./credentials";
+import { exchangeCode } from "./claude-oauth";
 import { unwrapResult } from "@/lib/server-actions";
+
+vi.mock("@/lib/claude-oauth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/claude-oauth")>();
+  return {
+    ...actual,
+    exchangeAuthorizationCode: vi.fn(async () => ({
+      access_token: "access-token",
+      refresh_token: "refresh-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "user:inference",
+    })),
+    createAnthropicAPIKey: vi.fn(async () => "sk-ant-test"),
+  };
+});
 
 async function createOrg(userId: string) {
   const org = await createOrganization({
@@ -64,5 +81,26 @@ describe("user-credentials server action — org fencing (WI-5)", () => {
       .set({ activeOrganizationId: orgY })
       .where(eq(sessionTable.id, session.id));
     expect(unwrapResult(await getUserCredentialsAction()).hasClaude).toBe(false);
+  });
+
+  it("stamps the active org on a Claude OAuth credential so the list shows it", async () => {
+    await mockLoggedInUser(session);
+    await db
+      .update(sessionTable)
+      .set({ activeOrganizationId: orgY })
+      .where(eq(sessionTable.id, session.id));
+
+    unwrapResult(
+      await exchangeCode({
+        code: "code",
+        codeVerifier: "verifier",
+        state: "state",
+        // api-key avoids the Anthropic profile fetch in the subscription path.
+        authType: "api-key",
+      }),
+    );
+
+    const credentials = unwrapResult(await getAgentProviderCredentialsAction());
+    expect(credentials.claudeCode?.length).toBe(1);
   });
 });
