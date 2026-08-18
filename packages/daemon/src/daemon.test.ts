@@ -691,6 +691,47 @@ describe("daemon", () => {
       expect(spawnEnv.ANTHROPIC_API_KEY).toBe("test-api-key-from-env");
     });
 
+    it("useCredits routes through the proxy and does NOT also send ANTHROPIC_API_KEY", async () => {
+      // Two credentials for one call means the CLI's precedence rule decides who
+      // pays. Harmless in a sandbox (nothing injects a key there, so the fallback
+      // is ""), but on an execution-plane box the operator's key is populated and
+      // would compete with the proxy token.
+      execSyncMock.mockReturnValue("NOT_EXISTS\n");
+
+      await daemon.start();
+      await writeToUnixSocket({
+        unixSocketPath: runtime.unixSocketPath,
+        dataStr: JSON.stringify({ ...TEST_INPUT_MESSAGE, useCredits: true }),
+      });
+      await sleep();
+
+      expect(spawnCommandLineMock).toHaveBeenCalledTimes(1);
+      const spawnEnv = spawnCommandLineMock.mock.calls[0]![1].env;
+      expect(spawnEnv.ANTHROPIC_AUTH_TOKEN).toBe("TEST_TOKEN_STRING");
+      expect(spawnEnv.ANTHROPIC_BASE_URL).toContain("/api/proxy/anthropic");
+      // Blanked, not omitted: the child env is {...process.env, ...env}, so
+      // omitting the key would let the box's ambient one through — which is
+      // exactly the collision this is meant to prevent. The ambient value here
+      // is "test-api-key-from-env"; it must NOT survive.
+      expect(spawnEnv.ANTHROPIC_API_KEY).toBe("");
+    });
+
+    it("without useCredits the proxy vars are absent and the key path is used", async () => {
+      execSyncMock.mockReturnValue("NOT_EXISTS\n");
+
+      await daemon.start();
+      await writeToUnixSocket({
+        unixSocketPath: runtime.unixSocketPath,
+        dataStr: JSON.stringify(TEST_INPUT_MESSAGE),
+      });
+      await sleep();
+
+      const spawnEnv = spawnCommandLineMock.mock.calls[0]![1].env;
+      expect(spawnEnv.ANTHROPIC_API_KEY).toBe("test-api-key-from-env");
+      expect(spawnEnv.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+      expect(spawnEnv.ANTHROPIC_BASE_URL).toBeUndefined();
+    });
+
     it("should set empty ANTHROPIC_API_KEY when Claude credentials file exists", async () => {
       // Mock execSync to return "EXISTS" (credentials file exists)
       execSyncMock.mockReturnValue("EXISTS\n");
