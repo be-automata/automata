@@ -664,14 +664,19 @@ export class TerragonDaemon {
         enableMcpPermissionPrompt: this.getFeatureFlag("mcpPermissionPrompt"),
       }),
       env: {
-        ANTHROPIC_API_KEY: getAnthropicApiKeyOrNull(this.runtime),
-        BASH_MAX_TIMEOUT_MS: (60 * 1000).toString(),
-        ...(!!input.useCredits
+        // useCredits routes every call through the control-plane proxy, which
+        // supplies the upstream key itself. Passing ANTHROPIC_API_KEY alongside
+        // it hands the CLI two contradictory credentials and lets ITS precedence
+        // rule decide who pays. Harmless in a sandbox (nothing injects a key
+        // there, so this resolves to ""), but on an execution-plane box the
+        // operator's key is present and would compete with the proxy token.
+        ...(input.useCredits
           ? {
               ANTHROPIC_BASE_URL: `${this.runtime.normalizedUrl}/api/proxy/anthropic`,
               ANTHROPIC_AUTH_TOKEN: input.token,
             }
-          : {}),
+          : { ANTHROPIC_API_KEY: getAnthropicApiKeyOrNull(this.runtime) }),
+        BASH_MAX_TIMEOUT_MS: (60 * 1000).toString(),
       },
       onStdoutLine: (line) => {
         try {

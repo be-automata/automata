@@ -77,6 +77,50 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
     }
   });
 
+  describe("D1 — which model credential the run gets", () => {
+    it("without a delivered credential: the box key is the credential and HOME stays ambient", () => {
+      const env = build();
+      expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-xxx");
+      expect(env.HOME).toBe("/home/op");
+    });
+
+    it("with a delivered credential: HOME is the run's own, and the box key is GONE", () => {
+      const env = buildDaemonEnv({
+        baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
+        anthropicApiKey: "sk-ant-boxkey",
+        claudeBinDir: "",
+        installationToken: INSTALL_TOKEN,
+        ghConfigDir: "/tmp/isolated-gh",
+        botLogin: "automata-ai-bot[bot]",
+        runHome: "/tmp/run-42/home",
+      });
+      // The agent CLI reads $HOME/.claude/.credentials.json. Pointing HOME at the
+      // run dir is what makes it read THIS run's credential instead of the
+      // operator's login — and what stops one run clobbering another's.
+      expect(env.HOME).toBe("/tmp/run-42/home");
+      // Two credentials for one call means the CLI's precedence rule picks who
+      // pays. That ambiguity is exactly how the box key silently won for users
+      // who had a subscription, so the box key must not be present at all.
+      expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(JSON.stringify(env)).not.toContain("sk-ant-boxkey");
+    });
+
+    it("injects credential env (Amp) past the secret-pattern filter that would drop it", () => {
+      const env = buildDaemonEnv({
+        baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
+        anthropicApiKey: "",
+        claudeBinDir: "",
+        installationToken: INSTALL_TOKEN,
+        ghConfigDir: "/tmp/isolated-gh",
+        botLogin: "automata-ai-bot[bot]",
+        credentialEnv: { AMP_API_KEY: "sgamp_user_test" },
+      });
+      // AMP_API_KEY matches SECRET_KEY_PATTERN, so ambient forwarding would drop
+      // it. It is injected explicitly, after the whitelist pass.
+      expect(env.AMP_API_KEY).toBe("sgamp_user_test");
+    });
+  });
+
   it("defense-in-depth: a secret-looking key is never forwarded even if whitelisted", () => {
     // Sanity: no whitelisted key matches the secret pattern (would be dropped).
     const secretish = [...SAFE_ENV_KEYS].filter((k) =>

@@ -47,6 +47,15 @@ export class DaemonProcess {
     private readonly config: WorkerConfig,
     private readonly input: AgentRunInput,
     private readonly workdir: string,
+    /**
+     * The run's own agent credential, already written to a per-run HOME (D1).
+     * Null/omitted → this run has no delivered credential and the caller forces
+     * it through the control-plane proxy instead.
+     */
+    private readonly credentials: {
+      home: string | null;
+      env: Record<string, string>;
+    } | null = null,
   ) {
     const workerId = getProcessWorkerId();
     this.runDir = workerRunDir(config.runNamespaceRoot, workerId);
@@ -80,6 +89,8 @@ export class DaemonProcess {
       installationToken: this.input.installationToken,
       ghConfigDir: this.ghConfigDir,
       botLogin: this.config.botLogin,
+      runHome: this.credentials?.home ?? null,
+      credentialEnv: this.credentials?.env ?? {},
     });
     return this.env;
   }

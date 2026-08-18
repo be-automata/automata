@@ -84,6 +84,69 @@ export async function pullNextMessage(
   return (await res.json()) as PulledDaemonMessage;
 }
 
+/**
+ * Pull the run's AGENT PROVIDER credential (D1). Mirrors www's AIAgentCredentials:
+ * a `json-file` the agent CLI reads (Claude/Codex), an `env-var` (Amp), or
+ * `built-in-credits` meaning "no user credential — run through the control-plane
+ * proxy". 204 is treated as built-in-credits.
+ *
+ * H2-class: the `json-file` contents and `env-var` value are LIVE CREDENTIALS.
+ * Never log the returned object. Callers materialise it under a per-run HOME at
+ * 0600 and wipe it when the run ends.
+ */
+export type PulledAgentCredentials =
+  | { type: "json-file"; contents: string }
+  | { type: "env-var"; key: string; value: string }
+  | { type: "built-in-credits" };
+
+/**
+ * The agent travels WITH the credential because the worker builds the child env
+ * (which fixes HOME, and so the credential file path) before it pulls
+ * next-message — it cannot learn the agent from there in time.
+ */
+export interface PulledAgentCredentialsResult {
+  agent: string;
+  credentials: PulledAgentCredentials;
+}
+
+const CREDITS_ONLY: PulledAgentCredentialsResult = {
+  agent: "",
+  credentials: { type: "built-in-credits" },
+};
+
+export async function pullAgentCredentials(
+  opts: WwwClientOpts,
+  signal?: AbortSignal,
+): Promise<PulledAgentCredentialsResult> {
+  const res = await fetch(
+    endpoint(opts.baseUrl, "/api/daemon/agent-credentials"),
+    {
+      method: "POST",
+      headers: headers(opts),
+      body: JSON.stringify({
+        threadId: opts.threadId,
+        threadChatId: opts.threadChatId,
+      }),
+      signal,
+    },
+  );
+  if (res.status === 204) {
+    return CREDITS_ONLY;
+  }
+  if (!res.ok) {
+    // Never fail the run over this: an older control plane has no such route
+    // (404) and a transient 5xx should not strand the run. Falling back to
+    // built-in-credits is the same outcome as a user with no credential —
+    // the run proceeds through the proxy rather than dying.
+    console.warn("[agent-run] agent-credentials unavailable, using credits", {
+      threadId: opts.threadId,
+      status: res.status,
+    });
+    return CREDITS_ONLY;
+  }
+  return (await res.json()) as PulledAgentCredentialsResult;
+}
+
 /** Max length of the failure reason forwarded to www (bounds accidental leakage). */
 const MAX_REASON_LEN = 500;
 
