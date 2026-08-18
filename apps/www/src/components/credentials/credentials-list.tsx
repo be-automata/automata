@@ -17,6 +17,7 @@ import {
   isConnectedCredentialsSupported,
 } from "@terragon/agent/utils";
 import { AgentIcon } from "@/components/chat/agent-icon";
+import { credentialKindInfo } from "@terragon/shared/model/credential-kind";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { DeleteConfirmationDialog } from "@/components/delete-confirmation-dialog";
@@ -36,7 +37,10 @@ function CredentialDeleteButton({
   deletePending: boolean;
 }) {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
-  const isOAuth = credential.type === "oauth";
+  // A connected ACCOUNT is disconnected, a pasted secret is deleted. Reading this
+  // from the shared kind map (rather than `type === "oauth"`) is what stops a new
+  // credential kind from silently inheriting the wrong copy.
+  const isOAuth = credentialKindInfo(credential.type).isConnection;
   const agentName = getAgentDisplayName(agent);
   return (
     <>
@@ -100,10 +104,13 @@ function CredentialsListItem({
               {credential.agentName}
             </span>
             <Badge variant="outline" className="text-xs">
-              {credential.type === "api-key" ? "API Key" : "Subscription"}
+              {credentialKindInfo(credential.type).label}
             </Badge>
           </div>
-          {credential.type === "oauth" &&
+          {/* A setup-token can carry an accountEmail when the optional profile
+              probe happened to succeed, so gate on "has account metadata to
+              show", not on the kind being interactive OAuth. */}
+          {credential.type !== "api-key" &&
             credential.metadata &&
             typeof credential.metadata === "object" && (
               <div className="flex flex-col gap-0.5 mt-0.5">

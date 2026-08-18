@@ -15,6 +15,7 @@ import {
 import { Eye, EyeOff, ChevronDown, ChevronRight } from "lucide-react";
 import {
   useExchangeClaudeAuthorizationCodeMutation,
+  useSaveClaudeSetupTokenMutation,
   useSaveCodexAuthJsonMutation,
   useSaveApiKeyMutation,
 } from "@/queries/credentials-queries";
@@ -204,21 +205,28 @@ export function AddClaudeCredentialDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const [mode, setMode] = useState<"api-key" | "subscription" | null>(null);
+  const [mode, setMode] = useState<
+    "api-key" | "subscription" | "setup-token" | null
+  >(null);
   const [apiKey, setApiKey] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
+  const [setupToken, setSetupToken] = useState("");
+  const [showSetupToken, setShowSetupToken] = useState(false);
   const [loading, setLoading] = useState(false);
   const [authType, setAuthType] = useState<AuthType | null>(null);
   const [codeVerifier, setCodeVerifier] = useState("");
   const [authCode, setAuthCode] = useState("");
 
   const saveApiKeyMutation = useSaveApiKeyMutation();
+  const saveSetupTokenMutation = useSaveClaudeSetupTokenMutation();
   const exchangeCodeMutation = useExchangeClaudeAuthorizationCodeMutation();
 
   const resetForm = () => {
     setMode(null);
     setApiKey("");
     setShowApiKey(false);
+    setSetupToken("");
+    setShowSetupToken(false);
     setCodeVerifier("");
     setAuthCode("");
     setAuthType(null);
@@ -290,6 +298,24 @@ export function AddClaudeCredentialDialog({
     resetForm();
   };
 
+  const handleSaveSetupToken = async () => {
+    // Mirror the server's cross-field check so the likely mistake — pasting an
+    // API key here — is named before a round-trip, not after.
+    if (setupToken.startsWith("sk-ant-api")) {
+      toast.error('That is an Anthropic API key. Use "Add API Key" instead.');
+      return;
+    }
+    if (!setupToken.startsWith("sk-ant-oat")) {
+      toast.error(
+        "That does not look like a `claude setup-token` token — it should start with sk-ant-oat.",
+      );
+      return;
+    }
+    await saveSetupTokenMutation.mutateAsync({ token: setupToken });
+    onOpenChange(false);
+    resetForm();
+  };
+
   const handleSubmit = async () => {
     if (!apiKey) {
       toast.error("Please enter a Claude API key");
@@ -343,10 +369,56 @@ export function AddClaudeCredentialDialog({
                 size="sm"
                 variant="outline"
                 className="w-full justify-start"
+                onClick={() => setMode("setup-token")}
+              >
+                Connect with a setup token
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="w-full justify-start"
                 onClick={() => setMode("api-key")}
               >
                 Add API Key
               </Button>
+            </div>
+          ) : mode === "setup-token" ? (
+            <div className="space-y-2">
+              <p className="text-sm text-muted-foreground">
+                Run this locally to mint a long-lived token from your Claude
+                subscription, then paste it below.
+              </p>
+              <pre className="bg-muted p-3 rounded-md text-xs overflow-x-auto">
+                <code>{`# requires a Claude subscription
+claude setup-token`}</code>
+              </pre>
+              <div className="relative">
+                <Input
+                  id="setupToken"
+                  type={showSetupToken ? "text" : "password"}
+                  placeholder="sk-ant-oat01-..."
+                  value={setupToken}
+                  onChange={(e) => setSetupToken(e.target.value.trim())}
+                  className="pr-10"
+                />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setShowSetupToken(!showSetupToken)}
+                  className="absolute right-0 top-0 h-full px-3"
+                >
+                  {showSetupToken ? (
+                    <EyeOff className="h-4 w-4" />
+                  ) : (
+                    <Eye className="h-4 w-4" />
+                  )}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Starts with <code>sk-ant-oat</code> and lasts for months. It is
+                used only to run your agents. If it stops working, run{" "}
+                <code>claude setup-token</code> again and paste the new one.
+              </p>
             </div>
           ) : mode === "api-key" ? (
             <div className="space-y-2">
@@ -415,6 +487,14 @@ export function AddClaudeCredentialDialog({
               disabled={!apiKey || saveApiKeyMutation.isPending}
             >
               {saveApiKeyMutation.isPending ? "Adding..." : "Add Credential"}
+            </Button>
+          )}
+          {mode === "setup-token" && (
+            <Button
+              onClick={handleSaveSetupToken}
+              disabled={!setupToken || saveSetupTokenMutation.isPending}
+            >
+              {saveSetupTokenMutation.isPending ? "Connecting..." : "Connect"}
             </Button>
           )}
           {mode === "subscription" && codeVerifier && (

@@ -14,6 +14,7 @@ import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { mockLoggedInUser } from "@/test-helpers/mock-next";
 import { getUserCredentialsAction } from "./user-credentials";
+import { saveAgentProviderApiKey } from "./credentials";
 import { getAgentProviderCredentialsAction } from "./credentials";
 import { exchangeCode } from "./claude-oauth";
 import { unwrapResult } from "@/lib/server-actions";
@@ -42,6 +43,42 @@ async function createOrg(userId: string) {
   await addOrganizationMember({ db, organizationId: org.id, userId });
   return org.id;
 }
+
+describe("validateApiKeyFormat — other agents must not regress", () => {
+  let user: User;
+  let session: Session;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    const created = await createTestUser({ db });
+    user = created.user;
+    session = created.session;
+    await mockLoggedInUser(session);
+  });
+
+  // The claudeCode arm gained a setup-token rejection. These pin that the other
+  // agents' prefixes are untouched by that change — the arms share one function.
+  it.each([
+    ["amp", "sgamp_user_abc"],
+    ["gemini", "AIzaSyAbc"],
+    ["codex", "sk-proj-abc"],
+  ] as const)("still accepts a valid %s key", async (agent, apiKey) => {
+    unwrapResult(await saveAgentProviderApiKey({ agent, apiKey }));
+    const rows = await db
+      .select()
+      .from(agentProviderCredentials)
+      .where(eq(agentProviderCredentials.userId, user.id));
+    expect(rows.some((r) => r.agent === agent)).toBe(true);
+  });
+
+  it.each([
+    ["amp", "wrong-prefix"],
+    ["gemini", "wrong-prefix"],
+  ] as const)("still rejects an invalid %s key", async (agent, apiKey) => {
+    const result = await saveAgentProviderApiKey({ agent, apiKey });
+    expect(JSON.stringify(result)).toMatch(/Invalid API key format/);
+  });
+});
 
 describe("user-credentials server action — org fencing (WI-5)", () => {
   let user: User;
@@ -80,7 +117,9 @@ describe("user-credentials server action — org fencing (WI-5)", () => {
       .update(sessionTable)
       .set({ activeOrganizationId: orgY })
       .where(eq(sessionTable.id, session.id));
-    expect(unwrapResult(await getUserCredentialsAction()).hasClaude).toBe(false);
+    expect(unwrapResult(await getUserCredentialsAction()).hasClaude).toBe(
+      false,
+    );
   });
 
   it("stamps the active org on a Claude OAuth credential so the list shows it", async () => {
