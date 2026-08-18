@@ -15,6 +15,7 @@ import {
 } from "./www-client";
 import {
   materialiseAgentCredentials,
+  NO_CREDENTIAL,
   type MaterialisedCredentials,
 } from "./agent-credentials";
 import type { AgentRunInput, AgentRunOutput } from "./types";
@@ -179,11 +180,23 @@ agentRunWorkflow.task({
         config.boxTrust === "owner"
           ? await pullAgentCredentials(wwwOpts, signal)
           : { agent: "", credentials: { type: "built-in-credits" as const } };
-      materialised = await materialiseAgentCredentials({
-        credentials: pulled.credentials,
-        agent: pulled.agent,
-        runRoot: workdir,
-      });
+      // Only a run that RECEIVES a credential gets a fresh HOME. Giving one to
+      // every run was an over-reach that took down the review pipeline: a fresh
+      // HOME is untrusted, an untrusted workspace makes the CLI ignore
+      // .claude/settings.json, and a review run (--permission-mode default, no
+      // skip-permissions) then blocks forever on a tool permission it cannot
+      // prompt for in -p mode. The thread sat in `booting` until the run timed
+      // out — no output, no error, nothing for the reviewer to parse. Runs that
+      // receive no credential keep the box's HOME, which is the configuration
+      // every green review has ever run on.
+      materialised =
+        pulled.credentials.type === "built-in-credits"
+          ? NO_CREDENTIAL
+          : await materialiseAgentCredentials({
+              credentials: pulled.credentials,
+              agent: pulled.agent,
+              runRoot: workdir,
+            });
     } catch (err) {
       await cleanupWorkdir(workdir);
       throw err;

@@ -25,11 +25,10 @@ const CREDENTIAL_FILE_BY_AGENT: Record<string, string> = {
 
 export interface MaterialisedCredentials {
   /**
-   * HOME for the child process. ALWAYS a fresh per-run dir, even when no
-   * credential was delivered — see materialiseAgentCredentials for why an
-   * empty one still matters.
+   * HOME for the child process: a fresh per-run dir when a credential was
+   * delivered, or null to keep the box's own HOME when none was.
    */
-  home: string;
+  home: string | null;
   /** Whether a provider credential was actually written / injected. */
   delivered: boolean;
   /** Extra env the credential needs (Amp's API key). Never logged. */
@@ -39,21 +38,69 @@ export interface MaterialisedCredentials {
 }
 
 /**
- * Give the run a fresh HOME under `runRoot`, and write the credential into it
- * when there is one.
+ * Mark the run's clone as a trusted workspace inside its own HOME.
  *
- * The HOME is created for EVERY run, credential or not. An empty one is not a
- * no-op: on macOS the agent CLI keeps its OAuth in the login Keychain, not in a
- * file, so a run that inherits the operator's HOME can authenticate as the
- * OPERATOR — silently spending the box owner's subscription on a run that was
- * meant to go through the proxy. Verified on Claude Code 2.1.234: with a fresh
- * HOME the CLI reports "Not logged in" (Keychain unreachable), and with a
- * delivered file it reads that file. A fresh HOME is what makes "either the
- * run's own credential or the proxy" true rather than aspirational.
+ * A fresh HOME has no `~/.claude.json`, so the agent CLI treats the workdir as
+ * untrusted: it ignores `.claude/settings.json` permission entries and, in
+ * `--permission-mode default`, has no way to grant a tool. REVIEW runs are the
+ * only ones that use that mode — deliberately, so the agent has no GitHub-write
+ * outlet (packages/daemon/src/claude.ts) — while every other run passes
+ * `--dangerously-skip-permissions` and never notices. That asymmetry is why
+ * giving every run a fresh HOME killed reviews and nothing else: the runs died
+ * in seconds with no output at all, and the control plane could only report
+ * "review intent could not be parsed".
+ *
+ * The CLI names this remedy in its own error text: set
+ * `projects["<workdir>"].hasTrustDialogAccepted`. Trust is scoped to THIS run's
+ * clone, so it grants nothing beyond the directory the run already owns.
+ */
+async function seedWorkspaceTrust({
+  home,
+  workdir,
+}: {
+  home: string;
+  workdir: string;
+}): Promise<void> {
+  const config = {
+    hasCompletedOnboarding: true,
+    projects: {
+      [workdir]: {
+        hasTrustDialogAccepted: true,
+        hasCompletedProjectOnboarding: true,
+      },
+    },
+  };
+  await fs.writeFile(path.join(home, ".claude.json"), JSON.stringify(config), {
+    mode: 0o600,
+  });
+}
+
+/**
+ * Give a CREDENTIAL-BEARING run a fresh HOME under `runRoot` and write the
+ * credential into it.
+ *
+ * The fresh HOME is what makes "this run uses its own credential" true: on macOS
+ * the CLI keeps OAuth in the login Keychain, so a run on the operator's HOME can
+ * authenticate as the OPERATOR. It is also seeded as a trusted workspace, since
+ * an unseeded HOME makes review runs hang on a permission they cannot prompt for.
+ *
+ * Callers must NOT invoke this for a run with no credential — see NO_CREDENTIAL.
  *
  * `agent` picks the file path; an agent we have no path for degrades to
  * built-in-credits rather than guessing a location.
  */
+/**
+ * The "nothing was delivered" result: no run HOME, so the child keeps the box's
+ * own HOME and its workspace-trust state. See the call site in workflow.ts for
+ * why a fresh HOME is reserved for credential-bearing runs.
+ */
+export const NO_CREDENTIAL: MaterialisedCredentials = {
+  home: null,
+  delivered: false,
+  env: {},
+  cleanup: async () => {},
+};
+
 export async function materialiseAgentCredentials({
   credentials,
   agent,
@@ -65,6 +112,7 @@ export async function materialiseAgentCredentials({
 }): Promise<MaterialisedCredentials> {
   const home = path.join(runRoot, "home");
   await fs.mkdir(home, { recursive: true, mode: 0o700 });
+  await seedWorkspaceTrust({ home, workdir: runRoot });
   const cleanup = async () => {
     await fs.rm(home, { recursive: true, force: true }).catch(() => {});
   };

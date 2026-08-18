@@ -64,6 +64,14 @@ vi.mock("./www-client", () => ({
 vi.mock("./agent-credentials", () => ({
   materialiseAgentCredentials: (...args: unknown[]) =>
     materialiseAgentCredentials(...args),
+  // A run with no credential short-circuits to this instead of materialising —
+  // it keeps the box HOME, so no fresh (untrusted) HOME is created.
+  NO_CREDENTIAL: {
+    home: null,
+    delivered: false,
+    env: {},
+    cleanup: async () => {},
+  },
 }));
 
 vi.mock("./daemon-process", () => ({

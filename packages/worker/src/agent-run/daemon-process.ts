@@ -53,7 +53,7 @@ export class DaemonProcess {
      * it through the control-plane proxy instead.
      */
     private readonly credentials: {
-      home: string;
+      home: string | null;
       delivered: boolean;
       env: Record<string, string>;
     } | null = null,
