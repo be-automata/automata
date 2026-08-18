@@ -89,9 +89,12 @@ export async function materialiseAgentCredentials({
 
   const relativePath = CREDENTIAL_FILE_BY_AGENT[agent];
   if (!relativePath) {
-    console.warn("[agent-run] no credential file path for agent, using credits", {
-      agent,
-    });
+    console.warn(
+      "[agent-run] no credential file path for agent, using credits",
+      {
+        agent,
+      },
+    );
     return empty;
   }
 

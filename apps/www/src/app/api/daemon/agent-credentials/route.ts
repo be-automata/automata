@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getDaemonTokenContext } from "@/lib/auth-server";
-import { getThreadMinimal, getThreadChat } from "@terragon/shared/model/threads";
+import {
+  getThreadMinimal,
+  getThreadChat,
+} from "@terragon/shared/model/threads";
 import { getAndVerifyCredentials } from "@/agent/credentials";
 import { ensureAgent } from "@terragon/agent/utils";
 import { ThreadError } from "@/agent/error";
@@ -71,11 +74,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // F2 anchor: bind on threadId too (see the next-message route for why the
   // null clause is temporary).
   if (ctx.threadId !== null && ctx.threadId !== threadId) {
-    console.log("[daemon agent-credentials] forbidden: token↔thread mismatch", {
-      requestedThreadId: threadId,
-      tokenThreadId: ctx.threadId,
-      org: ctx.organizationId,
-    });
+    console.log(
+      "[daemon agent-credentials] forbidden: token↔thread mismatch",
+      {
+        requestedThreadId: threadId,
+        tokenThreadId: ctx.threadId,
+        org: ctx.organizationId,
+      },
+    );
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -85,11 +91,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   if ((thread.organizationId ?? null) !== (ctx.organizationId ?? null)) {
-    console.log("[daemon agent-credentials] forbidden: token org != thread org", {
-      threadId,
-      tokenOrg: ctx.organizationId,
-      threadOrg: thread.organizationId,
-    });
+    console.log(
+      "[daemon agent-credentials] forbidden: token org != thread org",
+      {
+        threadId,
+        tokenOrg: ctx.organizationId,
+        threadOrg: thread.organizationId,
+      },
+    );
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -116,7 +125,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // (and so choose the credential file path) BEFORE it pulls next-message, so
     // it cannot learn the agent from there.
     // H2: do NOT log `credentials`.
-    return NextResponse.json({ agent: ensureAgent(threadChat.agent), credentials });
+    return NextResponse.json({
+      agent: ensureAgent(threadChat.agent),
+      credentials,
+    });
   } catch (error) {
     // A missing/invalid credential is not a server fault: the run falls back to
     // built-in credits, which is what the sandbox path does too.

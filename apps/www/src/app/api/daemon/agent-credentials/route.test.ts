@@ -98,7 +98,9 @@ describe("POST /api/daemon/agent-credentials", () => {
   });
 
   it("F1: 403 for a non-daemon (e.g. CLI) token — a user token cannot exfiltrate a credential", async () => {
-    vi.mocked(getDaemonTokenContext).mockResolvedValue(ctx({ tokenType: null }));
+    vi.mocked(getDaemonTokenContext).mockResolvedValue(
+      ctx({ tokenType: null }),
+    );
     const res = await POST(req({ threadId, threadChatId }));
     expect(res.status).toBe(403);
     expect(getAndVerifyCredentials).not.toHaveBeenCalled();
