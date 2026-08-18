@@ -10,8 +10,13 @@ import {
 import {
   pollUntilTerminal,
   postRunFailed,
+  pullAgentCredentials,
   pullNextMessage,
 } from "./www-client";
+import {
+  materialiseAgentCredentials,
+  type MaterialisedCredentials,
+} from "./agent-credentials";
 import type { AgentRunInput, AgentRunOutput } from "./types";
 
 export type { AgentRunInput, AgentRunOutput } from "./types";
@@ -150,7 +155,49 @@ agentRunWorkflow.task({
         (input.baseBranch ? ` (base ${input.baseBranch} fetched)` : ""),
     );
 
-    const daemon = new DaemonProcess(config, input, workdir);
+    // D1: resolve HOW this run authenticates to the model provider, BEFORE the
+    // child env is built (the credential fixes HOME, and the env is built once).
+    //
+    // "shared" box: never pull, never write a provider credential to this disk.
+    // "owner" box: pull the run's own credential and materialise it under a
+    // per-run HOME, so the run spends the USER's subscription / API key exactly
+    // like an in-sandbox run does.
+    // A "shared" box never asks for a credential; it still gets a fresh HOME,
+    // because an inherited one lets the agent CLI authenticate as the BOX OWNER
+    // out of the macOS Keychain — no file, no env var, no trace.
+    //
+    // These two steps sit BETWEEN the clone and the try/finally that owns
+    // cleanupWorkdir, and both can throw: the pull is a fetch (network error, or
+    // the run's AbortSignal firing on cancel/scheduleTimeout) and materialise
+    // does fs mkdir/writeFile. Without this guard such a throw escapes before
+    // the try is ever entered, and the cloned workdir is stranded on the box's
+    // disk for good. Cleaning the workdir also removes the per-run HOME beneath
+    // it, so a half-written credential cannot survive either.
+    let materialised: MaterialisedCredentials;
+    try {
+      const pulled =
+        config.boxTrust === "owner"
+          ? await pullAgentCredentials(wwwOpts, signal)
+          : { agent: "", credentials: { type: "built-in-credits" as const } };
+      materialised = await materialiseAgentCredentials({
+        credentials: pulled.credentials,
+        agent: pulled.agent,
+        runRoot: workdir,
+      });
+    } catch (err) {
+      await cleanupWorkdir(workdir);
+      throw err;
+    }
+    // H2: log the MODE, never the credential.
+    step(
+      `agent credential: ${
+        materialised.delivered
+          ? "delivered (run HOME)"
+          : `none → credits (box trust: ${config.boxTrust})`
+      }`,
+    );
+
+    const daemon = new DaemonProcess(config, input, workdir, materialised);
     try {
       // Fail-closed identity precondition (ADR-002): confirm gh authenticates as the
       // bot (installation token + isolated config) in the workdir BEFORE spawning —
@@ -188,6 +235,18 @@ agentRunWorkflow.task({
       step(
         `next-message: got message (agent=${message.agent}, model=${message.model})`,
       );
+      // The invariant that removes the silent third mode: a run either has its
+      // own credential on disk, or it goes through the control-plane proxy. It
+      // never falls through to whatever key the BOX happens to carry.
+      //
+      // www computes useCredits from "does this user have a credential", which is
+      // true-but-insufficient out here: the user can have one that this box was
+      // never given (shared box, or a control plane too old to serve it). The
+      // worker knows which actually happened, so it has the final say.
+      if (!materialised.delivered && !message.useCredits) {
+        step("no delivered credential → forcing credits (proxy)");
+        message.useCredits = true;
+      }
       const bytes = await daemon.sendMessage(message);
       step(`socket write ok: ${bytes} bytes → daemon ACKed`);
 
@@ -210,6 +269,9 @@ agentRunWorkflow.task({
       // group so no orphan survives, then remove the workdir. Runs on normal return,
       // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
       daemon.teardown();
+      // Wipe the delivered credential before the workdir goes, so a cleanup
+      // failure on the workdir can never leave a live token behind.
+      await materialised.cleanup();
       await cleanupWorkdir(workdir);
     }
   },

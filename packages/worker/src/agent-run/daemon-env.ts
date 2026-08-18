@@ -89,6 +89,28 @@ export interface BuildDaemonEnvOpts {
   ghConfigDir: string;
   /** Bot login the run's git commits are authored as (never the operator). */
   botLogin: string;
+  /**
+   * Per-run HOME (D1). REPLACES the ambient HOME so the agent CLI reads this
+   * run's credential and cannot see — or clobber — the operator's own login.
+   *
+   * Set for EVERY run, not only credential-bearing ones: on macOS the CLI keeps
+   * its OAuth in the login Keychain rather than a file, so a run left on the
+   * operator's HOME can authenticate AS the operator even with no credential
+   * file and no API key anywhere. A fresh HOME is the only thing that closes
+   * that. Null only for callers that opt out (tests of the legacy shape).
+   */
+  runHome?: string | null;
+  /**
+   * Whether a provider credential was actually delivered into `runHome`. Drives
+   * the box-key drop; distinct from `runHome` because every run now gets a HOME
+   * but only some get a credential.
+   */
+  credentialDelivered?: boolean;
+  /**
+   * Extra credential env (e.g. AMP_API_KEY). Injected after the whitelist pass,
+   * so it is never subject to the ambient-forwarding rules.
+   */
+  credentialEnv?: Record<string, string>;
 }
 
 export function buildDaemonEnv({
@@ -98,6 +120,9 @@ export function buildDaemonEnv({
   installationToken,
   ghConfigDir,
   botLogin,
+  runHome = null,
+  credentialDelivered = false,
+  credentialEnv = {},
 }: BuildDaemonEnvOpts): NodeJS.ProcessEnv {
   // 1. Whitelist: forward ONLY known-safe, non-secret ambient keys.
   const env: NodeJS.ProcessEnv = {};
@@ -107,10 +132,33 @@ export function buildDaemonEnv({
     }
   }
 
-  // 2. Agent runtime (ANTHROPIC_API_KEY is an INTENTIONAL secret we inject — it is
-  //    never forwarded from the ambient env, only set here).
-  env.ANTHROPIC_API_KEY = anthropicApiKey;
+  // 2. Agent runtime. ANTHROPIC_API_KEY is an INTENTIONAL secret we inject — never
+  //    forwarded from the ambient env, only set here.
+  //
+  //    It is injected ONLY as the last-resort box credential. When this run brought
+  //    its own credential (runHome), the box key must NOT be set: it would be a
+  //    second, contradictory credential for the same call, and which one the CLI
+  //    honours is the CLI's precedence rule, not ours. Handing over both is how the
+  //    box key silently won for users who had a subscription.
+  //
+  //    A sandbox never has this problem — apps/www injects no ANTHROPIC_API_KEY at
+  //    all, so its daemon sees either the credential file or the proxy. This keeps
+  //    the worker box to those same two clean modes.
+  if (credentialDelivered) {
+    delete env.ANTHROPIC_API_KEY;
+  } else {
+    env.ANTHROPIC_API_KEY = anthropicApiKey;
+  }
   env.FORCE_COLOR = "0";
+  // The run's own HOME replaces the operator's, so the agent CLI reads THIS run's
+  // credential. Must come after the whitelist pass, which forwards ambient HOME.
+  if (runHome) {
+    env.HOME = runHome;
+  }
+  // Credential env (Amp). After the whitelist so SECRET_KEY_PATTERN cannot drop it.
+  for (const [key, value] of Object.entries(credentialEnv)) {
+    env[key] = value;
+  }
   if (claudeBinDir) {
     env.PATH = `${claudeBinDir}:${baseEnv.PATH ?? ""}`;
   }

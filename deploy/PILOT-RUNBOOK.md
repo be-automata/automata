@@ -348,3 +348,38 @@ are in `deploy/PILOT-OPERATOR-STEPS.md` §5.
 > `*.trycloudflare.com` → re-`wrangler secret put HATCHET_API_URL` on every launch)
 > is **SUPERSEDED** by the named tunnel above. It remains only as a break-glass
 > fallback in PILOT-OPERATOR-STEPS §5.
+
+## Execution-plane model credential — `WORKER_BOX_TRUST`
+
+A worker box authenticates agent runs to Anthropic one of two ways, and the box
+says which by setting `WORKER_BOX_TRUST`:
+
+| value | how runs authenticate | use when |
+|---|---|---|
+| `shared` (default) | control-plane proxy (`useCredits`) — the run bills platform credits and no provider credential ever touches this disk | the box executes runs for tenants who do not own it |
+| `owner` | the worker pulls the run's own credential from `/api/daemon/agent-credentials` and writes it to a per-run `HOME` (0600, wiped at teardown) — the run spends the USER's subscription or API key | the box belongs to the tenant whose runs it executes (the pilot: the operator's own Mac) |
+
+```bash
+# pilot box (single-tenant): let runs spend the user's Claude subscription
+export WORKER_BOX_TRUST=owner
+```
+
+**Every run gets a fresh `HOME`, in both modes.** This is not hygiene. On macOS the
+agent CLI keeps its OAuth in the login **Keychain**, not in `~/.claude/.credentials.json`
+— so a run that inherits the operator's `HOME` authenticates AS the operator and
+spends *their* subscription, with no credential file and no env var anywhere to show
+for it. Verified on Claude Code 2.1.234: with a fresh `HOME` the CLI reports "Not
+logged in"; with a delivered credential file it reads that file. The operator's own
+`claude` login on the box is untouched and unreachable from a run.
+
+**The box's own `ANTHROPIC_API_KEY` is no longer a run credential.** It used to be
+the silent fallback: `buildRemoteDaemonMessage` skips `useCredits` when the user
+*has* a credential, but nothing delivered that credential to the box, so the daemon
+fell through to whatever key the box carried. A user with a Max subscription ran on
+the operator's API key, and a box with no key failed runs that should never have
+touched it. A run now either has its own credential in its own `HOME`, or it goes
+through the proxy — never the box key.
+
+Leaving `WORKER_BOX_TRUST` unset is safe but **changes who pays**: runs that used
+to quietly draw on the box's `ANTHROPIC_API_KEY` now bill platform credits. Set
+`owner` on a single-tenant box to get the subscription behaviour.

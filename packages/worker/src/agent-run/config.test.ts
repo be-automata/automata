@@ -23,6 +23,40 @@ describe("loadWorkerConfig", () => {
     ).toBe("/data/agent-runs");
   });
 
+  describe("boxTrust (D1) — who the box belongs to decides how runs authenticate", () => {
+    it("defaults to shared: an unconfigured box never gets a provider credential on disk", () => {
+      expect(loadWorkerConfig({}).boxTrust).toBe("shared");
+    });
+
+    it("only the exact string 'owner' opts in", () => {
+      expect(loadWorkerConfig({ WORKER_BOX_TRUST: "owner" }).boxTrust).toBe(
+        "owner",
+      );
+      expect(loadWorkerConfig({ WORKER_BOX_TRUST: "  owner  " }).boxTrust).toBe(
+        "owner",
+      );
+    });
+
+    it("anything truthy-but-wrong degrades to shared rather than opting in", () => {
+      // A typo or a truthy-looking value must not hand a tenant credential to a
+      // box that was never meant to hold one.
+      for (const value of [
+        "true",
+        "1",
+        "OWNER",
+        "Owner",
+        "yes",
+        "",
+        "shared",
+      ]) {
+        expect(
+          loadWorkerConfig({ WORKER_BOX_TRUST: value }).boxTrust,
+          `WORKER_BOX_TRUST=${JSON.stringify(value)} must not opt in`,
+        ).toBe("shared");
+      }
+    });
+  });
+
   it("honours WORKER_BOT_LOGIN override", () => {
     expect(
       loadWorkerConfig({ WORKER_BOT_LOGIN: "somnio-bot[bot]" }).botLogin,

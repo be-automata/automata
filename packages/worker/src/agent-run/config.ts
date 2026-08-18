@@ -27,6 +27,23 @@ export interface WorkerConfig {
   claudeBinDir: string;
   /** ANTHROPIC_API_KEY passed to the daemon when the box has no Claude creds file. */
   anthropicApiKey: string;
+  /**
+   * Who this box belongs to, which decides how a run authenticates to the model
+   * provider (D1).
+   *
+   * "owner"  — the box belongs to the tenant whose runs it executes (the pilot
+   *            case: the operator's own Mac). The worker may pull the run's
+   *            agent credential from the control plane and materialise it in a
+   *            per-run HOME, so the run spends the USER's subscription or API
+   *            key, exactly like an in-sandbox run.
+   * "shared" — the box executes runs for tenants who do not own it. A provider
+   *            credential must never land on disk here, so runs are forced
+   *            through the control-plane proxy (useCredits) and bill credits.
+   *
+   * Defaults to "shared": the safe answer for an unconfigured box. An operator
+   * opts a single-tenant box in with WORKER_BOX_TRUST=owner.
+   */
+  boxTrust: "owner" | "shared";
   /** Root under which each run gets an isolated clone directory. */
   workdirRoot: string;
   /** thread-status poll interval, ms (5-10s; runs are minutes-long — ADR-003). */
@@ -74,6 +91,10 @@ export function loadWorkerConfig(
     daemonDist: env.WORKER_DAEMON_DIST?.trim() || defaultDaemonDist(),
     claudeBinDir: resolveClaudeBinDir(env.CLAUDE_BIN),
     anthropicApiKey: env.ANTHROPIC_API_KEY ?? "",
+    // Only the exact string opts in. Anything else (unset, typo, "true") stays
+    // "shared", so a misconfigured box degrades to the mode that keeps provider
+    // credentials off its disk.
+    boxTrust: env.WORKER_BOX_TRUST?.trim() === "owner" ? "owner" : "shared",
     workdirRoot:
       env.WORKER_WORKDIR_ROOT?.trim() ||
       path.join(os.tmpdir(), "automata-worker-runs"),
