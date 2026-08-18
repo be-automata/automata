@@ -13,7 +13,10 @@ import {
   pullAgentCredentials,
   pullNextMessage,
 } from "./www-client";
-import { materialiseAgentCredentials } from "./agent-credentials";
+import {
+  materialiseAgentCredentials,
+  type MaterialisedCredentials,
+} from "./agent-credentials";
 import type { AgentRunInput, AgentRunOutput } from "./types";
 
 export type { AgentRunInput, AgentRunOutput } from "./types";
@@ -162,15 +165,29 @@ agentRunWorkflow.task({
     // A "shared" box never asks for a credential; it still gets a fresh HOME,
     // because an inherited one lets the agent CLI authenticate as the BOX OWNER
     // out of the macOS Keychain — no file, no env var, no trace.
-    const pulled =
-      config.boxTrust === "owner"
-        ? await pullAgentCredentials(wwwOpts, signal)
-        : { agent: "", credentials: { type: "built-in-credits" as const } };
-    const materialised = await materialiseAgentCredentials({
-      credentials: pulled.credentials,
-      agent: pulled.agent,
-      runRoot: workdir,
-    });
+    //
+    // These two steps sit BETWEEN the clone and the try/finally that owns
+    // cleanupWorkdir, and both can throw: the pull is a fetch (network error, or
+    // the run's AbortSignal firing on cancel/scheduleTimeout) and materialise
+    // does fs mkdir/writeFile. Without this guard such a throw escapes before
+    // the try is ever entered, and the cloned workdir is stranded on the box's
+    // disk for good. Cleaning the workdir also removes the per-run HOME beneath
+    // it, so a half-written credential cannot survive either.
+    let materialised: MaterialisedCredentials;
+    try {
+      const pulled =
+        config.boxTrust === "owner"
+          ? await pullAgentCredentials(wwwOpts, signal)
+          : { agent: "", credentials: { type: "built-in-credits" as const } };
+      materialised = await materialiseAgentCredentials({
+        credentials: pulled.credentials,
+        agent: pulled.agent,
+        runRoot: workdir,
+      });
+    } catch (err) {
+      await cleanupWorkdir(workdir);
+      throw err;
+    }
     // H2: log the MODE, never the credential.
     step(
       `agent credential: ${

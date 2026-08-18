@@ -3,6 +3,7 @@ import {
   pollThreadStatus,
   pollUntilTerminal,
   postRunFailed,
+  pullAgentCredentials,
   pullNextMessage,
   type PollContext,
   type WwwClientOpts,
@@ -332,5 +333,81 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
     };
     const result = await pollUntilTerminal(abortCtx, opts, 1, noSleep);
     expect(result.outcome).toBe("cancelled");
+  });
+});
+
+describe("pullAgentCredentials (D1 credential delivery)", () => {
+  it("POSTs the ids with the daemon-token header and returns the served credential", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        agent: "claude",
+        credentials: { type: "json-file", contents: '{"token":"x"}' },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await pullAgentCredentials(opts);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://www.example.com/api/daemon/agent-credentials");
+    expect(init.method).toBe("POST");
+    expect(init.headers["x-daemon-token"]).toBe("daemon-token-abc");
+    expect(JSON.parse(init.body)).toEqual({
+      threadId: "thread-1",
+      threadChatId: "chat-1",
+    });
+    expect(result).toEqual({
+      agent: "claude",
+      credentials: { type: "json-file", contents: '{"token":"x"}' },
+    });
+  });
+
+  it("returns credits-only on 204 (user has no credential to deliver)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(204, null)));
+
+    expect(await pullAgentCredentials(opts)).toEqual({
+      agent: "",
+      credentials: { type: "built-in-credits" },
+    });
+  });
+
+  it.each([404, 500])(
+    "falls back to credits (never throws) on %i — an older or wobbling control plane must not strand the run",
+    async (status) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(jsonResponse(status, { error: "nope" })),
+      );
+
+      expect(await pullAgentCredentials(opts)).toEqual({
+        agent: "",
+        credentials: { type: "built-in-credits" },
+      });
+      // The fallback is silent to the run but never silent in the logs.
+      expect(warn).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("propagates a rejected fetch (abort/network) rather than masking it as credits", async () => {
+    // The caller cleans up the workdir on this path; swallowing it here would
+    // hide a cancelled run behind a successful-looking credits fallback.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new DOMException("aborted", "AbortError")),
+    );
+
+    await expect(pullAgentCredentials(opts)).rejects.toThrow(/aborted/);
+  });
+
+  it("forwards the abort signal so a cancelled run aborts the in-flight pull", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(204, null));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    await pullAgentCredentials(opts, controller.signal);
+
+    expect(fetchMock.mock.calls[0]![1].signal).toBe(controller.signal);
   });
 });
