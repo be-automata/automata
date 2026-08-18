@@ -243,7 +243,16 @@ agentRunWorkflow.task({
       // true-but-insufficient out here: the user can have one that this box was
       // never given (shared box, or a control plane too old to serve it). The
       // worker knows which actually happened, so it has the final say.
-      if (!materialised.delivered && !message.useCredits) {
+      // "box-key": the operator declared this box's own ANTHROPIC_API_KEY to be
+      // the credential, so leave the message alone — daemon-env injects that key
+      // whenever nothing was delivered. Forcing credits here is what broke the
+      // pilot: its platform has no credit balance, so every run 402'd at the
+      // proxy and died with no output, on a box whose key worked fine.
+      if (
+        config.boxTrust !== "box-key" &&
+        !materialised.delivered &&
+        !message.useCredits
+      ) {
         step("no delivered credential → forcing credits (proxy)");
         message.useCredits = true;
       }

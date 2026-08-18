@@ -37,6 +37,15 @@ describe("loadWorkerConfig", () => {
       );
     });
 
+    it("box-key opts the box's own ANTHROPIC_API_KEY in as the run credential", () => {
+      // Regression: collapsing this into "shared" forced every run onto the
+      // credits proxy. On a platform with no credit balance that killed runs
+      // that had been working on the box key for months.
+      expect(loadWorkerConfig({ WORKER_BOX_TRUST: "box-key" }).boxTrust).toBe(
+        "box-key",
+      );
+    });
+
     it("anything truthy-but-wrong degrades to shared rather than opting in", () => {
       // A typo or a truthy-looking value must not hand a tenant credential to a
       // box that was never meant to hold one.
