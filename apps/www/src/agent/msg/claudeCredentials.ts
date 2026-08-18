@@ -176,6 +176,70 @@ export async function saveClaudeTokens({
 }
 
 /**
+ * Store a long-lived token minted by `claude setup-token`.
+ *
+ * Unlike the interactive OAuth flow there is no code exchange and no refresh
+ * token: the user runs the CLI locally and pastes the result. It lands in
+ * `accessTokenEncrypted` (NOT `apiKeyEncrypted` — the resolver checks `apiKey`
+ * first and would emit it as an `anthropicApiKey`, which the CLI would send as an
+ * `x-api-key` and Anthropic would reject) with a null `expiresAt`, which
+ * `getValidAccessTokenForCredential` already treats as "never refresh".
+ */
+export async function saveClaudeSetupToken({
+  userId,
+  organizationId,
+  token,
+}: {
+  userId: string;
+  organizationId?: string | null;
+  token: string;
+}): Promise<void> {
+  // Best-effort only. `claude setup-token` tokens are inference-scoped, so the
+  // OAuth profile endpoint may refuse them — that must not block a valid token
+  // from being saved. getAccountInfoFromTokenInner already returns null on any
+  // non-200 or throw.
+  const accountInfo = await getAccountInfoFromTokenInner({
+    accessToken: token,
+  });
+  await updateUserFlags({
+    db,
+    userId,
+    updates: {
+      isClaudeSub: true,
+      // Unknown rather than false: the probe above usually cannot read org type
+      // for an inference-scoped token. Do not gate features on these for a
+      // setup-token user — branch on the credential type instead.
+      isClaudeMaxSub: accountInfo?.organizationType === "claude_max",
+      claudeOrganizationType: accountInfo?.organizationType ?? null,
+    },
+  });
+  await insertAgentProviderCredentials({
+    db,
+    userId,
+    organizationId: organizationId ?? null,
+    credentialData: {
+      type: "setup-token",
+      agent: "claudeCode",
+      isActive: true,
+      accessToken: token,
+      expiresAt: null,
+      lastRefreshedAt: null,
+      metadata: {
+        type: "claude",
+        isSubscription: true,
+        accountEmail: accountInfo?.accountEmail,
+        accountId: accountInfo?.accountId,
+        orgId: accountInfo?.orgId,
+        orgName: accountInfo?.orgName,
+        organizationType: accountInfo?.organizationType,
+        isMax: !!accountInfo?.isMax,
+      },
+    },
+    encryptionKey: env.ENCRYPTION_MASTER_KEY,
+  });
+}
+
+/**
  * Get a valid Claude access token, refreshing if necessary
  */
 async function getValidAccessTokenInternal({
@@ -317,6 +381,32 @@ export async function getClaudeCredentialsJSONOrNull({
     }
     if (!credentials.accessToken) {
       return { contents: null, error: null };
+    }
+    // A `claude setup-token` token is a long-lived OAuth bearer with no refresh
+    // token and no expiry, so it skips the refresh round-trip entirely and is
+    // emitted in the SAME claudeAiOauth shape the interactive flow uses. Riding
+    // the existing file shape is deliberate: it inherits per-resume rewrite and
+    // removal in the sandbox (packages/sandbox setup.ts), 0600 materialisation on
+    // the worker, and the box-key drop — none of which an env-var delivery would
+    // get. Verified on the sandbox-pinned CLI (2.0.65): an `sk-ant-oat…` value in
+    // the accessToken slot is sent as an OAuth bearer.
+    if (credentials.type === "setup-token") {
+      return {
+        contents: JSON.stringify({
+          claudeAiOauth: {
+            accessToken: credentials.accessToken,
+            // The CLI must never refresh; the control plane owns credential
+            // lifecycle, and a setup-token has nothing to refresh with anyway.
+            refreshToken: "",
+            // No real expiry. Far-future keeps the CLI from pre-emptively
+            // treating it as stale; a revoked token surfaces as a 401 instead.
+            expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
+            scopes: ["user:inference"],
+            subscriptionType: null,
+          },
+        }),
+        error: null,
+      };
     }
     // Try to refresh the token
     const validAccessToken = await getValidAccessToken({

@@ -13,6 +13,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { DBMessage, DBUserMessage } from "./db-message";
+import type { CredentialKind } from "../model/credential-kind";
 import type { SandboxProvider, SandboxSize } from "@terragon/types/sandbox";
 import type { SandboxStatus, BootingSubstatus } from "@terragon/sandbox/types";
 import {
@@ -1353,7 +1354,11 @@ export const agentProviderCredentials = pgTable(
       onDelete: "cascade",
     }),
     agent: text("agent").$type<AIAgent>().notNull(),
-    type: text("type").$type<"api-key" | "oauth">().notNull(),
+    // Plain `text` + a TS union: no PG enum, no CHECK, so widening this is a pure
+    // TypeScript change with no migration. See model/credential-kind.ts for what
+    // each kind means to the UI — and for why that mapping is a Record the
+    // compiler can check rather than ternaries scattered across consumers.
+    type: text("type").$type<CredentialKind>().notNull(),
     isActive: boolean("is_active").notNull().default(true),
     apiKeyEncrypted: text("api_key_encrypted"),
     accessTokenEncrypted: text("access_token_encrypted"),

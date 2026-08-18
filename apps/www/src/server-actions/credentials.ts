@@ -45,6 +45,15 @@ function validateApiKeyFormat({
       break;
     }
     case "claudeCode": {
+      // `claude setup-token` tokens are ALSO `sk-ant-…`, so a bare prefix check
+      // accepts one here, stores it as an api-key, and the resolver then emits it
+      // as `anthropicApiKey` — sent as an x-api-key header and rejected with an
+      // opaque 401 at run time, long after the mistake. Name it at paste time.
+      if (apiKey?.startsWith("sk-ant-oat")) {
+        throw new UserFacingError(
+          'That is a `claude setup-token` token, not an API key. Use "Connect with a setup token" instead.',
+        );
+      }
       if (!apiKey || !apiKey.startsWith("sk-ant-")) {
         throw new UserFacingError("Invalid API key format");
       }

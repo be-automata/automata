@@ -12,6 +12,7 @@ import {
 } from "@/server-actions/credentials";
 import { toast } from "sonner";
 import { saveCodexAuthJson } from "@/server-actions/codex-auth";
+import { saveClaudeSetupToken } from "@/server-actions/claude-setup-token";
 import { exchangeCode } from "@/server-actions/claude-oauth";
 import { AIAgent } from "@terragon/agent/types";
 
@@ -158,6 +159,19 @@ export function useSaveCodexAuthJsonMutation() {
     mutationFn: saveCodexAuthJson,
     onSuccess: () => {
       toast.success("Codex credentials saved");
+      queryClient.invalidateQueries({
+        queryKey: credentialsQueryKeys.list(),
+      });
+    },
+  });
+}
+
+export function useSaveClaudeSetupTokenMutation() {
+  const queryClient = useQueryClient();
+  return useServerActionMutation({
+    mutationFn: saveClaudeSetupToken,
+    onSuccess: () => {
+      toast.success("Claude setup token saved");
       queryClient.invalidateQueries({
         queryKey: credentialsQueryKeys.list(),
       });

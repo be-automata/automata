@@ -154,6 +154,72 @@ describe("getAndVerifyCredentials — org fence (WI-5 batch 3a)", () => {
     expect(creds).toEqual({ type: "built-in-credits" });
   });
 
+  it("delivers a setup-token as the SAME json-file shape the subscription uses", async () => {
+    // Riding the existing file shape is the whole design: it inherits per-resume
+    // rewrite/removal in the sandbox and 0600 materialisation on the worker, so a
+    // revoked token stops working instead of being frozen into a process env.
+    // Verified against the sandbox-pinned CLI (2.0.65): an sk-ant-oat value in the
+    // accessToken slot is sent as an OAuth bearer.
+    await insertAgentProviderCredentials({
+      db,
+      userId: user.id,
+      organizationId: orgX,
+      credentialData: {
+        agent: "claudeCode",
+        type: "setup-token",
+        accessToken: "sk-ant-oat01-test",
+        isActive: true,
+        // No expiry and no refresh token — the two facts that make this kind
+        // skip the refresh round-trip entirely.
+        expiresAt: null,
+        lastRefreshedAt: null,
+        metadata: { type: "claude", isSubscription: true },
+      },
+      encryptionKey: env.ENCRYPTION_MASTER_KEY,
+    });
+
+    const creds = await getAndVerifyCredentials({
+      agent: "claudeCode",
+      model: null,
+      userId: user.id,
+      organizationId: orgX,
+    });
+    expect(creds.type).toBe("json-file");
+    const contents = JSON.parse(
+      (creds as { type: "json-file"; contents: string }).contents,
+    );
+    expect(contents.claudeAiOauth.accessToken).toBe("sk-ant-oat01-test");
+    // The CLI must never try to refresh: there is nothing to refresh with.
+    expect(contents.claudeAiOauth.refreshToken).toBe("");
+    // NOT an api-key delivery — that would be sent as x-api-key and 401.
+    expect(contents.anthropicApiKey).toBeUndefined();
+  });
+
+  it("org-fences a setup-token like every other credential kind", async () => {
+    await insertAgentProviderCredentials({
+      db,
+      userId: user.id,
+      organizationId: orgX,
+      credentialData: {
+        agent: "claudeCode",
+        type: "setup-token",
+        accessToken: "sk-ant-oat01-test",
+        isActive: true,
+        expiresAt: null,
+        lastRefreshedAt: null,
+        metadata: { type: "claude", isSubscription: true },
+      },
+      encryptionKey: env.ENCRYPTION_MASTER_KEY,
+    });
+    const creds = await getAndVerifyCredentials({
+      agent: "claudeCode",
+      model: null,
+      userId: user.id,
+      organizationId: orgY,
+    });
+    expect(creds).toEqual({ type: "built-in-credits" });
+  });
+
   it("keeps the error org-less when resolution is not org-scoped", async () => {
     // A user with no amp credential and no active org gets the plain message.
     const other = (await createTestUser({ db })).user;
