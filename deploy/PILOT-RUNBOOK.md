@@ -399,3 +399,44 @@ operator opt-in — never as a silent fallback.
 Leaving `WORKER_BOX_TRUST` unset is safe but **changes who pays**: runs that used
 to quietly draw on the box's `ANTHROPIC_API_KEY` now bill platform credits. Set
 `owner` on a single-tenant box to get the subscription behaviour.
+
+## Connecting Claude — which credential kind to use
+
+Three kinds, all reaching a run through the same `claudeAiOauth` credentials file
+(the resolver decides the delivery shape; the execution planes only honour shapes):
+
+| kind | how the user gets it | lifetime | refresh |
+|---|---|---|---|
+| API key | console.anthropic.com | until revoked | n/a — metered API billing |
+| Subscription (interactive OAuth) | "Connect Claude subscription" popup | **8 hours** | control plane re-mints with a 1h buffer |
+| Setup token | `claude setup-token` locally, pasted in | months | none — re-mint and paste again |
+
+**Setup tokens are the right default for an unattended box.** They spend the user's
+Claude subscription, survive far longer than the 8-hour interactive token, and need
+no refresh machinery. The trade is that expiry is not detected in advance: a revoked
+or expired token surfaces as a 401 inside the run. Re-mint with `claude setup-token`
+and paste the new value.
+
+The two `sk-ant-` secrets look alike and are NOT interchangeable — an API key
+(`sk-ant-api…`) is sent as an `x-api-key` header, a setup token (`sk-ant-oat…`) as an
+OAuth bearer. Pasting one into the other's field used to store fine and fail later as
+an opaque 401; both fields now reject the other's prefix by name.
+
+### Verifying a token by hand
+
+Empty `HOME` isolates the check from any local login (on macOS the CLI reads its own
+OAuth from the login Keychain, which a fresh `HOME` cannot reach):
+
+```bash
+H=$(mktemp -d); mkdir -p "$H/.claude"
+cat > "$H/.claude/.credentials.json" <<JSON
+{"claudeAiOauth":{"accessToken":"<token>","refreshToken":"","expiresAt":99999999999999,"scopes":["user:inference"],"subscriptionType":null}}
+JSON
+chmod 600 "$H/.claude/.credentials.json"
+env -i PATH="$PATH" HOME="$H" claude -p "say OK" --output-format stream-json --verbose </dev/null
+rm -rf "$H"
+```
+
+A working token reaches `"type":"result"` with `"is_error":false`. `401 OAuth access
+token is invalid` means the token is dead — the channel itself is fine, since a 401
+proves the file was read.
