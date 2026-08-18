@@ -53,7 +53,8 @@ export class DaemonProcess {
      * it through the control-plane proxy instead.
      */
     private readonly credentials: {
-      home: string | null;
+      home: string;
+      delivered: boolean;
       env: Record<string, string>;
     } | null = null,
   ) {
@@ -90,6 +91,7 @@ export class DaemonProcess {
       ghConfigDir: this.ghConfigDir,
       botLogin: this.config.botLogin,
       runHome: this.credentials?.home ?? null,
+      credentialDelivered: this.credentials?.delivered ?? false,
       credentialEnv: this.credentials?.env ?? {},
     });
     return this.env;

@@ -78,10 +78,30 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
   });
 
   describe("D1 — which model credential the run gets", () => {
-    it("without a delivered credential: the box key is the credential and HOME stays ambient", () => {
+    it("legacy shape (no runHome): the box key is the credential and HOME stays ambient", () => {
       const env = build();
       expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-xxx");
       expect(env.HOME).toBe("/home/op");
+    });
+
+    it("a credits-only run STILL gets a fresh HOME — an inherited one leaks the box owner's Keychain login", () => {
+      // The failure this pins has no file and no env var to find: on macOS the
+      // agent CLI reads its OAuth from the login Keychain, so a run left on the
+      // operator's HOME authenticates AS the operator and spends their
+      // subscription — on a run that was routed to the proxy. Verified on Claude
+      // Code 2.1.234: a fresh HOME yields "Not logged in".
+      const env = buildDaemonEnv({
+        baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
+        anthropicApiKey: "sk-ant-boxkey",
+        claudeBinDir: "",
+        installationToken: INSTALL_TOKEN,
+        ghConfigDir: "/tmp/isolated-gh",
+        botLogin: "automata-ai-bot[bot]",
+        runHome: "/tmp/run-42/home",
+        credentialDelivered: false,
+      });
+      expect(env.HOME).toBe("/tmp/run-42/home");
+      expect(env.HOME).not.toBe("/home/op");
     });
 
     it("with a delivered credential: HOME is the run's own, and the box key is GONE", () => {
@@ -93,6 +113,7 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
         ghConfigDir: "/tmp/isolated-gh",
         botLogin: "automata-ai-bot[bot]",
         runHome: "/tmp/run-42/home",
+        credentialDelivered: true,
       });
       // The agent CLI reads $HOME/.claude/.credentials.json. Pointing HOME at the
       // run dir is what makes it read THIS run's credential instead of the

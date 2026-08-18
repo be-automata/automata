@@ -159,23 +159,26 @@ agentRunWorkflow.task({
     // "owner" box: pull the run's own credential and materialise it under a
     // per-run HOME, so the run spends the USER's subscription / API key exactly
     // like an in-sandbox run does.
-    let materialised = { home: null as string | null, env: {}, cleanup: async () => {} };
-    if (config.boxTrust === "owner") {
-      const pulled = await pullAgentCredentials(wwwOpts, signal);
-      materialised = await materialiseAgentCredentials({
-        credentials: pulled.credentials,
-        agent: pulled.agent,
-        runRoot: workdir,
-      });
-      // H2: log the MODE, never the credential.
-      step(
-        `agent credential: ${
-          materialised.home ? "delivered (run HOME)" : "none → credits"
-        }`,
-      );
-    } else {
-      step("agent credential: shared box → credits (proxy)");
-    }
+    // A "shared" box never asks for a credential; it still gets a fresh HOME,
+    // because an inherited one lets the agent CLI authenticate as the BOX OWNER
+    // out of the macOS Keychain — no file, no env var, no trace.
+    const pulled =
+      config.boxTrust === "owner"
+        ? await pullAgentCredentials(wwwOpts, signal)
+        : { agent: "", credentials: { type: "built-in-credits" as const } };
+    const materialised = await materialiseAgentCredentials({
+      credentials: pulled.credentials,
+      agent: pulled.agent,
+      runRoot: workdir,
+    });
+    // H2: log the MODE, never the credential.
+    step(
+      `agent credential: ${
+        materialised.delivered
+          ? "delivered (run HOME)"
+          : `none → credits (box trust: ${config.boxTrust})`
+      }`,
+    );
 
     const daemon = new DaemonProcess(config, input, workdir, materialised);
     try {
@@ -223,7 +226,7 @@ agentRunWorkflow.task({
       // true-but-insufficient out here: the user can have one that this box was
       // never given (shared box, or a control plane too old to serve it). The
       // worker knows which actually happened, so it has the final say.
-      if (!materialised.home && !message.useCredits) {
+      if (!materialised.delivered && !message.useCredits) {
         step("no delivered credential → forcing credits (proxy)");
         message.useCredits = true;
       }

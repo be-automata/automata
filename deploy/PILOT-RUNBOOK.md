@@ -364,6 +364,14 @@ says which by setting `WORKER_BOX_TRUST`:
 export WORKER_BOX_TRUST=owner
 ```
 
+**Every run gets a fresh `HOME`, in both modes.** This is not hygiene. On macOS the
+agent CLI keeps its OAuth in the login **Keychain**, not in `~/.claude/.credentials.json`
+— so a run that inherits the operator's `HOME` authenticates AS the operator and
+spends *their* subscription, with no credential file and no env var anywhere to show
+for it. Verified on Claude Code 2.1.234: with a fresh `HOME` the CLI reports "Not
+logged in"; with a delivered credential file it reads that file. The operator's own
+`claude` login on the box is untouched and unreachable from a run.
+
 **The box's own `ANTHROPIC_API_KEY` is no longer a run credential.** It used to be
 the silent fallback: `buildRemoteDaemonMessage` skips `useCredits` when the user
 *has* a credential, but nothing delivered that credential to the box, so the daemon

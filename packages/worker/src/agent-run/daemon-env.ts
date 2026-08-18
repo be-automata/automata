@@ -90,12 +90,22 @@ export interface BuildDaemonEnvOpts {
   /** Bot login the run's git commits are authored as (never the operator). */
   botLogin: string;
   /**
-   * Per-run HOME holding the run's own agent credential (D1). When set it
-   * REPLACES the ambient HOME, so the agent CLI reads this run's credential and
-   * cannot see — or clobber — the operator's ~/.claude. Null when the run has no
-   * delivered credential (shared box, or user on built-in credits).
+   * Per-run HOME (D1). REPLACES the ambient HOME so the agent CLI reads this
+   * run's credential and cannot see — or clobber — the operator's own login.
+   *
+   * Set for EVERY run, not only credential-bearing ones: on macOS the CLI keeps
+   * its OAuth in the login Keychain rather than a file, so a run left on the
+   * operator's HOME can authenticate AS the operator even with no credential
+   * file and no API key anywhere. A fresh HOME is the only thing that closes
+   * that. Null only for callers that opt out (tests of the legacy shape).
    */
   runHome?: string | null;
+  /**
+   * Whether a provider credential was actually delivered into `runHome`. Drives
+   * the box-key drop; distinct from `runHome` because every run now gets a HOME
+   * but only some get a credential.
+   */
+  credentialDelivered?: boolean;
   /**
    * Extra credential env (e.g. AMP_API_KEY). Injected after the whitelist pass,
    * so it is never subject to the ambient-forwarding rules.
@@ -111,6 +121,7 @@ export function buildDaemonEnv({
   ghConfigDir,
   botLogin,
   runHome = null,
+  credentialDelivered = false,
   credentialEnv = {},
 }: BuildDaemonEnvOpts): NodeJS.ProcessEnv {
   // 1. Whitelist: forward ONLY known-safe, non-secret ambient keys.
@@ -133,7 +144,7 @@ export function buildDaemonEnv({
   //    A sandbox never has this problem — apps/www injects no ANTHROPIC_API_KEY at
   //    all, so its daemon sees either the credential file or the proxy. This keeps
   //    the worker box to those same two clean modes.
-  if (runHome) {
+  if (credentialDelivered) {
     delete env.ANTHROPIC_API_KEY;
   } else {
     env.ANTHROPIC_API_KEY = anthropicApiKey;
