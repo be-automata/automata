@@ -189,11 +189,17 @@ agentRunWorkflow.task({
       throw err;
     }
     // H2: log the MODE, never the credential.
+    // Name the credential the run will ACTUALLY use. The earlier version said
+    // "→ credits" for every undelivered run, which is a lie under box-key and
+    // would have sent the next person debugging this down the wrong path — the
+    // same way it took two rollbacks to find the last one.
     step(
       `agent credential: ${
         materialised.delivered
           ? "delivered (run HOME)"
-          : `none → credits (box trust: ${config.boxTrust})`
+          : config.boxTrust === "box-key"
+            ? "none → box ANTHROPIC_API_KEY (box trust: box-key)"
+            : `none → credits proxy (box trust: ${config.boxTrust})`
       }`,
     );
 
