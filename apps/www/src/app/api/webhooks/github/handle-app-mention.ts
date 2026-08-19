@@ -369,7 +369,13 @@ async function triggerTasksForUser({
         getFeatureFlagForUser({ db, userId, flagName: "batchGitHubMentions" }),
       ]);
 
-    const additionalUserMessage = automation?.action?.config?.message;
+    // Only a user_message action carries an inline message to append; a
+    // skill_message action is a reference resolved at thread creation (the
+    // mention path's skill cutover is #54 C3).
+    const additionalUserMessage =
+      automation?.action?.type === "user_message"
+        ? automation.action.config.message
+        : undefined;
 
     const getUserMessageToSend = ({
       forcedAgent,

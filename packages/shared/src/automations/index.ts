@@ -126,12 +126,31 @@ export const AutomationActionSchema = z.discriminatedUnion("type", [
       message: z.custom<DBUserMessage>(),
     }),
   }),
+  // A REFERENCE to a live repo skill (issue #54): instead of a message snapshot
+  // frozen into this jsonb at seed time, the control plane resolves the skill's
+  // current version at thread-creation time — so an accepted skill edit is live
+  // on the next run with no seed script and no redeploy. `version: "latest"`
+  // follows the skill's current pointer; any other value pins a version id.
+  z.object({
+    type: z.literal("skill_message"),
+    config: z.object({
+      skillName: z.string(),
+      version: z
+        .string()
+        .describe(`'latest' (follow the current version) or a version-id pin`),
+    }),
+  }),
 ]);
 export type AutomationAction = z.infer<typeof AutomationActionSchema>;
 export type AutomationActionType = AutomationAction["type"];
+export type SkillMessageAction = Extract<
+  AutomationAction,
+  { type: "skill_message" }
+>;
 
 export const actionTypeLabels: Record<AutomationActionType, string> = {
   user_message: "Create Thread",
+  skill_message: "Create Thread from Skill",
 };
 
 export function isRepoBranchRelevant(triggerType: AutomationTriggerType) {

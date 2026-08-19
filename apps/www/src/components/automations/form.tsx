@@ -377,7 +377,7 @@ export function AutomationEditorDialogContent({
         automation?.action.config ??
         initialValues?.action?.config ??
         defaultValues.action.config,
-    },
+    } as AutomationAction,
   };
   const form = useForm<z.infer<typeof AutomationFormSchema>>({
     resolver: zodResolver(AutomationFormSchema as unknown as any),
@@ -515,7 +515,14 @@ export function AutomationEditorDialogContent({
                 <FormItem>
                   <div className="flex flex-col gap-2 overflow-x-hidden">
                     <GenericPromptBox
-                      message={field.value.config.message}
+                      // skill_message actions carry a REFERENCE, not a message
+                      // — the editor for those ships with #54 C4. Feed the box
+                      // an empty message so the form stays type-safe meanwhile.
+                      message={
+                        field.value.type === "user_message"
+                          ? field.value.config.message
+                          : { type: "user", model: null, parts: [] }
+                      }
                       repoFullName={form.watch("repoFullName")}
                       branchName={form.watch("branchName")}
                       placeholder={getUserMessagePlaceholder(triggerType)}

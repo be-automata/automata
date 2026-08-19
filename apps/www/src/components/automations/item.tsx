@@ -257,9 +257,15 @@ function AutomationItemContents({
     }
   }
 
-  const promptText = convertToPlainText({
-    message: automation.action.config.message,
-  });
+  // skill_message actions carry a REFERENCE, not a message — the resolved body
+  // lives in the skill store. Full skill UI (chip + panel) ships in #54 C4;
+  // until then render the reference itself.
+  const promptText =
+    automation.action.type === "user_message"
+      ? convertToPlainText({
+          message: automation.action.config.message,
+        })
+      : `Skill: ${automation.action.config.skillName} (${automation.action.config.version})`;
 
   return (
     <div className="flex flex-col gap-1 text-xs text-muted-foreground pr-2 min-w-0">

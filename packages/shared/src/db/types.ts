@@ -122,6 +122,17 @@ export type ThreadSourceMetadata =
   | {
       type: "www-multi-agent";
       models: SelectedAIModels;
+    }
+  // Traceability stamp for skill_message automations (issue #54): the exact
+  // skill text a thread ran with. `contentSha` is the sha256 of the resolved
+  // body; `source` is the resolver tier ("db-version" | "tracked-default");
+  // `versionId` is present when a DB version was served.
+  | {
+      type: "automation-skill";
+      skillName: string;
+      contentSha: string;
+      source: string;
+      versionId?: string;
     };
 
 export type ThreadStatusDeprecated =
