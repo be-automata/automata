@@ -258,14 +258,14 @@ function AutomationItemContents({
   }
 
   // skill_message actions carry a REFERENCE, not a message — the resolved body
-  // lives in the skill store. Full skill UI (chip + panel) ships in #54 C4;
-  // until then render the reference itself.
+  // lives in the skill store, edited in the Skills panel (#54 C4). The chip
+  // below deep-links there; only user_message actions have inline prompt text.
   const promptText =
     automation.action.type === "user_message"
       ? convertToPlainText({
           message: automation.action.config.message,
         })
-      : `Skill: ${automation.action.config.skillName} (${automation.action.config.version})`;
+      : "";
 
   return (
     <div className="flex flex-col gap-1 text-xs text-muted-foreground pr-2 min-w-0">
@@ -322,6 +322,20 @@ function AutomationItemContents({
               <pre className="text-xs text-muted-foreground line-clamp-3 whitespace-pre-wrap">
                 {promptText}
               </pre>
+            </div>
+          )}
+          {automation.action.type === "skill_message" && (
+            <div>
+              <Link
+                href="/settings/review#skills"
+                className="inline-flex items-center gap-1 rounded-full bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                title="Edit this skill in the Skills panel"
+              >
+                <span className="font-medium">
+                  Skill: {automation.action.config.skillName}
+                </span>
+                <span>({automation.action.config.version})</span>
+              </Link>
             </div>
           )}
         </>
