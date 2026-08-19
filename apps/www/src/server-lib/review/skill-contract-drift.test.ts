@@ -13,10 +13,7 @@ import { loadReviewSkillBody, stripFrontmatter } from "./review-skill";
  */
 
 const SKILL_MD = fileURLToPath(
-  new URL(
-    "../../../../../deploy/skills/github-ops/SKILL.md",
-    import.meta.url,
-  ),
+  new URL("../../../../../deploy/skills/github-ops/SKILL.md", import.meta.url),
 );
 
 describe("emit-skill contract ↔ parser (no drift)", () => {
@@ -56,9 +53,28 @@ describe("seed inlines the tracked review skill (no box-local path)", () => {
   it("the seed contains no absolute home-directory skill path", () => {
     const seed = readFileSync(SEED_TS, "utf8");
     // Any absolute /Users/... or /home/... path would be box-specific.
-    const absHomePaths = seed.match(/["'`][^"'`\n]*\/(?:Users|home)\/[^"'`\n]*/g);
-    expect(absHomePaths, `seed must not hardcode a box path: ${absHomePaths}`)
-      .toBeNull();
+    const absHomePaths = seed.match(
+      /["'`][^"'`\n]*\/(?:Users|home)\/[^"'`\n]*/g,
+    );
+    expect(
+      absHomePaths,
+      `seed must not hardcode a box path: ${absHomePaths}`,
+    ).toBeNull();
+  });
+
+  it("the seed upserts by (name, repo) — a name-only key cross-stamps repos in one org", () => {
+    // All onboarded repos live under one org with IDENTICAL automation names
+    // ("Mirror: PR review (github-ops)" ×3 in production). A map keyed on name
+    // alone made a re-seed of repo B find repo A's row, overwrite its action
+    // with B's text, and never create B's row. Pin the composite key and that
+    // repoFullName rides along in the update so a matched row can't keep a
+    // stale repo.
+    const seed = readFileSync(SEED_TS, "utf8");
+    expect(seed).toContain("upsertKey(a.name, a.repoFullName)");
+    expect(seed).toContain(
+      "upsertKey(automation.name, automation.repoFullName)",
+    );
+    expect(seed).toMatch(/updates:\s*\{[^}]*repoFullName/s);
   });
 
   it("the seed references the skill via the shared loader, not a literal path", () => {
@@ -78,7 +94,9 @@ describe("seed inlines the tracked review skill (no box-local path)", () => {
   });
 
   it("the loader rejects a skill missing the verdict contract", () => {
-    const bogus = fileURLToPath(new URL("./parse-review-intent.ts", import.meta.url));
+    const bogus = fileURLToPath(
+      new URL("./parse-review-intent.ts", import.meta.url),
+    );
     expect(() => loadReviewSkillBody(bogus)).toThrow(
       /no fenced-json verdict contract/,
     );

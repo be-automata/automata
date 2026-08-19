@@ -88,7 +88,8 @@ function userMessage(text: string): DBUserMessage {
 
 const PR_AUTOMATION_NAME = "Mirror: PR review (github-ops)";
 const ISSUE_AUTOMATION_NAME = "Mirror: issue research (github-deep-research)";
-const MENTION_AUTOMATION_NAME = "Mirror: GitHub mention (github-mention-respond)";
+const MENTION_AUTOMATION_NAME =
+  "Mirror: GitHub mention (github-mention-respond)";
 
 async function main() {
   const org = await getOrganizationBySlug({ db, slug: orgSlug });
@@ -127,7 +128,15 @@ async function main() {
     userId: ownerUserId,
     organizationId: org.id,
   });
-  const existingByName = new Map(existing.map((a) => [a.name, a]));
+  // Keyed on (name, repo) — NOT name alone. All onboarded repos live under one
+  // org with identical automation names ("Mirror: PR review (github-ops)" ×3 in
+  // production), so a name-only key made a re-seed of repo B find repo A's row,
+  // overwrite its action with B's text, and never create B's row at all.
+  const upsertKey = (name: string, repoFullName: string) =>
+    `${name}\u0000${repoFullName}`;
+  const existingByName = new Map(
+    existing.map((a) => [upsertKey(a.name, a.repoFullName), a]),
+  );
 
   // Idempotent on action content (ADR-036): the old create-if-not-exists guard
   // SKIPPED an existing automation entirely, so a changed review instruction silently
@@ -140,7 +149,9 @@ async function main() {
   async function upsertAutomation(
     automation: Parameters<typeof createAutomation>[0]["automation"],
   ) {
-    const existingA = existingByName.get(automation.name);
+    const existingA = existingByName.get(
+      upsertKey(automation.name, automation.repoFullName),
+    );
     if (!existingA) {
       await createAutomation({
         db,
@@ -157,7 +168,13 @@ async function main() {
         accessTier: "pro",
         automationId: existingA.id,
         organizationId: org.id,
-        updates: { action: automation.action },
+        // repoFullName/branchName ride along so a matched row can never keep a
+        // stale repo or base branch (defense in depth on top of the composite key).
+        updates: {
+          action: automation.action,
+          repoFullName: automation.repoFullName,
+          branchName: automation.branchName,
+        },
       });
       console.log(`Updated automation action: ${automation.name}`);
     }
