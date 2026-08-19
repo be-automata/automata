@@ -136,7 +136,7 @@ describe("maybePromoteSkillLastKnownGood (real test DB)", () => {
     expect(await lastKnownGood(organizationId)).toBeNull();
   });
 
-  it("no-ops for non-skill threads, tracked-default runs (no versionId), and org-less threads", async () => {
+  it("no-ops for non-skill threads, legacy stamps with no versionId, and org-less threads", async () => {
     const { organizationId, versionId } = await seedSkill();
     await maybePromoteSkillLastKnownGood({
       db,

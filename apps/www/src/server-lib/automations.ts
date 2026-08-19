@@ -175,7 +175,7 @@ export async function runAutomation({
             skillName,
             contentSha: resolved.contentSha,
             source: resolved.source,
-            ...(resolved.versionId ? { versionId: resolved.versionId } : {}),
+            versionId: resolved.versionId,
           },
           automation: automation,
           githubPRNumber: options?.prNumber,

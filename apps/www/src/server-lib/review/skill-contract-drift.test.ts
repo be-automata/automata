@@ -2,7 +2,11 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseReviewIntent } from "./parse-review-intent";
-import { loadReviewSkillBody, stripFrontmatter } from "./review-skill";
+import { stripFrontmatter } from "./review-skill";
+import {
+  loadReviewSkillBody,
+  trackedReviewSkillPath,
+} from "../../../../../deploy/lib/review-skill-file";
 
 /**
  * Anti-drift guard (ADR-036 rider): the emit-skill's fenced-JSON EXAMPLE must parse
@@ -105,6 +109,23 @@ describe("seed inlines the tracked review skill (no box-local path)", () => {
   it("the loader reports a missing skill file rather than seeding without it", () => {
     expect(() => loadReviewSkillBody("/nonexistent/SKILL.md")).toThrow(
       /not readable/,
+    );
+  });
+
+  it("trackedReviewSkillPath resolves each cwd branch explicitly", () => {
+    // Every branch pinned so a regression in candidate order or fallback shows
+    // up in CI, not in a deploy script silently reading the wrong file.
+    const repoRoot = fileURLToPath(
+      new URL("../../../../..", import.meta.url),
+    ).replace(/\/$/, "");
+    // Branch 1: deploy/*.ts scripts run from the repo root.
+    expect(trackedReviewSkillPath(repoRoot)).toBe(SKILL_MD);
+    // Branch 2: apps/www tests/dev run with cwd=apps/www.
+    expect(trackedReviewSkillPath(`${repoRoot}/apps/www`)).toBe(SKILL_MD);
+    // Branch 3: neither candidate exists → first candidate, whose read then
+    // fails with the descriptive "not readable" error above.
+    expect(trackedReviewSkillPath("/nonexistent")).toBe(
+      "/nonexistent/deploy/skills/github-ops/SKILL.md",
     );
   });
 

@@ -41,7 +41,7 @@ import {
   getAutomations,
 } from "../packages/shared/src/model/automations";
 import { DBUserMessage } from "../packages/shared/src/db/db-message";
-import { loadReviewSkillBody } from "../apps/www/src/server-lib/review/review-skill";
+import { loadReviewSkillBody } from "./lib/review-skill-file";
 
 // Dogfooding pilot defaults (BeAutomata org, our own platform repo).
 const DEFAULT_ORG_SLUG = "beautomata";

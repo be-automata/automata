@@ -17,7 +17,7 @@
  * applies at dispatch (github-ops: fenced-json verdict contract; others:
  * non-empty) BEFORE any DB write — a push that would only be rejected or
  * fallen-back-from at run time must fail here, loudly, instead. Frontmatter is
- * stripped exactly like the tracked-default loader so a Claude-Code SKILL.md
+ * stripped exactly like the seed loader (deploy/lib/review-skill-file) so a SKILL.md
  * pushes the same text the seed would inline. The body is NEVER logged — only
  * its sha (it can be multi-KB and shas are the traceability currency).
  */

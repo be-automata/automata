@@ -12,13 +12,14 @@ import {
   resolveReviewSkill,
   renderSkillPlaceholders,
 } from "./resolve-review-skill";
-import { loadReviewSkillBody } from "./review-skill";
 
 /**
  * The thread-creation resolution seam: proves resolveReviewSkill serves the
- * LIVE current version, walks the fallback chain (current → last-known-good →
- * tracked default), never dispatches a contract-less github-ops body, and
- * resolves defaultless skills to null so the caller skips the run.
+ * LIVE current version, walks the PURE-DB fallback chain (current →
+ * last-known-good → oldest seed version), never dispatches a contract-less
+ * github-ops body, and resolves versionless skills to null so the caller
+ * skips the run. There is deliberately NO filesystem tier to test: the
+ * Workers runtime has no checkout (PR #57).
  */
 
 const db = createDb(env.DATABASE_URL!);
@@ -175,7 +176,16 @@ describe("resolveReviewSkill (fallback chain)", () => {
     expect(resolved?.body).toBe(VALID_BODY);
   });
 
-  it("invalid current, no last-known-good → tracked default (github-ops)", async () => {
+  it("invalid current, no last-known-good → oldest seed version", async () => {
+    const seeded = await createRepoSkillVersion({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      skillName: "github-ops",
+      body: VALID_BODY,
+      source: "seed",
+    });
+    // A broken edit becomes current, and nothing was ever promoted...
     await createRepoSkillVersion({
       db,
       organizationId: orgId,
@@ -184,6 +194,7 @@ describe("resolveReviewSkill (fallback chain)", () => {
       body: BROKEN_BODY,
       source: "api",
     });
+    // ...so the resolver falls to the DB record of the shipped default.
     const resolved = await resolveReviewSkill({
       db,
       organizationId: orgId,
@@ -191,14 +202,13 @@ describe("resolveReviewSkill (fallback chain)", () => {
       skillName: "github-ops",
       version: "latest",
     });
-    expect(resolved?.source).toBe("tracked-default");
-    expect(resolved?.versionId).toBeUndefined();
-    const tracked = loadReviewSkillBody();
-    expect(resolved?.body).toBe(tracked);
-    expect(resolved?.contentSha).toBe(computeContentSha(tracked));
+    expect(resolved?.source).toBe("seed-default");
+    expect(resolved?.versionId).toBe(seeded.version.id);
+    expect(resolved?.body).toBe(VALID_BODY);
+    expect(resolved?.contentSha).toBe(computeContentSha(VALID_BODY));
   });
 
-  it("no DB row at all → tracked default (github-ops)", async () => {
+  it("no DB version at all → null (never dispatch a body the org didn't approve)", async () => {
     const resolved = await resolveReviewSkill({
       db,
       organizationId: orgId,
@@ -206,10 +216,39 @@ describe("resolveReviewSkill (fallback chain)", () => {
       skillName: "github-ops",
       version: "latest",
     });
-    expect(resolved?.source).toBe("tracked-default");
+    expect(resolved).toBeNull();
   });
 
-  it("no org (legacy/unfenced) → tracked default, never a DB body", async () => {
+  it("a broken seed never dispatches either → null", async () => {
+    await createRepoSkillVersion({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      skillName: "github-ops",
+      body: BROKEN_BODY,
+      source: "seed",
+    });
+    const resolved = await resolveReviewSkill({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      skillName: "github-ops",
+      version: "latest",
+    });
+    expect(resolved).toBeNull();
+  });
+
+  it("no org (legacy/unfenced) → null, never a DB body", async () => {
+    // Even with a valid seed sitting in SOME org, an org-less request must
+    // not resolve to it.
+    await createRepoSkillVersion({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      skillName: "github-ops",
+      body: VALID_BODY,
+      source: "seed",
+    });
     const resolved = await resolveReviewSkill({
       db,
       organizationId: null,
@@ -217,7 +256,7 @@ describe("resolveReviewSkill (fallback chain)", () => {
       skillName: "github-ops",
       version: "latest",
     });
-    expect(resolved?.source).toBe("tracked-default");
+    expect(resolved).toBeNull();
   });
 
   it("non-github-ops skill needs only a non-empty body", async () => {

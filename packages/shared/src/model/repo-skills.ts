@@ -6,7 +6,7 @@ import {
   RepoSkillVersion,
   RepoSkillVersionSource,
 } from "../db/types";
-import { and, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import { normalizeRepo } from "./repo-review-settings";
 
 /**
@@ -29,9 +29,9 @@ import { normalizeRepo } from "./repo-review-settings";
  */
 
 /**
- * sha256 hex of a skill body — the traceability stamp shared by the model
- * (written on every version) and the resolver (stamped for tracked-default
- * fallbacks that have no version row).
+ * sha256 hex of a skill body — the traceability stamp written on every
+ * version and verified by the write surfaces (API route, dashboard,
+ * deploy/skill-push.ts).
  */
 export function computeContentSha(body: string): string {
   return createHash("sha256").update(body, "utf8").digest("hex");
@@ -123,6 +123,51 @@ export async function getSkillVersion({
         eq(repoSkills.organizationId, organizationId),
       ),
     )
+    .limit(1);
+  return row;
+}
+
+/**
+ * Oldest `source: 'seed'` version for one `(org, repo, skill)` — the
+ * resolver's LAST fallback tier. Seed versions are pushed from the tracked
+ * in-repo skill files by `deploy/seed-pilot-mirror.ts`, so this row is the DB
+ * record of the shipped default; the runtime never reads the filesystem (the
+ * Workers bundle has no checkout). Org-fenced like every other read here.
+ * Ordered by (createdAt, id) so re-seeds never change which row is "the"
+ * default.
+ */
+export async function getOldestSeedVersion({
+  db,
+  organizationId,
+  repoFullName,
+  skillName,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  skillName: string;
+}): Promise<RepoSkillVersion | undefined> {
+  const [row] = await db
+    .select({
+      id: repoSkillVersions.id,
+      skillId: repoSkillVersions.skillId,
+      body: repoSkillVersions.body,
+      contentSha: repoSkillVersions.contentSha,
+      source: repoSkillVersions.source,
+      createdByUserId: repoSkillVersions.createdByUserId,
+      createdAt: repoSkillVersions.createdAt,
+    })
+    .from(repoSkillVersions)
+    .innerJoin(repoSkills, eq(repoSkillVersions.skillId, repoSkills.id))
+    .where(
+      and(
+        eq(repoSkills.organizationId, organizationId),
+        eq(repoSkills.repoFullName, normalizeRepo(repoFullName)),
+        eq(repoSkills.skillName, skillName),
+        eq(repoSkillVersions.source, "seed"),
+      ),
+    )
+    .orderBy(asc(repoSkillVersions.createdAt), asc(repoSkillVersions.id))
     .limit(1);
   return row;
 }

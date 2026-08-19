@@ -102,7 +102,8 @@ export async function maybePromoteSkillLastKnownGood({
 }): Promise<void> {
   if (outcome !== "posted") return;
   if (sourceMetadata?.type !== "automation-skill") return;
-  // A tracked-default run has no version row to promote.
+  // Every resolver tier now serves a version row, but legacy stamps (and
+  // org-less threads) may lack one — nothing to promote then.
   if (!sourceMetadata.versionId || !organizationId) return;
   try {
     await promoteLastKnownGood({

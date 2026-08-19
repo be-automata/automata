@@ -7,6 +7,7 @@ import { createOrganization } from "./organizations";
 import {
   computeContentSha,
   createRepoSkillVersion,
+  getOldestSeedVersion,
   getRepoSkill,
   getSkillVersion,
   listRepoSkills,
@@ -400,5 +401,38 @@ describe("repo-skills (Neon, org-fenced, append-only versions)", () => {
       skillName: "github-ops",
     });
     expect(skill?.currentVersionId).toBe(ops.version.id);
+  });
+
+  it("getOldestSeedVersion: oldest seed row only, source-filtered and org-fenced", async () => {
+    const args = {
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      skillName: "github-ops",
+    };
+    // Non-seed writes never qualify, even when they are the only versions.
+    await createRepoSkillVersion({ ...args, body: "edit", source: "api" });
+    expect(await getOldestSeedVersion(args)).toBeUndefined();
+    // The FIRST seed stays "the" default across re-seeds and later edits.
+    const first = await createRepoSkillVersion({
+      ...args,
+      body: "seed v1",
+      source: "seed",
+    });
+    // Distinct createdAt: (createdAt, id) is the order key and ids are random.
+    await new Promise((r) => setTimeout(r, 5));
+    await createRepoSkillVersion({ ...args, body: "seed v2", source: "seed" });
+    await createRepoSkillVersion({
+      ...args,
+      body: "edit 2",
+      source: "dashboard",
+    });
+    const oldest = await getOldestSeedVersion(args);
+    expect(oldest?.id).toBe(first.version.id);
+    expect(oldest?.body).toBe("seed v1");
+    // Org fence: the same (repo, skill) under another org resolves nothing.
+    expect(
+      await getOldestSeedVersion({ ...args, organizationId: orgB }),
+    ).toBeUndefined();
   });
 });

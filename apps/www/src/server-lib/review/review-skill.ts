@@ -16,30 +16,6 @@
  * Dependency-free on purpose (node builtins only) so `deploy/*.ts` scripts can
  * import it under tsx without dragging in Next/alias resolution.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-
-/**
- * Absolute path to the tracked skill — the ONLY authoritative copy.
- *
- * Resolved lazily from cwd, NOT via `new URL(..., import.meta.url)`: webpack
- * rewrites that expression into an asset URL at module scope, which crashes
- * the production build of any route that imports this module (and the Workers
- * runtime has no checkout to read regardless — there the DB tiers of
- * resolveReviewSkill are authoritative and this path is only reached as the
- * loudly-logged last-resort tier). The candidates cover the two real callers:
- * `deploy/*.ts` scripts run from the repo root, and apps/www tests/dev run
- * from `apps/www`.
- */
-export function trackedReviewSkillPath(): string {
-  const rel = join("deploy", "skills", "github-ops", "SKILL.md");
-  const candidates = [
-    join(process.cwd(), rel),
-    join(process.cwd(), "..", "..", rel),
-  ];
-  return candidates.find((p) => existsSync(p)) ?? candidates[0]!;
-}
-
 /**
  * Strip the Claude Code YAML frontmatter. It carries skill-registry metadata
  * (name/description) that is meaningless inside an automation instruction, and
@@ -114,26 +90,4 @@ export function validateSkillBody(
         `dispatch an automation run with no instruction.`,
     );
   }
-}
-
-/**
- * The review methodology body, ready to inline into a prompt. Throws rather
- * than returning a partial instruction: a review agent running without its
- * methodology silently degrades every review, so failing the seed is correct.
- */
-export function loadReviewSkillBody(
-  skillPath: string = trackedReviewSkillPath(),
-): string {
-  let raw: string;
-  try {
-    raw = readFileSync(skillPath, "utf8");
-  } catch (err) {
-    throw new Error(
-      `Review skill not readable at ${skillPath}: ${(err as Error).message}. ` +
-        `It is tracked in-repo; a missing file means the checkout is incomplete.`,
-    );
-  }
-  const body = stripFrontmatter(raw);
-  assertReviewSkillContract(body, skillPath);
-  return body;
 }
