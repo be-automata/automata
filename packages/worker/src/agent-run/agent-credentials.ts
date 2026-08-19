@@ -50,6 +50,18 @@ export interface MaterialisedCredentials {
  * The CLI names this remedy in its own error text: set
  * `projects["<workdir>"].hasTrustDialogAccepted`. Trust is scoped to THIS run's
  * clone, so it grants nothing beyond the directory the run already owns.
+ *
+ * SECURITY — hooks are NOT gated by this seed. A repo's own
+ * `.claude/settings.json` hooks (arbitrary shell wired to lifecycle events)
+ * execute in `-p` mode WHETHER OR NOT the workspace is trusted — verified
+ * empirically on Claude Code 2.1.235: a SessionStart hook in a scratch repo
+ * fired under a seeded HOME and under a completely unseeded one, both times
+ * before auth (zero API calls, "Not logged in"). The trust seed therefore adds
+ * no hook exposure, and scoping it away from review runs would break them
+ * while mitigating nothing. Repo-controlled hook execution is a pre-existing
+ * property of running the agent CLI over a checkout at all; box-level
+ * mitigation (e.g. the CLI's `--bare`, which skips hooks) is a separate,
+ * run-mode-level decision tracked outside this module.
  */
 async function seedWorkspaceTrust({
   home,
