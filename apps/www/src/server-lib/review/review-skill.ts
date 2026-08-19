@@ -16,13 +16,29 @@
  * Dependency-free on purpose (node builtins only) so `deploy/*.ts` scripts can
  * import it under tsx without dragging in Next/alias resolution.
  */
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
-/** Absolute path to the tracked skill — the ONLY authoritative copy. */
-export const TRACKED_REVIEW_SKILL_PATH = fileURLToPath(
-  new URL("../../../../../deploy/skills/github-ops/SKILL.md", import.meta.url),
-);
+/**
+ * Absolute path to the tracked skill — the ONLY authoritative copy.
+ *
+ * Resolved lazily from cwd, NOT via `new URL(..., import.meta.url)`: webpack
+ * rewrites that expression into an asset URL at module scope, which crashes
+ * the production build of any route that imports this module (and the Workers
+ * runtime has no checkout to read regardless — there the DB tiers of
+ * resolveReviewSkill are authoritative and this path is only reached as the
+ * loudly-logged last-resort tier). The candidates cover the two real callers:
+ * `deploy/*.ts` scripts run from the repo root, and apps/www tests/dev run
+ * from `apps/www`.
+ */
+export function trackedReviewSkillPath(): string {
+  const rel = join("deploy", "skills", "github-ops", "SKILL.md");
+  const candidates = [
+    join(process.cwd(), rel),
+    join(process.cwd(), "..", "..", rel),
+  ];
+  return candidates.find((p) => existsSync(p)) ?? candidates[0]!;
+}
 
 /**
  * Strip the Claude Code YAML frontmatter. It carries skill-registry metadata
@@ -106,7 +122,7 @@ export function validateSkillBody(
  * methodology silently degrades every review, so failing the seed is correct.
  */
 export function loadReviewSkillBody(
-  skillPath: string = TRACKED_REVIEW_SKILL_PATH,
+  skillPath: string = trackedReviewSkillPath(),
 ): string {
   let raw: string;
   try {
