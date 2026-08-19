@@ -39,6 +39,7 @@ import {
   ThreadSourceMetadata,
   UserCreditGrantType,
   AgentProviderMetadata,
+  RepoSkillVersionSource,
 } from "./types";
 import {
   AutomationAction,
@@ -1464,6 +1465,97 @@ export const repoReviewSettings = pgTable(
  * stalled-tasks cron deletes rows older than HATCHET_RUN_PRUNE_AFTER_MS via
  * pruneHatchetRuns (see model/hatchet-run.ts).
  */
+/**
+ * Live, versioned review/agent skills per (org, repo, skill) — the DB tier of
+ * the hybrid skill store (issue #54). Today the github-ops methodology is
+ * INLINED into the automation's action jsonb at seed time, so an edit is dead
+ * until an operator re-runs the seed script. This entity makes the skill body
+ * first-class: the automation stores a REFERENCE (`skill_message` action) and
+ * the control plane resolves the current version at thread creation, so an
+ * accepted edit is live on the next run — no seed, no redeploy.
+ *
+ * MULTI-TENANT: fenced by `organizationId` exactly like `repoReviewSettings`;
+ * the same repo slug under two orgs carries independent skills. `repoFullName`
+ * is lowercased on write and read (case-insensitive GitHub slugs).
+ *
+ * `currentVersionId` is the pointer edits move (append-only versions, see
+ * `repoSkillVersions`); `lastKnownGoodVersionId` is promoted after a version
+ * demonstrably produced a healthy run, giving the resolver a safe fallback when
+ * the current version is broken. Both are nullable `set null` references so
+ * deleting a version can never orphan-block the skill row.
+ */
+export const repoSkills = pgTable(
+  "repo_skills",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    /** Lowercased 'owner/name' slug — GitHub slugs are case-insensitive. */
+    repoFullName: text("repo_full_name").notNull(),
+    /** Registry key, e.g. 'github-ops' | 'github-deep-research' | 'github-mention'. */
+    skillName: text("skill_name").notNull(),
+    /** The version the resolver serves for `version: "latest"` references. */
+    currentVersionId: text("current_version_id").references(
+      (): AnyPgColumn => repoSkillVersions.id,
+      { onDelete: "set null" },
+    ),
+    /** Fallback promoted after a healthy run — never points at a known-bad body. */
+    lastKnownGoodVersionId: text("last_known_good_version_id").references(
+      (): AnyPgColumn => repoSkillVersions.id,
+      { onDelete: "set null" },
+    ),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    // One skill row per (org, repo, name) — the resolver's live-read key.
+    uniqueIndex("repo_skills_org_repo_skill_index").on(
+      table.organizationId,
+      table.repoFullName,
+      table.skillName,
+    ),
+    index("repo_skills_org_id_index").on(table.organizationId),
+  ],
+);
+
+/**
+ * Append-only version history for `repoSkills`. An edit NEVER mutates a body:
+ * it inserts a new row here and moves `repoSkills.currentVersionId` — so the
+ * audit trail (who wrote what, from which surface) and rollback (revert = move
+ * the pointer) are structural, not best-effort. `contentSha` is the sha256 of
+ * the body, stamped into `thread.sourceMetadata` at resolution so any thread
+ * can be traced to the exact skill text it ran with.
+ */
+export const repoSkillVersions = pgTable(
+  "repo_skill_versions",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    skillId: text("skill_id")
+      .notNull()
+      .references(() => repoSkills.id, { onDelete: "cascade" }),
+    /** The full skill body (markdown, frontmatter already stripped). */
+    body: text("body").notNull(),
+    /** sha256 hex of `body` — the traceability stamp. */
+    contentSha: text("content_sha").notNull(),
+    /** Which edit surface produced this version. */
+    source: text("source").$type<RepoSkillVersionSource>().notNull(),
+    /** Provenance: the user who wrote this version (audit trail). */
+    createdByUserId: text("created_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [index("repo_skill_versions_skill_id_index").on(table.skillId)],
+);
+
 export const hatchetRun = pgTable(
   "hatchet_run",
   {
