@@ -36,11 +36,13 @@ process.env.HATCHET_CLIENT_TLS_STRATEGY = "none";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let workflowDef: any;
+let resolveUseCredits: typeof import("./workflow").resolveUseCredits;
 
 beforeAll(async () => {
   const mod = await import("./workflow");
   workflowDef = (mod.agentRunWorkflow as unknown as { definition: unknown })
     .definition;
+  resolveUseCredits = mod.resolveUseCredits;
 });
 
 afterEach(() => {
@@ -68,7 +70,7 @@ describe("agentRunWorkflow registration shape", () => {
     );
 
     // Key 2: global single-daemon-socket / memory-budget cap.
-    expect(keys[1].expression).toBe("'agent-run-shared-daemon-socket'");
+    expect(keys[1].expression).toBe("'agent-run-global-memory-budget'");
     expect(keys[1].maxRuns).toBe(1);
     expect(keys[1].limitStrategy).toBe(
       ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
@@ -150,4 +152,71 @@ describe("agentRunWorkflow onFailure (#2)", () => {
     const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
     expect(body.messages[0].error_info).toMatch(/agent-run failed/);
   });
+});
+
+describe("resolveUseCredits — the worker's final say", () => {
+  it("box-key + no delivered credential OVERRIDES an incoming useCredits=true (the 402 pilot bug)", () => {
+    // www sets useCredits=true precisely when the user has no connected
+    // credential — the box-key operator's normal state. Leaving it true blanks
+    // the box key in daemon-env and 402s at the credits proxy.
+    const r = resolveUseCredits({
+      boxTrust: "box-key",
+      credentialDelivered: false,
+      incomingUseCredits: true,
+    });
+    expect(r.useCredits).toBe(false);
+    expect(r.log).toMatch(/box-key/);
+  });
+
+  it("box-key + no delivered credential keeps useCredits=false when it arrives false", () => {
+    const r = resolveUseCredits({
+      boxTrust: "box-key",
+      credentialDelivered: false,
+      incomingUseCredits: false,
+    });
+    expect(r.useCredits).toBe(false);
+    expect(r.log).toBeNull();
+  });
+
+  it.each(["shared", "owner"] as const)(
+    "%s + no delivered credential forces credits (proxy) when useCredits arrives false",
+    (boxTrust) => {
+      // The silent-third-mode fix: an undelivered run on a non-box-key box must
+      // never fall through to whatever key the box happens to carry.
+      const r = resolveUseCredits({
+        boxTrust,
+        credentialDelivered: false,
+        incomingUseCredits: false,
+      });
+      expect(r.useCredits).toBe(true);
+      expect(r.log).toMatch(/forcing credits/);
+    },
+  );
+
+  it.each(["shared", "owner"] as const)(
+    "%s + no delivered credential keeps useCredits=true when it arrives true",
+    (boxTrust) => {
+      const r = resolveUseCredits({
+        boxTrust,
+        credentialDelivered: false,
+        incomingUseCredits: true,
+      });
+      expect(r.useCredits).toBe(true);
+      expect(r.log).toBeNull();
+    },
+  );
+
+  it.each(["shared", "owner", "box-key"] as const)(
+    "a delivered credential wins in %s mode: useCredits is false regardless of the incoming value",
+    (boxTrust) => {
+      for (const incomingUseCredits of [true, false]) {
+        const r = resolveUseCredits({
+          boxTrust,
+          credentialDelivered: true,
+          incomingUseCredits,
+        });
+        expect(r.useCredits).toBe(false);
+      }
+    },
+  );
 });

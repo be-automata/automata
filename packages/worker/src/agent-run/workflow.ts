@@ -74,6 +74,60 @@ const PER_ORG_MAX_RUNS = 1;
  */
 const GLOBAL_MAX_RUNS = 1;
 
+/**
+ * The worker's final say on `useCredits` — the invariant that removes the silent
+ * third mode: a run either has its own credential on disk, or it goes through
+ * the control-plane proxy, or (box-key only) it deliberately uses the box's key.
+ *
+ * www computes useCredits from "does this user have a connected credential"
+ * (remote-daemon-message.ts shouldUseCredits), which is wrong in BOTH directions
+ * out here:
+ *   - the user can have a credential this box was never given (shared box, or a
+ *     control plane too old to serve it) → www sends useCredits ABSENT/false,
+ *     and the worker must force it TRUE or the daemon falls through to the
+ *     box's own key (the silent third mode);
+ *   - under box-key the operator typically has NO connected credential — the
+ *     whole premise of the mode — so www sends useCredits TRUE, and the worker
+ *     must force it FALSE or daemon-env blanks the box key and routes through
+ *     the credits proxy, 402ing on a platform with no credit balance (the exact
+ *     pilot failure this mode exists to fix).
+ *
+ * A delivered credential wins over everything: the run authenticates from its
+ * own HOME and useCredits is forced false so the proxy is never consulted.
+ */
+export function resolveUseCredits({
+  boxTrust,
+  credentialDelivered,
+  incomingUseCredits,
+}: {
+  boxTrust: "owner" | "shared" | "box-key";
+  credentialDelivered: boolean;
+  incomingUseCredits: boolean;
+}): { useCredits: boolean; log: string | null } {
+  if (credentialDelivered) {
+    return incomingUseCredits
+      ? {
+          useCredits: false,
+          log: "credential delivered → overriding useCredits=false (run HOME wins)",
+        }
+      : { useCredits: false, log: null };
+  }
+  if (boxTrust === "box-key") {
+    return incomingUseCredits
+      ? {
+          useCredits: false,
+          log: "box-key → overriding useCredits=false (box ANTHROPIC_API_KEY)",
+        }
+      : { useCredits: false, log: null };
+  }
+  return incomingUseCredits
+    ? { useCredits: true, log: null }
+    : {
+        useCredits: true,
+        log: "no delivered credential → forcing credits (proxy)",
+      };
+}
+
 export const agentRunWorkflow = hatchet.workflow<AgentRunInput>({
   name: "agent-run",
   concurrency: [
@@ -83,7 +137,15 @@ export const agentRunWorkflow = hatchet.workflow<AgentRunInput>({
       limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
     },
     {
-      expression: "'agent-run-shared-daemon-socket'",
+      // Renamed from 'agent-run-shared-daemon-socket' (2026-08-19). Two reasons:
+      // (1) the cap's real justification is the single-box MEMORY budget — the
+      // shared-socket collision it was named for was solved by per-run sockets
+      // (Phase 0.2b); (2) the old group's scheduler state deadlocked in
+      // hatchet-lite after repeated worker re-registrations (stale
+      // GROUP_ROUND_ROBIN strategy rows chain into active ones and the child
+      // slot is never granted — tasks sit QUEUED forever with idle workers).
+      // A new group name mints fresh strategy state on registration.
+      expression: "'agent-run-global-memory-budget'",
       maxRuns: GLOBAL_MAX_RUNS,
       limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
     },
@@ -179,6 +241,17 @@ agentRunWorkflow.task({
         config.boxTrust === "owner"
           ? await pullAgentCredentials(wwwOpts, signal)
           : { agent: "", credentials: { type: "built-in-credits" as const } };
+      // EVERY run gets a fresh per-run HOME, credential or not, and that HOME is
+      // seeded as a trusted workspace (realpath'd — macOS tmpdir is a symlink).
+      // Both halves are load-bearing: the fresh HOME keeps a run off the
+      // operator's own logins/Keychain, and the trust seed is what lets a
+      // review run (--permission-mode default, no skip-permissions) grant its
+      // tools in -p mode. An unseeded workspace makes the CLI ignore
+      // .claude/settings.json and the review agent exits 1 with zero API calls
+      // — verified from captured stderr, and reproduced for owner mode in
+      // production before the seed landed. Credits/box-key runs need the seed
+      // just as much: review mode does not care where the model credential
+      // comes from.
       materialised = await materialiseAgentCredentials({
         credentials: pulled.credentials,
         agent: pulled.agent,
@@ -189,11 +262,17 @@ agentRunWorkflow.task({
       throw err;
     }
     // H2: log the MODE, never the credential.
+    // Name the credential the run will ACTUALLY use. The earlier version said
+    // "→ credits" for every undelivered run, which is a lie under box-key and
+    // would have sent the next person debugging this down the wrong path — the
+    // same way it took two rollbacks to find the last one.
     step(
       `agent credential: ${
         materialised.delivered
           ? "delivered (run HOME)"
-          : `none → credits (box trust: ${config.boxTrust})`
+          : config.boxTrust === "box-key"
+            ? "none → box ANTHROPIC_API_KEY (box trust: box-key)"
+            : `none → credits proxy (box trust: ${config.boxTrust})`
       }`,
     );
 
@@ -235,18 +314,22 @@ agentRunWorkflow.task({
       step(
         `next-message: got message (agent=${message.agent}, model=${message.model})`,
       );
-      // The invariant that removes the silent third mode: a run either has its
-      // own credential on disk, or it goes through the control-plane proxy. It
-      // never falls through to whatever key the BOX happens to carry.
-      //
-      // www computes useCredits from "does this user have a credential", which is
-      // true-but-insufficient out here: the user can have one that this box was
-      // never given (shared box, or a control plane too old to serve it). The
-      // worker knows which actually happened, so it has the final say.
-      if (!materialised.delivered && !message.useCredits) {
-        step("no delivered credential → forcing credits (proxy)");
-        message.useCredits = true;
+      // The worker has the final say on useCredits — www's guess is wrong in
+      // both directions out here (see resolveUseCredits). In particular,
+      // box-key must OVERRIDE an incoming useCredits=true: www sets it exactly
+      // when the user has no connected credential, which is the box-key
+      // operator's normal state, and an un-overridden true makes daemon-env
+      // blank the box key and 402 at the proxy — the pilot failure this mode
+      // exists to fix.
+      const resolved = resolveUseCredits({
+        boxTrust: config.boxTrust,
+        credentialDelivered: materialised.delivered,
+        incomingUseCredits: message.useCredits === true,
+      });
+      if (resolved.log) {
+        step(resolved.log);
       }
+      message.useCredits = resolved.useCredits;
       const bytes = await daemon.sendMessage(message);
       step(`socket write ok: ${bytes} bytes → daemon ACKed`);
 

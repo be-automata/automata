@@ -24,11 +24,7 @@ const CREDENTIAL_FILE_BY_AGENT: Record<string, string> = {
 };
 
 export interface MaterialisedCredentials {
-  /**
-   * HOME for the child process. ALWAYS a fresh per-run dir, even when no
-   * credential was delivered — see materialiseAgentCredentials for why an
-   * empty one still matters.
-   */
+  /** HOME for the child process. Always a fresh, trust-seeded per-run dir. */
   home: string;
   /** Whether a provider credential was actually written / injected. */
   delivered: boolean;
@@ -39,17 +35,77 @@ export interface MaterialisedCredentials {
 }
 
 /**
- * Give the run a fresh HOME under `runRoot`, and write the credential into it
- * when there is one.
+ * Mark the run's clone as a trusted workspace inside its own HOME.
  *
- * The HOME is created for EVERY run, credential or not. An empty one is not a
- * no-op: on macOS the agent CLI keeps its OAuth in the login Keychain, not in a
- * file, so a run that inherits the operator's HOME can authenticate as the
- * OPERATOR — silently spending the box owner's subscription on a run that was
- * meant to go through the proxy. Verified on Claude Code 2.1.234: with a fresh
- * HOME the CLI reports "Not logged in" (Keychain unreachable), and with a
- * delivered file it reads that file. A fresh HOME is what makes "either the
- * run's own credential or the proxy" true rather than aspirational.
+ * A fresh HOME has no `~/.claude.json`, so the agent CLI treats the workdir as
+ * untrusted: it ignores `.claude/settings.json` permission entries and, in
+ * `--permission-mode default`, has no way to grant a tool. REVIEW runs are the
+ * only ones that use that mode — deliberately, so the agent has no GitHub-write
+ * outlet (packages/daemon/src/claude.ts) — while every other run passes
+ * `--dangerously-skip-permissions` and never notices. That asymmetry is why
+ * giving every run a fresh HOME killed reviews and nothing else: the runs died
+ * in seconds with no output at all, and the control plane could only report
+ * "review intent could not be parsed".
+ *
+ * The CLI names this remedy in its own error text: set
+ * `projects["<workdir>"].hasTrustDialogAccepted`. Trust is scoped to THIS run's
+ * clone, so it grants nothing beyond the directory the run already owns.
+ *
+ * SECURITY — hooks are NOT gated by this seed. A repo's own
+ * `.claude/settings.json` hooks (arbitrary shell wired to lifecycle events)
+ * execute in `-p` mode WHETHER OR NOT the workspace is trusted — verified
+ * empirically on Claude Code 2.1.235: a SessionStart hook in a scratch repo
+ * fired under a seeded HOME and under a completely unseeded one, both times
+ * before auth (zero API calls, "Not logged in"). The trust seed therefore adds
+ * no hook exposure, and scoping it away from review runs would break them
+ * while mitigating nothing. Repo-controlled hook execution is a pre-existing
+ * property of running the agent CLI over a checkout at all; box-level
+ * mitigation (e.g. the CLI's `--bare`, which skips hooks) is a separate,
+ * run-mode-level decision tracked outside this module.
+ */
+async function seedWorkspaceTrust({
+  home,
+  workdir,
+}: {
+  home: string;
+  workdir: string;
+}): Promise<void> {
+  // The CLI keys trust by the RESOLVED cwd. On macOS os.tmpdir() returns
+  // /var/folders/…, a symlink to /private/var/folders/…, so seeding the
+  // symlinked spelling misses: the agent still printed "this workspace has not
+  // been trusted" with the /private path, made zero API calls and exited 1.
+  // Seed both spellings — the realpath is the one that matters, the raw one is
+  // insurance against a CLI that does not resolve.
+  const resolved = await fs.realpath(workdir).catch(() => workdir);
+  const trust = {
+    hasTrustDialogAccepted: true,
+    hasCompletedProjectOnboarding: true,
+  };
+  const config = {
+    hasCompletedOnboarding: true,
+    projects: {
+      [workdir]: trust,
+      [resolved]: trust,
+    },
+  };
+  await fs.writeFile(path.join(home, ".claude.json"), JSON.stringify(config), {
+    mode: 0o600,
+  });
+}
+
+/**
+ * Give EVERY run a fresh HOME under `runRoot`, seeded as a trusted workspace,
+ * and write the run's credential into it when it has one.
+ *
+ * Called unconditionally for every run (see workflow.ts). A run with no
+ * credential to deliver (`credentials.type === "built-in-credits"`, i.e. the
+ * proxy/box-key paths) still gets the fresh HOME and trust seed — it just has
+ * nothing written into it (`delivered: false`).
+ *
+ * The fresh HOME is what makes "this run uses its own credential" true: on macOS
+ * the CLI keeps OAuth in the login Keychain, so a run on the operator's HOME can
+ * authenticate as the OPERATOR. The trust seed is equally load-bearing: an
+ * unseeded HOME makes review runs hang on a permission they cannot prompt for.
  *
  * `agent` picks the file path; an agent we have no path for degrades to
  * built-in-credits rather than guessing a location.
@@ -65,6 +121,7 @@ export async function materialiseAgentCredentials({
 }): Promise<MaterialisedCredentials> {
   const home = path.join(runRoot, "home");
   await fs.mkdir(home, { recursive: true, mode: 0o700 });
+  await seedWorkspaceTrust({ home, workdir: runRoot });
   const cleanup = async () => {
     await fs.rm(home, { recursive: true, force: true }).catch(() => {});
   };

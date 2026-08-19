@@ -40,10 +40,21 @@ export interface WorkerConfig {
    *            credential must never land on disk here, so runs are forced
    *            through the control-plane proxy (useCredits) and bill credits.
    *
+   * "box-key" — the box's OWN ANTHROPIC_API_KEY is the intended credential for
+   *            every run on it. This is the self-host / pilot posture: the
+   *            operator put a funded key here on purpose so agents work, and no
+   *            user credential or platform credit is involved.
+   *
    * Defaults to "shared": the safe answer for an unconfigured box. An operator
-   * opts a single-tenant box in with WORKER_BOX_TRUST=owner.
+   * opts a single-tenant box in with WORKER_BOX_TRUST=owner (use the run user's
+   * own credential) or WORKER_BOX_TRUST=box-key (use this box's key).
+   *
+   * "box-key" exists because collapsing it into "shared" broke production: a box
+   * with a working key and a platform with NO credits was forced onto the credits
+   * proxy, and every review run died instantly. Silently falling back to the box
+   * key is wrong (that was the original bug); making the operator SAY so is right.
    */
-  boxTrust: "owner" | "shared";
+  boxTrust: "owner" | "shared" | "box-key";
   /** Root under which each run gets an isolated clone directory. */
   workdirRoot: string;
   /** thread-status poll interval, ms (5-10s; runs are minutes-long — ADR-003). */
@@ -94,7 +105,12 @@ export function loadWorkerConfig(
     // Only the exact string opts in. Anything else (unset, typo, "true") stays
     // "shared", so a misconfigured box degrades to the mode that keeps provider
     // credentials off its disk.
-    boxTrust: env.WORKER_BOX_TRUST?.trim() === "owner" ? "owner" : "shared",
+    boxTrust:
+      env.WORKER_BOX_TRUST?.trim() === "owner"
+        ? "owner"
+        : env.WORKER_BOX_TRUST?.trim() === "box-key"
+          ? "box-key"
+          : "shared",
     workdirRoot:
       env.WORKER_WORKDIR_ROOT?.trim() ||
       path.join(os.tmpdir(), "automata-worker-runs"),

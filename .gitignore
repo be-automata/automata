@@ -48,15 +48,28 @@ output.txt
 
 # claude code
 apps/www/.claude-flow
+# Shared config (.claude/settings.json, agents/, commands/) is committed on
+# purpose; only personal overrides are ignored.
 .claude/settings.local.json
 
-# ruflo / claude-flow per-checkout runtime state (daemon pid, logs, metrics)
-# and generated config. Regenerated on demand; never shared between worktrees.
+# ruflo / claude-flow per-checkout runtime state: daemon pid, logs, metrics and
+# generated config. Self-bootstraps on first command and is written at whatever
+# depth the tool runs from (see ruvnet/ruflo#695), so these stay unanchored.
 .claude-flow/
 .swarm/
+.hive-mind/
+claude-flow.config.json
+claude-flow.db
+hive-mind-prompt-*.txt
+.claude/checkpoints/
+.claude/helpers/
 .claude/proven-config.json
 .claude/.proven-config-version
 .claude/security-scans/
+
+# gstack local artifacts: browse captures, network logs and security reports.
+# Treated as sensitive, not just noise - these must never leave the machine.
+.gstack/
 
 # turborepo
 .turbo

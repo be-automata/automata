@@ -254,6 +254,17 @@ export function claudeCommand({
             "--disallowedTools",
             "'Bash(gh:*)'",
             "'Bash(git push:*)'",
+            // Review runs execute UNTRUSTED PR content, and the execution box
+            // seeds workspace trust (so review mode can grant its tools at all
+            // in -p). Trust also makes the CLI honor the reviewed branch's OWN
+            // .claude/settings.json — attacker-controlled on a fork PR, which
+            // could allow-list tools beyond this deliberately scoped set.
+            // Loading only user-level settings closes that: the repo's
+            // settings.json is never read, so the permission surface is exactly
+            // these flags regardless of what the PR commits. Supported on both
+            // CLI versions in service (verified 2.0.65 and 2.1.235).
+            "--setting-sources",
+            "user",
           ]
         : ["--dangerously-skip-permissions"]),
     "--output-format",

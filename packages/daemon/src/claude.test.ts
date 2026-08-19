@@ -29,6 +29,22 @@ describe("claudeCommand — permissionMode policy (phase-2 single-writer)", () =
     expect(cmd).toContain("--allowedTools Read Grep Glob Bash");
     // shell-quoted so `bash -c` doesn't choke on the parens/space/glob
     expect(cmd).toContain("--disallowedTools 'Bash(gh:*)' 'Bash(git push:*)'");
+    // Review runs execute untrusted PR content in a trust-seeded workspace, so
+    // the reviewed branch's own .claude/settings.json must never be loaded — a
+    // fork PR could commit permission grants that widen this scoped tool set.
+    expect(cmd).toContain("--setting-sources user");
+  });
+
+  it('permissionMode "review" never loads project-level settings; other modes are unrestricted', () => {
+    // allowAll runs use --dangerously-skip-permissions, where settings-based
+    // grants are moot; restricting sources there would break repo-intended
+    // configuration for ordinary task runs.
+    expect(
+      claudeCommand({ ...base, permissionMode: "allowAll" }),
+    ).not.toContain("--setting-sources");
+    expect(claudeCommand({ ...base, permissionMode: "plan" })).not.toContain(
+      "--setting-sources",
+    );
   });
 
   it('permissionMode "allowAll" (default) still uses --dangerously-skip-permissions', () => {

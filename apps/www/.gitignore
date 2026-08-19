@@ -17,6 +17,14 @@
 /.next/
 /out/
 
+# opennext cloudflare adapter build output, generated in full by
+# `@opennextjs/cloudflare` from /.next/ - worker.js, assets, cache and
+# server-functions are all derived artifacts, never edited by hand.
+/.open-next/
+
+# wrangler local state (dev sessions, tmp bundles)
+/.wrangler/
+
 # production
 /build
 
