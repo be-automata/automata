@@ -84,7 +84,15 @@ export const agentRunWorkflow = hatchet.workflow<AgentRunInput>({
       limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
     },
     {
-      expression: "'agent-run-shared-daemon-socket'",
+      // Renamed from 'agent-run-shared-daemon-socket' (2026-08-19). Two reasons:
+      // (1) the cap's real justification is the single-box MEMORY budget — the
+      // shared-socket collision it was named for was solved by per-run sockets
+      // (Phase 0.2b); (2) the old group's scheduler state deadlocked in
+      // hatchet-lite after repeated worker re-registrations (stale
+      // GROUP_ROUND_ROBIN strategy rows chain into active ones and the child
+      // slot is never granted — tasks sit QUEUED forever with idle workers).
+      // A new group name mints fresh strategy state on registration.
+      expression: "'agent-run-global-memory-budget'",
       maxRuns: GLOBAL_MAX_RUNS,
       limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
     },

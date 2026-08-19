@@ -145,10 +145,12 @@ export class DaemonProcess {
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
-    // Daemon stdout/stderr is agent output; it flows to www via events. We do not
-    // forward or store it here (H2: keep prompt/agent content off the worker box).
-    this.child.stdout?.resume();
-    this.child.stderr?.resume();
+    // TEMP DEBUG (uncommitted): tee daemon output to a local file to catch a
+    // fast agent crash whose stderr is otherwise dropped. Operator's own box.
+    const dbg = fs.createWriteStream("/tmp/automata-daemon-debug.log", { flags: "a" });
+    dbg.write(`\n===== run ${this.input.threadId} ${new Date().toISOString()} =====\n`);
+    this.child.stdout?.on("data", (d) => dbg.write(d));
+    this.child.stderr?.on("data", (d) => dbg.write(d));
 
     if (this.child.pid != null) {
       try {

@@ -68,7 +68,7 @@ describe("agentRunWorkflow registration shape", () => {
     );
 
     // Key 2: global single-daemon-socket / memory-budget cap.
-    expect(keys[1].expression).toBe("'agent-run-shared-daemon-socket'");
+    expect(keys[1].expression).toBe("'agent-run-global-memory-budget'");
     expect(keys[1].maxRuns).toBe(1);
     expect(keys[1].limitStrategy).toBe(
       ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
