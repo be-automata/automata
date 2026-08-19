@@ -29,9 +29,9 @@ import { normalizeRepo } from "./repo-review-settings";
  */
 
 /**
- * sha256 hex of a skill body — the traceability stamp shared by the model
- * (written on every version) and the resolver (stamped for tracked-default
- * fallbacks that have no version row).
+ * sha256 hex of a skill body — the traceability stamp written on every
+ * version and verified by the write surfaces (API route, dashboard,
+ * deploy/skill-push.ts).
  */
 export function computeContentSha(body: string): string {
   return createHash("sha256").update(body, "utf8").digest("hex");
@@ -39,8 +39,8 @@ export function computeContentSha(body: string): string {
 
 /**
  * Read the skill row for one `(org, repo, skill)`, or undefined when none
- * exists (the resolver then falls back to the tracked default). Read LIVE on
- * every automation run — an accepted edit applies with no restart.
+ * exists (the resolver then skips the run). Read LIVE on every automation
+ * run — an accepted edit applies with no restart.
  */
 export async function getRepoSkill({
   db,
@@ -106,15 +106,7 @@ export async function getSkillVersion({
   versionId: string;
 }): Promise<RepoSkillVersion | undefined> {
   const [row] = await db
-    .select({
-      id: repoSkillVersions.id,
-      skillId: repoSkillVersions.skillId,
-      body: repoSkillVersions.body,
-      contentSha: repoSkillVersions.contentSha,
-      source: repoSkillVersions.source,
-      createdByUserId: repoSkillVersions.createdByUserId,
-      createdAt: repoSkillVersions.createdAt,
-    })
+    .select(VERSION_COLUMNS)
     .from(repoSkillVersions)
     .innerJoin(repoSkills, eq(repoSkillVersions.skillId, repoSkills.id))
     .where(
@@ -125,6 +117,69 @@ export async function getSkillVersion({
     )
     .limit(1);
   return row;
+}
+
+/**
+ * The full version projection and its body-less variant — every version query
+ * selects one of these two, so adding a column to `repo_skill_versions` is a
+ * one-place edit instead of a silent partial read somewhere.
+ */
+const VERSION_COLUMNS = {
+  id: repoSkillVersions.id,
+  skillId: repoSkillVersions.skillId,
+  body: repoSkillVersions.body,
+  contentSha: repoSkillVersions.contentSha,
+  source: repoSkillVersions.source,
+  createdByUserId: repoSkillVersions.createdByUserId,
+  createdAt: repoSkillVersions.createdAt,
+};
+const { body: _body, ...VERSION_META_COLUMNS } = VERSION_COLUMNS;
+
+/**
+ * The one org-fence + identity predicate for history reads — the
+ * security-relevant part, so it exists exactly once.
+ */
+function versionHistoryFilter({
+  organizationId,
+  repoFullName,
+  skillName,
+}: {
+  organizationId: string;
+  repoFullName: string;
+  skillName: string;
+}) {
+  return and(
+    eq(repoSkills.organizationId, organizationId),
+    eq(repoSkills.repoFullName, normalizeRepo(repoFullName)),
+    eq(repoSkills.skillName, skillName),
+  );
+}
+
+/**
+ * Newest-first version rows WITH bodies for one `(org, repo, skill)`, capped.
+ * Bodies can be multi-KB, so callers that only need history metadata use
+ * `listSkillVersions` instead and fetch one body on demand.
+ */
+export async function listRecentSkillVersionsWithBodies({
+  db,
+  organizationId,
+  repoFullName,
+  skillName,
+  limit,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  skillName: string;
+  limit: number;
+}): Promise<RepoSkillVersion[]> {
+  return db
+    .select(VERSION_COLUMNS)
+    .from(repoSkillVersions)
+    .innerJoin(repoSkills, eq(repoSkillVersions.skillId, repoSkills.id))
+    .where(versionHistoryFilter({ organizationId, repoFullName, skillName }))
+    .orderBy(desc(repoSkillVersions.createdAt), desc(repoSkillVersions.id))
+    .limit(limit);
 }
 
 /**
@@ -149,23 +204,10 @@ export async function listSkillVersions({
   skillName: string;
 }): Promise<RepoSkillVersionMeta[]> {
   return db
-    .select({
-      id: repoSkillVersions.id,
-      skillId: repoSkillVersions.skillId,
-      contentSha: repoSkillVersions.contentSha,
-      source: repoSkillVersions.source,
-      createdByUserId: repoSkillVersions.createdByUserId,
-      createdAt: repoSkillVersions.createdAt,
-    })
+    .select(VERSION_META_COLUMNS)
     .from(repoSkillVersions)
     .innerJoin(repoSkills, eq(repoSkillVersions.skillId, repoSkills.id))
-    .where(
-      and(
-        eq(repoSkills.organizationId, organizationId),
-        eq(repoSkills.repoFullName, normalizeRepo(repoFullName)),
-        eq(repoSkills.skillName, skillName),
-      ),
-    )
+    .where(versionHistoryFilter({ organizationId, repoFullName, skillName }))
     .orderBy(desc(repoSkillVersions.createdAt), desc(repoSkillVersions.id));
 }
 

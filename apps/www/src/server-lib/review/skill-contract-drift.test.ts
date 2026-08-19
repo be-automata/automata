@@ -2,7 +2,11 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseReviewIntent } from "./parse-review-intent";
-import { loadReviewSkillBody, stripFrontmatter } from "./review-skill";
+import { stripFrontmatter } from "./review-skill";
+import {
+  loadReviewSkillBody,
+  TRACKED_REVIEW_SKILL_PATH,
+} from "../../../../../deploy/lib/review-skill-file";
 
 /**
  * Anti-drift guard (ADR-036 rider): the emit-skill's fenced-JSON EXAMPLE must parse
@@ -106,6 +110,11 @@ describe("seed inlines the tracked review skill (no box-local path)", () => {
     expect(() => loadReviewSkillBody("/nonexistent/SKILL.md")).toThrow(
       /not readable/,
     );
+  });
+
+  it("the loader's default path IS the tracked file", () => {
+    // Pinned by module location, not cwd — one assertion, no branches.
+    expect(TRACKED_REVIEW_SKILL_PATH).toBe(SKILL_MD);
   });
 
   it("stripFrontmatter does not terminate early on an inline --- in a value", () => {

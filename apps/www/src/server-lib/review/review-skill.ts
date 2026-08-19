@@ -16,14 +16,6 @@
  * Dependency-free on purpose (node builtins only) so `deploy/*.ts` scripts can
  * import it under tsx without dragging in Next/alias resolution.
  */
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
-/** Absolute path to the tracked skill — the ONLY authoritative copy. */
-export const TRACKED_REVIEW_SKILL_PATH = fileURLToPath(
-  new URL("../../../../../deploy/skills/github-ops/SKILL.md", import.meta.url),
-);
-
 /**
  * Strip the Claude Code YAML frontmatter. It carries skill-registry metadata
  * (name/description) that is meaningless inside an automation instruction, and
@@ -44,7 +36,8 @@ export function stripFrontmatter(md: string): string {
 
 /**
  * THE fenced-json verdict-contract check, shared by the tracked-file loader
- * below and the live-skill resolver (resolve-review-skill.ts): a github-ops
+ * (deploy/lib/review-skill-file.ts) and the live-skill resolver
+ * (resolve-review-skill.ts): a github-ops
  * body that cannot instruct the agent to emit a parseable verdict must never
  * be dispatched, whichever store it came from. Throws with a caller-supplied
  * label so the error names the offending source (a file path, a version id).
@@ -98,26 +91,4 @@ export function validateSkillBody(
         `dispatch an automation run with no instruction.`,
     );
   }
-}
-
-/**
- * The review methodology body, ready to inline into a prompt. Throws rather
- * than returning a partial instruction: a review agent running without its
- * methodology silently degrades every review, so failing the seed is correct.
- */
-export function loadReviewSkillBody(
-  skillPath: string = TRACKED_REVIEW_SKILL_PATH,
-): string {
-  let raw: string;
-  try {
-    raw = readFileSync(skillPath, "utf8");
-  } catch (err) {
-    throw new Error(
-      `Review skill not readable at ${skillPath}: ${(err as Error).message}. ` +
-        `It is tracked in-repo; a missing file means the checkout is incomplete.`,
-    );
-  }
-  const body = stripFrontmatter(raw);
-  assertReviewSkillContract(body, skillPath);
-  return body;
 }

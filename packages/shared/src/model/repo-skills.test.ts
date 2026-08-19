@@ -9,6 +9,7 @@ import {
   createRepoSkillVersion,
   getRepoSkill,
   getSkillVersion,
+  listRecentSkillVersionsWithBodies,
   listRepoSkills,
   listSkillVersions,
   promoteLastKnownGood,
@@ -400,5 +401,35 @@ describe("repo-skills (Neon, org-fenced, append-only versions)", () => {
       skillName: "github-ops",
     });
     expect(skill?.currentVersionId).toBe(ops.version.id);
+  });
+
+  it("listRecentSkillVersionsWithBodies: newest first, capped, org-fenced, bodies included", async () => {
+    const args = {
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      skillName: "github-ops",
+    };
+    for (const [i, source] of (
+      ["api", "dashboard", "api"] as const
+    ).entries()) {
+      await createRepoSkillVersion({ ...args, body: `v${i + 1}`, source });
+      // Distinct createdAt: (createdAt, id) is the order key and ids are random.
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const recent = await listRecentSkillVersionsWithBodies({
+      ...args,
+      limit: 2,
+    });
+    expect(recent.map((v) => v.body)).toEqual(["v3", "v2"]);
+    expect(recent[0]?.source).toBe("api");
+    // Org fence: the same (repo, skill) under another org resolves nothing.
+    expect(
+      await listRecentSkillVersionsWithBodies({
+        ...args,
+        organizationId: orgB,
+        limit: 5,
+      }),
+    ).toEqual([]);
   });
 });

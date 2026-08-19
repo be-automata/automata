@@ -12,13 +12,16 @@ import {
   resolveReviewSkill,
   renderSkillPlaceholders,
 } from "./resolve-review-skill";
-import { loadReviewSkillBody } from "./review-skill";
 
 /**
  * The thread-creation resolution seam: proves resolveReviewSkill serves the
- * LIVE current version, walks the fallback chain (current → last-known-good →
- * tracked default), never dispatches a contract-less github-ops body, and
- * resolves defaultless skills to null so the caller skips the run.
+ * LIVE current version, walks the PURE-DB fallback chain (current →
+ * last-known-good → newest valid historical version), never dispatches a
+ * contract-less github-ops body, and resolves versionless skills to null so
+ * the caller skips the run. There is deliberately NO filesystem tier to test:
+ * the Workers runtime has no checkout (PR #57). Fallback tests write versions
+ * ONLY through sources the real surfaces use ('api'/'dashboard') so the chain
+ * is proven reachable in production, not just in test fixtures.
  */
 
 const db = createDb(env.DATABASE_URL!);
@@ -68,6 +71,22 @@ describe("resolveReviewSkill (fallback chain)", () => {
   beforeEach(async () => {
     orgId = await makeOrg();
   });
+
+  /** github-ops version write, minus the boilerplate. */
+  const addVersion = (
+    body: string,
+    source: Parameters<typeof createRepoSkillVersion>[0]["source"],
+  ) =>
+    createRepoSkillVersion({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      skillName: "github-ops",
+      body,
+      source,
+    });
+  /** Distinct createdAt between writes — (createdAt, id) orders the history. */
+  const tick = () => new Promise((r) => setTimeout(r, 5));
 
   it("serves the current version live: an edit is picked up on the next resolution", async () => {
     await createRepoSkillVersion({
@@ -175,15 +194,15 @@ describe("resolveReviewSkill (fallback chain)", () => {
     expect(resolved?.body).toBe(VALID_BODY);
   });
 
-  it("invalid current, no last-known-good → tracked default (github-ops)", async () => {
-    await createRepoSkillVersion({
-      db,
-      organizationId: orgId,
-      repoFullName: REPO,
-      skillName: "github-ops",
-      body: BROKEN_BODY,
-      source: "api",
-    });
+  it("invalid current, no last-known-good → newest valid historical version", async () => {
+    // Real surfaces only: an old good dashboard edit, a newer good api edit,
+    // then a broken edit that becomes current. Nothing was ever promoted.
+    await addVersion(VALID_BODY, "dashboard");
+    await tick();
+    const newerGood = await addVersion(VALID_BODY_V2, "api");
+    await tick();
+    await addVersion(BROKEN_BODY, "api");
+    // The walk serves the NEWEST valid body, not the oldest.
     const resolved = await resolveReviewSkill({
       db,
       organizationId: orgId,
@@ -191,14 +210,13 @@ describe("resolveReviewSkill (fallback chain)", () => {
       skillName: "github-ops",
       version: "latest",
     });
-    expect(resolved?.source).toBe("tracked-default");
-    expect(resolved?.versionId).toBeUndefined();
-    const tracked = loadReviewSkillBody();
-    expect(resolved?.body).toBe(tracked);
-    expect(resolved?.contentSha).toBe(computeContentSha(tracked));
+    expect(resolved?.source).toBe("fallback-version");
+    expect(resolved?.versionId).toBe(newerGood.version.id);
+    expect(resolved?.body).toBe(VALID_BODY_V2);
+    expect(resolved?.contentSha).toBe(computeContentSha(VALID_BODY_V2));
   });
 
-  it("no DB row at all → tracked default (github-ops)", async () => {
+  it("no DB version at all → null (never dispatch a body the org didn't approve)", async () => {
     const resolved = await resolveReviewSkill({
       db,
       organizationId: orgId,
@@ -206,10 +224,26 @@ describe("resolveReviewSkill (fallback chain)", () => {
       skillName: "github-ops",
       version: "latest",
     });
-    expect(resolved?.source).toBe("tracked-default");
+    expect(resolved).toBeNull();
   });
 
-  it("no org (legacy/unfenced) → tracked default, never a DB body", async () => {
+  it("every historical version broken → null", async () => {
+    await addVersion(BROKEN_BODY, "dashboard");
+    await addVersion("Also just prose.", "api");
+    const resolved = await resolveReviewSkill({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      skillName: "github-ops",
+      version: "latest",
+    });
+    expect(resolved).toBeNull();
+  });
+
+  it("no org (legacy/unfenced) → null, never a DB body", async () => {
+    // Even with a valid version sitting in SOME org, an org-less request must
+    // not resolve to it.
+    await addVersion(VALID_BODY, "api");
     const resolved = await resolveReviewSkill({
       db,
       organizationId: null,
@@ -217,7 +251,7 @@ describe("resolveReviewSkill (fallback chain)", () => {
       skillName: "github-ops",
       version: "latest",
     });
-    expect(resolved?.source).toBe("tracked-default");
+    expect(resolved).toBeNull();
   });
 
   it("non-github-ops skill needs only a non-empty body", async () => {
