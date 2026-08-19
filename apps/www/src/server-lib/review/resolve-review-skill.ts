@@ -100,83 +100,88 @@ export async function resolveReviewSkill({
     return null;
   }
 
-  const skill = await getRepoSkill({
-    db,
-    organizationId,
-    repoFullName,
-    skillName,
-  });
-  const referencedVersionId =
-    version !== "latest" ? version : skill?.currentVersionId;
-
-  // Tier 1: the referenced version.
-  if (referencedVersionId) {
+  /**
+   * Fetch one version by id and serve it iff it passes the skill's validator.
+   * `serveWarning` marks the fallback tiers: serving anything but the
+   * referenced version is logged loudly.
+   */
+  async function tryVersionId(
+    versionId: string,
+    label: string,
+    serveWarning?: string,
+  ): Promise<ResolvedSkill | null> {
     const candidate = await getSkillVersion({
       db,
-      organizationId,
-      versionId: referencedVersionId,
+      organizationId: organizationId!,
+      versionId,
     });
-    if (candidate) {
-      try {
-        validateSkillBody(skillName, candidate.body, `version ${candidate.id}`);
-        return {
-          body: candidate.body,
-          contentSha: candidate.contentSha,
-          source: "db-version",
-          versionId: candidate.id,
-        };
-      } catch (err) {
-        console.error(
-          `resolveReviewSkill: skill '${skillName}' (${repoFullName}) version ` +
-            `${candidate.id} failed validation, falling back:`,
-          err,
-        );
-      }
-    } else {
+    if (!candidate) {
       console.error(
-        `resolveReviewSkill: skill '${skillName}' (${repoFullName}) references ` +
-          `missing version ${referencedVersionId}, falling back.`,
+        `resolveReviewSkill: skill '${skillName}' (${repoFullName}) ` +
+          `references missing ${label} ${versionId}, falling back.`,
       );
+      return null;
     }
+    try {
+      validateSkillBody(skillName, candidate.body, `${label} ${candidate.id}`);
+    } catch (err) {
+      console.error(
+        `resolveReviewSkill: skill '${skillName}' (${repoFullName}) ${label} ` +
+          `${candidate.id} failed validation, falling back:`,
+        err,
+      );
+      return null;
+    }
+    if (serveWarning) console.warn(serveWarning);
+    return {
+      body: candidate.body,
+      contentSha: candidate.contentSha,
+      source: "db-version",
+      versionId: candidate.id,
+    };
+  }
+
+  // Tier 1: the referenced version. A pin resolves directly — the skill row
+  // is only needed by the fallback tiers, so it is fetched lazily.
+  let skill =
+    version === "latest"
+      ? await getRepoSkill({ db, organizationId, repoFullName, skillName })
+      : undefined;
+  const referencedVersionId =
+    version !== "latest" ? version : skill?.currentVersionId;
+  if (referencedVersionId) {
+    const served = await tryVersionId(referencedVersionId, "version");
+    if (served) return served;
+  }
+  if (version !== "latest") {
+    skill = await getRepoSkill({ db, organizationId, repoFullName, skillName });
+  }
+
+  // No skill row means no versions exist (they hang off it) — skip the
+  // fallback queries that are provably empty.
+  if (!skill) {
+    console.error(
+      `resolveReviewSkill: skill '${skillName}' (${repoFullName}) is not ` +
+        `configured for this repo — the caller must SKIP this run.`,
+    );
+    return null;
   }
 
   // Tier 2: last known good — only ever points at a body that produced a
   // healthy run, but re-validate anyway (never dispatch contract-less).
-  if (skill?.lastKnownGoodVersionId) {
-    const lkg = await getSkillVersion({
-      db,
-      organizationId,
-      versionId: skill.lastKnownGoodVersionId,
-    });
-    if (lkg) {
-      try {
-        validateSkillBody(skillName, lkg.body, `last-known-good ${lkg.id}`);
-        console.warn(
-          `resolveReviewSkill: skill '${skillName}' (${repoFullName}) served ` +
-            `last-known-good version ${lkg.id}.`,
-        );
-        return {
-          body: lkg.body,
-          contentSha: lkg.contentSha,
-          source: "db-version",
-          versionId: lkg.id,
-        };
-      } catch (err) {
-        console.error(
-          `resolveReviewSkill: last-known-good ${lkg.id} for skill ` +
-            `'${skillName}' (${repoFullName}) failed validation too:`,
-          err,
-        );
-      }
-    }
+  if (skill.lastKnownGoodVersionId) {
+    const served = await tryVersionId(
+      skill.lastKnownGoodVersionId,
+      "last-known-good",
+      `resolveReviewSkill: skill '${skillName}' (${repoFullName}) served ` +
+        `last-known-good version ${skill.lastKnownGoodVersionId}.`,
+    );
+    if (served) return served;
   }
 
   // Tier 3: walk history, newest first, for any version that still passes
-  // validation. Rows already tried above are skipped by id (validation would
-  // reject them again anyway — the skip just saves the noise).
-  const tried = new Set(
-    [referencedVersionId, skill?.lastKnownGoodVersionId].filter(Boolean),
-  );
+  // validation. Rows already tried above just fail validation again and fall
+  // through — no bookkeeping needed.
   const history = await listRecentSkillVersionsWithBodies({
     db,
     organizationId,
@@ -185,29 +190,29 @@ export async function resolveReviewSkill({
     limit: FALLBACK_HISTORY_LIMIT,
   });
   for (const candidate of history) {
-    if (tried.has(candidate.id)) continue;
     try {
       validateSkillBody(
         skillName,
         candidate.body,
         `fallback version ${candidate.id}`,
       );
-      console.warn(
-        `resolveReviewSkill: skill '${skillName}' (${repoFullName}) resolved ` +
-          `to historical version ${candidate.id} (${candidate.source}, ` +
-          `${candidate.createdAt.toISOString()}) — no usable ` +
-          `current/last-known-good.`,
-      );
-      return {
-        body: candidate.body,
-        contentSha: candidate.contentSha,
-        source: "fallback-version",
-        versionId: candidate.id,
-      };
     } catch {
       // Keep walking — the loud per-tier logs above already cover the
       // current/LKG failures; an invalid mid-history row needs no alarm.
+      continue;
     }
+    console.warn(
+      `resolveReviewSkill: skill '${skillName}' (${repoFullName}) resolved ` +
+        `to historical version ${candidate.id} (${candidate.source}, ` +
+        `${candidate.createdAt.toISOString()}) — no usable ` +
+        `current/last-known-good.`,
+    );
+    return {
+      body: candidate.body,
+      contentSha: candidate.contentSha,
+      source: "fallback-version",
+      versionId: candidate.id,
+    };
   }
 
   console.error(

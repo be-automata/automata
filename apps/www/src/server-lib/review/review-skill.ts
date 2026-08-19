@@ -36,7 +36,8 @@ export function stripFrontmatter(md: string): string {
 
 /**
  * THE fenced-json verdict-contract check, shared by the tracked-file loader
- * below and the live-skill resolver (resolve-review-skill.ts): a github-ops
+ * (deploy/lib/review-skill-file.ts) and the live-skill resolver
+ * (resolve-review-skill.ts): a github-ops
  * body that cannot instruct the agent to emit a parseable verdict must never
  * be dispatched, whichever store it came from. Throws with a caller-supplied
  * label so the error names the offending source (a file path, a version id).

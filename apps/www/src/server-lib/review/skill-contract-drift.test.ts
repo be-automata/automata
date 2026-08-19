@@ -5,7 +5,7 @@ import { parseReviewIntent } from "./parse-review-intent";
 import { stripFrontmatter } from "./review-skill";
 import {
   loadReviewSkillBody,
-  trackedReviewSkillPath,
+  TRACKED_REVIEW_SKILL_PATH,
 } from "../../../../../deploy/lib/review-skill-file";
 
 /**
@@ -112,21 +112,9 @@ describe("seed inlines the tracked review skill (no box-local path)", () => {
     );
   });
 
-  it("trackedReviewSkillPath resolves each cwd branch explicitly", () => {
-    // Every branch pinned so a regression in candidate order or fallback shows
-    // up in CI, not in a deploy script silently reading the wrong file.
-    const repoRoot = fileURLToPath(
-      new URL("../../../../..", import.meta.url),
-    ).replace(/\/$/, "");
-    // Branch 1: deploy/*.ts scripts run from the repo root.
-    expect(trackedReviewSkillPath(repoRoot)).toBe(SKILL_MD);
-    // Branch 2: apps/www tests/dev run with cwd=apps/www.
-    expect(trackedReviewSkillPath(`${repoRoot}/apps/www`)).toBe(SKILL_MD);
-    // Branch 3: neither candidate exists → first candidate, whose read then
-    // fails with the descriptive "not readable" error above.
-    expect(trackedReviewSkillPath("/nonexistent")).toBe(
-      "/nonexistent/deploy/skills/github-ops/SKILL.md",
-    );
+  it("the loader's default path IS the tracked file", () => {
+    // Pinned by module location, not cwd — one assertion, no branches.
+    expect(TRACKED_REVIEW_SKILL_PATH).toBe(SKILL_MD);
   });
 
   it("stripFrontmatter does not terminate early on an inline --- in a value", () => {

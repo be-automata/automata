@@ -72,6 +72,22 @@ describe("resolveReviewSkill (fallback chain)", () => {
     orgId = await makeOrg();
   });
 
+  /** github-ops version write, minus the boilerplate. */
+  const addVersion = (
+    body: string,
+    source: Parameters<typeof createRepoSkillVersion>[0]["source"],
+  ) =>
+    createRepoSkillVersion({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      skillName: "github-ops",
+      body,
+      source,
+    });
+  /** Distinct createdAt between writes — (createdAt, id) orders the history. */
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+
   it("serves the current version live: an edit is picked up on the next resolution", async () => {
     await createRepoSkillVersion({
       db,
@@ -181,32 +197,11 @@ describe("resolveReviewSkill (fallback chain)", () => {
   it("invalid current, no last-known-good → newest valid historical version", async () => {
     // Real surfaces only: an old good dashboard edit, a newer good api edit,
     // then a broken edit that becomes current. Nothing was ever promoted.
-    await createRepoSkillVersion({
-      db,
-      organizationId: orgId,
-      repoFullName: REPO,
-      skillName: "github-ops",
-      body: VALID_BODY,
-      source: "dashboard",
-    });
-    await new Promise((r) => setTimeout(r, 5));
-    const newerGood = await createRepoSkillVersion({
-      db,
-      organizationId: orgId,
-      repoFullName: REPO,
-      skillName: "github-ops",
-      body: VALID_BODY_V2,
-      source: "api",
-    });
-    await new Promise((r) => setTimeout(r, 5));
-    await createRepoSkillVersion({
-      db,
-      organizationId: orgId,
-      repoFullName: REPO,
-      skillName: "github-ops",
-      body: BROKEN_BODY,
-      source: "api",
-    });
+    await addVersion(VALID_BODY, "dashboard");
+    await tick();
+    const newerGood = await addVersion(VALID_BODY_V2, "api");
+    await tick();
+    await addVersion(BROKEN_BODY, "api");
     // The walk serves the NEWEST valid body, not the oldest.
     const resolved = await resolveReviewSkill({
       db,
@@ -233,22 +228,8 @@ describe("resolveReviewSkill (fallback chain)", () => {
   });
 
   it("every historical version broken → null", async () => {
-    await createRepoSkillVersion({
-      db,
-      organizationId: orgId,
-      repoFullName: REPO,
-      skillName: "github-ops",
-      body: BROKEN_BODY,
-      source: "dashboard",
-    });
-    await createRepoSkillVersion({
-      db,
-      organizationId: orgId,
-      repoFullName: REPO,
-      skillName: "github-ops",
-      body: "Also just prose.",
-      source: "api",
-    });
+    await addVersion(BROKEN_BODY, "dashboard");
+    await addVersion("Also just prose.", "api");
     const resolved = await resolveReviewSkill({
       db,
       organizationId: orgId,
@@ -262,14 +243,7 @@ describe("resolveReviewSkill (fallback chain)", () => {
   it("no org (legacy/unfenced) → null, never a DB body", async () => {
     // Even with a valid version sitting in SOME org, an org-less request must
     // not resolve to it.
-    await createRepoSkillVersion({
-      db,
-      organizationId: orgId,
-      repoFullName: REPO,
-      skillName: "github-ops",
-      body: VALID_BODY,
-      source: "api",
-    });
+    await addVersion(VALID_BODY, "api");
     const resolved = await resolveReviewSkill({
       db,
       organizationId: null,

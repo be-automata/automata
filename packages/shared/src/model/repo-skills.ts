@@ -39,8 +39,8 @@ export function computeContentSha(body: string): string {
 
 /**
  * Read the skill row for one `(org, repo, skill)`, or undefined when none
- * exists (the resolver then falls back to the tracked default). Read LIVE on
- * every automation run — an accepted edit applies with no restart.
+ * exists (the resolver then skips the run). Read LIVE on every automation
+ * run — an accepted edit applies with no restart.
  */
 export async function getRepoSkill({
   db,
@@ -106,15 +106,7 @@ export async function getSkillVersion({
   versionId: string;
 }): Promise<RepoSkillVersion | undefined> {
   const [row] = await db
-    .select({
-      id: repoSkillVersions.id,
-      skillId: repoSkillVersions.skillId,
-      body: repoSkillVersions.body,
-      contentSha: repoSkillVersions.contentSha,
-      source: repoSkillVersions.source,
-      createdByUserId: repoSkillVersions.createdByUserId,
-      createdAt: repoSkillVersions.createdAt,
-    })
+    .select(VERSION_COLUMNS)
     .from(repoSkillVersions)
     .innerJoin(repoSkills, eq(repoSkillVersions.skillId, repoSkills.id))
     .where(
@@ -128,15 +120,45 @@ export async function getSkillVersion({
 }
 
 /**
- * Newest-first version rows WITH bodies for one `(org, repo, skill)`, capped —
- * the resolver's LAST fallback tier walks these when both the referenced
- * version and last-known-good are unusable: every row was written through a
- * validator-enforced surface (API route, dashboard action, skill-push), so
- * the most recent historical body that still passes validation is the best
- * org-approved text available. Capped because the walk only exists for the
- * disaster path; a skill whose last `limit` versions are ALL invalid has no
- * business dispatching. Org-fenced like every other read here; (createdAt,
- * id) DESC mirrors listSkillVersions.
+ * The full version projection and its body-less variant — every version query
+ * selects one of these two, so adding a column to `repo_skill_versions` is a
+ * one-place edit instead of a silent partial read somewhere.
+ */
+const VERSION_COLUMNS = {
+  id: repoSkillVersions.id,
+  skillId: repoSkillVersions.skillId,
+  body: repoSkillVersions.body,
+  contentSha: repoSkillVersions.contentSha,
+  source: repoSkillVersions.source,
+  createdByUserId: repoSkillVersions.createdByUserId,
+  createdAt: repoSkillVersions.createdAt,
+};
+const { body: _body, ...VERSION_META_COLUMNS } = VERSION_COLUMNS;
+
+/**
+ * The one org-fence + identity predicate for history reads — the
+ * security-relevant part, so it exists exactly once.
+ */
+function versionHistoryFilter({
+  organizationId,
+  repoFullName,
+  skillName,
+}: {
+  organizationId: string;
+  repoFullName: string;
+  skillName: string;
+}) {
+  return and(
+    eq(repoSkills.organizationId, organizationId),
+    eq(repoSkills.repoFullName, normalizeRepo(repoFullName)),
+    eq(repoSkills.skillName, skillName),
+  );
+}
+
+/**
+ * Newest-first version rows WITH bodies for one `(org, repo, skill)`, capped.
+ * Bodies can be multi-KB, so callers that only need history metadata use
+ * `listSkillVersions` instead and fetch one body on demand.
  */
 export async function listRecentSkillVersionsWithBodies({
   db,
@@ -152,24 +174,10 @@ export async function listRecentSkillVersionsWithBodies({
   limit: number;
 }): Promise<RepoSkillVersion[]> {
   return db
-    .select({
-      id: repoSkillVersions.id,
-      skillId: repoSkillVersions.skillId,
-      body: repoSkillVersions.body,
-      contentSha: repoSkillVersions.contentSha,
-      source: repoSkillVersions.source,
-      createdByUserId: repoSkillVersions.createdByUserId,
-      createdAt: repoSkillVersions.createdAt,
-    })
+    .select(VERSION_COLUMNS)
     .from(repoSkillVersions)
     .innerJoin(repoSkills, eq(repoSkillVersions.skillId, repoSkills.id))
-    .where(
-      and(
-        eq(repoSkills.organizationId, organizationId),
-        eq(repoSkills.repoFullName, normalizeRepo(repoFullName)),
-        eq(repoSkills.skillName, skillName),
-      ),
-    )
+    .where(versionHistoryFilter({ organizationId, repoFullName, skillName }))
     .orderBy(desc(repoSkillVersions.createdAt), desc(repoSkillVersions.id))
     .limit(limit);
 }
@@ -196,23 +204,10 @@ export async function listSkillVersions({
   skillName: string;
 }): Promise<RepoSkillVersionMeta[]> {
   return db
-    .select({
-      id: repoSkillVersions.id,
-      skillId: repoSkillVersions.skillId,
-      contentSha: repoSkillVersions.contentSha,
-      source: repoSkillVersions.source,
-      createdByUserId: repoSkillVersions.createdByUserId,
-      createdAt: repoSkillVersions.createdAt,
-    })
+    .select(VERSION_META_COLUMNS)
     .from(repoSkillVersions)
     .innerJoin(repoSkills, eq(repoSkillVersions.skillId, repoSkills.id))
-    .where(
-      and(
-        eq(repoSkills.organizationId, organizationId),
-        eq(repoSkills.repoFullName, normalizeRepo(repoFullName)),
-        eq(repoSkills.skillName, skillName),
-      ),
-    )
+    .where(versionHistoryFilter({ organizationId, repoFullName, skillName }))
     .orderBy(desc(repoSkillVersions.createdAt), desc(repoSkillVersions.id));
 }
 

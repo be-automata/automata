@@ -12,24 +12,22 @@
  * `deploy/seed-pilot-mirror.ts` (today inlines it into the `user_message`
  * automation text; the #54 C3 cutover will make it write seed versions too).
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   assertReviewSkillContract,
   stripFrontmatter,
 } from "../../apps/www/src/server-lib/review/review-skill";
 
 /**
- * Absolute path to the tracked skill — the ONLY authoritative in-repo copy.
- * Candidates cover the two real callers: `deploy/*.ts` scripts run from the
- * repo root, and apps/www tests run with cwd=`apps/www`. `cwd` is a parameter
- * so each branch is directly testable (drift test) without chdir games.
+ * Absolute path to the tracked skill — the ONLY authoritative in-repo copy,
+ * pinned by THIS module's location (`deploy/lib/`), not the caller's cwd.
+ * `import.meta.url` is safe again here: the webpack asset-URL hazard only
+ * applies inside the www bundle, which this deploy-only module never enters.
  */
-export function trackedReviewSkillPath(cwd: string = process.cwd()): string {
-  const rel = join("deploy", "skills", "github-ops", "SKILL.md");
-  const candidates = [join(cwd, rel), join(cwd, "..", "..", rel)];
-  return candidates.find((p) => existsSync(p)) ?? candidates[0]!;
-}
+export const TRACKED_REVIEW_SKILL_PATH = fileURLToPath(
+  new URL("../skills/github-ops/SKILL.md", import.meta.url),
+);
 
 /**
  * The review methodology body, ready to push as a skill version. Throws rather
@@ -38,7 +36,7 @@ export function trackedReviewSkillPath(cwd: string = process.cwd()): string {
  * correct.
  */
 export function loadReviewSkillBody(
-  skillPath: string = trackedReviewSkillPath(),
+  skillPath: string = TRACKED_REVIEW_SKILL_PATH,
 ): string {
   let raw: string;
   try {
