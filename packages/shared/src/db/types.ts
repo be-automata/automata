@@ -122,6 +122,17 @@ export type ThreadSourceMetadata =
   | {
       type: "www-multi-agent";
       models: SelectedAIModels;
+    }
+  // Traceability stamp for skill_message automations (issue #54): the exact
+  // skill text a thread ran with. `contentSha` is the sha256 of the resolved
+  // body; `source` is the resolver tier ("db-version" | "tracked-default");
+  // `versionId` is present when a DB version was served.
+  | {
+      type: "automation-skill";
+      skillName: string;
+      contentSha: string;
+      source: string;
+      versionId?: string;
     };
 
 export type ThreadStatusDeprecated =
@@ -345,6 +356,15 @@ export type AutomationInsert<T = AutomationTriggerType> = Omit<
 export type RepoReviewSetting = typeof schema.repoReviewSettings.$inferSelect;
 export type RepoReviewSettingInsert =
   typeof schema.repoReviewSettings.$inferInsert;
+
+/** Which edit surface produced a skill version (audit trail). */
+export type RepoSkillVersionSource = "dashboard" | "api" | "seed" | "repo-file";
+
+export type RepoSkill = typeof schema.repoSkills.$inferSelect;
+export type RepoSkillInsert = typeof schema.repoSkills.$inferInsert;
+export type RepoSkillVersion = typeof schema.repoSkillVersions.$inferSelect;
+export type RepoSkillVersionInsert =
+  typeof schema.repoSkillVersions.$inferInsert;
 
 export type HatchetRun = typeof schema.hatchetRun.$inferSelect;
 export type HatchetRunInsert = typeof schema.hatchetRun.$inferInsert;

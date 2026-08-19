@@ -41,6 +41,10 @@ import { SUBSCRIPTION_MESSAGES } from "@/lib/subscription-msgs";
 import { getMaxAutomationsForUser } from "@/lib/subscription-tiers";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import { UserFacingError } from "@/lib/server-actions";
+import {
+  resolveReviewSkill,
+  renderSkillPlaceholders,
+} from "./review/resolve-review-skill";
 
 /**
  * Effective shadow state for an automation's org: the org's installation mode
@@ -116,8 +120,74 @@ export async function runAutomation({
         threadChatId = newThreadResult.threadChatId;
         break;
       }
+      case "skill_message": {
+        // Live-skill reference (issue #54): resolve the skill body NOW, at the
+        // single seam where a stored instruction becomes a thread's first
+        // message — so an accepted edit is live on the next run and in-flight
+        // threads are untouched by construction.
+        const { skillName, version } = automation.action.config;
+        const resolved = await resolveReviewSkill({
+          db,
+          organizationId: automation.organizationId,
+          repoFullName: automation.repoFullName,
+          skillName,
+          version,
+        });
+        if (!resolved) {
+          // Defaultless skill with no usable version: skipping the run loudly
+          // beats dispatching an agent with an empty instruction.
+          console.error(
+            `Automation ${automation.id}: skill '${skillName}' has no usable ` +
+              `body — skipping thread creation.`,
+          );
+          return undefined;
+        }
+        const baseBranchName = options?.branchName ?? automation.branchName;
+        const message: DBUserMessage = {
+          type: "user",
+          model: null,
+          parts: [
+            {
+              type: "text",
+              text: renderSkillPlaceholders(resolved.body, {
+                repoFullName: automation.repoFullName,
+                baseBranch: baseBranchName,
+              }),
+            },
+          ],
+          timestamp: new Date().toISOString(),
+        };
+        const newThreadResult = await createNewThread({
+          userId: automation.userId,
+          organizationId: automation.organizationId,
+          shadow,
+          message: options?.transformMessage
+            ? options.transformMessage(message)
+            : message,
+          githubRepoFullName: automation.repoFullName,
+          baseBranchName,
+          headBranchName: null,
+          sourceType: "automation",
+          // Traceability: any thread can be traced to the exact skill text it
+          // ran with (contentSha) and which resolver tier served it.
+          sourceMetadata: {
+            type: "automation-skill",
+            skillName,
+            contentSha: resolved.contentSha,
+            source: resolved.source,
+            ...(resolved.versionId ? { versionId: resolved.versionId } : {}),
+          },
+          automation: automation,
+          githubPRNumber: options?.prNumber,
+          githubIssueNumber: options?.issueNumber,
+          disableGitCheckpointing: automation.disableGitCheckpointing ?? false,
+        });
+        threadId = newThreadResult.threadId;
+        threadChatId = newThreadResult.threadChatId;
+        break;
+      }
       default: {
-        assertNever(automation.action.type);
+        assertNever(automation.action);
       }
     }
     const updatedAutomation = await incrementAutomationRunCount({
@@ -350,8 +420,19 @@ export async function validateAutomationCreationOrUpdate({
         }
         break;
       }
+      case "skill_message": {
+        if (action.config.skillName.trim().length === 0) {
+          throw new UserFacingError("Skill name cannot be empty");
+        }
+        if (action.config.version.trim().length === 0) {
+          throw new UserFacingError(
+            `Skill version cannot be empty — use 'latest' or a version id`,
+          );
+        }
+        break;
+      }
       default: {
-        assertNever(action.type);
+        assertNever(action);
       }
     }
   }
