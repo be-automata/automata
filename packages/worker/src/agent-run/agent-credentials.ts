@@ -24,11 +24,8 @@ const CREDENTIAL_FILE_BY_AGENT: Record<string, string> = {
 };
 
 export interface MaterialisedCredentials {
-  /**
-   * HOME for the child process: a fresh per-run dir when a credential was
-   * delivered, or null to keep the box's own HOME when none was.
-   */
-  home: string | null;
+  /** HOME for the child process. Always a fresh, trust-seeded per-run dir. */
+  home: string;
   /** Whether a provider credential was actually written / injected. */
   delivered: boolean;
   /** Extra env the credential needs (Amp's API key). Never logged. */
@@ -98,18 +95,6 @@ async function seedWorkspaceTrust({
  * `agent` picks the file path; an agent we have no path for degrades to
  * built-in-credits rather than guessing a location.
  */
-/**
- * The "nothing was delivered" result: no run HOME, so the child keeps the box's
- * own HOME and its workspace-trust state. See the call site in workflow.ts for
- * why a fresh HOME is reserved for credential-bearing runs.
- */
-export const NO_CREDENTIAL: MaterialisedCredentials = {
-  home: null,
-  delivered: false,
-  env: {},
-  cleanup: async () => {},
-};
-
 export async function materialiseAgentCredentials({
   credentials,
   agent,

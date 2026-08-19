@@ -358,13 +358,25 @@ says which by setting `WORKER_BOX_TRUST`:
 |---|---|---|
 | `shared` (default) | control-plane proxy (`useCredits`) — the run bills platform credits and no provider credential ever touches this disk | the box executes runs for tenants who do not own it |
 | `owner` | the worker pulls the run's own credential from `/api/daemon/agent-credentials` and writes it to a per-run `HOME` (0600, wiped at teardown) — the run spends the USER's subscription or API key | the box belongs to the tenant whose runs it executes (the pilot: the operator's own Mac) |
+| `box-key` | the box's own `ANTHROPIC_API_KEY` is the declared credential for every run — no pull, no proxy | self-host/pilot posture: the operator funded a key on this box on purpose |
 
 ```bash
 # pilot box (single-tenant): let runs spend the user's Claude subscription
 export WORKER_BOX_TRUST=owner
 ```
 
-**Every run gets a fresh `HOME`, in both modes.** This is not hygiene. On macOS the
+**Every run gets a fresh `HOME`, in every mode, seeded as a trusted workspace.**
+The seed (`projects[<realpath of workdir>].hasTrustDialogAccepted` in the run
+HOME's `.claude.json`) is required: review runs use `--permission-mode default`,
+and in an untrusted workspace the CLI ignores `.claude/settings.json` and the
+agent exits with zero API calls. The path must be the REALPATH — macOS `tmpdir`
+is a symlink and the CLI resolves it.
+
+Do **not** set `CLAUDE_CODE_SIMPLE` on a worker box: simple mode cannot
+authenticate from an OAuth credentials file (it reports "OAuth session expired
+and could not be refreshed" without making an API call), which breaks every
+`owner`-mode run.
+ This is not hygiene. On macOS the
 agent CLI keeps its OAuth in the login **Keychain**, not in `~/.claude/.credentials.json`
 — so a run that inherits the operator's `HOME` authenticates AS the operator and
 spends *their* subscription, with no credential file and no env var anywhere to show

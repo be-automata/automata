@@ -15,7 +15,6 @@ import {
 } from "./www-client";
 import {
   materialiseAgentCredentials,
-  NO_CREDENTIAL,
   type MaterialisedCredentials,
 } from "./agent-credentials";
 import type { AgentRunInput, AgentRunOutput } from "./types";
@@ -188,23 +187,22 @@ agentRunWorkflow.task({
         config.boxTrust === "owner"
           ? await pullAgentCredentials(wwwOpts, signal)
           : { agent: "", credentials: { type: "built-in-credits" as const } };
-      // Only a run that RECEIVES a credential gets a fresh HOME. Giving one to
-      // every run was an over-reach that took down the review pipeline: a fresh
-      // HOME is untrusted, an untrusted workspace makes the CLI ignore
-      // .claude/settings.json, and a review run (--permission-mode default, no
-      // skip-permissions) then blocks forever on a tool permission it cannot
-      // prompt for in -p mode. The thread sat in `booting` until the run timed
-      // out — no output, no error, nothing for the reviewer to parse. Runs that
-      // receive no credential keep the box's HOME, which is the configuration
-      // every green review has ever run on.
-      materialised =
-        pulled.credentials.type === "built-in-credits"
-          ? NO_CREDENTIAL
-          : await materialiseAgentCredentials({
-              credentials: pulled.credentials,
-              agent: pulled.agent,
-              runRoot: workdir,
-            });
+      // EVERY run gets a fresh per-run HOME, credential or not, and that HOME is
+      // seeded as a trusted workspace (realpath'd — macOS tmpdir is a symlink).
+      // Both halves are load-bearing: the fresh HOME keeps a run off the
+      // operator's own logins/Keychain, and the trust seed is what lets a
+      // review run (--permission-mode default, no skip-permissions) grant its
+      // tools in -p mode. An unseeded workspace makes the CLI ignore
+      // .claude/settings.json and the review agent exits 1 with zero API calls
+      // — verified from captured stderr, and reproduced for owner mode in
+      // production before the seed landed. Credits/box-key runs need the seed
+      // just as much: review mode does not care where the model credential
+      // comes from.
+      materialised = await materialiseAgentCredentials({
+        credentials: pulled.credentials,
+        agent: pulled.agent,
+        runRoot: workdir,
+      });
     } catch (err) {
       await cleanupWorkdir(workdir);
       throw err;
