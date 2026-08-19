@@ -4,7 +4,7 @@ import {
   getRepoSkill,
   getSkillVersion,
 } from "@terragon/shared/model/repo-skills";
-import { assertReviewSkillContract, loadReviewSkillBody } from "./review-skill";
+import { loadReviewSkillBody, validateSkillBody } from "./review-skill";
 
 /**
  * Resolve the ONE skill-body snapshot for a single automation run — the live
@@ -21,8 +21,10 @@ import { assertReviewSkillContract, loadReviewSkillBody } from "./review-skill";
  *      to null and let the caller skip thread creation with a loud log, rather
  *      than dispatch an empty instruction.
  *
- * Validation is PER-SKILL (registry below): github-ops requires the fenced-json
- * verdict contract; any other skill requires only a non-empty body.
+ * Validation is PER-SKILL (`validateSkillBody` — the shared registry in
+ * review-skill.ts, also enforced at every write surface): github-ops requires
+ * the fenced-json verdict contract; any other skill requires only a non-empty
+ * body.
  */
 
 export type ResolvedSkill = {
@@ -35,36 +37,6 @@ export type ResolvedSkill = {
   /** The repo_skill_versions row id, when a DB version was served. */
   versionId?: string;
 };
-
-/**
- * Per-skill body validators. Throwing = invalid. Keyed by skill name so a new
- * skill gets the safe default (non-empty) without touching the resolver, and
- * a skill with a machine-parsed output contract (github-ops) can pin it here.
- */
-const SKILL_VALIDATORS: Record<
-  string,
-  (body: string, sourceLabel: string) => void
-> = {
-  "github-ops": assertReviewSkillContract,
-};
-
-function validateSkillBody(
-  skillName: string,
-  body: string,
-  sourceLabel: string,
-): void {
-  const validator = SKILL_VALIDATORS[skillName];
-  if (validator) {
-    validator(body, sourceLabel);
-    return;
-  }
-  if (body.trim().length === 0) {
-    throw new Error(
-      `Skill '${skillName}' body from ${sourceLabel} is empty — refusing to ` +
-        `dispatch an automation run with no instruction.`,
-    );
-  }
-}
 
 /**
  * Substitute the supported placeholders into a skill body. Deliberately tiny:

@@ -6,6 +6,8 @@ import {
   getThreadMinimal,
 } from "@terragon/shared/model/threads";
 import { getAutomation } from "@terragon/shared/model/automations";
+import { promoteLastKnownGood } from "@terragon/shared/model/repo-skills";
+import type { ThreadSourceMetadata } from "@terragon/shared";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { getOctokitForApp } from "@/lib/github";
 import { reconcilePrReviews } from "@/server-lib/reconcile-pr-reviews";
@@ -73,6 +75,54 @@ export function extractTerminalAgentText(messages: DBMessage[] | null): string {
     }
   }
   return "";
+}
+
+/**
+ * Promote the skill version a thread ran with to `lastKnownGoodVersionId` —
+ * but ONLY after a demonstrably healthy run: outcome "posted" (a clean review
+ * from a parsed intent). This is what keeps the resolver's fallback tier
+ * (issue #54) pointing at a body that has actually worked in production.
+ * Stale/degraded/skipped outcomes prove nothing about the skill body, so they
+ * promote nothing. Best-effort by design: a promotion failure must never
+ * disturb the finish hook (the review already posted), so errors are logged
+ * and swallowed.
+ */
+export async function maybePromoteSkillLastKnownGood({
+  db,
+  organizationId,
+  repoFullName,
+  sourceMetadata,
+  outcome,
+}: {
+  db: DB;
+  organizationId: string | null | undefined;
+  repoFullName: string;
+  sourceMetadata: ThreadSourceMetadata | null | undefined;
+  outcome: string;
+}): Promise<void> {
+  if (outcome !== "posted") return;
+  if (sourceMetadata?.type !== "automation-skill") return;
+  // A tracked-default run has no version row to promote.
+  if (!sourceMetadata.versionId || !organizationId) return;
+  try {
+    await promoteLastKnownGood({
+      db,
+      organizationId,
+      repoFullName,
+      skillName: sourceMetadata.skillName,
+      versionId: sourceMetadata.versionId,
+    });
+  } catch (err) {
+    console.error(
+      "[review-single-writer] promoteLastKnownGood failed (non-fatal)",
+      {
+        repoFullName,
+        skillName: sourceMetadata.skillName,
+        versionId: sourceMetadata.versionId,
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
+  }
 }
 
 export async function handleReviewEffectAtFinish({
@@ -186,6 +236,17 @@ export async function handleReviewEffectAtFinish({
           outcome: outcome.outcome,
         },
       });
+      // A clean post is THE health signal for the skill body the thread ran
+      // with (issue #54): promote it to last-known-good so the resolver's
+      // fallback tier only ever serves text that has worked in production.
+      await maybePromoteSkillLastKnownGood({
+        db,
+        organizationId: thread?.organizationId ?? null,
+        repoFullName,
+        sourceMetadata: thread?.sourceMetadata ?? null,
+        outcome: outcome.outcome,
+      });
+
       if (
         outcome.outcome === "degraded_comment" ||
         outcome.outcome === "post_failed"

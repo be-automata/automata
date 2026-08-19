@@ -10,7 +10,9 @@ import {
   getRepoSkill,
   getSkillVersion,
   listRepoSkills,
+  listSkillVersions,
   promoteLastKnownGood,
+  revertSkillToVersion,
 } from "./repo-skills";
 
 const db = createDb(env.DATABASE_URL!);
@@ -263,5 +265,140 @@ describe("repo-skills (Neon, org-fenced, append-only versions)", () => {
         versionId: first.version.id,
       }),
     ).toBeUndefined();
+  });
+
+  it("listSkillVersions returns newest-first metadata WITHOUT bodies, org-fenced", async () => {
+    const first = await createRepoSkillVersion({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      skillName: "github-ops",
+      body: "v1",
+      source: "seed",
+    });
+    const second = await createRepoSkillVersion({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      skillName: "github-ops",
+      body: "v2",
+      source: "dashboard",
+    });
+    const versions = await listSkillVersions({
+      db,
+      organizationId: orgA,
+      repoFullName: "Acme/WIDGETS", // case-insensitive like every read
+      skillName: "github-ops",
+    });
+    expect(versions.map((v) => v.id)).toEqual([
+      second.version.id,
+      first.version.id,
+    ]);
+    // Metadata only — the multi-KB bodies never ride along on history reads.
+    expect(versions[0]).not.toHaveProperty("body");
+    expect(versions[0]!.contentSha).toBe(second.version.contentSha);
+    expect(versions[0]!.source).toBe("dashboard");
+    // Another org sees nothing.
+    expect(
+      await listSkillVersions({
+        db,
+        organizationId: orgB,
+        repoFullName: "acme/widgets",
+        skillName: "github-ops",
+      }),
+    ).toHaveLength(0);
+  });
+
+  it("revertSkillToVersion moves currentVersionId back; append-only history intact", async () => {
+    const first = await createRepoSkillVersion({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      skillName: "github-ops",
+      body: "v1",
+      source: "seed",
+    });
+    const second = await createRepoSkillVersion({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      skillName: "github-ops",
+      body: "v2",
+      source: "dashboard",
+    });
+    const reverted = await revertSkillToVersion({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      skillName: "github-ops",
+      versionId: first.version.id,
+    });
+    expect(reverted?.currentVersionId).toBe(first.version.id);
+    // No new version row was created — revert is a pointer move, not an edit.
+    expect(
+      await listSkillVersions({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+        skillName: "github-ops",
+      }),
+    ).toHaveLength(2);
+    // v2 is still readable (roll-forward stays possible).
+    expect(
+      (
+        await getSkillVersion({
+          db,
+          organizationId: orgA,
+          versionId: second.version.id,
+        })
+      )?.body,
+    ).toBe("v2");
+  });
+
+  it("revertSkillToVersion is fenced: cross-org and cross-skill ids are no-ops", async () => {
+    const ops = await createRepoSkillVersion({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      skillName: "github-ops",
+      body: "ops v1",
+      source: "seed",
+    });
+    const mention = await createRepoSkillVersion({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      skillName: "github-mention",
+      body: "mention v1",
+      source: "seed",
+    });
+    // A version from another SKILL can never become this skill's current.
+    expect(
+      await revertSkillToVersion({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+        skillName: "github-ops",
+        versionId: mention.version.id,
+      }),
+    ).toBeUndefined();
+    // Cross-org: no-op.
+    expect(
+      await revertSkillToVersion({
+        db,
+        organizationId: orgB,
+        repoFullName: "acme/widgets",
+        skillName: "github-ops",
+        versionId: ops.version.id,
+      }),
+    ).toBeUndefined();
+    // Pointer unchanged.
+    const skill = await getRepoSkill({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      skillName: "github-ops",
+    });
+    expect(skill?.currentVersionId).toBe(ops.version.id);
   });
 });

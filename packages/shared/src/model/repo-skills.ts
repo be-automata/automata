@@ -6,7 +6,7 @@ import {
   RepoSkillVersion,
   RepoSkillVersionSource,
 } from "../db/types";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { normalizeRepo } from "./repo-review-settings";
 
 /**
@@ -128,6 +128,48 @@ export async function getSkillVersion({
 }
 
 /**
+ * Version-history METADATA for one skill — deliberately excludes `body`.
+ * The history views (GET route version list, dashboard panel) only need
+ * id/sha/provenance; bodies can be large (the github-ops methodology is
+ * multi-KB) and multiplying that by every version on every history read is
+ * pure waste. Fetch one body on demand via `getSkillVersion`. Newest first,
+ * org-fenced through the parent skill row like every other read here.
+ */
+export type RepoSkillVersionMeta = Omit<RepoSkillVersion, "body">;
+
+export async function listSkillVersions({
+  db,
+  organizationId,
+  repoFullName,
+  skillName,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  skillName: string;
+}): Promise<RepoSkillVersionMeta[]> {
+  return db
+    .select({
+      id: repoSkillVersions.id,
+      skillId: repoSkillVersions.skillId,
+      contentSha: repoSkillVersions.contentSha,
+      source: repoSkillVersions.source,
+      createdByUserId: repoSkillVersions.createdByUserId,
+      createdAt: repoSkillVersions.createdAt,
+    })
+    .from(repoSkillVersions)
+    .innerJoin(repoSkills, eq(repoSkillVersions.skillId, repoSkills.id))
+    .where(
+      and(
+        eq(repoSkills.organizationId, organizationId),
+        eq(repoSkills.repoFullName, normalizeRepo(repoFullName)),
+        eq(repoSkills.skillName, skillName),
+      ),
+    )
+    .orderBy(desc(repoSkillVersions.createdAt), desc(repoSkillVersions.id));
+}
+
+/**
  * Append a new version and move `currentVersionId` to it — THE edit operation
  * for every surface (dashboard PUT, API/CLI push, seed, repo-file sync). The
  * skill row is created on first write (get-or-create keyed on the unique
@@ -206,6 +248,50 @@ export async function createRepoSkillVersion({
       .returning();
     return { skill: skill!, version: version! };
   });
+}
+
+/**
+ * Revert = move `currentVersionId` back to a chosen EXISTING version. This is
+ * deliberately NOT `promoteLastKnownGood` (which moves the resolver's fallback
+ * pointer after a demonstrably healthy run) and deliberately NOT a new version
+ * row: history stays append-only and linear, and the reverted-to sha remains
+ * traceable to the exact text that originally ran. Same fencing rules as
+ * promotion — the version must belong to this (org, repo, skill) or the call
+ * is a no-op returning undefined (a guessed/cross-tenant version id can never
+ * become live).
+ */
+export async function revertSkillToVersion({
+  db,
+  organizationId,
+  repoFullName,
+  skillName,
+  versionId,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  skillName: string;
+  versionId: string;
+}): Promise<RepoSkill | undefined> {
+  const skill = await getRepoSkill({
+    db,
+    organizationId,
+    repoFullName,
+    skillName,
+  });
+  if (!skill) {
+    return undefined;
+  }
+  const version = await getSkillVersion({ db, organizationId, versionId });
+  if (!version || version.skillId !== skill.id) {
+    return undefined;
+  }
+  const [updated] = await db
+    .update(repoSkills)
+    .set({ currentVersionId: versionId, updatedAt: new Date() })
+    .where(eq(repoSkills.id, skill.id))
+    .returning();
+  return updated;
 }
 
 /**
