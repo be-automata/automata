@@ -44,10 +44,11 @@ const MODEL_PROVIDER_CONFIG: Record<ModelProvider, ModelValidationConfig> = {
       includesMatcher("sonnet"),
       includesMatcher("haiku"),
       includesMatcher("opus"),
+      includesMatcher("fable"),
     ],
     missingModelMessage: "Model must be specified in request body",
     unsupportedModelMessage: (model) =>
-      `Only Claude Sonnet, Haiku, or Opus models are supported. Requested model: ${model}`,
+      `Only Claude Sonnet, Haiku, Opus, or Fable models are supported. Requested model: ${model}`,
   },
   openrouter: {
     allowedMatchers: [

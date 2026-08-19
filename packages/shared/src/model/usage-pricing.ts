@@ -25,6 +25,8 @@ export const ANTHROPIC_MESSAGES_HAIKU_SKU: UsageSku =
 export const ANTHROPIC_MESSAGES_OPUS_SKU: UsageSku = "anthropic_messages_opus";
 export const ANTHROPIC_MESSAGES_OPUS_4_5_SKU: UsageSku =
   "anthropic_messages_opus_4_5";
+export const ANTHROPIC_MESSAGES_FABLE_SKU: UsageSku =
+  "anthropic_messages_fable";
 export const ANTHROPIC_MESSAGES_DEFAULT_SKU: UsageSku =
   "anthropic_messages_default";
 export const OPENROUTER_QWEN_SKU: UsageSku = "openrouter_qwen";
@@ -81,6 +83,18 @@ export const USAGE_SKU_PRICING: Record<UsageSku, UsageSkuPricing> = {
     cacheCreationRatePerToken: 6.25 / 1_000_000,
     cachedInputRatePerToken: 0.5 / 1_000_000,
     outputRatePerToken: 25 / 1_000_000,
+  },
+  // PLACEHOLDER pricing, deliberately set to the HIGHEST Anthropic bucket
+  // (legacy-Opus rates) until official Fable/Mythos-tier list prices are added:
+  // over-billing a premium model is recoverable, silently under-billing is not.
+  // A dedicated SKU (rather than falling through to default) keeps Fable spend
+  // separately visible in usage reports so the placeholder is auditable.
+  [ANTHROPIC_MESSAGES_FABLE_SKU]: {
+    currency: "usd",
+    inputRatePerToken: 15 / 1_000_000,
+    cacheCreationRatePerToken: 18.75 / 1_000_000,
+    cachedInputRatePerToken: 1.5 / 1_000_000,
+    outputRatePerToken: 75 / 1_000_000,
   },
   [ANTHROPIC_MESSAGES_DEFAULT_SKU]: {
     currency: "usd",
@@ -225,6 +239,10 @@ export function getAnthropicMessagesSkuForModel(
     return ANTHROPIC_MESSAGES_DEFAULT_SKU;
   }
   const normalized = model.toLowerCase();
+  // Upstream ids look like "claude-fable-5"; match before the generic buckets.
+  if (normalized.includes("fable") || normalized.includes("mythos")) {
+    return ANTHROPIC_MESSAGES_FABLE_SKU;
+  }
   if (normalized.includes("opus-4-5")) {
     return ANTHROPIC_MESSAGES_OPUS_4_5_SKU;
   }

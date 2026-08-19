@@ -69,6 +69,7 @@ export function modelToAgent(model: AIModel | null): AIAgent {
     case "gpt-5.2-codex-xhigh": {
       return "codex";
     }
+    case "fable":
     case "opus":
     case "haiku":
     case "sonnet": {
@@ -110,7 +111,7 @@ export function agentToModels(
       return ["gemini-3-pro", "gemini-2.5-pro"];
     }
     case "claudeCode": {
-      return ["haiku", "sonnet", "opus"];
+      return ["haiku", "sonnet", "opus", "fable"];
     }
     case "amp": {
       return ["amp"];
@@ -319,17 +320,23 @@ type ModelDisplayName = {
 
 export function getModelDisplayName(model: AIModel): ModelDisplayName {
   switch (model) {
+    case "fable":
+      return {
+        fullName: "Fable 5.0",
+        mainName: "Fable",
+        subName: "5.0",
+      };
     case "opus":
       return {
-        fullName: "Opus 4.5",
+        fullName: "Opus 5.0",
         mainName: "Opus",
-        subName: "4.5",
+        subName: "5.0",
       };
     case "sonnet":
       return {
-        fullName: "Sonnet 4.5",
+        fullName: "Sonnet 5",
         mainName: "Sonnet",
-        subName: "4.5",
+        subName: "5.0",
       };
     case "haiku":
       return {
@@ -704,6 +711,7 @@ export function isModelEnabledByDefault({
     case "opencode-oai/gpt-5-codex":
     case "opencode-ant/sonnet":
       return false;
+    case "fable":
     case "opus":
     case "sonnet":
     case "haiku":
