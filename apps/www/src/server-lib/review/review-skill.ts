@@ -43,6 +43,26 @@ export function stripFrontmatter(md: string): string {
 }
 
 /**
+ * THE fenced-json verdict-contract check, shared by the tracked-file loader
+ * below and the live-skill resolver (resolve-review-skill.ts): a github-ops
+ * body that cannot instruct the agent to emit a parseable verdict must never
+ * be dispatched, whichever store it came from. Throws with a caller-supplied
+ * label so the error names the offending source (a file path, a version id).
+ */
+export function assertReviewSkillContract(
+  body: string,
+  sourceLabel: string,
+): void {
+  if (!/```json[\s\S]*"verdict"[\s\S]*```/.test(body)) {
+    throw new Error(
+      `Review skill from ${sourceLabel} has no fenced-json verdict contract — ` +
+        `wrong content or a truncated skill. Refusing to dispatch a review ` +
+        `whose agent could not emit a parseable intent.`,
+    );
+  }
+}
+
+/**
  * The review methodology body, ready to inline into a prompt. Throws rather
  * than returning a partial instruction: a review agent running without its
  * methodology silently degrades every review, so failing the seed is correct.
@@ -60,12 +80,6 @@ export function loadReviewSkillBody(
     );
   }
   const body = stripFrontmatter(raw);
-  if (!/```json[\s\S]*"verdict"[\s\S]*```/.test(body)) {
-    throw new Error(
-      `Review skill at ${skillPath} has no fenced-json verdict contract — ` +
-        `wrong file or a truncated skill. Refusing to seed a review automation ` +
-        `whose agent could not emit a parseable intent.`,
-    );
-  }
+  assertReviewSkillContract(body, skillPath);
   return body;
 }
