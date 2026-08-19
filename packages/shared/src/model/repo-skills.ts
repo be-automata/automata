@@ -6,7 +6,7 @@ import {
   RepoSkillVersion,
   RepoSkillVersionSource,
 } from "../db/types";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { normalizeRepo } from "./repo-review-settings";
 
 /**
@@ -128,26 +128,30 @@ export async function getSkillVersion({
 }
 
 /**
- * Oldest `source: 'seed'` version for one `(org, repo, skill)` — the
- * resolver's LAST fallback tier. Seed versions are pushed from the tracked
- * in-repo skill files by `deploy/seed-pilot-mirror.ts`, so this row is the DB
- * record of the shipped default; the runtime never reads the filesystem (the
- * Workers bundle has no checkout). Org-fenced like every other read here.
- * Ordered by (createdAt, id) so re-seeds never change which row is "the"
- * default.
+ * Newest-first version rows WITH bodies for one `(org, repo, skill)`, capped —
+ * the resolver's LAST fallback tier walks these when both the referenced
+ * version and last-known-good are unusable: every row was written through a
+ * validator-enforced surface (API route, dashboard action, skill-push), so
+ * the most recent historical body that still passes validation is the best
+ * org-approved text available. Capped because the walk only exists for the
+ * disaster path; a skill whose last `limit` versions are ALL invalid has no
+ * business dispatching. Org-fenced like every other read here; (createdAt,
+ * id) DESC mirrors listSkillVersions.
  */
-export async function getOldestSeedVersion({
+export async function listRecentSkillVersionsWithBodies({
   db,
   organizationId,
   repoFullName,
   skillName,
+  limit,
 }: {
   db: DB;
   organizationId: string;
   repoFullName: string;
   skillName: string;
-}): Promise<RepoSkillVersion | undefined> {
-  const [row] = await db
+  limit: number;
+}): Promise<RepoSkillVersion[]> {
+  return db
     .select({
       id: repoSkillVersions.id,
       skillId: repoSkillVersions.skillId,
@@ -164,12 +168,10 @@ export async function getOldestSeedVersion({
         eq(repoSkills.organizationId, organizationId),
         eq(repoSkills.repoFullName, normalizeRepo(repoFullName)),
         eq(repoSkills.skillName, skillName),
-        eq(repoSkillVersions.source, "seed"),
       ),
     )
-    .orderBy(asc(repoSkillVersions.createdAt), asc(repoSkillVersions.id))
-    .limit(1);
-  return row;
+    .orderBy(desc(repoSkillVersions.createdAt), desc(repoSkillVersions.id))
+    .limit(limit);
 }
 
 /**

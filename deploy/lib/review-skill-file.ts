@@ -7,8 +7,10 @@
  * bundle is exactly what broke the production build once (webpack rewrites
  * `new URL(..., import.meta.url)` into an asset URL — see PR #57). The
  * runtime resolver (`resolveReviewSkill`) is pure-DB; the tracked file enters
- * the system solely through the write surfaces that import this module under
- * tsx: `deploy/seed-pilot-mirror.ts` and `deploy/skill-push.ts`.
+ * the system solely through the tsx scripts that import this module:
+ * `deploy/skill-push.ts` (writes it as a skill version) and
+ * `deploy/seed-pilot-mirror.ts` (today inlines it into the `user_message`
+ * automation text; the #54 C3 cutover will make it write seed versions too).
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";

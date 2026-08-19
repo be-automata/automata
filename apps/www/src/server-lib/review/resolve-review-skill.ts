@@ -1,8 +1,8 @@
 import type { DB } from "@terragon/shared/db";
 import {
-  getOldestSeedVersion,
   getRepoSkill,
   getSkillVersion,
+  listRecentSkillVersionsWithBodies,
 } from "@terragon/shared/model/repo-skills";
 import { validateSkillBody } from "./review-skill";
 
@@ -17,16 +17,22 @@ import { validateSkillBody } from "./review-skill";
  * runtime has no checkout, and the one fs-based tier this module used to have
  * broke the production build (webpack rewrote its module-scope
  * `new URL(..., import.meta.url)` into an asset URL — PR #57). The tracked
- * in-repo skill files reach the DB only through the tsx write surfaces
- * (deploy/seed-pilot-mirror.ts, deploy/skill-push.ts).
+ * in-repo skill files reach the DB only through validator-enforced write
+ * surfaces (deploy/skill-push.ts today; the seed script once the #54 C3
+ * cutover lands).
  *
  * Fallback chain — a body that fails its skill's validator is NEVER dispatched:
  *   1. the referenced version (currentVersionId for 'latest', or the pin)
  *   2. lastKnownGoodVersionId (promoted only after a demonstrably healthy run)
- *   3. the oldest `source: 'seed'` version — the DB record of the shipped
- *      default. A skill with no usable version at all resolves to null and the
- *      caller skips thread creation with a loud log, rather than dispatch an
- *      instruction nobody in the org ever approved.
+ *   3. the newest HISTORICAL version that still passes validation. Every
+ *      version row was written through a validator-enforced surface (API
+ *      route, dashboard action, skill-push), so any historical body is
+ *      org-approved text — the most recent valid one is the best stand-in for a
+ *      broken current. Reachable for EVERY skill that has ever had a version,
+ *      regardless of which surface created it. A skill with no usable version
+ *      at all resolves to null and the caller skips thread creation with a
+ *      loud log, rather than dispatch an instruction nobody in the org ever
+ *      approved.
  *
  * Validation is PER-SKILL (`validateSkillBody` — the shared registry in
  * review-skill.ts, also enforced at every write surface): github-ops requires
@@ -40,10 +46,17 @@ export type ResolvedSkill = {
   /** sha256 of `body` — stamped into thread.sourceMetadata for traceability. */
   contentSha: string;
   /** Which tier of the fallback chain served the body. */
-  source: "db-version" | "seed-default";
+  source: "db-version" | "fallback-version";
   /** The repo_skill_versions row id — always present (every tier is a row). */
   versionId: string;
 };
+
+/**
+ * How far tier 3 walks back through history looking for a valid body. The
+ * walk exists only for the disaster path (broken current, nothing promoted);
+ * a skill whose last 20 versions are ALL invalid has no business dispatching.
+ */
+const FALLBACK_HISTORY_LIMIT = 20;
 
 /**
  * Substitute the supported placeholders into a skill body. Deliberately tiny:
@@ -158,34 +171,42 @@ export async function resolveReviewSkill({
     }
   }
 
-  // Tier 3: the oldest seeded version — the DB record of the shipped default,
-  // pushed from the tracked in-repo file at onboarding. Re-validated like
-  // every tier: a seed that no longer passes its validator must not dispatch.
-  const seed = await getOldestSeedVersion({
+  // Tier 3: walk history, newest first, for any version that still passes
+  // validation. Rows already tried above are skipped by id (validation would
+  // reject them again anyway — the skip just saves the noise).
+  const tried = new Set(
+    [referencedVersionId, skill?.lastKnownGoodVersionId].filter(Boolean),
+  );
+  const history = await listRecentSkillVersionsWithBodies({
     db,
     organizationId,
     repoFullName,
     skillName,
+    limit: FALLBACK_HISTORY_LIMIT,
   });
-  if (seed) {
+  for (const candidate of history) {
+    if (tried.has(candidate.id)) continue;
     try {
-      validateSkillBody(skillName, seed.body, `seed version ${seed.id}`);
+      validateSkillBody(
+        skillName,
+        candidate.body,
+        `fallback version ${candidate.id}`,
+      );
       console.warn(
         `resolveReviewSkill: skill '${skillName}' (${repoFullName}) resolved ` +
-          `to seed version ${seed.id} (no usable current/last-known-good).`,
+          `to historical version ${candidate.id} (${candidate.source}, ` +
+          `${candidate.createdAt.toISOString()}) — no usable ` +
+          `current/last-known-good.`,
       );
       return {
-        body: seed.body,
-        contentSha: seed.contentSha,
-        source: "seed-default",
-        versionId: seed.id,
+        body: candidate.body,
+        contentSha: candidate.contentSha,
+        source: "fallback-version",
+        versionId: candidate.id,
       };
-    } catch (err) {
-      console.error(
-        `resolveReviewSkill: seed version ${seed.id} for skill ` +
-          `'${skillName}' (${repoFullName}) failed validation too:`,
-        err,
-      );
+    } catch {
+      // Keep walking — the loud per-tier logs above already cover the
+      // current/LKG failures; an invalid mid-history row needs no alarm.
     }
   }
 
