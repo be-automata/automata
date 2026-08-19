@@ -101,9 +101,7 @@ describe("repo-skills (Neon, org-fenced, append-only versions)", () => {
       versionId: first.version.id,
     });
     expect(v1?.body).toBe("v1");
-    expect(
-      await listRepoSkills({ db, organizationId: orgA }),
-    ).toHaveLength(1);
+    expect(await listRepoSkills({ db, organizationId: orgA })).toHaveLength(1);
   });
 
   it("lowercases the repo slug on write and read (case-insensitive match)", async () => {
