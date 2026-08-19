@@ -61,13 +61,22 @@ async function seedWorkspaceTrust({
   home: string;
   workdir: string;
 }): Promise<void> {
+  // The CLI keys trust by the RESOLVED cwd. On macOS os.tmpdir() returns
+  // /var/folders/…, a symlink to /private/var/folders/…, so seeding the
+  // symlinked spelling misses: the agent still printed "this workspace has not
+  // been trusted" with the /private path, made zero API calls and exited 1.
+  // Seed both spellings — the realpath is the one that matters, the raw one is
+  // insurance against a CLI that does not resolve.
+  const resolved = await fs.realpath(workdir).catch(() => workdir);
+  const trust = {
+    hasTrustDialogAccepted: true,
+    hasCompletedProjectOnboarding: true,
+  };
   const config = {
     hasCompletedOnboarding: true,
     projects: {
-      [workdir]: {
-        hasTrustDialogAccepted: true,
-        hasCompletedProjectOnboarding: true,
-      },
+      [workdir]: trust,
+      [resolved]: trust,
     },
   };
   await fs.writeFile(path.join(home, ".claude.json"), JSON.stringify(config), {
