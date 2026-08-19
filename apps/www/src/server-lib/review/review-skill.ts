@@ -63,6 +63,44 @@ export function assertReviewSkillContract(
 }
 
 /**
+ * Per-skill body validators — THE single registry shared by every surface that
+ * accepts or dispatches a skill body: the resolver (read side,
+ * resolve-review-skill.ts) and the write surfaces (API route PUT, dashboard
+ * server actions, deploy/skill-push.ts). Lives HERE, not in the resolver,
+ * because this module is dependency-free (node builtins only) so `deploy/*.ts`
+ * scripts can import it under tsx without Next/alias resolution — and so the
+ * write boundary can never drift from what the resolver will later accept.
+ *
+ * Throwing = invalid. Keyed by skill name so a new skill gets the safe default
+ * (non-empty) without touching any surface, and a skill with a machine-parsed
+ * output contract (github-ops) can pin it here.
+ */
+const SKILL_VALIDATORS: Record<
+  string,
+  (body: string, sourceLabel: string) => void
+> = {
+  "github-ops": assertReviewSkillContract,
+};
+
+export function validateSkillBody(
+  skillName: string,
+  body: string,
+  sourceLabel: string,
+): void {
+  const validator = SKILL_VALIDATORS[skillName];
+  if (validator) {
+    validator(body, sourceLabel);
+    return;
+  }
+  if (body.trim().length === 0) {
+    throw new Error(
+      `Skill '${skillName}' body from ${sourceLabel} is empty — refusing to ` +
+        `dispatch an automation run with no instruction.`,
+    );
+  }
+}
+
+/**
  * The review methodology body, ready to inline into a prompt. Throws rather
  * than returning a partial instruction: a review agent running without its
  * methodology silently degrades every review, so failing the seed is correct.
