@@ -34,6 +34,33 @@ describe("materialiseAgentCredentials (D1)", () => {
     expect(mode).toBe(0o600);
   });
 
+  it("seeds workspace trust under BOTH the raw and realpath'd workdir", async () => {
+    // The realpath half is a reproduced production bug: os.tmpdir() on macOS is
+    // /var/folders/… — a symlink to /private/var/folders/… — and the CLI keys
+    // trust by the RESOLVED cwd. A seed keyed only by the symlinked spelling
+    // missed, and review agents exited 1 with zero API calls.
+    const result = await materialiseAgentCredentials({
+      credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
+      agent: "claudeCode",
+      runRoot,
+    });
+    const seed = JSON.parse(
+      await fs.readFile(path.join(result.home!, ".claude.json"), "utf8"),
+    );
+    expect(seed.hasCompletedOnboarding).toBe(true);
+    const resolved = await fs.realpath(runRoot).catch(() => runRoot);
+    for (const key of new Set([runRoot, resolved])) {
+      expect(seed.projects[key], `missing trust for ${key}`).toMatchObject({
+        hasTrustDialogAccepted: true,
+        hasCompletedProjectOnboarding: true,
+      });
+    }
+    // 0600: the seed lives beside the credential and follows its hygiene.
+    expect(
+      (await fs.stat(path.join(result.home!, ".claude.json"))).mode & 0o777,
+    ).toBe(0o600);
+  });
+
   it("cleanup removes every credential byte, and is safe to call twice", async () => {
     const result = await materialiseAgentCredentials({
       credentials: { type: "json-file", contents: "secret-token-material" },
