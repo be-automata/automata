@@ -372,11 +372,7 @@ and in an untrusted workspace the CLI ignores `.claude/settings.json` and the
 agent exits with zero API calls. The path must be the REALPATH — macOS `tmpdir`
 is a symlink and the CLI resolves it.
 
-Do **not** set `CLAUDE_CODE_SIMPLE` on a worker box: simple mode cannot
-authenticate from an OAuth credentials file (it reports "OAuth session expired
-and could not be refreshed" without making an API call), which breaks every
-`owner`-mode run.
- This is not hygiene. On macOS the
+The fresh `HOME` is not hygiene. On macOS the
 agent CLI keeps its OAuth in the login **Keychain**, not in `~/.claude/.credentials.json`
 — so a run that inherits the operator's `HOME` authenticates AS the operator and
 spends *their* subscription, with no credential file and no env var anywhere to show
@@ -384,13 +380,21 @@ for it. Verified on Claude Code 2.1.234: with a fresh `HOME` the CLI reports "No
 logged in"; with a delivered credential file it reads that file. The operator's own
 `claude` login on the box is untouched and unreachable from a run.
 
-**The box's own `ANTHROPIC_API_KEY` is no longer a run credential.** It used to be
-the silent fallback: `buildRemoteDaemonMessage` skips `useCredits` when the user
-*has* a credential, but nothing delivered that credential to the box, so the daemon
-fell through to whatever key the box carried. A user with a Max subscription ran on
-the operator's API key, and a box with no key failed runs that should never have
-touched it. A run now either has its own credential in its own `HOME`, or it goes
-through the proxy — never the box key.
+Do **not** set `CLAUDE_CODE_SIMPLE` on a worker box: simple mode cannot
+authenticate from an OAuth credentials file (it reports "OAuth session expired
+and could not be refreshed" without making an API call), which breaks every
+`owner`-mode run.
+
+**Outside `box-key` mode, the box's own `ANTHROPIC_API_KEY` is never a run
+credential.** It used to be the silent fallback: `buildRemoteDaemonMessage` skips
+`useCredits` when the user *has* a credential, but nothing delivered that
+credential to the box, so the daemon fell through to whatever key the box carried.
+A user with a Max subscription ran on the operator's API key, and a box with no
+key failed runs that should never have touched it. In `shared` and `owner` modes
+a run now either has its own credential in its own `HOME`, or it goes through the
+proxy — the box key is unreachable. Only `WORKER_BOX_TRUST=box-key` makes the box
+key a run credential, and it does so explicitly, for every run, as a deliberate
+operator opt-in — never as a silent fallback.
 
 Leaving `WORKER_BOX_TRUST` unset is safe but **changes who pays**: runs that used
 to quietly draw on the box's `ANTHROPIC_API_KEY` now bill platform credits. Set

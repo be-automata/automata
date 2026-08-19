@@ -82,15 +82,18 @@ async function seedWorkspaceTrust({
 }
 
 /**
- * Give a CREDENTIAL-BEARING run a fresh HOME under `runRoot` and write the
- * credential into it.
+ * Give EVERY run a fresh HOME under `runRoot`, seeded as a trusted workspace,
+ * and write the run's credential into it when it has one.
+ *
+ * Called unconditionally for every run (see workflow.ts). A run with no
+ * credential to deliver (`credentials.type === "built-in-credits"`, i.e. the
+ * proxy/box-key paths) still gets the fresh HOME and trust seed — it just has
+ * nothing written into it (`delivered: false`).
  *
  * The fresh HOME is what makes "this run uses its own credential" true: on macOS
  * the CLI keeps OAuth in the login Keychain, so a run on the operator's HOME can
- * authenticate as the OPERATOR. It is also seeded as a trusted workspace, since
- * an unseeded HOME makes review runs hang on a permission they cannot prompt for.
- *
- * Callers must NOT invoke this for a run with no credential — see NO_CREDENTIAL.
+ * authenticate as the OPERATOR. The trust seed is equally load-bearing: an
+ * unseeded HOME makes review runs hang on a permission they cannot prompt for.
  *
  * `agent` picks the file path; an agent we have no path for degrades to
  * built-in-credits rather than guessing a location.
