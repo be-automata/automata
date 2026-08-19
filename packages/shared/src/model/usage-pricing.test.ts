@@ -15,9 +15,6 @@ describe("getAnthropicMessagesSkuForModel — fable routing", () => {
     expect(getAnthropicMessagesSkuForModel("claude-fable-5")).toBe(
       ANTHROPIC_MESSAGES_FABLE_SKU,
     );
-    expect(getAnthropicMessagesSkuForModel("claude-mythos-5")).toBe(
-      ANTHROPIC_MESSAGES_FABLE_SKU,
-    );
   });
 
   it("leaves existing buckets untouched", () => {

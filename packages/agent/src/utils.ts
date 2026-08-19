@@ -334,7 +334,7 @@ export function getModelDisplayName(model: AIModel): ModelDisplayName {
       };
     case "sonnet":
       return {
-        fullName: "Sonnet 5",
+        fullName: "Sonnet 5.0",
         mainName: "Sonnet",
         subName: "5.0",
       };

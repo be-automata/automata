@@ -240,7 +240,7 @@ export function getAnthropicMessagesSkuForModel(
   }
   const normalized = model.toLowerCase();
   // Upstream ids look like "claude-fable-5"; match before the generic buckets.
-  if (normalized.includes("fable") || normalized.includes("mythos")) {
+  if (normalized.includes("fable")) {
     return ANTHROPIC_MESSAGES_FABLE_SKU;
   }
   if (normalized.includes("opus-4-5")) {
