@@ -312,7 +312,7 @@ describe("Anthropic proxy route", () => {
     const response = await POST(request, { params: {} });
 
     expect(response.status).toBe(400);
-    expect(await response.text()).toContain("Claude Sonnet, Haiku, or Opus");
+    expect(await response.text()).toContain("Claude Sonnet, Haiku, Opus, or Fable");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

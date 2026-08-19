@@ -371,6 +371,7 @@ export type UsageSku =
   | "anthropic_messages_haiku"
   | "anthropic_messages_opus"
   | "anthropic_messages_opus_4_5"
+  | "anthropic_messages_fable"
   | "anthropic_messages_default"
   | "openrouter_qwen"
   | "openrouter_grok"
