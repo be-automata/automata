@@ -28,7 +28,7 @@ describe("materialiseAgentCredentials (D1)", () => {
     expect(result.home).toBe(path.join(runRoot, "home"));
     expect(result.home).not.toBe(os.homedir());
 
-    const target = path.join(result.home!, ".claude/.credentials.json");
+    const target = path.join(result.home, ".claude/.credentials.json");
     expect(await fs.readFile(target, "utf8")).toBe('{"claudeAiOauth":{}}');
     const mode = (await fs.stat(target)).mode & 0o777;
     expect(mode).toBe(0o600);
@@ -45,7 +45,7 @@ describe("materialiseAgentCredentials (D1)", () => {
       runRoot,
     });
     const seed = JSON.parse(
-      await fs.readFile(path.join(result.home!, ".claude.json"), "utf8"),
+      await fs.readFile(path.join(result.home, ".claude.json"), "utf8"),
     );
     expect(seed.hasCompletedOnboarding).toBe(true);
     const resolved = await fs.realpath(runRoot).catch(() => runRoot);
@@ -57,7 +57,7 @@ describe("materialiseAgentCredentials (D1)", () => {
     }
     // 0600: the seed lives beside the credential and follows its hygiene.
     expect(
-      (await fs.stat(path.join(result.home!, ".claude.json"))).mode & 0o777,
+      (await fs.stat(path.join(result.home, ".claude.json"))).mode & 0o777,
     ).toBe(0o600);
   });
 
@@ -68,7 +68,7 @@ describe("materialiseAgentCredentials (D1)", () => {
       runRoot,
     });
     await result.cleanup();
-    await expect(fs.stat(result.home!)).rejects.toThrow();
+    await expect(fs.stat(result.home)).rejects.toThrow();
     await result.cleanup();
   });
 
@@ -87,7 +87,7 @@ describe("materialiseAgentCredentials (D1)", () => {
     expect(result.delivered).toBe(false);
     expect(result.env).toEqual({});
     // The dir exists but holds no credential.
-    expect((await fs.readdir(result.home!)).length).toBe(1); // trust seed only
+    expect((await fs.readdir(result.home)).length).toBe(1); // trust seed only
   });
 
   it("an agent with no known credential path degrades to credits rather than guessing", async () => {
@@ -97,7 +97,7 @@ describe("materialiseAgentCredentials (D1)", () => {
       runRoot,
     });
     expect(result.delivered).toBe(false);
-    expect((await fs.readdir(result.home!)).length).toBe(1); // trust seed only
+    expect((await fs.readdir(result.home)).length).toBe(1); // trust seed only
   });
 
   it("env-var credentials need no file, but the run is still HOME-isolated", async () => {

@@ -351,8 +351,8 @@ are in `deploy/PILOT-OPERATOR-STEPS.md` §5.
 
 ## Execution-plane model credential — `WORKER_BOX_TRUST`
 
-A worker box authenticates agent runs to Anthropic one of two ways, and the box
-says which by setting `WORKER_BOX_TRUST`:
+A worker box authenticates agent runs to Anthropic one of three ways, and the
+box says which by setting `WORKER_BOX_TRUST`:
 
 | value | how runs authenticate | use when |
 |---|---|---|
