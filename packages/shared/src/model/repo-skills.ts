@@ -251,13 +251,6 @@ export async function createRepoSkillVersion({
 }
 
 /**
- * Promote a version to `lastKnownGoodVersionId` — called after the version
- * demonstrably produced a healthy run (e.g. a non-degraded review post), so
- * the resolver's fallback tier never points at a body that has not worked in
- * production. Org-fenced AND skill-fenced: the version must belong to this
- * (org, repo, skill) or the call is a no-op returning undefined.
- */
-/**
  * Revert = move `currentVersionId` back to a chosen EXISTING version. This is
  * deliberately NOT `promoteLastKnownGood` (which moves the resolver's fallback
  * pointer after a demonstrably healthy run) and deliberately NOT a new version
@@ -301,6 +294,13 @@ export async function revertSkillToVersion({
   return updated;
 }
 
+/**
+ * Promote a version to `lastKnownGoodVersionId` — called after the version
+ * demonstrably produced a healthy run (e.g. a non-degraded review post), so
+ * the resolver's fallback tier never points at a body that has not worked in
+ * production. Org-fenced AND skill-fenced: the version must belong to this
+ * (org, repo, skill) or the call is a no-op returning undefined.
+ */
 export async function promoteLastKnownGood({
   db,
   organizationId,
