@@ -11,6 +11,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── Security gate: no CRITICAL advisory may reach production deps ───────────
+  # Runs the same scan the security audit scored 3/100 before remediation; the
+  # gate is critical-only so an unfixable HIGH (no patched release upstream)
+  # cannot wedge every PR — Dependabot's security group handles those the day
+  # a patch exists.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+      - run: pnpm audit --prod --audit-level critical
+
   # ── Static checks: tsc (all packages), lint, format ──────────────────────────
   check:
     runs-on: ubuntu-latest
