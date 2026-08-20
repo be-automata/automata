@@ -56,6 +56,7 @@ import {
   listSkillVersions,
 } from "../packages/shared/src/model/repo-skills";
 import { loadReviewSkillBody } from "./lib/review-skill-file";
+import { validateSkillBody } from "../apps/www/src/server-lib/review/review-skill";
 
 // Dogfooding pilot defaults (BeAutomata org, our own platform repo).
 const DEFAULT_ORG_SLUG = "beautomata";
@@ -123,6 +124,13 @@ const SKILL_BODIES: Record<string, string> = {
     "An issue was opened in {{repoFullName}}. Research it (prod skill: github-deep-research).",
   "github-mention": "Respond to the GitHub mention.",
 };
+
+// Validator-enforced write surface, same as skill-push/API/dashboard: every
+// composed body must pass its skill's validator BEFORE any DB access — the
+// resolver's dispatch-time re-validation is a backstop, not the boundary.
+for (const [skillName, body] of Object.entries(SKILL_BODIES)) {
+  validateSkillBody(skillName, body, `seed body for '${skillName}'`);
+}
 
 const PR_AUTOMATION_NAME = "Mirror: PR review (github-ops)";
 const ISSUE_AUTOMATION_NAME = "Mirror: issue research (github-deep-research)";
