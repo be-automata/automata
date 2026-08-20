@@ -143,7 +143,14 @@ const SKILL_BODIES: Record<string, string> = {
 // composed body must pass its skill's validator BEFORE any DB access — the
 // resolver's dispatch-time re-validation is a backstop, not the boundary.
 for (const [skillName, body] of Object.entries(SKILL_BODIES)) {
-  validateSkillBody(skillName, body, `seed body for '${skillName}'`);
+  try {
+    validateSkillBody(skillName, body, `seed body for '${skillName}'`);
+  } catch (err) {
+    console.error(
+      `Skill body validation failed — aborting before any DB access:\n  ${(err as Error).message}`,
+    );
+    process.exit(1);
+  }
 }
 
 const PR_AUTOMATION_NAME = "Mirror: PR review (github-ops)";
@@ -266,17 +273,24 @@ async function main() {
     const existingA = existingByName.get(
       upsertKey(automation.name, automation.repoFullName),
     );
+    // One equality predicate for BOTH modes, over exactly the fields the
+    // update would write (action + repoFullName + branchName) — so the
+    // dry-run's "no write" claim is literally what the live run does, and an
+    // unchanged re-seed issues zero UPDATEs.
+    const unchanged =
+      existingA !== undefined &&
+      JSON.stringify(existingA.action) === JSON.stringify(automation.action) &&
+      existingA.repoFullName === automation.repoFullName &&
+      existingA.branchName === automation.branchName;
     if (dryRun) {
       if (!existingA) {
         console.log(
           `[dry-run] would CREATE automation '${automation.name}' with action ` +
             JSON.stringify(automation.action),
         );
-      } else if (
-        JSON.stringify(existingA.action) === JSON.stringify(automation.action)
-      ) {
+      } else if (unchanged) {
         console.log(
-          `[dry-run] automation '${automation.name}': action unchanged — no write.`,
+          `[dry-run] automation '${automation.name}': unchanged — no write.`,
         );
       } else {
         console.log(
@@ -285,6 +299,10 @@ async function main() {
             `    to: ${JSON.stringify(automation.action)}`,
         );
       }
+      return;
+    }
+    if (unchanged) {
+      console.log(`Automation unchanged, no write: ${automation.name}`);
       return;
     }
     if (!existingA) {
