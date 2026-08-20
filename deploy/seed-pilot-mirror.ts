@@ -73,7 +73,21 @@ if (!databaseUrl) {
 
 // --dry-run: print every skill-version and automation diff, write NOTHING.
 // This is the owner-sign-off artifact for the #54 C3 production cutover.
+// Unknown --flags are a HARD ERROR, never silently dropped: a typo like
+// `--dryrun` must abort, not fall through to a live production write — the
+// exact inversion of the safety the flag exists to provide.
 const rawArgs = process.argv.slice(2);
+const KNOWN_FLAGS = new Set(["--dry-run"]);
+const unknownFlags = rawArgs.filter(
+  (a) => a.startsWith("--") && !KNOWN_FLAGS.has(a),
+);
+if (unknownFlags.length > 0) {
+  console.error(
+    `Unknown flag(s): ${unknownFlags.join(", ")}. Known: ${[...KNOWN_FLAGS].join(", ")}. ` +
+      `Aborting — a mistyped --dry-run must never become a live write.`,
+  );
+  process.exit(1);
+}
 const dryRun = rawArgs.includes("--dry-run");
 const [orgSlugArg, repoFullNameArg, installationIdArg2] = rawArgs.filter(
   (a) => !a.startsWith("--"),
