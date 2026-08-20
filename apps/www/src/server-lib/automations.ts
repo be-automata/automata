@@ -45,6 +45,7 @@ import {
   resolveReviewSkill,
   renderSkillPlaceholders,
 } from "./review/resolve-review-skill";
+import { buildRepoOverrideFetcher } from "./review/repo-skill-override";
 
 /**
  * Effective shadow state for an automation's org: the org's installation mode
@@ -69,7 +70,19 @@ export async function runAutomation({
   userId: string;
   automationId: string;
   options?: {
+    /**
+     * The branch the thread WORKS ON (the sandbox checkout) — for PR events
+     * this is the PR's HEAD ref. NOT the review-diff base; see
+     * prBaseBranchName.
+     */
     branchName?: string;
+    /**
+     * The PR's BASE ref — what a review skill's `{{baseBranch}}` renders to
+     * (`git diff origin/<base>...HEAD`). Distinct from branchName: rendering
+     * the HEAD ref there makes the delta provably empty (caught live on
+     * PR #59's review). Falls back to automation.branchName when absent.
+     */
+    prBaseBranchName?: string;
     transformMessage?: (message: DBUserMessage) => DBUserMessage;
     prNumber?: number;
     issueNumber?: number;
@@ -132,6 +145,14 @@ export async function runAutomation({
           repoFullName: automation.repoFullName,
           skillName,
           version,
+          // Tier 0 (#54 C5): the repo's committed override, DEFAULT branch
+          // only (fetchRepoSkillOverride passes no ref by construction). Any
+          // failure degrades to the DB tiers — see buildRepoOverrideFetcher.
+          fetchRepoOverride: buildRepoOverrideFetcher({
+            userId: automation.userId,
+            repoFullName: automation.repoFullName,
+            skillName,
+          }),
         });
         if (!resolved) {
           // Defaultless skill with no usable version: skipping the run loudly
@@ -142,7 +163,13 @@ export async function runAutomation({
           );
           return undefined;
         }
+        // Two DIFFERENT branches: the thread works on options.branchName (the
+        // PR head for PR events), while the skill's {{baseBranch}} must be
+        // the review-diff base — the PR's base ref, falling back to the
+        // automation's configured branch.
         const baseBranchName = options?.branchName ?? automation.branchName;
+        const reviewDiffBase =
+          options?.prBaseBranchName ?? automation.branchName;
         const message: DBUserMessage = {
           type: "user",
           model: null,
@@ -151,7 +178,7 @@ export async function runAutomation({
               type: "text",
               text: renderSkillPlaceholders(resolved.body, {
                 repoFullName: automation.repoFullName,
-                baseBranch: baseBranchName,
+                baseBranch: reviewDiffBase,
               }),
             },
           ],
@@ -175,7 +202,9 @@ export async function runAutomation({
             skillName,
             contentSha: resolved.contentSha,
             source: resolved.source,
-            versionId: resolved.versionId,
+            // Absent for a repo-file override (no version row; provenance is
+            // contentSha + the repo's git history).
+            ...(resolved.versionId ? { versionId: resolved.versionId } : {}),
           },
           automation: automation,
           githubPRNumber: options?.prNumber,
@@ -544,6 +573,9 @@ export async function runPullRequestAutomation({
       source,
       options: {
         branchName,
+        // The review-diff base for {{baseBranch}} — the PR's BASE ref, never
+        // its head (rendering head made `git diff origin/<base>...HEAD` empty).
+        prBaseBranchName: pr.data.base.ref,
         prNumber,
         transformMessage: (message: DBUserMessage) => {
           return {

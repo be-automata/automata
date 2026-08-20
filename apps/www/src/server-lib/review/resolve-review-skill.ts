@@ -4,7 +4,8 @@ import {
   getSkillVersion,
   listRecentSkillVersionsWithBodies,
 } from "@terragon/shared/model/repo-skills";
-import { validateSkillBody } from "./review-skill";
+import { stripFrontmatter, validateSkillBody } from "./review-skill";
+import { computeContentSha } from "@terragon/shared/model/repo-skills";
 
 /**
  * Resolve the ONE skill-body snapshot for a single automation run — the live
@@ -22,6 +23,9 @@ import { validateSkillBody } from "./review-skill";
  * cutover lands).
  *
  * Fallback chain — a body that fails its skill's validator is NEVER dispatched:
+ *   0. the repo-file override (`.automata/skills/<skillName>.md` on the repo's
+ *      DEFAULT branch, when the caller injects `fetchRepoOverride`) — editing
+ *      a skill from the terminal is plain `git commit` (#54 C5)
  *   1. the referenced version (currentVersionId for 'latest', or the pin)
  *   2. lastKnownGoodVersionId (promoted only after a demonstrably healthy run)
  *   3. the newest HISTORICAL version that still passes validation. Every
@@ -46,9 +50,13 @@ export type ResolvedSkill = {
   /** sha256 of `body` — stamped into thread.sourceMetadata for traceability. */
   contentSha: string;
   /** Which tier of the fallback chain served the body. */
-  source: "db-version" | "fallback-version";
-  /** The repo_skill_versions row id — always present (every tier is a row). */
-  versionId: string;
+  source: "repo-file" | "db-version" | "fallback-version";
+  /**
+   * The repo_skill_versions row id. Present for every DB tier; absent for a
+   * repo-file override, which has no row — its provenance is the contentSha
+   * plus the repo's own git history.
+   */
+  versionId?: string;
 };
 
 /**
@@ -80,6 +88,7 @@ export async function resolveReviewSkill({
   repoFullName,
   skillName,
   version,
+  fetchRepoOverride,
 }: {
   db: DB;
   organizationId: string | null | undefined;
@@ -87,6 +96,13 @@ export async function resolveReviewSkill({
   skillName: string;
   /** 'latest' follows currentVersionId; anything else is a version-id pin. */
   version: "latest" | string;
+  /**
+   * Optional tier 0 (#54 C5): fetch the repo-file override
+   * (`.automata/skills/<skillName>.md` from the repo's DEFAULT branch — see
+   * fetchRepoSkillOverride's pinned invariant). Injected as a thunk so this
+   * module stays octokit-free and the tier is trivially testable.
+   */
+  fetchRepoOverride?: () => Promise<string | null>;
 }): Promise<ResolvedSkill | null> {
   // A thread with no organization (pre-tenant-fence legacy) cannot carry a
   // per-repo skill: skill rows are org-fenced, so there is nothing safe to
@@ -98,6 +114,34 @@ export async function resolveReviewSkill({
         `caller must SKIP this run.`,
     );
     return null;
+  }
+
+  // Tier 0: repo-file override — the repo's own committed skill wins over
+  // every DB tier. Validated like everything else; a broken or absent file
+  // falls through silently (absent) or loudly (broken) to the DB tiers.
+  if (fetchRepoOverride) {
+    const raw = await fetchRepoOverride();
+    if (raw !== null) {
+      const body = stripFrontmatter(raw);
+      try {
+        validateSkillBody(skillName, body, `repo-file override`);
+        console.warn(
+          `resolveReviewSkill: skill '${skillName}' (${repoFullName}) served ` +
+            `the repo-file override (.automata/skills/${skillName}.md).`,
+        );
+        return {
+          body,
+          contentSha: computeContentSha(body),
+          source: "repo-file",
+        };
+      } catch (err) {
+        console.error(
+          `resolveReviewSkill: repo-file override for skill '${skillName}' ` +
+            `(${repoFullName}) failed validation — falling through to DB tiers:`,
+          err,
+        );
+      }
+    }
   }
 
   /**

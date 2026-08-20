@@ -216,6 +216,44 @@ describe("resolveReviewSkill (fallback chain)", () => {
     expect(resolved?.contentSha).toBe(computeContentSha(VALID_BODY_V2));
   });
 
+  it("tier 0: a valid repo-file override beats every DB tier (#54 C5)", async () => {
+    const { version } = await addVersion(VALID_BODY, "api");
+    const overrideRaw =
+      '---\nname: github-ops\n---\nOverride methodology.\n```json\n{ "verdict": "approve" }\n```\n';
+    const resolved = await resolveReviewSkill({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      skillName: "github-ops",
+      version: "latest",
+      fetchRepoOverride: async () => overrideRaw,
+    });
+    expect(resolved?.source).toBe("repo-file");
+    // Frontmatter stripped before validation and serving.
+    expect(resolved?.body.startsWith("Override methodology.")).toBe(true);
+    expect(resolved?.versionId).toBeUndefined();
+    expect(resolved?.versionId).not.toBe(version.id);
+  });
+
+  it("tier 0: an invalid or absent override falls through to the DB tiers", async () => {
+    const { version } = await addVersion(VALID_BODY, "api");
+    for (const fetchRepoOverride of [
+      async () => BROKEN_BODY, // fails the github-ops validator
+      async () => null, // no file in the repo
+    ]) {
+      const resolved = await resolveReviewSkill({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+        skillName: "github-ops",
+        version: "latest",
+        fetchRepoOverride,
+      });
+      expect(resolved?.source).toBe("db-version");
+      expect(resolved?.versionId).toBe(version.id);
+    }
+  });
+
   it("no DB version at all → null (never dispatch a body the org didn't approve)", async () => {
     const resolved = await resolveReviewSkill({
       db,
