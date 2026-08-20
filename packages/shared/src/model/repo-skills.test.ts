@@ -60,6 +60,30 @@ describe("repo-skills (Neon, org-fenced, append-only versions)", () => {
     expect(skill.lastKnownGoodVersionId).toBeNull();
     expect(version.body).toBe("review methodology v1");
     expect(version.source).toBe("seed");
+    expect(version.sourceRef).toBeNull();
+  });
+
+  it("git-pack version records its pinned sourceRef; other sources leave it null", async () => {
+    const ref =
+      "be-automata/skill-library@" + "a".repeat(40) + ":github-ops/SKILL.md";
+    const { version } = await createRepoSkillVersion({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      skillName: "github-ops",
+      body: "imported methodology",
+      source: "git-pack",
+      sourceRef: ref,
+    });
+    expect(version.source).toBe("git-pack");
+    expect(version.sourceRef).toBe(ref);
+    // Read-back through the version query keeps the ref (provenance survives).
+    const read = await getSkillVersion({
+      db,
+      organizationId: orgA,
+      versionId: version.id,
+    });
+    expect(read?.sourceRef).toBe(ref);
   });
 
   it("computes sha256 of the body — never trusts a caller hash", async () => {

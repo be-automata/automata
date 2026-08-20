@@ -1547,6 +1547,13 @@ export const repoSkillVersions = pgTable(
     contentSha: text("content_sha").notNull(),
     /** Which edit surface produced this version. */
     source: text("source").$type<RepoSkillVersionSource>().notNull(),
+    /**
+     * Upstream provenance for a `source: 'git-pack'` version: the exact
+     * `owner/repo@<40-hex-sha>` (+ optional `:path`) the body was imported
+     * from at a PINNED ref. Null for every other source. Additive/nullable —
+     * old rows are unaffected.
+     */
+    sourceRef: text("source_ref"),
     /** Provenance: the user who wrote this version (audit trail). */
     createdByUserId: text("created_by_user_id").references(() => user.id, {
       onDelete: "set null",

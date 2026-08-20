@@ -130,6 +130,7 @@ const VERSION_COLUMNS = {
   body: repoSkillVersions.body,
   contentSha: repoSkillVersions.contentSha,
   source: repoSkillVersions.source,
+  sourceRef: repoSkillVersions.sourceRef,
   createdByUserId: repoSkillVersions.createdByUserId,
   createdAt: repoSkillVersions.createdAt,
 };
@@ -232,6 +233,7 @@ export async function createRepoSkillVersion({
   skillName,
   body,
   source,
+  sourceRef,
   createdByUserId,
 }: {
   db: DB;
@@ -240,6 +242,8 @@ export async function createRepoSkillVersion({
   skillName: string;
   body: string;
   source: RepoSkillVersionSource;
+  /** owner/repo@sha provenance — only meaningful for source 'git-pack'. */
+  sourceRef?: string | null;
   createdByUserId?: string | null;
 }): Promise<{ skill: RepoSkill; version: RepoSkillVersion }> {
   const repo = normalizeRepo(repoFullName);
@@ -280,6 +284,7 @@ export async function createRepoSkillVersion({
         body,
         contentSha: computeContentSha(body),
         source,
+        sourceRef: sourceRef ?? null,
         createdByUserId: createdByUserId ?? null,
       })
       .returning();
