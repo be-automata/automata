@@ -11,10 +11,12 @@ import { unwrapError } from "@/lib/server-actions";
 import {
   useRepoSkillDetailQuery,
   useRepoSkillsQuery,
+  useRepoSkillVersionBodyQuery,
   useRevertRepoSkillMutation,
   useSaveRepoSkillMutation,
 } from "@/queries/repo-skills-queries";
 import { cn } from "@/lib/utils";
+import { diffLines, diffStat } from "@/lib/line-diff";
 
 /**
  * Skills panel (issue #54 C4) — the dashboard edit surface for live repo
@@ -46,6 +48,8 @@ export function SkillsSettings() {
   const [draft, setDraft] = useState<{ seed: string; body: string } | null>(
     null,
   );
+  // A historical version being diffed against the current body (#64 slice 2).
+  const [diffVersionId, setDiffVersionId] = useState<string | null>(null);
 
   const skills = useMemo(
     () =>
@@ -74,9 +78,22 @@ export function SkillsSettings() {
       : (detail?.current?.body ?? "");
   const dirty = editorBody !== (detail?.current?.body ?? "");
 
+  const diffBodyQuery = useRepoSkillVersionBodyQuery({
+    repoFullName: selected?.repoFullName ?? null,
+    skillName: selected?.skillName ?? null,
+    versionId: diffVersionId,
+  });
+  // Diff the picked historical version (a) against the current body (b): dels
+  // are what the old version had, adds are what the current version added.
+  const diffRows =
+    diffVersionId && diffBodyQuery.data != null && detail?.current
+      ? diffLines(diffBodyQuery.data, detail.current.body)
+      : null;
+
   function select(repoFullName: string, skillName: string): void {
     setSelectedKey(`${repoFullName}\u0000${skillName}`);
     setDraft(null);
+    setDiffVersionId(null);
     saveMutation.reset();
     revertMutation.reset();
   }
@@ -270,27 +287,96 @@ export function SkillsSettings() {
                                       <span className="mx-2">·</span>
                                       {formatWhen(v.createdAt)}
                                     </span>
-                                    {isCurrent ? (
-                                      <span className="flex-shrink-0 rounded-full bg-muted px-2 py-0.5 font-medium">
-                                        Current
-                                      </span>
-                                    ) : (
-                                      <Button
-                                        type="button"
-                                        size="sm"
-                                        variant="outline"
-                                        className="h-6 px-2 text-xs"
-                                        disabled={revertMutation.isPending}
-                                        onClick={() => void revert(v.id)}
-                                      >
-                                        Revert
-                                      </Button>
-                                    )}
+                                    <span className="flex flex-shrink-0 items-center gap-2">
+                                      {isCurrent ? (
+                                        <span className="rounded-full bg-muted px-2 py-0.5 font-medium">
+                                          Current
+                                        </span>
+                                      ) : (
+                                        <>
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="ghost"
+                                            className="h-6 px-2 text-xs"
+                                            onClick={() =>
+                                              setDiffVersionId(
+                                                diffVersionId === v.id
+                                                  ? null
+                                                  : v.id,
+                                              )
+                                            }
+                                          >
+                                            {diffVersionId === v.id
+                                              ? "Hide diff"
+                                              : "Diff"}
+                                          </Button>
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="outline"
+                                            className="h-6 px-2 text-xs"
+                                            disabled={revertMutation.isPending}
+                                            onClick={() => void revert(v.id)}
+                                          >
+                                            Revert
+                                          </Button>
+                                        </>
+                                      )}
+                                    </span>
                                   </div>
                                 );
                               })}
                             </div>
                           </div>
+
+                          {diffVersionId && (
+                            <div className="flex flex-col gap-1">
+                              <h4 className="text-xs font-semibold text-muted-foreground">
+                                {(() => {
+                                  const stat = diffRows
+                                    ? diffStat(diffRows)
+                                    : null;
+                                  return `Diff vs current${
+                                    stat
+                                      ? ` · +${stat.added} −${stat.removed}`
+                                      : ""
+                                  }`;
+                                })()}
+                              </h4>
+                              {diffBodyQuery.isLoading && (
+                                <Skeleton className="h-24 w-full" />
+                              )}
+                              {diffBodyQuery.isError && (
+                                <p className="text-xs text-destructive">
+                                  {unwrapError(diffBodyQuery.error)}
+                                </p>
+                              )}
+                              {diffRows && (
+                                <pre className="max-h-[320px] overflow-auto rounded-md border font-mono text-xs leading-relaxed">
+                                  {diffRows.map((row, i) => (
+                                    <div
+                                      key={i}
+                                      className={cn(
+                                        "px-3 py-0.5 whitespace-pre-wrap",
+                                        row.kind === "add" &&
+                                          "bg-green-500/10 text-green-700 dark:text-green-400",
+                                        row.kind === "del" &&
+                                          "bg-red-500/10 text-red-700 dark:text-red-400",
+                                      )}
+                                    >
+                                      {row.kind === "add"
+                                        ? "+ "
+                                        : row.kind === "del"
+                                          ? "- "
+                                          : "  "}
+                                      {row.text}
+                                    </div>
+                                  ))}
+                                </pre>
+                              )}
+                            </div>
+                          )}
                         </>
                       )}
                     </div>

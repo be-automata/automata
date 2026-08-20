@@ -33,7 +33,7 @@ function repoFromParams(owner: string, repo: string): string {
 }
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   {
     params,
   }: { params: Promise<{ owner: string; repo: string; skill: string }> },
@@ -61,6 +61,32 @@ export async function GET(
   });
   if (!skill) {
     return NextResponse.json({ error: "Skill not found" }, { status: 404 });
+  }
+
+  // ?versionId=<id>: the "fetch one body on demand" path (history is
+  // metadata-only) — powers the version diff view (#64 slice 2). Org-fenced
+  // through getSkillVersion, AND checked to belong to THIS skill so a valid
+  // version id from another skill in the same org can't be read here.
+  const versionId = request.nextUrl.searchParams.get("versionId");
+  if (versionId) {
+    const version = await getSkillVersion({
+      db,
+      organizationId: ctx.organizationId,
+      versionId,
+    });
+    if (!version || version.skillId !== skill.id) {
+      return NextResponse.json({ error: "Version not found" }, { status: 404 });
+    }
+    return NextResponse.json({
+      version: {
+        versionId: version.id,
+        body: version.body,
+        contentSha: version.contentSha,
+        source: version.source,
+        sourceRef: version.sourceRef,
+        createdAt: version.createdAt,
+      },
+    });
   }
 
   const [current, versions] = await Promise.all([
