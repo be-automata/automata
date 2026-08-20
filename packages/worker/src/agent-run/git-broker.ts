@@ -37,8 +37,9 @@ import type { AddressInfo } from "node:net";
 const UPLOAD_PACK = "git-upload-pack";
 const RECEIVE_PACK = "git-receive-pack";
 
-// Response headers we must NOT copy verbatim from GitHub — Node re-frames the
-// body (chunked), so a stale length/encoding/connection header corrupts it.
+// Hop-by-hop / body-framing headers neither direction may copy verbatim — Node
+// (response) and fetch (request) re-frame the body, so a stale
+// length/encoding/connection header corrupts it.
 const HOP_BY_HOP = new Set([
   "connection",
   "keep-alive",
@@ -47,6 +48,14 @@ const HOP_BY_HOP = new Set([
   "content-encoding",
   "upgrade",
 ]);
+
+// Request headers the broker OWNS — everything else is forwarded VERBATIM
+// (a denylist, symmetric with HOP_BY_HOP on the response side). `authorization`
+// is replaced with the injected Basic auth (never the client's bearer); `host`
+// is set by fetch to the upstream. A denylist forwards future git headers by
+// default — the allowlist trap already bit us once: `git-protocol` was
+// load-bearing and its omission silently downgraded protocol v2→v0.
+const REQUEST_OWNED = new Set([...HOP_BY_HOP, "authorization", "host"]);
 
 export type GitBroker = {
   /** `http://127.0.0.1:<port>` — the base the agent's git remote points at. */
@@ -67,12 +76,11 @@ export type StartGitBrokerOptions = {
   fetchImpl?: typeof fetch;
 };
 
-function timingSafeEqualStr(a: string, b: string): boolean {
+function timingSafeEqualStr(a: string, bBuf: Buffer): boolean {
   const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
   // Length check first is safe: bearer length is not secret, and timingSafeEqual
-  // throws on length mismatch.
-  return ab.length === bb.length && timingSafeEqual(ab, bb);
+  // throws on length mismatch. `bBuf` is precomputed once in the closure.
+  return ab.length === bBuf.length && timingSafeEqual(ab, bBuf);
 }
 
 export async function startGitBroker(
@@ -81,19 +89,22 @@ export async function startGitBroker(
   const { installationToken, repoFullName, runBearer } = opts;
   const fetchImpl = opts.fetchImpl ?? fetch;
 
-  const slash = repoFullName.indexOf("/");
-  if (slash <= 0 || slash !== repoFullName.lastIndexOf("/")) {
+  // Trim + lowercase mirrors @terragon/shared's normalizeRepo (the platform's
+  // single repo-slug normalization) WITHOUT importing it — the worker is a lean
+  // plane and does not depend on @terragon/shared. GitHub slugs are
+  // case-insensitive; matching that normalization keeps a padded slug fencing
+  // identically here.
+  const [owner, repo, ...rest] = repoFullName.trim().toLowerCase().split("/");
+  if (!owner || !repo || rest.length > 0) {
     throw new Error(
       `git-broker: repoFullName must be 'owner/repo', got: ${repoFullName}`,
     );
   }
-  const owner = repoFullName.slice(0, slash).toLowerCase();
-  const repo = repoFullName.slice(slash + 1).toLowerCase();
   const pathPrefix = `/${owner}/${repo}.git/`;
   const injectedAuth =
     "Basic " +
     Buffer.from(`x-access-token:${installationToken}`).toString("base64");
-  const expectedBearer = `Bearer ${runBearer}`;
+  const expectedBearerBuf = Buffer.from(`Bearer ${runBearer}`);
 
   async function handle(
     req: IncomingMessage,
@@ -101,7 +112,7 @@ export async function startGitBroker(
   ): Promise<void> {
     // 1. Per-run bearer — the agent's git presents it via http.extraHeader.
     if (
-      !timingSafeEqualStr(req.headers["authorization"] ?? "", expectedBearer)
+      !timingSafeEqualStr(req.headers["authorization"] ?? "", expectedBearerBuf)
     ) {
       res.writeHead(401).end("unauthorized");
       return;
@@ -131,15 +142,16 @@ export async function startGitBroker(
     //    is rebuilt from the FENCED owner/repo/endpoint, never echoed from the
     //    request, so a normalized-away traversal can't retarget it.
     const target = `https://github.com/${owner}/${repo}.git/${endpoint}${url.search}`;
-    const fwd: Record<string, string> = { Authorization: injectedAuth };
-    // Forward the git-relevant request headers. `Git-Protocol` is load-bearing:
-    // git requests protocol v2 with it, and GitHub answers v0 if it is missing,
-    // so the client and server disagree and the clone fails. Content-Type/Accept
-    // carry the pack negotiation media types.
-    for (const h of ["content-type", "accept", "git-protocol"] as const) {
-      const v = req.headers[h];
-      if (typeof v === "string") fwd[h] = v;
+    // Forward every request header VERBATIM except the ones the broker owns
+    // (REQUEST_OWNED), then inject the real credential last so it always wins
+    // over any client-supplied authorization.
+    const fwd: Record<string, string> = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (REQUEST_OWNED.has(k)) continue;
+      if (typeof v === "string") fwd[k] = v;
+      else if (Array.isArray(v)) fwd[k] = v.join(", ");
     }
+    fwd.authorization = injectedAuth;
     const hasBody = req.method === "POST";
     const upstream = await fetchImpl(target, {
       method: req.method,

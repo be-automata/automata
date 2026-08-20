@@ -17,6 +17,7 @@ function recordingFetch() {
     url: string;
     method?: string;
     auth?: string;
+    headers: Record<string, string>;
     hasBody: boolean;
   }> = [];
   const impl = (async (url: string, init?: RequestInit) => {
@@ -25,6 +26,7 @@ function recordingFetch() {
       url: String(url),
       method: init?.method,
       auth: headers.get("Authorization") ?? undefined,
+      headers: Object.fromEntries(headers),
       hasBody: init?.body != null,
     });
     return new Response("UPSTREAM-BODY", {
@@ -37,22 +39,23 @@ function recordingFetch() {
   return { impl, calls };
 }
 
-async function start(fetchImpl: typeof fetch) {
+/** Start a broker over a recording fetch — the setup every test shares. */
+async function boot() {
+  const { impl, calls } = recordingFetch();
   broker = await startGitBroker({
     installationToken: TOKEN,
     repoFullName: REPO,
     runBearer: BEARER,
-    fetchImpl,
+    fetchImpl: impl,
   });
-  return broker;
+  return { b: broker, calls };
 }
 
 const withBearer = { Authorization: `Bearer ${BEARER}` };
 
 describe("startGitBroker (#65 — local git credential broker)", () => {
   it("injects the token upstream and NEVER exposes it to the caller", async () => {
-    const { impl, calls } = recordingFetch();
-    const b = await start(impl);
+    const { b, calls } = await boot();
     const res = await fetch(
       `${b.url}/be-automata/automata.git/info/refs?service=git-upload-pack`,
       { headers: withBearer },
@@ -74,8 +77,7 @@ describe("startGitBroker (#65 — local git credential broker)", () => {
   });
 
   it("401 without the per-run bearer, and never reaches upstream", async () => {
-    const { impl, calls } = recordingFetch();
-    const b = await start(impl);
+    const { b, calls } = await boot();
     const res = await fetch(
       `${b.url}/be-automata/automata.git/info/refs?service=git-upload-pack`,
     );
@@ -84,8 +86,7 @@ describe("startGitBroker (#65 — local git credential broker)", () => {
   });
 
   it("401 for a wrong bearer (timing-safe compare)", async () => {
-    const { impl, calls } = recordingFetch();
-    const b = await start(impl);
+    const { b, calls } = await boot();
     const res = await fetch(
       `${b.url}/be-automata/automata.git/info/refs?service=git-upload-pack`,
       { headers: { Authorization: "Bearer wrong" } },
@@ -95,8 +96,7 @@ describe("startGitBroker (#65 — local git credential broker)", () => {
   });
 
   it("404 for a different repo — the path fence holds", async () => {
-    const { impl, calls } = recordingFetch();
-    const b = await start(impl);
+    const { b, calls } = await boot();
     const res = await fetch(
       `${b.url}/attacker/other.git/info/refs?service=git-upload-pack`,
       { headers: withBearer },
@@ -106,8 +106,7 @@ describe("startGitBroker (#65 — local git credential broker)", () => {
   });
 
   it("403 for a non-git method/endpoint (arbitrary GET) — the allowlist holds", async () => {
-    const { impl, calls } = recordingFetch();
-    const b = await start(impl);
+    const { b, calls } = await boot();
     for (const path of [
       "be-automata/automata.git/config",
       "be-automata/automata.git/info/refs?service=evil",
@@ -120,8 +119,7 @@ describe("startGitBroker (#65 — local git credential broker)", () => {
   });
 
   it("POST git-upload-pack (fetch) and git-receive-pack (push) both proxy with a body", async () => {
-    const { impl, calls } = recordingFetch();
-    const b = await start(impl);
+    const { b, calls } = await boot();
     for (const endpoint of ["git-upload-pack", "git-receive-pack"]) {
       const res = await fetch(`${b.url}/be-automata/automata.git/${endpoint}`, {
         method: "POST",
@@ -142,9 +140,35 @@ describe("startGitBroker (#65 — local git credential broker)", () => {
     );
   });
 
+  it("forwards arbitrary git headers verbatim but REPLACES authorization (denylist)", async () => {
+    const { b, calls } = await boot();
+    await fetch(
+      `${b.url}/be-automata/automata.git/info/refs?service=git-upload-pack`,
+      {
+        headers: {
+          ...withBearer,
+          "git-protocol": "version=2",
+          "user-agent": "git/2.53.0",
+          // A hop-by-hop / owned header the broker must NOT forward.
+          connection: "keep-alive",
+        },
+      },
+    );
+    const sent = calls[0]!.headers;
+    // Load-bearing git header forwarded (the bug that broke real clones once).
+    expect(sent["git-protocol"]).toBe("version=2");
+    // A future/unknown git header rides through by default (denylist, not allowlist).
+    expect(sent["user-agent"]).toBe("git/2.53.0");
+    // The client's bearer is REPLACED with the injected token, never forwarded.
+    expect(calls[0]!.auth).toBe(
+      "Basic " + Buffer.from(`x-access-token:${TOKEN}`).toString("base64"),
+    );
+    // Hop-by-hop header is dropped.
+    expect(sent["connection"]).toBeUndefined();
+  });
+
   it("case-insensitive repo match (GitHub slugs are case-insensitive)", async () => {
-    const { impl, calls } = recordingFetch();
-    const b = await start(impl);
+    const { b, calls } = await boot();
     const res = await fetch(
       `${b.url}/Be-Automata/Automata.git/info/refs?service=git-upload-pack`,
       { headers: withBearer },
