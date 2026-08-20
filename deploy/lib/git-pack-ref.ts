@@ -73,7 +73,15 @@ export async function fetchGitPackBody(
   ref: GitPackRef,
   fetchImpl: typeof fetch = fetch,
 ): Promise<string> {
-  const url = `https://api.github.com/repos/${ref.owner}/${ref.repo}/contents/${ref.path}?ref=${ref.sha}`;
+  // Encode EVERY interpolated segment. A raw `#`/`?` in the path would
+  // otherwise absorb the `?ref=<sha>` suffix into the URL's fragment/query and
+  // silently resolve against the DEFAULT branch — the exact pin-defeating
+  // "unexpected resolution" this module exists to prevent. Path slashes are
+  // separators, so encode per-segment and rejoin.
+  const encPath = ref.path.split("/").map(encodeURIComponent).join("/");
+  const url =
+    `https://api.github.com/repos/${encodeURIComponent(ref.owner)}/` +
+    `${encodeURIComponent(ref.repo)}/contents/${encPath}?ref=${ref.sha}`;
   const headers: Record<string, string> = {
     Accept: "application/vnd.github.raw+json",
     "User-Agent": "automata-skill-push",

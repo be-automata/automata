@@ -44,7 +44,9 @@ describe("parseGitPackRef (#64 git skill packs — pinned refs only)", () => {
   });
 
   it("rejects a malformed repo", () => {
-    expect(() => parseGitPackRef(`justrepo@${SHA}:p.md`)).toThrow(/owner\/repo/);
+    expect(() => parseGitPackRef(`justrepo@${SHA}:p.md`)).toThrow(
+      /owner\/repo/,
+    );
     expect(() => parseGitPackRef(`a/b/c@${SHA}:p.md`)).toThrow(/owner\/repo/);
   });
 
@@ -66,6 +68,23 @@ describe("fetchGitPackBody", () => {
     expect(calledUrl).toBe(
       `https://api.github.com/repos/o/r/contents/p.md?ref=${SHA}`,
     );
+  });
+
+  it("URI-encodes path segments so a '#' or '?' can't swallow the ?ref pin", async () => {
+    // Regression: a raw '#'/'?' in the path would absorb the ?ref=<sha> suffix
+    // and silently resolve against the default branch — defeating the pin.
+    const trickyRef = parseGitPackRef(`o/r@${SHA}:dir/a?b#c.md`);
+    let calledUrl = "";
+    const fakeFetch = (async (url: string) => {
+      calledUrl = String(url);
+      return { ok: true, status: 200, text: async () => "BODY" };
+    }) as unknown as typeof fetch;
+    await fetchGitPackBody(trickyRef, fakeFetch);
+    // The special chars are encoded; the ?ref=<sha> pin survives intact.
+    expect(calledUrl).toBe(
+      `https://api.github.com/repos/o/r/contents/dir/a%3Fb%23c.md?ref=${SHA}`,
+    );
+    expect(calledUrl.endsWith(`?ref=${SHA}`)).toBe(true);
   });
 
   it("throws a helpful message on 404", async () => {
