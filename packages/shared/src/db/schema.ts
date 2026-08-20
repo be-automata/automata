@@ -1549,9 +1549,10 @@ export const repoSkillVersions = pgTable(
     source: text("source").$type<RepoSkillVersionSource>().notNull(),
     /**
      * Upstream provenance for a `source: 'git-pack'` version: the exact
-     * `owner/repo@<40-hex-sha>` (+ optional `:path`) the body was imported
-     * from at a PINNED ref. Null for every other source. Additive/nullable —
-     * old rows are unaffected.
+     * `owner/repo@<40-hex-sha>:<path>` the body was imported from at a PINNED
+     * ref (parseGitPackRef requires all three parts, so the `:path` is always
+     * present). Null for every other source. Additive/nullable — old rows are
+     * unaffected.
      */
     sourceRef: text("source_ref"),
     /** Provenance: the user who wrote this version (audit trail). */
