@@ -153,6 +153,22 @@ for (const [skillName, body] of Object.entries(SKILL_BODIES)) {
   }
 }
 
+/**
+ * JSON.stringify with recursively sorted object keys — jsonb-round-trip-stable,
+ * so semantically equal actions compare equal regardless of key order.
+ */
+function stableStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, v) =>
+    v !== null && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(
+          Object.entries(v as Record<string, unknown>).sort(([a], [b]) =>
+            a < b ? -1 : a > b ? 1 : 0,
+          ),
+        )
+      : v,
+  );
+}
+
 const PR_AUTOMATION_NAME = "Mirror: PR review (github-ops)";
 const ISSUE_AUTOMATION_NAME = "Mirror: issue research (github-deep-research)";
 const MENTION_AUTOMATION_NAME =
@@ -276,10 +292,14 @@ async function main() {
     // One equality predicate for BOTH modes, over exactly the fields the
     // update would write (action + repoFullName + branchName) — so the
     // dry-run's "no write" claim is literally what the live run does, and an
-    // unchanged re-seed issues zero UPDATEs.
+    // unchanged re-seed issues zero UPDATEs. Compared via key-sorted
+    // stringify: Postgres jsonb does NOT preserve object key order on
+    // round-trip ({skillName, version} reads back as {version, skillName}),
+    // so a plain JSON.stringify comparison would never match a stored action.
     const unchanged =
       existingA !== undefined &&
-      JSON.stringify(existingA.action) === JSON.stringify(automation.action) &&
+      stableStringify(existingA.action) ===
+        stableStringify(automation.action) &&
       existingA.repoFullName === automation.repoFullName &&
       existingA.branchName === automation.branchName;
     if (dryRun) {
