@@ -10,6 +10,7 @@ import {
   revertRepoSkillAction,
   saveRepoSkillAction,
 } from "@/server-actions/repo-skills";
+import { UserFacingError } from "@/lib/server-actions";
 
 export const repoSkillsQueryKeys = {
   list: () => ["repo-skills", "list"] as const,
@@ -53,9 +54,29 @@ export function useRepoSkillVersionBodyQuery({
         `/api/repo-skills/${encodeURIComponent(owner ?? "")}/` +
         `${encodeURIComponent(repo ?? "")}/${encodeURIComponent(skillName!)}` +
         `?versionId=${encodeURIComponent(versionId!)}`;
-      const res = await fetch(url);
+      let res: Response;
+      try {
+        res = await fetch(url);
+      } catch {
+        // Network failure — UserFacingError so unwrapError surfaces THIS
+        // message instead of collapsing to the generic one (this hook uses
+        // fetch directly, bypassing the server-action wrappers that would
+        // otherwise guarantee a UserFacingError).
+        throw new UserFacingError(
+          "Couldn't reach the server to load that version.",
+        );
+      }
       if (!res.ok) {
-        throw new Error(`Couldn't load that version (${res.status})`);
+        // Prefer the route's own { error } message (e.g. "Version not found").
+        const detail = await res
+          .json()
+          .then((j: { error?: unknown }) =>
+            typeof j?.error === "string" ? j.error : null,
+          )
+          .catch(() => null);
+        throw new UserFacingError(
+          detail ?? `Couldn't load that version (${res.status}).`,
+        );
       }
       const json = (await res.json()) as { version: { body: string } };
       return json.version.body;
