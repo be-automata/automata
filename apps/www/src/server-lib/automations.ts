@@ -575,7 +575,11 @@ export async function runPullRequestAutomation({
         branchName,
         // The review-diff base for {{baseBranch}} — the PR's BASE ref, never
         // its head (rendering head made `git diff origin/<base>...HEAD` empty).
-        prBaseBranchName: pr.data.base.ref,
+        // Optional-chained defensively: a malformed payload must degrade to
+        // the automation's configured branch (the resolver's fallback), not
+        // throw inside this try and silently skip the whole run — exactly
+        // what a base-less test fixture did to the shadow suite.
+        prBaseBranchName: pr.data.base?.ref,
         prNumber,
         transformMessage: (message: DBUserMessage) => {
           return {

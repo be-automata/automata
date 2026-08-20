@@ -29,7 +29,11 @@ vi.mock("@/app/api/webhooks/github/utils", async (importOriginal) => {
 const mockOctokit = {
   rest: {
     pulls: {
-      get: vi.fn().mockResolvedValue({ data: { head: { ref: "feature" } } }),
+      get: vi.fn().mockResolvedValue({
+        // Real pulls.get payloads always carry BOTH refs; the PR path reads
+        // head.ref (sandbox checkout) AND base.ref ({{baseBranch}} rendering).
+        data: { head: { ref: "feature" }, base: { ref: "main" } },
+      }),
     },
     repos: {
       get: vi.fn().mockResolvedValue({ data: { default_branch: "main" } }),
