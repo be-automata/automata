@@ -272,4 +272,46 @@ describe("GET/PUT /api/repo-skills/[owner]/[repo]/[skill]", () => {
     expect(g2.skill.current.body).toBe(edited);
     expect(g2.skill.versions).toHaveLength(2);
   });
+
+  it("GET ?versionId returns that version's body on demand (diff view, #64 slice 2)", async () => {
+    const put = await PUT(putReq("github-ops", { body: VALID_OPS_BODY }), {
+      params: params("github-ops"),
+    });
+    const { version } = (await put.json()) as {
+      version: { versionId: string };
+    };
+    const res = await GET(
+      req(
+        `/api/repo-skills/acme/widgets/github-ops?versionId=${version.versionId}`,
+      ),
+      { params: params("github-ops") },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      version: { versionId: string; body: string };
+    };
+    expect(body.version.versionId).toBe(version.versionId);
+    expect(body.version.body).toBe(VALID_OPS_BODY);
+  });
+
+  it("GET ?versionId 404s for a version that belongs to another skill (org-safe)", async () => {
+    await PUT(putReq("github-ops", { body: VALID_OPS_BODY }), {
+      params: params("github-ops"),
+    });
+    // A version id that exists in the store but under a different skillId.
+    store.versions.push({
+      id: "v_other",
+      skillId: "some_other_skill",
+      body: "secret other-skill body",
+      contentSha: "x",
+      source: "api",
+      createdByUserId: null,
+      createdAt: new Date(),
+    });
+    const res = await GET(
+      req("/api/repo-skills/acme/widgets/github-ops?versionId=v_other"),
+      { params: params("github-ops") },
+    );
+    expect(res.status).toBe(404);
+  });
 });
