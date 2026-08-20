@@ -361,7 +361,12 @@ export type RepoReviewSettingInsert =
   typeof schema.repoReviewSettings.$inferInsert;
 
 /** Which edit surface produced a skill version (audit trail). */
-export type RepoSkillVersionSource = "dashboard" | "api" | "seed" | "repo-file";
+export type RepoSkillVersionSource =
+  | "dashboard"
+  | "api"
+  | "seed"
+  | "repo-file"
+  | "git-pack";
 
 export type RepoSkill = typeof schema.repoSkills.$inferSelect;
 export type RepoSkillInsert = typeof schema.repoSkills.$inferInsert;
