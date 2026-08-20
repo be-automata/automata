@@ -125,9 +125,11 @@ export type ThreadSourceMetadata =
     }
   // Traceability stamp for skill_message automations (issue #54): the exact
   // skill text a thread ran with. `contentSha` is the sha256 of the resolved
-  // body; `source` is the resolver tier ("db-version" | "fallback-version");
-  // `versionId` names the repo_skill_versions row that was served (optional
-  // only for legacy stamps written before the resolver became pure-DB).
+  // body; `source` is the resolver tier
+  // ("repo-file" | "db-version" | "fallback-version"); `versionId` names the
+  // repo_skill_versions row that was served — absent for repo-file overrides
+  // (no version row by design; provenance = contentSha + the repo's git
+  // history) and for legacy stamps written before the resolver became pure-DB.
   | {
       type: "automation-skill";
       skillName: string;

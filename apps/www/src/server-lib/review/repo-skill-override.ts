@@ -1,5 +1,5 @@
 import type { Octokit } from "octokit";
-import { parseRepoFullName } from "@/lib/github";
+import { getOctokitForBackground, parseRepoFullName } from "@/lib/github";
 
 /**
  * Repo-file skill override (#54 C5): fetch `.automata/skills/<skillName>.md`
@@ -17,6 +17,37 @@ import { parseRepoFullName } from "@/lib/github";
  * — resolution falls through to the DB tiers) or unreadable (logged; a broken
  * override must degrade to the DB tiers, never block the run).
  */
+/**
+ * The production glue runAutomation injects as resolveReviewSkill's tier-0
+ * thunk: acquire the background octokit, then fetch the override. EVERY
+ * failure — octokit acquisition included — degrades to null (DB tiers); an
+ * override can never block a run. Lives here, not inline in runAutomation,
+ * so the acquisition + degrade behavior is directly unit-testable.
+ */
+export function buildRepoOverrideFetcher({
+  userId,
+  repoFullName,
+  skillName,
+}: {
+  userId: string;
+  repoFullName: string;
+  skillName: string;
+}): () => Promise<string | null> {
+  return async () => {
+    try {
+      const octokit = await getOctokitForBackground({ userId, repoFullName });
+      return await fetchRepoSkillOverride({ octokit, repoFullName, skillName });
+    } catch (err) {
+      console.error(
+        `buildRepoOverrideFetcher: override fetch for '${skillName}' ` +
+          `(${repoFullName}) failed — using DB tiers:`,
+        err,
+      );
+      return null;
+    }
+  };
+}
+
 export async function fetchRepoSkillOverride({
   octokit,
   repoFullName,

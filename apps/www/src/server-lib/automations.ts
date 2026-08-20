@@ -45,7 +45,7 @@ import {
   resolveReviewSkill,
   renderSkillPlaceholders,
 } from "./review/resolve-review-skill";
-import { fetchRepoSkillOverride } from "./review/repo-skill-override";
+import { buildRepoOverrideFetcher } from "./review/repo-skill-override";
 
 /**
  * Effective shadow state for an automation's org: the org's installation mode
@@ -135,27 +135,12 @@ export async function runAutomation({
           version,
           // Tier 0 (#54 C5): the repo's committed override, DEFAULT branch
           // only (fetchRepoSkillOverride passes no ref by construction). Any
-          // failure here degrades to the DB tiers — an override must never
-          // block a run.
-          fetchRepoOverride: async () => {
-            try {
-              const octokit = await getOctokitForBackground({
-                userId: automation.userId,
-                repoFullName: automation.repoFullName,
-              });
-              return await fetchRepoSkillOverride({
-                octokit,
-                repoFullName: automation.repoFullName,
-                skillName,
-              });
-            } catch (err) {
-              console.error(
-                `Automation ${automation.id}: repo-file override fetch failed — using DB tiers:`,
-                err,
-              );
-              return null;
-            }
-          },
+          // failure degrades to the DB tiers — see buildRepoOverrideFetcher.
+          fetchRepoOverride: buildRepoOverrideFetcher({
+            userId: automation.userId,
+            repoFullName: automation.repoFullName,
+            skillName,
+          }),
         });
         if (!resolved) {
           // Defaultless skill with no usable version: skipping the run loudly
