@@ -210,6 +210,38 @@ describe("runAutomation — skill_message resolution (#54 C2)", () => {
     expect(callArgs.organizationId).toBe(orgId);
   });
 
+  it("{{baseBranch}} renders the PR's BASE ref, never its head (PR #59 regression)", async () => {
+    // For PR events options.branchName is the HEAD ref (the sandbox
+    // checkout); rendering it into {{baseBranch}} makes
+    // `git diff origin/<base>...HEAD` provably empty — caught live on #59.
+    const automation = await makeSkillAutomation();
+    await createRepoSkillVersion({
+      db,
+      organizationId: orgId,
+      repoFullName: automation.repoFullName,
+      skillName: "github-ops",
+      body: SKILL_BODY,
+      source: "seed",
+    });
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "manual",
+      options: {
+        branchName: "feat/some-pr-head",
+        prBaseBranchName: "develop",
+        prNumber: 41,
+      },
+    });
+    const callArgs = vi.mocked(createNewThread).mock.calls[0]![0];
+    const text = (callArgs.message.parts[0] as { text: string }).text;
+    // The skill diffs against the PR base...
+    expect(text).toContain("against origin/develop.");
+    expect(text).not.toContain("origin/feat/some-pr-head");
+    // ...while the thread itself still works on the PR head.
+    expect(callArgs.baseBranchName).toBe("feat/some-pr-head");
+  });
+
   it("an edit is live on the next run — no reseed, new sha stamped", async () => {
     const automation = await makeSkillAutomation();
     await createRepoSkillVersion({
