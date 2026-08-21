@@ -100,6 +100,16 @@ export async function startGitBroker(
       `git-broker: repoFullName must be 'owner/repo', got: ${repoFullName}`,
     );
   }
+  // The entire fence rests on the bearer compare and the token injection. An
+  // empty bearer would make the check pass for the literal, secret-less
+  // "Authorization: Bearer "; an empty token would inject useless auth. Fail
+  // loudly at construction rather than serve a collapsed fence.
+  if (runBearer.length === 0) {
+    throw new Error("git-broker: runBearer must be a non-empty per-run secret");
+  }
+  if (installationToken.length === 0) {
+    throw new Error("git-broker: installationToken must be non-empty");
+  }
   const pathPrefix = `/${owner}/${repo}.git/`;
   const injectedAuth =
     "Basic " +

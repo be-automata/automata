@@ -167,6 +167,23 @@ describe("startGitBroker (#65 — local git credential broker)", () => {
     expect(sent["connection"]).toBeUndefined();
   });
 
+  it("refuses to start with an empty bearer or token (the fence can't collapse)", async () => {
+    await expect(
+      startGitBroker({
+        installationToken: TOKEN,
+        repoFullName: REPO,
+        runBearer: "",
+      }),
+    ).rejects.toThrow(/runBearer must be a non-empty/);
+    await expect(
+      startGitBroker({
+        installationToken: "",
+        repoFullName: REPO,
+        runBearer: BEARER,
+      }),
+    ).rejects.toThrow(/installationToken must be non-empty/);
+  });
+
   it("case-insensitive repo match (GitHub slugs are case-insensitive)", async () => {
     const { b, calls } = await boot();
     const res = await fetch(
