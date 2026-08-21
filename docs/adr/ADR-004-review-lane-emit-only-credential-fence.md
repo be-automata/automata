@@ -1,8 +1,9 @@
 # ADR-004: The review lane is emit-only with a structural credential fence
 
-- **Status:** Accepted (2026-08-21). The mechanism is already in production and regression-pinned
-  (#80); this ADR restates it as a durable invariant so the protected review harness cannot be
-  loosened by a later change or a new coding-agent CLI.
+- **Status:** Accepted, **AMENDED 2026-08-21** — an adversarial review found the env-strip is not
+  total (on-disk `~/.git-credentials` channel + non-Claude gap + OpenCode auto-approve); the
+  invariant is the target, but is NOT yet fully enforced. See "Amendment 2026-08-21" for the verified
+  gaps and the real DoD. The Claude env-strip is in production and regression-pinned (#80).
 - **Date:** 2026-08-21
 - **Context source:** #65 (broker git credentials — review lane verified), #80 (review-lane fence
   regression test), `packages/daemon/src/daemon.ts` (`stripGithubCredentials`,
@@ -32,10 +33,11 @@ below is what any implementation must preserve.
 
 1. **No resident credential.** When `permissionMode === "review"`, the daemon sets
    `withholdGitCredentials`, and `spawnAgentProcess` applies `stripGithubCredentials(childEnv)`,
-   which removes `GH_TOKEN`, `GITHUB_TOKEN`, and `GIT_CONFIG_COUNT|KEY_n|VALUE_n` (the git
-   extraheader auth is applied via exactly those `GIT_CONFIG_*` vars, so removal is total). A review
-   run performs **no authenticated git op and no `gh` call** — it reads a pre-provisioned diff
-   offline.
+   which removes `GH_TOKEN`, `GITHUB_TOKEN`, and `GIT_CONFIG_COUNT|KEY_n|VALUE_n` from the agent
+   **environment**. A review run is intended to perform **no authenticated git op and no `gh` call**
+   — it reads a pre-provisioned diff offline. **⚠ This env-strip is necessary but NOT sufficient — see
+   the 2026-08-21 amendment below: an on-disk credential channel survives it, so the invariant is not
+   yet fully enforced.**
 2. **`review` is the DEFAULT for PR triggers, and a structural pin for untrusted PR content.** An
    unconfigured PR-family automation runs `review` (emit-only). For any PR-family event whose content
    is **untrusted** — a fork PR, or an author **below the resolved trusted-author whitelist** — the
@@ -91,6 +93,38 @@ invariant is defensible and auditable:
   hardening guidance on running privileged logic against untrusted PRs — and why Evergreen excludes
   `pull_request` triggers entirely).
 
+## Amendment 2026-08-21 — the fence is INCOMPLETE (adversarial review, verified)
+
+An adversarial review (codex, independent model, read-only repo access) found that the original
+"removal is total" claim is **false**. The env-strip closes the environment channel only; three
+on-box channels survive it and must be closed before this ADR's invariant actually holds:
+
+1. **On-disk credential file (HIGH, verified).** `setupGitCredentials`
+   (`packages/sandbox/src/setup.ts:184-203`) runs **unconditionally** in `setupSandboxEveryTime`
+   (call at `setup.ts:213`, not review-gated) and writes the token **plaintext** to
+   `~/.git-credentials` while setting `credential.helper store` globally. `stripGithubCredentials`
+   removes only env keys, so a prompt-injected review agent can `cat ~/.git-credentials` (exfiltrate)
+   or just `git push` (the helper supplies the token). The Claude review tool-policy denies
+   `Bash(git push:*)`/`gh` but **not `cat`**.
+2. **Non-Claude harnesses get no tool-policy AND no env-strip (HIGH, verified).** `withholdGitCredentials`
+   is passed only by `runClaudeCodeCommand` (`packages/daemon/src/daemon.ts:646-656`); Codex/Amp/
+   Gemini/OpenCode call `spawnAgentProcess` without it (`daemon.ts:720-886`). This is the same gap
+   #76 criterion 5 tracks — but until it lands, four of five harnesses run review with the token
+   fully resident.
+3. **OpenCode auto-approves every permission (HIGH, verified).** `OPENCODE_AUTO_APPROVE_PLUGIN_CONTENT`
+   (`packages/sandbox/src/agents/opencode-config.ts:154-163`, installed at `setup.ts:419`) returns
+   `output.status = "allow"` for all `permission.ask` — so an OpenCode review run has no effective
+   tool fence at all.
+
+**Required fix to make the invariant true (this ADR's real DoD):** for a review run, in addition to
+the env-strip — (a) remove `~/.git-credentials` and `git config --global --unset credential.helper`
+(or never write them in the review provisioning path); (b) apply the review tool-policy for EVERY
+harness, and disable the OpenCode auto-approve plugin in review mode; (c) note that `permissionMode`
+is CLI-argument scoping, **not an OS capability boundary** — an agent with `Bash` can launch another
+CLI with different flags, so the credential must be *absent from the box*, not merely denied by
+policy. The durable end-state is the broker (#81): the token is never resident on the review box at
+all. Tracking: this amendment's fixes should be a child of #81 / folded into #76.
+
 ## Options considered
 
 - **Strip credentials from the review env (chosen)** vs a scoped read-only token. Chosen: absence is
@@ -101,18 +135,25 @@ invariant is defensible and auditable:
 
 ## Consequences
 
-- **Positive:** a review agent cannot push, comment, or leak a token even under full prompt
-  injection; the guarantee is two-layered (tool-policy + env strip) and does not depend on the agent
-  behaving.
-- **Negative / watch:** the fence must be re-proven for every new harness (ADR-006 makes this a typed
-  field + a per-agent test, not a manual reminder). The non-review lanes still hold a resident token
-  and need the broker work (#81) — that is a *separate* lane, out of this ADR's scope.
+- **Positive (once the amendment's fixes land):** a review agent cannot push, comment, or leak a
+  token even under full prompt injection; the guarantee is layered (tool-policy + env strip + on-disk
+  removal + broker) and does not depend on the agent behaving.
+- **Negative / watch:** **as of 2026-08-21 the invariant is NOT fully enforced** — the on-disk
+  `~/.git-credentials` channel, the non-Claude env-strip gap (#76), and the OpenCode auto-approve
+  plugin each defeat it (see Amendment). The env-strip + Claude tool-policy raise the bar but do not
+  close the hole. The fence must also be re-proven for every new harness (ADR-006 makes this a typed
+  field + a per-agent test). Non-review lanes hold a resident token by design and need the broker
+  (#81) — the review lane needs the SAME broker to be truly credential-free.
 
 ## Testing
 
 - `daemon.test.ts` "#65 wiring" dispatches a real review-mode message and asserts the captured spawn
   env is credential-free; normal mode keeps it. #76 extends this from Claude-only to all five
   adapters. A golden test pins `reviewPolicyArgs()` output (#75).
+- **On-disk fence assertion (amendment):** in a review run, `~/.git-credentials` is absent (or
+  empty) and `git config --global credential.helper` is unset — assert on the box, and prove a
+  `cat ~/.git-credentials` / `git push` yields nothing usable. Run this per-harness, and prove the
+  OpenCode auto-approve plugin is disabled in review mode.
 - Trust-conditioned floor property test: for every fork PR and every PR whose `author_association` ∉
   {`OWNER`, `MEMBER`}, `effective === "review"` regardless of config; a non-fork member/owner PR
   configured above `review` reaches the daemon at the configured mode, and its GitHub write arrives

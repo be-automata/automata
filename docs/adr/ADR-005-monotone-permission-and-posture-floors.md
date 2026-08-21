@@ -3,7 +3,9 @@
 - **Status:** Accepted (2026-08-21) as the governing invariant for epic #70 Track P (#71–#74) and its
   successors #82 (per-trigger `permissionMode` floor) and #83 (per-sub-event granularity). The
   review-severity axis (`blockTolerance`) already ships; this ADR fixes the *shape* every current
-  and future strictness control must take.
+  and future strictness control must take. **Corrected 2026-08-21** (adversarial review): the
+  default-vs-cap arithmetic was fixed, and two implementation gaps (no trust data path; two
+  unguarded dispatch seams) were made explicit — see Decision §2, §3a, §3b.
 - **Date:** 2026-08-21
 - **Context source:** `packages/shared/src/db/schema.ts:1423` (`blockTolerance` on
   `repo_review_settings`), `packages/review/src/review/severity-policy.ts` (`toleranceToPolicy`),
@@ -33,20 +35,41 @@ not merely validated against.
 1. **Total order, strictest-first:** `review ⊏ plan ⊏ allowAll` for permission mode;
    `critical ⊐ error ⊐ warning ⊐ info` for the blocking severity. Each is a lattice with a
    well-defined *meet* (most-strict).
-2. **Compose by meet, never by override:** the effective value is
-   `min-privilege(derivedDefault, configuredFloor, …)` — a monotone `tighten()` that takes the
-   most-strict of all applicable scopes per field. An org floor a repo can only tighten; a
-   per-trigger/sub-event floor is `min(configuredMode, floorFor(subEvent))`.
-3. **The PR floor is trust-conditioned; `review` is the default and the untrusted bottom.**
-   `floorFor(subEvent, ctx)` returns `review` as a **structural pin** for **untrusted** PR content —
-   a fork PR, or an author **below the resolved trusted-author threshold** — so no configuration can
-   move it (ADR-004's confused-deputy fence). For a **trusted-internal** PR (non-fork, author
-   at/above the threshold) the floor drops so an automation may be configured *above* `review` (write
-   PR comments / create linking issues), while `review` remains the **default** when unconfigured. The
-   trust context (`isFork`, `author_association`) is derived **server-side from the webhook, never
-   user-supplied** — so the floor is a function of trust, and config still only tightens toward it.
-   Monotonicity is unchanged: `rank(effective) ≤ rank(floorFor(subEvent, ctx))`. (Relaxed from a flat
-   PR→`review` pin by owner ruling 2026-08-21.)
+2. **Separate the DEFAULT from the CAP — they are not the same value (correction 2026-08-21).** An
+   earlier draft wrote `effective = min(derivedDefault, configured)` with PR `derivedDefault = review`;
+   that is a bug — since `review` is the least-privilege element, the meet can never yield
+   `plan`/`allowAll`, so the trusted-internal write case is mathematically impossible. Model privilege
+   explicitly (`review = 0 ⊏ plan = 1 ⊏ allowAll = 2`) and keep two distinct things:
+   - **`cap(ctx)`** = the maximum privilege a scope permits (a monotone ceiling). Composed across
+     scopes by `tighten()` = **min-privilege**: `cap_eff = min(cap_org, cap_repo, cap_trigger, …)` —
+     a lower scope can only lower the cap, never raise it.
+   - **`default`** = the value used when the automation sets no mode (PR-family → `review`; non-PR →
+     `allowAll`).
+   The effective mode is `effective = min-privilege(configured ?? default, cap_eff(ctx))`. Worked
+   cases: trusted-internal PR configured `allowAll` → `min(allowAll, cap=allowAll) = allowAll` ✓;
+   trusted-internal PR unconfigured → `min(review, allowAll) = review` (default holds) ✓; untrusted
+   PR configured `allowAll` → `min(allowAll, cap=review) = review` (pinned) ✓.
+3. **The PR cap is trust-conditioned; `review` is the default.** `cap(ctx)` for a PR-family
+   sub-event is **`review` (privilege 0) for untrusted content** — a fork PR, or an author **below
+   the resolved trusted-author threshold** — so no configuration can raise it (ADR-004's
+   confused-deputy fence). For a **trusted-internal** PR (non-fork, author at/above the threshold) the
+   cap is **`allowAll`**, so an automation may be configured up to write PR comments / create linking
+   issues; but the **default stays `review`** when unconfigured. The trust context (`isFork`,
+   `author_association`) is derived **server-side, never user-supplied**. Monotonicity holds on the
+   cap: `privilege(effective) ≤ cap_eff(ctx)`. (Relaxed from a flat PR→`review` pin by owner ruling
+   2026-08-21; arithmetic corrected 2026-08-21.)
+3a. **Trust context needs a data path that does not exist yet (verified gap).** Today PR webhook
+   dispatch carries only automation id / repo / PR number / action / source
+   (`apps/www/src/app/api/webhooks/github/handlers.ts`), the created thread persists only skill
+   provenance (`packages/shared/src/db/types.ts` `ThreadSourceMetadata`), and `buildRemoteDaemonMessage`
+   receives no trust fields. `cap(ctx)` therefore requires a NEW immutable trust snapshot (`isFork`,
+   `author_association`, sub-event) captured at intake and threaded to the resolver. **Manual/retry
+   runs** (`source: "manual"`, no webhook) MUST **fail closed** — treat as untrusted (cap = `review`)
+   or do a fresh server-side GitHub lookup; never default missing trust to trusted.
+3b. **The cap must be enforced at a SINGLE shared resolver both dispatch seams call (verified gap).**
+   `permissionMode` is set independently at `apps/www/src/server-lib/remote-daemon-message.ts` AND at
+   `apps/www/src/agent/msg/startAgentMessage.ts:406-490`. Enforcing the cap in only one lets the
+   other bypass it. The resolver is the invariant; both seams delegate to it.
 4. **The trusted-author threshold is itself a posture on this same lattice** (owner ruling
    2026-08-21). Order `author_association` by trust rank
    (`OWNER > MEMBER > COLLABORATOR > CONTRIBUTOR > FIRST_TIME_CONTRIBUTOR > NONE`); the trusted set is
@@ -72,8 +95,11 @@ not merely validated against.
   user-settable** — a forgeable trust context defeats the fence.
 - **A "free trigger→mode map with no floor"** (loosening for untrusted content) was analyzed and
   **rejected as net-negative** (#82): it breaks the guarantee for a convenience nobody needs.
-- **Monotonicity is property-tested:** `rank(effective) ≤ rank(derivedDefault)` for every
-  (scope, config) tuple (#72, #82 criterion 3).
+- **Monotonicity is property-tested:** `privilege(effective) ≤ cap_eff(ctx)` for every
+  (scope, config, trust) tuple, and `cap_eff = min-privilege(cap_org, cap_repo, …)` (a lower scope
+  can only lower the cap) (#72, #82 criterion 3).
+- **Missing trust fails closed:** an event with no derivable trust context (manual/retry, absent
+  webhook fields) resolves to `cap = review`, never to the permissive default.
 - Absent configuration reproduces today's derived behavior exactly (regression).
 
 ## Options considered
@@ -103,8 +129,11 @@ mitigations — see ADR-004's Standards mapping for the full citation set.
 
 ## Testing
 
-- Property tests: monotonicity over all inputs; for untrusted PR content (fork, or rank below
-  `T_eff`) `effective === "review"` regardless of config; a trusted-internal PR configured `plan`/
-  `allowAll` reaches the daemon at that mode; `T_eff = max(T_org, T_repo)` (a repo cannot admit an
-  author the org excluded); a non-PR trigger configured `plan` reaches the daemon as `plan`,
-  configured `review` runs emit-only.
+- Property tests: `privilege(effective) ≤ cap_eff` over all inputs; for untrusted PR content (fork,
+  or rank below `T_eff`) `effective === "review"` regardless of config; a trusted-internal PR
+  configured `plan`/`allowAll` reaches the daemon at that mode; `T_eff = max(T_org, T_repo)` (a repo
+  cannot admit an author the org excluded); a non-PR trigger configured `plan` reaches the daemon as
+  `plan`, configured `review` runs emit-only.
+- Both dispatch seams (`remote-daemon-message.ts` and `startAgentMessage.ts`) route through the one
+  resolver — a test drives each seam and asserts the same clamped mode.
+- Manual/retry dispatch with no webhook trust resolves to `review` (fail-closed), not the default.
