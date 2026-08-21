@@ -59,9 +59,12 @@ below is what any implementation must preserve.
 
 ## Anti-deviation invariants (what the protected harness must always hold)
 
-- **Every** harness's review run produces a spawn env with no GitHub credential — not just Claude.
-  This is a **typed capability** (`withholdGitCredentialsInReviewMode`, ADR-006) and is asserted
-  per-agent (#76 acceptance criterion 5), so a new CLI cannot silently ship without the fence.
+- **Required invariant (not yet enforced):** *every* harness's review run must produce a spawn env
+  with no GitHub credential — not just Claude. As of 2026-08-21 this holds for Claude only; the
+  other four harnesses run review with the token fully resident (see Amendment). The mechanism that
+  will enforce it for every harness is a **typed capability** (`withholdGitCredentialsInReviewMode`,
+  ADR-006) asserted per-agent (#76 acceptance criterion 5), so once it lands a new CLI cannot
+  silently ship without the fence.
 - The approve floor is **server-enforced** regardless of what the agent emits or omits — the agent
   cannot approve below the floor by malformed output.
 - Adding a git-write or `gh` tool to the review tool-policy is forbidden. The review policy lives in
