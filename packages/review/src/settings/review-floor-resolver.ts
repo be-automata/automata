@@ -71,8 +71,9 @@ export function resolveApproveFloorPolicy(
  *
  * Returns the same 2-field {@link ApproveSeverityPolicy} shape as
  * {@link resolveApproveFloorPolicy} — deliberately NOT widened, so the
- * single production caller (`apps/www/src/server-lib/review/resolve-approve-floor.ts`)
- * and its existing assertions are untouched.
+ * single production caller (`apps/www/src/server-lib/review/resolve-approve-floor.ts`,
+ * which now IS this function's caller — issue #73) and its existing assertions
+ * are untouched.
  */
 export function resolveComposedFloorPolicy(
   orgSetting: StoredReviewTolerance | null | undefined,

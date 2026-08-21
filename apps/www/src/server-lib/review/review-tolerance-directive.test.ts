@@ -7,6 +7,7 @@ import {
 } from "@terragon/shared/model/test-helpers";
 import { createOrganization } from "@terragon/shared/model/organizations";
 import { setRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
+import { upsertOrganizationReviewSetting } from "@terragon/shared/model/organization-review-settings";
 import { nanoid } from "nanoid";
 import { computeReviewToleranceDirective } from "./review-tolerance-directive";
 
@@ -104,6 +105,30 @@ describe("computeReviewToleranceDirective (mode-agnostic)", () => {
     });
     expect(directive).toContain("Repository review tolerance: `info`");
     expect(directive).toContain("EVERY finding — including `info`");
+  });
+
+  it("org floor tightens the rendered directive: org warning + repo error → directive reflects warning", async () => {
+    await upsertOrganizationReviewSetting({
+      db,
+      organizationId: orgId,
+      patch: { blockTolerance: "warning" },
+    });
+    await setRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "acme/widgets",
+      blockTolerance: "error",
+    });
+    const threadId = await makeReviewThread("acme/widgets");
+    const { directive } = await computeReviewToleranceDirective({
+      db,
+      userId,
+      threadId,
+    });
+    expect(directive).toContain("Repository review tolerance: `warning`");
+    expect(directive).toContain(
+      "at `warning` or higher force `request_changes`",
+    );
   });
 
   it("emits NO directive for a non-review (non-pull_request) thread", async () => {

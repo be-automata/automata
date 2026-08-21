@@ -43,8 +43,10 @@ export async function computeReviewToleranceDirective({
   /**
    * The already-fetched thread (getThreadMinimal result), passed by callers that
    * loaded it moments earlier (the /api/daemon/next-message route fetches it for
-   * its ownership check) so the always-on directive adds ZERO extra reads. When
-   * omitted, the helper fetches it itself.
+   * its ownership check) so this helper avoids a redundant thread read. It still
+   * calls `resolveApproveFloor`, which adds one org-row PK lookup alongside the
+   * existing repo-row read (both via `Promise.all`, so wall-clock stays ~flat).
+   * When `thread` is omitted, the helper fetches it itself.
    */
   thread?: ThreadForDirective | null;
 }): Promise<{ directive: string; isReview: boolean }> {
