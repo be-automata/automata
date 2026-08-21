@@ -11,6 +11,7 @@ import {
   DBUserMessage,
   ThreadSource,
   ThreadSourceMetadata,
+  ThreadTrustContext,
 } from "@terragon/shared";
 import { modelToAgent } from "@terragon/agent/utils";
 import { UserFacingError } from "@/lib/server-actions";
@@ -62,6 +63,15 @@ export interface CreateThreadOptions {
   skipSetup?: boolean;
   sourceType: ThreadSource;
   sourceMetadata?: ThreadSourceMetadata;
+  /**
+   * Server-derived PR trust snapshot (ADR-005 §3a, #82) — captured at intake
+   * from `pulls.get`, NEVER caller-suppliable via any zod request schema or
+   * server-action arg (forgery would defeat the permission-floor fence).
+   * Absent/undefined for a non-PR thread, or when the intake-time GitHub
+   * lookup failed (fail-closed — the permission-floor resolver treats a NULL
+   * `thread.trustContext` as untrusted, never as trusted-by-omission).
+   */
+  trustContext?: ThreadTrustContext | null;
   delayMs?: number;
   // Shadow mode (pilot): create the thread row (org-stamped, dashboard-
   // visible) but do NOT boot a sandbox or run the agent — so the installation
@@ -93,6 +103,7 @@ export async function createNewThread({
   skipSetup = false,
   sourceType,
   sourceMetadata,
+  trustContext = null,
   delayMs = 0,
   shadow = false,
 }: CreateThreadOptions): Promise<{ threadId: string; threadChatId: string }> {
@@ -230,6 +241,7 @@ export async function createNewThread({
       skipSetup,
       sourceType,
       sourceMetadata,
+      trustContext,
       shadow,
     },
     initialChatValues: {

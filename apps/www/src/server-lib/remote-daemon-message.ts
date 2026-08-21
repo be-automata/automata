@@ -1,6 +1,8 @@
 import { db } from "@/lib/db";
 import { getThreadChat } from "@terragon/shared/model/threads";
 import { computeReviewToleranceDirective } from "@/server-lib/review/review-tolerance-directive";
+import { resolvePermissionModeForDispatch } from "@/server-lib/review/resolve-permission-mode";
+import type { ThreadTrustContext } from "@terragon/shared/db/types";
 import { getUserMessageToSend } from "@/lib/db-message-helpers";
 import { tryAutoCompactThread } from "@/server-lib/compact";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
@@ -59,6 +61,7 @@ export async function buildRemoteDaemonMessage({
     automationId: string | null;
     organizationId: string | null;
     githubRepoFullName: string;
+    trustContext?: ThreadTrustContext | null;
   } | null;
 }): Promise<RemoteDaemonMessage | null> {
   const threadChat = await getThreadChat({
@@ -124,18 +127,32 @@ export async function buildRemoteDaemonMessage({
   // Per-repo review tolerance (ADR-036) is MODE-AGNOSTIC: the directive telling the
   // agent which verdict its findings imply under the repo's floor is pure prompt
   // guidance, injected for EVERY review thread regardless of REVIEW_SINGLE_WRITER
-  // (see computeReviewToleranceDirective — it never reads the flag).
-  const { directive: reviewToleranceDirective, isReview } =
-    await computeReviewToleranceDirective({ db, userId, threadId, thread });
+  // (see computeReviewToleranceDirective — it never reads the flag). This call is
+  // ALSO the ONE `getAutomation` read the permission-mode resolver below reuses
+  // (ADR-005 §3b: one read, not two) — the automation it returns carries the
+  // trigger type + configured permissionMode.
+  const {
+    directive: reviewToleranceDirective,
+    automation,
+    thread: resolvedThread,
+  } = await computeReviewToleranceDirective({ db, userId, threadId, thread });
 
-  // Every review thread runs emit-only: permissionMode="review" makes the daemon
-  // strip all GitHub credentials + apply the no-gh-write tool-policy, so the agent
-  // EMITs its verdict and the control plane posts it once at thread-finish (with
-  // the tolerance floor + approve backstop). This is unconditional now — the review
-  // channel is single-writer in every mode (the retired REVIEW_SINGLE_WRITER=false
-  // path posted nothing), and withholding gh creds here is what prevents a
-  // double-post now that the finish hook always posts the intent.
-  const applyReviewPolicy = isReview;
+  // The permission-mode FLOOR (ADR-005 §2/§3/§3b, #82): the ONE shared resolver
+  // both dispatch seams call. PR-family events default/cap to "review" (emit-only,
+  // ADR-004) unless the content is trust-verified (server-derived trustContext,
+  // never caller-supplied); non-PR events are uncapped, reproducing today's
+  // "allowAll" default exactly (AC4 regression). This REPLACES the old
+  // `applyReviewPolicy ? "review" : threadChat.permissionMode || "allowAll"`
+  // ad-hoc check — that check only ever considered `isReview`, never a
+  // configured trigger permissionMode nor the trust floor.
+  const permissionMode = await resolvePermissionModeForDispatch({
+    db,
+    organizationId: resolvedThread?.organizationId ?? null,
+    repoFullName: resolvedThread?.githubRepoFullName,
+    automation,
+    thread: { trustContext: resolvedThread?.trustContext ?? null },
+    threadChatPermissionMode: threadChat.permissionMode,
+  });
 
   return {
     type: "claude",
@@ -144,9 +161,7 @@ export async function buildRemoteDaemonMessage({
     agentVersion: threadChat.agentVersion,
     prompt: finalPrompt + reviewToleranceDirective,
     sessionId,
-    permissionMode: applyReviewPolicy
-      ? "review"
-      : threadChat.permissionMode || "allowAll",
+    permissionMode,
     ...(shouldUseCredits ? { useCredits: true } : {}),
     featureFlags,
   };

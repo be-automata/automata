@@ -37,6 +37,7 @@ import {
   ClaudeOrganizationType,
   ThreadSource,
   ThreadSourceMetadata,
+  ThreadTrustContext,
   UserCreditGrantType,
   AgentProviderMetadata,
   RepoSkillVersionSource,
@@ -398,6 +399,16 @@ export const thread = pgTable(
     skipSetup: boolean("skip_setup").notNull().default(false),
     sourceType: text("source_type").$type<ThreadSource>(),
     sourceMetadata: jsonb("source_metadata").$type<ThreadSourceMetadata>(),
+    /**
+     * Server-derived PR trust snapshot (ADR-005 §3a) — `isFork` +
+     * `authorAssociation` captured ONCE at intake from `pulls.get`, never from
+     * caller/webhook input. NULL means "no snapshot" (non-PR thread, or an
+     * intake-time GitHub lookup failure) and the permission-floor resolver MUST
+     * treat NULL as fail-closed (cap = "review"), never as trusted. Kept as its
+     * own column rather than folded into `sourceMetadata` — that field is a
+     * discriminated union `automation-skill` promotion already occupies.
+     */
+    trustContext: jsonb("trust_context").$type<ThreadTrustContext>(),
     // Thread version:
     // 0: One thread -> chat information is part of the thread
     // 1: One thread -> can have multiple thread chats, chat information is separate from the thread

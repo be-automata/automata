@@ -1,7 +1,8 @@
 import type { DB } from "@terragon/shared/db";
+import type { Automation, ThreadTrustContext } from "@terragon/shared/db/types";
 import { getThreadMinimal } from "@terragon/shared/model/threads";
+import { getAutomation } from "@terragon/shared/model/automations";
 import { buildReviewToleranceDirective } from "@terragon/review/severity-policy";
-import { isReviewThread } from "./review-single-writer-finish";
 import { resolveApproveFloor } from "./resolve-approve-floor";
 
 /** The minimal thread fields this helper reads (a subset of getThreadMinimal). */
@@ -9,6 +10,7 @@ type ThreadForDirective = {
   automationId: string | null;
   organizationId: string | null;
   githubRepoFullName: string;
+  trustContext?: ThreadTrustContext | null;
 };
 
 /**
@@ -30,6 +32,20 @@ type ThreadForDirective = {
  *    or "" when this is not a review thread (or the repo is unknown).
  *  - `isReview`: whether this is a review thread — the caller uses this to gate
  *    the SINGLE-WRITER-only concerns (permissionMode="review" + server floor).
+ *  - `automation`: the fetched automation row (or null when the thread has no
+ *    automation), exposed so callers that ALSO need the trigger type +
+ *    configured `permissionMode` (the #82 permission-floor resolver) can
+ *    reuse this ONE `getAutomation` read instead of issuing a second one —
+ *    the whole point of threading the already-fetched thread through in the
+ *    first place (ADR-005 §3b: one read, not two, at each dispatch seam).
+ *  - `thread`: the RESOLVED thread (whichever of `providedThread` /
+ *    `getThreadMinimal` was actually used) — callers MUST read
+ *    `organizationId`/`trustContext`/`githubRepoFullName` from THIS, never
+ *    from their own possibly-omitted `thread` argument, since a caller that
+ *    passes no `thread` at all would otherwise silently resolve against
+ *    `undefined` (losing the trust snapshot and fail-open-ing the
+ *    permission-floor cap to "review" for the wrong reason — missing data,
+ *    not a real fail-closed decision).
  */
 export async function computeReviewToleranceDirective({
   db,
@@ -49,19 +65,27 @@ export async function computeReviewToleranceDirective({
    * When `thread` is omitted, the helper fetches it itself.
    */
   thread?: ThreadForDirective | null;
-}): Promise<{ directive: string; isReview: boolean }> {
+}): Promise<{
+  directive: string;
+  isReview: boolean;
+  automation: Automation | null;
+  thread: ThreadForDirective | null;
+}> {
   const thread =
     providedThread !== undefined
       ? providedThread
-      : await getThreadMinimal({ db, userId, threadId });
-  const isReview = await isReviewThread({
-    db,
-    userId,
-    automationId: thread?.automationId ?? null,
-    organizationId: thread?.organizationId ?? null,
-  });
+      : ((await getThreadMinimal({ db, userId, threadId })) ?? null);
+  const automation = thread?.automationId
+    ? ((await getAutomation({
+        db,
+        userId,
+        automationId: thread.automationId,
+        organizationId: thread.organizationId ?? null,
+      })) ?? null)
+    : null;
+  const isReview = automation?.triggerType === "pull_request";
   if (!isReview || !thread?.githubRepoFullName) {
-    return { directive: "", isReview };
+    return { directive: "", isReview, automation, thread };
   }
   const policy = await resolveApproveFloor({
     db,
@@ -71,5 +95,7 @@ export async function computeReviewToleranceDirective({
   return {
     directive: "\n\n---\n\n" + buildReviewToleranceDirective(policy) + "\n",
     isReview,
+    automation,
+    thread,
   };
 }
