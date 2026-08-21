@@ -89,7 +89,6 @@ describe("buildRemoteDaemonMessage — permission-mode floor (#82)", () => {
         organizationId: orgId,
         repoFullName: "acme/widgets",
         triggerType,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         triggerConfig: triggerConfig as any,
       },
     });
