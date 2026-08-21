@@ -11,29 +11,14 @@ import {
 } from "./shared";
 import { performance } from "node:perf_hooks";
 import { RetryBackoff, RetryConfig, DEFAULT_RETRY_CONFIG } from "./retry";
-import {
-  getAnthropicApiKeyOrNull,
-  maybeFixLogsForSessionId,
-  claudeCommand,
-} from "./claude";
-import {
-  geminiCommand,
-  parseGeminiLine,
-  createGeminiParserState,
-} from "./gemini";
+import { maybeFixLogsForSessionId } from "./claude";
 import {
   MessageBufferEntry,
   killProcessGroup,
   createIdleWatchdog,
 } from "./utils";
-import {
-  opencodeCommand,
-  getOpencodeApiKeyOrNull,
-  parseOpencodeLine,
-} from "./opencode";
-import { ampCommand, getAmpApiKeyOrNull } from "./amp";
-import { codexCommand, parseCodexLine } from "./codex";
 import { AgentFrontmatterReader } from "./agent-frontmatter";
+import { getAdapter } from "./adapters/registry";
 
 function formatError(error: unknown): object {
   if (error instanceof Error) {
@@ -311,7 +296,7 @@ export class TerragonDaemon {
         clearInterval(activeProcessState.pollInterval);
       }
       if (
-        activeProcessState.agent === "claudeCode" &&
+        getAdapter(activeProcessState.agent).capabilities.fixesSessionLogs &&
         activeProcessState.sessionId
       ) {
         this.runtime.logger.info("Cleaning up claude session logs", {
@@ -355,33 +340,11 @@ export class TerragonDaemon {
       pollInterval: null,
     };
     this.activeProcesses.set(input.threadChatId, newProcessState);
-    switch (input.agent) {
-      case "claudeCode":
-        await this.runClaudeCodeCommand(input);
-        break;
-      case "amp":
-        await this.runAmpCommand(input);
-        break;
-      case "codex":
-        await this.runCodexCommand(input);
-        break;
-      case "gemini":
-        await this.runGeminiCommand(input);
-        break;
-      case "opencode":
-        await this.runOpencodeCommand(input);
-        break;
-      default: {
-        // This ensures we handle all model types exhaustively
-        const _exhaustiveCheck: never = input.agent;
-        this.runtime.logger.error("Unknown agent", {
-          agent: _exhaustiveCheck,
-          agentVersion: input.agentVersion,
-          model: input.model,
-        });
-        throw new Error(`Unknown agent: ${input.agent}`);
-      }
-    }
+    // getAdapter(input.agent) is exhaustive by construction: the registry is
+    // typed `Record<AIAgent, HarnessAdapter>` (adapters/registry.ts), so
+    // TypeScript already rejects any AIAgent variant left unhandled — no
+    // runtime default case is needed here.
+    await this.runAgentCommand(input);
   }
 
   private onProcessStderr = (
@@ -643,302 +606,140 @@ export class TerragonDaemon {
     });
   }
 
-  private async runClaudeCodeCommand(
-    input: DaemonMessageClaude,
-  ): Promise<void> {
-    if (input.sessionId) {
+  /**
+   * Generic per-agent dispatch (#76, ADR-006). Replaces the deleted dispatch
+   * switch and the five `run*Command` methods with a single implementation
+   * driven entirely by `getAdapter(input.agent)` — no per-agent branching on
+   * agent identity remains. Every quirk that used to live in one of the five
+   * methods is now expressed as either a `HarnessAdapter` method (buildArgs,
+   * prepareEnv, makeLineParser) or a `HarnessCapabilities` flag
+   * (fixesSessionLogs / flushBufferOnErrorResult / sessionTracking /
+   * withholdGitCredentialsInReviewMode / mockSuccessResult). See
+   * adapters/types.ts for the contract these flags encode.
+   */
+  private async runAgentCommand(input: DaemonMessageClaude): Promise<void> {
+    const adapter = getAdapter(input.agent);
+
+    // Gap A: only claudeCode fixes up on-disk session logs pre-spawn
+    // (mirrors the deleted runClaudeCodeCommand's pre-spawn call).
+    if (adapter.capabilities.fixesSessionLogs && input.sessionId) {
       maybeFixLogsForSessionId(this.runtime, input.sessionId);
     }
+
+    const parser = adapter.makeLineParser({ runtime: this.runtime });
+
     return this.spawnAgentProcess({
-      agentName: "Claude",
+      agentName: adapter.displayName,
       input,
-      // Review runs (single-writer): strip every GitHub credential from the agent env.
-      withholdGitCredentials: input.permissionMode === "review",
-      command: claudeCommand({
+      // The withhold criterion (epic #70 DoD 6): driven ENTIRELY by
+      // capabilities, never by agent identity and never unconditionally.
+      withholdGitCredentials:
+        input.permissionMode === "review" &&
+        adapter.capabilities.withholdGitCredentialsInReviewMode,
+      command: adapter.buildArgs({
         runtime: this.runtime,
         prompt: input.prompt,
         sessionId: input.sessionId,
         model: input.model,
-        mcpConfigPath: this.mcpConfigPath ?? null,
         permissionMode: input.permissionMode,
+        mcpConfigPath: this.mcpConfigPath ?? null,
         enableMcpPermissionPrompt: this.getFeatureFlag("mcpPermissionPrompt"),
+        useCredits: input.useCredits,
       }),
-      env: {
-        // useCredits routes every call through the control-plane proxy, which
-        // supplies the upstream key itself. Passing ANTHROPIC_API_KEY alongside
-        // it hands the CLI two contradictory credentials and lets ITS precedence
-        // rule decide who pays. Harmless in a sandbox (nothing injects a key
-        // there), but on an execution-plane box the operator's key IS present.
-        //
-        // It must be blanked, not omitted: the child env is `{...process.env,
-        // ...env}` below, so leaving the key out of this object just lets the
-        // ambient one through. "" is the same "no key" signal the credentials-file
-        // path has always used.
-        ANTHROPIC_API_KEY: input.useCredits
-          ? ""
-          : getAnthropicApiKeyOrNull(this.runtime),
-        BASH_MAX_TIMEOUT_MS: (60 * 1000).toString(),
-        ...(input.useCredits
-          ? {
-              ANTHROPIC_BASE_URL: `${this.runtime.normalizedUrl}/api/proxy/anthropic`,
-              ANTHROPIC_AUTH_TOKEN: input.token,
-            }
-          : {}),
-      },
+      env: adapter.prepareEnv({
+        runtime: this.runtime,
+        useCredits: !!input.useCredits,
+        token: input.token,
+        normalizedUrl: this.runtime.normalizedUrl,
+      }),
+      getMockSuccessResult: adapter.capabilities.mockSuccessResult
+        ? () => adapter.capabilities.mockSuccessResult!
+        : undefined,
       onStdoutLine: (line) => {
-        try {
-          const outputMessage = JSON.parse(line);
-          const sessionId = outputMessage.session_id;
-          if (sessionId) {
-            this.updateActiveProcessState(input.threadChatId, {
-              sessionId,
-              isWorking: true,
-            });
+        // Snapshot staleness: read the active process state ONCE per stdout
+        // line, BEFORE the message loop — a system message earlier in the
+        // same batch must NOT backfill later messages of that same batch.
+        const activeProcessState = this.activeProcesses.get(input.threadChatId);
+        const parsedMessages = parser.parse(line, {
+          isWorking: !!activeProcessState?.isWorking,
+        });
+        for (const parsedMessage of parsedMessages) {
+          const type = (parsedMessage as { type?: string }).type;
+          const sessionId = (parsedMessage as { session_id?: string })
+            .session_id;
+
+          // Gap C: the three session-tracking policies are intentionally
+          // NOT unified — this is the highest-risk divergence.
+          if (adapter.capabilities.sessionTracking === "any-message") {
+            if (sessionId) {
+              this.updateActiveProcessState(input.threadChatId, {
+                sessionId,
+                isWorking: true,
+              });
+            }
+          } else if (
+            adapter.capabilities.sessionTracking === "system-init-with-backfill"
+          ) {
+            if (type === "system" && sessionId) {
+              this.updateActiveProcessState(input.threadChatId, {
+                sessionId,
+                isWorking: true,
+              });
+            } else if (
+              activeProcessState?.sessionId &&
+              (type === "assistant" || type === "user")
+            ) {
+              (parsedMessage as { session_id?: string }).session_id =
+                activeProcessState.sessionId;
+            }
           }
-          if (outputMessage.type === "result") {
-            this.updateActiveProcessState(input.threadChatId, {
-              isCompleted: true,
-            });
-          }
+          // sessionTracking === "none" (amp): never touch sessionId/isWorking.
+
           this.addMessageToBuffer({
-            agent: "claudeCode",
-            message: outputMessage,
+            agent: input.agent,
+            message: parsedMessage,
             threadId: input.threadId,
             threadChatId: input.threadChatId,
             token: input.token,
           });
-        } catch (e) {
-          this.runtime.logger.error("Failed to parse Claude output line", {
-            line,
-            error: formatError(e),
-          });
-        }
-      },
-    });
-  }
 
-  private async runOpencodeCommand(input: DaemonMessageClaude): Promise<void> {
-    return this.spawnAgentProcess({
-      agentName: "Opencode",
-      input,
-      command: opencodeCommand({
-        runtime: this.runtime,
-        prompt: input.prompt,
-        model: input.model,
-        sessionId: input.sessionId,
-      }),
-      env: {
-        OPENCODE_API_KEY: getOpencodeApiKeyOrNull(this.runtime),
-      },
-      getMockSuccessResult: () => "Opencode successfully completed",
-      onStdoutLine: (line) => {
-        const activeProcessState = this.activeProcesses.get(input.threadChatId);
-        const parsedMessages = parseOpencodeLine({
-          line,
-          runtime: this.runtime,
-          isWorking: !!activeProcessState?.isWorking,
-        });
-        for (const parsedMessage of parsedMessages) {
-          const type = parsedMessage.type;
-          const sessionId = parsedMessage.session_id;
-          if (type === "system" && sessionId) {
-            this.updateActiveProcessState(input.threadChatId, {
-              sessionId,
-              isWorking: true,
-            });
-          } else if (
-            activeProcessState?.sessionId &&
-            (type === "assistant" || type === "user")
-          ) {
-            parsedMessage.session_id = activeProcessState.sessionId;
-          }
+          // isCompleted on type === "result" is uniform across all five agents.
           if (type === "result") {
             this.updateActiveProcessState(input.threadChatId, {
               isCompleted: true,
             });
-          }
-          this.addMessageToBuffer({
-            agent: "opencode",
-            message: parsedMessage,
-            threadId: input.threadId,
-            threadChatId: input.threadChatId,
-            token: input.token,
-          });
-        }
-      },
-    });
-  }
-
-  private async runAmpCommand(input: DaemonMessageClaude): Promise<void> {
-    return this.spawnAgentProcess({
-      agentName: "Amp",
-      command: ampCommand({
-        runtime: this.runtime,
-        prompt: input.prompt,
-        sessionId: input.sessionId,
-      }),
-      env: { AMP_API_KEY: getAmpApiKeyOrNull(this.runtime) },
-      input,
-      onStdoutLine: (line) => {
-        try {
-          const outputMessage = JSON.parse(line);
-          if (outputMessage.type === "result") {
-            this.updateActiveProcessState(input.threadChatId, {
-              isCompleted: true,
-            });
-          }
-          if (
-            outputMessage.type === "user" &&
-            outputMessage.message?.role === "user" &&
-            outputMessage.message?.content?.[0]?.type === "text"
-          ) {
-            // Ignore this message because amp echos the first message from the user.
-            this.runtime.logger.debug("Ignoring Amp user message", {
-              message: outputMessage,
-            });
-            return;
-          }
-          this.addMessageToBuffer({
-            agent: "amp",
-            message: outputMessage,
-            threadId: input.threadId,
-            threadChatId: input.threadChatId,
-            token: input.token,
-          });
-        } catch (e) {
-          this.runtime.logger.error("Failed to parse Amp output line", {
-            line,
-            error: e,
-          });
-        }
-      },
-    });
-  }
-
-  private async runCodexCommand(input: DaemonMessageClaude): Promise<void> {
-    return this.spawnAgentProcess({
-      agentName: "Codex",
-      input,
-      command: codexCommand({
-        runtime: this.runtime,
-        prompt: input.prompt,
-        model: input.model,
-        sessionId: input.sessionId,
-        useCredits: !!input.useCredits,
-      }),
-      getMockSuccessResult: () => "Codex successfully completed",
-      onStdoutLine: (line) => {
-        // Parse the line into ClaudeMessage format
-        const parsedMessages = parseCodexLine({
-          line,
-          runtime: this.runtime,
-        });
-        const activeProcessState = this.activeProcesses.get(input.threadChatId);
-        for (const parsedMessage of parsedMessages) {
-          const type = parsedMessage.type;
-          const sessionId = parsedMessage.session_id;
-          if (type === "system" && sessionId) {
-            this.updateActiveProcessState(input.threadChatId, {
-              sessionId,
-              isWorking: true,
-            });
-          } else if (
-            activeProcessState?.sessionId &&
-            (type === "assistant" || type === "user")
-          ) {
-            parsedMessage.session_id = activeProcessState.sessionId;
-          }
-          this.addMessageToBuffer({
-            agent: "codex",
-            message: parsedMessage,
-            threadId: input.threadId,
-            threadChatId: input.threadChatId,
-            token: input.token,
-          });
-          if (parsedMessage.type === "result") {
-            this.updateActiveProcessState(input.threadChatId, {
-              isCompleted: true,
-            });
-            if (parsedMessage.is_error) {
+            // Gap B: only codex flushes immediately on an is_error result.
+            // Ordering matters — the message above must already be in the
+            // buffer before this flush, which is why addMessageToBuffer
+            // runs first. Must NOT generalize to Claude (daemon.test.ts
+            // pins that Claude's is_error result does not trigger a flush).
+            if (
+              adapter.capabilities.flushBufferOnErrorResult &&
+              (parsedMessage as { is_error?: boolean }).is_error
+            ) {
               this.flushMessageBuffer();
             }
           }
         }
       },
-    });
-  }
-
-  private async runGeminiCommand(input: DaemonMessageClaude): Promise<void> {
-    // Create parser state for accumulating deltas
-    const parserState = createGeminiParserState();
-    return this.spawnAgentProcess({
-      agentName: "Gemini",
-      command: geminiCommand({
-        runtime: this.runtime,
-        prompt: input.prompt,
-        model: input.model,
-        sessionId: input.sessionId,
-      }),
-      env: {
-        GOOGLE_GEMINI_BASE_URL: `${this.runtime.normalizedUrl}/api/proxy/google`,
-        GEMINI_API_KEY: input.token,
-      },
-      input,
-      onStdoutLine: (line) => {
-        // Parse the line into ClaudeMessage format
-        const parsedMessages = parseGeminiLine({
-          line,
-          runtime: this.runtime,
-          state: parserState,
-        });
-        const activeProcessState = this.activeProcesses.get(input.threadChatId);
-        for (const parsedMessage of parsedMessages) {
-          const type = parsedMessage.type;
-          const sessionId = parsedMessage.session_id;
-          if (type === "system" && sessionId) {
-            this.updateActiveProcessState(input.threadChatId, {
-              sessionId,
-              isWorking: true,
-            });
-          } else if (
-            activeProcessState?.sessionId &&
-            (type === "assistant" || type === "user")
-          ) {
-            parsedMessage.session_id = activeProcessState.sessionId;
-          }
-          if (type === "result") {
-            this.updateActiveProcessState(input.threadChatId, {
-              isCompleted: true,
-            });
-          }
-          this.addMessageToBuffer({
-            agent: "gemini",
-            message: parsedMessage,
-            threadId: input.threadId,
-            threadChatId: input.threadChatId,
-            token: input.token,
-          });
-        }
-      },
       onClose: () => {
-        // Flush any remaining accumulated content
-        if (parserState.accumulatedContent) {
-          const activeProcessState = this.activeProcesses.get(
-            input.threadChatId,
-          );
+        // Only gemini's parser defines finalize(); for every other agent
+        // this is a no-op, matching the absence of an onClose handler in
+        // the deleted per-agent methods.
+        const finalMessages = parser.finalize?.() ?? [];
+        if (finalMessages.length === 0) {
+          return;
+        }
+        const activeProcessState = this.activeProcesses.get(input.threadChatId);
+        for (const parsedMessage of finalMessages) {
+          // gemini's finalize() yields session_id: "" byte-identically; the
+          // real session id (or "" if none tracked yet) is supplied here,
+          // exactly as the deleted onClose handler did.
+          (parsedMessage as { session_id?: string }).session_id =
+            activeProcessState?.sessionId || "";
           this.addMessageToBuffer({
-            agent: "gemini",
-            message: {
-              type: "assistant",
-              message: {
-                role: "assistant",
-                content: [
-                  { type: "text", text: parserState.accumulatedContent },
-                ],
-              },
-              parent_tool_use_id: null,
-              session_id: activeProcessState?.sessionId || "",
-            },
+            agent: input.agent,
+            message: parsedMessage,
             threadId: input.threadId,
             threadChatId: input.threadChatId,
             token: input.token,

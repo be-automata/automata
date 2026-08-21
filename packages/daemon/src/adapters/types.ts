@@ -77,18 +77,42 @@ export interface HarnessLineParser {
 /**
  * Security + behavior capabilities every adapter must declare.
  *
- * `withholdGitCredentialsInReviewMode` is the TARGET contract (ADR-004 /
- * ADR-006): every adapter reports `true` here. This is deliberately NOT a
- * mirror of daemon.ts's CURRENT behavior — today only `runClaudeCodeCommand`
- * passes `withholdGitCredentials` (daemon.ts:656); the other four run
- * methods omit it. That gap is closed by #76's cutover to the generic
- * `runAgentCommand`, which will read this field uniformly. A1 (#75) only
- * defines the contract and pins the gap with an explicitly-labelled test —
- * daemon.ts itself is untouched here.
+ * `withholdGitCredentialsInReviewMode` is the contract (ADR-004 / ADR-006):
+ * every adapter reports `true` here, and as of #76's cutover to the generic
+ * `runAgentCommand`, daemon.ts reads this field uniformly for every agent
+ * (`withholdGitCredentials: input.permissionMode === "review" &&
+ * adapter.capabilities.withholdGitCredentialsInReviewMode`) — closing the
+ * pre-#76 gap where only `runClaudeCodeCommand` actually withheld
+ * credentials. See the (now-inverted) test in `daemon-golden.test.ts`.
+ *
+ * Three additive capabilities close the remaining per-agent quirks the
+ * generic runner needs to reproduce byte-identically (#76):
+ *
+ * - `fixesSessionLogs`: true ONLY for claudeCode. The generic runner calls
+ *   `maybeFixLogsForSessionId` before spawn when set (mirrors the deleted
+ *   `runClaudeCodeCommand`'s pre-spawn call), and `killActiveProcess`'s
+ *   session-log cleanup now branches on this flag via `getAdapter(...)`
+ *   instead of `agent === "claudeCode"`.
+ * - `flushBufferOnErrorResult`: true ONLY for codex. After a `result`
+ *   message with `is_error: true` is added to the buffer, the generic
+ *   runner flushes immediately — preserving codex's exact ordering
+ *   (addMessageToBuffer first, then isCompleted, then flush). This must NOT
+ *   generalize to Claude: daemon.test.ts pins that Claude's `is_error`
+ *   result does NOT trigger a custom flush.
+ * - `sessionTracking`: `"any-message"` (claudeCode — any message carrying a
+ *   `session_id` sets it, no backfill), `"system-init-with-backfill"`
+ *   (codex/gemini/opencode — only a `type: "system"` message with
+ *   `session_id` sets it; assistant/user messages get backfilled from the
+ *   snapshot when it already has one), or `"none"` (amp — never touches
+ *   `sessionId`/`isWorking`). These three policies are NOT unified; the
+ *   generic runner branches on this field per line.
  */
 export interface HarnessCapabilities {
   withholdGitCredentialsInReviewMode: boolean;
   mockSuccessResult?: string;
+  fixesSessionLogs?: boolean;
+  flushBufferOnErrorResult?: boolean;
+  sessionTracking: "any-message" | "system-init-with-backfill" | "none";
 }
 
 export interface HarnessAdapter {

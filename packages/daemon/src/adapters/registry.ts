@@ -9,8 +9,8 @@ import type { HarnessAdapter } from "./types";
 /**
  * One adapter per harness (ADR-006 decision 2). Adding a hypothetical new
  * CLI is one adapter file + one line here — no daemon switch, no five
- * `run*Command` methods. `daemon.ts` does not read this registry in #75;
- * the cutover is #76.
+ * `run*Command` methods. As of #76, `daemon.ts`'s generic `runAgentCommand`
+ * reads this registry via `getAdapter(input.agent)` for every dispatch.
  */
 export const harnessAdapterRegistry: Record<AIAgent, HarnessAdapter> = {
   claudeCode: claudeAdapter,

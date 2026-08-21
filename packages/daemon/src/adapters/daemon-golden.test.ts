@@ -1,11 +1,14 @@
 /**
- * (a) Daemon-level goldens for #75 — drives the REAL daemon (today's path:
- * the per-agent `run*Command` methods in daemon.ts) over the unix socket and
- * captures the exact spawnCommandLine command string + env for codex, amp,
- * gemini, and opencode (claude's daemon-level goldens already live in
- * daemon.test.ts). `adapter-golden.test.ts` asserts the façades in
- * `packages/daemon/src/adapters/*-adapter.ts` reproduce these same values —
- * they are A2's (#76) guardrail that the cutover is byte-identical.
+ * (a) Daemon-level goldens for #75/#76 — drives the REAL daemon over the
+ * unix socket and captures the exact spawnCommandLine command string + env
+ * for codex, amp, gemini, and opencode (claude's daemon-level goldens
+ * already live in daemon.test.ts). Originally written against the per-agent
+ * `run*Command` methods (#75); as of #76 the daemon dispatches every agent
+ * through the single generic `runAgentCommand`, and these same goldens now
+ * exercise that path — the byte-identical command/env output proves the
+ * cutover changed no observable behavior. `adapter-golden.test.ts` asserts
+ * the façades in `packages/daemon/src/adapters/*-adapter.ts` reproduce these
+ * same values in isolation.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { nanoid } from "nanoid/non-secure";
@@ -197,35 +200,213 @@ describe("daemon-golden (#75, part a) — today's per-agent run*Command path", (
     expect(EXPECTED_CODEX_MOCK).toBe("Codex successfully completed");
   });
 
-  it("LABELLED old-path gap (ADR-004 amendment / epic #70 DoD item 6): review mode on codex/amp/gemini/opencode does NOT strip GH_TOKEN today — closes in #76, not #75", async () => {
+  it("review-mode run strips every GitHub credential for EVERY agent (#76, epic #70 DoD 6)", async () => {
+    // INVERTS the pre-#76 labelled gap test: before the cutover, review mode
+    // on codex/amp/gemini/opencode did NOT strip GH_TOKEN (only Claude's old
+    // per-agent method passed withholdGitCredentials). #76's generic
+    // runAgentCommand reads adapter.capabilities.withholdGitCredentialsInReviewMode
+    // uniformly for every agent, so this security assertion now flips from
+    // "token present" to "token absent" — closing the gap the pre-#76 test
+    // pinned as still-open.
     vi.stubEnv("GH_TOKEN", "ghs_secret_token");
+    vi.stubEnv("GITHUB_TOKEN", "ghs_secret_token");
+    vi.stubEnv("GIT_CONFIG_COUNT", "1");
+    vi.stubEnv("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader");
+    vi.stubEnv("GIT_CONFIG_VALUE_0", "AUTHORIZATION: basic REDACTED");
+
     await daemon.start();
-    for (const agent of ["codex", "amp", "gemini", "opencode"] as const) {
+    const agents = [
+      "claudeCode",
+      "codex",
+      "gemini",
+      "amp",
+      "opencode",
+    ] as const;
+    for (const agent of agents) {
       await writeToUnixSocket({
         unixSocketPath: runtime.unixSocketPath,
         dataStr: JSON.stringify({
           ...BASE_MESSAGE,
           agent,
+          model: agent === "claudeCode" ? "opus" : BASE_MESSAGE.model,
           permissionMode: "review",
+          threadChatId: `REVIEW_${agent}`,
           prompt: `review-mode ${agent}`,
         }),
       });
     }
     await sleepUntil(
-      () => (runtime.spawnCommandLine as any).mock.calls.length === 4,
+      () =>
+        (runtime.spawnCommandLine as any).mock.calls.length === agents.length,
     );
-    const calls = (runtime.spawnCommandLine as any).mock.calls as Array<
+    const reviewCalls = (runtime.spawnCommandLine as any).mock.calls as Array<
+      [
+        string,
+        {
+          env: Record<string, string | undefined>;
+          onClose?: (code: number | null) => void;
+        },
+      ]
+    >;
+    for (const [, opts] of reviewCalls) {
+      expect(opts.env.GH_TOKEN).toBeUndefined();
+      expect(opts.env.GITHUB_TOKEN).toBeUndefined();
+      expect(opts.env.GIT_CONFIG_COUNT).toBeUndefined();
+      expect(opts.env.GIT_CONFIG_KEY_0).toBeUndefined();
+      expect(opts.env.GIT_CONFIG_VALUE_0).toBeUndefined();
+      // Close each run before dispatching the next batch so processes don't
+      // collide on threadChatId reuse below.
+      opts.onClose?.(0);
+    }
+
+    // Negative half: permissionMode "allowAll" per agent keeps the creds.
+    (runtime.spawnCommandLine as any).mockClear();
+    for (const agent of agents) {
+      await writeToUnixSocket({
+        unixSocketPath: runtime.unixSocketPath,
+        dataStr: JSON.stringify({
+          ...BASE_MESSAGE,
+          agent,
+          model: agent === "claudeCode" ? "opus" : BASE_MESSAGE.model,
+          permissionMode: "allowAll",
+          threadChatId: `ALLOWALL_${agent}`,
+          prompt: `allowAll-mode ${agent}`,
+        }),
+      });
+    }
+    await sleepUntil(
+      () =>
+        (runtime.spawnCommandLine as any).mock.calls.length === agents.length,
+    );
+    const allowAllCalls = (runtime.spawnCommandLine as any).mock.calls as Array<
       [string, { env: Record<string, string | undefined> }]
     >;
-    for (const [, opts] of calls) {
-      // The gap: today's daemon.ts only passes withholdGitCredentials from
-      // runClaudeCodeCommand (daemon.ts:656) — the other four run methods
-      // never do, so a review run on any of them keeps GH_TOKEN resident.
-      // HarnessAdapter.capabilities.withholdGitCredentialsInReviewMode is
-      // `true` for every adapter (see adapter-golden.test.ts) as the TARGET
-      // contract; #76's generic runAgentCommand is what actually closes
-      // this gap by reading that field.
+    for (const [, opts] of allowAllCalls) {
       expect(opts.env.GH_TOKEN).toBe("ghs_secret_token");
+      expect(opts.env.GIT_CONFIG_KEY_0).toBe(
+        "http.https://github.com/.extraheader",
+      );
     }
+  });
+
+  it("codex: an is_error result flushes the message buffer immediately (Gap B), via the socket (#76 characterization — no daemon-level pin existed pre-cutover)", async () => {
+    // Long flush delay so the natural debounce timer cannot fire during this
+    // test's window — any serverPost we observe must come from codex's
+    // immediate is_error flush (adapter capabilities.flushBufferOnErrorResult).
+    const longFlushDaemon = new TerragonDaemon({
+      runtime,
+      messageFlushDelay: 60_000,
+    });
+    await longFlushDaemon.start();
+    await writeToUnixSocket({
+      unixSocketPath: runtime.unixSocketPath,
+      dataStr: JSON.stringify(BASE_MESSAGE), // agent: codex
+    });
+    await sleepUntil(
+      () => (runtime.spawnCommandLine as any).mock.calls.length === 1,
+    );
+    const onStdoutLine = (runtime.spawnCommandLine as any).mock.calls[0][1]
+      .onStdoutLine as (line: string) => void;
+
+    onStdoutLine(JSON.stringify({ type: "error", message: "boom" }));
+
+    await sleepUntil(() => (runtime.serverPost as any).mock.calls.length === 1);
+    const [payload] = (runtime.serverPost as any).mock.calls[0];
+    expect(payload.messages).toEqual([
+      {
+        type: "result",
+        subtype: "error_during_execution",
+        session_id: "",
+        error: "boom",
+        is_error: true,
+        num_turns: 0,
+        duration_ms: 0,
+      },
+    ]);
+  });
+
+  it("amp: echoed first user message is dropped, via the socket (#76 characterization — no daemon-level pin existed pre-cutover)", async () => {
+    vi.stubEnv("AMP_API_KEY", "amp-secret-key");
+    await daemon.start();
+    await writeToUnixSocket({
+      unixSocketPath: runtime.unixSocketPath,
+      dataStr: JSON.stringify({ ...BASE_MESSAGE, agent: "amp" }),
+    });
+    await sleepUntil(
+      () => (runtime.spawnCommandLine as any).mock.calls.length === 1,
+    );
+    const onStdoutLine = (runtime.spawnCommandLine as any).mock.calls[0][1]
+      .onStdoutLine as (line: string) => void;
+
+    // Amp echoes the prompt the daemon just sent it as a "user" role
+    // message; the adapter's parser drops it so it never reaches the buffer.
+    onStdoutLine(
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: "echoed" }] },
+      }),
+    );
+    // A real assistant message that must survive, to prove the buffer isn't
+    // simply empty for an unrelated reason.
+    onStdoutLine(
+      JSON.stringify({
+        type: "assistant",
+        message: { role: "assistant", content: [{ type: "text", text: "hi" }] },
+      }),
+    );
+
+    await sleepUntil(() => (runtime.serverPost as any).mock.calls.length === 1);
+    const [payload] = (runtime.serverPost as any).mock.calls[0];
+    expect(payload.messages).toHaveLength(1);
+    expect(payload.messages[0]).toMatchObject({ type: "assistant" });
+  });
+
+  it("claude: 'any-message' session tracking sets sessionId from a bare assistant message (no system/init wrapper) (#76 Gap C characterization)", async () => {
+    vi.stubEnv("IDLE_TIMEOUT_MS", "50");
+    await daemon.start();
+    await writeToUnixSocket({
+      unixSocketPath: runtime.unixSocketPath,
+      dataStr: JSON.stringify({
+        ...BASE_MESSAGE,
+        agent: "claudeCode",
+        model: "opus",
+      }),
+    });
+    await sleepUntil(
+      () => (runtime.spawnCommandLine as any).mock.calls.length === 1,
+    );
+    const onStdoutLine = (runtime.spawnCommandLine as any).mock.calls[0][1]
+      .onStdoutLine as (line: string) => void;
+
+    // No "type": "system" wrapper — just an assistant message carrying a
+    // session_id. The "any-message" policy must still track it.
+    onStdoutLine(
+      JSON.stringify({
+        type: "assistant",
+        message: { role: "assistant", content: [{ type: "text", text: "hi" }] },
+        session_id: "CLAUDE_SESSION_ANY",
+      }),
+    );
+
+    // The idle watchdog's timeout message reads the tracked sessionId from
+    // activeProcesses — the only externally-observable proof the "any-
+    // message" policy captured it without a system/init wrapper. The
+    // assistant message flushes first (10ms debounce); the watchdog result
+    // flushes separately once it fires (~50ms idle), so wait for both
+    // serverPost calls and inspect all sent messages.
+    await sleepUntil(
+      () => (runtime.serverPost as any).mock.calls.length >= 2,
+      5000,
+    );
+    const allSentMessages = (runtime.serverPost as any).mock.calls.flatMap(
+      (call: any) => call[0].messages,
+    );
+    const watchdogMessage = allSentMessages.find(
+      (m: any) => m.is_error === true,
+    );
+    expect(watchdogMessage).toMatchObject({
+      is_error: true,
+      session_id: "CLAUDE_SESSION_ANY",
+    });
   });
 });

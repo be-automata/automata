@@ -15,7 +15,7 @@ export const ampAdapter: HarnessAdapter = {
   authFilePath: () => null,
 
   prepareEnv(ctx: PrepareEnvContext): Record<string, string | undefined> {
-    // Mirrors daemon.ts:780.
+    // Mirrors the pre-#76 runAmpCommand env assembly.
     return { AMP_API_KEY: getAmpApiKeyOrNull(ctx.runtime) };
   },
 
@@ -30,11 +30,10 @@ export const ampAdapter: HarnessAdapter = {
   normalizeModel: (model: string) => model,
 
   makeLineParser: (ctx) => ({
-    // Mirrors the inline JSON.parse in runAmpCommand's onStdoutLine
-    // (daemon.ts:782-813), including dropping amp's echoed first user
-    // message (the CLI re-emits the prompt the daemon just sent it as a
-    // "user" role message; forwarding it would duplicate the prompt in the
-    // thread).
+    // Mirrors the inline JSON.parse the pre-#76 runAmpCommand did in its
+    // onStdoutLine, including dropping amp's echoed first user message (the
+    // CLI re-emits the prompt the daemon just sent it as a "user" role
+    // message; forwarding it would duplicate the prompt in the thread).
     parse(line: string): ClaudeMessage[] {
       try {
         const outputMessage = JSON.parse(line) as ClaudeMessage & {
@@ -53,7 +52,8 @@ export const ampAdapter: HarnessAdapter = {
         }
         return [outputMessage];
       } catch (e) {
-        // daemon.ts:808-813 logs the raw error (not formatError-wrapped) here.
+        // Logs the raw error (not formatError-wrapped), matching the
+        // pre-#76 runAmpCommand behavior exactly.
         ctx.runtime.logger.error("Failed to parse Amp output line", {
           line,
           error: e,
@@ -65,5 +65,7 @@ export const ampAdapter: HarnessAdapter = {
 
   capabilities: {
     withholdGitCredentialsInReviewMode: true,
+    // amp never touches sessionId/isWorking from parsed messages.
+    sessionTracking: "none",
   },
 };

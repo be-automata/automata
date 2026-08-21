@@ -24,7 +24,7 @@ export const opencodeAdapter: HarnessAdapter = {
   authFilePath: () => null,
 
   prepareEnv(ctx: PrepareEnvContext): Record<string, string | undefined> {
-    // Mirrors daemon.ts:730-732.
+    // Mirrors the pre-#76 runOpencodeCommand env assembly.
     return {
       OPENCODE_API_KEY: getOpencodeApiKeyOrNull(ctx.runtime),
     };
@@ -44,8 +44,8 @@ export const opencodeAdapter: HarnessAdapter = {
   makeLineParser: (ctx) => ({
     // isWorking is read at CALL time (per ParseLineCallContext), not
     // captured when the parser is constructed — parseOpencodeLine's
-    // step_start handling (daemon.ts:735-739) needs the process state as of
-    // THIS line, which changes as earlier lines are processed.
+    // step_start handling needs the process state as of THIS line, which
+    // changes as earlier lines in the same stdout batch are processed.
     parse(line, callCtx) {
       return parseOpencodeLine({
         line,
@@ -58,5 +58,8 @@ export const opencodeAdapter: HarnessAdapter = {
   capabilities: {
     withholdGitCredentialsInReviewMode: true,
     mockSuccessResult: "Opencode successfully completed",
+    // Only a type: "system" message with a session_id sets the tracked
+    // session; assistant/user messages get backfilled from the snapshot.
+    sessionTracking: "system-init-with-backfill",
   },
 };

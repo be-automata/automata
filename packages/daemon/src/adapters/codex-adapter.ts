@@ -18,7 +18,7 @@ export const codexAdapter: HarnessAdapter = {
   authFilePath: () => ".codex/auth.json",
 
   prepareEnv(_ctx: PrepareEnvContext): Record<string, string | undefined> {
-    // Codex needs no per-agent env (daemon.ts:818-828 passes none).
+    // Codex needs no per-agent env (the pre-#76 runCodexCommand passed none).
     return {};
   },
 
@@ -43,5 +43,14 @@ export const codexAdapter: HarnessAdapter = {
   capabilities: {
     withholdGitCredentialsInReviewMode: true,
     mockSuccessResult: "Codex successfully completed",
+    // codex is the ONLY agent that flushes the message buffer immediately
+    // when a result message arrives with is_error: true (the generic
+    // runner preserves the exact ordering: addMessageToBuffer first, then
+    // isCompleted, then this flush). Do NOT generalize to other agents —
+    // daemon.test.ts pins that Claude's is_error result does NOT flush.
+    flushBufferOnErrorResult: true,
+    // Only a type: "system" message with a session_id sets the tracked
+    // session; assistant/user messages get backfilled from the snapshot.
+    sessionTracking: "system-init-with-backfill",
   },
 };
