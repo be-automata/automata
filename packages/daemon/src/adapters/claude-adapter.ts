@@ -1,5 +1,9 @@
 import { authFilePathForAgent } from "@terragon/agent/auth-file";
-import { claudeCommand, getAnthropicApiKeyOrNull } from "../claude";
+import {
+  claudeCommand,
+  getAnthropicApiKeyOrNull,
+  reviewPolicyArgs,
+} from "../claude";
 import type { ClaudeMessage } from "../shared";
 import { formatError } from "./format-error";
 import type {
@@ -83,4 +87,10 @@ export const claudeAdapter: HarnessAdapter = {
     // messages within the same stdout batch.
     sessionTracking: "any-message",
   },
+
+  // SHIPPED (#88): exposes claude.ts's existing named seam through the
+  // adapter contract — no behavior change. `claudeCommand` already spreads
+  // this same function's output when permissionMode === "review"
+  // (claude.ts:277-278), so this is the SAME policy, not a duplicate one.
+  reviewPolicyArgs,
 };

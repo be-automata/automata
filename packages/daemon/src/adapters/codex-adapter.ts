@@ -1,5 +1,5 @@
 import { authFilePathForAgent } from "@terragon/agent/auth-file";
-import { codexCommand, parseCodexLine } from "../codex";
+import { codexCommand, codexReviewPolicyArgs, parseCodexLine } from "../codex";
 import type {
   BuildArgsConfig,
   HarnessAdapter,
@@ -30,6 +30,7 @@ export const codexAdapter: HarnessAdapter = {
       model: cfg.model,
       sessionId: cfg.sessionId,
       useCredits: !!cfg.useCredits,
+      permissionMode: cfg.permissionMode,
     });
   },
 
@@ -54,4 +55,8 @@ export const codexAdapter: HarnessAdapter = {
     // session; assistant/user messages get backfilled from the snapshot.
     sessionTracking: "system-init-with-backfill",
   },
+
+  // [] + documented reason — see codex.ts's codexReviewPolicyArgs() JSDoc
+  // for the verification against the pinned codex 0.76.0 (#88).
+  reviewPolicyArgs: codexReviewPolicyArgs,
 };

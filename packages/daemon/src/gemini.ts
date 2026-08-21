@@ -1,10 +1,53 @@
 import { nanoid } from "nanoid/non-secure";
 import type { JsonStreamEvent } from "@google/gemini-cli-core";
 import { IDaemonRuntime } from "./runtime";
-import { ClaudeMessage } from "./shared";
+import {
+  ClaudeMessage,
+  type PermissionMode,
+  reviewPolicyArgsFor,
+} from "./shared";
 
 const PROMPT_FLAG_DEPRECATION_WARNING =
   "The --prompt (-p) flag has been deprecated and will be removed in a future version";
+
+/**
+ * Review tool-policy for gemini (#88, ADR-004 named seam). Ships `[]`: the
+ * candidate restriction (dropping `--yolo` + an explicit shell/tool
+ * allowlist) was researched against the PINNED sandbox image version,
+ * gemini-cli 0.20.0 (packages/sandbox-image/Dockerfile.hbs:81-86), and
+ * REJECTED:
+ *
+ * - Without `--yolo` (approval mode `default`), gemini-cli's non-interactive
+ *   scheduler errors any tool call that requires confirmation with
+ *   `ToolErrorType.CONFIRMATION_REQUIRED` instead of prompting — i.e. it
+ *   does not hang, but it DOES break the run for any Bash/edit/write tool
+ *   call, which the review flow may need (e.g. reading via shell, running
+ *   `git diff`).
+ * - The candidate allowlist flag (`--allowed-tools`) is documented as
+ *   DEPRECATED in current gemini-cli docs in favor of a "Policy Engine"
+ *   (`--policy`), and neither source is version-pinned to 0.20.0
+ *   specifically, so its exact spelling/behavior at the pinned version
+ *   cannot be verified.
+ *
+ * Per the orchestrator's safety ruling (#88): a review fence that breaks the
+ * run is worse than the status quo. The git-credential withhold
+ * (`withholdGitCredentialsInReviewMode`, #76) is the hard guarantee; this
+ * seam stays wired (composed as a no-op array spread below) so a verified
+ * restriction is a one-array edit later. Do NOT write setup-time
+ * `.gemini/settings.json` as a substitute seam — that changes behavior for
+ * every run, not just review, and is the wrong seam per the adversarial
+ * validator's review of this ticket.
+ *
+ * Verified against (2026-08-21): gemini-cli CLI options reference
+ * (mintlify.wiki/google-gemini/gemini-cli/reference/cli-options,
+ * geminicli.com/docs/reference/configuration), gemini-cli non-interactive
+ * mode docs (deepwiki.com/waywardgeek/gemini-cli/10-non-interactive-mode),
+ * and github.com/google-gemini/gemini-cli PR #18500 (Policy Engine
+ * deprecating --allowed-tools).
+ */
+export function geminiReviewPolicyArgs(): string[] {
+  return [];
+}
 
 /**
  * Create a command to run the Gemini CLI with the given prompt.
@@ -18,11 +61,13 @@ export function geminiCommand({
   prompt,
   model,
   sessionId,
+  permissionMode,
 }: {
   runtime: IDaemonRuntime;
   prompt: string;
   model: string;
   sessionId: string | null;
+  permissionMode?: PermissionMode;
 }): string {
   // Write prompt to a temporary file
   const tmpFileName = `/tmp/gemini-prompt-${nanoid()}.txt`;
@@ -41,6 +86,7 @@ export function geminiCommand({
     "--yolo", // Skip confirmation prompts
     "--output-format",
     "stream-json",
+    ...reviewPolicyArgsFor(permissionMode, geminiReviewPolicyArgs),
     // Resume the latest session if sessionId is provided
     ...(sessionId ? ["--resume", "--prompt", "' '"] : []),
   ];

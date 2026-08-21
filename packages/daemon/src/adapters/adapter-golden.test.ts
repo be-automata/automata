@@ -32,6 +32,16 @@ import {
   EXPECTED_AMP_COMMAND,
   EXPECTED_GEMINI_COMMAND,
   EXPECTED_OPENCODE_COMMAND,
+  EXPECTED_CODEX_REVIEW_POLICY,
+  EXPECTED_GEMINI_REVIEW_POLICY,
+  EXPECTED_AMP_REVIEW_POLICY,
+  EXPECTED_OPENCODE_REVIEW_POLICY,
+  EXPECTED_CODEX_COMMAND_REVIEW,
+  EXPECTED_GEMINI_COMMAND_REVIEW,
+  EXPECTED_AMP_COMMAND_REVIEW,
+  EXPECTED_OPENCODE_COMMAND_REVIEW,
+  OPENCODE_REVIEW_MODE_ENV_KEY,
+  OPENCODE_REVIEW_MODE_ENV_VALUE,
 } from "./__golden-fixtures";
 
 vi.mock("nanoid/non-secure", () => ({ nanoid: () => "NANOID" }));
@@ -258,8 +268,135 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
     });
   });
 
-  describe("HarnessCapabilities — the TARGET contract (ADR-004/ADR-006)", () => {
-    it("every adapter reports withholdGitCredentialsInReviewMode === true (target, NOT today's daemon.ts behavior — see the labelled gap test in daemon-golden.test.ts)", () => {
+  describe("reviewPolicyArgs() per adapter (#88, AC3) — best-available-per-CLI, verified or documented []", () => {
+    // The four []-shipping adapters, each with its documented reason (the
+    // full verification lives in the named builder file's JSDoc).
+    const emptyPolicyAdapters: Array<{
+      name: string;
+      reason: string;
+      adapter: typeof codexAdapter;
+      model: string;
+      stubEnv?: [string, string];
+      expectedPolicy: string[];
+      expectedReviewCommand: string;
+      expectedDefaultCommand: string;
+    }> = [
+      {
+        name: "codexAdapter",
+        reason:
+          "verified-unsafe against pinned codex 0.76.0, see codex.ts JSDoc",
+        adapter: codexAdapter,
+        model: "gpt-5",
+        expectedPolicy: EXPECTED_CODEX_REVIEW_POLICY,
+        expectedReviewCommand: EXPECTED_CODEX_COMMAND_REVIEW,
+        expectedDefaultCommand: EXPECTED_CODEX_COMMAND_DEFAULT,
+      },
+      {
+        name: "geminiAdapter",
+        reason:
+          "verified-unsafe against pinned gemini-cli 0.20.0, see gemini.ts JSDoc",
+        adapter: geminiAdapter,
+        model: "gemini-3-pro",
+        expectedPolicy: EXPECTED_GEMINI_REVIEW_POLICY,
+        expectedReviewCommand: EXPECTED_GEMINI_COMMAND_REVIEW,
+        expectedDefaultCommand: EXPECTED_GEMINI_COMMAND,
+      },
+      {
+        name: "ampAdapter",
+        reason:
+          "no verified restriction surface for pinned amp build, see amp.ts JSDoc",
+        adapter: ampAdapter,
+        model: "amp",
+        stubEnv: ["AMP_API_KEY", "amp-secret-key"],
+        expectedPolicy: EXPECTED_AMP_REVIEW_POLICY,
+        expectedReviewCommand: EXPECTED_AMP_COMMAND_REVIEW,
+        expectedDefaultCommand: EXPECTED_AMP_COMMAND,
+      },
+      {
+        name: "opencodeAdapter",
+        reason: "args aren't the seam — the plugin is, see opencode.ts JSDoc",
+        adapter: opencodeAdapter,
+        model: "opencode/grok-code",
+        stubEnv: ["OPENCODE_API_KEY", "opencode-secret-key"],
+        expectedPolicy: EXPECTED_OPENCODE_REVIEW_POLICY,
+        expectedReviewCommand: EXPECTED_OPENCODE_COMMAND_REVIEW,
+        expectedDefaultCommand: EXPECTED_OPENCODE_COMMAND,
+      },
+    ];
+
+    it.each(emptyPolicyAdapters)(
+      "$name.reviewPolicyArgs() is [] ($reason)",
+      ({ adapter, expectedPolicy }) => {
+        expect(adapter.reviewPolicyArgs()).toEqual(expectedPolicy);
+      },
+    );
+
+    it.each(emptyPolicyAdapters)(
+      "$name.buildArgs(review/allowAll/undefined) are all byte-identical since reviewPolicyArgs() is []",
+      ({
+        adapter,
+        model,
+        stubEnv,
+        expectedReviewCommand,
+        expectedDefaultCommand,
+      }) => {
+        if (stubEnv) {
+          vi.stubEnv(stubEnv[0], stubEnv[1]);
+        }
+        const base = {
+          runtime: fakeRuntime(),
+          prompt: "TEST_PROMPT_STRING",
+          sessionId: null,
+          model,
+        };
+        expect(
+          normalizePromptPath(
+            adapter.buildArgs({ ...base, permissionMode: "review" }),
+          ),
+        ).toBe(expectedReviewCommand);
+        for (const permissionMode of ["allowAll", undefined] as const) {
+          expect(
+            normalizePromptPath(adapter.buildArgs({ ...base, permissionMode })),
+          ).toBe(expectedDefaultCommand);
+        }
+        expect(expectedReviewCommand).toBe(expectedDefaultCommand);
+      },
+    );
+
+    it("opencodeAdapter.prepareEnv sets TERRAGON_REVIEW_MODE=1 only in review mode (#88 AC2)", () => {
+      vi.stubEnv("OPENCODE_API_KEY", "opencode-secret-key");
+      const reviewEnv = opencodeAdapter.prepareEnv({
+        runtime: fakeRuntime(),
+        useCredits: false,
+        token: TOKEN,
+        normalizedUrl: NORMALIZED_URL,
+        permissionMode: "review",
+      });
+      expect(reviewEnv[OPENCODE_REVIEW_MODE_ENV_KEY]).toBe(
+        OPENCODE_REVIEW_MODE_ENV_VALUE,
+      );
+
+      const allowAllEnv = opencodeAdapter.prepareEnv({
+        runtime: fakeRuntime(),
+        useCredits: false,
+        token: TOKEN,
+        normalizedUrl: NORMALIZED_URL,
+        permissionMode: "allowAll",
+      });
+      expect(allowAllEnv[OPENCODE_REVIEW_MODE_ENV_KEY]).toBeUndefined();
+
+      const undefinedModeEnv = opencodeAdapter.prepareEnv({
+        runtime: fakeRuntime(),
+        useCredits: false,
+        token: TOKEN,
+        normalizedUrl: NORMALIZED_URL,
+      });
+      expect(undefinedModeEnv[OPENCODE_REVIEW_MODE_ENV_KEY]).toBeUndefined();
+    });
+  });
+
+  describe("HarnessCapabilities — CLOSED by #76 for env-strip; this PR closes the tool-policy gap where verifiable (ADR-004/ADR-006)", () => {
+    it("every adapter reports withholdGitCredentialsInReviewMode === true (CLOSED by #76 — daemon.ts's generic runAgentCommand reads this uniformly; see the inverted pin in daemon-golden.test.ts)", () => {
       for (const agent of Object.keys(harnessAdapterRegistry) as Array<
         keyof typeof harnessAdapterRegistry
       >) {

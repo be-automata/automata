@@ -1,5 +1,5 @@
 import { authFilePathForAgent } from "@terragon/agent/auth-file";
-import { ampCommand, getAmpApiKeyOrNull } from "../amp";
+import { ampCommand, ampReviewPolicyArgs, getAmpApiKeyOrNull } from "../amp";
 import type { ClaudeMessage } from "../shared";
 import type {
   BuildArgsConfig,
@@ -24,6 +24,7 @@ export const ampAdapter: HarnessAdapter = {
       runtime: cfg.runtime,
       prompt: cfg.prompt,
       sessionId: cfg.sessionId,
+      permissionMode: cfg.permissionMode,
     });
   },
 
@@ -68,4 +69,8 @@ export const ampAdapter: HarnessAdapter = {
     // amp never touches sessionId/isWorking from parsed messages.
     sessionTracking: "none",
   },
+
+  // [] + documented reason — see amp.ts's ampReviewPolicyArgs() JSDoc for
+  // the verification against the pinned amp 0.0.1765471542-g74e231 (#88).
+  reviewPolicyArgs: ampReviewPolicyArgs,
 };

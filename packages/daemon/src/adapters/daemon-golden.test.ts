@@ -18,6 +18,7 @@ import type { DaemonMessageClaude } from "../shared";
 import {
   NORMALIZED_URL,
   TOKEN,
+  REVIEW_POLICY_JOINED,
   normalizePromptPath,
   expectedGeminiEnv,
   expectedOpencodeEnv,
@@ -29,6 +30,8 @@ import {
   EXPECTED_AMP_COMMAND,
   EXPECTED_GEMINI_COMMAND,
   EXPECTED_OPENCODE_COMMAND,
+  OPENCODE_REVIEW_MODE_ENV_KEY,
+  OPENCODE_REVIEW_MODE_ENV_VALUE,
 } from "./__golden-fixtures";
 
 async function sleep(ms: number = 10) {
@@ -248,18 +251,33 @@ describe("daemon-golden (#75, part a) — today's per-agent run*Command path", (
         },
       ]
     >;
-    for (const [, opts] of reviewCalls) {
+    for (const [index, [command, opts]] of reviewCalls.entries()) {
+      const agent = agents[index]!;
       expect(opts.env.GH_TOKEN).toBeUndefined();
       expect(opts.env.GITHUB_TOKEN).toBeUndefined();
       expect(opts.env.GIT_CONFIG_COUNT).toBeUndefined();
       expect(opts.env.GIT_CONFIG_KEY_0).toBeUndefined();
       expect(opts.env.GIT_CONFIG_VALUE_0).toBeUndefined();
+
+      // #88: per-agent review tool-policy carried in the command string
+      // where reviewPolicyArgs() is non-empty (claude only — the other
+      // four ship [] per their adapter's documented reason).
+      if (agent === "claudeCode") {
+        expect(command).toContain(REVIEW_POLICY_JOINED);
+      }
+      // #88 AC2: opencode's review fence is the env marker, not a command arg.
+      if (agent === "opencode") {
+        expect(opts.env[OPENCODE_REVIEW_MODE_ENV_KEY]).toBe(
+          OPENCODE_REVIEW_MODE_ENV_VALUE,
+        );
+      }
       // Close each run before dispatching the next batch so processes don't
       // collide on threadChatId reuse below.
       opts.onClose?.(0);
     }
 
-    // Negative half: permissionMode "allowAll" per agent keeps the creds.
+    // Negative half: permissionMode "allowAll" per agent keeps the creds
+    // AND never carries the review tool-policy / opencode review marker.
     (runtime.spawnCommandLine as any).mockClear();
     for (const agent of agents) {
       await writeToUnixSocket({
@@ -281,11 +299,16 @@ describe("daemon-golden (#75, part a) — today's per-agent run*Command path", (
     const allowAllCalls = (runtime.spawnCommandLine as any).mock.calls as Array<
       [string, { env: Record<string, string | undefined> }]
     >;
-    for (const [, opts] of allowAllCalls) {
+    for (const [index, [command, opts]] of allowAllCalls.entries()) {
+      const agent = agents[index]!;
       expect(opts.env.GH_TOKEN).toBe("ghs_secret_token");
       expect(opts.env.GIT_CONFIG_KEY_0).toBe(
         "http.https://github.com/.extraheader",
       );
+      expect(command).not.toContain(REVIEW_POLICY_JOINED);
+      if (agent === "opencode") {
+        expect(opts.env[OPENCODE_REVIEW_MODE_ENV_KEY]).toBeUndefined();
+      }
     }
   });
 

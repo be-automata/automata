@@ -275,6 +275,40 @@ describe("sandbox-setup", () => {
       );
     });
 
+    it("should write the mode-aware auto-approve plugin for opencode agent (#88 AC2)", async () => {
+      const session = new MockSession("mock-sandbox");
+      vi.spyOn(session, "runCommand").mockImplementation(async (cmd) => {
+        if (cmd === "cd && pwd") return "/home/user";
+        return "";
+      });
+      const writeTextFileSpy = vi
+        .spyOn(session, "writeTextFile")
+        .mockImplementation(async () => {});
+
+      const options = {
+        ...defaultOptions,
+        agent: "opencode" as const,
+      };
+
+      await setupSandboxEveryTime({
+        session,
+        options,
+        isCreatingSandbox: false,
+      });
+
+      const pluginCall = writeTextFileSpy.mock.calls.find(
+        ([path]) =>
+          path === "/home/user/.config/opencode/plugin/auto-approve.ts",
+      );
+      expect(pluginCall).toBeDefined();
+      const pluginContents = pluginCall?.[1] as string;
+      // #88 AC2: the written plugin file is mode-aware — it must reference
+      // the TERRAGON_REVIEW_MODE marker, not the old unconditional "allow".
+      expect(pluginContents).toContain("TERRAGON_REVIEW_MODE");
+      expect(pluginContents).toContain('"deny"');
+      expect(pluginContents).toContain('"allow"');
+    });
+
     it("should create CLAUDE.md for claudeCode agents with customSystemPrompt", async () => {
       const session = new MockSession("mock-sandbox");
       vi.spyOn(session, "runCommand").mockImplementation(async (cmd) => {

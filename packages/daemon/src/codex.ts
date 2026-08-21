@@ -1,7 +1,11 @@
 import { nanoid } from "nanoid/non-secure";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import { IDaemonRuntime } from "./runtime";
-import { ClaudeMessage } from "./shared";
+import {
+  ClaudeMessage,
+  type PermissionMode,
+  reviewPolicyArgsFor,
+} from "./shared";
 
 function transformMcpToolCall({
   codexMsg,
@@ -222,6 +226,45 @@ function transformTodoListItem({
 }
 
 /**
+ * Review tool-policy for codex (#88, ADR-004 named seam). Ships `[]`: the
+ * candidate restriction (`--sandbox read-only` replacing
+ * `--dangerously-bypass-approvals-and-sandbox`) was researched against the
+ * PINNED sandbox image version, codex 0.76.0
+ * (packages/sandbox-image/Dockerfile.hbs:81-86), and REJECTED on both
+ * verification points the orchestrator required:
+ *
+ * 1. Codex's OS-level sandbox (Landlock on Linux, falls back through
+ *    seccomp/bubblewrap) is documented as unreliable inside containers
+ *    without the SYS_ADMIN capability / an unconfined seccomp profile —
+ *    exactly the automata sandbox's execution environment — commonly
+ *    erroring ("the combination of seccomp/landlock ... is not supported in
+ *    this environment") or silently falling back to full access, which
+ *    would make `--sandbox read-only` either break the review run or grant
+ *    no real restriction at all.
+ * 2. Read-only sandbox mode is documented as NOT blocking network access by
+ *    default ("Network access (if enabled)") — so it would not add a
+ *    meaningful confused-deputy fence even where the sandbox mechanism does
+ *    function.
+ *
+ * A review fence that hangs or breaks the run is worse than the status quo
+ * (orchestrator safety ruling, #88): the git-credential withhold
+ * (`withholdGitCredentialsInReviewMode`, #76) is the hard guarantee here;
+ * this seam stays wired (composed as a no-op array spread below) so a
+ * future verified restriction is a one-array edit.
+ *
+ * Verified against (2026-08-21): codex CLI sandboxing docs
+ * (docs.onlinetool.cc/codex/docs/sandbox.html, docs/platform-sandboxing.html)
+ * and community reports of Landlock/seccomp failures inside Docker
+ * containers (github.com/openai/codex/issues/1039, OpenAI developer
+ * community thread "using codex exec within docker (sandbox readonly
+ * error)"). Neither source is version-pinned to 0.76.0 specifically, which
+ * is itself part of why this ships `[]` rather than a guessed restriction.
+ */
+export function codexReviewPolicyArgs(): string[] {
+  return [];
+}
+
+/**
  * Create a command to run the Codex CLI with the given prompt.
  *
  * @param runtime - The daemon runtime
@@ -236,12 +279,14 @@ export function codexCommand({
   model,
   sessionId,
   useCredits = false,
+  permissionMode,
 }: {
   runtime: IDaemonRuntime;
   prompt: string;
   model: string;
   sessionId: string | null;
   useCredits?: boolean;
+  permissionMode?: PermissionMode;
 }): string {
   // Write prompt to a file
   const tmpFileName = `/tmp/codex-prompt-${nanoid()}.txt`;
@@ -254,6 +299,7 @@ export function codexCommand({
     "exec",
     "--dangerously-bypass-approvals-and-sandbox",
     "--json",
+    ...reviewPolicyArgsFor(permissionMode, codexReviewPolicyArgs),
   ];
   switch (model) {
     case "gpt-5-low":

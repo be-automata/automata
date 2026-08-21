@@ -82,3 +82,31 @@ export function normalizePromptPath(command: string): string {
     "/tmp/$1-prompt-NANOID.txt",
   );
 }
+
+/**
+ * #88 additions — per-adapter `reviewPolicyArgs()` goldens and the
+ * review-mode command/env expectations. codex/gemini/amp/opencode ship `[]`
+ * (verified-unsafe or wrong-seam per adapter JSDoc, see codex.ts /
+ * gemini.ts / amp.ts / opencode.ts); claude's is the pre-existing
+ * REVIEW_POLICY_JOINED above. These are ADDITIONS ONLY — the constants
+ * above this comment (lines 20-21, 63-76) are byte-identical to pre-#88
+ * (AC4 gate).
+ */
+export const EXPECTED_CODEX_REVIEW_POLICY: string[] = [];
+export const EXPECTED_GEMINI_REVIEW_POLICY: string[] = [];
+export const EXPECTED_AMP_REVIEW_POLICY: string[] = [];
+export const EXPECTED_OPENCODE_REVIEW_POLICY: string[] = [];
+
+// review-mode command strings are byte-identical to the non-review
+// EXPECTED_*_COMMAND constants above for codex/gemini/amp/opencode, because
+// each ships an empty reviewPolicyArgs() (composed as a no-op array
+// spread). Named separately so a future non-empty policy is a single
+// literal edit here, not a hunt through the test files.
+export const EXPECTED_CODEX_COMMAND_REVIEW = EXPECTED_CODEX_COMMAND_DEFAULT;
+export const EXPECTED_GEMINI_COMMAND_REVIEW = EXPECTED_GEMINI_COMMAND;
+export const EXPECTED_AMP_COMMAND_REVIEW = EXPECTED_AMP_COMMAND;
+export const EXPECTED_OPENCODE_COMMAND_REVIEW = EXPECTED_OPENCODE_COMMAND;
+
+/** The opencode review-mode env marker the mode-aware auto-approve plugin reads (#88 AC2). */
+export const OPENCODE_REVIEW_MODE_ENV_KEY = "TERRAGON_REVIEW_MODE";
+export const OPENCODE_REVIEW_MODE_ENV_VALUE = "1";

@@ -7,7 +7,11 @@ import type {
   StepFinishPart,
 } from "@opencode-ai/sdk/client";
 import { IDaemonRuntime } from "./runtime";
-import { ClaudeMessage } from "./shared";
+import {
+  ClaudeMessage,
+  type PermissionMode,
+  reviewPolicyArgsFor,
+} from "./shared";
 
 /**
  * Get the Opencode API key from the environment.
@@ -290,6 +294,23 @@ export function parseOpencodeLine({
 }
 
 /**
+ * Review tool-policy for opencode (#88, ADR-004 named seam). Ships `[]`:
+ * unlike the other four harnesses, opencode's real review restriction is
+ * NOT a CLI arg at all — opencode's permission system is enforced entirely
+ * by its `permission.ask` plugin hook (`OPENCODE_AUTO_APPROVE_PLUGIN_CONTENT`,
+ * packages/sandbox/src/agents/opencode-config.ts), so args are the wrong
+ * seam for this CLI regardless of the pinned version, opencode-ai 1.0.149
+ * (packages/sandbox-image/Dockerfile.hbs:81-86). The actual AC2 fix is the
+ * plugin itself becoming mode-aware (see opencode-config.ts's
+ * `TERRAGON_REVIEW_MODE` marker), set via `opencodeAdapter.prepareEnv` in
+ * review mode. This seam stays wired (composed as a no-op array spread
+ * below) for contract symmetry with the other four adapters.
+ */
+export function opencodeReviewPolicyArgs(): string[] {
+  return [];
+}
+
+/**
  * Create a command to run the Opencode CLI with the given prompt.
  *
  * The command format is:
@@ -304,11 +325,13 @@ export function opencodeCommand({
   prompt,
   model,
   sessionId,
+  permissionMode,
 }: {
   runtime: IDaemonRuntime;
   prompt: string;
   model: string;
   sessionId: string | null;
+  permissionMode?: PermissionMode;
 }): string {
   // NOTE: We can remove once everything deploys for a day or so
   // now that we're using the normalizedModelForDaemon function.
@@ -344,5 +367,6 @@ export function opencodeCommand({
   if (sessionId) {
     parts.push("--session", sessionId);
   }
+  parts.push(...reviewPolicyArgsFor(permissionMode, opencodeReviewPolicyArgs));
   return parts.join(" ");
 }

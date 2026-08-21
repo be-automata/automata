@@ -151,13 +151,33 @@ export function buildOpencodeConfig({
   return JSON.stringify(config, null, 2);
 }
 
+/**
+ * Mode-aware auto-approve plugin (#88 AC2, closing ADR-004's amendment gap
+ * #3). Normal-mode behavior is UNCHANGED: every `permission.ask` is
+ * allowed, exactly as before. In review mode — signalled by the
+ * `TERRAGON_REVIEW_MODE` env marker `opencodeAdapter.prepareEnv` sets on the
+ * spawned process when `permissionMode === "review"` (#88) — every ask is
+ * DENIED instead. This is deliberately coarse (deny ALL asks, not just
+ * write-class ones): opencode's `permission.ask` input does not reliably
+ * distinguish a pure-read tool call from a write one across all providers,
+ * and ADR-004's principle is that a review fence that is too strict (an
+ * agent that can't act) is safe, while one that is too permissive
+ * (allowing a write it shouldn't) is the actual hazard. `reviewPolicyArgs()`
+ * for opencode is `[]` — this plugin, not a CLI arg, is the real seam (see
+ * opencode.ts's opencodeReviewPolicyArgs() JSDoc).
+ *
+ * This closes ADR-004's amendment gap #3 ("OpenCode auto-approves every
+ * permission") but NOT the on-disk credential channel (gap #1, tracked by
+ * #89) — a review agent with this plugin still cannot use tools to push,
+ * but `~/.git-credentials` remains a separate, still-open channel.
+ */
 export const OPENCODE_AUTO_APPROVE_PLUGIN_CONTENT = `\
 import { Plugin } from "@opencode-ai/plugin";
 
 export default (async (ctx) => {
   return {
     "permission.ask": async (input, output) => {
-      output.status = "allow";
+      output.status = process.env.TERRAGON_REVIEW_MODE === "1" ? "deny" : "allow";
     },
   };
 }) satisfies Plugin;`;
