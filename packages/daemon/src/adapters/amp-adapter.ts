@@ -1,3 +1,4 @@
+import { authFilePathForAgent } from "@terragon/agent/auth-file";
 import { ampCommand, getAmpApiKeyOrNull } from "../amp";
 import type { ClaudeMessage } from "../shared";
 import type {
@@ -11,8 +12,7 @@ export const ampAdapter: HarnessAdapter = {
   agent: "amp",
   displayName: "Amp",
 
-  // Not populated today — #77's job.
-  authFilePath: () => null,
+  authFilePath: () => authFilePathForAgent("amp"),
 
   prepareEnv(ctx: PrepareEnvContext): Record<string, string | undefined> {
     // Mirrors the pre-#76 runAmpCommand env assembly.

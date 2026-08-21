@@ -9,6 +9,7 @@
     "./utils": "./src/utils.ts",
     "./tool-calls": "./src/tool-calls.ts",
     "./types": "./src/types.ts",
+    "./auth-file": "./src/auth-file.ts",
     "./versions": "./src/versions.ts",
     "./proxy": "./src/proxy.ts"
   },

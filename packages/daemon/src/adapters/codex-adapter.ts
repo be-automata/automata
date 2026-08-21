@@ -1,3 +1,4 @@
+import { authFilePathForAgent } from "@terragon/agent/auth-file";
 import { codexCommand, parseCodexLine } from "../codex";
 import type {
   BuildArgsConfig,
@@ -15,7 +16,7 @@ export const codexAdapter: HarnessAdapter = {
   agent: "codex",
   displayName: "Codex",
 
-  authFilePath: () => ".codex/auth.json",
+  authFilePath: () => authFilePathForAgent("codex"),
 
   prepareEnv(_ctx: PrepareEnvContext): Record<string, string | undefined> {
     // Codex needs no per-agent env (the pre-#76 runCodexCommand passed none).
