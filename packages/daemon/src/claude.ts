@@ -174,6 +174,50 @@ export function maybeFixLogsForSessionId(
   }
 }
 
+/**
+ * Single-writer review runs (ADR phase-2): the agent produces a structured
+ * review result and the executor is the sole poster — the agent must have
+ * NO GitHub-write outlet. --dangerously-skip-permissions bypasses ALL
+ * permission checks (so --disallowedTools would be ignored), so it is
+ * DROPPED here; a scoped default-mode policy denies gh entirely (read+write)
+ * and git push, while keeping repo Read/Grep/Glob + Bash for tests + git
+ * diff for the PR diff. The token is separately withheld from the run env
+ * (see daemon-env), so a raw curl bypass also has no credential.
+ *
+ * Extracted verbatim (#75 AC4) so a golden test can pin the review tool
+ * policy at a single named seam (ADR-004) — every HarnessAdapter's review
+ * policy is expected to converge on an equivalent shape.
+ */
+export function reviewPolicyArgs(): string[] {
+  return [
+    "--permission-mode",
+    "default",
+    "--allowedTools",
+    "Read",
+    "Grep",
+    "Glob",
+    "Bash",
+    // SHELL-QUOTED: the whole command is joined into a string and run via a
+    // shell (`cat prompt | claude ...`), so the parentheses/space/glob in these
+    // matchers MUST be single-quoted or the shell errors ("syntax error near
+    // unexpected token '('") and the agent never launches.
+    "--disallowedTools",
+    "'Bash(gh:*)'",
+    "'Bash(git push:*)'",
+    // Review runs execute UNTRUSTED PR content, and the execution box
+    // seeds workspace trust (so review mode can grant its tools at all
+    // in -p). Trust also makes the CLI honor the reviewed branch's OWN
+    // .claude/settings.json — attacker-controlled on a fork PR, which
+    // could allow-list tools beyond this deliberately scoped set.
+    // Loading only user-level settings closes that: the repo's
+    // settings.json is never read, so the permission surface is exactly
+    // these flags regardless of what the PR commits. Supported on both
+    // CLI versions in service (verified 2.0.65 and 2.1.235).
+    "--setting-sources",
+    "user",
+  ];
+}
+
 export function claudeCommand({
   runtime,
   prompt,
@@ -231,41 +275,7 @@ export function claudeCommand({
           "Bash",
         ]
       : permissionMode === "review"
-        ? // Single-writer review runs (ADR phase-2): the agent produces a structured
-          // review result and the executor is the sole poster — the agent must have
-          // NO GitHub-write outlet. --dangerously-skip-permissions bypasses ALL
-          // permission checks (so --disallowedTools would be ignored), so it is
-          // DROPPED here; a scoped default-mode policy denies gh entirely (read+write)
-          // and git push, while keeping repo Read/Grep/Glob + Bash for tests + git
-          // diff for the PR diff. The token is separately withheld from the run env
-          // (see daemon-env), so a raw curl bypass also has no credential.
-          [
-            "--permission-mode",
-            "default",
-            "--allowedTools",
-            "Read",
-            "Grep",
-            "Glob",
-            "Bash",
-            // SHELL-QUOTED: the whole command is joined into a string and run via a
-            // shell (`cat prompt | claude ...`), so the parentheses/space/glob in these
-            // matchers MUST be single-quoted or the shell errors ("syntax error near
-            // unexpected token '('") and the agent never launches.
-            "--disallowedTools",
-            "'Bash(gh:*)'",
-            "'Bash(git push:*)'",
-            // Review runs execute UNTRUSTED PR content, and the execution box
-            // seeds workspace trust (so review mode can grant its tools at all
-            // in -p). Trust also makes the CLI honor the reviewed branch's OWN
-            // .claude/settings.json — attacker-controlled on a fork PR, which
-            // could allow-list tools beyond this deliberately scoped set.
-            // Loading only user-level settings closes that: the repo's
-            // settings.json is never read, so the permission surface is exactly
-            // these flags regardless of what the PR commits. Supported on both
-            // CLI versions in service (verified 2.0.65 and 2.1.235).
-            "--setting-sources",
-            "user",
-          ]
+        ? reviewPolicyArgs()
         : ["--dangerously-skip-permissions"]),
     "--output-format",
     "stream-json",
