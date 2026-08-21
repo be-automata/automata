@@ -6,9 +6,9 @@
 - **Date:** 2026-08-21
 - **Context source:** #65 (broker git credentials — review lane verified), #80 (review-lane fence
   regression test), `packages/daemon/src/daemon.ts` (`stripGithubCredentials`,
-  `runClaudeCodeCommand` `withholdGitCredentials`), `packages/daemon/src/daemon-env.ts:193-196`
+  `runClaudeCodeCommand` `withholdGitCredentials`), `packages/worker/src/agent-run/daemon-env.ts:193-196`
   (the git extraheader vars removal targets), `apps/www/src/server-lib/remote-daemon-message.ts:138-149`
-  (permissionMode derivation), `packages/*/review-single-writer-finish.ts` (`isReviewThread`),
+  (permissionMode derivation), `apps/www/src/server-lib/review/review-single-writer-finish.ts` (`isReviewThread`),
   `parse-review-intent.ts` + `resolve-approve-floor.ts` (control-plane verdict handling),
   `docs/uat/adr-036-effect-intent.md` (the effect-intent / emit-only mechanism).
 - **Deciders:** operator + 2026-08-21 architecture pass
@@ -38,13 +38,17 @@ below is what any implementation must preserve.
    offline.
 2. **`review` is the DEFAULT for PR triggers, and a structural pin for untrusted PR content.** An
    unconfigured PR-family automation runs `review` (emit-only). For any PR-family event whose content
-   is **untrusted** — a fork PR, or an author whose `author_association` ∉ {`OWNER`, `MEMBER`} — the
+   is **untrusted** — a fork PR, or an author **below the resolved trusted-author whitelist** — the
    mode is **pinned** to `review` and no configuration can move it (the confused-deputy fence). For a
-   **trusted-internal** PR (non-fork, member/owner author) an automation MAY be configured *above*
-   `review` (to write PR comments / create linking issues), but `review` stays the default. The trust
-   signal is derived **server-side from the webhook payload, never user-set** — otherwise the fence
-   is forgeable. See ADR-005 for the trust-conditioned floor. (Relaxed from a flat PR→`review` pin by
-   owner ruling 2026-08-21.)
+   **trusted-internal** PR (non-fork, author at/above the whitelist) an automation MAY be configured
+   *above* `review` (to write PR comments / create linking issues), but `review` stays the default.
+   The **trusted-author whitelist is itself a configurable, monotone posture** (§ADR-005): an admin
+   defines which `author_association` levels count as trusted for write; the org sets a floor a repo
+   can only *tighten* (admit fewer, never more); the default is {`OWNER`, `MEMBER`}, and `COLLABORATOR`
+   is admissible by configuration. The trust signal (`isFork`, `author_association`) is derived
+   **server-side from the webhook payload, never user-set** — otherwise the fence is forgeable. See
+   ADR-005 for the floor. (Relaxed from a flat PR→`review` pin by owner ruling 2026-08-21;
+   whitelist made configurable 2026-08-21.)
 3. **Emit-only single-writer (the write path).** The review agent has **no `gh` / `git push`
    tools**. It emits a fenced-JSON verdict; the **control plane** parses it
    (`parse-review-intent.ts`), validates the severity against the approve floor

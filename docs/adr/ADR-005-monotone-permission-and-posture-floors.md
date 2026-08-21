@@ -5,7 +5,7 @@
   review-severity axis (`blockTolerance`) already ships; this ADR fixes the *shape* every current
   and future strictness control must take.
 - **Date:** 2026-08-21
-- **Context source:** `packages/shared/src/db/schema.ts:1411` (`blockTolerance` on
+- **Context source:** `packages/shared/src/db/schema.ts:1423` (`blockTolerance` on
   `repo_review_settings`), `packages/review/src/review/severity-policy.ts` (`toleranceToPolicy`),
   `packages/review/src/settings/review-floor-resolver.ts` (`resolveApproveFloorPolicy` live-read),
   `apps/www/src/server-lib/remote-daemon-message.ts:138-149` (permissionMode seam). Benchmark:
@@ -39,15 +39,25 @@ not merely validated against.
    per-trigger/sub-event floor is `min(configuredMode, floorFor(subEvent))`.
 3. **The PR floor is trust-conditioned; `review` is the default and the untrusted bottom.**
    `floorFor(subEvent, ctx)` returns `review` as a **structural pin** for **untrusted** PR content —
-   a fork PR, or an author whose `author_association` ∉ {`OWNER`, `MEMBER`} — so no configuration can
-   move it (ADR-004's confused-deputy fence). For a **trusted-internal** PR (non-fork, member/owner
-   author) the floor drops so an automation may be configured *above* `review` (write PR comments /
-   create linking issues), while `review` remains the **default** when unconfigured. The trust
-   context is derived **server-side from the webhook, never user-supplied** — so the floor is a
-   function of trust, and config still only tightens toward it. Monotonicity is unchanged:
-   `rank(effective) ≤ rank(floorFor(subEvent, ctx))`. (Relaxed from a flat PR→`review` pin by owner
-   ruling 2026-08-21.)
-4. **Enforced at the seam, not only in the UI:** the control-plane seam clamps regardless of what
+   a fork PR, or an author **below the resolved trusted-author threshold** — so no configuration can
+   move it (ADR-004's confused-deputy fence). For a **trusted-internal** PR (non-fork, author
+   at/above the threshold) the floor drops so an automation may be configured *above* `review` (write
+   PR comments / create linking issues), while `review` remains the **default** when unconfigured. The
+   trust context (`isFork`, `author_association`) is derived **server-side from the webhook, never
+   user-supplied** — so the floor is a function of trust, and config still only tightens toward it.
+   Monotonicity is unchanged: `rank(effective) ≤ rank(floorFor(subEvent, ctx))`. (Relaxed from a flat
+   PR→`review` pin by owner ruling 2026-08-21.)
+4. **The trusted-author threshold is itself a posture on this same lattice** (owner ruling
+   2026-08-21). Order `author_association` by trust rank
+   (`OWNER > MEMBER > COLLABORATOR > CONTRIBUTOR > FIRST_TIME_CONTRIBUTOR > NONE`); the trusted set is
+   "rank ≥ T". An admin configures `T` end-to-end; the **org sets the floor `T_org` (the most
+   permissive value allowed) and a repo may only *raise* it** (`T_eff = max(T_org, T_repo)` — admit
+   fewer authors, never more), composed by the SAME `tighten()` combinator as the other axes. Default
+   `T = MEMBER` (whitelist {`OWNER`, `MEMBER`}); `COLLABORATOR` is admissible by configuration. Fork
+   PRs remain untrusted regardless of `T` (a hard structural gate; revisit only via a separate ADR).
+   This is the composability property generalizing: a new trust knob is just another monotone field,
+   not a new code path.
+5. **Enforced at the seam, not only in the UI:** the control-plane seam clamps regardless of what
    the caller sends — the UI/zod additionally makes the loosening option un-selectable, but the seam
    is the source of truth (mirrors how ADR-036's approve floor is server-enforced even when the
    caller forgets).
@@ -93,5 +103,8 @@ mitigations — see ADR-004's Standards mapping for the full citation set.
 
 ## Testing
 
-- Property tests: monotonicity over all inputs; `effective(pull_request, *) === "review"`; a non-PR
-  trigger configured `plan` reaches the daemon as `plan`, configured `review` runs emit-only.
+- Property tests: monotonicity over all inputs; for untrusted PR content (fork, or rank below
+  `T_eff`) `effective === "review"` regardless of config; a trusted-internal PR configured `plan`/
+  `allowAll` reaches the daemon at that mode; `T_eff = max(T_org, T_repo)` (a repo cannot admit an
+  author the org excluded); a non-PR trigger configured `plan` reaches the daemon as `plan`,
+  configured `review` runs emit-only.
