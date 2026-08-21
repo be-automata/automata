@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { BlockTolerance } from "@terragon/review/severity-policy";
+import { errorFromResponse } from "./error-from-response";
 
 /**
  * Per-repo REQUESTED_CHANGES tolerance overrides for the caller's active org.
@@ -26,25 +27,6 @@ export interface RepoReviewSettingPatch {
 export const reviewSettingsQueryKeys = {
   list: () => ["review-settings", "list"] as const,
 };
-
-/** Read the error text from a failed response, falling back to the status line. */
-async function errorFromResponse(res: Response): Promise<Error> {
-  let message = res.statusText;
-  try {
-    const text = await res.text();
-    if (text) {
-      try {
-        const parsed = JSON.parse(text) as { error?: string };
-        message = parsed.error ?? text;
-      } catch {
-        message = text;
-      }
-    }
-  } catch {
-    // keep the status line
-  }
-  return new Error(message || `Request failed (${res.status})`);
-}
 
 /** Split `owner/name` into its two path segments (name may itself be a slug). */
 function splitRepoFullName(
