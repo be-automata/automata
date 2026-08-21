@@ -21,7 +21,7 @@ export const claudeAdapter: HarnessAdapter = {
   authFilePath: () => ".claude/.credentials.json",
 
   prepareEnv(ctx: PrepareEnvContext): Record<string, string | undefined> {
-    // Mirrors daemon.ts:666-687 exactly.
+    // Mirrors the pre-#76 runClaudeCodeCommand env assembly exactly.
     return {
       ANTHROPIC_API_KEY: ctx.useCredits
         ? ""
@@ -51,10 +51,10 @@ export const claudeAdapter: HarnessAdapter = {
   normalizeModel: (model: string) => model,
 
   makeLineParser: (ctx) => ({
-    // Mirrors the inline JSON.parse in runClaudeCodeCommand's onStdoutLine
-    // (daemon.ts:688-715). Session/isCompleted state tracking and
-    // addMessageToBuffer stay in the daemon (or, post-#76, the generic
-    // runAgentCommand) — this façade only reproduces the parse step.
+    // Mirrors the inline JSON.parse the pre-#76 runClaudeCodeCommand did in
+    // its onStdoutLine. Session/isCompleted state tracking and
+    // addMessageToBuffer stay in the daemon's generic runAgentCommand —
+    // this façade only reproduces the parse step.
     parse(line: string): ClaudeMessage[] {
       try {
         const outputMessage = JSON.parse(line) as ClaudeMessage;
@@ -70,10 +70,16 @@ export const claudeAdapter: HarnessAdapter = {
   }),
 
   capabilities: {
-    // Target contract (ADR-004/ADR-006): true for every adapter. Claude is
-    // also the ONLY agent for which daemon.ts's OLD path actually applies
-    // this today (daemon.ts:656) — see the labelled gap test in
-    // adapters/capabilities.golden.test.ts.
+    // Contract (ADR-004/ADR-006): true for every adapter. Claude was the
+    // ONLY agent for which daemon.ts's pre-#76 path actually applied this —
+    // see the (now-inverted) labelled test in
+    // adapters/daemon-golden.test.ts and adapter-golden.test.ts.
     withholdGitCredentialsInReviewMode: true,
+    // Only claudeCode fixes up on-disk session logs (pre-spawn, and on
+    // process kill via killActiveProcess).
+    fixesSessionLogs: true,
+    // Any message carrying a session_id sets it; no backfill of later
+    // messages within the same stdout batch.
+    sessionTracking: "any-message",
   },
 };

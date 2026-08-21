@@ -13,10 +13,10 @@ import type {
 /**
  * Thin façade over `gemini.ts`. Gemini needs per-run parser state
  * (`createGeminiParserState()`) plus a `finalize()` that flushes
- * `parserState.accumulatedContent` — mirroring the `onClose` handler in
- * `runGeminiCommand` (daemon.ts:872, 923-947). Without `finalize`, the last
+ * `parserState.accumulatedContent` — mirroring the `onClose` handler the
+ * pre-#76 `runGeminiCommand` registered. Without `finalize`, the last
  * accumulated delta chunk would be silently dropped when the process closes,
- * which is exactly the byte-identical-output hazard A2 must avoid.
+ * which is exactly the byte-identical-output hazard #76's cutover must avoid.
  */
 export const geminiAdapter: HarnessAdapter = {
   agent: "gemini",
@@ -26,7 +26,7 @@ export const geminiAdapter: HarnessAdapter = {
   authFilePath: () => null,
 
   prepareEnv(ctx: PrepareEnvContext): Record<string, string | undefined> {
-    // Mirrors daemon.ts:882-885.
+    // Mirrors the pre-#76 runGeminiCommand env assembly.
     return {
       GOOGLE_GEMINI_BASE_URL: `${ctx.normalizedUrl}/api/proxy/google`,
       GEMINI_API_KEY: ctx.token,
@@ -50,11 +50,13 @@ export const geminiAdapter: HarnessAdapter = {
       parse(line) {
         return parseGeminiLine({ line, runtime: ctx.runtime, state });
       },
-      // Mirrors the onClose flush in runGeminiCommand (daemon.ts:923-947).
+      // Mirrors the onClose flush the pre-#76 runGeminiCommand registered.
       // Note: the flushed message's session_id there is read from
       // activeProcessState — a daemon-owned field this façade does not have
-      // access to, so it is intentionally left "" here; #76's generic
-      // runAgentCommand supplies the real session_id when wiring this up.
+      // access to, so it is intentionally left "" here; the generic
+      // runAgentCommand overwrites it with the real session_id
+      // (activeProcessState?.sessionId || "") when wiring this up, byte-
+      // identically to the deleted onClose handler.
       finalize(): ClaudeMessage[] {
         if (!state.accumulatedContent) {
           return [];
@@ -78,5 +80,8 @@ export const geminiAdapter: HarnessAdapter = {
 
   capabilities: {
     withholdGitCredentialsInReviewMode: true,
+    // Only a type: "system" message with a session_id sets the tracked
+    // session; assistant/user messages get backfilled from the snapshot.
+    sessionTracking: "system-init-with-backfill",
   },
 };
