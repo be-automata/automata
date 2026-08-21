@@ -1,9 +1,18 @@
 "use client";
 
+import { useState } from "react";
 import type { BlockTolerance } from "@terragon/review/severity-policy";
 import { AlertCircle, Loader2 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SettingsSection } from "@/components/settings/settings-row";
 import {
@@ -11,7 +20,14 @@ import {
   useSetOrgReviewSettingMutation,
 } from "@/queries/org-review-settings-queries";
 import { ToleranceRadioCard } from "./tolerance-radio-card";
-import { TOLERANCE_ORDER } from "./constants";
+import { isLooserOrgFloor, TOLERANCE_ORDER } from "./constants";
+
+/** A floor change awaiting explicit confirmation because it loosens org-wide. */
+interface PendingFloorLoosen {
+  from: BlockTolerance;
+  /** `null` = clearing the floor entirely ("no floor"). */
+  to: BlockTolerance | null;
+}
 
 /**
  * Org-wide review floor selector (ADR-005 §4). Governance intent only —
@@ -30,15 +46,36 @@ export function OrgFloorCard() {
 
   const stored = settingQuery.data?.blockTolerance ?? null;
   const isMutating = setMutation.isPending;
+  const [pending, setPending] = useState<PendingFloorLoosen | null>(null);
+
+  /**
+   * Loosening or clearing the org-wide floor is higher blast-radius than a
+   * single repo's tolerance (it re-opens every repo in the org), so — like the
+   * per-repo isLooser + ConfirmLoosenDialog flow — it requires an explicit
+   * confirmation. Tightening (including setting a first floor) applies
+   * immediately.
+   */
+  function requestChange(target: BlockTolerance | null): void {
+    if (target === stored) return;
+    if (stored !== null && isLooserOrgFloor(target, stored)) {
+      setPending({ from: stored, to: target });
+      return;
+    }
+    setMutation.mutate({ blockTolerance: target });
+  }
 
   function select(tolerance: BlockTolerance): void {
-    if (tolerance === stored) return;
-    setMutation.mutate({ blockTolerance: tolerance });
+    requestChange(tolerance);
   }
 
   function clear(): void {
     if (stored === null) return;
-    setMutation.mutate({ blockTolerance: null });
+    requestChange(null);
+  }
+
+  function confirmPending(): void {
+    if (pending) setMutation.mutate({ blockTolerance: pending.to });
+    setPending(null);
   }
 
   return (
@@ -114,6 +151,66 @@ export function OrgFloorCard() {
           </div>
         </div>
       )}
+
+      <Dialog
+        open={pending !== null}
+        onOpenChange={(open) => {
+          if (!open) setPending(null);
+        }}
+      >
+        <DialogContent>
+          {pending && (
+            <>
+              <DialogHeader>
+                <DialogTitle>
+                  {pending.to === null
+                    ? "Remove the organization review floor?"
+                    : "Loosen the organization review floor?"}
+                </DialogTitle>
+                <DialogDescription>
+                  This applies to every repository in the organization.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-2 text-sm">
+                <p>
+                  {pending.to === null ? (
+                    <>
+                      You&apos;re removing the floor (currently{" "}
+                      <code className="font-mono">{pending.from}</code>) — repos
+                      will be able to configure any tolerance, including the
+                      most lenient.
+                    </>
+                  ) : (
+                    <>
+                      You&apos;re loosening the floor from{" "}
+                      <code className="font-mono">{pending.from}</code> to{" "}
+                      <code className="font-mono">{pending.to}</code> — repos
+                      will be able to configure more lenient tolerances than
+                      before.
+                    </>
+                  )}
+                </p>
+                <p className="text-muted-foreground">
+                  The floor is stored governance; enforcement at review time
+                  ships with the org-floor resolver.
+                </p>
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setPending(null)}
+                >
+                  Cancel
+                </Button>
+                <Button type="button" onClick={confirmPending}>
+                  {pending.to === null ? "Remove floor" : "Loosen floor"}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </SettingsSection>
   );
 }

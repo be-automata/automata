@@ -13,6 +13,7 @@ import {
   blocksUnder,
   consequenceFor,
   isLooser,
+  isLooserOrgFloor,
   DEFAULT_TOLERANCE,
   type Consequence,
 } from "./constants";
@@ -85,6 +86,39 @@ describe("review-tolerance matrix ↔ server kernel parity", () => {
     for (const a of BLOCK_TOLERANCES) {
       for (const b of BLOCK_TOLERANCES) {
         expect(isLooser(a, b), `isLooser(${a}, ${b})`).toBe(rank(a) > rank(b));
+      }
+    }
+  });
+});
+
+/**
+ * Guard-decision semantics for the org floor confirm dialog: any transition
+ * this returns `true` for must go through explicit confirmation before the
+ * PUT fires (OrgFloorCard.requestChange). `null` = "no floor" = loosest.
+ */
+describe("isLooserOrgFloor (null = no floor = loosest)", () => {
+  it("clearing an existing floor is always a loosen (confirm required)", () => {
+    for (const t of BLOCK_TOLERANCES) {
+      expect(isLooserOrgFloor(null, t), `clear from ${t}`).toBe(true);
+    }
+  });
+
+  it("setting a first floor is never a loosen (applies immediately)", () => {
+    for (const t of BLOCK_TOLERANCES) {
+      expect(isLooserOrgFloor(t, null), `first-set ${t}`).toBe(false);
+    }
+  });
+
+  it("no floor → no floor is not a loosen", () => {
+    expect(isLooserOrgFloor(null, null)).toBe(false);
+  });
+
+  it("matches isLooser exactly for every non-null pair", () => {
+    for (const a of BLOCK_TOLERANCES) {
+      for (const b of BLOCK_TOLERANCES) {
+        expect(isLooserOrgFloor(a, b), `isLooserOrgFloor(${a}, ${b})`).toBe(
+          isLooser(a, b),
+        );
       }
     }
   });
