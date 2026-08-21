@@ -8,9 +8,18 @@
  */
 
 import type { BlockTolerance } from "../review/severity-policy";
+import type { TrustedAuthorThreshold } from "./posture-lattice";
 
 export type { BlockTolerance };
 export { BLOCK_TOLERANCES, isBlockTolerance } from "../review/severity-policy";
+
+export type { TrustedAuthorThreshold };
+export {
+  TRUST_ORDER,
+  DEFAULT_TRUSTED_AUTHOR_THRESHOLD,
+  isTrustedAuthorThreshold,
+  trustRank,
+} from "./posture-lattice";
 
 /** One per-repo review-tolerance override. `repo` is a lowercased 'owner/name' slug. */
 export interface RepoReviewSetting {

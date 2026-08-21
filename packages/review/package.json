@@ -15,6 +15,7 @@
     "./state/review-intent-executor": "./src/review/state/review-intent-executor.ts",
     "./audit/review-audit-log": "./src/audit/review-audit-log.ts",
     "./settings/review-floor-resolver": "./src/settings/review-floor-resolver.ts",
+    "./settings/posture-lattice": "./src/settings/posture-lattice.ts",
     "./settings/types": "./src/settings/types.ts",
     "./types": "./src/types.ts"
   },
