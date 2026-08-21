@@ -8,6 +8,9 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 import {
   SEVERITY_ORDER,
@@ -53,6 +56,80 @@ describe("severity-policy — ordering + defaults", () => {
       blockSeverity: "warning",
       surfaceSeverity: "warning",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GATE_SEVERITY_POLICY — structural "ReviewGate untouched" pin (issue #73 /
+// epic #70 owner ruling; ADR-005).
+//
+// WHY THIS TEST IS STRUCTURAL, NOT END-TO-END: the internal ReviewGate has NO
+// runtime consumer in THIS repo — GATE_SEVERITY_POLICY is only referenced from
+// tests here; the gate itself executes inside orch-agents, a separate repo this
+// codebase cannot exercise. So there is no live "ReviewGate ignored the org
+// floor at runtime" assertion we can make from here. Instead this test pins
+// the STATIC guarantee that makes such a runtime bypass impossible by
+// construction: (a) the exported value never changed, and (b) the source
+// declares it as an inert literal with zero import path to the org-floor
+// composition machinery (`review-floor-resolver`) or the tighten lattice
+// (`posture-lattice`) — so no future edit can wire it up without this test
+// failing first. A reviewer should NOT read this as proof the deployed
+// ReviewGate is unaffected by an org floor; it proves this repo's kernel
+// cannot smuggle that wiring in silently. See also the apps/www test in
+// resolve-approve-floor.test.ts, which shows the SAME literal staying
+// {warning,warning} while resolveApproveFloor (the actual external-PR path)
+// returns a tightened {info,info} under an org floor — the one live
+// composed-vs-untouched contrast this codebase CAN exercise end-to-end.
+// ---------------------------------------------------------------------------
+
+describe("severity-policy — GATE_SEVERITY_POLICY structural pin (ReviewGate untouched)", () => {
+  test("(a) value pin: GATE_SEVERITY_POLICY is exactly {blockSeverity: warning, surfaceSeverity: warning}", () => {
+    assert.deepEqual(GATE_SEVERITY_POLICY, {
+      blockSeverity: "warning",
+      surfaceSeverity: "warning",
+    });
+  });
+
+  test("(b) provenance pin: the source declares GATE_SEVERITY_POLICY as a literal const with no import from the org-floor lattice", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const sourcePath = join(here, "../../src/review/severity-policy.ts");
+    const source = readFileSync(sourcePath, "utf8");
+
+    // No import path into the composition machinery that would let a future
+    // edit route the gate through the org floor / tighten lattice.
+    assert.doesNotMatch(
+      source,
+      /from\s+["']\.\.\/settings\/review-floor-resolver["']/,
+      "severity-policy.ts must not import from ../settings/review-floor-resolver",
+    );
+    assert.doesNotMatch(
+      source,
+      /from\s+["']\.\.\/settings\/posture-lattice["']/,
+      "severity-policy.ts must not import from ../settings/posture-lattice",
+    );
+
+    // GATE_SEVERITY_POLICY must be declared as a plain object literal, not the
+    // result of a call expression (e.g. resolveComposedFloorPolicy(...) or
+    // tightenSeverityPolicy(...)) — a call expression there would mean the
+    // "constant" could vary with runtime/org state.
+    const declMatch = source.match(
+      /export const GATE_SEVERITY_POLICY:\s*ApproveSeverityPolicy\s*=\s*(\{[\s\S]*?\n\};)/,
+    );
+    assert.ok(
+      declMatch,
+      "expected to find `export const GATE_SEVERITY_POLICY: ApproveSeverityPolicy = { ... };`",
+    );
+    const rhs = declMatch![1]!;
+    assert.match(
+      rhs.trim(),
+      /^\{[\s\S]*\}\s*;$/,
+      "GATE_SEVERITY_POLICY's initializer must be an object literal, not a call expression",
+    );
+    assert.doesNotMatch(
+      rhs,
+      /\w+\s*\(/,
+      "GATE_SEVERITY_POLICY's initializer must not contain a function call",
+    );
   });
 });
 

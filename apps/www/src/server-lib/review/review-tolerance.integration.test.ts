@@ -4,6 +4,7 @@ import { createDb } from "@terragon/shared/db";
 import { nanoid } from "nanoid";
 import { createOrganization } from "@terragon/shared/model/organizations";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
+import { upsertOrganizationReviewSetting } from "@terragon/shared/model/organization-review-settings";
 import type {
   GitHubReview,
   ReviewGitHubClient,
@@ -174,6 +175,56 @@ describe("review-tolerance booted-stack integration (real DB → resolve → exe
     });
     expect(outcome).toMatchObject({ outcome: "posted", verdict: "comment" });
     expect(github.submitReview).not.toHaveBeenCalled();
+  });
+
+  it("ORG-1: org floor tighter than repo → the POSTED VERDICT reflects the composed (org) floor", async () => {
+    // Org floor: warning (stricter). Repo: error (looser, would let warnings
+    // through). The composed floor must win — the directive + backstop agree.
+    await upsertOrganizationReviewSetting({
+      db,
+      organizationId: orgId,
+      patch: { blockTolerance: "warning" },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { blockTolerance: "error" },
+    });
+    const { github, outcome } = await reviewWithStoredPolicy({
+      organizationId: orgId,
+      terminalText: emittedApproveWith("warning"),
+    });
+    expect(outcome).toMatchObject({
+      outcome: "posted",
+      verdict: "request_changes",
+    });
+    expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
+  });
+
+  it("ORG-2: repo tighter than org floor → the repo's stricter tolerance is honored in the posted verdict", async () => {
+    // Org floor: warning (looser). Repo: info (stricter). The composed floor
+    // must be info — the repo cannot be loosened past its own configured bar.
+    await upsertOrganizationReviewSetting({
+      db,
+      organizationId: orgId,
+      patch: { blockTolerance: "warning" },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { blockTolerance: "info" },
+    });
+    const { github, outcome } = await reviewWithStoredPolicy({
+      organizationId: orgId,
+      terminalText: emittedApproveWith("info"),
+    });
+    expect(outcome).toMatchObject({
+      outcome: "posted",
+      verdict: "request_changes",
+    });
+    expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
   });
 
   it("DRAFT-1: default (no row) → intake engages drafts (policy true)", async () => {

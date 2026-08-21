@@ -103,7 +103,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     threadId,
     threadChatId,
     // Reuse the thread we already loaded above (ownership check) so the always-on
-    // review-tolerance directive computation adds zero extra reads.
+    // review-tolerance directive computation avoids a redundant thread read (it
+    // still reads the org + repo review-setting rows via resolveApproveFloor;
+    // those two reads run via Promise.all so wall-clock stays ~flat).
     thread,
   });
   if (!message) {
