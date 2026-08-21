@@ -49,6 +49,7 @@ describe("GET /api/review-settings", () => {
         repoFullName: "acme/widgets",
         blockTolerance: "info",
         reviewDraftPrs: false,
+        trustedAuthorThreshold: null,
         updatedByUserId: USER,
         createdAt: new Date(),
         updatedAt: new Date("2026-07-20T00:00:00Z"),
