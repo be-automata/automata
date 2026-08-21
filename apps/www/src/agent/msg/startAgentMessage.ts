@@ -57,6 +57,8 @@ import {
   getThreadContextMessageToGenerate,
   generateThreadContextResult,
 } from "@/server-lib/thread-context";
+import { getAutomation } from "@terragon/shared/model/automations";
+import { resolvePermissionModeForDispatch } from "@/server-lib/review/resolve-permission-mode";
 
 async function checkTaskQueueLimit({ db, userId }: { db: DB; userId: string }) {
   // Task queue limiting is always enabled
@@ -270,7 +272,8 @@ export async function startAgentMessage({
           threadId,
           threadChatId,
           repoFullName: thread!.githubRepoFullName,
-          branch: branchName ?? thread!.branchName ?? thread!.repoBaseBranchName,
+          branch:
+            branchName ?? thread!.branchName ?? thread!.repoBaseBranchName,
         });
         return;
       }
@@ -479,6 +482,42 @@ export async function startAgentMessage({
             (agentForModel === "claudeCode" && !userCredentials.hasClaude) ||
             !isConnectedCredentialsSupported(agentForModel);
 
+          // The permission-mode FLOOR (ADR-005 §2/§3/§3b, #82) — the SAME shared
+          // resolver Seam A (`remote-daemon-message.ts`) calls, so both dispatch
+          // seams clamp to the identical mode for the identical thread. This is
+          // the local (non-hatchet-remote) sandbox path: unlike Seam A, there is
+          // NO pre-existing automation read here, so one is added — a single
+          // extra `getAutomation` for a non-hot-loop dispatch path is an
+          // acceptable cost for closing the gap ADR-005 §3b calls out.
+          //
+          // SECURITY FIX, called out loudly: today this seam has NO review
+          // derivation at all — it always sent `threadChat.permissionMode ||
+          // "allowAll"`, so a PR-review automation dispatched down this LOCAL
+          // path (the flag-off / non-hatchet-remote path) reached the daemon at
+          // "allowAll" even though Seam A pins the SAME thread to "review". The
+          // resolver call below intentionally TIGHTENS that to "review" for a
+          // PR-family thread with no trust-verified content — this is a
+          // confused-deputy fix (ADR-004), not an AC4 regression: AC4's "absent
+          // config reproduces today's behavior" invariant is about NON-PR
+          // dispatch paths, which this resolver reproduces bit-for-bit via the
+          // `threadChatPermissionMode` fallback below.
+          const automation = thread!.automationId
+            ? ((await getAutomation({
+                db,
+                userId,
+                automationId: thread!.automationId,
+                organizationId: thread!.organizationId ?? null,
+              })) ?? null)
+            : null;
+          const permissionMode = await resolvePermissionModeForDispatch({
+            db,
+            organizationId: thread!.organizationId ?? null,
+            repoFullName: thread!.githubRepoFullName,
+            automation,
+            thread: { trustContext: thread!.trustContext ?? null },
+            threadChatPermissionMode: threadChat.permissionMode,
+          });
+
           await sendDaemonMessage({
             message: {
               type: "claude",
@@ -487,7 +526,7 @@ export async function startAgentMessage({
               agentVersion: threadChat.agentVersion,
               prompt: finalFinalPrompt,
               sessionId,
-              permissionMode: threadChat.permissionMode || "allowAll",
+              permissionMode,
               ...(shouldUseCredits ? { useCredits: true } : {}),
             },
             userId,

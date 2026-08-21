@@ -1,6 +1,19 @@
 import * as z from "zod/v4";
 import { DBUserMessage } from "../db/db-message";
 
+/**
+ * The per-trigger `permissionMode` FLOOR config field (#82, ADR-005 §2/§5).
+ * Optional and absent-by-default: absent ⇒ `undefined` ⇒ the resolver's
+ * `configured ?? default` falls through to today's derived default, so
+ * omitting this field on every existing automation reproduces today's
+ * behavior exactly (ADR-005's AC4 regression invariant). This is the
+ * MECHANISM only — no config UI ships with this ticket (that belongs with
+ * the #74-family surface per ADR-005 §5); the value can only ever be
+ * TIGHTENED by the server-side floor resolver
+ * (`@terragon/review/settings/permission-floor`), never honored as-is.
+ */
+const permissionModeConfig = z.enum(["review", "plan", "allowAll"]).optional();
+
 export const AutomationTriggerSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("manual"),
@@ -11,6 +24,7 @@ export const AutomationTriggerSchema = z.discriminatedUnion("type", [
     config: z.object({
       cron: z.string(),
       timezone: z.string(),
+      permissionMode: permissionModeConfig,
     }),
   }),
   z.object({
@@ -36,6 +50,7 @@ export const AutomationTriggerSchema = z.discriminatedUnion("type", [
         .boolean()
         .optional()
         .describe("Automatically archive the task when the agent completes"),
+      permissionMode: permissionModeConfig,
     }),
   }),
   z.object({
@@ -59,6 +74,7 @@ export const AutomationTriggerSchema = z.discriminatedUnion("type", [
         .boolean()
         .optional()
         .describe("Automatically archive the task when the agent completes"),
+      permissionMode: permissionModeConfig,
     }),
   }),
   z.object({
@@ -79,6 +95,7 @@ export const AutomationTriggerSchema = z.discriminatedUnion("type", [
           .optional()
           .describe("Comma-separated list of bot usernames to include"),
       }),
+      permissionMode: permissionModeConfig,
     }),
   }),
 ]);

@@ -138,6 +138,27 @@ export type ThreadSourceMetadata =
       versionId?: string;
     };
 
+/**
+ * Server-derived trust snapshot for a PR-triggered thread (ADR-005 §3a). Captured
+ * ONCE at intake from `pulls.get` (both automated and manual dispatch — never from
+ * the webhook payload or any caller-suppliable field, so it cannot be forged) and
+ * persisted immutably on the thread. Raw `authorAssociation` string here — this
+ * package stays dependency-free from `@terragon/review`; the permission-floor
+ * resolver (`@terragon/review/settings/permission-floor`) validates/ranks it.
+ * NULL means "no trust snapshot" (a non-PR thread, or an intake-time GitHub lookup
+ * failure) and MUST resolve fail-closed (cap = "review"), never fall back to
+ * trusted. Lives on its own column (`thread.trustContext`), never inside
+ * `sourceMetadata` — that field is a discriminated union `automation-skill`
+ * promotion already occupies (see `maybePromoteSkillLastKnownGood`), and writing
+ * trust there would collide with it.
+ */
+export type ThreadTrustContext = {
+  source: "github-pr";
+  isFork: boolean;
+  authorAssociation: string;
+  capturedAt: string;
+};
+
 export type ThreadStatusDeprecated =
   | "queued-blocked"
   | "error"

@@ -17,7 +17,11 @@ import {
   GitHubMentionTriggerConfig,
   AutomationTriggerType,
 } from "@terragon/shared/automations";
-import { AccessTier, DBUserMessage } from "@terragon/shared";
+import {
+  AccessTier,
+  DBUserMessage,
+  ThreadTrustContext,
+} from "@terragon/shared";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
 import { effectiveShadow } from "@/lib/github-side-effects";
 import {
@@ -86,6 +90,14 @@ export async function runAutomation({
     transformMessage?: (message: DBUserMessage) => DBUserMessage;
     prNumber?: number;
     issueNumber?: number;
+    /**
+     * Server-derived PR trust snapshot (ADR-005 §3a, #82) — captured by the
+     * caller (runPullRequestAutomation) from `pulls.get`, threaded through
+     * unconditionally so BOTH `source: "automated"` and `source: "manual"`
+     * dispatch persist it (fail-closed if the lookup failed: undefined here
+     * means "no snapshot", never "trusted").
+     */
+    trustContext?: ThreadTrustContext | null;
   };
   source: "automated" | "manual";
 }): Promise<{ threadId: string; threadChatId: string } | undefined> {
@@ -124,6 +136,7 @@ export async function runAutomation({
           baseBranchName: options?.branchName ?? automation.branchName,
           headBranchName: null,
           sourceType: "automation",
+          trustContext: options?.trustContext,
           automation: automation,
           githubPRNumber: options?.prNumber,
           githubIssueNumber: options?.issueNumber,
@@ -207,6 +220,7 @@ export async function runAutomation({
             ...(resolved.versionId ? { versionId: resolved.versionId } : {}),
           },
           automation: automation,
+          trustContext: options?.trustContext,
           githubPRNumber: options?.prNumber,
           githubIssueNumber: options?.issueNumber,
           disableGitCheckpointing: automation.disableGitCheckpointing ?? false,
@@ -543,6 +557,18 @@ export async function runPullRequestAutomation({
       pull_number: prNumber,
     });
     const branchName = pr.data.head.ref;
+    // Server-derived trust snapshot (ADR-005 §3a, #82): captured HERE, from the
+    // EXISTING pulls.get read (no new webhook/API call, no extra round trip),
+    // for BOTH source: "automated" and "manual" — runs unconditionally, not
+    // gated behind `source !== "manual"` like the thread-archival block below.
+    // Unforgeable by construction: nothing in the request path lets a caller
+    // set isFork/authorAssociation — this is the ONLY writer.
+    const trustContext: ThreadTrustContext = {
+      source: "github-pr",
+      isFork: pr.data.head?.repo?.fork ?? true,
+      authorAssociation: pr.data.author_association ?? "NONE",
+      capturedAt: new Date().toISOString(),
+    };
 
     if (source !== "manual") {
       const unarchivedThreadsForAutomation = await getThreads({
@@ -581,6 +607,7 @@ export async function runPullRequestAutomation({
         // what a base-less test fixture did to the shadow suite.
         prBaseBranchName: pr.data.base?.ref,
         prNumber,
+        trustContext,
         transformMessage: (message: DBUserMessage) => {
           return {
             ...message,

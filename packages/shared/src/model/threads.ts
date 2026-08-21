@@ -179,6 +179,7 @@ async function getThreadsInner({
       skipSetup: schema.thread.skipSetup,
       sourceType: schema.thread.sourceType,
       sourceMetadata: schema.thread.sourceMetadata,
+      trustContext: schema.thread.trustContext,
       version: schema.thread.version,
       gitDiffStats: schema.thread.gitDiffStats,
 
@@ -685,6 +686,7 @@ export async function getThread({
     disableGitCheckpointing: thread.disableGitCheckpointing,
     sourceType: thread.sourceType,
     sourceMetadata: thread.sourceMetadata,
+    trustContext: thread.trustContext,
     version: thread.version,
     isUnread: thread.isUnread,
     threadChats: resolveThreadChatFull(thread, threadChats),
