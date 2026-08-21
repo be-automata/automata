@@ -120,6 +120,7 @@ describe("daemon", () => {
   afterEach(async () => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     await runtime.teardown();
   });
 
@@ -207,6 +208,60 @@ describe("daemon", () => {
     });
     await sleepUntil(() => spawnCommandLineMock.mock.calls.length === 2);
     expect(killChildProcessGroupMock).not.toHaveBeenCalled();
+  });
+
+  it("review-mode run strips every GitHub credential from the agent env; a normal run keeps them (#65 wiring)", async () => {
+    // Pin the ACTUAL security property at its decision point (daemon.ts:
+    // withholdGitCredentials = permissionMode === "review"), not just the
+    // stripGithubCredentials helper in isolation: a review agent (emit-only,
+    // ADR-036) must reach the spawn with NO GitHub credential vector, while a
+    // normal-mode agent — which legitimately needs authenticated git/gh —
+    // keeps them. These enter the child env via process.env, so stub them there.
+    vi.stubEnv("GH_TOKEN", "ghs_secret_token");
+    vi.stubEnv("GITHUB_TOKEN", "ghs_secret_token");
+    vi.stubEnv("GIT_CONFIG_COUNT", "1");
+    vi.stubEnv("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader");
+    vi.stubEnv("GIT_CONFIG_VALUE_0", "AUTHORIZATION: basic REDACTED");
+
+    await daemon.start();
+    await writeToUnixSocket({
+      unixSocketPath: runtime.unixSocketPath,
+      dataStr: JSON.stringify({
+        ...TEST_INPUT_MESSAGE,
+        permissionMode: "review",
+      }),
+    });
+    await sleepUntil(() => spawnCommandLineMock.mock.calls.length === 1);
+    const reviewEnv = spawnCommandLineMock.mock.calls[0]![1].env as Record<
+      string,
+      string | undefined
+    >;
+    expect(reviewEnv.GH_TOKEN).toBeUndefined();
+    expect(reviewEnv.GITHUB_TOKEN).toBeUndefined();
+    expect(reviewEnv.GIT_CONFIG_COUNT).toBeUndefined();
+    expect(reviewEnv.GIT_CONFIG_KEY_0).toBeUndefined();
+    expect(reviewEnv.GIT_CONFIG_VALUE_0).toBeUndefined();
+
+    // End the review run, then a normal-mode run keeps the credentials.
+    spawnCommandLineMock.mock.calls[0]![1].onClose?.(0);
+    await sleep();
+    await writeToUnixSocket({
+      unixSocketPath: runtime.unixSocketPath,
+      dataStr: JSON.stringify({
+        ...TEST_INPUT_MESSAGE,
+        permissionMode: "allowAll",
+        prompt: "normal run",
+      }),
+    });
+    await sleepUntil(() => spawnCommandLineMock.mock.calls.length === 2);
+    const normalEnv = spawnCommandLineMock.mock.calls[1]![1].env as Record<
+      string,
+      string | undefined
+    >;
+    expect(normalEnv.GH_TOKEN).toBe("ghs_secret_token");
+    expect(normalEnv.GIT_CONFIG_KEY_0).toBe(
+      "http.https://github.com/.extraheader",
+    );
   });
 
   it("should spawn the claude command and send output to the API", async () => {
