@@ -1428,6 +1428,17 @@ export const repoReviewSettings = pgTable(
      * gate, so a draft-skipped PR never dispatches a run at all.
      */
     reviewDraftPrs: boolean("review_draft_prs").notNull().default(true),
+    /**
+     * Author-trust threshold `T` (an `author_association` trust rank:
+     * OWNER > MEMBER > COLLABORATOR > CONTRIBUTOR > FIRST_TIME_CONTRIBUTOR > NONE)
+     * for this repo, per ADR-005 §4. Nullable, no column default — absent means
+     * "no repo override" and the resolver falls back to the org floor / the
+     * `MEMBER` default. Raw string here (dependency-free from `@terragon/review`),
+     * validated at the apps/www boundary. A repo may only *raise* this above the
+     * org floor `T_org` (`T_eff = max(T_org, T_repo)`), enforced by the resolver,
+     * not this column.
+     */
+    trustedAuthorThreshold: text("trusted_author_threshold"),
     /** Provenance: the user who last wrote this override (audit trail). */
     updatedByUserId: text("updated_by_user_id").references(() => user.id, {
       onDelete: "set null",
@@ -1446,6 +1457,54 @@ export const repoReviewSettings = pgTable(
     ),
     index("repo_review_settings_org_id_index").on(table.organizationId),
   ],
+);
+
+/**
+ * Per-organization review-settings floor (ADR-005 §4): `blockTolerance` and
+ * `trustedAuthorThreshold` set here are the ORG FLOOR — the most permissive
+ * value a repo under this org may configure. A repo may only narrow
+ * `blockTolerance` and only *raise* `trustedAuthorThreshold` relative to this
+ * row (`T_eff = max(T_org, T_repo)`), composed by the same monotone
+ * combinator described in ADR-005. Both columns are nullable with NO default:
+ * an absent row (or absent column) means "no org floor configured" — today's
+ * behavior is unchanged until an org explicitly sets one. The "default
+ * T = MEMBER" from the owner ruling is a RESOLVER default (tickets #72/#73),
+ * never a column default here.
+ *
+ * MULTI-TENANT: `organizationId` is both the primary key and the tenant fence
+ * — one row per org, looked up by PK alone (no repo slug in this table).
+ * `updatedByUserId` records provenance for the audit trail, mirroring
+ * `repoReviewSettings`.
+ */
+export const organizationReviewSettings = pgTable(
+  "organization_review_settings",
+  {
+    organizationId: text("organization_id")
+      .primaryKey()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    /**
+     * 'info' | 'warning' | 'error' — the org-wide floor for the lowest
+     * severity that blocks. Nullable, no default: absent = no org floor =
+     * today's per-repo-only behavior.
+     */
+    blockTolerance: text("block_tolerance"),
+    /**
+     * Author-trust threshold floor `T_org`. Stored values are the six GitHub
+     * `author_association` ranks uppercase (OWNER | MEMBER | COLLABORATOR |
+     * CONTRIBUTOR | FIRST_TIME_CONTRIBUTOR | NONE). Nullable, no default —
+     * see `repoReviewSettings.trustedAuthorThreshold` doc for the same note.
+     */
+    trustedAuthorThreshold: text("trusted_author_threshold"),
+    /** Provenance: the user who last wrote this override (audit trail). */
+    updatedByUserId: text("updated_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
 );
 
 /**

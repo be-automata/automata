@@ -360,6 +360,11 @@ export type RepoReviewSetting = typeof schema.repoReviewSettings.$inferSelect;
 export type RepoReviewSettingInsert =
   typeof schema.repoReviewSettings.$inferInsert;
 
+export type OrganizationReviewSetting =
+  typeof schema.organizationReviewSettings.$inferSelect;
+export type OrganizationReviewSettingInsert =
+  typeof schema.organizationReviewSettings.$inferInsert;
+
 /** Which edit surface produced a skill version (audit trail). */
 export type RepoSkillVersionSource =
   | "dashboard"
