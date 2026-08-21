@@ -15,6 +15,7 @@ import {
   useSetReviewSettingMutation,
 } from "@/queries/review-settings-queries";
 import { ToleranceMatrix } from "@/components/settings/review-tolerance/tolerance-matrix";
+import { OrgFloorCard } from "@/components/settings/review-tolerance/org-floor-card";
 import { RepoRow } from "@/components/settings/review-tolerance/repo-row";
 import {
   ConfirmLoosenDialog,
@@ -208,6 +209,8 @@ export function ReviewSettings() {
 
   return (
     <div className="flex flex-col gap-8">
+      <OrgFloorCard />
+
       <SettingsSection
         label="Review Tolerance"
         description="Per-repository floor for when PR review findings force a Request changes verdict. Repositories with no override run on the warning default."

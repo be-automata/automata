@@ -54,6 +54,21 @@ export function isLooser(
   return TOLERANCE_BLOCK_RANK[target] > TOLERANCE_BLOCK_RANK[current];
 }
 
+/**
+ * Org-floor variant of `isLooser` where `null` means "no floor" — the loosest
+ * possible state (repos may configure anything). Setting a floor where none
+ * existed is always a tighten; clearing an existing floor is always a loosen.
+ */
+export function isLooserOrgFloor(
+  target: BlockTolerance | null,
+  current: BlockTolerance | null,
+): boolean {
+  if (target === current) return false;
+  if (target === null) return current !== null;
+  if (current === null) return false;
+  return isLooser(target, current);
+}
+
 export type Consequence = "Request changes" | "Comment" | "Approve";
 
 /** Verdict a finding of `severity` produces under a repo's `tolerance`. */
