@@ -100,7 +100,7 @@ An adversarial review (codex, independent model, read-only repo access) found th
 on-box channels survive it and must be closed before this ADR's invariant actually holds:
 
 1. **On-disk credential file (HIGH, verified).** `setupGitCredentials`
-   (`packages/sandbox/src/setup.ts:184-203`) runs **unconditionally** in `setupSandboxEveryTime`
+   (`packages/sandbox/src/setup.ts:166-202`) runs **unconditionally** in `setupSandboxEveryTime`
    (call at `setup.ts:213`, not review-gated) and writes the token **plaintext** to
    `~/.git-credentials` while setting `credential.helper store` globally. `stripGithubCredentials`
    removes only env keys, so a prompt-injected review agent can `cat ~/.git-credentials` (exfiltrate)
