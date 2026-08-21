@@ -121,11 +121,9 @@ export interface HarnessAdapter {
   displayName: string;
   /**
    * Path (relative to the run's HOME) of this agent's on-disk credential
-   * file, or null if the agent has none. Mirrors
-   * `packages/worker/src/agent-run/agent-credentials.ts`
-   * `CREDENTIAL_FILE_BY_AGENT` (CONTEXT ONLY, not modified here) — only
-   * claudeCode and codex have an entry today; populating gemini/amp/opencode
-   * is #77's job, not #75's.
+   * file, or null if the agent has none. Sourced from the single shared map,
+   * `AUTH_FILE_BY_AGENT` / `authFilePathForAgent` in `@terragon/agent/auth-file`
+   * (#77) — see that module's JSDoc for why gemini/amp/opencode are null.
    */
   authFilePath(): string | null;
   prepareEnv(ctx: PrepareEnvContext): Record<string, string | undefined>;

@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { authFilePathForAgent } from "@terragon/agent/auth-file";
 import type { PulledAgentCredentials } from "./www-client";
 
 /**
@@ -16,12 +17,6 @@ import type { PulledAgentCredentials } from "./www-client";
  * Nothing here is written for a "shared" box; the caller decides that (config
  * boxTrust) and simply does not call this.
  */
-
-/** Where each agent's credential file lives, relative to the run HOME. */
-const CREDENTIAL_FILE_BY_AGENT: Record<string, string> = {
-  claudeCode: ".claude/.credentials.json",
-  codex: ".codex/auth.json",
-};
 
 export interface MaterialisedCredentials {
   /** HOME for the child process. Always a fresh, trust-seeded per-run dir. */
@@ -107,8 +102,10 @@ async function seedWorkspaceTrust({
  * authenticate as the OPERATOR. The trust seed is equally load-bearing: an
  * unseeded HOME makes review runs hang on a permission they cannot prompt for.
  *
- * `agent` picks the file path; an agent we have no path for degrades to
- * built-in-credits rather than guessing a location.
+ * `agent` picks the file path via `authFilePathForAgent`
+ * (`@terragon/agent/auth-file` — the shared source of truth for both this
+ * worker and the daemon's per-agent adapters, #77); an agent we have no path
+ * for degrades to built-in-credits rather than guessing a location.
  */
 export async function materialiseAgentCredentials({
   credentials,
@@ -144,7 +141,7 @@ export async function materialiseAgentCredentials({
     };
   }
 
-  const relativePath = CREDENTIAL_FILE_BY_AGENT[agent];
+  const relativePath = authFilePathForAgent(agent);
   if (!relativePath) {
     console.warn(
       "[agent-run] no credential file path for agent, using credits",

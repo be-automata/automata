@@ -29,6 +29,7 @@
   "packageManager": "pnpm@10.14.0",
   "dependencies": {
     "@hatchet-dev/typescript-sdk": "^1.26.0",
+    "@terragon/agent": "workspace:*",
     "@terragon/daemon": "workspace:*"
   },
   "devDependencies": {

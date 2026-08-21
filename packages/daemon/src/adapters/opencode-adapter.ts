@@ -1,3 +1,4 @@
+import { authFilePathForAgent } from "@terragon/agent/auth-file";
 import {
   getOpencodeApiKeyOrNull,
   opencodeCommand,
@@ -19,9 +20,7 @@ export const opencodeAdapter: HarnessAdapter = {
   agent: "opencode",
   displayName: "Opencode",
 
-  // Not populated today (CREDENTIAL_FILE_BY_AGENT has no opencode entry) —
-  // populating it is #77's job, not #75's.
-  authFilePath: () => null,
+  authFilePath: () => authFilePathForAgent("opencode"),
 
   prepareEnv(ctx: PrepareEnvContext): Record<string, string | undefined> {
     // Mirrors the pre-#76 runOpencodeCommand env assembly.

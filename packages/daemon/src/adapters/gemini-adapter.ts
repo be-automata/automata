@@ -1,3 +1,4 @@
+import { authFilePathForAgent } from "@terragon/agent/auth-file";
 import {
   createGeminiParserState,
   geminiCommand,
@@ -22,8 +23,7 @@ export const geminiAdapter: HarnessAdapter = {
   agent: "gemini",
   displayName: "Gemini",
 
-  // Not populated today — #77's job.
-  authFilePath: () => null,
+  authFilePath: () => authFilePathForAgent("gemini"),
 
   prepareEnv(ctx: PrepareEnvContext): Record<string, string | undefined> {
     // Mirrors the pre-#76 runGeminiCommand env assembly.

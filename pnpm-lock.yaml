@@ -1232,6 +1232,9 @@ importers:
       '@hatchet-dev/typescript-sdk':
         specifier: ^1.26.0
         version: 1.26.0(@grpc/grpc-js@1.14.4)(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(@opentelemetry/api@1.9.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))(zod@4.4.3)
+      '@terragon/agent':
+        specifier: workspace:*
+        version: link:../agent
       '@terragon/daemon':
         specifier: workspace:*
         version: link:../daemon
@@ -5970,7 +5973,7 @@ packages:
       react-dom: 19.1.2
       solid-js: ^1.0.0
       svelte: ^4.0.0 || ^5.0.0
-      vitest: '>=3.2.6 <4'
+      vitest: 3.1.4
       vue: ^3.0.0
     peerDependenciesMeta:
       '@lynx-js/react':
@@ -7060,6 +7063,7 @@ packages:
   eslint@9.31.0:
     resolution: {integrity: sha512-QldCVh/ztyKJJZLr4jXNUByx3gR+TDYZCRXEktiZoUR3PGy4qCmSbkxcIle8GEwGpb5JBZazlaJ/CxLidXdEbQ==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'

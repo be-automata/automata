@@ -34,6 +34,34 @@ describe("materialiseAgentCredentials (D1)", () => {
     expect(mode).toBe(0o600);
   });
 
+  it("writes the Codex credential to a per-run HOME at 0600 (#77 shared map)", async () => {
+    const result = await materialiseAgentCredentials({
+      credentials: { type: "json-file", contents: '{"tokens":{}}' },
+      agent: "codex",
+      runRoot,
+    });
+
+    const target = path.join(result.home, ".codex/auth.json");
+    expect(await fs.readFile(target, "utf8")).toBe('{"tokens":{}}');
+    const mode = (await fs.stat(target)).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  it.each(["gemini", "amp", "opencode"])(
+    "%s has no file-based auth path — a json-file credential degrades to credits (pins the null mapping, #77)",
+    async (agent) => {
+      const result = await materialiseAgentCredentials({
+        credentials: { type: "json-file", contents: "hypothetical-cred" },
+        agent,
+        runRoot,
+      });
+      expect(result.delivered).toBe(false);
+      expect(result.env).toEqual({});
+      // The dir exists (fresh HOME + trust seed) but holds no credential file.
+      expect((await fs.readdir(result.home)).length).toBe(1); // trust seed only
+    },
+  );
+
   it("seeds workspace trust under BOTH the raw and realpath'd workdir", async () => {
     // The realpath half is a reproduced production bug: os.tmpdir() on macOS is
     // /var/folders/… — a symlink to /private/var/folders/… — and the CLI keys

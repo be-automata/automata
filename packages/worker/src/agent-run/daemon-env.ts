@@ -50,8 +50,10 @@ export const SAFE_ENV_KEYS = new Set([
   "FORCE_COLOR",
   "npm_config_prefix",
   "npm_config_cache",
-  // claude-code runtime toggles (non-secret).
-  "CLAUDE_CODE_SIMPLE",
+  // "CLAUDE_CODE_SIMPLE" intentionally NOT whitelisted (#77): nothing in the
+  // repo ever sets it, so forwarding it here only exists as a latent
+  // OAuth-file-auth killer waiting for an operator's ambient env to carry
+  // it. Revert: re-add the string literal to this set.
 ]);
 
 /** Defense-in-depth: a whitelisted key is still dropped if it looks like a secret. */

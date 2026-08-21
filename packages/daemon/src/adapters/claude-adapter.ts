@@ -1,3 +1,4 @@
+import { authFilePathForAgent } from "@terragon/agent/auth-file";
 import { claudeCommand, getAnthropicApiKeyOrNull } from "../claude";
 import type { ClaudeMessage } from "../shared";
 import { formatError } from "./format-error";
@@ -18,7 +19,7 @@ export const claudeAdapter: HarnessAdapter = {
   agent: "claudeCode",
   displayName: "Claude",
 
-  authFilePath: () => ".claude/.credentials.json",
+  authFilePath: () => authFilePathForAgent("claudeCode"),
 
   prepareEnv(ctx: PrepareEnvContext): Record<string, string | undefined> {
     // Mirrors the pre-#76 runClaudeCodeCommand env assembly exactly.

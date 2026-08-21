@@ -142,6 +142,27 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
     });
   });
 
+  it("CLAUDE_CODE_SIMPLE never reaches the child env, review-lane or not (#77)", () => {
+    // Nothing in the repo sets this var; forwarding it is the documented
+    // OAuth-file-auth killer this whitelist exists to fence. Pinned with
+    // teeth: even if an operator's ambient env carries it, it must not
+    // survive the whitelist pass, in either credential mode.
+    const reviewLane = build({ CLAUDE_CODE_SIMPLE: "1" });
+    expect(reviewLane.CLAUDE_CODE_SIMPLE).toBeUndefined();
+
+    const nonReviewLane = buildDaemonEnv({
+      baseEnv: { PATH: "/usr/bin", HOME: "/home/op", CLAUDE_CODE_SIMPLE: "1" },
+      anthropicApiKey: "sk-ant-boxkey",
+      claudeBinDir: "",
+      installationToken: INSTALL_TOKEN,
+      ghConfigDir: "/tmp/isolated-gh",
+      botLogin: "automata-ai-bot[bot]",
+      runHome: "/tmp/run-42/home",
+      credentialDelivered: true,
+    });
+    expect(nonReviewLane.CLAUDE_CODE_SIMPLE).toBeUndefined();
+  });
+
   it("defense-in-depth: a secret-looking key is never forwarded even if whitelisted", () => {
     // Sanity: no whitelisted key matches the secret pattern (would be dropped).
     const secretish = [...SAFE_ENV_KEYS].filter((k) =>
