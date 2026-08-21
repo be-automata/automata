@@ -37,9 +37,16 @@ not merely validated against.
    `min-privilege(derivedDefault, configuredFloor, …)` — a monotone `tighten()` that takes the
    most-strict of all applicable scopes per field. An org floor a repo can only tighten; a
    per-trigger/sub-event floor is `min(configuredMode, floorFor(subEvent))`.
-3. **PR-family is pinned to `review` structurally:** `floorFor` returns `review` for every PR-family
-   sub-event that executes untrusted PR content, so no configuration value can move it out of
-   `review` (this is ADR-004's fence, expressed as the floor's bottom element).
+3. **The PR floor is trust-conditioned; `review` is the default and the untrusted bottom.**
+   `floorFor(subEvent, ctx)` returns `review` as a **structural pin** for **untrusted** PR content —
+   a fork PR, or an author whose `author_association` ∉ {`OWNER`, `MEMBER`} — so no configuration can
+   move it (ADR-004's confused-deputy fence). For a **trusted-internal** PR (non-fork, member/owner
+   author) the floor drops so an automation may be configured *above* `review` (write PR comments /
+   create linking issues), while `review` remains the **default** when unconfigured. The trust
+   context is derived **server-side from the webhook, never user-supplied** — so the floor is a
+   function of trust, and config still only tightens toward it. Monotonicity is unchanged:
+   `rank(effective) ≤ rank(floorFor(subEvent, ctx))`. (Relaxed from a flat PR→`review` pin by owner
+   ruling 2026-08-21.)
 4. **Enforced at the seam, not only in the UI:** the control-plane seam clamps regardless of what
    the caller sends — the UI/zod additionally makes the loosening option un-selectable, but the seam
    is the source of truth (mirrors how ADR-036's approve floor is server-enforced even when the
@@ -47,9 +54,14 @@ not merely validated against.
 
 ## Anti-deviation invariants
 
-- **No loosening path may ever be added** — not a per-repo override, a per-trigger map, nor a
-  free-form config. A "free trigger→mode map with no floor" was analyzed and **rejected as
-  net-negative** (#82): it breaks the guarantee for a convenience nobody needs.
+- **Config only tightens toward the floor; the floor for untrusted PR content is `review` and
+  structural.** The 2026-08-21 relaxation makes the PR floor *trust-conditioned* (write is
+  configurable for trusted-internal PRs), NOT loosenable for untrusted content — a fork/external PR
+  can never be configured out of `review`. Write above `review` is **opt-in, never default**.
+- **The trust signal (fork, `author_association`) is server-derived from the webhook and MUST NOT be
+  user-settable** — a forgeable trust context defeats the fence.
+- **A "free trigger→mode map with no floor"** (loosening for untrusted content) was analyzed and
+  **rejected as net-negative** (#82): it breaks the guarantee for a convenience nobody needs.
 - **Monotonicity is property-tested:** `rank(effective) ≤ rank(derivedDefault)` for every
   (scope, config) tuple (#72, #82 criterion 3).
 - Absent configuration reproduces today's derived behavior exactly (regression).
@@ -68,6 +80,16 @@ not merely validated against.
 - **Negative / watch:** two issues in the family build floors at the same seam — **#82** (per-trigger)
   and **#83** (per-sub-event, its successor). They must not build the floor twice; #82 establishes
   the mechanism and #83 generalizes `floorFor` from trigger to sub-event (sequencing noted in #82).
+- **Negative / watch:** configuring a trusted-internal PR *above* `review` requires GitHub write
+  without a resident token — it depends on the **broker (#81)**. Until #81 lands, the trusted-internal
+  relaxation is defined but not enable-able (the floor still computes; the write capability is gated).
+
+## Standards mapping
+
+The tighten-only floor is a **least-privilege** control (**NIST SP 800-53 AC-6**, **ISO/IEC
+27001:2022 Annex A 8.2**): a lower scope may only reduce authority. The trust-conditioned PR bottom
+implements the **confused-deputy** (MITRE **CWE-441**) and **prompt-injection** (**OWASP LLM01**)
+mitigations — see ADR-004's Standards mapping for the full citation set.
 
 ## Testing
 

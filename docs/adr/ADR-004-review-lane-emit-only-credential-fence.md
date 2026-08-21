@@ -36,9 +36,15 @@ below is what any implementation must preserve.
    extraheader auth is applied via exactly those `GIT_CONFIG_*` vars, so removal is total). A review
    run performs **no authenticated git op and no `gh` call** — it reads a pre-provisioned diff
    offline.
-2. **`review` is derived, not user-set, for PR triggers.** `isReview` is TRUE exactly when the
-   automation is PR-triggered (`isReviewThread`), and after #83 it is sub-event-aware. A PR-family
-   run can never leave `review` (see ADR-005 for the floor that makes this structural).
+2. **`review` is the DEFAULT for PR triggers, and a structural pin for untrusted PR content.** An
+   unconfigured PR-family automation runs `review` (emit-only). For any PR-family event whose content
+   is **untrusted** — a fork PR, or an author whose `author_association` ∉ {`OWNER`, `MEMBER`} — the
+   mode is **pinned** to `review` and no configuration can move it (the confused-deputy fence). For a
+   **trusted-internal** PR (non-fork, member/owner author) an automation MAY be configured *above*
+   `review` (to write PR comments / create linking issues), but `review` stays the default. The trust
+   signal is derived **server-side from the webhook payload, never user-set** — otherwise the fence
+   is forgeable. See ADR-005 for the trust-conditioned floor. (Relaxed from a flat PR→`review` pin by
+   owner ruling 2026-08-21.)
 3. **Emit-only single-writer (the write path).** The review agent has **no `gh` / `git push`
    tools**. It emits a fenced-JSON verdict; the **control plane** parses it
    (`parse-review-intent.ts`), validates the severity against the approve floor
@@ -54,6 +60,32 @@ below is what any implementation must preserve.
   cannot approve below the floor by malformed output.
 - Adding a git-write or `gh` tool to the review tool-policy is forbidden. The review policy lives in
   a **named seam** (`reviewPolicyArgs()`, #75) that a golden test pins.
+- A configured PR-write run (trusted-internal, above `review`) obtains GitHub write via the
+  **broker** (#81 — per-run bearer, no resident token), **never a resident credential**. Until #81
+  lands, PR-write cannot be enabled, because the only alternative is a resident token — reintroducing
+  exactly the exfiltration surface `review` removes.
+
+## Standards mapping
+
+This decision is not house opinion; it implements recognized security guidance, cited here so the
+invariant is defensible and auditable:
+
+- **Confused deputy** — MITRE **CWE-441** (Unintended Proxy or Intermediary). A privileged agent
+  acting on untrusted PR content is the textbook confused deputy; capability removal is the remedy.
+- **Prompt injection** — **OWASP Top 10 for LLM Applications, LLM01: Prompt Injection**. Untrusted PR
+  text is attacker-controlled input to the model.
+- **Excessive Agency** — **OWASP for LLM Apps** (LLM08:2023 / LLM06:2025). The named mitigation is to
+  minimize the tools/permissions/autonomy an agent holds — precisely emit-only + token strip.
+- **Least privilege** — **NIST SP 800-53 AC-6**, **ISO/IEC 27001:2022 Annex A 8.2** (privileged
+  access rights). The agent gets the least authority that lets it do its job (read + emit).
+- **Information-flow / single-writer** — **NIST SP 800-53 AC-4** (information flow enforcement); the
+  control plane is the single writer, so the untrusted agent cannot drive an external side effect.
+- Capability-based framing: **Principle of Least Authority (POLA)** — absence of a credential is a
+  stronger guarantee than a scoped one.
+- GitHub-specific: the `pull_request` / bot-authored-event confused-deputy pitfall is why
+  fork + `author_association` gating is the standard trust boundary (mirrors GitHub Actions security
+  hardening guidance on running privileged logic against untrusted PRs — and why Evergreen excludes
+  `pull_request` triggers entirely).
 
 ## Options considered
 
@@ -77,3 +109,7 @@ below is what any implementation must preserve.
 - `daemon.test.ts` "#65 wiring" dispatches a real review-mode message and asserts the captured spawn
   env is credential-free; normal mode keeps it. #76 extends this from Claude-only to all five
   adapters. A golden test pins `reviewPolicyArgs()` output (#75).
+- Trust-conditioned floor property test: for every fork PR and every PR whose `author_association` ∉
+  {`OWNER`, `MEMBER`}, `effective === "review"` regardless of config; a non-fork member/owner PR
+  configured above `review` reaches the daemon at the configured mode, and its GitHub write arrives
+  via the broker (#81), asserted with no resident token in env/argv/disk.
