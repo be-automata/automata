@@ -23,17 +23,19 @@ import { getPostHogServer } from "@/lib/posthog-server";
  *
  * `blockTolerance` ONLY. `trustedAuthorThreshold` (the other axis on
  * `organizationReviewSettings`) is NOT exposed here — its selector/route
- * vocabulary belongs to #72 (org trust-threshold floor) and #73 (resolver
- * that composes both floors into verdicts), which are unmerged as of this
- * route. Do not add a `trustedAuthorThreshold` field to this route ahead of
- * those tickets landing.
+ * vocabulary belongs to #72 (org trust-threshold floor; merged —
+ * `resolveComposedFloorPolicy` lives in
+ * `packages/review/src/settings/review-floor-resolver.ts`) and #73, which
+ * wires that resolver into `apps/www/src/server-lib/review/resolve-approve-floor.ts`
+ * so verdicts actually read the org row. Do not add a `trustedAuthorThreshold`
+ * field to this route ahead of that wiring landing.
  *
  * GET is open to any org member (a floor is something every member should be
  * able to see). PUT is gated to org admins/owners via {@link isOrgAdmin} —
  * a floor is org governance, not a per-member setting.
  *
  * NOTE: this floor is stored but not yet composed into review verdicts.
- * Enforcement at review time ships with the org-floor resolver (#73).
+ * Enforcement at review time ships when #73 wires the composed resolver in.
  */
 
 function toDto(row: { blockTolerance: string | null; updatedAt: Date }) {
