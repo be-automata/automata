@@ -31,6 +31,27 @@ export const DaemonMessageClaudeSchema = z.object({
   useCredits: z.boolean().optional(),
 });
 
+/**
+ * The resolved permission mode for a run, derived from the wire schema above
+ * so the two can never drift.
+ */
+export type PermissionMode = NonNullable<
+  z.infer<typeof DaemonMessageClaudeSchema>["permissionMode"]
+>;
+
+/**
+ * Compose a harness's review tool-policy into its command (#88): the policy
+ * applies only when the run is in review mode and is a no-op otherwise.
+ * Shared by every `*Command()` builder so the mode→policy rule lives in one
+ * place.
+ */
+export function reviewPolicyArgsFor(
+  permissionMode: PermissionMode | undefined,
+  reviewPolicyArgs: () => string[],
+): string[] {
+  return permissionMode === "review" ? reviewPolicyArgs() : [];
+}
+
 export const DaemonMessagePingSchema = z.object({
   type: z.literal("ping"),
   threadId: z.null().optional(),

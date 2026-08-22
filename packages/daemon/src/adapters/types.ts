@@ -1,6 +1,6 @@
 import type { AIAgent, AIAgentCredentials } from "@terragon/agent/types";
 import type { IDaemonRuntime } from "../runtime";
-import type { ClaudeMessage } from "../shared";
+import type { ClaudeMessage, PermissionMode } from "../shared";
 
 /**
  * HarnessAdapter contract (#75, ADR-006).
@@ -30,6 +30,20 @@ export interface PrepareEnvContext {
   useCredits: boolean;
   token: string;
   normalizedUrl: string;
+  /**
+   * The resolved permission mode for this run (#88). Added under ADR-006:
+   * this is NOT a new credential kind or an identity field — `permissionMode`
+   * already crosses the wire on `DaemonMessageClaudeSchema` and already
+   * reaches `buildArgs` (`BuildArgsConfig.permissionMode`); this field only
+   * makes the SAME already-resolved value visible to `prepareEnv` too, so an
+   * adapter's env-assembly can react to review mode (e.g. opencode's
+   * mode-aware auto-approve plugin, which reads a `TERRAGON_REVIEW_MODE` env
+   * marker `opencodeAdapter.prepareEnv` sets here). The SHAPE-not-KIND
+   * boundary is untouched: no credential kind, userId, or organizationId is
+   * added — `permissionMode` is a resolved SHAPE-level mode, exactly like the
+   * value `buildArgs` already consumes.
+   */
+  permissionMode?: PermissionMode;
 }
 
 /** Config passed to `buildArgs` — the union of every `*Command()` builder's params today. */
@@ -38,7 +52,7 @@ export interface BuildArgsConfig {
   prompt: string;
   sessionId: string | null;
   model: string;
-  permissionMode?: "allowAll" | "plan" | "review";
+  permissionMode?: PermissionMode;
   mcpConfigPath?: string | null;
   enableMcpPermissionPrompt?: boolean;
   useCredits?: boolean;
@@ -139,4 +153,19 @@ export interface HarnessAdapter {
   normalizeModel(model: string): string;
   makeLineParser(ctx: MakeLineParserContext): HarnessLineParser;
   capabilities: HarnessCapabilities;
+  /**
+   * The per-harness review tool-policy (#88, ADR-004 "named seam"). Returns
+   * the extra CLI args `buildArgs` composes in when `permissionMode ===
+   * "review"`. This is the BEST-AVAILABLE restriction per CLI, not a
+   * uniform guarantee: the withhold-git-credentials capability
+   * (`withholdGitCredentialsInReviewMode`) is the hard guarantee every
+   * adapter provides; `reviewPolicyArgs()` is additive defense-in-depth that
+   * is only applied where it can be verified NOT to hang or break the run
+   * against the pinned CLI version (`packages/sandbox-image/Dockerfile.hbs`).
+   * An adapter that cannot verify a safe restriction MUST return `[]` and
+   * document why in its own JSDoc (naming the pinned version and what was
+   * checked) rather than guess — see claude-adapter.ts (shipped),
+   * codex/gemini/amp/opencode-adapter.ts ([] + reason).
+   */
+  reviewPolicyArgs(): string[];
 }

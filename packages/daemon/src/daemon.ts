@@ -651,6 +651,7 @@ export class TerragonDaemon {
         useCredits: !!input.useCredits,
         token: input.token,
         normalizedUrl: this.runtime.normalizedUrl,
+        permissionMode: input.permissionMode,
       }),
       getMockSuccessResult: adapter.capabilities.mockSuccessResult
         ? () => adapter.capabilities.mockSuccessResult!

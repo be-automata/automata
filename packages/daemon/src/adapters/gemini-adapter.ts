@@ -2,6 +2,7 @@ import { authFilePathForAgent } from "@terragon/agent/auth-file";
 import {
   createGeminiParserState,
   geminiCommand,
+  geminiReviewPolicyArgs,
   parseGeminiLine,
 } from "../gemini";
 import type { ClaudeMessage } from "../shared";
@@ -39,6 +40,7 @@ export const geminiAdapter: HarnessAdapter = {
       prompt: cfg.prompt,
       model: cfg.model,
       sessionId: cfg.sessionId,
+      permissionMode: cfg.permissionMode,
     });
   },
 
@@ -84,4 +86,8 @@ export const geminiAdapter: HarnessAdapter = {
     // session; assistant/user messages get backfilled from the snapshot.
     sessionTracking: "system-init-with-backfill",
   },
+
+  // [] + documented reason — see gemini.ts's geminiReviewPolicyArgs() JSDoc
+  // for the verification against the pinned gemini-cli 0.20.0 (#88).
+  reviewPolicyArgs: geminiReviewPolicyArgs,
 };
