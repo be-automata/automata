@@ -47,8 +47,11 @@ export type CreateSandboxOptions = {
    * resolved control-plane-side (system entries already merged in). Providers
    * learn ONLY this shape — never the settings table or where the policy came
    * from (declared structurally, never imported across the plane boundary).
-   * Absent = no enforcement (today's behavior). NOT consumed by any provider
-   * yet — provider enforcement lands in a later slice (PR C).
+   * Absent = no enforcement (today's behavior). Enforced per provider:
+   * Docker = internal network + filtering proxy sidecar (docker-egress.ts),
+   * E2B = native firewall (network.allowOut/denyOut), Daytona = create-time
+   * networkAllowList/domainAllowList. See src/egress.ts for the mappings and
+   * docs/egress-enforcement.md for ops caveats.
    */
   egressPolicy?: {
     level: "none" | "ip_port" | "domain";

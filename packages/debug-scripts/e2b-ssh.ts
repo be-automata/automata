@@ -11,7 +11,8 @@ async function main() {
     process.exit(1);
   }
   console.log(`Resuming sandbox: ${sandboxId}`);
-  await Sandbox.resume(sandboxId, {
+  // e2b v2: `connect` auto-resumes a paused sandbox (`Sandbox.resume` is gone).
+  await Sandbox.connect(sandboxId, {
     timeoutMs: SLEEP_MS,
   });
 

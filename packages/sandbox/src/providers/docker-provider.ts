@@ -6,8 +6,19 @@ import {
 } from "../types";
 import { execSync, spawn } from "child_process";
 import { promises as fs } from "fs";
+import os from "os";
 import path from "path";
 import { nanoid } from "nanoid/non-secure";
+import {
+  buildEgressNetworkCreateCommand,
+  buildEgressSidecarBridgeConnectCommand,
+  buildEgressSidecarRunCommand,
+  buildEgressTeardownCommands,
+  buildSandboxEgressRunFlags,
+  egressNetworkName,
+  egressSidecarName,
+} from "./docker-egress";
+import { EGRESS_PROXY_SCRIPT } from "../egress-proxy-standalone.generated";
 
 const HOME_DIR = "root";
 const DEFAULT_DIR = `/${HOME_DIR}`;
@@ -156,11 +167,35 @@ class DockerSession implements ISandboxSession {
     if (this.hibernationTimeout) {
       clearTimeout(this.hibernationTimeout);
     }
+    // Resolve the container NAME before removal so the egress sidecar +
+    // internal network (derived from the name, #66 spec §3.5) can be torn
+    // down too. Best-effort: a sandbox created without an egress policy has
+    // neither, and the teardown commands simply fail silently.
+    let containerName: string | null = null;
+    try {
+      containerName = execSync(
+        `docker inspect --format '{{.Name}}' ${this.containerId}`,
+        { encoding: "utf8" },
+      )
+        .trim()
+        .replace(/^\//, "");
+    } catch {
+      // Container already gone — nothing to derive teardown names from.
+    }
     try {
       execSync(`docker rm -f ${this.containerId}`, { stdio: "ignore" });
     } catch (error) {
       console.error(`Failed to remove container ${this.containerId}:`, error);
       throw error;
+    }
+    if (containerName) {
+      for (const command of buildEgressTeardownCommands(containerName)) {
+        try {
+          execSync(command, { stdio: "ignore" });
+        } catch {
+          // No egress sidecar/network for this sandbox — nothing to remove.
+        }
+      }
     }
   }
 
@@ -271,15 +306,99 @@ export class DockerProvider implements ISandboxProvider {
     const dateStr = `${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
     const timeStr = `${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}`;
     const containerName = `${prefix}-${dateStr}-${timeStr}-${nanoid()}`;
+    // Egress enforcement (#66 spec §3.5): with a policy shape present, the
+    // sandbox is pinned to an `--internal` network whose only way out is the
+    // filtering proxy sidecar. Without one, the docker run below is exactly
+    // today's path.
+    let egressFlags = "";
+    if (options.egressPolicy) {
+      try {
+        egressFlags = await this.setUpEgressEnforcement(
+          containerName,
+          options.egressPolicy,
+        );
+      } catch (error) {
+        console.error("Failed to set up egress enforcement:", error);
+        this.tearDownEgressEnforcement(containerName);
+        throw error;
+      }
+    }
     try {
       // Create and start container
-      const createCommand = `docker run -d --name ${containerName} ${envFlags} -w ${DEFAULT_DIR} ${BASE_IMAGE} tail -f /dev/null`;
+      const createCommand = egressFlags
+        ? `docker run -d --name ${containerName} ${egressFlags} ${envFlags} -w ${DEFAULT_DIR} ${BASE_IMAGE} tail -f /dev/null`
+        : `docker run -d --name ${containerName} ${envFlags} -w ${DEFAULT_DIR} ${BASE_IMAGE} tail -f /dev/null`;
       const containerId = execSync(createCommand, { encoding: "utf8" }).trim();
       const dockerSession = new DockerSession(containerId);
       return dockerSession;
     } catch (error) {
       console.error("Failed to create Docker sandbox:", error);
+      if (options.egressPolicy) {
+        this.tearDownEgressEnforcement(containerName);
+      }
       throw error;
+    }
+  }
+
+  /**
+   * Create the internal network + proxy sidecar for one sandbox (#66 §3.5)
+   * and return the extra `docker run` flags for the sandbox container.
+   *
+   * Audit v1: the sidecar logs every allow/deny as a JSON line to its stdout
+   * (`docker logs <name>-egress`); control-plane audit POSTs from this plane
+   * are a documented follow-up (docs/egress-enforcement.md).
+   */
+  private async setUpEgressEnforcement(
+    containerName: string,
+    egressPolicy: NonNullable<CreateSandboxOptions["egressPolicy"]>,
+  ): Promise<string> {
+    const networkName = egressNetworkName(containerName);
+    const sidecarName = egressSidecarName(containerName);
+    // Materialize the standalone proxy script (generated string module — the
+    // single matcher source in this package) for the read-only bind mount.
+    const scriptDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "automata-egress-"),
+    );
+    const scriptHostPath = path.join(scriptDir, "egress-proxy.cjs");
+    await fs.writeFile(scriptHostPath, EGRESS_PROXY_SCRIPT, { mode: 0o444 });
+    try {
+      execSync(buildEgressNetworkCreateCommand(networkName), {
+        stdio: "ignore",
+      });
+    } catch (error) {
+      // Idempotent: an already-existing network is fine, anything else is not.
+      const exists = execSync(
+        `docker network ls --filter name=^${networkName}$ --format '{{.Name}}'`,
+        { encoding: "utf8" },
+      ).trim();
+      if (exists !== networkName) {
+        throw error;
+      }
+    }
+    execSync(
+      buildEgressSidecarRunCommand({
+        sidecarName,
+        networkName,
+        baseImage: BASE_IMAGE,
+        scriptHostPath,
+        policy: egressPolicy,
+      }),
+      { stdio: "ignore" },
+    );
+    // The sidecar (and only the sidecar) also gets a route out.
+    execSync(buildEgressSidecarBridgeConnectCommand(sidecarName), {
+      stdio: "ignore",
+    });
+    return buildSandboxEgressRunFlags(networkName);
+  }
+
+  private tearDownEgressEnforcement(containerName: string): void {
+    for (const command of buildEgressTeardownCommands(containerName)) {
+      try {
+        execSync(command, { stdio: "ignore" });
+      } catch {
+        // Best-effort cleanup of partially-created egress resources.
+      }
     }
   }
 
@@ -314,6 +433,34 @@ export class DockerProvider implements ISandboxProvider {
     } catch (error) {
       console.warn("Failed to cleanup test containers:", error);
     }
+    DockerProvider.cleanupEgressNetworks(TEST_CONTAINER_PREFIX);
+  }
+
+  /**
+   * Remove leaked egress internal networks (#66 §3.5). Sidecar containers
+   * share the sandbox name prefix and are removed with the container sweep
+   * above; the `--internal` networks need their own sweep.
+   */
+  private static cleanupEgressNetworks(prefix: string): void {
+    try {
+      const listCommand = `docker network ls --filter "name=automata-egress-${prefix}" --format "{{.Name}}"`;
+      const networkList = execSync(listCommand, { encoding: "utf8" }).trim();
+      if (!networkList) {
+        return;
+      }
+      for (const network of networkList.split("\n")) {
+        if (!network.trim()) {
+          continue;
+        }
+        try {
+          execSync(`docker network rm ${network.trim()}`, { stdio: "ignore" });
+        } catch {
+          // Network still in use or already gone — leave it.
+        }
+      }
+    } catch (error) {
+      console.warn("Failed to cleanup egress networks:", error);
+    }
   }
 
   /**
@@ -337,5 +484,6 @@ export class DockerProvider implements ISandboxProvider {
     } catch (error) {
       console.warn("Failed to cleanup Terragon containers:", error);
     }
+    DockerProvider.cleanupEgressNetworks(CONTAINER_PREFIX);
   }
 }
