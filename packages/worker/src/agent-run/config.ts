@@ -67,6 +67,16 @@ export interface WorkerConfig {
    * SIBLING dirs whose worker pid is dead. Default /tmp keeps socket paths short.
    */
   runNamespaceRoot: string;
+  /**
+   * Per-run GitHub credential brokering (#81). "on" (default): the workflow
+   * starts the git + gh brokers and the agent child never sees the
+   * installation token — only a per-run bearer, in EVERY lane. "legacy-direct"
+   * is the one-env-var rollback: no brokers, today's exact raw-token env.
+   * Fail-closed within a run: with "on", a broker start failure throws
+   * pre-daemon — a run configured for brokering must never silently fall back
+   * to a raw-token env.
+   */
+  credentialBroker: "on" | "legacy-direct";
 }
 
 function defaultDaemonDist(): string {
@@ -121,5 +131,12 @@ export function loadWorkerConfig(
     botLogin: env.WORKER_BOT_LOGIN?.trim() || "automata-ai-bot[bot]",
     runNamespaceRoot:
       env.WORKER_RUN_NAMESPACE_ROOT?.trim() || DEFAULT_RUN_NAMESPACE_ROOT,
+    // Only the exact rollback string opts OUT — anything else (unset, typo)
+    // stays brokered, so a misconfigured box degrades to the mode that keeps
+    // the installation token out of agent env.
+    credentialBroker:
+      env.WORKER_CREDENTIAL_BROKER?.trim() === "legacy-direct"
+        ? "legacy-direct"
+        : "on",
   };
 }

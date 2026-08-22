@@ -50,6 +50,13 @@ const pullAgentCredentials = vi.fn();
 const materialiseAgentCredentials = vi.fn();
 const postEgressEvents = vi.fn(async (..._args: unknown[]) => {});
 const startEgressProxy = vi.fn();
+// #81: brokering is ON by default, so every runFn case would otherwise start
+// REAL brokers (a real loopback listener + unix socket). Mocked like the
+// egress proxy; per-case behavior set in beforeEach / the broker describe.
+const startGitBroker = vi.fn();
+const startGhBroker = vi.fn();
+// Ctor args of every DaemonProcess the run built (the broker handoff pin).
+const daemonCtorArgs: unknown[][] = [];
 
 vi.mock("./provision", () => ({
   provisionWorkdir: (...args: unknown[]) => provisionWorkdir(...args),
@@ -73,8 +80,19 @@ vi.mock("./agent-credentials", () => ({
     materialiseAgentCredentials(...args),
 }));
 
+vi.mock("./git-broker", () => ({
+  startGitBroker: (...args: unknown[]) => startGitBroker(...args),
+}));
+
+vi.mock("./gh-broker", () => ({
+  startGhBroker: (...args: unknown[]) => startGhBroker(...args),
+}));
+
 vi.mock("./daemon-process", () => ({
   DaemonProcess: class {
+    constructor(...args: unknown[]) {
+      daemonCtorArgs.push(args);
+    }
     preflightGhAuth = vi.fn();
     start = vi.fn();
     teardown = vi.fn();
@@ -113,10 +131,24 @@ beforeEach(() => {
   materialiseAgentCredentials.mockReset();
   postEgressEvents.mockClear();
   startEgressProxy.mockReset();
+  // Default: both brokers start fine (the flag is on by default).
+  startGitBroker.mockReset();
+  startGhBroker.mockReset();
+  startGitBroker.mockResolvedValue({
+    url: "http://127.0.0.1:41999",
+    port: 41999,
+    close: vi.fn(async () => {}),
+  });
+  startGhBroker.mockResolvedValue({
+    socketPath: "/tmp/automata-agent-run/w-test/thr_leak_1-gh.sock",
+    close: vi.fn(async () => {}),
+  });
+  daemonCtorArgs.length = 0;
 });
 
 afterEach(() => {
   delete process.env.WORKER_BOX_TRUST;
+  delete process.env.WORKER_CREDENTIAL_BROKER;
 });
 
 function ctx() {
@@ -247,6 +279,122 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
 
     expect(startEgressProxy).not.toHaveBeenCalled();
     expect(postEgressEvents).not.toHaveBeenCalled();
+  });
+});
+
+describe("agent-run run task — credential brokers (#81)", () => {
+  function sharedBoxNoCredential() {
+    process.env.WORKER_BOX_TRUST = "shared";
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+    });
+  }
+
+  it("brokers start by default, the DaemonProcess gets the broker handoff, and both close exactly once", async () => {
+    sharedBoxNoCredential();
+    const gitClose = vi.fn(async () => {});
+    const ghClose = vi.fn(async () => {});
+    startGitBroker.mockResolvedValue({
+      url: "http://127.0.0.1:41999",
+      port: 41999,
+      close: gitClose,
+    });
+    startGhBroker.mockResolvedValue({
+      socketPath: "/tmp/automata-agent-run/w-test/thr_leak_1-gh.sock",
+      close: ghClose,
+    });
+
+    await expect(runFn(INPUT, ctx())).resolves.toMatchObject({
+      outcome: "nothing-to-run",
+    });
+
+    expect(startGitBroker).toHaveBeenCalledTimes(1);
+    // The real token + repo fence go to the broker; one shared bearer to both.
+    expect(startGitBroker).toHaveBeenCalledWith(
+      expect.objectContaining({
+        installationToken: "inst-secret",
+        repoFullName: "o/r",
+        runBearer: expect.stringMatching(/^[0-9a-f]{64}$/),
+      }),
+    );
+    expect(startGhBroker).toHaveBeenCalledTimes(1);
+    const bearer = (startGitBroker.mock.calls[0]![0] as { runBearer: string })
+      .runBearer;
+    expect(startGhBroker).toHaveBeenCalledWith(
+      expect.objectContaining({
+        installationToken: "inst-secret",
+        runBearer: bearer,
+        socketPath: expect.stringMatching(/thr_leak_1-gh\.sock$/),
+      }),
+    );
+    // The DaemonProcess ctor's broker opt carries the bearer, never the token.
+    const brokerArg = daemonCtorArgs[0]![5] as Record<string, string>;
+    expect(brokerArg).toMatchObject({
+      gitUrl: "http://127.0.0.1:41999",
+      bearer,
+      repoFullName: "o/r",
+    });
+    expect(gitClose).toHaveBeenCalledTimes(1);
+    expect(ghClose).toHaveBeenCalledTimes(1);
+    expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
+  });
+
+  it("git broker start failure: fail-closed — wipes the credential, removes the workdir, propagates", async () => {
+    sharedBoxNoCredential();
+    const credentialCleanup = vi.fn(async () => {});
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: credentialCleanup,
+    });
+    const original = new Error("listen EADDRINUSE");
+    startGitBroker.mockRejectedValue(original);
+
+    await expect(runFn(INPUT, ctx())).rejects.toBe(original);
+
+    expect(startGhBroker).not.toHaveBeenCalled();
+    expect(credentialCleanup).toHaveBeenCalledTimes(1);
+    expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
+    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
+  });
+
+  it("gh broker start failure: closes the already-started git broker AND the egress proxy, then rethrows", async () => {
+    sharedBoxNoCredential();
+    const gitClose = vi.fn(async () => {});
+    startGitBroker.mockResolvedValue({
+      url: "http://127.0.0.1:41999",
+      port: 41999,
+      close: gitClose,
+    });
+    const egressClose = vi.fn(async () => {});
+    startEgressProxy.mockResolvedValue({
+      url: "http://127.0.0.1:41234",
+      port: 41234,
+      close: egressClose,
+    });
+    const original = new Error("sun_path limit");
+    startGhBroker.mockRejectedValue(original);
+
+    await expect(runFn(EGRESS_INPUT, ctx())).rejects.toBe(original);
+
+    expect(gitClose).toHaveBeenCalledTimes(1);
+    expect(egressClose).toHaveBeenCalledTimes(1);
+    expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
+  });
+
+  it("WORKER_CREDENTIAL_BROKER=legacy-direct: no brokers, and the DaemonProcess gets broker=null (rollback)", async () => {
+    sharedBoxNoCredential();
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+
+    await expect(runFn(INPUT, ctx())).resolves.toMatchObject({
+      outcome: "nothing-to-run",
+    });
+
+    expect(startGitBroker).not.toHaveBeenCalled();
+    expect(startGhBroker).not.toHaveBeenCalled();
+    expect(daemonCtorArgs[0]![5]).toBeNull();
   });
 });
 

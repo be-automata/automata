@@ -121,6 +121,30 @@ export interface BuildDaemonEnvOpts {
    * proxy vars are already stripped by the whitelist, which must stay true.
    */
   egressProxyUrl?: string | null;
+  /**
+   * Per-run credential brokers (#81). When set, the agent child gets NO
+   * reusable GitHub credential: `GH_TOKEN`/`GITHUB_TOKEN` carry the per-run
+   * bearer (gh needs a non-empty token, and the gh broker verifies exactly
+   * this value), git is rewritten onto the loopback git broker via
+   * `url.insteadOf` (which also catches ad-hoc `git push https://github.com/…`
+   * URLs the agent types — remote surgery would miss those), and `GH_REPO`
+   * restores gh's repo targeting (the insteadOf rewrite makes gh's
+   * remote-based resolution fail). The installation token appears NOWHERE in
+   * the returned env.
+   *
+   * Null (the default) = today's exact raw-token env — the rollback contract
+   * (`WORKER_CREDENTIAL_BROKER=legacy-direct`).
+   */
+  broker?: {
+    /** git broker base url, `http://127.0.0.1:<port>` (no trailing slash). */
+    gitUrl: string;
+    /** gh broker unix socket — written as `http_unix_socket` by the caller. */
+    ghSocketPath: string;
+    /** The per-run bearer both brokers verify. */
+    bearer: string;
+    /** `owner/repo` for GH_REPO targeting. */
+    repoFullName: string;
+  } | null;
 }
 
 export function buildDaemonEnv({
@@ -134,6 +158,7 @@ export function buildDaemonEnv({
   credentialDelivered = false,
   credentialEnv = {},
   egressProxyUrl = null,
+  broker = null,
 }: BuildDaemonEnvOpts): NodeJS.ProcessEnv {
   // 1. Whitelist: forward ONLY known-safe, non-secret ambient keys.
   const env: NodeJS.ProcessEnv = {};
@@ -189,19 +214,31 @@ export function buildDaemonEnv({
     env.PATH = `${claudeBinDir}:${baseEnv.PATH ?? ""}`;
   }
 
-  // 3. gh: the installation token is the ONLY credential; an isolated empty config
-  //    dir prevents gh from falling back to the operator's stored OAuth (hosts.yml).
-  env.GH_TOKEN = installationToken;
-  env.GITHUB_TOKEN = installationToken;
+  // 3. gh: brokered (#81) → the per-run bearer is the "token" (the gh broker
+  //    verifies it; `gh auth token` prints only this useless-off-box value) and
+  //    GH_REPO restores repo targeting under the insteadOf rewrite. Legacy →
+  //    the installation token is the ONLY credential. Either way the isolated
+  //    config dir prevents gh from falling back to the operator's stored OAuth
+  //    (hosts.yml) — and, brokered, it carries the `http_unix_socket` entry.
+  if (broker) {
+    env.GH_TOKEN = broker.bearer;
+    env.GITHUB_TOKEN = broker.bearer;
+    env.GH_REPO = broker.repoFullName;
+  } else {
+    env.GH_TOKEN = installationToken;
+    env.GITHUB_TOKEN = installationToken;
+  }
   env.GH_CONFIG_DIR = ghConfigDir;
 
-  // 4. git: neutralize host config (osxkeychain helper, operator identity), inject the
-  //    installation token as an HTTP extraheader for github.com via GIT_CONFIG_* env,
-  //    and set the bot commit identity two ways: git config AND GIT_AUTHOR/COMMITTER_*
-  //    env (the latter wins even for commits the agent makes directly).
-  const authHeader = `AUTHORIZATION: basic ${Buffer.from(
-    `x-access-token:${installationToken}`,
-  ).toString("base64")}`;
+  // 4. git: neutralize host config (osxkeychain helper, operator identity), point
+  //    git at its credential via GIT_CONFIG_* env, and set the bot commit identity
+  //    two ways: git config AND GIT_AUTHOR/COMMITTER_* env (the latter wins even
+  //    for commits the agent makes directly).
+  //
+  //    Brokered (#81): NO raw-token extraheader — github.com URLs are rewritten
+  //    onto the loopback git broker (insteadOf) and authenticated with the
+  //    per-run bearer, exactly the `Bearer <runBearer>` git-broker.ts expects.
+  //    Legacy: the installation token as a Basic extraheader for github.com.
   const botEmail = `${botLogin}@users.noreply.github.com`;
   env.GIT_CONFIG_GLOBAL = "/dev/null";
   env.GIT_CONFIG_SYSTEM = "/dev/null";
@@ -210,12 +247,28 @@ export function buildDaemonEnv({
   env.GIT_AUTHOR_EMAIL = botEmail;
   env.GIT_COMMITTER_NAME = botLogin;
   env.GIT_COMMITTER_EMAIL = botEmail;
-  const gitConfig: Array<[string, string]> = [
-    ["http.https://github.com/.extraheader", authHeader],
-    ["credential.helper", ""], // reset inherited helpers (osxkeychain, gh, …)
-    ["user.name", botLogin],
-    ["user.email", botEmail],
-  ];
+  const gitConfig: Array<[string, string]> = broker
+    ? [
+        [`url.${broker.gitUrl}/.insteadOf`, "https://github.com/"],
+        [
+          `http.${broker.gitUrl}/.extraheader`,
+          `Authorization: Bearer ${broker.bearer}`,
+        ],
+        ["credential.helper", ""], // reset inherited helpers (osxkeychain, gh, …)
+        ["user.name", botLogin],
+        ["user.email", botEmail],
+      ]
+    : [
+        [
+          "http.https://github.com/.extraheader",
+          `AUTHORIZATION: basic ${Buffer.from(
+            `x-access-token:${installationToken}`,
+          ).toString("base64")}`,
+        ],
+        ["credential.helper", ""], // reset inherited helpers (osxkeychain, gh, …)
+        ["user.name", botLogin],
+        ["user.email", botEmail],
+      ];
   env.GIT_CONFIG_COUNT = String(gitConfig.length);
   gitConfig.forEach(([key, value], i) => {
     env[`GIT_CONFIG_KEY_${i}`] = key;

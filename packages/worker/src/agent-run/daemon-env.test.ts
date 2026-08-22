@@ -212,6 +212,77 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
     });
   });
 
+  describe("#81 — brokered credentials: the agent env NEVER carries the installation token", () => {
+    const BROKER = {
+      gitUrl: "http://127.0.0.1:45678",
+      ghSocketPath: "/tmp/automata-agent-run/w-1/thr_1-gh.sock",
+      bearer: "runbearer0123456789abcdef",
+      repoFullName: "be-automata/automata",
+    };
+
+    function buildBrokered() {
+      return buildDaemonEnv({
+        baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
+        anthropicApiKey: "sk-ant-xxx",
+        claudeBinDir: "",
+        installationToken: INSTALL_TOKEN,
+        ghConfigDir: "/tmp/isolated-gh",
+        botLogin: "automata-ai-bot[bot]",
+        broker: BROKER,
+      });
+    }
+
+    it("the DoD assertion: no env value equals or contains the installation token (raw or base64)", () => {
+      const serialized = JSON.stringify(buildBrokered());
+      expect(serialized).not.toContain(INSTALL_TOKEN);
+      const b64 = Buffer.from(`x-access-token:${INSTALL_TOKEN}`).toString(
+        "base64",
+      );
+      expect(serialized).not.toContain(b64);
+    });
+
+    it("GH_TOKEN/GITHUB_TOKEN are the per-run bearer, GH_REPO restores gh targeting, config dir unchanged", () => {
+      const env = buildBrokered();
+      // The bearer doubles as gh's non-empty token placeholder; `gh auth token`
+      // prints only this useless-off-box value.
+      expect(env.GH_TOKEN).toBe(BROKER.bearer);
+      expect(env.GITHUB_TOKEN).toBe(BROKER.bearer);
+      // The insteadOf rewrite breaks gh's remote-based repo resolution (spike
+      // E4); GH_REPO is the verified mitigation.
+      expect(env.GH_REPO).toBe(BROKER.repoFullName);
+      expect(env.GH_CONFIG_DIR).toBe("/tmp/isolated-gh");
+    });
+
+    it("git config rewrites github.com onto the broker with the Bearer extraheader — and NO github.com extraheader", () => {
+      const env = buildBrokered();
+      const count = Number(env.GIT_CONFIG_COUNT);
+      const entries = new Map<string, string>();
+      for (let i = 0; i < count; i++) {
+        entries.set(env[`GIT_CONFIG_KEY_${i}`]!, env[`GIT_CONFIG_VALUE_${i}`]!);
+      }
+      // insteadOf also rewrites ad-hoc URLs the agent types — remote surgery
+      // on the clone would miss those.
+      expect(entries.get(`url.${BROKER.gitUrl}/.insteadOf`)).toBe(
+        "https://github.com/",
+      );
+      // Exactly the `Bearer ${runBearer}` git-broker.ts expects.
+      expect(entries.get(`http.${BROKER.gitUrl}/.extraheader`)).toBe(
+        `Authorization: Bearer ${BROKER.bearer}`,
+      );
+      expect(entries.has("http.https://github.com/.extraheader")).toBe(false);
+      // Neutralization + bot identity survive brokering.
+      expect(entries.get("credential.helper")).toBe("");
+      expect(entries.get("user.name")).toBe("automata-ai-bot[bot]");
+    });
+
+    it("broker: null is the verbatim legacy env — the rollback contract", () => {
+      const env = build();
+      expect(env.GH_TOKEN).toBe(INSTALL_TOKEN);
+      expect(env.GH_REPO).toBeUndefined();
+      expect(env.GIT_CONFIG_KEY_0).toBe("http.https://github.com/.extraheader");
+    });
+  });
+
   it("defense-in-depth: a secret-looking key is never forwarded even if whitelisted", () => {
     // Sanity: no whitelisted key matches the secret pattern (would be dropped).
     const secretish = [...SAFE_ENV_KEYS].filter((k) =>

@@ -66,6 +66,30 @@ describe("loadWorkerConfig", () => {
     });
   });
 
+  describe("credentialBroker (#81) — who holds the installation token", () => {
+    it("defaults to on: the agent env never carries the raw token unless the operator opts out", () => {
+      expect(loadWorkerConfig({}).credentialBroker).toBe("on");
+    });
+
+    it("only the exact rollback string opts out; junk stays brokered", () => {
+      expect(
+        loadWorkerConfig({ WORKER_CREDENTIAL_BROKER: "legacy-direct" })
+          .credentialBroker,
+      ).toBe("legacy-direct");
+      expect(
+        loadWorkerConfig({ WORKER_CREDENTIAL_BROKER: " legacy-direct " })
+          .credentialBroker,
+      ).toBe("legacy-direct");
+      for (const value of ["off", "false", "0", "LEGACY-DIRECT", ""]) {
+        expect(
+          loadWorkerConfig({ WORKER_CREDENTIAL_BROKER: value })
+            .credentialBroker,
+          `WORKER_CREDENTIAL_BROKER=${JSON.stringify(value)} must not opt out`,
+        ).toBe("on");
+      }
+    });
+  });
+
   it("honours WORKER_BOT_LOGIN override", () => {
     expect(
       loadWorkerConfig({ WORKER_BOT_LOGIN: "somnio-bot[bot]" }).botLogin,

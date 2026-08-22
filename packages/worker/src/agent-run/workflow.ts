@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
 import { hatchet } from "../hatchet-client";
 import { loadWorkerConfig } from "./config";
@@ -21,6 +22,9 @@ import {
   type EgressDecisionEvent,
   type EgressProxy,
 } from "./egress-proxy";
+import { startGitBroker, type GitBroker } from "./git-broker";
+import { startGhBroker, type GhBroker } from "./gh-broker";
+import { getProcessWorkerId, runGhSocketPath } from "./run-namespace";
 import {
   materialiseAgentCredentials,
   type MaterialisedCredentials,
@@ -364,12 +368,82 @@ agentRunWorkflow.task({
       );
     }
 
+    // #81: per-run GitHub credential brokers — the installation token stays in
+    // THIS process's heap; the agent child gets only a per-run bearer, in EVERY
+    // lane. permissionMode arrives only with the pulled message — AFTER the env
+    // is first built (preflightGhAuth memoises it) — so brokering is not
+    // lane-gated: review keeps its daemon-side strip on top, which now removes
+    // the bearer + broker git config too (strictly less than today). Both
+    // brokers must be up BEFORE the env is built. Same self-cleanup rule as the
+    // egress block above — and fail-closed: a broker start failure throws
+    // rather than falling back to a raw-token env.
+    let gitBroker: GitBroker | null = null;
+    let ghBroker: GhBroker | null = null;
+    let broker: {
+      gitUrl: string;
+      ghSocketPath: string;
+      bearer: string;
+      repoFullName: string;
+    } | null = null;
+    if (config.credentialBroker === "on") {
+      try {
+        // Minted once per run, shared by both brokers; never logged.
+        const runBearer = randomBytes(32).toString("hex");
+        gitBroker = await startGitBroker({
+          installationToken: input.installationToken,
+          repoFullName: input.repoFullName,
+          runBearer,
+        });
+        ghBroker = await startGhBroker({
+          installationToken: input.installationToken,
+          runBearer,
+          socketPath: runGhSocketPath(
+            config.runNamespaceRoot,
+            getProcessWorkerId(),
+            input.threadId,
+          ),
+        });
+        broker = {
+          gitUrl: gitBroker.url,
+          ghSocketPath: ghBroker.socketPath,
+          bearer: runBearer,
+          repoFullName: input.repoFullName,
+        };
+      } catch (err) {
+        try {
+          await gitBroker?.close();
+        } catch {
+          // socket already gone
+        }
+        try {
+          await ghBroker?.close();
+        } catch {
+          // socket already gone
+        }
+        if (egressProxy) {
+          try {
+            await egressProxy.close();
+          } catch {
+            // socket already gone
+          }
+        }
+        await egressEvents?.close();
+        await materialised.cleanup();
+        await cleanupWorkdir(workdir);
+        throw err;
+      }
+      step(
+        `credential brokers up: git=127.0.0.1:${gitBroker.port}, gh=${ghBroker.socketPath}`,
+      );
+    }
+
     const daemon = new DaemonProcess(
       config,
       input,
       workdir,
       materialised,
       egressProxy?.url ?? null,
+      broker,
     );
     try {
       // Fail-closed identity precondition (ADR-002): confirm gh authenticates as the
@@ -454,6 +528,23 @@ agentRunWorkflow.task({
           await egressProxy.close();
         } catch {
           // sockets already gone
+        }
+      }
+      // #81: close both credential brokers after the daemon is dead (no more
+      // child git/gh traffic). Best-effort, like the egress proxy — the token
+      // dies with this process either way.
+      if (gitBroker) {
+        try {
+          await gitBroker.close();
+        } catch {
+          // socket already gone
+        }
+      }
+      if (ghBroker) {
+        try {
+          await ghBroker.close();
+        } catch {
+          // socket already gone
         }
       }
       await egressEvents?.close();
