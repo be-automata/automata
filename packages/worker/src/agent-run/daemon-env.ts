@@ -82,6 +82,22 @@ function isForwardable(key: string): boolean {
   return true;
 }
 
+/**
+ * The per-run credential-broker handoff (#81): what the workflow passes to
+ * daemon-process/daemon-env so the agent child is pointed at the loopback
+ * brokers instead of carrying a raw token.
+ */
+export type BrokerHandoff = {
+  /** git broker base url, `http://127.0.0.1:<port>` (no trailing slash). */
+  gitUrl: string;
+  /** gh broker unix socket — written as `http_unix_socket` by the caller. */
+  ghSocketPath: string;
+  /** The per-run bearer both brokers verify. */
+  bearer: string;
+  /** `owner/repo` for GH_REPO targeting. */
+  repoFullName: string;
+};
+
 export interface BuildDaemonEnvOpts {
   baseEnv: NodeJS.ProcessEnv;
   anthropicApiKey: string;
@@ -135,16 +151,7 @@ export interface BuildDaemonEnvOpts {
    * Null (the default) = today's exact raw-token env — the rollback contract
    * (`WORKER_CREDENTIAL_BROKER=legacy-direct`).
    */
-  broker?: {
-    /** git broker base url, `http://127.0.0.1:<port>` (no trailing slash). */
-    gitUrl: string;
-    /** gh broker unix socket — written as `http_unix_socket` by the caller. */
-    ghSocketPath: string;
-    /** The per-run bearer both brokers verify. */
-    bearer: string;
-    /** `owner/repo` for GH_REPO targeting. */
-    repoFullName: string;
-  } | null;
+  broker?: BrokerHandoff | null;
 }
 
 export function buildDaemonEnv({
@@ -247,16 +254,13 @@ export function buildDaemonEnv({
   env.GIT_AUTHOR_EMAIL = botEmail;
   env.GIT_COMMITTER_NAME = botLogin;
   env.GIT_COMMITTER_EMAIL = botEmail;
-  const gitConfig: Array<[string, string]> = broker
+  const gitAuthConfig: Array<[string, string]> = broker
     ? [
         [`url.${broker.gitUrl}/.insteadOf`, "https://github.com/"],
         [
           `http.${broker.gitUrl}/.extraheader`,
           `Authorization: Bearer ${broker.bearer}`,
         ],
-        ["credential.helper", ""], // reset inherited helpers (osxkeychain, gh, …)
-        ["user.name", botLogin],
-        ["user.email", botEmail],
       ]
     : [
         [
@@ -265,10 +269,13 @@ export function buildDaemonEnv({
             `x-access-token:${installationToken}`,
           ).toString("base64")}`,
         ],
-        ["credential.helper", ""], // reset inherited helpers (osxkeychain, gh, …)
-        ["user.name", botLogin],
-        ["user.email", botEmail],
       ];
+  const gitConfig: Array<[string, string]> = [
+    ...gitAuthConfig,
+    ["credential.helper", ""], // reset inherited helpers (osxkeychain, gh, …)
+    ["user.name", botLogin],
+    ["user.email", botEmail],
+  ];
   env.GIT_CONFIG_COUNT = String(gitConfig.length);
   gitConfig.forEach(([key, value], i) => {
     env[`GIT_CONFIG_KEY_${i}`] = key;

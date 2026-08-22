@@ -5,7 +5,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
-import { buildDaemonEnv } from "./daemon-env";
+import { buildDaemonEnv, type BrokerHandoff } from "./daemon-env";
+import { ghBrokerConfigYaml } from "./gh-broker";
 import {
   getProcessWorkerId,
   runPidPath,
@@ -69,12 +70,7 @@ export class DaemonProcess {
      * When set, ensureEnv() additionally writes `http_unix_socket` into the
      * isolated gh config dir so the agent's gh dials the gh broker.
      */
-    private readonly broker: {
-      gitUrl: string;
-      ghSocketPath: string;
-      bearer: string;
-      repoFullName: string;
-    } | null = null,
+    private readonly broker: BrokerHandoff | null = null,
   ) {
     const workerId = getProcessWorkerId();
     this.runDir = workerRunDir(config.runNamespaceRoot, workerId);
@@ -110,7 +106,7 @@ export class DaemonProcess {
       // Self-inflicted breakage, never a credential leak.
       fs.writeFileSync(
         path.join(this.ghConfigDir, "config.yml"),
-        `version: 1\nhttp_unix_socket: ${this.broker.ghSocketPath}\n`,
+        ghBrokerConfigYaml(this.broker.ghSocketPath),
       );
     }
     this.env = buildDaemonEnv({

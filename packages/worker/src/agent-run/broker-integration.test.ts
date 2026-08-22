@@ -74,11 +74,10 @@ describe.skipIf(!hasGh)("gh through the gh broker (the preflight path)", () => {
       installationToken: TOKEN,
       runBearer: BEARER,
       socketPath: path.join(socketDir, "gh.sock"),
-      fetchImpl: (async (url: string, init?: RequestInit) => {
-        // gh 2.95.0's auth status issues POST /graphql (viewer) + GET / —
-        // the broker must have injected the REAL token by the time we're here.
-        const headers = new Headers(init?.headers);
-        expect(headers.get("authorization")).toBe(`token ${TOKEN}`);
+      fetchImpl: (async (url: string) => {
+        // gh 2.95.0's auth status issues POST /graphql (viewer) + GET /.
+        // Upstream auth-header injection is pinned by the gh-broker unit tests;
+        // this test's job is only "real gh honours socket + bearer".
         if (String(url).endsWith("/graphql")) {
           return new Response(
             JSON.stringify({ data: { viewer: { login: "automata-bot" } } }),

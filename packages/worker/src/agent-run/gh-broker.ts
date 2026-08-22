@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { HOP_BY_HOP, REQUEST_OWNED } from "./broker-common";
 
 /**
  * Worker-box-LOCAL gh-API credential broker (#81, be-automata/automata) — the
@@ -56,21 +57,15 @@ const MAX_SOCKET_PATH_BYTES = 100;
 /** Cap the buffered GraphQL body; gh's queries are a few KB. Fail closed. */
 const MAX_GRAPHQL_BODY_BYTES = 1024 * 1024;
 
-// Hop-by-hop / body-framing headers neither direction may copy verbatim —
-// same set and reasoning as git-broker.ts.
-const HOP_BY_HOP = new Set([
-  "connection",
-  "keep-alive",
-  "transfer-encoding",
-  "content-length",
-  "content-encoding",
-  "upgrade",
-]);
-
-// Request headers the broker OWNS — everything else is forwarded VERBATIM
-// (denylist model, symmetric with git-broker.ts's REQUEST_OWNED: a denylist
-// forwards future gh headers by default).
-const REQUEST_OWNED = new Set([...HOP_BY_HOP, "authorization", "host"]);
+/**
+ * The content of the isolated GH_CONFIG_DIR's config.yml that routes gh onto
+ * this broker's unix socket. Spike-verified gh transport contract (gh 2.95.0):
+ * `http_unix_socket` has NO env-var equivalent — it is a config.yml key only.
+ * Owned here so the broker and its caller can never drift on the shape.
+ */
+export function ghBrokerConfigYaml(socketPath: string): string {
+  return `version: 1\nhttp_unix_socket: ${socketPath}\n`;
+}
 
 export type GhBroker = {
   /** The unix socket gh dials (the run's `http_unix_socket` config value). */
@@ -89,11 +84,6 @@ export type StartGhBrokerOptions = {
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch;
 };
-
-function timingSafeEqualStr(a: string, bBuf: Buffer): boolean {
-  const ab = Buffer.from(a);
-  return ab.length === bBuf.length && timingSafeEqual(ab, bBuf);
-}
 
 /**
  * True iff the GraphQL document contains a `mutation` operation. Strings
@@ -168,12 +158,16 @@ export async function startGhBroker(
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
-    // 1. Per-run bearer.
-    const auth = req.headers["authorization"] ?? "";
-    if (
-      !timingSafeEqualStr(auth, expectedTokenBuf) &&
-      !timingSafeEqualStr(auth, expectedBearerBuf)
-    ) {
+    // 1. Per-run bearer. The auth header is encoded ONCE and compared against
+    //    both precomputed expected values. Length check first is safe: bearer
+    //    length is not secret, and timingSafeEqual throws on length mismatch.
+    const authBuf = Buffer.from(req.headers["authorization"] ?? "");
+    const authOk =
+      (authBuf.length === expectedTokenBuf.length &&
+        timingSafeEqual(authBuf, expectedTokenBuf)) ||
+      (authBuf.length === expectedBearerBuf.length &&
+        timingSafeEqual(authBuf, expectedBearerBuf));
+    if (!authOk) {
       res.writeHead(401).end("unauthorized");
       return;
     }
@@ -183,13 +177,21 @@ export async function startGhBroker(
       res.writeHead(403).end("forbidden");
       return;
     }
-    const url = new URL(req.url ?? "/", "http://api.github.com");
+    // gh sends origin-form request targets (`/path?query`) — no full-URL parse
+    // needed; anything else is malformed here.
+    const reqUrl = req.url ?? "";
+    if (!reqUrl.startsWith("/")) {
+      res.writeHead(400).end("bad request");
+      return;
+    }
     // 3. Method/path allowlist (read-only v1).
     const isRead = req.method === "GET" || req.method === "HEAD";
-    const isGraphql = req.method === "POST" && url.pathname === "/graphql";
+    const isGraphql =
+      req.method === "POST" &&
+      (reqUrl === "/graphql" || reqUrl.startsWith("/graphql?"));
     if (!isRead && !isGraphql) {
-      // Deny record: method + path only — never the body, never any token.
-      console.error(`gh-broker: denied ${req.method} ${url.pathname}`);
+      // Deny record: method + path only — never the query/body, never any token.
+      console.error(`gh-broker: denied ${req.method} ${reqUrl.split("?")[0]}`);
       res.writeHead(403).end("forbidden");
       return;
     }
@@ -214,7 +216,7 @@ export async function startGhBroker(
 
     // 4. Proxy to api.github.com with the token injected server-side, last, so
     //    it always wins over any client-supplied authorization.
-    const target = `https://api.github.com${url.pathname}${url.search}`;
+    const target = `https://api.github.com${reqUrl}`;
     const fwd: Record<string, string> = {};
     for (const [k, v] of Object.entries(req.headers)) {
       if (REQUEST_OWNED.has(k)) continue;
@@ -229,8 +231,9 @@ export async function startGhBroker(
     });
 
     const outHeaders: Record<string, string> = {};
+    // WHATWG Headers.forEach already yields lowercase keys.
     upstream.headers.forEach((value, key) => {
-      if (!HOP_BY_HOP.has(key.toLowerCase())) outHeaders[key] = value;
+      if (!HOP_BY_HOP.has(key)) outHeaders[key] = value;
     });
     res.writeHead(upstream.status, outHeaders);
     if (upstream.body) {
