@@ -10,11 +10,10 @@ valid for.
 ## Deployment boundary (read first)
 
 Every risk acceptance below is scoped to the **single-tenant pilot deployment**
-(one operator, one worker box, first-party repos). \*\*#108 (dedicated agent uid
-
-- PF anchor) is a hard precondition for any multi-tenant expansion or for
-  processing customer data on the worker plane.\*\* Outside the pilot boundary,
-  the acceptances in the register are void and the gaps become launch blockers.
+(one operator, one worker box, first-party repos). **#108 (dedicated agent uid +
+PF anchor) is a hard precondition for any multi-tenant expansion or for
+processing customer data on the worker plane.** Outside the pilot boundary, the
+acceptances in the register are void and the gaps become launch blockers.
 
 ## Control mapping (TSC → implemented control → evidence)
 
