@@ -36,7 +36,10 @@ function randomSuffix() {
 }
 
 function getTemplateName({ cpuCount, memoryGB }: TemplateArgs): string {
-  return `${namePrefix}-vCPU-${cpuCount}-RAM-${memoryGB}GB-${randomSuffix()}`;
+  // Lowercase: E2B's v2 build system rejects uppercase template names (the
+  // v1 API lowercased them server-side, which is why the old terry-vCPU-*
+  // names resolved as terry-vcpu-*).
+  return `${namePrefix}-vcpu-${cpuCount}-ram-${memoryGB}gb-${randomSuffix()}`;
 }
 
 function getDaytonaBuildFlags({ cpuCount, memoryGB }: TemplateArgs) {
@@ -64,8 +67,8 @@ function getE2BBuildFlags({ cpuCount, memoryGB }: TemplateArgs) {
   const memoryMB = memoryGB * 1024;
   return {
     name,
+    // v2 `template create` takes the name as a positional argument.
     args: [
-      "--name",
       name,
       "--dockerfile",
       path.relative(process.cwd(), dockerfilePath),
@@ -120,7 +123,9 @@ async function buildE2BTemplate(templateArgs: TemplateArgs) {
     fs.unlinkSync(e2bTomlPath);
   }
   const { name, args } = getE2BBuildFlags(templateArgs);
-  await runCommand(`e2b template build ${args.join(" ")}`);
+  // v2 build system (`template create`, remote builder); `template build` is
+  // the deprecated v1 path and exits 1 with @e2b/cli >= 2.x.
+  await runCommand(`e2b template create ${args.join(" ")}`);
   console.log(`Template built successfully: ${name}`);
   return name;
 }
