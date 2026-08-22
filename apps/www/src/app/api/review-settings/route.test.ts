@@ -50,6 +50,8 @@ describe("GET /api/review-settings", () => {
         blockTolerance: "info",
         reviewDraftPrs: false,
         trustedAuthorThreshold: null,
+        egressPolicy: null,
+        egressAllowlist: null,
         updatedByUserId: USER,
         createdAt: new Date(),
         updatedAt: new Date("2026-07-20T00:00:00Z"),

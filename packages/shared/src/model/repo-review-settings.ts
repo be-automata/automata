@@ -75,13 +75,22 @@ export async function upsertRepoReviewSetting({
   db: DB;
   organizationId: string;
   repoFullName: string;
-  patch: { blockTolerance?: string; reviewDraftPrs?: boolean };
+  patch: {
+    blockTolerance?: string;
+    reviewDraftPrs?: boolean;
+    /** '#66 egress level ('none'|'ip_port'|'domain'); null clears (= no enforcement). */
+    egressPolicy?: string | null;
+    /** #66 operator allowlist entries; null clears. Validated at shape-build time. */
+    egressAllowlist?: string[] | null;
+  };
   updatedByUserId?: string | null;
 }): Promise<RepoReviewSetting> {
   const repo = normalizeRepo(repoFullName);
   const set: {
     blockTolerance?: string;
     reviewDraftPrs?: boolean;
+    egressPolicy?: string | null;
+    egressAllowlist?: string[] | null;
     updatedByUserId: string | null;
     updatedAt: Date;
   } = { updatedByUserId: updatedByUserId ?? null, updatedAt: new Date() };
@@ -89,6 +98,9 @@ export async function upsertRepoReviewSetting({
     set.blockTolerance = patch.blockTolerance;
   if (patch.reviewDraftPrs !== undefined)
     set.reviewDraftPrs = patch.reviewDraftPrs;
+  if (patch.egressPolicy !== undefined) set.egressPolicy = patch.egressPolicy;
+  if (patch.egressAllowlist !== undefined)
+    set.egressAllowlist = patch.egressAllowlist;
 
   const [row] = await db
     .insert(repoReviewSettings)
@@ -101,6 +113,12 @@ export async function upsertRepoReviewSetting({
         : {}),
       ...(patch.reviewDraftPrs !== undefined
         ? { reviewDraftPrs: patch.reviewDraftPrs }
+        : {}),
+      ...(patch.egressPolicy !== undefined
+        ? { egressPolicy: patch.egressPolicy }
+        : {}),
+      ...(patch.egressAllowlist !== undefined
+        ? { egressAllowlist: patch.egressAllowlist }
         : {}),
       updatedByUserId: updatedByUserId ?? null,
     })

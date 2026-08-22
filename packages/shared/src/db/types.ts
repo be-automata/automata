@@ -403,6 +403,17 @@ export type RepoSkillVersionInsert =
 export type HatchetRun = typeof schema.hatchetRun.$inferSelect;
 export type HatchetRunInsert = typeof schema.hatchetRun.$inferInsert;
 
+/**
+ * Egress enforcement level (#66): 'none' = system hosts only, 'ip_port' =
+ * exact IP[:port] allowlist, 'domain' = domain (incl. `*.` wildcard)
+ * allowlist. Stored raw (nullable text) on `repoReviewSettings.egressPolicy`;
+ * validated to this union when the shape is built.
+ */
+export type EgressPolicyLevel = "none" | "ip_port" | "domain";
+
+export type EgressEvent = typeof schema.egressEvents.$inferSelect;
+export type EgressEventInsert = typeof schema.egressEvents.$inferInsert;
+
 export type UserCreditGrantType =
   | "signup_bonus"
   | "stripe_top_up"

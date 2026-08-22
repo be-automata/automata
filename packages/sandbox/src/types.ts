@@ -42,6 +42,18 @@ export type CreateSandboxOptions = {
   setupScript?: string | null; // Custom setup script to override repository's terragon-setup.sh
   fastResume?: boolean; // Fast resume mode - skips unnecessary setup steps that run everytime (claude credentials, daemon update, etc)
   publicUrl: string;
+  /**
+   * Per-repo egress policy SHAPE (#66) — level + FINAL allowlist, fully
+   * resolved control-plane-side (system entries already merged in). Providers
+   * learn ONLY this shape — never the settings table or where the policy came
+   * from (declared structurally, never imported across the plane boundary).
+   * Absent = no enforcement (today's behavior). NOT consumed by any provider
+   * yet — provider enforcement lands in a later slice (PR C).
+   */
+  egressPolicy?: {
+    level: "none" | "ip_port" | "domain";
+    allowlist: string[];
+  };
   featureFlags: FeatureFlags;
   generateBranchName: (threadName: string | null) => Promise<string | null>;
   onStatusUpdate: ({

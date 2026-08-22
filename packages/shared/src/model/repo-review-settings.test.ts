@@ -236,3 +236,86 @@ describe("repo-review-settings (Neon, org-fenced)", () => {
     ).toBeDefined();
   });
 });
+
+describe("repo-review-settings egress columns (#66 slice 1)", () => {
+  let orgA: string;
+
+  beforeEach(async () => {
+    orgA = await makeOrg("acme");
+  });
+
+  it("egress fields default to null (no enforcement) on a tolerance-only row", async () => {
+    const row = await setRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      blockTolerance: "warning",
+    });
+    expect(row.egressPolicy).toBeNull();
+    expect(row.egressAllowlist).toBeNull();
+  });
+
+  it("roundtrips egressPolicy + egressAllowlist through upsert/get/list", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: {
+        egressPolicy: "domain",
+        egressAllowlist: ["registry.npmjs.org", "*.githubusercontent.com"],
+      },
+    });
+    const got = await getRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+    });
+    expect(got?.egressPolicy).toBe("domain");
+    expect(got?.egressAllowlist).toEqual([
+      "registry.npmjs.org",
+      "*.githubusercontent.com",
+    ]);
+    const list = await listRepoReviewSettings({ db, organizationId: orgA });
+    expect(list).toHaveLength(1);
+    expect(list[0]!.egressPolicy).toBe("domain");
+  });
+
+  it("egress patch preserves other fields; other-field patch preserves egress; null clears", async () => {
+    await setRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      blockTolerance: "error",
+    });
+    // Egress-only patch: tolerance survives.
+    const withEgress = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { egressPolicy: "ip_port", egressAllowlist: ["10.0.0.5:443"] },
+    });
+    expect(withEgress.blockTolerance).toBe("error");
+    expect(withEgress.egressPolicy).toBe("ip_port");
+
+    // Tolerance-only patch: egress survives.
+    const afterTolerance = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { blockTolerance: "info" },
+    });
+    expect(afterTolerance.egressPolicy).toBe("ip_port");
+    expect(afterTolerance.egressAllowlist).toEqual(["10.0.0.5:443"]);
+
+    // Explicit null clears (revert to no enforcement — rollback path, spec §7).
+    const cleared = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { egressPolicy: null, egressAllowlist: null },
+    });
+    expect(cleared.egressPolicy).toBeNull();
+    expect(cleared.egressAllowlist).toBeNull();
+    expect(cleared.blockTolerance).toBe("info");
+  });
+});
