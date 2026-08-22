@@ -163,6 +163,55 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
     expect(nonReviewLane.CLAUDE_CODE_SIMPLE).toBeUndefined();
   });
 
+  describe("#66 slice 2 — egress proxy env injection", () => {
+    const PROXY_URL = "http://127.0.0.1:54321";
+    // Operator boxes can carry an ambient corporate proxy — it must NEVER
+    // reach the child (it would re-route run traffic through operator infra
+    // and, when a policy is set, shadow the enforcing per-run proxy).
+    const ambientProxies = {
+      HTTPS_PROXY: "http://corp-proxy.internal:3128",
+      HTTP_PROXY: "http://corp-proxy.internal:3128",
+      https_proxy: "http://corp-proxy.internal:3128",
+      http_proxy: "http://corp-proxy.internal:3128",
+      NO_PROXY: "corp.internal",
+      no_proxy: "corp.internal",
+    };
+
+    it("sets all 6 proxy vars when egressProxyUrl is set (and they point at the run proxy, not ambient)", () => {
+      const env = buildDaemonEnv({
+        baseEnv: { PATH: "/usr/bin", HOME: "/home/op", ...ambientProxies },
+        anthropicApiKey: "sk-ant-xxx",
+        claudeBinDir: "",
+        installationToken: INSTALL_TOKEN,
+        ghConfigDir: "/tmp/isolated-gh",
+        botLogin: "automata-ai-bot[bot]",
+        egressProxyUrl: PROXY_URL,
+      });
+      expect(env.HTTPS_PROXY).toBe(PROXY_URL);
+      expect(env.HTTP_PROXY).toBe(PROXY_URL);
+      expect(env.https_proxy).toBe(PROXY_URL);
+      expect(env.http_proxy).toBe(PROXY_URL);
+      // Loopback carve-out: daemon socket, git broker, and the proxy itself.
+      expect(env.NO_PROXY).toBe("127.0.0.1,localhost");
+      expect(env.no_proxy).toBe("127.0.0.1,localhost");
+      expect(JSON.stringify(env)).not.toContain("corp-proxy.internal");
+    });
+
+    it("injects NOTHING when unset — and ambient proxy vars stay stripped by the whitelist", () => {
+      const env = buildDaemonEnv({
+        baseEnv: { PATH: "/usr/bin", HOME: "/home/op", ...ambientProxies },
+        anthropicApiKey: "sk-ant-xxx",
+        claudeBinDir: "",
+        installationToken: INSTALL_TOKEN,
+        ghConfigDir: "/tmp/isolated-gh",
+        botLogin: "automata-ai-bot[bot]",
+      });
+      for (const key of Object.keys(ambientProxies)) {
+        expect(env[key], key).toBeUndefined();
+      }
+    });
+  });
+
   it("defense-in-depth: a secret-looking key is never forwarded even if whitelisted", () => {
     // Sanity: no whitelisted key matches the secret pattern (would be dropped).
     const secretish = [...SAFE_ENV_KEYS].filter((k) =>

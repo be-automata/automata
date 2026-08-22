@@ -113,6 +113,14 @@ export interface BuildDaemonEnvOpts {
    * so it is never subject to the ambient-forwarding rules.
    */
   credentialEnv?: Record<string, string>;
+  /**
+   * The per-run egress filtering proxy's base url (#66 slice 2,
+   * `http://127.0.0.1:<port>`). When set, HTTP(S)_PROXY (both cases) point the
+   * child at it and NO_PROXY carves out loopback (the daemon socket, git
+   * broker, and the proxy itself). When unset, NOTHING is injected — ambient
+   * proxy vars are already stripped by the whitelist, which must stay true.
+   */
+  egressProxyUrl?: string | null;
 }
 
 export function buildDaemonEnv({
@@ -125,6 +133,7 @@ export function buildDaemonEnv({
   runHome = null,
   credentialDelivered = false,
   credentialEnv = {},
+  egressProxyUrl = null,
 }: BuildDaemonEnvOpts): NodeJS.ProcessEnv {
   // 1. Whitelist: forward ONLY known-safe, non-secret ambient keys.
   const env: NodeJS.ProcessEnv = {};
@@ -156,6 +165,21 @@ export function buildDaemonEnv({
   // credential. Must come after the whitelist pass, which forwards ambient HOME.
   if (runHome) {
     env.HOME = runHome;
+  }
+  // Egress enforcement (#66 slice 2): route the child's HTTP(S) traffic through
+  // the per-run filtering proxy. Injected AFTER the whitelist pass (like HOME)
+  // so it can never be shadowed by — or confused with — an ambient proxy var
+  // (those are not whitelisted and stay stripped either way). NO_PROXY keeps
+  // loopback direct: the daemon socket, the git broker, and the proxy itself
+  // all live there. Honesty: env-var proxying is cooperative — the PF anchor
+  // (deploy/egress-pf.conf) is the bypass backstop, not this injection.
+  if (egressProxyUrl) {
+    env.HTTPS_PROXY = egressProxyUrl;
+    env.HTTP_PROXY = egressProxyUrl;
+    env.https_proxy = egressProxyUrl;
+    env.http_proxy = egressProxyUrl;
+    env.NO_PROXY = "127.0.0.1,localhost";
+    env.no_proxy = "127.0.0.1,localhost";
   }
   // Credential env (Amp). After the whitelist so SECRET_KEY_PATTERN cannot drop it.
   for (const [key, value] of Object.entries(credentialEnv)) {

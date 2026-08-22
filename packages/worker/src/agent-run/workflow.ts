@@ -9,10 +9,18 @@ import {
 } from "./retry-classification";
 import {
   pollUntilTerminal,
+  postEgressEvents,
   postRunFailed,
   pullAgentCredentials,
   pullNextMessage,
+  type EgressEventWire,
+  type WwwClientOpts,
 } from "./www-client";
+import {
+  startEgressProxy,
+  type EgressDecisionEvent,
+  type EgressProxy,
+} from "./egress-proxy";
 import {
   materialiseAgentCredentials,
   type MaterialisedCredentials,
@@ -126,6 +134,58 @@ export function resolveUseCredits({
         useCredits: true,
         log: "no delivered credential → forcing credits (proxy)",
       };
+}
+
+/** Flush the egress audit batch at this size (well under the route's 100 cap). */
+const EGRESS_BATCH_MAX = 20;
+/** …or after this long, whichever comes first. */
+const EGRESS_BATCH_FLUSH_MS = 2_000;
+
+/**
+ * Tiny audit batcher for the egress proxy (#66 §3.3 worker half): the proxy's
+ * sync onEvent callback lands events here; the batch is POSTed to
+ * /api/daemon/egress-event every 2s or 20 events, with a final flush on
+ * close(). postEgressEvents never throws (and neither does add()), so audit
+ * delivery can NEVER fail the run — lost audit rows are logged, not fatal.
+ */
+export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
+  add: (event: EgressDecisionEvent) => void;
+  close: () => Promise<void>;
+} {
+  let buffer: EgressEventWire[] = [];
+  const flush = (): Promise<void> => {
+    if (buffer.length === 0) {
+      return Promise.resolve();
+    }
+    const events = buffer;
+    buffer = [];
+    return postEgressEvents(wwwOpts, events);
+  };
+  const timer = setInterval(() => void flush(), EGRESS_BATCH_FLUSH_MS);
+  // Never hold the worker process open for an audit flush tick.
+  timer.unref?.();
+  return {
+    add(event) {
+      buffer.push({
+        destinationHost: event.destinationHost,
+        // Port 0 is the proxy's "unknown" sentinel (unparseable target); the
+        // route requires ≥1, so unknown travels as absent.
+        ...(event.destinationPort > 0
+          ? { destinationPort: event.destinationPort }
+          : {}),
+        action: event.action,
+        policyLevel: event.policyLevel,
+        source: "worker",
+      });
+      if (buffer.length >= EGRESS_BATCH_MAX) {
+        void flush();
+      }
+    },
+    async close() {
+      clearInterval(timer);
+      await flush();
+    },
+  };
 }
 
 export const agentRunWorkflow = hatchet.workflow<AgentRunInput>({
@@ -276,7 +336,41 @@ agentRunWorkflow.task({
       }`,
     );
 
-    const daemon = new DaemonProcess(config, input, workdir, materialised);
+    // #66 slice 2: per-run egress enforcement, iff the control plane resolved a
+    // policy onto this run's input. Absent policy ⇒ nothing starts and nothing
+    // is injected — zero behavior change. The proxy must be up BEFORE the
+    // daemon env is first built (preflightGhAuth builds it), because the env is
+    // memoised. A proxy-start failure must not strand the clone: this sits
+    // outside the try/finally that owns cleanup, so it cleans up itself.
+    let egressProxy: EgressProxy | null = null;
+    let egressEvents: ReturnType<typeof createEgressEventBatcher> | null = null;
+    if (input.egressPolicy) {
+      try {
+        const batcher = createEgressEventBatcher(wwwOpts);
+        egressEvents = batcher;
+        egressProxy = await startEgressProxy({
+          policy: input.egressPolicy,
+          onEvent: (e) => batcher.add(e),
+        });
+      } catch (err) {
+        await egressEvents?.close();
+        await materialised.cleanup();
+        await cleanupWorkdir(workdir);
+        throw err;
+      }
+      step(
+        `egress proxy up: 127.0.0.1:${egressProxy.port} ` +
+          `(level=${input.egressPolicy.level}, ${input.egressPolicy.allowlist.length} allowlist entries)`,
+      );
+    }
+
+    const daemon = new DaemonProcess(
+      config,
+      input,
+      workdir,
+      materialised,
+      egressProxy?.url ?? null,
+    );
     try {
       // Fail-closed identity precondition (ADR-002): confirm gh authenticates as the
       // bot (installation token + isolated config) in the workdir BEFORE spawning —
@@ -352,6 +446,17 @@ agentRunWorkflow.task({
       // group so no orphan survives, then remove the workdir. Runs on normal return,
       // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
       daemon.teardown();
+      // #66: close the egress proxy after the daemon is dead (no more child
+      // traffic), then flush the last audit batch. Both are best-effort — an
+      // audit/proxy teardown hiccup must never mask the run's real outcome.
+      if (egressProxy) {
+        try {
+          await egressProxy.close();
+        } catch {
+          // sockets already gone
+        }
+      }
+      await egressEvents?.close();
       // Wipe the delivered credential before the workdir goes, so a cleanup
       // failure on the workdir can never leave a live token behind.
       await materialised.cleanup();
