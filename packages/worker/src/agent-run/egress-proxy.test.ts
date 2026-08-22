@@ -3,6 +3,7 @@ import {
   request as httpRequest,
 } from "node:http";
 import { createServer as createTcpServer, type AddressInfo } from "node:net";
+import type { Duplex } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   matchEgress,
@@ -339,6 +340,61 @@ describe("startEgressProxy (real loopback servers)", () => {
         policyLevel: "ip_port",
       },
     ]);
+  });
+
+  it("close() severs BOTH ends of an in-flight CONNECT tunnel (no upstream socket leak)", async () => {
+    // Regression: close() used to destroy only tracked client-facing sockets;
+    // the upstream socket from handleConnect's netConnect() survived teardown.
+    let resolveUpstreamSeen!: () => void;
+    let resolveUpstreamClosed!: () => void;
+    const upstreamSeen = new Promise<void>((r) => (resolveUpstreamSeen = r));
+    const upstreamClosed = new Promise<void>(
+      (r) => (resolveUpstreamClosed = r),
+    );
+    const tcpPort = await new Promise<number>((resolve) => {
+      const server = createTcpServer((socket) => {
+        resolveUpstreamSeen();
+        socket.on("close", () => resolveUpstreamClosed());
+      });
+      closers.push(() => server.close());
+      server.listen(0, "127.0.0.1", () =>
+        resolve((server.address() as AddressInfo).port),
+      );
+    });
+
+    const { p } = await boot({
+      level: "ip_port",
+      allowlist: [`127.0.0.1:${tcpPort}`],
+    });
+
+    // Open a tunnel and leave it in flight (no client-side end/destroy).
+    const clientSocket = await new Promise<Duplex>((resolve, reject) => {
+      const req = httpRequest({
+        host: "127.0.0.1",
+        port: p.port,
+        method: "CONNECT",
+        path: `127.0.0.1:${tcpPort}`,
+      });
+      req.on("connect", (res, socket) => {
+        expect(res.statusCode).toBe(200);
+        resolve(socket);
+      });
+      req.on("error", reject);
+      req.end();
+    });
+    const clientClosed = new Promise<void>((r) =>
+      clientSocket.on("close", () => r()),
+    );
+    clientSocket.on("error", () => {}); // severed mid-tunnel: ECONNRESET is the point
+    await upstreamSeen;
+
+    await p.close();
+    proxy = null; // already closed — afterEach must not double-close
+
+    // BOTH halves die: the upstream server sees its connection destroyed …
+    await upstreamClosed;
+    // … and the client side is severed too.
+    await clientClosed;
   });
 
   it("CONNECT deny: 403 response and a deny event; no tunnel is opened", async () => {

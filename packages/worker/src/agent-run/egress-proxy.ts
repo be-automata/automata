@@ -253,6 +253,11 @@ export async function startEgressProxy(
       upstream.pipe(clientSocket);
       clientSocket.pipe(upstream);
     });
+    // Track the OUTBOUND half of the tunnel too: close() destroys every socket
+    // in this set, and destroying only the client half would leak the live
+    // upstream TCP connection past the run's teardown.
+    sockets.add(upstream);
+    upstream.on("close", () => sockets.delete(upstream));
     // On error on either side, destroy BOTH — a half-open tunnel leaks sockets.
     const destroyBoth = () => {
       upstream.destroy();
@@ -262,12 +267,14 @@ export async function startEgressProxy(
     clientSocket.on("error", destroyBoth);
   }
 
+  // Track live sockets — client connections AND the upstream halves of CONNECT
+  // tunnels — so close() can sever in-flight tunnels at both ends.
+  // server.close() alone waits forever on an open tunnel.
+  const sockets = new Set<Socket>();
+
   const server = createServer(handleRequest);
   server.on("connect", handleConnect);
 
-  // Track live client sockets so close() can sever in-flight CONNECT tunnels —
-  // server.close() alone waits forever on an open tunnel.
-  const sockets = new Set<Socket>();
   server.on("connection", (socket) => {
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
