@@ -312,11 +312,11 @@ describe("createEgressEventBatcher — audit batch add/flush/close", () => {
     expect(postEgressEvents).toHaveBeenCalledTimes(1);
   });
 
-  it("port 0 (unparseable sentinel) travels as an ABSENT destinationPort", async () => {
+  it("null destinationPort (unknown) travels as an ABSENT destinationPort", async () => {
     const batcher = createEgressEventBatcher(OPTS);
     batcher.add({
       destinationHost: "unparseable",
-      destinationPort: 0,
+      destinationPort: null,
       action: "deny",
       policyLevel: "domain",
     });
