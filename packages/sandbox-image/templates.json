@@ -675,5 +675,14 @@
     "provider": "e2b",
     "size": "small",
     "createdAt": "2026-08-22T17:44:01.000Z"
+  },
+  {
+    "name": "terry-vcpu-4-ram-8gb-2026-08-22-17-48-16-2e9765",
+    "dockerfileHash": "903762974aa1782c1f8e5ec7c965b7271616cd147e9b93e2b6fa3525dfdbb646",
+    "cpuCount": 4,
+    "memoryGB": 8,
+    "provider": "e2b",
+    "size": "large",
+    "createdAt": "2026-08-22T17:48:34.000Z"
   }
 ]
