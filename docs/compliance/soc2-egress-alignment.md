@@ -57,6 +57,7 @@ and mechanically shrinks RA-3.
   per-plane E2E matrices, template/snapshot verification).
 - Industry benchmark: 9-system comparison recorded on #66 (Harden-Runner, E2B,
   Daytona, Modal, Cloudflare, Vercel, Codex CLI, Anthropic srt/Claude Code,
-  K8s/Cilium) — both deviations at or ahead of prevailing practice.
+  K8s/Cilium) — the two benchmarked deviations (RA-2 vendor audit gap, RA-3
+  system-host allowance) are at or ahead of prevailing practice.
 - Change-management evidence: PRs #101–#106, each Automata-bot APPROVED on the
   final head with green CI.
