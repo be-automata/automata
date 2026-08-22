@@ -151,7 +151,7 @@ describe("toDaytonaNetwork", () => {
     it("throws — networkBlockAll would sever the daemon callback", () => {
       expect(() =>
         toDaytonaNetwork(policy("none", ["callback.example.com"])),
-      ).toThrow(/unsupported on daytona/);
+      ).toThrow(/"none" is unsupported on the daytona provider/);
     });
   });
 });

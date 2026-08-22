@@ -104,7 +104,7 @@ describe("DaytonaProvider egress creation options", () => {
           egressPolicy: { level: "none", allowlist: ["callback.example.com"] },
         }),
       ),
-    ).rejects.toThrow(/unsupported on daytona/);
+    ).rejects.toThrow(/"none" is unsupported on the daytona provider/);
     expect(createMock).not.toHaveBeenCalled();
   });
 

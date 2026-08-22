@@ -45,7 +45,7 @@ export type E2bNetworkOptions = {
  * system entries every policy level requires (see {@link toDaytonaNetwork}).
  */
 export type DaytonaNetworkOptions = {
-  domainAllowList?: string;
+  domainAllowList: string;
 };
 
 /** Daytona's documented cap on `domainAllowList` entries. */
@@ -53,18 +53,6 @@ export const DAYTONA_MAX_DOMAIN_ALLOWLIST = 20;
 
 /** `host:port` splitter — digits-only port suffix, so domains and IPv4 are safe. */
 const HOST_PORT_RE = /^(.+):(\d{1,5})$/;
-
-const IPV4_CIDR_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/;
-
-function isIpv4Cidr(entry: string): boolean {
-  const m = IPV4_CIDR_RE.exec(entry);
-  if (!m) {
-    return false;
-  }
-  return (
-    m.slice(1, 5).every((octet) => Number(octet) <= 255) && Number(m[5]) <= 32
-  );
-}
 
 /** Trim, lowercase, drop empties, dedupe — every mapper's first pass. */
 function normalizeEntries(allowlist: string[]): string[] {
@@ -78,11 +66,12 @@ function normalizeEntries(allowlist: string[]): string[] {
   return out;
 }
 
-/** Split an entry into host + optional port pin. CIDRs never carry ports. */
+/**
+ * Split an entry into host + optional port pin. CIDRs need no special case:
+ * an IPv4 CIDR has no colon and an IPv6 CIDR ends in `/nn`, so the regex
+ * never matches one and it falls through whole.
+ */
 function splitHostPort(entry: string): { host: string; port: number | null } {
-  if (isIpv4Cidr(entry)) {
-    return { host: entry, port: null };
-  }
   const m = HOST_PORT_RE.exec(entry);
   if (m) {
     return { host: m[1]!, port: Number(m[2]) };
@@ -131,14 +120,22 @@ export function toE2bNetwork(policy: EgressPolicyShape): E2bNetworkOptions {
  *   (violating the callback exception, AC4) — we throw rather than create a
  *   sandbox whose daemon can never phone home.
  */
+/** One template for every level Daytona cannot express (#66 spec §3.7). */
+function daytonaUnsupported(level: string, reason: string, remedy: string) {
+  return new Error(
+    `egress policy level "${level}" is unsupported on the daytona provider: ${reason} (#66 spec §3.7); ${remedy}`,
+  );
+}
+
 export function toDaytonaNetwork(
   policy: EgressPolicyShape,
 ): DaytonaNetworkOptions {
-  const entries = normalizeEntries(policy.allowlist);
   switch (policy.level) {
     case "none": {
-      throw new Error(
-        'egress policy level "none" is unsupported on daytona: networkBlockAll would sever the daemon callback (#66 spec §3.7); refusing to create a broken sandbox',
+      throw daytonaUnsupported(
+        "none",
+        "networkBlockAll would sever the daemon callback",
+        "refusing to create a broken sandbox",
       );
     }
     case "ip_port": {
@@ -146,11 +143,14 @@ export function toDaytonaNetwork(
       // exclusive at creation (provider spike on #66) — a CIDR list cannot
       // carry the hostname system entries, and dropping or pre-resolving
       // them is forbidden (CONTRACT NOTE / rotating IPs). Fail loudly.
-      throw new Error(
-        'egress policy level "ip_port" is unsupported on the daytona provider: networkAllowList (CIDR-only) is mutually exclusive with domainAllowList, so the required system hostnames (daemon callback, github.com, api.anthropic.com) cannot be expressed (#66 spec §3.7); use "domain" level',
+      throw daytonaUnsupported(
+        "ip_port",
+        "networkAllowList (CIDR-only) is mutually exclusive with domainAllowList, so the required system hostnames (daemon callback, github.com, api.github.com, api.anthropic.com) cannot be expressed",
+        'use "domain" level',
       );
     }
     case "domain": {
+      const entries = normalizeEntries(policy.allowlist);
       const domains: string[] = [];
       for (const entry of entries) {
         const { host } = splitHostPort(entry);
