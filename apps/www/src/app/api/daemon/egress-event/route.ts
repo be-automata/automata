@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import { insertEgressEvents } from "@terragon/shared/model/egress-events";
+import { EGRESS_POLICY_LEVELS } from "@terragon/shared/model/egress-policy";
 
 /**
  * POST /api/daemon/egress-event   body: { events: [...] }
@@ -24,7 +25,7 @@ const eventSchema = z.object({
   destinationHost: z.string().min(1).max(1024),
   destinationPort: z.number().int().min(1).max(65535).optional(),
   action: z.enum(["allow", "deny"]),
-  policyLevel: z.enum(["none", "ip_port", "domain"]).optional(),
+  policyLevel: z.enum(EGRESS_POLICY_LEVELS).optional(),
   source: z.enum(["worker", "docker", "e2b", "daytona"]),
 });
 
@@ -63,17 +64,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  // Parsed events pass through as-is: insertEgressEvents owns the single
+  // absent→null normalization pass.
   await insertEgressEvents({
     db,
     events: parsed.data.events.map((e) => ({
-      organizationId: ctx.organizationId ?? null,
-      threadId: ctx.threadId ?? null,
+      ...e,
+      organizationId: ctx.organizationId,
+      threadId: ctx.threadId,
       runId,
-      destinationHost: e.destinationHost,
-      destinationPort: e.destinationPort ?? null,
-      action: e.action,
-      policyLevel: e.policyLevel ?? null,
-      source: e.source,
     })),
   });
 

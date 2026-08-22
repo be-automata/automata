@@ -2,6 +2,20 @@ import { SandboxProvider, SandboxSize } from "@terragon/types/sandbox";
 import { AIAgent, AIAgentCredentials } from "@terragon/agent/types";
 import { FeatureFlags } from "@terragon/daemon/shared";
 import { McpConfig } from "./mcp-config";
+
+/**
+ * Per-repo egress policy SHAPE (#66) — level + FINAL allowlist, fully
+ * resolved control-plane-side (system entries already merged in). Structural
+ * mirror of the www-side / worker-side shapes — declared per-package, never
+ * imported across the plane boundary. Providers learn ONLY this shape — never
+ * the settings table or where the policy came from. See src/egress.ts for the
+ * per-provider mappings.
+ */
+export type EgressPolicyShape = {
+  level: "none" | "ip_port" | "domain";
+  allowlist: string[];
+};
+
 // NOTE: This is stored in the database, so don't remove any values from this list.
 export type SandboxStatus =
   | "unknown"
@@ -43,20 +57,14 @@ export type CreateSandboxOptions = {
   fastResume?: boolean; // Fast resume mode - skips unnecessary setup steps that run everytime (claude credentials, daemon update, etc)
   publicUrl: string;
   /**
-   * Per-repo egress policy SHAPE (#66) — level + FINAL allowlist, fully
-   * resolved control-plane-side (system entries already merged in). Providers
-   * learn ONLY this shape — never the settings table or where the policy came
-   * from (declared structurally, never imported across the plane boundary).
+   * Per-repo egress policy SHAPE (#66) — see {@link EgressPolicyShape}.
    * Absent = no enforcement (today's behavior). Enforced per provider:
    * Docker = internal network + filtering proxy sidecar (docker-egress.ts),
    * E2B = native firewall (network.allowOut/denyOut), Daytona = create-time
    * networkAllowList/domainAllowList. See src/egress.ts for the mappings and
    * docs/egress-enforcement.md for ops caveats.
    */
-  egressPolicy?: {
-    level: "none" | "ip_port" | "domain";
-    allowlist: string[];
-  };
+  egressPolicy?: EgressPolicyShape;
   featureFlags: FeatureFlags;
   generateBranchName: (threadName: string | null) => Promise<string | null>;
   onStatusUpdate: ({

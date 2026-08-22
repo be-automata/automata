@@ -37,8 +37,61 @@ const UNPARSEABLE = "unparseable";
 const HOST_PORT_RE = /^(.+):(\d{1,5})$/;
 
 /**
- * Pure allow/deny decision for one destination. MIRRORS `matchEgress` in
+ * Compile the immutable allowlist ONCE at startup so per-connection matching
+ * is a Map/Set lookup plus a wildcard-suffix scan — never a re-parse of every
+ * entry per connection. MIRRORS `compileEgressPolicy` in
  * packages/worker/src/agent-run/egress-proxy.ts — keep in sync.
+ *
+ * Shape: { level, exactHosts: Map<host, Set<port>|null>, wildcardSuffixes:
+ * [{suffix, port|null}] }. exactHosts value null = any port (a bare ip_port
+ * entry); for "domain"/"none" a bare entry compiles to {443, 80} and a
+ * `host:port` pin adds its port. Wildcard pin null = the two web ports.
+ */
+function compileEgressPolicy(policy) {
+  const exactHosts = new Map();
+  const wildcardSuffixes = [];
+  const addExact = (host, ports) => {
+    const existing = exactHosts.get(host);
+    if (existing === null) {
+      return; // already any-port — nothing can widen it further
+    }
+    if (ports === null) {
+      exactHosts.set(host, null);
+      return;
+    }
+    const set = existing ?? new Set();
+    for (const p of ports) {
+      set.add(p);
+    }
+    exactHosts.set(host, set);
+  };
+  for (const raw of policy.allowlist) {
+    const entry = String(raw).trim().toLowerCase();
+    if (entry.length === 0) {
+      continue;
+    }
+    const m = HOST_PORT_RE.exec(entry);
+    const entryHost = m ? m[1] : entry;
+    const entryPort = m ? Number(m[2]) : null;
+    if (policy.level === "ip_port") {
+      // Exact IPv4 match; a bare IP entry matches any port, IP:port pins it.
+      addExact(entryHost, entryPort === null ? null : [entryPort]);
+    } else if (entryHost.startsWith("*.")) {
+      // "*.example.com" → ".example.com" suffix
+      wildcardSuffixes.push({ suffix: entryHost.slice(1), port: entryPort });
+    } else {
+      // Plain-domain entries allow the two web ports only; pins add theirs.
+      addExact(entryHost, entryPort === null ? [443, 80] : [entryPort]);
+    }
+  }
+  return { level: policy.level, exactHosts, wildcardSuffixes };
+}
+
+/**
+ * Pure allow/deny decision for one destination. MIRRORS `matchEgress` in
+ * packages/worker/src/agent-run/egress-proxy.ts — keep in sync. Accepts the
+ * raw shape (compiled on the fly — table tests) or the startup-compiled form
+ * (the proxy's per-connection hot path).
  *
  * - level "domain": exact host match, or `*.wildcard` suffix match; a plain
  *   domain entry allows ports 443 and 80 only; a `host:port` entry pins it.
@@ -49,6 +102,7 @@ const HOST_PORT_RE = /^(.+):(\d{1,5})$/;
  * - fail closed: empty/garbage host is a deny.
  */
 function matchEgress(policy, host, port) {
+  const compiled = policy.exactHosts ? policy : compileEgressPolicy(policy);
   const h = String(host).trim().toLowerCase().replace(/\.$/, "");
   if (h.length === 0) {
     return false;
@@ -56,37 +110,19 @@ function matchEgress(policy, host, port) {
   if (h === "127.0.0.1" || h === "localhost" || h === "::1") {
     return true; // implicit loopback allow — never part of the shape
   }
-  for (const raw of policy.allowlist) {
-    const entry = String(raw).trim().toLowerCase();
-    if (entry.length === 0) {
+  const ports = compiled.exactHosts.get(h);
+  if (ports !== undefined) {
+    if (ports === null || (port !== null && ports.has(port))) {
+      return true;
+    }
+    // Exact host with a non-matching port: a wildcard entry may still allow it.
+  }
+  for (const { suffix, port: pin } of compiled.wildcardSuffixes) {
+    if (!h.endsWith(suffix)) {
       continue;
     }
-    const m = HOST_PORT_RE.exec(entry);
-    const entryHost = m ? m[1] : entry;
-    const entryPort = m ? Number(m[2]) : null;
-
-    if (policy.level === "ip_port") {
-      // Exact IPv4 match; a bare IP entry matches any port, IP:port pins it.
-      if (entryHost === h && (entryPort === null || entryPort === port)) {
-        return true;
-      }
-      continue;
-    }
-
-    // "domain" and "none" share the domain rules ("none"'s allowlist is the
-    // control-plane-resolved system hosts).
-    const hostMatches = entryHost.startsWith("*.")
-      ? h.endsWith(entryHost.slice(1)) // "*.example.com" → ".example.com" suffix
-      : entryHost === h;
-    if (!hostMatches) {
-      continue;
-    }
-    if (entryPort !== null) {
-      if (entryPort === port) {
-        return true;
-      }
-    } else if (port === 443 || port === 80) {
-      return true; // plain-domain entries allow the two web ports only
+    if (pin !== null ? port === pin : port === 443 || port === 80) {
+      return true;
     }
   }
   return false;
@@ -118,8 +154,12 @@ function parsePolicy(json) {
  * decision (allow AND deny) goes through `onEvent`.
  */
 function startProxy(policy, listenPort, onEvent) {
+  // Compile the immutable allowlist ONCE at startup; every connection then
+  // matches against the compiled form.
+  const compiled = compileEgressPolicy(policy);
+
   function decide(host, port) {
-    const allowed = matchEgress(policy, host, port);
+    const allowed = matchEgress(compiled, host, port);
     try {
       onEvent({
         destinationHost: host,
@@ -142,7 +182,7 @@ function startProxy(policy, listenPort, onEvent) {
       }
       target = new URL(req.url);
     } catch {
-      decide(UNPARSEABLE, 0);
+      decide(UNPARSEABLE, null);
       res.writeHead(403).end();
       return;
     }
@@ -181,7 +221,7 @@ function startProxy(policy, listenPort, onEvent) {
   function handleConnect(req, clientSocket, head) {
     const m = HOST_PORT_RE.exec(req.url ?? "");
     if (!m) {
-      decide(UNPARSEABLE, 0);
+      decide(UNPARSEABLE, null);
       clientSocket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
       clientSocket.end();
       return;
@@ -237,7 +277,7 @@ function main() {
   });
 }
 
-module.exports = { matchEgress, parsePolicy, startProxy };
+module.exports = { compileEgressPolicy, matchEgress, parsePolicy, startProxy };
 
 if (require.main === module) {
   main();

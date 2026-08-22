@@ -7,6 +7,7 @@ import {
   setRepoReviewSetting,
   upsertRepoReviewSetting,
 } from "@terragon/shared/model/repo-review-settings";
+import { repoReviewSettings } from "@terragon/shared/db/schema";
 import { resolveEgressPolicy } from "./resolve-egress-policy";
 
 /**
@@ -21,7 +22,12 @@ const db = createDb(env.DATABASE_URL!);
 
 // The test env's callback host (nonLocalhostPublicAppUrl → NEXT_PUBLIC_APP_URL).
 const callbackHost = new URL(process.env.NEXT_PUBLIC_APP_URL!).host;
-const systemHosts = [callbackHost, "github.com", "api.anthropic.com"];
+const systemHosts = [
+  callbackHost,
+  "github.com",
+  "api.github.com",
+  "api.anthropic.com",
+];
 
 async function makeOrg(): Promise<string> {
   const org = await createOrganization({
@@ -111,7 +117,7 @@ describe("resolveEgressPolicy (dispatch snapshot)", () => {
     ).toBeNull();
   });
 
-  it("'none' → system hosts only (callback + github.com + api.anthropic.com)", async () => {
+  it("'none' → system hosts only (callback + github hosts + api.anthropic.com)", async () => {
     await upsertRepoReviewSetting({
       db,
       organizationId: orgId,
@@ -128,11 +134,14 @@ describe("resolveEgressPolicy (dispatch snapshot)", () => {
   });
 
   it("an INVALID stored entry throws at resolve time (fail loud, never a wrong policy)", async () => {
-    await upsertRepoReviewSetting({
-      db,
+    // The upsert now rejects invalid entries at the write boundary, so seed the
+    // bad row DIRECTLY — resolve-time validation is exactly the backstop for
+    // rows that bypassed (or predate) the model's write validation.
+    await db.insert(repoReviewSettings).values({
       organizationId: orgId,
       repoFullName: "acme/widgets",
-      patch: { egressPolicy: "ip_port", egressAllowlist: ["not-an-ip"] },
+      egressPolicy: "ip_port",
+      egressAllowlist: ["not-an-ip"],
     });
     await expect(
       resolveEgressPolicy({

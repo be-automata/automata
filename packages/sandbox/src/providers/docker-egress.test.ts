@@ -3,13 +3,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import {
+  EGRESS_NETWORK_PREFIX,
   EGRESS_PROXY_ALIAS,
   EGRESS_PROXY_PORT,
   EGRESS_PROXY_SCRIPT_CONTAINER_PATH,
-  buildEgressNetworkCreateCommand,
-  buildEgressSidecarBridgeConnectCommand,
   buildEgressSidecarRunCommand,
-  buildEgressTeardownCommands,
   buildSandboxEgressRunFlags,
   egressNetworkName,
   egressSidecarName,
@@ -19,18 +17,15 @@ import { EGRESS_PROXY_SCRIPT } from "../egress-proxy-standalone.generated";
 const require = createRequire(import.meta.url);
 
 describe("docker egress command builders (pure — no docker daemon)", () => {
-  it("derives network and sidecar names from the container name", () => {
+  it("derives network and sidecar names from the container name (network from the exported prefix)", () => {
     expect(egressNetworkName("terragon-sandbox-x")).toBe(
       "automata-egress-terragon-sandbox-x",
     );
+    expect(egressNetworkName("terragon-sandbox-x")).toBe(
+      `${EGRESS_NETWORK_PREFIX}terragon-sandbox-x`,
+    );
     expect(egressSidecarName("terragon-sandbox-x")).toBe(
       "terragon-sandbox-x-egress",
-    );
-  });
-
-  it("creates the network as --internal (no direct route out)", () => {
-    expect(buildEgressNetworkCreateCommand("automata-egress-n")).toBe(
-      "docker network create --internal automata-egress-n",
     );
   });
 
@@ -60,12 +55,6 @@ describe("docker egress command builders (pure — no docker daemon)", () => {
     expect(command).not.toContain("egress_policy");
   });
 
-  it("connects only the sidecar to the bridge", () => {
-    expect(buildEgressSidecarBridgeConnectCommand("sb-egress")).toBe(
-      "docker network connect bridge sb-egress",
-    );
-  });
-
   it("builds sandbox run flags: internal network + proxy env, NO_PROXY loopback", () => {
     const flags = buildSandboxEgressRunFlags("automata-egress-sb");
     expect(flags).toContain("--network automata-egress-sb");
@@ -83,12 +72,6 @@ describe("docker egress command builders (pure — no docker daemon)", () => {
     }
   });
 
-  it("tears down sidecar then network", () => {
-    expect(buildEgressTeardownCommands("sb")).toEqual([
-      "docker rm -f sb-egress",
-      "docker network rm automata-egress-sb",
-    ]);
-  });
 });
 
 describe("egress-proxy-standalone.cjs", () => {

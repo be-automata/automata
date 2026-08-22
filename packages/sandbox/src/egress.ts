@@ -22,15 +22,12 @@
  *   the worker proxy's full matching semantics including port pins.
  */
 
-/**
- * Structural mirror of the `egressPolicy` field on `CreateSandboxOptions`
- * (types.ts) and of the run-input shape in packages/worker. Deliberately
- * declared per-package, never imported across the plane boundary.
- */
-export type EgressPolicyShape = {
-  level: "none" | "ip_port" | "domain";
-  allowlist: string[];
-};
+import type { EgressPolicyShape } from "./types";
+
+// The ONE shape crossing into this plane — declared in types.ts (next to
+// `CreateSandboxOptions.egressPolicy`), re-exported here for the mappers'
+// consumers.
+export type { EgressPolicyShape } from "./types";
 
 /** E2B `Sandbox.create` `network` option subset produced by {@link toE2bNetwork}. */
 export type E2bNetworkOptions = {

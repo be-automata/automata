@@ -134,26 +134,25 @@ describe("postEgressEvents (#66 audit sink, worker half)", () => {
     expect("destinationPort" in body.events[1]).toBe(false);
   });
 
-  it("chunks a batch above the route's 100-event cap into multiple POSTs", async () => {
+  it("sends a batch as ONE POST (callers keep batches ≤ the route's 100 cap)", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValue(jsonResponse(200, { inserted: 100 }));
+      .mockResolvedValue(jsonResponse(200, { inserted: 20 }));
     vi.stubGlobal("fetch", fetchMock);
 
     await postEgressEvents(
       opts,
-      Array.from({ length: 150 }, (_, i) => ({
+      Array.from({ length: 20 }, (_, i) => ({
         destinationHost: `h${i}.example.com`,
         action: "deny" as const,
         source: "worker" as const,
       })),
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    const sizes = fetchMock.mock.calls.map(
-      (c) => JSON.parse(c[1].body).events.length,
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetchMock.mock.calls[0]![1].body).events).toHaveLength(
+      20,
     );
-    expect(sizes).toEqual([100, 50]);
   });
 
   it("does nothing at all for an empty batch", async () => {

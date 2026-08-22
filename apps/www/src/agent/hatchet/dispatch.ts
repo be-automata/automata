@@ -18,6 +18,7 @@ import {
   markHatchetRunsSuperseded,
 } from "@terragon/shared/model/hatchet-run";
 import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
+import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import { resolveEgressPolicy } from "@/server-lib/egress/resolve-egress-policy";
 import { triggerAgentRun, cancelAgentRun } from "./transport";
 
@@ -213,12 +214,10 @@ export interface AgentRunInput {
    * behavior). The worker learns level + FINAL allowlist only — never the
    * settings table or where the policy came from (composability invariant;
    * mirrored structurally, not imported, in packages/worker types).
-   * NOT consumed by the worker yet — enforcement lands in PR B.
+   * Consumed by the worker's workflow.ts: it starts the per-run filtering
+   * forward proxy (egress-proxy.ts) and daemon-env points the child at it.
    */
-  egressPolicy?: {
-    level: "none" | "ip_port" | "domain";
-    allowlist: string[];
-  };
+  egressPolicy?: EgressPolicyShape;
 }
 
 /** True when a thread should dispatch to the remote execution plane. */
@@ -288,8 +287,10 @@ export async function dispatchAgentRun({
   // sourcing from it left baseBranch undefined and the worker never fetched origin/main.
   // Resolve the REAL, per-PR base from the PR itself (App octokit). Undefined (non-PR
   // thread, fetch fails, or base==head) → provision skips the base-fetch (head-only).
-  let baseBranch: string | undefined;
-  if (thread?.githubPRNumber) {
+  const resolveBaseBranch = async (): Promise<string | undefined> => {
+    if (!thread?.githubPRNumber) {
+      return undefined;
+    }
     try {
       const octokit = await getOctokitForApp({ owner, repo });
       const { data: pr } = await octokit.rest.pulls.get({
@@ -298,7 +299,7 @@ export async function dispatchAgentRun({
         pull_number: thread.githubPRNumber,
       });
       if (pr.base?.ref && pr.base.ref !== branch) {
-        baseBranch = pr.base.ref;
+        return pr.base.ref;
       }
     } catch (err) {
       console.warn(
@@ -310,25 +311,30 @@ export async function dispatchAgentRun({
         },
       );
     }
-  }
+    return undefined;
+  };
+
+  // #66 slice 1: resolve the per-repo egress SHAPE alongside the PR base-branch
+  // fetch (both depend only on the thread row already loaded — no reason to
+  // serialize a DB read behind a GitHub round-trip), LIVE from the settings row
+  // (a dashboard write applies on the next dispatch). null (no org / no row /
+  // policy unset) → field omitted = no enforcement, today's behavior. An INVALID
+  // stored policy throws here, failing the dispatch loudly rather than launching
+  // with a silently-wrong policy.
+  const [baseBranch, egressPolicy] = await Promise.all([
+    resolveBaseBranch(),
+    resolveEgressPolicy({
+      db,
+      organizationId: thread?.organizationId,
+      repoFullName,
+    }).then((shape) => shape ?? undefined),
+  ]);
 
   // #3/#7 wire contract: orgId is NEVER null (a personal/no-org thread falls back
   // to a per-user key) so the Phase-2 per-org concurrency CEL never dereferences
   // null. prNumber comes from the same thread row already loaded for baseBranch.
   const orgId = thread?.organizationId ?? `u:${userId}`;
   const prNumber = thread?.githubPRNumber ?? undefined;
-
-  // #66 slice 1: resolve the per-repo egress SHAPE alongside the other per-thread
-  // resolution, LIVE from the settings row (a dashboard write applies on the next
-  // dispatch). null (no org / no row / policy unset) → field omitted = no
-  // enforcement, today's behavior. An INVALID stored policy throws here, failing
-  // the dispatch loudly rather than launching with a silently-wrong policy.
-  const egressPolicy =
-    (await resolveEgressPolicy({
-      db,
-      organizationId: thread?.organizationId,
-      repoFullName,
-    })) ?? undefined;
 
   // #7 trace join: mint a W3C traceparent at the dispatch boundary so the worker's
   // run span and the daemon-event → GitHub-post can be stitched into one trace by a

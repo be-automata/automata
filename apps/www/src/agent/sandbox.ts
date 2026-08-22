@@ -229,15 +229,17 @@ async function getOrCreateSandboxForThread({
   const generateBranchNameWithPrefix = (threadName: string | null) =>
     generateBranchName(threadName, branchPrefix);
   const sandboxSize = thread.sandboxSize ?? DEFAULT_SANDBOX_SIZE;
-  // #66 slice 1: resolve the per-repo egress SHAPE live at sandbox creation.
-  // undefined (no org / no row / policy unset) = no enforcement, today's
-  // behavior. No provider consumes it yet (PR C) — this only plumbs the shape.
-  const egressPolicy =
-    (await resolveEgressPolicy({
-      db,
-      organizationId: thread.organizationId,
-      repoFullName: thread.githubRepoFullName,
-    })) ?? undefined;
+  // #66 slice 1: resolve the per-repo egress SHAPE live at sandbox CREATION
+  // only — providers apply the policy at create time, so a resume (existing
+  // codesandboxId) would throw the result away. undefined (resume / no org /
+  // no row / policy unset) = no enforcement, today's behavior.
+  const egressPolicy = thread.codesandboxId
+    ? undefined
+    : ((await resolveEgressPolicy({
+        db,
+        organizationId: thread.organizationId,
+        repoFullName: thread.githubRepoFullName,
+      })) ?? undefined);
   const startTime = Date.now();
   const session = await getOrCreateSandboxWithTimeout(thread.codesandboxId, {
     threadName: thread.name,

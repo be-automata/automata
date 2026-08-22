@@ -30,23 +30,21 @@ export const EGRESS_PROXY_ALIAS = "automata-egress-proxy";
 /** Where the standalone proxy script is mounted inside the sidecar. */
 export const EGRESS_PROXY_SCRIPT_CONTAINER_PATH = "/automata/egress-proxy.cjs";
 
+/**
+ * Prefix of every egress internal-network name. The single source for both
+ * naming ({@link egressNetworkName}) and the provider's leaked-network sweep
+ * filter (docker-provider cleanupEgressNetworks) — never re-inline the string.
+ */
+export const EGRESS_NETWORK_PREFIX = "automata-egress-";
+
 /** Internal (`--internal`) network name for one sandbox container. */
 export function egressNetworkName(containerName: string): string {
-  return `automata-egress-${containerName}`;
+  return `${EGRESS_NETWORK_PREFIX}${containerName}`;
 }
 
 /** Sidecar container name for one sandbox container. */
 export function egressSidecarName(containerName: string): string {
   return `${containerName}-egress`;
-}
-
-/**
- * `docker network create --internal <name>` — idempotent by construction:
- * a pre-existing network of that name is fine (`|| true` would swallow real
- * errors, so the caller ignores only "already exists" instead).
- */
-export function buildEgressNetworkCreateCommand(networkName: string): string {
-  return `docker network create --internal ${networkName}`;
 }
 
 /**
@@ -83,16 +81,6 @@ export function buildEgressSidecarRunCommand({
 }
 
 /**
- * Attach the sidecar to the default bridge so it (and only it) has a route
- * out. The sandbox container stays internal-only.
- */
-export function buildEgressSidecarBridgeConnectCommand(
-  sidecarName: string,
-): string {
-  return `docker network connect bridge ${sidecarName}`;
-}
-
-/**
  * Flags spliced into the sandbox `docker run`: pin it to the internal
  * network and point every proxy-honouring client at the sidecar. NO_PROXY
  * keeps loopback traffic (daemon unix/localhost plumbing) off the proxy.
@@ -109,12 +97,4 @@ export function buildSandboxEgressRunFlags(networkName: string): string {
     `-e NO_PROXY=${bashQuote(noProxy)}`,
     `-e no_proxy=${bashQuote(noProxy)}`,
   ].join(" ");
-}
-
-/** Best-effort teardown commands for removeSandbox/shutdown. */
-export function buildEgressTeardownCommands(containerName: string): string[] {
-  return [
-    `docker rm -f ${egressSidecarName(containerName)}`,
-    `docker network rm ${egressNetworkName(containerName)}`,
-  ];
 }

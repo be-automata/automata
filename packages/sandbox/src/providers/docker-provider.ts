@@ -5,15 +5,14 @@ import {
   ISandboxSession,
 } from "../types";
 import { execSync, spawn } from "child_process";
+import { createHash } from "crypto";
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
 import { nanoid } from "nanoid/non-secure";
 import {
-  buildEgressNetworkCreateCommand,
-  buildEgressSidecarBridgeConnectCommand,
+  EGRESS_NETWORK_PREFIX,
   buildEgressSidecarRunCommand,
-  buildEgressTeardownCommands,
   buildSandboxEgressRunFlags,
   egressNetworkName,
   egressSidecarName,
@@ -33,7 +32,20 @@ class DockerSession implements ISandboxSession {
   public readonly sandboxProvider: "docker" = "docker";
   private hibernationTimeout?: NodeJS.Timeout;
 
-  constructor(private containerId: string) {}
+  /**
+   * `created` is present only on the CREATE path: the provider already knows
+   * the container name and whether egress was configured, so teardown needs
+   * no `docker inspect` and can skip egress teardown outright when no policy
+   * was set. A session rehydrated from a bare sandboxId (resume path) falls
+   * back to the inspect-based recovery in shutdown().
+   */
+  constructor(
+    private containerId: string,
+    private readonly created?: {
+      containerName: string;
+      egressConfigured: boolean;
+    },
+  ) {}
 
   get homeDir(): string {
     return HOME_DIR;
@@ -167,20 +179,28 @@ class DockerSession implements ISandboxSession {
     if (this.hibernationTimeout) {
       clearTimeout(this.hibernationTimeout);
     }
-    // Resolve the container NAME before removal so the egress sidecar +
-    // internal network (derived from the name, #66 spec §3.5) can be torn
-    // down too. Best-effort: a sandbox created without an egress policy has
-    // neither, and the teardown commands simply fail silently.
+    // The egress sidecar + internal network (derived from the container NAME,
+    // #66 spec §3.5) must go with the container. On the CREATE path the name
+    // and whether egress was configured are already known — no `docker
+    // inspect`, and no teardown execs at all when no policy was set. A
+    // rehydrated-from-sandboxId session (resume path) recovers the name via
+    // inspect and best-efforts the teardown.
     let containerName: string | null = null;
-    try {
-      containerName = execSync(
-        `docker inspect --format '{{.Name}}' ${this.containerId}`,
-        { encoding: "utf8" },
-      )
-        .trim()
-        .replace(/^\//, "");
-    } catch {
-      // Container already gone — nothing to derive teardown names from.
+    let tearDownEgress = true;
+    if (this.created) {
+      containerName = this.created.containerName;
+      tearDownEgress = this.created.egressConfigured;
+    } else {
+      try {
+        containerName = execSync(
+          `docker inspect --format '{{.Name}}' ${this.containerId}`,
+          { encoding: "utf8" },
+        )
+          .trim()
+          .replace(/^\//, "");
+      } catch {
+        // Container already gone — nothing to derive teardown names from.
+      }
     }
     try {
       execSync(`docker rm -f ${this.containerId}`, { stdio: "ignore" });
@@ -188,8 +208,11 @@ class DockerSession implements ISandboxSession {
       console.error(`Failed to remove container ${this.containerId}:`, error);
       throw error;
     }
-    if (containerName) {
-      for (const command of buildEgressTeardownCommands(containerName)) {
+    if (containerName && tearDownEgress) {
+      for (const command of [
+        `docker rm -f ${egressSidecarName(containerName)}`,
+        `docker network rm ${egressNetworkName(containerName)}`,
+      ]) {
         try {
           execSync(command, { stdio: "ignore" });
         } catch {
@@ -309,28 +332,26 @@ export class DockerProvider implements ISandboxProvider {
     // Egress enforcement (#66 spec §3.5): with a policy shape present, the
     // sandbox is pinned to an `--internal` network whose only way out is the
     // filtering proxy sidecar. Without one, the docker run below is exactly
-    // today's path.
-    let egressFlags = "";
-    if (options.egressPolicy) {
-      try {
+    // today's path. ONE try/catch spans setup + docker run: on any failure the
+    // partially-created egress resources are swept by the (idempotent,
+    // best-effort) teardown before rethrowing.
+    try {
+      let egressFlags = "";
+      if (options.egressPolicy) {
         egressFlags = await this.setUpEgressEnforcement(
           containerName,
           options.egressPolicy,
         );
-      } catch (error) {
-        console.error("Failed to set up egress enforcement:", error);
-        this.tearDownEgressEnforcement(containerName);
-        throw error;
       }
-    }
-    try {
       // Create and start container
       const createCommand = egressFlags
         ? `docker run -d --name ${containerName} ${egressFlags} ${envFlags} -w ${DEFAULT_DIR} ${BASE_IMAGE} tail -f /dev/null`
         : `docker run -d --name ${containerName} ${envFlags} -w ${DEFAULT_DIR} ${BASE_IMAGE} tail -f /dev/null`;
       const containerId = execSync(createCommand, { encoding: "utf8" }).trim();
-      const dockerSession = new DockerSession(containerId);
-      return dockerSession;
+      return new DockerSession(containerId, {
+        containerName,
+        egressConfigured: egressFlags !== "",
+      });
     } catch (error) {
       console.error("Failed to create Docker sandbox:", error);
       if (options.egressPolicy) {
@@ -356,13 +377,30 @@ export class DockerProvider implements ISandboxProvider {
     const sidecarName = egressSidecarName(containerName);
     // Materialize the standalone proxy script (generated string module — the
     // single matcher source in this package) for the read-only bind mount.
-    const scriptDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), "automata-egress-"),
+    // Content-addressed + write-once: every create with the same embedded
+    // script reuses ONE stable temp file (no per-create mkdtemp litter, no
+    // cleanup needed).
+    const scriptHash = createHash("sha256")
+      .update(EGRESS_PROXY_SCRIPT)
+      .digest("hex")
+      .slice(0, 16);
+    const scriptHostPath = path.join(
+      os.tmpdir(),
+      `automata-egress-${scriptHash}.cjs`,
     );
-    const scriptHostPath = path.join(scriptDir, "egress-proxy.cjs");
-    await fs.writeFile(scriptHostPath, EGRESS_PROXY_SCRIPT, { mode: 0o444 });
     try {
-      execSync(buildEgressNetworkCreateCommand(networkName), {
+      await fs.writeFile(scriptHostPath, EGRESS_PROXY_SCRIPT, {
+        mode: 0o444,
+        flag: "wx", // write only if missing — the content-addressed name guarantees equality
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+    }
+    try {
+      // `docker network create --internal` — the internal net has no route out.
+      execSync(`docker network create --internal ${networkName}`, {
         stdio: "ignore",
       });
     } catch (error) {
@@ -386,14 +424,18 @@ export class DockerProvider implements ISandboxProvider {
       { stdio: "ignore" },
     );
     // The sidecar (and only the sidecar) also gets a route out.
-    execSync(buildEgressSidecarBridgeConnectCommand(sidecarName), {
+    execSync(`docker network connect bridge ${sidecarName}`, {
       stdio: "ignore",
     });
     return buildSandboxEgressRunFlags(networkName);
   }
 
+  /** Best-effort, idempotent sweep of one sandbox's egress sidecar + network. */
   private tearDownEgressEnforcement(containerName: string): void {
-    for (const command of buildEgressTeardownCommands(containerName)) {
+    for (const command of [
+      `docker rm -f ${egressSidecarName(containerName)}`,
+      `docker network rm ${egressNetworkName(containerName)}`,
+    ]) {
       try {
         execSync(command, { stdio: "ignore" });
       } catch {
@@ -443,7 +485,7 @@ export class DockerProvider implements ISandboxProvider {
    */
   private static cleanupEgressNetworks(prefix: string): void {
     try {
-      const listCommand = `docker network ls --filter "name=automata-egress-${prefix}" --format "{{.Name}}"`;
+      const listCommand = `docker network ls --filter "name=${EGRESS_NETWORK_PREFIX}${prefix}" --format "{{.Name}}"`;
       const networkList = execSync(listCommand, { encoding: "utf8" }).trim();
       if (!networkList) {
         return;

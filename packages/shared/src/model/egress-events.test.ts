@@ -105,9 +105,6 @@ describe("egress-events (audit sink, org-fenced)", () => {
   });
 
   it("prune deletes only rows past the age bound (all orgs — maintenance)", async () => {
-    const now = new Date();
-    const old = new Date(now.getTime() - EGRESS_EVENTS_PRUNE_AFTER_MS - 1000);
-    const fresh = new Date(now.getTime() - 60_000);
     await insertEgressEvents({
       db,
       events: [
@@ -117,7 +114,6 @@ describe("egress-events (audit sink, org-fenced)", () => {
           destinationHost: "old.example.com",
           action: "deny",
           source: "worker",
-          createdAt: old,
         },
         {
           organizationId: orgB,
@@ -125,30 +121,23 @@ describe("egress-events (audit sink, org-fenced)", () => {
           destinationHost: "old-b.example.com",
           action: "allow",
           source: "docker",
-          createdAt: old,
-        },
-        {
-          organizationId: orgA,
-          runId,
-          destinationHost: "fresh.example.com",
-          action: "allow",
-          source: "worker",
-          createdAt: fresh,
         },
       ],
     });
-    // ≥2: rows from other tests in this suite may also be past the bound;
+    // With today's clock the just-inserted rows are inside the window — kept.
+    await pruneEgressEvents({ db });
+    expect(
+      await listEgressEvents({ db, organizationId: orgA, runId }),
+    ).toHaveLength(1);
+    // A `now` past the retention window sweeps them, across BOTH orgs.
+    // ≥2: rows from other tests in this suite may also fall past the bound;
     // ours are the only ones under THIS runId, so assert via the run listing.
-    const deleted = await pruneEgressEvents({ db, now });
+    const future = new Date(Date.now() + EGRESS_EVENTS_PRUNE_AFTER_MS + 60_000);
+    const deleted = await pruneEgressEvents({ db, now: future });
     expect(deleted).toBeGreaterThanOrEqual(2);
-    const remainingA = await listEgressEvents({
-      db,
-      organizationId: orgA,
-      runId,
-    });
-    expect(remainingA.map((r) => r.destinationHost)).toEqual([
-      "fresh.example.com",
-    ]);
+    expect(
+      await listEgressEvents({ db, organizationId: orgA, runId }),
+    ).toHaveLength(0);
     expect(
       await listEgressEvents({ db, organizationId: orgB, runId }),
     ).toHaveLength(0);

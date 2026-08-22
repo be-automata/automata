@@ -439,7 +439,7 @@ describe("startEgressProxy (real loopback servers)", () => {
     expect(events).toEqual([
       {
         destinationHost: "unparseable",
-        destinationPort: 0,
+        destinationPort: null,
         action: "deny",
         policyLevel: "domain",
       },
