@@ -11,6 +11,7 @@ import path from "path";
 import { getTemplateIdForSize } from "@terragon/sandbox-image";
 import { retryAsync } from "@terragon/utils/retry";
 import { formatError } from "@terragon/utils/error";
+import { toDaytonaNetwork, type EgressPolicyShape } from "../egress";
 
 const HOME_DIR = "root";
 const DEFAULT_DIR = `/${HOME_DIR}`;
@@ -48,8 +49,18 @@ async function resumeWithRetry(sandboxId: string): Promise<DaytonaSandbox> {
 async function createWithRetry(
   templateId: string,
   envs: Record<string, string>,
+  egressPolicy?: EgressPolicyShape,
 ): Promise<DaytonaSandbox> {
   const daytona = getDaytonaOrThrow();
+  // Egress enforcement (#66 §3.7): translate the control-plane shape into
+  // Daytona's create-time network params BEFORE any create attempt — an
+  // unrepresentable policy (level "none", non-IP entries at ip_port level,
+  // over-cap lists) must throw here, never produce a broken/unfenced sandbox.
+  // Create-time only: live network updates are tier-gated on Daytona, which is
+  // acceptable because sandboxes are created per-thread. Like E2B, Daytona
+  // enforces natively (provider-side iptables) but emits no per-connection
+  // audit feed — documented limitation (docs/egress-enforcement.md).
+  const networkParams = egressPolicy ? toDaytonaNetwork(egressPolicy) : {};
   return await retryAsync(
     async () => {
       console.log(
@@ -63,6 +74,7 @@ async function createWithRetry(
         autoStopInterval: 15, // 15 minutes
         autoArchiveInterval: 5, // 5 minutes
         autoDeleteInterval: 60 * 24 * 30, // 30 days
+        ...networkParams,
       });
       console.log(
         `[daytona] Created sandbox in ${Date.now() - startTime}ms`,
@@ -355,6 +367,7 @@ export class DaytonaProvider implements ISandboxProvider {
         size: options.sandboxSize,
       }),
       envs,
+      options.egressPolicy,
     );
     const session = new DaytonaSession(sandbox);
     await setupDaytonaOneTime(session);

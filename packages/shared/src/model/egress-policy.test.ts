@@ -122,6 +122,25 @@ describe("buildEgressPolicyShape", () => {
     ).toThrow(/Invalid egress allowlist entry/);
   });
 
+  it("canonicalizes entries control-plane-side: trim, lowercase, drop empties, dedupe", () => {
+    const shape = buildEgressPolicyShape(
+      {
+        egressPolicy: "domain",
+        egressAllowlist: [
+          "  Registry.NPMJS.org ",
+          "",
+          "   ",
+          "registry.npmjs.org",
+        ],
+      },
+      { systemHosts },
+    );
+    expect(shape).toEqual({
+      level: "domain",
+      allowlist: ["registry.npmjs.org", ...systemHosts],
+    });
+  });
+
   it("empty/null operator allowlist → system hosts only at enforcing levels", () => {
     expect(
       buildEgressPolicyShape(

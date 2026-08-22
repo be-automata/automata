@@ -21,12 +21,13 @@
     "test-sandbox-image": "SANDBOX_IMAGE_TEST=true dotenv -e .env -- vitest sandbox-image",
     "test-sandbox-provider": "dotenv -e .env -- vitest sandbox.test.ts",
     "test-sandbox-e2b": "SANDBOX_PROVIDER=e2b pnpm test-sandbox-provider",
-    "test-sandbox-daytona": "SANDBOX_PROVIDER=daytona pnpm test-sandbox-provider"
+    "test-sandbox-daytona": "SANDBOX_PROVIDER=daytona pnpm test-sandbox-provider",
+    "build-egress-proxy": "node scripts/build-egress-proxy.mjs"
   },
   "packageManager": "pnpm@10.14.0",
   "dependencies": {
-    "@daytonaio/sdk": "0.115.2",
-    "@e2b/code-interpreter": "^1.2.0-beta.4",
+    "@daytonaio/sdk": "0.205.1",
+    "@e2b/code-interpreter": "^2.7.1",
     "@iarna/toml": "^3.0.0",
     "@terragon/agent": "workspace:*",
     "@terragon/bundled": "workspace:*",

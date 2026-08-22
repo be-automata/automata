@@ -38,7 +38,6 @@ export async function insertEgressEvents({
     action: "allow" | "deny";
     policyLevel?: string | null;
     source?: string | null;
-    createdAt?: Date;
   }>;
 }): Promise<void> {
   if (events.length === 0) return;
@@ -52,7 +51,6 @@ export async function insertEgressEvents({
       action: e.action,
       policyLevel: e.policyLevel ?? null,
       source: e.source ?? null,
-      ...(e.createdAt ? { createdAt: e.createdAt } : {}),
     })),
   );
 }

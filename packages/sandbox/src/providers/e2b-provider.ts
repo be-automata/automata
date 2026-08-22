@@ -7,6 +7,7 @@ import {
 import { getTemplateIdForSize } from "@terragon/sandbox-image";
 import { Sandbox } from "@e2b/code-interpreter";
 import { retryAsync } from "@terragon/utils/retry";
+import { toE2bNetwork, type EgressPolicyShape } from "../egress";
 
 const HOME_DIR = "root";
 const REPO_DIR = "repo";
@@ -17,9 +18,10 @@ async function resumeWithRetry(sandboxId: string): Promise<ISandboxSession> {
   return await retryAsync(
     async () => {
       console.log(`[e2b] Resuming sandbox ${sandboxId}...`);
-      const sandbox = await Sandbox.resume(sandboxId, {
-        // @ts-expect-error - autoPause is not public
-        autoPause: true,
+      // e2b v2: `connect` auto-resumes a paused sandbox (`Sandbox.resume` is
+      // gone). Pause-on-timeout is a persistent sandbox `lifecycle` property
+      // set at create time, so nothing to re-assert here.
+      const sandbox = await Sandbox.connect(sandboxId, {
         timeoutMs: SLEEP_MS,
       });
       console.log(
@@ -42,15 +44,24 @@ async function resumeWithRetry(sandboxId: string): Promise<ISandboxSession> {
 async function createWithRetry(
   templateId: string,
   envs: Record<string, string>,
+  egressPolicy?: EgressPolicyShape,
 ): Promise<Sandbox> {
   return await retryAsync(
     async () => {
       console.log(`[e2b] Creating sandbox with templateId: ${templateId}...`);
       const startTime = Date.now();
       const sandbox = await Sandbox.create(templateId, {
-        // @ts-expect-error - autoPause is not public
-        autoPause: true,
+        // e2b v2: `lifecycle.onTimeout: "pause"` is the stable replacement for
+        // the old patched `autoPause: true` (patches/e2b.patch is gone).
+        lifecycle: { onTimeout: "pause" },
         timeoutMs: SLEEP_MS,
+        // Egress enforcement (#66 §3.6): when the control plane shipped a
+        // policy SHAPE, translate it to E2B's native firewall — deny-all plus
+        // the resolved allowlist. Enforced below the process (env-unset cannot
+        // bypass it), but E2B emits no per-connection audit feed: enforcement
+        // without per-connection audit rows is a documented limitation
+        // (docs/egress-enforcement.md). Absent policy = no network opts at all.
+        ...(egressPolicy ? { network: toE2bNetwork(egressPolicy) } : {}),
         envs: {
           ...envs,
           // Uncomment this to debug git issues.
@@ -214,7 +225,11 @@ export class E2BProvider implements ISandboxProvider {
       provider: "e2b",
       size: options.sandboxSize,
     });
-    const sandbox = await createWithRetry(templateId, envs);
+    const sandbox = await createWithRetry(
+      templateId,
+      envs,
+      options.egressPolicy,
+    );
     const e2bSession = new E2BSession(sandbox);
     return e2bSession;
   }

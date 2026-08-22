@@ -168,9 +168,9 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
     add(event) {
       buffer.push({
         destinationHost: event.destinationHost,
-        // Port 0 is the proxy's "unknown" sentinel (unparseable target); the
-        // route requires ≥1, so unknown travels as absent.
-        ...(event.destinationPort > 0
+        // null = port unknown (unparseable target); the route's schema takes
+        // optional (not nullable), so unknown travels as absent.
+        ...(event.destinationPort !== null
           ? { destinationPort: event.destinationPort }
           : {}),
         action: event.action,

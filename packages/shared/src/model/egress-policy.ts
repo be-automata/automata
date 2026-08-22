@@ -83,19 +83,37 @@ function assertValidEntry(level: EgressPolicyLevel, entry: string): void {
 }
 
 /**
+ * Canonicalize allowlist entries: trim, lowercase, drop empties, dedupe
+ * (order-stable). Applied ONCE control-plane-side so the shape's allowlist is
+ * truly final; plane-side normalization stays as belt-and-suspenders.
+ */
+function canonicalizeEntries(entries: string[]): string[] {
+  const out: string[] = [];
+  for (const raw of entries) {
+    const entry = raw.trim().toLowerCase();
+    if (entry.length > 0 && !out.includes(entry)) {
+      out.push(entry);
+    }
+  }
+  return out;
+}
+
+/**
  * Build the final `EgressPolicyShape` for one run from the stored row fields
  * plus the system hosts every run must reach (callback host, github.com until
- * #81 removes direct git, api.anthropic.com). Pure: no DB, no env — the
- * apps/www resolver supplies both inputs.
+ * #81 removes direct git, api.github.com, api.anthropic.com). Pure: no DB, no
+ * env — the apps/www resolver supplies both inputs.
  *
  * - `row.egressPolicy` null/undefined → null (no enforcement; today's behavior).
  * - Unknown level or an invalid allowlist entry → throw (fail loud at resolve
  *   time, never a silently-wrong policy on the wire).
  * - Level 'none' → allowlist is the system hosts ONLY (operator entries ignored).
- * - Otherwise merge operator entries + system hosts, deduped, order-stable
- *   (operator entries first). System hosts are hostnames even under `ip_port`
- *   — see the CONTRACT NOTE on `EgressPolicyShape`: enforcers must
- *   resolve-then-match hostname entries, never drop them.
+ * - Otherwise merge operator entries + system hosts, canonicalized (trimmed,
+ *   lowercased, empties dropped) + deduped, order-stable (operator entries
+ *   first). The result is FINAL — planes may re-normalize but never need to.
+ *   System hosts are hostnames even under `ip_port` — see the CONTRACT NOTE
+ *   on `EgressPolicyShape`: enforcers must resolve-then-match hostname
+ *   entries, never drop them.
  */
 export function buildEgressPolicyShape(
   row: { egressPolicy: string | null; egressAllowlist: string[] | null },
@@ -111,11 +129,14 @@ export function buildEgressPolicyShape(
     );
   }
   if (level === "none") {
-    return { level, allowlist: [...new Set(systemHosts)] };
+    return { level, allowlist: canonicalizeEntries(systemHosts) };
   }
-  const userEntries = row.egressAllowlist ?? [];
+  const userEntries = canonicalizeEntries(row.egressAllowlist ?? []);
   for (const entry of userEntries) {
     assertValidEntry(level, entry);
   }
-  return { level, allowlist: [...new Set([...userEntries, ...systemHosts])] };
+  return {
+    level,
+    allowlist: canonicalizeEntries([...userEntries, ...systemHosts]),
+  };
 }

@@ -85,6 +85,25 @@ export async function runStalledTasksCron(): Promise<void> {
     console.error("[cron:stalled] hatchet_run prune failed (non-fatal)", error);
   }
 
+  // Bound egress_event growth (#66 audit exhaust): same hourly age-based prune
+  // pattern as hatchet_run above — nothing ever marks audit rows consumed, so
+  // age is the only growth bound. Fail-soft — a prune error must not skip
+  // stalled recovery.
+  try {
+    const { pruneEgressEvents } = await import(
+      "@terragon/shared/model/egress-events"
+    );
+    const pruned = await pruneEgressEvents({ db });
+    if (pruned > 0) {
+      console.log(`[cron:stalled] pruned ${pruned} aged egress_event rows`);
+    }
+  } catch (error) {
+    console.error(
+      "[cron:stalled] egress_event prune failed (non-fatal)",
+      error,
+    );
+  }
+
   const stalledThreads = await getStalledThreads({
     db,
     cutoffSecs: STALLED_CUTOFF_SECS,

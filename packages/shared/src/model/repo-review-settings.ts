@@ -2,6 +2,7 @@ import { DB } from "../db";
 import { repoReviewSettings } from "../db/schema";
 import { RepoReviewSetting } from "../db/types";
 import { and, eq } from "drizzle-orm";
+import { buildEgressPolicyShape } from "./egress-policy";
 
 /**
  * Per-repository REQUESTED_CHANGES severity tolerance (ADR-036 review floor),
@@ -86,6 +87,30 @@ export async function upsertRepoReviewSetting({
   updatedByUserId?: string | null;
 }): Promise<RepoReviewSetting> {
   const repo = normalizeRepo(repoFullName);
+
+  // #66: validate egress fields at the WRITE boundary by reusing the pure shape
+  // builder (empty system hosts) — an invalid level or allowlist entry throws
+  // here instead of landing in the table. A partial egress patch pairs with the
+  // stored other half so entries are always checked against the effective
+  // level. Dispatch-time validation (resolveEgressPolicy) stays as backstop.
+  if (patch.egressPolicy !== undefined || patch.egressAllowlist !== undefined) {
+    let level = patch.egressPolicy;
+    let allowlist = patch.egressAllowlist;
+    if (level === undefined || allowlist === undefined) {
+      const existing = await getRepoReviewSetting({
+        db,
+        organizationId,
+        repoFullName,
+      });
+      if (level === undefined) level = existing?.egressPolicy ?? null;
+      if (allowlist === undefined)
+        allowlist = existing?.egressAllowlist ?? null;
+    }
+    buildEgressPolicyShape(
+      { egressPolicy: level, egressAllowlist: allowlist },
+      { systemHosts: [] },
+    );
+  }
   const set: {
     blockTolerance?: string;
     reviewDraftPrs?: boolean;

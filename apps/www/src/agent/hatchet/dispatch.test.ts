@@ -155,8 +155,8 @@ describe("dispatchAgentRun", () => {
 
     const input = JSON.parse(fetchMock.mock.calls[0]![1].body).input;
     // The FINAL shape: operator entries + system hosts (callback, github.com,
-    // api.anthropic.com) merged control-plane-side — the worker receives level
-    // + allowlist only, never table/model provenance.
+    // api.github.com, api.anthropic.com) merged control-plane-side — the worker
+    // receives level + allowlist only, never table/model provenance.
     const callbackHost = new URL(process.env.NEXT_PUBLIC_APP_URL!).host;
     expect(input.egressPolicy).toEqual({
       level: "domain",
@@ -164,6 +164,7 @@ describe("dispatchAgentRun", () => {
         "registry.npmjs.org",
         callbackHost,
         "github.com",
+        "api.github.com",
         "api.anthropic.com",
       ],
     });

@@ -477,4 +477,10 @@ code in this repo.** macOS PF needs root and is host-global; the unprivileged
 worker cannot load it per run. Until the anchor is loaded, the env-unset bypass
 exists on the worker plane; with it loaded, direct web egress from the agent
 uid is blocked at the packet level and only the audited loopback proxy path
-remains. Docker/E2B/Daytona plane enforcement is slice 3.
+remains.
+
+**Provider planes (slice 3):** Docker (internal network + proxy sidecar), E2B
+(native firewall, SDK v2) and Daytona (create-time allowlists) enforce the same
+shape — ops gates (E2B template rebuild with envd ≥ 0.2.0 before deploy;
+Daytona org-tier verification) and audit limitations are documented in
+`docs/egress-enforcement.md`.

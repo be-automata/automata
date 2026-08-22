@@ -12,8 +12,8 @@ export async function GET(request: NextRequest) {
   });
 
   let sandbox = await Sandbox.create(templateId, {
-    // @ts-expect-error - autoPause is not public
-    autoPause: true,
+    // e2b v2: lifecycle.onTimeout replaces the old patched autoPause option.
+    lifecycle: { onTimeout: "pause" },
     timeoutMs: 30 * 1000,
   });
 
@@ -23,9 +23,8 @@ export async function GET(request: NextRequest) {
 
   await new Promise((resolve) => setTimeout(resolve, 60 * 1000));
 
-  sandbox = await Sandbox.resume(id, {
-    // @ts-expect-error - autoPause is not public
-    autoPause: true,
+  // e2b v2: `connect` auto-resumes a paused sandbox (`Sandbox.resume` is gone).
+  sandbox = await Sandbox.connect(id, {
     timeoutMs: 30 * 1000,
   });
 

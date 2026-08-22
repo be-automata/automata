@@ -56,9 +56,10 @@ async function resumeSandboxSession({
       if (!options.e2bApiKey) {
         throw new Error("E2B_API_KEY is not set");
       }
-      const e2bSandbox = await E2bSandbox.resume(sandboxId, {
-        // @ts-expect-error - autoPause is not public
-        autoPause: true,
+      // e2b v2: `connect` auto-resumes a paused sandbox; the pause-on-timeout
+      // behavior is a sandbox `lifecycle` property set at create time (see
+      // packages/sandbox e2b-provider), so nothing to re-assert here.
+      const e2bSandbox = await E2bSandbox.connect(sandboxId, {
         timeoutMs: SLEEP_MS,
         apiKey: options.e2bApiKey,
       });

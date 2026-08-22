@@ -280,6 +280,52 @@ describe("repo-review-settings egress columns (#66 slice 1)", () => {
     expect(list[0]!.egressPolicy).toBe("domain");
   });
 
+  it("rejects an invalid egress level at the write boundary", async () => {
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+        patch: { egressPolicy: "everything" },
+      }),
+    ).rejects.toThrow(/Invalid egress policy level "everything"/);
+    // Nothing landed in the table.
+    expect(
+      await getRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("rejects an invalid allowlist entry at the write boundary", async () => {
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+        patch: { egressPolicy: "domain", egressAllowlist: ["not a host"] },
+      }),
+    ).rejects.toThrow(/Invalid egress allowlist entry "not a host"/);
+
+    // An allowlist-only patch is validated against the STORED level too.
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { egressPolicy: "ip_port", egressAllowlist: ["10.0.0.5"] },
+    });
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+        patch: { egressAllowlist: ["evil.example.com"] },
+      }),
+    ).rejects.toThrow(/expected an IP or IP:port/);
+  });
+
   it("egress patch preserves other fields; other-field patch preserves egress; null clears", async () => {
     await setRepoReviewSetting({
       db,
