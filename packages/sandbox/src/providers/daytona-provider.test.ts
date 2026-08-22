@@ -62,24 +62,21 @@ describe("DaytonaProvider egress creation options", () => {
     vi.unstubAllEnvs();
   });
 
-  it("passes networkAllowList CIDRs for an ip_port policy", async () => {
+  it("rejects an ip_port-level policy BEFORE creating any sandbox (CIDR list cannot carry system hostnames)", async () => {
     const provider = new DaytonaProvider();
-    await provider.getOrCreateSandbox(
-      null,
-      createOptions({
-        egressPolicy: {
-          level: "ip_port",
-          allowlist: ["10.0.0.1", "10.0.0.2:8080", "10.1.0.0/16"],
-        },
-      }),
-    );
-    expect(createMock).toHaveBeenCalledTimes(1);
-    const params = createMock.mock.calls[0]![0] as Record<string, unknown>;
-    expect(params.snapshot).toBe("snapshot-small");
-    // Bare IPv4 → /32; IP:port loses the port (Daytona CIDR list is port-less).
-    expect(params.networkAllowList).toBe("10.0.0.1/32,10.0.0.2/32,10.1.0.0/16");
-    expect(params.domainAllowList).toBeUndefined();
-    expect(params.networkBlockAll).toBeUndefined();
+    await expect(
+      provider.getOrCreateSandbox(
+        null,
+        createOptions({
+          egressPolicy: {
+            level: "ip_port",
+            // Real dispatch always merges hostname system entries in.
+            allowlist: ["10.0.0.1", "10.0.0.2:8080", "callback.example.com"],
+          },
+        }),
+      ),
+    ).rejects.toThrow(/"ip_port" is unsupported on the daytona provider/);
+    expect(createMock).not.toHaveBeenCalled();
   });
 
   it("passes domainAllowList for a domain policy", async () => {

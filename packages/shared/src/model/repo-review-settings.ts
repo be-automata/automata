@@ -103,7 +103,8 @@ export async function upsertRepoReviewSetting({
         repoFullName,
       });
       if (level === undefined) level = existing?.egressPolicy ?? null;
-      if (allowlist === undefined) allowlist = existing?.egressAllowlist ?? null;
+      if (allowlist === undefined)
+        allowlist = existing?.egressAllowlist ?? null;
     }
     buildEgressPolicyShape(
       { egressPolicy: level, egressAllowlist: allowlist },

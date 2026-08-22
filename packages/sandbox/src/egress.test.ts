@@ -3,7 +3,6 @@ import {
   toE2bNetwork,
   toDaytonaNetwork,
   DAYTONA_MAX_DOMAIN_ALLOWLIST,
-  DAYTONA_MAX_NETWORK_ALLOWLIST,
   type EgressPolicyShape,
 } from "./egress";
 
@@ -78,38 +77,14 @@ describe("toE2bNetwork", () => {
 
 describe("toDaytonaNetwork", () => {
   describe("ip_port level", () => {
-    it("converts a bare IPv4 to /32", () => {
-      expect(toDaytonaNetwork(policy("ip_port", ["10.0.0.1"]))).toEqual({
-        networkAllowList: "10.0.0.1/32",
-      });
-    });
-
-    it("drops the port from IP:port entries (CIDR list is port-less)", () => {
-      expect(toDaytonaNetwork(policy("ip_port", ["10.0.0.1:8080"]))).toEqual({
-        networkAllowList: "10.0.0.1/32",
-      });
-    });
-
-    it("passes CIDRs through and joins with commas", () => {
-      expect(
-        toDaytonaNetwork(policy("ip_port", ["10.0.0.0/24", "192.168.1.5"])),
-      ).toEqual({
-        networkAllowList: "10.0.0.0/24,192.168.1.5/32",
-      });
-    });
-
-    it("dedupes entries that collapse to the same CIDR", () => {
-      expect(
-        toDaytonaNetwork(policy("ip_port", ["10.0.0.1", "10.0.0.1:443"])),
-      ).toEqual({ networkAllowList: "10.0.0.1/32" });
-    });
-
-    it("routes hostname-shaped (system) entries to domainAllowList — never drops or rejects them (CONTRACT NOTE)", () => {
+    it("throws — networkAllowList (CIDR-only) is mutually exclusive with domainAllowList, so the hostname system entries cannot be expressed", () => {
       // buildEgressPolicyShape merges hostname system entries (callback host,
       // github.com, api.github.com, api.anthropic.com) into the FINAL
-      // allowlist at EVERY level, including ip_port. This is the exact shape
-      // real dispatch hands the mapper: it must create, not throw.
-      expect(
+      // allowlist at EVERY level, including ip_port — the shape's CONTRACT
+      // NOTE forbids dropping them, and Daytona's CIDR list cannot carry
+      // them (nor can it coexist with domainAllowList at creation). The
+      // mapper must refuse loudly at create time, exactly like "none".
+      expect(() =>
         toDaytonaNetwork(
           policy("ip_port", [
             "10.0.0.1:8080",
@@ -119,51 +94,13 @@ describe("toDaytonaNetwork", () => {
             "api.anthropic.com",
           ]),
         ),
-      ).toEqual({
-        networkAllowList: "10.0.0.1/32",
-        domainAllowList:
-          "callback.example.com,github.com,api.github.com,api.anthropic.com",
-      });
+      ).toThrow(/"ip_port" is unsupported on the daytona provider/);
     });
 
-    it("a non-IPv4 look-alike (out-of-range octet) falls to domainAllowList — fail-closed, never widened", () => {
-      // Operator entries are constrained to IP[:port] at the write boundary,
-      // so this can't come from an operator; as a "domain" it matches nothing.
-      expect(toDaytonaNetwork(policy("ip_port", ["999.0.0.1"]))).toEqual({
-        networkAllowList: "",
-        domainAllowList: "999.0.0.1",
-      });
-    });
-
-    it(`rejects more than ${DAYTONA_MAX_DOMAIN_ALLOWLIST} hostname entries at ip_port level instead of truncating`, () => {
-      const entries = Array.from(
-        { length: DAYTONA_MAX_DOMAIN_ALLOWLIST + 1 },
-        (_, i) => `host${i}.example.com`,
-      );
-      expect(() => toDaytonaNetwork(policy("ip_port", entries))).toThrow(
-        /refusing to truncate/,
-      );
-    });
-
-    it(`rejects more than ${DAYTONA_MAX_NETWORK_ALLOWLIST} CIDRs instead of truncating`, () => {
-      const entries = Array.from(
-        { length: DAYTONA_MAX_NETWORK_ALLOWLIST + 1 },
-        (_, i) => `10.0.0.${i}`,
-      );
-      expect(() => toDaytonaNetwork(policy("ip_port", entries))).toThrow(
-        /refusing to truncate/,
-      );
-    });
-
-    it(`accepts exactly ${DAYTONA_MAX_NETWORK_ALLOWLIST} CIDRs`, () => {
-      const entries = Array.from(
-        { length: DAYTONA_MAX_NETWORK_ALLOWLIST },
-        (_, i) => `10.0.0.${i}`,
-      );
-      const result = toDaytonaNetwork(policy("ip_port", entries));
-      expect(result.networkAllowList!.split(",")).toHaveLength(
-        DAYTONA_MAX_NETWORK_ALLOWLIST,
-      );
+    it("throws even for a pure-IP allowlist — the system hostnames are always merged in by real dispatch", () => {
+      expect(() =>
+        toDaytonaNetwork(policy("ip_port", ["10.0.0.1", "10.0.0.0/24"])),
+      ).toThrow(/use "domain" level/);
     });
   });
 

@@ -16,7 +16,9 @@
  *   port pin is lost at this plane (the worker-plane proxy still honours it).
  * - Daytona (`networkAllowList`): comma-separated CIDRs only — port-less and
  *   domain-less. (`domainAllowList`, 0.190+): comma-separated domains with
- *   `*.` wildcards, max 20 entries.
+ *   `*.` wildcards, max 20 entries. The two (and `networkBlockAll`) are
+ *   MUTUALLY EXCLUSIVE at creation — so only `domain` level is mappable
+ *   (system entries are hostnames at every level).
  * - Docker: no native primitive — enforced by the sidecar proxy instead
  *   (providers/docker-egress.ts + egress-proxy-standalone.cjs), which reuses
  *   the worker proxy's full matching semantics including port pins.
@@ -35,31 +37,24 @@ export type E2bNetworkOptions = {
   allowOut: string[];
 };
 
-/** Daytona `daytona.create` param subset produced by {@link toDaytonaNetwork}. */
+/**
+ * Daytona `daytona.create` param subset produced by {@link toDaytonaNetwork}.
+ * Only `domainAllowList` is ever produced: Daytona's three network params
+ * (`networkBlockAll` / `networkAllowList` / `domainAllowList`) are mutually
+ * exclusive at creation, and only the domain list can carry the hostname
+ * system entries every policy level requires (see {@link toDaytonaNetwork}).
+ */
 export type DaytonaNetworkOptions = {
-  networkBlockAll?: boolean;
-  networkAllowList?: string;
   domainAllowList?: string;
 };
 
 /** Daytona's documented cap on `domainAllowList` entries. */
 export const DAYTONA_MAX_DOMAIN_ALLOWLIST = 20;
-/** Daytona's documented cap on `networkAllowList` CIDRs (spec §3.7). */
-export const DAYTONA_MAX_NETWORK_ALLOWLIST = 5;
 
 /** `host:port` splitter — digits-only port suffix, so domains and IPv4 are safe. */
 const HOST_PORT_RE = /^(.+):(\d{1,5})$/;
 
-const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 const IPV4_CIDR_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/;
-
-function isIpv4(host: string): boolean {
-  const m = IPV4_RE.exec(host);
-  if (!m) {
-    return false;
-  }
-  return m.slice(1).every((octet) => Number(octet) <= 255);
-}
 
 function isIpv4Cidr(entry: string): boolean {
   const m = IPV4_CIDR_RE.exec(entry);
@@ -121,17 +116,17 @@ export function toE2bNetwork(policy: EgressPolicyShape): E2bNetworkOptions {
 /**
  * Translate the shape into Daytona create-time network params (spec §3.7).
  *
- * - `ip_port` → `networkAllowList` (comma-separated CIDRs). A bare IPv4
- *   becomes a `/32`; an `IP:port` entry loses its port (Daytona's CIDR list
- *   is port-less — documented limitation); a CIDR passes through. Hostname-
- *   shaped entries are the SYSTEM entries (callback host, github.com, …) the
- *   control plane merges in at EVERY level — the shape's CONTRACT NOTE says
- *   enforcers must match them by SNI/Host, never drop them — so they route to
- *   `domainAllowList` (Daytona's Host/SNI matcher). Operator entries are
- *   already constrained to IP[:port] at the write/resolve boundary. Max 5
- *   CIDRs / 20 domains — more is an error, never a silent truncation.
  * - `domain` → `domainAllowList` (comma-separated, `*.` wildcards allowed,
  *   max 20 entries — more is an error). Port pins are dropped (port-less).
+ * - `ip_port` → ERROR: Daytona's `networkAllowList` (CIDR-only) and
+ *   `domainAllowList` are MUTUALLY EXCLUSIVE at creation (provider spike on
+ *   #66), so a CIDR list cannot also carry the hostname SYSTEM entries
+ *   (callback host, github.com, api.github.com, api.anthropic.com) the
+ *   control plane merges in at every level. Dropping them would sever the
+ *   daemon callback and violate the shape's CONTRACT NOTE ("never drop");
+ *   DNS-resolving them to CIDRs control-plane-side is unacceptable (GitHub/
+ *   Anthropic IPs rotate — a stale IP bricks runs silently). Daytona is
+ *   `domain`-level only in v1.
  * - `none` → ERROR: `networkBlockAll` alone would sever the daemon callback
  *   (violating the callback exception, AC4) — we throw rather than create a
  *   sandbox whose daemon can never phone home.
@@ -147,40 +142,13 @@ export function toDaytonaNetwork(
       );
     }
     case "ip_port": {
-      const cidrs: string[] = [];
-      const domains: string[] = [];
-      for (const entry of entries) {
-        const { host } = splitHostPort(entry);
-        if (isIpv4Cidr(host)) {
-          if (!cidrs.includes(host)) {
-            cidrs.push(host);
-          }
-        } else if (isIpv4(host)) {
-          const cidr = `${host}/32`;
-          if (!cidrs.includes(cidr)) {
-            cidrs.push(cidr);
-          }
-        } else if (!domains.includes(host)) {
-          // Hostname-shaped ⇒ a system entry (operator entries are IP[:port]
-          // by write-boundary validation). CONTRACT NOTE: never drop these —
-          // Daytona's domainAllowList (Host/SNI match) carries them.
-          domains.push(host);
-        }
-      }
-      if (cidrs.length > DAYTONA_MAX_NETWORK_ALLOWLIST) {
-        throw new Error(
-          `egress allowlist has ${cidrs.length} CIDRs but daytona networkAllowList supports at most ${DAYTONA_MAX_NETWORK_ALLOWLIST}; refusing to truncate`,
-        );
-      }
-      if (domains.length > DAYTONA_MAX_DOMAIN_ALLOWLIST) {
-        throw new Error(
-          `egress allowlist has ${domains.length} domains but daytona domainAllowList supports at most ${DAYTONA_MAX_DOMAIN_ALLOWLIST}; refusing to truncate`,
-        );
-      }
-      return {
-        networkAllowList: cidrs.join(","),
-        ...(domains.length > 0 ? { domainAllowList: domains.join(",") } : {}),
-      };
+      // networkAllowList (CIDR-only) and domainAllowList are mutually
+      // exclusive at creation (provider spike on #66) — a CIDR list cannot
+      // carry the hostname system entries, and dropping or pre-resolving
+      // them is forbidden (CONTRACT NOTE / rotating IPs). Fail loudly.
+      throw new Error(
+        'egress policy level "ip_port" is unsupported on the daytona provider: networkAllowList (CIDR-only) is mutually exclusive with domainAllowList, so the required system hostnames (daemon callback, github.com, api.anthropic.com) cannot be expressed (#66 spec §3.7); use "domain" level',
+      );
     }
     case "domain": {
       const domains: string[] = [];

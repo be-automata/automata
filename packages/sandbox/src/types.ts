@@ -61,7 +61,8 @@ export type CreateSandboxOptions = {
    * Absent = no enforcement (today's behavior). Enforced per provider:
    * Docker = internal network + filtering proxy sidecar (docker-egress.ts),
    * E2B = native firewall (network.allowOut/denyOut), Daytona = create-time
-   * networkAllowList/domainAllowList. See src/egress.ts for the mappings and
+   * domainAllowList (`domain` level only — `ip_port`/`none` are create-time
+   * errors there). See src/egress.ts for the mappings and
    * docs/egress-enforcement.md for ops caveats.
    */
   egressPolicy?: EgressPolicyShape;

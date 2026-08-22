@@ -72,15 +72,18 @@ env-unset. Caveats:
 
 `daytona.create` receives (mapper: `toDaytonaNetwork`):
 
-- `ip_port` → `networkAllowList` (comma-separated CIDRs; bare IPv4 becomes
-  `/32`; `IP:port` loses the port — the CIDR list is port-less; max 5, more
-  is an error, never truncation). Hostname-shaped entries — always the SYSTEM
-  entries the control plane merges in at every level (callback host,
-  github.com, api.github.com, api.anthropic.com; operator entries are
-  IP[:port]-validated at the write boundary) — route to `domainAllowList`
-  per the shape's CONTRACT NOTE (match by Host/SNI, never drop), max 20,
 - `domain` → `domainAllowList` (comma-separated, `*.` wildcards, max 20 —
   more is an error),
+- `ip_port` → **create-time error**: Daytona's `networkAllowList`
+  (CIDR-only) and `domainAllowList` are **mutually exclusive at creation**
+  (provider spike on #66), so a CIDR list cannot also carry the hostname
+  system entries (daemon callback, github.com, api.github.com,
+  api.anthropic.com) the control plane merges in at every level. Dropping
+  them would sever the daemon callback and violate the shape's CONTRACT
+  NOTE ("never drop"); resolving them to IPs control-plane-side is not
+  acceptable either — GitHub/Anthropic IPs rotate, and a stale pin bricks
+  runs silently. **Daytona supports `domain` level only in v1**; repos
+  needing `ip_port` must use another provider.
 - `none` → **create-time error**: `networkBlockAll` alone would sever the
   daemon callback; we refuse to create a broken sandbox. Repos that need
   `none` cannot run on Daytona until Daytona grows CIDR-exceptioned
@@ -90,7 +93,7 @@ Caveats:
 
 - **OPS GATE — org tier:** Daytona organizations at tier 1/2 cannot override
   network settings; the create params are rejected or ignored. Verify on the
-  real org (create a sandbox with `networkAllowList` set and probe it) BEFORE
+  real org (create a sandbox with `domainAllowList` set and probe it) BEFORE
   enabling egress policies on Daytona-provider repos.
 - Create-time only: live network updates are tier-gated; acceptable since
   sandboxes are created per-thread.
