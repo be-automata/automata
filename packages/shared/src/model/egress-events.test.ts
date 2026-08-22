@@ -75,7 +75,9 @@ describe("egress-events (audit sink, org-fenced)", () => {
   });
 
   it("empty batch is a no-op", async () => {
-    await expect(insertEgressEvents({ db, events: [] })).resolves.toBeUndefined();
+    await expect(
+      insertEgressEvents({ db, events: [] }),
+    ).resolves.toBeUndefined();
   });
 
   it("org fence: one org can never read another's audit rows", async () => {
@@ -91,13 +93,15 @@ describe("egress-events (audit sink, org-fenced)", () => {
         },
       ],
     });
-    expect(await listEgressEvents({ db, organizationId: orgB })).toHaveLength(0);
+    expect(await listEgressEvents({ db, organizationId: orgB })).toHaveLength(
+      0,
+    );
     expect(
       await listEgressEvents({ db, organizationId: orgB, runId }),
     ).toHaveLength(0);
-    expect(await listEgressEvents({ db, organizationId: orgA, runId })).toHaveLength(
-      1,
-    );
+    expect(
+      await listEgressEvents({ db, organizationId: orgA, runId }),
+    ).toHaveLength(1);
   });
 
   it("prune deletes only rows past the age bound (all orgs — maintenance)", async () => {
@@ -137,7 +141,11 @@ describe("egress-events (audit sink, org-fenced)", () => {
     // ours are the only ones under THIS runId, so assert via the run listing.
     const deleted = await pruneEgressEvents({ db, now });
     expect(deleted).toBeGreaterThanOrEqual(2);
-    const remainingA = await listEgressEvents({ db, organizationId: orgA, runId });
+    const remainingA = await listEgressEvents({
+      db,
+      organizationId: orgA,
+      runId,
+    });
     expect(remainingA.map((r) => r.destinationHost)).toEqual([
       "fresh.example.com",
     ]);

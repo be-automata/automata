@@ -7,6 +7,15 @@ import type { EgressPolicyLevel } from "../db/types";
  * from — the composability invariant. The allowlist is FINAL: fully resolved
  * control-plane-side, system entries already merged in. Loopback is implicitly
  * allowed by every enforcer (broker + proxy live there) — not part of the shape.
+ *
+ * CONTRACT NOTE for enforcers (slices 2/3): system entries are always
+ * hostnames (callback host, github.com, api.anthropic.com) and are merged in
+ * at EVERY level, including `ip_port`. An IP/port-level enforcer MUST treat
+ * hostname-shaped allowlist entries as resolve-then-match (or match by
+ * SNI/Host) — it must NOT drop them as non-IP noise, or the callback/GitHub/
+ * Anthropic reachability guarantee silently breaks under strict `ip_port`
+ * policy. Only OPERATOR entries are constrained to bare IP[:port] at that
+ * level.
  */
 export type EgressPolicyShape = {
   level: EgressPolicyLevel;
@@ -16,14 +25,13 @@ export type EgressPolicyShape = {
 
 export const EGRESS_POLICY_LEVELS = ["none", "ip_port", "domain"] as const;
 
-export function isEgressPolicyLevel(
-  value: string,
-): value is EgressPolicyLevel {
+export function isEgressPolicyLevel(value: string): value is EgressPolicyLevel {
   return (EGRESS_POLICY_LEVELS as readonly string[]).includes(value);
 }
 
 const PORT_RE = /^[0-9]{1,5}$/;
-const IPV4_RE = /^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$/;
+const IPV4_RE =
+  /^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$/;
 // RFC-1035-ish label: alnum, hyphens inside, 1-63 chars; at least two labels.
 const DOMAIN_RE =
   /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/i;
@@ -85,7 +93,9 @@ function assertValidEntry(level: EgressPolicyLevel, entry: string): void {
  *   time, never a silently-wrong policy on the wire).
  * - Level 'none' → allowlist is the system hosts ONLY (operator entries ignored).
  * - Otherwise merge operator entries + system hosts, deduped, order-stable
- *   (operator entries first).
+ *   (operator entries first). System hosts are hostnames even under `ip_port`
+ *   — see the CONTRACT NOTE on `EgressPolicyShape`: enforcers must
+ *   resolve-then-match hostname entries, never drop them.
  */
 export function buildEgressPolicyShape(
   row: { egressPolicy: string | null; egressAllowlist: string[] | null },
