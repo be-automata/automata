@@ -440,3 +440,40 @@ rm -rf "$H"
 A working token reaches `"type":"result"` with `"is_error":false`. `401 OAuth access
 token is invalid` means the token is dead — the channel itself is fine, since a 401
 proves the file was read.
+
+## Egress enforcement backstop (#66 slice 2 — worker plane)
+
+When a repo has an egress policy set (`repoReviewSettings.egress_policy`), the
+control plane resolves it into a shape (level + final allowlist) and the worker
+starts a **per-run loopback filtering forward proxy**
+(`packages/worker/src/agent-run/egress-proxy.ts`). The agent child gets
+`HTTPS_PROXY`/`HTTP_PROXY` (both cases) pointed at it and
+`NO_PROXY=127.0.0.1,localhost`. The proxy allows/denies each `CONNECT` and
+absolute-form HTTP request against the allowlist (wildcard domains, port
+pinning, exact IP:port — level-dependent), fails closed on unparseable targets,
+and posts **every** decision (allow and deny) to
+`POST /api/daemon/egress-event` for the `egress_events` audit trail. No policy
+on the repo ⇒ no proxy, no env vars, no behavior change.
+
+**The honest limitation: env-var proxying is cooperative.** A prompt-injected
+agent that runs `unset HTTPS_PROXY` (or uses a client that ignores proxy vars)
+bypasses the proxy entirely. The backstop is the PF anchor template at
+`deploy/egress-pf.conf`: default-deny direct outbound 80/443 for the agent uid,
+loopback excepted (so proxied traffic still flows). Load it as root on the
+pilot box:
+
+```bash
+# edit __AGENT_UID__ first (id -u <worker-user>)
+sudo pfctl -a automata-egress -f deploy/egress-pf.conf
+sudo pfctl -e            # if PF is not already enabled
+sudo pfctl -a automata-egress -sr   # verify
+```
+
+Rollback: `sudo pfctl -a automata-egress -F rules`.
+
+**This is manual host configuration — NOT CI-verified and NOT applied by any
+code in this repo.** macOS PF needs root and is host-global; the unprivileged
+worker cannot load it per run. Until the anchor is loaded, the env-unset bypass
+exists on the worker plane; with it loaded, direct web egress from the agent
+uid is blocked at the packet level and only the audited loopback proxy path
+remains. Docker/E2B/Daytona plane enforcement is slice 3.

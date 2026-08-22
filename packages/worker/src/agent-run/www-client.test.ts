@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   pollThreadStatus,
+  postEgressEvents,
   pollUntilTerminal,
   postRunFailed,
   pullAgentCredentials,
@@ -88,6 +89,99 @@ describe("postRunFailed (#2 terminal-failure callback)", () => {
     await expect(
       postRunFailed(opts, { reason: "run: boom" }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("postEgressEvents (#66 audit sink, worker half)", () => {
+  it("POSTs the batch to /api/daemon/egress-event with the daemon-token header", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { inserted: 2 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await postEgressEvents(opts, [
+      {
+        destinationHost: "api.github.com",
+        destinationPort: 443,
+        action: "allow",
+        policyLevel: "domain",
+        source: "worker",
+      },
+      {
+        destinationHost: "evil.example.com",
+        action: "deny",
+        policyLevel: "domain",
+        source: "worker",
+      },
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://www.example.com/api/daemon/egress-event");
+    expect(init.method).toBe("POST");
+    expect(init.headers["x-daemon-token"]).toBe("daemon-token-abc");
+    const body = JSON.parse(init.body);
+    expect(body.events).toHaveLength(2);
+    expect(body.events[0]).toEqual({
+      destinationHost: "api.github.com",
+      destinationPort: 443,
+      action: "allow",
+      policyLevel: "domain",
+      source: "worker",
+    });
+    // Port is genuinely absent (not null) when unknown — the route's zod
+    // schema takes optional, not nullable.
+    expect("destinationPort" in body.events[1]).toBe(false);
+  });
+
+  it("chunks a batch above the route's 100-event cap into multiple POSTs", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { inserted: 100 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await postEgressEvents(
+      opts,
+      Array.from({ length: 150 }, (_, i) => ({
+        destinationHost: `h${i}.example.com`,
+        action: "deny" as const,
+        source: "worker" as const,
+      })),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const sizes = fetchMock.mock.calls.map(
+      (c) => JSON.parse(c[1].body).events.length,
+    );
+    expect(sizes).toEqual([100, 50]);
+  });
+
+  it("does nothing at all for an empty batch", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await postEgressEvents(opts, []);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("NEVER throws: a non-2xx and a network error are both logged and swallowed", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(500, { error: "x" })),
+    );
+    await expect(
+      postEgressEvents(opts, [
+        { destinationHost: "a.example.com", action: "deny", source: "worker" },
+      ]),
+    ).resolves.toBeUndefined();
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNRESET")));
+    await expect(
+      postEgressEvents(opts, [
+        { destinationHost: "a.example.com", action: "deny", source: "worker" },
+      ]),
+    ).resolves.toBeUndefined();
+    expect(errSpy).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -56,8 +56,9 @@ export type AgentRunInput = {
    * resolved control-plane-side (system entries already merged). The worker
    * learns ONLY this shape: never the settings table, model, or provenance
    * (mirror of the www-side field per this file's header rule — declared
-   * structurally, never imported). Absent = no enforcement. NOT consumed
-   * yet — the enforcing forward proxy lands in the next slice (PR B).
+   * structurally, never imported). Absent = no enforcement. Consumed by
+   * workflow.ts: it starts the per-run filtering forward proxy
+   * (egress-proxy.ts) and daemon-env points the child at it.
    */
   egressPolicy?: {
     level: "none" | "ip_port" | "domain";

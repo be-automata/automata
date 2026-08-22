@@ -57,6 +57,12 @@ export class DaemonProcess {
       delivered: boolean;
       env: Record<string, string>;
     } | null = null,
+    /**
+     * The per-run egress filtering proxy's base url (#66 slice 2), when this
+     * run carries an egress policy. Null → no proxy vars are injected and the
+     * child's egress is unfiltered on this plane (today's behavior).
+     */
+    private readonly egressProxyUrl: string | null = null,
   ) {
     const workerId = getProcessWorkerId();
     this.runDir = workerRunDir(config.runNamespaceRoot, workerId);
@@ -93,6 +99,7 @@ export class DaemonProcess {
       runHome: this.credentials?.home ?? null,
       credentialDelivered: this.credentials?.delivered ?? false,
       credentialEnv: this.credentials?.env ?? {},
+      egressProxyUrl: this.egressProxyUrl,
     });
     return this.env;
   }

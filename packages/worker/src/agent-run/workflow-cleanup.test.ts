@@ -59,6 +59,7 @@ vi.mock("./www-client", () => ({
   pullNextMessage: vi.fn(),
   pollUntilTerminal: vi.fn(),
   postRunFailed: vi.fn(),
+  postEgressEvents: vi.fn(),
 }));
 
 vi.mock("./agent-credentials", () => ({

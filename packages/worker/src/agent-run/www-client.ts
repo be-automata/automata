@@ -211,6 +211,61 @@ export async function postRunFailed(
   }
 }
 
+/**
+ * One egress decision on the wire — mirrors the control plane's
+ * /api/daemon/egress-event body schema (#66 §3.3): `destinationPort` and
+ * `policyLevel` optional, `source` fixed to "worker" for this plane.
+ */
+export interface EgressEventWire {
+  destinationHost: string;
+  destinationPort?: number;
+  action: "allow" | "deny";
+  policyLevel?: "none" | "ip_port" | "domain";
+  source: "worker";
+}
+
+/** The control-plane route rejects batches above this — chunk below it. */
+const MAX_EGRESS_EVENTS_PER_POST = 100;
+
+/**
+ * POST a batch of egress proxy decisions to the audit sink
+ * (/api/daemon/egress-event, #66 §3.3). Same X-Daemon-Token custody as the
+ * sibling endpoints; the run identity comes from the token server-side, so the
+ * body carries only the decisions.
+ *
+ * NEVER throws — audit delivery must not fail (or stall) the run. Both a
+ * request error and a non-2xx are logged, not thrown (the postRunFailed rule).
+ * Oversize batches are chunked under the route's cap rather than rejected.
+ */
+export async function postEgressEvents(
+  opts: WwwClientOpts,
+  events: EgressEventWire[],
+): Promise<void> {
+  for (let i = 0; i < events.length; i += MAX_EGRESS_EVENTS_PER_POST) {
+    const chunk = events.slice(i, i + MAX_EGRESS_EVENTS_PER_POST);
+    let res: Response;
+    try {
+      res = await fetch(endpoint(opts.baseUrl, "/api/daemon/egress-event"), {
+        method: "POST",
+        headers: headers(opts),
+        body: JSON.stringify({ events: chunk }),
+      });
+    } catch (error) {
+      console.error("[agent-run] postEgressEvents request failed (swallowed)", {
+        threadId: opts.threadId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+    if (!res.ok) {
+      console.error("[agent-run] postEgressEvents non-2xx (audit rows lost)", {
+        threadId: opts.threadId,
+        status: res.status,
+      });
+    }
+  }
+}
+
 export type ThreadStatusPoll =
   | { kind: "status"; status: string; terminal: boolean }
   | { kind: "auth-error"; httpStatus: number };
