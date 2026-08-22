@@ -46,21 +46,21 @@ Installing the App is what mints the **installation id** that the id-capture flo
 
 `githubInstallation.mode` is `'shadow' | 'active'` per installation→org binding.
 
-| | shadow | active |
-|---|---|---|
-| Webhook ingested | yes | yes |
-| Thread/task row created (org-stamped, dashboard-visible) | yes | yes |
-| `thread.shadow` flag (UI can badge) | `true` | `false` |
-| Sandbox boot / agent run | **no** | yes |
-| GitHub side effects (comments, checks, reviews, eyes reaction) | **none** | yes |
-| Billing-link comment for no-access users | suppressed | posted |
+|                                                                | shadow     | active  |
+| -------------------------------------------------------------- | ---------- | ------- |
+| Webhook ingested                                               | yes        | yes     |
+| Thread/task row created (org-stamped, dashboard-visible)       | yes        | yes     |
+| `thread.shadow` flag (UI can badge)                            | `true`     | `false` |
+| Sandbox boot / agent run                                       | **no**     | yes     |
+| GitHub side effects (comments, checks, reviews, eyes reaction) | **none**   | yes     |
+| Billing-link comment for no-access users                       | suppressed | posted  |
 
 Implementation seams:
 
 - **Resolution** — `getInstallationOrgAndMode({ db, installationId })`
   (`packages/shared/src/model/github-installation.ts`) returns `{ organizationId,
-  mode }` in one read. **No row → `active`** (migration-safe: an installation
-  that predates the binding table keeps working). A *new binding* defaults to
+mode }` in one read. **No row → `active`** (migration-safe: an installation
+  that predates the binding table keeps working). A _new binding_ defaults to
   `shadow` (safe onboarding); shadow is therefore always opt-in per binding,
   never a side effect of an installation being unknown.
 - **Ingest gate** — `handleAppMention` derives the mode once, suppresses the
@@ -69,13 +69,13 @@ Implementation seams:
 - **Boot suppression** — `createNewThread` stamps `thread.shadow` and, when
   shadow, returns without scheduling `startAgentMessage` (no boot). As a
   belt-and-suspenders systemic guarantee, `queueFollowUpInternal` also refuses
-  to drain the follow-up queue for a shadow thread, so a *second* mention on an
+  to drain the follow-up queue for a shadow thread, so a _second_ mention on an
   already-shadow thread still never boots the agent.
 
 ### The deployment-level kill-switch (defense in depth)
 
 Per-installation shadow mode has one gap: between wiring the pilot webhook and
-running the bind step, an event from a *resolvable* sender resolves to `active`
+running the bind step, an event from a _resolvable_ sender resolves to `active`
 (the migration-safe no-row default) and would act before the binding exists — the
 id-capture chicken/egg. The env var **`GITHUB_SIDE_EFFECTS_ENABLED`** closes it.
 It defaults `true` (back-compat), but the pilot Worker sets it **`false`**, which
@@ -94,18 +94,18 @@ Prod orch-agents routes these repo event classes (from its `WORKFLOW.md`) to
 skills. The pilot needs **intake parity**: every routed event class must produce
 a correctly-attributed task/thread in the bound org.
 
-| # | Event class | Prod skill (intent) | Chassis today | Gap → plan |
-|---|---|---|---|---|
-| 1 | `pull_request.opened` | github-ops (PR review) | `handlePullRequestUpdated` runs a PR **automation** only if a user created one (`on.open`); else PR-status DB update — **no task** | **Seeded automation** (`on.open`, `includeAllAuthors`, shadow-aware) → "Review PR" for every PR |
-| 2 | `pull_request.synchronize` | github-ops | PR automation only, `on.update` | Same seeded automation (`on.update`) |
-| 3 | `pull_request.review_requested` | github-ops | **Not handled** (action absent from route) | **Mirror-intake** → "Review PR #N (review requested)" |
-| 4 | `pull_request.closed` (merged=true) | github-pr-merged-jira | `handlePullRequestStatusChange` → status DB update only, **no task** | Mirror-intake, `merged===true` only → "Post-merge follow-up for PR #N" |
-| 5 | `pull_request_review.changes_requested` | github-ops (re-review) | `handlePullRequestReviewEvent` fires only on `submitted` **and** is mention-gated; state not inspected → **no task** | Mirror-intake, `review.state==="changes_requested"` → "Address changes requested on PR #N" |
-| 6 | `workflow_run` failure | gh-fix-ci | **Not handled** (event absent from route) | Mirror-intake, new `workflow_run.completed` sub, `conclusion==="failure"` → "Fix CI: run '<name>' failed" |
-| 7 | `issues.opened` | github-deep-research | `handleIssueEvent` runs an issue **automation** only if a user created one (`on.open`); else **no task** | **Seeded automation** (`on.open`, `includeAllAuthors`, shadow-aware) → "Research issue" |
-| 8 | `issues.labeled` [`bug`\|`enhancement`] | github-ops | **Not handled** (only `issues.opened` subscribed) | Mirror-intake, new `issues.labeled` sub + label allowlist → "Handle issue #N (labeled <label>)" |
-| 9 | `issue_comment.created` + bot mention | github-mention-respond (chassis-native) | `handleIssueCommentEvent` → `handleAppMention` | **COVERED** (native; shadow-aware) |
-| 10 | `pull_request_review_comment.created` + bot mention | github-review-comment-respond (chassis-native) | `handlePullRequestReviewCommentEvent` → `handleAppMention` | **COVERED** (native; shadow-aware) |
+| #   | Event class                                         | Prod skill (intent)                            | Chassis today                                                                                                                      | Gap → plan                                                                                                |
+| --- | --------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| 1   | `pull_request.opened`                               | github-ops (PR review)                         | `handlePullRequestUpdated` runs a PR **automation** only if a user created one (`on.open`); else PR-status DB update — **no task** | **Seeded automation** (`on.open`, `includeAllAuthors`, shadow-aware) → "Review PR" for every PR           |
+| 2   | `pull_request.synchronize`                          | github-ops                                     | PR automation only, `on.update`                                                                                                    | Same seeded automation (`on.update`)                                                                      |
+| 3   | `pull_request.review_requested`                     | github-ops                                     | **Not handled** (action absent from route)                                                                                         | **Mirror-intake** → "Review PR #N (review requested)"                                                     |
+| 4   | `pull_request.closed` (merged=true)                 | github-pr-merged-jira                          | `handlePullRequestStatusChange` → status DB update only, **no task**                                                               | Mirror-intake, `merged===true` only → "Post-merge follow-up for PR #N"                                    |
+| 5   | `pull_request_review.changes_requested`             | github-ops (re-review)                         | `handlePullRequestReviewEvent` fires only on `submitted` **and** is mention-gated; state not inspected → **no task**               | Mirror-intake, `review.state==="changes_requested"` → "Address changes requested on PR #N"                |
+| 6   | `workflow_run` failure                              | gh-fix-ci                                      | **Not handled** (event absent from route)                                                                                          | Mirror-intake, new `workflow_run.completed` sub, `conclusion==="failure"` → "Fix CI: run '<name>' failed" |
+| 7   | `issues.opened`                                     | github-deep-research                           | `handleIssueEvent` runs an issue **automation** only if a user created one (`on.open`); else **no task**                           | **Seeded automation** (`on.open`, `includeAllAuthors`, shadow-aware) → "Research issue"                   |
+| 8   | `issues.labeled` [`bug`\|`enhancement`]             | github-ops                                     | **Not handled** (only `issues.opened` subscribed)                                                                                  | Mirror-intake, new `issues.labeled` sub + label allowlist → "Handle issue #N (labeled <label>)"           |
+| 9   | `issue_comment.created` + bot mention               | github-mention-respond (chassis-native)        | `handleIssueCommentEvent` → `handleAppMention`                                                                                     | **COVERED** (native; shadow-aware)                                                                        |
+| 10  | `pull_request_review_comment.created` + bot mention | github-review-comment-respond (chassis-native) | `handlePullRequestReviewCommentEvent` → `handleAppMention`                                                                         | **COVERED** (native; shadow-aware)                                                                        |
 
 **Two implementation mechanisms.** The automation trigger schema
 (`packages/shared/src/automations/index.ts`) expresses only `pull_request`
@@ -240,12 +240,12 @@ mirror class — open a PR or push to one (→ "Review PR" task), or label an is
 
 Because prod does not act on `be-automata/automata`, there is no two-bots
 contention, so once shadow-verify passes you can go straight to full active and
-let the bot comment on our own PRs. Still flip in this order so an *unintended*
+let the bot comment on our own PRs. Still flip in this order so an _unintended_
 installation can't act during the transition:
 
 **5a. Flip the global kill-switch ON.** Set `GITHUB_SIDE_EFFECTS_ENABLED=true`
 (or remove it) on the pilot Worker and redeploy. Per-installation mode now
-governs — and BeAutomata is still **shadow**-bound, so it *still* produces no
+governs — and BeAutomata is still **shadow**-bound, so it _still_ produces no
 side effects. A quick re-verify here proves the switch flip alone didn't wake
 anything up.
 
@@ -288,14 +288,14 @@ mandatory and the rollout must NOT rush to active.
 
 Two independent things must never fight over one PR:
 
-1. **Prod orch-agents** — the existing bot, driven by the GitHub App's *own*
+1. **Prod orch-agents** — the existing bot, driven by the GitHub App's _own_
    webhook (the App-level webhook URL, which points at prod).
 2. **The new Automata platform** — driven by a **separate, repo-level webhook**
    we add to the customer repo, pointing at the Workers URL.
 
 > **CRITICAL SAFETY — the GitHub App's own webhook URL is NEVER touched.** It
-> keeps pointing at prod for the entire pilot. The pilot uses a *separate
-> repo-level webhook* (Settings → Webhooks on the customer repo). Never repoint,
+> keeps pointing at prod for the entire pilot. The pilot uses a _separate
+> repo-level webhook_ (Settings → Webhooks on the customer repo). Never repoint,
 > disable, or edit the App-level webhook to run this pilot. If the only way you
 > can think of to route events to the platform is to change the App's webhook
 > URL, stop — that would hijack every repo the App is installed on (including the
@@ -327,7 +327,7 @@ watch.
 
 > **Before flipping the customer binding to active, decide how prod orch-agents
 > stops acting on that repo** (otherwise you re-introduce the two-bots problem —
-> now both *acting*). Coordinate the prod cutover (remove the repo from prod's
+> now both _acting_). Coordinate the prod cutover (remove the repo from prod's
 > scope, or stop the App-level delivery routing for it — but **never** by
 > repointing the shared App webhook) as a separate, deliberate step. Only after
 > prod is confirmed out of the loop do you run steps 5a → 5b for the customer
@@ -354,11 +354,11 @@ are in `deploy/PILOT-OPERATOR-STEPS.md` §5.
 A worker box authenticates agent runs to Anthropic one of three ways, and the
 box says which by setting `WORKER_BOX_TRUST`:
 
-| value | how runs authenticate | use when |
-|---|---|---|
-| `shared` (default) | control-plane proxy (`useCredits`) — the run bills platform credits and no provider credential ever touches this disk | the box executes runs for tenants who do not own it |
-| `owner` | the worker pulls the run's own credential from `/api/daemon/agent-credentials` and writes it to a per-run `HOME` (0600, wiped at teardown) — the run spends the USER's subscription or API key | the box belongs to the tenant whose runs it executes (the pilot: the operator's own Mac) |
-| `box-key` | the box's own `ANTHROPIC_API_KEY` is the declared credential for every run — no pull, no proxy | self-host/pilot posture: the operator funded a key on this box on purpose |
+| value              | how runs authenticate                                                                                                                                                                          | use when                                                                                 |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `shared` (default) | control-plane proxy (`useCredits`) — the run bills platform credits and no provider credential ever touches this disk                                                                          | the box executes runs for tenants who do not own it                                      |
+| `owner`            | the worker pulls the run's own credential from `/api/daemon/agent-credentials` and writes it to a per-run `HOME` (0600, wiped at teardown) — the run spends the USER's subscription or API key | the box belongs to the tenant whose runs it executes (the pilot: the operator's own Mac) |
+| `box-key`          | the box's own `ANTHROPIC_API_KEY` is the declared credential for every run — no pull, no proxy                                                                                                 | self-host/pilot posture: the operator funded a key on this box on purpose                |
 
 ```bash
 # pilot box (single-tenant): let runs spend the user's Claude subscription
@@ -375,7 +375,7 @@ is a symlink and the CLI resolves it.
 The fresh `HOME` is not hygiene. On macOS the
 agent CLI keeps its OAuth in the login **Keychain**, not in `~/.claude/.credentials.json`
 — so a run that inherits the operator's `HOME` authenticates AS the operator and
-spends *their* subscription, with no credential file and no env var anywhere to show
+spends _their_ subscription, with no credential file and no env var anywhere to show
 for it. Verified on Claude Code 2.1.234: with a fresh `HOME` the CLI reports "Not
 logged in"; with a delivered credential file it reads that file. The operator's own
 `claude` login on the box is untouched and unreachable from a run.
@@ -387,7 +387,7 @@ and could not be refreshed" without making an API call), which breaks every
 
 **Outside `box-key` mode, the box's own `ANTHROPIC_API_KEY` is never a run
 credential.** It used to be the silent fallback: `buildRemoteDaemonMessage` skips
-`useCredits` when the user *has* a credential, but nothing delivered that
+`useCredits` when the user _has_ a credential, but nothing delivered that
 credential to the box, so the daemon fell through to whatever key the box carried.
 A user with a Max subscription ran on the operator's API key, and a box with no
 key failed runs that should never have touched it. In `shared` and `owner` modes
@@ -405,11 +405,11 @@ to quietly draw on the box's `ANTHROPIC_API_KEY` now bill platform credits. Set
 Three kinds, all reaching a run through the same `claudeAiOauth` credentials file
 (the resolver decides the delivery shape; the execution planes only honour shapes):
 
-| kind | how the user gets it | lifetime | refresh |
-|---|---|---|---|
-| API key | console.anthropic.com | until revoked | n/a — metered API billing |
-| Subscription (interactive OAuth) | "Connect Claude subscription" popup | **8 hours** | control plane re-mints with a 1h buffer |
-| Setup token | `claude setup-token` locally, pasted in | months | none — re-mint and paste again |
+| kind                             | how the user gets it                    | lifetime      | refresh                                 |
+| -------------------------------- | --------------------------------------- | ------------- | --------------------------------------- |
+| API key                          | console.anthropic.com                   | until revoked | n/a — metered API billing               |
+| Subscription (interactive OAuth) | "Connect Claude subscription" popup     | **8 hours**   | control plane re-mints with a 1h buffer |
+| Setup token                      | `claude setup-token` locally, pasted in | months        | none — re-mint and paste again          |
 
 **Setup tokens are the right default for an unattended box.** They spend the user's
 Claude subscription, survive far longer than the 8-hour interactive token, and need
@@ -458,9 +458,10 @@ on the repo ⇒ no proxy, no env vars, no behavior change.
 **The honest limitation: env-var proxying is cooperative.** A prompt-injected
 agent that runs `unset HTTPS_PROXY` (or uses a client that ignores proxy vars)
 bypasses the proxy entirely. The backstop is the PF anchor template at
-`deploy/egress-pf.conf`: default-deny direct outbound 80/443 for the agent uid,
-loopback excepted (so proxied traffic still flows). Load it as root on the
-pilot box:
+`deploy/egress-pf.conf`: default-deny direct outbound 80/443 for the agent uid
+— tcp AND udp, since udp/443 is QUIC / HTTP-3 and a tcp-only rule would leave
+an https bypass — loopback excepted (so proxied traffic still flows). Load it
+as root on the pilot box:
 
 ```bash
 # edit __AGENT_UID__ first (id -u <worker-user>)

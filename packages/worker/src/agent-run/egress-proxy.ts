@@ -146,13 +146,19 @@ export async function startEgressProxy(
   // Fail loudly at construction rather than serve a collapsed fence (the
   // git-broker rule): a run dispatched WITH a policy must never proceed with a
   // proxy that cannot decide.
-  if (!policy || !LEVELS.has(policy.level) || !Array.isArray(policy.allowlist)) {
+  if (
+    !policy ||
+    !LEVELS.has(policy.level) ||
+    !Array.isArray(policy.allowlist)
+  ) {
     throw new Error(
       "egress-proxy: policy must be {level: none|ip_port|domain, allowlist: string[]}",
     );
   }
   if (typeof onEvent !== "function") {
-    throw new Error("egress-proxy: onEvent callback is required (audit is AC3)");
+    throw new Error(
+      "egress-proxy: onEvent callback is required (audit is AC3)",
+    );
   }
 
   function decide(host: string, port: number): boolean {

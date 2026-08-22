@@ -1,4 +1,7 @@
-import { createServer as createHttpServer, request as httpRequest } from "node:http";
+import {
+  createServer as createHttpServer,
+  request as httpRequest,
+} from "node:http";
 import { createServer as createTcpServer, type AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -17,38 +20,182 @@ const domainPolicy = (allowlist: string[]): EgressPolicyShape => ({
 describe("matchEgress (pure decision table)", () => {
   it.each<[string, EgressPolicyShape, string, number, boolean]>([
     // domain level: exact + web ports only for plain entries
-    ["exact domain, 443", domainPolicy(["api.github.com"]), "api.github.com", 443, true],
-    ["exact domain, 80", domainPolicy(["api.github.com"]), "api.github.com", 80, true],
-    ["exact domain, odd port denied", domainPolicy(["api.github.com"]), "api.github.com", 8443, false],
-    ["different host denied", domainPolicy(["api.github.com"]), "evil.example.com", 443, false],
-    ["subdomain NOT covered by plain entry", domainPolicy(["github.com"]), "api.github.com", 443, false],
+    [
+      "exact domain, 443",
+      domainPolicy(["api.github.com"]),
+      "api.github.com",
+      443,
+      true,
+    ],
+    [
+      "exact domain, 80",
+      domainPolicy(["api.github.com"]),
+      "api.github.com",
+      80,
+      true,
+    ],
+    [
+      "exact domain, odd port denied",
+      domainPolicy(["api.github.com"]),
+      "api.github.com",
+      8443,
+      false,
+    ],
+    [
+      "different host denied",
+      domainPolicy(["api.github.com"]),
+      "evil.example.com",
+      443,
+      false,
+    ],
+    [
+      "subdomain NOT covered by plain entry",
+      domainPolicy(["github.com"]),
+      "api.github.com",
+      443,
+      false,
+    ],
     // wildcard entries
-    ["wildcard matches subdomain", domainPolicy(["*.github.com"]), "api.github.com", 443, true],
-    ["wildcard matches deep subdomain", domainPolicy(["*.github.com"]), "a.b.github.com", 443, true],
-    ["wildcard does NOT match the apex", domainPolicy(["*.github.com"]), "github.com", 443, false],
-    ["wildcard is a suffix, not a substring", domainPolicy(["*.github.com"]), "evilgithub.com", 443, false],
+    [
+      "wildcard matches subdomain",
+      domainPolicy(["*.github.com"]),
+      "api.github.com",
+      443,
+      true,
+    ],
+    [
+      "wildcard matches deep subdomain",
+      domainPolicy(["*.github.com"]),
+      "a.b.github.com",
+      443,
+      true,
+    ],
+    [
+      "wildcard does NOT match the apex",
+      domainPolicy(["*.github.com"]),
+      "github.com",
+      443,
+      false,
+    ],
+    [
+      "wildcard is a suffix, not a substring",
+      domainPolicy(["*.github.com"]),
+      "evilgithub.com",
+      443,
+      false,
+    ],
     // host:port entries pin the port
-    ["host:port pins that port", domainPolicy(["api.example.com:9443"]), "api.example.com", 9443, true],
-    ["host:port denies the web ports", domainPolicy(["api.example.com:9443"]), "api.example.com", 443, false],
+    [
+      "host:port pins that port",
+      domainPolicy(["api.example.com:9443"]),
+      "api.example.com",
+      9443,
+      true,
+    ],
+    [
+      "host:port denies the web ports",
+      domainPolicy(["api.example.com:9443"]),
+      "api.example.com",
+      443,
+      false,
+    ],
     // case + trailing-dot normalization
-    ["case-insensitive host", domainPolicy(["API.GitHub.com"]), "api.github.com", 443, true],
-    ["trailing-dot FQDN normalized", domainPolicy(["api.github.com"]), "api.github.com.", 443, true],
+    [
+      "case-insensitive host",
+      domainPolicy(["API.GitHub.com"]),
+      "api.github.com",
+      443,
+      true,
+    ],
+    [
+      "trailing-dot FQDN normalized",
+      domainPolicy(["api.github.com"]),
+      "api.github.com.",
+      443,
+      true,
+    ],
     // ip_port level: exact IPv4[:port]
-    ["ip exact, any port", { level: "ip_port", allowlist: ["10.0.0.5"] }, "10.0.0.5", 12345, true],
-    ["ip:port pinned allow", { level: "ip_port", allowlist: ["10.0.0.5:443"] }, "10.0.0.5", 443, true],
-    ["ip:port pinned deny", { level: "ip_port", allowlist: ["10.0.0.5:443"] }, "10.0.0.5", 80, false],
-    ["other ip denied", { level: "ip_port", allowlist: ["10.0.0.5"] }, "10.0.0.6", 443, false],
-    ["domain never matches at ip_port level", { level: "ip_port", allowlist: ["10.0.0.5"] }, "github.com", 443, false],
+    [
+      "ip exact, any port",
+      { level: "ip_port", allowlist: ["10.0.0.5"] },
+      "10.0.0.5",
+      12345,
+      true,
+    ],
+    [
+      "ip:port pinned allow",
+      { level: "ip_port", allowlist: ["10.0.0.5:443"] },
+      "10.0.0.5",
+      443,
+      true,
+    ],
+    [
+      "ip:port pinned deny",
+      { level: "ip_port", allowlist: ["10.0.0.5:443"] },
+      "10.0.0.5",
+      80,
+      false,
+    ],
+    [
+      "other ip denied",
+      { level: "ip_port", allowlist: ["10.0.0.5"] },
+      "10.0.0.6",
+      443,
+      false,
+    ],
+    [
+      "domain never matches at ip_port level",
+      { level: "ip_port", allowlist: ["10.0.0.5"] },
+      "github.com",
+      443,
+      false,
+    ],
     // none level: ONLY the (system) allowlist entries — nothing implicit but loopback
-    ["none: system host allowed", { level: "none", allowlist: ["api.anthropic.com"] }, "api.anthropic.com", 443, true],
-    ["none: anything else denied", { level: "none", allowlist: ["api.anthropic.com"] }, "github.com", 443, false],
-    ["none: empty allowlist denies all", { level: "none", allowlist: [] }, "example.com", 443, false],
+    [
+      "none: system host allowed",
+      { level: "none", allowlist: ["api.anthropic.com"] },
+      "api.anthropic.com",
+      443,
+      true,
+    ],
+    [
+      "none: anything else denied",
+      { level: "none", allowlist: ["api.anthropic.com"] },
+      "github.com",
+      443,
+      false,
+    ],
+    [
+      "none: empty allowlist denies all",
+      { level: "none", allowlist: [] },
+      "example.com",
+      443,
+      false,
+    ],
     // implicit loopback allow at every level (broker + proxy live there)
-    ["loopback ip implicit at none", { level: "none", allowlist: [] }, "127.0.0.1", 5432, true],
-    ["localhost implicit at ip_port", { level: "ip_port", allowlist: [] }, "localhost", 80, true],
+    [
+      "loopback ip implicit at none",
+      { level: "none", allowlist: [] },
+      "127.0.0.1",
+      5432,
+      true,
+    ],
+    [
+      "localhost implicit at ip_port",
+      { level: "ip_port", allowlist: [] },
+      "localhost",
+      80,
+      true,
+    ],
     // fail-closed shapes
     ["empty host denied", domainPolicy(["*.github.com"]), "", 443, false],
-    ["unparseable sentinel denied", domainPolicy(["*.github.com"]), "unparseable", 0, false],
+    [
+      "unparseable sentinel denied",
+      domainPolicy(["*.github.com"]),
+      "unparseable",
+      0,
+      false,
+    ],
   ])("%s", (_name, policy, host, port, expected) => {
     expect(matchEgress(policy, host, port)).toBe(expected);
   });
@@ -105,13 +252,16 @@ describe("startEgressProxy (real loopback servers)", () => {
   ): Promise<{ status: number; body: string }> {
     return new Promise((resolve, reject) => {
       const req = httpRequest(
-        { host: "127.0.0.1", port: proxyPort, method: "GET", path: absoluteUrl },
+        {
+          host: "127.0.0.1",
+          port: proxyPort,
+          method: "GET",
+          path: absoluteUrl,
+        },
         (res) => {
           let body = "";
           res.on("data", (d) => (body += d));
-          res.on("end", () =>
-            resolve({ status: res.statusCode ?? 0, body }),
-          );
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
         },
       );
       req.on("error", reject);

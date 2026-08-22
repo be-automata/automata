@@ -48,6 +48,8 @@ const provisionWorkdir = vi.fn(async (..._args: unknown[]) => WORKDIR);
 const cleanupWorkdir = vi.fn(async (..._args: unknown[]) => {});
 const pullAgentCredentials = vi.fn();
 const materialiseAgentCredentials = vi.fn();
+const postEgressEvents = vi.fn(async (..._args: unknown[]) => {});
+const startEgressProxy = vi.fn();
 
 vi.mock("./provision", () => ({
   provisionWorkdir: (...args: unknown[]) => provisionWorkdir(...args),
@@ -59,7 +61,11 @@ vi.mock("./www-client", () => ({
   pullNextMessage: vi.fn(),
   pollUntilTerminal: vi.fn(),
   postRunFailed: vi.fn(),
-  postEgressEvents: vi.fn(),
+  postEgressEvents: (...args: unknown[]) => postEgressEvents(...args),
+}));
+
+vi.mock("./egress-proxy", () => ({
+  startEgressProxy: (...args: unknown[]) => startEgressProxy(...args),
 }));
 
 vi.mock("./agent-credentials", () => ({
@@ -88,12 +94,14 @@ const INPUT = {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let runFn: any;
+let createEgressEventBatcher: typeof import("./workflow").createEgressEventBatcher;
 
 beforeAll(async () => {
   const mod = await import("./workflow");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const def = (mod.agentRunWorkflow as any).definition;
   runFn = def._tasks[0].fn;
+  createEgressEventBatcher = mod.createEgressEventBatcher;
 });
 
 beforeEach(() => {
@@ -103,6 +111,8 @@ beforeEach(() => {
   cleanupWorkdir.mockClear();
   pullAgentCredentials.mockReset();
   materialiseAgentCredentials.mockReset();
+  postEgressEvents.mockClear();
+  startEgressProxy.mockReset();
 });
 
 afterEach(() => {
@@ -170,5 +180,152 @@ describe("agent-run run task — workdir is never leaked by a failed credential 
 
     expect(pullAgentCredentials).not.toHaveBeenCalled();
     expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
+  });
+});
+
+const EGRESS_INPUT = {
+  ...INPUT,
+  egressPolicy: { level: "domain" as const, allowlist: ["api.example.com"] },
+};
+
+describe("agent-run run task — egress proxy start failure and teardown (#66 slice 2)", () => {
+  // The proxy start block sits BETWEEN the clone and the try/finally that owns
+  // cleanup (same class of path as the credential steps above), so it must
+  // clean up after itself: credential wipe + workdir removal, then rethrow.
+  it("start failure: wipes the credential, removes the workdir, and propagates the error", async () => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    const credentialCleanup = vi.fn(async () => {});
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: credentialCleanup,
+    });
+    const original = new Error("listen EADDRINUSE");
+    startEgressProxy.mockRejectedValue(original);
+
+    await expect(runFn(EGRESS_INPUT, ctx())).rejects.toBe(original);
+
+    expect(credentialCleanup).toHaveBeenCalledTimes(1);
+    expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
+    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
+  });
+
+  it("teardown: a run that started the proxy closes it exactly once in the finally", async () => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+    });
+    const close = vi.fn(async () => {});
+    startEgressProxy.mockResolvedValue({
+      url: "http://127.0.0.1:41234",
+      port: 41234,
+      close,
+    });
+
+    await expect(runFn(EGRESS_INPUT, ctx())).resolves.toMatchObject({
+      outcome: "nothing-to-run",
+    });
+
+    expect(startEgressProxy).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
+  });
+
+  it("policy absent: the proxy is never started (zero behavior change)", async () => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+    });
+
+    await expect(runFn(INPUT, ctx())).resolves.toMatchObject({
+      outcome: "nothing-to-run",
+    });
+
+    expect(startEgressProxy).not.toHaveBeenCalled();
+    expect(postEgressEvents).not.toHaveBeenCalled();
+  });
+});
+
+describe("createEgressEventBatcher — audit batch add/flush/close", () => {
+  const OPTS = { fake: "www-opts" } as never;
+  const event = (n: number) => ({
+    destinationHost: `host-${n}.example.com`,
+    destinationPort: 443,
+    action: "allow" as const,
+    policyLevel: "domain" as const,
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("flushes immediately at 20 events, in wire format with source=worker", () => {
+    const batcher = createEgressEventBatcher(OPTS);
+    for (let i = 0; i < 20; i++) {
+      batcher.add(event(i));
+    }
+    expect(postEgressEvents).toHaveBeenCalledTimes(1);
+    const [opts, events] = postEgressEvents.mock.calls[0] as [
+      unknown,
+      Array<Record<string, unknown>>,
+    ];
+    expect(opts).toBe(OPTS);
+    expect(events).toHaveLength(20);
+    expect(events[0]).toEqual({
+      destinationHost: "host-0.example.com",
+      destinationPort: 443,
+      action: "allow",
+      policyLevel: "domain",
+      source: "worker",
+    });
+  });
+
+  it("flushes a partial batch on the 2s timer, and an empty tick posts nothing", () => {
+    const batcher = createEgressEventBatcher(OPTS);
+    batcher.add(event(1));
+    expect(postEgressEvents).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(2_000);
+    expect(postEgressEvents).toHaveBeenCalledTimes(1);
+
+    // Nothing new buffered → the next tick must NOT post an empty batch.
+    vi.advanceTimersByTime(2_000);
+    expect(postEgressEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it("close() flushes the remainder and stops the timer", async () => {
+    const batcher = createEgressEventBatcher(OPTS);
+    batcher.add(event(1));
+    await batcher.close();
+    expect(postEgressEvents).toHaveBeenCalledTimes(1);
+
+    // Timer is cleared: time passing after close never posts again.
+    vi.advanceTimersByTime(10_000);
+    expect(postEgressEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it("port 0 (unparseable sentinel) travels as an ABSENT destinationPort", async () => {
+    const batcher = createEgressEventBatcher(OPTS);
+    batcher.add({
+      destinationHost: "unparseable",
+      destinationPort: 0,
+      action: "deny",
+      policyLevel: "domain",
+    });
+    await batcher.close();
+    const [, events] = postEgressEvents.mock.calls[0] as [
+      unknown,
+      Array<Record<string, unknown>>,
+    ];
+    expect(events[0]).not.toHaveProperty("destinationPort");
+    expect(events[0]).toMatchObject({ action: "deny" });
   });
 });
