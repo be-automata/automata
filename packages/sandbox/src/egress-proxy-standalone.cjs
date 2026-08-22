@@ -243,6 +243,9 @@ function startProxy(policy, listenPort, onEvent) {
       clientSocket.pipe(upstream);
     });
     // On error on either side, destroy BOTH — a half-open tunnel leaks sockets.
+    // Unlike the worker proxy (which tracks upstreams for a graceful close()),
+    // this process has no shutdown path: it dies with its container (SIGKILL
+    // on `docker rm -f`), and the OS reclaims every socket then.
     const destroyBoth = () => {
       upstream.destroy();
       clientSocket.destroy();
