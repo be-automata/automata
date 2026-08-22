@@ -71,7 +71,6 @@ describe("docker egress command builders (pure — no docker daemon)", () => {
       expect(flags).toContain(`-e ${key}='127.0.0.1,localhost'`);
     }
   });
-
 });
 
 describe("egress-proxy-standalone.cjs", () => {
