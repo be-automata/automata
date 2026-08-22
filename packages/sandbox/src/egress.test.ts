@@ -104,15 +104,44 @@ describe("toDaytonaNetwork", () => {
       ).toEqual({ networkAllowList: "10.0.0.1/32" });
     });
 
-    it("rejects hostnames (not expressible as CIDRs)", () => {
-      expect(() =>
-        toDaytonaNetwork(policy("ip_port", ["example.com"])),
-      ).toThrow(/not an IPv4 address or CIDR/);
+    it("routes hostname-shaped (system) entries to domainAllowList — never drops or rejects them (CONTRACT NOTE)", () => {
+      // buildEgressPolicyShape merges hostname system entries (callback host,
+      // github.com, api.github.com, api.anthropic.com) into the FINAL
+      // allowlist at EVERY level, including ip_port. This is the exact shape
+      // real dispatch hands the mapper: it must create, not throw.
+      expect(
+        toDaytonaNetwork(
+          policy("ip_port", [
+            "10.0.0.1:8080",
+            "callback.example.com",
+            "github.com",
+            "api.github.com",
+            "api.anthropic.com",
+          ]),
+        ),
+      ).toEqual({
+        networkAllowList: "10.0.0.1/32",
+        domainAllowList:
+          "callback.example.com,github.com,api.github.com,api.anthropic.com",
+      });
     });
 
-    it("rejects out-of-range octets", () => {
-      expect(() => toDaytonaNetwork(policy("ip_port", ["999.0.0.1"]))).toThrow(
-        /not an IPv4 address or CIDR/,
+    it("a non-IPv4 look-alike (out-of-range octet) falls to domainAllowList — fail-closed, never widened", () => {
+      // Operator entries are constrained to IP[:port] at the write boundary,
+      // so this can't come from an operator; as a "domain" it matches nothing.
+      expect(toDaytonaNetwork(policy("ip_port", ["999.0.0.1"]))).toEqual({
+        networkAllowList: "",
+        domainAllowList: "999.0.0.1",
+      });
+    });
+
+    it(`rejects more than ${DAYTONA_MAX_DOMAIN_ALLOWLIST} hostname entries at ip_port level instead of truncating`, () => {
+      const entries = Array.from(
+        { length: DAYTONA_MAX_DOMAIN_ALLOWLIST + 1 },
+        (_, i) => `host${i}.example.com`,
+      );
+      expect(() => toDaytonaNetwork(policy("ip_port", entries))).toThrow(
+        /refusing to truncate/,
       );
     });
 

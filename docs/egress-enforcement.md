@@ -74,7 +74,11 @@ env-unset. Caveats:
 
 - `ip_port` → `networkAllowList` (comma-separated CIDRs; bare IPv4 becomes
   `/32`; `IP:port` loses the port — the CIDR list is port-less; max 5, more
-  is an error, never truncation),
+  is an error, never truncation). Hostname-shaped entries — always the SYSTEM
+  entries the control plane merges in at every level (callback host,
+  github.com, api.github.com, api.anthropic.com; operator entries are
+  IP[:port]-validated at the write boundary) — route to `domainAllowList`
+  per the shape's CONTRACT NOTE (match by Host/SNI, never drop), max 20,
 - `domain` → `domainAllowList` (comma-separated, `*.` wildcards, max 20 —
   more is an error),
 - `none` → **create-time error**: `networkBlockAll` alone would sever the

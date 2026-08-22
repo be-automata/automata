@@ -123,9 +123,13 @@ export function toE2bNetwork(policy: EgressPolicyShape): E2bNetworkOptions {
  *
  * - `ip_port` → `networkAllowList` (comma-separated CIDRs). A bare IPv4
  *   becomes a `/32`; an `IP:port` entry loses its port (Daytona's CIDR list
- *   is port-less — documented limitation); a CIDR passes through. Anything
- *   that is not IPv4-shaped is an error (Daytona cannot express hostnames at
- *   this level). Max 5 CIDRs — more is an error, never a silent truncation.
+ *   is port-less — documented limitation); a CIDR passes through. Hostname-
+ *   shaped entries are the SYSTEM entries (callback host, github.com, …) the
+ *   control plane merges in at EVERY level — the shape's CONTRACT NOTE says
+ *   enforcers must match them by SNI/Host, never drop them — so they route to
+ *   `domainAllowList` (Daytona's Host/SNI matcher). Operator entries are
+ *   already constrained to IP[:port] at the write/resolve boundary. Max 5
+ *   CIDRs / 20 domains — more is an error, never a silent truncation.
  * - `domain` → `domainAllowList` (comma-separated, `*.` wildcards allowed,
  *   max 20 entries — more is an error). Port pins are dropped (port-less).
  * - `none` → ERROR: `networkBlockAll` alone would sever the daemon callback
@@ -144,20 +148,23 @@ export function toDaytonaNetwork(
     }
     case "ip_port": {
       const cidrs: string[] = [];
+      const domains: string[] = [];
       for (const entry of entries) {
         const { host } = splitHostPort(entry);
-        let cidr: string;
         if (isIpv4Cidr(host)) {
-          cidr = host;
+          if (!cidrs.includes(host)) {
+            cidrs.push(host);
+          }
         } else if (isIpv4(host)) {
-          cidr = `${host}/32`;
-        } else {
-          throw new Error(
-            `egress allowlist entry "${entry}" is not an IPv4 address or CIDR: daytona networkAllowList cannot express it`,
-          );
-        }
-        if (!cidrs.includes(cidr)) {
-          cidrs.push(cidr);
+          const cidr = `${host}/32`;
+          if (!cidrs.includes(cidr)) {
+            cidrs.push(cidr);
+          }
+        } else if (!domains.includes(host)) {
+          // Hostname-shaped ⇒ a system entry (operator entries are IP[:port]
+          // by write-boundary validation). CONTRACT NOTE: never drop these —
+          // Daytona's domainAllowList (Host/SNI match) carries them.
+          domains.push(host);
         }
       }
       if (cidrs.length > DAYTONA_MAX_NETWORK_ALLOWLIST) {
@@ -165,7 +172,15 @@ export function toDaytonaNetwork(
           `egress allowlist has ${cidrs.length} CIDRs but daytona networkAllowList supports at most ${DAYTONA_MAX_NETWORK_ALLOWLIST}; refusing to truncate`,
         );
       }
-      return { networkAllowList: cidrs.join(",") };
+      if (domains.length > DAYTONA_MAX_DOMAIN_ALLOWLIST) {
+        throw new Error(
+          `egress allowlist has ${domains.length} domains but daytona domainAllowList supports at most ${DAYTONA_MAX_DOMAIN_ALLOWLIST}; refusing to truncate`,
+        );
+      }
+      return {
+        networkAllowList: cidrs.join(","),
+        ...(domains.length > 0 ? { domainAllowList: domains.join(",") } : {}),
+      };
     }
     case "domain": {
       const domains: string[] = [];
