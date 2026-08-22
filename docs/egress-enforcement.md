@@ -6,7 +6,8 @@ Worker-plane (macOS) enforcement and its PF backstop live in
 
 The control plane resolves a per-repo policy (`repoReviewSettings.egress_policy`
 and its allowlist) into a **shape** — `{level, allowlist}`, system hosts (daemon
-callback, `github.com`, `api.anthropic.com`) already merged — and ships it on
+callback, `github.com`, `api.github.com`, `api.anthropic.com`) already merged —
+and ships it on
 `CreateSandboxOptions.egressPolicy`. Providers translate the shape via the pure
 mappers in `packages/sandbox/src/egress.ts`. **No policy on the repo ⇒ every
 provider's create path is unchanged** (rollback = clear the columns).
