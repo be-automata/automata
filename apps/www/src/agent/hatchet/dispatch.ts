@@ -327,6 +327,7 @@ export async function dispatchAgentRun({
       db,
       organizationId: thread?.organizationId,
       repoFullName,
+      plane: "worker",
     }).then((shape) => shape ?? undefined),
   ]);
 

@@ -239,6 +239,7 @@ async function getOrCreateSandboxForThread({
         db,
         organizationId: thread.organizationId,
         repoFullName: thread.githubRepoFullName,
+        plane: "sandbox",
       })) ?? undefined);
   const startTime = Date.now();
   const session = await getOrCreateSandboxWithTimeout(thread.codesandboxId, {

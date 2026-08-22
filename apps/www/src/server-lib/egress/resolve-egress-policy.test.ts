@@ -50,6 +50,7 @@ describe("resolveEgressPolicy (dispatch snapshot)", () => {
         db,
         organizationId: null,
         repoFullName: "acme/widgets",
+        plane: "worker",
       }),
     ).toBeNull();
   });
@@ -60,6 +61,7 @@ describe("resolveEgressPolicy (dispatch snapshot)", () => {
         db,
         organizationId: orgId,
         repoFullName: "acme/widgets",
+        plane: "worker",
       }),
     ).toBeNull();
   });
@@ -76,6 +78,7 @@ describe("resolveEgressPolicy (dispatch snapshot)", () => {
         db,
         organizationId: orgId,
         repoFullName: "acme/widgets",
+        plane: "worker",
       }),
     ).toBeNull();
   });
@@ -95,6 +98,7 @@ describe("resolveEgressPolicy (dispatch snapshot)", () => {
         db,
         organizationId: orgId,
         repoFullName: "acme/widgets",
+        plane: "worker",
       }),
     ).toEqual({
       level: "domain",
@@ -113,6 +117,7 @@ describe("resolveEgressPolicy (dispatch snapshot)", () => {
         db,
         organizationId: orgId,
         repoFullName: "acme/widgets",
+        plane: "worker",
       }),
     ).toBeNull();
   });
@@ -124,11 +129,16 @@ describe("resolveEgressPolicy (dispatch snapshot)", () => {
       repoFullName: "acme/widgets",
       patch: { egressPolicy: "none", egressAllowlist: ["ignored.example.com"] },
     });
+    // #81 sequencing: the plane param is threaded, but BOTH planes still get
+    // the full system-host list this PR (dropping the github hosts for
+    // "worker" waits on the brokered worker fleet being confirmed deployed —
+    // version skew would brick pushes under enforcement).
     expect(
       await resolveEgressPolicy({
         db,
         organizationId: orgId,
         repoFullName: "acme/widgets",
+        plane: "sandbox",
       }),
     ).toEqual({ level: "none", allowlist: systemHosts });
   });
@@ -148,6 +158,7 @@ describe("resolveEgressPolicy (dispatch snapshot)", () => {
         db,
         organizationId: orgId,
         repoFullName: "acme/widgets",
+        plane: "worker",
       }),
     ).rejects.toThrow(/expected an IP or IP:port/);
   });
@@ -165,6 +176,7 @@ describe("resolveEgressPolicy (dispatch snapshot)", () => {
         db,
         organizationId: orgId,
         repoFullName: "acme/widgets",
+        plane: "worker",
       }),
     ).toBeNull();
   });
