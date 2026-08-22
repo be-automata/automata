@@ -14,6 +14,7 @@ import {
   daemonRunKey,
 } from "@/lib/daemon-token";
 import { createAutomation } from "@terragon/shared/model/automations";
+import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import { thread as threadTable } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
@@ -33,6 +34,7 @@ describe("hatchetDispatchEnabled", () => {
 
 describe("dispatchAgentRun", () => {
   let user: User;
+  let orgId: string;
   let threadId: string;
   let threadChatId: string;
 
@@ -44,6 +46,7 @@ describe("dispatchAgentRun", () => {
       name: "Org",
       slug: `org-${nanoid(8).toLowerCase()}`,
     });
+    orgId = org.id;
     const t = await createTestThread({
       db,
       userId: user.id,
@@ -117,6 +120,53 @@ describe("dispatchAgentRun", () => {
     expect(serialized.toLowerCase()).not.toContain("privatekey");
     expect(serialized.toLowerCase()).not.toContain("masterkey");
 
+    // #66: no stored egress policy for this (org, repo) → the shape is ABSENT
+    // from the wire input (undefined → dropped by JSON.stringify) = no
+    // enforcement, today's behavior.
+    expect(input.egressPolicy).toBeUndefined();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("#66: attaches the resolved egress SHAPE when the (org, repo) row sets a policy", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "be-automata/automata",
+      patch: {
+        egressPolicy: "domain",
+        egressAllowlist: ["registry.npmjs.org"],
+      },
+    });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ run: { metadata: { id: "run-1" } } }), {
+        status: 200,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId,
+      threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "main",
+    });
+
+    const input = JSON.parse(fetchMock.mock.calls[0]![1].body).input;
+    // The FINAL shape: operator entries + system hosts (callback, github.com,
+    // api.anthropic.com) merged control-plane-side — the worker receives level
+    // + allowlist only, never table/model provenance.
+    const callbackHost = new URL(process.env.NEXT_PUBLIC_APP_URL!).host;
+    expect(input.egressPolicy).toEqual({
+      level: "domain",
+      allowlist: [
+        "registry.npmjs.org",
+        callbackHost,
+        "github.com",
+        "api.anthropic.com",
+      ],
+    });
     vi.unstubAllGlobals();
   });
 

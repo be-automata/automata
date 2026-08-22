@@ -1450,6 +1450,21 @@ export const repoReviewSettings = pgTable(
      * not this column.
      */
     trustedAuthorThreshold: text("trusted_author_threshold"),
+    /**
+     * Egress enforcement level for runs on this repo (#66):
+     * 'none' | 'ip_port' | 'domain'. NULL (the default) = no enforcement —
+     * today's behavior, so absent policy is a structural no-regression. Raw
+     * string here (dependency-free); validated to `EgressPolicyLevel` when the
+     * shape is built (`model/egress-policy.ts`).
+     */
+    egressPolicy: text("egress_policy"),
+    /**
+     * Operator allowlist entries for the level above: `host` or `host:port`
+     * (`ip_port` level: IP or IP:port; `domain` level: domain or `*.domain`
+     * wildcard). System hosts (callback, github.com, api.anthropic.com) are
+     * merged in at shape-build time, NOT stored here.
+     */
+    egressAllowlist: text("egress_allowlist").array(),
     /** Provenance: the user who last wrote this override (audit trail). */
     updatedByUserId: text("updated_by_user_id").references(() => user.id, {
       onDelete: "set null",
@@ -1677,5 +1692,50 @@ export const hatchetRun = pgTable(
       table.prNumber,
     ),
     index("hatchet_run_thread_id_index").on(table.threadId),
+  ],
+);
+
+/**
+ * Egress audit sink (#66): one row per egress decision (allow AND deny) made
+ * by an enforcement plane (worker proxy, Docker sidecar) or a single
+ * "policy applied" marker from native-firewall planes (E2B/Daytona). Rows
+ * arrive via the daemon-token-authed `/api/daemon/egress-event` route — the
+ * planes never touch this table (composability invariant: planes learn the
+ * `EgressPolicyShape` only, never table/model names).
+ *
+ * MULTI-TENANT: `organizationId` is the tenant fence for reads (org-fenced
+ * list in `model/egress-events.ts`); nullable because a personal/no-org
+ * thread still audits. Retention: rows are audit exhaust, not durable
+ * billing data — the age-based `pruneEgressEvents` (same pattern as
+ * `pruneHatchetRuns`) bounds table growth, so age is the only growth bound.
+ */
+export const egressEvents = pgTable(
+  "egress_events",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "set null",
+    }),
+    threadId: text("thread_id"),
+    /** The per-run key the decision belongs to (the daemon token's run binding). */
+    runId: text("run_id").notNull(),
+    destinationHost: text("destination_host").notNull(),
+    destinationPort: integer("destination_port"),
+    /** 'allow' | 'deny' — every decision is audited, not only denies (AC3). */
+    action: text("action").$type<"allow" | "deny">().notNull(),
+    /** The policy level in force when the decision was made ('none'|'ip_port'|'domain'). */
+    policyLevel: text("policy_level"),
+    /** Which plane decided: 'worker' | 'docker' | 'e2b' | 'daytona'. */
+    source: text("source"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("egress_events_run_id_index").on(table.runId),
+    index("egress_events_org_created_at_index").on(
+      table.organizationId,
+      table.createdAt,
+    ),
   ],
 );

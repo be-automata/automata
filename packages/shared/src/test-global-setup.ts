@@ -31,6 +31,7 @@ const REQUIRED_TABLES = [
   "thread_chat",
   "subscription",
   "github_check_run",
+  "egress_events",
 ];
 
 async function verifySchemaApplied(db: DB): Promise<void> {

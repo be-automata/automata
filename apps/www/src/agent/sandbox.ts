@@ -30,6 +30,7 @@ import { wrapError } from "./error";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { trackSandboxCreation } from "@/lib/rate-limit";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
+import { resolveEgressPolicy } from "@/server-lib/egress/resolve-egress-policy";
 import { generateBranchName } from "@/server-lib/generate-branch-name";
 import { sandboxTimeoutMs } from "@terragon/sandbox/constants";
 import { getAndVerifyCredentials } from "./credentials";
@@ -228,6 +229,15 @@ async function getOrCreateSandboxForThread({
   const generateBranchNameWithPrefix = (threadName: string | null) =>
     generateBranchName(threadName, branchPrefix);
   const sandboxSize = thread.sandboxSize ?? DEFAULT_SANDBOX_SIZE;
+  // #66 slice 1: resolve the per-repo egress SHAPE live at sandbox creation.
+  // undefined (no org / no row / policy unset) = no enforcement, today's
+  // behavior. No provider consumes it yet (PR C) — this only plumbs the shape.
+  const egressPolicy =
+    (await resolveEgressPolicy({
+      db,
+      organizationId: thread.organizationId,
+      repoFullName: thread.githubRepoFullName,
+    })) ?? undefined;
   const startTime = Date.now();
   const session = await getOrCreateSandboxWithTimeout(thread.codesandboxId, {
     threadName: thread.name,
@@ -251,6 +261,7 @@ async function getOrCreateSandboxForThread({
     skipSetupScript: thread.skipSetup,
     fastResume: fastResume && !!thread.codesandboxId,
     publicUrl: nonLocalhostPublicAppUrl(),
+    egressPolicy,
     featureFlags: userFeatureFlags,
     generateBranchName: generateBranchNameWithPrefix,
     onStatusUpdate: async ({ sandboxId, sandboxStatus, bootingStatus }) => {

@@ -18,6 +18,7 @@ import {
   markHatchetRunsSuperseded,
 } from "@terragon/shared/model/hatchet-run";
 import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
+import { resolveEgressPolicy } from "@/server-lib/egress/resolve-egress-policy";
 import { triggerAgentRun, cancelAgentRun } from "./transport";
 
 /** Trigger-fetch retry policy — a transient network blip must not fail dispatch. */
@@ -206,6 +207,18 @@ export interface AgentRunInput {
    * is shared with pre-#7 / non-dispatch inputs.
    */
   traceparent?: string;
+  /**
+   * Per-repo egress policy SHAPE (#66, slice 1/3), resolved LIVE at dispatch
+   * from the control-plane settings row. Absent = no enforcement (today's
+   * behavior). The worker learns level + FINAL allowlist only — never the
+   * settings table or where the policy came from (composability invariant;
+   * mirrored structurally, not imported, in packages/worker types).
+   * NOT consumed by the worker yet — enforcement lands in PR B.
+   */
+  egressPolicy?: {
+    level: "none" | "ip_port" | "domain";
+    allowlist: string[];
+  };
 }
 
 /** True when a thread should dispatch to the remote execution plane. */
@@ -305,6 +318,18 @@ export async function dispatchAgentRun({
   const orgId = thread?.organizationId ?? `u:${userId}`;
   const prNumber = thread?.githubPRNumber ?? undefined;
 
+  // #66 slice 1: resolve the per-repo egress SHAPE alongside the other per-thread
+  // resolution, LIVE from the settings row (a dashboard write applies on the next
+  // dispatch). null (no org / no row / policy unset) → field omitted = no
+  // enforcement, today's behavior. An INVALID stored policy throws here, failing
+  // the dispatch loudly rather than launching with a silently-wrong policy.
+  const egressPolicy =
+    (await resolveEgressPolicy({
+      db,
+      organizationId: thread?.organizationId,
+      repoFullName,
+    })) ?? undefined;
+
   // #7 trace join: mint a W3C traceparent at the dispatch boundary so the worker's
   // run span and the daemon-event → GitHub-post can be stitched into one trace by a
   // collector later. Never carries the tokens/prompt — it is opaque random ids.
@@ -322,6 +347,7 @@ export async function dispatchAgentRun({
     orgId,
     prNumber,
     traceparent,
+    egressPolicy,
   };
   console.log("[hatchet] dispatching agent-run", {
     threadId,
