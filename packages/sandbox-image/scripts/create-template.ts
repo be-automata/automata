@@ -45,6 +45,10 @@ function getTemplateName({ cpuCount, memoryGB }: TemplateArgs): string {
 function getDaytonaBuildFlags({ cpuCount, memoryGB }: TemplateArgs) {
   const name = getTemplateName({ cpuCount, memoryGB });
   const dockerfilePath = getDockerfilePath("daytona");
+  // Daytona orgs cap per-sandbox disk (10GB on the current org; the previous
+  // org allowed 20). Override with DAYTONA_SNAPSHOT_DISK_GB when the org's
+  // limit differs.
+  const diskGB = process.env.DAYTONA_SNAPSHOT_DISK_GB ?? "10";
   return {
     name,
     args: [
@@ -54,7 +58,7 @@ function getDaytonaBuildFlags({ cpuCount, memoryGB }: TemplateArgs) {
       "--cpu",
       cpuCount.toString(),
       "--disk",
-      "20",
+      diskGB,
       "--memory",
       memoryGB.toString(),
     ],
