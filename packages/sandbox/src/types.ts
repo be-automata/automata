@@ -31,7 +31,8 @@ export type EgressPolicyShape = {
  */
 export type CredentialBrokerShape =
   | DockerCredentialBrokerShape
-  | E2bCredentialBrokerShape;
+  | E2bCredentialBrokerShape
+  | DaytonaCredentialBrokerShape;
 
 /**
  * Docker variant (#114) — the inputs a Docker cred-broker sidecar needs to
@@ -79,6 +80,36 @@ export type E2bCredentialBrokerShape = {
   kind: "e2b-native";
   installationToken: string;
   repoFullName: string;
+};
+
+/**
+ * Daytona variant (#114) — like E2B, Daytona injects the credential in its OWN
+ * egress plane, so there is NO sidecar and NO guest-held bearer. The provider
+ * seeds a WRITE-ONLY org Secret (`daytona.secret.create`) with the installation
+ * token and mounts it into the sandbox via the create-time `secrets` map
+ * (ENV-VAR → secret NAME). The guest env var receives only the secret's opaque
+ * `placeholder` (`dtn_secret_<id>`); Daytona substitutes the real value
+ * transparently on outbound HTTPS requests to the secret's allowed `hosts`
+ * (github.com / api.github.com), where the placeholder appears VERBATIM in an
+ * `Authorization` header. The guest never holds the installation token (env.ts
+ * sets no resident token; setup.ts writes a VERBATIM `Authorization: token
+ * $GH_TOKEN` extraheader — never base64, no `~/.git-credentials`).
+ *
+ * INVERTED ordering vs E2B: the `secrets` map references a secret NAME that must
+ * ALREADY EXIST, so the secret is created BEFORE `daytona.create`. The name
+ * cannot derive from the sandboxId (which does not exist yet); it is derived
+ * control-plane-side from the STABLE thread id and carried HERE as `secretName`
+ * so create, resume-refresh, and teardown all address the same secret with NO
+ * new persistence. Like E2B, a Daytona brokered sandbox CAN resume in place —
+ * the provider REFRESHES the secret value with a fresh installation token on
+ * resume. Built control-plane-side on BOTH create and resume; never persisted.
+ */
+export type DaytonaCredentialBrokerShape = {
+  kind: "daytona-native";
+  installationToken: string;
+  repoFullName: string;
+  /** Deterministic, thread-derived org-Secret name. Stable across resume. */
+  secretName: string;
 };
 
 // NOTE: This is stored in the database, so don't remove any values from this list.
@@ -187,6 +218,16 @@ export type CreateSandboxOptions = {
 export type BrokerRefresh = {
   /** Mint a fresh GitHub installation token. Invoked only when rotation is due. */
   mintToken: () => Promise<string>;
+  /**
+   * Daytona-only (#114): the deterministic, thread-derived org-Secret NAME the
+   * provider must rotate. Daytona has no by-name freshness read keyed on the
+   * sandboxId (its secret name derives from the STABLE thread id, not the
+   * sandboxId), so the SECONDARY connect paths — which see only a sandboxId —
+   * cannot re-derive it; the control plane supplies it here. E2B derives its
+   * vault-secret name from the sandboxId and IGNORES this field. Absent on the
+   * E2B / non-Daytona paths.
+   */
+  secretName?: string;
 };
 
 export interface ISandboxProvider {
@@ -204,12 +245,19 @@ export interface ISandboxProvider {
    * Force-destroy a sandbox by id WITHOUT starting/unpausing it (#114). Unlike
    * {@link getSandboxOrNull} (which unpauses/starts a stale guest so it can be
    * resumed), this tears the guest and any sidecar/network/secret-file
-   * resources down in place — used by the brokered-resume recreate so a stale
-   * raw-token guest is never revived on its way to the grave. Optional: only
-   * the Docker provider (the only brokered provider) implements it; callers
-   * fall back to {@link getSandboxOrNull} + shutdown otherwise.
+   * resources down in place — used by the brokered-resume recreate and the
+   * create-failure sweeps so a stale raw-token guest is never revived on its way
+   * to the grave. Optional: the Docker, E2B, and Daytona providers implement it;
+   * callers fall back to {@link getSandboxOrNull} + shutdown otherwise.
+   *
+   * `brokerSecretName` (#114, Daytona-only): the deterministic thread-derived
+   * org-Secret name to delete alongside the guest. Daytona's broker secret name
+   * derives from the STABLE thread id (not the sandboxId), so a by-id teardown
+   * of a FRESH/UNMARKED session cannot re-derive it — the caller supplies it
+   * here so the secret (holding a live installation token) is never orphaned.
+   * E2B/Docker derive their broker resource from the sandboxId and IGNORE it.
    */
-  shutdownById?(sandboxId: string): Promise<void>;
+  shutdownById?(sandboxId: string, brokerSecretName?: string): Promise<void>;
 }
 
 export interface BackgroundCommandOptions {

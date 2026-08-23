@@ -64,11 +64,21 @@ export function resolveCredentialBrokerForCreate({
   githubRepoFullName,
   githubAccessToken,
   featureFlags,
+  threadId,
 }: {
   sandboxProvider: SandboxProvider;
   githubRepoFullName: string;
   githubAccessToken: string;
   featureFlags: Partial<Record<FeatureFlagName, boolean>> | null | undefined;
+  /**
+   * Stable per-run id used to derive the Daytona org-Secret name (#114). The
+   * Daytona secret must exist BEFORE the sandbox (its `secrets` map references an
+   * existing name), so the name cannot derive from the sandboxId; it derives
+   * from this stable id, which is re-derivable on resume/teardown. The
+   * Docker/E2B branches ignore it (Docker uses a fresh bearer; E2B derives its
+   * vault-secret name from the sandboxId inside the provider).
+   */
+  threadId: string;
 }): { shape: CredentialBrokerShape; mode: "brokered" } | null {
   if (!isCredentialBrokerEnabled(featureFlags)) {
     return null;
@@ -95,16 +105,40 @@ export function resolveCredentialBrokerForCreate({
       mode: "brokered",
     };
   }
+  if (sandboxProvider === "daytona") {
+    return {
+      shape: {
+        kind: "daytona-native",
+        installationToken: githubAccessToken,
+        repoFullName: githubRepoFullName,
+        secretName: daytonaBrokerSecretName(threadId),
+      },
+      mode: "brokered",
+    };
+  }
   return null;
 }
 
 /**
- * Build the credential-broker SHAPE for an in-place RESUME (#114). Only E2B
- * brokered sandboxes resume in place (Docker recreates on resume), so this
- * returns an `e2b-native` shape ONLY when the provider is E2B and the thread's
- * persisted provenance is `"brokered"`. It carries the FRESH installation token
- * so the provider can REFRESH E2B's vault secret (installation tokens expire
- * ~1h); the vault-secret name is re-derived from the sandboxId in the provider.
+ * Deterministic Daytona org-Secret name for a run's native credential broker
+ * (#114), derived from the STABLE thread id. Prefixed with a letter and
+ * sanitized to Daytona's `^[a-zA-Z_][a-zA-Z0-9_-]*$` secret-name charset so the
+ * same name is re-derivable on create, resume-refresh, and teardown with NO new
+ * persistence. Case is preserved (Daytona allows mixed case).
+ */
+export function daytonaBrokerSecretName(threadId: string): string {
+  return `gh-inst-${threadId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
+
+/**
+ * Build the credential-broker SHAPE for an in-place RESUME (#114). E2B AND
+ * Daytona brokered sandboxes resume in place (Docker recreates on resume), so
+ * this returns an `e2b-native` / `daytona-native` shape when the provider is
+ * E2B/Daytona and the thread's persisted provenance is `"brokered"`. It carries
+ * the FRESH installation token so the provider can REFRESH its secret
+ * (installation tokens expire ~1h); the E2B vault-secret name is re-derived from
+ * the sandboxId in the provider, while the Daytona secret name is re-derived
+ * from the stable `threadId` here.
  *
  * Gated on the PERSISTED mode, NOT the current flag: a sandbox created brokered
  * still has live E2B egress rules + a vault entry after pause, so it must stay
@@ -118,25 +152,42 @@ export function resolveCredentialBrokerForResume({
   githubRepoFullName,
   githubAccessToken,
   persistedBrokerMode,
+  threadId,
 }: {
   sandboxProvider: SandboxProvider;
   githubRepoFullName: string;
   githubAccessToken: string;
   persistedBrokerMode: "brokered" | "legacy-direct" | null | undefined;
+  /**
+   * Stable per-run id used to re-derive the Daytona org-Secret name on resume
+   * (#114) — the SAME derivation used at create. Ignored on the E2B path (which
+   * re-derives from the sandboxId inside the provider).
+   */
+  threadId: string;
 }): { shape: CredentialBrokerShape } | null {
-  if (sandboxProvider !== "e2b") {
-    return null;
-  }
   if (persistedBrokerMode !== "brokered") {
     return null;
   }
-  return {
-    shape: {
-      kind: "e2b-native",
-      installationToken: githubAccessToken,
-      repoFullName: githubRepoFullName,
-    },
-  };
+  if (sandboxProvider === "e2b") {
+    return {
+      shape: {
+        kind: "e2b-native",
+        installationToken: githubAccessToken,
+        repoFullName: githubRepoFullName,
+      },
+    };
+  }
+  if (sandboxProvider === "daytona") {
+    return {
+      shape: {
+        kind: "daytona-native",
+        installationToken: githubAccessToken,
+        repoFullName: githubRepoFullName,
+        secretName: daytonaBrokerSecretName(threadId),
+      },
+    };
+  }
+  return null;
 }
 
 /**
@@ -159,16 +210,28 @@ export function resolveBrokerRefreshForConnect({
   sandboxProvider,
   persistedBrokerMode,
   mintToken,
+  threadId,
 }: {
   sandboxProvider: SandboxProvider;
   persistedBrokerMode: "brokered" | "legacy-direct" | null | undefined;
   mintToken: () => Promise<string>;
+  /**
+   * Stable per-run id used to re-derive the Daytona org-Secret name (#114) on
+   * the secondary connect paths, which see only a sandboxId. Ignored on the E2B
+   * path (it re-derives from the sandboxId inside the provider).
+   */
+  threadId: string;
 }): BrokerRefresh | undefined {
-  if (sandboxProvider !== "e2b") {
-    return undefined;
-  }
   if (persistedBrokerMode !== "brokered") {
     return undefined;
   }
-  return { mintToken };
+  if (sandboxProvider === "e2b") {
+    return { mintToken };
+  }
+  if (sandboxProvider === "daytona") {
+    // Daytona has no by-name freshness read keyed on the sandboxId, so carry the
+    // thread-derived secret name the provider must rotate.
+    return { mintToken, secretName: daytonaBrokerSecretName(threadId) };
+  }
+  return undefined;
 }

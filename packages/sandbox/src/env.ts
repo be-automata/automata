@@ -35,6 +35,10 @@ export function getEnv({
    *    placeholder ({@link E2B_BROKERED_GH_TOKEN_PLACEHOLDER}); E2B's egress
    *    proxy overrides the `Authorization` header with the vault secret, so the
    *    placeholder never grants anything. No per-run bearer exists.
+   *  - `daytona-native`: `GH_TOKEN`/`GITHUB_TOKEN` are NOT emitted here at all —
+   *    Daytona mounts the org Secret's opaque placeholder into those vars via the
+   *    create-time `secrets` map, and getEnv deletes both so nothing (raw token
+   *    or user value) layers over that placeholder. No per-run bearer exists.
    * Absent = today's exact raw-token env (rollback contract).
    */
   credentialBroker?: CredentialBrokerShape | null;
@@ -84,6 +88,19 @@ export function getEnv({
     // requests); `gh`/Octokit send the placeholder, which E2B then overrides.
     env.GH_TOKEN = E2B_BROKERED_GH_TOKEN_PLACEHOLDER;
     env.GITHUB_TOKEN = E2B_BROKERED_GH_TOKEN_PLACEHOLDER;
+  } else if (credentialBroker?.kind === "daytona-native") {
+    // Daytona: the guest's GH_TOKEN/GITHUB_TOKEN are the org Secret's opaque
+    // PLACEHOLDER, injected at the SANDBOX level by Daytona's create-time
+    // `secrets` map (ENV → secret name) — NOT here. getEnv must therefore emit
+    // NEITHER var: any value we set (the raw installation token, or a
+    // user-supplied GH_TOKEN above) would layer OVER the sandbox-level
+    // placeholder whenever a command runs with this env, either re-introducing a
+    // resident token or defeating Daytona's header substitution. DELETE both so
+    // the placeholder from the secrets map shines through untouched. This runs
+    // AFTER the userEnv/agentCredentials loop, so a user-supplied GH_TOKEN cannot
+    // shadow the brokered state. The installation token appears NOWHERE here.
+    delete env.GH_TOKEN;
+    delete env.GITHUB_TOKEN;
   }
 
   if (overrides) {

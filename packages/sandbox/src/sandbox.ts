@@ -136,18 +136,27 @@ export async function getSandboxOrNull({
 export async function shutdownSandboxById({
   sandboxProvider,
   sandboxId,
+  brokerSecretName,
 }: {
   sandboxProvider: SandboxProvider;
   sandboxId: string;
+  /**
+   * #114 (Daytona-only): the deterministic thread-derived org-Secret name to
+   * delete alongside the guest. Daytona's broker secret name derives from the
+   * thread id (not the sandboxId), so a by-id teardown of a fresh/stale sandbox
+   * cannot re-derive it — the control plane supplies it so the token-holding
+   * secret is never orphaned. Undefined for E2B/Docker/non-brokered.
+   */
+  brokerSecretName?: string;
 }): Promise<void> {
   const provider = getSandboxProvider(sandboxProvider);
   // #114: prefer the in-place force-destroy that NEVER unpauses/starts the
   // guest. Routing through getSandboxOrNull (as the fallback does) would
   // unpause a stale brokered guest — reviving the raw-token guest we are trying
-  // to tear down. Only the Docker provider (the sole brokered provider)
-  // implements shutdownById; others keep the resume-then-shutdown fallback.
+  // to tear down. The Docker, E2B, and Daytona providers implement shutdownById;
+  // others keep the resume-then-shutdown fallback.
   if (provider.shutdownById) {
-    await provider.shutdownById(sandboxId);
+    await provider.shutdownById(sandboxId, brokerSecretName);
     return;
   }
   const session = await provider.getSandboxOrNull(sandboxId);

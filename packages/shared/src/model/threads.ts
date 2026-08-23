@@ -1122,6 +1122,7 @@ export async function getThreadBrokerContextBySandboxId({
   db: DB;
   sandboxId: string;
 }): Promise<{
+  threadId: string;
   userId: string;
   githubRepoFullName: string;
   sandboxProvider: SandboxProvider;
@@ -1129,6 +1130,9 @@ export async function getThreadBrokerContextBySandboxId({
 } | null> {
   const result = await db
     .select({
+      // #114: the STABLE thread id, needed to re-derive the Daytona org-Secret
+      // name on the admin secondary connect path (see resolveBrokerRefreshForConnect).
+      threadId: schema.thread.id,
       userId: schema.thread.userId,
       githubRepoFullName: schema.thread.githubRepoFullName,
       sandboxProvider: schema.thread.sandboxProvider,

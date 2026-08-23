@@ -282,6 +282,8 @@ async function getOrCreateSandboxForThread({
     // Server-resolved per-user flag map (#114). Per-org scoping is not supported
     // by the flag system, so this is the user-scoped fallback; env stays force-on.
     featureFlags: userFeatureFlags,
+    // Stable id for the Daytona org-Secret name (#114); ignored by Docker/E2B.
+    threadId,
   });
   const persistedBrokerMode = thread.credentialBrokerMode ?? undefined;
 
@@ -296,7 +298,23 @@ async function getOrCreateSandboxForThread({
     githubRepoFullName: thread.githubRepoFullName,
     githubAccessToken,
     persistedBrokerMode,
+    // Stable id for the Daytona org-Secret name (#114); ignored by E2B.
+    threadId,
   });
+
+  // #114: the Daytona org-Secret name for this thread, so EVERY by-id teardown
+  // (create-timeout sweep, recreate stale-destroy, recreate/initial-create
+  // persist-failure) also deletes the secret holding the live installation
+  // token — those teardowns run on a FRESH/UNMARKED session that cannot
+  // re-derive it. Deterministic from threadId, so it is identical across the
+  // stale and fresh sandboxes of a thread. undefined for E2B/Docker/non-brokered
+  // (they derive their broker resource from the sandboxId), which is correct.
+  const daytonaBrokerSecretName =
+    brokerCreate?.shape.kind === "daytona-native"
+      ? brokerCreate.shape.secretName
+      : brokerResume?.shape.kind === "daytona-native"
+        ? brokerResume.shape.secretName
+        : undefined;
 
   // #66: resolve the per-repo egress SHAPE only when we CREATE (providers apply
   // it at create time). Recomputed on the recreate path too.
@@ -410,6 +428,7 @@ async function getOrCreateSandboxForThread({
         await shutdownSandboxById({
           sandboxProvider: thread.sandboxProvider,
           sandboxId: createdSandboxId,
+          brokerSecretName: daytonaBrokerSecretName,
         }).catch((teardownError) => {
           console.error(
             "Failed to sweep fresh sandbox after create timeout",
@@ -454,6 +473,8 @@ async function getOrCreateSandboxForThread({
       await shutdownSandboxById({
         sandboxProvider: thread.sandboxProvider,
         sandboxId: staleSandboxId,
+        // Deterministic from threadId — same name as the stale sandbox's secret.
+        brokerSecretName: daytonaBrokerSecretName,
       });
     } catch (destroyError) {
       console.error("Failed to destroy stale brokered sandbox", destroyError);
@@ -491,6 +512,7 @@ async function getOrCreateSandboxForThread({
       await shutdownSandboxById({
         sandboxProvider: thread.sandboxProvider,
         sandboxId: session.sandboxId,
+        brokerSecretName: daytonaBrokerSecretName,
       }).catch((teardownError) => {
         console.error(
           "Failed to tear down fresh brokered sandbox after persist failure",
@@ -521,6 +543,7 @@ async function getOrCreateSandboxForThread({
       await shutdownSandboxById({
         sandboxProvider: thread.sandboxProvider,
         sandboxId: session.sandboxId,
+        brokerSecretName: daytonaBrokerSecretName,
       }).catch((teardownError) => {
         console.error(
           "Failed to tear down fresh sandbox after initial-create persist failure",

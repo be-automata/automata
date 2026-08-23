@@ -210,6 +210,32 @@ export async function setupGitCredentials(
     );
     return;
   }
+  // Daytona (`daytona-native`): Daytona substitutes the org Secret's opaque
+  // placeholder ONLY where it appears VERBATIM in an outbound HTTPS header.
+  // `gh`/Octokit send `Authorization: token <GH_TOKEN>` (GH_TOKEN = the
+  // placeholder) → verbatim → substituted. But git's default credential helper
+  // sends `Authorization: Basic base64(user:token)`, which base64-WRAPS the
+  // placeholder and DEFEATS substitution. So write NO `~/.git-credentials` and
+  // instead a VERBATIM `Authorization: token $GH_TOKEN` extraheader for the
+  // GitHub hosts. `$GH_TOKEN` is shell-expanded at setup time (from the
+  // sandbox-level placeholder Daytona's `secrets` map injected), so the
+  // placeholder lands VERBATIM in ~/.gitconfig — it is NON-secret, so writing it
+  // to disk preserves never-residency of the REAL token. NEVER base64-wrap.
+  // Scrub any residue first (#89 belt-and-suspenders; a fresh snapshot is clean).
+  if (options.credentialBroker?.kind === "daytona-native") {
+    await session.runCommand(
+      [
+        `rm -f ~/.git-credentials`,
+        `git config --global --unset-all credential.helper || true`,
+        `git config --global --unset-all http.https://github.com/.extraheader || true`,
+        `git config --global --unset-all http.https://api.github.com/.extraheader || true`,
+        `git config --global http.https://github.com/.extraheader "Authorization: token $GH_TOKEN"`,
+        `git config --global http.https://api.github.com/.extraheader "Authorization: token $GH_TOKEN"`,
+      ].join(" && "),
+      { cwd: "/" },
+    );
+    return;
+  }
   try {
     await session.runCommand(`git config --global credential.helper store`, {
       cwd: "/",

@@ -621,7 +621,14 @@ export class E2BProvider implements ISandboxProvider {
    * re-leak), and the `finally` still guarantees the secret is destroyed even if
    * kill throws. Mirrors {@link E2BSession.shutdown}'s finally pattern.
    */
-  async shutdownById(sandboxId: string): Promise<void> {
+  async shutdownById(
+    sandboxId: string,
+    // #114: Daytona-only param (its broker secret name derives from the thread
+    // id, not the sandboxId). E2B derives its vault-secret name from the
+    // sandboxId, so this is ignored here — accepted only to satisfy the
+    // ISandboxProvider signature.
+    _brokerSecretName?: string,
+  ): Promise<void> {
     const secretName = e2bBrokerSecretName(sandboxId);
     try {
       const sandbox = await Sandbox.connect(sandboxId);

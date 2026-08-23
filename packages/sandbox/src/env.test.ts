@@ -166,4 +166,60 @@ describe("getEnv", () => {
       expect(E2B_BROKERED_GH_TOKEN_PLACEHOLDER).not.toMatch(/^gh[a-z]_/);
     });
   });
+
+  describe("Daytona native credential broker (#114)", () => {
+    const daytonaBroker = {
+      kind: "daytona-native" as const,
+      installationToken: "ghs_installation_token_secret",
+      repoFullName: "be-automata/automata",
+      secretName: "gh-inst-thread_abc123",
+    };
+
+    it("emits NEITHER GH_TOKEN NOR GITHUB_TOKEN (the secrets-map placeholder owns them), never the token", () => {
+      const env = getEnv({
+        githubAccessToken: daytonaBroker.installationToken,
+        userEnv: [],
+        agentCredentials: null,
+        credentialBroker: daytonaBroker,
+      });
+      // Daytona injects the placeholder at the sandbox level via the `secrets`
+      // map; getEnv must set neither var so it can't layer over the placeholder.
+      expect(env.GH_TOKEN).toBeUndefined();
+      expect(env.GITHUB_TOKEN).toBeUndefined();
+      expect(env.GH_REPO).toBeUndefined();
+      // The installation token appears NOWHERE.
+      expect(JSON.stringify(env)).not.toContain(
+        daytonaBroker.installationToken,
+      );
+    });
+
+    it("DELETES a user-supplied GH_TOKEN/GITHUB_TOKEN so it can't shadow the placeholder", () => {
+      const env = getEnv({
+        githubAccessToken: daytonaBroker.installationToken,
+        userEnv: [
+          { key: "GH_TOKEN", value: "user-token" },
+          { key: "GITHUB_TOKEN", value: "user-token-2" },
+          { key: "OTHER", value: "keep-me" },
+        ],
+        agentCredentials: null,
+        credentialBroker: daytonaBroker,
+      });
+      expect(env.GH_TOKEN).toBeUndefined();
+      expect(env.GITHUB_TOKEN).toBeUndefined();
+      // Non-github user vars are untouched.
+      expect(env.OTHER).toBe("keep-me");
+    });
+
+    it("still applies our trusted overrides after the reserved broker keys", () => {
+      const env = getEnv({
+        githubAccessToken: daytonaBroker.installationToken,
+        userEnv: [],
+        agentCredentials: null,
+        credentialBroker: daytonaBroker,
+        overrides: { CI: "true" },
+      });
+      expect(env.CI).toBe("true");
+      expect(env.GH_TOKEN).toBeUndefined();
+    });
+  });
 });

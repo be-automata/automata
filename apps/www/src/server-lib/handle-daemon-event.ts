@@ -248,6 +248,8 @@ export async function handleDaemonEvent({
               userId,
               repoFullName: thread.githubRepoFullName,
             }),
+          // Stable id for the Daytona org-Secret name (#114); ignored by E2B.
+          threadId,
         }),
       }),
     );

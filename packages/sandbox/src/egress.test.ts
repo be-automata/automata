@@ -4,6 +4,8 @@ import {
   toE2bBrokeredNetwork,
   E2B_BROKER_GITHUB_HOSTS,
   toDaytonaNetwork,
+  toDaytonaBrokeredNetwork,
+  DAYTONA_BROKER_GITHUB_HOSTS,
   DAYTONA_MAX_DOMAIN_ALLOWLIST,
   type EgressPolicyShape,
 } from "./egress";
@@ -222,5 +224,76 @@ describe("toE2bBrokeredNetwork (#114)", () => {
     // placeholder the caller passed in.
     expect(JSON.stringify(net)).toContain("${e2b.secrets.gh-inst-sb1}");
     expect(JSON.stringify(net)).not.toContain("ghs_");
+  });
+});
+
+describe("toDaytonaBrokeredNetwork (#114)", () => {
+  it("no egress policy: open internet ({}), nothing to merge or restrict", () => {
+    // Matches unbrokered Daytona: GitHub is reachable + substituted, and we must
+    // not NEWLY restrict egress the flag-off path never restricted.
+    expect(toDaytonaBrokeredNetwork({})).toEqual({});
+  });
+
+  it("with a domain policy: MERGES the github hosts into domainAllowList (dedup)", () => {
+    const net = toDaytonaBrokeredNetwork({
+      egressPolicy: {
+        level: "domain",
+        allowlist: ["example.com", "registry.npmjs.org"],
+      },
+    });
+    expect(net.domainAllowList).toBe(
+      "example.com,registry.npmjs.org,github.com,api.github.com",
+    );
+  });
+
+  it("does NOT duplicate a github host already in the policy allowlist", () => {
+    const net = toDaytonaBrokeredNetwork({
+      egressPolicy: {
+        level: "domain",
+        allowlist: ["github.com", "example.com"],
+      },
+    });
+    // github.com already present (not re-added); api.github.com appended.
+    expect(net.domainAllowList).toBe("github.com,example.com,api.github.com");
+  });
+
+  it("enforces the 20-domain cap AFTER merging the github hosts", () => {
+    // 19 domains + 2 broker hosts (1 new after dedup... none overlap) = 21 > 20.
+    const entries = Array.from({ length: 19 }, (_, i) => `d${i}.example.com`);
+    expect(entries).toHaveLength(19);
+    expect(() =>
+      toDaytonaBrokeredNetwork({
+        egressPolicy: { level: "domain", allowlist: entries },
+      }),
+    ).toThrow(
+      new RegExp(
+        `after merging the GitHub broker hosts.*at most ${DAYTONA_MAX_DOMAIN_ALLOWLIST}`,
+      ),
+    );
+  });
+
+  it("stays within the cap when the merge lands exactly at 20", () => {
+    const entries = Array.from({ length: 18 }, (_, i) => `d${i}.example.com`);
+    const net = toDaytonaBrokeredNetwork({
+      egressPolicy: { level: "domain", allowlist: entries },
+    });
+    const domains = net.domainAllowList!.split(",");
+    expect(domains).toHaveLength(DAYTONA_MAX_DOMAIN_ALLOWLIST);
+    for (const host of DAYTONA_BROKER_GITHUB_HOSTS) {
+      expect(domains).toContain(host);
+    }
+  });
+
+  it("rejects unrepresentable policies exactly as toDaytonaNetwork does", () => {
+    expect(() =>
+      toDaytonaBrokeredNetwork({
+        egressPolicy: { level: "none", allowlist: ["callback.example.com"] },
+      }),
+    ).toThrow(/"none" is unsupported on the daytona provider/);
+    expect(() =>
+      toDaytonaBrokeredNetwork({
+        egressPolicy: { level: "ip_port", allowlist: ["10.0.0.1"] },
+      }),
+    ).toThrow(/"ip_port" is unsupported on the daytona provider/);
   });
 });

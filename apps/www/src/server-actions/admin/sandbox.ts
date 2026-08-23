@@ -51,6 +51,8 @@ export const getSandboxDaemonLogs = adminOnly(
                   userId: brokerContext.userId,
                   repoFullName: brokerContext.githubRepoFullName,
                 }),
+              // Stable id for the Daytona org-Secret name (#114); ignored by E2B.
+              threadId: brokerContext.threadId,
             })
           : undefined;
         try {

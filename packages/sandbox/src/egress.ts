@@ -141,6 +141,64 @@ export type DaytonaNetworkOptions = {
 /** Daytona's documented cap on `domainAllowList` entries. */
 export const DAYTONA_MAX_DOMAIN_ALLOWLIST = 20;
 
+/**
+ * The two GitHub hosts the Daytona native credential broker (#114) allows the
+ * secret value to be substituted on: git-over-HTTPS (github.com) AND the
+ * REST/GraphQL API used by `gh`/Octokit (api.github.com). Passed as the org
+ * Secret's `hosts` AND merged into `domainAllowList` when an egress policy is
+ * enforced (so a policy never accidentally blocks the brokered GitHub traffic).
+ */
+export const DAYTONA_BROKER_GITHUB_HOSTS = [
+  "github.com",
+  "api.github.com",
+] as const;
+
+/**
+ * Daytona create-time network params for a BROKERED sandbox (#114).
+ *
+ * Mirrors the E2B composition rule ({@link toE2bBrokeredNetwork}): the broker
+ * must never let a per-repo egress policy (#66) accidentally BLOCK the GitHub
+ * hosts whose credential Daytona substitutes.
+ *
+ * Two cases:
+ *  - NO egress policy: return `{}` (open internet — today's unbrokered Daytona
+ *    behavior). GitHub is reachable and the placeholder is substituted; there is
+ *    nothing to un-block, and adding a `domainAllowList` would NEWLY restrict
+ *    egress the flag-off path never restricted. Matches E2B's "no policy ⇒ open".
+ *  - egress policy present: reuse {@link toDaytonaNetwork} (which throws for the
+ *    `none` / `ip_port` levels Daytona cannot express) and MERGE the GitHub
+ *    hosts into `domainAllowList` (dedup). The 20-entry cap is enforced AFTER the
+ *    merge — an over-cap list throws rather than silently dropping a host.
+ */
+export type DaytonaBrokeredNetworkOptions = { domainAllowList?: string };
+
+export function toDaytonaBrokeredNetwork({
+  egressPolicy,
+  hosts = [...DAYTONA_BROKER_GITHUB_HOSTS],
+}: {
+  egressPolicy?: EgressPolicyShape;
+  hosts?: string[];
+}): DaytonaBrokeredNetworkOptions {
+  if (!egressPolicy) {
+    // No policy: open internet, exactly like unbrokered Daytona. GitHub is
+    // reachable and substituted; nothing to merge, nothing to restrict.
+    return {};
+  }
+  const base = toDaytonaNetwork(egressPolicy);
+  const domains = base.domainAllowList ? base.domainAllowList.split(",") : [];
+  for (const host of hosts) {
+    if (!domains.includes(host)) {
+      domains.push(host);
+    }
+  }
+  if (domains.length > DAYTONA_MAX_DOMAIN_ALLOWLIST) {
+    throw new Error(
+      `egress allowlist has ${domains.length} domains after merging the GitHub broker hosts but daytona domainAllowList supports at most ${DAYTONA_MAX_DOMAIN_ALLOWLIST}; refusing to truncate`,
+    );
+  }
+  return { domainAllowList: domains.join(",") };
+}
+
 /** `host:port` splitter — digits-only port suffix, so domains and IPv4 are safe. */
 const HOST_PORT_RE = /^(.+):(\d{1,5})$/;
 
