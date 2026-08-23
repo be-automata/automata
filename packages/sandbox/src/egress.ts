@@ -38,6 +38,108 @@ export type E2bNetworkOptions = {
 };
 
 /**
+ * The two GitHub hosts every native credential broker (#114) scopes credential
+ * injection to: git-over-HTTPS (github.com) AND the REST/GraphQL API used by
+ * `gh`/Octokit (api.github.com). One mechanism covers both. Single source of
+ * truth shared by the E2B and Daytona brokers (they inject/substitute on the
+ * same host set); the provider-named aliases below preserve their call sites.
+ */
+export const BROKER_GITHUB_HOSTS = ["github.com", "api.github.com"] as const;
+
+/**
+ * E2B alias of {@link BROKER_GITHUB_HOSTS}: the hosts the E2B native broker
+ * injects an `Authorization` header on.
+ */
+export const E2B_BROKER_GITHUB_HOSTS = BROKER_GITHUB_HOSTS;
+
+/**
+ * #114 §7a: near-expiry throttle for the broker-secret rotation on the SECONDARY
+ * connect paths (keepalive `extendLife`, admin-view `getSandboxOrNull`), shared
+ * by the E2B and Daytona providers.
+ *
+ * GitHub installation tokens live ~60 min. A provider rotates its vaulted/org
+ * secret only when it was last updated MORE than this long ago (or is missing),
+ * so a burst of keepalives on a still-fresh secret mints at most ~one token per
+ * hour per sandbox instead of one per call. 50 min leaves a comfortable margin
+ * under the ~60 min TTL so the vaulted token is never allowed to actually expire
+ * between rotations.
+ */
+export const BROKER_SECRET_STALE_MS = 50 * 60 * 1000; // 50 minutes
+
+/**
+ * A single E2B egress transform rule in the STATIC-headers form — structurally
+ * a subset of the SDK's `SandboxNetworkRule` (`{ transform: { headers } }`), so
+ * it is assignable to `SandboxNetworkOpts.rules` / `SandboxNetworkUpdate.rules`
+ * without importing the e2b SDK into this pure mapper.
+ */
+export type E2bStaticHeaderRule = {
+  transform: { headers: Record<string, string> };
+};
+
+/**
+ * E2B network options for a BROKERED sandbox (#114): the egress firewall
+ * (`allowOut`/optional `denyOut`) COMPOSED with per-host header-injection
+ * `rules`. Shape is a structural subset of the SDK `SandboxNetworkOpts` /
+ * `SandboxNetworkUpdate` — the provider passes it straight to `Sandbox.create`
+ * / `sandbox.updateNetwork`.
+ */
+export type E2bBrokeredNetworkOptions = {
+  allowOut: string[];
+  denyOut?: string[];
+  rules: Record<string, E2bStaticHeaderRule[]>;
+};
+
+/**
+ * Compose the E2B native credential-broker egress config (#114): register a
+ * header-injection rule for each GitHub host and COMPOSE it with any per-repo
+ * egress policy (#66) WITHOUT clobbering it.
+ *
+ * Two cases:
+ *  - egress policy present: reuse {@link toE2bNetwork} for the base
+ *    (`denyOut: ["0.0.0.0/0"]` + the resolved allowlist), then MERGE the broker
+ *    hosts into `allowOut` (they are normally already there as system entries,
+ *    but merging is idempotent and never drops a repo's allowlist entry). A host
+ *    named in `rules` MUST also appear in `allowOut` (SDK contract), else the
+ *    rule never fires.
+ *  - no egress policy: keep today's OPEN internet — `allowOut` is
+ *    `["0.0.0.0/0", ...hosts]` (the sentinel allows all traffic; the explicit
+ *    hosts satisfy the "rule host must appear in allowOut" contract) and NO
+ *    `denyOut` (setting one would newly restrict egress the flag-off path never
+ *    restricted).
+ *
+ * `authHeaderValue` is the fully-formed header value the caller built from the
+ * E2B Secret placeholder (e.g. `` `token ${Secret.fill(name)}` ``); this mapper
+ * stays free of the e2b SDK and of any secret material (the placeholder is
+ * inert until E2B resolves it server-side).
+ */
+export function toE2bBrokeredNetwork({
+  egressPolicy,
+  authHeaderValue,
+  hosts = [...E2B_BROKER_GITHUB_HOSTS],
+}: {
+  egressPolicy?: EgressPolicyShape;
+  authHeaderValue: string;
+  hosts?: string[];
+}): E2bBrokeredNetworkOptions {
+  const rules: Record<string, E2bStaticHeaderRule[]> = {};
+  for (const host of hosts) {
+    rules[host] = [
+      { transform: { headers: { Authorization: authHeaderValue } } },
+    ];
+  }
+  // One merge for both cases: seed allowOut from the policy's resolved allowlist
+  // when present, else the open-internet sentinel; then dedup-append the GitHub
+  // hosts (so a `rules` host always appears in allowOut, per the SDK contract).
+  const base = egressPolicy ? toE2bNetwork(egressPolicy) : null;
+  const allowOut = mergeUnique(base ? base.allowOut : ["0.0.0.0/0"], hosts);
+  // With a policy, keep its deny-all; without one, no denyOut (open internet —
+  // adding one would newly restrict egress the flag-off path never restricted).
+  return base
+    ? { allowOut, denyOut: base.denyOut, rules }
+    : { allowOut, rules };
+}
+
+/**
  * Daytona `daytona.create` param subset produced by {@link toDaytonaNetwork}.
  * Only `domainAllowList` is ever produced: Daytona's three network params
  * (`networkBlockAll` / `networkAllowList` / `domainAllowList`) are mutually
@@ -51,8 +153,79 @@ export type DaytonaNetworkOptions = {
 /** Daytona's documented cap on `domainAllowList` entries. */
 export const DAYTONA_MAX_DOMAIN_ALLOWLIST = 20;
 
+/**
+ * The two GitHub hosts the Daytona native credential broker (#114) allows the
+ * secret value to be substituted on: git-over-HTTPS (github.com) AND the
+ * REST/GraphQL API used by `gh`/Octokit (api.github.com). Passed as the org
+ * Secret's `hosts` AND merged into `domainAllowList` when an egress policy is
+ * enforced (so a policy never accidentally blocks the brokered GitHub traffic).
+ *
+ * Daytona alias of {@link BROKER_GITHUB_HOSTS} (both brokers scope to the same
+ * host set); preserved as a distinct name for the provider's call sites.
+ */
+export const DAYTONA_BROKER_GITHUB_HOSTS = BROKER_GITHUB_HOSTS;
+
+/**
+ * Daytona create-time network params for a BROKERED sandbox (#114).
+ *
+ * Mirrors the E2B composition rule ({@link toE2bBrokeredNetwork}): the broker
+ * must never let a per-repo egress policy (#66) accidentally BLOCK the GitHub
+ * hosts whose credential Daytona substitutes.
+ *
+ * Two cases:
+ *  - NO egress policy: return `{}` (open internet — today's unbrokered Daytona
+ *    behavior). GitHub is reachable and the placeholder is substituted; there is
+ *    nothing to un-block, and adding a `domainAllowList` would NEWLY restrict
+ *    egress the flag-off path never restricted. Matches E2B's "no policy ⇒ open".
+ *  - egress policy present: reuse {@link toDaytonaNetwork} (which throws for the
+ *    `none` / `ip_port` levels Daytona cannot express) and MERGE the GitHub
+ *    hosts into `domainAllowList` (dedup). The 20-entry cap is enforced AFTER the
+ *    merge — an over-cap list throws rather than silently dropping a host.
+ */
+export type DaytonaBrokeredNetworkOptions = { domainAllowList?: string };
+
+export function toDaytonaBrokeredNetwork({
+  egressPolicy,
+  hosts = [...DAYTONA_BROKER_GITHUB_HOSTS],
+}: {
+  egressPolicy?: EgressPolicyShape;
+  hosts?: string[];
+}): DaytonaBrokeredNetworkOptions {
+  if (!egressPolicy) {
+    // No policy: open internet, exactly like unbrokered Daytona. GitHub is
+    // reachable and substituted; nothing to merge, nothing to restrict.
+    return {};
+  }
+  const base = toDaytonaNetwork(egressPolicy);
+  const domains = mergeUnique(
+    base.domainAllowList ? base.domainAllowList.split(",") : [],
+    hosts,
+  );
+  if (domains.length > DAYTONA_MAX_DOMAIN_ALLOWLIST) {
+    throw new Error(
+      `egress allowlist has ${domains.length} domains after merging the GitHub broker hosts but daytona domainAllowList supports at most ${DAYTONA_MAX_DOMAIN_ALLOWLIST}; refusing to truncate`,
+    );
+  }
+  return { domainAllowList: domains.join(",") };
+}
+
 /** `host:port` splitter — digits-only port suffix, so domains and IPv4 are safe. */
 const HOST_PORT_RE = /^(.+):(\d{1,5})$/;
+
+/**
+ * Dedup-append: return a copy of `base` with each entry of `extra` that is not
+ * already present appended in order. Used by the brokered mappers to merge the
+ * GitHub hosts into an allowlist without dropping a repo's existing entries.
+ */
+function mergeUnique(base: string[], extra: readonly string[]): string[] {
+  const out = [...base];
+  for (const item of extra) {
+    if (!out.includes(item)) {
+      out.push(item);
+    }
+  }
+  return out;
+}
 
 /** Trim, lowercase, drop empties, dedupe — every mapper's first pass. */
 function normalizeEntries(allowlist: string[]): string[] {

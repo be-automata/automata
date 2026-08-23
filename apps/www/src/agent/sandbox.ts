@@ -28,7 +28,10 @@ import {
   shutdownSandboxById,
   BrokeredSandboxNotResumableError,
 } from "@terragon/sandbox";
-import { resolveCredentialBrokerForCreate } from "@/server-lib/credential-broker/resolve-credential-broker";
+import {
+  resolveCredentialBrokerForCreate,
+  resolveCredentialBrokerForResume,
+} from "@/server-lib/credential-broker/resolve-credential-broker";
 import { shouldHibernateSandbox } from "./sandbox-resource";
 import { wrapError } from "./error";
 import { getPostHogServer } from "@/lib/posthog-server";
@@ -279,8 +282,39 @@ async function getOrCreateSandboxForThread({
     // Server-resolved per-user flag map (#114). Per-org scoping is not supported
     // by the flag system, so this is the user-scoped fallback; env stays force-on.
     featureFlags: userFeatureFlags,
+    // Stable id for the Daytona org-Secret name (#114); ignored by Docker/E2B.
+    threadId,
   });
   const persistedBrokerMode = thread.credentialBrokerMode ?? undefined;
+
+  // #114: E2B brokered sandboxes resume IN PLACE (rules + vault persist across
+  // pause), so a resume must carry a fresh `e2b-native` shape — the provider
+  // refreshes the vault secret with the fresh token and setup/env take the
+  // brokered branch (no resident raw token). Gated on the PERSISTED provenance,
+  // not the current flag. Null for Docker (which recreates) and non-brokered
+  // threads.
+  const brokerResume = resolveCredentialBrokerForResume({
+    sandboxProvider: thread.sandboxProvider,
+    githubRepoFullName: thread.githubRepoFullName,
+    githubAccessToken,
+    persistedBrokerMode,
+    // Stable id for the Daytona org-Secret name (#114); ignored by E2B.
+    threadId,
+  });
+
+  // #114: the Daytona org-Secret name for this thread, so EVERY by-id teardown
+  // (create-timeout sweep, recreate stale-destroy, recreate/initial-create
+  // persist-failure) also deletes the secret holding the live installation
+  // token — those teardowns run on a FRESH/UNMARKED session that cannot
+  // re-derive it. Deterministic from threadId, so it is identical across the
+  // stale and fresh sandboxes of a thread. undefined for E2B/Docker/non-brokered
+  // (they derive their broker resource from the sandboxId), which is correct.
+  const daytonaBrokerSecretName =
+    brokerCreate?.shape.kind === "daytona-native"
+      ? brokerCreate.shape.secretName
+      : brokerResume?.shape.kind === "daytona-native"
+        ? brokerResume.shape.secretName
+        : undefined;
 
   // #66: resolve the per-repo egress SHAPE only when we CREATE (providers apply
   // it at create time). Recomputed on the recreate path too.
@@ -318,9 +352,13 @@ async function getOrCreateSandboxForThread({
     fastResume: fastResume && !args.forCreate,
     publicUrl: nonLocalhostPublicAppUrl(),
     egressPolicy: args.forCreate ? args.egressPolicy : undefined,
-    // Secret shape only on CREATE; NON-secret mode on both so a brokered resume
-    // fails closed at the provider.
-    credentialBroker: args.forCreate ? (brokerCreate?.shape ?? undefined) : undefined,
+    // CREATE carries the create shape (Docker or E2B). RESUME carries the E2B
+    // in-place refresh shape (Docker resume is null — it recreates instead). The
+    // NON-secret mode is carried on both so a brokered resume fails closed /
+    // stays brokered at the provider.
+    credentialBroker: args.forCreate
+      ? (brokerCreate?.shape ?? undefined)
+      : (brokerResume?.shape ?? undefined),
     credentialBrokerMode: args.forCreate
       ? (brokerCreate?.mode ?? undefined)
       : persistedBrokerMode,
@@ -390,6 +428,7 @@ async function getOrCreateSandboxForThread({
         await shutdownSandboxById({
           sandboxProvider: thread.sandboxProvider,
           sandboxId: createdSandboxId,
+          brokerSecretName: daytonaBrokerSecretName,
         }).catch((teardownError) => {
           console.error(
             "Failed to sweep fresh sandbox after create timeout",
@@ -434,6 +473,8 @@ async function getOrCreateSandboxForThread({
       await shutdownSandboxById({
         sandboxProvider: thread.sandboxProvider,
         sandboxId: staleSandboxId,
+        // Deterministic from threadId — same name as the stale sandbox's secret.
+        brokerSecretName: daytonaBrokerSecretName,
       });
     } catch (destroyError) {
       console.error("Failed to destroy stale brokered sandbox", destroyError);
@@ -471,6 +512,7 @@ async function getOrCreateSandboxForThread({
       await shutdownSandboxById({
         sandboxProvider: thread.sandboxProvider,
         sandboxId: session.sandboxId,
+        brokerSecretName: daytonaBrokerSecretName,
       }).catch((teardownError) => {
         console.error(
           "Failed to tear down fresh brokered sandbox after persist failure",
@@ -501,6 +543,7 @@ async function getOrCreateSandboxForThread({
       await shutdownSandboxById({
         sandboxProvider: thread.sandboxProvider,
         sandboxId: session.sandboxId,
+        brokerSecretName: daytonaBrokerSecretName,
       }).catch((teardownError) => {
         console.error(
           "Failed to tear down fresh sandbox after initial-create persist failure",
@@ -514,17 +557,22 @@ async function getOrCreateSandboxForThread({
 
   const existingSandboxId = thread.codesandboxId;
 
-  // #114 CRITICAL: a brokered thread is NEVER resumed in place — running OR
-  // paused. An in-place resume runs setupSandboxEveryTime → setupGitCredentials
-  // WITHOUT the create-only broker shape, so it takes the legacy branch and
-  // writes the raw installation token to ~/.git-credentials (and can restart
-  // the daemon with it), re-leaking the token the broker exists to withhold. So
-  // refuse BEFORE any resume setup / cred write / daemon restart / unpause and
-  // route to the fail-closed CAS recreate. This is decided HERE (control plane)
-  // by the NON-secret persisted provenance; the provider fails closed too
-  // (defense in depth). Legacy threads (mode null/undefined) are unaffected and
-  // take the normal in-place resume below.
-  if (persistedBrokerMode === "brokered") {
+  // #114 CRITICAL (Docker only): a brokered DOCKER thread is NEVER resumed in
+  // place — running OR paused. An in-place resume runs setupSandboxEveryTime →
+  // setupGitCredentials WITHOUT the create-only broker shape, so it takes the
+  // legacy branch and writes the raw installation token to ~/.git-credentials
+  // (and can restart the daemon with it), re-leaking the token the broker
+  // exists to withhold. So refuse BEFORE any resume setup / cred write / daemon
+  // restart / unpause and route to the fail-closed CAS recreate. Decided HERE
+  // (control plane) by the NON-secret persisted provenance; the provider fails
+  // closed too (defense in depth).
+  //
+  // E2B is DIFFERENT: its egress rules + vault secret persist across pause, so a
+  // brokered E2B sandbox resumes IN PLACE with a fresh `e2b-native` shape
+  // (brokerResume above) — the provider refreshes the vault secret and env/setup
+  // take the brokered branch (never a resident raw token). So only Docker
+  // recreates. Legacy threads (mode null/undefined) take the normal resume.
+  if (persistedBrokerMode === "brokered" && thread.sandboxProvider === "docker") {
     return await recreateBrokeredSandbox(existingSandboxId);
   }
 

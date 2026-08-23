@@ -79,6 +79,7 @@ describe(
       publicUrl: "http://localhost:3000",
       featureFlags: {},
       credentialBroker: {
+        kind: "docker-sidecar",
         installationToken: INJECTED_TOKEN,
         runBearer: RUN_BEARER,
         repoFullName: REPO,

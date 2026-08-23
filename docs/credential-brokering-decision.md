@@ -118,6 +118,19 @@ both docs agree.
 
 ### 2. E2B → `transform.headers` + `Secret.fill()` (native, never-resident)
 
+> **IMPLEMENTED (#114), behind the flag, live-gated.** Landed in
+> `packages/sandbox` (E2B provider brokered create/resume/teardown + egress
+> composition) and `apps/www` (resolver + resume wiring), gated on the existing
+> `sandboxCredentialBroker` flag / `SANDBOX_CREDENTIAL_BROKER=on`, default OFF and
+> fail-safe. Covers BOTH git and the `gh`/`api.github.com` API in one mechanism.
+> The vault-secret name is derived from the E2B sandboxId (not carried in the
+> shape) so create/resume/teardown share one handle with no extra persistence;
+> E2B brokered sandboxes resume IN PLACE with a `Secret.update` refresh (Docker,
+> by contrast, recreates). Unit-tested + type-checked; **live E2E is a gated ops
+> step** (E2B `transform.headers` public-beta plan access) — see
+> `reports/ISSUE-114-E2B-SPEC.md` §7. Daytona (item 3) is now IMPLEMENTED too
+> (see its banner below).
+
 At create, control-plane-side: `Secret.create('gh-inst-<runId>', <token>)`
 (write-only), then `Sandbox.create(templateId, { network: { allowOut: [...,
 'github.com'], rules: { 'github.com': [{ transform: { headers: { Authorization:
@@ -135,6 +148,24 @@ genuine host-side boundary on E2B Cloud/BYOC.
   E2B Cloud or BYOC (rejected on open-source `e2b-dev/infra` deployments).
 
 ### 3. Daytona → organization `Secrets` host-substitution (native, never-resident)
+
+> **IMPLEMENTED (#114), behind the flag, live-gated.** Landed in
+> `packages/sandbox` (Daytona provider brokered create/resume/teardown —
+> `providers/daytona-provider.ts` create ~`upsertDaytonaBrokerSecret` + resume
+> `updateDaytonaBrokerSecret` + `shutdownById` — and egress composition
+> `egress.ts:toDaytonaBrokeredNetwork`) and `apps/www` (resolver
+> `resolve-credential-broker.ts` daytona-native shape + resume wiring), plus the
+> `env.ts`/`setup.ts` daytona-native branches (guest holds only the non-secret
+> placeholder; verbatim `Authorization: token $GH_TOKEN` extraheader, no
+> `~/.git-credentials`). Gated on the existing `sandboxCredentialBroker` flag /
+> `SANDBOX_CREDENTIAL_BROKER=on`, default OFF and fail-safe. Covers BOTH git and
+> the `gh`/`api.github.com` API in one mechanism. The org-Secret name derives
+> from the stable thread id (`daytonaBrokerSecretName`) so create/resume/teardown
+> share one handle with no extra persistence; Daytona brokered sandboxes resume
+> IN PLACE with a secret-value refresh. Unit-tested + type-checked; **live E2E is
+> a gated ops step** (org tier + verbatim-placeholder substitution) — see the ops
+> gate below. The Docker `gh`-API CONNECT-proxy half (item 1) remains the
+> remaining deferred item.
 
 At create: `daytona.secret.create({ name: 'gh-inst-<runId>', value: <token>,
 hosts: ['github.com'] })`, then `daytona.create({ snapshot, secrets: {

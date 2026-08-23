@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getEnv } from "./env";
+import { getEnv, E2B_BROKERED_GH_TOKEN_PLACEHOLDER } from "./env";
 
 describe("getEnv", () => {
   it("should set GH_TOKEN from githubAccessToken by default", () => {
@@ -84,6 +84,7 @@ describe("getEnv", () => {
 
   describe("credential broker (#114)", () => {
     const broker = {
+      kind: "docker-sidecar" as const,
       installationToken: "ghs_installation_token_secret",
       runBearer: "run-bearer-abc123",
       repoFullName: "be-automata/automata",
@@ -123,6 +124,102 @@ describe("getEnv", () => {
         overrides: { GH_TOKEN: "override-token" },
       });
       expect(env.GH_TOKEN).toBe("override-token");
+    });
+  });
+
+  describe("E2B native credential broker (#114)", () => {
+    const e2bBroker = {
+      kind: "e2b-native" as const,
+      installationToken: "ghs_installation_token_secret",
+      repoFullName: "be-automata/automata",
+    };
+
+    it("sets GH_TOKEN/GITHUB_TOKEN to the inert placeholder, never the token", () => {
+      const env = getEnv({
+        githubAccessToken: e2bBroker.installationToken,
+        userEnv: [],
+        agentCredentials: null,
+        credentialBroker: e2bBroker,
+      });
+      expect(env.GH_TOKEN).toBe(E2B_BROKERED_GH_TOKEN_PLACEHOLDER);
+      expect(env.GITHUB_TOKEN).toBe(E2B_BROKERED_GH_TOKEN_PLACEHOLDER);
+      // No per-run bearer and no GH_REPO on the E2B path.
+      expect(env.GH_REPO).toBeUndefined();
+      // The installation token appears NOWHERE.
+      expect(JSON.stringify(env)).not.toContain(e2bBroker.installationToken);
+    });
+
+    it("RESERVES GH_TOKEN — a user GH_TOKEN can NOT shadow the placeholder", () => {
+      const env = getEnv({
+        githubAccessToken: e2bBroker.installationToken,
+        userEnv: [{ key: "GH_TOKEN", value: "user-token" }],
+        agentCredentials: null,
+        credentialBroker: e2bBroker,
+      });
+      expect(env.GH_TOKEN).toBe(E2B_BROKERED_GH_TOKEN_PLACEHOLDER);
+      expect(env.GITHUB_TOKEN).toBe(E2B_BROKERED_GH_TOKEN_PLACEHOLDER);
+    });
+
+    it("the placeholder is clearly non-secret (not a real-looking token)", () => {
+      // Guards against someone swapping in a value that could be mistaken for a
+      // credential; it must never start with a GitHub token prefix.
+      expect(E2B_BROKERED_GH_TOKEN_PLACEHOLDER).not.toMatch(/^gh[a-z]_/);
+    });
+  });
+
+  describe("Daytona native credential broker (#114)", () => {
+    const daytonaBroker = {
+      kind: "daytona-native" as const,
+      installationToken: "ghs_installation_token_secret",
+      repoFullName: "be-automata/automata",
+      secretName: "gh-inst-thread_abc123",
+    };
+
+    it("emits NEITHER GH_TOKEN NOR GITHUB_TOKEN (the secrets-map placeholder owns them), never the token", () => {
+      const env = getEnv({
+        githubAccessToken: daytonaBroker.installationToken,
+        userEnv: [],
+        agentCredentials: null,
+        credentialBroker: daytonaBroker,
+      });
+      // Daytona injects the placeholder at the sandbox level via the `secrets`
+      // map; getEnv must set neither var so it can't layer over the placeholder.
+      expect(env.GH_TOKEN).toBeUndefined();
+      expect(env.GITHUB_TOKEN).toBeUndefined();
+      expect(env.GH_REPO).toBeUndefined();
+      // The installation token appears NOWHERE.
+      expect(JSON.stringify(env)).not.toContain(
+        daytonaBroker.installationToken,
+      );
+    });
+
+    it("DELETES a user-supplied GH_TOKEN/GITHUB_TOKEN so it can't shadow the placeholder", () => {
+      const env = getEnv({
+        githubAccessToken: daytonaBroker.installationToken,
+        userEnv: [
+          { key: "GH_TOKEN", value: "user-token" },
+          { key: "GITHUB_TOKEN", value: "user-token-2" },
+          { key: "OTHER", value: "keep-me" },
+        ],
+        agentCredentials: null,
+        credentialBroker: daytonaBroker,
+      });
+      expect(env.GH_TOKEN).toBeUndefined();
+      expect(env.GITHUB_TOKEN).toBeUndefined();
+      // Non-github user vars are untouched.
+      expect(env.OTHER).toBe("keep-me");
+    });
+
+    it("still applies our trusted overrides after the reserved broker keys", () => {
+      const env = getEnv({
+        githubAccessToken: daytonaBroker.installationToken,
+        userEnv: [],
+        agentCredentials: null,
+        credentialBroker: daytonaBroker,
+        overrides: { CI: "true" },
+      });
+      expect(env.CI).toBe("true");
+      expect(env.GH_TOKEN).toBeUndefined();
     });
   });
 });

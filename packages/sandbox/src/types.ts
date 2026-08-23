@@ -17,31 +17,99 @@ export type EgressPolicyShape = {
 };
 
 /**
- * Per-run credential-broker SHAPE (#114) — the inputs a Docker cred-broker
- * sidecar needs to stand up a repo-fenced git-smart-HTTP proxy: the GitHub
- * installation token, the per-run bearer the guest presents, and the fenced
- * `owner/repo`. Structural mirror of {@link EgressPolicyShape} — declared
- * per-package, resolved control-plane-side, never imported across the plane
- * boundary.
+ * Per-run credential-broker SHAPE (#114) — a DISCRIMINATED UNION over the
+ * `kind` of never-resident custody a provider stands up. Structural mirror of
+ * {@link EgressPolicyShape} — declared per-package, resolved control-plane-side,
+ * never imported across the plane boundary.
  *
  * HONESTY NOTE: unlike {@link EgressPolicyShape} (which carries only resolved
  * POLICY — non-secret), this shape carries a LIVE SECRET (the installation
  * token). A provider that consumes it therefore becomes a secret custodian for
  * the run's lifetime — a deliberate, narrower trust statement than egress's
- * plane-neutral invariant. The sidecar builders in
- * providers/docker-cred-broker.ts keep the token OFF argv/`-e`, delivering it
- * only through a `0o400` `:ro` file mount.
+ * plane-neutral invariant. Each variant keeps the token off `/proc`, argv, and
+ * guest disk by its OWN mechanism (see the variant docs).
+ */
+export type CredentialBrokerShape =
+  | DockerCredentialBrokerShape
+  | E2bCredentialBrokerShape
+  | DaytonaCredentialBrokerShape;
+
+/**
+ * Docker variant (#114) — the inputs a Docker cred-broker sidecar needs to
+ * stand up a repo-fenced git-smart-HTTP proxy: the GitHub installation token,
+ * the per-run bearer the guest presents, and the fenced `owner/repo`.
+ *
+ * The sidecar builders in providers/docker-cred-broker.ts keep the token OFF
+ * argv/`-e`, delivering it only through a `0o400` `:ro` file mount. The guest
+ * holds ONLY the ephemeral bearer (never the installation token).
  *
  * WIRED (#114): consumed on the Docker create path (docker-provider
  * setUpCredentialBroker + setup.ts brokered git-config + env.ts brokered env);
- * resume fails closed via the NON-secret
- * {@link CreateSandboxOptions.credentialBrokerMode}. Built control-plane-side
- * only at CREATE; the bearer is ephemeral (never persisted).
+ * a Docker brokered sandbox is NON-resumable and fails closed on resume via the
+ * NON-secret {@link CreateSandboxOptions.credentialBrokerMode}. Built
+ * control-plane-side only at CREATE; the bearer is ephemeral (never persisted).
  */
-export type CredentialBrokerShape = {
+export type DockerCredentialBrokerShape = {
+  kind: "docker-sidecar";
   installationToken: string;
   runBearer: string;
   repoFullName: string;
+};
+
+/**
+ * E2B variant (#114) — E2B injects the credential in its OWN egress plane, so
+ * there is NO sidecar and NO guest-held bearer. The provider seeds E2B's
+ * write-only Secret vault with the installation token and registers a per-host
+ * `network.rules[host].transform.headers` rule that injects
+ * `Authorization: token ${e2b.secrets.<name>}` on requests to github.com /
+ * api.github.com — resolved by E2B's egress proxy per request, OUTSIDE the
+ * guest. The guest carries only a non-secret placeholder GH_TOKEN (env.ts), and
+ * no ~/.git-credentials is written (setup.ts).
+ *
+ * The per-run vault secret NAME is NOT carried here: it is derived
+ * deterministically from the E2B sandboxId (the only handle that survives
+ * pause/resume AND is available at teardown-by-id) via
+ * `e2bBrokerSecretName()`. So this shape needs only the token (to seed/refresh
+ * the vault) and `repoFullName` (parity / non-secret provenance). Unlike
+ * Docker, an E2B brokered sandbox CAN resume in place (rules + vault persist
+ * across pause) — the provider REFRESHES the vault secret with a fresh
+ * installation token on resume (Secret.update). Built control-plane-side on
+ * BOTH create and resume (the token is short-lived); never persisted.
+ */
+export type E2bCredentialBrokerShape = {
+  kind: "e2b-native";
+  installationToken: string;
+  repoFullName: string;
+};
+
+/**
+ * Daytona variant (#114) — like E2B, Daytona injects the credential in its OWN
+ * egress plane, so there is NO sidecar and NO guest-held bearer. The provider
+ * seeds a WRITE-ONLY org Secret (`daytona.secret.create`) with the installation
+ * token and mounts it into the sandbox via the create-time `secrets` map
+ * (ENV-VAR → secret NAME). The guest env var receives only the secret's opaque
+ * `placeholder` (`dtn_secret_<id>`); Daytona substitutes the real value
+ * transparently on outbound HTTPS requests to the secret's allowed `hosts`
+ * (github.com / api.github.com), where the placeholder appears VERBATIM in an
+ * `Authorization` header. The guest never holds the installation token (env.ts
+ * sets no resident token; setup.ts writes a VERBATIM `Authorization: token
+ * $GH_TOKEN` extraheader — never base64, no `~/.git-credentials`).
+ *
+ * INVERTED ordering vs E2B: the `secrets` map references a secret NAME that must
+ * ALREADY EXIST, so the secret is created BEFORE `daytona.create`. The name
+ * cannot derive from the sandboxId (which does not exist yet); it is derived
+ * control-plane-side from the STABLE thread id and carried HERE as `secretName`
+ * so create, resume-refresh, and teardown all address the same secret with NO
+ * new persistence. Like E2B, a Daytona brokered sandbox CAN resume in place —
+ * the provider REFRESHES the secret value with a fresh installation token on
+ * resume. Built control-plane-side on BOTH create and resume; never persisted.
+ */
+export type DaytonaCredentialBrokerShape = {
+  kind: "daytona-native";
+  installationToken: string;
+  repoFullName: string;
+  /** Deterministic, thread-derived org-Secret name. Stable across resume. */
+  secretName: string;
 };
 
 // NOTE: This is stored in the database, so don't remove any values from this list.
@@ -96,10 +164,16 @@ export type CreateSandboxOptions = {
   egressPolicy?: EgressPolicyShape;
   /**
    * Per-run credential-broker SHAPE (#114) — see {@link CredentialBrokerShape}.
-   * Present (Docker create path, flag on) = the guest is brokered: the provider
-   * stands up a cred-broker sidecar and the guest never receives the
-   * installation token. Absent = today's raw-token behavior (rollback / flag
-   * off / non-Docker provider). Carries a live secret; built only at CREATE.
+   * Present = the guest is brokered and never receives the installation token:
+   *  - Docker (`docker-sidecar`): set on the CREATE path only (a Docker brokered
+   *    sandbox is non-resumable; resume recreates). The provider stands up a
+   *    cred-broker sidecar.
+   *  - E2B (`e2b-native`): set on BOTH create and resume. On create the provider
+   *    seeds E2B's Secret vault + registers the egress header-injection rule; on
+   *    resume it REFRESHES the vault secret (E2B resumes in place). The token
+   *    here seeds/refreshes the vault; it never reaches the guest.
+   * Absent = today's raw-token behavior (rollback / flag off / unbrokered
+   * provider). Carries a live secret.
    */
   credentialBroker?: CredentialBrokerShape;
   /**
@@ -124,24 +198,66 @@ export type CreateSandboxOptions = {
   }) => Promise<void>;
 };
 
+/**
+ * Lazy broker-secret refresh handle for the SECONDARY connect paths (#114 §7a).
+ *
+ * `getSandboxOrNull` (admin log viewer) and `extendLife` (keepalive) both
+ * `Sandbox.connect` — which AUTO-RESUMES a paused guest. On a brokered E2B
+ * sandbox the guest would otherwise resume on whatever installation token is
+ * already vaulted, so these paths must be able to rotate the vault secret
+ * BEFORE connect, exactly like the primary `resumeSandbox` path.
+ *
+ * Shaped as a LAZY resolver: `mintToken` is a callback that mints a FRESH
+ * installation token, and the E2B provider invokes it ONLY when a rotation is
+ * actually due (the vaulted secret is stale / missing — see the near-expiry
+ * throttle in e2b-provider.ts). A frequent keepalive on a still-fresh secret
+ * therefore never mints a token. Absent (the default) = today's behavior:
+ * connect with no rotation. Non-E2B providers ignore it (their `extendLife` /
+ * `getSandboxOrNull` simply omit the parameter — assignable to this signature).
+ */
+export type BrokerRefresh = {
+  /** Mint a fresh GitHub installation token. Invoked only when rotation is due. */
+  mintToken: () => Promise<string>;
+  /**
+   * Daytona-only (#114): the deterministic, thread-derived org-Secret NAME the
+   * provider must rotate. Daytona has no by-name freshness read keyed on the
+   * sandboxId (its secret name derives from the STABLE thread id, not the
+   * sandboxId), so the SECONDARY connect paths — which see only a sandboxId —
+   * cannot re-derive it; the control plane supplies it here. E2B derives its
+   * vault-secret name from the sandboxId and IGNORES this field. Absent on the
+   * E2B / non-Daytona paths.
+   */
+  secretName?: string;
+};
+
 export interface ISandboxProvider {
-  getSandboxOrNull(sandboxId: string): Promise<ISandboxSession | null>;
+  getSandboxOrNull(
+    sandboxId: string,
+    refresh?: BrokerRefresh,
+  ): Promise<ISandboxSession | null>;
   getOrCreateSandbox(
     sandboxId: string | null,
     options: CreateSandboxOptions,
   ): Promise<ISandboxSession>;
   hibernateById(sandboxId: string): Promise<void>;
-  extendLife(sandboxId: string): Promise<void>;
+  extendLife(sandboxId: string, refresh?: BrokerRefresh): Promise<void>;
   /**
    * Force-destroy a sandbox by id WITHOUT starting/unpausing it (#114). Unlike
    * {@link getSandboxOrNull} (which unpauses/starts a stale guest so it can be
    * resumed), this tears the guest and any sidecar/network/secret-file
-   * resources down in place — used by the brokered-resume recreate so a stale
-   * raw-token guest is never revived on its way to the grave. Optional: only
-   * the Docker provider (the only brokered provider) implements it; callers
-   * fall back to {@link getSandboxOrNull} + shutdown otherwise.
+   * resources down in place — used by the brokered-resume recreate and the
+   * create-failure sweeps so a stale raw-token guest is never revived on its way
+   * to the grave. Optional: the Docker, E2B, and Daytona providers implement it;
+   * callers fall back to {@link getSandboxOrNull} + shutdown otherwise.
+   *
+   * `brokerSecretName` (#114, Daytona-only): the deterministic thread-derived
+   * org-Secret name to delete alongside the guest. Daytona's broker secret name
+   * derives from the STABLE thread id (not the sandboxId), so a by-id teardown
+   * of a FRESH/UNMARKED session cannot re-derive it — the caller supplies it
+   * here so the secret (holding a live installation token) is never orphaned.
+   * E2B/Docker derive their broker resource from the sandboxId and IGNORE it.
    */
-  shutdownById?(sandboxId: string): Promise<void>;
+  shutdownById?(sandboxId: string, brokerSecretName?: string): Promise<void>;
 }
 
 export interface BackgroundCommandOptions {

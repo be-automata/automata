@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { getUserOrNull } from "@/lib/auth-server";
 import {
@@ -131,6 +132,15 @@ export async function POST(request: NextRequest) {
         // supported by the flag system, so this is the user-scoped fallback;
         // env stays force-on.
         featureFlags,
+        // #114: this setup-script sandbox is threadless and ephemeral (never
+        // resumed) and torn down BY-SESSION (sandbox.shutdown() below deletes
+        // the secret the session captured at create — no by-id/by-derivation
+        // recovery is ever needed). So the Daytona org-Secret name must be
+        // unique PER INVOCATION, not per environment: two concurrent setup-script
+        // runs for the SAME environment would otherwise derive the same secret
+        // name, and either run's shutdown would delete the other's live secret.
+        // A per-run random suffix removes the collision. Ignored by Docker/E2B.
+        threadId: `${environmentId}-${randomBytes(8).toString("hex")}`,
       });
       // Create sandbox options
       const sandboxOptions: CreateSandboxOptions = {

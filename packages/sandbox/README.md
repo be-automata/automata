@@ -184,18 +184,18 @@ autoArchiveInterval: 5, autoDeleteInterval: 30d, … })` (`daytona-provider.ts:7
 > and [`docs/compliance/soc2-egress-alignment.md`](../../docs/compliance/soc2-egress-alignment.md).
 > Where the docs and code disagree, the code wins and it is flagged inline.
 
-|                         | **E2B**                              | **Daytona**                       | **Docker**                            | **Mock**        |
-| ----------------------- | ------------------------------------ | --------------------------------- | ------------------------------------- | --------------- |
-| Runs where              | managed micro-VM (remote)            | managed sandbox (remote)          | local container                       | in-process stub |
-| SDK / lib               | `@e2b/code-interpreter ^2.7.1` (v2)  | `@daytonaio/sdk 0.205.1`          | `docker` CLI                          | none            |
-| Egress mechanism        | native firewall `allowOut`/`denyOut` | create-time `domainAllowList`     | `--internal` net + proxy sidecar      | none            |
-| Policy levels supported | `none` / `ip_port`\* / `domain`      | `domain` **only**                 | `none` / `ip_port` / `domain`         | n/a             |
-| Env-unset bypass?       | no (below process)                   | no (below process)                | no (no route but the proxy)           | n/a             |
-| Per-connection audit    | **no feed**                          | **no feed**                       | **yes** — sidecar stdout JSON         | n/a             |
-| Resident GitHub token   | yes (`~/.git-credentials`)           | yes                               | brokered-optional (#114 Docker, flag) | n/a             |
-| Boot                    | new VM + template pull               | new sandbox + snapshot            | local `docker run` (fastest)          | instant         |
-| Resume                  | `connect` auto-resume from pause     | state-machine restore/start       | unpause/start                         | n/a             |
-| Cost                    | metered VM (managed billing)         | metered sandbox (managed billing) | local compute only                    | free            |
+|                         | **E2B**                                                         | **Daytona**                       | **Docker**                                     | **Mock**        |
+| ----------------------- | --------------------------------------------------------------- | --------------------------------- | ---------------------------------------------- | --------------- |
+| Runs where              | managed micro-VM (remote)                                       | managed sandbox (remote)          | local container                                | in-process stub |
+| SDK / lib               | `@e2b/code-interpreter ^2.7.1` (v2)                             | `@daytonaio/sdk 0.205.1`          | `docker` CLI                                   | none            |
+| Egress mechanism        | native firewall `allowOut`/`denyOut`                            | create-time `domainAllowList`     | `--internal` net + proxy sidecar               | none            |
+| Policy levels supported | `none` / `ip_port`\* / `domain`                                 | `domain` **only**                 | `none` / `ip_port` / `domain`                  | n/a             |
+| Env-unset bypass?       | no (below process)                                              | no (below process)                | no (no route but the proxy)                    | n/a             |
+| Per-connection audit    | **no feed**                                                     | **no feed**                       | **yes** — sidecar stdout JSON                  | n/a             |
+| Resident GitHub token   | brokered-optional (#114 E2B, flag, egress-injected; live-gated) | yes                               | brokered-optional (#114 Docker, flag, sidecar) | n/a             |
+| Boot                    | new VM + template pull                                          | new sandbox + snapshot            | local `docker run` (fastest)                   | instant         |
+| Resume                  | `connect` auto-resume from pause                                | state-machine restore/start       | unpause/start                                  | n/a             |
+| Cost                    | metered VM (managed billing)                                    | metered sandbox (managed billing) | local compute only                             | free            |
 
 \* E2B `ip_port`: the level is accepted, but a `host:port` allowlist entry maps to
 its bare host — E2B selectors carry no port syntax, so the port pin is dropped at
@@ -271,15 +271,57 @@ Two planes, two very different states:
   `~/.git-credentials`** on the brokered path. Brokered sandboxes are **not resumed
   in place** — a resume fails closed and recreates fresh under a DB CAS lease
   (`thread.credentialBrokerMode` provenance). Default off = today's exact behavior.
-  **Git only:** the `gh`-API half (a CA-terminating CONNECT proxy) is deferred — a
-  brokered guest's `gh` API calls fail closed (401) rather than leak. **E2B/Daytona
-  stay unbrokered** (managed runtimes, no host-reachable per-run peer). #114 remains
-  open for those two + the gh half.
-- **#89 (review-lane on-disk credential) — OPEN for E2B/Daytona; closed on the
-  brokered Docker path.** The review env-strip removes env keys only, so the
-  `~/.git-credentials` channel (`setup.ts:213`) survives it on the unbrokered
-  providers; a brokered Docker sandbox writes no such file. Still open for E2B and
-  Daytona (and unbrokered/default Docker).
+  **Git only on Docker:** the `gh`-API half (a CA-terminating CONNECT proxy) is
+  deferred — a brokered Docker guest's `gh` API calls fail closed (401) rather
+  than leak.
+- **Sandbox plane — E2B brokered behind the same flag (#114, git AND gh),
+  live-gated.** E2B needs **no sidecar**: it injects the credential in its OWN
+  egress plane. The installation token lives in E2B's **write-only Secret vault**
+  (`Secret.create`/`Secret.fill`), and a per-host
+  `network.rules[host].transform.headers` rule injects `Authorization: token
+${e2b.secrets.<name>}` for **github.com AND api.github.com** — resolved by
+  E2B's egress proxy per request, OUTSIDE the guest (so ONE mechanism covers both
+  git and `gh`, unlike Docker). The guest holds only a **non-secret placeholder**
+  `GH_TOKEN` (`env.ts`) and **no `~/.git-credentials`** (`setup.ts`); git uses
+  plain `https://github.com`. The vault-secret name derives from the sandboxId
+  (`e2bBrokerSecretName`), so create/resume/teardown all address it with no extra
+  persistence. Unlike Docker, an E2B brokered sandbox **resumes in place** — the
+  rules + vault persist across pause and the provider **refreshes** the vault
+  secret with a fresh installation token (`Secret.update`); teardown destroys it
+  (`Secret.destroy`). allowOut composes with any #66 egress policy without
+  clobbering it (`egress.ts:toE2bBrokeredNetwork`). **Fail closed** on any
+  refresh/setup failure (never a resident raw token). **LIVE-GATED:**
+  `transform.headers` is E2B public beta and needs transform-plan access on the
+  team; implemented + unit-tested + type-checked here, **not yet live-verified**
+  (see `reports/ISSUE-114-E2B-SPEC.md` §7, mirroring `docs/egress-enforcement.md`).
+- **Sandbox plane — Daytona brokered behind the same flag (#114, git AND gh),
+  live-gated.** Like E2B, Daytona needs **no sidecar** — it substitutes the
+  credential in its OWN egress plane. The installation token lives in a
+  **write-only org Secret** (`daytona.secret.create`, scoped
+  `hosts: [github.com, api.github.com]`), mounted into the guest via the
+  create-time `secrets` map as a **non-secret placeholder** (`GH_TOKEN` /
+  `GITHUB_TOKEN` → `dtn_secret_<id>`); `setup.ts` writes a **verbatim**
+  `Authorization: token $GH_TOKEN` git extraheader (never base64, **no
+  `~/.git-credentials`**) and Daytona substitutes the real token on outbound
+  requests to the allowed hosts (so ONE mechanism covers both git and `gh`). The
+  org-Secret name derives from the stable thread id (`daytonaBrokerSecretName`),
+  so create/resume/teardown all address it with no extra persistence. Like E2B, a
+  Daytona brokered sandbox **resumes in place** — the org Secret + `secrets`
+  mapping persist across pause and the provider **refreshes** the secret value
+  with a fresh installation token; teardown deletes it
+  (`daytona.secret.delete`). domainAllowList composes with any #66 egress policy
+  without clobbering it (`egress.ts:toDaytonaBrokeredNetwork`). **Fail closed** on
+  any refresh/setup failure (never a resident raw token). **LIVE-GATED:** verify
+  org tier + verbatim-placeholder substitution before prod. #114 remains open for
+  the Docker `gh`-API half (a CA-terminating CONNECT proxy).
+- **#89 (review-lane on-disk credential) — closed on ALL brokered planes; open
+  only when the flag is off.** With the broker flag on, NONE of the three
+  brokered planes (Docker, E2B, Daytona) write `~/.git-credentials` — Docker uses
+  the sidecar, and E2B/Daytona keep the token out of the guest entirely (a
+  non-secret placeholder only). The review env-strip removes env keys only, so the
+  `~/.git-credentials` channel (`setup.ts:213`) survives it ONLY on the
+  unbrokered/default path (flag off) on any provider; every brokered plane writes
+  no such file.
 
 > Note: `docs/compliance/soc2-egress-alignment.md:22` credits only the git broker
 > and is worker-plane-scoped; it predates the gh-API broker from PR #113. The

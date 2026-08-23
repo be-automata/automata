@@ -177,6 +177,7 @@ describe("sandbox-setup", () => {
         .spyOn(session, "runCommand")
         .mockResolvedValue("");
       const broker = {
+        kind: "docker-sidecar" as const,
         installationToken: "ghs_installation_token_secret",
         runBearer: "run-bearer-abc123",
         repoFullName: "owner/repo",
@@ -198,6 +199,72 @@ describe("sandbox-setup", () => {
       expect(script).not.toContain("credential.helper store");
       expect(script).not.toMatch(/echo.*> ~\/\.git-credentials/);
       // The installation token appears NOWHERE in the guest commands.
+      expect(script).not.toContain(broker.installationToken);
+      expect(script).not.toContain("x-access-token");
+    });
+
+    it("e2b-native brokered: scrubs residue, writes NO ~/.git-credentials and NO broker wiring (E2B injects at egress)", async () => {
+      const session = new MockSession("mock-sandbox");
+      const runCommandSpy = vi
+        .spyOn(session, "runCommand")
+        .mockResolvedValue("");
+      const broker = {
+        kind: "e2b-native" as const,
+        installationToken: "ghs_installation_token_secret",
+        repoFullName: "owner/repo",
+      };
+      await setupGitCredentials(session, {
+        ...defaultOptions,
+        credentialBroker: broker,
+      });
+      const script = runCommandSpy.mock.calls.map((c) => c[0]).join("\n");
+      // Defensive scrub only — no credentials file, no docker-broker insteadOf.
+      expect(script).toContain("rm -f ~/.git-credentials");
+      expect(script).not.toContain("credential.helper store");
+      expect(script).not.toMatch(/echo.*> ~\/\.git-credentials/);
+      expect(script).not.toContain("insteadOf");
+      expect(script).not.toContain(CRED_BROKER_ALIAS);
+      // The installation token appears NOWHERE in the guest commands.
+      expect(script).not.toContain(broker.installationToken);
+      expect(script).not.toContain("x-access-token");
+    });
+
+    it("daytona-native brokered: writes the VERBATIM `Authorization: token $GH_TOKEN` extraheader (no base64, no ~/.git-credentials)", async () => {
+      const session = new MockSession("mock-sandbox");
+      const runCommandSpy = vi
+        .spyOn(session, "runCommand")
+        .mockResolvedValue("");
+      const broker = {
+        kind: "daytona-native" as const,
+        installationToken: "ghs_installation_token_secret",
+        repoFullName: "owner/repo",
+        secretName: "gh-inst-thread_abc123",
+      };
+      await setupGitCredentials(session, {
+        ...defaultOptions,
+        credentialBroker: broker,
+      });
+      const script = runCommandSpy.mock.calls.map((c) => c[0]).join("\n");
+      // Verbatim-token extraheader for BOTH github hosts, shell-expanded from the
+      // sandbox-level placeholder ($GH_TOKEN). This is the inverse of e2b (which
+      // UNSETS the extraheader): daytona must SET it so git sends the placeholder
+      // verbatim in the Authorization header for substitution.
+      expect(script).toContain(
+        `git config --global http.https://github.com/.extraheader "Authorization: token $GH_TOKEN"`,
+      );
+      expect(script).toContain(
+        `git config --global http.https://api.github.com/.extraheader "Authorization: token $GH_TOKEN"`,
+      );
+      // NEVER base64 (Basic auth would defeat substitution).
+      expect(script).not.toMatch(/Authorization: Basic/i);
+      expect(script).not.toContain("base64");
+      // NO ~/.git-credentials written, no store helper, no docker-broker wiring.
+      expect(script).toContain("rm -f ~/.git-credentials");
+      expect(script).not.toContain("credential.helper store");
+      expect(script).not.toMatch(/echo.*> ~\/\.git-credentials/);
+      expect(script).not.toContain("insteadOf");
+      // The installation token appears NOWHERE in the guest commands (only the
+      // placeholder reference $GH_TOKEN, resolved server-side by Daytona).
       expect(script).not.toContain(broker.installationToken);
       expect(script).not.toContain("x-access-token");
     });

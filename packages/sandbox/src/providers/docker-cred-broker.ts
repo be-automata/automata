@@ -1,6 +1,6 @@
 import { bashQuote } from "../utils";
 import { sandboxTimeoutMs } from "../constants";
-import type { CredentialBrokerShape } from "../types";
+import type { DockerCredentialBrokerShape } from "../types";
 
 /**
  * Pure command/args builders for the Docker-plane credential-broker sidecar
@@ -183,7 +183,7 @@ export function isAgedUnreferencedBroker(params: {
  * share one shape. NEVER logged; NEVER passed as argv/`-e`.
  */
 export function buildCredBrokerSecretsFileContent(
-  shape: Pick<CredentialBrokerShape, "installationToken" | "runBearer">,
+  shape: Pick<DockerCredentialBrokerShape, "installationToken" | "runBearer">,
 ): string {
   return JSON.stringify({
     installationToken: shape.installationToken,

@@ -1,6 +1,7 @@
 import {
   BackgroundCommandOptions,
   CreateSandboxOptions,
+  DockerCredentialBrokerShape,
   ISandboxProvider,
   ISandboxSession,
 } from "../types";
@@ -432,20 +433,23 @@ export class DockerProvider implements ISandboxProvider {
       //    fences the TOKEN, not egress).
       let credBrokerConfigured = false;
       let credGuestFlags = "";
-      if (options.credentialBroker) {
+      // The Docker provider only ever receives the `docker-sidecar` variant
+      // (the resolver returns `e2b-native` only for the E2B provider); narrow
+      // explicitly so a mis-routed shape can never stand up a sidecar.
+      const dockerBroker =
+        options.credentialBroker?.kind === "docker-sidecar"
+          ? options.credentialBroker
+          : undefined;
+      if (dockerBroker) {
         const usesEgressNetwork = egressFlags !== "";
         const brokerNetwork = usesEgressNetwork
           ? egressNetworkName(containerName)
           : credBrokerNetworkName(containerName);
-        await this.setUpCredentialBroker(
-          containerName,
-          options.credentialBroker,
-          {
-            networkName: brokerNetwork,
-            createNetwork: !usesEgressNetwork,
-            connectBridge: usesEgressNetwork,
-          },
-        );
+        await this.setUpCredentialBroker(containerName, dockerBroker, {
+          networkName: brokerNetwork,
+          createNetwork: !usesEgressNetwork,
+          connectBridge: usesEgressNetwork,
+        });
         credBrokerConfigured = true;
         credBrokerDedicatedNetwork = !usesEgressNetwork;
         if (usesEgressNetwork) {
@@ -481,7 +485,7 @@ export class DockerProvider implements ISandboxProvider {
       // and silently orphans the `--internal` network. When the broker owns no
       // network of its own, the egress teardown reclaims the shared one; only a
       // dedicated broker network is removed by the broker teardown itself.
-      if (options.credentialBroker) {
+      if (options.credentialBroker?.kind === "docker-sidecar") {
         this.tearDownCredentialBroker(containerName, {
           removeNetwork: credBrokerDedicatedNetwork,
         });
@@ -572,7 +576,7 @@ export class DockerProvider implements ISandboxProvider {
    */
   private async setUpCredentialBroker(
     containerName: string,
-    broker: NonNullable<CreateSandboxOptions["credentialBroker"]>,
+    broker: DockerCredentialBrokerShape,
     opts: {
       networkName: string;
       createNetwork: boolean;
