@@ -47,6 +47,20 @@ export function getEnv({
   // userEnv/agentCredentials so a user-supplied GH_TOKEN can NOT shadow the
   // per-run bearer (still before `overrides`, which are our own trusted keys).
   // The installation token appears NOWHERE in the returned env.
+  //
+  // SCOPE (#114): only the GIT half is brokered on Docker. The per-run bearer
+  // below is meaningful ONLY to the cred-broker sidecar's git-smart-HTTP
+  // endpoints (routed via the `insteadOf`+Bearer git config in setup.ts); it is
+  // deliberately NOT a valid api.github.com credential. The gh-API half — the
+  // worker plane's gh-broker + GH_CONFIG_DIR/http_unix_socket routing
+  // (packages/worker/src/agent-run/daemon-env.ts) — is DEFERRED (a
+  // CA-terminating CONNECT proxy; tracked on #114). Consequence, by design:
+  // with SANDBOX_CREDENTIAL_BROKER=on, `gh` API calls that need auth FAIL CLOSED
+  // (401 against a bearer GitHub cannot honor) rather than leak the installation
+  // token. Setting GH_TOKEN to the bearer (vs. leaving the raw token, or
+  // unsetting it) is what keeps the raw token out of the guest while git stays
+  // fully functional; the 401 is the intended fail-closed posture until the gh
+  // half lands.
   if (credentialBroker) {
     env.GH_TOKEN = credentialBroker.runBearer;
     env.GITHUB_TOKEN = credentialBroker.runBearer;
