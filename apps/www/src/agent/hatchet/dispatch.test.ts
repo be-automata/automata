@@ -154,19 +154,15 @@ describe("dispatchAgentRun", () => {
     });
 
     const input = JSON.parse(fetchMock.mock.calls[0]![1].body).input;
-    // The FINAL shape: operator entries + system hosts (callback, github.com,
-    // api.github.com, api.anthropic.com) merged control-plane-side — the worker
-    // receives level + allowlist only, never table/model provenance.
+    // The FINAL shape: operator entries + system hosts merged control-plane-side
+    // — the worker receives level + allowlist only, never table/model
+    // provenance. dispatch enforces on the WORKER plane, whose system hosts drop
+    // github.com / api.github.com (#66 AC4): the agent reaches GitHub only
+    // through loopback brokers (#81), leaving the callback host + api.anthropic.com.
     const callbackHost = new URL(process.env.NEXT_PUBLIC_APP_URL!).host;
     expect(input.egressPolicy).toEqual({
       level: "domain",
-      allowlist: [
-        "registry.npmjs.org",
-        callbackHost,
-        "github.com",
-        "api.github.com",
-        "api.anthropic.com",
-      ],
+      allowlist: ["registry.npmjs.org", callbackHost, "api.anthropic.com"],
     });
     vi.unstubAllGlobals();
   });
