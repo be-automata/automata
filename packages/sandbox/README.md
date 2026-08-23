@@ -309,7 +309,8 @@ Two planes, two very different states:
   on the real org first); no audit feed; resident token.
 - **Docker** — _pro:_ fastest, free, the **only** plane with per-connection egress
   audit, and the only sandbox plane that can broker credentials
-  (#114 Docker, `SANDBOX_CREDENTIAL_BROKER=on` → no resident token in the guest); great for local iteration. _con:_ local single-host, not
+  (#114 Docker, `SANDBOX_CREDENTIAL_BROKER=on` → no resident token in the guest);
+  great for local iteration. _con:_ local single-host, not
   remote isolation; hibernate is timer-based; still writes a resident token like
   every sandbox provider today; not a production isolation boundary.
 - **Mock** — _pro:_ zero-cost deterministic tests. _con:_ test-only; every I/O
