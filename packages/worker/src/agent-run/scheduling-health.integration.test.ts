@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
+import { writeFile, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,17 +51,39 @@ const packageRoot = path.resolve(
   "..",
 );
 const COMPOSE_FILE = path.join(packageRoot, "docker-compose.hatchet.yml");
+// `docker compose up` has no --publish flag (that's `run`); the port override
+// must come from a compose file. Generated at runtime, scoped to the IT
+// project only, so the repo's compose files stay untouched (base publishes no
+// port by design, and the maintenance overlay owns 55433).
+const IT_OVERRIDE_FILE = path.join(
+  packageRoot,
+  ".hatchet-it-port-override.generated.yml",
+);
 const COMPOSE_PROJECT_NAME = "automata-hatchet-it";
 // Deliberately far from the live stack's 8888/7077 and the maintenance
 // overlay's 55433, so an isolated run can never collide with a box that also
 // has the live pilot stack (or another dev box's maintenance overlay) up.
 const IT_PG_PORT = 25433;
+// hatchet-lite must ALSO run in the IT project: the engine, not postgres,
+// owns the schema migrations (a postgres-only stack has zero v1_* tables).
+// Its host ports are !override'd away so the IT project can never collide
+// with the live stack's 8888/7077 (compose v2.24+ supports !override).
+const IT_OVERRIDE_YAML = `services:
+  postgres:
+    ports:
+      - "127.0.0.1:${IT_PG_PORT}:5432"
+  hatchet-lite:
+    ports: !override []
+`;
 
 async function composeUp(): Promise<void> {
+  await writeFile(IT_OVERRIDE_FILE, IT_OVERRIDE_YAML, "utf8");
   await execFileAsync("docker", [
     "compose",
     "-f",
     COMPOSE_FILE,
+    "-f",
+    IT_OVERRIDE_FILE,
     "-p",
     COMPOSE_PROJECT_NAME,
     "--project-directory",
@@ -68,7 +91,32 @@ async function composeUp(): Promise<void> {
     "up",
     "-d",
     "postgres",
+    "hatchet-lite",
   ]);
+}
+
+/**
+ * Migrations belong to hatchet-lite, not postgres — poll until the engine has
+ * created the concurrency tables before letting any fixture run.
+ */
+async function waitForSchemaReady(
+  client: Client,
+  timeoutMs = 120_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const r = await client.query(
+      `SELECT count(*)::int AS n FROM information_schema.tables
+       WHERE table_name IN ('v1_step_concurrency','v1_concurrency_slot','v1_task_runtime','Worker')`,
+    );
+    if (r.rows[0].n >= 4) return;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `hatchet-lite migrations did not create the expected tables within ${timeoutMs}ms (found ${r.rows[0].n}/4)`,
+      );
+    }
+    await new Promise((res) => setTimeout(res, 2000));
+  }
 }
 
 async function composeDownV(): Promise<void> {
@@ -125,20 +173,7 @@ describe.skipIf(!itEnabled)(
       // IT_PG_PORT, never 55433 (the maintenance overlay's port) and never
       // touching the live project. This mirrors
       // docker-compose.hatchet.maintenance.yml's shape without editing it.
-      await execFileAsync("docker", [
-        "compose",
-        "-f",
-        COMPOSE_FILE,
-        "-p",
-        COMPOSE_PROJECT_NAME,
-        "--project-directory",
-        packageRoot,
-        "up",
-        "-d",
-        "postgres",
-        "--publish",
-        `127.0.0.1:${IT_PG_PORT}:5432`,
-      ]).catch(() => composeUp());
+      await composeUp();
       await waitForPgReady(IT_PG_PORT);
       pg = new Client({
         host: "127.0.0.1",
@@ -148,6 +183,7 @@ describe.skipIf(!itEnabled)(
         database: "hatchet",
       });
       await pg.connect();
+      await waitForSchemaReady(pg);
       db = {
         query: (text: string, params?: unknown[]) => pg.query(text, params),
       };
@@ -175,7 +211,8 @@ describe.skipIf(!itEnabled)(
     afterAll(async () => {
       await pg?.end().catch(() => {});
       await composeDownV().catch(() => {});
-    });
+      await rm(IT_OVERRIDE_FILE, { force: true }).catch(() => {});
+    }, 60_000);
 
     describe("7.2.1 — concurrency-group rot: SQL round-trip against a real isolated engine schema", () => {
       it("AC-1: detectors return nothing against freshly-migrated, empty concurrency tables", async () => {
