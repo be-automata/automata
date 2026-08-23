@@ -81,4 +81,48 @@ describe("getEnv", () => {
 
     expect(env.GH_TOKEN).toBe("override-token");
   });
+
+  describe("credential broker (#114)", () => {
+    const broker = {
+      installationToken: "ghs_installation_token_secret",
+      runBearer: "run-bearer-abc123",
+      repoFullName: "be-automata/automata",
+    };
+
+    it("sets GH_TOKEN/GITHUB_TOKEN to the bearer and GH_REPO, never the token", () => {
+      const env = getEnv({
+        githubAccessToken: broker.installationToken,
+        userEnv: [],
+        agentCredentials: null,
+        credentialBroker: broker,
+      });
+      expect(env.GH_TOKEN).toBe(broker.runBearer);
+      expect(env.GITHUB_TOKEN).toBe(broker.runBearer);
+      expect(env.GH_REPO).toBe(broker.repoFullName);
+      // The installation token appears NOWHERE.
+      expect(JSON.stringify(env)).not.toContain(broker.installationToken);
+    });
+
+    it("RESERVES GH_TOKEN in brokered mode — a user GH_TOKEN can NOT shadow the bearer", () => {
+      const env = getEnv({
+        githubAccessToken: broker.installationToken,
+        userEnv: [{ key: "GH_TOKEN", value: "user-token" }],
+        agentCredentials: null,
+        credentialBroker: broker,
+      });
+      expect(env.GH_TOKEN).toBe(broker.runBearer);
+      expect(env.GITHUB_TOKEN).toBe(broker.runBearer);
+    });
+
+    it("still applies our trusted overrides after the reserved broker keys", () => {
+      const env = getEnv({
+        githubAccessToken: broker.installationToken,
+        userEnv: [],
+        agentCredentials: null,
+        credentialBroker: broker,
+        overrides: { GH_TOKEN: "override-token" },
+      });
+      expect(env.GH_TOKEN).toBe("override-token");
+    });
+  });
 });

@@ -21,6 +21,11 @@ import {
   OPENCODE_AUTO_APPROVE_PLUGIN_CONTENT,
 } from "./agents/opencode-config";
 import { getEnv } from "./env";
+import {
+  CRED_BROKER_ALIAS,
+  CRED_BROKER_GIT_PORT,
+  buildGuestCredBrokerGitConfig,
+} from "./providers/docker-cred-broker";
 import path from "path";
 
 async function createNewBranch({
@@ -118,6 +123,7 @@ export async function setupSandboxOneTime(
     userMcpConfig: options.mcpConfig,
     publicUrl: options.publicUrl,
     featureFlags: options.featureFlags,
+    credentialBroker: options.credentialBroker,
   });
 
   // Wait for daemon to be ready (it has its own 1 second wait)
@@ -138,6 +144,7 @@ export async function setupSandboxOneTime(
         environmentVariables: options.environmentVariables,
         githubAccessToken: options.githubAccessToken,
         agentCredentials: options.agentCredentials,
+        credentialBroker: options.credentialBroker,
         setupScript: options.setupScript,
       },
     });
@@ -167,6 +174,22 @@ export async function setupGitCredentials(
   session: ISandboxSession,
   options: CreateSandboxOptions,
 ) {
+  // Brokered (#114): the guest NEVER holds the installation token. Route
+  // github.com through the per-run credential-broker sidecar (insteadOf +
+  // Bearer extraheader) and DO NOT write ~/.git-credentials. Defensively scrub
+  // any residue first (belt-and-suspenders for #89; a fresh base image is
+  // clean, so these are normally no-ops). Brokered sandboxes are non-resumable
+  // (the control plane recreates on resume), so this always runs on a fresh
+  // create-path guest.
+  if (options.credentialBroker) {
+    const gitConfigScript = buildGuestCredBrokerGitConfig({
+      alias: CRED_BROKER_ALIAS,
+      port: CRED_BROKER_GIT_PORT,
+      bearer: options.credentialBroker.runBearer,
+    }).join(" && ");
+    await session.runCommand(gitConfigScript, { cwd: "/" });
+    return;
+  }
   try {
     await session.runCommand(`git config --global credential.helper store`, {
       cwd: "/",
@@ -463,6 +486,7 @@ async function executeSetupScriptCommand({
   environmentVariables,
   agentCredentials,
   githubAccessToken,
+  credentialBroker,
   onUpdate,
 }: {
   session: ISandboxSession;
@@ -470,6 +494,7 @@ async function executeSetupScriptCommand({
   environmentVariables: CreateSandboxOptions["environmentVariables"];
   agentCredentials: CreateSandboxOptions["agentCredentials"];
   githubAccessToken: string;
+  credentialBroker?: CreateSandboxOptions["credentialBroker"];
   onUpdate?: OnUpdateCallback;
 }) {
   // To debug some corrupted images issue, lets log the git status before and
@@ -487,6 +512,7 @@ async function executeSetupScriptCommand({
           userEnv: environmentVariables,
           githubAccessToken,
           agentCredentials,
+          credentialBroker,
           overrides: {
             CI: "true",
             TERM: "xterm",
@@ -514,7 +540,10 @@ export async function runSetupScript({
   session: ISandboxSession;
   options: Pick<
     CreateSandboxOptions,
-    "environmentVariables" | "githubAccessToken" | "agentCredentials"
+    | "environmentVariables"
+    | "githubAccessToken"
+    | "agentCredentials"
+    | "credentialBroker"
   > & {
     setupScript?: string | null;
     setupScriptPath?: string;
@@ -552,6 +581,7 @@ export async function runSetupScript({
         environmentVariables: options.environmentVariables,
         agentCredentials: options.agentCredentials,
         githubAccessToken: options.githubAccessToken,
+        credentialBroker: options.credentialBroker,
         onUpdate: onUpdateWrapped,
       });
     } else {
@@ -563,6 +593,7 @@ export async function runSetupScript({
         environmentVariables: options.environmentVariables,
         agentCredentials: options.agentCredentials,
         githubAccessToken: options.githubAccessToken,
+        credentialBroker: options.credentialBroker,
         onUpdate: onUpdateWrapped,
       });
     }

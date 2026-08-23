@@ -364,6 +364,13 @@ export const thread = pgTable(
     githubPRNumber: integer("github_pr_number"),
     githubIssueNumber: integer("github_issue_number"),
     codesandboxId: text("codesandbox_id"),
+    // #114: NON-secret credential-broker provenance for the current sandbox.
+    // "brokered" = the sandbox was created with a per-run credential broker
+    // (Docker only); resume must fail closed and recreate. null/"legacy-direct"
+    // = today's raw-token behavior. Never stores the token or bearer.
+    credentialBrokerMode: text("credential_broker_mode").$type<
+      "brokered" | "legacy-direct"
+    >(),
     sandboxProvider: text("sandbox_provider")
       .notNull()
       .$type<SandboxProvider>()

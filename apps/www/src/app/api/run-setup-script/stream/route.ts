@@ -12,6 +12,7 @@ import { getOrCreateSandbox, getSandboxProvider } from "@/agent/sandbox";
 import { CreateSandboxOptions } from "@terragon/sandbox/types";
 import { runSetupScript } from "@terragon/sandbox";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
+import { resolveCredentialBrokerForCreate } from "@/server-lib/credential-broker/resolve-credential-broker";
 import {
   getDefaultBranchForRepo,
   getGitHubTokenForBackground,
@@ -114,6 +115,19 @@ export async function POST(request: NextRequest) {
         await sendError("GitHub access token not found");
         return;
       }
+      const sandboxProvider = await getSandboxProvider({
+        userSetting: userSettings?.sandboxProvider,
+        sandboxSize: preferredSandboxSize,
+        userId,
+      });
+      // #114: this is a CREATE path — carry the broker shape so a brokered
+      // Docker sandbox never receives the raw installation token (Docker + flag
+      // on only; null otherwise = today's behavior).
+      const brokerCreate = resolveCredentialBrokerForCreate({
+        sandboxProvider,
+        githubRepoFullName: environment.repoFullName,
+        githubAccessToken,
+      });
       // Create sandbox options
       const sandboxOptions: CreateSandboxOptions = {
         threadName: `Sandbox Session - ${environment.repoFullName}`,
@@ -123,11 +137,7 @@ export async function POST(request: NextRequest) {
         githubRepoFullName: environment.repoFullName,
         repoBaseBranchName: defaultBranch,
         userId,
-        sandboxProvider: await getSandboxProvider({
-          userSetting: userSettings?.sandboxProvider,
-          sandboxSize: preferredSandboxSize,
-          userId,
-        }),
+        sandboxProvider,
         sandboxSize: preferredSandboxSize,
         agent: null,
         createNewBranch: false,
@@ -136,6 +146,9 @@ export async function POST(request: NextRequest) {
         autoUpdateDaemon: false,
         skipSetupScript: true,
         publicUrl: nonLocalhostPublicAppUrl(),
+        egressPolicy: undefined,
+        credentialBroker: brokerCreate?.shape ?? undefined,
+        credentialBrokerMode: brokerCreate?.mode ?? undefined,
         featureFlags: featureFlags,
         generateBranchName: async () => null,
         onStatusUpdate: async () => {},
@@ -173,6 +186,8 @@ export async function POST(request: NextRequest) {
               githubAccessToken,
               setupScript,
               setupScriptPath,
+              // #114: brokered so the setup script env carries only the bearer.
+              credentialBroker: brokerCreate?.shape ?? undefined,
               // We already stream the output, so we don't need to include it in the error message
               excludeOutputInError: true,
               // No agent credentials for setup script

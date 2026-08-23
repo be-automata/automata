@@ -5,6 +5,7 @@ import {
   getThreadMinimal,
   updateThread,
   getThreadChat,
+  claimBrokeredSandboxRecreate,
 } from "@terragon/shared/model/threads";
 import { getUser, getUserSettings } from "@terragon/shared/model/user";
 import { getGitHubTokenForBackground } from "@/lib/github";
@@ -24,7 +25,10 @@ import type { SandboxProvider, SandboxSize } from "@terragon/types/sandbox";
 import {
   getOrCreateSandbox as getOrCreateSandboxInternal,
   hibernateSandbox as hibernateSandboxInternal,
+  shutdownSandboxById,
+  BrokeredSandboxNotResumableError,
 } from "@terragon/sandbox";
+import { resolveCredentialBrokerForCreate } from "@/server-lib/credential-broker/resolve-credential-broker";
 import { shouldHibernateSandbox } from "./sandbox-resource";
 import { wrapError } from "./error";
 import { getPostHogServer } from "@/lib/posthog-server";
@@ -229,20 +233,55 @@ async function getOrCreateSandboxForThread({
   const generateBranchNameWithPrefix = (threadName: string | null) =>
     generateBranchName(threadName, branchPrefix);
   const sandboxSize = thread.sandboxSize ?? DEFAULT_SANDBOX_SIZE;
-  // #66 slice 1: resolve the per-repo egress SHAPE live at sandbox CREATION
-  // only — providers apply the policy at create time, so a resume (existing
-  // codesandboxId) would throw the result away. undefined (resume / no org /
-  // no row / policy unset) = no enforcement, today's behavior.
-  const egressPolicy = thread.codesandboxId
-    ? undefined
-    : ((await resolveEgressPolicy({
-        db,
-        organizationId: thread.organizationId,
-        repoFullName: thread.githubRepoFullName,
-        plane: "sandbox",
-      })) ?? undefined);
   const startTime = Date.now();
-  const session = await getOrCreateSandboxWithTimeout(thread.codesandboxId, {
+
+  const statusUpdateHandler: CreateSandboxOptions["onStatusUpdate"] = async ({
+    sandboxId,
+    sandboxStatus,
+    bootingStatus,
+  }) => {
+    if (sandboxId && bootingStatus === "provisioning-done") {
+      getPostHogServer().capture({
+        distinctId: userId,
+        event: "sandbox_provisioned",
+        properties: {
+          threadId,
+          sandboxId,
+          sandboxProvider: thread.sandboxProvider,
+          githubRepoFullName: thread.githubRepoFullName,
+          durationMs: Date.now() - startTime,
+        },
+      });
+    }
+    await onStatusUpdate({ sandboxId, sandboxStatus, bootingStatus });
+  };
+
+  // #114: build the per-run broker SHAPE for any CREATE (initial or the
+  // fail-closed resume recreate). Docker + flag on only. The `mode` is the
+  // NON-secret provenance persisted on the thread; the shape (secret) is never
+  // persisted. Also carry the persisted mode on resume so the provider can fail
+  // closed on a stale brokered guest without the secret.
+  const brokerCreate = resolveCredentialBrokerForCreate({
+    sandboxProvider: thread.sandboxProvider,
+    githubRepoFullName: thread.githubRepoFullName,
+    githubAccessToken,
+  });
+  const persistedBrokerMode = thread.credentialBrokerMode ?? undefined;
+
+  // #66: resolve the per-repo egress SHAPE only when we CREATE (providers apply
+  // it at create time). Recomputed on the recreate path too.
+  const resolveEgressForCreate = async () =>
+    (await resolveEgressPolicy({
+      db,
+      organizationId: thread.organizationId,
+      repoFullName: thread.githubRepoFullName,
+      plane: "sandbox",
+    })) ?? undefined;
+
+  const makeOptions = (args: {
+    forCreate: boolean;
+    egressPolicy: Awaited<ReturnType<typeof resolveEgressForCreate>>;
+  }): CreateSandboxOptions => ({
     threadName: thread.name,
     agent: agentOrNull,
     agentCredentials: agentCredentialsOrNull,
@@ -262,45 +301,97 @@ async function getOrCreateSandboxForThread({
     customSystemPrompt: userSettings.customSystemPrompt,
     setupScript: repositoryEnvironment.setupScript,
     skipSetupScript: thread.skipSetup,
-    fastResume: fastResume && !!thread.codesandboxId,
+    fastResume: fastResume && !args.forCreate,
     publicUrl: nonLocalhostPublicAppUrl(),
-    egressPolicy,
+    egressPolicy: args.forCreate ? args.egressPolicy : undefined,
+    // Secret shape only on CREATE; NON-secret mode on both so a brokered resume
+    // fails closed at the provider.
+    credentialBroker: args.forCreate ? (brokerCreate?.shape ?? undefined) : undefined,
+    credentialBrokerMode: args.forCreate
+      ? (brokerCreate?.mode ?? undefined)
+      : persistedBrokerMode,
     featureFlags: userFeatureFlags,
     generateBranchName: generateBranchNameWithPrefix,
-    onStatusUpdate: async ({ sandboxId, sandboxStatus, bootingStatus }) => {
-      if (sandboxId && bootingStatus === "provisioning-done") {
-        getPostHogServer().capture({
-          distinctId: userId,
-          event: "sandbox_provisioned",
-          properties: {
-            threadId,
-            sandboxId,
-            sandboxProvider: thread.sandboxProvider,
-            githubRepoFullName: thread.githubRepoFullName,
-            durationMs: Date.now() - startTime,
-          },
-        });
-      }
-      await onStatusUpdate({
-        sandboxId,
-        sandboxStatus,
-        bootingStatus,
-      });
-    },
+    onStatusUpdate: statusUpdateHandler,
   });
 
-  if (!thread.codesandboxId) {
+  const persistCreated = async (sandboxId: string) => {
     await updateThread({
       db,
       userId,
       threadId,
       updates: {
-        codesandboxId: session.sandboxId,
+        codesandboxId: sandboxId,
         sandboxSize,
+        // Record the NON-secret provenance so a later resume fails closed.
+        credentialBrokerMode: brokerCreate ? brokerCreate.mode : "legacy-direct",
       },
     });
+  };
+
+  // Initial call: CREATE when no sandbox yet, else RESUME the existing one.
+  if (!thread.codesandboxId) {
+    const egressPolicy = await resolveEgressForCreate();
+    const session = await getOrCreateSandboxWithTimeout(
+      null,
+      makeOptions({ forCreate: true, egressPolicy }),
+    );
+    await persistCreated(session.sandboxId);
+    return session;
   }
-  return session;
+
+  const existingSandboxId = thread.codesandboxId;
+  try {
+    // A RUNNING brokered sandbox reconnects here; a stale (paused/exited)
+    // brokered one throws BrokeredSandboxNotResumableError (fail-closed).
+    return await getOrCreateSandboxWithTimeout(
+      existingSandboxId,
+      makeOptions({ forCreate: false, egressPolicy: undefined }),
+    );
+  } catch (error) {
+    if (!(error instanceof BrokeredSandboxNotResumableError)) {
+      throw error;
+    }
+    // #114 fail-closed recreate lease: exactly ONE concurrent resume wins and
+    // recreates; losers converge on the winner's fresh sandbox (never recreate
+    // → no orphan).
+    const claim = await claimBrokeredSandboxRecreate({
+      db,
+      userId,
+      threadId,
+      expectedSandboxId: existingSandboxId,
+    });
+    if (claim.claimed) {
+      // Winner: destroy the stale sandbox (+ its sidecar/network/secret file),
+      // then create a fresh brokered one.
+      await shutdownSandboxById({
+        sandboxProvider: thread.sandboxProvider,
+        sandboxId: existingSandboxId,
+      }).catch((e) => {
+        console.error("Failed to destroy stale brokered sandbox", e);
+      });
+      const egressPolicy = await resolveEgressForCreate();
+      const session = await getOrCreateSandboxWithTimeout(
+        null,
+        makeOptions({ forCreate: true, egressPolicy }),
+      );
+      await persistCreated(session.sandboxId);
+      return session;
+    }
+    // Loser: the winner cleared codesandboxId and is recreating. Re-read; if the
+    // fresh (running) sandbox is published, reconnect to it; otherwise ask the
+    // caller to retry (no recreate, so nothing is orphaned).
+    const refreshed = await getThreadMinimal({ db, threadId, userId });
+    if (refreshed?.codesandboxId) {
+      return await getOrCreateSandboxWithTimeout(
+        refreshed.codesandboxId,
+        makeOptions({ forCreate: false, egressPolicy: undefined }),
+      );
+    }
+    throw new Error(
+      "Brokered sandbox recreate in progress; please retry the request.",
+    );
+  }
 }
 
 export async function createSandboxForThread({

@@ -18,6 +18,25 @@ import {
   egressSidecarName,
 } from "./docker-egress";
 import { EGRESS_PROXY_SCRIPT } from "../egress-proxy-standalone.generated";
+import {
+  BrokeredSandboxNotResumableError,
+  CRED_BROKER_ALIAS,
+  CRED_BROKER_GIT_PORT,
+  CRED_BROKER_NETWORK_PREFIX,
+  buildCredBrokerSecretsFileContent,
+  buildCredBrokerSidecarRunCommand,
+  buildSandboxCredBrokerRunFlags,
+  credBrokerNetworkName,
+  credBrokerSidecarName,
+} from "./docker-cred-broker";
+import { CRED_BROKER_SCRIPT } from "../cred-broker-standalone.generated";
+
+/** Host path of one sandbox's `:ro` secret file — derived from the container
+ * name (no per-session persistence needed; create→teardown lifetime, exactly
+ * like the egress sidecar/network names). */
+function credBrokerSecretHostPath(containerName: string): string {
+  return path.join(os.tmpdir(), `automata-cred-secret-${containerName}.json`);
+}
 
 const HOME_DIR = "root";
 const DEFAULT_DIR = `/${HOME_DIR}`;
@@ -44,6 +63,13 @@ class DockerSession implements ISandboxSession {
     private readonly created?: {
       containerName: string;
       egressConfigured: boolean;
+      /** #114: the cred-broker sidecar + (broker-only) dedicated network +
+       * host secret file were stood up for this container and must be torn
+       * down with it. */
+      credBrokerConfigured?: boolean;
+      /** Whether the cred-broker used a DEDICATED (broker-only) network that
+       * teardown must remove; false when it shared the egress internal net. */
+      credBrokerDedicatedNetwork?: boolean;
     },
   ) {}
 
@@ -187,9 +213,18 @@ class DockerSession implements ISandboxSession {
     // inspect and best-efforts the teardown.
     let containerName: string | null = null;
     let tearDownEgress = true;
+    // #114: on the CREATE path we know exactly whether a cred broker was set up
+    // and whether it used a dedicated network. A rehydrated (resume) session is
+    // never brokered (brokered sandboxes are non-resumable), so best-effort
+    // idempotent teardown there is a safe no-op.
+    let tearDownCredBroker = true;
+    let credBrokerDedicatedNetwork = true;
     if (this.created) {
       containerName = this.created.containerName;
       tearDownEgress = this.created.egressConfigured;
+      tearDownCredBroker = this.created.credBrokerConfigured ?? false;
+      credBrokerDedicatedNetwork =
+        this.created.credBrokerDedicatedNetwork ?? false;
     } else {
       try {
         containerName = execSync(
@@ -219,6 +254,25 @@ class DockerSession implements ISandboxSession {
           // No egress sidecar/network for this sandbox — nothing to remove.
         }
       }
+    }
+    // #114: tear down the cred-broker sidecar + (dedicated) network + host
+    // secret file. All names derive from the container name — no per-session
+    // persistence. Best-effort/idempotent.
+    if (containerName && tearDownCredBroker) {
+      const commands = [`docker rm -f ${credBrokerSidecarName(containerName)}`];
+      if (credBrokerDedicatedNetwork) {
+        commands.push(
+          `docker network rm ${credBrokerNetworkName(containerName)}`,
+        );
+      }
+      for (const command of commands) {
+        try {
+          execSync(command, { stdio: "ignore" });
+        } catch {
+          // No cred-broker sidecar/network for this sandbox — nothing to remove.
+        }
+      }
+      await fs.unlink(credBrokerSecretHostPath(containerName)).catch(() => {});
     }
   }
 
@@ -285,6 +339,21 @@ class DockerSession implements ISandboxSession {
 export class DockerProvider implements ISandboxProvider {
   constructor() {}
 
+  /** True iff the container exists and its status is "running" (not paused/
+   * exited). Used by the #114 brokered-resume fence to distinguish a safe
+   * reconnect from a stale guest that must be recreated. */
+  private isContainerRunning(sandboxId: string): boolean {
+    try {
+      const status = execSync(
+        `docker inspect --format '{{.State.Status}}' ${sandboxId}`,
+        { encoding: "utf8" },
+      ).trim();
+      return status === "running";
+    } catch {
+      return false;
+    }
+  }
+
   async getSandboxOrNull(sandboxId: string): Promise<ISandboxSession | null> {
     // Try to resume existing container
     try {
@@ -309,6 +378,21 @@ export class DockerProvider implements ISandboxProvider {
     options: CreateSandboxOptions,
   ): Promise<ISandboxSession> {
     if (sandboxId) {
+      // #114 fail-closed resume for brokered Docker sandboxes. A PAUSED/EXITED
+      // brokered guest is NON-resumable: unpausing it would race the surviving
+      // named sidecar and cannot scrub a raw token from a stopped daemon's
+      // env — so we refuse BEFORE any unpause/start and let the control plane
+      // recreate (fresh, fail-closed). A RUNNING brokered sandbox is safe to
+      // RECONNECT to (its sidecar is up, its guest never held the token, no
+      // unpause happens) — this is what lets concurrent resumes converge on the
+      // winner's freshly-created sandbox instead of each recreating (no orphan).
+      // The signal is the NON-secret persisted provenance, never the secret.
+      if (options.credentialBrokerMode === "brokered") {
+        if (this.isContainerRunning(sandboxId)) {
+          return new DockerSession(sandboxId);
+        }
+        throw new BrokeredSandboxNotResumableError(sandboxId);
+      }
       const sandbox = await this.getSandboxOrNull(sandboxId);
       if (sandbox) {
         return sandbox;
@@ -343,19 +427,65 @@ export class DockerProvider implements ISandboxProvider {
           options.egressPolicy,
         );
       }
+      // #114 credential broker: stand up a per-run cred-broker sidecar so the
+      // guest never holds the installation token (git is routed through it via
+      // the brokered git-config set in setup.ts). Network composition:
+      //  - egress ALSO on: the sidecar joins the egress `--internal` network;
+      //    the guest is already pinned there, so we just add the broker alias
+      //    to its NO_PROXY (git's plain-HTTP call bypasses the egress proxy).
+      //  - broker only: a DEDICATED user-defined (non-internal) network shared
+      //    by guest + sidecar; the guest keeps normal internet (the broker
+      //    fences the TOKEN, not egress).
+      let credBrokerConfigured = false;
+      let credBrokerDedicatedNetwork = false;
+      let credGuestFlags = "";
+      if (options.credentialBroker) {
+        const usesEgressNetwork = egressFlags !== "";
+        const brokerNetwork = usesEgressNetwork
+          ? egressNetworkName(containerName)
+          : credBrokerNetworkName(containerName);
+        await this.setUpCredentialBroker(
+          containerName,
+          options.credentialBroker,
+          {
+            networkName: brokerNetwork,
+            createNetwork: !usesEgressNetwork,
+            connectBridge: usesEgressNetwork,
+          },
+        );
+        credBrokerConfigured = true;
+        credBrokerDedicatedNetwork = !usesEgressNetwork;
+        if (usesEgressNetwork) {
+          // Re-emit the egress guest flags with the broker alias in NO_PROXY.
+          egressFlags = buildSandboxEgressRunFlags(
+            egressNetworkName(containerName),
+            [CRED_BROKER_ALIAS],
+          );
+        } else {
+          credGuestFlags = buildSandboxCredBrokerRunFlags(brokerNetwork);
+        }
+      }
+      // Exactly one of these pins the guest's network (egress net or the
+      // dedicated broker net); both empty = today's default-bridge path.
+      const networkFlags = egressFlags || credGuestFlags;
       // Create and start container
-      const createCommand = egressFlags
-        ? `docker run -d --name ${containerName} ${egressFlags} ${envFlags} -w ${DEFAULT_DIR} ${BASE_IMAGE} tail -f /dev/null`
+      const createCommand = networkFlags
+        ? `docker run -d --name ${containerName} ${networkFlags} ${envFlags} -w ${DEFAULT_DIR} ${BASE_IMAGE} tail -f /dev/null`
         : `docker run -d --name ${containerName} ${envFlags} -w ${DEFAULT_DIR} ${BASE_IMAGE} tail -f /dev/null`;
       const containerId = execSync(createCommand, { encoding: "utf8" }).trim();
       return new DockerSession(containerId, {
         containerName,
         egressConfigured: egressFlags !== "",
+        credBrokerConfigured,
+        credBrokerDedicatedNetwork,
       });
     } catch (error) {
       console.error("Failed to create Docker sandbox:", error);
       if (options.egressPolicy) {
         this.tearDownEgressEnforcement(containerName);
+      }
+      if (options.credentialBroker) {
+        this.tearDownCredentialBroker(containerName);
       }
       throw error;
     }
@@ -430,6 +560,147 @@ export class DockerProvider implements ISandboxProvider {
     return buildSandboxEgressRunFlags(networkName);
   }
 
+  /**
+   * Stand up the per-run credential-broker sidecar for one sandbox (#114):
+   * materialize the broker script + a `0o400` `:ro` secret file (installation
+   * token + per-run bearer — NEVER on argv/`-e`), attach the sidecar to the
+   * given network under its alias, wait for its git listener (readiness
+   * barrier), and clean up transactionally on any failure. The token lives only
+   * inside the sidecar container (its mounted secret file / heap).
+   */
+  private async setUpCredentialBroker(
+    containerName: string,
+    broker: NonNullable<CreateSandboxOptions["credentialBroker"]>,
+    opts: {
+      networkName: string;
+      createNetwork: boolean;
+      connectBridge: boolean;
+    },
+  ): Promise<void> {
+    const sidecarName = credBrokerSidecarName(containerName);
+    const secretsHostPath = credBrokerSecretHostPath(containerName);
+    // Content-addressed, write-once script mount (mirror the egress sidecar).
+    const scriptHash = createHash("sha256")
+      .update(CRED_BROKER_SCRIPT)
+      .digest("hex")
+      .slice(0, 16);
+    const scriptHostPath = path.join(
+      os.tmpdir(),
+      `automata-cred-broker-${scriptHash}.cjs`,
+    );
+    try {
+      try {
+        await fs.writeFile(scriptHostPath, CRED_BROKER_SCRIPT, {
+          mode: 0o444,
+          flag: "wx", // content-addressed name guarantees equality
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+          throw error;
+        }
+      }
+      // Per-run secret file (mode 0o400). Unique per container name; overwrite
+      // any stale file from a previous same-named run (there is none in
+      // practice — names carry a nanoid).
+      await fs.writeFile(
+        secretsHostPath,
+        buildCredBrokerSecretsFileContent({
+          installationToken: broker.installationToken,
+          runBearer: broker.runBearer,
+        }),
+        { mode: 0o400 },
+      );
+      if (opts.createNetwork) {
+        // Dedicated user-defined (NON-internal) network: guest + sidecar reach
+        // each other by alias and both keep normal outbound internet.
+        try {
+          execSync(`docker network create ${opts.networkName}`, {
+            stdio: "ignore",
+          });
+        } catch (error) {
+          const exists = execSync(
+            `docker network ls --filter name=^${opts.networkName}$ --format '{{.Name}}'`,
+            { encoding: "utf8" },
+          ).trim();
+          if (exists !== opts.networkName) {
+            throw error;
+          }
+        }
+      }
+      execSync(
+        buildCredBrokerSidecarRunCommand({
+          sidecarName,
+          networkName: opts.networkName,
+          baseImage: BASE_IMAGE,
+          scriptHostPath,
+          secretsHostPath,
+          repoFullName: broker.repoFullName,
+        }),
+        { stdio: "ignore" },
+      );
+      if (opts.connectBridge) {
+        // The egress `--internal` network has no route out; give the sidecar
+        // (and only the sidecar) a path to github.com via the default bridge.
+        execSync(`docker network connect bridge ${sidecarName}`, {
+          stdio: "ignore",
+        });
+      }
+      await this.waitForCredBrokerReady(sidecarName);
+    } catch (error) {
+      // Transactional: sweep any partial broker resources before rethrowing.
+      this.tearDownCredentialBroker(containerName, {
+        removeNetwork: opts.createNetwork,
+      });
+      throw error;
+    }
+  }
+
+  /** Readiness barrier: poll the sidecar's git listener until it accepts a
+   * connection, so the guest's first clone can't race it. Fails closed. */
+  private async waitForCredBrokerReady(
+    sidecarName: string,
+    maxAttempts = 40,
+    intervalMs = 500,
+  ): Promise<void> {
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        execSync(
+          `docker exec ${sidecarName} bash -c "timeout 1 bash -c '</dev/tcp/127.0.0.1/${CRED_BROKER_GIT_PORT}'"`,
+          { stdio: "ignore" },
+        );
+        return;
+      } catch {
+        // Not listening yet.
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+    throw new Error(
+      `cred-broker sidecar ${sidecarName} never bound its git listener`,
+    );
+  }
+
+  /** Best-effort, idempotent sweep of one sandbox's cred-broker sidecar +
+   * (dedicated) network + host secret file. */
+  private tearDownCredentialBroker(
+    containerName: string,
+    opts: { removeNetwork?: boolean } = { removeNetwork: true },
+  ): void {
+    const commands = [`docker rm -f ${credBrokerSidecarName(containerName)}`];
+    if (opts.removeNetwork ?? true) {
+      commands.push(
+        `docker network rm ${credBrokerNetworkName(containerName)}`,
+      );
+    }
+    for (const command of commands) {
+      try {
+        execSync(command, { stdio: "ignore" });
+      } catch {
+        // Best-effort cleanup of partially-created broker resources.
+      }
+    }
+    fs.unlink(credBrokerSecretHostPath(containerName)).catch(() => {});
+  }
+
   /** Best-effort, idempotent sweep of one sandbox's egress sidecar + network. */
   private tearDownEgressEnforcement(containerName: string): void {
     for (const command of [
@@ -476,6 +747,7 @@ export class DockerProvider implements ISandboxProvider {
       console.warn("Failed to cleanup test containers:", error);
     }
     DockerProvider.cleanupEgressNetworks(TEST_CONTAINER_PREFIX);
+    DockerProvider.cleanupCredBrokerNetworks(TEST_CONTAINER_PREFIX);
   }
 
   /**
@@ -527,5 +799,34 @@ export class DockerProvider implements ISandboxProvider {
       console.warn("Failed to cleanup Terragon containers:", error);
     }
     DockerProvider.cleanupEgressNetworks(CONTAINER_PREFIX);
+    DockerProvider.cleanupCredBrokerNetworks(CONTAINER_PREFIX);
+  }
+
+  /**
+   * Remove leaked cred-broker dedicated networks (#114). Sidecar containers
+   * share the sandbox name prefix and are removed with the container sweep;
+   * the dedicated (broker-only) networks need their own sweep, mirroring
+   * {@link cleanupEgressNetworks}.
+   */
+  private static cleanupCredBrokerNetworks(prefix: string): void {
+    try {
+      const listCommand = `docker network ls --filter "name=${CRED_BROKER_NETWORK_PREFIX}${prefix}" --format "{{.Name}}"`;
+      const networkList = execSync(listCommand, { encoding: "utf8" }).trim();
+      if (!networkList) {
+        return;
+      }
+      for (const network of networkList.split("\n")) {
+        if (!network.trim()) {
+          continue;
+        }
+        try {
+          execSync(`docker network rm ${network.trim()}`, { stdio: "ignore" });
+        } catch {
+          // Network still in use or already gone — leave it.
+        }
+      }
+    } catch (error) {
+      console.warn("Failed to cleanup cred-broker networks:", error);
+    }
   }
 }

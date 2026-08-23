@@ -86,3 +86,24 @@ export async function getSandboxOrNull({
   const provider = getSandboxProvider(sandboxProvider);
   return await provider.getSandboxOrNull(sandboxId);
 }
+
+/**
+ * Force-destroy a sandbox by id, tearing down its container and any sidecar/
+ * network/secret-file resources (#114). Best-effort: a missing sandbox is a
+ * no-op. Used by the control plane's brokered-resume recreate (the CAS winner
+ * destroys the stale sandbox before creating a fresh one), so a brokered
+ * sandbox and its cred-broker sidecar are never orphaned.
+ */
+export async function shutdownSandboxById({
+  sandboxProvider,
+  sandboxId,
+}: {
+  sandboxProvider: SandboxProvider;
+  sandboxId: string;
+}): Promise<void> {
+  const provider = getSandboxProvider(sandboxProvider);
+  const session = await provider.getSandboxOrNull(sandboxId);
+  if (session) {
+    await session.shutdown();
+  }
+}
