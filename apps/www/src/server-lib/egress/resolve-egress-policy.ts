@@ -38,13 +38,24 @@ export type EgressPlane = "worker" | "sandbox";
  */
 function systemEgressHosts(plane: EgressPlane): string[] {
   const callbackHost = new URL(nonLocalhostPublicAppUrl()).host;
-  // Worker plane (#66 AC4): the credential brokers (#81) are DELIVERED, so the
-  // agent reaches GitHub only through loopback — git via the git broker
-  // (`http://127.0.0.1:<port>`) and gh via the broker's unix socket — both
-  // exempted from the egress proxy by NO_PROXY. It therefore needs no direct
-  // egress to github.com / api.github.com, so they are dropped from the
-  // allowlist. The sandbox plane still holds the resident token and pushes to
-  // GitHub directly (#114), so it keeps both hosts.
+  // Worker plane (#66 AC4): this allowlist fences the AGENT RUN's egress (the
+  // brokered daemon/agent env behind the egress proxy). Within that fence the
+  // credential brokers (#81) are DELIVERED, so the agent reaches GitHub only
+  // through loopback — git via the git broker (`http://127.0.0.1:<port>`) and
+  // gh via the broker's unix socket — both exempted from the proxy by NO_PROXY.
+  // The agent therefore needs no direct egress to github.com / api.github.com,
+  // so they are dropped from the allowlist.
+  //
+  // SCOPE NOTE: worker-process provisioning is a SEPARATE path this allowlist
+  // has never governed — provisionWorkdir (packages/worker/src/agent-run/
+  // provision.ts) clones/fetches github.com directly with the installation
+  // token, in the worker's ambient env before the brokers start. That traffic
+  // is outside this fence either way, so dropping the hosts here does not affect
+  // it; do not read this drop as a claim that ALL worker-process GitHub egress
+  // is brokered.
+  //
+  // The sandbox plane still holds the resident token and pushes to GitHub
+  // directly (#114), so it keeps both hosts.
   if (plane === "worker") {
     return [callbackHost, "api.anthropic.com"];
   }
