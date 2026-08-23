@@ -23,11 +23,16 @@ import {
   CRED_BROKER_ALIAS,
   CRED_BROKER_GIT_PORT,
   CRED_BROKER_NETWORK_PREFIX,
+  CRED_BROKER_ROLE_LABEL_KEY,
+  CRED_BROKER_ROLE_LABEL_VALUE,
+  CRED_BROKER_SIDECAR_SUFFIX,
+  ORPHAN_BROKER_MIN_AGE_MS,
   buildCredBrokerSecretsFileContent,
   buildCredBrokerSidecarRunCommand,
   buildSandboxCredBrokerRunFlags,
   credBrokerNetworkName,
   credBrokerSidecarName,
+  isAgedUnreferencedBroker,
 } from "./docker-cred-broker";
 import { CRED_BROKER_SCRIPT } from "../cred-broker-standalone.generated";
 
@@ -586,6 +591,16 @@ export class DockerProvider implements ISandboxProvider {
       `automata-cred-broker-${scriptHash}.cjs`,
     );
     try {
+      // #114 SAFE auto-reclaim of DIFFERENT-name orphans: a pre-id create
+      // timeout can also strand a broker sidecar/network under the ABANDONED
+      // run's container name (the guest `docker run` is abandoned after the
+      // sidecar/network are up, before the guest id surfaces, so the caller
+      // can't sweep it by id). Every (re)create draws a fresh nanoid name, so
+      // the same-name reclaim below never catches those. Sweep AGED +
+      // UNREFERENCED broker orphans here so the next brokered create reclaims
+      // the stranded token-holder — gated so it can NEVER touch a concurrent
+      // live sandbox's broker (young, or with a running/paused guest attached).
+      this.reclaimOrphanedBrokerResources(containerName);
       // #114 idempotent pre-create reclaim: an uncatchable pre-id create timeout
       // (the guest `docker run` is abandoned mid-flight after this sidecar +
       // network are already up) leaves a stale same-name broker sidecar/network
@@ -709,6 +724,358 @@ export class DockerProvider implements ISandboxProvider {
       }
     }
     fs.unlink(credBrokerSecretHostPath(containerName)).catch(() => {});
+  }
+
+  /**
+   * Fresh (non-cached) PRESENCE check for a single guest container, used as the
+   * TOCTOU recheck immediately before a broker is force-removed (#114 HIGH 2 —
+   * residual window).
+   *
+   * WIDENED to ANY state, not just running/paused: a guest exists as a container
+   * from the instant `docker run`/`docker create` makes it, and it dwells in
+   * state `created` (and briefly `restarting`) BEFORE it reaches `running`. A
+   * running/paused-only check would miss a booting-but-not-yet-running guest and
+   * wrongly reclaim its (already-referenced) broker. So any existing container —
+   * created / restarting / running / paused (and even exited/dead: still a
+   * container, so we conservatively keep its broker) — counts as present. Only a
+   * truly-absent guest (no container at all → `docker inspect` errors) is
+   * reclaimable.
+   */
+  private guestExists(guestName: string): boolean {
+    try {
+      execSync(`docker inspect ${guestName}`, { stdio: "ignore" });
+      return true; // Container exists in SOME state → present, keep its broker.
+    } catch {
+      return false; // No such container → truly absent → reclaimable.
+    }
+  }
+
+  /**
+   * Guarded reclaim of ONE orphan broker (its sidecar + dedicated network + host
+   * secret), the destructive tail of the sidecar reclaim loop. The order is
+   * network-GUARD-FIRST so that Docker's own atomic attached-endpoint check —
+   * not a best-effort recheck — is what proves the guest is absent BEFORE the
+   * sidecar is ever removed (#114 Codex HIGH, final fix). Split by network mode:
+   *
+   *   DEDICATED-network broker (createNetwork was true — the common, egress-off
+   *   case). The sidecar is itself attached to the dedicated net, so a bare
+   *   `docker network rm` would always fail on the sidecar's own endpoint. We
+   *   therefore FIRST `docker network disconnect` the sidecar (freeing only ITS
+   *   endpoint; the container is left running and untouched), THEN run a NON-force
+   *   `docker network rm <dedicatedNet>`:
+   *     • SUCCEEDS → the only endpoint was the sidecar's, so NO guest is attached
+   *       → the guest is provably absent → NOW it is safe to `docker rm -f` the
+   *       sidecar and unlink the secret.
+   *     • FAILS ("has active endpoints") → a guest attached in the window and
+   *       still holds an endpoint → the guest is (or just became) live. We
+   *       RECONNECT the sidecar to restore that live guest's broker and SKIP the
+   *       whole reclaim (sidecar + net + secret all left intact for a later pass).
+   *   The sidecar is never force-removed until the network rm has atomically
+   *   proven no guest is attached, so a guest that races into the window is fully
+   *   protected — it keeps a working, reconnected broker.
+   *
+   *   SHARED-egress broker (createNetwork was false: the sidecar lives on the
+   *   reused egress `--internal` network, there is NO dedicated broker net to
+   *   guard). Without a dedicated network there is no atomic proof-of-no-guest,
+   *   and force-removing the sidecar here could tear down a broker whose guest
+   *   attached in the window. That risk is not worth reclaiming an orphan, so we
+   *   do NOT auto-remove shared-egress brokers at all — they are intentionally
+   *   left to the same-name pre-create reclaim ({@link tearDownCredentialBroker},
+   *   which runs on the next brokered create) and the explicit cleanup sweeps
+   *   ({@link cleanupTestContainers} / {@link cleanupAllContainers}).
+   *
+   * A cheap any-state {@link guestExists} recheck stays as an early skip, but the
+   * dedicated network rm is the authoritative gate.
+   *
+   * Why the remaining window can never select a DIFFERENT live sandbox: a broker
+   * is keyed by its guest's container name, which carries a fresh `nanoid` per
+   * create, and a brokered sandbox is NEVER resumed in place (a resume is a fresh
+   * create with a fresh name — see {@link getSandboxOrNull} / the #114 shutdown
+   * path). So this exact name will never be reused by any future create; the only
+   * guest that could ever attach to this broker is the one abandoned create that
+   * stranded it — already >30 min dead per the age gate. Name reuse is
+   * impossible, so the gate only ever protects THIS broker's own (never-arriving)
+   * guest, never someone else's live sandbox. Best-effort/idempotent throughout.
+   */
+  private reclaimBrokerSidecar(guestName: string): void {
+    const sidecar = credBrokerSidecarName(guestName);
+    const dedicatedNet = credBrokerNetworkName(guestName);
+    let hasDedicatedNet = false;
+    try {
+      hasDedicatedNet =
+        execSync(
+          `docker network ls --filter name=^${dedicatedNet}$ --format '{{.Name}}'`,
+          { encoding: "utf8" },
+        ).trim() === dedicatedNet;
+    } catch {
+      return; // Docker unavailable → nothing to do this pass.
+    }
+    // Cheap early skip: any-state presence recheck before we touch anything.
+    if (this.guestExists(guestName)) {
+      return;
+    }
+    if (!hasDedicatedNet) {
+      // Shared-egress broker: no dedicated net → no atomic proof-of-no-guest.
+      // Do NOT force-remove; leave it for same-name reclaim + explicit cleanup.
+      return;
+    }
+    // Free ONLY the sidecar's endpoint so the network rm below gates purely on
+    // guest presence. The sidecar container is left running/untouched, so this
+    // is reversible if a guest turns out to be attached.
+    try {
+      execSync(`docker network disconnect -f ${dedicatedNet} ${sidecar}`, {
+        stdio: "ignore",
+      });
+    } catch {
+      // Sidecar already gone / not attached — fall through to the network rm,
+      // which still atomically gates on any (guest) endpoint.
+    }
+    // Atomic gate: NON-force network rm succeeds only if NO endpoint remains.
+    // With the sidecar disconnected, the only endpoint that can remain is a
+    // guest's → success proves the guest is absent.
+    try {
+      execSync(`docker network rm ${dedicatedNet}`, { stdio: "ignore" });
+    } catch {
+      // A guest attached in the window and still holds an endpoint → it is live.
+      // Reconnect the sidecar to restore the live guest's broker, then skip the
+      // whole reclaim (leave sidecar + net + secret for a later pass).
+      // MUST restore the broker DNS alias (#114): the original attach used
+      // `--network-alias ${CRED_BROKER_ALIAS}` and the live guest resolves the
+      // broker by that alias, so reconnecting without it would leave the guest
+      // on the network yet unable to resolve the broker, breaking its git.
+      try {
+        execSync(
+          `docker network connect --alias ${CRED_BROKER_ALIAS} ${dedicatedNet} ${sidecar}`,
+          {
+            stdio: "ignore",
+          },
+        );
+      } catch {
+        // Best-effort restore; the sidecar container itself is still present.
+      }
+      return;
+    }
+    // Network removal succeeded → guest provably absent → safe to remove the
+    // now-detached sidecar and its host secret.
+    try {
+      execSync(`docker rm -f ${sidecar}`, { stdio: "ignore" });
+    } catch {
+      // Already gone / vanished — nothing more to reclaim.
+    }
+    fs.unlink(credBrokerSecretHostPath(guestName)).catch(() => {});
+  }
+
+  /**
+   * #114 SAFE create-time reclaim of AGED + UNREFERENCED orphan cred-broker
+   * resources. A pre-id create timeout can strand a broker sidecar/network under
+   * the abandoned run's container name (a DIFFERENT name than any later create's
+   * fresh nanoid), so the same-name reclaim in {@link setUpCredentialBroker}
+   * never catches it and the stranded sidecar keeps holding the installation
+   * token until the (test-only) prefix sweep runs. This closes that gap on the
+   * live path.
+   *
+   * Safety (Codex non-regression): a broker is removed ONLY when it is BOTH
+   * older than {@link ORPHAN_BROKER_MIN_AGE_MS} AND has no guest container
+   * present — see {@link isAgedUnreferencedBroker}. A concurrent LIVE sandbox's
+   * broker is always either young (its create is still in flight) or has a guest
+   * container present, so it can never be selected. The initial `docker ps`
+   * snapshot classifies running/paused guests as live; the destructive removal is
+   * then re-guarded with the WIDENED any-state {@link guestExists} (which also
+   * catches a guest still in `created`/`restarting`) PLUS Docker's non-force
+   * network-rm atomic endpoint guard — see {@link reclaimBrokerSidecar} — so a
+   * guest that boots inside the snapshot→rm window is never reclaimed out from
+   * under. Best-effort/idempotent: any docker error (daemon down, resource
+   * already gone, network still attached) is swallowed so a create never fails on
+   * cleanup.
+   */
+  private reclaimOrphanedBrokerResources(
+    currentContainerName: string,
+    minAgeMs: number = ORPHAN_BROKER_MIN_AGE_MS,
+  ): void {
+    const isTest = process.env.NODE_ENV === "test";
+    const containerPrefix = isTest ? TEST_CONTAINER_PREFIX : CONTAINER_PREFIX;
+    const nowMs = Date.now();
+
+    // Identify broker sidecars by the ROBUST label marker (#114 HIGH 1), NOT by
+    // the `-cred-broker` name suffix: a guest's nanoid name could legitimately
+    // end in `-cred-broker` and a suffix guess would misclassify that live guest
+    // as a sidecar and force-remove its still-referenced broker. The label is
+    // stamped only by us on the sidecar `docker run`, so it never collides with a
+    // guest name. Scope the label filter to our env prefix too (test vs. prod).
+    let sidecarNames: string[] = [];
+    try {
+      sidecarNames = execSync(
+        `docker ps -a --filter label=${CRED_BROKER_ROLE_LABEL_KEY}=${CRED_BROKER_ROLE_LABEL_VALUE} --filter name=${containerPrefix} --format '{{.Names}}'`,
+        { encoding: "utf8" },
+      )
+        .trim()
+        .split("\n")
+        .filter((r) => r.trim());
+    } catch {
+      // Docker unavailable / nothing listed — nothing to reclaim.
+      return;
+    }
+
+    // Candidate stranded broker networks (cheap, name-filtered `docker network
+    // ls`). Fetched up front so the sweep can SHORT-CIRCUIT: this whole reclaim
+    // is best-effort and runs on every brokered create, so when there are
+    // provably NO broker containers AND no candidate broker networks there is
+    // nothing to reclaim and we return BEFORE the expensive full-fleet
+    // `docker ps -a` live-guest scan below.
+    let netNames: string[] = [];
+    try {
+      netNames = execSync(
+        `docker network ls --filter name=${CRED_BROKER_NETWORK_PREFIX}${containerPrefix} --format '{{.Name}}'`,
+        { encoding: "utf8" },
+      )
+        .trim()
+        .split("\n")
+        .filter((n) => n.trim());
+    } catch {
+      // Docker unavailable — nothing to reclaim.
+      return;
+    }
+    if (sidecarNames.length === 0 && netNames.length === 0) {
+      return; // Provably nothing to reclaim — skip the full-fleet scans.
+    }
+
+    // Everything else under our prefix is a potential guest. A guest is "live" —
+    // hence its broker is referenced — when running OR paused (a hibernated guest
+    // may still resume; treat it as live so we never touch it). Broker sidecars
+    // are excluded via the label set above so they're never counted as guests.
+    const sidecarSet = new Set(sidecarNames);
+    const liveGuestNames = new Set<string>();
+    try {
+      const rows = execSync(
+        `docker ps -a --filter name=${containerPrefix} --format '{{.Names}}|{{.State}}'`,
+        { encoding: "utf8" },
+      )
+        .trim()
+        .split("\n")
+        .filter((r) => r.trim());
+      for (const row of rows) {
+        const [name, state] = row.split("|");
+        if (!name || sidecarSet.has(name)) {
+          continue;
+        }
+        if (state === "running" || state === "paused") {
+          liveGuestNames.add(name);
+        }
+      }
+    } catch {
+      // Docker unavailable — nothing to reclaim.
+      return;
+    }
+
+    // Sidecars: reclaim the aged, unreferenced ones (sidecar + its dedicated
+    // network + host secret file).
+    for (const sidecar of sidecarNames) {
+      const guestName = sidecar.slice(0, -CRED_BROKER_SIDECAR_SUFFIX.length);
+      if (guestName === currentContainerName || liveGuestNames.has(guestName)) {
+        continue; // in-flight run or live guest → keep (no inspect needed).
+      }
+      let createdAtMs = NaN;
+      try {
+        createdAtMs = Date.parse(
+          execSync(`docker inspect --format '{{.Created}}' ${sidecar}`, {
+            encoding: "utf8",
+          }).trim(),
+        );
+      } catch {
+        continue; // Vanished between listing and inspect.
+      }
+      if (
+        !isAgedUnreferencedBroker({
+          containerName: guestName,
+          createdAtMs,
+          guestAlive: false,
+          nowMs,
+          minAgeMs,
+          currentContainerName,
+        })
+      ) {
+        continue;
+      }
+      // TOCTOU close (#114 HIGH — residual): the `docker ps` snapshot above may
+      // be stale AND was running/paused-only, so it misses a guest still in the
+      // `created` state (booted but not yet started). Re-check with the WIDENED
+      // any-state {@link guestExists}; if the guest exists in any state its
+      // broker is referenced again → skip. The destructive removal itself is
+      // then network-guard-FIRST (dedicated-net brokers only): a non-force
+      // `docker network rm` atomically proves no guest is attached BEFORE the
+      // sidecar is removed; shared-egress brokers are left untouched — see
+      // {@link reclaimBrokerSidecar}.
+      if (this.guestExists(guestName)) {
+        continue;
+      }
+      this.reclaimBrokerSidecar(guestName);
+    }
+
+    // Networks stranded WITHOUT a sidecar (network create succeeded but the
+    // sidecar run was abandoned): reclaim aged ones with nothing attached. A
+    // live sandbox's broker network always has its sidecar+guest attached, so
+    // an empty container list can't belong to a live sandbox; the age gate
+    // still protects a concurrent create's pre-attach window. (`netNames` was
+    // listed up front for the short-circuit above.)
+    for (const net of netNames) {
+      const guestName = net.slice(CRED_BROKER_NETWORK_PREFIX.length);
+      if (
+        !guestName ||
+        guestName === currentContainerName ||
+        liveGuestNames.has(guestName)
+      ) {
+        continue;
+      }
+      let createdAtMs = NaN;
+      let hasAttachedContainers = true;
+      try {
+        createdAtMs = Date.parse(
+          execSync(`docker network inspect --format '{{.Created}}' ${net}`, {
+            encoding: "utf8",
+          }).trim(),
+        );
+        const containersJson = execSync(
+          `docker network inspect --format '{{json .Containers}}' ${net}`,
+          { encoding: "utf8" },
+        ).trim();
+        hasAttachedContainers =
+          containersJson !== "{}" && containersJson !== "null";
+      } catch {
+        continue; // Vanished between listing and inspect.
+      }
+      if (hasAttachedContainers) {
+        continue; // Something still attached → not a bare orphan.
+      }
+      if (
+        !isAgedUnreferencedBroker({
+          containerName: guestName,
+          createdAtMs,
+          guestAlive: false,
+          nowMs,
+          minAgeMs,
+          currentContainerName,
+        })
+      ) {
+        continue;
+      }
+      // TOCTOU close (#114 HIGH — residual): re-check with the WIDENED any-state
+      // {@link guestExists} that the guest hasn't come up (even into `created`)
+      // since the snapshot, before removing its bare broker network. The
+      // `docker network rm` below is already NON-force — Docker's own atomic
+      // endpoint guard: if a guest attached in the window it errors and we leave
+      // the network for the next pass.
+      if (this.guestExists(guestName)) {
+        continue;
+      }
+      try {
+        execSync(`docker network rm ${net}`, { stdio: "ignore" });
+      } catch {
+        // Still in use (a guest attached in the window) or already gone — leave
+        // it for the next pass rather than force-removing a referenced network.
+        continue;
+      }
+      fs.unlink(credBrokerSecretHostPath(guestName)).catch(() => {});
+    }
   }
 
   /** Best-effort, idempotent sweep of one sandbox's egress sidecar + network. */

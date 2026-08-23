@@ -1,4 +1,5 @@
 import { bashQuote } from "../utils";
+import { sandboxTimeoutMs } from "../constants";
 import type { CredentialBrokerShape } from "../types";
 
 /**
@@ -66,9 +67,114 @@ export function credBrokerNetworkName(containerName: string): string {
   return `${CRED_BROKER_NETWORK_PREFIX}${containerName}`;
 }
 
-/** Cred-broker sidecar container name for one sandbox container. */
+/** Suffix appended to a sandbox container name to form its sidecar name. The
+ * single source for both {@link credBrokerSidecarName} and the reverse
+ * (sidecar → guest name) used by the orphan-reclaim sweep — never re-inline. */
+export const CRED_BROKER_SIDECAR_SUFFIX = "-cred-broker";
+
+/** Cred-broker sidecar container name for one sandbox container. Built from
+ * {@link CRED_BROKER_SIDECAR_SUFFIX} so it stays in lockstep with the reverse
+ * derivation in the orphan-reclaim sweep. */
 export function credBrokerSidecarName(containerName: string): string {
-  return `${containerName}-cred-broker`;
+  return `${containerName}${CRED_BROKER_SIDECAR_SUFFIX}`;
+}
+
+/**
+ * Docker label key/value stamped on every cred-broker sidecar at creation
+ * ({@link buildCredBrokerSidecarRunCommand}). This is the ROBUST identity marker
+ * the orphan-reclaim sweep selects candidates by (`docker ps -a --filter
+ * label=<key>=<value>`), NOT the `-cred-broker` name suffix.
+ *
+ * Why a label and not the name suffix (#114 Codex HIGH 1): a guest name is
+ * `terragon-sandbox[-test]-MMDD-HHMM-<nanoid>` and the nanoid alphabet is
+ * `A-Za-z0-9_-`, so a legitimate guest name CAN in principle end in the literal
+ * `-cred-broker`. Classifying by suffix would then mistake that live guest for a
+ * sidecar, omit it from the live-guest set, and force-remove its (real, still
+ * referenced) broker. The label is set only by us on the sidecar `docker run`,
+ * so it can never collide with a guest name however the nanoid falls.
+ */
+export const CRED_BROKER_ROLE_LABEL_KEY = "automata.role";
+export const CRED_BROKER_ROLE_LABEL_VALUE = "cred-broker";
+
+/**
+ * Extra margin added on top of the control-plane boot timeout to derive
+ * {@link ORPHAN_BROKER_MIN_AGE_MS}. Generous, so clock skew / a slow readiness
+ * barrier / clone can never push a legitimate in-flight create past the gate.
+ */
+export const ORPHAN_BROKER_AGE_MARGIN_MS = 15 * 60 * 1000;
+
+/**
+ * Minimum age a cred-broker sidecar/network must reach before the create-time
+ * orphan sweep may reclaim it (#114).
+ *
+ * DERIVATION (Codex HIGH 2 — the age gate must EXCEED the max boot lifetime, not
+ * undercut it): a guest `docker run` has no per-create timeout of its own, so the
+ * longest a legitimate create can sit with its broker up but its guest not yet
+ * attached is bounded by the control-plane sandbox-creation timeout,
+ * {@link sandboxTimeoutMs} (currently 15 min; see ../constants.ts). We set the
+ * gate to that timeout PLUS {@link ORPHAN_BROKER_AGE_MARGIN_MS} (15 min) = 30 min
+ * so a slow-but-legitimate create still booting right up to the timeout is always
+ * younger than the gate and therefore protected from a concurrent create's sweep.
+ * Deriving it from the constant (rather than a hardcoded 10 min, which was
+ * SHORTER than the boot timeout) keeps the two from silently drifting apart. The
+ * gate still bounds how long a genuinely stranded sidecar can hold the
+ * installation token before the next brokered create reclaims it.
+ */
+export const ORPHAN_BROKER_MIN_AGE_MS =
+  sandboxTimeoutMs + ORPHAN_BROKER_AGE_MARGIN_MS;
+
+/**
+ * Pure orphan-selection predicate for the create-time broker reclaim (#114).
+ *
+ * A cred-broker sidecar/network is a genuine orphan — safe to force-remove —
+ * ONLY when BOTH hold:
+ *  - its guest is NOT live (no running/paused container with the guest name):
+ *    a live sandbox always has its guest attached, so a live broker is never
+ *    unreferenced; and
+ *  - it is OLDER than {@link ORPHAN_BROKER_MIN_AGE_MS}: a concurrent create
+ *    that has stood up its broker but not yet attached its guest is younger
+ *    than this, so the age gate protects that in-flight window.
+ *
+ * Because BOTH are required, this can never select a concurrent LIVE
+ * sandbox's broker: a live one is either young (age gate) or has a running/
+ * paused guest attached (reference gate). Only a broker whose guest never came
+ * up (or already died) AND that has aged past the create window is reclaimed.
+ * The current run's own container name is always excluded (defensive; its
+ * fresh nanoid name never collides in practice).
+ */
+export function isAgedUnreferencedBroker(params: {
+  /** The sandbox container name this broker belongs to. */
+  containerName: string;
+  /** ms-since-epoch the sidecar/network was created (NaN → unknown → keep). */
+  createdAtMs: number;
+  /** Whether a running/paused guest container with this name exists. */
+  guestAlive: boolean;
+  /** Reference time (ms since epoch). */
+  nowMs: number;
+  /** Age threshold; defaults to {@link ORPHAN_BROKER_MIN_AGE_MS}. */
+  minAgeMs?: number;
+  /** The in-flight create's container name — never reclaim it. */
+  currentContainerName?: string;
+}): boolean {
+  const {
+    containerName,
+    createdAtMs,
+    guestAlive,
+    nowMs,
+    currentContainerName,
+  } = params;
+  const minAgeMs = params.minAgeMs ?? ORPHAN_BROKER_MIN_AGE_MS;
+  if (currentContainerName && containerName === currentContainerName) {
+    return false;
+  }
+  if (guestAlive) {
+    return false;
+  }
+  // Unknown/unparseable age → fail safe and keep it.
+  if (!Number.isFinite(createdAtMs)) {
+    return false;
+  }
+  return nowMs - createdAtMs >= minAgeMs;
 }
 
 /**
@@ -109,6 +215,9 @@ export function buildCredBrokerSidecarRunCommand({
 }): string {
   return [
     `docker run -d --name ${sidecarName}`,
+    // Robust identity marker for the orphan-reclaim sweep — selection is by this
+    // label, never by the `-cred-broker` name suffix (#114 HIGH 1).
+    `--label ${CRED_BROKER_ROLE_LABEL_KEY}=${CRED_BROKER_ROLE_LABEL_VALUE}`,
     `--network ${networkName}`,
     `--network-alias ${CRED_BROKER_ALIAS}`,
     `-v ${bashQuote(scriptHostPath)}:${CRED_BROKER_SCRIPT_CONTAINER_PATH}:ro`,
