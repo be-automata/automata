@@ -5,7 +5,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
-import { buildDaemonEnv } from "./daemon-env";
+import { buildDaemonEnv, type BrokerHandoff } from "./daemon-env";
+import { ghBrokerConfigYaml } from "./gh-broker";
 import {
   getProcessWorkerId,
   runPidPath,
@@ -63,6 +64,13 @@ export class DaemonProcess {
      * child's egress is unfiltered on this plane (today's behavior).
      */
     private readonly egressProxyUrl: string | null = null,
+    /**
+     * Per-run credential brokers (#81), when the workflow started them. Null →
+     * legacy raw-token env (WORKER_CREDENTIAL_BROKER=legacy-direct rollback).
+     * When set, ensureEnv() additionally writes `http_unix_socket` into the
+     * isolated gh config dir so the agent's gh dials the gh broker.
+     */
+    private readonly broker: BrokerHandoff | null = null,
   ) {
     const workerId = getProcessWorkerId();
     this.runDir = workerRunDir(config.runNamespaceRoot, workerId);
@@ -89,6 +97,18 @@ export class DaemonProcess {
       return this.env;
     }
     this.ghConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "automata-gh-"));
+    if (this.broker) {
+      // #81: `http_unix_socket` has NO env-var equivalent — it is a config.yml
+      // key only. Writing it into the per-run dir routes every gh API call
+      // through the gh broker; teardown's ghConfigDir removal cleans it up.
+      // The agent CAN edit this file to drop the socket — then gh dials
+      // api.github.com directly with the bearer, which GitHub rejects.
+      // Self-inflicted breakage, never a credential leak.
+      fs.writeFileSync(
+        path.join(this.ghConfigDir, "config.yml"),
+        ghBrokerConfigYaml(this.broker.ghSocketPath),
+      );
+    }
     this.env = buildDaemonEnv({
       baseEnv: process.env,
       anthropicApiKey: this.config.anthropicApiKey,
@@ -100,6 +120,7 @@ export class DaemonProcess {
       credentialDelivered: this.credentials?.delivered ?? false,
       credentialEnv: this.credentials?.env ?? {},
       egressProxyUrl: this.egressProxyUrl,
+      broker: this.broker,
     });
     return this.env;
   }

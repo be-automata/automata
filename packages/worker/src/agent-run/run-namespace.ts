@@ -59,6 +59,23 @@ export function runSocketPath(
   );
 }
 
+/**
+ * The gh credential broker's unix socket (#81). Lives beside the daemon socket
+ * under the worker's namespaced dir — root defaults to /tmp precisely so these
+ * stay under the sun_path limit (the broker asserts the length; macOS bind
+ * silently truncates over-long paths rather than erroring).
+ */
+export function runGhSocketPath(
+  root: string,
+  workerId: string,
+  threadId: string,
+): string {
+  return path.join(
+    workerRunDir(root, workerId),
+    `${sanitizeThreadId(threadId)}-gh.sock`,
+  );
+}
+
 export function runPidPath(
   root: string,
   workerId: string,

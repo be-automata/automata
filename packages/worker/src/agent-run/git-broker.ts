@@ -3,10 +3,10 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { AddressInfo } from "node:net";
+import { HOP_BY_HOP, REQUEST_OWNED, timingSafeEqualStr } from "./broker-common";
 
 /**
  * Worker-box-LOCAL git credential broker (#65, be-automata/automata).
@@ -37,26 +37,6 @@ import type { AddressInfo } from "node:net";
 const UPLOAD_PACK = "git-upload-pack";
 const RECEIVE_PACK = "git-receive-pack";
 
-// Hop-by-hop / body-framing headers neither direction may copy verbatim — Node
-// (response) and fetch (request) re-frame the body, so a stale
-// length/encoding/connection header corrupts it.
-const HOP_BY_HOP = new Set([
-  "connection",
-  "keep-alive",
-  "transfer-encoding",
-  "content-length",
-  "content-encoding",
-  "upgrade",
-]);
-
-// Request headers the broker OWNS — everything else is forwarded VERBATIM
-// (a denylist, symmetric with HOP_BY_HOP on the response side). `authorization`
-// is replaced with the injected Basic auth (never the client's bearer); `host`
-// is set by fetch to the upstream. A denylist forwards future git headers by
-// default — the allowlist trap already bit us once: `git-protocol` was
-// load-bearing and its omission silently downgraded protocol v2→v0.
-const REQUEST_OWNED = new Set([...HOP_BY_HOP, "authorization", "host"]);
-
 export type GitBroker = {
   /** `http://127.0.0.1:<port>` — the base the agent's git remote points at. */
   url: string;
@@ -75,13 +55,6 @@ export type StartGitBrokerOptions = {
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch;
 };
-
-function timingSafeEqualStr(a: string, bBuf: Buffer): boolean {
-  const ab = Buffer.from(a);
-  // Length check first is safe: bearer length is not secret, and timingSafeEqual
-  // throws on length mismatch. `bBuf` is precomputed once in the closure.
-  return ab.length === bBuf.length && timingSafeEqual(ab, bBuf);
-}
 
 export async function startGitBroker(
   opts: StartGitBrokerOptions,

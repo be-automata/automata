@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
 import { hatchet } from "../hatchet-client";
 import { loadWorkerConfig } from "./config";
@@ -21,6 +22,10 @@ import {
   type EgressDecisionEvent,
   type EgressProxy,
 } from "./egress-proxy";
+import { startGitBroker, type GitBroker } from "./git-broker";
+import { startGhBroker, type GhBroker } from "./gh-broker";
+import type { BrokerHandoff } from "./daemon-env";
+import { getProcessWorkerId, runGhSocketPath } from "./run-namespace";
 import {
   materialiseAgentCredentials,
   type MaterialisedCredentials,
@@ -134,6 +139,20 @@ export function resolveUseCredits({
         useCredits: true,
         log: "no delivered credential → forcing credits (proxy)",
       };
+}
+
+/**
+ * Best-effort close for per-run loopback servers (egress proxy, brokers,
+ * batcher): a teardown hiccup must never mask the run's real outcome.
+ */
+async function closeQuietly(
+  closable: { close(): Promise<void> } | null | undefined,
+): Promise<void> {
+  try {
+    await closable?.close();
+  } catch {
+    // socket already gone
+  }
 }
 
 /** Flush the egress audit batch at this size (well under the route's 100 cap). */
@@ -353,7 +372,7 @@ agentRunWorkflow.task({
           onEvent: (e) => batcher.add(e),
         });
       } catch (err) {
-        await egressEvents?.close();
+        await closeQuietly(egressEvents);
         await materialised.cleanup();
         await cleanupWorkdir(workdir);
         throw err;
@@ -364,12 +383,63 @@ agentRunWorkflow.task({
       );
     }
 
+    // #81: per-run GitHub credential brokers — the installation token stays in
+    // THIS process's heap; the agent child gets only a per-run bearer, in EVERY
+    // lane. permissionMode arrives only with the pulled message — AFTER the env
+    // is first built (preflightGhAuth memoises it) — so brokering is not
+    // lane-gated: review keeps its daemon-side strip on top, which now removes
+    // the bearer + broker git config too (strictly less than today). Both
+    // brokers must be up BEFORE the env is built. Same self-cleanup rule as the
+    // egress block above — and fail-closed: a broker start failure throws
+    // rather than falling back to a raw-token env.
+    let gitBroker: GitBroker | null = null;
+    let ghBroker: GhBroker | null = null;
+    let broker: BrokerHandoff | null = null;
+    if (config.credentialBroker === "on") {
+      try {
+        // Minted once per run, shared by both brokers; never logged.
+        const runBearer = randomBytes(32).toString("hex");
+        gitBroker = await startGitBroker({
+          installationToken: input.installationToken,
+          repoFullName: input.repoFullName,
+          runBearer,
+        });
+        ghBroker = await startGhBroker({
+          installationToken: input.installationToken,
+          runBearer,
+          socketPath: runGhSocketPath(
+            config.runNamespaceRoot,
+            getProcessWorkerId(),
+            input.threadId,
+          ),
+        });
+        broker = {
+          gitUrl: gitBroker.url,
+          ghSocketPath: ghBroker.socketPath,
+          bearer: runBearer,
+          repoFullName: input.repoFullName,
+        };
+      } catch (err) {
+        await closeQuietly(gitBroker);
+        await closeQuietly(ghBroker);
+        await closeQuietly(egressProxy);
+        await closeQuietly(egressEvents);
+        await materialised.cleanup();
+        await cleanupWorkdir(workdir);
+        throw err;
+      }
+      step(
+        `credential brokers up: git=127.0.0.1:${gitBroker.port}, gh=${ghBroker.socketPath}`,
+      );
+    }
+
     const daemon = new DaemonProcess(
       config,
       input,
       workdir,
       materialised,
       egressProxy?.url ?? null,
+      broker,
     );
     try {
       // Fail-closed identity precondition (ADR-002): confirm gh authenticates as the
@@ -449,14 +519,13 @@ agentRunWorkflow.task({
       // #66: close the egress proxy after the daemon is dead (no more child
       // traffic), then flush the last audit batch. Both are best-effort — an
       // audit/proxy teardown hiccup must never mask the run's real outcome.
-      if (egressProxy) {
-        try {
-          await egressProxy.close();
-        } catch {
-          // sockets already gone
-        }
-      }
-      await egressEvents?.close();
+      await closeQuietly(egressProxy);
+      // #81: close both credential brokers after the daemon is dead (no more
+      // child git/gh traffic). Best-effort, like the egress proxy — the token
+      // dies with this process either way.
+      await closeQuietly(gitBroker);
+      await closeQuietly(ghBroker);
+      await closeQuietly(egressEvents);
       // Wipe the delivered credential before the workdir goes, so a cleanup
       // failure on the workdir can never leave a live token behind.
       await materialised.cleanup();
