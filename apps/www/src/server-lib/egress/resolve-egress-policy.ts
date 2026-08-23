@@ -10,9 +10,9 @@ import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
  * The plane a resolved policy will be enforced on. The distinction matters for
  * the github hosts (#81): on the WORKER plane the credential brokers run in the
  * worker process, whose outbound traffic is NOT subject to the agent's egress
- * fence — so `github.com`/`api.github.com` can eventually be dropped from the
- * worker's system list. In a SANDBOX the provider allowlist fences the whole
- * box, brokers included, so those hosts must stay.
+ * fence — so `github.com`/`api.github.com` are dropped from the worker's system
+ * list (#66 AC4). In a SANDBOX the provider allowlist fences the whole box,
+ * brokers included, so those hosts must stay.
  */
 export type EgressPlane = "worker" | "sandbox";
 
@@ -23,20 +23,42 @@ export type EgressPlane = "worker" | "sandbox";
  * Merged into the shape control-plane-side so planes receive a FINAL allowlist
  * and never compute system entries themselves.
  *
- * #81 sequencing: the worker plane is now brokered, but BOTH planes still get
- * the github hosts — dropping them for `plane: "worker"` while any un-brokered
- * worker is deployed would brick pushes under enforcement (control plane and
- * worker boxes deploy independently; version skew is real). The worker-plane
- * drop is a follow-up one-line flip here after the brokered worker fleet is
- * confirmed deployed.
+ * #66 AC4: the worker plane is now brokered (#81 delivered), so it DROPS the
+ * github hosts — the agent reaches GitHub only through loopback brokers, which
+ * NO_PROXY exempts from the egress proxy. The sandbox plane keeps them (#114).
+ * Deployment precondition: every worker box must be on the brokered #113 build
+ * before this takes effect under enforcement — a pre-#113 box still uses direct
+ * github.com egress and would have its pushes bricked by the tighter allowlist
+ * (control plane and worker boxes deploy independently; version skew is real).
  *
  * FOLLOW-UP: this flat list over-grants — e.g. a Gemini-harness run does not
  * need `api.anthropic.com`. The right shape is a harness-keyed system-host map
  * (per-agent/per-lane entries resolved from the run's harness at dispatch);
  * deliberately deferred until the harness identity is available here.
  */
-function systemEgressHosts(_plane: EgressPlane): string[] {
+function systemEgressHosts(plane: EgressPlane): string[] {
   const callbackHost = new URL(nonLocalhostPublicAppUrl()).host;
+  // Worker plane (#66 AC4): this allowlist fences the AGENT RUN's egress (the
+  // brokered daemon/agent env behind the egress proxy). Within that fence the
+  // credential brokers (#81) are DELIVERED, so the agent reaches GitHub only
+  // through loopback — git via the git broker (`http://127.0.0.1:<port>`) and
+  // gh via the broker's unix socket — both exempted from the proxy by NO_PROXY.
+  // The agent therefore needs no direct egress to github.com / api.github.com,
+  // so they are dropped from the allowlist.
+  //
+  // SCOPE NOTE: worker-process provisioning is a SEPARATE path this allowlist
+  // has never governed — provisionWorkdir (packages/worker/src/agent-run/
+  // provision.ts) clones/fetches github.com directly with the installation
+  // token, in the worker's ambient env before the brokers start. That traffic
+  // is outside this fence either way, so dropping the hosts here does not affect
+  // it; do not read this drop as a claim that ALL worker-process GitHub egress
+  // is brokered.
+  //
+  // The sandbox plane still holds the resident token and pushes to GitHub
+  // directly (#114), so it keeps both hosts.
+  if (plane === "worker") {
+    return [callbackHost, "api.anthropic.com"];
+  }
   return [callbackHost, "github.com", "api.github.com", "api.anthropic.com"];
 }
 
