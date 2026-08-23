@@ -167,17 +167,30 @@ export function createEngineDbFromPool(pool: {
 }
 
 /**
+ * Pool options for the engine-DB reach, exported so tests can assert them.
+ * `max: 2` — the maintenance loop is single-flight plus one connection of
+ * headroom for an occasional direct query. `connectionTimeoutMillis` bounds
+ * `pool.connect()` itself: the SET LOCAL statement/lock timeouts only apply
+ * once a connection exists, so without this a routable-but-unresponsive engine
+ * host (firewall drop, network partition) would hang `pool.connect()` — and
+ * with it the awaited `bootTimeSlotReclaim` boot path — indefinitely (AC-14).
+ */
+export const ENGINE_DB_POOL_OPTIONS = {
+  max: 2,
+  connectionTimeoutMillis: 5_000,
+} as const;
+
+/**
  * Master gate (§3.0): returns `null` when `HATCHET_ENGINE_DATABASE_URL` is
  * unset, which is how every mechanism in this ticket stays an inert no-op on a
- * box that never opted in. `max: 2` — the maintenance loop is single-flight
- * plus one connection of headroom for an occasional direct query.
+ * box that never opted in.
  */
 export function createEngineDb(env: NodeJS.ProcessEnv = process.env): EngineDb | null {
   const connectionString = env.HATCHET_ENGINE_DATABASE_URL?.trim();
   if (!connectionString) {
     return null;
   }
-  const pool = new Pool({ connectionString, max: 2 });
+  const pool = new Pool({ connectionString, ...ENGINE_DB_POOL_OPTIONS });
   return createEngineDbFromPool(pool);
 }
 

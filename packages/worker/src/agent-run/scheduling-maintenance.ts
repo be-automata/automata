@@ -285,7 +285,7 @@ export function startMaintenanceLoop(
   let healthServer: Server | null = null;
   if (config.healthPort) {
     try {
-      healthServer = createServer((req, res) => {
+      const server = createServer((req, res) => {
         if (req.url !== "/healthz") {
           res.writeHead(404).end();
           return;
@@ -295,8 +295,23 @@ export function startMaintenanceLoop(
         });
         res.end(JSON.stringify(latestSnapshot));
       });
-      healthServer.listen(config.healthPort, "127.0.0.1");
-      healthServer.unref();
+      // `listen()` failures (EADDRINUSE from a stale/overlapping worker on the
+      // same port, EACCES, ...) arrive as an async 'error' EVENT, not a throw —
+      // without this listener Node rethrows it as an uncaught exception and
+      // kills the whole worker process. The healthz listener is optional
+      // observability; losing it must never take the worker down (AC-14).
+      server.on("error", (err) => {
+        log({ event: "scheduling.tick_error", error: `healthz listen failed: ${String(err)}` });
+        try {
+          server.close();
+        } catch {
+          // best-effort
+        }
+        healthServer = null;
+      });
+      server.listen(config.healthPort, "127.0.0.1");
+      server.unref();
+      healthServer = server;
     } catch (err) {
       log({ event: "scheduling.tick_error", error: `healthz listen failed: ${String(err)}` });
       healthServer = null;

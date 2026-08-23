@@ -1,5 +1,6 @@
+import { createServer as createNetServer } from "node:net";
 import { describe, expect, it, vi } from "vitest";
-import type { PgLike } from "./engine-db";
+import { ENGINE_DB_POOL_OPTIONS, type PgLike } from "./engine-db";
 import {
   alertableRecoveryLatencySeconds,
   detectSchedulingTimeoutEvents,
@@ -14,7 +15,11 @@ import {
   repairWorkflowConcurrencyRot,
 } from "./scheduling-health";
 import { loadWorkerConfig, resolveMechanismMode } from "./config";
-import { bootTimeSlotReclaim, runMaintenanceTick } from "./scheduling-maintenance";
+import {
+  bootTimeSlotReclaim,
+  runMaintenanceTick,
+  startMaintenanceLoop,
+} from "./scheduling-maintenance";
 
 const TENANT_ID = "707d0855-80ab-4e1f-a156-f1c4546cbf52";
 
@@ -654,6 +659,47 @@ describe("bootTimeSlotReclaim — boot-path hygiene and gating", () => {
     await bootTimeSlotReclaim(offConfig, vi.fn(), db as never);
     expect(db.withAdvisoryLock).not.toHaveBeenCalled();
     expect(db.query).not.toHaveBeenCalled();
+  });
+});
+
+describe("startMaintenanceLoop — healthz listener resilience", () => {
+  it("EADDRINUSE on the health port is logged, not an uncaught crash (AC-14)", async () => {
+    // Occupy an ephemeral port first, then point the health listener at it.
+    const blocker = createNetServer();
+    const port = await new Promise<number>((resolve) => {
+      blocker.listen(0, "127.0.0.1", () => {
+        const addr = blocker.address();
+        resolve(typeof addr === "object" && addr ? addr.port : 0);
+      });
+    });
+    const config = loadWorkerConfig({
+      HATCHET_ENGINE_DATABASE_URL: "postgresql://fake",
+      HATCHET_ENGINE_TENANT_ID: TENANT_ID,
+      WORKER_HEALTH_PORT: String(port),
+    });
+    const log = vi.fn();
+    const handle = startMaintenanceLoop(config, null, log);
+    try {
+      // The 'error' event is asynchronous — wait for the handler to log it.
+      await vi.waitFor(() => {
+        expect(log).toHaveBeenCalledWith(
+          expect.objectContaining({
+            event: "scheduling.tick_error",
+            error: expect.stringContaining("healthz listen failed"),
+          }),
+        );
+      });
+    } finally {
+      handle.stop();
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+  });
+});
+
+describe("engine-db pool options", () => {
+  it("bounds pool.connect() so a black-holed engine host cannot hang the awaited boot path (AC-14)", () => {
+    expect(ENGINE_DB_POOL_OPTIONS.connectionTimeoutMillis).toBe(5_000);
+    expect(ENGINE_DB_POOL_OPTIONS.max).toBe(2);
   });
 });
 
