@@ -405,6 +405,9 @@ export class DockerProvider implements ISandboxProvider {
     // today's path. ONE try/catch spans setup + docker run: on any failure the
     // partially-created egress resources are swept by the (idempotent,
     // best-effort) teardown before rethrowing.
+    // Hoisted so the catch knows whether the broker owns a dedicated network
+    // (vs. sharing the egress net) to teardown in the correct order.
+    let credBrokerDedicatedNetwork = false;
     try {
       let egressFlags = "";
       if (options.egressPolicy) {
@@ -423,7 +426,6 @@ export class DockerProvider implements ISandboxProvider {
       //    by guest + sidecar; the guest keeps normal internet (the broker
       //    fences the TOKEN, not egress).
       let credBrokerConfigured = false;
-      let credBrokerDedicatedNetwork = false;
       let credGuestFlags = "";
       if (options.credentialBroker) {
         const usesEgressNetwork = egressFlags !== "";
@@ -467,11 +469,20 @@ export class DockerProvider implements ISandboxProvider {
       });
     } catch (error) {
       console.error("Failed to create Docker sandbox:", error);
+      // Order matters: remove the cred-broker sidecar FIRST so it detaches
+      // from the (possibly shared) egress network. Otherwise, when the broker
+      // shares the egress network (credBrokerDedicatedNetwork=false), the
+      // egress `docker network rm` below fails on a still-attached container
+      // and silently orphans the `--internal` network. When the broker owns no
+      // network of its own, the egress teardown reclaims the shared one; only a
+      // dedicated broker network is removed by the broker teardown itself.
+      if (options.credentialBroker) {
+        this.tearDownCredentialBroker(containerName, {
+          removeNetwork: credBrokerDedicatedNetwork,
+        });
+      }
       if (options.egressPolicy) {
         this.tearDownEgressEnforcement(containerName);
-      }
-      if (options.credentialBroker) {
-        this.tearDownCredentialBroker(containerName);
       }
       throw error;
     }
