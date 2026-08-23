@@ -71,6 +71,78 @@ export function credBrokerSidecarName(containerName: string): string {
   return `${containerName}-cred-broker`;
 }
 
+/** Suffix appended to a sandbox container name to form its sidecar name. The
+ * single source for both {@link credBrokerSidecarName} and the reverse
+ * (sidecar → guest name) used by the orphan-reclaim sweep — never re-inline. */
+export const CRED_BROKER_SIDECAR_SUFFIX = "-cred-broker";
+
+/**
+ * Minimum age a cred-broker sidecar/network must reach before the create-time
+ * orphan sweep may reclaim it (#114). It MUST comfortably exceed the whole
+ * brokered-create window — sidecar run + readiness barrier (up to ~20s) + guest
+ * `docker run` + clone/setup — so a CONCURRENT in-flight create (whose broker is
+ * up but whose guest has not yet been created/attached — the exact pre-id
+ * window) is always younger than this and therefore protected. 10 minutes is
+ * far beyond any realistic boot, while still bounding how long a stranded
+ * sidecar can hold the installation token before the next brokered create
+ * reclaims it.
+ */
+export const ORPHAN_BROKER_MIN_AGE_MS = 10 * 60 * 1000;
+
+/**
+ * Pure orphan-selection predicate for the create-time broker reclaim (#114).
+ *
+ * A cred-broker sidecar/network is a genuine orphan — safe to force-remove —
+ * ONLY when BOTH hold:
+ *  - its guest is NOT live (no running/paused container with the guest name):
+ *    a live sandbox always has its guest attached, so a live broker is never
+ *    unreferenced; and
+ *  - it is OLDER than {@link ORPHAN_BROKER_MIN_AGE_MS}: a concurrent create
+ *    that has stood up its broker but not yet attached its guest is younger
+ *    than this, so the age gate protects that in-flight window.
+ *
+ * Because BOTH are required, this can never select a concurrent LIVE
+ * sandbox's broker: a live one is either young (age gate) or has a running/
+ * paused guest attached (reference gate). Only a broker whose guest never came
+ * up (or already died) AND that has aged past the create window is reclaimed.
+ * The current run's own container name is always excluded (defensive; its
+ * fresh nanoid name never collides in practice).
+ */
+export function isAgedUnreferencedBroker(params: {
+  /** The sandbox container name this broker belongs to. */
+  containerName: string;
+  /** ms-since-epoch the sidecar/network was created (NaN → unknown → keep). */
+  createdAtMs: number;
+  /** Whether a running/paused guest container with this name exists. */
+  guestAlive: boolean;
+  /** Reference time (ms since epoch). */
+  nowMs: number;
+  /** Age threshold; defaults to {@link ORPHAN_BROKER_MIN_AGE_MS}. */
+  minAgeMs?: number;
+  /** The in-flight create's container name — never reclaim it. */
+  currentContainerName?: string;
+}): boolean {
+  const {
+    containerName,
+    createdAtMs,
+    guestAlive,
+    nowMs,
+    currentContainerName,
+  } = params;
+  const minAgeMs = params.minAgeMs ?? ORPHAN_BROKER_MIN_AGE_MS;
+  if (currentContainerName && containerName === currentContainerName) {
+    return false;
+  }
+  if (guestAlive) {
+    return false;
+  }
+  // Unknown/unparseable age → fail safe and keep it.
+  if (!Number.isFinite(createdAtMs)) {
+    return false;
+  }
+  return nowMs - createdAtMs >= minAgeMs;
+}
+
 /**
  * The JSON payload written to the host secret file (mode `0o400`, bind-mounted
  * `:ro` into the sidecar). Kept as a builder so the write path and the tests

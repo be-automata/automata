@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { DockerProvider } from "./docker-provider";
 import {
   BrokeredSandboxNotResumableError,
+  ORPHAN_BROKER_MIN_AGE_MS,
   credBrokerNetworkName,
   credBrokerSidecarName,
 } from "./docker-cred-broker";
@@ -326,6 +327,152 @@ describe(
         { encoding: "utf8" },
       ).trim();
       expect(running).toBe("true");
+    });
+  },
+);
+
+// #114 (bounded MED) SAFE auto-reclaim of DIFFERENT-name orphans: a pre-id
+// create timeout can strand a broker sidecar/network under the abandoned run's
+// name (a DIFFERENT name than any later create's fresh nanoid), so the same-name
+// reclaim never catches it. reclaimOrphanedBrokerResources sweeps AGED +
+// UNREFERENCED broker orphans on every brokered create — while NEVER touching a
+// concurrent live sandbox's broker (young, or with a running/paused guest). This
+// drives the private reclaim directly with a controllable age threshold to prove
+// both halves without waiting 10 real minutes.
+describe(
+  "docker cred-broker orphan auto-reclaim (integration)",
+  { skip: process.env.SANDBOX_PROVIDER !== "docker", timeout: TIMEOUT_MS },
+  () => {
+    vi.setConfig({ testTimeout: TIMEOUT_MS });
+
+    const BASE_IMAGE = "ghcr.io/terragon-labs/containers-test";
+    const provider = new DockerProvider();
+
+    // A running-container name that the reclaim must treat as the in-flight
+    // create and never touch. All names TEST_CONTAINER_PREFIX-scoped so
+    // cleanupTestContainers sweeps them.
+    const tag = randomBytes(4).toString("hex");
+    const CURRENT = `terragon-sandbox-test-current-${tag}`;
+
+    // Names created across the cases, torn down in afterAll.
+    const created: {
+      sidecars: string[];
+      networks: string[];
+      guests: string[];
+    } = { sidecars: [], networks: [], guests: [] };
+
+    const reclaim = (minAgeMs: number) =>
+      (
+        provider as unknown as {
+          reclaimOrphanedBrokerResources: (
+            currentContainerName: string,
+            minAgeMs?: number,
+          ) => void;
+        }
+      ).reclaimOrphanedBrokerResources(CURRENT, minAgeMs);
+
+    /** Seed an orphan broker: sidecar + dedicated network, NO guest. */
+    function seedOrphan(guestName: string) {
+      const net = credBrokerNetworkName(guestName);
+      const sidecar = credBrokerSidecarName(guestName);
+      execSync(`docker network create ${net}`, { stdio: "ignore" });
+      execSync(
+        `docker run -d --name ${sidecar} --network ${net} ${BASE_IMAGE} tail -f /dev/null`,
+        { stdio: "ignore" },
+      );
+      created.networks.push(net);
+      created.sidecars.push(sidecar);
+      return { net, sidecar };
+    }
+
+    /** Seed a LIVE broker: sidecar + network + a RUNNING guest attached. */
+    function seedLive(guestName: string) {
+      const net = credBrokerNetworkName(guestName);
+      const sidecar = credBrokerSidecarName(guestName);
+      execSync(`docker network create ${net}`, { stdio: "ignore" });
+      execSync(
+        `docker run -d --name ${sidecar} --network ${net} ${BASE_IMAGE} tail -f /dev/null`,
+        { stdio: "ignore" },
+      );
+      execSync(
+        `docker run -d --name ${guestName} --network ${net} ${BASE_IMAGE} tail -f /dev/null`,
+        { stdio: "ignore" },
+      );
+      created.networks.push(net);
+      created.sidecars.push(sidecar);
+      created.guests.push(guestName);
+      return { net, sidecar, guestName };
+    }
+
+    const containerExists = (name: string) =>
+      execSync(`docker ps -a --filter "name=^${name}$" --format "{{.Names}}"`, {
+        encoding: "utf8",
+      }).trim() === name;
+    const networkExists = (name: string) =>
+      execSync(
+        `docker network ls --filter "name=^${name}$" --format "{{.Name}}"`,
+        { encoding: "utf8" },
+      ).trim() === name;
+
+    afterAll(async () => {
+      for (const s of created.sidecars) {
+        try {
+          execSync(`docker rm -f ${s}`, { stdio: "ignore" });
+        } catch {}
+      }
+      for (const g of created.guests) {
+        try {
+          execSync(`docker rm -f ${g}`, { stdio: "ignore" });
+        } catch {}
+      }
+      for (const n of created.networks) {
+        try {
+          execSync(`docker network rm ${n}`, { stdio: "ignore" });
+        } catch {}
+      }
+      await DockerProvider.cleanupTestContainers();
+    });
+
+    it("reclaims an AGED + UNREFERENCED orphan with a DIFFERENT name than the current run", () => {
+      const guest = `terragon-sandbox-test-orphan-${tag}`;
+      const { net, sidecar } = seedOrphan(guest);
+      expect(containerExists(sidecar)).toBe(true);
+      expect(networkExists(net)).toBe(true);
+
+      // minAgeMs 0 → the freshly-seeded orphan already clears the age gate; with
+      // no live guest it is a genuine orphan and must be swept.
+      reclaim(0);
+
+      expect(containerExists(sidecar)).toBe(false);
+      expect(networkExists(net)).toBe(false);
+    });
+
+    it("does NOT touch a concurrent LIVE sandbox's broker (running guest attached), even when aged", () => {
+      const guest = `terragon-sandbox-test-live-${tag}`;
+      const { net, sidecar, guestName } = seedLive(guest);
+      expect(containerExists(sidecar)).toBe(true);
+      expect(containerExists(guestName)).toBe(true);
+
+      // Even with minAgeMs 0, the running guest marks the broker as referenced —
+      // the reclaim must leave the sidecar, network, AND guest alone.
+      reclaim(0);
+
+      expect(containerExists(sidecar)).toBe(true);
+      expect(networkExists(net)).toBe(true);
+      expect(containerExists(guestName)).toBe(true);
+    });
+
+    it("does NOT touch a YOUNG unreferenced broker (a concurrent create's pre-attach window)", () => {
+      const guest = `terragon-sandbox-test-young-${tag}`;
+      const { net, sidecar } = seedOrphan(guest);
+      expect(containerExists(sidecar)).toBe(true);
+
+      // The default 10-minute threshold treats this just-seeded, guestless
+      // broker as an in-flight create — it must be preserved.
+      reclaim(ORPHAN_BROKER_MIN_AGE_MS);
+
+      expect(containerExists(sidecar)).toBe(true);
+      expect(networkExists(net)).toBe(true);
     });
   },
 );

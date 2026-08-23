@@ -23,11 +23,14 @@ import {
   CRED_BROKER_ALIAS,
   CRED_BROKER_GIT_PORT,
   CRED_BROKER_NETWORK_PREFIX,
+  CRED_BROKER_SIDECAR_SUFFIX,
+  ORPHAN_BROKER_MIN_AGE_MS,
   buildCredBrokerSecretsFileContent,
   buildCredBrokerSidecarRunCommand,
   buildSandboxCredBrokerRunFlags,
   credBrokerNetworkName,
   credBrokerSidecarName,
+  isAgedUnreferencedBroker,
 } from "./docker-cred-broker";
 import { CRED_BROKER_SCRIPT } from "../cred-broker-standalone.generated";
 
@@ -586,6 +589,16 @@ export class DockerProvider implements ISandboxProvider {
       `automata-cred-broker-${scriptHash}.cjs`,
     );
     try {
+      // #114 SAFE auto-reclaim of DIFFERENT-name orphans: a pre-id create
+      // timeout can also strand a broker sidecar/network under the ABANDONED
+      // run's container name (the guest `docker run` is abandoned after the
+      // sidecar/network are up, before the guest id surfaces, so the caller
+      // can't sweep it by id). Every (re)create draws a fresh nanoid name, so
+      // the same-name reclaim below never catches those. Sweep AGED +
+      // UNREFERENCED broker orphans here so the next brokered create reclaims
+      // the stranded token-holder — gated so it can NEVER touch a concurrent
+      // live sandbox's broker (young, or with a running/paused guest attached).
+      this.reclaimOrphanedBrokerResources(containerName);
       // #114 idempotent pre-create reclaim: an uncatchable pre-id create timeout
       // (the guest `docker run` is abandoned mid-flight after this sidecar +
       // network are already up) leaves a stale same-name broker sidecar/network
@@ -709,6 +722,163 @@ export class DockerProvider implements ISandboxProvider {
       }
     }
     fs.unlink(credBrokerSecretHostPath(containerName)).catch(() => {});
+  }
+
+  /**
+   * #114 SAFE create-time reclaim of AGED + UNREFERENCED orphan cred-broker
+   * resources. A pre-id create timeout can strand a broker sidecar/network under
+   * the abandoned run's container name (a DIFFERENT name than any later create's
+   * fresh nanoid), so the same-name reclaim in {@link setUpCredentialBroker}
+   * never catches it and the stranded sidecar keeps holding the installation
+   * token until the (test-only) prefix sweep runs. This closes that gap on the
+   * live path.
+   *
+   * Safety (Codex non-regression): a broker is removed ONLY when it is BOTH
+   * older than {@link ORPHAN_BROKER_MIN_AGE_MS} AND has no live (running/paused)
+   * guest attached — see {@link isAgedUnreferencedBroker}. A concurrent LIVE
+   * sandbox's broker is always either young (its create is still in flight) or
+   * has a running/paused guest, so it can never be selected. A guest that is
+   * itself still running is treated as live and left untouched — we never
+   * force-remove a running guest or its broker. Best-effort/idempotent: any
+   * docker error (daemon down, resource already gone, network still attached)
+   * is swallowed so a broker create never fails on cleanup.
+   */
+  private reclaimOrphanedBrokerResources(
+    currentContainerName: string,
+    minAgeMs: number = ORPHAN_BROKER_MIN_AGE_MS,
+  ): void {
+    const isTest = process.env.NODE_ENV === "test";
+    const containerPrefix = isTest ? TEST_CONTAINER_PREFIX : CONTAINER_PREFIX;
+    const nowMs = Date.now();
+
+    // One pass over every container carrying our prefix: classify broker
+    // sidecars vs. their (potentially live) guests. A guest is "live" — hence
+    // its broker is referenced — when running OR paused (a hibernated guest may
+    // still resume; treat it as live so we never touch it).
+    let rows: string[] = [];
+    try {
+      rows = execSync(
+        `docker ps -a --filter name=${containerPrefix} --format '{{.Names}}|{{.State}}'`,
+        { encoding: "utf8" },
+      )
+        .trim()
+        .split("\n")
+        .filter((r) => r.trim());
+    } catch {
+      // Docker unavailable / nothing listed — nothing to reclaim.
+      return;
+    }
+    const liveGuestNames = new Set<string>();
+    const sidecarNames: string[] = [];
+    for (const row of rows) {
+      const [name, state] = row.split("|");
+      if (!name) {
+        continue;
+      }
+      if (name.endsWith(CRED_BROKER_SIDECAR_SUFFIX)) {
+        sidecarNames.push(name);
+      } else if (state === "running" || state === "paused") {
+        liveGuestNames.add(name);
+      }
+    }
+
+    // Sidecars: reclaim the aged, unreferenced ones (sidecar + its dedicated
+    // network + host secret file).
+    for (const sidecar of sidecarNames) {
+      const guestName = sidecar.slice(0, -CRED_BROKER_SIDECAR_SUFFIX.length);
+      if (guestName === currentContainerName || liveGuestNames.has(guestName)) {
+        continue; // in-flight run or live guest → keep (no inspect needed).
+      }
+      let createdAtMs = NaN;
+      try {
+        createdAtMs = Date.parse(
+          execSync(`docker inspect --format '{{.Created}}' ${sidecar}`, {
+            encoding: "utf8",
+          }).trim(),
+        );
+      } catch {
+        continue; // Vanished between listing and inspect.
+      }
+      if (
+        !isAgedUnreferencedBroker({
+          containerName: guestName,
+          createdAtMs,
+          guestAlive: false,
+          nowMs,
+          minAgeMs,
+          currentContainerName,
+        })
+      ) {
+        continue;
+      }
+      this.tearDownCredentialBroker(guestName, { removeNetwork: true });
+    }
+
+    // Networks stranded WITHOUT a sidecar (network create succeeded but the
+    // sidecar run was abandoned): reclaim aged ones with nothing attached. A
+    // live sandbox's broker network always has its sidecar+guest attached, so
+    // an empty container list can't belong to a live sandbox; the age gate
+    // still protects a concurrent create's pre-attach window.
+    let netNames: string[] = [];
+    try {
+      netNames = execSync(
+        `docker network ls --filter name=${CRED_BROKER_NETWORK_PREFIX}${containerPrefix} --format '{{.Name}}'`,
+        { encoding: "utf8" },
+      )
+        .trim()
+        .split("\n")
+        .filter((n) => n.trim());
+    } catch {
+      return;
+    }
+    for (const net of netNames) {
+      const guestName = net.slice(CRED_BROKER_NETWORK_PREFIX.length);
+      if (
+        !guestName ||
+        guestName === currentContainerName ||
+        liveGuestNames.has(guestName)
+      ) {
+        continue;
+      }
+      let createdAtMs = NaN;
+      let hasAttachedContainers = true;
+      try {
+        createdAtMs = Date.parse(
+          execSync(`docker network inspect --format '{{.Created}}' ${net}`, {
+            encoding: "utf8",
+          }).trim(),
+        );
+        const containersJson = execSync(
+          `docker network inspect --format '{{json .Containers}}' ${net}`,
+          { encoding: "utf8" },
+        ).trim();
+        hasAttachedContainers =
+          containersJson !== "{}" && containersJson !== "null";
+      } catch {
+        continue; // Vanished between listing and inspect.
+      }
+      if (hasAttachedContainers) {
+        continue; // Something still attached → not a bare orphan.
+      }
+      if (
+        !isAgedUnreferencedBroker({
+          containerName: guestName,
+          createdAtMs,
+          guestAlive: false,
+          nowMs,
+          minAgeMs,
+          currentContainerName,
+        })
+      ) {
+        continue;
+      }
+      try {
+        execSync(`docker network rm ${net}`, { stdio: "ignore" });
+      } catch {
+        // Still in use or already gone — leave it.
+      }
+      fs.unlink(credBrokerSecretHostPath(guestName)).catch(() => {});
+    }
   }
 
   /** Best-effort, idempotent sweep of one sandbox's egress sidecar + network. */
