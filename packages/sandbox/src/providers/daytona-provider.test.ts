@@ -367,24 +367,24 @@ describe("DaytonaProvider native credential broker (#114)", () => {
         credentialBrokerMode: "brokered",
       }),
     );
-    // Refresh is via the conflict-upsert path: create → conflict → list+update,
-    // OR create succeeds (secret was deleted). Either way the fresh token lands.
-    // With the default (create succeeds) mock, upsert = create.
-    expect(secretCreateMock).toHaveBeenCalledWith({
-      name: SECRET_NAME,
+    // Resume uses the expect-exists path: list → exact match → update (the org
+    // Secret persists across pause), NOT create-first — so the common case is 2
+    // API round-trips, not 3 (no forced conflict).
+    expect(secretListMock).toHaveBeenCalledWith({ name: SECRET_NAME });
+    expect(secretUpdateMock).toHaveBeenCalledWith(SECRET_ID, {
       value: daytonaBroker.installationToken,
-      hosts: [...DAYTONA_BROKER_GITHUB_HOSTS],
     });
+    expect(secretCreateMock).not.toHaveBeenCalled();
     // The refresh must complete before the guest is resumed (daytona.get/start).
-    const secretOrder = secretCreateMock.mock.invocationCallOrder[0]!;
+    const updateOrder = secretUpdateMock.mock.invocationCallOrder[0]!;
     const getOrder = getMock.mock.invocationCallOrder[0]!;
-    expect(secretOrder).toBeLessThan(getOrder);
+    expect(updateOrder).toBeLessThan(getOrder);
   });
 
-  it("resume refresh upserts (conflict → update) when the secret already exists", async () => {
-    secretCreateMock.mockRejectedValueOnce(
-      new DaytonaConflictError("name exists"),
-    );
+  it("resume re-creates the secret when it is gone (list miss → create fallback)", async () => {
+    // Secret destroyed out of band: the expect-exists list finds no match, so
+    // the refresh falls back to create (re-scoped to the github hosts).
+    secretListMock.mockImplementationOnce(async () => ({ items: [] }));
     const provider = new DaytonaProvider();
     await provider.getOrCreateSandbox(
       "daytona-test-sandbox",
@@ -393,15 +393,17 @@ describe("DaytonaProvider native credential broker (#114)", () => {
         credentialBrokerMode: "brokered",
       }),
     );
-    expect(secretUpdateMock).toHaveBeenCalledWith(SECRET_ID, {
+    expect(secretCreateMock).toHaveBeenCalledWith({
+      name: SECRET_NAME,
       value: daytonaBroker.installationToken,
+      hosts: [...DAYTONA_BROKER_GITHUB_HOSTS],
     });
     expect(getMock).toHaveBeenCalled();
   });
 
   it("resume fails closed: does NOT resume and throws if the secret refresh throws", async () => {
-    secretCreateMock.mockRejectedValueOnce(new Error("secret 503"));
-    // Not a conflict → propagates (fail closed).
+    // Expect-exists path: the update on the existing secret throws → propagates.
+    secretUpdateMock.mockRejectedValueOnce(new Error("secret 503"));
     const provider = new DaytonaProvider();
     await expect(
       provider.getOrCreateSandbox(

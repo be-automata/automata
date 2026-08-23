@@ -17,6 +17,7 @@ import { getTemplateIdForSize } from "@terragon/sandbox-image";
 import { retryAsync } from "@terragon/utils/retry";
 import { formatError } from "@terragon/utils/error";
 import {
+  BROKER_SECRET_STALE_MS,
   DAYTONA_BROKER_GITHUB_HOSTS,
   toDaytonaBrokeredNetwork,
   toDaytonaNetwork,
@@ -27,16 +28,6 @@ const HOME_DIR = "root";
 const DEFAULT_DIR = `/${HOME_DIR}`;
 const REPO_DIR = "repo";
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-
-/**
- * #114 §7a: near-expiry throttle for the broker-secret rotation on the SECONDARY
- * connect paths (keepalive `extendLife`, admin-view `getSandboxOrNull`). Mirrors
- * the E2B provider constant: GitHub installation tokens live ~60 min, so we only
- * rotate the org Secret when it was last updated MORE than ~50 min ago (or is
- * gone), leaving a comfortable margin under the TTL while a burst of keepalives
- * mints at most ~one token per hour per sandbox.
- */
-const BROKER_SECRET_STALE_MS = 50 * 60 * 1000; // 50 minutes
 
 /**
  * #114: upsert the run's write-only Daytona org Secret to `token`, addressed by
@@ -79,6 +70,40 @@ async function upsertDaytonaBrokerSecret(
     await daytona.secret.update(match.id, { value: token });
     return match.id;
   }
+}
+
+/**
+ * #114: refresh the run's write-only Daytona org Secret to `token` on the RESUME
+ * path, where the secret ALWAYS already exists (it persists across pause). Tries
+ * `list({ name })` → exact-name match → `update(id, { value })` FIRST (2 API
+ * round-trips in the common case), rather than the create-first
+ * {@link upsertDaytonaBrokerSecret} — which on resume would ALWAYS throw
+ * {@link DaytonaConflictError} then fall back to list+update (3 round-trips where
+ * 2 suffice). Only on a GENUINE miss (the secret was destroyed out of band) does
+ * it fall back to `create` (re-asserting the GitHub `hosts` scope). Returns the
+ * secret id (teardown deletes BY ID). Fail closed: any list/update/create
+ * failure propagates to the caller (which must NOT resume on a stale/absent
+ * credential).
+ */
+async function updateDaytonaBrokerSecret(
+  daytona: Daytona,
+  secretName: string,
+  token: string,
+): Promise<string> {
+  const { items } = await daytona.secret.list({ name: secretName });
+  const match = items.find((s) => s.name === secretName);
+  if (match) {
+    await daytona.secret.update(match.id, { value: token });
+    return match.id;
+  }
+  // Genuine miss (destroyed out of band) — re-create it; the persisted
+  // create-time `secrets` mapping references this name, so injection resumes.
+  const secret = await daytona.secret.create({
+    name: secretName,
+    value: token,
+    hosts: [...DAYTONA_BROKER_GITHUB_HOSTS],
+  });
+  return secret.id;
 }
 
 /**
@@ -704,10 +729,12 @@ export class DaytonaProvider implements ISandboxProvider {
     const daytona = getDaytonaOrThrow();
     // Refresh the secret value with the fresh token BEFORE resuming. Fail
     // closed: a failure throws WITHOUT resuming, so the guest stays stopped and
-    // never resumes on a stale/absent credential.
+    // never resumes on a stale/absent credential. The org Secret persists across
+    // pause, so use the expect-exists list→update path (2 round-trips) rather
+    // than create-first (which would always conflict then fall back — 3 calls).
     let secretId: string;
     try {
-      secretId = await upsertDaytonaBrokerSecret(
+      secretId = await updateDaytonaBrokerSecret(
         daytona,
         broker.secretName,
         broker.installationToken,

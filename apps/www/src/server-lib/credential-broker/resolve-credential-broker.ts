@@ -5,6 +5,8 @@ import type { SandboxProvider } from "@terragon/types/sandbox";
 import type {
   BrokerRefresh,
   CredentialBrokerShape,
+  DaytonaCredentialBrokerShape,
+  E2bCredentialBrokerShape,
 } from "@terragon/sandbox/types";
 
 /**
@@ -59,6 +61,44 @@ export function isCredentialBrokerEnabled(
  * persisted on the thread so a later resume can detect brokered-ness WITHOUT the
  * secret shape.
  */
+/**
+ * The e2b-native / daytona-native shape dispatch shared by
+ * {@link resolveCredentialBrokerForCreate} and
+ * {@link resolveCredentialBrokerForResume}: both build the SAME native shape for
+ * the managed planes (Create additionally wraps it with `mode: "brokered"`;
+ * Resume returns it bare). The E2B shape carries only the installation token +
+ * repo (its vault-secret name derives from the sandboxId inside the provider);
+ * the Daytona shape also carries the thread-derived org-Secret name. Returns
+ * null for any non-native provider (docker / unknown), so each caller keeps its
+ * own provider-specific branch (Create's docker-sidecar path; Resume's docker
+ * recreate).
+ */
+function nativeBrokerShape(
+  sandboxProvider: SandboxProvider,
+  {
+    installationToken,
+    repoFullName,
+    threadId,
+  }: { installationToken: string; repoFullName: string; threadId: string },
+): E2bCredentialBrokerShape | DaytonaCredentialBrokerShape | null {
+  if (sandboxProvider === "e2b") {
+    return {
+      kind: "e2b-native",
+      installationToken,
+      repoFullName,
+    };
+  }
+  if (sandboxProvider === "daytona") {
+    return {
+      kind: "daytona-native",
+      installationToken,
+      repoFullName,
+      secretName: daytonaBrokerSecretName(threadId),
+    };
+  }
+  return null;
+}
+
 export function resolveCredentialBrokerForCreate({
   sandboxProvider,
   githubRepoFullName,
@@ -95,26 +135,13 @@ export function resolveCredentialBrokerForCreate({
       mode: "brokered",
     };
   }
-  if (sandboxProvider === "e2b") {
-    return {
-      shape: {
-        kind: "e2b-native",
-        installationToken: githubAccessToken,
-        repoFullName: githubRepoFullName,
-      },
-      mode: "brokered",
-    };
-  }
-  if (sandboxProvider === "daytona") {
-    return {
-      shape: {
-        kind: "daytona-native",
-        installationToken: githubAccessToken,
-        repoFullName: githubRepoFullName,
-        secretName: daytonaBrokerSecretName(threadId),
-      },
-      mode: "brokered",
-    };
+  const shape = nativeBrokerShape(sandboxProvider, {
+    installationToken: githubAccessToken,
+    repoFullName: githubRepoFullName,
+    threadId,
+  });
+  if (shape) {
+    return { shape, mode: "brokered" };
   }
   return null;
 }
@@ -168,26 +195,12 @@ export function resolveCredentialBrokerForResume({
   if (persistedBrokerMode !== "brokered") {
     return null;
   }
-  if (sandboxProvider === "e2b") {
-    return {
-      shape: {
-        kind: "e2b-native",
-        installationToken: githubAccessToken,
-        repoFullName: githubRepoFullName,
-      },
-    };
-  }
-  if (sandboxProvider === "daytona") {
-    return {
-      shape: {
-        kind: "daytona-native",
-        installationToken: githubAccessToken,
-        repoFullName: githubRepoFullName,
-        secretName: daytonaBrokerSecretName(threadId),
-      },
-    };
-  }
-  return null;
+  const shape = nativeBrokerShape(sandboxProvider, {
+    installationToken: githubAccessToken,
+    repoFullName: githubRepoFullName,
+    threadId,
+  });
+  return shape ? { shape } : null;
 }
 
 /**

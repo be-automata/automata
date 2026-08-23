@@ -38,14 +38,33 @@ export type E2bNetworkOptions = {
 };
 
 /**
- * The two GitHub hosts the E2B native credential broker (#114) injects an
- * `Authorization` header on: git-over-HTTPS (github.com) AND the REST/GraphQL
- * API used by `gh`/Octokit (api.github.com). One mechanism covers both.
+ * The two GitHub hosts every native credential broker (#114) scopes credential
+ * injection to: git-over-HTTPS (github.com) AND the REST/GraphQL API used by
+ * `gh`/Octokit (api.github.com). One mechanism covers both. Single source of
+ * truth shared by the E2B and Daytona brokers (they inject/substitute on the
+ * same host set); the provider-named aliases below preserve their call sites.
  */
-export const E2B_BROKER_GITHUB_HOSTS = [
-  "github.com",
-  "api.github.com",
-] as const;
+export const BROKER_GITHUB_HOSTS = ["github.com", "api.github.com"] as const;
+
+/**
+ * E2B alias of {@link BROKER_GITHUB_HOSTS}: the hosts the E2B native broker
+ * injects an `Authorization` header on.
+ */
+export const E2B_BROKER_GITHUB_HOSTS = BROKER_GITHUB_HOSTS;
+
+/**
+ * #114 §7a: near-expiry throttle for the broker-secret rotation on the SECONDARY
+ * connect paths (keepalive `extendLife`, admin-view `getSandboxOrNull`), shared
+ * by the E2B and Daytona providers.
+ *
+ * GitHub installation tokens live ~60 min. A provider rotates its vaulted/org
+ * secret only when it was last updated MORE than this long ago (or is missing),
+ * so a burst of keepalives on a still-fresh secret mints at most ~one token per
+ * hour per sandbox instead of one per call. 50 min leaves a comfortable margin
+ * under the ~60 min TTL so the vaulted token is never allowed to actually expire
+ * between rotations.
+ */
+export const BROKER_SECRET_STALE_MS = 50 * 60 * 1000; // 50 minutes
 
 /**
  * A single E2B egress transform rule in the STATIC-headers form — structurally
@@ -108,23 +127,16 @@ export function toE2bBrokeredNetwork({
       { transform: { headers: { Authorization: authHeaderValue } } },
     ];
   }
-  if (egressPolicy) {
-    const base = toE2bNetwork(egressPolicy);
-    const allowOut = [...base.allowOut];
-    for (const host of hosts) {
-      if (!allowOut.includes(host)) {
-        allowOut.push(host);
-      }
-    }
-    return { allowOut, denyOut: base.denyOut, rules };
-  }
-  const allowOut = ["0.0.0.0/0"];
-  for (const host of hosts) {
-    if (!allowOut.includes(host)) {
-      allowOut.push(host);
-    }
-  }
-  return { allowOut, rules };
+  // One merge for both cases: seed allowOut from the policy's resolved allowlist
+  // when present, else the open-internet sentinel; then dedup-append the GitHub
+  // hosts (so a `rules` host always appears in allowOut, per the SDK contract).
+  const base = egressPolicy ? toE2bNetwork(egressPolicy) : null;
+  const allowOut = mergeUnique(base ? base.allowOut : ["0.0.0.0/0"], hosts);
+  // With a policy, keep its deny-all; without one, no denyOut (open internet —
+  // adding one would newly restrict egress the flag-off path never restricted).
+  return base
+    ? { allowOut, denyOut: base.denyOut, rules }
+    : { allowOut, rules };
 }
 
 /**
@@ -147,11 +159,11 @@ export const DAYTONA_MAX_DOMAIN_ALLOWLIST = 20;
  * REST/GraphQL API used by `gh`/Octokit (api.github.com). Passed as the org
  * Secret's `hosts` AND merged into `domainAllowList` when an egress policy is
  * enforced (so a policy never accidentally blocks the brokered GitHub traffic).
+ *
+ * Daytona alias of {@link BROKER_GITHUB_HOSTS} (both brokers scope to the same
+ * host set); preserved as a distinct name for the provider's call sites.
  */
-export const DAYTONA_BROKER_GITHUB_HOSTS = [
-  "github.com",
-  "api.github.com",
-] as const;
+export const DAYTONA_BROKER_GITHUB_HOSTS = BROKER_GITHUB_HOSTS;
 
 /**
  * Daytona create-time network params for a BROKERED sandbox (#114).
@@ -185,12 +197,10 @@ export function toDaytonaBrokeredNetwork({
     return {};
   }
   const base = toDaytonaNetwork(egressPolicy);
-  const domains = base.domainAllowList ? base.domainAllowList.split(",") : [];
-  for (const host of hosts) {
-    if (!domains.includes(host)) {
-      domains.push(host);
-    }
-  }
+  const domains = mergeUnique(
+    base.domainAllowList ? base.domainAllowList.split(",") : [],
+    hosts,
+  );
   if (domains.length > DAYTONA_MAX_DOMAIN_ALLOWLIST) {
     throw new Error(
       `egress allowlist has ${domains.length} domains after merging the GitHub broker hosts but daytona domainAllowList supports at most ${DAYTONA_MAX_DOMAIN_ALLOWLIST}; refusing to truncate`,
@@ -201,6 +211,21 @@ export function toDaytonaBrokeredNetwork({
 
 /** `host:port` splitter — digits-only port suffix, so domains and IPv4 are safe. */
 const HOST_PORT_RE = /^(.+):(\d{1,5})$/;
+
+/**
+ * Dedup-append: return a copy of `base` with each entry of `extra` that is not
+ * already present appended in order. Used by the brokered mappers to merge the
+ * GitHub hosts into an allowlist without dropping a repo's existing entries.
+ */
+function mergeUnique(base: string[], extra: readonly string[]): string[] {
+  const out = [...base];
+  for (const item of extra) {
+    if (!out.includes(item)) {
+      out.push(item);
+    }
+  }
+  return out;
+}
 
 /** Trim, lowercase, drop empties, dedupe — every mapper's first pass. */
 function normalizeEntries(allowlist: string[]): string[] {

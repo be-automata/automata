@@ -9,6 +9,7 @@ import { getTemplateIdForSize } from "@terragon/sandbox-image";
 import { Sandbox, Secret, SecretNotFoundError } from "@e2b/code-interpreter";
 import { retryAsync } from "@terragon/utils/retry";
 import {
+  BROKER_SECRET_STALE_MS,
   E2B_BROKER_GITHUB_HOSTS,
   toE2bBrokeredNetwork,
   toE2bNetwork,
@@ -17,19 +18,6 @@ import {
 const HOME_DIR = "root";
 const REPO_DIR = "repo";
 const SLEEP_MS = 60 * 15 * 1000; // 15 minutes
-
-/**
- * #114 §7a: near-expiry throttle for the broker-secret rotation on the SECONDARY
- * connect paths (keepalive `extendLife`, admin-view `getSandboxOrNull`).
- *
- * GitHub installation tokens live ~60 min. We rotate the vault secret only when
- * it was last updated MORE than this long ago (or is missing), so a burst of
- * keepalives on a still-fresh secret mints at most ~one token per hour per
- * sandbox instead of one per call. 50 min leaves a comfortable margin under the
- * ~60 min TTL so the vaulted token is never allowed to actually expire between
- * rotations.
- */
-const BROKER_SECRET_STALE_MS = 50 * 60 * 1000; // 50 minutes
 
 /** Network options passed to {@link createWithRetry} / `Sandbox.create`. */
 type E2bCreateNetwork = { allowOut: string[]; denyOut?: string[] };

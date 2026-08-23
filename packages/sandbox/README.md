@@ -294,13 +294,34 @@ ${e2b.secrets.<name>}` for **github.com AND api.github.com** — resolved by
   `transform.headers` is E2B public beta and needs transform-plan access on the
   team; implemented + unit-tested + type-checked here, **not yet live-verified**
   (see `reports/ISSUE-114-E2B-SPEC.md` §7, mirroring `docs/egress-enforcement.md`).
-  **Daytona stays unbrokered** (native org Secrets are the follow-up; see the
-  spike). #114 remains open for the Docker gh half + Daytona.
-- **#89 (review-lane on-disk credential) — OPEN for E2B/Daytona; closed on the
-  brokered Docker path.** The review env-strip removes env keys only, so the
-  `~/.git-credentials` channel (`setup.ts:213`) survives it on the unbrokered
-  providers; a brokered Docker sandbox writes no such file. Still open for E2B and
-  Daytona (and unbrokered/default Docker).
+- **Sandbox plane — Daytona brokered behind the same flag (#114, git AND gh),
+  live-gated.** Like E2B, Daytona needs **no sidecar** — it substitutes the
+  credential in its OWN egress plane. The installation token lives in a
+  **write-only org Secret** (`daytona.secret.create`, scoped
+  `hosts: [github.com, api.github.com]`), mounted into the guest via the
+  create-time `secrets` map as a **non-secret placeholder** (`GH_TOKEN` /
+  `GITHUB_TOKEN` → `dtn_secret_<id>`); `setup.ts` writes a **verbatim**
+  `Authorization: token $GH_TOKEN` git extraheader (never base64, **no
+  `~/.git-credentials`**) and Daytona substitutes the real token on outbound
+  requests to the allowed hosts (so ONE mechanism covers both git and `gh`). The
+  org-Secret name derives from the stable thread id (`daytonaBrokerSecretName`),
+  so create/resume/teardown all address it with no extra persistence. Like E2B, a
+  Daytona brokered sandbox **resumes in place** — the org Secret + `secrets`
+  mapping persist across pause and the provider **refreshes** the secret value
+  with a fresh installation token; teardown deletes it
+  (`daytona.secret.delete`). domainAllowList composes with any #66 egress policy
+  without clobbering it (`egress.ts:toDaytonaBrokeredNetwork`). **Fail closed** on
+  any refresh/setup failure (never a resident raw token). **LIVE-GATED:** verify
+  org tier + verbatim-placeholder substitution before prod. #114 remains open for
+  the Docker `gh`-API half (a CA-terminating CONNECT proxy).
+- **#89 (review-lane on-disk credential) — closed on ALL brokered planes; open
+  only when the flag is off.** With the broker flag on, NONE of the three
+  brokered planes (Docker, E2B, Daytona) write `~/.git-credentials` — Docker uses
+  the sidecar, and E2B/Daytona keep the token out of the guest entirely (a
+  non-secret placeholder only). The review env-strip removes env keys only, so the
+  `~/.git-credentials` channel (`setup.ts:213`) survives it ONLY on the
+  unbrokered/default path (flag off) on any provider; every brokered plane writes
+  no such file.
 
 > Note: `docs/compliance/soc2-egress-alignment.md:22` credits only the git broker
 > and is worker-plane-scoped; it predates the gh-API broker from PR #113. The
