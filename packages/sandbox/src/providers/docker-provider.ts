@@ -916,6 +916,29 @@ export class DockerProvider implements ISandboxProvider {
       return;
     }
 
+    // Candidate stranded broker networks (cheap, name-filtered `docker network
+    // ls`). Fetched up front so the sweep can SHORT-CIRCUIT: this whole reclaim
+    // is best-effort and runs on every brokered create, so when there are
+    // provably NO broker containers AND no candidate broker networks there is
+    // nothing to reclaim and we return BEFORE the expensive full-fleet
+    // `docker ps -a` live-guest scan below.
+    let netNames: string[] = [];
+    try {
+      netNames = execSync(
+        `docker network ls --filter name=${CRED_BROKER_NETWORK_PREFIX}${containerPrefix} --format '{{.Name}}'`,
+        { encoding: "utf8" },
+      )
+        .trim()
+        .split("\n")
+        .filter((n) => n.trim());
+    } catch {
+      // Docker unavailable — nothing to reclaim.
+      return;
+    }
+    if (sidecarNames.length === 0 && netNames.length === 0) {
+      return; // Provably nothing to reclaim — skip the full-fleet scans.
+    }
+
     // Everything else under our prefix is a potential guest. A guest is "live" —
     // hence its broker is referenced — when running OR paused (a hibernated guest
     // may still resume; treat it as live so we never touch it). Broker sidecars
@@ -992,19 +1015,8 @@ export class DockerProvider implements ISandboxProvider {
     // sidecar run was abandoned): reclaim aged ones with nothing attached. A
     // live sandbox's broker network always has its sidecar+guest attached, so
     // an empty container list can't belong to a live sandbox; the age gate
-    // still protects a concurrent create's pre-attach window.
-    let netNames: string[] = [];
-    try {
-      netNames = execSync(
-        `docker network ls --filter name=${CRED_BROKER_NETWORK_PREFIX}${containerPrefix} --format '{{.Name}}'`,
-        { encoding: "utf8" },
-      )
-        .trim()
-        .split("\n")
-        .filter((n) => n.trim());
-    } catch {
-      return;
-    }
+    // still protects a concurrent create's pre-attach window. (`netNames` was
+    // listed up front for the short-circuit above.)
     for (const net of netNames) {
       const guestName = net.slice(CRED_BROKER_NETWORK_PREFIX.length);
       if (

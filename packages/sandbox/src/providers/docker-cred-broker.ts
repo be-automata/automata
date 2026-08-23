@@ -67,15 +67,17 @@ export function credBrokerNetworkName(containerName: string): string {
   return `${CRED_BROKER_NETWORK_PREFIX}${containerName}`;
 }
 
-/** Cred-broker sidecar container name for one sandbox container. */
-export function credBrokerSidecarName(containerName: string): string {
-  return `${containerName}-cred-broker`;
-}
-
 /** Suffix appended to a sandbox container name to form its sidecar name. The
  * single source for both {@link credBrokerSidecarName} and the reverse
  * (sidecar → guest name) used by the orphan-reclaim sweep — never re-inline. */
 export const CRED_BROKER_SIDECAR_SUFFIX = "-cred-broker";
+
+/** Cred-broker sidecar container name for one sandbox container. Built from
+ * {@link CRED_BROKER_SIDECAR_SUFFIX} so it stays in lockstep with the reverse
+ * derivation in the orphan-reclaim sweep. */
+export function credBrokerSidecarName(containerName: string): string {
+  return `${containerName}${CRED_BROKER_SIDECAR_SUFFIX}`;
+}
 
 /**
  * Docker label key/value stamped on every cred-broker sidecar at creation

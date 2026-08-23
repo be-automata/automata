@@ -411,6 +411,19 @@ describe(
       return { net, sidecar, guestName };
     }
 
+    /**
+     * Seed a BARE broker network: the dedicated `--internal`-style network only,
+     * with NO sidecar and NO guest — exactly what a create leaves stranded when
+     * the network create succeeds but the sidecar `docker run` is abandoned. The
+     * network-only reclaim loop (docker-provider.ts) targets these.
+     */
+    function seedBareNetwork(guestName: string) {
+      const net = credBrokerNetworkName(guestName);
+      execSync(`docker network create ${net}`, { stdio: "ignore" });
+      created.networks.push(net);
+      return { net };
+    }
+
     const containerExists = (name: string) =>
       execSync(`docker ps -a --filter "name=^${name}$" --format "{{.Names}}"`, {
         encoding: "utf8",
@@ -615,6 +628,76 @@ describe(
       reclaim(0);
 
       expect(containerExists(sidecar)).toBe(true);
+    });
+
+    // #114 network-only reclaim: a create can strand a BARE broker network (the
+    // `docker network create` landed but the sidecar `docker run` was abandoned),
+    // so there is no sidecar to catch it in the sidecar loop. The network-only
+    // loop reclaims aged, empty, guestless bare networks — while protecting a
+    // network with anything attached, a live guest, or a young pre-attach window.
+    it("reclaims an AGED, UNATTACHED, guestless BARE broker network (no sidecar)", () => {
+      const guest = `terragon-sandbox-test-barenet-${tag}`;
+      const { net } = seedBareNetwork(guest);
+      expect(networkExists(net)).toBe(true);
+
+      // minAgeMs 0 → the freshly-seeded network clears the age gate; nothing is
+      // attached and no guest exists, so it is a genuine bare orphan → removed.
+      reclaim(0);
+
+      expect(networkExists(net)).toBe(false);
+    });
+
+    it("does NOT remove a BARE broker network that still has a container attached", () => {
+      const guest = `terragon-sandbox-test-barenet-attached-${tag}`;
+      const { net } = seedBareNetwork(guest);
+      // Attach a squatter (NOT named as the guest, so `guestExists(guest)` is
+      // false and the reclaim reaches the attached-container gate). The
+      // `hasAttachedContainers` check must keep the network.
+      const squatter = `terragon-sandbox-test-barenet-squatter-${tag}`;
+      execSync(
+        `docker run -d --name ${squatter} --network ${net} ${BASE_IMAGE} tail -f /dev/null`,
+        { stdio: "ignore" },
+      );
+      created.guests.push(squatter);
+      expect(networkExists(net)).toBe(true);
+
+      // Even at minAgeMs 0 (age gate satisfied), the attached container marks the
+      // network as still in use → it must be left intact.
+      reclaim(0);
+
+      expect(networkExists(net)).toBe(true);
+      expect(containerExists(squatter)).toBe(true);
+    });
+
+    it("does NOT remove a BARE broker network whose live GUEST is running", () => {
+      const guest = `terragon-sandbox-test-barenet-live-${tag}`;
+      const { net } = seedBareNetwork(guest);
+      // A running guest with the matching name attached to the bare net: the
+      // live-guest reference gate (running/paused snapshot) must skip it before
+      // any attachment inspect even runs.
+      execSync(
+        `docker run -d --name ${guest} --network ${net} ${BASE_IMAGE} tail -f /dev/null`,
+        { stdio: "ignore" },
+      );
+      created.guests.push(guest);
+      expect(containerExists(guest)).toBe(true);
+
+      reclaim(0);
+
+      expect(networkExists(net)).toBe(true);
+      expect(containerExists(guest)).toBe(true);
+    });
+
+    it("does NOT remove a YOUNG bare broker network (a concurrent create's pre-attach window)", () => {
+      const guest = `terragon-sandbox-test-barenet-young-${tag}`;
+      const { net } = seedBareNetwork(guest);
+      expect(networkExists(net)).toBe(true);
+
+      // The default threshold (boot timeout + margin) treats this just-seeded,
+      // empty network as an in-flight create's pre-attach window → preserved.
+      reclaim(ORPHAN_BROKER_MIN_AGE_MS);
+
+      expect(networkExists(net)).toBe(true);
     });
   },
 );
