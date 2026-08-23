@@ -4,6 +4,10 @@ import { assertAuthEnabledFromEnv } from "../agent-run/assert-auth";
 import { loadWorkerConfig } from "../agent-run/config";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
 import {
+  bootTimeSlotReclaim,
+  startMaintenanceLoop,
+} from "../agent-run/scheduling-maintenance";
+import {
   getProcessWorkerId,
   workerLockPath,
   workerRunDir,
@@ -57,10 +61,24 @@ async function main() {
   }
 
   claimNamespaceAndReclaim();
+
+  // #69 §3.2.4 item 2 — boot-time (secondary) engine-DB slot reclaim, BEFORE
+  // registration so this registration's own fresh strategy rows are never
+  // scanned as if they were the leak. Master-gated on
+  // HATCHET_ENGINE_DATABASE_URL and fully try/catch-guarded internally: an
+  // unconfigured or unreachable engine DB must never block boot.
+  await bootTimeSlotReclaim(loadWorkerConfig());
+
   const worker = await hatchet.worker("automata-worker", {
     workflows,
     slots: 5,
   });
+
+  // #69 §3.2.4 item 1 (PRIMARY path) + §3.1 rot repair + §3.3 stuck-QUEUED
+  // detection. Runs AFTER registration so it observes the strategy rows THIS
+  // registration just minted (§3.1.4 ordering note). Master-gated the same
+  // way; starts nothing when HATCHET_ENGINE_DATABASE_URL is unset.
+  startMaintenanceLoop(loadWorkerConfig(), getProcessWorkerId());
 
   // Graceful-drain semantics (Phase 3.1 / plan amendment 8). We deliberately install
   // NO custom SIGTERM/SIGINT handler: the Hatchet SDK already registers

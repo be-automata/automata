@@ -223,7 +223,13 @@ export const agentRunWorkflow = hatchet.workflow<AgentRunInput>({
       // hatchet-lite after repeated worker re-registrations (stale
       // GROUP_ROUND_ROBIN strategy rows chain into active ones and the child
       // slot is never granted — tasks sit QUEUED forever with idle workers).
-      // A new group name mints fresh strategy state on registration.
+      // The rename minted fresh strategy state on registration but did NOT
+      // prevent rot — the new group has since re-rotted (#69 §2.3, verified
+      // live 2026-08-23). The group name is NOT rotated again (#69 §3.1.1:
+      // rotation trades this deadlock for a worse one — two concurrent
+      // agent-runs on a box budgeted for one). Instead an engine-DB repairer
+      // (scheduling-maintenance.ts, opt-in, dry-run by default) detects and
+      // prunes the corrupted chain pointers behind this group name.
       expression: "'agent-run-global-memory-budget'",
       maxRuns: GLOBAL_MAX_RUNS,
       limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,

@@ -2,8 +2,9 @@
 #
 # Pilot topology: THIS box plays the BeAutomata "customer-supplied" execution box.
 # hatchet-lite bundles engine + REST API + dashboard in one container against its
-# OWN dedicated Postgres (internal to this compose network — no host port, so no
-# collision with the :3100 self-host stack's Postgres on 55432).
+# OWN dedicated Postgres (internal to this compose network — no host port BY
+# DEFAULT, so no collision with the :3100 self-host stack's Postgres on 55432 —
+# see docker-compose.hatchet.maintenance.yml for the opt-in loopback publish (#69)).
 #
 # Image is PINNED to a non-dev tag (ADR-002 §Deployment guard): the `-dev` images
 # embed a publicly-known JWT signing key (authdisabled build tag) which voids tenant

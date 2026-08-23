@@ -77,6 +77,37 @@ export interface WorkerConfig {
    * to a raw-token env.
    */
   credentialBroker: "on" | "legacy-direct";
+
+  // --- Scheduling deadlock recovery (#69, §3.5) -----------------------------
+  // Everything below is inert unless engineDatabaseUrl is set — the box's
+  // engine Postgres publishes no host port by default (see
+  // docker-compose.hatchet.maintenance.yml), so an unconfigured box never
+  // attempts a connection, never writes a snapshot, and boot is never blocked
+  // on any of this (AC-13).
+  /** Master gate. Empty → all three #69 mechanisms are inert no-ops. */
+  engineDatabaseUrl: string;
+  /** Tenant every maintenance query scopes to. Empty → auto-resolve the single tenant at boot. */
+  engineTenantId: string;
+  /** Global mode for mechanisms 1 (rot repair) & 2 (slot reclaim). */
+  schedulingMaintenanceMode: "off" | "dry-run" | "on";
+  /** Per-mechanism override for rot repair. "inherit" defers to schedulingMaintenanceMode. */
+  concurrencyRotRepairMode: "off" | "dry-run" | "on" | "inherit";
+  /** Per-mechanism override for slot reclaim. "inherit" defers to schedulingMaintenanceMode. */
+  slotReclaimMode: "off" | "dry-run" | "on" | "inherit";
+  /** Mechanism 3 (stuck-QUEUED detection). Read-only, so on by default. */
+  stuckQueuedDetect: "off" | "on";
+  /** Stuck-QUEUED threshold, seconds. Default scheduleTimeout/2 (workflow.ts:236). */
+  stuckQueuedS: number;
+  /** Dead-generation heartbeat threshold, seconds (§3.2.1). Also the no-progress event window. */
+  workerDeadAfterS: number;
+  /** Age floor for orphan slots only, seconds (§3.2.2 case (a)). */
+  slotMinAgeS: number;
+  /** Maintenance tick period, seconds. Adds to the §3.2.2 latency bound. */
+  maintIntervalS: number;
+  /** Per-query LIMIT for every maintenance statement. */
+  maintBatch: number;
+  /** Optional loopback /healthz port. null → no new listener (default). */
+  healthPort: number | null;
 }
 
 function defaultDaemonDist(): string {
@@ -101,6 +132,38 @@ function resolveClaudeBinDir(explicit: string | undefined): string {
     return explicit.endsWith("/claude") ? path.dirname(explicit) : explicit;
   }
   return "";
+}
+
+/** Parses a positive-int env value, falling back to `fallback` on anything non-finite or ≤0. */
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * Exact-string mode parser shared by the three #69 mode knobs
+ * (`config.ts:134-140` doctrine): only `off`/`dry-run`/`on` opt in; anything
+ * else — unset, typo, garbage — degrades to `safeDefault` so a misconfigured
+ * box never silently starts mutating engine state.
+ */
+function parseMode(
+  raw: string | undefined,
+  safeDefault: "off" | "dry-run" | "on",
+): "off" | "dry-run" | "on" {
+  const trimmed = raw?.trim();
+  return trimmed === "off" || trimmed === "dry-run" || trimmed === "on"
+    ? trimmed
+    : safeDefault;
+}
+
+/** Same doctrine, but "inherit" is also a valid explicit value (the per-mechanism override knobs). */
+function parseModeOrInherit(
+  raw: string | undefined,
+): "off" | "dry-run" | "on" | "inherit" {
+  const trimmed = raw?.trim();
+  return trimmed === "off" || trimmed === "dry-run" || trimmed === "on"
+    ? trimmed
+    : "inherit";
 }
 
 export function loadWorkerConfig(
@@ -138,5 +201,38 @@ export function loadWorkerConfig(
       env.WORKER_CREDENTIAL_BROKER?.trim() === "legacy-direct"
         ? "legacy-direct"
         : "on",
+
+    // --- #69 scheduling deadlock recovery ---------------------------------
+    engineDatabaseUrl: env.HATCHET_ENGINE_DATABASE_URL?.trim() || "",
+    engineTenantId: env.HATCHET_ENGINE_TENANT_ID?.trim() || "",
+    schedulingMaintenanceMode: parseMode(
+      env.WORKER_SCHEDULING_MAINTENANCE,
+      "dry-run",
+    ),
+    concurrencyRotRepairMode: parseModeOrInherit(
+      env.WORKER_CONCURRENCY_ROT_REPAIR,
+    ),
+    slotReclaimMode: parseModeOrInherit(env.WORKER_SLOT_RECLAIM),
+    stuckQueuedDetect:
+      env.WORKER_STUCK_QUEUED_DETECT?.trim() === "off" ? "off" : "on",
+    stuckQueuedS: parsePositiveInt(env.HATCHET_STUCK_QUEUED_S, 900),
+    workerDeadAfterS: parsePositiveInt(env.HATCHET_WORKER_DEAD_AFTER_S, 600),
+    slotMinAgeS: parsePositiveInt(env.HATCHET_SLOT_MIN_AGE_S, 600),
+    maintIntervalS: parsePositiveInt(env.HATCHET_MAINT_INTERVAL_S, 60),
+    maintBatch: parsePositiveInt(env.HATCHET_MAINT_BATCH, 100),
+    healthPort: (() => {
+      const n = Number(env.WORKER_HEALTH_PORT);
+      return env.WORKER_HEALTH_PORT?.trim() && Number.isFinite(n) && n > 0
+        ? n
+        : null;
+    })(),
   };
+}
+
+/** Resolves a per-mechanism mode: an explicit off/dry-run/on wins; "inherit" defers to the global mode. */
+export function resolveMechanismMode(
+  mechanismMode: "off" | "dry-run" | "on" | "inherit",
+  globalMode: "off" | "dry-run" | "on",
+): "off" | "dry-run" | "on" {
+  return mechanismMode === "inherit" ? globalMode : mechanismMode;
 }

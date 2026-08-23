@@ -1,0 +1,8 @@
+# Opt-in overlay (#69): publishes the engine Postgres on LOOPBACK ONLY so the
+# host-resident worker can run scheduling-deadlock maintenance. Never merge this
+# into docker-compose.hatchet.yml — `hatchet:up` must stay port-free by default.
+# NEVER change 127.0.0.1 to 0.0.0.0: the engine DB is the tenancy root.
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:55433:5432"
