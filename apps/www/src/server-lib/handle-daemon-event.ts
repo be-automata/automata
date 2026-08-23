@@ -16,6 +16,8 @@ import {
 import { waitUntil } from "@/lib/wait-until";
 import { setActiveThreadChat } from "@/agent/sandbox-resource";
 import { extendSandboxLife } from "@terragon/sandbox";
+import { getGitHubTokenForBackground } from "@/lib/github";
+import { resolveBrokerRefreshForConnect } from "@/server-lib/credential-broker/resolve-credential-broker";
 import { checkpointThread } from "@/server-lib/checkpoint-thread";
 import { isAnthropicDownPOST } from "@/server-lib/internal-request";
 import { updateThreadChatWithTransition } from "@/agent/update-status";
@@ -230,10 +232,23 @@ export async function handleDaemonEvent({
   // Extend the life of the sandbox. Remote-plane threads (ADR-003) never have
   // a control-plane sandbox to extend.
   if (thread.codesandboxId && thread.sandboxProvider) {
+    // #114 §7a: on a brokered E2B thread the keepalive connect auto-resumes the
+    // guest, so thread a LAZY, throttled vault-secret refresh through it — the
+    // provider mints a fresh installation token only when the vaulted one is
+    // near expiry. undefined for Docker / non-brokered (today's behavior).
     waitUntil(
       extendSandboxLife({
         sandboxId: thread.codesandboxId,
         sandboxProvider: thread.sandboxProvider,
+        refresh: resolveBrokerRefreshForConnect({
+          sandboxProvider: thread.sandboxProvider,
+          persistedBrokerMode: thread.credentialBrokerMode ?? undefined,
+          mintToken: () =>
+            getGitHubTokenForBackground({
+              userId,
+              repoFullName: thread.githubRepoFullName,
+            }),
+        }),
       }),
     );
   }

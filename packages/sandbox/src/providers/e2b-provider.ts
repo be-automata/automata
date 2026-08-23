@@ -1,11 +1,12 @@
 import {
   BackgroundCommandOptions,
+  BrokerRefresh,
   CreateSandboxOptions,
   ISandboxProvider,
   ISandboxSession,
 } from "../types";
 import { getTemplateIdForSize } from "@terragon/sandbox-image";
-import { Sandbox, Secret } from "@e2b/code-interpreter";
+import { Sandbox, Secret, SecretNotFoundError } from "@e2b/code-interpreter";
 import { retryAsync } from "@terragon/utils/retry";
 import {
   E2B_BROKER_GITHUB_HOSTS,
@@ -16,6 +17,19 @@ import {
 const HOME_DIR = "root";
 const REPO_DIR = "repo";
 const SLEEP_MS = 60 * 15 * 1000; // 15 minutes
+
+/**
+ * #114 §7a: near-expiry throttle for the broker-secret rotation on the SECONDARY
+ * connect paths (keepalive `extendLife`, admin-view `getSandboxOrNull`).
+ *
+ * GitHub installation tokens live ~60 min. We rotate the vault secret only when
+ * it was last updated MORE than this long ago (or is missing), so a burst of
+ * keepalives on a still-fresh secret mints at most ~one token per hour per
+ * sandbox instead of one per call. 50 min leaves a comfortable margin under the
+ * ~60 min TTL so the vaulted token is never allowed to actually expire between
+ * rotations.
+ */
+const BROKER_SECRET_STALE_MS = 50 * 60 * 1000; // 50 minutes
 
 /** Network options passed to {@link createWithRetry} / `Sandbox.create`. */
 type E2bCreateNetwork = { allowOut: string[]; denyOut?: string[] };
@@ -101,6 +115,75 @@ async function destroyBrokerSecretBestEffort(
         `it may be ORPHANED in the E2B project vault and should be removed manually:`,
       secondError,
     );
+  }
+}
+
+/**
+ * #114 §7a: throttled broker-secret rotation for the SECONDARY connect paths,
+ * run BEFORE `Sandbox.connect` (which auto-resumes the guest) so a brokered
+ * guest never resumes on a stale token.
+ *
+ * `refresh` is supplied ONLY when the caller knows the thread is brokered
+ * (`credentialBrokerMode === "brokered"`), so its presence means "this sandbox
+ * is brokered — keep its vault secret fresh". Absent = unbrokered / non-E2B /
+ * today's behavior: no-op (nothing minted, nothing rotated).
+ *
+ * Near-expiry throttle: read the vaulted secret's `updatedAt` via
+ * `Secret.getInfo` (metadata only — the value stays write-only). If it is
+ * younger than {@link BROKER_SECRET_STALE_MS} we SKIP — `refresh.mintToken()` is
+ * never invoked, so frequent keepalives cost no GitHub token. Only when the
+ * secret is stale (or missing) do we mint a fresh token and
+ * `Secret.update`/`create` it.
+ *
+ * Fail closed: if `getInfo` fails for any reason OTHER than "not found", or if
+ * the mint / update / create throws, this REJECTS — the caller must then NOT
+ * connect (so the guest stays paused rather than resuming on a possibly
+ * revoked/rotated credential), consistent with the primary `resumeSandbox` path.
+ * A genuinely-missing secret is not a failure: we (re)create it, mirroring the
+ * primary path's `Secret.create`-if-gone.
+ */
+async function refreshBrokerSecretIfStale(
+  sandboxId: string,
+  refresh: BrokerRefresh | undefined,
+): Promise<void> {
+  if (!refresh) {
+    return;
+  }
+  const secretName = e2bBrokerSecretName(sandboxId);
+  let updatedAt: Date | null = null;
+  let secretExists = true;
+  try {
+    const info = await Secret.getInfo(secretName);
+    updatedAt = info.updatedAt;
+  } catch (error) {
+    if (error instanceof SecretNotFoundError) {
+      // Brokered provenance but the vault entry is gone (e.g. destroyed out of
+      // band). Not a failure — re-mint and re-create below; the persisted egress
+      // rules already reference this name, so injection resumes.
+      secretExists = false;
+    } else {
+      // Ambiguous vault error — fail closed (do NOT connect on an unknown
+      // freshness state).
+      throw error;
+    }
+  }
+  if (
+    secretExists &&
+    updatedAt &&
+    Date.now() - updatedAt.getTime() < BROKER_SECRET_STALE_MS
+  ) {
+    // Still fresh — skip. `refresh.mintToken()` is NOT invoked (lazy): a
+    // frequent keepalive on a fresh secret mints no GitHub token.
+    return;
+  }
+  // Stale or missing — mint a fresh installation token and rotate the vault
+  // secret BEFORE the caller connects. A mint/rotate failure propagates (fail
+  // closed): the caller will not connect, so the guest stays paused.
+  const freshToken = await refresh.mintToken();
+  if (secretExists) {
+    await Secret.update(secretName, freshToken);
+  } else {
+    await Secret.create(secretName, freshToken);
   }
 }
 
@@ -330,33 +413,39 @@ export class E2BProvider implements ISandboxProvider {
   constructor() {}
 
   /**
-   * #114 residual (secondary connect path — NOT fully fail-closed, documented):
-   * `Sandbox.connect` auto-resumes a paused guest. This keepalive path carries no
-   * control-plane installation token, so it CANNOT refresh the vault secret — a
-   * brokered guest resumes here on whatever token is already vaulted. This is NOT
-   * a leak (never-resident holds: the token stays in E2B's egress plane, never in
-   * the guest), and freshness is bounded by the token's own ~1h TTL. It is a
-   * freshness/fail-closed GAP, not closed here: full rotation on every connect is
-   * a follow-up requiring the control-plane token to be threaded through this
-   * low-level path. See reports/ISSUE-114-E2B-SPEC.md §7.
+   * #114 §7a (CLOSED): `Sandbox.connect` auto-resumes a paused guest, so this
+   * keepalive path now ROTATES the brokered vault secret BEFORE connect, exactly
+   * like the primary `resumeSandbox` path — a brokered guest never resumes on a
+   * stale token. `refresh` is the lazy handle the control plane threads in when
+   * the thread is brokered; rotation is near-expiry THROTTLED
+   * ({@link refreshBrokerSecretIfStale}) so frequent keepalives don't mint a
+   * GitHub token on every call. Absent `refresh` (unbrokered / non-E2B) = today's
+   * behavior. Fail closed: a rotation failure throws WITHOUT connecting (the
+   * guest stays paused).
    */
-  async extendLife(sandboxId: string): Promise<void> {
+  async extendLife(sandboxId: string, refresh?: BrokerRefresh): Promise<void> {
+    await refreshBrokerSecretIfStale(sandboxId, refresh);
     const sandbox = await Sandbox.connect(sandboxId);
     await sandbox.setTimeout(SLEEP_MS);
   }
 
   /**
-   * #114 residual (secondary connect path — NOT fully fail-closed, documented):
-   * used by the admin daemon-log view
-   * (apps/www/src/server-actions/admin/sandbox.ts). Like {@link extendLife} it has
-   * no control-plane token, so a brokered guest resumes on the already-vaulted
-   * token WITHOUT rotation. Acceptable for this read-only/keepalive use because
-   * the token is never guest-resident (never-resident holds) and is bounded by
-   * its ~1h TTL; it is NOT full rotation-on-connect. See
-   * reports/ISSUE-114-E2B-SPEC.md §7.
+   * #114 §7a (CLOSED): used by the admin daemon-log view
+   * (apps/www/src/server-actions/admin/sandbox.ts). Like {@link extendLife},
+   * `Sandbox.connect` auto-resumes the guest, so this now ROTATES the brokered
+   * vault secret BEFORE connect via the lazy, near-expiry-throttled `refresh`
+   * handle — no stale-token resume. Absent `refresh` = today's behavior. Fail
+   * closed: a rotation failure means we never connect and return null (no usable
+   * session), so the guest is not resumed on a stale credential.
    */
-  async getSandboxOrNull(sandboxId: string): Promise<ISandboxSession | null> {
+  async getSandboxOrNull(
+    sandboxId: string,
+    refresh?: BrokerRefresh,
+  ): Promise<ISandboxSession | null> {
     try {
+      // Rotate BEFORE connect — a rotation throw skips resumeWithRetry entirely,
+      // so a brokered guest is never auto-resumed on a stale token.
+      await refreshBrokerSecretIfStale(sandboxId, refresh);
       return await resumeWithRetry(sandboxId);
     } catch (error) {
       console.warn(`Failed to resume sandbox ${sandboxId}:`, error);

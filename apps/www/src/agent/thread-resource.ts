@@ -13,6 +13,8 @@ import { db } from "@/lib/db";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { waitUntil } from "@/lib/wait-until";
 import { extendSandboxLife } from "@terragon/sandbox";
+import { getGitHubTokenForBackground } from "@/lib/github";
+import { resolveBrokerRefreshForConnect } from "@/server-lib/credential-broker/resolve-credential-broker";
 import { trackUsageEvents } from "@/server-lib/usage-events";
 import { onThreadChatError } from "@/server-lib/thread-status-change";
 
@@ -175,9 +177,21 @@ export async function withThreadSandboxSession<T>({
           });
           if (sandboxSessionOrNull) {
             sandboxUsageStartTime = Date.now();
+            // #114 §7a: keepalive connect auto-resumes a brokered E2B guest, so
+            // thread a LAZY, throttled vault-secret refresh through it. undefined
+            // for Docker / non-brokered threads (today's behavior).
             await extendSandboxLife({
               sandboxProvider: sandboxSessionOrNull.sandboxProvider,
               sandboxId: sandboxSessionOrNull.sandboxId,
+              refresh: resolveBrokerRefreshForConnect({
+                sandboxProvider: sandboxSessionOrNull.sandboxProvider,
+                persistedBrokerMode: thread.credentialBrokerMode ?? undefined,
+                mintToken: () =>
+                  getGitHubTokenForBackground({
+                    userId,
+                    repoFullName: thread.githubRepoFullName,
+                  }),
+              }),
             });
           }
           return await execOrThrow({

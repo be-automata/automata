@@ -167,14 +167,39 @@ export type CreateSandboxOptions = {
   }) => Promise<void>;
 };
 
+/**
+ * Lazy broker-secret refresh handle for the SECONDARY connect paths (#114 §7a).
+ *
+ * `getSandboxOrNull` (admin log viewer) and `extendLife` (keepalive) both
+ * `Sandbox.connect` — which AUTO-RESUMES a paused guest. On a brokered E2B
+ * sandbox the guest would otherwise resume on whatever installation token is
+ * already vaulted, so these paths must be able to rotate the vault secret
+ * BEFORE connect, exactly like the primary `resumeSandbox` path.
+ *
+ * Shaped as a LAZY resolver: `mintToken` is a callback that mints a FRESH
+ * installation token, and the E2B provider invokes it ONLY when a rotation is
+ * actually due (the vaulted secret is stale / missing — see the near-expiry
+ * throttle in e2b-provider.ts). A frequent keepalive on a still-fresh secret
+ * therefore never mints a token. Absent (the default) = today's behavior:
+ * connect with no rotation. Non-E2B providers ignore it (their `extendLife` /
+ * `getSandboxOrNull` simply omit the parameter — assignable to this signature).
+ */
+export type BrokerRefresh = {
+  /** Mint a fresh GitHub installation token. Invoked only when rotation is due. */
+  mintToken: () => Promise<string>;
+};
+
 export interface ISandboxProvider {
-  getSandboxOrNull(sandboxId: string): Promise<ISandboxSession | null>;
+  getSandboxOrNull(
+    sandboxId: string,
+    refresh?: BrokerRefresh,
+  ): Promise<ISandboxSession | null>;
   getOrCreateSandbox(
     sandboxId: string | null,
     options: CreateSandboxOptions,
   ): Promise<ISandboxSession>;
   hibernateById(sandboxId: string): Promise<void>;
-  extendLife(sandboxId: string): Promise<void>;
+  extendLife(sandboxId: string, refresh?: BrokerRefresh): Promise<void>;
   /**
    * Force-destroy a sandbox by id WITHOUT starting/unpausing it (#114). Unlike
    * {@link getSandboxOrNull} (which unpauses/starts a stale guest so it can be

@@ -2,7 +2,10 @@ import { randomBytes } from "crypto";
 import { env } from "@terragon/env/apps-www";
 import type { FeatureFlagName } from "@terragon/shared";
 import type { SandboxProvider } from "@terragon/types/sandbox";
-import type { CredentialBrokerShape } from "@terragon/sandbox/types";
+import type {
+  BrokerRefresh,
+  CredentialBrokerShape,
+} from "@terragon/sandbox/types";
 
 /**
  * Global force-on kill switch for the Docker credential broker (#114). Set
@@ -134,4 +137,38 @@ export function resolveCredentialBrokerForResume({
       repoFullName: githubRepoFullName,
     },
   };
+}
+
+/**
+ * Build the LAZY broker-secret refresh handle for a SECONDARY connect path
+ * (#114 §7a) — the keepalive `extendSandboxLife` and the admin-view
+ * `getSandboxOrNull`. Both `Sandbox.connect` (auto-resuming the guest), so on a
+ * brokered E2B sandbox they must rotate the vault secret before connect.
+ *
+ * Returns a handle ONLY for a brokered E2B thread (persisted provenance
+ * `"brokered"` + provider `"e2b"`); otherwise `undefined` (Docker recreates;
+ * non-brokered / non-E2B keep today's behavior byte-for-byte — no refresh arg).
+ *
+ * The handle is a LAZY resolver: `mintToken` is not called here — it is a
+ * callback the provider invokes ONLY when the vaulted secret is actually stale
+ * (near-expiry throttle in e2b-provider.ts). So a keepalive on a still-fresh
+ * secret mints no installation token. Mirrors the primary resume's token seam
+ * (`getGitHubTokenForBackground` → repo→installation-token).
+ */
+export function resolveBrokerRefreshForConnect({
+  sandboxProvider,
+  persistedBrokerMode,
+  mintToken,
+}: {
+  sandboxProvider: SandboxProvider;
+  persistedBrokerMode: "brokered" | "legacy-direct" | null | undefined;
+  mintToken: () => Promise<string>;
+}): BrokerRefresh | undefined {
+  if (sandboxProvider !== "e2b") {
+    return undefined;
+  }
+  if (persistedBrokerMode !== "brokered") {
+    return undefined;
+  }
+  return { mintToken };
 }

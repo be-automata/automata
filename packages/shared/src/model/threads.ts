@@ -35,6 +35,7 @@ import {
   ThreadChatInsertRaw,
 } from "../db/types";
 import { BroadcastMessageThreadData } from "@terragon/types/broadcast";
+import type { SandboxProvider } from "@terragon/types/sandbox";
 import { sanitizeForJson } from "../utils/sanitize-json";
 import { toUTC, validateTimezone } from "../utils/timezone";
 import { getUser } from "./user";
@@ -1104,6 +1105,39 @@ export async function claimBrokeredSandboxRecreate({
     )
     .returning({ id: schema.thread.id });
   return { claimed: updateResult.length > 0 };
+}
+
+/**
+ * #114 §7a: fetch the NON-secret broker context for the thread that owns a given
+ * sandbox, keyed by `codesandboxId`. Used by the admin daemon-log view — which
+ * has only a sandboxId, no thread/user context — to decide whether to thread a
+ * broker-secret refresh through its `getSandboxOrNull` connect (and to mint the
+ * fresh installation token as the sandbox OWNER, not the admin). No user fence:
+ * this is an admin-only path. Returns null when no thread references the sandbox.
+ */
+export async function getThreadBrokerContextBySandboxId({
+  db,
+  sandboxId,
+}: {
+  db: DB;
+  sandboxId: string;
+}): Promise<{
+  userId: string;
+  githubRepoFullName: string;
+  sandboxProvider: SandboxProvider;
+  credentialBrokerMode: "brokered" | "legacy-direct" | null;
+} | null> {
+  const result = await db
+    .select({
+      userId: schema.thread.userId,
+      githubRepoFullName: schema.thread.githubRepoFullName,
+      sandboxProvider: schema.thread.sandboxProvider,
+      credentialBrokerMode: schema.thread.credentialBrokerMode,
+    })
+    .from(schema.thread)
+    .where(eq(schema.thread.codesandboxId, sandboxId))
+    .limit(1);
+  return result[0] ?? null;
 }
 
 /**

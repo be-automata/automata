@@ -6,6 +6,7 @@ import type { CreateSandboxOptions } from "../types";
 // rule wiring (#114). No real E2B calls.
 const updateNetworkMock = vi.fn(async (_network: unknown) => {});
 const killMock = vi.fn(async () => {});
+const setTimeoutMock = vi.fn(async (_ms: number) => {});
 vi.mock("@e2b/code-interpreter", () => ({
   Sandbox: {
     create: vi.fn(async () => ({
@@ -18,6 +19,7 @@ vi.mock("@e2b/code-interpreter", () => ({
       // resumeWithRetry probes the sandbox with a command after connect.
       commands: { run: vi.fn(async () => ({ stdout: "hello" })) },
       kill: killMock,
+      setTimeout: setTimeoutMock,
     })),
   },
   // E2B Secret vault (#114). `fill` mirrors the real SDK's placeholder format so
@@ -27,14 +29,31 @@ vi.mock("@e2b/code-interpreter", () => ({
     update: vi.fn(async () => ({})),
     destroy: vi.fn(async () => true),
     exists: vi.fn(async () => true),
+    // #114 §7a: metadata read for the near-expiry throttle. Default = fresh
+    // (updatedAt now) so the throttle SKIPS unless a test overrides it.
+    getInfo: vi.fn(async (name: string) => ({
+      secretId: "sec-1",
+      name,
+      version: 1,
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })),
     fill: vi.fn((name: string) => `\${e2b.secrets.${name}}`),
+  },
+  // Real SDK error class for the "secret missing" branch of the throttle.
+  SecretNotFoundError: class SecretNotFoundError extends Error {
+    constructor(message?: string) {
+      super(message);
+      this.name = "SecretNotFoundError";
+    }
   },
 }));
 vi.mock("@terragon/sandbox-image", () => ({
   getTemplateIdForSize: vi.fn(() => "template-small"),
 }));
 
-import { Sandbox, Secret } from "@e2b/code-interpreter";
+import { Sandbox, Secret, SecretNotFoundError } from "@e2b/code-interpreter";
 import { E2BProvider, e2bBrokerSecretName } from "./e2b-provider";
 
 function createOptions(
@@ -452,5 +471,191 @@ describe("E2BProvider native credential broker (#114)", () => {
     expect(Secret.exists).not.toHaveBeenCalled();
     expect(Secret.update).not.toHaveBeenCalled();
     expect(Secret.create).not.toHaveBeenCalled();
+  });
+});
+
+// #114 §7a: the SECONDARY connect paths (keepalive extendLife, admin-view
+// getSandboxOrNull) now rotate the brokered vault secret BEFORE connect, but
+// NEAR-EXPIRY THROTTLED so frequent keepalives don't mint a token every call.
+describe("E2BProvider secondary connect paths — throttled broker refresh (#114 §7a)", () => {
+  const SANDBOX_ID = "e2b-test-sandbox";
+  const SECRET = e2bBrokerSecretName(SANDBOX_ID);
+  const FRESH_TOKEN = "ghs_fresh_installation_token";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Reset getInfo to the default (fresh) after clearAllMocks wipes impls.
+    vi.mocked(Secret.getInfo).mockImplementation(async (name: string) => ({
+      secretId: "sec-1",
+      name,
+      version: 1,
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }));
+  });
+
+  const freshMintToken = () => vi.fn(async () => FRESH_TOKEN);
+
+  // ---- extendLife -------------------------------------------------------
+
+  it("extendLife: FRESH secret (<50min) → mintToken NOT called, no Secret.update, still connects", async () => {
+    vi.mocked(Secret.getInfo).mockResolvedValueOnce({
+      secretId: "sec-1",
+      name: SECRET,
+      version: 1,
+      metadata: {},
+      createdAt: new Date(),
+      // Updated 10 min ago — well within the ~50min throttle window.
+      updatedAt: new Date(Date.now() - 10 * 60 * 1000),
+    });
+    const mintToken = freshMintToken();
+    const provider = new E2BProvider();
+    await provider.extendLife(SANDBOX_ID, { mintToken });
+    // Lazy: the mint callback is never invoked when the secret is still fresh.
+    expect(mintToken).not.toHaveBeenCalled();
+    expect(Secret.update).not.toHaveBeenCalled();
+    expect(Secret.create).not.toHaveBeenCalled();
+    // Keepalive still connects and extends the timeout.
+    expect(Sandbox.connect).toHaveBeenCalledWith(SANDBOX_ID);
+  });
+
+  it("extendLife: STALE secret (>50min) → mintToken called once, Secret.update BEFORE connect", async () => {
+    vi.mocked(Secret.getInfo).mockResolvedValueOnce({
+      secretId: "sec-1",
+      name: SECRET,
+      version: 1,
+      metadata: {},
+      createdAt: new Date(),
+      // Updated 55 min ago — past the throttle window: rotate.
+      updatedAt: new Date(Date.now() - 55 * 60 * 1000),
+    });
+    const mintToken = freshMintToken();
+    const provider = new E2BProvider();
+    await provider.extendLife(SANDBOX_ID, { mintToken });
+    expect(mintToken).toHaveBeenCalledTimes(1);
+    expect(Secret.update).toHaveBeenCalledWith(SECRET, FRESH_TOKEN);
+    expect(Secret.create).not.toHaveBeenCalled();
+    // Rotation must complete before the guest is auto-resumed by connect.
+    const updateOrder = vi.mocked(Secret.update).mock.invocationCallOrder[0]!;
+    const connectOrder = vi.mocked(Sandbox.connect).mock
+      .invocationCallOrder[0]!;
+    expect(updateOrder).toBeLessThan(connectOrder);
+  });
+
+  it("extendLife: MISSING secret → mintToken called, Secret.create (not update)", async () => {
+    vi.mocked(Secret.getInfo).mockRejectedValueOnce(
+      new SecretNotFoundError("not found"),
+    );
+    const mintToken = freshMintToken();
+    const provider = new E2BProvider();
+    await provider.extendLife(SANDBOX_ID, { mintToken });
+    expect(mintToken).toHaveBeenCalledTimes(1);
+    expect(Secret.create).toHaveBeenCalledWith(SECRET, FRESH_TOKEN);
+    expect(Secret.update).not.toHaveBeenCalled();
+  });
+
+  it("extendLife: rotation failure → fail closed (does NOT connect, throws)", async () => {
+    vi.mocked(Secret.getInfo).mockResolvedValueOnce({
+      secretId: "sec-1",
+      name: SECRET,
+      version: 1,
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(Date.now() - 55 * 60 * 1000),
+    });
+    vi.mocked(Secret.update).mockRejectedValueOnce(new Error("vault 503"));
+    const mintToken = freshMintToken();
+    const provider = new E2BProvider();
+    await expect(
+      provider.extendLife(SANDBOX_ID, { mintToken }),
+    ).rejects.toThrow(/vault 503/);
+    expect(Sandbox.connect).not.toHaveBeenCalled();
+  });
+
+  it("extendLife: no refresh handle → unbrokered behavior (no vault touch, connects)", async () => {
+    const provider = new E2BProvider();
+    await provider.extendLife(SANDBOX_ID);
+    expect(Secret.getInfo).not.toHaveBeenCalled();
+    expect(Secret.update).not.toHaveBeenCalled();
+    expect(Secret.create).not.toHaveBeenCalled();
+    expect(Sandbox.connect).toHaveBeenCalledWith(SANDBOX_ID);
+  });
+
+  // ---- getSandboxOrNull -------------------------------------------------
+
+  it("getSandboxOrNull: FRESH secret → mintToken NOT called, connects and returns a session", async () => {
+    vi.mocked(Secret.getInfo).mockResolvedValueOnce({
+      secretId: "sec-1",
+      name: SECRET,
+      version: 1,
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(Date.now() - 5 * 60 * 1000),
+    });
+    const mintToken = freshMintToken();
+    const provider = new E2BProvider();
+    const session = await provider.getSandboxOrNull(SANDBOX_ID, { mintToken });
+    expect(session).not.toBeNull();
+    expect(mintToken).not.toHaveBeenCalled();
+    expect(Secret.update).not.toHaveBeenCalled();
+    expect(Sandbox.connect).toHaveBeenCalled();
+  });
+
+  it("getSandboxOrNull: STALE secret → mintToken once, Secret.update BEFORE connect", async () => {
+    vi.mocked(Secret.getInfo).mockResolvedValueOnce({
+      secretId: "sec-1",
+      name: SECRET,
+      version: 1,
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(Date.now() - 90 * 60 * 1000),
+    });
+    const mintToken = freshMintToken();
+    const provider = new E2BProvider();
+    await provider.getSandboxOrNull(SANDBOX_ID, { mintToken });
+    expect(mintToken).toHaveBeenCalledTimes(1);
+    expect(Secret.update).toHaveBeenCalledWith(SECRET, FRESH_TOKEN);
+    const updateOrder = vi.mocked(Secret.update).mock.invocationCallOrder[0]!;
+    const connectOrder = vi.mocked(Sandbox.connect).mock
+      .invocationCallOrder[0]!;
+    expect(updateOrder).toBeLessThan(connectOrder);
+  });
+
+  it("getSandboxOrNull: rotation failure → fail closed (does NOT connect, returns null)", async () => {
+    vi.mocked(Secret.getInfo).mockResolvedValueOnce({
+      secretId: "sec-1",
+      name: SECRET,
+      version: 1,
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(Date.now() - 90 * 60 * 1000),
+    });
+    vi.mocked(Secret.update).mockRejectedValueOnce(new Error("vault down"));
+    const mintToken = freshMintToken();
+    const provider = new E2BProvider();
+    const session = await provider.getSandboxOrNull(SANDBOX_ID, { mintToken });
+    expect(session).toBeNull();
+    expect(Sandbox.connect).not.toHaveBeenCalled();
+  });
+
+  it("getSandboxOrNull: ambiguous getInfo error → fail closed (returns null, no connect)", async () => {
+    vi.mocked(Secret.getInfo).mockRejectedValueOnce(new Error("vault 500"));
+    const mintToken = freshMintToken();
+    const provider = new E2BProvider();
+    const session = await provider.getSandboxOrNull(SANDBOX_ID, { mintToken });
+    expect(session).toBeNull();
+    // Ambiguous freshness must NOT mint or connect.
+    expect(mintToken).not.toHaveBeenCalled();
+    expect(Sandbox.connect).not.toHaveBeenCalled();
+  });
+
+  it("getSandboxOrNull: no refresh handle → unbrokered behavior (no vault touch)", async () => {
+    const provider = new E2BProvider();
+    await provider.getSandboxOrNull(SANDBOX_ID);
+    expect(Secret.getInfo).not.toHaveBeenCalled();
+    expect(Secret.update).not.toHaveBeenCalled();
+    expect(Secret.create).not.toHaveBeenCalled();
+    expect(Sandbox.connect).toHaveBeenCalled();
   });
 });

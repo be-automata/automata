@@ -163,25 +163,52 @@ Before enabling in prod (ops, not code):
    exposes `network.egressProxy` (SOCKS5, E2B Cloud/BYOC) to an injector we
    operate — a documented fallback, not implemented here.
 
-### 7a. Secondary connect paths — freshness residual (documented, NOT fully fail-closed)
+### 7a. Secondary connect paths — freshness residual CLOSED (all connect paths rotate, throttled)
 
-Two low-level provider paths call `Sandbox.connect` (which auto-resumes a paused
-guest) with **no control-plane installation token**, so they **cannot refresh**
-the vault secret and a brokered guest resumes on the already-vaulted token:
+**Status: CLOSED.** Previously two low-level provider paths called
+`Sandbox.connect` (which auto-resumes a paused guest) with no control-plane
+token, so a brokered guest resumed on the already-vaulted token without rotation.
+**Both now rotate the vault secret before connect**, throttled:
 
-- `E2BProvider.extendLife(sandboxId)` — keepalive `setTimeout`.
-- `E2BProvider.getSandboxOrNull(sandboxId)` — used by the admin daemon-log view
+- `E2BProvider.extendLife(sandboxId, refresh?)` — keepalive `setTimeout`.
+- `E2BProvider.getSandboxOrNull(sandboxId, refresh?)` — admin daemon-log view
   (`apps/www/src/server-actions/admin/sandbox.ts`).
 
-This is **NOT a leak** — never-resident holds: the token stays in E2B's egress
-plane and never enters the guest env/argv/disk — and freshness is bounded by the
-installation token's own **~1h TTL**. It is a **freshness / fail-closed gap**,
-stated honestly here rather than papered over: these read-only/keepalive paths
-resume a brokered sandbox **without rotation**. Full rotation-on-every-connect is
-a **follow-up** requiring the control-plane token to be threaded through these
-low-level paths (they currently take only a `sandboxId`). The primary
-agent-work resume path (`resumeSandbox`) DOES refresh-before-connect and is
-fail-closed; only these secondary paths carry the documented residual.
+**Interface (`packages/sandbox/src/types.ts`):** both methods take an OPTIONAL
+`refresh?: BrokerRefresh` where `BrokerRefresh = { mintToken: () => Promise<string> }`
+— a **lazy** resolver. Non-E2B providers omit the parameter (assignable to the
+signature) and are byte-identical.
+
+**Throttle (`e2b-provider.ts` → `refreshBrokerSecretIfStale`):** when `refresh`
+is provided (caller knows the thread is `credentialBrokerMode === "brokered"`),
+read the vaulted secret's `updatedAt` via `Secret.getInfo` (metadata only — the
+value stays write-only). If it was updated **within the last ~50 min**
+(`BROKER_SECRET_STALE_MS`, a margin under the installation token's ~60 min TTL),
+**SKIP** — `mintToken` is never invoked, so a burst of keepalives on a fresh
+secret mints **no** GitHub token. Only when the secret is **stale or missing** do
+we call `mintToken()` and `Secret.update` (or `Secret.create` if gone) **BEFORE**
+connect. This bounds minting to **~once/hour per sandbox** regardless of keepalive
+frequency. **Fail closed:** an ambiguous `getInfo` error, or a mint/update/create
+failure, throws before connect (`extendLife` rejects; `getSandboxOrNull` returns
+null) — the guest never resumes on an unknown/stale credential, consistent with
+the primary `resumeSandbox` path.
+
+**Callers (lazy `mintToken` threaded only when brokered):**
+`resolveBrokerRefreshForConnect` (returns a handle only for E2B +
+`persistedBrokerMode === "brokered"`) is wired at
+`apps/www/src/server-lib/handle-daemon-event.ts` (keepalive after a daemon
+event), `apps/www/src/agent/thread-resource.ts` (keepalive on thread load), and
+`apps/www/src/server-actions/admin/sandbox.ts` (admin log view — looks up the
+owning thread's non-secret broker context via
+`getThreadBrokerContextBySandboxId` and mints as the sandbox OWNER). `mintToken`
+reuses the primary resume's seam (`getGitHubTokenForBackground` →
+repo→installation-token) and stays lazy — it is invoked only when the provider
+determines a rotation is due. Non-brokered / non-E2B threads pass no `refresh`
+and are byte-identical to today.
+
+Every connect path — primary `resumeSandbox` plus both secondary paths — now
+refreshes before connect, so a brokered guest is **always** resumed on a fresh
+token AND the token is never guest-resident. No documented freshness gap remains.
 
 ## 8. Trust note (ADR deviation)
 
@@ -210,6 +237,16 @@ the egress-audit gap in `docs/egress-enforcement.md`.
   E2B create directive + `resolveCredentialBrokerForResume`.
 - `apps/www/src/agent/sandbox.ts` — E2B in-place brokered resume wiring; recreate
   gated to Docker.
+- §7a (all connect paths rotate, throttled): `packages/sandbox/src/types.ts`
+  (`BrokerRefresh` + optional `refresh?` on `getSandboxOrNull`/`extendLife`),
+  `packages/sandbox/src/providers/e2b-provider.ts`
+  (`refreshBrokerSecretIfStale` throttle + wiring), `packages/sandbox/src/sandbox.ts`
+  (`refresh` pass-through), `resolve-credential-broker.ts`
+  (`resolveBrokerRefreshForConnect`), `packages/shared/src/model/threads.ts`
+  (`getThreadBrokerContextBySandboxId`), and callers
+  `apps/www/src/server-lib/handle-daemon-event.ts`,
+  `apps/www/src/agent/thread-resource.ts`,
+  `apps/www/src/server-actions/admin/sandbox.ts`.
 - Tests: `egress.test.ts`, `env.test.ts`, `providers/e2b-provider.test.ts`,
   `setup.test.ts`, `resolve-credential-broker.test.ts`; Docker fixtures updated
   for the `kind` discriminant.

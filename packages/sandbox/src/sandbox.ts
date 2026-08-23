@@ -1,5 +1,5 @@
 import type { SandboxProvider } from "@terragon/types/sandbox";
-import type { CreateSandboxOptions } from "./types";
+import type { BrokerRefresh, CreateSandboxOptions } from "./types";
 import { getSandboxProvider } from "./provider";
 import { setupSandboxEveryTime, setupSandboxOneTime } from "./setup";
 
@@ -93,23 +93,37 @@ export async function hibernateSandbox({
 export async function extendSandboxLife({
   sandboxProvider,
   sandboxId,
+  refresh,
 }: {
   sandboxProvider: SandboxProvider;
   sandboxId: string;
+  /**
+   * #114 §7a: lazy broker-secret refresh handle. Present only for brokered E2B
+   * threads; the provider rotates the vault secret (throttled) before connect.
+   * Absent = today's behavior. See {@link BrokerRefresh}.
+   */
+  refresh?: BrokerRefresh;
 }) {
   const provider = getSandboxProvider(sandboxProvider);
-  await provider.extendLife(sandboxId);
+  await provider.extendLife(sandboxId, refresh);
 }
 
 export async function getSandboxOrNull({
   sandboxProvider,
   sandboxId,
+  refresh,
 }: {
   sandboxProvider: SandboxProvider;
   sandboxId: string;
+  /**
+   * #114 §7a: lazy broker-secret refresh handle. Present only for brokered E2B
+   * threads; the provider rotates the vault secret (throttled) before connect.
+   * Absent = today's behavior. See {@link BrokerRefresh}.
+   */
+  refresh?: BrokerRefresh;
 }) {
   const provider = getSandboxProvider(sandboxProvider);
-  return await provider.getSandboxOrNull(sandboxId);
+  return await provider.getSandboxOrNull(sandboxId, refresh);
 }
 
 /**
