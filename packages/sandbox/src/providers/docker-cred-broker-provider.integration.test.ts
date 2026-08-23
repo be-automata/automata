@@ -528,15 +528,16 @@ describe(
       expect(containerExists(guest)).toBe(true);
     });
 
-    it("dedicated-network reclaim SKIPS (leaves the network) when an endpoint attached in the window — Docker's non-force network-rm atomic guard (#114 residual TOCTOU)", () => {
-      // Guard 2: the reclaim removes the sidecar, then removes the dedicated
-      // broker network with a NON-force `docker network rm`, which FAILS if any
-      // container endpoint is still attached. Simulate a guest that attached in
-      // the sub-ms window after the presence recheck by attaching an extra
-      // running container (NOT name-matching the guest, so `guestExists` is
-      // false and the reclaim proceeds to the destructive tail) to the dedicated
-      // net. The non-force network rm must then error → the network is LEFT for
-      // the next pass instead of being force-removed out from under the endpoint.
+    it("dedicated-network reclaim is network-guard-FIRST: an endpoint attached in the window LEAVES the sidecar AND network intact (#114 Codex HIGH — final fix)", () => {
+      // Network-guard-first: the reclaim disconnects ONLY the sidecar, then runs
+      // a NON-force `docker network rm` as the atomic proof-of-no-guest BEFORE
+      // the sidecar is ever removed. If a guest raced into the window it still
+      // holds an endpoint, so the rm FAILS → the sidecar is reconnected and the
+      // WHOLE reclaim is skipped. This is the fix for the old order (which force-
+      // removed the sidecar first and could orphan a live guest's broker).
+      // Simulate the racing guest with an extra running container attached to the
+      // dedicated net (NOT name-matching the guest, so `guestExists(guest)` is
+      // false and the reclaim proceeds to the destructive tail).
       const guest = `terragon-sandbox-test-netguard-${tag}`;
       const { net, sidecar } = seedOrphan(guest);
       const squatter = `terragon-sandbox-test-squatter-${tag}`;
@@ -549,13 +550,51 @@ describe(
       expect(networkExists(net)).toBe(true);
 
       // minAgeMs 0 → age gate satisfied; guestExists(guest) is false (no
-      // container named `guest`), so the reclaim reaches the network-rm guard.
+      // container named `guest`), so the reclaim reaches the network-rm gate.
       reclaim(0);
 
-      // Guard fired: the dedicated network survives because the squatter endpoint
-      // is still attached (non-force rm refused), left for the next pass.
+      // Gate fired BEFORE the sidecar was touched: the sidecar survives (and is
+      // reconnected to the net), the network survives (non-force rm refused on
+      // the squatter endpoint), and the squatter is untouched — all left for a
+      // later pass rather than tearing down a possibly-live guest's broker.
+      expect(containerExists(sidecar)).toBe(true);
       expect(networkExists(net)).toBe(true);
       expect(containerExists(squatter)).toBe(true);
+      // The reconnected sidecar is back on the dedicated net (its broker path to
+      // the racing guest is restored, not left detached).
+      const attached = execSync(
+        `docker network inspect --format '{{range .Containers}}{{.Name}} {{end}}' ${net}`,
+        { encoding: "utf8" },
+      ).trim();
+      expect(attached).toContain(sidecar);
+    });
+
+    it("shared-egress broker (no dedicated net) is NOT auto-removed — left for same-name reclaim (#114 Codex HIGH — final fix)", () => {
+      // Shared-egress brokers (createNetwork was false) live on the reused egress
+      // network, so there is NO dedicated net whose non-force rm could atomically
+      // prove no guest is attached. Without that gate, force-removing the sidecar
+      // here could tear down a broker whose guest raced into the window — so the
+      // auto-reclaim intentionally SKIPS them (they are reclaimed by the same-name
+      // pre-create reclaim + explicit cleanup instead). Seed a labeled sidecar
+      // with NO dedicated `credBrokerNetworkName` net (attached to the default
+      // bridge), aged and guestless — it must still survive the reclaim.
+      const guest = `terragon-sandbox-test-shared-${tag}`;
+      const sidecar = credBrokerSidecarName(guest);
+      const dedicatedNet = credBrokerNetworkName(guest);
+      execSync(
+        `docker run -d --name ${sidecar} --label ${CRED_BROKER_ROLE_LABEL_KEY}=${CRED_BROKER_ROLE_LABEL_VALUE} ${BASE_IMAGE} tail -f /dev/null`,
+        { stdio: "ignore" },
+      );
+      created.sidecars.push(sidecar);
+      expect(containerExists(sidecar)).toBe(true);
+      // Precondition: no dedicated broker net exists for this guest name.
+      expect(networkExists(dedicatedNet)).toBe(false);
+
+      // minAgeMs 0 → age gate satisfied, no guest → the sidecar reaches
+      // reclaimBrokerSidecar, which finds no dedicated net and must SKIP.
+      reclaim(0);
+
+      expect(containerExists(sidecar)).toBe(true);
     });
   },
 );

@@ -774,23 +774,41 @@ export class DockerProvider implements ISandboxProvider {
   }
 
   /**
-   * Guarded force-removal of ONE orphan broker sidecar (+ its dedicated network
-   * and host secret), the destructive tail of the sidecar reclaim loop. Two
-   * safe-by-construction guards close the residual create-a-guest-in-the-window
-   * race (#114 Codex HIGH):
+   * Guarded reclaim of ONE orphan broker (its sidecar + dedicated network + host
+   * secret), the destructive tail of the sidecar reclaim loop. The order is
+   * network-GUARD-FIRST so that Docker's own atomic attached-endpoint check —
+   * not a best-effort recheck — is what proves the guest is absent BEFORE the
+   * sidecar is ever removed (#114 Codex HIGH, final fix). Split by network mode:
    *
-   *   Guard 1 — any-state presence recheck. Re-run {@link guestExists} right
-   *   before the `docker rm -f`; if the guest now exists in ANY state its broker
-   *   is referenced again → skip.
+   *   DEDICATED-network broker (createNetwork was true — the common, egress-off
+   *   case). The sidecar is itself attached to the dedicated net, so a bare
+   *   `docker network rm` would always fail on the sidecar's own endpoint. We
+   *   therefore FIRST `docker network disconnect` the sidecar (freeing only ITS
+   *   endpoint; the container is left running and untouched), THEN run a NON-force
+   *   `docker network rm <dedicatedNet>`:
+   *     • SUCCEEDS → the only endpoint was the sidecar's, so NO guest is attached
+   *       → the guest is provably absent → NOW it is safe to `docker rm -f` the
+   *       sidecar and unlink the secret.
+   *     • FAILS ("has active endpoints") → a guest attached in the window and
+   *       still holds an endpoint → the guest is (or just became) live. We
+   *       RECONNECT the sidecar to restore that live guest's broker and SKIP the
+   *       whole reclaim (sidecar + net + secret all left intact for a later pass).
+   *   The sidecar is never force-removed until the network rm has atomically
+   *   proven no guest is attached, so a guest that races into the window is fully
+   *   protected — it keeps a working, reconnected broker.
    *
-   *   Guard 2 — Docker's own atomic attached-endpoint guard. When the broker
-   *   owns a DEDICATED network, remove it with a NON-force `docker network rm`,
-   *   which FAILS if any container endpoint is still attached. If a guest
-   *   attached in the sub-millisecond window after guard 1, that rm errors and we
-   *   SKIP — leaving the network + secret for the next pass rather than orphaning
-   *   a live guest's broker. For the egress-SHARED-network case (createNetwork
-   *   was false: there is no dedicated broker net to guard) guard 1 alone stands,
-   *   applied twice — once in the caller and once here immediately before the rm.
+   *   SHARED-egress broker (createNetwork was false: the sidecar lives on the
+   *   reused egress `--internal` network, there is NO dedicated broker net to
+   *   guard). Without a dedicated network there is no atomic proof-of-no-guest,
+   *   and force-removing the sidecar here could tear down a broker whose guest
+   *   attached in the window. That risk is not worth reclaiming an orphan, so we
+   *   do NOT auto-remove shared-egress brokers at all — they are intentionally
+   *   left to the same-name pre-create reclaim ({@link tearDownCredentialBroker},
+   *   which runs on the next brokered create) and the explicit cleanup sweeps
+   *   ({@link cleanupTestContainers} / {@link cleanupAllContainers}).
+   *
+   * A cheap any-state {@link guestExists} recheck stays as an early skip, but the
+   * dedicated network rm is the authoritative gate.
    *
    * Why the remaining window can never select a DIFFERENT live sandbox: a broker
    * is keyed by its guest's container name, which carries a fresh `nanoid` per
@@ -799,7 +817,7 @@ export class DockerProvider implements ISandboxProvider {
    * path). So this exact name will never be reused by any future create; the only
    * guest that could ever attach to this broker is the one abandoned create that
    * stranded it — already >30 min dead per the age gate. Name reuse is
-   * impossible, so the guards only ever protect THIS broker's own (never-arriving)
+   * impossible, so the gate only ever protects THIS broker's own (never-arriving)
    * guest, never someone else's live sandbox. Best-effort/idempotent throughout.
    */
   private reclaimBrokerSidecar(guestName: string): void {
@@ -815,25 +833,50 @@ export class DockerProvider implements ISandboxProvider {
     } catch {
       return; // Docker unavailable → nothing to do this pass.
     }
-    // Guard 1 (final any-state recheck, immediately before the destructive rm).
+    // Cheap early skip: any-state presence recheck before we touch anything.
     if (this.guestExists(guestName)) {
       return;
     }
+    if (!hasDedicatedNet) {
+      // Shared-egress broker: no dedicated net → no atomic proof-of-no-guest.
+      // Do NOT force-remove; leave it for same-name reclaim + explicit cleanup.
+      return;
+    }
+    // Free ONLY the sidecar's endpoint so the network rm below gates purely on
+    // guest presence. The sidecar container is left running/untouched, so this
+    // is reversible if a guest turns out to be attached.
+    try {
+      execSync(`docker network disconnect -f ${dedicatedNet} ${sidecar}`, {
+        stdio: "ignore",
+      });
+    } catch {
+      // Sidecar already gone / not attached — fall through to the network rm,
+      // which still atomically gates on any (guest) endpoint.
+    }
+    // Atomic gate: NON-force network rm succeeds only if NO endpoint remains.
+    // With the sidecar disconnected, the only endpoint that can remain is a
+    // guest's → success proves the guest is absent.
+    try {
+      execSync(`docker network rm ${dedicatedNet}`, { stdio: "ignore" });
+    } catch {
+      // A guest attached in the window and still holds an endpoint → it is live.
+      // Reconnect the sidecar to restore the live guest's broker, then skip the
+      // whole reclaim (leave sidecar + net + secret for a later pass).
+      try {
+        execSync(`docker network connect ${dedicatedNet} ${sidecar}`, {
+          stdio: "ignore",
+        });
+      } catch {
+        // Best-effort restore; the sidecar container itself is still present.
+      }
+      return;
+    }
+    // Network removal succeeded → guest provably absent → safe to remove the
+    // now-detached sidecar and its host secret.
     try {
       execSync(`docker rm -f ${sidecar}`, { stdio: "ignore" });
     } catch {
-      // Already gone / vanished between listing and now — nothing to reclaim.
-    }
-    if (hasDedicatedNet) {
-      // Guard 2: NON-force network rm is Docker's atomic attached-endpoint
-      // guard. It succeeds only if nothing is attached; if a guest raced in and
-      // attached after guard 1, it errors → skip (leave net + secret for the
-      // next pass) rather than tear down a now-referenced broker.
-      try {
-        execSync(`docker network rm ${dedicatedNet}`, { stdio: "ignore" });
-      } catch {
-        return; // Endpoint attached in the window → leave for the next pass.
-      }
+      // Already gone / vanished — nothing more to reclaim.
     }
     fs.unlink(credBrokerSecretHostPath(guestName)).catch(() => {});
   }
@@ -928,8 +971,9 @@ export class DockerProvider implements ISandboxProvider {
       // `created` state (booted but not yet started). Re-check with the WIDENED
       // any-state {@link guestExists}; if the guest exists in any state its
       // broker is referenced again → skip. The destructive removal itself is
-      // then done under two safe-by-construction guards (any-state recheck +
-      // Docker's non-force network-rm atomic endpoint guard) — see
+      // then network-guard-FIRST (dedicated-net brokers only): a non-force
+      // `docker network rm` atomically proves no guest is attached BEFORE the
+      // sidecar is removed; shared-egress brokers are left untouched — see
       // {@link reclaimBrokerSidecar}.
       if (this.guestExists(guestName)) {
         continue;
