@@ -33,7 +33,7 @@ export const EGRESS_PROXY_SCRIPT_CONTAINER_PATH = "/automata/egress-proxy.cjs";
 /**
  * Prefix of every egress internal-network name. The single source for both
  * naming ({@link egressNetworkName}) and the provider's leaked-network sweep
- * filter (docker-provider cleanupEgressNetworks) — never re-inline the string.
+ * filter (docker-provider cleanupNetworksByPrefix) — never re-inline the string.
  */
 export const EGRESS_NETWORK_PREFIX = "automata-egress-";
 

@@ -156,26 +156,6 @@ export function buildGuestCredBrokerGitConfig({
 }
 
 /**
- * Add the cred-broker alias to a guest NO_PROXY value so the guest's plain-HTTP
- * call to `http://<alias>:<port>` bypasses the egress forward proxy (when egress
- * is also on). Pure string helper — mirrors docker-egress.ts's NO_PROXY
- * default (`127.0.0.1,localhost`).
- */
-export function addCredBrokerToNoProxy(
-  existing: string,
-  alias: string = CRED_BROKER_ALIAS,
-): string {
-  const entries = existing
-    .split(",")
-    .map((e) => e.trim())
-    .filter((e) => e.length > 0);
-  if (!entries.includes(alias)) {
-    entries.push(alias);
-  }
-  return entries.join(",");
-}
-
-/**
  * Guest `docker run` flags for a BROKER-ONLY sandbox (no egress enforcement):
  * pin the guest to the cred-broker's user-defined (non-internal) network so it
  * reaches the sidecar by alias AND keeps normal outbound internet (the

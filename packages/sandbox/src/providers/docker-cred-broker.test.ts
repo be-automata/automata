@@ -8,7 +8,6 @@ import {
   CRED_BROKER_NETWORK_PREFIX,
   CRED_BROKER_SCRIPT_CONTAINER_PATH,
   CRED_BROKER_SECRETS_CONTAINER_PATH,
-  addCredBrokerToNoProxy,
   buildCredBrokerSecretsFileContent,
   buildCredBrokerSidecarRunCommand,
   buildGuestCredBrokerGitConfig,
@@ -132,16 +131,6 @@ describe("docker cred-broker command builders (pure — no docker daemon)", () =
     // The installation token is NEVER present in the guest config.
     expect(script).not.toContain("x-access-token");
     expect(script).not.toContain("ghs_");
-  });
-
-  it("adds the cred-broker alias to NO_PROXY without duplicating", () => {
-    expect(addCredBrokerToNoProxy("127.0.0.1,localhost")).toBe(
-      `127.0.0.1,localhost,${CRED_BROKER_ALIAS}`,
-    );
-    // Idempotent.
-    expect(
-      addCredBrokerToNoProxy(`127.0.0.1,localhost,${CRED_BROKER_ALIAS}`),
-    ).toBe(`127.0.0.1,localhost,${CRED_BROKER_ALIAS}`);
   });
 });
 

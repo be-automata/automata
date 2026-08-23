@@ -758,18 +758,31 @@ export class DockerProvider implements ISandboxProvider {
     } catch (error) {
       console.warn("Failed to cleanup test containers:", error);
     }
-    DockerProvider.cleanupEgressNetworks(TEST_CONTAINER_PREFIX);
-    DockerProvider.cleanupCredBrokerNetworks(TEST_CONTAINER_PREFIX);
+    DockerProvider.cleanupNetworksByPrefix(
+      EGRESS_NETWORK_PREFIX,
+      TEST_CONTAINER_PREFIX,
+      "egress",
+    );
+    DockerProvider.cleanupNetworksByPrefix(
+      CRED_BROKER_NETWORK_PREFIX,
+      TEST_CONTAINER_PREFIX,
+      "cred-broker",
+    );
   }
 
   /**
-   * Remove leaked egress internal networks (#66 §3.5). Sidecar containers
-   * share the sandbox name prefix and are removed with the container sweep
-   * above; the `--internal` networks need their own sweep.
+   * Remove leaked per-sandbox docker networks matching one sidecar-network
+   * prefix (egress `--internal` nets, #66 §3.5; cred-broker dedicated nets,
+   * #114). Sidecar containers share the sandbox name prefix and are removed
+   * with the container sweep above; these networks need their own sweep.
    */
-  private static cleanupEgressNetworks(prefix: string): void {
+  private static cleanupNetworksByPrefix(
+    networkPrefix: string,
+    containerPrefix: string,
+    label: string,
+  ): void {
     try {
-      const listCommand = `docker network ls --filter "name=${EGRESS_NETWORK_PREFIX}${prefix}" --format "{{.Name}}"`;
+      const listCommand = `docker network ls --filter "name=${networkPrefix}${containerPrefix}" --format "{{.Name}}"`;
       const networkList = execSync(listCommand, { encoding: "utf8" }).trim();
       if (!networkList) {
         return;
@@ -785,7 +798,7 @@ export class DockerProvider implements ISandboxProvider {
         }
       }
     } catch (error) {
-      console.warn("Failed to cleanup egress networks:", error);
+      console.warn(`Failed to cleanup ${label} networks:`, error);
     }
   }
 
@@ -810,35 +823,15 @@ export class DockerProvider implements ISandboxProvider {
     } catch (error) {
       console.warn("Failed to cleanup Terragon containers:", error);
     }
-    DockerProvider.cleanupEgressNetworks(CONTAINER_PREFIX);
-    DockerProvider.cleanupCredBrokerNetworks(CONTAINER_PREFIX);
-  }
-
-  /**
-   * Remove leaked cred-broker dedicated networks (#114). Sidecar containers
-   * share the sandbox name prefix and are removed with the container sweep;
-   * the dedicated (broker-only) networks need their own sweep, mirroring
-   * {@link cleanupEgressNetworks}.
-   */
-  private static cleanupCredBrokerNetworks(prefix: string): void {
-    try {
-      const listCommand = `docker network ls --filter "name=${CRED_BROKER_NETWORK_PREFIX}${prefix}" --format "{{.Name}}"`;
-      const networkList = execSync(listCommand, { encoding: "utf8" }).trim();
-      if (!networkList) {
-        return;
-      }
-      for (const network of networkList.split("\n")) {
-        if (!network.trim()) {
-          continue;
-        }
-        try {
-          execSync(`docker network rm ${network.trim()}`, { stdio: "ignore" });
-        } catch {
-          // Network still in use or already gone — leave it.
-        }
-      }
-    } catch (error) {
-      console.warn("Failed to cleanup cred-broker networks:", error);
-    }
+    DockerProvider.cleanupNetworksByPrefix(
+      EGRESS_NETWORK_PREFIX,
+      CONTAINER_PREFIX,
+      "egress",
+    );
+    DockerProvider.cleanupNetworksByPrefix(
+      CRED_BROKER_NETWORK_PREFIX,
+      CONTAINER_PREFIX,
+      "cred-broker",
+    );
   }
 }
