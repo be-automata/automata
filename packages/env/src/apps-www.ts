@@ -74,11 +74,13 @@ export const env = envsafe({
   // Sandbox providers
   E2B_API_KEY: str({ allowEmpty: true, default: "" }),
   DAYTONA_API_KEY: str({ default: "", allowEmpty: true }),
-  // #114 Docker credential broker gate. "on" = brokered Docker sandboxes (the
-  // installation token stays in a per-run sidecar; the guest holds only a
-  // per-run bearer). Anything else (default "legacy-direct") = today's exact
-  // raw-token behavior. Only affects the Docker provider; mirrors the worker's
-  // WORKER_CREDENTIAL_BROKER opt-out semantics.
+  // #114 Docker credential broker GLOBAL force-on kill switch. Rollout is now
+  // driven by the per-org `sandboxCredentialBroker` feature flag; this env var
+  // stays as an ops OR-override: "on" forces brokered Docker sandboxes for
+  // EVERYONE regardless of the flag (the installation token stays in a per-run
+  // sidecar; the guest holds only a per-run bearer). Anything else (default
+  // "legacy-direct") leaves the decision to the flag. Only affects the Docker
+  // provider; mirrors the worker's WORKER_CREDENTIAL_BROKER opt-out semantics.
   SANDBOX_CREDENTIAL_BROKER: str({
     default: "legacy-direct",
     allowEmpty: true,

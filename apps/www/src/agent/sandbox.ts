@@ -276,6 +276,9 @@ async function getOrCreateSandboxForThread({
     sandboxProvider: thread.sandboxProvider,
     githubRepoFullName: thread.githubRepoFullName,
     githubAccessToken,
+    // Server-resolved per-user flag map (#114). Per-org scoping is not supported
+    // by the flag system, so this is the user-scoped fallback; env stays force-on.
+    featureFlags: userFeatureFlags,
   });
   const persistedBrokerMode = thread.credentialBrokerMode ?? undefined;
 
