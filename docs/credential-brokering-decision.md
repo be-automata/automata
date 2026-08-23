@@ -118,6 +118,18 @@ both docs agree.
 
 ### 2. E2B → `transform.headers` + `Secret.fill()` (native, never-resident)
 
+> **IMPLEMENTED (#114), behind the flag, live-gated.** Landed in
+> `packages/sandbox` (E2B provider brokered create/resume/teardown + egress
+> composition) and `apps/www` (resolver + resume wiring), gated on the existing
+> `sandboxCredentialBroker` flag / `SANDBOX_CREDENTIAL_BROKER=on`, default OFF and
+> fail-safe. Covers BOTH git and the `gh`/`api.github.com` API in one mechanism.
+> The vault-secret name is derived from the E2B sandboxId (not carried in the
+> shape) so create/resume/teardown share one handle with no extra persistence;
+> E2B brokered sandboxes resume IN PLACE with a `Secret.update` refresh (Docker,
+> by contrast, recreates). Unit-tested + type-checked; **live E2E is a gated ops
+> step** (E2B `transform.headers` public-beta plan access) — see
+> `reports/ISSUE-114-E2B-SPEC.md` §7. Daytona (item 3) remains the follow-up.
+
 At create, control-plane-side: `Secret.create('gh-inst-<runId>', <token>)`
 (write-only), then `Sandbox.create(templateId, { network: { allowOut: [...,
 'github.com'], rules: { 'github.com': [{ transform: { headers: { Authorization:

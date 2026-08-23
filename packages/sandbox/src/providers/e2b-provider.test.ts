@@ -2,23 +2,40 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { CreateSandboxOptions } from "../types";
 
 // Creation-option tests: mock the SDK client and assert the EXACT network
-// options passed at Sandbox.create (#66 §3.6). No real E2B calls.
+// options passed at Sandbox.create (#66 §3.6) and the credential-broker vault +
+// rule wiring (#114). No real E2B calls.
+const updateNetworkMock = vi.fn(async (_network: unknown) => {});
+const killMock = vi.fn(async () => {});
 vi.mock("@e2b/code-interpreter", () => ({
   Sandbox: {
-    create: vi.fn(async () => ({ sandboxId: "e2b-test-sandbox" })),
+    create: vi.fn(async () => ({
+      sandboxId: "e2b-test-sandbox",
+      updateNetwork: updateNetworkMock,
+      kill: killMock,
+    })),
     connect: vi.fn(async () => ({
       sandboxId: "e2b-test-sandbox",
       // resumeWithRetry probes the sandbox with a command after connect.
       commands: { run: vi.fn(async () => ({ stdout: "hello" })) },
+      kill: killMock,
     })),
+  },
+  // E2B Secret vault (#114). `fill` mirrors the real SDK's placeholder format so
+  // the injected header value can be asserted exactly.
+  Secret: {
+    create: vi.fn(async () => ({})),
+    update: vi.fn(async () => ({})),
+    destroy: vi.fn(async () => true),
+    exists: vi.fn(async () => true),
+    fill: vi.fn((name: string) => `\${e2b.secrets.${name}}`),
   },
 }));
 vi.mock("@terragon/sandbox-image", () => ({
   getTemplateIdForSize: vi.fn(() => "template-small"),
 }));
 
-import { Sandbox } from "@e2b/code-interpreter";
-import { E2BProvider } from "./e2b-provider";
+import { Sandbox, Secret } from "@e2b/code-interpreter";
+import { E2BProvider, e2bBrokerSecretName } from "./e2b-provider";
 
 function createOptions(
   overrides: Partial<CreateSandboxOptions> = {},
@@ -117,5 +134,211 @@ describe("E2BProvider egress creation options", () => {
       timeoutMs: expect.any(Number),
     });
     expect(Sandbox.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("E2BProvider native credential broker (#114)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const e2bBroker = {
+    kind: "e2b-native" as const,
+    installationToken: "ghs_installation_token_do_not_leak",
+    repoFullName: "org/repo",
+  };
+  const EXPECTED_SECRET = e2bBrokerSecretName("e2b-test-sandbox");
+  const EXPECTED_AUTH = `token \${e2b.secrets.${EXPECTED_SECRET}}`;
+
+  it("seeds the vault, then attaches injection rules for BOTH github hosts", async () => {
+    const provider = new E2BProvider();
+    await provider.getOrCreateSandbox(
+      null,
+      createOptions({ credentialBroker: e2bBroker }),
+    );
+
+    // Vault seeded with the real token (write-only) under the derived name.
+    expect(Secret.create).toHaveBeenCalledWith(
+      EXPECTED_SECRET,
+      e2bBroker.installationToken,
+    );
+
+    // Create carries the firewall BASE only (no rules — the secret name is not
+    // known until the sandbox exists). Open internet + the two hosts.
+    const [, createOpts] = vi.mocked(Sandbox.create).mock.calls[0]! as [
+      string,
+      Record<string, any>,
+    ];
+    expect(createOpts.network.rules).toBeUndefined();
+    expect(createOpts.network.allowOut).toEqual([
+      "0.0.0.0/0",
+      "github.com",
+      "api.github.com",
+    ]);
+
+    // Rules attached post-create via updateNetwork, injecting the PLACEHOLDER
+    // header (never the raw token) for both hosts.
+    expect(updateNetworkMock).toHaveBeenCalledTimes(1);
+    const net = updateNetworkMock.mock.calls[0]![0] as any;
+    expect(net.rules["github.com"]).toEqual([
+      { transform: { headers: { Authorization: EXPECTED_AUTH } } },
+    ]);
+    expect(net.rules["api.github.com"]).toEqual([
+      { transform: { headers: { Authorization: EXPECTED_AUTH } } },
+    ]);
+    // The raw token is NEVER in the network payload.
+    expect(JSON.stringify(net)).not.toContain(e2bBroker.installationToken);
+  });
+
+  it("composes the broker rules with a per-repo egress policy WITHOUT clobbering it", async () => {
+    const provider = new E2BProvider();
+    await provider.getOrCreateSandbox(
+      null,
+      createOptions({
+        credentialBroker: e2bBroker,
+        egressPolicy: {
+          level: "domain",
+          allowlist: ["registry.npmjs.org", "example.com"],
+        },
+      }),
+    );
+    // Create base: deny-all + the repo allowlist + the merged github hosts.
+    const [, createOpts] = vi.mocked(Sandbox.create).mock.calls[0]! as [
+      string,
+      Record<string, any>,
+    ];
+    expect(createOpts.network.denyOut).toEqual(["0.0.0.0/0"]);
+    expect(createOpts.network.allowOut).toEqual([
+      "registry.npmjs.org",
+      "example.com",
+      "github.com",
+      "api.github.com",
+    ]);
+    // updateNetwork preserves that composition and adds the rules.
+    const net = updateNetworkMock.mock.calls[0]![0] as any;
+    expect(net.denyOut).toEqual(["0.0.0.0/0"]);
+    expect(net.allowOut).toEqual([
+      "registry.npmjs.org",
+      "example.com",
+      "github.com",
+      "api.github.com",
+    ]);
+    expect(Object.keys(net.rules).sort()).toEqual([
+      "api.github.com",
+      "github.com",
+    ]);
+  });
+
+  it("fails closed: destroys the secret and kills the guest if rule attach throws", async () => {
+    updateNetworkMock.mockRejectedValueOnce(new Error("transform plan denied"));
+    const provider = new E2BProvider();
+    await expect(
+      provider.getOrCreateSandbox(
+        null,
+        createOptions({ credentialBroker: e2bBroker }),
+      ),
+    ).rejects.toThrow(/transform plan denied/);
+    expect(Secret.destroy).toHaveBeenCalledWith(EXPECTED_SECRET);
+    expect(killMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("teardown (session.shutdown) destroys the vault secret", async () => {
+    const provider = new E2BProvider();
+    const session = await provider.getOrCreateSandbox(
+      null,
+      createOptions({ credentialBroker: e2bBroker }),
+    );
+    await session.shutdown();
+    expect(killMock).toHaveBeenCalled();
+    expect(Secret.destroy).toHaveBeenCalledWith(EXPECTED_SECRET);
+  });
+
+  it("resume REFRESHES the vault secret with the fresh token (rules persist)", async () => {
+    const provider = new E2BProvider();
+    await provider.getOrCreateSandbox(
+      "e2b-test-sandbox",
+      createOptions({
+        credentialBroker: e2bBroker,
+        credentialBrokerMode: "brokered",
+      }),
+    );
+    expect(Secret.exists).toHaveBeenCalledWith(EXPECTED_SECRET);
+    expect(Secret.update).toHaveBeenCalledWith(
+      EXPECTED_SECRET,
+      e2bBroker.installationToken,
+    );
+    // Rules persist across pause — no re-attach on resume.
+    expect(updateNetworkMock).not.toHaveBeenCalled();
+  });
+
+  it("resume re-creates the vault secret if it is somehow gone", async () => {
+    vi.mocked(Secret.exists).mockResolvedValueOnce(false);
+    const provider = new E2BProvider();
+    await provider.getOrCreateSandbox(
+      "e2b-test-sandbox",
+      createOptions({
+        credentialBroker: e2bBroker,
+        credentialBrokerMode: "brokered",
+      }),
+    );
+    expect(Secret.update).not.toHaveBeenCalled();
+    expect(Secret.create).toHaveBeenCalledWith(
+      EXPECTED_SECRET,
+      e2bBroker.installationToken,
+    );
+  });
+
+  it("resume fails closed when brokered provenance has no shape to refresh from", async () => {
+    const provider = new E2BProvider();
+    await expect(
+      provider.getOrCreateSandbox(
+        "e2b-test-sandbox",
+        createOptions({ credentialBrokerMode: "brokered" }),
+      ),
+    ).rejects.toThrow(/missing the broker shape/);
+    expect(Secret.update).not.toHaveBeenCalled();
+  });
+
+  it("a resumed brokered session destroys its secret on shutdown", async () => {
+    const provider = new E2BProvider();
+    const session = await provider.getOrCreateSandbox(
+      "e2b-test-sandbox",
+      createOptions({
+        credentialBroker: e2bBroker,
+        credentialBrokerMode: "brokered",
+      }),
+    );
+    await session.shutdown();
+    expect(Secret.destroy).toHaveBeenCalledWith(EXPECTED_SECRET);
+  });
+
+  it("shutdownById destroys the derived secret and kills the guest", async () => {
+    const provider = new E2BProvider();
+    await provider.shutdownById!("e2b-test-sandbox");
+    expect(Secret.destroy).toHaveBeenCalledWith(EXPECTED_SECRET);
+    expect(killMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("flag-off create is byte-identical to today: no Secret + no network", async () => {
+    const provider = new E2BProvider();
+    await provider.getOrCreateSandbox(null, createOptions());
+    expect(Secret.create).not.toHaveBeenCalled();
+    expect(updateNetworkMock).not.toHaveBeenCalled();
+    const [, createOpts] = vi.mocked(Sandbox.create).mock.calls[0]! as [
+      string,
+      Record<string, unknown>,
+    ];
+    expect("network" in createOpts).toBe(false);
+  });
+
+  it("non-brokered resume touches no vault secret", async () => {
+    const provider = new E2BProvider();
+    await provider.getOrCreateSandbox(
+      "e2b-test-sandbox",
+      createOptions({ credentialBrokerMode: "legacy-direct" }),
+    );
+    expect(Secret.exists).not.toHaveBeenCalled();
+    expect(Secret.update).not.toHaveBeenCalled();
+    expect(Secret.create).not.toHaveBeenCalled();
   });
 });

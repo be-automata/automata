@@ -38,6 +38,96 @@ export type E2bNetworkOptions = {
 };
 
 /**
+ * The two GitHub hosts the E2B native credential broker (#114) injects an
+ * `Authorization` header on: git-over-HTTPS (github.com) AND the REST/GraphQL
+ * API used by `gh`/Octokit (api.github.com). One mechanism covers both.
+ */
+export const E2B_BROKER_GITHUB_HOSTS = [
+  "github.com",
+  "api.github.com",
+] as const;
+
+/**
+ * A single E2B egress transform rule in the STATIC-headers form — structurally
+ * a subset of the SDK's `SandboxNetworkRule` (`{ transform: { headers } }`), so
+ * it is assignable to `SandboxNetworkOpts.rules` / `SandboxNetworkUpdate.rules`
+ * without importing the e2b SDK into this pure mapper.
+ */
+export type E2bStaticHeaderRule = {
+  transform: { headers: Record<string, string> };
+};
+
+/**
+ * E2B network options for a BROKERED sandbox (#114): the egress firewall
+ * (`allowOut`/optional `denyOut`) COMPOSED with per-host header-injection
+ * `rules`. Shape is a structural subset of the SDK `SandboxNetworkOpts` /
+ * `SandboxNetworkUpdate` — the provider passes it straight to `Sandbox.create`
+ * / `sandbox.updateNetwork`.
+ */
+export type E2bBrokeredNetworkOptions = {
+  allowOut: string[];
+  denyOut?: string[];
+  rules: Record<string, E2bStaticHeaderRule[]>;
+};
+
+/**
+ * Compose the E2B native credential-broker egress config (#114): register a
+ * header-injection rule for each GitHub host and COMPOSE it with any per-repo
+ * egress policy (#66) WITHOUT clobbering it.
+ *
+ * Two cases:
+ *  - egress policy present: reuse {@link toE2bNetwork} for the base
+ *    (`denyOut: ["0.0.0.0/0"]` + the resolved allowlist), then MERGE the broker
+ *    hosts into `allowOut` (they are normally already there as system entries,
+ *    but merging is idempotent and never drops a repo's allowlist entry). A host
+ *    named in `rules` MUST also appear in `allowOut` (SDK contract), else the
+ *    rule never fires.
+ *  - no egress policy: keep today's OPEN internet — `allowOut` is
+ *    `["0.0.0.0/0", ...hosts]` (the sentinel allows all traffic; the explicit
+ *    hosts satisfy the "rule host must appear in allowOut" contract) and NO
+ *    `denyOut` (setting one would newly restrict egress the flag-off path never
+ *    restricted).
+ *
+ * `authHeaderValue` is the fully-formed header value the caller built from the
+ * E2B Secret placeholder (e.g. `` `token ${Secret.fill(name)}` ``); this mapper
+ * stays free of the e2b SDK and of any secret material (the placeholder is
+ * inert until E2B resolves it server-side).
+ */
+export function toE2bBrokeredNetwork({
+  egressPolicy,
+  authHeaderValue,
+  hosts = [...E2B_BROKER_GITHUB_HOSTS],
+}: {
+  egressPolicy?: EgressPolicyShape;
+  authHeaderValue: string;
+  hosts?: string[];
+}): E2bBrokeredNetworkOptions {
+  const rules: Record<string, E2bStaticHeaderRule[]> = {};
+  for (const host of hosts) {
+    rules[host] = [
+      { transform: { headers: { Authorization: authHeaderValue } } },
+    ];
+  }
+  if (egressPolicy) {
+    const base = toE2bNetwork(egressPolicy);
+    const allowOut = [...base.allowOut];
+    for (const host of hosts) {
+      if (!allowOut.includes(host)) {
+        allowOut.push(host);
+      }
+    }
+    return { allowOut, denyOut: base.denyOut, rules };
+  }
+  const allowOut = ["0.0.0.0/0"];
+  for (const host of hosts) {
+    if (!allowOut.includes(host)) {
+      allowOut.push(host);
+    }
+  }
+  return { allowOut, rules };
+}
+
+/**
  * Daytona `daytona.create` param subset produced by {@link toDaytonaNetwork}.
  * Only `domainAllowList` is ever produced: Daytona's three network params
  * (`networkBlockAll` / `networkAllowList` / `domainAllowList`) are mutually

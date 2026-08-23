@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   toE2bNetwork,
+  toE2bBrokeredNetwork,
+  E2B_BROKER_GITHUB_HOSTS,
   toDaytonaNetwork,
   DAYTONA_MAX_DOMAIN_ALLOWLIST,
   type EgressPolicyShape,
@@ -153,5 +155,72 @@ describe("toDaytonaNetwork", () => {
         toDaytonaNetwork(policy("none", ["callback.example.com"])),
       ).toThrow(/"none" is unsupported on the daytona provider/);
     });
+  });
+});
+
+describe("toE2bBrokeredNetwork (#114)", () => {
+  const AUTH = "token ${e2b.secrets.gh-inst-sb1}";
+
+  it("registers a header-injection rule for BOTH github hosts", () => {
+    const net = toE2bBrokeredNetwork({ authHeaderValue: AUTH });
+    for (const host of E2B_BROKER_GITHUB_HOSTS) {
+      expect(net.rules[host]).toEqual([
+        { transform: { headers: { Authorization: AUTH } } },
+      ]);
+    }
+    expect(Object.keys(net.rules).sort()).toEqual(
+      [...E2B_BROKER_GITHUB_HOSTS].sort(),
+    );
+  });
+
+  it("no egress policy: keeps OPEN internet (0.0.0.0/0) + hosts, no denyOut", () => {
+    const net = toE2bBrokeredNetwork({ authHeaderValue: AUTH });
+    expect(net.allowOut).toEqual(["0.0.0.0/0", "github.com", "api.github.com"]);
+    expect(net.denyOut).toBeUndefined();
+  });
+
+  it("with egress policy: composes deny-all + MERGES hosts into the allowlist (never clobbers)", () => {
+    const net = toE2bBrokeredNetwork({
+      authHeaderValue: AUTH,
+      egressPolicy: {
+        level: "domain",
+        allowlist: ["example.com", "registry.npmjs.org"],
+      },
+    });
+    expect(net.denyOut).toEqual(["0.0.0.0/0"]);
+    // Repo allowlist entries preserved, github hosts appended.
+    expect(net.allowOut).toEqual([
+      "example.com",
+      "registry.npmjs.org",
+      "github.com",
+      "api.github.com",
+    ]);
+    // The rules still fire for both hosts.
+    expect(Object.keys(net.rules).sort()).toEqual(
+      [...E2B_BROKER_GITHUB_HOSTS].sort(),
+    );
+  });
+
+  it("does NOT duplicate a github host already in the egress allowlist", () => {
+    const net = toE2bBrokeredNetwork({
+      authHeaderValue: AUTH,
+      egressPolicy: {
+        level: "domain",
+        allowlist: ["github.com", "api.github.com", "example.com"],
+      },
+    });
+    expect(net.allowOut).toEqual([
+      "github.com",
+      "api.github.com",
+      "example.com",
+    ]);
+  });
+
+  it("carries no secret material — only the caller-built placeholder header", () => {
+    const net = toE2bBrokeredNetwork({ authHeaderValue: AUTH });
+    // The mapper never sees a raw token; the value it stores is the inert
+    // placeholder the caller passed in.
+    expect(JSON.stringify(net)).toContain("${e2b.secrets.gh-inst-sb1}");
+    expect(JSON.stringify(net)).not.toContain("ghs_");
   });
 });

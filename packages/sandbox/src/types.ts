@@ -17,30 +17,67 @@ export type EgressPolicyShape = {
 };
 
 /**
- * Per-run credential-broker SHAPE (#114) — the inputs a Docker cred-broker
- * sidecar needs to stand up a repo-fenced git-smart-HTTP proxy: the GitHub
- * installation token, the per-run bearer the guest presents, and the fenced
- * `owner/repo`. Structural mirror of {@link EgressPolicyShape} — declared
- * per-package, resolved control-plane-side, never imported across the plane
- * boundary.
+ * Per-run credential-broker SHAPE (#114) — a DISCRIMINATED UNION over the
+ * `kind` of never-resident custody a provider stands up. Structural mirror of
+ * {@link EgressPolicyShape} — declared per-package, resolved control-plane-side,
+ * never imported across the plane boundary.
  *
  * HONESTY NOTE: unlike {@link EgressPolicyShape} (which carries only resolved
  * POLICY — non-secret), this shape carries a LIVE SECRET (the installation
  * token). A provider that consumes it therefore becomes a secret custodian for
  * the run's lifetime — a deliberate, narrower trust statement than egress's
- * plane-neutral invariant. The sidecar builders in
- * providers/docker-cred-broker.ts keep the token OFF argv/`-e`, delivering it
- * only through a `0o400` `:ro` file mount.
+ * plane-neutral invariant. Each variant keeps the token off `/proc`, argv, and
+ * guest disk by its OWN mechanism (see the variant docs).
+ */
+export type CredentialBrokerShape =
+  | DockerCredentialBrokerShape
+  | E2bCredentialBrokerShape;
+
+/**
+ * Docker variant (#114) — the inputs a Docker cred-broker sidecar needs to
+ * stand up a repo-fenced git-smart-HTTP proxy: the GitHub installation token,
+ * the per-run bearer the guest presents, and the fenced `owner/repo`.
+ *
+ * The sidecar builders in providers/docker-cred-broker.ts keep the token OFF
+ * argv/`-e`, delivering it only through a `0o400` `:ro` file mount. The guest
+ * holds ONLY the ephemeral bearer (never the installation token).
  *
  * WIRED (#114): consumed on the Docker create path (docker-provider
  * setUpCredentialBroker + setup.ts brokered git-config + env.ts brokered env);
- * resume fails closed via the NON-secret
- * {@link CreateSandboxOptions.credentialBrokerMode}. Built control-plane-side
- * only at CREATE; the bearer is ephemeral (never persisted).
+ * a Docker brokered sandbox is NON-resumable and fails closed on resume via the
+ * NON-secret {@link CreateSandboxOptions.credentialBrokerMode}. Built
+ * control-plane-side only at CREATE; the bearer is ephemeral (never persisted).
  */
-export type CredentialBrokerShape = {
+export type DockerCredentialBrokerShape = {
+  kind: "docker-sidecar";
   installationToken: string;
   runBearer: string;
+  repoFullName: string;
+};
+
+/**
+ * E2B variant (#114) — E2B injects the credential in its OWN egress plane, so
+ * there is NO sidecar and NO guest-held bearer. The provider seeds E2B's
+ * write-only Secret vault with the installation token and registers a per-host
+ * `network.rules[host].transform.headers` rule that injects
+ * `Authorization: token ${e2b.secrets.<name>}` on requests to github.com /
+ * api.github.com — resolved by E2B's egress proxy per request, OUTSIDE the
+ * guest. The guest carries only a non-secret placeholder GH_TOKEN (env.ts), and
+ * no ~/.git-credentials is written (setup.ts).
+ *
+ * The per-run vault secret NAME is NOT carried here: it is derived
+ * deterministically from the E2B sandboxId (the only handle that survives
+ * pause/resume AND is available at teardown-by-id) via
+ * `e2bBrokerSecretName()`. So this shape needs only the token (to seed/refresh
+ * the vault) and `repoFullName` (parity / non-secret provenance). Unlike
+ * Docker, an E2B brokered sandbox CAN resume in place (rules + vault persist
+ * across pause) — the provider REFRESHES the vault secret with a fresh
+ * installation token on resume (Secret.update). Built control-plane-side on
+ * BOTH create and resume (the token is short-lived); never persisted.
+ */
+export type E2bCredentialBrokerShape = {
+  kind: "e2b-native";
+  installationToken: string;
   repoFullName: string;
 };
 
@@ -96,10 +133,16 @@ export type CreateSandboxOptions = {
   egressPolicy?: EgressPolicyShape;
   /**
    * Per-run credential-broker SHAPE (#114) — see {@link CredentialBrokerShape}.
-   * Present (Docker create path, flag on) = the guest is brokered: the provider
-   * stands up a cred-broker sidecar and the guest never receives the
-   * installation token. Absent = today's raw-token behavior (rollback / flag
-   * off / non-Docker provider). Carries a live secret; built only at CREATE.
+   * Present = the guest is brokered and never receives the installation token:
+   *  - Docker (`docker-sidecar`): set on the CREATE path only (a Docker brokered
+   *    sandbox is non-resumable; resume recreates). The provider stands up a
+   *    cred-broker sidecar.
+   *  - E2B (`e2b-native`): set on BOTH create and resume. On create the provider
+   *    seeds E2B's Secret vault + registers the egress header-injection rule; on
+   *    resume it REFRESHES the vault secret (E2B resumes in place). The token
+   *    here seeds/refreshes the vault; it never reaches the guest.
+   * Absent = today's raw-token behavior (rollback / flag off / unbrokered
+   * provider). Carries a live secret.
    */
   credentialBroker?: CredentialBrokerShape;
   /**

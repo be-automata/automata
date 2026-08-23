@@ -42,12 +42,19 @@ export function isCredentialBrokerEnabled(
 
 /**
  * Build the per-run credential-broker SHAPE for a CREATE (initial or the
- * fail-closed resume recreate). Returns null when the provider is not Docker
- * (E2B/Daytona have no host-reachable per-run sidecar — out of scope) or when
- * brokering is disabled for the actor (per-org flag off AND env not force-on).
- * Mints a fresh, ephemeral per-run bearer (never persisted; the guest holds only
- * this, never the installation token). The `mode` is the NON-secret provenance
- * persisted on the thread so a later resume can fail closed WITHOUT the secret.
+ * fail-closed Docker resume recreate). Returns a PROVIDER-APPROPRIATE directive:
+ *  - `docker`: a `docker-sidecar` shape carrying the installation token, a
+ *    fresh ephemeral per-run bearer (the only thing the guest holds), and the
+ *    fenced repo. The provider stands up an out-of-guest sidecar.
+ *  - `e2b`: an `e2b-native` shape carrying the installation token (to SEED
+ *    E2B's write-only Secret vault) and the repo. There is NO bearer and no
+ *    sidecar — E2B injects the credential in its own egress plane. The per-run
+ *    vault-secret NAME is derived from the sandboxId inside the provider (it
+ *    does not exist until create), so it is not carried here.
+ * Returns null for any other provider, or when brokering is disabled for the
+ * actor (flag off AND env not force-on). The `mode` is the NON-secret provenance
+ * persisted on the thread so a later resume can detect brokered-ness WITHOUT the
+ * secret shape.
  */
 export function resolveCredentialBrokerForCreate({
   sandboxProvider,
@@ -60,19 +67,71 @@ export function resolveCredentialBrokerForCreate({
   githubAccessToken: string;
   featureFlags: Partial<Record<FeatureFlagName, boolean>> | null | undefined;
 }): { shape: CredentialBrokerShape; mode: "brokered" } | null {
-  if (sandboxProvider !== "docker") {
-    return null;
-  }
   if (!isCredentialBrokerEnabled(featureFlags)) {
     return null;
   }
-  const runBearer = randomBytes(32).toString("hex");
+  if (sandboxProvider === "docker") {
+    const runBearer = randomBytes(32).toString("hex");
+    return {
+      shape: {
+        kind: "docker-sidecar",
+        installationToken: githubAccessToken,
+        runBearer,
+        repoFullName: githubRepoFullName,
+      },
+      mode: "brokered",
+    };
+  }
+  if (sandboxProvider === "e2b") {
+    return {
+      shape: {
+        kind: "e2b-native",
+        installationToken: githubAccessToken,
+        repoFullName: githubRepoFullName,
+      },
+      mode: "brokered",
+    };
+  }
+  return null;
+}
+
+/**
+ * Build the credential-broker SHAPE for an in-place RESUME (#114). Only E2B
+ * brokered sandboxes resume in place (Docker recreates on resume), so this
+ * returns an `e2b-native` shape ONLY when the provider is E2B and the thread's
+ * persisted provenance is `"brokered"`. It carries the FRESH installation token
+ * so the provider can REFRESH E2B's vault secret (installation tokens expire
+ * ~1h); the vault-secret name is re-derived from the sandboxId in the provider.
+ *
+ * Gated on the PERSISTED mode, NOT the current flag: a sandbox created brokered
+ * still has live E2B egress rules + a vault entry after pause, so it must stay
+ * brokered on resume even if the flag was since turned off — otherwise the
+ * legacy env/setup path would write a resident raw token into a guest whose
+ * egress still injects, defeating never-residency. Returns null otherwise
+ * (Docker, non-brokered threads, or a legacy thread with no provenance).
+ */
+export function resolveCredentialBrokerForResume({
+  sandboxProvider,
+  githubRepoFullName,
+  githubAccessToken,
+  persistedBrokerMode,
+}: {
+  sandboxProvider: SandboxProvider;
+  githubRepoFullName: string;
+  githubAccessToken: string;
+  persistedBrokerMode: "brokered" | "legacy-direct" | null | undefined;
+}): { shape: CredentialBrokerShape } | null {
+  if (sandboxProvider !== "e2b") {
+    return null;
+  }
+  if (persistedBrokerMode !== "brokered") {
+    return null;
+  }
   return {
     shape: {
+      kind: "e2b-native",
       installationToken: githubAccessToken,
-      runBearer,
       repoFullName: githubRepoFullName,
     },
-    mode: "brokered",
   };
 }

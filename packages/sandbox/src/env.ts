@@ -1,6 +1,18 @@
 import { AIAgentCredentials } from "@terragon/agent/types";
 import type { CredentialBrokerShape } from "./types";
 
+/**
+ * Non-secret placeholder GH_TOKEN/GITHUB_TOKEN for the E2B native broker (#114).
+ * On the E2B brokered path the guest must hold NO real credential, but `gh`
+ * (and Octokit) only send an `Authorization` header when a token is present —
+ * so we seed a clearly-inert sentinel. E2B's egress proxy then OVERRIDES that
+ * header with `token ${e2b.secrets.<name>}` for api.github.com, so the sentinel
+ * value is never used off-box and never grants anything on its own. Git needs
+ * no credential at all (the header is injected on plain github.com requests).
+ */
+export const E2B_BROKERED_GH_TOKEN_PLACEHOLDER =
+  "x-terragon-e2b-brokered-placeholder";
+
 export function getEnv({
   userEnv,
   githubAccessToken,
@@ -14,11 +26,16 @@ export function getEnv({
   overrides?: Record<string, string>;
   /**
    * Per-run credential broker (#114). When present, the guest NEVER receives
-   * the installation token: `GH_TOKEN`/`GITHUB_TOKEN` carry only the per-run
-   * bearer (useless off-box; git presents it to the broker sidecar which
-   * verifies it) and `GH_REPO` restores gh's repo targeting under the
-   * `insteadOf` rewrite. Mirrors the worker plane's `buildDaemonEnv` broker
-   * branch. Absent = today's exact raw-token env (rollback contract).
+   * the installation token. Behavior depends on the broker `kind`:
+   *  - `docker-sidecar`: `GH_TOKEN`/`GITHUB_TOKEN` carry only the per-run bearer
+   *    (useless off-box; git presents it to the broker sidecar which verifies
+   *    it) and `GH_REPO` restores gh's repo targeting under the `insteadOf`
+   *    rewrite. Mirrors the worker plane's `buildDaemonEnv` broker branch.
+   *  - `e2b-native`: `GH_TOKEN`/`GITHUB_TOKEN` carry only a NON-secret
+   *    placeholder ({@link E2B_BROKERED_GH_TOKEN_PLACEHOLDER}); E2B's egress
+   *    proxy overrides the `Authorization` header with the vault secret, so the
+   *    placeholder never grants anything. No per-run bearer exists.
+   * Absent = today's exact raw-token env (rollback contract).
    */
   credentialBroker?: CredentialBrokerShape | null;
 }) {
@@ -43,28 +60,30 @@ export function getEnv({
     }
   }
 
-  // Brokered (#114): RESERVE GH_TOKEN/GITHUB_TOKEN/GH_REPO — written AFTER
-  // userEnv/agentCredentials so a user-supplied GH_TOKEN can NOT shadow the
-  // per-run bearer (still before `overrides`, which are our own trusted keys).
-  // The installation token appears NOWHERE in the returned env.
-  //
-  // SCOPE (#114): only the GIT half is brokered on Docker. The per-run bearer
-  // below is meaningful ONLY to the cred-broker sidecar's git-smart-HTTP
-  // endpoints (routed via the `insteadOf`+Bearer git config in setup.ts); it is
-  // deliberately NOT a valid api.github.com credential. The gh-API half — the
-  // worker plane's gh-broker + GH_CONFIG_DIR/http_unix_socket routing
-  // (packages/worker/src/agent-run/daemon-env.ts) — is DEFERRED (a
-  // CA-terminating CONNECT proxy; tracked on #114). Consequence, by design:
-  // with SANDBOX_CREDENTIAL_BROKER=on, `gh` API calls that need auth FAIL CLOSED
-  // (401 against a bearer GitHub cannot honor) rather than leak the installation
-  // token. Setting GH_TOKEN to the bearer (vs. leaving the raw token, or
-  // unsetting it) is what keeps the raw token out of the guest while git stays
-  // fully functional; the 401 is the intended fail-closed posture until the gh
-  // half lands.
-  if (credentialBroker) {
+  // Brokered (#114): RESERVE GH_TOKEN/GITHUB_TOKEN (+ GH_REPO on Docker) —
+  // written AFTER userEnv/agentCredentials so a user-supplied GH_TOKEN can NOT
+  // shadow the brokered value (still before `overrides`, which are our own
+  // trusted keys). The installation token appears NOWHERE in the returned env
+  // on either brokered path.
+  if (credentialBroker?.kind === "docker-sidecar") {
+    // Docker: only the GIT half is brokered. The per-run bearer below is
+    // meaningful ONLY to the cred-broker sidecar's git-smart-HTTP endpoints
+    // (routed via the `insteadOf`+Bearer git config in setup.ts); it is
+    // deliberately NOT a valid api.github.com credential. The gh-API half is
+    // DEFERRED (a CA-terminating CONNECT proxy; tracked on #114). Consequence,
+    // by design: `gh` API calls that need auth FAIL CLOSED (401 against a bearer
+    // GitHub cannot honor) rather than leak the installation token.
     env.GH_TOKEN = credentialBroker.runBearer;
     env.GITHUB_TOKEN = credentialBroker.runBearer;
     env.GH_REPO = credentialBroker.repoFullName;
+  } else if (credentialBroker?.kind === "e2b-native") {
+    // E2B: BOTH halves are brokered by E2B's egress proxy in ONE mechanism.
+    // The guest holds only a non-secret placeholder; E2B overrides the
+    // `Authorization` header with the vault secret for github.com AND
+    // api.github.com. Git needs no credential (the header is injected on plain
+    // requests); `gh`/Octokit send the placeholder, which E2B then overrides.
+    env.GH_TOKEN = E2B_BROKERED_GH_TOKEN_PLACEHOLDER;
+    env.GITHUB_TOKEN = E2B_BROKERED_GH_TOKEN_PLACEHOLDER;
   }
 
   if (overrides) {

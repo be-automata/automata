@@ -177,6 +177,7 @@ describe("sandbox-setup", () => {
         .spyOn(session, "runCommand")
         .mockResolvedValue("");
       const broker = {
+        kind: "docker-sidecar" as const,
         installationToken: "ghs_installation_token_secret",
         runBearer: "run-bearer-abc123",
         repoFullName: "owner/repo",
@@ -197,6 +198,32 @@ describe("sandbox-setup", () => {
       expect(script).toContain("rm -f ~/.git-credentials");
       expect(script).not.toContain("credential.helper store");
       expect(script).not.toMatch(/echo.*> ~\/\.git-credentials/);
+      // The installation token appears NOWHERE in the guest commands.
+      expect(script).not.toContain(broker.installationToken);
+      expect(script).not.toContain("x-access-token");
+    });
+
+    it("e2b-native brokered: scrubs residue, writes NO ~/.git-credentials and NO broker wiring (E2B injects at egress)", async () => {
+      const session = new MockSession("mock-sandbox");
+      const runCommandSpy = vi
+        .spyOn(session, "runCommand")
+        .mockResolvedValue("");
+      const broker = {
+        kind: "e2b-native" as const,
+        installationToken: "ghs_installation_token_secret",
+        repoFullName: "owner/repo",
+      };
+      await setupGitCredentials(session, {
+        ...defaultOptions,
+        credentialBroker: broker,
+      });
+      const script = runCommandSpy.mock.calls.map((c) => c[0]).join("\n");
+      // Defensive scrub only — no credentials file, no docker-broker insteadOf.
+      expect(script).toContain("rm -f ~/.git-credentials");
+      expect(script).not.toContain("credential.helper store");
+      expect(script).not.toMatch(/echo.*> ~\/\.git-credentials/);
+      expect(script).not.toContain("insteadOf");
+      expect(script).not.toContain(CRED_BROKER_ALIAS);
       // The installation token appears NOWHERE in the guest commands.
       expect(script).not.toContain(broker.installationToken);
       expect(script).not.toContain("x-access-token");

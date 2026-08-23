@@ -174,20 +174,40 @@ export async function setupGitCredentials(
   session: ISandboxSession,
   options: CreateSandboxOptions,
 ) {
-  // Brokered (#114): the guest NEVER holds the installation token. Route
-  // github.com through the per-run credential-broker sidecar (insteadOf +
-  // Bearer extraheader) and DO NOT write ~/.git-credentials. Defensively scrub
-  // any residue first (belt-and-suspenders for #89; a fresh base image is
-  // clean, so these are normally no-ops). Brokered sandboxes are non-resumable
-  // (the control plane recreates on resume), so this always runs on a fresh
-  // create-path guest.
-  if (options.credentialBroker) {
+  // Brokered (#114): the guest NEVER holds the installation token and NO
+  // ~/.git-credentials is written on either brokered path.
+  //
+  // Docker (`docker-sidecar`): route github.com through the per-run
+  // credential-broker sidecar (insteadOf + Bearer extraheader). Defensively
+  // scrub any residue first (belt-and-suspenders for #89; a fresh base image is
+  // clean, so these are normally no-ops). Docker brokered sandboxes are
+  // non-resumable (the control plane recreates on resume), so this always runs
+  // on a fresh create-path guest.
+  if (options.credentialBroker?.kind === "docker-sidecar") {
     const gitConfigScript = buildGuestCredBrokerGitConfig({
       alias: CRED_BROKER_ALIAS,
       port: CRED_BROKER_GIT_PORT,
       bearer: options.credentialBroker.runBearer,
     }).join(" && ");
     await session.runCommand(gitConfigScript, { cwd: "/" });
+    return;
+  }
+  // E2B (`e2b-native`): E2B's egress proxy injects the `Authorization` header
+  // per request, OUTSIDE the guest — git uses plain `https://github.com/...`
+  // with NO credential of its own. Write no ~/.git-credentials and no broker
+  // wiring; only defensively scrub any residue (a fresh template is clean, so
+  // this is normally a no-op). This runs on both the create and the in-place
+  // resume path (E2B brokered sandboxes resume in place), so scrubbing here
+  // also guarantees a resume never re-introduces a raw-token credential file.
+  if (options.credentialBroker?.kind === "e2b-native") {
+    await session.runCommand(
+      [
+        `rm -f ~/.git-credentials`,
+        `git config --global --unset-all credential.helper || true`,
+        `git config --global --unset-all http.https://github.com/.extraheader || true`,
+      ].join(" && "),
+      { cwd: "/" },
+    );
     return;
   }
   try {
