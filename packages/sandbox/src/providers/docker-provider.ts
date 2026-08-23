@@ -575,6 +575,19 @@ export class DockerProvider implements ISandboxProvider {
       `automata-cred-broker-${scriptHash}.cjs`,
     );
     try {
+      // #114 idempotent pre-create reclaim: an uncatchable pre-id create timeout
+      // (the guest `docker run` is abandoned mid-flight after this sidecar +
+      // network are already up) leaves a stale same-name broker sidecar/network
+      // behind, and the `docker run -d --name` below would then collide. Sweep
+      // any stale same-name broker resources BEFORE (re)creating so the next
+      // brokered create reclaims the orphan instead of failing on it. Mirrors
+      // the transactional teardown-on-failure below and the egress
+      // network-create idempotency; best-effort, so a clean slate is a no-op.
+      // Only drop the dedicated broker network here — when sharing the egress
+      // network (createNetwork=false) that network is egress-owned and reused.
+      this.tearDownCredentialBroker(containerName, {
+        removeNetwork: opts.createNetwork,
+      });
       try {
         await fs.writeFile(scriptHostPath, CRED_BROKER_SCRIPT, {
           mode: 0o444,

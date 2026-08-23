@@ -486,7 +486,26 @@ async function getOrCreateSandboxForThread({
   if (!thread.codesandboxId) {
     const egressPolicy = await resolveEgressForCreate();
     const session = await createSandboxSweepingOnTimeout(egressPolicy);
-    await persistCreated(session.sandboxId);
+    // #114: on a persist failure the freshly-created guest exists but is
+    // untracked (its id was never written) — tear it down (guest + broker
+    // sidecar/network/secret) so nothing (including the token-holding sidecar)
+    // is orphaned, mirroring recreateBrokeredSandbox's persist-failure
+    // compensation above. A create/setup throw or non-cancelling timeout is
+    // already swept before we reach here, so this only compensates the persist.
+    try {
+      await persistCreated(session.sandboxId);
+    } catch (persistError) {
+      await shutdownSandboxById({
+        sandboxProvider: thread.sandboxProvider,
+        sandboxId: session.sandboxId,
+      }).catch((teardownError) => {
+        console.error(
+          "Failed to tear down fresh sandbox after initial-create persist failure",
+          teardownError,
+        );
+      });
+      throw persistError;
+    }
     return session;
   }
 

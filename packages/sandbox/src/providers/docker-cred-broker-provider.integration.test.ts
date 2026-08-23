@@ -229,3 +229,103 @@ describe(
     });
   },
 );
+
+// #114 (MED) pre-create reclaim: an uncatchable pre-id create timeout can leave
+// a stale same-name broker sidecar/network behind (guest `docker run` abandoned
+// after the sidecar is already up). The next brokered create must RECLAIM that
+// orphan rather than fail on the `docker run -d --name` collision. Drives the
+// wired setUpCredentialBroker with a pre-seeded same-name orphan and proves the
+// stale sidecar is force-removed and replaced by a fresh, ready one.
+describe(
+  "docker cred-broker pre-create reclaim (integration)",
+  { skip: process.env.SANDBOX_PROVIDER !== "docker", timeout: TIMEOUT_MS },
+  () => {
+    vi.setConfig({ testTimeout: TIMEOUT_MS });
+
+    const realToken = (() => {
+      const fromEnv = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+      if (fromEnv) return fromEnv;
+      try {
+        return execSync("gh auth token", { encoding: "utf8" }).trim() || null;
+      } catch {
+        return null;
+      }
+    })();
+    const INJECTED_TOKEN =
+      realToken ?? `ghs_sentinel_${randomBytes(8).toString("hex")}`;
+    const RUN_BEARER = randomBytes(32).toString("hex");
+    const REPO = "octocat/Hello-World";
+    // TEST_CONTAINER_PREFIX ("terragon-sandbox-test") so cleanupTestContainers
+    // sweeps whatever this test leaves behind.
+    const containerName = `terragon-sandbox-test-reclaim-${randomBytes(4).toString("hex")}`;
+    const sidecarName = credBrokerSidecarName(containerName);
+    const networkName = credBrokerNetworkName(containerName);
+    const BASE_IMAGE = "ghcr.io/terragon-labs/containers-test";
+
+    const provider = new DockerProvider();
+
+    afterAll(async () => {
+      // setUpCredentialBroker is transactional but leaves the freshly-created
+      // sidecar/network up on success; tear them down explicitly.
+      try {
+        execSync(`docker rm -f ${sidecarName}`, { stdio: "ignore" });
+      } catch {}
+      try {
+        execSync(`docker network rm ${networkName}`, { stdio: "ignore" });
+      } catch {}
+      await DockerProvider.cleanupTestContainers();
+    });
+
+    it("force-removes a stale same-name sidecar and stands up a fresh ready one", async () => {
+      // Seed the orphan: a same-name sidecar attached to a same-name network,
+      // exactly what a pre-id create timeout would strand.
+      execSync(`docker network create ${networkName}`, { stdio: "ignore" });
+      execSync(
+        `docker run -d --name ${sidecarName} --network ${networkName} ${BASE_IMAGE} tail -f /dev/null`,
+        { stdio: "ignore" },
+      );
+      const orphanId = execSync(
+        `docker inspect --format '{{.Id}}' ${sidecarName}`,
+        { encoding: "utf8" },
+      ).trim();
+
+      // The next brokered create (via the private setup step) must reclaim it,
+      // not throw on the name collision. Resolving at all proves the readiness
+      // barrier passed against the FRESH sidecar.
+      await (
+        provider as unknown as {
+          setUpCredentialBroker: (
+            containerName: string,
+            broker: NonNullable<CreateSandboxOptions["credentialBroker"]>,
+            opts: {
+              networkName: string;
+              createNetwork: boolean;
+              connectBridge: boolean;
+            },
+          ) => Promise<void>;
+        }
+      ).setUpCredentialBroker(
+        containerName,
+        {
+          installationToken: INJECTED_TOKEN,
+          runBearer: RUN_BEARER,
+          repoFullName: REPO,
+        },
+        { networkName, createNetwork: true, connectBridge: false },
+      );
+
+      // A sidecar with the same NAME is up again, but it's a DIFFERENT container
+      // (the orphan was force-removed and replaced) — the reclaim happened.
+      const freshId = execSync(
+        `docker inspect --format '{{.Id}}' ${sidecarName}`,
+        { encoding: "utf8" },
+      ).trim();
+      expect(freshId).not.toBe(orphanId);
+      const running = execSync(
+        `docker inspect --format '{{.State.Running}}' ${sidecarName}`,
+        { encoding: "utf8" },
+      ).trim();
+      expect(running).toBe("true");
+    });
+  },
+);
