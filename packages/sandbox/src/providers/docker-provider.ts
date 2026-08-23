@@ -727,29 +727,6 @@ export class DockerProvider implements ISandboxProvider {
   }
 
   /**
-   * #114 SAFE create-time reclaim of AGED + UNREFERENCED orphan cred-broker
-   * resources. A pre-id create timeout can strand a broker sidecar/network under
-   * the abandoned run's container name (a DIFFERENT name than any later create's
-   * fresh nanoid), so the same-name reclaim in {@link setUpCredentialBroker}
-   * never catches it and the stranded sidecar keeps holding the installation
-   * token until the (test-only) prefix sweep runs. This closes that gap on the
-   * live path.
-   *
-   * Safety (Codex non-regression): a broker is removed ONLY when it is BOTH
-   * older than {@link ORPHAN_BROKER_MIN_AGE_MS} AND has no guest container
-   * present — see {@link isAgedUnreferencedBroker}. A concurrent LIVE sandbox's
-   * broker is always either young (its create is still in flight) or has a guest
-   * container present, so it can never be selected. The initial `docker ps`
-   * snapshot classifies running/paused guests as live; the destructive removal is
-   * then re-guarded with the WIDENED any-state {@link guestExists} (which also
-   * catches a guest still in `created`/`restarting`) PLUS Docker's non-force
-   * network-rm atomic endpoint guard — see {@link reclaimBrokerSidecar} — so a
-   * guest that boots inside the snapshot→rm window is never reclaimed out from
-   * under. Best-effort/idempotent: any docker error (daemon down, resource
-   * already gone, network still attached) is swallowed so a create never fails on
-   * cleanup.
-   */
-  /**
    * Fresh (non-cached) PRESENCE check for a single guest container, used as the
    * TOCTOU recheck immediately before a broker is force-removed (#114 HIGH 2 —
    * residual window).
@@ -888,6 +865,29 @@ export class DockerProvider implements ISandboxProvider {
     fs.unlink(credBrokerSecretHostPath(guestName)).catch(() => {});
   }
 
+  /**
+   * #114 SAFE create-time reclaim of AGED + UNREFERENCED orphan cred-broker
+   * resources. A pre-id create timeout can strand a broker sidecar/network under
+   * the abandoned run's container name (a DIFFERENT name than any later create's
+   * fresh nanoid), so the same-name reclaim in {@link setUpCredentialBroker}
+   * never catches it and the stranded sidecar keeps holding the installation
+   * token until the (test-only) prefix sweep runs. This closes that gap on the
+   * live path.
+   *
+   * Safety (Codex non-regression): a broker is removed ONLY when it is BOTH
+   * older than {@link ORPHAN_BROKER_MIN_AGE_MS} AND has no guest container
+   * present — see {@link isAgedUnreferencedBroker}. A concurrent LIVE sandbox's
+   * broker is always either young (its create is still in flight) or has a guest
+   * container present, so it can never be selected. The initial `docker ps`
+   * snapshot classifies running/paused guests as live; the destructive removal is
+   * then re-guarded with the WIDENED any-state {@link guestExists} (which also
+   * catches a guest still in `created`/`restarting`) PLUS Docker's non-force
+   * network-rm atomic endpoint guard — see {@link reclaimBrokerSidecar} — so a
+   * guest that boots inside the snapshot→rm window is never reclaimed out from
+   * under. Best-effort/idempotent: any docker error (daemon down, resource
+   * already gone, network still attached) is swallowed so a create never fails on
+   * cleanup.
+   */
   private reclaimOrphanedBrokerResources(
     currentContainerName: string,
     minAgeMs: number = ORPHAN_BROKER_MIN_AGE_MS,
