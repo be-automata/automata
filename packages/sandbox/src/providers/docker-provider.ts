@@ -736,31 +736,106 @@ export class DockerProvider implements ISandboxProvider {
    * live path.
    *
    * Safety (Codex non-regression): a broker is removed ONLY when it is BOTH
-   * older than {@link ORPHAN_BROKER_MIN_AGE_MS} AND has no live (running/paused)
-   * guest attached — see {@link isAgedUnreferencedBroker}. A concurrent LIVE
-   * sandbox's broker is always either young (its create is still in flight) or
-   * has a running/paused guest, so it can never be selected. A guest that is
-   * itself still running is treated as live and left untouched — we never
-   * force-remove a running guest or its broker. Best-effort/idempotent: any
-   * docker error (daemon down, resource already gone, network still attached)
-   * is swallowed so a broker create never fails on cleanup.
+   * older than {@link ORPHAN_BROKER_MIN_AGE_MS} AND has no guest container
+   * present — see {@link isAgedUnreferencedBroker}. A concurrent LIVE sandbox's
+   * broker is always either young (its create is still in flight) or has a guest
+   * container present, so it can never be selected. The initial `docker ps`
+   * snapshot classifies running/paused guests as live; the destructive removal is
+   * then re-guarded with the WIDENED any-state {@link guestExists} (which also
+   * catches a guest still in `created`/`restarting`) PLUS Docker's non-force
+   * network-rm atomic endpoint guard — see {@link reclaimBrokerSidecar} — so a
+   * guest that boots inside the snapshot→rm window is never reclaimed out from
+   * under. Best-effort/idempotent: any docker error (daemon down, resource
+   * already gone, network still attached) is swallowed so a create never fails on
+   * cleanup.
    */
   /**
-   * Fresh (non-cached) liveness check for a single guest container, used as the
-   * TOCTOU recheck immediately before a broker is force-removed (#114 HIGH 2).
-   * Live = running or paused (a paused/hibernated guest may still resume).
-   * Absent / errored inspect → not live.
+   * Fresh (non-cached) PRESENCE check for a single guest container, used as the
+   * TOCTOU recheck immediately before a broker is force-removed (#114 HIGH 2 —
+   * residual window).
+   *
+   * WIDENED to ANY state, not just running/paused: a guest exists as a container
+   * from the instant `docker run`/`docker create` makes it, and it dwells in
+   * state `created` (and briefly `restarting`) BEFORE it reaches `running`. A
+   * running/paused-only check would miss a booting-but-not-yet-running guest and
+   * wrongly reclaim its (already-referenced) broker. So any existing container —
+   * created / restarting / running / paused (and even exited/dead: still a
+   * container, so we conservatively keep its broker) — counts as present. Only a
+   * truly-absent guest (no container at all → `docker inspect` errors) is
+   * reclaimable.
    */
-  private isGuestLive(guestName: string): boolean {
+  private guestExists(guestName: string): boolean {
     try {
-      const status = execSync(
-        `docker inspect --format '{{.State.Status}}' ${guestName}`,
-        { encoding: "utf8" },
-      ).trim();
-      return status === "running" || status === "paused";
+      execSync(`docker inspect ${guestName}`, { stdio: "ignore" });
+      return true; // Container exists in SOME state → present, keep its broker.
     } catch {
-      return false; // No such container → not live.
+      return false; // No such container → truly absent → reclaimable.
     }
+  }
+
+  /**
+   * Guarded force-removal of ONE orphan broker sidecar (+ its dedicated network
+   * and host secret), the destructive tail of the sidecar reclaim loop. Two
+   * safe-by-construction guards close the residual create-a-guest-in-the-window
+   * race (#114 Codex HIGH):
+   *
+   *   Guard 1 — any-state presence recheck. Re-run {@link guestExists} right
+   *   before the `docker rm -f`; if the guest now exists in ANY state its broker
+   *   is referenced again → skip.
+   *
+   *   Guard 2 — Docker's own atomic attached-endpoint guard. When the broker
+   *   owns a DEDICATED network, remove it with a NON-force `docker network rm`,
+   *   which FAILS if any container endpoint is still attached. If a guest
+   *   attached in the sub-millisecond window after guard 1, that rm errors and we
+   *   SKIP — leaving the network + secret for the next pass rather than orphaning
+   *   a live guest's broker. For the egress-SHARED-network case (createNetwork
+   *   was false: there is no dedicated broker net to guard) guard 1 alone stands,
+   *   applied twice — once in the caller and once here immediately before the rm.
+   *
+   * Why the remaining window can never select a DIFFERENT live sandbox: a broker
+   * is keyed by its guest's container name, which carries a fresh `nanoid` per
+   * create, and a brokered sandbox is NEVER resumed in place (a resume is a fresh
+   * create with a fresh name — see {@link getSandboxOrNull} / the #114 shutdown
+   * path). So this exact name will never be reused by any future create; the only
+   * guest that could ever attach to this broker is the one abandoned create that
+   * stranded it — already >30 min dead per the age gate. Name reuse is
+   * impossible, so the guards only ever protect THIS broker's own (never-arriving)
+   * guest, never someone else's live sandbox. Best-effort/idempotent throughout.
+   */
+  private reclaimBrokerSidecar(guestName: string): void {
+    const sidecar = credBrokerSidecarName(guestName);
+    const dedicatedNet = credBrokerNetworkName(guestName);
+    let hasDedicatedNet = false;
+    try {
+      hasDedicatedNet =
+        execSync(
+          `docker network ls --filter name=^${dedicatedNet}$ --format '{{.Name}}'`,
+          { encoding: "utf8" },
+        ).trim() === dedicatedNet;
+    } catch {
+      return; // Docker unavailable → nothing to do this pass.
+    }
+    // Guard 1 (final any-state recheck, immediately before the destructive rm).
+    if (this.guestExists(guestName)) {
+      return;
+    }
+    try {
+      execSync(`docker rm -f ${sidecar}`, { stdio: "ignore" });
+    } catch {
+      // Already gone / vanished between listing and now — nothing to reclaim.
+    }
+    if (hasDedicatedNet) {
+      // Guard 2: NON-force network rm is Docker's atomic attached-endpoint
+      // guard. It succeeds only if nothing is attached; if a guest raced in and
+      // attached after guard 1, it errors → skip (leave net + secret for the
+      // next pass) rather than tear down a now-referenced broker.
+      try {
+        execSync(`docker network rm ${dedicatedNet}`, { stdio: "ignore" });
+      } catch {
+        return; // Endpoint attached in the window → leave for the next pass.
+      }
+    }
+    fs.unlink(credBrokerSecretHostPath(guestName)).catch(() => {});
   }
 
   private reclaimOrphanedBrokerResources(
@@ -848,15 +923,18 @@ export class DockerProvider implements ISandboxProvider {
       ) {
         continue;
       }
-      // TOCTOU close (#114 HIGH 2): the `docker ps` snapshot above may be stale —
-      // the guest can have come up between the listing and now. Re-check its
-      // liveness immediately before force-removing the broker; if the guest is
-      // now live, the broker is referenced again → skip. The 30-min age gate
-      // already makes this window vanishingly small; this shuts it entirely.
-      if (this.isGuestLive(guestName)) {
+      // TOCTOU close (#114 HIGH — residual): the `docker ps` snapshot above may
+      // be stale AND was running/paused-only, so it misses a guest still in the
+      // `created` state (booted but not yet started). Re-check with the WIDENED
+      // any-state {@link guestExists}; if the guest exists in any state its
+      // broker is referenced again → skip. The destructive removal itself is
+      // then done under two safe-by-construction guards (any-state recheck +
+      // Docker's non-force network-rm atomic endpoint guard) — see
+      // {@link reclaimBrokerSidecar}.
+      if (this.guestExists(guestName)) {
         continue;
       }
-      this.tearDownCredentialBroker(guestName, { removeNetwork: true });
+      this.reclaimBrokerSidecar(guestName);
     }
 
     // Networks stranded WITHOUT a sidecar (network create succeeded but the
@@ -917,15 +995,21 @@ export class DockerProvider implements ISandboxProvider {
       ) {
         continue;
       }
-      // TOCTOU close (#114 HIGH 2): re-check the guest hasn't come up since the
-      // snapshot before removing its (bare) broker network.
-      if (this.isGuestLive(guestName)) {
+      // TOCTOU close (#114 HIGH — residual): re-check with the WIDENED any-state
+      // {@link guestExists} that the guest hasn't come up (even into `created`)
+      // since the snapshot, before removing its bare broker network. The
+      // `docker network rm` below is already NON-force — Docker's own atomic
+      // endpoint guard: if a guest attached in the window it errors and we leave
+      // the network for the next pass.
+      if (this.guestExists(guestName)) {
         continue;
       }
       try {
         execSync(`docker network rm ${net}`, { stdio: "ignore" });
       } catch {
-        // Still in use or already gone — leave it.
+        // Still in use (a guest attached in the window) or already gone — leave
+        // it for the next pass rather than force-removing a referenced network.
+        continue;
       }
       fs.unlink(credBrokerSecretHostPath(guestName)).catch(() => {});
     }

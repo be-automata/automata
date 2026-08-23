@@ -498,5 +498,64 @@ describe(
 
       expect(containerExists(collidingGuest)).toBe(true);
     });
+
+    it("does NOT reclaim a broker whose guest is present but not yet RUNNING (state `created`) — widened any-state presence (#114 residual TOCTOU)", () => {
+      // The residual race: the running/paused-only snapshot misses a guest that
+      // has been `docker create`d (exists as a container in state `created`) but
+      // not yet started. Seed an aged orphan, then create — but do NOT start —
+      // its guest. The widened any-state `guestExists` recheck must treat the
+      // `created` guest as present and leave the whole broker intact.
+      const guest = `terragon-sandbox-test-created-${tag}`;
+      const { net, sidecar } = seedOrphan(guest);
+      execSync(
+        `docker create --name ${guest} --network ${net} ${BASE_IMAGE} tail -f /dev/null`,
+        { stdio: "ignore" },
+      );
+      created.guests.push(guest);
+      // Sanity: the guest exists but is NOT running/paused.
+      const state = execSync(
+        `docker inspect --format '{{.State.Status}}' ${guest}`,
+        { encoding: "utf8" },
+      ).trim();
+      expect(state).toBe("created");
+
+      // Even at minAgeMs 0 (age gate satisfied), the created-state guest marks
+      // the broker referenced — sidecar, network, and guest must all survive.
+      reclaim(0);
+
+      expect(containerExists(sidecar)).toBe(true);
+      expect(networkExists(net)).toBe(true);
+      expect(containerExists(guest)).toBe(true);
+    });
+
+    it("dedicated-network reclaim SKIPS (leaves the network) when an endpoint attached in the window — Docker's non-force network-rm atomic guard (#114 residual TOCTOU)", () => {
+      // Guard 2: the reclaim removes the sidecar, then removes the dedicated
+      // broker network with a NON-force `docker network rm`, which FAILS if any
+      // container endpoint is still attached. Simulate a guest that attached in
+      // the sub-ms window after the presence recheck by attaching an extra
+      // running container (NOT name-matching the guest, so `guestExists` is
+      // false and the reclaim proceeds to the destructive tail) to the dedicated
+      // net. The non-force network rm must then error → the network is LEFT for
+      // the next pass instead of being force-removed out from under the endpoint.
+      const guest = `terragon-sandbox-test-netguard-${tag}`;
+      const { net, sidecar } = seedOrphan(guest);
+      const squatter = `terragon-sandbox-test-squatter-${tag}`;
+      execSync(
+        `docker run -d --name ${squatter} --network ${net} ${BASE_IMAGE} tail -f /dev/null`,
+        { stdio: "ignore" },
+      );
+      created.guests.push(squatter);
+      expect(containerExists(sidecar)).toBe(true);
+      expect(networkExists(net)).toBe(true);
+
+      // minAgeMs 0 → age gate satisfied; guestExists(guest) is false (no
+      // container named `guest`), so the reclaim reaches the network-rm guard.
+      reclaim(0);
+
+      // Guard fired: the dedicated network survives because the squatter endpoint
+      // is still attached (non-force rm refused), left for the next pass.
+      expect(networkExists(net)).toBe(true);
+      expect(containerExists(squatter)).toBe(true);
+    });
   },
 );
