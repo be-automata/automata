@@ -45,9 +45,10 @@ assessed in §5–§6.
 ## 1. Codebase capability (what surfaces exist today)
 
 Read: `packages/sandbox/src/providers/e2b-provider.ts`,
-`daytona-provider.ts`, `egress.ts`, `types.ts`,
+`providers/daytona-provider.ts`, `packages/sandbox/src/egress.ts`,
+`packages/sandbox/src/types.ts`,
 `docs/egress-enforcement.md`, plus the Docker reference
-(`providers/docker-cred-broker.ts`, `docker-egress.ts`).
+(`providers/docker-cred-broker.ts`, `providers/docker-egress.ts`).
 
 ### What the providers currently use
 
@@ -415,7 +416,8 @@ already documented in `docs/egress-enforcement.md`.
 ## Appendix — evidence index
 
 - Codebase: `packages/sandbox/src/providers/e2b-provider.ts`,
-  `daytona-provider.ts`, `egress.ts`, `types.ts`
+  `providers/daytona-provider.ts`, `packages/sandbox/src/egress.ts`,
+  `packages/sandbox/src/types.ts`
   (`CredentialBrokerShape`), `providers/docker-cred-broker.ts` (reference),
   `docs/egress-enforcement.md`.
 - E2B SDK types: `@e2b/code-interpreter@2.7.1` (`export * from 'e2b'`,

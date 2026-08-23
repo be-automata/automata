@@ -169,6 +169,6 @@ Both managed-plane designs make the **provider a plaintext credential custodian 
 its egress plane** (it must see the token to inject it) — the same trust already
 extended to the provider for the guest filesystem and to E2B's SOCKS5 tunnel /
 domain MITM, and explicitly in-scope per the `CredentialBrokerShape` HONESTY NOTE
-in `packages/sandbox/src/providers/types.ts`. Record it as an ADR deviation,
+in `packages/sandbox/src/types.ts`. Record it as an ADR deviation,
 mirroring the egress-audit gap already documented in
 `docs/egress-enforcement.md`.
