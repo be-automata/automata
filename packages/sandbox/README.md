@@ -184,18 +184,18 @@ autoArchiveInterval: 5, autoDeleteInterval: 30d, … })` (`daytona-provider.ts:7
 > and [`docs/compliance/soc2-egress-alignment.md`](../../docs/compliance/soc2-egress-alignment.md).
 > Where the docs and code disagree, the code wins and it is flagged inline.
 
-|                         | **E2B**                              | **Daytona**                       | **Docker**                         | **Mock**        |
-| ----------------------- | ------------------------------------ | --------------------------------- | ---------------------------------- | --------------- |
-| Runs where              | managed micro-VM (remote)            | managed sandbox (remote)          | local container                    | in-process stub |
-| SDK / lib               | `@e2b/code-interpreter ^2.7.1` (v2)  | `@daytonaio/sdk 0.205.1`          | `docker` CLI                       | none            |
-| Egress mechanism        | native firewall `allowOut`/`denyOut` | create-time `domainAllowList`     | `--internal` net + proxy sidecar   | none            |
-| Policy levels supported | `none` / `ip_port`\* / `domain`      | `domain` **only**                 | `none` / `ip_port` / `domain`      | n/a             |
-| Env-unset bypass?       | no (below process)                   | no (below process)                | no (no route but the proxy)        | n/a             |
-| Per-connection audit    | **no feed**                          | **no feed**                       | **yes** — sidecar stdout JSON      | n/a             |
-| Resident GitHub token   | yes (`~/.git-credentials`)           | yes                               | yes (broker only _proposed_, #114) | n/a             |
-| Boot                    | new VM + template pull               | new sandbox + snapshot            | local `docker run` (fastest)       | instant         |
-| Resume                  | `connect` auto-resume from pause     | state-machine restore/start       | unpause/start                      | n/a             |
-| Cost                    | metered VM (managed billing)         | metered sandbox (managed billing) | local compute only                 | free            |
+|                         | **E2B**                              | **Daytona**                       | **Docker**                            | **Mock**        |
+| ----------------------- | ------------------------------------ | --------------------------------- | ------------------------------------- | --------------- |
+| Runs where              | managed micro-VM (remote)            | managed sandbox (remote)          | local container                       | in-process stub |
+| SDK / lib               | `@e2b/code-interpreter ^2.7.1` (v2)  | `@daytonaio/sdk 0.205.1`          | `docker` CLI                          | none            |
+| Egress mechanism        | native firewall `allowOut`/`denyOut` | create-time `domainAllowList`     | `--internal` net + proxy sidecar      | none            |
+| Policy levels supported | `none` / `ip_port`\* / `domain`      | `domain` **only**                 | `none` / `ip_port` / `domain`         | n/a             |
+| Env-unset bypass?       | no (below process)                   | no (below process)                | no (no route but the proxy)           | n/a             |
+| Per-connection audit    | **no feed**                          | **no feed**                       | **yes** — sidecar stdout JSON         | n/a             |
+| Resident GitHub token   | yes (`~/.git-credentials`)           | yes                               | brokered-optional (#114 Docker, flag) | n/a             |
+| Boot                    | new VM + template pull               | new sandbox + snapshot            | local `docker run` (fastest)          | instant         |
+| Resume                  | `connect` auto-resume from pause     | state-machine restore/start       | unpause/start                         | n/a             |
+| Cost                    | metered VM (managed billing)         | metered sandbox (managed billing) | local compute only                    | free            |
 
 \* E2B `ip_port`: the level is accepted, but a `host:port` allowlist entry maps to
 its bare host — E2B selectors carry no port syntax, so the port pin is dropped at
@@ -257,22 +257,29 @@ Two planes, two very different states:
   per-run bearer. Brokering is the fail-safe default (`credentialBroker: "on"`
   unless the exact string `legacy-direct` is set). Merged as **PR #113 /
   commit `e264815`** (builds on #65/#79/#80).
-- **Sandbox plane — NOT brokered on any provider yet (#114, open issue).** Every
-  provider still writes a **resident** GitHub token to disk on boot:
-  `setupGitCredentials` (`setup.ts:166`) unconditionally runs
+- **Sandbox plane — Docker brokered behind a flag (#114, git half); E2B/Daytona
+  not yet.** By default every provider still writes a **resident** GitHub token to
+  disk on boot: `setupGitCredentials` (`setup.ts:166`) runs
   `git config --global credential.helper store` and writes `~/.git-credentials`
-  with the real `GITHUB_ACCESS_TOKEN` (`setup.ts:193`) from `setupSandboxEveryTime`
-  (`setup.ts:213`) — there is no flag, env switch, or brokered branch in this code
-  path today. **Issue #114** _proposes_ a provider-host-side credential broker so
-  the guest would receive only a per-run, repo-fenced bearer and no
-  `~/.git-credentials`; Docker is the natural first target (its sidecar/host is
-  reachable per run), while E2B/Daytona are managed runtimes with no host-reachable
-  per-run peer and are harder. **That broker does not exist in this repo yet** —
-  #114 is open and unimplemented, so no sandbox provider is brokered today.
-- **#89 (review-lane on-disk credential) — OPEN for every sandbox provider.** The
-  review env-strip removes env keys only; the `~/.git-credentials` channel written
-  from `setupSandboxEveryTime` (`setup.ts:213`) survives it on E2B, Daytona **and**
-  Docker alike, since no sandbox provider brokers credentials today (see #114 above).
+  with the real `GITHUB_ACCESS_TOKEN` from `setupSandboxEveryTime` (`setup.ts:213`).
+  With **`SANDBOX_CREDENTIAL_BROKER=on` on the Docker plane** (merged as **PR #117 /
+  commit `b0f4fa7`**), a per-run credential-broker **sidecar** holds the
+  installation token in a `0o400 :ro` file (never argv/`-e`/`docker inspect`); the
+  guest gets only a per-run, repo-fenced bearer — git via `insteadOf`+`Bearer`,
+  token injected server-side in the sidecar
+  (`providers/docker-cred-broker.ts`, `cred-broker-standalone.cjs`), and **no
+  `~/.git-credentials`** on the brokered path. Brokered sandboxes are **not resumed
+  in place** — a resume fails closed and recreates fresh under a DB CAS lease
+  (`thread.credentialBrokerMode` provenance). Default off = today's exact behavior.
+  **Git only:** the `gh`-API half (a CA-terminating CONNECT proxy) is deferred — a
+  brokered guest's `gh` API calls fail closed (401) rather than leak. **E2B/Daytona
+  stay unbrokered** (managed runtimes, no host-reachable per-run peer). #114 remains
+  open for those two + the gh half.
+- **#89 (review-lane on-disk credential) — OPEN for E2B/Daytona; closed on the
+  brokered Docker path.** The review env-strip removes env keys only, so the
+  `~/.git-credentials` channel (`setup.ts:213`) survives it on the unbrokered
+  providers; a brokered Docker sandbox writes no such file. Still open for E2B and
+  Daytona (and unbrokered/default Docker).
 
 > Note: `docs/compliance/soc2-egress-alignment.md:22` credits only the git broker
 > and is worker-plane-scoped; it predates the gh-API broker from PR #113. The
@@ -301,8 +308,8 @@ Two planes, two very different states:
   and `none` are hard errors); tier 1/2 orgs cannot override network settings (verify
   on the real org first); no audit feed; resident token.
 - **Docker** — _pro:_ fastest, free, the **only** plane with per-connection egress
-  audit, and the natural first home for the _proposed_ sandbox-plane credential
-  broker (#114, open); great for local iteration. _con:_ local single-host, not
+  audit, and the only sandbox plane that can broker credentials
+  (#114 Docker, `SANDBOX_CREDENTIAL_BROKER=on` → no resident token in the guest); great for local iteration. _con:_ local single-host, not
   remote isolation; hibernate is timer-based; still writes a resident token like
   every sandbox provider today; not a production isolation boundary.
 - **Mock** — _pro:_ zero-cost deterministic tests. _con:_ test-only; every I/O
