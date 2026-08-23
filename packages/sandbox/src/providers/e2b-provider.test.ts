@@ -295,9 +295,27 @@ describe("E2BProvider native credential broker (#114)", () => {
     );
   });
 
-  it("resume fails closed: kills the guest and throws if the vault refresh throws", async () => {
-    // The guest is live post-connect, but the vault refresh fails — the run must
-    // NOT proceed on a possibly revoked/rotated credential.
+  it("resume refreshes the vault secret BEFORE connecting (ordering)", async () => {
+    const provider = new E2BProvider();
+    await provider.getOrCreateSandbox(
+      "e2b-test-sandbox",
+      createOptions({
+        credentialBroker: e2bBroker,
+        credentialBrokerMode: "brokered",
+      }),
+    );
+    // The refresh must complete before the guest is auto-resumed by connect —
+    // otherwise the guest briefly runs on the prior credential.
+    const updateOrder = vi.mocked(Secret.update).mock.invocationCallOrder[0]!;
+    const connectOrder = vi.mocked(Sandbox.connect).mock
+      .invocationCallOrder[0]!;
+    expect(updateOrder).toBeLessThan(connectOrder);
+  });
+
+  it("resume fails closed: does NOT connect and throws if the vault refresh throws", async () => {
+    // With refresh-before-connect, a refresh failure must mean the guest is
+    // NEVER resumed — the sandbox stays paused rather than running on a possibly
+    // revoked/rotated credential.
     vi.mocked(Secret.update).mockRejectedValueOnce(new Error("vault 503"));
     const provider = new E2BProvider();
     await expect(
@@ -309,9 +327,10 @@ describe("E2BProvider native credential broker (#114)", () => {
         }),
       ),
     ).rejects.toThrow(/vault 503/);
-    // Fail closed: the guest is killed and the (possibly-stale) secret destroyed.
-    expect(killMock).toHaveBeenCalledTimes(1);
-    expect(Secret.destroy).toHaveBeenCalledWith(EXPECTED_SECRET);
+    // Fail closed: never connected (so never auto-resumed), never killed. The
+    // sandbox stays paused with whatever token was vaulted.
+    expect(Sandbox.connect).not.toHaveBeenCalled();
+    expect(killMock).not.toHaveBeenCalled();
   });
 
   it("teardown destroys the vault secret even when kill() rejects", async () => {
@@ -351,11 +370,65 @@ describe("E2BProvider native credential broker (#114)", () => {
     expect(Secret.destroy).toHaveBeenCalledWith(EXPECTED_SECRET);
   });
 
-  it("shutdownById destroys the derived secret and kills the guest", async () => {
+  it("shutdownById kills the guest BEFORE destroying the secret (ordering)", async () => {
     const provider = new E2BProvider();
     await provider.shutdownById!("e2b-test-sandbox");
     expect(Secret.destroy).toHaveBeenCalledWith(EXPECTED_SECRET);
     expect(killMock).toHaveBeenCalledTimes(1);
+    // Kill must precede destroy: connect auto-resumes the guest, so destroying
+    // the secret first would briefly resume it with rules pointing at a deleted
+    // secret.
+    const killOrder = killMock.mock.invocationCallOrder[0]!;
+    const destroyOrder = vi.mocked(Secret.destroy).mock.invocationCallOrder[0]!;
+    expect(killOrder).toBeLessThan(destroyOrder);
+  });
+
+  it("shutdownById still destroys the secret in finally when kill() rejects", async () => {
+    killMock.mockRejectedValueOnce(new Error("kill boom"));
+    const provider = new E2BProvider();
+    // shutdownById swallows the kill error (best-effort force teardown).
+    await provider.shutdownById!("e2b-test-sandbox");
+    expect(Secret.destroy).toHaveBeenCalledWith(EXPECTED_SECRET);
+  });
+
+  it("teardown retries Secret.destroy once, then WARNs if it still fails", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Both attempts fail — the secret cannot be reclaimed, so we must WARN loudly
+    // (naming the secret) rather than silently orphan it.
+    vi.mocked(Secret.destroy)
+      .mockRejectedValueOnce(new Error("destroy 500"))
+      .mockRejectedValueOnce(new Error("destroy 500 again"));
+    const provider = new E2BProvider();
+    const session = await provider.getOrCreateSandbox(
+      null,
+      createOptions({ credentialBroker: e2bBroker }),
+    );
+    await session.shutdown();
+    // Retried once (2 total attempts).
+    expect(Secret.destroy).toHaveBeenCalledTimes(2);
+    // A WARN naming the orphaned secret was emitted.
+    const warnedAboutOrphan = warnSpy.mock.calls.some((args) =>
+      args.some(
+        (a) =>
+          typeof a === "string" &&
+          a.includes(EXPECTED_SECRET) &&
+          /orphan/i.test(a),
+      ),
+    );
+    expect(warnedAboutOrphan).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it("teardown Secret.destroy succeeds on the retry after one failure", async () => {
+    vi.mocked(Secret.destroy).mockRejectedValueOnce(new Error("transient"));
+    const provider = new E2BProvider();
+    const session = await provider.getOrCreateSandbox(
+      null,
+      createOptions({ credentialBroker: e2bBroker }),
+    );
+    await session.shutdown();
+    // First failed, second (retry) succeeded — 2 attempts, no throw.
+    expect(Secret.destroy).toHaveBeenCalledTimes(2);
   });
 
   it("flag-off create is byte-identical to today: no Secret + no network", async () => {

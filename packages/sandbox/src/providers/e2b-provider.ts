@@ -72,16 +72,50 @@ function e2bBrokeredCreateBaseNetwork(
   return { allowOut: [], denyOut: ["0.0.0.0/0"] };
 }
 
+/**
+ * #114: best-effort destroy of a run's E2B vault secret, with ONE retry. The
+ * secret is project-scoped and holds the raw installation token, so a swallowed
+ * destroy failure would orphan a live credential in the vault. On the first
+ * failure we retry once; if it still fails we log a clear WARN naming the secret
+ * so an operator can reclaim it manually. Never throws (teardown callers sequence
+ * this so it cannot mask a `kill()` error), and destroy of a missing secret is a
+ * no-op — safe for unbrokered sandboxes too.
+ */
+async function destroyBrokerSecretBestEffort(
+  secretName: string,
+): Promise<void> {
+  try {
+    await Secret.destroy(secretName);
+    return;
+  } catch (firstError) {
+    console.warn(
+      `[e2b] failed to destroy broker secret ${secretName}; retrying once:`,
+      firstError,
+    );
+  }
+  try {
+    await Secret.destroy(secretName);
+  } catch (secondError) {
+    console.warn(
+      `[e2b] STILL failed to destroy broker secret ${secretName} after retry — ` +
+        `it may be ORPHANED in the E2B project vault and should be removed manually:`,
+      secondError,
+    );
+  }
+}
+
 async function resumeWithRetry(
   sandboxId: string,
   opts?: {
     /**
      * #114: skip the post-connect liveness probe. On a BROKERED resume the vault
-     * secret must be refreshed BEFORE any control-plane guest command runs, so
-     * the caller connects with the probe skipped and runs it itself only after
-     * the refresh succeeds. `Sandbox.connect` still auto-resumes the guest and
-     * runs E2B's OWN internal resume probe — that is unavoidable and carries no
-     * credential — but no control-plane command touches the guest here.
+     * secret is refreshed with the fresh token BEFORE this connect runs (so the
+     * guest never resumes on a stale credential); the caller still connects with
+     * the probe skipped so IT owns the first control-plane command — letting it
+     * mark the session brokered and tear it down if the probe fails.
+     * `Sandbox.connect` auto-resumes the guest and runs E2B's OWN internal resume
+     * probe — unavoidable and credential-free — but no control-plane command
+     * touches the guest here.
      */
     skipReadyCheck?: boolean;
   },
@@ -272,12 +306,9 @@ class E2BSession implements ISandboxSession {
       await this.sandbox.kill();
     } finally {
       if (this.brokerSecretName) {
-        await Secret.destroy(this.brokerSecretName).catch((error) => {
-          console.warn(
-            `[e2b] failed to destroy broker secret ${this.brokerSecretName}:`,
-            error,
-          );
-        });
+        // Retry-then-WARN: a swallowed destroy failure would orphan the raw
+        // installation token in the project vault.
+        await destroyBrokerSecretBestEffort(this.brokerSecretName);
       }
     }
   }
@@ -298,11 +329,32 @@ class E2BSession implements ISandboxSession {
 export class E2BProvider implements ISandboxProvider {
   constructor() {}
 
+  /**
+   * #114 residual (secondary connect path — NOT fully fail-closed, documented):
+   * `Sandbox.connect` auto-resumes a paused guest. This keepalive path carries no
+   * control-plane installation token, so it CANNOT refresh the vault secret — a
+   * brokered guest resumes here on whatever token is already vaulted. This is NOT
+   * a leak (never-resident holds: the token stays in E2B's egress plane, never in
+   * the guest), and freshness is bounded by the token's own ~1h TTL. It is a
+   * freshness/fail-closed GAP, not closed here: full rotation on every connect is
+   * a follow-up requiring the control-plane token to be threaded through this
+   * low-level path. See reports/ISSUE-114-E2B-SPEC.md §7.
+   */
   async extendLife(sandboxId: string): Promise<void> {
     const sandbox = await Sandbox.connect(sandboxId);
     await sandbox.setTimeout(SLEEP_MS);
   }
 
+  /**
+   * #114 residual (secondary connect path — NOT fully fail-closed, documented):
+   * used by the admin daemon-log view
+   * (apps/www/src/server-actions/admin/sandbox.ts). Like {@link extendLife} it has
+   * no control-plane token, so a brokered guest resumes on the already-vaulted
+   * token WITHOUT rotation. Acceptable for this read-only/keepalive use because
+   * the token is never guest-resident (never-resident holds) and is bounded by
+   * its ~1h TTL; it is NOT full rotation-on-connect. See
+   * reports/ISSUE-114-E2B-SPEC.md §7.
+   */
   async getSandboxOrNull(sandboxId: string): Promise<ISandboxSession | null> {
     try {
       return await resumeWithRetry(sandboxId);
@@ -363,7 +415,7 @@ export class E2BProvider implements ISandboxProvider {
           "[e2b] failed to set up native credential broker; tearing down",
           error,
         );
-        await Secret.destroy(secretName).catch(() => {});
+        await destroyBrokerSecretBestEffort(secretName);
         await sandbox.kill().catch(() => {});
         throw error;
       }
@@ -414,16 +466,16 @@ export class E2BProvider implements ISandboxProvider {
         `E2B brokered sandbox ${sandboxId} resume is missing the broker shape needed to refresh the vault secret (#114); refusing to resume.`,
       );
     }
-    // `Sandbox.connect` auto-resumes the guest, but we MUST refresh the vault
-    // secret BEFORE any control-plane guest command runs — otherwise real work
-    // could execute against a stale/revoked credential. Connect with the
-    // liveness probe SKIPPED (only E2B's own internal resume probe runs), then
-    // refresh, then run the probe ourselves.
-    const session = await resumeWithRetry(sandboxId, { skipReadyCheck: true });
     const secretName = e2bBrokerSecretName(sandboxId);
-    // Mark brokered up front so the fail-closed teardown below also destroys the
-    // vault secret.
-    session.markBrokered(secretName);
+    // Refresh the vault secret with the fresh token BEFORE connecting.
+    // `Sandbox.connect` auto-resumes the guest, so refreshing AFTER connect would
+    // leave a window where the guest runs against the PRIOR (stale/possibly
+    // revoked) credential. The vault Secret is PROJECT-scoped and addressed by
+    // name — both the sandboxId and the fresh installation token are known here,
+    // with NO live sandbox connection — so we can rewrite it first. Fail closed:
+    // if the refresh fails we throw WITHOUT connecting, so the sandbox stays
+    // PAUSED and never resumes on a stale/absent credential (and never falls back
+    // to a resident raw token).
     try {
       if (await Secret.exists(secretName)) {
         await Secret.update(secretName, broker.installationToken);
@@ -433,19 +485,35 @@ export class E2BProvider implements ISandboxProvider {
         await Secret.create(secretName, broker.installationToken);
       }
     } catch (error) {
-      // Fail closed: the guest is live post-resume but the vault holds a
-      // possibly revoked/rotated secret (or the refresh threw). Tear the guest
-      // down (kill + destroy the vault secret) BEFORE it can do any real work,
+      console.error(
+        `[e2b] brokered resume vault refresh failed for ${sandboxId}; refusing to resume (sandbox stays paused)`,
+        error,
+      );
+      throw error;
+    }
+    // The vault now holds the fresh token — it is safe to resume the guest.
+    // Connect with the liveness probe SKIPPED (only E2B's own internal resume
+    // probe runs), mark the session brokered so teardown destroys the vault
+    // secret, then run the control-plane probe ourselves. If the refresh above
+    // had already connected in a retry and then failed we would have killed it —
+    // but with refresh strictly BEFORE connect, a refresh failure means nothing
+    // was ever connected.
+    const session = await resumeWithRetry(sandboxId, { skipReadyCheck: true });
+    session.markBrokered(secretName);
+    try {
+      await session.runCommand("echo 'hello'", { cwd: "/" });
+    } catch (error) {
+      // Post-resume liveness probe failed. The vault holds a fresh token and the
+      // guest never held a raw one (never-resident), but do not leave a
+      // half-alive brokered guest: tear it down (kill + destroy the vault secret)
       // then rethrow so the run cannot proceed.
       console.error(
-        `[e2b] brokered resume vault refresh failed for ${sandboxId}; tearing down`,
+        `[e2b] brokered resume liveness probe failed for ${sandboxId}; tearing down`,
         error,
       );
       await session.shutdown().catch(() => {});
       throw error;
     }
-    // Refresh succeeded — NOW it is safe to run a control-plane guest command.
-    await session.runCommand("echo 'hello'", { cwd: "/" });
     console.log(`[e2b] Sandbox ${sandboxId} is running (brokered resume)`);
     return session;
   }
@@ -454,23 +522,25 @@ export class E2BProvider implements ISandboxProvider {
    * #114: force-destroy a sandbox by id, ALSO destroying its (derived) vault
    * secret so no secret is orphaned when teardown does not go through a
    * broker-aware {@link E2BSession}. Destroy of a missing secret is a no-op, so
-   * this is safe for unbrokered E2B sandboxes too. Connecting to kill may
-   * briefly unpause a paused guest, but — unlike Docker — an E2B brokered guest
-   * never held a raw token (never-resident) and this runs no setup, so there is
-   * nothing to re-leak.
+   * this is safe for unbrokered E2B sandboxes too.
+   *
+   * Ordering: KILL FIRST, then destroy the secret in a `finally`. `Sandbox.connect`
+   * auto-resumes a paused guest, so if we destroyed the secret BEFORE connecting
+   * the guest would briefly resume with its injection rules pointing at a
+   * now-deleted secret. By killing first the guest only ever resumes while the
+   * secret still exists (bounded by its own ~1h TTL, never-resident — nothing to
+   * re-leak), and the `finally` still guarantees the secret is destroyed even if
+   * kill throws. Mirrors {@link E2BSession.shutdown}'s finally pattern.
    */
   async shutdownById(sandboxId: string): Promise<void> {
-    await Secret.destroy(e2bBrokerSecretName(sandboxId)).catch((error) => {
-      console.warn(
-        `[e2b] failed to destroy broker secret for ${sandboxId}:`,
-        error,
-      );
-    });
+    const secretName = e2bBrokerSecretName(sandboxId);
     try {
       const sandbox = await Sandbox.connect(sandboxId);
       await sandbox.kill();
     } catch (error) {
       console.warn(`[e2b] failed to kill sandbox ${sandboxId}:`, error);
+    } finally {
+      await destroyBrokerSecretBestEffort(secretName);
     }
   }
 

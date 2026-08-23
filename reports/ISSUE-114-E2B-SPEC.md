@@ -101,8 +101,13 @@ vault secret:
   `credentialBrokerMode === "brokered"`, not the current flag) reconstructs an
   `e2b-native` shape with a **fresh** token and passes it on the resume options.
 - Provider: `Secret.exists(name) ? Secret.update(name, freshToken) :
-  Secret.create(name, freshToken)`. Rules reference the secret by name, so **no**
-  `updateNetwork` is needed.
+  Secret.create(name, freshToken)` **BEFORE** `Sandbox.connect`. `connect`
+  auto-resumes the guest, so the refresh runs first (no live sandbox connection
+  needed — the Secret is project-scoped and addressed by name) so the guest never
+  resumes on the prior credential. On refresh failure the provider throws
+  **without connecting**, leaving the sandbox paused. Rules reference the secret
+  by name, so **no** `updateNetwork` is needed. After connect, a post-resume
+  liveness probe runs; if it fails the guest is torn down (kill + secret destroy).
 - `env.ts`/`setup.ts` take the E2B brokered branch on resume too (no resident raw
   token; scrub any `~/.git-credentials`).
 
@@ -114,11 +119,18 @@ shape.
 
 ## 6. Teardown — no orphan secrets
 
-- `E2BSession.shutdown()` (create/resume path) best-effort `Secret.destroy(name)`
-  after `kill()`.
-- `E2BProvider.shutdownById(sandboxId)` derives the name and destroys the secret
-  (no-op if absent) then kills — so teardown routes that rehydrate a bare session
-  (e.g. `shutdownSandboxById`) still reclaim the vault entry.
+- `E2BSession.shutdown()` (create/resume path) destroys the secret in a `finally`
+  after `kill()`, so a rejected `kill()` cannot orphan it. Destroy is
+  **retry-then-WARN**: on failure it retries once and, if still failing, logs a
+  clear WARN naming the secret so an operator can reclaim it (never silently
+  swallowed).
+- `E2BProvider.shutdownById(sandboxId)` **kills FIRST, then destroys the secret in
+  a `finally`.** `Sandbox.connect` auto-resumes the guest, so destroying the
+  secret before connect would briefly resume the guest with its rules pointing at
+  a now-deleted secret. Killing first means the guest only ever resumes while the
+  secret still exists, and the `finally` still guarantees the secret is destroyed.
+  Uses the same retry-then-WARN destroy. Reclaims the vault entry for teardown
+  routes that rehydrate a bare session (e.g. `shutdownSandboxById`).
 
 `Secret.destroy` of a missing secret is a no-op, so these are safe for
 unbrokered E2B sandboxes too.
@@ -150,6 +162,26 @@ Before enabling in prod (ops, not code):
 5. **Fallback:** if `transform.headers` is unavailable on our plan, the SDK also
    exposes `network.egressProxy` (SOCKS5, E2B Cloud/BYOC) to an injector we
    operate — a documented fallback, not implemented here.
+
+### 7a. Secondary connect paths — freshness residual (documented, NOT fully fail-closed)
+
+Two low-level provider paths call `Sandbox.connect` (which auto-resumes a paused
+guest) with **no control-plane installation token**, so they **cannot refresh**
+the vault secret and a brokered guest resumes on the already-vaulted token:
+
+- `E2BProvider.extendLife(sandboxId)` — keepalive `setTimeout`.
+- `E2BProvider.getSandboxOrNull(sandboxId)` — used by the admin daemon-log view
+  (`apps/www/src/server-actions/admin/sandbox.ts`).
+
+This is **NOT a leak** — never-resident holds: the token stays in E2B's egress
+plane and never enters the guest env/argv/disk — and freshness is bounded by the
+installation token's own **~1h TTL**. It is a **freshness / fail-closed gap**,
+stated honestly here rather than papered over: these read-only/keepalive paths
+resume a brokered sandbox **without rotation**. Full rotation-on-every-connect is
+a **follow-up** requiring the control-plane token to be threaded through these
+low-level paths (they currently take only a `sandboxId`). The primary
+agent-work resume path (`resumeSandbox`) DOES refresh-before-connect and is
+fail-closed; only these secondary paths carry the documented residual.
 
 ## 8. Trust note (ADR deviation)
 
