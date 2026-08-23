@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { DockerProvider } from "./docker-provider";
 import {
   BrokeredSandboxNotResumableError,
+  CRED_BROKER_ALIAS,
   CRED_BROKER_ROLE_LABEL_KEY,
   CRED_BROKER_ROLE_LABEL_VALUE,
   ORPHAN_BROKER_MIN_AGE_MS,
@@ -567,6 +568,25 @@ describe(
         { encoding: "utf8" },
       ).trim();
       expect(attached).toContain(sidecar);
+      // #114 Codex HIGH: the reconnect MUST restore the broker DNS alias, not
+      // just the raw endpoint. The original attach used
+      // `--network-alias ${CRED_BROKER_ALIAS}` and the live (racing) guest
+      // resolves the broker by that alias — reconnecting without it leaves the
+      // guest on the net yet unable to resolve `${CRED_BROKER_ALIAS}`, silently
+      // breaking its git. Assert the sidecar's endpoint on the dedicated net
+      // carries the alias again.
+      const sidecarAliases = execSync(
+        `docker inspect --format '{{range .NetworkSettings.Networks}}{{range .Aliases}}{{.}} {{end}}{{end}}' ${sidecar}`,
+        { encoding: "utf8" },
+      ).trim();
+      expect(sidecarAliases).toContain(CRED_BROKER_ALIAS);
+      // End-to-end: the racing guest (squatter) can actually resolve the broker
+      // by that alias over the shared dedicated net.
+      const resolved = execSync(
+        `docker exec ${squatter} getent hosts ${CRED_BROKER_ALIAS}`,
+        { encoding: "utf8" },
+      ).trim();
+      expect(resolved).toContain(CRED_BROKER_ALIAS);
     });
 
     it("shared-egress broker (no dedicated net) is NOT auto-removed — left for same-name reclaim (#114 Codex HIGH — final fix)", () => {

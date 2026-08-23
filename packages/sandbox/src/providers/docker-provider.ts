@@ -862,10 +862,17 @@ export class DockerProvider implements ISandboxProvider {
       // A guest attached in the window and still holds an endpoint → it is live.
       // Reconnect the sidecar to restore the live guest's broker, then skip the
       // whole reclaim (leave sidecar + net + secret for a later pass).
+      // MUST restore the broker DNS alias (#114): the original attach used
+      // `--network-alias ${CRED_BROKER_ALIAS}` and the live guest resolves the
+      // broker by that alias, so reconnecting without it would leave the guest
+      // on the network yet unable to resolve the broker, breaking its git.
       try {
-        execSync(`docker network connect ${dedicatedNet} ${sidecar}`, {
-          stdio: "ignore",
-        });
+        execSync(
+          `docker network connect --alias ${CRED_BROKER_ALIAS} ${dedicatedNet} ${sidecar}`,
+          {
+            stdio: "ignore",
+          },
+        );
       } catch {
         // Best-effort restore; the sidecar container itself is still present.
       }
