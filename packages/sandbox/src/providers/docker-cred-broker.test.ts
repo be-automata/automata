@@ -6,6 +6,8 @@ import {
   CRED_BROKER_ALIAS,
   CRED_BROKER_GIT_PORT,
   CRED_BROKER_NETWORK_PREFIX,
+  CRED_BROKER_ROLE_LABEL_KEY,
+  CRED_BROKER_ROLE_LABEL_VALUE,
   CRED_BROKER_SCRIPT_CONTAINER_PATH,
   CRED_BROKER_SECRETS_CONTAINER_PATH,
   ORPHAN_BROKER_MIN_AGE_MS,
@@ -16,6 +18,7 @@ import {
   credBrokerSidecarName,
   isAgedUnreferencedBroker,
 } from "./docker-cred-broker";
+import { sandboxTimeoutMs } from "../constants";
 import { CRED_BROKER_SCRIPT } from "../cred-broker-standalone.generated";
 
 const require = createRequire(import.meta.url);
@@ -62,6 +65,12 @@ describe("docker cred-broker command builders (pure — no docker daemon)", () =
       repoFullName: "be-automata/automata",
     });
     expect(command).toContain("docker run -d --name sb-cred-broker");
+    // #114 HIGH 1: the robust role label the orphan-reclaim sweep selects by.
+    expect(command).toContain(
+      `--label ${CRED_BROKER_ROLE_LABEL_KEY}=${CRED_BROKER_ROLE_LABEL_VALUE}`,
+    );
+    expect(CRED_BROKER_ROLE_LABEL_KEY).toBe("automata.role");
+    expect(CRED_BROKER_ROLE_LABEL_VALUE).toBe("cred-broker");
     expect(command).toContain("--network automata-cred-broker-sb");
     expect(command).toContain(`--network-alias ${CRED_BROKER_ALIAS}`);
     expect(command).toContain(
@@ -144,6 +153,14 @@ describe("isAgedUnreferencedBroker (orphan selection — pure)", () => {
   const nowMs = 1_000_000_000_000;
   const aged = nowMs - ORPHAN_BROKER_MIN_AGE_MS - 1;
   const young = nowMs - 1_000;
+
+  it("age gate EXCEEDS the control-plane boot timeout (#114 HIGH 2 — no drift)", () => {
+    // The gate must be strictly larger than the max create/boot lifetime so a
+    // slow-but-legitimate create still booting at the timeout is never reclaimed.
+    expect(ORPHAN_BROKER_MIN_AGE_MS).toBeGreaterThan(sandboxTimeoutMs);
+    // Derived as boot timeout + a generous margin (currently 30 min total).
+    expect(ORPHAN_BROKER_MIN_AGE_MS).toBe(sandboxTimeoutMs + 15 * 60 * 1000);
+  });
 
   it("reclaims an AGED + UNREFERENCED broker (the pre-id-timeout orphan)", () => {
     expect(

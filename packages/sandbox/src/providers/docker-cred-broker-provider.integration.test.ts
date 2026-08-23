@@ -4,6 +4,8 @@ import { randomBytes } from "node:crypto";
 import { DockerProvider } from "./docker-provider";
 import {
   BrokeredSandboxNotResumableError,
+  CRED_BROKER_ROLE_LABEL_KEY,
+  CRED_BROKER_ROLE_LABEL_VALUE,
   ORPHAN_BROKER_MIN_AGE_MS,
   credBrokerNetworkName,
   credBrokerSidecarName,
@@ -376,8 +378,10 @@ describe(
       const net = credBrokerNetworkName(guestName);
       const sidecar = credBrokerSidecarName(guestName);
       execSync(`docker network create ${net}`, { stdio: "ignore" });
+      // Stamp the same role label the real sidecar carries — the reclaim selects
+      // candidates by this label, not by the `-cred-broker` name suffix (#114).
       execSync(
-        `docker run -d --name ${sidecar} --network ${net} ${BASE_IMAGE} tail -f /dev/null`,
+        `docker run -d --name ${sidecar} --label ${CRED_BROKER_ROLE_LABEL_KEY}=${CRED_BROKER_ROLE_LABEL_VALUE} --network ${net} ${BASE_IMAGE} tail -f /dev/null`,
         { stdio: "ignore" },
       );
       created.networks.push(net);
@@ -390,8 +394,10 @@ describe(
       const net = credBrokerNetworkName(guestName);
       const sidecar = credBrokerSidecarName(guestName);
       execSync(`docker network create ${net}`, { stdio: "ignore" });
+      // Stamp the same role label the real sidecar carries — the reclaim selects
+      // candidates by this label, not by the `-cred-broker` name suffix (#114).
       execSync(
-        `docker run -d --name ${sidecar} --network ${net} ${BASE_IMAGE} tail -f /dev/null`,
+        `docker run -d --name ${sidecar} --label ${CRED_BROKER_ROLE_LABEL_KEY}=${CRED_BROKER_ROLE_LABEL_VALUE} --network ${net} ${BASE_IMAGE} tail -f /dev/null`,
         { stdio: "ignore" },
       );
       execSync(
@@ -467,12 +473,30 @@ describe(
       const { net, sidecar } = seedOrphan(guest);
       expect(containerExists(sidecar)).toBe(true);
 
-      // The default 10-minute threshold treats this just-seeded, guestless
-      // broker as an in-flight create — it must be preserved.
+      // The default threshold (boot timeout + margin) treats this just-seeded,
+      // guestless broker as an in-flight create — it must be preserved.
       reclaim(ORPHAN_BROKER_MIN_AGE_MS);
 
       expect(containerExists(sidecar)).toBe(true);
       expect(networkExists(net)).toBe(true);
+    });
+
+    it("does NOT misclassify a live GUEST whose name ends in -cred-broker (#114 HIGH 1 — label-based selection)", () => {
+      // A guest's nanoid name CAN legitimately end in the sidecar suffix. Under
+      // the old suffix-based classification this running guest would be treated
+      // as a sidecar and force-removed. Selection is now by the role LABEL, which
+      // this guest does NOT carry — it must be left running, even at minAgeMs 0.
+      const collidingGuest = `terragon-sandbox-test-collide-${tag}-cred-broker`;
+      execSync(
+        `docker run -d --name ${collidingGuest} ${BASE_IMAGE} tail -f /dev/null`,
+        { stdio: "ignore" },
+      );
+      created.guests.push(collidingGuest);
+      expect(containerExists(collidingGuest)).toBe(true);
+
+      reclaim(0);
+
+      expect(containerExists(collidingGuest)).toBe(true);
     });
   },
 );

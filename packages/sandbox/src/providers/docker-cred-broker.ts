@@ -1,4 +1,5 @@
 import { bashQuote } from "../utils";
+import { sandboxTimeoutMs } from "../constants";
 import type { CredentialBrokerShape } from "../types";
 
 /**
@@ -77,17 +78,48 @@ export function credBrokerSidecarName(containerName: string): string {
 export const CRED_BROKER_SIDECAR_SUFFIX = "-cred-broker";
 
 /**
- * Minimum age a cred-broker sidecar/network must reach before the create-time
- * orphan sweep may reclaim it (#114). It MUST comfortably exceed the whole
- * brokered-create window — sidecar run + readiness barrier (up to ~20s) + guest
- * `docker run` + clone/setup — so a CONCURRENT in-flight create (whose broker is
- * up but whose guest has not yet been created/attached — the exact pre-id
- * window) is always younger than this and therefore protected. 10 minutes is
- * far beyond any realistic boot, while still bounding how long a stranded
- * sidecar can hold the installation token before the next brokered create
- * reclaims it.
+ * Docker label key/value stamped on every cred-broker sidecar at creation
+ * ({@link buildCredBrokerSidecarRunCommand}). This is the ROBUST identity marker
+ * the orphan-reclaim sweep selects candidates by (`docker ps -a --filter
+ * label=<key>=<value>`), NOT the `-cred-broker` name suffix.
+ *
+ * Why a label and not the name suffix (#114 Codex HIGH 1): a guest name is
+ * `terragon-sandbox[-test]-MMDD-HHMM-<nanoid>` and the nanoid alphabet is
+ * `A-Za-z0-9_-`, so a legitimate guest name CAN in principle end in the literal
+ * `-cred-broker`. Classifying by suffix would then mistake that live guest for a
+ * sidecar, omit it from the live-guest set, and force-remove its (real, still
+ * referenced) broker. The label is set only by us on the sidecar `docker run`,
+ * so it can never collide with a guest name however the nanoid falls.
  */
-export const ORPHAN_BROKER_MIN_AGE_MS = 10 * 60 * 1000;
+export const CRED_BROKER_ROLE_LABEL_KEY = "automata.role";
+export const CRED_BROKER_ROLE_LABEL_VALUE = "cred-broker";
+
+/**
+ * Extra margin added on top of the control-plane boot timeout to derive
+ * {@link ORPHAN_BROKER_MIN_AGE_MS}. Generous, so clock skew / a slow readiness
+ * barrier / clone can never push a legitimate in-flight create past the gate.
+ */
+export const ORPHAN_BROKER_AGE_MARGIN_MS = 15 * 60 * 1000;
+
+/**
+ * Minimum age a cred-broker sidecar/network must reach before the create-time
+ * orphan sweep may reclaim it (#114).
+ *
+ * DERIVATION (Codex HIGH 2 — the age gate must EXCEED the max boot lifetime, not
+ * undercut it): a guest `docker run` has no per-create timeout of its own, so the
+ * longest a legitimate create can sit with its broker up but its guest not yet
+ * attached is bounded by the control-plane sandbox-creation timeout,
+ * {@link sandboxTimeoutMs} (currently 15 min; see ../constants.ts). We set the
+ * gate to that timeout PLUS {@link ORPHAN_BROKER_AGE_MARGIN_MS} (15 min) = 30 min
+ * so a slow-but-legitimate create still booting right up to the timeout is always
+ * younger than the gate and therefore protected from a concurrent create's sweep.
+ * Deriving it from the constant (rather than a hardcoded 10 min, which was
+ * SHORTER than the boot timeout) keeps the two from silently drifting apart. The
+ * gate still bounds how long a genuinely stranded sidecar can hold the
+ * installation token before the next brokered create reclaims it.
+ */
+export const ORPHAN_BROKER_MIN_AGE_MS =
+  sandboxTimeoutMs + ORPHAN_BROKER_AGE_MARGIN_MS;
 
 /**
  * Pure orphan-selection predicate for the create-time broker reclaim (#114).
@@ -181,6 +213,9 @@ export function buildCredBrokerSidecarRunCommand({
 }): string {
   return [
     `docker run -d --name ${sidecarName}`,
+    // Robust identity marker for the orphan-reclaim sweep — selection is by this
+    // label, never by the `-cred-broker` name suffix (#114 HIGH 1).
+    `--label ${CRED_BROKER_ROLE_LABEL_KEY}=${CRED_BROKER_ROLE_LABEL_VALUE}`,
     `--network ${networkName}`,
     `--network-alias ${CRED_BROKER_ALIAS}`,
     `-v ${bashQuote(scriptHostPath)}:${CRED_BROKER_SCRIPT_CONTAINER_PATH}:ro`,

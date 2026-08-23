@@ -23,6 +23,8 @@ import {
   CRED_BROKER_ALIAS,
   CRED_BROKER_GIT_PORT,
   CRED_BROKER_NETWORK_PREFIX,
+  CRED_BROKER_ROLE_LABEL_KEY,
+  CRED_BROKER_ROLE_LABEL_VALUE,
   CRED_BROKER_SIDECAR_SUFFIX,
   ORPHAN_BROKER_MIN_AGE_MS,
   buildCredBrokerSecretsFileContent,
@@ -743,6 +745,24 @@ export class DockerProvider implements ISandboxProvider {
    * docker error (daemon down, resource already gone, network still attached)
    * is swallowed so a broker create never fails on cleanup.
    */
+  /**
+   * Fresh (non-cached) liveness check for a single guest container, used as the
+   * TOCTOU recheck immediately before a broker is force-removed (#114 HIGH 2).
+   * Live = running or paused (a paused/hibernated guest may still resume).
+   * Absent / errored inspect → not live.
+   */
+  private isGuestLive(guestName: string): boolean {
+    try {
+      const status = execSync(
+        `docker inspect --format '{{.State.Status}}' ${guestName}`,
+        { encoding: "utf8" },
+      ).trim();
+      return status === "running" || status === "paused";
+    } catch {
+      return false; // No such container → not live.
+    }
+  }
+
   private reclaimOrphanedBrokerResources(
     currentContainerName: string,
     minAgeMs: number = ORPHAN_BROKER_MIN_AGE_MS,
@@ -751,14 +771,16 @@ export class DockerProvider implements ISandboxProvider {
     const containerPrefix = isTest ? TEST_CONTAINER_PREFIX : CONTAINER_PREFIX;
     const nowMs = Date.now();
 
-    // One pass over every container carrying our prefix: classify broker
-    // sidecars vs. their (potentially live) guests. A guest is "live" — hence
-    // its broker is referenced — when running OR paused (a hibernated guest may
-    // still resume; treat it as live so we never touch it).
-    let rows: string[] = [];
+    // Identify broker sidecars by the ROBUST label marker (#114 HIGH 1), NOT by
+    // the `-cred-broker` name suffix: a guest's nanoid name could legitimately
+    // end in `-cred-broker` and a suffix guess would misclassify that live guest
+    // as a sidecar and force-remove its still-referenced broker. The label is
+    // stamped only by us on the sidecar `docker run`, so it never collides with a
+    // guest name. Scope the label filter to our env prefix too (test vs. prod).
+    let sidecarNames: string[] = [];
     try {
-      rows = execSync(
-        `docker ps -a --filter name=${containerPrefix} --format '{{.Names}}|{{.State}}'`,
+      sidecarNames = execSync(
+        `docker ps -a --filter label=${CRED_BROKER_ROLE_LABEL_KEY}=${CRED_BROKER_ROLE_LABEL_VALUE} --filter name=${containerPrefix} --format '{{.Names}}'`,
         { encoding: "utf8" },
       )
         .trim()
@@ -768,18 +790,33 @@ export class DockerProvider implements ISandboxProvider {
       // Docker unavailable / nothing listed — nothing to reclaim.
       return;
     }
+
+    // Everything else under our prefix is a potential guest. A guest is "live" —
+    // hence its broker is referenced — when running OR paused (a hibernated guest
+    // may still resume; treat it as live so we never touch it). Broker sidecars
+    // are excluded via the label set above so they're never counted as guests.
+    const sidecarSet = new Set(sidecarNames);
     const liveGuestNames = new Set<string>();
-    const sidecarNames: string[] = [];
-    for (const row of rows) {
-      const [name, state] = row.split("|");
-      if (!name) {
-        continue;
+    try {
+      const rows = execSync(
+        `docker ps -a --filter name=${containerPrefix} --format '{{.Names}}|{{.State}}'`,
+        { encoding: "utf8" },
+      )
+        .trim()
+        .split("\n")
+        .filter((r) => r.trim());
+      for (const row of rows) {
+        const [name, state] = row.split("|");
+        if (!name || sidecarSet.has(name)) {
+          continue;
+        }
+        if (state === "running" || state === "paused") {
+          liveGuestNames.add(name);
+        }
       }
-      if (name.endsWith(CRED_BROKER_SIDECAR_SUFFIX)) {
-        sidecarNames.push(name);
-      } else if (state === "running" || state === "paused") {
-        liveGuestNames.add(name);
-      }
+    } catch {
+      // Docker unavailable — nothing to reclaim.
+      return;
     }
 
     // Sidecars: reclaim the aged, unreferenced ones (sidecar + its dedicated
@@ -809,6 +846,14 @@ export class DockerProvider implements ISandboxProvider {
           currentContainerName,
         })
       ) {
+        continue;
+      }
+      // TOCTOU close (#114 HIGH 2): the `docker ps` snapshot above may be stale —
+      // the guest can have come up between the listing and now. Re-check its
+      // liveness immediately before force-removing the broker; if the guest is
+      // now live, the broker is referenced again → skip. The 30-min age gate
+      // already makes this window vanishingly small; this shuts it entirely.
+      if (this.isGuestLive(guestName)) {
         continue;
       }
       this.tearDownCredentialBroker(guestName, { removeNetwork: true });
@@ -870,6 +915,11 @@ export class DockerProvider implements ISandboxProvider {
           currentContainerName,
         })
       ) {
+        continue;
+      }
+      // TOCTOU close (#114 HIGH 2): re-check the guest hasn't come up since the
+      // snapshot before removing its (bare) broker network.
+      if (this.isGuestLive(guestName)) {
         continue;
       }
       try {
