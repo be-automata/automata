@@ -130,6 +130,12 @@ export const featureFlagsDefinitions = {
     description:
       "Enable shutdown mode - shows shutdown banner and blocks new subscriptions. Used for Terragon shutdown on February 14th, 2026.",
   },
+  sandboxCredentialBroker: {
+    defaultValue: false,
+    enabledForPreview: false,
+    description:
+      "Per-org rollout gate for the Docker sandbox credential broker (#114). When enabled for the creating user, Docker sandboxes receive a per-run bearer via a host-side sidecar instead of the raw GitHub installation token. Evaluated server-side per user (the flag system's closest fit to per-org, since org-scoped overrides do not exist); the SANDBOX_CREDENTIAL_BROKER=on env var remains a global force-on kill switch. Only affects the Docker provider.",
+  },
 } as const satisfies Record<string, FeatureFlagDefinition>;
 
 export type FeatureFlagName = keyof typeof featureFlagsDefinitions;

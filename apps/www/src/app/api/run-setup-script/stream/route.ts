@@ -127,6 +127,10 @@ export async function POST(request: NextRequest) {
         sandboxProvider,
         githubRepoFullName: environment.repoFullName,
         githubAccessToken,
+        // Server-resolved per-user flag map (#114). Per-org scoping is not
+        // supported by the flag system, so this is the user-scoped fallback;
+        // env stays force-on.
+        featureFlags,
       });
       // Create sandbox options
       const sandboxOptions: CreateSandboxOptions = {
