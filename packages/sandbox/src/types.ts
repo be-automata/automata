@@ -16,6 +16,34 @@ export type EgressPolicyShape = {
   allowlist: string[];
 };
 
+/**
+ * Per-run credential-broker SHAPE (#114) — the inputs a Docker cred-broker
+ * sidecar needs to stand up a repo-fenced git-smart-HTTP proxy: the GitHub
+ * installation token, the per-run bearer the guest presents, and the fenced
+ * `owner/repo`. Structural mirror of {@link EgressPolicyShape} — declared
+ * per-package, resolved control-plane-side, never imported across the plane
+ * boundary.
+ *
+ * HONESTY NOTE: unlike {@link EgressPolicyShape} (which carries only resolved
+ * POLICY — non-secret), this shape carries a LIVE SECRET (the installation
+ * token). A provider that consumes it therefore becomes a secret custodian for
+ * the run's lifetime — a deliberate, narrower trust statement than egress's
+ * plane-neutral invariant. The sidecar builders in
+ * providers/docker-cred-broker.ts keep the token OFF argv/`-e`, delivering it
+ * only through a `0o400` `:ro` file mount.
+ *
+ * WIRED (#114): consumed on the Docker create path (docker-provider
+ * setUpCredentialBroker + setup.ts brokered git-config + env.ts brokered env);
+ * resume fails closed via the NON-secret
+ * {@link CreateSandboxOptions.credentialBrokerMode}. Built control-plane-side
+ * only at CREATE; the bearer is ephemeral (never persisted).
+ */
+export type CredentialBrokerShape = {
+  installationToken: string;
+  runBearer: string;
+  repoFullName: string;
+};
+
 // NOTE: This is stored in the database, so don't remove any values from this list.
 export type SandboxStatus =
   | "unknown"
@@ -66,6 +94,23 @@ export type CreateSandboxOptions = {
    * docs/egress-enforcement.md for ops caveats.
    */
   egressPolicy?: EgressPolicyShape;
+  /**
+   * Per-run credential-broker SHAPE (#114) — see {@link CredentialBrokerShape}.
+   * Present (Docker create path, flag on) = the guest is brokered: the provider
+   * stands up a cred-broker sidecar and the guest never receives the
+   * installation token. Absent = today's raw-token behavior (rollback / flag
+   * off / non-Docker provider). Carries a live secret; built only at CREATE.
+   */
+  credentialBroker?: CredentialBrokerShape;
+  /**
+   * NON-secret brokered provenance (#114). Persisted on the thread so a RESUME
+   * can detect that a sandbox "should be brokered" WITHOUT the secret shape
+   * (which is never persisted). On resume the Docker provider fails closed when
+   * this is `"brokered"` (throws {@link BrokeredSandboxNotResumableError}
+   * before the guest is unpaused); the control plane then recreates. Absent /
+   * `"legacy-direct"` = today's resume behavior.
+   */
+  credentialBrokerMode?: "brokered" | "legacy-direct";
   featureFlags: FeatureFlags;
   generateBranchName: (threadName: string | null) => Promise<string | null>;
   onStatusUpdate: ({
@@ -87,6 +132,16 @@ export interface ISandboxProvider {
   ): Promise<ISandboxSession>;
   hibernateById(sandboxId: string): Promise<void>;
   extendLife(sandboxId: string): Promise<void>;
+  /**
+   * Force-destroy a sandbox by id WITHOUT starting/unpausing it (#114). Unlike
+   * {@link getSandboxOrNull} (which unpauses/starts a stale guest so it can be
+   * resumed), this tears the guest and any sidecar/network/secret-file
+   * resources down in place — used by the brokered-resume recreate so a stale
+   * raw-token guest is never revived on its way to the grave. Optional: only
+   * the Docker provider (the only brokered provider) implements it; callers
+   * fall back to {@link getSandboxOrNull} + shutdown otherwise.
+   */
+  shutdownById?(sandboxId: string): Promise<void>;
 }
 
 export interface BackgroundCommandOptions {

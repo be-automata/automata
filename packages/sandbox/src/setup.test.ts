@@ -4,9 +4,14 @@ import {
   setupSandboxOneTime,
   gitCloneRepo,
   setupSandboxEveryTime,
+  setupGitCredentials,
 } from "./setup";
 import { CreateSandboxOptions } from "./types";
 import { MockSession } from "./providers/mock-provider";
+import {
+  CRED_BROKER_ALIAS,
+  CRED_BROKER_GIT_PORT,
+} from "./providers/docker-cred-broker";
 
 // Mock the installDaemon function
 vi.mock("./daemon", () => ({
@@ -149,6 +154,52 @@ describe("sandbox-setup", () => {
         "git clone --filter=blob:none --no-recurse-submodules https://github.com/owner/repo.git repo",
         { cwd: "." },
       );
+    });
+  });
+
+  describe("setupGitCredentials (#114 broker branch)", () => {
+    it("legacy: writes ~/.git-credentials with the token and the store helper", async () => {
+      const session = new MockSession("mock-sandbox");
+      const runCommandSpy = vi
+        .spyOn(session, "runCommand")
+        .mockResolvedValue("");
+      await setupGitCredentials(session, defaultOptions);
+      const calls = runCommandSpy.mock.calls.map((c) => c[0]);
+      expect(calls.some((c) => c.includes("credential.helper store"))).toBe(
+        true,
+      );
+      expect(calls.some((c) => c.includes("~/.git-credentials"))).toBe(true);
+    });
+
+    it("brokered: routes github.com through the broker, scrubs residue, writes NO ~/.git-credentials, and never exposes the token", async () => {
+      const session = new MockSession("mock-sandbox");
+      const runCommandSpy = vi
+        .spyOn(session, "runCommand")
+        .mockResolvedValue("");
+      const broker = {
+        installationToken: "ghs_installation_token_secret",
+        runBearer: "run-bearer-abc123",
+        repoFullName: "owner/repo",
+      };
+      await setupGitCredentials(session, {
+        ...defaultOptions,
+        credentialBroker: broker,
+      });
+      const script = runCommandSpy.mock.calls.map((c) => c[0]).join("\n");
+      const brokerUrl = `http://${CRED_BROKER_ALIAS}:${CRED_BROKER_GIT_PORT}/`;
+      expect(script).toContain(
+        `url.'${brokerUrl}'.insteadOf https://github.com/`,
+      );
+      expect(script).toContain(
+        `extraheader 'Authorization: Bearer ${broker.runBearer}'`,
+      );
+      // Residue removal + no store helper + no credentials file write.
+      expect(script).toContain("rm -f ~/.git-credentials");
+      expect(script).not.toContain("credential.helper store");
+      expect(script).not.toMatch(/echo.*> ~\/\.git-credentials/);
+      // The installation token appears NOWHERE in the guest commands.
+      expect(script).not.toContain(broker.installationToken);
+      expect(script).not.toContain("x-access-token");
     });
   });
 

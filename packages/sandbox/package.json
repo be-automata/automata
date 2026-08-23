@@ -22,7 +22,8 @@
     "test-sandbox-provider": "dotenv -e .env -- vitest sandbox.test.ts",
     "test-sandbox-e2b": "SANDBOX_PROVIDER=e2b pnpm test-sandbox-provider",
     "test-sandbox-daytona": "SANDBOX_PROVIDER=daytona pnpm test-sandbox-provider",
-    "build-egress-proxy": "node scripts/build-egress-proxy.mjs"
+    "build-egress-proxy": "node scripts/build-egress-proxy.mjs",
+    "build-cred-broker": "node scripts/build-cred-broker.mjs"
   },
   "packageManager": "pnpm@10.14.0",
   "dependencies": {

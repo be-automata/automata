@@ -162,6 +162,7 @@ async function getThreadsInner({
       githubPRNumber: schema.thread.githubPRNumber,
       githubIssueNumber: schema.thread.githubIssueNumber,
       codesandboxId: schema.thread.codesandboxId,
+      credentialBrokerMode: schema.thread.credentialBrokerMode,
       sandboxProvider: schema.thread.sandboxProvider,
       sandboxSize: schema.thread.sandboxSize,
       sandboxStatus: schema.thread.sandboxStatus,
@@ -662,6 +663,7 @@ export async function getThread({
     githubRepoFullName: thread.githubRepoFullName,
     automationId: thread.automationId,
     codesandboxId: thread.codesandboxId,
+    credentialBrokerMode: thread.credentialBrokerMode,
     sandboxProvider: thread.sandboxProvider,
     sandboxSize: thread.sandboxSize,
     bootingSubstatus: thread.bootingSubstatus,
@@ -1066,6 +1068,42 @@ export async function updateThread({
     return;
   }
   throw new Error("Failed to update thread");
+}
+
+/**
+ * #114 concurrent-resume lease. A brokered Docker sandbox is non-resumable, so
+ * a resume must recreate it — but two concurrent resumes must NOT both recreate
+ * (that orphans a sandbox + its sidecar/network). This atomically clears the
+ * thread's stale `codesandboxId` with a compare-and-set: only the caller that
+ * still observes `expectedSandboxId` wins (`claimed: true`) and performs the
+ * destroy-old + recreate; losers get `claimed: false` and must retry (a
+ * brokered sandbox is never resumed in place, so a loser can neither reconnect
+ * to nor destroy the winner's fresh sandbox — it retries once the winner has
+ * published). Non-secret only — touches no token/bearer.
+ */
+export async function claimBrokeredSandboxRecreate({
+  db,
+  userId,
+  threadId,
+  expectedSandboxId,
+}: {
+  db: DB;
+  userId: string;
+  threadId: string;
+  expectedSandboxId: string;
+}): Promise<{ claimed: boolean }> {
+  const updateResult = await db
+    .update(schema.thread)
+    .set({ codesandboxId: null })
+    .where(
+      and(
+        eq(schema.thread.id, threadId),
+        eq(schema.thread.userId, userId),
+        eq(schema.thread.codesandboxId, expectedSandboxId),
+      ),
+    )
+    .returning({ id: schema.thread.id });
+  return { claimed: updateResult.length > 0 };
 }
 
 /**

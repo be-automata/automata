@@ -23,6 +23,7 @@ async function startDaemon({
   agentCredentials,
   publicUrl,
   featureFlags,
+  credentialBroker,
 }: {
   session: ISandboxSession;
   environmentVariables: Array<{ key: string; value: string }>;
@@ -30,6 +31,7 @@ async function startDaemon({
   agentCredentials: AIAgentCredentials | null;
   publicUrl: string;
   featureFlags: FeatureFlags;
+  credentialBroker?: CreateSandboxOptions["credentialBroker"];
 }) {
   if (!agentCredentials) {
     console.warn("No agent credentials provided");
@@ -52,6 +54,7 @@ async function startDaemon({
         userEnv: environmentVariables,
         githubAccessToken,
         agentCredentials,
+        credentialBroker,
         overrides: {
           // 1 minute max timeout for bash commands
           BASH_MAX_TIMEOUT_MS: (60 * 1000).toString(),
@@ -74,6 +77,7 @@ export async function installDaemon({
   userMcpConfig,
   publicUrl,
   featureFlags,
+  credentialBroker,
 }: {
   session: ISandboxSession;
   environmentVariables: Array<{ key: string; value: string }>;
@@ -82,6 +86,7 @@ export async function installDaemon({
   userMcpConfig?: McpConfig;
   publicUrl: string;
   featureFlags: FeatureFlags;
+  credentialBroker?: CreateSandboxOptions["credentialBroker"];
 }) {
   const daemonFile = getDaemonFile();
   const mcpServerFile = getMcpServerFile();
@@ -110,6 +115,7 @@ export async function installDaemon({
     agentCredentials,
     publicUrl,
     featureFlags,
+    credentialBroker,
   });
   console.log("Daemon command running");
   await waitForDaemonReady(session);
@@ -197,6 +203,7 @@ export async function updateDaemonIfOutdated({
         userMcpConfig: options.mcpConfig,
         publicUrl: options.publicUrl,
         featureFlags: options.featureFlags,
+        credentialBroker: options.credentialBroker,
       });
       console.log("Daemon updated successfully");
     } else {
@@ -230,6 +237,7 @@ export async function restartDaemonIfNotRunning({
     agentCredentials: options.agentCredentials,
     publicUrl: options.publicUrl,
     featureFlags: options.featureFlags,
+    credentialBroker: options.credentialBroker,
   });
   console.log("Daemon started, waiting for it to be ready");
   await waitForDaemonReady(session);

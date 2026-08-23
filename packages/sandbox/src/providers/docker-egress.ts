@@ -33,7 +33,7 @@ export const EGRESS_PROXY_SCRIPT_CONTAINER_PATH = "/automata/egress-proxy.cjs";
 /**
  * Prefix of every egress internal-network name. The single source for both
  * naming ({@link egressNetworkName}) and the provider's leaked-network sweep
- * filter (docker-provider cleanupEgressNetworks) — never re-inline the string.
+ * filter (docker-provider cleanupNetworksByPrefix) — never re-inline the string.
  */
 export const EGRESS_NETWORK_PREFIX = "automata-egress-";
 
@@ -85,9 +85,14 @@ export function buildEgressSidecarRunCommand({
  * network and point every proxy-honouring client at the sidecar. NO_PROXY
  * keeps loopback traffic (daemon unix/localhost plumbing) off the proxy.
  */
-export function buildSandboxEgressRunFlags(networkName: string): string {
+export function buildSandboxEgressRunFlags(
+  networkName: string,
+  extraNoProxy: string[] = [],
+): string {
   const proxyUrl = `http://${EGRESS_PROXY_ALIAS}:${EGRESS_PROXY_PORT}`;
-  const noProxy = "127.0.0.1,localhost";
+  // Extra NO_PROXY entries (e.g. the #114 cred-broker alias) so the guest's
+  // plain-HTTP call to that host bypasses this egress forward proxy.
+  const noProxy = ["127.0.0.1", "localhost", ...extraNoProxy].join(",");
   return [
     `--network ${networkName}`,
     `-e HTTP_PROXY=${bashQuote(proxyUrl)}`,
