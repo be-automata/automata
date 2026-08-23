@@ -43,6 +43,17 @@ import type { UserSettings } from "@terragon/shared";
 import { ensureAgent } from "@terragon/agent/utils";
 import { getLastUserMessageModel } from "@/lib/db-message-helpers";
 
+// #114: distinguishable timeout so a CREATE caller can tell a non-cancelling
+// timeout (the underlying create/setup promise is abandoned mid-flight, still
+// possibly holding a guest + broker sidecar) apart from a create/setup throw
+// (the source-level teardown in @terragon/sandbox already swept the guest).
+class SandboxCreationTimeoutError extends Error {
+  constructor() {
+    super("Sandbox creation timed out. Please try again later.");
+    this.name = "SandboxCreationTimeoutError";
+  }
+}
+
 async function getOrCreateSandboxWithTimeout(
   sandboxId: string | null,
   options: Parameters<typeof getOrCreateSandbox>[1],
@@ -56,7 +67,7 @@ async function getOrCreateSandboxWithTimeout(
     ),
   ]);
   if (result === "timeout") {
-    throw new Error("Sandbox creation timed out. Please try again later.");
+    throw new SandboxCreationTimeoutError();
   }
   return result;
 }
@@ -332,6 +343,61 @@ async function getOrCreateSandboxForThread({
     });
   };
 
+  // #114: run a CREATE (never a resume) under the non-cancelling timeout and
+  // guarantee no orphaned guest/broker-sidecar/network/secret on failure.
+  //
+  // Two failure classes:
+  //  - create/setup THROW: @terragon/sandbox's getOrCreateSandbox tears the
+  //    fresh guest down at the source (provider create-phase try/catch + the
+  //    setup-phase teardown) before rethrowing, so nothing orphans and this
+  //    layer must NOT re-destroy (the id may already be gone).
+  //  - TIMEOUT: the underlying promise is abandoned mid-flight and is NOT
+  //    cancellable, so the source teardown cannot run for it. We capture the
+  //    fresh sandbox id from the provider's `provisioning-done` status update
+  //    (emitted right after the guest + sidecar are up, before setup) and
+  //    force-destroy that id here — sidecar + network + secret file included.
+  //
+  // If the timeout fires BEFORE the provider publishes an id (still inside the
+  // initial `docker run`), the id is unknowable at this layer and the abandoned
+  // create is not cancellable, so it cannot be swept by id from here. Such a
+  // guest carries a fresh per-create nanoid name (no collision with a retry, so
+  // a re-attempt never adopts or double-creates it) and is reclaimed by the
+  // provider's prefix-scoped container/network sweep, not this path.
+  const createSandboxSweepingOnTimeout = async (
+    egressPolicy: Awaited<ReturnType<typeof resolveEgressForCreate>>,
+  ): Promise<ISandboxSession> => {
+    const options = makeOptions({ forCreate: true, egressPolicy });
+    let createdSandboxId: string | null = null;
+    const capturingOptions: CreateSandboxOptions = {
+      ...options,
+      onStatusUpdate: async (update) => {
+        if (update.sandboxId) {
+          createdSandboxId = update.sandboxId;
+        }
+        await options.onStatusUpdate(update);
+      },
+    };
+    try {
+      return await getOrCreateSandboxWithTimeout(null, capturingOptions);
+    } catch (error) {
+      // Only the timeout needs compensation here: create/setup throws are
+      // already swept at the source. Destroying on a non-timeout throw would
+      // double-destroy an already-removed guest (docker rm -f then errors).
+      if (error instanceof SandboxCreationTimeoutError && createdSandboxId) {
+        await shutdownSandboxById({
+          sandboxProvider: thread.sandboxProvider,
+          sandboxId: createdSandboxId,
+        }).catch((teardownError) => {
+          console.error(
+            "Failed to sweep fresh sandbox after create timeout",
+            teardownError,
+          );
+        });
+      }
+      throw error;
+    }
+  };
+
   // #114 fail-closed recreate: a brokered thread is NEVER resumed in place, so
   // a resume must destroy the stale sandbox and create a fresh brokered one. A
   // CAS lease ensures exactly ONE concurrent resume wins the recreate; losers
@@ -388,15 +454,14 @@ async function getOrCreateSandboxForThread({
         { cause: destroyError },
       );
     }
-    // Create the fresh brokered sandbox. On any create/setup failure the
-    // provider sweeps its own partial resources (docker-provider create
-    // try/catch); codesandboxId stays NULL (recoverable). On a persist failure
-    // the guest exists but is untracked — tear it down so nothing is orphaned.
+    // Create the fresh brokered sandbox. On a create/setup THROW the source
+    // teardown in @terragon/sandbox sweeps the guest + broker sidecar/network/
+    // secret; on a non-cancelling TIMEOUT createSandboxSweepingOnTimeout
+    // force-destroys the freshly-created id. Either way codesandboxId stays NULL
+    // (recoverable). On a persist failure the guest exists but is untracked —
+    // tear it down so nothing (including the token-holding sidecar) is orphaned.
     const egressPolicy = await resolveEgressForCreate();
-    const session = await getOrCreateSandboxWithTimeout(
-      null,
-      makeOptions({ forCreate: true, egressPolicy }),
-    );
+    const session = await createSandboxSweepingOnTimeout(egressPolicy);
     try {
       await persistCreated(session.sandboxId);
     } catch (persistError) {
@@ -415,12 +480,12 @@ async function getOrCreateSandboxForThread({
   };
 
   // Initial call: CREATE when no sandbox yet, else RESUME the existing one.
+  // The first create can also be brokered (Docker + flag on), so it runs through
+  // the same timeout-sweeping create path — no orphaned broker sidecar on a
+  // create/setup failure (swept at the source) or a non-cancelling timeout.
   if (!thread.codesandboxId) {
     const egressPolicy = await resolveEgressForCreate();
-    const session = await getOrCreateSandboxWithTimeout(
-      null,
-      makeOptions({ forCreate: true, egressPolicy }),
-    );
+    const session = await createSandboxSweepingOnTimeout(egressPolicy);
     await persistCreated(session.sandboxId);
     return session;
   }
