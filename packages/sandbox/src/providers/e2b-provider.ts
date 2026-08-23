@@ -34,31 +34,58 @@ export function e2bBrokerSecretName(sandboxId: string): string {
 
 /**
  * Build the CREATE-time base network for a brokered E2B sandbox (#114): the
- * egress firewall WITHOUT the header-injection rules (the rules reference the
- * vault secret, whose name derives from the not-yet-known sandboxId, so they
- * are attached via `updateNetwork` right after create). Composes with any
- * per-repo egress policy WITHOUT clobbering it; ensures the GitHub hosts are in
- * `allowOut` so the rules can fire once attached.
+ * egress firewall WITHOUT the header-injection rules AND, crucially, WITHOUT the
+ * GitHub hosts reachable. The rules reference the vault secret whose name
+ * derives from the not-yet-known sandboxId, so they are attached via
+ * `updateNetwork` right after create. If GitHub were in `allowOut` at create
+ * time there would be a window (a template startup process, or another holder of
+ * the sandbox id) where the guest could reach GitHub with NO injection rule —
+ * i.e. anonymously / un-brokered. So we create with GitHub DENIED and let
+ * `updateNetwork` open the GitHub `allowOut` and attach the transform rules
+ * ATOMICALLY together (`SandboxNetworkUpdate` replaces allowOut/denyOut/rules in
+ * one call), so GitHub egress is never open without its injection rule.
+ *
+ * Composition with a per-repo egress policy is preserved (not clobbered): the
+ * rest of the repo allowlist is kept at create; only the GitHub hosts are held
+ * back until the rules attach. `updateNetwork` (via {@link toE2bBrokeredNetwork})
+ * restores the full composed allowlist plus GitHub plus the rules.
  */
 function e2bBrokeredCreateBaseNetwork(
   egressPolicy: CreateSandboxOptions["egressPolicy"],
 ): E2bCreateNetwork {
+  const githubHosts: readonly string[] = E2B_BROKER_GITHUB_HOSTS;
   if (egressPolicy) {
     const base = toE2bNetwork(egressPolicy);
-    const allowOut = [...base.allowOut];
-    for (const host of E2B_BROKER_GITHUB_HOSTS) {
-      if (!allowOut.includes(host)) {
-        allowOut.push(host);
-      }
-    }
+    // Keep the repo allowlist, but hold back the GitHub hosts until the rules
+    // attach. With deny-all as the default (base.denyOut), a host absent from
+    // allowOut is denied — so GitHub is unreachable in the create window.
+    const allowOut = base.allowOut.filter(
+      (host) => !githubHosts.includes(host),
+    );
     return { denyOut: base.denyOut, allowOut };
   }
-  // No egress policy: keep today's OPEN internet (0.0.0.0/0), plus the hosts so
-  // the injection rules (attached next) fire. No denyOut.
-  return { allowOut: ["0.0.0.0/0", ...E2B_BROKER_GITHUB_HOSTS] };
+  // No egress policy: create FULLY CLOSED (deny-all). Open internet cannot
+  // selectively deny GitHub (E2B deny rules are IP/CIDR only, not domains), so
+  // to guarantee GitHub is never open without its rule we deny everything in the
+  // create window; `updateNetwork` reopens 0.0.0.0/0 + the GitHub hosts together
+  // with the injection rules immediately after.
+  return { allowOut: [], denyOut: ["0.0.0.0/0"] };
 }
 
-async function resumeWithRetry(sandboxId: string): Promise<E2BSession> {
+async function resumeWithRetry(
+  sandboxId: string,
+  opts?: {
+    /**
+     * #114: skip the post-connect liveness probe. On a BROKERED resume the vault
+     * secret must be refreshed BEFORE any control-plane guest command runs, so
+     * the caller connects with the probe skipped and runs it itself only after
+     * the refresh succeeds. `Sandbox.connect` still auto-resumes the guest and
+     * runs E2B's OWN internal resume probe — that is unavoidable and carries no
+     * credential — but no control-plane command touches the guest here.
+     */
+    skipReadyCheck?: boolean;
+  },
+): Promise<E2BSession> {
   const startTime = Date.now();
   return await retryAsync(
     async () => {
@@ -73,9 +100,11 @@ async function resumeWithRetry(sandboxId: string): Promise<E2BSession> {
         `[e2b] Resumed sandbox ${sandboxId} in ${Date.now() - startTime}ms`,
       );
       const session = new E2BSession(sandbox);
-      // Attempt to run a command to check if the sandbox is running
-      await session.runCommand("echo 'hello'", { cwd: "/" });
-      console.log(`[e2b] Sandbox ${sandboxId} is running`);
+      if (!opts?.skipReadyCheck) {
+        // Attempt to run a command to check if the sandbox is running
+        await session.runCommand("echo 'hello'", { cwd: "/" });
+        console.log(`[e2b] Sandbox ${sandboxId} is running`);
+      }
       return session;
     },
     {
@@ -233,17 +262,23 @@ class E2BSession implements ISandboxSession {
   }
 
   async shutdown(): Promise<void> {
-    await this.sandbox.kill();
-    // #114: best-effort destroy of this run's vault secret so nothing is
-    // orphaned. Idempotent (destroy of a missing secret is a no-op) and never
-    // fatal to the teardown.
-    if (this.brokerSecretName) {
-      await Secret.destroy(this.brokerSecretName).catch((error) => {
-        console.warn(
-          `[e2b] failed to destroy broker secret ${this.brokerSecretName}:`,
-          error,
-        );
-      });
+    // #114: the vault-secret destroy MUST run regardless of whether kill()
+    // succeeds — otherwise a kill() throw would orphan the run's secret in the
+    // vault. Sequence the destroy in a `finally` so a rejected kill() still
+    // tears down the secret; the kill error is not swallowed (it rethrows after
+    // the finally). Destroy is best-effort/idempotent (no-op if absent) and
+    // never masks the kill error.
+    try {
+      await this.sandbox.kill();
+    } finally {
+      if (this.brokerSecretName) {
+        await Secret.destroy(this.brokerSecretName).catch((error) => {
+          console.warn(
+            `[e2b] failed to destroy broker secret ${this.brokerSecretName}:`,
+            error,
+          );
+        });
+      }
     }
   }
 
@@ -359,12 +394,11 @@ export class E2BProvider implements ISandboxProvider {
     sandboxId: string,
     options: CreateSandboxOptions,
   ): Promise<ISandboxSession> {
-    const session = await resumeWithRetry(sandboxId);
     const isBrokered =
       options.credentialBroker?.kind === "e2b-native" ||
       options.credentialBrokerMode === "brokered";
     if (!isBrokered) {
-      return session;
+      return await resumeWithRetry(sandboxId);
     }
     const broker =
       options.credentialBroker?.kind === "e2b-native"
@@ -372,21 +406,47 @@ export class E2BProvider implements ISandboxProvider {
         : undefined;
     if (!broker) {
       // Brokered provenance but no shape to refresh from: we cannot re-seed the
-      // vault with a fresh token, so fail closed rather than resume on a stale
-      // or absent credential.
+      // vault with a fresh token. Fail closed BEFORE resuming — do not even
+      // connect (which would auto-resume the guest), so the sandbox stays paused
+      // rather than running on a stale/absent (possibly revoked/rotated)
+      // credential.
       throw new Error(
         `E2B brokered sandbox ${sandboxId} resume is missing the broker shape needed to refresh the vault secret (#114); refusing to resume.`,
       );
     }
+    // `Sandbox.connect` auto-resumes the guest, but we MUST refresh the vault
+    // secret BEFORE any control-plane guest command runs — otherwise real work
+    // could execute against a stale/revoked credential. Connect with the
+    // liveness probe SKIPPED (only E2B's own internal resume probe runs), then
+    // refresh, then run the probe ourselves.
+    const session = await resumeWithRetry(sandboxId, { skipReadyCheck: true });
     const secretName = e2bBrokerSecretName(sandboxId);
-    if (await Secret.exists(secretName)) {
-      await Secret.update(secretName, broker.installationToken);
-    } else {
-      // The vault entry is gone (e.g. destroyed out of band). Re-create it; the
-      // persisted rules already reference this name, so injection resumes.
-      await Secret.create(secretName, broker.installationToken);
-    }
+    // Mark brokered up front so the fail-closed teardown below also destroys the
+    // vault secret.
     session.markBrokered(secretName);
+    try {
+      if (await Secret.exists(secretName)) {
+        await Secret.update(secretName, broker.installationToken);
+      } else {
+        // The vault entry is gone (e.g. destroyed out of band). Re-create it;
+        // the persisted rules already reference this name, so injection resumes.
+        await Secret.create(secretName, broker.installationToken);
+      }
+    } catch (error) {
+      // Fail closed: the guest is live post-resume but the vault holds a
+      // possibly revoked/rotated secret (or the refresh threw). Tear the guest
+      // down (kill + destroy the vault secret) BEFORE it can do any real work,
+      // then rethrow so the run cannot proceed.
+      console.error(
+        `[e2b] brokered resume vault refresh failed for ${sandboxId}; tearing down`,
+        error,
+      );
+      await session.shutdown().catch(() => {});
+      throw error;
+    }
+    // Refresh succeeded — NOW it is safe to run a control-plane guest command.
+    await session.runCommand("echo 'hello'", { cwd: "/" });
+    console.log(`[e2b] Sandbox ${sandboxId} is running (brokered resume)`);
     return session;
   }
 

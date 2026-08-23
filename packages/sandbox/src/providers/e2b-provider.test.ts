@@ -164,22 +164,26 @@ describe("E2BProvider native credential broker (#114)", () => {
     );
 
     // Create carries the firewall BASE only (no rules — the secret name is not
-    // known until the sandbox exists). Open internet + the two hosts.
+    // known until the sandbox exists). Crucially GitHub is NOT reachable in the
+    // create window: with no egress policy the base is FULLY CLOSED (deny-all),
+    // so there is no window where GitHub is open without its injection rule.
     const [, createOpts] = vi.mocked(Sandbox.create).mock.calls[0]! as [
       string,
       Record<string, any>,
     ];
     expect(createOpts.network.rules).toBeUndefined();
-    expect(createOpts.network.allowOut).toEqual([
-      "0.0.0.0/0",
-      "github.com",
-      "api.github.com",
-    ]);
+    expect(createOpts.network.allowOut).toEqual([]);
+    expect(createOpts.network.denyOut).toEqual(["0.0.0.0/0"]);
+    // GitHub is absent from the create-time allowOut.
+    expect(createOpts.network.allowOut).not.toContain("github.com");
+    expect(createOpts.network.allowOut).not.toContain("api.github.com");
 
-    // Rules attached post-create via updateNetwork, injecting the PLACEHOLDER
-    // header (never the raw token) for both hosts.
+    // updateNetwork opens GitHub `allowOut` AND attaches the injection rules
+    // together in ONE atomic call, injecting the PLACEHOLDER header (never the
+    // raw token) for both hosts — GitHub egress and its rule arrive together.
     expect(updateNetworkMock).toHaveBeenCalledTimes(1);
     const net = updateNetworkMock.mock.calls[0]![0] as any;
+    expect(net.allowOut).toEqual(["0.0.0.0/0", "github.com", "api.github.com"]);
     expect(net.rules["github.com"]).toEqual([
       { transform: { headers: { Authorization: EXPECTED_AUTH } } },
     ]);
@@ -202,7 +206,9 @@ describe("E2BProvider native credential broker (#114)", () => {
         },
       }),
     );
-    // Create base: deny-all + the repo allowlist + the merged github hosts.
+    // Create base: deny-all + the repo allowlist, but GitHub is HELD BACK until
+    // the rules attach (no window where GitHub is open without injection). The
+    // repo allowlist is preserved (composition, not clobber).
     const [, createOpts] = vi.mocked(Sandbox.create).mock.calls[0]! as [
       string,
       Record<string, any>,
@@ -211,10 +217,11 @@ describe("E2BProvider native credential broker (#114)", () => {
     expect(createOpts.network.allowOut).toEqual([
       "registry.npmjs.org",
       "example.com",
-      "github.com",
-      "api.github.com",
     ]);
-    // updateNetwork preserves that composition and adds the rules.
+    expect(createOpts.network.allowOut).not.toContain("github.com");
+    expect(createOpts.network.allowOut).not.toContain("api.github.com");
+    // updateNetwork restores the full composition (repo allowlist + GitHub) and
+    // adds the rules — GitHub allowOut and its rules arrive together.
     const net = updateNetworkMock.mock.calls[0]![0] as any;
     expect(net.denyOut).toEqual(["0.0.0.0/0"]);
     expect(net.allowOut).toEqual([
@@ -286,6 +293,38 @@ describe("E2BProvider native credential broker (#114)", () => {
       EXPECTED_SECRET,
       e2bBroker.installationToken,
     );
+  });
+
+  it("resume fails closed: kills the guest and throws if the vault refresh throws", async () => {
+    // The guest is live post-connect, but the vault refresh fails — the run must
+    // NOT proceed on a possibly revoked/rotated credential.
+    vi.mocked(Secret.update).mockRejectedValueOnce(new Error("vault 503"));
+    const provider = new E2BProvider();
+    await expect(
+      provider.getOrCreateSandbox(
+        "e2b-test-sandbox",
+        createOptions({
+          credentialBroker: e2bBroker,
+          credentialBrokerMode: "brokered",
+        }),
+      ),
+    ).rejects.toThrow(/vault 503/);
+    // Fail closed: the guest is killed and the (possibly-stale) secret destroyed.
+    expect(killMock).toHaveBeenCalledTimes(1);
+    expect(Secret.destroy).toHaveBeenCalledWith(EXPECTED_SECRET);
+  });
+
+  it("teardown destroys the vault secret even when kill() rejects", async () => {
+    const provider = new E2BProvider();
+    const session = await provider.getOrCreateSandbox(
+      null,
+      createOptions({ credentialBroker: e2bBroker }),
+    );
+    // kill() throwing must NOT orphan the vault secret.
+    killMock.mockRejectedValueOnce(new Error("kill boom"));
+    await expect(session.shutdown()).rejects.toThrow(/kill boom/);
+    // Destroy still ran (sequenced in a finally), so no secret is leaked.
+    expect(Secret.destroy).toHaveBeenCalledWith(EXPECTED_SECRET);
   });
 
   it("resume fails closed when brokered provenance has no shape to refresh from", async () => {
