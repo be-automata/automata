@@ -58,11 +58,16 @@ network firewall**:
 - **E2B** (`e2b-provider.ts:53-70`): `Sandbox.create(templateId, { network: toE2bNetwork(policy), envs, lifecycle })`. The only host-side surface consumed is `network: { denyOut, allowOut }` (`egress.ts:91-103`). Guest I/O is `sandbox.commands.run` / `sandbox.files.*`.
 - **Daytona** (`daytona-provider.ts:70-78`): `daytona.create({ snapshot, envVars, domainAllowList, ... })`. Host-side surface consumed is `domainAllowList` only (`egress.ts:130-167`; `ip_port`/`none` throw). Guest I/O is `sandbox.process.*` / `sandbox.fs.*`.
 
-Secrets today reach the guest as **plaintext env vars** —
-`CreateSandboxOptions.environmentVariables` and `githubAccessToken` are folded
-into `envs`/`envVars` at create (`e2b-provider.ts:218-223`,
-`daytona-provider.ts:358-363`). That is precisely the residency #114 wants to
-eliminate: guest-root can read them from `/proc`.
+Secrets today reach the guest as **plaintext env vars**. The raw
+`githubAccessToken` becomes `env.GH_TOKEN` inside `getEnv()`
+(`packages/sandbox/src/env.ts:32`), which is threaded as the `env:` of the
+guest `runCommand` calls at **daemon start** (`daemon.ts:53`, `startDaemon`) and
+**setup-script run** (`setup.ts:511`, `executeSetupScriptCommand`) — i.e. at
+daemon/setup time, not at `Sandbox.create()`/`daytona.create()` (the providers
+themselves never reference `githubAccessToken` — grep-verified zero matches in
+`e2b-provider.ts`/`daytona-provider.ts`; their create-time `envs`/`envVars` only
+carry user-supplied `options.environmentVariables`). That is precisely the
+residency #114 wants to eliminate: guest-root can read `GH_TOKEN` from `/proc`.
 
 ### What the codebase already knows about the shape of the fix
 
