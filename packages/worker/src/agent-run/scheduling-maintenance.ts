@@ -321,20 +321,27 @@ export function startMaintenanceLoop(
  * normally find nothing (§3.2.2b). Entirely `try/catch`-guarded: it must never
  * prevent boot (AC-14) — this is the literal "before `hatchet.worker(...)`"
  * hook the spec (§5 item 7) describes.
+ *
+ * Runs inside `withAdvisoryLock`, never on the raw pool: that is the only path
+ * that applies the CONNECTION_HYGIENE_SQL timeouts (statement_timeout 5s /
+ * lock_timeout 1s), so a lock-contended DELETE errors out fast instead of
+ * hanging the awaited boot path — and a sibling launchd unit mid-tick makes
+ * this a clean skip rather than a concurrent second reclaim.
  */
 export async function bootTimeSlotReclaim(
   config: WorkerConfig,
   log: Logger = defaultLogger,
+  /** Test seam: pass an EngineDb to skip pool construction. `null` = gate closed. */
+  engineDb?: EngineDb | null,
 ): Promise<void> {
   if (!config.engineDatabaseUrl) {
     return; // master gate
   }
-  const db = createEngineDb(process.env);
+  const db = engineDb !== undefined ? engineDb : createEngineDb(process.env);
   if (!db) {
     return;
   }
   try {
-    const tenantId = config.engineTenantId || (await resolveTenantId(db));
     const slotMode = resolveMechanismMode(
       config.slotReclaimMode,
       config.schedulingMaintenanceMode,
@@ -342,16 +349,23 @@ export async function bootTimeSlotReclaim(
     if (slotMode === "off") {
       return;
     }
-    const result = await reclaimEngineSlots(db, {
-      tenantId,
-      deadAfterSeconds: config.workerDeadAfterS,
-      minSlotAgeSeconds: config.slotMinAgeS,
-      selfWorkerId: null,
-      mode: slotMode,
-      limit: config.maintBatch,
+    const lockOutcome = await db.withAdvisoryLock(async (client) => {
+      const tenantId = config.engineTenantId || (await resolveTenantId(client));
+      return reclaimEngineSlots(client, {
+        tenantId,
+        deadAfterSeconds: config.workerDeadAfterS,
+        minSlotAgeSeconds: config.slotMinAgeS,
+        selfWorkerId: null,
+        mode: slotMode,
+        limit: config.maintBatch,
+      });
     });
-    if (result.touched > 0) {
-      log({ event: "scheduling.boot_slots_reclaimed", rowsTouched: result.touched });
+    if (!lockOutcome.acquired) {
+      log({ event: "scheduling.tick_skipped_locked" });
+      return;
+    }
+    if (lockOutcome.result.touched > 0) {
+      log({ event: "scheduling.boot_slots_reclaimed", rowsTouched: lockOutcome.result.touched });
     }
   } catch (err) {
     log({ event: "scheduling.tick_error", error: `boot reclaim: ${String(err)}` });

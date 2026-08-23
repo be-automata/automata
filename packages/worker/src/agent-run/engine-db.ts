@@ -30,6 +30,11 @@ export interface PgLike {
  * a lock for long or run away on a slow query — this is engine-internal state,
  * not application data, and the box's ONE agent-run slot depends on the engine
  * staying responsive.
+ *
+ * `SET LOCAL` is transaction-scoped (a warning-level no-op outside one), which
+ * is why `withConnection`/`withAdvisoryLock` open an explicit transaction
+ * before applying it — the settings then die with the COMMIT/ROLLBACK and can
+ * never leak onto a pooled connection reused by someone else.
  */
 const CONNECTION_HYGIENE_SQL = [
   "SET LOCAL statement_timeout = '5s'",
@@ -81,15 +86,30 @@ export function createEngineDbFromPool(pool: {
     async withConnection(fn) {
       const client = await pool.connect();
       try {
-        await client.query(CONNECTION_HYGIENE_SQL);
-        return await fn(client);
+        await client.query("BEGIN");
+        try {
+          await client.query(CONNECTION_HYGIENE_SQL);
+          const result = await fn(client);
+          await client.query("COMMIT");
+          return result;
+        } catch (err) {
+          try {
+            await client.query("ROLLBACK");
+          } catch {
+            // best-effort; connection is released either way
+          }
+          throw err;
+        }
       } finally {
         client.release();
       }
     },
     async withAdvisoryLock(fn) {
       const client = await pool.connect();
+      let inTransaction = false;
       try {
+        await client.query("BEGIN");
+        inTransaction = true;
         await client.query(CONNECTION_HYGIENE_SQL);
         const lockResult = await client.query<{ pg_try_advisory_lock: boolean }>(
           "SELECT pg_try_advisory_lock($1::int, $2::int) AS pg_try_advisory_lock",
@@ -97,11 +117,25 @@ export function createEngineDbFromPool(pool: {
         );
         const acquired = lockResult.rows[0]?.pg_try_advisory_lock === true;
         if (!acquired) {
+          await client.query("ROLLBACK");
+          inTransaction = false;
           return { acquired: false };
         }
         try {
           const result = await fn(client);
+          // Session-level advisory locks survive COMMIT; the unlock below (or,
+          // worst case, the pool releasing the session) drops the lock.
+          await client.query("COMMIT");
+          inTransaction = false;
           return { acquired: true, result };
+        } catch (err) {
+          try {
+            await client.query("ROLLBACK");
+          } catch {
+            // best-effort
+          }
+          inTransaction = false;
+          throw err;
         } finally {
           try {
             await client.query(
@@ -113,6 +147,15 @@ export function createEngineDbFromPool(pool: {
             // pool regardless, which also drops session-scoped advisory locks.
           }
         }
+      } catch (err) {
+        if (inTransaction) {
+          try {
+            await client.query("ROLLBACK");
+          } catch {
+            // best-effort
+          }
+        }
+        throw err;
       } finally {
         client.release();
       }

@@ -14,7 +14,7 @@ import {
   repairWorkflowConcurrencyRot,
 } from "./scheduling-health";
 import { loadWorkerConfig, resolveMechanismMode } from "./config";
-import { runMaintenanceTick } from "./scheduling-maintenance";
+import { bootTimeSlotReclaim, runMaintenanceTick } from "./scheduling-maintenance";
 
 const TENANT_ID = "707d0855-80ab-4e1f-a156-f1c4546cbf52";
 
@@ -512,6 +512,148 @@ describe("runMaintenanceTick — resilience and gating", () => {
     expect(log).toHaveBeenCalledWith(
       expect.objectContaining({ event: "scheduling.tick_skipped_locked" }),
     );
+  });
+});
+
+describe("reclaimEngineSlots — orphan labeling on the write path", () => {
+  it("mode 'on' maps each returned row's orphan flag from the DELETE's RETURNING, not a hardcoded value", async () => {
+    const db = new FakePg((text) => {
+      if (/DELETE FROM v1_concurrency_slot/.test(text)) {
+        return {
+          rows: [
+            {
+              task_id: "t1",
+              task_inserted_at: "2026-08-23T00:00:00Z",
+              task_retry_count: 0,
+              strategy_id: 1,
+              key: "k",
+              workflow_run_id: "wr1",
+              orphan: true,
+            },
+            {
+              task_id: "t2",
+              task_inserted_at: "2026-08-23T00:00:00Z",
+              task_retry_count: 0,
+              strategy_id: 1,
+              key: "k",
+              workflow_run_id: "wr2",
+              orphan: false,
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    const result = await reclaimEngineSlots(db, {
+      tenantId: TENANT_ID,
+      deadAfterSeconds: 600,
+      minSlotAgeSeconds: 600,
+      selfWorkerId: null,
+      mode: "on",
+    });
+    const deleteCall = db.calls.find((c) => /DELETE FROM v1_concurrency_slot/.test(c.text));
+    expect(deleteCall?.text).toMatch(/RETURNING[\s\S]*c\.orphan/);
+    expect(result.touched).toBe(2);
+    expect(result.rows.map((r) => r.orphan)).toEqual([true, false]);
+  });
+});
+
+describe("bootTimeSlotReclaim — boot-path hygiene and gating", () => {
+  const config = loadWorkerConfig({
+    HATCHET_ENGINE_DATABASE_URL: "postgresql://fake",
+    HATCHET_ENGINE_TENANT_ID: TENANT_ID,
+    WORKER_SLOT_RECLAIM: "on",
+  });
+
+  function makeEngineDb(inner: PgLike) {
+    return {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      withConnection: vi.fn(),
+      withAdvisoryLock: vi.fn(async (fn: (c: PgLike) => Promise<unknown>) => ({
+        acquired: true as const,
+        result: await fn(inner),
+      })),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  it("master gate: with engineDatabaseUrl unset, the db is never touched", async () => {
+    const db = makeEngineDb(new FakePg(() => ({ rows: [] })));
+    await bootTimeSlotReclaim(loadWorkerConfig({}), vi.fn(), db as never);
+    expect(db.withAdvisoryLock).not.toHaveBeenCalled();
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  it("runs the reclaim through withAdvisoryLock (hygiene timeouts), never on the raw db, and closes the pool", async () => {
+    const inner = new FakePg((text) =>
+      /DELETE FROM v1_concurrency_slot/.test(text)
+        ? {
+            rows: [
+              {
+                task_id: "t1",
+                task_inserted_at: "2026-08-23T00:00:00Z",
+                task_retry_count: 0,
+                strategy_id: 1,
+                key: "k",
+                workflow_run_id: "wr1",
+                orphan: true,
+              },
+            ],
+          }
+        : { rows: [] },
+    );
+    const db = makeEngineDb(inner);
+    const log = vi.fn();
+    await bootTimeSlotReclaim(config, log, db as never);
+    expect(db.withAdvisoryLock).toHaveBeenCalledTimes(1);
+    expect(db.query).not.toHaveBeenCalled(); // raw (hygiene-less) path unused
+    expect(inner.calls.some((c) => /DELETE FROM v1_concurrency_slot/.test(c.text))).toBe(true);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "scheduling.boot_slots_reclaimed", rowsTouched: 1 }),
+    );
+    expect(db.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("advisory lock not acquired → clean skip, no raw queries, pool closed (AC-10)", async () => {
+    const db = {
+      query: vi.fn(),
+      withConnection: vi.fn(),
+      withAdvisoryLock: vi.fn().mockResolvedValue({ acquired: false }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const log = vi.fn();
+    await bootTimeSlotReclaim(config, log, db as never);
+    expect(db.query).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "scheduling.tick_skipped_locked" }),
+    );
+    expect(db.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("a throwing engine db resolves (never rejects), logs tick_error, and still closes (AC-14)", async () => {
+    const db = {
+      query: vi.fn().mockRejectedValue(new Error("connection refused")),
+      withConnection: vi.fn(),
+      withAdvisoryLock: vi.fn().mockRejectedValue(new Error("connection refused")),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const log = vi.fn();
+    await expect(bootTimeSlotReclaim(config, log, db as never)).resolves.toBeUndefined();
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "scheduling.tick_error" }),
+    );
+    expect(db.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("slot reclaim 'off' → no engine queries at all", async () => {
+    const offConfig = loadWorkerConfig({
+      HATCHET_ENGINE_DATABASE_URL: "postgresql://fake",
+      WORKER_SLOT_RECLAIM: "off",
+    });
+    const db = makeEngineDb(new FakePg(() => ({ rows: [] })));
+    await bootTimeSlotReclaim(offConfig, vi.fn(), db as never);
+    expect(db.withAdvisoryLock).not.toHaveBeenCalled();
+    expect(db.query).not.toHaveBeenCalled();
   });
 });
 

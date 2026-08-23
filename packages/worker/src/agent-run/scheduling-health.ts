@@ -468,6 +468,7 @@ export async function reclaimEngineSlots(
     strategy_id: number;
     key: string;
     workflow_run_id: string;
+    orphan: boolean;
   }>(
     `WITH dead_workers AS (
        SELECT id FROM "Worker"
@@ -508,7 +509,7 @@ export async function reclaimEngineSlots(
         AND s.task_inserted_at = c.task_inserted_at
         AND s.task_retry_count = c.task_retry_count
         AND s.strategy_id      = c.strategy_id
-     RETURNING s.task_id, s.task_inserted_at, s.task_retry_count, s.strategy_id, s.key, s.workflow_run_id`,
+     RETURNING s.task_id, s.task_inserted_at, s.task_retry_count, s.strategy_id, s.key, s.workflow_run_id, c.orphan`,
     [
       opts.tenantId,
       opts.deadAfterSeconds,
@@ -526,7 +527,7 @@ export async function reclaimEngineSlots(
       strategyId: r.strategy_id,
       key: r.key,
       workflowRunId: r.workflow_run_id,
-      orphan: false,
+      orphan: r.orphan,
     })),
   };
 }
