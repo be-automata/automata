@@ -192,7 +192,7 @@ covers the worker substrate.
 | Policy levels supported | `none` / `ip_port`* / `domain` | `domain` **only** | `none` / `ip_port` / `domain` | n/a |
 | Env-unset bypass? | no (below process) | no (below process) | no (no route but the proxy) | n/a |
 | Per-connection audit | **no feed** | **no feed** | **yes** — sidecar stdout JSON | n/a |
-| Resident GitHub token | yes (`~/.git-credentials`) | yes | yes | n/a |
+| Resident GitHub token | yes (`~/.git-credentials`) | yes | **brokered-optional** (#114, flag) | n/a |
 | Boot | new VM + template pull | new sandbox + snapshot | local `docker run` (fastest) | instant |
 | Resume | `connect` auto-resume from pause | state-machine restore/start | unpause/start | n/a |
 | Cost | metered VM (managed billing) | metered sandbox (managed billing) | local compute only | free |
@@ -257,18 +257,25 @@ Two planes, two very different states:
   per-run bearer. Brokering is the fail-safe default (`credentialBroker: "on"`
   unless the exact string `legacy-direct` is set). Merged as **PR #113 /
   commit `e264815`** (builds on #65/#79/#80).
-- **Sandbox plane (E2B/Daytona/Docker) — NOT brokered.** These providers still
-  write a **resident** GitHub token to disk on every boot:
-  `setupGitCredentials` (`setup.ts:166`) writes `~/.git-credentials` with the real
-  `GITHUB_ACCESS_TOKEN` (`setup.ts:192`), called unconditionally from
-  `setupSandboxEveryTime` (`setup.ts:213`). There is **no broker code in
-  `packages/sandbox`** (a `grep` for `broker` finds only egress).
-- **#114 (sandbox-plane / Docker host-side broker) — IN-FLIGHT, no code.** Open
-  issue, no PR, nothing merged. The Docker egress sidecar is cited only as a shape
-  precedent. **Do not treat sandbox brokering as done.**
-- **#89 (review-lane on-disk credential) — OPEN, unresolved.** The review env-strip
-  removes env keys only; the `~/.git-credentials` channel written at `setup.ts:213`
-  survives it. Not fixed.
+- **Sandbox plane — Docker brokered behind a flag (#114); E2B/Daytona not yet.**
+  By default every provider still writes a **resident** GitHub token to disk on
+  boot: `setupGitCredentials` (`setup.ts:166`) writes `~/.git-credentials` with the
+  real `GITHUB_ACCESS_TOKEN` (`setup.ts:192`) from `setupSandboxEveryTime`
+  (`setup.ts:213`). With `SANDBOX_CREDENTIAL_BROKER=on` **on the Docker plane**, a
+  per-run credential-broker **sidecar** holds the installation token in a `0o400`
+  `:ro` file (never argv/`-e`/`docker inspect`); the guest gets only a per-run,
+  repo-fenced bearer — git via `insteadOf`+`Bearer`, token injected server-side in
+  the sidecar (`providers/docker-cred-broker.ts`, `cred-broker-standalone.cjs`), and
+  **no `~/.git-credentials`** on the brokered path (so this also closes #89 for
+  Docker). Brokered sandboxes are **not resumed in place** — a resume fails closed
+  and recreates fresh under a DB CAS lease (`thread.credentialBrokerMode` provenance).
+  Default off = today's exact behavior. **Git only** — the `gh`-API half (a
+  CA-terminating CONNECT proxy) is deferred, and **E2B/Daytona stay unbrokered**
+  (managed runtimes with no host-reachable per-run peer). #114 remains open for those.
+- **#89 (review-lane on-disk credential) — OPEN for E2B/Daytona; closed for
+  brokered Docker.** The review env-strip removes env keys only; the
+  `~/.git-credentials` channel (`setup.ts:213`) survives it on the unbrokered
+  providers. The Docker brokered path writes no such file.
 
 > Note: `docs/compliance/soc2-egress-alignment.md:22` credits only the git broker
 > and is worker-plane-scoped; it predates the gh-API broker from PR #113. The
@@ -297,8 +304,11 @@ Two planes, two very different states:
   and `none` are hard errors); tier 1/2 orgs cannot override network settings (verify
   on the real org first); no audit feed; resident token.
 - **Docker** — *pro:* fastest, free, the **only** plane with per-connection egress
-  audit; great for local iteration. *con:* local single-host, not remote isolation;
-  hibernate is timer-based; resident token; not a production isolation boundary.
+  audit, and the **only sandbox plane that can broker credentials** (#114,
+  `SANDBOX_CREDENTIAL_BROKER=on` → no resident token in the guest); great for local
+  iteration. *con:* local single-host, not remote isolation; hibernate is
+  timer-based; resident token unless brokered; brokered sandboxes can't resume
+  in place (they recreate); not a production isolation boundary.
 - **Mock** — *pro:* zero-cost deterministic tests. *con:* test-only; every I/O
   method throws.
 
