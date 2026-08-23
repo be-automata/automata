@@ -1076,9 +1076,10 @@ export async function updateThread({
  * (that orphans a sandbox + its sidecar/network). This atomically clears the
  * thread's stale `codesandboxId` with a compare-and-set: only the caller that
  * still observes `expectedSandboxId` wins (`claimed: true`) and performs the
- * destroy-old + recreate; losers get `claimed: false` and must converge on the
- * winner's freshly-created sandbox (reconnect), never recreate themselves.
- * Non-secret only — touches no token/bearer.
+ * destroy-old + recreate; losers get `claimed: false` and must retry (a
+ * brokered sandbox is never resumed in place, so a loser can neither reconnect
+ * to nor destroy the winner's fresh sandbox — it retries once the winner has
+ * published). Non-secret only — touches no token/bearer.
  */
 export async function claimBrokeredSandboxRecreate({
   db,

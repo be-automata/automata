@@ -339,21 +339,6 @@ class DockerSession implements ISandboxSession {
 export class DockerProvider implements ISandboxProvider {
   constructor() {}
 
-  /** True iff the container exists and its status is "running" (not paused/
-   * exited). Used by the #114 brokered-resume fence to distinguish a safe
-   * reconnect from a stale guest that must be recreated. */
-  private isContainerRunning(sandboxId: string): boolean {
-    try {
-      const status = execSync(
-        `docker inspect --format '{{.State.Status}}' ${sandboxId}`,
-        { encoding: "utf8" },
-      ).trim();
-      return status === "running";
-    } catch {
-      return false;
-    }
-  }
-
   async getSandboxOrNull(sandboxId: string): Promise<ISandboxSession | null> {
     // Try to resume existing container
     try {
@@ -378,19 +363,20 @@ export class DockerProvider implements ISandboxProvider {
     options: CreateSandboxOptions,
   ): Promise<ISandboxSession> {
     if (sandboxId) {
-      // #114 fail-closed resume for brokered Docker sandboxes. A PAUSED/EXITED
-      // brokered guest is NON-resumable: unpausing it would race the surviving
-      // named sidecar and cannot scrub a raw token from a stopped daemon's
-      // env — so we refuse BEFORE any unpause/start and let the control plane
-      // recreate (fresh, fail-closed). A RUNNING brokered sandbox is safe to
-      // RECONNECT to (its sidecar is up, its guest never held the token, no
-      // unpause happens) — this is what lets concurrent resumes converge on the
-      // winner's freshly-created sandbox instead of each recreating (no orphan).
-      // The signal is the NON-secret persisted provenance, never the secret.
+      // #114 fail-closed resume for brokered Docker sandboxes. A brokered guest
+      // is NEVER resumed in place — RUNNING or paused/exited. Reconnecting to a
+      // running guest is unsafe too: the control plane's resume setup
+      // (setupSandboxEveryTime → setupGitCredentials) runs WITHOUT the
+      // create-only broker shape, so it takes the legacy branch and writes the
+      // raw installation token to ~/.git-credentials (and can restart the
+      // daemon with it) — re-leaking the token the broker exists to withhold.
+      // Unpausing a stale guest is doubly unsafe (races the surviving sidecar,
+      // can't scrub a stopped daemon's env). So we refuse BEFORE any
+      // unpause/start/reconnect and let the control plane recreate (fresh,
+      // fail-closed). The signal is the NON-secret persisted provenance, never
+      // the secret. Defense in depth: the control plane already routes brokered
+      // resumes straight to recreate without calling resume here.
       if (options.credentialBrokerMode === "brokered") {
-        if (this.isContainerRunning(sandboxId)) {
-          return new DockerSession(sandboxId);
-        }
         throw new BrokeredSandboxNotResumableError(sandboxId);
       }
       const sandbox = await this.getSandboxOrNull(sandboxId);
@@ -723,6 +709,19 @@ export class DockerProvider implements ISandboxProvider {
     // For debugging purposes, don't pause the container when hibernate is called
     // We automatically pause the container using the hibernation timeout instead.
     console.log("Hibernate called, but not pausing container");
+  }
+
+  /**
+   * #114: force-destroy a sandbox by id WITHOUT unpausing/starting it. A
+   * rehydrated {@link DockerSession} (no `created` metadata) recovers the
+   * container name via `docker inspect` and best-efforts the sidecar/network/
+   * secret-file teardown; `docker rm -f` removes the guest in place (paused,
+   * exited, or running) and never resumes its daemon — unlike
+   * {@link getSandboxOrNull}, which unpauses a stale guest before returning it.
+   * Errors propagate so the caller can fail loudly rather than orphan.
+   */
+  async shutdownById(sandboxId: string): Promise<void> {
+    await new DockerSession(sandboxId).shutdown();
   }
 
   /**

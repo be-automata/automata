@@ -102,6 +102,15 @@ export async function shutdownSandboxById({
   sandboxId: string;
 }): Promise<void> {
   const provider = getSandboxProvider(sandboxProvider);
+  // #114: prefer the in-place force-destroy that NEVER unpauses/starts the
+  // guest. Routing through getSandboxOrNull (as the fallback does) would
+  // unpause a stale brokered guest — reviving the raw-token guest we are trying
+  // to tear down. Only the Docker provider (the sole brokered provider)
+  // implements shutdownById; others keep the resume-then-shutdown fallback.
+  if (provider.shutdownById) {
+    await provider.shutdownById(sandboxId);
+    return;
+  }
   const session = await provider.getSandboxOrNull(sandboxId);
   if (session) {
     await session.shutdown();

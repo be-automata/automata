@@ -132,6 +132,16 @@ export interface ISandboxProvider {
   ): Promise<ISandboxSession>;
   hibernateById(sandboxId: string): Promise<void>;
   extendLife(sandboxId: string): Promise<void>;
+  /**
+   * Force-destroy a sandbox by id WITHOUT starting/unpausing it (#114). Unlike
+   * {@link getSandboxOrNull} (which unpauses/starts a stale guest so it can be
+   * resumed), this tears the guest and any sidecar/network/secret-file
+   * resources down in place — used by the brokered-resume recreate so a stale
+   * raw-token guest is never revived on its way to the grave. Optional: only
+   * the Docker provider (the only brokered provider) implements it; callers
+   * fall back to {@link getSandboxOrNull} + shutdown otherwise.
+   */
+  shutdownById?(sandboxId: string): Promise<void>;
 }
 
 export interface BackgroundCommandOptions {

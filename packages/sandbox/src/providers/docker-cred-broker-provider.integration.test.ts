@@ -15,9 +15,9 @@ const TIMEOUT_MS = 5 * 60 * 1000;
 // Opt-in provider E2E (mirrors docker-egress.integration.test.ts): drives the
 // WIRED DockerProvider with a credentialBroker shape and proves the installation
 // token is ABSENT from the guest on the CREATE path AND the setup-script path,
-// and that a brokered RESUME of a PAUSED guest fails closed (before any
-// unpause), while a RUNNING one reconnects. Needs a docker daemon + the test
-// base image. Run:
+// and that a brokered RESUME fails closed BEFORE any unpause/reconnect —
+// PAUSED (stays paused) AND RUNNING (no reconnect, so the raw-token resume
+// setup never runs). Needs a docker daemon + the test base image. Run:
 //   SANDBOX_PROVIDER=docker pnpm -C packages/sandbox vitest docker-cred-broker-provider.integration
 describe(
   "docker cred-broker provider wiring (integration)",
@@ -181,12 +181,37 @@ describe(
       }
     });
 
-    it("brokered RESUME of a RUNNING guest reconnects (no throw, no unpause needed)", async () => {
-      const reconnected = await provider.getOrCreateSandbox(
-        sandbox.sandboxId,
-        baseOptions,
-      );
-      expect(reconnected.sandboxId).toBe(sandbox.sandboxId);
+    it("brokered RESUME of a RUNNING guest ALSO fails closed (no reconnect, no raw-token resume setup)", async () => {
+      // #114 CRITICAL: reconnecting to a running brokered guest would let the
+      // control plane run setupSandboxEveryTime → setupGitCredentials WITHOUT
+      // the create-only broker shape, writing the raw token to
+      // ~/.git-credentials. The provider must refuse a running brokered guest
+      // too, not just a paused one.
+      const before = execSync(
+        `docker inspect --format '{{.State.Status}}' ${sandbox.sandboxId}`,
+        { encoding: "utf8" },
+      ).trim();
+      expect(before).toBe("running");
+      await expect(
+        provider.getOrCreateSandbox(sandbox.sandboxId, baseOptions),
+      ).rejects.toBeInstanceOf(BrokeredSandboxNotResumableError);
+      // The guest is still running (untouched) and, crucially, no raw token was
+      // written: the refused resume never reached setupGitCredentials, and the
+      // guest still carries only the brokered bearer git-config from create.
+      const after = execSync(
+        `docker inspect --format '{{.State.Status}}' ${sandbox.sandboxId}`,
+        { encoding: "utf8" },
+      ).trim();
+      expect(after).toBe("running");
+      const creds = await sandbox
+        .runCommand("cat ~/.git-credentials 2>&1 || true", { cwd: "/" })
+        .catch(() => "");
+      expect(creds).not.toContain(INJECTED_TOKEN);
+      const config = await sandbox.runCommand("git config --global --list", {
+        cwd: "/",
+      });
+      expect(config).toContain(`Authorization: Bearer ${RUN_BEARER}`);
+      expect(config).not.toContain(INJECTED_TOKEN);
     });
 
     it("shutdown tears down the guest, sidecar, and network", async () => {

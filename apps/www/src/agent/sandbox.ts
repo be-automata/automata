@@ -323,10 +323,95 @@ async function getOrCreateSandboxForThread({
       updates: {
         codesandboxId: sandboxId,
         sandboxSize,
-        // Record the NON-secret provenance so a later resume fails closed.
-        credentialBrokerMode: brokerCreate ? brokerCreate.mode : "legacy-direct",
+        // #114 (LOW): record the NON-secret provenance ONLY when actually
+        // brokering, so a later resume fails closed. When brokering is off /
+        // provider ≠ docker, leave the column NULL — flag-off is then
+        // byte-identical to pre-#114 behavior (no "legacy-direct" written).
+        credentialBrokerMode: brokerCreate ? brokerCreate.mode : null,
       },
     });
+  };
+
+  // #114 fail-closed recreate: a brokered thread is NEVER resumed in place, so
+  // a resume must destroy the stale sandbox and create a fresh brokered one. A
+  // CAS lease ensures exactly ONE concurrent resume wins the recreate; losers
+  // do NOT reconnect to the winner's fresh brokered sandbox (that would re-run
+  // the raw-token resume setup) and do NOT destroy it (the winner is using it)
+  // — they ask the caller to retry, converging once the winner has published.
+  const recreateBrokeredSandbox = async (
+    staleSandboxId: string,
+  ): Promise<ISandboxSession> => {
+    const claim = await claimBrokeredSandboxRecreate({
+      db,
+      userId,
+      threadId,
+      expectedSandboxId: staleSandboxId,
+    });
+    if (!claim.claimed) {
+      // Loser: the winner cleared codesandboxId and is recreating. Never
+      // reconnect (re-leak) or destroy (the winner owns it) — retry instead.
+      throw new Error(
+        "Brokered sandbox recreate in progress; please retry the request.",
+      );
+    }
+    // Winner. The CAS already cleared codesandboxId (recoverable NULL state: a
+    // failure below leaves the thread able to CREATE fresh on the next resume).
+    // Destroy the stale sandbox (+ its sidecar/network/secret file) WITHOUT
+    // unpausing it. If that destroy FAILS we must NOT proceed to create a
+    // second guest (that orphans the stale one whose id we just cleared):
+    // restore the stale id so a later resume can retry the recreate, then fail
+    // the run loudly instead of silently swallowing the error.
+    try {
+      await shutdownSandboxById({
+        sandboxProvider: thread.sandboxProvider,
+        sandboxId: staleSandboxId,
+      });
+    } catch (destroyError) {
+      console.error("Failed to destroy stale brokered sandbox", destroyError);
+      await updateThread({
+        db,
+        userId,
+        threadId,
+        updates: { codesandboxId: staleSandboxId },
+      }).catch((restoreError) => {
+        console.error(
+          "Failed to restore stale brokered sandbox id after destroy failure",
+          restoreError,
+        );
+      });
+      throw new Error(
+        `Failed to destroy stale brokered sandbox ${staleSandboxId} during recreate: ${
+          destroyError instanceof Error
+            ? destroyError.message
+            : String(destroyError)
+        }`,
+        { cause: destroyError },
+      );
+    }
+    // Create the fresh brokered sandbox. On any create/setup failure the
+    // provider sweeps its own partial resources (docker-provider create
+    // try/catch); codesandboxId stays NULL (recoverable). On a persist failure
+    // the guest exists but is untracked — tear it down so nothing is orphaned.
+    const egressPolicy = await resolveEgressForCreate();
+    const session = await getOrCreateSandboxWithTimeout(
+      null,
+      makeOptions({ forCreate: true, egressPolicy }),
+    );
+    try {
+      await persistCreated(session.sandboxId);
+    } catch (persistError) {
+      await shutdownSandboxById({
+        sandboxProvider: thread.sandboxProvider,
+        sandboxId: session.sandboxId,
+      }).catch((teardownError) => {
+        console.error(
+          "Failed to tear down fresh brokered sandbox after persist failure",
+          teardownError,
+        );
+      });
+      throw persistError;
+    }
+    return session;
   };
 
   // Initial call: CREATE when no sandbox yet, else RESUME the existing one.
@@ -341,56 +426,34 @@ async function getOrCreateSandboxForThread({
   }
 
   const existingSandboxId = thread.codesandboxId;
+
+  // #114 CRITICAL: a brokered thread is NEVER resumed in place — running OR
+  // paused. An in-place resume runs setupSandboxEveryTime → setupGitCredentials
+  // WITHOUT the create-only broker shape, so it takes the legacy branch and
+  // writes the raw installation token to ~/.git-credentials (and can restart
+  // the daemon with it), re-leaking the token the broker exists to withhold. So
+  // refuse BEFORE any resume setup / cred write / daemon restart / unpause and
+  // route to the fail-closed CAS recreate. This is decided HERE (control plane)
+  // by the NON-secret persisted provenance; the provider fails closed too
+  // (defense in depth). Legacy threads (mode null/undefined) are unaffected and
+  // take the normal in-place resume below.
+  if (persistedBrokerMode === "brokered") {
+    return await recreateBrokeredSandbox(existingSandboxId);
+  }
+
   try {
-    // A RUNNING brokered sandbox reconnects here; a stale (paused/exited)
-    // brokered one throws BrokeredSandboxNotResumableError (fail-closed).
     return await getOrCreateSandboxWithTimeout(
       existingSandboxId,
       makeOptions({ forCreate: false, egressPolicy: undefined }),
     );
   } catch (error) {
+    // Defense in depth: if a provider still signals a brokered sandbox as
+    // non-resumable (e.g. provenance drift), converge on the same fail-closed
+    // recreate rather than surfacing a raw resume error.
     if (!(error instanceof BrokeredSandboxNotResumableError)) {
       throw error;
     }
-    // #114 fail-closed recreate lease: exactly ONE concurrent resume wins and
-    // recreates; losers converge on the winner's fresh sandbox (never recreate
-    // → no orphan).
-    const claim = await claimBrokeredSandboxRecreate({
-      db,
-      userId,
-      threadId,
-      expectedSandboxId: existingSandboxId,
-    });
-    if (claim.claimed) {
-      // Winner: destroy the stale sandbox (+ its sidecar/network/secret file),
-      // then create a fresh brokered one.
-      await shutdownSandboxById({
-        sandboxProvider: thread.sandboxProvider,
-        sandboxId: existingSandboxId,
-      }).catch((e) => {
-        console.error("Failed to destroy stale brokered sandbox", e);
-      });
-      const egressPolicy = await resolveEgressForCreate();
-      const session = await getOrCreateSandboxWithTimeout(
-        null,
-        makeOptions({ forCreate: true, egressPolicy }),
-      );
-      await persistCreated(session.sandboxId);
-      return session;
-    }
-    // Loser: the winner cleared codesandboxId and is recreating. Re-read; if the
-    // fresh (running) sandbox is published, reconnect to it; otherwise ask the
-    // caller to retry (no recreate, so nothing is orphaned).
-    const refreshed = await getThreadMinimal({ db, threadId, userId });
-    if (refreshed?.codesandboxId) {
-      return await getOrCreateSandboxWithTimeout(
-        refreshed.codesandboxId,
-        makeOptions({ forCreate: false, egressPolicy: undefined }),
-      );
-    }
-    throw new Error(
-      "Brokered sandbox recreate in progress; please retry the request.",
-    );
+    return await recreateBrokeredSandbox(existingSandboxId);
   }
 }
 
