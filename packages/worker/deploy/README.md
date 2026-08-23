@@ -131,3 +131,139 @@ Each daemon SIGKILLs its own process group on teardown, and boot-time reclaim re
 dead sibling worker's orphaned daemons. Add a worker-liveness alert (gap #7): alert on
 a worker that stops heartbeating so a silently-dead unit is noticed before it starves
 HA.
+
+## Scheduling deadlock: diagnosis and recovery (#69)
+
+Two independent engine-side defects can wedge the box's single agent-run slot:
+**concurrency-group rot** (a corrupted strategy-chain pointer leaves the active chain
+dead-ending — tasks sit `QUEUED` forever with an idle worker) and **SIGKILL slot
+exhaustion** (a worker killed without drain never releases its `v1_concurrency_slot`
+row). Both are 100% throughput loss with no automatic recovery unless the mechanisms
+below are enabled. See `docs/plans/69-scheduling-deadlock-recovery.md` for the full
+design and the live evidence this diagnosis is built from.
+
+### Everything here is OFF by default
+
+`HATCHET_ENGINE_DATABASE_URL` unset is the master gate: a box that only ever runs
+plain `hatchet:up` has no published engine-DB port to point it at, never sets the URL,
+and is byte-identical to a box that predates this ticket. Nothing here changes that
+default.
+
+### Diagnosis (read-only, works on any box with docker access — no opt-in required)
+
+```bash
+# Step-level rot (§3.1.2) — non-empty rows mean an active strategy's parent
+# pointer leads outside its own live chain.
+docker exec automata-hatchet-postgres-1 psql -U hatchet -d hatchet -c "
+  SELECT c.id, c.step_id, c.expression, c.parent_strategy_id,
+         p.id IS NULL AS parent_missing, COALESCE(p.is_active, false) AS parent_is_active,
+         p.step_id AS parent_step_id
+    FROM v1_step_concurrency c
+    LEFT JOIN v1_step_concurrency p ON p.id = c.parent_strategy_id AND p.tenant_id = c.tenant_id
+   WHERE c.is_active AND c.parent_strategy_id IS NOT NULL
+     AND (p.id IS NULL OR NOT p.is_active OR p.step_id <> c.step_id)
+   ORDER BY c.id;"
+
+# Workflow-level rot (§3.1.4) — non-empty rows mean an active chain names a
+# nonexistent or foreign-version child strategy.
+docker exec automata-hatchet-postgres-1 psql -U hatchet -d hatchet -c "
+  SELECT c.id, c.workflow_version_id, c.expression, c.child_strategy_ids, x.child_id
+    FROM v1_workflow_concurrency c
+    CROSS JOIN LATERAL unnest(COALESCE(c.child_strategy_ids, '{}'::bigint[])) AS x(child_id)
+    LEFT JOIN v1_workflow_concurrency k ON k.id = x.child_id
+           AND k.workflow_id = c.workflow_id AND k.workflow_version_id = c.workflow_version_id
+   WHERE c.is_active AND k.id IS NULL
+   ORDER BY c.id;"
+
+# Leaked slots (§3.2) — a filled slot with no live runtime, or one owned by a
+# dead worker generation.
+docker exec automata-hatchet-postgres-1 psql -U hatchet -d hatchet -c "
+  SELECT s.task_id, s.key, s.is_filled, r.worker_id, w.\"lastHeartbeatAt\"
+    FROM v1_concurrency_slot s
+    LEFT JOIN v1_task_runtime r ON r.task_id = s.task_id AND r.task_inserted_at = s.task_inserted_at
+                                AND r.retry_count = s.task_retry_count AND r.evicted_at IS NULL
+    LEFT JOIN \"Worker\" w ON w.id = r.worker_id
+   WHERE s.is_filled;"
+
+# Stuck-QUEUED tasks (§3.3) — QUEUED past the schedule-timeout half-life.
+docker exec automata-hatchet-postgres-1 psql -U hatchet -d hatchet -c "
+  SELECT external_id, workflow_run_id, inserted_at,
+         EXTRACT(epoch FROM (now() - inserted_at))::int AS queued_for_s
+    FROM v1_tasks_olap
+   WHERE readable_status = 'QUEUED' AND inserted_at >= now() - interval '7 days'
+   ORDER BY inserted_at;"
+```
+
+### Reading `scheduling-health.json`
+
+Once maintenance is enabled the worker atomically writes
+`<runNamespaceRoot>/scheduling-health.json` (default `/tmp/automata-agent-run/`) on
+every tick. `healthy: true` means all detectors returned zero findings. Non-zero
+`rot.stepLevel`/`rot.workflowLevel` or `slots.reclaimable` with `mode: "dry-run"` means
+the box is corrupted or leaking but nothing has been written yet — this is expected
+during the observation window (see Promotion below). A structured log line
+(`event: "scheduling.rot_detected"` / `"scheduling.rot_repaired"` /
+`"scheduling.slots_reclaimed"` / `"scheduling.stuck_queued"` / `"scheduling.tick_error"`
+/ `"scheduling.tick_skipped_locked"`) is emitted to `worker.log` on every tick with a
+non-empty finding.
+
+### Recovery-latency bounds — alert on the ALERTABLE figure, not 5 minutes
+
+```
+nominal   = HATCHET_WORKER_DEAD_AFTER_S (600s) + HATCHET_MAINT_INTERVAL_S (60s)  ≈ 11 min
+alertable = HATCHET_WORKER_DEAD_AFTER_S (600s) + 2 × HATCHET_MAINT_INTERVAL_S    ≈ 12 min
+```
+
+The alertable figure accounts for one lost `pg_try_advisory_lock` race between the two
+launchd units (§3.4) — publishing the nominal figure as an ops alert threshold would
+page on healthy contention. It is **not** 5 minutes, and it is **not** bounded by
+`scheduleTimeout` (that gate was deliberately removed, §3.2.2). A box needing faster
+recovery lowers `HATCHET_WORKER_DEAD_AFTER_S`, accepting a proportionally larger
+network-partition hazard (§3.2.1).
+
+### Opting in
+
+```bash
+# 1. Bring the engine up with the loopback-only maintenance overlay (never
+#    edits docker-compose.hatchet.yml; a box that skips this stays port-free).
+pnpm --filter @terragon/worker hatchet:up:maintenance
+
+# 2. Point the worker at it and restart with SIGTERM + wait (never
+#    `launchctl kickstart -k`, which is SIGKILL — see "Graceful restart" above).
+echo 'HATCHET_ENGINE_DATABASE_URL=postgresql://hatchet:hatchet@127.0.0.1:55433/hatchet?sslmode=disable' \
+  >> ~/.automata/worker-box.env
+launchctl kill TERM gui/$UID/com.automata.worker
+```
+
+At this point `WORKER_SCHEDULING_MAINTENANCE` defaults to `dry-run`:
+mechanisms 1 (rot repair) and 2 (slot reclaim) detect and log but never write.
+Mechanism 3 (stuck-QUEUED detection) is read-only and on by default.
+
+### Promotion procedure (dry-run → on)
+
+1. Observe ≥24h of `scheduling-health.json`. Confirm the reported rot rows match a
+   manual diagnosis query above and `slots.reclaimable = 0` on a healthy box.
+2. Flip `WORKER_CONCURRENCY_ROT_REPAIR=on`, restart (SIGTERM + wait), confirm the
+   one-time repair fires and subsequent ticks report `rot.repaired = 0`.
+3. Flip `WORKER_SLOT_RECLAIM=on` **separately, at least a day later**, and only after
+   reviewing the partition guard (§3.2.1) against this box's network reliability. A box
+   on flaky connectivity should stay at `dry-run` indefinitely for this mechanism —
+   detection still works, and the manual reclaim query above covers the rare real case.
+
+### Kill switches (rollback)
+
+Unset any of these and SIGTERM-restart — an untouched box (no `HATCHET_ENGINE_DATABASE_URL`)
+is the strongest rollback available, since nothing runs at all:
+
+| Env var | Effect when unset/off |
+|---|---|
+| `HATCHET_ENGINE_DATABASE_URL` | Master gate. Unset → all three mechanisms inert. |
+| `WORKER_SCHEDULING_MAINTENANCE=off` | Mechanisms 1 & 2 fully disabled (no detect, no write). |
+| `WORKER_CONCURRENCY_ROT_REPAIR=off` | Rot repair specifically disabled (detection via mechanism 3 unaffected). |
+| `WORKER_SLOT_RECLAIM=off` | Slot reclaim specifically disabled. |
+| `WORKER_STUCK_QUEUED_DETECT=off` | Read-only detection disabled (rarely needed). |
+
+To roll back a repair that already happened: the repair only NULLs a dangling parent
+pointer / strips dangling child ids — it never deletes a row or flips `is_active`.
+Restarting the worker re-registers the workflow and mints a fresh chain; there is no
+state to manually restore.
