@@ -7,17 +7,16 @@ vi.mock("@/lib/github", async (importOriginal) => ({
   getOctokitForUser: vi.fn(),
 }));
 
-function octokit(permission: string | Error) {
+function octokit(adminOrError: boolean | Error) {
   return {
     rest: {
-      users: {
-        getAuthenticated: vi.fn().mockResolvedValue({ data: { login: "me" } }),
-      },
       repos: {
-        getCollaboratorPermissionLevel:
-          permission instanceof Error
-            ? vi.fn().mockRejectedValue(permission)
-            : vi.fn().mockResolvedValue({ data: { permission } }),
+        get:
+          adminOrError instanceof Error
+            ? vi.fn().mockRejectedValue(adminOrError)
+            : vi.fn().mockResolvedValue({
+                data: { permissions: { admin: adminOrError } },
+              }),
       },
     },
   } as never;
@@ -30,7 +29,7 @@ describe("checkRepoAdmin (#125 C6)", () => {
   });
 
   it("admin / write map to admin / not-admin; the answer is cached 5 min per (user, repo)", async () => {
-    vi.mocked(getOctokitForUser).mockResolvedValue(octokit("admin"));
+    vi.mocked(getOctokitForUser).mockResolvedValue(octokit(true));
     let t = 0;
     const now = () => t;
     expect(
@@ -43,7 +42,7 @@ describe("checkRepoAdmin (#125 C6)", () => {
     expect(getOctokitForUser).toHaveBeenCalledTimes(1);
     // TTL expiry re-checks.
     t = 5 * 60 * 1000 + 1;
-    vi.mocked(getOctokitForUser).mockResolvedValue(octokit("write"));
+    vi.mocked(getOctokitForUser).mockResolvedValue(octokit(false));
     expect(
       await checkRepoAdmin({ userId: "u1", repoFullName: "a/r", now }),
     ).toBe("not-admin");
@@ -58,7 +57,7 @@ describe("checkRepoAdmin (#125 C6)", () => {
     expect(await checkRepoAdmin({ userId: "u2", repoFullName: "a/r" })).toBe(
       "lookup-failed",
     );
-    vi.mocked(getOctokitForUser).mockResolvedValue(octokit("admin"));
+    vi.mocked(getOctokitForUser).mockResolvedValue(octokit(true));
     expect(await checkRepoAdmin({ userId: "u2", repoFullName: "a/r" })).toBe(
       "admin",
     );

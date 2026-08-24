@@ -1,7 +1,7 @@
 import { DB } from "../db";
 import { repoReviewSettings } from "../db/schema";
 import { RepoReviewSetting } from "../db/types";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, ne } from "drizzle-orm";
 import { buildEgressPolicyShape } from "./egress-policy";
 
 /**
@@ -320,8 +320,16 @@ export async function listRepoReviewSettings({
   db: DB;
   organizationId: string;
 }): Promise<RepoReviewSetting[]> {
+  // The org-default sentinel ('*') is a storage encoding, not a repo override —
+  // it has its own accessor (getRepoReviewSetting with the sentinel name) and
+  // must never leak into "list the org's overrides".
   return db
     .select()
     .from(repoReviewSettings)
-    .where(eq(repoReviewSettings.organizationId, organizationId));
+    .where(
+      and(
+        eq(repoReviewSettings.organizationId, organizationId),
+        ne(repoReviewSettings.repoFullName, ORG_DEFAULT_REPO_SENTINEL),
+      ),
+    );
 }

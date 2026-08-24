@@ -1,6 +1,7 @@
 import React from "react";
 import { AlertTriangle } from "lucide-react";
 import {
+  DEFAULT_SUPERSEDE_POLICY,
   SUPERSEDE_POLICIES,
   SUPERSEDE_POLICY_LABELS,
   type SupersedePolicy,
@@ -30,7 +31,8 @@ export const POLICY_CONSEQUENCE: Record<SupersedePolicy, string> = {
     "Keep today's behavior: the platform cancels the old review when a new commit arrives.",
 };
 
-export const DEFAULT_POLICY: SupersedePolicy = "newest-wins";
+// The platform default lives in the shared model (the dispatch resolver uses
+// the same constant), so the "Default" badge can never disagree with it.
 
 export function PolicyRadioGroup({
   value,
@@ -48,7 +50,7 @@ export function PolicyRadioGroup({
   onRecheckChange: (on: boolean) => void;
   idPrefix?: string;
 }) {
-  const selected = value ?? DEFAULT_POLICY;
+  const selected = value ?? DEFAULT_SUPERSEDE_POLICY;
   return (
     <RadioGroup
       value={selected}
@@ -78,7 +80,7 @@ export function PolicyRadioGroup({
               <span className="text-sm font-medium">
                 {SUPERSEDE_POLICY_LABELS[policy]}
               </span>
-              {policy === DEFAULT_POLICY && (
+              {policy === DEFAULT_SUPERSEDE_POLICY && (
                 <span className="rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
                   Default
                 </span>

@@ -3,7 +3,10 @@
 import React, { useState } from "react";
 import { AlertCircle, RotateCcw } from "lucide-react";
 import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
-import { SUPERSEDE_POLICY_LABELS } from "@terragon/shared/model/repo-review-settings";
+import {
+  DEFAULT_SUPERSEDE_POLICY,
+  SUPERSEDE_POLICY_LABELS,
+} from "@terragon/shared/model/repo-review-settings";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -15,14 +18,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { SettingsSection } from "@/components/settings/settings-row";
-import { useReviewSettingsQuery } from "@/queries/review-settings-queries";
 import {
-  ConflictError,
+  useReviewSettingsQuery,
+  useSetReviewSettingMutation,
+} from "@/queries/review-settings-queries";
+import {
   useSetSupersedeDefaultMutation,
-  useSetSupersedeOverrideMutation,
   useSupersedeDefaultQuery,
 } from "@/queries/supersede-policy-queries";
-import { DEFAULT_POLICY, PolicyRadioGroup } from "./policy-radio-group";
+import { ConflictError } from "@/queries/error-from-response";
+import { PolicyRadioGroup } from "./policy-radio-group";
 
 /**
  * #125 C6 — "Review & Automations": the org-wide supersede policy (what
@@ -38,7 +43,9 @@ export function SupersedePolicySection() {
   const defaultQuery = useSupersedeDefaultQuery();
   const listQuery = useReviewSettingsQuery();
   const setDefault = useSetSupersedeDefaultMutation();
-  const setOverride = useSetSupersedeOverrideMutation();
+  const setOverride = useSetReviewSettingMutation({
+    successMessage: "Repo override saved. Applies to new runs.",
+  });
   const [conflict, setConflict] = useState(false);
 
   const stored = defaultQuery.data ?? null;
@@ -61,7 +68,7 @@ export function SupersedePolicySection() {
   }
 
   const overrides = (listQuery.data ?? []).filter(
-    (s) => s.supersedePolicy !== null && s.supersedePolicy !== undefined,
+    (s) => s.supersedePolicy !== null,
   );
 
   return (
@@ -137,12 +144,14 @@ export function SupersedePolicySection() {
                       Repo override
                     </span>
                     <Select
-                      value={s.supersedePolicy ?? DEFAULT_POLICY}
+                      value={s.supersedePolicy ?? DEFAULT_SUPERSEDE_POLICY}
                       onValueChange={(v) =>
                         setOverride.mutate({
                           repoFullName: s.repoFullName,
-                          supersedePolicy: v as SupersedePolicy,
-                          expectedUpdatedAt: s.updatedAt,
+                          patch: {
+                            supersedePolicy: v as SupersedePolicy,
+                            expectedUpdatedAt: s.updatedAt,
+                          },
                         })
                       }
                       disabled={setOverride.isPending}
@@ -173,8 +182,10 @@ export function SupersedePolicySection() {
                       onClick={() =>
                         setOverride.mutate({
                           repoFullName: s.repoFullName,
-                          supersedePolicy: null,
-                          expectedUpdatedAt: s.updatedAt,
+                          patch: {
+                            supersedePolicy: null,
+                            expectedUpdatedAt: s.updatedAt,
+                          },
                         })
                       }
                       disabled={setOverride.isPending}

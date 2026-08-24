@@ -5,10 +5,12 @@ import { isOrgAdmin } from "@/lib/org-role";
 import {
   getRepoReviewSetting,
   upsertRepoReviewSetting,
-  isSupersedePolicy,
   ORG_DEFAULT_REPO_SENTINEL,
-  SUPERSEDE_POLICIES,
 } from "@terragon/shared/model/repo-review-settings";
+import {
+  parseSupersedePatch,
+  checkExpectedUpdatedAt,
+} from "../supersede-route-shared";
 import { getPostHogServer } from "@/lib/posthog-server";
 
 /**
@@ -88,36 +90,9 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   } catch {
     return NextResponse.json({ error: "Invalid body" }, { status: 400 });
   }
-  const patch: {
-    supersedePolicy?: string | null;
-    recheckOnComplete?: boolean;
-  } = {};
-  if (body.supersedePolicy !== undefined) {
-    if (
-      body.supersedePolicy !== null &&
-      !(
-        typeof body.supersedePolicy === "string" &&
-        isSupersedePolicy(body.supersedePolicy)
-      )
-    ) {
-      return NextResponse.json(
-        {
-          error: `supersedePolicy must be null or one of ${SUPERSEDE_POLICIES.join(", ")}`,
-        },
-        { status: 400 },
-      );
-    }
-    patch.supersedePolicy = body.supersedePolicy;
-  }
-  if (body.recheckOnComplete !== undefined) {
-    if (typeof body.recheckOnComplete !== "boolean") {
-      return NextResponse.json(
-        { error: "recheckOnComplete must be a boolean" },
-        { status: 400 },
-      );
-    }
-    patch.recheckOnComplete = body.recheckOnComplete;
-  }
+  const supersede = parseSupersedePatch(body);
+  if ("errorResponse" in supersede) return supersede.errorResponse;
+  const patch = supersede.patch;
   if (
     patch.supersedePolicy === undefined &&
     patch.recheckOnComplete === undefined
@@ -128,22 +103,13 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // Optimistic concurrency: two admins editing at once must never silently
-  // last-write-win.
-  if (body.expectedUpdatedAt !== undefined) {
-    const existing = await getRepoReviewSetting({
-      db,
-      organizationId: ctx.organizationId,
-      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
-    });
-    const current = existing?.updatedAt?.toISOString() ?? null;
-    if (current !== null && current !== body.expectedUpdatedAt) {
-      return NextResponse.json(
-        { error: "conflict", currentUpdatedAt: current },
-        { status: 409 },
-      );
-    }
-  }
+  const conflict = await checkExpectedUpdatedAt({
+    db,
+    organizationId: ctx.organizationId,
+    repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+    expectedUpdatedAt: body.expectedUpdatedAt,
+  });
+  if (conflict) return conflict;
 
   const row = await upsertRepoReviewSetting({
     db,

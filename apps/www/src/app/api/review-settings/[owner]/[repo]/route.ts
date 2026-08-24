@@ -2,12 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getTenantContextOrNull } from "@/lib/auth-server";
 import {
-  getRepoReviewSetting,
   upsertRepoReviewSetting,
   removeRepoReviewSetting,
-  isSupersedePolicy,
-  SUPERSEDE_POLICIES,
 } from "@terragon/shared/model/repo-review-settings";
+import {
+  parseSupersedePatch,
+  checkExpectedUpdatedAt,
+} from "../../supersede-route-shared";
 import { isOrgAdmin } from "@/lib/org-role";
 import { checkRepoAdmin } from "@/lib/repo-admin";
 import {
@@ -120,32 +121,9 @@ export async function PUT(
     }
     patch.reviewDraftPrs = body.reviewDraftPrs;
   }
-  if (body.supersedePolicy !== undefined) {
-    if (
-      body.supersedePolicy !== null &&
-      !(
-        typeof body.supersedePolicy === "string" &&
-        isSupersedePolicy(body.supersedePolicy)
-      )
-    ) {
-      return NextResponse.json(
-        {
-          error: `supersedePolicy must be null or one of ${SUPERSEDE_POLICIES.join(", ")}`,
-        },
-        { status: 400 },
-      );
-    }
-    patch.supersedePolicy = body.supersedePolicy;
-  }
-  if (body.recheckOnComplete !== undefined) {
-    if (typeof body.recheckOnComplete !== "boolean") {
-      return NextResponse.json(
-        { error: "recheckOnComplete must be a boolean" },
-        { status: 400 },
-      );
-    }
-    patch.recheckOnComplete = body.recheckOnComplete;
-  }
+  const supersede = parseSupersedePatch(body);
+  if ("errorResponse" in supersede) return supersede.errorResponse;
+  Object.assign(patch, supersede.patch);
   if (
     patch.blockTolerance === undefined &&
     patch.reviewDraftPrs === undefined &&
@@ -173,22 +151,13 @@ export async function PUT(
   });
   if (denied) return denied;
 
-  // Optimistic concurrency: a PUT carrying a stale expectedUpdatedAt gets a
-  // 409 — never a silent last-write-wins between two admins.
-  if (body.expectedUpdatedAt !== undefined) {
-    const existing = await getRepoReviewSetting({
-      db,
-      organizationId: ctx.organizationId,
-      repoFullName,
-    });
-    const current = existing?.updatedAt?.toISOString() ?? null;
-    if (current !== null && current !== body.expectedUpdatedAt) {
-      return NextResponse.json(
-        { error: "conflict", currentUpdatedAt: current },
-        { status: 409 },
-      );
-    }
-  }
+  const conflict = await checkExpectedUpdatedAt({
+    db,
+    organizationId: ctx.organizationId,
+    repoFullName,
+    expectedUpdatedAt: body.expectedUpdatedAt,
+  });
+  if (conflict) return conflict;
 
   const row = await upsertRepoReviewSetting({
     db,
