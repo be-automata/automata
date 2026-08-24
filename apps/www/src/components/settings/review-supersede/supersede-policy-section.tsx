@@ -32,107 +32,108 @@ import { PolicyRadioGroup } from "./policy-radio-group";
 /**
  * #125 C6 — "Review & Automations": the org-wide supersede policy (what
  * happens when a commit lands during a running review) + per-repo overrides.
- * Full state table: skeleton / empty / human error (incl. no-active-org) /
- * success toast / concurrent-edit conflict with a Reload action. Full mobile
- * parity: the overrides render as stacked cards under 640px (grid classes),
- * radio cards and switches are 44px targets. Writes are permission-gated
- * server-side (org admin for the default; org- or repo-admin for overrides)
- * and surface the 403's human copy as-is.
+ *
+ * Split into a PURE view (`SupersedePolicySectionView`, every state is a
+ * prop — testable with renderToStaticMarkup) and a thin container that binds
+ * the queries/mutations. State table: loading skeleton / human error /
+ * conflict banner with Reload (BOTH the org default and a repo override
+ * losing a race land here — never a silent last-write-wins) / empty
+ * overrides / overrides list with Restore default. Mobile: overrides stack as
+ * cards under 640px; radio cards, selects and switches are 44px targets.
+ * Writes are permission-gated server-side (org admin for the default; org- or
+ * repo-admin for overrides) and the 403's human copy is toasted as-is.
  */
-export function SupersedePolicySection() {
-  const defaultQuery = useSupersedeDefaultQuery();
-  const listQuery = useReviewSettingsQuery();
-  const setDefault = useSetSupersedeDefaultMutation();
-  const setOverride = useSetReviewSettingMutation({
-    successMessage: "Repo override saved. Applies to new runs.",
-  });
-  const [conflict, setConflict] = useState(false);
 
-  const stored = defaultQuery.data ?? null;
-  const storedPolicy = stored?.supersedePolicy ?? null;
-  const recheck = stored?.recheckOnComplete ?? false;
+export interface OverrideRow {
+  repoFullName: string;
+  supersedePolicy: string | null;
+  updatedAt: string;
+}
 
-  function saveDefault(patch: {
-    supersedePolicy?: SupersedePolicy | null;
-    recheckOnComplete?: boolean;
-  }) {
-    setConflict(false);
-    setDefault.mutate(
-      { ...patch, expectedUpdatedAt: stored?.updatedAt },
-      {
-        onError: (error) => {
-          if (error instanceof ConflictError) setConflict(true);
-        },
-      },
-    );
-  }
+export type SupersedeSectionState =
+  | { kind: "loading" }
+  | { kind: "error"; message: string }
+  | {
+      kind: "ready";
+      policy: SupersedePolicy | null;
+      recheckOnComplete: boolean;
+      /** Another admin saved between our read and write. */
+      conflict: boolean;
+      saving: boolean;
+      overridesLoading: boolean;
+      overrides: OverrideRow[];
+    };
 
-  const overrides = (listQuery.data ?? []).filter(
-    (s) => s.supersedePolicy !== null,
-  );
+export interface SupersedeSectionActions {
+  onSelectPolicy: (policy: SupersedePolicy) => void;
+  onRecheckChange: (on: boolean) => void;
+  onOverridePolicy: (row: OverrideRow, policy: SupersedePolicy) => void;
+  onRestoreDefault: (row: OverrideRow) => void;
+  onReload: () => void;
+}
 
+export function SupersedePolicySectionView({
+  state,
+  actions,
+}: {
+  state: SupersedeSectionState;
+  actions: SupersedeSectionActions;
+}) {
   return (
     <SettingsSection
       label="Review & Automations"
       description="What happens when a new commit lands while a review is still running. The org default applies to every repo without an override. Changes apply to new runs."
     >
-      {defaultQuery.isLoading ? (
+      {state.kind === "loading" ? (
         <div className="grid gap-2" data-testid="supersede-skeleton">
           <Skeleton className="h-16 w-full" />
           <Skeleton className="h-16 w-full" />
           <Skeleton className="h-16 w-full" />
         </div>
-      ) : defaultQuery.isError ? (
+      ) : state.kind === "error" ? (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>Couldn&apos;t load the review policy</AlertTitle>
-          <AlertDescription>
-            {defaultQuery.error instanceof Error
-              ? defaultQuery.error.message
-              : "Something went wrong. Reload the page to try again."}
-          </AlertDescription>
+          <AlertDescription>{state.message}</AlertDescription>
         </Alert>
       ) : (
         <>
-          {conflict && (
-            <Alert>
+          {state.conflict && (
+            <Alert role="status" data-testid="supersede-conflict">
               <AlertCircle className="h-4 w-4" />
               <AlertTitle>Another admin just saved changes</AlertTitle>
               <AlertDescription className="flex items-center gap-2">
-                Reload to see the latest before editing again.
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setConflict(false);
-                    void defaultQuery.refetch();
-                  }}
-                >
+                Your change was not applied. Reload to see the latest before
+                editing again.
+                <Button size="sm" variant="outline" onClick={actions.onReload}>
                   Reload
                 </Button>
               </AlertDescription>
             </Alert>
           )}
           <PolicyRadioGroup
-            value={storedPolicy}
-            recheckOnComplete={recheck}
-            disabled={setDefault.isPending}
-            onSelect={(policy) => saveDefault({ supersedePolicy: policy })}
-            onRecheckChange={(on) => saveDefault({ recheckOnComplete: on })}
+            value={state.policy}
+            recheckOnComplete={state.recheckOnComplete}
+            disabled={state.saving}
+            onSelect={actions.onSelectPolicy}
+            onRecheckChange={actions.onRecheckChange}
           />
           <div className="mt-6">
             <h4 className="text-sm font-medium">Repo overrides</h4>
-            {listQuery.isLoading ? (
+            {state.overridesLoading ? (
               <Skeleton className="mt-2 h-12 w-full" />
-            ) : overrides.length === 0 ? (
-              <p className="mt-2 text-sm text-muted-foreground">
+            ) : state.overrides.length === 0 ? (
+              <p
+                className="mt-2 text-sm text-muted-foreground"
+                data-testid="supersede-overrides-empty"
+              >
                 All your repos use the org default. Set a repo&apos;s policy
                 from the selector below its row in Review tolerance, or here
                 once one differs.
               </p>
             ) : (
               <ul className="mt-2 grid gap-2">
-                {overrides.map((s) => (
+                {state.overrides.map((s) => (
                   <li
                     key={s.repoFullName}
                     className="grid grid-cols-1 items-center gap-2 rounded-md border p-3 sm:grid-cols-[1fr_auto_auto_auto]"
@@ -146,15 +147,9 @@ export function SupersedePolicySection() {
                     <Select
                       value={s.supersedePolicy ?? DEFAULT_SUPERSEDE_POLICY}
                       onValueChange={(v) =>
-                        setOverride.mutate({
-                          repoFullName: s.repoFullName,
-                          patch: {
-                            supersedePolicy: v as SupersedePolicy,
-                            expectedUpdatedAt: s.updatedAt,
-                          },
-                        })
+                        actions.onOverridePolicy(s, v as SupersedePolicy)
                       }
-                      disabled={setOverride.isPending}
+                      disabled={state.saving}
                     >
                       <SelectTrigger
                         className="min-h-11 w-full sm:w-64"
@@ -179,16 +174,8 @@ export function SupersedePolicySection() {
                       variant="ghost"
                       size="sm"
                       className="min-h-11 justify-self-start sm:justify-self-auto"
-                      onClick={() =>
-                        setOverride.mutate({
-                          repoFullName: s.repoFullName,
-                          patch: {
-                            supersedePolicy: null,
-                            expectedUpdatedAt: s.updatedAt,
-                          },
-                        })
-                      }
-                      disabled={setOverride.isPending}
+                      onClick={() => actions.onRestoreDefault(s)}
+                      disabled={state.saving}
                     >
                       <RotateCcw className="mr-1 h-3 w-3" aria-hidden />
                       Restore default
@@ -201,5 +188,86 @@ export function SupersedePolicySection() {
         </>
       )}
     </SettingsSection>
+  );
+}
+
+/** Thin container: binds the queries/mutations to the pure view. */
+export function SupersedePolicySection() {
+  const defaultQuery = useSupersedeDefaultQuery();
+  const listQuery = useReviewSettingsQuery();
+  const setDefault = useSetSupersedeDefaultMutation();
+  const setOverride = useSetReviewSettingMutation({
+    successMessage: "Repo override saved. Applies to new runs.",
+  });
+  const [conflict, setConflict] = useState(false);
+
+  const stored = defaultQuery.data ?? null;
+
+  // Both writers route a lost race into the same banner — the org default
+  // and the per-repo override alike (the hooks deliberately do NOT toast a
+  // ConflictError; this is the one place that renders it).
+  const onConflict = (error: unknown) => {
+    if (error instanceof ConflictError) setConflict(true);
+  };
+
+  function saveDefault(patch: {
+    supersedePolicy?: SupersedePolicy | null;
+    recheckOnComplete?: boolean;
+  }) {
+    setConflict(false);
+    setDefault.mutate(
+      { ...patch, expectedUpdatedAt: stored?.updatedAt },
+      { onError: onConflict },
+    );
+  }
+
+  function saveOverride(row: OverrideRow, policy: SupersedePolicy | null) {
+    setConflict(false);
+    setOverride.mutate(
+      {
+        repoFullName: row.repoFullName,
+        patch: { supersedePolicy: policy, expectedUpdatedAt: row.updatedAt },
+      },
+      { onError: onConflict },
+    );
+  }
+
+  const state: SupersedeSectionState = defaultQuery.isLoading
+    ? { kind: "loading" }
+    : defaultQuery.isError
+      ? {
+          kind: "error",
+          message:
+            defaultQuery.error instanceof Error
+              ? defaultQuery.error.message
+              : "Something went wrong. Reload the page to try again.",
+        }
+      : {
+          kind: "ready",
+          policy: stored?.supersedePolicy ?? null,
+          recheckOnComplete: stored?.recheckOnComplete ?? false,
+          conflict,
+          saving: setDefault.isPending || setOverride.isPending,
+          overridesLoading: listQuery.isLoading,
+          overrides: (listQuery.data ?? []).filter(
+            (s) => s.supersedePolicy !== null,
+          ),
+        };
+
+  return (
+    <SupersedePolicySectionView
+      state={state}
+      actions={{
+        onSelectPolicy: (policy) => saveDefault({ supersedePolicy: policy }),
+        onRecheckChange: (on) => saveDefault({ recheckOnComplete: on }),
+        onOverridePolicy: (row, policy) => saveOverride(row, policy),
+        onRestoreDefault: (row) => saveOverride(row, null),
+        onReload: () => {
+          setConflict(false);
+          void defaultQuery.refetch();
+          void listQuery.refetch();
+        },
+      }}
+    />
   );
 }

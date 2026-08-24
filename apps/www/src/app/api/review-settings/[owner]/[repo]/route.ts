@@ -175,6 +175,11 @@ export async function PUT(
       repoFullName: row.repoFullName,
       blockTolerance: row.blockTolerance,
       reviewDraftPrs: row.reviewDraftPrs,
+      supersedePolicy: row.supersedePolicy,
+      recheckOnComplete: row.recheckOnComplete,
+      // What THIS write changed — the audit trail must show the delta, not
+      // just the resulting row.
+      changed: Object.keys(patch),
     },
   });
 

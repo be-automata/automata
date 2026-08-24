@@ -1,0 +1,124 @@
+import React from "react";
+import { describe, expect, it, vi } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import {
+  SupersedePolicySectionView,
+  type SupersedeSectionActions,
+  type SupersedeSectionState,
+} from "./supersede-policy-section";
+
+// The app compiles JSX with the automatic runtime; vitest here uses the
+// classic one, so presentational wrappers without an explicit React import
+// are stubbed with plain elements (they carry no logic under test).
+vi.mock("@/components/ui/skeleton", () => ({
+  Skeleton: ({ className }: { className?: string }) => (
+    <div className={className} data-skeleton="" />
+  ),
+}));
+vi.mock("@/components/settings/settings-row", () => ({
+  SettingsSection: ({
+    label,
+    description,
+    children,
+  }: {
+    label: string;
+    description?: React.ReactNode;
+    children: React.ReactNode;
+  }) => (
+    <section>
+      <h3>{label}</h3>
+      <p>{description}</p>
+      {children}
+    </section>
+  ),
+}));
+
+const actions: SupersedeSectionActions = {
+  onSelectPolicy: vi.fn(),
+  onRecheckChange: vi.fn(),
+  onOverridePolicy: vi.fn(),
+  onRestoreDefault: vi.fn(),
+  onReload: vi.fn(),
+};
+
+const render = (state: SupersedeSectionState) =>
+  renderToStaticMarkup(
+    <SupersedePolicySectionView state={state} actions={actions} />,
+  );
+
+const ready = (
+  over: Partial<Extract<SupersedeSectionState, { kind: "ready" }>> = {},
+): SupersedeSectionState => ({
+  kind: "ready",
+  policy: null,
+  recheckOnComplete: false,
+  conflict: false,
+  saving: false,
+  overridesLoading: false,
+  overrides: [],
+  ...over,
+});
+
+/** #125 C6 — the section's state table, rendered state by state. */
+describe("SupersedePolicySectionView", () => {
+  it("loading → skeleton, no controls", () => {
+    const html = render({ kind: "loading" });
+    expect(html).toContain('data-testid="supersede-skeleton"');
+    expect(html).not.toContain('role="radiogroup"');
+  });
+
+  it("error → human copy, no controls", () => {
+    const html = render({
+      kind: "error",
+      message: "Select an organization first — this setting belongs to one.",
+    });
+    expect(html).toContain("Couldn&#x27;t load the review policy");
+    expect(html).toContain("Select an organization first");
+    expect(html).not.toContain('role="radiogroup"');
+  });
+
+  it("ready + no overrides → radio group with the org policy selected and the empty-state copy", () => {
+    const html = render(ready({ policy: "complete-run-queue" }));
+    expect(html).toContain('role="radiogroup"');
+    expect(html).toMatch(
+      /value="complete-run-queue"[^>]*aria-checked="true"|aria-checked="true"[^>]*value="complete-run-queue"/,
+    );
+    expect(html).toContain('data-testid="supersede-overrides-empty"');
+    expect(html).not.toContain('data-testid="supersede-conflict"');
+  });
+
+  it("ready + overrides → one row per repo with its policy, an override chip and Restore default", () => {
+    const html = render(
+      ready({
+        overrides: [
+          {
+            repoFullName: "acme/widgets",
+            supersedePolicy: "app-side",
+            updatedAt: "2026-08-24T00:00:00.000Z",
+          },
+          {
+            repoFullName: "acme/api",
+            supersedePolicy: "complete-run-discard",
+            updatedAt: "2026-08-24T00:00:00.000Z",
+          },
+        ],
+      }),
+    );
+    expect(html).toContain("acme/widgets");
+    expect(html).toContain("acme/api");
+    expect((html.match(/>Repo override</g) ?? []).length).toBe(2);
+    expect((html.match(/Restore default/g) ?? []).length).toBe(2);
+    expect(html).toContain('aria-label="Supersede policy for acme/widgets"');
+    expect(html).not.toContain('data-testid="supersede-overrides-empty"');
+  });
+
+  it("conflict → banner with Reload, controls still rendered (and disabled while saving)", () => {
+    const html = render(ready({ conflict: true, saving: true }));
+    expect(html).toContain('data-testid="supersede-conflict"');
+    expect(html).toContain("Another admin just saved changes");
+    expect(html).toContain("Your change was not applied");
+    expect(html).toContain(">Reload<");
+    expect(html).toContain('role="radiogroup"');
+    expect(html).toContain("disabled");
+  });
+});
