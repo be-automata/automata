@@ -1045,22 +1045,73 @@ export async function setThreadActiveRun({
 }
 
 /**
- * The thread's run GENERATION for the #125 C1 fence: the active remote run's
- * externalId (NULL = legacy/in-process run → fence fails OPEN) and whether the
- * thread is already terminal-superseded. Read by the daemon-facing routes on
- * every terminal/verdict write. Not user-fenced: the caller's daemon token
- * already binds the thread.
+ * The terminal `errorMessage` a superseded thread carries (#8 app-side and
+ * #125 C1). Load-bearing for the generation fence below — ONE constant for the
+ * writer and every reader; C4 (#129) widens this into typed terminal causes.
  */
-export async function getThreadGeneration({
+export const THREAD_SUPERSEDED_ERROR = "superseded";
+
+export type ThreadGenerationCheck =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: "not-found" | "superseded" | "stale-generation";
+      activeRunExternalId: string | null;
+    };
+
+/**
+ * The #125 C1 generation fence, as ONE decision shared by every daemon-facing
+ * write (terminal, verdict, and C4's sweep). Refuses when the thread is
+ * already terminal-superseded (a newer run owns the PR), or when the writer
+ * names a run other than the thread's ACTIVE run (stamped at dispatch by
+ * C2). A NULL stamp, or a writer that carries no run id, fails OPEN on the
+ * stamp arm — legacy/in-process runs are never fenced out.
+ */
+export function decideThreadGeneration({
+  thread,
+  runExternalId,
+}: {
+  thread: {
+    activeRunExternalId: string | null;
+    status: ThreadStatus;
+    errorMessage: string | null;
+  };
+  runExternalId: string | null;
+}): ThreadGenerationCheck {
+  if (
+    thread.status === "complete" &&
+    thread.errorMessage === THREAD_SUPERSEDED_ERROR
+  ) {
+    return {
+      ok: false,
+      reason: "superseded",
+      activeRunExternalId: thread.activeRunExternalId,
+    };
+  }
+  if (
+    runExternalId !== null &&
+    thread.activeRunExternalId !== null &&
+    thread.activeRunExternalId !== runExternalId
+  ) {
+    return {
+      ok: false,
+      reason: "stale-generation",
+      activeRunExternalId: thread.activeRunExternalId,
+    };
+  }
+  return { ok: true };
+}
+
+/** `decideThreadGeneration` over a fresh read of the thread row. */
+export async function checkThreadGeneration({
   db,
   threadId,
+  runExternalId,
 }: {
   db: DB;
   threadId: string;
-}): Promise<{
-  activeRunExternalId: string | null;
-  superseded: boolean;
-} | null> {
+  runExternalId: string | null;
+}): Promise<ThreadGenerationCheck> {
   const [row] = await db
     .select({
       activeRunExternalId: schema.thread.activeRunExternalId,
@@ -1070,11 +1121,10 @@ export async function getThreadGeneration({
     .from(schema.thread)
     .where(eq(schema.thread.id, threadId))
     .limit(1);
-  if (!row) return null;
-  return {
-    activeRunExternalId: row.activeRunExternalId,
-    superseded: row.status === "complete" && row.errorMessage === "superseded",
-  };
+  if (!row) {
+    return { ok: false, reason: "not-found", activeRunExternalId: null };
+  }
+  return decideThreadGeneration({ thread: row, runExternalId });
 }
 
 export async function updateThread({
@@ -1389,7 +1439,7 @@ export async function markThreadsSuperseded({
   if (threadIds.length === 0) return 0;
   const updated = await db
     .update(schema.thread)
-    .set({ status: "complete", errorMessage: "superseded" })
+    .set({ status: "complete", errorMessage: THREAD_SUPERSEDED_ERROR })
     .where(
       and(
         inArray(schema.thread.id, threadIds),

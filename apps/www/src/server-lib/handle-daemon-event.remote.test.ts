@@ -5,7 +5,12 @@ import {
   createTestThread,
 } from "@terragon/shared/model/test-helpers";
 import { User, Session } from "@terragon/shared";
-import { getThread, getThreadChat } from "@terragon/shared/model/threads";
+import {
+  getThread,
+  getThreadChat,
+  markThreadsSuperseded,
+  setThreadActiveRun,
+} from "@terragon/shared/model/threads";
 import { handleDaemonEvent } from "./handle-daemon-event";
 import { checkpointThread } from "@/server-lib/checkpoint-thread";
 import { extendSandboxLife } from "@terragon/sandbox";
@@ -137,5 +142,65 @@ describe("handleDaemonEvent for sandbox-less remote threads", () => {
     });
     const okResult = await openPullRequest({ threadId: withPR.threadId });
     expect(okResult.success).toBe(true);
+  });
+});
+
+describe("handleDaemonEvent — #125 C1 generation fence (no extra read)", () => {
+  let user: User;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    user = (await createTestUser({ db })).user;
+    await mockWaitUntil();
+  });
+
+  async function remoteThread() {
+    return createTestThread({
+      db,
+      userId: user.id,
+      overrides: { sandboxProvider: "hatchet-remote" },
+      chatOverrides: { status: "working" },
+    });
+  }
+
+  it("409 once the thread is terminal-superseded — a stale verdict never lands", async () => {
+    const { threadId, threadChatId } = await remoteThread();
+    await markThreadsSuperseded({ db, threadIds: [threadId] });
+    const r = await handleDaemonEvent({
+      threadId,
+      threadChatId,
+      userId: user.id,
+      timezone: "UTC",
+      contextUsage: null,
+      messages: [getClaudeResultMessage()],
+      runExternalId: null,
+    });
+    expect(r).toMatchObject({ success: false, status: 409 });
+  });
+
+  it("409 when the writer names an older generation; the active one lands", async () => {
+    const { threadId, threadChatId } = await remoteThread();
+    await setThreadActiveRun({ db, threadId, externalId: "run-new" });
+    const stale = await handleDaemonEvent({
+      threadId,
+      threadChatId,
+      userId: user.id,
+      timezone: "UTC",
+      contextUsage: null,
+      messages: [getClaudeResultMessage()],
+      runExternalId: "run-old",
+    });
+    expect(stale).toMatchObject({ success: false, status: 409 });
+    const live = await handleDaemonEvent({
+      threadId,
+      threadChatId,
+      userId: user.id,
+      timezone: "UTC",
+      contextUsage: null,
+      messages: [getClaudeResultMessage()],
+      runExternalId: "run-new",
+    });
+    expect(live.success).toBe(true);
+    await waitUntilResolved();
   });
 });

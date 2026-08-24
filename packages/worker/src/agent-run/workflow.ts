@@ -348,39 +348,36 @@ export function makeAgentRunWorkflow(
   return wf;
 }
 
+/** The slice of Hatchet's task context the run fn consumes. */
+type RunCtx = {
+  abortController?: AbortController;
+  cancelled: boolean;
+  log: (message: string) => void;
+  workflowRunId?: () => string;
+};
+
 /**
  * The ONE run task fn shared by every variant. Wraps `runAgentInner` with the
- * #125 C1 abort handling: when the engine cancels THIS run (abort signal fired
- * — in-flight or pre-daemon during provision) under a native policy, exactly ONE
- * explicit `superseded` terminal is posted to www after teardown. Legacy runs
- * (no supersedePolicy on the input) and the app-side policy post nothing — the
- * control plane already owns that terminal.
+ * #125 C1 cancel hook: when the engine cancels THIS run (in-flight or
+ * pre-daemon during provision) under a native policy, an explicit
+ * `superseded` terminal is posted to www after teardown — `finally` runs on
+ * both return and throw, so exactly once. Legacy runs (no supersedePolicy)
+ * and the app-side policy post nothing: the control plane owns that terminal.
  */
 async function runAgent(
   input: AgentRunInput,
-  ctx: Parameters<typeof runAgentInner>[1],
+  ctx: RunCtx,
 ): Promise<AgentRunOutput> {
-  const signal: AbortSignal | undefined = ctx.abortController?.signal;
-  const wasCancelled = () => signal?.aborted === true || ctx.cancelled === true;
   try {
-    const out = await runAgentInner(input, ctx);
-    if (out.outcome === "cancelled" || wasCancelled()) {
-      await postSupersededOnce(input, ctx);
+    return await runAgentInner(input, ctx);
+  } finally {
+    if (ctx.cancelled || ctx.abortController?.signal.aborted) {
+      await postSuperseded(input, ctx);
     }
-    return out;
-  } catch (err) {
-    if (wasCancelled()) {
-      await postSupersededOnce(input, ctx);
-    }
-    throw err;
   }
 }
 
-/** Runs the terminal post at most once per run task invocation. */
-async function postSupersededOnce(
-  input: AgentRunInput,
-  ctx: { workflowRunId?: () => string; log: (m: string) => void },
-): Promise<void> {
+async function postSuperseded(input: AgentRunInput, ctx: RunCtx) {
   const policy = input.supersedePolicy;
   if (!policy || policy === "app-side") {
     return;
@@ -400,6 +397,7 @@ async function postSupersededOnce(
       threadId: input.threadId,
       threadChatId: input.threadChatId,
       traceparent: input.traceparent,
+      runExternalId,
     },
     { runExternalId, policy },
   );
@@ -413,20 +411,17 @@ async function postSupersededOnce(
  * entry) keeps the pre-#125 REST trigger contract byte-identical.
  */
 export const agentRunWorkflows = (
-  Object.entries(AGENT_RUN_VARIANTS) as [AgentRunVariantName, PerPrStrategy][]
-).map(([name, strategy]) => makeAgentRunWorkflow(name, strategy));
+  Object.keys(AGENT_RUN_VARIANTS) as AgentRunVariantName[]
+).map((name) => makeAgentRunWorkflow(name, AGENT_RUN_VARIANTS[name]));
 
 /** The legacy workflow, exported by name for existing callers/tests. */
-export const agentRunWorkflow = agentRunWorkflows[0]!;
+export const agentRunWorkflow = agentRunWorkflows.find(
+  (w) => w.definition.name === "agent-run",
+)!;
 
 async function runAgentInner(
   input: AgentRunInput,
-  ctx: {
-    abortController?: AbortController;
-    cancelled: boolean;
-    log: (message: string) => void;
-    workflowRunId?: () => string;
-  },
+  ctx: RunCtx,
 ): Promise<AgentRunOutput> {
   const config = loadWorkerConfig();
   const wwwOpts = {
@@ -438,6 +433,8 @@ async function runAgentInner(
     // daemon-event → GitHub-post continues the dispatch-minted trace. Dispatch sets
     // it on every remote run; if ever absent the header is simply omitted (no-op).
     traceparent: input.traceparent,
+    // #125 C1: stamp this run's generation on every www call (fence header).
+    runExternalId: ctx.workflowRunId?.() || undefined,
   };
 
   // Cancellation signal (Hatchet cancel: scheduleTimeout/executionTimeout). Used
@@ -732,7 +729,7 @@ async function runAgentInner(
  */
 async function onAgentRunFailure(
   input: AgentRunInput,
-  ctx: { errors?: () => Record<string, string> },
+  ctx: { errors?: () => Record<string, string>; workflowRunId?: () => string },
 ): Promise<void> {
   try {
     await postRunFailed(
@@ -741,6 +738,7 @@ async function onAgentRunFailure(
         daemonToken: input.daemonToken,
         threadId: input.threadId,
         threadChatId: input.threadChatId,
+        runExternalId: ctx.workflowRunId?.() || undefined,
       },
       { reason: summarizeHatchetErrors(ctx) },
     );

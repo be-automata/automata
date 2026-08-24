@@ -1,6 +1,4 @@
 import { getDaemonTokenContext } from "@/lib/auth-server";
-import { db } from "@/lib/db";
-import { getThreadGeneration } from "@terragon/shared/model/threads";
 import { handleDaemonEvent } from "@/server-lib/handle-daemon-event";
 import { DaemonEventAPIBody } from "@terragon/daemon/shared";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
@@ -39,32 +37,6 @@ export async function POST(request: Request) {
   }
   const userId = ctx.userId;
 
-  // #125 C1 generation fence for VERDICT/terminal writes: once a thread is
-  // terminal-superseded (a newer run owns the PR), no event from the old
-  // generation may land — this closes the cancel race in which a cancelled
-  // run still streams its verdict. A worker-originated write may also carry
-  // its `runExternalId`; when the thread has an active-run stamp and it
-  // differs, the write is refused the same way. A NULL stamp fails OPEN.
-  const rawRunExternalId = (json as { runExternalId?: unknown }).runExternalId;
-  const runExternalId =
-    typeof rawRunExternalId === "string" ? rawRunExternalId : null;
-  const generation = await getThreadGeneration({ db, threadId });
-  if (
-    generation &&
-    (generation.superseded ||
-      (runExternalId !== null &&
-        generation.activeRunExternalId !== null &&
-        generation.activeRunExternalId !== runExternalId))
-  ) {
-    console.log("[daemon-event] rejected superseded generation", {
-      threadId,
-      runExternalId,
-      activeRunExternalId: generation.activeRunExternalId,
-      superseded: generation.superseded,
-    });
-    return new Response("superseded", { status: 409 });
-  }
-
   // Prefer computing context usage from the last non-result message's usage
   // fields when available. Do not sum across all messages.
   const computedContextUsage = (() => {
@@ -96,6 +68,9 @@ export async function POST(request: Request) {
     contextUsage: computedContextUsage ?? null,
     // #7 trace join: continue the trace the remote worker forwards on the header.
     traceparent: request.headers.get("traceparent") ?? undefined,
+    // #125 C1: the worker stamps its run generation on every call; the
+    // in-sandbox daemon sends none (fails open on the stamp arm).
+    runExternalId: request.headers.get("x-run-external-id"),
   });
 
   if (!result.success) {

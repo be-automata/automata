@@ -19,6 +19,13 @@ export interface WwwClientOpts {
    * header is simply omitted (trace join is a no-op, no behaviour change).
    */
   traceparent?: string;
+  /**
+   * #125 C1: this run's Hatchet externalId, sent as `x-run-external-id` on
+   * every www call so the control plane's generation fence can refuse a
+   * write from a superseded run uniformly (terminal, verdict, failure).
+   * Undefined → header omitted (the fence fails open on that arm).
+   */
+  runExternalId?: string;
 }
 
 function endpoint(baseUrl: string, pathname: string): string {
@@ -32,6 +39,9 @@ function headers(opts: WwwClientOpts): Record<string, string> {
   };
   if (opts.traceparent) {
     h.traceparent = opts.traceparent;
+  }
+  if (opts.runExternalId) {
+    h["x-run-external-id"] = opts.runExternalId;
   }
   return h;
 }
@@ -217,33 +227,17 @@ export async function postRunFailed(
  * `policyLevel` optional, `source` fixed to "worker" for this plane.
  */
 /**
- * Typed terminal causes the worker can post (#125 C1; the full taxonomy is
- * C4's). `superseded` = the engine cancelled this run under a native per-PR
- * policy. Structural mirror of the www route's enum — never imported.
- */
-export type RunTerminalCause = "superseded";
-
-/**
  * POST the explicit `superseded` terminal for a run the engine cancelled
  * (#125 C1) — the sibling of postRunFailed. www fences it by generation:
  * `runExternalId` must equal the thread's active run or the write is refused
  * (409). Idempotent per (thread, run): retries never double-apply. Never
- * throws — a cancelled run's terminal is best-effort, the C4 sweep is the
- * backstop.
+ * throws — the C4 sweep is the backstop.
  *
  * Returns "applied" | "noop" | "rejected" | "error" for the caller's log line.
  */
 export async function postRunSuperseded(
   opts: WwwClientOpts,
-  {
-    runExternalId,
-    policy,
-    supersededBy,
-  }: {
-    runExternalId: string;
-    policy: string;
-    supersededBy?: string;
-  },
+  { runExternalId, policy }: { runExternalId: string; policy: string },
 ): Promise<"applied" | "noop" | "rejected" | "error"> {
   let res: Response;
   try {
@@ -254,8 +248,8 @@ export async function postRunSuperseded(
         threadId: opts.threadId,
         threadChatId: opts.threadChatId,
         runExternalId,
-        cause: "superseded" satisfies RunTerminalCause,
-        detail: { policy, ...(supersededBy ? { supersededBy } : {}) },
+        cause: "superseded",
+        detail: { policy },
       }),
     });
   } catch (error) {
