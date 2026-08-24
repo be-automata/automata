@@ -239,7 +239,9 @@ describe("loadWorkerConfig", () => {
       expect(
         loadWorkerConfig({ WORKER_HEALTH_PORT: "not-a-port" }).healthPort,
       ).toBeNull();
-      expect(loadWorkerConfig({ WORKER_HEALTH_PORT: "0" }).healthPort).toBeNull();
+      expect(
+        loadWorkerConfig({ WORKER_HEALTH_PORT: "0" }).healthPort,
+      ).toBeNull();
     });
   });
 });

@@ -154,7 +154,9 @@ async function waitForPgReady(port: number, timeoutMs = 60_000): Promise<void> {
       await new Promise((r) => setTimeout(r, 1000));
     }
   }
-  throw new Error(`postgres never became ready on port ${port}: ${String(lastErr)}`);
+  throw new Error(
+    `postgres never became ready on port ${port}: ${String(lastErr)}`,
+  );
 }
 
 const itEnabled = process.env.HATCHET_IT === "1";
@@ -217,7 +219,9 @@ describe.skipIf(!itEnabled)(
     describe("7.2.1 — concurrency-group rot: SQL round-trip against a real isolated engine schema", () => {
       it("AC-1: detectors return nothing against freshly-migrated, empty concurrency tables", async () => {
         const stepFindings = await detectStepConcurrencyRot(db, { tenantId });
-        const workflowFindings = await detectWorkflowConcurrencyRot(db, { tenantId });
+        const workflowFindings = await detectWorkflowConcurrencyRot(db, {
+          tenantId,
+        });
         expect(stepFindings).toEqual([]);
         expect(workflowFindings).toEqual([]);
       });
@@ -235,34 +239,31 @@ describe.skipIf(!itEnabled)(
         expect(before.rows[0].c).toBe(after.rows[0].c);
       });
 
-      it.skip(
-        "register-until-rot loop reproduces §2.3's corruption, and repair unblocks a QUEUED run that stays wedged with a live worker present (AC-2, AC-3, AC-4, AC-6, AC-8c)",
-        async () => {
-          // NOT IMPLEMENTED — see the file-level DEVIATION note. Steps, verbatim
-          // from spec §7.2.1, for whoever picks this up:
-          //   1. Fresh engine (this beforeAll already brings up an isolated
-          //      postgres-only project — extend it to also run hatchet-lite on
-          //      isolated ports, e.g. 28888/27077).
-          //   2. shapeGenerator(i) => distinct concurrency-group expression
-          //      arrays for a probe workflow `rot-probe`.
-          //   3. FOR i in 1..12: spawn a real @hatchet-dev/typescript-sdk
-          //      worker child process registering `rot-probe` with shapes[i]
-          //      against the isolated engine (HATCHET_CLIENT_TOKEN minted for
-          //      the isolated tenant), wait for its rows in
-          //      v1_step_concurrency, SIGTERM it, call
-          //      detectStepConcurrencyRot/detectWorkflowConcurrencyRot; break
-          //      on first non-empty result, recording `registrationsToRot`.
-          //      FAIL LOUDLY (not skip) if the loop exhausts without rot.
-          //   5. Spawn a live worker on the CURRENT shape, trigger a
-          //      `rot-probe` run, assert it stays QUEUED >=30s while the live
-          //      worker's Worker.lastHeartbeatAt stays fresh.
-          //   6-8. repairConcurrencyRot(mode:'on'); assert 0 findings remain,
-          //      same-version links survived (AC-8c), the run reaches RUNNING
-          //      within 30s (AC-4), and a second repair pass touches 0 rows
-          //      (AC-6). Record whether the in-place repair fired or the
-          //      §3.1.3 quiescence precondition deferred it to the boot path.
-        },
-      );
+      it.skip("register-until-rot loop reproduces §2.3's corruption, and repair unblocks a QUEUED run that stays wedged with a live worker present (AC-2, AC-3, AC-4, AC-6, AC-8c)", async () => {
+        // NOT IMPLEMENTED — see the file-level DEVIATION note. Steps, verbatim
+        // from spec §7.2.1, for whoever picks this up:
+        //   1. Fresh engine (this beforeAll already brings up an isolated
+        //      postgres-only project — extend it to also run hatchet-lite on
+        //      isolated ports, e.g. 28888/27077).
+        //   2. shapeGenerator(i) => distinct concurrency-group expression
+        //      arrays for a probe workflow `rot-probe`.
+        //   3. FOR i in 1..12: spawn a real @hatchet-dev/typescript-sdk
+        //      worker child process registering `rot-probe` with shapes[i]
+        //      against the isolated engine (HATCHET_CLIENT_TOKEN minted for
+        //      the isolated tenant), wait for its rows in
+        //      v1_step_concurrency, SIGTERM it, call
+        //      detectStepConcurrencyRot/detectWorkflowConcurrencyRot; break
+        //      on first non-empty result, recording `registrationsToRot`.
+        //      FAIL LOUDLY (not skip) if the loop exhausts without rot.
+        //   5. Spawn a live worker on the CURRENT shape, trigger a
+        //      `rot-probe` run, assert it stays QUEUED >=30s while the live
+        //      worker's Worker.lastHeartbeatAt stays fresh.
+        //   6-8. repairConcurrencyRot(mode:'on'); assert 0 findings remain,
+        //      same-version links survived (AC-8c), the run reaches RUNNING
+        //      within 30s (AC-4), and a second repair pass touches 0 rows
+        //      (AC-6). Record whether the in-place repair fired or the
+        //      §3.1.3 quiescence precondition deferred it to the boot path.
+      });
     });
 
     describe("7.2.2 — SIGKILL slot exhaustion: partition-guard fixtures", () => {
@@ -322,15 +323,12 @@ describe.skipIf(!itEnabled)(
         expect(result.touched).toBe(0);
       });
 
-      it.skip(
-        "full SIGKILL-of-a-real-child-process repro frees exactly 1 leaked slot and the queued run reaches RUNNING within 30s (AC-5)",
-        async () => {
-          // NOT IMPLEMENTED — see the file-level DEVIATION note; steps 1-11
-          // of spec §7.2.2 verbatim, to be implemented against
-          // reclaimEngineSlots imported above once the isolated project also
-          // runs hatchet-lite (not just postgres).
-        },
-      );
+      it.skip("full SIGKILL-of-a-real-child-process repro frees exactly 1 leaked slot and the queued run reaches RUNNING within 30s (AC-5)", async () => {
+        // NOT IMPLEMENTED — see the file-level DEVIATION note; steps 1-11
+        // of spec §7.2.2 verbatim, to be implemented against
+        // reclaimEngineSlots imported above once the isolated project also
+        // runs hatchet-lite (not just postgres).
+      });
     });
   },
 );

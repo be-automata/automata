@@ -172,7 +172,11 @@ export async function repairStepConcurrencyRot(
     };
   }
 
-  const result = await db.query<{ id: number; step_id: string; expression: string }>(
+  const result = await db.query<{
+    id: number;
+    step_id: string;
+    expression: string;
+  }>(
     `UPDATE v1_step_concurrency c
         SET parent_strategy_id = NULL
       WHERE c.tenant_id = $1::uuid
@@ -589,7 +593,9 @@ export async function detectSchedulingTimeoutEvents(
       GROUP BY 1`,
     [opts.tenantId, opts.windowSeconds],
   );
-  const byType = new Map(result.rows.map((r) => [r.event_type, Number(r.count)]));
+  const byType = new Map(
+    result.rows.map((r) => [r.event_type, Number(r.count)]),
+  );
   return {
     schedulingTimedOut: byType.get("SCHEDULING_TIMED_OUT") ?? 0,
     requeuedNoWorker: byType.get("REQUEUED_NO_WORKER") ?? 0,

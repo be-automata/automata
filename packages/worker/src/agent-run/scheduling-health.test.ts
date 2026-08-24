@@ -105,9 +105,24 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
       if (/FROM v1_workflow_concurrency c\s+CROSS JOIN LATERAL/.test(text)) {
         return {
           rows: [
-            { id: 1, workflow_version_id: "01fa6942", expression: "'agent-run-shared-daemon-socket'", child_strategy_ids: [2] },
-            { id: 3, workflow_version_id: "9603cb2f", expression: "'agent-run-shared-daemon-socket'", child_strategy_ids: [4] },
-            { id: 5, workflow_version_id: "75e03a6f", expression: "'agent-run-global-memory-budget'", child_strategy_ids: [6] },
+            {
+              id: 1,
+              workflow_version_id: "01fa6942",
+              expression: "'agent-run-shared-daemon-socket'",
+              child_strategy_ids: [2],
+            },
+            {
+              id: 3,
+              workflow_version_id: "9603cb2f",
+              expression: "'agent-run-shared-daemon-socket'",
+              child_strategy_ids: [4],
+            },
+            {
+              id: 5,
+              workflow_version_id: "75e03a6f",
+              expression: "'agent-run-global-memory-budget'",
+              child_strategy_ids: [6],
+            },
           ],
         };
       }
@@ -140,9 +155,20 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
   describe("dry-run mode (AC-7)", () => {
     it("issues zero UPDATE/DELETE statements while still reporting findings", async () => {
       const db = new FakePg((text) => {
-        if (/^\s*SELECT c\.id, c\.step_id, c\.expression, c\.parent_strategy_id\s*$/m.test(text)) {
+        if (
+          /^\s*SELECT c\.id, c\.step_id, c\.expression, c\.parent_strategy_id\s*$/m.test(
+            text,
+          )
+        ) {
           return {
-            rows: [{ id: 5, step_id: "5c93e973", expression: "x", parent_strategy_id: 4 }],
+            rows: [
+              {
+                id: 5,
+                step_id: "5c93e973",
+                expression: "x",
+                parent_strategy_id: 4,
+              },
+            ],
           };
         }
         return { rows: [] };
@@ -156,7 +182,9 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
       expect(repair.touched).toBe(0);
       expect(repair.rows.map((r) => r.id)).toEqual([5]);
 
-      const mutating = db.calls.filter((c) => /^\s*(UPDATE|DELETE)/i.test(c.text));
+      const mutating = db.calls.filter((c) =>
+        /^\s*(UPDATE|DELETE)/i.test(c.text),
+      );
       expect(mutating).toHaveLength(0);
     });
 
@@ -183,7 +211,9 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
       });
       expect(result.touched).toBe(0);
       expect(result.rows).toHaveLength(1);
-      const mutating = db.calls.filter((c) => /^\s*(UPDATE|DELETE)/i.test(c.text));
+      const mutating = db.calls.filter((c) =>
+        /^\s*(UPDATE|DELETE)/i.test(c.text),
+      );
       expect(mutating).toHaveLength(0);
     });
   });
@@ -199,7 +229,10 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
         minSlotAgeSeconds: 600,
         selfWorkerId: null,
       });
-      await detectStuckQueued(db, { tenantId: TENANT_ID, thresholdSeconds: 900 });
+      await detectStuckQueued(db, {
+        tenantId: TENANT_ID,
+        thresholdSeconds: 900,
+      });
       for (const call of db.calls) {
         expect(call.text).toMatch(/\bLIMIT\b/);
       }
@@ -212,7 +245,11 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
       const db = new FakePg((text) => {
         if (/^\s*UPDATE v1_step_concurrency/.test(text)) {
           return {
-            rows: hundredIds.map((id) => ({ id, step_id: "s", expression: "e" })),
+            rows: hundredIds.map((id) => ({
+              id,
+              step_id: "s",
+              expression: "e",
+            })),
           };
         }
         return { rows: [] };
@@ -239,13 +276,7 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
       expect(call?.text).toMatch(/"tenantId"\s*=\s*\$1/);
       expect(call?.text).toMatch(/"lastHeartbeatAt"\s+IS\s+NOT\s+NULL/);
       expect(call?.text).toMatch(/id\s*<>\s*\$3/);
-      expect(call?.params).toEqual([
-        TENANT_ID,
-        600,
-        "self-worker-1",
-        100,
-        600,
-      ]);
+      expect(call?.params).toEqual([TENANT_ID, 600, "self-worker-1", 100, 600]);
     });
   });
 
@@ -359,10 +390,23 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
     it("detects then repairs both tables and reports idempotent 0-touch on a second pass", async () => {
       let stepCallCount = 0;
       const db = new FakePg((text) => {
-        if (/^\s*SELECT c\.id, c\.step_id, c\.expression, c\.parent_strategy_id\s*$/m.test(text)) {
+        if (
+          /^\s*SELECT c\.id, c\.step_id, c\.expression, c\.parent_strategy_id\s*$/m.test(
+            text,
+          )
+        ) {
           stepCallCount += 1;
           return stepCallCount === 1
-            ? { rows: [{ id: 5, step_id: "s", expression: "e", parent_strategy_id: 4 }] }
+            ? {
+                rows: [
+                  {
+                    id: 5,
+                    step_id: "s",
+                    expression: "e",
+                    parent_strategy_id: 4,
+                  },
+                ],
+              }
             : { rows: [] };
         }
         if (/^\s*UPDATE v1_step_concurrency/.test(text)) {
@@ -370,11 +414,17 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
         }
         return { rows: [] };
       });
-      const first = await repairConcurrencyRot(db, { tenantId: TENANT_ID, mode: "on" });
+      const first = await repairConcurrencyRot(db, {
+        tenantId: TENANT_ID,
+        mode: "on",
+      });
       expect(first.stepFindings).toHaveLength(1);
       expect(first.stepRepair.touched).toBe(1);
 
-      const second = await repairConcurrencyRot(db, { tenantId: TENANT_ID, mode: "on" });
+      const second = await repairConcurrencyRot(db, {
+        tenantId: TENANT_ID,
+        mode: "on",
+      });
       expect(second.stepFindings).toHaveLength(0);
       expect(second.stepRepair.touched).toBe(0);
     });
@@ -387,7 +437,10 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
         nominalRecoveryLatencySeconds(cfg.workerDeadAfterS, cfg.maintIntervalS),
       ).toBe(660); // 600 + 60 = 11 min
       expect(
-        alertableRecoveryLatencySeconds(cfg.workerDeadAfterS, cfg.maintIntervalS),
+        alertableRecoveryLatencySeconds(
+          cfg.workerDeadAfterS,
+          cfg.maintIntervalS,
+        ),
       ).toBe(720); // 600 + 120 = 12 min
     });
   });
@@ -481,8 +534,12 @@ describe("runMaintenanceTick — resilience and gating", () => {
   it("a PgLike that throws resolves (never rejects) and reports engineReachable: false (AC-14)", async () => {
     const throwingDb = {
       query: vi.fn().mockRejectedValue(new Error("connection refused")),
-      withConnection: vi.fn().mockRejectedValue(new Error("connection refused")),
-      withAdvisoryLock: vi.fn().mockRejectedValue(new Error("connection refused")),
+      withConnection: vi
+        .fn()
+        .mockRejectedValue(new Error("connection refused")),
+      withAdvisoryLock: vi
+        .fn()
+        .mockRejectedValue(new Error("connection refused")),
       close: vi.fn().mockResolvedValue(undefined),
     };
     const log = vi.fn();
@@ -556,7 +613,9 @@ describe("reclaimEngineSlots — orphan labeling on the write path", () => {
       selfWorkerId: null,
       mode: "on",
     });
-    const deleteCall = db.calls.find((c) => /DELETE FROM v1_concurrency_slot/.test(c.text));
+    const deleteCall = db.calls.find((c) =>
+      /DELETE FROM v1_concurrency_slot/.test(c.text),
+    );
     expect(deleteCall?.text).toMatch(/RETURNING[\s\S]*c\.orphan/);
     expect(result.touched).toBe(2);
     expect(result.rows.map((r) => r.orphan)).toEqual([true, false]);
@@ -612,9 +671,14 @@ describe("bootTimeSlotReclaim — boot-path hygiene and gating", () => {
     await bootTimeSlotReclaim(config, log, db as never);
     expect(db.withAdvisoryLock).toHaveBeenCalledTimes(1);
     expect(db.query).not.toHaveBeenCalled(); // raw (hygiene-less) path unused
-    expect(inner.calls.some((c) => /DELETE FROM v1_concurrency_slot/.test(c.text))).toBe(true);
+    expect(
+      inner.calls.some((c) => /DELETE FROM v1_concurrency_slot/.test(c.text)),
+    ).toBe(true);
     expect(log).toHaveBeenCalledWith(
-      expect.objectContaining({ event: "scheduling.boot_slots_reclaimed", rowsTouched: 1 }),
+      expect.objectContaining({
+        event: "scheduling.boot_slots_reclaimed",
+        rowsTouched: 1,
+      }),
     );
     expect(db.close).toHaveBeenCalledTimes(1);
   });
@@ -639,11 +703,15 @@ describe("bootTimeSlotReclaim — boot-path hygiene and gating", () => {
     const db = {
       query: vi.fn().mockRejectedValue(new Error("connection refused")),
       withConnection: vi.fn(),
-      withAdvisoryLock: vi.fn().mockRejectedValue(new Error("connection refused")),
+      withAdvisoryLock: vi
+        .fn()
+        .mockRejectedValue(new Error("connection refused")),
       close: vi.fn().mockResolvedValue(undefined),
     };
     const log = vi.fn();
-    await expect(bootTimeSlotReclaim(config, log, db as never)).resolves.toBeUndefined();
+    await expect(
+      bootTimeSlotReclaim(config, log, db as never),
+    ).resolves.toBeUndefined();
     expect(log).toHaveBeenCalledWith(
       expect.objectContaining({ event: "scheduling.tick_error" }),
     );

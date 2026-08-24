@@ -111,7 +111,9 @@ export function createEngineDbFromPool(pool: {
         await client.query("BEGIN");
         inTransaction = true;
         await client.query(CONNECTION_HYGIENE_SQL);
-        const lockResult = await client.query<{ pg_try_advisory_lock: boolean }>(
+        const lockResult = await client.query<{
+          pg_try_advisory_lock: boolean;
+        }>(
           "SELECT pg_try_advisory_lock($1::int, $2::int) AS pg_try_advisory_lock",
           [MAINTENANCE_ADVISORY_LOCK.classId, MAINTENANCE_ADVISORY_LOCK.objId],
         );
@@ -138,10 +140,10 @@ export function createEngineDbFromPool(pool: {
           throw err;
         } finally {
           try {
-            await client.query(
-              "SELECT pg_advisory_unlock($1::int, $2::int)",
-              [MAINTENANCE_ADVISORY_LOCK.classId, MAINTENANCE_ADVISORY_LOCK.objId],
-            );
+            await client.query("SELECT pg_advisory_unlock($1::int, $2::int)", [
+              MAINTENANCE_ADVISORY_LOCK.classId,
+              MAINTENANCE_ADVISORY_LOCK.objId,
+            ]);
           } catch {
             // Best-effort: the connection is about to be released back to the
             // pool regardless, which also drops session-scoped advisory locks.
@@ -185,7 +187,9 @@ export const ENGINE_DB_POOL_OPTIONS = {
  * unset, which is how every mechanism in this ticket stays an inert no-op on a
  * box that never opted in.
  */
-export function createEngineDb(env: NodeJS.ProcessEnv = process.env): EngineDb | null {
+export function createEngineDb(
+  env: NodeJS.ProcessEnv = process.env,
+): EngineDb | null {
   const connectionString = env.HATCHET_ENGINE_DATABASE_URL?.trim();
   if (!connectionString) {
     return null;

@@ -35,11 +35,25 @@ const defaultLogger: Logger = (line) => console.log(JSON.stringify(line));
 export interface SchedulingHealthSnapshot {
   ts: string;
   engineReachable: boolean;
-  stuckQueued: { count: number; oldestQueuedForS: number; externalIds: string[] };
+  stuckQueued: {
+    count: number;
+    oldestQueuedForS: number;
+    externalIds: string[];
+  };
   schedulingTimedOut1h: number;
   requeuedNoWorker1h: number;
-  rot: { stepLevel: number; workflowLevel: number; repaired: number; mode: MaintenanceMode };
-  slots: { filled: number; reclaimable: number; reclaimed: number; mode: MaintenanceMode };
+  rot: {
+    stepLevel: number;
+    workflowLevel: number;
+    repaired: number;
+    mode: MaintenanceMode;
+  };
+  slots: {
+    filled: number;
+    reclaimable: number;
+    reclaimed: number;
+    mode: MaintenanceMode;
+  };
   healthy: boolean;
 }
 
@@ -98,7 +112,8 @@ export async function runMaintenanceTick(
     return emptySnapshot(false);
   }
 
-  const db = opts.engineDb !== undefined ? opts.engineDb : createEngineDb(process.env);
+  const db =
+    opts.engineDb !== undefined ? opts.engineDb : createEngineDb(process.env);
   if (!db) {
     return emptySnapshot(false);
   }
@@ -159,11 +174,13 @@ export async function runMaintenanceTick(
       return emptySnapshot(true);
     }
 
-    const { rot, slotCandidates, stuckQueued, schedulingEvents } = lockOutcome.result;
+    const { rot, slotCandidates, stuckQueued, schedulingEvents } =
+      lockOutcome.result;
 
     const stepFindingCount = rot?.stepFindings.length ?? 0;
     const workflowFindingCount = rot?.workflowFindings.length ?? 0;
-    const rotRepaired = (rot?.stepRepair.touched ?? 0) + (rot?.workflowRepair.touched ?? 0);
+    const rotRepaired =
+      (rot?.stepRepair.touched ?? 0) + (rot?.workflowRepair.touched ?? 0);
 
     if (stepFindingCount > 0 || workflowFindingCount > 0) {
       log({
@@ -204,7 +221,9 @@ export async function runMaintenanceTick(
       stuckQueued: {
         count: stuckQueued.length,
         oldestQueuedForS:
-          stuckQueued.length > 0 ? Math.max(...stuckQueued.map((r) => r.queuedForS)) : 0,
+          stuckQueued.length > 0
+            ? Math.max(...stuckQueued.map((r) => r.queuedForS))
+            : 0,
         externalIds: stuckQueued.map((r) => r.externalId),
       },
       schedulingTimedOut1h: schedulingEvents.schedulingTimedOut,
@@ -301,7 +320,10 @@ export function startMaintenanceLoop(
       // kills the whole worker process. The healthz listener is optional
       // observability; losing it must never take the worker down (AC-14).
       server.on("error", (err) => {
-        log({ event: "scheduling.tick_error", error: `healthz listen failed: ${String(err)}` });
+        log({
+          event: "scheduling.tick_error",
+          error: `healthz listen failed: ${String(err)}`,
+        });
         try {
           server.close();
         } catch {
@@ -313,7 +335,10 @@ export function startMaintenanceLoop(
       server.unref();
       healthServer = server;
     } catch (err) {
-      log({ event: "scheduling.tick_error", error: `healthz listen failed: ${String(err)}` });
+      log({
+        event: "scheduling.tick_error",
+        error: `healthz listen failed: ${String(err)}`,
+      });
       healthServer = null;
     }
   }
@@ -380,10 +405,16 @@ export async function bootTimeSlotReclaim(
       return;
     }
     if (lockOutcome.result.touched > 0) {
-      log({ event: "scheduling.boot_slots_reclaimed", rowsTouched: lockOutcome.result.touched });
+      log({
+        event: "scheduling.boot_slots_reclaimed",
+        rowsTouched: lockOutcome.result.touched,
+      });
     }
   } catch (err) {
-    log({ event: "scheduling.tick_error", error: `boot reclaim: ${String(err)}` });
+    log({
+      event: "scheduling.tick_error",
+      error: `boot reclaim: ${String(err)}`,
+    });
   } finally {
     try {
       await db.close();
@@ -393,7 +424,4 @@ export async function bootTimeSlotReclaim(
   }
 }
 
-export {
-  alertableRecoveryLatencySeconds,
-  nominalRecoveryLatencySeconds,
-};
+export { alertableRecoveryLatencySeconds, nominalRecoveryLatencySeconds };

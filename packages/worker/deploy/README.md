@@ -255,13 +255,13 @@ Mechanism 3 (stuck-QUEUED detection) is read-only and on by default.
 Unset any of these and SIGTERM-restart — an untouched box (no `HATCHET_ENGINE_DATABASE_URL`)
 is the strongest rollback available, since nothing runs at all:
 
-| Env var | Effect when unset/off |
-|---|---|
-| `HATCHET_ENGINE_DATABASE_URL` | Master gate. Unset → all three mechanisms inert. |
-| `WORKER_SCHEDULING_MAINTENANCE=off` | Mechanisms 1 & 2 fully disabled (no detect, no write). |
+| Env var                             | Effect when unset/off                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------ |
+| `HATCHET_ENGINE_DATABASE_URL`       | Master gate. Unset → all three mechanisms inert.                         |
+| `WORKER_SCHEDULING_MAINTENANCE=off` | Mechanisms 1 & 2 fully disabled (no detect, no write).                   |
 | `WORKER_CONCURRENCY_ROT_REPAIR=off` | Rot repair specifically disabled (detection via mechanism 3 unaffected). |
-| `WORKER_SLOT_RECLAIM=off` | Slot reclaim specifically disabled. |
-| `WORKER_STUCK_QUEUED_DETECT=off` | Read-only detection disabled (rarely needed). |
+| `WORKER_SLOT_RECLAIM=off`           | Slot reclaim specifically disabled.                                      |
+| `WORKER_STUCK_QUEUED_DETECT=off`    | Read-only detection disabled (rarely needed).                            |
 
 To roll back a repair that already happened: the repair only NULLs a dangling parent
 pointer / strips dangling child ids — it never deletes a row or flips `is_active`.
