@@ -1044,6 +1044,39 @@ export async function setThreadActiveRun({
     .where(eq(schema.thread.id, threadId));
 }
 
+/**
+ * The thread's run GENERATION for the #125 C1 fence: the active remote run's
+ * externalId (NULL = legacy/in-process run → fence fails OPEN) and whether the
+ * thread is already terminal-superseded. Read by the daemon-facing routes on
+ * every terminal/verdict write. Not user-fenced: the caller's daemon token
+ * already binds the thread.
+ */
+export async function getThreadGeneration({
+  db,
+  threadId,
+}: {
+  db: DB;
+  threadId: string;
+}): Promise<{
+  activeRunExternalId: string | null;
+  superseded: boolean;
+} | null> {
+  const [row] = await db
+    .select({
+      activeRunExternalId: schema.thread.activeRunExternalId,
+      status: schema.thread.status,
+      errorMessage: schema.thread.errorMessage,
+    })
+    .from(schema.thread)
+    .where(eq(schema.thread.id, threadId))
+    .limit(1);
+  if (!row) return null;
+  return {
+    activeRunExternalId: row.activeRunExternalId,
+    superseded: row.status === "complete" && row.errorMessage === "superseded",
+  };
+}
+
 export async function updateThread({
   db,
   userId,

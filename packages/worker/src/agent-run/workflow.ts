@@ -12,6 +12,7 @@ import {
   pollUntilTerminal,
   postEgressEvents,
   postRunFailed,
+  postRunSuperseded,
   pullAgentCredentials,
   pullNextMessage,
   type EgressEventWire,
@@ -62,7 +63,19 @@ export type { AgentRunInput, AgentRunOutput } from "./types";
  *      `u:${userId}` fallback) so the CEL key never dereferences null.
  *   2. global constant key: the single-box daemon memory budget — only ONE
  *      agent-run executes at a time across ALL orgs and BOTH workers.
- * Later runs QUEUE rather than cancel — an in-flight agent turn must never be killed.
+ * On the LEGACY `agent-run` workflow later runs QUEUE rather than cancel — an
+ * in-flight agent turn is never killed by the engine there (flag-off contract,
+ * #125 AC7). The three POLICY VARIANTS (#125 C1, `makeAgentRunWorkflow`) stack a
+ * THIRD, per-PR key (`input.prKey`, maxRuns 1) ON TOP of these two, and it is the
+ * per-PR entry's limitStrategy that encodes the supersede policy:
+ *   - agent-run-newest  → CANCEL_IN_PROGRESS  (newest-wins: cancel the live run)
+ *   - agent-run-strict  → GROUP_ROUND_ROBIN   (complete-run · queue)
+ *   - agent-run-discard → CANCEL_NEWEST       (complete-run · discard)
+ * A run the engine cancels under a variant is NOT silent: the run task posts an
+ * explicit `superseded` terminal to www (postRunSuperseded), fenced by generation.
+ * The variants are only ever dispatched with `prKey`/`deliveryId` present (www
+ * C2 guarantees it under the flag), so their CEL never dereferences a missing
+ * field; the legacy workflow carries no per-PR entry and no idempotency key.
  *
  * FAIRNESS IS ONLY PROVEN LIVE (plan amendment 11): this config type-checks and
  * locks the shape, but round-robin-across-orgs is scheduler-side behaviour — it is
@@ -207,338 +220,498 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
   };
 }
 
-export const agentRunWorkflow = hatchet.workflow<AgentRunInput>({
-  name: "agent-run",
-  concurrency: [
-    {
-      expression: "input.orgId",
-      maxRuns: PER_ORG_MAX_RUNS,
-      limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
-    },
-    {
-      // Renamed from 'agent-run-shared-daemon-socket' (2026-08-19). Two reasons:
-      // (1) the cap's real justification is the single-box MEMORY budget — the
-      // shared-socket collision it was named for was solved by per-run sockets
-      // (Phase 0.2b); (2) the old group's scheduler state deadlocked in
-      // hatchet-lite after repeated worker re-registrations (stale
-      // GROUP_ROUND_ROBIN strategy rows chain into active ones and the child
-      // slot is never granted — tasks sit QUEUED forever with idle workers).
-      // The rename minted fresh strategy state on registration but did NOT
-      // prevent rot — the new group has since re-rotted (#69 §2.3, verified
-      // live 2026-08-23). The group name is NOT rotated again (#69 §3.1.1:
-      // rotation trades this deadlock for a worse one — two concurrent
-      // agent-runs on a box budgeted for one). Instead an engine-DB repairer
-      // (scheduling-maintenance.ts, opt-in, dry-run by default) detects and
-      // prunes the corrupted chain pointers behind this group name.
-      expression: "'agent-run-global-memory-budget'",
-      maxRuns: GLOBAL_MAX_RUNS,
-      limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
-    },
-  ],
-});
+/**
+ * The per-PR concurrency strategy of a policy variant, or null for the legacy
+ * workflow (no per-PR entry at all — its concurrency is byte-identical to
+ * pre-#125, so flag-off dispatches are unaffected).
+ */
+type PerPrStrategy = ConcurrencyLimitStrategy | null;
 
-agentRunWorkflow.task({
-  name: "run",
-  scheduleTimeout: "30m",
-  executionTimeout: "30m",
-  // EXPLICIT retries: 0 (the SDK default is already 0). A single agent-run is a
-  // minutes-long, NON-idempotent side-effecting operation (it clones, runs the
-  // agent, and posts a GitHub review) — auto-retrying it would re-execute the
-  // agent and risk a double side-effect. Keep this explicit so a future edit
-  // can't silently enable retries. This is Phase 1.4 mechanism #1 (exactly-once):
-  // at retries:0 + workflow maxRuns:1 the only at-least-once window is engine
-  // redelivery, which the www single-writer (HEAD+verdict idempotency) absorbs.
-  retries: 0,
-  // slotCost DEFERRED (#8): meaningless at GLOBAL_MAX_RUNS=1 (one run at a time), so
-  // it stays unset until #3b raises the global cap — at which point set slotCost to
-  // model each agent-run's memory weight so a worker's physical slots reflect real
-  // capacity. Wiring it now would have no effect. See workflow-level concurrency doc.
-  fn: async (input: AgentRunInput, ctx): Promise<AgentRunOutput> => {
-    const config = loadWorkerConfig();
-    const wwwOpts = {
+/**
+ * Variant table (#125 C1). STRUCTURALLY DUPLICATED (never imported) by the
+ * control plane's POLICY_TO_WORKFLOW (apps/www/src/agent/hatchet/transport.ts).
+ * Every registered variant shares ONE task fn and ONE config; the only
+ * difference is the per-PR entry's limitStrategy. `as const` so a typo in a
+ * name is a type error at the registry.
+ */
+export const AGENT_RUN_VARIANTS = {
+  "agent-run": null,
+  "agent-run-newest": ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
+  "agent-run-strict": ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
+  "agent-run-discard": ConcurrencyLimitStrategy.CANCEL_NEWEST,
+} as const satisfies Record<string, PerPrStrategy>;
+export type AgentRunVariantName = keyof typeof AGENT_RUN_VARIANTS;
+
+/** The strategies a per-PR entry may carry. Anything else fails registration. */
+const SUPPORTED_PER_PR_STRATEGIES: ReadonlySet<ConcurrencyLimitStrategy> =
+  new Set([
+    ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
+    ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
+    ConcurrencyLimitStrategy.CANCEL_NEWEST,
+  ]);
+
+/**
+ * Idempotency window for the policy variants: the GitHub webhook redelivery
+ * window (a redelivered `X-GitHub-Delivery` within 24h dedupes to ONE run).
+ * Intentional re-dispatches (recheck, redo) mint DISTINCT delivery ids at the
+ * control plane and are never deduped here.
+ */
+const DELIVERY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Build one agent-run workflow. Config is identical across variants except
+ * the OPTIONAL per-PR concurrency entry (stacked on top of the per-org and
+ * global entries) and — for variants only — the delivery-id idempotency key.
+ * Unknown strategy → throws at registration (fail-loud, never a silently
+ * mis-strategied group).
+ */
+export function makeAgentRunWorkflow(
+  name: string,
+  perPrStrategy: PerPrStrategy,
+) {
+  if (
+    perPrStrategy !== null &&
+    !SUPPORTED_PER_PR_STRATEGIES.has(perPrStrategy)
+  ) {
+    throw new Error(
+      `makeAgentRunWorkflow(${name}): unsupported per-PR concurrency strategy ${String(perPrStrategy)}`,
+    );
+  }
+  const wf = hatchet.workflow<AgentRunInput>({
+    name,
+    concurrency: [
+      ...(perPrStrategy !== null
+        ? [
+            {
+              // Per-PR key (`${orgId}/${repo}/${prNumber}`, built by www C2).
+              // The CEL references the FIELD — never an interpolation.
+              expression: "input.prKey",
+              maxRuns: 1,
+              limitStrategy: perPrStrategy,
+            },
+          ]
+        : []),
+      {
+        expression: "input.orgId",
+        maxRuns: PER_ORG_MAX_RUNS,
+        limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
+      },
+      {
+        // Renamed from 'agent-run-shared-daemon-socket' (2026-08-19). Two reasons:
+        // (1) the cap's real justification is the single-box MEMORY budget — the
+        // shared-socket collision it was named for was solved by per-run sockets
+        // (Phase 0.2b); (2) the old group's scheduler state deadlocked in
+        // hatchet-lite after repeated worker re-registrations (stale
+        // GROUP_ROUND_ROBIN strategy rows chain into active ones and the child
+        // slot is never granted — tasks sit QUEUED forever with idle workers).
+        // The rename minted fresh strategy state on registration but did NOT
+        // prevent rot — the new group has since re-rotted (#69 §2.3, verified
+        // live 2026-08-23). The group name is NOT rotated again (#69 §3.1.1:
+        // rotation trades this deadlock for a worse one — two concurrent
+        // agent-runs on a box budgeted for one). Instead an engine-DB repairer
+        // (scheduling-maintenance.ts, opt-in, dry-run by default) detects and
+        // prunes the corrupted chain pointers behind this group name.
+        expression: "'agent-run-global-memory-budget'",
+        maxRuns: GLOBAL_MAX_RUNS,
+        limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
+      },
+    ],
+  });
+  wf.task({
+    name: "run",
+    scheduleTimeout: "30m",
+    executionTimeout: "30m",
+    // EXPLICIT retries: 0 (the SDK default is already 0). A single agent-run is a
+    // minutes-long, NON-idempotent side-effecting operation (it clones, runs the
+    // agent, and posts a GitHub review) — auto-retrying it would re-execute the
+    // agent and risk a double side-effect. Keep this explicit so a future edit
+    // can't silently enable retries. This is Phase 1.4 mechanism #1 (exactly-once):
+    // at retries:0 + workflow maxRuns:1 the only at-least-once window is engine
+    // redelivery, which the www single-writer (HEAD+verdict idempotency) absorbs.
+    retries: 0,
+    // slotCost DEFERRED (#8): meaningless at GLOBAL_MAX_RUNS=1 (one run at a time), so
+    // it stays unset until #3b raises the global cap — at which point set slotCost to
+    // model each agent-run's memory weight so a worker's physical slots reflect real
+    // capacity. Wiring it now would have no effect. See workflow-level concurrency doc.
+    ...(perPrStrategy !== null
+      ? {
+          idempotency: {
+            strategy: "ttl" as const,
+            expression: "input.deliveryId",
+            ttlMs: DELIVERY_IDEMPOTENCY_TTL_MS,
+          },
+        }
+      : {}),
+    fn: runAgent,
+  });
+  wf.onFailure({ fn: onAgentRunFailure });
+  return wf;
+}
+
+/**
+ * The ONE run task fn shared by every variant. Wraps `runAgentInner` with the
+ * #125 C1 abort handling: when the engine cancels THIS run (abort signal fired
+ * — in-flight or pre-daemon during provision) under a native policy, exactly ONE
+ * explicit `superseded` terminal is posted to www after teardown. Legacy runs
+ * (no supersedePolicy on the input) and the app-side policy post nothing — the
+ * control plane already owns that terminal.
+ */
+async function runAgent(
+  input: AgentRunInput,
+  ctx: Parameters<typeof runAgentInner>[1],
+): Promise<AgentRunOutput> {
+  const signal: AbortSignal | undefined = ctx.abortController?.signal;
+  const wasCancelled = () => signal?.aborted === true || ctx.cancelled === true;
+  try {
+    const out = await runAgentInner(input, ctx);
+    if (out.outcome === "cancelled" || wasCancelled()) {
+      await postSupersededOnce(input, ctx);
+    }
+    return out;
+  } catch (err) {
+    if (wasCancelled()) {
+      await postSupersededOnce(input, ctx);
+    }
+    throw err;
+  }
+}
+
+/** Runs the terminal post at most once per run task invocation. */
+async function postSupersededOnce(
+  input: AgentRunInput,
+  ctx: { workflowRunId?: () => string; log: (m: string) => void },
+): Promise<void> {
+  const policy = input.supersedePolicy;
+  if (!policy || policy === "app-side") {
+    return;
+  }
+  // The generation the fence compares against — Hatchet's run id for THIS run.
+  const runExternalId = ctx.workflowRunId?.() ?? "";
+  if (!runExternalId) {
+    ctx.log(
+      `[agent-run ${input.threadId}] cancelled under ${policy} but no workflowRunId — terminal not posted (C4 sweep is the backstop)`,
+    );
+    return;
+  }
+  const result = await postRunSuperseded(
+    {
       baseUrl: input.daemonCallbackUrl,
       daemonToken: input.daemonToken,
       threadId: input.threadId,
       threadChatId: input.threadChatId,
-      // #7 trace join: forwarded as a `traceparent` header on every www call so the
-      // daemon-event → GitHub-post continues the dispatch-minted trace. Dispatch sets
-      // it on every remote run; if ever absent the header is simply omitted (no-op).
       traceparent: input.traceparent,
-    };
+    },
+    { runExternalId, policy },
+  );
+  ctx.log(
+    `[agent-run ${input.threadId}] cancelled under ${policy} → superseded terminal: ${result}`,
+  );
+}
 
-    // Cancellation signal (Hatchet cancel: scheduleTimeout/executionTimeout). Used
-    // to abort in-flight pulls/polls so the finally-block daemon teardown runs
-    // promptly — no orphan daemon survives a cancelled run.
-    const signal: AbortSignal | undefined = ctx.abortController?.signal;
-    const pollCtx = {
-      get cancelled() {
-        return ctx.cancelled;
-      },
-      log: (message: string) => ctx.log(message),
-      signal,
-    };
+/**
+ * Registered variants, in the table's order. `agent-run` (legacy, no per-PR
+ * entry) keeps the pre-#125 REST trigger contract byte-identical.
+ */
+export const agentRunWorkflows = (
+  Object.entries(AGENT_RUN_VARIANTS) as [AgentRunVariantName, PerPrStrategy][]
+).map(([name, strategy]) => makeAgentRunWorkflow(name, strategy));
 
-    // Step logging (boot-coder): each boot step is logged so a stalled re-fire
-    // pinpoints exactly where the agent fails to launch. Never logs the prompt (H2)
-    // — only ids, pids, counts, and thread status. #7: the run's traceparent is
-    // stamped on every line (`trace=…`) so worker logs join the end-to-end trace.
-    const tracePrefix = input.traceparent ? ` trace=${input.traceparent}` : "";
-    const step = (msg: string) =>
-      ctx.log(`[agent-run ${input.threadId}${tracePrefix}] ${msg}`);
+/** The legacy workflow, exported by name for existing callers/tests. */
+export const agentRunWorkflow = agentRunWorkflows[0]!;
 
-    // Provision: clone into a per-run workdir keyed on threadId. threadId is unique
-    // per thread; threadChatId is the shared legacy sentinel when
-    // enableThreadChatCreation is off, so it would collide every run onto one dir.
-    const workdir = await provisionWorkdir({
-      repoFullName: input.repoFullName,
-      branch: input.branch,
-      baseBranch: input.baseBranch,
-      installationToken: input.installationToken,
-      workdirRoot: config.workdirRoot,
-      runId: input.threadId,
+async function runAgentInner(
+  input: AgentRunInput,
+  ctx: {
+    abortController?: AbortController;
+    cancelled: boolean;
+    log: (message: string) => void;
+    workflowRunId?: () => string;
+  },
+): Promise<AgentRunOutput> {
+  const config = loadWorkerConfig();
+  const wwwOpts = {
+    baseUrl: input.daemonCallbackUrl,
+    daemonToken: input.daemonToken,
+    threadId: input.threadId,
+    threadChatId: input.threadChatId,
+    // #7 trace join: forwarded as a `traceparent` header on every www call so the
+    // daemon-event → GitHub-post continues the dispatch-minted trace. Dispatch sets
+    // it on every remote run; if ever absent the header is simply omitted (no-op).
+    traceparent: input.traceparent,
+  };
+
+  // Cancellation signal (Hatchet cancel: scheduleTimeout/executionTimeout). Used
+  // to abort in-flight pulls/polls so the finally-block daemon teardown runs
+  // promptly — no orphan daemon survives a cancelled run.
+  const signal: AbortSignal | undefined = ctx.abortController?.signal;
+  const pollCtx = {
+    get cancelled() {
+      return ctx.cancelled;
+    },
+    log: (message: string) => ctx.log(message),
+    signal,
+  };
+
+  // Step logging (boot-coder): each boot step is logged so a stalled re-fire
+  // pinpoints exactly where the agent fails to launch. Never logs the prompt (H2)
+  // — only ids, pids, counts, and thread status. #7: the run's traceparent is
+  // stamped on every line (`trace=…`) so worker logs join the end-to-end trace.
+  const tracePrefix = input.traceparent ? ` trace=${input.traceparent}` : "";
+  const step = (msg: string) =>
+    ctx.log(`[agent-run ${input.threadId}${tracePrefix}] ${msg}`);
+
+  // Provision: clone into a per-run workdir keyed on threadId. threadId is unique
+  // per thread; threadChatId is the shared legacy sentinel when
+  // enableThreadChatCreation is off, so it would collide every run onto one dir.
+  const workdir = await provisionWorkdir({
+    repoFullName: input.repoFullName,
+    branch: input.branch,
+    baseBranch: input.baseBranch,
+    installationToken: input.installationToken,
+    workdirRoot: config.workdirRoot,
+    runId: input.threadId,
+  });
+  step(
+    `clone complete: ${input.repoFullName}@${input.branch}` +
+      (input.baseBranch ? ` (base ${input.baseBranch} fetched)` : ""),
+  );
+
+  // D1: resolve HOW this run authenticates to the model provider, BEFORE the
+  // child env is built (the credential fixes HOME, and the env is built once).
+  //
+  // "shared" box: never pull, never write a provider credential to this disk.
+  // "owner" box: pull the run's own credential and materialise it under a
+  // per-run HOME, so the run spends the USER's subscription / API key exactly
+  // like an in-sandbox run does.
+  // A "shared" box never asks for a credential; it still gets a fresh HOME,
+  // because an inherited one lets the agent CLI authenticate as the BOX OWNER
+  // out of the macOS Keychain — no file, no env var, no trace.
+  //
+  // These two steps sit BETWEEN the clone and the try/finally that owns
+  // cleanupWorkdir, and both can throw: the pull is a fetch (network error, or
+  // the run's AbortSignal firing on cancel/scheduleTimeout) and materialise
+  // does fs mkdir/writeFile. Without this guard such a throw escapes before
+  // the try is ever entered, and the cloned workdir is stranded on the box's
+  // disk for good. Cleaning the workdir also removes the per-run HOME beneath
+  // it, so a half-written credential cannot survive either.
+  let materialised: MaterialisedCredentials;
+  try {
+    const pulled =
+      config.boxTrust === "owner"
+        ? await pullAgentCredentials(wwwOpts, signal)
+        : { agent: "", credentials: { type: "built-in-credits" as const } };
+    // EVERY run gets a fresh per-run HOME, credential or not, and that HOME is
+    // seeded as a trusted workspace (realpath'd — macOS tmpdir is a symlink).
+    // Both halves are load-bearing: the fresh HOME keeps a run off the
+    // operator's own logins/Keychain, and the trust seed is what lets a
+    // review run (--permission-mode default, no skip-permissions) grant its
+    // tools in -p mode. An unseeded workspace makes the CLI ignore
+    // .claude/settings.json and the review agent exits 1 with zero API calls
+    // — verified from captured stderr, and reproduced for owner mode in
+    // production before the seed landed. Credits/box-key runs need the seed
+    // just as much: review mode does not care where the model credential
+    // comes from.
+    materialised = await materialiseAgentCredentials({
+      credentials: pulled.credentials,
+      agent: pulled.agent,
+      runRoot: workdir,
     });
-    step(
-      `clone complete: ${input.repoFullName}@${input.branch}` +
-        (input.baseBranch ? ` (base ${input.baseBranch} fetched)` : ""),
-    );
+  } catch (err) {
+    await cleanupWorkdir(workdir);
+    throw err;
+  }
+  // H2: log the MODE, never the credential.
+  // Name the credential the run will ACTUALLY use. The earlier version said
+  // "→ credits" for every undelivered run, which is a lie under box-key and
+  // would have sent the next person debugging this down the wrong path — the
+  // same way it took two rollbacks to find the last one.
+  step(
+    `agent credential: ${
+      materialised.delivered
+        ? "delivered (run HOME)"
+        : config.boxTrust === "box-key"
+          ? "none → box ANTHROPIC_API_KEY (box trust: box-key)"
+          : `none → credits proxy (box trust: ${config.boxTrust})`
+    }`,
+  );
 
-    // D1: resolve HOW this run authenticates to the model provider, BEFORE the
-    // child env is built (the credential fixes HOME, and the env is built once).
-    //
-    // "shared" box: never pull, never write a provider credential to this disk.
-    // "owner" box: pull the run's own credential and materialise it under a
-    // per-run HOME, so the run spends the USER's subscription / API key exactly
-    // like an in-sandbox run does.
-    // A "shared" box never asks for a credential; it still gets a fresh HOME,
-    // because an inherited one lets the agent CLI authenticate as the BOX OWNER
-    // out of the macOS Keychain — no file, no env var, no trace.
-    //
-    // These two steps sit BETWEEN the clone and the try/finally that owns
-    // cleanupWorkdir, and both can throw: the pull is a fetch (network error, or
-    // the run's AbortSignal firing on cancel/scheduleTimeout) and materialise
-    // does fs mkdir/writeFile. Without this guard such a throw escapes before
-    // the try is ever entered, and the cloned workdir is stranded on the box's
-    // disk for good. Cleaning the workdir also removes the per-run HOME beneath
-    // it, so a half-written credential cannot survive either.
-    let materialised: MaterialisedCredentials;
+  // #66 slice 2: per-run egress enforcement, iff the control plane resolved a
+  // policy onto this run's input. Absent policy ⇒ nothing starts and nothing
+  // is injected — zero behavior change. The proxy must be up BEFORE the
+  // daemon env is first built (preflightGhAuth builds it), because the env is
+  // memoised. A proxy-start failure must not strand the clone: this sits
+  // outside the try/finally that owns cleanup, so it cleans up itself.
+  let egressProxy: EgressProxy | null = null;
+  let egressEvents: ReturnType<typeof createEgressEventBatcher> | null = null;
+  if (input.egressPolicy) {
     try {
-      const pulled =
-        config.boxTrust === "owner"
-          ? await pullAgentCredentials(wwwOpts, signal)
-          : { agent: "", credentials: { type: "built-in-credits" as const } };
-      // EVERY run gets a fresh per-run HOME, credential or not, and that HOME is
-      // seeded as a trusted workspace (realpath'd — macOS tmpdir is a symlink).
-      // Both halves are load-bearing: the fresh HOME keeps a run off the
-      // operator's own logins/Keychain, and the trust seed is what lets a
-      // review run (--permission-mode default, no skip-permissions) grant its
-      // tools in -p mode. An unseeded workspace makes the CLI ignore
-      // .claude/settings.json and the review agent exits 1 with zero API calls
-      // — verified from captured stderr, and reproduced for owner mode in
-      // production before the seed landed. Credits/box-key runs need the seed
-      // just as much: review mode does not care where the model credential
-      // comes from.
-      materialised = await materialiseAgentCredentials({
-        credentials: pulled.credentials,
-        agent: pulled.agent,
-        runRoot: workdir,
+      const batcher = createEgressEventBatcher(wwwOpts);
+      egressEvents = batcher;
+      egressProxy = await startEgressProxy({
+        policy: input.egressPolicy,
+        onEvent: (e) => batcher.add(e),
       });
     } catch (err) {
+      await closeQuietly(egressEvents);
+      await materialised.cleanup();
       await cleanupWorkdir(workdir);
       throw err;
     }
-    // H2: log the MODE, never the credential.
-    // Name the credential the run will ACTUALLY use. The earlier version said
-    // "→ credits" for every undelivered run, which is a lie under box-key and
-    // would have sent the next person debugging this down the wrong path — the
-    // same way it took two rollbacks to find the last one.
     step(
-      `agent credential: ${
-        materialised.delivered
-          ? "delivered (run HOME)"
-          : config.boxTrust === "box-key"
-            ? "none → box ANTHROPIC_API_KEY (box trust: box-key)"
-            : `none → credits proxy (box trust: ${config.boxTrust})`
-      }`,
+      `egress proxy up: 127.0.0.1:${egressProxy.port} ` +
+        `(level=${input.egressPolicy.level}, ${input.egressPolicy.allowlist.length} allowlist entries)`,
     );
+  }
 
-    // #66 slice 2: per-run egress enforcement, iff the control plane resolved a
-    // policy onto this run's input. Absent policy ⇒ nothing starts and nothing
-    // is injected — zero behavior change. The proxy must be up BEFORE the
-    // daemon env is first built (preflightGhAuth builds it), because the env is
-    // memoised. A proxy-start failure must not strand the clone: this sits
-    // outside the try/finally that owns cleanup, so it cleans up itself.
-    let egressProxy: EgressProxy | null = null;
-    let egressEvents: ReturnType<typeof createEgressEventBatcher> | null = null;
-    if (input.egressPolicy) {
-      try {
-        const batcher = createEgressEventBatcher(wwwOpts);
-        egressEvents = batcher;
-        egressProxy = await startEgressProxy({
-          policy: input.egressPolicy,
-          onEvent: (e) => batcher.add(e),
-        });
-      } catch (err) {
-        await closeQuietly(egressEvents);
-        await materialised.cleanup();
-        await cleanupWorkdir(workdir);
-        throw err;
-      }
-      step(
-        `egress proxy up: 127.0.0.1:${egressProxy.port} ` +
-          `(level=${input.egressPolicy.level}, ${input.egressPolicy.allowlist.length} allowlist entries)`,
-      );
-    }
-
-    // #81: per-run GitHub credential brokers — the installation token stays in
-    // THIS process's heap; the agent child gets only a per-run bearer, in EVERY
-    // lane. permissionMode arrives only with the pulled message — AFTER the env
-    // is first built (preflightGhAuth memoises it) — so brokering is not
-    // lane-gated: review keeps its daemon-side strip on top, which now removes
-    // the bearer + broker git config too (strictly less than today). Both
-    // brokers must be up BEFORE the env is built. Same self-cleanup rule as the
-    // egress block above — and fail-closed: a broker start failure throws
-    // rather than falling back to a raw-token env.
-    let gitBroker: GitBroker | null = null;
-    let ghBroker: GhBroker | null = null;
-    let broker: BrokerHandoff | null = null;
-    if (config.credentialBroker === "on") {
-      try {
-        // Minted once per run, shared by both brokers; never logged.
-        const runBearer = randomBytes(32).toString("hex");
-        gitBroker = await startGitBroker({
-          installationToken: input.installationToken,
-          repoFullName: input.repoFullName,
-          runBearer,
-        });
-        ghBroker = await startGhBroker({
-          installationToken: input.installationToken,
-          runBearer,
-          socketPath: runGhSocketPath(
-            config.runNamespaceRoot,
-            getProcessWorkerId(),
-            input.threadId,
-          ),
-        });
-        broker = {
-          gitUrl: gitBroker.url,
-          ghSocketPath: ghBroker.socketPath,
-          bearer: runBearer,
-          repoFullName: input.repoFullName,
-        };
-      } catch (err) {
-        await closeQuietly(gitBroker);
-        await closeQuietly(ghBroker);
-        await closeQuietly(egressProxy);
-        await closeQuietly(egressEvents);
-        await materialised.cleanup();
-        await cleanupWorkdir(workdir);
-        throw err;
-      }
-      step(
-        `credential brokers up: git=127.0.0.1:${gitBroker.port}, gh=${ghBroker.socketPath}`,
-      );
-    }
-
-    const daemon = new DaemonProcess(
-      config,
-      input,
-      workdir,
-      materialised,
-      egressProxy?.url ?? null,
-      broker,
-    );
+  // #81: per-run GitHub credential brokers — the installation token stays in
+  // THIS process's heap; the agent child gets only a per-run bearer, in EVERY
+  // lane. permissionMode arrives only with the pulled message — AFTER the env
+  // is first built (preflightGhAuth memoises it) — so brokering is not
+  // lane-gated: review keeps its daemon-side strip on top, which now removes
+  // the bearer + broker git config too (strictly less than today). Both
+  // brokers must be up BEFORE the env is built. Same self-cleanup rule as the
+  // egress block above — and fail-closed: a broker start failure throws
+  // rather than falling back to a raw-token env.
+  let gitBroker: GitBroker | null = null;
+  let ghBroker: GhBroker | null = null;
+  let broker: BrokerHandoff | null = null;
+  if (config.credentialBroker === "on") {
     try {
-      // Fail-closed identity precondition (ADR-002): confirm gh authenticates as the
-      // bot (installation token + isolated config) in the workdir BEFORE spawning —
-      // a misconfigured box must block, never silently post as the wrong identity.
-      // #6: an auth-precondition failure is a MISCONFIG (never transient) → mark it
-      // NonRetryableError so it routes straight to onFailure, not backoff.
-      try {
-        await daemon.preflightGhAuth();
-      } catch (err) {
-        throw nonRetryablePreflight(err);
-      }
-      step("gh auth precondition ok (bot identity)");
-
-      // Run: bring up the daemon, then pull the message it should execute.
-      await daemon.start();
-      step(`daemon spawned: pid=${daemon.pid ?? "unknown"}`);
-      // #6: a 4xx next-message (PR gone / permission / bad token) is terminal →
-      // NonRetryableError; a 5xx/network stays retryable (classifyNextMessageError).
-      let message: Awaited<ReturnType<typeof pullNextMessage>>;
-      try {
-        message = await pullNextMessage(wwwOpts, signal);
-      } catch (err) {
-        throw classifyNextMessageError(err);
-      }
-      if (!message) {
-        // Nothing to run (no pending user message / empty prompt).
-        step("next-message: 204 (nothing to run)");
-        return {
-          threadId: input.threadId,
-          threadChatId: input.threadChatId,
-          outcome: "nothing-to-run",
-        };
-      }
-      // H2: log only non-sensitive shape, never the prompt.
-      step(
-        `next-message: got message (agent=${message.agent}, model=${message.model})`,
-      );
-      // The worker has the final say on useCredits — www's guess is wrong in
-      // both directions out here (see resolveUseCredits). In particular,
-      // box-key must OVERRIDE an incoming useCredits=true: www sets it exactly
-      // when the user has no connected credential, which is the box-key
-      // operator's normal state, and an un-overridden true makes daemon-env
-      // blank the box key and 402 at the proxy — the pilot failure this mode
-      // exists to fix.
-      const resolved = resolveUseCredits({
-        boxTrust: config.boxTrust,
-        credentialDelivered: materialised.delivered,
-        incomingUseCredits: message.useCredits === true,
+      // Minted once per run, shared by both brokers; never logged.
+      const runBearer = randomBytes(32).toString("hex");
+      gitBroker = await startGitBroker({
+        installationToken: input.installationToken,
+        repoFullName: input.repoFullName,
+        runBearer,
       });
-      if (resolved.log) {
-        step(resolved.log);
-      }
-      message.useCredits = resolved.useCredits;
-      const bytes = await daemon.sendMessage(message);
-      step(`socket write ok: ${bytes} bytes → daemon ACKed`);
+      ghBroker = await startGhBroker({
+        installationToken: input.installationToken,
+        runBearer,
+        socketPath: runGhSocketPath(
+          config.runNamespaceRoot,
+          getProcessWorkerId(),
+          input.threadId,
+        ),
+      });
+      broker = {
+        gitUrl: gitBroker.url,
+        ghSocketPath: ghBroker.socketPath,
+        bearer: runBearer,
+        repoFullName: input.repoFullName,
+      };
+    } catch (err) {
+      await closeQuietly(gitBroker);
+      await closeQuietly(ghBroker);
+      await closeQuietly(egressProxy);
+      await closeQuietly(egressEvents);
+      await materialised.cleanup();
+      await cleanupWorkdir(workdir);
+      throw err;
+    }
+    step(
+      `credential brokers up: git=127.0.0.1:${gitBroker.port}, gh=${ghBroker.socketPath}`,
+    );
+  }
 
-      // Poll www for terminal. The daemon streams events to www, which owns the
-      // thread status; the worker asks www, not the daemon. Revoke-race ruling and
-      // the poll loop live in www-client (pollUntilTerminal).
-      const result = await pollUntilTerminal(
-        pollCtx,
-        wwwOpts,
-        config.pollIntervalMs,
-      );
+  const daemon = new DaemonProcess(
+    config,
+    input,
+    workdir,
+    materialised,
+    egressProxy?.url ?? null,
+    broker,
+  );
+  try {
+    // Fail-closed identity precondition (ADR-002): confirm gh authenticates as the
+    // bot (installation token + isolated config) in the workdir BEFORE spawning —
+    // a misconfigured box must block, never silently post as the wrong identity.
+    // #6: an auth-precondition failure is a MISCONFIG (never transient) → mark it
+    // NonRetryableError so it routes straight to onFailure, not backoff.
+    try {
+      await daemon.preflightGhAuth();
+    } catch (err) {
+      throw nonRetryablePreflight(err);
+    }
+    step("gh auth precondition ok (bot identity)");
+
+    // Run: bring up the daemon, then pull the message it should execute.
+    await daemon.start();
+    step(`daemon spawned: pid=${daemon.pid ?? "unknown"}`);
+    // #6: a 4xx next-message (PR gone / permission / bad token) is terminal →
+    // NonRetryableError; a 5xx/network stays retryable (classifyNextMessageError).
+    let message: Awaited<ReturnType<typeof pullNextMessage>>;
+    try {
+      message = await pullNextMessage(wwwOpts, signal);
+    } catch (err) {
+      throw classifyNextMessageError(err);
+    }
+    if (!message) {
+      // Nothing to run (no pending user message / empty prompt).
+      step("next-message: 204 (nothing to run)");
       return {
         threadId: input.threadId,
         threadChatId: input.threadChatId,
-        outcome: result.outcome,
-        finalStatus: result.finalStatus,
+        outcome: "nothing-to-run",
       };
-    } finally {
-      // Terminal OR cancel (incl. scheduleTimeout): SIGKILL the daemon's process
-      // group so no orphan survives, then remove the workdir. Runs on normal return,
-      // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
-      daemon.teardown();
-      // #66: close the egress proxy after the daemon is dead (no more child
-      // traffic), then flush the last audit batch. Both are best-effort — an
-      // audit/proxy teardown hiccup must never mask the run's real outcome.
-      await closeQuietly(egressProxy);
-      // #81: close both credential brokers after the daemon is dead (no more
-      // child git/gh traffic). Best-effort, like the egress proxy — the token
-      // dies with this process either way.
-      await closeQuietly(gitBroker);
-      await closeQuietly(ghBroker);
-      await closeQuietly(egressEvents);
-      // Wipe the delivered credential before the workdir goes, so a cleanup
-      // failure on the workdir can never leave a live token behind.
-      await materialised.cleanup();
-      await cleanupWorkdir(workdir);
     }
-  },
-});
+    // H2: log only non-sensitive shape, never the prompt.
+    step(
+      `next-message: got message (agent=${message.agent}, model=${message.model})`,
+    );
+    // The worker has the final say on useCredits — www's guess is wrong in
+    // both directions out here (see resolveUseCredits). In particular,
+    // box-key must OVERRIDE an incoming useCredits=true: www sets it exactly
+    // when the user has no connected credential, which is the box-key
+    // operator's normal state, and an un-overridden true makes daemon-env
+    // blank the box key and 402 at the proxy — the pilot failure this mode
+    // exists to fix.
+    const resolved = resolveUseCredits({
+      boxTrust: config.boxTrust,
+      credentialDelivered: materialised.delivered,
+      incomingUseCredits: message.useCredits === true,
+    });
+    if (resolved.log) {
+      step(resolved.log);
+    }
+    message.useCredits = resolved.useCredits;
+    const bytes = await daemon.sendMessage(message);
+    step(`socket write ok: ${bytes} bytes → daemon ACKed`);
+
+    // Poll www for terminal. The daemon streams events to www, which owns the
+    // thread status; the worker asks www, not the daemon. Revoke-race ruling and
+    // the poll loop live in www-client (pollUntilTerminal).
+    const result = await pollUntilTerminal(
+      pollCtx,
+      wwwOpts,
+      config.pollIntervalMs,
+    );
+    return {
+      threadId: input.threadId,
+      threadChatId: input.threadChatId,
+      outcome: result.outcome,
+      finalStatus: result.finalStatus,
+    };
+  } finally {
+    // Terminal OR cancel (incl. scheduleTimeout): SIGKILL the daemon's process
+    // group so no orphan survives, then remove the workdir. Runs on normal return,
+    // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
+    daemon.teardown();
+    // #66: close the egress proxy after the daemon is dead (no more child
+    // traffic), then flush the last audit batch. Both are best-effort — an
+    // audit/proxy teardown hiccup must never mask the run's real outcome.
+    await closeQuietly(egressProxy);
+    // #81: close both credential brokers after the daemon is dead (no more
+    // child git/gh traffic). Best-effort, like the egress proxy — the token
+    // dies with this process either way.
+    await closeQuietly(gitBroker);
+    await closeQuietly(ghBroker);
+    await closeQuietly(egressEvents);
+    // Wipe the delivered credential before the workdir goes, so a cleanup
+    // failure on the workdir can never leave a live token behind.
+    await materialised.cleanup();
+    await cleanupWorkdir(workdir);
+  }
+}
 
 /**
  * #2 on-failure handler. Fires ONLY when the workflow FAILED (Hatchet guarantees
@@ -557,28 +730,29 @@ agentRunWorkflow.task({
  * H2: the reason is built ONLY from Hatchet's own error summary (ctx.errors()),
  * never agent output or the prompt. Wrapped so onFailure never throws uncaught.
  */
-agentRunWorkflow.onFailure({
-  fn: async (input: AgentRunInput, ctx): Promise<void> => {
-    try {
-      await postRunFailed(
-        {
-          baseUrl: input.daemonCallbackUrl,
-          daemonToken: input.daemonToken,
-          threadId: input.threadId,
-          threadChatId: input.threadChatId,
-        },
-        { reason: summarizeHatchetErrors(ctx) },
-      );
-    } catch (err) {
-      // postRunFailed already swallows its own errors; this is defense-in-depth so
-      // a summarise/build throw can't escape the on-failure task.
-      console.error(
-        `[agent-run ${input.threadId}] onFailure handler threw (swallowed)`,
-        err,
-      );
-    }
-  },
-});
+async function onAgentRunFailure(
+  input: AgentRunInput,
+  ctx: { errors?: () => Record<string, string> },
+): Promise<void> {
+  try {
+    await postRunFailed(
+      {
+        baseUrl: input.daemonCallbackUrl,
+        daemonToken: input.daemonToken,
+        threadId: input.threadId,
+        threadChatId: input.threadChatId,
+      },
+      { reason: summarizeHatchetErrors(ctx) },
+    );
+  } catch (err) {
+    // postRunFailed already swallows its own errors; this is defense-in-depth so
+    // a summarise/build throw can't escape the on-failure task.
+    console.error(
+      `[agent-run ${input.threadId}] onFailure handler threw (swallowed)`,
+      err,
+    );
+  }
+}
 
 /**
  * Build the failure reason from Hatchet's per-task error map (ctx.errors()): the

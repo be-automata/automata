@@ -220,3 +220,81 @@ describe("resolveUseCredits — the worker's final say", () => {
     },
   );
 });
+
+describe("#125 C1: makeAgentRunWorkflow variants", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let mod: any;
+  beforeAll(async () => {
+    mod = await import("./workflow");
+  });
+
+  const defOf = (name: string) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mod.agentRunWorkflows.find((w: any) => w.definition.name === name)
+      ?.definition;
+
+  it("registers the legacy workflow + 3 policy variants, table-driven", () => {
+    expect(Object.keys(mod.AGENT_RUN_VARIANTS)).toEqual([
+      "agent-run",
+      "agent-run-newest",
+      "agent-run-strict",
+      "agent-run-discard",
+    ]);
+    expect(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mod.agentRunWorkflows.map((w: any) => w.definition.name),
+    ).toEqual(Object.keys(mod.AGENT_RUN_VARIANTS));
+  });
+
+  it("legacy agent-run is byte-identical to pre-#125: 2 keys, no per-PR entry, no idempotency (AC7)", () => {
+    const legacy = defOf("agent-run");
+    expect(legacy.concurrency).toHaveLength(2);
+    expect(legacy.concurrency[0].expression).toBe("input.orgId");
+    expect(legacy._tasks[0].idempotency).toBeUndefined();
+  });
+
+  it("variants are identical to legacy EXCEPT the stacked per-PR entry's limitStrategy + the deliveryId idempotency (AC1)", () => {
+    const legacy = defOf("agent-run");
+    const expectedStrategy: Record<string, ConcurrencyLimitStrategy> = {
+      "agent-run-newest": ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
+      "agent-run-strict": ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
+      "agent-run-discard": ConcurrencyLimitStrategy.CANCEL_NEWEST,
+    };
+    for (const [name, strategy] of Object.entries(expectedStrategy)) {
+      const v = defOf(name);
+      expect(v, name).toBeDefined();
+      // Per-PR entry is FIRST and references the field, never interpolates.
+      expect(v.concurrency).toHaveLength(3);
+      expect(v.concurrency[0]).toEqual({
+        expression: "input.prKey",
+        maxRuns: 1,
+        limitStrategy: strategy,
+      });
+      // The two legacy entries follow, unchanged.
+      expect(v.concurrency.slice(1)).toEqual(legacy.concurrency);
+      // ONE shared task fn + identical task config except idempotency.
+      expect(v._tasks).toHaveLength(1);
+      expect(v._tasks[0].fn).toBe(legacy._tasks[0].fn);
+      const { idempotency, ...taskRest } = v._tasks[0];
+      const { idempotency: legacyIdem, ...legacyRest } = legacy._tasks[0];
+      expect(legacyIdem).toBeUndefined();
+      expect(taskRest).toEqual(legacyRest);
+      expect(idempotency).toEqual({
+        strategy: "ttl",
+        expression: "input.deliveryId",
+        ttlMs: 24 * 60 * 60 * 1000,
+      });
+      // Same onFailure handler.
+      expect(v.onFailure.fn).toBe(legacy.onFailure.fn);
+    }
+  });
+
+  it("throws at registration on an unsupported per-PR strategy (AC2 fail-loud)", () => {
+    expect(() =>
+      mod.makeAgentRunWorkflow(
+        "agent-run-bogus",
+        999 as unknown as ConcurrencyLimitStrategy,
+      ),
+    ).toThrow(/unsupported per-PR concurrency strategy 999/);
+  });
+});
