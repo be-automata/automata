@@ -20,7 +20,20 @@ import {
 import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import { resolveEgressPolicy } from "@/server-lib/egress/resolve-egress-policy";
-import { triggerAgentRun, cancelAgentRun } from "./transport";
+import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
+import {
+  resolveSupersedePolicy,
+  normalizeRepo,
+  type SupersedePolicy,
+} from "@terragon/shared/model/repo-review-settings";
+import { thread as threadTable } from "@terragon/shared/db/schema";
+import { eq } from "drizzle-orm";
+import {
+  triggerAgentRun,
+  cancelAgentRun,
+  workflowNameForPolicy,
+  validateRunMetadata,
+} from "./transport";
 
 /** Trigger-fetch retry policy — a transient network blip must not fail dispatch. */
 const TRIGGER_MAX_ATTEMPTS = 3;
@@ -137,11 +150,12 @@ async function triggerWithRetry(
   input: AgentRunInput,
   threadId: string,
   threadChatId: string,
+  opts?: Parameters<typeof triggerAgentRun>[2],
 ): Promise<{ externalId: string | undefined }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= TRIGGER_MAX_ATTEMPTS; attempt++) {
     try {
-      return await triggerAgentRun(input, hatchetConfig());
+      return await triggerAgentRun(input, hatchetConfig(), opts);
     } catch (error) {
       lastError = error;
       console.error("[hatchet] trigger attempt failed", {
@@ -218,6 +232,27 @@ export interface AgentRunInput {
    * forward proxy (egress-proxy.ts) and daemon-env points the child at it.
    */
   egressPolicy?: EgressPolicyShape;
+  /**
+   * #125/#127 flag-ON only: the per-PR concurrency key,
+   * `${orgId}/${normalizedRepo}/${prNumber}`. The worker variants' per-PR CEL
+   * entry references `input.prKey` — the field, never an interpolation. Absent
+   * with the flag off (byte-identical dispatch) and for non-review runs.
+   */
+  prKey?: string;
+  /**
+   * #125/#127 flag-ON only: the run's idempotency identity. The webhook's
+   * `X-GitHub-Delivery` id when the dispatch descends from a webhook, else a
+   * synthetic `manual:<threadId>:<ts>` — always present under the flag, never
+   * empty. Deduped by C1's `idempotency` task config (24h TTL); intentional
+   * re-dispatches (recheck, redo) mint DISTINCT ids and are never deduped.
+   */
+  deliveryId?: string;
+  /**
+   * #125/#127 flag-ON only: the SNAPSHOT of the supersede policy resolved at
+   * dispatch. The authority for this run's audit/recheck/cancel semantics —
+   * consumers read the stamp, never the current settings row (#125 decision 5).
+   */
+  supersedePolicy?: SupersedePolicy;
 }
 
 /** True when a thread should dispatch to the remote execution plane. */
@@ -239,12 +274,20 @@ export async function dispatchAgentRun({
   threadChatId,
   repoFullName,
   branch,
+  deliveryId,
 }: {
   userId: string;
   threadId: string;
   threadChatId: string;
   repoFullName: string;
   branch: string;
+  /**
+   * #127: the originating webhook's `X-GitHub-Delivery` id, when this dispatch
+   * descends from a GitHub webhook (plumbed webhook → automation → thread →
+   * here). Absent for manual/scheduled paths — a synthetic id is minted below.
+   * Only consumed when the supersedePolicy flag is ON.
+   */
+  deliveryId?: string;
 }): Promise<void> {
   const runKey = daemonRunKey({ threadId, threadChatId });
 
@@ -384,9 +427,76 @@ export async function dispatchAgentRun({
       ? { organizationId: thread.organizationId, prNumber }
       : null;
 
+  // #125/#127: the supersedePolicy feature flag, resolved SERVER-SIDE for the
+  // dispatching user (per-org rollout approximated at user scope, exactly like
+  // sandboxCredentialBroker). OFF (default) → everything below the flag check
+  // is the legacy path, byte-identical payload (IRON golden). ON for a REVIEW
+  // dispatch → the resolved policy picks the workflow variant, the input gains
+  // prKey/deliveryId, the metadata is enriched + versioned, and the policy is
+  // SNAPSHOTTED onto the run (metadata + input) as the authority for that run.
+  const supersedeFlagOn = await getFeatureFlagForUser({
+    db,
+    userId,
+    flagName: "supersedePolicy",
+  });
+  let dispatchOpts: Parameters<typeof triggerAgentRun>[2];
+  let stampedPolicy: SupersedePolicy | null = null;
+  if (supersedeFlagOn && reviewContext) {
+    // Unknown stored policy value THROWS here (resolver) — the dispatch fails
+    // loudly rather than running under a silently-degraded policy.
+    const resolved = await resolveSupersedePolicy({
+      db,
+      organizationId: reviewContext.organizationId,
+      repoFullName,
+    });
+    stampedPolicy = resolved.policy;
+    const repo = normalizeRepo(repoFullName);
+    input.prKey = `${orgId}/${repo}/${reviewContext.prNumber}`;
+    // Always present, never empty: webhook-descended dispatches carry the real
+    // X-GitHub-Delivery id; manual/scheduled paths mint a synthetic id that is
+    // unique per dispatch so intentional re-dispatches are never deduped.
+    input.deliveryId =
+      deliveryId && deliveryId.length > 0
+        ? deliveryId
+        : `manual:${threadId}:${Date.now()}`;
+    input.supersedePolicy = resolved.policy;
+    // Skill provenance when the thread ran a resolved skill (absent otherwise).
+    const sourceMetadata = thread?.sourceMetadata;
+    const skillVersion =
+      sourceMetadata?.type === "automation-skill"
+        ? ((sourceMetadata as { versionId?: string; contentSha?: string })
+            .versionId ??
+          (sourceMetadata as { contentSha?: string }).contentSha)
+        : undefined;
+    dispatchOpts = {
+      workflowName: workflowNameForPolicy(resolved.policy),
+      additionalMetadata: validateRunMetadata({
+        metaVersion: "1",
+        threadId,
+        threadChatId,
+        orgId,
+        repoFullName: repo,
+        prNumber: String(reviewContext.prNumber),
+        lane: "review",
+        supersedePolicy: resolved.policy,
+        ...(skillVersion ? { skillVersion } : {}),
+      }),
+    };
+    console.log("[hatchet] supersede policy resolved for dispatch", {
+      threadId,
+      policy: resolved.policy,
+      recheckOnComplete: resolved.recheckOnComplete,
+      workflowName: dispatchOpts.workflowName,
+      deliveryId: input.deliveryId,
+    });
+  }
+
   // Cancel + terminally-transition any prior in-flight review run for this PR BEFORE
-  // triggering the new one (best-effort; never blocks the dispatch).
-  if (reviewContext) {
+  // triggering the new one (best-effort; never blocks the dispatch). Runs on the
+  // LEGACY path (flag off) and under the explicit 'app-side' policy; the three
+  // native policies leave supersession to the engine's per-PR strategy — the
+  // worker's abort handler + C4 sweep own the terminal bookkeeping there.
+  if (reviewContext && (!supersedeFlagOn || stampedPolicy === "app-side")) {
     await supersedePriorReviewRuns({
       organizationId: reviewContext.organizationId,
       repoFullName,
@@ -402,7 +512,27 @@ export async function dispatchAgentRun({
       input,
       threadId,
       threadChatId,
+      dispatchOpts,
     );
+
+    // #127: stamp the thread's ACTIVE run for the C1 generation fence. Flag-ON
+    // only (the legacy path leaves the column NULL → fence fails open). A
+    // missing externalId just skips the stamp — the run still executes.
+    if (supersedeFlagOn && externalId) {
+      try {
+        await db
+          .update(threadTable)
+          .set({ activeRunExternalId: externalId })
+          .where(eq(threadTable.id, threadId));
+      } catch (error) {
+        // Best-effort: the fence fails open on a NULL stamp; never fail the
+        // dispatch over bookkeeping.
+        console.error("[hatchet] activeRunExternalId stamp failed", {
+          threadId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
 
     // Record this review run so a LATER push can supersede it. Only reviews are
     // tracked; a missing externalId (unexpected trigger-response shape) just skips

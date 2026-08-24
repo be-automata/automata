@@ -15,7 +15,11 @@ import {
 } from "@/lib/daemon-token";
 import { createAutomation } from "@terragon/shared/model/automations";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
-import { thread as threadTable } from "@terragon/shared/db/schema";
+import {
+  thread as threadTable,
+  repoReviewSettings,
+} from "@terragon/shared/db/schema";
+import { setUserFeatureFlagOverride } from "@terragon/shared/model/feature-flags";
 import { eq } from "drizzle-orm";
 import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
 
@@ -462,6 +466,237 @@ describe("dispatchAgentRun — #8 supersede stale in-flight review", () => {
       where: (t, { eq }) => eq(t.id, priorReview.threadId),
     });
     expect(reviewRow!.errorMessage).not.toBe("superseded");
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
+  let user: User;
+  let orgId: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    user = (await createTestUser({ db })).user;
+    const org = await createOrganization({
+      db,
+      name: "Org",
+      slug: `org-${nanoid(8).toLowerCase()}`,
+    });
+    orgId = org.id;
+    await setUserFeatureFlagOverride({
+      db,
+      userId: user.id,
+      name: "supersedePolicy",
+      value: true,
+    });
+  });
+
+  async function makeReviewThread(prNumber: number) {
+    const automation = await createAutomation({
+      db,
+      userId: user.id,
+      accessTier: "pro",
+      organizationId: orgId,
+      automation: {
+        name: "pr review",
+        repoFullName: "be-automata/automata",
+        branchName: "main",
+        enabled: true,
+        triggerType: "pull_request",
+        triggerConfig: {},
+        action: {
+          type: "user_message",
+          config: {
+            message: {
+              type: "user",
+              model: null,
+              parts: [],
+              timestamp: new Date().toISOString(),
+            },
+          },
+        },
+      },
+    });
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        organizationId: orgId,
+        githubRepoFullName: "be-automata/automata",
+        githubPRNumber: prNumber,
+        automationId: automation.id,
+      },
+    });
+    await db
+      .update(threadTable)
+      .set({ status: "booting" })
+      .where(eq(threadTable.id, t.threadId));
+    return t;
+  }
+
+  function okFetch(runId: string) {
+    const cancels: unknown[] = [];
+    const mock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/tasks/cancel")) {
+        cancels.push(JSON.parse(String(init?.body)));
+        return new Response("{}", { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({ run: { metadata: { id: runId } } }),
+        { status: 200 },
+      );
+    });
+    return { mock, cancels };
+  }
+
+  it("review dispatch: variant by policy, prKey/deliveryId/supersedePolicy in input, versioned metadata, activeRunExternalId stamped", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "be-automata/automata",
+      patch: { supersedePolicy: "complete-run-discard" },
+    });
+    const t = await makeReviewThread(77);
+    const f = okFetch("run-discard-1");
+    vi.stubGlobal("fetch", f.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      repoFullName: "Be-Automata/Automata",
+      branch: "feature",
+      deliveryId: "gh-delivery-abc",
+    });
+    const body = JSON.parse(f.mock.mock.calls[0]![1]!.body as string);
+    expect(body.workflowName).toBe("agent-run-discard");
+    expect(body.input.prKey).toBe(`${orgId}/be-automata/automata/77`);
+    expect(body.input.deliveryId).toBe("gh-delivery-abc");
+    expect(body.input.supersedePolicy).toBe("complete-run-discard");
+    expect(body.additionalMetadata).toEqual({
+      metaVersion: "1",
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      orgId,
+      repoFullName: "be-automata/automata",
+      prNumber: "77",
+      lane: "review",
+      supersedePolicy: "complete-run-discard",
+    });
+    // Native policy → app-side cancel pass NOT run.
+    expect(f.cancels).toHaveLength(0);
+    const [row] = await db.query.thread.findMany({
+      where: (th, { eq: e }) => e(th.id, t.threadId),
+    });
+    expect(row!.activeRunExternalId).toBe("run-discard-1");
+    vi.unstubAllGlobals();
+  });
+
+  it("mints a synthetic deliveryId when none is supplied (never empty)", async () => {
+    const t = await makeReviewThread(78);
+    const f = okFetch("run-2");
+    vi.stubGlobal("fetch", f.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "feature",
+    });
+    const body = JSON.parse(f.mock.mock.calls[0]![1]!.body as string);
+    expect(body.workflowName).toBe("agent-run"); // default newest-wins
+    expect(body.input.deliveryId).toMatch(
+      new RegExp(`^manual:${t.threadId}:\\d+$`),
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("app-side policy keeps the legacy cancel pass AND routes to agent-run", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "*",
+      patch: { supersedePolicy: "app-side" },
+    });
+    const old = await makeReviewThread(79);
+    const fresh = await makeReviewThread(79);
+    const f1 = okFetch("run-old");
+    vi.stubGlobal("fetch", f1.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: old.threadId,
+      threadChatId: old.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "feature",
+    });
+    vi.unstubAllGlobals();
+    const f2 = okFetch("run-new");
+    vi.stubGlobal("fetch", f2.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: fresh.threadId,
+      threadChatId: fresh.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "feature",
+    });
+    expect(f2.cancels).toEqual([{ externalIds: ["run-old"] }]);
+    const trigger = f2.mock.mock.calls.find(([u]) =>
+      String(u).includes("/trigger"),
+    )!;
+    expect(JSON.parse(trigger[1]!.body as string).workflowName).toBe(
+      "agent-run",
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("unknown stored policy → dispatch THROWS, nothing is triggered", async () => {
+    const t = await makeReviewThread(80);
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "be-automata/automata",
+      patch: { blockTolerance: "error" },
+    });
+    await db
+      .update(repoReviewSettings)
+      .set({ supersedePolicy: "zzz" })
+      .where(eq(repoReviewSettings.organizationId, orgId));
+    const f = okFetch("never");
+    vi.stubGlobal("fetch", f.mock);
+    await expect(
+      dispatchAgentRun({
+        userId: user.id,
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        repoFullName: "be-automata/automata",
+        branch: "feature",
+      }),
+    ).rejects.toThrow(/Unknown supersedePolicy 'zzz'/);
+    expect(f.mock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("non-review thread under the flag: legacy payload (no prKey, no variant)", async () => {
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { organizationId: orgId },
+    });
+    const f = okFetch("run-plain");
+    vi.stubGlobal("fetch", f.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "main",
+    });
+    const body = JSON.parse(f.mock.mock.calls[0]![1]!.body as string);
+    expect(body.workflowName).toBe("agent-run");
+    expect(body.input.prKey).toBeUndefined();
+    expect(body.additionalMetadata).toEqual({
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+    });
     vi.unstubAllGlobals();
   });
 });

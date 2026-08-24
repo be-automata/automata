@@ -3,7 +3,11 @@ import { env } from "@terragon/env/pkg-shared";
 import { createDb } from "../db";
 import { nanoid } from "nanoid";
 import { createOrganization } from "./organizations";
+import { and, eq } from "drizzle-orm";
+import { repoReviewSettings } from "../db/schema";
 import {
+  ORG_DEFAULT_REPO_SENTINEL,
+  resolveSupersedePolicy,
   getRepoReviewSetting,
   setRepoReviewSetting,
   upsertRepoReviewSetting,
@@ -363,5 +367,141 @@ describe("repo-review-settings egress columns (#66 slice 1)", () => {
     expect(cleared.egressPolicy).toBeNull();
     expect(cleared.egressAllowlist).toBeNull();
     expect(cleared.blockTolerance).toBe("info");
+  });
+});
+
+describe("resolveSupersedePolicy (#125/#127)", () => {
+  let orgA: string;
+  let orgB: string;
+
+  beforeEach(async () => {
+    orgA = await makeOrg("acme");
+    orgB = await makeOrg("globex");
+  });
+
+  it("defaults to newest-wins with recheck off when nothing is configured", async () => {
+    await expect(
+      resolveSupersedePolicy({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+      }),
+    ).resolves.toEqual({ policy: "newest-wins", recheckOnComplete: false });
+  });
+
+  it("falls back to the org-default sentinel row ('*') when the repo has no override", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { supersedePolicy: "complete-run-queue" },
+    });
+    await expect(
+      resolveSupersedePolicy({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+      }),
+    ).resolves.toEqual({
+      policy: "complete-run-queue",
+      recheckOnComplete: false,
+    });
+    // Other orgs are untouched by A's default (tenant fence).
+    await expect(
+      resolveSupersedePolicy({
+        db,
+        organizationId: orgB,
+        repoFullName: "acme/widgets",
+      }),
+    ).resolves.toEqual({ policy: "newest-wins", recheckOnComplete: false });
+  });
+
+  it("repo override beats org default, and matches case-insensitively", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { supersedePolicy: "complete-run-queue" },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "Acme/Widgets",
+      patch: {
+        supersedePolicy: "complete-run-discard",
+        recheckOnComplete: true,
+      },
+    });
+    await expect(
+      resolveSupersedePolicy({
+        db,
+        organizationId: orgA,
+        repoFullName: "ACME/WIDGETS",
+      }),
+    ).resolves.toEqual({
+      policy: "complete-run-discard",
+      recheckOnComplete: true,
+    });
+  });
+
+  it("a repo row with NULL policy defers to the org default (not to newest-wins)", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { supersedePolicy: "app-side" },
+    });
+    // Repo row exists for another field only.
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { blockTolerance: "error" },
+    });
+    await expect(
+      resolveSupersedePolicy({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+      }),
+    ).resolves.toMatchObject({ policy: "app-side" });
+  });
+
+  it("rejects an unknown policy at the write boundary", async () => {
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+        patch: { supersedePolicy: "yolo" },
+      }),
+    ).rejects.toThrow(/Unknown supersedePolicy 'yolo'/);
+  });
+
+  it("THROWS on an unknown stored value — never a silent default", async () => {
+    // Bypass the write-boundary check to simulate a bad row (e.g. a future
+    // policy removed from the union while rows still carry it).
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { blockTolerance: "error" },
+    });
+    await db
+      .update(repoReviewSettings)
+      .set({ supersedePolicy: "legacy-unknown" })
+      .where(
+        and(
+          eq(repoReviewSettings.organizationId, orgA),
+          eq(repoReviewSettings.repoFullName, "acme/widgets"),
+        ),
+      );
+    await expect(
+      resolveSupersedePolicy({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+      }),
+    ).rejects.toThrow(/Unknown supersedePolicy 'legacy-unknown'/);
   });
 });

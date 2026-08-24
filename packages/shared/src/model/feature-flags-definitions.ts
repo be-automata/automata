@@ -130,6 +130,12 @@ export const featureFlagsDefinitions = {
     description:
       "Enable shutdown mode - shows shutdown banner and blocks new subscriptions. Used for Terragon shutdown on February 14th, 2026.",
   },
+  supersedePolicy: {
+    defaultValue: false,
+    enabledForPreview: false,
+    description:
+      "Gates the configurable supersede-policy feature for PR-review runs (#125). OFF (default): dispatch is byte-identical to the legacy path — workflowName 'agent-run', minimal metadata, app-side supersede (#8) active. ON for the dispatching user: the resolved (org, repo) supersedePolicy selects the Hatchet workflow variant (newest-wins → CANCEL_IN_PROGRESS, complete-run-queue → GROUP_ROUND_ROBIN, complete-run-discard → CANCEL_NEWEST, app-side → legacy), the input carries prKey + deliveryId, and enriched versioned metadata is stamped on the run. Evaluated server-side per user (closest fit to per-org).",
+  },
   sandboxCredentialBroker: {
     defaultValue: false,
     enabledForPreview: false,

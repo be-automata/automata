@@ -81,6 +81,8 @@ export async function handlePullRequestStatusChange(
 
 export async function handlePullRequestUpdated(
   event: PullRequestEvent,
+  /** #127: the webhook's X-GitHub-Delivery id, threaded to the dispatch. */
+  deliveryId?: string,
 ): Promise<void> {
   const repoFullName = event.repository.full_name;
   const prNumber = event.pull_request.number;
@@ -104,7 +106,7 @@ export async function handlePullRequestUpdated(
       const batch = automations.slice(i, i + BATCH_SIZE);
       const results = await Promise.allSettled(
         batch.map((automation) =>
-          handlePullRequestAutomation(event, automation),
+          handlePullRequestAutomation(event, automation, deliveryId),
         ),
       );
       const failed = results.filter((result) => result.status === "rejected");
@@ -131,6 +133,7 @@ const BATCH_SIZE = 5;
 async function handlePullRequestAutomation(
   event: PullRequestEvent,
   automation: Automation,
+  deliveryId?: string,
 ): Promise<void> {
   const prNumber = event.pull_request.number;
   const repoFullName = event.repository.full_name;
@@ -190,6 +193,7 @@ async function handlePullRequestAutomation(
       repoFullName,
       prNumber,
       source: "automated",
+      deliveryId,
     }).catch((error) => {
       console.error(
         `Error running automation ${automation.id} for PR #${prNumber} in ${repoFullName}:`,
@@ -234,6 +238,7 @@ async function handlePullRequestAutomation(
     repoFullName,
     prNumber,
     source: "automated",
+    deliveryId,
   }).catch((error) => {
     console.error(
       `Error running automation ${automation.id} for PR #${prNumber} in ${repoFullName}:`,

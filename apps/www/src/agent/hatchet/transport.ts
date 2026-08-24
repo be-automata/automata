@@ -4,6 +4,71 @@
  * cloudflared tunnel. This is the ONE place the transport lives.
  */
 
+import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
+
+/**
+ * #125/#127: which registered workflow VARIANT each supersede policy dispatches
+ * to. STRUCTURALLY DUPLICATED in the worker's variant table
+ * (packages/worker/src/agent-run/workflow.ts) — the planes share no imports
+ * (composability invariant), so a drift between the two tables is caught by
+ * C3's E2E, not the type system. 'app-side' deliberately routes to the default
+ * 'agent-run' workflow: the control plane keeps the legacy #8 cancel rules and
+ * the engine applies no per-PR strategy.
+ */
+export const POLICY_TO_WORKFLOW = {
+  "newest-wins": "agent-run",
+  "complete-run-queue": "agent-run-strict",
+  "complete-run-discard": "agent-run-discard",
+  "app-side": "agent-run",
+} as const satisfies Record<SupersedePolicy, string>;
+
+/**
+ * Exhaustive policy → workflowName mapping. The switch (not a bare table
+ * lookup) is deliberate: a policy value that escapes the union — a widened
+ * type, a raw DB string — THROWS here instead of dispatching `undefined` as a
+ * workflow name (fail-loud, #125 decision 4).
+ */
+export function workflowNameForPolicy(policy: SupersedePolicy): string {
+  switch (policy) {
+    case "newest-wins":
+    case "complete-run-queue":
+    case "complete-run-discard":
+    case "app-side":
+      return POLICY_TO_WORKFLOW[policy];
+    default: {
+      const exhaustive: never = policy;
+      throw new Error(`Unknown supersede policy: ${String(exhaustive)}`);
+    }
+  }
+}
+
+/** Enriched-metadata hard limits (#127 AC5): schema versioned + bounded. */
+const METADATA_MAX_KEYS = 12;
+const METADATA_MAX_VALUE_CHARS = 256;
+
+/**
+ * Reject an over-limit metadata object AT DISPATCH (#127 AC5) — Hatchet's
+ * additionalMetadata is unbounded engine-side, so the bound lives here.
+ */
+export function validateRunMetadata(
+  metadata: Record<string, string>,
+): Record<string, string> {
+  const keys = Object.keys(metadata);
+  if (keys.length > METADATA_MAX_KEYS) {
+    throw new Error(
+      `Run metadata exceeds ${METADATA_MAX_KEYS} keys (${keys.length}): ${keys.join(", ")}`,
+    );
+  }
+  for (const [key, value] of Object.entries(metadata)) {
+    if (typeof value !== "string" || value.length > METADATA_MAX_VALUE_CHARS) {
+      throw new Error(
+        `Run metadata value for '${key}' exceeds ${METADATA_MAX_VALUE_CHARS} chars (or is not a string)`,
+      );
+    }
+  }
+  return metadata;
+}
+
 export interface HatchetTriggerConfig {
   /** Engine REST base (via the tunnel). Changes per quick-tunnel run → from env. */
   apiUrl: string;
@@ -46,6 +111,17 @@ export async function triggerAgentRun<
 >(
   input: T,
   config: HatchetTriggerConfig,
+  /**
+   * #125/#127 flag-ON extension point. ABSENT (the default, and always absent
+   * when the supersedePolicy flag is off) → the legacy payload, byte-identical:
+   * workflowName 'agent-run' + the minimal threadId/threadChatId metadata
+   * (guarded by the IRON golden in dispatch-golden.test.ts). Present → the
+   * policy-selected variant name and the enriched, validated metadata.
+   */
+  opts?: {
+    workflowName?: string;
+    additionalMetadata?: Record<string, string>;
+  },
 ): Promise<{ externalId: string | undefined }> {
   const { apiUrl, tenantId, apiToken } = requireHatchetConfig(
     config,
@@ -60,9 +136,9 @@ export async function triggerAgentRun<
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        workflowName: "agent-run",
+        workflowName: opts?.workflowName ?? "agent-run",
         input,
-        additionalMetadata: {
+        additionalMetadata: opts?.additionalMetadata ?? {
           threadId: input.threadId,
           threadChatId: input.threadChatId,
         },

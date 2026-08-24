@@ -375,6 +375,15 @@ export const thread = pgTable(
       .notNull()
       .$type<SandboxProvider>()
       .default("e2b"),
+    /**
+     * The Hatchet workflow-run externalId of this thread's ACTIVE (latest
+     * dispatched, not-yet-terminal) remote run (#125/#127). Written at
+     * dispatch when the supersedePolicy flag is ON; consumed by the C1
+     * generation fence: a terminal/verdict write from a run whose externalId
+     * no longer matches is rejected 409 (superseded). NULL = no fenced run
+     * (legacy dispatch, in-process sandbox) → the fence FAILS OPEN.
+     */
+    activeRunExternalId: text("active_run_external_id"),
     sandboxSize: text("sandbox_size").$type<SandboxSize>(),
     sandboxStatus: text("sandbox_status").$type<SandboxStatus>(),
     bootingSubstatus: text("booting_substatus").$type<BootingSubstatus>(),
@@ -1472,6 +1481,23 @@ export const repoReviewSettings = pgTable(
      * merged in at shape-build time, NOT stored here.
      */
     egressAllowlist: text("egress_allowlist").array(),
+    /**
+     * Supersede policy for PR-review runs on this (org, repo) (#125/#127):
+     * what happens when a new commit lands while a review run is still in
+     * flight on the same PR. One of 'newest-wins' | 'complete-run-queue' |
+     * 'complete-run-discard' | 'app-side'. NULL (default) = no explicit
+     * choice → the resolver falls back to the org-default row (sentinel repo
+     * '*') and finally to 'newest-wins'. Raw string here (dependency-free);
+     * validated at the write boundary AND at dispatch — an unknown stored
+     * value THROWS at dispatch, never degrades silently.
+     */
+    supersedePolicy: text("supersede_policy"),
+    /**
+     * Under 'complete-run-discard' only (#125 design D3): when the surviving
+     * run finishes, re-dispatch one review at the PR's CURRENT head if newer
+     * commits were discarded mid-run. Default false — discard means discard.
+     */
+    recheckOnComplete: boolean("recheck_on_complete").notNull().default(false),
     /** Provenance: the user who last wrote this override (audit trail). */
     updatedByUserId: text("updated_by_user_id").references(() => user.id, {
       onDelete: "set null",

@@ -84,6 +84,7 @@ export async function startAgentMessage({
   isNewThread,
   createNewBranch = true,
   branchName,
+  deliveryId,
   delayMs = 0,
 }: {
   db: DB;
@@ -97,6 +98,8 @@ export async function startAgentMessage({
   isNewThread: boolean;
   createNewBranch?: boolean;
   branchName?: string;
+  /** #127: originating webhook delivery id, forwarded to the Hatchet dispatch. */
+  deliveryId?: string;
   delayMs?: number;
 }) {
   console.log("Starting agent message", { threadId, threadChatId });
@@ -274,6 +277,7 @@ export async function startAgentMessage({
           repoFullName: thread!.githubRepoFullName,
           branch:
             branchName ?? thread!.branchName ?? thread!.repoBaseBranchName,
+          deliveryId,
         });
         return;
       }

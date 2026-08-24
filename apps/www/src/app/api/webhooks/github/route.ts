@@ -79,8 +79,10 @@ export async function POST(request: NextRequest) {
       "pull_request.ready_for_review",
       "pull_request.synchronize",
     ],
-    async ({ payload }) => {
-      await handlePullRequestUpdated(payload);
+    async ({ id, payload }) => {
+      // #127: thread the webhook delivery id to the dispatch — it becomes the
+      // run's idempotency identity under the supersedePolicy flag.
+      await handlePullRequestUpdated(payload, id);
     },
   );
   // Mirror-intake (pilot): event classes prod routes to a skill but the

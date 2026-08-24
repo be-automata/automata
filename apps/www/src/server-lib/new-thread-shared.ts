@@ -72,6 +72,12 @@ export interface CreateThreadOptions {
    * `thread.trustContext` as untrusted, never as trusted-by-omission).
    */
   trustContext?: ThreadTrustContext | null;
+  /**
+   * #127: originating webhook delivery id (X-GitHub-Delivery), threaded to
+   * the first agent dispatch as its idempotency identity. Absent for
+   * user-initiated/manual creation paths (dispatch mints a synthetic id).
+   */
+  deliveryId?: string;
   delayMs?: number;
   // Shadow mode (pilot): create the thread row (org-stamped, dashboard-
   // visible) but do NOT boot a sandbox or run the agent — so the installation
@@ -104,6 +110,7 @@ export async function createNewThread({
   sourceType,
   sourceMetadata,
   trustContext = null,
+  deliveryId,
   delayMs = 0,
   shadow = false,
 }: CreateThreadOptions): Promise<{ threadId: string; threadChatId: string }> {
@@ -374,6 +381,7 @@ export async function createNewThread({
       isNewThread: true,
       createNewBranch: effectiveCreateNewBranch,
       branchName: headBranchName || baseBranchName,
+      deliveryId,
       delayMs,
     }).catch((error) => {
       console.error("Error in startAgentMessage:", error);

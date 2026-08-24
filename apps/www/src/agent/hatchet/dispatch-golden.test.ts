@@ -30,11 +30,7 @@ import { dispatchAgentRun } from "./dispatch";
  *   UPDATE_DISPATCH_GOLDEN=1 pnpm -C apps/www exec vitest run src/agent/hatchet/dispatch-golden.test.ts
  */
 
-const FIXTURE_PATH = join(
-  __dirname,
-  "__fixtures__",
-  "transport.golden.json",
-);
+const FIXTURE_PATH = join(__dirname, "__fixtures__", "transport.golden.json");
 
 const GOLDEN_PR_NUMBER = 4242;
 
@@ -125,11 +121,11 @@ describe("dispatch golden (flag OFF byte-identical)", () => {
         repoFullName: "be-automata/automata",
         branch: args.branch,
       });
-      const triggerCall = fetchMock.mock.calls.find(([u]) =>
-        String(u).includes("/workflow-runs/trigger"),
-      );
+      const triggerCall = (
+        fetchMock.mock.calls as unknown as [string, RequestInit][]
+      ).find(([u]) => String(u).includes("/workflow-runs/trigger"));
       expect(triggerCall).toBeDefined();
-      return JSON.parse((triggerCall![1] as RequestInit).body as string);
+      return JSON.parse(triggerCall![1].body as string);
     } finally {
       rngSpy.mockRestore();
       vi.unstubAllGlobals();

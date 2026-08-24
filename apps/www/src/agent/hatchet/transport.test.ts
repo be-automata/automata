@@ -1,5 +1,15 @@
 import { describe, it, vi, beforeEach, expect } from "vitest";
-import { triggerAgentRun, cancelAgentRun } from "./transport";
+import {
+  triggerAgentRun,
+  cancelAgentRun,
+  POLICY_TO_WORKFLOW,
+  workflowNameForPolicy,
+  validateRunMetadata,
+} from "./transport";
+import {
+  SUPERSEDE_POLICIES,
+  type SupersedePolicy,
+} from "@terragon/shared/model/repo-review-settings";
 
 const CONFIG = {
   apiUrl: "https://tunnel.example.com/",
@@ -115,5 +125,66 @@ describe("cancelAgentRun (#8 supersede)", () => {
     vi.stubGlobal("fetch", fetchMock);
     await expect(cancelAgentRun(["run-a"], CONFIG)).rejects.toThrow(/404/);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("POLICY_TO_WORKFLOW / workflowNameForPolicy (#125/#127)", () => {
+  it("maps every policy in the union — exhaustive, no silent undefined", () => {
+    for (const policy of SUPERSEDE_POLICIES) {
+      expect(typeof workflowNameForPolicy(policy)).toBe("string");
+      expect(workflowNameForPolicy(policy)).toBe(POLICY_TO_WORKFLOW[policy]);
+    }
+    expect(POLICY_TO_WORKFLOW).toEqual({
+      "newest-wins": "agent-run",
+      "complete-run-queue": "agent-run-strict",
+      "complete-run-discard": "agent-run-discard",
+      "app-side": "agent-run",
+    });
+  });
+
+  it("throws on a policy outside the union (fail-loud)", () => {
+    expect(() =>
+      workflowNameForPolicy("bogus" as unknown as SupersedePolicy),
+    ).toThrow(/Unknown supersede policy: bogus/);
+  });
+
+  it("triggerAgentRun with opts sends the variant name + enriched metadata", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ run: { metadata: { id: "r" } } }), {
+        status: 200,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await triggerAgentRun(INPUT, CONFIG, {
+      workflowName: "agent-run-discard",
+      additionalMetadata: { metaVersion: "1", threadId: "thr_1" },
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
+    expect(body.workflowName).toBe("agent-run-discard");
+    expect(body.additionalMetadata).toEqual({
+      metaVersion: "1",
+      threadId: "thr_1",
+    });
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("validateRunMetadata (#127 AC5)", () => {
+  it("accepts ≤12 keys with ≤256-char values", () => {
+    const ok = Object.fromEntries(
+      Array.from({ length: 12 }, (_, i) => [`k${i}`, "x".repeat(256)]),
+    );
+    expect(validateRunMetadata(ok)).toBe(ok);
+  });
+  it("rejects >12 keys", () => {
+    const tooMany = Object.fromEntries(
+      Array.from({ length: 13 }, (_, i) => [`k${i}`, "v"]),
+    );
+    expect(() => validateRunMetadata(tooMany)).toThrow(/exceeds 12 keys/);
+  });
+  it("rejects a value >256 chars", () => {
+    expect(() => validateRunMetadata({ a: "x".repeat(257) })).toThrow(
+      /exceeds 256 chars/,
+    );
   });
 });

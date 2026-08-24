@@ -31,6 +31,87 @@ export function normalizeRepo(repoFullName: string): string {
 }
 
 /**
+ * Supersede policies for PR-review runs (#125/#127): what happens when a new
+ * commit lands while a review run is still in flight on the same PR.
+ *  - 'newest-wins'          → engine cancels the in-flight run, runs the new one
+ *  - 'complete-run-queue'   → the new run queues behind the in-flight one
+ *  - 'complete-run-discard' → the new run is discarded while one is live
+ *  - 'app-side'             → the control plane decides (legacy #8 rules)
+ */
+export const SUPERSEDE_POLICIES = [
+  "newest-wins",
+  "complete-run-queue",
+  "complete-run-discard",
+  "app-side",
+] as const;
+export type SupersedePolicy = (typeof SUPERSEDE_POLICIES)[number];
+
+/** The policy every (org, repo) gets when nothing is configured. */
+export const DEFAULT_SUPERSEDE_POLICY: SupersedePolicy = "newest-wins";
+
+/**
+ * The org-default row's repo slug sentinel. `normalizeRepo` lowercases real
+ * slugs and GitHub slugs can never be a bare '*', so this row can never
+ * collide with a real repo override.
+ */
+export const ORG_DEFAULT_REPO_SENTINEL = "*";
+
+export function isSupersedePolicy(value: string): value is SupersedePolicy {
+  return (SUPERSEDE_POLICIES as readonly string[]).includes(value);
+}
+
+/**
+ * Resolve the effective supersede policy for one (org, repo): exact repo
+ * override → org-default sentinel row ('*') → 'newest-wins'. Resolved LIVE at
+ * every dispatch, and SNAPSHOTTED onto the run there — audit/recheck/cancel
+ * read the stamped policy, never the current config (#125 decision 5).
+ *
+ * An unknown stored value THROWS (never a silent degrade): a bad row must
+ * fail the dispatch loudly, exactly like an invalid egress policy does.
+ */
+export async function resolveSupersedePolicy({
+  db,
+  organizationId,
+  repoFullName,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+}): Promise<{ policy: SupersedePolicy; recheckOnComplete: boolean }> {
+  const pick = (
+    row: RepoReviewSetting | undefined,
+  ): { policy: SupersedePolicy; recheckOnComplete: boolean } | null => {
+    if (!row?.supersedePolicy) return null;
+    if (!isSupersedePolicy(row.supersedePolicy)) {
+      throw new Error(
+        `Unknown supersedePolicy '${row.supersedePolicy}' stored for ` +
+          `(${organizationId}, ${row.repoFullName}) — refusing to dispatch ` +
+          `with a silently-degraded policy`,
+      );
+    }
+    return {
+      policy: row.supersedePolicy,
+      recheckOnComplete: row.recheckOnComplete,
+    };
+  };
+  const repoRow = await getRepoReviewSetting({
+    db,
+    organizationId,
+    repoFullName,
+  });
+  const fromRepo = pick(repoRow);
+  if (fromRepo) return fromRepo;
+  const orgRow = await getRepoReviewSetting({
+    db,
+    organizationId,
+    repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+  });
+  const fromOrg = pick(orgRow);
+  if (fromOrg) return fromOrg;
+  return { policy: DEFAULT_SUPERSEDE_POLICY, recheckOnComplete: false };
+}
+
+/**
  * Read the tolerance override for one `(org, repo)`, or undefined when none
  * exists (the repo then falls back to env/default at the resolver). Read LIVE on
  * every dispatched review run — a dashboard write applies with no restart.
@@ -83,6 +164,10 @@ export async function upsertRepoReviewSetting({
     egressPolicy?: string | null;
     /** #66 operator allowlist entries; null clears. Validated at shape-build time. */
     egressAllowlist?: string[] | null;
+    /** #125/#127 supersede policy; null clears (falls back org-default → 'newest-wins'). */
+    supersedePolicy?: string | null;
+    /** #125 discard-mode recheck toggle. */
+    recheckOnComplete?: boolean;
   };
   updatedByUserId?: string | null;
 }): Promise<RepoReviewSetting> {
@@ -111,11 +196,24 @@ export async function upsertRepoReviewSetting({
       { systemHosts: [] },
     );
   }
+  // #127: an unknown policy must never land in the table (dispatch throws on
+  // read as backstop, but the write boundary is the right place to reject).
+  if (
+    patch.supersedePolicy !== undefined &&
+    patch.supersedePolicy !== null &&
+    !isSupersedePolicy(patch.supersedePolicy)
+  ) {
+    throw new Error(
+      `Unknown supersedePolicy '${patch.supersedePolicy}' — expected one of ${SUPERSEDE_POLICIES.join(", ")}`,
+    );
+  }
   const set: {
     blockTolerance?: string;
     reviewDraftPrs?: boolean;
     egressPolicy?: string | null;
     egressAllowlist?: string[] | null;
+    supersedePolicy?: string | null;
+    recheckOnComplete?: boolean;
     updatedByUserId: string | null;
     updatedAt: Date;
   } = { updatedByUserId: updatedByUserId ?? null, updatedAt: new Date() };
@@ -126,6 +224,10 @@ export async function upsertRepoReviewSetting({
   if (patch.egressPolicy !== undefined) set.egressPolicy = patch.egressPolicy;
   if (patch.egressAllowlist !== undefined)
     set.egressAllowlist = patch.egressAllowlist;
+  if (patch.supersedePolicy !== undefined)
+    set.supersedePolicy = patch.supersedePolicy;
+  if (patch.recheckOnComplete !== undefined)
+    set.recheckOnComplete = patch.recheckOnComplete;
 
   const [row] = await db
     .insert(repoReviewSettings)
@@ -144,6 +246,12 @@ export async function upsertRepoReviewSetting({
         : {}),
       ...(patch.egressAllowlist !== undefined
         ? { egressAllowlist: patch.egressAllowlist }
+        : {}),
+      ...(patch.supersedePolicy !== undefined
+        ? { supersedePolicy: patch.supersedePolicy }
+        : {}),
+      ...(patch.recheckOnComplete !== undefined
+        ? { recheckOnComplete: patch.recheckOnComplete }
         : {}),
       updatedByUserId: updatedByUserId ?? null,
     })
