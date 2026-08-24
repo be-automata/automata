@@ -69,13 +69,6 @@ const SUPPORTED_PER_PR_STRATEGIES: ReadonlySet<ConcurrencyLimitStrategy> =
 const DELIVERY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Build one agent-run workflow. Config is identical across variants except
- * the OPTIONAL per-PR concurrency entry (stacked on top of the per-org and
- * global entries) and — for variants only — the delivery-id idempotency key.
- * Unknown strategy → throws at registration (fail-loud, never a silently
- * mis-strategied group).
- */
-/**
  * The PURE registration shape of one agent-run workflow — the workflow
  * options (name + stacked concurrency) and the run task's options, minus the
  * task fn. Exported so #128's E2E suite registers the EXACT production
@@ -96,9 +89,11 @@ export function buildAgentRunDefinition(
     }[];
     /**
      * WORKFLOW-level, not task-level: the SDK's registration only serializes
-     * `workflow.idempotency` (worker-internal.js) — a task-level option is
-     * dropped silently, which #128's E2E caught (duplicate deliveryId ran
-     * twice). Verified against hatchet-lite v0.94.10.
+     * `workflow.idempotency` (a task-level option is dropped silently).
+     * INERT on hatchet-lite v0.94.10 — the engine persists no workflow
+     * idempotency config, so a repeated deliveryId still runs twice. It is
+     * registered anyway so nothing else changes the day the engine honours
+     * it. See docs/uat/hatchet-lite-v0.94.10-observed.md §3.
      */
     idempotency?: { strategy: "ttl"; expression: string; ttlMs: number };
   };
@@ -114,7 +109,7 @@ export function buildAgentRunDefinition(
     !SUPPORTED_PER_PR_STRATEGIES.has(perPrStrategy)
   ) {
     throw new Error(
-      `makeAgentRunWorkflow(${name}): unsupported per-PR concurrency strategy ${String(perPrStrategy)}`,
+      `buildAgentRunDefinition(${name}): unsupported per-PR concurrency strategy ${String(perPrStrategy)}`,
     );
   }
   return {

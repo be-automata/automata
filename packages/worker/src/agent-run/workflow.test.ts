@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
 import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
+import { AGENT_RUN_VARIANTS } from "./definition";
 
 /**
  * Phase 0.1 registration-shape proof for the agent-run WORKFLOW (converted from a
@@ -234,7 +235,7 @@ describe("#125 C1: makeAgentRunWorkflow variants", () => {
       ?.definition;
 
   it("registers the legacy workflow + 3 policy variants, table-driven", () => {
-    expect(Object.keys(mod.AGENT_RUN_VARIANTS)).toEqual([
+    expect(Object.keys(AGENT_RUN_VARIANTS)).toEqual([
       "agent-run",
       "agent-run-newest",
       "agent-run-strict",
@@ -243,7 +244,7 @@ describe("#125 C1: makeAgentRunWorkflow variants", () => {
     expect(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       mod.agentRunWorkflows.map((w: any) => w.definition.name),
-    ).toEqual(Object.keys(mod.AGENT_RUN_VARIANTS));
+    ).toEqual(Object.keys(AGENT_RUN_VARIANTS));
   });
 
   it("legacy agent-run is byte-identical to pre-#125: 2 keys, no per-PR entry, no idempotency (AC7)", () => {

@@ -39,14 +39,6 @@ import {
 import type { AgentRunInput, AgentRunOutput } from "./types";
 
 export type { AgentRunInput, AgentRunOutput } from "./types";
-export {
-  AGENT_RUN_VARIANTS,
-  buildAgentRunDefinition,
-  PER_ORG_MAX_RUNS,
-  GLOBAL_MAX_RUNS,
-  type AgentRunVariantName,
-  type PerPrStrategy,
-} from "./definition";
 
 /**
  * The execution-plane agent-run workflow (ADR-002/ADR-003). Triggered from the
@@ -66,16 +58,16 @@ export {
  * timeout window is the grace period for THEIR infra being down; 5m would silently
  * drop queued work during a brief outage (ADR-002 §Worker availability).
  *
- * Concurrency is a STACKED array of two GROUP_ROUND_ROBIN keys (Phase 2, #3a
- * per-org fair ordering). Both cap at 1 today; the ordering, not the throughput,
- * is what changes:
- *   1. per-ORG key (`input.orgId`): GROUP_ROUND_ROBIN makes the scheduler pick the
- *      next waiting ORG fairly when the slot frees, so one org's backlog can never
- *      head-of-line-block another (the direct "one org can't starve another"
- *      answer at pilot volume). orgId is guaranteed non-empty by dispatch (the
- *      `u:${userId}` fallback) so the CEL key never dereferences null.
+ * Concurrency is a STACKED array of two GROUP_ROUND_ROBIN keys (shapes in
+ * definition.ts). Both cap at 1 today:
+ *   1. per-ORG key (`input.orgId`): serializes runs WITHIN an org. orgId is
+ *      guaranteed non-empty by dispatch (the `u:${userId}` fallback) so the CEL
+ *      key never dereferences null.
  *   2. global constant key: the single-box daemon memory budget — only ONE
- *      agent-run executes at a time across ALL orgs and BOTH workers.
+ *      agent-run executes at a time across ALL orgs and BOTH workers. It is a
+ *      single group, so ordering across orgs under it is FIFO (observed, #128
+ *      E2E — docs/uat/hatchet-lite-v0.94.10-observed.md §1); cross-org fairness
+ *      needs global>1 (#3b, memory-gated).
  * On the LEGACY `agent-run` workflow later runs QUEUE rather than cancel — an
  * in-flight agent turn is never killed by the engine there (flag-off contract,
  * #125 AC7). The three POLICY VARIANTS (#125 C1, `makeAgentRunWorkflow`) stack a
@@ -89,16 +81,6 @@ export {
  * The variants are only ever dispatched with `prKey`/`deliveryId` present (www
  * C2 guarantees it under the flag), so their CEL never dereferences a missing
  * field; the legacy workflow carries no per-PR entry and no idempotency key.
- *
- * FAIRNESS — OBSERVED, NOT DELIVERED (#128 E2E, hatchet-lite v0.94.10,
- * 2026-08-24): the 2-org interleave UAT ran against a real engine and the start
- * order is pure FIFO (a1, a2, a3, b1). The global cap is ONE concurrency group
- * and GROUP_ROUND_ROBIN over a single group is FIFO, so at GLOBAL_MAX_RUNS=1 an
- * org's backlog DOES head-of-line-block another. The per-org entry still
- * serializes within an org. Cross-org fairness needs global>1 (memory-gated,
- * #3b) or an engine ordering primitive; the characterization test in
- * supersede.integration.test.ts freezes the observed FIFO so any change is
- * deliberate. (Supersedes "plan amendment 11".)
  */
 
 /**

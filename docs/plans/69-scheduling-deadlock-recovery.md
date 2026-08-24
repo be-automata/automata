@@ -9,7 +9,7 @@
 ## 1. Context & stakes
 
 The execution plane runs one Hatchet workflow, `agent-run`, on a customer-supplied box. Its
-global concurrency cap is **1** (`packages/worker/src/agent-run/workflow.ts:88`,
+global concurrency cap is **1** (`packages/worker/src/agent-run/definition.ts` (`GLOBAL_MAX_RUNS`),
 `GLOBAL_MAX_RUNS = 1`), justified by the single-box daemon memory budget
 (`workflow.ts:80-87`). That means the box has exactly **one** slot for agent work.
 
@@ -60,8 +60,8 @@ export const agentRunWorkflow = hatchet.workflow<AgentRunInput>({
 });
 ```
 
-- `PER_ORG_MAX_RUNS = 1` — `workflow.ts:77`.
-- `GLOBAL_MAX_RUNS = 1` — `workflow.ts:88`. The doc comment `workflow.ts:80-87` ties the cap to
+- `PER_ORG_MAX_RUNS = 1` — `definition.ts` (moved from `workflow.ts:77` by #128).
+- `GLOBAL_MAX_RUNS = 1` — `definition.ts` (moved from `workflow.ts:88` by #128). Its doc comment ties the cap to
   the ENOMEM wall; raising it is gated on #3b.
 - `scheduleTimeout: "30m"` — `workflow.ts:236`. `executionTimeout: "30m"` — `workflow.ts:237`.
   `retries: 0` — `workflow.ts:245`.

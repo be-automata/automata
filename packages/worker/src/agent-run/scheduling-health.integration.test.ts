@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
-import { writeFile, rm } from "node:fs/promises";
-import { promisify } from "node:util";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Client } from "pg";
+import type { Client } from "pg";
+import {
+  composeDownV,
+  composeUp,
+  connectPg,
+  pollUntil,
+} from "./hatchet-it-harness";
 import {
   detectStepConcurrencyRot,
   detectWorkflowConcurrencyRot,
@@ -13,8 +14,6 @@ import {
   repairConcurrencyRot,
 } from "./scheduling-health";
 import type { PgLike } from "./engine-db";
-
-const execFileAsync = promisify(execFile);
 
 /**
  * Dockerized integration harness (#69 §7.2). Gated on HATCHET_IT=1 — skipped
@@ -45,117 +44,23 @@ const execFileAsync = promisify(execFile);
  * fixtures for slot reclamation. Taking this fallback weakens AC-4 exactly as
  * §7.2.1 anticipates and is recorded here, not silently adopted.
  */
-const packageRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-);
-const COMPOSE_FILE = path.join(packageRoot, "docker-compose.hatchet.yml");
-// `docker compose up` has no --publish flag (that's `run`); the port override
-// must come from a compose file. Generated at runtime, scoped to the IT
-// project only, so the repo's compose files stay untouched (base publishes no
-// port by design, and the maintenance overlay owns 55433).
-const IT_OVERRIDE_FILE = path.join(
-  packageRoot,
-  ".hatchet-it-port-override.generated.yml",
-);
-const COMPOSE_PROJECT_NAME = "automata-hatchet-it";
-// Deliberately far from the live stack's 8888/7077 and the maintenance
-// overlay's 55433, so an isolated run can never collide with a box that also
-// has the live pilot stack (or another dev box's maintenance overlay) up.
-const IT_PG_PORT = 25433;
-// hatchet-lite must ALSO run in the IT project: the engine, not postgres,
-// owns the schema migrations (a postgres-only stack has zero v1_* tables).
-// Its host ports are !override'd away so the IT project can never collide
-// with the live stack's 8888/7077 (compose v2.24+ supports !override).
-const IT_OVERRIDE_YAML = `services:
-  postgres:
-    ports:
-      - "127.0.0.1:${IT_PG_PORT}:5432"
-  hatchet-lite:
-    ports: !override []
-`;
-
-async function composeUp(): Promise<void> {
-  await writeFile(IT_OVERRIDE_FILE, IT_OVERRIDE_YAML, "utf8");
-  await execFileAsync("docker", [
-    "compose",
-    "-f",
-    COMPOSE_FILE,
-    "-f",
-    IT_OVERRIDE_FILE,
-    "-p",
-    COMPOSE_PROJECT_NAME,
-    "--project-directory",
-    packageRoot,
-    "up",
-    "-d",
-    "postgres",
-    "hatchet-lite",
-  ]);
-}
-
 /**
  * Migrations belong to hatchet-lite, not postgres — poll until the engine has
  * created the concurrency tables before letting any fixture run.
  */
-async function waitForSchemaReady(
-  client: Client,
-  timeoutMs = 120_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const r = await client.query(
-      `SELECT count(*)::int AS n FROM information_schema.tables
-       WHERE table_name IN ('v1_step_concurrency','v1_concurrency_slot','v1_task_runtime','Worker')`,
-    );
-    if (r.rows[0].n >= 4) return;
-    if (Date.now() > deadline) {
-      throw new Error(
-        `hatchet-lite migrations did not create the expected tables within ${timeoutMs}ms (found ${r.rows[0].n}/4)`,
-      );
-    }
-    await new Promise((res) => setTimeout(res, 2000));
-  }
-}
-
-async function composeDownV(): Promise<void> {
-  await execFileAsync("docker", [
-    "compose",
-    "-f",
-    COMPOSE_FILE,
-    "-p",
-    COMPOSE_PROJECT_NAME,
-    "--project-directory",
-    packageRoot,
-    "down",
-    "-v",
-  ]);
-}
-
-async function waitForPgReady(port: number, timeoutMs = 60_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastErr: unknown;
-  while (Date.now() < deadline) {
-    try {
-      const client = new Client({
-        host: "127.0.0.1",
-        port,
-        user: "hatchet",
-        password: "hatchet",
-        database: "hatchet",
-      });
-      await client.connect();
-      await client.query("SELECT 1");
-      await client.end();
-      return;
-    } catch (err) {
-      lastErr = err;
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  }
-  throw new Error(
-    `postgres never became ready on port ${port}: ${String(lastErr)}`,
+async function waitForSchemaReady(client: Client): Promise<void> {
+  await pollUntil(
+    "hatchet-lite concurrency tables",
+    async () =>
+      (
+        await client.query(
+          `SELECT count(*)::int AS n FROM information_schema.tables
+           WHERE table_name IN ('v1_step_concurrency','v1_concurrency_slot','v1_task_runtime','Worker')`,
+        )
+      ).rows[0].n as number,
+    (n) => n >= 4,
+    120_000,
+    2000,
   );
 }
 
@@ -169,22 +74,10 @@ describe.skipIf(!itEnabled)(
     let tenantId: string;
 
     beforeAll(async () => {
-      // Base compose file publishes no host port for postgres by design
-      // (§2.2) — the isolated IT project therefore needs its own port
-      // override, scoped ONLY to COMPOSE_PROJECT_NAME=automata-hatchet-it, on
-      // IT_PG_PORT, never 55433 (the maintenance overlay's port) and never
-      // touching the live project. This mirrors
-      // docker-compose.hatchet.maintenance.yml's shape without editing it.
+      // Stack safety (own project, own ports, never the live engine) lives in
+      // hatchet-it-harness.ts, shared with supersede.integration.test.ts.
       await composeUp();
-      await waitForPgReady(IT_PG_PORT);
-      pg = new Client({
-        host: "127.0.0.1",
-        port: IT_PG_PORT,
-        user: "hatchet",
-        password: "hatchet",
-        database: "hatchet",
-      });
-      await pg.connect();
+      pg = await connectPg();
       await waitForSchemaReady(pg);
       db = {
         query: (text: string, params?: unknown[]) => pg.query(text, params),
@@ -212,8 +105,7 @@ describe.skipIf(!itEnabled)(
 
     afterAll(async () => {
       await pg?.end().catch(() => {});
-      await composeDownV().catch(() => {});
-      await rm(IT_OVERRIDE_FILE, { force: true }).catch(() => {});
+      await composeDownV();
     }, 60_000);
 
     describe("7.2.1 — concurrency-group rot: SQL round-trip against a real isolated engine schema", () => {
@@ -243,8 +135,8 @@ describe.skipIf(!itEnabled)(
         // NOT IMPLEMENTED — see the file-level DEVIATION note. Steps, verbatim
         // from spec §7.2.1, for whoever picks this up:
         //   1. Fresh engine (this beforeAll already brings up an isolated
-        //      postgres-only project — extend it to also run hatchet-lite on
-        //      isolated ports, e.g. 28888/27077).
+        //      postgres-only project — the harness now also runs hatchet-lite
+        //      on isolated ports 28888/27077).
         //   2. shapeGenerator(i) => distinct concurrency-group expression
         //      arrays for a probe workflow `rot-probe`.
         //   3. FOR i in 1..12: spawn a real @hatchet-dev/typescript-sdk
