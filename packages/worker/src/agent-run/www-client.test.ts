@@ -55,6 +55,22 @@ describe("postRunFailed (#2 terminal-failure callback)", () => {
     });
   });
 
+  it("redacts credential material from the reason before it is persisted", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("OK", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const b64 = Buffer.from(
+      "x-access-token:ghs_3211193_abcdefghijklmnop",
+    ).toString("base64");
+    await postRunFailed(opts, {
+      reason: `run: Command failed: git -c http.extraHeader=AUTHORIZATION: basic ${b64} clone`,
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
+    expect(body.messages[0].error_info).not.toContain(b64);
+    expect(body.messages[0].error_info).toContain("basic <redacted>");
+  });
+
   it("truncates a long reason and never carries prompt/agent content", async () => {
     const fetchMock = vi
       .fn()

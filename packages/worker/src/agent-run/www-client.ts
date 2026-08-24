@@ -1,4 +1,5 @@
 import type { DaemonEventAPIBody } from "@terragon/daemon/shared";
+import { redactSecrets } from "./redact";
 import type { PulledDaemonMessage, TerminalCause } from "./types";
 
 /**
@@ -190,7 +191,8 @@ export async function postRunFailed(
         type: "custom-error",
         session_id: null,
         duration_ms: 0,
-        error_info: reason.slice(0, MAX_REASON_LEN),
+        // Defense in depth: no credential material may reach the thread row.
+        error_info: redactSecrets(reason).slice(0, MAX_REASON_LEN),
       },
     ],
   };

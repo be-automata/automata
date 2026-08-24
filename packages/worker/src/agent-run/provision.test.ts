@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ensureBaseDiffable } from "./provision";
+import { ensureBaseDiffable, provisionWorkdir } from "./provision";
 
 const execFileAsync = promisify(execFile);
 
@@ -101,4 +101,34 @@ describe("ensureBaseDiffable (BUG-EXEC-02)", () => {
     // ...and NOT the base-only commit (the two-dot lie this fix avoids).
     expect(stdout).not.toContain("MAINONLY");
   });
+});
+
+describe("git failures never echo the auth header", () => {
+  it("a failed clone throws the git verb + stderr tail, with the extraHeader credential absent", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "prov-redact-"));
+    try {
+      const token = "ghs_3211193_abcdefghijklmnopqrstuvwxyz";
+      await expect(
+        provisionWorkdir({
+          repoFullName:
+            "definitely-not-a-real-owner/definitely-not-a-real-repo-4b1d",
+          branch: "main",
+          installationToken: token,
+          workdirRoot: root,
+          runId: "run-redact",
+        }),
+      ).rejects.toSatisfy((e: unknown) => {
+        const msg = (e as Error).message;
+        expect(msg).toMatch(/^git clone failed \(exit \d+\)/);
+        expect(msg).not.toContain("basic ");
+        expect(msg).not.toContain(token);
+        expect(msg).not.toContain(
+          Buffer.from(`x-access-token:${token}`).toString("base64"),
+        );
+        return true;
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

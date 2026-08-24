@@ -2,8 +2,40 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { redactSecrets } from "./redact";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Run git and, on failure, throw an error that carries the useful part (the
+ * verb, exit code and the tail of stderr) and NEVER the command line: Node's
+ * default "Command failed: git -c http.extraHeader=AUTHORIZATION: basic …"
+ * message echoes the installation token, and that message becomes the run's
+ * persisted failure reason (see postRunFailed). Stderr is redacted too.
+ */
+async function gitExec(args: string[], opts: { maxBuffer?: number } = {}) {
+  try {
+    return await execFileAsync("git", args, opts);
+  } catch (error) {
+    const e = error as { code?: unknown; stderr?: unknown };
+    const verb =
+      args.find(
+        (a) =>
+          !a.startsWith("-") &&
+          a !== "git" &&
+          !a.includes("=") &&
+          !a.startsWith("/"),
+      ) ?? "git";
+    const stderr = typeof e.stderr === "string" ? e.stderr.trim() : "";
+    const tail = stderr.length > 600 ? `…${stderr.slice(-600)}` : stderr;
+    throw new Error(
+      redactSecrets(
+        `git ${verb} failed (exit ${String(e.code ?? "?")})${tail ? `: ${tail}` : ""}`,
+      ),
+      { cause: error },
+    );
+  }
+}
 
 /**
  * Clone `repoFullName@branch` into a fresh per-run workdir using the short-lived
@@ -43,8 +75,7 @@ export async function provisionWorkdir({
   const cloneUrl = `https://github.com/${repoFullName}.git`;
 
   // --depth 1 on the target branch: the working checkout the agent reviews at HEAD.
-  await execFileAsync(
-    "git",
+  await gitExec(
     [
       "-c",
       `http.extraHeader=${authHeader}`,
@@ -102,7 +133,7 @@ export async function ensureBaseDiffable({
   authConfigArgs: string[];
 }): Promise<boolean> {
   const gitFetch = (args: string[]) =>
-    execFileAsync("git", ["-C", workdir, ...authConfigArgs, "fetch", ...args], {
+    gitExec(["-C", workdir, ...authConfigArgs, "fetch", ...args], {
       maxBuffer: 64 * 1024 * 1024,
     });
   // Base tip into a remote-tracking ref the agent can diff against.
