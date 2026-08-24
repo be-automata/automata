@@ -2,8 +2,8 @@ import { env } from "@terragon/env/apps-www";
 import { db } from "@/lib/db";
 import {
   claimSweepLeases,
+  findNewerRun,
   findSweepCandidates,
-  hasNewerRun,
   retireHatchetRun,
   setSweepLease,
   type SweepCandidate,
@@ -14,6 +14,8 @@ import {
 } from "@terragon/shared/model/threads";
 import type { TerminalCause } from "@terragon/shared/model/terminal-cause";
 import { assertNever } from "@terragon/shared/utils";
+import { maybeRecheckOnComplete } from "./supersede-recheck";
+import { maybeRecheckOnComplete } from "@/server-lib/supersede-recheck";
 import {
   getAgentRunStatus,
   type AgentRunStatus,
@@ -85,7 +87,7 @@ export type SweepReport = {
  * prKey instead — or every CANCELLED degrades to `user-cancelled`.
  */
 function newerSibling(run: SweepCandidate) {
-  return hasNewerRun({
+  return findNewerRun({
     db,
     organizationId: run.organizationId,
     repoFullName: run.repoFullName,
@@ -96,7 +98,7 @@ function newerSibling(run: SweepCandidate) {
 }
 
 type Decision =
-  | { kind: "terminal"; cause: TerminalCause }
+  | { kind: "terminal"; cause: TerminalCause; supersededByThreadId?: string }
   | { kind: "retire" }
   | { kind: "live" };
 
@@ -106,14 +108,26 @@ async function decide(
   run: SweepCandidate,
 ): Promise<Decision> {
   switch (status) {
-    case "CANCELLED":
-      return (await newerSibling(run))
-        ? { kind: "terminal", cause: "superseded" }
+    case "CANCELLED": {
+      const newer = await newerSibling(run);
+      return newer
+        ? {
+            kind: "terminal",
+            cause: "superseded",
+            supersededByThreadId: newer.threadId,
+          }
         : { kind: "terminal", cause: "user-cancelled" };
-    case "NOT_FOUND":
-      return (await newerSibling(run))
-        ? { kind: "terminal", cause: "superseded" }
+    }
+    case "NOT_FOUND": {
+      const newer = await newerSibling(run);
+      return newer
+        ? {
+            kind: "terminal",
+            cause: "superseded",
+            supersededByThreadId: newer.threadId,
+          }
         : { kind: "terminal", cause: "plane-offline" };
+    }
     case "FAILED":
       return { kind: "terminal", cause: "daemon-failed" };
     case "COMPLETED":
@@ -238,6 +252,7 @@ export async function runSupersedeSweep(
             db,
             threadId: run.threadId,
             cause: decision.cause,
+            supersededByThreadId: decision.supersededByThreadId,
           });
           await retireHatchetRun({
             db,
@@ -250,6 +265,25 @@ export async function runSupersedeSweep(
               cause: decision.cause,
             });
           }
+          // #125 C5: the reconciliation runs UNCONDITIONALLY (a retried tick
+          // must heal a recheck lost between the terminal and the ledger) and
+          // with the columns already in hand — zero extra reads (never throws).
+          await maybeRecheckOnComplete({
+            threadId: run.threadId,
+            thread: {
+              userId: run.threadUserId,
+              organizationId: run.threadOrganizationId,
+              githubRepoFullName: run.threadRepoFullName,
+              githubPRNumber: run.threadGithubPRNumber,
+              automationId: run.threadAutomationId,
+              reviewedSha: run.threadReviewedSha,
+              sandboxProvider: run.threadSandboxProvider,
+            },
+            run: {
+              supersedePolicy: run.supersedePolicy,
+              recheckOnComplete: run.recheckOnComplete,
+            },
+          });
           console.log("[supersede-sweep] terminal", {
             threadId: run.threadId,
             externalId: run.externalId,
@@ -259,6 +293,7 @@ export async function runSupersedeSweep(
           });
           return;
         }
+
         default:
           return assertNever(decision);
       }

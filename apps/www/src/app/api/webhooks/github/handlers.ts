@@ -28,6 +28,10 @@ import {
   runIssueAutomation,
 } from "@/server-lib/automations";
 import { Automation } from "@terragon/shared/db/types";
+import {
+  buildPrKey,
+  upsertDesiredHead,
+} from "@terragon/shared/model/supersede-recheck";
 import { createMirrorTask } from "./mirror-intake";
 // publicAppUrl is used within utils via postBillingLinkComment
 export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
@@ -139,6 +143,28 @@ async function handlePullRequestAutomation(
   const repoFullName = event.repository.full_name;
   if (automation.repoFullName !== repoFullName) {
     return;
+  }
+  // #125 C5: record the newest head for this PR (durable desired head) —
+  // compare-and-set on GitHub's timestamp so an out-of-order delivery never
+  // moves it backwards. Best-effort; a bookkeeping failure never blocks the run.
+  if (automation.organizationId && deliveryId) {
+    await upsertDesiredHead({
+      db,
+      prKey: buildPrKey({
+        orgId: automation.organizationId,
+        repoFullName,
+        prNumber,
+      }),
+      sha: event.pull_request.head.sha,
+      webhookAt: new Date(event.pull_request.updated_at),
+      deliveryId,
+    }).catch((error) =>
+      console.error("[github webhook] desired-head upsert failed (non-fatal)", {
+        repoFullName,
+        prNumber,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
   }
   const config = automation.triggerConfig as PullRequestTriggerConfig;
   // Check if this automation should trigger for the current event

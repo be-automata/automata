@@ -103,6 +103,8 @@ export async function runAutomation({
      * thread creation to the Hatchet dispatch as its idempotency identity.
      */
     deliveryId?: string;
+    /** #125 C5: the PR head SHA the run reviews (stamped on the thread). */
+    headSha?: string;
   };
   source: "automated" | "manual";
 }): Promise<{ threadId: string; threadChatId: string } | undefined> {
@@ -147,6 +149,7 @@ export async function runAutomation({
           githubIssueNumber: options?.issueNumber,
           disableGitCheckpointing: automation.disableGitCheckpointing ?? false,
           deliveryId: options?.deliveryId,
+          reviewedSha: options?.headSha,
         });
         threadId = newThreadResult.threadId;
         threadChatId = newThreadResult.threadChatId;
@@ -231,6 +234,7 @@ export async function runAutomation({
           githubIssueNumber: options?.issueNumber,
           disableGitCheckpointing: automation.disableGitCheckpointing ?? false,
           deliveryId: options?.deliveryId,
+          reviewedSha: options?.headSha,
         });
         threadId = newThreadResult.threadId;
         threadChatId = newThreadResult.threadChatId;
@@ -567,6 +571,9 @@ export async function runPullRequestAutomation({
       pull_number: prNumber,
     });
     const branchName = pr.data.head.ref;
+    // #125 C5: the SHA this run reviews, from the SAME read — stamped on the
+    // thread (reviewedSha) so the recheck reconciliation never re-reads GitHub.
+    const headSha = pr.data.head.sha;
     // Server-derived trust snapshot (ADR-005 §3a, #82): captured HERE, from the
     // EXISTING pulls.get read (no new webhook/API call, no extra round trip),
     // for BOTH source: "automated" and "manual" — runs unconditionally, not
@@ -610,6 +617,7 @@ export async function runPullRequestAutomation({
       options: {
         branchName,
         deliveryId,
+        headSha,
         // The review-diff base for {{baseBranch}} — the PR's BASE ref, never
         // its head (rendering head made `git diff origin/<base>...HEAD` empty).
         // Optional-chained defensively: a malformed payload must degrade to

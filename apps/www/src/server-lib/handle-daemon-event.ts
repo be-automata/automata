@@ -35,6 +35,7 @@ import {
 } from "@/agent/msg/helpers";
 import { maybeStartQueuedThreadChat } from "./process-queued-thread";
 import { handleReviewEffectAtFinish } from "./review/review-single-writer-finish";
+import { maybeRecheckOnComplete } from "./supersede-recheck";
 import { trackUsageEvents } from "./usage-events";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import { compactThreadChat } from "./compact";
@@ -615,6 +616,16 @@ async function handleThreadFinish({
   // post-run reconciler still runs as the straddle-backstop, converging GitHub to
   // the no-dup invariant. Both fail-soft (waitUntil + catch) — a review-effect
   // failure must never fail the thread.
+  // #125 C5: the discard·recheck reconciliation fires at the terminal, AFTER
+  // the review effect is queued — fail-soft like everything else here.
+  waitUntil(
+    maybeRecheckOnComplete({ threadId }).catch((error) =>
+      console.error("[supersede-recheck] finish-hook failed (non-fatal)", {
+        threadId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    ),
+  );
   if (prNumber !== null && repoFullName) {
     waitUntil(
       handleReviewEffectAtFinish({

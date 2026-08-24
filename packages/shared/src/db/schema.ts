@@ -393,6 +393,18 @@ export const thread = pgTable(
      * thread-view chips (C5).
      */
     terminalCause: text("terminal_cause"),
+    /**
+     * #125 C5: the PR head SHA this run reviews — stamped at thread creation
+     * from the SAME `pulls.get` read that resolved the head branch; never
+     * re-read from GitHub later. The recheck reconciliation compares it to
+     * the durable desired head. NULL for non-PR threads.
+     */
+    reviewedSha: text("reviewed_sha"),
+    /**
+     * #125 C5: when `terminalCause = 'superseded'`, the thread of the newer
+     * run that took over — what the "Superseded" chip links to. Best-effort.
+     */
+    supersededByThreadId: text("superseded_by_thread_id"),
     sandboxSize: text("sandbox_size").$type<SandboxSize>(),
     sandboxStatus: text("sandbox_status").$type<SandboxStatus>(),
     bootingSubstatus: text("booting_substatus").$type<BootingSubstatus>(),
@@ -1728,6 +1740,14 @@ export const hatchetRun = pgTable(
      * two concurrent ticks can never both act on one run. NULL = unclaimed.
      */
     sweepLeaseUntil: timestamp("sweep_lease_until", { mode: "date" }),
+    /**
+     * #125 C5: the policy SNAPSHOT stamped at dispatch (decision 5) — the
+     * control-plane copy of what the run's input/metadata carry. The recheck
+     * reconciliation reads THESE, never the current settings row. NULL on
+     * legacy (flag-off) dispatches.
+     */
+    supersedePolicy: text("supersede_policy"),
+    recheckOnComplete: boolean("recheck_on_complete"),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .notNull()
@@ -1745,6 +1765,56 @@ export const hatchetRun = pgTable(
     // One row per Hatchet run; the generation fence, the worker terminal and
     // the staleness self-check all look rows up by externalId.
     uniqueIndex("hatchet_run_external_id_index").on(table.externalId),
+  ],
+);
+
+/**
+ * #125 C5 durable desired head: the newest PR head SHA seen for one
+ * `prKey` (`${orgId}/${repo}/${prNumber}`), written by every pull_request
+ * webhook with a compare-and-set on the GitHub timestamp (out-of-order
+ * deliveries never move it backwards; ties break on the lexicographically
+ * greater delivery id). The recheck reconciliation compares a finished run's
+ * `thread.reviewedSha` against this.
+ */
+export const supersedeDesiredHead = pgTable("supersede_desired_head", {
+  prKey: text("pr_key").primaryKey(),
+  sha: text("sha").notNull(),
+  /** The GitHub-side timestamp of the delivery that set this head. */
+  webhookAt: timestamp("webhook_at", { mode: "date" }).notNull(),
+  deliveryId: text("delivery_id").notNull(),
+  updatedAt: timestamp("updated_at", { mode: "date" })
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+});
+
+/**
+ * #125 C5 recheck ledger: one row per (prKey, desiredHeadSha) that a
+ * reconciliation re-dispatched for. The UNIQUE constraint IS the
+ * exactly-once guarantee — at most one recheck per head, however many
+ * terminals race to claim it.
+ */
+export const supersedeRecheck = pgTable(
+  "supersede_recheck",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    prKey: text("pr_key").notNull(),
+    desiredHeadSha: text("desired_head_sha").notNull(),
+    /** The finished thread whose terminal triggered this recheck. */
+    triggeredByThreadId: text("triggered_by_thread_id")
+      .notNull()
+      .references(() => thread.id, { onDelete: "cascade" }),
+    dispatchedAt: timestamp("dispatched_at", { mode: "date" })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("supersede_recheck_pr_key_sha_index").on(
+      table.prKey,
+      table.desiredHeadSha,
+    ),
   ],
 );
 

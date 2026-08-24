@@ -1,0 +1,127 @@
+import { db } from "@/lib/db";
+import { getLatestHatchetRunForThread } from "@terragon/shared/model/hatchet-run";
+import {
+  buildPrKey,
+  claimRecheck,
+  getDesiredHead,
+} from "@terragon/shared/model/supersede-recheck";
+import { thread as threadTable } from "@terragon/shared/db/schema";
+import { eq } from "drizzle-orm";
+
+/**
+ * #125 C5 recheck reconciliation for `complete-run-discard` + `recheckOnComplete`.
+ *
+ * Discard means "a newer push while a review is running is dropped"; the
+ * toggle promises "…but re-review the PR's head when the running review
+ * finishes". Done naively ("compare SHAs at terminal, re-dispatch") this
+ * loops and duplicates (Codex finding). Here it is exactly-once by
+ * construction:
+ *
+ *  - the DESIRED head is durable (`supersede_desired_head`, CAS by webhook
+ *    timestamp) and the REVIEWED head is stamped on the thread at creation
+ *    (`reviewedSha`), never re-read from GitHub;
+ *  - the policy snapshot read is the RUN ROW's (`hatchet_run.supersedePolicy`
+ *    / `recheckOnComplete`), stamped at dispatch — never the current settings;
+ *  - one re-dispatch per (prKey, desiredHeadSha): `claimRecheck` inserts into
+ *    a UNIQUE-constrained ledger, and only the winner dispatches. Three rapid
+ *    pushes during a run yield ONE recheck (for the final head); a push during
+ *    the recheck yields exactly one more.
+ *
+ * Fires from every terminal write (finish hook, worker terminal route, sweep).
+ * The re-dispatch is a normal PR automation run with a synthetic delivery id
+ * `recheck:<prKey>:<sha>` — the id is unique per (prKey, sha) by the same
+ * ledger, so it is never deduped against a real webhook delivery.
+ */
+export async function maybeRecheckOnComplete({
+  threadId,
+  dispatch = defaultDispatch,
+}: {
+  threadId: string;
+  /** Injected for tests; production re-dispatches through runPullRequestAutomation. */
+  dispatch?: (args: {
+    userId: string;
+    automationId: string;
+    repoFullName: string;
+    prNumber: number;
+    deliveryId: string;
+  }) => Promise<void>;
+}): Promise<{ rechecked: boolean; reason: string }> {
+  const [row] = await db
+    .select({
+      userId: threadTable.userId,
+      organizationId: threadTable.organizationId,
+      repoFullName: threadTable.githubRepoFullName,
+      prNumber: threadTable.githubPRNumber,
+      automationId: threadTable.automationId,
+      reviewedSha: threadTable.reviewedSha,
+    })
+    .from(threadTable)
+    .where(eq(threadTable.id, threadId))
+    .limit(1);
+  if (
+    !row ||
+    !row.organizationId ||
+    row.prNumber === null ||
+    !row.automationId ||
+    !row.reviewedSha
+  ) {
+    return { rechecked: false, reason: "not-a-review-run" };
+  }
+  const run = await getLatestHatchetRunForThread({ db, threadId });
+  if (
+    !run ||
+    run.supersedePolicy !== "complete-run-discard" ||
+    run.recheckOnComplete !== true
+  ) {
+    return { rechecked: false, reason: "policy-not-discard-recheck" };
+  }
+  const prKey = buildPrKey({
+    orgId: row.organizationId,
+    repoFullName: row.repoFullName,
+    prNumber: row.prNumber,
+  });
+  const desired = await getDesiredHead({ db, prKey });
+  if (!desired || desired.sha === row.reviewedSha) {
+    return { rechecked: false, reason: "head-already-reviewed" };
+  }
+  const won = await claimRecheck({
+    db,
+    prKey,
+    desiredHeadSha: desired.sha,
+    triggeredByThreadId: threadId,
+  });
+  if (!won) {
+    return { rechecked: false, reason: "recheck-already-claimed" };
+  }
+  console.log("[supersede-recheck] re-dispatching for the current head", {
+    threadId,
+    prKey,
+    reviewedSha: row.reviewedSha,
+    desiredSha: desired.sha,
+  });
+  await dispatch({
+    userId: row.userId,
+    automationId: row.automationId,
+    repoFullName: row.repoFullName,
+    prNumber: row.prNumber,
+    deliveryId: `recheck:${prKey}:${desired.sha}`,
+  });
+  return { rechecked: true, reason: "dispatched" };
+}
+
+async function defaultDispatch(args: {
+  userId: string;
+  automationId: string;
+  repoFullName: string;
+  prNumber: number;
+  deliveryId: string;
+}): Promise<void> {
+  // Dynamic import: automations.ts drags the thread-creation graph in; this
+  // module is imported by the sweep/cron path that must stay light.
+  const { runPullRequestAutomation } = await import("@/server-lib/automations");
+  await runPullRequestAutomation({
+    ...args,
+    prEventAction: "synchronize",
+    source: "automated",
+  });
+}

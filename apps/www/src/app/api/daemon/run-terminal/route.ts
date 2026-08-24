@@ -11,6 +11,7 @@ import {
   getHatchetRunByExternalId,
 } from "@terragon/shared/model/hatchet-run";
 import { TERMINAL_CAUSES } from "@terragon/shared/model/terminal-cause";
+import { maybeRecheckOnComplete } from "@/server-lib/supersede-recheck";
 
 /**
  * POST /api/daemon/run-terminal
@@ -114,5 +115,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     policy: detail?.policy,
     applied,
   });
+  if (applied) {
+    // #125 C5: a terminal is where the discard·recheck reconciliation fires.
+    await maybeRecheckOnComplete({ threadId }).catch((error) =>
+      console.error("[run-terminal] recheck failed (non-fatal)", {
+        threadId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
   return NextResponse.json({ applied });
 }

@@ -169,6 +169,8 @@ async function getThreadsInner({
       credentialBrokerMode: schema.thread.credentialBrokerMode,
       activeRunExternalId: schema.thread.activeRunExternalId,
       terminalCause: schema.thread.terminalCause,
+      reviewedSha: schema.thread.reviewedSha,
+      supersededByThreadId: schema.thread.supersededByThreadId,
       sandboxProvider: schema.thread.sandboxProvider,
       sandboxSize: schema.thread.sandboxSize,
       sandboxStatus: schema.thread.sandboxStatus,
@@ -672,6 +674,8 @@ export async function getThread({
     credentialBrokerMode: thread.credentialBrokerMode,
     activeRunExternalId: thread.activeRunExternalId,
     terminalCause: thread.terminalCause,
+    reviewedSha: thread.reviewedSha,
+    supersededByThreadId: thread.supersededByThreadId,
     sandboxProvider: thread.sandboxProvider,
     sandboxSize: thread.sandboxSize,
     bootingSubstatus: thread.bootingSubstatus,
@@ -1471,10 +1475,13 @@ export async function markThreadsTerminal({
   db,
   threadIds,
   cause,
+  supersededByThreadId,
 }: {
   db: DB;
   threadIds: string[];
   cause: TerminalCause;
+  /** #125 C5: the newer run's thread when `cause === "superseded"` (chip link). */
+  supersededByThreadId?: string | null;
 }): Promise<string[]> {
   if (threadIds.length === 0) return [];
   const terminal = {
@@ -1492,7 +1499,11 @@ export async function markThreadsTerminal({
   const [threadRows, chatRows] = await Promise.all([
     db
       .update(schema.thread)
-      .set({ ...terminal, terminalCause: cause })
+      .set({
+        ...terminal,
+        terminalCause: cause,
+        ...(supersededByThreadId ? { supersededByThreadId } : {}),
+      })
       .where(
         and(
           inArray(schema.thread.id, threadIds),
@@ -1565,13 +1576,22 @@ export async function markThreadTerminal({
   db,
   threadId,
   cause,
+  supersededByThreadId,
 }: {
   db: DB;
   threadId: string;
   cause: TerminalCause;
+  supersededByThreadId?: string | null;
 }): Promise<boolean> {
   return (
-    (await markThreadsTerminal({ db, threadIds: [threadId], cause })).length > 0
+    (
+      await markThreadsTerminal({
+        db,
+        threadIds: [threadId],
+        cause,
+        supersededByThreadId,
+      })
+    ).length > 0
   );
 }
 

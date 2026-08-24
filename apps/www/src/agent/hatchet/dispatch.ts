@@ -26,6 +26,7 @@ import {
   resolveSupersedePolicy,
   normalizeRepo,
   type SupersedePolicy,
+  type SupersedeSnapshot,
 } from "@terragon/shared/model/repo-review-settings";
 import { setThreadActiveRun } from "@terragon/shared/model/threads";
 import {
@@ -277,6 +278,8 @@ type SupersedePlan = {
   appSideCancel: boolean;
   /** Stamp thread.activeRunExternalId for the C1 fence (flag ON only). */
   stampFence: boolean;
+  /** The resolved policy snapshot (flag ON review runs only). */
+  snapshot: SupersedeSnapshot | undefined;
 };
 
 /**
@@ -310,6 +313,7 @@ async function planSupersede({
       triggerOpts: undefined,
       appSideCancel: true,
       stampFence: false,
+      snapshot: undefined,
     };
   }
   if (!reviewContext) {
@@ -323,6 +327,7 @@ async function planSupersede({
       triggerOpts: undefined,
       appSideCancel: false,
       stampFence: false,
+      snapshot: undefined,
     };
   }
   const snapshot = await resolveSupersedePolicy({
@@ -361,6 +366,7 @@ async function planSupersede({
     triggerOpts,
     appSideCancel: snapshot.policy === "app-side",
     stampFence: true,
+    snapshot,
   };
   console.log("[hatchet] supersede policy resolved for dispatch", {
     threadId,
@@ -618,6 +624,9 @@ export async function dispatchAgentRun({
             repoFullName,
             prNumber: reviewContext.prNumber,
             externalId,
+            // #125 C5: the control-plane copy of the policy snapshot — the
+            // recheck reconciliation reads THIS, never the settings row.
+            snapshot: plan.snapshot,
           }).catch((error) => {
             console.error("[hatchet] recordHatchetRun failed (non-fatal)", {
               threadId,

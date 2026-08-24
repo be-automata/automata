@@ -1,7 +1,18 @@
 import { DB } from "../db";
 import { hatchetRun } from "../db/schema";
 import { HatchetRun } from "../db/types";
-import { and, eq, gt, gte, inArray, isNull, lt, ne, or } from "drizzle-orm";
+import {
+  and,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNull,
+  lt,
+  ne,
+  or,
+} from "drizzle-orm";
 import { thread as threadTable } from "../db/schema";
 import { reapableThreadStatuses, threadEffectiveStatusIn } from "./threads";
 import { normalizeRepo } from "./repo-review-settings";
@@ -39,6 +50,7 @@ export async function recordHatchetRun({
   repoFullName,
   prNumber,
   externalId,
+  snapshot,
 }: {
   db: DB;
   threadId: string;
@@ -46,6 +58,8 @@ export async function recordHatchetRun({
   repoFullName: string;
   prNumber: number;
   externalId: string;
+  /** #125 C5: the policy snapshot stamped at dispatch (absent on legacy dispatches). */
+  snapshot?: { policy: string; recheckOnComplete: boolean };
 }): Promise<HatchetRun> {
   const [row] = await db
     .insert(hatchetRun)
@@ -55,9 +69,32 @@ export async function recordHatchetRun({
       repoFullName: normalizeRepo(repoFullName),
       prNumber,
       externalId,
+      ...(snapshot
+        ? {
+            supersedePolicy: snapshot.policy,
+            recheckOnComplete: snapshot.recheckOnComplete,
+          }
+        : {}),
     })
     .returning();
   return row!;
+}
+
+/** The latest recorded run for one thread. */
+export async function getLatestHatchetRunForThread({
+  db,
+  threadId,
+}: {
+  db: DB;
+  threadId: string;
+}): Promise<HatchetRun | undefined> {
+  const [row] = await db
+    .select()
+    .from(hatchetRun)
+    .where(eq(hatchetRun.threadId, threadId))
+    .orderBy(desc(hatchetRun.createdAt))
+    .limit(1);
+  return row;
 }
 
 /**
@@ -293,7 +330,14 @@ export async function setSweepLease({
  * superseded) and by the queue-mode staleness self-check (a newer run is
  * already queued → skip). Org-fenced like every read here.
  */
-export async function hasNewerRun({
+export async function hasNewerRun(
+  args: Parameters<typeof findNewerRun>[0],
+): Promise<boolean> {
+  return (await findNewerRun(args)) !== null;
+}
+
+/** The newest later sibling run for the same (org, repo, PR), if any. */
+export async function findNewerRun({
   db,
   organizationId,
   repoFullName,
@@ -307,9 +351,12 @@ export async function hasNewerRun({
   prNumber: number;
   after: Date;
   excludeExternalId?: string;
-}): Promise<boolean> {
+}): Promise<{ threadId: string; externalId: string } | null> {
   const rows = await db
-    .select({ id: hatchetRun.id })
+    .select({
+      threadId: hatchetRun.threadId,
+      externalId: hatchetRun.externalId,
+    })
     .from(hatchetRun)
     .where(
       and(
@@ -322,8 +369,9 @@ export async function hasNewerRun({
           : []),
       ),
     )
+    .orderBy(desc(hatchetRun.createdAt))
     .limit(1);
-  return rows.length > 0;
+  return rows[0] ?? null;
 }
 
 /** The recorded row for one Hatchet externalId (any org — the caller is a daemon-token route). */
