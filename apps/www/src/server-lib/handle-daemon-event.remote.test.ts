@@ -21,6 +21,7 @@ import {
   waitUntilResolved,
 } from "@/test-helpers/mock-next";
 import { openPullRequest } from "@/server-actions/pull-request";
+import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 
 vi.mock("@/server-lib/checkpoint-thread", () => ({
   checkpointThread: vi.fn().mockResolvedValue(undefined),
@@ -166,6 +167,40 @@ describe("handleDaemonEvent — #125 C1 generation fence (no extra read)", () =>
   it("409 once the thread is terminal-superseded — a stale verdict never lands", async () => {
     const { threadId, threadChatId } = await remoteThread();
     await markThreadsSuperseded({ db, threadIds: [threadId] });
+    const r = await handleDaemonEvent({
+      threadId,
+      threadChatId,
+      userId: user.id,
+      timezone: "UTC",
+      contextUsage: null,
+      messages: [getClaudeResultMessage()],
+      runExternalId: null,
+    });
+    expect(r).toMatchObject({ success: false, status: 409 });
+  });
+
+  it("409 for a NON-legacy threadChat row too — the terminal is stamped on the EFFECTIVE (chat) row and the fence reads it back", async () => {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { sandboxProvider: "hatchet-remote" },
+      chatOverrides: { status: "working" },
+      enableThreadChatCreation: true,
+    });
+    expect(threadChatId).not.toBe(LEGACY_THREAD_CHAT_ID);
+    expect(await markThreadsSuperseded({ db, threadIds: [threadId] })).toBe(1);
+    // The live chat row carries the terminal…
+    const chat = await getThreadChat({
+      db,
+      userId: user.id,
+      threadId,
+      threadChatId,
+    });
+    expect(chat).toMatchObject({
+      status: "complete",
+      errorMessage: "superseded",
+    });
+    // …and the fence closes on it.
     const r = await handleDaemonEvent({
       threadId,
       threadChatId,

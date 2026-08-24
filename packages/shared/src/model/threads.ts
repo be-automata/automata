@@ -1437,27 +1437,54 @@ export async function markThreadsSuperseded({
   threadIds: string[];
 }): Promise<number> {
   if (threadIds.length === 0) return 0;
-  const updated = await db
-    .update(schema.thread)
-    .set({ status: "complete", errorMessage: THREAD_SUPERSEDED_ERROR })
-    .where(
-      and(
-        inArray(schema.thread.id, threadIds),
-        inArray(schema.thread.status, reapableThreadStatuses),
-      ),
-    )
-    .returning({ id: schema.thread.id, userId: schema.thread.userId });
+  const terminal = {
+    status: "complete" as const,
+    errorMessage: THREAD_SUPERSEDED_ERROR,
+  };
+  // The EFFECTIVE status of a thread lives on the thread row for legacy
+  // (LEGACY_THREAD_CHAT_ID) threads and on the threadChat row otherwise
+  // (enableThreadChatCreation). Stamp whichever is live so every reader of the
+  // effective status — getThreadChat's alias, the daemon-event fence — sees
+  // the terminal. A non-live row (e.g. the never-started thread row of a
+  // chat-mode thread) simply doesn't match.
+  const [threadRows, chatRows] = await Promise.all([
+    db
+      .update(schema.thread)
+      .set(terminal)
+      .where(
+        and(
+          inArray(schema.thread.id, threadIds),
+          inArray(schema.thread.status, reapableThreadStatuses),
+        ),
+      )
+      .returning({ id: schema.thread.id, userId: schema.thread.userId }),
+    db
+      .update(schema.threadChat)
+      .set(terminal)
+      .where(
+        and(
+          inArray(schema.threadChat.threadId, threadIds),
+          inArray(schema.threadChat.status, reapableThreadStatuses),
+        ),
+      )
+      .returning({
+        id: schema.threadChat.threadId,
+        userId: schema.threadChat.userId,
+      }),
+  ]);
+  const updated = new Map<string, string>();
+  for (const r of [...threadRows, ...chatRows]) updated.set(r.id, r.userId);
 
   await Promise.all(
-    updated.map((t) =>
+    [...updated].map(([threadId, userId]) =>
       publishBroadcastUserMessage({
         type: "user",
-        id: t.userId,
-        data: { threadId: t.id, threadStatusUpdated: "complete" },
+        id: userId,
+        data: { threadId, threadStatusUpdated: "complete" },
       }),
     ),
   );
-  return updated.length;
+  return updated.size;
 }
 
 export async function hasOtherUnarchivedThreadsWithSamePR({

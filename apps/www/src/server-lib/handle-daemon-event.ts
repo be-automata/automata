@@ -98,7 +98,10 @@ export async function handleDaemonEvent({
 
   // #125 C1 generation fence: once a newer run owns the PR, no event from the
   // old generation may land — closes the cancel race where a cancelled run
-  // still streams its verdict.
+  // still streams its verdict. Reads the EFFECTIVE status: threadChat is the
+  // thread row's alias for legacy threads and the real chat row otherwise —
+  // and markThreadsSuperseded stamps whichever of the two is live, so the
+  // superseded terminal is visible here in both modes (no extra read).
   const generation = decideThreadGeneration({
     thread: {
       activeRunExternalId: thread.activeRunExternalId,
