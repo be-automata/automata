@@ -5,6 +5,8 @@ import {
   pollUntilTerminal,
   postRunFailed,
   postRunSuperseded,
+  postRunTerminal,
+  checkRunStaleness,
   pullAgentCredentials,
   pullNextMessage,
   type PollContext,
@@ -557,6 +559,60 @@ describe("postRunSuperseded (#125 C1)", () => {
     await expect(
       postRunSuperseded(opts, { runExternalId: "r", policy: "newest-wins" }),
     ).resolves.toBe("error");
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("postRunTerminal / checkRunStaleness (#125 C4)", () => {
+  const opts = {
+    baseUrl: "https://www.example.com/",
+    daemonToken: "tok",
+    threadId: "thr_1",
+    threadChatId: "tc_1",
+    runExternalId: "run-1",
+  };
+
+  it("posts a typed cause with the generation header; policy detail optional", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ applied: true }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    expect(
+      await postRunTerminal(opts, { runExternalId: "run-1", cause: "timeout" }),
+    ).toBe("applied");
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(init.headers["x-run-external-id"]).toBe("run-1");
+    expect(JSON.parse(init.body)).toEqual({
+      threadId: "thr_1",
+      threadChatId: "tc_1",
+      runExternalId: "run-1",
+      cause: "timeout",
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("checkRunStaleness: true only on {stale:true}; any failure fails OPEN", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ stale: true }), { status: 200 }),
+        )
+        .mockResolvedValueOnce(new Response("nope", { status: 500 }))
+        .mockRejectedValueOnce(new Error("ECONNRESET")),
+    );
+    expect(await checkRunStaleness(opts, { runExternalId: "run-1" })).toBe(
+      true,
+    );
+    expect(await checkRunStaleness(opts, { runExternalId: "run-1" })).toBe(
+      false,
+    );
+    expect(await checkRunStaleness(opts, { runExternalId: "run-1" })).toBe(
+      false,
+    );
     vi.unstubAllGlobals();
   });
 });

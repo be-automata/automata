@@ -157,3 +157,48 @@ describe("POST /api/daemon/run-terminal (#125 C1 generation fence)", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("POST /api/daemon/run-terminal — typed causes (#125 C4)", () => {
+  it("accepts every cause in the taxonomy and persists terminalCause", async () => {
+    // Reuse the outer describe's fixtures via a fresh thread per cause.
+    const user = (await createTestUser({ db })).user;
+    const org = await createOrganization({
+      db,
+      name: "Org",
+      slug: `org-${nanoid(8).toLowerCase()}`,
+    });
+    for (const cause of ["stale-skipped", "discarded", "timeout"] as const) {
+      const t = await createTestThread({
+        db,
+        userId: user.id,
+        overrides: { organizationId: org.id },
+      });
+      await db
+        .update(threadTable)
+        .set({ status: "working" })
+        .where(eq(threadTable.id, t.threadId));
+      vi.mocked(getDaemonTokenContext).mockResolvedValueOnce({
+        userId: user.id,
+        apiKeyId: "apikey_test",
+        organizationId: org.id,
+        threadChatId: t.threadChatId,
+        threadId: t.threadId,
+        tokenType: "daemon",
+      });
+      const res = await POST(
+        req({
+          threadId: t.threadId,
+          threadChatId: t.threadChatId,
+          runExternalId: `run-${cause}`,
+          cause,
+        }),
+      );
+      expect(res.status).toBe(200);
+      const [row] = await db
+        .select({ terminalCause: threadTable.terminalCause })
+        .from(threadTable)
+        .where(eq(threadTable.id, t.threadId));
+      expect(row!.terminalCause).toBe(cause);
+    }
+  });
+});

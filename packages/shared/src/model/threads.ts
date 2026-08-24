@@ -1,4 +1,5 @@
 import { DB } from "../db";
+import type { TerminalCause } from "./terminal-cause";
 import * as schema from "../db/schema";
 import {
   eq,
@@ -15,6 +16,7 @@ import {
   sql,
   ne,
   isNotNull,
+  lt,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { publishBroadcastUserMessage } from "../broadcast-server";
@@ -165,6 +167,7 @@ async function getThreadsInner({
       codesandboxId: schema.thread.codesandboxId,
       credentialBrokerMode: schema.thread.credentialBrokerMode,
       activeRunExternalId: schema.thread.activeRunExternalId,
+      terminalCause: schema.thread.terminalCause,
       sandboxProvider: schema.thread.sandboxProvider,
       sandboxSize: schema.thread.sandboxSize,
       sandboxStatus: schema.thread.sandboxStatus,
@@ -667,6 +670,7 @@ export async function getThread({
     codesandboxId: thread.codesandboxId,
     credentialBrokerMode: thread.credentialBrokerMode,
     activeRunExternalId: thread.activeRunExternalId,
+    terminalCause: thread.terminalCause,
     sandboxProvider: thread.sandboxProvider,
     sandboxSize: thread.sandboxSize,
     bootingSubstatus: thread.bootingSubstatus,
@@ -1075,12 +1079,15 @@ export function decideThreadGeneration({
     activeRunExternalId: string | null;
     status: ThreadStatus;
     errorMessage: string | null;
+    /** Optional so pre-C4 readers (threadChat rows) still fence on errorMessage. */
+    terminalCause?: string | null;
   };
   runExternalId: string | null;
 }): ThreadGenerationCheck {
   if (
-    thread.status === "complete" &&
-    thread.errorMessage === THREAD_SUPERSEDED_ERROR
+    (thread.terminalCause !== undefined && thread.terminalCause !== null) ||
+    (thread.status === "complete" &&
+      thread.errorMessage === THREAD_SUPERSEDED_ERROR)
   ) {
     return {
       ok: false,
@@ -1117,6 +1124,7 @@ export async function checkThreadGeneration({
       activeRunExternalId: schema.thread.activeRunExternalId,
       status: schema.thread.status,
       errorMessage: schema.thread.errorMessage,
+      terminalCause: schema.thread.terminalCause,
     })
     .from(schema.thread)
     .where(eq(schema.thread.id, threadId))
@@ -1446,11 +1454,12 @@ export async function markThreadsSuperseded({
   // (enableThreadChatCreation). Stamp whichever is live so every reader of the
   // effective status — getThreadChat's alias, the daemon-event fence — sees
   // the terminal. A non-live row (e.g. the never-started thread row of a
-  // chat-mode thread) simply doesn't match.
+  // chat-mode thread) simply doesn't match. The typed cause is a thread-row
+  // column (the run ledger's join key), stamped there regardless.
   const [threadRows, chatRows] = await Promise.all([
     db
       .update(schema.thread)
-      .set(terminal)
+      .set({ ...terminal, terminalCause: "superseded" })
       .where(
         and(
           inArray(schema.thread.id, threadIds),
@@ -1485,6 +1494,67 @@ export async function markThreadsSuperseded({
     ),
   );
   return updated.size;
+}
+
+/**
+ * Write ONE typed terminal for a thread (#125 C4): status → complete,
+ * `terminalCause` set, `errorMessage` carrying the cause for the legacy
+ * readers. Idempotent: only a reapable (non-terminal) thread transitions, so a
+ * retry — or a second sweep tick — never rewrites an existing terminal.
+ * Returns true when this call performed the transition.
+ */
+export async function markThreadTerminal({
+  db,
+  threadId,
+  cause,
+}: {
+  db: DB;
+  threadId: string;
+  cause: TerminalCause;
+}): Promise<boolean> {
+  const updated = await db
+    .update(schema.thread)
+    .set({ status: "complete", errorMessage: cause, terminalCause: cause })
+    .where(
+      and(
+        eq(schema.thread.id, threadId),
+        inArray(schema.thread.status, reapableThreadStatuses),
+      ),
+    )
+    .returning({ id: schema.thread.id });
+  return updated.length > 0;
+}
+
+/**
+ * Remote threads that were dispatched but never got a Hatchet run recorded
+ * (#125 C4 rule ii — the non-transactional enqueue gap): still reapable,
+ * created more than `olderThanMs` ago, on the remote plane, with no
+ * hatchet_run row. Candidates for the `plane-offline` terminal.
+ */
+export async function findOrphanRemoteThreads({
+  db,
+  olderThanMs,
+  now = new Date(),
+}: {
+  db: DB;
+  olderThanMs: number;
+  now?: Date;
+}): Promise<{ id: string; createdAt: Date }[]> {
+  return db
+    .select({ id: schema.thread.id, createdAt: schema.thread.createdAt })
+    .from(schema.thread)
+    .leftJoin(
+      schema.hatchetRun,
+      eq(schema.hatchetRun.threadId, schema.thread.id),
+    )
+    .where(
+      and(
+        eq(schema.thread.sandboxProvider, "hatchet-remote"),
+        inArray(schema.thread.status, reapableThreadStatuses),
+        isNull(schema.hatchetRun.id),
+        lt(schema.thread.createdAt, new Date(now.getTime() - olderThanMs)),
+      ),
+    );
 }
 
 export async function hasOtherUnarchivedThreadsWithSamePR({

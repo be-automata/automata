@@ -4,17 +4,20 @@ import { db } from "@/lib/db";
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import {
   checkThreadGeneration,
-  markThreadsSuperseded,
+  markThreadTerminal,
 } from "@terragon/shared/model/threads";
 import { markHatchetRunSupersededByExternalId } from "@terragon/shared/model/hatchet-run";
+import { TERMINAL_CAUSES } from "@terragon/shared/model/terminal-cause";
 
 /**
  * POST /api/daemon/run-terminal
  *   body: { threadId, threadChatId, runExternalId, cause, detail? }
  *
- * The worker's EXPLICIT terminal for a run the engine cancelled under a native
- * supersede policy (#125 C1) — the sibling of the `custom-error` terminal in
- * /api/daemon-event. Same X-Daemon-Token custody + F1/F2 binding as the other
+ * The worker's EXPLICIT typed terminal (#125 C1/C4) — `superseded` when the
+ * engine cancelled it under a native policy, `stale-skipped` when the queue
+ * mode's self-check found a newer run already queued, and the rest of the
+ * taxonomy as the worker learns to name them — the sibling of the
+ * `custom-error` terminal in /api/daemon-event. Same X-Daemon-Token custody + F1/F2 binding as the other
  * daemon endpoints.
  *
  * GENERATION FENCE: the write is accepted ONLY if `runExternalId` equals the
@@ -27,14 +30,12 @@ import { markHatchetRunSupersededByExternalId } from "@terragon/shared/model/hat
  * (`applied: false`), never a duplicate terminal.
  */
 
-/** Terminal causes this endpoint accepts (C4/#129 widens the taxonomy). */
-const RUN_TERMINAL_CAUSES = ["superseded"] as const;
-
 const bodySchema = z.object({
   threadId: z.string().min(1),
   threadChatId: z.string().min(1),
   runExternalId: z.string().min(1).max(256),
-  cause: z.enum(RUN_TERMINAL_CAUSES),
+  // The typed taxonomy (#125 C4) — the worker mirrors it structurally.
+  cause: z.enum(TERMINAL_CAUSES),
   detail: z.object({ policy: z.string().max(64).optional() }).optional(),
 });
 
@@ -105,9 +106,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // `cause` is an enum of one; both bookkeeping writes are idempotent.
+  // Both bookkeeping writes are idempotent: the thread transitions only from
+  // a reapable status, and the run row flip is an exact-id update.
   const [applied] = await Promise.all([
-    markThreadsSuperseded({ db, threadIds: [threadId] }).then((n) => n > 0),
+    markThreadTerminal({ db, threadId, cause }),
     markHatchetRunSupersededByExternalId({ db, externalId: runExternalId }),
   ]);
   console.log("[run-terminal] terminal write", {

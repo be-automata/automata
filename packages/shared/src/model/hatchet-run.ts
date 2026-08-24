@@ -1,7 +1,19 @@
 import { DB } from "../db";
 import { hatchetRun } from "../db/schema";
 import { HatchetRun } from "../db/types";
-import { and, eq, gte, inArray, lt, ne } from "drizzle-orm";
+import {
+  and,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNull,
+  lt,
+  ne,
+  or,
+  sql,
+} from "drizzle-orm";
+import { thread as threadTable } from "../db/schema";
 import { normalizeRepo } from "./repo-review-settings";
 
 /**
@@ -153,4 +165,170 @@ export async function markHatchetRunSupersededByExternalId({
     .update(hatchetRun)
     .set({ status: "superseded" })
     .where(eq(hatchetRun.externalId, externalId));
+}
+
+/** Sweep lease length (#125 C4): a tick owns a run this long; expired = retry next tick. */
+export const SWEEP_LEASE_MS = 5 * 60 * 1000;
+
+/**
+ * Runs the #125 C4 sweep should inspect: still `in_flight` here, dispatched
+ * more than `olderThanMs` ago, whose thread is NOT yet terminal, and not
+ * currently leased by another tick. Bounded by the freshness window so the
+ * sweep never chases runs the watchdog already owns.
+ */
+export async function findSweepCandidates({
+  db,
+  olderThanMs,
+  now = new Date(),
+}: {
+  db: DB;
+  olderThanMs: number;
+  now?: Date;
+}): Promise<
+  {
+    id: string;
+    threadId: string;
+    organizationId: string;
+    repoFullName: string;
+    prNumber: number;
+    externalId: string;
+    createdAt: Date;
+  }[]
+> {
+  return db
+    .select({
+      id: hatchetRun.id,
+      threadId: hatchetRun.threadId,
+      organizationId: hatchetRun.organizationId,
+      repoFullName: hatchetRun.repoFullName,
+      prNumber: hatchetRun.prNumber,
+      externalId: hatchetRun.externalId,
+      createdAt: hatchetRun.createdAt,
+    })
+    .from(hatchetRun)
+    .innerJoin(threadTable, eq(threadTable.id, hatchetRun.threadId))
+    .where(
+      and(
+        eq(hatchetRun.status, "in_flight"),
+        lt(hatchetRun.createdAt, new Date(now.getTime() - olderThanMs)),
+        gte(
+          hatchetRun.createdAt,
+          new Date(now.getTime() - SUPERSEDE_FRESHNESS_MS),
+        ),
+        isNull(threadTable.terminalCause),
+        inArray(threadTable.status, [
+          "booting",
+          "stopping",
+          "working",
+          "working-done",
+          "working-error",
+          "checkpointing",
+        ]),
+        or(
+          isNull(hatchetRun.sweepLeaseUntil),
+          lt(hatchetRun.sweepLeaseUntil, now),
+        ),
+      ),
+    );
+}
+
+/**
+ * Claim the sweep lease for one run (compare-and-set): succeeds only when the
+ * row is unleased or its lease expired. The caller acts ONLY on `true`; a
+ * concurrent tick gets `false` and skips — two ticks never both act.
+ */
+export async function claimSweepLease({
+  db,
+  id,
+  now = new Date(),
+  leaseMs = SWEEP_LEASE_MS,
+}: {
+  db: DB;
+  id: string;
+  now?: Date;
+  leaseMs?: number;
+}): Promise<boolean> {
+  const rows = await db
+    .update(hatchetRun)
+    .set({ sweepLeaseUntil: new Date(now.getTime() + leaseMs) })
+    .where(
+      and(
+        eq(hatchetRun.id, id),
+        or(
+          isNull(hatchetRun.sweepLeaseUntil),
+          lt(hatchetRun.sweepLeaseUntil, now),
+        ),
+      ),
+    )
+    .returning({ id: hatchetRun.id });
+  return rows.length > 0;
+}
+
+/**
+ * Is there a run for the same (org, repo, PR) recorded AFTER `after`? Used by
+ * the sweep's cause inference (a cancelled run with a newer sibling was
+ * superseded) and by the queue-mode staleness self-check (a newer run is
+ * already queued → skip). Org-fenced like every read here.
+ */
+export async function hasNewerRun({
+  db,
+  organizationId,
+  repoFullName,
+  prNumber,
+  after,
+  excludeExternalId,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  prNumber: number;
+  after: Date;
+  excludeExternalId?: string;
+}): Promise<boolean> {
+  const rows = await db
+    .select({ id: hatchetRun.id })
+    .from(hatchetRun)
+    .where(
+      and(
+        eq(hatchetRun.organizationId, organizationId),
+        eq(hatchetRun.repoFullName, normalizeRepo(repoFullName)),
+        eq(hatchetRun.prNumber, prNumber),
+        gt(hatchetRun.createdAt, after),
+        ...(excludeExternalId
+          ? [ne(hatchetRun.externalId, excludeExternalId)]
+          : []),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
+/** The recorded row for one Hatchet externalId (any org — the caller is a daemon-token route). */
+export async function getHatchetRunByExternalId({
+  db,
+  externalId,
+}: {
+  db: DB;
+  externalId: string;
+}): Promise<HatchetRun | undefined> {
+  const [row] = await db
+    .select()
+    .from(hatchetRun)
+    .where(eq(hatchetRun.externalId, externalId))
+    .limit(1);
+  return row;
+}
+
+/** Mark one run row terminal-by-sweep so it is never a supersede candidate again. */
+export async function markHatchetRunSwept({
+  db,
+  id,
+}: {
+  db: DB;
+  id: string;
+}): Promise<void> {
+  await db
+    .update(hatchetRun)
+    .set({ status: "superseded", sweepLeaseUntil: sql`NULL` })
+    .where(eq(hatchetRun.id, id));
 }

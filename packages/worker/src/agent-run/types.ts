@@ -96,11 +96,53 @@ export type AgentRunInput = {
   recheckOnComplete?: boolean;
 };
 
+/**
+ * Typed terminal causes (#125 C4). Structural mirror of the control plane's
+ * `TERMINAL_CAUSES` (packages/shared/src/model/terminal-cause.ts) — never
+ * imported across the plane boundary. `describeTerminalCause` below is the
+ * exhaustive switch that fails compilation when the two drift.
+ */
+export type TerminalCause =
+  | "superseded"
+  | "discarded"
+  | "stale-skipped"
+  | "user-cancelled"
+  | "timeout"
+  | "daemon-failed"
+  | "publish-failed"
+  | "plane-offline";
+
+/** One log line per cause — the worker-side exhaustive switch over the union. */
+export function describeTerminalCause(cause: TerminalCause): string {
+  switch (cause) {
+    case "superseded":
+      return "cancelled by a newer run (policy)";
+    case "discarded":
+      return "dropped while an older run was live (policy)";
+    case "stale-skipped":
+      return "skipped: a newer run was already queued";
+    case "user-cancelled":
+      return "cancelled by a user";
+    case "timeout":
+      return "schedule/execution timeout";
+    case "daemon-failed":
+      return "daemon failed before a verdict";
+    case "publish-failed":
+      return "verdict could not be published";
+    case "plane-offline":
+      return "never became visible on the execution plane";
+    default: {
+      const exhaustive: never = cause;
+      throw new Error(`unknown terminal cause ${String(exhaustive)}`);
+    }
+  }
+}
+
 export type AgentRunOutput = {
   threadId: string;
   threadChatId: string;
   /** How the run reached a terminal state. */
-  outcome: "completed" | "nothing-to-run" | "cancelled";
+  outcome: "completed" | "nothing-to-run" | "cancelled" | "stale-skipped";
   /** Final thread status observed from www, when known. */
   finalStatus?: string;
 };

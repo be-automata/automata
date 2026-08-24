@@ -7,6 +7,8 @@ import {
   type PerPrStrategy,
 } from "./definition";
 import { loadWorkerConfig } from "./config";
+import path from "node:path";
+import { withBoxSlot } from "./box-slot";
 import { DaemonProcess } from "./daemon-process";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
 import {
@@ -18,6 +20,8 @@ import {
   postEgressEvents,
   postRunFailed,
   postRunSuperseded,
+  postRunTerminal,
+  checkRunStaleness,
   pullAgentCredentials,
   pullNextMessage,
   type EgressEventWire,
@@ -238,8 +242,55 @@ async function runAgent(
   input: AgentRunInput,
   ctx: RunCtx,
 ): Promise<AgentRunOutput> {
+  // #125 C4 queue-mode staleness self-check: under complete-run·queue a run
+  // may have waited behind an older one while newer commits landed. Before
+  // provisioning ANYTHING, ask www whether a newer run is already recorded for
+  // this PR; if so, skip with a typed `stale-skipped` terminal — no clone, no
+  // daemon, no credits spent reviewing an obsolete SHA. Fails open.
+  const runExternalId = ctx.workflowRunId?.() ?? "";
+  if (input.supersedePolicy === "complete-run-queue" && runExternalId) {
+    const wwwOpts = {
+      baseUrl: input.daemonCallbackUrl,
+      daemonToken: input.daemonToken,
+      threadId: input.threadId,
+      threadChatId: input.threadChatId,
+      traceparent: input.traceparent,
+      runExternalId,
+    };
+    const stale = await checkRunStaleness(
+      wwwOpts,
+      { runExternalId },
+      ctx.abortController?.signal,
+    );
+    if (stale) {
+      const result = await postRunTerminal(wwwOpts, {
+        runExternalId,
+        cause: "stale-skipped",
+        policy: input.supersedePolicy,
+      });
+      ctx.log(
+        `[agent-run ${input.threadId}] stale-skipped (newer run queued for this PR) → terminal: ${result}`,
+      );
+      return {
+        threadId: input.threadId,
+        threadChatId: input.threadChatId,
+        outcome: "stale-skipped",
+      };
+    }
+  }
   try {
-    return await runAgentInner(input, ctx);
+    // #125 C4: the box's ONE agent-run slot, enforced here because the engine's
+    // "global" concurrency key is scoped per workflow (see box-slot.ts). Held
+    // across provisioning + the agent turn, released in every exit path.
+    // Waiting here honours the engine's cancel (the same abort signal).
+    return await withBoxSlot(
+      {
+        dir: path.join(loadWorkerConfig().runNamespaceRoot, "box-slot"),
+        holder: input.threadId,
+        signal: ctx.abortController?.signal,
+      },
+      () => runAgentInner(input, ctx),
+    );
   } finally {
     if (ctx.cancelled || ctx.abortController?.signal.aborted) {
       await postSuperseded(input, ctx);

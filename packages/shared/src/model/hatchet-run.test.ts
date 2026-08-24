@@ -9,6 +9,8 @@ import { createOrganization } from "./organizations";
 import { createTestUser, createTestThread } from "./test-helpers";
 import {
   markThreadsSuperseded,
+  markThreadTerminal,
+  findOrphanRemoteThreads,
   setThreadActiveRun,
   decideThreadGeneration,
   checkThreadGeneration,
@@ -19,6 +21,10 @@ import {
   findSupersedableReviewRuns,
   markHatchetRunsSuperseded,
   markHatchetRunSupersededByExternalId,
+  claimSweepLease,
+  findSweepCandidates,
+  hasNewerRun,
+  SWEEP_LEASE_MS,
   pruneHatchetRuns,
   HATCHET_RUN_PRUNE_AFTER_MS,
   SUPERSEDE_FRESHNESS_MS,
@@ -391,5 +397,171 @@ describe("#125 C1 generation fence (decideThreadGeneration / checkThreadGenerati
       .from(hatchetRunTable)
       .where(eq(hatchetRunTable.externalId, "ext-1"));
     expect(row!.status).toBe("superseded");
+  });
+});
+
+describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () => {
+  let userId: string;
+  let orgA: string;
+
+  beforeEach(async () => {
+    userId = (await createTestUser({ db })).user.id;
+    orgA = await makeOrg("acme");
+  });
+
+  async function remoteRun(
+    prNumber: number,
+    ageMs: number,
+    externalId: string,
+  ) {
+    const { threadId } = await createTestThread({
+      db,
+      userId,
+      overrides: { organizationId: orgA, sandboxProvider: "hatchet-remote" },
+    });
+    await setThreadStatus(threadId, "working");
+    const run = await recordHatchetRun({
+      db,
+      threadId,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      prNumber,
+      externalId,
+    });
+    await db
+      .update(hatchetRunTable)
+      .set({ createdAt: new Date(Date.now() - ageMs) })
+      .where(eq(hatchetRunTable.id, run.id));
+    return { threadId, runId: run.id };
+  }
+
+  it("claimSweepLease is a compare-and-set: one winner, then free again after expiry", async () => {
+    const { runId } = await remoteRun(1, 0, "ext-lease");
+    const now = new Date();
+    const [a, b] = await Promise.all([
+      claimSweepLease({ db, id: runId, now }),
+      claimSweepLease({ db, id: runId, now }),
+    ]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+    // Still leased.
+    expect(await claimSweepLease({ db, id: runId, now })).toBe(false);
+    // Past expiry.
+    expect(
+      await claimSweepLease({
+        db,
+        id: runId,
+        now: new Date(now.getTime() + SWEEP_LEASE_MS + 1),
+      }),
+    ).toBe(true);
+  });
+
+  it("findSweepCandidates: only in_flight rows older than T with a non-terminal thread and no live lease", async () => {
+    const old = await remoteRun(2, 11 * 60 * 1000, "ext-old");
+    const young = await remoteRun(3, 2 * 60 * 1000, "ext-young");
+    const terminal = await remoteRun(4, 11 * 60 * 1000, "ext-terminal");
+    await markThreadTerminal({
+      db,
+      threadId: terminal.threadId,
+      cause: "superseded",
+    });
+    const leased = await remoteRun(5, 11 * 60 * 1000, "ext-leased");
+    await claimSweepLease({ db, id: leased.runId });
+
+    const ids = (
+      await findSweepCandidates({ db, olderThanMs: 10 * 60 * 1000 })
+    ).map((c) => c.externalId);
+    expect(ids).toContain("ext-old");
+    expect(ids).not.toContain("ext-young");
+    expect(ids).not.toContain("ext-terminal");
+    expect(ids).not.toContain("ext-leased");
+    void old;
+    void young;
+  });
+
+  it("hasNewerRun sees only later siblings of the same (org, repo, PR)", async () => {
+    const first = await remoteRun(6, 5 * 60 * 1000, "ext-first");
+    const [firstRow] = await db
+      .select()
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.id, first.runId));
+    expect(
+      await hasNewerRun({
+        db,
+        organizationId: orgA,
+        repoFullName: "ACME/Widgets",
+        prNumber: 6,
+        after: firstRow!.createdAt,
+        excludeExternalId: "ext-first",
+      }),
+    ).toBe(false);
+    await remoteRun(6, 0, "ext-second");
+    expect(
+      await hasNewerRun({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+        prNumber: 6,
+        after: firstRow!.createdAt,
+        excludeExternalId: "ext-first",
+      }),
+    ).toBe(true);
+    // Another PR / another org never counts.
+    const orgB = await makeOrg("globex");
+    expect(
+      await hasNewerRun({
+        db,
+        organizationId: orgB,
+        repoFullName: "acme/widgets",
+        prNumber: 6,
+        after: firstRow!.createdAt,
+      }),
+    ).toBe(false);
+  });
+
+  it("markThreadTerminal writes the typed cause exactly once", async () => {
+    const { threadId } = await remoteRun(7, 0, "ext-term");
+    expect(
+      await markThreadTerminal({ db, threadId, cause: "user-cancelled" }),
+    ).toBe(true);
+    expect(
+      await markThreadTerminal({ db, threadId, cause: "superseded" }),
+    ).toBe(false);
+    const [row] = await db.query.thread.findMany({
+      where: (t, { eq: e }) => e(t.id, threadId),
+    });
+    expect(row!.status).toBe("complete");
+    expect(row!.terminalCause).toBe("user-cancelled");
+    expect(row!.errorMessage).toBe("user-cancelled");
+  });
+
+  it("findOrphanRemoteThreads: remote, reapable, run-less, older than N", async () => {
+    const orphan = await createTestThread({
+      db,
+      userId,
+      overrides: { organizationId: orgA, sandboxProvider: "hatchet-remote" },
+    });
+    await setThreadStatus(orphan.threadId, "booting");
+    await db
+      .update(threadTable)
+      .set({ createdAt: new Date(Date.now() - 20 * 60 * 1000) })
+      .where(eq(threadTable.id, orphan.threadId));
+    const tracked = await remoteRun(8, 20 * 60 * 1000, "ext-tracked");
+    const local = await createTestThread({
+      db,
+      userId,
+      overrides: { organizationId: orgA },
+    });
+    await setThreadStatus(local.threadId, "booting");
+    await db
+      .update(threadTable)
+      .set({ createdAt: new Date(Date.now() - 20 * 60 * 1000) })
+      .where(eq(threadTable.id, local.threadId));
+
+    const ids = (
+      await findOrphanRemoteThreads({ db, olderThanMs: 15 * 60 * 1000 })
+    ).map((t) => t.id);
+    expect(ids).toContain(orphan.threadId);
+    expect(ids).not.toContain(tracked.threadId);
+    expect(ids).not.toContain(local.threadId);
   });
 });

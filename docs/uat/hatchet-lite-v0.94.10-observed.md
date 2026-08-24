@@ -44,6 +44,25 @@ dedupe half is an open deviation.
 would multiply rot): trigger→start latency of run 50 ≤ 2× run 1, and zero
 QUEUED/RUNNING runs remain after the drain. This is #69's regression guard.
 
+## 5. Concurrency groups are scoped per workflow
+
+A run on `agent-run-strict` started 193ms into a live `agent-run-newest` run:
+the `'agent-run-global-memory-budget'` key — a constant expression meant as a
+box-wide cap — is a separate group per workflow version. With the four
+variants registered the engine alone would allow up to four concurrent
+agent-runs on a box budgeted for one. The worker therefore enforces the box
+slot itself (`packages/worker/src/agent-run/box-slot.ts`: atomic mkdir lock +
+owner heartbeat, shared by both worker processes, abort-aware, stale-owner
+reclaim); the E2E's next case proves runs on different variants no longer
+overlap with it in place.
+
+Also observed, INTERMITTENTLY, on `agent-run-strict` (three stacked
+`GROUP_ROUND_ROBIN` entries): two runs with different `prKey`s and different
+orgs RUNNING at the same time — the per-workflow cap is not even reliable
+within that variant (the #69 stacked-GRR family). Not frozen as a case because
+it is intermittent; it is the second reason the box slot, not the engine, is
+the enforcement point for the one-agent budget.
+
 ## Also verified (not characterizations — the intended semantics hold)
 
 - `agent-run-newest` (`CANCEL_IN_PROGRESS`): the live run is CANCELLED, the

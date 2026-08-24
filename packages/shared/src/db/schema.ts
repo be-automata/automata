@@ -384,6 +384,15 @@ export const thread = pgTable(
      * (legacy dispatch, in-process sandbox) → the fence FAILS OPEN.
      */
     activeRunExternalId: text("active_run_external_id"),
+    /**
+     * Typed terminal cause (#125 C4): WHY a remote review run ended, written
+     * exactly once by the worker's terminal post or the supersede sweep.
+     * One of `TERMINAL_CAUSES` (model/terminal-cause.ts). NULL = no typed
+     * terminal (normal completion, or a legacy/in-process run). Read by the
+     * generation fence (any typed terminal refuses late writes) and by the
+     * thread-view chips (C5).
+     */
+    terminalCause: text("terminal_cause"),
     sandboxSize: text("sandbox_size").$type<SandboxSize>(),
     sandboxStatus: text("sandbox_status").$type<SandboxStatus>(),
     bootingSubstatus: text("booting_substatus").$type<BootingSubstatus>(),
@@ -1711,6 +1720,12 @@ export const hatchetRun = pgTable(
       .notNull()
       .$type<"in_flight" | "superseded">()
       .default("in_flight"),
+    /**
+     * #125 C4 sweep lease: a sweep tick claims a row by moving this past now()
+     * (compare-and-set) before it inspects the engine or writes a terminal —
+     * two concurrent ticks can never both act on one run. NULL = unclaimed.
+     */
+    sweepLeaseUntil: timestamp("sweep_lease_until", { mode: "date" }),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .notNull()

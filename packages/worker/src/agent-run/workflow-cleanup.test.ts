@@ -66,6 +66,8 @@ vi.mock("./provision", () => ({
 const pullNextMessage = vi.fn();
 const pollUntilTerminal = vi.fn();
 const postRunSuperseded = vi.fn(async (..._args: unknown[]) => "applied");
+const postRunTerminal = vi.fn(async (..._args: unknown[]) => "applied");
+const checkRunStaleness = vi.fn(async (..._args: unknown[]) => false);
 
 vi.mock("./www-client", () => ({
   pullAgentCredentials: (...args: unknown[]) => pullAgentCredentials(...args),
@@ -73,6 +75,8 @@ vi.mock("./www-client", () => ({
   pollUntilTerminal: (...args: unknown[]) => pollUntilTerminal(...args),
   postRunFailed: vi.fn(),
   postRunSuperseded: (...args: unknown[]) => postRunSuperseded(...args),
+  postRunTerminal: (...args: unknown[]) => postRunTerminal(...args),
+  checkRunStaleness: (...args: unknown[]) => checkRunStaleness(...args),
   postEgressEvents: (...args: unknown[]) => postEgressEvents(...args),
 }));
 
@@ -622,5 +626,78 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     expect(
       ctx.log.mock.calls.some((c) => String(c[0]).includes("no workflowRunId")),
     ).toBe(true);
+  });
+});
+
+/**
+ * #125 C4 queue-mode staleness self-check: under complete-run·queue the run
+ * asks www FIRST whether a newer run is already recorded for its PR and, if
+ * so, skips itself with a `stale-skipped` terminal before provisioning
+ * anything. Other policies never ask; a transport failure fails open.
+ */
+describe("#125 C4: queue-mode staleness self-check", () => {
+  const QUEUE_INPUT = {
+    ...INPUT,
+    prKey: "org-1/o/r/9",
+    deliveryId: "gh-9",
+    supersedePolicy: "complete-run-queue" as const,
+  };
+  const ctx = () => ({
+    abortController: new AbortController(),
+    cancelled: false,
+    log: vi.fn(),
+    workflowRunId: () => "run-ext-q",
+  });
+
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    provisionWorkdir.mockReset().mockResolvedValue(WORKDIR);
+    cleanupWorkdir.mockReset().mockResolvedValue(undefined);
+    postRunTerminal.mockReset().mockResolvedValue("applied");
+    checkRunStaleness.mockReset().mockResolvedValue(false);
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      cleanup: vi.fn(async () => {}),
+    });
+    pullNextMessage.mockReset().mockResolvedValue(null);
+  });
+
+  it("stale ⇒ stale-skipped terminal, NO provisioning, outcome stale-skipped (AC4)", async () => {
+    checkRunStaleness.mockResolvedValue(true);
+    const c = ctx();
+    const out = await runFn(QUEUE_INPUT, c);
+    expect(out.outcome).toBe("stale-skipped");
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
+    const [opts, args] = postRunTerminal.mock.calls[0]!;
+    expect(opts).toMatchObject({
+      threadId: INPUT.threadId,
+      runExternalId: "run-ext-q",
+    });
+    expect(args).toEqual({
+      runExternalId: "run-ext-q",
+      cause: "stale-skipped",
+      policy: "complete-run-queue",
+    });
+  });
+
+  it("not stale ⇒ the run proceeds to provision", async () => {
+    const out = await runFn(QUEUE_INPUT, ctx());
+    expect(checkRunStaleness).toHaveBeenCalledTimes(1);
+    expect(provisionWorkdir).toHaveBeenCalledTimes(1);
+    expect(out.outcome).toBe("nothing-to-run");
+    expect(postRunTerminal).not.toHaveBeenCalled();
+  });
+
+  it("other policies and legacy runs never ask", async () => {
+    for (const extra of [
+      {},
+      { supersedePolicy: "newest-wins" as const },
+      { supersedePolicy: "complete-run-discard" as const },
+    ]) {
+      await runFn({ ...INPUT, prKey: "k", deliveryId: "d", ...extra }, ctx());
+    }
+    expect(checkRunStaleness).not.toHaveBeenCalled();
   });
 });

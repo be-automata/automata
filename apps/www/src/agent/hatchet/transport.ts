@@ -237,3 +237,46 @@ export async function cancelAgentRun(
     throw new Error(`Hatchet cancel failed: ${res.status} ${body}`);
   }
 }
+
+/** Engine run status as the v1 REST API reports it, plus NOT_FOUND for a vanished run. */
+export type AgentRunStatus =
+  | "QUEUED"
+  | "RUNNING"
+  | "COMPLETED"
+  | "CANCELLED"
+  | "FAILED"
+  | "NOT_FOUND";
+
+/**
+ * Read one run's status by externalId (#125 C4 sweep). 404 → NOT_FOUND (the
+ * engine pruned it, or it never existed — both are "not live"). Any other
+ * non-2xx throws so the sweep skips the run this tick rather than guessing.
+ */
+export async function getAgentRunStatus(
+  externalId: string,
+  config: HatchetTriggerConfig,
+): Promise<AgentRunStatus> {
+  const { apiUrl, tenantId, apiToken } = requireHatchetConfig(config, "cancel");
+  const res = await fetch(
+    `${apiUrl.replace(/\/$/, "")}/api/v1/stable/tenants/${tenantId}/workflow-runs/${encodeURIComponent(externalId)}`,
+    { headers: { Authorization: `Bearer ${apiToken}` } },
+  );
+  if (res.status === 404) return "NOT_FOUND";
+  if (!res.ok) {
+    throw new Error(`Hatchet run status failed: ${res.status}`);
+  }
+  const json = (await res.json().catch(() => ({}))) as {
+    run?: { status?: string };
+  };
+  const status = json.run?.status;
+  switch (status) {
+    case "QUEUED":
+    case "RUNNING":
+    case "COMPLETED":
+    case "CANCELLED":
+    case "FAILED":
+      return status;
+    default:
+      throw new Error(`Hatchet run status unrecognised: ${String(status)}`);
+  }
+}
