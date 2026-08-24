@@ -389,6 +389,32 @@ describe("resolveSupersedePolicy (#125/#127)", () => {
     ).resolves.toEqual({ policy: "newest-wins", recheckOnComplete: false });
   });
 
+  it("listRepoReviewSettings never returns the org-default sentinel ('*') (#131 AC6)", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { supersedePolicy: "app-side" },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/x",
+      patch: { supersedePolicy: "complete-run-queue" },
+    });
+    const names = (
+      await listRepoReviewSettings({ db, organizationId: orgA })
+    ).map((r) => r.repoFullName);
+    expect(names).toEqual(["acme/x"]);
+    // The sentinel is still reachable by its own accessor.
+    const sentinel = await getRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+    });
+    expect(sentinel?.supersedePolicy).toBe("app-side");
+  });
+
   it("falls back to the org-default sentinel row ('*') when the repo has no override", async () => {
     await upsertRepoReviewSetting({
       db,
