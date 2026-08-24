@@ -3,7 +3,7 @@ import { hatchetRun } from "../db/schema";
 import { HatchetRun } from "../db/types";
 import { and, eq, gt, gte, inArray, isNull, lt, ne, or } from "drizzle-orm";
 import { thread as threadTable } from "../db/schema";
-import { reapableThreadStatuses } from "./threads";
+import { reapableThreadStatuses, threadEffectiveStatusIn } from "./threads";
 import { normalizeRepo } from "./repo-review-settings";
 
 /**
@@ -207,7 +207,7 @@ export async function findSweepCandidates({
           new Date(now.getTime() - SUPERSEDE_FRESHNESS_MS),
         ),
         isNull(threadTable.terminalCause),
-        inArray(threadTable.status, reapableThreadStatuses),
+        threadEffectiveStatusIn(reapableThreadStatuses),
         or(
           isNull(hatchetRun.sweepLeaseUntil),
           lt(hatchetRun.sweepLeaseUntil, now),

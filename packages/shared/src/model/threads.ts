@@ -2,21 +2,22 @@ import { DB } from "../db";
 import type { TerminalCause } from "./terminal-cause";
 import * as schema from "../db/schema";
 import {
-  eq,
   and,
-  desc,
   asc,
-  inArray,
-  lte,
-  gte,
   count,
+  desc,
+  eq,
+  exists,
   getTableColumns,
-  or,
-  isNull,
-  sql,
-  ne,
+  gte,
+  inArray,
   isNotNull,
+  isNull,
   lt,
+  lte,
+  ne,
+  or,
+  sql,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { publishBroadcastUserMessage } from "../broadcast-server";
@@ -1387,6 +1388,26 @@ export async function deleteThreadById({
  * ONE definition shared by `getStalledThreads` and `markThreadsSuperseded` — a
  * future status added here reaches both sweeps, never one silently.
  */
+/**
+ * SQL predicate: the thread's EFFECTIVE status is one of `statuses`. A legacy
+ * thread carries it on the thread row; a chat-mode thread
+ * (enableThreadChatCreation) carries it on its threadChat row(s) while the
+ * thread row keeps its creation value. Every reaper/sweep predicate on
+ * "thread status" must use this, or chat-mode threads are invisible to it.
+ */
+export function threadEffectiveStatusIn(statuses: ThreadStatus[]) {
+  return or(
+    inArray(schema.thread.status, statuses),
+    exists(db_select_chat_status(statuses)),
+  );
+}
+function db_select_chat_status(statuses: ThreadStatus[]) {
+  return sql`(select 1 from ${schema.threadChat} where ${schema.threadChat.threadId} = ${schema.thread.id} and ${schema.threadChat.status} in (${sql.join(
+    statuses.map((s) => sql`${s}`),
+    sql`, `,
+  )}))`;
+}
+
 export const reapableThreadStatuses: ThreadStatus[] = [
   "booting",
   "stopping",
@@ -1558,7 +1579,7 @@ export async function findOrphanRemoteThreads({
     .where(
       and(
         eq(schema.thread.sandboxProvider, "hatchet-remote"),
-        eq(schema.thread.status, "booting"),
+        threadEffectiveStatusIn(["booting"]),
         isNotNull(schema.thread.organizationId),
         isNotNull(schema.thread.githubPRNumber),
         eq(schema.automations.triggerType, "pull_request"),

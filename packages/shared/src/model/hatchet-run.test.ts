@@ -3,7 +3,11 @@ import { env } from "@terragon/env/pkg-shared";
 import { nanoid } from "nanoid";
 import { eq } from "drizzle-orm";
 import { createDb } from "../db";
-import { thread as threadTable } from "../db/schema";
+import {
+  thread as threadTable,
+  threadChat as threadChatTable,
+} from "../db/schema";
+import { reapableThreadStatuses } from "./threads";
 import { ThreadStatus } from "../db/types";
 import { createOrganization } from "./organizations";
 import {
@@ -528,6 +532,70 @@ describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () 
     expect(row!.terminalCause).toBe("user-cancelled");
     // The legacy errorMessage sentinel is written ONLY for `superseded`.
     expect(row!.errorMessage).toBeNull();
+  });
+
+  it("findSweepCandidates sees a CHAT-MODE thread (status on threadChat, thread row at its creation value) — and drops it once its chat row is terminal", async () => {
+    const chatMode = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 77,
+      externalId: "ext-chat-mode",
+      ageMs: 20 * 60 * 1000,
+      enableThreadChatCreation: true,
+    });
+    const [row] = await db
+      .select({ status: threadTable.status })
+      .from(threadTable)
+      .where(eq(threadTable.id, chatMode.threadId));
+    expect(reapableThreadStatuses).not.toContain(row!.status); // thread row is NOT live
+    let ids = (
+      await findSweepCandidates({ db, olderThanMs: 10 * 60 * 1000 })
+    ).map((c) => c.threadId);
+    expect(ids).toContain(chatMode.threadId);
+    // Its chat row reaches a terminal → no longer a candidate.
+    await db
+      .update(threadChatTable)
+      .set({ status: "complete" })
+      .where(eq(threadChatTable.id, chatMode.threadChatId));
+    ids = (await findSweepCandidates({ db, olderThanMs: 10 * 60 * 1000 })).map(
+      (c) => c.threadId,
+    );
+    expect(ids).not.toContain(chatMode.threadId);
+  });
+
+  it("findOrphanRemoteThreads sees a CHAT-MODE review thread whose chat row is stuck in booting", async () => {
+    const reviewAutomation = await createTestAutomation({
+      db,
+      userId,
+      values: {
+        organizationId: orgA,
+        triggerType: "pull_request",
+        repoFullName: "acme/widgets",
+        triggerConfig: { on: { open: true, update: true }, filter: {} },
+      },
+    });
+    const t = await createTestThread({
+      db,
+      userId,
+      overrides: {
+        organizationId: orgA,
+        sandboxProvider: "hatchet-remote",
+        githubRepoFullName: "acme/widgets",
+        githubPRNumber: 12,
+        automationId: reviewAutomation.id,
+      },
+      chatOverrides: { status: "booting" },
+      enableThreadChatCreation: true,
+    });
+    await db
+      .update(threadTable)
+      .set({ createdAt: new Date(Date.now() - 20 * 60 * 1000) })
+      .where(eq(threadTable.id, t.threadId));
+    const ids = (
+      await findOrphanRemoteThreads({ db, olderThanMs: 15 * 60 * 1000 })
+    ).map((x) => x.id);
+    expect(ids).toContain(t.threadId);
   });
 
   it("findOrphanRemoteThreads: ONLY a review thread (org + PR + pull_request automation) still in `booting`, run-less, older than N", async () => {

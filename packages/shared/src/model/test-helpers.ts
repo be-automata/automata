@@ -301,6 +301,7 @@ export async function createTestRemoteRun({
   externalId,
   ageMs = 0,
   repoFullName = "acme/widgets",
+  enableThreadChatCreation = false,
 }: {
   db: DB;
   userId: string;
@@ -309,16 +310,22 @@ export async function createTestRemoteRun({
   externalId: string;
   ageMs?: number;
   repoFullName?: string;
-}): Promise<{ threadId: string; runId: string }> {
-  const { threadId } = await createTestThread({
+  /** Chat-mode thread: the live status sits on the threadChat row. */
+  enableThreadChatCreation?: boolean;
+}): Promise<{ threadId: string; threadChatId: string; runId: string }> {
+  const { threadId, threadChatId } = await createTestThread({
     db,
     userId,
     overrides: { organizationId, sandboxProvider: "hatchet-remote" },
+    chatOverrides: { status: "working" },
+    enableThreadChatCreation,
   });
-  await db
-    .update(schema.thread)
-    .set({ status: "working" })
-    .where(eq(schema.thread.id, threadId));
+  if (!enableThreadChatCreation) {
+    await db
+      .update(schema.thread)
+      .set({ status: "working" })
+      .where(eq(schema.thread.id, threadId));
+  }
   const run = await recordHatchetRun({
     db,
     threadId,
@@ -333,5 +340,5 @@ export async function createTestRemoteRun({
       .set({ createdAt: new Date(Date.now() - ageMs) })
       .where(eq(schema.hatchetRun.id, run.id));
   }
-  return { threadId, runId: run.id };
+  return { threadId, threadChatId, runId: run.id };
 }
