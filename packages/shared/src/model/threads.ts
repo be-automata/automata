@@ -164,6 +164,7 @@ async function getThreadsInner({
       githubIssueNumber: schema.thread.githubIssueNumber,
       codesandboxId: schema.thread.codesandboxId,
       credentialBrokerMode: schema.thread.credentialBrokerMode,
+      activeRunExternalId: schema.thread.activeRunExternalId,
       sandboxProvider: schema.thread.sandboxProvider,
       sandboxSize: schema.thread.sandboxSize,
       sandboxStatus: schema.thread.sandboxStatus,
@@ -665,6 +666,7 @@ export async function getThread({
     automationId: thread.automationId,
     codesandboxId: thread.codesandboxId,
     credentialBrokerMode: thread.credentialBrokerMode,
+    activeRunExternalId: thread.activeRunExternalId,
     sandboxProvider: thread.sandboxProvider,
     sandboxSize: thread.sandboxSize,
     bootingSubstatus: thread.bootingSubstatus,
@@ -1020,6 +1022,26 @@ export async function updateThreadChat({
     },
   });
   return null;
+}
+
+/**
+ * Stamp the thread's ACTIVE remote run (#125/#127) — the C1 generation fence
+ * compares terminal writes against this. A narrow, broadcast-free writer: the
+ * stamp is bookkeeping for the fence, not a UI-visible thread update.
+ */
+export async function setThreadActiveRun({
+  db,
+  threadId,
+  externalId,
+}: {
+  db: DB;
+  threadId: string;
+  externalId: string | null;
+}): Promise<void> {
+  await db
+    .update(schema.thread)
+    .set({ activeRunExternalId: externalId })
+    .where(eq(schema.thread.id, threadId));
 }
 
 export async function updateThread({

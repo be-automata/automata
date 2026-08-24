@@ -1,0 +1,39 @@
+{
+  "plain": {
+    "workflowName": "agent-run",
+    "input": {
+      "threadId": "__THREAD_ID__",
+      "threadChatId": "__THREAD_CHAT_ID__",
+      "repoFullName": "be-automata/automata",
+      "branch": "main",
+      "daemonCallbackUrl": "http://localhost:3000",
+      "installationToken": "mock-github-token",
+      "daemonToken": "__DAEMON_TOKEN__",
+      "orgId": "__ORG_ID__",
+      "traceparent": "__TRACEPARENT__"
+    },
+    "additionalMetadata": {
+      "threadId": "__THREAD_ID__",
+      "threadChatId": "__THREAD_CHAT_ID__"
+    }
+  },
+  "review": {
+    "workflowName": "agent-run",
+    "input": {
+      "threadId": "__THREAD_ID__",
+      "threadChatId": "__THREAD_CHAT_ID__",
+      "repoFullName": "be-automata/automata",
+      "branch": "feature-golden",
+      "daemonCallbackUrl": "http://localhost:3000",
+      "installationToken": "mock-github-token",
+      "daemonToken": "__DAEMON_TOKEN__",
+      "orgId": "__ORG_ID__",
+      "prNumber": 4242,
+      "traceparent": "__TRACEPARENT__"
+    },
+    "additionalMetadata": {
+      "threadId": "__THREAD_ID__",
+      "threadChatId": "__THREAD_CHAT_ID__"
+    }
+  }
+}

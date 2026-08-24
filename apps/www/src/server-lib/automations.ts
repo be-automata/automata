@@ -98,6 +98,11 @@ export async function runAutomation({
      * means "no snapshot", never "trusted").
      */
     trustContext?: ThreadTrustContext | null;
+    /**
+     * #127: the originating webhook's X-GitHub-Delivery id — threaded through
+     * thread creation to the Hatchet dispatch as its idempotency identity.
+     */
+    deliveryId?: string;
   };
   source: "automated" | "manual";
 }): Promise<{ threadId: string; threadChatId: string } | undefined> {
@@ -141,6 +146,7 @@ export async function runAutomation({
           githubPRNumber: options?.prNumber,
           githubIssueNumber: options?.issueNumber,
           disableGitCheckpointing: automation.disableGitCheckpointing ?? false,
+          deliveryId: options?.deliveryId,
         });
         threadId = newThreadResult.threadId;
         threadChatId = newThreadResult.threadChatId;
@@ -224,6 +230,7 @@ export async function runAutomation({
           githubPRNumber: options?.prNumber,
           githubIssueNumber: options?.issueNumber,
           disableGitCheckpointing: automation.disableGitCheckpointing ?? false,
+          deliveryId: options?.deliveryId,
         });
         threadId = newThreadResult.threadId;
         threadChatId = newThreadResult.threadChatId;
@@ -489,6 +496,7 @@ export async function runPullRequestAutomation({
   prEventAction,
   prNumber,
   source,
+  deliveryId,
 }: {
   userId: string;
   automationId: string;
@@ -496,6 +504,8 @@ export async function runPullRequestAutomation({
   prEventAction: PullRequestEvent["action"];
   prNumber: number;
   source: "automated" | "manual";
+  /** #127: originating webhook delivery id (absent for manual runs). */
+  deliveryId?: string;
 }) {
   const { automation, canRun } = await validateCanRunAutomation({
     userId,
@@ -599,6 +609,7 @@ export async function runPullRequestAutomation({
       source,
       options: {
         branchName,
+        deliveryId,
         // The review-diff base for {{baseBranch}} — the PR's BASE ref, never
         // its head (rendering head made `git diff origin/<base>...HEAD` empty).
         // Optional-chained defensively: a malformed payload must degrade to

@@ -13,11 +13,19 @@ import {
   hasActiveDaemonToken,
   daemonRunKey,
 } from "@/lib/daemon-token";
-import { createAutomation } from "@terragon/shared/model/automations";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
-import { thread as threadTable } from "@terragon/shared/db/schema";
+import { repoReviewSettings } from "@terragon/shared/db/schema";
+import { setFeatureFlagOverrideForTest } from "@terragon/shared/model/test-helpers";
 import { eq } from "drizzle-orm";
+import { getInstallationToken } from "@terragon/shared/github-app";
+import { thread as threadTable } from "@terragon/shared/db/schema";
 import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
+import {
+  createReviewAutomation,
+  createBootingPRThread,
+  routedHatchetFetch,
+  triggerBody,
+} from "./__fixtures__/review-thread";
 
 describe("hatchetDispatchEnabled", () => {
   it("false by default (no HATCHET_* env in tests) → in-process path", () => {
@@ -319,74 +327,11 @@ describe("dispatchAgentRun — #8 supersede stale in-flight review", () => {
     orgId = org.id;
   });
 
-  async function makeAutomation(
-    triggerType: "pull_request" | "github_mention",
-  ) {
-    const automation = await createAutomation({
-      db,
-      userId: user.id,
-      accessTier: "pro",
-      organizationId: orgId,
-      automation: {
-        name: `${triggerType} automation`,
-        repoFullName: "be-automata/automata",
-        branchName: "main",
-        enabled: true,
-        triggerType,
-        triggerConfig: {},
-        action: {
-          type: "user_message",
-          config: {
-            message: {
-              type: "user",
-              model: null,
-              parts: [],
-              timestamp: new Date().toISOString(),
-            },
-          },
-        },
-      },
-    });
-    return automation.id;
-  }
-
-  async function makePRThread(automationId: string, prNumber: number) {
-    const t = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: {
-        organizationId: orgId,
-        githubRepoFullName: "be-automata/automata",
-        githubPRNumber: prNumber,
-        automationId,
-      },
-    });
-    // In production dispatch runs only after startAgentMessage transitions the thread
-    // to `booting`, so a superseded prior run is in the active set that
-    // markThreadsSuperseded targets (mirrors stopStalledThreads). ThreadInsert omits
-    // `status`, so set it directly.
-    await db
-      .update(threadTable)
-      .set({ status: "booting" })
-      .where(eq(threadTable.id, t.threadId));
-    return t;
-  }
-
-  /** A fetch mock that routes trigger vs cancel and records the cancel bodies. */
-  function routedFetch(triggerRunId: string) {
-    const cancelBodies: unknown[] = [];
-    const mock = vi.fn(async (url: string, init?: RequestInit) => {
-      if (url.includes("/tasks/cancel")) {
-        cancelBodies.push(JSON.parse(String(init?.body)));
-        return new Response("{}", { status: 200 });
-      }
-      return new Response(
-        JSON.stringify({ run: { metadata: { id: triggerRunId } } }),
-        { status: 200 },
-      );
-    });
-    return { mock, cancelBodies };
-  }
+  const makeAutomation = (t: "pull_request" | "github_mention") =>
+    createReviewAutomation({ userId: user.id, orgId, triggerType: t });
+  const makePRThread = (automationId: string, prNumber: number) =>
+    createBootingPRThread({ userId: user.id, orgId, automationId, prNumber });
+  const routedFetch = routedHatchetFetch;
 
   it("a second review dispatch cancels the prior run's externalId and supersedes its thread", async () => {
     const reviewAutomation = await makeAutomation("pull_request");
@@ -462,6 +407,242 @@ describe("dispatchAgentRun — #8 supersede stale in-flight review", () => {
       where: (t, { eq }) => eq(t.id, priorReview.threadId),
     });
     expect(reviewRow!.errorMessage).not.toBe("superseded");
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
+  let user: User;
+  let orgId: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    user = (await createTestUser({ db })).user;
+    const org = await createOrganization({
+      db,
+      name: "Org",
+      slug: `org-${nanoid(8).toLowerCase()}`,
+    });
+    orgId = org.id;
+    await setFeatureFlagOverrideForTest({
+      db,
+      userId: user.id,
+      name: "supersedePolicy",
+      value: true,
+    });
+  });
+
+  const makeReviewThread = async (prNumber: number) =>
+    createBootingPRThread({
+      userId: user.id,
+      orgId,
+      automationId: await createReviewAutomation({ userId: user.id, orgId }),
+      prNumber,
+    });
+  const okFetch = (runId: string) => {
+    const r = routedHatchetFetch(runId);
+    return { mock: r.mock, cancels: r.cancelBodies };
+  };
+
+  it("review dispatch: variant by policy, prKey/deliveryId/supersedePolicy in input, versioned metadata, activeRunExternalId stamped", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "be-automata/automata",
+      patch: { supersedePolicy: "complete-run-discard" },
+    });
+    const t = await makeReviewThread(77);
+    const f = okFetch("run-discard-1");
+    vi.stubGlobal("fetch", f.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      repoFullName: "Be-Automata/Automata",
+      branch: "feature",
+      deliveryId: "gh-delivery-abc",
+    });
+    const body = triggerBody(f.mock);
+    expect(body.workflowName).toBe("agent-run-discard");
+    expect(body.input.prKey).toBe(`${orgId}/be-automata/automata/77`);
+    expect(body.input.deliveryId).toBe("gh-delivery-abc");
+    expect(body.input.supersedePolicy).toBe("complete-run-discard");
+    expect(body.input.recheckOnComplete).toBe(false);
+    expect(body.additionalMetadata).toEqual({
+      metaVersion: "1",
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      orgId,
+      repoFullName: "be-automata/automata",
+      prNumber: "77",
+      lane: "review",
+      supersedePolicy: "complete-run-discard",
+      recheckOnComplete: "false",
+    });
+    // Native policy → app-side cancel pass NOT run.
+    expect(f.cancels).toHaveLength(0);
+    const [row] = await db.query.thread.findMany({
+      where: (th, { eq: e }) => e(th.id, t.threadId),
+    });
+    expect(row!.activeRunExternalId).toBe("run-discard-1");
+    vi.unstubAllGlobals();
+  });
+
+  it("mints a synthetic deliveryId when none is supplied (never empty)", async () => {
+    const t = await makeReviewThread(78);
+    const f = okFetch("run-2");
+    vi.stubGlobal("fetch", f.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "feature",
+    });
+    const body = triggerBody(f.mock);
+    expect(body.workflowName).toBe("agent-run-newest"); // default newest-wins
+    expect(body.input.deliveryId).toMatch(
+      new RegExp(`^manual:${t.threadId}:[0-9a-f]{16}$`),
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("app-side policy keeps the legacy cancel pass AND routes to agent-run", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "*",
+      patch: { supersedePolicy: "app-side" },
+    });
+    const old = await makeReviewThread(79);
+    const fresh = await makeReviewThread(79);
+    const f1 = okFetch("run-old");
+    vi.stubGlobal("fetch", f1.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: old.threadId,
+      threadChatId: old.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "feature",
+    });
+    vi.unstubAllGlobals();
+    const f2 = okFetch("run-new");
+    vi.stubGlobal("fetch", f2.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: fresh.threadId,
+      threadChatId: fresh.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "feature",
+    });
+    expect(f2.cancels).toEqual([{ externalIds: ["run-old"] }]);
+    expect(triggerBody(f2.mock).workflowName).toBe("agent-run");
+    vi.unstubAllGlobals();
+  });
+
+  it("unknown stored policy → dispatch FAILS the thread loudly, nothing is triggered, and the minted token is revoked (no phantom run)", async () => {
+    const t = await makeReviewThread(80);
+    const runKey = daemonRunKey({
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "be-automata/automata",
+      patch: { blockTolerance: "error" },
+    });
+    await db
+      .update(repoReviewSettings)
+      .set({ supersedePolicy: "zzz" })
+      .where(eq(repoReviewSettings.organizationId, orgId));
+    const f = okFetch("never");
+    vi.stubGlobal("fetch", f.mock);
+    await expect(
+      dispatchAgentRun({
+        userId: user.id,
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        repoFullName: "be-automata/automata",
+        branch: "feature",
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/Failed to dispatch/),
+      cause: expect.objectContaining({
+        message: expect.stringMatching(/Unknown supersedePolicy 'zzz'/),
+      }),
+    });
+    expect(f.mock).not.toHaveBeenCalled();
+    // The token minted before planSupersede must not survive the failure —
+    // otherwise hasActiveDaemonToken() reports a phantom run for this runKey
+    // and every retry for the token's TTL silently no-ops.
+    expect(await hasActiveDaemonToken({ userId: user.id, name: runKey })).toBe(
+      false,
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("non-review thread under the flag: legacy payload (no prKey, no variant)", async () => {
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { organizationId: orgId },
+    });
+    const f = okFetch("run-plain");
+    vi.stubGlobal("fetch", f.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "main",
+    });
+    const body = triggerBody(f.mock);
+    expect(body.workflowName).toBe("agent-run");
+    expect(body.input.prKey).toBeUndefined();
+    expect(body.additionalMetadata).toEqual({
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+    });
+    // No fence stamp for a non-review run: activeRunExternalId is a REVIEW
+    // generation marker and must never carry an out-of-scope value.
+    const [row] = await db
+      .select({ activeRunExternalId: threadTable.activeRunExternalId })
+      .from(threadTable)
+      .where(eq(threadTable.id, t.threadId));
+    expect(row!.activeRunExternalId).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it("a sibling of the mint rejecting (installation-token lookup fails) still revokes the minted token — no phantom run", async () => {
+    const t = await makeReviewThread(81);
+    const runKey = daemonRunKey({
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+    });
+    const f = okFetch("never");
+    vi.stubGlobal("fetch", f.mock);
+    // getInstallationToken shares the pre-trigger Promise.all with the mint;
+    // Promise.all rejects on its failure without waiting for the mint's row.
+    vi.mocked(getInstallationToken).mockRejectedValueOnce(
+      new Error("github down"),
+    );
+    await expect(
+      dispatchAgentRun({
+        userId: user.id,
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        repoFullName: "be-automata/automata",
+        branch: "feature",
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/Failed to dispatch/),
+      cause: expect.objectContaining({ message: "github down" }),
+    });
+    expect(f.mock).not.toHaveBeenCalled();
+    expect(await hasActiveDaemonToken({ userId: user.id, name: runKey })).toBe(
+      false,
+    );
     vi.unstubAllGlobals();
   });
 });

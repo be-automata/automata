@@ -1,7 +1,7 @@
 import { DB } from "../db";
 import { repoReviewSettings } from "../db/schema";
 import { RepoReviewSetting } from "../db/types";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { buildEgressPolicyShape } from "./egress-policy";
 
 /**
@@ -28,6 +28,95 @@ import { buildEgressPolicyShape } from "./egress-policy";
  */
 export function normalizeRepo(repoFullName: string): string {
   return repoFullName.trim().toLowerCase();
+}
+
+/**
+ * Supersede policies for PR-review runs (#125/#127): what happens when a new
+ * commit lands while a review run is still in flight on the same PR.
+ *  - 'newest-wins'          → engine cancels the in-flight run, runs the new one
+ *  - 'complete-run-queue'   → the new run queues behind the in-flight one
+ *  - 'complete-run-discard' → the new run is discarded while one is live
+ *  - 'app-side'             → the control plane decides (legacy #8 rules)
+ */
+export const SUPERSEDE_POLICIES = [
+  "newest-wins",
+  "complete-run-queue",
+  "complete-run-discard",
+  "app-side",
+] as const;
+export type SupersedePolicy = (typeof SUPERSEDE_POLICIES)[number];
+
+/** The policy every (org, repo) gets when nothing is configured. */
+export const DEFAULT_SUPERSEDE_POLICY: SupersedePolicy = "newest-wins";
+
+/**
+ * The org-default row's repo slug sentinel. `normalizeRepo` lowercases real
+ * slugs and GitHub slugs can never be a bare '*', so this row can never
+ * collide with a real repo override.
+ */
+export const ORG_DEFAULT_REPO_SENTINEL = "*";
+
+export function isSupersedePolicy(value: string): value is SupersedePolicy {
+  return (SUPERSEDE_POLICIES as readonly string[]).includes(value);
+}
+
+/**
+ * The policy snapshot stamped onto a run at dispatch (#125 decision 5): the
+ * authority for that run's audit/recheck/cancel semantics. Consumers read the
+ * stamp, never the current settings row — so BOTH fields travel together.
+ */
+export type SupersedeSnapshot = {
+  policy: SupersedePolicy;
+  recheckOnComplete: boolean;
+};
+
+/**
+ * Resolve the effective supersede policy for one (org, repo): exact repo
+ * override → org-default sentinel row ('*') → 'newest-wins'. One query for
+ * both candidate rows; resolved LIVE at every dispatch.
+ *
+ * An unknown stored value THROWS (never a silent degrade): a bad row must
+ * fail the dispatch loudly, exactly like an invalid egress policy does.
+ */
+export async function resolveSupersedePolicy({
+  db,
+  organizationId,
+  repoFullName,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+}): Promise<SupersedeSnapshot> {
+  const repo = normalizeRepo(repoFullName);
+  const rows = await db
+    .select()
+    .from(repoReviewSettings)
+    .where(
+      and(
+        eq(repoReviewSettings.organizationId, organizationId),
+        inArray(repoReviewSettings.repoFullName, [
+          repo,
+          ORG_DEFAULT_REPO_SENTINEL,
+        ]),
+      ),
+    );
+  const byRepo = new Map(rows.map((r) => [r.repoFullName, r]));
+  for (const candidate of [repo, ORG_DEFAULT_REPO_SENTINEL]) {
+    const row = byRepo.get(candidate);
+    if (!row?.supersedePolicy) continue;
+    if (!isSupersedePolicy(row.supersedePolicy)) {
+      throw new Error(
+        `Unknown supersedePolicy '${row.supersedePolicy}' stored for ` +
+          `(${organizationId}, ${row.repoFullName}) — refusing to dispatch ` +
+          `with a silently-degraded policy`,
+      );
+    }
+    return {
+      policy: row.supersedePolicy,
+      recheckOnComplete: row.recheckOnComplete,
+    };
+  }
+  return { policy: DEFAULT_SUPERSEDE_POLICY, recheckOnComplete: false };
 }
 
 /**
@@ -83,6 +172,10 @@ export async function upsertRepoReviewSetting({
     egressPolicy?: string | null;
     /** #66 operator allowlist entries; null clears. Validated at shape-build time. */
     egressAllowlist?: string[] | null;
+    /** #125/#127 supersede policy; null clears (falls back org-default → 'newest-wins'). */
+    supersedePolicy?: string | null;
+    /** #125 discard-mode recheck toggle. */
+    recheckOnComplete?: boolean;
   };
   updatedByUserId?: string | null;
 }): Promise<RepoReviewSetting> {
@@ -111,11 +204,24 @@ export async function upsertRepoReviewSetting({
       { systemHosts: [] },
     );
   }
+  // #127: an unknown policy must never land in the table (dispatch throws on
+  // read as backstop, but the write boundary is the right place to reject).
+  if (
+    patch.supersedePolicy !== undefined &&
+    patch.supersedePolicy !== null &&
+    !isSupersedePolicy(patch.supersedePolicy)
+  ) {
+    throw new Error(
+      `Unknown supersedePolicy '${patch.supersedePolicy}' — expected one of ${SUPERSEDE_POLICIES.join(", ")}`,
+    );
+  }
   const set: {
     blockTolerance?: string;
     reviewDraftPrs?: boolean;
     egressPolicy?: string | null;
     egressAllowlist?: string[] | null;
+    supersedePolicy?: string | null;
+    recheckOnComplete?: boolean;
     updatedByUserId: string | null;
     updatedAt: Date;
   } = { updatedByUserId: updatedByUserId ?? null, updatedAt: new Date() };
@@ -126,27 +232,16 @@ export async function upsertRepoReviewSetting({
   if (patch.egressPolicy !== undefined) set.egressPolicy = patch.egressPolicy;
   if (patch.egressAllowlist !== undefined)
     set.egressAllowlist = patch.egressAllowlist;
+  if (patch.supersedePolicy !== undefined)
+    set.supersedePolicy = patch.supersedePolicy;
+  if (patch.recheckOnComplete !== undefined)
+    set.recheckOnComplete = patch.recheckOnComplete;
 
   const [row] = await db
     .insert(repoReviewSettings)
-    .values({
-      organizationId,
-      repoFullName: repo,
-      // Omitted fields fall to the column defaults on first insert.
-      ...(patch.blockTolerance !== undefined
-        ? { blockTolerance: patch.blockTolerance }
-        : {}),
-      ...(patch.reviewDraftPrs !== undefined
-        ? { reviewDraftPrs: patch.reviewDraftPrs }
-        : {}),
-      ...(patch.egressPolicy !== undefined
-        ? { egressPolicy: patch.egressPolicy }
-        : {}),
-      ...(patch.egressAllowlist !== undefined
-        ? { egressAllowlist: patch.egressAllowlist }
-        : {}),
-      updatedByUserId: updatedByUserId ?? null,
-    })
+    // `set` holds exactly the defined patch fields (+ provenance); omitted
+    // fields fall to the column defaults on first insert.
+    .values({ organizationId, repoFullName: repo, ...set })
     .onConflictDoUpdate({
       target: [
         repoReviewSettings.organizationId,

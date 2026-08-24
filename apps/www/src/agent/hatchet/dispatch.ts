@@ -19,8 +19,22 @@ import {
 } from "@terragon/shared/model/hatchet-run";
 import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
+import type { ThreadSourceMetadata } from "@terragon/shared/db/types";
 import { resolveEgressPolicy } from "@/server-lib/egress/resolve-egress-policy";
-import { triggerAgentRun, cancelAgentRun } from "./transport";
+import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
+import {
+  resolveSupersedePolicy,
+  normalizeRepo,
+  type SupersedePolicy,
+} from "@terragon/shared/model/repo-review-settings";
+import { setThreadActiveRun } from "@terragon/shared/model/threads";
+import {
+  triggerAgentRun,
+  cancelAgentRun,
+  workflowNameForPolicy,
+  buildReviewRunMetadata,
+  type TriggerOpts,
+} from "./transport";
 
 /** Trigger-fetch retry policy — a transient network blip must not fail dispatch. */
 const TRIGGER_MAX_ATTEMPTS = 3;
@@ -137,11 +151,12 @@ async function triggerWithRetry(
   input: AgentRunInput,
   threadId: string,
   threadChatId: string,
+  opts?: TriggerOpts,
 ): Promise<{ externalId: string | undefined }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= TRIGGER_MAX_ATTEMPTS; attempt++) {
     try {
-      return await triggerAgentRun(input, hatchetConfig());
+      return await triggerAgentRun(input, hatchetConfig(), opts);
     } catch (error) {
       lastError = error;
       console.error("[hatchet] trigger attempt failed", {
@@ -218,6 +233,29 @@ export interface AgentRunInput {
    * forward proxy (egress-proxy.ts) and daemon-env points the child at it.
    */
   egressPolicy?: EgressPolicyShape;
+  /**
+   * #125/#127 flag-ON only: the per-PR concurrency key,
+   * `${orgId}/${normalizedRepo}/${prNumber}`. The worker variants' per-PR CEL
+   * entry references `input.prKey` — the field, never an interpolation. Absent
+   * with the flag off (byte-identical dispatch) and for non-review runs.
+   */
+  prKey?: string;
+  /**
+   * #125/#127 flag-ON only: the run's idempotency identity. The webhook's
+   * `X-GitHub-Delivery` id when the dispatch descends from a webhook, else a
+   * synthetic `manual:<threadId>:<random>` — always present under the flag, never
+   * empty. Deduped by C1's `idempotency` task config (24h TTL); intentional
+   * re-dispatches (recheck, redo) mint DISTINCT ids and are never deduped.
+   */
+  deliveryId?: string;
+  /**
+   * #125/#127 flag-ON only: the SNAPSHOT of the supersede policy resolved at
+   * dispatch. The authority for this run's audit/recheck/cancel semantics —
+   * consumers read the stamp, never the current settings row (#125 decision 5).
+   */
+  supersedePolicy?: SupersedePolicy;
+  /** #125/#127 flag-ON only: the other half of the snapshot (discard recheck). */
+  recheckOnComplete?: boolean;
 }
 
 /** True when a thread should dispatch to the remote execution plane. */
@@ -225,6 +263,112 @@ export function hatchetDispatchEnabled(thread: {
   sandboxProvider?: string | null;
 }): boolean {
   return env.HATCHET_ENABLED || thread.sandboxProvider === "hatchet-remote";
+}
+
+type SupersedePlan = {
+  /** Spread into the base input; empty on the legacy path (key set unchanged). */
+  inputExtension: Pick<
+    AgentRunInput,
+    "prKey" | "deliveryId" | "supersedePolicy" | "recheckOnComplete"
+  >;
+  /** Trigger opts; undefined on the legacy path (byte-identical payload). */
+  triggerOpts: TriggerOpts | undefined;
+  /** Run the #8 control-plane cancel pass (legacy path, or explicit app-side). */
+  appSideCancel: boolean;
+  /** Stamp thread.activeRunExternalId for the C1 fence (flag ON only). */
+  stampFence: boolean;
+};
+
+/**
+ * Decide the dispatch mode ONCE (#125/#127). Legacy when the flag is off or
+ * the run is not a PR review. Otherwise resolve the (org, repo) policy — an
+ * unknown stored value throws here, failing the dispatch loudly — and derive
+ * the variant, the input extension and the metadata from the SNAPSHOT.
+ */
+async function planSupersede({
+  enabled,
+  reviewContext,
+  thread,
+  threadId,
+  threadChatId,
+  orgId,
+  repoFullName,
+  deliveryId,
+}: {
+  enabled: boolean;
+  reviewContext: { organizationId: string; prNumber: number } | null;
+  thread: { sourceMetadata?: ThreadSourceMetadata | null } | null;
+  threadId: string;
+  threadChatId: string;
+  orgId: string;
+  repoFullName: string;
+  deliveryId: string | undefined;
+}): Promise<SupersedePlan> {
+  if (!enabled) {
+    return {
+      inputExtension: {},
+      triggerOpts: undefined,
+      appSideCancel: true,
+      stampFence: false,
+    };
+  }
+  if (!reviewContext) {
+    // Non-review dispatch under the flag: nothing to plan. No fence stamp —
+    // activeRunExternalId is a REVIEW-run generation marker; stamping a
+    // mention/personal thread would hand the C1 fence an out-of-scope value.
+    // appSideCancel is unobserved here (its consumer is gated on
+    // reviewContext) — false keeps the plan honest.
+    return {
+      inputExtension: {},
+      triggerOpts: undefined,
+      appSideCancel: false,
+      stampFence: false,
+    };
+  }
+  const snapshot = await resolveSupersedePolicy({
+    db,
+    organizationId: reviewContext.organizationId,
+    repoFullName,
+  });
+  const repo = normalizeRepo(repoFullName);
+  const sourceMetadata = thread?.sourceMetadata;
+  const skillVersion =
+    sourceMetadata?.type === "automation-skill"
+      ? (sourceMetadata.versionId ?? sourceMetadata.contentSha)
+      : undefined;
+  const triggerOpts: TriggerOpts = {
+    workflowName: workflowNameForPolicy(snapshot.policy),
+    additionalMetadata: buildReviewRunMetadata({
+      threadId,
+      threadChatId,
+      orgId,
+      repoFullName: repo,
+      prNumber: reviewContext.prNumber,
+      snapshot,
+      skillVersion,
+    }),
+  };
+  const plan: SupersedePlan = {
+    inputExtension: {
+      prKey: `${orgId}/${repo}/${reviewContext.prNumber}`,
+      // Always present, never empty: a webhook-descended dispatch carries the
+      // real X-GitHub-Delivery id; manual/scheduled paths mint a per-dispatch
+      // synthetic id so intentional re-dispatches are never deduped.
+      deliveryId: deliveryId || `manual:${threadId}:${randomHex(8)}`,
+      supersedePolicy: snapshot.policy,
+      recheckOnComplete: snapshot.recheckOnComplete,
+    },
+    triggerOpts,
+    appSideCancel: snapshot.policy === "app-side",
+    stampFence: true,
+  };
+  console.log("[hatchet] supersede policy resolved for dispatch", {
+    threadId,
+    ...snapshot,
+    workflowName: triggerOpts.workflowName,
+    deliveryId: plan.inputExtension.deliveryId,
+  });
+  return plan;
 }
 
 /**
@@ -239,12 +383,20 @@ export async function dispatchAgentRun({
   threadChatId,
   repoFullName,
   branch,
+  deliveryId,
 }: {
   userId: string;
   threadId: string;
   threadChatId: string;
   repoFullName: string;
   branch: string;
+  /**
+   * #127: the originating webhook's `X-GitHub-Delivery` id, when this dispatch
+   * descends from a GitHub webhook (plumbed webhook → automation → thread →
+   * here). Absent for manual/scheduled paths — a synthetic id is minted below.
+   * Only consumed when the supersedePolicy flag is ON.
+   */
+  deliveryId?: string;
 }): Promise<void> {
   const runKey = daemonRunKey({ threadId, threadChatId });
 
@@ -274,156 +426,207 @@ export async function dispatchAgentRun({
   }
 
   const [owner, repo] = parseRepoFullName(repoFullName);
-  const [installationToken, daemonToken, thread] = await Promise.all([
-    getInstallationToken(owner, repo),
-    mintDaemonToken({ userId, threadId, threadChatId, name: runKey }),
-    getThreadMinimal({ db, userId, threadId }),
-  ]);
 
-  // BUG-EXEC-02: the review agent needs the PR's BASE branch to compute the delta
-  // offline (`git diff origin/<base>...HEAD`). thread.repoBaseBranchName is NOT the
-  // base — for a thread working on an existing branch it holds the HEAD/working branch
-  // (cli-router.ts: headBranchName = createNewBranch ? null : repoBaseBranchName), so
-  // sourcing from it left baseBranch undefined and the worker never fetched origin/main.
-  // Resolve the REAL, per-PR base from the PR itself (App octokit). Undefined (non-PR
-  // thread, fetch fails, or base==head) → provision skips the base-fetch (head-only).
-  const resolveBaseBranch = async (): Promise<string | undefined> => {
-    if (!thread?.githubPRNumber) {
-      return undefined;
-    }
-    try {
-      const octokit = await getOctokitForApp({ owner, repo });
-      const { data: pr } = await octokit.rest.pulls.get({
-        owner,
-        repo,
-        pull_number: thread.githubPRNumber,
-      });
-      if (pr.base?.ref && pr.base.ref !== branch) {
-        return pr.base.ref;
-      }
-    } catch (err) {
-      console.warn(
-        "[hatchet] could not resolve PR base branch — baseBranch unset",
-        {
-          threadId,
-          prNumber: thread.githubPRNumber,
-          error: err instanceof Error ? err.message : String(err),
-        },
-      );
-    }
-    return undefined;
-  };
-
-  // #66 slice 1: resolve the per-repo egress SHAPE alongside the PR base-branch
-  // fetch (both depend only on the thread row already loaded — no reason to
-  // serialize a DB read behind a GitHub round-trip), LIVE from the settings row
-  // (a dashboard write applies on the next dispatch). null (no org / no row /
-  // policy unset) → field omitted = no enforcement, today's behavior. An INVALID
-  // stored policy throws here, failing the dispatch loudly rather than launching
-  // with a silently-wrong policy.
-  const [baseBranch, egressPolicy] = await Promise.all([
-    resolveBaseBranch(),
-    resolveEgressPolicy({
-      db,
-      organizationId: thread?.organizationId,
-      repoFullName,
-      plane: "worker",
-    }).then((shape) => shape ?? undefined),
-  ]);
-
-  // #3/#7 wire contract: orgId is NEVER null (a personal/no-org thread falls back
-  // to a per-user key) so the Phase-2 per-org concurrency CEL never dereferences
-  // null. prNumber comes from the same thread row already loaded for baseBranch.
-  const orgId = thread?.organizationId ?? `u:${userId}`;
-  const prNumber = thread?.githubPRNumber ?? undefined;
-
-  // #7 trace join: mint a W3C traceparent at the dispatch boundary so the worker's
-  // run span and the daemon-event → GitHub-post can be stitched into one trace by a
-  // collector later. Never carries the tokens/prompt — it is opaque random ids.
-  const traceparent = generateTraceparent();
-
-  const input: AgentRunInput = {
-    threadId,
-    threadChatId,
-    repoFullName,
-    branch,
-    baseBranch,
-    daemonCallbackUrl: nonLocalhostPublicAppUrl(),
-    installationToken,
-    daemonToken,
-    orgId,
-    prNumber,
-    traceparent,
-    egressPolicy,
-  };
-  console.log("[hatchet] dispatching agent-run", {
-    threadId,
-    threadChatId,
-    repoFullName,
-    branch,
-    orgId,
-    prNumber,
-    traceparent,
-  });
-
-  // #8 supersede eligibility: ONLY a PR-REVIEW run (a `pull_request`-triggered
-  // automation) in a REAL org supersedes a prior review. Mentions (`github_mention`)
-  // and personal/no-org threads never do — and the hatchet_run FK needs a real org id,
-  // not the `u:${userId}` concurrency fallback. Determined from the already-loaded
-  // thread (its automationId), so no extra fetch. The narrowed object is null unless
-  // all conditions hold (so `organizationId`/`prNumber` are non-null downstream).
-  const reviewContext =
-    thread?.organizationId != null &&
-    prNumber !== undefined &&
-    (await isReviewThread({
-      db,
-      userId,
-      automationId: thread.automationId ?? null,
-      organizationId: thread.organizationId,
-    }))
-      ? { organizationId: thread.organizationId, prNumber }
-      : null;
-
-  // Cancel + terminally-transition any prior in-flight review run for this PR BEFORE
-  // triggering the new one (best-effort; never blocks the dispatch).
-  if (reviewContext) {
-    await supersedePriorReviewRuns({
-      organizationId: reviewContext.organizationId,
-      repoFullName,
-      prNumber: reviewContext.prNumber,
-      currentThreadId: threadId,
-    });
-  }
-
+  // The token is minted INSIDE the guarded region: Promise.all rejects on the
+  // first sibling failure without waiting for the mint, so a sibling that
+  // rejects after the mint's row landed would otherwise leak the token. From
+  // the mint on, EVERY failure before the trigger (sibling reads, base-branch
+  // resolve, egress resolve, planSupersede — which throws on a corrupt stored
+  // policy — the app-side cancel pass) revokes it in the catch below, or
+  // hasActiveDaemonToken() would report a phantom run for this runKey and
+  // silently no-op every retry for the token's TTL (reviews on #135). The
+  // revoke is keyed by runKey, so it is a harmless no-op when the mint itself
+  // was the failure.
   try {
+    const [installationToken, daemonToken, thread] = await Promise.all([
+      getInstallationToken(owner, repo),
+      mintDaemonToken({ userId, threadId, threadChatId, name: runKey }),
+      getThreadMinimal({ db, userId, threadId }),
+    ]);
+    // BUG-EXEC-02: the review agent needs the PR's BASE branch to compute the delta
+    // offline (`git diff origin/<base>...HEAD`). thread.repoBaseBranchName is NOT the
+    // base — for a thread working on an existing branch it holds the HEAD/working branch
+    // (cli-router.ts: headBranchName = createNewBranch ? null : repoBaseBranchName), so
+    // sourcing from it left baseBranch undefined and the worker never fetched origin/main.
+    // Resolve the REAL, per-PR base from the PR itself (App octokit). Undefined (non-PR
+    // thread, fetch fails, or base==head) → provision skips the base-fetch (head-only).
+    const resolveBaseBranch = async (): Promise<string | undefined> => {
+      if (!thread?.githubPRNumber) {
+        return undefined;
+      }
+      try {
+        const octokit = await getOctokitForApp({ owner, repo });
+        const { data: pr } = await octokit.rest.pulls.get({
+          owner,
+          repo,
+          pull_number: thread.githubPRNumber,
+        });
+        if (pr.base?.ref && pr.base.ref !== branch) {
+          return pr.base.ref;
+        }
+      } catch (err) {
+        console.warn(
+          "[hatchet] could not resolve PR base branch — baseBranch unset",
+          {
+            threadId,
+            prNumber: thread.githubPRNumber,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+      }
+      return undefined;
+    };
+
+    // #66 slice 1: resolve the per-repo egress SHAPE alongside the PR base-branch
+    // fetch (both depend only on the thread row already loaded — no reason to
+    // serialize a DB read behind a GitHub round-trip), LIVE from the settings row
+    // (a dashboard write applies on the next dispatch). null (no org / no row /
+    // policy unset) → field omitted = no enforcement, today's behavior. An INVALID
+    // stored policy throws here, failing the dispatch loudly rather than launching
+    // with a silently-wrong policy.
+    const [baseBranch, egressPolicy] = await Promise.all([
+      resolveBaseBranch(),
+      resolveEgressPolicy({
+        db,
+        organizationId: thread?.organizationId,
+        repoFullName,
+        plane: "worker",
+      }).then((shape) => shape ?? undefined),
+    ]);
+
+    // #3/#7 wire contract: orgId is NEVER null (a personal/no-org thread falls back
+    // to a per-user key) so the Phase-2 per-org concurrency CEL never dereferences
+    // null. prNumber comes from the same thread row already loaded for baseBranch.
+    const orgId = thread?.organizationId ?? `u:${userId}`;
+    const prNumber = thread?.githubPRNumber ?? undefined;
+
+    // #7 trace join: mint a W3C traceparent at the dispatch boundary so the worker's
+    // run span and the daemon-event → GitHub-post can be stitched into one trace by a
+    // collector later. Never carries the tokens/prompt — it is opaque random ids.
+    const traceparent = generateTraceparent();
+
+    const baseInput: AgentRunInput = {
+      threadId,
+      threadChatId,
+      repoFullName,
+      branch,
+      baseBranch,
+      daemonCallbackUrl: nonLocalhostPublicAppUrl(),
+      installationToken,
+      daemonToken,
+      orgId,
+      prNumber,
+      traceparent,
+      egressPolicy,
+    };
+    console.log("[hatchet] dispatching agent-run", {
+      threadId,
+      threadChatId,
+      repoFullName,
+      branch,
+      orgId,
+      prNumber,
+      traceparent,
+    });
+
+    // #8 supersede eligibility: ONLY a PR-REVIEW run (a `pull_request`-triggered
+    // automation) in a REAL org supersedes a prior review. Mentions (`github_mention`)
+    // and personal/no-org threads never do — and the hatchet_run FK needs a real org id,
+    // not the `u:${userId}` concurrency fallback. Determined from the already-loaded
+    // thread (its automationId), so no extra fetch. The narrowed object is null unless
+    // all conditions hold (so `organizationId`/`prNumber` are non-null downstream).
+    const reviewContext =
+      thread?.organizationId != null &&
+      prNumber !== undefined &&
+      (await isReviewThread({
+        db,
+        userId,
+        automationId: thread.automationId ?? null,
+        organizationId: thread.organizationId,
+      }))
+        ? { organizationId: thread.organizationId, prNumber }
+        : null;
+
+    // #125/#127: ONE plan for the dispatch mode. Flag OFF (or a non-review run)
+    // → legacy: no extension, no opts, byte-identical payload (IRON golden).
+    // Flag ON on a review run → the resolved policy picks the workflow variant,
+    // the input gains prKey/deliveryId + the policy SNAPSHOT, and the metadata
+    // is enriched. The three native policies leave supersession to the engine's
+    // per-PR strategy; only 'app-side' (and the legacy path) keeps the #8
+    // control-plane cancel pass.
+    // #125/#127 rollout gate, resolved server-side for the dispatching user
+    // (per-org rollout approximated at user scope, like sandboxCredentialBroker).
+    // Read ONLY for review runs: the flag governs nothing else, and a mention /
+    // personal dispatch must not pay a DB read for it.
+    const supersedeFlagOn = reviewContext
+      ? await getFeatureFlagForUser({ db, userId, flagName: "supersedePolicy" })
+      : false;
+    const plan = await planSupersede({
+      enabled: supersedeFlagOn,
+      reviewContext,
+      thread,
+      threadId,
+      threadChatId,
+      orgId,
+      repoFullName,
+      deliveryId,
+    });
+    const input: AgentRunInput = { ...baseInput, ...plan.inputExtension };
+
+    if (reviewContext && plan.appSideCancel) {
+      await supersedePriorReviewRuns({
+        organizationId: reviewContext.organizationId,
+        repoFullName,
+        prNumber: reviewContext.prNumber,
+        currentThreadId: threadId,
+      });
+    }
+
     // The token is minted BEFORE the trigger (the input carries its value). Retry
-    // absorbs transients; only a FINAL failure lands here.
+    // absorbs transients; only a FINAL failure lands in the catch below.
     const { externalId } = await triggerWithRetry(
       input,
       threadId,
       threadChatId,
+      plan.triggerOpts,
     );
 
-    // Record this review run so a LATER push can supersede it. Only reviews are
-    // tracked; a missing externalId (unexpected trigger-response shape) just skips
-    // tracking — the run still executes, it simply can't be superseded (watchdog
-    // remains the backstop). Best-effort: a bookkeeping failure must not fail dispatch.
-    if (reviewContext && externalId) {
-      await recordHatchetRun({
-        db,
-        threadId,
-        organizationId: reviewContext.organizationId,
-        repoFullName,
-        prNumber: reviewContext.prNumber,
-        externalId,
-      }).catch((error) => {
-        console.error("[hatchet] recordHatchetRun failed (non-fatal)", {
-          threadId,
-          prNumber,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }
+    // Best-effort bookkeeping after a successful trigger, run concurrently —
+    // neither may fail the dispatch (the run is already executing).
+    await Promise.all([
+      // #127: stamp the thread's ACTIVE run for the C1 generation fence.
+      // Flag-ON only (legacy leaves the column NULL → fence fails open).
+      plan.stampFence && externalId
+        ? setThreadActiveRun({ db, threadId, externalId }).catch(
+            (error: unknown) => {
+              console.error("[hatchet] activeRunExternalId stamp failed", {
+                threadId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            },
+          )
+        : undefined,
+      // Record this review run so a LATER push can supersede it. Only reviews are
+      // tracked; a missing externalId (unexpected trigger-response shape) just skips
+      // tracking — the run still executes, it simply can't be superseded (watchdog
+      // remains the backstop).
+      reviewContext && externalId
+        ? recordHatchetRun({
+            db,
+            threadId,
+            organizationId: reviewContext.organizationId,
+            repoFullName,
+            prNumber: reviewContext.prNumber,
+            externalId,
+          }).catch((error) => {
+            console.error("[hatchet] recordHatchetRun failed (non-fatal)", {
+              threadId,
+              prNumber,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          })
+        : undefined,
+    ]);
   } catch (error) {
     // Dispatch failed for good. Revoke the just-minted token so it can't block the
     // dedup guard (a retry re-dispatches cleanly), then throw so withThreadChat

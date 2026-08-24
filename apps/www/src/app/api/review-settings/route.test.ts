@@ -52,6 +52,8 @@ describe("GET /api/review-settings", () => {
         trustedAuthorThreshold: null,
         egressPolicy: null,
         egressAllowlist: null,
+        supersedePolicy: null,
+        recheckOnComplete: false,
         updatedByUserId: USER,
         createdAt: new Date(),
         updatedAt: new Date("2026-07-20T00:00:00Z"),
