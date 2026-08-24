@@ -7,6 +7,7 @@ import {
 } from "@terragon/shared/model/supersede-recheck";
 import { thread as threadTable } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
+import { hatchetDispatchEnabled } from "@/agent/hatchet/dispatch";
 
 /**
  * #125 C5 recheck reconciliation for `complete-run-discard` + `recheckOnComplete`.
@@ -86,7 +87,11 @@ async function recheckOnComplete({
   // Zero-read bail when the caller already holds the columns: the finish
   // hook fires for EVERY thread terminal in the system, so the common
   // (non-review, non-remote) path must not cost a query.
-  if (pre && (pre.sandboxProvider !== "hatchet-remote" || !pre.reviewedSha)) {
+  // "Remote" is decided by the SAME gate as dispatch (hatchetDispatchEnabled):
+  // under HATCHET_ENABLED every thread runs remotely and the provider column
+  // keeps its local default ("docker" in production) — a bare provider check
+  // here would make the recheck never fire in prod.
+  if (pre && (!hatchetDispatchEnabled(pre) || !pre.reviewedSha)) {
     return { rechecked: false, reason: "not-a-review-run" };
   }
   const row =

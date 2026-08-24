@@ -1,5 +1,8 @@
-import { describe, it, beforeEach, expect } from "vitest";
+import { describe, it, beforeEach, expect, vi } from "vitest";
 import { db } from "@/lib/db";
+import { thread as threadTable } from "@terragon/shared/db/schema";
+import { eq } from "drizzle-orm";
+import { hatchetDispatchEnabled } from "@/agent/hatchet/dispatch";
 import {
   createTestUser,
   createTestThread,
@@ -18,6 +21,16 @@ import { maybeRecheckOnComplete } from "./supersede-recheck";
  * #125 C5 recheck reconciliation: exactly one re-dispatch per
  * (prKey, desiredHeadSha), no loops, OFF by default.
  */
+vi.mock("@/agent/hatchet/dispatch", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    hatchetDispatchEnabled: vi.fn(
+      actual.hatchetDispatchEnabled as (t: unknown) => boolean,
+    ),
+  };
+});
+
 describe("maybeRecheckOnComplete (#125 C5)", () => {
   let user: User;
   let orgId: string;
@@ -145,6 +158,43 @@ describe("maybeRecheckOnComplete (#125 C5)", () => {
       (await maybeRecheckOnComplete({ threadId: nw, dispatch })).rechecked,
     ).toBe(false);
     expect(calls).toHaveLength(0);
+  });
+
+  it("zero-read bail decides 'remote' with dispatch's gate: a docker-provider thread is a remote review run under HATCHET_ENABLED and not otherwise", async () => {
+    // Production stamps the local-default provider ("docker") on every thread
+    // and dispatches remotely via HATCHET_ENABLED; a bare provider check would
+    // bail here forever and the recheck would never fire in prod.
+    const threadId = await finishedRun({
+      reviewedSha: "aaa",
+      policy: "complete-run-discard",
+      recheckOnComplete: true,
+      externalId: "ext-gate",
+    });
+    await db
+      .update(threadTable)
+      .set({ sandboxProvider: "docker" })
+      .where(eq(threadTable.id, threadId));
+    const pre = {
+      userId: user.id,
+      organizationId: orgId,
+      githubRepoFullName: REPO,
+      githubPRNumber: PR,
+      automationId,
+      sandboxProvider: "docker",
+      reviewedSha: "aaa",
+    };
+    const { calls, dispatch } = recorder();
+    vi.mocked(hatchetDispatchEnabled).mockReturnValueOnce(false);
+    expect(
+      (await maybeRecheckOnComplete({ threadId, thread: pre, dispatch }))
+        .reason,
+    ).toBe("not-a-review-run");
+    vi.mocked(hatchetDispatchEnabled).mockReturnValueOnce(true);
+    expect(
+      (await maybeRecheckOnComplete({ threadId, thread: pre, dispatch }))
+        .reason,
+    ).not.toBe("not-a-review-run");
+    expect(calls).toHaveLength(0); // no newer head recorded → nothing to recheck
   });
 
   it("a legacy (no snapshot) or non-review thread never rechecks", async () => {
