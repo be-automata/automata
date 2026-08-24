@@ -1,4 +1,5 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 /**
@@ -11,19 +12,29 @@ import path from "node:path";
  * four variants registered, the engine alone would let up to four agent-runs
  * execute at once on a box budgeted for one (the ENOMEM wall the cap exists
  * for). This lock is the box-level belt to the engine's per-workflow
- * suspenders: every run acquires it before provisioning and releases it in
- * its finally, across BOTH worker processes on the box (shared directory).
+ * suspenders: every run acquires it before its credentials touch disk and
+ * releases it in its finally, across BOTH worker processes on the box (shared
+ * directory). Worker `slots: 1` bounds how many runs can wait here.
  *
- * Mechanism: an atomic `mkdir` of `<dir>/slot` is the lock; `owner.json`
- * inside carries the holder's pid + a heartbeat. A waiter reclaims a slot
- * whose owner pid is dead or whose heartbeat is older than `staleMs` (a
- * SIGKILLed worker never releases). Waiting honours the run's AbortSignal so
- * an engine cancel while queued here still tears down promptly.
+ * Mechanism: the holder writes `owner.json` {pid, holder, heartbeatAt} into a
+ * private temp dir and atomically RENAMES it to `<dir>/slot` — the slot never
+ * exists without its owner file, so a waiter can never mistake a fresh holder
+ * for a stale one. A waiter reclaims a slot whose owner pid is dead or whose
+ * heartbeat is older than `staleMs` (a SIGKILLed worker never releases).
+ * `release()` removes the slot ONLY if the owner file is still ours, so a
+ * holder that was reclaimed (heartbeat stalled) can never free someone else's
+ * lock. Waiting honours the run's AbortSignal, including in the instant after
+ * a successful claim, so an engine cancel while queued here never runs a body.
  */
 
 export type BoxSlot = { release: () => Promise<void> };
 
-type Owner = { pid: number; holder: string; heartbeatAt: number };
+type Owner = {
+  pid: number;
+  holder: string;
+  nonce: string;
+  heartbeatAt: number;
+};
 
 const HEARTBEAT_MS = 10_000;
 
@@ -46,6 +57,12 @@ async function readOwner(slotDir: string): Promise<Owner | null> {
   }
 }
 
+function abortError(): Error {
+  const err = new Error("box slot wait aborted");
+  err.name = "AbortError";
+  return err;
+}
+
 export async function acquireBoxSlot({
   dir,
   holder,
@@ -63,32 +80,44 @@ export async function acquireBoxSlot({
 }): Promise<BoxSlot> {
   await mkdir(dir, { recursive: true });
   const slotDir = path.join(dir, "slot");
+  const nonce = randomBytes(8).toString("hex");
+  const owner = (): Owner => ({
+    pid: process.pid,
+    holder,
+    nonce,
+    heartbeatAt: now(),
+  });
   for (;;) {
-    if (signal?.aborted) {
-      const err = new Error("box slot wait aborted");
-      err.name = "AbortError";
-      throw err;
-    }
+    if (signal?.aborted) throw abortError();
+    // Build the claim privately, then publish it atomically.
+    const claim = path.join(dir, `.claim-${process.pid}-${nonce}`);
+    await mkdir(claim, { recursive: true });
+    await writeFile(path.join(claim, "owner.json"), JSON.stringify(owner()));
     try {
-      await mkdir(slotDir);
-      // Acquired — but a cancel can land in the same instant the previous
-      // holder released. Never run a cancelled run's body: give it back.
+      await rename(claim, slotDir);
       if (signal?.aborted) {
+        // A cancel can land in the instant the previous holder released:
+        // never run a cancelled run's body — give the slot straight back.
         await rm(slotDir, { recursive: true, force: true });
-        const err = new Error("box slot wait aborted");
-        err.name = "AbortError";
-        throw err;
+        throw abortError();
       }
       break;
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST" && code !== "ENOTEMPTY" && code !== "EISDIR") {
+        await rm(claim, { recursive: true, force: true });
+        throw e;
+      }
+      await rm(claim, { recursive: true, force: true });
     }
-    // Held by someone: reclaim only a dead or silent owner.
-    const owner = await readOwner(slotDir);
+    // Held by someone: reclaim only a dead or silent owner. A slot without
+    // an owner file cannot be a fresh holder (claims are published whole),
+    // so it is debris from a crash mid-release — reclaim it too.
+    const current = await readOwner(slotDir);
     const stale =
-      owner === null ||
-      !pidAlive(owner.pid) ||
-      now() - owner.heartbeatAt > staleMs;
+      current === null ||
+      !pidAlive(current.pid) ||
+      now() - current.heartbeatAt > staleMs;
     if (stale) {
       await rm(slotDir, { recursive: true, force: true });
       continue;
@@ -96,22 +125,16 @@ export async function acquireBoxSlot({
     await new Promise((r) => setTimeout(r, pollMs));
   }
   const ownerFile = path.join(slotDir, "owner.json");
-  const beat = () =>
-    writeFile(
-      ownerFile,
-      JSON.stringify({
-        pid: process.pid,
-        holder,
-        heartbeatAt: now(),
-      } satisfies Owner),
-      "utf8",
-    );
-  await beat();
+  const beat = () => writeFile(ownerFile, JSON.stringify(owner()), "utf8");
   const timer = setInterval(() => void beat().catch(() => {}), HEARTBEAT_MS);
   timer.unref?.();
   return {
     async release() {
       clearInterval(timer);
+      // Only free a slot that is still OURS: a holder reclaimed after a
+      // heartbeat stall must not remove the new holder's lock.
+      const current = await readOwner(slotDir);
+      if (current && current.nonce !== nonce) return;
       await rm(slotDir, { recursive: true, force: true });
     },
   };

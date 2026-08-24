@@ -5,6 +5,7 @@ import {
   createTestThread,
   createTestOrg,
   createTestRemoteRun,
+  createTestAutomation,
 } from "@terragon/shared/model/test-helpers";
 import {
   thread as threadTable,
@@ -169,11 +170,27 @@ describe("runSupersedeSweep (#125 C4)", () => {
     expect(again.terminals).toEqual([{ threadId, cause: "user-cancelled" }]);
   });
 
-  it("rule (ii): a dispatched remote thread with no recorded run ⇒ plane-offline after N, not before", async () => {
+  it("rule (ii): a dispatched REVIEW thread stuck in booting with no recorded run ⇒ plane-offline after N, not before", async () => {
+    const automation = await createTestAutomation({
+      db,
+      userId: user.id,
+      values: {
+        organizationId: orgId,
+        triggerType: "pull_request",
+        repoFullName: "be-automata/automata",
+        triggerConfig: { on: { open: true, update: true }, filter: {} },
+      },
+    });
     const orphan = await createTestThread({
       db,
       userId: user.id,
-      overrides: { organizationId: orgId, sandboxProvider: "hatchet-remote" },
+      overrides: {
+        organizationId: orgId,
+        sandboxProvider: "hatchet-remote",
+        githubRepoFullName: "be-automata/automata",
+        githubPRNumber: 5,
+        automationId: automation.id,
+      },
     });
     await db
       .update(threadTable)

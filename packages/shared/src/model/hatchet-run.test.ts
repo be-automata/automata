@@ -10,6 +10,7 @@ import {
   createTestUser,
   createTestThread,
   createTestRemoteRun,
+  createTestAutomation,
 } from "./test-helpers";
 import {
   markThreadsSuperseded,
@@ -529,34 +530,64 @@ describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () 
     expect(row!.errorMessage).toBeNull();
   });
 
-  it("findOrphanRemoteThreads: remote, reapable, run-less, older than N", async () => {
-    const orphan = await createTestThread({
+  it("findOrphanRemoteThreads: ONLY a review thread (org + PR + pull_request automation) still in `booting`, run-less, older than N", async () => {
+    const reviewAutomation = await createTestAutomation({
       db,
       userId,
-      overrides: { organizationId: orgA, sandboxProvider: "hatchet-remote" },
+      values: {
+        organizationId: orgA,
+        triggerType: "pull_request",
+        repoFullName: "acme/widgets",
+        triggerConfig: { on: { open: true, update: true }, filter: {} },
+      },
     });
-    await setThreadStatus(orphan.threadId, "booting");
-    await db
-      .update(threadTable)
-      .set({ createdAt: new Date(Date.now() - 20 * 60 * 1000) })
-      .where(eq(threadTable.id, orphan.threadId));
+    const mentionAutomation = await createTestAutomation({
+      db,
+      userId,
+      values: {
+        organizationId: orgA,
+        triggerType: "github_mention",
+        repoFullName: "acme/widgets",
+        triggerConfig: {},
+      },
+    });
+    const old = new Date(Date.now() - 20 * 60 * 1000);
+    const mk = async (over: Record<string, unknown>, status: ThreadStatus) => {
+      const t = await createTestThread({
+        db,
+        userId,
+        overrides: {
+          organizationId: orgA,
+          sandboxProvider: "hatchet-remote",
+          githubRepoFullName: "acme/widgets",
+          ...over,
+        },
+      });
+      await db
+        .update(threadTable)
+        .set({ status, createdAt: old })
+        .where(eq(threadTable.id, t.threadId));
+      return t.threadId;
+    };
+    const orphan = await mk(
+      { githubPRNumber: 9, automationId: reviewAutomation.id },
+      "booting",
+    );
+    const mention = await mk({ automationId: mentionAutomation.id }, "booting");
+    const progressed = await mk(
+      { githubPRNumber: 10, automationId: reviewAutomation.id },
+      "working",
+    );
     const tracked = await remoteRun(8, 20 * 60 * 1000, "ext-tracked");
-    const local = await createTestThread({
-      db,
-      userId,
-      overrides: { organizationId: orgA },
-    });
-    await setThreadStatus(local.threadId, "booting");
-    await db
-      .update(threadTable)
-      .set({ createdAt: new Date(Date.now() - 20 * 60 * 1000) })
-      .where(eq(threadTable.id, local.threadId));
+    const noAutomation = await mk({ githubPRNumber: 11 }, "booting");
 
     const ids = (
       await findOrphanRemoteThreads({ db, olderThanMs: 15 * 60 * 1000 })
     ).map((t) => t.id);
-    expect(ids).toContain(orphan.threadId);
+    expect(ids).toContain(orphan);
+    expect(ids).not.toContain(mention);
+    expect(ids).not.toContain(progressed);
     expect(ids).not.toContain(tracked.threadId);
-    expect(ids).not.toContain(local.threadId);
+    expect(ids).not.toContain(noAutomation);
   });
 });

@@ -126,6 +126,8 @@ export const env = envsafe({
   // #125 C4 supersede sweep timing (ms). Unset = the sweep's own defaults
   // (10 min before consulting the engine about an in_flight run; 15 min
   // before a run-less remote thread is `plane-offline`).
+  // The sweep's kill switch (the runbook's "disable by env").
+  SUPERSEDE_SWEEP_ENABLED: bool({ default: true }),
   SUPERSEDE_SWEEP_CANCELLED_AFTER_MS: str({ default: "", allowEmpty: true }),
   SUPERSEDE_SWEEP_ORPHAN_AFTER_MS: str({ default: "", allowEmpty: true }),
 

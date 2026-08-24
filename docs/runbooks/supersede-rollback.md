@@ -51,8 +51,9 @@ the sweep (step 3) within ~10 minutes as `user-cancelled`.
 
 `runSupersedeSweep` (every minute, scheduled-tasks cron) is additive and safe
 under flag OFF: it only ever writes a terminal to a thread that has none. Leave
-it on; disable by env (`SUPERSEDE_SWEEP_CANCELLED_AFTER_MS` /
-`SUPERSEDE_SWEEP_ORPHAN_AFTER_MS` are the only knobs) only if it misbehaves.
+it on. Kill switch: `SUPERSEDE_SWEEP_ENABLED=false` on the www worker (the
+timing knobs `SUPERSEDE_SWEEP_CANCELLED_AFTER_MS` /
+`SUPERSEDE_SWEEP_ORPHAN_AFTER_MS` accept positive integers only).
 
 ## Success criteria for retiring `hatchet_run` (app-side supersede)
 

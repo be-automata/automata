@@ -1526,10 +1526,14 @@ export async function markThreadTerminal({
 }
 
 /**
- * Remote threads that were dispatched but never got a Hatchet run recorded
- * (#125 C4 rule ii — the non-transactional enqueue gap): still reapable,
- * created more than `olderThanMs` ago, on the remote plane, with no
- * hatchet_run row. Candidates for the `plane-offline` terminal.
+ * Review threads that were dispatched to the remote plane but never got a
+ * Hatchet run recorded (#125 C4 rule ii — the non-transactional-enqueue gap).
+ * Deliberately NARROW, because dispatch records a `hatchet_run` row ONLY for
+ * review runs (org + PR + a `pull_request` automation): a mention or a
+ * deep-research run on the remote plane never has a row and must never be
+ * swept. And only threads still in `booting` — a thread that ever reached
+ * `working` had a daemon, so the run was visible; its age is measured from
+ * creation because a review thread is created and dispatched in one step.
  */
 export async function findOrphanRemoteThreads({
   db,
@@ -1543,6 +1547,10 @@ export async function findOrphanRemoteThreads({
   return db
     .select({ id: schema.thread.id, createdAt: schema.thread.createdAt })
     .from(schema.thread)
+    .innerJoin(
+      schema.automations,
+      eq(schema.automations.id, schema.thread.automationId),
+    )
     .leftJoin(
       schema.hatchetRun,
       eq(schema.hatchetRun.threadId, schema.thread.id),
@@ -1550,7 +1558,10 @@ export async function findOrphanRemoteThreads({
     .where(
       and(
         eq(schema.thread.sandboxProvider, "hatchet-remote"),
-        inArray(schema.thread.status, reapableThreadStatuses),
+        eq(schema.thread.status, "booting"),
+        isNotNull(schema.thread.organizationId),
+        isNotNull(schema.thread.githubPRNumber),
+        eq(schema.automations.triggerType, "pull_request"),
         isNull(schema.hatchetRun.id),
         lt(schema.thread.createdAt, new Date(now.getTime() - olderThanMs)),
       ),

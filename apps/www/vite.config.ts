@@ -56,6 +56,7 @@ export default defineConfig({
       HATCHET_API_URL: "https://hatchet-test.example.com",
       HATCHET_TENANT_ID: "TENANT_TEST",
       HATCHET_API_TOKEN: "HATCHET_API_TOKEN_TEST",
+      SUPERSEDE_SWEEP_ENABLED: "true",
       SUPERSEDE_SWEEP_CANCELLED_AFTER_MS: "",
       SUPERSEDE_SWEEP_ORPHAN_AFTER_MS: "",
 

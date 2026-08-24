@@ -35,6 +35,7 @@ describe("box slot (#125 C4 — the worker-side one-agent budget)", () => {
       JSON.stringify({
         pid: 2 ** 22 - 1,
         holder: "ghost",
+        nonce: "x",
         heartbeatAt: Date.now(),
       }),
     );
@@ -49,6 +50,7 @@ describe("box slot (#125 C4 — the worker-side one-agent budget)", () => {
       JSON.stringify({
         pid: process.pid,
         holder: "silent",
+        nonce: "y",
         heartbeatAt: Date.now() - 60_000,
       }),
     );
@@ -83,6 +85,39 @@ describe("box slot (#125 C4 — the worker-side one-agent budget)", () => {
     ).rejects.toThrow(/aborted/);
     const slot = await acquireBoxSlot({ dir, holder: "next", pollMs: 20 });
     await slot.release();
+  });
+
+  it("a holder that was reclaimed after a heartbeat stall never frees the NEW holder's slot", async () => {
+    let clock = Date.now();
+    const stalled = await acquireBoxSlot({
+      dir,
+      holder: "stalled",
+      pollMs: 20,
+      now: () => clock,
+    });
+    // Its heartbeat goes silent for a minute; a waiter reclaims the slot.
+    clock += 60_000;
+    const fresh = await acquireBoxSlot({
+      dir,
+      holder: "fresh",
+      pollMs: 20,
+      staleMs: 45_000,
+      now: () => clock,
+    });
+    // The stalled holder finally releases — it must NOT remove "fresh"'s lock.
+    await stalled.release();
+    const probe = new AbortController();
+    setTimeout(() => probe.abort(), 120);
+    await expect(
+      acquireBoxSlot({
+        dir,
+        holder: "probe",
+        pollMs: 20,
+        signal: probe.signal,
+        now: () => clock,
+      }),
+    ).rejects.toThrow(/aborted/);
+    await fresh.release();
   });
 
   it("releases on throw (withBoxSlot)", async () => {

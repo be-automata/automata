@@ -144,6 +144,13 @@ async function mapLimit<T>(
 export async function runSupersedeSweep(
   deps: SweepDeps = {},
 ): Promise<SweepReport> {
+  const report: SweepReport = {
+    examined: 0,
+    claimed: 0,
+    terminals: [],
+    orphans: [],
+  };
+  if (!env.SUPERSEDE_SWEEP_ENABLED) return report;
   const now = new Date();
   const cancelledAfterMs =
     deps.cancelledAfterMs ??
@@ -161,13 +168,6 @@ export async function runSupersedeSweep(
         tenantId: env.HATCHET_TENANT_ID,
         apiToken: env.HATCHET_API_TOKEN,
       }));
-
-  const report: SweepReport = {
-    examined: 0,
-    claimed: 0,
-    terminals: [],
-    orphans: [],
-  };
 
   // Rule (i): claim the batch in ONE compare-and-set, then read the engine
   // with bounded concurrency; every terminal pair is idempotent.
