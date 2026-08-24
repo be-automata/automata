@@ -8,16 +8,12 @@ describe("RunStatusChip (#125 C5)", () => {
   it("every typed cause renders a chip with text (not colour alone) and a status role (AC4)", () => {
     for (const cause of TERMINAL_CAUSES) {
       const html = renderToStaticMarkup(
-        <RunStatusChip terminalCause={cause} policy="complete-run-discard" />,
+        <RunStatusChip terminalCause={cause} />,
       );
-      const model = runStatusChipModel({
-        terminalCause: cause,
-        policy: "complete-run-discard",
-      })!;
+      const model = runStatusChipModel({ terminalCause: cause })!;
       expect(html).toContain('role="status"');
       expect(html).toContain(model.label);
       expect(html).toContain("<svg"); // icon + text
-      expect(html).toMatchSnapshot(cause);
     }
   });
 

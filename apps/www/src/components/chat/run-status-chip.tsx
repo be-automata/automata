@@ -15,6 +15,11 @@ import {
   isTerminalCause,
   type TerminalCause,
 } from "@terragon/shared/model/terminal-cause";
+import {
+  SUPERSEDE_POLICY_LABELS,
+  type SupersedePolicy,
+} from "@terragon/shared/model/repo-review-settings";
+import { assertNever } from "@terragon/shared/utils";
 import { cn } from "@/lib/utils";
 
 /**
@@ -29,6 +34,7 @@ export type RunStatusChipModel = {
   label: string;
   detail: string;
   tone: "neutral" | "warning" | "danger" | "info";
+  cause: TerminalCause;
   href?: string;
 };
 
@@ -40,50 +46,37 @@ export function runStatusChipModel({
 }: {
   terminalCause: string | null | undefined;
   supersededByThreadId?: string | null;
-  policy?: string | null;
+  policy?: SupersedePolicy | null;
 }): RunStatusChipModel | null {
   if (!terminalCause || !isTerminalCause(terminalCause)) return null;
   const { label, detail } = describeTerminalCause(terminalCause);
-  const policyNote = policy ? ` · ${policyLabel(policy)}` : "";
-  switch (terminalCause) {
+  const policyNote = policy
+    ? ` · org policy: ${SUPERSEDE_POLICY_LABELS[policy]}`
+    : "";
+  const cause = terminalCause;
+  switch (cause) {
     case "superseded":
       return {
         label,
         detail: detail + policyNote,
         tone: "info",
+        cause,
         ...(supersededByThreadId
           ? { href: `/task/${supersededByThreadId}` }
           : {}),
       };
     case "discarded":
     case "stale-skipped":
-      return { label, detail: detail + policyNote, tone: "warning" };
+      return { label, detail: detail + policyNote, tone: "warning", cause };
     case "user-cancelled":
-      return { label, detail, tone: "neutral" };
+      return { label, detail, tone: "neutral", cause };
     case "timeout":
     case "daemon-failed":
     case "publish-failed":
     case "plane-offline":
-      return { label, detail, tone: "danger" };
-    default: {
-      const exhaustive: never = terminalCause;
-      throw new Error(`unmapped terminal cause ${String(exhaustive)}`);
-    }
-  }
-}
-
-function policyLabel(policy: string): string {
-  switch (policy) {
-    case "newest-wins":
-      return "org policy: newest commit wins";
-    case "complete-run-queue":
-      return "org policy: finish the running review, then queue";
-    case "complete-run-discard":
-      return "org policy: finish the running review, drop newer";
-    case "app-side":
-      return "org policy: control plane decides";
+      return { label, detail, tone: "danger", cause };
     default:
-      return `org policy: ${policy}`;
+      return assertNever(cause);
   }
 }
 
@@ -114,7 +107,7 @@ export function RunStatusChip({
 }: {
   terminalCause: string | null | undefined;
   supersededByThreadId?: string | null;
-  policy?: string | null;
+  policy?: SupersedePolicy | null;
   className?: string;
 }) {
   const model = runStatusChipModel({
@@ -123,7 +116,7 @@ export function RunStatusChip({
     policy,
   });
   if (!model) return null;
-  const Icon = ICONS[terminalCause as TerminalCause];
+  const Icon = ICONS[model.cause];
   const body = (
     <>
       <Icon className="size-3" strokeWidth={2.5} aria-hidden="true" />

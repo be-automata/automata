@@ -4,15 +4,13 @@ import {
   createTestUser,
   createTestThread,
   createTestOrg,
+  createTestRemoteRun,
 } from "@terragon/shared/model/test-helpers";
-import { createAutomation } from "@terragon/shared/model/automations";
-import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
+import { createReviewAutomation } from "@/agent/hatchet/__fixtures__/review-thread";
 import {
   buildPrKey,
   upsertDesiredHead,
 } from "@terragon/shared/model/supersede-recheck";
-import { thread as threadTable } from "@terragon/shared/db/schema";
-import { eq } from "drizzle-orm";
 import { User } from "@terragon/shared";
 import { maybeRecheckOnComplete } from "./supersede-recheck";
 
@@ -30,32 +28,7 @@ describe("maybeRecheckOnComplete (#125 C5)", () => {
   beforeEach(async () => {
     user = (await createTestUser({ db })).user;
     orgId = await createTestOrg({ db });
-    const automation = await createAutomation({
-      db,
-      userId: user.id,
-      accessTier: "pro",
-      organizationId: orgId,
-      automation: {
-        name: "pr review",
-        repoFullName: REPO,
-        branchName: "main",
-        enabled: true,
-        triggerType: "pull_request",
-        triggerConfig: {},
-        action: {
-          type: "user_message",
-          config: {
-            message: {
-              type: "user",
-              model: null,
-              parts: [],
-              timestamp: new Date().toISOString(),
-            },
-          },
-        },
-      },
-    });
-    automationId = automation.id;
+    automationId = await createReviewAutomation({ userId: user.id, orgId });
   });
 
   const prKey = () => buildPrKey({ orgId, repoFullName: REPO, prNumber: PR });
@@ -67,35 +40,23 @@ describe("maybeRecheckOnComplete (#125 C5)", () => {
     externalId,
   }: {
     reviewedSha: string;
-    policy: string;
+    policy: "complete-run-discard" | "newest-wins";
     recheckOnComplete: boolean;
     externalId: string;
   }) {
-    const t = await createTestThread({
+    const { threadId } = await createTestRemoteRun({
       db,
       userId: user.id,
-      overrides: {
-        organizationId: orgId,
-        githubRepoFullName: REPO,
-        githubPRNumber: PR,
-        automationId,
-        sandboxProvider: "hatchet-remote",
-      },
-    });
-    await db
-      .update(threadTable)
-      .set({ reviewedSha, status: "complete" })
-      .where(eq(threadTable.id, t.threadId));
-    await recordHatchetRun({
-      db,
-      threadId: t.threadId,
       organizationId: orgId,
-      repoFullName: REPO,
       prNumber: PR,
       externalId,
+      repoFullName: REPO,
+      status: "complete",
+      reviewedSha,
+      automationId,
       snapshot: { policy, recheckOnComplete },
     });
-    return t.threadId;
+    return threadId;
   }
 
   const push = (sha: string, seconds: number, deliveryId: string) =>

@@ -11,6 +11,7 @@ import {
   getHatchetRunByExternalId,
 } from "@terragon/shared/model/hatchet-run";
 import { TERMINAL_CAUSES } from "@terragon/shared/model/terminal-cause";
+import { waitUntil } from "@/lib/wait-until";
 import { maybeRecheckOnComplete } from "@/server-lib/supersede-recheck";
 
 /**
@@ -115,14 +116,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     policy: detail?.policy,
     applied,
   });
-  if (applied) {
-    // #125 C5: a terminal is where the discard·recheck reconciliation fires.
-    await maybeRecheckOnComplete({ threadId }).catch((error) =>
-      console.error("[run-terminal] recheck failed (non-fatal)", {
-        threadId,
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    );
-  }
+  // #125 C5: the discard·recheck reconciliation fires off the response path
+  // (the dispatch inside can take seconds) and UNCONDITIONALLY — a worker
+  // retry of an already-applied terminal must still heal a recheck lost to a
+  // crash between the terminal write and the ledger claim (the UNIQUE ledger
+  // keeps it at-most-once).
+  waitUntil(maybeRecheckOnComplete({ threadId }));
   return NextResponse.json({ applied });
 }

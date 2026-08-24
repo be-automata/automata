@@ -35,7 +35,10 @@ import {
 } from "@/agent/msg/helpers";
 import { maybeStartQueuedThreadChat } from "./process-queued-thread";
 import { handleReviewEffectAtFinish } from "./review/review-single-writer-finish";
-import { maybeRecheckOnComplete } from "./supersede-recheck";
+import {
+  maybeRecheckOnComplete,
+  type RecheckThreadPre,
+} from "./supersede-recheck";
 import { trackUsageEvents } from "./usage-events";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import { compactThreadChat } from "./compact";
@@ -583,6 +586,15 @@ export async function handleDaemonEvent({
         shouldSkipCheckpoint,
         repoFullName: thread.githubRepoFullName ?? null,
         prNumber: thread.githubPRNumber ?? null,
+        finishedThread: {
+          userId: thread.userId,
+          organizationId: thread.organizationId,
+          githubRepoFullName: thread.githubRepoFullName,
+          githubPRNumber: thread.githubPRNumber,
+          automationId: thread.automationId,
+          reviewedSha: thread.reviewedSha,
+          sandboxProvider: thread.sandboxProvider,
+        },
       }),
     );
   }
@@ -599,6 +611,7 @@ async function handleThreadFinish({
   shouldSkipCheckpoint,
   repoFullName,
   prNumber,
+  finishedThread,
 }: {
   userId: string;
   threadId: string;
@@ -609,6 +622,8 @@ async function handleThreadFinish({
   shouldSkipCheckpoint: boolean;
   repoFullName: string | null;
   prNumber: number | null;
+  /** The row handleDaemonEvent already loaded — the recheck's zero-read bail. */
+  finishedThread?: RecheckThreadPre;
 }) {
   // ADR-036: dispatch the review effect for a terminal PR thread. For a review
   // thread the control-plane executor posts exactly once from the agent's emitted
@@ -616,15 +631,26 @@ async function handleThreadFinish({
   // post-run reconciler still runs as the straddle-backstop, converging GitHub to
   // the no-dup invariant. Both fail-soft (waitUntil + catch) — a review-effect
   // failure must never fail the thread.
-  // #125 C5: the discard·recheck reconciliation fires at the terminal, AFTER
-  // the review effect is queued — fail-soft like everything else here.
+  // #125 C5: the discard·recheck reconciliation fires at the terminal
+  // (never throws; runs off the response path). The thread row already in
+  // hand makes the common non-review path a zero-read bail.
   waitUntil(
-    maybeRecheckOnComplete({ threadId }).catch((error) =>
-      console.error("[supersede-recheck] finish-hook failed (non-fatal)", {
-        threadId,
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    ),
+    maybeRecheckOnComplete({
+      threadId,
+      ...(finishedThread
+        ? {
+            thread: {
+              userId: finishedThread.userId,
+              organizationId: finishedThread.organizationId,
+              githubRepoFullName: finishedThread.githubRepoFullName,
+              githubPRNumber: finishedThread.githubPRNumber,
+              automationId: finishedThread.automationId,
+              reviewedSha: finishedThread.reviewedSha,
+              sandboxProvider: finishedThread.sandboxProvider,
+            },
+          }
+        : {}),
+    }),
   );
   if (prNumber !== null && repoFullName) {
     waitUntil(

@@ -16,6 +16,7 @@ import { getGithubPR, upsertGithubPR } from "./github";
 import { setUserFeatureFlagOverride, upsertFeatureFlag } from "./feature-flags";
 import { createAutomation } from "./automations";
 import { recordHatchetRun } from "./hatchet-run";
+import type { SupersedeSnapshot } from "./repo-review-settings";
 import { createOrganization, addOrganizationMember } from "./organizations";
 
 export async function createTestUser({
@@ -302,6 +303,10 @@ export async function createTestRemoteRun({
   ageMs = 0,
   repoFullName = "acme/widgets",
   enableThreadChatCreation = false,
+  status = "working",
+  reviewedSha,
+  automationId,
+  snapshot,
 }: {
   db: DB;
   userId: string;
@@ -312,18 +317,34 @@ export async function createTestRemoteRun({
   repoFullName?: string;
   /** Chat-mode thread: the live status sits on the threadChat row. */
   enableThreadChatCreation?: boolean;
+  status?: "working" | "complete";
+  reviewedSha?: string;
+  automationId?: string;
+  snapshot?: SupersedeSnapshot;
 }): Promise<{ threadId: string; threadChatId: string; runId: string }> {
   const { threadId, threadChatId } = await createTestThread({
     db,
     userId,
-    overrides: { organizationId, sandboxProvider: "hatchet-remote" },
-    chatOverrides: { status: "working" },
+    overrides: {
+      organizationId,
+      sandboxProvider: "hatchet-remote",
+      githubRepoFullName: repoFullName,
+      githubPRNumber: prNumber,
+      ...(automationId ? { automationId } : {}),
+    },
+    chatOverrides: { status },
     enableThreadChatCreation,
   });
-  if (!enableThreadChatCreation) {
+  // Chat-mode: the live status is on the threadChat row (set above); the
+  // thread row keeps its creation value. Legacy: the thread row IS the status.
+  const threadPatch = {
+    ...(enableThreadChatCreation ? {} : { status }),
+    ...(reviewedSha ? { reviewedSha } : {}),
+  };
+  if (Object.keys(threadPatch).length > 0) {
     await db
       .update(schema.thread)
-      .set({ status: "working" })
+      .set(threadPatch)
       .where(eq(schema.thread.id, threadId));
   }
   const run = await recordHatchetRun({
@@ -333,6 +354,7 @@ export async function createTestRemoteRun({
     repoFullName,
     prNumber,
     externalId,
+    snapshot,
   });
   if (ageMs > 0) {
     await db

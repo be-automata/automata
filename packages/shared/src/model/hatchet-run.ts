@@ -15,7 +15,7 @@ import {
 } from "drizzle-orm";
 import { thread as threadTable } from "../db/schema";
 import { reapableThreadStatuses, threadEffectiveStatusIn } from "./threads";
-import { normalizeRepo } from "./repo-review-settings";
+import { normalizeRepo, type SupersedeSnapshot } from "./repo-review-settings";
 
 /**
  * Per-dispatch tracking of the Hatchet `agent-run` externalId, for #8 supersede.
@@ -59,7 +59,7 @@ export async function recordHatchetRun({
   prNumber: number;
   externalId: string;
   /** #125 C5: the policy snapshot stamped at dispatch (absent on legacy dispatches). */
-  snapshot?: { policy: string; recheckOnComplete: boolean };
+  snapshot?: SupersedeSnapshot;
 }): Promise<HatchetRun> {
   const [row] = await db
     .insert(hatchetRun)
@@ -232,6 +232,17 @@ export async function findSweepCandidates({
       prNumber: hatchetRun.prNumber,
       externalId: hatchetRun.externalId,
       createdAt: hatchetRun.createdAt,
+      // #125 C5: the snapshot + thread columns the recheck needs — in the
+      // same join, so the sweep's terminal path adds zero extra reads.
+      supersedePolicy: hatchetRun.supersedePolicy,
+      recheckOnComplete: hatchetRun.recheckOnComplete,
+      threadUserId: threadTable.userId,
+      threadAutomationId: threadTable.automationId,
+      threadReviewedSha: threadTable.reviewedSha,
+      threadSandboxProvider: threadTable.sandboxProvider,
+      threadGithubPRNumber: threadTable.githubPRNumber,
+      threadRepoFullName: threadTable.githubRepoFullName,
+      threadOrganizationId: threadTable.organizationId,
     })
     .from(hatchetRun)
     .innerJoin(threadTable, eq(threadTable.id, hatchetRun.threadId))

@@ -32,42 +32,90 @@ import { eq } from "drizzle-orm";
  * `recheck:<prKey>:<sha>` — the id is unique per (prKey, sha) by the same
  * ledger, so it is never deduped against a real webhook delivery.
  */
-export async function maybeRecheckOnComplete({
+type RecheckDispatch = (args: {
+  userId: string;
+  automationId: string;
+  repoFullName: string;
+  prNumber: number;
+  deliveryId: string;
+}) => Promise<void>;
+
+/** Columns a caller may already hold — passing them skips the thread read. */
+export type RecheckThreadPre = {
+  userId: string;
+  organizationId: string | null;
+  githubRepoFullName: string;
+  githubPRNumber: number | null;
+  automationId: string | null;
+  reviewedSha: string | null;
+  sandboxProvider: string;
+};
+
+/** NEVER throws: every terminal writer calls this bare (fail-soft inside). */
+export async function maybeRecheckOnComplete(args: {
+  threadId: string;
+  /** Pre-read thread columns (zero-read bail) — see RecheckThreadPre. */
+  thread?: RecheckThreadPre;
+  /** Pre-read run snapshot (the sweep already holds it). */
+  run?: { supersedePolicy: string | null; recheckOnComplete: boolean | null };
+  /** Injected for tests; production re-dispatches through runPullRequestAutomation. */
+  dispatch?: RecheckDispatch;
+}): Promise<{ rechecked: boolean; reason: string }> {
+  try {
+    return await recheckOnComplete(args);
+  } catch (error) {
+    console.error("[supersede-recheck] failed (non-fatal)", {
+      threadId: args.threadId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { rechecked: false, reason: "error" };
+  }
+}
+
+async function recheckOnComplete({
   threadId,
+  thread: pre,
+  run: preRun,
   dispatch = defaultDispatch,
 }: {
   threadId: string;
-  /** Injected for tests; production re-dispatches through runPullRequestAutomation. */
-  dispatch?: (args: {
-    userId: string;
-    automationId: string;
-    repoFullName: string;
-    prNumber: number;
-    deliveryId: string;
-  }) => Promise<void>;
+  thread?: RecheckThreadPre;
+  run?: { supersedePolicy: string | null; recheckOnComplete: boolean | null };
+  dispatch?: RecheckDispatch;
 }): Promise<{ rechecked: boolean; reason: string }> {
-  const [row] = await db
-    .select({
-      userId: threadTable.userId,
-      organizationId: threadTable.organizationId,
-      repoFullName: threadTable.githubRepoFullName,
-      prNumber: threadTable.githubPRNumber,
-      automationId: threadTable.automationId,
-      reviewedSha: threadTable.reviewedSha,
-    })
-    .from(threadTable)
-    .where(eq(threadTable.id, threadId))
-    .limit(1);
+  // Zero-read bail when the caller already holds the columns: the finish
+  // hook fires for EVERY thread terminal in the system, so the common
+  // (non-review, non-remote) path must not cost a query.
+  if (pre && (pre.sandboxProvider !== "hatchet-remote" || !pre.reviewedSha)) {
+    return { rechecked: false, reason: "not-a-review-run" };
+  }
+  const row =
+    pre ??
+    (
+      await db
+        .select({
+          userId: threadTable.userId,
+          organizationId: threadTable.organizationId,
+          githubRepoFullName: threadTable.githubRepoFullName,
+          githubPRNumber: threadTable.githubPRNumber,
+          automationId: threadTable.automationId,
+          reviewedSha: threadTable.reviewedSha,
+          sandboxProvider: threadTable.sandboxProvider,
+        })
+        .from(threadTable)
+        .where(eq(threadTable.id, threadId))
+        .limit(1)
+    )[0];
   if (
     !row ||
     !row.organizationId ||
-    row.prNumber === null ||
+    row.githubPRNumber === null ||
     !row.automationId ||
     !row.reviewedSha
   ) {
     return { rechecked: false, reason: "not-a-review-run" };
   }
-  const run = await getLatestHatchetRunForThread({ db, threadId });
+  const run = preRun ?? (await getLatestHatchetRunForThread({ db, threadId }));
   if (
     !run ||
     run.supersedePolicy !== "complete-run-discard" ||
@@ -77,10 +125,14 @@ export async function maybeRecheckOnComplete({
   }
   const prKey = buildPrKey({
     orgId: row.organizationId,
-    repoFullName: row.repoFullName,
-    prNumber: row.prNumber,
+    repoFullName: row.githubRepoFullName,
+    prNumber: row.githubPRNumber,
   });
   const desired = await getDesiredHead({ db, prKey });
+  // Inequality, not "newer than": reviewedSha comes from pulls.get at
+  // creation and can be AHEAD of the webhook's sha; the newer push's own
+  // delivery advances desired to the same sha before most runs finish, and
+  // the rare race costs one ledger-capped recheck of an already-reviewed head.
   if (!desired || desired.sha === row.reviewedSha) {
     return { rechecked: false, reason: "head-already-reviewed" };
   }
@@ -102,20 +154,14 @@ export async function maybeRecheckOnComplete({
   await dispatch({
     userId: row.userId,
     automationId: row.automationId,
-    repoFullName: row.repoFullName,
-    prNumber: row.prNumber,
+    repoFullName: row.githubRepoFullName,
+    prNumber: row.githubPRNumber,
     deliveryId: `recheck:${prKey}:${desired.sha}`,
   });
   return { rechecked: true, reason: "dispatched" };
 }
 
-async function defaultDispatch(args: {
-  userId: string;
-  automationId: string;
-  repoFullName: string;
-  prNumber: number;
-  deliveryId: string;
-}): Promise<void> {
+const defaultDispatch: RecheckDispatch = async (args) => {
   // Dynamic import: automations.ts drags the thread-creation graph in; this
   // module is imported by the sweep/cron path that must stay light.
   const { runPullRequestAutomation } = await import("@/server-lib/automations");
@@ -124,4 +170,4 @@ async function defaultDispatch(args: {
     prEventAction: "synchronize",
     source: "automated",
   });
-}
+};

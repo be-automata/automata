@@ -105,6 +105,44 @@ export async function handlePullRequestUpdated(
     console.log(
       `Found ${automations.length} pull request automations for ${repoFullName}`,
     );
+    // #125 C5: record the newest head for this PR (durable desired head) —
+    // ONCE per distinct org on this delivery, not once per automation.
+    // Compare-and-set on GitHub's timestamp so an out-of-order delivery never
+    // moves it backwards. Best-effort; a failure never blocks the runs. This
+    // handler only receives head-affecting actions (opened / ready_for_review
+    // / synchronize).
+    if (deliveryId) {
+      const orgIds = [
+        ...new Set(
+          automations
+            .map((a) => a.organizationId)
+            .filter((o): o is string => o !== null),
+        ),
+      ];
+      await Promise.all(
+        orgIds.map((orgId) =>
+          upsertDesiredHead({
+            db,
+            prKey: buildPrKey({
+              orgId,
+              repoFullName,
+              prNumber: event.pull_request.number,
+            }),
+            sha: event.pull_request.head.sha,
+            webhookAt: new Date(event.pull_request.updated_at),
+            deliveryId,
+          }).catch((error) =>
+            console.error(
+              "[github webhook] desired-head upsert failed (non-fatal)",
+              {
+                repoFullName,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            ),
+          ),
+        ),
+      );
+    }
     // Process each automation
     for (let i = 0; i < automations.length; i += BATCH_SIZE) {
       const batch = automations.slice(i, i + BATCH_SIZE);
@@ -144,28 +182,7 @@ async function handlePullRequestAutomation(
   if (automation.repoFullName !== repoFullName) {
     return;
   }
-  // #125 C5: record the newest head for this PR (durable desired head) —
-  // compare-and-set on GitHub's timestamp so an out-of-order delivery never
-  // moves it backwards. Best-effort; a bookkeeping failure never blocks the run.
-  if (automation.organizationId && deliveryId) {
-    await upsertDesiredHead({
-      db,
-      prKey: buildPrKey({
-        orgId: automation.organizationId,
-        repoFullName,
-        prNumber,
-      }),
-      sha: event.pull_request.head.sha,
-      webhookAt: new Date(event.pull_request.updated_at),
-      deliveryId,
-    }).catch((error) =>
-      console.error("[github webhook] desired-head upsert failed (non-fatal)", {
-        repoFullName,
-        prNumber,
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    );
-  }
+
   const config = automation.triggerConfig as PullRequestTriggerConfig;
   // Check if this automation should trigger for the current event
   let shouldTrigger = false;

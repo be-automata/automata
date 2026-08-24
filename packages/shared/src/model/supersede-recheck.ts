@@ -1,4 +1,4 @@
-import { and, eq, gt, lt, or, sql } from "drizzle-orm";
+import { and, eq, lt, or } from "drizzle-orm";
 import { DB } from "../db";
 import { supersedeDesiredHead, supersedeRecheck } from "../db/schema";
 import { normalizeRepo } from "./repo-review-settings";
@@ -96,26 +96,4 @@ export async function claimRecheck({
     })
     .returning({ id: supersedeRecheck.id });
   return rows.length > 0;
-}
-
-/** Rechecks newer than `after` for one prKey (tests + the no-loop guard). */
-export async function countRechecks({
-  db,
-  prKey,
-  after,
-}: {
-  db: DB;
-  prKey: string;
-  after?: Date;
-}): Promise<number> {
-  const [row] = await db
-    .select({ n: sql<number>`count(*)::int` })
-    .from(supersedeRecheck)
-    .where(
-      and(
-        eq(supersedeRecheck.prKey, prKey),
-        ...(after ? [gt(supersedeRecheck.dispatchedAt, after)] : []),
-      ),
-    );
-  return row?.n ?? 0;
 }

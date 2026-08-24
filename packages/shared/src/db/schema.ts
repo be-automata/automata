@@ -1773,7 +1773,9 @@ export const hatchetRun = pgTable(
  * `prKey` (`${orgId}/${repo}/${prNumber}`), written by every pull_request
  * webhook with a compare-and-set on the GitHub timestamp (out-of-order
  * deliveries never move it backwards; ties break on the lexicographically
- * greater delivery id). The recheck reconciliation compares a finished run's
+ * greater delivery id — a DETERMINISM rule, not an ordering claim: two pushes
+ * in the same second can land on the older sha, and any later delivery
+ * corrects it). The recheck reconciliation compares a finished run's
  * `thread.reviewedSha` against this.
  */
 export const supersedeDesiredHead = pgTable("supersede_desired_head", {

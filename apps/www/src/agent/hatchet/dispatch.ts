@@ -29,6 +29,7 @@ import {
   type SupersedeSnapshot,
 } from "@terragon/shared/model/repo-review-settings";
 import { setThreadActiveRun } from "@terragon/shared/model/threads";
+import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
 import {
   triggerAgentRun,
   cancelAgentRun,
@@ -355,7 +356,11 @@ async function planSupersede({
   };
   const plan: SupersedePlan = {
     inputExtension: {
-      prKey: `${orgId}/${repo}/${reviewContext.prNumber}`,
+      prKey: buildPrKey({
+        orgId,
+        repoFullName,
+        prNumber: reviewContext.prNumber,
+      }),
       // Always present, never empty: a webhook-descended dispatch carries the
       // real X-GitHub-Delivery id; manual/scheduled paths mint a per-dispatch
       // synthetic id so intentional re-dispatches are never deduped.

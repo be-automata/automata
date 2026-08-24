@@ -108,25 +108,22 @@ async function decide(
   run: SweepCandidate,
 ): Promise<Decision> {
   switch (status) {
-    case "CANCELLED": {
-      const newer = await newerSibling(run);
-      return newer
-        ? {
-            kind: "terminal",
-            cause: "superseded",
-            supersededByThreadId: newer.threadId,
-          }
-        : { kind: "terminal", cause: "user-cancelled" };
-    }
+    case "CANCELLED":
     case "NOT_FOUND": {
       const newer = await newerSibling(run);
-      return newer
-        ? {
-            kind: "terminal",
-            cause: "superseded",
-            supersededByThreadId: newer.threadId,
-          }
-        : { kind: "terminal", cause: "plane-offline" };
+      if (newer) {
+        return {
+          kind: "terminal",
+          cause: "superseded",
+          supersededByThreadId: newer.threadId,
+        };
+      }
+      // A CANCELLED run was cancelled by someone; a VANISHED one never made
+      // it to the plane (pruned / trigger lost) — not the user's doing.
+      return {
+        kind: "terminal",
+        cause: status === "CANCELLED" ? "user-cancelled" : "plane-offline",
+      };
     }
     case "FAILED":
       return { kind: "terminal", cause: "daemon-failed" };

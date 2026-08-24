@@ -7,10 +7,11 @@ import {
   createTestThread,
   createTestUser,
 } from "./test-helpers";
+import { eq } from "drizzle-orm";
+import { supersedeRecheck } from "../db/schema";
 import {
   buildPrKey,
   claimRecheck,
-  countRechecks,
   getDesiredHead,
   upsertDesiredHead,
 } from "./supersede-recheck";
@@ -27,7 +28,7 @@ describe("#125 C5 desired head (CAS) + recheck ledger", () => {
     });
   });
 
-  it("buildPrKey normalises the slug exactly like dispatch does", () => {
+  it("buildPrKey lowercases and trims the slug", () => {
     expect(
       buildPrKey({ orgId: "o", repoFullName: " Acme/Widgets ", prNumber: 1 }),
     ).toBe("o/acme/widgets/1");
@@ -109,7 +110,12 @@ describe("#125 C5 desired head (CAS) + recheck ledger", () => {
       ),
     );
     expect(results.filter(Boolean)).toHaveLength(1);
-    expect(await countRechecks({ db, prKey })).toBe(1);
+    const ledger = () =>
+      db
+        .select()
+        .from(supersedeRecheck)
+        .where(eq(supersedeRecheck.prKey, prKey));
+    expect(await ledger()).toHaveLength(1);
     expect(
       await claimRecheck({
         db,
@@ -118,6 +124,6 @@ describe("#125 C5 desired head (CAS) + recheck ledger", () => {
         triggeredByThreadId: threadId,
       }),
     ).toBe(true);
-    expect(await countRechecks({ db, prKey })).toBe(2);
+    expect(await ledger()).toHaveLength(2);
   });
 });
