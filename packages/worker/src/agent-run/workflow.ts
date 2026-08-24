@@ -1,6 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
 import { hatchet } from "../hatchet-client";
+import {
+  AGENT_RUN_VARIANTS,
+  buildAgentRunDefinition,
+  type AgentRunVariantName,
+  type PerPrStrategy,
+} from "./definition";
 import { loadWorkerConfig } from "./config";
 import { DaemonProcess } from "./daemon-process";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
@@ -34,6 +39,14 @@ import {
 import type { AgentRunInput, AgentRunOutput } from "./types";
 
 export type { AgentRunInput, AgentRunOutput } from "./types";
+export {
+  AGENT_RUN_VARIANTS,
+  buildAgentRunDefinition,
+  PER_ORG_MAX_RUNS,
+  GLOBAL_MAX_RUNS,
+  type AgentRunVariantName,
+  type PerPrStrategy,
+} from "./definition";
 
 /**
  * The execution-plane agent-run workflow (ADR-002/ADR-003). Triggered from the
@@ -77,28 +90,16 @@ export type { AgentRunInput, AgentRunOutput } from "./types";
  * C2 guarantees it under the flag), so their CEL never dereferences a missing
  * field; the legacy workflow carries no per-PR entry and no idempotency key.
  *
- * FAIRNESS IS ONLY PROVEN LIVE (plan amendment 11): this config type-checks and
- * locks the shape, but round-robin-across-orgs is scheduler-side behaviour — it is
- * "delivered" only when the 2-org interleave UAT is observed, not on merge.
+ * FAIRNESS — OBSERVED, NOT DELIVERED (#128 E2E, hatchet-lite v0.94.10,
+ * 2026-08-24): the 2-org interleave UAT ran against a real engine and the start
+ * order is pure FIFO (a1, a2, a3, b1). The global cap is ONE concurrency group
+ * and GROUP_ROUND_ROBIN over a single group is FIFO, so at GLOBAL_MAX_RUNS=1 an
+ * org's backlog DOES head-of-line-block another. The per-org entry still
+ * serializes within an org. Cross-org fairness needs global>1 (memory-gated,
+ * #3b) or an engine ordering primitive; the characterization test in
+ * supersede.integration.test.ts freezes the observed FIFO so any change is
+ * deliberate. (Supersedes "plan amendment 11".)
  */
-
-/**
- * Per-org concurrency cap. GROUP_ROUND_ROBIN on `input.orgId` gives fair ORDERING
- * across orgs; the cap itself is 1 and MUST stay ≤ the global cap so no single org
- * can ever hold every slot. Raising this is gated on #3b (real per-org parallelism).
- */
-const PER_ORG_MAX_RUNS = 1;
-
-/**
- * Global concurrency cap = the single-box daemon memory budget. Held at 1: N
- * concurrent agents each spawn a full `claude` process, and the orch-agents ENOMEM
- * wall (4+ SDK sessions tripped fork/posix_spawn on a 7.6GB box, safe only after an
- * 8GiB swap file) is the precedent. Raise ONLY after per-agent RSS × N + headroom is
- * validated on the pilot box (plan's "Concurrency > 1 is gated on memory"), and set
- * `slotCost` to reflect the weight at the same time. Per-run daemon isolation (the
- * `--socket-path` flag) removes the socket-collision blocker but NOT the memory one.
- */
-const GLOBAL_MAX_RUNS = 1;
 
 /**
  * The worker's final say on `useCredits` — the invariant that removes the silent
@@ -221,129 +222,16 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
 }
 
 /**
- * The per-PR concurrency strategy of a policy variant, or null for the legacy
- * workflow (no per-PR entry at all — its concurrency is byte-identical to
- * pre-#125, so flag-off dispatches are unaffected).
- */
-type PerPrStrategy = ConcurrencyLimitStrategy | null;
-
-/**
- * Variant table (#125 C1). STRUCTURALLY DUPLICATED (never imported) by the
- * control plane's POLICY_TO_WORKFLOW (apps/www/src/agent/hatchet/transport.ts).
- * Every registered variant shares ONE task fn and ONE config; the only
- * difference is the per-PR entry's limitStrategy. `as const` so a typo in a
- * name is a type error at the registry.
- */
-export const AGENT_RUN_VARIANTS = {
-  "agent-run": null,
-  "agent-run-newest": ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
-  "agent-run-strict": ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
-  "agent-run-discard": ConcurrencyLimitStrategy.CANCEL_NEWEST,
-} as const satisfies Record<string, PerPrStrategy>;
-export type AgentRunVariantName = keyof typeof AGENT_RUN_VARIANTS;
-
-/** The strategies a per-PR entry may carry. Anything else fails registration. */
-const SUPPORTED_PER_PR_STRATEGIES: ReadonlySet<ConcurrencyLimitStrategy> =
-  new Set([
-    ConcurrencyLimitStrategy.CANCEL_IN_PROGRESS,
-    ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
-    ConcurrencyLimitStrategy.CANCEL_NEWEST,
-  ]);
-
-/**
- * Idempotency window for the policy variants: the GitHub webhook redelivery
- * window (a redelivered `X-GitHub-Delivery` within 24h dedupes to ONE run).
- * Intentional re-dispatches (recheck, redo) mint DISTINCT delivery ids at the
- * control plane and are never deduped here.
- */
-const DELIVERY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Build one agent-run workflow. Config is identical across variants except
- * the OPTIONAL per-PR concurrency entry (stacked on top of the per-org and
- * global entries) and — for variants only — the delivery-id idempotency key.
- * Unknown strategy → throws at registration (fail-loud, never a silently
- * mis-strategied group).
+ * Register one agent-run workflow from its pure definition with the real run
+ * fn + onFailure handler.
  */
 export function makeAgentRunWorkflow(
   name: string,
   perPrStrategy: PerPrStrategy,
 ) {
-  if (
-    perPrStrategy !== null &&
-    !SUPPORTED_PER_PR_STRATEGIES.has(perPrStrategy)
-  ) {
-    throw new Error(
-      `makeAgentRunWorkflow(${name}): unsupported per-PR concurrency strategy ${String(perPrStrategy)}`,
-    );
-  }
-  const wf = hatchet.workflow<AgentRunInput>({
-    name,
-    concurrency: [
-      ...(perPrStrategy !== null
-        ? [
-            {
-              // Per-PR key (`${orgId}/${repo}/${prNumber}`, built by www C2).
-              // The CEL references the FIELD — never an interpolation.
-              expression: "input.prKey",
-              maxRuns: 1,
-              limitStrategy: perPrStrategy,
-            },
-          ]
-        : []),
-      {
-        expression: "input.orgId",
-        maxRuns: PER_ORG_MAX_RUNS,
-        limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
-      },
-      {
-        // Renamed from 'agent-run-shared-daemon-socket' (2026-08-19). Two reasons:
-        // (1) the cap's real justification is the single-box MEMORY budget — the
-        // shared-socket collision it was named for was solved by per-run sockets
-        // (Phase 0.2b); (2) the old group's scheduler state deadlocked in
-        // hatchet-lite after repeated worker re-registrations (stale
-        // GROUP_ROUND_ROBIN strategy rows chain into active ones and the child
-        // slot is never granted — tasks sit QUEUED forever with idle workers).
-        // The rename minted fresh strategy state on registration but did NOT
-        // prevent rot — the new group has since re-rotted (#69 §2.3, verified
-        // live 2026-08-23). The group name is NOT rotated again (#69 §3.1.1:
-        // rotation trades this deadlock for a worse one — two concurrent
-        // agent-runs on a box budgeted for one). Instead an engine-DB repairer
-        // (scheduling-maintenance.ts, opt-in, dry-run by default) detects and
-        // prunes the corrupted chain pointers behind this group name.
-        expression: "'agent-run-global-memory-budget'",
-        maxRuns: GLOBAL_MAX_RUNS,
-        limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
-      },
-    ],
-  });
-  wf.task({
-    name: "run",
-    scheduleTimeout: "30m",
-    executionTimeout: "30m",
-    // EXPLICIT retries: 0 (the SDK default is already 0). A single agent-run is a
-    // minutes-long, NON-idempotent side-effecting operation (it clones, runs the
-    // agent, and posts a GitHub review) — auto-retrying it would re-execute the
-    // agent and risk a double side-effect. Keep this explicit so a future edit
-    // can't silently enable retries. This is Phase 1.4 mechanism #1 (exactly-once):
-    // at retries:0 + workflow maxRuns:1 the only at-least-once window is engine
-    // redelivery, which the www single-writer (HEAD+verdict idempotency) absorbs.
-    retries: 0,
-    // slotCost DEFERRED (#8): meaningless at GLOBAL_MAX_RUNS=1 (one run at a time), so
-    // it stays unset until #3b raises the global cap — at which point set slotCost to
-    // model each agent-run's memory weight so a worker's physical slots reflect real
-    // capacity. Wiring it now would have no effect. See workflow-level concurrency doc.
-    ...(perPrStrategy !== null
-      ? {
-          idempotency: {
-            strategy: "ttl" as const,
-            expression: "input.deliveryId",
-            ttlMs: DELIVERY_IDEMPOTENCY_TTL_MS,
-          },
-        }
-      : {}),
-    fn: runAgent,
-  });
+  const def = buildAgentRunDefinition(name, perPrStrategy);
+  const wf = hatchet.workflow<AgentRunInput>(def.workflow);
+  wf.task({ ...def.task, fn: runAgent });
   wf.onFailure({ fn: onAgentRunFailure });
   return wf;
 }

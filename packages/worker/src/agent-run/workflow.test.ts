@@ -250,6 +250,7 @@ describe("#125 C1: makeAgentRunWorkflow variants", () => {
     const legacy = defOf("agent-run");
     expect(legacy.concurrency).toHaveLength(2);
     expect(legacy.concurrency[0].expression).toBe("input.orgId");
+    expect(legacy.idempotency).toBeUndefined();
     expect(legacy._tasks[0].idempotency).toBeUndefined();
   });
 
@@ -272,14 +273,12 @@ describe("#125 C1: makeAgentRunWorkflow variants", () => {
       });
       // The two legacy entries follow, unchanged.
       expect(v.concurrency.slice(1)).toEqual(legacy.concurrency);
-      // ONE shared task fn + identical task config except idempotency.
+      // ONE shared task fn + identical task config.
       expect(v._tasks).toHaveLength(1);
       expect(v._tasks[0].fn).toBe(legacy._tasks[0].fn);
-      const { idempotency, ...taskRest } = v._tasks[0];
-      const { idempotency: legacyIdem, ...legacyRest } = legacy._tasks[0];
-      expect(legacyIdem).toBeUndefined();
-      expect(taskRest).toEqual(legacyRest);
-      expect(idempotency).toEqual({
+      expect(v._tasks[0]).toEqual(legacy._tasks[0]);
+      // Idempotency is WORKFLOW-level (the only level the SDK registers).
+      expect(v.idempotency).toEqual({
         strategy: "ttl",
         expression: "input.deliveryId",
         ttlMs: 24 * 60 * 60 * 1000,
