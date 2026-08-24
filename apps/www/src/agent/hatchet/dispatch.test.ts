@@ -17,6 +17,8 @@ import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-sett
 import { repoReviewSettings } from "@terragon/shared/db/schema";
 import { setFeatureFlagOverrideForTest } from "@terragon/shared/model/test-helpers";
 import { eq } from "drizzle-orm";
+import { getInstallationToken } from "@terragon/shared/github-app";
+import { thread as threadTable } from "@terragon/shared/db/schema";
 import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
 import {
   createReviewAutomation,
@@ -500,7 +502,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
     const body = triggerBody(f.mock);
     expect(body.workflowName).toBe("agent-run-newest"); // default newest-wins
     expect(body.input.deliveryId).toMatch(
-      new RegExp(`^manual:${t.threadId}:\\d+$`),
+      new RegExp(`^manual:${t.threadId}:[0-9a-f]{16}$`),
     );
     vi.unstubAllGlobals();
   });
@@ -602,6 +604,45 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       threadId: t.threadId,
       threadChatId: t.threadChatId,
     });
+    // No fence stamp for a non-review run: activeRunExternalId is a REVIEW
+    // generation marker and must never carry an out-of-scope value.
+    const [row] = await db
+      .select({ activeRunExternalId: threadTable.activeRunExternalId })
+      .from(threadTable)
+      .where(eq(threadTable.id, t.threadId));
+    expect(row!.activeRunExternalId).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it("a sibling of the mint rejecting (installation-token lookup fails) still revokes the minted token — no phantom run", async () => {
+    const t = await makeReviewThread(81);
+    const runKey = daemonRunKey({
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+    });
+    const f = okFetch("never");
+    vi.stubGlobal("fetch", f.mock);
+    // getInstallationToken shares the pre-trigger Promise.all with the mint;
+    // Promise.all rejects on its failure without waiting for the mint's row.
+    vi.mocked(getInstallationToken).mockRejectedValueOnce(
+      new Error("github down"),
+    );
+    await expect(
+      dispatchAgentRun({
+        userId: user.id,
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        repoFullName: "be-automata/automata",
+        branch: "feature",
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/Failed to dispatch/),
+      cause: expect.objectContaining({ message: "github down" }),
+    });
+    expect(f.mock).not.toHaveBeenCalled();
+    expect(await hasActiveDaemonToken({ userId: user.id, name: runKey })).toBe(
+      false,
+    );
     vi.unstubAllGlobals();
   });
 });

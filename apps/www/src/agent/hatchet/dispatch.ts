@@ -243,7 +243,7 @@ export interface AgentRunInput {
   /**
    * #125/#127 flag-ON only: the run's idempotency identity. The webhook's
    * `X-GitHub-Delivery` id when the dispatch descends from a webhook, else a
-   * synthetic `manual:<threadId>:<ts>` — always present under the flag, never
+   * synthetic `manual:<threadId>:<random>` — always present under the flag, never
    * empty. Deduped by C1's `idempotency` task config (24h TTL); intentional
    * re-dispatches (recheck, redo) mint DISTINCT ids and are never deduped.
    */
@@ -313,11 +313,16 @@ async function planSupersede({
     };
   }
   if (!reviewContext) {
+    // Non-review dispatch under the flag: nothing to plan. No fence stamp —
+    // activeRunExternalId is a REVIEW-run generation marker; stamping a
+    // mention/personal thread would hand the C1 fence an out-of-scope value.
+    // appSideCancel is unobserved here (its consumer is gated on
+    // reviewContext) — false keeps the plan honest.
     return {
       inputExtension: {},
       triggerOpts: undefined,
-      appSideCancel: true,
-      stampFence: true,
+      appSideCancel: false,
+      stampFence: false,
     };
   }
   const snapshot = await resolveSupersedePolicy({
@@ -349,7 +354,7 @@ async function planSupersede({
       // Always present, never empty: a webhook-descended dispatch carries the
       // real X-GitHub-Delivery id; manual/scheduled paths mint a per-dispatch
       // synthetic id so intentional re-dispatches are never deduped.
-      deliveryId: deliveryId || `manual:${threadId}:${Date.now()}`,
+      deliveryId: deliveryId || `manual:${threadId}:${randomHex(8)}`,
       supersedePolicy: snapshot.policy,
       recheckOnComplete: snapshot.recheckOnComplete,
     },
@@ -421,22 +426,23 @@ export async function dispatchAgentRun({
   }
 
   const [owner, repo] = parseRepoFullName(repoFullName);
-  const [installationToken, daemonToken, thread, supersedeFlagOn] =
-    await Promise.all([
+
+  // The token is minted INSIDE the guarded region: Promise.all rejects on the
+  // first sibling failure without waiting for the mint, so a sibling that
+  // rejects after the mint's row landed would otherwise leak the token. From
+  // the mint on, EVERY failure before the trigger (sibling reads, base-branch
+  // resolve, egress resolve, planSupersede — which throws on a corrupt stored
+  // policy — the app-side cancel pass) revokes it in the catch below, or
+  // hasActiveDaemonToken() would report a phantom run for this runKey and
+  // silently no-op every retry for the token's TTL (reviews on #135). The
+  // revoke is keyed by runKey, so it is a harmless no-op when the mint itself
+  // was the failure.
+  try {
+    const [installationToken, daemonToken, thread] = await Promise.all([
       getInstallationToken(owner, repo),
       mintDaemonToken({ userId, threadId, threadChatId, name: runKey }),
       getThreadMinimal({ db, userId, threadId }),
-      // #125/#127 rollout gate, resolved server-side for the dispatching user
-      // (per-org rollout approximated at user scope, like sandboxCredentialBroker).
-      getFeatureFlagForUser({ db, userId, flagName: "supersedePolicy" }),
     ]);
-
-  // From here on a minted token exists: EVERY failure before the trigger lands
-  // (base-branch resolve, egress resolve, planSupersede — which throws on a
-  // corrupt stored policy — the app-side cancel pass) must revoke it in the
-  // catch below, or hasActiveDaemonToken() would report a phantom run for this
-  // runKey and silently no-op every retry for the token's TTL (review on #135).
-  try {
     // BUG-EXEC-02: the review agent needs the PR's BASE branch to compute the delta
     // offline (`git diff origin/<base>...HEAD`). thread.repoBaseBranchName is NOT the
     // base — for a thread working on an existing branch it holds the HEAD/working branch
@@ -548,6 +554,13 @@ export async function dispatchAgentRun({
     // is enriched. The three native policies leave supersession to the engine's
     // per-PR strategy; only 'app-side' (and the legacy path) keeps the #8
     // control-plane cancel pass.
+    // #125/#127 rollout gate, resolved server-side for the dispatching user
+    // (per-org rollout approximated at user scope, like sandboxCredentialBroker).
+    // Read ONLY for review runs: the flag governs nothing else, and a mention /
+    // personal dispatch must not pay a DB read for it.
+    const supersedeFlagOn = reviewContext
+      ? await getFeatureFlagForUser({ db, userId, flagName: "supersedePolicy" })
+      : false;
     const plan = await planSupersede({
       enabled: supersedeFlagOn,
       reviewContext,
