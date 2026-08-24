@@ -1538,7 +1538,10 @@ export async function markThreadsTerminal({
   if (chatOnly.length > 0) {
     await db
       .update(schema.thread)
-      .set({ terminalCause: cause })
+      .set({
+        terminalCause: cause,
+        ...(supersededByThreadId ? { supersededByThreadId } : {}),
+      })
       .where(
         and(
           inArray(schema.thread.id, chatOnly),
