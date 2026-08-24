@@ -431,141 +431,146 @@ export async function dispatchAgentRun({
       getFeatureFlagForUser({ db, userId, flagName: "supersedePolicy" }),
     ]);
 
-  // BUG-EXEC-02: the review agent needs the PR's BASE branch to compute the delta
-  // offline (`git diff origin/<base>...HEAD`). thread.repoBaseBranchName is NOT the
-  // base — for a thread working on an existing branch it holds the HEAD/working branch
-  // (cli-router.ts: headBranchName = createNewBranch ? null : repoBaseBranchName), so
-  // sourcing from it left baseBranch undefined and the worker never fetched origin/main.
-  // Resolve the REAL, per-PR base from the PR itself (App octokit). Undefined (non-PR
-  // thread, fetch fails, or base==head) → provision skips the base-fetch (head-only).
-  const resolveBaseBranch = async (): Promise<string | undefined> => {
-    if (!thread?.githubPRNumber) {
-      return undefined;
-    }
-    try {
-      const octokit = await getOctokitForApp({ owner, repo });
-      const { data: pr } = await octokit.rest.pulls.get({
-        owner,
-        repo,
-        pull_number: thread.githubPRNumber,
-      });
-      if (pr.base?.ref && pr.base.ref !== branch) {
-        return pr.base.ref;
-      }
-    } catch (err) {
-      console.warn(
-        "[hatchet] could not resolve PR base branch — baseBranch unset",
-        {
-          threadId,
-          prNumber: thread.githubPRNumber,
-          error: err instanceof Error ? err.message : String(err),
-        },
-      );
-    }
-    return undefined;
-  };
-
-  // #66 slice 1: resolve the per-repo egress SHAPE alongside the PR base-branch
-  // fetch (both depend only on the thread row already loaded — no reason to
-  // serialize a DB read behind a GitHub round-trip), LIVE from the settings row
-  // (a dashboard write applies on the next dispatch). null (no org / no row /
-  // policy unset) → field omitted = no enforcement, today's behavior. An INVALID
-  // stored policy throws here, failing the dispatch loudly rather than launching
-  // with a silently-wrong policy.
-  const [baseBranch, egressPolicy] = await Promise.all([
-    resolveBaseBranch(),
-    resolveEgressPolicy({
-      db,
-      organizationId: thread?.organizationId,
-      repoFullName,
-      plane: "worker",
-    }).then((shape) => shape ?? undefined),
-  ]);
-
-  // #3/#7 wire contract: orgId is NEVER null (a personal/no-org thread falls back
-  // to a per-user key) so the Phase-2 per-org concurrency CEL never dereferences
-  // null. prNumber comes from the same thread row already loaded for baseBranch.
-  const orgId = thread?.organizationId ?? `u:${userId}`;
-  const prNumber = thread?.githubPRNumber ?? undefined;
-
-  // #7 trace join: mint a W3C traceparent at the dispatch boundary so the worker's
-  // run span and the daemon-event → GitHub-post can be stitched into one trace by a
-  // collector later. Never carries the tokens/prompt — it is opaque random ids.
-  const traceparent = generateTraceparent();
-
-  const baseInput: AgentRunInput = {
-    threadId,
-    threadChatId,
-    repoFullName,
-    branch,
-    baseBranch,
-    daemonCallbackUrl: nonLocalhostPublicAppUrl(),
-    installationToken,
-    daemonToken,
-    orgId,
-    prNumber,
-    traceparent,
-    egressPolicy,
-  };
-  console.log("[hatchet] dispatching agent-run", {
-    threadId,
-    threadChatId,
-    repoFullName,
-    branch,
-    orgId,
-    prNumber,
-    traceparent,
-  });
-
-  // #8 supersede eligibility: ONLY a PR-REVIEW run (a `pull_request`-triggered
-  // automation) in a REAL org supersedes a prior review. Mentions (`github_mention`)
-  // and personal/no-org threads never do — and the hatchet_run FK needs a real org id,
-  // not the `u:${userId}` concurrency fallback. Determined from the already-loaded
-  // thread (its automationId), so no extra fetch. The narrowed object is null unless
-  // all conditions hold (so `organizationId`/`prNumber` are non-null downstream).
-  const reviewContext =
-    thread?.organizationId != null &&
-    prNumber !== undefined &&
-    (await isReviewThread({
-      db,
-      userId,
-      automationId: thread.automationId ?? null,
-      organizationId: thread.organizationId,
-    }))
-      ? { organizationId: thread.organizationId, prNumber }
-      : null;
-
-  // #125/#127: ONE plan for the dispatch mode. Flag OFF (or a non-review run)
-  // → legacy: no extension, no opts, byte-identical payload (IRON golden).
-  // Flag ON on a review run → the resolved policy picks the workflow variant,
-  // the input gains prKey/deliveryId + the policy SNAPSHOT, and the metadata
-  // is enriched. The three native policies leave supersession to the engine's
-  // per-PR strategy; only 'app-side' (and the legacy path) keeps the #8
-  // control-plane cancel pass.
-  const plan = await planSupersede({
-    enabled: supersedeFlagOn,
-    reviewContext,
-    thread,
-    threadId,
-    threadChatId,
-    orgId,
-    repoFullName,
-    deliveryId,
-  });
-  const input: AgentRunInput = { ...baseInput, ...plan.inputExtension };
-
-  if (reviewContext && plan.appSideCancel) {
-    await supersedePriorReviewRuns({
-      organizationId: reviewContext.organizationId,
-      repoFullName,
-      prNumber: reviewContext.prNumber,
-      currentThreadId: threadId,
-    });
-  }
-
+  // From here on a minted token exists: EVERY failure before the trigger lands
+  // (base-branch resolve, egress resolve, planSupersede — which throws on a
+  // corrupt stored policy — the app-side cancel pass) must revoke it in the
+  // catch below, or hasActiveDaemonToken() would report a phantom run for this
+  // runKey and silently no-op every retry for the token's TTL (review on #135).
   try {
+    // BUG-EXEC-02: the review agent needs the PR's BASE branch to compute the delta
+    // offline (`git diff origin/<base>...HEAD`). thread.repoBaseBranchName is NOT the
+    // base — for a thread working on an existing branch it holds the HEAD/working branch
+    // (cli-router.ts: headBranchName = createNewBranch ? null : repoBaseBranchName), so
+    // sourcing from it left baseBranch undefined and the worker never fetched origin/main.
+    // Resolve the REAL, per-PR base from the PR itself (App octokit). Undefined (non-PR
+    // thread, fetch fails, or base==head) → provision skips the base-fetch (head-only).
+    const resolveBaseBranch = async (): Promise<string | undefined> => {
+      if (!thread?.githubPRNumber) {
+        return undefined;
+      }
+      try {
+        const octokit = await getOctokitForApp({ owner, repo });
+        const { data: pr } = await octokit.rest.pulls.get({
+          owner,
+          repo,
+          pull_number: thread.githubPRNumber,
+        });
+        if (pr.base?.ref && pr.base.ref !== branch) {
+          return pr.base.ref;
+        }
+      } catch (err) {
+        console.warn(
+          "[hatchet] could not resolve PR base branch — baseBranch unset",
+          {
+            threadId,
+            prNumber: thread.githubPRNumber,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+      }
+      return undefined;
+    };
+
+    // #66 slice 1: resolve the per-repo egress SHAPE alongside the PR base-branch
+    // fetch (both depend only on the thread row already loaded — no reason to
+    // serialize a DB read behind a GitHub round-trip), LIVE from the settings row
+    // (a dashboard write applies on the next dispatch). null (no org / no row /
+    // policy unset) → field omitted = no enforcement, today's behavior. An INVALID
+    // stored policy throws here, failing the dispatch loudly rather than launching
+    // with a silently-wrong policy.
+    const [baseBranch, egressPolicy] = await Promise.all([
+      resolveBaseBranch(),
+      resolveEgressPolicy({
+        db,
+        organizationId: thread?.organizationId,
+        repoFullName,
+        plane: "worker",
+      }).then((shape) => shape ?? undefined),
+    ]);
+
+    // #3/#7 wire contract: orgId is NEVER null (a personal/no-org thread falls back
+    // to a per-user key) so the Phase-2 per-org concurrency CEL never dereferences
+    // null. prNumber comes from the same thread row already loaded for baseBranch.
+    const orgId = thread?.organizationId ?? `u:${userId}`;
+    const prNumber = thread?.githubPRNumber ?? undefined;
+
+    // #7 trace join: mint a W3C traceparent at the dispatch boundary so the worker's
+    // run span and the daemon-event → GitHub-post can be stitched into one trace by a
+    // collector later. Never carries the tokens/prompt — it is opaque random ids.
+    const traceparent = generateTraceparent();
+
+    const baseInput: AgentRunInput = {
+      threadId,
+      threadChatId,
+      repoFullName,
+      branch,
+      baseBranch,
+      daemonCallbackUrl: nonLocalhostPublicAppUrl(),
+      installationToken,
+      daemonToken,
+      orgId,
+      prNumber,
+      traceparent,
+      egressPolicy,
+    };
+    console.log("[hatchet] dispatching agent-run", {
+      threadId,
+      threadChatId,
+      repoFullName,
+      branch,
+      orgId,
+      prNumber,
+      traceparent,
+    });
+
+    // #8 supersede eligibility: ONLY a PR-REVIEW run (a `pull_request`-triggered
+    // automation) in a REAL org supersedes a prior review. Mentions (`github_mention`)
+    // and personal/no-org threads never do — and the hatchet_run FK needs a real org id,
+    // not the `u:${userId}` concurrency fallback. Determined from the already-loaded
+    // thread (its automationId), so no extra fetch. The narrowed object is null unless
+    // all conditions hold (so `organizationId`/`prNumber` are non-null downstream).
+    const reviewContext =
+      thread?.organizationId != null &&
+      prNumber !== undefined &&
+      (await isReviewThread({
+        db,
+        userId,
+        automationId: thread.automationId ?? null,
+        organizationId: thread.organizationId,
+      }))
+        ? { organizationId: thread.organizationId, prNumber }
+        : null;
+
+    // #125/#127: ONE plan for the dispatch mode. Flag OFF (or a non-review run)
+    // → legacy: no extension, no opts, byte-identical payload (IRON golden).
+    // Flag ON on a review run → the resolved policy picks the workflow variant,
+    // the input gains prKey/deliveryId + the policy SNAPSHOT, and the metadata
+    // is enriched. The three native policies leave supersession to the engine's
+    // per-PR strategy; only 'app-side' (and the legacy path) keeps the #8
+    // control-plane cancel pass.
+    const plan = await planSupersede({
+      enabled: supersedeFlagOn,
+      reviewContext,
+      thread,
+      threadId,
+      threadChatId,
+      orgId,
+      repoFullName,
+      deliveryId,
+    });
+    const input: AgentRunInput = { ...baseInput, ...plan.inputExtension };
+
+    if (reviewContext && plan.appSideCancel) {
+      await supersedePriorReviewRuns({
+        organizationId: reviewContext.organizationId,
+        repoFullName,
+        prNumber: reviewContext.prNumber,
+        currentThreadId: threadId,
+      });
+    }
+
     // The token is minted BEFORE the trigger (the input carries its value). Retry
-    // absorbs transients; only a FINAL failure lands here.
+    // absorbs transients; only a FINAL failure lands in the catch below.
     const { externalId } = await triggerWithRetry(
       input,
       threadId,

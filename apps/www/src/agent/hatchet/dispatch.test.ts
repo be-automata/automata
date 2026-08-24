@@ -538,8 +538,12 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
     vi.unstubAllGlobals();
   });
 
-  it("unknown stored policy → dispatch THROWS, nothing is triggered", async () => {
+  it("unknown stored policy → dispatch FAILS the thread loudly, nothing is triggered, and the minted token is revoked (no phantom run)", async () => {
     const t = await makeReviewThread(80);
+    const runKey = daemonRunKey({
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+    });
     await upsertRepoReviewSetting({
       db,
       organizationId: orgId,
@@ -560,8 +564,19 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
         repoFullName: "be-automata/automata",
         branch: "feature",
       }),
-    ).rejects.toThrow(/Unknown supersedePolicy 'zzz'/);
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/Failed to dispatch/),
+      cause: expect.objectContaining({
+        message: expect.stringMatching(/Unknown supersedePolicy 'zzz'/),
+      }),
+    });
     expect(f.mock).not.toHaveBeenCalled();
+    // The token minted before planSupersede must not survive the failure —
+    // otherwise hasActiveDaemonToken() reports a phantom run for this runKey
+    // and every retry for the token's TTL silently no-ops.
+    expect(await hasActiveDaemonToken({ userId: user.id, name: runKey })).toBe(
+      false,
+    );
     vi.unstubAllGlobals();
   });
 
