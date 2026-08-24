@@ -247,6 +247,9 @@ export async function runSupersedeSweep(
     db,
     olderThanMs: orphanAfterMs,
     now,
+    // Same gate as hatchetDispatchEnabled(): with HATCHET_ENABLED every review
+    // thread is remote regardless of its (local-default) provider column.
+    remoteProviderOnly: !env.HATCHET_ENABLED,
   });
   for (const t of orphans) {
     const applied = await markThreadTerminal({

@@ -1560,10 +1560,19 @@ export async function findOrphanRemoteThreads({
   db,
   olderThanMs,
   now = new Date(),
+  remoteProviderOnly = true,
 }: {
   db: DB;
   olderThanMs: number;
   now?: Date;
+  /**
+   * Restrict to threads pinned to `sandboxProvider = "hatchet-remote"`. Pass
+   * FALSE when the deployment dispatches EVERY thread remotely
+   * (`HATCHET_ENABLED` — the same gate as `hatchetDispatchEnabled`): there the
+   * provider column keeps its local default ("docker" in production) and a
+   * provider filter would make the rule silently match nothing.
+   */
+  remoteProviderOnly?: boolean;
 }): Promise<{ id: string; createdAt: Date }[]> {
   return db
     .select({ id: schema.thread.id, createdAt: schema.thread.createdAt })
@@ -1578,7 +1587,9 @@ export async function findOrphanRemoteThreads({
     )
     .where(
       and(
-        eq(schema.thread.sandboxProvider, "hatchet-remote"),
+        remoteProviderOnly
+          ? eq(schema.thread.sandboxProvider, "hatchet-remote")
+          : undefined,
         threadEffectiveStatusIn(["booting"]),
         isNotNull(schema.thread.organizationId),
         isNotNull(schema.thread.githubPRNumber),

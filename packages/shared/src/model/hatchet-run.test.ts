@@ -564,6 +564,49 @@ describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () 
     expect(ids).not.toContain(chatMode.threadId);
   });
 
+  it("findOrphanRemoteThreads with remoteProviderOnly=false (HATCHET_ENABLED deployments) matches a review thread whose provider column is the local default", async () => {
+    const reviewAutomation = await createTestAutomation({
+      db,
+      userId,
+      values: {
+        organizationId: orgA,
+        triggerType: "pull_request",
+        repoFullName: "acme/widgets",
+        triggerConfig: { on: { open: true, update: true }, filter: {} },
+      },
+    });
+    const t = await createTestThread({
+      db,
+      userId,
+      overrides: {
+        organizationId: orgA,
+        sandboxProvider: "docker", // what production stamps under HATCHET_ENABLED
+        githubRepoFullName: "acme/widgets",
+        githubPRNumber: 13,
+        automationId: reviewAutomation.id,
+      },
+    });
+    await db
+      .update(threadTable)
+      .set({
+        status: "booting",
+        createdAt: new Date(Date.now() - 20 * 60 * 1000),
+      })
+      .where(eq(threadTable.id, t.threadId));
+    const strict = (
+      await findOrphanRemoteThreads({ db, olderThanMs: 15 * 60 * 1000 })
+    ).map((x) => x.id);
+    expect(strict).not.toContain(t.threadId);
+    const all = (
+      await findOrphanRemoteThreads({
+        db,
+        olderThanMs: 15 * 60 * 1000,
+        remoteProviderOnly: false,
+      })
+    ).map((x) => x.id);
+    expect(all).toContain(t.threadId);
+  });
+
   it("findOrphanRemoteThreads sees a CHAT-MODE review thread whose chat row is stuck in booting", async () => {
     const reviewAutomation = await createTestAutomation({
       db,
