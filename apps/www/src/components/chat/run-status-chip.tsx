@@ -67,7 +67,14 @@ export function runStatusChipModel({
       };
     case "discarded":
     case "stale-skipped":
-      return { label, detail: detail + policyNote, tone: "warning", cause };
+      // Policy-caused outcomes deep-link to the org's policy page (C6).
+      return {
+        label,
+        detail: detail + policyNote,
+        tone: "warning",
+        cause,
+        href: "/settings/review-automations",
+      };
     case "user-cancelled":
       return { label, detail, tone: "neutral", cause };
     case "timeout":

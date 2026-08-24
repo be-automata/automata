@@ -15,6 +15,8 @@ export interface RepoReviewSettingDto {
   repoFullName: string;
   blockTolerance: BlockTolerance;
   reviewDraftPrs: boolean;
+  supersedePolicy: string | null;
+  recheckOnComplete: boolean;
   updatedAt: string;
 }
 

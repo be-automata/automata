@@ -7,6 +7,11 @@ import {
   removeRepoReviewSetting,
 } from "@terragon/shared/model/repo-review-settings";
 
+// #125 C6: these cases exercise validation/DTO shape; the permission gate has
+// its own suite (route.permissions.test.ts) — pin it open here.
+vi.mock("@/lib/org-role", () => ({
+  isOrgAdmin: vi.fn().mockResolvedValue(true),
+}));
 vi.mock("@/lib/auth-server", () => ({
   getTenantContextOrNull: vi.fn(),
 }));

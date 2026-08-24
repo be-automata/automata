@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getTenantContextOrNull } from "@/lib/auth-server";
-import { listRepoReviewSettings } from "@terragon/shared/model/repo-review-settings";
+import {
+  listRepoReviewSettings,
+  ORG_DEFAULT_REPO_SENTINEL,
+} from "@terragon/shared/model/repo-review-settings";
 
 /**
  * GET /api/review-settings
@@ -25,11 +28,16 @@ export async function GET(): Promise<NextResponse> {
     organizationId: ctx.organizationId,
   });
   return NextResponse.json({
-    settings: rows.map((r) => ({
-      repoFullName: r.repoFullName,
-      blockTolerance: r.blockTolerance,
-      reviewDraftPrs: r.reviewDraftPrs,
-      updatedAt: r.updatedAt,
-    })),
+    settings: rows
+      // The org-default sentinel has its own endpoint (/api/review-settings/default).
+      .filter((r) => r.repoFullName !== ORG_DEFAULT_REPO_SENTINEL)
+      .map((r) => ({
+        repoFullName: r.repoFullName,
+        blockTolerance: r.blockTolerance,
+        reviewDraftPrs: r.reviewDraftPrs,
+        supersedePolicy: r.supersedePolicy,
+        recheckOnComplete: r.recheckOnComplete,
+        updatedAt: r.updatedAt,
+      })),
   });
 }

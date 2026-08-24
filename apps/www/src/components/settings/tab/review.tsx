@@ -16,6 +16,7 @@ import {
 } from "@/queries/review-settings-queries";
 import { ToleranceMatrix } from "@/components/settings/review-tolerance/tolerance-matrix";
 import { OrgFloorCard } from "@/components/settings/review-tolerance/org-floor-card";
+import { SupersedePolicySection } from "@/components/settings/review-supersede/supersede-policy-section";
 import { RepoRow } from "@/components/settings/review-tolerance/repo-row";
 import {
   ConfirmLoosenDialog,
@@ -210,6 +211,7 @@ export function ReviewSettings() {
   return (
     <div className="flex flex-col gap-8">
       <OrgFloorCard />
+      <SupersedePolicySection />
 
       <SettingsSection
         label="Review Tolerance"
