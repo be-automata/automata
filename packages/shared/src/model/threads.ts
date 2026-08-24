@@ -1478,7 +1478,8 @@ export async function markThreadsTerminal({
   // effective status — getThreadChat's alias, the daemon-event fence — sees
   // the terminal. A non-live row (e.g. the never-started thread row of a
   // chat-mode thread) simply doesn't match. The typed cause is a thread-row
-  // column (the run ledger's join key), stamped there regardless.
+  // column (the run ledger's join key); for threads that moved via their chat
+  // row it is stamped on the thread row in a follow-up write below.
   const [threadRows, chatRows] = await Promise.all([
     db
       .update(schema.thread)
@@ -1506,6 +1507,25 @@ export async function markThreadsTerminal({
   ]);
   const updated = new Map<string, string>();
   for (const r of [...threadRows, ...chatRows]) updated.set(r.id, r.userId);
+
+  // Chat-mode threads moved via their chat row only: the thread row (frozen at
+  // its creation status, never reapable) still owns the typed cause, so stamp
+  // it there too — exactly once (the WHERE keeps a retry from rewriting it).
+  const movedViaThreadRow = new Set(threadRows.map((r) => r.id));
+  const chatOnly = chatRows
+    .map((r) => r.id)
+    .filter((id) => !movedViaThreadRow.has(id));
+  if (chatOnly.length > 0) {
+    await db
+      .update(schema.thread)
+      .set({ terminalCause: cause })
+      .where(
+        and(
+          inArray(schema.thread.id, chatOnly),
+          isNull(schema.thread.terminalCause),
+        ),
+      );
+  }
 
   await Promise.all(
     [...updated].map(([threadId, userId]) =>

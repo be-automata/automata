@@ -7,7 +7,7 @@ import {
   thread as threadTable,
   threadChat as threadChatTable,
 } from "../db/schema";
-import { reapableThreadStatuses } from "./threads";
+import { markThreadsTerminal, reapableThreadStatuses } from "./threads";
 import { ThreadStatus } from "../db/types";
 import { createOrganization } from "./organizations";
 import {
@@ -562,6 +562,60 @@ describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () 
       (c) => c.threadId,
     );
     expect(ids).not.toContain(chatMode.threadId);
+  });
+
+  it("markThreadsTerminal stamps terminalCause on the THREAD row of a chat-mode thread whose live status is on threadChat (exactly once)", async () => {
+    const chatMode = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 78,
+      externalId: "ext-chat-cause",
+      enableThreadChatCreation: true,
+    });
+    expect(
+      await markThreadsTerminal({
+        db,
+        threadIds: [chatMode.threadId],
+        cause: "superseded",
+      }),
+    ).toEqual([chatMode.threadId]);
+    const row = async () =>
+      (
+        await db
+          .select({
+            status: threadTable.status,
+            terminalCause: threadTable.terminalCause,
+          })
+          .from(threadTable)
+          .where(eq(threadTable.id, chatMode.threadId))
+      )[0]!;
+    const chat = async () =>
+      (
+        await db
+          .select({
+            status: threadChatTable.status,
+            errorMessage: threadChatTable.errorMessage,
+          })
+          .from(threadChatTable)
+          .where(eq(threadChatTable.id, chatMode.threadChatId))
+      )[0]!;
+    expect(await chat()).toEqual({
+      status: "complete",
+      errorMessage: "superseded",
+    });
+    const first = await row();
+    expect(first.terminalCause).toBe("superseded");
+    expect(reapableThreadStatuses).not.toContain(first.status); // thread row untouched otherwise
+    // A retry moves nothing and rewrites nothing.
+    expect(
+      await markThreadsTerminal({
+        db,
+        threadIds: [chatMode.threadId],
+        cause: "timeout",
+      }),
+    ).toEqual([]);
+    expect((await row()).terminalCause).toBe("superseded");
   });
 
   it("findOrphanRemoteThreads with remoteProviderOnly=false (HATCHET_ENABLED deployments) matches a review thread whose provider column is the local default", async () => {
