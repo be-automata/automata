@@ -1,5 +1,5 @@
 import { hello } from "./hello/workflow";
-import { agentRunWorkflow } from "./agent-run/workflow";
+import { agentRunWorkflows } from "./agent-run/workflow";
 
 /**
  * The set of workflows this worker registers with the engine. The worker bootstrap
@@ -11,4 +11,4 @@ import { agentRunWorkflow } from "./agent-run/workflow";
  * Ownership boundary: workflow authors (agent-run steps) append their exported task
  * here; they do not need to touch the worker bootstrap.
  */
-export const workflows = [hello, agentRunWorkflow];
+export const workflows = [hello, ...agentRunWorkflows];

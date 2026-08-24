@@ -4,6 +4,7 @@ import {
   postEgressEvents,
   pollUntilTerminal,
   postRunFailed,
+  postRunSuperseded,
   pullAgentCredentials,
   pullNextMessage,
   type PollContext,
@@ -502,5 +503,60 @@ describe("pullAgentCredentials (D1 credential delivery)", () => {
     await pullAgentCredentials(opts, controller.signal);
 
     expect(fetchMock.mock.calls[0]![1].signal).toBe(controller.signal);
+  });
+});
+
+describe("postRunSuperseded (#125 C1)", () => {
+  const opts = {
+    baseUrl: "https://www.example.com/",
+    daemonToken: "tok",
+    threadId: "thr_1",
+    threadChatId: "tc_1",
+    traceparent: "00-aa-bb-01",
+  };
+
+  it("POSTs the fenced terminal body and reports applied", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ applied: true }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const r = await postRunSuperseded(opts, {
+      runExternalId: "run-1",
+      policy: "newest-wins",
+    });
+    expect(r).toBe("applied");
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://www.example.com/api/daemon/run-terminal");
+    expect(init.headers["x-daemon-token"]).toBe("tok");
+    expect(init.headers.traceparent).toBe("00-aa-bb-01");
+    expect(JSON.parse(init.body)).toEqual({
+      threadId: "thr_1",
+      threadChatId: "tc_1",
+      runExternalId: "run-1",
+      cause: "superseded",
+      detail: { policy: "newest-wins" },
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("409 (generation fence) → 'rejected', never throws", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("superseded", { status: 409 })),
+    );
+    await expect(
+      postRunSuperseded(opts, { runExternalId: "old", policy: "newest-wins" }),
+    ).resolves.toBe("rejected");
+    vi.unstubAllGlobals();
+  });
+
+  it("network failure → 'error', swallowed", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNRESET")));
+    await expect(
+      postRunSuperseded(opts, { runExternalId: "r", policy: "newest-wins" }),
+    ).resolves.toBe("error");
+    vi.unstubAllGlobals();
   });
 });

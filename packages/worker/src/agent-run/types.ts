@@ -69,6 +69,30 @@ export type AgentRunInput = {
    * (egress-proxy.ts) and daemon-env points the child at it.
    */
   egressPolicy?: EgressPolicyShape;
+  /**
+   * #125 (C2 stamps, C1 consumes): per-PR concurrency key
+   * `${orgId}/${repo}/${prNumber}`. Present ONLY on runs dispatched to a
+   * policy variant (agent-run-newest / -strict / -discard) — the variants'
+   * per-PR CEL entry references `input.prKey` as a field. Absent on the legacy
+   * `agent-run` workflow, which has no per-PR entry.
+   */
+  prKey?: string;
+  /**
+   * #125: the run's idempotency identity (webhook delivery id, or a synthetic
+   * per-dispatch id). The variants' task config dedupes on it (24h TTL).
+   */
+  deliveryId?: string;
+  /**
+   * #125: the supersede-policy SNAPSHOT stamped at dispatch — the authority
+   * for this run's terminal cause when the engine cancels it. Structural
+   * mirror of the www union; absent on legacy runs.
+   */
+  supersedePolicy?:
+    | "newest-wins"
+    | "complete-run-queue"
+    | "complete-run-discard"
+    | "app-side";
+  recheckOnComplete?: boolean;
 };
 
 export type AgentRunOutput = {

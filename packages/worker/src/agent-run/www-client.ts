@@ -216,6 +216,71 @@ export async function postRunFailed(
  * /api/daemon/egress-event body schema (#66 §3.3): `destinationPort` and
  * `policyLevel` optional, `source` fixed to "worker" for this plane.
  */
+/**
+ * Typed terminal causes the worker can post (#125 C1; the full taxonomy is
+ * C4's). `superseded` = the engine cancelled this run under a native per-PR
+ * policy. Structural mirror of the www route's enum — never imported.
+ */
+export type RunTerminalCause = "superseded";
+
+/**
+ * POST the explicit `superseded` terminal for a run the engine cancelled
+ * (#125 C1) — the sibling of postRunFailed. www fences it by generation:
+ * `runExternalId` must equal the thread's active run or the write is refused
+ * (409). Idempotent per (thread, run): retries never double-apply. Never
+ * throws — a cancelled run's terminal is best-effort, the C4 sweep is the
+ * backstop.
+ *
+ * Returns "applied" | "noop" | "rejected" | "error" for the caller's log line.
+ */
+export async function postRunSuperseded(
+  opts: WwwClientOpts,
+  {
+    runExternalId,
+    policy,
+    supersededBy,
+  }: {
+    runExternalId: string;
+    policy: string;
+    supersededBy?: string;
+  },
+): Promise<"applied" | "noop" | "rejected" | "error"> {
+  let res: Response;
+  try {
+    res = await fetch(endpoint(opts.baseUrl, "/api/daemon/run-terminal"), {
+      method: "POST",
+      headers: headers(opts),
+      body: JSON.stringify({
+        threadId: opts.threadId,
+        threadChatId: opts.threadChatId,
+        runExternalId,
+        cause: "superseded" satisfies RunTerminalCause,
+        detail: { policy, ...(supersededBy ? { supersededBy } : {}) },
+      }),
+    });
+  } catch (error) {
+    console.error("[agent-run] postRunSuperseded request failed (swallowed)", {
+      threadId: opts.threadId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return "error";
+  }
+  if (res.status === 409) {
+    // A newer generation already owns the thread — exactly the race the
+    // fence exists to close. Not an error.
+    return "rejected";
+  }
+  if (!res.ok) {
+    console.error("[agent-run] postRunSuperseded non-2xx", {
+      threadId: opts.threadId,
+      status: res.status,
+    });
+    return "error";
+  }
+  const body = (await res.json().catch(() => ({}))) as { applied?: boolean };
+  return body.applied ? "applied" : "noop";
+}
+
 export interface EgressEventWire {
   destinationHost: string;
   destinationPort?: number;
