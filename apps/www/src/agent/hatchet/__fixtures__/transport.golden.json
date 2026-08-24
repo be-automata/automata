@@ -8,9 +8,9 @@
       "branch": "main",
       "daemonCallbackUrl": "http://localhost:3000",
       "installationToken": "mock-github-token",
-      "daemonToken": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "daemonToken": "__DAEMON_TOKEN__",
       "orgId": "__ORG_ID__",
-      "traceparent": "00-05050505050505050505050505050505-0606060606060606-01"
+      "traceparent": "__TRACEPARENT__"
     },
     "additionalMetadata": {
       "threadId": "__THREAD_ID__",
@@ -26,10 +26,10 @@
       "branch": "feature-golden",
       "daemonCallbackUrl": "http://localhost:3000",
       "installationToken": "mock-github-token",
-      "daemonToken": "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+      "daemonToken": "__DAEMON_TOKEN__",
       "orgId": "__ORG_ID__",
       "prNumber": 4242,
-      "traceparent": "00-09090909090909090909090909090909-0a0a0a0a0a0a0a0a-01"
+      "traceparent": "__TRACEPARENT__"
     },
     "additionalMetadata": {
       "threadId": "__THREAD_ID__",

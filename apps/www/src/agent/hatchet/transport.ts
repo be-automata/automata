@@ -4,12 +4,15 @@
  * cloudflared tunnel. This is the ONE place the transport lives.
  */
 
-import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
+import type {
+  SupersedePolicy,
+  SupersedeSnapshot,
+} from "@terragon/shared/model/repo-review-settings";
 
 /**
  * #125/#127: which registered workflow VARIANT each supersede policy dispatches
- * to. STRUCTURALLY DUPLICATED in the worker's variant table
- * (packages/worker/src/agent-run/workflow.ts) — the planes share no imports
+ * to. STRUCTURALLY DUPLICATED (not imported) by the worker's variant table
+ * (packages/worker/src/agent-run/workflow.ts, landing in C1/#126) — the planes share no imports
  * (composability invariant), so a drift between the two tables is caught by
  * C3's E2E, not the type system. 'app-side' deliberately routes to the default
  * 'agent-run' workflow: the control plane keeps the legacy #8 cancel rules and
@@ -69,6 +72,56 @@ export function validateRunMetadata(
   return metadata;
 }
 
+/** The wire metadata schema (metaVersion "1") stamped on a flag-ON review run. */
+export const RUN_METADATA_VERSION = "1";
+
+/**
+ * Build the enriched, versioned metadata for a flag-ON review dispatch and
+ * validate it against the limits above. Dispatch passes DOMAIN values; the
+ * wire keys and the version live here, next to the limits they must satisfy.
+ * The policy snapshot is spread whole so metadata can never drift from input.
+ */
+export function buildReviewRunMetadata({
+  threadId,
+  threadChatId,
+  orgId,
+  repoFullName,
+  prNumber,
+  snapshot,
+  skillVersion,
+}: {
+  threadId: string;
+  threadChatId: string;
+  orgId: string;
+  /** Already-normalized (lowercase) slug. */
+  repoFullName: string;
+  prNumber: number;
+  snapshot: SupersedeSnapshot;
+  skillVersion?: string;
+}): Record<string, string> {
+  return validateRunMetadata({
+    metaVersion: RUN_METADATA_VERSION,
+    threadId,
+    threadChatId,
+    orgId,
+    repoFullName,
+    prNumber: String(prNumber),
+    lane: "review",
+    supersedePolicy: snapshot.policy,
+    recheckOnComplete: String(snapshot.recheckOnComplete),
+    ...(skillVersion ? { skillVersion } : {}),
+  });
+}
+
+/**
+ * Flag-ON trigger extension. Absent → the legacy payload, byte-identical
+ * (guarded by dispatch-golden.test.ts).
+ */
+export type TriggerOpts = {
+  workflowName?: string;
+  additionalMetadata?: Record<string, string>;
+};
+
 export interface HatchetTriggerConfig {
   /** Engine REST base (via the tunnel). Changes per quick-tunnel run → from env. */
   apiUrl: string;
@@ -111,17 +164,7 @@ export async function triggerAgentRun<
 >(
   input: T,
   config: HatchetTriggerConfig,
-  /**
-   * #125/#127 flag-ON extension point. ABSENT (the default, and always absent
-   * when the supersedePolicy flag is off) → the legacy payload, byte-identical:
-   * workflowName 'agent-run' + the minimal threadId/threadChatId metadata
-   * (guarded by the IRON golden in dispatch-golden.test.ts). Present → the
-   * policy-selected variant name and the enriched, validated metadata.
-   */
-  opts?: {
-    workflowName?: string;
-    additionalMetadata?: Record<string, string>;
-  },
+  opts?: TriggerOpts,
 ): Promise<{ externalId: string | undefined }> {
   const { apiUrl, tenantId, apiToken } = requireHatchetConfig(
     config,

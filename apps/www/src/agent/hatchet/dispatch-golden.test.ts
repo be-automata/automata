@@ -7,12 +7,15 @@ import {
   createTestThread,
 } from "@terragon/shared/model/test-helpers";
 import { createOrganization } from "@terragon/shared/model/organizations";
-import { createAutomation } from "@terragon/shared/model/automations";
 import { nanoid } from "nanoid";
 import { User } from "@terragon/shared";
-import { thread as threadTable } from "@terragon/shared/db/schema";
-import { eq } from "drizzle-orm";
 import { dispatchAgentRun } from "./dispatch";
+import {
+  createReviewAutomation,
+  createBootingPRThread,
+  routedHatchetFetch,
+  triggerBody,
+} from "./__fixtures__/review-thread";
 
 /**
  * #125/#127 IRON regression golden: with the `supersedePolicy` feature flag OFF
@@ -21,10 +24,11 @@ import { dispatchAgentRun } from "./dispatch";
  * supersede-policy work landed. Literal deep equality against a versioned
  * fixture, not an exclusion list.
  *
- * The fixture was captured from the pre-change dispatch path with every
- * nondeterministic input pinned (tokens, traceparent, ids). Run-specific ids
- * are stored as __PLACEHOLDER__ strings and substituted with the live values
- * before comparison — every key is still compared, nothing is skipped.
+ * The fixture was captured from the pre-change dispatch path. Run-specific
+ * values (ids, the minted daemon token, the traceparent) are stored as
+ * __PLACEHOLDER__ strings and substituted with the live values before
+ * comparison — every key is still compared, nothing is skipped; the two
+ * random fields are additionally shape-asserted.
  *
  * To regenerate (ONLY for a deliberate, reviewed contract change):
  *   UPDATE_DISPATCH_GOLDEN=1 pnpm -C apps/www exec vitest run src/agent/hatchet/dispatch-golden.test.ts
@@ -33,16 +37,6 @@ import { dispatchAgentRun } from "./dispatch";
 const FIXTURE_PATH = join(__dirname, "__fixtures__", "transport.golden.json");
 
 const GOLDEN_PR_NUMBER = 4242;
-
-/**
- * Deterministic-but-unique RNG for the dispatch windows: each getRandomValues
- * call fills the buffer with the next counter byte. Unique per call (so two
- * dispatches never mint colliding apikey ids) yet identical across runs (so the
- * traceparent/token bytes in the fixture reproduce), as long as the number of
- * RNG calls per dispatch is stable — which it is, same code path. The counter
- * is FILE-GLOBAL and never resets, mirroring capture order = verify order.
- */
-let rngCallCounter = 0;
 
 type Placeholders = Record<string, string>;
 
@@ -90,29 +84,8 @@ describe("dispatch golden (flag OFF byte-identical)", () => {
     threadChatId: string;
     branch: string;
   }): Promise<unknown> {
-    const fetchMock = vi.fn(async (url: string) => {
-      if (String(url).includes("/tasks/cancel")) {
-        return new Response("{}", { status: 200 });
-      }
-      return new Response(
-        JSON.stringify({ run: { metadata: { id: "golden-run" } } }),
-        { status: 200 },
-      );
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    // Counter RNG for the DISPATCH WINDOW ONLY (deterministic traceparent +
-    // daemon token). Scoped here so test-data id generation stays random.
-    const rngSpy = vi
-      .spyOn(globalThis.crypto, "getRandomValues")
-      .mockImplementation(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ((buf: any) => {
-          rngCallCounter = (rngCallCounter + 1) & 0xff;
-          if (buf) new Uint8Array(buf.buffer ?? buf).fill(rngCallCounter);
-          return buf;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        }) as any,
-      );
+    const { mock } = routedHatchetFetch("golden-run");
+    vi.stubGlobal("fetch", mock);
     try {
       await dispatchAgentRun({
         userId: user.id,
@@ -121,19 +94,43 @@ describe("dispatch golden (flag OFF byte-identical)", () => {
         repoFullName: "be-automata/automata",
         branch: args.branch,
       });
-      const triggerCall = (
-        fetchMock.mock.calls as unknown as [string, RequestInit][]
-      ).find(([u]) => String(u).includes("/workflow-runs/trigger"));
-      expect(triggerCall).toBeDefined();
-      return JSON.parse(triggerCall![1].body as string);
+      return triggerBody(mock);
     } finally {
-      rngSpy.mockRestore();
       vi.unstubAllGlobals();
     }
   }
 
-  function loadFixture(): { plain: unknown; review: unknown } {
-    return JSON.parse(readFileSync(FIXTURE_PATH, "utf8"));
+  /** Compare against the fixture, or (UPDATE_DISPATCH_GOLDEN=1) record it. */
+  function assertOrRecordGolden(
+    key: "plain" | "review",
+    body: unknown,
+    t: { threadId: string; threadChatId: string },
+  ) {
+    // The two per-dispatch random fields are pinned as placeholders AFTER a
+    // shape assertion — they are still compared, never excluded.
+    const input = (body as { input: Record<string, unknown> }).input;
+    expect(input.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+    expect(input.daemonToken).toMatch(/^[A-Za-z0-9_-]{64}$/);
+    const values: Placeholders = {
+      __THREAD_ID__: t.threadId,
+      __THREAD_CHAT_ID__: t.threadChatId,
+      __ORG_ID__: orgId,
+      __TRACEPARENT__: input.traceparent as string,
+      __DAEMON_TOKEN__: input.daemonToken as string,
+    };
+    let fixture: Record<string, unknown> = {};
+    try {
+      fixture = JSON.parse(readFileSync(FIXTURE_PATH, "utf8"));
+    } catch {
+      if (!process.env.UPDATE_DISPATCH_GOLDEN)
+        throw new Error("missing golden");
+    }
+    if (process.env.UPDATE_DISPATCH_GOLDEN) {
+      fixture[key] = abstract(body, values);
+      writeFileSync(FIXTURE_PATH, JSON.stringify(fixture, null, 2) + "\n");
+      return;
+    }
+    expect(body).toEqual(materialize(fixture[key], values));
   }
 
   it("plain org thread (no PR): payload matches the golden literally", async () => {
@@ -147,85 +144,22 @@ describe("dispatch golden (flag OFF byte-identical)", () => {
       threadChatId: t.threadChatId,
       branch: "main",
     });
-    const values: Placeholders = {
-      __THREAD_ID__: t.threadId,
-      __THREAD_CHAT_ID__: t.threadChatId,
-      __ORG_ID__: orgId,
-    };
-    if (process.env.UPDATE_DISPATCH_GOLDEN) {
-      const current = loadFixtureOrEmpty();
-      current.plain = abstract(body, values);
-      writeFileSync(FIXTURE_PATH, JSON.stringify(current, null, 2) + "\n");
-      return;
-    }
-    expect(body).toEqual(materialize(loadFixture().plain, values));
+    assertOrRecordGolden("plain", body, t);
   });
 
   it("PR-review thread: payload matches the golden literally", async () => {
-    const automation = await createAutomation({
-      db,
+    const t = await createBootingPRThread({
       userId: user.id,
-      accessTier: "pro",
-      organizationId: orgId,
-      automation: {
-        name: "pull_request automation",
-        repoFullName: "be-automata/automata",
-        branchName: "main",
-        enabled: true,
-        triggerType: "pull_request",
-        triggerConfig: {},
-        action: {
-          type: "user_message",
-          config: {
-            message: {
-              type: "user",
-              model: null,
-              parts: [],
-              timestamp: new Date().toISOString(),
-            },
-          },
-        },
-      },
+      orgId,
+      automationId: await createReviewAutomation({ userId: user.id, orgId }),
+      prNumber: GOLDEN_PR_NUMBER,
     });
-    const t = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: {
-        organizationId: orgId,
-        githubRepoFullName: "be-automata/automata",
-        githubPRNumber: GOLDEN_PR_NUMBER,
-        automationId: automation.id,
-      },
-    });
-    await db
-      .update(threadTable)
-      .set({ status: "booting" })
-      .where(eq(threadTable.id, t.threadId));
 
     const body = await captureDispatchBody({
       threadId: t.threadId,
       threadChatId: t.threadChatId,
       branch: "feature-golden",
     });
-    const values: Placeholders = {
-      __THREAD_ID__: t.threadId,
-      __THREAD_CHAT_ID__: t.threadChatId,
-      __ORG_ID__: orgId,
-    };
-    if (process.env.UPDATE_DISPATCH_GOLDEN) {
-      const current = loadFixtureOrEmpty();
-      current.review = abstract(body, values);
-      writeFileSync(FIXTURE_PATH, JSON.stringify(current, null, 2) + "\n");
-      return;
-    }
-    expect(body).toEqual(materialize(loadFixture().review, values));
+    assertOrRecordGolden("review", body, t);
   });
-
-  function loadFixtureOrEmpty(): Record<string, unknown> {
-    try {
-      return JSON.parse(readFileSync(FIXTURE_PATH, "utf8"));
-    } catch {
-      return {};
-    }
-  }
 });

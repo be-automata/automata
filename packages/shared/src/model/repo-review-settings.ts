@@ -1,7 +1,7 @@
 import { DB } from "../db";
 import { repoReviewSettings } from "../db/schema";
 import { RepoReviewSetting } from "../db/types";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { buildEgressPolicyShape } from "./egress-policy";
 
 /**
@@ -61,10 +61,19 @@ export function isSupersedePolicy(value: string): value is SupersedePolicy {
 }
 
 /**
+ * The policy snapshot stamped onto a run at dispatch (#125 decision 5): the
+ * authority for that run's audit/recheck/cancel semantics. Consumers read the
+ * stamp, never the current settings row — so BOTH fields travel together.
+ */
+export type SupersedeSnapshot = {
+  policy: SupersedePolicy;
+  recheckOnComplete: boolean;
+};
+
+/**
  * Resolve the effective supersede policy for one (org, repo): exact repo
- * override → org-default sentinel row ('*') → 'newest-wins'. Resolved LIVE at
- * every dispatch, and SNAPSHOTTED onto the run there — audit/recheck/cancel
- * read the stamped policy, never the current config (#125 decision 5).
+ * override → org-default sentinel row ('*') → 'newest-wins'. One query for
+ * both candidate rows; resolved LIVE at every dispatch.
  *
  * An unknown stored value THROWS (never a silent degrade): a bad row must
  * fail the dispatch loudly, exactly like an invalid egress policy does.
@@ -77,11 +86,24 @@ export async function resolveSupersedePolicy({
   db: DB;
   organizationId: string;
   repoFullName: string;
-}): Promise<{ policy: SupersedePolicy; recheckOnComplete: boolean }> {
-  const pick = (
-    row: RepoReviewSetting | undefined,
-  ): { policy: SupersedePolicy; recheckOnComplete: boolean } | null => {
-    if (!row?.supersedePolicy) return null;
+}): Promise<SupersedeSnapshot> {
+  const repo = normalizeRepo(repoFullName);
+  const rows = await db
+    .select()
+    .from(repoReviewSettings)
+    .where(
+      and(
+        eq(repoReviewSettings.organizationId, organizationId),
+        inArray(repoReviewSettings.repoFullName, [
+          repo,
+          ORG_DEFAULT_REPO_SENTINEL,
+        ]),
+      ),
+    );
+  const byRepo = new Map(rows.map((r) => [r.repoFullName, r]));
+  for (const candidate of [repo, ORG_DEFAULT_REPO_SENTINEL]) {
+    const row = byRepo.get(candidate);
+    if (!row?.supersedePolicy) continue;
     if (!isSupersedePolicy(row.supersedePolicy)) {
       throw new Error(
         `Unknown supersedePolicy '${row.supersedePolicy}' stored for ` +
@@ -93,21 +115,7 @@ export async function resolveSupersedePolicy({
       policy: row.supersedePolicy,
       recheckOnComplete: row.recheckOnComplete,
     };
-  };
-  const repoRow = await getRepoReviewSetting({
-    db,
-    organizationId,
-    repoFullName,
-  });
-  const fromRepo = pick(repoRow);
-  if (fromRepo) return fromRepo;
-  const orgRow = await getRepoReviewSetting({
-    db,
-    organizationId,
-    repoFullName: ORG_DEFAULT_REPO_SENTINEL,
-  });
-  const fromOrg = pick(orgRow);
-  if (fromOrg) return fromOrg;
+  }
   return { policy: DEFAULT_SUPERSEDE_POLICY, recheckOnComplete: false };
 }
 
@@ -231,30 +239,9 @@ export async function upsertRepoReviewSetting({
 
   const [row] = await db
     .insert(repoReviewSettings)
-    .values({
-      organizationId,
-      repoFullName: repo,
-      // Omitted fields fall to the column defaults on first insert.
-      ...(patch.blockTolerance !== undefined
-        ? { blockTolerance: patch.blockTolerance }
-        : {}),
-      ...(patch.reviewDraftPrs !== undefined
-        ? { reviewDraftPrs: patch.reviewDraftPrs }
-        : {}),
-      ...(patch.egressPolicy !== undefined
-        ? { egressPolicy: patch.egressPolicy }
-        : {}),
-      ...(patch.egressAllowlist !== undefined
-        ? { egressAllowlist: patch.egressAllowlist }
-        : {}),
-      ...(patch.supersedePolicy !== undefined
-        ? { supersedePolicy: patch.supersedePolicy }
-        : {}),
-      ...(patch.recheckOnComplete !== undefined
-        ? { recheckOnComplete: patch.recheckOnComplete }
-        : {}),
-      updatedByUserId: updatedByUserId ?? null,
-    })
+    // `set` holds exactly the defined patch fields (+ provenance); omitted
+    // fields fall to the column defaults on first insert.
+    .values({ organizationId, repoFullName: repo, ...set })
     .onConflictDoUpdate({
       target: [
         repoReviewSettings.organizationId,

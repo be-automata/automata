@@ -13,15 +13,17 @@ import {
   hasActiveDaemonToken,
   daemonRunKey,
 } from "@/lib/daemon-token";
-import { createAutomation } from "@terragon/shared/model/automations";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
-import {
-  thread as threadTable,
-  repoReviewSettings,
-} from "@terragon/shared/db/schema";
-import { setUserFeatureFlagOverride } from "@terragon/shared/model/feature-flags";
+import { repoReviewSettings } from "@terragon/shared/db/schema";
+import { setFeatureFlagOverrideForTest } from "@terragon/shared/model/test-helpers";
 import { eq } from "drizzle-orm";
 import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
+import {
+  createReviewAutomation,
+  createBootingPRThread,
+  routedHatchetFetch,
+  triggerBody,
+} from "./__fixtures__/review-thread";
 
 describe("hatchetDispatchEnabled", () => {
   it("false by default (no HATCHET_* env in tests) → in-process path", () => {
@@ -323,74 +325,11 @@ describe("dispatchAgentRun — #8 supersede stale in-flight review", () => {
     orgId = org.id;
   });
 
-  async function makeAutomation(
-    triggerType: "pull_request" | "github_mention",
-  ) {
-    const automation = await createAutomation({
-      db,
-      userId: user.id,
-      accessTier: "pro",
-      organizationId: orgId,
-      automation: {
-        name: `${triggerType} automation`,
-        repoFullName: "be-automata/automata",
-        branchName: "main",
-        enabled: true,
-        triggerType,
-        triggerConfig: {},
-        action: {
-          type: "user_message",
-          config: {
-            message: {
-              type: "user",
-              model: null,
-              parts: [],
-              timestamp: new Date().toISOString(),
-            },
-          },
-        },
-      },
-    });
-    return automation.id;
-  }
-
-  async function makePRThread(automationId: string, prNumber: number) {
-    const t = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: {
-        organizationId: orgId,
-        githubRepoFullName: "be-automata/automata",
-        githubPRNumber: prNumber,
-        automationId,
-      },
-    });
-    // In production dispatch runs only after startAgentMessage transitions the thread
-    // to `booting`, so a superseded prior run is in the active set that
-    // markThreadsSuperseded targets (mirrors stopStalledThreads). ThreadInsert omits
-    // `status`, so set it directly.
-    await db
-      .update(threadTable)
-      .set({ status: "booting" })
-      .where(eq(threadTable.id, t.threadId));
-    return t;
-  }
-
-  /** A fetch mock that routes trigger vs cancel and records the cancel bodies. */
-  function routedFetch(triggerRunId: string) {
-    const cancelBodies: unknown[] = [];
-    const mock = vi.fn(async (url: string, init?: RequestInit) => {
-      if (url.includes("/tasks/cancel")) {
-        cancelBodies.push(JSON.parse(String(init?.body)));
-        return new Response("{}", { status: 200 });
-      }
-      return new Response(
-        JSON.stringify({ run: { metadata: { id: triggerRunId } } }),
-        { status: 200 },
-      );
-    });
-    return { mock, cancelBodies };
-  }
+  const makeAutomation = (t: "pull_request" | "github_mention") =>
+    createReviewAutomation({ userId: user.id, orgId, triggerType: t });
+  const makePRThread = (automationId: string, prNumber: number) =>
+    createBootingPRThread({ userId: user.id, orgId, automationId, prNumber });
+  const routedFetch = routedHatchetFetch;
 
   it("a second review dispatch cancels the prior run's externalId and supersedes its thread", async () => {
     const reviewAutomation = await makeAutomation("pull_request");
@@ -483,7 +422,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       slug: `org-${nanoid(8).toLowerCase()}`,
     });
     orgId = org.id;
-    await setUserFeatureFlagOverride({
+    await setFeatureFlagOverrideForTest({
       db,
       userId: user.id,
       name: "supersedePolicy",
@@ -491,63 +430,17 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
     });
   });
 
-  async function makeReviewThread(prNumber: number) {
-    const automation = await createAutomation({
-      db,
+  const makeReviewThread = async (prNumber: number) =>
+    createBootingPRThread({
       userId: user.id,
-      accessTier: "pro",
-      organizationId: orgId,
-      automation: {
-        name: "pr review",
-        repoFullName: "be-automata/automata",
-        branchName: "main",
-        enabled: true,
-        triggerType: "pull_request",
-        triggerConfig: {},
-        action: {
-          type: "user_message",
-          config: {
-            message: {
-              type: "user",
-              model: null,
-              parts: [],
-              timestamp: new Date().toISOString(),
-            },
-          },
-        },
-      },
+      orgId,
+      automationId: await createReviewAutomation({ userId: user.id, orgId }),
+      prNumber,
     });
-    const t = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: {
-        organizationId: orgId,
-        githubRepoFullName: "be-automata/automata",
-        githubPRNumber: prNumber,
-        automationId: automation.id,
-      },
-    });
-    await db
-      .update(threadTable)
-      .set({ status: "booting" })
-      .where(eq(threadTable.id, t.threadId));
-    return t;
-  }
-
-  function okFetch(runId: string) {
-    const cancels: unknown[] = [];
-    const mock = vi.fn(async (url: string, init?: RequestInit) => {
-      if (url.includes("/tasks/cancel")) {
-        cancels.push(JSON.parse(String(init?.body)));
-        return new Response("{}", { status: 200 });
-      }
-      return new Response(
-        JSON.stringify({ run: { metadata: { id: runId } } }),
-        { status: 200 },
-      );
-    });
-    return { mock, cancels };
-  }
+  const okFetch = (runId: string) => {
+    const r = routedHatchetFetch(runId);
+    return { mock: r.mock, cancels: r.cancelBodies };
+  };
 
   it("review dispatch: variant by policy, prKey/deliveryId/supersedePolicy in input, versioned metadata, activeRunExternalId stamped", async () => {
     await upsertRepoReviewSetting({
@@ -567,11 +460,12 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       branch: "feature",
       deliveryId: "gh-delivery-abc",
     });
-    const body = JSON.parse(f.mock.mock.calls[0]![1]!.body as string);
+    const body = triggerBody(f.mock);
     expect(body.workflowName).toBe("agent-run-discard");
     expect(body.input.prKey).toBe(`${orgId}/be-automata/automata/77`);
     expect(body.input.deliveryId).toBe("gh-delivery-abc");
     expect(body.input.supersedePolicy).toBe("complete-run-discard");
+    expect(body.input.recheckOnComplete).toBe(false);
     expect(body.additionalMetadata).toEqual({
       metaVersion: "1",
       threadId: t.threadId,
@@ -581,6 +475,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       prNumber: "77",
       lane: "review",
       supersedePolicy: "complete-run-discard",
+      recheckOnComplete: "false",
     });
     // Native policy → app-side cancel pass NOT run.
     expect(f.cancels).toHaveLength(0);
@@ -602,7 +497,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       repoFullName: "be-automata/automata",
       branch: "feature",
     });
-    const body = JSON.parse(f.mock.mock.calls[0]![1]!.body as string);
+    const body = triggerBody(f.mock);
     expect(body.workflowName).toBe("agent-run"); // default newest-wins
     expect(body.input.deliveryId).toMatch(
       new RegExp(`^manual:${t.threadId}:\\d+$`),
@@ -639,12 +534,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       branch: "feature",
     });
     expect(f2.cancels).toEqual([{ externalIds: ["run-old"] }]);
-    const trigger = f2.mock.mock.calls.find(([u]) =>
-      String(u).includes("/trigger"),
-    )!;
-    expect(JSON.parse(trigger[1]!.body as string).workflowName).toBe(
-      "agent-run",
-    );
+    expect(triggerBody(f2.mock).workflowName).toBe("agent-run");
     vi.unstubAllGlobals();
   });
 
@@ -690,7 +580,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       repoFullName: "be-automata/automata",
       branch: "main",
     });
-    const body = JSON.parse(f.mock.mock.calls[0]![1]!.body as string);
+    const body = triggerBody(f.mock);
     expect(body.workflowName).toBe("agent-run");
     expect(body.input.prKey).toBeUndefined();
     expect(body.additionalMetadata).toEqual({
