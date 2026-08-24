@@ -498,7 +498,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       branch: "feature",
     });
     const body = triggerBody(f.mock);
-    expect(body.workflowName).toBe("agent-run"); // default newest-wins
+    expect(body.workflowName).toBe("agent-run-newest"); // default newest-wins
     expect(body.input.deliveryId).toMatch(
       new RegExp(`^manual:${t.threadId}:\\d+$`),
     );

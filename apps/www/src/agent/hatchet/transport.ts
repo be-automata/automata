@@ -14,12 +14,14 @@ import type {
  * to. STRUCTURALLY DUPLICATED (not imported) by the worker's variant table
  * (packages/worker/src/agent-run/workflow.ts, landing in C1/#126) — the planes share no imports
  * (composability invariant), so a drift between the two tables is caught by
- * C3's E2E, not the type system. 'app-side' deliberately routes to the default
- * 'agent-run' workflow: the control plane keeps the legacy #8 cancel rules and
- * the engine applies no per-PR strategy.
+ * C3's E2E, not the type system. The legacy 'agent-run' workflow carries NO
+ * per-PR entry (flag-off dispatches keep hitting it byte-identically, #125
+ * AC7), so every native policy — newest-wins included — routes to a dedicated
+ * variant. 'app-side' deliberately routes to legacy 'agent-run': the control
+ * plane keeps the #8 cancel rules and the engine applies no per-PR strategy.
  */
 export const POLICY_TO_WORKFLOW = {
-  "newest-wins": "agent-run",
+  "newest-wins": "agent-run-newest",
   "complete-run-queue": "agent-run-strict",
   "complete-run-discard": "agent-run-discard",
   "app-side": "agent-run",

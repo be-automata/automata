@@ -135,7 +135,7 @@ describe("POLICY_TO_WORKFLOW / workflowNameForPolicy (#125/#127)", () => {
       expect(workflowNameForPolicy(policy)).toBe(POLICY_TO_WORKFLOW[policy]);
     }
     expect(POLICY_TO_WORKFLOW).toEqual({
-      "newest-wins": "agent-run",
+      "newest-wins": "agent-run-newest",
       "complete-run-queue": "agent-run-strict",
       "complete-run-discard": "agent-run-discard",
       "app-side": "agent-run",
