@@ -65,7 +65,6 @@ vi.mock("./provision", () => ({
 
 const pullNextMessage = vi.fn();
 const pollUntilTerminal = vi.fn();
-const postRunSuperseded = vi.fn(async (..._args: unknown[]) => "applied");
 const postRunTerminal = vi.fn(async (..._args: unknown[]) => "applied");
 const checkRunStaleness = vi.fn(async (..._args: unknown[]) => false);
 
@@ -74,7 +73,6 @@ vi.mock("./www-client", () => ({
   pullNextMessage: (...args: unknown[]) => pullNextMessage(...args),
   pollUntilTerminal: (...args: unknown[]) => pollUntilTerminal(...args),
   postRunFailed: vi.fn(),
-  postRunSuperseded: (...args: unknown[]) => postRunSuperseded(...args),
   postRunTerminal: (...args: unknown[]) => postRunTerminal(...args),
   checkRunStaleness: (...args: unknown[]) => checkRunStaleness(...args),
   postEgressEvents: (...args: unknown[]) => postEgressEvents(...args),
@@ -527,7 +525,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     provisionWorkdir.mockReset().mockResolvedValue(WORKDIR);
     cleanupWorkdir.mockReset().mockResolvedValue(undefined);
     pullAgentCredentials.mockReset();
-    postRunSuperseded.mockReset().mockResolvedValue("applied");
+    postRunTerminal.mockReset().mockResolvedValue("applied");
     pullNextMessage.mockReset();
     pollUntilTerminal.mockReset();
     materialiseAgentCredentials.mockResolvedValue({
@@ -548,7 +546,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     cleanupWorkdir.mockImplementation(async () => {
       order.push("cleanup");
     });
-    postRunSuperseded.mockImplementation(async () => {
+    postRunTerminal.mockImplementation(async () => {
       order.push("post");
       return "applied";
     });
@@ -558,8 +556,8 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
       ctx,
     );
     expect(out.outcome).toBe("cancelled");
-    expect(postRunSuperseded).toHaveBeenCalledTimes(1);
-    const [opts, args] = postRunSuperseded.mock.calls[0]!;
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
+    const [opts, args] = postRunTerminal.mock.calls[0]!;
     expect(opts).toMatchObject({
       baseUrl: INPUT.daemonCallbackUrl,
       daemonToken: INPUT.daemonToken,
@@ -568,6 +566,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     });
     expect(args).toEqual({
       runExternalId: "run-ext-inflight",
+      cause: "superseded",
       policy: "complete-run-discard",
     });
     expect(order).toEqual(["cleanup", "post"]);
@@ -579,9 +578,10 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     await expect(
       runFn({ ...PR_INPUT, supersedePolicy: "newest-wins" }, ctx),
     ).rejects.toThrow("aborted");
-    expect(postRunSuperseded).toHaveBeenCalledTimes(1);
-    expect(postRunSuperseded.mock.calls[0]![1]).toEqual({
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
+    expect(postRunTerminal.mock.calls[0]![1]).toEqual({
       runExternalId: "run-ext-provision",
+      cause: "superseded",
       policy: "newest-wins",
     });
     expect(cleanupWorkdir).not.toHaveBeenCalled();
@@ -595,7 +595,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
       runFn({ ...PR_INPUT, supersedePolicy: "complete-run-queue" }, ctx),
     ).rejects.toThrow("aborted during pull");
     expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
-    expect(postRunSuperseded).toHaveBeenCalledTimes(1);
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
   });
 
   it("a NON-cancelled failure posts no superseded terminal (onFailure owns it)", async () => {
@@ -604,7 +604,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     await expect(
       runFn({ ...PR_INPUT, supersedePolicy: "newest-wins" }, ctx),
     ).rejects.toThrow("clone failed");
-    expect(postRunSuperseded).not.toHaveBeenCalled();
+    expect(postRunTerminal).not.toHaveBeenCalled();
   });
 
   it("legacy run (no policy) and app-side: cancel posts nothing (AC7)", async () => {
@@ -613,7 +613,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
       abortIn(provisionWorkdir);
       await expect(runFn({ ...PR_INPUT, ...extra }, ctx)).rejects.toThrow();
     }
-    expect(postRunSuperseded).not.toHaveBeenCalled();
+    expect(postRunTerminal).not.toHaveBeenCalled();
   });
 
   it("no workflowRunId: logs and skips the post (C4 sweep is the backstop)", async () => {
@@ -622,7 +622,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     await expect(
       runFn({ ...PR_INPUT, supersedePolicy: "newest-wins" }, ctx),
     ).rejects.toThrow();
-    expect(postRunSuperseded).not.toHaveBeenCalled();
+    expect(postRunTerminal).not.toHaveBeenCalled();
     expect(
       ctx.log.mock.calls.some((c) => String(c[0]).includes("no workflowRunId")),
     ).toBe(true);

@@ -71,7 +71,12 @@ async function main() {
 
   const worker = await hatchet.worker("automata-worker", {
     workflows,
-    slots: 5,
+    // #125 C4: ONE slot per worker process. The engine's global concurrency key is
+    // per workflow (docs/uat/hatchet-lite-v0.94.10-observed.md §5), so admission
+    // is bounded here: with two processes on the box at most one run executes
+    // (box-slot.ts) and at most one waits; everything else stays QUEUED on the
+    // engine, where a cancel/supersede is free and no timeout clock is running.
+    slots: 1,
   });
 
   // #69 §3.2.4 item 1 (PRIMARY path) + §3.1 rot repair + §3.3 stuck-QUEUED

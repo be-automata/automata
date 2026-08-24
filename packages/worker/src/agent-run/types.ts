@@ -99,18 +99,25 @@ export type AgentRunInput = {
 /**
  * Typed terminal causes (#125 C4). Structural mirror of the control plane's
  * `TERMINAL_CAUSES` (packages/shared/src/model/terminal-cause.ts) — never
- * imported across the plane boundary. `describeTerminalCause` below is the
- * exhaustive switch that fails compilation when the two drift.
+ * imported across the plane boundary. The type derives from the tuple so the
+ * two cannot drift within this plane; `describeTerminalCause` is the
+ * exhaustive switch that fails compilation when the mirror drifts from www.
  */
-export type TerminalCause =
-  | "superseded"
-  | "discarded"
-  | "stale-skipped"
-  | "user-cancelled"
-  | "timeout"
-  | "daemon-failed"
-  | "publish-failed"
-  | "plane-offline";
+export const TERMINAL_CAUSES = [
+  "superseded",
+  "discarded",
+  "stale-skipped",
+  "user-cancelled",
+  "timeout",
+  "daemon-failed",
+  "publish-failed",
+  "plane-offline",
+] as const;
+export type TerminalCause = (typeof TERMINAL_CAUSES)[number];
+
+function assertNever(value: never): never {
+  throw new Error(`unexpected value ${String(value)}`);
+}
 
 /** One log line per cause — the worker-side exhaustive switch over the union. */
 export function describeTerminalCause(cause: TerminalCause): string {
@@ -131,10 +138,8 @@ export function describeTerminalCause(cause: TerminalCause): string {
       return "verdict could not be published";
     case "plane-offline":
       return "never became visible on the execution plane";
-    default: {
-      const exhaustive: never = cause;
-      throw new Error(`unknown terminal cause ${String(exhaustive)}`);
-    }
+    default:
+      return assertNever(cause);
   }
 }
 

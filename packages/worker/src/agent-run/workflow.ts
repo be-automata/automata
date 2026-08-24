@@ -8,7 +8,7 @@ import {
 } from "./definition";
 import { loadWorkerConfig } from "./config";
 import path from "node:path";
-import { withBoxSlot } from "./box-slot";
+import { acquireBoxSlot, type BoxSlot } from "./box-slot";
 import { DaemonProcess } from "./daemon-process";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
 import {
@@ -19,7 +19,6 @@ import {
   pollUntilTerminal,
   postEgressEvents,
   postRunFailed,
-  postRunSuperseded,
   postRunTerminal,
   checkRunStaleness,
   pullAgentCredentials,
@@ -231,32 +230,41 @@ type RunCtx = {
 };
 
 /**
+ * The www client options for THIS run: ids + the #7 traceparent header on
+ * every call, and (#125 C1) this run's generation as `x-run-external-id` so
+ * the control plane's fence can refuse a write from a superseded run.
+ */
+function wwwOptsFor(input: AgentRunInput, ctx: RunCtx): WwwClientOpts {
+  return {
+    baseUrl: input.daemonCallbackUrl,
+    daemonToken: input.daemonToken,
+    threadId: input.threadId,
+    threadChatId: input.threadChatId,
+    traceparent: input.traceparent,
+    runExternalId: ctx.workflowRunId?.() || undefined,
+  };
+}
+
+/**
  * The ONE run task fn shared by every variant. Wraps `runAgentInner` with the
- * #125 C1 cancel hook: when the engine cancels THIS run (in-flight or
- * pre-daemon during provision) under a native policy, an explicit
- * `superseded` terminal is posted to www after teardown — `finally` runs on
- * both return and throw, so exactly once. Legacy runs (no supersedePolicy)
- * and the app-side policy post nothing: the control plane owns that terminal.
+ * #125 C4 queue-mode staleness self-check and the #125 C1 cancel hook: when
+ * the engine cancels THIS run (in-flight or pre-daemon during provision)
+ * under a native policy, an explicit `superseded` terminal is posted to www
+ * after teardown — `finally` runs on both return and throw, so exactly once.
+ * Legacy runs (no supersedePolicy) and the app-side policy post nothing: the
+ * control plane owns that terminal.
  */
 async function runAgent(
   input: AgentRunInput,
   ctx: RunCtx,
 ): Promise<AgentRunOutput> {
-  // #125 C4 queue-mode staleness self-check: under complete-run·queue a run
-  // may have waited behind an older one while newer commits landed. Before
-  // provisioning ANYTHING, ask www whether a newer run is already recorded for
-  // this PR; if so, skip with a typed `stale-skipped` terminal — no clone, no
-  // daemon, no credits spent reviewing an obsolete SHA. Fails open.
-  const runExternalId = ctx.workflowRunId?.() ?? "";
+  const config = loadWorkerConfig();
+  const wwwOpts = wwwOptsFor(input, ctx);
+  const runExternalId = wwwOpts.runExternalId ?? "";
+  // Under complete-run·queue a run may have waited behind an older one while
+  // newer commits landed. Ask www FIRST; if a newer run is already recorded,
+  // skip with a typed terminal — no clone, no daemon, no credits. Fails open.
   if (input.supersedePolicy === "complete-run-queue" && runExternalId) {
-    const wwwOpts = {
-      baseUrl: input.daemonCallbackUrl,
-      daemonToken: input.daemonToken,
-      threadId: input.threadId,
-      threadChatId: input.threadChatId,
-      traceparent: input.traceparent,
-      runExternalId,
-    };
     const stale = await checkRunStaleness(
       wwwOpts,
       { runExternalId },
@@ -279,49 +287,36 @@ async function runAgent(
     }
   }
   try {
-    // #125 C4: the box's ONE agent-run slot, enforced here because the engine's
-    // "global" concurrency key is scoped per workflow (see box-slot.ts). Held
-    // across provisioning + the agent turn, released in every exit path.
-    // Waiting here honours the engine's cancel (the same abort signal).
-    return await withBoxSlot(
-      {
-        dir: path.join(loadWorkerConfig().runNamespaceRoot, "box-slot"),
-        holder: input.threadId,
-        signal: ctx.abortController?.signal,
-      },
-      () => runAgentInner(input, ctx),
-    );
+    return await runAgentInner(input, ctx, config, wwwOpts);
   } finally {
     if (ctx.cancelled || ctx.abortController?.signal.aborted) {
-      await postSuperseded(input, ctx);
+      await postSuperseded(input, ctx, wwwOpts);
     }
   }
 }
 
-async function postSuperseded(input: AgentRunInput, ctx: RunCtx) {
+async function postSuperseded(
+  input: AgentRunInput,
+  ctx: RunCtx,
+  wwwOpts: WwwClientOpts,
+) {
   const policy = input.supersedePolicy;
   if (!policy || policy === "app-side") {
     return;
   }
   // The generation the fence compares against — Hatchet's run id for THIS run.
-  const runExternalId = ctx.workflowRunId?.() ?? "";
+  const runExternalId = wwwOpts.runExternalId;
   if (!runExternalId) {
     ctx.log(
       `[agent-run ${input.threadId}] cancelled under ${policy} but no workflowRunId — terminal not posted (C4 sweep is the backstop)`,
     );
     return;
   }
-  const result = await postRunSuperseded(
-    {
-      baseUrl: input.daemonCallbackUrl,
-      daemonToken: input.daemonToken,
-      threadId: input.threadId,
-      threadChatId: input.threadChatId,
-      traceparent: input.traceparent,
-      runExternalId,
-    },
-    { runExternalId, policy },
-  );
+  const result = await postRunTerminal(wwwOpts, {
+    runExternalId,
+    cause: "superseded",
+    policy,
+  });
   ctx.log(
     `[agent-run ${input.threadId}] cancelled under ${policy} → superseded terminal: ${result}`,
   );
@@ -343,21 +338,9 @@ export const agentRunWorkflow = agentRunWorkflows.find(
 async function runAgentInner(
   input: AgentRunInput,
   ctx: RunCtx,
+  config: ReturnType<typeof loadWorkerConfig>,
+  wwwOpts: WwwClientOpts,
 ): Promise<AgentRunOutput> {
-  const config = loadWorkerConfig();
-  const wwwOpts = {
-    baseUrl: input.daemonCallbackUrl,
-    daemonToken: input.daemonToken,
-    threadId: input.threadId,
-    threadChatId: input.threadChatId,
-    // #7 trace join: forwarded as a `traceparent` header on every www call so the
-    // daemon-event → GitHub-post continues the dispatch-minted trace. Dispatch sets
-    // it on every remote run; if ever absent the header is simply omitted (no-op).
-    traceparent: input.traceparent,
-    // #125 C1: stamp this run's generation on every www call (fence header).
-    runExternalId: ctx.workflowRunId?.() || undefined,
-  };
-
   // Cancellation signal (Hatchet cancel: scheduleTimeout/executionTimeout). Used
   // to abort in-flight pulls/polls so the finally-block daemon teardown runs
   // promptly — no orphan daemon survives a cancelled run.
@@ -412,8 +395,21 @@ async function runAgentInner(
   // the try is ever entered, and the cloned workdir is stranded on the box's
   // disk for good. Cleaning the workdir also removes the per-run HOME beneath
   // it, so a half-written credential cannot survive either.
+  let boxSlot: BoxSlot | null = null;
   let materialised: MaterialisedCredentials;
   try {
+    // #125 C4: the box's ONE agent-run slot (box-slot.ts) — the engine's
+    // "global" key is per workflow, so the budget is enforced here. Taken
+    // AFTER the clone (network/disk, not memory) and BEFORE any credential
+    // touches disk, so a long wait never widens the on-disk credential
+    // window; a cancel while waiting throws into this catch and the clone is
+    // cleaned up. Released in the finally below, after teardown.
+    boxSlot = await acquireBoxSlot({
+      dir: path.join(config.runNamespaceRoot, "box-slot"),
+      holder: input.threadId,
+      signal,
+    });
+    step("box slot acquired");
     const pulled =
       config.boxTrust === "owner"
         ? await pullAgentCredentials(wwwOpts, signal)
@@ -435,6 +431,7 @@ async function runAgentInner(
       runRoot: workdir,
     });
   } catch (err) {
+    await boxSlot?.release();
     await cleanupWorkdir(workdir);
     throw err;
   }
@@ -472,6 +469,7 @@ async function runAgentInner(
     } catch (err) {
       await closeQuietly(egressEvents);
       await materialised.cleanup();
+      await boxSlot?.release();
       await cleanupWorkdir(workdir);
       throw err;
     }
@@ -523,6 +521,7 @@ async function runAgentInner(
       await closeQuietly(egressProxy);
       await closeQuietly(egressEvents);
       await materialised.cleanup();
+      await boxSlot?.release();
       await cleanupWorkdir(workdir);
       throw err;
     }
@@ -628,6 +627,9 @@ async function runAgentInner(
     // failure on the workdir can never leave a live token behind.
     await materialised.cleanup();
     await cleanupWorkdir(workdir);
+    // The box slot goes last: the next run may start only once this one's
+    // daemon is dead and its disk footprint is gone.
+    await boxSlot?.release();
   }
 }
 

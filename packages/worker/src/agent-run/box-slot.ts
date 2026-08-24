@@ -50,7 +50,7 @@ export async function acquireBoxSlot({
   dir,
   holder,
   signal,
-  pollMs = 250,
+  pollMs = 1000,
   staleMs = 45_000,
   now = () => Date.now(),
 }: {

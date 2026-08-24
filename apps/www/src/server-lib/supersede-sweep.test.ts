@@ -3,15 +3,14 @@ import { db } from "@/lib/db";
 import {
   createTestUser,
   createTestThread,
+  createTestOrg,
+  createTestRemoteRun,
 } from "@terragon/shared/model/test-helpers";
-import { createOrganization } from "@terragon/shared/model/organizations";
-import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
 import {
   thread as threadTable,
   hatchetRun as hatchetRunTable,
 } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
-import { nanoid } from "nanoid";
 import { User } from "@terragon/shared";
 import { runSupersedeSweep } from "./supersede-sweep";
 import type { AgentRunStatus } from "@/agent/hatchet/transport";
@@ -28,42 +27,25 @@ describe("runSupersedeSweep (#125 C4)", () => {
 
   beforeEach(async () => {
     user = (await createTestUser({ db })).user;
-    const org = await createOrganization({
-      db,
-      name: "Org",
-      slug: `org-${nanoid(8).toLowerCase()}`,
-    });
-    orgId = org.id;
+    orgId = await createTestOrg({ db });
   });
 
-  async function remoteRun(
+  const remoteRun = async (
     prNumber: number,
     ageMs: number,
     externalId: string,
-  ) {
-    const t = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: { organizationId: orgId, sandboxProvider: "hatchet-remote" },
-    });
-    await db
-      .update(threadTable)
-      .set({ status: "working" })
-      .where(eq(threadTable.id, t.threadId));
-    const run = await recordHatchetRun({
-      db,
-      threadId: t.threadId,
-      organizationId: orgId,
-      repoFullName: "be-automata/automata",
-      prNumber,
-      externalId,
-    });
-    await db
-      .update(hatchetRunTable)
-      .set({ createdAt: new Date(Date.now() - ageMs) })
-      .where(eq(hatchetRunTable.id, run.id));
-    return t.threadId;
-  }
+  ) =>
+    (
+      await createTestRemoteRun({
+        db,
+        userId: user.id,
+        organizationId: orgId,
+        prNumber,
+        externalId,
+        ageMs,
+        repoFullName: "be-automata/automata",
+      })
+    ).threadId;
 
   const threadRow = async (id: string) =>
     (
@@ -73,10 +55,11 @@ describe("runSupersedeSweep (#125 C4)", () => {
   const reader = (map: Record<string, AgentRunStatus>) => async (id: string) =>
     map[id] ?? "NOT_FOUND";
 
-  it("rule (i): CANCELLED with a newer sibling ⇒ superseded; without ⇒ user-cancelled; FAILED ⇒ daemon-failed; live/done ⇒ untouched", async () => {
+  it("rule (i): CANCELLED ⇒ superseded (with sibling, linked) / user-cancelled; NOT_FOUND ⇒ superseded / plane-offline; FAILED ⇒ daemon-failed; live ⇒ untouched + lease extended; COMPLETED ⇒ run retired, thread untouched", async () => {
     const superseded = await remoteRun(1, T + 60_000, "r-old");
     await remoteRun(1, 0, "r-newer"); // newer sibling, same PR
     const userCancelled = await remoteRun(2, T + 60_000, "r-alone");
+    const vanished = await remoteRun(6, T + 60_000, "r-vanished");
     const failed = await remoteRun(3, T + 60_000, "r-failed");
     const running = await remoteRun(4, T + 60_000, "r-running");
     const done = await remoteRun(5, T + 60_000, "r-done");
@@ -86,7 +69,8 @@ describe("runSupersedeSweep (#125 C4)", () => {
       orphanAfterMs: N,
       readStatus: reader({
         "r-old": "CANCELLED",
-        "r-alone": "NOT_FOUND",
+        "r-alone": "CANCELLED",
+        "r-vanished": "NOT_FOUND",
         "r-failed": "FAILED",
         "r-running": "RUNNING",
         "r-done": "COMPLETED",
@@ -96,16 +80,35 @@ describe("runSupersedeSweep (#125 C4)", () => {
       expect.arrayContaining([
         { threadId: superseded, cause: "superseded" },
         { threadId: userCancelled, cause: "user-cancelled" },
+        { threadId: vanished, cause: "plane-offline" },
         { threadId: failed, cause: "daemon-failed" },
       ]),
     );
-    expect((await threadRow(superseded)).terminalCause).toBe("superseded");
-    expect((await threadRow(userCancelled)).terminalCause).toBe(
-      "user-cancelled",
-    );
+    const sup = await threadRow(superseded);
+    expect(sup.terminalCause).toBe("superseded");
+    expect(sup.errorMessage).toBe("superseded");
+    const uc = await threadRow(userCancelled);
+    expect(uc.terminalCause).toBe("user-cancelled");
+    expect(uc.errorMessage).toBeNull();
+    expect((await threadRow(vanished)).terminalCause).toBe("plane-offline");
     expect((await threadRow(failed)).terminalCause).toBe("daemon-failed");
     expect((await threadRow(running)).status).toBe("working");
     expect((await threadRow(done)).status).toBe("working");
+    const runRows = await db
+      .select({
+        externalId: hatchetRunTable.externalId,
+        status: hatchetRunTable.status,
+        lease: hatchetRunTable.sweepLeaseUntil,
+      })
+      .from(hatchetRunTable);
+    const byId = Object.fromEntries(runRows.map((r) => [r.externalId, r]));
+    expect(byId["r-done"]!.status).toBe("terminal");
+    expect(byId["r-old"]!.status).toBe("superseded");
+    expect(byId["r-failed"]!.status).toBe("terminal");
+    // Live: lease pushed out well past the default 5 min.
+    expect(byId["r-running"]!.lease!.getTime()).toBeGreaterThan(
+      Date.now() + 10 * 60 * 1000,
+    );
   });
 
   it("rule (i) waits T: a fresh in_flight run is not examined", async () => {
@@ -134,7 +137,7 @@ describe("runSupersedeSweep (#125 C4)", () => {
     expect(reads).toBe(1);
     expect(a.terminals.length + b.terminals.length).toBe(1);
     expect((await threadRow(threadId)).terminalCause).toBe("user-cancelled");
-    // A later tick re-examines nothing: the row is swept and the thread terminal.
+    // A later tick re-examines nothing: the row is retired and the thread terminal.
     const again = await runSupersedeSweep({
       cancelledAfterMs: T,
       orphanAfterMs: N,
@@ -142,6 +145,28 @@ describe("runSupersedeSweep (#125 C4)", () => {
     });
     expect(again.examined).toBe(0);
     expect(reads).toBe(1);
+  });
+
+  it("an engine read failure releases the lease so the next tick retries at once", async () => {
+    const threadId = await remoteRun(8, T + 60_000, "r-flaky");
+    let calls = 0;
+    const readStatus = async (): Promise<AgentRunStatus> => {
+      calls++;
+      if (calls === 1) throw new Error("ECONNRESET");
+      return "CANCELLED";
+    };
+    await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus,
+    });
+    expect((await threadRow(threadId)).status).toBe("working");
+    const again = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus,
+    });
+    expect(again.terminals).toEqual([{ threadId, cause: "user-cancelled" }]);
   });
 
   it("rule (ii): a dispatched remote thread with no recorded run ⇒ plane-offline after N, not before", async () => {

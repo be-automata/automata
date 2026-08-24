@@ -6,7 +6,11 @@ import { createDb } from "../db";
 import { thread as threadTable } from "../db/schema";
 import { ThreadStatus } from "../db/types";
 import { createOrganization } from "./organizations";
-import { createTestUser, createTestThread } from "./test-helpers";
+import {
+  createTestUser,
+  createTestThread,
+  createTestRemoteRun,
+} from "./test-helpers";
 import {
   markThreadsSuperseded,
   markThreadTerminal,
@@ -20,7 +24,7 @@ import {
   recordHatchetRun,
   findSupersedableReviewRuns,
   markHatchetRunsSuperseded,
-  markHatchetRunSupersededByExternalId,
+  retireHatchetRun,
   claimSweepLease,
   findSweepCandidates,
   hasNewerRun,
@@ -371,7 +375,7 @@ describe("#125 C1 generation fence (decideThreadGeneration / checkThreadGenerati
     ).toMatchObject({ ok: false, reason: "superseded" });
   });
 
-  it("markHatchetRunSupersededByExternalId flips exactly the matching row; unknown id is a no-op", async () => {
+  it("retireHatchetRun flips exactly the matching row (by externalId); unknown id is a no-op", async () => {
     const { threadId } = await createTestThread({
       db,
       userId,
@@ -385,13 +389,21 @@ describe("#125 C1 generation fence (decideThreadGeneration / checkThreadGenerati
       prNumber: 1,
       externalId: "ext-1",
     });
-    await markHatchetRunSupersededByExternalId({ db, externalId: "nope" });
+    await retireHatchetRun({
+      db,
+      key: { externalId: "nope" },
+      as: "superseded",
+    });
     let [row] = await db
       .select()
       .from(hatchetRunTable)
       .where(eq(hatchetRunTable.externalId, "ext-1"));
     expect(row!.status).toBe("in_flight");
-    await markHatchetRunSupersededByExternalId({ db, externalId: "ext-1" });
+    await retireHatchetRun({
+      db,
+      key: { externalId: "ext-1" },
+      as: "superseded",
+    });
     [row] = await db
       .select()
       .from(hatchetRunTable)
@@ -409,31 +421,15 @@ describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () 
     orgA = await makeOrg("acme");
   });
 
-  async function remoteRun(
-    prNumber: number,
-    ageMs: number,
-    externalId: string,
-  ) {
-    const { threadId } = await createTestThread({
+  const remoteRun = (prNumber: number, ageMs: number, externalId: string) =>
+    createTestRemoteRun({
       db,
       userId,
-      overrides: { organizationId: orgA, sandboxProvider: "hatchet-remote" },
-    });
-    await setThreadStatus(threadId, "working");
-    const run = await recordHatchetRun({
-      db,
-      threadId,
       organizationId: orgA,
-      repoFullName: "acme/widgets",
       prNumber,
       externalId,
+      ageMs,
     });
-    await db
-      .update(hatchetRunTable)
-      .set({ createdAt: new Date(Date.now() - ageMs) })
-      .where(eq(hatchetRunTable.id, run.id));
-    return { threadId, runId: run.id };
-  }
 
   it("claimSweepLease is a compare-and-set: one winner, then free again after expiry", async () => {
     const { runId } = await remoteRun(1, 0, "ext-lease");
@@ -456,8 +452,8 @@ describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () 
   });
 
   it("findSweepCandidates: only in_flight rows older than T with a non-terminal thread and no live lease", async () => {
-    const old = await remoteRun(2, 11 * 60 * 1000, "ext-old");
-    const young = await remoteRun(3, 2 * 60 * 1000, "ext-young");
+    await remoteRun(2, 11 * 60 * 1000, "ext-old");
+    await remoteRun(3, 2 * 60 * 1000, "ext-young");
     const terminal = await remoteRun(4, 11 * 60 * 1000, "ext-terminal");
     await markThreadTerminal({
       db,
@@ -474,8 +470,6 @@ describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () 
     expect(ids).not.toContain("ext-young");
     expect(ids).not.toContain("ext-terminal");
     expect(ids).not.toContain("ext-leased");
-    void old;
-    void young;
   });
 
   it("hasNewerRun sees only later siblings of the same (org, repo, PR)", async () => {
@@ -531,7 +525,8 @@ describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () 
     });
     expect(row!.status).toBe("complete");
     expect(row!.terminalCause).toBe("user-cancelled");
-    expect(row!.errorMessage).toBe("user-cancelled");
+    // The legacy errorMessage sentinel is written ONLY for `superseded`.
+    expect(row!.errorMessage).toBeNull();
   });
 
   it("findOrphanRemoteThreads: remote, reapable, run-less, older than N", async () => {

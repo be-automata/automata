@@ -516,7 +516,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
     });
     const old = await makeReviewThread(79);
     const fresh = await makeReviewThread(79);
-    const f1 = okFetch("run-old");
+    const f1 = okFetch("run-old-appside");
     vi.stubGlobal("fetch", f1.mock);
     await dispatchAgentRun({
       userId: user.id,
@@ -526,7 +526,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       branch: "feature",
     });
     vi.unstubAllGlobals();
-    const f2 = okFetch("run-new");
+    const f2 = okFetch("run-new-appside");
     vi.stubGlobal("fetch", f2.mock);
     await dispatchAgentRun({
       userId: user.id,
@@ -535,7 +535,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       repoFullName: "be-automata/automata",
       branch: "feature",
     });
-    expect(f2.cancels).toEqual([{ externalIds: ["run-old"] }]);
+    expect(f2.cancels).toEqual([{ externalIds: ["run-old-appside"] }]);
     expect(triggerBody(f2.mock).workflowName).toBe("agent-run");
     vi.unstubAllGlobals();
   });

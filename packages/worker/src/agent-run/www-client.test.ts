@@ -4,7 +4,6 @@ import {
   postEgressEvents,
   pollUntilTerminal,
   postRunFailed,
-  postRunSuperseded,
   postRunTerminal,
   checkRunStaleness,
   pullAgentCredentials,
@@ -508,7 +507,7 @@ describe("pullAgentCredentials (D1 credential delivery)", () => {
   });
 });
 
-describe("postRunSuperseded (#125 C1)", () => {
+describe("postRunTerminal — superseded (#125 C1)", () => {
   const opts = {
     baseUrl: "https://www.example.com/",
     daemonToken: "tok",
@@ -524,8 +523,9 @@ describe("postRunSuperseded (#125 C1)", () => {
         new Response(JSON.stringify({ applied: true }), { status: 200 }),
       );
     vi.stubGlobal("fetch", fetchMock);
-    const r = await postRunSuperseded(opts, {
+    const r = await postRunTerminal(opts, {
       runExternalId: "run-1",
+      cause: "superseded",
       policy: "newest-wins",
     });
     expect(r).toBe("applied");
@@ -549,7 +549,11 @@ describe("postRunSuperseded (#125 C1)", () => {
       vi.fn().mockResolvedValue(new Response("superseded", { status: 409 })),
     );
     await expect(
-      postRunSuperseded(opts, { runExternalId: "old", policy: "newest-wins" }),
+      postRunTerminal(opts, {
+        runExternalId: "old",
+        cause: "superseded",
+        policy: "newest-wins",
+      }),
     ).resolves.toBe("rejected");
     vi.unstubAllGlobals();
   });
@@ -557,7 +561,11 @@ describe("postRunSuperseded (#125 C1)", () => {
   it("network failure → 'error', swallowed", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNRESET")));
     await expect(
-      postRunSuperseded(opts, { runExternalId: "r", policy: "newest-wins" }),
+      postRunTerminal(opts, {
+        runExternalId: "r",
+        cause: "superseded",
+        policy: "newest-wins",
+      }),
     ).resolves.toBe("error");
     vi.unstubAllGlobals();
   });

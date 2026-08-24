@@ -20,10 +20,10 @@ may still hold QUEUED runs. Bulk-cancel them through the engine REST API with
 the tenant token (`HATCHET_API_URL` / `HATCHET_TENANT_ID` / `HATCHET_API_TOKEN`
 from the www worker secrets):
 
-ORDER MATTERS: cancel the QUEUED runs first, then the RUNNING ones. Cancelling
-a running run frees its slot immediately, and a still-queued run can start
-before its own cancel is processed (observed on the isolated engine during the
-drill).
+Cancel the QUEUED runs first, then the RUNNING ones. Either order ends the
+same way (nothing live, no drained run completes); QUEUED-first minimises the
+window in which a just-freed slot admits a run that is then cancelled on its
+first tick (observed on the isolated engine during the drill).
 
 ```bash
 drain() {  # $1 = QUEUED | RUNNING

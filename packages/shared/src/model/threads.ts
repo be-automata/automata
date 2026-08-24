@@ -1084,11 +1084,13 @@ export function decideThreadGeneration({
   };
   runExternalId: string | null;
 }): ThreadGenerationCheck {
-  if (
-    (thread.terminalCause !== undefined && thread.terminalCause !== null) ||
-    (thread.status === "complete" &&
-      thread.errorMessage === THREAD_SUPERSEDED_ERROR)
-  ) {
+  const terminal =
+    thread.terminalCause !== undefined
+      ? thread.terminalCause !== null
+      : // Pre-C4 shape (threadChat rows): the legacy sentinel is the only signal.
+        thread.status === "complete" &&
+        thread.errorMessage === THREAD_SUPERSEDED_ERROR;
+  if (terminal) {
     return {
       ok: false,
       reason: "superseded",
@@ -1385,7 +1387,7 @@ export async function deleteThreadById({
  * ONE definition shared by `getStalledThreads` and `markThreadsSuperseded` — a
  * future status added here reaches both sweeps, never one silently.
  */
-const reapableThreadStatuses: ThreadStatus[] = [
+export const reapableThreadStatuses: ThreadStatus[] = [
   "booting",
   "stopping",
   "working",
@@ -1426,28 +1428,28 @@ export async function stopStalledThreads({
 }
 
 /**
- * Terminally transition threads whose remote review run was SUPERSEDED by a newer
- * push (enterprise-hardening #8, amendment 7). A cancelled Hatchet run emits NO
- * terminal daemon-event (the worker SIGKILLs its daemon in `finally`), so without an
- * explicit transition the old review thread would zombie as "working" until the 75m
- * watchdog reaps it — and keep occupying a concurrency slot. This flips it to a
- * terminal state with a DISTINCT reason ("superseded") so it's visibly not an error.
- *
- * Only ACTIVE (non-terminal) threads are transitioned, so a thread that legitimately
- * completed in the race window keeps its real terminal state/errorMessage. Broadcasts
- * per updated thread so the UI reflects the stop in realtime. Returns the count moved.
+ * Write ONE typed terminal to a set of threads (#125 C1/C4): status → complete,
+ * `terminalCause` set. `errorMessage` carries the legacy `superseded` sentinel
+ * ONLY for that cause (the pre-C4 contract the chat UI and old fence rows
+ * read); every other cause leaves it NULL — the cause lives in ONE column.
+ * Idempotent: only a reapable (non-terminal) thread transitions, so a retry,
+ * a racing dispatch, or a second sweep tick never rewrites a terminal that a
+ * thread legitimately reached. Broadcasts per moved thread so the UI reflects
+ * it in realtime. Returns the ids actually moved.
  */
-export async function markThreadsSuperseded({
+export async function markThreadsTerminal({
   db,
   threadIds,
+  cause,
 }: {
   db: DB;
   threadIds: string[];
-}): Promise<number> {
-  if (threadIds.length === 0) return 0;
+  cause: TerminalCause;
+}): Promise<string[]> {
+  if (threadIds.length === 0) return [];
   const terminal = {
     status: "complete" as const,
-    errorMessage: THREAD_SUPERSEDED_ERROR,
+    errorMessage: cause === "superseded" ? THREAD_SUPERSEDED_ERROR : null,
   };
   // The EFFECTIVE status of a thread lives on the thread row for legacy
   // (LEGACY_THREAD_CHAT_ID) threads and on the threadChat row otherwise
@@ -1459,7 +1461,7 @@ export async function markThreadsSuperseded({
   const [threadRows, chatRows] = await Promise.all([
     db
       .update(schema.thread)
-      .set({ ...terminal, terminalCause: "superseded" })
+      .set({ ...terminal, terminalCause: cause })
       .where(
         and(
           inArray(schema.thread.id, threadIds),
@@ -1493,16 +1495,22 @@ export async function markThreadsSuperseded({
       }),
     ),
   );
-  return updated.size;
+  return [...updated.keys()];
 }
 
-/**
- * Write ONE typed terminal for a thread (#125 C4): status → complete,
- * `terminalCause` set, `errorMessage` carrying the cause for the legacy
- * readers. Idempotent: only a reapable (non-terminal) thread transitions, so a
- * retry — or a second sweep tick — never rewrites an existing terminal.
- * Returns true when this call performed the transition.
- */
+/** #8 app-side supersede: the prior review threads a newer dispatch replaces. Returns the count moved. */
+export async function markThreadsSuperseded({
+  db,
+  threadIds,
+}: {
+  db: DB;
+  threadIds: string[];
+}): Promise<number> {
+  return (await markThreadsTerminal({ db, threadIds, cause: "superseded" }))
+    .length;
+}
+
+/** One thread, one typed cause. True when this call performed the transition. */
 export async function markThreadTerminal({
   db,
   threadId,
@@ -1512,17 +1520,9 @@ export async function markThreadTerminal({
   threadId: string;
   cause: TerminalCause;
 }): Promise<boolean> {
-  const updated = await db
-    .update(schema.thread)
-    .set({ status: "complete", errorMessage: cause, terminalCause: cause })
-    .where(
-      and(
-        eq(schema.thread.id, threadId),
-        inArray(schema.thread.status, reapableThreadStatuses),
-      ),
-    )
-    .returning({ id: schema.thread.id });
-  return updated.length > 0;
+  return (
+    (await markThreadsTerminal({ db, threadIds: [threadId], cause })).length > 0
+  );
 }
 
 /**

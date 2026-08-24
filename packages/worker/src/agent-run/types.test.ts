@@ -1,21 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { describeTerminalCause, type TerminalCause } from "./types";
-
-const ALL: TerminalCause[] = [
-  "superseded",
-  "discarded",
-  "stale-skipped",
-  "user-cancelled",
-  "timeout",
-  "daemon-failed",
-  "publish-failed",
-  "plane-offline",
-];
+import {
+  TERMINAL_CAUSES,
+  describeTerminalCause,
+  type TerminalCause,
+} from "./types";
 
 describe("worker terminal causes mirror (#125 C4)", () => {
-  it("every cause is described; the switch is exhaustive", () => {
-    for (const c of ALL)
+  it("every cause in the tuple is described; an unknown value throws", () => {
+    for (const c of TERMINAL_CAUSES) {
       expect(describeTerminalCause(c).length).toBeGreaterThan(0);
+    }
+    expect(TERMINAL_CAUSES).toHaveLength(8);
     expect(() => describeTerminalCause("nope" as TerminalCause)).toThrow();
   });
 });

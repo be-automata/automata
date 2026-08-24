@@ -1711,14 +1711,16 @@ export const hatchetRun = pgTable(
     /** Hatchet workflow-run id (`run.metadata.id`) — the handle passed to cancel. */
     externalId: text("external_id").notNull(),
     /**
-     * 'in_flight' at dispatch → 'superseded' when a newer review cancels it.
-     * There is deliberately NO 'finished' state: rows are never eagerly marked
-     * done (the supersede finder bounds candidates by a freshness window
-     * instead); widen this union only when something actually writes a value.
+     * 'in_flight' at dispatch → 'superseded' when a newer review takes the PR
+     * (app-side cancel, or the worker's/sweep's `superseded` terminal) →
+     * 'terminal' for any other typed terminal (#125 C4: the CAUSE lives on
+     * the thread; this status only says "no longer a supersede candidate").
+     * A successfully completed run is never eagerly marked (the finder bounds
+     * candidates by a freshness window instead).
      */
     status: text("status")
       .notNull()
-      .$type<"in_flight" | "superseded">()
+      .$type<"in_flight" | "superseded" | "terminal">()
       .default("in_flight"),
     /**
      * #125 C4 sweep lease: a sweep tick claims a row by moving this past now()
@@ -1740,6 +1742,9 @@ export const hatchetRun = pgTable(
       table.prNumber,
     ),
     index("hatchet_run_thread_id_index").on(table.threadId),
+    // One row per Hatchet run; the generation fence, the worker terminal and
+    // the staleness self-check all look rows up by externalId.
+    uniqueIndex("hatchet_run_external_id_index").on(table.externalId),
   ],
 );
 

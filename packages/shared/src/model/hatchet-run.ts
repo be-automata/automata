@@ -1,19 +1,9 @@
 import { DB } from "../db";
 import { hatchetRun } from "../db/schema";
 import { HatchetRun } from "../db/types";
-import {
-  and,
-  eq,
-  gt,
-  gte,
-  inArray,
-  isNull,
-  lt,
-  ne,
-  or,
-  sql,
-} from "drizzle-orm";
+import { and, eq, gt, gte, inArray, isNull, lt, ne, or } from "drizzle-orm";
 import { thread as threadTable } from "../db/schema";
+import { reapableThreadStatuses } from "./threads";
 import { normalizeRepo } from "./repo-review-settings";
 
 /**
@@ -151,20 +141,29 @@ export async function markHatchetRunsSuperseded({
 }
 
 /**
- * Mark the row for ONE run `superseded` by its Hatchet externalId (#125 C1:
- * the worker's own terminal). No-op when untracked (non-review run).
+ * Retire one run row from the supersede-candidate set (#125 C1/C4): the
+ * status names WHY it left — `superseded` (a newer run took the PR) or
+ * `terminal` (any other typed terminal; the cause itself lives on the
+ * thread). Keyed by row id (sweep) or by Hatchet externalId (worker
+ * terminal); always clears the sweep lease.
  */
-export async function markHatchetRunSupersededByExternalId({
+export async function retireHatchetRun({
   db,
-  externalId,
+  key,
+  as,
 }: {
   db: DB;
-  externalId: string;
+  key: { id: string } | { externalId: string };
+  as: "superseded" | "terminal";
 }): Promise<void> {
   await db
     .update(hatchetRun)
-    .set({ status: "superseded" })
-    .where(eq(hatchetRun.externalId, externalId));
+    .set({ status: as, sweepLeaseUntil: null })
+    .where(
+      "id" in key
+        ? eq(hatchetRun.id, key.id)
+        : eq(hatchetRun.externalId, key.externalId),
+    );
 }
 
 /** Sweep lease length (#125 C4): a tick owns a run this long; expired = retry next tick. */
@@ -180,21 +179,13 @@ export async function findSweepCandidates({
   db,
   olderThanMs,
   now = new Date(),
+  limit = SWEEP_BATCH_LIMIT,
 }: {
   db: DB;
   olderThanMs: number;
   now?: Date;
-}): Promise<
-  {
-    id: string;
-    threadId: string;
-    organizationId: string;
-    repoFullName: string;
-    prNumber: number;
-    externalId: string;
-    createdAt: Date;
-  }[]
-> {
+  limit?: number;
+}) {
   return db
     .select({
       id: hatchetRun.id,
@@ -216,44 +207,46 @@ export async function findSweepCandidates({
           new Date(now.getTime() - SUPERSEDE_FRESHNESS_MS),
         ),
         isNull(threadTable.terminalCause),
-        inArray(threadTable.status, [
-          "booting",
-          "stopping",
-          "working",
-          "working-done",
-          "working-error",
-          "checkpointing",
-        ]),
+        inArray(threadTable.status, reapableThreadStatuses),
         or(
           isNull(hatchetRun.sweepLeaseUntil),
           lt(hatchetRun.sweepLeaseUntil, now),
         ),
       ),
-    );
+    )
+    .orderBy(hatchetRun.createdAt)
+    .limit(limit);
 }
+export type SweepCandidate = Awaited<
+  ReturnType<typeof findSweepCandidates>
+>[number];
+
+/** A bad hour must not blow the every-minute cron: leftovers are safe for the next tick (lease). */
+export const SWEEP_BATCH_LIMIT = 50;
 
 /**
- * Claim the sweep lease for one run (compare-and-set): succeeds only when the
- * row is unleased or its lease expired. The caller acts ONLY on `true`; a
- * concurrent tick gets `false` and skips — two ticks never both act.
+ * Claim the sweep lease for a batch of runs in ONE compare-and-set UPDATE:
+ * a row is won only when unleased or expired. Returns the ids won; a
+ * concurrent tick gets the complement — two ticks never both act on a run.
  */
-export async function claimSweepLease({
+export async function claimSweepLeases({
   db,
-  id,
+  ids,
   now = new Date(),
   leaseMs = SWEEP_LEASE_MS,
 }: {
   db: DB;
-  id: string;
+  ids: string[];
   now?: Date;
   leaseMs?: number;
-}): Promise<boolean> {
+}): Promise<string[]> {
+  if (ids.length === 0) return [];
   const rows = await db
     .update(hatchetRun)
     .set({ sweepLeaseUntil: new Date(now.getTime() + leaseMs) })
     .where(
       and(
-        eq(hatchetRun.id, id),
+        inArray(hatchetRun.id, ids),
         or(
           isNull(hatchetRun.sweepLeaseUntil),
           lt(hatchetRun.sweepLeaseUntil, now),
@@ -261,7 +254,37 @@ export async function claimSweepLease({
       ),
     )
     .returning({ id: hatchetRun.id });
-  return rows.length > 0;
+  return rows.map((r) => r.id);
+}
+
+/** One-row convenience over claimSweepLeases (tests). */
+export async function claimSweepLease(args: {
+  db: DB;
+  id: string;
+  now?: Date;
+  leaseMs?: number;
+}): Promise<boolean> {
+  return (await claimSweepLeases({ ...args, ids: [args.id] })).length > 0;
+}
+
+/**
+ * Re-time a held lease: a run that is still LIVE on the engine is pushed out
+ * to a longer horizon (no point re-reading it every 5 min), and a read
+ * failure releases it so the next tick retries at once.
+ */
+export async function setSweepLease({
+  db,
+  id,
+  until,
+}: {
+  db: DB;
+  id: string;
+  until: Date | null;
+}): Promise<void> {
+  await db
+    .update(hatchetRun)
+    .set({ sweepLeaseUntil: until })
+    .where(eq(hatchetRun.id, id));
 }
 
 /**
@@ -317,18 +340,4 @@ export async function getHatchetRunByExternalId({
     .where(eq(hatchetRun.externalId, externalId))
     .limit(1);
   return row;
-}
-
-/** Mark one run row terminal-by-sweep so it is never a supersede candidate again. */
-export async function markHatchetRunSwept({
-  db,
-  id,
-}: {
-  db: DB;
-  id: string;
-}): Promise<void> {
-  await db
-    .update(hatchetRun)
-    .set({ status: "superseded", sweepLeaseUntil: sql`NULL` })
-    .where(eq(hatchetRun.id, id));
 }

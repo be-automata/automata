@@ -1,16 +1,19 @@
 import { env } from "@terragon/env/apps-www";
 import { db } from "@/lib/db";
 import {
-  claimSweepLease,
+  claimSweepLeases,
   findSweepCandidates,
   hasNewerRun,
-  markHatchetRunSwept,
+  retireHatchetRun,
+  setSweepLease,
+  type SweepCandidate,
 } from "@terragon/shared/model/hatchet-run";
 import {
   findOrphanRemoteThreads,
   markThreadTerminal,
 } from "@terragon/shared/model/threads";
 import type { TerminalCause } from "@terragon/shared/model/terminal-cause";
+import { assertNever } from "@terragon/shared/utils";
 import {
   getAgentRunStatus,
   type AgentRunStatus,
@@ -23,26 +26,34 @@ import {
  * non-transactional-enqueue gap (thread written, trigger never fired).
  *
  * Runs every minute on the scheduled-tasks cron. Two rules:
- *  (i)  a recorded run still in_flight for > T whose engine status is
- *       CANCELLED (or gone) and whose thread has no terminal → terminal by
- *       INFERRED cause: `superseded` when a newer run exists for the same
- *       (org, repo, PR), else `user-cancelled`. Engine FAILED → `daemon-failed`
- *       (onFailure normally posts this; the sweep is the backstop).
+ *  (i)  a recorded run still in_flight for > T whose thread has no terminal:
+ *       engine CANCELLED → `superseded` when a newer run exists for the same
+ *       (org, repo, PR), else `user-cancelled`; engine NOT_FOUND (pruned, or
+ *       the trigger never landed) → `superseded` with a newer sibling, else
+ *       `plane-offline`; engine FAILED → `daemon-failed` (onFailure normally
+ *       posts this; the sweep is the backstop); engine COMPLETED while the
+ *       thread is still reapable → the run row is retired (www missed the
+ *       finish; the stalled watchdog owns the thread) so it is not re-read
+ *       every tick; QUEUED/RUNNING → left alone, lease pushed out.
  *  (ii) a remote thread dispatched > N ago with NO recorded run at all →
  *       `plane-offline`.
  *
- * Exactly-once by construction: every candidate is CLAIMED with a
- * compare-and-set lease (`claimSweepLease`) before any engine read or write —
- * two concurrent ticks never both act — and the terminal write itself only
- * transitions a still-reapable thread (`markThreadTerminal`), so a retry after
- * a crash mid-tick is a no-op. A run that is still RUNNING/QUEUED is left
- * alone (its lease expires and it is re-examined next tick).
+ * Exactly-once by construction: the batch is CLAIMED with one compare-and-set
+ * lease UPDATE (`claimSweepLeases`) before any engine read or write — two
+ * concurrent ticks never both act on a run — and the terminal write itself
+ * only transitions a still-reapable thread (`markThreadTerminal`), so a
+ * retry after a crash mid-tick is a no-op. A failed engine read releases the
+ * lease so the next tick retries at once.
  */
 
 /** Rule (i): in_flight for longer than this before the engine is consulted. */
 export const SWEEP_CANCELLED_AFTER_MS_DEFAULT = 10 * 60 * 1000;
 /** Rule (ii): dispatched-without-a-run for longer than this ⇒ plane-offline. */
 export const SWEEP_ORPHAN_AFTER_MS_DEFAULT = 15 * 60 * 1000;
+/** How long a LIVE run's lease is pushed out before it is re-read. */
+const LIVE_RECHECK_MS = 15 * 60 * 1000;
+/** Engine reads in flight at once. */
+const ENGINE_READ_CONCURRENCY = 4;
 
 /** An env knob is a positive integer ms string or unset; anything else is ignored. */
 function msFromEnv(raw: string): number | undefined {
@@ -51,7 +62,6 @@ function msFromEnv(raw: string): number | undefined {
 }
 
 export type SweepDeps = {
-  now?: () => Date;
   /** Injected for tests; production reads the engine over REST. */
   readStatus?: (externalId: string) => Promise<AgentRunStatus>;
   cancelledAfterMs?: number;
@@ -66,18 +76,14 @@ export type SweepReport = {
 };
 
 /**
- * Infer the terminal cause for a run the engine reports as CANCELLED / gone —
- * documented here because it is a RULE, not a lookup: a newer sibling run for
- * the PR means this one was superseded; otherwise someone cancelled it.
+ * The newer sibling run for the PR, if any — an app-side fact (hatchet_run),
+ * which is why cause inference lives here and not on the engine.
+ * TODO(hatchet_run retirement): when the table goes (runbook §success
+ * criteria), this must read the engine's run list by `additional_metadata`
+ * prKey instead — or every CANCELLED degrades to `user-cancelled`.
  */
-async function inferCancelledCause(run: {
-  organizationId: string;
-  repoFullName: string;
-  prNumber: number;
-  createdAt: Date;
-  externalId: string;
-}): Promise<TerminalCause> {
-  const newer = await hasNewerRun({
+function newerSibling(run: SweepCandidate) {
+  return hasNewerRun({
     db,
     organizationId: run.organizationId,
     repoFullName: run.repoFullName,
@@ -85,34 +91,60 @@ async function inferCancelledCause(run: {
     after: run.createdAt,
     excludeExternalId: run.externalId,
   });
-  return newer ? "superseded" : "user-cancelled";
 }
 
-function causeForStatus(
+type Decision =
+  | { kind: "terminal"; cause: TerminalCause }
+  | { kind: "retire" }
+  | { kind: "live" };
+
+/** The exhaustive rule (i) table; a new engine status fails compilation here. */
+async function decide(
   status: AgentRunStatus,
-): "cancelled" | "failed" | "live" | "done" {
+  run: SweepCandidate,
+): Promise<Decision> {
   switch (status) {
     case "CANCELLED":
+      return (await newerSibling(run))
+        ? { kind: "terminal", cause: "superseded" }
+        : { kind: "terminal", cause: "user-cancelled" };
     case "NOT_FOUND":
-      return "cancelled";
+      return (await newerSibling(run))
+        ? { kind: "terminal", cause: "superseded" }
+        : { kind: "terminal", cause: "plane-offline" };
     case "FAILED":
-      return "failed";
+      return { kind: "terminal", cause: "daemon-failed" };
+    case "COMPLETED":
+      return { kind: "retire" };
     case "QUEUED":
     case "RUNNING":
-      return "live";
-    case "COMPLETED":
-      return "done";
-    default: {
-      const exhaustive: never = status;
-      throw new Error(`unknown run status ${String(exhaustive)}`);
-    }
+      return { kind: "live" };
+    default:
+      return assertNever(status);
   }
+}
+
+/** Run `fn` over `items` with at most `limit` in flight. */
+async function mapLimit<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) {
+        const item = items[next++]!;
+        await fn(item);
+      }
+    }),
+  );
 }
 
 export async function runSupersedeSweep(
   deps: SweepDeps = {},
 ): Promise<SweepReport> {
-  const now = deps.now?.() ?? new Date();
+  const now = new Date();
   const cancelledAfterMs =
     deps.cancelledAfterMs ??
     msFromEnv(env.SUPERSEDE_SWEEP_CANCELLED_AFTER_MS) ??
@@ -137,45 +169,78 @@ export async function runSupersedeSweep(
     orphans: [],
   };
 
-  // Rule (i)
+  // Rule (i): claim the batch in ONE compare-and-set, then read the engine
+  // with bounded concurrency; every terminal pair is idempotent.
   const candidates = await findSweepCandidates({
     db,
     olderThanMs: cancelledAfterMs,
     now,
   });
   report.examined = candidates.length;
-  for (const run of candidates) {
-    if (!(await claimSweepLease({ db, id: run.id, now }))) continue;
-    report.claimed++;
+  const won = new Set(
+    await claimSweepLeases({ db, ids: candidates.map((c) => c.id), now }),
+  );
+  const claimed = candidates.filter((c) => won.has(c.id));
+  report.claimed = claimed.length;
+  await mapLimit(claimed, ENGINE_READ_CONCURRENCY, async (run) => {
     let status: AgentRunStatus;
     try {
       status = await readStatus(run.externalId);
     } catch (error) {
-      console.error("[supersede-sweep] engine status read failed (skip)", {
-        externalId: run.externalId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      continue;
+      console.error(
+        "[supersede-sweep] engine status read failed (retry next tick)",
+        {
+          externalId: run.externalId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
+      await setSweepLease({ db, id: run.id, until: null });
+      return;
     }
-    const kind = causeForStatus(status);
-    if (kind === "live" || kind === "done") continue;
-    const cause: TerminalCause =
-      kind === "failed" ? "daemon-failed" : await inferCancelledCause(run);
-    const applied = await markThreadTerminal({
-      db,
-      threadId: run.threadId,
-      cause,
-    });
-    await markHatchetRunSwept({ db, id: run.id });
-    if (applied) report.terminals.push({ threadId: run.threadId, cause });
-    console.log("[supersede-sweep] terminal", {
-      threadId: run.threadId,
-      externalId: run.externalId,
-      status,
-      cause,
-      applied,
-    });
-  }
+    const decision = await decide(status, run);
+    switch (decision.kind) {
+      case "live":
+        await setSweepLease({
+          db,
+          id: run.id,
+          until: new Date(now.getTime() + LIVE_RECHECK_MS),
+        });
+        return;
+      case "retire":
+        await retireHatchetRun({ db, key: { id: run.id }, as: "terminal" });
+        return;
+      case "terminal": {
+        const [applied] = await Promise.all([
+          markThreadTerminal({
+            db,
+            threadId: run.threadId,
+            cause: decision.cause,
+          }),
+          retireHatchetRun({
+            db,
+            key: { id: run.id },
+            as: decision.cause === "superseded" ? "superseded" : "terminal",
+          }),
+        ]);
+        if (applied) {
+          report.terminals.push({
+            threadId: run.threadId,
+            cause: decision.cause,
+          });
+        }
+        console.log("[supersede-sweep] terminal", {
+          threadId: run.threadId,
+          externalId: run.externalId,
+          status,
+          cause: decision.cause,
+          applied,
+        });
+        return;
+      }
+      default:
+        return assertNever(decision);
+    }
+  });
 
   // Rule (ii)
   const orphans = await findOrphanRemoteThreads({

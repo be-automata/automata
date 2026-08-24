@@ -281,14 +281,6 @@ export async function postRunTerminal(
   return body.applied ? "applied" : "noop";
 }
 
-/** The `superseded` terminal (engine cancel under a native policy). */
-export function postRunSuperseded(
-  opts: WwwClientOpts,
-  { runExternalId, policy }: { runExternalId: string; policy: string },
-): Promise<RunTerminalResult> {
-  return postRunTerminal(opts, { runExternalId, cause: "superseded", policy });
-}
-
 /**
  * Queue-mode staleness self-check (#125 C4): is a NEWER run already recorded
  * for this run's PR? Fails OPEN on any transport error — a self-check must
