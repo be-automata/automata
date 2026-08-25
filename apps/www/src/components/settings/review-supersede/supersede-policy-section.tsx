@@ -338,18 +338,21 @@ export function availableRepoNames(
 }
 
 /**
- * The supersede family on a repo row is TWO columns. The row is shared with
- * the tolerance and egress families and is never deleted by "Restore
- * default", so both writers that begin or end an override must name both
- * columns — otherwise a repo that once had recheck ON silently carries it
- * into a brand-new override the Add flow never exposed.
+ * The supersede family is TWO columns and the recheck flag only means
+ * something under complete-run-discard. Every writer that CHANGES the policy
+ * — Add override, the org-default radio, an override's Select, Restore
+ * default — names both columns and turns recheck OFF: the row is shared with
+ * the tolerance and egress families and outlives the override, so a flag
+ * left behind from an earlier discard configuration would silently re-arm
+ * the re-verify the next time discard is chosen. Re-enabling recheck is
+ * always an explicit toggle by the admin.
  */
 export const RESTORE_DEFAULT_PATCH = {
   supersedePolicy: null,
   recheckOnComplete: false,
 } as const;
 
-export function addOverridePatch(policy: SupersedePolicy): {
+export function policyPatch(policy: SupersedePolicy): {
   supersedePolicy: SupersedePolicy;
   recheckOnComplete: false;
 } {
@@ -450,10 +453,10 @@ export function SupersedePolicySection() {
     <SupersedePolicySectionView
       state={state}
       actions={{
-        onSelectPolicy: (policy) => saveDefault({ supersedePolicy: policy }),
+        onSelectPolicy: (policy) => saveDefault(policyPatch(policy)),
         onRecheckChange: (on) => saveDefault({ recheckOnComplete: on }),
         onOverridePolicy: (row, policy) =>
-          saveOverride(row, { supersedePolicy: policy }),
+          saveOverride(row, policyPatch(policy)),
         onOverrideRecheck: (row, on) =>
           saveOverride(row, { recheckOnComplete: on }),
         onRestoreDefault: (row) =>
@@ -461,7 +464,7 @@ export function SupersedePolicySection() {
         onAddOverride: (repoFullName, policy) => {
           setConflict(false);
           setOverride.mutate(
-            { repoFullName, patch: addOverridePatch(policy) },
+            { repoFullName, patch: policyPatch(policy) },
             { onError: onConflict },
           );
         },

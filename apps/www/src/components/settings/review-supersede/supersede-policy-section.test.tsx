@@ -7,7 +7,7 @@ import {
   type SupersedeSectionState,
   availableRepoNames,
   RESTORE_DEFAULT_PATCH,
-  addOverridePatch,
+  policyPatch,
 } from "./supersede-policy-section";
 
 // The app compiles JSX with the automatic runtime; vitest here uses the
@@ -170,8 +170,8 @@ describe("availableRepoNames — Add-override picker excludes repos that already
 });
 
 describe("override lifecycle patches name BOTH supersede columns — the row outlives the override", () => {
-  it("Add override starts with recheck OFF regardless of what the shared row still carries", () => {
-    expect(addOverridePatch("complete-run-discard")).toEqual({
+  it("choosing a policy (Add override, org radio, override Select) always turns recheck OFF — re-arming it is an explicit toggle", () => {
+    expect(policyPatch("complete-run-discard")).toEqual({
       supersedePolicy: "complete-run-discard",
       recheckOnComplete: false,
     });

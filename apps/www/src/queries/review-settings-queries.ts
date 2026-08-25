@@ -142,6 +142,9 @@ export function useClearReviewToleranceMutation() {
       });
     },
     onError: (error: unknown) => {
+      // Same contract as the setter: a stale-version 409 is rendered inline by
+      // the row (one conflict surface), never toasted on top of it.
+      if (error instanceof ConflictError) return;
       toast.error(error instanceof Error ? error.message : String(error));
     },
   });
