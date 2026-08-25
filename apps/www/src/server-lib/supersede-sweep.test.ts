@@ -116,8 +116,12 @@ describe("runSupersedeSweep (#125 C4)", () => {
     );
   });
 
-  it("rule (i): CANCELLED under complete-run-discard with no newer sibling ⇒ discarded (CANCEL_NEWEST victim the worker never saw), and the reader gets the run's createdAt as its lookup hint", async () => {
+  it("rule (i): CANCELLED under complete-run-discard ⇒ discarded even with a newer sibling (the recheck), which is linked; the reader gets createdAt + threadId as its lookup hint", async () => {
     const victim = await remoteRun(8, T + 60_000, "r-discarded");
+    // The recheck of the discarded head is a NEWER sibling on the same PR —
+    // it must not flip the cause to `superseded` (prod 2026-08-25 18:25Z did
+    // exactly that), but it IS the run to link to.
+    const recheck = await remoteRun(8, 0, "r-recheck");
     await db
       .update(hatchetRunTable)
       .set({ supersedePolicy: "complete-run-discard" })
@@ -137,10 +141,30 @@ describe("runSupersedeSweep (#125 C4)", () => {
     const row = await threadRow(victim);
     expect(row.terminalCause).toBe("discarded");
     expect(row.status).toBe("complete");
+    expect(row.supersededByThreadId).toBe(recheck);
     expect(hints["r-discarded"]!.createdAt.getTime()).toBeLessThan(
       Date.now() - T,
     );
     expect(hints["r-discarded"]!.threadId).toBe(victim);
+  });
+
+  it("rule (i): CANCELLED under complete-run-discard with NO newer sibling ⇒ discarded, nothing linked (recheck off, or the sweep won the race with the recheck dispatch)", async () => {
+    const victim = await remoteRun(9, T + 60_000, "r-discarded-alone");
+    await db
+      .update(hatchetRunTable)
+      .set({ supersedePolicy: "complete-run-discard" })
+      .where(eq(hatchetRunTable.externalId, "r-discarded-alone"));
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({ "r-discarded-alone": "CANCELLED" }),
+    });
+    expect(report.terminals).toEqual([
+      { threadId: victim, cause: "discarded" },
+    ]);
+    const row = await threadRow(victim);
+    expect(row.terminalCause).toBe("discarded");
+    expect(row.supersededByThreadId).toBeNull();
   });
 
   it("rule (i) waits T: a fresh in_flight run is not examined", async () => {
