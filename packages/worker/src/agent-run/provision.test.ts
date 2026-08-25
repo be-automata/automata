@@ -2,9 +2,9 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
+import { inspect, promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ensureBaseDiffable } from "./provision";
+import { ensureBaseDiffable, gitExec } from "./provision";
 
 const execFileAsync = promisify(execFile);
 
@@ -100,5 +100,49 @@ describe("ensureBaseDiffable (BUG-EXEC-02)", () => {
     expect(stdout).toContain("+MORE");
     // ...and NOT the base-only commit (the two-dot lie this fix avoids).
     expect(stdout).not.toContain("MAINONLY");
+  });
+});
+
+describe("git failures never echo the auth header", () => {
+  it("a failing git command throws the verb + stderr tail, with the extraHeader credential absent (hermetic: local path, no network)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "prov-redact-"));
+    try {
+      const token = "ghs_3211193_abcdefghijklmnopqrstuvwxyz";
+      const authHeader = `AUTHORIZATION: basic ${Buffer.from(
+        `x-access-token:${token}`,
+      ).toString("base64")}`;
+      // Exactly the argv shape provisionWorkdir builds, against a path that
+      // does not exist — git fails locally, no network, no real token.
+      await expect(
+        gitExec([
+          "-c",
+          `http.extraHeader=${authHeader}`,
+          "clone",
+          "--depth",
+          "1",
+          path.join(root, "definitely-missing.git"),
+          path.join(root, "out"),
+        ]),
+      ).rejects.toSatisfy((e: unknown) => {
+        const msg = (e as Error).message;
+        expect(msg).toMatch(/^git clone failed \(exit \d+\): /);
+        expect(msg).toMatch(/does not exist|not found|No such file/i);
+        expect(msg).not.toContain("basic ");
+        expect(msg).not.toContain(token);
+        expect(msg).not.toContain(
+          Buffer.from(`x-access-token:${token}`).toString("base64"),
+        );
+        // NO reachable property may carry the raw argv: no `cause`, and the
+        // full inspected form (what console.error would print) is clean too.
+        expect((e as { cause?: unknown }).cause).toBeUndefined();
+        const inspected = inspect(e, { depth: 10 });
+        expect(inspected).not.toContain("basic ");
+        expect(inspected).not.toContain(token);
+        expect(inspected).not.toContain("extraHeader");
+        return true;
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });
