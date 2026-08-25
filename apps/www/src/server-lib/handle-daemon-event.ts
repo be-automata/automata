@@ -107,6 +107,11 @@ export async function handleDaemonEvent({
       activeRunExternalId: thread.activeRunExternalId,
       status: threadChat.status,
       errorMessage: threadChat.errorMessage,
+      // C4: ANY typed terminal refuses late writes — not only the
+      // 'superseded' sentinel. The cause lives on the thread row (already
+      // loaded); omitting it here silently downgraded the fence to the
+      // pre-C4 sentinel check for the other seven causes.
+      terminalCause: thread.terminalCause,
     },
     runExternalId: runExternalId ?? null,
   });

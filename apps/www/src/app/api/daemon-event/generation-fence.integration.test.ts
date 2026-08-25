@@ -10,7 +10,10 @@ import {
   createTestThread,
 } from "@terragon/shared/model/test-helpers";
 import { createOrganization } from "@terragon/shared/model/organizations";
-import { setThreadActiveRun } from "@terragon/shared/model/threads";
+import {
+  markThreadTerminal,
+  setThreadActiveRun,
+} from "@terragon/shared/model/threads";
 import {
   thread as threadTable,
   threadChat as threadChatTable,
@@ -188,6 +191,23 @@ describe.each([
       expect(t2.status).toBe(200);
       expect(await t2.json()).toEqual({ applied: false });
     });
+
+    it.each([
+      "timeout",
+      "daemon-failed",
+      "plane-offline",
+      "user-cancelled",
+    ] as const)(
+      "ANY typed terminal (%s), not only 'superseded', refuses a late daemon-event",
+      async (cause) => {
+        await setThreadActiveRun({ db, threadId, externalId: "run-1" });
+        expect(await markThreadTerminal({ db, threadId, cause })).toBe(true);
+        // These causes leave errorMessage NULL — the fence must key on the
+        // typed cause, not the superseded sentinel.
+        expect((await event("run-1")).status).toBe(409);
+        expect((await event()).status).toBe(409);
+      },
+    );
 
     it("a newer dispatch re-stamps the thread: the old generation can neither terminate nor write, the new one can", async () => {
       await setThreadActiveRun({ db, threadId, externalId: "run-1" });

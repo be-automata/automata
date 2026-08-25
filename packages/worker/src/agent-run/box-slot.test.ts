@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -117,6 +117,59 @@ describe("box slot (#125 C4 — the worker-side one-agent budget)", () => {
         now: () => clock,
       }),
     ).rejects.toThrow(/aborted/);
+    await fresh.release();
+  });
+
+  it("an UNREADABLE owner file (torn/partial) is never treated as debris — the live holder keeps the slot", async () => {
+    const held = await acquireBoxSlot({ dir, holder: "first", pollMs: 20 });
+    // Simulate a torn read: truncate the owner file to a partial JSON.
+    await writeFile(path.join(dir, "slot", "owner.json"), '{"pid":', "utf8");
+    let acquired = false;
+    const waiter = acquireBoxSlot({ dir, holder: "second", pollMs: 20 }).then(
+      (s) => {
+        acquired = true;
+        return s;
+      },
+    );
+    await new Promise((r) => setTimeout(r, 150));
+    expect(acquired).toBe(false);
+    // The holder's next heartbeat repairs the file atomically; release frees it.
+    await held.release();
+    const second = await waiter;
+    expect(acquired).toBe(true);
+    await second.release();
+  });
+
+  it("a stalled holder's heartbeat never overwrites the successor's owner file", async () => {
+    let t = 1_000_000;
+    const now = () => t;
+    const stalled = await acquireBoxSlot({
+      dir,
+      holder: "stalled",
+      pollMs: 20,
+      staleMs: 100,
+      now,
+    });
+    t += 200; // heartbeat stale → reclaimable
+    const fresh = await acquireBoxSlot({
+      dir,
+      holder: "fresh",
+      pollMs: 20,
+      staleMs: 100,
+      now,
+    });
+    const before = JSON.parse(
+      await readFile(path.join(dir, "slot", "owner.json"), "utf8"),
+    );
+    expect(before.holder).toBe("fresh");
+    // The stalled holder "resumes": its release must be a no-op and the
+    // owner file must still be the successor's afterwards.
+    await stalled.release();
+    const after = JSON.parse(
+      await readFile(path.join(dir, "slot", "owner.json"), "utf8"),
+    );
+    expect(after.holder).toBe("fresh");
+    expect(after.nonce).toBe(before.nonce);
     await fresh.release();
   });
 
