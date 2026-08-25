@@ -151,11 +151,14 @@ export function ReviewSettings() {
     }
   }
 
+  // Every writer on a row carries the row's version: a stale Save gets the
+  // same 409 as a stale Reset instead of silently last-write-winning over a
+  // concurrent admin (the row's updatedAt is on every RepoRowData).
   const doSave = (row: RepoRowData, target: BlockTolerance): Promise<void> =>
     runMutation(row, () =>
       setMutation.mutateAsync({
         repoFullName: row.repoFullName,
-        patch: { blockTolerance: target },
+        patch: { blockTolerance: target, expectedUpdatedAt: row.updatedAt },
       }),
     );
 
@@ -176,7 +179,7 @@ export function ReviewSettings() {
     try {
       await setMutation.mutateAsync({
         repoFullName: row.repoFullName,
-        patch: { reviewDraftPrs },
+        patch: { reviewDraftPrs, expectedUpdatedAt: row.updatedAt },
       });
     } catch {
       // useSetReviewSettingMutation toasts the error; the switch reverts on refetch.
