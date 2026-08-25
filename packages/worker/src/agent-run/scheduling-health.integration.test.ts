@@ -2,11 +2,16 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Client } from "pg";
 import {
+  SCHEMA_READY_DELETE_TRIGGER_FN,
+  SCHEMA_READY_TABLES,
   composeDownV,
   composeUp,
   connectPg,
   pollUntil,
+  schemaIsReady,
+  waitForEngineReady,
 } from "./hatchet-it-harness";
+import type { SchemaReadyCounts } from "./hatchet-it-harness";
 import {
   detectStepConcurrencyRot,
   detectWorkflowConcurrencyRot,
@@ -45,22 +50,74 @@ import type { PgLike } from "./engine-db";
  * §7.2.1 anticipates and is recorded here, not silently adopted.
  */
 /**
- * Migrations belong to hatchet-lite, not postgres — poll until the engine has
- * created the concurrency tables before letting any fixture run.
+ * Migrations belong to hatchet-lite, not postgres — and they land in stages,
+ * so "the tables exist" is not the same as "the schema the queries need
+ * exists". This suite routinely meets a brand-new engine mid-migration:
+ * `supersede.integration.test.ts` tears the stack down with `down -v` in its
+ * own `afterAll`, and whichever of the two files runs second brings it back
+ * up from nothing. (File ORDER is not pinned — vitest's default sequencer may
+ * reorder specs — so neither file may assume it runs first. Both gate their
+ * own setup independently, which is what makes the order irrelevant.)
+ *
+ * INCIDENT RECORD — measured 2026-08-25 against a fresh hatchet-lite v0.94.10.
+ * These are observations of one pinned third-party image, not a contract; if
+ * the image tag in docker-compose.hatchet.yml moves, re-measure rather than
+ * trusting the numbers:
+ *
+ *   t=0.0s  "Worker" exists
+ *   t=1.2s  the five v1_* tables exist (one migration batch)
+ *   t=1.9s  v1_task_runtime.evicted_at is added   <-- LAST; ~700ms half-migrated window
+ *   t≈1.2s  the engine's own /api/ready returns 200
+ *
+ * A readiness gate that stops at the tables lands inside that window on a slow
+ * runner and `reclaimEngineSlots` fails with `column r.evicted_at does not
+ * exist` (42703) — worker-e2e was green at 86dfc8e and red at ca2a6ce on
+ * byte-identical code. Note /api/ready went 200 BEFORE the column landed, so
+ * the engine's own signal is necessary but NOT sufficient; the schema probe
+ * below is what actually closes the race.
+ *
+ * Budgets: every wait inside `beforeAll` must fit under its hook timeout, or
+ * vitest kills the hook with a generic "Hook timed out" and `pollUntil`'s
+ * message — which names the stage and the last counts — never prints. That
+ * diagnostic is the whole point. See the accounting at the hook itself.
  */
+const READY_BUDGET_MS = 60_000;
+const PG_CONNECT_BUDGET_MS = 30_000;
+
 async function waitForSchemaReady(client: Client): Promise<void> {
+  await waitForEngineReady(READY_BUDGET_MS);
+  // Each object is counted SEPARATELY and schema-qualified. Summing them into
+  // one number cannot tell "all tables, no column" from "one extra table, no
+  // column", and the engine's db carries a second schema (`outbox`) whose
+  // names are not guaranteed to stay disjoint. Separate fields also make the
+  // timeout message name the missing piece instead of an opaque total.
+  // `public` is where these resolve via the default search_path, so it is
+  // what must be ready.
   await pollUntil(
-    "hatchet-lite concurrency tables",
+    "hatchet-lite concurrency schema (tables + evicted_at + release trigger)",
     async () =>
+      // Not dead code: `rows[0]` is possibly-undefined to the type checker.
+      // A missing row is "not ready", never a crash mid-poll.
       (
-        await client.query(
-          `SELECT count(*)::int AS n FROM information_schema.tables
-           WHERE table_name IN ('v1_step_concurrency','v1_concurrency_slot','v1_task_runtime','Worker')`,
+        await client.query<SchemaReadyCounts>(
+          `SELECT
+             (SELECT count(*) FROM information_schema.tables
+               WHERE table_schema = 'public'
+                 AND table_name = ANY($1::text[]))::int AS tables,
+             (SELECT count(*) FROM information_schema.columns
+               WHERE table_schema = 'public'
+                 AND table_name = 'v1_task_runtime'
+                 AND column_name = 'evicted_at')::int AS evicted_at,
+             (SELECT count(*) FROM pg_proc p
+                JOIN pg_namespace n ON n.oid = p.pronamespace
+               WHERE n.nspname = 'public'
+                 AND p.proname = $2)::int AS delete_trigger_fn`,
+          [[...SCHEMA_READY_TABLES], SCHEMA_READY_DELETE_TRIGGER_FN],
         )
-      ).rows[0].n as number,
-    (n) => n >= 4,
-    120_000,
-    2000,
+      ).rows[0] ?? { tables: 0, evicted_at: 0, delete_trigger_fn: 0 },
+    schemaIsReady,
+    READY_BUDGET_MS,
+    250,
   );
 }
 
@@ -77,7 +134,7 @@ describe.skipIf(!itEnabled)(
       // Stack safety (own project, own ports, never the live engine) lives in
       // hatchet-it-harness.ts, shared with supersede.integration.test.ts.
       await composeUp();
-      pg = await connectPg();
+      pg = await connectPg(PG_CONNECT_BUDGET_MS);
       await waitForSchemaReady(pg);
       db = {
         query: (text: string, params?: unknown[]) => pg.query(text, params),
@@ -101,7 +158,16 @@ describe.skipIf(!itEnabled)(
           // if this insert fails the fixtures below that depend on a real
           // Tenant row will fail loudly on their own assertions instead.
         });
-    }, 120_000);
+      // Exhaustive budget accounting — every await above is bounded, so the
+      // hook ceiling is the sum plus headroom, and a genuine hang surfaces as
+      // pollUntil's named message rather than a generic "Hook timed out":
+      //   connectPg           30s  (PG_CONNECT_BUDGET_MS, capped here)
+      //   waitForEngineReady  60s  (READY_BUDGET_MS)
+      //   schema probe        60s  (READY_BUDGET_MS)
+      //   ------------------------
+      //   bounded total      150s, leaving 90s for composeUp (image already
+      //   pulled by whichever file ran first, so this is ~1-2s in practice).
+    }, 240_000);
 
     afterAll(async () => {
       await pg?.end().catch(() => {});
@@ -159,6 +225,24 @@ describe.skipIf(!itEnabled)(
     });
 
     describe("7.2.2 — SIGKILL slot exhaustion: partition-guard fixtures", () => {
+      it("the pinned engine still has the column the reclaim queries project", async () => {
+        // Engine-version drift canary, NOT a test of the gate: `beforeAll`
+        // cannot return unless this is already true, so it never fails on a
+        // healthy run. Its job is the day docker-compose.hatchet.yml moves off
+        // v0.94.10 onto an image without `evicted_at` — then this fails here,
+        // naming the column, instead of surfacing as a 42703 buried inside
+        // reclaimEngineSlots two tests later. The gate's own regression (a
+        // half-migrated schema must not be accepted) is pinned deterministically
+        // in hatchet-it-harness.test.ts, which needs no docker.
+        const r = await pg.query(
+          `SELECT count(*)::int AS n FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'v1_task_runtime'
+              AND column_name = 'evicted_at'`,
+        );
+        expect(r.rows[0].n).toBe(1);
+      });
+
       it("AC-8d: a dead-but-still-progressing task's slot is never reclaimed", async () => {
         // Real Worker + v1_task_events_olap rows against the real isolated
         // schema — this is the safety assertion the spec calls out as
