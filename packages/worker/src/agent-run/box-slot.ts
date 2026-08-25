@@ -71,6 +71,28 @@ async function readOwner(
   }
 }
 
+/**
+ * Remove the published slot ATOMICALLY with respect to a concurrent claim:
+ * `rm -r` is unlink-then-rmdir, and a waiter's `rename(claim, slotDir)` can
+ * land between the two (POSIX rename replaces an empty target directory),
+ * making the trailing rmdir throw ENOTEMPTY — and a successful run would end
+ * as a failure. Renaming the slot to a private tombstone first is a single
+ * syscall; the tombstone is then deleted at leisure. Already gone → no-op.
+ */
+async function removeSlot(dir: string, slotDir: string): Promise<void> {
+  const tomb = path.join(
+    dir,
+    `.tomb-${process.pid}-${randomBytes(4).toString("hex")}`,
+  );
+  try {
+    await rename(slotDir, tomb);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw e;
+  }
+  await rm(tomb, { recursive: true, force: true }).catch(() => {});
+}
+
 async function ownerFileOlderThan(
   slotDir: string,
   ms: number,
@@ -135,7 +157,7 @@ export async function acquireBoxSlot({
       if (signal?.aborted) {
         // A cancel can land in the instant the previous holder released:
         // never run a cancelled run's body — give the slot straight back.
-        await rm(slotDir, { recursive: true, force: true });
+        await removeSlot(dir, slotDir);
         throw abortError();
       }
       break;
@@ -161,7 +183,7 @@ export async function acquireBoxSlot({
           await ownerFileOlderThan(slotDir, staleMs, now)
         : !pidAlive(current.pid) || now() - current.heartbeatAt > staleMs);
     if (stale) {
-      await rm(slotDir, { recursive: true, force: true });
+      await removeSlot(dir, slotDir);
       continue;
     }
     await new Promise((r) => setTimeout(r, pollMs));
@@ -197,7 +219,7 @@ export async function acquireBoxSlot({
       ) {
         return;
       }
-      await rm(slotDir, { recursive: true, force: true });
+      await removeSlot(dir, slotDir);
     },
   };
 }
