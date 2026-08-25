@@ -109,6 +109,79 @@ export async function pollUntil<T>(
   }
 }
 
+/**
+ * The engine's own readiness signal. hatchet-lite serves /api/ready only after
+ * its migrations have landed, so this is the ONE gate both suites share — see
+ * the boot-race note in scheduling-health.integration.test.ts for why table
+ * existence alone is not a substitute.
+ */
+export async function waitForEngineReady(
+  budgetMs = 60_000,
+  everyMs = 250,
+): Promise<void> {
+  await pollUntil(
+    "hatchet-lite engine ready (/api/ready)",
+    () =>
+      // The per-request timeout is load-bearing, not decoration: bare `fetch`
+      // has no default timeout, so ONE hung connection to a wedged engine
+      // never settles and `pollUntil` can never reach its deadline — the
+      // budget above would be silently unenforceable. Cap each attempt well
+      // under the poll cadence's own patience.
+      fetch(`${REST}/api/ready`, { signal: AbortSignal.timeout(5_000) })
+        .then((r) => r.status)
+        .catch(() => 0),
+    (s) => s === 200,
+    budgetMs,
+    everyMs,
+  );
+}
+
+/** Counts the schema-readiness probe reads, one field per guarded object. */
+export interface SchemaReadyCounts {
+  tables: number;
+  evicted_at: number;
+  delete_trigger_fn: number;
+}
+
+/**
+ * EVERY schema object the scheduling-health suite's queries actually touch —
+ * not just the one that caused the observed 42703. Gating on a subset and
+ * relying on the rest happening to land in the same migration batch is how
+ * this class of flake comes back through a different table.
+ *
+ * `SCHEMA_READY_TABLES` is the union of what the suite runs, read off
+ * scheduling-health.ts: detectStepConcurrencyRot -> v1_step_concurrency;
+ * detectWorkflowConcurrencyRot -> v1_workflow_concurrency; findReclaimableSlots
+ * / reclaimEngineSlots -> v1_concurrency_slot, v1_task_runtime, "Worker",
+ * v1_task_events_olap. `reclaimEngineSlots` in mode `on` also DELETEs, which
+ * fires the engine's own release trigger, so that function is gated too.
+ */
+export const SCHEMA_READY_TABLES = [
+  "v1_step_concurrency",
+  "v1_workflow_concurrency",
+  "v1_concurrency_slot",
+  "v1_task_runtime",
+  "Worker",
+  "v1_task_events_olap",
+] as const;
+
+export const SCHEMA_READY_DELETE_TRIGGER_FN =
+  "after_v1_concurrency_slot_delete_function";
+
+export const SCHEMA_READY = {
+  tables: SCHEMA_READY_TABLES.length,
+  evictedAt: 1,
+  deleteTriggerFn: 1,
+} as const;
+
+export function schemaIsReady(r: SchemaReadyCounts): boolean {
+  return (
+    r.tables >= SCHEMA_READY.tables &&
+    r.evicted_at >= SCHEMA_READY.evictedAt &&
+    r.delete_trigger_fn >= SCHEMA_READY.deleteTriggerFn
+  );
+}
+
 /** A connected pg Client to the IT postgres, once it accepts queries. */
 export async function connectPg(timeoutMs = 90_000): Promise<Client> {
   return pollUntil(
@@ -156,16 +229,7 @@ export async function bootstrapTenant(
     120_000,
     500,
   );
-  await pollUntil(
-    "REST ready",
-    () =>
-      fetch(`${REST}/api/ready`)
-        .then((r) => r.status)
-        .catch(() => 0),
-    (s) => s === 200,
-    60_000,
-    500,
-  );
+  await waitForEngineReady();
   const minted = await compose([
     "exec",
     "-T",
