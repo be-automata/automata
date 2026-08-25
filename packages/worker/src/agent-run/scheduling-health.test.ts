@@ -1,5 +1,5 @@
 import { createServer as createNetServer } from "node:net";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ENGINE_DB_POOL_OPTIONS, type PgLike } from "./engine-db";
 import {
   alertableRecoveryLatencySeconds,
@@ -13,7 +13,6 @@ import {
   repairConcurrencyRot,
   repairStepConcurrencyRot,
   repairWorkflowConcurrencyRot,
-  resetEvictedAtSupportForTest,
 } from "./scheduling-health";
 import { loadWorkerConfig, resolveMechanismMode } from "./config";
 import {
@@ -41,10 +40,6 @@ class FakePg implements PgLike {
     return this.responder(text, params) as { rows: Row[] };
   }
 }
-
-// Pure-fixture suite: pin the column probe so every fake db sees only the
-// statements under test (the real probe is covered by the dockerized IT).
-beforeEach(() => resetEvictedAtSupportForTest(false));
 
 describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
   describe("healthy fixture (AC-1)", () => {
@@ -579,6 +574,62 @@ describe("runMaintenanceTick — resilience and gating", () => {
     expect(log).toHaveBeenCalledWith(
       expect.objectContaining({ event: "scheduling.tick_skipped_locked" }),
     );
+  });
+});
+
+describe("the reclaim queries project evicted_at unconditionally", () => {
+  /**
+   * #69 guard. A compatibility shim once resolved this predicate at runtime
+   * from information_schema and dropped it when the probe said the column was
+   * absent. That is not a compatible fallback — it is a DIFFERENT query:
+   * without `AND r.evicted_at IS NULL` the LEFT JOIN matches evicted runtime
+   * rows, so `orphan` computes false for a slot whose task was evicted and the
+   * slot is never reclaimed. That is precisely the leak #69 exists to close,
+   * arrived at silently and cached for the life of the process.
+   *
+   * The shim also made this suite test the wrong thing: it pinned the probe to
+   * false in a global beforeEach, so every fixture below saw the no-predicate
+   * variant and the shape that actually runs in production had zero unit
+   * coverage. The integration suite now guarantees the column exists before
+   * the queries run (hatchet-it-harness.ts, schemaIsReady), so the predicate
+   * is unconditional again — and these assertions keep it that way.
+   */
+  const captureSql = async (mode: "on" | "dry-run") => {
+    const db = new FakePg(() => ({ rows: [] }));
+    await reclaimEngineSlots(db, {
+      tenantId: TENANT_ID,
+      deadAfterSeconds: 600,
+      minSlotAgeSeconds: 600,
+      selfWorkerId: null,
+      mode,
+    });
+    return db.calls.map((c) => c.text);
+  };
+
+  it("the write path (mode 'on') filters evicted runtime rows out of the join", async () => {
+    const sql = await captureSql("on");
+    const del = sql.find((t) => /DELETE FROM v1_concurrency_slot/.test(t));
+    expect(del).toBeDefined();
+    expect(del).toMatch(
+      /LEFT JOIN v1_task_runtime r[\s\S]*AND r\.evicted_at IS NULL/,
+    );
+  });
+
+  it("the read path (mode 'dry-run') filters them out identically", async () => {
+    const sql = await captureSql("dry-run");
+    const sel = sql.find((t) => /FROM v1_concurrency_slot s/.test(t));
+    expect(sel).toBeDefined();
+    expect(sel).toMatch(
+      /LEFT JOIN v1_task_runtime r[\s\S]*AND r\.evicted_at IS NULL/,
+    );
+  });
+
+  it("no statement probes information_schema for the column — the predicate is not conditional", async () => {
+    for (const mode of ["on", "dry-run"] as const) {
+      for (const text of await captureSql(mode)) {
+        expect(text).not.toMatch(/information_schema\.columns/);
+      }
+    }
   });
 });
 
