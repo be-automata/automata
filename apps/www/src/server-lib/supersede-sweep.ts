@@ -114,6 +114,25 @@ async function decide(
     case "CANCELLED":
     case "NOT_FOUND": {
       const newer = await newerSibling(run);
+      // Under complete-run-discard the engine CANCELs the NEWEST run
+      // (CANCEL_NEWEST) while an OLDER one stays live; the worker never sees
+      // that run, so this is the only place it can be named `discarded`. The
+      // POLICY decides the cause, not the sibling table: with recheck on, a
+      // newer sibling (the recheck of this very head) always exists by the
+      // time the grace elapses, and the first prod retirement (2026-08-25
+      // 18:25Z) landed as `superseded` for exactly that reason. The sibling
+      // is still LINKED so the chip deep-links to the run that reviewed the
+      // head.
+      if (
+        status === "CANCELLED" &&
+        run.supersedePolicy === "complete-run-discard"
+      ) {
+        return {
+          kind: "terminal",
+          cause: "discarded",
+          supersededByThreadId: newer?.threadId,
+        };
+      }
       if (newer) {
         return {
           kind: "terminal",
@@ -121,19 +140,8 @@ async function decide(
           supersededByThreadId: newer.threadId,
         };
       }
-      // No newer sibling. Under complete-run-discard the engine CANCELs the
-      // NEWEST run (CANCEL_NEWEST) while an OLDER one stays live — the worker
-      // never sees that run, so this is the only place it can be named
-      // `discarded` (live-verified 2026-08-25: it was landing as
-      // user-cancelled). Otherwise a CANCELLED run was cancelled by someone;
-      // a VANISHED one never made it to the plane (pruned / trigger lost) —
-      // not the user's doing.
-      if (
-        status === "CANCELLED" &&
-        run.supersedePolicy === "complete-run-discard"
-      ) {
-        return { kind: "terminal", cause: "discarded" };
-      }
+      // A CANCELLED run was cancelled by someone; a VANISHED one never made
+      // it to the plane (pruned / trigger lost) — not the user's doing.
       return {
         kind: "terminal",
         cause: status === "CANCELLED" ? "user-cancelled" : "plane-offline",

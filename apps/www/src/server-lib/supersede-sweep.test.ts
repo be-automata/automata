@@ -116,8 +116,12 @@ describe("runSupersedeSweep (#125 C4)", () => {
     );
   });
 
-  it("rule (i): CANCELLED under complete-run-discard with no newer sibling ⇒ discarded (CANCEL_NEWEST victim the worker never saw), and the reader gets the run's createdAt as its lookup hint", async () => {
+  it("rule (i): CANCELLED under complete-run-discard ⇒ discarded even with a newer sibling (the recheck), which is linked; the reader gets createdAt + threadId as its lookup hint", async () => {
     const victim = await remoteRun(8, T + 60_000, "r-discarded");
+    // The recheck of the discarded head is a NEWER sibling on the same PR —
+    // it must not flip the cause to `superseded` (prod 2026-08-25 18:25Z did
+    // exactly that), but it IS the run to link to.
+    const recheck = await remoteRun(8, 0, "r-recheck");
     await db
       .update(hatchetRunTable)
       .set({ supersedePolicy: "complete-run-discard" })
@@ -137,6 +141,7 @@ describe("runSupersedeSweep (#125 C4)", () => {
     const row = await threadRow(victim);
     expect(row.terminalCause).toBe("discarded");
     expect(row.status).toBe("complete");
+    expect(row.supersededByThreadId).toBe(recheck);
     expect(hints["r-discarded"]!.createdAt.getTime()).toBeLessThan(
       Date.now() - T,
     );
