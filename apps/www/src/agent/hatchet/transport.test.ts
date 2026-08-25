@@ -254,6 +254,26 @@ describe("getAgentRunStatus (#125 C4 sweep reader)", () => {
     vi.unstubAllGlobals();
   });
 
+  it("fails CLOSED when the page cap is exhausted without the row — a drifted window/threadId is a retry, never NOT_FOUND", async () => {
+    const full = Array.from({ length: 50 }, (_, i) => ({
+      id: `filler-${i}`,
+      status: "COMPLETED",
+    }));
+    // Every page is full and the engine claims more pages than the cap.
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(async () => page(full, { num_pages: 999 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(getAgentRunStatus("r-never", CONFIG, HINT)).rejects.toThrow(
+      /10 pages without r-never/,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(10);
+    expect(
+      new URL(String(fetchMock.mock.calls[9]![0])).searchParams.get("offset"),
+    ).toBe("450");
+    vi.unstubAllGlobals();
+  });
+
   it("fails CLOSED: non-2xx, a malformed/empty 200 body, and an unrecognised status all throw — never NOT_FOUND", async () => {
     const fetchMock = vi
       .fn()
