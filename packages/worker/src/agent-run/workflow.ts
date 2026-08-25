@@ -287,7 +287,31 @@ async function runAgent(
     }
   }
   try {
-    return await runAgentInner(input, ctx, config, wwwOpts);
+    const output = await runAgentInner(input, ctx, config, wwwOpts);
+    if (output.outcome === "stopped") {
+      // A user Stop put the thread in `stopping`. The daemon never observes
+      // that status and www cannot reach a remote-plane daemon, so the
+      // WORKER closes the loop: the daemon is already torn down (finally in
+      // runAgentInner) — post the typed terminal so the thread completes
+      // and this task ends NOW instead of at its step timeout (which held
+      // the engine/box slot for 30 minutes in prod, starving every queued
+      // review behind it).
+      if (runExternalId) {
+        const result = await postRunTerminal(wwwOpts, {
+          runExternalId,
+          cause: "user-cancelled",
+          policy: input.supersedePolicy,
+        });
+        ctx.log(
+          `[agent-run ${input.threadId}] thread stopping → user-cancelled terminal: ${result}`,
+        );
+      } else {
+        ctx.log(
+          `[agent-run ${input.threadId}] thread stopping but no workflowRunId — terminal not posted (C4 sweep is the backstop)`,
+        );
+      }
+    }
+    return output;
   } finally {
     if (ctx.cancelled || ctx.abortController?.signal.aborted) {
       await postSuperseded(input, ctx, wwwOpts);

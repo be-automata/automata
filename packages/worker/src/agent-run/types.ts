@@ -147,7 +147,13 @@ export type AgentRunOutput = {
   threadId: string;
   threadChatId: string;
   /** How the run reached a terminal state. */
-  outcome: "completed" | "nothing-to-run" | "cancelled" | "stale-skipped";
+  outcome:
+    | "completed"
+    | "nothing-to-run"
+    | "cancelled"
+    | "stale-skipped"
+    /** www put the thread in `stopping` (user Stop): daemon torn down, `user-cancelled` posted. */
+    | "stopped";
   /** Final thread status observed from www, when known. */
   finalStatus?: string;
 };

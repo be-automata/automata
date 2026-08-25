@@ -329,6 +329,19 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
     expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
   });
 
+  it("returns stopped as soon as www reports `stopping` — the worker must tear down instead of waiting for terminal=true", async () => {
+    const responses = [
+      jsonResponse(200, { status: "working", terminal: false }),
+      jsonResponse(200, { status: "stopping", terminal: false }),
+      jsonResponse(200, { status: "stopping", terminal: false }), // never reached
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await pollUntilTerminal(ctx(), opts, 1, noSleep);
+    expect(result).toEqual({ outcome: "stopped", finalStatus: "stopping" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("throws on a 401 AFTER a successful poll without terminal=true (premature revocation, not completion)", async () => {
     // Under revoke-on-terminal-read www revokes only after serving terminal=true (which
     // the loop returns on). A 401 here means the token died mid-run without the worker

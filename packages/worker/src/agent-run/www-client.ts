@@ -406,7 +406,15 @@ export interface PollContext {
 }
 
 export interface PollResult {
-  outcome: "completed" | "cancelled";
+  /**
+   * "stopped": www put the thread in `stopping` (a user Stop). The daemon
+   * does not observe that status and www cannot reach a remote-plane daemon,
+   * so the WORKER must act: tear the daemon down and post the typed
+   * `user-cancelled` terminal. Without this the task waited for terminal=true
+   * until its step timeout — holding the box/engine slot for 30 minutes
+   * (observed in prod 2026-08-25, PR #139 run starving #137/#138).
+   */
+  outcome: "completed" | "cancelled" | "stopped";
   finalStatus?: string;
 }
 
@@ -492,6 +500,9 @@ export async function pollUntilTerminal(
     ctx.log(`thread-status: ${poll.status} (terminal=${poll.terminal})`);
     if (poll.terminal) {
       return { outcome: "completed", finalStatus: poll.status };
+    }
+    if (poll.status === "stopping") {
+      return { outcome: "stopped", finalStatus: poll.status };
     }
 
     await sleep(pollIntervalMs);
