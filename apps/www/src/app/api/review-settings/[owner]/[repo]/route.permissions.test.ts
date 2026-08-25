@@ -158,4 +158,28 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
     const winner = a.status === 200 ? "app-side" : "complete-run-queue";
     expect(row?.supersedePolicy).toBe(winner);
   });
+
+  it("DELETE (tolerance Reset) never wipes the repo's supersede override — the row is kept with tolerance at defaults", async () => {
+    await actor("owner");
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { blockTolerance: "error", supersedePolicy: "app-side" },
+    });
+    const res = await DELETE(
+      new NextRequest("http://localhost/api/review-settings/acme/widgets", {
+        method: "DELETE",
+      }),
+      { params },
+    );
+    expect(res.status).toBe(200);
+    const row = await getRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+    });
+    expect(row?.supersedePolicy).toBe("app-side");
+    expect(row?.blockTolerance).toBe("warning");
+  });
 });

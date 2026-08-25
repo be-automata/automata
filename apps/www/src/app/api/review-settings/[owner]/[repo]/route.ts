@@ -221,7 +221,7 @@ export async function PUT(
 }
 
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ owner: string; repo: string }> },
 ): Promise<NextResponse> {
   const ctx = await getTenantContextOrNull();
@@ -245,11 +245,24 @@ export async function DELETE(
   });
   if (denied) return denied;
 
-  const removed = await removeRepoReviewSetting({
+  // Optional CAS on the reset path too (?expectedUpdatedAt=<iso>).
+  const expectedRaw = request.nextUrl.searchParams.get("expectedUpdatedAt");
+  const expectedUpdatedAt = expectedRaw ? new Date(expectedRaw) : undefined;
+  if (expectedUpdatedAt && Number.isNaN(expectedUpdatedAt.getTime())) {
+    return NextResponse.json(
+      { error: "expectedUpdatedAt must be an ISO timestamp" },
+      { status: 400 },
+    );
+  }
+  const { removed, conflict } = await removeRepoReviewSetting({
     db,
     organizationId: ctx.organizationId,
     repoFullName,
+    expectedUpdatedAt,
   });
+  if (conflict) {
+    return NextResponse.json({ error: "conflict" }, { status: 409 });
+  }
 
   getPostHogServer().capture({
     distinctId: ctx.userId,

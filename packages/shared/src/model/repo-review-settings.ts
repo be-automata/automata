@@ -317,25 +317,63 @@ export async function setRepoReviewSetting({
  * Remove the override for one `(org, repo)` (repo reverts to env/default). No-op
  * when absent. Returns true when a row was actually deleted.
  */
+/**
+ * "Reset to default" for the TOLERANCE family (block tolerance + draft-PR
+ * review) of one repo. The row is shared with the other per-repo families
+ * (#66 egress, #125 supersede policy): when any of those still carries an
+ * override the row is KEPT and only the tolerance columns go back to their
+ * defaults; the row is deleted only when nothing else lives on it. Resetting
+ * a repo's tolerance must never silently discard its supersede policy.
+ * Optional `expectedUpdatedAt` makes the reset a compare-and-swap (409-class
+ * conflict → false, nothing changed).
+ */
 export async function removeRepoReviewSetting({
   db,
   organizationId,
   repoFullName,
+  expectedUpdatedAt,
 }: {
   db: DB;
   organizationId: string;
   repoFullName: string;
-}): Promise<boolean> {
+  expectedUpdatedAt?: Date;
+}): Promise<{ removed: boolean; conflict: boolean }> {
+  const repo = normalizeRepo(repoFullName);
+  const rowFilter = and(
+    eq(repoReviewSettings.organizationId, organizationId),
+    eq(repoReviewSettings.repoFullName, repo),
+  );
+  const existing = await getRepoReviewSetting({
+    db,
+    organizationId,
+    repoFullName,
+  });
+  if (!existing) return { removed: false, conflict: false };
+  const versionFilter = expectedUpdatedAt
+    ? and(rowFilter, eq(repoReviewSettings.updatedAt, expectedUpdatedAt))
+    : rowFilter;
+  const otherFamiliesPresent =
+    existing.supersedePolicy !== null ||
+    existing.egressPolicy !== null ||
+    (existing.egressAllowlist !== null &&
+      existing.egressAllowlist !== undefined);
+  if (otherFamiliesPresent) {
+    const updated = await db
+      .update(repoReviewSettings)
+      .set({
+        blockTolerance: "warning",
+        reviewDraftPrs: true,
+        updatedAt: new Date(),
+      })
+      .where(versionFilter)
+      .returning({ id: repoReviewSettings.id });
+    return { removed: updated.length > 0, conflict: updated.length === 0 };
+  }
   const deleted = await db
     .delete(repoReviewSettings)
-    .where(
-      and(
-        eq(repoReviewSettings.organizationId, organizationId),
-        eq(repoReviewSettings.repoFullName, normalizeRepo(repoFullName)),
-      ),
-    )
+    .where(versionFilter)
     .returning({ id: repoReviewSettings.id });
-  return deleted.length > 0;
+  return { removed: deleted.length > 0, conflict: deleted.length === 0 };
 }
 
 /** List all tolerance overrides for one org (dashboard settings page). */

@@ -144,7 +144,7 @@ describe("repo-review-settings (Neon, org-fenced)", () => {
         organizationId: orgA,
         repoFullName: "acme/widgets",
       }),
-    ).toBe(true);
+    ).toEqual({ removed: true, conflict: false });
     expect(
       await getRepoReviewSetting({
         db,
@@ -229,7 +229,7 @@ describe("repo-review-settings (Neon, org-fenced)", () => {
       organizationId: orgA,
       repoFullName: "shared/repo",
     });
-    expect(removed).toBe(false);
+    expect(removed).toEqual({ removed: false, conflict: false });
     // orgB's row survives.
     expect(
       await getRepoReviewSetting({
@@ -387,6 +387,59 @@ describe("resolveSupersedePolicy (#125/#127)", () => {
         repoFullName: "acme/widgets",
       }),
     ).resolves.toEqual({ policy: "newest-wins", recheckOnComplete: false });
+  });
+
+  it("resetting the TOLERANCE family keeps a repo's supersede override (row kept, tolerance back to defaults); a row with nothing else is deleted (#131)", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/both",
+      patch: { blockTolerance: "error", supersedePolicy: "complete-run-queue" },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/tolerance-only",
+      patch: { blockTolerance: "error" },
+    });
+    expect(
+      await removeRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/both",
+      }),
+    ).toEqual({ removed: true, conflict: false });
+    const kept = await getRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/both",
+    });
+    expect(kept?.supersedePolicy).toBe("complete-run-queue");
+    expect(kept?.blockTolerance).toBe("warning");
+    expect(
+      await removeRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/tolerance-only",
+      }),
+    ).toEqual({ removed: true, conflict: false });
+    expect(
+      await getRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/tolerance-only",
+      }),
+    ).toBeUndefined();
+    // CAS: a stale version resets nothing.
+    const stale = new Date(kept!.updatedAt.getTime() - 60_000);
+    expect(
+      await removeRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/both",
+        expectedUpdatedAt: stale,
+      }),
+    ).toEqual({ removed: false, conflict: true });
   });
 
   it("listRepoReviewSettings never returns the org-default sentinel ('*') (#131 AC6)", async () => {

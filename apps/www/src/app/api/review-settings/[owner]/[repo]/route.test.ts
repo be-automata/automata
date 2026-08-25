@@ -70,7 +70,10 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       createdAt: new Date(),
       updatedAt: new Date(),
     });
-    vi.mocked(removeRepoReviewSetting).mockResolvedValue(true);
+    vi.mocked(removeRepoReviewSetting).mockResolvedValue({
+      removed: true,
+      conflict: false,
+    });
   });
 
   it("401 when unauthenticated", async () => {
