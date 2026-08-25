@@ -11,6 +11,8 @@ import {
   getHatchetRunByExternalId,
 } from "@terragon/shared/model/hatchet-run";
 import { TERMINAL_CAUSES } from "@terragon/shared/model/terminal-cause";
+import { waitUntil } from "@/lib/wait-until";
+import { maybeRecheckOnComplete } from "@/server-lib/supersede-recheck";
 
 /**
  * POST /api/daemon/run-terminal
@@ -60,6 +62,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       (generation.activeRunExternalId === null ||
         generation.activeRunExternalId === runExternalId)
     ) {
+      // A retry of an already-applied terminal is exactly the path that
+      // must heal a recheck lost between the first attempt's terminal write
+      // and its ledger claim — so the reconciliation fires here too (the
+      // UNIQUE ledger keeps it at-most-once).
+      waitUntil(maybeRecheckOnComplete({ threadId }));
       return NextResponse.json({ applied: false });
     }
     console.log("[run-terminal] rejected", {
@@ -114,5 +121,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     policy: detail?.policy,
     applied,
   });
+  // #125 C5: the discard·recheck reconciliation fires off the response path
+  // (the dispatch inside can take seconds) and UNCONDITIONALLY — a worker
+  // retry of an already-applied terminal must still heal a recheck lost to a
+  // crash between the terminal write and the ledger claim (the UNIQUE ledger
+  // keeps it at-most-once).
+  waitUntil(maybeRecheckOnComplete({ threadId }));
   return NextResponse.json({ applied });
 }

@@ -11,6 +11,7 @@ import { ChatHeaderButtons } from "./chat-header-buttons";
 import { SidebarTrigger, useSidebar } from "@/components/ui/sidebar";
 import posthog from "posthog-js";
 import { ThreadStatusIndicator } from "@/components/thread-status";
+import { RunStatusChip } from "@/components/chat/run-status-chip";
 import { Input } from "@/components/ui/input";
 import { useUpdateThreadNameMutation } from "@/queries/thread-mutations";
 import { AutomationPill } from "@/components/automations/pill";
@@ -108,6 +109,10 @@ export const ChatHeader = memo(function ChatHeader({
           <div className="flex flex-col min-w-0 w-full">
             <div className="flex items-center gap-2 w-full">
               <ThreadStatusIndicator thread={thread} />
+              <RunStatusChip
+                terminalCause={thread.terminalCause}
+                supersededByThreadId={thread.supersededByThreadId}
+              />
               <div className="flex items-center gap-1.5 min-w-0 flex-1">
                 {isEditing ? (
                   <Input

@@ -9,6 +9,14 @@ import { markThreadTerminal } from "@terragon/shared/model/threads";
 import { hatchetRun as hatchetRunTable } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 import { runSupersedeSweep } from "./supersede-sweep";
+import { maybeRecheckOnComplete } from "./supersede-recheck";
+
+vi.mock("./supersede-recheck", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  maybeRecheckOnComplete: vi
+    .fn()
+    .mockResolvedValue({ rechecked: false, reason: "test" }),
+}));
 
 // Fault injection on the thread write: the run row must NOT be retired when
 // the thread terminal failed, or it silently leaves the sweep's candidate
@@ -79,5 +87,33 @@ describe("supersede sweep — terminal write ordering under a thread-write failu
       { threadId: run.threadId, cause: "daemon-failed" },
     ]);
     expect(await rowStatus()).toBe("terminal");
+  });
+
+  it("engine COMPLETED with www having missed the finish (the `retire` branch) still fires the recheck reconciliation", async () => {
+    vi.mocked(maybeRecheckOnComplete).mockClear();
+    const run = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgId,
+      prNumber: 42,
+      externalId: "r-retire",
+      ageMs: T + 60_000,
+      repoFullName: "be-automata/automata",
+      snapshot: { policy: "complete-run-discard", recheckOnComplete: true },
+    });
+    await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: 15 * 60 * 1000,
+      readStatus: async () => "COMPLETED",
+    });
+    expect(maybeRecheckOnComplete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: run.threadId,
+        run: {
+          supersedePolicy: "complete-run-discard",
+          recheckOnComplete: true,
+        },
+      }),
+    );
   });
 });

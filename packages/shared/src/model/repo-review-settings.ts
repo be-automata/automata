@@ -71,6 +71,17 @@ export type SupersedeSnapshot = {
 };
 
 /**
+ * The one human wording per policy — shared by the thread-view chip (C5) and
+ * the settings page (C6) so the two can never disagree.
+ */
+export const SUPERSEDE_POLICY_LABELS: Record<SupersedePolicy, string> = {
+  "newest-wins": "newest commit wins",
+  "complete-run-queue": "finish the running review, then queue",
+  "complete-run-discard": "finish the running review, drop newer",
+  "app-side": "control plane decides",
+};
+
+/**
  * Resolve the effective supersede policy for one (org, repo): exact repo
  * override → org-default sentinel row ('*') → 'newest-wins'. One query for
  * both candidate rows; resolved LIVE at every dispatch.

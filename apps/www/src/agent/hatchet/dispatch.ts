@@ -26,8 +26,10 @@ import {
   resolveSupersedePolicy,
   normalizeRepo,
   type SupersedePolicy,
+  type SupersedeSnapshot,
 } from "@terragon/shared/model/repo-review-settings";
 import { setThreadActiveRun } from "@terragon/shared/model/threads";
+import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
 import {
   triggerAgentRun,
   cancelAgentRun,
@@ -44,7 +46,7 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 /** The Hatchet REST transport config, read from env (shared by trigger + cancel). */
-function hatchetConfig() {
+export function hatchetConfig() {
   return {
     apiUrl: env.HATCHET_API_URL,
     tenantId: env.HATCHET_TENANT_ID,
@@ -277,6 +279,8 @@ type SupersedePlan = {
   appSideCancel: boolean;
   /** Stamp thread.activeRunExternalId for the C1 fence (flag ON only). */
   stampFence: boolean;
+  /** The resolved policy snapshot (flag ON review runs only). */
+  snapshot: SupersedeSnapshot | undefined;
 };
 
 /**
@@ -310,6 +314,7 @@ async function planSupersede({
       triggerOpts: undefined,
       appSideCancel: true,
       stampFence: false,
+      snapshot: undefined,
     };
   }
   if (!reviewContext) {
@@ -323,6 +328,7 @@ async function planSupersede({
       triggerOpts: undefined,
       appSideCancel: false,
       stampFence: false,
+      snapshot: undefined,
     };
   }
   const snapshot = await resolveSupersedePolicy({
@@ -350,7 +356,11 @@ async function planSupersede({
   };
   const plan: SupersedePlan = {
     inputExtension: {
-      prKey: `${orgId}/${repo}/${reviewContext.prNumber}`,
+      prKey: buildPrKey({
+        orgId,
+        repoFullName,
+        prNumber: reviewContext.prNumber,
+      }),
       // Always present, never empty: a webhook-descended dispatch carries the
       // real X-GitHub-Delivery id; manual/scheduled paths mint a per-dispatch
       // synthetic id so intentional re-dispatches are never deduped.
@@ -361,6 +371,7 @@ async function planSupersede({
     triggerOpts,
     appSideCancel: snapshot.policy === "app-side",
     stampFence: true,
+    snapshot,
   };
   console.log("[hatchet] supersede policy resolved for dispatch", {
     threadId,
@@ -618,6 +629,9 @@ export async function dispatchAgentRun({
             repoFullName,
             prNumber: reviewContext.prNumber,
             externalId,
+            // #125 C5: the control-plane copy of the policy snapshot — the
+            // recheck reconciliation reads THIS, never the settings row.
+            snapshot: plan.snapshot,
           }).catch((error) => {
             console.error("[hatchet] recordHatchetRun failed (non-fatal)", {
               threadId,

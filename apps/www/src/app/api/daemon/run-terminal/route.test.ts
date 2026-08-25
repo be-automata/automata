@@ -2,6 +2,7 @@ import { describe, it, vi, beforeEach, expect } from "vitest";
 import { NextRequest } from "next/server";
 import { POST } from "./route";
 import { db } from "@/lib/db";
+import { maybeRecheckOnComplete } from "@/server-lib/supersede-recheck";
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import {
   createTestUser,
@@ -26,6 +27,13 @@ function req(body: unknown) {
     headers: { "X-Daemon-Token": "tok", "content-type": "application/json" },
   });
 }
+
+vi.mock("@/server-lib/supersede-recheck", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  maybeRecheckOnComplete: vi
+    .fn()
+    .mockResolvedValue({ rechecked: false, reason: "test" }),
+}));
 
 describe("POST /api/daemon/run-terminal (#125 C1 generation fence)", () => {
   let user: User;
@@ -166,6 +174,16 @@ describe("POST /api/daemon/run-terminal (#125 C1 generation fence)", () => {
       .from(hatchetRunTable)
       .where(eq(hatchetRunTable.threadId, other.threadId));
     expect(row!.status).toBe("in_flight");
+  });
+
+  it("a retried (already-applied) terminal still fires the recheck reconciliation — the lost-claim healing path", async () => {
+    await setThreadActiveRun({ db, threadId, externalId: "run-active" });
+    vi.mocked(maybeRecheckOnComplete).mockClear();
+    const first = await POST(req(body("run-active")));
+    expect(await first.json()).toEqual({ applied: true });
+    const retry = await POST(req(body("run-active")));
+    expect(await retry.json()).toEqual({ applied: false });
+    expect(maybeRecheckOnComplete).toHaveBeenCalledTimes(2);
   });
 
   it("404 for an unknown thread", async () => {

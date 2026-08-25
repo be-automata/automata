@@ -78,6 +78,8 @@ export interface CreateThreadOptions {
    * user-initiated/manual creation paths (dispatch mints a synthetic id).
    */
   deliveryId?: string;
+  /** #125 C5: the PR head SHA a review run reviews; stamped on the thread. */
+  reviewedSha?: string;
   delayMs?: number;
   // Shadow mode (pilot): create the thread row (org-stamped, dashboard-
   // visible) but do NOT boot a sandbox or run the agent — so the installation
@@ -111,6 +113,7 @@ export async function createNewThread({
   sourceMetadata,
   trustContext = null,
   deliveryId,
+  reviewedSha,
   delayMs = 0,
   shadow = false,
 }: CreateThreadOptions): Promise<{ threadId: string; threadChatId: string }> {
@@ -250,6 +253,7 @@ export async function createNewThread({
       sourceMetadata,
       trustContext,
       shadow,
+      reviewedSha,
     },
     initialChatValues: {
       agent,
