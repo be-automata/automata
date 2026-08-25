@@ -1,5 +1,5 @@
 import { createServer as createNetServer } from "node:net";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ENGINE_DB_POOL_OPTIONS, type PgLike } from "./engine-db";
 import {
   alertableRecoveryLatencySeconds,
@@ -13,6 +13,7 @@ import {
   repairConcurrencyRot,
   repairStepConcurrencyRot,
   repairWorkflowConcurrencyRot,
+  resetEvictedAtSupportForTest,
 } from "./scheduling-health";
 import { loadWorkerConfig, resolveMechanismMode } from "./config";
 import {
@@ -40,6 +41,10 @@ class FakePg implements PgLike {
     return this.responder(text, params) as { rows: Row[] };
   }
 }
+
+// Pure-fixture suite: pin the column probe so every fake db sees only the
+// statements under test (the real probe is covered by the dockerized IT).
+beforeEach(() => resetEvictedAtSupportForTest(false));
 
 describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
   describe("healthy fixture (AC-1)", () => {
