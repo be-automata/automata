@@ -148,6 +148,25 @@ describe("runSupersedeSweep (#125 C4)", () => {
     expect(hints["r-discarded"]!.threadId).toBe(victim);
   });
 
+  it("rule (i): CANCELLED under complete-run-discard with NO newer sibling ⇒ discarded, nothing linked (recheck off, or the sweep won the race with the recheck dispatch)", async () => {
+    const victim = await remoteRun(9, T + 60_000, "r-discarded-alone");
+    await db
+      .update(hatchetRunTable)
+      .set({ supersedePolicy: "complete-run-discard" })
+      .where(eq(hatchetRunTable.externalId, "r-discarded-alone"));
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({ "r-discarded-alone": "CANCELLED" }),
+    });
+    expect(report.terminals).toEqual([
+      { threadId: victim, cause: "discarded" },
+    ]);
+    const row = await threadRow(victim);
+    expect(row.terminalCause).toBe("discarded");
+    expect(row.supersededByThreadId).toBeNull();
+  });
+
   it("rule (i) waits T: a fresh in_flight run is not examined", async () => {
     await remoteRun(6, 60_000, "r-fresh");
     const report = await runSupersedeSweep({
