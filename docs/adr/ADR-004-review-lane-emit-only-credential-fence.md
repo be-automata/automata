@@ -61,6 +61,12 @@ below is what any implementation must preserve.
    (`parse-review-intent.ts`), validates the severity against the approve floor
    (`resolve-approve-floor.ts`), and posts the review **exactly once**. A parse failure yields a
    degraded marker — never an unreviewed merge and never a second writer.
+   **Scoped 2026-08-25 (#140):** the degraded marker is a claim about live HEAD, so it is
+   posted only by a run that can speak for HEAD. A run dispatched against an older commit,
+   or abandoned before it could emit (`ABANDONED_TERMINAL_CAUSES`), reports the parse
+   failure through telemetry (`skipped_stale_degrade`, `workFailed`) instead of onto the
+   PR. This narrows the marker, never the verdict: a parsed intent from such a run still
+   posts, at the commit it reviewed. Exactly-once and no-second-writer are unchanged.
 
 ## Anti-deviation invariants (what the protected harness must always hold)
 
