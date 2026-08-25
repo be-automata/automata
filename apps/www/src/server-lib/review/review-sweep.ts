@@ -4,6 +4,7 @@ import { env } from "@terragon/env/apps-www";
 import { thread as threadTable } from "@terragon/shared/db/schema";
 import type { ThreadStatus } from "@terragon/shared/db/types";
 import { getThreadChat } from "@terragon/shared/model/threads";
+import { isAbandonedTerminalCause } from "@terragon/shared/model/terminal-cause";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { getOctokitForApp } from "@/lib/github";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
@@ -56,6 +57,8 @@ export async function runReviewSweep(): Promise<void> {
       prNumber: threadTable.githubPRNumber,
       automationId: threadTable.automationId,
       organizationId: threadTable.organizationId,
+      terminalCause: threadTable.terminalCause,
+      reviewedSha: threadTable.reviewedSha,
     })
     .from(threadTable)
     .where(
@@ -122,6 +125,17 @@ export async function runReviewSweep(): Promise<void> {
         botLogin: resolveBotLogin(),
         currentHeadSha,
         terminalText,
+        // Both flags gate the DEGRADED warning ONLY — never a verdict. An
+        // abandoned run (#125 C4 typed terminal) is deliberately still swept
+        // rather than skipped outright: supersession marks a thread terminal
+        // concurrently with cancellation, so a run that already persisted a
+        // real verdict can be stamped `superseded` before its finish hook
+        // posts, and the generation fence then rejects that late write. This
+        // sweep is the only thing left that can recover that verdict, so it
+        // must still read the run's output — it just won't invent a warning
+        // out of the run's silence.
+        reviewedSha: c.reviewedSha,
+        runAbandoned: isAbandonedTerminalCause(c.terminalCause),
       });
       console.log("[review-sweep] backstopped a terminal review thread", {
         threadId: c.id,

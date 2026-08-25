@@ -6,6 +6,7 @@ import {
   getThreadMinimal,
 } from "@terragon/shared/model/threads";
 import { getAutomation } from "@terragon/shared/model/automations";
+import { isAbandonedTerminalCause } from "@terragon/shared/model/terminal-cause";
 import { promoteLastKnownGood } from "@terragon/shared/model/repo-skills";
 import type { ThreadSourceMetadata } from "@terragon/shared";
 import { getPostHogServer } from "@/lib/posthog-server";
@@ -215,6 +216,12 @@ export async function handleReviewEffectAtFinish({
         terminalText,
         approveFloorPolicy,
         isDraft,
+        // Same two degraded-path gates as the sweep: a run that produced no
+        // parseable intent must not stamp a warning onto a head it was never
+        // dispatched against, nor speak at all if it was abandoned before it
+        // could. Neither gate can withhold a parsed verdict.
+        reviewedSha: thread?.reviewedSha ?? null,
+        runAbandoned: isAbandonedTerminalCause(thread?.terminalCause ?? null),
         logger: {
           info: (message, meta) =>
             console.log(`[review-single-writer] ${message}`, meta),
@@ -250,7 +257,11 @@ export async function handleReviewEffectAtFinish({
 
       if (
         outcome.outcome === "degraded_comment" ||
-        outcome.outcome === "post_failed"
+        outcome.outcome === "post_failed" ||
+        // Withheld-warning is still a failed run: nothing reached GitHub, so
+        // telemetry is the ONLY signal an operator gets that an agent never
+        // emitted a verdict. Silent here would re-open the gap #107 is about.
+        outcome.outcome === "skipped_stale_degrade"
       ) {
         console.error(
           "[review-single-writer] WorkFailed — review not cleanly applied",

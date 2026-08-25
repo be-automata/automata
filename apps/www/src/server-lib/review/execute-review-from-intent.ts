@@ -40,6 +40,7 @@ export type ReviewFromIntentOutcome =
   | { outcome: "posted_stale_comment"; intendedVerdict: string }
   | { outcome: "skipped_existing" }
   | { outcome: "skipped_superseded" }
+  | { outcome: "skipped_stale_degrade"; reason: string; workFailed: true }
   | { outcome: "degraded_comment"; reason: string; workFailed: true }
   | { outcome: "post_failed"; failureReason: string; workFailed: true };
 
@@ -63,6 +64,25 @@ export interface ExecuteReviewFromIntentOpts {
   approveFloorPolicy?: ApproveSeverityPolicy;
   /** Draft PR → the floor caps at `comment` (never a formal request_changes). */
   isDraft?: boolean;
+  /**
+   * The head SHA this run was dispatched to review (thread.reviewedSha, #125 C5).
+   * Consulted ONLY on the DEGRADED path: a run that produced no parseable intent
+   * has nothing to anchor its warning to except the commit it was pointed at, so
+   * when that commit is no longer HEAD the warning is not about live HEAD and is
+   * skipped — a newer run owns the PR. Omit (or NULL for a legacy/in-process
+   * thread) to keep the pre-existing behaviour of degrading at live HEAD.
+   */
+  reviewedSha?: string | null;
+  /**
+   * This run was abandoned by policy or by a user (see ABANDONED_TERMINAL_CAUSES).
+   * Also DEGRADED-path only, and deliberately NOT a reason to skip the candidate
+   * outright: a superseded run can still have persisted a real verdict that the
+   * generation fence stopped its finish hook from posting, and discarding that is
+   * the worst outcome this module has. An abandoned run's SILENCE proves nothing,
+   * so only the "could not be parsed" warning is withheld; a parsed verdict posts
+   * through the normal (or stale) path exactly as it would otherwise.
+   */
+  runAbandoned?: boolean;
   logger?: ReviewLogger;
 }
 
@@ -82,6 +102,42 @@ export async function executeReviewFromIntent(
 
   const parsed = parseReviewIntent(terminalText);
   if (!parsed.ok) {
+    // A DEGRADED COMMENT IS A CLAIM ABOUT LIVE HEAD. There is no emitted commit
+    // to anchor it to, so it can only be posted at whatever HEAD is now. Two
+    // cases make that claim false, and in BOTH the run's silence is evidence of
+    // nothing about the code at HEAD:
+    //   - the run was dispatched against an older commit (a newer run owns HEAD);
+    //   - the run was abandoned by policy or by a user before it could speak.
+    // Observed on #140 (2026-08-25): the hourly sweep reaped a run killed with
+    // the worker box and stamped "no parseable verdict — a human should review
+    // this PR" onto a commit pushed 73 seconds earlier, whose own review was
+    // still running.
+    //
+    // This withholds ONLY the warning, never a verdict — a parsed intent has
+    // already taken the branch below by the time we reach here. And it stays
+    // loud where it matters: workFailed still fires, so an agent that failed to
+    // emit pages an operator instead of shouting at the PR author (see #107).
+    const canSpeakForHead =
+      !opts.runAbandoned &&
+      !(opts.reviewedSha && opts.reviewedSha !== currentHeadSha);
+    if (!canSpeakForHead) {
+      logger?.warn(
+        "review-from-intent: unparseable intent from a run that cannot speak for HEAD — warning withheld",
+        {
+          repoFullName,
+          prNumber,
+          reviewedSha: opts.reviewedSha ?? null,
+          currentHeadSha,
+          runAbandoned: opts.runAbandoned ?? false,
+          reason: parsed.reason,
+        },
+      );
+      return {
+        outcome: "skipped_stale_degrade",
+        reason: parsed.reason,
+        workFailed: true,
+      };
+    }
     // Zero-effects / malformed → degraded COMMENT + loud workFailed. The COMMENT
     // is visibly marked so a lost request_changes can't masquerade as a clean pass.
     return await postDegradedComment({

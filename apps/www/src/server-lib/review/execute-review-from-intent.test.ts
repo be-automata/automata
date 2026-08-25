@@ -89,7 +89,10 @@ describe("executeReviewFromIntent", () => {
       currentHeadSha: HEAD,
       terminalText: "I looked at the PR and it seems fine to me.",
     });
-    expect(res).toMatchObject({ outcome: "degraded_comment", workFailed: true });
+    expect(res).toMatchObject({
+      outcome: "degraded_comment",
+      workFailed: true,
+    });
     expect(github.submitReview).not.toHaveBeenCalled();
     expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
     const body = github.submitReviewWithComments.mock.calls[0]![4] as string;
@@ -151,7 +154,11 @@ describe("executeReviewFromIntent", () => {
       body: "",
     };
     const github = makeGithub([newer]);
-    const staleIntent = fenced({ verdict: "approve", commit: OLD, summary: "ok" });
+    const staleIntent = fenced({
+      verdict: "approve",
+      commit: OLD,
+      summary: "ok",
+    });
     const res = await executeReviewFromIntent({
       github,
       repoFullName: REPO,
@@ -202,5 +209,151 @@ describe("executeReviewFromIntent", () => {
       terminalText: RC_AT_HEAD,
     });
     expect(res).toMatchObject({ outcome: "post_failed", workFailed: true });
+  });
+});
+
+describe("executeReviewFromIntent — degraded path never speaks for a stale head", () => {
+  // Regression for #140 (2026-08-25): a run reaped by the hourly sweep produced
+  // ZERO output, and the degraded warning ("a human should review this PR") was
+  // posted at a commit pushed 73s earlier whose own review was still in flight.
+  it("skips the degraded COMMENT when the run reviewed an older head", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: "", // killed mid-run: no agent output at all
+      reviewedSha: OLD,
+    });
+    // Distinct from skipped_superseded: that means "a newer review already
+    // posted"; this means "the agent never emitted, and it wasn't about HEAD".
+    // workFailed keeps it loud in telemetry even though nothing reaches GitHub.
+    expect(res).toMatchObject({
+      outcome: "skipped_stale_degrade",
+      workFailed: true,
+    });
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+  });
+
+  it("still degrades loudly when the run reviewed the CURRENT head", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: "I looked at it and it seems fine.",
+      reviewedSha: HEAD,
+    });
+    expect(res.outcome).toBe("degraded_comment");
+    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
+    expect(github.submitReviewWithComments.mock.calls[0]![4]).toContain(
+      DEGRADED_INTENT_MARKER,
+    );
+  });
+
+  it("degrades at live HEAD when the thread carries no reviewedSha (legacy)", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: "",
+      reviewedSha: null,
+    });
+    expect(res.outcome).toBe("degraded_comment");
+    expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(HEAD);
+  });
+
+  it("a real verdict from an older head still posts (stale path unchanged)", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: fenced({
+        verdict: "request_changes",
+        commit: OLD,
+        summary: "Off-by-one.",
+        findings: [
+          { severity: "error", path: "a.ts", line: 3, body: "use >=" },
+        ],
+      }),
+      reviewedSha: OLD,
+    });
+    expect(res.outcome).toBe("posted_stale_comment");
+    expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(OLD);
+  });
+});
+
+describe("executeReviewFromIntent — an abandoned run withholds only the warning", () => {
+  // Codex adversarial review, 2026-08-25: terminal cause is NOT proof the run
+  // produced nothing. Supersession stamps a thread terminal concurrently with
+  // cancellation, so a run can persist a verdict and have its finish-hook write
+  // fenced out. Suppressing the whole run would discard that verdict forever.
+  it("withholds the degraded warning for an abandoned run at HEAD", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: "",
+      reviewedSha: HEAD,
+      runAbandoned: true,
+    });
+    expect(res).toMatchObject({
+      outcome: "skipped_stale_degrade",
+      workFailed: true,
+    });
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+  });
+
+  it("STILL POSTS a real verdict an abandoned run managed to persist", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: RC_AT_HEAD,
+      reviewedSha: HEAD,
+      runAbandoned: true,
+    });
+    expect(res.outcome).toBe("posted");
+    expect(github.submitReview).toHaveBeenCalledTimes(1);
+    expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
+  });
+
+  it("STILL POSTS an abandoned run's verdict for an older commit, at that commit", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: fenced({
+        verdict: "request_changes",
+        commit: OLD,
+        summary: "Off-by-one.",
+        findings: [
+          { severity: "error", path: "a.ts", line: 3, body: "use >=" },
+        ],
+      }),
+      reviewedSha: OLD,
+      runAbandoned: true,
+    });
+    expect(res.outcome).toBe("posted_stale_comment");
+    expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(OLD);
   });
 });

@@ -76,3 +76,32 @@ export function describeTerminalCause(cause: TerminalCause): {
       return assertNever(cause);
   }
 }
+
+/**
+ * Causes that mean the run was ABANDONED before it could produce a verdict —
+ * by policy (a newer run took the PR) or by a user. Nothing it did or didn't
+ * say is evidence about the PR, so the review sweep must never speak for it:
+ * treating one of these as "a stalled run whose verdict got lost" makes the
+ * sweep post a `⚠️ intent could not be parsed` COMMENT at whatever the live
+ * HEAD happens to be — a false "a human should review this PR" alarm on a
+ * commit the abandoned run never saw (observed on #140, 2026-08-25).
+ *
+ * The complement (`timeout`, `daemon-failed`, `publish-failed`, and a NULL
+ * cause — a dropped finish event) IS sweepable: that run owned the PR and
+ * either has a persisted verdict to republish or genuinely failed to reach one.
+ */
+export const ABANDONED_TERMINAL_CAUSES = [
+  "superseded",
+  "discarded",
+  "stale-skipped",
+  "user-cancelled",
+  "plane-offline",
+] as const satisfies readonly TerminalCause[];
+
+/** True when a terminal cause means the run was abandoned (see above). */
+export function isAbandonedTerminalCause(cause: string | null): boolean {
+  return (
+    cause !== null &&
+    (ABANDONED_TERMINAL_CAUSES as readonly string[]).includes(cause)
+  );
+}
