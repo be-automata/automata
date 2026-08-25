@@ -484,7 +484,11 @@ describe.skipIf(!itEnabled)(
         pending.push(
           await dispatch("agent-run-strict", {
             label: `drill-p${i}`,
-            sleepMs: 200,
+            // Long enough that a run admitted in the instant the blocker's
+            // cancel frees the box slot cannot COMPLETE before its own cancel
+            // is delivered (CI saw a 200ms body finish first — that is the
+            // race the runbook describes, not a drill failure).
+            sleepMs: 3000,
             prKey: uid(`org-a/repo/${40 + i}`),
             boxSlot: true,
           }),
