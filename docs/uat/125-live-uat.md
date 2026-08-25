@@ -7,3 +7,4 @@ Throwaway PR used to exercise newest-wins / queue / discard+recheck / app-side o
 - push 3 (complete-run-queue)
 - push 4 (complete-run-queue)
 - push 5 (complete-run-queue)
+push 6 — complete-run-queue (post-#143) 17:14:14
