@@ -191,27 +191,32 @@ describe("validateRunMetadata (#127 AC5)", () => {
 });
 
 describe("getAgentRunStatus (#125 C4 sweep reader)", () => {
-  const HINT = { createdAt: new Date("2026-08-25T17:20:24.000Z") };
-  const rows = (...r: { id: string; status: string }[]) =>
+  const HINT = {
+    createdAt: new Date("2026-08-25T17:20:24.000Z"),
+    threadId: "thread-1",
+  };
+  const page = (
+    r: { id: string; status: string }[],
+    pagination: { num_pages: number },
+  ) =>
     new Response(
       JSON.stringify({
         rows: r.map(({ id, status }) => ({ metadata: { id }, status })),
+        pagination,
       }),
       { status: 200 },
     );
 
-  it("reads the COLLECTION route (by-id GETs 403 for API tokens) windowed on createdAt and matched on metadata.id", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        rows(
+  it("reads the COLLECTION route (by-id GETs 403 for API tokens): windowed on createdAt, filtered on threadId metadata, matched on metadata.id", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      page(
+        [
           { id: "other", status: "RUNNING" },
           { id: "r1", status: "CANCELLED" },
-        ),
-      )
-      .mockResolvedValueOnce(rows({ id: "other", status: "RUNNING" }))
-      .mockResolvedValueOnce(new Response("boom", { status: 502 }))
-      .mockResolvedValueOnce(rows({ id: "r4", status: "WEIRD" }));
+        ],
+        { num_pages: 1 },
+      ),
+    );
     vi.stubGlobal("fetch", fetchMock);
     expect(await getAgentRunStatus("r1", CONFIG, HINT)).toBe("CANCELLED");
     const url = new URL(String(fetchMock.mock.calls[0]![0]));
@@ -219,9 +224,55 @@ describe("getAgentRunStatus (#125 C4 sweep reader)", () => {
     expect(url.searchParams.get("only_tasks")).toBe("false");
     expect(url.searchParams.get("since")).toBe("2026-08-25T17:10:24.000Z");
     expect(url.searchParams.get("until")).toBe("2026-08-25T17:30:24.000Z");
-    // Absent inside the window ⇒ pruned ⇒ NOT_FOUND (never a guess).
-    expect(await getAgentRunStatus("r2", CONFIG, HINT)).toBe("NOT_FOUND");
+    expect(url.searchParams.get("additional_metadata")).toBe(
+      "threadId:thread-1",
+    );
+    expect(url.searchParams.get("offset")).toBe("0");
+    vi.unstubAllGlobals();
+  });
+
+  it("pages to exhaustion before concluding NOT_FOUND — a full page without the row is not 'pruned'", async () => {
+    const full = Array.from({ length: 50 }, (_, i) => ({
+      id: `filler-${i}`,
+      status: "COMPLETED",
+    }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(page(full, { num_pages: 2 }))
+      .mockResolvedValueOnce(
+        page([{ id: "r-late", status: "RUNNING" }], { num_pages: 2 }),
+      )
+      .mockResolvedValueOnce(page(full, { num_pages: 2 }))
+      .mockResolvedValueOnce(page([], { num_pages: 2 }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await getAgentRunStatus("r-late", CONFIG, HINT)).toBe("RUNNING");
+    expect(
+      new URL(String(fetchMock.mock.calls[1]![0])).searchParams.get("offset"),
+    ).toBe("50");
+    // Two pages fully read, row absent ⇒ pruned.
+    expect(await getAgentRunStatus("r-gone", CONFIG, HINT)).toBe("NOT_FOUND");
+    vi.unstubAllGlobals();
+  });
+
+  it("fails CLOSED: non-2xx, a malformed/empty 200 body, and an unrecognised status all throw — never NOT_FOUND", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("boom", { status: 502 }))
+      .mockResolvedValueOnce(new Response("", { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        page([{ id: "r4", status: "WEIRD" }], { num_pages: 1 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
     await expect(getAgentRunStatus("r3", CONFIG, HINT)).rejects.toThrow(/502/);
+    await expect(getAgentRunStatus("r3", CONFIG, HINT)).rejects.toThrow(
+      /malformed/,
+    );
+    await expect(getAgentRunStatus("r3", CONFIG, HINT)).rejects.toThrow(
+      /malformed/,
+    );
     await expect(getAgentRunStatus("r4", CONFIG, HINT)).rejects.toThrow(
       /unrecognised/,
     );

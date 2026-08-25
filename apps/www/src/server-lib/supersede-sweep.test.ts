@@ -122,12 +122,12 @@ describe("runSupersedeSweep (#125 C4)", () => {
       .update(hatchetRunTable)
       .set({ supersedePolicy: "complete-run-discard" })
       .where(eq(hatchetRunTable.externalId, "r-discarded"));
-    const hints: Record<string, Date> = {};
+    const hints: Record<string, { createdAt: Date; threadId: string }> = {};
     const report = await runSupersedeSweep({
       cancelledAfterMs: T,
       orphanAfterMs: N,
       readStatus: async (id, hint) => {
-        hints[id] = hint.createdAt;
+        hints[id] = hint;
         return "CANCELLED";
       },
     });
@@ -137,7 +137,10 @@ describe("runSupersedeSweep (#125 C4)", () => {
     const row = await threadRow(victim);
     expect(row.terminalCause).toBe("discarded");
     expect(row.status).toBe("complete");
-    expect(hints["r-discarded"]!.getTime()).toBeLessThan(Date.now() - T);
+    expect(hints["r-discarded"]!.createdAt.getTime()).toBeLessThan(
+      Date.now() - T,
+    );
+    expect(hints["r-discarded"]!.threadId).toBe(victim);
   });
 
   it("rule (i) waits T: a fresh in_flight run is not examined", async () => {

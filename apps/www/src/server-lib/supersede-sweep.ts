@@ -217,7 +217,10 @@ export async function runSupersedeSweep(
   await mapLimit(claimed, ENGINE_READ_CONCURRENCY, async (run) => {
     let status: AgentRunStatus;
     try {
-      status = await readStatus(run.externalId, { createdAt: run.createdAt });
+      status = await readStatus(run.externalId, {
+        createdAt: run.createdAt,
+        threadId: run.threadId,
+      });
     } catch (error) {
       console.error(
         "[supersede-sweep] engine status read failed (retry next tick)",
