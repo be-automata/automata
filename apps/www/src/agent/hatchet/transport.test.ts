@@ -191,23 +191,40 @@ describe("validateRunMetadata (#127 AC5)", () => {
 });
 
 describe("getAgentRunStatus (#125 C4 sweep reader)", () => {
-  it("maps the v1 run status, 404 → NOT_FOUND, other non-2xx throws", async () => {
+  const HINT = { createdAt: new Date("2026-08-25T17:20:24.000Z") };
+  const rows = (...r: { id: string; status: string }[]) =>
+    new Response(
+      JSON.stringify({
+        rows: r.map(({ id, status }) => ({ metadata: { id }, status })),
+      }),
+      { status: 200 },
+    );
+
+  it("reads the COLLECTION route (by-id GETs 403 for API tokens) windowed on createdAt and matched on metadata.id", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ run: { status: "CANCELLED" } }), {
-          status: 200,
-        }),
+        rows(
+          { id: "other", status: "RUNNING" },
+          { id: "r1", status: "CANCELLED" },
+        ),
       )
-      .mockResolvedValueOnce(new Response("nope", { status: 404 }))
-      .mockResolvedValueOnce(new Response("boom", { status: 502 }));
+      .mockResolvedValueOnce(rows({ id: "other", status: "RUNNING" }))
+      .mockResolvedValueOnce(new Response("boom", { status: 502 }))
+      .mockResolvedValueOnce(rows({ id: "r4", status: "WEIRD" }));
     vi.stubGlobal("fetch", fetchMock);
-    expect(await getAgentRunStatus("r1", CONFIG)).toBe("CANCELLED");
-    expect(fetchMock.mock.calls[0]![0]).toBe(
-      "https://tunnel.example.com/api/v1/stable/tenants/tenant-1/workflow-runs/r1",
+    expect(await getAgentRunStatus("r1", CONFIG, HINT)).toBe("CANCELLED");
+    const url = new URL(String(fetchMock.mock.calls[0]![0]));
+    expect(url.pathname).toBe("/api/v1/stable/tenants/tenant-1/workflow-runs");
+    expect(url.searchParams.get("only_tasks")).toBe("false");
+    expect(url.searchParams.get("since")).toBe("2026-08-25T17:10:24.000Z");
+    expect(url.searchParams.get("until")).toBe("2026-08-25T17:30:24.000Z");
+    // Absent inside the window ⇒ pruned ⇒ NOT_FOUND (never a guess).
+    expect(await getAgentRunStatus("r2", CONFIG, HINT)).toBe("NOT_FOUND");
+    await expect(getAgentRunStatus("r3", CONFIG, HINT)).rejects.toThrow(/502/);
+    await expect(getAgentRunStatus("r4", CONFIG, HINT)).rejects.toThrow(
+      /unrecognised/,
     );
-    expect(await getAgentRunStatus("r2", CONFIG)).toBe("NOT_FOUND");
-    await expect(getAgentRunStatus("r3", CONFIG)).rejects.toThrow(/502/);
     vi.unstubAllGlobals();
   });
 });

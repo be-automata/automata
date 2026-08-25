@@ -247,36 +247,64 @@ export type AgentRunStatus =
   | "FAILED"
   | "NOT_FOUND";
 
+/** What the reader needs besides the id to find a run on the collection route. */
+export type AgentRunLookupHint = {
+  /** hatchet_run.created_at — the engine's inserted_at is within seconds of it. */
+  createdAt: Date;
+};
+
+/** Half-width of the `since`/`until` window around `createdAt`. */
+export const RUN_LOOKUP_WINDOW_MS = 10 * 60 * 1000;
+
 /**
- * Read one run's status by externalId (#125 C4 sweep). 404 → NOT_FOUND (the
- * engine pruned it, or it never existed — both are "not live"). Any other
+ * Read one run's status by externalId (#125 C4 sweep).
+ *
+ * WHY the collection route and not `workflow-runs/{id}`: hatchet-lite 0.94
+ * answers every by-id `stable` GET (`workflow-runs/{id}`, `/status`,
+ * `tasks/{id}`, `dag/{id}`) with 403 for a tenant API token — only session
+ * users pass its resource getter — while the collection routes serve the same
+ * token (live-verified 2026-08-25; the by-id reader failed on every prod
+ * sweep tick and a CANCEL_NEWEST victim stayed `booting` for 30+ minutes).
+ * The list is windowed on `createdAt` and matched on `metadata.id`, so an
+ * absent row inside the window means the engine pruned it → NOT_FOUND. Any
  * non-2xx throws so the sweep skips the run this tick rather than guessing.
  */
 export async function getAgentRunStatus(
   externalId: string,
   config: HatchetTriggerConfig,
+  hint: AgentRunLookupHint,
 ): Promise<AgentRunStatus> {
   const { apiUrl, tenantId, apiToken } = requireHatchetConfig(config, "status");
+  const query = new URLSearchParams({
+    only_tasks: "false",
+    since: new Date(
+      hint.createdAt.getTime() - RUN_LOOKUP_WINDOW_MS,
+    ).toISOString(),
+    until: new Date(
+      hint.createdAt.getTime() + RUN_LOOKUP_WINDOW_MS,
+    ).toISOString(),
+    limit: "200",
+  });
   const res = await fetch(
-    `${apiUrl.replace(/\/$/, "")}/api/v1/stable/tenants/${tenantId}/workflow-runs/${encodeURIComponent(externalId)}`,
+    `${apiUrl.replace(/\/$/, "")}/api/v1/stable/tenants/${tenantId}/workflow-runs?${query}`,
     { headers: { Authorization: `Bearer ${apiToken}` } },
   );
-  if (res.status === 404) return "NOT_FOUND";
   if (!res.ok) {
     throw new Error(`Hatchet run status failed: ${res.status}`);
   }
   const json = (await res.json().catch(() => ({}))) as {
-    run?: { status?: string };
+    rows?: { metadata?: { id?: string }; status?: string }[];
   };
-  const status = json.run?.status;
-  switch (status) {
+  const row = (json.rows ?? []).find((r) => r.metadata?.id === externalId);
+  if (!row) return "NOT_FOUND";
+  switch (row.status) {
     case "QUEUED":
     case "RUNNING":
     case "COMPLETED":
     case "CANCELLED":
     case "FAILED":
-      return status;
+      return row.status;
     default:
-      throw new Error(`Hatchet run status unrecognised: ${String(status)}`);
+      throw new Error(`Hatchet run status unrecognised: ${String(row.status)}`);
   }
 }

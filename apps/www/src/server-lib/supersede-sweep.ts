@@ -17,6 +17,7 @@ import { assertNever } from "@terragon/shared/utils";
 import { maybeRecheckOnComplete } from "./supersede-recheck";
 import {
   getAgentRunStatus,
+  type AgentRunLookupHint,
   type AgentRunStatus,
 } from "@/agent/hatchet/transport";
 
@@ -64,7 +65,10 @@ function msFromEnv(raw: string): number | undefined {
 
 export type SweepDeps = {
   /** Injected for tests; production reads the engine over REST. */
-  readStatus?: (externalId: string) => Promise<AgentRunStatus>;
+  readStatus?: (
+    externalId: string,
+    hint: AgentRunLookupHint,
+  ) => Promise<AgentRunStatus>;
   cancelledAfterMs?: number;
   orphanAfterMs?: number;
 };
@@ -117,8 +121,19 @@ async function decide(
           supersededByThreadId: newer.threadId,
         };
       }
-      // A CANCELLED run was cancelled by someone; a VANISHED one never made
-      // it to the plane (pruned / trigger lost) — not the user's doing.
+      // No newer sibling. Under complete-run-discard the engine CANCELs the
+      // NEWEST run (CANCEL_NEWEST) while an OLDER one stays live — the worker
+      // never sees that run, so this is the only place it can be named
+      // `discarded` (live-verified 2026-08-25: it was landing as
+      // user-cancelled). Otherwise a CANCELLED run was cancelled by someone;
+      // a VANISHED one never made it to the plane (pruned / trigger lost) —
+      // not the user's doing.
+      if (
+        status === "CANCELLED" &&
+        run.supersedePolicy === "complete-run-discard"
+      ) {
+        return { kind: "terminal", cause: "discarded" };
+      }
       return {
         kind: "terminal",
         cause: status === "CANCELLED" ? "user-cancelled" : "plane-offline",
@@ -175,12 +190,16 @@ export async function runSupersedeSweep(
     SWEEP_ORPHAN_AFTER_MS_DEFAULT;
   const readStatus =
     deps.readStatus ??
-    ((externalId: string) =>
-      getAgentRunStatus(externalId, {
-        apiUrl: env.HATCHET_API_URL,
-        tenantId: env.HATCHET_TENANT_ID,
-        apiToken: env.HATCHET_API_TOKEN,
-      }));
+    ((externalId: string, hint: AgentRunLookupHint) =>
+      getAgentRunStatus(
+        externalId,
+        {
+          apiUrl: env.HATCHET_API_URL,
+          tenantId: env.HATCHET_TENANT_ID,
+          apiToken: env.HATCHET_API_TOKEN,
+        },
+        hint,
+      ));
 
   // Rule (i): claim the batch in ONE compare-and-set, then read the engine
   // with bounded concurrency; every terminal pair is idempotent.
@@ -198,7 +217,7 @@ export async function runSupersedeSweep(
   await mapLimit(claimed, ENGINE_READ_CONCURRENCY, async (run) => {
     let status: AgentRunStatus;
     try {
-      status = await readStatus(run.externalId);
+      status = await readStatus(run.externalId, { createdAt: run.createdAt });
     } catch (error) {
       console.error(
         "[supersede-sweep] engine status read failed (retry next tick)",
