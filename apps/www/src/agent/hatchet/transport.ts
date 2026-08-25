@@ -247,36 +247,95 @@ export type AgentRunStatus =
   | "FAILED"
   | "NOT_FOUND";
 
+/** What the reader needs besides the id to find a run on the collection route. */
+export type AgentRunLookupHint = {
+  /** hatchet_run.created_at — the engine's inserted_at is within seconds of it. */
+  createdAt: Date;
+  /** Dispatch stamps `additional_metadata.threadId`; the list is filtered on it. */
+  threadId: string;
+};
+
+/** Half-width of the `since`/`until` window around `createdAt`. */
+export const RUN_LOOKUP_WINDOW_MS = 10 * 60 * 1000;
+/** Rows per page and the page cap — a thread has a handful of runs, never hundreds. */
+const RUN_LOOKUP_PAGE = 50;
+const RUN_LOOKUP_MAX_PAGES = 10;
+
 /**
- * Read one run's status by externalId (#125 C4 sweep). 404 → NOT_FOUND (the
- * engine pruned it, or it never existed — both are "not live"). Any other
- * non-2xx throws so the sweep skips the run this tick rather than guessing.
+ * Read one run's status by externalId (#125 C4 sweep).
+ *
+ * WHY the collection route and not `workflow-runs/{id}`: hatchet-lite 0.94
+ * answers every by-id `stable` GET (`workflow-runs/{id}`, `/status`,
+ * `tasks/{id}`, `dag/{id}`) with 403 for a tenant API token — only session
+ * users pass its resource getter — while the collection routes serve the same
+ * token (live-verified 2026-08-25; the by-id reader failed on every prod
+ * sweep tick and a CANCEL_NEWEST victim stayed `booting` for 30+ minutes).
+ *
+ * The list is filtered on `additional_metadata.threadId` (so it holds only
+ * that thread's runs, not the whole shared tenant), windowed on `createdAt`,
+ * paged to exhaustion, and matched on `metadata.id`. Only a fully read,
+ * well-formed listing that lacks the row means the engine pruned it →
+ * NOT_FOUND. Anything else — non-2xx, a body without a `rows` array, an
+ * unrecognised status, or more pages than the cap — throws so the sweep skips
+ * the run this tick rather than guessing (fail-closed: a throw releases the
+ * lease; a wrong NOT_FOUND terminalizes a live run).
  */
 export async function getAgentRunStatus(
   externalId: string,
   config: HatchetTriggerConfig,
+  hint: AgentRunLookupHint,
 ): Promise<AgentRunStatus> {
   const { apiUrl, tenantId, apiToken } = requireHatchetConfig(config, "status");
-  const res = await fetch(
-    `${apiUrl.replace(/\/$/, "")}/api/v1/stable/tenants/${tenantId}/workflow-runs/${encodeURIComponent(externalId)}`,
-    { headers: { Authorization: `Bearer ${apiToken}` } },
+  const base = `${apiUrl.replace(/\/$/, "")}/api/v1/stable/tenants/${tenantId}/workflow-runs`;
+  for (let page = 0; page < RUN_LOOKUP_MAX_PAGES; page++) {
+    const query = new URLSearchParams({
+      only_tasks: "false",
+      since: new Date(
+        hint.createdAt.getTime() - RUN_LOOKUP_WINDOW_MS,
+      ).toISOString(),
+      until: new Date(
+        hint.createdAt.getTime() + RUN_LOOKUP_WINDOW_MS,
+      ).toISOString(),
+      additional_metadata: `threadId:${hint.threadId}`,
+      limit: String(RUN_LOOKUP_PAGE),
+      offset: String(page * RUN_LOOKUP_PAGE),
+    });
+    const res = await fetch(`${base}?${query}`, {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    });
+    if (!res.ok) {
+      throw new Error(`Hatchet run status failed: ${res.status}`);
+    }
+    const json = (await res.json().catch(() => null)) as {
+      rows?: unknown;
+      pagination?: { num_pages?: unknown };
+    } | null;
+    if (!json || !Array.isArray(json.rows)) {
+      throw new Error("Hatchet run status malformed: no rows array");
+    }
+    const rows = json.rows as { metadata?: { id?: string }; status?: string }[];
+    const row = rows.find((r) => r.metadata?.id === externalId);
+    if (row) {
+      switch (row.status) {
+        case "QUEUED":
+        case "RUNNING":
+        case "COMPLETED":
+        case "CANCELLED":
+        case "FAILED":
+          return row.status;
+        default:
+          throw new Error(
+            `Hatchet run status unrecognised: ${String(row.status)}`,
+          );
+      }
+    }
+    const numPages = json.pagination?.num_pages;
+    const lastPage =
+      rows.length < RUN_LOOKUP_PAGE ||
+      (typeof numPages === "number" && page + 1 >= numPages);
+    if (lastPage) return "NOT_FOUND";
+  }
+  throw new Error(
+    `Hatchet run status: ${RUN_LOOKUP_MAX_PAGES} pages without ${externalId}`,
   );
-  if (res.status === 404) return "NOT_FOUND";
-  if (!res.ok) {
-    throw new Error(`Hatchet run status failed: ${res.status}`);
-  }
-  const json = (await res.json().catch(() => ({}))) as {
-    run?: { status?: string };
-  };
-  const status = json.run?.status;
-  switch (status) {
-    case "QUEUED":
-    case "RUNNING":
-    case "COMPLETED":
-    case "CANCELLED":
-    case "FAILED":
-      return status;
-    default:
-      throw new Error(`Hatchet run status unrecognised: ${String(status)}`);
-  }
 }
