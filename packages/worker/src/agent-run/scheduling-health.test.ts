@@ -42,7 +42,9 @@ class FakePg implements PgLike {
   }
 }
 
-beforeEach(() => resetEvictedAtSupportForTest());
+// Pure-fixture suite: pin the column probe so every fake db sees only the
+// statements under test (the real probe is covered by the dockerized IT).
+beforeEach(() => resetEvictedAtSupportForTest(false));
 
 describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
   describe("healthy fixture (AC-1)", () => {

@@ -83,9 +83,15 @@ const DEFAULT_LIMIT = 100;
  * column the engine may not have — resolve it once per process.
  */
 let evictedAtSupported: boolean | null = null;
-/** Tests: forget the per-process answer so each case probes its own fixture. */
-export function resetEvictedAtSupportForTest(): void {
-  evictedAtSupported = null;
+/**
+ * Tests: pin (or forget, with `null`) the per-process answer. The pure unit
+ * suite pins it so its fake databases see only the statements under test;
+ * the dockerized IT leaves it unpinned and exercises the real probe.
+ */
+export function resetEvictedAtSupportForTest(
+  value: boolean | null = null,
+): void {
+  evictedAtSupported = value;
 }
 async function evictedAtPredicate(db: PgLike): Promise<string> {
   if (evictedAtSupported === null) {
