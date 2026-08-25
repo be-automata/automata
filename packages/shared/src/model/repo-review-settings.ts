@@ -1,7 +1,7 @@
 import { DB } from "../db";
 import { repoReviewSettings } from "../db/schema";
 import { RepoReviewSetting } from "../db/types";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, ne, not, or } from "drizzle-orm";
 import { buildEgressPolicyShape } from "./egress-policy";
 
 /**
@@ -38,6 +38,14 @@ export function normalizeRepo(repoFullName: string): string {
  *  - 'complete-run-discard' → the new run is discarded while one is live
  *  - 'app-side'             → the control plane decides (legacy #8 rules)
  */
+/** The stored row changed since the caller read it (expectedUpdatedAt mismatch). */
+export class RepoReviewSettingConflictError extends Error {
+  constructor() {
+    super("repo review setting changed since it was read");
+    this.name = "RepoReviewSettingConflictError";
+  }
+}
+
 export const SUPERSEDE_POLICIES = [
   "newest-wins",
   "complete-run-queue",
@@ -172,6 +180,8 @@ export async function upsertRepoReviewSetting({
   repoFullName,
   patch,
   updatedByUserId,
+  expectedUpdatedAt,
+  expectAbsentSupersedeOverride,
 }: {
   db: DB;
   organizationId: string;
@@ -189,6 +199,22 @@ export async function upsertRepoReviewSetting({
     recheckOnComplete?: boolean;
   };
   updatedByUserId?: string | null;
+  /**
+   * Optimistic concurrency (#131): when given, the write applies ONLY if the
+   * stored row's updatedAt still equals this value — enforced by the database
+   * in the same statement (ON CONFLICT … DO UPDATE … WHERE), never by a
+   * read-then-write. A mismatch throws {@link RepoReviewSettingConflictError}.
+   * A row that does not exist yet is created (nothing to conflict with).
+   */
+  expectedUpdatedAt?: Date;
+  /**
+   * First-write CAS (#131): the write applies ONLY if no supersede override
+   * exists yet (`supersede_policy IS NULL` — the row may still exist for the
+   * tolerance/egress families). Two admins racing to create the same repo's
+   * first override: the loser throws {@link RepoReviewSettingConflictError}.
+   * Mutually exclusive with `expectedUpdatedAt`.
+   */
+  expectAbsentSupersedeOverride?: boolean;
 }): Promise<RepoReviewSetting> {
   const repo = normalizeRepo(repoFullName);
 
@@ -248,6 +274,17 @@ export async function upsertRepoReviewSetting({
   if (patch.recheckOnComplete !== undefined)
     set.recheckOnComplete = patch.recheckOnComplete;
 
+  // CAS has two shapes: a version fence for edits (updated_at must still be
+  // the value the admin read), and an ABSENCE fence for first writes
+  // (expectAbsentSupersedeOverride: the row may exist for another family, but
+  // supersede_policy must still be NULL). Both are enforced by the DATABASE
+  // in the write itself; the loser's UPDATE matches no row and 409s — two
+  // admins racing to CREATE the first override can never both get 200.
+  const setWhere = expectedUpdatedAt
+    ? eq(repoReviewSettings.updatedAt, expectedUpdatedAt)
+    : expectAbsentSupersedeOverride
+      ? isNull(repoReviewSettings.supersedePolicy)
+      : undefined;
   const [row] = await db
     .insert(repoReviewSettings)
     // `set` holds exactly the defined patch fields (+ provenance); omitted
@@ -259,9 +296,16 @@ export async function upsertRepoReviewSetting({
         repoReviewSettings.repoFullName,
       ],
       set,
+      ...(setWhere ? { setWhere } : {}),
     })
     .returning();
-  return row!;
+  if (!row) {
+    if (setWhere) {
+      throw new RepoReviewSettingConflictError();
+    }
+    throw new Error("upsertRepoReviewSetting returned no row");
+  }
+  return row;
 }
 
 /** Convenience: set only the tolerance, preserving any draft-policy field. */
@@ -288,28 +332,69 @@ export async function setRepoReviewSetting({
 }
 
 /**
- * Remove the override for one `(org, repo)` (repo reverts to env/default). No-op
- * when absent. Returns true when a row was actually deleted.
+ * "Reset to default" for the TOLERANCE family (block tolerance + draft-PR
+ * review) of one repo. The row is shared with the other per-repo families
+ * (#66 egress, #125 supersede policy): when any of those still carries an
+ * override the row is KEPT and only the tolerance columns go back to their
+ * defaults; the row is deleted only when nothing else lives on it. Resetting
+ * a repo's tolerance must never silently discard its supersede policy.
+ * Optional `expectedUpdatedAt` makes the reset a compare-and-swap (409-class
+ * conflict → false, nothing changed).
  */
 export async function removeRepoReviewSetting({
   db,
   organizationId,
   repoFullName,
+  expectedUpdatedAt,
 }: {
   db: DB;
   organizationId: string;
   repoFullName: string;
-}): Promise<boolean> {
+  expectedUpdatedAt?: Date;
+}): Promise<{ removed: boolean; conflict: boolean }> {
+  const repo = normalizeRepo(repoFullName);
+  const rowFilter = and(
+    eq(repoReviewSettings.organizationId, organizationId),
+    eq(repoReviewSettings.repoFullName, repo),
+    ...(expectedUpdatedAt
+      ? [eq(repoReviewSettings.updatedAt, expectedUpdatedAt)]
+      : []),
+  );
+  // The "does another family live on this row" decision is made BY THE
+  // DATABASE inside each statement, not by a prior SELECT: a supersede/egress
+  // override landing concurrently can never be wiped by a reset that read
+  // the row a moment earlier.
+  const otherFamiliesPresent = or(
+    isNotNull(repoReviewSettings.supersedePolicy),
+    isNotNull(repoReviewSettings.egressPolicy),
+    isNotNull(repoReviewSettings.egressAllowlist),
+  )!;
+  const reset = await db
+    .update(repoReviewSettings)
+    .set({
+      blockTolerance: "warning",
+      reviewDraftPrs: true,
+      updatedAt: new Date(),
+    })
+    .where(and(rowFilter, otherFamiliesPresent))
+    .returning({ id: repoReviewSettings.id });
+  if (reset.length > 0) return { removed: true, conflict: false };
   const deleted = await db
     .delete(repoReviewSettings)
-    .where(
-      and(
-        eq(repoReviewSettings.organizationId, organizationId),
-        eq(repoReviewSettings.repoFullName, normalizeRepo(repoFullName)),
-      ),
-    )
+    .where(and(rowFilter, not(otherFamiliesPresent)))
     .returning({ id: repoReviewSettings.id });
-  return deleted.length > 0;
+  if (deleted.length > 0) return { removed: true, conflict: false };
+  // Nothing matched: either no row (nothing to reset) or, with a version
+  // given, the row moved on since the caller read it.
+  if (expectedUpdatedAt) {
+    const exists = await getRepoReviewSetting({
+      db,
+      organizationId,
+      repoFullName,
+    });
+    return { removed: false, conflict: exists !== undefined };
+  }
+  return { removed: false, conflict: false };
 }
 
 /** List all tolerance overrides for one org (dashboard settings page). */
@@ -320,8 +405,16 @@ export async function listRepoReviewSettings({
   db: DB;
   organizationId: string;
 }): Promise<RepoReviewSetting[]> {
+  // The org-default sentinel ('*') is a storage encoding, not a repo override —
+  // it has its own accessor (getRepoReviewSetting with the sentinel name) and
+  // must never leak into "list the org's overrides".
   return db
     .select()
     .from(repoReviewSettings)
-    .where(eq(repoReviewSettings.organizationId, organizationId));
+    .where(
+      and(
+        eq(repoReviewSettings.organizationId, organizationId),
+        ne(repoReviewSettings.repoFullName, ORG_DEFAULT_REPO_SENTINEL),
+      ),
+    );
 }

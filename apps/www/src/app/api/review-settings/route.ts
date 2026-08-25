@@ -29,6 +29,8 @@ export async function GET(): Promise<NextResponse> {
       repoFullName: r.repoFullName,
       blockTolerance: r.blockTolerance,
       reviewDraftPrs: r.reviewDraftPrs,
+      supersedePolicy: r.supersedePolicy,
+      recheckOnComplete: r.recheckOnComplete,
       updatedAt: r.updatedAt,
     })),
   });

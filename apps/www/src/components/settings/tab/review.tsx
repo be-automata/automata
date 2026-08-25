@@ -16,6 +16,7 @@ import {
 } from "@/queries/review-settings-queries";
 import { ToleranceMatrix } from "@/components/settings/review-tolerance/tolerance-matrix";
 import { OrgFloorCard } from "@/components/settings/review-tolerance/org-floor-card";
+import { SupersedePolicySection } from "@/components/settings/review-supersede/supersede-policy-section";
 import { RepoRow } from "@/components/settings/review-tolerance/repo-row";
 import {
   ConfirmLoosenDialog,
@@ -36,6 +37,8 @@ interface RepoRowData {
   /** Whether Automata engages this repo's draft PRs (override or the `true` default). */
   reviewDraftPrs: boolean;
   hasOverride: boolean;
+  /** Version of the stored row (ISO) — sent with writes as the CAS token. */
+  updatedAt?: string;
 }
 
 export function ReviewSettings() {
@@ -71,6 +74,7 @@ export function ReviewSettings() {
         tolerance: override?.blockTolerance ?? DEFAULT_TOLERANCE,
         reviewDraftPrs: override?.reviewDraftPrs ?? true,
         hasOverride: Boolean(override),
+        updatedAt: override?.updatedAt,
       });
     }
     // Include overrides for repos not in the user's installable list (e.g. set
@@ -80,6 +84,7 @@ export function ReviewSettings() {
       if (!rowMap.has(key)) {
         rowMap.set(key, {
           repoFullName: s.repoFullName,
+          updatedAt: s.updatedAt,
           key,
           tolerance: s.blockTolerance,
           reviewDraftPrs: s.reviewDraftPrs,
@@ -146,17 +151,23 @@ export function ReviewSettings() {
     }
   }
 
+  // Every writer on a row carries the row's version: a stale Save gets the
+  // same 409 as a stale Reset instead of silently last-write-winning over a
+  // concurrent admin (the row's updatedAt is on every RepoRowData).
   const doSave = (row: RepoRowData, target: BlockTolerance): Promise<void> =>
     runMutation(row, () =>
       setMutation.mutateAsync({
         repoFullName: row.repoFullName,
-        patch: { blockTolerance: target },
+        patch: { blockTolerance: target, expectedUpdatedAt: row.updatedAt },
       }),
     );
 
   const doReset = (row: RepoRowData): Promise<void> =>
     runMutation(row, () =>
-      clearMutation.mutateAsync({ repoFullName: row.repoFullName }),
+      clearMutation.mutateAsync({
+        repoFullName: row.repoFullName,
+        expectedUpdatedAt: row.updatedAt,
+      }),
     );
 
   /** The draft-PR toggle saves immediately (partial patch) — no explicit Save. */
@@ -168,7 +179,7 @@ export function ReviewSettings() {
     try {
       await setMutation.mutateAsync({
         repoFullName: row.repoFullName,
-        patch: { reviewDraftPrs },
+        patch: { reviewDraftPrs, expectedUpdatedAt: row.updatedAt },
       });
     } catch {
       // useSetReviewSettingMutation toasts the error; the switch reverts on refetch.
@@ -210,6 +221,7 @@ export function ReviewSettings() {
   return (
     <div className="flex flex-col gap-8">
       <OrgFloorCard />
+      <SupersedePolicySection />
 
       <SettingsSection
         label="Review Tolerance"

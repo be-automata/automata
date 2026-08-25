@@ -13,6 +13,7 @@ import {
   upsertRepoReviewSetting,
   removeRepoReviewSetting,
   listRepoReviewSettings,
+  RepoReviewSettingConflictError,
 } from "./repo-review-settings";
 
 const db = createDb(env.DATABASE_URL!);
@@ -144,7 +145,7 @@ describe("repo-review-settings (Neon, org-fenced)", () => {
         organizationId: orgA,
         repoFullName: "acme/widgets",
       }),
-    ).toBe(true);
+    ).toEqual({ removed: true, conflict: false });
     expect(
       await getRepoReviewSetting({
         db,
@@ -159,7 +160,7 @@ describe("repo-review-settings (Neon, org-fenced)", () => {
         organizationId: orgA,
         repoFullName: "acme/widgets",
       }),
-    ).toBe(false);
+    ).toEqual({ removed: false, conflict: false });
   });
 
   it("defaults: a tolerance-only insert leaves reviewDraftPrs TRUE", async () => {
@@ -229,7 +230,7 @@ describe("repo-review-settings (Neon, org-fenced)", () => {
       organizationId: orgA,
       repoFullName: "shared/repo",
     });
-    expect(removed).toBe(false);
+    expect(removed).toEqual({ removed: false, conflict: false });
     // orgB's row survives.
     expect(
       await getRepoReviewSetting({
@@ -387,6 +388,129 @@ describe("resolveSupersedePolicy (#125/#127)", () => {
         repoFullName: "acme/widgets",
       }),
     ).resolves.toEqual({ policy: "newest-wins", recheckOnComplete: false });
+  });
+
+  it("resetting the TOLERANCE family keeps a repo's supersede override (row kept, tolerance back to defaults); a row with nothing else is deleted (#131)", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/both",
+      patch: { blockTolerance: "error", supersedePolicy: "complete-run-queue" },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/tolerance-only",
+      patch: { blockTolerance: "error" },
+    });
+    expect(
+      await removeRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/both",
+      }),
+    ).toEqual({ removed: true, conflict: false });
+    const kept = await getRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/both",
+    });
+    expect(kept?.supersedePolicy).toBe("complete-run-queue");
+    expect(kept?.blockTolerance).toBe("warning");
+    expect(
+      await removeRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/tolerance-only",
+      }),
+    ).toEqual({ removed: true, conflict: false });
+    expect(
+      await getRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/tolerance-only",
+      }),
+    ).toBeUndefined();
+    // CAS: a stale version resets nothing.
+    const stale = new Date(kept!.updatedAt.getTime() - 60_000);
+    expect(
+      await removeRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/both",
+        expectedUpdatedAt: stale,
+      }),
+    ).toEqual({ removed: false, conflict: true });
+  });
+
+  it("first-write CAS (#131): two admins racing to CREATE the same repo's first override — exactly one wins, the loser conflicts", async () => {
+    const create = () =>
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/first-override",
+        patch: { supersedePolicy: "complete-run-queue" },
+        expectAbsentSupersedeOverride: true,
+      });
+    const results = await Promise.allSettled([create(), create()]);
+    const won = results.filter((r) => r.status === "fulfilled");
+    const lost = results.filter(
+      (r) =>
+        r.status === "rejected" &&
+        r.reason instanceof RepoReviewSettingConflictError,
+    );
+    expect(won).toHaveLength(1);
+    expect(lost).toHaveLength(1);
+    // The absence fence also guards a tolerance-only row (row exists, no
+    // supersede override yet): first create wins, a second one conflicts.
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/tolerance-first",
+      patch: { blockTolerance: "warning" },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/tolerance-first",
+      patch: { supersedePolicy: "newest-wins" },
+      expectAbsentSupersedeOverride: true,
+    });
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/tolerance-first",
+        patch: { supersedePolicy: "app-side" },
+        expectAbsentSupersedeOverride: true,
+      }),
+    ).rejects.toBeInstanceOf(RepoReviewSettingConflictError);
+  });
+
+  it("listRepoReviewSettings never returns the org-default sentinel ('*') (#131 AC6)", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { supersedePolicy: "app-side" },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/x",
+      patch: { supersedePolicy: "complete-run-queue" },
+    });
+    const names = (
+      await listRepoReviewSettings({ db, organizationId: orgA })
+    ).map((r) => r.repoFullName);
+    expect(names).toEqual(["acme/x"]);
+    // The sentinel is still reachable by its own accessor.
+    const sentinel = await getRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+    });
+    expect(sentinel?.supersedePolicy).toBe("app-side");
   });
 
   it("falls back to the org-default sentinel row ('*') when the repo has no override", async () => {

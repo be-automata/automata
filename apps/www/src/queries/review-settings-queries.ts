@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { BlockTolerance } from "@terragon/review/severity-policy";
-import { errorFromResponse } from "./error-from-response";
+import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
+import { ConflictError, errorFromResponse } from "./error-from-response";
 
 /**
  * Per-repo REQUESTED_CHANGES tolerance overrides for the caller's active org.
@@ -15,6 +16,8 @@ export interface RepoReviewSettingDto {
   repoFullName: string;
   blockTolerance: BlockTolerance;
   reviewDraftPrs: boolean;
+  supersedePolicy: string | null;
+  recheckOnComplete: boolean;
   updatedAt: string;
 }
 
@@ -22,6 +25,15 @@ export interface RepoReviewSettingDto {
 export interface RepoReviewSettingPatch {
   blockTolerance?: BlockTolerance;
   reviewDraftPrs?: boolean;
+  /** null clears the override (falls back to the org default). */
+  supersedePolicy?: SupersedePolicy | null;
+  recheckOnComplete?: boolean;
+  /**
+   * Optimistic concurrency fence — a stale value gets a ConflictError.
+   * `null` is the first-write fence: "I read no override yet"; the create
+   * 409s if someone else added one in between.
+   */
+  expectedUpdatedAt?: string | null;
 }
 
 export const reviewSettingsQueryKeys = {
@@ -29,7 +41,7 @@ export const reviewSettingsQueryKeys = {
 };
 
 /** Split `owner/name` into its two path segments (name may itself be a slug). */
-function splitRepoFullName(
+export function splitRepoFullName(
   repoFullName: string,
 ): [owner: string, repo: string] {
   const slash = repoFullName.indexOf("/");
@@ -61,7 +73,10 @@ export function useReviewSettingsQuery() {
   return useQuery(reviewSettingsQueryOptions());
 }
 
-export function useSetReviewSettingMutation() {
+export function useSetReviewSettingMutation(options?: {
+  /** Toast to show on success (silent by default, matching prior callers). */
+  successMessage?: string;
+}) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
@@ -87,11 +102,14 @@ export function useSetReviewSettingMutation() {
       return json.setting;
     },
     onSuccess: () => {
+      if (options?.successMessage) toast.success(options.successMessage);
       queryClient.invalidateQueries({
         queryKey: reviewSettingsQueryKeys.list(),
       });
     },
     onError: (error: unknown) => {
+      // Conflicts get a dedicated reload flow at the call site, not a toast.
+      if (error instanceof ConflictError) return;
       toast.error(error instanceof Error ? error.message : String(error));
     },
   });
@@ -102,12 +120,18 @@ export function useClearReviewToleranceMutation() {
   return useMutation({
     mutationFn: async ({
       repoFullName,
+      expectedUpdatedAt,
     }: {
       repoFullName: string;
+      /** The version the UI showed — a stale reset is a 409, never a wipe. */
+      expectedUpdatedAt?: string;
     }): Promise<boolean> => {
       const [owner, repo] = splitRepoFullName(repoFullName);
+      const qs = expectedUpdatedAt
+        ? `?expectedUpdatedAt=${encodeURIComponent(expectedUpdatedAt)}`
+        : "";
       const res = await fetch(
-        `/api/review-settings/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+        `/api/review-settings/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}${qs}`,
         { method: "DELETE" },
       );
       if (!res.ok) {
@@ -122,6 +146,9 @@ export function useClearReviewToleranceMutation() {
       });
     },
     onError: (error: unknown) => {
+      // Same contract as the setter: a stale-version 409 is rendered inline by
+      // the row (one conflict surface), never toasted on top of it.
+      if (error instanceof ConflictError) return;
       toast.error(error instanceof Error ? error.message : String(error));
     },
   });

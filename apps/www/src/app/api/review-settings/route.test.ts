@@ -6,9 +6,13 @@ import { listRepoReviewSettings } from "@terragon/shared/model/repo-review-setti
 vi.mock("@/lib/auth-server", () => ({
   getTenantContextOrNull: vi.fn(),
 }));
-vi.mock("@terragon/shared/model/repo-review-settings", () => ({
-  listRepoReviewSettings: vi.fn(),
-}));
+vi.mock(
+  "@terragon/shared/model/repo-review-settings",
+  async (importOriginal) => ({
+    ...(await importOriginal<object>()),
+    listRepoReviewSettings: vi.fn(),
+  }),
+);
 vi.mock("@/lib/db", () => ({ db: {} }));
 
 const ORG = "org_1";

@@ -28,6 +28,16 @@ describe("RunStatusChip (#125 C5)", () => {
     expect(html).toContain("Superseded");
   });
 
+  it.each(["discarded", "stale-skipped"] as const)(
+    "%s links to the Review & Automations settings (the policy that caused it)",
+    (cause) => {
+      const html = renderToStaticMarkup(
+        <RunStatusChip terminalCause={cause} />,
+      );
+      expect(html).toContain('href="/settings/review-automations"');
+    },
+  );
+
   it("renders nothing for a run without a typed terminal, or an unknown cause", () => {
     expect(renderToStaticMarkup(<RunStatusChip terminalCause={null} />)).toBe(
       "",
