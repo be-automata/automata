@@ -4,7 +4,8 @@ import {
   postEgressEvents,
   pollUntilTerminal,
   postRunFailed,
-  postRunSuperseded,
+  postRunTerminal,
+  checkRunStaleness,
   pullAgentCredentials,
   pullNextMessage,
   type PollContext,
@@ -328,6 +329,19 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
     expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
   });
 
+  it("returns stopped as soon as www reports `stopping` — the worker must tear down instead of waiting for terminal=true", async () => {
+    const responses = [
+      jsonResponse(200, { status: "working", terminal: false }),
+      jsonResponse(200, { status: "stopping", terminal: false }),
+      jsonResponse(200, { status: "stopping", terminal: false }), // never reached
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await pollUntilTerminal(ctx(), opts, 1, noSleep);
+    expect(result).toEqual({ outcome: "stopped", finalStatus: "stopping" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("throws on a 401 AFTER a successful poll without terminal=true (premature revocation, not completion)", async () => {
     // Under revoke-on-terminal-read www revokes only after serving terminal=true (which
     // the loop returns on). A 401 here means the token died mid-run without the worker
@@ -506,7 +520,7 @@ describe("pullAgentCredentials (D1 credential delivery)", () => {
   });
 });
 
-describe("postRunSuperseded (#125 C1)", () => {
+describe("postRunTerminal — superseded (#125 C1)", () => {
   const opts = {
     baseUrl: "https://www.example.com/",
     daemonToken: "tok",
@@ -522,8 +536,9 @@ describe("postRunSuperseded (#125 C1)", () => {
         new Response(JSON.stringify({ applied: true }), { status: 200 }),
       );
     vi.stubGlobal("fetch", fetchMock);
-    const r = await postRunSuperseded(opts, {
+    const r = await postRunTerminal(opts, {
       runExternalId: "run-1",
+      cause: "superseded",
       policy: "newest-wins",
     });
     expect(r).toBe("applied");
@@ -547,7 +562,11 @@ describe("postRunSuperseded (#125 C1)", () => {
       vi.fn().mockResolvedValue(new Response("superseded", { status: 409 })),
     );
     await expect(
-      postRunSuperseded(opts, { runExternalId: "old", policy: "newest-wins" }),
+      postRunTerminal(opts, {
+        runExternalId: "old",
+        cause: "superseded",
+        policy: "newest-wins",
+      }),
     ).resolves.toBe("rejected");
     vi.unstubAllGlobals();
   });
@@ -555,8 +574,66 @@ describe("postRunSuperseded (#125 C1)", () => {
   it("network failure → 'error', swallowed", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNRESET")));
     await expect(
-      postRunSuperseded(opts, { runExternalId: "r", policy: "newest-wins" }),
+      postRunTerminal(opts, {
+        runExternalId: "r",
+        cause: "superseded",
+        policy: "newest-wins",
+      }),
     ).resolves.toBe("error");
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("postRunTerminal / checkRunStaleness (#125 C4)", () => {
+  const opts = {
+    baseUrl: "https://www.example.com/",
+    daemonToken: "tok",
+    threadId: "thr_1",
+    threadChatId: "tc_1",
+    runExternalId: "run-1",
+  };
+
+  it("posts a typed cause with the generation header; policy detail optional", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ applied: true }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    expect(
+      await postRunTerminal(opts, { runExternalId: "run-1", cause: "timeout" }),
+    ).toBe("applied");
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(init.headers["x-run-external-id"]).toBe("run-1");
+    expect(JSON.parse(init.body)).toEqual({
+      threadId: "thr_1",
+      threadChatId: "tc_1",
+      runExternalId: "run-1",
+      cause: "timeout",
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("checkRunStaleness: true only on {stale:true}; any failure fails OPEN", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ stale: true }), { status: 200 }),
+        )
+        .mockResolvedValueOnce(new Response("nope", { status: 500 }))
+        .mockRejectedValueOnce(new Error("ECONNRESET")),
+    );
+    expect(await checkRunStaleness(opts, { runExternalId: "run-1" })).toBe(
+      true,
+    );
+    expect(await checkRunStaleness(opts, { runExternalId: "run-1" })).toBe(
+      false,
+    );
+    expect(await checkRunStaleness(opts, { runExternalId: "run-1" })).toBe(
+      false,
+    );
     vi.unstubAllGlobals();
   });
 });

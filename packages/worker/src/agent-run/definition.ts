@@ -147,6 +147,10 @@ export function buildAgentRunDefinition(
           // agent-runs on a box budgeted for one). Instead an engine-DB repairer
           // (scheduling-maintenance.ts, opt-in, dry-run by default) detects and
           // prunes the corrupted chain pointers behind this group name.
+          // NOT box-wide: Hatchet scopes this group PER WORKFLOW, so with the
+          // variants registered it caps each variant separately (observed,
+          // docs/uat/hatchet-lite-v0.94.10-observed.md §5). The box-wide
+          // budget is enforced by the worker's box slot (box-slot.ts).
           expression: "'agent-run-global-memory-budget'",
           maxRuns: GLOBAL_MAX_RUNS,
           limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,

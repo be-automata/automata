@@ -384,6 +384,15 @@ export const thread = pgTable(
      * (legacy dispatch, in-process sandbox) → the fence FAILS OPEN.
      */
     activeRunExternalId: text("active_run_external_id"),
+    /**
+     * Typed terminal cause (#125 C4): WHY a remote review run ended, written
+     * exactly once by the worker's terminal post or the supersede sweep.
+     * One of `TERMINAL_CAUSES` (model/terminal-cause.ts). NULL = no typed
+     * terminal (normal completion, or a legacy/in-process run). Read by the
+     * generation fence (any typed terminal refuses late writes) and by the
+     * thread-view chips (C5).
+     */
+    terminalCause: text("terminal_cause"),
     sandboxSize: text("sandbox_size").$type<SandboxSize>(),
     sandboxStatus: text("sandbox_status").$type<SandboxStatus>(),
     bootingSubstatus: text("booting_substatus").$type<BootingSubstatus>(),
@@ -1702,15 +1711,23 @@ export const hatchetRun = pgTable(
     /** Hatchet workflow-run id (`run.metadata.id`) — the handle passed to cancel. */
     externalId: text("external_id").notNull(),
     /**
-     * 'in_flight' at dispatch → 'superseded' when a newer review cancels it.
-     * There is deliberately NO 'finished' state: rows are never eagerly marked
-     * done (the supersede finder bounds candidates by a freshness window
-     * instead); widen this union only when something actually writes a value.
+     * 'in_flight' at dispatch → 'superseded' when a newer review takes the PR
+     * (app-side cancel, or the worker's/sweep's `superseded` terminal) →
+     * 'terminal' for any other typed terminal (#125 C4: the CAUSE lives on
+     * the thread; this status only says "no longer a supersede candidate").
+     * A successfully completed run is never eagerly marked (the finder bounds
+     * candidates by a freshness window instead).
      */
     status: text("status")
       .notNull()
-      .$type<"in_flight" | "superseded">()
+      .$type<"in_flight" | "superseded" | "terminal">()
       .default("in_flight"),
+    /**
+     * #125 C4 sweep lease: a sweep tick claims a row by moving this past now()
+     * (compare-and-set) before it inspects the engine or writes a terminal —
+     * two concurrent ticks can never both act on one run. NULL = unclaimed.
+     */
+    sweepLeaseUntil: timestamp("sweep_lease_until", { mode: "date" }),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .notNull()
@@ -1725,6 +1742,9 @@ export const hatchetRun = pgTable(
       table.prNumber,
     ),
     index("hatchet_run_thread_id_index").on(table.threadId),
+    // One row per Hatchet run; the generation fence, the worker terminal and
+    // the staleness self-check all look rows up by externalId.
+    uniqueIndex("hatchet_run_external_id_index").on(table.externalId),
   ],
 );
 

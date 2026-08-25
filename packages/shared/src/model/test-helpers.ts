@@ -1,4 +1,5 @@
 import { DB } from "../db";
+import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid/non-secure";
 import * as schema from "../db/schema";
 import { getUserFlags } from "../model/user-flags";
@@ -14,6 +15,7 @@ import { FeatureFlagName } from "./feature-flags-definitions";
 import { getGithubPR, upsertGithubPR } from "./github";
 import { setUserFeatureFlagOverride, upsertFeatureFlag } from "./feature-flags";
 import { createAutomation } from "./automations";
+import { recordHatchetRun } from "./hatchet-run";
 import { createOrganization, addOrganizationMember } from "./organizations";
 
 export async function createTestUser({
@@ -269,4 +271,74 @@ export async function createTestOrganization({
     role,
   });
   return { organization, member };
+}
+
+/** A fresh org with a unique slug (the four-line boilerplate every model test repeats). */
+export async function createTestOrg({
+  db,
+  name = "Org",
+}: {
+  db: DB;
+  name?: string;
+}): Promise<string> {
+  const org = await createOrganization({
+    db,
+    name,
+    slug: `${name.toLowerCase()}-${nanoid(8).toLowerCase()}`,
+  });
+  return org.id;
+}
+
+/**
+ * A remote (hatchet-remote) review thread in `working` with a recorded
+ * hatchet_run row, optionally back-dated — the #125 C4 sweep fixture.
+ */
+export async function createTestRemoteRun({
+  db,
+  userId,
+  organizationId,
+  prNumber,
+  externalId,
+  ageMs = 0,
+  repoFullName = "acme/widgets",
+  enableThreadChatCreation = false,
+}: {
+  db: DB;
+  userId: string;
+  organizationId: string;
+  prNumber: number;
+  externalId: string;
+  ageMs?: number;
+  repoFullName?: string;
+  /** Chat-mode thread: the live status sits on the threadChat row. */
+  enableThreadChatCreation?: boolean;
+}): Promise<{ threadId: string; threadChatId: string; runId: string }> {
+  const { threadId, threadChatId } = await createTestThread({
+    db,
+    userId,
+    overrides: { organizationId, sandboxProvider: "hatchet-remote" },
+    chatOverrides: { status: "working" },
+    enableThreadChatCreation,
+  });
+  if (!enableThreadChatCreation) {
+    await db
+      .update(schema.thread)
+      .set({ status: "working" })
+      .where(eq(schema.thread.id, threadId));
+  }
+  const run = await recordHatchetRun({
+    db,
+    threadId,
+    organizationId,
+    repoFullName,
+    prNumber,
+    externalId,
+  });
+  if (ageMs > 0) {
+    await db
+      .update(schema.hatchetRun)
+      .set({ createdAt: new Date(Date.now() - ageMs) })
+      .where(eq(schema.hatchetRun.id, run.id));
+  }
+  return { threadId, threadChatId, runId: run.id };
 }

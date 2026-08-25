@@ -1,5 +1,5 @@
 import type { DaemonEventAPIBody } from "@terragon/daemon/shared";
-import type { PulledDaemonMessage } from "./types";
+import type { PulledDaemonMessage, TerminalCause } from "./types";
 
 /**
  * The worker's HTTP client for the control plane's daemon endpoints (ADR-003).
@@ -226,19 +226,23 @@ export async function postRunFailed(
  * /api/daemon/egress-event body schema (#66 §3.3): `destinationPort` and
  * `policyLevel` optional, `source` fixed to "worker" for this plane.
  */
+export type RunTerminalResult = "applied" | "noop" | "rejected" | "error";
+
 /**
- * POST the explicit `superseded` terminal for a run the engine cancelled
- * (#125 C1) — the sibling of postRunFailed. www fences it by generation:
- * `runExternalId` must equal the thread's active run or the write is refused
- * (409). Idempotent per (thread, run): retries never double-apply. Never
- * throws — the C4 sweep is the backstop.
- *
- * Returns "applied" | "noop" | "rejected" | "error" for the caller's log line.
+ * POST one typed terminal for THIS run (#125 C1/C4) — the sibling of
+ * postRunFailed. www fences it by generation: `runExternalId` must equal the
+ * thread's active run or the write is refused (409). Idempotent per
+ * (thread, run): retries never double-apply. Never throws — the C4 sweep is
+ * the backstop. Returns the outcome for the caller's log line.
  */
-export async function postRunSuperseded(
+export async function postRunTerminal(
   opts: WwwClientOpts,
-  { runExternalId, policy }: { runExternalId: string; policy: string },
-): Promise<"applied" | "noop" | "rejected" | "error"> {
+  {
+    runExternalId,
+    cause,
+    policy,
+  }: { runExternalId: string; cause: TerminalCause; policy?: string },
+): Promise<RunTerminalResult> {
   let res: Response;
   try {
     res = await fetch(endpoint(opts.baseUrl, "/api/daemon/run-terminal"), {
@@ -248,13 +252,14 @@ export async function postRunSuperseded(
         threadId: opts.threadId,
         threadChatId: opts.threadChatId,
         runExternalId,
-        cause: "superseded",
-        detail: { policy },
+        cause,
+        ...(policy ? { detail: { policy } } : {}),
       }),
     });
   } catch (error) {
-    console.error("[agent-run] postRunSuperseded request failed (swallowed)", {
+    console.error("[agent-run] postRunTerminal request failed (swallowed)", {
       threadId: opts.threadId,
+      cause,
       error: error instanceof Error ? error.message : String(error),
     });
     return "error";
@@ -265,14 +270,47 @@ export async function postRunSuperseded(
     return "rejected";
   }
   if (!res.ok) {
-    console.error("[agent-run] postRunSuperseded non-2xx", {
+    console.error("[agent-run] postRunTerminal non-2xx", {
       threadId: opts.threadId,
+      cause,
       status: res.status,
     });
     return "error";
   }
   const body = (await res.json().catch(() => ({}))) as { applied?: boolean };
   return body.applied ? "applied" : "noop";
+}
+
+/**
+ * Queue-mode staleness self-check (#125 C4): is a NEWER run already recorded
+ * for this run's PR? Fails OPEN on any transport error — a self-check must
+ * never strand a run; the worst case is reviewing an obsolete SHA.
+ */
+export async function checkRunStaleness(
+  opts: WwwClientOpts,
+  { runExternalId }: { runExternalId: string },
+  signal?: AbortSignal,
+): Promise<boolean> {
+  try {
+    const res = await fetch(
+      endpoint(opts.baseUrl, "/api/daemon/run-staleness"),
+      {
+        method: "POST",
+        headers: headers(opts),
+        body: JSON.stringify({
+          threadId: opts.threadId,
+          threadChatId: opts.threadChatId,
+          runExternalId,
+        }),
+        signal,
+      },
+    );
+    if (!res.ok) return false;
+    const body = (await res.json().catch(() => ({}))) as { stale?: boolean };
+    return body.stale === true;
+  } catch {
+    return false;
+  }
 }
 
 export interface EgressEventWire {
@@ -368,7 +406,15 @@ export interface PollContext {
 }
 
 export interface PollResult {
-  outcome: "completed" | "cancelled";
+  /**
+   * "stopped": www put the thread in `stopping` (a user Stop). The daemon
+   * does not observe that status and www cannot reach a remote-plane daemon,
+   * so the WORKER must act: tear the daemon down and post the typed
+   * `user-cancelled` terminal. Without this the task waited for terminal=true
+   * until its step timeout — holding the box/engine slot for 30 minutes
+   * (observed in prod 2026-08-25, PR #139 run starving #137/#138).
+   */
+  outcome: "completed" | "cancelled" | "stopped";
   finalStatus?: string;
 }
 
@@ -454,6 +500,9 @@ export async function pollUntilTerminal(
     ctx.log(`thread-status: ${poll.status} (terminal=${poll.terminal})`);
     if (poll.terminal) {
       return { outcome: "completed", finalStatus: poll.status };
+    }
+    if (poll.status === "stopping") {
+      return { outcome: "stopped", finalStatus: poll.status };
     }
 
     await sleep(pollIntervalMs);

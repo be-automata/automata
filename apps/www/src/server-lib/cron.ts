@@ -171,6 +171,19 @@ export async function runQueuedTasksCron(): Promise<void> {
  * worker's own public URL and 404'd on Workers (the last of the four dead self-fetches).
  */
 export async function runScheduledTasksCron(): Promise<void> {
+  // #125 C4: the supersede sweep rides the every-minute cron. Fail-soft and
+  // dynamically imported like the other runners — a sweep error must never
+  // skip scheduled-thread processing.
+  try {
+    const { runSupersedeSweep } = await import("@/server-lib/supersede-sweep");
+    const r = await runSupersedeSweep();
+    if (r.terminals.length > 0 || r.orphans.length > 0) {
+      console.log("[cron:scheduled] supersede sweep", r);
+    }
+  } catch (error) {
+    console.error("[cron:scheduled] supersede sweep failed (non-fatal)", error);
+  }
+
   const { runScheduledThread } = await import("@/server-lib/scheduled-thread");
   const dueThreadChats = await getScheduledThreadChatsDueToRun({ db });
   console.log(`[cron:scheduled] ${dueThreadChats.length} thread chats due`);

@@ -77,3 +77,6 @@ hive-mind-prompt-*.txt
 # vscode-extension local workspace settings
 apps/vscode-extension/.vscode/
 .gstack/
+
+# hatchet-lite IT harness (packages/worker/src/agent-run/hatchet-it-harness.ts) — written per run, removed in afterAll
+packages/worker/.hatchet-it-override.generated.yml

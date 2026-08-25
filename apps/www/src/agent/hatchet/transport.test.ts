@@ -2,6 +2,7 @@ import { describe, it, vi, beforeEach, expect } from "vitest";
 import {
   triggerAgentRun,
   cancelAgentRun,
+  getAgentRunStatus,
   POLICY_TO_WORKFLOW,
   workflowNameForPolicy,
   validateRunMetadata,
@@ -186,5 +187,27 @@ describe("validateRunMetadata (#127 AC5)", () => {
     expect(() => validateRunMetadata({ a: "x".repeat(257) })).toThrow(
       /exceeds 256 chars/,
     );
+  });
+});
+
+describe("getAgentRunStatus (#125 C4 sweep reader)", () => {
+  it("maps the v1 run status, 404 → NOT_FOUND, other non-2xx throws", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ run: { status: "CANCELLED" } }), {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(new Response("nope", { status: 404 }))
+      .mockResolvedValueOnce(new Response("boom", { status: 502 }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await getAgentRunStatus("r1", CONFIG)).toBe("CANCELLED");
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "https://tunnel.example.com/api/v1/stable/tenants/tenant-1/workflow-runs/r1",
+    );
+    expect(await getAgentRunStatus("r2", CONFIG)).toBe("NOT_FOUND");
+    await expect(getAgentRunStatus("r3", CONFIG)).rejects.toThrow(/502/);
+    vi.unstubAllGlobals();
   });
 });

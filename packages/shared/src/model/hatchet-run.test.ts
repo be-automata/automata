@@ -3,12 +3,23 @@ import { env } from "@terragon/env/pkg-shared";
 import { nanoid } from "nanoid";
 import { eq } from "drizzle-orm";
 import { createDb } from "../db";
-import { thread as threadTable } from "../db/schema";
+import {
+  thread as threadTable,
+  threadChat as threadChatTable,
+} from "../db/schema";
+import { markThreadsTerminal, reapableThreadStatuses } from "./threads";
 import { ThreadStatus } from "../db/types";
 import { createOrganization } from "./organizations";
-import { createTestUser, createTestThread } from "./test-helpers";
+import {
+  createTestUser,
+  createTestThread,
+  createTestRemoteRun,
+  createTestAutomation,
+} from "./test-helpers";
 import {
   markThreadsSuperseded,
+  markThreadTerminal,
+  findOrphanRemoteThreads,
   setThreadActiveRun,
   decideThreadGeneration,
   checkThreadGeneration,
@@ -18,7 +29,11 @@ import {
   recordHatchetRun,
   findSupersedableReviewRuns,
   markHatchetRunsSuperseded,
-  markHatchetRunSupersededByExternalId,
+  retireHatchetRun,
+  claimSweepLease,
+  findSweepCandidates,
+  hasNewerRun,
+  SWEEP_LEASE_MS,
   pruneHatchetRuns,
   HATCHET_RUN_PRUNE_AFTER_MS,
   SUPERSEDE_FRESHNESS_MS,
@@ -365,7 +380,7 @@ describe("#125 C1 generation fence (decideThreadGeneration / checkThreadGenerati
     ).toMatchObject({ ok: false, reason: "superseded" });
   });
 
-  it("markHatchetRunSupersededByExternalId flips exactly the matching row; unknown id is a no-op", async () => {
+  it("retireHatchetRun flips exactly the matching row (by externalId); unknown id is a no-op", async () => {
     const { threadId } = await createTestThread({
       db,
       userId,
@@ -379,17 +394,365 @@ describe("#125 C1 generation fence (decideThreadGeneration / checkThreadGenerati
       prNumber: 1,
       externalId: "ext-1",
     });
-    await markHatchetRunSupersededByExternalId({ db, externalId: "nope" });
+    await retireHatchetRun({
+      db,
+      key: { externalId: "nope" },
+      as: "superseded",
+    });
     let [row] = await db
       .select()
       .from(hatchetRunTable)
       .where(eq(hatchetRunTable.externalId, "ext-1"));
     expect(row!.status).toBe("in_flight");
-    await markHatchetRunSupersededByExternalId({ db, externalId: "ext-1" });
+    await retireHatchetRun({
+      db,
+      key: { externalId: "ext-1" },
+      as: "superseded",
+    });
     [row] = await db
       .select()
       .from(hatchetRunTable)
       .where(eq(hatchetRunTable.externalId, "ext-1"));
     expect(row!.status).toBe("superseded");
+  });
+});
+
+describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () => {
+  let userId: string;
+  let orgA: string;
+
+  beforeEach(async () => {
+    userId = (await createTestUser({ db })).user.id;
+    orgA = await makeOrg("acme");
+  });
+
+  const remoteRun = (prNumber: number, ageMs: number, externalId: string) =>
+    createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber,
+      externalId,
+      ageMs,
+    });
+
+  it("claimSweepLease is a compare-and-set: one winner, then free again after expiry", async () => {
+    const { runId } = await remoteRun(1, 0, "ext-lease");
+    const now = new Date();
+    const [a, b] = await Promise.all([
+      claimSweepLease({ db, id: runId, now }),
+      claimSweepLease({ db, id: runId, now }),
+    ]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+    // Still leased.
+    expect(await claimSweepLease({ db, id: runId, now })).toBe(false);
+    // Past expiry.
+    expect(
+      await claimSweepLease({
+        db,
+        id: runId,
+        now: new Date(now.getTime() + SWEEP_LEASE_MS + 1),
+      }),
+    ).toBe(true);
+  });
+
+  it("findSweepCandidates: only in_flight rows older than T with a non-terminal thread and no live lease", async () => {
+    await remoteRun(2, 11 * 60 * 1000, "ext-old");
+    await remoteRun(3, 2 * 60 * 1000, "ext-young");
+    const terminal = await remoteRun(4, 11 * 60 * 1000, "ext-terminal");
+    await markThreadTerminal({
+      db,
+      threadId: terminal.threadId,
+      cause: "superseded",
+    });
+    const leased = await remoteRun(5, 11 * 60 * 1000, "ext-leased");
+    await claimSweepLease({ db, id: leased.runId });
+
+    const ids = (
+      await findSweepCandidates({ db, olderThanMs: 10 * 60 * 1000 })
+    ).map((c) => c.externalId);
+    expect(ids).toContain("ext-old");
+    expect(ids).not.toContain("ext-young");
+    expect(ids).not.toContain("ext-terminal");
+    expect(ids).not.toContain("ext-leased");
+  });
+
+  it("hasNewerRun sees only later siblings of the same (org, repo, PR)", async () => {
+    const first = await remoteRun(6, 5 * 60 * 1000, "ext-first");
+    const [firstRow] = await db
+      .select()
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.id, first.runId));
+    expect(
+      await hasNewerRun({
+        db,
+        organizationId: orgA,
+        repoFullName: "ACME/Widgets",
+        prNumber: 6,
+        after: firstRow!.createdAt,
+        excludeExternalId: "ext-first",
+      }),
+    ).toBe(false);
+    await remoteRun(6, 0, "ext-second");
+    expect(
+      await hasNewerRun({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+        prNumber: 6,
+        after: firstRow!.createdAt,
+        excludeExternalId: "ext-first",
+      }),
+    ).toBe(true);
+    // Another PR / another org never counts.
+    const orgB = await makeOrg("globex");
+    expect(
+      await hasNewerRun({
+        db,
+        organizationId: orgB,
+        repoFullName: "acme/widgets",
+        prNumber: 6,
+        after: firstRow!.createdAt,
+      }),
+    ).toBe(false);
+  });
+
+  it("markThreadTerminal writes the typed cause exactly once", async () => {
+    const { threadId } = await remoteRun(7, 0, "ext-term");
+    expect(
+      await markThreadTerminal({ db, threadId, cause: "user-cancelled" }),
+    ).toBe(true);
+    expect(
+      await markThreadTerminal({ db, threadId, cause: "superseded" }),
+    ).toBe(false);
+    const [row] = await db.query.thread.findMany({
+      where: (t, { eq: e }) => e(t.id, threadId),
+    });
+    expect(row!.status).toBe("complete");
+    expect(row!.terminalCause).toBe("user-cancelled");
+    // The legacy errorMessage sentinel is written ONLY for `superseded`.
+    expect(row!.errorMessage).toBeNull();
+  });
+
+  it("findSweepCandidates sees a CHAT-MODE thread (status on threadChat, thread row at its creation value) — and drops it once its chat row is terminal", async () => {
+    const chatMode = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 77,
+      externalId: "ext-chat-mode",
+      ageMs: 20 * 60 * 1000,
+      enableThreadChatCreation: true,
+    });
+    const [row] = await db
+      .select({ status: threadTable.status })
+      .from(threadTable)
+      .where(eq(threadTable.id, chatMode.threadId));
+    expect(reapableThreadStatuses).not.toContain(row!.status); // thread row is NOT live
+    let ids = (
+      await findSweepCandidates({ db, olderThanMs: 10 * 60 * 1000 })
+    ).map((c) => c.threadId);
+    expect(ids).toContain(chatMode.threadId);
+    // Its chat row reaches a terminal → no longer a candidate.
+    await db
+      .update(threadChatTable)
+      .set({ status: "complete" })
+      .where(eq(threadChatTable.id, chatMode.threadChatId));
+    ids = (await findSweepCandidates({ db, olderThanMs: 10 * 60 * 1000 })).map(
+      (c) => c.threadId,
+    );
+    expect(ids).not.toContain(chatMode.threadId);
+  });
+
+  it("markThreadsTerminal stamps terminalCause on the THREAD row of a chat-mode thread whose live status is on threadChat (exactly once)", async () => {
+    const chatMode = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 78,
+      externalId: "ext-chat-cause",
+      enableThreadChatCreation: true,
+    });
+    expect(
+      await markThreadsTerminal({
+        db,
+        threadIds: [chatMode.threadId],
+        cause: "superseded",
+      }),
+    ).toEqual([chatMode.threadId]);
+    const row = async () =>
+      (
+        await db
+          .select({
+            status: threadTable.status,
+            terminalCause: threadTable.terminalCause,
+          })
+          .from(threadTable)
+          .where(eq(threadTable.id, chatMode.threadId))
+      )[0]!;
+    const chat = async () =>
+      (
+        await db
+          .select({
+            status: threadChatTable.status,
+            errorMessage: threadChatTable.errorMessage,
+          })
+          .from(threadChatTable)
+          .where(eq(threadChatTable.id, chatMode.threadChatId))
+      )[0]!;
+    expect(await chat()).toEqual({
+      status: "complete",
+      errorMessage: "superseded",
+    });
+    const first = await row();
+    expect(first.terminalCause).toBe("superseded");
+    expect(reapableThreadStatuses).not.toContain(first.status); // thread row untouched otherwise
+    // A retry moves nothing and rewrites nothing.
+    expect(
+      await markThreadsTerminal({
+        db,
+        threadIds: [chatMode.threadId],
+        cause: "timeout",
+      }),
+    ).toEqual([]);
+    expect((await row()).terminalCause).toBe("superseded");
+  });
+
+  it("findOrphanRemoteThreads with remoteProviderOnly=false (HATCHET_ENABLED deployments) matches a review thread whose provider column is the local default", async () => {
+    const reviewAutomation = await createTestAutomation({
+      db,
+      userId,
+      values: {
+        organizationId: orgA,
+        triggerType: "pull_request",
+        repoFullName: "acme/widgets",
+        triggerConfig: { on: { open: true, update: true }, filter: {} },
+      },
+    });
+    const t = await createTestThread({
+      db,
+      userId,
+      overrides: {
+        organizationId: orgA,
+        sandboxProvider: "docker", // what production stamps under HATCHET_ENABLED
+        githubRepoFullName: "acme/widgets",
+        githubPRNumber: 13,
+        automationId: reviewAutomation.id,
+      },
+    });
+    await db
+      .update(threadTable)
+      .set({
+        status: "booting",
+        createdAt: new Date(Date.now() - 20 * 60 * 1000),
+      })
+      .where(eq(threadTable.id, t.threadId));
+    const strict = (
+      await findOrphanRemoteThreads({ db, olderThanMs: 15 * 60 * 1000 })
+    ).map((x) => x.id);
+    expect(strict).not.toContain(t.threadId);
+    const all = (
+      await findOrphanRemoteThreads({
+        db,
+        olderThanMs: 15 * 60 * 1000,
+        remoteProviderOnly: false,
+      })
+    ).map((x) => x.id);
+    expect(all).toContain(t.threadId);
+  });
+
+  it("findOrphanRemoteThreads sees a CHAT-MODE review thread whose chat row is stuck in booting", async () => {
+    const reviewAutomation = await createTestAutomation({
+      db,
+      userId,
+      values: {
+        organizationId: orgA,
+        triggerType: "pull_request",
+        repoFullName: "acme/widgets",
+        triggerConfig: { on: { open: true, update: true }, filter: {} },
+      },
+    });
+    const t = await createTestThread({
+      db,
+      userId,
+      overrides: {
+        organizationId: orgA,
+        sandboxProvider: "hatchet-remote",
+        githubRepoFullName: "acme/widgets",
+        githubPRNumber: 12,
+        automationId: reviewAutomation.id,
+      },
+      chatOverrides: { status: "booting" },
+      enableThreadChatCreation: true,
+    });
+    await db
+      .update(threadTable)
+      .set({ createdAt: new Date(Date.now() - 20 * 60 * 1000) })
+      .where(eq(threadTable.id, t.threadId));
+    const ids = (
+      await findOrphanRemoteThreads({ db, olderThanMs: 15 * 60 * 1000 })
+    ).map((x) => x.id);
+    expect(ids).toContain(t.threadId);
+  });
+
+  it("findOrphanRemoteThreads: ONLY a review thread (org + PR + pull_request automation) still in `booting`, run-less, older than N", async () => {
+    const reviewAutomation = await createTestAutomation({
+      db,
+      userId,
+      values: {
+        organizationId: orgA,
+        triggerType: "pull_request",
+        repoFullName: "acme/widgets",
+        triggerConfig: { on: { open: true, update: true }, filter: {} },
+      },
+    });
+    const mentionAutomation = await createTestAutomation({
+      db,
+      userId,
+      values: {
+        organizationId: orgA,
+        triggerType: "github_mention",
+        repoFullName: "acme/widgets",
+        triggerConfig: {},
+      },
+    });
+    const old = new Date(Date.now() - 20 * 60 * 1000);
+    const mk = async (over: Record<string, unknown>, status: ThreadStatus) => {
+      const t = await createTestThread({
+        db,
+        userId,
+        overrides: {
+          organizationId: orgA,
+          sandboxProvider: "hatchet-remote",
+          githubRepoFullName: "acme/widgets",
+          ...over,
+        },
+      });
+      await db
+        .update(threadTable)
+        .set({ status, createdAt: old })
+        .where(eq(threadTable.id, t.threadId));
+      return t.threadId;
+    };
+    const orphan = await mk(
+      { githubPRNumber: 9, automationId: reviewAutomation.id },
+      "booting",
+    );
+    const mention = await mk({ automationId: mentionAutomation.id }, "booting");
+    const progressed = await mk(
+      { githubPRNumber: 10, automationId: reviewAutomation.id },
+      "working",
+    );
+    const tracked = await remoteRun(8, 20 * 60 * 1000, "ext-tracked");
+    const noAutomation = await mk({ githubPRNumber: 11 }, "booting");
+
+    const ids = (
+      await findOrphanRemoteThreads({ db, olderThanMs: 15 * 60 * 1000 })
+    ).map((t) => t.id);
+    expect(ids).toContain(orphan);
+    expect(ids).not.toContain(mention);
+    expect(ids).not.toContain(progressed);
+    expect(ids).not.toContain(tracked.threadId);
+    expect(ids).not.toContain(noAutomation);
   });
 });

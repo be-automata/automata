@@ -1,74 +1,47 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { getDaemonTokenContext } from "@/lib/auth-server";
+import { parseDaemonRequest } from "@/lib/daemon-route";
 import {
   checkThreadGeneration,
-  markThreadsSuperseded,
+  markThreadTerminal,
 } from "@terragon/shared/model/threads";
-import { markHatchetRunSupersededByExternalId } from "@terragon/shared/model/hatchet-run";
+import {
+  retireHatchetRun,
+  getHatchetRunByExternalId,
+} from "@terragon/shared/model/hatchet-run";
+import { TERMINAL_CAUSES } from "@terragon/shared/model/terminal-cause";
 
 /**
  * POST /api/daemon/run-terminal
  *   body: { threadId, threadChatId, runExternalId, cause, detail? }
  *
- * The worker's EXPLICIT terminal for a run the engine cancelled under a native
- * supersede policy (#125 C1) — the sibling of the `custom-error` terminal in
- * /api/daemon-event. Same X-Daemon-Token custody + F1/F2 binding as the other
- * daemon endpoints.
+ * The worker's EXPLICIT typed terminal (#125 C1/C4) — `superseded` when the
+ * engine cancelled it under a native policy, `stale-skipped` when the queue
+ * mode's self-check found a newer run already queued, and the rest of the
+ * taxonomy as the worker learns to name them — the sibling of the
+ * `custom-error` terminal in /api/daemon-event.
  *
  * GENERATION FENCE: the write is accepted ONLY if `runExternalId` equals the
  * thread's active run (stamped at dispatch by C2). Any other generation gets
  * 409 — a cancelled run that raced a newer dispatch can never rewrite the
  * newer run's thread. A NULL stamp (legacy dispatch) fails OPEN.
  *
- * IDEMPOTENT: the transition targets only reapable (non-terminal) statuses
- * (`markThreadsSuperseded`), so a retry after success is a no-op
- * (`applied: false`), never a duplicate terminal.
+ * IDEMPOTENT: the transition targets only reapable (non-terminal) statuses,
+ * so a retry after success is a no-op (`applied: false`), never a duplicate.
  */
-
-/** Terminal causes this endpoint accepts (C4/#129 widens the taxonomy). */
-const RUN_TERMINAL_CAUSES = ["superseded"] as const;
-
 const bodySchema = z.object({
   threadId: z.string().min(1),
   threadChatId: z.string().min(1),
   runExternalId: z.string().min(1).max(256),
-  cause: z.enum(RUN_TERMINAL_CAUSES),
+  cause: z.enum(TERMINAL_CAUSES),
   detail: z.object({ policy: z.string().max(64).optional() }).optional(),
 });
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const ctx = await getDaemonTokenContext(request);
-  if (!ctx) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  if (ctx.tokenType !== "daemon") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
-  }
-  const parsed = bodySchema.safeParse(raw);
-  if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Invalid body", details: parsed.error.issues },
-      { status: 400 },
-    );
-  }
-  const { threadId, threadChatId, runExternalId, cause, detail } = parsed.data;
-
-  // F2: the token is bound to one threadChat (+ threadId anchor).
-  if (ctx.threadChatId !== null && ctx.threadChatId !== threadChatId) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-  if (ctx.threadId !== null && ctx.threadId !== threadId) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const r = await parseDaemonRequest(request, bodySchema);
+  if (r instanceof NextResponse) return r;
+  const { threadId, runExternalId, cause, detail } = r.body;
 
   const generation = await checkThreadGeneration({
     db,
@@ -105,11 +78,35 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // `cause` is an enum of one; both bookkeeping writes are idempotent.
-  const [applied] = await Promise.all([
-    markThreadsSuperseded({ db, threadIds: [threadId] }).then((n) => n > 0),
-    markHatchetRunSupersededByExternalId({ db, externalId: runExternalId }),
-  ]);
+  // OWNERSHIP: the run row named by the caller-supplied runExternalId must
+  // belong to the authenticated thread — a daemon token for thread A must
+  // never retire thread B's run. A run with no row (legacy dispatch) only
+  // gets the thread terminal.
+  const runRow = await getHatchetRunByExternalId({
+    db,
+    externalId: runExternalId,
+  });
+  if (runRow && runRow.threadId !== threadId) {
+    console.warn("[run-terminal] run/thread mismatch", {
+      threadId,
+      runExternalId,
+      runThreadId: runRow.threadId,
+    });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // ORDER MATTERS (no transaction spans the two tables): the thread terminal
+  // lands first; the run row leaves the supersede-candidate set only once it
+  // has, so a failed thread write leaves the row in_flight for the sweep.
+  // Both writes are idempotent (reapable-status guard; status column).
+  const applied = await markThreadTerminal({ db, threadId, cause });
+  if (runRow) {
+    await retireHatchetRun({
+      db,
+      key: { externalId: runExternalId },
+      as: cause === "superseded" ? "superseded" : "terminal",
+    });
+  }
   console.log("[run-terminal] terminal write", {
     threadId,
     runExternalId,

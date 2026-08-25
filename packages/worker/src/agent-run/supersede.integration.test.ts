@@ -19,6 +19,10 @@ import {
   connectPg,
   pollUntil,
 } from "./hatchet-it-harness";
+import { withBoxSlot } from "./box-slot";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 /**
  * #125 C3 (#128): the supersede-policy E2E suite against a REAL, ISOLATED
@@ -40,7 +44,8 @@ const Status = APIContracts.V1TaskStatus;
 type Status = APIContracts.V1TaskStatus;
 const TERMINAL: Status[] = [Status.COMPLETED, Status.CANCELLED, Status.FAILED];
 
-type StubInput = { label: string; sleepMs: number };
+/** `boxSlot: true` runs the stub under the worker-side box slot (box-slot.ts). */
+type StubInput = { label: string; sleepMs: number; boxSlot?: boolean };
 
 /** What the stub fn saw for one execution (keyed by the input label). */
 type Execution = {
@@ -67,27 +72,42 @@ describe.skipIf(!itEnabled)(
     let workflows: WorkflowDeclaration<StubInput, {}>[];
     const executions = new Map<string, Execution>();
 
+    let boxSlotDir = "";
+
     /** The stub run fn: sleeps `input.sleepMs` in 100ms ticks, honouring cancel. */
     async function stubRun(
       input: StubInput,
-      ctx: { cancelled: boolean },
+      ctx: { cancelled: boolean; abortController?: AbortController },
     ): Promise<{ label: string }> {
-      const ex: Execution = {
-        label: input.label,
-        startedAt: Date.now(),
-        cancelled: false,
-      };
-      executions.set(input.label, ex);
-      const until = Date.now() + input.sleepMs;
-      while (Date.now() < until) {
-        if (ctx.cancelled) {
-          ex.cancelled = true;
-          break;
+      const body = async () => {
+        const ex: Execution = {
+          label: input.label,
+          startedAt: Date.now(),
+          cancelled: false,
+        };
+        executions.set(input.label, ex);
+        const until = Date.now() + input.sleepMs;
+        while (Date.now() < until) {
+          if (ctx.cancelled) {
+            ex.cancelled = true;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 100));
         }
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      ex.endedAt = Date.now();
-      return { label: input.label };
+        ex.endedAt = Date.now();
+        return { label: input.label };
+      };
+      return input.boxSlot
+        ? withBoxSlot(
+            {
+              dir: boxSlotDir,
+              holder: input.label,
+              signal: ctx.abortController?.signal,
+              pollMs: 25,
+            },
+            body,
+          )
+        : body();
     }
 
     const uid = (p: string) =>
@@ -106,6 +126,7 @@ describe.skipIf(!itEnabled)(
         prKey: string;
         orgId?: string;
         deliveryId?: string;
+        boxSlot?: boolean;
       },
     ): Promise<{
       id: string;
@@ -184,6 +205,7 @@ describe.skipIf(!itEnabled)(
       );
 
     beforeAll(async () => {
+      boxSlotDir = await mkdtemp(path.join(tmpdir(), "it-box-slot-"));
       await composeUp();
       pg = await connectPg();
       ({ tenantId, token } = await bootstrapTenant(pg));
@@ -399,6 +421,124 @@ describe.skipIf(!itEnabled)(
       });
       expect(await waitTerminal(a.id)).toBe(Status.COMPLETED);
       expect(await waitTerminal(b.id)).toBe(Status.COMPLETED);
+    });
+
+    it("CHARACTERIZATION (hatchet-lite v0.94.10): concurrency groups are scoped PER WORKFLOW — the global memory-budget key does NOT cap across variants", async () => {
+      const blocker = await dispatch("agent-run-newest", {
+        label: "xv-blocker",
+        sleepMs: 2500,
+        prKey: uid("org-z/repo/8"),
+        orgId: "org-z",
+      });
+      await waitStatus(blocker.id, [Status.RUNNING]);
+      const other = await dispatch("agent-run-strict", {
+        label: "xv-strict",
+        sleepMs: 300,
+        prKey: uid("org-a/repo/50"),
+      });
+      await waitTerminal(other.id);
+      await waitTerminal(blocker.id);
+      const b = executions.get(blocker.label)!;
+      const o = executions.get(other.label)!;
+      // CONTRACT: the strict run started WHILE the newest run was live. This
+      // is why the worker enforces the box slot itself (next case; box-slot.ts).
+      // See docs/uat/hatchet-lite-v0.94.10-observed.md §5.
+      expect(o.startedAt).toBeLessThan(b.endedAt!);
+    });
+
+    it("worker box slot (box-slot.ts): runs on DIFFERENT variants never overlap on one box", async () => {
+      const blocker = await dispatch("agent-run-newest", {
+        label: "bs-blocker",
+        sleepMs: 2500,
+        prKey: uid("org-z/repo/9"),
+        orgId: "org-z",
+        boxSlot: true,
+      });
+      await waitStatus(blocker.id, [Status.RUNNING]);
+      const other = await dispatch("agent-run-strict", {
+        label: "bs-strict",
+        sleepMs: 300,
+        prKey: uid("org-a/repo/51"),
+        boxSlot: true,
+      });
+      await waitTerminal(other.id);
+      await waitTerminal(blocker.id);
+      const b = executions.get(blocker.label)!;
+      const o = executions.get(other.label)!;
+      expect(o.startedAt).toBeGreaterThanOrEqual(b.endedAt!);
+    });
+
+    it("ROLLBACK DRILL (docs/runbooks/supersede-rollback.md step 2): pending native runs are bulk-cancelled — QUEUED first, then RUNNING — and nothing is left live", async () => {
+      // Every run holds the worker box slot (production shape): one body
+      // executes at a time on the box no matter what the engine admits (§5).
+      const blocker = await dispatch("agent-run-strict", {
+        label: "drill-blocker",
+        sleepMs: 4000,
+        prKey: uid("org-z/repo/9"),
+        orgId: "org-z",
+        boxSlot: true,
+      });
+      await waitStarted(blocker.label);
+      const pending: Awaited<ReturnType<typeof dispatch>>[] = [];
+      for (let i = 0; i < 3; i++) {
+        pending.push(
+          await dispatch("agent-run-strict", {
+            label: `drill-p${i}`,
+            sleepMs: 200,
+            prKey: uid(`org-a/repo/${40 + i}`),
+            boxSlot: true,
+          }),
+        );
+      }
+      const listIds = async (statuses: Status[]) =>
+        ((await hatchet.runs.list({ statuses })).rows ?? []).map(
+          (r) => r.metadata.id,
+        );
+      // The OLAP list can lag a just-triggered run: wait until every pending
+      // run is listed as QUEUED or RUNNING (engine-admitted but blocked on the
+      // box slot) before draining.
+      await pollUntil(
+        "all pending runs listed",
+        () => listIds([Status.QUEUED, Status.RUNNING]),
+        (ids) => pending.every((r) => ids.includes(r.id)),
+      );
+      const cancel = async (ids: string[]) => {
+        if (ids.length === 0) return;
+        const res = await fetch(
+          `${REST}/api/v1/stable/tenants/${tenantId}/tasks/cancel`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ externalIds: ids }),
+          },
+        );
+        expect(res.ok).toBe(true);
+      };
+      // The runbook's order: QUEUED first (a cancelled running run frees its
+      // slot at once and a still-queued run could otherwise start), then RUNNING.
+      await cancel(await listIds([Status.QUEUED]));
+      await cancel(await listIds([Status.RUNNING]));
+      for (const r of pending) {
+        expect(await waitTerminal(r.id)).toBe(Status.CANCELLED);
+      }
+      await waitTerminal(blocker.id);
+      // No drained run COMPLETES. A cancel is delivered asynchronously, so a
+      // run admitted in the very instant the blocker's cancel freed the box
+      // slot can start its body — and is then cancelled on its first tick
+      // (observed; see the runbook). Never a full execution.
+      for (const r of pending) {
+        const ex = executions.get(r.label);
+        expect(ex === undefined || ex.cancelled).toBe(true);
+      }
+      const remaining = await pollUntil(
+        "zero live runs after the drain",
+        () => listIds([Status.QUEUED, Status.RUNNING]),
+        (ids) => ids.length === 0,
+      );
+      expect(remaining).toEqual([]);
     });
 
     it("anti-rot (#69 regression guard): 50 sequential ephemeral per-PR groups — no scheduling degradation, zero residual QUEUED/RUNNING", async () => {

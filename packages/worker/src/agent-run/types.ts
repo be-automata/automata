@@ -96,11 +96,64 @@ export type AgentRunInput = {
   recheckOnComplete?: boolean;
 };
 
+/**
+ * Typed terminal causes (#125 C4). Structural mirror of the control plane's
+ * `TERMINAL_CAUSES` (packages/shared/src/model/terminal-cause.ts) — never
+ * imported across the plane boundary. The type derives from the tuple so the
+ * two cannot drift within this plane; `describeTerminalCause` is the
+ * exhaustive switch that fails compilation when the mirror drifts from www.
+ */
+export const TERMINAL_CAUSES = [
+  "superseded",
+  "discarded",
+  "stale-skipped",
+  "user-cancelled",
+  "timeout",
+  "daemon-failed",
+  "publish-failed",
+  "plane-offline",
+] as const;
+export type TerminalCause = (typeof TERMINAL_CAUSES)[number];
+
+function assertNever(value: never): never {
+  throw new Error(`unexpected value ${String(value)}`);
+}
+
+/** One log line per cause — the worker-side exhaustive switch over the union. */
+export function describeTerminalCause(cause: TerminalCause): string {
+  switch (cause) {
+    case "superseded":
+      return "cancelled by a newer run (policy)";
+    case "discarded":
+      return "dropped while an older run was live (policy)";
+    case "stale-skipped":
+      return "skipped: a newer run was already queued";
+    case "user-cancelled":
+      return "cancelled by a user";
+    case "timeout":
+      return "schedule/execution timeout";
+    case "daemon-failed":
+      return "daemon failed before a verdict";
+    case "publish-failed":
+      return "verdict could not be published";
+    case "plane-offline":
+      return "never became visible on the execution plane";
+    default:
+      return assertNever(cause);
+  }
+}
+
 export type AgentRunOutput = {
   threadId: string;
   threadChatId: string;
   /** How the run reached a terminal state. */
-  outcome: "completed" | "nothing-to-run" | "cancelled";
+  outcome:
+    | "completed"
+    | "nothing-to-run"
+    | "cancelled"
+    | "stale-skipped"
+    /** www put the thread in `stopping` (user Stop): daemon torn down, `user-cancelled` posted. */
+    | "stopped";
   /** Final thread status observed from www, when known. */
   finalStatus?: string;
 };
