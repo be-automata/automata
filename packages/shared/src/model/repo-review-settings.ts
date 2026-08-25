@@ -314,10 +314,6 @@ export async function setRepoReviewSetting({
 }
 
 /**
- * Remove the override for one `(org, repo)` (repo reverts to env/default). No-op
- * when absent. Returns true when a row was actually deleted.
- */
-/**
  * "Reset to default" for the TOLERANCE family (block tolerance + draft-PR
  * review) of one repo. The row is shared with the other per-repo families
  * (#66 egress, #125 supersede policy): when any of those still carries an

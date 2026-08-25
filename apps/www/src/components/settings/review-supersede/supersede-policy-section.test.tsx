@@ -5,6 +5,7 @@ import {
   SupersedePolicySectionView,
   type SupersedeSectionActions,
   type SupersedeSectionState,
+  availableRepoNames,
 } from "./supersede-policy-section";
 
 // The app compiles JSX with the automatic runtime; vitest here uses the
@@ -150,5 +151,18 @@ describe("SupersedePolicySectionView", () => {
     expect(html).toContain(">Reload<");
     expect(html).toContain('role="radiogroup"');
     expect(html).toContain("disabled");
+  });
+});
+
+describe("availableRepoNames — Add-override picker excludes repos that already have an override", () => {
+  it("matches case-insensitively: GitHub's cased slug vs the model's lowercased key", () => {
+    const settings = [
+      { repoFullName: "acme/widgets", supersedePolicy: "newest-wins" },
+      // tolerance-only row: no supersede override → still offerable
+      { repoFullName: "acme/api", supersedePolicy: null },
+    ];
+    expect(
+      availableRepoNames(["Acme/Widgets", "acme/api", "Beta/Tool"], settings),
+    ).toEqual(["Beta/Tool", "acme/api"]);
   });
 });

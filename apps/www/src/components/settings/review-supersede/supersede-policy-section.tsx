@@ -318,6 +318,25 @@ function AddOverrideRow({
   );
 }
 
+/**
+ * Repos the "Add override" picker may offer: every repo the caller can see
+ * minus those that already carry a supersede override. GitHub reports cased
+ * slugs ("Acme/Widgets"); the model stores and matches them lowercased
+ * (repo-review-settings.ts), so the comparison runs on the normalized key —
+ * strict equality would keep offering a cased repo that already has a row.
+ */
+export function availableRepoNames(
+  repoFullNames: readonly string[],
+  settings: readonly { repoFullName: string; supersedePolicy: unknown }[],
+): string[] {
+  const taken = new Set(
+    settings
+      .filter((s) => s.supersedePolicy !== null)
+      .map((s) => s.repoFullName.toLowerCase()),
+  );
+  return repoFullNames.filter((name) => !taken.has(name.toLowerCase())).sort();
+}
+
 /** Thin container: binds the queries/mutations to the pure view. */
 export function SupersedePolicySection() {
   const defaultQuery = useSupersedeDefaultQuery();
@@ -402,15 +421,10 @@ export function SupersedePolicySection() {
           overrides: (listQuery.data ?? []).filter(
             (s) => s.supersedePolicy !== null,
           ),
-          availableRepos: (reposQuery.data?.repos ?? [])
-            .map((r) => r.full_name)
-            .filter(
-              (name) =>
-                !(listQuery.data ?? []).some(
-                  (s) => s.repoFullName === name && s.supersedePolicy !== null,
-                ),
-            )
-            .sort(),
+          availableRepos: availableRepoNames(
+            (reposQuery.data?.repos ?? []).map((r) => r.full_name),
+            listQuery.data ?? [],
+          ),
         };
 
   return (
