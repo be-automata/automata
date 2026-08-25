@@ -159,7 +159,7 @@ describe("repo-review-settings (Neon, org-fenced)", () => {
         organizationId: orgA,
         repoFullName: "acme/widgets",
       }),
-    ).toBe(false);
+    ).toEqual({ removed: false, conflict: false });
   });
 
   it("defaults: a tolerance-only insert leaves reviewDraftPrs TRUE", async () => {
