@@ -76,6 +76,26 @@ const DEFAULT_LIMIT = 100;
  * Rot: an ACTIVE strategy whose parent pointer leads outside its own live chain
  * — missing, inactive, or belonging to a different step (§3.1.2, §2.3).
  */
+/**
+ * `v1_task_runtime.evicted_at` exists on some hatchet-lite v0.94.x databases
+ * and not on others (a fresh CI engine at the pinned tag lacks it; a
+ * longer-lived one migrated it in). The reclaim query must not depend on a
+ * column the engine may not have — resolve it once per process.
+ */
+let evictedAtSupported: boolean | null = null;
+async function evictedAtPredicate(db: PgLike): Promise<string> {
+  if (evictedAtSupported === null) {
+    const r = await db.query<{ ok: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'v1_task_runtime' AND column_name = 'evicted_at'
+       ) AS ok`,
+    );
+    evictedAtSupported = r.rows[0]?.ok === true;
+  }
+  return evictedAtSupported ? "AND r.evicted_at IS NULL" : "";
+}
+
 export async function detectStepConcurrencyRot(
   db: PgLike,
   opts: { tenantId: string; limit?: number },
@@ -377,6 +397,7 @@ export async function findReclaimableSlots(
   },
 ): Promise<ReclaimCandidateRow[]> {
   const limit = opts.limit ?? DEFAULT_LIMIT;
+  const evictedPredicate = await evictedAtPredicate(db);
   const result = await db.query<{
     task_id: string;
     task_inserted_at: string;
@@ -402,7 +423,7 @@ export async function findReclaimableSlots(
                 ON r.task_id          = s.task_id
                AND r.task_inserted_at = s.task_inserted_at
                AND r.retry_count      = s.task_retry_count
-               AND r.evicted_at IS NULL
+               ${evictedPredicate}
         WHERE s.tenant_id = $1::uuid
           AND s.is_filled
           AND (
@@ -465,6 +486,7 @@ export async function reclaimEngineSlots(
     return { touched: 0, rows };
   }
   const limit = opts.limit ?? DEFAULT_LIMIT;
+  const evictedPredicate = await evictedAtPredicate(db);
   const result = await db.query<{
     task_id: string;
     task_inserted_at: string;
@@ -490,7 +512,7 @@ export async function reclaimEngineSlots(
                 ON r.task_id          = s.task_id
                AND r.task_inserted_at = s.task_inserted_at
                AND r.retry_count      = s.task_retry_count
-               AND r.evicted_at IS NULL
+               ${evictedPredicate}
         WHERE s.tenant_id = $1::uuid
           AND s.is_filled
           AND (
