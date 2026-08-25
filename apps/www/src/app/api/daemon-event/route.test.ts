@@ -3,20 +3,12 @@ import { POST } from "./route";
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import { handleDaemonEvent } from "@/server-lib/handle-daemon-event";
 import { DaemonTokenContext } from "@/lib/daemon-token-context";
-import { getThreadGeneration } from "@terragon/shared/model/threads";
 
 vi.mock("@/lib/auth-server", () => ({
   getDaemonTokenContext: vi.fn(),
 }));
 vi.mock("@/server-lib/handle-daemon-event", () => ({
   handleDaemonEvent: vi.fn().mockResolvedValue({ success: true }),
-}));
-vi.mock("@terragon/shared/model/threads", () => ({
-  // Default: no stamp, not superseded → the fence fails open for the
-  // pre-existing cases.
-  getThreadGeneration: vi
-    .fn()
-    .mockResolvedValue({ activeRunExternalId: null, superseded: false }),
 }));
 
 const THREAD_CHAT_ID = "tc_1";
@@ -94,63 +86,43 @@ describe("POST /api/daemon-event — F1/F2 token binding", () => {
   });
 });
 
-describe("POST /api/daemon-event — #125 C1 generation fence", () => {
-  function reqWith(extra: Record<string, unknown>) {
-    return new Request("http://localhost/api/daemon-event", {
-      method: "POST",
-      body: JSON.stringify({
-        messages: [],
-        threadId: "thr_1",
-        threadChatId: THREAD_CHAT_ID,
-        ...extra,
-      }),
-      headers: { "X-Daemon-Token": "tok", "content-type": "application/json" },
-    });
-  }
-
+describe("POST /api/daemon-event — #125 C1 generation header", () => {
   beforeEach(() => {
     vi.mocked(getDaemonTokenContext).mockResolvedValue(ctx());
-    vi.mocked(getThreadGeneration).mockReset();
     vi.mocked(handleDaemonEvent).mockClear();
   });
 
-  it("409 once the thread is terminal-superseded — a stale verdict never lands", async () => {
-    vi.mocked(getThreadGeneration).mockResolvedValue({
-      activeRunExternalId: "run-new",
-      superseded: true,
+  it("forwards x-run-external-id to the handler (null when absent)", async () => {
+    await POST(req(THREAD_CHAT_ID));
+    expect(vi.mocked(handleDaemonEvent).mock.calls[0]![0]).toMatchObject({
+      runExternalId: null,
     });
-    const res = await POST(reqWith({}));
-    expect(res.status).toBe(409);
-    expect(handleDaemonEvent).not.toHaveBeenCalled();
+    await POST(
+      new Request("http://localhost/api/daemon-event", {
+        method: "POST",
+        body: JSON.stringify({
+          messages: [],
+          threadId: "thr_1",
+          threadChatId: THREAD_CHAT_ID,
+        }),
+        headers: {
+          "X-Daemon-Token": "tok",
+          "content-type": "application/json",
+          "x-run-external-id": "run-7",
+        },
+      }),
+    );
+    expect(vi.mocked(handleDaemonEvent).mock.calls[1]![0]).toMatchObject({
+      runExternalId: "run-7",
+    });
   });
 
-  it("409 when the write names an older generation than the active run", async () => {
-    vi.mocked(getThreadGeneration).mockResolvedValue({
-      activeRunExternalId: "run-new",
-      superseded: false,
+  it("maps the handler's 409 to the response", async () => {
+    vi.mocked(handleDaemonEvent).mockResolvedValueOnce({
+      success: false,
+      error: "superseded",
+      status: 409,
     });
-    const res = await POST(reqWith({ runExternalId: "run-old" }));
-    expect(res.status).toBe(409);
-    expect(handleDaemonEvent).not.toHaveBeenCalled();
-  });
-
-  it("accepts the active generation, and fails OPEN with no stamp", async () => {
-    vi.mocked(getThreadGeneration).mockResolvedValue({
-      activeRunExternalId: "run-new",
-      superseded: false,
-    });
-    expect((await POST(reqWith({ runExternalId: "run-new" }))).status).toBe(
-      200,
-    );
-    vi.mocked(getThreadGeneration).mockResolvedValue({
-      activeRunExternalId: null,
-      superseded: false,
-    });
-    expect((await POST(reqWith({ runExternalId: "whatever" }))).status).toBe(
-      200,
-    );
-    // Daemon-originated events carry no runExternalId: only the superseded
-    // flag can refuse them.
-    expect((await POST(reqWith({}))).status).toBe(200);
+    expect((await POST(req(THREAD_CHAT_ID))).status).toBe(409);
   });
 });

@@ -7,11 +7,18 @@ import { thread as threadTable } from "../db/schema";
 import { ThreadStatus } from "../db/types";
 import { createOrganization } from "./organizations";
 import { createTestUser, createTestThread } from "./test-helpers";
-import { markThreadsSuperseded } from "./threads";
+import {
+  markThreadsSuperseded,
+  setThreadActiveRun,
+  decideThreadGeneration,
+  checkThreadGeneration,
+  THREAD_SUPERSEDED_ERROR,
+} from "./threads";
 import {
   recordHatchetRun,
   findSupersedableReviewRuns,
   markHatchetRunsSuperseded,
+  markHatchetRunSupersededByExternalId,
   pruneHatchetRuns,
   HATCHET_RUN_PRUNE_AFTER_MS,
   SUPERSEDE_FRESHNESS_MS,
@@ -272,5 +279,117 @@ describe("markThreadsSuperseded", () => {
       where: (thread, { eq }) => eq(thread.id, threadId),
     });
     expect(row!.errorMessage).toBeNull();
+  });
+});
+
+describe("#125 C1 generation fence (decideThreadGeneration / checkThreadGeneration)", () => {
+  let userId: string;
+  let orgA: string;
+
+  beforeEach(async () => {
+    userId = (await createTestUser({ db })).user.id;
+    orgA = await makeOrg("acme");
+  });
+
+  it("pure decision: superseded wins, then stale generation, else ok (NULL stamp / no id fail OPEN)", () => {
+    const live = { activeRunExternalId: "run-new", status: "working" as const };
+    expect(
+      decideThreadGeneration({
+        thread: { ...live, errorMessage: null },
+        runExternalId: "run-new",
+      }),
+    ).toEqual({ ok: true });
+    expect(
+      decideThreadGeneration({
+        thread: { ...live, errorMessage: null },
+        runExternalId: "run-old",
+      }),
+    ).toEqual({
+      ok: false,
+      reason: "stale-generation",
+      activeRunExternalId: "run-new",
+    });
+    expect(
+      decideThreadGeneration({
+        thread: { ...live, errorMessage: null },
+        runExternalId: null,
+      }),
+    ).toEqual({ ok: true });
+    expect(
+      decideThreadGeneration({
+        thread: {
+          activeRunExternalId: null,
+          status: "working",
+          errorMessage: null,
+        },
+        runExternalId: "anything",
+      }),
+    ).toEqual({ ok: true });
+    expect(
+      decideThreadGeneration({
+        thread: {
+          activeRunExternalId: "run-new",
+          status: "complete",
+          errorMessage: THREAD_SUPERSEDED_ERROR,
+        },
+        runExternalId: "run-new",
+      }),
+    ).toEqual({
+      ok: false,
+      reason: "superseded",
+      activeRunExternalId: "run-new",
+    });
+  });
+
+  it("reads the row: not-found, then the same decision; the writer constant is what it reads back", async () => {
+    expect(
+      await checkThreadGeneration({
+        db,
+        threadId: "00000000-0000-0000-0000-000000000000",
+        runExternalId: "r",
+      }),
+    ).toEqual({ ok: false, reason: "not-found", activeRunExternalId: null });
+    const { threadId } = await createTestThread({
+      db,
+      userId,
+      overrides: { organizationId: orgA },
+    });
+    await setThreadStatus(threadId, "working");
+    await setThreadActiveRun({ db, threadId, externalId: "run-new" });
+    expect(
+      await checkThreadGeneration({ db, threadId, runExternalId: "run-old" }),
+    ).toMatchObject({ ok: false, reason: "stale-generation" });
+    await markThreadsSuperseded({ db, threadIds: [threadId] });
+    expect(
+      await checkThreadGeneration({ db, threadId, runExternalId: "run-new" }),
+    ).toMatchObject({ ok: false, reason: "superseded" });
+  });
+
+  it("markHatchetRunSupersededByExternalId flips exactly the matching row; unknown id is a no-op", async () => {
+    const { threadId } = await createTestThread({
+      db,
+      userId,
+      overrides: { organizationId: orgA },
+    });
+    await recordHatchetRun({
+      db,
+      threadId,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      prNumber: 1,
+      externalId: "ext-1",
+    });
+    await markHatchetRunSupersededByExternalId({ db, externalId: "nope" });
+    let [row] = await db
+      .select()
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.externalId, "ext-1"));
+    expect(row!.status).toBe("in_flight");
+    await markHatchetRunSupersededByExternalId({ db, externalId: "ext-1" });
+    [row] = await db
+      .select()
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.externalId, "ext-1"));
+    expect(row!.status).toBe("superseded");
   });
 });

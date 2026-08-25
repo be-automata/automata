@@ -115,3 +115,31 @@ jobs:
           echo "::group::review (node --test)"
           pnpm --filter @terragon/review test
           echo "::endgroup::"
+
+  # ── Worker E2E vs dockerized hatchet-lite (#125 C3 / #128) ───────────────────
+  # Isolated compose project (own ports; see hatchet-it-harness.ts), ~2 min,
+  # torn down in `if: always()` as the backstop for a killed vitest process.
+  worker-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+      - name: Install dependencies (worker closure only)
+        run: pnpm install --frozen-lockfile --prefer-offline --filter "@terragon/worker..."
+      - name: Supersede-policy E2E + scheduling-health IT (HATCHET_IT=1)
+        env:
+          HATCHET_IT: "1"
+        run: |
+          pnpm --filter @terragon/worker exec vitest run --no-file-parallelism \
+            src/agent-run/supersede.integration.test.ts \
+            src/agent-run/scheduling-health.integration.test.ts
+      - name: Tear down (always)
+        if: always()
+        run: docker compose -p automata-hatchet-it down -v --remove-orphans || true

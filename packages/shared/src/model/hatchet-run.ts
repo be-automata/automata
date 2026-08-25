@@ -137,3 +137,20 @@ export async function markHatchetRunsSuperseded({
     .set({ status: "superseded" })
     .where(inArray(hatchetRun.id, ids));
 }
+
+/**
+ * Mark the row for ONE run `superseded` by its Hatchet externalId (#125 C1:
+ * the worker's own terminal). No-op when untracked (non-review run).
+ */
+export async function markHatchetRunSupersededByExternalId({
+  db,
+  externalId,
+}: {
+  db: DB;
+  externalId: string;
+}): Promise<void> {
+  await db
+    .update(hatchetRun)
+    .set({ status: "superseded" })
+    .where(eq(hatchetRun.externalId, externalId));
+}

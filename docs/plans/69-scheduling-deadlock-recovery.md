@@ -9,7 +9,7 @@
 ## 1. Context & stakes
 
 The execution plane runs one Hatchet workflow, `agent-run`, on a customer-supplied box. Its
-global concurrency cap is **1** (`packages/worker/src/agent-run/workflow.ts:88`,
+global concurrency cap is **1** (`packages/worker/src/agent-run/definition.ts` (`GLOBAL_MAX_RUNS`),
 `GLOBAL_MAX_RUNS = 1`), justified by the single-box daemon memory budget
 (`workflow.ts:80-87`). That means the box has exactly **one** slot for agent work.
 
@@ -60,11 +60,11 @@ export const agentRunWorkflow = hatchet.workflow<AgentRunInput>({
 });
 ```
 
-- `PER_ORG_MAX_RUNS = 1` — `workflow.ts:77`.
-- `GLOBAL_MAX_RUNS = 1` — `workflow.ts:88`. The doc comment `workflow.ts:80-87` ties the cap to
+- `PER_ORG_MAX_RUNS = 1` — `definition.ts` (moved from `workflow.ts:77` by #128).
+- `GLOBAL_MAX_RUNS = 1` — `definition.ts` (moved from `workflow.ts:88` by #128). Its doc comment ties the cap to
   the ENOMEM wall; raising it is gated on #3b.
-- `scheduleTimeout: "30m"` — `workflow.ts:236`. `executionTimeout: "30m"` — `workflow.ts:237`.
-  `retries: 0` — `workflow.ts:245`.
+- `scheduleTimeout: "30m"` — `definition.ts:167` (moved from `workflow.ts:236` by #128). `executionTimeout: "30m"` — `definition.ts:168` (moved from `workflow.ts:237` by #128).
+  `retries: 0` — `definition.ts:176` (moved from `workflow.ts:245` by #128).
 - The rot comment: `workflow.ts:219-226`, verbatim: *"the old group's scheduler state deadlocked
   in hatchet-lite after repeated worker re-registrations (stale GROUP_ROUND_ROBIN strategy rows
   chain into active ones and the child slot is never granted — tasks sit QUEUED forever with
@@ -602,7 +602,7 @@ reintroduce the same failure here. Four mitigations, applied together:
    from "did we hear a heartbeat" to "is this task demonstrably making no progress", which is the
    question we actually mean.
 3. **Bounded blast radius even if all guards are wrong.** The victim task's own
-   `executionTimeout: "30m"` (`workflow.ts:237`) caps how long a wrongly-reclaimed run can
+   `executionTimeout: "30m"` (`definition.ts:168` (moved from `workflow.ts:237` by #128)) caps how long a wrongly-reclaimed run can
    double-occupy memory, and the process-side reaper (`reclaim.ts:59`) SIGKILLs the orphan daemon
    group on the next worker boot. So the worst case is bounded, not unbounded.
 4. **Residual risk is stated, not hidden.** With guards 1–3 the remaining window is: a worker
@@ -643,7 +643,7 @@ task mid-assignment, and reclaiming it would race a healthy scheduler.
 
 **Correction: the `schedule_timeout_at < now()` floor from the earlier draft is REMOVED.** It was
 wrong in a way that silently defeated the whole mechanism. `schedule_timeout_at` is derived from
-the task's `scheduleTimeout`, which for `agent-run` is **30 minutes** (`workflow.ts:236`). Gating
+the task's `scheduleTimeout`, which for `agent-run` is **30 minutes** (`definition.ts:167` (moved from `workflow.ts:236` by #128)). Gating
 reclamation on it would have meant the box stays wedged for the victim's full 30-minute schedule
 window regardless of the advertised dead-worker threshold — i.e. the mechanism would have
 advertised ~5-minute recovery and delivered ~30-minute recovery, and the §7.2.2 repro ("R2 RUNNING
@@ -781,7 +781,7 @@ The `>= now() - 7 days` clause is not cosmetic: `v1_tasks_olap` is `RANGE (inser
 partitioned with 26 daily partitions today (§2.6), and the bound lets the planner prune.
 
 **Threshold:** `HATCHET_STUCK_QUEUED_S`, default **900 s** = `scheduleTimeout / 2`
-(`scheduleTimeout: "30m"`, `workflow.ts:236`). Half the window means the signal fires with 15
+(`scheduleTimeout: "30m"`, `definition.ts:167` (moved from `workflow.ts:236` by #128)). Half the window means the signal fires with 15
 minutes of head-room before the engine gives up, which is the whole point — an operator can act
 before work is lost.
 
@@ -856,7 +856,7 @@ pattern (`config.ts:134-140`).
 | `WORKER_CONCURRENCY_ROT_REPAIR` | `off`\|`dry-run`\|`on` | inherit | Per-mechanism override (mech 1). |
 | `WORKER_SLOT_RECLAIM` | `off`\|`dry-run`\|`on` | inherit | Per-mechanism override (mech 2). |
 | `WORKER_STUCK_QUEUED_DETECT` | `off`\|`on` | **`on`** | Mechanism 3. Read-only, so on by default. |
-| `HATCHET_STUCK_QUEUED_S` | int | `900` | `scheduleTimeout`/2 (`workflow.ts:236`). |
+| `HATCHET_STUCK_QUEUED_S` | int | `900` | `scheduleTimeout`/2 (`definition.ts:167` (moved from `workflow.ts:236` by #128)). |
 | `HATCHET_WORKER_DEAD_AFTER_S` | int | `600` | Dead-generation heartbeat threshold ≈120 missed heartbeats (§3.2.1). Also the no-progress event window. |
 | `HATCHET_SLOT_MIN_AGE_S` | int | `600` | Age floor for **orphan** slots only (§3.2.2 case (a)). |
 | `HATCHET_MAINT_INTERVAL_S` | int | `60` | Maintenance tick period. Adds to the §3.2.2 latency bound. |
@@ -876,8 +876,8 @@ Anything not exactly `on` / `off` / `dry-run` falls back to the safe value, per 
 - **The group name stays `'agent-run-global-memory-budget'`** (`workflow.ts:227`). No rotation —
   §3.1.1. Only the stale half of the comment at `workflow.ts:219-226` is updated to say the
   rename is now backed by a repairer.
-- **`scheduleTimeout` stays 30m and `executionTimeout` stays 30m** (`workflow.ts:236-237`);
-  `retries: 0` stays (`workflow.ts:245`).
+- **`scheduleTimeout` stays 30m and `executionTimeout` stays 30m** (`definition.ts:167-168` (moved from `workflow.ts:236-237` by #128));
+  `retries: 0` stays (`definition.ts:176` (moved from `workflow.ts:245` by #128)).
 - **No thread-state transitions.** A stuck-`QUEUED` detection produces a log line, a JSON field,
   and (optionally) a 503. It does **not** mark a thread failed, does not post a daemon event,
   does not cancel the Hatchet run. **Typed terminal causes and the state-machine sweep are #129.**
@@ -1071,7 +1071,7 @@ returns canned `rows`. This layer proves the *decisions*, not the SQL semantics:
   and alertable equals `HATCHET_WORKER_DEAD_AFTER_S + 2 × HATCHET_MAINT_INTERVAL_S`, both
   computed from the actual defaults. (AC-5b)
 - **Threshold arithmetic** ⇒ default `stuckQueuedS` is 900 and equals half of the 30m
-  `scheduleTimeout` at `workflow.ts:236` (a literal assertion so the two can't drift silently).
+  `scheduleTimeout` at `definition.ts:167` (moved from `workflow.ts:236` by #128) (a literal assertion so the two can't drift silently).
 - **Tick resilience** ⇒ a `PgLike` that throws ⇒ `runMaintenanceTick()` resolves, does not
   reject, and reports `engineReachable: false`. (AC-14)
 - **Advisory lock** ⇒ a fake whose `pg_try_advisory_lock` returns `false` ⇒ zero subsequent

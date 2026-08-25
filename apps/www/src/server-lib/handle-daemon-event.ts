@@ -12,6 +12,7 @@ import {
 import {
   getThreadChat,
   getThreadMinimal,
+  decideThreadGeneration,
 } from "@terragon/shared/model/threads";
 import { waitUntil } from "@/lib/wait-until";
 import { setActiveThreadChat } from "@/agent/sandbox-resource";
@@ -46,6 +47,7 @@ export async function handleDaemonEvent({
   timezone,
   contextUsage,
   traceparent,
+  runExternalId,
 }: {
   messages: ClaudeMessage[];
   threadId: string;
@@ -60,6 +62,12 @@ export async function handleDaemonEvent({
    * absent for in-sandbox daemons and pre-#7 runs.
    */
   traceparent?: string;
+  /**
+   * #125 C1: the writer's run generation (worker `x-run-external-id` header),
+   * or null for the in-sandbox daemon. Checked against the thread's active
+   * run + superseded state on the row ALREADY loaded below — no extra read.
+   */
+  runExternalId?: string | null;
 }) {
   console.log(
     "Daemon event",
@@ -87,6 +95,30 @@ export async function handleDaemonEvent({
     return { success: false, error: "Thread chat not found", status: 404 };
   }
   console.log("Thread chat status: ", threadChat.status);
+
+  // #125 C1 generation fence: once a newer run owns the PR, no event from the
+  // old generation may land — closes the cancel race where a cancelled run
+  // still streams its verdict. Reads the EFFECTIVE status: threadChat is the
+  // thread row's alias for legacy threads and the real chat row otherwise —
+  // and markThreadsSuperseded stamps whichever of the two is live, so the
+  // superseded terminal is visible here in both modes (no extra read).
+  const generation = decideThreadGeneration({
+    thread: {
+      activeRunExternalId: thread.activeRunExternalId,
+      status: threadChat.status,
+      errorMessage: threadChat.errorMessage,
+    },
+    runExternalId: runExternalId ?? null,
+  });
+  if (!generation.ok) {
+    console.log("[daemon-event] rejected superseded generation", {
+      threadId,
+      runExternalId: runExternalId ?? null,
+      reason: generation.reason,
+      activeRunExternalId: generation.activeRunExternalId,
+    });
+    return { success: false, error: "superseded", status: 409 };
+  }
 
   let isStop = false;
   let isDone = false;

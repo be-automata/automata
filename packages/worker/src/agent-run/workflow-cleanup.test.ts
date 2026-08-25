@@ -63,11 +63,16 @@ vi.mock("./provision", () => ({
   cleanupWorkdir: (...args: unknown[]) => cleanupWorkdir(...args),
 }));
 
+const pullNextMessage = vi.fn();
+const pollUntilTerminal = vi.fn();
+const postRunSuperseded = vi.fn(async (..._args: unknown[]) => "applied");
+
 vi.mock("./www-client", () => ({
   pullAgentCredentials: (...args: unknown[]) => pullAgentCredentials(...args),
-  pullNextMessage: vi.fn(),
-  pollUntilTerminal: vi.fn(),
+  pullNextMessage: (...args: unknown[]) => pullNextMessage(...args),
+  pollUntilTerminal: (...args: unknown[]) => pollUntilTerminal(...args),
   postRunFailed: vi.fn(),
+  postRunSuperseded: (...args: unknown[]) => postRunSuperseded(...args),
   postEgressEvents: (...args: unknown[]) => postEgressEvents(...args),
 }));
 
@@ -95,6 +100,7 @@ vi.mock("./daemon-process", () => ({
     }
     preflightGhAuth = vi.fn();
     start = vi.fn();
+    sendMessage = vi.fn(async () => 42);
     teardown = vi.fn();
   },
 }));
@@ -475,5 +481,146 @@ describe("createEgressEventBatcher — audit batch add/flush/close", () => {
     ];
     expect(events[0]).not.toHaveProperty("destinationPort");
     expect(events[0]).toMatchObject({ action: "deny" });
+  });
+});
+
+/**
+ * #125 C1 cancel hook: when the engine cancels a run under a NATIVE supersede
+ * policy, exactly ONE explicit `superseded` terminal is posted to www — after
+ * teardown (egress flushed, workdir cleaned) — for an in-flight cancel and for
+ * a pre-daemon (provision-phase) cancel alike. Legacy runs (no policy on the
+ * input) and `app-side` post nothing.
+ */
+describe("#125 C1: engine cancel → explicit superseded terminal", () => {
+  const PR_INPUT = {
+    ...INPUT,
+    prKey: "org-1/o/r/7",
+    deliveryId: "gh-1",
+  };
+
+  function makeCtx(runId: string | null = "run-ext-1") {
+    const abortController = new AbortController();
+    const ctx = {
+      abortController,
+      cancelled: false,
+      log: vi.fn(),
+      ...(runId !== null ? { workflowRunId: () => runId } : {}),
+    };
+    // Fire the engine cancel from inside a mocked step: abort + flag + throw.
+    const abortIn = (mock: ReturnType<typeof vi.fn>, message = "aborted") =>
+      mock.mockImplementation(async () => {
+        abortController.abort();
+        ctx.cancelled = true;
+        throw new Error(message);
+      });
+    return { ctx, abortIn, abortController };
+  }
+
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    // abortIn() swaps implementations; restore the harness defaults per case.
+    provisionWorkdir.mockReset().mockResolvedValue(WORKDIR);
+    cleanupWorkdir.mockReset().mockResolvedValue(undefined);
+    pullAgentCredentials.mockReset();
+    postRunSuperseded.mockReset().mockResolvedValue("applied");
+    pullNextMessage.mockReset();
+    pollUntilTerminal.mockReset();
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      cleanup: vi.fn(async () => {}),
+    });
+  });
+
+  it("in-flight cancel: ONE terminal, posted AFTER teardown + cleanup, stamped with this run's id (AC3)", async () => {
+    const { ctx, abortController } = makeCtx("run-ext-inflight");
+    pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
+    const order: string[] = [];
+    pollUntilTerminal.mockImplementation(async () => {
+      abortController.abort();
+      ctx.cancelled = true;
+      return { outcome: "cancelled" };
+    });
+    cleanupWorkdir.mockImplementation(async () => {
+      order.push("cleanup");
+    });
+    postRunSuperseded.mockImplementation(async () => {
+      order.push("post");
+      return "applied";
+    });
+
+    const out = await runFn(
+      { ...PR_INPUT, supersedePolicy: "complete-run-discard" },
+      ctx,
+    );
+    expect(out.outcome).toBe("cancelled");
+    expect(postRunSuperseded).toHaveBeenCalledTimes(1);
+    const [opts, args] = postRunSuperseded.mock.calls[0]!;
+    expect(opts).toMatchObject({
+      baseUrl: INPUT.daemonCallbackUrl,
+      daemonToken: INPUT.daemonToken,
+      threadId: INPUT.threadId,
+      runExternalId: "run-ext-inflight",
+    });
+    expect(args).toEqual({
+      runExternalId: "run-ext-inflight",
+      policy: "complete-run-discard",
+    });
+    expect(order).toEqual(["cleanup", "post"]);
+  });
+
+  it("pre-daemon cancel (during provision): terminal posted; nothing to clean (AC4)", async () => {
+    const { ctx, abortIn } = makeCtx("run-ext-provision");
+    abortIn(provisionWorkdir);
+    await expect(
+      runFn({ ...PR_INPUT, supersedePolicy: "newest-wins" }, ctx),
+    ).rejects.toThrow("aborted");
+    expect(postRunSuperseded).toHaveBeenCalledTimes(1);
+    expect(postRunSuperseded.mock.calls[0]![1]).toEqual({
+      runExternalId: "run-ext-provision",
+      policy: "newest-wins",
+    });
+    expect(cleanupWorkdir).not.toHaveBeenCalled();
+  });
+
+  it("cancel after the clone (credential pull): workdir cleaned AND terminal posted", async () => {
+    const { ctx, abortIn } = makeCtx("run-ext-cred");
+    process.env.WORKER_BOX_TRUST = "owner";
+    abortIn(pullAgentCredentials, "aborted during pull");
+    await expect(
+      runFn({ ...PR_INPUT, supersedePolicy: "complete-run-queue" }, ctx),
+    ).rejects.toThrow("aborted during pull");
+    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
+    expect(postRunSuperseded).toHaveBeenCalledTimes(1);
+  });
+
+  it("a NON-cancelled failure posts no superseded terminal (onFailure owns it)", async () => {
+    const { ctx } = makeCtx();
+    provisionWorkdir.mockRejectedValue(new Error("clone failed"));
+    await expect(
+      runFn({ ...PR_INPUT, supersedePolicy: "newest-wins" }, ctx),
+    ).rejects.toThrow("clone failed");
+    expect(postRunSuperseded).not.toHaveBeenCalled();
+  });
+
+  it("legacy run (no policy) and app-side: cancel posts nothing (AC7)", async () => {
+    for (const extra of [{}, { supersedePolicy: "app-side" as const }]) {
+      const { ctx, abortIn } = makeCtx();
+      abortIn(provisionWorkdir);
+      await expect(runFn({ ...PR_INPUT, ...extra }, ctx)).rejects.toThrow();
+    }
+    expect(postRunSuperseded).not.toHaveBeenCalled();
+  });
+
+  it("no workflowRunId: logs and skips the post (C4 sweep is the backstop)", async () => {
+    const { ctx, abortIn } = makeCtx(null);
+    abortIn(provisionWorkdir);
+    await expect(
+      runFn({ ...PR_INPUT, supersedePolicy: "newest-wins" }, ctx),
+    ).rejects.toThrow();
+    expect(postRunSuperseded).not.toHaveBeenCalled();
+    expect(
+      ctx.log.mock.calls.some((c) => String(c[0]).includes("no workflowRunId")),
+    ).toBe(true);
   });
 });

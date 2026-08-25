@@ -92,6 +92,7 @@ export type AgentRunInput = {
     | "complete-run-queue"
     | "complete-run-discard"
     | "app-side";
+  /** #125 snapshot pass-through; unread by the worker until C4/C5. */
   recheckOnComplete?: boolean;
 };
 
