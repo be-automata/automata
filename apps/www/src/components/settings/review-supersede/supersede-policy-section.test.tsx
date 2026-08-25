@@ -6,6 +6,8 @@ import {
   type SupersedeSectionActions,
   type SupersedeSectionState,
   availableRepoNames,
+  RESTORE_DEFAULT_PATCH,
+  addOverridePatch,
 } from "./supersede-policy-section";
 
 // The app compiles JSX with the automatic runtime; vitest here uses the
@@ -164,5 +166,20 @@ describe("availableRepoNames — Add-override picker excludes repos that already
     expect(
       availableRepoNames(["Acme/Widgets", "acme/api", "Beta/Tool"], settings),
     ).toEqual(["Beta/Tool", "acme/api"]);
+  });
+});
+
+describe("override lifecycle patches name BOTH supersede columns — the row outlives the override", () => {
+  it("Add override starts with recheck OFF regardless of what the shared row still carries", () => {
+    expect(addOverridePatch("complete-run-discard")).toEqual({
+      supersedePolicy: "complete-run-discard",
+      recheckOnComplete: false,
+    });
+  });
+  it("Restore default clears the policy AND the recheck flag", () => {
+    expect(RESTORE_DEFAULT_PATCH).toEqual({
+      supersedePolicy: null,
+      recheckOnComplete: false,
+    });
   });
 });

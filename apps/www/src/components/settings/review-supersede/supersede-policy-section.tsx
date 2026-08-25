@@ -337,6 +337,25 @@ export function availableRepoNames(
   return repoFullNames.filter((name) => !taken.has(name.toLowerCase())).sort();
 }
 
+/**
+ * The supersede family on a repo row is TWO columns. The row is shared with
+ * the tolerance and egress families and is never deleted by "Restore
+ * default", so both writers that begin or end an override must name both
+ * columns — otherwise a repo that once had recheck ON silently carries it
+ * into a brand-new override the Add flow never exposed.
+ */
+export const RESTORE_DEFAULT_PATCH = {
+  supersedePolicy: null,
+  recheckOnComplete: false,
+} as const;
+
+export function addOverridePatch(policy: SupersedePolicy): {
+  supersedePolicy: SupersedePolicy;
+  recheckOnComplete: false;
+} {
+  return { supersedePolicy: policy, recheckOnComplete: false };
+}
+
 /** Thin container: binds the queries/mutations to the pure view. */
 export function SupersedePolicySection() {
   const defaultQuery = useSupersedeDefaultQuery();
@@ -438,11 +457,11 @@ export function SupersedePolicySection() {
         onOverrideRecheck: (row, on) =>
           saveOverride(row, { recheckOnComplete: on }),
         onRestoreDefault: (row) =>
-          saveOverride(row, { supersedePolicy: null }, restoreOverride),
+          saveOverride(row, RESTORE_DEFAULT_PATCH, restoreOverride),
         onAddOverride: (repoFullName, policy) => {
           setConflict(false);
           setOverride.mutate(
-            { repoFullName, patch: { supersedePolicy: policy } },
+            { repoFullName, patch: addOverridePatch(policy) },
             { onError: onConflict },
           );
         },
