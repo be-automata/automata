@@ -1,5 +1,5 @@
 import { createServer as createNetServer } from "node:net";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ENGINE_DB_POOL_OPTIONS, type PgLike } from "./engine-db";
 import {
   alertableRecoveryLatencySeconds,
