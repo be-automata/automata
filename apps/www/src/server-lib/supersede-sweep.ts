@@ -73,6 +73,8 @@ export type SweepReport = {
   claimed: number;
   terminals: { threadId: string; cause: TerminalCause }[];
   orphans: string[];
+  /** Per-candidate failures — the tick never aborts on one bad row. */
+  errors: { externalId: string; message: string }[];
 };
 
 /**
@@ -149,6 +151,7 @@ export async function runSupersedeSweep(
     claimed: 0,
     terminals: [],
     orphans: [],
+    errors: [],
   };
   if (!env.SUPERSEDE_SWEEP_ENABLED) return report;
   const now = new Date();
@@ -197,48 +200,68 @@ export async function runSupersedeSweep(
       await setSweepLease({ db, id: run.id, until: null });
       return;
     }
-    const decision = await decide(status, run);
-    switch (decision.kind) {
-      case "live":
-        await setSweepLease({
-          db,
-          id: run.id,
-          until: new Date(now.getTime() + LIVE_RECHECK_MS),
-        });
-        return;
-      case "retire":
-        await retireHatchetRun({ db, key: { id: run.id }, as: "terminal" });
-        return;
-      case "terminal": {
-        const [applied] = await Promise.all([
-          markThreadTerminal({
+    // FAIL-SOFT per candidate: a thrown write here must neither abort the
+    // tick for every other row nor keep the lease — release it so the next
+    // tick retries this run (the row is still in_flight: the run row is
+    // retired only AFTER the thread terminal landed).
+    try {
+      await applyDecision(await decide(status, run));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[supersede-sweep] candidate failed (retry next tick)", {
+        externalId: run.externalId,
+        threadId: run.threadId,
+        error: message,
+      });
+      report.errors.push({ externalId: run.externalId, message });
+      await setSweepLease({ db, id: run.id, until: null }).catch(() => {});
+    }
+    async function applyDecision(decision: Decision): Promise<void> {
+      switch (decision.kind) {
+        case "live":
+          await setSweepLease({
             db,
-            threadId: run.threadId,
-            cause: decision.cause,
-          }),
-          retireHatchetRun({
+            id: run.id,
+            until: new Date(now.getTime() + LIVE_RECHECK_MS),
+          });
+          return;
+        case "retire":
+          await retireHatchetRun({ db, key: { id: run.id }, as: "terminal" });
+          return;
+        case "terminal": {
+          // ORDER MATTERS (no transaction spans the two tables): the thread
+          // terminal lands first; the run row leaves the candidate set only
+          // once it has. If the thread write fails the row stays in_flight
+          // and the next tick retries — retiring first would drop the row
+          // from findSweepCandidates while the thread never terminated.
+          const applied = await markThreadTerminal({
             db,
-            key: { id: run.id },
-            as: decision.cause === "superseded" ? "superseded" : "terminal",
-          }),
-        ]);
-        if (applied) {
-          report.terminals.push({
             threadId: run.threadId,
             cause: decision.cause,
           });
+          await retireHatchetRun({
+            db,
+            key: { id: run.id },
+            as: decision.cause === "superseded" ? "superseded" : "terminal",
+          });
+          if (applied) {
+            report.terminals.push({
+              threadId: run.threadId,
+              cause: decision.cause,
+            });
+          }
+          console.log("[supersede-sweep] terminal", {
+            threadId: run.threadId,
+            externalId: run.externalId,
+            status,
+            cause: decision.cause,
+            applied,
+          });
+          return;
         }
-        console.log("[supersede-sweep] terminal", {
-          threadId: run.threadId,
-          externalId: run.externalId,
-          status,
-          cause: decision.cause,
-          applied,
-        });
-        return;
+        default:
+          return assertNever(decision);
       }
-      default:
-        return assertNever(decision);
     }
   });
 

@@ -1408,6 +1408,15 @@ function db_select_chat_status(statuses: ThreadStatus[]) {
   )}))`;
 }
 
+/**
+ * Thread-row columns a RESUME (new user message / boot of an ended thread)
+ * must clear. `terminalCause` is write-once per run and read by the
+ * generation fence as "this thread is terminal — refuse late writes"; a
+ * thread that legitimately starts again must shed it, or the first typed
+ * terminal would fence the thread forever (review on #138).
+ */
+export const THREAD_RESUME_UPDATES = { terminalCause: null } as const;
+
 export const reapableThreadStatuses: ThreadStatus[] = [
   "booting",
   "stopping",

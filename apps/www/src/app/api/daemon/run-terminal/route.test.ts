@@ -6,7 +6,9 @@ import { getDaemonTokenContext } from "@/lib/auth-server";
 import {
   createTestUser,
   createTestThread,
+  createTestRemoteRun,
 } from "@terragon/shared/model/test-helpers";
+import { hatchetRun as hatchetRunTable } from "@terragon/shared/db/schema";
 import { createOrganization } from "@terragon/shared/model/organizations";
 import { setThreadActiveRun } from "@terragon/shared/model/threads";
 import { thread as threadTable } from "@terragon/shared/db/schema";
@@ -145,6 +147,25 @@ describe("POST /api/daemon/run-terminal (#125 C1 generation fence)", () => {
       applied: false,
     });
     expect((await threadRow()).errorMessage).toBe("superseded");
+  });
+
+  it("403 when the runExternalId names ANOTHER thread's run — a daemon token never retires someone else's run", async () => {
+    const other = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 99,
+      externalId: "run-of-other-thread",
+    });
+    const res = await POST(req(body("run-of-other-thread")));
+    expect(res.status).toBe(403);
+    // Neither side moved: our thread is still live, their run still in flight.
+    expect((await threadRow()).status).toBe("working");
+    const [row] = await db
+      .select({ status: hatchetRunTable.status })
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.threadId, other.threadId));
+    expect(row!.status).toBe("in_flight");
   });
 
   it("404 for an unknown thread", async () => {

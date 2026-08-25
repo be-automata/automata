@@ -1,3 +1,4 @@
+import { THREAD_RESUME_UPDATES } from "@terragon/shared/model/threads";
 import {
   DBUserMessage,
   DBUserMessageWithModel,
@@ -195,6 +196,7 @@ export async function startAgentMessage({
               errorMessageInfo: null,
               appendMessages: uploadedMessage ? [uploadedMessage] : undefined,
             },
+            updates: THREAD_RESUME_UPDATES,
           });
           return;
         }
@@ -232,6 +234,7 @@ export async function startAgentMessage({
               errorMessageInfo: null,
               appendMessages: uploadedMessage ? [uploadedMessage] : undefined,
             },
+            updates: THREAD_RESUME_UPDATES,
           });
           return;
         }
@@ -262,6 +265,7 @@ export async function startAgentMessage({
           errorMessageInfo: null,
           appendMessages: uploadedMessage ? [uploadedMessage] : undefined,
         },
+        updates: THREAD_RESUME_UPDATES,
       });
 
       // ADR-003: when the execution plane is on, dispatch to the remote Hatchet

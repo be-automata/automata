@@ -534,6 +534,48 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     });
   });
 
+  it("user Stop (www reports `stopping`): the run ends NOW with ONE user-cancelled terminal stamped with this run's id — no engine cancel involved", async () => {
+    const { ctx } = makeCtx("run-ext-stop");
+    pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
+    const order: string[] = [];
+    pollUntilTerminal.mockResolvedValue({
+      outcome: "stopped",
+      finalStatus: "stopping",
+    });
+    cleanupWorkdir.mockImplementation(async () => {
+      order.push("cleanup");
+    });
+    postRunTerminal.mockImplementation(async () => {
+      order.push("post");
+      return "applied";
+    });
+
+    const out = await runFn(PR_INPUT, ctx); // legacy policy: still posts
+    expect(out.outcome).toBe("stopped");
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
+    const [, args] = postRunTerminal.mock.calls[0]!;
+    expect(args).toEqual({
+      runExternalId: "run-ext-stop",
+      cause: "user-cancelled",
+      policy: undefined,
+    });
+    // Teardown/cleanup precede the terminal (the daemon is dead before www
+    // is told), and the cancel hook did NOT also fire (not an engine cancel).
+    expect(order).toEqual(["cleanup", "post"]);
+  });
+
+  it("user Stop without a workflowRunId posts nothing (sweep is the backstop)", async () => {
+    const { ctx } = makeCtx(null);
+    pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
+    pollUntilTerminal.mockResolvedValue({
+      outcome: "stopped",
+      finalStatus: "stopping",
+    });
+    const out = await runFn(PR_INPUT, ctx);
+    expect(out.outcome).toBe("stopped");
+    expect(postRunTerminal).not.toHaveBeenCalled();
+  });
+
   it("in-flight cancel: ONE terminal, posted AFTER teardown + cleanup, stamped with this run's id (AC3)", async () => {
     const { ctx, abortController } = makeCtx("run-ext-inflight");
     pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });

@@ -13,6 +13,7 @@ import { createOrganization } from "@terragon/shared/model/organizations";
 import {
   markThreadTerminal,
   setThreadActiveRun,
+  THREAD_RESUME_UPDATES,
 } from "@terragon/shared/model/threads";
 import {
   thread as threadTable,
@@ -208,6 +209,22 @@ describe.each([
         expect((await event()).status).toBe(409);
       },
     );
+
+    it("a RESUME clears the typed terminal: after user-cancelled the fence closes, after THREAD_RESUME_UPDATES it opens again", async () => {
+      await setThreadActiveRun({ db, threadId, externalId: "run-1" });
+      expect(
+        await markThreadTerminal({ db, threadId, cause: "user-cancelled" }),
+      ).toBe(true);
+      expect((await event("run-1")).status).toBe(409);
+      // What startAgentMessage applies on every boot/resume transition.
+      await setLive();
+      await db
+        .update(threadTable)
+        .set(THREAD_RESUME_UPDATES)
+        .where(eq(threadTable.id, threadId));
+      expect((await event("run-1")).status).toBe(200);
+      await waitUntilResolved();
+    });
 
     it("a newer dispatch re-stamps the thread: the old generation can neither terminate nor write, the new one can", async () => {
       await setThreadActiveRun({ db, threadId, externalId: "run-1" });

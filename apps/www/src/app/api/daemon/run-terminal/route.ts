@@ -6,7 +6,10 @@ import {
   checkThreadGeneration,
   markThreadTerminal,
 } from "@terragon/shared/model/threads";
-import { retireHatchetRun } from "@terragon/shared/model/hatchet-run";
+import {
+  retireHatchetRun,
+  getHatchetRunByExternalId,
+} from "@terragon/shared/model/hatchet-run";
 import { TERMINAL_CAUSES } from "@terragon/shared/model/terminal-cause";
 
 /**
@@ -75,16 +78,35 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // Both writes are idempotent: the thread transitions only from a reapable
-  // status, and the run row leaves the supersede-candidate set.
-  const [applied] = await Promise.all([
-    markThreadTerminal({ db, threadId, cause }),
-    retireHatchetRun({
+  // OWNERSHIP: the run row named by the caller-supplied runExternalId must
+  // belong to the authenticated thread — a daemon token for thread A must
+  // never retire thread B's run. A run with no row (legacy dispatch) only
+  // gets the thread terminal.
+  const runRow = await getHatchetRunByExternalId({
+    db,
+    externalId: runExternalId,
+  });
+  if (runRow && runRow.threadId !== threadId) {
+    console.warn("[run-terminal] run/thread mismatch", {
+      threadId,
+      runExternalId,
+      runThreadId: runRow.threadId,
+    });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // ORDER MATTERS (no transaction spans the two tables): the thread terminal
+  // lands first; the run row leaves the supersede-candidate set only once it
+  // has, so a failed thread write leaves the row in_flight for the sweep.
+  // Both writes are idempotent (reapable-status guard; status column).
+  const applied = await markThreadTerminal({ db, threadId, cause });
+  if (runRow) {
+    await retireHatchetRun({
       db,
       key: { externalId: runExternalId },
       as: cause === "superseded" ? "superseded" : "terminal",
-    }),
-  ]);
+    });
+  }
   console.log("[run-terminal] terminal write", {
     threadId,
     runExternalId,
