@@ -97,3 +97,33 @@ export async function claimRecheck({
     .returning({ id: supersedeRecheck.id });
   return rows.length > 0;
 }
+
+/**
+ * Compensation for a claim whose dispatch could not be performed: remove the
+ * ledger row so the head can be rechecked by a later terminal. Only the row
+ * this claimant inserted is removed (prKey + sha + triggeredBy), so a racing
+ * successful claim by another thread is never released by mistake.
+ */
+export async function releaseRecheck({
+  db,
+  prKey,
+  desiredHeadSha,
+  triggeredByThreadId,
+}: {
+  db: DB;
+  prKey: string;
+  desiredHeadSha: string;
+  triggeredByThreadId: string;
+}): Promise<boolean> {
+  const rows = await db
+    .delete(supersedeRecheck)
+    .where(
+      and(
+        eq(supersedeRecheck.prKey, prKey),
+        eq(supersedeRecheck.desiredHeadSha, desiredHeadSha),
+        eq(supersedeRecheck.triggeredByThreadId, triggeredByThreadId),
+      ),
+    )
+    .returning({ id: supersedeRecheck.id });
+  return rows.length > 0;
+}

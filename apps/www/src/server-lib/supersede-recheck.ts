@@ -4,6 +4,7 @@ import {
   buildPrKey,
   claimRecheck,
   getDesiredHead,
+  releaseRecheck,
 } from "@terragon/shared/model/supersede-recheck";
 import { thread as threadTable } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
@@ -156,13 +157,36 @@ async function recheckOnComplete({
     reviewedSha: row.reviewedSha,
     desiredSha: desired.sha,
   });
-  await dispatch({
-    userId: row.userId,
-    automationId: row.automationId,
-    repoFullName: row.githubRepoFullName,
-    prNumber: row.githubPRNumber,
-    deliveryId: `recheck:${prKey}:${desired.sha}`,
-  });
+  try {
+    await dispatch({
+      userId: row.userId,
+      automationId: row.automationId,
+      repoFullName: row.githubRepoFullName,
+      prNumber: row.githubPRNumber,
+      deliveryId: `recheck:${prKey}:${desired.sha}`,
+    });
+  } catch (error) {
+    // The ledger row is the ONLY gate for this head: a claim whose dispatch
+    // failed must be given back, or the discard+recheck promise is silently
+    // and permanently lost for that push. Release, then let the caller's
+    // never-throws boundary log it.
+    await releaseRecheck({
+      db,
+      prKey,
+      desiredHeadSha: desired.sha,
+      triggeredByThreadId: threadId,
+    }).catch((releaseError: unknown) => {
+      console.error("[supersede-recheck] claim release failed", {
+        threadId,
+        prKey,
+        error:
+          releaseError instanceof Error
+            ? releaseError.message
+            : String(releaseError),
+      });
+    });
+    throw error;
+  }
   return { rechecked: true, reason: "dispatched" };
 }
 

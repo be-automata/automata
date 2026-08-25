@@ -135,6 +135,29 @@ describe("maybeRecheckOnComplete (#125 C5)", () => {
     expect(calls[1]!.deliveryId).toBe(`recheck:${prKey()}:sha-5`);
   });
 
+  it("a claim whose dispatch throws is released: the head can still be rechecked by a later terminal", async () => {
+    const threadId = await finishedRun({
+      reviewedSha: "sha-1",
+      policy: "complete-run-discard",
+      recheckOnComplete: true,
+      externalId: "ext-throw",
+    });
+    await push("sha-9", 1, "d9");
+    const boom = async () => {
+      throw new Error("automation trigger down");
+    };
+    // never-throws boundary: reports, does not propagate…
+    const failed = await maybeRecheckOnComplete({ threadId, dispatch: boom });
+    expect(failed.rechecked).toBe(false);
+    // …and the ledger row was given back, so the next terminal re-dispatches.
+    const { calls, dispatch } = recorder();
+    const again = await maybeRecheckOnComplete({ threadId, dispatch });
+    expect(again).toEqual({ rechecked: true, reason: "dispatched" });
+    expect(calls).toEqual([
+      { deliveryId: `recheck:${prKey()}:sha-9`, prNumber: PR },
+    ]);
+  });
+
   it("recheck OFF ⇒ zero re-dispatch (AC2); non-discard policies ⇒ zero", async () => {
     await push("sha-1", 0, "d1");
     const off = await finishedRun({
