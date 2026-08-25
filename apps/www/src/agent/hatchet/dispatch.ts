@@ -46,7 +46,7 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 /** The Hatchet REST transport config, read from env (shared by trigger + cancel). */
-function hatchetConfig() {
+export function hatchetConfig() {
   return {
     apiUrl: env.HATCHET_API_URL,
     tenantId: env.HATCHET_TENANT_ID,

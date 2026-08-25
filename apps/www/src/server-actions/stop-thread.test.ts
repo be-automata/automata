@@ -4,7 +4,10 @@ import { db } from "@/lib/db";
 import {
   createTestUser,
   createTestThread,
+  createTestOrg,
+  createTestRemoteRun,
 } from "@terragon/shared/model/test-helpers";
+import { cancelAgentRun } from "@/agent/hatchet/transport";
 import {
   mockLoggedInUser,
   mockLoggedOutUser,
@@ -24,6 +27,20 @@ const stopThread = async ({
 }) => {
   return unwrapResult(await stopThreadAction({ threadId, threadChatId }));
 };
+
+// #125: a Stop on a remote-plane thread must cancel the engine run too.
+vi.mock("@/agent/hatchet/transport", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  cancelAgentRun: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/agent/hatchet/dispatch", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  hatchetConfig: vi.fn(() => ({
+    apiUrl: "http://hatchet.test",
+    tenantId: "t",
+    apiToken: "x",
+  })),
+}));
 
 describe("stopThread", () => {
   let user: User;
@@ -61,6 +78,36 @@ describe("stopThread", () => {
     });
     expect(updatedThreadChat).toBeDefined();
     expect(updatedThreadChat!.status).toBe("stopping");
+  });
+
+  it("a remote-plane thread's Stop cancels its in-flight engine run (the worker must not wait for the step timeout)", async () => {
+    await mockWaitUntil();
+    await mockLoggedInUser(session);
+    const orgId = await createTestOrg({ db });
+    const remote = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 7,
+      externalId: "wfrun-stop-me",
+    });
+    await stopThread({
+      threadId: remote.threadId,
+      threadChatId: remote.threadChatId,
+    });
+    await waitUntilResolved();
+    expect(cancelAgentRun).toHaveBeenCalledWith(
+      ["wfrun-stop-me"],
+      expect.objectContaining({ apiUrl: "http://hatchet.test" }),
+    );
+  });
+
+  it("a local-sandbox thread's Stop never touches the engine", async () => {
+    await mockWaitUntil();
+    await mockLoggedInUser(session);
+    await stopThread({ threadId, threadChatId });
+    await waitUntilResolved();
+    expect(cancelAgentRun).not.toHaveBeenCalled();
   });
 
   it("should throw error when user is not authenticated", async () => {
