@@ -83,13 +83,19 @@ const DEFAULT_LIMIT = 100;
  * column the engine may not have — resolve it once per process.
  */
 let evictedAtSupported: boolean | null = null;
+/** Tests: forget the per-process answer so each case probes its own fixture. */
+export function resetEvictedAtSupportForTest(): void {
+  evictedAtSupported = null;
+}
 async function evictedAtPredicate(db: PgLike): Promise<string> {
   if (evictedAtSupported === null) {
+    // Bounded like every other statement here (AC-9): the probe is one row.
     const r = await db.query<{ ok: boolean }>(
       `SELECT EXISTS (
          SELECT 1 FROM information_schema.columns
           WHERE table_name = 'v1_task_runtime' AND column_name = 'evicted_at'
-       ) AS ok`,
+       ) AS ok
+       LIMIT 1`,
     );
     evictedAtSupported = r.rows[0]?.ok === true;
   }

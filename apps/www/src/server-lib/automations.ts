@@ -591,11 +591,15 @@ export async function runPullRequestAutomation({
     // #125: under a native supersede policy the ENGINE supersedes prior runs
     // (cancel / queue / discard per the policy) — archiving+stopping the prior
     // review threads here would cancel a run the policy says must finish.
-    const engineOwns = await engineOwnsSupersession({
-      userId,
-      organizationId: automation.organizationId ?? null,
-      repoFullName,
-    });
+    // Only the automated path ever supersedes prior threads — a manual run
+    // must not pay the flag + policy reads whose answer it would discard.
+    const engineOwns =
+      source !== "manual" &&
+      (await engineOwnsSupersession({
+        userId,
+        organizationId: automation.organizationId ?? null,
+        repoFullName,
+      }));
     if (source !== "manual" && engineOwns) {
       console.log(
         `[automation] engine-owned supersession for PR #${prNumber} in ${repoFullName} — prior review threads left to the policy`,

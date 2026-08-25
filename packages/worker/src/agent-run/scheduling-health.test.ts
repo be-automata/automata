@@ -13,6 +13,7 @@ import {
   repairConcurrencyRot,
   repairStepConcurrencyRot,
   repairWorkflowConcurrencyRot,
+  resetEvictedAtSupportForTest,
 } from "./scheduling-health";
 import { loadWorkerConfig, resolveMechanismMode } from "./config";
 import {
@@ -40,6 +41,8 @@ class FakePg implements PgLike {
     return this.responder(text, params) as { rows: Row[] };
   }
 }
+
+beforeEach(() => resetEvictedAtSupportForTest());
 
 describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
   describe("healthy fixture (AC-1)", () => {
