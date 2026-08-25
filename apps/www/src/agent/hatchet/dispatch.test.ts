@@ -15,7 +15,10 @@ import {
 } from "@/lib/daemon-token";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import { repoReviewSettings } from "@terragon/shared/db/schema";
-import { setFeatureFlagOverrideForTest } from "@terragon/shared/model/test-helpers";
+import {
+  setFeatureFlagOverrideForTest,
+  createTestRemoteRun,
+} from "@terragon/shared/model/test-helpers";
 import { eq } from "drizzle-orm";
 import { getInstallationToken } from "@terragon/shared/github-app";
 import { thread as threadTable } from "@terragon/shared/db/schema";
@@ -23,6 +26,7 @@ import {
   hatchetDispatchEnabled,
   dispatchAgentRun,
   engineOwnsSupersession,
+  policyIsEngineOwned,
 } from "./dispatch";
 import {
   createReviewAutomation,
@@ -683,5 +687,40 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       await engineOwnsSupersession({ ...args, organizationId: null }),
     ).toBe(false);
     void t;
+  });
+
+  it("policyIsEngineOwned is the single rule behind BOTH app-side gates", async () => {
+    expect(policyIsEngineOwned("newest-wins")).toBe(true);
+    expect(policyIsEngineOwned("complete-run-queue")).toBe(true);
+    expect(policyIsEngineOwned("complete-run-discard")).toBe(true);
+    expect(policyIsEngineOwned("app-side")).toBe(false);
+    // Dispatch's own gate agrees: under app-side the cancel pass runs, under
+    // a native policy it does not (observed via the cancel endpoint).
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "be-automata/automata",
+      patch: { supersedePolicy: "complete-run-queue" },
+    });
+    await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 91,
+      externalId: "run-prior-91",
+      repoFullName: "be-automata/automata",
+    });
+    const t = await makeReviewThread(91);
+    const f = okFetch("run-new-91");
+    vi.stubGlobal("fetch", f.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "feature",
+    });
+    expect(f.cancels).toEqual([]); // engine-owned: no app-side cancel
+    vi.unstubAllGlobals();
   });
 });

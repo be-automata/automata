@@ -265,11 +265,17 @@ export interface AgentRunInput {
  * for the dispatching user and the resolved policy is one of the native
  * variants), or does the control plane (legacy / app-side)? Every app-side
  * "supersede the prior run/thread" mechanism must consult THIS — there are
- * two (dispatch's supersedePriorReviewRuns and the automation's archival of
- * prior PR threads) and both cancelled the running review under
- * complete-run-queue in production when only one was gated. Fails safe to
- * "control plane" (legacy behaviour) on any error.
+ * two (dispatch's supersedePriorReviewRuns via planSupersede, and the
+ * automation's archival of prior PR threads) and both cancelled the running
+ * review under complete-run-queue in production when only one was gated.
+ * Both now derive from policyIsEngineOwned(); this wrapper adds the flag read
+ * and fails safe to "control plane" (legacy behaviour) on any error.
  */
+/** The ONE rule: every native policy is engine-owned; only app-side is ours. */
+export function policyIsEngineOwned(policy: SupersedePolicy): boolean {
+  return policy !== "app-side";
+}
+
 export async function engineOwnsSupersession({
   userId,
   organizationId,
@@ -292,7 +298,7 @@ export async function engineOwnsSupersession({
       organizationId,
       repoFullName,
     });
-    return snapshot.policy !== "app-side";
+    return policyIsEngineOwned(snapshot.policy);
   } catch (error) {
     console.error("[hatchet] engineOwnsSupersession failed — legacy path", {
       repoFullName,
@@ -411,7 +417,9 @@ async function planSupersede({
       recheckOnComplete: snapshot.recheckOnComplete,
     },
     triggerOpts,
-    appSideCancel: snapshot.policy === "app-side",
+    // Same predicate as engineOwnsSupersession (the automation's archival
+    // gate): the two app-side supersede mechanisms can never diverge again.
+    appSideCancel: !policyIsEngineOwned(snapshot.policy),
     stampFence: true,
     snapshot,
   };
@@ -491,11 +499,27 @@ export async function dispatchAgentRun({
   // revoke is keyed by runKey, so it is a harmless no-op when the mint itself
   // was the failure.
   try {
-    const [installationToken, daemonToken, thread] = await Promise.all([
+    // SETTLE all three before judging: Promise.all would reject on a sibling
+    // while the mint's INSERT is still in flight, so the catch's revoke could
+    // run BEFORE the token lands — a phantom token (seen as a flaky CI
+    // failure of the sibling-rejection test). With every promise settled the
+    // revoke below always sees the minted row.
+    const settled = await Promise.allSettled([
       getInstallationToken(owner, repo),
       mintDaemonToken({ userId, threadId, threadChatId, name: runKey }),
       getThreadMinimal({ db, userId, threadId }),
     ]);
+    const failed = settled.find((r) => r.status === "rejected");
+    if (failed && failed.status === "rejected") {
+      throw failed.reason;
+    }
+    const [installationToken, daemonToken, thread] = settled.map((r) =>
+      r.status === "fulfilled" ? r.value : undefined,
+    ) as [
+      Awaited<ReturnType<typeof getInstallationToken>>,
+      Awaited<ReturnType<typeof mintDaemonToken>>,
+      Awaited<ReturnType<typeof getThreadMinimal>>,
+    ];
     // BUG-EXEC-02: the review agent needs the PR's BASE branch to compute the delta
     // offline (`git diff origin/<base>...HEAD`). thread.repoBaseBranchName is NOT the
     // base — for a thread working on an existing branch it holds the HEAD/working branch
