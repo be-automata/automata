@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { AlertCircle, RotateCcw } from "lucide-react";
+import { AlertCircle, AlertTriangle, RotateCcw } from "lucide-react";
 import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
 import {
   DEFAULT_SUPERSEDE_POLICY,
@@ -10,6 +10,8 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -48,6 +50,7 @@ import { PolicyRadioGroup } from "./policy-radio-group";
 export interface OverrideRow {
   repoFullName: string;
   supersedePolicy: string | null;
+  recheckOnComplete: boolean;
   updatedAt: string;
 }
 
@@ -71,6 +74,7 @@ export interface SupersedeSectionActions {
   onSelectPolicy: (policy: SupersedePolicy) => void;
   onRecheckChange: (on: boolean) => void;
   onOverridePolicy: (row: OverrideRow, policy: SupersedePolicy) => void;
+  onOverrideRecheck: (row: OverrideRow, on: boolean) => void;
   onRestoreDefault: (row: OverrideRow) => void;
   onAddOverride: (repoFullName: string, policy: SupersedePolicy) => void;
   onReload: () => void;
@@ -183,6 +187,41 @@ export function SupersedePolicySectionView({
                       <RotateCcw className="mr-1 h-3 w-3" aria-hidden />
                       Restore default
                     </Button>
+                    {s.supersedePolicy === "complete-run-discard" && (
+                      <div
+                        className="sm:col-span-4"
+                        aria-live="polite"
+                        data-testid="override-discard-warning"
+                      >
+                        <p className="flex items-start gap-1 text-xs text-amber-600 dark:text-amber-500">
+                          <AlertTriangle
+                            className="mt-0.5 h-3 w-3 shrink-0"
+                            aria-hidden
+                          />
+                          <span>
+                            Commits pushed to {s.repoFullName} during a review
+                            will get no feedback unless re-verification is on.
+                          </span>
+                        </p>
+                        <div className="mt-2 flex min-h-11 items-center gap-2">
+                          <Switch
+                            id={`override-recheck-${s.repoFullName}`}
+                            checked={s.recheckOnComplete}
+                            onCheckedChange={(on) =>
+                              actions.onOverrideRecheck(s, on)
+                            }
+                            disabled={state.saving}
+                          />
+                          <Label
+                            htmlFor={`override-recheck-${s.repoFullName}`}
+                            className="text-xs"
+                          >
+                            Re-verify the newest commit when the running review
+                            finishes
+                          </Label>
+                        </div>
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -310,12 +349,18 @@ export function SupersedePolicySection() {
     );
   }
 
-  function saveOverride(row: OverrideRow, policy: SupersedePolicy | null) {
+  function saveOverride(
+    row: OverrideRow,
+    patch: {
+      supersedePolicy?: SupersedePolicy | null;
+      recheckOnComplete?: boolean;
+    },
+  ) {
     setConflict(false);
     setOverride.mutate(
       {
         repoFullName: row.repoFullName,
-        patch: { supersedePolicy: policy, expectedUpdatedAt: row.updatedAt },
+        patch: { ...patch, expectedUpdatedAt: row.updatedAt },
       },
       { onError: onConflict },
     );
@@ -358,8 +403,11 @@ export function SupersedePolicySection() {
       actions={{
         onSelectPolicy: (policy) => saveDefault({ supersedePolicy: policy }),
         onRecheckChange: (on) => saveDefault({ recheckOnComplete: on }),
-        onOverridePolicy: (row, policy) => saveOverride(row, policy),
-        onRestoreDefault: (row) => saveOverride(row, null),
+        onOverridePolicy: (row, policy) =>
+          saveOverride(row, { supersedePolicy: policy }),
+        onOverrideRecheck: (row, on) =>
+          saveOverride(row, { recheckOnComplete: on }),
+        onRestoreDefault: (row) => saveOverride(row, { supersedePolicy: null }),
         onAddOverride: (repoFullName, policy) => {
           setConflict(false);
           setOverride.mutate(

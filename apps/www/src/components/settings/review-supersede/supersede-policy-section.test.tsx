@@ -38,6 +38,7 @@ const actions: SupersedeSectionActions = {
   onRecheckChange: vi.fn(),
   onOverridePolicy: vi.fn(),
   onRestoreDefault: vi.fn(),
+  onOverrideRecheck: vi.fn(),
   onAddOverride: vi.fn(),
   onReload: vi.fn(),
 };
@@ -96,11 +97,13 @@ describe("SupersedePolicySectionView", () => {
           {
             repoFullName: "acme/widgets",
             supersedePolicy: "app-side",
+            recheckOnComplete: false,
             updatedAt: "2026-08-24T00:00:00.000Z",
           },
           {
             repoFullName: "acme/api",
             supersedePolicy: "complete-run-discard",
+            recheckOnComplete: true,
             updatedAt: "2026-08-24T00:00:00.000Z",
           },
         ],
@@ -111,6 +114,15 @@ describe("SupersedePolicySectionView", () => {
     expect((html.match(/>Repo override</g) ?? []).length).toBe(2);
     expect((html.match(/Restore default/g) ?? []).length).toBe(2);
     expect(html).toContain('aria-label="Supersede policy for acme/widgets"');
+    // The discard override carries the same amber warning + re-verify toggle
+    // as the org default — never a silent "no feedback" repo.
+    expect(
+      (html.match(/data-testid="override-discard-warning"/g) ?? []).length,
+    ).toBe(1);
+    expect(html).toContain("Commits pushed to acme/api during a review");
+    expect(html).toMatch(
+      /id="override-recheck-acme\/api"[^>]*aria-checked="true"|aria-checked="true"[^>]*id="override-recheck-acme\/api"/,
+    );
     expect(html).not.toContain('data-testid="supersede-overrides-empty"');
   });
 

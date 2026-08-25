@@ -111,4 +111,19 @@ describe("/api/review-settings/default (#125 C6 org default)", () => {
     await actor("admin");
     expect((await put({ supersedePolicy: "yolo" })).status).toBe(400);
   });
+
+  it("two CONCURRENT admins holding the same version: exactly one wins, the other gets 409", async () => {
+    await actor("admin");
+    await put({ supersedePolicy: "newest-wins" });
+    const v = (await getRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+    }))!.updatedAt.toISOString();
+    const [a, b] = await Promise.all([
+      put({ supersedePolicy: "app-side", expectedUpdatedAt: v }),
+      put({ supersedePolicy: "complete-run-queue", expectedUpdatedAt: v }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+  });
 });

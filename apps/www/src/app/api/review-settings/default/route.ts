@@ -6,11 +6,9 @@ import {
   getRepoReviewSetting,
   upsertRepoReviewSetting,
   ORG_DEFAULT_REPO_SENTINEL,
+  RepoReviewSettingConflictError,
 } from "@terragon/shared/model/repo-review-settings";
-import {
-  parseSupersedePatch,
-  checkExpectedUpdatedAt,
-} from "../supersede-route-shared";
+import { parseSupersedePatch } from "../supersede-route-shared";
 import { getPostHogServer } from "@/lib/posthog-server";
 
 /**
@@ -103,21 +101,47 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  const conflict = await checkExpectedUpdatedAt({
-    db,
-    organizationId: ctx.organizationId,
-    repoFullName: ORG_DEFAULT_REPO_SENTINEL,
-    expectedUpdatedAt: body.expectedUpdatedAt,
-  });
-  if (conflict) return conflict;
-
-  const row = await upsertRepoReviewSetting({
-    db,
-    organizationId: ctx.organizationId,
-    repoFullName: ORG_DEFAULT_REPO_SENTINEL,
-    patch,
-    updatedByUserId: ctx.userId,
-  });
+  // Optimistic concurrency, enforced by the DATABASE in the write itself
+  // (ON CONFLICT … DO UPDATE … WHERE updated_at = expected): two admins who
+  // read the same version can never both win — the loser gets a 409, never
+  // a silent last-write-wins.
+  const expectedUpdatedAt =
+    typeof body.expectedUpdatedAt === "string"
+      ? new Date(body.expectedUpdatedAt)
+      : undefined;
+  if (expectedUpdatedAt && Number.isNaN(expectedUpdatedAt.getTime())) {
+    return NextResponse.json(
+      { error: "expectedUpdatedAt must be an ISO timestamp" },
+      { status: 400 },
+    );
+  }
+  let row;
+  try {
+    row = await upsertRepoReviewSetting({
+      db,
+      organizationId: ctx.organizationId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch,
+      updatedByUserId: ctx.userId,
+      expectedUpdatedAt,
+    });
+  } catch (error) {
+    if (error instanceof RepoReviewSettingConflictError) {
+      const current = await getRepoReviewSetting({
+        db,
+        organizationId: ctx.organizationId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      });
+      return NextResponse.json(
+        {
+          error: "conflict",
+          currentUpdatedAt: current?.updatedAt?.toISOString() ?? null,
+        },
+        { status: 409 },
+      );
+    }
+    throw error;
+  }
   getPostHogServer().capture({
     distinctId: ctx.userId,
     event: "supersede_policy_default_set",

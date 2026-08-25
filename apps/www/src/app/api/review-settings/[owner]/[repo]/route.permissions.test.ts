@@ -135,4 +135,27 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
     });
     expect(ok.status).toBe(200);
   });
+
+  it("two CONCURRENT writers holding the same version: exactly one wins, the other gets 409 (DB-level CAS, not read-then-write)", async () => {
+    await actor("owner");
+    const first = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { supersedePolicy: "newest-wins" },
+    });
+    const v = first.updatedAt.toISOString();
+    const [a, b] = await Promise.all([
+      put({ supersedePolicy: "app-side", expectedUpdatedAt: v }),
+      put({ supersedePolicy: "complete-run-queue", expectedUpdatedAt: v }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const row = await getRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+    });
+    const winner = a.status === 200 ? "app-side" : "complete-run-queue";
+    expect(row?.supersedePolicy).toBe(winner);
+  });
 });

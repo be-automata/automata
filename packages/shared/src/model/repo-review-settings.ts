@@ -38,6 +38,14 @@ export function normalizeRepo(repoFullName: string): string {
  *  - 'complete-run-discard' → the new run is discarded while one is live
  *  - 'app-side'             → the control plane decides (legacy #8 rules)
  */
+/** The stored row changed since the caller read it (expectedUpdatedAt mismatch). */
+export class RepoReviewSettingConflictError extends Error {
+  constructor() {
+    super("repo review setting changed since it was read");
+    this.name = "RepoReviewSettingConflictError";
+  }
+}
+
 export const SUPERSEDE_POLICIES = [
   "newest-wins",
   "complete-run-queue",
@@ -172,6 +180,7 @@ export async function upsertRepoReviewSetting({
   repoFullName,
   patch,
   updatedByUserId,
+  expectedUpdatedAt,
 }: {
   db: DB;
   organizationId: string;
@@ -189,6 +198,14 @@ export async function upsertRepoReviewSetting({
     recheckOnComplete?: boolean;
   };
   updatedByUserId?: string | null;
+  /**
+   * Optimistic concurrency (#131): when given, the write applies ONLY if the
+   * stored row's updatedAt still equals this value — enforced by the database
+   * in the same statement (ON CONFLICT … DO UPDATE … WHERE), never by a
+   * read-then-write. A mismatch throws {@link RepoReviewSettingConflictError}.
+   * A row that does not exist yet is created (nothing to conflict with).
+   */
+  expectedUpdatedAt?: Date;
 }): Promise<RepoReviewSetting> {
   const repo = normalizeRepo(repoFullName);
 
@@ -259,9 +276,18 @@ export async function upsertRepoReviewSetting({
         repoReviewSettings.repoFullName,
       ],
       set,
+      ...(expectedUpdatedAt
+        ? { setWhere: eq(repoReviewSettings.updatedAt, expectedUpdatedAt) }
+        : {}),
     })
     .returning();
-  return row!;
+  if (!row) {
+    if (expectedUpdatedAt) {
+      throw new RepoReviewSettingConflictError();
+    }
+    throw new Error("upsertRepoReviewSetting returned no row");
+  }
+  return row;
 }
 
 /** Convenience: set only the tolerance, preserving any draft-policy field. */

@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
-import type { DB } from "@terragon/shared/db";
 import {
-  getRepoReviewSetting,
   isSupersedePolicy,
   SUPERSEDE_POLICIES,
 } from "@terragon/shared/model/repo-review-settings";
@@ -55,37 +53,4 @@ export function parseSupersedePatch(body: {
     patch.recheckOnComplete = body.recheckOnComplete;
   }
   return { patch };
-}
-
-/**
- * Optimistic concurrency: a write carrying a stale expectedUpdatedAt gets a
- * 409 {error:"conflict", currentUpdatedAt} — never a silent last-write-wins
- * between two admins. Returns the 409 to send, or null when the write may
- * proceed.
- */
-export async function checkExpectedUpdatedAt({
-  db,
-  organizationId,
-  repoFullName,
-  expectedUpdatedAt,
-}: {
-  db: DB;
-  organizationId: string;
-  repoFullName: string;
-  expectedUpdatedAt: unknown;
-}): Promise<NextResponse | null> {
-  if (expectedUpdatedAt === undefined) return null;
-  const existing = await getRepoReviewSetting({
-    db,
-    organizationId,
-    repoFullName,
-  });
-  const current = existing?.updatedAt?.toISOString() ?? null;
-  if (current !== null && current !== expectedUpdatedAt) {
-    return NextResponse.json(
-      { error: "conflict", currentUpdatedAt: current },
-      { status: 409 },
-    );
-  }
-  return null;
 }
