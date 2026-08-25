@@ -80,7 +80,7 @@ export type { AgentRunInput, AgentRunOutput } from "./types";
  *   - agent-run-strict  → GROUP_ROUND_ROBIN   (complete-run · queue)
  *   - agent-run-discard → CANCEL_NEWEST       (complete-run · discard)
  * A run the engine cancels under a variant is NOT silent: the run task posts an
- * explicit `superseded` terminal to www (postRunSuperseded), fenced by generation.
+ * explicit typed terminal to www (postRunTerminal — `superseded` for a native-policy cancel), fenced by generation.
  * The variants are only ever dispatched with `prKey`/`deliveryId` present (www
  * C2 guarantees it under the flag), so their CEL never dereferences a missing
  * field; the legacy workflow carries no per-PR entry and no idempotency key.

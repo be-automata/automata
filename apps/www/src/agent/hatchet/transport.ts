@@ -139,7 +139,7 @@ export interface HatchetTriggerConfig {
  */
 function requireHatchetConfig(
   config: HatchetTriggerConfig,
-  verb: "dispatch" | "cancel",
+  verb: "dispatch" | "cancel" | "status",
 ): HatchetTriggerConfig {
   const { apiUrl, tenantId, apiToken } = config;
   if (!apiUrl || !tenantId || !apiToken) {
@@ -256,7 +256,7 @@ export async function getAgentRunStatus(
   externalId: string,
   config: HatchetTriggerConfig,
 ): Promise<AgentRunStatus> {
-  const { apiUrl, tenantId, apiToken } = requireHatchetConfig(config, "cancel");
+  const { apiUrl, tenantId, apiToken } = requireHatchetConfig(config, "status");
   const res = await fetch(
     `${apiUrl.replace(/\/$/, "")}/api/v1/stable/tenants/${tenantId}/workflow-runs/${encodeURIComponent(externalId)}`,
     { headers: { Authorization: `Bearer ${apiToken}` } },
