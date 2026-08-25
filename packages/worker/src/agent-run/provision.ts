@@ -13,7 +13,10 @@ const execFileAsync = promisify(execFile);
  * message echoes the installation token, and that message becomes the run's
  * persisted failure reason (see postRunFailed). Stderr is redacted too.
  */
-async function gitExec(args: string[], opts: { maxBuffer?: number } = {}) {
+export async function gitExec(
+  args: string[],
+  opts: { maxBuffer?: number } = {},
+) {
   try {
     return await execFileAsync("git", args, opts);
   } catch (error) {

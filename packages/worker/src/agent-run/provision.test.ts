@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ensureBaseDiffable, provisionWorkdir } from "./provision";
+import { ensureBaseDiffable, gitExec } from "./provision";
 
 const execFileAsync = promisify(execFile);
 
@@ -104,22 +104,29 @@ describe("ensureBaseDiffable (BUG-EXEC-02)", () => {
 });
 
 describe("git failures never echo the auth header", () => {
-  it("a failed clone throws the git verb + stderr tail, with the extraHeader credential absent", async () => {
+  it("a failing git command throws the verb + stderr tail, with the extraHeader credential absent (hermetic: local path, no network)", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "prov-redact-"));
     try {
       const token = "ghs_3211193_abcdefghijklmnopqrstuvwxyz";
+      const authHeader = `AUTHORIZATION: basic ${Buffer.from(
+        `x-access-token:${token}`,
+      ).toString("base64")}`;
+      // Exactly the argv shape provisionWorkdir builds, against a path that
+      // does not exist — git fails locally, no network, no real token.
       await expect(
-        provisionWorkdir({
-          repoFullName:
-            "definitely-not-a-real-owner/definitely-not-a-real-repo-4b1d",
-          branch: "main",
-          installationToken: token,
-          workdirRoot: root,
-          runId: "run-redact",
-        }),
+        gitExec([
+          "-c",
+          `http.extraHeader=${authHeader}`,
+          "clone",
+          "--depth",
+          "1",
+          path.join(root, "definitely-missing.git"),
+          path.join(root, "out"),
+        ]),
       ).rejects.toSatisfy((e: unknown) => {
         const msg = (e as Error).message;
-        expect(msg).toMatch(/^git clone failed \(exit \d+\)/);
+        expect(msg).toMatch(/^git clone failed \(exit \d+\): /);
+        expect(msg).toMatch(/does not exist|not found|No such file/i);
         expect(msg).not.toContain("basic ");
         expect(msg).not.toContain(token);
         expect(msg).not.toContain(
@@ -130,5 +137,5 @@ describe("git failures never echo the auth header", () => {
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
-  }, 60_000);
+  });
 });
