@@ -16,10 +16,18 @@ vi.mock("@/lib/auth-server", () => ({
   getTenantContextOrNull: vi.fn(),
 }));
 
-vi.mock("@terragon/shared/model/repo-review-settings", () => ({
-  upsertRepoReviewSetting: vi.fn(),
-  removeRepoReviewSetting: vi.fn(),
-}));
+// Partial mock: route.ts (via supersede-route-shared.ts) also uses
+// getRepoReviewSetting / isSupersedePolicy / SUPERSEDE_POLICIES — keep the
+// real ones so a future case that sends supersedePolicy or expectedUpdatedAt
+// fails on its assertion, not on a "not a function" TypeError.
+vi.mock(
+  "@terragon/shared/model/repo-review-settings",
+  async (importOriginal) => ({
+    ...(await importOriginal<object>()),
+    upsertRepoReviewSetting: vi.fn(),
+    removeRepoReviewSetting: vi.fn(),
+  }),
+);
 
 const captureMock = vi.fn();
 vi.mock("@/lib/posthog-server", () => ({
