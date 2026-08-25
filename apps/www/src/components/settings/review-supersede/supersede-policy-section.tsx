@@ -464,7 +464,12 @@ export function SupersedePolicySection() {
         onAddOverride: (repoFullName, policy) => {
           setConflict(false);
           setOverride.mutate(
-            { repoFullName, patch: policyPatch(policy) },
+            // First-write fence: this repo showed "no override yet" in the
+            // picker; the create 409s if another admin added one meanwhile.
+            {
+              repoFullName,
+              patch: { ...policyPatch(policy), expectedUpdatedAt: null },
+            },
             { onError: onConflict },
           );
         },

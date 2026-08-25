@@ -154,6 +154,9 @@ export async function PUT(
   // (ON CONFLICT … DO UPDATE … WHERE updated_at = expected): two admins who
   // read the same version can never both win — the loser gets a 409, never
   // a silent last-write-wins.
+  // `expectedUpdatedAt: null` is the FIRST-WRITE fence: the caller read "no
+  // override yet" and the write must only apply while that is still true.
+  const expectAbsentSupersedeOverride = body.expectedUpdatedAt === null;
   const expectedUpdatedAt =
     typeof body.expectedUpdatedAt === "string"
       ? new Date(body.expectedUpdatedAt)
@@ -173,6 +176,7 @@ export async function PUT(
       patch,
       updatedByUserId: ctx.userId,
       expectedUpdatedAt,
+      expectAbsentSupersedeOverride,
     });
   } catch (error) {
     if (error instanceof RepoReviewSettingConflictError) {

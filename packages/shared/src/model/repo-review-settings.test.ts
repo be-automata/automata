@@ -13,6 +13,7 @@ import {
   upsertRepoReviewSetting,
   removeRepoReviewSetting,
   listRepoReviewSettings,
+  RepoReviewSettingConflictError,
 } from "./repo-review-settings";
 
 const db = createDb(env.DATABASE_URL!);
@@ -440,6 +441,50 @@ describe("resolveSupersedePolicy (#125/#127)", () => {
         expectedUpdatedAt: stale,
       }),
     ).toEqual({ removed: false, conflict: true });
+  });
+
+  it("first-write CAS (#131): two admins racing to CREATE the same repo's first override — exactly one wins, the loser conflicts", async () => {
+    const create = () =>
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/first-override",
+        patch: { supersedePolicy: "complete-run-queue" },
+        expectAbsentSupersedeOverride: true,
+      });
+    const results = await Promise.allSettled([create(), create()]);
+    const won = results.filter((r) => r.status === "fulfilled");
+    const lost = results.filter(
+      (r) =>
+        r.status === "rejected" &&
+        r.reason instanceof RepoReviewSettingConflictError,
+    );
+    expect(won).toHaveLength(1);
+    expect(lost).toHaveLength(1);
+    // The absence fence also guards a tolerance-only row (row exists, no
+    // supersede override yet): first create wins, a second one conflicts.
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/tolerance-first",
+      patch: { blockTolerance: "warning" },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/tolerance-first",
+      patch: { supersedePolicy: "newest-wins" },
+      expectAbsentSupersedeOverride: true,
+    });
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/tolerance-first",
+        patch: { supersedePolicy: "app-side" },
+        expectAbsentSupersedeOverride: true,
+      }),
+    ).rejects.toBeInstanceOf(RepoReviewSettingConflictError);
   });
 
   it("listRepoReviewSettings never returns the org-default sentinel ('*') (#131 AC6)", async () => {

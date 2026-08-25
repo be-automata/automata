@@ -179,6 +179,20 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
     expect(json.removed).toBe(true);
   });
 
+  it("PUT with expectedUpdatedAt:null passes the first-write absence fence to the model", async () => {
+    const res = await PUT(
+      putReq({ supersedePolicy: "newest-wins", expectedUpdatedAt: null }),
+      { params },
+    );
+    expect(res.status).toBe(200);
+    expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectAbsentSupersedeOverride: true,
+        expectedUpdatedAt: undefined,
+      }),
+    );
+  });
+
   it("DELETE 409 on a lost CAS race carries currentUpdatedAt — the same body shape as PUT", async () => {
     const current = new Date("2026-08-25T18:00:00.000Z");
     vi.mocked(removeRepoReviewSetting).mockResolvedValue({

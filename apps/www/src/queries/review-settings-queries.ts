@@ -28,8 +28,12 @@ export interface RepoReviewSettingPatch {
   /** null clears the override (falls back to the org default). */
   supersedePolicy?: SupersedePolicy | null;
   recheckOnComplete?: boolean;
-  /** Optimistic concurrency fence — a stale value gets a ConflictError. */
-  expectedUpdatedAt?: string;
+  /**
+   * Optimistic concurrency fence — a stale value gets a ConflictError.
+   * `null` is the first-write fence: "I read no override yet"; the create
+   * 409s if someone else added one in between.
+   */
+  expectedUpdatedAt?: string | null;
 }
 
 export const reviewSettingsQueryKeys = {

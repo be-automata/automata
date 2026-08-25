@@ -1,7 +1,7 @@
 import { DB } from "../db";
 import { repoReviewSettings } from "../db/schema";
 import { RepoReviewSetting } from "../db/types";
-import { and, eq, inArray, isNotNull, ne, not, or } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, ne, not, or } from "drizzle-orm";
 import { buildEgressPolicyShape } from "./egress-policy";
 
 /**
@@ -181,6 +181,7 @@ export async function upsertRepoReviewSetting({
   patch,
   updatedByUserId,
   expectedUpdatedAt,
+  expectAbsentSupersedeOverride,
 }: {
   db: DB;
   organizationId: string;
@@ -206,6 +207,14 @@ export async function upsertRepoReviewSetting({
    * A row that does not exist yet is created (nothing to conflict with).
    */
   expectedUpdatedAt?: Date;
+  /**
+   * First-write CAS (#131): the write applies ONLY if no supersede override
+   * exists yet (`supersede_policy IS NULL` — the row may still exist for the
+   * tolerance/egress families). Two admins racing to create the same repo's
+   * first override: the loser throws {@link RepoReviewSettingConflictError}.
+   * Mutually exclusive with `expectedUpdatedAt`.
+   */
+  expectAbsentSupersedeOverride?: boolean;
 }): Promise<RepoReviewSetting> {
   const repo = normalizeRepo(repoFullName);
 
@@ -265,6 +274,17 @@ export async function upsertRepoReviewSetting({
   if (patch.recheckOnComplete !== undefined)
     set.recheckOnComplete = patch.recheckOnComplete;
 
+  // CAS has two shapes: a version fence for edits (updated_at must still be
+  // the value the admin read), and an ABSENCE fence for first writes
+  // (expectAbsentSupersedeOverride: the row may exist for another family, but
+  // supersede_policy must still be NULL). Both are enforced by the DATABASE
+  // in the write itself; the loser's UPDATE matches no row and 409s — two
+  // admins racing to CREATE the first override can never both get 200.
+  const setWhere = expectedUpdatedAt
+    ? eq(repoReviewSettings.updatedAt, expectedUpdatedAt)
+    : expectAbsentSupersedeOverride
+      ? isNull(repoReviewSettings.supersedePolicy)
+      : undefined;
   const [row] = await db
     .insert(repoReviewSettings)
     // `set` holds exactly the defined patch fields (+ provenance); omitted
@@ -276,13 +296,11 @@ export async function upsertRepoReviewSetting({
         repoReviewSettings.repoFullName,
       ],
       set,
-      ...(expectedUpdatedAt
-        ? { setWhere: eq(repoReviewSettings.updatedAt, expectedUpdatedAt) }
-        : {}),
+      ...(setWhere ? { setWhere } : {}),
     })
     .returning();
   if (!row) {
-    if (expectedUpdatedAt) {
+    if (setWhere) {
       throw new RepoReviewSettingConflictError();
     }
     throw new Error("upsertRepoReviewSetting returned no row");
