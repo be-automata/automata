@@ -3,3 +3,4 @@
 Throwaway PR used to exercise newest-wins / queue / discard+recheck / app-side on the pilot worker.
 
 - push 1
+- push 2 (newest-wins: this must cancel the running review of push 1)
