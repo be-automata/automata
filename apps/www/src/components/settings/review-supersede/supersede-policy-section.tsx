@@ -327,6 +327,11 @@ export function SupersedePolicySection() {
   const setOverride = useSetReviewSettingMutation({
     successMessage: "Repo override saved. Applies to new runs.",
   });
+  // Restore default clears the override, so it must not claim one was saved.
+  const restoreOverride = useSetReviewSettingMutation({
+    successMessage:
+      "Repo override removed. The org default applies to new runs.",
+  });
   const [conflict, setConflict] = useState(false);
 
   const stored = defaultQuery.data ?? null;
@@ -355,9 +360,10 @@ export function SupersedePolicySection() {
       supersedePolicy?: SupersedePolicy | null;
       recheckOnComplete?: boolean;
     },
+    mutation: typeof setOverride = setOverride,
   ) {
     setConflict(false);
-    setOverride.mutate(
+    mutation.mutate(
       {
         repoFullName: row.repoFullName,
         patch: { ...patch, expectedUpdatedAt: row.updatedAt },
@@ -407,7 +413,8 @@ export function SupersedePolicySection() {
           saveOverride(row, { supersedePolicy: policy }),
         onOverrideRecheck: (row, on) =>
           saveOverride(row, { recheckOnComplete: on }),
-        onRestoreDefault: (row) => saveOverride(row, { supersedePolicy: null }),
+        onRestoreDefault: (row) =>
+          saveOverride(row, { supersedePolicy: null }, restoreOverride),
         onAddOverride: (repoFullName, policy) => {
           setConflict(false);
           setOverride.mutate(
