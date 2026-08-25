@@ -236,7 +236,27 @@ export async function runSupersedeSweep(
           });
           return;
         case "retire":
+          // Engine COMPLETED but www never saw the finish: the run row is
+          // retired — and the discard·recheck promise must still be honoured
+          // here, exactly as on the terminal path (this backstop population
+          // is where a lost recheck has no other re-trigger).
           await retireHatchetRun({ db, key: { id: run.id }, as: "terminal" });
+          await maybeRecheckOnComplete({
+            threadId: run.threadId,
+            thread: {
+              userId: run.threadUserId,
+              organizationId: run.threadOrganizationId,
+              githubRepoFullName: run.threadRepoFullName,
+              githubPRNumber: run.threadGithubPRNumber,
+              automationId: run.threadAutomationId,
+              reviewedSha: run.threadReviewedSha,
+              sandboxProvider: run.threadSandboxProvider,
+            },
+            run: {
+              supersedePolicy: run.supersedePolicy,
+              recheckOnComplete: run.recheckOnComplete,
+            },
+          });
           return;
         case "terminal": {
           // ORDER MATTERS (no transaction spans the two tables): the thread
