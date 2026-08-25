@@ -31,12 +31,19 @@ export async function gitExec(
       ) ?? "git";
     const stderr = typeof e.stderr === "string" ? e.stderr.trim() : "";
     const tail = stderr.length > 600 ? `…${stderr.slice(-600)}` : stderr;
-    throw new Error(
+    // NO `cause`: the raw execFile rejection carries the full argv (with the
+    // auth header) in .message and .cmd, and Node's default error inspection
+    // prints the [cause] chain — so a logged throw would leak it anyway.
+    // Everything diagnostic the raw error had (code, signal, stderr tail) is
+    // already in the redacted message; the exit code is kept as a plain field.
+    const redacted = new Error(
       redactSecrets(
         `git ${verb} failed (exit ${String(e.code ?? "?")})${tail ? `: ${tail}` : ""}`,
       ),
-      { cause: error },
-    );
+    ) as Error & { code?: unknown; signal?: unknown };
+    redacted.code = e.code;
+    redacted.signal = (error as { signal?: unknown }).signal;
+    throw redacted;
   }
 }
 

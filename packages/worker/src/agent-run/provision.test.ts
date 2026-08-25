@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
+import { inspect, promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ensureBaseDiffable, gitExec } from "./provision";
 
@@ -132,6 +132,13 @@ describe("git failures never echo the auth header", () => {
         expect(msg).not.toContain(
           Buffer.from(`x-access-token:${token}`).toString("base64"),
         );
+        // NO reachable property may carry the raw argv: no `cause`, and the
+        // full inspected form (what console.error would print) is clean too.
+        expect((e as { cause?: unknown }).cause).toBeUndefined();
+        const inspected = inspect(e, { depth: 10 });
+        expect(inspected).not.toContain("basic ");
+        expect(inspected).not.toContain(token);
+        expect(inspected).not.toContain("extraHeader");
         return true;
       });
     } finally {
