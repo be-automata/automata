@@ -1,0 +1,13 @@
+# #125 live UAT — supersede policy (prod)
+
+Throwaway PR used to exercise newest-wins / queue / discard+recheck / app-side on the pilot worker.
+
+- push 1
+- push 2 (newest-wins: this must cancel the running review of push 1)
+- push 3 (complete-run-queue)
+- push 4 (complete-run-queue)
+- push 5 (complete-run-queue)
+push 6 — complete-run-queue (post-#143) 17:14:14
+push 7 — complete-run-queue (post-#143) 17:14:26
+push 8 — complete-run-discard+recheck 17:19:57
+push 9 — complete-run-discard+recheck 17:20:12
