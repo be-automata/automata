@@ -19,7 +19,11 @@ import { setFeatureFlagOverrideForTest } from "@terragon/shared/model/test-helpe
 import { eq } from "drizzle-orm";
 import { getInstallationToken } from "@terragon/shared/github-app";
 import { thread as threadTable } from "@terragon/shared/db/schema";
-import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
+import {
+  hatchetDispatchEnabled,
+  dispatchAgentRun,
+  engineOwnsSupersession,
+} from "./dispatch";
 import {
   createReviewAutomation,
   createBootingPRThread,
@@ -644,5 +648,40 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       false,
     );
     vi.unstubAllGlobals();
+  });
+
+  it("engineOwnsSupersession: false with the flag OFF; true for a native policy; false for app-side; false (legacy) on a corrupt stored policy", async () => {
+    const t = await makeReviewThread(90);
+    const args = {
+      userId: user.id,
+      organizationId: orgId,
+      repoFullName: "be-automata/automata",
+    };
+    // Flag ON is set for this describe's user in beforeEach; default policy is
+    // newest-wins (native).
+    expect(await engineOwnsSupersession(args)).toBe(true);
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "be-automata/automata",
+      patch: { supersedePolicy: "app-side" },
+    });
+    expect(await engineOwnsSupersession(args)).toBe(false);
+    await db
+      .update(repoReviewSettings)
+      .set({ supersedePolicy: "zzz" })
+      .where(eq(repoReviewSettings.organizationId, orgId));
+    expect(await engineOwnsSupersession(args)).toBe(false); // fail-safe
+    await setFeatureFlagOverrideForTest({
+      db,
+      userId: user.id,
+      name: "supersedePolicy",
+      value: false,
+    });
+    expect(await engineOwnsSupersession(args)).toBe(false);
+    expect(
+      await engineOwnsSupersession({ ...args, organizationId: null }),
+    ).toBe(false);
+    void t;
   });
 });

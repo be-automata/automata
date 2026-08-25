@@ -260,6 +260,48 @@ export interface AgentRunInput {
   recheckOnComplete?: boolean;
 }
 
+/**
+ * #125: does the ENGINE own supersession for review runs of this repo (flag ON
+ * for the dispatching user and the resolved policy is one of the native
+ * variants), or does the control plane (legacy / app-side)? Every app-side
+ * "supersede the prior run/thread" mechanism must consult THIS — there are
+ * two (dispatch's supersedePriorReviewRuns and the automation's archival of
+ * prior PR threads) and both cancelled the running review under
+ * complete-run-queue in production when only one was gated. Fails safe to
+ * "control plane" (legacy behaviour) on any error.
+ */
+export async function engineOwnsSupersession({
+  userId,
+  organizationId,
+  repoFullName,
+}: {
+  userId: string;
+  organizationId: string | null;
+  repoFullName: string;
+}): Promise<boolean> {
+  if (!organizationId) return false;
+  try {
+    const on = await getFeatureFlagForUser({
+      db,
+      userId,
+      flagName: "supersedePolicy",
+    });
+    if (!on) return false;
+    const snapshot = await resolveSupersedePolicy({
+      db,
+      organizationId,
+      repoFullName,
+    });
+    return snapshot.policy !== "app-side";
+  } catch (error) {
+    console.error("[hatchet] engineOwnsSupersession failed — legacy path", {
+      repoFullName,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
 /** True when a thread should dispatch to the remote execution plane. */
 export function hatchetDispatchEnabled(thread: {
   sandboxProvider?: string | null;

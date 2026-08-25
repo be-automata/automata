@@ -44,6 +44,7 @@ import { getAccessInfoForUser } from "@/lib/subscription";
 import { SUBSCRIPTION_MESSAGES } from "@/lib/subscription-msgs";
 import { getMaxAutomationsForUser } from "@/lib/subscription-tiers";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
+import { engineOwnsSupersession } from "@/agent/hatchet/dispatch";
 import { UserFacingError } from "@/lib/server-actions";
 import {
   resolveReviewSkill,
@@ -587,7 +588,20 @@ export async function runPullRequestAutomation({
       capturedAt: new Date().toISOString(),
     };
 
-    if (source !== "manual") {
+    // #125: under a native supersede policy the ENGINE supersedes prior runs
+    // (cancel / queue / discard per the policy) — archiving+stopping the prior
+    // review threads here would cancel a run the policy says must finish.
+    const engineOwns = await engineOwnsSupersession({
+      userId,
+      organizationId: automation.organizationId ?? null,
+      repoFullName,
+    });
+    if (source !== "manual" && engineOwns) {
+      console.log(
+        `[automation] engine-owned supersession for PR #${prNumber} in ${repoFullName} — prior review threads left to the policy`,
+      );
+    }
+    if (source !== "manual" && !engineOwns) {
       const unarchivedThreadsForAutomation = await getThreads({
         db,
         userId,
