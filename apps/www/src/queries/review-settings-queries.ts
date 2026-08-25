@@ -116,12 +116,18 @@ export function useClearReviewToleranceMutation() {
   return useMutation({
     mutationFn: async ({
       repoFullName,
+      expectedUpdatedAt,
     }: {
       repoFullName: string;
+      /** The version the UI showed — a stale reset is a 409, never a wipe. */
+      expectedUpdatedAt?: string;
     }): Promise<boolean> => {
       const [owner, repo] = splitRepoFullName(repoFullName);
+      const qs = expectedUpdatedAt
+        ? `?expectedUpdatedAt=${encodeURIComponent(expectedUpdatedAt)}`
+        : "";
       const res = await fetch(
-        `/api/review-settings/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+        `/api/review-settings/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}${qs}`,
         { method: "DELETE" },
       );
       if (!res.ok) {

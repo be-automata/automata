@@ -1,7 +1,7 @@
 import { DB } from "../db";
 import { repoReviewSettings } from "../db/schema";
 import { RepoReviewSetting } from "../db/types";
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, ne, not, or } from "drizzle-orm";
 import { buildEgressPolicyShape } from "./egress-policy";
 
 /**
@@ -342,38 +342,45 @@ export async function removeRepoReviewSetting({
   const rowFilter = and(
     eq(repoReviewSettings.organizationId, organizationId),
     eq(repoReviewSettings.repoFullName, repo),
+    ...(expectedUpdatedAt
+      ? [eq(repoReviewSettings.updatedAt, expectedUpdatedAt)]
+      : []),
   );
-  const existing = await getRepoReviewSetting({
-    db,
-    organizationId,
-    repoFullName,
-  });
-  if (!existing) return { removed: false, conflict: false };
-  const versionFilter = expectedUpdatedAt
-    ? and(rowFilter, eq(repoReviewSettings.updatedAt, expectedUpdatedAt))
-    : rowFilter;
-  const otherFamiliesPresent =
-    existing.supersedePolicy !== null ||
-    existing.egressPolicy !== null ||
-    (existing.egressAllowlist !== null &&
-      existing.egressAllowlist !== undefined);
-  if (otherFamiliesPresent) {
-    const updated = await db
-      .update(repoReviewSettings)
-      .set({
-        blockTolerance: "warning",
-        reviewDraftPrs: true,
-        updatedAt: new Date(),
-      })
-      .where(versionFilter)
-      .returning({ id: repoReviewSettings.id });
-    return { removed: updated.length > 0, conflict: updated.length === 0 };
-  }
+  // The "does another family live on this row" decision is made BY THE
+  // DATABASE inside each statement, not by a prior SELECT: a supersede/egress
+  // override landing concurrently can never be wiped by a reset that read
+  // the row a moment earlier.
+  const otherFamiliesPresent = or(
+    isNotNull(repoReviewSettings.supersedePolicy),
+    isNotNull(repoReviewSettings.egressPolicy),
+    isNotNull(repoReviewSettings.egressAllowlist),
+  );
+  const reset = await db
+    .update(repoReviewSettings)
+    .set({
+      blockTolerance: "warning",
+      reviewDraftPrs: true,
+      updatedAt: new Date(),
+    })
+    .where(and(rowFilter, otherFamiliesPresent))
+    .returning({ id: repoReviewSettings.id });
+  if (reset.length > 0) return { removed: true, conflict: false };
   const deleted = await db
     .delete(repoReviewSettings)
-    .where(versionFilter)
+    .where(and(rowFilter, not(otherFamiliesPresent)))
     .returning({ id: repoReviewSettings.id });
-  return { removed: deleted.length > 0, conflict: deleted.length === 0 };
+  if (deleted.length > 0) return { removed: true, conflict: false };
+  // Nothing matched: either no row (nothing to reset) or, with a version
+  // given, the row moved on since the caller read it.
+  if (expectedUpdatedAt) {
+    const exists = await getRepoReviewSetting({
+      db,
+      organizationId,
+      repoFullName,
+    });
+    return { removed: false, conflict: exists !== undefined };
+  }
+  return { removed: false, conflict: false };
 }
 
 /** List all tolerance overrides for one org (dashboard settings page). */

@@ -157,7 +157,10 @@ export function ReviewSettings() {
 
   const doReset = (row: RepoRowData): Promise<void> =>
     runMutation(row, () =>
-      clearMutation.mutateAsync({ repoFullName: row.repoFullName }),
+      clearMutation.mutateAsync({
+        repoFullName: row.repoFullName,
+        expectedUpdatedAt: row.updatedAt,
+      }),
     );
 
   /** The draft-PR toggle saves immediately (partial patch) — no explicit Save. */
