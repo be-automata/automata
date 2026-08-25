@@ -1,5 +1,6 @@
 import { describe, it, beforeEach, expect, vi } from "vitest";
 import { db } from "@/lib/db";
+import { runPullRequestAutomation } from "@/server-lib/automations";
 import { thread as threadTable } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 import { hatchetDispatchEnabled } from "@/agent/hatchet/dispatch";
@@ -30,6 +31,11 @@ vi.mock("@/agent/hatchet/dispatch", async (importOriginal) => {
     ),
   };
 });
+
+vi.mock("@/server-lib/automations", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  runPullRequestAutomation: vi.fn(),
+}));
 
 describe("maybeRecheckOnComplete (#125 C5)", () => {
   let user: User;
@@ -133,6 +139,32 @@ describe("maybeRecheckOnComplete (#125 C5)", () => {
     expect(again.rechecked).toBe(true);
     expect(calls).toHaveLength(2);
     expect(calls[1]!.deliveryId).toBe(`recheck:${prKey()}:sha-5`);
+  });
+
+  it("the REAL dispatcher: when runPullRequestAutomation swallows its failure (returns false) the claim is still released", async () => {
+    const threadId = await finishedRun({
+      reviewedSha: "sha-1",
+      policy: "complete-run-discard",
+      recheckOnComplete: true,
+      externalId: "ext-real-fail",
+    });
+    await push("sha-8", 1, "d8");
+    vi.mocked(runPullRequestAutomation).mockResolvedValueOnce(false);
+    const failed = await maybeRecheckOnComplete({ threadId }); // default dispatch
+    expect(failed.rechecked).toBe(false);
+    expect(runPullRequestAutomation).toHaveBeenCalledTimes(1);
+    // Released: a later terminal re-dispatches the same head.
+    vi.mocked(runPullRequestAutomation).mockResolvedValueOnce(true);
+    const again = await maybeRecheckOnComplete({ threadId });
+    expect(again).toEqual({ rechecked: true, reason: "dispatched" });
+    expect(runPullRequestAutomation).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        prNumber: PR,
+        deliveryId: `recheck:${prKey()}:sha-8`,
+        prEventAction: "synchronize",
+        source: "automated",
+      }),
+    );
   });
 
   it("a claim whose dispatch throws is released: the head can still be rechecked by a later terminal", async () => {

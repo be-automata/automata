@@ -194,9 +194,19 @@ const defaultDispatch: RecheckDispatch = async (args) => {
   // Dynamic import: automations.ts drags the thread-creation graph in; this
   // module is imported by the sweep/cron path that must stay light.
   const { runPullRequestAutomation } = await import("@/server-lib/automations");
-  await runPullRequestAutomation({
+  // runPullRequestAutomation swallows its own dispatch-chain failures (it
+  // reports them on the GitHub check run instead). For the recheck that is
+  // NOT enough: a swallowed failure would leave the ledger row claimed with
+  // no run — so a non-dispatch is surfaced as a throw, which releases the
+  // claim (see maybeRecheckOnComplete) and lets a later terminal retry.
+  const dispatched = await runPullRequestAutomation({
     ...args,
     prEventAction: "synchronize",
     source: "automated",
   });
+  if (!dispatched) {
+    throw new Error(
+      `recheck re-dispatch for ${args.repoFullName}#${args.prNumber} did not start a run`,
+    );
+  }
 };

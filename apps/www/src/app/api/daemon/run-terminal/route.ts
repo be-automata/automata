@@ -62,6 +62,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       (generation.activeRunExternalId === null ||
         generation.activeRunExternalId === runExternalId)
     ) {
+      // A retry of an already-applied terminal is exactly the path that
+      // must heal a recheck lost between the first attempt's terminal write
+      // and its ledger claim — so the reconciliation fires here too (the
+      // UNIQUE ledger keeps it at-most-once).
+      waitUntil(maybeRecheckOnComplete({ threadId }));
       return NextResponse.json({ applied: false });
     }
     console.log("[run-terminal] rejected", {

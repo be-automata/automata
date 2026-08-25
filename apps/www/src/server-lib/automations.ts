@@ -510,7 +510,7 @@ export async function runPullRequestAutomation({
   source: "automated" | "manual";
   /** #127: originating webhook delivery id (absent for manual runs). */
   deliveryId?: string;
-}) {
+}): Promise<boolean> {
   const { automation, canRun } = await validateCanRunAutomation({
     userId,
     automationId,
@@ -518,7 +518,7 @@ export async function runPullRequestAutomation({
     throwOnError: false,
   });
   if (!canRun) {
-    return;
+    return false;
   }
   if (automation.repoFullName !== repoFullName) {
     throw new Error("Automation is not configured for this repository");
@@ -656,6 +656,7 @@ export async function runPullRequestAutomation({
         summary: `Automation started: ${threadId}`,
       });
     }
+    return true;
   } catch (error) {
     console.error(`Error running automation ${automationId}:`, error);
     if (checkRunId !== null) {
@@ -670,6 +671,7 @@ export async function runPullRequestAutomation({
         threadChatIdOrNull: null,
       });
     }
+    return false;
   }
 }
 

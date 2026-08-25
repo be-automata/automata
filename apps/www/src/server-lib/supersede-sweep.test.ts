@@ -58,7 +58,7 @@ describe("runSupersedeSweep (#125 C4)", () => {
 
   it("rule (i): CANCELLED ⇒ superseded (with sibling, linked) / user-cancelled; NOT_FOUND ⇒ superseded / plane-offline; FAILED ⇒ daemon-failed; live ⇒ untouched + lease extended; COMPLETED ⇒ run retired, thread untouched", async () => {
     const superseded = await remoteRun(1, T + 60_000, "r-old");
-    await remoteRun(1, 0, "r-newer"); // newer sibling, same PR
+    const newer = await remoteRun(1, 0, "r-newer"); // newer sibling, same PR
     const userCancelled = await remoteRun(2, T + 60_000, "r-alone");
     const vanished = await remoteRun(6, T + 60_000, "r-vanished");
     const failed = await remoteRun(3, T + 60_000, "r-failed");
@@ -85,6 +85,10 @@ describe("runSupersedeSweep (#125 C4)", () => {
         { threadId: failed, cause: "daemon-failed" },
       ]),
     );
+    // The superseded thread is LINKED to the newer sibling (persisted, not
+    // just computed): the chip's "superseded by" deep link reads this column.
+    expect((await threadRow(superseded)).supersededByThreadId).toBe(newer);
+    expect((await threadRow(superseded)).terminalCause).toBe("superseded");
     const sup = await threadRow(superseded);
     expect(sup.terminalCause).toBe("superseded");
     expect(sup.errorMessage).toBe("superseded");
