@@ -261,7 +261,20 @@ export async function DELETE(
     expectedUpdatedAt,
   });
   if (conflict) {
-    return NextResponse.json({ error: "conflict" }, { status: 409 });
+    // Same 409 shape as PUT (supersede-route-shared.ts): the client's
+    // ConflictError parser reads currentUpdatedAt on every conflict.
+    const current = await getRepoReviewSetting({
+      db,
+      organizationId: ctx.organizationId,
+      repoFullName,
+    });
+    return NextResponse.json(
+      {
+        error: "conflict",
+        currentUpdatedAt: current?.updatedAt?.toISOString() ?? null,
+      },
+      { status: 409 },
+    );
   }
 
   getPostHogServer().capture({

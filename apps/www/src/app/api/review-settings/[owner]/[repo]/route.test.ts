@@ -5,6 +5,7 @@ import { getTenantContextOrNull } from "@/lib/auth-server";
 import {
   upsertRepoReviewSetting,
   removeRepoReviewSetting,
+  getRepoReviewSetting,
 } from "@terragon/shared/model/repo-review-settings";
 
 // #125 C6: these cases exercise validation/DTO shape; the permission gate has
@@ -26,6 +27,9 @@ vi.mock(
     ...(await importOriginal<object>()),
     upsertRepoReviewSetting: vi.fn(),
     removeRepoReviewSetting: vi.fn(),
+    // The 409 bodies read the current row back; mocked so the conflict tests
+    // pin the body shape without a database.
+    getRepoReviewSetting: vi.fn(),
   }),
 );
 
@@ -173,6 +177,41 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
     );
     const json = (await res.json()) as { removed: boolean };
     expect(json.removed).toBe(true);
+  });
+
+  it("DELETE 409 on a lost CAS race carries currentUpdatedAt — the same body shape as PUT", async () => {
+    const current = new Date("2026-08-25T18:00:00.000Z");
+    vi.mocked(removeRepoReviewSetting).mockResolvedValue({
+      removed: false,
+      conflict: true,
+    });
+    vi.mocked(getRepoReviewSetting).mockResolvedValue({
+      id: "rrs_1",
+      organizationId: ORG,
+      repoFullName: "acme/widgets",
+      blockTolerance: "error",
+      reviewDraftPrs: true,
+      trustedAuthorThreshold: null,
+      egressPolicy: null,
+      egressAllowlist: null,
+      supersedePolicy: null,
+      recheckOnComplete: false,
+      updatedByUserId: USER,
+      createdAt: current,
+      updatedAt: current,
+    });
+    const res = await DELETE(
+      new NextRequest(
+        "http://localhost/api/review-settings/acme/widgets?expectedUpdatedAt=2026-08-25T17:00:00.000Z",
+        { method: "DELETE" },
+      ),
+      { params },
+    );
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: "conflict",
+      currentUpdatedAt: current.toISOString(),
+    });
   });
 
   it("DELETE is 401 when unauthenticated", async () => {
