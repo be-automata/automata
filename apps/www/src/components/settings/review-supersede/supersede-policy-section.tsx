@@ -387,7 +387,17 @@ export function SupersedePolicySection() {
           policy: stored?.supersedePolicy ?? null,
           recheckOnComplete: stored?.recheckOnComplete ?? false,
           conflict,
-          saving: setDefault.isPending || setOverride.isPending,
+          // Every writer must be here. `saving` disables the whole section,
+          // and `restoreOverride` is a SEPARATE mutation instance (it carries
+          // its own toast copy), so omitting it left the controls live during
+          // a restore: a double-click fired two PUTs with the same
+          // `expectedUpdatedAt`, the second lost the DB CAS race, and the 409
+          // surfaced as "Another admin just saved changes" for a conflict the
+          // user had with themselves.
+          saving:
+            setDefault.isPending ||
+            setOverride.isPending ||
+            restoreOverride.isPending,
           overridesLoading: listQuery.isLoading,
           overrides: (listQuery.data ?? []).filter(
             (s) => s.supersedePolicy !== null,
