@@ -38,6 +38,7 @@ const actions: SupersedeSectionActions = {
   onRecheckChange: vi.fn(),
   onOverridePolicy: vi.fn(),
   onRestoreDefault: vi.fn(),
+  onAddOverride: vi.fn(),
   onReload: vi.fn(),
 };
 
@@ -56,6 +57,7 @@ const ready = (
   saving: false,
   overridesLoading: false,
   overrides: [],
+  availableRepos: [],
   ...over,
 });
 
@@ -110,6 +112,22 @@ describe("SupersedePolicySectionView", () => {
     expect((html.match(/Restore default/g) ?? []).length).toBe(2);
     expect(html).toContain('aria-label="Supersede policy for acme/widgets"');
     expect(html).not.toContain('data-testid="supersede-overrides-empty"');
+  });
+
+  it("ready + repos without an override → the Add-override row is the path to a repo's FIRST override; empty copy points at it", () => {
+    const html = render(
+      ready({ availableRepos: ["acme/widgets", "acme/api"] }),
+    );
+    expect(html).toContain('data-testid="supersede-add-override"');
+    expect(html).toContain('aria-label="Repository to add an override for"');
+    expect(html).toContain(">Add override<");
+    expect(html).toContain("Add an override below");
+    expect(html).not.toContain("Review tolerance"); // no reference to a control that does not exist
+  });
+
+  it("no repos left to override → no Add-override row", () => {
+    const html = render(ready({ availableRepos: [] }));
+    expect(html).not.toContain('data-testid="supersede-add-override"');
   });
 
   it("conflict → banner with Reload, controls still rendered (and disabled while saving)", () => {

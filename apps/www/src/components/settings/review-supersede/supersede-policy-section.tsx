@@ -27,6 +27,7 @@ import {
   useSupersedeDefaultQuery,
 } from "@/queries/supersede-policy-queries";
 import { ConflictError } from "@/queries/error-from-response";
+import { useUserReposQuery } from "@/queries/user-repo-queries";
 import { PolicyRadioGroup } from "./policy-radio-group";
 
 /**
@@ -62,6 +63,8 @@ export type SupersedeSectionState =
       saving: boolean;
       overridesLoading: boolean;
       overrides: OverrideRow[];
+      /** Repos the caller can add a FIRST override for (not yet overridden). */
+      availableRepos: string[];
     };
 
 export interface SupersedeSectionActions {
@@ -69,6 +72,7 @@ export interface SupersedeSectionActions {
   onRecheckChange: (on: boolean) => void;
   onOverridePolicy: (row: OverrideRow, policy: SupersedePolicy) => void;
   onRestoreDefault: (row: OverrideRow) => void;
+  onAddOverride: (repoFullName: string, policy: SupersedePolicy) => void;
   onReload: () => void;
 }
 
@@ -127,9 +131,8 @@ export function SupersedePolicySectionView({
                 className="mt-2 text-sm text-muted-foreground"
                 data-testid="supersede-overrides-empty"
               >
-                All your repos use the org default. Set a repo&apos;s policy
-                from the selector below its row in Review tolerance, or here
-                once one differs.
+                All your repos use the org default. Add an override below to
+                give one repo its own policy.
               </p>
             ) : (
               <ul className="mt-2 grid gap-2">
@@ -184,6 +187,13 @@ export function SupersedePolicySectionView({
                 ))}
               </ul>
             )}
+            {!state.overridesLoading && (
+              <AddOverrideRow
+                repos={state.availableRepos}
+                disabled={state.saving}
+                onAdd={actions.onAddOverride}
+              />
+            )}
           </div>
         </>
       )}
@@ -191,10 +201,89 @@ export function SupersedePolicySectionView({
   );
 }
 
+/**
+ * The only way to create a repo's FIRST override: pick a repo the caller can
+ * see (GitHub App installations), pick a policy, Add. Repos that already have
+ * an override are edited in the list above instead.
+ */
+function AddOverrideRow({
+  repos,
+  disabled,
+  onAdd,
+}: {
+  repos: string[];
+  disabled: boolean;
+  onAdd: (repoFullName: string, policy: SupersedePolicy) => void;
+}) {
+  const [repo, setRepo] = useState<string>("");
+  const [policy, setPolicy] = useState<SupersedePolicy>(
+    DEFAULT_SUPERSEDE_POLICY,
+  );
+  if (repos.length === 0) return null;
+  return (
+    <div
+      className="mt-3 grid grid-cols-1 items-center gap-2 rounded-md border border-dashed p-3 sm:grid-cols-[1fr_auto_auto]"
+      data-testid="supersede-add-override"
+    >
+      <Select value={repo} onValueChange={setRepo} disabled={disabled}>
+        <SelectTrigger
+          className="min-h-11 w-full"
+          aria-label="Repository to add an override for"
+        >
+          <SelectValue placeholder="Choose a repository…" />
+        </SelectTrigger>
+        <SelectContent>
+          {repos.map((r) => (
+            <SelectItem key={r} value={r}>
+              {r}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Select
+        value={policy}
+        onValueChange={(v) => setPolicy(v as SupersedePolicy)}
+        disabled={disabled}
+      >
+        <SelectTrigger
+          className="min-h-11 w-full sm:w-64"
+          aria-label="Policy for the new override"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {(
+            Object.entries(SUPERSEDE_POLICY_LABELS) as [
+              SupersedePolicy,
+              string,
+            ][]
+          ).map(([value, label]) => (
+            <SelectItem key={value} value={value}>
+              {label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Button
+        size="sm"
+        className="min-h-11"
+        disabled={disabled || !repo}
+        onClick={() => {
+          onAdd(repo, policy);
+          setRepo("");
+        }}
+      >
+        Add override
+      </Button>
+    </div>
+  );
+}
+
 /** Thin container: binds the queries/mutations to the pure view. */
 export function SupersedePolicySection() {
   const defaultQuery = useSupersedeDefaultQuery();
   const listQuery = useReviewSettingsQuery();
+  const reposQuery = useUserReposQuery();
   const setDefault = useSetSupersedeDefaultMutation();
   const setOverride = useSetReviewSettingMutation({
     successMessage: "Repo override saved. Applies to new runs.",
@@ -252,6 +341,15 @@ export function SupersedePolicySection() {
           overrides: (listQuery.data ?? []).filter(
             (s) => s.supersedePolicy !== null,
           ),
+          availableRepos: (reposQuery.data?.repos ?? [])
+            .map((r) => r.full_name)
+            .filter(
+              (name) =>
+                !(listQuery.data ?? []).some(
+                  (s) => s.repoFullName === name && s.supersedePolicy !== null,
+                ),
+            )
+            .sort(),
         };
 
   return (
@@ -262,6 +360,13 @@ export function SupersedePolicySection() {
         onRecheckChange: (on) => saveDefault({ recheckOnComplete: on }),
         onOverridePolicy: (row, policy) => saveOverride(row, policy),
         onRestoreDefault: (row) => saveOverride(row, null),
+        onAddOverride: (repoFullName, policy) => {
+          setConflict(false);
+          setOverride.mutate(
+            { repoFullName, patch: { supersedePolicy: policy } },
+            { onError: onConflict },
+          );
+        },
         onReload: () => {
           setConflict(false);
           void defaultQuery.refetch();
