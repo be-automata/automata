@@ -105,6 +105,10 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   // (ON CONFLICT … DO UPDATE … WHERE updated_at = expected): two admins who
   // read the same version can never both win — the loser gets a 409, never
   // a silent last-write-wins.
+  // `expectedUpdatedAt: null` is the FIRST-WRITE fence: the sentinel row is
+  // created lazily, and two org admins racing to set the very first default
+  // must not both get 200 — same contract as the per-repo route.
+  const expectAbsentSupersedeOverride = body.expectedUpdatedAt === null;
   const expectedUpdatedAt =
     typeof body.expectedUpdatedAt === "string"
       ? new Date(body.expectedUpdatedAt)
@@ -124,6 +128,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       patch,
       updatedByUserId: ctx.userId,
       expectedUpdatedAt,
+      expectAbsentSupersedeOverride,
     });
   } catch (error) {
     if (error instanceof RepoReviewSettingConflictError) {

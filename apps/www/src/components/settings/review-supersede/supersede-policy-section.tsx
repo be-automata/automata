@@ -390,7 +390,9 @@ export function SupersedePolicySection() {
   }) {
     setConflict(false);
     setDefault.mutate(
-      { ...patch, expectedUpdatedAt: stored?.updatedAt },
+      // No stored default yet ⇒ the null first-write fence, so two org
+      // admins can't both create it; otherwise the version fence.
+      { ...patch, expectedUpdatedAt: stored ? stored.updatedAt : null },
       { onError: onConflict },
     );
   }

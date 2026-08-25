@@ -83,6 +83,22 @@ describe("/api/review-settings/default (#125 C6 org default)", () => {
     ).toBe("complete-run-discard");
   });
 
+  it("first-write fence: two admins racing to CREATE the org default (expectedUpdatedAt:null) — exactly one 200, the other 409", async () => {
+    await actor("admin");
+    const [a, b] = await Promise.all([
+      put({ supersedePolicy: "newest-wins", expectedUpdatedAt: null }),
+      put({ supersedePolicy: "app-side", expectedUpdatedAt: null }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const stored = await getRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+    });
+    // The winner's choice stands — nothing was silently overwritten.
+    expect(["newest-wins", "app-side"]).toContain(stored?.supersedePolicy);
+  });
+
   it("conflict: a stale expectedUpdatedAt → 409 and no overwrite (AC3)", async () => {
     await actor("owner");
     await put({ supersedePolicy: "newest-wins" });

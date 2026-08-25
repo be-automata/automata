@@ -40,7 +40,7 @@ export function useSetSupersedeDefaultMutation() {
     mutationFn: async (args: {
       supersedePolicy?: SupersedePolicy | null;
       recheckOnComplete?: boolean;
-      expectedUpdatedAt?: string;
+      expectedUpdatedAt?: string | null;
     }): Promise<SupersedeDefaultDto> => {
       const res = await fetch("/api/review-settings/default", {
         method: "PUT",
