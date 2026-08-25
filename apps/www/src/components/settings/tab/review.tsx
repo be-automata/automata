@@ -37,6 +37,8 @@ interface RepoRowData {
   /** Whether Automata engages this repo's draft PRs (override or the `true` default). */
   reviewDraftPrs: boolean;
   hasOverride: boolean;
+  /** Version of the stored row (ISO) — sent with writes as the CAS token. */
+  updatedAt?: string;
 }
 
 export function ReviewSettings() {
@@ -72,6 +74,7 @@ export function ReviewSettings() {
         tolerance: override?.blockTolerance ?? DEFAULT_TOLERANCE,
         reviewDraftPrs: override?.reviewDraftPrs ?? true,
         hasOverride: Boolean(override),
+        updatedAt: override?.updatedAt,
       });
     }
     // Include overrides for repos not in the user's installable list (e.g. set
@@ -81,6 +84,7 @@ export function ReviewSettings() {
       if (!rowMap.has(key)) {
         rowMap.set(key, {
           repoFullName: s.repoFullName,
+          updatedAt: s.updatedAt,
           key,
           tolerance: s.blockTolerance,
           reviewDraftPrs: s.reviewDraftPrs,

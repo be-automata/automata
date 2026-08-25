@@ -354,7 +354,7 @@ export async function removeRepoReviewSetting({
     isNotNull(repoReviewSettings.supersedePolicy),
     isNotNull(repoReviewSettings.egressPolicy),
     isNotNull(repoReviewSettings.egressAllowlist),
-  );
+  )!;
   const reset = await db
     .update(repoReviewSettings)
     .set({
