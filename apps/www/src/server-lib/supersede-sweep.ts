@@ -15,7 +15,6 @@ import {
 import type { TerminalCause } from "@terragon/shared/model/terminal-cause";
 import { assertNever } from "@terragon/shared/utils";
 import { maybeRecheckOnComplete } from "./supersede-recheck";
-import { maybeRecheckOnComplete } from "@/server-lib/supersede-recheck";
 import {
   getAgentRunStatus,
   type AgentRunStatus,
