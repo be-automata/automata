@@ -756,3 +756,130 @@ describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () 
     expect(ids).not.toContain(noAutomation);
   });
 });
+
+describe("markThreadsTerminal — chat-mode terminal lands as ONE transaction (#153)", () => {
+  // A chat-mode (version=1) thread terminates across TWO tables: threadChat
+  // carries `status`, the thread row carries the typed `terminalCause` that the
+  // #125 C1 generation fence keys on. Those used to be three independent
+  // statements, so a late daemon event arriving between them saw `complete`
+  // with a NULL cause and was ADMITTED when it should have been refused.
+  // These are the first tests to exercise that path at all.
+  let userId: string;
+  let orgA: string;
+
+  beforeEach(async () => {
+    userId = (await createTestUser({ db })).user.id;
+    orgA = await makeOrg("acme-153");
+  });
+
+  it("stamps BOTH rows — threadChat.status AND thread.terminalCause", async () => {
+    const { threadId } = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 1,
+      externalId: nanoid(),
+      enableThreadChatCreation: true,
+      status: "working",
+    });
+
+    const moved = await markThreadsTerminal({
+      db,
+      threadIds: [threadId],
+      cause: "superseded",
+    });
+    expect(moved).toEqual([threadId]);
+
+    const [thread] = await db.query.thread.findMany({
+      where: (t, { eq }) => eq(t.id, threadId),
+    });
+    const [chat] = await db.query.threadChat.findMany({
+      where: (c, { eq }) => eq(c.threadId, threadId),
+    });
+
+    // The fence's two inputs must agree. Before #153 these could disagree.
+    expect(chat!.status).toBe("complete");
+    expect(thread!.terminalCause).toBe("superseded");
+  });
+
+  it("carries supersededByThreadId onto the thread row on the chat-only path", async () => {
+    const { threadId } = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 2,
+      externalId: nanoid(),
+      enableThreadChatCreation: true,
+      status: "working",
+    });
+    const { threadId: newerId } = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 2,
+      externalId: nanoid(),
+      enableThreadChatCreation: true,
+      status: "working",
+    });
+
+    await markThreadsTerminal({
+      db,
+      threadIds: [threadId],
+      cause: "superseded",
+      supersededByThreadId: newerId,
+    });
+
+    const [thread] = await db.query.thread.findMany({
+      where: (t, { eq }) => eq(t.id, threadId),
+    });
+    expect(thread!.terminalCause).toBe("superseded");
+    expect(thread!.supersededByThreadId).toBe(newerId);
+  });
+
+  it("v0 is unchanged — the legacy single-row path still terminates", async () => {
+    const { threadId } = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 3,
+      externalId: nanoid(),
+      enableThreadChatCreation: false,
+      status: "working",
+    });
+
+    const moved = await markThreadsTerminal({
+      db,
+      threadIds: [threadId],
+      cause: "daemon-failed",
+    });
+    expect(moved).toEqual([threadId]);
+
+    const [thread] = await db.query.thread.findMany({
+      where: (t, { eq }) => eq(t.id, threadId),
+    });
+    expect(thread!.status).toBe("complete");
+    expect(thread!.terminalCause).toBe("daemon-failed");
+  });
+
+  it("a retry does not rewrite the cause (WHERE terminalCause IS NULL holds)", async () => {
+    const { threadId } = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 4,
+      externalId: nanoid(),
+      enableThreadChatCreation: true,
+      status: "working",
+    });
+    await markThreadsTerminal({ db, threadIds: [threadId], cause: "timeout" });
+    await markThreadsTerminal({
+      db,
+      threadIds: [threadId],
+      cause: "user-cancelled",
+    });
+    const [thread] = await db.query.thread.findMany({
+      where: (t, { eq }) => eq(t.id, threadId),
+    });
+    expect(thread!.terminalCause).toBe("timeout");
+  });
+});

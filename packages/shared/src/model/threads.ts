@@ -1496,59 +1496,84 @@ export async function markThreadsTerminal({
   // chat-mode thread) simply doesn't match. The typed cause is a thread-row
   // column (the run ledger's join key); for threads that moved via their chat
   // row it is stamped on the thread row in a follow-up write below.
-  const [threadRows, chatRows] = await Promise.all([
-    db
-      .update(schema.thread)
-      .set({
-        ...terminal,
-        terminalCause: cause,
-        ...(supersededByThreadId ? { supersededByThreadId } : {}),
-      })
-      .where(
-        and(
-          inArray(schema.thread.id, threadIds),
-          inArray(schema.thread.status, reapableThreadStatuses),
-        ),
-      )
-      .returning({ id: schema.thread.id, userId: schema.thread.userId }),
-    db
-      .update(schema.threadChat)
-      .set(terminal)
-      .where(
-        and(
-          inArray(schema.threadChat.threadId, threadIds),
-          inArray(schema.threadChat.status, reapableThreadStatuses),
-        ),
-      )
-      .returning({
-        id: schema.threadChat.threadId,
-        userId: schema.threadChat.userId,
-      }),
-  ]);
+  // ONE TRANSACTION (#153 prerequisite). The effective status of a thread lives
+  // on the thread row for legacy (LEGACY_THREAD_CHAT_ID) threads and on the
+  // threadChat row otherwise (enableThreadChatCreation), while the typed cause
+  // is a thread-row column (the run ledger's join key). A chat-mode thread
+  // therefore terminates across TWO tables, and these writes used to be three
+  // independent statements: threadChat.status landed first and thread
+  // .terminalCause in a follow-up write. Between them the thread was visibly
+  // `complete` with a NULL cause — and the #125 C1 generation fence keys on
+  // terminalCause, so a late daemon event arriving in that window was ADMITTED
+  // when it should have been refused. Wrapping all three in one transaction
+  // closes that window: a concurrent reader sees every write or none.
+  //
+  // Under v0 (every thread today) the threadChat UPDATE matches nothing and
+  // chatOnly is empty, so this is behaviourally identical to the previous code
+  // — it is the forward-looking half of #153's prerequisite that needs no
+  // schema migration. The remaining half (the fence READS terminalCause and
+  // status via two separate SELECTs, which can still straddle) requires moving
+  // the lifecycle columns onto threadChat and is tracked on #153.
+  //
+  // Broadcast publishing stays OUTSIDE the transaction: it is network I/O, and
+  // a broadcast failure must never roll back a terminal that already committed.
+  const { threadRows, chatRows } = await db.transaction(async (tx) => {
+    const [threadRows, chatRows] = await Promise.all([
+      tx
+        .update(schema.thread)
+        .set({
+          ...terminal,
+          terminalCause: cause,
+          ...(supersededByThreadId ? { supersededByThreadId } : {}),
+        })
+        .where(
+          and(
+            inArray(schema.thread.id, threadIds),
+            inArray(schema.thread.status, reapableThreadStatuses),
+          ),
+        )
+        .returning({ id: schema.thread.id, userId: schema.thread.userId }),
+      tx
+        .update(schema.threadChat)
+        .set(terminal)
+        .where(
+          and(
+            inArray(schema.threadChat.threadId, threadIds),
+            inArray(schema.threadChat.status, reapableThreadStatuses),
+          ),
+        )
+        .returning({
+          id: schema.threadChat.threadId,
+          userId: schema.threadChat.userId,
+        }),
+    ]);
+
+    // Chat-mode threads moved via their chat row only: the thread row (frozen at
+    // its creation status, never reapable) still owns the typed cause, so stamp
+    // it there too — exactly once (the WHERE keeps a retry from rewriting it).
+    const movedViaThreadRow = new Set(threadRows.map((r) => r.id));
+    const chatOnly = chatRows
+      .map((r) => r.id)
+      .filter((id) => !movedViaThreadRow.has(id));
+    if (chatOnly.length > 0) {
+      await tx
+        .update(schema.thread)
+        .set({
+          terminalCause: cause,
+          ...(supersededByThreadId ? { supersededByThreadId } : {}),
+        })
+        .where(
+          and(
+            inArray(schema.thread.id, chatOnly),
+            isNull(schema.thread.terminalCause),
+          ),
+        );
+    }
+    return { threadRows, chatRows };
+  });
+
   const updated = new Map<string, string>();
   for (const r of [...threadRows, ...chatRows]) updated.set(r.id, r.userId);
-
-  // Chat-mode threads moved via their chat row only: the thread row (frozen at
-  // its creation status, never reapable) still owns the typed cause, so stamp
-  // it there too — exactly once (the WHERE keeps a retry from rewriting it).
-  const movedViaThreadRow = new Set(threadRows.map((r) => r.id));
-  const chatOnly = chatRows
-    .map((r) => r.id)
-    .filter((id) => !movedViaThreadRow.has(id));
-  if (chatOnly.length > 0) {
-    await db
-      .update(schema.thread)
-      .set({
-        terminalCause: cause,
-        ...(supersededByThreadId ? { supersededByThreadId } : {}),
-      })
-      .where(
-        and(
-          inArray(schema.thread.id, chatOnly),
-          isNull(schema.thread.terminalCause),
-        ),
-      );
-  }
 
   await Promise.all(
     [...updated].map(([threadId, userId]) =>
