@@ -756,3 +756,47 @@ describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () 
     expect(ids).not.toContain(noAutomation);
   });
 });
+
+describe("markThreadsTerminal — supersededByThreadId on the chat-only path (#153)", () => {
+  // The ONLY genuinely uncovered case here. The chat-mode terminal itself is
+  // already pinned by "stamps terminalCause on the THREAD row of a chat-mode
+  // thread ... (exactly once)" above, and the legacy path by
+  // "markThreadTerminal writes the typed cause exactly once" — both of which
+  // assert MORE than a duplicate would. supersededByThreadId has no coverage on
+  // main (verified 2026-08-26), and it rides the follow-up write that only
+  // fires when a thread moved via its chat row.
+  let userId: string;
+  let orgA: string;
+
+  beforeEach(async () => {
+    userId = (await createTestUser({ db })).user.id;
+    orgA = await makeOrg("acme-153");
+  });
+
+  it("stamps the superseding thread id on the thread row of a chat-mode thread", async () => {
+    const mk = (prNumber: number) =>
+      createTestRemoteRun({
+        db,
+        userId,
+        organizationId: orgA,
+        prNumber,
+        externalId: nanoid(),
+        enableThreadChatCreation: true,
+      });
+    const { threadId } = await mk(2);
+    const { threadId: newerId } = await mk(2);
+
+    await markThreadsTerminal({
+      db,
+      threadIds: [threadId],
+      cause: "superseded",
+      supersededByThreadId: newerId,
+    });
+
+    const [row] = await db.query.thread.findMany({
+      where: (t, { eq }) => eq(t.id, threadId),
+    });
+    expect(row!.terminalCause).toBe("superseded");
+    expect(row!.supersededByThreadId).toBe(newerId);
+  });
+});

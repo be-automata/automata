@@ -56,7 +56,18 @@ pnpm tsc-check
 
 If you make a change to the db schema, you need to run the following command to push the schema to the development db.
 
-This happens automatically for tests environments and happens automatically in production using a github action when code lands on main.
+Test environments push the schema automatically.
+
+> **PRODUCTION DOES NOT.** Verified 2026-08-26: `.github/workflows/` contains only
+> `ci.yml`, which runs lint/typecheck/tests and has **no drizzle push step**. There is
+> no GitHub action that migrates the Neon production database when code lands on main.
+>
+> A schema change therefore ships in two ordered manual steps: **push the schema to prod
+> FIRST, then deploy the worker**. Merging schema-dependent code without the push leaves
+> production running code that reads columns which do not exist.
+>
+> The prod `DATABASE_URL` is a write-only Cloudflare Worker secret (`wrangler secret list`
+> shows names only), so whoever runs the migration needs it out of band.
 
 ```bash
 # Push schema to dev database

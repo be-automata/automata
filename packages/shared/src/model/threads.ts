@@ -1488,67 +1488,82 @@ export async function markThreadsTerminal({
     status: "complete" as const,
     errorMessage: cause === "superseded" ? THREAD_SUPERSEDED_ERROR : null,
   };
-  // The EFFECTIVE status of a thread lives on the thread row for legacy
-  // (LEGACY_THREAD_CHAT_ID) threads and on the threadChat row otherwise
-  // (enableThreadChatCreation). Stamp whichever is live so every reader of the
-  // effective status — getThreadChat's alias, the daemon-event fence — sees
-  // the terminal. A non-live row (e.g. the never-started thread row of a
-  // chat-mode thread) simply doesn't match. The typed cause is a thread-row
-  // column (the run ledger's join key); for threads that moved via their chat
-  // row it is stamped on the thread row in a follow-up write below.
-  const [threadRows, chatRows] = await Promise.all([
-    db
-      .update(schema.thread)
-      .set({
-        ...terminal,
-        terminalCause: cause,
-        ...(supersededByThreadId ? { supersededByThreadId } : {}),
-      })
-      .where(
-        and(
-          inArray(schema.thread.id, threadIds),
-          inArray(schema.thread.status, reapableThreadStatuses),
-        ),
-      )
-      .returning({ id: schema.thread.id, userId: schema.thread.userId }),
-    db
-      .update(schema.threadChat)
-      .set(terminal)
-      .where(
-        and(
-          inArray(schema.threadChat.threadId, threadIds),
-          inArray(schema.threadChat.status, reapableThreadStatuses),
-        ),
-      )
-      .returning({
-        id: schema.threadChat.threadId,
-        userId: schema.threadChat.userId,
-      }),
-  ]);
+  // ONE TRANSACTION (#153 prerequisite). A chat-mode thread terminates across
+  // TWO tables: threadChat carries the live `status`, the thread row carries the
+  // typed `terminalCause` (the run ledger's join key). These were three
+  // independent statements, so between them a thread was visibly `complete`
+  // with a NULL cause — and the #125 C1 fence keys on terminalCause, so a late
+  // daemon event landing in that window was ADMITTED instead of refused. One
+  // transaction closes that WRITE window; nothing COMMITTED shows that pair.
+  //
+  // It does NOT close the READ tear: handleDaemonEvent fetches the chat row and
+  // the thread row in two separate queries, and decideThreadGeneration treats a
+  // present-but-null terminalCause as "not terminal" without consulting status,
+  // so a straddling reader still admits. Two fixes, neither in scope here: the
+  // cheap one is a SINGLE joined read at the fence (a transaction would NOT do
+  // it — Postgres defaults to READ COMMITTED, where each statement takes a
+  // fresh snapshot); the durable one is moving the lifecycle columns onto
+  // threadChat. Both tracked on #153.
+  //
+  // Broadcasts stay OUTSIDE the transaction: network I/O must never hold it
+  // open, and a failed publish must not roll back a committed terminal.
+  const { threadRows, chatRows } = await db.transaction(async (tx) => {
+    const [threadRows, chatRows] = await Promise.all([
+      tx
+        .update(schema.thread)
+        .set({
+          ...terminal,
+          terminalCause: cause,
+          ...(supersededByThreadId ? { supersededByThreadId } : {}),
+        })
+        .where(
+          and(
+            inArray(schema.thread.id, threadIds),
+            inArray(schema.thread.status, reapableThreadStatuses),
+          ),
+        )
+        .returning({ id: schema.thread.id, userId: schema.thread.userId }),
+      tx
+        .update(schema.threadChat)
+        .set(terminal)
+        .where(
+          and(
+            inArray(schema.threadChat.threadId, threadIds),
+            inArray(schema.threadChat.status, reapableThreadStatuses),
+          ),
+        )
+        .returning({
+          id: schema.threadChat.threadId,
+          userId: schema.threadChat.userId,
+        }),
+    ]);
+
+    // Chat-mode threads moved via their chat row only: the thread row (frozen at
+    // its creation status, never reapable) still owns the typed cause, so stamp
+    // it there too — exactly once (the WHERE keeps a retry from rewriting it).
+    const movedViaThreadRow = new Set(threadRows.map((r) => r.id));
+    const chatOnly = chatRows
+      .map((r) => r.id)
+      .filter((id) => !movedViaThreadRow.has(id));
+    if (chatOnly.length > 0) {
+      await tx
+        .update(schema.thread)
+        .set({
+          terminalCause: cause,
+          ...(supersededByThreadId ? { supersededByThreadId } : {}),
+        })
+        .where(
+          and(
+            inArray(schema.thread.id, chatOnly),
+            isNull(schema.thread.terminalCause),
+          ),
+        );
+    }
+    return { threadRows, chatRows };
+  });
+
   const updated = new Map<string, string>();
   for (const r of [...threadRows, ...chatRows]) updated.set(r.id, r.userId);
-
-  // Chat-mode threads moved via their chat row only: the thread row (frozen at
-  // its creation status, never reapable) still owns the typed cause, so stamp
-  // it there too — exactly once (the WHERE keeps a retry from rewriting it).
-  const movedViaThreadRow = new Set(threadRows.map((r) => r.id));
-  const chatOnly = chatRows
-    .map((r) => r.id)
-    .filter((id) => !movedViaThreadRow.has(id));
-  if (chatOnly.length > 0) {
-    await db
-      .update(schema.thread)
-      .set({
-        terminalCause: cause,
-        ...(supersededByThreadId ? { supersededByThreadId } : {}),
-      })
-      .where(
-        and(
-          inArray(schema.thread.id, chatOnly),
-          isNull(schema.thread.terminalCause),
-        ),
-      );
-  }
 
   await Promise.all(
     [...updated].map(([threadId, userId]) =>
