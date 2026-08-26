@@ -61,7 +61,14 @@ export async function updateThreadChatWithTransition({
         reattemptQueueAt = new Date(Date.now() + 60 * 60 * 1000);
       }
     }
-    const updatedThreadOrUndefined = await updateThreadChatStatusAtomic({
+    // Take the CAS RESULT, not the truthiness of the wrapper. This used to be
+    // `if (!!updatedThreadOrUndefined)` against a value that once was a
+    // row-or-undefined; updateThreadChatStatusAtomic now returns
+    // `{ didUpdateStatus: boolean }` — an object, so ALWAYS truthy. Every
+    // caller that treats `didUpdateStatus` as "I won the race" was therefore
+    // told it won even when the `eq(status, fromStatus)` guard matched zero
+    // rows, which is the entire point of the compare-and-set.
+    ({ didUpdateStatus } = await updateThreadChatStatusAtomic({
       db,
       userId,
       threadId,
@@ -69,10 +76,7 @@ export async function updateThreadChatWithTransition({
       fromStatus: threadChat.status,
       toStatus: updatedStatus,
       reattemptQueueAt,
-    });
-    if (!!updatedThreadOrUndefined) {
-      didUpdateStatus = true;
-    }
+    }));
   }
   if (updates) {
     await updateThread({
