@@ -1,125 +1,107 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { nanoid } from "nanoid";
+import { env } from "@terragon/env/pkg-shared";
+import { createDb } from "../db";
+import { markThreadsTerminal } from "./threads";
+import { createOrganization } from "./organizations";
+import { createTestRemoteRun, createTestUser } from "./test-helpers";
 
 /**
  * #153 prerequisite — STRUCTURAL regression guard.
  *
- * A chat-mode thread terminates across TWO tables: `threadChat` carries
- * `status`, the thread row carries the typed `terminalCause` that the #125 C1
- * generation fence keys on. Those used to be three independent statements, so
- * a late daemon event arriving between them observed `complete` with a NULL
- * cause and was ADMITTED when it should have been refused.
+ * A chat-mode thread terminates across TWO tables, so its three writes used to
+ * be three independent statements and a reader could observe `complete` with a
+ * NULL cause between them. See markThreadsTerminal for the full mechanism.
  *
- * The end state was always eventually correct, so a sequential real-DB test
- * cannot tell the two implementations apart — it is the WINDOW that changed.
- * This file pins the boundary itself: every write must be issued on the
- * transaction handle, and none directly on `db`. Revert the transaction and
- * these fail; the real-DB tests in hatchet-run.test.ts do not.
+ * The end state was always eventually correct, so the real-DB assertions in
+ * hatchet-run.test.ts cannot tell the two implementations apart — it is the
+ * WINDOW that changed. This file pins the boundary itself against the REAL db:
+ * every write must go through the transaction handle, and none directly on
+ * `db`. Revert the transaction and these fail.
  */
 
-const h = vi.hoisted(() => ({ broadcasts: 0 }));
+const db = createDb(env.DATABASE_URL!);
 
-vi.mock("../broadcast-server", () => ({
-  publishBroadcastUserMessage: vi.fn(async () => {
-    h.broadcasts += 1;
-  }),
-}));
-
-import { markThreadsTerminal } from "./threads";
-
-/** Records which handle each UPDATE was issued on. */
-function makeRecordingDb() {
-  const issuedOn: string[] = [];
-  let transactionCalls = 0;
-  let broadcastsInsideTx = 0;
-  let insideTx = false;
-
-  const chain = (handle: string, rows: Array<{ id: string; userId: string }>) => ({
-    set: () => ({
-      where: () => ({
-        returning: async () => {
-          issuedOn.push(handle);
-          return rows;
-        },
-        // the follow-up stamp has no .returning()
-        then: (resolve: (v: unknown) => unknown) => {
-          issuedOn.push(handle);
-          return Promise.resolve(resolve(undefined));
-        },
-      }),
-    }),
-  });
-
-  const db = {
-    // thread UPDATE matches nothing (chat-mode: thread row frozen, not reapable);
-    // threadChat UPDATE matches -> forces the chat-only follow-up stamp path.
-    update: (table: { _: { name?: string } } | unknown) => {
-      const name = tableName(table);
-      const rows =
-        name === "thread_chat" ? [{ id: "thread_1", userId: "user_1" }] : [];
-      return chain(insideTx ? "tx" : "db", rows);
-    },
-    transaction: async (cb: (tx: unknown) => Promise<unknown>) => {
-      transactionCalls += 1;
-      insideTx = true;
-      try {
-        return await cb(db);
-      } finally {
-        insideTx = false;
-        broadcastsInsideTx = h.broadcasts;
-      }
-    },
-  };
-  return {
+async function makeOrg(slug: string) {
+  const org = await createOrganization({
     db,
-    issuedOn,
-    stats: () => ({ transactionCalls, broadcastsInsideTx }),
-  };
-}
-
-function tableName(t: unknown): string {
-  const sym = Object.getOwnPropertySymbols(t as object).find((s) =>
-    String(s).includes("Name"),
-  );
-  return sym ? String((t as Record<symbol, unknown>)[sym]) : "";
+    name: slug,
+    slug: `${slug}-${nanoid(6)}`,
+  });
+  return org.id;
 }
 
 describe("markThreadsTerminal — the terminal write is ONE transaction", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    h.broadcasts = 0;
+  let userId: string;
+  let orgA: string;
+
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    userId = (await createTestUser({ db })).user.id;
+    orgA = await makeOrg("acme-atomic");
   });
 
-  it("opens exactly one transaction", async () => {
-    const { db, stats } = makeRecordingDb();
+  it("opens exactly one transaction and issues NO update outside it", async () => {
+    const { threadId } = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 91,
+      externalId: nanoid(),
+      enableThreadChatCreation: true,
+    });
+
+    const txSpy = vi.spyOn(db, "transaction");
+    // The drizzle transaction handle is a DISTINCT object from `db`, so any
+    // write that reached `db.update` directly escaped the transaction.
+    const updateSpy = vi.spyOn(db, "update");
+
     await markThreadsTerminal({
-      db: db as never,
-      threadIds: ["thread_1"],
+      db,
+      threadIds: [threadId],
       cause: "superseded",
     });
-    expect(stats().transactionCalls).toBe(1);
+
+    expect(txSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).not.toHaveBeenCalled();
   });
 
-  it("issues EVERY update on the transaction handle, never on db", async () => {
-    const { db, issuedOn } = makeRecordingDb();
-    await markThreadsTerminal({
-      db: db as never,
-      threadIds: ["thread_1"],
-      cause: "superseded",
+  it("commits before broadcasting — network I/O never holds the transaction open", async () => {
+    const { threadId } = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 92,
+      externalId: nanoid(),
+      enableThreadChatCreation: true,
     });
-    expect(issuedOn.length).toBeGreaterThanOrEqual(2);
-    expect(issuedOn).not.toContain("db");
-    expect(new Set(issuedOn)).toEqual(new Set(["tx"]));
-  });
 
-  it("broadcasts OUTSIDE the transaction — network I/O must not hold it open", async () => {
-    const { db, stats } = makeRecordingDb();
+    // Order of events, not timing: the transaction must have COMMITTED before
+    // the first broadcast is published. Guards against someone moving the
+    // publish loop inside the transaction, which would hold a DB connection
+    // open across network I/O.
+    const seq: string[] = [];
+    const realTransaction = db.transaction.bind(db);
+    vi.spyOn(db, "transaction").mockImplementation((async (cb: never) => {
+      const result = await realTransaction(cb);
+      seq.push("tx-commit");
+      return result;
+    }) as typeof db.transaction);
+
+    const broadcast = await import("../broadcast-server");
+    vi.spyOn(broadcast, "publishBroadcastUserMessage").mockImplementation(
+      (async () => {
+        seq.push("broadcast");
+      }) as typeof broadcast.publishBroadcastUserMessage,
+    );
+
     await markThreadsTerminal({
-      db: db as never,
-      threadIds: ["thread_1"],
+      db,
+      threadIds: [threadId],
       cause: "superseded",
     });
-    // Zero broadcasts had fired by the time the transaction closed.
-    expect(stats().broadcastsInsideTx).toBe(0);
-    expect(h.broadcasts).toBeGreaterThan(0);
+
+    expect(seq[0]).toBe("tx-commit");
+    expect(seq).toContain("broadcast");
   });
 });

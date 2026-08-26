@@ -1488,35 +1488,25 @@ export async function markThreadsTerminal({
     status: "complete" as const,
     errorMessage: cause === "superseded" ? THREAD_SUPERSEDED_ERROR : null,
   };
-  // The EFFECTIVE status of a thread lives on the thread row for legacy
-  // (LEGACY_THREAD_CHAT_ID) threads and on the threadChat row otherwise
-  // (enableThreadChatCreation). Stamp whichever is live so every reader of the
-  // effective status — getThreadChat's alias, the daemon-event fence — sees
-  // the terminal. A non-live row (e.g. the never-started thread row of a
-  // chat-mode thread) simply doesn't match. The typed cause is a thread-row
-  // column (the run ledger's join key); for threads that moved via their chat
-  // row it is stamped on the thread row in a follow-up write below.
-  // ONE TRANSACTION (#153 prerequisite). The effective status of a thread lives
-  // on the thread row for legacy (LEGACY_THREAD_CHAT_ID) threads and on the
-  // threadChat row otherwise (enableThreadChatCreation), while the typed cause
-  // is a thread-row column (the run ledger's join key). A chat-mode thread
-  // therefore terminates across TWO tables, and these writes used to be three
-  // independent statements: threadChat.status landed first and thread
-  // .terminalCause in a follow-up write. Between them the thread was visibly
-  // `complete` with a NULL cause — and the #125 C1 generation fence keys on
-  // terminalCause, so a late daemon event arriving in that window was ADMITTED
-  // when it should have been refused. Wrapping all three in one transaction
-  // closes that window: a concurrent reader sees every write or none.
+  // ONE TRANSACTION (#153 prerequisite). A chat-mode thread terminates across
+  // TWO tables: threadChat carries the live `status`, the thread row carries the
+  // typed `terminalCause` (the run ledger's join key). These were three
+  // independent statements, so between them a thread was visibly `complete`
+  // with a NULL cause — and the #125 C1 fence keys on terminalCause, so a late
+  // daemon event landing in that window was ADMITTED instead of refused. One
+  // transaction closes that WRITE window; nothing COMMITTED shows that pair.
   //
-  // Under v0 (every thread today) the threadChat UPDATE matches nothing and
-  // chatOnly is empty, so this is behaviourally identical to the previous code
-  // — it is the forward-looking half of #153's prerequisite that needs no
-  // schema migration. The remaining half (the fence READS terminalCause and
-  // status via two separate SELECTs, which can still straddle) requires moving
-  // the lifecycle columns onto threadChat and is tracked on #153.
+  // It does NOT close the READ tear: handleDaemonEvent fetches the chat row and
+  // the thread row in two separate queries, and decideThreadGeneration treats a
+  // present-but-null terminalCause as "not terminal" without consulting status,
+  // so a straddling reader still admits. Two fixes, neither in scope here: the
+  // cheap one is a SINGLE joined read at the fence (a transaction would NOT do
+  // it — Postgres defaults to READ COMMITTED, where each statement takes a
+  // fresh snapshot); the durable one is moving the lifecycle columns onto
+  // threadChat. Both tracked on #153.
   //
-  // Broadcast publishing stays OUTSIDE the transaction: it is network I/O, and
-  // a broadcast failure must never roll back a terminal that already committed.
+  // Broadcasts stay OUTSIDE the transaction: network I/O must never hold it
+  // open, and a failed publish must not roll back a committed terminal.
   const { threadRows, chatRows } = await db.transaction(async (tx) => {
     const [threadRows, chatRows] = await Promise.all([
       tx
