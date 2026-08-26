@@ -36,6 +36,7 @@ import {
   ThreadInfoFull,
   ThreadInfo,
   ThreadChatInsertRaw,
+  ThreadErrorMessage,
 } from "../db/types";
 import { BroadcastMessageThreadData } from "@terragon/types/broadcast";
 import type { SandboxProvider } from "@terragon/types/sandbox";
@@ -1439,6 +1440,17 @@ export async function getStalledThreads({
 }) {
   const threads = await db.query.thread.findMany({
     where: and(
+      // KNOWN GAP (latent, v1 only): this should be threadEffectiveStatusIn, per
+      // that helper's own docblock — a chat-mode thread keeps its live status on
+      // the threadChat row, so this bare column filter makes those threads
+      // invisible to the stall watchdog. It is NOT changed here because
+      // threadEffectiveStatusIn builds raw SQL whose column refs resolve against
+      // the OUTER query alias; under the relational builder (`db.query.thread
+      // .findMany`) it emits `"thread"."thread_id"` inside the subquery and the
+      // statement fails. Fixing it means porting this to `db.select().from()`,
+      // which changes the return shape for every caller. Harmless today (v0 has
+      // no threadChat rows, so effective status IS thread status) — tracked with
+      // the v1 work on #153.
       inArray(schema.thread.status, reapableThreadStatuses),
       lte(schema.thread.updatedAt, new Date(Date.now() - cutoffSecs * 1000)),
     ),
@@ -1454,11 +1466,25 @@ export async function stopStalledThreads({
   db: DB;
   threadIds: string[];
 }) {
-  await db
-    .update(schema.thread)
-    .set({ status: "complete", errorMessage: "request-timeout" })
-    .where(inArray(schema.thread.id, threadIds))
-    .returning();
+  // Route through the typed-terminal writer instead of a bare UPDATE. The old
+  // statement wrote `status = complete` with NO `terminalCause`, and
+  // decideThreadGeneration treats a PRESENT-but-null cause as "not terminal"
+  // without consulting status — so every thread this watchdog reaped stayed
+  // PERMANENTLY unfenced and admitted late daemon events forever. It also wrote
+  // only the thread row, leaving a chat-mode thread's live status untouched, and
+  // had no reapable guard, so a second cron tick could overwrite a terminal a
+  // thread had legitimately reached.
+  //
+  // markThreadsTerminal supplies all four: the typed cause, the threadChat write,
+  // the reapable-status guard (idempotent under retry), and one transaction.
+  // `request-timeout` is passed through explicitly because the chat UI renders a
+  // dedicated case for it.
+  await markThreadsTerminal({
+    db,
+    threadIds,
+    cause: "timeout",
+    errorMessage: "request-timeout",
+  });
 }
 
 /**
@@ -1476,17 +1502,31 @@ export async function markThreadsTerminal({
   threadIds,
   cause,
   supersededByThreadId,
+  errorMessage,
 }: {
   db: DB;
   threadIds: string[];
   cause: TerminalCause;
   /** #125 C5: the newer run's thread when `cause === "superseded"` (chip link). */
   supersededByThreadId?: string | null;
+  /**
+   * Override the `errorMessage` written alongside the terminal. Defaults to the
+   * legacy `superseded` sentinel for that cause and NULL otherwise. The stall
+   * watchdog passes `request-timeout`, which is a USER-VISIBLE error type the
+   * chat UI renders a dedicated case for (`chat-error.tsx`), so it must survive
+   * the move onto this typed-terminal path.
+   */
+  errorMessage?: ThreadErrorMessage | null;
 }): Promise<string[]> {
   if (threadIds.length === 0) return [];
   const terminal = {
     status: "complete" as const,
-    errorMessage: cause === "superseded" ? THREAD_SUPERSEDED_ERROR : null,
+    errorMessage:
+      errorMessage !== undefined
+        ? errorMessage
+        : cause === "superseded"
+          ? THREAD_SUPERSEDED_ERROR
+          : null,
   };
   // ONE TRANSACTION (#153 prerequisite). A chat-mode thread terminates across
   // TWO tables: threadChat carries the live `status`, the thread row carries the

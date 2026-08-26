@@ -7,7 +7,11 @@ import {
   thread as threadTable,
   threadChat as threadChatTable,
 } from "../db/schema";
-import { markThreadsTerminal, reapableThreadStatuses } from "./threads";
+import {
+  markThreadsTerminal,
+  reapableThreadStatuses,
+  stopStalledThreads,
+} from "./threads";
 import { ThreadStatus } from "../db/types";
 import { createOrganization } from "./organizations";
 import {
@@ -798,5 +802,91 @@ describe("markThreadsTerminal — supersededByThreadId on the chat-only path (#1
     });
     expect(row!.terminalCause).toBe("superseded");
     expect(row!.supersededByThreadId).toBe(newerId);
+  });
+});
+
+describe("stopStalledThreads — the stall watchdog writes a TYPED terminal", () => {
+  // Before this, the watchdog wrote `status = complete` with NO terminalCause.
+  // decideThreadGeneration treats a PRESENT-but-null cause as "not terminal"
+  // without consulting status, so every thread the watchdog reaped stayed
+  // PERMANENTLY unfenced — a late daemon event was admitted forever, not for a
+  // window. It also wrote only the thread row and had no reapable guard.
+  let userId: string;
+  let orgA: string;
+
+  beforeEach(async () => {
+    userId = (await createTestUser({ db })).user.id;
+    orgA = await makeOrg("acme-stall");
+  });
+
+  const stalled = (prNumber: number, chat = false) =>
+    createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber,
+      externalId: nanoid(),
+      enableThreadChatCreation: chat,
+      status: "working",
+    });
+
+  it("stamps terminalCause so the generation fence actually refuses late writes", async () => {
+    const { threadId } = await stalled(11);
+    await stopStalledThreads({ db, threadIds: [threadId] });
+
+    const [row] = await db.query.thread.findMany({
+      where: (t, { eq }) => eq(t.id, threadId),
+    });
+    expect(row!.status).toBe("complete");
+    expect(row!.terminalCause).toBe("timeout");
+
+    // The property that matters: the fence now refuses.
+    expect(
+      decideThreadGeneration({
+        thread: {
+          activeRunExternalId: row!.activeRunExternalId,
+          status: row!.status,
+          errorMessage: row!.errorMessage,
+          terminalCause: row!.terminalCause,
+        },
+        runExternalId: null,
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("preserves the user-visible request-timeout error", async () => {
+    const { threadId } = await stalled(12);
+    await stopStalledThreads({ db, threadIds: [threadId] });
+    const [row] = await db.query.thread.findMany({
+      where: (t, { eq }) => eq(t.id, threadId),
+    });
+    // chat-error.tsx renders a dedicated case for this value.
+    expect(row!.errorMessage).toBe("request-timeout");
+  });
+
+  it("terminates a chat-mode thread's LIVE status row, not just the thread row", async () => {
+    const { threadId } = await stalled(13, true);
+    await stopStalledThreads({ db, threadIds: [threadId] });
+    const [chat] = await db.query.threadChat.findMany({
+      where: (c, { eq }) => eq(c.threadId, threadId),
+    });
+    expect(chat!.status).toBe("complete");
+  });
+
+  it("is idempotent — a second tick does not overwrite a terminal already reached", async () => {
+    const { threadId } = await stalled(14);
+    await markThreadsTerminal({
+      db,
+      threadIds: [threadId],
+      cause: "user-cancelled",
+    });
+    await stopStalledThreads({ db, threadIds: [threadId] });
+    const [row] = await db.query.thread.findMany({
+      where: (t, { eq }) => eq(t.id, threadId),
+    });
+    expect(row!.terminalCause).toBe("user-cancelled");
+    // The old bare UPDATE had no reapable guard, so it clobbered the
+    // errorMessage of a thread that had already legitimately terminated.
+    expect(row!.errorMessage).not.toBe("request-timeout");
   });
 });

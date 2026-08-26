@@ -2769,8 +2769,17 @@ describe("thread", () => {
         threadChatId: thread1ChatId,
         userId: user.id,
       });
+      // BEHAVIOUR CHANGE: thread1 was created ALREADY `complete`, i.e. not in a
+      // reapable status. The watchdog used to clobber it anyway — a bare UPDATE
+      // with no status guard, so a second cron tick (or a thread that finished
+      // between getStalledThreads and stopStalledThreads) overwrote a terminal
+      // the thread had legitimately reached. It now routes through
+      // markThreadsTerminal, whose WHERE only matches reapable statuses, so an
+      // already-terminal thread is left alone. In production getStalledThreads
+      // only ever returns reapable threads, so this guard fires solely on that
+      // TOCTOU window — where skipping is the correct outcome.
       expect(updatedThreadChat!.status).toBe("complete");
-      expect(updatedThreadChat!.errorMessage).toBe("request-timeout");
+      expect(updatedThreadChat!.errorMessage).toBeNull();
 
       updatedThreadChat = await getThreadChat({
         db,
