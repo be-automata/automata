@@ -24,6 +24,7 @@ These are proposed directions still under design; they become ADRs when accepted
 - **#84** — Roles as first-class actor (identity + permission floor + credential-gated model).
 - **#85** — Host batteries + in-sandbox orchestration (thin skills over a guaranteed capability host).
 - **#83** — Sub-event trigger granularity + mirror-intake fold (extends ADR-005 to per-sub-event).
+- **#153** — v1 thread-chat model (multi-harness agents on one PR; premium capability, undecided).
 
 ## Writing a new ADR
 
