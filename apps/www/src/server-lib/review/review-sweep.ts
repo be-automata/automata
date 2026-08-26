@@ -59,6 +59,7 @@ export async function runReviewSweep(): Promise<void> {
       organizationId: threadTable.organizationId,
       terminalCause: threadTable.terminalCause,
       reviewedSha: threadTable.reviewedSha,
+      version: threadTable.version,
     })
     .from(threadTable)
     .where(
@@ -86,6 +87,27 @@ export async function runReviewSweep(): Promise<void> {
         organizationId: c.organizationId ?? null,
       });
       if (!review) continue;
+
+      // v0 keeps chat state ON the thread row, so LEGACY_THREAD_CHAT_ID is the
+      // correct address for the read below. v1 moves it to threadChat row(s),
+      // and WHICH chat carries the verdict is undecided (#153) — reading the
+      // thread row would find no messages and, since #150 made the degraded
+      // warning conditional, withhold SILENTLY instead of posting. A lost
+      // verdict is the worst outcome this module has, so refuse to guess and
+      // page instead. Placed before the octokit calls so an unservable thread
+      // costs no GitHub API quota. `version` is NOT NULL default 0.
+      if (c.version > 0) {
+        console.error(
+          "[review-sweep] cannot address chat state for a v1 thread — skipped",
+          {
+            threadId: c.id,
+            version: c.version,
+            repoFullName: c.repoFullName,
+            prNumber: c.prNumber,
+          },
+        );
+        continue;
+      }
 
       const octokit = await getOctokitForApp({
         owner: c.repoFullName.split("/")[0]!,
