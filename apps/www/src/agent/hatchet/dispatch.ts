@@ -676,18 +676,25 @@ export async function dispatchAgentRun({
     await Promise.all([
       // #127: stamp the thread's ACTIVE run for the C1 generation fence.
       // Flag-ON only (legacy leaves the column NULL → fence fails open).
-      // Stamp = unfence (one write, #125 C1/#153). Unstamped plans (non-review,
+      // Stamp = unfence (one write, #125 C1/#153). UNSTAMPED PLANS (non-review,
       // flag-off) never restamp, so they shed the typed terminal here instead —
-      // after the trigger, when the new run already exists.
-      plan.stampFence && externalId
-        ? setThreadActiveRun({ db, threadId, externalId }).catch(
-            (error: unknown) => {
-              console.error("[hatchet] activeRunExternalId stamp failed", {
-                threadId,
-                error: error instanceof Error ? error.message : String(error),
-              });
-            },
-          )
+      // after the trigger, when the new run already exists. Branch on the PLAN,
+      // never on externalId: a stamped (review) plan whose trigger response
+      // carried no run id is an anomaly that must FAIL CLOSED — no stamp, no
+      // unfence, the thread stays refused until the watchdog or a retry sorts
+      // it out. Unfencing there would shed the terminal while the old run's id
+      // still matches the stale stamp — the exact C1 window this PR closes.
+      plan.stampFence
+        ? externalId
+          ? setThreadActiveRun({ db, threadId, externalId }).catch(
+              (error: unknown) => {
+                console.error("[hatchet] activeRunExternalId stamp failed", {
+                  threadId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              },
+            )
+          : undefined
         : clearThreadTerminalForResume({ db, threadId }).catch(
             (error: unknown) => {
               console.error("[hatchet] resume unfence failed", {
