@@ -1057,15 +1057,24 @@ export async function setThreadActiveRun({
   // #153 read-tear fix: the chat row mirrors the stamp so the fence can decide
   // from a single row. One transaction — the two rows never disagree in any
   // committed state.
+  //
+  // Stamping a NEW run also sheds the typed terminal IN THE SAME WRITE.
+  // Clearing the cause any earlier opens a fail-open window: the old (just
+  // terminated) run's id still matches activeRunExternalId, so its late
+  // events would pass BOTH fence arms until this stamp lands. Fused, the
+  // terminal arm refuses the old generation right up to the instant the
+  // stale-generation arm takes over — zero admitted window (#125 C1).
+  // A null externalId only clears the stamp; it never touches the cause.
+  const set =
+    externalId !== null
+      ? { activeRunExternalId: externalId, terminalCause: null }
+      : { activeRunExternalId: externalId };
   await db.transaction(async (tx) => {
     await Promise.all([
-      tx
-        .update(schema.thread)
-        .set({ activeRunExternalId: externalId })
-        .where(eq(schema.thread.id, threadId)),
+      tx.update(schema.thread).set(set).where(eq(schema.thread.id, threadId)),
       tx
         .update(schema.threadChat)
-        .set({ activeRunExternalId: externalId })
+        .set(set)
         .where(eq(schema.threadChat.threadId, threadId)),
     ]);
   });
@@ -1439,11 +1448,17 @@ function db_select_chat_status(statuses: ThreadStatus[]) {
  *
  * INVARIANT (#153 read-tear fix): thread.terminalCause and
  * threadChat.terminalCause move together — the fence decides from the chat
- * row alone. This is the ONLY resume writer, and it clears both rows in ONE
- * transaction (no broadcasts inside — nothing holds it open), so an
- * interruption can never leave the chat mirror carrying a stale terminal
- * that fences a resumed thread forever. Do not clear either column anywhere
- * else.
+ * row alone. Clears both rows in ONE transaction (no broadcasts inside), so
+ * an interruption can never leave the chat mirror carrying a stale terminal
+ * that fences a resumed thread forever.
+ *
+ * SCOPE: only for planes that never restamp the fence — the in-process
+ * sandbox boot and unstamped (non-review / flag-off) remote dispatches,
+ * called AFTER the new run exists. The stamped review plane must NOT use
+ * this: setThreadActiveRun sheds the cause atomically with the new stamp,
+ * and clearing earlier reopens the #125 C1 window (the old run's id still
+ * matches the stamp until then). Queued threads stay fenced on purpose —
+ * dequeue re-enters startAgentMessage and the dispatch unfences.
  */
 export async function clearThreadTerminalForResume({
   db,

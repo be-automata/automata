@@ -28,7 +28,10 @@ import {
   type SupersedePolicy,
   type SupersedeSnapshot,
 } from "@terragon/shared/model/repo-review-settings";
-import { setThreadActiveRun } from "@terragon/shared/model/threads";
+import {
+  setThreadActiveRun,
+  clearThreadTerminalForResume,
+} from "@terragon/shared/model/threads";
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
 import {
   triggerAgentRun,
@@ -673,6 +676,9 @@ export async function dispatchAgentRun({
     await Promise.all([
       // #127: stamp the thread's ACTIVE run for the C1 generation fence.
       // Flag-ON only (legacy leaves the column NULL → fence fails open).
+      // Stamp = unfence (one write, #125 C1/#153). Unstamped plans (non-review,
+      // flag-off) never restamp, so they shed the typed terminal here instead —
+      // after the trigger, when the new run already exists.
       plan.stampFence && externalId
         ? setThreadActiveRun({ db, threadId, externalId }).catch(
             (error: unknown) => {
@@ -682,7 +688,14 @@ export async function dispatchAgentRun({
               });
             },
           )
-        : undefined,
+        : clearThreadTerminalForResume({ db, threadId }).catch(
+            (error: unknown) => {
+              console.error("[hatchet] resume unfence failed", {
+                threadId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            },
+          ),
       // Record this review run so a LATER push can supersede it. Only reviews are
       // tracked; a missing externalId (unexpected trigger-response shape) just skips
       // tracking — the run still executes, it simply can't be superseded (watchdog

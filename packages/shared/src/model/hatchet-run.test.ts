@@ -926,9 +926,27 @@ describe("#153 read-tear mirrors — the chat row carries every fence input", ()
     });
   });
 
-  it("setThreadActiveRun stamps the run id on BOTH rows", async () => {
+  it("setThreadActiveRun stamps the run id on BOTH rows and sheds the typed terminal in the SAME write", async () => {
     const { threadId } = await mkChatMode();
+    // The thread previously reached a typed terminal (both rows, as
+    // markThreadsTerminal stamps them). Restamping for the NEW run must
+    // clear it atomically — clearing earlier opens the #125 C1 window.
+    await markThreadsTerminal({
+      db,
+      threadIds: [threadId],
+      cause: "user-cancelled",
+    });
     await setThreadActiveRun({ db, threadId, externalId: "run-xyz" });
+    const [tc] = await db
+      .select({ cause: threadTable.terminalCause })
+      .from(threadTable)
+      .where(eq(threadTable.id, threadId));
+    const [cc] = await db
+      .select({ cause: threadChatTable.terminalCause })
+      .from(threadChatTable)
+      .where(eq(threadChatTable.threadId, threadId));
+    expect(tc!.cause).toBeNull();
+    expect(cc!.cause).toBeNull();
     const [t] = await db
       .select({ stamp: threadTable.activeRunExternalId })
       .from(threadTable)
@@ -939,13 +957,28 @@ describe("#153 read-tear mirrors — the chat row carries every fence input", ()
       .where(eq(threadChatTable.threadId, threadId));
     expect(t!.stamp).toBe("run-xyz");
     expect(c!.stamp).toBe("run-xyz");
-    // and clearing clears both
+    // Clearing the stamp clears both rows but NEVER touches the cause: a
+    // null stamp is not a new run, so it must not unfence anything. (Seeded
+    // directly — the thread is already non-reapable, so markThreadsTerminal
+    // would be a no-op here.)
+    await db
+      .update(threadTable)
+      .set({ terminalCause: "timeout" })
+      .where(eq(threadTable.id, threadId));
+    await db
+      .update(threadChatTable)
+      .set({ terminalCause: "timeout" })
+      .where(eq(threadChatTable.threadId, threadId));
     await setThreadActiveRun({ db, threadId, externalId: null });
     const [c2] = await db
-      .select({ stamp: threadChatTable.activeRunExternalId })
+      .select({
+        stamp: threadChatTable.activeRunExternalId,
+        cause: threadChatTable.terminalCause,
+      })
       .from(threadChatTable)
       .where(eq(threadChatTable.threadId, threadId));
     expect(c2!.stamp).toBeNull();
+    expect(c2!.cause).toBe("timeout");
   });
 });
 

@@ -186,9 +186,9 @@ export async function startAgentMessage({
               ...queuedThreadCounts,
             },
           });
-          // Resume pair (#153): one atomic writer clears both terminal
-          // mirrors — never split across the non-transactional updates below.
-          await clearThreadTerminalForResume({ db, threadId });
+          // No unfence here (#153/#125 C1): a queued thread stays fenced on
+          // purpose — the old run's late events must keep being refused until
+          // dequeue re-enters startAgentMessage and the dispatch restamps.
           await updateThreadChatWithTransition({
             userId,
             threadId,
@@ -225,7 +225,7 @@ export async function startAgentMessage({
               ...queuedThreadCounts,
             },
           });
-          await clearThreadTerminalForResume({ db, threadId });
+          // Queued: stays fenced (see the concurrency-limit branch above).
           await updateThreadChatWithTransition({
             userId,
             threadId,
@@ -257,8 +257,11 @@ export async function startAgentMessage({
         });
       }
 
-      // Resume pair (#153): the atomic writer, not the split updates below.
-      await clearThreadTerminalForResume({ db, threadId });
+      // No unfence before the boot transition (#125 C1): clearing the cause
+      // while the OLD run's id still matches the stamp would admit its late
+      // events. The remote plane unfences atomically inside the dispatch's
+      // setThreadActiveRun (or its unstamped fallback); the in-process plane
+      // unfences right after the fork below.
       await updateThreadChatWithTransition({
         userId,
         threadId,
@@ -288,6 +291,11 @@ export async function startAgentMessage({
         });
         return;
       }
+
+      // In-process plane: no run ids exist (daemon events carry
+      // runExternalId null), so there is no stamp to fuse with — unfence here,
+      // once the thread is committed to booting this plane (#153).
+      await clearThreadTerminalForResume({ db, threadId });
 
       // Get or create sandbox for the thread
       const startTime = Date.now();
