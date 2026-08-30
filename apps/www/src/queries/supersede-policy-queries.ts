@@ -37,8 +37,14 @@ export function useSupersedeDefaultQuery() {
   });
 }
 
-export function useSetSupersedeDefaultMutation() {
+export function useSetSupersedeDefaultMutation(options?: {
+  /** Toast on success — callers name their own outcome (the supersede card
+   * talks about runs, the draft card about PR events). */
+  successMessage?: string;
+}) {
   const queryClient = useQueryClient();
+  const successMessage =
+    options?.successMessage ?? "Org default saved. Applies to new runs.";
   return useMutation({
     mutationFn: async (args: {
       supersedePolicy?: SupersedePolicy | null;
@@ -56,15 +62,12 @@ export function useSetSupersedeDefaultMutation() {
       return json.setting;
     },
     onSuccess: (setting) => {
-      toast.success("Org default saved. Applies to new runs.");
-      // Write the returned row into the cache SYNCHRONOUSLY before the
-      // refetch. Two cards (supersede + draft default) share this sentinel
-      // row's cache entry; invalidate-only left a window where the sibling
-      // still held the prior updatedAt and self-409ed on its next save.
+      toast.success(successMessage);
+      // Synchronous cache write of the returned row. Two cards share this
+      // sentinel row's cache entry; invalidate-only left a window where the
+      // sibling still held the prior updatedAt and self-409ed on its next
+      // save. The PUT response IS the stored row, so no refetch needed.
       queryClient.setQueryData(supersedeDefaultQueryKeys.detail(), setting);
-      queryClient.invalidateQueries({
-        queryKey: supersedeDefaultQueryKeys.detail(),
-      });
     },
     onError: (error: unknown) => {
       if (error instanceof ConflictError) return; // section renders the reload row

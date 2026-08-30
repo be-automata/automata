@@ -148,6 +148,8 @@ describe("/api/review-settings/default — reviewDraftPrs (org draft toggle)", (
   let userId: string;
   let orgId: string;
 
+  // Same actor() as the describe above — re-declared because it writes THESE
+  // describe-scoped ids; hoisting would share mutable state across suites.
   async function actor(role: "owner" | "admin" | "member") {
     userId = (await createTestUser({ db })).user.id;
     const org = await createTestOrganization({ db, userId, role });

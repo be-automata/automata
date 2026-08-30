@@ -13,13 +13,10 @@ import { getRepoReviewSettingWithOrgDefault } from "@terragon/shared/model/repo-
  * automation's `includeDraftPRs` filter). Read live from Neon, so a dashboard
  * change applies to the next webhook with no restart.
  *
- * Deliberate semantics (no-migration decision, 2026-08-30): `reviewDraftPrs`
- * is NOT NULL DEFAULT true, so a row that exists for ANY family carries an
- * authoritative draft value — implicit true counts as a choice. That is
- * already the shipped behaviour at the repo tier; the org tier matches it.
- * The one observable shift: an org whose sentinel row was created by the
- * supersede UI now beats a legacy `includeDraftPRs: false` filter (dashboard
- * over legacy — the sanctioned direction, self-serviced by the toggle).
+ * `reviewDraftPrs` is NOT NULL DEFAULT true, so a row created by ANY family
+ * (e.g. supersede-only) carries an authoritative draft value — it beats a
+ * legacy `includeDraftPRs: false`. Decision narrative + rewrite instruction
+ * live in the PINS test in resolve-review-draft-policy.test.ts.
  */
 export async function resolveReviewDraftPolicy({
   db,

@@ -8,7 +8,10 @@ import {
   ORG_DEFAULT_REPO_SENTINEL,
   RepoReviewSettingConflictError,
 } from "@terragon/shared/model/repo-review-settings";
-import { parseSupersedePatch } from "../supersede-route-shared";
+import {
+  parseReviewDraftPrs,
+  parseSupersedePatch,
+} from "../supersede-route-shared";
 import { getPostHogServer } from "@/lib/posthog-server";
 
 /**
@@ -93,19 +96,9 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   }
   const supersede = parseSupersedePatch(body);
   if ("errorResponse" in supersede) return supersede.errorResponse;
-  const patch: typeof supersede.patch & { reviewDraftPrs?: boolean } =
-    supersede.patch;
-  // Same local validation shape as the per-repo route — the shared parser
-  // stays supersede-only on purpose (that route validates this field itself).
-  if (body.reviewDraftPrs !== undefined) {
-    if (typeof body.reviewDraftPrs !== "boolean") {
-      return NextResponse.json(
-        { error: "reviewDraftPrs must be a boolean" },
-        { status: 400 },
-      );
-    }
-    patch.reviewDraftPrs = body.reviewDraftPrs;
-  }
+  const drafts = parseReviewDraftPrs(body);
+  if ("errorResponse" in drafts) return drafts.errorResponse;
+  const patch = { ...supersede.patch, ...drafts };
   if (
     patch.supersedePolicy === undefined &&
     patch.recheckOnComplete === undefined &&
@@ -124,13 +117,9 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   // (ON CONFLICT … DO UPDATE … WHERE updated_at = expected): two admins who
   // read the same version can never both win — the loser gets a 409, never
   // a silent last-write-wins.
-  // `expectedUpdatedAt: null` is the FIRST-WRITE fence: the sentinel row is
-  // created lazily, and two org admins racing to set the very first default
-  // must not both get 200. ROW-level absence, not the per-family fence: this
-  // route's GET returns the whole sentinel row, so the client sends null only
-  // when the row is truly absent — and a family fence would let a draft-only
-  // first write slip past a concurrent draft write (supersede_policy stays
-  // NULL on such rows, hollowing the fence for both families).
+  // `expectedUpdatedAt: null` = ROW-level first-write fence, not the
+  // per-family one: this GET returns the whole sentinel row, so null means
+  // the row is truly absent. See `expectRowAbsent` on upsertRepoReviewSetting.
   const expectRowAbsent = body.expectedUpdatedAt === null;
   const expectedUpdatedAt =
     typeof body.expectedUpdatedAt === "string"

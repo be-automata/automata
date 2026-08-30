@@ -19,10 +19,8 @@ import { ConflictError } from "@/queries/error-from-response";
  * ('*') the supersede section edits, resolved at webhook intake as:
  * repo row → this sentinel → legacy automation filter → true.
  *
- * Shares the supersede section's query hooks ON PURPOSE: one cache entry for
- * the sentinel row means both sections always hold the same `updatedAt`, so
- * they cannot 409 each other out of staleness — a residual 409 is a genuine
- * concurrent write, which is exactly what the conflict banner is for.
+ * Shares the supersede section's query hooks — one cache entry for the
+ * sentinel row; see supersede-policy-queries.ts for the coherency story.
  *
  * Storage is NOT NULL: a sentinel row that exists carries an authoritative
  * value (implicit true counts as a choice). No stored row = effective true.
@@ -38,7 +36,6 @@ export type OrgDraftDefaultState =
       kind: "ready";
       /** Effective org-wide value (stored, or the system default true). */
       reviewDrafts: boolean;
-      /** ONE predicate over every mutation instance in this card. */
       saving: boolean;
       /** A CAS write lost its race (either family — the row is shared). */
       conflict: boolean;
@@ -113,7 +110,9 @@ export function OrgDraftDefaultCardView({
 /** Thin container: binds the SHARED sentinel-row query + mutation. */
 export function OrgDraftDefaultCard() {
   const defaults = useSupersedeDefaultQuery();
-  const setDefaults = useSetSupersedeDefaultMutation();
+  const setDefaults = useSetSupersedeDefaultMutation({
+    successMessage: "Org default saved. Applies to new pull request events.",
+  });
   const [conflict, setConflict] = useState(false);
 
   const state: OrgDraftDefaultState = defaults.isPending
@@ -139,8 +138,7 @@ export function OrgDraftDefaultCard() {
       setDefaults.mutate(
         {
           reviewDraftPrs: reviewDrafts,
-          // First-write fence: null only when the sentinel row is truly
-          // absent (this GET returns the whole row, both families).
+          // First-write fence: null only when the sentinel row is truly absent.
           expectedUpdatedAt: defaults.data ? defaults.data.updatedAt : null,
         },
         {

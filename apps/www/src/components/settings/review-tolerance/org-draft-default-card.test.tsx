@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   OrgDraftDefaultCardView,
-  EFFECTIVE_DRAFT_DEFAULT,
   type OrgDraftDefaultActions,
   type OrgDraftDefaultState,
 } from "./org-draft-default-card";
@@ -101,9 +100,5 @@ describe("OrgDraftDefaultCardView", () => {
     expect(html).toContain("changed since you loaded");
     expect(html).toContain(">Reload<");
     expect(html).toContain('role="switch"');
-  });
-
-  it("the effective default with no stored row is TRUE", () => {
-    expect(EFFECTIVE_DRAFT_DEFAULT).toBe(true);
   });
 });

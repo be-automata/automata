@@ -155,22 +155,13 @@ export async function resolveSupersedePolicy({
   organizationId: string;
   repoFullName: string;
 }): Promise<SupersedeSnapshot> {
-  const repo = normalizeRepo(repoFullName);
-  const rows = await db
-    .select()
-    .from(repoReviewSettings)
-    .where(
-      and(
-        eq(repoReviewSettings.organizationId, organizationId),
-        inArray(repoReviewSettings.repoFullName, [
-          repo,
-          ORG_DEFAULT_REPO_SENTINEL,
-        ]),
-      ),
-    );
-  const byRepo = new Map(rows.map((r) => [r.repoFullName, r]));
-  for (const candidate of [repo, ORG_DEFAULT_REPO_SENTINEL]) {
-    const row = byRepo.get(candidate);
+  const { repo: repoRow, orgDefault } =
+    await getRepoReviewSettingWithOrgDefault({
+      db,
+      organizationId,
+      repoFullName,
+    });
+  for (const row of [repoRow, orgDefault]) {
     if (!row?.supersedePolicy) continue;
     if (!isSupersedePolicy(row.supersedePolicy)) {
       throw new Error(
@@ -267,15 +258,14 @@ export async function upsertRepoReviewSetting({
   expectAbsentSupersedeOverride?: boolean;
   /**
    * Whole-row first-write CAS (org-default sentinel writes). The write applies
-   * ONLY if NO row exists at all. The per-family absence fence above is wrong
-   * for the sentinel: a draft-toggle-only first write would slip past a
-   * `supersede_policy IS NULL` check even though another admin's draft write
-   * already landed — and draft-created sentinel rows keep supersede_policy
-   * NULL, hollowing that fence for the supersede family too. The default
-   * route's GET returns the WHOLE row, so its client sends
-   * `expectedUpdatedAt: null` only when the row is truly absent — making
-   * row-level absence the correct fence there. Mutually exclusive with both
-   * fences above.
+   * ONLY if NO row exists at all. CANONICAL fence comparison: `expectedUpdatedAt`
+   * fences an EDIT on the version the caller read; `expectAbsentSupersedeOverride`
+   * fences a first write of ONE family (the row may exist for others); this
+   * fences a first write of the WHOLE row. The per-family fence is wrong for
+   * the sentinel: a draft-only first write slips past `supersede_policy IS
+   * NULL` even when another admin's draft write already landed, and
+   * draft-created rows keep supersede_policy NULL, hollowing that fence for
+   * the supersede family too. Exactly ONE fence may be supplied — two throw.
    */
   expectRowAbsent?: boolean;
 }): Promise<RepoReviewSetting> {
