@@ -920,7 +920,10 @@ describe("#153 read-tear mirrors — the chat row carries every fence input", ()
       })
       .from(threadChatTable)
       .where(eq(threadChatTable.threadId, threadId));
-    expect(chat).toMatchObject({ status: "complete", terminalCause: "timeout" });
+    expect(chat).toMatchObject({
+      status: "complete",
+      terminalCause: "timeout",
+    });
   });
 
   it("setThreadActiveRun stamps the run id on BOTH rows", async () => {
@@ -943,5 +946,60 @@ describe("#153 read-tear mirrors — the chat row carries every fence input", ()
       .from(threadChatTable)
       .where(eq(threadChatTable.threadId, threadId));
     expect(c2!.stamp).toBeNull();
+  });
+});
+
+describe("#153 backfill — pre-deploy terminal chat threads get their mirrors", () => {
+  let userId: string;
+  let orgA: string;
+
+  beforeEach(async () => {
+    userId = (await createTestUser({ db })).user.id;
+    orgA = await makeOrg("acme-backfill");
+  });
+
+  it("copies terminalCause + activeRunExternalId onto NULL chat mirrors, never overwriting stamped ones", async () => {
+    const { backfillThreadChatFenceMirrors } = await import(
+      "../../scripts/backfill-thread-chat-fence-mirrors"
+    );
+    const mk = () =>
+      createTestRemoteRun({
+        db,
+        userId,
+        organizationId: orgA,
+        prNumber: 11,
+        externalId: nanoid(),
+        enableThreadChatCreation: true,
+      });
+    // A thread terminated BEFORE the deploy: thread row carries the cause and
+    // stamp, the chat mirrors are NULL (the pre-mirror world).
+    const { threadId: oldT } = await mk();
+    await db
+      .update(threadTable)
+      .set({ terminalCause: "superseded", activeRunExternalId: "run-old" })
+      .where(eq(threadTable.id, oldT));
+    // A thread the NEW writers already stamped: mirrors must not be touched.
+    const { threadId: newT } = await mk();
+    await setThreadActiveRun({ db, threadId: newT, externalId: "run-live" });
+
+    await backfillThreadChatFenceMirrors(db);
+
+    const [oldChat] = await db
+      .select({
+        cause: threadChatTable.terminalCause,
+        stamp: threadChatTable.activeRunExternalId,
+      })
+      .from(threadChatTable)
+      .where(eq(threadChatTable.threadId, oldT));
+    expect(oldChat).toMatchObject({ cause: "superseded", stamp: "run-old" });
+
+    const [newChat] = await db
+      .select({ stamp: threadChatTable.activeRunExternalId })
+      .from(threadChatTable)
+      .where(eq(threadChatTable.threadId, newT));
+    expect(newChat!.stamp).toBe("run-live");
+
+    // Idempotent: a rerun is a no-op.
+    expect(await backfillThreadChatFenceMirrors(db)).toBe(0);
   });
 });
