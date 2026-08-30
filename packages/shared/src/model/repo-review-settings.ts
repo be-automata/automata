@@ -210,7 +210,8 @@ export async function getRepoReviewSetting({
  * target is the `(organization_id, repo_full_name)` unique index, so a repeat
  * write updates in place. Only the fields present in `patch` are written — an
  * absent field keeps its stored value (or its column default on first insert:
- * `blockTolerance` → 'warning', `reviewDraftPrs` → true). Returns the stored row.
+ * `blockTolerance` → 'warning'; `reviewDraftPrs` has NO default — absent on
+ * first insert leaves it NULL, i.e. "no choice"). Returns the stored row.
  * `blockTolerance`, when present, MUST be pre-validated by the caller (the route
  * validates against `BLOCK_TOLERANCES`).
  */
@@ -229,7 +230,9 @@ export async function upsertRepoReviewSetting({
   repoFullName: string;
   patch: {
     blockTolerance?: string;
-    reviewDraftPrs?: boolean;
+    /** Tri-state: explicit true/false is a choice; null CLEARS the choice at
+     * this scope (repo → inherit org; sentinel → inherit legacy/default). */
+    reviewDraftPrs?: boolean | null;
     /** '#66 egress level ('none'|'ip_port'|'domain'); null clears (= no enforcement). */
     egressPolicy?: string | null;
     /** #66 operator allowlist entries; null clears. Validated at shape-build time. */
@@ -321,7 +324,7 @@ export async function upsertRepoReviewSetting({
   }
   const set: {
     blockTolerance?: string;
-    reviewDraftPrs?: boolean;
+    reviewDraftPrs?: boolean | null;
     egressPolicy?: string | null;
     egressAllowlist?: string[] | null;
     supersedePolicy?: string | null;
@@ -402,12 +405,14 @@ export async function setRepoReviewSetting({
 }
 
 /**
- * "Reset to default" for the TOLERANCE family (block tolerance + draft-PR
- * review) of one repo. The row is shared with the other per-repo families
- * (#66 egress, #125 supersede policy): when any of those still carries an
- * override the row is KEPT and only the tolerance columns go back to their
- * defaults; the row is deleted only when nothing else lives on it. Resetting
- * a repo's tolerance must never silently discard its supersede policy.
+ * "Reset to default" for the TOLERANCE family (block tolerance only — the
+ * draft-PR policy is its OWN family since the tri-state migration and a
+ * tolerance reset must NOT touch it) of one repo. The row is shared with the
+ * other per-repo families (#66 egress, #125 supersede policy, drafts): when
+ * any of those still carries an override the row is KEPT and only the
+ * tolerance columns go back to their defaults; the row is deleted only when
+ * nothing else lives on it. Resetting a repo's tolerance must never silently
+ * discard its supersede policy or draft choice.
  * Optional `expectedUpdatedAt` makes the reset a compare-and-swap (409-class
  * conflict → false, nothing changed).
  */
@@ -438,12 +443,15 @@ export async function removeRepoReviewSetting({
     isNotNull(repoReviewSettings.supersedePolicy),
     isNotNull(repoReviewSettings.egressPolicy),
     isNotNull(repoReviewSettings.egressAllowlist),
+    // Tri-state migration: drafts are their OWN family now. A row whose only
+    // content is a draft override must survive a tolerance reset — and the
+    // reset below no longer touches reviewDraftPrs at all.
+    isNotNull(repoReviewSettings.reviewDraftPrs),
   )!;
   const reset = await db
     .update(repoReviewSettings)
     .set({
       blockTolerance: "warning",
-      reviewDraftPrs: true,
       updatedAt: new Date(),
     })
     .where(and(rowFilter, otherFamiliesPresent))

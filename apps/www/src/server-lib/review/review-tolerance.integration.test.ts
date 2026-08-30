@@ -227,12 +227,20 @@ describe("review-tolerance booted-stack integration (real DB → resolve → exe
     expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
   });
 
-  it("DRAFT-1: default (no row) → intake engages drafts (policy true)", async () => {
+  it("DRAFT-1: default (no row, no filter) → intake SKIPS drafts (policy false); a legacy opt-in engages them", async () => {
     expect(
       await resolveReviewDraftPolicy({
         db,
         organizationId: orgId,
         repoFullName: REPO,
+      }),
+    ).toBe(false);
+    expect(
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+        automationIncludeDraftPrs: true,
       }),
     ).toBe(true);
   });

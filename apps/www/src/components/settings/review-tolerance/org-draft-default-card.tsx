@@ -17,24 +17,25 @@ import { ConflictError } from "@/queries/error-from-response";
 /**
  * Org-wide "Review draft PRs" default — a column on the SAME sentinel row
  * ('*') the supersede section edits, resolved at webhook intake as:
- * repo row → this sentinel → legacy automation filter → true.
+ * repo row → this sentinel → legacy automation filter → false.
  *
  * Shares the supersede section's query hooks — one cache entry for the
  * sentinel row; see supersede-policy-queries.ts for the coherency story.
  *
- * Storage is NOT NULL: a sentinel row that exists carries an authoritative
- * value (implicit true counts as a choice). No stored row = effective true.
+ * Storage is TRI-STATE: NULL means "no choice at this scope" and resolution
+ * falls through to the legacy automation filter, then the system default
+ * FALSE. Only an explicit true/false on the sentinel is an org-wide choice.
  */
 
-/** Effective org default when no sentinel row exists. */
-export const EFFECTIVE_DRAFT_DEFAULT = true;
+/** Effective org default when neither the sentinel nor a legacy automation filter chose: drafts are skipped. */
+export const EFFECTIVE_DRAFT_DEFAULT = false;
 
 export type OrgDraftDefaultState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
   | {
       kind: "ready";
-      /** Effective org-wide value (stored, or the system default true). */
+      /** Effective org-wide value (stored, or the system default false). */
       reviewDrafts: boolean;
       saving: boolean;
       /** A CAS write lost its race (either family — the row is shared). */

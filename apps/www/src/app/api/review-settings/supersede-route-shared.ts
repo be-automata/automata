@@ -61,12 +61,15 @@ export function parseSupersedePatch(body: {
  */
 export function parseReviewDraftPrs(body: {
   reviewDraftPrs?: unknown;
-}): { reviewDraftPrs?: boolean } | { errorResponse: NextResponse } {
+}): { reviewDraftPrs?: boolean | null } | { errorResponse: NextResponse } {
   if (body.reviewDraftPrs === undefined) return {};
-  if (typeof body.reviewDraftPrs !== "boolean") {
+  if (
+    body.reviewDraftPrs !== null &&
+    typeof body.reviewDraftPrs !== "boolean"
+  ) {
     return {
       errorResponse: NextResponse.json(
-        { error: "reviewDraftPrs must be a boolean" },
+        { error: "reviewDraftPrs must be a boolean or null (null = inherit)" },
         { status: 400 },
       ),
     };

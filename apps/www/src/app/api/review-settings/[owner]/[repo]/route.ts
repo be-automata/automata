@@ -99,7 +99,7 @@ export async function PUT(
 
   const patch: {
     blockTolerance?: string;
-    reviewDraftPrs?: boolean;
+    reviewDraftPrs?: boolean | null;
     supersedePolicy?: string | null;
     recheckOnComplete?: boolean;
   } = {};

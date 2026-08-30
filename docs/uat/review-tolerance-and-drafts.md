@@ -5,7 +5,9 @@ Durable, re-runnable acceptance cases for the two per-repo review settings shipp
 
 - **REQUESTED_CHANGES tolerance** — an operator sets, per repo, the severity floor that forces
   `request_changes`: `error` (only error/critical block), `warning` (default), `info` (everything blocks).
-- **Review draft PRs** — per repo, whether Automata engages DRAFT PRs. Default **true** (works on drafts).
+- **Review draft PRs** — TRI-STATE per repo and org-wide (the `'*'` sentinel row): explicit true/false
+  is a choice; NULL inherits (repo → org sentinel → legacy automation `includeDraftPRs` filter). System
+  default **false** — drafts are skipped until marked ready for review; operators opt in via the dashboard.
 
 Read [`README.md`](./README.md) first (parameters + preflight). These cases reuse the same plane; the
 mechanism is proven at the unit/integration layer (see the note at the bottom) — this suite proves the
@@ -34,7 +36,8 @@ mechanism is proven at the unit/integration layer (see the note at the bottom) �
 Helper — set/clear/read a repo's settings (org resolved from the session):
 ```bash
 set_tolerance(){ curl -s -X PUT "$WORKER_URL/api/review-settings/$OWNER/$NAME" -H "cookie: $COOKIE" -H 'content-type: application/json' -d "{\"blockTolerance\":\"$1\"}"; echo; }
-set_drafts(){    curl -s -X PUT "$WORKER_URL/api/review-settings/$OWNER/$NAME" -H "cookie: $COOKIE" -H 'content-type: application/json' -d "{\"reviewDraftPrs\":$1}"; echo; }
+set_drafts(){    curl -s -X PUT "$WORKER_URL/api/review-settings/$OWNER/$NAME" -H "cookie: $COOKIE" -H 'content-type: application/json' -d "{\"reviewDraftPrs\":$1}"; echo; }   # true | false | null (null = inherit)
+set_org_drafts(){ curl -s -X PUT "$WORKER_URL/api/review-settings/default" -H "cookie: $COOKIE" -H 'content-type: application/json' -d "{\"reviewDraftPrs\":$1}"; echo; }        # org-wide sentinel
 clear_repo(){    curl -s -X DELETE "$WORKER_URL/api/review-settings/$OWNER/$NAME" -H "cookie: $COOKIE"; echo; }
 show_repo(){     curl -s "$WORKER_URL/api/review-settings" -H "cookie: $COOKIE" | jq --arg r "$OWNER/$NAME" '.settings[]|select(.repoFullName==($r|ascii_downcase))'; }
 ```
@@ -68,27 +71,35 @@ via `gh api repos/$REPO/pulls/<n>/reviews`. The reviewed-commit + verdict is the
 If a second org also has `$REPO` onboarded: set `info` under org A and `error` under org B for the same
 slug; confirm each org's reviews use its own floor. (Skip if only one org onboards the repo.)
 
-### DRAFT-1 — works on drafts by default
-1. `clear_repo` (draft policy defaults to true).
+### DRAFT-1 — drafts are SKIPPED by default
+1. `clear_repo` and clear any org sentinel choice (`set_org_drafts null`) — no draft choice anywhere.
+2. Open a **draft** PR with a reviewable diff.
+3. **Expect:** **no run dispatches** — the webhook logs
+   `Skipping automation … for draft PR #<n> … (repo draft policy = ignore)`. No review is posted.
+4. Mark the PR **ready for review** → the bot engages and posts a verdict.
+
+### DRAFT-2 — opt a repo IN to drafts, then back out
+1. `set_drafts true`.
 2. Open a **draft** PR with a reviewable diff.
 3. **Expect:** bot engages — a review/comment is posted (draft verdicts cap at COMMENT by design). A run
    dispatches (visible in `/api/runs` / worker log).
+4. `set_drafts null` (back to inherit; with no org choice this falls to the FALSE default) and push a
+   commit to a fresh draft PR.
+5. **Expect:** the intake skip returns — no run, `repo draft policy = ignore` in the log.
 
-### DRAFT-2 — opt a repo out of drafts, then back in
-1. `set_drafts false`.
-2. Open a **draft** PR (or convert an open one to draft) and push a commit.
-3. **Expect:** **no run dispatches** — the webhook logs `Skipping automation … for draft PR #<n> … (repo draft policy = ignore)`. No review is posted.
-4. Mark the PR **ready for review**.
-5. **Expect:** the bot now engages and posts a verdict.
-6. `set_drafts true` (or `clear_repo`) and confirm a fresh draft PR is engaged again.
+### DRAFT-3 — org-wide opt-in, repo override wins
+1. `clear_repo`; `set_org_drafts true` → a fresh draft PR IS engaged (sentinel opt-in).
+2. `set_drafts false` on the repo → a draft PR on it is skipped (repo override beats the org sentinel).
+3. Cleanup: `clear_repo`; `set_org_drafts null`.
 
 ---
 
 ## Pass bar
 
-All cases post the asserted verdict against the reviewed commit, TOL-2 flips **without a restart**, and
-DRAFT-2 shows the intake skip in the log then engages on ready. Record the PR numbers + reviewed SHAs +
-verdicts as evidence (mirror the matrix convention in `docs/triage/`).
+All cases post the asserted verdict against the reviewed commit, TOL-2 flips **without a restart**,
+DRAFT-1 shows the default intake skip then engages on ready, and DRAFT-3 shows the repo override beating
+the org sentinel. Record the PR numbers + reviewed SHAs + verdicts as evidence (mirror the matrix
+convention in `docs/triage/`).
 
 ## Mechanism already proven below the live layer (context for the validator)
 
@@ -99,7 +110,7 @@ failure implies an env/deploy/migration gap, not logic:
 - `apps/www/src/server-lib/review/resolve-approve-floor.test.ts` / `resolve-review-draft-policy.test.ts` —
   live-read precedence (row > env/automation > default), org-fenced.
 - `packages/shared/src/model/repo-review-settings.test.ts` — org isolation, partial-upsert preserves the
-  other field, column defaults.
+  other field, tri-state NULL semantics + CAS fences.
 - `apps/www/src/app/api/review-settings/**/route.test.ts` — authz (401/400), validation, org fence, audit.
 - `apps/www/src/components/settings/review-tolerance/constants.test.ts` — the UI matrix is locked
   cell-for-cell against the server kernel (no frontend/backend drift).

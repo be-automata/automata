@@ -176,6 +176,27 @@ describe("/api/review-settings/default — reviewDraftPrs (org draft toggle)", (
     expect((await put({ reviewDraftPrs: true })).status).toBe(403);
   });
 
+  it("PUT reviewDraftPrs:null clears the org choice back to inherit (tri-state)", async () => {
+    await actor("admin");
+    const first = await put({ reviewDraftPrs: true, expectedUpdatedAt: null });
+    expect(first.status).toBe(200);
+    const v1 = ((await first.json()) as { setting: { updatedAt: string } })
+      .setting.updatedAt;
+
+    const cleared = await put({ reviewDraftPrs: null, expectedUpdatedAt: v1 });
+    expect(cleared.status).toBe(200);
+    expect(
+      ((await cleared.json()) as { setting: { reviewDraftPrs: boolean | null } })
+        .setting.reviewDraftPrs,
+    ).toBeNull();
+
+    const getRes = await GET();
+    const json = (await getRes.json()) as {
+      setting: { reviewDraftPrs: boolean | null } | null;
+    };
+    expect(json.setting?.reviewDraftPrs).toBeNull();
+  });
+
   it("non-boolean → 400, never stored", async () => {
     await actor("admin");
     expect((await put({ reviewDraftPrs: "nope" })).status).toBe(400);

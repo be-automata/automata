@@ -13,9 +13,9 @@ import { ConflictError, errorFromResponse } from "./error-from-response";
 export interface SupersedeDefaultDto {
   supersedePolicy: SupersedePolicy | null;
   recheckOnComplete: boolean;
-  /** Org-wide draft-PR default. NOT NULL in storage: a sentinel row that
-   * exists carries an authoritative value (implicit true counts). */
-  reviewDraftPrs: boolean;
+  /** Org-wide draft-PR default. Tri-state: null = the org has not chosen
+   * (falls through to the legacy automation filter, then FALSE). */
+  reviewDraftPrs: boolean | null;
   updatedAt: string;
 }
 
@@ -49,7 +49,7 @@ export function useSetSupersedeDefaultMutation(options?: {
     mutationFn: async (args: {
       supersedePolicy?: SupersedePolicy | null;
       recheckOnComplete?: boolean;
-      reviewDraftPrs?: boolean;
+      reviewDraftPrs?: boolean | null;
       expectedUpdatedAt?: string | null;
     }): Promise<SupersedeDefaultDto> => {
       const res = await fetch("/api/review-settings/default", {

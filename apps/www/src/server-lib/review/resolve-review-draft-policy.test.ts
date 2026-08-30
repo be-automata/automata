@@ -10,8 +10,10 @@ import {
 import { resolveReviewDraftPolicy } from "./resolve-review-draft-policy";
 
 /**
- * Draft-PR intake gate resolution. Precedence: per-repo dashboard setting >
- * automation config > default TRUE (Automata works on drafts by default).
+ * Draft-PR intake gate resolution. TRI-STATE precedence: explicit per-repo
+ * value > explicit org-sentinel value > legacy automation filter > FALSE
+ * (drafts are skipped until marked ready; operators opt in via the dashboard).
+ * NULL at either dashboard tier means "no choice here" and falls through.
  */
 
 const db = createDb(env.DATABASE_URL!);
@@ -32,31 +34,41 @@ describe("resolveReviewDraftPolicy", () => {
     orgId = await makeOrg();
   });
 
-  it("no org, no automation config → default TRUE (works on drafts)", async () => {
+  it("no org, no automation config → default FALSE (drafts skipped)", async () => {
     expect(
       await resolveReviewDraftPolicy({
         db,
         organizationId: null,
         repoFullName: REPO,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
-  it("org present, no per-repo row → falls to automation config, else default TRUE", async () => {
+  it("no org, legacy automation opt-in TRUE is honored", async () => {
     expect(
       await resolveReviewDraftPolicy({
         db,
-        organizationId: orgId,
+        organizationId: null,
         repoFullName: REPO,
+        automationIncludeDraftPrs: true,
       }),
     ).toBe(true);
-    // Legacy per-automation opt-out is still honored when there's no dashboard row.
+  });
+
+  it("org present, no per-repo row → falls to automation config, else default FALSE", async () => {
     expect(
       await resolveReviewDraftPolicy({
         db,
         organizationId: orgId,
         repoFullName: REPO,
         automationIncludeDraftPrs: false,
+      }),
+    ).toBe(false);
+    expect(
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
       }),
     ).toBe(false);
   });
@@ -95,7 +107,9 @@ describe("resolveReviewDraftPolicy", () => {
     ).toBe(true);
   });
 
-  it("a tolerance-only row leaves the draft policy at its default TRUE", async () => {
+  it("a tolerance-only row leaves the draft policy at its default FALSE", async () => {
+    // Tri-state: the row's draft value is NULL (no choice), so resolution
+    // falls through the empty tiers to the system default.
     await upsertRepoReviewSetting({
       db,
       organizationId: orgId,
@@ -108,7 +122,7 @@ describe("resolveReviewDraftPolicy", () => {
         organizationId: orgId,
         repoFullName: REPO,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 });
 
@@ -157,12 +171,11 @@ describe("resolveReviewDraftPolicy — org-default sentinel tier", () => {
     ).toBe(true);
   });
 
-  it("PINS THE NO-MIGRATION DECISION: a supersede-only sentinel row carries an authoritative implicit TRUE, beating a legacy includeDraftPRs=false", async () => {
-    // reviewDraftPrs is NOT NULL DEFAULT true, so a sentinel row created by
-    // the supersede UI alone still speaks for the draft family. Deliberate:
-    // matches the repo tier's shipped semantics (dashboard > legacy filter).
-    // If this test starts failing because the column went nullable, the
-    // migration finally happened — rewrite this to assert the tri-state.
+  it("TRI-STATE (the migration happened): a supersede-only sentinel row is NO draft choice — the legacy filter wins again", async () => {
+    // The predecessor of this test pinned the opposite (implicit true beats
+    // the legacy filter) and instructed its own rewrite once the column went
+    // nullable. It did: a row created by another family now carries NULL and
+    // falls through, so a legacy includeDraftPRs:false is honoured again.
     await upsertRepoReviewSetting({
       db,
       organizationId: orgId,
@@ -176,7 +189,67 @@ describe("resolveReviewDraftPolicy — org-default sentinel tier", () => {
         repoFullName: REPO,
         automationIncludeDraftPrs: false,
       }),
+    ).toBe(false);
+  });
+
+  it("TRI-STATE: a repo row with a NULL draft value inherits THROUGH to the org sentinel", async () => {
+    // The wart the migration removes: a tolerance-only repo row used to pin
+    // drafts to implicit true, masking an org-level OFF.
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { reviewDraftPrs: false },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { blockTolerance: "info" }, // draft family untouched → NULL
+    });
+    expect(
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      }),
+    ).toBe(false);
+  });
+
+  it("TRI-STATE: PUT reviewDraftPrs null clears a repo override back to inherit", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { reviewDraftPrs: false },
+    });
+    const row = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { reviewDraftPrs: true },
+    });
+    expect(
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      }),
     ).toBe(true);
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { reviewDraftPrs: null },
+      expectedUpdatedAt: row.updatedAt,
+    });
+    expect(
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      }),
+    ).toBe(false); // inherits the org OFF again
   });
 
   it("another org's sentinel is invisible", async () => {
