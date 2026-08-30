@@ -13,7 +13,6 @@ import { createOrganization } from "@terragon/shared/model/organizations";
 import {
   markThreadTerminal,
   setThreadActiveRun,
-  THREAD_RESUME_UPDATES,
 } from "@terragon/shared/model/threads";
 import {
   thread as threadTable,
@@ -210,19 +209,27 @@ describe.each([
       },
     );
 
-    it("a RESUME clears the typed terminal: after user-cancelled the fence closes, after THREAD_RESUME_UPDATES it opens again", async () => {
+    it("the resume window is FAIL-CLOSED: the old run stays refused from its terminal until the new stamp takes over", async () => {
       await setThreadActiveRun({ db, threadId, externalId: "run-1" });
       expect(
         await markThreadTerminal({ db, threadId, cause: "user-cancelled" }),
       ).toBe(true);
       expect((await event("run-1")).status).toBe(409);
-      // What startAgentMessage applies on every boot/resume transition.
+
+      // Mid-resume, BEFORE the new dispatch restamps: the typed terminal is
+      // still set (nothing clears it early any more), so the old run — whose
+      // id still MATCHES the stale stamp — keeps being refused. Clearing the
+      // cause here (the old THREAD_RESUME_UPDATES ordering) would have
+      // admitted this exact event: terminal=false and run-1 == stamp.
       await setLive();
-      await db
-        .update(threadTable)
-        .set(THREAD_RESUME_UPDATES)
-        .where(eq(threadTable.id, threadId));
-      expect((await event("run-1")).status).toBe(200);
+      expect((await event("run-1")).status).toBe(409);
+
+      // The new dispatch stamps run-2: ONE write sheds the terminal and
+      // flips refusal from the terminal arm to the stale-generation arm —
+      // the old run never sees an open door.
+      await setThreadActiveRun({ db, threadId, externalId: "run-2" });
+      expect((await event("run-1")).status).toBe(409);
+      expect((await event("run-2")).status).toBe(200);
       await waitUntilResolved();
     });
 

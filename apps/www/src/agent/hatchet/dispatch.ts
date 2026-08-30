@@ -28,7 +28,10 @@ import {
   type SupersedePolicy,
   type SupersedeSnapshot,
 } from "@terragon/shared/model/repo-review-settings";
-import { setThreadActiveRun } from "@terragon/shared/model/threads";
+import {
+  setThreadActiveRun,
+  clearThreadTerminalForResume,
+} from "@terragon/shared/model/threads";
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
 import {
   triggerAgentRun,
@@ -673,16 +676,33 @@ export async function dispatchAgentRun({
     await Promise.all([
       // #127: stamp the thread's ACTIVE run for the C1 generation fence.
       // Flag-ON only (legacy leaves the column NULL → fence fails open).
-      plan.stampFence && externalId
-        ? setThreadActiveRun({ db, threadId, externalId }).catch(
+      // Stamp = unfence (one write, #125 C1/#153). UNSTAMPED PLANS (non-review,
+      // flag-off) never restamp, so they shed the typed terminal here instead —
+      // after the trigger, when the new run already exists. Branch on the PLAN,
+      // never on externalId: a stamped (review) plan whose trigger response
+      // carried no run id is an anomaly that must FAIL CLOSED — no stamp, no
+      // unfence, the thread stays refused until the watchdog or a retry sorts
+      // it out. Unfencing there would shed the terminal while the old run's id
+      // still matches the stale stamp — the exact C1 window this PR closes.
+      plan.stampFence
+        ? externalId
+          ? setThreadActiveRun({ db, threadId, externalId }).catch(
+              (error: unknown) => {
+                console.error("[hatchet] activeRunExternalId stamp failed", {
+                  threadId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              },
+            )
+          : undefined
+        : clearThreadTerminalForResume({ db, threadId }).catch(
             (error: unknown) => {
-              console.error("[hatchet] activeRunExternalId stamp failed", {
+              console.error("[hatchet] resume unfence failed", {
                 threadId,
                 error: error instanceof Error ? error.message : String(error),
               });
             },
-          )
-        : undefined,
+          ),
       // Record this review run so a LATER push can supersede it. Only reviews are
       // tracked; a missing externalId (unexpected trigger-response shape) just skips
       // tracking — the run still executes, it simply can't be superseded (watchdog

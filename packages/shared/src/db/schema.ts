@@ -518,6 +518,17 @@ export const threadChat = pgTable(
       onDelete: "cascade",
     }),
     title: text("title"),
+    /**
+     * #153 read-tear fix: the generation fence must decide from ONE row read
+     * in ONE statement. These two mirror the thread row's lifecycle columns so
+     * a chat-mode thread's chat row carries every fence input:
+     * `setThreadActiveRun` stamps activeRunExternalId on both rows in one
+     * transaction; `markThreadsTerminal` stamps terminalCause here inside the
+     * terminal transaction. The thread row stays the run ledger's join key —
+     * these are fence mirrors, not a move.
+     */
+    activeRunExternalId: text("active_run_external_id"),
+    terminalCause: text("terminal_cause"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()

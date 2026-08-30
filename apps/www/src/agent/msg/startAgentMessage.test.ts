@@ -10,6 +10,8 @@ import { nanoid } from "nanoid";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 import { User } from "@terragon/shared";
 import { getThreadChat } from "@terragon/shared/model/threads";
+import * as schema from "@terragon/shared/db/schema";
+import { eq } from "drizzle-orm";
 import { startAgentMessage } from "./startAgentMessage";
 import { hasActiveDaemonToken, daemonRunKey } from "@/lib/daemon-token";
 import { sendDaemonMessage } from "@/agent/daemon";
@@ -277,5 +279,70 @@ describe("startAgentMessage — permission-mode floor (#82, local/in-process sea
     });
 
     expect(lastSentPermissionMode()).toBe("plan");
+  });
+});
+
+describe("startAgentMessage — resume clears the terminal PAIR (#153 read-tear fix)", () => {
+  let user: User;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    user = (await createTestUser({ db })).user;
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ externalId: "run" }), { status: 200 }),
+        ),
+    );
+  });
+
+  it("a thread resumed after a typed terminal sheds terminalCause through the REAL boot path — the unstamped dispatch's post-trigger fallback", async () => {
+    // Legacy (sentinel) thread: the production condition, and the only shape
+    // this harness can dispatch — a chat-mode thread's daemon-token name
+    // (threadId:threadChatId, two uuids = 73 chars) exceeds better-auth's
+    // api-key name cap, so v1 dispatch fails at mint. Latent v1-only blocker,
+    // tracked with the #153 v1 work; the pair-clearing itself is covered at
+    // the writer level (hatchet-run.test.ts) and fence level
+    // (generation-fence.integration.test.ts).
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        sandboxProvider: "hatchet-remote",
+        githubRepoFullName: "be-automata/automata",
+        repoBaseBranchName: "main",
+      },
+      chatOverrides: { status: "complete" },
+    });
+    expect(threadChatId).toBe(LEGACY_THREAD_CHAT_ID);
+    // The thread previously reached a typed terminal.
+    await db
+      .update(schema.thread)
+      .set({ terminalCause: "user-cancelled" })
+      .where(eq(schema.thread.id, threadId));
+
+    await startAgentMessage({
+      db,
+      userId: user.id,
+      message: {
+        type: "user",
+        model: "sonnet",
+        parts: [{ type: "text", text: "resume it" }],
+      },
+      threadId,
+      threadChatId,
+      isNewThread: false,
+    });
+
+    // Non-review remote dispatch is UNSTAMPED (stampFence false), so the
+    // unfence is the post-trigger fallback in dispatchAgentRun — the cause is
+    // shed only once the new run exists, never before (the #125 C1 window).
+    const [t] = await db
+      .select({ cause: schema.thread.terminalCause })
+      .from(schema.thread)
+      .where(eq(schema.thread.id, threadId));
+    expect(t!.cause).toBeNull();
   });
 });

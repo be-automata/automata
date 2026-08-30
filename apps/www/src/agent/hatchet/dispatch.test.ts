@@ -723,4 +723,43 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
     expect(f.cancels).toEqual([]); // engine-owned: no app-side cancel
     vi.unstubAllGlobals();
   });
+
+  it("FAIL-CLOSED: a stamped (review) dispatch whose trigger response carries no run id neither stamps nor unfences", async () => {
+    // transport.ts reads json.run?.metadata?.id — a shape mismatch (a
+    // previously-hit bug class) yields externalId undefined AFTER a 200
+    // trigger. The plan is stamped, so the fallback unfence must NOT fire:
+    // shedding the terminal without a new stamp reopens the #125 C1 window
+    // (the old run's id still matches the stale stamp). The thread stays
+    // fenced until the watchdog or a retry sorts it out.
+    const t = await makeReviewThread(92);
+    // The thread carries a prior generation's terminal + stamp.
+    await db
+      .update(threadTable)
+      .set({ terminalCause: "superseded", activeRunExternalId: "run-old-92" })
+      .where(eq(threadTable.id, t.threadId));
+    const badShape = vi.fn(async (url: string) => {
+      if (url.includes("/tasks/cancel"))
+        return new Response("{}", { status: 200 });
+      // 200, but not the { run: { metadata: { id } } } shape.
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", badShape);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "feature",
+    });
+    const [row] = await db
+      .select({
+        cause: threadTable.terminalCause,
+        stamp: threadTable.activeRunExternalId,
+      })
+      .from(threadTable)
+      .where(eq(threadTable.id, t.threadId));
+    expect(row!.cause).toBe("superseded"); // still fenced
+    expect(row!.stamp).toBe("run-old-92"); // untouched
+    vi.unstubAllGlobals();
+  });
 });

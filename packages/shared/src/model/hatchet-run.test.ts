@@ -890,3 +890,149 @@ describe("stopStalledThreads — the stall watchdog writes a TYPED terminal", ()
     expect(row!.errorMessage).not.toBe("request-timeout");
   });
 });
+
+describe("#153 read-tear mirrors — the chat row carries every fence input", () => {
+  let userId: string;
+  let orgA: string;
+
+  beforeEach(async () => {
+    userId = (await createTestUser({ db })).user.id;
+    orgA = await makeOrg("acme-tear");
+  });
+
+  const mkChatMode = () =>
+    createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 9,
+      externalId: nanoid(),
+      enableThreadChatCreation: true,
+    });
+
+  it("markThreadsTerminal stamps terminalCause on the CHAT row inside the terminal transaction", async () => {
+    const { threadId } = await mkChatMode();
+    await markThreadsTerminal({ db, threadIds: [threadId], cause: "timeout" });
+    const [chat] = await db
+      .select({
+        status: threadChatTable.status,
+        terminalCause: threadChatTable.terminalCause,
+      })
+      .from(threadChatTable)
+      .where(eq(threadChatTable.threadId, threadId));
+    expect(chat).toMatchObject({
+      status: "complete",
+      terminalCause: "timeout",
+    });
+  });
+
+  it("setThreadActiveRun stamps the run id on BOTH rows and sheds the typed terminal in the SAME write", async () => {
+    const { threadId } = await mkChatMode();
+    // The thread previously reached a typed terminal (both rows, as
+    // markThreadsTerminal stamps them). Restamping for the NEW run must
+    // clear it atomically — clearing earlier opens the #125 C1 window.
+    await markThreadsTerminal({
+      db,
+      threadIds: [threadId],
+      cause: "user-cancelled",
+    });
+    await setThreadActiveRun({ db, threadId, externalId: "run-xyz" });
+    const [tc] = await db
+      .select({ cause: threadTable.terminalCause })
+      .from(threadTable)
+      .where(eq(threadTable.id, threadId));
+    const [cc] = await db
+      .select({ cause: threadChatTable.terminalCause })
+      .from(threadChatTable)
+      .where(eq(threadChatTable.threadId, threadId));
+    expect(tc!.cause).toBeNull();
+    expect(cc!.cause).toBeNull();
+    const [t] = await db
+      .select({ stamp: threadTable.activeRunExternalId })
+      .from(threadTable)
+      .where(eq(threadTable.id, threadId));
+    const [c] = await db
+      .select({ stamp: threadChatTable.activeRunExternalId })
+      .from(threadChatTable)
+      .where(eq(threadChatTable.threadId, threadId));
+    expect(t!.stamp).toBe("run-xyz");
+    expect(c!.stamp).toBe("run-xyz");
+    // Clearing the stamp clears both rows but NEVER touches the cause: a
+    // null stamp is not a new run, so it must not unfence anything. (Seeded
+    // directly — the thread is already non-reapable, so markThreadsTerminal
+    // would be a no-op here.)
+    await db
+      .update(threadTable)
+      .set({ terminalCause: "timeout" })
+      .where(eq(threadTable.id, threadId));
+    await db
+      .update(threadChatTable)
+      .set({ terminalCause: "timeout" })
+      .where(eq(threadChatTable.threadId, threadId));
+    await setThreadActiveRun({ db, threadId, externalId: null });
+    const [c2] = await db
+      .select({
+        stamp: threadChatTable.activeRunExternalId,
+        cause: threadChatTable.terminalCause,
+      })
+      .from(threadChatTable)
+      .where(eq(threadChatTable.threadId, threadId));
+    expect(c2!.stamp).toBeNull();
+    expect(c2!.cause).toBe("timeout");
+  });
+});
+
+describe("#153 backfill — pre-deploy terminal chat threads get their mirrors", () => {
+  let userId: string;
+  let orgA: string;
+
+  beforeEach(async () => {
+    userId = (await createTestUser({ db })).user.id;
+    orgA = await makeOrg("acme-backfill");
+  });
+
+  it("copies terminalCause + activeRunExternalId onto NULL chat mirrors, never overwriting stamped ones", async () => {
+    const { backfillThreadChatFenceMirrors } = await import(
+      "../../scripts/backfill-thread-chat-fence-mirrors"
+    );
+    const mk = () =>
+      createTestRemoteRun({
+        db,
+        userId,
+        organizationId: orgA,
+        prNumber: 11,
+        externalId: nanoid(),
+        enableThreadChatCreation: true,
+      });
+    // A thread terminated BEFORE the deploy: thread row carries the cause and
+    // stamp, the chat mirrors are NULL (the pre-mirror world).
+    const { threadId: oldT } = await mk();
+    await db
+      .update(threadTable)
+      .set({ terminalCause: "superseded", activeRunExternalId: "run-old" })
+      .where(eq(threadTable.id, oldT));
+    // A thread the NEW writers already stamped: mirrors must not be touched.
+    const { threadId: newT } = await mk();
+    await setThreadActiveRun({ db, threadId: newT, externalId: "run-live" });
+
+    await backfillThreadChatFenceMirrors(db);
+
+    const [oldChat] = await db
+      .select({
+        cause: threadChatTable.terminalCause,
+        stamp: threadChatTable.activeRunExternalId,
+      })
+      .from(threadChatTable)
+      .where(eq(threadChatTable.threadId, oldT));
+    expect(oldChat).toMatchObject({ cause: "superseded", stamp: "run-old" });
+
+    const [newChat] = await db
+      .select({ stamp: threadChatTable.activeRunExternalId })
+      .from(threadChatTable)
+      .where(eq(threadChatTable.threadId, newT));
+    expect(newChat!.stamp).toBe("run-live");
+
+    // Idempotent: a rerun is a no-op.
+    expect(await backfillThreadChatFenceMirrors(db)).toBe(0);
+  });
+});

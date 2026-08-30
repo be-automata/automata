@@ -798,6 +798,8 @@ type ThreadForThreadChatInfoFull = Pick<
   | "name"
   | "queuedMessages"
   | "messages"
+  | "activeRunExternalId"
+  | "terminalCause"
 > & {
   isUnread: boolean;
 };
@@ -836,6 +838,10 @@ function createLegacyThreadChatFull(
     isUnread: thread.isUnread,
     messages: thread.messages ?? [],
     queuedMessages: thread.queuedMessages ?? [],
+    // Fence inputs (#153): for a legacy thread the chat "row" IS the thread
+    // row, so these arrive from the same single read as status/errorMessage.
+    activeRunExternalId: thread.activeRunExternalId,
+    terminalCause: thread.terminalCause,
   };
 }
 
@@ -1048,10 +1054,30 @@ export async function setThreadActiveRun({
   threadId: string;
   externalId: string | null;
 }): Promise<void> {
-  await db
-    .update(schema.thread)
-    .set({ activeRunExternalId: externalId })
-    .where(eq(schema.thread.id, threadId));
+  // #153 read-tear fix: the chat row mirrors the stamp so the fence can decide
+  // from a single row. One transaction — the two rows never disagree in any
+  // committed state.
+  //
+  // Stamping a NEW run also sheds the typed terminal IN THE SAME WRITE.
+  // Clearing the cause any earlier opens a fail-open window: the old (just
+  // terminated) run's id still matches activeRunExternalId, so its late
+  // events would pass BOTH fence arms until this stamp lands. Fused, the
+  // terminal arm refuses the old generation right up to the instant the
+  // stale-generation arm takes over — zero admitted window (#125 C1).
+  // A null externalId only clears the stamp; it never touches the cause.
+  const set =
+    externalId !== null
+      ? { activeRunExternalId: externalId, terminalCause: null }
+      : { activeRunExternalId: externalId };
+  await db.transaction(async (tx) => {
+    await Promise.all([
+      tx.update(schema.thread).set(set).where(eq(schema.thread.id, threadId)),
+      tx
+        .update(schema.threadChat)
+        .set(set)
+        .where(eq(schema.threadChat.threadId, threadId)),
+    ]);
+  });
 }
 
 /**
@@ -1414,13 +1440,46 @@ function db_select_chat_status(statuses: ThreadStatus[]) {
 }
 
 /**
- * Thread-row columns a RESUME (new user message / boot of an ended thread)
- * must clear. `terminalCause` is write-once per run and read by the
- * generation fence as "this thread is terminal — refuse late writes"; a
- * thread that legitimately starts again must shed it, or the first typed
- * terminal would fence the thread forever (review on #138).
+ * Clear the typed terminal on a RESUME (new user message / boot of an ended
+ * thread). `terminalCause` is write-once per run and read by the generation
+ * fence as "this thread is terminal — refuse late writes"; a thread that
+ * legitimately starts again must shed it, or the first typed terminal would
+ * fence the thread forever (review on #138).
+ *
+ * INVARIANT (#153 read-tear fix): thread.terminalCause and
+ * threadChat.terminalCause move together — the fence decides from the chat
+ * row alone. Clears both rows in ONE transaction (no broadcasts inside), so
+ * an interruption can never leave the chat mirror carrying a stale terminal
+ * that fences a resumed thread forever.
+ *
+ * SCOPE: only for planes that never restamp the fence — the in-process
+ * sandbox boot and unstamped (non-review / flag-off) remote dispatches,
+ * called AFTER the new run exists. The stamped review plane must NOT use
+ * this: setThreadActiveRun sheds the cause atomically with the new stamp,
+ * and clearing earlier reopens the #125 C1 window (the old run's id still
+ * matches the stamp until then). Queued threads stay fenced on purpose —
+ * dequeue re-enters startAgentMessage and the dispatch unfences.
  */
-export const THREAD_RESUME_UPDATES = { terminalCause: null } as const;
+export async function clearThreadTerminalForResume({
+  db,
+  threadId,
+}: {
+  db: DB;
+  threadId: string;
+}): Promise<void> {
+  await db.transaction(async (tx) => {
+    await Promise.all([
+      tx
+        .update(schema.thread)
+        .set({ terminalCause: null })
+        .where(eq(schema.thread.id, threadId)),
+      tx
+        .update(schema.threadChat)
+        .set({ terminalCause: null })
+        .where(eq(schema.threadChat.threadId, threadId)),
+    ]);
+  });
+}
 
 export const reapableThreadStatuses: ThreadStatus[] = [
   "booting",
@@ -1536,14 +1595,10 @@ export async function markThreadsTerminal({
   // daemon event landing in that window was ADMITTED instead of refused. One
   // transaction closes that WRITE window; nothing COMMITTED shows that pair.
   //
-  // It does NOT close the READ tear: handleDaemonEvent fetches the chat row and
-  // the thread row in two separate queries, and decideThreadGeneration treats a
-  // present-but-null terminalCause as "not terminal" without consulting status,
-  // so a straddling reader still admits. Two fixes, neither in scope here: the
-  // cheap one is a SINGLE joined read at the fence (a transaction would NOT do
-  // it — Postgres defaults to READ COMMITTED, where each statement takes a
-  // fresh snapshot); the durable one is moving the lifecycle columns onto
-  // threadChat. Both tracked on #153.
+  // The READ tear is closed by the mirror columns on threadChat (#153): the
+  // fence decides from the chat-row read alone (the legacy branch reads the
+  // thread row — also one statement, one snapshot). This transaction stamps
+  // terminalCause on BOTH rows so no committed state can split them.
   //
   // Broadcasts stay OUTSIDE the transaction: network I/O must never hold it
   // open, and a failed publish must not roll back a committed terminal.
@@ -1565,7 +1620,9 @@ export async function markThreadsTerminal({
         .returning({ id: schema.thread.id, userId: schema.thread.userId }),
       tx
         .update(schema.threadChat)
-        .set(terminal)
+        // The chat row mirrors terminalCause (#153 read-tear fix) so the fence
+        // sees the typed terminal in its single chat-row read.
+        .set({ ...terminal, terminalCause: cause })
         .where(
           and(
             inArray(schema.threadChat.threadId, threadIds),
