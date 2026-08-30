@@ -29,7 +29,7 @@ import { getPostHogServer } from "@/lib/posthog-server";
 function toDto(row: {
   supersedePolicy: string | null;
   recheckOnComplete: boolean;
-  reviewDraftPrs: boolean;
+  reviewDraftPrs: boolean | null;
   updatedAt: Date;
 }) {
   return {

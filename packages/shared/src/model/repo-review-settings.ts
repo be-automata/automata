@@ -229,7 +229,9 @@ export async function upsertRepoReviewSetting({
   repoFullName: string;
   patch: {
     blockTolerance?: string;
-    reviewDraftPrs?: boolean;
+    /** Tri-state: explicit true/false is a choice; null CLEARS the choice at
+     * this scope (repo → inherit org; sentinel → inherit legacy/default). */
+    reviewDraftPrs?: boolean | null;
     /** '#66 egress level ('none'|'ip_port'|'domain'); null clears (= no enforcement). */
     egressPolicy?: string | null;
     /** #66 operator allowlist entries; null clears. Validated at shape-build time. */
@@ -321,7 +323,7 @@ export async function upsertRepoReviewSetting({
   }
   const set: {
     blockTolerance?: string;
-    reviewDraftPrs?: boolean;
+    reviewDraftPrs?: boolean | null;
     egressPolicy?: string | null;
     egressAllowlist?: string[] | null;
     supersedePolicy?: string | null;
@@ -438,12 +440,15 @@ export async function removeRepoReviewSetting({
     isNotNull(repoReviewSettings.supersedePolicy),
     isNotNull(repoReviewSettings.egressPolicy),
     isNotNull(repoReviewSettings.egressAllowlist),
+    // Tri-state migration: drafts are their OWN family now. A row whose only
+    // content is a draft override must survive a tolerance reset — and the
+    // reset below no longer touches reviewDraftPrs at all.
+    isNotNull(repoReviewSettings.reviewDraftPrs),
   )!;
   const reset = await db
     .update(repoReviewSettings)
     .set({
       blockTolerance: "warning",
-      reviewDraftPrs: true,
       updatedAt: new Date(),
     })
     .where(and(rowFilter, otherFamiliesPresent))

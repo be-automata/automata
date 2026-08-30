@@ -164,14 +164,17 @@ describe("repo-review-settings (Neon, org-fenced)", () => {
     ).toEqual({ removed: false, conflict: false });
   });
 
-  it("defaults: a tolerance-only insert leaves reviewDraftPrs TRUE", async () => {
+  it("defaults: a tolerance-only insert leaves reviewDraftPrs NULL (tri-state: no choice)", async () => {
+    // Pre-migration this asserted implicit TRUE — the wart where a row created
+    // by another family silently pinned the draft policy. NULL now means the
+    // resolution falls through to the org sentinel / legacy filter / true.
     const row = await setRepoReviewSetting({
       db,
       organizationId: orgA,
       repoFullName: "acme/widgets",
       blockTolerance: "error",
     });
-    expect(row.reviewDraftPrs).toBe(true);
+    expect(row.reviewDraftPrs).toBeNull();
     expect(row.blockTolerance).toBe("error");
   });
 
@@ -766,5 +769,36 @@ describe("getRepoReviewSettingWithOrgDefault + expectRowAbsent (draft org tier)"
       repoFullName: "acme/unused",
     });
     expect(rows.orgDefault).toBeUndefined();
+  });
+});
+
+describe("tri-state drafts: tolerance reset preserves the draft family", () => {
+  let orgId: string;
+  beforeEach(async () => {
+    orgId = await makeOrg("acme-tristate");
+  });
+
+  it("removeRepoReviewSetting keeps a row whose only content is a draft override, and leaves the value alone", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "acme/widgets",
+      patch: { reviewDraftPrs: false, blockTolerance: "info" },
+    });
+    const { removed } = await removeRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "acme/widgets",
+    });
+    expect(removed).toBe(true);
+    const row = await getRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "acme/widgets",
+    });
+    // Row survives (draft family lives on it) with tolerance reset to default
+    // and the draft override UNTOUCHED — drafts are their own family now.
+    expect(row?.blockTolerance).toBe("warning");
+    expect(row?.reviewDraftPrs).toBe(false);
   });
 });

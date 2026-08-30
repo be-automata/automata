@@ -15,7 +15,8 @@ import { ConflictError, errorFromResponse } from "./error-from-response";
 export interface RepoReviewSettingDto {
   repoFullName: string;
   blockTolerance: BlockTolerance;
-  reviewDraftPrs: boolean;
+  /** Tri-state: null = inherit (org sentinel → legacy filter → true). */
+  reviewDraftPrs: boolean | null;
   supersedePolicy: string | null;
   recheckOnComplete: boolean;
   updatedAt: string;
@@ -24,7 +25,8 @@ export interface RepoReviewSettingDto {
 /** Partial patch — send only the field(s) being changed (at least one). */
 export interface RepoReviewSettingPatch {
   blockTolerance?: BlockTolerance;
-  reviewDraftPrs?: boolean;
+  /** Explicit true/false sets an override; null clears it (inherit). */
+  reviewDraftPrs?: boolean | null;
   /** null clears the override (falls back to the org default). */
   supersedePolicy?: SupersedePolicy | null;
   recheckOnComplete?: boolean;

@@ -96,7 +96,10 @@ export function ReviewSettings() {
           updatedAt: s.updatedAt,
           key,
           tolerance: s.blockTolerance,
-          reviewDraftPrs: s.reviewDraftPrs,
+          reviewDraftPrs:
+            s.reviewDraftPrs ??
+            orgDefaultQuery.data?.reviewDraftPrs ??
+            EFFECTIVE_DRAFT_DEFAULT,
           hasOverride: true,
         });
       }

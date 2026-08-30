@@ -1475,7 +1475,14 @@ export const repoReviewSettings = pgTable(
      * ignore drafts until they are marked ready. Enforced at the webhook intake
      * gate, so a draft-skipped PR never dispatches a run at all.
      */
-    reviewDraftPrs: boolean("review_draft_prs").notNull().default(true),
+    /**
+     * Tri-state draft-PR policy. NULL = no choice at this scope — a repo row
+     * inherits the org sentinel, the sentinel inherits the legacy automation
+     * filter, and the system default is TRUE. Explicit true/false is a choice.
+     * (Was NOT NULL DEFAULT true; migrated so a row created by another family
+     * no longer silently pins drafts.)
+     */
+    reviewDraftPrs: boolean("review_draft_prs"),
     /**
      * Author-trust threshold `T` (an `author_association` trust rank:
      * OWNER > MEMBER > COLLABORATOR > CONTRIBUTOR > FIRST_TIME_CONTRIBUTOR > NONE)
