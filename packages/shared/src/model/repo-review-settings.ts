@@ -1,7 +1,17 @@
 import { DB } from "../db";
 import { repoReviewSettings } from "../db/schema";
 import { RepoReviewSetting } from "../db/types";
-import { and, eq, inArray, isNotNull, isNull, ne, not, or } from "drizzle-orm";
+import {
+  and,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  not,
+  or,
+  sql,
+} from "drizzle-orm";
 import { buildEgressPolicyShape } from "./egress-policy";
 
 /**
@@ -90,6 +100,45 @@ export const SUPERSEDE_POLICY_LABELS: Record<SupersedePolicy, string> = {
 };
 
 /**
+ * One query for a repo's row AND the org-default sentinel row ('*'). The
+ * draft-PR resolver consumes this: repo override → org default → (caller's
+ * legacy tiers). Same single-query shape as resolveSupersedePolicy — the
+ * two candidate rows are fetched together so the tiers can never straddle
+ * two snapshots.
+ */
+export async function getRepoReviewSettingWithOrgDefault({
+  db,
+  organizationId,
+  repoFullName,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+}): Promise<{
+  repo: RepoReviewSetting | undefined;
+  orgDefault: RepoReviewSetting | undefined;
+}> {
+  const repo = normalizeRepo(repoFullName);
+  const rows = await db
+    .select()
+    .from(repoReviewSettings)
+    .where(
+      and(
+        eq(repoReviewSettings.organizationId, organizationId),
+        inArray(repoReviewSettings.repoFullName, [
+          repo,
+          ORG_DEFAULT_REPO_SENTINEL,
+        ]),
+      ),
+    );
+  const byRepo = new Map(rows.map((r) => [r.repoFullName, r]));
+  return {
+    repo: byRepo.get(repo),
+    orgDefault: byRepo.get(ORG_DEFAULT_REPO_SENTINEL),
+  };
+}
+
+/**
  * Resolve the effective supersede policy for one (org, repo): exact repo
  * override → org-default sentinel row ('*') → 'newest-wins'. One query for
  * both candidate rows; resolved LIVE at every dispatch.
@@ -106,22 +155,13 @@ export async function resolveSupersedePolicy({
   organizationId: string;
   repoFullName: string;
 }): Promise<SupersedeSnapshot> {
-  const repo = normalizeRepo(repoFullName);
-  const rows = await db
-    .select()
-    .from(repoReviewSettings)
-    .where(
-      and(
-        eq(repoReviewSettings.organizationId, organizationId),
-        inArray(repoReviewSettings.repoFullName, [
-          repo,
-          ORG_DEFAULT_REPO_SENTINEL,
-        ]),
-      ),
-    );
-  const byRepo = new Map(rows.map((r) => [r.repoFullName, r]));
-  for (const candidate of [repo, ORG_DEFAULT_REPO_SENTINEL]) {
-    const row = byRepo.get(candidate);
+  const { repo: repoRow, orgDefault } =
+    await getRepoReviewSettingWithOrgDefault({
+      db,
+      organizationId,
+      repoFullName,
+    });
+  for (const row of [repoRow, orgDefault]) {
     if (!row?.supersedePolicy) continue;
     if (!isSupersedePolicy(row.supersedePolicy)) {
       throw new Error(
@@ -182,6 +222,7 @@ export async function upsertRepoReviewSetting({
   updatedByUserId,
   expectedUpdatedAt,
   expectAbsentSupersedeOverride,
+  expectRowAbsent,
 }: {
   db: DB;
   organizationId: string;
@@ -215,8 +256,34 @@ export async function upsertRepoReviewSetting({
    * Mutually exclusive with `expectedUpdatedAt`.
    */
   expectAbsentSupersedeOverride?: boolean;
+  /**
+   * Whole-row first-write CAS (org-default sentinel writes). The write applies
+   * ONLY if NO row exists at all. CANONICAL fence comparison: `expectedUpdatedAt`
+   * fences an EDIT on the version the caller read; `expectAbsentSupersedeOverride`
+   * fences a first write of ONE family (the row may exist for others); this
+   * fences a first write of the WHOLE row. The per-family fence is wrong for
+   * the sentinel: a draft-only first write slips past `supersede_policy IS
+   * NULL` even when another admin's draft write already landed, and
+   * draft-created rows keep supersede_policy NULL, hollowing that fence for
+   * the supersede family too. Exactly ONE fence may be supplied — two throw.
+   */
+  expectRowAbsent?: boolean;
 }): Promise<RepoReviewSetting> {
   const repo = normalizeRepo(repoFullName);
+
+  // The docblock above promises the fences are mutually exclusive — enforce it
+  // so a caller supplying two gets a loud throw instead of the silent
+  // precedence of the setWhere ternary chain.
+  const fencesSupplied = [
+    expectedUpdatedAt !== undefined,
+    expectRowAbsent === true,
+    expectAbsentSupersedeOverride === true,
+  ].filter(Boolean).length;
+  if (fencesSupplied > 1) {
+    throw new Error(
+      "upsertRepoReviewSetting: supply at most ONE of expectedUpdatedAt / expectRowAbsent / expectAbsentSupersedeOverride",
+    );
+  }
 
   // #66: validate egress fields at the WRITE boundary by reusing the pure shape
   // builder (empty system hosts) — an invalid level or allowlist entry throws
@@ -282,9 +349,12 @@ export async function upsertRepoReviewSetting({
   // admins racing to CREATE the first override can never both get 200.
   const setWhere = expectedUpdatedAt
     ? eq(repoReviewSettings.updatedAt, expectedUpdatedAt)
-    : expectAbsentSupersedeOverride
-      ? isNull(repoReviewSettings.supersedePolicy)
-      : undefined;
+    : expectRowAbsent
+      ? // Any pre-existing row loses: the ON CONFLICT UPDATE matches nothing.
+        sql`false`
+      : expectAbsentSupersedeOverride
+        ? isNull(repoReviewSettings.supersedePolicy)
+        : undefined;
   const [row] = await db
     .insert(repoReviewSettings)
     // `set` holds exactly the defined patch fields (+ provenance); omitted

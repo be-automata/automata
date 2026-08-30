@@ -98,6 +98,14 @@ export async function getLatestHatchetRunForThread({
 }
 
 /**
+ * DO NOT add a draft-state filter here. The keying — (org, repo, prNumber,
+ * in_flight) with NO draft filter — is what lets a ready_for_review dispatch
+ * preempt an in-flight run that started while the PR was a draft (newest-wins).
+ * Draft state is deliberately NOT recorded on run rows; filtering on it would
+ * reopen the orch-agents#349 bug class (a stale draft run swallowing the first
+ * verdict).
+ */
+/**
  * Find the LIVE in_flight review runs for one (org, repo, PR) that a newer review
  * dispatch should supersede — every fresh in_flight row EXCEPT the current thread's
  * own (a dispatch never cancels itself). Bounded to the freshness window so a

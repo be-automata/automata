@@ -14,6 +14,7 @@ import {
   removeRepoReviewSetting,
   listRepoReviewSettings,
   RepoReviewSettingConflictError,
+  getRepoReviewSettingWithOrgDefault,
 } from "./repo-review-settings";
 
 const db = createDb(env.DATABASE_URL!);
@@ -627,5 +628,143 @@ describe("resolveSupersedePolicy (#125/#127)", () => {
         repoFullName: "acme/widgets",
       }),
     ).rejects.toThrow(/Unknown supersedePolicy 'legacy-unknown'/);
+  });
+});
+
+describe("getRepoReviewSettingWithOrgDefault + expectRowAbsent (draft org tier)", () => {
+  let orgId: string;
+  beforeEach(async () => {
+    orgId = await makeOrg("acme-draft");
+  });
+
+  it("returns both rows / either / neither, org-fenced, in one call", async () => {
+    expect(
+      await getRepoReviewSettingWithOrgDefault({
+        db,
+        organizationId: orgId,
+        repoFullName: "acme/widgets",
+      }),
+    ).toEqual({ repo: undefined, orgDefault: undefined });
+
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { reviewDraftPrs: false },
+    });
+    const sentinelOnly = await getRepoReviewSettingWithOrgDefault({
+      db,
+      organizationId: orgId,
+      repoFullName: "acme/widgets",
+    });
+    expect(sentinelOnly.repo).toBeUndefined();
+    expect(sentinelOnly.orgDefault?.reviewDraftPrs).toBe(false);
+
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "acme/widgets",
+      patch: { reviewDraftPrs: true },
+    });
+    const both = await getRepoReviewSettingWithOrgDefault({
+      db,
+      organizationId: orgId,
+      repoFullName: "Acme/Widgets", // normalized lookup
+    });
+    expect(both.repo?.reviewDraftPrs).toBe(true);
+    expect(both.orgDefault?.reviewDraftPrs).toBe(false);
+
+    const foreign = await makeOrg("stranger");
+    const fenced = await getRepoReviewSettingWithOrgDefault({
+      db,
+      organizationId: foreign,
+      repoFullName: "acme/widgets",
+    });
+    expect(fenced).toEqual({ repo: undefined, orgDefault: undefined });
+  });
+
+  it("sentinel stays excluded from listRepoReviewSettings after a draft-only write", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { reviewDraftPrs: false },
+    });
+    const listed = await listRepoReviewSettings({ db, organizationId: orgId });
+    expect(
+      listed.some((r) => r.repoFullName === ORG_DEFAULT_REPO_SENTINEL),
+    ).toBe(false);
+  });
+
+  it("expectRowAbsent: first write lands; ANY pre-existing row (even supersede-only) loses", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { supersedePolicy: "newest-wins" },
+      expectRowAbsent: true,
+    });
+    // The family fence (supersede_policy IS NULL) would ADMIT this second
+    // "first" write because the draft family looks untouched. The row fence
+    // must refuse: the row exists, whoever holds a stale null loses.
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+        patch: { reviewDraftPrs: false },
+        expectRowAbsent: true,
+      }),
+    ).rejects.toThrow(RepoReviewSettingConflictError);
+  });
+
+  it("a draft write via CAS does not clobber a stored supersedePolicy", async () => {
+    const row = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { supersedePolicy: "complete-run-queue" },
+    });
+    const after = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { reviewDraftPrs: false },
+      expectedUpdatedAt: row.updatedAt,
+    });
+    expect(after.supersedePolicy).toBe("complete-run-queue");
+    expect(after.reviewDraftPrs).toBe(false);
+  });
+
+  it("supplying two fences throws loudly instead of silently preferring one", async () => {
+    // The docblock promises mutual exclusion; without the guard the setWhere
+    // ternary would silently run only the expectedUpdatedAt fence.
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+        patch: { reviewDraftPrs: true },
+        expectedUpdatedAt: new Date(),
+        expectRowAbsent: true,
+      }),
+    ).rejects.toThrow(/at most ONE/);
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+        patch: { reviewDraftPrs: true },
+        expectRowAbsent: true,
+        expectAbsentSupersedeOverride: true,
+      }),
+    ).rejects.toThrow(/at most ONE/);
+    // And no row was created by either refused call.
+    const rows = await getRepoReviewSettingWithOrgDefault({
+      db,
+      organizationId: orgId,
+      repoFullName: "acme/unused",
+    });
+    expect(rows.orgDefault).toBeUndefined();
   });
 });

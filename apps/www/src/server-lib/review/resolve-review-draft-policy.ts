@@ -1,16 +1,22 @@
 import type { DB } from "@terragon/shared/db";
-import { getRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
+import { getRepoReviewSettingWithOrgDefault } from "@terragon/shared/model/repo-review-settings";
 
 /**
  * Whether Automata should engage a DRAFT pull request for this repo, resolved at
  * webhook intake. Precedence:
  *
- *   per-repo dashboard setting (explicit)  >  automation trigger config  >  default TRUE
+ *   per-repo dashboard row  >  org-default sentinel row ('*')  >
+ *   automation trigger config (legacy)  >  default TRUE
  *
  * The system default is TRUE — Automata works on draft PRs by default; an
- * operator opts a repo OUT via the dashboard (or, legacy, an automation's
- * `includeDraftPRs` filter). Read live from Neon, so a dashboard change applies
- * to the next webhook with no restart.
+ * operator opts out per repo or org-wide via the dashboard (or, legacy, an
+ * automation's `includeDraftPRs` filter). Read live from Neon, so a dashboard
+ * change applies to the next webhook with no restart.
+ *
+ * `reviewDraftPrs` is NOT NULL DEFAULT true, so a row created by ANY family
+ * (e.g. supersede-only) carries an authoritative draft value — it beats a
+ * legacy `includeDraftPRs: false`. Decision narrative + rewrite instruction
+ * live in the PINS test in resolve-review-draft-policy.test.ts.
  */
 export async function resolveReviewDraftPolicy({
   db,
@@ -25,12 +31,13 @@ export async function resolveReviewDraftPolicy({
   automationIncludeDraftPrs?: boolean;
 }): Promise<boolean> {
   if (organizationId) {
-    const setting = await getRepoReviewSetting({
+    const { repo, orgDefault } = await getRepoReviewSettingWithOrgDefault({
       db,
       organizationId,
       repoFullName,
     });
-    if (setting) return setting.reviewDraftPrs;
+    if (repo) return repo.reviewDraftPrs;
+    if (orgDefault) return orgDefault.reviewDraftPrs;
   }
   return automationIncludeDraftPrs ?? true;
 }

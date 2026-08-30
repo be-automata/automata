@@ -54,3 +54,22 @@ export function parseSupersedePatch(body: {
   }
   return { patch };
 }
+
+/**
+ * Validate the reviewDraftPrs field of a PUT body — shared by both writers of
+ * repo_review_settings (this module's charter: one copy so they can't drift).
+ */
+export function parseReviewDraftPrs(body: {
+  reviewDraftPrs?: unknown;
+}): { reviewDraftPrs?: boolean } | { errorResponse: NextResponse } {
+  if (body.reviewDraftPrs === undefined) return {};
+  if (typeof body.reviewDraftPrs !== "boolean") {
+    return {
+      errorResponse: NextResponse.json(
+        { error: "reviewDraftPrs must be a boolean" },
+        { status: 400 },
+      ),
+    };
+  }
+  return { reviewDraftPrs: body.reviewDraftPrs };
+}

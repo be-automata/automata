@@ -7,7 +7,10 @@ import {
   RepoReviewSettingConflictError,
   getRepoReviewSetting,
 } from "@terragon/shared/model/repo-review-settings";
-import { parseSupersedePatch } from "../../supersede-route-shared";
+import {
+  parseReviewDraftPrs,
+  parseSupersedePatch,
+} from "../../supersede-route-shared";
 import { isOrgAdmin } from "@/lib/org-role";
 import { checkRepoAdmin } from "@/lib/repo-admin";
 import {
@@ -111,15 +114,10 @@ export async function PUT(
     }
     patch.blockTolerance = body.blockTolerance;
   }
-  if (body.reviewDraftPrs !== undefined) {
-    if (typeof body.reviewDraftPrs !== "boolean") {
-      return NextResponse.json(
-        { error: "reviewDraftPrs must be a boolean" },
-        { status: 400 },
-      );
-    }
-    patch.reviewDraftPrs = body.reviewDraftPrs;
-  }
+  const drafts = parseReviewDraftPrs(body);
+  if ("errorResponse" in drafts) return drafts.errorResponse;
+  if (drafts.reviewDraftPrs !== undefined)
+    patch.reviewDraftPrs = drafts.reviewDraftPrs;
   const supersede = parseSupersedePatch(body);
   if ("errorResponse" in supersede) return supersede.errorResponse;
   Object.assign(patch, supersede.patch);

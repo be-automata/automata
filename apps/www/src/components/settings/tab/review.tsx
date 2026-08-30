@@ -16,6 +16,11 @@ import {
 } from "@/queries/review-settings-queries";
 import { ToleranceMatrix } from "@/components/settings/review-tolerance/tolerance-matrix";
 import { OrgFloorCard } from "@/components/settings/review-tolerance/org-floor-card";
+import {
+  EFFECTIVE_DRAFT_DEFAULT,
+  OrgDraftDefaultCard,
+} from "@/components/settings/review-tolerance/org-draft-default-card";
+import { useSupersedeDefaultQuery } from "@/queries/supersede-policy-queries";
 import { SupersedePolicySection } from "@/components/settings/review-supersede/supersede-policy-section";
 import { RepoRow } from "@/components/settings/review-tolerance/repo-row";
 import {
@@ -43,6 +48,7 @@ interface RepoRowData {
 
 export function ReviewSettings() {
   const settingsQuery = useReviewSettingsQuery();
+  const orgDefaultQuery = useSupersedeDefaultQuery();
   const reposQuery = useUserReposQuery();
   const setMutation = useSetReviewSettingMutation();
   const clearMutation = useClearReviewToleranceMutation();
@@ -72,7 +78,10 @@ export function ReviewSettings() {
         repoFullName: repo.full_name,
         key,
         tolerance: override?.blockTolerance ?? DEFAULT_TOLERANCE,
-        reviewDraftPrs: override?.reviewDraftPrs ?? true,
+        reviewDraftPrs:
+          override?.reviewDraftPrs ??
+          orgDefaultQuery.data?.reviewDraftPrs ??
+          EFFECTIVE_DRAFT_DEFAULT,
         hasOverride: Boolean(override),
         updatedAt: override?.updatedAt,
       });
@@ -93,7 +102,7 @@ export function ReviewSettings() {
       }
     }
     return [...rowMap.values()].sort((a, b) => a.key.localeCompare(b.key));
-  }, [settingsQuery.data, reposQuery.data]);
+  }, [settingsQuery.data, reposQuery.data, orgDefaultQuery.data]);
 
   const visibleRows = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -216,11 +225,17 @@ export function ReviewSettings() {
     void doReset(row);
   }
 
-  const isLoading = settingsQuery.isLoading;
+  // Gate on the org-default query too: rows without an override render the
+  // ORG default, so resolving the settings list first would flash every
+  // no-override switch ON and then flip it when a false sentinel arrives —
+  // exactly for the orgs that opted out. isLoading is false on error, so a
+  // failed default query degrades to the fallback instead of wedging the table.
+  const isLoading = settingsQuery.isLoading || orgDefaultQuery.isLoading;
 
   return (
     <div className="flex flex-col gap-8">
       <OrgFloorCard />
+      <OrgDraftDefaultCard />
       <SupersedePolicySection />
 
       <SettingsSection
