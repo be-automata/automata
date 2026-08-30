@@ -42,8 +42,9 @@ echo "    Set tolerances (via the migrated DB or the dashboard), open PRs with t
 echo "    described findings, and assert the posted verdict via:"
 echo "      gh api repos/$REPO/pulls/<n>/reviews --jq '.[-1].state'"
 echo "    Cases: TOL-1 (warning blocks by default), TOL-2 (error tolerance -> COMMENT,"
-echo "    no restart), TOL-3 (info -> everything blocks), DRAFT-1 (drafts engaged by"
-echo "    default), DRAFT-2 (reviewDraftPrs=false -> intake skip, then ready -> engage)."
+echo "    no restart), TOL-3 (info -> everything blocks), DRAFT-1 (drafts SKIPPED by"
+echo "    default, engage on ready), DRAFT-2 (repo opt-in reviewDraftPrs=true -> engage,"
+echo "    then null -> inherit -> skip), DRAFT-3 (org sentinel opt-in, repo override wins)."
 echo
 echo "Post-run: hand the PR#/SHA/verdict evidence to the production-validator for the"
 echo "live-tier sign-off, mirroring docs/triage/UAT-VALIDATION-MATRIX.md."

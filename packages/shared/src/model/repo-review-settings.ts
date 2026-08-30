@@ -405,12 +405,14 @@ export async function setRepoReviewSetting({
 }
 
 /**
- * "Reset to default" for the TOLERANCE family (block tolerance + draft-PR
- * review) of one repo. The row is shared with the other per-repo families
- * (#66 egress, #125 supersede policy): when any of those still carries an
- * override the row is KEPT and only the tolerance columns go back to their
- * defaults; the row is deleted only when nothing else lives on it. Resetting
- * a repo's tolerance must never silently discard its supersede policy.
+ * "Reset to default" for the TOLERANCE family (block tolerance only — the
+ * draft-PR policy is its OWN family since the tri-state migration and a
+ * tolerance reset must NOT touch it) of one repo. The row is shared with the
+ * other per-repo families (#66 egress, #125 supersede policy, drafts): when
+ * any of those still carries an override the row is KEPT and only the
+ * tolerance columns go back to their defaults; the row is deleted only when
+ * nothing else lives on it. Resetting a repo's tolerance must never silently
+ * discard its supersede policy or draft choice.
  * Optional `expectedUpdatedAt` makes the reset a compare-and-swap (409-class
  * conflict → false, nothing changed).
  */
