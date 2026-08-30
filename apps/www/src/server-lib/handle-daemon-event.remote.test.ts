@@ -22,6 +22,8 @@ import {
 } from "@/test-helpers/mock-next";
 import { openPullRequest } from "@/server-actions/pull-request";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
+import * as schema from "@terragon/shared/db/schema";
+import { eq } from "drizzle-orm";
 
 vi.mock("@/server-lib/checkpoint-thread", () => ({
   checkpointThread: vi.fn().mockResolvedValue(undefined),
@@ -237,5 +239,98 @@ describe("handleDaemonEvent — #125 C1 generation fence (no extra read)", () =>
     });
     expect(live.success).toBe(true);
     await waitUntilResolved();
+  });
+});
+
+describe("handleDaemonEvent — #153 read-tear closed: the fence decides from ONE row", () => {
+  let user: User;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    user = (await createTestUser({ db })).user;
+    await mockWaitUntil();
+  });
+
+  async function chatModeThread() {
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { sandboxProvider: "hatchet-remote" },
+      chatOverrides: { status: "working" },
+      enableThreadChatCreation: true,
+    });
+    expect(t.threadChatId).not.toBe(LEGACY_THREAD_CHAT_ID);
+    return t;
+  }
+
+  it("REGRESSION (the tear itself): a terminal chat row refuses even when the thread row's cause reads as the pre-commit NULL", async () => {
+    // The exact combination a straddling reader used to assemble: the chat
+    // read lands AFTER the terminal commit, the thread read landed BEFORE it.
+    // Old fence: terminalCause came from the thread read — present-but-null
+    // short-circuits to "not terminal" and the event was ADMITTED. New fence:
+    // every input comes from the chat read, which carries the typed cause.
+    const { threadId, threadChatId } = await chatModeThread();
+    await markThreadsSuperseded({ db, threadIds: [threadId] });
+    // Reconstruct the stale thread-row snapshot the tear depended on.
+    await db
+      .update(schema.thread)
+      .set({ terminalCause: null })
+      .where(eq(schema.thread.id, threadId));
+
+    const r = await handleDaemonEvent({
+      threadId,
+      threadChatId,
+      userId: user.id,
+      timezone: "UTC",
+      contextUsage: null,
+      messages: [getClaudeResultMessage()],
+      runExternalId: null,
+    });
+    expect(r).toMatchObject({ success: false, status: 409 });
+  });
+
+  it("REGRESSION: the stale-generation arm reads the chat row's stamp, not the thread row's", async () => {
+    // Old fence: activeRunExternalId came from the thread read — a pre-stamp
+    // snapshot (NULL) failed OPEN and let a stale writer through. The chat row
+    // now carries the stamp (setThreadActiveRun writes both in one
+    // transaction), so the stale writer is refused from the single chat read.
+    const { threadId, threadChatId } = await chatModeThread();
+    await setThreadActiveRun({ db, threadId, externalId: "run-new" });
+    await db
+      .update(schema.thread)
+      .set({ activeRunExternalId: null })
+      .where(eq(schema.thread.id, threadId));
+
+    const stale = await handleDaemonEvent({
+      threadId,
+      threadChatId,
+      userId: user.id,
+      timezone: "UTC",
+      contextUsage: null,
+      messages: [getClaudeResultMessage()],
+      runExternalId: "run-old",
+    });
+    expect(stale).toMatchObject({ success: false, status: 409 });
+  });
+
+  it("legacy thread: the single thread-row read still carries all four fence inputs", async () => {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { sandboxProvider: "hatchet-remote" },
+      chatOverrides: { status: "working" },
+    });
+    expect(threadChatId).toBe(LEGACY_THREAD_CHAT_ID);
+    await markThreadsSuperseded({ db, threadIds: [threadId] });
+    const r = await handleDaemonEvent({
+      threadId,
+      threadChatId,
+      userId: user.id,
+      timezone: "UTC",
+      contextUsage: null,
+      messages: [getClaudeResultMessage()],
+      runExternalId: null,
+    });
+    expect(r).toMatchObject({ success: false, status: 409 });
   });
 });

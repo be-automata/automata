@@ -890,3 +890,58 @@ describe("stopStalledThreads — the stall watchdog writes a TYPED terminal", ()
     expect(row!.errorMessage).not.toBe("request-timeout");
   });
 });
+
+describe("#153 read-tear mirrors — the chat row carries every fence input", () => {
+  let userId: string;
+  let orgA: string;
+
+  beforeEach(async () => {
+    userId = (await createTestUser({ db })).user.id;
+    orgA = await makeOrg("acme-tear");
+  });
+
+  const mkChatMode = () =>
+    createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 9,
+      externalId: nanoid(),
+      enableThreadChatCreation: true,
+    });
+
+  it("markThreadsTerminal stamps terminalCause on the CHAT row inside the terminal transaction", async () => {
+    const { threadId } = await mkChatMode();
+    await markThreadsTerminal({ db, threadIds: [threadId], cause: "timeout" });
+    const [chat] = await db
+      .select({
+        status: threadChatTable.status,
+        terminalCause: threadChatTable.terminalCause,
+      })
+      .from(threadChatTable)
+      .where(eq(threadChatTable.threadId, threadId));
+    expect(chat).toMatchObject({ status: "complete", terminalCause: "timeout" });
+  });
+
+  it("setThreadActiveRun stamps the run id on BOTH rows", async () => {
+    const { threadId } = await mkChatMode();
+    await setThreadActiveRun({ db, threadId, externalId: "run-xyz" });
+    const [t] = await db
+      .select({ stamp: threadTable.activeRunExternalId })
+      .from(threadTable)
+      .where(eq(threadTable.id, threadId));
+    const [c] = await db
+      .select({ stamp: threadChatTable.activeRunExternalId })
+      .from(threadChatTable)
+      .where(eq(threadChatTable.threadId, threadId));
+    expect(t!.stamp).toBe("run-xyz");
+    expect(c!.stamp).toBe("run-xyz");
+    // and clearing clears both
+    await setThreadActiveRun({ db, threadId, externalId: null });
+    const [c2] = await db
+      .select({ stamp: threadChatTable.activeRunExternalId })
+      .from(threadChatTable)
+      .where(eq(threadChatTable.threadId, threadId));
+    expect(c2!.stamp).toBeNull();
+  });
+});

@@ -14,6 +14,7 @@ import {
   markThreadTerminal,
   setThreadActiveRun,
   THREAD_RESUME_UPDATES,
+  THREAD_CHAT_RESUME_UPDATES,
 } from "@terragon/shared/model/threads";
 import {
   thread as threadTable,
@@ -216,12 +217,19 @@ describe.each([
         await markThreadTerminal({ db, threadId, cause: "user-cancelled" }),
       ).toBe(true);
       expect((await event("run-1")).status).toBe(409);
-      // What startAgentMessage applies on every boot/resume transition.
+      // What startAgentMessage applies on every boot/resume transition: the
+      // resume PAIR — thread row + chat mirror (#153 read-tear fix; the fence
+      // decides from the chat row, so clearing only the thread row would
+      // leave the thread fenced forever).
       await setLive();
       await db
         .update(threadTable)
         .set(THREAD_RESUME_UPDATES)
         .where(eq(threadTable.id, threadId));
+      await db
+        .update(threadChatTable)
+        .set(THREAD_CHAT_RESUME_UPDATES)
+        .where(eq(threadChatTable.threadId, threadId));
       expect((await event("run-1")).status).toBe(200);
       await waitUntilResolved();
     });

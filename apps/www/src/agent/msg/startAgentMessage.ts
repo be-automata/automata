@@ -1,4 +1,7 @@
-import { THREAD_RESUME_UPDATES } from "@terragon/shared/model/threads";
+import {
+  THREAD_RESUME_UPDATES,
+  THREAD_CHAT_RESUME_UPDATES,
+} from "@terragon/shared/model/threads";
 import {
   DBUserMessage,
   DBUserMessageWithModel,
@@ -192,6 +195,7 @@ export async function startAgentMessage({
             threadChatId,
             eventType: "system.concurrency-limit",
             chatUpdates: {
+              ...THREAD_CHAT_RESUME_UPDATES,
               errorMessage: null,
               errorMessageInfo: null,
               appendMessages: uploadedMessage ? [uploadedMessage] : undefined,
@@ -230,6 +234,7 @@ export async function startAgentMessage({
             eventType: "system.sandbox-creation-rate-limit",
             rateLimitResetTime: sandboxCreationRateLimitRemaining.reset,
             chatUpdates: {
+              ...THREAD_CHAT_RESUME_UPDATES,
               errorMessage: null,
               errorMessageInfo: null,
               appendMessages: uploadedMessage ? [uploadedMessage] : undefined,
@@ -261,6 +266,7 @@ export async function startAgentMessage({
         threadChatId,
         eventType: "system.boot",
         chatUpdates: {
+          ...THREAD_CHAT_RESUME_UPDATES,
           errorMessage: null,
           errorMessageInfo: null,
           appendMessages: uploadedMessage ? [uploadedMessage] : undefined,

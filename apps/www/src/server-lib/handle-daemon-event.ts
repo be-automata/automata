@@ -102,20 +102,22 @@ export async function handleDaemonEvent({
 
   // #125 C1 generation fence: once a newer run owns the PR, no event from the
   // old generation may land — closes the cancel race where a cancelled run
-  // still streams its verdict. Reads the EFFECTIVE status: threadChat is the
-  // thread row's alias for legacy threads and the real chat row otherwise —
-  // and markThreadsSuperseded stamps whichever of the two is live, so the
-  // superseded terminal is visible here in both modes (no extra read).
+  // still streams its verdict. EVERY input comes from the ONE chat-row read
+  // (#153 read-tear fix): for a legacy thread that read IS the thread row, and
+  // for a chat-mode thread the chat row mirrors activeRunExternalId and
+  // terminalCause (stamped in the same transactions that write them). Mixing
+  // fields from the separate `thread` read reopened the tear this closes — a
+  // pre-commit thread snapshot carries a present-but-null terminalCause, which
+  // short-circuits the decision to "not terminal" regardless of the fresher
+  // chat read. Do not source any fence field from `thread`.
   const generation = decideThreadGeneration({
     thread: {
-      activeRunExternalId: thread.activeRunExternalId,
+      activeRunExternalId: threadChat.activeRunExternalId,
       status: threadChat.status,
       errorMessage: threadChat.errorMessage,
       // C4: ANY typed terminal refuses late writes — not only the
-      // 'superseded' sentinel. The cause lives on the thread row (already
-      // loaded); omitting it here silently downgraded the fence to the
-      // pre-C4 sentinel check for the other seven causes.
-      terminalCause: thread.terminalCause,
+      // 'superseded' sentinel.
+      terminalCause: threadChat.terminalCause,
     },
     runExternalId: runExternalId ?? null,
   });
