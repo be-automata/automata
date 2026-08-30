@@ -133,13 +133,46 @@ export function OrgDraftDefaultCard() {
           conflict,
         };
 
-  const actions: OrgDraftDefaultActions = {
+  const actions = buildOrgDraftActions({
+    latest: defaults.data ?? null,
+    mutate: setDefaults.mutate,
+    setConflict,
+    refetch: () => void defaults.refetch(),
+  });
+
+  return <OrgDraftDefaultCardView state={state} actions={actions} />;
+}
+
+/**
+ * Container action wiring, exported for tests. A retry MUST clear a stale
+ * conflict banner BEFORE mutating: once a write loses the CAS race, the next
+ * toggle runs against freshly-invalidated data and can succeed — leaving the
+ * "changed since you loaded" banner up after a successful save contradicts
+ * the banner's own message. Same setConflict(false)-before-mutate ordering
+ * as SupersedePolicySection.saveDefault, for the same reason.
+ */
+export function buildOrgDraftActions({
+  latest,
+  mutate,
+  setConflict,
+  refetch,
+}: {
+  latest: { updatedAt: string } | null;
+  mutate: (
+    input: { reviewDraftPrs: boolean; expectedUpdatedAt: string | null },
+    options: { onError: (error: unknown) => void },
+  ) => void;
+  setConflict: (value: boolean) => void;
+  refetch: () => void;
+}): OrgDraftDefaultActions {
+  return {
     onChange: (reviewDrafts) => {
-      setDefaults.mutate(
+      setConflict(false);
+      mutate(
         {
           reviewDraftPrs: reviewDrafts,
           // First-write fence: null only when the sentinel row is truly absent.
-          expectedUpdatedAt: defaults.data ? defaults.data.updatedAt : null,
+          expectedUpdatedAt: latest ? latest.updatedAt : null,
         },
         {
           onError: (error) => {
@@ -150,9 +183,7 @@ export function OrgDraftDefaultCard() {
     },
     onReload: () => {
       setConflict(false);
-      void defaults.refetch();
+      refetch();
     },
   };
-
-  return <OrgDraftDefaultCardView state={state} actions={actions} />;
 }

@@ -2,10 +2,12 @@ import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  buildOrgDraftActions,
   OrgDraftDefaultCardView,
   type OrgDraftDefaultActions,
   type OrgDraftDefaultState,
 } from "./org-draft-default-card";
+import { ConflictError } from "@/queries/error-from-response";
 
 vi.mock("@/components/ui/skeleton", () => ({
   Skeleton: ({ className }: { className?: string }) => (
@@ -100,5 +102,95 @@ describe("OrgDraftDefaultCardView", () => {
     expect(html).toContain("changed since you loaded");
     expect(html).toContain(">Reload<");
     expect(html).toContain('role="switch"');
+  });
+});
+
+describe("buildOrgDraftActions (container wiring)", () => {
+  /** Tracks the conflict flag the way useState would, in call order. */
+  function harness(latest: { updatedAt: string } | null) {
+    let conflict = false;
+    const calls: string[] = [];
+    const mutate = vi.fn(
+      (
+        _input: { reviewDraftPrs: boolean; expectedUpdatedAt: string | null },
+        _options: { onError: (error: unknown) => void },
+      ) => {
+        calls.push(`mutate(conflict=${conflict})`);
+      },
+    );
+    const setConflict = (value: boolean) => {
+      conflict = value;
+      calls.push(`setConflict(${value})`);
+    };
+    const refetch = vi.fn();
+    const actions = buildOrgDraftActions({
+      latest,
+      mutate,
+      setConflict,
+      refetch,
+    });
+    return {
+      actions,
+      mutate,
+      refetch,
+      calls,
+      get conflict() {
+        return conflict;
+      },
+    };
+  }
+
+  it("passes the loaded updatedAt as the CAS fence, null when the sentinel row is absent", () => {
+    const withRow = harness({ updatedAt: "2026-08-30T00:00:00.000Z" });
+    withRow.actions.onChange(false);
+    expect(withRow.mutate.mock.calls[0]![0]).toEqual({
+      reviewDraftPrs: false,
+      expectedUpdatedAt: "2026-08-30T00:00:00.000Z",
+    });
+
+    const firstWrite = harness(null);
+    firstWrite.actions.onChange(true);
+    expect(firstWrite.mutate.mock.calls[0]![0]).toEqual({
+      reviewDraftPrs: true,
+      expectedUpdatedAt: null,
+    });
+  });
+
+  it("a lost CAS race raises the conflict banner; non-conflict errors do not", () => {
+    const h = harness({ updatedAt: "2026-08-30T00:00:00.000Z" });
+    h.actions.onChange(false);
+    h.mutate.mock.calls[0]![1].onError(new Error("500 from the API"));
+    expect(h.conflict).toBe(false);
+    h.mutate.mock.calls[0]![1].onError(new ConflictError(null));
+    expect(h.conflict).toBe(true);
+  });
+
+  it("REGRESSION: a retry clears the stale conflict banner BEFORE mutating, so a successful save never leaves 'changed since you loaded' up", () => {
+    const h = harness({ updatedAt: "2026-08-30T00:00:00.000Z" });
+    // First toggle loses the race → banner up.
+    h.actions.onChange(false);
+    h.mutate.mock.calls[0]![1].onError(new ConflictError(null));
+    expect(h.conflict).toBe(true);
+    // Retry succeeds (onError never fires): the banner must already be down,
+    // and it must have been cleared before the mutate was issued.
+    h.actions.onChange(false);
+    expect(h.conflict).toBe(false);
+    expect(h.calls).toEqual([
+      "setConflict(false)",
+      "mutate(conflict=false)",
+      "setConflict(true)",
+      "setConflict(false)",
+      "mutate(conflict=false)",
+    ]);
+  });
+
+  it("Reload clears the banner and refetches", () => {
+    const h = harness({ updatedAt: "2026-08-30T00:00:00.000Z" });
+    h.actions.onChange(true);
+    h.mutate.mock.calls[0]![1].onError(new ConflictError(null));
+    expect(h.conflict).toBe(true);
+    h.actions.onReload();
+    expect(h.conflict).toBe(false);
+    expect(h.refetch).toHaveBeenCalledTimes(1);
   });
 });
