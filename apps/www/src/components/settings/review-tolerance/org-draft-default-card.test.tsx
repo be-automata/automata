@@ -77,7 +77,7 @@ describe("OrgDraftDefaultCardView", () => {
       conflict: false,
     });
     expect(html).toContain('aria-checked="false"');
-    expect(html).toContain("marked ready for review");
+    expect(html).toContain("skipped until they&#x27;re marked ready");
   });
 
   it("saving → the switch is disabled", () => {

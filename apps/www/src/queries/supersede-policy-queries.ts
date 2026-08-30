@@ -55,8 +55,13 @@ export function useSetSupersedeDefaultMutation() {
       const json = (await res.json()) as { setting: SupersedeDefaultDto };
       return json.setting;
     },
-    onSuccess: () => {
+    onSuccess: (setting) => {
       toast.success("Org default saved. Applies to new runs.");
+      // Write the returned row into the cache SYNCHRONOUSLY before the
+      // refetch. Two cards (supersede + draft default) share this sentinel
+      // row's cache entry; invalidate-only left a window where the sibling
+      // still held the prior updatedAt and self-409ed on its next save.
+      queryClient.setQueryData(supersedeDefaultQueryKeys.detail(), setting);
       queryClient.invalidateQueries({
         queryKey: supersedeDefaultQueryKeys.detail(),
       });

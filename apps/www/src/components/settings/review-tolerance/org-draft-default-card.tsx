@@ -94,7 +94,7 @@ export function OrgDraftDefaultCardView({
               <p className="text-xs text-muted-foreground" aria-live="polite">
                 {state.reviewDrafts
                   ? "Draft PRs are reviewed as soon as they're opened or updated."
-                  : "Draft PRs are skipped. The review runs when a PR is marked ready for review."}
+                  : "Draft PRs are skipped until they're marked ready for review."}
               </p>
             </div>
             <Switch
