@@ -735,4 +735,36 @@ describe("getRepoReviewSettingWithOrgDefault + expectRowAbsent (draft org tier)"
     expect(after.supersedePolicy).toBe("complete-run-queue");
     expect(after.reviewDraftPrs).toBe(false);
   });
+
+  it("supplying two fences throws loudly instead of silently preferring one", async () => {
+    // The docblock promises mutual exclusion; without the guard the setWhere
+    // ternary would silently run only the expectedUpdatedAt fence.
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+        patch: { reviewDraftPrs: true },
+        expectedUpdatedAt: new Date(),
+        expectRowAbsent: true,
+      }),
+    ).rejects.toThrow(/at most ONE/);
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+        patch: { reviewDraftPrs: true },
+        expectRowAbsent: true,
+        expectAbsentSupersedeOverride: true,
+      }),
+    ).rejects.toThrow(/at most ONE/);
+    // And no row was created by either refused call.
+    const rows = await getRepoReviewSettingWithOrgDefault({
+      db,
+      organizationId: orgId,
+      repoFullName: "acme/unused",
+    });
+    expect(rows.orgDefault).toBeUndefined();
+  });
 });

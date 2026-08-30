@@ -271,6 +271,20 @@ export async function upsertRepoReviewSetting({
 }): Promise<RepoReviewSetting> {
   const repo = normalizeRepo(repoFullName);
 
+  // The docblock above promises the fences are mutually exclusive — enforce it
+  // so a caller supplying two gets a loud throw instead of the silent
+  // precedence of the setWhere ternary chain.
+  const fencesSupplied = [
+    expectedUpdatedAt !== undefined,
+    expectRowAbsent === true,
+    expectAbsentSupersedeOverride === true,
+  ].filter(Boolean).length;
+  if (fencesSupplied > 1) {
+    throw new Error(
+      "upsertRepoReviewSetting: supply at most ONE of expectedUpdatedAt / expectRowAbsent / expectAbsentSupersedeOverride",
+    );
+  }
+
   // #66: validate egress fields at the WRITE boundary by reusing the pure shape
   // builder (empty system hosts) — an invalid level or allowlist entry throws
   // here instead of landing in the table. A partial egress patch pairs with the
