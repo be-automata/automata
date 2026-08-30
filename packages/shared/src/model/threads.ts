@@ -1431,20 +1431,40 @@ function db_select_chat_status(statuses: ThreadStatus[]) {
 }
 
 /**
- * Thread-row columns a RESUME (new user message / boot of an ended thread)
- * must clear. `terminalCause` is write-once per run and read by the
- * generation fence as "this thread is terminal — refuse late writes"; a
- * thread that legitimately starts again must shed it, or the first typed
- * terminal would fence the thread forever (review on #138).
+ * Clear the typed terminal on a RESUME (new user message / boot of an ended
+ * thread). `terminalCause` is write-once per run and read by the generation
+ * fence as "this thread is terminal — refuse late writes"; a thread that
+ * legitimately starts again must shed it, or the first typed terminal would
+ * fence the thread forever (review on #138).
  *
  * INVARIANT (#153 read-tear fix): thread.terminalCause and
  * threadChat.terminalCause move together — the fence decides from the chat
- * row alone. Every resume writer passes BOTH constants (thread `updates` +
- * chat `chatUpdates`), or a resumed chat-mode thread stays fenced forever.
+ * row alone. This is the ONLY resume writer, and it clears both rows in ONE
+ * transaction (no broadcasts inside — nothing holds it open), so an
+ * interruption can never leave the chat mirror carrying a stale terminal
+ * that fences a resumed thread forever. Do not clear either column anywhere
+ * else.
  */
-export const THREAD_RESUME_UPDATES = { terminalCause: null } as const;
-/** The chat-row half of the resume pair — see THREAD_RESUME_UPDATES. */
-export const THREAD_CHAT_RESUME_UPDATES = { terminalCause: null } as const;
+export async function clearThreadTerminalForResume({
+  db,
+  threadId,
+}: {
+  db: DB;
+  threadId: string;
+}): Promise<void> {
+  await db.transaction(async (tx) => {
+    await Promise.all([
+      tx
+        .update(schema.thread)
+        .set({ terminalCause: null })
+        .where(eq(schema.thread.id, threadId)),
+      tx
+        .update(schema.threadChat)
+        .set({ terminalCause: null })
+        .where(eq(schema.threadChat.threadId, threadId)),
+    ]);
+  });
+}
 
 export const reapableThreadStatuses: ThreadStatus[] = [
   "booting",

@@ -10,6 +10,8 @@ import { nanoid } from "nanoid";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 import { User } from "@terragon/shared";
 import { getThreadChat } from "@terragon/shared/model/threads";
+import * as schema from "@terragon/shared/db/schema";
+import { eq } from "drizzle-orm";
 import { startAgentMessage } from "./startAgentMessage";
 import { hasActiveDaemonToken, daemonRunKey } from "@/lib/daemon-token";
 import { sendDaemonMessage } from "@/agent/daemon";
@@ -277,5 +279,73 @@ describe("startAgentMessage — permission-mode floor (#82, local/in-process sea
     });
 
     expect(lastSentPermissionMode()).toBe("plan");
+  });
+});
+
+describe("startAgentMessage — resume clears the terminal PAIR (#153 read-tear fix)", () => {
+  let user: User;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    user = (await createTestUser({ db })).user;
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ externalId: "run" }), { status: 200 }),
+        ),
+    );
+  });
+
+  it("a chat-mode thread resumed after a typed terminal sheds terminalCause on BOTH rows through the real boot path", async () => {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        sandboxProvider: "hatchet-remote",
+        githubRepoFullName: "be-automata/automata",
+        repoBaseBranchName: "main",
+      },
+      chatOverrides: { status: "complete" },
+      enableThreadChatCreation: true,
+    });
+    expect(threadChatId).not.toBe(LEGACY_THREAD_CHAT_ID);
+    // The thread previously reached a typed terminal: both rows carry the
+    // cause (as markThreadsTerminal stamps them).
+    await db
+      .update(schema.thread)
+      .set({ terminalCause: "user-cancelled" })
+      .where(eq(schema.thread.id, threadId));
+    await db
+      .update(schema.threadChat)
+      .set({ terminalCause: "user-cancelled" })
+      .where(eq(schema.threadChat.threadId, threadId));
+
+    await startAgentMessage({
+      db,
+      userId: user.id,
+      message: {
+        type: "user",
+        model: "sonnet",
+        parts: [{ type: "text", text: "resume it" }],
+      },
+      threadId,
+      threadChatId,
+      isNewThread: false,
+    });
+
+    // The fence reads the CHAT row (#153): if only the thread row were
+    // cleared, this thread would be fenced forever. Assert the pair.
+    const [t] = await db
+      .select({ cause: schema.thread.terminalCause })
+      .from(schema.thread)
+      .where(eq(schema.thread.id, threadId));
+    const [c] = await db
+      .select({ cause: schema.threadChat.terminalCause })
+      .from(schema.threadChat)
+      .where(eq(schema.threadChat.threadId, threadId));
+    expect(t!.cause).toBeNull();
+    expect(c!.cause).toBeNull();
   });
 });

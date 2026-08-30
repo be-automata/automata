@@ -13,8 +13,7 @@ import { createOrganization } from "@terragon/shared/model/organizations";
 import {
   markThreadTerminal,
   setThreadActiveRun,
-  THREAD_RESUME_UPDATES,
-  THREAD_CHAT_RESUME_UPDATES,
+  clearThreadTerminalForResume,
 } from "@terragon/shared/model/threads";
 import {
   thread as threadTable,
@@ -211,25 +210,18 @@ describe.each([
       },
     );
 
-    it("a RESUME clears the typed terminal: after user-cancelled the fence closes, after THREAD_RESUME_UPDATES it opens again", async () => {
+    it("a RESUME clears the typed terminal: after user-cancelled the fence closes, after clearThreadTerminalForResume it opens again", async () => {
       await setThreadActiveRun({ db, threadId, externalId: "run-1" });
       expect(
         await markThreadTerminal({ db, threadId, cause: "user-cancelled" }),
       ).toBe(true);
       expect((await event("run-1")).status).toBe(409);
-      // What startAgentMessage applies on every boot/resume transition: the
-      // resume PAIR — thread row + chat mirror (#153 read-tear fix; the fence
-      // decides from the chat row, so clearing only the thread row would
-      // leave the thread fenced forever).
+      // The PRODUCTION resume writer (what startAgentMessage calls on every
+      // boot/resume): one transaction clears the thread row AND the chat
+      // mirror — the fence decides from the chat row, so a split clear would
+      // leave the thread fenced forever (#153 read-tear fix).
       await setLive();
-      await db
-        .update(threadTable)
-        .set(THREAD_RESUME_UPDATES)
-        .where(eq(threadTable.id, threadId));
-      await db
-        .update(threadChatTable)
-        .set(THREAD_CHAT_RESUME_UPDATES)
-        .where(eq(threadChatTable.threadId, threadId));
+      await clearThreadTerminalForResume({ db, threadId });
       expect((await event("run-1")).status).toBe(200);
       await waitUntilResolved();
     });

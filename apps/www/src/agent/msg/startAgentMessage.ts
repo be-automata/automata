@@ -1,7 +1,4 @@
-import {
-  THREAD_RESUME_UPDATES,
-  THREAD_CHAT_RESUME_UPDATES,
-} from "@terragon/shared/model/threads";
+import { clearThreadTerminalForResume } from "@terragon/shared/model/threads";
 import {
   DBUserMessage,
   DBUserMessageWithModel,
@@ -189,18 +186,19 @@ export async function startAgentMessage({
               ...queuedThreadCounts,
             },
           });
+          // Resume pair (#153): one atomic writer clears both terminal
+          // mirrors — never split across the non-transactional updates below.
+          await clearThreadTerminalForResume({ db, threadId });
           await updateThreadChatWithTransition({
             userId,
             threadId,
             threadChatId,
             eventType: "system.concurrency-limit",
             chatUpdates: {
-              ...THREAD_CHAT_RESUME_UPDATES,
               errorMessage: null,
               errorMessageInfo: null,
               appendMessages: uploadedMessage ? [uploadedMessage] : undefined,
             },
-            updates: THREAD_RESUME_UPDATES,
           });
           return;
         }
@@ -227,6 +225,7 @@ export async function startAgentMessage({
               ...queuedThreadCounts,
             },
           });
+          await clearThreadTerminalForResume({ db, threadId });
           await updateThreadChatWithTransition({
             userId,
             threadId,
@@ -234,12 +233,10 @@ export async function startAgentMessage({
             eventType: "system.sandbox-creation-rate-limit",
             rateLimitResetTime: sandboxCreationRateLimitRemaining.reset,
             chatUpdates: {
-              ...THREAD_CHAT_RESUME_UPDATES,
               errorMessage: null,
               errorMessageInfo: null,
               appendMessages: uploadedMessage ? [uploadedMessage] : undefined,
             },
-            updates: THREAD_RESUME_UPDATES,
           });
           return;
         }
@@ -260,18 +257,18 @@ export async function startAgentMessage({
         });
       }
 
+      // Resume pair (#153): the atomic writer, not the split updates below.
+      await clearThreadTerminalForResume({ db, threadId });
       await updateThreadChatWithTransition({
         userId,
         threadId,
         threadChatId,
         eventType: "system.boot",
         chatUpdates: {
-          ...THREAD_CHAT_RESUME_UPDATES,
           errorMessage: null,
           errorMessageInfo: null,
           appendMessages: uploadedMessage ? [uploadedMessage] : undefined,
         },
-        updates: THREAD_RESUME_UPDATES,
       });
 
       // ADR-003: when the execution plane is on, dispatch to the remote Hatchet
