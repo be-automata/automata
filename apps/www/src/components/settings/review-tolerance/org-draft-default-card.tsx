@@ -17,7 +17,7 @@ import { ConflictError } from "@/queries/error-from-response";
 /**
  * Org-wide "Review draft PRs" default — a column on the SAME sentinel row
  * ('*') the supersede section edits, resolved at webhook intake as:
- * repo row → this sentinel → legacy automation filter → true.
+ * repo row → this sentinel → legacy automation filter → false.
  *
  * Shares the supersede section's query hooks — one cache entry for the
  * sentinel row; see supersede-policy-queries.ts for the coherency story.

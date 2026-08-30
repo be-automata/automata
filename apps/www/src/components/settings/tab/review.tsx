@@ -39,7 +39,7 @@ interface RepoRowData {
   key: string;
   /** Persisted tolerance in effect (override or the locked default). */
   tolerance: BlockTolerance;
-  /** Whether Automata engages this repo's draft PRs (override or the `true` default). */
+  /** Whether Automata engages this repo's draft PRs (override, org default, or the system default `false`). */
   reviewDraftPrs: boolean;
   hasOverride: boolean;
   /** Version of the stored row (ISO) — sent with writes as the CAS token. */

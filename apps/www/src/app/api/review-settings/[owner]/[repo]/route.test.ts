@@ -166,6 +166,33 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
     expect(json.setting.reviewDraftPrs).toBe(false);
   });
 
+  it("PUT reviewDraftPrs:null clears the repo override back to inherit (tri-state)", async () => {
+    vi.mocked(upsertRepoReviewSetting).mockResolvedValue({
+      id: "s1",
+      organizationId: ORG,
+      repoFullName: "acme/widgets",
+      blockTolerance: "warning",
+      reviewDraftPrs: null,
+      trustedAuthorThreshold: null,
+      egressPolicy: null,
+      egressAllowlist: null,
+      supersedePolicy: null,
+      recheckOnComplete: false,
+      updatedByUserId: USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const res = await PUT(putReq({ reviewDraftPrs: null }), { params });
+    expect(res.status).toBe(200);
+    expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+      expect.objectContaining({ patch: { reviewDraftPrs: null } }),
+    );
+    const json = (await res.json()) as {
+      setting: { reviewDraftPrs: boolean | null };
+    };
+    expect(json.setting.reviewDraftPrs).toBeNull();
+  });
+
   it("DELETE clears the override fenced to the active org", async () => {
     const res = await DELETE(putReq({ blockTolerance: "error" }), { params });
     expect(res.status).toBe(200);
