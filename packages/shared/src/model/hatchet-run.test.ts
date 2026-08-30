@@ -890,3 +890,48 @@ describe("stopStalledThreads — the stall watchdog writes a TYPED terminal", ()
     expect(row!.errorMessage).not.toBe("request-timeout");
   });
 });
+
+describe("draft→ready preemption pin (org/repo draft toggle feature)", () => {
+  // GUARANTEE UNDER TEST: a ready_for_review dispatch supersedes an in-flight
+  // run that was started while the PR was a DRAFT. The finder is keyed on
+  // (org, repo, prNumber, in_flight) with NO draft-state filter — draft state
+  // is not even recorded on the run row, and that absence IS the guarantee.
+  // If someone adds a "skip drafts" filter to this finder, newest-wins stops
+  // preempting stale draft runs and the orch-agents#349 bug class reopens
+  // here. This test exists to make that change fail loudly.
+  let userId: string;
+  let orgA: string;
+
+  beforeEach(async () => {
+    userId = (await createTestUser({ db })).user.id;
+    orgA = await makeOrg("acme-draftpin");
+  });
+
+  it("an in-flight run started on a draft PR is selected for supersession by the ready dispatch", async () => {
+    const draftRun = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 77,
+      externalId: nanoid(),
+      status: "working",
+    });
+    const readyRun = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 77,
+      externalId: nanoid(),
+      status: "working",
+    });
+    const found = await findSupersedableReviewRuns({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      prNumber: 77,
+      excludeThreadId: readyRun.threadId,
+    });
+    expect(found.map((r) => r.threadId)).toContain(draftRun.threadId);
+    expect(found.map((r) => r.threadId)).not.toContain(readyRun.threadId);
+  });
+});

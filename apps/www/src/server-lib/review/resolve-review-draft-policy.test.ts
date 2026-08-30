@@ -3,7 +3,10 @@ import { env } from "@terragon/env/pkg-shared";
 import { createDb } from "@terragon/shared/db";
 import { nanoid } from "nanoid";
 import { createOrganization } from "@terragon/shared/model/organizations";
-import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
+import {
+  ORG_DEFAULT_REPO_SENTINEL,
+  upsertRepoReviewSetting,
+} from "@terragon/shared/model/repo-review-settings";
 import { resolveReviewDraftPolicy } from "./resolve-review-draft-policy";
 
 /**
@@ -106,5 +109,91 @@ describe("resolveReviewDraftPolicy", () => {
         repoFullName: REPO,
       }),
     ).toBe(true);
+  });
+});
+
+describe("resolveReviewDraftPolicy — org-default sentinel tier", () => {
+  let orgId: string;
+  beforeEach(async () => {
+    orgId = await makeOrg();
+  });
+
+  it("sentinel FALSE + no repo row → drafts skipped, beating automation TRUE", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { reviewDraftPrs: false },
+    });
+    expect(
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+        automationIncludeDraftPrs: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("repo row TRUE wins over sentinel FALSE", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { reviewDraftPrs: false },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { reviewDraftPrs: true },
+    });
+    expect(
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      }),
+    ).toBe(true);
+  });
+
+  it("PINS THE NO-MIGRATION DECISION: a supersede-only sentinel row carries an authoritative implicit TRUE, beating a legacy includeDraftPRs=false", async () => {
+    // reviewDraftPrs is NOT NULL DEFAULT true, so a sentinel row created by
+    // the supersede UI alone still speaks for the draft family. Deliberate:
+    // matches the repo tier's shipped semantics (dashboard > legacy filter).
+    // If this test starts failing because the column went nullable, the
+    // migration finally happened — rewrite this to assert the tri-state.
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { supersedePolicy: "newest-wins" },
+    });
+    expect(
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+        automationIncludeDraftPrs: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("another org's sentinel is invisible", async () => {
+    const otherOrg = await makeOrg();
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: otherOrg,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { reviewDraftPrs: false },
+    });
+    expect(
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+        automationIncludeDraftPrs: false,
+      }),
+    ).toBe(false); // falls through to the automation filter, not the foreign sentinel
   });
 });

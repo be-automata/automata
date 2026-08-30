@@ -26,11 +26,13 @@ import { getPostHogServer } from "@/lib/posthog-server";
 function toDto(row: {
   supersedePolicy: string | null;
   recheckOnComplete: boolean;
+  reviewDraftPrs: boolean;
   updatedAt: Date;
 }) {
   return {
     supersedePolicy: row.supersedePolicy,
     recheckOnComplete: row.recheckOnComplete,
+    reviewDraftPrs: row.reviewDraftPrs,
     updatedAt: row.updatedAt,
   };
 }
@@ -81,6 +83,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   let body: {
     supersedePolicy?: unknown;
     recheckOnComplete?: unknown;
+    reviewDraftPrs?: unknown;
     expectedUpdatedAt?: unknown;
   };
   try {
@@ -90,13 +93,29 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   }
   const supersede = parseSupersedePatch(body);
   if ("errorResponse" in supersede) return supersede.errorResponse;
-  const patch = supersede.patch;
+  const patch: typeof supersede.patch & { reviewDraftPrs?: boolean } =
+    supersede.patch;
+  // Same local validation shape as the per-repo route — the shared parser
+  // stays supersede-only on purpose (that route validates this field itself).
+  if (body.reviewDraftPrs !== undefined) {
+    if (typeof body.reviewDraftPrs !== "boolean") {
+      return NextResponse.json(
+        { error: "reviewDraftPrs must be a boolean" },
+        { status: 400 },
+      );
+    }
+    patch.reviewDraftPrs = body.reviewDraftPrs;
+  }
   if (
     patch.supersedePolicy === undefined &&
-    patch.recheckOnComplete === undefined
+    patch.recheckOnComplete === undefined &&
+    patch.reviewDraftPrs === undefined
   ) {
     return NextResponse.json(
-      { error: "provide supersedePolicy and/or recheckOnComplete" },
+      {
+        error:
+          "provide supersedePolicy, recheckOnComplete and/or reviewDraftPrs",
+      },
       { status: 400 },
     );
   }
@@ -107,8 +126,12 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   // a silent last-write-wins.
   // `expectedUpdatedAt: null` is the FIRST-WRITE fence: the sentinel row is
   // created lazily, and two org admins racing to set the very first default
-  // must not both get 200 — same contract as the per-repo route.
-  const expectAbsentSupersedeOverride = body.expectedUpdatedAt === null;
+  // must not both get 200. ROW-level absence, not the per-family fence: this
+  // route's GET returns the whole sentinel row, so the client sends null only
+  // when the row is truly absent — and a family fence would let a draft-only
+  // first write slip past a concurrent draft write (supersede_policy stays
+  // NULL on such rows, hollowing the fence for both families).
+  const expectRowAbsent = body.expectedUpdatedAt === null;
   const expectedUpdatedAt =
     typeof body.expectedUpdatedAt === "string"
       ? new Date(body.expectedUpdatedAt)
@@ -128,7 +151,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       patch,
       updatedByUserId: ctx.userId,
       expectedUpdatedAt,
-      expectAbsentSupersedeOverride,
+      expectRowAbsent,
     });
   } catch (error) {
     if (error instanceof RepoReviewSettingConflictError) {
@@ -154,6 +177,8 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       organizationId: ctx.organizationId,
       supersedePolicy: row.supersedePolicy,
       recheckOnComplete: row.recheckOnComplete,
+      reviewDraftPrs: row.reviewDraftPrs,
+      changed: Object.keys(patch),
     },
   });
   return NextResponse.json({ setting: toDto(row) });

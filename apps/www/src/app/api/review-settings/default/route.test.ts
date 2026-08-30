@@ -143,3 +143,98 @@ describe("/api/review-settings/default (#125 C6 org default)", () => {
     expect([a.status, b.status].sort()).toEqual([200, 409]);
   });
 });
+
+describe("/api/review-settings/default — reviewDraftPrs (org draft toggle)", () => {
+  let userId: string;
+  let orgId: string;
+
+  async function actor(role: "owner" | "admin" | "member") {
+    userId = (await createTestUser({ db })).user.id;
+    const org = await createTestOrganization({ db, userId, role });
+    orgId = org.organization.id;
+    vi.mocked(getTenantContextOrNull).mockResolvedValue({
+      userId,
+      organizationId: orgId,
+    });
+  }
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("a draft-only PUT is accepted, round-trips on GET, and 403s for a member", async () => {
+    await actor("admin");
+    const res = await put({ reviewDraftPrs: false, expectedUpdatedAt: null });
+    expect(res.status).toBe(200);
+    const getRes = await GET();
+    const json = (await getRes.json()) as {
+      setting: { reviewDraftPrs: boolean } | null;
+    };
+    expect(json.setting?.reviewDraftPrs).toBe(false);
+
+    await actor("member");
+    expect((await put({ reviewDraftPrs: true })).status).toBe(403);
+  });
+
+  it("non-boolean → 400, never stored", async () => {
+    await actor("admin");
+    expect((await put({ reviewDraftPrs: "nope" })).status).toBe(400);
+    expect(
+      await getRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("THE FENCE THE FAMILY CHECK MISSED: two draft-only first writes (expectedUpdatedAt:null ×2) — exactly one 200", async () => {
+    // Draft-only writes leave supersede_policy NULL, so the old per-family
+    // fence would have admitted both. The row-level fence must not.
+    await actor("admin");
+    const [a, b] = await Promise.all([
+      put({ reviewDraftPrs: false, expectedUpdatedAt: null }),
+      put({ reviewDraftPrs: true, expectedUpdatedAt: null }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+  });
+
+  it("a draft write does not clobber a stored supersedePolicy, and vice versa", async () => {
+    await actor("admin");
+    const first = await put({
+      supersedePolicy: "complete-run-queue",
+      expectedUpdatedAt: null,
+    });
+    expect(first.status).toBe(200);
+    const v1 = ((await first.json()) as { setting: { updatedAt: string } })
+      .setting.updatedAt;
+
+    const second = await put({
+      reviewDraftPrs: false,
+      expectedUpdatedAt: v1,
+    });
+    expect(second.status).toBe(200);
+    const row = await getRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+    });
+    expect(row?.supersedePolicy).toBe("complete-run-queue");
+    expect(row?.reviewDraftPrs).toBe(false);
+  });
+
+  it("stale expectedUpdatedAt on a draft write → 409, value untouched", async () => {
+    await actor("admin");
+    const first = await put({ reviewDraftPrs: false, expectedUpdatedAt: null });
+    expect(first.status).toBe(200);
+    const res = await put({
+      reviewDraftPrs: true,
+      expectedUpdatedAt: new Date(0).toISOString(),
+    });
+    expect(res.status).toBe(409);
+    const row = await getRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+    });
+    expect(row?.reviewDraftPrs).toBe(false);
+  });
+});

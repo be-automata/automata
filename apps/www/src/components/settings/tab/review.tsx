@@ -16,6 +16,8 @@ import {
 } from "@/queries/review-settings-queries";
 import { ToleranceMatrix } from "@/components/settings/review-tolerance/tolerance-matrix";
 import { OrgFloorCard } from "@/components/settings/review-tolerance/org-floor-card";
+import { OrgDraftDefaultCard } from "@/components/settings/review-tolerance/org-draft-default-card";
+import { useSupersedeDefaultQuery } from "@/queries/supersede-policy-queries";
 import { SupersedePolicySection } from "@/components/settings/review-supersede/supersede-policy-section";
 import { RepoRow } from "@/components/settings/review-tolerance/repo-row";
 import {
@@ -43,6 +45,7 @@ interface RepoRowData {
 
 export function ReviewSettings() {
   const settingsQuery = useReviewSettingsQuery();
+  const orgDefaultQuery = useSupersedeDefaultQuery();
   const reposQuery = useUserReposQuery();
   const setMutation = useSetReviewSettingMutation();
   const clearMutation = useClearReviewToleranceMutation();
@@ -72,7 +75,10 @@ export function ReviewSettings() {
         repoFullName: repo.full_name,
         key,
         tolerance: override?.blockTolerance ?? DEFAULT_TOLERANCE,
-        reviewDraftPrs: override?.reviewDraftPrs ?? true,
+        reviewDraftPrs:
+          override?.reviewDraftPrs ??
+          orgDefaultQuery.data?.reviewDraftPrs ??
+          true,
         hasOverride: Boolean(override),
         updatedAt: override?.updatedAt,
       });
@@ -93,7 +99,7 @@ export function ReviewSettings() {
       }
     }
     return [...rowMap.values()].sort((a, b) => a.key.localeCompare(b.key));
-  }, [settingsQuery.data, reposQuery.data]);
+  }, [settingsQuery.data, reposQuery.data, orgDefaultQuery.data]);
 
   const visibleRows = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -221,6 +227,7 @@ export function ReviewSettings() {
   return (
     <div className="flex flex-col gap-8">
       <OrgFloorCard />
+      <OrgDraftDefaultCard />
       <SupersedePolicySection />
 
       <SettingsSection
