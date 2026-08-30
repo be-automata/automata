@@ -210,7 +210,8 @@ export async function getRepoReviewSetting({
  * target is the `(organization_id, repo_full_name)` unique index, so a repeat
  * write updates in place. Only the fields present in `patch` are written — an
  * absent field keeps its stored value (or its column default on first insert:
- * `blockTolerance` → 'warning', `reviewDraftPrs` → true). Returns the stored row.
+ * `blockTolerance` → 'warning'; `reviewDraftPrs` has NO default — absent on
+ * first insert leaves it NULL, i.e. "no choice"). Returns the stored row.
  * `blockTolerance`, when present, MUST be pre-validated by the caller (the route
  * validates against `BLOCK_TOLERANCES`).
  */

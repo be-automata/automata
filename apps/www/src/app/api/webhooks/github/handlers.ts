@@ -206,9 +206,9 @@ async function handlePullRequestAutomation(
     );
     return;
   }
-  // Draft-PR gate. Automata works on drafts by DEFAULT; a repo is opted out via
-  // the dashboard per-repo setting (or, legacy, the automation's includeDraftPRs
-  // filter). Resolved live so a dashboard change applies to the next webhook.
+  // Draft-PR gate. Drafts are skipped by DEFAULT; a repo or org opts in via
+  // the dashboard (or, legacy, the automation's includeDraftPRs filter).
+  // Resolved live so a dashboard change applies to the next webhook.
   if (event.pull_request.draft) {
     const reviewDrafts = await resolveReviewDraftPolicy({
       db,

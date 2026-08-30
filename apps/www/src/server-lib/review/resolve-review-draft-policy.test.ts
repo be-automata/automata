@@ -11,7 +11,8 @@ import { resolveReviewDraftPolicy } from "./resolve-review-draft-policy";
 
 /**
  * Draft-PR intake gate resolution. TRI-STATE precedence: explicit per-repo
- * value > explicit org-sentinel value > legacy automation filter > TRUE.
+ * value > explicit org-sentinel value > legacy automation filter > FALSE
+ * (drafts are skipped until marked ready; operators opt in via the dashboard).
  * NULL at either dashboard tier means "no choice here" and falls through.
  */
 
@@ -33,17 +34,28 @@ describe("resolveReviewDraftPolicy", () => {
     orgId = await makeOrg();
   });
 
-  it("no org, no automation config → default TRUE (works on drafts)", async () => {
+  it("no org, no automation config → default FALSE (drafts skipped)", async () => {
     expect(
       await resolveReviewDraftPolicy({
         db,
         organizationId: null,
         repoFullName: REPO,
       }),
+    ).toBe(false);
+  });
+
+  it("no org, legacy automation opt-in TRUE is honored", async () => {
+    expect(
+      await resolveReviewDraftPolicy({
+        db,
+        organizationId: null,
+        repoFullName: REPO,
+        automationIncludeDraftPrs: true,
+      }),
     ).toBe(true);
   });
 
-  it("org present, no per-repo row → falls to automation config, else default TRUE", async () => {
+  it("org present, no per-repo row → falls to automation config, else default FALSE", async () => {
     expect(
       await resolveReviewDraftPolicy({
         db,
@@ -58,7 +70,7 @@ describe("resolveReviewDraftPolicy", () => {
         organizationId: orgId,
         repoFullName: REPO,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("a per-repo row WINS over the automation config", async () => {
@@ -95,7 +107,7 @@ describe("resolveReviewDraftPolicy", () => {
     ).toBe(true);
   });
 
-  it("a tolerance-only row leaves the draft policy at its default TRUE", async () => {
+  it("a tolerance-only row leaves the draft policy at its default FALSE", async () => {
     // Tri-state: the row's draft value is NULL (no choice), so resolution
     // falls through the empty tiers to the system default.
     await upsertRepoReviewSetting({
@@ -110,7 +122,7 @@ describe("resolveReviewDraftPolicy", () => {
         organizationId: orgId,
         repoFullName: REPO,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 });
 

@@ -6,12 +6,13 @@ import { getRepoReviewSettingWithOrgDefault } from "@terragon/shared/model/repo-
  * webhook intake. Precedence:
  *
  *   per-repo dashboard row  >  org-default sentinel row ('*')  >
- *   automation trigger config (legacy)  >  default TRUE
+ *   automation trigger config (legacy)  >  default FALSE
  *
- * The system default is TRUE — Automata works on draft PRs by default; an
- * operator opts out per repo or org-wide via the dashboard (or, legacy, an
- * automation's `includeDraftPRs` filter). Read live from Neon, so a dashboard
- * change applies to the next webhook with no restart.
+ * The system default is FALSE — drafts are skipped until they are marked
+ * ready for review; an operator opts in per repo or org-wide via the
+ * dashboard (or, legacy, an automation's `includeDraftPRs` filter). Read live
+ * from Neon, so a dashboard change applies to the next webhook with no
+ * restart.
  *
  * `reviewDraftPrs` is TRI-STATE: NULL means "no choice at this scope" and the
  * resolution falls through — so a row created by another family (e.g. a
@@ -39,5 +40,5 @@ export async function resolveReviewDraftPolicy({
     if (repo?.reviewDraftPrs != null) return repo.reviewDraftPrs;
     if (orgDefault?.reviewDraftPrs != null) return orgDefault.reviewDraftPrs;
   }
-  return automationIncludeDraftPrs ?? true;
+  return automationIncludeDraftPrs ?? false;
 }

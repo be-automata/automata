@@ -1470,15 +1470,11 @@ export const repoReviewSettings = pgTable(
     /** 'info' | 'warning' | 'error' — the lowest severity that blocks. */
     blockTolerance: text("block_tolerance").notNull().default("warning"),
     /**
-     * Whether Automata engages DRAFT pull requests for this repo. Default true —
-     * Automata works on drafts by default; an operator sets this false to have it
-     * ignore drafts until they are marked ready. Enforced at the webhook intake
-     * gate, so a draft-skipped PR never dispatches a run at all.
-     */
-    /**
-     * Tri-state draft-PR policy. NULL = no choice at this scope — a repo row
-     * inherits the org sentinel, the sentinel inherits the legacy automation
-     * filter, and the system default is TRUE. Explicit true/false is a choice.
+     * Tri-state draft-PR policy, enforced at the webhook intake gate (a
+     * draft-skipped PR never dispatches a run). NULL = no choice at this
+     * scope — a repo row inherits the org sentinel, the sentinel inherits the
+     * legacy automation filter, and the system default is FALSE (drafts are
+     * skipped until marked ready for review). Explicit true/false is a choice.
      * (Was NOT NULL DEFAULT true; migrated so a row created by another family
      * no longer silently pins drafts.)
      */

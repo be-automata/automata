@@ -14,7 +14,7 @@ export interface SupersedeDefaultDto {
   supersedePolicy: SupersedePolicy | null;
   recheckOnComplete: boolean;
   /** Org-wide draft-PR default. Tri-state: null = the org has not chosen
-   * (effective default true). */
+   * (falls through to the legacy automation filter, then FALSE). */
   reviewDraftPrs: boolean | null;
   updatedAt: string;
 }
