@@ -38,8 +38,20 @@ const execFileAsync = promisify(execFile);
  * BEFORE the clone, not after. Nothing already present when it is set gets it.
  */
 export const INHERITABLE_ACE_RIGHTS =
+  // FILE data rights. Without these the whole feature is inert: the agent uid
+  // could stat the checkout and its own credential file but not read one byte
+  // of either, and could create nothing. `read`/`write`/`append`/`execute` are
+  // chmod(1)'s file-permission names; `delete` is a "both" right and is what
+  // lets the agent replace a file it owns the content of (git rewrites in
+  // place). See chmod(1) "ACL MANIPULATION OPTIONS" for the exact vocabulary.
+  "read,write,append,execute,delete," +
+  // DIRECTORY rights: traverse it, list it, create and remove entries in it.
   "list,search,add_file,add_subdirectory,delete_child," +
+  // ATTRIBUTE rights: xattrs + the ACL itself, so a git checkout and the
+  // credential seed keep working across the uid split.
   "readattr,writeattr,readextattr,writeextattr,readsecurity," +
+  // Inheritance: applied by the kernel at CREATE time, which is why the ACE
+  // goes on before the clone.
   "file_inherit,directory_inherit";
 
 /**

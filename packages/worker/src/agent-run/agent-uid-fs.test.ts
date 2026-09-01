@@ -33,6 +33,30 @@ describe("buildAceInvocation", () => {
     });
   });
 
+  it("the per-run rights carry every FILE data right, by name", () => {
+    // Regression fence for the shipped-inert bug: the first cut of this
+    // constant listed directory + attribute rights ONLY, so an inheriting file
+    // granted the agent uid metadata access and nothing else — it could not
+    // read the checkout or its own credential file, and agent-uid mode could
+    // not work at all. The whole feature rests on this string.
+    for (const right of ["read", "write", "append", "execute", "delete"]) {
+      expect(INHERITABLE_ACE_RIGHTS.split(",")).toContain(right);
+    }
+    // …and still every directory right it needs to create the run's tree.
+    for (const right of [
+      "list",
+      "search",
+      "add_file",
+      "add_subdirectory",
+      "delete_child",
+    ]) {
+      expect(INHERITABLE_ACE_RIGHTS.split(",")).toContain(right);
+    }
+    // Never granted: taking ownership or rewriting the ACL out from under us.
+    expect(INHERITABLE_ACE_RIGHTS.split(",")).not.toContain("writesecurity");
+    expect(INHERITABLE_ACE_RIGHTS.split(",")).not.toContain("chown");
+  });
+
   it("the per-run rights are inheritable and the shared-root rights are not", () => {
     expect(INHERITABLE_ACE_RIGHTS).toContain("file_inherit");
     expect(INHERITABLE_ACE_RIGHTS).toContain("directory_inherit");
