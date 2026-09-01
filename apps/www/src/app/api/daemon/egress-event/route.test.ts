@@ -118,6 +118,48 @@ describe("POST /api/daemon/egress-event", () => {
     });
   });
 
+  it("persists the observe/enforce mode marker, defaulting absent to enforce (#108 F4)", async () => {
+    // An observe-mode plane allows EVERYTHING, so its allow rows are evidence
+    // that traffic happened — never that a policy permitted it. Without the
+    // marker the two are indistinguishable in the audit trail.
+    const res = await POST(
+      req({
+        events: [
+          {
+            destinationHost: "observed.example.com",
+            action: "allow",
+            policyLevel: "none",
+            source: "worker",
+            mode: "observe",
+          },
+          {
+            destinationHost: "enforced.example.com",
+            action: "allow",
+            policyLevel: "domain",
+            source: "worker",
+            mode: "enforce",
+          },
+          // No marker at all — an older plane, which always meant "enforce".
+          {
+            destinationHost: "legacy.example.com",
+            action: "allow",
+            source: "worker",
+          },
+        ],
+      }),
+    );
+    expect(res.status).toBe(200);
+    const rows = await listEgressEvents({
+      db,
+      organizationId: orgId,
+      runId: threadChatId,
+    });
+    const byHost = Object.fromEntries(rows.map((r) => [r.destinationHost, r]));
+    expect(byHost["observed.example.com"]?.mode).toBe("observe");
+    expect(byHost["enforced.example.com"]?.mode).toBe("enforce");
+    expect(byHost["legacy.example.com"]?.mode).toBe("enforce");
+  });
+
   it("400 on malformed body: not JSON, missing events, bad action/source, empty batch", async () => {
     const notJson = new NextRequest("http://localhost/api/daemon/egress-event", {
       method: "POST",
@@ -138,6 +180,15 @@ describe("POST /api/daemon/egress-event", () => {
       (
         await POST(
           req({ events: [{ ...okEvent, source: "mars" }] }),
+        )
+      ).status,
+    ).toBe(400);
+    // #108 F4: an unknown posture is a rejection, never a silently-dropped
+    // field that would leave the row claiming "enforce".
+    expect(
+      (
+        await POST(
+          req({ events: [{ ...okEvent, mode: "audit-only" }] }),
         )
       ).status,
     ).toBe(400);

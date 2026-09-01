@@ -11,6 +11,7 @@ import stripAnsi from "strip-ansi";
 import { Logger, OutputFormat } from "./logger";
 import { DaemonEventAPIBody } from "./shared";
 import { nanoid } from "nanoid/non-secure";
+import { postJson } from "./proxy-fetch";
 
 export interface IDaemonRuntime {
   url: string;
@@ -184,15 +185,19 @@ export class DaemonRuntime implements IDaemonRuntime {
       return;
     }
     this.logger.info(`POST to ${url}`, logArgs);
-    const response = await fetch(url, {
-      method: "POST",
+    // #108 D1: this POST must survive a host-level 443 block on the agent uid.
+    // postJson is plain `fetch` — today's exact behaviour — unless the worker
+    // set AUTOMATA_DAEMON_CALLBACK_VIA_PROXY=1, which it does ONLY in agent-uid
+    // mode (F5). A run that merely carries an egress policy is unaffected.
+    const response = await postJson({
+      url,
       headers: {
         "Content-Type": "application/json",
         "X-Daemon-Token": token,
       },
       body: JSON.stringify(body),
     });
-    if (!response.ok) {
+    if (response.status < 200 || response.status >= 300) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
   }

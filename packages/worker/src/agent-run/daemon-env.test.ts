@@ -195,6 +195,40 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       expect(env.NO_PROXY).toBe("127.0.0.1,localhost");
       expect(env.no_proxy).toBe("127.0.0.1,localhost");
       expect(JSON.stringify(env)).not.toContain("corp-proxy.internal");
+      // #108 D1: belt-and-braces for the agent CLI child (node >=22.21/>=24).
+      expect(env.NODE_USE_ENV_PROXY).toBe("1");
+      // #108 F5: a policy-bearing run WITHOUT agentUser keeps the DIRECT daemon
+      // callback it has always had. This is the pre-existing #66 shape.
+      expect(env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY).toBeUndefined();
+    });
+
+    it("opts the daemon callback onto the proxy ONLY in agent-uid mode (#108 F5)", () => {
+      const env = buildDaemonEnv({
+        baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
+        anthropicApiKey: "sk-ant-xxx",
+        claudeBinDir: "",
+        installationToken: INSTALL_TOKEN,
+        ghConfigDir: "/tmp/isolated-gh",
+        botLogin: "automata-ai-bot[bot]",
+        egressProxyUrl: PROXY_URL,
+        agentUser: "_automata-agent",
+        runHome: "/tmp/run-home",
+      });
+      expect(env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY).toBe("1");
+    });
+
+    it("never opts in without a proxy, even in agent-uid mode (#108 F5)", () => {
+      const env = buildDaemonEnv({
+        baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
+        anthropicApiKey: "sk-ant-xxx",
+        claudeBinDir: "",
+        installationToken: INSTALL_TOKEN,
+        ghConfigDir: "/tmp/isolated-gh",
+        botLogin: "automata-ai-bot[bot]",
+        agentUser: "_automata-agent",
+        runHome: "/tmp/run-home",
+      });
+      expect(env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY).toBeUndefined();
     });
 
     it("injects NOTHING when unset — and ambient proxy vars stay stripped by the whitelist", () => {
@@ -209,6 +243,103 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       for (const key of Object.keys(ambientProxies)) {
         expect(env[key], key).toBeUndefined();
       }
+      // The default-off proof for #108 D1: no proxy, no node proxy hint.
+      expect(env.NODE_USE_ENV_PROXY).toBeUndefined();
+      expect(env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY).toBeUndefined();
+    });
+  });
+
+  describe("#108 — agent-uid mode drops what is unsafe across a uid boundary", () => {
+    const AMBIENT = {
+      PATH: "/usr/bin",
+      HOME: "/home/op",
+      USER: "operator",
+      NODE_OPTIONS: "--require /Users/op/evil.js",
+      TMPDIR: "/var/folders/j0/abc/T/",
+      TMP: "/var/folders/j0/abc/T/",
+      TEMP: "/var/folders/j0/abc/T/",
+      XDG_CONFIG_HOME: "/home/op/.config",
+      XDG_DATA_HOME: "/home/op/.local/share",
+      XDG_CACHE_HOME: "/home/op/.cache",
+      XDG_RUNTIME_DIR: "/run/user/501",
+    };
+
+    const base = {
+      anthropicApiKey: "sk-ant-xxx",
+      claudeBinDir: "",
+      installationToken: INSTALL_TOKEN,
+      ghConfigDir: "/tmp/isolated-gh",
+      botLogin: "automata-ai-bot[bot]",
+    };
+
+    it("agentUser empty: forwards NODE_OPTIONS, TMPDIR, USER and the XDG dirs exactly as today", () => {
+      const env = buildDaemonEnv({ baseEnv: AMBIENT, ...base });
+      expect(env.NODE_OPTIONS).toBe("--require /Users/op/evil.js");
+      expect(env.TMPDIR).toBe("/var/folders/j0/abc/T/");
+      expect(env.TMP).toBe("/var/folders/j0/abc/T/");
+      expect(env.TEMP).toBe("/var/folders/j0/abc/T/");
+      expect(env.USER).toBe("operator");
+      expect(env.XDG_CONFIG_HOME).toBe("/home/op/.config");
+      expect(env.XDG_RUNTIME_DIR).toBe("/run/user/501");
+      expect(env.LOGNAME).toBeUndefined();
+    });
+
+    it("agentUser set: NODE_OPTIONS is dropped (sudo -E would carry a --require across)", () => {
+      const env = buildDaemonEnv({
+        baseEnv: AMBIENT,
+        ...base,
+        agentUser: "_automata-agent",
+      });
+      expect(env.NODE_OPTIONS).toBeUndefined();
+    });
+
+    it("agentUser set: the operator TMPDIR/TMP/TEMP and every XDG_* var are dropped", () => {
+      const env = buildDaemonEnv({
+        baseEnv: AMBIENT,
+        ...base,
+        agentUser: "_automata-agent",
+      });
+      for (const key of [
+        "TMP",
+        "TEMP",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_RUNTIME_DIR",
+      ]) {
+        expect(env[key], key).toBeUndefined();
+      }
+      expect(env.TMPDIR).toBeUndefined(); // no runTmpDir given
+    });
+
+    it("agentUser set: TMPDIR points into the run workdir when one is given", () => {
+      const env = buildDaemonEnv({
+        baseEnv: AMBIENT,
+        ...base,
+        agentUser: "_automata-agent",
+        runTmpDir: "/usr/local/automata/runs/thr_1/tmp",
+      });
+      expect(env.TMPDIR).toBe("/usr/local/automata/runs/thr_1/tmp");
+    });
+
+    it("agentUser set: USER and LOGNAME name the agent account, not the operator", () => {
+      const env = buildDaemonEnv({
+        baseEnv: AMBIENT,
+        ...base,
+        agentUser: "_automata-agent",
+      });
+      expect(env.USER).toBe("_automata-agent");
+      expect(env.LOGNAME).toBe("_automata-agent");
+    });
+
+    it("agentUser set: HOME is still the per-run HOME (the #50 seed is unaffected)", () => {
+      const env = buildDaemonEnv({
+        baseEnv: AMBIENT,
+        ...base,
+        agentUser: "_automata-agent",
+        runHome: "/usr/local/automata/runs/thr_1/home",
+      });
+      expect(env.HOME).toBe("/usr/local/automata/runs/thr_1/home");
     });
   });
 

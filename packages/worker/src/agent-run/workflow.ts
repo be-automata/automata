@@ -27,6 +27,7 @@ import {
   type WwwClientOpts,
 } from "./www-client";
 import {
+  assertEgressProxyReachable,
   startEgressProxy,
   type EgressDecisionEvent,
   type EgressProxy,
@@ -193,6 +194,7 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
           : {}),
         action: event.action,
         policyLevel: event.policyLevel,
+        mode: event.mode,
         source: "worker",
       });
       if (buffer.length >= EGRESS_BATCH_MAX) {
@@ -395,6 +397,8 @@ async function runAgentInner(
     installationToken: input.installationToken,
     workdirRoot: config.workdirRoot,
     runId: input.threadId,
+    // #108: empty (the default) ⇒ no ACLs are touched at all.
+    agentUser: config.agentUser,
   });
   step(
     `clone complete: ${input.repoFullName}@${input.branch}` +
@@ -482,15 +486,30 @@ async function runAgentInner(
   // outside the try/finally that owns cleanup, so it cleans up itself.
   let egressProxy: EgressProxy | null = null;
   let egressEvents: ReturnType<typeof createEgressEventBatcher> | null = null;
-  if (input.egressPolicy) {
+  // #108: agent-uid runs ALWAYS get a proxy. Under the PF anchor the agent has
+  // no direct route to 80/443, so without one the agent CLI's own provider call
+  // dies; but a repo with no policy must not silently acquire a deny-all fence
+  // either. Hence observe: allow everything, audit everything, and mark every
+  // row so nothing downstream can read it as enforcement. Absent BOTH a policy
+  // and an agent user, nothing starts and nothing is injected — zero change.
+  const egressMode: "enforce" | "observe" = input.egressPolicy
+    ? "enforce"
+    : "observe";
+  if (input.egressPolicy || config.agentUser) {
     try {
       const batcher = createEgressEventBatcher(wwwOpts);
       egressEvents = batcher;
       egressProxy = await startEgressProxy({
-        policy: input.egressPolicy,
+        policy: input.egressPolicy ?? { level: "none", allowlist: [] },
+        mode: egressMode,
         onEvent: (e) => batcher.add(e),
       });
+      // A2, BLOCKING: a proxy that does not answer turns the run into a silent
+      // 90s hang with no output that the agent cannot report. Prove the
+      // listener before anything is pointed at it.
+      await assertEgressProxyReachable({ url: egressProxy.url });
     } catch (err) {
+      await closeQuietly(egressProxy);
       await closeQuietly(egressEvents);
       await materialised.cleanup();
       await boxSlot?.release();
@@ -498,8 +517,10 @@ async function runAgentInner(
       throw err;
     }
     step(
-      `egress proxy up: 127.0.0.1:${egressProxy.port} ` +
-        `(level=${input.egressPolicy.level}, ${input.egressPolicy.allowlist.length} allowlist entries)`,
+      `egress proxy up (${egressMode}): 127.0.0.1:${egressProxy.port} ` +
+        (input.egressPolicy
+          ? `(level=${input.egressPolicy.level}, ${input.egressPolicy.allowlist.length} allowlist entries)`
+          : "(no repo policy — allow-all, every decision audited)"),
     );
   }
 

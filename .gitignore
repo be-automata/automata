@@ -80,3 +80,9 @@ apps/vscode-extension/.vscode/
 
 # hatchet-lite IT harness (packages/worker/src/agent-run/hatchet-it-harness.ts) — written per run, removed in afterAll
 packages/worker/.hatchet-it-override.generated.yml
+
+# Agent scratch + local vector store. `.claude/tmp/` holds raw tool transcripts
+# written during a session; a `git add -A` swept 2.6MB of them (and ruvector.db)
+# into a PR once. Neither is referenced by any build, test or deploy step.
+.claude/tmp/
+ruvector.db

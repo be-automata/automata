@@ -321,6 +321,13 @@ export interface EgressEventWire {
   action: "allow" | "deny";
   policyLevel?: "none" | "ip_port" | "domain";
   source: "worker";
+  /**
+   * #108: the posture that produced the decision. "observe" rows record that
+   * traffic HAPPENED; only "enforce" rows are evidence that a policy permitted
+   * it. Accepted by the route's zod schema and persisted in
+   * `egress_events.mode`; absent ⇒ 'enforce' (what every pre-#108 plane meant).
+   */
+  mode?: "enforce" | "observe";
 }
 
 /**

@@ -56,6 +56,24 @@ export const SAFE_ENV_KEYS = new Set([
   // it. Revert: re-add the string literal to this set.
 ]);
 
+/**
+ * Whitelisted keys that are additionally dropped when the child runs as a
+ * DIFFERENT uid (#108). NODE_OPTIONS is the dangerous one: `sudo -E` carries it
+ * across, and `--require <path the agent uid can write>` executes before the
+ * daemon. The rest point at operator-owned 0700 directories the agent uid
+ * cannot traverse, or would override the per-run HOME.
+ */
+export const CROSS_UID_UNSAFE_KEYS = [
+  "NODE_OPTIONS",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_RUNTIME_DIR",
+] as const;
+
 /** Defense-in-depth: a whitelisted key is still dropped if it looks like a secret. */
 const SECRET_KEY_PATTERN = /TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL/i;
 
@@ -152,6 +170,28 @@ export interface BuildDaemonEnvOpts {
    * (`WORKER_CREDENTIAL_BROKER=legacy-direct`).
    */
   broker?: BrokerHandoff | null;
+  /**
+   * #108: the unix account the child will actually run as. Empty (the default)
+   * = nothing below happens and the built env is byte-for-byte today's.
+   *
+   * When set, three things change, all of them because the child is a DIFFERENT
+   * uid than this process:
+   *  - NODE_OPTIONS is NOT forwarded. `sudo -E` carries it into the uid-300
+   *    process, and a `--require` at any uid-300-writable path would execute
+   *    before the daemon does (adversarial review, #108).
+   *  - the operator's TMPDIR/TMP/TEMP and every XDG_* dir are dropped. macOS
+   *    TMPDIR is /var/folders/<...>/T — mode 0700, owned by the operator's uid,
+   *    untraversable by the agent uid; the XDG dirs would likewise point back
+   *    at the operator's home and override the per-run HOME.
+   *  - USER/LOGNAME name the agent account, so anything that shells out and
+   *    asks who it is gets a consistent answer.
+   */
+  agentUser?: string;
+  /**
+   * The run's own TMPDIR (inside the workdir, so it inherits the run's ACE).
+   * Only consulted when `agentUser` is set.
+   */
+  runTmpDir?: string | null;
 }
 
 export function buildDaemonEnv({
@@ -166,6 +206,8 @@ export function buildDaemonEnv({
   credentialEnv = {},
   egressProxyUrl = null,
   broker = null,
+  agentUser = "",
+  runTmpDir = null,
 }: BuildDaemonEnvOpts): NodeJS.ProcessEnv {
   // 1. Whitelist: forward ONLY known-safe, non-secret ambient keys.
   const env: NodeJS.ProcessEnv = {};
@@ -173,6 +215,19 @@ export function buildDaemonEnv({
     if (isForwardable(key) && baseEnv[key] !== undefined) {
       env[key] = baseEnv[key];
     }
+  }
+
+  // 1b. #108: keys that are safe to forward to a child of OUR uid but not to a
+  // child of a different one. See BuildDaemonEnvOpts.agentUser.
+  if (agentUser) {
+    for (const key of CROSS_UID_UNSAFE_KEYS) {
+      delete env[key];
+    }
+    if (runTmpDir) {
+      env.TMPDIR = runTmpDir;
+    }
+    env.USER = agentUser;
+    env.LOGNAME = agentUser;
   }
 
   // 2. Agent runtime. ANTHROPIC_API_KEY is an INTENTIONAL secret we inject — never
@@ -212,6 +267,23 @@ export function buildDaemonEnv({
     env.http_proxy = egressProxyUrl;
     env.NO_PROXY = "127.0.0.1,localhost";
     env.no_proxy = "127.0.0.1,localhost";
+    // Belt-and-braces for the AGENT CLI child (a separate node process whose
+    // HTTP client we do not own): node's built-in env proxy support, which
+    // exists only on node >=22.21.0 / >=24.0.0. The DAEMON does not depend on
+    // it — packages/daemon/src/proxy-fetch.ts proxies explicitly — so its
+    // absence on an older runtime is inert rather than a silent callback loss.
+    env.NODE_USE_ENV_PROXY = "1";
+    // #108 F5: the DAEMON's own control-plane callback moves onto the proxy
+    // ONLY in agent-uid mode, where the PF anchor makes the direct route
+    // unusable. A run that merely carries an egress policy (#66 slice 2, live
+    // since before this ticket) keeps the direct callback it has always had —
+    // routing it through the proxy would hand it new syscalls, new timeout and
+    // error behaviour, and a new dependency on the allowlist carrying the
+    // callback host, none of which anyone opted into. Consumed by
+    // packages/daemon/src/proxy-fetch.ts (CALLBACK_VIA_PROXY_ENV).
+    if (agentUser) {
+      env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY = "1";
+    }
   }
   // Credential env (Amp). After the whitelist so SECRET_KEY_PATTERN cannot drop it.
   for (const [key, value] of Object.entries(credentialEnv)) {

@@ -1,3 +1,9 @@
+import {
+  type ChildProcess,
+  type spawn,
+  type SpawnOptions,
+} from "node:child_process";
+import EventEmitter from "node:events";
 import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
@@ -219,4 +225,313 @@ setInterval(() => {}, 1000);
     expect(fs.existsSync(expectedSocket)).toBe(false);
     expect(fs.existsSync(expectedPidFile)).toBe(false);
   });
+
+  /**
+   * #108. Every assertion below injects both the ACE runner and spawn: the unit
+   * suite must never invoke sudo, chmod +a, dscl or a real uid switch.
+   */
+  type Recorded = { file: string; args: string[] };
+
+  function fakeSpawn(opts: {
+    recorded: Recorded[];
+    /** When set, the "wrapper" writes this pgid into the pidfile it is handed. */
+    wrapperPgid?: number;
+  }) {
+    return ((file: string, args: string[], spawnOpts?: SpawnOptions) => {
+      opts.recorded.push({ file, args });
+      const pidFile = (spawnOpts?.env as Record<string, string> | undefined)
+        ?.AUTOMATA_PIDFILE;
+      if (opts.wrapperPgid != null && pidFile) {
+        fs.writeFileSync(pidFile, String(opts.wrapperPgid));
+      }
+      const child = new EventEmitter() as unknown as ChildProcess & {
+        stdout: EventEmitter & { resume: () => void };
+        stderr: EventEmitter & { resume: () => void };
+      };
+      const stream = () =>
+        Object.assign(new EventEmitter(), { resume: () => {} });
+      Object.assign(child, {
+        pid: 9001,
+        exitCode: null,
+        stdout: stream(),
+        stderr: stream(),
+        unref: () => {},
+      });
+      return child;
+    }) as unknown as typeof spawn;
+  }
+
+  /** Bind the socket ourselves so waitForSocket resolves without a real daemon. */
+  async function bindSocket(p: string): Promise<void> {
+    const server = net.createServer();
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(p, () => resolve()));
+  }
+
+  it("applies no ACE and spawns nodeBin DIRECTLY when agentUser is empty (default-off proof)", async () => {
+    const { root, workdir, input } = fixture();
+    const aceCalls: string[][] = [];
+    const recorded: Recorded[] = [];
+    const config = loadWorkerConfig({
+      WORKER_RUN_NAMESPACE_ROOT: root,
+      WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+      WORKER_NODE_BIN: "/usr/bin/node",
+    });
+    const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+    fs.mkdirSync(path.dirname(socket), { recursive: true });
+    const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      aceExec: async (_f, a) => void aceCalls.push(a),
+      spawnFn: fakeSpawn({ recorded }),
+    });
+    daemons.push(daemon);
+    await bindSocket(socket);
+    await daemon.start();
+
+    expect(aceCalls).toEqual([]);
+    expect(recorded).toEqual([
+      {
+        file: "/usr/bin/node",
+        args: [
+          "/opt/daemon/index.js",
+          "--url",
+          input.daemonCallbackUrl,
+          "--socket-path",
+          socket,
+        ],
+      },
+    ]);
+    // The worker itself records the pgid, exactly as before.
+    expect(
+      Number(
+        fs
+          .readFileSync(
+            runPidPath(root, getProcessWorkerId(), input.threadId),
+            "utf8",
+          )
+          .trim(),
+      ),
+    ).toBe(9001);
+    expect(daemon.pid).toBe(9001);
+  });
+
+  it("degraded teardown: a LATE wrapper pidfile is still group-killed as the agent (F3)", async () => {
+    // resolvePgid()'s bounded wait can expire before a slow sudo/PAM hop lands
+    // the pidfile. teardown must take one last look rather than signal the
+    // pre-sudo pid, which is sudo's own (root) process and unkillable by the
+    // agent account.
+    const { root, workdir, input } = fixture();
+    const recorded: Recorded[] = [];
+    const killed: number[] = [];
+    const config = loadWorkerConfig({
+      WORKER_RUN_NAMESPACE_ROOT: root,
+      WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+      WORKER_AGENT_USER: "_automata-agent",
+      WORKER_WORKDIR_ROOT: workdir,
+    });
+    const pidFile = runPidPath(root, getProcessWorkerId(), input.threadId);
+    fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+    const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      aceExec: async () => {},
+      // No wrapperPgid: the wrapper "has not written it yet".
+      spawnFn: fakeSpawn({ recorded }),
+      platform: "darwin",
+      killFn: (p) => void killed.push(p),
+    });
+    daemons.push(daemon);
+    await expect(daemon.start()).rejects.toThrow(
+      /never recorded its process group/,
+    );
+    // …and only NOW does the wrapper's value land.
+    fs.writeFileSync(pidFile, "7777");
+
+    daemon.teardown();
+    const kill = recorded.find((r) => r.args.includes("/bin/kill"));
+    expect(kill?.file).toBe("/usr/bin/sudo");
+    expect(kill?.args).toEqual([
+      "-n",
+      "-u",
+      "_automata-agent",
+      "--",
+      "/bin/kill",
+      "-9",
+      "--",
+      "-7777",
+    ]);
+    // Never the pre-sudo pid.
+    expect(killed).toEqual([]);
+  });
+
+  it("degraded teardown: NO pgid ever ⇒ loud log + kill sudo's own group, not a doomed sudo kill (F3)", async () => {
+    const { root, workdir, input } = fixture();
+    const recorded: Recorded[] = [];
+    const killed: number[] = [];
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => void errors.push(args.join(" "));
+    try {
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_AGENT_USER: "_automata-agent",
+        WORKER_WORKDIR_ROOT: workdir,
+      });
+      fs.mkdirSync(
+        path.dirname(runPidPath(root, getProcessWorkerId(), input.threadId)),
+        { recursive: true },
+      );
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        {
+          aceExec: async () => {},
+          spawnFn: fakeSpawn({ recorded }),
+          platform: "darwin",
+          killFn: (p) => void killed.push(p),
+        },
+      );
+      daemons.push(daemon);
+      await expect(daemon.start()).rejects.toThrow(
+        /never recorded its process group/,
+      );
+      daemon.teardown();
+    } finally {
+      console.error = originalError;
+    }
+    // A `sudo -u agent kill` aimed at sudo's own root process is a guaranteed
+    // EPERM no-op — so we do not issue one. We kill sudo's group ourselves.
+    expect(recorded.some((r) => r.args.includes("/bin/kill"))).toBe(false);
+    expect(killed).toEqual([-9001]);
+    expect(errors.join("\n")).toMatch(/never recorded a process group/);
+    expect(errors.join("\n")).toMatch(/may survive this teardown/);
+  });
+
+  it("applies NO ACE itself even in agent-uid mode — boot owns that (F2)", async () => {
+    // The gh-broker socket is bound in this same dir BEFORE start() runs, and
+    // macOS applies ACE inheritance at CREATE time, so a per-run grant here
+    // would never reach it. claimRunNamespace() applies both grants at worker
+    // boot instead; start() must stay out of the ACL business entirely.
+    const { root, workdir, input } = fixture();
+    const aceCalls: string[][] = [];
+    const config = loadWorkerConfig({
+      WORKER_RUN_NAMESPACE_ROOT: root,
+      WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+      WORKER_AGENT_USER: "_automata-agent",
+      WORKER_WORKDIR_ROOT: workdir,
+    });
+    const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+    fs.mkdirSync(path.dirname(socket), { recursive: true });
+    const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      aceExec: async (_f, a) => void aceCalls.push(a),
+      spawnFn: fakeSpawn({ recorded: [], wrapperPgid: 4242 }),
+      platform: "darwin",
+    });
+    daemons.push(daemon);
+    await bindSocket(socket);
+    await daemon.start();
+
+    expect(aceCalls).toEqual([]);
+  });
+
+  it("spawns via sudo -n -u <user> -E -- and takes the pgid from the WRAPPER, not child.pid", async () => {
+    const { root, workdir, input } = fixture();
+    const recorded: Recorded[] = [];
+    const config = loadWorkerConfig({
+      WORKER_RUN_NAMESPACE_ROOT: root,
+      WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+      WORKER_NODE_BIN: "/usr/local/automata/bin/node",
+      WORKER_AGENT_USER: "_automata-agent",
+      WORKER_WORKDIR_ROOT: workdir,
+    });
+    const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+    fs.mkdirSync(path.dirname(socket), { recursive: true });
+    const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      aceExec: async () => {},
+      spawnFn: fakeSpawn({ recorded, wrapperPgid: 4242 }),
+      platform: "darwin",
+    });
+    daemons.push(daemon);
+    await bindSocket(socket);
+    await daemon.start();
+
+    expect(recorded[0]?.file).toBe("/usr/bin/sudo");
+    expect(recorded[0]?.args.slice(0, 5)).toEqual([
+      "-n",
+      "-u",
+      "_automata-agent",
+      "-E",
+      "--",
+    ]);
+    // The daemon argv rides through as POSITIONAL args after the wrapper script.
+    expect(recorded[0]?.args.slice(-5)).toEqual([
+      "/opt/daemon/index.js",
+      "--url",
+      input.daemonCallbackUrl,
+      "--socket-path",
+      socket,
+    ]);
+    // sudo may fork a setsid'd monitor, so child.pid (9001) is NOT the group.
+    expect(daemon.pid).toBe(4242);
+  });
+
+  it("teardown shells out to sudo /bin/kill -9 -- -<pgid> when agentUser is set", async () => {
+    const { root, workdir, input } = fixture();
+    const recorded: Recorded[] = [];
+    const config = loadWorkerConfig({
+      WORKER_RUN_NAMESPACE_ROOT: root,
+      WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+      WORKER_AGENT_USER: "_automata-agent",
+      WORKER_WORKDIR_ROOT: workdir,
+    });
+    const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+    const pidFile = runPidPath(root, getProcessWorkerId(), input.threadId);
+    fs.mkdirSync(path.dirname(socket), { recursive: true });
+    const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      aceExec: async () => {},
+      spawnFn: fakeSpawn({ recorded, wrapperPgid: 4242 }),
+      platform: "darwin",
+    });
+    daemons.push(daemon);
+    await bindSocket(socket);
+    await daemon.start();
+    daemon.teardown();
+
+    expect(recorded[1]).toEqual({
+      file: "/usr/bin/sudo",
+      args: [
+        "-n",
+        "-u",
+        "_automata-agent",
+        "--",
+        "/bin/kill",
+        "-9",
+        "--",
+        "-4242",
+      ],
+    });
+    // teardown still removes this run's own pidfile and socket first.
+    expect(fs.existsSync(pidFile)).toBe(false);
+    expect(fs.existsSync(socket)).toBe(false);
+  });
+
+  function fixture() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-root-"));
+    const scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-script-"));
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-wd-"));
+    tmpDirs.push(root, scriptDir, workdir);
+    const input: AgentRunInput = {
+      threadId: `thr_ace_${Math.random().toString(36).slice(2)}`,
+      threadChatId: "tc_1",
+      repoFullName: "o/r",
+      branch: "main",
+      daemonCallbackUrl: "http://localhost:3999",
+      installationToken: "inst",
+      daemonToken: "daemon",
+      orgId: "org-1",
+    };
+    return { root, scriptDir, workdir, input };
+  }
 });

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Reload the Automata PF wrapper conf at boot (#108).
+
+    One-shot `pfctl` loads do NOT survive a reboot, and macOS does not auto-load
+    /etc/pf.conf with PF enabled. This unit is the ONLY thing that makes the
+    egress anchor persistent. It is the first root-owned unit in this repo; every
+    other deploy unit is a LaunchAgent under gui/$UID.
+
+    `-E`, never `-e`: -E takes a reference on the PF enable refcount that no other
+    macOS component can release on our behalf. With -e, any component calling
+    `pfctl -X <token>` silently disables PF and this anchor with it.
+
+    Install:
+      sudo install -o root -g wheel -m 0644 com.automata.pf.plist \
+        /Library/LaunchDaemons/com.automata.pf.plist
+      sudo launchctl bootstrap system /Library/LaunchDaemons/com.automata.pf.plist
+    Remove:
+      sudo launchctl bootout system/com.automata.pf
+  -->
+  <key>Label</key>
+  <string>com.automata.pf</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/sbin/pfctl</string>
+    <string>-E</string>
+    <string>-f</string>
+    <string>/etc/automata-pf.conf</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- One-shot: pfctl loads the ruleset and exits. Nothing to keep alive. -->
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardErrorPath</key>
+  <string>/var/log/automata-pf.err</string>
+  <key>StandardOutPath</key>
+  <string>/var/log/automata-pf.out</string>
+</dict>
+</plist>

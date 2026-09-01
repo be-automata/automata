@@ -39,6 +39,13 @@ set -a; source ~/.automata/worker-box.env; set +a
 bash scripts/assert-auth-enabled.sh || exit 1
 # Daemon bundle must be current (worker consumes packages/daemon/dist).
 pnpm run daemon:build || exit 1
+# #108 agent-uid mode ONLY: publish the just-built bundle where the agent uid can
+# read it, so WORKER_DAEMON_DIST always matches the build. Own that ONE directory
+# as the operator (`sudo chown $(id -un) /usr/local/automata/daemon`) so this
+# needs no extra sudo grant.
+if [ -n "${WORKER_AGENT_USER:-}" ]; then
+  install -m 0444 dist/../../daemon/dist/index.js /usr/local/automata/daemon/index.js || exit 1
+fi
 exec node --import tsx src/hello/worker.ts
 ```
 
@@ -55,6 +62,22 @@ exec node --import tsx src/hello/worker.ts
 `worker-box.env` the worker loads. The worker's TS boot gate
 (`assertAuthEnabledFromEnv`) is the second, cross-platform layer, so even a box whose
 `run-worker.sh` was not updated still fails closed.
+
+## Agent-uid mode (#108)
+
+`WORKER_AGENT_USER` runs the agent child as a dedicated unprivileged role
+account so the PF egress anchor can fence it without fencing the operator.
+It is OFF by default — empty means byte-for-byte the behaviour above.
+
+Host provisioning (role account, `/usr/local/automata` tree, sudoers, PF wrapper
+conf + preflight/verify scripts + boot LaunchDaemon) and the verification gates
+are in `AGENT-UID-PROVISIONING.md`. Two things that will otherwise bite:
+
+- `WORKER_AGENT_USER` without `WORKER_WORKDIR_ROOT` is a hard boot failure. The
+  default root is `os.tmpdir()` — 0700, owned by the worker's uid, untraversable
+  by any other.
+- `WORKER_NODE_BIN` must be node **≥22.21.0 (22.x) or ≥24.0.0**. The worker
+  probes it at boot and refuses to start below that floor.
 
 ## Install
 
