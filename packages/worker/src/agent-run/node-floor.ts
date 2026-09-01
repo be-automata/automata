@@ -17,11 +17,19 @@
 
 export const NODE_ENV_PROXY_FLOOR = ">=22.21.0 (22.x) or >=24.0.0";
 
-/** Parse `v22.22.1` / `22.22.1` into [major, minor, patch]. Null if unparseable. */
+/**
+ * Parse `v22.22.1` / `22.22.1` into [major, minor, patch]. Null if unparseable.
+ *
+ * FULLY ANCHORED, both ends. An unanchored tail let `v22.21.0garbage` — or any
+ * string that merely STARTS with a version — parse as 22.21.0 and clear the
+ * floor, which is the opposite of the fail-closed contract this module exists
+ * for. The optional suffix permits a real semver prerelease/build tag
+ * (`v24.1.0-nightly20260101abc`, `+build`) and nothing else.
+ */
 export function parseNodeVersion(
   raw: string,
 ): [number, number, number] | null {
-  const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(raw.trim());
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/.exec(raw.trim());
   if (!m) {
     return null;
   }

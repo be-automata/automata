@@ -25,6 +25,31 @@ describe("nodeSupportsEnvProxy", () => {
     expect(parseNodeVersion("garbage")).toBeNull();
   });
 
+  // #108 F6: the regex is anchored at BOTH ends. An unanchored tail let any
+  // string that merely started with a version clear the floor.
+  it.each([
+    ["v22.21.0", [22, 21, 0], true],
+    ["22.21.0", [22, 21, 0], true],
+    ["v24.0.0", [24, 0, 0], true],
+    ["v22.21.0-nightly1", [22, 21, 0], true],
+    ["v24.1.0+build.7", [24, 1, 0], true],
+    ["v22.21.0garbage", null, false],
+    ["v24.0.0-not-node", [24, 0, 0], true],
+    ["v24.0.0 && rm -rf /", null, false],
+    ["v22.21", null, false],
+    ["22.21.0.1", null, false],
+    ["vv22.21.0", null, false],
+    ["prefix v24.0.0", null, false],
+  ] as const)(
+    "parses %s to %j (supported: %s)",
+    (raw, expected, supported) => {
+      expect(parseNodeVersion(raw)).toEqual(
+        expected === null ? null : [...expected],
+      );
+      expect(nodeSupportsEnvProxy(raw)).toBe(supported);
+    },
+  );
+
   it("tolerates a missing leading v and trailing newline", () => {
     expect(nodeSupportsEnvProxy("22.21.0\n")).toBe(true);
     expect(parseNodeVersion("v22.22.1\n")).toEqual([22, 22, 1]);
