@@ -3,6 +3,7 @@ import {
   DBUserMessage,
   DBUserMessageWithModel,
   Thread,
+  ThreadErrorType,
 } from "@terragon/shared";
 import { DB } from "@terragon/shared/db";
 import {
@@ -60,6 +61,7 @@ import {
 } from "@/server-lib/thread-context";
 import { getAutomation } from "@terragon/shared/model/automations";
 import { resolvePermissionModeForDispatch } from "@/server-lib/review/resolve-permission-mode";
+import { notifyMentionSourceOfFailure } from "@/server-lib/mention-notify";
 
 async function checkTaskQueueLimit({ db, userId }: { db: DB; userId: string }) {
   // Task queue limiting is always enabled
@@ -559,6 +561,21 @@ export async function startAgentMessage({
     },
     onError: (error) => {
       console.error("Error starting claude:", error);
+      const errorType: ThreadErrorType =
+        error instanceof ThreadError ? error.type : "unknown-error";
+      // notifyMentionSourceOfFailure swallows its own errors (logs via
+      // "[mention-notify] failed"), but a defensive .catch keeps a future
+      // change to that contract from ever masking this boot-error handling.
+      waitUntil(
+        notifyMentionSourceOfFailure({ db, threadId, errorType }).catch(
+          (notifyError) => {
+            console.error("[mention-notify] failed", {
+              threadId,
+              error: notifyError,
+            });
+          },
+        ),
+      );
     },
   });
 }
