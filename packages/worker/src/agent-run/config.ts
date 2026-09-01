@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
+import { assertAgentUser } from "./spawn-as-user";
 
 /**
  * Execution-plane worker box configuration (ADR-003). Unlike the control plane
@@ -55,6 +56,19 @@ export interface WorkerConfig {
    * key is wrong (that was the original bug); making the operator SAY so is right.
    */
   boxTrust: "owner" | "shared" | "box-key";
+  /**
+   * Dedicated unprivileged unix account the agent child runs as (#108).
+   *
+   * Empty (the DEFAULT) = EXACTLY today's behaviour: no sudo wrapper, no ACLs,
+   * no group-kill shell-out, no observe-mode proxy. Non-empty additionally
+   * REQUIRES an explicit WORKER_WORKDIR_ROOT (see the loader) — the default
+   * root is os.tmpdir(), which on macOS is a 0700 dir owned by the worker's own
+   * uid and untraversable by any other, so every run would die at clone.
+   *
+   * macOS-only mechanism; nothing here is platform-gated at config level so the
+   * package still typechecks and tests on any platform.
+   */
+  agentUser: string;
   /** Root under which each run gets an isolated clone directory. */
   workdirRoot: string;
   /** thread-status poll interval, ms (5-10s; runs are minutes-long — ADR-003). */
@@ -170,7 +184,23 @@ export function loadWorkerConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): WorkerConfig {
   const pollIntervalMs = Number(env.WORKER_POLL_INTERVAL_MS ?? "7000");
+  // #108: validate the agent-uid opt-in HERE, not in a separate boot assert —
+  // worker.ts calls loadWorkerConfig at boot AND the workflow calls it per run,
+  // so a misconfigured box can neither start nor execute.
+  const agentUser = env.WORKER_AGENT_USER?.trim() || "";
+  if (agentUser) {
+    assertAgentUser(agentUser);
+    if (!env.WORKER_WORKDIR_ROOT?.trim()) {
+      throw new Error(
+        "WORKER_AGENT_USER is set but WORKER_WORKDIR_ROOT is not: the default " +
+          "workdir root is os.tmpdir(), which on macOS is mode 0700 and owned by " +
+          "the worker's own uid — the agent uid cannot traverse it and every run " +
+          "would die at clone. Set WORKER_WORKDIR_ROOT (e.g. /usr/local/automata/runs).",
+      );
+    }
+  }
   return {
+    agentUser,
     nodeBin: env.WORKER_NODE_BIN?.trim() || process.execPath,
     daemonDist: env.WORKER_DAEMON_DIST?.trim() || defaultDaemonDist(),
     claudeBinDir: resolveClaudeBinDir(env.CLAUDE_BIN),

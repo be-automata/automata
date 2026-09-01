@@ -14,6 +14,39 @@ describe("loadWorkerConfig", () => {
     expect(cfg.workdirRoot).toMatch(/automata-worker-runs$/);
     expect(cfg.botLogin).toBe("automata-ai-bot[bot]");
     expect(cfg.runNamespaceRoot).toBe("/tmp/automata-agent-run");
+    expect(cfg.agentUser).toBe(""); // #108 default-off
+  });
+
+  describe("agentUser (#108) — the uid drop is OFF unless explicitly configured", () => {
+    it("defaults to empty: an unconfigured box keeps today's behaviour exactly", () => {
+      expect(loadWorkerConfig({}).agentUser).toBe("");
+    });
+
+    it("honours WORKER_AGENT_USER when WORKER_WORKDIR_ROOT is also explicit", () => {
+      const cfg = loadWorkerConfig({
+        WORKER_AGENT_USER: "  _automata-agent  ",
+        WORKER_WORKDIR_ROOT: "/usr/local/automata/runs",
+      });
+      expect(cfg.agentUser).toBe("_automata-agent");
+      expect(cfg.workdirRoot).toBe("/usr/local/automata/runs");
+    });
+
+    it("throws when WORKER_AGENT_USER is set without WORKER_WORKDIR_ROOT", () => {
+      // The default root is os.tmpdir(): 0700, owned by the worker's own uid,
+      // untraversable by the agent uid — every run would die at clone.
+      expect(() =>
+        loadWorkerConfig({ WORKER_AGENT_USER: "_automata-agent" }),
+      ).toThrow(/WORKER_AGENT_USER.*WORKER_WORKDIR_ROOT/s);
+    });
+
+    it("rejects a malformed WORKER_AGENT_USER at load time", () => {
+      expect(() =>
+        loadWorkerConfig({
+          WORKER_AGENT_USER: "-u",
+          WORKER_WORKDIR_ROOT: "/usr/local/automata/runs",
+        }),
+      ).toThrow(/WORKER_AGENT_USER/);
+    });
   });
 
   it("honours WORKER_RUN_NAMESPACE_ROOT override", () => {

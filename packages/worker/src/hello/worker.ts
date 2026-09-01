@@ -1,7 +1,10 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs";
+import { promisify } from "node:util";
 import { hatchet } from "../hatchet-client";
 import { assertAuthEnabledFromEnv } from "../agent-run/assert-auth";
 import { loadWorkerConfig } from "../agent-run/config";
+import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
 import {
   bootTimeSlotReclaim,
@@ -13,6 +16,8 @@ import {
   workerRunDir,
 } from "../agent-run/run-namespace";
 import { workflows } from "../registry";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Claim this worker process's namespaced run dir and reap orphans left by DEAD
@@ -55,6 +60,29 @@ async function main() {
   } catch (err) {
     console.error(
       "[worker-boot] FATAL: auth-enabled probe failed — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
+
+  // #108 A5: agent-uid mode leans on node's built-in env-proxy support for the
+  // agent CLI child. Node 20 has none, and a box on it would turn every fenced
+  // run into a silent 90s stall with zero output rather than an error. Probe the
+  // configured node ONCE at boot and refuse to start below the floor.
+  try {
+    const cfg = loadWorkerConfig();
+    if (cfg.agentUser) {
+      await assertNodeBinSupportsEnvProxy({
+        nodeBin: cfg.nodeBin,
+        exec: (file, args) => execFileAsync(file, args),
+      });
+      console.log(
+        `[worker-boot] agent-uid mode: ${cfg.agentUser}; node env-proxy floor OK`,
+      );
+    }
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: agent-uid configuration is unusable — refusing to start",
       err,
     );
     process.exit(1);
