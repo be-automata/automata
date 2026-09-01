@@ -12,6 +12,30 @@ and ships it on
 mappers in `packages/sandbox/src/egress.ts`. **No policy on the repo ⇒ every
 provider's create path is unchanged** (rollback = clear the columns).
 
+> ### ⚠️ KNOWN GAP: the system-host set breaks OAuth runs under an enforcing policy
+>
+> The four system hosts above are enough for a run that authenticates with an
+> **API key**. They are NOT enough for a run that authenticates with a delivered
+> **OAuth/subscription credential** (`WORKER_BOX_TRUST=owner`, and every
+> in-sandbox run that receives the user's own credential).
+>
+> Anthropic's published requirements
+> (<https://code.claude.com/docs/en/network-config#network-access-requirements>)
+> list `platform.claude.com` as required for "OAuth token exchange, refresh,
+> revocation — both Console and claude.ai sign-ins require it", plus `claude.ai`
+> for account authentication. Neither is in the merged set, so under an
+> enforcing policy the agent's token refresh is denied by the proxy.
+>
+> The symptom is NOT a clear auth error: the CLI reports an OAuth failure with
+> no API call made, which reads as a dead credential rather than a blocked host.
+> That is the same misleading signature recorded for `CLAUDE_CODE_SIMPLE` in the
+> pilot's `worker-box.env`.
+>
+> Found while implementing #108; deliberately not fixed there because the merge
+> happens control-plane-side and changing it alters every existing enforcing
+> policy. Until it is fixed, treat "enforcing policy + owner-trust box" as an
+> unsupported combination.
+
 ## Docker — internal network + proxy sidecar
 
 Per sandbox with a policy, `docker-provider.ts`:
