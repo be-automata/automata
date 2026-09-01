@@ -18,6 +18,11 @@ import {
   runSocketPath,
   workerRunDir,
 } from "./run-namespace";
+import { redactSecrets } from "./redact";
+import {
+  buildKillInvocation,
+  buildSpawnInvocation,
+} from "./spawn-as-user";
 import { verifyGhAuth } from "./verify-gh-auth";
 import type { WorkerConfig } from "./config";
 import type { AgentRunInput, PulledDaemonMessage } from "./types";
@@ -41,6 +46,15 @@ import type { AgentRunInput, PulledDaemonMessage } from "./types";
  */
 export class DaemonProcess {
   private child: ChildProcess | null = null;
+  /**
+   * The process GROUP to signal at teardown. In default mode this is
+   * `child.pid` (spawn is `detached`, so the child leads its own group). In
+   * agent-uid mode it is the value the sudo wrapper wrote for itself — see
+   * spawn-as-user.ts for why a pre-sudo pid is not usable.
+   */
+  private pgid: number | null = null;
+  /** Bounded, redacted tail of the child's stderr, for start() diagnostics. */
+  private stderrTail = "";
   private ghConfigDir: string | null = null;
   private env: NodeJS.ProcessEnv | null = null;
   private readonly runDir: string;
@@ -81,7 +95,11 @@ export class DaemonProcess {
      * and get the real /bin/chmod. Keeping this last preserves every existing
      * call site unchanged.
      */
-    private readonly deps: { aceExec?: AceExec } = {},
+    private readonly deps: {
+      aceExec?: AceExec;
+      spawnFn?: typeof spawn;
+      platform?: NodeJS.Platform;
+    } = {},
   ) {
     const workerId = getProcessWorkerId();
     this.runDir = workerRunDir(config.runNamespaceRoot, workerId);
@@ -132,6 +150,12 @@ export class DaemonProcess {
       credentialEnv: this.credentials?.env ?? {},
       egressProxyUrl: this.egressProxyUrl,
       broker: this.broker,
+      agentUser: this.config.agentUser,
+      // Inside the workdir, so it inherits the run's ACE. Provisioning created
+      // it in the same `if (agentUser)` branch that applied that ACE.
+      runTmpDir: this.config.agentUser
+        ? path.join(this.workdir, "tmp")
+        : null,
     });
     return this.env;
   }
@@ -184,46 +208,106 @@ export class DaemonProcess {
         dir: this.config.runNamespaceRoot,
         users: [this.config.agentUser],
         exec: this.deps.aceExec,
+        platform: this.deps.platform,
       });
       await applyInheritableAces({
         dir: this.runDir,
         users: [this.config.agentUser, os.userInfo().username],
         exec: this.deps.aceExec,
+        platform: this.deps.platform,
       });
     }
 
     const env = this.ensureEnv();
 
-    this.child = spawn(
-      this.config.nodeBin,
-      [
+    // #108: with agentUser empty this returns the command UNCHANGED and an empty
+    // env — byte-for-byte today's spawn.
+    const invocation = buildSpawnInvocation({
+      agentUser: this.config.agentUser,
+      file: this.config.nodeBin,
+      args: [
         this.config.daemonDist,
         "--url",
         this.input.daemonCallbackUrl,
         "--socket-path",
         this.socketPath,
       ],
-      {
-        cwd: this.workdir,
-        env,
-        detached: true, // own process group — see class doc
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    // Daemon stdout/stderr is agent output; it flows to www via events. We do not
+      pidFilePath: this.pidFilePath,
+    });
+
+    this.child = (this.deps.spawnFn ?? spawn)(invocation.file, invocation.args, {
+      cwd: this.workdir,
+      // sudo -E forwards THIS env (spawn's `env` REPLACES the child's), not the
+      // operator's ambient one — buildDaemonEnv already whitelisted it.
+      env: { ...env, ...invocation.env },
+      detached: true, // own process group — see class doc
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    // Daemon stdout is agent output; it flows to www via events. We do not
     // forward or store it here (H2: keep prompt/agent content off the worker box).
     this.child.stdout?.resume();
+    // stderr is kept as a BOUNDED, REDACTED tail only, and only to explain a
+    // failed start. Without it a missing SETENV in sudoers ("sorry, you are not
+    // allowed to preserve the environment") surfaces as a bare 15s socket
+    // timeout naming nothing.
+    this.child.stderr?.on("data", (chunk: Buffer) => {
+      this.stderrTail = redactSecrets(
+        (this.stderrTail + chunk.toString()).slice(-STDERR_TAIL_BYTES),
+      );
+    });
     this.child.stderr?.resume();
 
-    if (this.child.pid != null) {
-      try {
-        fs.writeFileSync(this.pidFilePath, String(this.child.pid));
-      } catch {
-        // best-effort — reclaim just won't fire if we can't persist the pid
-      }
-    }
+    this.pgid = await this.resolvePgid();
 
     await this.waitForSocket();
+  }
+
+  /**
+   * Determine the process group to signal at teardown, and make sure the
+   * pidfile holds it (boot-reclaim reads that file).
+   *
+   * Default mode: `child.pid` IS the group leader (detached spawn); the worker
+   * writes the pidfile, exactly as before.
+   *
+   * Agent-uid mode: the sudo wrapper wrote its own `$$` there before exec'ing,
+   * because sudo may fork a monitor that setsid()s and setpgid()s the command
+   * into a group the pre-sudo pid names neither of. We WAIT for that value
+   * rather than overwrite it.
+   */
+  private async resolvePgid(): Promise<number | null> {
+    if (!this.config.agentUser) {
+      const pid = this.child?.pid ?? null;
+      if (pid != null) {
+        try {
+          fs.writeFileSync(this.pidFilePath, String(pid));
+        } catch {
+          // best-effort — reclaim just won't fire if we can't persist the pid
+        }
+      }
+      return pid;
+    }
+    const deadline = Date.now() + WRAPPER_PIDFILE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (this.child?.exitCode != null) {
+        break; // the spawn already failed; waitForSocket reports why
+      }
+      try {
+        const raw = fs.readFileSync(this.pidFilePath, "utf8").trim();
+        const pid = Number(raw);
+        if (Number.isInteger(pid) && pid > 0) {
+          return pid;
+        }
+      } catch {
+        // not written yet
+      }
+      await delay(50);
+    }
+    // No pgid means teardown cannot reap the group. Surface it rather than
+    // leaking a live agent silently.
+    throw new Error(
+      `daemon wrapper never recorded its process group in ${this.pidFilePath}` +
+        (this.stderrTail ? `: ${this.stderrTail.trim()}` : ""),
+    );
   }
 
   /**
@@ -243,15 +327,19 @@ export class DaemonProcess {
     return dataStr.length; // byte count for step logging (not the content — H2)
   }
 
-  /** The spawned daemon's pid (undefined before start / after teardown). */
+  /**
+   * The daemon's process-GROUP pid (undefined before start / after teardown).
+   * In default mode this is the spawned child's own pid.
+   */
   get pid(): number | undefined {
-    return this.child?.pid;
+    return this.pgid ?? this.child?.pid;
   }
 
   /** SIGKILL the daemon's process group. Best-effort and idempotent. */
   teardown(): void {
-    const pid = this.child?.pid;
+    const pid = this.pgid ?? this.child?.pid ?? null;
     this.child = null;
+    this.pgid = null;
     // Clear this run's own pid + socket file first so a later reclaim doesn't target
     // a recycled pid and the next same-threadId run binds clean.
     try {
@@ -274,6 +362,25 @@ export class DaemonProcess {
     }
     this.env = null;
     if (pid == null) {
+      return;
+    }
+    const killInvocation = buildKillInvocation({
+      agentUser: this.config.agentUser,
+      pgid: pid,
+    });
+    if (killInvocation) {
+      // Cross-uid: process.kill(-pid) from the worker's uid is EPERM. Shell out
+      // as the agent account so the kernel's own kill(2) check permits it.
+      // Fire-and-forget — teardown() is sync and best-effort by contract.
+      try {
+        (this.deps.spawnFn ?? spawn)(
+          killInvocation.file,
+          killInvocation.args,
+          { stdio: "ignore" },
+        ).unref();
+      } catch {
+        // already gone
+      }
       return;
     }
     try {
@@ -308,7 +415,8 @@ export class DaemonProcess {
     while (Date.now() < deadline) {
       if (this.child?.exitCode != null) {
         throw new Error(
-          `daemon exited before its socket was ready (code ${this.child.exitCode})`,
+          `daemon exited before its socket was ready (code ${this.child.exitCode})` +
+            (this.stderrTail ? `: ${this.stderrTail.trim()}` : ""),
         );
       }
       try {
@@ -418,6 +526,12 @@ export function writeDaemonMessage(
     });
   });
 }
+
+/** Cap on the retained stderr tail (bytes). Diagnostics only, never content. */
+const STDERR_TAIL_BYTES = 4096;
+
+/** How long the sudo wrapper gets to record its own pgid. */
+const WRAPPER_PIDFILE_TIMEOUT_MS = 2_000;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
