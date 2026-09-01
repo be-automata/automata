@@ -6,6 +6,7 @@ import { createServer as createTcpServer, type AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertEgressProxyReachable,
   matchEgress,
   startEgressProxy,
   type EgressDecisionEvent,
@@ -288,6 +289,7 @@ describe("startEgressProxy (real loopback servers)", () => {
         destinationPort: upstreamPort,
         action: "allow",
         policyLevel: "ip_port",
+        mode: "enforce",
       },
     ]);
   });
@@ -303,6 +305,7 @@ describe("startEgressProxy (real loopback servers)", () => {
         destinationPort: 80,
         action: "deny",
         policyLevel: "domain",
+        mode: "enforce",
       },
     ]);
   });
@@ -338,6 +341,7 @@ describe("startEgressProxy (real loopback servers)", () => {
         destinationPort: tcpPort,
         action: "allow",
         policyLevel: "ip_port",
+        mode: "enforce",
       },
     ]);
   });
@@ -426,6 +430,7 @@ describe("startEgressProxy (real loopback servers)", () => {
         destinationPort: 443,
         action: "deny",
         policyLevel: "none",
+        mode: "enforce",
       },
     ]);
   });
@@ -442,6 +447,7 @@ describe("startEgressProxy (real loopback servers)", () => {
         destinationPort: null,
         action: "deny",
         policyLevel: "domain",
+        mode: "enforce",
       },
     ]);
   });
@@ -457,6 +463,7 @@ describe("startEgressProxy (real loopback servers)", () => {
       destinationPort: 80,
       action: "deny",
       policyLevel: "domain",
+      mode: "enforce",
     });
   });
 
@@ -475,6 +482,115 @@ describe("startEgressProxy (real loopback servers)", () => {
         onEvent: undefined as any,
       }),
     ).rejects.toThrow(/onEvent callback is required/);
+  });
+
+  describe("#108 observe mode — allow-all AND audited", () => {
+    it("defaults to enforce: an existing policy still denies exactly as before", async () => {
+      const { p, events } = await boot(domainPolicy(["api.github.com"]));
+      expect(p.mode).toBe("enforce");
+      const res = await viaProxy(p.port, "http://example.com/x");
+      expect(res.status).toBe(403);
+      expect(events.at(-1)).toMatchObject({ action: "deny", mode: "enforce" });
+    });
+
+    it("observe allows a host the allowlist would deny, and proxies it for real", async () => {
+      const upstreamPort = await startUpstreamHttp();
+      const events: EgressDecisionEvent[] = [];
+      proxy = await startEgressProxy({
+        policy: domainPolicy(["api.github.com"]), // would deny 127.0.0.1:port
+        mode: "observe",
+        onEvent: (e) => events.push(e),
+      });
+      const res = await viaProxy(
+        proxy.port,
+        `http://127.0.0.1:${upstreamPort}/ok`,
+      );
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("UPSTREAM:GET:/ok");
+    });
+
+    it("observe still fires onEvent for EVERY decision, marked mode:observe", async () => {
+      const events: EgressDecisionEvent[] = [];
+      proxy = await startEgressProxy({
+        policy: { level: "none", allowlist: [] },
+        mode: "observe",
+        onEvent: (e) => events.push(e),
+      });
+      // Unreachable upstream is fine — the DECISION is what must be audited.
+      await viaProxy(proxy.port, "http://denied.example.com/x").catch(() => {});
+      expect(events).toContainEqual({
+        destinationHost: "denied.example.com",
+        destinationPort: 80,
+        action: "allow",
+        policyLevel: "none",
+        mode: "observe",
+      });
+    });
+
+    it("observe counts distinct hosts for the step log", async () => {
+      proxy = await startEgressProxy({
+        policy: { level: "none", allowlist: [] },
+        mode: "observe",
+        onEvent: () => {},
+      });
+      await viaProxy(proxy.port, "http://a.example.com/1").catch(() => {});
+      await viaProxy(proxy.port, "http://a.example.com/2").catch(() => {});
+      await viaProxy(proxy.port, "http://b.example.com/1").catch(() => {});
+      expect(proxy.observedHosts().get("a.example.com")).toBe(2);
+      expect(proxy.observedHosts().get("b.example.com")).toBe(1);
+    });
+
+    it("observe still fails closed on an unparseable target", async () => {
+      const events: EgressDecisionEvent[] = [];
+      proxy = await startEgressProxy({
+        policy: { level: "none", allowlist: [] },
+        mode: "observe",
+        onEvent: (e) => events.push(e),
+      });
+      // Non-absolute-form: the proxy cannot know where this was meant to go, so
+      // observe must NOT synthesise a connection to it.
+      const res = await viaProxy(proxy.port, "/relative");
+      expect(res.status).toBe(403);
+      expect(events.at(-1)).toMatchObject({
+        destinationHost: "unparseable",
+        action: "deny",
+        mode: "observe",
+      });
+    });
+  });
+
+  describe("#108 A2 — proxy health check", () => {
+    it("resolves against a live proxy without producing an audit event", async () => {
+      const events: EgressDecisionEvent[] = [];
+      proxy = await startEgressProxy({
+        policy: domainPolicy([]),
+        onEvent: (e) => events.push(e),
+      });
+      await expect(
+        assertEgressProxyReachable({ url: proxy.url }),
+      ).resolves.toBeUndefined();
+      expect(events).toEqual([]);
+      expect(proxy.observedHosts().size).toBe(0);
+    });
+
+    it("throws, naming the url, when nothing is listening", async () => {
+      // Port 9 (discard) is closed on loopback here — a dead proxy.
+      await expect(
+        assertEgressProxyReachable({ url: "http://127.0.0.1:9", timeoutMs: 500 }),
+      ).rejects.toThrow(/egress proxy health check failed at http:\/\/127\.0\.0\.1:9/);
+    });
+
+    it("throws after close(), which is the state that would hang the run", async () => {
+      const p = await startEgressProxy({
+        policy: domainPolicy([]),
+        onEvent: () => {},
+      });
+      const url = p.url;
+      await p.close();
+      await expect(
+        assertEgressProxyReachable({ url, timeoutMs: 500 }),
+      ).rejects.toThrow(/refusing to start the daemon/);
+    });
   });
 
   it("a throwing onEvent never breaks enforcement (allow still proxies)", async () => {

@@ -54,15 +54,55 @@ export type EgressDecisionEvent = {
   destinationPort: number | null;
   action: "allow" | "deny";
   policyLevel: "none" | "ip_port" | "domain";
+  /**
+   * WHICH POSTURE PRODUCED THIS DECISION (#108). Without it the audit trail
+   * would claim "enforced" about traffic that was merely carried: an observe
+   * run allows everything, so an `action:"allow"` row from it means only "this
+   * happened", never "the policy permitted this". Every consumer that reads
+   * egress_events as evidence of enforcement must filter on `mode:"enforce"`.
+   */
+  mode: EgressProxyMode;
 };
+
+/**
+ * "enforce" (the default) — today's behaviour: matchEgress decides, denies are
+ * denied.
+ *
+ * "observe" — every destination is ALLOWED, and every decision is still POSTED.
+ * This is the agent-uid default for a repo with no policy. Under the PF anchor
+ * the agent has NO direct route to 80/443, so a proxy must exist on every run
+ * or the agent CLI's own api.anthropic.com call dies; but a box that has no
+ * policy must not silently acquire a deny-all fence either.
+ *
+ * Allow-all WITHOUT audit was rejected outright: this proxy is loopback-only
+ * with no client auth, the anchor passes lo0 unconditionally, and the agent is
+ * HANDED the proxy URL — that combination is an unaudited open relay egressing
+ * as the operator's uid. Auditing it is what makes it defensible, and it is
+ * also the only way to earn a tighter default: one trivial `claude -p` run on
+ * the pilot box reached api.anthropic.com, mcp-proxy.anthropic.com,
+ * docs.mcp.cloudflare.com, stitch.googleapis.com, registry.npmjs.org and two
+ * telemetry hosts, so the legitimate set cannot be enumerated from the repo.
+ */
+export type EgressProxyMode = "enforce" | "observe";
 
 export type EgressProxy = {
   /** `http://127.0.0.1:<port>` — what daemon-env sets HTTP(S)_PROXY to. */
   url: string;
   port: number;
+  /** The posture this proxy is running under. */
+  mode: EgressProxyMode;
+  /** Distinct destination hosts seen, with a decision count each (step logging). */
+  observedHosts: () => Map<string, number>;
   /** Stop listening and sever live tunnels; resolves when closed. */
   close: () => Promise<void>;
 };
+
+/**
+ * Liveness path (#108 A2). A plain, NON-absolute-form GET here answers 200 and
+ * is NOT audited — it is the worker probing its own listener, not run traffic.
+ * Every other non-absolute-form request still fails closed with 403.
+ */
+export const EGRESS_HEALTH_PATH = "/__automata/egress-health";
 
 export type StartEgressProxyOptions = {
   policy: EgressPolicyShape;
@@ -72,6 +112,8 @@ export type StartEgressProxyOptions = {
    * plumbing can never break enforcement.
    */
   onEvent: (event: EgressDecisionEvent) => void;
+  /** See {@link EgressProxyMode}. Defaults to "enforce" — today's behaviour. */
+  mode?: EgressProxyMode;
 };
 
 const LEVELS = new Set(["none", "ip_port", "domain"]);
@@ -187,6 +229,7 @@ export async function startEgressProxy(
   opts: StartEgressProxyOptions,
 ): Promise<EgressProxy> {
   const { policy, onEvent } = opts;
+  const mode: EgressProxyMode = opts.mode ?? "enforce";
   // Fail loudly at construction rather than serve a collapsed fence (the
   // git-broker rule): a run dispatched WITH a policy must never proceed with a
   // proxy that cannot decide.
@@ -209,14 +252,29 @@ export async function startEgressProxy(
   // matches against the compiled form.
   const compiled = compileEgressPolicy(policy);
 
+  const observed = new Map<string, number>();
+
   function decide(host: string, port: number | null): boolean {
-    const allowed = matchEgress(compiled, host, port);
+    // Observe allows everything — but it is still a DECISION, and it is still
+    // audited, carrying the mode marker so nothing downstream can mistake it
+    // for enforcement.
+    // Fail closed on an unparseable target in EVERY mode. Observe must never
+    // synthesise a connection to a destination it could not parse, and the
+    // audit row must say what actually happened: denied.
+    const allowed =
+      host === UNPARSEABLE
+        ? false
+        : mode === "observe"
+          ? true
+          : matchEgress(compiled, host, port);
+    observed.set(host, (observed.get(host) ?? 0) + 1);
     try {
       onEvent({
         destinationHost: host,
         destinationPort: port,
         action: allowed ? "allow" : "deny",
         policyLevel: policy.level,
+        mode,
       });
     } catch {
       // Audit plumbing must never break (or leak into) enforcement.
@@ -226,6 +284,16 @@ export async function startEgressProxy(
 
   /** Absolute-form plain-HTTP proxying (`GET http://host/...`). */
   function handleRequest(req: IncomingMessage, res: ServerResponse): void {
+    // #108 A2: the worker's own liveness probe. Answered before any decision, so
+    // it neither reaches an origin nor pollutes the audit trail. A dead proxy is
+    // a SILENT 90s hang for the agent CLI (verified on the pilot box: zero
+    // output, zero stderr), which the agent physically cannot report — so the
+    // worker must confirm the listener itself before spawning the daemon.
+    if (req.url === EGRESS_HEALTH_PATH) {
+      req.resume();
+      res.writeHead(200, { "content-type": "text/plain" }).end("ok");
+      return;
+    }
     let target: URL;
     try {
       if (!req.url || !/^http:\/\//i.test(req.url)) {
@@ -333,6 +401,8 @@ export async function startEgressProxy(
   return {
     url: `http://127.0.0.1:${port}`,
     port,
+    mode,
+    observedHosts: () => new Map(observed),
     close: () =>
       new Promise<void>((resolve, reject) => {
         for (const socket of sockets) {
@@ -341,4 +411,54 @@ export async function startEgressProxy(
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };
+}
+
+/**
+ * Confirm the per-run proxy is actually answering on loopback (#108 A2).
+ *
+ * WHY THIS IS BLOCKING. Verified on the pilot box: pointed at a proxy that does
+ * not answer, the agent CLI produced ZERO output and ZERO stderr for 90 seconds
+ * before being killed — the #107 "run produced no output" class exactly, and a
+ * failure mode the agent cannot report because it never gets that far. The
+ * worker owns the listener, so the worker checks it, before daemon.start().
+ */
+export async function assertEgressProxyReachable(opts: {
+  url: string;
+  timeoutMs?: number;
+}): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 2_000;
+  const target = new URL(EGRESS_HEALTH_PATH, opts.url);
+  const status = await new Promise<number>((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: target.hostname,
+        port: Number(target.port),
+        method: "GET",
+        path: EGRESS_HEALTH_PATH,
+        timeout: timeoutMs,
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode ?? 0));
+      },
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error(`no answer within ${timeoutMs}ms`));
+    });
+    req.on("error", (err) => reject(err));
+    req.end();
+  }).catch((err: Error) => {
+    throw new Error(
+      `egress proxy health check failed at ${opts.url}: ${err.message} — ` +
+        `refusing to start the daemon (a proxy the agent cannot reach makes the ` +
+        `run hang silently with no output)`,
+    );
+  });
+  if (status !== 200) {
+    throw new Error(
+      `egress proxy health check failed at ${opts.url}: status ${status} — ` +
+        `refusing to start the daemon`,
+    );
+  }
 }

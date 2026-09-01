@@ -78,8 +78,12 @@ vi.mock("./www-client", () => ({
   postEgressEvents: (...args: unknown[]) => postEgressEvents(...args),
 }));
 
+const assertEgressProxyReachable = vi.fn(async (..._args: unknown[]) => {});
+
 vi.mock("./egress-proxy", () => ({
   startEgressProxy: (...args: unknown[]) => startEgressProxy(...args),
+  assertEgressProxyReachable: (...args: unknown[]) =>
+    assertEgressProxyReachable(...args),
 }));
 
 vi.mock("./agent-credentials", () => ({
@@ -139,6 +143,8 @@ beforeEach(() => {
   materialiseAgentCredentials.mockReset();
   postEgressEvents.mockClear();
   startEgressProxy.mockReset();
+  assertEgressProxyReachable.mockReset();
+  assertEgressProxyReachable.mockResolvedValue(undefined);
   // Default: both brokers start fine (the flag is on by default).
   startGitBroker.mockReset();
   startGhBroker.mockReset();
@@ -273,7 +279,35 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
     expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
   });
 
-  it("policy absent: the proxy is never started (zero behavior change)", async () => {
+  it("A2: a proxy that fails its health check blocks the run before the daemon starts", async () => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    const credentialCleanup = vi.fn(async () => {});
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: credentialCleanup,
+    });
+    const close = vi.fn(async () => {});
+    startEgressProxy.mockResolvedValue({
+      url: "http://127.0.0.1:41234",
+      port: 41234,
+      mode: "enforce",
+      observedHosts: () => new Map(),
+      close,
+    });
+    const dead = new Error("egress proxy health check failed");
+    assertEgressProxyReachable.mockRejectedValueOnce(dead);
+
+    // Without this the run would hang for 90s producing NO output and no
+    // stderr — the agent cannot report a proxy it cannot reach.
+    await expect(runFn(EGRESS_INPUT, ctx())).rejects.toBe(dead);
+    expect(daemonCtorArgs).toHaveLength(0);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(credentialCleanup).toHaveBeenCalledTimes(1);
+    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
+  });
+
+  it("#108: no policy AND no agentUser: the proxy is never started (default-off proof)", async () => {
     process.env.WORKER_BOX_TRUST = "shared";
     materialiseAgentCredentials.mockResolvedValue({
       delivered: false,
@@ -287,6 +321,77 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
 
     expect(startEgressProxy).not.toHaveBeenCalled();
     expect(postEgressEvents).not.toHaveBeenCalled();
+    expect(assertEgressProxyReachable).not.toHaveBeenCalled();
+  });
+
+  it("#108: agentUser set with no policy starts an OBSERVE proxy that still audits", async () => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_AGENT_USER = "_automata-agent";
+    process.env.WORKER_WORKDIR_ROOT = "/usr/local/automata/runs";
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+    });
+    const close = vi.fn(async () => {});
+    startEgressProxy.mockResolvedValue({
+      url: "http://127.0.0.1:41234",
+      port: 41234,
+      mode: "observe",
+      observedHosts: () => new Map(),
+      close,
+    });
+
+    try {
+      await expect(runFn(INPUT, ctx())).resolves.toMatchObject({
+        outcome: "nothing-to-run",
+      });
+      const [opts] = startEgressProxy.mock.calls[0] as [
+        Record<string, unknown>,
+      ];
+      expect(opts.mode).toBe("observe");
+      expect(opts.policy).toEqual({ level: "none", allowlist: [] });
+      // A1: allow-all is only defensible BECAUSE it is audited. onEvent must be
+      // the real batcher, never a no-op.
+      expect(typeof opts.onEvent).toBe("function");
+      expect(assertEgressProxyReachable).toHaveBeenCalledWith({
+        url: "http://127.0.0.1:41234",
+      });
+      // and the daemon child is pointed at it
+      expect(daemonCtorArgs[0]![4]).toBe("http://127.0.0.1:41234");
+    } finally {
+      delete process.env.WORKER_AGENT_USER;
+      delete process.env.WORKER_WORKDIR_ROOT;
+    }
+  });
+
+  it("#108: a repo policy stays ENFORCE even in agent-uid mode", async () => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_AGENT_USER = "_automata-agent";
+    process.env.WORKER_WORKDIR_ROOT = "/usr/local/automata/runs";
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+    });
+    startEgressProxy.mockResolvedValue({
+      url: "http://127.0.0.1:41234",
+      port: 41234,
+      mode: "enforce",
+      observedHosts: () => new Map(),
+      close: vi.fn(async () => {}),
+    });
+    try {
+      await runFn(EGRESS_INPUT, ctx());
+      const [opts] = startEgressProxy.mock.calls[0] as [
+        Record<string, unknown>,
+      ];
+      expect(opts.mode).toBe("enforce");
+      expect(opts.policy).toEqual(EGRESS_INPUT.egressPolicy);
+    } finally {
+      delete process.env.WORKER_AGENT_USER;
+      delete process.env.WORKER_WORKDIR_ROOT;
+    }
   });
 });
 
@@ -413,6 +518,7 @@ describe("createEgressEventBatcher — audit batch add/flush/close", () => {
     destinationPort: 443,
     action: "allow" as const,
     policyLevel: "domain" as const,
+    mode: "enforce" as const,
   });
 
   beforeEach(() => {
@@ -440,6 +546,7 @@ describe("createEgressEventBatcher — audit batch add/flush/close", () => {
       destinationPort: 443,
       action: "allow",
       policyLevel: "domain",
+      mode: "enforce",
       source: "worker",
     });
   });
@@ -475,6 +582,7 @@ describe("createEgressEventBatcher — audit batch add/flush/close", () => {
       destinationPort: null,
       action: "deny",
       policyLevel: "domain",
+      mode: "enforce" as const,
     });
     await batcher.close();
     const [, events] = postEgressEvents.mock.calls[0] as [
