@@ -311,6 +311,101 @@ setInterval(() => {}, 1000);
     expect(daemon.pid).toBe(9001);
   });
 
+  it("degraded teardown: a LATE wrapper pidfile is still group-killed as the agent (F3)", async () => {
+    // resolvePgid()'s bounded wait can expire before a slow sudo/PAM hop lands
+    // the pidfile. teardown must take one last look rather than signal the
+    // pre-sudo pid, which is sudo's own (root) process and unkillable by the
+    // agent account.
+    const { root, workdir, input } = fixture();
+    const recorded: Recorded[] = [];
+    const killed: number[] = [];
+    const config = loadWorkerConfig({
+      WORKER_RUN_NAMESPACE_ROOT: root,
+      WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+      WORKER_AGENT_USER: "_automata-agent",
+      WORKER_WORKDIR_ROOT: workdir,
+    });
+    const pidFile = runPidPath(root, getProcessWorkerId(), input.threadId);
+    fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+    const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      aceExec: async () => {},
+      // No wrapperPgid: the wrapper "has not written it yet".
+      spawnFn: fakeSpawn({ recorded }),
+      platform: "darwin",
+      killFn: (p) => void killed.push(p),
+    });
+    daemons.push(daemon);
+    await expect(daemon.start()).rejects.toThrow(
+      /never recorded its process group/,
+    );
+    // …and only NOW does the wrapper's value land.
+    fs.writeFileSync(pidFile, "7777");
+
+    daemon.teardown();
+    const kill = recorded.find((r) => r.args.includes("/bin/kill"));
+    expect(kill?.file).toBe("/usr/bin/sudo");
+    expect(kill?.args).toEqual([
+      "-n",
+      "-u",
+      "_automata-agent",
+      "--",
+      "/bin/kill",
+      "-9",
+      "--",
+      "-7777",
+    ]);
+    // Never the pre-sudo pid.
+    expect(killed).toEqual([]);
+  });
+
+  it("degraded teardown: NO pgid ever ⇒ loud log + kill sudo's own group, not a doomed sudo kill (F3)", async () => {
+    const { root, workdir, input } = fixture();
+    const recorded: Recorded[] = [];
+    const killed: number[] = [];
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => void errors.push(args.join(" "));
+    try {
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_AGENT_USER: "_automata-agent",
+        WORKER_WORKDIR_ROOT: workdir,
+      });
+      fs.mkdirSync(
+        path.dirname(runPidPath(root, getProcessWorkerId(), input.threadId)),
+        { recursive: true },
+      );
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        {
+          aceExec: async () => {},
+          spawnFn: fakeSpawn({ recorded }),
+          platform: "darwin",
+          killFn: (p) => void killed.push(p),
+        },
+      );
+      daemons.push(daemon);
+      await expect(daemon.start()).rejects.toThrow(
+        /never recorded its process group/,
+      );
+      daemon.teardown();
+    } finally {
+      console.error = originalError;
+    }
+    // A `sudo -u agent kill` aimed at sudo's own root process is a guaranteed
+    // EPERM no-op — so we do not issue one. We kill sudo's group ourselves.
+    expect(recorded.some((r) => r.args.includes("/bin/kill"))).toBe(false);
+    expect(killed).toEqual([-9001]);
+    expect(errors.join("\n")).toMatch(/never recorded a process group/);
+    expect(errors.join("\n")).toMatch(/may survive this teardown/);
+  });
+
   it("applies NO ACE itself even in agent-uid mode — boot owns that (F2)", async () => {
     // The gh-broker socket is bound in this same dir BEFORE start() runs, and
     // macOS applies ACE inheritance at CREATE time, so a per-run grant here

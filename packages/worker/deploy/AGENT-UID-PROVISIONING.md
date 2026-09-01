@@ -30,6 +30,14 @@ Does **not** buy:
   prevented only by where the ACEs are placed (the per-run workdir, and this
   worker's own `runs/<workerId>/` rendezvous dir — never the shared root),
   never by ownership.
+- **Protection from a forged process group.** The worker group-kills the pgid
+  the sudo wrapper wrote into `runs/<workerId>/<threadId>.pid`, a file the
+  agent uid can write. A prompt-injected agent could put another run's pgid
+  there and have the worker kill it. This grants the attacker NOTHING new: all
+  runs share one uid, so that agent can already signal any sibling agent
+  process directly with `kill(2)`. It is the same fact as the bullet above —
+  one uid is not a per-run boundary — and authenticating the pidfile would not
+  change it.
 - **A command fence.** See the header of `sudoers.d-automata`. The sudoers rule
   is a uid-drop capability; the grantee already outranks the runas account.
 - **Closure of the daemon's bearer surface.** The agent already receives

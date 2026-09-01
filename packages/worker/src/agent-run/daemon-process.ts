@@ -95,6 +95,8 @@ export class DaemonProcess {
       aceExec?: AceExec;
       spawnFn?: typeof spawn;
       platform?: NodeJS.Platform;
+      /** Injectable so the suite never SIGKILLs a real process group. */
+      killFn?: (pid: number, signal: NodeJS.Signals) => void;
     } = {},
   ) {
     const workerId = getProcessWorkerId();
@@ -310,9 +312,41 @@ export class DaemonProcess {
     return this.pgid ?? this.child?.pid;
   }
 
-  /** SIGKILL the daemon's process group. Best-effort and idempotent. */
+  /**
+   * SIGKILL the daemon's process group. Best-effort and idempotent.
+   *
+   * DEGRADED PATH (#108 F3). In agent-uid mode `child.pid` is the pre-sudo
+   * pid — sudo's own process, running as root, in a DIFFERENT group from the
+   * daemon (the monitor setsid()s and setpgid()s the command). Signalling it
+   * as the agent account is a guaranteed EPERM no-op, so a run whose wrapper
+   * pgid was never resolved would leak a LIVE agent in complete silence. So:
+   * take one last look at the wrapper's pidfile before removing it; if it is
+   * still absent, say so LOUDLY and fall back to killing sudo's own group from
+   * the worker's uid (which the kernel does permit, since sudo's real uid is
+   * ours) rather than issuing a kill that cannot land.
+   */
   teardown(): void {
-    const pid = this.pgid ?? this.child?.pid ?? null;
+    let pid = this.pgid;
+    let degraded = false;
+    // `child == null` ⇒ nothing was ever spawned, or teardown already ran.
+    // teardown() is idempotent by contract, so the alarm below must not fire
+    // on the second call.
+    if (pid == null && this.child != null && this.config.agentUser) {
+      pid = this.readWrapperPgid();
+      if (pid == null) {
+        degraded = true;
+        console.error(
+          `[agent-run] daemon teardown for ${this.input.threadId}: the sudo ` +
+            `wrapper never recorded a process group in ${this.pidFilePath}. ` +
+            `Killing sudo's own group as the worker instead; an agent process ` +
+            `under ${this.config.agentUser} may survive this teardown and must ` +
+            `be reaped by boot-reclaim or by hand.`,
+        );
+      }
+    }
+    if (pid == null) {
+      pid = this.child?.pid ?? null;
+    }
     this.child = null;
     this.pgid = null;
     // Clear this run's own pid + socket file first so a later reclaim doesn't target
@@ -339,10 +373,14 @@ export class DaemonProcess {
     if (pid == null) {
       return;
     }
-    const killInvocation = buildKillInvocation({
-      agentUser: this.config.agentUser,
-      pgid: pid,
-    });
+    // In the degraded path the target is sudo's group, not the agent's: it is
+    // OURS to signal and NOT the agent account's, so the sudo hop is skipped.
+    const killInvocation = degraded
+      ? null
+      : buildKillInvocation({
+          agentUser: this.config.agentUser,
+          pgid: pid,
+        });
     if (killInvocation) {
       // Cross-uid: process.kill(-pid) from the worker's uid is EPERM. Shell out
       // as the agent account so the kernel's own kill(2) check permits it.
@@ -359,9 +397,24 @@ export class DaemonProcess {
       return;
     }
     try {
-      process.kill(-pid, "SIGKILL"); // negative pid → the whole process group
+      // negative pid → the whole process group
+      (this.deps.killFn ?? process.kill.bind(process))(-pid, "SIGKILL");
     } catch {
       // already gone
+    }
+  }
+
+  /**
+   * Last-chance read of the wrapper's pidfile. The wrapper writes `$$` before
+   * `exec`, so a value can land AFTER resolvePgid()'s bounded wait gave up —
+   * e.g. a slow sudo/PAM hop. Returns null when there is nothing usable.
+   */
+  private readWrapperPgid(): number | null {
+    try {
+      const pid = Number(fs.readFileSync(this.pidFilePath, "utf8").trim());
+      return Number.isInteger(pid) && pid > 0 ? pid : null;
+    } catch {
+      return null;
     }
   }
 
