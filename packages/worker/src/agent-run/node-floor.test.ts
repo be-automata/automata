@@ -40,15 +40,12 @@ describe("nodeSupportsEnvProxy", () => {
     ["22.21.0.1", null, false],
     ["vv22.21.0", null, false],
     ["prefix v24.0.0", null, false],
-  ] as const)(
-    "parses %s to %j (supported: %s)",
-    (raw, expected, supported) => {
-      expect(parseNodeVersion(raw)).toEqual(
-        expected === null ? null : [...expected],
-      );
-      expect(nodeSupportsEnvProxy(raw)).toBe(supported);
-    },
-  );
+  ] as const)("parses %s to %j (supported: %s)", (raw, expected, supported) => {
+    expect(parseNodeVersion(raw)).toEqual(
+      expected === null ? null : [...expected],
+    );
+    expect(nodeSupportsEnvProxy(raw)).toBe(supported);
+  });
 
   it("tolerates a missing leading v and trailing newline", () => {
     expect(nodeSupportsEnvProxy("22.21.0\n")).toBe(true);
@@ -72,7 +69,9 @@ describe("assertNodeBinSupportsEnvProxy", () => {
         nodeBin: "/opt/node20/bin/node",
         exec: async () => ({ stdout: "v20.19.0\n" }),
       }),
-    ).rejects.toThrow(/\/opt\/node20\/bin\/node reports v20\.19\.0.*22\.21\.0/s);
+    ).rejects.toThrow(
+      /\/opt\/node20\/bin\/node reports v20\.19\.0.*22\.21\.0/s,
+    );
   });
 
   it("throws when the probe itself fails rather than assuming support", async () => {

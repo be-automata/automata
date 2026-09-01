@@ -143,7 +143,14 @@ describe("assertAgentUser", () => {
   });
 
   it("rejects whitespace, semicolons, slashes and uppercase", () => {
-    for (const bad of ["a b", "a;b", "/usr/bin/x", "Agent", "", "a".repeat(40)]) {
+    for (const bad of [
+      "a b",
+      "a;b",
+      "/usr/bin/x",
+      "Agent",
+      "",
+      "a".repeat(40),
+    ]) {
       expect(() => assertAgentUser(bad), bad).toThrow(/WORKER_AGENT_USER/);
     }
   });
@@ -157,8 +164,8 @@ describe("assertAgentUser", () => {
         pidFilePath: "/p",
       }),
     ).toThrow(/WORKER_AGENT_USER/);
-    expect(() => buildKillInvocation({ agentUser: "root;rm", pgid: 1 })).toThrow(
-      /WORKER_AGENT_USER/,
-    );
+    expect(() =>
+      buildKillInvocation({ agentUser: "root;rm", pgid: 1 }),
+    ).toThrow(/WORKER_AGENT_USER/);
   });
 });

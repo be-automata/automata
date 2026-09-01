@@ -576,8 +576,13 @@ describe("startEgressProxy (real loopback servers)", () => {
     it("throws, naming the url, when nothing is listening", async () => {
       // Port 9 (discard) is closed on loopback here — a dead proxy.
       await expect(
-        assertEgressProxyReachable({ url: "http://127.0.0.1:9", timeoutMs: 500 }),
-      ).rejects.toThrow(/egress proxy health check failed at http:\/\/127\.0\.0\.1:9/);
+        assertEgressProxyReachable({
+          url: "http://127.0.0.1:9",
+          timeoutMs: 500,
+        }),
+      ).rejects.toThrow(
+        /egress proxy health check failed at http:\/\/127\.0\.0\.1:9/,
+      );
     });
 
     it("throws after close(), which is the state that would hang the run", async () => {

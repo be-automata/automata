@@ -1,4 +1,8 @@
-import { type ChildProcess, type spawn, type SpawnOptions } from "node:child_process";
+import {
+  type ChildProcess,
+  type spawn,
+  type SpawnOptions,
+} from "node:child_process";
 import EventEmitter from "node:events";
 import net from "node:net";
 import fs from "node:fs";
@@ -8,11 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { DaemonProcess, writeDaemonMessage } from "./daemon-process";
 import { loadWorkerConfig } from "./config";
-import {
-  getProcessWorkerId,
-  runPidPath,
-  runSocketPath,
-} from "./run-namespace";
+import { getProcessWorkerId, runPidPath, runSocketPath } from "./run-namespace";
 import type { AgentRunInput } from "./types";
 
 /**
@@ -304,7 +304,10 @@ setInterval(() => {}, 1000);
     expect(
       Number(
         fs
-          .readFileSync(runPidPath(root, getProcessWorkerId(), input.threadId), "utf8")
+          .readFileSync(
+            runPidPath(root, getProcessWorkerId(), input.threadId),
+            "utf8",
+          )
           .trim(),
       ),
     ).toBe(9001);

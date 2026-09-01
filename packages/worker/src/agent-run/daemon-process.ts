@@ -15,10 +15,7 @@ import {
   workerRunDir,
 } from "./run-namespace";
 import { redactSecrets } from "./redact";
-import {
-  buildKillInvocation,
-  buildSpawnInvocation,
-} from "./spawn-as-user";
+import { buildKillInvocation, buildSpawnInvocation } from "./spawn-as-user";
 import { verifyGhAuth } from "./verify-gh-auth";
 import type { WorkerConfig } from "./config";
 import type { AgentRunInput, PulledDaemonMessage } from "./types";
@@ -151,9 +148,7 @@ export class DaemonProcess {
       agentUser: this.config.agentUser,
       // Inside the workdir, so it inherits the run's ACE. Provisioning created
       // it in the same `if (agentUser)` branch that applied that ACE.
-      runTmpDir: this.config.agentUser
-        ? path.join(this.workdir, "tmp")
-        : null,
+      runTmpDir: this.config.agentUser ? path.join(this.workdir, "tmp") : null,
     });
     return this.env;
   }
@@ -212,14 +207,18 @@ export class DaemonProcess {
       pidFilePath: this.pidFilePath,
     });
 
-    this.child = (this.deps.spawnFn ?? spawn)(invocation.file, invocation.args, {
-      cwd: this.workdir,
-      // sudo -E forwards THIS env (spawn's `env` REPLACES the child's), not the
-      // operator's ambient one — buildDaemonEnv already whitelisted it.
-      env: { ...env, ...invocation.env },
-      detached: true, // own process group — see class doc
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    this.child = (this.deps.spawnFn ?? spawn)(
+      invocation.file,
+      invocation.args,
+      {
+        cwd: this.workdir,
+        // sudo -E forwards THIS env (spawn's `env` REPLACES the child's), not the
+        // operator's ambient one — buildDaemonEnv already whitelisted it.
+        env: { ...env, ...invocation.env },
+        detached: true, // own process group — see class doc
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
     // Daemon stdout is agent output; it flows to www via events. We do not
     // forward or store it here (H2: keep prompt/agent content off the worker box).
     this.child.stdout?.resume();
@@ -386,11 +385,9 @@ export class DaemonProcess {
       // as the agent account so the kernel's own kill(2) check permits it.
       // Fire-and-forget — teardown() is sync and best-effort by contract.
       try {
-        (this.deps.spawnFn ?? spawn)(
-          killInvocation.file,
-          killInvocation.args,
-          { stdio: "ignore" },
-        ).unref();
+        (this.deps.spawnFn ?? spawn)(killInvocation.file, killInvocation.args, {
+          stdio: "ignore",
+        }).unref();
       } catch {
         // already gone
       }

@@ -146,7 +146,9 @@ export function buildKillInvocation(opts: {
   }
   assertAgentUser(agentUser);
   if (!Number.isInteger(pgid) || pgid <= 0) {
-    throw new Error(`buildKillInvocation: pgid must be a positive integer, got ${pgid}`);
+    throw new Error(
+      `buildKillInvocation: pgid must be a positive integer, got ${pgid}`,
+    );
   }
   return {
     file: SUDO_BIN,

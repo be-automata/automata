@@ -5,11 +5,7 @@ import path from "node:path";
 import { inspect, promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { INHERITABLE_ACE_RIGHTS } from "./agent-uid-fs";
-import {
-  ensureBaseDiffable,
-  gitExec,
-  provisionWorkdir,
-} from "./provision";
+import { ensureBaseDiffable, gitExec, provisionWorkdir } from "./provision";
 
 const execFileAsync = promisify(execFile);
 
@@ -194,9 +190,7 @@ describe("provisionWorkdir — agent-uid ACEs", () => {
     });
     expect(r.calls).toEqual(["git:clone"]);
     // and no run tmp dir is created either
-    await expect(
-      fs.stat(path.join(root, "thr_1", "tmp")),
-    ).rejects.toThrow();
+    await expect(fs.stat(path.join(root, "thr_1", "tmp"))).rejects.toThrow();
   });
 
   it.skipIf(process.platform !== "darwin")(
@@ -219,9 +213,9 @@ describe("provisionWorkdir — agent-uid ACEs", () => {
         "git:clone",
       ]);
       // The run's own TMPDIR exists and inherits the grant.
-      expect((await fs.stat(path.join(root, "thr_1", "tmp"))).isDirectory()).toBe(
-        true,
-      );
+      expect(
+        (await fs.stat(path.join(root, "thr_1", "tmp"))).isDirectory(),
+      ).toBe(true);
     },
   );
 });
