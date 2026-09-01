@@ -1,0 +1,58 @@
+# /etc/sudoers.d/automata — Automata #108 privilege DROP delegation.
+#
+# READ THIS BEFORE REVIEWING THE RULES: this is a UID-DROP CAPABILITY, NOT a
+# command fence, and it cannot be made one. sudoers(5): "If no command line
+# arguments are specified, the user may run the command with any arguments they
+# choose." A bare command path therefore permits `sh -c ...`, and SETENV (which
+# `sudo -E` requires) additionally hands the caller NODE_OPTIONS. Anyone who can
+# use this rule has arbitrary code execution as the runas account. That is fine,
+# and it is fine for reasons of DIRECTION, not scoping:
+#
+#   - the grantee is the worker's own login — the operator — who is already
+#     strictly MORE privileged than the runas account. Nothing is escalated.
+#   - the runas target is an unprivileged role account (/usr/bin/false shell,
+#     /var/empty home) with NO sudoers entry of its own, so nothing flows back.
+#   - the untrusted party is the AGENT, which runs AS that account and therefore
+#     cannot use this rule at all: this file is 0440 root:wheel.
+#   - the kill rule runs /bin/kill AS the role account, so the kernel's own
+#     kill(2) check bounds it to that uid's processes. It cannot signal root or
+#     the operator. This is why the runas is the role account and never (root):
+#     `sudo -u root /bin/kill -9 -- -1` would be a box-killer.
+#
+# Runas MUST be the role account. Never (ALL) — SETENV is IMPLIED when the
+# command is ALL, which would grant it far more widely than intended.
+#
+# INSTALL (validate on a COPY first — a syntax error in any sudoers.d file
+# breaks sudo for the whole box):
+#   cp sudoers.d-automata /tmp/automata.sudoers
+#   sed -i '' "s/^automata /$(id -un) /" /tmp/automata.sudoers
+#   sudo visudo -cf /tmp/automata.sudoers          # MUST say "parsed OK"
+#   sudo install -o root -g wheel -m 0440 /tmp/automata.sudoers /etc/sudoers.d/automata
+#   sudo grep -q includedir /etc/sudoers || echo "MISSING @includedir /etc/sudoers.d"
+
+Runas_Alias AGENT = _automata-agent
+
+Cmnd_Alias AUTOMATA_DAEMON = /bin/sh
+Cmnd_Alias AUTOMATA_KILL   = /bin/kill
+
+# Belt and braces for the process model. use_pty became the DEFAULT in sudo
+# 1.9.14: with it on, sudo's monitor setsid()s into a NEW session and then
+# setpgid()s the command into its own group, so a pgid the worker recorded
+# before sudo ran reaches neither process and every run leaks a live agent at
+# teardown. log_input/log_output imply the same monitor. Turning them off also
+# biases sudo toward exec()ing in place rather than forking at all.
+#
+# NOTE: `!use_pty` inside a `Defaults!<Cmnd_Alias>` line has no worked example in
+# sudoers(5) — treat it as inferred-valid and confirm with the G3 gate in
+# AGENT-UID-PROVISIONING.md. Correctness does NOT depend on it: the spawned
+# wrapper records its own `$$` as the pgid, which is the group leader under both
+# sudo shapes (see packages/worker/src/agent-run/spawn-as-user.ts).
+Defaults!AUTOMATA_DAEMON !use_pty, !log_output, !log_input, !pam_session, !pam_setcred
+Defaults!AUTOMATA_KILL   !use_pty, !log_output, !log_input
+
+# Replace `automata` with the worker box's actual login (`id -un`).
+# SETENV is MANDATORY on the daemon rule: without it `sudo -E` is refused with
+# "sorry, you are not allowed to preserve the environment", every spawn exits
+# non-zero before the daemon runs, and the symptom is a bare 15s socket timeout.
+automata ALL=(AGENT) NOPASSWD: SETENV: AUTOMATA_DAEMON
+automata ALL=(AGENT) NOPASSWD: AUTOMATA_KILL

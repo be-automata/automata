@@ -463,14 +463,34 @@ bypasses the proxy entirely. The backstop is the PF anchor template at
 an https bypass — loopback excepted (so proxied traffic still flows). Load it
 as root on the pilot box:
 
+**The anchor fences a DEDICATED role account, never the worker's own uid** (#108).
+Rendering `__AGENT_UID__` to uid 501 blocks the operator AND the worker — the
+control-plane poll, the git broker's upstream fetch and the credential pull all
+die at once. Provisioning, the preflight/verify scripts, the PF wrapper conf and
+the boot LaunchDaemon are in
+`packages/worker/deploy/AGENT-UID-PROVISIONING.md`; that document is the
+procedure, and the summary below is not a substitute for it.
+
 ```bash
-# edit __AGENT_UID__ first (id -u <worker-user>)
-sudo pfctl -a automata-egress -f deploy/egress-pf.conf
-sudo pfctl -e            # if PF is not already enabled
-sudo pfctl -a automata-egress -sr   # verify
+sudo cp deploy/egress-pf.conf /etc/pf.anchors/automata-egress
+sudo sed -i '' "s/__AGENT_UID__/$(id -u _automata-agent)/" /etc/pf.anchors/automata-egress
+sudo install -o root -g wheel -m 0644   packages/worker/deploy/automata-pf.conf /etc/automata-pf.conf
+sudo packages/worker/deploy/pf-preflight.sh _automata-agent   # validates, parses, then loads with -E
+sudo packages/worker/deploy/pf-verify.sh
 ```
 
-Rollback: `sudo pfctl -a automata-egress -F rules`.
+Never edit `/etc/pf.conf` (Apple rewrites it on OS updates) and never enable PF
+with `-e` (any system component calling `pfctl -X <token>` would silently disable
+PF and this anchor).
+
+Rollback, scoped: `sudo pfctl -a automata-egress -F rules`. Nuclear:
+`sudo pfctl -d`. Neither can lock anyone out of the local console — PF filters
+network paths only.
+
+**Load order:** the daemon bundle carrying the proxy-aware control-plane callback
+must be live on the box BEFORE the anchor is loaded, or the daemon's own
+`POST /api/daemon-event` is dropped at the packet level and runs produce no
+output at all.
 
 **This is manual host configuration — NOT CI-verified and NOT applied by any
 code in this repo.** macOS PF needs root and is host-global; the unprivileged
