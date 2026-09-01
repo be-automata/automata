@@ -123,6 +123,29 @@ sudo chown "$(id -un)":staff /usr/local/automata/runs && sudo chmod 700 /usr/loc
 sudo -u _automata-agent /usr/local/automata/bin/node --version
 ```
 
+### Verifying the tree — and one trap that looks like a broken install
+
+```bash
+# node: must print >=22.21.0. Runs as-is.
+sudo -u _automata-agent /usr/local/automata/bin/node --version
+
+# claude: needs BOTH a traversable cwd and a writable HOME, or it prints only
+# `error: An unknown error occurred (Unexpected)` with no further detail.
+sudo -u _automata-agent /bin/sh -c \
+  'cd /tmp && H=$(mktemp -d) && HOME=$H TMPDIR=$H /usr/local/automata/bin/claude --version; rm -rf "$H"'
+
+# the agent must NOT be able to write to bin/ — a writable node or claude would
+# defeat the entire delegation (see sudoers.d-automata's header).
+sudo -u _automata-agent /bin/sh -c 'touch /usr/local/automata/bin/x'   # must be Permission denied
+```
+
+**The cwd trap:** if the invoking shell's cwd is a directory the agent uid
+cannot traverse — e.g. anywhere under the operator's home, which is exactly
+where you will be standing when you run these — the agent inherits it, `getcwd`
+fails, and `claude` reports a bare "unknown error". It is not the install. Real
+runs are unaffected because the worker spawns with `cwd` set to the per-run
+workdir, which carries the ACE; but every manual verification must `cd` first.
+
 The node at `/usr/local/automata/bin/node` must be **≥22.21.0 (22.x) or
 ≥24.0.0**. The worker probes it at boot and refuses to start below that floor:
 `NODE_USE_ENV_PROXY` does not exist on node 20, and a box below the floor turns
