@@ -1,6 +1,8 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { WORKER_LOCK_FILENAME, workerRunDir } from "./run-namespace";
+import { buildKillInvocation, type Invocation } from "./spawn-as-user";
 
 /**
  * Boot-time reclaim of orphaned daemons (enterprise-hardening Phase 0.2b, BINDING
@@ -29,9 +31,25 @@ export interface ReclaimOpts {
   log?: (message: string) => void;
   /** Injectable for tests (default process.kill). */
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
+  /**
+   * #108: the unix account daemons run as. Empty (the default) = today's exact
+   * behaviour, `process.kill(-pgid)`. Non-empty ⇒ the group kill shells out as
+   * that account, because process.kill across a uid boundary is EPERM.
+   */
+  agentUser?: string;
+  /** Injectable for tests (default: spawn the invocation and unref it). */
+  spawnKill?: (invocation: Invocation) => void;
 }
 
-/** True iff `pid` is confirmed dead (kill(pid,0) throws ESRCH). */
+/**
+ * True iff `pid` is confirmed dead (kill(pid,0) throws ESRCH).
+ *
+ * This deliberately stays on `process.kill` even in agent-uid mode: it targets
+ * the sibling **worker.lock** pid, which is another worker process and so
+ * always the OPERATOR's own uid, never the agent's. The EPERM →"treat as ALIVE"
+ * rule below already fails safe if that ever stops being true. Do not "fix"
+ * this into a sudo call — it would shell out once per sibling dir at every boot.
+ */
 function isPidDead(
   pid: number,
   kill: (pid: number, signal: NodeJS.Signals | 0) => void,
@@ -59,6 +77,14 @@ function readPid(file: string): number | null {
 export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
   const { root, selfWorkerId } = opts;
   const kill = opts.kill ?? ((pid, signal) => process.kill(pid, signal));
+  const spawnKill =
+    opts.spawnKill ??
+    ((invocation: Invocation) => {
+      // `sudo -n` never prompts, so a missing NOPASSWD exits immediately rather
+      // than hanging boot. Orphans then survive — exactly today's pre-#108
+      // failure mode — and boot is not blocked.
+      spawn(invocation.file, invocation.args, { stdio: "ignore" }).unref();
+    });
   const log = opts.log ?? (() => {});
 
   let entries: fs.Dirent[];
@@ -97,10 +123,23 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
         continue; // malformed pid file — tolerate
       }
       try {
-        kill(-daemonPid, "SIGKILL"); // negative pid → the whole process group
-        log(
-          `reclaim: SIGKILLed orphan daemon group ${daemonPid} (${entry.name})`,
-        );
+        // Inside the try: reclaim never throws (boot must not be blocked by a
+        // stray file), and the builders validate their inputs.
+        const killInvocation = buildKillInvocation({
+          agentUser: opts.agentUser ?? "",
+          pgid: daemonPid,
+        });
+        if (killInvocation) {
+          spawnKill(killInvocation);
+          log(
+            `reclaim: sudo-SIGKILLed orphan daemon group ${daemonPid} (${entry.name})`,
+          );
+        } else {
+          kill(-daemonPid, "SIGKILL"); // negative pid → the whole process group
+          log(
+            `reclaim: SIGKILLed orphan daemon group ${daemonPid} (${entry.name})`,
+          );
+        }
       } catch {
         // already gone
       }

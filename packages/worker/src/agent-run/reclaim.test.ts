@@ -181,3 +181,104 @@ describe("reclaimDeadWorkerRuns", () => {
     ).not.toThrow();
   });
 });
+
+/**
+ * #108: across a uid boundary process.kill(-pgid) is EPERM, so the group kill
+ * shells out as the agent account. The liveness probe deliberately does NOT —
+ * it targets the sibling worker.lock pid, always the operator's own uid.
+ */
+describe("reclaimDeadWorkerRuns — agent-uid mode", () => {
+  it("agentUser empty: still group-kills with process.kill(-pgid) (unchanged)", () => {
+    const root = tmpRoot();
+    makeWorkerDir(root, "w-dead", { lockPid: "111", daemonPids: [222] });
+    const kill = vi.fn((pid: number) => {
+      if (pid === 111) {
+        const err = new Error("no such process") as NodeJS.ErrnoException;
+        err.code = "ESRCH";
+        throw err;
+      }
+    });
+    const spawnKill = vi.fn();
+    reclaimDeadWorkerRuns({
+      root,
+      selfWorkerId: "w-self",
+      kill,
+      spawnKill,
+    });
+    expect(kill).toHaveBeenCalledWith(-222, "SIGKILL");
+    expect(spawnKill).not.toHaveBeenCalled();
+  });
+
+  it("agentUser set: builds sudo -u <user> /bin/kill -9 -- -<pgid> per orphan pid", () => {
+    const root = tmpRoot();
+    makeWorkerDir(root, "w-dead", { lockPid: "111", daemonPids: [222, 333] });
+    const kill = vi.fn((pid: number) => {
+      if (pid === 111) {
+        const err = new Error("no such process") as NodeJS.ErrnoException;
+        err.code = "ESRCH";
+        throw err;
+      }
+    });
+    const spawnKill = vi.fn();
+    reclaimDeadWorkerRuns({
+      root,
+      selfWorkerId: "w-self",
+      agentUser: "_automata-agent",
+      kill,
+      spawnKill,
+    });
+
+    const targets = spawnKill.mock.calls
+      .map((c) => (c[0] as { args: string[] }).args.at(-1))
+      .sort();
+    expect(targets).toEqual(["-222", "-333"]);
+    for (const [inv] of spawnKill.mock.calls) {
+      expect((inv as { file: string }).file).toBe("/usr/bin/sudo");
+      expect((inv as { args: string[] }).args.slice(0, 3)).toEqual([
+        "-n",
+        "-u",
+        "_automata-agent",
+      ]);
+    }
+    // process.kill is used ONLY for the worker.lock liveness probe.
+    expect(kill.mock.calls).toEqual([[111, 0]]);
+  });
+
+  it("agentUser set: a LIVE sibling is never touched", () => {
+    const root = tmpRoot();
+    makeWorkerDir(root, "w-live", { lockPid: "111", daemonPids: [222] });
+    const spawnKill = vi.fn();
+    reclaimDeadWorkerRuns({
+      root,
+      selfWorkerId: "w-self",
+      agentUser: "_automata-agent",
+      kill: () => {}, // signal delivered → alive
+      spawnKill,
+    });
+    expect(spawnKill).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(root, "w-live"))).toBe(true);
+  });
+
+  it("agentUser set: a malformed pid file is tolerated without throwing", () => {
+    const root = tmpRoot();
+    const dir = makeWorkerDir(root, "w-dead", { lockPid: "111" });
+    fs.writeFileSync(path.join(dir, "thr_bad.pid"), "not-a-pid");
+    const spawnKill = vi.fn();
+    expect(() =>
+      reclaimDeadWorkerRuns({
+        root,
+        selfWorkerId: "w-self",
+        agentUser: "_automata-agent",
+        kill: (pid: number) => {
+          if (pid === 111) {
+            const err = new Error("gone") as NodeJS.ErrnoException;
+            err.code = "ESRCH";
+            throw err;
+          }
+        },
+        spawnKill,
+      }),
+    ).not.toThrow();
+    expect(spawnKill).not.toHaveBeenCalled();
+  });
+});

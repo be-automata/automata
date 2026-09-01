@@ -41,6 +41,8 @@ function claimNamespaceAndReclaim(): void {
   reclaimDeadWorkerRuns({
     root,
     selfWorkerId: workerId,
+    // #108: empty (the default) ⇒ process.kill(-pgid), exactly as before.
+    agentUser: loadWorkerConfig().agentUser,
     log: (message) => console.log(`[worker-boot] ${message}`),
   });
 }
