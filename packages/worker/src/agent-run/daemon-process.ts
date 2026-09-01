@@ -5,6 +5,11 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
+import {
+  applyInheritableAces,
+  applyTraverseAce,
+  type AceExec,
+} from "./agent-uid-fs";
 import { buildDaemonEnv, type BrokerHandoff } from "./daemon-env";
 import { ghBrokerConfigYaml } from "./gh-broker";
 import {
@@ -71,6 +76,12 @@ export class DaemonProcess {
      * isolated gh config dir so the agent's gh dials the gh broker.
      */
     private readonly broker: BrokerHandoff | null = null,
+    /**
+     * Injectable side-effects, for tests only. Production callers pass nothing
+     * and get the real /bin/chmod. Keeping this last preserves every existing
+     * call site unchanged.
+     */
+    private readonly deps: { aceExec?: AceExec } = {},
   ) {
     const workerId = getProcessWorkerId();
     this.runDir = workerRunDir(config.runNamespaceRoot, workerId);
@@ -154,6 +165,32 @@ export class DaemonProcess {
     // here — this method must never touch another run's or worker's resources.
     fs.mkdirSync(this.runDir, { recursive: true });
     this.cleanOwnStaleFiles();
+
+    // #108: TWO grants on this worker's run-namespace dir, because it is a
+    // CROSS-UID RENDEZVOUS in both directions. The agent uid must be able to
+    // BIND the daemon socket and write the wrapper's pidfile here; the worker's
+    // own login must be able to CONNECT to a socket the agent uid created.
+    // Darwin enforces unix-socket permissions (unix(4); XNU unp_connect →
+    // vnode_authorize(KAUTH_VNODE_WRITE_DATA)) and node binds sockets 0755, so
+    // without the second grant writeDaemonMessage() cannot reach the daemon at
+    // all. bind(2)-created sockets DO inherit ACEs (verified on 15.7.3/APFS),
+    // so neither the daemon's bind nor gh-broker.ts needs to change.
+    //
+    // NAMED AND DELIBERATE: this also exposes the UNAUTHENTICATED daemon socket
+    // (daemon/src/runtime.ts) to the agent uid. The agent already holds
+    // DAEMON_TOKEN, so this widens no trust boundary that was closed before.
+    if (this.config.agentUser) {
+      await applyTraverseAce({
+        dir: this.config.runNamespaceRoot,
+        users: [this.config.agentUser],
+        exec: this.deps.aceExec,
+      });
+      await applyInheritableAces({
+        dir: this.runDir,
+        users: [this.config.agentUser, os.userInfo().username],
+        exec: this.deps.aceExec,
+      });
+    }
 
     const env = this.ensureEnv();
 

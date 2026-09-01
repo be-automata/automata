@@ -4,7 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { inspect, promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ensureBaseDiffable, gitExec } from "./provision";
+import { INHERITABLE_ACE_RIGHTS } from "./agent-uid-fs";
+import {
+  ensureBaseDiffable,
+  gitExec,
+  provisionWorkdir,
+} from "./provision";
 
 const execFileAsync = promisify(execFile);
 
@@ -145,4 +150,78 @@ describe("git failures never echo the auth header", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+});
+
+/**
+ * #108: the per-run ACE must be applied BEFORE the clone. macOS applies ACL
+ * inheritance at create time, so anything cloned first would not carry the
+ * grant — this is a correctness constraint, asserted as call ordering.
+ */
+describe("provisionWorkdir — agent-uid ACEs", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-ace-"));
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  function recorder() {
+    const calls: string[] = [];
+    return {
+      calls,
+      aceExec: async (_file: string, args: string[]) => {
+        calls.push(`ace:${args[1]}`);
+      },
+      runGit: async (args: string[]) => {
+        calls.push(`git:${args.find((a) => a === "clone") ?? "other"}`);
+        return { stdout: "", stderr: "" };
+      },
+    };
+  }
+
+  it("touches no ACLs at all when agentUser is empty (default-off proof)", async () => {
+    const r = recorder();
+    await provisionWorkdir({
+      repoFullName: "o/r",
+      branch: "main",
+      installationToken: "ghs_x",
+      workdirRoot: root,
+      runId: "thr_1",
+      aceExec: r.aceExec,
+      runGit: r.runGit,
+    });
+    expect(r.calls).toEqual(["git:clone"]);
+    // and no run tmp dir is created either
+    await expect(
+      fs.stat(path.join(root, "thr_1", "tmp")),
+    ).rejects.toThrow();
+  });
+
+  it.skipIf(process.platform !== "darwin")(
+    "applies the shared-root traverse ACE and the per-run ACE BEFORE the clone",
+    async () => {
+      const r = recorder();
+      await provisionWorkdir({
+        repoFullName: "o/r",
+        branch: "main",
+        installationToken: "ghs_x",
+        workdirRoot: root,
+        runId: "thr_1",
+        agentUser: "_automata-agent",
+        aceExec: r.aceExec,
+        runGit: r.runGit,
+      });
+      expect(r.calls).toEqual([
+        "ace:_automata-agent allow search",
+        `ace:_automata-agent allow ${INHERITABLE_ACE_RIGHTS}`,
+        "git:clone",
+      ]);
+      // The run's own TMPDIR exists and inherits the grant.
+      expect((await fs.stat(path.join(root, "thr_1", "tmp"))).isDirectory()).toBe(
+        true,
+      );
+    },
+  );
 });

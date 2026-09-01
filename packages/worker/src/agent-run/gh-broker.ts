@@ -32,7 +32,12 @@ import { HOP_BY_HOP, REQUEST_OWNED } from "./broker-common";
  * Fencing, per request and in order:
  *   - per-run bearer, timing-safe (`token <bearer>` — gh's scheme — or
  *     `Bearer <bearer>` for hand-rolled curls). Socket file permissions are NOT
- *     a fence: the agent runs as the same uid.
+ *     the fence, in EITHER uid mode. Without WORKER_AGENT_USER the agent runs
+ *     as the same uid as this broker. With it (#108) the agent runs as a
+ *     different uid and Darwin DOES enforce socket permissions (unix(4)) — but
+ *     the run-namespace dir carries an inheritable ACE that deliberately
+ *     re-opens this socket to the agent uid, because `gh` must reach it. The
+ *     per-run bearer is the fence either way.
  *   - Host must be `api.github.com` (uploads.github.com /
  *     objects.githubusercontent.com are out of scope — documented limitation).
  *   - method/path allowlist, v1 = read-only: GET/HEAD any path (reads cannot

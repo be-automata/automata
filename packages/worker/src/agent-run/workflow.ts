@@ -395,6 +395,8 @@ async function runAgentInner(
     installationToken: input.installationToken,
     workdirRoot: config.workdirRoot,
     runId: input.threadId,
+    // #108: empty (the default) ⇒ no ACLs are touched at all.
+    agentUser: config.agentUser,
   });
   step(
     `clone complete: ${input.repoFullName}@${input.branch}` +

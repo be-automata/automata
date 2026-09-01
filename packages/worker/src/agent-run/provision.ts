@@ -2,6 +2,11 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import {
+  applyInheritableAces,
+  applyTraverseAce,
+  type AceExec,
+} from "./agent-uid-fs";
 import { redactSecrets } from "./redact";
 
 const execFileAsync = promisify(execFile);
@@ -61,6 +66,9 @@ export async function provisionWorkdir({
   installationToken,
   workdirRoot,
   runId,
+  agentUser = "",
+  aceExec,
+  runGit = gitExec,
 }: {
   repoFullName: string;
   branch: string;
@@ -74,10 +82,42 @@ export async function provisionWorkdir({
   workdirRoot: string;
   /** Unique per-run directory key — pass threadId, NOT the shared legacy sentinel. */
   runId: string;
+  /**
+   * #108: the unix account the agent child runs as. Empty (the default) = no
+   * ACLs are touched at all — byte-for-byte today's provisioning.
+   */
+  agentUser?: string;
+  /** Injectable ACE runner (tests only). */
+  aceExec?: AceExec;
+  /** Injectable git runner (tests only) — defaults to the real gitExec. */
+  runGit?: typeof gitExec;
 }): Promise<string> {
   const workdir = path.join(workdirRoot, runId);
   await fs.rm(workdir, { recursive: true, force: true });
   await fs.mkdir(workdir, { recursive: true });
+
+  // #108: open THIS run's dir to the agent uid, and the shared root by traverse
+  // ONLY (namei needs search on every component; an inheritable ACE on the root
+  // would expose every OTHER run's credentials to the same uid).
+  //
+  // ORDERING IS A CORRECTNESS CONSTRAINT, not a style choice: macOS applies
+  // inheritance at create time, so anything cloned BEFORE this call would not
+  // carry the grant. It must precede the clone.
+  if (agentUser) {
+    await applyTraverseAce({
+      dir: workdirRoot,
+      users: [agentUser],
+      exec: aceExec,
+    });
+    await applyInheritableAces({
+      dir: workdir,
+      users: [agentUser],
+      exec: aceExec,
+    });
+    // The run's own TMPDIR, inheriting the grant above. The operator's
+    // /var/folders/<...>/T is 0700 and untraversable by the agent uid.
+    await fs.mkdir(path.join(workdir, "tmp"), { recursive: true, mode: 0o700 });
+  }
 
   const authHeader = `AUTHORIZATION: basic ${Buffer.from(
     `x-access-token:${installationToken}`,
@@ -85,7 +125,7 @@ export async function provisionWorkdir({
   const cloneUrl = `https://github.com/${repoFullName}.git`;
 
   // --depth 1 on the target branch: the working checkout the agent reviews at HEAD.
-  await gitExec(
+  await runGit(
     [
       "-c",
       `http.extraHeader=${authHeader}`,

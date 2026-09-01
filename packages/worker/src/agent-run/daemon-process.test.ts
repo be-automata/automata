@@ -4,9 +4,18 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
+import {
+  INHERITABLE_ACE_RIGHTS,
+  TRAVERSE_ACE_RIGHTS,
+} from "./agent-uid-fs";
 import { DaemonProcess, writeDaemonMessage } from "./daemon-process";
 import { loadWorkerConfig } from "./config";
-import { getProcessWorkerId, runPidPath, runSocketPath } from "./run-namespace";
+import {
+  getProcessWorkerId,
+  runPidPath,
+  runSocketPath,
+  workerRunDir,
+} from "./run-namespace";
 import type { AgentRunInput } from "./types";
 
 /**
@@ -219,4 +228,79 @@ setInterval(() => {}, 1000);
     expect(fs.existsSync(expectedSocket)).toBe(false);
     expect(fs.existsSync(expectedPidFile)).toBe(false);
   });
+
+  /**
+   * #108: the run-namespace dir is a cross-uid rendezvous. start() must grant
+   * BOTH the agent account (which binds the daemon socket and writes the
+   * wrapper pidfile) and the worker's own login (which must connect back to a
+   * socket the agent uid created — Darwin enforces unix-socket permissions).
+   */
+  it("applies no ACE at all when agentUser is empty (default-off proof)", async () => {
+    const { root, scriptDir, workdir, input } = fixture();
+    const aceCalls: string[][] = [];
+    const daemon = new DaemonProcess(
+      loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: writeFakeDaemonScript(scriptDir),
+      }),
+      input,
+      workdir,
+      null,
+      null,
+      null,
+      { aceExec: async (_f, a) => void aceCalls.push(a) },
+    );
+    daemons.push(daemon);
+    await daemon.start();
+    expect(aceCalls).toEqual([]);
+  });
+
+  it.skipIf(process.platform !== "darwin")(
+    "grants the agent user AND the worker's own login on the run dir, root traverse-only",
+    async () => {
+      const { root, scriptDir, workdir, input } = fixture();
+      const aceCalls: string[][] = [];
+      const daemon = new DaemonProcess(
+        loadWorkerConfig({
+          WORKER_RUN_NAMESPACE_ROOT: root,
+          WORKER_DAEMON_DIST: writeFakeDaemonScript(scriptDir),
+          WORKER_AGENT_USER: "_automata-agent",
+          WORKER_WORKDIR_ROOT: workdir,
+        }),
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        { aceExec: async (_f, a) => void aceCalls.push(a) },
+      );
+      daemons.push(daemon);
+      await daemon.start();
+
+      const me = os.userInfo().username;
+      expect(aceCalls.map((a) => `${a[1]} @ ${a[2]}`)).toEqual([
+        `_automata-agent allow ${TRAVERSE_ACE_RIGHTS} @ ${root}`,
+        `_automata-agent allow ${INHERITABLE_ACE_RIGHTS} @ ${workerRunDir(root, getProcessWorkerId())}`,
+        `${me} allow ${INHERITABLE_ACE_RIGHTS} @ ${workerRunDir(root, getProcessWorkerId())}`,
+      ]);
+    },
+  );
+
+  function fixture() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-root-"));
+    const scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-script-"));
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-wd-"));
+    tmpDirs.push(root, scriptDir, workdir);
+    const input: AgentRunInput = {
+      threadId: `thr_ace_${Math.random().toString(36).slice(2)}`,
+      threadChatId: "tc_1",
+      repoFullName: "o/r",
+      branch: "main",
+      daemonCallbackUrl: "http://localhost:3999",
+      installationToken: "inst",
+      daemonToken: "daemon",
+      orgId: "org-1",
+    };
+    return { root, scriptDir, workdir, input };
+  }
 });

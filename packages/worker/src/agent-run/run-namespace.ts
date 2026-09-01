@@ -13,6 +13,15 @@ import path from "node:path";
  *
  * Root default is /tmp (like the daemon's own defaultUnixSocketPath) to keep unix
  * socket paths well under the ~104-char sun_path limit.
+ *
+ * CROSS-UID RENDEZVOUS (#108). Under WORKER_AGENT_USER these dirs stop being a
+ * single-uid scratch space: the DAEMON (agent uid) binds `<threadId>.sock` and
+ * writes `<threadId>.pid` here, while the WORKER (operator uid) connects to that
+ * socket and reads that pid, and the agent's `gh` connects to the worker-created
+ * `<threadId>-gh.sock`. Darwin enforces unix-socket permissions, so
+ * DaemonProcess.start() puts an inheritable ACE for BOTH accounts on
+ * `<root>/<workerId>/` and a traverse-only ACE on `<root>` itself. Neither the
+ * daemon's bind nor the gh broker needs to know: bind(2)-created sockets inherit.
  */
 
 export const DEFAULT_RUN_NAMESPACE_ROOT = "/tmp/automata-agent-run";
