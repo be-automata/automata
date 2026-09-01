@@ -46,19 +46,45 @@ export async function insertEgressEvents({
   }>;
 }): Promise<void> {
   if (events.length === 0) return;
-  await db.insert(egressEvents).values(
-    events.map((e) => ({
-      organizationId: e.organizationId ?? null,
-      threadId: e.threadId ?? null,
-      runId: e.runId,
-      destinationHost: e.destinationHost,
-      destinationPort: e.destinationPort ?? null,
-      action: e.action,
-      policyLevel: e.policyLevel ?? null,
-      source: e.source ?? null,
-      mode: e.mode ?? "enforce",
-    })),
-  );
+  const rows = events.map((e) => ({
+    organizationId: e.organizationId ?? null,
+    threadId: e.threadId ?? null,
+    runId: e.runId,
+    destinationHost: e.destinationHost,
+    destinationPort: e.destinationPort ?? null,
+    action: e.action,
+    policyLevel: e.policyLevel ?? null,
+    source: e.source ?? null,
+    mode: e.mode ?? "enforce",
+  }));
+  try {
+    await db.insert(egressEvents).values(rows);
+  } catch (error) {
+    // #108: production schema migration is MANUAL (AGENTS.md) and has no CI
+    // step, so www can reach production before `egress_events.mode` exists.
+    // Without this fallback that window turns every audit POST into a 500 and
+    // we LOSE the decisions — the one outcome an audit trail may not have.
+    // 42703 = undefined_column. Retry once without the marker: the rows land,
+    // and they read back as `enforce` from the column default once it is added,
+    // which is the honest value for a pre-migration www (it cannot yet be
+    // running an observe-mode box). Any other error propagates untouched.
+    if (!isUndefinedColumn(error)) {
+      throw error;
+    }
+    console.warn(
+      "[egress-events] `mode` column missing — inserting without it. " +
+        "The production schema push has not run yet; see AGENTS.md (schema " +
+        "push must PRECEDE the deploy).",
+    );
+    await db
+      .insert(egressEvents)
+      .values(rows.map(({ mode: _mode, ...rest }) => rest));
+  }
+}
+
+/** Postgres 42703 = undefined_column, however the driver surfaces it. */
+function isUndefinedColumn(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === "42703";
 }
 
 /**

@@ -77,6 +77,19 @@ describe("buildSpawnInvocation in agent-uid mode", () => {
     // `$$` survives the exec and is the group leader under BOTH sudo shapes;
     // a pre-sudo child.pid reaches neither when use_pty is on.
     expect(PGID_WRAPPER_SCRIPT).toContain('printf %s "$$"');
+  });
+
+  it("aborts BEFORE exec when the pidfile write fails (no unreapable orphan)", () => {
+    // The whole pgid mechanism rests on this: if printf falls through to exec
+    // on failure, a live agent runs under the agent uid with its process group
+    // recorded NOWHERE — teardown signals sudo's group instead and boot-reclaim
+    // has no pidfile to find. The `||` must sit between the write and the exec.
+    const [write, rest] = PGID_WRAPPER_SCRIPT.split(";");
+    expect(write).toContain("|| exit 97");
+    expect(rest).toContain("exec ");
+    expect(PGID_WRAPPER_SCRIPT.indexOf("|| exit 97")).toBeLessThan(
+      PGID_WRAPPER_SCRIPT.indexOf("exec "),
+    );
     expect(PGID_WRAPPER_SCRIPT).toContain("exec ");
   });
 });

@@ -143,3 +143,69 @@ describe("egress-events (audit sink, org-fenced)", () => {
     ).toHaveLength(0);
   });
 });
+
+/**
+ * #108: production schema migration is manual (AGENTS.md), so www can reach
+ * production before `egress_events.mode` exists. That window must not turn every
+ * audit POST into a 500 — losing decisions is the one thing an audit trail may
+ * not do. These use a stub db so the missing-column path is reachable without
+ * actually dropping a column from the shared test database.
+ */
+describe("insertEgressEvents — pre-migration `mode` column fallback", () => {
+  const event = {
+    organizationId: null,
+    runId: "run_1",
+    destinationHost: "example.com",
+    destinationPort: 443,
+    action: "allow" as const,
+    policyLevel: "none" as const,
+    mode: "observe" as const,
+  };
+
+  function stubDb(failFirstWith?: { code: string }) {
+    const calls: Array<Record<string, unknown>[]> = [];
+    let n = 0;
+    return {
+      calls,
+      db: {
+        insert: () => ({
+          values: async (rows: Record<string, unknown>[]) => {
+            calls.push(rows);
+            n += 1;
+            if (n === 1 && failFirstWith) throw failFirstWith;
+          },
+        }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    };
+  }
+
+  it("retries WITHOUT `mode` when the column does not exist (42703)", async () => {
+    const { db: stub, calls } = stubDb({ code: "42703" });
+    await insertEgressEvents({ db: stub, events: [event] });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]![0]).toHaveProperty("mode", "observe");
+    expect(calls[1]![0]).not.toHaveProperty("mode");
+    // the rest of the row must survive the retry intact
+    expect(calls[1]![0]).toMatchObject({
+      runId: "run_1",
+      destinationHost: "example.com",
+      action: "allow",
+    });
+  });
+
+  it("does NOT swallow any other database error", async () => {
+    const { db: stub, calls } = stubDb({ code: "23505" }); // unique_violation
+    await expect(
+      insertEgressEvents({ db: stub, events: [event] }),
+    ).rejects.toMatchObject({ code: "23505" });
+    expect(calls).toHaveLength(1); // no retry
+  });
+
+  it("sends `mode` on the first attempt and does not retry when it succeeds", async () => {
+    const { db: stub, calls } = stubDb();
+    await insertEgressEvents({ db: stub, events: [event] });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0]).toHaveProperty("mode", "observe");
+  });
+});

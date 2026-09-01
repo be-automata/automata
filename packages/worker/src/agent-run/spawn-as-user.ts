@@ -44,9 +44,19 @@ export const SH_BIN = "/bin/sh";
  * value arrives through the environment (`AUTOMATA_PIDFILE`, `AUTOMATA_NODE`) or
  * as a positional argument (`"$@"`), so no caller-controlled string is ever
  * parsed as shell.
+ *
+ * The `|| exit 97` is load-bearing, not defensive noise. Without it a failed
+ * pidfile write (unwritable path, ACL inheritance that did not land, a full
+ * disk) still falls through to `exec`, and we get the one outcome this whole
+ * mechanism exists to prevent: a live agent under the agent uid whose process
+ * group NOTHING recorded. resolvePgid() would time out, teardown would signal
+ * sudo's pre-wrapper group instead, and boot-reclaim would have no pidfile to
+ * find. Failing before `exec` turns an unreapable orphan into a run that dies
+ * loudly at start(). 97 is arbitrary but distinct from node's own exit codes,
+ * so it is identifiable in a failure reason.
  */
 export const PGID_WRAPPER_SCRIPT =
-  'printf %s "$$" > "$AUTOMATA_PIDFILE"; exec "$AUTOMATA_NODE" "$@"';
+  'printf %s "$$" > "$AUTOMATA_PIDFILE" || exit 97; exec "$AUTOMATA_NODE" "$@"';
 
 /** `$0` for the wrapper shell — cosmetic, but it names the process in `ps`. */
 const WRAPPER_ARGV0 = "automata-daemon";
