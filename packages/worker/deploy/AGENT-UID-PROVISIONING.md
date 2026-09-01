@@ -22,6 +22,9 @@ Buys:
 
 - The agent's uid ≠ the operator's, so the operator's login Keychain, `~/.ssh`
   and `~/.config/gh` are unreachable by DAC, and PF can fence the agent alone.
+  **This holds only once the account is removed from the `staff` group** — see
+  §1. `sysadminctl` puts it there by default and macOS home dirs are
+  group-readable by `staff`.
 - Nothing flows agent uid → operator uid.
 
 Does **not** buy:
@@ -72,6 +75,32 @@ sudo -n -u _automata-agent true 2>&1 | grep -q . && echo "OK: no sudo rights"
 
 `sysadminctl` writes its progress to **stderr and is chatty even on success** —
 confirm from `id`, never from its output.
+
+### ⚠️ Two things `sysadminctl` gets wrong, both MANDATORY to fix
+
+```bash
+sudo dseditgroup -o edit -d _automata-agent -t user staff   # 1
+sudo dseditgroup -o create -i "$AGENT_UID" _automata-agent  # 2
+```
+
+**1. It silently adds the account to `staff`, which defeats the boundary.**
+macOS home directories are `drwxr-x---  <user>  staff`, so a `staff` member can
+traverse and list the operator's home — and `~/.ssh`, `~/.claude` and
+`~/Library/Keychains` are commonly `drwxr-xr-x` inside it. Secrets themselves are
+0600 so their CONTENTS stay unreadable, but directory listings, `known_hosts`,
+ssh `config` and any world-readable file are exposed. Verified on macOS 15.7.3.
+Until this is run, the "unreachable by DAC" claim below is **false**.
+
+**2. It assigns the GID but creates no group record**, so `id` prints a bare
+number and files land with a nameless group.
+
+Verify BOTH, and prove the boundary rather than assuming it:
+
+```bash
+id -Gn _automata-agent | tr ' ' '\n' | grep -qx staff && echo "STILL IN STAFF — stop" || echo "OK"
+dscl . -read /Groups/_automata-agent PrimaryGroupID     # must print the gid
+sudo -u _automata-agent ls /Users/$(id -un) 2>&1 | head -1   # must be Permission denied
+```
 
 It must have no sudoers entry of its own, and it must never be uid 501. Nothing
 downstream hardcodes the number: the worker resolves the account by NAME

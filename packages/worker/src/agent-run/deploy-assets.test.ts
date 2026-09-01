@@ -142,4 +142,20 @@ describe("packages/worker/deploy — PF wrapper, scripts and LaunchDaemon", () =
     expect(doc).toMatch(/does \*\*not\*\* buy|Does \*\*not\*\* buy/i);
     expect(doc).toMatch(/Per-run isolation/);
   });
+
+  it("the provisioning doc fixes what sysadminctl gets wrong", () => {
+    // Both were found by running the real command on a real box, and both are
+    // silent: sysadminctl reports success either way. Without the `staff`
+    // removal the uid split is COSMETIC — macOS home dirs are drwxr-x--- <user>
+    // staff, so a staff member traverses the operator's home and lists ~/.ssh,
+    // ~/.claude and ~/Library/Keychains. If this assertion ever fails because
+    // someone trimmed the doc, the boundary silently stops existing.
+    const doc = deploy("AGENT-UID-PROVISIONING.md");
+    expect(doc).toMatch(/dseditgroup -o edit -d _automata-agent -t user staff/);
+    expect(doc).toMatch(/dseditgroup -o create/);
+    expect(doc).toMatch(/STILL IN STAFF/);
+    // the uid must be chosen on the box: 300 collides with Apple's _aonsensed
+    expect(doc).toMatch(/_aonsensed/);
+    expect(doc).not.toMatch(/-UID 300\b/);
+  });
 });
