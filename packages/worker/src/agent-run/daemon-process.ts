@@ -5,11 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
-import {
-  applyInheritableAces,
-  applyTraverseAce,
-  type AceExec,
-} from "./agent-uid-fs";
+import type { AceExec } from "./agent-uid-fs";
 import { buildDaemonEnv, type BrokerHandoff } from "./daemon-env";
 import { ghBrokerConfigYaml } from "./gh-broker";
 import {
@@ -190,33 +186,12 @@ export class DaemonProcess {
     fs.mkdirSync(this.runDir, { recursive: true });
     this.cleanOwnStaleFiles();
 
-    // #108: TWO grants on this worker's run-namespace dir, because it is a
-    // CROSS-UID RENDEZVOUS in both directions. The agent uid must be able to
-    // BIND the daemon socket and write the wrapper's pidfile here; the worker's
-    // own login must be able to CONNECT to a socket the agent uid created.
-    // Darwin enforces unix-socket permissions (unix(4); XNU unp_connect →
-    // vnode_authorize(KAUTH_VNODE_WRITE_DATA)) and node binds sockets 0755, so
-    // without the second grant writeDaemonMessage() cannot reach the daemon at
-    // all. bind(2)-created sockets DO inherit ACEs (verified on 15.7.3/APFS),
-    // so neither the daemon's bind nor gh-broker.ts needs to change.
-    //
-    // NAMED AND DELIBERATE: this also exposes the UNAUTHENTICATED daemon socket
-    // (daemon/src/runtime.ts) to the agent uid. The agent already holds
-    // DAEMON_TOKEN, so this widens no trust boundary that was closed before.
-    if (this.config.agentUser) {
-      await applyTraverseAce({
-        dir: this.config.runNamespaceRoot,
-        users: [this.config.agentUser],
-        exec: this.deps.aceExec,
-        platform: this.deps.platform,
-      });
-      await applyInheritableAces({
-        dir: this.runDir,
-        users: [this.config.agentUser, os.userInfo().username],
-        exec: this.deps.aceExec,
-        platform: this.deps.platform,
-      });
-    }
+    // #108 F2: the cross-uid ACEs are NOT applied here. macOS applies ACE
+    // inheritance at CREATE time, and workflow.ts binds the gh-broker socket in
+    // this same dir BEFORE start() runs — a grant added here would never reach
+    // it, and the agent's `gh` would fail to connect (Darwin enforces
+    // unix-socket permissions). They are applied ONCE at worker boot, on the
+    // empty dir, by claimRunNamespace() (run-namespace.ts).
 
     const env = this.ensureEnv();
 

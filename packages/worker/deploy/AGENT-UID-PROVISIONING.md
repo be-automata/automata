@@ -27,8 +27,9 @@ Buys:
 Does **not** buy:
 
 - **Per-run isolation.** All runs share one agent uid. Cross-run reads are
-  prevented only by where the ACEs are placed (per-run dir, never the shared
-  root), never by ownership.
+  prevented only by where the ACEs are placed (the per-run workdir, and this
+  worker's own `runs/<workerId>/` rendezvous dir — never the shared root),
+  never by ownership.
 - **A command fence.** See the header of `sudoers.d-automata`. The sudoers rule
   is a uid-drop capability; the grantee already outranks the runas account.
 - **Closure of the daemon's bearer surface.** The agent already receives
@@ -58,8 +59,10 @@ sudo cp "$(readlink -f "$(command -v node)")" /usr/local/automata/bin/node
 sudo cp -R "$(dirname "$(readlink -f "$(command -v claude)")")"/. /usr/local/automata/bin/
 sudo chown -R root:wheel /usr/local/automata/bin /usr/local/automata/daemon
 sudo chmod -R a+rX /usr/local/automata /usr/local/automata/bin /usr/local/automata/daemon
-# runs/ belongs to the WORKER. Per-run ACEs open each run dir to the agent uid;
-# the root itself gets traverse only, so one run cannot read another's.
+# runs/ belongs to the WORKER. At BOOT the worker opens its own
+# runs/<workerId>/ dir to the agent uid with an inheritable ACE (before any
+# socket is bound — macOS applies inheritance at create time); the root itself
+# gets traverse only, so one WORKER cannot read another's.
 sudo chown "$(id -un)":staff /usr/local/automata/runs && sudo chmod 700 /usr/local/automata/runs
 sudo -u _automata-agent /usr/local/automata/bin/node --version
 ```
@@ -175,10 +178,11 @@ https://example.com` as the worker's login must print `200`. A failure here mean
 **G6 — rules loaded.** `sudo ./pf-verify.sh`, and again after a reboot.
 
 **G7 — a real review run** end to end under `WORKER_AGENT_USER`, reaching a
-parsed verdict. Watch for three named signatures: a 15s "daemon socket not
+parsed verdict. Watch for four named signatures: a 15s "daemon socket not
 ready" (an ACE did not land), "not allowed to preserve the environment"
-(`SETENV` missing), and zero daemon events with a live daemon (the proxy-aware
-daemon bundle is not the one deployed).
+(`SETENV` missing), a `gh` that cannot reach its broker socket (the boot ACE
+did not run — it must precede every bind), and zero daemon events with a live
+daemon (the proxy-aware daemon bundle is not the one deployed).
 
 ---
 

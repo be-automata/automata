@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { applyRunNamespaceAces, type AceExec } from "./agent-uid-fs";
 
 /**
  * Per-run resource namespacing for the execution-plane worker (enterprise-hardening
@@ -19,9 +22,11 @@ import path from "node:path";
  * writes `<threadId>.pid` here, while the WORKER (operator uid) connects to that
  * socket and reads that pid, and the agent's `gh` connects to the worker-created
  * `<threadId>-gh.sock`. Darwin enforces unix-socket permissions, so
- * DaemonProcess.start() puts an inheritable ACE for BOTH accounts on
+ * claimRunNamespace() (worker BOOT) puts an inheritable ACE for BOTH accounts on
  * `<root>/<workerId>/` and a traverse-only ACE on `<root>` itself. Neither the
- * daemon's bind nor the gh broker needs to know: bind(2)-created sockets inherit.
+ * daemon's bind nor the gh broker needs to know: bind(2)-created sockets inherit
+ * — PROVIDED the ACE predates the bind, which is why it is applied at boot and
+ * never per-run (the gh broker binds before DaemonProcess.start() runs).
  */
 
 export const DEFAULT_RUN_NAMESPACE_ROOT = "/tmp/automata-agent-run";
@@ -94,4 +99,43 @@ export function runPidPath(
     workerRunDir(root, workerId),
     `${sanitizeThreadId(threadId)}.pid`,
   );
+}
+
+/**
+ * Claim this worker's namespaced run dir at BOOT: create it, apply the #108
+ * cross-uid ACEs, then write the worker lock.
+ *
+ * ORDER IS LOAD-BEARING. The ACEs go on the empty dir BEFORE anything is
+ * created inside it, because macOS applies inheritance at create time. Every
+ * later artefact — the worker lock, each run's daemon socket, each run's
+ * gh-broker socket, each run's pidfile — inherits from that point on. Applying
+ * the grant per-run inside DaemonProcess.start() missed the gh-broker socket
+ * entirely, since workflow.ts binds it first.
+ *
+ * Returns the dir. Throws if the dir cannot be claimed or an ACE cannot be
+ * applied: a worker that cannot set these up would leak every run's resources
+ * or stall every run on an unreachable socket, so it must not boot.
+ */
+export async function claimRunNamespace(opts: {
+  root: string;
+  workerId: string;
+  /** Empty (the default) ⇒ no ACL is touched at all. */
+  agentUser: string;
+  workerLogin?: string;
+  exec?: AceExec;
+  platform?: NodeJS.Platform;
+}): Promise<string> {
+  const { root, workerId, agentUser } = opts;
+  const dir = workerRunDir(root, workerId);
+  fs.mkdirSync(dir, { recursive: true });
+  await applyRunNamespaceAces({
+    root,
+    runDir: dir,
+    agentUser,
+    workerLogin: opts.workerLogin ?? os.userInfo().username,
+    exec: opts.exec,
+    platform: opts.platform,
+  });
+  fs.writeFileSync(workerLockPath(root, workerId), String(process.pid));
+  return dir;
 }

@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import fs from "node:fs";
 import { promisify } from "node:util";
 import { hatchet } from "../hatchet-client";
 import { assertAuthEnabledFromEnv } from "../agent-run/assert-auth";
@@ -11,9 +10,8 @@ import {
   startMaintenanceLoop,
 } from "../agent-run/scheduling-maintenance";
 import {
+  claimRunNamespace,
   getProcessWorkerId,
-  workerLockPath,
-  workerRunDir,
 } from "../agent-run/run-namespace";
 import { workflows } from "../registry";
 
@@ -26,13 +24,19 @@ const execFileAsync = promisify(execFile);
  * siblings. Reclaim only ever group-SIGKILLs daemons under a dir whose worker pid is
  * confirmed dead — a live worker's daemons are never touched (safe for ≥2 workers).
  */
-function claimNamespaceAndReclaim(): void {
+async function claimNamespaceAndReclaim(): Promise<void> {
   const root = loadWorkerConfig().runNamespaceRoot;
   const workerId = getProcessWorkerId();
-  const dir = workerRunDir(root, workerId);
   try {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(workerLockPath(root, workerId), String(process.pid));
+    // #108 F2: this ALSO applies the cross-uid ACEs, on the empty dir, before
+    // anything is created inside it. macOS applies ACE inheritance at create
+    // time, so a grant added later (per-run, inside DaemonProcess.start())
+    // never reaches the gh-broker socket workflow.ts already bound.
+    await claimRunNamespace({
+      root,
+      workerId,
+      agentUser: loadWorkerConfig().agentUser,
+    });
   } catch (err) {
     // A worker that can't claim its dir would leak every run's resources — fail loud.
     console.error("worker: failed to claim run namespace", err);
@@ -90,7 +94,7 @@ async function main() {
     process.exit(1);
   }
 
-  claimNamespaceAndReclaim();
+  await claimNamespaceAndReclaim();
 
   // #69 §3.2.4 item 2 — boot-time (secondary) engine-DB slot reclaim, BEFORE
   // registration so this registration's own fresh strategy rows are never

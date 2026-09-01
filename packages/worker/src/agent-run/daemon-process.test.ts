@@ -6,17 +6,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
-import {
-  INHERITABLE_ACE_RIGHTS,
-  TRAVERSE_ACE_RIGHTS,
-} from "./agent-uid-fs";
 import { DaemonProcess, writeDaemonMessage } from "./daemon-process";
 import { loadWorkerConfig } from "./config";
 import {
   getProcessWorkerId,
   runPidPath,
   runSocketPath,
-  workerRunDir,
 } from "./run-namespace";
 import type { AgentRunInput } from "./types";
 
@@ -316,7 +311,11 @@ setInterval(() => {}, 1000);
     expect(daemon.pid).toBe(9001);
   });
 
-  it("grants the agent user AND the worker's own login on the run dir, root traverse-only", async () => {
+  it("applies NO ACE itself even in agent-uid mode — boot owns that (F2)", async () => {
+    // The gh-broker socket is bound in this same dir BEFORE start() runs, and
+    // macOS applies ACE inheritance at CREATE time, so a per-run grant here
+    // would never reach it. claimRunNamespace() applies both grants at worker
+    // boot instead; start() must stay out of the ACL business entirely.
     const { root, workdir, input } = fixture();
     const aceCalls: string[][] = [];
     const config = loadWorkerConfig({
@@ -336,13 +335,7 @@ setInterval(() => {}, 1000);
     await bindSocket(socket);
     await daemon.start();
 
-    const me = os.userInfo().username;
-    const runDir = workerRunDir(root, getProcessWorkerId());
-    expect(aceCalls.map((a) => `${a[1]} @ ${a[2]}`)).toEqual([
-      `_automata-agent allow ${TRAVERSE_ACE_RIGHTS} @ ${root}`,
-      `_automata-agent allow ${INHERITABLE_ACE_RIGHTS} @ ${runDir}`,
-      `${me} allow ${INHERITABLE_ACE_RIGHTS} @ ${runDir}`,
-    ]);
+    expect(aceCalls).toEqual([]);
   });
 
   it("spawns via sudo -n -u <user> -E -- and takes the pgid from the WRAPPER, not child.pid", async () => {

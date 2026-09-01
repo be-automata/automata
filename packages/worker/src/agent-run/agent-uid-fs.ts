@@ -127,3 +127,46 @@ export function applyTraverseAce(opts: {
 }): Promise<void> {
   return applyAces({ ...opts, rights: TRAVERSE_ACE_RIGHTS });
 }
+
+/**
+ * The BOOT-TIME grant on this worker's run-namespace dir (#108 F2).
+ *
+ * WHY BOOT AND NOT PER-RUN. macOS applies inheritance at CREATE time. The
+ * gh-broker socket (`<threadId>-gh.sock`) and the daemon socket are bound by
+ * workflow.ts BEFORE `DaemonProcess.start()` runs, so an ACE applied inside
+ * start() reaches neither — the agent's `gh` then cannot connect (Darwin
+ * enforces unix-socket permissions) and the failure looks like a broker bug.
+ * Applying the two grants ONCE at worker boot, before any run or broker
+ * exists, makes every file and socket later created in the dir inherit them.
+ *
+ * TWO grants, because the dir is a cross-uid rendezvous in BOTH directions:
+ * the agent uid must bind the daemon socket and write the wrapper's pidfile
+ * here, and the worker's own login must connect to a socket the agent uid
+ * created. The shared ROOT gets traverse only — one inheritable ACE there
+ * would hand the agent uid every OTHER worker's runs.
+ *
+ * No-op when `agentUser` is empty (the default-off contract).
+ */
+export async function applyRunNamespaceAces(opts: {
+  /** The SHARED namespace root — traverse only. */
+  root: string;
+  /** This worker's own `<root>/<workerId>` dir — inheritable grant. */
+  runDir: string;
+  agentUser: string;
+  /** The worker's own login, so it can reach back into agent-created files. */
+  workerLogin: string;
+  exec?: AceExec;
+  platform?: NodeJS.Platform;
+}): Promise<void> {
+  const { root, runDir, agentUser, workerLogin, exec, platform } = opts;
+  if (!agentUser) {
+    return;
+  }
+  await applyTraverseAce({ dir: root, users: [agentUser], exec, platform });
+  await applyInheritableAces({
+    dir: runDir,
+    users: [agentUser, workerLogin],
+    exec,
+    platform,
+  });
+}
