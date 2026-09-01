@@ -219,3 +219,73 @@ describe("provisionWorkdir — agent-uid ACEs", () => {
     },
   );
 });
+
+/**
+ * The regression that broke every agent-uid run on the pilot box.
+ *
+ * provisionWorkdir has to apply the inheritable ACE BEFORE the clone (macOS
+ * applies inheritance at create time). It used to also create the run's `tmp/`
+ * there — and `git clone` REFUSES a destination that exists and is non-empty,
+ * so provisioning died with "destination path ... already exists and is not an
+ * empty directory" on every run with WORKER_AGENT_USER set.
+ *
+ * CI could not catch it: the ACE tests inject a fake `runGit`, so the real
+ * emptiness rule was never exercised. This one runs a REAL `git clone` against
+ * a local remote with agentUser set, and a fake aceExec so it stays pure and
+ * runs on Linux.
+ */
+describe("provisionWorkdir — a real clone with agentUser set", () => {
+  let root: string;
+  let origin: string;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-clone-"));
+    origin = path.join(root, "origin");
+    await fs.mkdir(origin, { recursive: true });
+    const git = (args: string[]) =>
+      execFileAsync("git", ["-C", origin, ...args]);
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "t@t"]);
+    await git(["config", "user.name", "t"]);
+    await fs.writeFile(path.join(origin, "app.txt"), "hello\n");
+    await git(["add", "app.txt"]);
+    await git(["commit", "-q", "-m", "init"]);
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("clones successfully — the run's tmp/ must not pre-empty the destination", async () => {
+    const aceCalls: string[][] = [];
+    const workdir = await provisionWorkdir({
+      repoFullName: "irrelevant/local",
+      branch: "main",
+      installationToken: "unused-for-a-local-remote",
+      workdirRoot: path.join(root, "runs"),
+      runId: "thr_clone",
+      agentUser: "_automata-agent",
+      aceExec: async (file, args) => {
+        aceCalls.push([file, ...args]);
+      },
+      // local remote: no auth header, no github.com
+      runGit: (args) =>
+        execFileAsync(
+          "git",
+          args.map((a) => (a.startsWith("https://github.com/") ? origin : a)),
+          { maxBuffer: 16 * 1024 * 1024 },
+        ),
+    });
+
+    // the clone actually produced a working tree
+    await expect(
+      fs.readFile(path.join(workdir, "app.txt"), "utf8"),
+    ).resolves.toBe("hello\n");
+    // ...and the run's TMPDIR still exists afterwards
+    const tmpStat = await fs.stat(path.join(workdir, "tmp"));
+    expect(tmpStat.isDirectory()).toBe(true);
+    // ...and the ACEs were still applied BEFORE the clone (root then workdir)
+    expect(aceCalls.length).toBeGreaterThanOrEqual(2);
+    expect(aceCalls.every((c) => c[0] === "/bin/chmod")).toBe(true);
+  });
+});

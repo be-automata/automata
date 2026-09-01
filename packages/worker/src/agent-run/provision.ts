@@ -114,9 +114,6 @@ export async function provisionWorkdir({
       users: [agentUser],
       exec: aceExec,
     });
-    // The run's own TMPDIR, inheriting the grant above. The operator's
-    // /var/folders/<...>/T is 0700 and untraversable by the agent uid.
-    await fs.mkdir(path.join(workdir, "tmp"), { recursive: true, mode: 0o700 });
   }
 
   const authHeader = `AUTHORIZATION: basic ${Buffer.from(
@@ -150,6 +147,22 @@ export async function provisionWorkdir({
       baseBranch,
       authConfigArgs: ["-c", `http.extraHeader=${authHeader}`],
     });
+  }
+
+  // The run's own TMPDIR — the operator's /var/folders/<...>/T is 0700 and
+  // untraversable by the agent uid.
+  //
+  // AFTER the clone, and this ordering is load-bearing in the opposite
+  // direction to the ACEs above: `git clone` REFUSES a destination that exists
+  // and is non-empty ("fatal: destination path ... already exists and is not an
+  // empty directory"), so creating this beforehand broke EVERY agent-uid run at
+  // provisioning. Found on the pilot box, not in CI — the unit tests inject a
+  // fake `runGit`, so the real emptiness rule was never exercised.
+  //
+  // Creating it here still inherits the ACE: macOS applies inheritance at
+  // create time, and the grant is already on `workdir`.
+  if (agentUser) {
+    await fs.mkdir(path.join(workdir, "tmp"), { recursive: true, mode: 0o700 });
   }
 
   return workdir;
