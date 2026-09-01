@@ -27,6 +27,14 @@ const eventSchema = z.object({
   action: z.enum(["allow", "deny"]),
   policyLevel: z.enum(EGRESS_POLICY_LEVELS).optional(),
   source: z.enum(["worker", "docker", "e2b", "daytona"]),
+  /**
+   * #108: the posture that produced the decision. A plane running in OBSERVE
+   * mode allows everything, so its `action:"allow"` rows are evidence that
+   * traffic happened — never that a policy permitted it. Persisting the marker
+   * is what stops the audit trail from overclaiming enforcement. Absent (an
+   * older plane) ⇒ 'enforce', which is what those planes meant.
+   */
+  mode: z.enum(["enforce", "observe"]).optional(),
 });
 
 const bodySchema = z.object({

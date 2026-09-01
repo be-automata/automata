@@ -1868,6 +1868,19 @@ export const egressEvents = pgTable(
     policyLevel: text("policy_level"),
     /** Which plane decided: 'worker' | 'docker' | 'e2b' | 'daytona'. */
     source: text("source"),
+    /**
+     * WHICH POSTURE PRODUCED THE DECISION (#108). 'enforce' — the policy was
+     * applied and this allow means the policy PERMITTED it. 'observe' — the
+     * plane allowed everything and this row means only "this traffic
+     * happened". Without the marker an observe allow is indistinguishable from
+     * an enforced one and the audit trail overclaims. Defaults to 'enforce' so
+     * every row written before this column existed keeps its original meaning
+     * (they were all enforcing planes).
+     */
+    mode: text("mode")
+      .$type<"enforce" | "observe">()
+      .default("enforce")
+      .notNull(),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
   },
   (table) => [

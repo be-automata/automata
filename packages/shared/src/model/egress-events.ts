@@ -38,6 +38,11 @@ export async function insertEgressEvents({
     action: "allow" | "deny";
     policyLevel?: string | null;
     source?: string | null;
+    /**
+     * #108: the posture that produced the decision. Absent ⇒ 'enforce', which
+     * is what every pre-#108 plane meant.
+     */
+    mode?: "enforce" | "observe" | null;
   }>;
 }): Promise<void> {
   if (events.length === 0) return;
@@ -51,6 +56,7 @@ export async function insertEgressEvents({
       action: e.action,
       policyLevel: e.policyLevel ?? null,
       source: e.source ?? null,
+      mode: e.mode ?? "enforce",
     })),
   );
 }

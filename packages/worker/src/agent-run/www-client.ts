@@ -324,9 +324,8 @@ export interface EgressEventWire {
   /**
    * #108: the posture that produced the decision. "observe" rows record that
    * traffic HAPPENED; only "enforce" rows are evidence that a policy permitted
-   * it. NOTE: the control-plane route's zod schema strips unknown keys, so this
-   * field is currently accepted-and-dropped server-side — persisting it is a
-   * follow-up on the control plane (schema + column), tracked on #108.
+   * it. Accepted by the route's zod schema and persisted in
+   * `egress_events.mode`; absent ⇒ 'enforce' (what every pre-#108 plane meant).
    */
   mode?: "enforce" | "observe";
 }
