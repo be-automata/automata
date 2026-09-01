@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
@@ -67,6 +68,7 @@ export async function provisionWorkdir({
   workdirRoot,
   runId,
   agentUser = "",
+  workerLogin = os.userInfo().username,
   aceExec,
   runGit = gitExec,
 }: {
@@ -87,6 +89,12 @@ export async function provisionWorkdir({
    * ACLs are touched at all — byte-for-byte today's provisioning.
    */
   agentUser?: string;
+  /**
+   * The worker's own login, granted alongside the agent so it can still delete
+   * agent-created files at cleanup. Defaults to the current user; injectable
+   * for tests.
+   */
+  workerLogin?: string;
   /** Injectable ACE runner (tests only). */
   aceExec?: AceExec;
   /** Injectable git runner (tests only) — defaults to the real gitExec. */
@@ -109,9 +117,18 @@ export async function provisionWorkdir({
       users: [agentUser],
       exec: aceExec,
     });
+    // BOTH users, exactly as claimRunNamespace does for the rendezvous dir
+    // (agent-uid-fs.ts). Granting the agent alone is not enough: every
+    // directory the AGENT creates inside the run is owned by the agent uid, and
+    // deleting a file needs write on its containing directory — so the worker
+    // (uid 501) could not remove them and cleanupWorkdir failed with EACCES.
+    // The run's HOME then SURVIVES the run, carrying whatever credential was
+    // delivered into it — the precise residue a per-run HOME exists to prevent.
+    // Observed on the pilot box: `.claude/projects/...` left undeletable after
+    // an otherwise-successful review run.
     await applyInheritableAces({
       dir: workdir,
-      users: [agentUser],
+      users: [agentUser, workerLogin],
       exec: aceExec,
     });
   }
