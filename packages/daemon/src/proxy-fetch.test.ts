@@ -12,8 +12,16 @@ import {
 const ON = { [CALLBACK_VIA_PROXY_ENV]: "1" };
 
 const servers: Server[] = [];
+/**
+ * Sockets handed to us by the 'connect' event. These are UPGRADED out of the
+ * server's own connection tracking, so `closeAllConnections()` does not reach
+ * them and `close()` waits on them forever — a 10s hook timeout instead of a
+ * test failure. Any test that answers a CONNECT must register its socket here.
+ */
+const tunnels: { destroy: () => void }[] = [];
 
 afterEach(async () => {
+  tunnels.splice(0).forEach((s) => s.destroy());
   await Promise.all(
     servers.splice(0).map(
       (s) =>
@@ -277,5 +285,65 @@ describe("postJson", () => {
       env: {},
     });
     expect(result).toEqual({ status: 401 });
+  });
+
+  /**
+   * The CONNECT succeeds and the handshake then fails or stalls. Both used to
+   * be unreachable by any handler: node throws on an unhandled socket 'error',
+   * which kills the whole daemon (no uncaughtException handler in this
+   * package), and a stall was covered by nothing because https.request's
+   * `timeout` is socket-scoped and only arms once the socket is assigned.
+   *
+   * Both assertions below are really "the process is still alive and we got a
+   * rejection" — if either regresses, vitest reports an unhandled error and the
+   * worker box gets a run that dies with no explanation.
+   */
+  it("rejects instead of crashing when TLS fails AFTER a successful CONNECT", async () => {
+    const server = createServer();
+    server.on("connect", (_req, socket) => {
+      tunnels.push(socket);
+      socket.on("error", () => {}); // the client destroys it; not a test failure
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      // Tunnel is up; now speak garbage instead of TLS so the handshake fails.
+      socket.write("this is definitely not a TLS ServerHello\r\n");
+    });
+    const proxyPort = await listen(server);
+    const err = await postJson({
+      url: "https://www.example.com/api/daemon-event",
+      headers: { "X-Daemon-Token": "super-secret-token" },
+      body: "{}",
+      env: { ...ON, HTTPS_PROXY: `http://127.0.0.1:${proxyPort}` },
+      timeoutMs: 300,
+    }).then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect(err?.message).not.toContain("super-secret-token");
+  });
+
+  it("times out instead of hanging when the TLS handshake stalls after CONNECT", async () => {
+    const server = createServer();
+    server.on("connect", (_req, socket) => {
+      tunnels.push(socket);
+      socket.on("error", () => {});
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      // ...and then say nothing at all, forever.
+    });
+    const proxyPort = await listen(server);
+    const started = Date.now();
+    const err = await postJson({
+      url: "https://www.example.com/api/daemon-event",
+      headers: {},
+      body: "{}",
+      env: { ...ON, HTTPS_PROXY: `http://127.0.0.1:${proxyPort}` },
+      timeoutMs: 300,
+    }).then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect(err?.message).toMatch(/timed out/i);
+    expect(Date.now() - started).toBeLessThan(4000); // bounded, not hung
   });
 });

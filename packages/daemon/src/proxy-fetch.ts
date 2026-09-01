@@ -1,5 +1,5 @@
 import { request as httpRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { Socket } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 
@@ -260,22 +260,61 @@ function sendOverSocket(args: {
 }): Promise<PostJsonResult> {
   const { target, headers, body, socket, timeoutMs } = args;
   return new Promise<PostJsonResult>((resolve, reject) => {
+    // Set by connectTls when the handshake itself fails; preferred over the
+    // ClientRequest's generic "socket hang up" when both arrive.
+    let handshakeError: Error | null = null;
+
+    // TLS over the already-established CONNECT tunnel.
+    //
+    // THIS MUST BE A ONE-SHOT AGENT, NOT `agent: false`. Node's docs for
+    // `agent: false` say it "causes a new Agent with default values to be
+    // used" — and a default Agent's createConnection is net.createConnection,
+    // so a `createConnection` passed in the REQUEST options is never called.
+    // The effect was silent and total: the CONNECT tunnel was opened, then
+    // IGNORED, and the request dialled the origin DIRECTLY. Verified against a
+    // local fake proxy — it logged the CONNECT and the response still came back
+    // from the real origin (405 from www.example.com). On a PF-fenced box that
+    // direct connect is exactly what is blocked, so this module would have
+    // failed at the one job it exists to do, on every agent-uid run.
+    //
+    // Overriding createConnection on our OWN Agent instance is what actually
+    // binds the request to `socket`.
+    const agent = new HttpsAgent({ keepAlive: false, maxSockets: 1 });
+    // `createConnection` is a documented Agent hook but is absent from
+    // @types/node's Agent surface, hence the cast rather than a subclass.
+    (
+      agent as unknown as {
+        createConnection: (
+          opts: unknown,
+          cb: (err: Error | null, s: Socket) => void,
+        ) => Socket;
+      }
+    ).createConnection = (
+      _opts: unknown,
+      cb: (err: Error | null, s: Socket) => void,
+    ) =>
+      connectTls(socket, target.hostname, timeoutMs, cb, (err) => {
+        handshakeError = err;
+      });
+
     const req = httpsRequest({
       method: "POST",
       host: target.hostname,
       port: Number(target.port || 443),
       path: `${target.pathname}${target.search}`,
       headers: { ...headers, host: target.host },
-      // TLS over the already-established CONNECT tunnel. `createConnection` is
-      // the typed way to hand node an existing socket (`socket` is not on
-      // https.RequestOptions); `agent:false` keeps it out of any pool.
-      createConnection: ((_opts: unknown, cb: (err: Error | null, s: Socket) => void) =>
-        connectTls(socket, target.hostname, cb)) as never,
-      agent: false,
+      agent,
       servername: target.hostname,
       timeout: timeoutMs,
     });
-    wireResponse(req, resolve, reject, timeoutMs, socket);
+    req.once("close", () => agent.destroy());
+    wireResponse(
+      req,
+      resolve,
+      (err) => reject(handshakeError ?? err),
+      timeoutMs,
+      socket,
+    );
     req.end(body);
   });
 }
@@ -341,13 +380,88 @@ function wireResponse(
   );
 }
 
-/** Wrap an established tunnel socket in TLS for `https.request`. */
+/**
+ * Wrap an established tunnel socket in TLS for `https.request`.
+ *
+ * EVERY failure mode here must end in a rejected promise, never an unhandled
+ * event and never a hang. This runs on the daemon's ONE control-plane callback,
+ * on every agent-uid run: a throw takes down the whole daemon (there is no
+ * uncaughtException handler in this package) and a hang produces a run that
+ * dies with no explanation — the exact #107 forensic class this module exists
+ * to eliminate. Reintroducing it here would be the worst possible place.
+ *
+ * Three listeners, all required:
+ *  - `error` on the TLS socket: a handshake that fails AFTER a successful
+ *    CONNECT (cert mismatch, protocol error, proxy closing the tunnel) emits
+ *    here. With no listener node throws on an EventEmitter 'error'.
+ *  - `error` on the RAW tunnel socket: it can fail independently, and it has no
+ *    listener of its own once handed to tls.
+ *  - a handshake timeout: `https.request`'s own `timeout` is socket-scoped and
+ *    only arms once the socket is assigned, so a handshake that stalls before
+ *    that is covered by nothing.
+ *
+ * NOTE ON THE TOTAL BOUND: the CONNECT (connectTunnel) and the handshake are
+ * bounded SEPARATELY, each by `timeoutMs`, so a stall in both phases takes up
+ * to 2x. That is deliberate — one budget per network phase — and deterministic;
+ * it is not an unbounded wait.
+ *
+ * Failures are surfaced by `destroy(err)` rather than by calling `cb(err)`:
+ * the socket is already returned synchronously to `https.request`, so
+ * destroying it with an error makes the ClientRequest emit 'error', which
+ * `wireResponse` already turns into a rejection. Calling `cb` a second time
+ * would double-assign the socket.
+ */
 function connectTls(
   socket: Socket,
   servername: string,
+  timeoutMs: number,
   cb: (err: Error | null, s: Socket) => void,
+  onHandshakeError: (err: Error) => void = () => {},
 ): Socket {
   const tlsSocket = tlsConnect({ socket, servername });
-  tlsSocket.once("secureConnect", () => cb(null, tlsSocket));
+  let handshakeDone = false;
+
+  const failHandshake = (err: Error) => {
+    if (handshakeDone) {
+      return; // past the handshake: the request owns the socket and its errors
+    }
+    handshakeDone = true;
+    // Report BEFORE destroying: destroying makes the ClientRequest emit a
+    // generic "socket hang up", which would otherwise be the only thing the
+    // caller ever sees. The specific cause is the whole point — a run that
+    // fails here must say WHY, not just that it failed.
+    onHandshakeError(err);
+    socket.destroy();
+    tlsSocket.destroy(err);
+  };
+
+  tlsSocket.once("secureConnect", () => {
+    handshakeDone = true;
+    // Re-arm at the same value so the REQUEST phase stays bounded: node's
+    // ClientRequest listens for the socket's 'timeout' and re-emits it on the
+    // request, which wireResponse already handles.
+    tlsSocket.setTimeout(timeoutMs);
+    cb(null, tlsSocket as unknown as Socket);
+  });
+  // Stays registered after the handshake purely so a later socket error is
+  // never an unhandled 'error' event; failHandshake no-ops by then and the
+  // request's own error handling takes it.
+  tlsSocket.on("error", (err: Error) =>
+    failHandshake(
+      new Error(`TLS handshake to ${servername} failed: ${err.message}`),
+    ),
+  );
+  socket.on("error", (err: Error) =>
+    failHandshake(
+      new Error(`CONNECT tunnel to ${servername} failed: ${err.message}`),
+    ),
+  );
+  tlsSocket.setTimeout(timeoutMs, () =>
+    failHandshake(
+      new Error(
+        `TLS handshake to ${servername} timed out after ${timeoutMs}ms`,
+      ),
+    ),
+  );
   return tlsSocket as unknown as Socket;
 }
