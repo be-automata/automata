@@ -49,15 +49,34 @@ Does **not** buy:
 
 ## 1. The role account
 
+**Pick the uid on the box; do NOT hardcode one.** macOS ships ~86 role accounts in
+200-499 and the set grows with OS updates, so any number written into a runbook
+eventually collides. Verified on macOS 15.7.3: **uid 300 is taken by
+`_aonsensed`**, and Apple's role accounts reach up to 441.
+
 ```bash
+# Choose the lowest free uid/gid at or above 450 — clear of the dense 200-300
+# cluster and of Apple's current 441 high-water mark.
+taken=$(dscl . -list /Users UniqueID | awk '$2>=200 && $2<=999 {print $2}' | sort -n)
+for u in $(seq 450 999); do echo "$taken" | grep -qx "$u" || { AGENT_UID=$u; break; }; done
+echo "using uid/gid $AGENT_UID"    # confirm it is NOT 501 before continuing
+
 sudo sysadminctl -addUser _automata-agent \
-     -fullName "Automata Agent" -UID 300 -GID 300 \
+     -fullName "Automata Agent" -UID "$AGENT_UID" -GID "$AGENT_UID" \
      -shell /usr/bin/false -home /var/empty -roleAccount
-id -u _automata-agent            # MUST print 300 (200-400 is the role range)
+
+id -u _automata-agent                      # MUST equal $AGENT_UID, and never 501
 dscl . -read /Groups/_automata-agent >/dev/null
+sudo -n -u _automata-agent true 2>&1 | grep -q . && echo "OK: no sudo rights"
 ```
 
-It must have no sudoers entry of its own, and it must never be uid 501.
+`sysadminctl` writes its progress to **stderr and is chatty even on success** —
+confirm from `id`, never from its output.
+
+It must have no sudoers entry of its own, and it must never be uid 501. Nothing
+downstream hardcodes the number: the worker resolves the account by NAME
+(`WORKER_AGENT_USER`), and `pf-preflight.sh` renders the anchor from
+`id -u _automata-agent` and refuses 501.
 
 ## 2. A runtime tree the agent uid can read
 
