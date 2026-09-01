@@ -10,10 +10,12 @@ import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
  * This posts a reply naming the failure on the thread's source PR/issue so
  * the mention isn't silently swallowed.
  *
- * Scoped to BOOT failures by construction: it is only ever wired in as the
- * `onError` callback `withThreadChat` invokes from its catch path
- * (see `startAgentMessage.ts`). Post-boot `withThreadChat` callers (slash
- * commands, checkpoint paths) pass no such callback, so they never notify.
+ * Scoped to BOOT failures because startAgentMessage's boot-catch `onError`
+ * is the ONLY call site of this function — not because other
+ * `withThreadChat` callers avoid `onError` in general (checkpoint-thread.ts
+ * passes one too; it just doesn't call this). Keep it that way: wiring this
+ * into any post-boot onError would notify on failures the mention author
+ * never caused.
  *
  * Fire-and-forget: callers must register this with `waitUntil` and attach
  * their own `.catch` — a failed notification must never mask the original
