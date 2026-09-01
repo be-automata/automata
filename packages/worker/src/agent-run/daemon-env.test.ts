@@ -195,6 +195,8 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       expect(env.NO_PROXY).toBe("127.0.0.1,localhost");
       expect(env.no_proxy).toBe("127.0.0.1,localhost");
       expect(JSON.stringify(env)).not.toContain("corp-proxy.internal");
+      // #108 D1: belt-and-braces for the agent CLI child (node >=22.21/>=24).
+      expect(env.NODE_USE_ENV_PROXY).toBe("1");
     });
 
     it("injects NOTHING when unset — and ambient proxy vars stay stripped by the whitelist", () => {
@@ -209,6 +211,8 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       for (const key of Object.keys(ambientProxies)) {
         expect(env[key], key).toBeUndefined();
       }
+      // The default-off proof for #108 D1: no proxy, no node proxy hint.
+      expect(env.NODE_USE_ENV_PROXY).toBeUndefined();
     });
   });
 

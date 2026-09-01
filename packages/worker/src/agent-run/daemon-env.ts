@@ -212,6 +212,12 @@ export function buildDaemonEnv({
     env.http_proxy = egressProxyUrl;
     env.NO_PROXY = "127.0.0.1,localhost";
     env.no_proxy = "127.0.0.1,localhost";
+    // Belt-and-braces for the AGENT CLI child (a separate node process whose
+    // HTTP client we do not own): node's built-in env proxy support, which
+    // exists only on node >=22.21.0 / >=24.0.0. The DAEMON does not depend on
+    // it — packages/daemon/src/proxy-fetch.ts proxies explicitly — so its
+    // absence on an older runtime is inert rather than a silent callback loss.
+    env.NODE_USE_ENV_PROXY = "1";
   }
   // Credential env (Amp). After the whitelist so SECRET_KEY_PATTERN cannot drop it.
   for (const [key, value] of Object.entries(credentialEnv)) {
