@@ -186,8 +186,9 @@ export class DaemonRuntime implements IDaemonRuntime {
     }
     this.logger.info(`POST to ${url}`, logArgs);
     // #108 D1: this POST must survive a host-level 443 block on the agent uid.
-    // postJson is plain `fetch` when no HTTP(S)_PROXY is set (today's exact
-    // behaviour) and travels through the loopback egress proxy when it is.
+    // postJson is plain `fetch` — today's exact behaviour — unless the worker
+    // set AUTOMATA_DAEMON_CALLBACK_VIA_PROXY=1, which it does ONLY in agent-uid
+    // mode (F5). A run that merely carries an egress policy is unaffected.
     const response = await postJson({
       url,
       headers: {

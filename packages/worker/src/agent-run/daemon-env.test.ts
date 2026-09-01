@@ -197,6 +197,38 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       expect(JSON.stringify(env)).not.toContain("corp-proxy.internal");
       // #108 D1: belt-and-braces for the agent CLI child (node >=22.21/>=24).
       expect(env.NODE_USE_ENV_PROXY).toBe("1");
+      // #108 F5: a policy-bearing run WITHOUT agentUser keeps the DIRECT daemon
+      // callback it has always had. This is the pre-existing #66 shape.
+      expect(env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY).toBeUndefined();
+    });
+
+    it("opts the daemon callback onto the proxy ONLY in agent-uid mode (#108 F5)", () => {
+      const env = buildDaemonEnv({
+        baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
+        anthropicApiKey: "sk-ant-xxx",
+        claudeBinDir: "",
+        installationToken: INSTALL_TOKEN,
+        ghConfigDir: "/tmp/isolated-gh",
+        botLogin: "automata-ai-bot[bot]",
+        egressProxyUrl: PROXY_URL,
+        agentUser: "_automata-agent",
+        runHome: "/tmp/run-home",
+      });
+      expect(env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY).toBe("1");
+    });
+
+    it("never opts in without a proxy, even in agent-uid mode (#108 F5)", () => {
+      const env = buildDaemonEnv({
+        baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
+        anthropicApiKey: "sk-ant-xxx",
+        claudeBinDir: "",
+        installationToken: INSTALL_TOKEN,
+        ghConfigDir: "/tmp/isolated-gh",
+        botLogin: "automata-ai-bot[bot]",
+        agentUser: "_automata-agent",
+        runHome: "/tmp/run-home",
+      });
+      expect(env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY).toBeUndefined();
     });
 
     it("injects NOTHING when unset — and ambient proxy vars stay stripped by the whitelist", () => {
@@ -213,6 +245,7 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       }
       // The default-off proof for #108 D1: no proxy, no node proxy hint.
       expect(env.NODE_USE_ENV_PROXY).toBeUndefined();
+      expect(env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY).toBeUndefined();
     });
   });
 

@@ -1,7 +1,15 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { postJson, resolveProxyForUrl, shouldBypassProxy } from "./proxy-fetch";
+import {
+  CALLBACK_VIA_PROXY_ENV,
+  postJson,
+  resolveProxyForUrl,
+  shouldBypassProxy,
+} from "./proxy-fetch";
+
+/** Every proxying case requires the worker's explicit opt-in (#108 F5). */
+const ON = { [CALLBACK_VIA_PROXY_ENV]: "1" };
 
 const servers: Server[] = [];
 
@@ -33,6 +41,7 @@ describe("resolveProxyForUrl", () => {
 
   it("prefers HTTPS_PROXY for an https target and HTTP_PROXY for an http target", () => {
     const env = {
+      ...ON,
       HTTPS_PROXY: "http://127.0.0.1:1111",
       HTTP_PROXY: "http://127.0.0.1:2222",
     };
@@ -47,6 +56,7 @@ describe("resolveProxyForUrl", () => {
   it("honours lowercase https_proxy when the uppercase form is absent", () => {
     expect(
       resolveProxyForUrl("https://a.example.com", {
+        ...ON,
         https_proxy: "http://127.0.0.1:3333",
       }),
     ).toBe("http://127.0.0.1:3333");
@@ -55,15 +65,44 @@ describe("resolveProxyForUrl", () => {
   it("bypasses a loopback callback url under the injected NO_PROXY", () => {
     expect(
       resolveProxyForUrl("http://127.0.0.1:9999/api/daemon-event", {
+        ...ON,
         HTTP_PROXY: "http://127.0.0.1:1111",
         NO_PROXY: "127.0.0.1,localhost",
       }),
     ).toBeNull();
   });
 
+  it("stays DIRECT for a policy-bearing run that was never opted in (#108 F5)", () => {
+    // The pre-#108 world: an egress policy is in force, HTTPS_PROXY is injected
+    // for the AGENT CLI child, and the daemon's own callback has always gone
+    // direct. Nothing about that run may change.
+    expect(
+      resolveProxyForUrl("https://www.example.com/api/daemon-event", {
+        HTTPS_PROXY: "http://127.0.0.1:1111",
+        HTTP_PROXY: "http://127.0.0.1:1111",
+        https_proxy: "http://127.0.0.1:1111",
+        http_proxy: "http://127.0.0.1:1111",
+      }),
+    ).toBeNull();
+    // Only the exact opt-in value flips it.
+    expect(
+      resolveProxyForUrl("https://www.example.com/api/daemon-event", {
+        [CALLBACK_VIA_PROXY_ENV]: "true",
+        HTTPS_PROXY: "http://127.0.0.1:1111",
+      }),
+    ).toBeNull();
+    expect(
+      resolveProxyForUrl("https://www.example.com/api/daemon-event", {
+        ...ON,
+        HTTPS_PROXY: "http://127.0.0.1:1111",
+      }),
+    ).toBe("http://127.0.0.1:1111");
+  });
+
   it("ignores a scheme-less proxy value instead of guessing a scheme", () => {
     expect(
       resolveProxyForUrl("https://a.example.com", {
+        ...ON,
         HTTPS_PROXY: "127.0.0.1:1111",
       }),
     ).toBeNull();
@@ -123,6 +162,35 @@ describe("postJson", () => {
     expect(seen.body).toBe('{"hello":"world"}');
   });
 
+  it("policy present, agentUser empty ⇒ plain fetch straight to the origin (#108 F5)", async () => {
+    let originHit = false;
+    let proxyHit = false;
+    const proxyPort = await listen(
+      createServer((req, res) => {
+        proxyHit = true;
+        req.resume();
+        res.writeHead(200).end();
+      }),
+    );
+    const originPort = await listen(
+      createServer((req, res) => {
+        originHit = true;
+        req.resume();
+        req.on("end", () => res.writeHead(200).end());
+      }),
+    );
+    const result = await postJson({
+      url: `http://127.0.0.1:${originPort}/api/daemon-event`,
+      headers: { "X-Daemon-Token": "tok" },
+      body: "{}",
+      // HTTP_PROXY set (the run has an egress policy) but NO opt-in.
+      env: { HTTP_PROXY: `http://127.0.0.1:${proxyPort}` },
+    });
+    expect(result).toEqual({ status: 200 });
+    expect(originHit).toBe(true);
+    expect(proxyHit).toBe(false);
+  });
+
   it("sends an absolute-form request to the proxy for an http target", async () => {
     let proxiedUrl: string | undefined;
     const proxyPort = await listen(
@@ -144,7 +212,7 @@ describe("postJson", () => {
       url: `http://origin.invalid:${originPort}/api/daemon-event`,
       headers: { "Content-Type": "application/json" },
       body: "{}",
-      env: { HTTP_PROXY: `http://127.0.0.1:${proxyPort}` },
+      env: { ...ON, HTTP_PROXY: `http://127.0.0.1:${proxyPort}` },
     });
     expect(result).toEqual({ status: 200 });
     expect(proxiedUrl?.startsWith("http://origin.invalid:")).toBe(true);
@@ -167,7 +235,7 @@ describe("postJson", () => {
         url: "https://www.example.com/api/daemon-event",
         headers: { "X-Daemon-Token": "super-secret-token" },
         body: "{}",
-        env: { HTTPS_PROXY: `http://127.0.0.1:${proxyPort}` },
+        env: { ...ON, HTTPS_PROXY: `http://127.0.0.1:${proxyPort}` },
       }),
     ).rejects.toThrow(/www\.example\.com:443/);
     expect(connectMethod).toBe("CONNECT");
@@ -185,7 +253,7 @@ describe("postJson", () => {
       url: "https://www.example.com/api/daemon-event",
       headers: { "X-Daemon-Token": "super-secret-token" },
       body: "{}",
-      env: { HTTPS_PROXY: `http://127.0.0.1:${proxyPort}` },
+      env: { ...ON, HTTPS_PROXY: `http://127.0.0.1:${proxyPort}` },
     }).then(
       () => null,
       (e: Error) => e,

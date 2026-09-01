@@ -273,6 +273,17 @@ export function buildDaemonEnv({
     // it — packages/daemon/src/proxy-fetch.ts proxies explicitly — so its
     // absence on an older runtime is inert rather than a silent callback loss.
     env.NODE_USE_ENV_PROXY = "1";
+    // #108 F5: the DAEMON's own control-plane callback moves onto the proxy
+    // ONLY in agent-uid mode, where the PF anchor makes the direct route
+    // unusable. A run that merely carries an egress policy (#66 slice 2, live
+    // since before this ticket) keeps the direct callback it has always had —
+    // routing it through the proxy would hand it new syscalls, new timeout and
+    // error behaviour, and a new dependency on the allowlist carrying the
+    // callback host, none of which anyone opted into. Consumed by
+    // packages/daemon/src/proxy-fetch.ts (CALLBACK_VIA_PROXY_ENV).
+    if (agentUser) {
+      env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY = "1";
+    }
   }
   // Credential env (Amp). After the whitelist so SECRET_KEY_PATTERN cannot drop it.
   for (const [key, value] of Object.entries(credentialEnv)) {

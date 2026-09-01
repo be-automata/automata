@@ -21,10 +21,27 @@ import { connect as tlsConnect } from "node:tls";
  * SILENT no-op on the wrong runtime — reproducing the very bug being fixed.
  * This module is dependency-free and node20-safe.
  *
- * DEFAULT-OFF CONTRACT: with no proxy env set, `postJson` calls global `fetch`
- * with exactly the arguments `runtime.ts` used before — byte-for-byte today's
+ * DEFAULT-OFF CONTRACT: unless the worker EXPLICITLY opts this run in via
+ * `AUTOMATA_DAEMON_CALLBACK_VIA_PROXY=1`, `postJson` calls global `fetch` with
+ * exactly the arguments `runtime.ts` used before — byte-for-byte today's
  * behaviour.
+ *
+ * WHY AN EXPLICIT GATE AND NOT JUST "IS HTTP(S)_PROXY SET" (#108 F5). Runs have
+ * carried an egress policy — and therefore HTTPS_PROXY — since #66 slice 2,
+ * with the daemon callback going DIRECT. Keying off the proxy vars alone would
+ * silently move every one of those existing runs onto a new transport with new
+ * syscalls, new timeout and error behaviour, and a new dependency on the
+ * policy's allowlist containing the callback host. Nobody opted into that. The
+ * worker sets this variable ONLY in agent-uid mode, where the PF anchor makes
+ * the direct route genuinely unusable.
  */
+
+/**
+ * The opt-in. Set by the worker (daemon-env.ts) only when a run is BOTH
+ * agent-uid-fenced and proxied. Absent ⇒ plain `fetch`, whatever the proxy
+ * variables say.
+ */
+export const CALLBACK_VIA_PROXY_ENV = "AUTOMATA_DAEMON_CALLBACK_VIA_PROXY";
 
 /** Lowercase env lookup precedence documented by Claude Code's network-config. */
 function pick(env: NodeJS.ProcessEnv, keys: string[]): string | undefined {
@@ -86,6 +103,12 @@ export function resolveProxyForUrl(
   target: string,
   env: NodeJS.ProcessEnv,
 ): string | null {
+  // #108 F5: fail SHUT unless the worker explicitly opted this run in. A run
+  // that merely has an egress policy keeps the direct callback it has always
+  // had.
+  if (env[CALLBACK_VIA_PROXY_ENV] !== "1") {
+    return null;
+  }
   let parsed: URL;
   try {
     parsed = new URL(target);
