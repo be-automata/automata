@@ -26,7 +26,13 @@
  * cannot run this code without it.
  */
 
-import { Client } from "pg";
+import { sql } from "drizzle-orm";
+// `pg` is NOT a root dependency — deploy/ has no package.json, so a bare `pg`
+// import resolves only by accidental hoisting (it did locally; it is absent from
+// node_modules/pg and from the root package.json). Every other deploy/*.ts goes
+// through the shared helper, which is the resolution path that is actually
+// guaranteed. Caught in review of #173.
+import { createDb } from "../packages/shared/src/db";
 
 /** Columns this revision of the code cannot run without. */
 const REQUIRED: ReadonlyArray<{
@@ -53,34 +59,36 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const client = new Client({ connectionString: url });
-  try {
-    await client.connect();
-  } catch (error) {
-    console.error(
-      `assert-schema-ready: FAIL: cannot reach the database (fail-closed): ${
-        (error as Error).message
-      }`,
-    );
-    process.exit(1);
-  }
-
+  const db = createDb(url);
   const missing: string[] = [];
-  try {
-    for (const req of REQUIRED) {
-      const { rows } = await client.query(
-        `SELECT 1 FROM information_schema.columns
-          WHERE table_name = $1 AND column_name = $2 LIMIT 1`,
-        [req.table, req.column],
+  for (const req of REQUIRED) {
+    let present: boolean;
+    try {
+      // table_schema is pinned: without it, a same-named table in ANOTHER
+      // schema on the search_path reports a false "present" and lets a real
+      // gap through — the one way a gate like this can be worse than nothing.
+      const result = await db.execute(sql`
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = ${req.table}
+           AND column_name = ${req.column}
+         LIMIT 1
+      `);
+      const rows = (result as unknown as { rows?: unknown[] }).rows ?? [];
+      present = rows.length > 0;
+    } catch (error) {
+      console.error(
+        `assert-schema-ready: FAIL: cannot query the database (fail-closed): ${
+          (error as Error).message
+        }`,
       );
-      if (rows.length === 0) {
-        missing.push(`  ${req.table}.${req.column} — ${req.since}`);
-      } else {
-        console.log(`assert-schema-ready: ok ${req.table}.${req.column}`);
-      }
+      process.exit(1);
     }
-  } finally {
-    await client.end().catch(() => {});
+    if (present) {
+      console.log(`assert-schema-ready: ok ${req.table}.${req.column}`);
+    } else {
+      missing.push(`  ${req.table}.${req.column} — ${req.since}`);
+    }
   }
 
   if (missing.length > 0) {
