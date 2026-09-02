@@ -37,6 +37,17 @@ function createNodePgDb(databaseUrl: string) {
   return drizzle(databaseUrl, { schema });
 }
 
+/**
+ * Re-exported so callers OUTSIDE a workspace package — notably deploy/*.ts,
+ * which has no package.json of its own — can build raw queries without a bare
+ * `drizzle-orm` import. Such an import resolves only if drizzle-orm happens to
+ * be hoisted to the repo-root node_modules; it is not a root dependency, so
+ * that is an accident of the current install rather than a guarantee. Routing
+ * through this module keeps the resolution rooted in packages/shared, which
+ * genuinely depends on drizzle-orm. (#173 review.)
+ */
+export { sql } from "drizzle-orm";
+
 export type DB = ReturnType<typeof createNodePgDb>;
 
 export function createDb(databaseUrl: string): DB {
