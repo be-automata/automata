@@ -378,10 +378,11 @@ export const thread = pgTable(
     /**
      * The Hatchet workflow-run externalId of this thread's ACTIVE (latest
      * dispatched, not-yet-terminal) remote run (#125/#127). Written at
-     * dispatch when the supersedePolicy flag is ON; consumed by the C1
-     * generation fence: a terminal/verdict write from a run whose externalId
-     * no longer matches is rejected 409 (superseded). NULL = no fenced run
-     * (legacy dispatch, in-process sandbox) → the fence FAILS OPEN.
+     * dispatch for every REVIEW run (#165 — unconditional since the flag's
+     * retirement); consumed by the C1 generation fence: a terminal/verdict
+     * write from a run whose externalId no longer matches is rejected 409
+     * (superseded). NULL = no fenced run (non-review dispatch, in-process
+     * sandbox) → the fence FAILS OPEN.
      */
     activeRunExternalId: text("active_run_external_id"),
     /**

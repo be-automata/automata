@@ -1,17 +1,18 @@
-# Supersede policy (#125) — rollback runbook
+# Supersede policy (#125/#165) — rollback runbook
 
-Rolling the feature back is three steps, each independently reversible. The
-drill below was executed once in dev (the isolated hatchet-lite stack, see the
-"drill" test in `packages/worker/src/agent-run/supersede.integration.test.ts`).
+Since #165 (ADR-007) the engine is the SOLE automatic supersession authority:
+the `supersedePolicy` feature flag, the `app-side` policy value, and every
+www-side cancel path (`supersedePriorReviewRuns`, the automation's
+prior-thread archival) are DELETED from the code. There is no flag to flip.
 
-## 1. Flag OFF
+## 1. Roll back the code (the only step 1 that exists now)
 
-Admin → Feature flags → `supersedePolicy` → global OFF (and clear any per-user
-overrides). Effect is immediate for NEW dispatches: they hit the legacy
-`agent-run` workflow with the byte-identical payload (guarded by
-`apps/www/src/agent/hatchet/__fixtures__/transport.golden.json`) and the
-app-side (#8) supersede pass is back in charge. In-flight and queued native
-runs are unaffected by the flag — drain them in step 2.
+Revert the #165 PR (or redeploy the previous build): the flag definition and
+the app-side cancel pass return with it. Data needs nothing — the retire
+migration only NULLed `app-side` settings rows, and a NULL row resolves to
+`newest-wins` under the old build too (its default), so behavior is stable
+across the rollback. In-flight and queued native runs are unaffected by the
+deploy — drain them in step 2 if the incident requires a quiet engine.
 
 ## 2. Drain queued native runs
 
@@ -55,15 +56,12 @@ it on. Kill switch: `SUPERSEDE_SWEEP_ENABLED=false` on the www worker (the
 timing knobs `SUPERSEDE_SWEEP_CANCELLED_AFTER_MS` /
 `SUPERSEDE_SWEEP_ORPHAN_AFTER_MS` accept positive integers only).
 
-## Success criteria for retiring `hatchet_run` (app-side supersede)
+## Retirement of the app-side path — EXECUTED (#165)
 
-Retire the app-side path (and this table's supersede role) only when ALL hold
-for two consecutive pilot weeks with the flag ON:
-
-1. zero runs took the app-side cancel pass (`[hatchet] superseding prior…`
-   log line absent);
-2. every cancelled native run reached a typed terminal within the sweep bound
-   (no thread ever reaped by the 75m stalled watchdog with a NULL
-   `terminal_cause`);
-3. the engine version dedupes delivery ids (the #128 characterization case
-   flips) — until then `hatchet_run` is also the sweep's cause-inference source.
+The success criteria that used to live here were met during the 2026-08-25
+live UAT (zero app-side cancel passes under native policies after #143; every
+cancelled native run reached a typed terminal within the sweep bound) and
+#165 retired the path. `hatchet_run` itself STAYS: it is the sweep's
+cause-inference source and the recheck ledger's spine; the engine still does
+not dedupe delivery ids (the #128 characterization case), so the per-thread
+double-dispatch guard remains load-bearing.
