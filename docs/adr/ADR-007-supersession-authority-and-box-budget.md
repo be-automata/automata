@@ -1,6 +1,6 @@
 # ADR-007 — Supersession authority and the one-agent box budget
 
-- **Status:** Proposed (Accepted when #165's and #152 Stage 2's PRs merge)
+- **Status:** Supersession half (decisions 1–3): **Accepted** (PR #175 → `e3dcc1b`, live-proven 2026-09-02). Box-budget half (decisions 4–5): **Stage A Accepted** (PR #177 → `b11762f`, drill-proven); remainder Proposed, gated on the one-worker topology decision.
 - **Date:** 2026-09-02
 - **Issues:** #165 (supersession sole authority), #152 (concurrency budget consolidation), epic #125
 - **Supersedes / superseded by:** —
@@ -16,16 +16,16 @@ arrives. Two structural questions were left open at delivery:
 1. **Who terminates a prior run?** The legacy path (`app-side` policy, the
    `supersedePolicy` feature flag OFF) had www cancel prior runs itself, in TWO places
    (dispatch's `supersedePriorReviewRuns`, the automation's archive-prior-threads block).
-   #143 gated both on the repo's *current* policy — leaving two termination authorities
+   #143 gated both on the repo's _current_ policy — leaving two termination authorities
    plus policy-flip races in both directions (a queued engine-owned run cancelled by www;
    a legacy run stranded into a duplicate review).
 2. **What enforces "one agent at a time" on the box?** Hatchet offers no cross-workflow
    concurrency primitive: concurrency entries are scoped per workflow with the strategy
    fixed at definition time (docs; live-proven by the #128 E2E — an `agent-run-strict` run
    started 193 ms into a live `agent-run-newest` run), worker `slots` cap per worker
-   *process*, and rate limits are starts-per-window. The interim belt is
+   _process_, and rate limits are starts-per-window. The interim belt is
    `packages/worker/src/agent-run/box-slot.ts`, a bespoke lease whose dead-holder reclaim
-   is a 45-second staleness *assumption* — it cannot observe whether the previous
+   is a 45-second staleness _assumption_ — it cannot observe whether the previous
    holder's agent container actually died.
 
 ## Decision
@@ -42,14 +42,25 @@ arrives. Two structural questions were left open at delivery:
    under the policy it was dispatched with; an admin who flips policy mid-review can get
    one duplicate review. A flip is an explicit admin action, not a push.
 4. **The one-agent box budget is enforced on the HOST, at the contended resource.**
-   (#152 Stage 2): kernel `flock` for cross-process exclusion (released by the kernel on
-   process death — no heartbeat, no staleness), an admission reaper that reconciles agent
-   container labels with engine workflow-run status *before* any container is created
-   (fail-closed on unknown state; deliberately no mode that admits beside a live foreign
-   container), and a per-container `--memory` ceiling so a runaway agent degrades to one
-   OOM-killed container instead of a box-wide ENOMEM. Consequences: one worker process
-   per box, `slots: 1` as the engine-native cross-workflow cap, `box-slot.ts` retired.
-5. **The host budget never cancels.** It may delay or reject *admission* of a run (a
+   The production agent is a host PROCESS GROUP (daemon spawned detached under the
+   dedicated agent uid), not a container — the budget mechanisms are process-plane:
+   - **Stage A (shipped, #177):** admission reap — before the box-slot acquire, every
+     run admission (a) reclaims dead sibling workers' orphan daemon groups
+     (`reclaimDeadWorkerRuns`, previously boot-only) and (b) SIGKILLs any recorded
+     process group for the admitted run's own threadId (`reapOwnThreadAttempts`),
+     so an engine redelivery can never share the box with its dead predecessor.
+     Safe with no engine status read: redelivery only follows session lapse, www's
+     per-thread token dedup bars concurrent double-dispatch, and `slots: 1` keeps
+     each worker single-flight. Drill-proven live (worker SIGKILL mid-run → orphan
+     group reaped → 36 s redelivery, clean).
+   - **Remainder (Proposed, gated on the one-worker topology decision):** kernel
+     `flock` for cross-process exclusion + `slots: 1` as the engine-native
+     cross-workflow cap, `box-slot.ts` retirement, a uid-scan reaper for
+     teardown-escaped setsid subtrees (observed live: a ~360-process tree outliving
+     its completed run — its pid file gone and pgid unrecorded), and a memory
+     ceiling (macOS has no cgroups; the hard cap arrives with a containerized
+     topology).
+5. **The host budget never cancels.** It may delay or reject _admission_ of a run (a
    typed, retryable error); terminating a running review remains the engine's (or the
    user's) act alone.
 

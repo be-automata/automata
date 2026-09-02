@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   WORKER_LOCK_FILENAME,
-  sanitizeThreadId,
+  runPidPath,
   workerRunDir,
 } from "./run-namespace";
 import { buildKillInvocation, type Invocation } from "./spawn-as-user";
@@ -68,6 +68,50 @@ function isPidDead(
   }
 }
 
+/** readdir the namespace root, [] when it does not exist — shared by both reapers. */
+function listWorkerDirs(root: string): fs.Dirent[] {
+  try {
+    return fs
+      .readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory());
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The ONE group-kill dispatch both reapers share: sudo-shelled as the agent
+ * account when configured (cross-uid process.kill is EPERM; `sudo -n` never
+ * prompts, so a missing NOPASSWD exits instead of hanging), else
+ * process.kill(-pgid). Never throws. Returns the label of the path taken so
+ * the caller's log line can say which.
+ */
+function killDaemonGroup(
+  pgid: number,
+  opts: Pick<ReclaimOpts, "agentUser" | "kill" | "spawnKill">,
+): "sudo" | "direct" | "gone" {
+  const kill = opts.kill ?? ((pid, signal) => process.kill(pid, signal));
+  const spawnKill =
+    opts.spawnKill ??
+    ((invocation: Invocation) => {
+      spawn(invocation.file, invocation.args, { stdio: "ignore" }).unref();
+    });
+  try {
+    const invocation = buildKillInvocation({
+      agentUser: opts.agentUser ?? "",
+      pgid,
+    });
+    if (invocation) {
+      spawnKill(invocation);
+      return "sudo";
+    }
+    kill(-pgid, "SIGKILL");
+    return "direct";
+  } catch {
+    return "gone";
+  }
+}
+
 function readPid(file: string): number | null {
   try {
     const raw = fs.readFileSync(file, "utf8").trim();
@@ -81,25 +125,10 @@ function readPid(file: string): number | null {
 export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
   const { root, selfWorkerId } = opts;
   const kill = opts.kill ?? ((pid, signal) => process.kill(pid, signal));
-  const spawnKill =
-    opts.spawnKill ??
-    ((invocation: Invocation) => {
-      // `sudo -n` never prompts, so a missing NOPASSWD exits immediately rather
-      // than hanging boot. Orphans then survive — exactly today's pre-#108
-      // failure mode — and boot is not blocked.
-      spawn(invocation.file, invocation.args, { stdio: "ignore" }).unref();
-    });
   const log = opts.log ?? (() => {});
 
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return; // root doesn't exist yet → nothing to reclaim
-  }
-
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name === selfWorkerId) {
+  for (const entry of listWorkerDirs(root)) {
+    if (entry.name === selfWorkerId) {
       continue;
     }
     const dir = workerRunDir(root, entry.name);
@@ -126,26 +155,11 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
       if (daemonPid === null) {
         continue; // malformed pid file — tolerate
       }
-      try {
-        // Inside the try: reclaim never throws (boot must not be blocked by a
-        // stray file), and the builders validate their inputs.
-        const killInvocation = buildKillInvocation({
-          agentUser: opts.agentUser ?? "",
-          pgid: daemonPid,
-        });
-        if (killInvocation) {
-          spawnKill(killInvocation);
-          log(
-            `reclaim: sudo-SIGKILLed orphan daemon group ${daemonPid} (${entry.name})`,
-          );
-        } else {
-          kill(-daemonPid, "SIGKILL"); // negative pid → the whole process group
-          log(
-            `reclaim: SIGKILLed orphan daemon group ${daemonPid} (${entry.name})`,
-          );
-        }
-      } catch {
-        // already gone
+      const how = killDaemonGroup(daemonPid, opts);
+      if (how !== "gone") {
+        log(
+          `reclaim: ${how === "sudo" ? "sudo-" : ""}SIGKILLed orphan daemon group ${daemonPid} (${entry.name})`,
+        );
       }
     }
     try {
@@ -187,42 +201,20 @@ export function reapOwnThreadAttempts(
   opts: Omit<ReclaimOpts, "selfWorkerId"> & { threadId: string },
 ): number {
   const { root, threadId } = opts;
-  const kill = opts.kill ?? ((pid, signal) => process.kill(pid, signal));
-  const spawnKill =
-    opts.spawnKill ??
-    ((invocation: Invocation) => {
-      spawn(invocation.file, invocation.args, { stdio: "ignore" }).unref();
-    });
   const log = opts.log ?? (() => {});
-  const pidFileName = `${sanitizeThreadId(threadId)}.pid`;
 
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
   let reaped = 0;
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const pidFile = path.join(workerRunDir(root, entry.name), pidFileName);
+  for (const entry of listWorkerDirs(root)) {
+    // The producer's own path builder (daemon-process.ts writes these files
+    // via runPidPath) — the filename contract has exactly one owner.
+    const pidFile = runPidPath(root, entry.name, threadId);
     const daemonPid = readPid(pidFile);
     if (daemonPid === null) continue;
-    try {
-      const killInvocation = buildKillInvocation({
-        agentUser: opts.agentUser ?? "",
-        pgid: daemonPid,
-      });
-      if (killInvocation) {
-        spawnKill(killInvocation);
-      } else {
-        kill(-daemonPid, "SIGKILL");
-      }
+    const how = killDaemonGroup(daemonPid, opts);
+    if (how !== "gone") {
       log(
-        `admission-reap: SIGKILLed prior attempt group ${daemonPid} of ${threadId} (${entry.name})`,
+        `admission-reap: ${how === "sudo" ? "sudo-" : ""}SIGKILLed prior attempt group ${daemonPid} of ${threadId} (${entry.name})`,
       );
-    } catch {
-      // already gone
     }
     try {
       fs.rmSync(pidFile, { force: true });

@@ -456,17 +456,19 @@ async function runAgentInner(
     // with its own redelivery. Both are best-effort and never throw; the
     // safety argument for the no-engine-read own-thread kill lives on
     // reapOwnThreadAttempts.
+    const admissionLog = (m: string) =>
+      ctx.log(`[agent-run ${input.threadId}] ${m}`);
     reclaimDeadWorkerRuns({
       root: config.runNamespaceRoot,
       selfWorkerId: getProcessWorkerId(),
       agentUser: config.agentUser,
-      log: (m) => ctx.log(`[agent-run ${input.threadId}] ${m}`),
+      log: admissionLog,
     });
     reapOwnThreadAttempts({
       root: config.runNamespaceRoot,
       threadId: input.threadId,
       agentUser: config.agentUser,
-      log: (m) => ctx.log(`[agent-run ${input.threadId}] ${m}`),
+      log: admissionLog,
     });
     boxSlot = await acquireBoxSlot({
       dir: path.join(config.runNamespaceRoot, "box-slot"),

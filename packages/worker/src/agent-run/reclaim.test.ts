@@ -283,6 +283,15 @@ describe("reclaimDeadWorkerRuns — agent-uid mode", () => {
   });
 });
 
+/** One kill recorder for every case in this file (tuple shape). */
+function killRecorder() {
+  const kills: Array<[number, NodeJS.Signals | 0]> = [];
+  return {
+    kills,
+    kill: (p: number, s: NodeJS.Signals | 0) => kills.push([p, s]),
+  };
+}
+
 describe("reapOwnThreadAttempts (#152 Stage A admission reap)", () => {
   const THREAD = "11111111-2222-3333-4444-555555555555";
 
@@ -301,12 +310,8 @@ describe("reapOwnThreadAttempts (#152 Stage A admission reap)", () => {
       path.join(root, "worker-self", WORKER_LOCK_FILENAME),
       String(process.pid),
     );
-    const kills: Array<[number, unknown]> = [];
-    const n = reapOwnThreadAttempts({
-      root,
-      threadId: THREAD,
-      kill: (pid, sig) => kills.push([pid, sig]),
-    });
+    const { kills, kill } = killRecorder();
+    const n = reapOwnThreadAttempts({ root, threadId: THREAD, kill });
     expect(n).toBe(1);
     expect(kills).toEqual([[-7001, "SIGKILL"]]);
     expect(fs.existsSync(file)).toBe(false);
@@ -326,12 +331,8 @@ describe("reapOwnThreadAttempts (#152 Stage A admission reap)", () => {
       path.join(root, "worker-sibling", WORKER_LOCK_FILENAME),
       String(process.pid),
     );
-    const kills: Array<[number, unknown]> = [];
-    const n = reapOwnThreadAttempts({
-      root,
-      threadId: THREAD,
-      kill: (pid, sig) => kills.push([pid, sig]),
-    });
+    const { kills, kill } = killRecorder();
+    const n = reapOwnThreadAttempts({ root, threadId: THREAD, kill });
     expect(n).toBe(1);
     expect(kills).toEqual([[-7002, "SIGKILL"]]);
     expect(fs.existsSync(target)).toBe(false);
@@ -341,13 +342,13 @@ describe("reapOwnThreadAttempts (#152 Stage A admission reap)", () => {
   it("agentUser set: shells the group kill as the agent account instead of process.kill", () => {
     const root = tmpRoot();
     writeRunPid(root, "w1", 7004);
-    const kills: Array<[number, unknown]> = [];
+    const { kills, kill } = killRecorder();
     const spawned: string[][] = [];
     reapOwnThreadAttempts({
       root,
       threadId: THREAD,
       agentUser: "automata-agent",
-      kill: (pid, sig) => kills.push([pid, sig]),
+      kill,
       spawnKill: (inv) => spawned.push([inv.file, ...inv.args]),
     });
     expect(kills).toEqual([]);
@@ -373,14 +374,8 @@ describe("reapOwnThreadAttempts (#152 Stage A admission reap)", () => {
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, `${THREAD}.pid`);
     fs.writeFileSync(file, "not-a-pid");
-    const kills: Array<[number, unknown]> = [];
-    expect(
-      reapOwnThreadAttempts({
-        root,
-        threadId: THREAD,
-        kill: (p, s2) => kills.push([p, s2]),
-      }),
-    ).toBe(0);
+    const { kills, kill } = killRecorder();
+    expect(reapOwnThreadAttempts({ root, threadId: THREAD, kill })).toBe(0);
     expect(kills).toEqual([]);
     expect(fs.existsSync(file)).toBe(true);
   });
