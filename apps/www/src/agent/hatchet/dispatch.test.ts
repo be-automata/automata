@@ -435,10 +435,6 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
       automationId: await createReviewAutomation({ userId: user.id, orgId }),
       prNumber,
     });
-  const okFetch = (runId: string) => {
-    const r = routedHatchetFetch(runId);
-    return { mock: r.mock, cancels: r.cancelBodies };
-  };
 
   it("review dispatch: variant by policy, prKey/deliveryId/supersedePolicy in input, versioned metadata, activeRunExternalId stamped", async () => {
     await upsertRepoReviewSetting({
@@ -448,7 +444,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
       patch: { supersedePolicy: "complete-run-discard" },
     });
     const t = await makeReviewThread(77);
-    const f = okFetch("run-discard-1");
+    const f = routedHatchetFetch("run-discard-1");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
       userId: user.id,
@@ -476,7 +472,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
       recheckOnComplete: "false",
     });
     // #165: www never cancels — supersession is the variant's per-PR strategy.
-    expect(f.cancels).toHaveLength(0);
+    expect(f.cancelBodies).toHaveLength(0);
     const [row] = await db.query.thread.findMany({
       where: (th, { eq: e }) => e(th.id, t.threadId),
     });
@@ -486,7 +482,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
 
   it("mints a synthetic deliveryId when none is supplied (never empty)", async () => {
     const t = await makeReviewThread(78);
-    const f = okFetch("run-2");
+    const f = routedHatchetFetch("run-2");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
       userId: user.id,
@@ -517,7 +513,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
       .set({ supersedePolicy: "app-side" })
       .where(eq(repoReviewSettings.organizationId, orgId));
     const t = await makeReviewThread(79);
-    const f = okFetch("run-79");
+    const f = routedHatchetFetch("run-79");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
       userId: user.id,
@@ -529,7 +525,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
     const body = triggerBody(f.mock);
     expect(body.workflowName).toBe("agent-run-newest"); // default, not legacy
     expect(body.input.supersedePolicy).toBe("newest-wins");
-    expect(f.cancels).toHaveLength(0);
+    expect(f.cancelBodies).toHaveLength(0);
     vi.unstubAllGlobals();
   });
 
@@ -549,7 +545,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
       .update(repoReviewSettings)
       .set({ supersedePolicy: "zzz" })
       .where(eq(repoReviewSettings.organizationId, orgId));
-    const f = okFetch("never");
+    const f = routedHatchetFetch("never");
     vi.stubGlobal("fetch", f.mock);
     await expect(
       dispatchAgentRun({
@@ -581,7 +577,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
       userId: user.id,
       overrides: { organizationId: orgId },
     });
-    const f = okFetch("run-plain");
+    const f = routedHatchetFetch("run-plain");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
       userId: user.id,
@@ -613,7 +609,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
       threadId: t.threadId,
       threadChatId: t.threadChatId,
     });
-    const f = okFetch("never");
+    const f = routedHatchetFetch("never");
     vi.stubGlobal("fetch", f.mock);
     // getInstallationToken shares the pre-trigger Promise.all with the mint;
     // Promise.all rejects on its failure without waiting for the mint's row.
@@ -655,7 +651,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
       repoFullName: "be-automata/automata",
     });
     const t = await makeReviewThread(91);
-    const f = okFetch("run-new-91");
+    const f = routedHatchetFetch("run-new-91");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
       userId: user.id,
@@ -664,7 +660,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
       repoFullName: "be-automata/automata",
       branch: "feature",
     });
-    expect(f.cancels).toEqual([]); // #165: engine-owned, always
+    expect(f.cancelBodies).toEqual([]); // #165: engine-owned, always
     expect(triggerBody(f.mock).workflowName).toBe("agent-run-strict");
     vi.unstubAllGlobals();
   });

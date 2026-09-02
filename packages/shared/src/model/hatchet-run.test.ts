@@ -63,7 +63,7 @@ async function setThreadStatus(
     .where(eq(threadTable.id, threadId));
 }
 
-describe("hatchet-run (#8 supersede tracking, org-fenced)", () => {
+describe("hatchet-run row pruning", () => {
   let userId: string;
   let orgA: string;
 

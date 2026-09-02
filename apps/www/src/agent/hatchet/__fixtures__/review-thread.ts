@@ -50,7 +50,7 @@ export async function createReviewAutomation({
 /**
  * A PR thread already transitioned to `booting`: in production dispatch runs
  * only after startAgentMessage does that, so a superseded prior run is in the
- * active set markThreadsSuperseded targets. ThreadInsert omits `status`, so it
+ * active set production supersession semantics observed (nothing may touch it). ThreadInsert omits `status`, so it
  * is set directly.
  */
 export async function createBootingPRThread({

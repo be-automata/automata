@@ -170,6 +170,8 @@ export async function resolveSupersedePolicy({
   for (const row of [repoRow, orgDefault]) {
     if (!row?.supersedePolicy) continue;
     if (row.supersedePolicy === RETIRED_SUPERSEDE_POLICY) {
+      // TODO(#165): transient cutover shim — delete this branch once the
+      // retire migration has run and its verification counts are 0.
       // #165 cutover tolerance: a row written by a stale build reads as
       // unset (org default / platform default apply). The retire migration
       // (deploy/migrations/2026-09-02-165-retire-app-side-rows.sql) NULLs these; genuinely unknown

@@ -98,15 +98,6 @@ export async function getLatestHatchetRunForThread({
 }
 
 /**
- * DO NOT add a draft-state filter here. The keying — (org, repo, prNumber,
- * in_flight) with NO draft filter — is what lets a ready_for_review dispatch
- * preempt an in-flight run that started while the PR was a draft (newest-wins).
- * Draft state is deliberately NOT recorded on run rows; filtering on it would
- * reopen the orch-agents#349 bug class (a stale draft run swallowing the first
- * verdict).
- */
-
-/**
  * Delete rows older than HATCHET_RUN_PRUNE_AFTER_MS (any status). Rows are never
  * eagerly marked finished, so age is the only growth bound — the hourly
  * stalled-tasks cron calls this to keep the table from growing without limit.
