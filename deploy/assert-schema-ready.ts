@@ -104,6 +104,14 @@ async function main(): Promise<void> {
   console.log(
     `assert-schema-ready: OK — all ${REQUIRED.length} required column(s) present`,
   );
+  // Explicit exit, as every sibling script in deploy/ does after a createDb()
+  // run (bind-github-installation, seed-pilot-mirror, seed-selfhost, skill-push).
+  // createDb opens a pool that keeps the event loop alive: measured, the success
+  // path returned only after ~10s on node-postgres, and PROD IS NEON, where
+  // createDb selects the websocket-backed neon-serverless driver instead — a
+  // handle far more likely to hold the loop open indefinitely. A deploy gate
+  // that does not return control promptly is not usable in a pipeline.
+  process.exit(0);
 }
 
 main().catch((error: unknown) => {
