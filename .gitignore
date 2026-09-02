@@ -86,3 +86,11 @@ packages/worker/.hatchet-it-override.generated.yml
 # into a PR once. Neither is referenced by any build, test or deploy step.
 .claude/tmp/
 ruvector.db
+
+# Ruflo local secrets and runtime data
+.env
+.env.local
+.env.*.local
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/
