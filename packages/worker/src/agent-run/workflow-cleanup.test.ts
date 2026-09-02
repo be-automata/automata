@@ -58,6 +58,30 @@ const startGhBroker = vi.fn();
 // Ctor args of every DaemonProcess the run built (the broker handoff pin).
 const daemonCtorArgs: unknown[][] = [];
 
+// #152 Stage A: the admission reap scans the REAL namespace root and issues
+// real group-SIGKILLs for dead-sibling debris — on a box that also runs
+// production workers, a unit test must never do that (a recycled pgid could
+// be live work). Mocked like the other side-effectful collaborators, and the
+// mocks RECORD their order so the admission wiring (reclaim → reap → slot,
+// per the safety argument in workflow.ts) is asserted, not assumed.
+const admissionOrder: string[] = [];
+vi.mock("./reclaim", () => ({
+  reclaimDeadWorkerRuns: vi.fn(() => {
+    admissionOrder.push("reclaim");
+  }),
+  reapOwnThreadAttempts: vi.fn(() => {
+    admissionOrder.push("reap");
+    return 0;
+  }),
+}));
+// Same shared-root hazard as ./reclaim: the real acquireBoxSlot creates lock
+// dirs under the box's production namespace root during unit tests.
+vi.mock("./box-slot", () => ({
+  acquireBoxSlot: vi.fn(async () => {
+    admissionOrder.push("slot");
+    return { release: vi.fn() };
+  }),
+}));
 vi.mock("./provision", () => ({
   provisionWorkdir: (...args: unknown[]) => provisionWorkdir(...args),
   cleanupWorkdir: (...args: unknown[]) => cleanupWorkdir(...args),
@@ -856,5 +880,26 @@ describe("#125 C4: queue-mode staleness self-check", () => {
       await runFn({ ...INPUT, prKey: "k", deliveryId: "d", ...extra }, ctx());
     }
     expect(checkRunStaleness).not.toHaveBeenCalled();
+  });
+});
+
+describe("#152 Stage A: admission wiring order", () => {
+  it("reclaims dead siblings, then reaps this run's prior attempts, THEN acquires the box slot — with the run's threadId and the namespace root", async () => {
+    admissionOrder.length = 0;
+    const { reapOwnThreadAttempts, reclaimDeadWorkerRuns } = await import(
+      "./reclaim"
+    );
+    vi.mocked(reapOwnThreadAttempts).mockClear();
+    vi.mocked(reclaimDeadWorkerRuns).mockClear();
+    // Fail at the credential pull — everything at and before the slot has run.
+    pullAgentCredentials.mockRejectedValue(new Error("stop here"));
+    await expect(runFn({ ...INPUT }, ctx())).rejects.toThrow("stop here");
+    expect(admissionOrder.slice(0, 3)).toEqual(["reclaim", "reap", "slot"]);
+    expect(vi.mocked(reapOwnThreadAttempts)).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: INPUT.threadId }),
+    );
+    expect(vi.mocked(reclaimDeadWorkerRuns)).toHaveBeenCalledWith(
+      expect.objectContaining({ root: expect.any(String) }),
+    );
   });
 });

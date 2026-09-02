@@ -1,7 +1,11 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { WORKER_LOCK_FILENAME, workerRunDir } from "./run-namespace";
+import {
+  WORKER_LOCK_FILENAME,
+  sanitizeThreadId,
+  workerRunDir,
+} from "./run-namespace";
 import { buildKillInvocation, type Invocation } from "./spawn-as-user";
 
 /**
@@ -151,4 +155,81 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
       // best-effort
     }
   }
+}
+
+/**
+ * Admission-time reap of PREVIOUS ATTEMPTS of one run (#152 Stage A).
+ *
+ * The zombie window this closes: a worker dies (SIGKILL, panic, reboot race)
+ * mid-run, the engine's session lapses and it REDELIVERS the task — possibly
+ * to the OTHER worker process on the box — while the dead attempt's daemon
+ * process group still holds the box's memory and credentials. Boot-reclaim
+ * only runs at worker starts, so a redelivery landing on the surviving worker
+ * used to start a second agent beside the orphan.
+ *
+ * Called at run admission (workflow.ts, before the box-slot acquire): scans
+ * EVERY workerId dir — own and siblings, live or dead — for `<threadId>.pid`
+ * and SIGKILLs that process group, then removes ONLY the pid file (a live
+ * sibling's dir is never deleted; dead siblings are reclaimDeadWorkerRuns'
+ * job, which admission also invokes).
+ *
+ * WHY killing by threadId is safe with no engine read (fail-closed by
+ * construction, not by status polling):
+ *  - Hatchet never runs one workflow-run concurrently with itself: a
+ *    redelivery is issued only after the prior assignment's session lapsed.
+ *  - www's per-thread daemon-token dedup guard prevents two DISPATCHES for
+ *    one thread being in flight, so a same-threadId pid can only be a prior
+ *    attempt of THIS run — never someone else's live work.
+ *  - `slots: 1` means this worker itself has no other task mid-flight.
+ * Never throws; every op is best-effort (a stray file must not fail a run).
+ */
+export function reapOwnThreadAttempts(
+  opts: Omit<ReclaimOpts, "selfWorkerId"> & { threadId: string },
+): number {
+  const { root, threadId } = opts;
+  const kill = opts.kill ?? ((pid, signal) => process.kill(pid, signal));
+  const spawnKill =
+    opts.spawnKill ??
+    ((invocation: Invocation) => {
+      spawn(invocation.file, invocation.args, { stdio: "ignore" }).unref();
+    });
+  const log = opts.log ?? (() => {});
+  const pidFileName = `${sanitizeThreadId(threadId)}.pid`;
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let reaped = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const pidFile = path.join(workerRunDir(root, entry.name), pidFileName);
+    const daemonPid = readPid(pidFile);
+    if (daemonPid === null) continue;
+    try {
+      const killInvocation = buildKillInvocation({
+        agentUser: opts.agentUser ?? "",
+        pgid: daemonPid,
+      });
+      if (killInvocation) {
+        spawnKill(killInvocation);
+      } else {
+        kill(-daemonPid, "SIGKILL");
+      }
+      log(
+        `admission-reap: SIGKILLed prior attempt group ${daemonPid} of ${threadId} (${entry.name})`,
+      );
+    } catch {
+      // already gone
+    }
+    try {
+      fs.rmSync(pidFile, { force: true });
+    } catch {
+      // best-effort
+    }
+    reaped += 1;
+  }
+  return reaped;
 }

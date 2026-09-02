@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { reclaimDeadWorkerRuns } from "./reclaim";
+import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { WORKER_LOCK_FILENAME } from "./run-namespace";
 
 /**
@@ -280,5 +280,108 @@ describe("reclaimDeadWorkerRuns — agent-uid mode", () => {
       }),
     ).not.toThrow();
     expect(spawnKill).not.toHaveBeenCalled();
+  });
+});
+
+describe("reapOwnThreadAttempts (#152 Stage A admission reap)", () => {
+  const THREAD = "11111111-2222-3333-4444-555555555555";
+
+  function writeRunPid(root: string, workerId: string, pid: number): string {
+    const dir = path.join(root, workerId);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${THREAD}.pid`);
+    fs.writeFileSync(file, String(pid));
+    return file;
+  }
+
+  it("SIGKILLs a prior attempt's group recorded in the OWN dir and removes only the pid file", () => {
+    const root = tmpRoot();
+    const file = writeRunPid(root, "worker-self", 7001);
+    fs.writeFileSync(
+      path.join(root, "worker-self", WORKER_LOCK_FILENAME),
+      String(process.pid),
+    );
+    const kills: Array<[number, unknown]> = [];
+    const n = reapOwnThreadAttempts({
+      root,
+      threadId: THREAD,
+      kill: (pid, sig) => kills.push([pid, sig]),
+    });
+    expect(n).toBe(1);
+    expect(kills).toEqual([[-7001, "SIGKILL"]]);
+    expect(fs.existsSync(file)).toBe(false);
+    // The dir (and its lock) survives — only the pid file goes.
+    expect(
+      fs.existsSync(path.join(root, "worker-self", WORKER_LOCK_FILENAME)),
+    ).toBe(true);
+  });
+
+  it("reaps the same thread's attempt under a LIVE sibling dir (redelivery after that worker's kill) without touching the sibling's other runs", () => {
+    const root = tmpRoot();
+    const target = writeRunPid(root, "worker-sibling", 7002);
+    // The sibling also records an UNRELATED run — must survive.
+    const other = path.join(root, "worker-sibling", "other-thread.pid");
+    fs.writeFileSync(other, "7003");
+    fs.writeFileSync(
+      path.join(root, "worker-sibling", WORKER_LOCK_FILENAME),
+      String(process.pid),
+    );
+    const kills: Array<[number, unknown]> = [];
+    const n = reapOwnThreadAttempts({
+      root,
+      threadId: THREAD,
+      kill: (pid, sig) => kills.push([pid, sig]),
+    });
+    expect(n).toBe(1);
+    expect(kills).toEqual([[-7002, "SIGKILL"]]);
+    expect(fs.existsSync(target)).toBe(false);
+    expect(fs.existsSync(other)).toBe(true);
+  });
+
+  it("agentUser set: shells the group kill as the agent account instead of process.kill", () => {
+    const root = tmpRoot();
+    writeRunPid(root, "w1", 7004);
+    const kills: Array<[number, unknown]> = [];
+    const spawned: string[][] = [];
+    reapOwnThreadAttempts({
+      root,
+      threadId: THREAD,
+      agentUser: "automata-agent",
+      kill: (pid, sig) => kills.push([pid, sig]),
+      spawnKill: (inv) => spawned.push([inv.file, ...inv.args]),
+    });
+    expect(kills).toEqual([]);
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]!.join(" ")).toContain("-7004");
+  });
+
+  it("no pid file anywhere / missing root: returns 0, never throws", () => {
+    const root = tmpRoot();
+    fs.mkdirSync(path.join(root, "empty-worker"), { recursive: true });
+    expect(reapOwnThreadAttempts({ root, threadId: THREAD })).toBe(0);
+    expect(
+      reapOwnThreadAttempts({
+        root: path.join(root, "nope"),
+        threadId: THREAD,
+      }),
+    ).toBe(0);
+  });
+
+  it("malformed pid file is tolerated and left in place", () => {
+    const root = tmpRoot();
+    const dir = path.join(root, "w1");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${THREAD}.pid`);
+    fs.writeFileSync(file, "not-a-pid");
+    const kills: Array<[number, unknown]> = [];
+    expect(
+      reapOwnThreadAttempts({
+        root,
+        threadId: THREAD,
+        kill: (p, s2) => kills.push([p, s2]),
+      }),
+    ).toBe(0);
+    expect(kills).toEqual([]);
+    expect(fs.existsSync(file)).toBe(true);
   });
 });

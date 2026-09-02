@@ -50,7 +50,7 @@ export function getProcessWorkerId(): string {
 }
 
 /** Filename-safe threadId (threadIds are already `thr_<nanoid>`; defensive only). */
-function sanitizeThreadId(threadId: string): string {
+export function sanitizeThreadId(threadId: string): string {
   return threadId.replace(/[^A-Za-z0-9_-]/g, "_");
 }
 

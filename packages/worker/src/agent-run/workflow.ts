@@ -9,6 +9,7 @@ import {
 import { loadWorkerConfig } from "./config";
 import path from "node:path";
 import { acquireBoxSlot, type BoxSlot } from "./box-slot";
+import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { DaemonProcess } from "./daemon-process";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
 import {
@@ -448,6 +449,25 @@ async function runAgentInner(
     // touches disk, so a long wait never widens the on-disk credential
     // window; a cancel while waiting throws into this catch and the clone is
     // cleaned up. Released in the finally below, after teardown.
+    // #152 Stage A admission reap, BEFORE the slot: (a) a dead sibling
+    // worker's orphans die now, not at the next boot; (b) any prior attempt
+    // of THIS run (engine redelivery after a worker death) is SIGKILLed by
+    // its recorded process-group pid — the zombie can never share the box
+    // with its own redelivery. Both are best-effort and never throw; the
+    // safety argument for the no-engine-read own-thread kill lives on
+    // reapOwnThreadAttempts.
+    reclaimDeadWorkerRuns({
+      root: config.runNamespaceRoot,
+      selfWorkerId: getProcessWorkerId(),
+      agentUser: config.agentUser,
+      log: (m) => ctx.log(`[agent-run ${input.threadId}] ${m}`),
+    });
+    reapOwnThreadAttempts({
+      root: config.runNamespaceRoot,
+      threadId: input.threadId,
+      agentUser: config.agentUser,
+      log: (m) => ctx.log(`[agent-run ${input.threadId}] ${m}`),
+    });
     boxSlot = await acquireBoxSlot({
       dir: path.join(config.runNamespaceRoot, "box-slot"),
       holder: input.threadId,
