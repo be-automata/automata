@@ -2,6 +2,17 @@ import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
 import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
 import { AGENT_RUN_VARIANTS } from "./definition";
 
+// Defensive: this suite only checks registration shapes and never runs the
+// task fn — but if a future case does, the admission reap and box slot must
+// never touch the box's REAL namespace root from a unit test (#152 Stage A).
+vi.mock("./reclaim", () => ({
+  reclaimDeadWorkerRuns: vi.fn(),
+  reapOwnThreadAttempts: vi.fn().mockReturnValue(0),
+}));
+vi.mock("./box-slot", () => ({
+  acquireBoxSlot: vi.fn(async () => ({ release: vi.fn() })),
+}));
+
 /**
  * Phase 0.1 registration-shape proof for the agent-run WORKFLOW (converted from a
  * standalone `hatchet.task` so #2 onFailure + #3 stacked concurrency can attach).

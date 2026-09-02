@@ -884,7 +884,7 @@ describe("#125 C4: queue-mode staleness self-check", () => {
 });
 
 describe("#152 Stage A: admission wiring order", () => {
-  it("reclaims dead siblings, then reaps this run's prior attempts, THEN acquires the box slot — with the run's threadId and the namespace root", async () => {
+  it("BOTH admission reaps run BEFORE the box-slot acquire — with the run's threadId and the namespace root (their relative order is not a contract)", async () => {
     admissionOrder.length = 0;
     const { reapOwnThreadAttempts, reclaimDeadWorkerRuns } = await import(
       "./reclaim"
@@ -894,7 +894,14 @@ describe("#152 Stage A: admission wiring order", () => {
     // Fail at the credential pull — everything at and before the slot has run.
     pullAgentCredentials.mockRejectedValue(new Error("stop here"));
     await expect(runFn({ ...INPUT }, ctx())).rejects.toThrow("stop here");
-    expect(admissionOrder.slice(0, 3)).toEqual(["reclaim", "reap", "slot"]);
+    // The load-bearing invariant is set-before-slot, not reclaim-vs-reap
+    // order (either order yields the same end state — see reclaim.ts docs).
+    expect(admissionOrder.slice(0, 3).sort()).toEqual([
+      "reap",
+      "reclaim",
+      "slot",
+    ]);
+    expect(admissionOrder[2]).toBe("slot");
     expect(vi.mocked(reapOwnThreadAttempts)).toHaveBeenCalledWith(
       expect.objectContaining({ threadId: INPUT.threadId }),
     );

@@ -193,6 +193,12 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
     expect(json.setting.reviewDraftPrs).toBeNull();
   });
 
+  it("#165: the retired 'app-side' value → 400, never stored (per-repo route)", async () => {
+    const res = await PUT(putReq({ supersedePolicy: "app-side" }), { params });
+    expect(res.status).toBe(400);
+    expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
+  });
+
   it("DELETE clears the override fenced to the active org", async () => {
     const res = await DELETE(putReq({ blockTolerance: "error" }), { params });
     expect(res.status).toBe(200);
