@@ -139,7 +139,6 @@ describe("POLICY_TO_WORKFLOW / workflowNameForPolicy (#125/#127)", () => {
       "newest-wins": "agent-run-newest",
       "complete-run-queue": "agent-run-strict",
       "complete-run-discard": "agent-run-discard",
-      "app-side": "agent-run",
     });
   });
 

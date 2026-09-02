@@ -253,7 +253,7 @@ function wwwOptsFor(input: AgentRunInput, ctx: RunCtx): WwwClientOpts {
  * the engine cancels THIS run (in-flight or pre-daemon during provision)
  * under a native policy, an explicit `superseded` terminal is posted to www
  * after teardown — `finally` runs on both return and throw, so exactly once.
- * Legacy runs (no supersedePolicy) and the app-side policy post nothing: the
+ * Legacy runs (no supersedePolicy — non-review lanes) post nothing: the
  * control plane owns that terminal.
  */
 async function runAgent(
@@ -327,7 +327,7 @@ async function postSuperseded(
   wwwOpts: WwwClientOpts,
 ) {
   const policy = input.supersedePolicy;
-  if (!policy || policy === "app-side") {
+  if (!policy) {
     return;
   }
   // The generation the fence compares against — Hatchet's run id for THIS run.

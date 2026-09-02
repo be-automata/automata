@@ -99,7 +99,7 @@ describe("SupersedePolicySectionView", () => {
         overrides: [
           {
             repoFullName: "acme/widgets",
-            supersedePolicy: "app-side",
+            supersedePolicy: "complete-run-queue",
             recheckOnComplete: false,
             updatedAt: "2026-08-24T00:00:00.000Z",
           },

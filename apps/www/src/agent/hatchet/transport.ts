@@ -15,16 +15,14 @@ import type {
  * (packages/worker/src/agent-run/workflow.ts, landing in C1/#126) — the planes share no imports
  * (composability invariant), so a drift between the two tables is caught by
  * C3's E2E, not the type system. The legacy 'agent-run' workflow carries NO
- * per-PR entry (flag-off dispatches keep hitting it byte-identically, #125
- * AC7), so every native policy — newest-wins included — routes to a dedicated
- * variant. 'app-side' deliberately routes to legacy 'agent-run': the control
- * plane keeps the #8 cancel rules and the engine applies no per-PR strategy.
+ * per-PR entry and serves NON-REVIEW lanes only (#165): every review dispatch
+ * routes to a policy variant, and every policy is engine-owned — www owns no
+ * supersession path.
  */
 export const POLICY_TO_WORKFLOW = {
   "newest-wins": "agent-run-newest",
   "complete-run-queue": "agent-run-strict",
   "complete-run-discard": "agent-run-discard",
-  "app-side": "agent-run",
 } as const satisfies Record<SupersedePolicy, string>;
 
 /**
@@ -38,7 +36,6 @@ export function workflowNameForPolicy(policy: SupersedePolicy): string {
     case "newest-wins":
     case "complete-run-queue":
     case "complete-run-discard":
-    case "app-side":
       return POLICY_TO_WORKFLOW[policy];
     default: {
       const exhaustive: never = policy;

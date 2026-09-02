@@ -11,13 +11,13 @@ import { createNewThread } from "./new-thread-shared";
 import { getOctokitForBackground, getIsPRAuthor } from "@/lib/github";
 import { runPullRequestAutomation } from "./automations";
 import { archiveAndStopThread } from "./archive-thread";
-import { engineOwnsSupersession } from "@/agent/hatchet/dispatch";
 
 /**
- * #125: the automation's "archive + stop every other thread of this PR" step
- * is the LEGACY app-side supersede. Under a native policy the engine owns
- * supersession (cancel / queue / discard) — stopping the prior thread here
- * cancelled the running review under complete-run-queue in production.
+ * #165 (ADR-007): www owns NO supersession path. The automation's legacy
+ * "archive + stop every other thread of this PR" step is DELETED — the engine
+ * variant's per-PR concurrency supersedes prior runs, the C4 sweep reconciles.
+ * These tests are the regression fence: no dispatch of a PR automation may
+ * ever archive or stop a prior thread again, for any source.
  */
 vi.mock("./new-thread-shared", () => ({
   createNewThread: vi
@@ -30,10 +30,6 @@ vi.mock("@/app/api/webhooks/github/utils", async (importOriginal) => {
 });
 vi.mock("./archive-thread", () => ({
   archiveAndStopThread: vi.fn().mockResolvedValue(undefined),
-}));
-vi.mock("@/agent/hatchet/dispatch", async (importOriginal) => ({
-  ...(await importOriginal<object>()),
-  engineOwnsSupersession: vi.fn(),
 }));
 
 const octokit = {
@@ -50,7 +46,7 @@ const octokit = {
   },
 };
 
-describe("runPullRequestAutomation — prior-thread archival vs native supersede policies", () => {
+describe("runPullRequestAutomation — #165: prior threads are NEVER archived by www", () => {
   let user: User;
   let orgId: string;
   const REPO = "acme/widgets";
@@ -77,7 +73,7 @@ describe("runPullRequestAutomation — prior-thread archival vs native supersede
     });
   }
 
-  it("engine-owned policy → the prior review thread is LEFT ALONE (the policy decides)", async () => {
+  it("automated dispatch with a live prior thread of the same PR: the prior thread is LEFT ALONE", async () => {
     const automation = await createTestAutomation({
       db,
       userId: user.id,
@@ -88,7 +84,6 @@ describe("runPullRequestAutomation — prior-thread archival vs native supersede
       },
     });
     await priorThread(automation.id);
-    vi.mocked(engineOwnsSupersession).mockResolvedValue(true);
     await runPullRequestAutomation({
       userId: user.id,
       automationId: automation.id,
@@ -97,14 +92,11 @@ describe("runPullRequestAutomation — prior-thread archival vs native supersede
       prNumber: 7,
       source: "automated",
     });
-    expect(engineOwnsSupersession).toHaveBeenCalledWith(
-      expect.objectContaining({ organizationId: orgId, repoFullName: REPO }),
-    );
     expect(archiveAndStopThread).not.toHaveBeenCalled();
     expect(createNewThread).toHaveBeenCalledTimes(1);
   });
 
-  it("control-plane policy (flag off / app-side) → legacy behaviour: the prior thread is archived + stopped", async () => {
+  it("manual dispatch: same — no prior-thread side effects", async () => {
     const automation = await createTestAutomation({
       db,
       userId: user.id,
@@ -114,19 +106,16 @@ describe("runPullRequestAutomation — prior-thread archival vs native supersede
         repoFullName: REPO,
       },
     });
-    const prior = await priorThread(automation.id);
-    vi.mocked(engineOwnsSupersession).mockResolvedValue(false);
+    await priorThread(automation.id);
     await runPullRequestAutomation({
       userId: user.id,
       automationId: automation.id,
       repoFullName: REPO,
       prEventAction: "synchronize",
       prNumber: 7,
-      source: "automated",
+      source: "manual",
     });
-    expect(archiveAndStopThread).toHaveBeenCalledWith({
-      userId: user.id,
-      threadId: prior.threadId,
-    });
+    expect(archiveAndStopThread).not.toHaveBeenCalled();
+    expect(createNewThread).toHaveBeenCalledTimes(1);
   });
 });

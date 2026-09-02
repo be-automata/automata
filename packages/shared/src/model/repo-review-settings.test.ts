@@ -485,7 +485,7 @@ describe("resolveSupersedePolicy (#125/#127)", () => {
         db,
         organizationId: orgA,
         repoFullName: "acme/tolerance-first",
-        patch: { supersedePolicy: "app-side" },
+        patch: { supersedePolicy: "complete-run-discard" },
         expectAbsentSupersedeOverride: true,
       }),
     ).rejects.toBeInstanceOf(RepoReviewSettingConflictError);
@@ -496,7 +496,7 @@ describe("resolveSupersedePolicy (#125/#127)", () => {
       db,
       organizationId: orgA,
       repoFullName: ORG_DEFAULT_REPO_SENTINEL,
-      patch: { supersedePolicy: "app-side" },
+      patch: { supersedePolicy: "complete-run-discard" },
     });
     await upsertRepoReviewSetting({
       db,
@@ -514,7 +514,7 @@ describe("resolveSupersedePolicy (#125/#127)", () => {
       organizationId: orgA,
       repoFullName: ORG_DEFAULT_REPO_SENTINEL,
     });
-    expect(sentinel?.supersedePolicy).toBe("app-side");
+    expect(sentinel?.supersedePolicy).toBe("complete-run-discard");
   });
 
   it("falls back to the org-default sentinel row ('*') when the repo has no override", async () => {
@@ -577,7 +577,7 @@ describe("resolveSupersedePolicy (#125/#127)", () => {
       db,
       organizationId: orgA,
       repoFullName: ORG_DEFAULT_REPO_SENTINEL,
-      patch: { supersedePolicy: "app-side" },
+      patch: { supersedePolicy: "complete-run-queue" },
     });
     // Repo row exists for another field only.
     await upsertRepoReviewSetting({
@@ -592,7 +592,49 @@ describe("resolveSupersedePolicy (#125/#127)", () => {
         organizationId: orgA,
         repoFullName: "acme/widgets",
       }),
-    ).resolves.toMatchObject({ policy: "app-side" });
+    ).resolves.toMatchObject({ policy: "complete-run-queue" });
+  });
+
+  it("#165: a stored retired 'app-side' value reads as UNSET (org default applies); write boundary rejects it", async () => {
+    // Raw write — the cutover-window case of a stale build's row.
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { blockTolerance: "error" },
+    });
+    await db
+      .update(repoReviewSettings)
+      .set({ supersedePolicy: "app-side" })
+      .where(
+        and(
+          eq(repoReviewSettings.organizationId, orgA),
+          eq(repoReviewSettings.repoFullName, "acme/widgets"),
+        ),
+      );
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { supersedePolicy: "complete-run-discard" },
+    });
+    // The retired repo value is skipped; the org default wins.
+    await expect(
+      resolveSupersedePolicy({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/widgets",
+      }),
+    ).resolves.toMatchObject({ policy: "complete-run-discard" });
+    // And the write boundary refuses to store it anew.
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgA,
+        repoFullName: "acme/other",
+        patch: { supersedePolicy: "app-side" },
+      }),
+    ).rejects.toThrow(/Unknown supersedePolicy 'app-side'/);
   });
 
   it("rejects an unknown policy at the write boundary", async () => {

@@ -18,7 +18,7 @@
     }
   },
   "review": {
-    "workflowName": "agent-run",
+    "workflowName": "agent-run-newest",
     "input": {
       "threadId": "__THREAD_ID__",
       "threadChatId": "__THREAD_CHAT_ID__",
@@ -29,11 +29,22 @@
       "daemonToken": "__DAEMON_TOKEN__",
       "orgId": "__ORG_ID__",
       "prNumber": 4242,
-      "traceparent": "__TRACEPARENT__"
+      "traceparent": "__TRACEPARENT__",
+      "prKey": "__PR_KEY__",
+      "deliveryId": "__DELIVERY_ID__",
+      "supersedePolicy": "newest-wins",
+      "recheckOnComplete": false
     },
     "additionalMetadata": {
+      "metaVersion": "1",
       "threadId": "__THREAD_ID__",
-      "threadChatId": "__THREAD_CHAT_ID__"
+      "threadChatId": "__THREAD_CHAT_ID__",
+      "orgId": "__ORG_ID__",
+      "repoFullName": "be-automata/automata",
+      "prNumber": "4242",
+      "lane": "review",
+      "supersedePolicy": "newest-wins",
+      "recheckOnComplete": "false"
     }
   }
 }

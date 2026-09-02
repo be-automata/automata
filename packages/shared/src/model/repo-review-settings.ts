@@ -46,7 +46,6 @@ export function normalizeRepo(repoFullName: string): string {
  *  - 'newest-wins'          → engine cancels the in-flight run, runs the new one
  *  - 'complete-run-queue'   → the new run queues behind the in-flight one
  *  - 'complete-run-discard' → the new run is discarded while one is live
- *  - 'app-side'             → the control plane decides (legacy #8 rules)
  */
 /** The stored row changed since the caller read it (expectedUpdatedAt mismatch). */
 export class RepoReviewSettingConflictError extends Error {
@@ -60,8 +59,16 @@ export const SUPERSEDE_POLICIES = [
   "newest-wins",
   "complete-run-queue",
   "complete-run-discard",
-  "app-side",
 ] as const;
+
+/**
+ * #165: the retired legacy value. Never accepted on write (isSupersedePolicy
+ * is false for it) and never resolved — a stored row still carrying it (a
+ * stale build's write during the cutover window) reads as "no override", so
+ * the org default applies. Historical `hatchet_run.supersede_policy` text
+ * keeps the literal; run-snapshot readers treat it like any non-engine value.
+ */
+export const RETIRED_SUPERSEDE_POLICY = "app-side";
 export type SupersedePolicy = (typeof SUPERSEDE_POLICIES)[number];
 
 /** The policy every (org, repo) gets when nothing is configured. */
@@ -96,7 +103,6 @@ export const SUPERSEDE_POLICY_LABELS: Record<SupersedePolicy, string> = {
   "newest-wins": "newest commit wins",
   "complete-run-queue": "finish the running review, then queue",
   "complete-run-discard": "finish the running review, drop newer",
-  "app-side": "control plane decides",
 };
 
 /**
@@ -163,6 +169,16 @@ export async function resolveSupersedePolicy({
     });
   for (const row of [repoRow, orgDefault]) {
     if (!row?.supersedePolicy) continue;
+    if (row.supersedePolicy === RETIRED_SUPERSEDE_POLICY) {
+      // #165 cutover tolerance: a row written by a stale build reads as
+      // unset (org default / platform default apply). The retire migration
+      // (deploy/migrations/2026-09-02-165-retire-app-side-rows.sql) NULLs these; genuinely unknown
+      // values still throw below — fail-loud stays intact.
+      console.warn(
+        `[supersede] retired policy 'app-side' stored for (${organizationId}, ${row.repoFullName}) — treating as unset`,
+      );
+      continue;
+    }
     if (!isSupersedePolicy(row.supersedePolicy)) {
       throw new Error(
         `Unknown supersedePolicy '${row.supersedePolicy}' stored for ` +

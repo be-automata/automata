@@ -8,7 +8,7 @@ import { User, Session } from "@terragon/shared";
 import {
   getThread,
   getThreadChat,
-  markThreadsSuperseded,
+  markThreadTerminal,
   setThreadActiveRun,
 } from "@terragon/shared/model/threads";
 import { handleDaemonEvent } from "./handle-daemon-event";
@@ -168,7 +168,7 @@ describe("handleDaemonEvent — #125 C1 generation fence (no extra read)", () =>
 
   it("409 once the thread is terminal-superseded — a stale verdict never lands", async () => {
     const { threadId, threadChatId } = await remoteThread();
-    await markThreadsSuperseded({ db, threadIds: [threadId] });
+    await markThreadTerminal({ db, threadId, cause: "superseded" });
     const r = await handleDaemonEvent({
       threadId,
       threadChatId,
@@ -190,7 +190,9 @@ describe("handleDaemonEvent — #125 C1 generation fence (no extra read)", () =>
       enableThreadChatCreation: true,
     });
     expect(threadChatId).not.toBe(LEGACY_THREAD_CHAT_ID);
-    expect(await markThreadsSuperseded({ db, threadIds: [threadId] })).toBe(1);
+    expect(
+      await markThreadTerminal({ db, threadId, cause: "superseded" }),
+    ).toBe(true);
     // The live chat row carries the terminal…
     const chat = await getThreadChat({
       db,
@@ -270,7 +272,7 @@ describe("handleDaemonEvent — #153 read-tear closed: the fence decides from ON
     // short-circuits to "not terminal" and the event was ADMITTED. New fence:
     // every input comes from the chat read, which carries the typed cause.
     const { threadId, threadChatId } = await chatModeThread();
-    await markThreadsSuperseded({ db, threadIds: [threadId] });
+    await markThreadTerminal({ db, threadId, cause: "superseded" });
     // Reconstruct the stale thread-row snapshot the tear depended on.
     await db
       .update(schema.thread)
@@ -321,7 +323,7 @@ describe("handleDaemonEvent — #153 read-tear closed: the fence decides from ON
       chatOverrides: { status: "working" },
     });
     expect(threadChatId).toBe(LEGACY_THREAD_CHAT_ID);
-    await markThreadsSuperseded({ db, threadIds: [threadId] });
+    await markThreadTerminal({ db, threadId, cause: "superseded" });
     const r = await handleDaemonEvent({
       threadId,
       threadChatId,

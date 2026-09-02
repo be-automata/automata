@@ -21,7 +21,6 @@ import {
   createTestAutomation,
 } from "./test-helpers";
 import {
-  markThreadsSuperseded,
   markThreadTerminal,
   findOrphanRemoteThreads,
   setThreadActiveRun,
@@ -31,8 +30,6 @@ import {
 } from "./threads";
 import {
   recordHatchetRun,
-  findSupersedableReviewRuns,
-  markHatchetRunsSuperseded,
   retireHatchetRun,
   claimSweepLease,
   findSweepCandidates,
@@ -40,7 +37,6 @@ import {
   SWEEP_LEASE_MS,
   pruneHatchetRuns,
   HATCHET_RUN_PRUNE_AFTER_MS,
-  SUPERSEDE_FRESHNESS_MS,
 } from "./hatchet-run";
 import { hatchetRun as hatchetRunTable } from "../db/schema";
 
@@ -70,7 +66,6 @@ async function setThreadStatus(
 describe("hatchet-run (#8 supersede tracking, org-fenced)", () => {
   let userId: string;
   let orgA: string;
-  let orgB: string;
 
   async function makeThread(organizationId: string, prNumber: number) {
     const { threadId } = await createTestThread({
@@ -88,116 +83,6 @@ describe("hatchet-run (#8 supersede tracking, org-fenced)", () => {
   beforeEach(async () => {
     userId = (await createTestUser({ db })).user.id;
     orgA = await makeOrg("acme");
-    orgB = await makeOrg("globex");
-  });
-
-  it("records an in_flight run and finds it as supersedable from a newer thread", async () => {
-    const oldThread = await makeThread(orgA, 42);
-    const newThread = await makeThread(orgA, 42);
-    await recordHatchetRun({
-      db,
-      threadId: oldThread,
-      organizationId: orgA,
-      repoFullName: "acme/widgets",
-      prNumber: 42,
-      externalId: "run-old",
-    });
-
-    const found = await findSupersedableReviewRuns({
-      db,
-      organizationId: orgA,
-      repoFullName: "acme/widgets",
-      prNumber: 42,
-      excludeThreadId: newThread,
-    });
-    expect(found).toHaveLength(1);
-    expect(found[0]!.externalId).toBe("run-old");
-    expect(found[0]!.threadId).toBe(oldThread);
-  });
-
-  it("never returns the current thread's own run (a dispatch can't supersede itself)", async () => {
-    const t = await makeThread(orgA, 7);
-    await recordHatchetRun({
-      db,
-      threadId: t,
-      organizationId: orgA,
-      repoFullName: "acme/widgets",
-      prNumber: 7,
-      externalId: "run-self",
-    });
-    const found = await findSupersedableReviewRuns({
-      db,
-      organizationId: orgA,
-      repoFullName: "acme/widgets",
-      prNumber: 7,
-      excludeThreadId: t,
-    });
-    expect(found).toHaveLength(0);
-  });
-
-  it("is org-fenced: org B never sees org A's in-flight run for the same repo/PR", async () => {
-    const aThread = await makeThread(orgA, 9);
-    await recordHatchetRun({
-      db,
-      threadId: aThread,
-      organizationId: orgA,
-      repoFullName: "acme/widgets",
-      prNumber: 9,
-      externalId: "run-a",
-    });
-    const bThread = await makeThread(orgB, 9);
-    const found = await findSupersedableReviewRuns({
-      db,
-      organizationId: orgB,
-      repoFullName: "acme/widgets",
-      prNumber: 9,
-      excludeThreadId: bThread,
-    });
-    expect(found).toHaveLength(0);
-  });
-
-  it("matches repo slug case-insensitively", async () => {
-    const oldThread = await makeThread(orgA, 5);
-    const newThread = await makeThread(orgA, 5);
-    await recordHatchetRun({
-      db,
-      threadId: oldThread,
-      organizationId: orgA,
-      repoFullName: "ACME/Widgets", // stored lowercased
-      prNumber: 5,
-      externalId: "run-case",
-    });
-    const found = await findSupersedableReviewRuns({
-      db,
-      organizationId: orgA,
-      repoFullName: "acme/widgets",
-      prNumber: 5,
-      excludeThreadId: newThread,
-    });
-    expect(found).toHaveLength(1);
-  });
-
-  it("ignores runs older than the freshness window (long-finished, never a cancel target)", async () => {
-    const oldThread = await makeThread(orgA, 3);
-    const newThread = await makeThread(orgA, 3);
-    await recordHatchetRun({
-      db,
-      threadId: oldThread,
-      organizationId: orgA,
-      repoFullName: "acme/widgets",
-      prNumber: 3,
-      externalId: "run-stale",
-    });
-    // A `now` far past the freshness window makes the just-inserted row too old.
-    const found = await findSupersedableReviewRuns({
-      db,
-      organizationId: orgA,
-      repoFullName: "acme/widgets",
-      prNumber: 3,
-      excludeThreadId: newThread,
-      now: new Date(Date.now() + SUPERSEDE_FRESHNESS_MS + 60_000),
-    });
-    expect(found).toHaveLength(0);
   });
 
   it("pruneHatchetRuns deletes rows past the prune age and keeps fresh ones", async () => {
@@ -235,69 +120,6 @@ describe("hatchet-run (#8 supersede tracking, org-fenced)", () => {
       .from(hatchetRunTable)
       .where(eq(hatchetRunTable.threadId, t));
     expect(remaining.map((r) => r.id)).toEqual([fresh.id]);
-  });
-
-  it("markHatchetRunsSuperseded drops rows out of the supersedable set", async () => {
-    const oldThread = await makeThread(orgA, 11);
-    const newThread = await makeThread(orgA, 11);
-    const row = await recordHatchetRun({
-      db,
-      threadId: oldThread,
-      organizationId: orgA,
-      repoFullName: "acme/widgets",
-      prNumber: 11,
-      externalId: "run-x",
-    });
-    await markHatchetRunsSuperseded({ db, ids: [row.id] });
-    const found = await findSupersedableReviewRuns({
-      db,
-      organizationId: orgA,
-      repoFullName: "acme/widgets",
-      prNumber: 11,
-      excludeThreadId: newThread,
-    });
-    expect(found).toHaveLength(0);
-  });
-});
-
-describe("markThreadsSuperseded", () => {
-  let userId: string;
-  let orgA: string;
-
-  beforeEach(async () => {
-    userId = (await createTestUser({ db })).user.id;
-    orgA = await makeOrg("acme");
-  });
-
-  it("flips an ACTIVE thread to terminal 'complete' with a 'superseded' reason", async () => {
-    const { threadId } = await createTestThread({
-      db,
-      userId,
-      overrides: { organizationId: orgA },
-    });
-    await setThreadStatus(threadId, "working");
-    const moved = await markThreadsSuperseded({ db, threadIds: [threadId] });
-    expect(moved).toBe(1);
-    const [row] = await db.query.thread.findMany({
-      where: (thread, { eq }) => eq(thread.id, threadId),
-    });
-    expect(row!.status).toBe("complete");
-    expect(row!.errorMessage).toBe("superseded");
-  });
-
-  it("does NOT clobber a thread that already reached a terminal state", async () => {
-    const { threadId } = await createTestThread({
-      db,
-      userId,
-      overrides: { organizationId: orgA },
-    });
-    await setThreadStatus(threadId, "complete", null);
-    const moved = await markThreadsSuperseded({ db, threadIds: [threadId] });
-    expect(moved).toBe(0);
-    const [row] = await db.query.thread.findMany({
-      where: (thread, { eq }) => eq(thread.id, threadId),
-    });
-    expect(row!.errorMessage).toBeNull();
   });
 });
 
@@ -378,7 +200,7 @@ describe("#125 C1 generation fence (decideThreadGeneration / checkThreadGenerati
     expect(
       await checkThreadGeneration({ db, threadId, runExternalId: "run-old" }),
     ).toMatchObject({ ok: false, reason: "stale-generation" });
-    await markThreadsSuperseded({ db, threadIds: [threadId] });
+    await markThreadTerminal({ db, threadId, cause: "superseded" });
     expect(
       await checkThreadGeneration({ db, threadId, runExternalId: "run-new" }),
     ).toMatchObject({ ok: false, reason: "superseded" });

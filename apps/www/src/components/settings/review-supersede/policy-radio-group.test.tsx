@@ -7,7 +7,7 @@ import { PolicyRadioGroup, POLICY_CONSEQUENCE } from "./policy-radio-group";
 const noop = () => {};
 
 describe("PolicyRadioGroup (#125 C6)", () => {
-  it("renders a WAI radio group with all four policies in consequence language, Default badge on newest-wins", () => {
+  it("renders a WAI radio group with all three policies in consequence language, Default badge on newest-wins", () => {
     const html = renderToStaticMarkup(
       <PolicyRadioGroup
         value={null}
@@ -17,7 +17,7 @@ describe("PolicyRadioGroup (#125 C6)", () => {
       />,
     );
     expect(html).toContain('role="radiogroup"');
-    expect((html.match(/role="radio"/g) ?? []).length).toBe(4);
+    expect((html.match(/role="radio"/g) ?? []).length).toBe(3);
     for (const policy of SUPERSEDE_POLICIES) {
       // renderToStaticMarkup HTML-escapes apostrophes etc.
       const escaped = POLICY_CONSEQUENCE[policy]

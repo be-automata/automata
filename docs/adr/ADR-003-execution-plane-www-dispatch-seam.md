@@ -209,3 +209,10 @@ and `packages/sandbox` code where importable.
   prepared message the in-process path would have sent.
 - **Workflow step tests:** provision/run/cleanup against a mocked Hatchet context + a mocked
   daemon; installation token used for clone; workdir removed on terminal.
+
+## Amendment (2026-09-02, ADR-007 / #165)
+
+The seam **dispatches and stamps; it never cancels prior runs**. The pre-#165 app-side
+cancel pass (`supersedePriorReviewRuns`) and the automation's prior-thread archival are
+deleted; supersession of prior review runs is engine-only (the policy variant's per-PR
+concurrency), reconciled by the C4 sweep. See ADR-007.

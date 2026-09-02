@@ -599,7 +599,7 @@ describe("createEgressEventBatcher — audit batch add/flush/close", () => {
  * policy, exactly ONE explicit `superseded` terminal is posted to www — after
  * teardown (egress flushed, workdir cleaned) — for an in-flight cancel and for
  * a pre-daemon (provision-phase) cancel alike. Legacy runs (no policy on the
- * input) and `app-side` post nothing.
+ * input — non-review lanes) post nothing.
  */
 describe("#125 C1: engine cancel → explicit superseded terminal", () => {
   const PR_INPUT = {
@@ -757,12 +757,10 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     expect(postRunTerminal).not.toHaveBeenCalled();
   });
 
-  it("legacy run (no policy) and app-side: cancel posts nothing (AC7)", async () => {
-    for (const extra of [{}, { supersedePolicy: "app-side" as const }]) {
-      const { ctx, abortIn } = makeCtx();
-      abortIn(provisionWorkdir);
-      await expect(runFn({ ...PR_INPUT, ...extra }, ctx)).rejects.toThrow();
-    }
+  it("legacy run (no policy): cancel posts nothing (AC7)", async () => {
+    const { ctx, abortIn } = makeCtx();
+    abortIn(provisionWorkdir);
+    await expect(runFn({ ...PR_INPUT }, ctx)).rejects.toThrow();
     expect(postRunTerminal).not.toHaveBeenCalled();
   });
 

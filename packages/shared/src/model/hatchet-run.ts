@@ -105,44 +105,6 @@ export async function getLatestHatchetRunForThread({
  * reopen the orch-agents#349 bug class (a stale draft run swallowing the first
  * verdict).
  */
-/**
- * Find the LIVE in_flight review runs for one (org, repo, PR) that a newer review
- * dispatch should supersede — every fresh in_flight row EXCEPT the current thread's
- * own (a dispatch never cancels itself). Bounded to the freshness window so a
- * long-finished run (whose row was never marked finished) is not a cancel target.
- */
-export async function findSupersedableReviewRuns({
-  db,
-  organizationId,
-  repoFullName,
-  prNumber,
-  excludeThreadId,
-  now = new Date(),
-}: {
-  db: DB;
-  organizationId: string;
-  repoFullName: string;
-  prNumber: number;
-  excludeThreadId: string;
-  now?: Date;
-}): Promise<HatchetRun[]> {
-  return db
-    .select()
-    .from(hatchetRun)
-    .where(
-      and(
-        eq(hatchetRun.organizationId, organizationId),
-        eq(hatchetRun.repoFullName, normalizeRepo(repoFullName)),
-        eq(hatchetRun.prNumber, prNumber),
-        eq(hatchetRun.status, "in_flight"),
-        ne(hatchetRun.threadId, excludeThreadId),
-        gte(
-          hatchetRun.createdAt,
-          new Date(now.getTime() - SUPERSEDE_FRESHNESS_MS),
-        ),
-      ),
-    );
-}
 
 /**
  * Delete rows older than HATCHET_RUN_PRUNE_AFTER_MS (any status). Rows are never
@@ -168,21 +130,6 @@ export async function pruneHatchetRuns({
     )
     .returning({ id: hatchetRun.id });
   return deleted.length;
-}
-
-/** Mark rows `superseded` (their runs were cancelled by a newer review dispatch). */
-export async function markHatchetRunsSuperseded({
-  db,
-  ids,
-}: {
-  db: DB;
-  ids: string[];
-}): Promise<void> {
-  if (ids.length === 0) return;
-  await db
-    .update(hatchetRun)
-    .set({ status: "superseded" })
-    .where(inArray(hatchetRun.id, ids));
 }
 
 /**

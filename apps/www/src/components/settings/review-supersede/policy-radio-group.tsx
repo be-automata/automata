@@ -27,8 +27,6 @@ export const POLICY_CONSEQUENCE: Record<SupersedePolicy, string> = {
     "The running review finishes first; the new commit waits its turn. Reviews that are already stale skip themselves.",
   "complete-run-discard":
     "The running review finishes; commits pushed meanwhile are NOT reviewed.",
-  "app-side":
-    "Keep today's behavior: the platform cancels the old review when a new commit arrives.",
 };
 
 // The platform default lives in the shared model (the dispatch resolver uses

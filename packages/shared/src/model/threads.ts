@@ -1081,7 +1081,7 @@ export async function setThreadActiveRun({
 }
 
 /**
- * The terminal `errorMessage` a superseded thread carries (#8 app-side and
+ * The terminal `errorMessage` a superseded thread carries (worker- and
  * #125 C1). Load-bearing for the generation fence below — ONE constant for the
  * writer and every reader; C4 (#129) widens this into typed terminal causes.
  */
@@ -1672,18 +1672,6 @@ export async function markThreadsTerminal({
     ),
   );
   return [...updated.keys()];
-}
-
-/** #8 app-side supersede: the prior review threads a newer dispatch replaces. Returns the count moved. */
-export async function markThreadsSuperseded({
-  db,
-  threadIds,
-}: {
-  db: DB;
-  threadIds: string[];
-}): Promise<number> {
-  return (await markThreadsTerminal({ db, threadIds, cause: "superseded" }))
-    .length;
 }
 
 /** One thread, one typed cause. True when this call performed the transition. */

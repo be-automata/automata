@@ -537,3 +537,12 @@ runtime × customer box means an org can run Claude for reviews and Codex for ot
 its own keys, on its own hardware — a combination sealed-sandbox, single-runtime products cannot
 offer.
 
+
+## Amendment (2026-09-02, ADR-007 / #152)
+
+Engine-side concurrency (including the per-tenant policies and slot `schedule_timeout`
+discussed above) is scoped **per workflow** — no engine primitive caps across the four
+agent-run workflow variants. The one-agent-per-box budget is enforced host-side (flock +
+admission reaper + container memory ceiling; interim: `box-slot.ts`). The stale-RUNNING
+bound used by the reaper is the task's `executionTimeout`, distinct from the slot
+`schedule_timeout` above. See ADR-007.
