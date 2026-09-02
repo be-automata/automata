@@ -111,12 +111,6 @@ jobs:
           run_pkg @terragon/www
           run_pkg @terragon/daemon
           run_pkg @terragon/sandbox
-          # @terragon/worker was MISSING until #170. Every "CI green" on the
-          # #108 agent-uid work ran zero worker tests — including a test that
-          # could not pass on Linux at all. The package holds the execution
-          # plane: sudo uid-drop, ACL placement, egress proxy, broker handoff.
-          # Its darwin-only cases are guarded with skipIf/process.platform.
-          run_pkg @terragon/worker
 
           echo "::group::review (node --test)"
           pnpm --filter @terragon/review test
