@@ -291,9 +291,15 @@ describe("provisionWorkdir — a real clone with agentUser set", () => {
     // ...and the run's TMPDIR still exists afterwards
     const tmpStat = await fs.stat(path.join(workdir, "tmp"));
     expect(tmpStat.isDirectory()).toBe(true);
-    // ...and the ACEs were still applied BEFORE the clone (root then workdir)
-    expect(aceCalls.length).toBeGreaterThanOrEqual(2);
-    expect(aceCalls.every((c) => c[0] === "/bin/chmod")).toBe(true);
+    // The ACE assertions are darwin-only: applyAces is a hard no-op elsewhere
+    // (agent-uid-fs.ts) and provisionWorkdir passes no platform override, so
+    // aceCalls stays empty on Linux. The CLONE behaviour above is the point of
+    // this test and is platform-independent, so the test itself must stay
+    // cross-platform — only these two lines are gated.
+    if (process.platform === "darwin") {
+      expect(aceCalls.length).toBeGreaterThanOrEqual(2);
+      expect(aceCalls.every((c) => c[0] === "/bin/chmod")).toBe(true);
+    }
   });
 });
 
@@ -306,30 +312,33 @@ describe("provisionWorkdir — a real clone with agentUser set", () => {
  * box before this was fixed.
  */
 describe("provisionWorkdir — the workdir ACE must include the worker login", () => {
-  it("grants BOTH the agent user and the worker login, inheritably", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-ace-"));
-    const calls: string[][] = [];
-    await provisionWorkdir({
-      repoFullName: "o/r",
-      branch: "main",
-      installationToken: "t",
-      workdirRoot: path.join(root, "runs"),
-      runId: "thr_ace",
-      agentUser: "_automata-agent",
-      workerLogin: "the-operator",
-      aceExec: async (file, args) => {
-        calls.push([file, ...args]);
-      },
-      runGit: async () => ({ stdout: "", stderr: "" }),
-    });
-    const inheritable = calls.filter((c) =>
-      c.some((a) => a.includes("file_inherit")),
-    );
-    const granted = inheritable.map(
-      (c) => c.find((a) => a.includes("allow"))?.split(" ")[0] ?? "",
-    );
-    expect(granted).toContain("_automata-agent");
-    expect(granted).toContain("the-operator");
-    await fs.rm(root, { recursive: true, force: true });
-  });
+  it.skipIf(process.platform !== "darwin")(
+    "grants BOTH the agent user and the worker login, inheritably",
+    async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-ace-"));
+      const calls: string[][] = [];
+      await provisionWorkdir({
+        repoFullName: "o/r",
+        branch: "main",
+        installationToken: "t",
+        workdirRoot: path.join(root, "runs"),
+        runId: "thr_ace",
+        agentUser: "_automata-agent",
+        workerLogin: "the-operator",
+        aceExec: async (file, args) => {
+          calls.push([file, ...args]);
+        },
+        runGit: async () => ({ stdout: "", stderr: "" }),
+      });
+      const inheritable = calls.filter((c) =>
+        c.some((a) => a.includes("file_inherit")),
+      );
+      const granted = inheritable.map(
+        (c) => c.find((a) => a.includes("allow"))?.split(" ")[0] ?? "",
+      );
+      expect(granted).toContain("_automata-agent");
+      expect(granted).toContain("the-operator");
+      await fs.rm(root, { recursive: true, force: true });
+    },
+  );
 });
