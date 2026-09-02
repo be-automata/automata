@@ -141,3 +141,5 @@ With a repo policy `domain: ["github.com"]`:
 
 Opt-in automated check (needs a docker daemon):
 `SANDBOX_PROVIDER=docker pnpm -C packages/sandbox vitest run docker-egress.integration`.
+
+<!-- #108 cleanup verification 2026-09-02T12:42:33Z -->
