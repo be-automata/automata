@@ -574,8 +574,7 @@ export async function runPullRequestAutomation({
     const headSha = pr.data.head.sha;
     // Server-derived trust snapshot (ADR-005 §3a, #82): captured HERE, from the
     // EXISTING pulls.get read (no new webhook/API call, no extra round trip),
-    // for BOTH source: "automated" and "manual" — runs unconditionally, not
-    // gated behind `source !== "manual"` like the thread-archival block below.
+    // for BOTH source: "automated" and "manual" — runs unconditionally.
     // Unforgeable by construction: nothing in the request path lets a caller
     // set isFork/authorAssociation — this is the ONLY writer.
     const trustContext: ThreadTrustContext = {

@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
 /**
- * #125 C6: the 4-policy selector, in CONSEQUENCE language (never engine
+ * #125 C6: the 3-policy selector, in CONSEQUENCE language (never engine
  * jargon). Radix RadioGroup provides the WAI radio-group pattern (roving
  * tabindex, arrow keys, space). The discard card carries an amber warning
  * and the nested "re-verify when the run finishes" toggle; selecting discard
