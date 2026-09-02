@@ -58,6 +58,14 @@ const startGhBroker = vi.fn();
 // Ctor args of every DaemonProcess the run built (the broker handoff pin).
 const daemonCtorArgs: unknown[][] = [];
 
+// #152 Stage A: the admission reap scans the REAL namespace root and issues
+// real group-SIGKILLs for dead-sibling debris — on a box that also runs
+// production workers, a unit test must never do that (a recycled pgid could
+// be live work). Mocked like the other side-effectful collaborators.
+vi.mock("./reclaim", () => ({
+  reclaimDeadWorkerRuns: vi.fn(),
+  reapOwnThreadAttempts: vi.fn().mockReturnValue(0),
+}));
 vi.mock("./provision", () => ({
   provisionWorkdir: (...args: unknown[]) => provisionWorkdir(...args),
   cleanupWorkdir: (...args: unknown[]) => cleanupWorkdir(...args),
