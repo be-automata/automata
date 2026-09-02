@@ -1415,9 +1415,8 @@ export async function deleteThreadById({
 }
 
 /**
- * The non-terminal statuses a system reap (stall watchdog, supersede) may act on.
- * ONE definition shared by `getStalledThreads` and `markThreadsSuperseded` — a
- * future status added here reaches both sweeps, never one silently.
+ * The non-terminal statuses a system reap (the stall watchdog) may act on —
+ * a future status added here reaches every consumer, never one silently.
  */
 /**
  * SQL predicate: the thread's EFFECTIVE status is one of `statuses`. A legacy
