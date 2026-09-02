@@ -26,13 +26,15 @@
  * cannot run this code without it.
  */
 
-import { sql } from "drizzle-orm";
-// `pg` is NOT a root dependency — deploy/ has no package.json, so a bare `pg`
-// import resolves only by accidental hoisting (it did locally; it is absent from
-// node_modules/pg and from the root package.json). Every other deploy/*.ts goes
-// through the shared helper, which is the resolution path that is actually
-// guaranteed. Caught in review of #173.
-import { createDb } from "../packages/shared/src/db";
+// NO bare third-party imports here. deploy/ has no package.json, so `pg` or
+// `drizzle-orm` imported directly resolve only if they happen to be hoisted to
+// the repo-root node_modules — neither is a root dependency, so that is an
+// accident of the current install, not a guarantee. (It does resolve today:
+// this gate was run bare against a real Postgres repeatedly. That is precisely
+// why it is worth changing — a gate whose own imports work by accident is not a
+// gate.) Everything comes through the shared helper, whose resolution is rooted
+// in packages/shared, which really does depend on drizzle-orm. (#173 review.)
+import { createDb, sql } from "../packages/shared/src/db";
 
 /** Columns this revision of the code cannot run without. */
 const REQUIRED: ReadonlyArray<{
