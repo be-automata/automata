@@ -34,8 +34,6 @@ import {
   parseRepoFullName,
   getIsPRAuthor,
 } from "@/lib/github";
-import { getThreads } from "@terragon/shared/model/threads";
-import { archiveAndStopThread } from "./archive-thread";
 import {
   createGitHubCheckRunForAutomation,
   updateGitHubCheckRunForAutomation,
@@ -44,7 +42,6 @@ import { getAccessInfoForUser } from "@/lib/subscription";
 import { SUBSCRIPTION_MESSAGES } from "@/lib/subscription-msgs";
 import { getMaxAutomationsForUser } from "@/lib/subscription-tiers";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
-import { engineOwnsSupersession } from "@/agent/hatchet/dispatch";
 import { UserFacingError } from "@/lib/server-actions";
 import {
   resolveReviewSkill,
@@ -577,8 +574,7 @@ export async function runPullRequestAutomation({
     const headSha = pr.data.head.sha;
     // Server-derived trust snapshot (ADR-005 §3a, #82): captured HERE, from the
     // EXISTING pulls.get read (no new webhook/API call, no extra round trip),
-    // for BOTH source: "automated" and "manual" — runs unconditionally, not
-    // gated behind `source !== "manual"` like the thread-archival block below.
+    // for BOTH source: "automated" and "manual" — runs unconditionally.
     // Unforgeable by construction: nothing in the request path lets a caller
     // set isFork/authorAssociation — this is the ONLY writer.
     const trustContext: ThreadTrustContext = {
@@ -588,45 +584,11 @@ export async function runPullRequestAutomation({
       capturedAt: new Date().toISOString(),
     };
 
-    // Only the automated path ever supersedes prior threads (a manual run
-    // never touches them). Under a native supersede policy the ENGINE
-    // supersedes prior runs (cancel / queue / discard per the policy) —
-    // archiving+stopping the prior review threads here would cancel a run
-    // the policy says must finish.
-    if (source !== "manual") {
-      const engineOwns = await engineOwnsSupersession({
-        userId,
-        organizationId: automation.organizationId ?? null,
-        repoFullName,
-      });
-      if (engineOwns) {
-        console.log(
-          `[automation] engine-owned supersession for PR #${prNumber} in ${repoFullName} — prior review threads left to the policy`,
-        );
-      } else {
-        const unarchivedThreadsForAutomation = await getThreads({
-          db,
-          userId,
-          automationId,
-          archived: false,
-          githubRepoFullName: repoFullName,
-          githubPRNumber: prNumber,
-        });
-        console.log(
-          `Found ${unarchivedThreadsForAutomation.length} active threads for automation ${automationId} and PR #${prNumber} in ${repoFullName}`,
-        );
-        const results = await Promise.allSettled(
-          unarchivedThreadsForAutomation.map((thread) =>
-            archiveAndStopThread({ userId, threadId: thread.id }),
-          ),
-        );
-        for (const result of results) {
-          if (result.status === "rejected") {
-            console.error(`Error archiving thread:`, result.reason);
-          }
-        }
-      }
-    }
+    // #165 (ADR-007): www owns NO supersession path. Prior review threads of
+    // this automation+PR are left entirely to the engine's per-PR concurrency
+    // (the policy variant superseded/queued/discarded them at dispatch) and to
+    // the C4 sweep's typed terminals. The pre-#165 archival block lived here.
+
     const runAutomationResult = await runAutomation({
       userId,
       automationId,

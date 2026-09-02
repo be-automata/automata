@@ -90,8 +90,7 @@ export type AgentRunInput = {
   supersedePolicy?:
     | "newest-wins"
     | "complete-run-queue"
-    | "complete-run-discard"
-    | "app-side";
+    | "complete-run-discard";
   /** #125 snapshot pass-through; unread by the worker until C4/C5. */
   recheckOnComplete?: boolean;
 };

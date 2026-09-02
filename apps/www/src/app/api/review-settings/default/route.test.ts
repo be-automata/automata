@@ -87,7 +87,7 @@ describe("/api/review-settings/default (#125 C6 org default)", () => {
     await actor("admin");
     const [a, b] = await Promise.all([
       put({ supersedePolicy: "newest-wins", expectedUpdatedAt: null }),
-      put({ supersedePolicy: "app-side", expectedUpdatedAt: null }),
+      put({ supersedePolicy: "complete-run-discard", expectedUpdatedAt: null }),
     ]);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
     const stored = await getRepoReviewSetting({
@@ -96,7 +96,9 @@ describe("/api/review-settings/default (#125 C6 org default)", () => {
       repoFullName: ORG_DEFAULT_REPO_SENTINEL,
     });
     // The winner's choice stands — nothing was silently overwritten.
-    expect(["newest-wins", "app-side"]).toContain(stored?.supersedePolicy);
+    expect(["newest-wins", "complete-run-discard"]).toContain(
+      stored?.supersedePolicy,
+    );
   });
 
   it("conflict: a stale expectedUpdatedAt → 409 and no overwrite (AC3)", async () => {
@@ -108,7 +110,7 @@ describe("/api/review-settings/default (#125 C6 org default)", () => {
       repoFullName: ORG_DEFAULT_REPO_SENTINEL,
     }))!.updatedAt;
     const res = await put({
-      supersedePolicy: "app-side",
+      supersedePolicy: "complete-run-discard",
       expectedUpdatedAt: new Date(current.getTime() - 60_000).toISOString(),
     });
     expect(res.status).toBe(409);
@@ -121,6 +123,11 @@ describe("/api/review-settings/default (#125 C6 org default)", () => {
         })
       )?.supersedePolicy,
     ).toBe("newest-wins");
+  });
+
+  it("#165: the retired 'app-side' value → 400, never stored", async () => {
+    await actor("admin");
+    expect((await put({ supersedePolicy: "app-side" })).status).toBe(400);
   });
 
   it("unknown policy → 400, never stored", async () => {
@@ -137,7 +144,7 @@ describe("/api/review-settings/default (#125 C6 org default)", () => {
       repoFullName: ORG_DEFAULT_REPO_SENTINEL,
     }))!.updatedAt.toISOString();
     const [a, b] = await Promise.all([
-      put({ supersedePolicy: "app-side", expectedUpdatedAt: v }),
+      put({ supersedePolicy: "complete-run-discard", expectedUpdatedAt: v }),
       put({ supersedePolicy: "complete-run-queue", expectedUpdatedAt: v }),
     ]);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
@@ -186,8 +193,11 @@ describe("/api/review-settings/default — reviewDraftPrs (org draft toggle)", (
     const cleared = await put({ reviewDraftPrs: null, expectedUpdatedAt: v1 });
     expect(cleared.status).toBe(200);
     expect(
-      ((await cleared.json()) as { setting: { reviewDraftPrs: boolean | null } })
-        .setting.reviewDraftPrs,
+      (
+        (await cleared.json()) as {
+          setting: { reviewDraftPrs: boolean | null };
+        }
+      ).setting.reviewDraftPrs,
     ).toBeNull();
 
     const getRes = await GET();

@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
 /**
- * #125 C6: the 4-policy selector, in CONSEQUENCE language (never engine
+ * #125 C6: the 3-policy selector, in CONSEQUENCE language (never engine
  * jargon). Radix RadioGroup provides the WAI radio-group pattern (roving
  * tabindex, arrow keys, space). The discard card carries an amber warning
  * and the nested "re-verify when the run finishes" toggle; selecting discard
@@ -27,8 +27,6 @@ export const POLICY_CONSEQUENCE: Record<SupersedePolicy, string> = {
     "The running review finishes first; the new commit waits its turn. Reviews that are already stale skip themselves.",
   "complete-run-discard":
     "The running review finishes; commits pushed meanwhile are NOT reviewed.",
-  "app-side":
-    "Keep today's behavior: the platform cancels the old review when a new commit arrives.",
 };
 
 // The platform default lives in the shared model (the dispatch resolver uses

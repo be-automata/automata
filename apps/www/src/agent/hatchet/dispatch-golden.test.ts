@@ -18,11 +18,12 @@ import {
 } from "./__fixtures__/review-thread";
 
 /**
- * #125/#127 IRON regression golden: with the `supersedePolicy` feature flag OFF
- * (its default), the Hatchet dispatch payload — workflowName, input, and
- * additionalMetadata — must be EXACTLY the payload main produced before the
- * supersede-policy work landed. Literal deep equality against a versioned
- * fixture, not an exclusion list.
+ * IRON regression golden for the Hatchet dispatch payload — workflowName,
+ * input, and additionalMetadata compared literally against a versioned
+ * fixture, not an exclusion list. Since #165 the review case is the VARIANT
+ * payload (engine-owned supersession; the flag and legacy review path are
+ * gone); the plain-thread case remains the legacy `agent-run` payload,
+ * byte-identical for non-review lanes.
  *
  * The fixture was captured from the pre-change dispatch path. Run-specific
  * values (ids, the minted daemon token, the traceparent) are stored as
@@ -64,7 +65,7 @@ function abstract(node: unknown, values: Placeholders): unknown {
   return materialize(node, reverse);
 }
 
-describe("dispatch golden (flag OFF byte-identical)", () => {
+describe("dispatch golden (payload contract)", () => {
   let user: User;
   let orgId: string;
 
@@ -118,6 +119,17 @@ describe("dispatch golden (flag OFF byte-identical)", () => {
       __TRACEPARENT__: input.traceparent as string,
       __DAEMON_TOKEN__: input.daemonToken as string,
     };
+    if (key === "review") {
+      // #165: the review payload is the VARIANT contract. Its two composite
+      // per-run fields are shape-asserted, then pinned as placeholders —
+      // compared like every other key, never excluded.
+      expect(input.prKey).toBe(`${orgId}/be-automata/automata/4242`);
+      expect(input.deliveryId).toMatch(
+        new RegExp(`^manual:${t.threadId}:[0-9a-f]{16}$`),
+      );
+      values.__PR_KEY__ = input.prKey as string;
+      values.__DELIVERY_ID__ = input.deliveryId as string;
+    }
     let fixture: Record<string, unknown> = {};
     try {
       fixture = JSON.parse(readFileSync(FIXTURE_PATH, "utf8"));

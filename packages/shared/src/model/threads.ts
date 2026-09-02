@@ -1081,7 +1081,7 @@ export async function setThreadActiveRun({
 }
 
 /**
- * The terminal `errorMessage` a superseded thread carries (#8 app-side and
+ * The terminal `errorMessage` a superseded thread carries (worker- and
  * #125 C1). Load-bearing for the generation fence below — ONE constant for the
  * writer and every reader; C4 (#129) widens this into typed terminal causes.
  */
@@ -1415,9 +1415,8 @@ export async function deleteThreadById({
 }
 
 /**
- * The non-terminal statuses a system reap (stall watchdog, supersede) may act on.
- * ONE definition shared by `getStalledThreads` and `markThreadsSuperseded` — a
- * future status added here reaches both sweeps, never one silently.
+ * The non-terminal statuses a system reap (the stall watchdog) may act on —
+ * a future status added here reaches every consumer, never one silently.
  */
 /**
  * SQL predicate: the thread's EFFECTIVE status is one of `statuses`. A legacy
@@ -1672,18 +1671,6 @@ export async function markThreadsTerminal({
     ),
   );
   return [...updated.keys()];
-}
-
-/** #8 app-side supersede: the prior review threads a newer dispatch replaces. Returns the count moved. */
-export async function markThreadsSuperseded({
-  db,
-  threadIds,
-}: {
-  db: DB;
-  threadIds: string[];
-}): Promise<number> {
-  return (await markThreadsTerminal({ db, threadIds, cause: "superseded" }))
-    .length;
 }
 
 /** One thread, one typed cause. True when this call performed the transition. */

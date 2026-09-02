@@ -12,6 +12,7 @@ seam — the **Anti-deviation invariants** section of each ADR states what must 
 | [ADR-004](ADR-004-review-lane-emit-only-credential-fence.md) | The review lane is emit-only with a structural credential fence | Accepted |
 | [ADR-005](ADR-005-monotone-permission-and-posture-floors.md) | Permission/posture controls are monotone floors — tighten-only | Accepted |
 | [ADR-006](ADR-006-shape-not-kind-agent-agnostic-harness.md) | Planes receive resolved shapes, not credential kinds; agent-agnostic harness | Accepted |
+| [ADR-007](ADR-007-supersession-authority-and-box-budget.md) | Supersession authority (engine-only) + the one-agent box budget | Proposed |
 
 **Note:** [`../uat/adr-036-effect-intent.md`](../uat/adr-036-effect-intent.md) documents the
 effect-intent / emit-only wire format under `docs/uat/` (separate numbering); ADR-004 references it

@@ -253,7 +253,7 @@ function wwwOptsFor(input: AgentRunInput, ctx: RunCtx): WwwClientOpts {
  * the engine cancels THIS run (in-flight or pre-daemon during provision)
  * under a native policy, an explicit `superseded` terminal is posted to www
  * after teardown — `finally` runs on both return and throw, so exactly once.
- * Legacy runs (no supersedePolicy) and the app-side policy post nothing: the
+ * Legacy runs (no supersedePolicy — non-review lanes) post nothing: the
  * control plane owns that terminal.
  */
 async function runAgent(
@@ -321,13 +321,29 @@ async function runAgent(
   }
 }
 
+/**
+ * Structural mirror of the control plane's engine-owned policy set (the
+ * planes share no imports — composability invariant; drift is caught by the
+ * C3 E2E, same contract as the variant table above).
+ */
+const ENGINE_OWNED_POLICIES: readonly string[] = [
+  "newest-wins",
+  "complete-run-queue",
+  "complete-run-discard",
+];
+
 async function postSuperseded(
   input: AgentRunInput,
   ctx: RunCtx,
   wwwOpts: WwwClientOpts,
 ) {
   const policy = input.supersedePolicy;
-  if (!policy || policy === "app-side") {
+  // POSITIVE allowlist (#165): only an engine-owned snapshot posts the
+  // superseded terminal. The input is a WIRE value — a pre-#165 in-flight run
+  // can still carry the retired 'app-side' literal, and a future unknown
+  // value must fail toward "post nothing" (the C4 sweep is the backstop),
+  // never toward claiming a terminal this plane does not own.
+  if (!policy || !ENGINE_OWNED_POLICIES.includes(policy)) {
     return;
   }
   // The generation the fence compares against — Hatchet's run id for THIS run.

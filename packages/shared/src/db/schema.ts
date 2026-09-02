@@ -378,10 +378,11 @@ export const thread = pgTable(
     /**
      * The Hatchet workflow-run externalId of this thread's ACTIVE (latest
      * dispatched, not-yet-terminal) remote run (#125/#127). Written at
-     * dispatch when the supersedePolicy flag is ON; consumed by the C1
-     * generation fence: a terminal/verdict write from a run whose externalId
-     * no longer matches is rejected 409 (superseded). NULL = no fenced run
-     * (legacy dispatch, in-process sandbox) → the fence FAILS OPEN.
+     * dispatch for every REVIEW run (#165 — unconditional since the flag's
+     * retirement); consumed by the C1 generation fence: a terminal/verdict
+     * write from a run whose externalId no longer matches is rejected 409
+     * (superseded). NULL = no fenced run (non-review dispatch, in-process
+     * sandbox) → the fence FAILS OPEN.
      */
     activeRunExternalId: text("active_run_external_id"),
     /**
@@ -1520,7 +1521,7 @@ export const repoReviewSettings = pgTable(
      * Supersede policy for PR-review runs on this (org, repo) (#125/#127):
      * what happens when a new commit lands while a review run is still in
      * flight on the same PR. One of 'newest-wins' | 'complete-run-queue' |
-     * 'complete-run-discard' | 'app-side'. NULL (default) = no explicit
+     * 'complete-run-discard' ('app-side' retired by #165). NULL (default) = no explicit
      * choice → the resolver falls back to the org-default row (sentinel repo
      * '*') and finally to 'newest-wins'. Raw string here (dependency-free);
      * validated at the write boundary AND at dispatch — an unknown stored
@@ -1738,7 +1739,7 @@ export const hatchetRun = pgTable(
     externalId: text("external_id").notNull(),
     /**
      * 'in_flight' at dispatch → 'superseded' when a newer review takes the PR
-     * (app-side cancel, or the worker's/sweep's `superseded` terminal) →
+     * (the worker's/sweep's `superseded` terminal) →
      * 'terminal' for any other typed terminal (#125 C4: the CAUSE lives on
      * the thread; this status only says "no longer a supersede candidate").
      * A successfully completed run is never eagerly marked (the finder bounds

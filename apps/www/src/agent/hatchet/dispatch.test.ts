@@ -15,19 +15,11 @@ import {
 } from "@/lib/daemon-token";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import { repoReviewSettings } from "@terragon/shared/db/schema";
-import {
-  setFeatureFlagOverrideForTest,
-  createTestRemoteRun,
-} from "@terragon/shared/model/test-helpers";
+import { createTestRemoteRun } from "@terragon/shared/model/test-helpers";
 import { eq } from "drizzle-orm";
 import { getInstallationToken } from "@terragon/shared/github-app";
 import { thread as threadTable } from "@terragon/shared/db/schema";
-import {
-  hatchetDispatchEnabled,
-  dispatchAgentRun,
-  engineOwnsSupersession,
-  policyIsEngineOwned,
-} from "./dispatch";
+import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
 import {
   createReviewAutomation,
   createBootingPRThread,
@@ -320,7 +312,7 @@ describe("dispatchAgentRun", () => {
   });
 });
 
-describe("dispatchAgentRun — #8 supersede stale in-flight review", () => {
+describe("dispatchAgentRun — #165 engine-only supersession (www never cancels)", () => {
   let user: User;
   let orgId: string;
 
@@ -341,12 +333,11 @@ describe("dispatchAgentRun — #8 supersede stale in-flight review", () => {
     createBootingPRThread({ userId: user.id, orgId, automationId, prNumber });
   const routedFetch = routedHatchetFetch;
 
-  it("a second review dispatch cancels the prior run's externalId and supersedes its thread", async () => {
+  it("a second review dispatch for the same PR NEVER cancels the prior run or touches its thread", async () => {
     const reviewAutomation = await makeAutomation("pull_request");
     const old = await makePRThread(reviewAutomation, 100);
     const fresh = await makePRThread(reviewAutomation, 100);
 
-    // First (old) review dispatch records run 'run-old'.
     const first = routedFetch("run-old");
     vi.stubGlobal("fetch", first.mock);
     await dispatchAgentRun({
@@ -356,10 +347,12 @@ describe("dispatchAgentRun — #8 supersede stale in-flight review", () => {
       repoFullName: "be-automata/automata",
       branch: "feature",
     });
-    expect(first.cancelBodies).toHaveLength(0); // nothing prior to supersede
+    expect(first.cancelBodies).toHaveLength(0);
     vi.unstubAllGlobals();
 
-    // Second (fresh) review dispatch for the SAME PR must cancel 'run-old'.
+    // Second (fresh) review dispatch for the SAME PR: the engine variant's
+    // per-PR concurrency owns supersession (#165, ADR-007) — www issues no
+    // cancel and the old thread is untouched.
     const second = routedFetch("run-new");
     vi.stubGlobal("fetch", second.mock);
     await dispatchAgentRun({
@@ -370,14 +363,15 @@ describe("dispatchAgentRun — #8 supersede stale in-flight review", () => {
       branch: "feature",
     });
 
-    // The prior run was cancelled by externalId.
-    expect(second.cancelBodies).toEqual([{ externalIds: ["run-old"] }]);
-    // …and the OLD thread was terminally transitioned (no longer zombie "working").
+    expect(second.cancelBodies).toHaveLength(0);
+    expect(triggerBody(second.mock).workflowName).toBe("agent-run-newest");
     const [oldRow] = await db.query.thread.findMany({
       where: (t, { eq }) => eq(t.id, old.threadId),
     });
-    expect(oldRow!.status).toBe("complete");
-    expect(oldRow!.errorMessage).toBe("superseded");
+    // Not terminally transitioned, not archived — its run's fate is the
+    // engine's; the C4 sweep stamps the typed cause when that lands.
+    expect(oldRow!.errorMessage).not.toBe("superseded");
+    expect(oldRow!.activeRunExternalId).toBe("run-old");
     vi.unstubAllGlobals();
   });
 
@@ -419,7 +413,7 @@ describe("dispatchAgentRun — #8 supersede stale in-flight review", () => {
   });
 });
 
-describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
+describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", () => {
   let user: User;
   let orgId: string;
 
@@ -432,12 +426,6 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       slug: `org-${nanoid(8).toLowerCase()}`,
     });
     orgId = org.id;
-    await setFeatureFlagOverrideForTest({
-      db,
-      userId: user.id,
-      name: "supersedePolicy",
-      value: true,
-    });
   });
 
   const makeReviewThread = async (prNumber: number) =>
@@ -447,10 +435,6 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       automationId: await createReviewAutomation({ userId: user.id, orgId }),
       prNumber,
     });
-  const okFetch = (runId: string) => {
-    const r = routedHatchetFetch(runId);
-    return { mock: r.mock, cancels: r.cancelBodies };
-  };
 
   it("review dispatch: variant by policy, prKey/deliveryId/supersedePolicy in input, versioned metadata, activeRunExternalId stamped", async () => {
     await upsertRepoReviewSetting({
@@ -460,7 +444,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       patch: { supersedePolicy: "complete-run-discard" },
     });
     const t = await makeReviewThread(77);
-    const f = okFetch("run-discard-1");
+    const f = routedHatchetFetch("run-discard-1");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
       userId: user.id,
@@ -487,8 +471,8 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       supersedePolicy: "complete-run-discard",
       recheckOnComplete: "false",
     });
-    // Native policy → app-side cancel pass NOT run.
-    expect(f.cancels).toHaveLength(0);
+    // #165: www never cancels — supersession is the variant's per-PR strategy.
+    expect(f.cancelBodies).toHaveLength(0);
     const [row] = await db.query.thread.findMany({
       where: (th, { eq: e }) => e(th.id, t.threadId),
     });
@@ -498,7 +482,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
 
   it("mints a synthetic deliveryId when none is supplied (never empty)", async () => {
     const t = await makeReviewThread(78);
-    const f = okFetch("run-2");
+    const f = routedHatchetFetch("run-2");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
       userId: user.id,
@@ -515,36 +499,33 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
     vi.unstubAllGlobals();
   });
 
-  it("app-side policy keeps the legacy cancel pass AND routes to agent-run", async () => {
+  it("a stored retired 'app-side' row reads as UNSET: default policy applies, variant dispatch, no cancel", async () => {
+    // The write boundary rejects 'app-side' since #165, so seed it raw — the
+    // cutover-window case of a row written by a stale build.
     await upsertRepoReviewSetting({
       db,
       organizationId: orgId,
       repoFullName: "*",
-      patch: { supersedePolicy: "app-side" },
+      patch: { blockTolerance: "error" },
     });
-    const old = await makeReviewThread(79);
-    const fresh = await makeReviewThread(79);
-    const f1 = okFetch("run-old-appside");
-    vi.stubGlobal("fetch", f1.mock);
+    await db
+      .update(repoReviewSettings)
+      .set({ supersedePolicy: "app-side" })
+      .where(eq(repoReviewSettings.organizationId, orgId));
+    const t = await makeReviewThread(79);
+    const f = routedHatchetFetch("run-79");
+    vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
       userId: user.id,
-      threadId: old.threadId,
-      threadChatId: old.threadChatId,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
       repoFullName: "be-automata/automata",
       branch: "feature",
     });
-    vi.unstubAllGlobals();
-    const f2 = okFetch("run-new-appside");
-    vi.stubGlobal("fetch", f2.mock);
-    await dispatchAgentRun({
-      userId: user.id,
-      threadId: fresh.threadId,
-      threadChatId: fresh.threadChatId,
-      repoFullName: "be-automata/automata",
-      branch: "feature",
-    });
-    expect(f2.cancels).toEqual([{ externalIds: ["run-old-appside"] }]);
-    expect(triggerBody(f2.mock).workflowName).toBe("agent-run");
+    const body = triggerBody(f.mock);
+    expect(body.workflowName).toBe("agent-run-newest"); // default, not legacy
+    expect(body.input.supersedePolicy).toBe("newest-wins");
+    expect(f.cancelBodies).toHaveLength(0);
     vi.unstubAllGlobals();
   });
 
@@ -564,7 +545,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       .update(repoReviewSettings)
       .set({ supersedePolicy: "zzz" })
       .where(eq(repoReviewSettings.organizationId, orgId));
-    const f = okFetch("never");
+    const f = routedHatchetFetch("never");
     vi.stubGlobal("fetch", f.mock);
     await expect(
       dispatchAgentRun({
@@ -590,13 +571,13 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
     vi.unstubAllGlobals();
   });
 
-  it("non-review thread under the flag: legacy payload (no prKey, no variant)", async () => {
+  it("non-review thread: legacy payload (no prKey, no variant)", async () => {
     const t = await createTestThread({
       db,
       userId: user.id,
       overrides: { organizationId: orgId },
     });
-    const f = okFetch("run-plain");
+    const f = routedHatchetFetch("run-plain");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
       userId: user.id,
@@ -628,7 +609,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       threadId: t.threadId,
       threadChatId: t.threadChatId,
     });
-    const f = okFetch("never");
+    const f = routedHatchetFetch("never");
     vi.stubGlobal("fetch", f.mock);
     // getInstallationToken shares the pre-trigger Promise.all with the mint;
     // Promise.all rejects on its failure without waiting for the mint's row.
@@ -654,48 +635,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
     vi.unstubAllGlobals();
   });
 
-  it("engineOwnsSupersession: false with the flag OFF; true for a native policy; false for app-side; false (legacy) on a corrupt stored policy", async () => {
-    const t = await makeReviewThread(90);
-    const args = {
-      userId: user.id,
-      organizationId: orgId,
-      repoFullName: "be-automata/automata",
-    };
-    // Flag ON is set for this describe's user in beforeEach; default policy is
-    // newest-wins (native).
-    expect(await engineOwnsSupersession(args)).toBe(true);
-    await upsertRepoReviewSetting({
-      db,
-      organizationId: orgId,
-      repoFullName: "be-automata/automata",
-      patch: { supersedePolicy: "app-side" },
-    });
-    expect(await engineOwnsSupersession(args)).toBe(false);
-    await db
-      .update(repoReviewSettings)
-      .set({ supersedePolicy: "zzz" })
-      .where(eq(repoReviewSettings.organizationId, orgId));
-    expect(await engineOwnsSupersession(args)).toBe(false); // fail-safe
-    await setFeatureFlagOverrideForTest({
-      db,
-      userId: user.id,
-      name: "supersedePolicy",
-      value: false,
-    });
-    expect(await engineOwnsSupersession(args)).toBe(false);
-    expect(
-      await engineOwnsSupersession({ ...args, organizationId: null }),
-    ).toBe(false);
-    void t;
-  });
-
-  it("policyIsEngineOwned is the single rule behind BOTH app-side gates", async () => {
-    expect(policyIsEngineOwned("newest-wins")).toBe(true);
-    expect(policyIsEngineOwned("complete-run-queue")).toBe(true);
-    expect(policyIsEngineOwned("complete-run-discard")).toBe(true);
-    expect(policyIsEngineOwned("app-side")).toBe(false);
-    // Dispatch's own gate agrees: under app-side the cancel pass runs, under
-    // a native policy it does not (observed via the cancel endpoint).
+  it("a recorded prior in-flight run is never cancelled by a new dispatch under any policy", async () => {
     await upsertRepoReviewSetting({
       db,
       organizationId: orgId,
@@ -711,7 +651,7 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       repoFullName: "be-automata/automata",
     });
     const t = await makeReviewThread(91);
-    const f = okFetch("run-new-91");
+    const f = routedHatchetFetch("run-new-91");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
       userId: user.id,
@@ -720,7 +660,8 @@ describe("dispatchAgentRun — #125/#127 supersedePolicy flag ON", () => {
       repoFullName: "be-automata/automata",
       branch: "feature",
     });
-    expect(f.cancels).toEqual([]); // engine-owned: no app-side cancel
+    expect(f.cancelBodies).toEqual([]); // #165: engine-owned, always
+    expect(triggerBody(f.mock).workflowName).toBe("agent-run-strict");
     vi.unstubAllGlobals();
   });
 

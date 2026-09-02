@@ -11,17 +11,11 @@ import {
 } from "@/lib/daemon-token";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
 import { ThreadError } from "@/agent/error";
-import { markThreadsSuperseded } from "@terragon/shared/model/threads";
-import {
-  recordHatchetRun,
-  findSupersedableReviewRuns,
-  markHatchetRunsSuperseded,
-} from "@terragon/shared/model/hatchet-run";
+import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
 import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import type { ThreadSourceMetadata } from "@terragon/shared/db/types";
 import { resolveEgressPolicy } from "@/server-lib/egress/resolve-egress-policy";
-import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import {
   resolveSupersedePolicy,
   normalizeRepo,
@@ -35,7 +29,6 @@ import {
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
 import {
   triggerAgentRun,
-  cancelAgentRun,
   workflowNameForPolicy,
   buildReviewRunMetadata,
   type TriggerOpts,
@@ -55,75 +48,6 @@ export function hatchetConfig() {
     tenantId: env.HATCHET_TENANT_ID,
     apiToken: env.HATCHET_API_TOKEN,
   };
-}
-
-/**
- * #8 supersede: before a NEW review run is dispatched for a PR, cancel any prior
- * in-flight review run for the same (org, repo, PR) so only the newest verdict posts.
- * A cancelled Hatchet run emits NO terminal daemon-event, so we ALSO transition the
- * superseded threads terminally (amendment 7) — else they zombie as "working" until
- * the 75m watchdog and keep occupying a concurrency slot.
- *
- * Entirely BEST-EFFORT: a cancel/transition failure must never block the new dispatch
- * (the stalled-thread watchdog is the backstop). Only ever called for review threads
- * in a real org (mentions and personal/no-org threads never supersede).
- */
-async function supersedePriorReviewRuns({
-  organizationId,
-  repoFullName,
-  prNumber,
-  currentThreadId,
-}: {
-  organizationId: string;
-  repoFullName: string;
-  prNumber: number;
-  currentThreadId: string;
-}): Promise<void> {
-  try {
-    const prior = await findSupersedableReviewRuns({
-      db,
-      organizationId,
-      repoFullName,
-      prNumber,
-      excludeThreadId: currentThreadId,
-    });
-    if (prior.length === 0) return;
-
-    console.log("[hatchet] superseding prior in-flight review run(s)", {
-      organizationId,
-      repoFullName,
-      prNumber,
-      currentThreadId,
-      superseding: prior.map((r) => r.threadId),
-    });
-
-    // Cancel the remote runs (best-effort — a cancelled/already-finished run is a
-    // harmless no-op we swallow) and mark the rows + threads terminally so the old
-    // threads stop zombieing regardless of the cancel outcome. The three ops are
-    // independent (neither mark depends on the cancel result or on each other), so
-    // they run concurrently.
-    await Promise.all([
-      cancelAgentRun(
-        prior.map((r) => r.externalId),
-        hatchetConfig(),
-      ).catch((error) => {
-        console.error("[hatchet] supersede cancel failed (non-fatal)", {
-          prNumber,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }),
-      markHatchetRunsSuperseded({ db, ids: prior.map((r) => r.id) }),
-      markThreadsSuperseded({
-        db,
-        threadIds: prior.map((r) => r.threadId),
-      }),
-    ]);
-  } catch (error) {
-    console.error("[hatchet] supersede pass failed (non-fatal)", {
-      prNumber,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
 }
 
 /** Lowercase hex for `n` random bytes (crypto.getRandomValues — Workers + Node). */
@@ -239,76 +163,28 @@ export interface AgentRunInput {
    */
   egressPolicy?: EgressPolicyShape;
   /**
-   * #125/#127 flag-ON only: the per-PR concurrency key,
+   * #125/#127 review runs only: the per-PR concurrency key,
    * `${orgId}/${normalizedRepo}/${prNumber}`. The worker variants' per-PR CEL
    * entry references `input.prKey` — the field, never an interpolation. Absent
-   * with the flag off (byte-identical dispatch) and for non-review runs.
+   * for non-review runs (byte-identical legacy dispatch).
    */
   prKey?: string;
   /**
-   * #125/#127 flag-ON only: the run's idempotency identity. The webhook's
+   * #125/#127 review runs only: the run's idempotency identity. The webhook's
    * `X-GitHub-Delivery` id when the dispatch descends from a webhook, else a
-   * synthetic `manual:<threadId>:<random>` — always present under the flag, never
-   * empty. Deduped by C1's `idempotency` task config (24h TTL); intentional
+   * synthetic `manual:<threadId>:<random>` — always present on a review run,
+   * never empty. Deduped by C1's `idempotency` task config (24h TTL); intentional
    * re-dispatches (recheck, redo) mint DISTINCT ids and are never deduped.
    */
   deliveryId?: string;
   /**
-   * #125/#127 flag-ON only: the SNAPSHOT of the supersede policy resolved at
+   * #125/#127 review runs only: the SNAPSHOT of the supersede policy resolved at
    * dispatch. The authority for this run's audit/recheck/cancel semantics —
    * consumers read the stamp, never the current settings row (#125 decision 5).
    */
   supersedePolicy?: SupersedePolicy;
-  /** #125/#127 flag-ON only: the other half of the snapshot (discard recheck). */
+  /** #125/#127 review runs only: the other half of the snapshot (discard recheck). */
   recheckOnComplete?: boolean;
-}
-
-/**
- * #125: does the ENGINE own supersession for review runs of this repo (flag ON
- * for the dispatching user and the resolved policy is one of the native
- * variants), or does the control plane (legacy / app-side)? Every app-side
- * "supersede the prior run/thread" mechanism must consult THIS — there are
- * two (dispatch's supersedePriorReviewRuns via planSupersede, and the
- * automation's archival of prior PR threads) and both cancelled the running
- * review under complete-run-queue in production when only one was gated.
- * Both now derive from policyIsEngineOwned(); this wrapper adds the flag read
- * and fails safe to "control plane" (legacy behaviour) on any error.
- */
-/** The ONE rule: every native policy is engine-owned; only app-side is ours. */
-export function policyIsEngineOwned(policy: SupersedePolicy): boolean {
-  return policy !== "app-side";
-}
-
-export async function engineOwnsSupersession({
-  userId,
-  organizationId,
-  repoFullName,
-}: {
-  userId: string;
-  organizationId: string | null;
-  repoFullName: string;
-}): Promise<boolean> {
-  if (!organizationId) return false;
-  try {
-    const on = await getFeatureFlagForUser({
-      db,
-      userId,
-      flagName: "supersedePolicy",
-    });
-    if (!on) return false;
-    const snapshot = await resolveSupersedePolicy({
-      db,
-      organizationId,
-      repoFullName,
-    });
-    return policyIsEngineOwned(snapshot.policy);
-  } catch (error) {
-    console.error("[hatchet] engineOwnsSupersession failed — legacy path", {
-      repoFullName,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return false;
-  }
 }
 
 /** True when a thread should dispatch to the remote execution plane. */
@@ -318,30 +194,31 @@ export function hatchetDispatchEnabled(thread: {
   return env.HATCHET_ENABLED || thread.sandboxProvider === "hatchet-remote";
 }
 
-type SupersedePlan = {
-  /** Spread into the base input; empty on the legacy path (key set unchanged). */
+/**
+ * The review-dispatch plan (#165: exactly two dispatch modes exist). `null`
+ * for a non-review run — legacy `agent-run` payload, no trigger opts, no
+ * fence stamp, no run tracking. Non-null for a review run — every field is
+ * present together, so "is this a review plan" is ONE predicate everywhere.
+ */
+type ReviewPlan = {
+  /** Spread into the base input (prKey/deliveryId + the policy snapshot). */
   inputExtension: Pick<
     AgentRunInput,
     "prKey" | "deliveryId" | "supersedePolicy" | "recheckOnComplete"
   >;
-  /** Trigger opts; undefined on the legacy path (byte-identical payload). */
-  triggerOpts: TriggerOpts | undefined;
-  /** Run the #8 control-plane cancel pass (legacy path, or explicit app-side). */
-  appSideCancel: boolean;
-  /** Stamp thread.activeRunExternalId for the C1 fence (flag ON only). */
-  stampFence: boolean;
-  /** The resolved policy snapshot (flag ON review runs only). */
-  snapshot: SupersedeSnapshot | undefined;
+  /** Variant workflow name + enriched metadata. */
+  triggerOpts: TriggerOpts;
+  /** The resolved policy snapshot — the authority for this run's lifecycle. */
+  snapshot: SupersedeSnapshot;
 };
 
 /**
- * Decide the dispatch mode ONCE (#125/#127). Legacy when the flag is off or
- * the run is not a PR review. Otherwise resolve the (org, repo) policy — an
+ * Decide the dispatch mode ONCE (#125/#127/#165). Legacy plan only for a
+ * non-review run. A review run resolves the (org, repo) policy — an
  * unknown stored value throws here, failing the dispatch loudly — and derive
  * the variant, the input extension and the metadata from the SNAPSHOT.
  */
 async function planSupersede({
-  enabled,
   reviewContext,
   thread,
   threadId,
@@ -350,7 +227,6 @@ async function planSupersede({
   repoFullName,
   deliveryId,
 }: {
-  enabled: boolean;
   reviewContext: { organizationId: string; prNumber: number } | null;
   thread: { sourceMetadata?: ThreadSourceMetadata | null } | null;
   threadId: string;
@@ -358,29 +234,13 @@ async function planSupersede({
   orgId: string;
   repoFullName: string;
   deliveryId: string | undefined;
-}): Promise<SupersedePlan> {
-  if (!enabled) {
-    return {
-      inputExtension: {},
-      triggerOpts: undefined,
-      appSideCancel: true,
-      stampFence: false,
-      snapshot: undefined,
-    };
-  }
+}): Promise<ReviewPlan | null> {
   if (!reviewContext) {
-    // Non-review dispatch under the flag: nothing to plan. No fence stamp —
-    // activeRunExternalId is a REVIEW-run generation marker; stamping a
-    // mention/personal thread would hand the C1 fence an out-of-scope value.
-    // appSideCancel is unobserved here (its consumer is gated on
-    // reviewContext) — false keeps the plan honest.
-    return {
-      inputExtension: {},
-      triggerOpts: undefined,
-      appSideCancel: false,
-      stampFence: false,
-      snapshot: undefined,
-    };
+    // Non-review dispatch (mention / personal / no-org): nothing to plan. No
+    // fence stamp — activeRunExternalId is a REVIEW-run generation marker;
+    // stamping a mention/personal thread would hand the C1 fence an
+    // out-of-scope value.
+    return null;
   }
   const snapshot = await resolveSupersedePolicy({
     db,
@@ -405,7 +265,7 @@ async function planSupersede({
       skillVersion,
     }),
   };
-  const plan: SupersedePlan = {
+  const plan: ReviewPlan = {
     inputExtension: {
       prKey: buildPrKey({
         orgId,
@@ -420,10 +280,6 @@ async function planSupersede({
       recheckOnComplete: snapshot.recheckOnComplete,
     },
     triggerOpts,
-    // Same predicate as engineOwnsSupersession (the automation's archival
-    // gate): the two app-side supersede mechanisms can never diverge again.
-    appSideCancel: !policyIsEngineOwned(snapshot.policy),
-    stampFence: true,
     snapshot,
   };
   console.log("[hatchet] supersede policy resolved for dispatch", {
@@ -458,7 +314,7 @@ export async function dispatchAgentRun({
    * #127: the originating webhook's `X-GitHub-Delivery` id, when this dispatch
    * descends from a GitHub webhook (plumbed webhook → automation → thread →
    * here). Absent for manual/scheduled paths — a synthetic id is minted below.
-   * Only consumed when the supersedePolicy flag is ON.
+   * Consumed for review runs only.
    */
   deliveryId?: string;
 }): Promise<void> {
@@ -496,7 +352,7 @@ export async function dispatchAgentRun({
   // rejects after the mint's row landed would otherwise leak the token. From
   // the mint on, EVERY failure before the trigger (sibling reads, base-branch
   // resolve, egress resolve, planSupersede — which throws on a corrupt stored
-  // policy — the app-side cancel pass) revokes it in the catch below, or
+  // policy) revokes it in the catch below, or
   // hasActiveDaemonToken() would report a phantom run for this runKey and
   // silently no-op every retry for the token's TTL (reviews on #135). The
   // revoke is keyed by runKey, so it is a harmless no-op when the mint itself
@@ -627,22 +483,14 @@ export async function dispatchAgentRun({
         ? { organizationId: thread.organizationId, prNumber }
         : null;
 
-    // #125/#127: ONE plan for the dispatch mode. Flag OFF (or a non-review run)
-    // → legacy: no extension, no opts, byte-identical payload (IRON golden).
-    // Flag ON on a review run → the resolved policy picks the workflow variant,
-    // the input gains prKey/deliveryId + the policy SNAPSHOT, and the metadata
-    // is enriched. The three native policies leave supersession to the engine's
-    // per-PR strategy; only 'app-side' (and the legacy path) keeps the #8
-    // control-plane cancel pass.
-    // #125/#127 rollout gate, resolved server-side for the dispatching user
-    // (per-org rollout approximated at user scope, like sandboxCredentialBroker).
-    // Read ONLY for review runs: the flag governs nothing else, and a mention /
-    // personal dispatch must not pay a DB read for it.
-    const supersedeFlagOn = reviewContext
-      ? await getFeatureFlagForUser({ db, userId, flagName: "supersedePolicy" })
-      : false;
+    // #125/#127/#165: ONE plan for the dispatch mode. Non-review runs keep the
+    // legacy plan (no extension, no opts, byte-identical payload — IRON
+    // golden). A REVIEW run always resolves the (org, repo) policy: it picks
+    // the workflow variant, the input gains prKey/deliveryId + the policy
+    // SNAPSHOT, and the metadata is enriched. Supersession of prior runs is
+    // ENGINE-ONLY (#165, ADR-007): www owns no cancel path — the variant's
+    // per-PR strategy supersedes, and the C4 sweep reconciles.
     const plan = await planSupersede({
-      enabled: supersedeFlagOn,
       reviewContext,
       thread,
       threadId,
@@ -651,16 +499,7 @@ export async function dispatchAgentRun({
       repoFullName,
       deliveryId,
     });
-    const input: AgentRunInput = { ...baseInput, ...plan.inputExtension };
-
-    if (reviewContext && plan.appSideCancel) {
-      await supersedePriorReviewRuns({
-        organizationId: reviewContext.organizationId,
-        repoFullName,
-        prNumber: reviewContext.prNumber,
-        currentThreadId: threadId,
-      });
-    }
+    const input: AgentRunInput = { ...baseInput, ...plan?.inputExtension };
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry
     // absorbs transients; only a FINAL failure lands in the catch below.
@@ -668,23 +507,23 @@ export async function dispatchAgentRun({
       input,
       threadId,
       threadChatId,
-      plan.triggerOpts,
+      plan?.triggerOpts,
     );
 
     // Best-effort bookkeeping after a successful trigger, run concurrently —
     // neither may fail the dispatch (the run is already executing).
     await Promise.all([
       // #127: stamp the thread's ACTIVE run for the C1 generation fence.
-      // Flag-ON only (legacy leaves the column NULL → fence fails open).
-      // Stamp = unfence (one write, #125 C1/#153). UNSTAMPED PLANS (non-review,
-      // flag-off) never restamp, so they shed the typed terminal here instead —
-      // after the trigger, when the new run already exists. Branch on the PLAN,
-      // never on externalId: a stamped (review) plan whose trigger response
-      // carried no run id is an anomaly that must FAIL CLOSED — no stamp, no
-      // unfence, the thread stays refused until the watchdog or a retry sorts
-      // it out. Unfencing there would shed the terminal while the old run's id
-      // still matches the stale stamp — the exact C1 window this PR closes.
-      plan.stampFence
+      // Review runs only (a non-review plan is null; the column stays NULL →
+      // fence fails open). Stamp = unfence (one write, #125 C1/#153).
+      // Non-review dispatches never restamp, so they shed the typed terminal
+      // here instead — after the trigger, when the new run already exists.
+      // Branch on the PLAN, never on externalId: a review plan whose trigger
+      // response carried no run id is an anomaly that must FAIL CLOSED — no
+      // stamp, no unfence, the thread stays refused until the watchdog or a
+      // retry sorts it out. Unfencing there would shed the terminal while the
+      // old run's id still matches the stale stamp — the exact C1 window.
+      plan
         ? externalId
           ? setThreadActiveRun({ db, threadId, externalId }).catch(
               (error: unknown) => {
@@ -707,7 +546,9 @@ export async function dispatchAgentRun({
       // tracked; a missing externalId (unexpected trigger-response shape) just skips
       // tracking — the run still executes, it simply can't be superseded (watchdog
       // remains the backstop).
-      reviewContext && externalId
+      // Same ONE predicate as the stamp above (#165): a review dispatch is
+      // exactly "plan !== null" — the two gates can never diverge again.
+      plan && reviewContext && externalId
         ? recordHatchetRun({
             db,
             threadId,

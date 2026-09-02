@@ -83,7 +83,7 @@ export type SweepReport = {
 };
 
 /**
- * The newer sibling run for the PR, if any — an app-side fact (hatchet_run),
+ * The newer sibling run for the PR, if any — a control-plane fact (hatchet_run),
  * which is why cause inference lives here and not on the engine.
  * TODO(hatchet_run retirement): when the table goes (runbook §success
  * criteria), this must read the engine's run list by `additional_metadata`

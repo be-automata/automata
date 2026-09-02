@@ -111,7 +111,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
     // Second writer read BEFORE first's save.
     const stale = new Date(first.updatedAt.getTime() - 60_000).toISOString();
     const res = await put({
-      supersedePolicy: "app-side",
+      supersedePolicy: "complete-run-discard",
       expectedUpdatedAt: stale,
     });
     expect(res.status).toBe(409);
@@ -130,7 +130,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
     expect(row?.supersedePolicy).toBe("newest-wins");
     // A fresh expectedUpdatedAt succeeds.
     const ok = await put({
-      supersedePolicy: "app-side",
+      supersedePolicy: "complete-run-discard",
       expectedUpdatedAt: first.updatedAt.toISOString(),
     });
     expect(ok.status).toBe(200);
@@ -146,7 +146,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
     });
     const v = first.updatedAt.toISOString();
     const [a, b] = await Promise.all([
-      put({ supersedePolicy: "app-side", expectedUpdatedAt: v }),
+      put({ supersedePolicy: "complete-run-discard", expectedUpdatedAt: v }),
       put({ supersedePolicy: "complete-run-queue", expectedUpdatedAt: v }),
     ]);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
@@ -155,7 +155,8 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
       organizationId: orgId,
       repoFullName: REPO,
     });
-    const winner = a.status === 200 ? "app-side" : "complete-run-queue";
+    const winner =
+      a.status === 200 ? "complete-run-discard" : "complete-run-queue";
     expect(row?.supersedePolicy).toBe(winner);
   });
 
@@ -165,7 +166,10 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
       db,
       organizationId: orgId,
       repoFullName: REPO,
-      patch: { blockTolerance: "error", supersedePolicy: "app-side" },
+      patch: {
+        blockTolerance: "error",
+        supersedePolicy: "complete-run-discard",
+      },
     });
     const res = await DELETE(
       new NextRequest("http://localhost/api/review-settings/acme/widgets", {
@@ -179,7 +183,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
       organizationId: orgId,
       repoFullName: REPO,
     });
-    expect(row?.supersedePolicy).toBe("app-side");
+    expect(row?.supersedePolicy).toBe("complete-run-discard");
     expect(row?.blockTolerance).toBe("warning");
   });
 });
