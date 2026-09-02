@@ -68,6 +68,17 @@ Test environments push the schema automatically.
 >
 > The prod `DATABASE_URL` is a write-only Cloudflare Worker secret (`wrangler secret list`
 > shows names only), so whoever runs the migration needs it out of band.
+>
+> **The ordering is enforced, not just documented.** Run the gate before every
+> deploy — it exits non-zero if the deployed schema is missing a column this
+> revision needs, and fails closed on an unset URL or an unreachable database:
+>
+> ```bash
+> DATABASE_URL=... pnpm exec tsx deploy/assert-schema-ready.ts
+> ```
+>
+> When you add a column to `packages/shared/src/db/schema.ts`, add it to that
+> script's `REQUIRED` list in the SAME change.
 
 ```bash
 # Push schema to dev database
