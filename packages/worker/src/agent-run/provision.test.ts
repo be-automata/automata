@@ -204,12 +204,19 @@ describe("provisionWorkdir — agent-uid ACEs", () => {
         workdirRoot: root,
         runId: "thr_1",
         agentUser: "_automata-agent",
+        // pinned so the assertion does not depend on whose machine runs the suite
+        workerLogin: "the-operator",
         aceExec: r.aceExec,
         runGit: r.runGit,
       });
+      // Shared root: traverse ONLY, agent only — an inheritable ACE there would
+      // expose every other run. Per-run dir: inheritable, for BOTH the agent and
+      // the worker, the latter so cleanup can delete agent-created files.
+      // All of it BEFORE the clone (macOS inherits at create time).
       expect(r.calls).toEqual([
         "ace:_automata-agent allow search",
         `ace:_automata-agent allow ${INHERITABLE_ACE_RIGHTS}`,
+        `ace:the-operator allow ${INHERITABLE_ACE_RIGHTS}`,
         "git:clone",
       ]);
       // The run's own TMPDIR exists and inherits the grant.
@@ -284,8 +291,54 @@ describe("provisionWorkdir — a real clone with agentUser set", () => {
     // ...and the run's TMPDIR still exists afterwards
     const tmpStat = await fs.stat(path.join(workdir, "tmp"));
     expect(tmpStat.isDirectory()).toBe(true);
-    // ...and the ACEs were still applied BEFORE the clone (root then workdir)
-    expect(aceCalls.length).toBeGreaterThanOrEqual(2);
-    expect(aceCalls.every((c) => c[0] === "/bin/chmod")).toBe(true);
+    // The ACE assertions are darwin-only: applyAces is a hard no-op elsewhere
+    // (agent-uid-fs.ts) and provisionWorkdir passes no platform override, so
+    // aceCalls stays empty on Linux. The CLONE behaviour above is the point of
+    // this test and is platform-independent, so the test itself must stay
+    // cross-platform — only these two lines are gated.
+    if (process.platform === "darwin") {
+      expect(aceCalls.length).toBeGreaterThanOrEqual(2);
+      expect(aceCalls.every((c) => c[0] === "/bin/chmod")).toBe(true);
+    }
   });
+});
+
+/**
+ * The run's workdir must grant the ACE to BOTH the agent and the worker's own
+ * login. With the agent alone, every directory the agent creates inside the run
+ * is agent-owned, deleting a file needs write on its containing directory, and
+ * cleanupWorkdir (uid 501) fails with EACCES — leaving the run's HOME, and any
+ * credential delivered into it, on disk after the run. Observed on the pilot
+ * box before this was fixed.
+ */
+describe("provisionWorkdir — the workdir ACE must include the worker login", () => {
+  it.skipIf(process.platform !== "darwin")(
+    "grants BOTH the agent user and the worker login, inheritably",
+    async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-ace-"));
+      const calls: string[][] = [];
+      await provisionWorkdir({
+        repoFullName: "o/r",
+        branch: "main",
+        installationToken: "t",
+        workdirRoot: path.join(root, "runs"),
+        runId: "thr_ace",
+        agentUser: "_automata-agent",
+        workerLogin: "the-operator",
+        aceExec: async (file, args) => {
+          calls.push([file, ...args]);
+        },
+        runGit: async () => ({ stdout: "", stderr: "" }),
+      });
+      const inheritable = calls.filter((c) =>
+        c.some((a) => a.includes("file_inherit")),
+      );
+      const granted = inheritable.map(
+        (c) => c.find((a) => a.includes("allow"))?.split(" ")[0] ?? "",
+      );
+      expect(granted).toContain("_automata-agent");
+      expect(granted).toContain("the-operator");
+      await fs.rm(root, { recursive: true, force: true });
+    },
+  );
 });
