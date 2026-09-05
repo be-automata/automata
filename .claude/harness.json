@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "generated_by": "somnio-engineering-ai@0.9.1",
+  "generated_at": "2026-09-05T16:10:19Z",
+  "rules_source": {
+    "repo": "somnio-software/somnio-ai-tools",
+    "rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
+    "path": "agent-rules/rules",
+    "tier": "pub-cache"
+  },
+  "stacks": [
+    "typescript"
+  ],
+  "installed": [
+    {
+      "path": ".claude/rules/typescript/best-practices.md",
+      "origin": "somnio-software/somnio-ai-tools:ed8f9b6d622c794ccab93ace69755d928b216cd9:agent-rules/rules/typescript/best-practices.md",
+      "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
+      "sha256": "c5b516327c2750aa5a009a8151d8ffee43cec9062793e73969df52ea24159d2c",
+      "sha256_pre_optimize": "ecc7bca286a6eaaa4d9c4254f875dea0020958159d96bafb1a5cdb4324a554ef"
+    },
+    {
+      "path": "AGENTS.md",
+      "origin": "adapter-block:codex:ed8f9b6d622c794ccab93ace69755d928b216cd9:agent-rules/adapters/codex",
+      "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
+      "sha256": "cb7b1623cd4833347708c770cf84b13fe2f7d0ed230348cea2b3baab91cedd41"
+    },
+    {
+      "path": ".claude/settings.json",
+      "origin": "template:target-settings.json",
+      "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
+      "sha256": "e534526adbedff7cfa82a081ee1619cafd3c19b0934826db8b1c52fe33283ff9"
+    },
+    {
+      "path": "CLAUDE.md",
+      "origin": "template:CLAUDE.md.template",
+      "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
+      "sha256": "3cd4e9fb212496494b3f8dd52fd6f2f0286281b1ba091e00c1d347d4ba902a21"
+    },
+    {
+      "path": ".gitignore",
+      "origin": "template:gitignore-block",
+      "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
+      "sha256": "33da6fcafb6aef7d4eda8e828058ee9634fe2ce719101340419a4911cd7f9f01"
+    },
+    {
+      "path": ".claude/ship-gate.json",
+      "origin": "template:ship-gate-draft",
+      "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
+      "sha256": "bcf2447a6c1f95c38bec6a0c60bcbb657c26bd600429ee292ec1d14bebcaf49c"
+    }
+  ],
+  "pre_existing": [],
+  "not_in_scope": [
+    "cli skills: typescript has no catalog skill (rules only)"
+  ],
+  "agents": [
+    "claude",
+    "codex"
+  ],
+  "settings_bak_created": true,
+  "cli_installed": [
+    {
+      "agent": "claude",
+      "skill": "git-branch-format",
+      "path": ".claude/skills/git-branch-format",
+      "manifest": ".claude/skills/.somnio-skills.json"
+    },
+    {
+      "agent": "claude",
+      "skill": "git-commit-format",
+      "path": ".claude/skills/git-commit-format",
+      "manifest": ".claude/skills/.somnio-skills.json"
+    },
+    {
+      "agent": "claude",
+      "skill": "harness-audit",
+      "path": ".claude/skills/harness-audit",
+      "manifest": ".claude/skills/.somnio-skills.json"
+    },
+    {
+      "agent": "claude",
+      "skill": "optimize-claude-config",
+      "path": ".claude/skills/optimize-claude-config",
+      "manifest": ".claude/skills/.somnio-skills.json"
+    },
+    {
+      "agent": "claude",
+      "skill": "security-audit",
+      "path": ".claude/skills/security-audit",
+      "manifest": ".claude/skills/.somnio-skills.json"
+    },
+    {
+      "agent": "codex",
+      "skill": "git-branch-format",
+      "path": ".codex/skills/git_branch_format.md",
+      "manifest": ".codex/skills/.somnio-skills.json"
+    },
+    {
+      "agent": "codex",
+      "skill": "git-commit-format",
+      "path": ".codex/skills/git_commit_format.md",
+      "manifest": ".codex/skills/.somnio-skills.json"
+    },
+    {
+      "agent": "codex",
+      "skill": "harness-audit",
+      "path": ".codex/skills/harness_audit.md",
+      "manifest": ".codex/skills/.somnio-skills.json"
+    },
+    {
+      "agent": "codex",
+      "skill": "harness-audit",
+      "path": ".codex/somnio_rules/harness-audit",
+      "manifest": ".codex/skills/.somnio-skills.json"
+    },
+    {
+      "agent": "codex",
+      "skill": "optimize-claude-config",
+      "path": ".codex/skills/optimize_claude_config.md",
+      "manifest": ".codex/skills/.somnio-skills.json"
+    },
+    {
+      "agent": "codex",
+      "skill": "security-audit",
+      "path": ".codex/skills/security_audit.md",
+      "manifest": ".codex/skills/.somnio-skills.json"
+    },
+    {
+      "agent": "codex",
+      "skill": "security-audit",
+      "path": ".codex/somnio_rules/security-audit",
+      "manifest": ".codex/skills/.somnio-skills.json"
+    }
+  ],
+  "cli_version": "2.11.2",
+  "cli_pin": "2.11.2"
+}
