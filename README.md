@@ -8,6 +8,8 @@ Delegate work to coding agents in the cloud.
 
 For trademark use, see `TRADEMARKS.md`.
 
+Working on this repo with an AI coding agent? Contributor instructions live in `AGENTS.md`, including the checked-in harness (`.claude/`, `.codex/`) described under "AI Coding Harness".
+
 ## Features
 
 - **Multi-Agent Support**: Use multiple coding agents, including [Claude Code](https://www.anthropic.com/products/claude-code), [OpenAI Codex](https://github.com/openai/codex), [Amp](https://ampcode.com/), and [Gemini](https://github.com/google-gemini/gemini-cli). Easily add support for more agents as needed.
