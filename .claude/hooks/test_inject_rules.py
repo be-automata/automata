@@ -94,6 +94,28 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(ctx.count("TypeScript Best Practices"), 1)
 
+    def test_context_cap_bounds_rules_across_directories(self):
+        rules_dir = os.path.join(ROOT, ".claude", "rules")
+        made = []
+        big = "x" * (40 * 1024)
+        try:
+            for d in ("zz-cap-a", "zz-cap-b", "zz-cap-c"):
+                os.makedirs(os.path.join(rules_dir, d), exist_ok=True)
+                f = os.path.join(rules_dir, d, "rule.md")
+                with open(f, "w") as fh:
+                    fh.write('---\ndescription: cap test\npaths:\n  - "**/*.ts"\n---\n' + big + "\n")
+                made.append(f)
+            code, out, _ = run_hook({"tool_input": {"file_path": "packages/utils/src/zz-cap.ts"}})
+        finally:
+            for f in made:
+                os.unlink(f)
+                os.rmdir(os.path.dirname(f))
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(code, 0)
+        # three 40 KB rules plus the real one would be ~130 KB; the cap stops the walk after it is crossed
+        self.assertLess(len(ctx), inject_rules.MAX_CONTEXT_BYTES + 41 * 1024)
+        self.assertEqual(ctx.count("xxxx" * 10), 2 * (40 * 1024 // 40))
+
     def test_malformed_stdin_is_silent(self):
         env = {**os.environ, "CLAUDE_PROJECT_DIR": ROOT, "PYTHONDONTWRITEBYTECODE": "1"}
         proc = subprocess.run([sys.executable, HOOK], input="not json", capture_output=True, text=True, env=env)

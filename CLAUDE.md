@@ -39,4 +39,6 @@ matching path is touched (see `optimize-context-rules`).
 | pnpm --filter @terragon/sandbox exec vitest run --no-file-parallelism | sandbox provider tests |
 | pnpm --filter @terragon/review test | review package tests (node --test) |
 | pnpm audit --prod --audit-level critical | no critical advisories in production dependencies |
+| HATCHET_IT=1 pnpm --filter @terragon/worker exec vitest run --no-file-parallelism src/agent-run/supersede.integration.test.ts src/agent-run/scheduling-health.integration.test.ts | worker supersede-policy E2E and scheduling-health IT against dockerized hatchet-lite |
+| docker compose -p automata-hatchet-it down -v --remove-orphans \|\| true | tears down the hatchet-lite IT stack (fail-open, runs even when the tests died) |
 <!-- somnio:harness:end -->

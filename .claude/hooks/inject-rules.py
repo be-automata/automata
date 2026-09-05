@@ -82,7 +82,10 @@ def main():
     chunks = []
     rules_root = os.path.join(proj, '.claude', 'rules')
     seen = set()
+    total = 0
     for dirpath, dirnames, filenames in os.walk(rules_root, followlinks=False):
+        if total > MAX_CONTEXT_BYTES:
+            break  # the inner break only leaves one directory; stop the walk too
         dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
         for rule_file in (os.path.join(dirpath, f) for f in sorted(filenames) if f.endswith('.md')):
             if os.path.islink(rule_file):
@@ -103,7 +106,8 @@ def main():
             frontmatter, body = txt[3:end], txt[end + 4:]
             if any(glob_to_regex(p).match(rel) for p in parse_paths(frontmatter)):
                 chunks.append(body.strip())
-                if sum(len(c) for c in chunks) > MAX_CONTEXT_BYTES:
+                total += len(chunks[-1])
+                if total > MAX_CONTEXT_BYTES:
                     break  # keep the injection bounded; a runaway rule set must not stall every Write
 
     if not chunks:
