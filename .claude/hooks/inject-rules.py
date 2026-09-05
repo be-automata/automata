@@ -13,7 +13,6 @@ import json
 import sys
 import os
 import re
-import glob
 
 MAX_CONTEXT_BYTES = 64 * 1024  # upper bound on injected rule text per Write
 
@@ -61,9 +60,12 @@ def main():
     except Exception:
         return
 
+    if not isinstance(data, dict):
+        return
     proj = os.environ.get('CLAUDE_PROJECT_DIR') or data.get('cwd') or os.getcwd()
-    file_path = (data.get('tool_input') or {}).get('file_path', '')
-    if not file_path:
+    tool_input = data.get('tool_input')
+    file_path = tool_input.get('file_path', '') if isinstance(tool_input, dict) else ''
+    if not isinstance(file_path, str) or not file_path:
         return
 
     abs_fp = file_path if os.path.isabs(file_path) else os.path.join(proj, file_path)
@@ -78,22 +80,31 @@ def main():
     # crafted filename cannot break out of the formatting below.
     safe_rel = re.sub(r'[\x00-\x1f`]', '', rel)
     chunks = []
-    pattern = os.path.join(proj, '.claude', 'rules', '**', '*.md')
-    for rule_file in glob.glob(pattern, recursive=True):
-        try:
-            txt = open(rule_file, encoding='utf-8').read()
-        except Exception:
-            continue
-        if not txt.startswith('---'):
-            continue
-        end = txt.find('\n---', 3)
-        if end == -1:
-            continue
-        frontmatter, body = txt[3:end], txt[end + 4:]
-        if any(glob_to_regex(p).match(rel) for p in parse_paths(frontmatter)):
-            chunks.append(body.strip())
-            if sum(len(c) for c in chunks) > MAX_CONTEXT_BYTES:
-                break  # keep the injection bounded; a runaway rule set must not stall every Write
+    rules_root = os.path.join(proj, '.claude', 'rules')
+    seen = set()
+    for dirpath, dirnames, filenames in os.walk(rules_root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+        for rule_file in (os.path.join(dirpath, f) for f in sorted(filenames) if f.endswith('.md')):
+            if os.path.islink(rule_file):
+                continue  # never follow symlinks: a loop or an external link is a context bomb
+            real = os.path.realpath(rule_file)
+            if real in seen:
+                continue
+            seen.add(real)
+            try:
+                txt = open(rule_file, encoding='utf-8').read()
+            except Exception:
+                continue
+            if not txt.startswith('---'):
+                continue
+            end = txt.find('\n---', 3)
+            if end == -1:
+                continue
+            frontmatter, body = txt[3:end], txt[end + 4:]
+            if any(glob_to_regex(p).match(rel) for p in parse_paths(frontmatter)):
+                chunks.append(body.strip())
+                if sum(len(c) for c in chunks) > MAX_CONTEXT_BYTES:
+                    break  # keep the injection bounded; a runaway rule set must not stall every Write
 
     if not chunks:
         return
@@ -112,4 +123,8 @@ def main():
     }))
 
 
-main()
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception:
+        pass  # advisory hook: never block a Write because of our own failure

@@ -100,3 +100,8 @@ ruvector.db
 .claude/*.local.md
 .claude/settings.json.bak
 # somnio:harness:end
+# audit output written by the security-audit / harness-audit skills
+reports/security_audit.*
+reports/harness_audit.*
+reports/.artifacts/
+reports/.history/

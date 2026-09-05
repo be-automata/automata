@@ -78,6 +78,22 @@ class EndToEnd(unittest.TestCase):
         ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("(`packages/utils/src/zzxnew.ts`)", ctx)
 
+    def test_non_object_payloads_are_silent(self):
+        for payload in ([1, 2], {"tool_input": "not a dict"}, {"tool_input": {"file_path": 7}}):
+            code, out, err = run_hook(payload)
+            self.assertEqual((code, out, err), (0, "", ""), payload)
+
+    def test_symlink_loop_under_rules_is_ignored(self):
+        link = os.path.join(ROOT, ".claude", "rules", "zz-loop-test")
+        os.symlink("..", link)
+        try:
+            code, out, _ = run_hook({"tool_input": {"file_path": "packages/utils/src/zz-loop.ts"}})
+        finally:
+            os.unlink(link)
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(code, 0)
+        self.assertEqual(ctx.count("TypeScript Best Practices"), 1)
+
     def test_malformed_stdin_is_silent(self):
         env = {**os.environ, "CLAUDE_PROJECT_DIR": ROOT, "PYTHONDONTWRITEBYTECODE": "1"}
         proc = subprocess.run([sys.executable, HOOK], input="not json", capture_output=True, text=True, env=env)
