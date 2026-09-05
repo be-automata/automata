@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "skills": {
+    "git-branch-format": {
+      "kind": "workflow",
+      "paths": [
+        {
+          "root": "install",
+          "path": "git-branch-format"
+        }
+      ]
+    },
+    "git-commit-format": {
+      "kind": "workflow",
+      "paths": [
+        {
+          "root": "install",
+          "path": "git-commit-format"
+        }
+      ]
+    },
+    "harness-audit": {
+      "kind": "audit",
+      "paths": [
+        {
+          "root": "install",
+          "path": "harness-audit"
+        }
+      ]
+    },
+    "optimize-claude-config": {
+      "kind": "workflow",
+      "paths": [
+        {
+          "root": "install",
+          "path": "optimize-claude-config"
+        }
+      ]
+    },
+    "security-audit": {
+      "kind": "audit",
+      "paths": [
+        {
+          "root": "install",
+          "path": "security-audit"
+        }
+      ]
+    }
+  }
+}

@@ -94,3 +94,14 @@ ruvector.db
 .claude-flow/data/
 .claude-flow/logs/
 .claude-flow/sessions/
+
+# somnio:harness:begin
+.claude/.harness/
+.claude/*.local.md
+.claude/settings.json.bak
+# somnio:harness:end
+# audit output written by the security-audit / harness-audit skills
+reports/security_audit.*
+reports/harness_audit.*
+reports/.artifacts/
+reports/.history/
