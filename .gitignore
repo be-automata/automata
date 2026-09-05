@@ -94,3 +94,9 @@ ruvector.db
 .claude-flow/data/
 .claude-flow/logs/
 .claude-flow/sessions/
+
+# somnio:harness:begin
+.claude/.harness/
+.claude/*.local.md
+.claude/settings.json.bak
+# somnio:harness:end
