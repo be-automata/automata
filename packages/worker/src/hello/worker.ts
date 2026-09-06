@@ -9,6 +9,7 @@ import {
 import { loadWorkerConfig } from "../agent-run/config";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
+import { bootUidScan } from "../agent-run/uid-reaper";
 import {
   bootTimeSlotReclaim,
   startMaintenanceLoop,
@@ -116,6 +117,17 @@ async function main() {
   }
 
   await claimNamespaceAndReclaim();
+
+  // #184 (#152 Stage B2): reclaim agent-uid escapees left by a dead worker,
+  // under a NON-blocking take of the box lock. Busy ⇒ a live run owns the box
+  // and its own teardown scan reclaims; never block or kill without the lock.
+  // Never throws: fail-open on the scan (the box is still single-flight
+  // without it); the helper assert above stays fail-closed.
+  await bootUidScan({
+    root: loadWorkerConfig().runNamespaceRoot,
+    agentUser: loadWorkerConfig().agentUser,
+    log: (m) => console.log(`[worker-boot] ${m}`),
+  });
 
   // #69 §3.2.4 item 2 — boot-time (secondary) engine-DB slot reclaim, BEFORE
   // registration so this registration's own fresh strategy rows are never
