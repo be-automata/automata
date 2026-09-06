@@ -19,7 +19,7 @@ import {
   connectPg,
   pollUntil,
 } from "./hatchet-it-harness";
-import { withBoxSlot } from "./box-slot";
+import { withBoxLock } from "./box-lock";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -44,8 +44,8 @@ const Status = APIContracts.V1TaskStatus;
 type Status = APIContracts.V1TaskStatus;
 const TERMINAL: Status[] = [Status.COMPLETED, Status.CANCELLED, Status.FAILED];
 
-/** `boxSlot: true` runs the stub under the worker-side box slot (box-slot.ts). */
-type StubInput = { label: string; sleepMs: number; boxSlot?: boolean };
+/** `boxLock: true` runs the stub under the worker-side box lock (box-lock.ts). */
+type StubInput = { label: string; sleepMs: number; boxLock?: boolean };
 
 /** What the stub fn saw for one execution (keyed by the input label). */
 type Execution = {
@@ -72,7 +72,7 @@ describe.skipIf(!itEnabled)(
     let workflows: WorkflowDeclaration<StubInput, {}>[];
     const executions = new Map<string, Execution>();
 
-    let boxSlotDir = "";
+    let boxLockDir = "";
 
     /** The stub run fn: sleeps `input.sleepMs` in 100ms ticks, honouring cancel. */
     async function stubRun(
@@ -97,13 +97,12 @@ describe.skipIf(!itEnabled)(
         ex.endedAt = Date.now();
         return { label: input.label };
       };
-      return input.boxSlot
-        ? withBoxSlot(
+      return input.boxLock
+        ? withBoxLock(
             {
-              dir: boxSlotDir,
+              root: boxLockDir,
               holder: input.label,
               signal: ctx.abortController?.signal,
-              pollMs: 25,
             },
             body,
           )
@@ -126,7 +125,7 @@ describe.skipIf(!itEnabled)(
         prKey: string;
         orgId?: string;
         deliveryId?: string;
-        boxSlot?: boolean;
+        boxLock?: boolean;
       },
     ): Promise<{
       id: string;
@@ -205,7 +204,7 @@ describe.skipIf(!itEnabled)(
       );
 
     beforeAll(async () => {
-      boxSlotDir = await mkdtemp(path.join(tmpdir(), "it-box-slot-"));
+      boxLockDir = await mkdtemp(path.join(tmpdir(), "it-box-lock-"));
       await composeUp();
       pg = await connectPg();
       ({ tenantId, token } = await bootstrapTenant(pg));
@@ -441,25 +440,25 @@ describe.skipIf(!itEnabled)(
       const b = executions.get(blocker.label)!;
       const o = executions.get(other.label)!;
       // CONTRACT: the strict run started WHILE the newest run was live. This
-      // is why the worker enforces the box slot itself (next case; box-slot.ts).
+      // is why the worker enforces the box lock itself (next case; box-lock.ts).
       // See docs/uat/hatchet-lite-v0.94.10-observed.md §5.
       expect(o.startedAt).toBeLessThan(b.endedAt!);
     });
 
-    it("worker box slot (box-slot.ts): runs on DIFFERENT variants never overlap on one box", async () => {
+    it("worker box lock (box-lock.ts): in-process contention on one box — runs on DIFFERENT variants never overlap (cross-process proof: box-lock.test.ts AC6–AC8)", async () => {
       const blocker = await dispatch("agent-run-newest", {
         label: "bs-blocker",
         sleepMs: 2500,
         prKey: uid("org-z/repo/9"),
         orgId: "org-z",
-        boxSlot: true,
+        boxLock: true,
       });
       await waitStatus(blocker.id, [Status.RUNNING]);
       const other = await dispatch("agent-run-strict", {
         label: "bs-strict",
         sleepMs: 300,
         prKey: uid("org-a/repo/51"),
-        boxSlot: true,
+        boxLock: true,
       });
       await waitTerminal(other.id);
       await waitTerminal(blocker.id);
@@ -469,14 +468,14 @@ describe.skipIf(!itEnabled)(
     });
 
     it("ROLLBACK DRILL (docs/runbooks/supersede-rollback.md step 2): pending native runs are bulk-cancelled — QUEUED first, then RUNNING — and nothing is left live", async () => {
-      // Every run holds the worker box slot (production shape): one body
+      // Every run holds the worker box lock (production shape): one body
       // executes at a time on the box no matter what the engine admits (§5).
       const blocker = await dispatch("agent-run-strict", {
         label: "drill-blocker",
         sleepMs: 4000,
         prKey: uid("org-z/repo/9"),
         orgId: "org-z",
-        boxSlot: true,
+        boxLock: true,
       });
       await waitStarted(blocker.label);
       const pending: Awaited<ReturnType<typeof dispatch>>[] = [];
@@ -485,12 +484,12 @@ describe.skipIf(!itEnabled)(
           await dispatch("agent-run-strict", {
             label: `drill-p${i}`,
             // Long enough that a run admitted in the instant the blocker's
-            // cancel frees the box slot cannot COMPLETE before its own cancel
+            // cancel frees the box lock cannot COMPLETE before its own cancel
             // is delivered (CI saw a 200ms body finish first — that is the
             // race the runbook describes, not a drill failure).
             sleepMs: 3000,
             prKey: uid(`org-a/repo/${40 + i}`),
-            boxSlot: true,
+            boxLock: true,
           }),
         );
       }
@@ -500,7 +499,7 @@ describe.skipIf(!itEnabled)(
         );
       // The OLAP list can lag a just-triggered run: wait until every pending
       // run is listed as QUEUED or RUNNING (engine-admitted but blocked on the
-      // box slot) before draining.
+      // box lock) before draining.
       await pollUntil(
         "all pending runs listed",
         () => listIds([Status.QUEUED, Status.RUNNING]),

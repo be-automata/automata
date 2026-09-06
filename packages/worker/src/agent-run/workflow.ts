@@ -7,8 +7,7 @@ import {
   type PerPrStrategy,
 } from "./definition";
 import { loadWorkerConfig } from "./config";
-import path from "node:path";
-import { acquireBoxSlot, type BoxSlot } from "./box-slot";
+import { acquireBoxLock, type BoxLock } from "./box-lock";
 import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { DaemonProcess } from "./daemon-process";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
@@ -440,15 +439,17 @@ async function runAgentInner(
   // the try is ever entered, and the cloned workdir is stranded on the box's
   // disk for good. Cleaning the workdir also removes the per-run HOME beneath
   // it, so a half-written credential cannot survive either.
-  let boxSlot: BoxSlot | null = null;
+  let boxLock: BoxLock | null = null;
   let materialised: MaterialisedCredentials;
   try {
-    // #125 C4: the box's ONE agent-run slot (box-slot.ts) — the engine's
-    // "global" key is per workflow, so the budget is enforced here. Taken
-    // AFTER the clone (network/disk, not memory) and BEFORE any credential
-    // touches disk, so a long wait never widens the on-disk credential
-    // window; a cancel while waiting throws into this catch and the clone is
-    // cleaned up. Released in the finally below, after teardown.
+    // #183 (#152 Stage B1): the box's ONE agent-run lock (box-lock.ts) — a
+    // kernel flock(2) held by a helper child, so the kernel drops it the
+    // instant the holder dies (no staleness threshold, no heartbeat). The
+    // engine's "global" key is per workflow, so the budget is enforced here.
+    // Taken AFTER the clone (network/disk, not memory) and BEFORE any
+    // credential touches disk, so a long wait never widens the on-disk
+    // credential window; a cancel while waiting throws into this catch and
+    // the clone is cleaned up. Released in the finally below, after teardown.
     // #152 Stage A admission reap, BEFORE the slot: (a) a dead sibling
     // worker's orphans die now, not at the next boot; (b) any prior attempt
     // of THIS run (engine redelivery after a worker death) is SIGKILLed by
@@ -470,12 +471,13 @@ async function runAgentInner(
       agentUser: config.agentUser,
       log: admissionLog,
     });
-    boxSlot = await acquireBoxSlot({
-      dir: path.join(config.runNamespaceRoot, "box-slot"),
+    boxLock = await acquireBoxLock({
+      root: config.runNamespaceRoot,
       holder: input.threadId,
       signal,
+      log: admissionLog,
     });
-    step("box slot acquired");
+    step("box lock acquired");
     const pulled =
       config.boxTrust === "owner"
         ? await pullAgentCredentials(wwwOpts, signal)
@@ -497,7 +499,7 @@ async function runAgentInner(
       runRoot: workdir,
     });
   } catch (err) {
-    await boxSlot?.release();
+    await boxLock?.release();
     await cleanupWorkdir(workdir);
     throw err;
   }
@@ -550,7 +552,7 @@ async function runAgentInner(
       await closeQuietly(egressProxy);
       await closeQuietly(egressEvents);
       await materialised.cleanup();
-      await boxSlot?.release();
+      await boxLock?.release();
       await cleanupWorkdir(workdir);
       throw err;
     }
@@ -604,7 +606,7 @@ async function runAgentInner(
       await closeQuietly(egressProxy);
       await closeQuietly(egressEvents);
       await materialised.cleanup();
-      await boxSlot?.release();
+      await boxLock?.release();
       await cleanupWorkdir(workdir);
       throw err;
     }
@@ -710,9 +712,9 @@ async function runAgentInner(
     // failure on the workdir can never leave a live token behind.
     await materialised.cleanup();
     await cleanupWorkdir(workdir);
-    // The box slot goes last: the next run may start only once this one's
-    // daemon is dead and its disk footprint is gone.
-    await boxSlot?.release();
+    // The box lock goes last (ADR-007 I2): the next run may start only once
+    // this one's daemon is dead and its disk footprint is gone.
+    await boxLock?.release();
   }
 }
 
