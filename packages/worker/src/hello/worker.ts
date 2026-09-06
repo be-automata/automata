@@ -123,9 +123,10 @@ async function main() {
   // and its own teardown scan reclaims; never block or kill without the lock.
   // Never throws: fail-open on the scan (the box is still single-flight
   // without it); the helper assert above stays fail-closed.
+  const bootUidScanConfig = loadWorkerConfig();
   await bootUidScan({
-    root: loadWorkerConfig().runNamespaceRoot,
-    agentUser: loadWorkerConfig().agentUser,
+    root: bootUidScanConfig.runNamespaceRoot,
+    agentUser: bootUidScanConfig.agentUser,
     log: (m) => console.log(`[worker-boot] ${m}`),
   });
 

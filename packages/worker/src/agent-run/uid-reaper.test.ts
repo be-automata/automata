@@ -19,6 +19,7 @@ import {
   type BootUidScanOpts,
   type BoxBudgetSnapshot,
   type ProcRow,
+  type ReapAgentUidOpts,
 } from "./uid-reaper";
 
 type TryAcquireFn = NonNullable<BootUidScanOpts["tryAcquire"]>;
@@ -71,6 +72,26 @@ function scriptedList(...results: ProcRow[][]) {
 }
 
 const resolve450 = vi.fn(async () => 450);
+
+/**
+ * The defaults every non-`SAFETY`-exempt case shares: `agentUser: AGENT`,
+ * `resolveUid: resolve450`, `spawnKill: vi.fn(async () => {})`,
+ * `selfPid: 70001`. `overrides` must still supply `phase` and `log` (every
+ * required field they are) plus whatever else the case needs; a case that
+ * asserts on its own `spawnKill` spy overrides `spawnKill` explicitly.
+ */
+function baseReapOpts<
+  T extends Partial<ReapAgentUidOpts> & Pick<ReapAgentUidOpts, "phase" | "log">,
+>(overrides: T): ReapAgentUidOpts & T {
+  return {
+    agentUser: AGENT,
+    resolveUid: resolve450,
+    spawnKill: vi.fn(async () => {}),
+    selfPid: 70001,
+    ...overrides,
+  };
+}
+
 const roots: string[] = [];
 async function tmpRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "uid-reaper-"));
@@ -195,16 +216,15 @@ describe("reapAgentUidEscapees", () => {
   it("AC3: one uid-wide kill with the exact sudo argv; counts from the darwin fixture", async () => {
     const lines: string[] = [];
     const spawnKill = vi.fn(async (_inv: Invocation) => {});
-    const result = await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "admission",
-      threadId: "t-1",
-      log: (l) => lines.push(l),
-      listProcesses: scriptedList(DARWIN_ROWS, []),
-      resolveUid: resolve450,
-      spawnKill,
-      selfPid: 70001,
-    });
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        threadId: "t-1",
+        log: (l) => lines.push(l),
+        listProcesses: scriptedList(DARWIN_ROWS, []),
+        spawnKill,
+      }),
+    );
     expect(spawnKill).toHaveBeenCalledTimes(1);
     const inv = spawnKill.mock.calls[0]?.[0];
     expect(inv?.file).toBe("/usr/bin/sudo");
@@ -223,15 +243,16 @@ describe("reapAgentUidEscapees", () => {
 
   it("AC3: linux fixture — setsid'd pgid==pid escapees count as their own groups", async () => {
     const spawnKill = vi.fn(async () => {});
-    const result = await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "boot",
-      log: () => {},
-      listProcesses: scriptedList(LINUX_ROWS, []),
-      resolveUid: vi.fn(async () => 999),
-      spawnKill,
-      selfPid: 5000,
-    });
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "boot",
+        log: () => {},
+        listProcesses: scriptedList(LINUX_ROWS, []),
+        resolveUid: vi.fn(async () => 999),
+        spawnKill,
+        selfPid: 5000,
+      }),
+    );
     expect(result).toMatchObject({
       scanned: 3,
       groups: 2,
@@ -242,17 +263,15 @@ describe("reapAgentUidEscapees", () => {
 
   it("AC6: box.escapees_reaped is JSON after the first space with every key", async () => {
     const lines: string[] = [];
-    await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "teardown",
-      threadId: "t-6",
-      log: (l) => lines.push(l),
-      listProcesses: scriptedList(DARWIN_ROWS, []),
-      resolveUid: resolve450,
-      spawnKill: vi.fn(async () => {}),
-      selfPid: 70001,
-      settleMs: 0,
-    });
+    await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "teardown",
+        threadId: "t-6",
+        log: (l) => lines.push(l),
+        listProcesses: scriptedList(DARWIN_ROWS, []),
+        settleMs: 0,
+      }),
+    );
     const reaped = eventLines(lines, "box.escapees_reaped");
     expect(reaped).toHaveLength(1);
     const payload = payloadOf(reaped[0] ?? "");
@@ -291,15 +310,14 @@ describe("reapAgentUidEscapees", () => {
     const helpersOnly = DARWIN_ROWS.filter(
       (r) => r.uid !== 450 || MACOS_PER_USER_HELPERS.has(path.basename(r.comm)),
     );
-    const result = await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "admission",
-      log: (l) => lines.push(l),
-      listProcesses: scriptedList(helpersOnly),
-      resolveUid: resolve450,
-      spawnKill,
-      selfPid: 70001,
-    });
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        log: (l) => lines.push(l),
+        listProcesses: scriptedList(helpersOnly),
+        spawnKill,
+      }),
+    );
     expect(spawnKill).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       scanned: 0,
@@ -316,16 +334,16 @@ describe("reapAgentUidEscapees", () => {
   it("AC7: listProcesses rejection ⇒ error result, no kill, box.escapees_scan_failed", async () => {
     const lines: string[] = [];
     const spawnKill = vi.fn(async () => {});
-    const result = await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "admission",
-      log: (l) => lines.push(l),
-      listProcesses: vi.fn(async () => {
-        throw new Error("ps exploded");
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        log: (l) => lines.push(l),
+        listProcesses: vi.fn(async () => {
+          throw new Error("ps exploded");
+        }),
+        spawnKill,
       }),
-      resolveUid: resolve450,
-      spawnKill,
-    });
+    );
     expect(result).toMatchObject({
       skipped: false,
       scanned: 0,
@@ -341,16 +359,16 @@ describe("reapAgentUidEscapees", () => {
 
   it("AC7: resolveUid rejection is a scan failure too", async () => {
     const listProcesses = vi.fn(async () => DARWIN_ROWS);
-    const result = await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "boot",
-      log: () => {},
-      listProcesses,
-      resolveUid: vi.fn(async () => {
-        throw new Error("no such user");
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "boot",
+        log: () => {},
+        listProcesses,
+        resolveUid: vi.fn(async () => {
+          throw new Error("no such user");
+        }),
       }),
-      spawnKill: vi.fn(async () => {}),
-    });
+    );
     expect(result.error).toBe("no such user");
     expect(listProcesses).not.toHaveBeenCalled();
   });
@@ -360,18 +378,17 @@ describe("reapAgentUidEscapees", () => {
     const oneLeft = DARWIN_ROWS.filter(
       (r) => r.pid !== 66912 && r.pid !== 66916,
     );
-    const result = await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "admission",
-      log: (l) => lines.push(l),
-      listProcesses: scriptedList(DARWIN_ROWS, oneLeft),
-      resolveUid: resolve450,
-      spawnKill: vi.fn(async () => {
-        throw new Error("spawn sudo ENOENT");
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        log: (l) => lines.push(l),
+        listProcesses: scriptedList(DARWIN_ROWS, oneLeft),
+        spawnKill: vi.fn(async () => {
+          throw new Error("spawn sudo ENOENT");
+        }),
+        residualBoundMs: 150,
       }),
-      selfPid: 70001,
-      residualBoundMs: 150,
-    });
+    );
     expect(result).toMatchObject({
       scanned: 3,
       residual: 1,
@@ -389,15 +406,13 @@ describe("reapAgentUidEscapees", () => {
 
   it("AC7: residual poll re-scans every 100 ms until the set is empty", async () => {
     const listProcesses = scriptedList(DARWIN_ROWS, DARWIN_ROWS, []);
-    const result = await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "admission",
-      log: () => {},
-      listProcesses,
-      resolveUid: resolve450,
-      spawnKill: vi.fn(async () => {}),
-      selfPid: 70001,
-    });
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        log: () => {},
+        listProcesses,
+      }),
+    );
     expect(listProcesses.mock.calls.length).toBeGreaterThanOrEqual(3);
     expect(result).toMatchObject({ residual: 0, killed: 3 });
   });
@@ -413,18 +428,16 @@ describe("reapAgentUidEscapees", () => {
     ];
     const listProcesses = vi.fn(async () => manyEscapees);
     const started = Date.now();
-    const result = await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "teardown",
-      threadId: "t-7",
-      log: (l) => lines.push(l),
-      listProcesses,
-      resolveUid: resolve450,
-      spawnKill: vi.fn(async () => {}),
-      selfPid: 70001,
-      settleMs: 0,
-      residualBoundMs: 300,
-    });
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "teardown",
+        threadId: "t-7",
+        log: (l) => lines.push(l),
+        listProcesses,
+        settleMs: 0,
+        residualBoundMs: 300,
+      }),
+    );
     expect(Date.now() - started).toBeGreaterThanOrEqual(250);
     expect(result.scanned).toBe(7);
     expect(result.residual).toBe(7);
@@ -455,16 +468,14 @@ describe("reapAgentUidEscapees", () => {
       },
     ];
     const listProcesses = scriptedList(DARWIN_ROWS, respawned);
-    const result = await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "admission",
-      log: () => {},
-      listProcesses,
-      resolveUid: resolve450,
-      spawnKill: vi.fn(async () => {}),
-      selfPid: 70001,
-      residualBoundMs: 300,
-    });
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        log: () => {},
+        listProcesses,
+        residualBoundMs: 300,
+      }),
+    );
     expect(result).toMatchObject({
       scanned: 3,
       helpers: 5,
@@ -515,19 +526,13 @@ describe("reapAgentUidEscapees", () => {
 
   it("AC10: box-budget.json has the contract shape and escapeesSinceBoot accumulates", async () => {
     const root = await tmpRoot();
-    const common = {
-      agentUser: AGENT,
-      log: () => {},
-      resolveUid: resolve450,
-      spawnKill: vi.fn(async () => {}),
-      selfPid: 70001,
-      runNamespaceRoot: root,
-    };
-    await reapAgentUidEscapees({
-      ...common,
+    const common = baseReapOpts({
       phase: "boot",
+      log: () => {},
+      runNamespaceRoot: root,
       listProcesses: scriptedList(DARWIN_ROWS, []),
     });
+    await reapAgentUidEscapees(common);
     const first = JSON.parse(
       await readFile(path.join(root, BOX_BUDGET_FILENAME), "utf8"),
     ) as BoxBudgetSnapshot;
@@ -576,15 +581,14 @@ describe("reapAgentUidEscapees", () => {
 
   it("AC10: a zero-target scan still refreshes the snapshot", async () => {
     const root = await tmpRoot();
-    await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "admission",
-      log: () => {},
-      resolveUid: resolve450,
-      spawnKill: vi.fn(async () => {}),
-      listProcesses: scriptedList([]),
-      runNamespaceRoot: root,
-    });
+    await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        log: () => {},
+        listProcesses: scriptedList([]),
+        runNamespaceRoot: root,
+      }),
+    );
     const snap = JSON.parse(
       await readFile(path.join(root, BOX_BUDGET_FILENAME), "utf8"),
     ) as BoxBudgetSnapshot;
@@ -601,16 +605,14 @@ describe("reapAgentUidEscapees", () => {
     const notADir = path.join(dir, "file-not-dir");
     await writeFile(notADir, "x");
     const lines: string[] = [];
-    const result = await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "admission",
-      log: (l) => lines.push(l),
-      resolveUid: resolve450,
-      spawnKill: vi.fn(async () => {}),
-      listProcesses: scriptedList(DARWIN_ROWS, []),
-      selfPid: 70001,
-      runNamespaceRoot: notADir,
-    });
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        log: (l) => lines.push(l),
+        listProcesses: scriptedList(DARWIN_ROWS, []),
+        runNamespaceRoot: notADir,
+      }),
+    );
     expect(result).toMatchObject({ scanned: 3, killed: 3, failed: 0 });
     expect(result.error).toBeUndefined();
     const failed = eventLines(lines, "box.budget_write_failed");
@@ -629,15 +631,13 @@ describe("reapAgentUidEscapees", () => {
       firstListAt ??= Date.now();
       return [];
     });
-    await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "teardown",
-      log: () => {},
-      listProcesses,
-      resolveUid: resolve450,
-      spawnKill: vi.fn(async () => {}),
-      selfPid: 70001,
-    });
+    await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "teardown",
+        log: () => {},
+        listProcesses,
+      }),
+    );
     expect(listProcesses).toHaveBeenCalledTimes(1);
     expect(firstListAt).toBeDefined();
     expect((firstListAt ?? 0) - startedAt).toBeGreaterThanOrEqual(250);
@@ -650,15 +650,13 @@ describe("reapAgentUidEscapees", () => {
       firstListAt ??= Date.now();
       return [];
     });
-    await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "admission",
-      log: () => {},
-      listProcesses,
-      resolveUid: resolve450,
-      spawnKill: vi.fn(async () => {}),
-      selfPid: 70001,
-    });
+    await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        log: () => {},
+        listProcesses,
+      }),
+    );
     expect(listProcesses).toHaveBeenCalledTimes(1);
     expect(firstListAt).toBeDefined();
     expect((firstListAt ?? 0) - startedAt).toBeLessThan(50);
@@ -666,15 +664,13 @@ describe("reapAgentUidEscapees", () => {
 
   it("no snapshot is written without runNamespaceRoot", async () => {
     const root = await tmpRoot();
-    await reapAgentUidEscapees({
-      agentUser: AGENT,
-      phase: "admission",
-      log: () => {},
-      resolveUid: resolve450,
-      spawnKill: vi.fn(async () => {}),
-      listProcesses: scriptedList(DARWIN_ROWS, []),
-      selfPid: 70001,
-    });
+    await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        log: () => {},
+        listProcesses: scriptedList(DARWIN_ROWS, []),
+      }),
+    );
     await expect(
       readFile(path.join(root, BOX_BUDGET_FILENAME)),
     ).rejects.toThrow();

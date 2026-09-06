@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { tryAcquireBoxLock, type BoxLock } from "./box-lock";
+import { settlesWithin, tryAcquireBoxLock, type BoxLock } from "./box-lock";
 import { writeSnapshotAtomic } from "./scheduling-maintenance";
 import {
   buildKillAllAsAgentInvocation,
@@ -232,26 +232,16 @@ async function spawnKillAwaitingExit(inv: Invocation): Promise<void> {
     child.once("error", reject);
     child.once("exit", () => resolve());
   });
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<"timeout">((resolve) => {
-    timer = setTimeout(() => resolve("timeout"), KILL_EXIT_BOUND_MS);
-  });
-  const settled = new Promise<"settled">((resolve) => {
-    void (async () => {
-      try {
-        await exited;
-      } catch {
-        // surfaced by the `await exited` below
-      }
-      resolve("settled");
-    })();
-  });
-  try {
-    const first = await Promise.race([settled, timeout]);
-    if (first === "timeout") child.kill("SIGKILL");
-  } finally {
-    clearTimeout(timer);
-  }
+  // `settlesWithin` awaits its promise directly with no rejection handling,
+  // so a spawn `error` must be pre-caught here (settled-quickly, same as
+  // before) rather than left to reject inside it — the real rejection still
+  // reaches the caller via `await exited` below, which is what turns a spawn
+  // error into `failed` in `reapAgentUidEscapees`.
+  const exitedInTime = await settlesWithin(
+    exited.catch(() => {}),
+    KILL_EXIT_BOUND_MS,
+  );
+  if (!exitedInTime) child.kill("SIGKILL");
   await exited;
 }
 

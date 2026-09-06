@@ -194,7 +194,7 @@ function describeExit(exit: HelperExit, stderr: string): string {
 }
 
 /** Resolves true when `p` settles within `ms`, false on timeout. */
-async function settlesWithin(
+export async function settlesWithin(
   p: Promise<unknown>,
   ms: number,
 ): Promise<boolean> {
