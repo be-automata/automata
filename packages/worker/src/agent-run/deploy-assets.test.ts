@@ -159,3 +159,31 @@ describe("packages/worker/deploy — PF wrapper, scripts and LaunchDaemon", () =
     expect(doc).not.toMatch(/-UID 300\b/);
   });
 });
+
+describe("#183: single worker unit", () => {
+  const deploy = (f: string) => read(path.join(workerRoot, "deploy", f));
+
+  it("no deploy asset entry names the retired second unit", () => {
+    const entries = fs.readdirSync(path.join(workerRoot, "deploy"));
+    expect(entries.some((entry) => /worker-2/.test(entry))).toBe(false);
+  });
+
+  it("the runbook and provisioning doc no longer mention the second unit", () => {
+    expect(deploy("README.md")).not.toContain("worker-2");
+    expect(deploy("AGENT-UID-PROVISIONING.md")).not.toContain("worker-2");
+  });
+
+  it("the concurrency-cap citation points at definition.ts, not workflow.ts", () => {
+    const readme = deploy("README.md");
+    expect(readme).not.toContain("src/agent-run/workflow.ts");
+    const paragraphs = readme.split(/\n{2,}/);
+    const capParagraph = paragraphs.find((p) => p.includes("GLOBAL_MAX_RUNS"));
+    expect(capParagraph, readme).toBeTruthy();
+    expect(capParagraph).toContain("definition.ts");
+  });
+
+  it("only the single worker unit plist remains, and it declares the right label", () => {
+    const plist = deploy("com.automata.worker.plist");
+    expect(plist).toContain("com.automata.worker</string>");
+  });
+});
