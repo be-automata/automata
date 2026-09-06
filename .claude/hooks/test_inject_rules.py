@@ -52,6 +52,62 @@ class ParsePaths(unittest.TestCase):
         self.assertEqual(inject_rules.parse_paths("description: x\n"), [])
 
 
+class BraceExpansion(unittest.TestCase):
+    def test_one_group_expands(self):
+        self.assertEqual(
+            sorted(inject_rules.expand_braces("src/**/*.{ts,tsx}")),
+            ["src/**/*.ts", "src/**/*.tsx"],
+        )
+
+    def test_two_groups_expand_as_product(self):
+        self.assertEqual(
+            sorted(inject_rules.expand_braces("{a,b}/x.{ts,js}")),
+            ["a/x.js", "a/x.ts", "b/x.js", "b/x.ts"],
+        )
+
+    def test_unbalanced_and_nested_stay_literal(self):
+        self.assertEqual(inject_rules.expand_braces("src/{ts,tsx"), ["src/{ts,tsx"])
+        self.assertEqual(inject_rules.expand_braces("{a,{b,c}}"), ["{a,{b,c}}"])
+
+    def test_matches_uses_expansion(self):
+        self.assertTrue(inject_rules.matches("apps/www/x.tsx", ["**/*.{ts,tsx}"]))
+        self.assertFalse(inject_rules.matches("apps/www/x.css", ["**/*.{ts,tsx}"]))
+
+
+class BracketClass(unittest.TestCase):
+    def test_range_matches(self):
+        r = inject_rules.glob_to_regex("f[0-9].ts")
+        self.assertTrue(r.match("f3.ts"))
+        self.assertFalse(r.match("fx.ts"))
+
+    def test_negation_matches(self):
+        r = inject_rules.glob_to_regex("[!_]*.ts")
+        self.assertTrue(r.match("a.ts"))
+        self.assertFalse(r.match("_a.ts"))
+
+    def test_unterminated_bracket_is_literal(self):
+        r = inject_rules.glob_to_regex("a[b.ts")
+        self.assertTrue(r.match("a[b.ts"))
+
+    def test_class_body_cannot_break_out(self):
+        # A `]` first in the body belongs to the class; it never ends it early.
+        r = inject_rules.glob_to_regex("x[]].ts")
+        self.assertTrue(r.match("x].ts"))
+
+
+class FlowFormPaths(unittest.TestCase):
+    def test_inline_list_is_parsed(self):
+        fm = 'description: x\npaths: ["**/*.ts", \'**/*.tsx\']\n'
+        self.assertEqual(inject_rules.parse_paths(fm), ["**/*.ts", "**/*.tsx"])
+
+    def test_inline_list_keeps_brace_groups_whole(self):
+        fm = 'paths: ["src/**/*.{ts,tsx}", "docs/**"]\n'
+        self.assertEqual(inject_rules.parse_paths(fm), ["src/**/*.{ts,tsx}", "docs/**"])
+
+    def test_empty_inline_list_yields_nothing(self):
+        self.assertEqual(inject_rules.parse_paths("paths: []\n"), [])
+
+
 class EndToEnd(unittest.TestCase):
     def test_new_matching_ts_file_injects_rule(self):
         code, out, err = run_hook({"tool_input": {"file_path": "packages/utils/src/zz-new-file.ts"}})
