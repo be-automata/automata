@@ -77,7 +77,7 @@ arrives. Two structural questions were left open at delivery:
 
 ## Amendment (2026-09-05, #152 Stage B)
 
-- **Status:** Items 1–2 and 5 **Accepted** (Stage B1, PR #186 → `88e8e75`, live-proven 2026-09-06); items 3–4 Proposed with #184 (Stage B2).
+- **Status:** Items 1–2 **Accepted** (Stage B1, PR #186 → `88e8e75`, live-proven 2026-09-06); items 3–4 Proposed with #184 (Stage B2); item 5 stays **Deferred** (2026-09-05).
 - **Context source (as of `e2716a4`, pre-#183):** `box-slot.ts:178-184` (time-based reclaim), `workflow.ts:473-478` /
   `:698-715` (acquire and release ordering), `daemon-process.ts:353-370` (pid file removed
   before the kill), `spawn-as-user.ts:148-159` (pgid-only kill builder),
