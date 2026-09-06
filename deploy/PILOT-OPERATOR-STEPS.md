@@ -127,7 +127,11 @@ pnpm exec tsx deploy/review-single-writer-preflight.ts    # expect PASS / exit 0
 #     NEVER `launchctl kickstart -k` (SIGKILL drops the run; see
 #     packages/worker/deploy/README.md "Graceful restart"). Deploy when idle.
 launchctl kill TERM gui/$UID/com.automata.worker
-until launchctl print gui/$UID/com.automata.worker | grep -q 'state = running'; do sleep 2; done
+# Poll for EXIT first (the unit stays `running` while it drains on the old code),
+# then for the KeepAlive relaunch — same polarity as the deploy README.
+while launchctl print gui/$UID/com.automata.worker 2>/dev/null | grep -q 'state = running'; do sleep 2; done
+until launchctl print gui/$UID/com.automata.worker 2>/dev/null | grep -q 'state = running'; do sleep 2; done
+grep -q 'box lock helper OK' ~/.automata/worker.log   # new code booted
 
 # (e) Dark-deploy www (ships the executor/finish-wiring/sweep). SAFE-DARK: with the
 #     flag unset=false every new path is a no-op (reconciler-only, today's behavior).
