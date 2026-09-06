@@ -290,11 +290,10 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
     for (const token of forbidden) {
       expect(moduleText, `${token} in ${moduleFile}`).not.toContain(token);
     }
-    // The old scheme's knob must not survive anywhere else in the directory
-    // either (box-slot* itself is retired by P3).
+    // The old scheme's knob must not survive anywhere else in the directory.
     const staleKnob = forbidden[0];
     const others = readdirSync(agentRunDir)
-      .filter((f) => f.endsWith(".ts") && !f.startsWith("box-slot"))
+      .filter((f) => f.endsWith(".ts"))
       .map((f) => path.join(agentRunDir, f))
       .filter((f) => f !== fileURLToPath(import.meta.url));
     for (const file of others) {

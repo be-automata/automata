@@ -296,7 +296,7 @@ async function runAgent(
       // WORKER closes the loop: the daemon is already torn down (finally in
       // runAgentInner) — post the typed terminal so the thread completes
       // and this task ends NOW instead of at its step timeout (which held
-      // the engine/box slot for 30 minutes in prod, starving every queued
+      // the engine/box lock for 30 minutes in prod, starving every queued
       // review behind it).
       if (runExternalId) {
         const result = await postRunTerminal(wwwOpts, {

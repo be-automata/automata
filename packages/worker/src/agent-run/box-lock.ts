@@ -5,7 +5,7 @@ import path from "node:path";
 
 /**
  * The box's ONE agent-run lock, enforced on the worker plane (#152 Stage B1,
- * #183). Replaces box-slot.ts (#125 C4).
+ * #183). Replaces the #125 C4 owner-file slot scheme.
  *
  * WHY: the engine-side "global" concurrency key
  * (`'agent-run-global-memory-budget'`, definition.ts) is scoped PER WORKFLOW in

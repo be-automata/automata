@@ -181,7 +181,7 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
  * only runs at worker starts, so a redelivery landing on the surviving worker
  * used to start a second agent beside the orphan.
  *
- * Called at run admission (workflow.ts, before the box-slot acquire): scans
+ * Called at run admission (workflow.ts, before the box-lock acquire): scans
  * EVERY workerId dir — own and siblings, live or dead — for `<threadId>.pid`
  * and SIGKILLs that process group, then removes ONLY the pid file (a live
  * sibling's dir is never deleted; dead siblings are reclaimDeadWorkerRuns'
@@ -191,10 +191,11 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
  * construction, not by status polling):
  *  - Hatchet never runs one workflow-run concurrently with itself: a
  *    redelivery is issued only after the prior assignment's session lapsed.
- *  - www's per-thread daemon-token dedup guard prevents two DISPATCHES for
- *    one thread being in flight, so a same-threadId pid can only be a prior
- *    attempt of THIS run — never someone else's live work.
- *  - `slots: 1` means this worker itself has no other task mid-flight.
+ *  - www's per-thread token dedup bars concurrent double-dispatch, so a
+ *    same-threadId pid can only be a prior attempt of THIS run — never
+ *    someone else's live work.
+ *  - `slots: 1` on the box's single worker unit makes the box single-flight;
+ *    the kernel lock (box-lock.ts) covers the crash-relaunch overlap.
  * Never throws; every op is best-effort (a stray file must not fail a run).
  */
 export function reapOwnThreadAttempts(
