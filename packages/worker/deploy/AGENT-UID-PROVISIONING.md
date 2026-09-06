@@ -246,6 +246,19 @@ PASS = the node process's `pgid` equals `$PGID`. Then
 `sudo -n -u _automata-agent -- /bin/kill -9 -- -$PGID` and confirm
 `pgrep -u _automata-agent` is empty.
 
+The worker's uid-scan reaper (#184) issues this exact kill form —
+`sudo -n -u _automata-agent -- /bin/kill -9 -- -1` — itself, under the box
+lock, at boot, at run admission, and at run teardown. `-1` is uid-wide: the
+kernel bounds it to processes owned by `_automata-agent`, so it reaches every
+agent-uid process regardless of process group, not just the one PGID shown
+above. The five macOS per-user launchd helpers (`distnoted`, `lsd`,
+`csnameddatad`, `secd`, `contactsd`) will show up in `pgrep -u
+_automata-agent` between runs — that is expected; they are benign and
+respawn on demand, and the reaper excludes them from its counts. If a run's
+own `pgrep -u _automata-agent` shows residual processes after the reaper's
+scan, the manual hatch is still `sudo -n -u _automata-agent /bin/kill -9 --
+-$PGID` against the specific process group.
+
 **G4 — the anchor has teeth.** `sudo -u _automata-agent curl -m 5
 https://example.com` must fail (exit 28). This mirrors Anthropic's own
 devcontainer `init-firewall.sh` self-test.

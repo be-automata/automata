@@ -87,8 +87,33 @@ vi.mock("./reclaim", () => ({
 vi.mock("./box-lock", () => ({
   acquireBoxLock: vi.fn(async () => {
     admissionOrder.push("lock");
-    return { release: releaseMock };
+    return { release: releaseMock, lost: false };
   }),
+}));
+// #184 (#152 Stage B2): the real reaper's default spawnKill is a REAL
+// `sudo kill -9 -- -1` as the agent uid — lethal to live work on the pilot
+// box. This mock is the ONLY fence and lands in the same edit as the workflow
+// import. It records both phases so the admission order (lock → uid-scan →
+// daemon start, AC11/AC15) and the finally order (teardown → uid-scan →
+// cleanupWorkdir → release, AC12) are asserted, not assumed.
+const reapAgentUidEscapees = vi.fn(async (opts: { phase: string }) => {
+  admissionOrder.push(`uid-reap:${opts.phase}`);
+  finallyOrder.push(`uid-reap:${opts.phase}`);
+  return {
+    skipped: false,
+    scanned: 0,
+    groups: 0,
+    helpers: 0,
+    killed: 0,
+    residual: 0,
+    failed: 0,
+    durationMs: 0,
+  };
+});
+vi.mock("./uid-reaper", () => ({
+  reapAgentUidEscapees: (...args: unknown[]) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    reapAgentUidEscapees(...(args as [any])),
 }));
 vi.mock("./provision", () => ({
   provisionWorkdir: (...args: unknown[]) => provisionWorkdir(...args),
@@ -140,7 +165,10 @@ vi.mock("./daemon-process", () => ({
       daemonCtorArgs.push(args);
     }
     preflightGhAuth = vi.fn();
-    start = vi.fn();
+    // #184 AC15: the daemon may only be spawned AFTER the admission uid-scan.
+    start = vi.fn(() => {
+      admissionOrder.push("daemon-start");
+    });
     sendMessage = vi.fn(async () => 42);
     teardown = vi.fn(() => {
       finallyOrder.push("teardown");
@@ -851,7 +879,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
       // harness default so later cases acquire normally.
       vi.mocked(acquireBoxLock).mockImplementation(async () => {
         admissionOrder.push("lock");
-        return { release: releaseMock };
+        return { release: releaseMock, lost: false };
       });
     }
   });
@@ -949,11 +977,55 @@ describe("#152 Stage A: admission wiring order", () => {
       "reclaim",
     ]);
     expect(admissionOrder[2]).toBe("lock");
+    // #184 AC11: the uid-scan runs UNDER the lock, before the credential pull
+    // (which rejects here and stops the run right after).
+    expect(admissionOrder[3]).toBe("uid-reap:admission");
     expect(vi.mocked(reapOwnThreadAttempts)).toHaveBeenCalledWith(
       expect.objectContaining({ threadId: INPUT.threadId }),
     );
     expect(vi.mocked(reclaimDeadWorkerRuns)).toHaveBeenCalledWith(
       expect.objectContaining({ root: expect.any(String) }),
+    );
+  });
+
+  it("#184 AC15: scan-then-spawn — the admission uid-scan runs after the lock and BEFORE the daemon starts, with the config's agentUser and the run's threadId", async () => {
+    admissionOrder.length = 0;
+    reapAgentUidEscapees.mockClear();
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      cleanup: vi.fn(async () => {}),
+    });
+    pullNextMessage.mockReset().mockResolvedValue({
+      agent: "claudeCode",
+      model: "m",
+    });
+    pollUntilTerminal.mockReset().mockResolvedValue({
+      outcome: "terminal",
+      finalStatus: "complete",
+    });
+    postRunTerminal.mockReset().mockResolvedValue("applied");
+    await runFn(INPUT, ctx());
+    expect(admissionOrder.slice(0, 2).sort()).toEqual(["reap", "reclaim"]);
+    // The mock records BOTH phases here, so the teardown scan closes the list.
+    expect(admissionOrder.slice(2)).toEqual([
+      "lock",
+      "uid-reap:admission",
+      "daemon-start",
+      "uid-reap:teardown",
+    ]);
+    const { loadWorkerConfig } = await import("./config");
+    expect(reapAgentUidEscapees).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: "admission",
+        threadId: INPUT.threadId,
+        agentUser: loadWorkerConfig().agentUser,
+        runNamespaceRoot: loadWorkerConfig().runNamespaceRoot,
+      }),
+    );
+    expect(reapAgentUidEscapees).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: "teardown", threadId: INPUT.threadId }),
     );
   });
 });
@@ -967,7 +1039,15 @@ describe("#152 Stage A: admission wiring order", () => {
  * proxy, brokers) release BEFORE cleanupWorkdir by design and are out of scope.
  */
 describe("#183: finally order — box lock released last, after teardown and cleanupWorkdir", () => {
-  const TEARDOWN_TOKENS = ["teardown", "cleanupWorkdir", "release"];
+  // #184 AC12: the teardown uid-scan sits between the daemon teardown and
+  // cleanupWorkdir (before the proxy/broker closes — escapees are child
+  // traffic); the box-lock release stays last.
+  const TEARDOWN_TOKENS = [
+    "teardown",
+    "uid-reap:teardown",
+    "cleanupWorkdir",
+    "release",
+  ];
   const ctx = () => ({
     abortController: new AbortController(),
     cancelled: false,
@@ -998,10 +1078,40 @@ describe("#183: finally order — box lock released last, after teardown and cle
     });
     expect(finallyOrder.filter((x) => TEARDOWN_TOKENS.includes(x))).toEqual([
       "teardown",
+      "uid-reap:teardown",
       "cleanupWorkdir",
       "release",
     ]);
     expect(releaseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("#184: a LOST box lock skips the teardown uid-scan (another run may own the box) — logged, admission scan still ran, release still last", async () => {
+    const { acquireBoxLock } = await import("./box-lock");
+    reapAgentUidEscapees.mockClear();
+    vi.mocked(acquireBoxLock).mockImplementationOnce(async () => {
+      admissionOrder.push("lock");
+      return { release: releaseMock, lost: true };
+    });
+    pullNextMessage.mockResolvedValue(null);
+    const c = ctx();
+    await expect(runFn(INPUT, c)).resolves.toMatchObject({
+      outcome: "nothing-to-run",
+    });
+    expect(reapAgentUidEscapees.mock.calls.map(([opts]) => opts.phase)).toEqual(
+      ["admission"],
+    );
+    expect(finallyOrder.filter((x) => TEARDOWN_TOKENS.includes(x))).toEqual([
+      "teardown",
+      "cleanupWorkdir",
+      "release",
+    ]);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+    const skipped = c.log.mock.calls
+      .map((call) => String(call[0]))
+      .filter((l) => l.includes("box.escapees_scan_skipped"));
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toContain('"phase":"teardown"');
+    expect(skipped[0]).toContain('"reason":"lock lost"');
   });
 
   it("throw from inside the main try (pollUntilTerminal rejects): same order, release exactly once", async () => {
@@ -1010,6 +1120,7 @@ describe("#183: finally order — box lock released last, after teardown and cle
     await expect(runFn(INPUT, ctx())).rejects.toThrow("poll blew up");
     expect(finallyOrder.filter((x) => TEARDOWN_TOKENS.includes(x))).toEqual([
       "teardown",
+      "uid-reap:teardown",
       "cleanupWorkdir",
       "release",
     ]);

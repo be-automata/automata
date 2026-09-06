@@ -9,6 +9,7 @@ import {
 import { loadWorkerConfig } from "./config";
 import { acquireBoxLock, type BoxLock } from "./box-lock";
 import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
+import { reapAgentUidEscapees } from "./uid-reaper";
 import { DaemonProcess } from "./daemon-process";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
 import {
@@ -441,6 +442,10 @@ async function runAgentInner(
   // it, so a half-written credential cannot survive either.
   let boxLock: BoxLock | null = null;
   let materialised: MaterialisedCredentials;
+  // Hoisted above the try so the main finally (#184 teardown uid-scan) can
+  // log through the same prefix as the admission steps.
+  const admissionLog = (m: string) =>
+    ctx.log(`[agent-run ${input.threadId}] ${m}`);
   try {
     // #183 (#152 Stage B1): the box's ONE agent-run lock (box-lock.ts) — a
     // kernel flock(2) held by a helper child, so the kernel drops it the
@@ -457,8 +462,6 @@ async function runAgentInner(
     // with its own redelivery. Both are best-effort and never throw; the
     // safety argument for the no-engine-read own-thread kill lives on
     // reapOwnThreadAttempts.
-    const admissionLog = (m: string) =>
-      ctx.log(`[agent-run ${input.threadId}] ${m}`);
     reclaimDeadWorkerRuns({
       root: config.runNamespaceRoot,
       selfWorkerId: getProcessWorkerId(),
@@ -478,6 +481,19 @@ async function runAgentInner(
       log: admissionLog,
     });
     step("box lock acquired");
+    // #184 (#152 Stage B2): uid-wide scan UNDER the lock, BEFORE any
+    // credential touches disk and BEFORE this run spawns its daemon. ADR-007
+    // I2/I4: with the lock held no agent-uid process belongs to a live run, so
+    // everything the scan finds is an escapee (a detached `bash -lc | claude`
+    // subtree a worker-driven teardown could not reach by pgid) and is killed
+    // as one set. Never throws; on a disabled agent uid it is a no-op.
+    await reapAgentUidEscapees({
+      agentUser: config.agentUser,
+      phase: "admission",
+      threadId: input.threadId,
+      runNamespaceRoot: config.runNamespaceRoot,
+      log: admissionLog,
+    });
     const pulled =
       config.boxTrust === "owner"
         ? await pullAgentCredentials(wwwOpts, signal)
@@ -698,6 +714,28 @@ async function runAgentInner(
     // group so no orphan survives, then remove the workdir. Runs on normal return,
     // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
     daemon.teardown();
+    // #184 (#152 Stage B2): the teardown uid-scan runs right after the
+    // daemon's group is SIGKILLed and BEFORE the proxy/brokers close —
+    // escapees are child traffic, so they must be dead before those closes
+    // and before the credential wipe below (ADR-007 I2/I4). The 250 ms settle
+    // lives inside the reaper; it never throws, so it cannot mask the run's
+    // real outcome. The box lock still goes last. A LOST lock (the helper
+    // died mid-run, so the kernel already freed it) means another run may
+    // legitimately own the box now — its live agent would be collateral of
+    // a uid-wide kill, so the scan is skipped and logged instead.
+    if (boxLock?.lost) {
+      admissionLog(
+        `box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
+      );
+    } else {
+      await reapAgentUidEscapees({
+        agentUser: config.agentUser,
+        phase: "teardown",
+        threadId: input.threadId,
+        runNamespaceRoot: config.runNamespaceRoot,
+        log: admissionLog,
+      });
+    }
     // #66: close the egress proxy after the daemon is dead (no more child
     // traffic), then flush the last audit batch. Both are best-effort — an
     // audit/proxy teardown hiccup must never mask the run's real outcome.

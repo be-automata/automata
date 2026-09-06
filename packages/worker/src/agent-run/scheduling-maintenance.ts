@@ -70,17 +70,24 @@ function emptySnapshot(engineReachable: boolean): SchedulingHealthSnapshot {
   };
 }
 
-/** Write-temp-then-rename so a reader never observes a partial snapshot file. */
-export function writeSnapshotAtomic(
+/**
+ * Write-temp-then-rename so a reader never observes a partial snapshot file.
+ * Throws on write/rename failure — the caller decides (the maintenance tick
+ * logs `scheduling.tick_error`; the uid reaper logs `box.budget_write_failed`).
+ * `filename` defaults to the scheduling-health snapshot; #184 reuses the
+ * writer for `box-budget.json`.
+ */
+export function writeSnapshotAtomic<T extends object>(
   runNamespaceRoot: string,
-  snapshot: SchedulingHealthSnapshot,
+  snapshot: T,
+  filename = "scheduling-health.json",
 ): void {
   try {
     fs.mkdirSync(runNamespaceRoot, { recursive: true });
   } catch {
     // best-effort; the write below will surface the real error if this matters
   }
-  const target = path.join(runNamespaceRoot, "scheduling-health.json");
+  const target = path.join(runNamespaceRoot, filename);
   const tmp = `${target}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2));
   fs.renameSync(tmp, target);

@@ -133,14 +133,18 @@ jobs:
           cache: "pnpm"
       - name: Install dependencies (worker closure only)
         run: pnpm install --frozen-lockfile --prefer-offline --filter "@terragon/worker..."
+      - name: Provision the uid-reaper IT account (#184)
+        run: sudo useradd -r -s /usr/sbin/nologin automata-it-agent
       - name: Supersede-policy E2E + scheduling-health IT (HATCHET_IT=1)
         env:
           HATCHET_IT: "1"
+          HOST_UID_IT: "1"
         run: |
           pnpm --filter @terragon/worker exec vitest run --no-file-parallelism \
             src/agent-run/supersede.integration.test.ts \
             src/agent-run/scheduling-health.integration.test.ts \
-            src/agent-run/box-lock.test.ts
+            src/agent-run/box-lock.test.ts \
+            src/agent-run/uid-reaper.integration.test.ts
       - name: Tear down (always)
         if: always()
         run: docker compose -p automata-hatchet-it down -v --remove-orphans || true

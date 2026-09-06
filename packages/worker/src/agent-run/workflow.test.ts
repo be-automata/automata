@@ -12,6 +12,21 @@ vi.mock("./reclaim", () => ({
 vi.mock("./box-lock", () => ({
   acquireBoxLock: vi.fn(async () => ({ release: vi.fn() })),
 }));
+// #184: the real reaper's default spawnKill is a REAL `sudo kill -9 -- -1`
+// as the agent uid — on the pilot box that is lethal to live work. The mock
+// is the only fence; it lands in the same edit as the workflow import.
+vi.mock("./uid-reaper", () => ({
+  reapAgentUidEscapees: vi.fn(async () => ({
+    skipped: true,
+    scanned: 0,
+    groups: 0,
+    helpers: 0,
+    killed: 0,
+    residual: 0,
+    failed: 0,
+    durationMs: 0,
+  })),
+}));
 
 /**
  * Phase 0.1 registration-shape proof for the agent-run WORKFLOW (converted from a
