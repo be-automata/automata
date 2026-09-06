@@ -225,6 +225,48 @@ during the observation window (see Promotion below). A structured log line
 / `"scheduling.tick_skipped_locked"`) is emitted to `worker.log` on every tick with a
 non-empty finding.
 
+### Reading `box-budget.json`
+
+The uid-scan reaper (#184, `uid-reaper.ts`) writes
+`<runNamespaceRoot>/box-budget.json` after every non-skipped, non-errored scan
+(boot, run admission, and run teardown), atomically, with the shape:
+
+```json
+{
+  "ts": "2026-09-06T12:00:00.000Z",
+  "phase": "boot" | "admission" | "teardown",
+  "threadId": "…",
+  "scanned": 0,
+  "groups": 0,
+  "helpers": 0,
+  "killed": 0,
+  "residual": 0,
+  "failed": 0,
+  "escapeesSinceBoot": 0
+}
+```
+
+`scanned`/`groups`/`killed`/`residual`/`failed` describe the agent-uid
+processes reaped by that one scan; `escapeesSinceBoot` accumulates `killed`
+across every scan since the worker started. The five macOS per-user launchd
+helpers (`distnoted`, `lsd`, `csnameddatad`, `secd`, `contactsd`) are excluded
+from every one of those counts and reported separately as `helpers` — they
+respawn on demand and are not agent-run state.
+
+Every non-skipped scan logs `box.escapees_reaped` with the same counts.
+`box.escapees_residual` is logged only when `residual > 0` after the scan's
+kill — **this is the operator's cue**: it means the uid-wide
+`sudo -n -u _automata-agent -- /bin/kill -9 -- -1` did not clear everything
+within its bound, and the manual hatch is
+`sudo -n -u _automata-agent /bin/kill -9 -- -<pgid>` against the specific
+process group named in the log line's `sample`. `box.budget_write_failed` means
+the `box-budget.json` write itself failed (e.g. an unwritable
+`runNamespaceRoot`) — the scan and kill still ran; only the file is missing.
+
+When `WORKER_AGENT_USER` is empty, the boot log prints `box uid-scan
+disabled: WORKER_AGENT_USER is empty` and no scan, lock, or `box-budget.json`
+write happens at all.
+
 ### Recovery-latency bounds — alert on the ALERTABLE figure, not 5 minutes
 
 ```

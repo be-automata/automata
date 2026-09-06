@@ -185,7 +185,8 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
  * EVERY workerId dir — own and siblings, live or dead — for `<threadId>.pid`
  * and SIGKILLs that process group, then removes ONLY the pid file (a live
  * sibling's dir is never deleted; dead siblings are reclaimDeadWorkerRuns'
- * job, which admission also invokes).
+ * job, which admission also invokes), and the uid-scan reaper (`uid-reaper.ts`,
+ * #184) runs AFTER the lock — it is the only uid-wide kill.
  *
  * WHY killing by threadId is safe with no engine read (fail-closed by
  * construction, not by status polling):
