@@ -297,7 +297,7 @@ sudo ./pf-verify.sh || true
 sudo pfctl -a automata-egress -F rules            # drop the block, keep PF up
 sudo launchctl bootout system/com.automata.pf     # stop reloading it at boot
 sudo rm /etc/sudoers.d/automata                   # revoke the delegation
-# then WORKER_AGENT_USER= in worker-box.env and restart the worker units
+# then WORKER_AGENT_USER= in worker-box.env and restart the worker unit
 ```
 
 Order matters. Flush the PF rules **first**: removing `WORKER_AGENT_USER` while

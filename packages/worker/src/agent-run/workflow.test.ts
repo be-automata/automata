@@ -3,14 +3,14 @@ import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
 import { AGENT_RUN_VARIANTS } from "./definition";
 
 // Defensive: this suite only checks registration shapes and never runs the
-// task fn — but if a future case does, the admission reap and box slot must
+// task fn — but if a future case does, the admission reap and box lock must
 // never touch the box's REAL namespace root from a unit test (#152 Stage A).
 vi.mock("./reclaim", () => ({
   reclaimDeadWorkerRuns: vi.fn(),
   reapOwnThreadAttempts: vi.fn().mockReturnValue(0),
 }));
-vi.mock("./box-slot", () => ({
-  acquireBoxSlot: vi.fn(async () => ({ release: vi.fn() })),
+vi.mock("./box-lock", () => ({
+  acquireBoxLock: vi.fn(async () => ({ release: vi.fn() })),
 }));
 
 /**

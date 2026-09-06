@@ -4,29 +4,21 @@ Repo-tracked launchd templates + runbook for the Automata `agent-run` worker on 
 pilot Mac (enterprise-hardening Phase 3, gap #4). Real customer boxes get a systemd
 unit; this is the dev-Mac launchd analog.
 
-Two units are provided:
+One unit is provided:
 
-- `com.automata.worker.plist` — unit A (primary).
-- `com.automata.worker-2.plist` — unit B (warm standby for HA / rolling restarts).
+- `com.automata.worker.plist` — the worker unit.
 
-Both are **templates**. Replace the `__HOME__` and `__REPO__` tokens for the box,
+It is a **template**. Replace the `__HOME__` and `__REPO__` tokens for the box,
 then install to `~/Library/LaunchAgents/`.
 
-> **≥2 workers is safe ONLY because of Phase 0.2b per-worker namespace reclaim.**
-> Each worker process owns `/tmp/automata-agent-run/<workerId>/`
-> (`workerId = w-<pid>-<uuid>`, unique per process); boot-time reclaim reaps orphans
-> only under a **sibling** dir whose lock pid is confirmed dead, so a live worker's
-> daemons are never SIGKILLed. Without it, unit B's reclaim could kill unit A's live
-> daemon.
+One agent-run executes at a time on the box: `slots: 1` on the single unit plus the
+kernel box lock (`src/agent-run/box-lock.ts`). The `GLOBAL_MAX_RUNS = 1` key in
+`src/agent-run/definition.ts` caps each workflow VARIANT separately and is not the box
+budget. Extra throughput (gap #3b) means raising both, gated on a memory-headroom check.
 
-Unit B is a standby, **not** extra throughput: the workflow's global concurrency cap
-(`GLOBAL_MAX_RUNS = 1` in `src/agent-run/workflow.ts`) still serializes to ONE
-agent-run at a time across both units. Extra throughput is gap #3b (raise the cap),
-gated on a memory-headroom check.
+## `run-worker.sh` wiring
 
-## `run-worker.sh` wiring (both units run this)
-
-Both units exec `~/.automata/run-worker.sh`. It MUST call the fail-closed auth gate
+The unit execs `~/.automata/run-worker.sh`. It MUST call the fail-closed auth gate
 BEFORE starting the worker, so a `-dev` / auth-disabled hatchet-lite engine (public
 signing key → tenancy void) never gets a worker:
 
@@ -85,18 +77,16 @@ are in `AGENT-UID-PROVISIONING.md`. Two things that will otherwise bite:
 # Fill the template tokens for this box.
 HOME_DIR="$HOME"
 REPO="/absolute/path/to/automata-platform"
-for unit in com.automata.worker com.automata.worker-2; do
-  sed -e "s|__HOME__|$HOME_DIR|g" -e "s|__REPO__|$REPO|g" \
-    "$REPO/packages/worker/deploy/$unit.plist" \
-    > "$HOME/Library/LaunchAgents/$unit.plist"
-done
+unit=com.automata.worker
+sed -e "s|__HOME__|$HOME_DIR|g" -e "s|__REPO__|$REPO|g" \
+  "$REPO/packages/worker/deploy/$unit.plist" \
+  > "$HOME/Library/LaunchAgents/$unit.plist"
 
-# Load unit A (primary), then unit B (standby).
+# Load the worker unit.
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.automata.worker.plist
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.automata.worker-2.plist
 ```
 
-Confirm each booted and shows the drain-contract log line
+Confirm it booted and shows the drain-contract log line
 (`SIGTERM/SIGINT → SDK graceful drain …`) in its `*.log`.
 
 ## Graceful restart (NEVER `kickstart -k` mid-run)
@@ -121,16 +111,21 @@ done
 `launchctl kickstart -k` sends **SIGKILL** — it is the drop we are preventing. Do not
 use it on a unit that may be mid-run.
 
-## Rolling-restart runbook (zero dropped reviews across a deploy)
+## Graceful restart (single unit) + deploy idle
 
-Restart the two units **one at a time** so the other keeps serving:
+There is only one unit and no standby, so a deploy is a single drain-and-relaunch,
+not a rolling restart:
 
 1. Pull + rebuild on the box (see "Daemon rebuild" — the worker consumes the daemon
    `dist/`).
-2. Drain **unit A**: `launchctl kill TERM gui/$UID/com.automata.worker`; poll for exit
-   (above). Unit B keeps serving. KeepAlive relaunches A on the new code.
-3. Confirm A is back and healthy (drain-contract log line, no boot errors).
-4. Repeat for **unit B** (`com.automata.worker-2`).
+2. Drain: `launchctl kill TERM gui/$UID/com.automata.worker`; poll for exit (see
+   "Graceful restart" above). KeepAlive relaunches it on the new code.
+3. Confirm it is back and healthy (drain-contract log line, no boot errors).
+
+> **Deploy when idle.** With one unit and no standby, runs queued on OTHER workflow
+> variants sit on their 30-minute `scheduleTimeout` (`definition.ts:171-172`) while
+> this unit drains a long in-flight run — a long drain can leave them
+> `SCHEDULING_TIMED_OUT`. Deploy when the box is idle, not mid-run.
 
 > **Workflow version pinning caveat:** confirm in-flight runs stay on their registered
 > workflow version across the swap before claiming zero-downtime. If unconfirmed,
@@ -152,8 +147,8 @@ pnpm --filter @terragon/daemon run build
 
 Each daemon SIGKILLs its own process group on teardown, and boot-time reclaim reaps a
 dead sibling worker's orphaned daemons. Add a worker-liveness alert (gap #7): alert on
-a worker that stops heartbeating so a silently-dead unit is noticed before it starves
-HA.
+a worker that stops heartbeating so a silently-dead unit is noticed before queued runs
+hit their `scheduleTimeout`.
 
 ## Scheduling deadlock: diagnosis and recovery (#69)
 
@@ -237,9 +232,11 @@ nominal   = HATCHET_WORKER_DEAD_AFTER_S (600s) + HATCHET_MAINT_INTERVAL_S (60s) 
 alertable = HATCHET_WORKER_DEAD_AFTER_S (600s) + 2 × HATCHET_MAINT_INTERVAL_S    ≈ 12 min
 ```
 
-The alertable figure accounts for one lost `pg_try_advisory_lock` race between the two
-launchd units (§3.4) — publishing the nominal figure as an ops alert threshold would
-page on healthy contention. It is **not** 5 minutes, and it is **not** bounded by
+The alertable figure accounts for one skipped maintenance tick — a tick overlapping a
+long previous tick loses the `pg_try_advisory_lock`, or a worker restart lands
+mid-interval (§3.4) —
+publishing the nominal figure as an ops alert threshold would page on healthy
+contention. It is **not** 5 minutes, and it is **not** bounded by
 `scheduleTimeout` (that gate was deliberately removed, §3.2.2). A box needing faster
 recovery lowers `HATCHET_WORKER_DEAD_AFTER_S`, accepting a proportionally larger
 network-partition hazard (§3.2.1).

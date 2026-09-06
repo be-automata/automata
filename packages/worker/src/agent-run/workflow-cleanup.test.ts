@@ -62,9 +62,17 @@ const daemonCtorArgs: unknown[][] = [];
 // real group-SIGKILLs for dead-sibling debris — on a box that also runs
 // production workers, a unit test must never do that (a recycled pgid could
 // be live work). Mocked like the other side-effectful collaborators, and the
-// mocks RECORD their order so the admission wiring (reclaim → reap → slot,
+// mocks RECORD their order so the admission wiring (reclaim → reap → lock,
 // per the safety argument in workflow.ts) is asserted, not assumed.
 const admissionOrder: string[] = [];
+// #183 AC10: the main finally's teardown order (daemon teardown →
+// cleanupWorkdir → box-lock release) is recorded by the three mocks below and
+// asserted in the "#183: finally order" describe. The catch-path releases
+// (before cleanupWorkdir) are NOT covered here on purpose — see ADR-007 I2.
+const finallyOrder: string[] = [];
+const releaseMock = vi.fn(async () => {
+  finallyOrder.push("release");
+});
 vi.mock("./reclaim", () => ({
   reclaimDeadWorkerRuns: vi.fn(() => {
     admissionOrder.push("reclaim");
@@ -74,17 +82,20 @@ vi.mock("./reclaim", () => ({
     return 0;
   }),
 }));
-// Same shared-root hazard as ./reclaim: the real acquireBoxSlot creates lock
-// dirs under the box's production namespace root during unit tests.
-vi.mock("./box-slot", () => ({
-  acquireBoxSlot: vi.fn(async () => {
-    admissionOrder.push("slot");
-    return { release: vi.fn() };
+// Same shared-root hazard as ./reclaim: the real acquireBoxLock spawns a
+// lockf/flock helper on the box's production namespace root during unit tests.
+vi.mock("./box-lock", () => ({
+  acquireBoxLock: vi.fn(async () => {
+    admissionOrder.push("lock");
+    return { release: releaseMock };
   }),
 }));
 vi.mock("./provision", () => ({
   provisionWorkdir: (...args: unknown[]) => provisionWorkdir(...args),
-  cleanupWorkdir: (...args: unknown[]) => cleanupWorkdir(...args),
+  cleanupWorkdir: (...args: unknown[]) => {
+    finallyOrder.push("cleanupWorkdir");
+    return cleanupWorkdir(...args);
+  },
 }));
 
 const pullNextMessage = vi.fn();
@@ -131,7 +142,9 @@ vi.mock("./daemon-process", () => ({
     preflightGhAuth = vi.fn();
     start = vi.fn();
     sendMessage = vi.fn(async () => 42);
-    teardown = vi.fn();
+    teardown = vi.fn(() => {
+      finallyOrder.push("teardown");
+    });
   },
 }));
 
@@ -808,6 +821,40 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
       ctx.log.mock.calls.some((c) => String(c[0]).includes("no workflowRunId")),
     ).toBe(true);
   });
+
+  it("#183 AC13: cancel while WAITING on the box lock: abort error propagates unwrapped, ONE superseded terminal, workdir cleaned, no failure post, no release", async () => {
+    const { ctx, abortIn } = makeCtx("run-ext-lockwait");
+    const { acquireBoxLock } = await import("./box-lock");
+    const { postRunFailed } = await import("./www-client");
+    vi.mocked(postRunFailed).mockClear();
+    releaseMock.mockClear();
+    // The waiting helper is SIGKILLed on abort and acquireBoxLock rejects with
+    // the AbortError shape (box-lock.ts) — the workflow must not wrap it.
+    abortIn(vi.mocked(acquireBoxLock), "box lock wait aborted");
+    try {
+      await expect(
+        runFn({ ...PR_INPUT, supersedePolicy: "newest-wins" }, ctx),
+      ).rejects.toThrow(/aborted/);
+      expect(postRunTerminal).toHaveBeenCalledTimes(1);
+      expect(postRunTerminal.mock.calls[0]![1]).toEqual(
+        expect.objectContaining({
+          cause: "superseded",
+          policy: "newest-wins",
+        }),
+      );
+      expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
+      expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
+      expect(postRunFailed).not.toHaveBeenCalled();
+      expect(releaseMock).not.toHaveBeenCalled();
+    } finally {
+      // abortIn() swapped the module-level mock's implementation; restore the
+      // harness default so later cases acquire normally.
+      vi.mocked(acquireBoxLock).mockImplementation(async () => {
+        admissionOrder.push("lock");
+        return { release: releaseMock };
+      });
+    }
+  });
 });
 
 /**
@@ -884,29 +931,88 @@ describe("#125 C4: queue-mode staleness self-check", () => {
 });
 
 describe("#152 Stage A: admission wiring order", () => {
-  it("BOTH admission reaps run BEFORE the box-slot acquire — with the run's threadId and the namespace root (their relative order is not a contract)", async () => {
+  it("BOTH admission reaps run BEFORE the box-lock acquire — with the run's threadId and the namespace root (their relative order is not a contract)", async () => {
     admissionOrder.length = 0;
     const { reapOwnThreadAttempts, reclaimDeadWorkerRuns } = await import(
       "./reclaim"
     );
     vi.mocked(reapOwnThreadAttempts).mockClear();
     vi.mocked(reclaimDeadWorkerRuns).mockClear();
-    // Fail at the credential pull — everything at and before the slot has run.
+    // Fail at the credential pull — everything at and before the lock has run.
     pullAgentCredentials.mockRejectedValue(new Error("stop here"));
     await expect(runFn({ ...INPUT }, ctx())).rejects.toThrow("stop here");
-    // The load-bearing invariant is set-before-slot, not reclaim-vs-reap
+    // The load-bearing invariant is set-before-lock, not reclaim-vs-reap
     // order (either order yields the same end state — see reclaim.ts docs).
     expect(admissionOrder.slice(0, 3).sort()).toEqual([
+      "lock",
       "reap",
       "reclaim",
-      "slot",
     ]);
-    expect(admissionOrder[2]).toBe("slot");
+    expect(admissionOrder[2]).toBe("lock");
     expect(vi.mocked(reapOwnThreadAttempts)).toHaveBeenCalledWith(
       expect.objectContaining({ threadId: INPUT.threadId }),
     );
     expect(vi.mocked(reclaimDeadWorkerRuns)).toHaveBeenCalledWith(
       expect.objectContaining({ root: expect.any(String) }),
     );
+  });
+});
+
+/**
+ * #183 AC10 (ADR-007 I2): in the run's MAIN finally the box lock is released
+ * LAST — after the daemon's process group is torn down and after the workdir
+ * is gone — so the next run on the box can never overlap this one's daemon or
+ * its disk footprint. Holds on a normal return and on a throw from inside the
+ * main try alike. The three pre-daemon catch paths (credential pull, egress
+ * proxy, brokers) release BEFORE cleanupWorkdir by design and are out of scope.
+ */
+describe("#183: finally order — box lock released last, after teardown and cleanupWorkdir", () => {
+  const TEARDOWN_TOKENS = ["teardown", "cleanupWorkdir", "release"];
+  const ctx = () => ({
+    abortController: new AbortController(),
+    cancelled: false,
+    log: vi.fn(),
+    workflowRunId: () => "run-ext-fin",
+  });
+
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    finallyOrder.length = 0;
+    releaseMock.mockClear();
+    provisionWorkdir.mockReset().mockResolvedValue(WORKDIR);
+    cleanupWorkdir.mockReset().mockResolvedValue(undefined);
+    postRunTerminal.mockReset().mockResolvedValue("applied");
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      cleanup: vi.fn(async () => {}),
+    });
+    pullNextMessage.mockReset();
+    pollUntilTerminal.mockReset();
+  });
+
+  it("normal return: teardown → cleanupWorkdir → release, release exactly once", async () => {
+    pullNextMessage.mockResolvedValue(null);
+    await expect(runFn(INPUT, ctx())).resolves.toMatchObject({
+      outcome: "nothing-to-run",
+    });
+    expect(finallyOrder.filter((x) => TEARDOWN_TOKENS.includes(x))).toEqual([
+      "teardown",
+      "cleanupWorkdir",
+      "release",
+    ]);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("throw from inside the main try (pollUntilTerminal rejects): same order, release exactly once", async () => {
+    pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
+    pollUntilTerminal.mockRejectedValue(new Error("poll blew up"));
+    await expect(runFn(INPUT, ctx())).rejects.toThrow("poll blew up");
+    expect(finallyOrder.filter((x) => TEARDOWN_TOKENS.includes(x))).toEqual([
+      "teardown",
+      "cleanupWorkdir",
+      "release",
+    ]);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
   });
 });

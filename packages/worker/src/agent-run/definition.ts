@@ -150,7 +150,7 @@ export function buildAgentRunDefinition(
           // NOT box-wide: Hatchet scopes this group PER WORKFLOW, so with the
           // variants registered it caps each variant separately (observed,
           // docs/uat/hatchet-lite-v0.94.10-observed.md §5). The box-wide
-          // budget is enforced by the worker's box slot (box-slot.ts).
+          // budget is enforced by the worker's kernel box lock (box-lock.ts).
           expression: "'agent-run-global-memory-budget'",
           maxRuns: GLOBAL_MAX_RUNS,
           limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,

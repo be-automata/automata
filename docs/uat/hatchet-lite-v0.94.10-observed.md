@@ -51,9 +51,10 @@ the `'agent-run-global-memory-budget'` key — a constant expression meant as a
 box-wide cap — is a separate group per workflow version. With the four
 variants registered the engine alone would allow up to four concurrent
 agent-runs on a box budgeted for one. The worker therefore enforces the box
-slot itself (`packages/worker/src/agent-run/box-slot.ts`: atomic mkdir lock +
-owner heartbeat, shared by both worker processes, abort-aware, stale-owner
-reclaim); the E2E's next case proves runs on different variants no longer
+budget itself (since #183: `packages/worker/src/agent-run/box-lock.ts`, a kernel
+flock(2) held by a `lockf`/`flock` helper child, released by the kernel when the
+holder dies — no heartbeat, no staleness reclaim; it replaced the #125 C4
+`box-slot.ts` owner-file scheme, and the box now runs one worker unit); the E2E's next case proves runs on different variants no longer
 overlap with it in place.
 
 Also observed, INTERMITTENTLY, on `agent-run-strict` (three stacked

@@ -2,6 +2,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { hatchet } from "../hatchet-client";
 import { assertAuthEnabledFromEnv } from "../agent-run/assert-auth";
+import {
+  assertBoxLockHelperAvailable,
+  boxLockPath,
+} from "../agent-run/box-lock";
 import { loadWorkerConfig } from "../agent-run/config";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
@@ -94,6 +98,23 @@ async function main() {
     process.exit(1);
   }
 
+  // #183 (#152 Stage B1): the box's one agent-run lock is a kernel flock(2)
+  // taken through a helper binary (lockf on darwin, flock on linux). Probe it
+  // ONCE at boot, unconditionally, and refuse to start without it — a worker
+  // that cannot take the lock would admit runs with no box-wide budget at all.
+  try {
+    const { file } = await assertBoxLockHelperAvailable();
+    console.log(
+      `[worker-boot] box lock helper OK: ${file}; lock file ${boxLockPath(loadWorkerConfig().runNamespaceRoot)}`,
+    );
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: box lock helper unavailable — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
+
   await claimNamespaceAndReclaim();
 
   // #69 §3.2.4 item 2 — boot-time (secondary) engine-DB slot reclaim, BEFORE
@@ -105,11 +126,12 @@ async function main() {
 
   const worker = await hatchet.worker("automata-worker", {
     workflows,
-    // #125 C4: ONE slot per worker process. The engine's global concurrency key is
-    // per workflow (docs/uat/hatchet-lite-v0.94.10-observed.md §5), so admission
-    // is bounded here: with two processes on the box at most one run executes
-    // (box-slot.ts) and at most one waits; everything else stays QUEUED on the
-    // engine, where a cancel/supersede is free and no timeout clock is running.
+    // #125 C4 / #183: ONE slot per worker process and ONE unit per box:
+    // `slots: 1` is the engine-native cross-workflow cap (the engine's global
+    // concurrency key is per workflow — docs/uat/hatchet-lite-v0.94.10-observed.md
+    // §5); the kernel box lock (box-lock.ts) covers the crash-relaunch overlap.
+    // Everything else stays QUEUED on the engine, where a cancel/supersede is
+    // free and no timeout clock is running.
     slots: 1,
   });
 

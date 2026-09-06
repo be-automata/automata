@@ -542,7 +542,7 @@ offer.
 
 Engine-side concurrency (including the per-tenant policies and slot `schedule_timeout`
 discussed above) is scoped **per workflow** — no engine primitive caps across the four
-agent-run workflow variants. The one-agent-per-box budget is enforced host-side (flock +
-admission reaper + container memory ceiling; interim: `box-slot.ts`). The stale-RUNNING
+agent-run workflow variants. The one-agent-per-box budget is enforced host-side (kernel lock +
+admission/teardown reapers; memory ceiling deferred; `box-lock.ts`). The stale-RUNNING
 bound used by the reaper is the task's `executionTimeout`, distinct from the slot
 `schedule_timeout` above. See ADR-007.

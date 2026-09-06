@@ -616,9 +616,9 @@ export function nominalRecoveryLatencySeconds(
 
 /**
  * `deadAfterSeconds + 2 * maintIntervalSeconds` — the figure the runbook and
- * any ops alert threshold MUST use (§3.2.2): with two launchd units ticking,
- * the tick that would have fired can lose the advisory-lock race and skip,
- * costing one further interval.
+ * any ops alert threshold MUST use (§3.2.2): the tick that would have fired
+ * can be skipped by a maintenance tick overlapping a long previous tick, or
+ * a worker restart mid-interval, costing one further interval.
  */
 export function alertableRecoveryLatencySeconds(
   deadAfterSeconds: number,
