@@ -29,15 +29,22 @@ MAX_CONTEXT_BYTES = 64 * 1024  # upper bound on injected rule text per Write
 
 
 def _split_top(text):
-    """Split on commas that are not inside a brace group or a quoted item, so a
-    flow-form item like "src/**/*.{ts,tsx}" or "a,b.ts" stays one pattern.
+    """Split a YAML flow sequence body on its item separators.
 
-    Quote tracking matters: a comma inside a quoted glob but outside a `{...}`
-    group would otherwise tear the item into fragments that keep a stray quote
-    and silently match nothing. An unterminated quote consumes the rest, which
-    yields one item rather than garbage.
+    A comma only separates items at the top level. Glob syntax has exactly three
+    nesting contexts in which a comma is data rather than a separator, and all
+    three are tracked here, so the set is closed:
+
+      - quotes      `"a,b.ts"`          a quoted item
+      - `{...}`     `src/**/*.{ts,tsx}` a brace group
+      - `[...]`     `a[x,y].ts`         a bracket class
+
+    Splitting inside any of them tears the item into fragments that can never
+    match a real path, and because the hook fails open the rule would silently
+    stop firing rather than error. An unterminated quote or bracket consumes the
+    rest of the text, which yields one item instead of garbage.
     """
-    parts, buf, depth, quote = [], '', 0, None
+    parts, buf, braces, brackets, quote = [], '', 0, 0, None
     for ch in text:
         if quote:
             if ch == quote:
@@ -49,10 +56,14 @@ def _split_top(text):
             buf += ch
             continue
         if ch == '{':
-            depth += 1
-        elif ch == '}' and depth:
-            depth -= 1
-        if ch == ',' and depth == 0:
+            braces += 1
+        elif ch == '}' and braces:
+            braces -= 1
+        elif ch == '[':
+            brackets += 1
+        elif ch == ']' and brackets:
+            brackets -= 1
+        if ch == ',' and not braces and not brackets:
             parts.append(buf)
             buf = ''
         else:

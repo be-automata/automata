@@ -123,6 +123,24 @@ class FlowFormPaths(unittest.TestCase):
     def test_unterminated_quote_yields_one_item(self):
         self.assertEqual(inject_rules.parse_paths('paths: ["a,b.ts]\n'), ['"a,b.ts'])
 
+    def test_comma_inside_a_bracket_class_is_not_a_separator(self):
+        # Unquoted flow-form item whose bracket class contains a comma.
+        self.assertEqual(inject_rules.parse_paths("paths: [a[x,y].ts]\n"), ["a[x,y].ts"])
+        self.assertTrue(inject_rules.matches("ax.ts", inject_rules.parse_paths("paths: [a[x,y].ts]\n")))
+
+    def test_unterminated_bracket_yields_one_item(self):
+        self.assertEqual(inject_rules.parse_paths("paths: [a[x,y.ts]\n"), ["a[x,y.ts"])
+
+    def test_every_nesting_context_in_one_list(self):
+        fm = 'paths: ["a,b.ts", src/**/*.{ts,tsx}, c[x,y].ts, plain.ts]\n'
+        self.assertEqual(
+            inject_rules.parse_paths(fm),
+            ["a,b.ts", "src/**/*.{ts,tsx}", "c[x,y].ts", "plain.ts"],
+        )
+
+    def test_bracket_inside_a_brace_group(self):
+        self.assertEqual(inject_rules.parse_paths("paths: [{a[x,y],b}.ts]\n"), ["{a[x,y],b}.ts"])
+
 
 class EndToEnd(unittest.TestCase):
     def test_new_matching_ts_file_injects_rule(self):
