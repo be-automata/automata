@@ -55,7 +55,9 @@ arrives. Two structural questions were left open at delivery:
      the crash-relaunch overlap. Drill-proven live (worker SIGKILL mid-run → orphan
      group reaped → 36 s redelivery, clean).
    - **Stage B1 (shipped with #183):** kernel lock + one-unit topology + `box-slot.ts`
-     retirement. **Stage B2 (#184, pending):** uid-scan reaper. **Memory ceiling:**
+     retirement. **Stage B2 (#184):** uid-scan reaper — a uid-wide `kill -9 -- -1` as the
+     agent uid at boot/admission/teardown, only under the box lock; Accepted on merge +
+     live proof (U4–U7). **Memory ceiling:**
      deferred 2026-09-05 (macOS has no cgroups; arrives with a containerized
      topology).
 5. **The host budget never cancels.** It may delay or reject _admission_ of a run (a
@@ -77,7 +79,7 @@ arrives. Two structural questions were left open at delivery:
 
 ## Amendment (2026-09-05, #152 Stage B)
 
-- **Status:** Items 1–2 **Accepted** (Stage B1, PR #186 → `88e8e75`, live-proven 2026-09-06); items 3–4 Proposed with #184 (Stage B2); item 5 stays **Deferred** (2026-09-05).
+- **Status:** Items 1–2 **Accepted** (Stage B1, PR #186 → `88e8e75`, live-proven 2026-09-06); items 3–4 Proposed with #184 (Stage B2), Accepted on its merge + live proof (U4–U7); item 5 stays **Deferred** (2026-09-05).
 - **Context source (as of `e2716a4`, pre-#183):** `box-slot.ts:178-184` (time-based reclaim), `workflow.ts:473-478` /
   `:698-715` (acquire and release ordering), `daemon-process.ts:353-370` (pid file removed
   before the kill), `spawn-as-user.ts:148-159` (pgid-only kill builder),
@@ -99,10 +101,14 @@ arrives. Two structural questions were left open at delivery:
    Processes owned by the agent uid whose run has reached its finally, or whose worker is
    dead, are residue; killing them at boot, admission, or teardown is reclamation. A
    uid-wide `kill -9 -- -1` as the agent uid is issued only by the box-lock holder.
-   (Stage B2)
+   The only agent-uid processes outside a run are macOS's per-user launchd helpers
+   (`distnoted`, `lsd`, `csnameddatad`, `secd`, `contactsd`), which respawn on demand;
+   the reaper excludes them from its counts and reports them as `helpers`. Root cause
+   of the escape: the daemon spawns the agent `detached` (its own session and process
+   group), so any WORKER-driven daemon kill orphans the agent subtree. (Stage B2, #184)
 4. **Signal seam.** Process-plane reap results are emitted as run-scoped `box.*` log
    events and a host-plane `box-budget.json`; `scheduling-health.json` stays engine-DB
-   only. (Stage B2)
+   only. (Stage B2, #184)
 5. **Memory ceiling.** Deferred (2026-09-05); arrives with a containerized topology.
 
 ## Anti-deviation invariants

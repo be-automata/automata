@@ -262,6 +262,11 @@ within its bound, and the manual hatch is
 process group named in the log line's `sample`. `box.budget_write_failed` means
 the `box-budget.json` write itself failed (e.g. an unwritable
 `runNamespaceRoot`) — the scan and kill still ran; only the file is missing.
+`box.escapees_scan_failed` (with a `stage` of `scan`, `residual` or `unexpected`)
+means `ps` or `id -u` failed and nothing was killed; `box.escapees_kill_failed` means the
+sudo kill could not be spawned (`failed: 1` in the reaped line) — both are
+fail-open: the run continues, the box stays single-flight, and the next phase
+re-scans.
 
 When `WORKER_AGENT_USER` is empty, the boot log prints `box uid-scan
 disabled: WORKER_AGENT_USER is empty` and no scan, lock, or `box-budget.json`
