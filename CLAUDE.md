@@ -7,38 +7,20 @@
 
 ## Stacks detected
 
-<!-- typescript: comma-separated list of detected stacks, or the literal "none detected" when
-     detection found nothing. Regenerated from detection every run. -->
-typescript
+node
 
 ## Rules
 
 Rule bodies are never inlined here — only the index. Each row loads lazily, only when the
 matching path is touched (see `optimize-context-rules`).
 
-<!-- Rules table: one row per installed rule file. Regenerated from the installed rule set every run. -->
-| path | stack | loads when |
-|:--|:--|:--|
-| .claude/rules/typescript/best-practices.md | typescript | TypeScript conventions — naming, types, async/await, error handling, logging. |
+_No rules installed._
 
 ## Verification commands
 
-<!-- Verification commands table, sourced from the repo's CI workflow. Regenerated every run. -->
 | command | what it proves |
 |:--|:--|
-| pnpm install --frozen-lockfile --prefer-offline | lockfile is in sync with the workspace manifests |
-| pnpm --filter @terragon/docs exec fumadocs-mdx | docs `.source` codegen succeeds (required before type-checking apps/docs) |
-| pnpm turbo tsc-check | every package type-checks |
-| pnpm turbo lint | eslint passes in every package |
-| pnpm turbo format-check | prettier formatting holds in every package |
-| pnpm --filter @terragon/utils exec vitest run --no-file-parallelism | utils unit tests |
-| pnpm --filter @terragon/agent exec vitest run --no-file-parallelism | agent unit tests |
-| pnpm --filter @terragon/shared exec vitest run --no-file-parallelism | shared + DB model tests (throwaway Postgres via docker compose) |
-| pnpm --filter @terragon/www exec vitest run --no-file-parallelism | www app tests (throwaway Postgres via docker compose) |
-| pnpm --filter @terragon/daemon exec vitest run --no-file-parallelism | daemon runtime tests |
-| pnpm --filter @terragon/sandbox exec vitest run --no-file-parallelism | sandbox provider tests |
-| pnpm --filter @terragon/review test | review package tests (node --test) |
-| pnpm audit --prod --audit-level critical | no critical advisories in production dependencies |
-| HATCHET_IT=1 pnpm --filter @terragon/worker exec vitest run --no-file-parallelism src/agent-run/supersede.integration.test.ts src/agent-run/scheduling-health.integration.test.ts | worker supersede-policy E2E and scheduling-health IT against dockerized hatchet-lite |
-| docker compose -p automata-hatchet-it down -v --remove-orphans \|\| true | tears down the hatchet-lite IT stack (fail-open, runs even when the tests died) |
+| npm ci | — |
+| npm test | — |
+| npm run build | — |
 <!-- somnio:harness:end -->

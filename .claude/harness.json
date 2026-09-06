@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "generated_by": "somnio-engineering-ai@0.9.1",
-  "generated_at": "2026-09-05T16:10:19Z",
+  "generated_by": "somnio-engineering-ai@0.9.4",
+  "generated_at": "2026-09-06T02:12:31Z",
   "rules_source": {
     "repo": "somnio-software/somnio-ai-tools",
     "rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
@@ -9,56 +9,41 @@
     "tier": "pub-cache"
   },
   "stacks": [
-    "typescript"
+    "node"
   ],
   "installed": [
-    {
-      "path": ".claude/rules/typescript/best-practices.md",
-      "origin": "somnio-software/somnio-ai-tools:ed8f9b6d622c794ccab93ace69755d928b216cd9:agent-rules/rules/typescript/best-practices.md",
-      "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
-      "sha256": "c5b516327c2750aa5a009a8151d8ffee43cec9062793e73969df52ea24159d2c",
-      "sha256_pre_optimize": "ecc7bca286a6eaaa4d9c4254f875dea0020958159d96bafb1a5cdb4324a554ef"
-    },
-    {
-      "path": "AGENTS.md",
-      "origin": "adapter-block:codex:ed8f9b6d622c794ccab93ace69755d928b216cd9:agent-rules/adapters/codex",
-      "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
-      "sha256": "cb7b1623cd4833347708c770cf84b13fe2f7d0ed230348cea2b3baab91cedd41"
-    },
     {
       "path": ".claude/settings.json",
       "origin": "template:target-settings.json",
       "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
-      "sha256": "e534526adbedff7cfa82a081ee1619cafd3c19b0934826db8b1c52fe33283ff9"
+      "sha256": "4bf20f0ce1653bcaff255836d2b5c79ecf07c5b13f9bc47035fb734aaf0e38d3"
     },
     {
       "path": "CLAUDE.md",
       "origin": "template:CLAUDE.md.template",
       "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
-      "sha256": "3cd4e9fb212496494b3f8dd52fd6f2f0286281b1ba091e00c1d347d4ba902a21"
+      "sha256": "9eb365c46e33d2d9d0d6282c153d7f28ad015aaa200325dff6de3c85300735db"
     },
     {
       "path": ".gitignore",
       "origin": "template:gitignore-block",
       "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
-      "sha256": "33da6fcafb6aef7d4eda8e828058ee9634fe2ce719101340419a4911cd7f9f01"
-    },
-    {
-      "path": ".claude/ship-gate.json",
-      "origin": "template:ship-gate-draft",
-      "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
-      "sha256": "bcf2447a6c1f95c38bec6a0c60bcbb657c26bd600429ee292ec1d14bebcaf49c"
+      "sha256": "75bcbe9db82be5ccbe2b7c821ec54743ace360fe9e77b85e323a460f6afee059"
     }
   ],
-  "pre_existing": [],
+  "pre_existing": [
+    ".claude/ship-gate.json"
+  ],
   "not_in_scope": [
-    "cli skills: typescript has no catalog skill (rules only)"
+    "cli skills: node has no catalog skill (rules only)",
+    "rules: no codex adapter content for node at ed8f9b6",
+    "rules: skipped (node unserved at ed8f9b6)"
   ],
   "agents": [
     "claude",
     "codex"
   ],
-  "settings_bak_created": true,
+  "settings_bak_created": false,
   "cli_installed": [
     {
       "agent": "claude",

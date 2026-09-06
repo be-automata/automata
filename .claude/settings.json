@@ -57,7 +57,10 @@
       "Write(**/service-account*.json)",
       "Write(**/*credentials*.json)",
       "Write(**/auth.json)",
-      "Write(**/.netrc)"
+      "Write(**/.netrc)",
+      "Read(**/.env.*)",
+      "Edit(**/.env.*)",
+      "Write(**/.env.*)"
     ],
     "allow": [
       "Bash(pnpm:*)",
@@ -84,7 +87,21 @@
       "Bash(npx @claude-flow*)",
       "Bash(npx claude-flow*)",
       "Bash(node .claude/*)",
-      "mcp__claude-flow__*"
+      "mcp__claude-flow__*",
+      "Bash(pnpm run lint)",
+      "Bash(pnpm run lint:fix)",
+      "Bash(pnpm run build)",
+      "Bash(pnpm run test)",
+      "Bash(pnpm run test:cov)",
+      "Bash(pnpm run format:check)",
+      "Bash(pnpm run openapi:check)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git branch)",
+      "Bash(git show *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:api.github.com)"
     ],
     "ask": [
       "Bash(rm -rf *)",
