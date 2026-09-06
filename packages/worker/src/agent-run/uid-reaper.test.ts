@@ -622,6 +622,48 @@ describe("reapAgentUidEscapees", () => {
     expect(typeof payloadOf(failed[0] ?? "").error).toBe("string");
   });
 
+  it("AC4: teardown with settleMs omitted waits ≥ 250 ms before the first listProcesses", async () => {
+    const startedAt = Date.now();
+    let firstListAt: number | undefined;
+    const listProcesses = vi.fn(async (): Promise<ProcRow[]> => {
+      firstListAt ??= Date.now();
+      return [];
+    });
+    await reapAgentUidEscapees({
+      agentUser: AGENT,
+      phase: "teardown",
+      log: () => {},
+      listProcesses,
+      resolveUid: resolve450,
+      spawnKill: vi.fn(async () => {}),
+      selfPid: 70001,
+    });
+    expect(listProcesses).toHaveBeenCalledTimes(1);
+    expect(firstListAt).toBeDefined();
+    expect((firstListAt ?? 0) - startedAt).toBeGreaterThanOrEqual(250);
+  });
+
+  it("AC4: admission with settleMs omitted does not settle — first listProcesses within ~50 ms", async () => {
+    const startedAt = Date.now();
+    let firstListAt: number | undefined;
+    const listProcesses = vi.fn(async (): Promise<ProcRow[]> => {
+      firstListAt ??= Date.now();
+      return [];
+    });
+    await reapAgentUidEscapees({
+      agentUser: AGENT,
+      phase: "admission",
+      log: () => {},
+      listProcesses,
+      resolveUid: resolve450,
+      spawnKill: vi.fn(async () => {}),
+      selfPid: 70001,
+    });
+    expect(listProcesses).toHaveBeenCalledTimes(1);
+    expect(firstListAt).toBeDefined();
+    expect((firstListAt ?? 0) - startedAt).toBeLessThan(50);
+  });
+
   it("no snapshot is written without runNamespaceRoot", async () => {
     const root = await tmpRoot();
     await reapAgentUidEscapees({
@@ -721,22 +763,26 @@ describe("bootUidScan (AC14, unit level)", () => {
     expect(reap.mock.calls[0]?.[0]?.agentUser).toBe(AGENT);
   });
 
-  it("the lock is released even when reap rejects (defensive; reap never throws by contract)", async () => {
+  it("a reap that rejects ⇒ outcome error (never thrown into boot), logged, lock released once", async () => {
     const release = vi.fn(async () => {});
     const tryAcquire = vi.fn(async () => ({ release }) as BoxLock);
     const reap = vi.fn(async () => {
       throw new Error("contract broken");
     });
-    await expect(
-      bootUidScan({
-        root: "/root/x",
-        agentUser: AGENT,
-        log: () => {},
-        tryAcquire,
-        reap,
-      }),
-    ).rejects.toThrow("contract broken");
+    const lines: string[] = [];
+    const out = await bootUidScan({
+      root: "/root/x",
+      agentUser: AGENT,
+      log: (l) => lines.push(l),
+      tryAcquire,
+      reap,
+    });
+    expect(out).toEqual({ outcome: "error", error: "contract broken" });
+    expect(typeof out.error).toBe("string");
     expect(release).toHaveBeenCalledTimes(1);
+    expect(
+      lines.some((l) => l.includes("boot uid scan failed: contract broken")),
+    ).toBe(true);
   });
 
   it("a reap that reports error ⇒ outcome error, lock still released", async () => {

@@ -476,6 +476,13 @@ export async function bootUidScan(
       runNamespaceRoot: root,
       log,
     });
+  } catch (e) {
+    // `reap` never throws by contract; this wrapper's own contract is the
+    // one `main()` relies on, so an injected/edited reaper that does throw
+    // must not crash boot either.
+    const error = errorMessage(e);
+    log(`boot uid scan failed: ${error}`);
+    return { outcome: "error", error };
   } finally {
     try {
       await lock.release();

@@ -237,8 +237,6 @@ The uid-scan reaper (#184, `uid-reaper.ts`) writes
   "phase": "boot" | "admission" | "teardown",
   "threadId": "…",
   "scanned": 0,
-  "groups": 0,
-  "helpers": 0,
   "killed": 0,
   "residual": 0,
   "failed": 0,
@@ -246,20 +244,27 @@ The uid-scan reaper (#184, `uid-reaper.ts`) writes
 }
 ```
 
-`scanned`/`groups`/`killed`/`residual`/`failed` describe the agent-uid
-processes reaped by that one scan; `escapeesSinceBoot` accumulates `killed`
-across every scan since the worker started. The five macOS per-user launchd
-helpers (`distnoted`, `lsd`, `csnameddatad`, `secd`, `contactsd`) are excluded
-from every one of those counts and reported separately as `helpers` — they
-respawn on demand and are not agent-run state.
+`scanned`/`killed`/`residual`/`failed` describe the agent-uid processes reaped
+by that one scan; `escapeesSinceBoot` accumulates `killed` across every scan
+since the worker started. The five macOS per-user launchd helpers
+(`distnoted`, `lsd`, `csnameddatad`, `secd`, `contactsd`) are excluded from
+every one of those counts — they respawn on demand and are not agent-run
+state. `groups` (distinct pgids among the targets) and `helpers` (the excluded
+helper count) appear only in the `box.escapees_reaped` log line, never in the
+file.
 
-Every non-skipped scan logs `box.escapees_reaped` with the same counts.
-`box.escapees_residual` is logged only when `residual > 0` after the scan's
-kill — **this is the operator's cue**: it means the uid-wide
-`sudo -n -u _automata-agent -- /bin/kill -9 -- -1` did not clear everything
-within its bound, and the manual hatch is
-`sudo -n -u _automata-agent /bin/kill -9 -- -<pgid>` against the specific
-process group named in the log line's `sample`. `box.budget_write_failed` means
+Every non-skipped scan logs `box.escapees_reaped` with the same counts plus
+`groups` and `helpers`. `box.escapees_residual` is logged only when
+`residual > 0` after the scan's kill — **this is the operator's cue**: it
+means the uid-wide `sudo -n -u _automata-agent -- /bin/kill -9 -- -1` did not
+clear everything within its bound. `residual > 0` can also mean the residual
+re-scan itself failed (a `box.escapees_scan_failed` with `stage: "residual"`
+precedes it); in that case the pre-kill target list is reported conservatively
+as `residual`, so the kill may well have landed — confirm with the `ps` below
+before acting. The log line's `sample` lists up to five command basenames, not
+pgids. The manual hatch: find their pgids with
+`ps -axo pid,pgid,uid,comm | grep <name>` (or `pgrep -u _automata-agent -l`),
+then `sudo -n -u _automata-agent /bin/kill -9 -- -<pgid>`. `box.budget_write_failed` means
 the `box-budget.json` write itself failed (e.g. an unwritable
 `runNamespaceRoot`) — the scan and kill still ran; only the file is missing.
 `box.escapees_scan_failed` (with a `stage` of `scan`, `residual` or `unexpected`)
