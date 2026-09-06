@@ -49,7 +49,7 @@ Suspected-wrong existing links: none. Nothing deleted.
     reclamation ≠ cancellation, signal seam, memory ceiling deferred) and a new
     `## Anti-deviation invariants` section I1–I6 — ADR-007 has none today although
     `docs/adr/README.md` requires one for composability-critical decisions.
-  - ADR-007 status line upgrade; `docs/adr/README.md:15` cell; `:28-29` "agent container" →
+  - ADR-007 status line upgrade; `docs/adr/README.md:15` cell; ADR-007 `:28-29` "agent container" →
     "agent process group"; ADR-002 `:545-546` wording.
 - Doc-bug follow-ups folded into #183: `deploy/README.md:22-24` cites `GLOBAL_MAX_RUNS` in the
   wrong file; the plist/README claim that the engine's global cap serializes across both units
