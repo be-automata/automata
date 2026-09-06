@@ -1,5 +1,5 @@
 ---
-description: TypeScript conventions — naming, types, async/await, error handling, logging. Applies to all .ts files (apps, packages, scripts).
+description: TypeScript conventions — naming, types, async/await, error handling, logging. Applies to all .ts files (Functions, scripts, utilities).
 paths:
   - "**/*.ts"
 alwaysApply: false
@@ -8,9 +8,9 @@ alwaysApply: false
 ### General guidelines for TypeScript code in this repo.
 # TypeScript Best Practices
 
-These rules apply to every `.ts` file in the repo (apps, packages, build
-scripts, utilities). Framework-specific conventions (Next.js, Drizzle,
-PartyKit, the daemon) live with the package that owns them.
+These rules apply to every `.ts` file in the repo (Firebase Functions, build
+scripts, utilities). Firebase-specific conventions — handler registration,
+module boundaries, secrets — live in `.claude/rules/functions/`.
 
 Assume the reader knows JavaScript and is comfortable with static types. Do
 not restate basic language mechanics.
@@ -19,20 +19,22 @@ not restate basic language mechanics.
 
 ## tsconfig standards
 
-Canonical baseline is `packages/tsconfig/base.json` (`@terragon/tsconfig`).
-Extend it in any new TS package unless the framework overrides a flag:
+Canonical baseline used by `functions/tsconfig.json`. Mirror these flags in any
+new TS package unless the framework overrides them:
 
 ```json
 {
   "compilerOptions": {
+    "module": "commonjs",
+    "target": "es2020",
     "strict": true,
-    "noUncheckedIndexedAccess": true,
+    "noImplicitReturns": true,
     "noUnusedLocals": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "moduleResolution": "bundler",
-    "module": "ESNext",
-    "target": "ES2022"
+    "sourceMap": true,
+    "outDir": "lib",
+    "rootDir": "."
   }
 }
 ```
@@ -40,11 +42,12 @@ Extend it in any new TS package unless the framework overrides a flag:
 Why these flags:
 - `strict: true` turns on `strictNullChecks`, `noImplicitAny`, and the rest —
   non-negotiable.
-- `noUncheckedIndexedAccess` types every index access as possibly
-  `undefined`. Narrow instead of assuming the element exists.
+- `noImplicitReturns` forces every branch of a function to return a value.
+  Catches fallthrough bugs.
 - `noUnusedLocals` makes dead variables a compile error. Remove them instead
   of prefixing `_`.
-- `esModuleInterop` lets default imports work against CommonJS packages.
+- `esModuleInterop` lets you write `import * as admin from 'firebase-admin'`
+  against CommonJS packages.
 - `skipLibCheck` skips type-checking of `node_modules/**/*.d.ts` — faster
   builds, and we can't fix upstream types anyway.
 
@@ -55,13 +58,25 @@ Never downgrade `strict` to bypass an error. Fix the type.
 ## Naming
 
 - **Functions, variables, parameters:** `camelCase`. Verb-first for functions:
-  `createThread()`, `parseDaemonEvent()`.
+  `writeExpenseToSheet()`, `parseExpenseMessage()`.
 - **Constants (module-level, immutable):** `SCREAMING_SNAKE_CASE`.
 - **Types, interfaces, classes, enums:** `PascalCase`.
-- **Files:** `kebab-case.ts` (e.g. `active-org.ts`, `feature-flags-definitions.ts`). Barrel files (`index.ts`) re-export only.
-- **Secret/env keys:** `SCREAMING_SNAKE_CASE` strings — match the name
-  declared in `@terragon/env` and `.env.example`.
-- **Identifiers in code are always English.**
+- **Files:** `camelCase.ts`. Barrel files (`index.ts`) re-export only.
+- **Secret/env keys:** `SCREAMING_SNAKE_CASE` strings — match the name on the
+  secret in Google Secret Manager / `.env`.
+- **Identifiers in code are always English.** User-facing strings (Telegram
+  replies, sheet headers, UI labels) may be in Spanish, but their variable
+  names must still be English:
+
+```typescript
+// ✅ Good
+const SHEET_NAME_EXPENSES = 'Gastos';
+const EXPENSE_HEADERS = ['Fecha', 'Descripción', 'Monto'];
+
+// ❌ Bad
+const NOMBRE_HOJA_GASTOS = 'Gastos';
+const encabezadosGasto = ['Fecha', 'Descripción', 'Monto'];
+```
 
 ---
 
@@ -76,19 +91,19 @@ Grouping: built-in → third-party → local, separated by a blank line.
 // ✅ Good
 import { readFile } from 'node:fs/promises';
 
-import { NextResponse } from 'next/server';
-import { z } from 'zod';
+import express from 'express';
+import { logger } from 'firebase-functions';
 
-import { db } from '@terragon/shared/db';
+import { GEMINI_MODEL } from './config';
 import { formatTime } from './utils';
 ```
 
 Import only what you use. Prefer named imports over `import * as X` unless the
 library exposes a large surface you actually consume (e.g.
-`import * as schema from '@terragon/shared/db/schema'`).
+`import * as admin from 'firebase-admin'`).
 
-Use workspace imports (`@terragon/...`) across packages, the `@/*` alias
-(`./src/*`) inside `apps/www`, and relative paths within a package.
+Use relative paths for local imports (`./config`, `../utils`). No path
+aliases unless they're set up in `tsconfig.json`.
 
 ---
 
@@ -104,20 +119,20 @@ Use workspace imports (`@terragon/...`) across packages, the `@/*` alias
 
 ```typescript
 // ✅ Good
-function parseThreadPayload(raw: unknown): ThreadData {
-  if (typeof raw !== 'object' || raw === null || !('id' in raw)) {
+function parseResponse(raw: unknown): ExpenseData {
+  if (typeof raw !== 'object' || raw === null || !('amount' in raw)) {
     throw new Error('Invalid response shape');
   }
-  const obj = raw as { id: unknown };
-  if (typeof obj.id !== 'string') {
-    throw new Error('id must be a string');
+  const obj = raw as { amount: unknown };
+  if (typeof obj.amount !== 'number') {
+    throw new Error('amount must be a number');
   }
-  return { id: obj.id };
+  return { amount: obj.amount };
 }
 
 // ❌ Bad
-function parseThreadPayload(raw: any): ThreadData {
-  return { id: raw.id };
+function parseResponse(raw: any): ExpenseData {
+  return { amount: raw.amount };
 }
 ```
 
@@ -125,13 +140,13 @@ function parseThreadPayload(raw: any): ThreadData {
   `isX()` and return `value is X`:
 
 ```typescript
-interface ThreadData { id: string; status: string; }
+interface ExpenseData { amount: number; currency: string; }
 
-function isThreadData(v: unknown): v is ThreadData {
+function isExpenseData(v: unknown): v is ExpenseData {
   return (
     typeof v === 'object' && v !== null &&
-    typeof (v as ThreadData).id === 'string' &&
-    typeof (v as ThreadData).status === 'string'
+    typeof (v as ExpenseData).amount === 'number' &&
+    typeof (v as ExpenseData).currency === 'string'
   );
 }
 ```
@@ -141,10 +156,10 @@ function isThreadData(v: unknown): v is ThreadData {
 
 ```typescript
 // ✅ Good
-type ThreadStatus = 'queued' | 'running' | 'done';
+type Currency = 'ARS' | 'USD' | 'EUR';
 
 // ❌ Bad
-enum ThreadStatus { Queued = 'queued', Running = 'running', Done = 'done' }
+enum Currency { ARS = 'ARS', USD = 'USD', EUR = 'EUR' }
 ```
 
 ---
@@ -161,8 +176,8 @@ types. Use them deliberately:
 
 ```typescript
 // ✅ Good
-const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? '';
-const ids = (process.env.ALLOWED_ORIGINS ?? '').split(',').filter(Boolean);
+const spreadsheetId = process.env.SPREADSHEET_ID ?? '';
+const ids = (process.env.AUTHORIZED_USER_IDS ?? '').split(',').filter(Boolean);
 
 // ❌ Bad — || coerces 0 and '' to the default, which is a bug if those are valid values
 const port = process.env.PORT || 3000;
@@ -192,14 +207,14 @@ Always `async`/`await`. No `.then()` chains in source code.
 
 ```typescript
 // ✅ Good
-async function saveThread(data: ThreadData): Promise<void> {
+async function writeExpense(data: ExpenseData): Promise<void> {
   const row = await buildRow(data);
-  await threadRepo.insert(row);
+  await sheetsService.appendRow(row);
 }
 
 // ❌ Bad
-function saveThread(data: ThreadData): Promise<void> {
-  return buildRow(data).then(row => threadRepo.insert(row));
+function writeExpense(data: ExpenseData): Promise<void> {
+  return buildRow(data).then(row => sheetsService.appendRow(row));
 }
 ```
 
@@ -208,9 +223,9 @@ each step depends on the previous one:
 
 ```typescript
 // ✅ Good — independent reads run in parallel
-const [threads, pullRequests] = await Promise.all([
-  threadRepo.list(),
-  pullRequestRepo.list(),
+const [expenses, budgets] = await Promise.all([
+  sheetsService.readExpenses(),
+  sheetsService.readBudgets(),
 ]);
 ```
 
@@ -226,10 +241,10 @@ handling below).
   class for domain errors you want callers to distinguish:
 
 ```typescript
-export class SandboxNotFoundError extends Error {
-  constructor(public readonly sandboxId: string) {
-    super(`sandbox not found: ${sandboxId}`);
-    this.name = 'SandboxNotFoundError';
+export class WhitelistRejectedError extends Error {
+  constructor(public readonly email: string) {
+    super(`email not in whitelist: ${email}`);
+    this.name = 'WhitelistRejectedError';
   }
 }
 ```
@@ -240,10 +255,10 @@ export class SandboxNotFoundError extends Error {
 ```typescript
 // ✅ Good
 try {
-  await uploadArtifact(buffer);
+  await uploadReceipt(buffer);
 } catch (e) {
   const message = e instanceof Error ? e.message : String(e);
-  logger.error('uploadArtifact failed', { error: message });
+  logger.error('uploadReceipt failed', { error: message });
 }
 
 // ❌ Bad — e.message is a type error in strict mode
@@ -269,6 +284,9 @@ try { /* ... */ } catch (e) {
 - Never log secrets, ID tokens, full request headers, or PII. If a field
   might contain user email, redact or hash before logging.
 
+Firebase Functions has its own logger convention — see
+`.claude/rules/functions/architecture.md`.
+
 ---
 
 ## What NOT to Do
@@ -290,7 +308,8 @@ try { /* ... */ } catch (e) {
 ## Rules
 
 1. `strict: true` is non-negotiable. Fix type errors, don't suppress them.
-2. Identifiers are English.
+2. Identifiers are English. User-facing strings may be Spanish, but the
+   variable holding them is still named in English.
 3. `camelCase` members, `PascalCase` types, `SCREAMING_SNAKE_CASE` constants.
 4. ES module `import` only — never `require()`.
 5. Group imports: built-in → third-party → local, blank line between groups.

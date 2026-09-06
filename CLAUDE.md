@@ -14,7 +14,9 @@ typescript, node
 Rule bodies are never inlined here — only the index. Each row loads lazily, only when the
 matching path is touched (see `optimize-context-rules`).
 
-_No rules installed._
+| path | stack | loads when |
+|:--|:--|:--|
+| .claude/rules/typescript/best-practices.md | typescript | TypeScript conventions — naming, types, async/await, error handling, logging. |
 
 ## Verification commands
 

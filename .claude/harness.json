@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "somnio-engineering-ai@0.9.4",
-  "generated_at": "2026-09-06T02:26:15Z",
+  "generated_at": "2026-09-06T02:26:52Z",
   "rules_source": {
     "repo": "somnio-software/somnio-ai-tools",
     "rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
@@ -14,6 +14,13 @@
   ],
   "installed": [
     {
+      "path": ".claude/rules/typescript/best-practices.md",
+      "origin": "somnio-software/somnio-ai-tools:ed8f9b6d622c794ccab93ace69755d928b216cd9:agent-rules/rules/typescript/best-practices.md",
+      "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
+      "sha256": "c5b516327c2750aa5a009a8151d8ffee43cec9062793e73969df52ea24159d2c",
+      "sha256_pre_optimize": "c5b516327c2750aa5a009a8151d8ffee43cec9062793e73969df52ea24159d2c"
+    },
+    {
       "path": ".claude/settings.json",
       "origin": "template:target-settings.json",
       "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
@@ -23,7 +30,7 @@
       "path": "CLAUDE.md",
       "origin": "template:CLAUDE.md.template",
       "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
-      "sha256": "747a867b9bdca358346e93068ed11df78118f6a8d8ad34c96b17a9a6f33ce5bc"
+      "sha256": "e518fbf7b1823c80c9e090ab2c193f679042c94c77348e25440ab9c6c8084e39"
     },
     {
       "path": ".gitignore",
