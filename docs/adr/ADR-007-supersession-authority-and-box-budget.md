@@ -1,6 +1,6 @@
 # ADR-007 — Supersession authority and the one-agent box budget
 
-- **Status:** Supersession half: **Accepted** (PR #175 → `e3dcc1b`, live-proven 2026-09-02). Box-budget half: **Accepted** (Stage A PR #177 → `b11762f`; Stage B1 #183 kernel lock + one-unit topology); memory ceiling deferred 2026-09-05.
+- **Status:** Supersession half: **Accepted** (PR #175 → `e3dcc1b`, live-proven 2026-09-02). Box-budget half: Stage A **Accepted** (PR #177 → `b11762f`, drill-proven); Stage B1 (#183, kernel lock + one-unit topology) **Proposed → Accepted on merge + live proof (U1–U3)**; Stage B2 (#184) pending; memory ceiling deferred 2026-09-05.
 - **Date:** 2026-09-02
 - **Issues:** #165 (supersession sole authority), #152 (concurrency budget consolidation), epic #125
 - **Supersedes / superseded by:** —
@@ -78,7 +78,7 @@ arrives. Two structural questions were left open at delivery:
 ## Amendment (2026-09-05, #152 Stage B)
 
 - **Status:** Proposed with the Stage B PRs; Accepted on merge + live proof.
-- **Context source:** `box-slot.ts:178-184` (time-based reclaim), `workflow.ts:473-478` /
+- **Context source (as of `e2716a4`, pre-#183):** `box-slot.ts:178-184` (time-based reclaim), `workflow.ts:473-478` /
   `:698-715` (acquire and release ordering), `daemon-process.ts:353-370` (pid file removed
   before the kill), `spawn-as-user.ts:148-159` (pgid-only kill builder),
   `sudoers.d-automata:36,58` (bare `/bin/kill` as AGENT), `hello/worker.ts:106-114`

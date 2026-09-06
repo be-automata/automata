@@ -213,6 +213,9 @@ export async function acquireBoxLock({
   if (onAbort) signal?.removeEventListener("abort", onAbort);
 
   if (outcome.kind === "helper-gone") {
+    // Nothing to release, but the unwritten stdin pipe handle would otherwise
+    // linger until GC.
+    child.stdin.destroy();
     throw new BoxLockUnavailableError(file, describeExit(outcome.exit, stderr));
   }
   if (outcome.kind === "aborted") {

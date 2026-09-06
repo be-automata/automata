@@ -11,9 +11,10 @@ One unit is provided:
 It is a **template**. Replace the `__HOME__` and `__REPO__` tokens for the box,
 then install to `~/Library/LaunchAgents/`.
 
-The workflow's global concurrency cap (`GLOBAL_MAX_RUNS = 1` in
-`src/agent-run/definition.ts`) serializes to ONE agent-run at a time on the box.
-Extra throughput is gap #3b (raise the cap), gated on a memory-headroom check.
+One agent-run executes at a time on the box: `slots: 1` on the single unit plus the
+kernel box lock (`src/agent-run/box-lock.ts`). The `GLOBAL_MAX_RUNS = 1` key in
+`src/agent-run/definition.ts` caps each workflow VARIANT separately and is not the box
+budget. Extra throughput (gap #3b) means raising both, gated on a memory-headroom check.
 
 ## `run-worker.sh` wiring
 
