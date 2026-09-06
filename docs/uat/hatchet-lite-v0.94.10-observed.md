@@ -73,3 +73,4 @@ the enforcement point for the one-agent budget.
 - `agent-run-strict` (`GROUP_ROUND_ROBIN`): strict FIFO per `prKey`, no overlap.
 
 <!-- #183 drill 2026-09-06T06:15:58Z: throwaway, close without merging -->
+<!-- drill push 2 2026-09-06T06:18:13Z -->
