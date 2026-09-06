@@ -121,9 +121,19 @@ DATABASE_URL=postgres://... pnpm exec tsx deploy/seed-pilot-mirror.ts <orgSlug> 
 # (c) Preflight on the box (fails closed if the skill is absent / wrong):
 pnpm exec tsx deploy/review-single-writer-preflight.ts    # expect PASS / exit 0
 
-# (d) Kickstart the worker so daemon+worker run current-HEAD phase-2 code
-#     (run-worker.sh rebuilds the daemon dist on start):
-launchctl kickstart -k com.automata.worker
+# (d) Restart the worker so daemon+worker run current-HEAD phase-2 code
+#     (run-worker.sh rebuilds the daemon dist on start). Graceful only: SIGTERM lets
+#     an in-flight run finish and launchd KeepAlive relaunches on the new code —
+#     NEVER `launchctl kickstart -k` (SIGKILL drops the run; see
+#     packages/worker/deploy/README.md "Graceful restart"). Deploy when idle.
+LOG_MARK=$(wc -l < ~/.automata/worker.log)   # worker.log is append-only across relaunches
+launchctl kill TERM gui/$UID/com.automata.worker
+# Poll for EXIT first (the unit stays `running` while it drains on the old code),
+# then for the KeepAlive relaunch — same polarity as the deploy README.
+while launchctl print gui/$UID/com.automata.worker 2>/dev/null | grep -q 'state = running'; do sleep 2; done
+until launchctl print gui/$UID/com.automata.worker 2>/dev/null | grep -q 'state = running'; do sleep 2; done
+# Prove the NEW process booted: only lines written after the SIGTERM count.
+until tail -n +$((LOG_MARK+1)) ~/.automata/worker.log | grep -q 'box lock helper OK'; do sleep 2; done
 
 # (e) Dark-deploy www (ships the executor/finish-wiring/sweep). SAFE-DARK: with the
 #     flag unset=false every new path is a no-op (reconciler-only, today's behavior).
