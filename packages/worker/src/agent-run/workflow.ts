@@ -444,13 +444,13 @@ async function runAgentInner(
   try {
     // #183 (#152 Stage B1): the box's ONE agent-run lock (box-lock.ts) — a
     // kernel flock(2) held by a helper child, so the kernel drops it the
-    // instant the holder dies (no staleness threshold, no heartbeat). The
+    // instant the holder dies (no staleness threshold, no liveness beat). The
     // engine's "global" key is per workflow, so the budget is enforced here.
     // Taken AFTER the clone (network/disk, not memory) and BEFORE any
     // credential touches disk, so a long wait never widens the on-disk
     // credential window; a cancel while waiting throws into this catch and
     // the clone is cleaned up. Released in the finally below, after teardown.
-    // #152 Stage A admission reap, BEFORE the slot: (a) a dead sibling
+    // #152 Stage A admission reap, BEFORE the lock: (a) a dead sibling
     // worker's orphans die now, not at the next boot; (b) any prior attempt
     // of THIS run (engine redelivery after a worker death) is SIGKILLed by
     // its recorded process-group pid — the zombie can never share the box

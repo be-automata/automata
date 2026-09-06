@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Automata execution-plane worker — PRIMARY launchd unit (unit A).
+  Automata execution-plane worker — the box's single launchd unit.
 
   This is a TEMPLATE. Replace the __PLACEHOLDER__ tokens for the target box, then
   install to ~/Library/LaunchAgents/com.automata.worker.plist. See ./README.md.
@@ -12,7 +12,7 @@
                         (WorkingDirectory is <repo>/packages/worker)
 
   KeepAlive relaunches the worker after a GRACEFUL exit (SIGTERM drain, see README),
-  so a rolling restart is: SIGTERM this unit, wait for it to drain + exit, and
+  so a graceful restart is: SIGTERM this unit, wait for it to drain + exit, and
   launchd brings it back on the new code. ThrottleInterval 15 rate-limits crash
   loops. Runtime drain is owned by the Hatchet SDK (no custom signal handler) —
   never SIGKILL (`launchctl kickstart -k`) mid-run.

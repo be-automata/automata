@@ -225,8 +225,22 @@ export async function acquireBoxLock({
 
   log?.(`box lock acquired by ${holder} (helper pid ${child.pid})`);
 
+  // A helper that dies AFTER the ack (killed by hand, OOM, a stray cleanup)
+  // drops the lock while this run still believes it holds it. Nothing can
+  // recover that mid-run; make it loud instead of silent.
+  let released = false;
+  void (async () => {
+    const exit = await exited;
+    if (!released) {
+      log?.(
+        `box lock LOST by ${holder}: helper ${describeExit(exit, stderr)} — the box budget is unguarded until this run ends`,
+      );
+    }
+  })();
+
   let releasing: Promise<void> | undefined;
   const doRelease = async (): Promise<void> => {
+    released = true;
     child.stdin.end();
     const exitedInTime = await settlesWithin(exited, RELEASE_EXIT_BOUND_MS);
     if (!exitedInTime) {

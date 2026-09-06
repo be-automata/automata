@@ -146,8 +146,8 @@ pnpm --filter @terragon/daemon run build
 
 Each daemon SIGKILLs its own process group on teardown, and boot-time reclaim reaps a
 dead sibling worker's orphaned daemons. Add a worker-liveness alert (gap #7): alert on
-a worker that stops heartbeating so a silently-dead unit is noticed before it starves
-HA.
+a worker that stops heartbeating so a silently-dead unit is noticed before queued runs
+hit their `scheduleTimeout`.
 
 ## Scheduling deadlock: diagnosis and recovery (#69)
 
@@ -231,8 +231,9 @@ nominal   = HATCHET_WORKER_DEAD_AFTER_S (600s) + HATCHET_MAINT_INTERVAL_S (60s) 
 alertable = HATCHET_WORKER_DEAD_AFTER_S (600s) + 2 × HATCHET_MAINT_INTERVAL_S    ≈ 12 min
 ```
 
-The alertable figure accounts for one lost `pg_try_advisory_lock` race — a maintenance
-tick overlapping a long previous tick, or a worker restart mid-interval (§3.4) —
+The alertable figure accounts for one skipped maintenance tick — a tick overlapping a
+long previous tick loses the `pg_try_advisory_lock`, or a worker restart lands
+mid-interval (§3.4) —
 publishing the nominal figure as an ops alert threshold would page on healthy
 contention. It is **not** 5 minutes, and it is **not** bounded by
 `scheduleTimeout` (that gate was deliberately removed, §3.2.2). A box needing faster

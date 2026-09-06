@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, utimes } from "node:fs/promises";
+import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Readable } from "node:stream";
@@ -409,18 +409,25 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
     expect(file).toBe(boxLockHelper().file);
   }, 10_000);
 
-  it("F6: a helper that exits before the ack rejects with BoxLockUnavailableError carrying the exit and stderr — never hangs", async () => {
-    // The lock path is a directory: the helper cannot open it and exits
-    // before ever printing `ok`.
-    await mkdir(boxLockPath(root));
-    const err = await rejection(acquireBoxLock({ root, holder: "doomed" }));
-    expect(err).toBeInstanceOf(BoxLockUnavailableError);
-    if (err instanceof BoxLockUnavailableError) {
-      expect(err.helper).toBe(boxLockHelper().file);
-      expect(err.detail).toMatch(/^exit \d+\/null/);
-      expect(err.detail).toMatch(/directory/i);
-    }
-  }, 10_000);
+  it.skipIf(process.getuid?.() === 0)(
+    "F6: a helper that exits before the ack rejects with BoxLockUnavailableError carrying the exit and stderr — never hangs",
+    async () => {
+      // The lock file exists but is unreadable and unwritable (mode 000): the
+      // helper cannot open it and exits before ever printing `ok`. (A
+      // DIRECTORY would not do: util-linux flock locks directories happily,
+      // so that variant passes on darwin and fails on the linux CI runner.)
+      // Root bypasses mode bits, hence the skip.
+      await writeFile(boxLockPath(root), "", { mode: 0o000 });
+      const err = await rejection(acquireBoxLock({ root, holder: "doomed" }));
+      expect(err).toBeInstanceOf(BoxLockUnavailableError);
+      if (err instanceof BoxLockUnavailableError) {
+        expect(err.helper).toBe(boxLockHelper().file);
+        expect(err.detail).toMatch(/^exit \d+\/null/);
+        expect(err.detail).toMatch(/denied/i);
+      }
+    },
+    10_000,
+  );
 
   it("log: acquisition and release lines go to the injected logger, naming the holder", async () => {
     const lines: string[] = [];
