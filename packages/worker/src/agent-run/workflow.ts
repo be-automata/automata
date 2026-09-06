@@ -719,14 +719,23 @@ async function runAgentInner(
     // escapees are child traffic, so they must be dead before those closes
     // and before the credential wipe below (ADR-007 I2/I4). The 250 ms settle
     // lives inside the reaper; it never throws, so it cannot mask the run's
-    // real outcome. The box lock still goes last.
-    await reapAgentUidEscapees({
-      agentUser: config.agentUser,
-      phase: "teardown",
-      threadId: input.threadId,
-      runNamespaceRoot: config.runNamespaceRoot,
-      log: admissionLog,
-    });
+    // real outcome. The box lock still goes last. A LOST lock (the helper
+    // died mid-run, so the kernel already freed it) means another run may
+    // legitimately own the box now — its live agent would be collateral of
+    // a uid-wide kill, so the scan is skipped and logged instead.
+    if (boxLock?.lost) {
+      admissionLog(
+        `box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
+      );
+    } else {
+      await reapAgentUidEscapees({
+        agentUser: config.agentUser,
+        phase: "teardown",
+        threadId: input.threadId,
+        runNamespaceRoot: config.runNamespaceRoot,
+        log: admissionLog,
+      });
+    }
     // #66: close the egress proxy after the daemon is dead (no more child
     // traffic), then flush the last audit batch. Both are best-effort — an
     // audit/proxy teardown hiccup must never mask the run's real outcome.

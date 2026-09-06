@@ -87,7 +87,7 @@ vi.mock("./reclaim", () => ({
 vi.mock("./box-lock", () => ({
   acquireBoxLock: vi.fn(async () => {
     admissionOrder.push("lock");
-    return { release: releaseMock };
+    return { release: releaseMock, lost: false };
   }),
 }));
 // #184 (#152 Stage B2): the real reaper's default spawnKill is a REAL
@@ -879,7 +879,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
       // harness default so later cases acquire normally.
       vi.mocked(acquireBoxLock).mockImplementation(async () => {
         admissionOrder.push("lock");
-        return { release: releaseMock };
+        return { release: releaseMock, lost: false };
       });
     }
   });
@@ -1083,6 +1083,35 @@ describe("#183: finally order — box lock released last, after teardown and cle
       "release",
     ]);
     expect(releaseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("#184: a LOST box lock skips the teardown uid-scan (another run may own the box) — logged, admission scan still ran, release still last", async () => {
+    const { acquireBoxLock } = await import("./box-lock");
+    reapAgentUidEscapees.mockClear();
+    vi.mocked(acquireBoxLock).mockImplementationOnce(async () => {
+      admissionOrder.push("lock");
+      return { release: releaseMock, lost: true };
+    });
+    pullNextMessage.mockResolvedValue(null);
+    const c = ctx();
+    await expect(runFn(INPUT, c)).resolves.toMatchObject({
+      outcome: "nothing-to-run",
+    });
+    expect(reapAgentUidEscapees.mock.calls.map(([opts]) => opts.phase)).toEqual(
+      ["admission"],
+    );
+    expect(finallyOrder.filter((x) => TEARDOWN_TOKENS.includes(x))).toEqual([
+      "teardown",
+      "cleanupWorkdir",
+      "release",
+    ]);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+    const skipped = c.log.mock.calls
+      .map((call) => String(call[0]))
+      .filter((l) => l.includes("box.escapees_scan_skipped"));
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toContain('"phase":"teardown"');
+    expect(skipped[0]).toContain('"reason":"lock lost"');
   });
 
   it("throw from inside the main try (pollUntilTerminal rejects): same order, release exactly once", async () => {

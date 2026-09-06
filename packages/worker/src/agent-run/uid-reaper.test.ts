@@ -18,6 +18,7 @@ import {
   selectAgentRows,
   type BootUidScanOpts,
   type BoxBudgetSnapshot,
+  type KillExit,
   type ProcRow,
   type ReapAgentUidOpts,
 } from "./uid-reaper";
@@ -73,9 +74,19 @@ function scriptedList(...results: ProcRow[][]) {
 
 const resolve450 = vi.fn(async () => 450);
 
+/** A `spawnKill` fake that reports a clean exit 0 (the production shape). */
+const killExit0 = () =>
+  vi.fn(
+    async (_inv: Invocation): Promise<KillExit> => ({
+      code: 0,
+      signal: null,
+      stderrTail: "",
+    }),
+  );
+
 /**
  * The defaults every non-`SAFETY`-exempt case shares: `agentUser: AGENT`,
- * `resolveUid: resolve450`, `spawnKill: vi.fn(async () => {})`,
+ * `resolveUid: resolve450`, `spawnKill: killExit0()` (resolves exit 0),
  * `selfPid: 70001`. `overrides` must still supply `phase` and `log` (every
  * required field they are) plus whatever else the case needs; a case that
  * asserts on its own `spawnKill` spy overrides `spawnKill` explicitly.
@@ -86,7 +97,7 @@ function baseReapOpts<
   return {
     agentUser: AGENT,
     resolveUid: resolve450,
-    spawnKill: vi.fn(async () => {}),
+    spawnKill: killExit0(),
     selfPid: 70001,
     ...overrides,
   };
@@ -215,7 +226,7 @@ describe("reapAgentUidEscapees", () => {
 
   it("AC3: one uid-wide kill with the exact sudo argv; counts from the darwin fixture", async () => {
     const lines: string[] = [];
-    const spawnKill = vi.fn(async (_inv: Invocation) => {});
+    const spawnKill = killExit0();
     const result = await reapAgentUidEscapees(
       baseReapOpts({
         phase: "admission",
@@ -242,7 +253,7 @@ describe("reapAgentUidEscapees", () => {
   });
 
   it("AC3: linux fixture — setsid'd pgid==pid escapees count as their own groups", async () => {
-    const spawnKill = vi.fn(async () => {});
+    const spawnKill = killExit0();
     const result = await reapAgentUidEscapees(
       baseReapOpts({
         phase: "boot",
@@ -306,7 +317,7 @@ describe("reapAgentUidEscapees", () => {
 
   it("AC6: a zero-target scan still logs scanned 0 and issues no kill", async () => {
     const lines: string[] = [];
-    const spawnKill = vi.fn(async () => {});
+    const spawnKill = killExit0();
     const helpersOnly = DARWIN_ROWS.filter(
       (r) => r.uid !== 450 || MACOS_PER_USER_HELPERS.has(path.basename(r.comm)),
     );
@@ -333,7 +344,7 @@ describe("reapAgentUidEscapees", () => {
 
   it("AC7: listProcesses rejection ⇒ error result, no kill, box.escapees_scan_failed", async () => {
     const lines: string[] = [];
-    const spawnKill = vi.fn(async () => {});
+    const spawnKill = killExit0();
     const result = await reapAgentUidEscapees(
       baseReapOpts({
         phase: "admission",
@@ -402,6 +413,146 @@ describe("reapAgentUidEscapees", () => {
       failed: 1,
       killed: 2,
     });
+  });
+
+  it("void-resolving spawnKill is read as exit 0: killed = scanned, no kill_nonzero line", async () => {
+    const lines: string[] = [];
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        log: (l) => lines.push(l),
+        listProcesses: scriptedList(DARWIN_ROWS, []),
+        spawnKill: vi.fn(async () => {}),
+      }),
+    );
+    expect(result).toMatchObject({ scanned: 3, killed: 3, failed: 0 });
+    expect(eventLines(lines, "box.escapees_kill_nonzero")).toEqual([]);
+  });
+
+  it("refused sudo (exit 1 + 'a password is required') ⇒ failed 1, killed 0, residual = scanned, kill_nonzero logged with the stderr tail", async () => {
+    const lines: string[] = [];
+    const listProcesses = scriptedList(DARWIN_ROWS, []);
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "teardown",
+        threadId: "t-refused",
+        settleMs: 0,
+        log: (l) => lines.push(l),
+        listProcesses,
+        spawnKill: vi.fn(
+          async (): Promise<KillExit> => ({
+            code: 1,
+            signal: null,
+            stderrTail: "sudo: a password is required",
+          }),
+        ),
+      }),
+    );
+    // The signal was never sent: nothing may be reported as reclaimed, and
+    // the residual poll (which would have seen the scripted "[]") is skipped.
+    expect(result).toMatchObject({
+      skipped: false,
+      scanned: 3,
+      killed: 0,
+      residual: 3,
+      failed: 1,
+    });
+    expect(result.error).toBeUndefined();
+    expect(listProcesses).toHaveBeenCalledTimes(1);
+    const nonzero = eventLines(lines, "box.escapees_kill_nonzero");
+    expect(nonzero).toHaveLength(1);
+    expect(payloadOf(nonzero[0] ?? "")).toEqual({
+      phase: "teardown",
+      threadId: "t-refused",
+      uid: 450,
+      code: 1,
+      signal: null,
+      stderr: "sudo: a password is required",
+    });
+    const reaped = eventLines(lines, "box.escapees_reaped");
+    expect(reaped).toHaveLength(1);
+    expect(payloadOf(reaped[0] ?? "")).toMatchObject({
+      scanned: 3,
+      killed: 0,
+      residual: 3,
+      failed: 1,
+    });
+    expect(eventLines(lines, "box.escapees_kill_failed")).toEqual([]);
+  });
+
+  it("ESRCH-style exit 1 with empty stderr is NOT a failure: kill_nonzero logged, failed 0, killed from residual", async () => {
+    const lines: string[] = [];
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        log: (l) => lines.push(l),
+        listProcesses: scriptedList(DARWIN_ROWS, []),
+        spawnKill: vi.fn(
+          async (): Promise<KillExit> => ({
+            code: 1,
+            signal: null,
+            stderrTail: "",
+          }),
+        ),
+      }),
+    );
+    expect(result).toMatchObject({
+      scanned: 3,
+      killed: 3,
+      residual: 0,
+      failed: 0,
+    });
+    const nonzero = eventLines(lines, "box.escapees_kill_nonzero");
+    expect(nonzero).toHaveLength(1);
+    expect(payloadOf(nonzero[0] ?? "")).toMatchObject({ code: 1, stderr: "" });
+  });
+
+  it("a kill SIGKILLed at the exit bound (code null) is logged as kill_nonzero but not failed", async () => {
+    const lines: string[] = [];
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        phase: "admission",
+        log: (l) => lines.push(l),
+        listProcesses: scriptedList(DARWIN_ROWS, []),
+        spawnKill: vi.fn(
+          async (): Promise<KillExit> => ({
+            code: null,
+            signal: "SIGKILL",
+            stderrTail: "",
+          }),
+        ),
+      }),
+    );
+    expect(result).toMatchObject({ failed: 0, killed: 3 });
+    expect(
+      payloadOf(eventLines(lines, "box.escapees_kill_nonzero")[0] ?? ""),
+    ).toMatchObject({ code: null, signal: "SIGKILL" });
+  });
+
+  it("an agentUser that is not a plain login name ('-u') is a scan failure before id -u: no listProcesses, no kill", async () => {
+    const lines: string[] = [];
+    const listProcesses = vi.fn(async () => DARWIN_ROWS);
+    const resolveUid = vi.fn(async () => 450);
+    const spawnKill = killExit0();
+    const result = await reapAgentUidEscapees(
+      baseReapOpts({
+        agentUser: "-u",
+        phase: "admission",
+        log: (l) => lines.push(l),
+        listProcesses,
+        resolveUid,
+        spawnKill,
+      }),
+    );
+    expect(result.skipped).toBe(false);
+    expect(result.error).toMatch(/plain unix login name/);
+    expect(resolveUid).not.toHaveBeenCalled();
+    expect(listProcesses).not.toHaveBeenCalled();
+    expect(spawnKill).not.toHaveBeenCalled();
+    const failed = eventLines(lines, "box.escapees_scan_failed");
+    expect(failed).toHaveLength(1);
+    expect(payloadOf(failed[0] ?? "")).toMatchObject({ stage: "scan" });
+    expect(eventLines(lines, "box.escapees_reaped")).toEqual([]);
   });
 
   it("AC7: residual poll re-scans every 100 ms until the set is empty", async () => {
@@ -734,6 +885,7 @@ describe("bootUidScan (AC14, unit level)", () => {
       release: vi.fn(async () => {
         order.push("release");
       }),
+      lost: false,
     };
     const tryAcquire = vi.fn<TryAcquireFn>(async () => lock);
     const reap = vi.fn<ReapFn>(async () => {
@@ -761,7 +913,7 @@ describe("bootUidScan (AC14, unit level)", () => {
 
   it("a reap that rejects ⇒ outcome error (never thrown into boot), logged, lock released once", async () => {
     const release = vi.fn(async () => {});
-    const tryAcquire = vi.fn(async () => ({ release }) as BoxLock);
+    const tryAcquire = vi.fn(async () => ({ release, lost: false }) as BoxLock);
     const reap = vi.fn(async () => {
       throw new Error("contract broken");
     });
@@ -787,7 +939,7 @@ describe("bootUidScan (AC14, unit level)", () => {
       root: "/root/x",
       agentUser: AGENT,
       log: () => {},
-      tryAcquire: vi.fn(async () => ({ release }) as BoxLock),
+      tryAcquire: vi.fn(async () => ({ release, lost: false }) as BoxLock),
       reap: vi.fn(async () => ({ ...zero, error: "ps exploded" })),
     });
     expect(out).toMatchObject({ outcome: "error", error: "ps exploded" });

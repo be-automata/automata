@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { settlesWithin, tryAcquireBoxLock, type BoxLock } from "./box-lock";
 import { writeSnapshotAtomic } from "./scheduling-maintenance";
 import {
+  assertAgentUser,
   buildKillAllAsAgentInvocation,
   type Invocation,
 } from "./spawn-as-user";
@@ -45,6 +46,17 @@ export interface ProcRow {
   comm: string;
 }
 
+/**
+ * How the kill process ended. `stderrTail` is the last ≤ 200 chars of its
+ * stderr — the only place a REFUSED sudo (`sudo: a password is required`)
+ * differs from an ESRCH exit 1.
+ */
+export interface KillExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stderrTail?: string;
+}
+
 export interface ReapAgentUidOpts {
   agentUser: string;
   phase: ReapPhase;
@@ -56,8 +68,11 @@ export interface ReapAgentUidOpts {
   listProcesses?: () => Promise<ProcRow[]>;
   /** Default: `id -u <agentUser>`. */
   resolveUid?: (agentUser: string) => Promise<number>;
-  /** Default: spawn and AWAIT the exit, bounded by `KILL_EXIT_BOUND_MS`. */
-  spawnKill?: (inv: Invocation) => Promise<void>;
+  /**
+   * Default: spawn and AWAIT the exit, bounded by `KILL_EXIT_BOUND_MS`, and
+   * resolve the `KillExit`. A fake may resolve `undefined`, read as exit 0.
+   */
+  spawnKill?: (inv: Invocation) => Promise<KillExit | undefined | void>;
   /** Default `process.pid`. */
   selfPid?: number;
   /** Pre-scan settle; default 250 ms for `teardown`, 0 otherwise. */
@@ -134,6 +149,17 @@ const RESIDUAL_POLL_MS = 100;
 const DEFAULT_RESIDUAL_BOUND_MS = 2000;
 const TEARDOWN_SETTLE_MS = 250;
 const RESIDUAL_SAMPLE_SIZE = 5;
+/** Bound on the enumerators (`ps`, `id -u`): a hung one must not hold the run's finally open. */
+const ENUMERATE_TIMEOUT_MS = 2000;
+/** How much of the kill's stderr is kept in memory, and how much is logged. */
+const KILL_STDERR_MAX_BYTES = 4096;
+const KILL_STDERR_TAIL_CHARS = 200;
+/**
+ * A non-zero kill exit whose stderr says sudo itself declined (no NOPASSWD
+ * grant, a password prompt under `-n`, a sudoers deny, a missing binary) —
+ * the signal was never sent, as opposed to `kill`'s own exit 1 on ESRCH.
+ */
+const KILL_REFUSED_RE = /sudo:|password|not allowed|command not found/i;
 
 const execFileAsync = promisify(execFile);
 
@@ -197,13 +223,20 @@ export async function listProcessesViaPs(): Promise<ProcRow[]> {
   const { stdout } = await execFileAsync(
     PS_BIN,
     ["-A", "-o", "pid,pgid,uid,comm"],
-    { maxBuffer: 64 * 1024 * 1024 },
+    {
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: ENUMERATE_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+    },
   );
   return parsePsOutput(stdout);
 }
 
 async function resolveUidViaId(agentUser: string): Promise<number> {
-  const { stdout } = await execFileAsync(ID_BIN, ["-u", agentUser]);
+  const { stdout } = await execFileAsync(ID_BIN, ["-u", agentUser], {
+    timeout: ENUMERATE_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+  });
   const uid = Number(stdout.trim());
   if (!Number.isInteger(uid) || uid < 0) {
     throw new Error(`id -u ${agentUser} returned ${JSON.stringify(stdout)}`);
@@ -219,18 +252,25 @@ function sleep(ms: number): Promise<void> {
  * The default kill: spawn the sudo invocation and AWAIT its exit so the
  * residual measurement happens after the signal has been delivered — NOT the
  * fire-and-forget of `reclaim.ts`. Bounded: a sudo that has not exited after
- * `KILL_EXIT_BOUND_MS` is SIGKILLed and the reaper continues. A non-zero exit
- * is not a failure (`kill` exits 1 on ESRCH when the set was already empty);
- * only a spawn error rejects.
+ * `KILL_EXIT_BOUND_MS` is SIGKILLed and the reaper continues. Resolves the
+ * exit (`kill` exits 1 on ESRCH when the set was already empty, so a non-zero
+ * code alone is not a failure) plus a bounded stderr tail, which is what lets
+ * the reaper tell a REFUSED sudo apart; only a spawn error rejects.
  */
-async function spawnKillAwaitingExit(inv: Invocation): Promise<void> {
+async function spawnKillAwaitingExit(inv: Invocation): Promise<KillExit> {
   const child = spawn(inv.file, inv.args, {
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
     env: { ...process.env, ...inv.env },
   });
-  const exited = new Promise<void>((resolve, reject) => {
+  let stderr = "";
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => {
+    if (stderr.length >= KILL_STDERR_MAX_BYTES) return;
+    stderr += chunk.slice(0, KILL_STDERR_MAX_BYTES - stderr.length);
+  });
+  const exited = new Promise<KillExit>((resolve, reject) => {
     child.once("error", reject);
-    child.once("exit", () => resolve());
+    child.once("exit", (code, signal) => resolve({ code, signal }));
   });
   // `settlesWithin` awaits its promise directly with no rejection handling,
   // so a spawn `error` must be pre-caught here (settled-quickly, same as
@@ -242,7 +282,8 @@ async function spawnKillAwaitingExit(inv: Invocation): Promise<void> {
     KILL_EXIT_BOUND_MS,
   );
   if (!exitedInTime) child.kill("SIGKILL");
-  await exited;
+  const exit = await exited;
+  return { ...exit, stderrTail: stderr.trim().slice(-KILL_STDERR_TAIL_CHARS) };
 }
 
 function zeroResult(skipped: boolean, durationMs = 0): ReapAgentUidResult {
@@ -297,6 +338,9 @@ export async function reapAgentUidEscapees(
     let uid: number;
     let rows: ProcRow[];
     try {
+      // This module's own trust boundary: a name that is not a plain login
+      // (e.g. one starting with `-`) never reaches `id -u`, let alone sudo.
+      assertAgentUser(agentUser);
       uid = await resolveUid(agentUser);
       if (settleMs > 0) await sleep(settleMs);
       rows = await listProcesses();
@@ -315,13 +359,33 @@ export async function reapAgentUidEscapees(
     let failed = 0;
     let residual = 0;
     let residualRows: ProcRow[] = [];
+    // A refused sudo (no NOPASSWD grant etc.) never sent the signal: the
+    // targets are all still alive, so `killed` must be 0 and the operator
+    // must not be told anything was reclaimed.
+    let killRefused = false;
 
     if (scanned > 0) {
       // The helpers are not targets: nothing to reclaim when scanned === 0.
       const inv = buildKillAllAsAgentInvocation({ agentUser });
       if (inv) {
         try {
-          await spawnKill(inv);
+          const exit = (await spawnKill(inv)) ?? { code: 0, signal: null };
+          if (exit.code !== 0) {
+            const stderrTail = exit.stderrTail ?? "";
+            log(
+              `box.escapees_kill_nonzero ${JSON.stringify({
+                ...base,
+                uid,
+                code: exit.code,
+                signal: exit.signal,
+                stderr: stderrTail.slice(-KILL_STDERR_TAIL_CHARS),
+              })}`,
+            );
+            if (KILL_REFUSED_RE.test(stderrTail)) {
+              failed = 1;
+              killRefused = true;
+            }
+          }
         } catch (e) {
           failed = 1;
           log(
@@ -330,10 +394,11 @@ export async function reapAgentUidEscapees(
         }
       }
       // Residual: SIGKILL delivery to a large tree is not instantaneous, so
-      // re-scan until the filtered set is empty or the bound elapses.
+      // re-scan until the filtered set is empty or the bound elapses. A
+      // refused kill has nothing to wait for: every target is residual.
       const pollStart = now();
       residualRows = selected.targets;
-      for (;;) {
+      while (!killRefused) {
         try {
           residualRows = selectAgentRows(
             await listProcesses(),
@@ -353,7 +418,7 @@ export async function reapAgentUidEscapees(
       residual = residualRows.length;
     }
 
-    const killed = Math.max(0, scanned - residual);
+    const killed = killRefused ? 0 : Math.max(0, scanned - residual);
     escapeesSinceBoot += killed;
     const durationMs = now() - startedAt;
     log(

@@ -447,6 +447,39 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
     );
   }, 10_000);
 
+  it("lost: a helper SIGKILLed after the ack flips lock.lost within 1s and logs the LOST line; release() still resolves", async () => {
+    const lines: string[] = [];
+    const lock = await acquire({
+      root,
+      holder: "thread-lost",
+      log: (l) => lines.push(l),
+    });
+    expect(lock.lost).toBe(false);
+    const acquired = lines.find((l) => l.startsWith("box lock acquired by"));
+    const helperPid = Number(
+      /\(helper pid (\d+)\)$/.exec(acquired ?? "")?.[1] ?? NaN,
+    );
+    expect(Number.isInteger(helperPid)).toBe(true);
+    // Kill the helper only (not this process): the kernel drops the lock and
+    // the run still believes it holds it — the LOST state.
+    process.kill(helperPid, "SIGKILL");
+    const deadline = Date.now() + 1000;
+    while (!lock.lost && Date.now() < deadline) await sleep(10);
+    expect(lock.lost).toBe(true);
+    expect(
+      lines.some((l) => l.startsWith("box lock LOST by thread-lost:")),
+    ).toBe(true);
+    expect(await tryLock(root)).toBe(0);
+    await expect(lock.release()).resolves.toBeUndefined();
+    expect(lock.lost).toBe(true);
+  }, 10_000);
+
+  it("lost: stays false across a normal release", async () => {
+    const lock = await acquire({ root, holder: "thread-ok" });
+    await lock.release();
+    expect(lock.lost).toBe(false);
+  }, 10_000);
+
   describe("tryAcquireBoxLock (#184)", () => {
     it("returns null within 500ms while another PROCESS holds the lock, leaving no waiter behind", async () => {
       const holder = startHolder(root);

@@ -235,7 +235,7 @@ The uid-scan reaper (#184, `uid-reaper.ts`) writes
 {
   "ts": "2026-09-06T12:00:00.000Z",
   "phase": "boot" | "admission" | "teardown",
-  "threadId": "…",
+  "threadId": "…",   // optional — absent on boot scans (no run owns them)
   "scanned": 0,
   "killed": 0,
   "residual": 0,
@@ -267,11 +267,26 @@ pgids. The manual hatch: find their pgids with
 then `sudo -n -u _automata-agent /bin/kill -9 -- -<pgid>`. `box.budget_write_failed` means
 the `box-budget.json` write itself failed (e.g. an unwritable
 `runNamespaceRoot`) — the scan and kill still ran; only the file is missing.
-`box.escapees_scan_failed` (with a `stage` of `scan`, `residual` or `unexpected`)
-means `ps` or `id -u` failed and nothing was killed; `box.escapees_kill_failed` means the
-sudo kill could not be spawned (`failed: 1` in the reaped line) — both are
-fail-open: the run continues, the box stays single-flight, and the next phase
-re-scans.
+`box.escapees_scan_failed` carries a `stage`: `scan` means `ps`, `id -u` or the
+`WORKER_AGENT_USER` name check failed BEFORE the kill and nothing was killed;
+`residual` means the kill WAS issued and only the post-kill re-scan failed, so
+the pre-kill target list is reported conservatively as `residual` (see above);
+`unexpected` is the belt-and-braces catch and may be either. Each enumerator
+is bounded to 2 s (SIGKILLed on timeout) so a hung `ps` or a wedged directory
+service surfaces here instead of holding the run's finally open.
+`box.escapees_kill_failed` means the sudo kill could not be spawned (`failed: 1`
+in the reaped line). `box.escapees_kill_nonzero` means the kill process exited
+non-zero and carries `code`, `signal` and a `stderr` tail: an empty tail is
+`kill`'s own ESRCH exit 1 (the set emptied under us, not a failure); a tail
+matching `sudo:` / `password` / `not allowed` / `command not found` is a REFUSED
+sudo (no NOPASSWD grant) — the signal was never sent, so that scan reports
+`failed: 1`, `killed: 0` and `residual` = `scanned`; fix the sudoers grant, do not
+hunt pgids. `box.escapees_scan_skipped` with `reason: "lock lost"` means the
+run's box-lock helper died mid-run (a `box lock LOST by …` line precedes it), so
+the teardown scan was NOT run — another run may already own the box and its
+live agent would be collateral of a uid-wide kill; the next admission scan
+reclaims instead. All of these are fail-open: the run continues, the box stays
+single-flight, and the next phase re-scans.
 
 When `WORKER_AGENT_USER` is empty, the boot log prints `box uid-scan
 disabled: WORKER_AGENT_USER is empty` and no scan, lock, or `box-budget.json`

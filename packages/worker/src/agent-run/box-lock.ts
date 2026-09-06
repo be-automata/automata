@@ -64,6 +64,12 @@ export class BoxLockUnavailableError extends Error {
 
 export interface BoxLock {
   release(): Promise<void>;
+  /**
+   * True once the helper exited BEFORE `release()`: the kernel has already
+   * dropped the lock and another run may own the box. A teardown must not
+   * issue the uid-wide kill in that state (#184).
+   */
+  readonly lost: boolean;
 }
 
 export interface AcquireBoxLockOptions {
@@ -300,9 +306,11 @@ function heldLock(
 ): BoxLock {
   const { child, exited, stderr } = session;
   let released = false;
+  let lost = false;
   void (async () => {
     const exit = await exited;
     if (!released) {
+      lost = true;
       log?.(
         `box lock LOST by ${holder}: helper ${describeExit(exit, stderr())} — the box budget is unguarded until this run ends`,
       );
@@ -328,7 +336,12 @@ function heldLock(
     releasing ??= doRelease();
     return releasing;
   };
-  return { release };
+  return {
+    release,
+    get lost() {
+      return lost;
+    },
+  };
 }
 
 export async function acquireBoxLock({
