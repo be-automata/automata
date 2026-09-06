@@ -15,7 +15,7 @@
     "pnpm --filter @terragon/sandbox exec vitest run --no-file-parallelism",
     "pnpm --filter @terragon/review test",
     "pnpm audit --prod --audit-level critical",
-    "HATCHET_IT=1 pnpm --filter @terragon/worker exec vitest run --no-file-parallelism src/agent-run/supersede.integration.test.ts src/agent-run/scheduling-health.integration.test.ts src/agent-run/box-lock.test.ts",
+    "HATCHET_IT=1 HOST_UID_IT=1 pnpm --filter @terragon/worker exec vitest run --no-file-parallelism src/agent-run/supersede.integration.test.ts src/agent-run/scheduling-health.integration.test.ts src/agent-run/box-lock.test.ts src/agent-run/uid-reaper.integration.test.ts",
     "docker compose -p automata-hatchet-it down -v --remove-orphans || true"
   ],
   "_note": "drafted by harness-init; the TL promotes entries from _candidates into required — see the 'AI Coding Harness' section of AGENTS.md"
