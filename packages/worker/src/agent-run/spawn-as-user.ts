@@ -158,3 +158,29 @@ export function buildKillInvocation(opts: {
     env: {},
   };
 }
+
+/**
+ * Build the uid-wide kill invocation (#184). `kill -9 -- -1` run AS the agent
+ * account: the kernel's kill(2) permission check bounds the `-1` wildcard to
+ * that uid's processes, so it reaches every escapee (setsid'd `bash -lc …`
+ * subtrees under a foreign pgid) and nothing of root's or the operator's.
+ *
+ * `agentUser` empty ⇒ null: there is no agent uid, so there is nothing to
+ * scan for and the caller skips the reaper entirely.
+ */
+export function buildKillAllAsAgentInvocation(opts: {
+  agentUser: string;
+}): Invocation | null {
+  const { agentUser } = opts;
+  if (!agentUser) {
+    return null;
+  }
+  assertAgentUser(agentUser);
+  return {
+    file: SUDO_BIN,
+    // No -E, as on the pgid path. `--` before `-1` so kill reads it as the
+    // wildcard target, not a flag.
+    args: ["-n", "-u", agentUser, "--", KILL_BIN, "-9", "--", "-1"],
+    env: {},
+  };
+}

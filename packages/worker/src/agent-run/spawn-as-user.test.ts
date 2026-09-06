@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assertAgentUser,
+  buildKillAllAsAgentInvocation,
   buildKillInvocation,
   buildSpawnInvocation,
   KILL_BIN,
@@ -132,6 +133,40 @@ describe("buildKillInvocation in agent-uid mode", () => {
   });
 });
 
+describe("buildKillAllAsAgentInvocation (#184)", () => {
+  const inv = buildKillAllAsAgentInvocation({ agentUser: "_automata-agent" });
+
+  it("runs /bin/kill -9 -- -1 AS the agent account so kill(2) bounds the wildcard to that uid", () => {
+    expect(inv).not.toBeNull();
+    expect(inv?.file).toBe("/usr/bin/sudo");
+    expect(inv?.args).toEqual([
+      "-n",
+      "-u",
+      "_automata-agent",
+      "--",
+      "/bin/kill",
+      "-9",
+      "--",
+      "-1",
+    ]);
+    expect(inv?.env).toEqual({});
+  });
+
+  it("never passes -E (no environment, so no SETENV grant)", () => {
+    expect(inv?.args).not.toContain("-E");
+  });
+
+  it("returns null when agentUser is empty (no agent uid, nothing to reap)", () => {
+    expect(buildKillAllAsAgentInvocation({ agentUser: "" })).toBeNull();
+  });
+
+  it("leaves buildKillInvocation's positive-pgid guard untouched", () => {
+    expect(() =>
+      buildKillInvocation({ agentUser: "_automata-agent", pgid: -1 }),
+    ).toThrow(/positive integer/);
+  });
+});
+
 describe("assertAgentUser", () => {
   it("accepts a plain role-account login", () => {
     expect(() => assertAgentUser("_automata-agent")).not.toThrow();
@@ -155,7 +190,7 @@ describe("assertAgentUser", () => {
     }
   });
 
-  it("is enforced by both builders, not only by the config loader", () => {
+  it("is enforced by all three builders, not only by the config loader", () => {
     expect(() =>
       buildSpawnInvocation({
         agentUser: "-u",
@@ -167,5 +202,8 @@ describe("assertAgentUser", () => {
     expect(() =>
       buildKillInvocation({ agentUser: "root;rm", pgid: 1 }),
     ).toThrow(/WORKER_AGENT_USER/);
+    expect(() => buildKillAllAsAgentInvocation({ agentUser: "-u" })).toThrow(
+      /WORKER_AGENT_USER/,
+    );
   });
 });

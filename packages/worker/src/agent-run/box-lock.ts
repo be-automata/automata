@@ -44,8 +44,12 @@ import path from "node:path";
  * each acquire owns its own helper child, so a late second `release()` can
  * never free a successor's hold.
  *
- * #184 adds the try-lock variant; conflict exit codes differ per platform
- * (lockf `-t 0` → 75, util-linux flock `-n` → 1 unless `-E 75`).
+ * #184 added the try-lock variant (`tryAcquireBoxLock`): the same helper and
+ * ack, but the helper is told never to wait (lockf `-t 0`, util-linux flock
+ * `-n`), so a held lock surfaces as a pre-ack exit rather than a park. The
+ * conflict exit code is normalised to 75 on both platforms (lockf's
+ * EX_TEMPFAIL; flock's default is 1 unless `-E 75`). Both entry points share
+ * `spawnHelperAndAwaitAck`, so the spawn shape and the ack race never drift.
  */
 
 export class BoxLockUnavailableError extends Error {
@@ -71,9 +75,22 @@ export interface AcquireBoxLockOptions {
   log?: (line: string) => void;
 }
 
-interface BoxLockHelper {
+export interface BoxLockHelper {
   file: string;
   args: string[];
+}
+
+export interface TryAcquireBoxLockOptions {
+  /** The run-namespace root; the lock file is `<root>/box.lock`. */
+  root: string;
+  /** Who is trying — appears in the log lines only. */
+  holder: string;
+  log?: (line: string) => void;
+  /**
+   * Test seam: the helper to spawn instead of `boxLockTryHelper()`. Lets a
+   * test drive the spawn-failure branch with a bogus binary path.
+   */
+  helper?: BoxLockHelper;
 }
 
 interface HelperExit {
@@ -92,6 +109,12 @@ const SH_BIN = "/bin/sh";
 const HELPER_COMMAND = "printf ok; read _";
 /** How long a released helper gets to exit on EOF before it is SIGKILLed. */
 const RELEASE_EXIT_BOUND_MS = 2000;
+/**
+ * The helper's exit code when a try-lock finds the lock held. lockf(1) exits
+ * EX_TEMPFAIL (75) on `-t 0`; util-linux flock(1) is told the same code via
+ * `-E 75` so the caller has ONE busy signal on both platforms.
+ */
+const TRY_LOCK_BUSY_EXIT = 75;
 
 /** The single builder of the lock-file path. */
 export function boxLockPath(root: string): string {
@@ -114,6 +137,29 @@ export function boxLockHelper(
       return { file: "/usr/bin/lockf", args: ["-k", "-s", "-w"] };
     case "linux":
       return { file: "/usr/bin/flock", args: ["-x", "-o"] };
+    default:
+      throw new BoxLockUnavailableError(platform, "unsupported platform");
+  }
+}
+
+/**
+ * The non-waiting variant of `boxLockHelper` (#184): darwin `lockf -t 0`
+ * ("fail unless it can acquire the lock immediately"), linux `flock -n -E 75`
+ * (`-n` fails instead of waiting; `-E` sets that failure's exit code, whose
+ * default is 1). Same binary, same lock file, same ack command.
+ */
+export function boxLockTryHelper(
+  platform: NodeJS.Platform = process.platform,
+): BoxLockHelper {
+  const base = boxLockHelper(platform);
+  switch (platform) {
+    case "darwin":
+      return { file: base.file, args: [...base.args, "-t", "0"] };
+    case "linux":
+      return {
+        file: base.file,
+        args: [...base.args, "-n", "-E", String(TRY_LOCK_BUSY_EXIT)],
+      };
     default:
       throw new BoxLockUnavailableError(platform, "unsupported platform");
   }
@@ -169,19 +215,44 @@ async function settlesWithin(
   }
 }
 
-export async function acquireBoxLock({
-  root,
-  holder,
-  signal,
-  log,
-}: AcquireBoxLockOptions): Promise<BoxLock> {
+/** `spawn()` with three pipes: keeps stdin/stdout/stderr typed non-null. */
+type PipedChild = ReturnType<typeof spawnPiped>;
+function spawnPiped(file: string, args: string[]) {
+  return spawn(file, args, { stdio: ["pipe", "pipe", "pipe"] });
+}
+
+interface HelperSession {
+  child: PipedChild;
+  exited: Promise<HelperExit>;
+  outcome: AcquireOutcome;
+  /** Stderr accumulated so far; keeps filling until the helper exits. */
+  stderr: () => string;
+  file: string;
+}
+
+/**
+ * The one spawn-and-ack path behind both `acquireBoxLock` and
+ * `tryAcquireBoxLock`. Spawns `helper` on `<root>/box.lock`, wires the stdin
+ * error sink and the output accumulators BEFORE any await, then races the
+ * `ok` ack against the helper's exit and (optionally) the caller's abort.
+ * Decides nothing: each caller maps the outcome to its own contract.
+ */
+async function spawnHelperAndAwaitAck(
+  root: string,
+  helper: BoxLockHelper,
+  signal?: AbortSignal,
+): Promise<HelperSession> {
   await mkdir(root, { recursive: true });
   if (signal?.aborted) throw abortError();
-  const { file, args } = boxLockHelper();
+  const { file, args } = helper;
   const lockFile = boxLockPath(root);
-  const child = spawn(file, [...args, lockFile, SH_BIN, "-c", HELPER_COMMAND], {
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const child = spawnPiped(file, [
+    ...args,
+    lockFile,
+    SH_BIN,
+    "-c",
+    HELPER_COMMAND,
+  ]);
   // A helper that died before we wrote to it makes stdin EPIPE on end(); an
   // unhandled 'error' there would take the worker down. Register before any
   // await, together with the output accumulators.
@@ -212,31 +283,28 @@ export async function acquireBoxLock({
   });
   if (onAbort) signal?.removeEventListener("abort", onAbort);
 
-  if (outcome.kind === "helper-gone") {
-    // Nothing to release, but the unwritten stdin pipe handle would otherwise
-    // linger until GC.
-    child.stdin.destroy();
-    throw new BoxLockUnavailableError(file, describeExit(outcome.exit, stderr));
-  }
-  if (outcome.kind === "aborted") {
-    // Blocked in flock(2): it will never read the EOF, so kill it outright.
-    child.kill("SIGKILL");
-    child.stdin.destroy();
-    await exited;
-    throw abortError();
-  }
+  return { child, exited, outcome, stderr: () => stderr, file };
+}
 
-  log?.(`box lock acquired by ${holder} (helper pid ${child.pid})`);
-
-  // A helper that dies AFTER the ack (killed by hand, OOM, a stray cleanup)
-  // drops the lock while this run still believes it holds it. Nothing can
-  // recover that mid-run; make it loud instead of silent.
+/**
+ * Turn an acked helper into the caller's `BoxLock`: the LOST observer (a
+ * helper that dies after the ack drops the lock while the run still believes
+ * it holds it — nothing can recover that mid-run; make it loud instead of
+ * silent) and the memoised release closure (EOF on stdin ends `read`, with a
+ * SIGKILL fallback after RELEASE_EXIT_BOUND_MS).
+ */
+function heldLock(
+  session: HelperSession,
+  holder: string,
+  log?: (line: string) => void,
+): BoxLock {
+  const { child, exited, stderr } = session;
   let released = false;
   void (async () => {
     const exit = await exited;
     if (!released) {
       log?.(
-        `box lock LOST by ${holder}: helper ${describeExit(exit, stderr)} — the box budget is unguarded until this run ends`,
+        `box lock LOST by ${holder}: helper ${describeExit(exit, stderr())} — the box budget is unguarded until this run ends`,
       );
     }
   })();
@@ -260,14 +328,87 @@ export async function acquireBoxLock({
     releasing ??= doRelease();
     return releasing;
   };
+  return { release };
+}
+
+export async function acquireBoxLock({
+  root,
+  holder,
+  signal,
+  log,
+}: AcquireBoxLockOptions): Promise<BoxLock> {
+  const session = await spawnHelperAndAwaitAck(root, boxLockHelper(), signal);
+  const { child, exited, outcome, stderr, file } = session;
+
+  if (outcome.kind === "helper-gone") {
+    // Nothing to release, but the unwritten stdin pipe handle would otherwise
+    // linger until GC.
+    child.stdin.destroy();
+    throw new BoxLockUnavailableError(
+      file,
+      describeExit(outcome.exit, stderr()),
+    );
+  }
+  if (outcome.kind === "aborted") {
+    // Blocked in flock(2): it will never read the EOF, so kill it outright.
+    child.kill("SIGKILL");
+    child.stdin.destroy();
+    await exited;
+    throw abortError();
+  }
+
+  log?.(`box lock acquired by ${holder} (helper pid ${child.pid})`);
+  const lock = heldLock(session, holder, log);
 
   if (signal?.aborted) {
     // A cancel can land in the instant the previous holder released: never
     // run a cancelled run's body — give the lock straight back.
-    await release();
+    await lock.release();
     throw abortError();
   }
-  return { release };
+  return lock;
+}
+
+/**
+ * Non-blocking acquire (#184): `null` when another process holds the lock,
+ * never waits. Used by the boot-time uid scan, which must skip — not queue
+ * behind — a live run. Busy is the helper's pre-ack exit 75 with no spawn
+ * error; any other pre-ack exit is the same `BoxLockUnavailableError` as the
+ * waiting acquire. On ack the returned lock is the same memoised release
+ * closure, LOST observer included.
+ */
+export async function tryAcquireBoxLock({
+  root,
+  holder,
+  log,
+  helper,
+}: TryAcquireBoxLockOptions): Promise<BoxLock | null> {
+  const session = await spawnHelperAndAwaitAck(
+    root,
+    helper ?? boxLockTryHelper(),
+  );
+  const { child, outcome, stderr, file } = session;
+
+  if (outcome.kind === "helper-gone") {
+    child.stdin.destroy();
+    const { exit } = outcome;
+    if (exit.code === TRY_LOCK_BUSY_EXIT && !exit.spawnError) {
+      log?.(`box lock busy — ${holder} did not wait`);
+      return null;
+    }
+    throw new BoxLockUnavailableError(file, describeExit(exit, stderr()));
+  }
+  if (outcome.kind === "aborted") {
+    // Unreachable: no signal is passed to the try path. Kept exhaustive so a
+    // future signal parameter cannot silently fall through to "acquired".
+    child.kill("SIGKILL");
+    child.stdin.destroy();
+    await session.exited;
+    throw abortError();
+  }
+
+  log?.(`box lock acquired by ${holder} (helper pid ${child.pid})`);
+  return heldLock(session, holder, log);
 }
 
 /** Run `fn` holding the box lock; releases on return, throw, or abort. */

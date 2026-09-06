@@ -13,6 +13,8 @@ import {
   BoxLockUnavailableError,
   boxLockHelper,
   boxLockPath,
+  boxLockTryHelper,
+  tryAcquireBoxLock,
   withBoxLock,
   type BoxLock,
 } from "./box-lock";
@@ -444,4 +446,102 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       /^box lock released by thread-1 \(helper pid \d+\)$/,
     );
   }, 10_000);
+
+  describe("tryAcquireBoxLock (#184)", () => {
+    it("returns null within 500ms while another PROCESS holds the lock, leaving no waiter behind", async () => {
+      const holder = startHolder(root);
+      await holder.out.waitFor("held");
+      const childrenBefore = children.length;
+      const lines: string[] = [];
+      const t0 = Date.now();
+      const lock = await tryAcquireBoxLock({
+        root,
+        holder: "boot",
+        log: (l) => lines.push(l),
+      });
+      const elapsedMs = Date.now() - t0;
+      expect(lock).toBeNull();
+      expect(elapsedMs).toBeLessThan(500);
+      expect(lines).toEqual(["box lock busy — boot did not wait"]);
+      // The fixture still holds it: the try never stole or queued.
+      expect(await tryLock(root)).toBe(HELD_EXIT);
+      expect(children.length).toBe(childrenBefore);
+      const exit = holder.exit;
+      holder.child.kill("SIGKILL");
+      await exit;
+      expect(await tryLock(root)).toBe(0);
+      console.log(`[box-lock try] busy → null: ${elapsedMs}ms`);
+    }, 10_000);
+
+    it("acquires a free lock — the probe sees it held — and release() frees it", async () => {
+      const lines: string[] = [];
+      const lock = await tryAcquireBoxLock({
+        root,
+        holder: "boot",
+        log: (l) => lines.push(l),
+      });
+      expect(lock).not.toBeNull();
+      if (!lock) return;
+      locks.push(lock);
+      expect(await tryLock(root)).toBe(HELD_EXIT);
+      // A second try on the same root from this process is busy too.
+      expect(await tryAcquireBoxLock({ root, holder: "again" })).toBeNull();
+      await lock.release();
+      expect(await tryLock(root)).toBe(0);
+      expect(lines[0]).toMatch(
+        /^box lock acquired by boot \(helper pid \d+\)$/,
+      );
+      expect(lines[1]).toMatch(
+        /^box lock released by boot \(helper pid \d+\)$/,
+      );
+    }, 10_000);
+
+    it("helper argv per platform: base flags plus the non-waiting flags, busy exit normalised to 75", () => {
+      expect(boxLockTryHelper("darwin")).toEqual({
+        file: "/usr/bin/lockf",
+        args: ["-k", "-s", "-w", "-t", "0"],
+      });
+      expect(boxLockTryHelper("linux")).toEqual({
+        file: "/usr/bin/flock",
+        args: ["-x", "-o", "-n", "-E", "75"],
+      });
+      expect(() => boxLockTryHelper("win32")).toThrow(BoxLockUnavailableError);
+    }, 10_000);
+
+    it("a bogus helper binary surfaces as BoxLockUnavailableError (spawn failure is never 'busy')", async () => {
+      const bogus = path.join(root, "no-such-lockf");
+      const err = await rejection(
+        tryAcquireBoxLock({
+          root,
+          holder: "boot",
+          helper: { file: bogus, args: boxLockTryHelper().args },
+        }),
+      );
+      expect(err).toBeInstanceOf(BoxLockUnavailableError);
+      if (err instanceof BoxLockUnavailableError) {
+        expect(err.helper).toBe(bogus);
+        expect(err.detail).toMatch(/^spawn failed: /);
+        expect(err.detail).toMatch(/ENOENT/);
+      }
+      expect(await tryLock(root)).toBe(0);
+    }, 10_000);
+
+    it("release() is idempotent and a stale release never frees a successor's hold", async () => {
+      const a = await tryAcquireBoxLock({ root, holder: "A" });
+      expect(a).not.toBeNull();
+      if (!a) return;
+      locks.push(a);
+      await a.release();
+      await a.release();
+      expect(await tryLock(root)).toBe(0);
+      const b = await tryAcquireBoxLock({ root, holder: "B" });
+      expect(b).not.toBeNull();
+      if (!b) return;
+      locks.push(b);
+      await a.release();
+      expect(await tryLock(root)).toBe(HELD_EXIT);
+      await b.release();
+      expect(await tryLock(root)).toBe(0);
+    }, 10_000);
+  });
 });
