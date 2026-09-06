@@ -142,6 +142,30 @@ async function acquire(
   return lock;
 }
 
+/**
+ * Start an acquire on `root` that is aborted after `abortAfterMs` and assert it
+ * rejects with the AbortError contract. Returns the error and the abort time
+ * so timing-sensitive cases can measure latency.
+ */
+async function expectAbortedAcquire(
+  root: string,
+  holder: string,
+  abortAfterMs: number,
+): Promise<{ err: Error; abortedAt: number }> {
+  const ac = new AbortController();
+  let abortedAt = 0;
+  setTimeout(() => {
+    abortedAt = Date.now();
+    ac.abort();
+  }, abortAfterMs);
+  const err = await rejection(
+    acquireBoxLock({ root, holder, signal: ac.signal }),
+  );
+  expect(err.name).toBe("AbortError");
+  expect(err.message).toMatch(/aborted/);
+  return { err, abortedAt };
+}
+
 async function rejection(p: Promise<unknown>): Promise<Error> {
   try {
     await p;
@@ -196,19 +220,9 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
 
   it("AC2: an abort while WAITING rejects within 500ms with AbortError and leaves the holder's lock intact", async () => {
     const a = await acquire({ root, holder: "A" });
-    const ac = new AbortController();
-    let abortedAt = 0;
-    setTimeout(() => {
-      abortedAt = Date.now();
-      ac.abort();
-    }, 100);
-    const err = await rejection(
-      acquireBoxLock({ root, holder: "B", signal: ac.signal }),
-    );
+    const { abortedAt } = await expectAbortedAcquire(root, "B", 100);
     const latencyMs = Date.now() - abortedAt;
     expect(abortedAt).toBeGreaterThan(0);
-    expect(err.name).toBe("AbortError");
-    expect(err.message).toMatch(/aborted/);
     expect(latencyMs).toBeLessThan(500);
     expect(await tryLock(root)).toBe(HELD_EXIT);
     await a.release();
@@ -247,12 +261,7 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
     const b = await acquire({ root, holder: "B" });
     await a.release();
     expect(await tryLock(root)).toBe(HELD_EXIT);
-    const ac = new AbortController();
-    setTimeout(() => ac.abort(), 150);
-    const err = await rejection(
-      acquireBoxLock({ root, holder: "probe", signal: ac.signal }),
-    );
-    expect(err.name).toBe("AbortError");
+    await expectAbortedAcquire(root, "probe", 150);
     await b.release();
     expect(await tryLock(root)).toBe(0);
   }, 10_000);
@@ -261,12 +270,7 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
     const holder = startHolder(root);
     await holder.out.waitFor("held");
     await utimes(boxLockPath(root), 0, 0);
-    const ac = new AbortController();
-    setTimeout(() => ac.abort(), 300);
-    const err = await rejection(
-      acquireBoxLock({ root, holder: "waiter", signal: ac.signal }),
-    );
-    expect(err.name).toBe("AbortError");
+    await expectAbortedAcquire(root, "waiter", 300);
     expect(await tryLock(root)).toBe(HELD_EXIT);
     const exit = holder.exit;
     holder.child.kill("SIGKILL");
@@ -322,12 +326,7 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
     await a.out.waitFor("start");
     await sleep(50);
     const b = startHolder(root, ["--hold-ms=300"]);
-    const ac = new AbortController();
-    setTimeout(() => ac.abort(), 150);
-    const err = await rejection(
-      acquireBoxLock({ root, holder: "parent", signal: ac.signal }),
-    );
-    expect(err.name).toBe("AbortError");
+    await expectAbortedAcquire(root, "parent", 150);
     const [aExit, bExit] = await Promise.all([a.exit, b.exit]);
     expect(aExit.code).toBe(0);
     expect(bExit.code).toBe(0);
