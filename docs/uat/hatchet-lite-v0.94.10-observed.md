@@ -71,3 +71,5 @@ the enforcement point for the one-agent budget.
 - `agent-run-discard` (`CANCEL_NEWEST`): the newcomer is CANCELLED without ever
   executing; the incumbent completes.
 - `agent-run-strict` (`GROUP_ROUND_ROBIN`): strict FIFO per `prKey`, no overlap.
+
+<!-- #184 drill 2026-09-06T07:48:51Z: throwaway, close without merging -->
