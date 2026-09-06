@@ -295,6 +295,13 @@ run finish, then exit). Never hard-kill mid-run.
 - **Flag:** MUST / NOW / OPERATOR ACTION (launchd restart procedure).
 
 ### 3.2 [MUST] #4 — ≥2 workers (rolling restart)
+
+> **Superseded by #183 (ADR-007 Stage B1, 2026-09-05):** the box runs ONE worker unit;
+> `com.automata.worker-2.plist` was retired and the one-agent budget is a kernel flock
+> (`packages/worker/src/agent-run/box-lock.ts`). A deploy is a single drain-and-relaunch
+> when the box is idle — see `packages/worker/deploy/README.md`. The design below is kept
+> as the record of what was tried.
+
 **Design:** run a second worker so a deploy rolls one at a time (the draining one finishes,
 the other serves). On the single pilot Mac, two workers share `/tmp`.
 - **Blocker resolved by Phase 0.2:** per-run socket + per-run pidfile. Without it, worker B's
@@ -398,7 +405,7 @@ raise `maxRuns` with `slotCost` reflecting the weight. Keep `maxRuns:1` until th
 |--------|-------|-----|-------|
 | Edit `~/.automata/run-worker.sh` to call `assert-auth-enabled.sh` before `pnpm run worker` | pilot Mac | #5 | 1 |
 | Change restart procedure: `launchctl kill SIGTERM …` + wait, drop `kickstart -k` | pilot Mac launchd | #4 | 3 |
-| Install 2nd launchd unit `com.automata.worker-2.plist` | pilot Mac | #4 | 3 |
+| ~~Install 2nd launchd unit `com.automata.worker-2.plist`~~ (retired by #183 — one unit per box) | pilot Mac | #4 | 3 |
 | Provision OTLP collector + set `OTEL_EXPORTER_OTLP_ENDPOINT` (worker box) + www `wrangler secret put` | box + CF | #7 | 4 |
 | Confirm `getStalledThreads` cutoff > 30m Hatchet executionTimeout | www code (verify) | #2 | 1 |
 | Rebuild `@terragon/daemon` after 0.2 (worker consumes `packages/daemon/dist`) | pilot Mac | #4/#3b | 0 |

@@ -42,7 +42,7 @@ drain RUNNING
 Verify: the same list query returns zero rows for the variants. What the drain
 guarantees (proven by the drill): every drained run ends CANCELLED and none
 completes; a run the engine admitted in the same instant a cancel freed the
-box slot may START and is cancelled on its first tick (cancels are delivered
+box lock (`box-lock.ts`, #183) may START and is cancelled on its first tick (cancels are delivered
 asynchronously) — that is at most one agent turn's first seconds, never a
 review. The worker's cancel hook posts a `superseded` terminal for each
 cancelled run that carried a native policy; anything it misses is picked up by
