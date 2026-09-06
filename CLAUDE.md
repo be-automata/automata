@@ -7,7 +7,7 @@
 
 ## Stacks detected
 
-node
+typescript, node
 
 ## Rules
 
@@ -20,7 +20,7 @@ _No rules installed._
 
 | command | what it proves |
 |:--|:--|
-| npm ci | — |
-| npm test | — |
-| npm run build | — |
+| pnpm install --frozen-lockfile | — |
+| pnpm test | — |
+| pnpm build | — |
 <!-- somnio:harness:end -->

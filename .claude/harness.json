@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "somnio-engineering-ai@0.9.4",
-  "generated_at": "2026-09-06T02:12:31Z",
+  "generated_at": "2026-09-06T02:26:15Z",
   "rules_source": {
     "repo": "somnio-software/somnio-ai-tools",
     "rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
@@ -9,7 +9,8 @@
     "tier": "pub-cache"
   },
   "stacks": [
-    "node"
+    "node",
+    "typescript"
   ],
   "installed": [
     {
@@ -22,7 +23,7 @@
       "path": "CLAUDE.md",
       "origin": "template:CLAUDE.md.template",
       "source_rev": "ed8f9b6d622c794ccab93ace69755d928b216cd9",
-      "sha256": "9eb365c46e33d2d9d0d6282c153d7f28ad015aaa200325dff6de3c85300735db"
+      "sha256": "747a867b9bdca358346e93068ed11df78118f6a8d8ad34c96b17a9a6f33ce5bc"
     },
     {
       "path": ".gitignore",
@@ -36,12 +37,11 @@
   ],
   "not_in_scope": [
     "cli skills: node has no catalog skill (rules only)",
-    "rules: no codex adapter content for node at ed8f9b6",
+    "cli skills: typescript has no catalog skill (rules only)",
     "rules: skipped (node unserved at ed8f9b6)"
   ],
   "agents": [
-    "claude",
-    "codex"
+    "claude"
   ],
   "settings_bak_created": false,
   "cli_installed": [
@@ -74,48 +74,6 @@
       "skill": "security-audit",
       "path": ".claude/skills/security-audit",
       "manifest": ".claude/skills/.somnio-skills.json"
-    },
-    {
-      "agent": "codex",
-      "skill": "git-branch-format",
-      "path": ".codex/skills/git_branch_format.md",
-      "manifest": ".codex/skills/.somnio-skills.json"
-    },
-    {
-      "agent": "codex",
-      "skill": "git-commit-format",
-      "path": ".codex/skills/git_commit_format.md",
-      "manifest": ".codex/skills/.somnio-skills.json"
-    },
-    {
-      "agent": "codex",
-      "skill": "harness-audit",
-      "path": ".codex/skills/harness_audit.md",
-      "manifest": ".codex/skills/.somnio-skills.json"
-    },
-    {
-      "agent": "codex",
-      "skill": "harness-audit",
-      "path": ".codex/somnio_rules/harness-audit",
-      "manifest": ".codex/skills/.somnio-skills.json"
-    },
-    {
-      "agent": "codex",
-      "skill": "optimize-claude-config",
-      "path": ".codex/skills/optimize_claude_config.md",
-      "manifest": ".codex/skills/.somnio-skills.json"
-    },
-    {
-      "agent": "codex",
-      "skill": "security-audit",
-      "path": ".codex/skills/security_audit.md",
-      "manifest": ".codex/skills/.somnio-skills.json"
-    },
-    {
-      "agent": "codex",
-      "skill": "security-audit",
-      "path": ".codex/somnio_rules/security-audit",
-      "manifest": ".codex/skills/.somnio-skills.json"
     }
   ],
   "cli_version": "2.11.2",
