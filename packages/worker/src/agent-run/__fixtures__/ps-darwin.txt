@@ -1,0 +1,14 @@
+  PID  PGID   UID COMM
+    1     1     0 /sbin/launchd
+  326   326     0 /usr/libexec/logd
+36913 36913   450 /usr/sbin/distnoted
+36914 36914   450 /usr/libexec/lsd
+36921 36921   450 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/XPCServices/csnameddatad.xpc/Contents/MacOS/csnameddatad
+36922 36922   450 /usr/libexec/secd
+94708 94708   450 /System/Library/Frameworks/Contacts.framework/Support/contactsd
+66912 66912   450 bash
+66916 66912   450 claude
+68883 68883   450 /usr/local/automata/bin/node
+70001 70001   501 /bin/zsh
+garbage line without numbers
+
