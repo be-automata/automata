@@ -29,10 +29,25 @@ MAX_CONTEXT_BYTES = 64 * 1024  # upper bound on injected rule text per Write
 
 
 def _split_top(text):
-    """Split on commas that are not inside a brace group, so a flow-form item
-    like "src/**/*.{ts,tsx}" stays one pattern."""
-    parts, buf, depth = [], '', 0
+    """Split on commas that are not inside a brace group or a quoted item, so a
+    flow-form item like "src/**/*.{ts,tsx}" or "a,b.ts" stays one pattern.
+
+    Quote tracking matters: a comma inside a quoted glob but outside a `{...}`
+    group would otherwise tear the item into fragments that keep a stray quote
+    and silently match nothing. An unterminated quote consumes the rest, which
+    yields one item rather than garbage.
+    """
+    parts, buf, depth, quote = [], '', 0, None
     for ch in text:
+        if quote:
+            if ch == quote:
+                quote = None
+            buf += ch
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            buf += ch
+            continue
         if ch == '{':
             depth += 1
         elif ch == '}' and depth:

@@ -107,6 +107,22 @@ class FlowFormPaths(unittest.TestCase):
     def test_empty_inline_list_yields_nothing(self):
         self.assertEqual(inject_rules.parse_paths("paths: []\n"), [])
 
+    def test_quoted_comma_is_not_a_separator(self):
+        # A literal comma inside a quoted glob, outside any {...} group, used to
+        # tear the item into fragments that kept a stray quote and matched nothing.
+        self.assertEqual(inject_rules.parse_paths('paths: ["a,b.ts"]\n'), ["a,b.ts"])
+        self.assertEqual(inject_rules.parse_paths("paths: ['a,b.ts']\n"), ["a,b.ts"])
+
+    def test_quoted_comma_alongside_a_brace_group(self):
+        fm = 'paths: ["a,b.ts", "src/**/*.{ts,tsx}"]\n'
+        self.assertEqual(inject_rules.parse_paths(fm), ["a,b.ts", "src/**/*.{ts,tsx}"])
+
+    def test_quoted_comma_pattern_still_matches(self):
+        self.assertTrue(inject_rules.matches("a,b.ts", inject_rules.parse_paths('paths: ["a,b.ts"]\n')))
+
+    def test_unterminated_quote_yields_one_item(self):
+        self.assertEqual(inject_rules.parse_paths('paths: ["a,b.ts]\n'), ['"a,b.ts'])
+
 
 class EndToEnd(unittest.TestCase):
     def test_new_matching_ts_file_injects_rule(self):
