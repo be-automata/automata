@@ -127,13 +127,14 @@ pnpm exec tsx deploy/review-single-writer-preflight.ts    # expect PASS / exit 0
 #     NEVER `launchctl kickstart -k` (SIGKILL drops the run; see
 #     packages/worker/deploy/README.md "Graceful restart"). Deploy when idle.
 LOG_MARK=$(wc -l < ~/.automata/worker.log)   # worker.log is append-only across relaunches
+OLD_PID=$(launchctl print gui/$UID/com.automata.worker | awk '/pid =/{print $3}')
 launchctl kill TERM gui/$UID/com.automata.worker
-# Poll for EXIT first (the unit stays `running` while it drains on the old code),
-# then for the KeepAlive relaunch — same polarity as the deploy README.
-while launchctl print gui/$UID/com.automata.worker 2>/dev/null | grep -q 'state = running'; do sleep 2; done
-until launchctl print gui/$UID/com.automata.worker 2>/dev/null | grep -q 'state = running'; do sleep 2; done
-# Prove the NEW process booted: only lines written after the SIGTERM count.
+# Wait for the KeepAlive relaunch by PID, not by state: an idle unit drains and
+# relaunches faster than a 2 s poll, so `state = running` reads true on both sides.
+until NEW_PID=$(launchctl print gui/$UID/com.automata.worker 2>/dev/null | awk '/pid =/{print $3}'); [ -n "$NEW_PID" ] && [ "$NEW_PID" != "$OLD_PID" ]; do sleep 2; done
+# Prove the NEW process booted on the new code: only lines written after the SIGTERM count.
 until tail -n +$((LOG_MARK+1)) ~/.automata/worker.log | grep -q 'box lock helper OK'; do sleep 2; done
+tail -n +$((LOG_MARK+1)) ~/.automata/worker.log | grep 'box.escapees_reaped' | head -1   # boot uid-scan ran under the lock
 
 # (e) Dark-deploy www (ships the executor/finish-wiring/sweep). SAFE-DARK: with the
 #     flag unset=false every new path is a no-op (reconciler-only, today's behavior).
