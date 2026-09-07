@@ -9,12 +9,12 @@
     "format-check": "prettier --check . --ignore-path ../../.prettierignore --config ../../.prettierrc"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.803.0",
-    "@aws-sdk/s3-request-presigner": "^3.803.0"
+    "@aws-sdk/client-s3": "^3.1126.0",
+    "@aws-sdk/s3-request-presigner": "^3.1126.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.17",
-    "tsx": "^4.7.1",
+    "tsx": "^4.23.13",
     "typescript": "^5.8.3"
   }
 }
