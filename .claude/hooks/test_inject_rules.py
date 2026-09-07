@@ -73,6 +73,20 @@ class BraceExpansion(unittest.TestCase):
         self.assertTrue(inject_rules.matches("apps/www/x.tsx", ["**/*.{ts,tsx}"]))
         self.assertFalse(inject_rules.matches("apps/www/x.css", ["**/*.{ts,tsx}"]))
 
+    def test_bracket_class_inside_a_group_is_not_torn(self):
+        # The group body is split by the nesting-aware splitter, so the comma
+        # inside the bracket class is data, not an alternative separator.
+        self.assertEqual(
+            inject_rules.expand_braces("{a[x,y],b}.ts"),
+            ["a[x,y].ts", "b.ts"],
+        )
+        self.assertTrue(inject_rules.matches("ax.ts", ["{a[x,y],b}.ts"]))
+        self.assertTrue(inject_rules.matches("b.ts", ["{a[x,y],b}.ts"]))
+        self.assertFalse(inject_rules.matches("az.ts", ["{a[x,y],b}.ts"]))
+
+    def test_quoted_comma_inside_a_group_is_not_torn(self):
+        self.assertEqual(inject_rules.expand_braces('{"a,b",c}.ts'), ['"a,b".ts', "c.ts"])
+
 
 class BracketClass(unittest.TestCase):
     def test_range_matches(self):
@@ -93,6 +107,16 @@ class BracketClass(unittest.TestCase):
         # A `]` first in the body belongs to the class; it never ends it early.
         r = inject_rules.glob_to_regex("x[]].ts")
         self.assertTrue(r.match("x].ts"))
+
+    def test_leading_caret_is_a_literal_not_a_negation(self):
+        # Only `!` negates. A leading `^` used to invert the class silently.
+        self.assertFalse(inject_rules.matches("a.ts", ["[^_]*.ts"]))
+        self.assertTrue(inject_rules.matches("_a.ts", ["[^_]*.ts"]))
+        self.assertTrue(inject_rules.matches("^a.ts", ["[^_]*.ts"]))
+
+    def test_bang_negation_still_negates_with_a_caret_in_the_body(self):
+        self.assertFalse(inject_rules.matches("^a.ts", ["[!^a]*.ts"]))
+        self.assertTrue(inject_rules.matches("b.ts", ["[!^a]*.ts"]))
 
 
 class FlowFormPaths(unittest.TestCase):

@@ -86,7 +86,10 @@ def expand_braces(pat):
             if end == -1 or '{' in pat[i + 1:end]:
                 return [pat]  # nested braces: literal, never garbage
             parts.append(None)
-            alternatives.append(pat[i + 1:end].split(','))
+            # Reuse the one nesting-aware splitter rather than a plain
+            # .split(','): a bracket class inside the group, as in
+            # `{a[x,y],b}.ts`, must not be torn at its internal comma.
+            alternatives.append(_split_top(pat[i + 1:end]))
             i = end + 1
         else:
             j = pat.find('{', i)
@@ -137,6 +140,11 @@ def glob_to_regex(pat):
                 if neg:
                     body = body[1:]
                 body = body.replace('\\', '\\\\').replace(']', '\\]')
+                # Only `!` negates. A body whose first character is a literal
+                # `^` must be escaped or the regex negates the class instead,
+                # inverting the match. fnmatch.translate does the same.
+                if body.startswith('^') and not neg:
+                    body = '\\' + body
                 out.append('[' + ('^' if neg else '') + body + ']')
                 i = end + 1
         else:
