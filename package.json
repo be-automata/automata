@@ -23,9 +23,9 @@
     "dotenv-cli": "^8.0.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.1.0",
-    "prettier": "^3.5.3",
-    "tsx": "^4.19.2",
-    "turbo": "^2.5.4"
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.13",
+    "turbo": "^2.10.12"
   },
   "pnpm": {
     "overrides": {
@@ -38,7 +38,7 @@
       "octokit": "^5.0.2",
       "react-dom": "19.1.2",
       "react": "19.1.2",
-      "tsx": "4.20.3",
+      "tsx": "4.23.13",
       "typescript": "5.8.3",
       "vite": "^6.3.5",
       "vitest": "3.1.4",
@@ -195,6 +195,6 @@
     ]
   },
   "dependencies": {
-    "@git-diff-view/react": "^0.0.35"
+    "@git-diff-view/react": "^0.1.7"
   }
 }

@@ -17,7 +17,7 @@
     "format-check": "prettier --check . --ignore-path ../../.prettierignore --config ../../.prettierrc"
   },
   "dependencies": {
-    "zod": "4.1.11"
+    "zod": "4.5.4"
   },
   "devDependencies": {
     "@terragon/tsconfig": "workspace:*",

@@ -30,7 +30,7 @@
   "devDependencies": {
     "@terragon/tsconfig": "workspace:*",
     "@types/node": "^22.15.29",
-    "tsx": "^4.20.3",
+    "tsx": "^4.23.13",
     "typescript": "^5.8.3"
   }
 }

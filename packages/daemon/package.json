@@ -27,18 +27,18 @@
   "dependencies": {
     "@terragon/agent": "workspace:*",
     "nanoid": "^5.1.5",
-    "strip-ansi": "^7.1.0",
-    "zod": "4.1.11"
+    "strip-ansi": "^7.2.0",
+    "zod": "4.5.4"
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "^0.52.0",
-    "@google/gemini-cli-core": "^0.16.0",
-    "@openai/codex-sdk": "^0.46.0",
+    "@anthropic-ai/sdk": "^0.123.0",
+    "@google/gemini-cli-core": "^0.58.0",
+    "@openai/codex-sdk": "^0.153.2",
     "@opencode-ai/sdk": "^0.15.16",
     "@types/node": "^22.10.2",
-    "esbuild": "^0.24.0",
-    "nodemon": "^3.1.10",
-    "tsx": "^4.19.2",
+    "esbuild": "^0.28.2",
+    "nodemon": "^3.1.14",
+    "tsx": "^4.23.13",
     "typescript": "^5.8.3",
     "vitest": "^3.1.4"
   }
