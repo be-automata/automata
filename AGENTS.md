@@ -361,8 +361,14 @@ provenance manifest is `.claude/harness.json` (source repo, pinned revision, sha
   files, no third-party service references), so their `harness.json` hashes are intentionally
   stale: on a `--reconfigure` run answer keep-mine for the rule, then re-apply the same edits to
   the regenerated codex block.
-- The hook and its tests carry local fixes over the plugin asset (quoted `paths:` globs,
-  out-of-tree paths, symlinks, fail-open exit); keep them when syncing from upstream.
+- The hook's matcher tracks the plugin asset (brace groups, bracket classes, flow-form
+  `paths:`, quoted globs — synced from 0.9.6), but its **scan is deliberately stricter than
+  upstream and must stay that way**: no symlink following, realpath dedupe, out-of-tree paths
+  ignored, the echoed path stripped of control characters, and a 64 KB cap on injected text.
+  Never take the upstream asset wholesale — it still uses a symlink-following recursive glob
+  and interpolates the raw path. Re-run `.claude/hooks/test_inject_rules.py` after any sync.
+- `.claude/settings.json` is likewise stricter than the plugin template, which denies only
+  `Read`/`Edit` on 10 patterns; ours denies `Read`/`Edit`/`Write` on 19. Do not "sync" it.
 - Repo-specific instructions belong in the hand-written sections of this file (above the
   managed block). `CLAUDE.md` imports this file via `@AGENTS.md`.
 - Audit the harness with the `harness-audit` skill; the report lands in `reports/harness_audit.md`.

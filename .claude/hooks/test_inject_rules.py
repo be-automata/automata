@@ -52,6 +52,120 @@ class ParsePaths(unittest.TestCase):
         self.assertEqual(inject_rules.parse_paths("description: x\n"), [])
 
 
+class BraceExpansion(unittest.TestCase):
+    def test_one_group_expands(self):
+        self.assertEqual(
+            sorted(inject_rules.expand_braces("src/**/*.{ts,tsx}")),
+            ["src/**/*.ts", "src/**/*.tsx"],
+        )
+
+    def test_two_groups_expand_as_product(self):
+        self.assertEqual(
+            sorted(inject_rules.expand_braces("{a,b}/x.{ts,js}")),
+            ["a/x.js", "a/x.ts", "b/x.js", "b/x.ts"],
+        )
+
+    def test_unbalanced_and_nested_stay_literal(self):
+        self.assertEqual(inject_rules.expand_braces("src/{ts,tsx"), ["src/{ts,tsx"])
+        self.assertEqual(inject_rules.expand_braces("{a,{b,c}}"), ["{a,{b,c}}"])
+
+    def test_matches_uses_expansion(self):
+        self.assertTrue(inject_rules.matches("apps/www/x.tsx", ["**/*.{ts,tsx}"]))
+        self.assertFalse(inject_rules.matches("apps/www/x.css", ["**/*.{ts,tsx}"]))
+
+    def test_bracket_class_inside_a_group_is_not_torn(self):
+        # The group body is split by the nesting-aware splitter, so the comma
+        # inside the bracket class is data, not an alternative separator.
+        self.assertEqual(
+            inject_rules.expand_braces("{a[x,y],b}.ts"),
+            ["a[x,y].ts", "b.ts"],
+        )
+        self.assertTrue(inject_rules.matches("ax.ts", ["{a[x,y],b}.ts"]))
+        self.assertTrue(inject_rules.matches("b.ts", ["{a[x,y],b}.ts"]))
+        self.assertFalse(inject_rules.matches("az.ts", ["{a[x,y],b}.ts"]))
+
+    def test_quoted_comma_inside_a_group_is_not_torn(self):
+        self.assertEqual(inject_rules.expand_braces('{"a,b",c}.ts'), ['"a,b".ts', "c.ts"])
+
+
+class BracketClass(unittest.TestCase):
+    def test_range_matches(self):
+        r = inject_rules.glob_to_regex("f[0-9].ts")
+        self.assertTrue(r.match("f3.ts"))
+        self.assertFalse(r.match("fx.ts"))
+
+    def test_negation_matches(self):
+        r = inject_rules.glob_to_regex("[!_]*.ts")
+        self.assertTrue(r.match("a.ts"))
+        self.assertFalse(r.match("_a.ts"))
+
+    def test_unterminated_bracket_is_literal(self):
+        r = inject_rules.glob_to_regex("a[b.ts")
+        self.assertTrue(r.match("a[b.ts"))
+
+    def test_class_body_cannot_break_out(self):
+        # A `]` first in the body belongs to the class; it never ends it early.
+        r = inject_rules.glob_to_regex("x[]].ts")
+        self.assertTrue(r.match("x].ts"))
+
+    def test_leading_caret_is_a_literal_not_a_negation(self):
+        # Only `!` negates. A leading `^` used to invert the class silently.
+        self.assertFalse(inject_rules.matches("a.ts", ["[^_]*.ts"]))
+        self.assertTrue(inject_rules.matches("_a.ts", ["[^_]*.ts"]))
+        self.assertTrue(inject_rules.matches("^a.ts", ["[^_]*.ts"]))
+
+    def test_bang_negation_still_negates_with_a_caret_in_the_body(self):
+        self.assertFalse(inject_rules.matches("^a.ts", ["[!^a]*.ts"]))
+        self.assertTrue(inject_rules.matches("b.ts", ["[!^a]*.ts"]))
+
+
+class FlowFormPaths(unittest.TestCase):
+    def test_inline_list_is_parsed(self):
+        fm = 'description: x\npaths: ["**/*.ts", \'**/*.tsx\']\n'
+        self.assertEqual(inject_rules.parse_paths(fm), ["**/*.ts", "**/*.tsx"])
+
+    def test_inline_list_keeps_brace_groups_whole(self):
+        fm = 'paths: ["src/**/*.{ts,tsx}", "docs/**"]\n'
+        self.assertEqual(inject_rules.parse_paths(fm), ["src/**/*.{ts,tsx}", "docs/**"])
+
+    def test_empty_inline_list_yields_nothing(self):
+        self.assertEqual(inject_rules.parse_paths("paths: []\n"), [])
+
+    def test_quoted_comma_is_not_a_separator(self):
+        # A literal comma inside a quoted glob, outside any {...} group, used to
+        # tear the item into fragments that kept a stray quote and matched nothing.
+        self.assertEqual(inject_rules.parse_paths('paths: ["a,b.ts"]\n'), ["a,b.ts"])
+        self.assertEqual(inject_rules.parse_paths("paths: ['a,b.ts']\n"), ["a,b.ts"])
+
+    def test_quoted_comma_alongside_a_brace_group(self):
+        fm = 'paths: ["a,b.ts", "src/**/*.{ts,tsx}"]\n'
+        self.assertEqual(inject_rules.parse_paths(fm), ["a,b.ts", "src/**/*.{ts,tsx}"])
+
+    def test_quoted_comma_pattern_still_matches(self):
+        self.assertTrue(inject_rules.matches("a,b.ts", inject_rules.parse_paths('paths: ["a,b.ts"]\n')))
+
+    def test_unterminated_quote_yields_one_item(self):
+        self.assertEqual(inject_rules.parse_paths('paths: ["a,b.ts]\n'), ['"a,b.ts'])
+
+    def test_comma_inside_a_bracket_class_is_not_a_separator(self):
+        # Unquoted flow-form item whose bracket class contains a comma.
+        self.assertEqual(inject_rules.parse_paths("paths: [a[x,y].ts]\n"), ["a[x,y].ts"])
+        self.assertTrue(inject_rules.matches("ax.ts", inject_rules.parse_paths("paths: [a[x,y].ts]\n")))
+
+    def test_unterminated_bracket_yields_one_item(self):
+        self.assertEqual(inject_rules.parse_paths("paths: [a[x,y.ts]\n"), ["a[x,y.ts"])
+
+    def test_every_nesting_context_in_one_list(self):
+        fm = 'paths: ["a,b.ts", src/**/*.{ts,tsx}, c[x,y].ts, plain.ts]\n'
+        self.assertEqual(
+            inject_rules.parse_paths(fm),
+            ["a,b.ts", "src/**/*.{ts,tsx}", "c[x,y].ts", "plain.ts"],
+        )
+
+    def test_bracket_inside_a_brace_group(self):
+        self.assertEqual(inject_rules.parse_paths("paths: [{a[x,y],b}.ts]\n"), ["{a[x,y],b}.ts"])
+
+
 class EndToEnd(unittest.TestCase):
     def test_new_matching_ts_file_injects_rule(self):
         code, out, err = run_hook({"tool_input": {"file_path": "packages/utils/src/zz-new-file.ts"}})
@@ -115,6 +229,35 @@ class EndToEnd(unittest.TestCase):
         # three 40 KB rules plus the real one would be ~130 KB; the cap stops the walk after it is crossed
         self.assertLess(len(ctx), inject_rules.MAX_CONTEXT_BYTES + 41 * 1024)
         self.assertEqual(ctx.count("xxxx" * 10), 2 * (40 * 1024 // 40))
+
+    def test_closed_reader_still_exits_zero(self):
+        # The load-bearing invariant: a non-zero exit from a PreToolUse hook DENIES
+        # the Write. print() buffers, so a failed flush leaves bytes queued and the
+        # interpreter's shutdown flush would exit 120 unless fd 1 is redirected.
+        # The parent holds the only read end and closes it before the child writes,
+        # so the child's write is guaranteed to hit EPIPE.
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": ROOT, "PYTHONDONTWRITEBYTECODE": "1"}
+        payload = json.dumps({"tool_input": {"file_path": "packages/utils/src/zz-pipe.ts"}})
+        r, w = os.pipe()
+        proc = subprocess.Popen(
+            [sys.executable, HOOK], stdin=subprocess.PIPE, stdout=w,
+            stderr=subprocess.PIPE, env=env,
+        )
+        os.close(w)
+        os.close(r)
+        _, err = proc.communicate(payload.encode())
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(err.decode(), "")
+
+    def test_closed_stdout_fd_still_exits_zero(self):
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": ROOT, "PYTHONDONTWRITEBYTECODE": "1"}
+        payload = json.dumps({"tool_input": {"file_path": "packages/utils/src/zz-fd.ts"}})
+        proc = subprocess.run(
+            "exec %s %s >&-" % (sys.executable, HOOK), shell=True,
+            input=payload, capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stderr, "")
 
     def test_malformed_stdin_is_silent(self):
         env = {**os.environ, "CLAUDE_PROJECT_DIR": ROOT, "PYTHONDONTWRITEBYTECODE": "1"}
