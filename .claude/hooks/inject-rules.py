@@ -262,7 +262,16 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-        sys.stdout.flush()  # a closed reader at shutdown must not turn into exit 120
+        sys.stdout.flush()
     except BaseException:
-        pass  # advisory hook: never block a Write because of our own failure
+        # Swallowing the error is not enough. print() buffers, so when the flush
+        # above fails the bytes are still queued; the interpreter flushes again
+        # at shutdown, that raises too, and CPython then exits 120 no matter what
+        # sys.exit() was given. A non-zero exit from a PreToolUse hook DENIES the
+        # Write, which is the exact outcome this block exists to prevent. Point
+        # fd 1 at /dev/null so the shutdown flush has somewhere to go.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except BaseException:
+            pass
     sys.exit(0)

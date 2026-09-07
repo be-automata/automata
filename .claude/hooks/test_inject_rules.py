@@ -206,6 +206,35 @@ class EndToEnd(unittest.TestCase):
         self.assertLess(len(ctx), inject_rules.MAX_CONTEXT_BYTES + 41 * 1024)
         self.assertEqual(ctx.count("xxxx" * 10), 2 * (40 * 1024 // 40))
 
+    def test_closed_reader_still_exits_zero(self):
+        # The load-bearing invariant: a non-zero exit from a PreToolUse hook DENIES
+        # the Write. print() buffers, so a failed flush leaves bytes queued and the
+        # interpreter's shutdown flush would exit 120 unless fd 1 is redirected.
+        # The parent holds the only read end and closes it before the child writes,
+        # so the child's write is guaranteed to hit EPIPE.
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": ROOT, "PYTHONDONTWRITEBYTECODE": "1"}
+        payload = json.dumps({"tool_input": {"file_path": "packages/utils/src/zz-pipe.ts"}})
+        r, w = os.pipe()
+        proc = subprocess.Popen(
+            [sys.executable, HOOK], stdin=subprocess.PIPE, stdout=w,
+            stderr=subprocess.PIPE, env=env,
+        )
+        os.close(w)
+        os.close(r)
+        _, err = proc.communicate(payload.encode())
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(err.decode(), "")
+
+    def test_closed_stdout_fd_still_exits_zero(self):
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": ROOT, "PYTHONDONTWRITEBYTECODE": "1"}
+        payload = json.dumps({"tool_input": {"file_path": "packages/utils/src/zz-fd.ts"}})
+        proc = subprocess.run(
+            "exec %s %s >&-" % (sys.executable, HOOK), shell=True,
+            input=payload, capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stderr, "")
+
     def test_malformed_stdin_is_silent(self):
         env = {**os.environ, "CLAUDE_PROJECT_DIR": ROOT, "PYTHONDONTWRITEBYTECODE": "1"}
         proc = subprocess.run([sys.executable, HOOK], input="not json", capture_output=True, text=True, env=env)
