@@ -341,8 +341,20 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
     const aEnd = epoch(a, "end");
     const bStart = epoch(b, "start");
     const bEnd = epoch(b, "end");
-    expect(aEnd - aStart).toBeGreaterThanOrEqual(300);
-    expect(bEnd - bStart).toBeGreaterThanOrEqual(300);
+    // The fixture holds with `setTimeout(holdMs)` between two Date.now()
+    // readings (__fixtures__/box-lock-holder.ts:48-50). Neither end of that is
+    // exact: a timer may fire a hair early relative to Date.now(), and each
+    // reading truncates to whole milliseconds, so a correct 300ms hold can
+    // measure 299. CI hit exactly that — "expected 299 to be greater than or
+    // equal to 300" — on a PR that touched no worker code.
+    //
+    // This pair of bounds only proves each holder did not exit immediately, so
+    // it takes the slack. The invariants the lock actually guarantees are
+    // disjointness and ordering, and those are integer comparisons between
+    // readings rather than durations, so they stay exact below.
+    const HOLD_SLACK_MS = 5;
+    expect(aEnd - aStart).toBeGreaterThanOrEqual(300 - HOLD_SLACK_MS);
+    expect(bEnd - bStart).toBeGreaterThanOrEqual(300 - HOLD_SLACK_MS);
     const disjoint = aEnd <= bStart || bEnd <= aStart;
     expect(disjoint, `a=[${aStart},${aEnd}] b=[${bStart},${bEnd}]`).toBe(true);
     // A was holding when B launched, so B's interval follows A's.
