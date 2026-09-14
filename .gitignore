@@ -60,6 +60,12 @@ apps/www/.claude-flow
 .hive-mind/
 claude-flow.config.json
 claude-flow.db
+# agentdb vector store, its lock and its id map (agentdb.rvf, .rvf.lock,
+# .rvf.idmap.json). Same self-bootstrapping shape as the entries above.
+# Scoped to the .rvf stem on purpose: a bare `agentdb.*` is unanchored, so it
+# also swallows source files like packages/shared/src/agentdb.ts at any depth,
+# and the omission only ever surfaces as a module-resolution error in CI.
+agentdb.rvf*
 hive-mind-prompt-*.txt
 .claude/checkpoints/
 .claude/helpers/
