@@ -73,8 +73,8 @@ claude-code.js
 # All of this is already in .gitignore, but prettier does NOT read .gitignore —
 # it reads this file only. Without these entries `pnpm turbo format-check` fails
 # locally for anyone who has run the harness, while CI's clean checkout stays
-# green, which makes the local gate useless exactly when you want it: before
-# pushing. That gap let a prettier-only failure reach CI in #201.
+# green. The local gate is then red for reasons the developer did not cause,
+# exactly when it is most useful: before pushing.
 #
 # Depth matters. These are written at whatever directory the tool runs from
 # (ruvnet/ruflo#695); this checkout carries them at the repo root, under
