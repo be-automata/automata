@@ -472,7 +472,18 @@ describe.skipIf(!itEnabled)(
       // executes at a time on the box no matter what the engine admits (§5).
       const blocker = await dispatch("agent-run-strict", {
         label: "drill-blocker",
-        sleepMs: 4000,
+        // The blocker IS the drill's premise: every pending run must still be
+        // gated behind it when the drain runs. It used to hold for 4s while
+        // the "all pending runs listed" poll below was free to take up to
+        // pollUntil's 30s default — so on a slow OLAP the blocker finished
+        // NATURALLY before the drain, the gate vanished, and a pending run
+        // could be admitted and run a full body before its cancel landed.
+        // That is the flake: the engine still reports CANCELLED, but the
+        // worker never observed it, so `ex.cancelled` stayed false.
+        // Raising the PENDING bodies (200ms -> 3000ms) hardened the wrong
+        // side and left this live. The hold costs no wall clock: the drain
+        // cancels the blocker, so the test never waits it out.
+        sleepMs: 20_000,
         prKey: uid("org-z/repo/9"),
         orgId: "org-z",
         boxLock: true,
@@ -500,11 +511,22 @@ describe.skipIf(!itEnabled)(
       // The OLAP list can lag a just-triggered run: wait until every pending
       // run is listed as QUEUED or RUNNING (engine-admitted but blocked on the
       // box lock) before draining.
+      // Budget deliberately well under the blocker's hold. pollUntil's 30s
+      // default outlived the gate; if OLAP really is this far behind, fail
+      // here with a clear message rather than drain an ungated engine and
+      // trip a downstream assertion that reads like a product bug.
       await pollUntil(
         "all pending runs listed",
         () => listIds([Status.QUEUED, Status.RUNNING]),
         (ids) => pending.every((r) => ids.includes(r.id)),
+        8_000,
       );
+      // The premise, asserted rather than assumed: the blocker must still be
+      // live, or nothing was gated and the rest of this test proves nothing.
+      expect(
+        await listIds([Status.QUEUED, Status.RUNNING]),
+        "drill premise broken: the blocker ended before the drain, so the pending runs were never gated",
+      ).toContain(blocker.id);
       const cancel = async (ids: string[]) => {
         if (ids.length === 0) return;
         const res = await fetch(
@@ -534,7 +556,16 @@ describe.skipIf(!itEnabled)(
       // (observed; see the runbook). Never a full execution.
       for (const r of pending) {
         const ex = executions.get(r.label);
-        expect(ex === undefined || ex.cancelled).toBe(true);
+        // Carry the execution into the message. The bare `expect(...).toBe(true)`
+        // here reported only "expected false to be true", which said nothing
+        // about which run ran or for how long, and cost a full investigation.
+        expect(
+          ex === undefined || ex.cancelled,
+          ex === undefined
+            ? `${r.label}: unreachable`
+            : `${r.label} ran a full body without observing its cancel: ` +
+              `ran ${(ex.endedAt ?? Date.now()) - ex.startedAt}ms of a 3000ms body`,
+        ).toBe(true);
       }
       const remaining = await pollUntil(
         "zero live runs after the drain",
