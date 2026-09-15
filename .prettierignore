@@ -67,3 +67,40 @@ claude-code.js
 
 # handlebars files
 *.hbs
+
+# AI-harness per-checkout runtime state (ruflo / claude-flow / gstack).
+#
+# All of this is already in .gitignore, but prettier does NOT read .gitignore —
+# it reads this file only. Without these entries `pnpm turbo format-check` fails
+# locally for anyone who has run the harness, while CI's clean checkout stays
+# green, which makes the local gate useless exactly when you want it: before
+# pushing. That gap let a prettier-only failure reach CI in #201.
+#
+# Depth matters. These are written at whatever directory the tool runs from
+# (ruvnet/ruflo#695); this checkout carries them at the repo root, under
+# .claude/hooks/ and under packages/worker/. Bare directory names are already
+# unanchored, but any pattern containing a slash is anchored to this file's
+# directory, so those need an explicit `**/`.
+.claude-flow/
+.swarm/
+.hive-mind/
+.gstack/
+claude-flow.config.json
+claude-flow.db
+ruvector.db
+agentdb.rvf*
+hive-mind-prompt-*.txt
+**/.claude/checkpoints/
+**/.claude/helpers/
+**/.claude/security-scans/
+**/.claude/proven-config.json
+**/.claude/.proven-config-version
+**/.claude/.harness/
+**/.claude/settings.json.bak
+**/.claude/*.local.md
+
+# Audit output written by the security-audit / harness-audit skills.
+reports/security_audit.*
+reports/harness_audit.*
+reports/.artifacts/
+reports/.history/
