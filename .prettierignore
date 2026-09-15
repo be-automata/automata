@@ -6,6 +6,7 @@ node_modules/
 dist/
 build/
 .next/
+.open-next/
 .vercel/
 .source/
 
@@ -98,6 +99,8 @@ hive-mind-prompt-*.txt
 **/.claude/.harness/
 **/.claude/settings.json.bak
 **/.claude/*.local.md
+**/.claude/settings.local.json
+**/.claude/tmp/
 
 # Audit output written by the security-audit / harness-audit skills.
 reports/security_audit.*
