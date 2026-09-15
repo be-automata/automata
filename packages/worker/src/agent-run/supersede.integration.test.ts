@@ -564,7 +564,7 @@ describe.skipIf(!itEnabled)(
           ex === undefined
             ? `${r.label}: unreachable`
             : `${r.label} ran a full body without observing its cancel: ` +
-              `ran ${(ex.endedAt ?? Date.now()) - ex.startedAt}ms of a 3000ms body`,
+                `ran ${(ex.endedAt ?? Date.now()) - ex.startedAt}ms of a 3000ms body`,
         ).toBe(true);
       }
       const remaining = await pollUntil(
