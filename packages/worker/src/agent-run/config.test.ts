@@ -345,6 +345,33 @@ describe("#204: memory-ceiling knobs are validated at boot", () => {
     expect(parseMemoryMax("256M")).toBe(256 * 1024 ** 2);
   });
 
+  it("a stray WORKER_RUN_TASKS_MAX does NOT stop a box without the ceiling", () => {
+    // `parseTasksMax` throws on a set-but-invalid value. Running it
+    // unconditionally meant a box that never enabled the ceiling could be
+    // stopped from booting — and from running — by a leftover env var it does
+    // not use. That breaks the default-off promise this feature makes twice.
+    const base = {
+      WORKER_RUN_NAMESPACE_ROOT: "/tmp/x",
+      WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+      WORKER_NODE_BIN: "/usr/bin/node",
+      WORKER_RUN_TASKS_MAX: "not-a-number",
+    };
+    // Ceiling OFF: the value is unused, so it is not this feature's business.
+    const off = loadWorkerConfig(base);
+    expect(off.memoryMaxBytes).toBe(0);
+    expect(off.tasksMax).toBe(0);
+
+    // Ceiling ON: now it IS used, so a typo must still be refused at boot.
+    expect(() =>
+      loadWorkerConfig({
+        ...base,
+        WORKER_RUN_MEMORY_MAX: "1G",
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_WORKDIR_ROOT: "/tmp/x",
+      }),
+    ).toThrow(/WORKER_RUN_TASKS_MAX/);
+  });
+
   it("defaults tasksMax generously — it is a runaway guard, not a budget", () => {
     expect(parseTasksMax(undefined)).toBe(4096);
     expect(parseTasksMax("512")).toBe(512);

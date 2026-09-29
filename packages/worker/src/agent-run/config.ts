@@ -281,7 +281,14 @@ export function loadWorkerConfig(
   // capacity model needs (global cap, worker slots, per-run ceiling, swap) starts
   // with this one not being a typo.
   const memoryMaxBytes = parseMemoryMax(env.WORKER_RUN_MEMORY_MAX);
-  const tasksMax = parseTasksMax(env.WORKER_RUN_TASKS_MAX);
+  // ONLY VALIDATED WHEN THE CEILING IS ON. `parseTasksMax` throws on a set-but-
+  // invalid value, and running it unconditionally meant a box that never enabled
+  // the ceiling could be stopped from booting by a stray `WORKER_RUN_TASKS_MAX` —
+  // breaking the default-off promise this feature makes twice over. With the
+  // ceiling off the value is unused, so it is not this feature's business to
+  // reject it.
+  const tasksMax =
+    memoryMaxBytes > 0 ? parseTasksMax(env.WORKER_RUN_TASKS_MAX) : 0;
 
   const agentUser = env.WORKER_AGENT_USER?.trim() || "";
   if (agentUser) {

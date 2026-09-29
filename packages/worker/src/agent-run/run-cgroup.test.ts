@@ -424,7 +424,12 @@ describe("killAndRemoveRunCgroup", () => {
       log: (m) => logs.push(m),
     });
     expect(attempts).toBe(3);
-    expect(slept).toEqual([50, 50]);
+    // 20ms, not 50: every one of these milliseconds blocks the worker's event
+    // loop, and the boot sweep collects whatever the shorter budget leaves
+    // behind. A rarer leak was not worth a longer stall.
+    expect(slept).toEqual([20, 20]);
+    // And the whole budget stays inside 100ms: 5 attempts, 4 sleeps.
+    expect(slept.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(100);
     // A retry that eventually succeeds is not worth an alarm.
     expect(logs.filter((l) => l.includes("rmdir failed"))).toEqual([]);
   });

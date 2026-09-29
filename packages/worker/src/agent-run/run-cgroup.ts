@@ -253,12 +253,12 @@ const defaultFs: CgroupFs = {
   write: (file, value) => fs.writeFileSync(file, value),
   read: (file) => fs.readFileSync(file, "utf8"),
   rmdir: (dir) => fs.rmdirSync(dir),
-  // SYNCHRONOUS, because `teardown()` is synchronous by contract — but not a spin.
-  // The previous `while (Date.now() < until)` pinned a core AND blocked the event
-  // loop for up to half a second per teardown whenever rmdir kept failing EBUSY,
-  // stalling every other in-flight poll and the engine heartbeat with it.
-  // `Atomics.wait` on a private buffer blocks this thread and nothing else: no
-  // CPU burnt, no callers woken, and teardown stays synchronous.
+  // SYNCHRONOUS, AND IT DOES BLOCK THE EVENT LOOP. `teardown()` is synchronous by
+  // contract, it runs on the worker's main thread, and `Atomics.wait` parks that
+  // thread — so in-flight polls and the engine heartbeat wait too. What it fixes
+  // relative to the previous `while (Date.now() < until)` is only the CPU burn,
+  // not the stall. An earlier version of this comment claimed otherwise; it was
+  // wrong, and the retry budget below is what keeps the stall small instead.
   sleep: (ms) => {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   },
@@ -514,15 +514,21 @@ export function killAndRemoveRunCgroup(opts: {
   // `cgroup.kill` returns as soon as the signals are queued; the kernel still has
   // to reap them, and `rmdir` fails EBUSY while any member remains. Observed on
   // the first production run — the kill worked, the rmdir lost the race, and the
-  // directory stayed behind. A few short retries turn a guaranteed leak into a
-  // rare one, without blocking teardown on a process that refuses to die.
+  // directory stayed behind.
+  //
+  // BUDGET: 5 x 20ms = 100ms worst case, down from 10 x 50ms = 500ms. Every one
+  // of those milliseconds blocks the worker's event loop (see `sleep` above), so
+  // the budget is the stall. It can be this small because the leak is no longer
+  // permanent: `prepareDelegatedRoot` sweeps stale `run-*` dirs at the next boot.
+  // Trading a rarer leak for a longer stall was the wrong way round — the sweep
+  // collects the leak, nothing collects the stall.
   let removed = false;
-  for (let attempt = 0; attempt < 10 && !removed; attempt++) {
+  for (let attempt = 0; attempt < 5 && !removed; attempt++) {
     try {
       io.rmdir(opts.cgroupDir);
       removed = true;
     } catch {
-      io.sleep?.(50);
+      io.sleep?.(20);
     }
   }
   if (removed) {
