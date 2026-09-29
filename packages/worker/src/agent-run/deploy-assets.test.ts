@@ -473,3 +473,76 @@ describe("#192: the unit's sandbox must not fence out the launcher's own writes"
     expect(treeInstall[0]).not.toMatch(/-o root\b/);
   });
 });
+
+describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)", () => {
+  const linux = (f: string) =>
+    read(path.join(workerRoot, "deploy", "linux", f));
+
+  it("the ruleset owns ONE table and never flushes the kernel's", () => {
+    // Ubuntu's stock /etc/nftables.conf opens with `flush ruleset`, and Docker
+    // keeps 34 chains in the kernel ruleset that it does NOT rebuild on demand.
+    // A global flush here takes container networking — and on this box that is
+    // the Hatchet engine and its Postgres — down with it.
+    const conf = linux("egress-nft.conf");
+    expect(conf).not.toMatch(/^\s*flush ruleset/m);
+    expect(conf).toMatch(/^table inet automata_egress$/m);
+    expect(conf).toMatch(/^delete table inet automata_egress$/m);
+  });
+
+  it("fences tcp AND udp, so QUIC is not a hole", () => {
+    // udp/443 is HTTP-3. A tcp-only rule leaves an https path that never meets
+    // the cooperative proxy.
+    const conf = linux("egress-nft.conf");
+    expect(conf).toMatch(/meta skuid __AGENT_UID__ tcp dport \{ 80, 443 \}/);
+    expect(conf).toMatch(/meta skuid __AGENT_UID__ udp dport \{ 80, 443 \}/);
+  });
+
+  it("accepts loopback and never sets a drop policy on output", () => {
+    // The per-run proxy, both brokers and the engine are all on 127.0.0.1. A
+    // drop policy on the output hook fences the whole box, sshd included.
+    const conf = linux("egress-nft.conf");
+    expect(conf).toMatch(/oif "lo" accept/);
+    expect(conf).toMatch(/policy accept;/);
+    expect(conf).not.toMatch(/policy drop;/);
+    // Loopback must be accepted BEFORE the skuid rejects.
+    expect(conf.indexOf('oif "lo" accept')).toBeLessThan(
+      conf.indexOf("meta skuid"),
+    );
+  });
+
+  it("the preflight refuses uid 0 and the worker's own uid before loading", () => {
+    // Fencing either kills the control-plane poll, the git broker's upstream
+    // fetch and the credential pull — every run on the box — and both are one
+    // typo from the agent uid.
+    const pre = linux("nft-preflight.sh");
+    expect(pre).toMatch(/refusing to fence uid 0/);
+    expect(pre).toMatch(/refusing to fence the worker's own uid/);
+    expect(pre).toMatch(/__AGENT_UID__.*unrendered|unrendered/);
+    // Parse-check must precede the load.
+    expect(pre.indexOf("nft -c -f")).toBeLessThan(pre.indexOf("nft -f"));
+  });
+
+  it("the sudoers rule drops to the role account, never root or ALL", () => {
+    const sudoers = linux("sudoers.d-automata");
+    const rules = sudoers
+      .split("\n")
+      .filter((l) => !l.startsWith("#") && l.includes("NOPASSWD"));
+    expect(rules.length).toBe(2);
+    for (const rule of rules) {
+      expect(rule, rule).toContain("(AGENT)");
+      expect(rule, rule).not.toContain("(root)");
+      expect(rule, rule).not.toContain("(ALL)");
+    }
+    expect(sudoers).toMatch(/Runas_Alias AGENT = __AGENT_USER__/);
+    // SETENV on the daemon rule, or `sudo -E` is refused and every spawn dies.
+    expect(sudoers).toMatch(/NOPASSWD:\s*SETENV:\s*AUTOMATA_DAEMON/);
+  });
+
+  it("uses the usr-merged command paths Linux actually resolves", () => {
+    // /bin is a symlink to /usr/bin on Ubuntu, and /usr/bin/kill is procps'
+    // binary — `command -v kill` reports the shell builtin and misleads.
+    const sudoers = linux("sudoers.d-automata");
+    expect(sudoers).toMatch(/AUTOMATA_DAEMON = \/usr\/bin\/sh/);
+    expect(sudoers).toMatch(/AUTOMATA_KILL\s+= \/usr\/bin\/kill/);
+  });
+});
