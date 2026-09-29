@@ -265,6 +265,18 @@ export function isInWorkerCgroupScope(
     .find((l) => l.startsWith("0::"));
   const rel = line?.slice("0::".length);
   if (!rel) return false;
+  // A ROOT SCOPE MATCHES EVERYTHING, and getting this wrong disables the reaper
+  // in silence. Under a private cgroup namespace (`cgroupns=private`)
+  // /proc/self/cgroup reads `0::/` or `0::/supervisor`, so the scope resolves to
+  // "/" — and `startsWith("//")` matches nothing, so every process looks foreign
+  // and nothing is ever reaped. The only trace would be an out-of-scope log line.
+  //
+  // Semantically "/" is also the right answer to match on: in that namespace the
+  // visible cgroup tree IS the worker's own. On a host where the worker genuinely
+  // sits in the root cgroup this degrades to the old uid-only behaviour, which is
+  // why `reapAgentUidEscapees` says so out loud rather than leaving the operator
+  // to believe the scoping is protecting them.
+  if (workerScope === "/") return true;
   return rel === workerScope || rel.startsWith(`${workerScope}/`);
 }
 
@@ -448,6 +460,18 @@ export async function reapAgentUidEscapees(
     const inScope = workerScope
       ? (pid: number) => inWorkerScope(pid, workerScope)
       : undefined;
+    if (workerScope === "/") {
+      // Not a failure, but not the protection the scope is meant to give either:
+      // everything visible matches, so this is uid-only matching wearing a scope.
+      log(
+        `box.escapees_scope_degraded ${JSON.stringify({
+          ...base,
+          scope: workerScope,
+          reason:
+            "worker is at the cgroup root (private namespace or unscoped host) — uid alone decides",
+        })}`,
+      );
+    }
     const selected = selectAgentRows(rows, uid, selfPid, inScope);
     if (selected.foreign.length > 0) {
       // Loud, because this is the line that would have caught #210 on day one:

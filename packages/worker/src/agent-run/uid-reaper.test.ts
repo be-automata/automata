@@ -229,6 +229,22 @@ describe("cgroup scoping (#210 — the uid is not ours alone)", () => {
     ).toBe(false);
   });
 
+  it("a private cgroup namespace resolves to the ROOT scope, which matches all", () => {
+    // `cgroupns=private` makes /proc/self/cgroup read `0::/` or `0::/supervisor`,
+    // and dirname('/supervisor') is '/'. Before this was handled, the prefix
+    // became '//', nothing matched, every process looked foreign and the reaper
+    // silently reaped nothing — the exact silent downgrade it exists to prevent.
+    expect(readSelfCgroupScope(() => "0::/\n")).toBe("/");
+    expect(readSelfCgroupScope(() => "0::/supervisor\n")).toBe("/");
+
+    const at = (p: string) => () => `0::${p}\n`;
+    expect(isInWorkerCgroupScope(1, "/", at("/"))).toBe(true);
+    expect(isInWorkerCgroupScope(1, "/", at("/run-x"))).toBe(true);
+    expect(isInWorkerCgroupScope(1, "/", at("/system.slice/anything"))).toBe(
+      true,
+    );
+  });
+
   it("an unreadable /proc/<pid>/cgroup is NOT ours", () => {
     // A process we cannot place is one we cannot justify SIGKILLing. Missing an
     // escapee costs a rescan; a false positive cost the engine's database.
@@ -313,6 +329,36 @@ describe("reapAgentUidEscapees", () => {
     // And it says out loud what it spared, rather than dropping it silently.
     expect(lines.join("\n")).toMatch(/box\.escapees_out_of_scope/);
     expect(lines.join("\n")).toMatch(/"spared":1/);
+  });
+
+  it("a root scope reaps normally AND says the scoping is degraded", async () => {
+    // Matching everything is right in a private namespace, and is uid-only
+    // matching on an unscoped host. Either way the operator is told, rather than
+    // left believing a scope is protecting them.
+    const rows = [{ pid: 4242, pgid: 4242, uid: 999, comm: "node" }];
+    let killed = false;
+    const lines: string[] = [];
+    const result = await reapAgentUidEscapees({
+      agentUser: AGENT,
+      phase: "admission",
+      log: (l) => lines.push(l),
+      listProcesses: async () => (killed ? [] : rows),
+      resolveUid: async () => 999,
+      spawnKill: async () => {
+        killed = true;
+      },
+      selfPid: 1,
+      settleMs: 0,
+      residualBoundMs: 500,
+      cgroupScope: () => "/",
+      inWorkerScope: (pid, scope) =>
+        isInWorkerCgroupScope(pid, scope, () => "0::/run-x\n"),
+    });
+    // Reaped, not silently spared — this is the regression the finding named.
+    expect(result.killed).toBe(1);
+    expect(result.residual).toBe(0);
+    expect(lines.join("\n")).toMatch(/box\.escapees_scope_degraded/);
+    expect(lines.join("\n")).not.toMatch(/out_of_scope/);
   });
 
   it("no cgroup v2 ⇒ the reaper behaves exactly as it did before", async () => {
