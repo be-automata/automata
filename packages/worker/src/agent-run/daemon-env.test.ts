@@ -479,3 +479,49 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
     expect(env.GIT_CONFIG_KEY_0).toBe("http.https://github.com/.extraheader");
   });
 });
+
+describe("#108: git must not refuse the agent's own checkout", () => {
+  const base = {
+    baseEnv: {} as NodeJS.ProcessEnv,
+    anthropicApiKey: "",
+    claudeBinDir: "/usr/local/bin",
+    installationToken: "ghs_x",
+    ghConfigDir: "/tmp/gh",
+    botLogin: "automata-ai-bot[bot]",
+    workdir: "/usr/local/automata/runs/thr-1",
+  };
+
+  function gitConfigOf(env: NodeJS.ProcessEnv): Record<string, string> {
+    const out: Record<string, string> = {};
+    const n = Number(env.GIT_CONFIG_COUNT ?? "0");
+    for (let i = 0; i < n; i++) {
+      const k = env[`GIT_CONFIG_KEY_${i}`];
+      const v = env[`GIT_CONFIG_VALUE_${i}`];
+      if (k !== undefined) out[k] = v ?? "";
+    }
+    return out;
+  }
+
+  it("marks THIS run's checkout safe for the agent uid", () => {
+    // The worker clones it, the agent runs in it, and git refuses a repository
+    // owned by someone else: "detected dubious ownership". Every git command
+    // then fails — including the `git diff origin/main...HEAD` a review agent
+    // opens with, so it reports that it cannot review instead of producing a
+    // verdict. Observed in production the first run that got that far.
+    const env = buildDaemonEnv({ ...base, agentUser: "automata-agent" });
+    expect(gitConfigOf(env)["safe.directory"]).toBe(base.workdir);
+  });
+
+  it("scopes it to the workdir and never uses the wildcard", () => {
+    // `*` would trust every repository on the box, including other runs' and
+    // the operator's own checkouts.
+    const env = buildDaemonEnv({ ...base, agentUser: "automata-agent" });
+    expect(gitConfigOf(env)["safe.directory"]).not.toBe("*");
+    expect(Object.values(gitConfigOf(env))).not.toContain("*");
+  });
+
+  it("adds nothing in default mode, where owner and runner are one uid", () => {
+    const env = buildDaemonEnv({ ...base, agentUser: "" });
+    expect(gitConfigOf(env)).not.toHaveProperty("safe.directory");
+  });
+});

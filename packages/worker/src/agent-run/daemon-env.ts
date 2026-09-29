@@ -192,6 +192,11 @@ export interface BuildDaemonEnvOpts {
    * Only consulted when `agentUser` is set.
    */
   runTmpDir?: string | null;
+  /**
+   * The run's checkout. Used only to mark it `safe.directory` for the agent uid,
+   * which git otherwise refuses to operate in.
+   */
+  workdir?: string | null;
 }
 
 export function buildDaemonEnv({
@@ -208,6 +213,7 @@ export function buildDaemonEnv({
   broker = null,
   agentUser = "",
   runTmpDir = null,
+  workdir = null,
 }: BuildDaemonEnvOpts): NodeJS.ProcessEnv {
   // 1. Whitelist: forward ONLY known-safe, non-secret ambient keys.
   const env: NodeJS.ProcessEnv = {};
@@ -347,6 +353,23 @@ export function buildDaemonEnv({
     ["credential.helper", ""], // reset inherited helpers (osxkeychain, gh, …)
     ["user.name", botLogin],
     ["user.email", botEmail],
+    // #108 agent-uid mode: the WORKER clones the checkout, the AGENT runs in it,
+    // and git refuses a repository owned by someone else —
+    //
+    //   fatal: detected dubious ownership in repository at '<workdir>'
+    //
+    // Every git command then fails, including the `git diff origin/main...HEAD`
+    // a review agent opens with, so the agent reports it cannot review rather
+    // than producing a verdict. Observed in production the first time a run got
+    // far enough to try.
+    //
+    // Scoped to THIS run's workdir, never `*`: the agent should be trusted with
+    // the checkout it was given and nothing else on the box. Harmless when
+    // agentUser is empty, where owner and runner are the same uid anyway — but
+    // still omitted there, so the default-mode env stays byte-for-byte.
+    ...(agentUser && workdir
+      ? ([["safe.directory", workdir]] as Array<[string, string]>)
+      : []),
   ];
   env.GIT_CONFIG_COUNT = String(gitConfig.length);
   gitConfig.forEach(([key, value], i) => {
