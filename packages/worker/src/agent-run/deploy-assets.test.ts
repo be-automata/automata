@@ -599,3 +599,25 @@ describe("packages/worker/deploy/linux — engine backup (#192)", () => {
     expect(timer).toMatch(/^OnCalendar=/m);
   });
 });
+
+describe("#204: the unit delegates a cgroup subtree, narrowly", () => {
+  const linux = (f: string) =>
+    read(path.join(workerRoot, "deploy", "linux", f));
+
+  it("delegates exactly the two controllers the ceiling uses", () => {
+    // `Delegate=yes` would hand the worker every controller for no gain. The
+    // narrow form is the whole reason this needs no privilege elsewhere.
+    const unit = linux("automata-worker.service");
+    expect(unit).toMatch(/^Delegate=memory pids$/m);
+    expect(unit).not.toMatch(/^Delegate=(yes|true)$/m);
+  });
+
+  it("records why a transient scope was not used", () => {
+    // Someone will propose `systemd-run --scope` again, because #193 specified
+    // it. The measurement that killed it belongs next to the line that replaced
+    // it, or the next person repeats the polkit discovery from scratch.
+    const unit = linux("automata-worker.service");
+    expect(unit).toMatch(/polkit/i);
+    expect(unit).toMatch(/systemd-run/);
+  });
+});

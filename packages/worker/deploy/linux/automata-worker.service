@@ -76,6 +76,29 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=automata-worker
 
+# ── #204: the per-run memory ceiling needs a delegated cgroup subtree ──────
+#
+# Delegation hands the worker write access to its OWN cgroup subtree, which is
+# what lets it create and cap a per-run cgroup with NO privilege. The alternative
+# #193 specified — `systemd-run --scope --uid=<agent>` — cannot work here: as this
+# unit's User= the scope is refused by polkit ("Interactive authentication
+# required"), and making it possible would need either a sudoers entry for
+# `systemd-run` (arbitrary root: sudoers(5) permits any arguments for a bare
+# command path, and `--uid=0` is one) or a polkit rule amounting to "start any
+# transient unit as any uid".
+#
+# NARROW, not `Delegate=yes`. Only the two controllers the ceiling uses. Widening
+# it hands the worker every other controller for no gain.
+#
+# The worker moves itself into a `supervisor/` leaf at boot before enabling the
+# controllers, because cgroup v2 refuses to enable them for the children of a
+# cgroup that still holds processes. Without that the enable fails EBUSY.
+#
+# Removing this line does not break the boot — the worker logs that the ceiling
+# is OFF and runs uncapped, which is the state before #204. That is deliberate
+# (the feature is opt-in) and is also why the log line says so loudly.
+Delegate=memory pids
+
 # ── Hardening that does NOT fight the agent-uid design ─────────────────────
 #
 # The worker legitimately spawns an agent under a DIFFERENT uid via sudo, so

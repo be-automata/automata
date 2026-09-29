@@ -4,6 +4,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import type { AceExec } from "./agent-uid-fs";
 import { buildDaemonEnv, type BrokerHandoff } from "./daemon-env";
@@ -14,6 +15,12 @@ import {
   runSocketPath,
   workerRunDir,
 } from "./run-namespace";
+import {
+  assessCgroupSupport,
+  createRunCgroup,
+  killAndRemoveRunCgroup,
+  readOomKillCount,
+} from "./run-cgroup";
 import { redactSecrets } from "./redact";
 import { buildKillInvocation, buildSpawnInvocation } from "./spawn-as-user";
 import { verifyGhAuth } from "./verify-gh-auth";
@@ -37,6 +44,16 @@ import type { AgentRunInput, PulledDaemonMessage } from "./types";
  * reclaim.ts) — NOT this class — reaps daemons orphaned by a worker-process death.
  * start() only cleans THIS run's own stale socket/pid (e.g. a same-threadId retry).
  */
+
+/**
+ * #204 log line. Goes to stderr like the rest of this module's diagnostics, and
+ * is deliberately noisy about a DECLINED ceiling: silence would make a
+ * misconfigured box indistinguishable from a protected one.
+ */
+function logCgroup(message: string): void {
+  console.error(`[agent-run] ${message}`);
+}
+
 export class DaemonProcess {
   private child: ChildProcess | null = null;
   /**
@@ -109,6 +126,22 @@ export class DaemonProcess {
       input.threadId,
     );
   }
+
+  /**
+   * #204: this run's cgroup, when the ceiling is on. Null in every other case —
+   * feature off, not Linux, agent-uid mode off, or the subtree not delegated.
+   */
+  private cgroupDir: string | null = null;
+
+  /**
+   * #204: the OOM count observed at teardown.
+   *
+   * Cached because teardown REMOVES the cgroup, and the caller classifies the
+   * exit afterwards — a live read at that point would find nothing and report 0,
+   * so the ceiling would never be reported as the cause. Without this the whole
+   * `resource-limit` classification is dead code.
+   */
+  private observedOomKills = 0;
 
   /**
    * Build the sanitized child env once (idempotent). Creates the isolated EMPTY gh
@@ -194,6 +227,14 @@ export class DaemonProcess {
 
     // #108: with agentUser empty this returns the command UNCHANGED and an empty
     // env — byte-for-byte today's spawn.
+    // #204: the per-run memory ceiling. Everything here is skipped unless the
+    // ceiling is configured AND agent-uid mode is on (without the uid drop there
+    // is no separate process to cap) AND the subtree is delegated. The support
+    // check reports a REASON when it declines, because an operator who meant to
+    // enable this and mistyped `Delegate=` should be told which precondition
+    // failed rather than silently getting no ceiling.
+    this.cgroupDir = this.prepareRunCgroup();
+
     const invocation = buildSpawnInvocation({
       agentUser: this.config.agentUser,
       file: this.config.nodeBin,
@@ -205,6 +246,9 @@ export class DaemonProcess {
         this.socketPath,
       ],
       pidFilePath: this.pidFilePath,
+      ...(this.cgroupDir
+        ? { cgroupProcsPath: path.join(this.cgroupDir, "cgroup.procs") }
+        : {}),
     });
 
     this.child = (this.deps.spawnFn ?? spawn)(
@@ -325,6 +369,31 @@ export class DaemonProcess {
    * ours) rather than issuing a kill that cannot land.
    */
   teardown(): void {
+    // #204: kill the run's cgroup FIRST, while it still exists.
+    //
+    // `cgroup.kill` is a single kernel-side write that reaches every member of
+    // this run and NO sibling — no pid races, no reliance on a recorded pgid, and
+    // nothing to get wrong in the degraded path below. When the ceiling is on it
+    // makes the pgid kill redundant rather than replacing it; both run, because
+    // the pgid path is what this method has always been verified on and #205 is
+    // where the uid-wide kill actually gets retired.
+    //
+    // Ordering matters twice over: the OOM counter lives inside the cgroup, so it
+    // must be read before the directory goes, and `rmdir` fails while members
+    // remain, so the kill must precede it.
+    if (this.cgroupDir) {
+      // Reads through oomKills(), which caches — the classification happens
+      // after this method has removed the cgroup.
+      const oom = this.oomKills();
+      if (oom > 0) {
+        logCgroup(
+          `run ${this.input.threadId} was OOM-killed ${oom} time(s) inside its cgroup (memory.max=${this.config.memoryMaxBytes})`,
+        );
+      }
+      killAndRemoveRunCgroup({ cgroupDir: this.cgroupDir, log: logCgroup });
+      this.cgroupDir = null;
+    }
+
     let pid = this.pgid;
     let degraded = false;
     // `child == null` ⇒ nothing was ever spawned, or teardown already ran.
@@ -432,6 +501,104 @@ export class DaemonProcess {
     } catch {
       // the daemon unlinks/rebinds the socket itself; this is belt-and-suspenders
     }
+  }
+
+  /**
+   * #204: create this run's capped cgroup, or return null with a logged reason.
+   *
+   * Returns null — never throws — for every "feature is off" case, because a box
+   * without the ceiling must behave exactly as it does today. It DOES log the
+   * reason when the ceiling was asked for and could not be applied: a silent
+   * absence is the failure mode #192's cloud-init taught, and an operator who
+   * mistyped `Delegate=` needs to see it.
+   */
+  private prepareRunCgroup(): string | null {
+    const { memoryMaxBytes, tasksMax, agentUser } = this.config;
+    if (memoryMaxBytes <= 0) {
+      return null;
+    }
+    if (!agentUser) {
+      // Without the uid drop the agent is this process's own child in this
+      // process's own cgroup; capping it would cap the worker.
+      logCgroup(
+        "run cgroup skipped: WORKER_RUN_MEMORY_MAX is set but WORKER_AGENT_USER is empty",
+      );
+      return null;
+    }
+    let procSelfCgroup: string;
+    try {
+      procSelfCgroup = fs.readFileSync("/proc/self/cgroup", "utf8");
+    } catch {
+      logCgroup("run cgroup skipped: /proc/self/cgroup is unreadable");
+      return null;
+    }
+    const support = assessCgroupSupport({ procSelfCgroup });
+    if (!support.supported) {
+      logCgroup(`run cgroup skipped: ${support.reason}`);
+      return null;
+    }
+    try {
+      const dir = createRunCgroup({
+        root: support.root,
+        threadId: this.input.threadId,
+        memoryMaxBytes,
+        tasksMax,
+        ...(this.agentIds() ?? {}),
+      });
+      logCgroup(
+        `run cgroup ${dir}: memory.max=${memoryMaxBytes} memory.swap.max=0 pids.max=${tasksMax}`,
+      );
+      return dir;
+    } catch (e) {
+      // A ceiling that cannot be applied must NOT silently become no ceiling.
+      // Failing the run here is loud and recoverable; running uncapped while the
+      // logs claim a limit is neither.
+      throw new Error(
+        `could not create this run's cgroup under ${support.root}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  /**
+   * uid/gid of the agent role account, or null when it cannot be resolved.
+   *
+   * Resolved with `id`, not `os.userInfo()` — that reports the CURRENT process's
+   * user, which is the worker, and chowning `cgroup.procs` to the worker would
+   * leave the wrapper unable to join its own cgroup.
+   */
+  private agentIds(): { agentUid: number; agentGid: number } | null {
+    try {
+      const uid = Number(
+        execFileSync("/usr/bin/id", ["-u", this.config.agentUser], {
+          encoding: "utf8",
+        }).trim(),
+      );
+      const gid = Number(
+        execFileSync("/usr/bin/id", ["-g", this.config.agentUser], {
+          encoding: "utf8",
+        }).trim(),
+      );
+      if (!Number.isInteger(uid) || !Number.isInteger(gid)) {
+        return null;
+      }
+      return { agentUid: uid, agentGid: gid };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * #204: did the kernel OOM-kill anything in this run's cgroup?
+   *
+   * Read BEFORE teardown removes the cgroup, and exposed so the caller can
+   * classify the exit. Zero whenever the ceiling was off.
+   */
+  oomKills(): number {
+    if (this.cgroupDir) {
+      this.observedOomKills = readOomKillCount({ cgroupDir: this.cgroupDir });
+    }
+    // After teardown the cgroup is gone; the value observed then is the answer.
+    return this.observedOomKills;
   }
 
   private async waitForSocket(timeoutMs = 15_000): Promise<void> {

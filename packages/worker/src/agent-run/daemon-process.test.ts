@@ -8,7 +8,7 @@ import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { DaemonProcess, writeDaemonMessage } from "./daemon-process";
 import { loadWorkerConfig } from "./config";
@@ -567,4 +567,85 @@ setInterval(() => {}, 1000);
     );
     return { root, scriptDir, workdir, input };
   }
+
+  /**
+   * #204: the ceiling's WIRING — which branch is taken and in what order. The
+   * kernel behaviour itself is drilled on the box, because a mocked cgroup
+   * cannot OOM anything.
+   */
+  describe("per-run memory ceiling (#204)", () => {
+    it("declines, with a reason, when the ceiling is set but agent-uid mode is off", async () => {
+      // Without the uid drop the agent is this process's own child in this
+      // process's own cgroup, so capping it would cap the WORKER. Declining is
+      // correct; declining SILENTLY is the failure #192's cloud-init taught.
+      const { root, workdir, input } = fixture();
+      const logs: string[] = [];
+      const spy = vi.spyOn(console, "error").mockImplementation((m) => {
+        logs.push(String(m));
+      });
+      try {
+        const config = loadWorkerConfig({
+          WORKER_RUN_NAMESPACE_ROOT: root,
+          WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+          WORKER_NODE_BIN: "/usr/bin/node",
+          WORKER_RUN_MEMORY_MAX: "1G",
+          // WORKER_AGENT_USER deliberately absent
+        });
+        expect(config.memoryMaxBytes).toBe(1024 ** 3);
+        const recorded: Recorded[] = [];
+        const socket = runSocketPath(
+          root,
+          getProcessWorkerId(),
+          input.threadId,
+        );
+        fs.mkdirSync(path.dirname(socket), { recursive: true });
+        const daemon = new DaemonProcess(
+          config,
+          input,
+          workdir,
+          null,
+          null,
+          null,
+          { spawnFn: fakeSpawn({ recorded }) },
+        );
+        daemons.push(daemon);
+        await daemon.start();
+
+        // The spawn is the plain default one — no sudo, no wrapper, so no
+        // cgroup join could have been requested. (`Recorded` keeps file+args;
+        // asserting the argv is the stronger check anyway.)
+        expect(recorded[0]?.file).toBe("/usr/bin/node");
+        expect(recorded[0]?.args?.join(" ")).not.toContain(
+          "AUTOMATA_CGROUP_PROCS",
+        );
+        expect(logs.join("\n")).toMatch(/WORKER_AGENT_USER is empty/);
+        expect(daemon.oomKills()).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("reports no OOM when the ceiling was never applied", () => {
+      // A run with no cgroup must never be classified resource-limit, whatever
+      // its exit code was.
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+      });
+      expect(config.memoryMaxBytes).toBe(0);
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        { spawnFn: fakeSpawn({ recorded: [] }) },
+      );
+      daemons.push(daemon);
+      expect(daemon.oomKills()).toBe(0);
+    });
+  });
 });

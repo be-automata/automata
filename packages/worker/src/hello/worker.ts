@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { hatchet } from "../hatchet-client";
@@ -18,6 +19,10 @@ import {
   claimRunNamespace,
   getProcessWorkerId,
 } from "../agent-run/run-namespace";
+import {
+  assessCgroupSupport,
+  prepareDelegatedRoot,
+} from "../agent-run/run-cgroup";
 import { workflows } from "../registry";
 
 const execFileAsync = promisify(execFile);
@@ -61,6 +66,46 @@ async function claimNamespaceAndReclaim(): Promise<void> {
  * engine over outbound gRPC for work. On a real customer box this is the process the
  * installer runs and keeps alive. Run locally with `pnpm --filter @terragon/worker worker`.
  */
+
+/**
+ * #204 boot step: vacate the delegated cgroup root and enable the controllers.
+ *
+ * Never throws. The ceiling is opt-in, and a box that has not opted in must boot
+ * exactly as it does today.
+ */
+function prepareCeilingSubtreeAtBoot(): void {
+  const cfg = loadWorkerConfig();
+  if (cfg.memoryMaxBytes <= 0) {
+    return;
+  }
+  let procSelfCgroup: string;
+  try {
+    procSelfCgroup = readFileSync("/proc/self/cgroup", "utf8");
+  } catch {
+    console.log(
+      "[worker-boot] memory ceiling requested but /proc/self/cgroup is unreadable — ceiling OFF",
+    );
+    return;
+  }
+  const support = assessCgroupSupport({ procSelfCgroup });
+  if (!support.supported) {
+    console.log(
+      `[worker-boot] memory ceiling requested but unavailable: ${support.reason} — ceiling OFF`,
+    );
+    return;
+  }
+  try {
+    prepareDelegatedRoot({ root: support.root, pid: process.pid });
+    console.log(
+      `[worker-boot] memory ceiling armed: ${support.root} (memory.max=${cfg.memoryMaxBytes} per run, pids.max=${cfg.tasksMax})`,
+    );
+  } catch (e) {
+    console.log(
+      `[worker-boot] memory ceiling requested but subtree preparation failed: ${e instanceof Error ? e.message : String(e)} — ceiling OFF`,
+    );
+  }
+}
+
 async function main() {
   // #5 fail-closed gate: refuse to boot against an auth-DISABLED engine (a
   // -dev/auth-off hatchet-lite embeds a public signing key → tenancy void). Runs
@@ -144,6 +189,19 @@ async function main() {
   // nothing else.
   const boxId = loadWorkerConfig().boxId;
   console.log(`[worker-boot] box id: ${boxId}`);
+
+  // #204: prepare the delegated cgroup subtree once, at boot, before any run.
+  //
+  // Two reasons it cannot be per-run. The worker must move ITSELF out of the
+  // delegated root (cgroup v2 refuses to enable controllers for the children of
+  // a cgroup that holds processes), and doing that repeatedly is pointless; and
+  // `cgroup.subtree_control` is a property of the root, not of a run.
+  //
+  // Best-effort by design: a box with no delegation, or not on Linux, keeps
+  // today's behaviour exactly. It logs whichever precondition failed, because an
+  // operator who meant to enable the ceiling and mistyped `Delegate=` should see
+  // that rather than quietly getting no ceiling.
+  prepareCeilingSubtreeAtBoot();
   const worker = await hatchet.worker(`automata-worker-${boxId}`, {
     workflows,
     // #125 C4 / #183: ONE slot per worker process and ONE unit per box:
