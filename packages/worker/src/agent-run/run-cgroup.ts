@@ -178,6 +178,8 @@ export interface CgroupFs {
   write: (file: string, value: string) => void;
   read: (file: string) => string;
   rmdir: (dir: string) => void;
+  /** Injectable so the retry loop below costs a test nothing. */
+  sleep?: (ms: number) => void;
 }
 
 const defaultFs: CgroupFs = {
@@ -185,6 +187,14 @@ const defaultFs: CgroupFs = {
   write: (file, value) => fs.writeFileSync(file, value),
   read: (file) => fs.readFileSync(file, "utf8"),
   rmdir: (dir) => fs.rmdirSync(dir),
+  // Busy-wait rather than async: teardown() is synchronous by contract, and 50ms
+  // at a time bounded to ten tries is half a second in the worst case.
+  sleep: (ms) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      /* spin */
+    }
+  },
 };
 
 /**
@@ -380,6 +390,23 @@ export function killAndRemoveRunCgroup(opts: {
     log(
       `cgroup.kill failed for ${opts.cgroupDir}: ${e instanceof Error ? e.message : String(e)}`,
     );
+  }
+  // `cgroup.kill` returns as soon as the signals are queued; the kernel still has
+  // to reap them, and `rmdir` fails EBUSY while any member remains. Observed on
+  // the first production run — the kill worked, the rmdir lost the race, and the
+  // directory stayed behind. A few short retries turn a guaranteed leak into a
+  // rare one, without blocking teardown on a process that refuses to die.
+  let removed = false;
+  for (let attempt = 0; attempt < 10 && !removed; attempt++) {
+    try {
+      io.rmdir(opts.cgroupDir);
+      removed = true;
+    } catch {
+      io.sleep?.(50);
+    }
+  }
+  if (removed) {
+    return;
   }
   try {
     io.rmdir(opts.cgroupDir);

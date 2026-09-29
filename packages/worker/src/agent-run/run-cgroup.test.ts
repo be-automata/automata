@@ -293,6 +293,56 @@ describe("killAndRemoveRunCgroup", () => {
     expect(f.removed).toEqual(["/cg/run-1"]);
   });
 
+  it("retries the rmdir, because cgroup.kill only QUEUES the signals", () => {
+    // Observed on the first production run: the kill worked and the rmdir lost
+    // the race with the kernel reaping, so the directory stayed behind and every
+    // run leaked one. Retrying turns a guaranteed leak into a rare one.
+    let attempts = 0;
+    const slept: number[] = [];
+    const flaky: CgroupFs = {
+      mkdir: () => {},
+      write: () => {},
+      read: () => "",
+      rmdir: () => {
+        attempts += 1;
+        if (attempts < 3) throw new Error("EBUSY");
+      },
+      sleep: (ms) => void slept.push(ms),
+    };
+    const logs: string[] = [];
+    killAndRemoveRunCgroup({
+      cgroupDir: "/cg/run-1",
+      fsi: flaky,
+      log: (m) => logs.push(m),
+    });
+    expect(attempts).toBe(3);
+    expect(slept).toEqual([50, 50]);
+    // A retry that eventually succeeds is not worth an alarm.
+    expect(logs.filter((l) => l.includes("rmdir failed"))).toEqual([]);
+  });
+
+  it("gives up after a bounded number of retries and says so", () => {
+    // A process that refuses to die must not hold teardown open.
+    const stuck: CgroupFs = {
+      mkdir: () => {},
+      write: () => {},
+      read: () => "",
+      rmdir: () => {
+        throw new Error("EBUSY");
+      },
+      sleep: () => {},
+    };
+    const logs: string[] = [];
+    expect(() =>
+      killAndRemoveRunCgroup({
+        cgroupDir: "/cg/run-1",
+        fsi: stuck,
+        log: (m) => logs.push(m),
+      }),
+    ).not.toThrow();
+    expect(logs.join("\n")).toMatch(/rmdir failed/);
+  });
+
   it("never throws — a teardown failure must not fail a finished run", () => {
     const logs: string[] = [];
     const throwing: CgroupFs = {
