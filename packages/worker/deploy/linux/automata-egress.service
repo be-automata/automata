@@ -1,0 +1,42 @@
+# Load the agent-uid egress backstop at boot (#192).
+#
+# WITHOUT THIS THE FENCE IS A ONE-SHOT. `nft -f` writes to the running kernel and
+# nothing more, so a fence loaded by hand is gone after the next reboot and the
+# agent uid has unrestricted egress again — with every log line still saying the
+# box is fenced. That is the silent-downgrade failure mode this deployment keeps
+# producing, so the fence gets a unit like everything else.
+#
+# DO NOT USE THE STOCK `nftables.service` FOR THIS. Ubuntu's /etc/nftables.conf
+# opens with `flush ruleset`, and Docker keeps its NAT and filter chains in the
+# kernel ruleset without re-creating them on demand. Enabling that unit wipes
+# container networking, which on this box is the Hatchet engine and its Postgres.
+# This unit loads ONE file that replaces ONE table.
+#
+# Install: render __AGENT_UID__ into /etc/automata/egress-nft.conf first —
+# nft-preflight.sh refuses uid 0, the worker's own uid, and an unrendered
+# placeholder, and parse-checks before loading.
+
+[Unit]
+Description=Automata agent-uid egress backstop (nftables)
+Documentation=file:///opt/automata-platform/packages/worker/deploy/linux/egress-nft.conf
+# Ordered after docker so its chains exist first. Not Requires=: the fence is
+# still correct on a box where docker failed, and refusing to fence because an
+# unrelated service is down would be backwards.
+After=network-pre.target docker.service
+Wants=network-pre.target
+# The worker must not accept work before the fence is up.
+Before=automata-worker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nft-preflight.sh /etc/automata/egress-nft.conf
+# Scoped teardown: drops OUR table and leaves Docker's chains untouched. Failing
+# open here is deliberate — the table may already be absent.
+ExecStop=/bin/sh -c 'nft delete table inet automata_egress 2>/dev/null || true'
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=automata-egress
+
+[Install]
+WantedBy=multi-user.target

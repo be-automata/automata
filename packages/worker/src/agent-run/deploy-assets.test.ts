@@ -674,3 +674,40 @@ describe("#192: cloud-init installs the agent the runs actually need", () => {
     );
   });
 });
+
+describe("#192: the egress fence is loaded at boot, not by hand", () => {
+  const linux = (f: string) =>
+    read(path.join(workerRoot, "deploy", "linux", f));
+
+  it("ships a unit, because `nft -f` does not survive a reboot", () => {
+    // The fence was loaded by hand and nothing reloaded it at boot, so a reboot
+    // would have left the agent uid with unrestricted egress while every log
+    // line still said the box was fenced. Found by checking, not by an incident.
+    const unit = linux("automata-egress.service");
+    expect(unit).toMatch(/^Type=oneshot$/m);
+    expect(unit).toMatch(/^RemainAfterExit=yes$/m);
+    expect(unit).toMatch(/nft-preflight\.sh/);
+    expect(unit).toMatch(/^WantedBy=multi-user\.target$/m);
+  });
+
+  it("comes up BEFORE the worker accepts work", () => {
+    // A worker that takes a run before the fence exists runs that one unfenced.
+    expect(linux("automata-egress.service")).toMatch(
+      /^Before=automata-worker\.service$/m,
+    );
+  });
+
+  it("tears down only OUR table, never the ruleset", () => {
+    // `flush ruleset` here would take Docker's chains — and with them the engine
+    // and its Postgres. Same trap the ruleset file itself documents.
+    // Anchored to the ExecStop LINE, not the file: the header comment names
+    // `flush ruleset` precisely to explain why it must not be used, and a
+    // whole-file match reads that explanation as the thing it warns about.
+    // (Third time this session a comment mentioning the forbidden string broke
+    // one of my own assertions.)
+    const unit = linux("automata-egress.service");
+    const execStop = unit.match(/^ExecStop=.*$/m)?.[0] ?? "";
+    expect(execStop).toMatch(/delete table inet automata_egress/);
+    expect(execStop).not.toMatch(/flush ruleset/);
+  });
+});
