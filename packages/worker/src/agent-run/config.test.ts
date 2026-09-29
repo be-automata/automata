@@ -343,6 +343,20 @@ describe("#204: memory-ceiling knobs are validated at boot", () => {
     // budget, it is an outage, and it should fail at boot not per run.
     expect(() => parseMemoryMax("64M")).toThrow(/below 256M/);
     expect(parseMemoryMax("256M")).toBe(256 * 1024 ** 2);
+    // A typo that the regex happily accepts must not reach `memory.max`:
+    // past 2^53 the product is imprecise, and further out it is Infinity.
+    for (const huge of [
+      "99999999999999999999G",
+      "9007199254740993",
+      "1000000000000G",
+    ]) {
+      expect(() => parseMemoryMax(huge), huge).toThrow(
+        /exact integer number of bytes/,
+      );
+    }
+    // And the realistic end of the range still parses exactly.
+    expect(parseMemoryMax("1500M")).toBe(1500 * 1024 ** 2);
+    expect(parseMemoryMax("8G")).toBe(8 * 1024 ** 3);
   });
 
   it("a stray WORKER_RUN_TASKS_MAX does NOT stop a box without the ceiling", () => {

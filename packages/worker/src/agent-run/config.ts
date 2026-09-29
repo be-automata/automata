@@ -244,6 +244,18 @@ export function parseMemoryMax(raw: string | undefined): number {
   const suffix = (m[2] ?? "").toUpperCase();
   const scale = { "": 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3 }[suffix] ?? 1;
   const bytes = Number(m[1]) * scale;
+  // A TYPO MUST NOT BECOME A NONSENSE CEILING. The regex accepts any run of
+  // digits, so `99999999999999999999G` parses — and `Number(...) * scale` then
+  // exceeds 2^53 or overflows to Infinity, which is written verbatim into
+  // `memory.max`. The kernel's answer to that is not something to find out in
+  // production, and this file's whole posture is to refuse a typo at boot rather
+  // than carry it into a run.
+  if (!Number.isSafeInteger(bytes)) {
+    throw new Error(
+      `WORKER_RUN_MEMORY_MAX=${v} does not fit an exact integer number of bytes ` +
+        `(got ${bytes}); use a realistic value such as 1500M`,
+    );
+  }
   // A ceiling below one session's measured ~1.1 GB would OOM-kill every run.
   // Refusing is kinder than a box where nothing completes.
   if (bytes > 0 && bytes < 256 * 1024 ** 2) {
