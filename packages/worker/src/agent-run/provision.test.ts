@@ -342,3 +342,137 @@ describe("provisionWorkdir — the workdir ACE must include the worker login", (
     },
   );
 });
+
+/**
+ * Production, 2026-09-28: a review that had been working for five minutes was
+ * redelivered by the engine; the new attempt tried to clear the previous
+ * attempt's workdir while that attempt was still writing into it, and threw
+ *
+ *   ENOTEMPTY: directory not empty, rmdir '/usr/local/automata/runs/<id>'
+ *
+ * The run died with no verdict and reached the user as "Review intent could not
+ * be parsed". `force: true` suppresses ENOENT and nothing else.
+ */
+describe("provisionWorkdir — a stale workdir is renamed, never removed in place", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-tomb-"));
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const noop = {
+    aceExec: async () => {},
+    runGit: async () => ({ stdout: "", stderr: "" }),
+  };
+
+  it("starts clean even when the previous attempt left a populated tree", async () => {
+    const stale = path.join(root, "thr_1");
+    await fs.mkdir(path.join(stale, "deep", "nested"), { recursive: true });
+    await fs.writeFile(path.join(stale, "deep", "nested", "leftover"), "x");
+
+    const workdir = await provisionWorkdir({
+      repoFullName: "o/r",
+      branch: "main",
+      installationToken: "ghs_x",
+      workdirRoot: root,
+      runId: "thr_1",
+      ...noop,
+    });
+
+    expect(workdir).toBe(stale);
+    // The residue must not be visible to the new run under the real path.
+    await expect(
+      fs.stat(path.join(stale, "deep", "nested", "leftover")),
+    ).rejects.toThrow();
+  });
+
+  it("leaves no tombstone behind on the happy path", async () => {
+    await fs.mkdir(path.join(root, "thr_1"), { recursive: true });
+    await fs.writeFile(path.join(root, "thr_1", "f"), "x");
+    await provisionWorkdir({
+      repoFullName: "o/r",
+      branch: "main",
+      installationToken: "ghs_x",
+      workdirRoot: root,
+      runId: "thr_1",
+      ...noop,
+    });
+    const entries = await fs.readdir(root);
+    expect(entries.filter((e) => e.includes(".tombstone-"))).toEqual([]);
+  });
+
+  it("sweeps a tombstone an earlier run could not free", async () => {
+    // A live escapee holding the tree is exactly what leaves one behind. The
+    // next run must clear it rather than accumulating residue forever.
+    const orphan = path.join(root, `thr_0.tombstone-${Date.now() - 1000}`);
+    await fs.mkdir(path.join(orphan, "sub"), { recursive: true });
+    await fs.writeFile(path.join(orphan, "sub", "f"), "x");
+
+    await provisionWorkdir({
+      repoFullName: "o/r",
+      branch: "main",
+      installationToken: "ghs_x",
+      workdirRoot: root,
+      runId: "thr_2",
+      ...noop,
+    });
+
+    await expect(fs.stat(orphan)).rejects.toThrow();
+  });
+
+  it("succeeds when the stale tree CANNOT be emptied — the case that broke production", async () => {
+    // Deterministic stand-in for the redelivery race. In production the tree
+    // could not be emptied because the previous attempt's agent was still
+    // writing into it. Here an INNER directory is made unwritable, so unlinking
+    // its child fails — a recursive remove cannot empty the tree — while the
+    // outer directory stays writable, so it can still be renamed out of the way.
+    //
+    // This is the test that separates the fix from its predecessor: the old
+    // `fs.rm(workdir, { recursive: true, force: true })` throws here and fails
+    // the run. `force: true` only ever suppressed ENOENT.
+    const stale = path.join(root, "thr_locked");
+    const locked = path.join(stale, "locked");
+    await fs.mkdir(locked, { recursive: true });
+    await fs.writeFile(path.join(locked, "held"), "x");
+    await fs.chmod(locked, 0o500); // r-x: its child cannot be unlinked
+
+    try {
+      // Sanity: the operation the old code performed really does fail here.
+      await expect(
+        fs.rm(stale, { recursive: true, force: true }),
+      ).rejects.toThrow();
+
+      const workdir = await provisionWorkdir({
+        repoFullName: "o/r",
+        branch: "main",
+        installationToken: "ghs_x",
+        workdirRoot: root,
+        runId: "thr_locked",
+        ...noop,
+      });
+      expect(workdir).toBe(stale);
+      // A fresh, empty directory — the residue went to a tombstone.
+      expect(await fs.readdir(workdir)).toEqual([]);
+    } finally {
+      for (const e of await fs.readdir(root).catch(() => [])) {
+        await fs.chmod(path.join(root, e, "locked"), 0o700).catch(() => {});
+      }
+    }
+  });
+
+  it("provisions normally when there is no residue at all", async () => {
+    const workdir = await provisionWorkdir({
+      repoFullName: "o/r",
+      branch: "main",
+      installationToken: "ghs_x",
+      workdirRoot: root,
+      runId: "thr_3",
+      ...noop,
+    });
+    expect(workdir).toBe(path.join(root, "thr_3"));
+    await expect(fs.stat(workdir)).resolves.toBeTruthy();
+  });
+});
