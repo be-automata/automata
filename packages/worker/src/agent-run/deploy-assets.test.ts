@@ -402,3 +402,74 @@ describe("#192: the unit waits for the engine before the auth gate runs", () => 
     );
   });
 });
+
+describe("#192: the unit's sandbox must not fence out the launcher's own writes", () => {
+  const linux = (f: string) =>
+    read(path.join(workerRoot, "deploy", "linux", f));
+
+  it("every /usr path the launcher writes to is in ReadWritePaths", () => {
+    // The bug this exists for: ProtectSystem=full remounts /usr read-only
+    // inside the unit's namespace, and /usr/local/automata is under /usr. The
+    // launcher stages the daemon bundle there on every agent-uid run, so the
+    // install fails "Read-only file system" the moment WORKER_AGENT_USER is
+    // set — and never before, which is why it survived review of both files
+    // read separately. Only comparing them catches it.
+    const unit = linux("automata-worker.service");
+    const script = linux("run-worker.sh.template");
+
+    const protectsUsr = /^ProtectSystem=(full|strict|yes|true)$/m.test(unit);
+    if (!protectsUsr) return;
+
+    const rw = [...unit.matchAll(/^ReadWritePaths=(.+)$/gm)].flatMap((m) =>
+      m[1] ? m[1].trim().split(/\s+/) : [],
+    );
+
+    // Destinations the launcher writes to, not every path it mentions.
+    const written = [
+      ...script.matchAll(/^\s*install\s+[^\n]*?\s(\/usr\/\S+)/gm),
+      ...script.matchAll(/^\s*(?:cp|mv|tee)\s+[^\n]*?\s(\/usr\/\S+)/gm),
+      ...script.matchAll(/>\s*(\/usr\/\S+)/gm),
+    ].flatMap((m) => (m[1] ? [m[1]] : []));
+
+    expect(
+      written.length,
+      "launcher writes nothing under /usr",
+    ).toBeGreaterThan(0);
+    for (const target of written) {
+      const covered = rw.some(
+        (p) => target === p || target.startsWith(p.replace(/\/$/, "") + "/"),
+      );
+      expect(
+        covered,
+        `${target} is written by run-worker.sh but no ReadWritePaths= covers it, ` +
+          `and ProtectSystem makes /usr read-only`,
+      ).toBe(true);
+    }
+  });
+
+  it("the exception stays narrow — never all of /usr or /usr/local", () => {
+    // Widening it hands the unit every other thing installed there.
+    const unit = linux("automata-worker.service");
+    const rw = [...unit.matchAll(/^ReadWritePaths=(.+)$/gm)].flatMap((m) =>
+      m[1] ? m[1].trim().split(/\s+/) : [],
+    );
+    for (const p of rw) {
+      expect(["/usr", "/usr/local", "/"]).not.toContain(p.replace(/\/$/, ""));
+    }
+  });
+
+  it("cloud-init gives the runtime tree to the service account, not root", () => {
+    // cloud-init runs as root, so a bare `install -d` leaves root:root and the
+    // non-root worker gets EACCES — a second, independent cause of the same
+    // failure, which survives fixing ReadWritePaths alone.
+    const ci = linux("cloud-init.yaml");
+    const treeInstall = ci.match(
+      /install -d[^\n]*(?:\\\n\s*)?[^\n]*\/usr\/local\/automata\b[^\n]*/,
+    );
+    if (!treeInstall) {
+      throw new Error("no install of /usr/local/automata found in cloud-init");
+    }
+    expect(treeInstall[0]).toMatch(/-o \S+/);
+    expect(treeInstall[0]).not.toMatch(/-o root\b/);
+  });
+});

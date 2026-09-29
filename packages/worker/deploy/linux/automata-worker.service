@@ -83,7 +83,21 @@ SyslogIdentifier=automata-worker
 # egress fence depends on. The rest is free.
 NoNewPrivileges=no
 PrivateTmp=no
+
+# ProtectSystem=full remounts /usr read-only inside this unit's namespace — and
+# /usr/local/automata is a subpath of /usr. The launcher stages the daemon bundle
+# there on every agent-uid run (run-worker.sh.template), so without this
+# exception that install fails with "Read-only file system" the moment
+# WORKER_AGENT_USER is set — i.e. exactly when the Linux fence is turned on, and
+# never before, which is why it stayed invisible while the mode was off.
+# Verified on the box: the same write under a transient unit with
+# ProtectSystem=full fails read-only and succeeds without it.
+#
+# Keep the exception as narrow as the one directory. Widening it to /usr/local
+# hands the unit everything else installed there.
 ProtectSystem=full
+ReadWritePaths=/usr/local/automata
+
 ProtectHome=no
 ProtectKernelTunables=yes
 ProtectControlGroups=yes

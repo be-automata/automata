@@ -160,9 +160,17 @@ write_files:
 
       # ── the agent-readable runtime tree ──────────────────────────────────
       # The daemon bundle is staged here because the agent uid cannot read the
-      # operator's home. Owned by the operator, world-readable, never writable
-      # by the agent.
-      install -d -m 0755 /usr/local/automata /usr/local/automata/daemon
+      # service account's home. World-readable so the agent can load it, and
+      # owned by the SERVICE ACCOUNT — not root — because run-worker.sh installs
+      # the freshly built bundle here on every agent-uid run, as that
+      # unprivileged user. Left root:root (the obvious `install -d` with no
+      # -o/-g) it looks right, passes every static check, and fails with EACCES
+      # the first time the Linux fence is actually switched on.
+      #
+      # Ordering matters: this runs AFTER the useradd above, or the chown has
+      # no user to name.
+      install -d -m 0755 -o automata -g automata \
+        /usr/local/automata /usr/local/automata/daemon
 
       # ── assertions: the box is provisioned only if these all hold ────────
       NODE_MAJOR_MIN="$NODE_MAJOR_MIN" NODE_MINOR_MIN="$NODE_MINOR_MIN" \
