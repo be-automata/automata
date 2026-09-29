@@ -60,7 +60,48 @@ export const INHERITABLE_ACE_RIGHTS =
  */
 export const TRAVERSE_ACE_RIGHTS = "search";
 
+/**
+ * LINUX: the same two grants expressed as POSIX ACLs (#192 P4).
+ *
+ * THE VOCABULARY COLLAPSES. POSIX ACLs have exactly r, w and x — none of macOS's
+ * separate delete/attribute/inheritance rights. `rwx` on a directory already
+ * carries what the long macOS list spells out, and `--x` is traverse-without-read.
+ *
+ * INHERITANCE IS A SEPARATE ENTRY, NOT A FLAG. macOS folds inheritance into the
+ * ACE via file_inherit/directory_inherit. Linux splits it: the ACCESS ACL governs
+ * the directory itself, and the DEFAULT ACL (`-d`) is what newly created entries
+ * copy. Both are needed — a default ACL alone grants nothing on the directory it
+ * sits on, so the daemon could not write its pidfile into a dir it was "granted".
+ *
+ * THE DEFAULT ACL NEVER GOES ON THE SHARED ROOT. Same reason the macOS traverse
+ * ACE is not inheritable: it would hand the agent uid every OTHER run's contents.
+ * All runs share one uid, so cross-run isolation is placement, not ownership.
+ *
+ * ── THE TRAP, AND IT IS THE OPPOSITE OF macOS ──────────────────────────────
+ *
+ * The macOS note above records, verified, that `chmod 600` does NOT strip an ACE.
+ * On Linux it effectively does. POSIX ACLs have a MASK that caps every named-user
+ * entry, and when an ACL is present `chmod`'s GROUP bits ARE the mask. Measured on
+ * Ubuntu 24.04/ext4:
+ *
+ *   after creation:   user:agent:rwx  #effective:rw-   mask::rw-   agent reads: YES
+ *   after chmod 600:  user:agent:rwx  #effective:---   mask::---   agent reads: NO
+ *
+ * `getfacl` STILL LISTS THE ENTRY. The fence is inert and inspection says it is
+ * applied. This matters here because the #50 workspace-trust seed writes a 0600
+ * `.claude.json`, and a review run dies in seconds with no output if that seed is
+ * unreadable — so on Linux, anything that chmods a file AFTER creating it must
+ * re-apply the ACL or not chmod at all. Verify a Linux fence by reading
+ * `#effective:`, or better by reading the file as the agent uid; never by the
+ * presence of the entry.
+ */
+export const LINUX_INHERITABLE_ACL_RIGHTS = "rwx";
+export const LINUX_TRAVERSE_ACL_RIGHTS = "--x";
+
 export type AceExec = (file: string, args: string[]) => Promise<void>;
+
+/** Which of the two grants to apply. The rights per platform follow from it. */
+export type AceGrant = "inheritable" | "traverse";
 
 /** `chmod +a "<user> allow <rights>" <dir>` as argv. Pure. */
 export function buildAceInvocation(opts: {
@@ -74,6 +115,39 @@ export function buildAceInvocation(opts: {
   };
 }
 
+/**
+ * The setfacl argv for one grant. Pure.
+ *
+ * Returns TWO invocations for the inheritable grant — access ACL then default
+ * ACL — and ONE for traverse. Order matters only for readability; neither
+ * depends on the other.
+ */
+export function buildSetfaclInvocations(opts: {
+  user: string;
+  dir: string;
+  grant: AceGrant;
+}): { file: string; args: string[] }[] {
+  const { user, dir, grant } = opts;
+  if (grant === "traverse") {
+    return [
+      {
+        file: "/usr/bin/setfacl",
+        args: ["-m", `u:${user}:${LINUX_TRAVERSE_ACL_RIGHTS}`, dir],
+      },
+    ];
+  }
+  return [
+    {
+      file: "/usr/bin/setfacl",
+      args: ["-m", `u:${user}:${LINUX_INHERITABLE_ACL_RIGHTS}`, dir],
+    },
+    {
+      file: "/usr/bin/setfacl",
+      args: ["-d", "-m", `u:${user}:${LINUX_INHERITABLE_ACL_RIGHTS}`, dir],
+    },
+  ];
+}
+
 const defaultExec: AceExec = async (file, args) => {
   await execFileAsync(file, args);
 };
@@ -81,24 +155,44 @@ const defaultExec: AceExec = async (file, args) => {
 async function applyAces(opts: {
   dir: string;
   users: string[];
-  rights: string;
+  grant: AceGrant;
   exec?: AceExec;
   platform?: NodeJS.Platform;
 }): Promise<void> {
-  const { dir, users, rights } = opts;
+  const { dir, users, grant } = opts;
   const platform = opts.platform ?? process.platform;
-  // No users = the default-off path. Non-darwin = the mechanism does not exist;
-  // the worker still runs (and its suite still passes) on Linux CI.
-  if (users.length === 0 || platform !== "darwin") {
+  // No users = the default-off path.
+  if (users.length === 0) {
+    return;
+  }
+  // Anything that is neither darwin nor linux has no mechanism here. This used
+  // to read `platform !== "darwin"`, which made the whole fence a silent no-op
+  // on Linux: callers got a resolved promise and a box with no boundary on it.
+  if (platform !== "darwin" && platform !== "linux") {
     return;
   }
   const exec = opts.exec ?? defaultExec;
   for (const user of users) {
-    const inv = buildAceInvocation({ user, dir, rights });
-    // Deliberately NOT swallowed: `chmod +a` fails on a volume without ACL
-    // support, and a silently-missing ACE surfaces later as a 15s "daemon
-    // socket not ready" with nothing pointing at the cause. Fail loud, here.
-    await exec(inv.file, inv.args);
+    const invocations =
+      platform === "darwin"
+        ? [
+            buildAceInvocation({
+              user,
+              dir,
+              rights:
+                grant === "traverse"
+                  ? TRAVERSE_ACE_RIGHTS
+                  : INHERITABLE_ACE_RIGHTS,
+            }),
+          ]
+        : buildSetfaclInvocations({ user, dir, grant });
+    for (const inv of invocations) {
+      // Deliberately NOT swallowed: the tool fails on a filesystem mounted
+      // without ACL support, and a silently-missing grant surfaces later as a
+      // 15s "daemon socket not ready", or as a run that dies on an unwritable
+      // pidfile, with nothing pointing at the cause. Fail loud, here.
+      await exec(inv.file, inv.args);
+    }
   }
 }
 
@@ -112,7 +206,7 @@ export function applyInheritableAces(opts: {
   exec?: AceExec;
   platform?: NodeJS.Platform;
 }): Promise<void> {
-  return applyAces({ ...opts, rights: INHERITABLE_ACE_RIGHTS });
+  return applyAces({ ...opts, grant: "inheritable" });
 }
 
 /**
@@ -125,7 +219,7 @@ export function applyTraverseAce(opts: {
   exec?: AceExec;
   platform?: NodeJS.Platform;
 }): Promise<void> {
-  return applyAces({ ...opts, rights: TRAVERSE_ACE_RIGHTS });
+  return applyAces({ ...opts, grant: "traverse" });
 }
 
 /**
