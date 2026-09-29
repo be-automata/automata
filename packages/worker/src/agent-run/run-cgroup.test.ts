@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   assessCgroupSupport,
@@ -301,5 +303,26 @@ describe("moveIntoCgroup", () => {
     expect(() =>
       moveIntoCgroup({ cgroupDir: "/cg/run-1", pid: 1, fsi: throwing }),
     ).toThrow(/EPERM/);
+  });
+});
+
+/**
+ * The classification is only worth anything if something CALLS it. It was built
+ * and left unwired once — the on-box drill caught that, reporting "generic
+ * failure" for a run the kernel had just OOM-killed.
+ */
+describe("#204: the dead-daemon path names the ceiling", () => {
+  it("daemon-process classifies on signalCode, not only exitCode", () => {
+    // A SIGKILLed child reports exitCode null, so a check on exitCode alone
+    // never fires — which is exactly how an OOM would go unreported.
+    const src = fs.readFileSync(
+      path.join(__dirname, "daemon-process.ts"),
+      "utf8",
+    );
+    expect(src).toMatch(/signalCode != null/);
+    expect(src).toMatch(/classifyAgentExit\(\{/);
+    const call = src.slice(src.indexOf("classifyAgentExit({"));
+    expect(call).toMatch(/signal: this\.child\.signalCode/);
+    expect(call).toMatch(/oomKills: this\.oomKills\(\)/);
   });
 });

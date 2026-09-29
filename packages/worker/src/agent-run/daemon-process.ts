@@ -22,6 +22,7 @@ import {
   moveIntoCgroup,
   readOomKillCount,
 } from "./run-cgroup";
+import { classifyAgentExit } from "./retry-classification";
 import { redactSecrets } from "./redact";
 import { buildKillInvocation, buildSpawnInvocation } from "./spawn-as-user";
 import { verifyGhAuth } from "./verify-gh-auth";
@@ -633,11 +634,24 @@ export class DaemonProcess {
     const deadline = Date.now() + timeoutMs;
     let lastErr: unknown;
     while (Date.now() < deadline) {
-      if (this.child?.exitCode != null) {
-        throw new Error(
-          `daemon exited before its socket was ready (code ${this.child.exitCode})` +
+      // A dead child here is how an OOM actually surfaces: the kernel SIGKILLs
+      // the agent inside its cgroup, the socket never appears, and this is the
+      // first code to notice. `signalCode` matters as much as `exitCode` —
+      // a killed process reports exitCode null.
+      if (this.child?.exitCode != null || this.child?.signalCode != null) {
+        const generic = new Error(
+          `daemon exited before its socket was ready (code ${this.child.exitCode}, signal ${this.child.signalCode ?? "none"})` +
             (this.stderrTail ? `: ${this.stderrTail.trim()}` : ""),
         );
+        // #204: name the memory ceiling as the cause ONLY when the kernel says
+        // so. Read before teardown removes the cgroup; oomKills() caches it.
+        throw classifyAgentExit({
+          exitCode: this.child.exitCode,
+          signal: this.child.signalCode,
+          oomKills: this.oomKills(),
+          memoryMaxBytes: this.config.memoryMaxBytes,
+          fallback: generic,
+        });
       }
       try {
         await this.probeSocket();
