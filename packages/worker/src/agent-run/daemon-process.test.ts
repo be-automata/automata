@@ -683,6 +683,39 @@ setInterval(() => {}, 1000);
       expect(fs.existsSync(marker)).toBe(false);
     });
 
+    it("a stale ready marker from a crashed run is cleared BEFORE the next spawn", async () => {
+      // The marker is a safety interlock: the wrapper execs the moment it exists.
+      // A leftover from a crashed run of the same threadId would let the next
+      // agent start before the worker had capped it — uncapped, while every log
+      // said capped. teardown covers the run that ends; this covers the run that
+      // never got to.
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+      });
+      const recorded: Recorded[] = [];
+      const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+      fs.mkdirSync(path.dirname(socket), { recursive: true });
+      const marker = `${runPidPath(root, getProcessWorkerId(), input.threadId)}.cgroup-ready`;
+      fs.writeFileSync(marker, "");
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        { spawnFn: fakeSpawn({ recorded }) },
+      );
+      daemons.push(daemon);
+      await daemon.start();
+      // No ceiling in this config, so nothing re-creates it: if start() had not
+      // cleared it, it would still be here.
+      expect(fs.existsSync(marker)).toBe(false);
+    });
+
     it("agentFailure: null while alive, the classified cause once dead, null after teardown", async () => {
       // This is what turns a mid-run OOM into a resource-limit error instead of a
       // poll that spins until Hatchet cancels the task. The `null` after teardown

@@ -532,6 +532,19 @@ export class DaemonProcess {
     } catch {
       // the daemon unlinks/rebinds the socket itself; this is belt-and-suspenders
     }
+    try {
+      // #204 THE MARKER IS A SAFETY INTERLOCK, SO A STALE ONE IS A SAFETY FAILURE.
+      // The wrapper execs as soon as this file exists. If a crashed run of the same
+      // threadId left one behind, the next wrapper stops waiting IMMEDIATELY — before
+      // the worker has moved it into the cgroup — and the agent runs uncapped while
+      // every log says it is capped. That is precisely the silent downgrade this
+      // whole mechanism exists to prevent, so the marker is cleared here as well as
+      // in teardown: teardown covers the run that ends, this covers the run that
+      // never got to.
+      fs.rmSync(this.cgroupReadyPath(), { force: true });
+    } catch {
+      // ignore
+    }
   }
 
   /**
@@ -590,12 +603,6 @@ export class DaemonProcess {
   }
 
   /**
-   * #204: did the kernel OOM-kill anything in this run's cgroup?
-   *
-   * Read BEFORE teardown removes the cgroup, and exposed so the caller can
-   * classify the exit. Zero whenever the ceiling was off.
-   */
-  /**
    * #204: the run's failure cause when the agent process is gone, or null while it
    * is alive. Consumed by the poll loop (`PollContext.agentFailure`).
    *
@@ -627,6 +634,12 @@ export class DaemonProcess {
     });
   }
 
+  /**
+   * #204: did the kernel OOM-kill anything in this run's cgroup?
+   *
+   * Read BEFORE teardown removes the cgroup, and exposed so the caller can
+   * classify the exit. Zero whenever the ceiling was off.
+   */
   oomKills(): number {
     if (this.cgroupDir) {
       this.observedOomKills = readOomKillCount({ cgroupDir: this.cgroupDir });

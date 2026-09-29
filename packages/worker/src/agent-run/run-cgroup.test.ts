@@ -259,7 +259,7 @@ describe("createRunCgroup", () => {
       tasksMax: 512,
       fsi: f.fsi,
     });
-    expect(dir).toBe(`${root}/run-thr-1`);
+    expect(dir).toBe(runCgroupPath(root, "thr-1"));
     expect(f.writes).toEqual([
       [`${dir}/memory.max`, "1400000000"],
       [`${dir}/memory.swap.max`, "0"],
@@ -282,18 +282,31 @@ describe("createRunCgroup", () => {
       tasksMax: 1,
       fsi: f.fsi,
     });
+    const dir = runCgroupPath(root, "thr-1");
     expect(f.writes.map(([file]) => file)).toEqual([
-      `${root}/run-thr-1/memory.max`,
-      `${root}/run-thr-1/memory.swap.max`,
-      `${root}/run-thr-1/pids.max`,
+      `${dir}/memory.max`,
+      `${dir}/memory.swap.max`,
+      `${dir}/pids.max`,
     ]);
   });
 
   it("sanitises the threadId, because it becomes a path", () => {
-    expect(runCgroupPath(root, "../../escape")).toBe(
-      `${root}/run-______escape`,
-    );
-    expect(runCgroupPath(root, "a/b")).toBe(`${root}/run-a_b`);
+    // Contained under root, and nothing left that a path could traverse with.
+    for (const id of ["../../escape", "a/b"]) {
+      const dir = runCgroupPath(root, id);
+      expect(dir.startsWith(`${root}/run-`)).toBe(true);
+      expect(path.basename(dir)).not.toContain("/");
+      expect(path.basename(dir)).not.toContain("..");
+    }
+  });
+
+  it("two threadIds that sanitise alike still get DIFFERENT cgroups", () => {
+    // Sharing a directory would mean sharing one memory ceiling, and either
+    // run's teardown would `cgroup.kill` the other's agent. The digest is of
+    // the RAW id, so ids the sanitiser folds together stay apart.
+    expect(runCgroupPath(root, "a/b")).not.toBe(runCgroupPath(root, "a_b"));
+    // Same id ⇒ same path, or teardown could not find what start created.
+    expect(runCgroupPath(root, "a/b")).toBe(runCgroupPath(root, "a/b"));
   });
 });
 

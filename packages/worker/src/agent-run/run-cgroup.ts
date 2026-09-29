@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -211,7 +212,18 @@ export function assessCgroupSupport(opts: {
  * traceable to a run, and sanitised because it becomes a filesystem path.
  */
 export function runCgroupPath(root: string, threadId: string): string {
-  return path.join(root, `run-${threadId.replace(/[^a-zA-Z0-9_-]/g, "_")}`);
+  // SANITISING ALONE CAN COLLIDE, and a collision here is not cosmetic: two runs
+  // would share one cgroup, so they would share one memory ceiling and either
+  // one's teardown would `cgroup.kill` the other's agent. Today's threadIds are
+  // uuids and cannot collide, but this function does not get to assume that about
+  // every future caller, so the short digest of the RAW id keeps distinct ids
+  // distinct whatever the sanitiser folds together.
+  const safe = threadId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const digest = createHash("sha256")
+    .update(threadId)
+    .digest("hex")
+    .slice(0, 8);
+  return path.join(root, `run-${safe}-${digest}`);
 }
 
 /** Injectable filesystem surface, so every function below is unit-testable. */
