@@ -101,6 +101,14 @@ function baseReapOpts<
     resolveUid: resolve450,
     spawnKill: killExit0(),
     selfPid: 70001,
+    // #210: these tests feed SYNTHETIC pids from a fixture, so cgroup scoping is
+    // meaningless for them — and on Linux it is actively wrong: the default
+    // predicate reads the REAL /proc/<pid>/cgroup, finds nothing for pid 4242,
+    // and classes every fixture row as foreign, so `scanned` collapses to 0.
+    // macOS has no /proc, the scope resolves to null, and the same tests pass —
+    // which is exactly how this shipped green locally and red in CI.
+    // Scoping has its own tests; these are about kill argv and counts.
+    cgroupScope: () => null,
     ...overrides,
   };
 }
@@ -359,6 +367,39 @@ describe("reapAgentUidEscapees", () => {
     expect(result.residual).toBe(0);
     expect(lines.join("\n")).toMatch(/box\.escapees_scope_degraded/);
     expect(lines.join("\n")).not.toMatch(/out_of_scope/);
+  });
+
+  it("EVERY row unplaceable is reported loudly, not as a clean zero-kill run", async () => {
+    // Two different causes, one signature. In CI it was synthetic fixture pids
+    // with no /proc entry on the runner. In production it is `/proc` mounted with
+    // hidepid=, where the worker cannot read another uid's cgroup at all. Either
+    // way the reaper reaps nothing while its counters read like a quiet box —
+    // which is the silent downgrade this whole fence exists to prevent.
+    const lines: string[] = [];
+    const result = await reapAgentUidEscapees({
+      agentUser: AGENT,
+      phase: "boot",
+      log: (l) => lines.push(l),
+      listProcesses: async () => [
+        { pid: 4242, pgid: 4242, uid: 999, comm: "node" },
+        { pid: 4300, pgid: 4300, uid: 999, comm: "claude" },
+      ],
+      resolveUid: async () => 999,
+      spawnKill: async () => {},
+      selfPid: 1,
+      settleMs: 0,
+      residualBoundMs: 100,
+      cgroupScope: () => "/system.slice/automata-worker.service",
+      // Nothing can be placed — exactly what an unreadable /proc/<pid>/cgroup does.
+      inWorkerScope: () => false,
+    });
+    expect(result.scanned).toBe(0);
+    expect(result.killed).toBe(0);
+    const log = lines.join("\n");
+    expect(log).toMatch(/box\.escapees_all_out_of_scope/);
+    expect(log).toMatch(/hidepid/);
+    // And NOT the ordinary "some were spared" line, which would understate it.
+    expect(log).not.toMatch(/escapees_out_of_scope /);
   });
 
   it("no cgroup v2 ⇒ the reaper behaves exactly as it did before", async () => {

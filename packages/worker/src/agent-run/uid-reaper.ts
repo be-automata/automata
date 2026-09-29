@@ -473,7 +473,27 @@ export async function reapAgentUidEscapees(
       );
     }
     const selected = selectAgentRows(rows, uid, selfPid, inScope);
-    if (selected.foreign.length > 0) {
+    // EVERY candidate foreign is not a scoping success, it is a scoping FAILURE.
+    //
+    // It is what `/proc` mounted with `hidepid=` produces: the worker cannot read
+    // any other uid's `/proc/<pid>/cgroup`, every row is unplaceable, and the
+    // reaper quietly stops reaping while its counters read like a clean run. CI
+    // showed this exact signature with synthetic fixture pids, which is the same
+    // shape for a different reason.
+    //
+    // Loud, and not fatal: refusing to run would be worse than a fence that
+    // reports it cannot see. The operator gets the one line that explains it.
+    if (selected.targets.length === 0 && selected.foreign.length > 0) {
+      log(
+        `box.escapees_all_out_of_scope ${JSON.stringify({
+          ...base,
+          scope: workerScope,
+          spared: selected.foreign.length,
+          reason:
+            "every same-uid process was unplaceable — /proc hidepid, a pid namespace, or a scope that cannot match; NOTHING was reaped",
+        })}`,
+      );
+    } else if (selected.foreign.length > 0) {
       // Loud, because this is the line that would have caught #210 on day one:
       // processes sharing the agent's uid that are NOT ours, and are therefore
       // never killed.
