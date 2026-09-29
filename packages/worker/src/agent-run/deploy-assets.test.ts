@@ -239,3 +239,66 @@ describe("packages/worker/docker-compose.hatchet.prod.yml (#192)", () => {
     expect(overlay).not.toContain("image:");
   });
 });
+
+describe("packages/worker/deploy/linux/cloud-init.yaml (#192)", () => {
+  const cloudInit = read(
+    path.join(workerRoot, "deploy", "linux", "cloud-init.yaml"),
+  );
+
+  it("provisions from ONE fail-fast script, not a list of runcmd entries", () => {
+    // The first box built from this file came up with Node 18 and no pnpm
+    // while cloud-init reported `status: done` and `errors: []`. cloud-init
+    // ignores each runcmd entry's exit code, so a failed step is invisible and
+    // the NEXT step happily works on the broken state. Going back to a list
+    // reintroduces exactly that, silently.
+    expect(cloudInit).toMatch(/set -euo pipefail/);
+    const runcmd = cloudInit.slice(cloudInit.indexOf("\nruncmd:"));
+    const entries = runcmd.split("\n").filter((l) => l.trim().startsWith("- "));
+    expect(entries.length, runcmd).toBe(1);
+    expect(entries[0]).toContain("automata-provision.sh");
+  });
+
+  it("waits for the dpkg/apt lock instead of racing it", () => {
+    // This is the root cause of the Node 18 box: `package_upgrade` and
+    // apt-daily still held the lock, the NodeSource repo script lost the race,
+    // and nothing checked. Every apt call goes through the waiter.
+    expect(cloudInit).toMatch(/wait_for_apt\(\)/);
+    expect(cloudInit).toMatch(/lock-frontend/);
+    expect(cloudInit).toMatch(/apt_get\(\)\s*\{\s*wait_for_apt;/);
+  });
+
+  it("detects a failed NodeSource repo add by CONTENT, not by filename", () => {
+    // Two ways to get this wrong, both observed here:
+    //   - no check at all -> Ubuntu's nodejs 18 installs and looks like success
+    //   - a check pinned to `nodesource.list` -> false alarm on 24.04, which
+    //     emits deb822 `nodesource.sources`
+    expect(cloudInit).toMatch(
+      /grep -rqs nodesource \/etc\/apt\/sources\.list\.d\//,
+    );
+    expect(cloudInit).not.toMatch(/sources\.list\.d\/nodesource\.list/);
+    expect(cloudInit).toMatch(/FATAL: NodeSource repo was not configured/);
+  });
+
+  it("writes the sentinel only AFTER the assertions", () => {
+    // `/usr/local/automata/.provisioned` is the contract downstream checks
+    // instead of cloud-init's own status. Hoisting it above the assertions
+    // would make it mean nothing while still appearing to work.
+    // Anchored on the line that WRITES it — the path is also named in the
+    // header comment, and matching that instead would pass no matter where
+    // the write actually sits.
+    const floorCheck = cloudInit.indexOf("is below");
+    const sentinel = cloudInit.indexOf(
+      "date -uIseconds > /usr/local/automata/.provisioned",
+    );
+    expect(floorCheck).toBeGreaterThan(-1);
+    expect(sentinel).toBeGreaterThan(-1);
+    expect(sentinel).toBeGreaterThan(floorCheck);
+  });
+
+  it("installs acl, which the Linux agent-uid fence needs to exist at all", () => {
+    // setfacl/getfacl are how the fence works on Linux. Absent, it degrades
+    // silently — the precise failure #192 exists to remove on this platform.
+    expect(cloudInit).toMatch(/^\s+- acl$/m);
+    expect(cloudInit).toMatch(/command -v setfacl/);
+  });
+});

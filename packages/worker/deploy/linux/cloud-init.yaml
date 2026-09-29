@@ -1,0 +1,195 @@
+#cloud-config
+# Base bring-up for the shared execution box (#192).
+#
+# Scope: get a correct, boring foundation. The delicate parts — the nftables
+# ruleset, the agent-uid ACLs, the systemd units — are repo assets applied
+# afterwards by their own phases, deliberately NOT inlined here. A cloud-init
+# that half-fails on the interesting parts leaves a box nobody can reason about.
+#
+# Target: Ubuntu 24.04, Hetzner CX33 (4 vCPU / 8 GB / 80 GB).
+#
+# ── Why this is ONE script instead of a list of runcmd entries ──────────────
+#
+# It was a list once, and the first box provisioned from it came up with Node
+# 18 and no pnpm while cloud-init reported `status: done` and `errors: []`.
+# Two properties of `runcmd` combined to hide it: each entry is a separate
+# command whose exit code cloud-init ignores, and the NodeSource repo script
+# lost a race for the dpkg lock against `package_upgrade` and `apt-daily`. The
+# repo was therefore never added, the NEXT entry's `apt-get install -y nodejs`
+# happily installed Ubuntu's 18.19.1, and nothing anywhere said a word — the
+# worker's own >=22.21 floor would have been the first thing to notice, at
+# runtime, on a box already believed to be good.
+#
+# So: `set -euo pipefail` in a single script (a failure stops the run and lands
+# in /var/log/cloud-init-output.log), an explicit wait for the apt lock, and
+# ASSERTIONS at the end rather than a hopeful `final_message`. The sentinel
+# file is the contract — `/usr/local/automata/.provisioned` exists only if
+# every assertion passed, so a provisioning check tests for it instead of
+# trusting cloud-init's own status.
+
+package_update: true
+package_upgrade: true
+
+packages:
+  # `acl` is load-bearing, not incidental: the Linux agent-uid fence uses
+  # setfacl/getfacl. Without it the fence silently degrades, which is the exact
+  # failure #192 exists to remove on this platform.
+  - acl
+  - ca-certificates
+  - curl
+  - git
+  - gnupg
+  - jq
+  - nftables
+  - rsync
+
+write_files:
+  # Swap is part of the capacity spec, not an optimisation. ADR-002 §6 measured
+  # 6 concurrent sessions on 7.6 GB + 10 GiB swap; 6-on-7.6GB only worked
+  # because swap lifted CommitLimit. Ship without it and the box inherits the
+  # fork/posix_spawn ENOMEM already debugged in production.
+  - path: /etc/sysctl.d/60-automata.conf
+    permissions: "0644"
+    content: |
+      # Prefer RAM, but let swap exist so CommitLimit covers the run budget.
+      vm.swappiness = 10
+      # Leave overcommit in heuristic mode (0). Mode 1 hides the fork ENOMEM
+      # until the OOM killer picks a victim, which may be the worker, the
+      # engine or its Postgres.
+      vm.overcommit_memory = 0
+
+  - path: /usr/local/sbin/automata-provision.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      NODE_MAJOR_MIN=22
+      NODE_MINOR_MIN=21
+      PNPM_VERSION=10.14.0
+
+      # cloud-init's own package_upgrade and Ubuntu's apt-daily timers hold the
+      # dpkg lock well into first boot. Every apt call below waits for it
+      # instead of racing it — this is the bug that produced a Node 18 box.
+      wait_for_apt() {
+        local i
+        for i in $(seq 1 120); do
+          if ! fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock \
+                     /var/cache/apt/archives/lock >/dev/null 2>&1; then
+            return 0
+          fi
+          sleep 5
+        done
+        echo "FATAL: dpkg/apt lock still held after 10 minutes" >&2
+        return 1
+      }
+
+      apt_get() { wait_for_apt; apt-get "$@"; }
+
+      install -m 0755 -d /etc/apt/keyrings
+
+      # ── Docker CE from Docker's own repo (Ubuntu's docker.io lags) ────────
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list
+
+      # ── gh CLI ───────────────────────────────────────────────────────────
+      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /etc/apt/keyrings/githubcli.gpg
+      chmod a+r /etc/apt/keyrings/githubcli.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list
+
+      # ── cloudflared (the named tunnel moves onto this box) ────────────────
+      curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+        -o /etc/apt/keyrings/cloudflare-main.gpg
+      chmod a+r /etc/apt/keyrings/cloudflare-main.gpg
+      echo "deb [signed-by=/etc/apt/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" \
+        > /etc/apt/sources.list.d/cloudflared.list
+
+      # ── Node: the repo script, then PROVE the repo took ──────────────────
+      # `setup_22.x` runs its own apt-get update, so it needs the lock free.
+      wait_for_apt
+      curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource.sh
+      bash /tmp/nodesource.sh
+      # Without this check a failed repo add is indistinguishable from success:
+      # the install below just picks up Ubuntu's nodejs and everything looks fine.
+      # Matched by CONTENT, not by filename: the script emits deb822
+      # (`nodesource.sources`) on 24.04 but has shipped `nodesource.list`
+      # before, and pinning the name turns a working repo into a false alarm.
+      grep -rqs nodesource /etc/apt/sources.list.d/ \
+        || { echo "FATAL: NodeSource repo was not configured" >&2; exit 1; }
+
+      apt_get update
+      apt_get install -y \
+        docker-ce docker-ce-cli containerd.io docker-buildx-plugin \
+        docker-compose-plugin \
+        gh cloudflared nodejs
+
+      systemctl enable --now docker
+
+      corepack enable
+      corepack prepare "pnpm@${PNPM_VERSION}" --activate
+
+      # ── swap ─────────────────────────────────────────────────────────────
+      if [ ! -f /swapfile ]; then
+        fallocate -l 8G /swapfile
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+      fi
+      grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+      sysctl --system
+
+      # ── the unprivileged agent role account ──────────────────────────────
+      # System account, no login shell, no password. It exists so the agent runs
+      # under a uid distinct from the worker's, which is what the nftables egress
+      # fence keys on. Its HOME is created per run, not here.
+      id -u automata-agent >/dev/null 2>&1 || useradd --system --create-home \
+        --home-dir /home/automata-agent --shell /usr/sbin/nologin automata-agent
+      chmod 750 /home/automata-agent
+
+      # ── the worker's own service account + repo checkout root ────────────
+      id -u automata >/dev/null 2>&1 || useradd --system --create-home \
+        --home-dir /home/automata --shell /bin/bash automata
+      usermod -aG docker automata
+      install -d -m 0755 -o automata -g automata /opt/automata-platform
+
+      # ── the agent-readable runtime tree ──────────────────────────────────
+      # The daemon bundle is staged here because the agent uid cannot read the
+      # operator's home. Owned by the operator, world-readable, never writable
+      # by the agent.
+      install -d -m 0755 /usr/local/automata /usr/local/automata/daemon
+
+      # ── assertions: the box is provisioned only if these all hold ────────
+      NODE_MAJOR_MIN="$NODE_MAJOR_MIN" NODE_MINOR_MIN="$NODE_MINOR_MIN" \
+        node -e '
+          const [maj, min] = process.versions.node.split(".").map(Number);
+          const MAJ = Number(process.env.NODE_MAJOR_MIN);
+          const MIN = Number(process.env.NODE_MINOR_MIN);
+          if (maj < MAJ || (maj === MAJ && min < MIN)) {
+            console.error("FATAL: node " + process.versions.node + " is below " + MAJ + "." + MIN + ".0");
+            process.exit(1);
+          }
+        '
+      pnpm --version >/dev/null
+      docker compose version >/dev/null
+      command -v setfacl >/dev/null
+      command -v nft >/dev/null
+      command -v gh >/dev/null
+      command -v cloudflared >/dev/null
+      id -u automata >/dev/null
+      id -u automata-agent >/dev/null
+      swapon --show | grep -q /swapfile
+
+      # The sentinel is the contract. cloud-init reports `status: done` even
+      # when runcmd entries failed, so nothing downstream should trust that —
+      # it should test for this file, which only the line below creates.
+      date -uIseconds > /usr/local/automata/.provisioned
+      echo "automata execution plane base ready"
+
+runcmd:
+  - [/usr/local/sbin/automata-provision.sh]
