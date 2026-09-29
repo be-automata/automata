@@ -69,6 +69,11 @@ write_files:
       NODE_MAJOR_MIN=22
       NODE_MINOR_MIN=21
       PNPM_VERSION=10.14.0
+      # Pinned like node and pnpm above, and for the same reason: without it each
+      # box provisions whatever happened to be latest that hour, so two boxes run
+      # different agent builds and a bad release breaks provisioning with nothing
+      # in the repo to point at. Bump this deliberately.
+      CLAUDE_CODE_VERSION=2.1.284
 
       # cloud-init's own package_upgrade and Ubuntu's apt-daily timers hold the
       # dpkg lock well into first boot. Every apt call below waits for it
@@ -149,7 +154,7 @@ write_files:
       #
       # NPM_CONFIG_PREFIX=/usr/local, not a user install: the AGENT uid runs
       # this binary, and it cannot traverse the service account's home.
-      NPM_CONFIG_PREFIX=/usr/local npm install -g @anthropic-ai/claude-code
+      NPM_CONFIG_PREFIX=/usr/local npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
       # ── swap ─────────────────────────────────────────────────────────────
       if [ ! -f /swapfile ]; then

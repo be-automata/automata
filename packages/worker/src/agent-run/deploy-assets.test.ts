@@ -661,7 +661,12 @@ describe("#192: cloud-init installs the agent the runs actually need", () => {
     // /usr/local because the AGENT uid runs it and cannot traverse the service
     // account's home.
     const s = ci();
-    expect(s).toMatch(/npm install -g @anthropic-ai\/claude-code/);
+    // PINNED, like node and pnpm: an unpinned global install means two boxes
+    // provisioned an hour apart run different agent builds.
+    expect(s).toMatch(/CLAUDE_CODE_VERSION=\d+\.\d+\.\d+/);
+    expect(s).toMatch(
+      /npm install -g "@anthropic-ai\/claude-code@\$\{CLAUDE_CODE_VERSION\}"/,
+    );
     expect(s).toMatch(/NPM_CONFIG_PREFIX=\/usr\/local/);
   });
 

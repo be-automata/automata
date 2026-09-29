@@ -253,13 +253,14 @@ const defaultFs: CgroupFs = {
   write: (file, value) => fs.writeFileSync(file, value),
   read: (file) => fs.readFileSync(file, "utf8"),
   rmdir: (dir) => fs.rmdirSync(dir),
-  // Busy-wait rather than async: teardown() is synchronous by contract, and 50ms
-  // at a time bounded to ten tries is half a second in the worst case.
+  // SYNCHRONOUS, because `teardown()` is synchronous by contract — but not a spin.
+  // The previous `while (Date.now() < until)` pinned a core AND blocked the event
+  // loop for up to half a second per teardown whenever rmdir kept failing EBUSY,
+  // stalling every other in-flight poll and the engine heartbeat with it.
+  // `Atomics.wait` on a private buffer blocks this thread and nothing else: no
+  // CPU burnt, no callers woken, and teardown stays synchronous.
   sleep: (ms) => {
-    const until = Date.now() + ms;
-    while (Date.now() < until) {
-      /* spin */
-    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   },
 };
 
