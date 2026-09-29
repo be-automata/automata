@@ -546,3 +546,56 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
     expect(sudoers).toMatch(/AUTOMATA_KILL\s+= \/usr\/bin\/kill/);
   });
 });
+
+describe("packages/worker/deploy/linux — engine backup (#192)", () => {
+  const linux = (f: string) =>
+    read(path.join(workerRoot, "deploy", "linux", f));
+  const script = linux("automata-engine-backup.sh");
+
+  it("verifies the dump before keeping it, and writes via a temp name", () => {
+    // The classic silent failure is a job that "succeeds" for months into a
+    // zero-byte file and is discovered on the one day it is needed. Both guards
+    // must survive: a size floor AND a real archive read.
+    expect(script).toMatch(/pg_restore --list/);
+    expect(script).toMatch(/MIN_BYTES/);
+    // Dump to .partial, rename only after verification — a crash mid-write must
+    // never leave a half-file wearing a good name.
+    expect(script).toMatch(/\.partial/);
+    const verify = script.indexOf("pg_restore --list");
+    const rename = script.indexOf('mv -f "$TMP" "$FINAL"');
+    expect(rename).toBeGreaterThan(verify);
+  });
+
+  it("dumps in a format pg_restore can actually read back", () => {
+    // Plain SQL cannot be verified with `pg_restore --list`, so -Fc is what
+    // makes the verification step above possible at all.
+    expect(script).toMatch(/pg_dump[^\n]*-Fc/);
+  });
+
+  it("never prunes the last surviving dump", () => {
+    // A fortnight of failures followed by a successful prune is how a backup
+    // story ends with no backups.
+    expect(script).toMatch(/REMAINING.*-gt 1|-gt 1/);
+    expect(script).toMatch(/mtime "\+\$\{KEEP_DAYS\}"/);
+  });
+
+  it("keeps dumps unreadable by the agent and the worker accounts", () => {
+    // A dump is the whole execution history, including the tenant the worker's
+    // token is scoped to.
+    expect(script).toMatch(/install -d -m 0700/);
+    expect(script).toMatch(/chmod 0600/);
+  });
+
+  it("the unit fails loudly rather than retrying into silence", () => {
+    const unit = linux("automata-engine-backup.service");
+    expect(unit).toMatch(/^Type=oneshot$/m);
+    expect(unit).not.toMatch(/^Restart=/m);
+    expect(unit).toMatch(/^TimeoutStartSec=\d+$/m);
+  });
+
+  it("the timer catches up a run missed while the box was down", () => {
+    const timer = linux("automata-engine-backup.timer");
+    expect(timer).toMatch(/^Persistent=true$/m);
+    expect(timer).toMatch(/^OnCalendar=/m);
+  });
+});

@@ -1,0 +1,16 @@
+# Nightly, with Persistent=true so a dump missed while the box was down runs on
+# the next boot rather than being skipped in silence.
+
+[Unit]
+Description=Nightly Hatchet engine database backup
+
+[Timer]
+OnCalendar=daily
+# Spread the load off the exact minute; agent runs are memory-hungry and a dump
+# landing on top of one is avoidable contention.
+RandomizedDelaySec=1800
+Persistent=true
+Unit=automata-engine-backup.service
+
+[Install]
+WantedBy=timers.target

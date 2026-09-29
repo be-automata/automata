@@ -1,0 +1,26 @@
+# Nightly dump of the Hatchet engine's Postgres (#192).
+#
+# Oneshot, driven by automata-engine-backup.timer. It runs as root because it
+# talks to the docker socket; the dumps land 0600 in a 0700 directory, so the
+# agent uid and the worker account cannot read execution history out of them.
+#
+# A failure here is LOUD by design: no Restart=, so a failed run leaves the unit
+# in `failed` where `systemctl --failed` and the deadman check will see it. A
+# backup job that quietly retries until it looks fine is the failure mode this
+# exists to avoid.
+
+[Unit]
+Description=Back up the Hatchet engine database
+Documentation=file:///opt/automata-platform/packages/worker/deploy/linux/automata-engine-backup.sh
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/automata-engine-backup.sh /var/backups/automata
+# Bounded: a dump that hangs must not silently occupy the box until the next
+# timer fires on top of it.
+TimeoutStartSec=900
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=automata-engine-backup
