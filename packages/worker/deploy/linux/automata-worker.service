@@ -76,50 +76,29 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=automata-worker
 
-# ── #204: the per-run memory ceiling needs a delegated cgroup subtree ──────
+# ── #204: the per-run memory ceiling is an OPT-IN DROP-IN, not part of this unit ──
 #
-# Delegation hands the worker write access to its OWN cgroup subtree, which is
-# what lets it create and cap a per-run cgroup with NO privilege. The alternative
-# #193 specified — `systemd-run --scope --uid=<agent>` — cannot work here: as this
-# unit's User= the scope is refused by polkit ("Interactive authentication
-# required"), and making it possible would need either a sudoers entry for
-# `systemd-run` (arbitrary root: sudoers(5) permits any arguments for a bare
-# command path, and `--uid=0` is one) or a polkit rule amounting to "start any
-# transient unit as any uid".
+# The ceiling needs two things this unit deliberately does NOT provide:
+# `Delegate=memory pids` and the absence of `ProtectControlGroups=`. Both live in
+# `automata-worker.service.d/10-ceiling.conf`, installed only on a box that
+# enables the ceiling.
 #
-# NARROW, not `Delegate=yes`. Only the two controllers the ceiling uses. Widening
-# it hands the worker every other controller for no gain.
+# WHY IT IS SPLIT. `ProtectControlGroups=yes` remounts /sys/fs/cgroup read-only
+# inside the unit's namespace, so a delegated subtree is correctly OWNED and
+# completely unwritable and the ceiling cannot be armed. Shipping it relaxed in
+# the base unit would weaken hardening on every box, including the ones that
+# never enable the ceiling — a regression they get nothing for. The drop-in
+# confines the relaxation to the boxes that need it.
 #
-# The worker moves itself into a `supervisor/` leaf at boot before enabling the
-# controllers, because cgroup v2 refuses to enable them for the children of a
-# cgroup that still holds processes. Without that the enable fails EBUSY.
+# A MISCONFIGURED BOX FAILS LOUDLY, it does not run uncapped: with
+# `WORKER_RUN_MEMORY_MAX` set and the drop-in absent, the worker refuses to boot
+# and names the missing delegation (`hello/worker.ts`). With the ceiling unset,
+# this unit boots exactly as it did before #204.
 #
-# Removing this line is safe ONLY while `WORKER_RUN_MEMORY_MAX` is unset: the boot
-# then skips the whole step and the box runs uncapped, exactly as before #204.
-# With the ceiling configured and this line gone, the worker REFUSES TO BOOT and
-# names the missing delegation. That is deliberate — a box told to cap its runs
-# must never quietly run them uncapped — so if you remove this, unset the ceiling
-# in the same change.
-Delegate=memory pids
+# Install:  install -D -m0644 automata-worker.service.d/10-ceiling.conf \
+#             /etc/systemd/system/automata-worker.service.d/10-ceiling.conf
+#           systemctl daemon-reload && systemctl restart automata-worker.service
 
-# ACCEPTED TRADE, FOR EVERY BOX RUNNING THIS UNIT, INCLUDING THE ONES WITH THE
-# CEILING OFF: `ProtectControlGroups=yes` is absent below on purpose. It remounts
-# /sys/fs/cgroup read-only inside the unit's namespace, so the delegated subtree
-# is correctly OWNED and completely unwritable, and #204's ceiling cannot be
-# armed. Of ProtectControlGroups, ProtectKernelTunables and ProtectSystem=full,
-# only the first breaks delegation, so exactly one line is missing and the other
-# two stay.
-#
-# What it costs: this service account can write its own delegated subtree. What
-# it does NOT cost: the AGENT uid gains nothing — every file in a run cgroup stays
-# worker-owned, which is the same property that stops the agent raising its own
-# memory.max, and the agent has no write access to the worker's subtree at all.
-#
-# A drop-in that removes it only where the ceiling is enabled was considered and
-# rejected: this unit ships for one purpose, and two boot-time security postures
-# to reason about is worse than one, for a setting the agent uid cannot reach in
-# either.
-#
 # ── Hardening that does NOT fight the agent-uid design ─────────────────────
 #
 # The worker legitimately spawns an agent under a DIFFERENT uid via sudo, so
@@ -145,21 +124,22 @@ ReadWritePaths=/usr/local/automata
 ProtectHome=no
 ProtectKernelTunables=yes
 
-# ProtectControlGroups is deliberately NOT set, and this is the one hardening
-# line that cannot coexist with the ceiling above. `=yes` remounts
-# /sys/fs/cgroup READ-ONLY inside this unit's namespace, so the delegated subtree
-# stays correctly owned (automata:automata) and entirely unwritable — the worker
-# then logs "ceiling OFF" citing a missing Delegate= that is in fact present,
-# which is a maximally confusing symptom for a one-line cause.
+# ProtectControlGroups IS set here, and the ceiling's drop-in is what turns it
+# off where the ceiling is enabled. `=yes` remounts /sys/fs/cgroup READ-ONLY
+# inside this unit's namespace, so a delegated subtree stays correctly owned and
+# entirely unwritable — the worker then reports a missing `Delegate=` that is in
+# fact present, a maximally confusing symptom for a one-line cause.
 #
-# Isolated on the box rather than assumed, because removing more hardening than
+# Isolated on the box rather than assumed, because relaxing more hardening than
 # necessary would be the wrong trade. With Delegate=memory pids:
 #   baseline (no hardening) ............ subtree_control WRITABLE
-#   ProtectControlGroups=yes ........... read-only   <-- the culprit
+#   ProtectControlGroups=yes ........... read-only   <-- the only culprit
 #   ProtectKernelTunables=yes .......... WRITABLE
 #   ProtectSystem=full ................. WRITABLE
 #   the other two together ............. WRITABLE
-# So exactly one line goes; the other two stay.
+# So the drop-in relaxes exactly this one line, and only on boxes that cap runs.
+ProtectControlGroups=yes
+
 RestrictSUIDSGID=no
 
 [Install]
