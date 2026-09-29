@@ -102,6 +102,24 @@ SyslogIdentifier=automata-worker
 # in the same change.
 Delegate=memory pids
 
+# ACCEPTED TRADE, FOR EVERY BOX RUNNING THIS UNIT, INCLUDING THE ONES WITH THE
+# CEILING OFF: `ProtectControlGroups=yes` is absent below on purpose. It remounts
+# /sys/fs/cgroup read-only inside the unit's namespace, so the delegated subtree
+# is correctly OWNED and completely unwritable, and #204's ceiling cannot be
+# armed. Of ProtectControlGroups, ProtectKernelTunables and ProtectSystem=full,
+# only the first breaks delegation, so exactly one line is missing and the other
+# two stay.
+#
+# What it costs: this service account can write its own delegated subtree. What
+# it does NOT cost: the AGENT uid gains nothing — every file in a run cgroup stays
+# worker-owned, which is the same property that stops the agent raising its own
+# memory.max, and the agent has no write access to the worker's subtree at all.
+#
+# A drop-in that removes it only where the ceiling is enabled was considered and
+# rejected: this unit ships for one purpose, and two boot-time security postures
+# to reason about is worse than one, for a setting the agent uid cannot reach in
+# either.
+#
 # ── Hardening that does NOT fight the agent-uid design ─────────────────────
 #
 # The worker legitimately spawns an agent under a DIFFERENT uid via sudo, so

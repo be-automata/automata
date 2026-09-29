@@ -296,9 +296,17 @@ export class DaemonProcess {
     // its ceiling rather than being moved mid-flight.
     if (this.cgroupDir) {
       if (this.pgid == null) {
+        // INVARIANT, not an expected failure. `cgroupDir` is non-null only when
+        // the ceiling is on, which `loadWorkerConfig` only permits with
+        // `agentUser` set — and in that mode `resolvePgid()` either returns a
+        // positive integer or throws, including on the exitCode break. So this is
+        // unreachable. It stays because it is also the narrowing `moveIntoCgroup`
+        // needs, and because if resolvePgid's contract ever loosens, the failure
+        // it would produce is an agent running uncapped.
         throw new Error(
-          "the memory ceiling is on but the wrapper never recorded a pid, so it " +
-            "could not be placed in its cgroup; refusing to run the agent uncapped",
+          "invariant violated: the memory ceiling is on but no pgid was resolved, " +
+            "so the wrapper could not be placed in its cgroup; refusing to run " +
+            "the agent uncapped",
         );
       }
       moveIntoCgroup({ cgroupDir: this.cgroupDir, pid: this.pgid });
