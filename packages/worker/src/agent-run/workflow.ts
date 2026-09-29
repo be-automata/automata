@@ -528,6 +528,7 @@ async function runAgentInner(
       credentials: pulled.credentials,
       agent: pulled.agent,
       runRoot: workdir,
+      agentUser: config.agentUser,
     });
   } catch (err) {
     await boxLock?.release();

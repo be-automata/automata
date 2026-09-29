@@ -197,8 +197,11 @@ async function applyAces(opts: {
 }
 
 /**
- * Grant every `users` entry an INHERITABLE ACE on one per-run directory.
- * No-op when `users` is empty or the platform is not darwin.
+ * Grant every `users` entry an INHERITABLE grant on one per-run directory:
+ * a macOS ACE, or on Linux the access + default ACL pair.
+ *
+ * No-op when `users` is empty, or on a platform with no mechanism here. That
+ * used to mean "not darwin", which silently included Linux — see applyAces.
  */
 export function applyInheritableAces(opts: {
   dir: string;
@@ -225,13 +228,21 @@ export function applyTraverseAce(opts: {
 /**
  * The BOOT-TIME grant on this worker's run-namespace dir (#108 F2).
  *
- * WHY BOOT AND NOT PER-RUN. macOS applies inheritance at CREATE time. The
+ * WHY IT MUST PRECEDE THE BROKERS — and why it is no longer boot-ONLY.
+ * macOS applies inheritance at CREATE time. The
  * gh-broker socket (`<threadId>-gh.sock`) and the daemon socket are bound by
  * workflow.ts BEFORE `DaemonProcess.start()` runs, so an ACE applied inside
  * start() reaches neither — the agent's `gh` then cannot connect (Darwin
  * enforces unix-socket permissions) and the failure looks like a broker bug.
- * Applying the two grants ONCE at worker boot, before any run or broker
- * exists, makes every file and socket later created in the dir inherit them.
+ * Applying the two grants before any run or broker exists makes every file and
+ * socket later created in the dir inherit them.
+ *
+ * It WAS applied once, at boot, on exactly that reasoning — right about
+ * ordering, wrong about lifetime. The namespace root lives under /tmp, macOS
+ * reaps /tmp after three idle days, and every run on a recreated bare dir then
+ * died on an unwritable pidfile. run-namespace.ts's ensureRunNamespace() now
+ * re-asserts this before each run, still ahead of every broker. See that
+ * module's header for the production timeline.
  *
  * TWO grants, because the dir is a cross-uid rendezvous in BOTH directions:
  * the agent uid must bind the daemon socket and write the wrapper's pidfile
@@ -263,4 +274,71 @@ export async function applyRunNamespaceAces(opts: {
     exec,
     platform,
   });
+}
+
+/** Re-grant rights for a FILE: read and write, never execute. */
+export const LINUX_FILE_REGRANT_RIGHTS = "rw-";
+
+/**
+ * Re-grant rights for a DIRECTORY: execute is traversal, and without it the
+ * named user cannot reach anything inside however well-granted the contents are.
+ */
+export const LINUX_DIR_REGRANT_RIGHTS = "rwx";
+
+/**
+ * Restore a named-user grant on ONE FILE after its mode was set (#192 P4).
+ *
+ * WHY THIS HAS TO EXIST ON LINUX AND NOT ON macOS. A POSIX ACL's mask caps every
+ * named-user entry, and the GROUP-class bits of a file's mode ARE that mask. So
+ * any write that lands the group bits at zero silently zeroes the grant — and
+ * `getfacl` keeps listing the entry, so the fence reads as applied. Measured on
+ * Ubuntu 24.04/ext4:
+ *
+ *   created 0644, granted:  user:agent:rwx  #effective:rw-  agent reads: YES
+ *   then chmod 0600:        user:agent:rwx  #effective:---  agent reads: NO
+ *   created 0600 directly:  user:agent:rwx  #effective:---  agent reads: NO
+ *
+ * Note the third line: a 0600 CREATION MODE is enough. No chmod is required for
+ * the grant to be born dead, which is why this must be called after every
+ * sensitive write into a granted tree and not only where a chmod is visible.
+ *
+ * Re-granting does NOT widen access. It raises the mask so the ONE named user
+ * regains what it was already given; `group::` and `other::` stay as they were.
+ * Verified on the box: after the re-grant the agent reads the file while both
+ * `nobody` and the worker's own account are still refused. `stat -c %a` will
+ * report 660 because it renders the mask in the group bits — that is a display
+ * artefact of POSIX ACLs, not group access.
+ *
+ * On macOS this is deliberately a no-op: an allow ACE survives `chmod 600`
+ * (verified on 15.7.3/APFS), so there is nothing to restore.
+ */
+export async function reapplyPathGrant(opts: {
+  target: string;
+  users: string[];
+  /**
+   * Directories need `x` or the user cannot traverse into them, and a run HOME
+   * created `mode: 0o700` is exactly that case — the grant on every file inside
+   * it is irrelevant if the directory itself cannot be entered.
+   */
+  kind: "file" | "directory";
+  exec?: AceExec;
+  platform?: NodeJS.Platform;
+}): Promise<void> {
+  const { target, users, kind } = opts;
+  const platform = opts.platform ?? process.platform;
+  if (users.length === 0 || platform !== "linux") {
+    return;
+  }
+  const rights =
+    kind === "directory" ? LINUX_DIR_REGRANT_RIGHTS : LINUX_FILE_REGRANT_RIGHTS;
+  const exec = opts.exec ?? defaultExec;
+  for (const user of users) {
+    // Not swallowed, for the same reason the directory grants are not: a
+    // silently missing re-grant produces a credential the agent cannot read,
+    // and that surfaces as a run dying in seconds with no output.
+    //
+    // Only the ACCESS entry is restored. The DEFAULT ACL is untouched by chmod
+    // (verified on the box), so re-asserting it here would be noise.
+    await exec("/usr/bin/setfacl", ["-m", `u:${user}:${rights}`, target]);
+  }
 }

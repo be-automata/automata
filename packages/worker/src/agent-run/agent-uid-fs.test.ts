@@ -12,7 +12,10 @@ import {
   applyRunNamespaceAces,
   buildAceInvocation,
   buildSetfaclInvocations,
+  LINUX_DIR_REGRANT_RIGHTS,
+  LINUX_FILE_REGRANT_RIGHTS,
   LINUX_TRAVERSE_ACL_RIGHTS,
+  reapplyPathGrant,
   INHERITABLE_ACE_RIGHTS,
   TRAVERSE_ACE_RIGHTS,
 } from "./agent-uid-fs";
@@ -366,3 +369,88 @@ describe.skipIf(process.platform !== "linux")(
     });
   },
 );
+
+describe("reapplyPathGrant", () => {
+  it("re-grants on Linux, where a 0600 mode zeroes the ACL mask", async () => {
+    const calls: string[][] = [];
+    await reapplyPathGrant({
+      target: "/run/w-1/home/.claude.json",
+      kind: "file" as const,
+      users: ["automata-agent"],
+      platform: "linux",
+      exec: async (f, a) => void calls.push([f, ...a]),
+    });
+    expect(calls).toEqual([
+      [
+        "/usr/bin/setfacl",
+        "-m",
+        "u:automata-agent:rw-",
+        "/run/w-1/home/.claude.json",
+      ],
+    ]);
+  });
+
+  it("grants no execute bit on a credential file", () => {
+    expect(LINUX_FILE_REGRANT_RIGHTS).toBe("rw-");
+    expect(LINUX_FILE_REGRANT_RIGHTS).not.toContain("x");
+  });
+
+  it("is a no-op on macOS, where an ACE survives chmod", async () => {
+    const calls: unknown[] = [];
+    await reapplyPathGrant({
+      target: "/run/x",
+      kind: "file" as const,
+      users: ["_automata-agent"],
+      platform: "darwin",
+      exec: async (f, a) => void calls.push([f, a]),
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("is a no-op when agent-uid mode is off", async () => {
+    const calls: unknown[] = [];
+    await reapplyPathGrant({
+      target: "/run/x",
+      kind: "file" as const,
+      users: [],
+      platform: "linux",
+      exec: async (f, a) => void calls.push([f, a]),
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("propagates failure rather than leaving an unreadable credential", async () => {
+    await expect(
+      reapplyPathGrant({
+        target: "/run/x",
+        kind: "file" as const,
+        users: ["automata-agent"],
+        platform: "linux",
+        exec: async () => {
+          throw new Error("setfacl: Operation not supported");
+        },
+      }),
+    ).rejects.toThrow(/Operation not supported/);
+  });
+});
+
+describe("reapplyPathGrant — directories", () => {
+  it("grants x on a directory: without traversal the contents are unreachable", async () => {
+    // The run HOME is created `mode: 0o700`, which zeroes the mask on the
+    // DIRECTORY. Every file inside can be perfectly granted and the agent still
+    // cannot reach any of them. Observed on the box before this existed.
+    const calls: string[][] = [];
+    await reapplyPathGrant({
+      target: "/run/w-1/home",
+      kind: "directory",
+      users: ["automata-agent"],
+      platform: "linux",
+      exec: async (f, a) => void calls.push([f, ...a]),
+    });
+    expect(calls).toEqual([
+      ["/usr/bin/setfacl", "-m", "u:automata-agent:rwx", "/run/w-1/home"],
+    ]);
+    expect(LINUX_DIR_REGRANT_RIGHTS).toContain("x");
+    expect(LINUX_FILE_REGRANT_RIGHTS).not.toContain("x");
+  });
+});
