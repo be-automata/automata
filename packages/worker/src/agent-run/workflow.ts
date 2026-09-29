@@ -36,7 +36,11 @@ import {
 import { startGitBroker, type GitBroker } from "./git-broker";
 import { startGhBroker, type GhBroker } from "./gh-broker";
 import type { BrokerHandoff } from "./daemon-env";
-import { getProcessWorkerId, runGhSocketPath } from "./run-namespace";
+import {
+  ensureRunNamespace,
+  getProcessWorkerId,
+  runGhSocketPath,
+} from "./run-namespace";
 import {
   materialiseAgentCredentials,
   type MaterialisedCredentials,
@@ -462,6 +466,17 @@ async function runAgentInner(
     // with its own redelivery. Both are best-effort and never throw; the
     // safety argument for the no-engine-read own-thread kill lives on
     // reapOwnThreadAttempts.
+    // Re-assert the cross-uid namespace grant BEFORE anything writes into the
+    // dir or binds a socket in it. The boot-time claim is not enough: the
+    // default root lives under /tmp, macOS reaps /tmp entries untouched for
+    // three days, and a bare recreated dir kills the run at the daemon's
+    // pidfile write with "Permission denied" — which reaches the user as
+    // "Review intent could not be parsed". Idempotent; see run-namespace.ts.
+    await ensureRunNamespace({
+      root: config.runNamespaceRoot,
+      workerId: getProcessWorkerId(),
+      agentUser: config.agentUser,
+    });
     reclaimDeadWorkerRuns({
       root: config.runNamespaceRoot,
       selfWorkerId: getProcessWorkerId(),

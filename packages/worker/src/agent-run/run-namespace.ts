@@ -22,11 +22,33 @@ import { applyRunNamespaceAces, type AceExec } from "./agent-uid-fs";
  * writes `<threadId>.pid` here, while the WORKER (operator uid) connects to that
  * socket and reads that pid, and the agent's `gh` connects to the worker-created
  * `<threadId>-gh.sock`. Darwin enforces unix-socket permissions, so
- * claimRunNamespace() (worker BOOT) puts an inheritable ACE for BOTH accounts on
+ * ensureRunNamespace() puts an inheritable ACE for BOTH accounts on
  * `<root>/<workerId>/` and a traverse-only ACE on `<root>` itself. Neither the
  * daemon's bind nor the gh broker needs to know: bind(2)-created sockets inherit
- * — PROVIDED the ACE predates the bind, which is why it is applied at boot and
- * never per-run (the gh broker binds before DaemonProcess.start() runs).
+ * — PROVIDED the ACE predates the bind, which is why it must run before the gh
+ * broker binds (it binds before DaemonProcess.start() does).
+ *
+ * THE GRANT IS RE-ASSERTED PER RUN, NOT ONLY AT BOOT. It used to run once, at
+ * boot, on the reasoning above — correct about ordering, and silently wrong about
+ * lifetime. The default root is under /tmp, and macOS's periodic cleaner reaps
+ * /tmp entries untouched for three days. Observed in production 2026-09-28: a
+ * worker up since Sep 6 served a run whose namespace dir was BORN Sep 28,
+ * recreated bare by the run itself long after the boot-time grant was applied to
+ * a directory that no longer existed. The daemon then could not write its pidfile
+ * —
+ *
+ *   automata-daemon: /tmp/.../<threadId>.pid: Permission denied
+ *
+ * — resolvePgid() threw, and the run died about a second after starting. It
+ * surfaces to the user as "Review intent could not be parsed", because the agent
+ * never produced any output to parse. Every review on an idle box was failing
+ * this way, silently, with the cause three layers from the symptom.
+ *
+ * Re-asserting costs two `chmod +a` calls per run and closes the whole class:
+ * a reaped /tmp, a manual rm, anything that removes the dir under a live worker.
+ * `chmod +a` is idempotent (verified on macOS 15: re-adding an identical ACE
+ * exits 0 and leaves one entry), so the steady-state cost is the two calls and
+ * nothing else.
  */
 
 export const DEFAULT_RUN_NAMESPACE_ROOT = "/tmp/automata-agent-run";
@@ -102,21 +124,22 @@ export function runPidPath(
 }
 
 /**
- * Claim this worker's namespaced run dir at BOOT: create it, apply the #108
- * cross-uid ACEs, then write the worker lock.
+ * Make this worker's namespaced run dir exist and carry the #108 cross-uid
+ * grants. Idempotent, and safe to call before every run — see the module header
+ * for why calling it only at boot was a production failure.
  *
- * ORDER IS LOAD-BEARING. The ACEs go on the empty dir BEFORE anything is
- * created inside it, because macOS applies inheritance at create time. Every
- * later artefact — the worker lock, each run's daemon socket, each run's
- * gh-broker socket, each run's pidfile — inherits from that point on. Applying
- * the grant per-run inside DaemonProcess.start() missed the gh-broker socket
- * entirely, since workflow.ts binds it first.
+ * ORDER IS LOAD-BEARING. The ACEs must be on the dir BEFORE anything is created
+ * inside it, because macOS applies inheritance at create time. Every later
+ * artefact — the worker lock, each run's daemon socket, each run's gh-broker
+ * socket, each run's pidfile — inherits from that point on. Applying the grant
+ * inside DaemonProcess.start() is too late: workflow.ts binds the gh-broker
+ * socket first, so call this at admission, before any broker comes up.
  *
- * Returns the dir. Throws if the dir cannot be claimed or an ACE cannot be
- * applied: a worker that cannot set these up would leak every run's resources
- * or stall every run on an unreachable socket, so it must not boot.
+ * Returns the dir. Throws if the dir cannot be created or an ACE cannot be
+ * applied — a run whose namespace is ungranted will stall on an unreachable
+ * socket or die on an unwritable pidfile, and failing here names the cause.
  */
-export async function claimRunNamespace(opts: {
+export async function ensureRunNamespace(opts: {
   root: string;
   workerId: string;
   /** Empty (the default) ⇒ no ACL is touched at all. */
@@ -136,6 +159,30 @@ export async function claimRunNamespace(opts: {
     exec: opts.exec,
     platform: opts.platform,
   });
-  fs.writeFileSync(workerLockPath(root, workerId), String(process.pid));
+  return dir;
+}
+
+/**
+ * Boot-time claim: ensure the namespace, then stake this worker's lock in it.
+ *
+ * The lock write is what makes the dir a CLAIM rather than just a grant — a
+ * sibling worker reaps orphans under a workerId whose lock pid is dead, so it
+ * must exist before any run does. Only boot calls this; every run re-asserts
+ * the grant alone via ensureRunNamespace().
+ */
+export async function claimRunNamespace(opts: {
+  root: string;
+  workerId: string;
+  /** Empty (the default) ⇒ no ACL is touched at all. */
+  agentUser: string;
+  workerLogin?: string;
+  exec?: AceExec;
+  platform?: NodeJS.Platform;
+}): Promise<string> {
+  const dir = await ensureRunNamespace(opts);
+  fs.writeFileSync(
+    workerLockPath(opts.root, opts.workerId),
+    String(process.pid),
+  );
   return dir;
 }
