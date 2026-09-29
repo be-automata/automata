@@ -615,6 +615,17 @@ export class DaemonProcess {
    * live, since teardown has not run yet here.
    */
   agentFailure(): unknown | null {
+    // GATED ON THE CEILING, to keep the default-off promise literally true.
+    // Noticing a dead agent mid-run would help every box — today the poll loop
+    // spins until Hatchet cancels the task, on a capped box and an uncapped one
+    // alike. But turning that on everywhere is a behaviour change for boxes this
+    // PR is not about: a daemon that exits cleanly a poll interval before www
+    // records terminal would start failing runs that pass today. That fix is
+    // worth making, in its own change, with its own evidence. Here it exists
+    // only where the ceiling does, which is the case #204 has to classify.
+    if (this.config.memoryMaxBytes <= 0) {
+      return null;
+    }
     const child = this.child;
     if (!child) {
       return null;

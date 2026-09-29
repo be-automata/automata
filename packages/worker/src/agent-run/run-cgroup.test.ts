@@ -26,7 +26,10 @@ import {
  */
 
 /** Recording fake for the whole filesystem surface. */
-function fakeFs(seed: Record<string, string> = {}) {
+function fakeFs(
+  seed: Record<string, string> = {},
+  entries: Record<string, string[]> = {},
+) {
   const files: Record<string, string> = { ...seed };
   const dirs: string[] = [];
   const writes: [string, string][] = [];
@@ -44,6 +47,7 @@ function fakeFs(seed: Record<string, string> = {}) {
       return v;
     },
     rmdir: (d) => void removed.push(d),
+    readdir: (d) => entries[d] ?? [],
   };
   return { fsi, files, dirs, writes, removed };
 }
@@ -184,6 +188,32 @@ describe("prepareDelegatedRoot", () => {
       .filter(([file]) => file === `${root}/${SUPERVISOR_CGROUP}/cgroup.procs`)
       .map(([, v]) => v);
     expect(moved).toEqual(["111", "222"]);
+  });
+
+  it("sweeps stale run-* cgroups at boot — teardown is allowed to give up", () => {
+    // killAndRemoveRunCgroup gives up after bounded retries rather than failing a
+    // finished run, so a run whose members outlived the kill leaves its directory.
+    // Without this sweep they accumulate for the life of the box.
+    const f = fakeFs(
+      {
+        [`${root}/cgroup.subtree_control`]: "",
+        [`${root}/cgroup.procs`]: "111\n",
+      },
+      {
+        [root]: [
+          "run-a-11111111",
+          "run-b-22222222",
+          "supervisor",
+          "cgroup.procs",
+        ],
+      },
+    );
+    prepareDelegatedRoot({ root, pid: 111, fsi: f.fsi });
+    // Only the run dirs, and nothing else in the delegated root.
+    expect(f.removed).toEqual([
+      `${root}/run-a-11111111`,
+      `${root}/run-b-22222222`,
+    ]);
   });
 
   it("still moves itself when the root's member list is unreadable", () => {

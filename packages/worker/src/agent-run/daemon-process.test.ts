@@ -726,6 +726,7 @@ setInterval(() => {}, 1000);
         WORKER_RUN_NAMESPACE_ROOT: root,
         WORKER_DAEMON_DIST: "/opt/daemon/index.js",
         WORKER_NODE_BIN: "/usr/bin/node",
+        WORKER_RUN_MEMORY_MAX: "1G",
       });
       const recorded: Recorded[] = [];
       const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
@@ -768,6 +769,49 @@ setInterval(() => {}, 1000);
       );
 
       daemon.teardown();
+      expect(daemon.agentFailure()).toBeNull();
+    });
+
+    it("agentFailure stays silent on a box with no ceiling — default-off is literal", async () => {
+      // Noticing a dead agent mid-run would help every box, but switching it on
+      // everywhere is a behaviour change this PR does not own: a daemon that
+      // exits cleanly just before www records terminal would start failing runs
+      // that pass today. So the check exists only where the ceiling does.
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+        // WORKER_RUN_MEMORY_MAX deliberately absent
+      });
+      const recorded: Recorded[] = [];
+      const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+      fs.mkdirSync(path.dirname(socket), { recursive: true });
+      const inner = fakeSpawn({ recorded });
+      let spawned: ChildProcess | null = null;
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        {
+          spawnFn: ((file: string, args: string[], o: SpawnOptions) => {
+            spawned = inner(file, args, o);
+            return spawned;
+          }) as unknown as typeof spawn,
+        },
+      );
+      daemons.push(daemon);
+      await daemon.start();
+      const child = spawned as unknown as {
+        exitCode: number | null;
+        signalCode: string | null;
+      };
+      // A clean exit 0, which is the case that would newly fail runs.
+      child.exitCode = 0;
+      child.signalCode = null;
       expect(daemon.agentFailure()).toBeNull();
     });
   });

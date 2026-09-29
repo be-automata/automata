@@ -206,10 +206,12 @@ async function main() {
   // a cgroup that holds processes), and doing that repeatedly is pointless; and
   // `cgroup.subtree_control` is a property of the root, not of a run.
   //
-  // Best-effort by design: a box with no delegation, or not on Linux, keeps
-  // today's behaviour exactly. It logs whichever precondition failed, because an
-  // operator who meant to enable the ceiling and mistyped `Delegate=` should see
-  // that rather than quietly getting no ceiling.
+  // FAIL-CLOSED, and only for a box that asked. With `WORKER_RUN_MEMORY_MAX`
+  // unset this returns immediately and the boot is what it has always been. With
+  // it set and unarmable — no delegation, a mistyped `Delegate=`, not Linux — the
+  // worker refuses to start and names the precondition that failed. The earlier
+  // "log it and carry on" was the worst of both: the box then failed every run
+  // while its boot log said the feature was simply off.
   try {
     prepareCeilingSubtreeAtBoot();
   } catch (err) {

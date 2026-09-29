@@ -232,11 +232,23 @@ export interface CgroupFs {
   write: (file: string, value: string) => void;
   read: (file: string) => string;
   rmdir: (dir: string) => void;
+  /**
+   * Entry names in a directory; [] when it cannot be read. Optional: an injected
+   * surface that omits it simply gets no boot sweep, rather than a type error.
+   */
+  readdir?: (dir: string) => string[];
   /** Injectable so the retry loop below costs a test nothing. */
   sleep?: (ms: number) => void;
 }
 
 const defaultFs: CgroupFs = {
+  readdir: (dir) => {
+    try {
+      return fs.readdirSync(dir);
+    } catch {
+      return [];
+    }
+  },
   mkdir: (dir) => fs.mkdirSync(dir, { recursive: true }),
   write: (file, value) => fs.writeFileSync(file, value),
   read: (file) => fs.readFileSync(file, "utf8"),
@@ -308,6 +320,27 @@ export function prepareDelegatedRoot(opts: {
       // A pid that exited between the read and the write is gone, which is the
       // outcome we wanted anyway. Anything still there will surface as the EBUSY
       // below, named.
+    }
+  }
+
+  // THE SWEEP THE TEARDOWN COMMENT PROMISES. `killAndRemoveRunCgroup` gives up
+  // after its bounded retries rather than failing a finished run, so a run whose
+  // members outlived the kill leaves its directory behind. Without a sweep those
+  // accumulate for the life of the box — one empty directory per such run, each
+  // still holding its `memory.max`. Boot is the right moment: no run of ours is
+  // in flight, and the previous worker's processes are already gone.
+  //
+  // `rmdir` only — a directory that still holds processes fails EBUSY and is
+  // LEFT, which is the correct outcome: that would mean a live agent, and a boot
+  // sweep has no business killing one it cannot account for.
+  for (const entry of io.readdir?.(root) ?? []) {
+    if (!entry.startsWith("run-")) {
+      continue;
+    }
+    try {
+      io.rmdir(path.join(root, entry));
+    } catch {
+      // Still occupied, or already gone. Both are fine.
     }
   }
 
@@ -465,8 +498,9 @@ export function killAndRemoveRunCgroup(opts: {
   try {
     io.rmdir(opts.cgroupDir);
   } catch (e) {
-    // A surviving member or a slow kill leaves the directory; the next run's
-    // sweep can take it. Residue is cheap, a failed teardown is not.
+    // A surviving member or a slow kill leaves the directory. Residue is cheap,
+    // a failed teardown is not — and the leftover is not permanent: the boot
+    // sweep in prepareDelegatedRoot rmdirs stale `run-*` dirs on the next start.
     log(
       `rmdir failed for ${opts.cgroupDir}: ${e instanceof Error ? e.message : String(e)}`,
     );

@@ -94,9 +94,12 @@ SyslogIdentifier=automata-worker
 # controllers, because cgroup v2 refuses to enable them for the children of a
 # cgroup that still holds processes. Without that the enable fails EBUSY.
 #
-# Removing this line does not break the boot — the worker logs that the ceiling
-# is OFF and runs uncapped, which is the state before #204. That is deliberate
-# (the feature is opt-in) and is also why the log line says so loudly.
+# Removing this line is safe ONLY while `WORKER_RUN_MEMORY_MAX` is unset: the boot
+# then skips the whole step and the box runs uncapped, exactly as before #204.
+# With the ceiling configured and this line gone, the worker REFUSES TO BOOT and
+# names the missing delegation. That is deliberate — a box told to cap its runs
+# must never quietly run them uncapped — so if you remove this, unset the ceiling
+# in the same change.
 Delegate=memory pids
 
 # ── Hardening that does NOT fight the agent-uid design ─────────────────────
