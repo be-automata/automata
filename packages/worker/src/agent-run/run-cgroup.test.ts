@@ -1,0 +1,288 @@
+import { describe, expect, it } from "vitest";
+import {
+  assessCgroupSupport,
+  createRunCgroup,
+  killAndRemoveRunCgroup,
+  parseCgroupPath,
+  parseControllers,
+  prepareDelegatedRoot,
+  readOomKillCount,
+  REQUIRED_CONTROLLERS,
+  runCgroupPath,
+  SUPERVISOR_CGROUP,
+  type CgroupFs,
+} from "./run-cgroup";
+
+/**
+ * #204: the per-run memory ceiling.
+ *
+ * Every mutation here was proven against the real kernel on the Linux box
+ * before it was written; these tests fence the SHAPE so a later edit cannot
+ * quietly lose a step whose absence only shows up as EBUSY on a live box, or —
+ * worse — as a ceiling that silently is not applied.
+ */
+
+/** Recording fake for the whole filesystem surface. */
+function fakeFs(seed: Record<string, string> = {}) {
+  const files: Record<string, string> = { ...seed };
+  const dirs: string[] = [];
+  const writes: [string, string][] = [];
+  const chowns: [string, number, number][] = [];
+  const removed: string[] = [];
+  const fsi: CgroupFs = {
+    mkdir: (d) => void dirs.push(d),
+    write: (f, v) => {
+      writes.push([f, v]);
+      files[f] = v;
+    },
+    read: (f) => {
+      const v = files[f];
+      if (v === undefined) throw new Error(`ENOENT ${f}`);
+      return v;
+    },
+    rmdir: (d) => void removed.push(d),
+    chown: (f, u, g) => void chowns.push([f, u, g]),
+  };
+  return { fsi, files, dirs, writes, chowns, removed };
+}
+
+describe("parseCgroupPath", () => {
+  it("takes the v2 line, which is the one with no controller", () => {
+    // A hybrid host lists v1 controllers too; only `0::` is the unified path.
+    expect(
+      parseCgroupPath(
+        "12:pids:/system.slice/x\n1:name=systemd:/system.slice/x\n0::/system.slice/automata-worker.service\n",
+      ),
+    ).toBe("/system.slice/automata-worker.service");
+  });
+
+  it("returns null on a v1-only host — a supported off state, not an error", () => {
+    expect(parseCgroupPath("12:pids:/system.slice/x\n")).toBeNull();
+    expect(parseCgroupPath("")).toBeNull();
+  });
+
+  it("rejects a non-absolute path rather than joining it blindly", () => {
+    // A relative value would path.join into somewhere unintended.
+    expect(parseCgroupPath("0::relative/path")).toBeNull();
+  });
+});
+
+describe("parseControllers", () => {
+  it("splits on whitespace and tolerates an empty file", () => {
+    expect(parseControllers(" memory  pids \n")).toEqual(["memory", "pids"]);
+    expect(parseControllers("\n")).toEqual([]);
+    expect(parseControllers("")).toEqual([]);
+  });
+});
+
+describe("assessCgroupSupport", () => {
+  const procV2 = "0::/system.slice/automata-worker.service\n";
+
+  it("is off, with a reason, on a non-Linux platform", () => {
+    const r = assessCgroupSupport({
+      platform: "darwin",
+      procSelfCgroup: procV2,
+    });
+    expect(r.supported).toBe(false);
+    expect(r).toMatchObject({ reason: expect.stringContaining("darwin") });
+  });
+
+  it("names Delegate= when subtree_control is not writable", () => {
+    // This is the misconfiguration an operator will actually make, so the
+    // message has to say what to fix rather than just refusing.
+    const r = assessCgroupSupport({
+      platform: "linux",
+      procSelfCgroup: procV2,
+      access: () => false,
+      readFile: () => "memory pids",
+    });
+    expect(r.supported).toBe(false);
+    expect(r).toMatchObject({ reason: expect.stringContaining("Delegate=") });
+  });
+
+  it("names the missing controller when Delegate= is too narrow", () => {
+    const r = assessCgroupSupport({
+      platform: "linux",
+      procSelfCgroup: procV2,
+      access: () => true,
+      readFile: () => "pids",
+    });
+    expect(r.supported).toBe(false);
+    expect(r).toMatchObject({ reason: expect.stringContaining("memory") });
+  });
+
+  it("is supported when both controllers are delegated, and reports the root", () => {
+    const r = assessCgroupSupport({
+      platform: "linux",
+      procSelfCgroup: procV2,
+      mountPoint: "/sys/fs/cgroup",
+      access: () => true,
+      readFile: () => "cpuset cpu io memory hugetlb pids rdma misc",
+    });
+    expect(r).toMatchObject({
+      supported: true,
+      root: "/sys/fs/cgroup/system.slice/automata-worker.service",
+    });
+  });
+
+  it("requires exactly the controllers the feature uses", () => {
+    expect([...REQUIRED_CONTROLLERS]).toEqual(["memory", "pids"]);
+  });
+});
+
+describe("prepareDelegatedRoot", () => {
+  const root = "/sys/fs/cgroup/system.slice/w.service";
+
+  it("moves the worker into the supervisor leaf BEFORE enabling controllers", () => {
+    // Load-bearing ordering, and a kernel rule rather than a preference: cgroup
+    // v2 refuses `+memory` on a cgroup that still holds processes, with EBUSY
+    // ("Device or resource busy") and nothing naming the cause. Reversing these
+    // two writes is the mistake this test exists to catch.
+    const f = fakeFs({ [`${root}/cgroup.subtree_control`]: "" });
+    prepareDelegatedRoot({ root, pid: 4242, fsi: f.fsi });
+
+    expect(f.dirs).toContain(`${root}/${SUPERVISOR_CGROUP}`);
+    const order = f.writes.map(([file]) => file);
+    expect(order.indexOf(`${root}/${SUPERVISOR_CGROUP}/cgroup.procs`)).toBe(0);
+    expect(order.indexOf(`${root}/cgroup.subtree_control`)).toBe(1);
+    expect(f.writes[0]?.[1]).toBe("4242");
+    expect(f.writes[1]?.[1]).toBe("+memory +pids");
+  });
+
+  it("is idempotent: an already-delegated subtree gets no second enable", () => {
+    // A worker restart must not need the box reset.
+    const f = fakeFs({ [`${root}/cgroup.subtree_control`]: "memory pids" });
+    prepareDelegatedRoot({ root, pid: 1, fsi: f.fsi });
+    expect(
+      f.writes.filter(([file]) => file.endsWith("cgroup.subtree_control")),
+    ).toEqual([]);
+    // It still (re-)parks itself, which the kernel accepts for a present pid.
+    expect(f.writes.map(([file]) => file)).toEqual([
+      `${root}/${SUPERVISOR_CGROUP}/cgroup.procs`,
+    ]);
+  });
+
+  it("enables only what is missing", () => {
+    const f = fakeFs({ [`${root}/cgroup.subtree_control`]: "pids" });
+    prepareDelegatedRoot({ root, pid: 1, fsi: f.fsi });
+    expect(f.writes[1]?.[1]).toBe("+memory");
+  });
+});
+
+describe("createRunCgroup", () => {
+  const root = "/sys/fs/cgroup/system.slice/w.service";
+
+  it("sets the ceiling, and pins swap to zero", () => {
+    // MemorySwapMax=0 is the ADR-002 §6 decision: swap is the box-wide
+    // CommitLimit cushion, not per-run headroom. A run allowed to swap drags
+    // the whole box toward the ENOMEM that takes worker, engine and Postgres
+    // together — which is the failure this ticket exists to prevent, so a
+    // loosened value here would defeat the feature while looking enabled.
+    const f = fakeFs();
+    const dir = createRunCgroup({
+      root,
+      threadId: "thr-1",
+      memoryMaxBytes: 1_400_000_000,
+      tasksMax: 512,
+      fsi: f.fsi,
+    });
+    expect(dir).toBe(`${root}/run-thr-1`);
+    expect(f.writes).toEqual([
+      [`${dir}/memory.max`, "1400000000"],
+      [`${dir}/memory.swap.max`, "0"],
+      [`${dir}/pids.max`, "512"],
+    ]);
+  });
+
+  it("chowns ONLY cgroup.procs to the agent uid", () => {
+    // The wrapper joins the cgroup itself before `exec`, so nothing allocates
+    // outside the ceiling — that needs this one file writable by the agent.
+    // Chowning anything else would let the agent raise its own limit.
+    const f = fakeFs();
+    createRunCgroup({
+      root,
+      threadId: "thr-1",
+      memoryMaxBytes: 1,
+      tasksMax: 1,
+      agentUid: 999,
+      agentGid: 987,
+      fsi: f.fsi,
+    });
+    expect(f.chowns).toEqual([[`${root}/run-thr-1/cgroup.procs`, 999, 987]]);
+  });
+
+  it("chowns nothing when agent-uid mode is off", () => {
+    const f = fakeFs();
+    createRunCgroup({
+      root,
+      threadId: "thr-1",
+      memoryMaxBytes: 1,
+      tasksMax: 1,
+      fsi: f.fsi,
+    });
+    expect(f.chowns).toEqual([]);
+  });
+
+  it("sanitises the threadId, because it becomes a path", () => {
+    expect(runCgroupPath(root, "../../escape")).toBe(
+      `${root}/run-______escape`,
+    );
+    expect(runCgroupPath(root, "a/b")).toBe(`${root}/run-a_b`);
+  });
+});
+
+describe("readOomKillCount", () => {
+  it("reads the counter, which is what distinguishes an OOM from our own kill", () => {
+    // Every SIGKILL exits 137, including teardown's. Without this counter a
+    // superseded run would be reported as `resource-limit` — a wrong cause,
+    // which is the class of report this ticket removes.
+    const f = fakeFs({
+      "/cg/memory.events": "low 0\nhigh 0\nmax 12\noom 1\noom_kill 3\n",
+    });
+    expect(readOomKillCount({ cgroupDir: "/cg", fsi: f.fsi })).toBe(3);
+  });
+
+  it("returns 0 — never a false OOM — when the file is gone", () => {
+    const f = fakeFs();
+    expect(readOomKillCount({ cgroupDir: "/cg", fsi: f.fsi })).toBe(0);
+  });
+
+  it("returns 0 on a malformed counter rather than NaN", () => {
+    const f = fakeFs({ "/cg/memory.events": "oom_kill abc\n" });
+    expect(readOomKillCount({ cgroupDir: "/cg", fsi: f.fsi })).toBe(0);
+  });
+});
+
+describe("killAndRemoveRunCgroup", () => {
+  it("kills via cgroup.kill BEFORE rmdir, which fails while members remain", () => {
+    const f = fakeFs();
+    killAndRemoveRunCgroup({ cgroupDir: "/cg/run-1", fsi: f.fsi });
+    expect(f.writes).toEqual([["/cg/run-1/cgroup.kill", "1"]]);
+    expect(f.removed).toEqual(["/cg/run-1"]);
+  });
+
+  it("never throws — a teardown failure must not fail a finished run", () => {
+    const logs: string[] = [];
+    const throwing: CgroupFs = {
+      mkdir: () => {},
+      write: () => {
+        throw new Error("EACCES");
+      },
+      read: () => "",
+      rmdir: () => {
+        throw new Error("EBUSY");
+      },
+      chown: () => {},
+    };
+    expect(() =>
+      killAndRemoveRunCgroup({
+        cgroupDir: "/cg/run-1",
+        fsi: throwing,
+        log: (m) => logs.push(m),
+      }),
+    ).not.toThrow();
+    // ...but it must SAY so, or residue accumulates invisibly.
+    expect(logs.join("\n")).toMatch(/cgroup\.kill failed/);
+    expect(logs.join("\n")).toMatch(/rmdir failed/);
+  });
+});
