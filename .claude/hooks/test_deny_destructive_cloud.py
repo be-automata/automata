@@ -65,6 +65,38 @@ CASES = [
 ]
 
 
+
+def check_declarative_mirror():
+    """The deny patterns in settings.json must mirror the hook's DENIED set.
+
+    The hook's own docstring justifies those entries as making the guard
+    "visible when reading the config, not only when running it". A list that
+    covers fewer verbs than the hook does not do that — it undersells the fence
+    to anyone scanning settings.json. It drifted the first time it was written
+    (10 pairs in the hook, 6 in the config), which is why this is a test and not
+    a convention.
+    """
+    import re
+
+    settings = json.loads((HOOK.parent.parent / "settings.json").read_text())
+    declared = set()
+    for entry in settings.get("permissions", {}).get("deny", []):
+        m = re.fullmatch(r"Bash\(hcloud (\S+) (\S+) \*\)", entry)
+        if m:
+            declared.add((m.group(1), m.group(2)))
+
+    source = HOOK.read_text()
+    body = source.split("DENIED = {", 1)[1].split("}", 1)[0]
+    in_hook = set(re.findall(r'\("([^"]+)",\s*"([^"]+)"\)', body))
+
+    problems = []
+    for pair in sorted(in_hook - declared):
+        problems.append(f"  hook blocks {pair} but settings.json does not list it")
+    for pair in sorted(declared - in_hook):
+        problems.append(f"  settings.json lists {pair} but the hook does not block it")
+    return problems
+
+
 def main():
     failures = []
 
@@ -92,6 +124,8 @@ def main():
     )
     if proc.returncode != ALLOW:
         failures.append(f"  malformed stdin returned {proc.returncode}, expected 0")
+
+    failures.extend(check_declarative_mirror())
 
     if failures:
         print(f"FAIL ({len(failures)})")

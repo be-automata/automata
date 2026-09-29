@@ -63,7 +63,11 @@
       "Bash(hcloud firewall delete *)",
       "Bash(hcloud ssh-key delete *)",
       "Bash(hcloud network delete *)",
-      "Bash(hcloud load-balancer delete *)"
+      "Bash(hcloud load-balancer delete *)",
+      "Bash(hcloud image delete *)",
+      "Bash(hcloud floating-ip delete *)",
+      "Bash(hcloud primary-ip delete *)",
+      "Bash(hcloud placement-group delete *)"
     ],
     "allow": [
       "Bash(pnpm:*)",

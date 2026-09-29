@@ -344,8 +344,11 @@ provenance manifest is `.claude/harness.json` (source repo, pinned revision, sha
   not on create, so this hook injects the matching rule body when the agent creates a NEW file.
   Tests: `python3 .claude/hooks/test_inject_rules.py`.
 - `.claude/hooks/deny-destructive-cloud.py` — `PreToolUse(Bash)` hook. Refuses
-  `hcloud server delete` and the adjacent destroyers of persistent state (volume, firewall,
-  ssh-key, network, load-balancer). It exists because `permissions.deny` matches the command
+  `hcloud server delete` and the adjacent destroyers of persistent state: `volume`,
+  `firewall`, `ssh-key`, `network`, `image`, `floating-ip`, `primary-ip`, `load-balancer`
+  and `placement-group` — ten verb pairs, mirrored one-for-one by the `Bash(hcloud … delete *)`
+  entries in `.claude/settings.json`. A test asserts that mirror holds, because the list
+  drifted the first time it was written. It exists because `permissions.deny` matches the command
   string by PREFIX, so `Bash(hcloud server delete *)` catches the obvious form and misses
   `hcloud --context X server delete …`, extra whitespace, an absolute argv[0], and anything
   after a `&&` or `;`. The hook tokenises instead, skipping global flags, and inspects every
