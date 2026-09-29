@@ -343,6 +343,17 @@ provenance manifest is `.claude/harness.json` (source repo, pinned revision, sha
 - `.claude/hooks/inject-rules.py` — `PreToolUse(Write)` hook. Path-scoped rules load on read,
   not on create, so this hook injects the matching rule body when the agent creates a NEW file.
   Tests: `python3 .claude/hooks/test_inject_rules.py`.
+- `.claude/hooks/deny-destructive-cloud.py` — `PreToolUse(Bash)` hook. Refuses
+  `hcloud server delete` and the adjacent destroyers of persistent state (volume, firewall,
+  ssh-key, network, load-balancer). It exists because `permissions.deny` matches the command
+  string by PREFIX, so `Bash(hcloud server delete *)` catches the obvious form and misses
+  `hcloud --context X server delete …`, extra whitespace, an absolute argv[0], and anything
+  after a `&&` or `;`. The hook tokenises instead, skipping global flags, and inspects every
+  segment of a compound command. It fails OPEN on anything it cannot parse — a guard that
+  wedged every Bash call on its own bug would be worse than the risk it covers, and the
+  permission layer is still underneath. The declarative `Bash(hcloud … delete *)` deny
+  entries are kept alongside it so the guard is visible when reading the config, not only
+  when running it. Tests: `python3 .claude/hooks/test_deny_destructive_cloud.py`.
 - `.claude/skills/` and `.codex/skills/` — vendored somnio catalog skills for each agent:
   `git-branch-format`, `git-commit-format`, `harness-audit`, `optimize-claude-config`,
   `security-audit`. The per-agent manifest is `.somnio-skills.json` in each directory; Codex
