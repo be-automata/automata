@@ -225,47 +225,57 @@ describe("#204: the memory-ceiling wrapper", () => {
     // instead of a conditional inside the original.
     const without = buildSpawnInvocation(base);
     for (const off of [undefined, "", "   "]) {
-      expect(buildSpawnInvocation({ ...base, cgroupProcsPath: off })).toEqual(
+      expect(buildSpawnInvocation({ ...base, cgroupReadyPath: off })).toEqual(
         without,
       );
     }
     expect(without.args).toContain(PGID_WRAPPER_SCRIPT);
-    expect(without.env).not.toHaveProperty("AUTOMATA_CGROUP_PROCS");
+    expect(without.env).not.toHaveProperty("AUTOMATA_CGROUP_READY");
   });
 
-  it("joins the cgroup BEFORE the exec, and before the pidfile write", () => {
-    // Moving a process into a cgroup after it starts leaves it allocating
-    // outside the ceiling, and here that window would be a whole node startup.
+  it("records its pid, then BLOCKS until the worker confirms, then execs", () => {
+    // The wrapper cannot join the cgroup itself: cgroup v2 requires write on the
+    // common ancestor's cgroup.procs, which the agent uid does not own, and
+    // chowning it over is EPERM. Measured on the box — the WORKER may move an
+    // agent-uid process in, the agent may not move itself in even at 0666. So
+    // the worker moves it and this script holds still until it has, which is
+    // what keeps the agent inside its ceiling from its first instruction rather
+    // than being moved mid-flight.
     const inv = buildSpawnInvocation({
       ...base,
-      cgroupProcsPath:
-        "/sys/fs/cgroup/system.slice/w.service/run-1/cgroup.procs",
+      cgroupReadyPath: "/tmp/run-1.pid.cgroup-ready",
     });
-    const script = inv.args.find((a) => a.includes("AUTOMATA_CGROUP_PROCS"));
+    const script = inv.args.find((a) => a.includes("AUTOMATA_CGROUP_READY"));
     expect(script).toBe(PGID_CGROUP_WRAPPER_SCRIPT);
-    expect(script).toBeDefined();
-    const s = script ?? "";
-    expect(s.indexOf("AUTOMATA_CGROUP_PROCS")).toBeLessThan(
-      s.indexOf("AUTOMATA_PIDFILE"),
+    const sc = script ?? "";
+    expect(sc.indexOf("AUTOMATA_PIDFILE")).toBeLessThan(
+      sc.indexOf("AUTOMATA_CGROUP_READY"),
     );
-    expect(s.indexOf("AUTOMATA_CGROUP_PROCS")).toBeLessThan(s.indexOf("exec"));
+    expect(sc.indexOf("AUTOMATA_CGROUP_READY")).toBeLessThan(
+      sc.indexOf("exec"),
+    );
+    // The wrapper never writes cgroup.procs — that is the worker's job.
+    expect(sc).not.toContain("cgroup.procs");
   });
 
-  it("fails the join loudly instead of running the agent uncapped", () => {
-    // Falling through to `exec` after a failed join would run the agent with NO
-    // ceiling while every log line claims one was applied. Distinct from the
-    // pidfile's 97 so a failure reason names which write failed.
-    expect(PGID_CGROUP_WRAPPER_SCRIPT).toContain("|| exit 96");
+  it("bounds the wait, and a timeout is FATAL rather than uncapped", () => {
+    // Proceeding to `exec` after a failed handshake would run the agent with no
+    // ceiling while every log line claims one was applied — the silent downgrade
+    // this ticket exists to prevent. 96 is distinct from the pidfile's 97 so a
+    // failure reason names which step failed.
+    expect(PGID_CGROUP_WRAPPER_SCRIPT).toMatch(/-gt 200 \] && exit 96/);
     expect(PGID_CGROUP_WRAPPER_SCRIPT).toContain("|| exit 97");
     expect(PGID_WRAPPER_SCRIPT).not.toContain("exit 96");
+    // An unbounded wait would hang every run on a wedged worker instead.
+    expect(PGID_CGROUP_WRAPPER_SCRIPT).toMatch(/i=\$\(\(i\+1\)\)/);
   });
 
   it("passes the cgroup path by ENVIRONMENT, never interpolated into sh -c", () => {
     // Same rule the pidfile follows: no caller-controlled string is ever parsed
     // as shell.
-    const evil = "/sys/fs/cgroup/x/run-1/cgroup.procs; rm -rf /";
-    const inv = buildSpawnInvocation({ ...base, cgroupProcsPath: evil });
-    expect(inv.env.AUTOMATA_CGROUP_PROCS).toBe(evil);
+    const evil = "/tmp/run-1.ready; rm -rf /";
+    const inv = buildSpawnInvocation({ ...base, cgroupReadyPath: evil });
+    expect(inv.env.AUTOMATA_CGROUP_READY).toBe(evil);
     expect(inv.args.join(" ")).not.toContain("rm -rf");
   });
 
@@ -273,7 +283,7 @@ describe("#204: the memory-ceiling wrapper", () => {
     const inv = buildSpawnInvocation({
       ...base,
       agentUser: "",
-      cgroupProcsPath: "/sys/fs/cgroup/x/run-1/cgroup.procs",
+      cgroupReadyPath: "/tmp/run-1.ready",
     });
     expect(inv).toEqual({ file: base.file, args: base.args, env: {} });
   });

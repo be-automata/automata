@@ -621,3 +621,28 @@ describe("#204: the unit delegates a cgroup subtree, narrowly", () => {
     expect(unit).toMatch(/systemd-run/);
   });
 });
+
+describe("#204: hardening must not fence out the delegated subtree", () => {
+  const unitFile = () =>
+    read(path.join(workerRoot, "deploy", "linux", "automata-worker.service"));
+
+  it("never sets ProtectControlGroups alongside Delegate=", () => {
+    // `ProtectControlGroups=yes` remounts /sys/fs/cgroup read-only inside the
+    // unit's namespace, so the delegated subtree is correctly OWNED and totally
+    // unwritable. The worker then reports "ceiling OFF, the unit needs
+    // Delegate=" while Delegate= is right there — a one-line cause with a
+    // maximally misleading symptom. Isolated on the box: this setting alone
+    // breaks it; ProtectKernelTunables and ProtectSystem=full do not.
+    const unit = unitFile();
+    if (!/^Delegate=/m.test(unit)) return;
+    expect(unit).not.toMatch(/^ProtectControlGroups=(yes|true)$/m);
+  });
+
+  it("keeps the hardening that does NOT conflict", () => {
+    // The fix is one line, not the whole block — removing more than necessary
+    // would be the wrong trade.
+    const unit = unitFile();
+    expect(unit).toMatch(/^ProtectKernelTunables=yes$/m);
+    expect(unit).toMatch(/^ProtectSystem=full$/m);
+  });
+});

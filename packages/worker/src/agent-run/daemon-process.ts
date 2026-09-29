@@ -19,6 +19,7 @@ import {
   assessCgroupSupport,
   createRunCgroup,
   killAndRemoveRunCgroup,
+  moveIntoCgroup,
   readOomKillCount,
 } from "./run-cgroup";
 import { redactSecrets } from "./redact";
@@ -144,6 +145,14 @@ export class DaemonProcess {
   private observedOomKills = 0;
 
   /**
+   * The marker the wrapper blocks on. Lives beside the pidfile — the same dir the
+   * agent can already read — so the handshake needs no new grant.
+   */
+  private cgroupReadyPath(): string {
+    return `${this.pidFilePath}.cgroup-ready`;
+  }
+
+  /**
    * Build the sanitized child env once (idempotent). Creates the isolated EMPTY gh
    * config dir so the agent's `gh` can't read the operator's stored OAuth (hosts.yml)
    * and post as the human — it must use the installation token → the App bot. The dir
@@ -246,9 +255,7 @@ export class DaemonProcess {
         this.socketPath,
       ],
       pidFilePath: this.pidFilePath,
-      ...(this.cgroupDir
-        ? { cgroupProcsPath: path.join(this.cgroupDir, "cgroup.procs") }
-        : {}),
+      ...(this.cgroupDir ? { cgroupReadyPath: this.cgroupReadyPath() } : {}),
     });
 
     this.child = (this.deps.spawnFn ?? spawn)(
@@ -278,6 +285,22 @@ export class DaemonProcess {
     this.child.stderr?.resume();
 
     this.pgid = await this.resolvePgid();
+
+    // #204: the handshake. resolvePgid() has just waited for the wrapper to
+    // record its own pid; the wrapper is now BLOCKED before its `exec`. Move it
+    // into the run cgroup — which only the worker may do, across the uid split —
+    // and then release it. The pid survives `exec`, so the agent starts inside
+    // its ceiling rather than being moved mid-flight.
+    if (this.cgroupDir) {
+      if (this.pgid == null) {
+        throw new Error(
+          "the memory ceiling is on but the wrapper never recorded a pid, so it " +
+            "could not be placed in its cgroup; refusing to run the agent uncapped",
+        );
+      }
+      moveIntoCgroup({ cgroupDir: this.cgroupDir, pid: this.pgid });
+      fs.writeFileSync(this.cgroupReadyPath(), "");
+    }
 
     await this.waitForSocket();
   }
@@ -421,6 +444,11 @@ export class DaemonProcess {
     // a recycled pid and the next same-threadId run binds clean.
     try {
       fs.rmSync(this.pidFilePath, { force: true });
+    } catch {
+      // ignore
+    }
+    try {
+      fs.rmSync(this.cgroupReadyPath(), { force: true });
     } catch {
       // ignore
     }

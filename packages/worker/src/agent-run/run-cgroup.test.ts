@@ -3,6 +3,7 @@ import {
   assessCgroupSupport,
   createRunCgroup,
   killAndRemoveRunCgroup,
+  moveIntoCgroup,
   parseCgroupPath,
   parseControllers,
   prepareDelegatedRoot,
@@ -27,7 +28,7 @@ function fakeFs(seed: Record<string, string> = {}) {
   const files: Record<string, string> = { ...seed };
   const dirs: string[] = [];
   const writes: [string, string][] = [];
-  const chowns: [string, number, number][] = [];
+
   const removed: string[] = [];
   const fsi: CgroupFs = {
     mkdir: (d) => void dirs.push(d),
@@ -41,9 +42,8 @@ function fakeFs(seed: Record<string, string> = {}) {
       return v;
     },
     rmdir: (d) => void removed.push(d),
-    chown: (f, u, g) => void chowns.push([f, u, g]),
   };
-  return { fsi, files, dirs, writes, chowns, removed };
+  return { fsi, files, dirs, writes, removed };
 }
 
 describe("parseCgroupPath", () => {
@@ -194,24 +194,13 @@ describe("createRunCgroup", () => {
     ]);
   });
 
-  it("chowns ONLY cgroup.procs to the agent uid", () => {
-    // The wrapper joins the cgroup itself before `exec`, so nothing allocates
-    // outside the ceiling — that needs this one file writable by the agent.
-    // Chowning anything else would let the agent raise its own limit.
-    const f = fakeFs();
-    createRunCgroup({
-      root,
-      threadId: "thr-1",
-      memoryMaxBytes: 1,
-      tasksMax: 1,
-      agentUid: 999,
-      agentGid: 987,
-      fsi: f.fsi,
-    });
-    expect(f.chowns).toEqual([[`${root}/run-thr-1/cgroup.procs`, 999, 987]]);
-  });
-
-  it("chowns nothing when agent-uid mode is off", () => {
+  it("hands NOTHING to the agent — every file stays worker-owned", () => {
+    // An earlier shape chowned cgroup.procs to the agent so the wrapper could
+    // join itself. That is EPERM (an unprivileged user cannot give a file away)
+    // and unnecessary: measured on the box, the WORKER may move an agent-uid
+    // process in, while the agent may not move itself in even at 0666. Leaving
+    // every file worker-owned is also what stops the agent raising its own
+    // ceiling.
     const f = fakeFs();
     createRunCgroup({
       root,
@@ -220,7 +209,11 @@ describe("createRunCgroup", () => {
       tasksMax: 1,
       fsi: f.fsi,
     });
-    expect(f.chowns).toEqual([]);
+    expect(f.writes.map(([file]) => file)).toEqual([
+      `${root}/run-thr-1/memory.max`,
+      `${root}/run-thr-1/memory.swap.max`,
+      `${root}/run-thr-1/pids.max`,
+    ]);
   });
 
   it("sanitises the threadId, because it becomes a path", () => {
@@ -272,7 +265,6 @@ describe("killAndRemoveRunCgroup", () => {
       rmdir: () => {
         throw new Error("EBUSY");
       },
-      chown: () => {},
     };
     expect(() =>
       killAndRemoveRunCgroup({
@@ -284,5 +276,30 @@ describe("killAndRemoveRunCgroup", () => {
     // ...but it must SAY so, or residue accumulates invisibly.
     expect(logs.join("\n")).toMatch(/cgroup\.kill failed/);
     expect(logs.join("\n")).toMatch(/rmdir failed/);
+  });
+});
+
+describe("moveIntoCgroup", () => {
+  it("writes the pid into cgroup.procs — the worker's move, not the agent's", () => {
+    const f = fakeFs();
+    moveIntoCgroup({ cgroupDir: "/cg/run-1", pid: 4242, fsi: f.fsi });
+    expect(f.writes).toEqual([["/cg/run-1/cgroup.procs", "4242"]]);
+  });
+
+  it("propagates failure rather than running the agent uncapped", () => {
+    // A run whose membership did not land would execute with NO ceiling while
+    // every log line says one was applied. That silent downgrade is the exact
+    // failure this ticket exists to prevent, so this must throw.
+    const throwing: CgroupFs = {
+      mkdir: () => {},
+      write: () => {
+        throw new Error("EPERM");
+      },
+      read: () => "",
+      rmdir: () => {},
+    };
+    expect(() =>
+      moveIntoCgroup({ cgroupDir: "/cg/run-1", pid: 1, fsi: throwing }),
+    ).toThrow(/EPERM/);
   });
 });

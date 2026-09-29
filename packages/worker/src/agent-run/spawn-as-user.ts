@@ -65,20 +65,32 @@ export const PGID_WRAPPER_SCRIPT =
  * exact argv equality, and a conditional would change the string even when the
  * feature is off.
  *
- * JOINING THE CGROUP MUST PRECEDE THE EXEC. Moving a process into a cgroup after
- * it starts leaves a window in which it allocates outside the ceiling, and on
- * this path that window is a whole node startup. Writing `$$` here puts the
- * wrapper in the cgroup before `exec` replaces it, and `exec` keeps the pid, so
- * the agent is never once outside its limit.
+ * WHY THE WRAPPER WAITS INSTEAD OF JOINING. The obvious shape — the wrapper
+ * writes its own `$$` into `cgroup.procs` — cannot work. cgroup v2 delegation
+ * requires write access to the destination's `cgroup.procs` AND to the common
+ * ancestor's, and the agent uid owns neither; chowning them to the agent is
+ * itself EPERM, because an unprivileged user cannot give a file away. Measured
+ * on the box from the worker's own delegated subtree: the agent moving itself in
+ * is refused even with `cgroup.procs` at 0666, while the WORKER moving the
+ * agent's process in succeeds.
  *
- * `|| exit 96` is load-bearing for the same reason `|| exit 97` is on the pidfile
- * write: falling through to `exec` after a failed join would run the agent
- * UNCAPPED while every log line says the ceiling was applied. 96 is distinct from
- * 97 so a failure reason names which write failed.
+ * So the worker performs the move, and this wrapper's job is to hold still until
+ * it has. The order is: write `$$` (which the worker is already waiting for, for
+ * the pgid contract) → BLOCK until the worker signals membership → `exec`. The
+ * pid survives `exec`, so the agent runs inside the ceiling from its very first
+ * instruction rather than being moved mid-flight.
+ *
+ * The wait is BOUNDED and its expiry is fatal. Proceeding to `exec` after a
+ * failed handshake would run the agent with no ceiling at all while every log
+ * line claims one was applied, and this ticket's whole premise is that a silent
+ * downgrade is worse than a run that dies. 96 is distinct from the pidfile's 97
+ * so a failure reason names which step failed.
  */
 export const PGID_CGROUP_WRAPPER_SCRIPT =
-  'printf %s "$$" > "$AUTOMATA_CGROUP_PROCS" || exit 96; ' +
-  'printf %s "$$" > "$AUTOMATA_PIDFILE" || exit 97; exec "$AUTOMATA_NODE" "$@"';
+  'printf %s "$$" > "$AUTOMATA_PIDFILE" || exit 97; ' +
+  'i=0; while [ ! -e "$AUTOMATA_CGROUP_READY" ]; do ' +
+  'i=$((i+1)); [ "$i" -gt 200 ] && exit 96; sleep 0.05; done; ' +
+  'exec "$AUTOMATA_NODE" "$@"';
 
 /** `$0` for the wrapper shell — cosmetic, but it names the process in `ps`. */
 const WRAPPER_ARGV0 = "automata-daemon";
@@ -123,19 +135,19 @@ export function buildSpawnInvocation(opts: {
   /** Where the wrapper records its own pgid. Only used in agent-uid mode. */
   pidFilePath: string;
   /**
-   * #204: absolute path to this run's `<cgroup>/cgroup.procs`. Absent (the
-   * default) ⇒ no ceiling and the argv below is unchanged. Only meaningful in
-   * agent-uid mode, because without the uid drop there is no separate process
-   * to cap.
+   * #204: absolute path to the marker the WORKER creates once it has moved this
+   * run into its cgroup. Absent (the default) ⇒ no ceiling and the argv below is
+   * unchanged. Only meaningful in agent-uid mode, because without the uid drop
+   * there is no separate process to cap.
    */
-  cgroupProcsPath?: string;
+  cgroupReadyPath?: string;
 }): Invocation {
   const { agentUser, file, args, pidFilePath } = opts;
   if (!agentUser) {
     return { file, args, env: {} };
   }
   assertAgentUser(agentUser);
-  const cgroupProcsPath = opts.cgroupProcsPath?.trim() || "";
+  const cgroupReadyPath = opts.cgroupReadyPath?.trim() || "";
   return {
     file: SUDO_BIN,
     args: [
@@ -146,14 +158,14 @@ export function buildSpawnInvocation(opts: {
       "--",
       SH_BIN,
       "-c",
-      cgroupProcsPath ? PGID_CGROUP_WRAPPER_SCRIPT : PGID_WRAPPER_SCRIPT,
+      cgroupReadyPath ? PGID_CGROUP_WRAPPER_SCRIPT : PGID_WRAPPER_SCRIPT,
       WRAPPER_ARGV0,
       ...args,
     ],
     env: {
       AUTOMATA_PIDFILE: pidFilePath,
       AUTOMATA_NODE: file,
-      ...(cgroupProcsPath ? { AUTOMATA_CGROUP_PROCS: cgroupProcsPath } : {}),
+      ...(cgroupReadyPath ? { AUTOMATA_CGROUP_READY: cgroupReadyPath } : {}),
     },
   };
 }

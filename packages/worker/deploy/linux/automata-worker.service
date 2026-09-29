@@ -123,7 +123,22 @@ ReadWritePaths=/usr/local/automata
 
 ProtectHome=no
 ProtectKernelTunables=yes
-ProtectControlGroups=yes
+
+# ProtectControlGroups is deliberately NOT set, and this is the one hardening
+# line that cannot coexist with the ceiling above. `=yes` remounts
+# /sys/fs/cgroup READ-ONLY inside this unit's namespace, so the delegated subtree
+# stays correctly owned (automata:automata) and entirely unwritable — the worker
+# then logs "ceiling OFF" citing a missing Delegate= that is in fact present,
+# which is a maximally confusing symptom for a one-line cause.
+#
+# Isolated on the box rather than assumed, because removing more hardening than
+# necessary would be the wrong trade. With Delegate=memory pids:
+#   baseline (no hardening) ............ subtree_control WRITABLE
+#   ProtectControlGroups=yes ........... read-only   <-- the culprit
+#   ProtectKernelTunables=yes .......... WRITABLE
+#   ProtectSystem=full ................. WRITABLE
+#   the other two together ............. WRITABLE
+# So exactly one line goes; the other two stay.
 RestrictSUIDSGID=no
 
 [Install]

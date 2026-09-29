@@ -165,7 +165,6 @@ export interface CgroupFs {
   write: (file: string, value: string) => void;
   read: (file: string) => string;
   rmdir: (dir: string) => void;
-  chown: (file: string, uid: number, gid: number) => void;
 }
 
 const defaultFs: CgroupFs = {
@@ -173,7 +172,6 @@ const defaultFs: CgroupFs = {
   write: (file, value) => fs.writeFileSync(file, value),
   read: (file) => fs.readFileSync(file, "utf8"),
   rmdir: (dir) => fs.rmdirSync(dir),
-  chown: (file, uid, gid) => fs.chownSync(file, uid, gid),
 };
 
 /**
@@ -224,19 +222,26 @@ export function prepareDelegatedRoot(opts: {
  * toward the fork/posix_spawn ENOMEM that takes worker, engine and Postgres
  * together.
  *
- * `cgroup.procs` is chowned to the agent uid — and ONLY that file — because the
- * wrapper joins the cgroup itself before `exec`, so the agent never allocates
- * outside its ceiling. Everything else in the cgroup stays owned by the worker,
- * so the agent cannot raise its own limit.
+ * NOTHING here is handed to the agent. An earlier shape chowned `cgroup.procs`
+ * to the agent uid so the wrapper could join the cgroup itself; that is both
+ * impossible (an unprivileged user cannot give a file away to another uid —
+ * EPERM) and unnecessary. Measured on the box from the worker's OWN delegated
+ * subtree, which is production's shape:
+ *
+ *   worker moves its own same-uid child ................. OK
+ *   worker moves an AGENT-uid child (spawned via sudo) .. OK
+ *   agent moves ITSELF in, even with cgroup.procs 0666 .. refused
+ *
+ * cgroup v2 delegation requires write on the destination's `cgroup.procs` AND on
+ * the common ancestor's, and the agent owns neither. The worker owns both. So the
+ * worker performs the move, and every file in the cgroup stays worker-owned —
+ * which is also why the agent cannot raise its own limit.
  */
 export function createRunCgroup(opts: {
   root: string;
   threadId: string;
   memoryMaxBytes: number;
   tasksMax: number;
-  /** uid/gid of the agent role account, when agent-uid mode is on. */
-  agentUid?: number;
-  agentGid?: number;
   fsi?: CgroupFs;
 }): string {
   const { root, threadId, memoryMaxBytes, tasksMax } = opts;
@@ -248,10 +253,29 @@ export function createRunCgroup(opts: {
   io.write(path.join(dir, "memory.swap.max"), "0");
   io.write(path.join(dir, "pids.max"), String(tasksMax));
 
-  if (opts.agentUid != null && opts.agentGid != null) {
-    io.chown(path.join(dir, "cgroup.procs"), opts.agentUid, opts.agentGid);
-  }
   return dir;
+}
+
+/**
+ * Put one process into this run's cgroup. Performed by the WORKER, which is the
+ * only party permitted to — see createRunCgroup's note for the measurements.
+ *
+ * Called with the wrapper's own pid (the one it recorded for the pgid contract),
+ * AFTER it has been recorded and BEFORE the wrapper execs the agent. The pid
+ * survives `exec`, so the agent runs inside the ceiling from its first
+ * instruction rather than being moved mid-flight.
+ *
+ * Throws on failure. A run whose cgroup membership did not land would execute
+ * with NO ceiling while every log line says one was applied, and that silent
+ * downgrade is the failure this whole ticket exists to prevent.
+ */
+export function moveIntoCgroup(opts: {
+  cgroupDir: string;
+  pid: number;
+  fsi?: CgroupFs;
+}): void {
+  const io = opts.fsi ?? defaultFs;
+  io.write(path.join(opts.cgroupDir, "cgroup.procs"), String(opts.pid));
 }
 
 /**
