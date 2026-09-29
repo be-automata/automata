@@ -90,6 +90,16 @@ vi.mock("./box-lock", () => ({
     return { release: releaseMock, lost: false };
   }),
 }));
+// Same hazard once more: with WORKER_AGENT_USER set (the #108 cases below),
+// the real ensureRunNamespace applies REAL ACLs (macOS chmod +a / Linux
+// setfacl) for that account on the box's production namespace root. That only
+// ever passed on machines where the agent account exists — on any other box
+// (CI runners included) the exec fails and takes the run down with it.
+// Everything else run-namespace exports stays real.
+vi.mock("./run-namespace", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./run-namespace")>()),
+  ensureRunNamespace: vi.fn(async () => "/tmp/automata-agent-run/test"),
+}));
 // #184 (#152 Stage B2): the real reaper's default spawnKill is a REAL
 // `sudo kill -9 -- -1` as the agent uid — lethal to live work on the pilot
 // box. This mock is the ONLY fence and lands in the same edit as the workflow

@@ -180,7 +180,9 @@ setInterval(() => {}, 1000);
   }
 
   it("spawns with a per-run --socket-path and writes the per-run pidfile", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ns-root-"));
+    // Short root prefix: see fixture() below — the socket path must stay
+    // under Darwin's 104-byte sun_path cap or bind/connect silently truncate.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dpn-"));
     const scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ns-script-"));
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ns-wd-"));
     tmpDirs.push(root, scriptDir, workdir);
@@ -239,6 +241,20 @@ setInterval(() => {}, 1000);
   }) {
     return ((file: string, args: string[], spawnOpts?: SpawnOptions) => {
       opts.recorded.push({ file, args });
+      // Bind the daemon socket HERE, like the real daemon: only after spawn,
+      // never before start(). start()'s cleanOwnStaleFiles() rmSync's the
+      // socket path, so a socket the test pre-binds is unlinked and
+      // waitForSocket polls ENOENT to its timeout on Linux. macOS masked
+      // this for months: these paths exceeded sun_path's 104-byte cap, and
+      // Darwin's bind(2)/connect(2) BOTH silently truncate, so the rmSync of
+      // the full-length name never touched the file actually bound.
+      const flagIdx = args.indexOf("--socket-path");
+      const boundSocket = flagIdx === -1 ? undefined : args[flagIdx + 1];
+      if (boundSocket !== undefined) {
+        const server = net.createServer();
+        servers.push(server);
+        server.listen(boundSocket);
+      }
       const pidFile = (spawnOpts?.env as Record<string, string> | undefined)
         ?.AUTOMATA_PIDFILE;
       if (opts.wrapperPgid != null && pidFile) {
@@ -261,13 +277,6 @@ setInterval(() => {}, 1000);
     }) as unknown as typeof spawn;
   }
 
-  /** Bind the socket ourselves so waitForSocket resolves without a real daemon. */
-  async function bindSocket(p: string): Promise<void> {
-    const server = net.createServer();
-    servers.push(server);
-    await new Promise<void>((resolve) => server.listen(p, () => resolve()));
-  }
-
   it("applies no ACE and spawns nodeBin DIRECTLY when agentUser is empty (default-off proof)", async () => {
     const { root, workdir, input } = fixture();
     const aceCalls: string[][] = [];
@@ -284,7 +293,6 @@ setInterval(() => {}, 1000);
       spawnFn: fakeSpawn({ recorded }),
     });
     daemons.push(daemon);
-    await bindSocket(socket);
     await daemon.start();
 
     expect(aceCalls).toEqual([]);
@@ -430,7 +438,6 @@ setInterval(() => {}, 1000);
       platform: "darwin",
     });
     daemons.push(daemon);
-    await bindSocket(socket);
     await daemon.start();
 
     expect(aceCalls).toEqual([]);
@@ -454,7 +461,6 @@ setInterval(() => {}, 1000);
       platform: "darwin",
     });
     daemons.push(daemon);
-    await bindSocket(socket);
     await daemon.start();
 
     expect(recorded[0]?.file).toBe("/usr/bin/sudo");
@@ -495,7 +501,6 @@ setInterval(() => {}, 1000);
       platform: "darwin",
     });
     daemons.push(daemon);
-    await bindSocket(socket);
     await daemon.start();
     daemon.teardown();
 
@@ -518,12 +523,16 @@ setInterval(() => {}, 1000);
   });
 
   function fixture() {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-root-"));
+    // Short prefixes + a short threadId on purpose: the socket path must stay
+    // under sun_path's cap (104 bytes on Darwin, where os.tmpdir() is already
+    // ~50 chars) or macOS bind/connect silently truncate it and the suite
+    // stops testing the path it thinks it does.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dpa-"));
     const scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-script-"));
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-wd-"));
     tmpDirs.push(root, scriptDir, workdir);
     const input: AgentRunInput = {
-      threadId: `thr_ace_${Math.random().toString(36).slice(2)}`,
+      threadId: `t_${Math.random().toString(36).slice(2, 8)}`,
       threadChatId: "tc_1",
       repoFullName: "o/r",
       branch: "main",
