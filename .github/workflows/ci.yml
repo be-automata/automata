@@ -111,6 +111,9 @@ jobs:
           run_pkg @terragon/www
           run_pkg @terragon/daemon
           run_pkg @terragon/sandbox
+          # #171: the execution plane's own unit suite. worker-e2e below is NOT
+          # a substitute — it runs four integration files against hatchet-lite.
+          run_pkg @terragon/worker
 
           echo "::group::review (node --test)"
           pnpm --filter @terragon/review test

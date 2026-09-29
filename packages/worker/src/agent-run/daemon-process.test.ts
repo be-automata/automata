@@ -24,6 +24,10 @@ import type { AgentRunInput } from "./types";
 
 let servers: net.Server[] = [];
 let socketPaths: string[] = [];
+// Bind failures from fakeSpawn's fire-and-forget listen() (see below) — an
+// unhandled 'error' event would crash the whole run with no test named, so
+// they are collected here and rethrown by afterEach against the right test.
+const bindErrors: Error[] = [];
 
 function socketPath(): string {
   const p = path.join(
@@ -73,6 +77,11 @@ afterEach(() => {
     }
   }
   socketPaths = [];
+  if (bindErrors.length > 0) {
+    const first = bindErrors[0];
+    bindErrors.length = 0;
+    throw first;
+  }
 });
 
 describe("writeDaemonMessage", () => {
@@ -141,6 +150,15 @@ describe("DaemonProcess per-run socket (Phase 0.2b)", () => {
   const tmpDirs: string[] = [];
   const daemons: DaemonProcess[] = [];
 
+  /**
+   * Fail loudly if a fixture ever grows past Darwin's sun_path cap again —
+   * over it, macOS bind(2)/connect(2) silently truncate and the suite tests
+   * a different path than it thinks (the false pass this file used to have).
+   */
+  function assertUnderSunPathCap(socket: string): void {
+    expect(Buffer.byteLength(socket)).toBeLessThan(104);
+  }
+
   afterEach(() => {
     for (const d of daemons) d.teardown();
     daemons.length = 0;
@@ -180,7 +198,9 @@ setInterval(() => {}, 1000);
   }
 
   it("spawns with a per-run --socket-path and writes the per-run pidfile", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ns-root-"));
+    // Short root prefix: see fixture() below — the socket path must stay
+    // under Darwin's 104-byte sun_path cap or bind/connect silently truncate.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dpn-"));
     const scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ns-script-"));
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ns-wd-"));
     tmpDirs.push(root, scriptDir, workdir);
@@ -201,12 +221,14 @@ setInterval(() => {}, 1000);
       orgId: "org-1",
     };
 
+    const workerId = getProcessWorkerId();
+    const expectedSocket = runSocketPath(root, workerId, threadId);
+    assertUnderSunPathCap(expectedSocket);
+
     const daemon = new DaemonProcess(config, input, workdir);
     daemons.push(daemon);
     await daemon.start();
 
-    const workerId = getProcessWorkerId();
-    const expectedSocket = runSocketPath(root, workerId, threadId);
     const expectedPidFile = runPidPath(root, workerId, threadId);
 
     // The fake daemon bound EXACTLY the per-run socket it was handed → the flag
@@ -239,6 +261,21 @@ setInterval(() => {}, 1000);
   }) {
     return ((file: string, args: string[], spawnOpts?: SpawnOptions) => {
       opts.recorded.push({ file, args });
+      // Bind the daemon socket HERE, like the real daemon: only after spawn,
+      // never before start(). start()'s cleanOwnStaleFiles() rmSync's the
+      // socket path, so a socket the test pre-binds is unlinked and
+      // waitForSocket polls ENOENT to its timeout on Linux. macOS masked
+      // this for months: these paths exceeded sun_path's 104-byte cap, and
+      // Darwin's bind(2)/connect(2) BOTH silently truncate, so the rmSync of
+      // the full-length name never touched the file actually bound.
+      const flagIdx = args.indexOf("--socket-path");
+      const boundSocket = flagIdx === -1 ? undefined : args[flagIdx + 1];
+      if (boundSocket !== undefined) {
+        const server = net.createServer();
+        server.on("error", (err) => void bindErrors.push(err));
+        servers.push(server);
+        server.listen(boundSocket);
+      }
       const pidFile = (spawnOpts?.env as Record<string, string> | undefined)
         ?.AUTOMATA_PIDFILE;
       if (opts.wrapperPgid != null && pidFile) {
@@ -261,13 +298,6 @@ setInterval(() => {}, 1000);
     }) as unknown as typeof spawn;
   }
 
-  /** Bind the socket ourselves so waitForSocket resolves without a real daemon. */
-  async function bindSocket(p: string): Promise<void> {
-    const server = net.createServer();
-    servers.push(server);
-    await new Promise<void>((resolve) => server.listen(p, () => resolve()));
-  }
-
   it("applies no ACE and spawns nodeBin DIRECTLY when agentUser is empty (default-off proof)", async () => {
     const { root, workdir, input } = fixture();
     const aceCalls: string[][] = [];
@@ -284,7 +314,6 @@ setInterval(() => {}, 1000);
       spawnFn: fakeSpawn({ recorded }),
     });
     daemons.push(daemon);
-    await bindSocket(socket);
     await daemon.start();
 
     expect(aceCalls).toEqual([]);
@@ -430,7 +459,6 @@ setInterval(() => {}, 1000);
       platform: "darwin",
     });
     daemons.push(daemon);
-    await bindSocket(socket);
     await daemon.start();
 
     expect(aceCalls).toEqual([]);
@@ -454,7 +482,6 @@ setInterval(() => {}, 1000);
       platform: "darwin",
     });
     daemons.push(daemon);
-    await bindSocket(socket);
     await daemon.start();
 
     expect(recorded[0]?.file).toBe("/usr/bin/sudo");
@@ -495,7 +522,6 @@ setInterval(() => {}, 1000);
       platform: "darwin",
     });
     daemons.push(daemon);
-    await bindSocket(socket);
     await daemon.start();
     daemon.teardown();
 
@@ -518,12 +544,16 @@ setInterval(() => {}, 1000);
   });
 
   function fixture() {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-root-"));
+    // Short prefixes + a short threadId on purpose: the socket path must stay
+    // under sun_path's cap (104 bytes on Darwin, where os.tmpdir() is already
+    // ~50 chars) or macOS bind/connect silently truncate it and the suite
+    // stops testing the path it thinks it does.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dpa-"));
     const scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-script-"));
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-wd-"));
     tmpDirs.push(root, scriptDir, workdir);
     const input: AgentRunInput = {
-      threadId: `thr_ace_${Math.random().toString(36).slice(2)}`,
+      threadId: `t_${Math.random().toString(36).slice(2, 8)}`,
       threadChatId: "tc_1",
       repoFullName: "o/r",
       branch: "main",
@@ -532,6 +562,9 @@ setInterval(() => {}, 1000);
       daemonToken: "daemon",
       orgId: "org-1",
     };
+    assertUnderSunPathCap(
+      runSocketPath(root, getProcessWorkerId(), input.threadId),
+    );
     return { root, scriptDir, workdir, input };
   }
 });
