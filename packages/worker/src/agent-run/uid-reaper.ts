@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -80,6 +81,10 @@ export interface ReapAgentUidOpts {
   /** How long the post-kill residual poll may run; default 2000 ms. */
   residualBoundMs?: number;
   now?: () => number;
+  /** #210, injected for tests. Default: read `/proc/self/cgroup`. */
+  cgroupScope?: () => string | null;
+  /** #210, injected for tests. Default: read `/proc/<pid>/cgroup`. */
+  inWorkerScope?: (pid: number, scope: string) => boolean;
 }
 
 export interface ReapAgentUidResult {
@@ -195,6 +200,75 @@ export function parsePsOutput(text: string): ProcRow[] {
 }
 
 /**
+ * The worker's own cgroup v2 path, or null when there is no cgroup v2 to read
+ * (macOS, cgroup v1, an unreadable /proc) — null means "do not filter", which
+ * keeps every non-Linux box behaving exactly as it does today.
+ *
+ * The `supervisor/` leaf is stripped because #204 moves the worker into it at
+ * boot: the scope we care about is the DELEGATED ROOT, which is that leaf's
+ * parent and contains both the supervisor and every run cgroup.
+ */
+export function readSelfCgroupScope(
+  read: (p: string) => string = (f) => fs.readFileSync(f, "utf8"),
+): string | null {
+  let raw: string;
+  try {
+    raw = read("/proc/self/cgroup");
+  } catch {
+    return null;
+  }
+  const line = raw
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.startsWith("0::"));
+  const rel = line?.slice("0::".length);
+  if (!rel || !rel.startsWith("/")) return null;
+  return path.basename(rel) === "supervisor" ? path.dirname(rel) : rel;
+}
+
+/**
+ * Is this pid inside the worker's own cgroup subtree?
+ *
+ * WHY THIS EXISTS. The uid scan assumed the agent uid belongs to the agent and
+ * nothing else. On a box that also runs the execution plane's containers that is
+ * false: the `postgres` image uses uid 999, the agent account was created at uid
+ * 999, and the host sees container processes by their host-side uid — so the
+ * scan killed the engine's own database three times per run, 45 restarts deep
+ * before anyone noticed (#210).
+ *
+ * WHY THE CGROUP IS THE RIGHT DISCRIMINATOR, and not a `docker-*.scope` denylist:
+ * cgroup membership is INHERITED at fork and does not change on `setsid`, on
+ * re-parenting to pid 1, or on anything else an escapee does. That is exactly the
+ * property the escapee hunt needs — a process that fled its process group cannot
+ * flee its cgroup — so scoping by cgroup is strictly more precise than matching a
+ * uid, collision or no collision. A denylist would also have to be maintained
+ * against every future runtime on the box; this does not.
+ *
+ * Unreadable `/proc/<pid>/cgroup` ⇒ NOT ours. A process we cannot place is one we
+ * cannot justify SIGKILLing, and the cost of missing an escapee is bounded (the
+ * next phase rescans) while the cost of a false positive is a dead database.
+ */
+export function isInWorkerCgroupScope(
+  pid: number,
+  workerScope: string,
+  read: (p: string) => string = (f) => fs.readFileSync(f, "utf8"),
+): boolean {
+  let raw: string;
+  try {
+    raw = read(`/proc/${pid}/cgroup`);
+  } catch {
+    return false;
+  }
+  const line = raw
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.startsWith("0::"));
+  const rel = line?.slice("0::".length);
+  if (!rel) return false;
+  return rel === workerScope || rel.startsWith(`${workerScope}/`);
+}
+
+/**
  * The agent-uid rows minus ourselves, pid 1 and kernel-owned groups (pgid ≤
  * 0), split into kill targets and the known per-user helpers.
  */
@@ -202,20 +276,30 @@ export function selectAgentRows(
   rows: ProcRow[],
   uid: number,
   selfPid: number,
-): { targets: ProcRow[]; helpers: ProcRow[] } {
+  /**
+   * #210: when given, a row must ALSO be inside the worker's cgroup subtree.
+   * Omitted (macOS, no cgroup v2) ⇒ uid alone decides, exactly as before.
+   */
+  inScope?: (pid: number) => boolean,
+): { targets: ProcRow[]; helpers: ProcRow[]; foreign: ProcRow[] } {
   const targets: ProcRow[] = [];
   const helpers: ProcRow[] = [];
+  const foreign: ProcRow[] = [];
   for (const row of rows) {
     if (row.uid !== uid) continue;
     if (row.pid === selfPid || row.pid === 1) continue;
     if (row.pgid <= 0) continue;
+    if (inScope && !inScope(row.pid)) {
+      foreign.push(row);
+      continue;
+    }
     if (MACOS_PER_USER_HELPERS.has(path.basename(row.comm))) {
       helpers.push(row);
     } else {
       targets.push(row);
     }
   }
-  return { targets, helpers };
+  return { targets, helpers, foreign };
 }
 
 /** The default enumerator: `ps -A -o pid,pgid,uid,comm` (UNIX-style options). */
@@ -323,6 +407,8 @@ export async function reapAgentUidEscapees(
     settleMs = phase === "teardown" ? TEARDOWN_SETTLE_MS : 0,
     residualBoundMs = DEFAULT_RESIDUAL_BOUND_MS,
     now = Date.now,
+    cgroupScope = readSelfCgroupScope,
+    inWorkerScope = isInWorkerCgroupScope,
   } = opts;
 
   if (!agentUser) {
@@ -352,7 +438,27 @@ export async function reapAgentUidEscapees(
       return { ...zeroResult(false, now() - startedAt), error };
     }
 
-    const selected = selectAgentRows(rows, uid, selfPid);
+    // #210: scope the scan to the worker's own cgroup subtree. Null scope (no
+    // cgroup v2 — macOS, cgroup v1) ⇒ uid alone decides, as before.
+    const workerScope = cgroupScope();
+    const selected = selectAgentRows(
+      rows,
+      uid,
+      selfPid,
+      workerScope ? (pid) => inWorkerScope(pid, workerScope) : undefined,
+    );
+    if (selected.foreign.length > 0) {
+      // Loud, because this is the line that would have caught #210 on day one:
+      // processes sharing the agent's uid that are NOT ours, and are therefore
+      // never killed.
+      log(
+        `box.escapees_out_of_scope ${JSON.stringify({
+          ...base,
+          scope: workerScope,
+          spared: selected.foreign.length,
+        })}`,
+      );
+    }
     const scanned = selected.targets.length;
     const groups = new Set(selected.targets.map((r) => r.pgid)).size;
     const helpers = selected.helpers.length;

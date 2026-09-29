@@ -16,6 +16,8 @@ import {
   parsePsOutput,
   reapAgentUidEscapees,
   selectAgentRows,
+  readSelfCgroupScope,
+  isInWorkerCgroupScope,
   type BootUidScanOpts,
   type BoxBudgetSnapshot,
   type KillExit,
@@ -186,6 +188,88 @@ describe("selectAgentRows (AC2, AC5)", () => {
     const { targets, helpers } = selectAgentRows(rows, 450, 10);
     expect(targets.map((r) => r.pid)).toEqual([14]);
     expect(helpers).toEqual([]);
+  });
+});
+
+describe("cgroup scoping (#210 — the uid is not ours alone)", () => {
+  const WORKER = "/system.slice/automata-worker.service";
+
+  it("readSelfCgroupScope climbs out of the supervisor leaf", () => {
+    // #204 moves the worker into `<root>/supervisor` at boot, so the scope we
+    // want is that leaf's PARENT — it contains the supervisor and every run.
+    expect(readSelfCgroupScope(() => `0::${WORKER}/supervisor\n`)).toBe(WORKER);
+    expect(readSelfCgroupScope(() => `0::${WORKER}\n`)).toBe(WORKER);
+  });
+
+  it("readSelfCgroupScope returns null where there is no cgroup v2", () => {
+    // macOS and cgroup v1: null means "do not filter", so those boxes keep
+    // today's behaviour exactly.
+    expect(
+      readSelfCgroupScope(() => {
+        throw new Error("ENOENT");
+      }),
+    ).toBeNull();
+    expect(
+      readSelfCgroupScope(() => "1:name=systemd:/user.slice\n"),
+    ).toBeNull();
+  });
+
+  it("a pid is in scope only under the worker's subtree, prefix-safely", () => {
+    const at = (p: string) => () => `0::${p}\n`;
+    expect(isInWorkerCgroupScope(1, WORKER, at(WORKER))).toBe(true);
+    expect(isInWorkerCgroupScope(1, WORKER, at(`${WORKER}/run-abc-1234`))).toBe(
+      true,
+    );
+    // A sibling unit whose name merely STARTS with ours is not ours.
+    expect(
+      isInWorkerCgroupScope(1, WORKER, at(`${WORKER}-other.service`)),
+    ).toBe(false);
+    expect(
+      isInWorkerCgroupScope(1, WORKER, at("/system.slice/docker-abc123.scope")),
+    ).toBe(false);
+  });
+
+  it("an unreadable /proc/<pid>/cgroup is NOT ours", () => {
+    // A process we cannot place is one we cannot justify SIGKILLing. Missing an
+    // escapee costs a rescan; a false positive cost the engine's database.
+    expect(
+      isInWorkerCgroupScope(1, WORKER, () => {
+        throw new Error("ESRCH");
+      }),
+    ).toBe(false);
+  });
+
+  it("THE #210 REGRESSION: a container's postgres shares the uid and is spared", () => {
+    // Reproduces production exactly: the postgres image runs as uid 999, the
+    // agent account was created at uid 999, and the host sees container
+    // processes by their host-side uid — so the uid scan killed the engine's own
+    // database three times per run, 45 restarts deep.
+    const rows: ProcRow[] = [
+      { pid: 4242, pgid: 4242, uid: 999, comm: "node" },
+      { pid: 22096, pgid: 22096, uid: 999, comm: "postgres" },
+      { pid: 22148, pgid: 22096, uid: 999, comm: "postgres: checkpointer" },
+    ];
+    const cgroupOf: Record<number, string> = {
+      4242: `${WORKER}/run-thread-abcd1234`,
+      22096: "/system.slice/docker-0b6149d99a12.scope",
+      22148: "/system.slice/docker-0b6149d99a12.scope",
+    };
+    const { targets, foreign } = selectAgentRows(rows, 999, 1, (pid) =>
+      isInWorkerCgroupScope(pid, WORKER, () => `0::${cgroupOf[pid]}\n`),
+    );
+    expect(targets.map((r) => r.pid)).toEqual([4242]);
+    expect(foreign.map((r) => r.pid)).toEqual([22096, 22148]);
+  });
+
+  it("without a scope the selection is byte-for-byte what it was", () => {
+    const { targets, helpers, foreign } = selectAgentRows(
+      LINUX_ROWS,
+      999,
+      5000,
+    );
+    expect(targets.map((r) => r.pid).sort()).toEqual([4242, 4300, 4301]);
+    expect(helpers).toHaveLength(0);
+    expect(foreign).toEqual([]);
   });
 });
 
