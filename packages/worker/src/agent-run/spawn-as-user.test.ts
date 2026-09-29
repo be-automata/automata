@@ -7,6 +7,7 @@ import {
   KILL_BIN,
   PGID_WRAPPER_SCRIPT,
   SH_BIN,
+  PGID_CGROUP_WRAPPER_SCRIPT,
   SUDO_BIN,
 } from "./spawn-as-user";
 
@@ -205,5 +206,75 @@ describe("assertAgentUser", () => {
     expect(() => buildKillAllAsAgentInvocation({ agentUser: "-u" })).toThrow(
       /WORKER_AGENT_USER/,
     );
+  });
+});
+
+describe("#204: the memory-ceiling wrapper", () => {
+  const base = {
+    agentUser: "_automata-agent",
+    file: "/usr/bin/node",
+    args: ["/opt/daemon/index.js", "--socket-path", "/tmp/s.sock"],
+    pidFilePath: "/tmp/run.pid",
+  };
+
+  it("leaves the default spawn BYTE-FOR-BYTE unchanged", () => {
+    // The whole #108 rollout leans on "empty ceiling reproduces prior
+    // behaviour exactly". This compares the two invocations rather than
+    // spot-checking fields, so any drift at all fails — including a changed
+    // wrapper string, which is why the cgroup wrapper is a separate constant
+    // instead of a conditional inside the original.
+    const without = buildSpawnInvocation(base);
+    for (const off of [undefined, "", "   "]) {
+      expect(buildSpawnInvocation({ ...base, cgroupProcsPath: off })).toEqual(
+        without,
+      );
+    }
+    expect(without.args).toContain(PGID_WRAPPER_SCRIPT);
+    expect(without.env).not.toHaveProperty("AUTOMATA_CGROUP_PROCS");
+  });
+
+  it("joins the cgroup BEFORE the exec, and before the pidfile write", () => {
+    // Moving a process into a cgroup after it starts leaves it allocating
+    // outside the ceiling, and here that window would be a whole node startup.
+    const inv = buildSpawnInvocation({
+      ...base,
+      cgroupProcsPath:
+        "/sys/fs/cgroup/system.slice/w.service/run-1/cgroup.procs",
+    });
+    const script = inv.args.find((a) => a.includes("AUTOMATA_CGROUP_PROCS"));
+    expect(script).toBe(PGID_CGROUP_WRAPPER_SCRIPT);
+    expect(script).toBeDefined();
+    const s = script ?? "";
+    expect(s.indexOf("AUTOMATA_CGROUP_PROCS")).toBeLessThan(
+      s.indexOf("AUTOMATA_PIDFILE"),
+    );
+    expect(s.indexOf("AUTOMATA_CGROUP_PROCS")).toBeLessThan(s.indexOf("exec"));
+  });
+
+  it("fails the join loudly instead of running the agent uncapped", () => {
+    // Falling through to `exec` after a failed join would run the agent with NO
+    // ceiling while every log line claims one was applied. Distinct from the
+    // pidfile's 97 so a failure reason names which write failed.
+    expect(PGID_CGROUP_WRAPPER_SCRIPT).toContain("|| exit 96");
+    expect(PGID_CGROUP_WRAPPER_SCRIPT).toContain("|| exit 97");
+    expect(PGID_WRAPPER_SCRIPT).not.toContain("exit 96");
+  });
+
+  it("passes the cgroup path by ENVIRONMENT, never interpolated into sh -c", () => {
+    // Same rule the pidfile follows: no caller-controlled string is ever parsed
+    // as shell.
+    const evil = "/sys/fs/cgroup/x/run-1/cgroup.procs; rm -rf /";
+    const inv = buildSpawnInvocation({ ...base, cgroupProcsPath: evil });
+    expect(inv.env.AUTOMATA_CGROUP_PROCS).toBe(evil);
+    expect(inv.args.join(" ")).not.toContain("rm -rf");
+  });
+
+  it("is inert without agent-uid mode — there is no separate process to cap", () => {
+    const inv = buildSpawnInvocation({
+      ...base,
+      agentUser: "",
+      cgroupProcsPath: "/sys/fs/cgroup/x/run-1/cgroup.procs",
+    });
+    expect(inv).toEqual({ file: base.file, args: base.args, env: {} });
   });
 });

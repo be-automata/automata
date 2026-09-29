@@ -70,6 +70,14 @@ export interface WorkerConfig {
    */
   agentUser: string;
   /**
+   * #204: per-run memory ceiling in bytes. 0 (the DEFAULT) = off, and the spawn
+   * is byte-for-byte what it is today. Requires agent-uid mode and a delegated
+   * cgroup subtree; see run-cgroup.ts.
+   */
+  memoryMaxBytes: number;
+  /** #204: per-run `pids.max`. Only read when the ceiling is on. */
+  tasksMax: number;
+  /**
    * Stable identity for this box, used in the engine worker name so two boxes
    * are distinguishable. See resolveBoxId.
    */
@@ -213,6 +221,54 @@ export function resolveBoxId(raw: string | undefined): string {
   return cleaned || "unknown-box";
 }
 
+/**
+ * Parse `WORKER_RUN_MEMORY_MAX` — bytes, or a `K`/`M`/`G` suffix because a
+ * ceiling written in bytes is unreadable and an unreadable knob gets mistyped.
+ *
+ * Unset or empty = 0 = OFF. Anything present but unparseable THROWS: a typo that
+ * silently disabled a memory ceiling would leave the box exposed while the
+ * config claims it is protected, which is the failure #192's cloud-init lesson
+ * was about.
+ */
+export function parseMemoryMax(raw: string | undefined): number {
+  const v = (raw ?? "").trim();
+  if (!v) {
+    return 0;
+  }
+  const m = /^(\d+)([KMG]?)$/i.exec(v);
+  if (!m?.[1]) {
+    throw new Error(
+      `WORKER_RUN_MEMORY_MAX must be bytes with an optional K/M/G suffix, got ${JSON.stringify(v)}`,
+    );
+  }
+  const suffix = (m[2] ?? "").toUpperCase();
+  const scale = { "": 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3 }[suffix] ?? 1;
+  const bytes = Number(m[1]) * scale;
+  // A ceiling below one session's measured ~1.1 GB would OOM-kill every run.
+  // Refusing is kinder than a box where nothing completes.
+  if (bytes > 0 && bytes < 256 * 1024 ** 2) {
+    throw new Error(
+      `WORKER_RUN_MEMORY_MAX=${v} is below 256M; a ceiling that low kills every run (one session measures ~1.1 GB)`,
+    );
+  }
+  return bytes;
+}
+
+/** Parse `WORKER_RUN_TASKS_MAX`; unset ⇒ a generous default, since it is a runaway guard, not a budget. */
+export function parseTasksMax(raw: string | undefined): number {
+  const v = (raw ?? "").trim();
+  if (!v) {
+    return 4096;
+  }
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 64) {
+    throw new Error(
+      `WORKER_RUN_TASKS_MAX must be an integer >= 64, got ${JSON.stringify(v)}`,
+    );
+  }
+  return n;
+}
+
 export function loadWorkerConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): WorkerConfig {
@@ -220,6 +276,13 @@ export function loadWorkerConfig(
   // #108: validate the agent-uid opt-in HERE, not in a separate boot assert —
   // worker.ts calls loadWorkerConfig at boot AND the workflow calls it per run,
   // so a misconfigured box can neither start nor execute.
+  // #204. Parsed before the agentUser gate below so a nonsense value is refused
+  // at boot rather than at the first run — the whole-tuple validation ADR-002's
+  // capacity model needs (global cap, worker slots, per-run ceiling, swap) starts
+  // with this one not being a typo.
+  const memoryMaxBytes = parseMemoryMax(env.WORKER_RUN_MEMORY_MAX);
+  const tasksMax = parseTasksMax(env.WORKER_RUN_TASKS_MAX);
+
   const agentUser = env.WORKER_AGENT_USER?.trim() || "";
   if (agentUser) {
     assertAgentUser(agentUser);
@@ -235,6 +298,8 @@ export function loadWorkerConfig(
   return {
     agentUser,
     boxId: resolveBoxId(env.WORKER_BOX_ID),
+    memoryMaxBytes,
+    tasksMax,
     nodeBin: env.WORKER_NODE_BIN?.trim() || process.execPath,
     daemonDist: env.WORKER_DAEMON_DIST?.trim() || defaultDaemonDist(),
     claudeBinDir: resolveClaudeBinDir(env.CLAUDE_BIN),

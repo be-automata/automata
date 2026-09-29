@@ -58,6 +58,28 @@ export const SH_BIN = "/bin/sh";
 export const PGID_WRAPPER_SCRIPT =
   'printf %s "$$" > "$AUTOMATA_PIDFILE" || exit 97; exec "$AUTOMATA_NODE" "$@"';
 
+/**
+ * The wrapper for #204's per-run memory ceiling. A SEPARATE script rather than a
+ * conditional inside the one above, so the default (no-ceiling) argv stays
+ * byte-for-byte what it has always been — the default-off proof is a test on
+ * exact argv equality, and a conditional would change the string even when the
+ * feature is off.
+ *
+ * JOINING THE CGROUP MUST PRECEDE THE EXEC. Moving a process into a cgroup after
+ * it starts leaves a window in which it allocates outside the ceiling, and on
+ * this path that window is a whole node startup. Writing `$$` here puts the
+ * wrapper in the cgroup before `exec` replaces it, and `exec` keeps the pid, so
+ * the agent is never once outside its limit.
+ *
+ * `|| exit 96` is load-bearing for the same reason `|| exit 97` is on the pidfile
+ * write: falling through to `exec` after a failed join would run the agent
+ * UNCAPPED while every log line says the ceiling was applied. 96 is distinct from
+ * 97 so a failure reason names which write failed.
+ */
+export const PGID_CGROUP_WRAPPER_SCRIPT =
+  'printf %s "$$" > "$AUTOMATA_CGROUP_PROCS" || exit 96; ' +
+  'printf %s "$$" > "$AUTOMATA_PIDFILE" || exit 97; exec "$AUTOMATA_NODE" "$@"';
+
 /** `$0` for the wrapper shell — cosmetic, but it names the process in `ps`. */
 const WRAPPER_ARGV0 = "automata-daemon";
 
@@ -100,12 +122,20 @@ export function buildSpawnInvocation(opts: {
   args: string[];
   /** Where the wrapper records its own pgid. Only used in agent-uid mode. */
   pidFilePath: string;
+  /**
+   * #204: absolute path to this run's `<cgroup>/cgroup.procs`. Absent (the
+   * default) ⇒ no ceiling and the argv below is unchanged. Only meaningful in
+   * agent-uid mode, because without the uid drop there is no separate process
+   * to cap.
+   */
+  cgroupProcsPath?: string;
 }): Invocation {
   const { agentUser, file, args, pidFilePath } = opts;
   if (!agentUser) {
     return { file, args, env: {} };
   }
   assertAgentUser(agentUser);
+  const cgroupProcsPath = opts.cgroupProcsPath?.trim() || "";
   return {
     file: SUDO_BIN,
     args: [
@@ -116,13 +146,14 @@ export function buildSpawnInvocation(opts: {
       "--",
       SH_BIN,
       "-c",
-      PGID_WRAPPER_SCRIPT,
+      cgroupProcsPath ? PGID_CGROUP_WRAPPER_SCRIPT : PGID_WRAPPER_SCRIPT,
       WRAPPER_ARGV0,
       ...args,
     ],
     env: {
       AUTOMATA_PIDFILE: pidFilePath,
       AUTOMATA_NODE: file,
+      ...(cgroupProcsPath ? { AUTOMATA_CGROUP_PROCS: cgroupProcsPath } : {}),
     },
   };
 }
