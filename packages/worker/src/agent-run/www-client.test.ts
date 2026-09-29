@@ -653,3 +653,85 @@ describe("postRunTerminal / checkRunStaleness (#125 C4)", () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe("pollUntilTerminal: the agent dies mid-run (#204)", () => {
+  const working = () =>
+    jsonResponse(200, { status: "working", terminal: false });
+  const noSleep = async () => {};
+
+  it("fails the run with the agent's own classified error, not a cancellation", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async () => working()),
+    );
+    const oom = new Error("agent run exceeded its memory ceiling");
+    const ctx: PollContext = {
+      cancelled: false,
+      log: () => {},
+      agentFailure: () => oom,
+    };
+    await expect(pollUntilTerminal(ctx, opts, 0, noSleep)).rejects.toBe(oom);
+  });
+
+  it("needs TWO consecutive sightings — one poll of grace", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async () => working()),
+    );
+    let looks = 0;
+    const ctx: PollContext = {
+      // Ends the loop on the 3rd pass so the test terminates whatever happens;
+      // the assertion is that it got there WITHOUT throwing.
+      get cancelled() {
+        return looks >= 3;
+      },
+      log: () => {},
+      // Dead on the first look, alive on the second: a transient reading must
+      // not fail the run.
+      agentFailure: () => (++looks === 1 ? new Error("gone") : null),
+    };
+    const result = await pollUntilTerminal(ctx, opts, 0, noSleep);
+    expect(result.outcome).toBe("cancelled");
+    expect(looks).toBeGreaterThanOrEqual(3);
+  });
+
+  it("a terminal status wins over a dead agent — the daemon may exit first", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(200, { status: "done", terminal: true }),
+        ),
+    );
+    const result = await pollUntilTerminal(
+      {
+        cancelled: false,
+        log: () => {},
+        agentFailure: () => new Error("gone"),
+      },
+      opts,
+      0,
+      noSleep,
+    );
+    expect(result).toEqual({ outcome: "completed", finalStatus: "done" });
+  });
+
+  it("without the predicate the loop is what it always was", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(200, { status: "done", terminal: true }),
+        ),
+    );
+    const result = await pollUntilTerminal(
+      { cancelled: false, log: () => {} },
+      opts,
+      0,
+      noSleep,
+    );
+    expect(result.outcome).toBe("completed");
+  });
+});

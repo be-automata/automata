@@ -595,6 +595,38 @@ export class DaemonProcess {
    * Read BEFORE teardown removes the cgroup, and exposed so the caller can
    * classify the exit. Zero whenever the ceiling was off.
    */
+  /**
+   * #204: the run's failure cause when the agent process is gone, or null while it
+   * is alive. Consumed by the poll loop (`PollContext.agentFailure`).
+   *
+   * `null` also when nothing was ever spawned, and after teardown — which nulls
+   * `child` — so this method never fails a run on a process it already killed.
+   *
+   * The classification is the same one `waitForSocket` applies at startup, which is
+   * the point: whether the kernel kills the agent before its socket appears or two
+   * minutes into the run, the run reports the SAME cause. Reads the OOM counter
+   * live, since teardown has not run yet here.
+   */
+  agentFailure(): unknown | null {
+    const child = this.child;
+    if (!child) {
+      return null;
+    }
+    if (child.exitCode == null && child.signalCode == null) {
+      return null;
+    }
+    return classifyAgentExit({
+      exitCode: child.exitCode,
+      signal: child.signalCode,
+      oomKills: this.oomKills(),
+      memoryMaxBytes: this.config.memoryMaxBytes,
+      fallback: new Error(
+        `the agent process exited mid-run (code ${child.exitCode}, signal ${child.signalCode ?? "none"}) without the thread reaching a terminal status` +
+          (this.stderrTail ? `: ${this.stderrTail.trim()}` : ""),
+      ),
+    });
+  }
+
   oomKills(): number {
     if (this.cgroupDir) {
       this.observedOomKills = readOomKillCount({ cgroupDir: this.cgroupDir });

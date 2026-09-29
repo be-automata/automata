@@ -102,6 +102,25 @@ describe("assessCgroupSupport", () => {
     expect(r).toMatchObject({ reason: expect.stringContaining("Delegate=") });
   });
 
+  it("refuses when the controllers are available but NOT enabled in subtree_control", () => {
+    // The boot step is what writes `+memory` into subtree_control. If it failed,
+    // `cgroup.controllers` still lists memory — the parent granted it — so a check
+    // that reads only that file reports `supported`, every run then dies writing
+    // `memory.max`, and the boot log says the ceiling is simply off. Availability
+    // is not the same as enablement.
+    const r = assessCgroupSupport({
+      platform: "linux",
+      procSelfCgroup: procV2,
+      access: () => true,
+      readFile: (p: string) =>
+        p.endsWith("cgroup.subtree_control") ? "" : "memory pids",
+    });
+    expect(r.supported).toBe(false);
+    expect(r).toMatchObject({
+      reason: expect.stringContaining("not enabled in subtree_control"),
+    });
+  });
+
   it("names the missing controller when Delegate= is too narrow", () => {
     const r = assessCgroupSupport({
       platform: "linux",

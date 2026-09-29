@@ -398,7 +398,11 @@ async function runAgentInner(
     },
     log: (message: string) => ctx.log(message),
     signal,
+    // #204: filled in once the daemon exists (below). Until then there is no agent
+    // to have died, and the poll loop has not started either.
+    agentFailure: () => daemonForPoll?.agentFailure() ?? null,
   };
+  let daemonForPoll: DaemonProcess | null = null;
 
   // Step logging (boot-coder): each boot step is logged so a stalled re-fire
   // pinpoints exactly where the agent fails to launch. Never logs the prompt (H2)
@@ -655,6 +659,7 @@ async function runAgentInner(
     egressProxy?.url ?? null,
     broker,
   );
+  daemonForPoll = daemon;
   try {
     // Fail-closed identity precondition (ADR-002): confirm gh authenticates as the
     // bot (installation token + isolated config) in the workdir BEFORE spawning —

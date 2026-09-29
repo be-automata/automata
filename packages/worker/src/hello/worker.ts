@@ -64,8 +64,15 @@ async function claimNamespaceAndReclaim(): Promise<void> {
 /**
  * #204 boot step: vacate the delegated cgroup root and enable the controllers.
  *
- * Never throws. The ceiling is opt-in, and a box that has not opted in must boot
- * exactly as it does today.
+ * A box that did NOT ask for a ceiling (`memoryMaxBytes <= 0`) returns immediately
+ * and boots exactly as it does today — that is the whole of the default-off path.
+ *
+ * A box that DID ask and cannot deliver refuses to boot. The earlier version logged
+ * "ceiling OFF" and carried on, which was the worst of both: every subsequent run
+ * still built a cgroup and then died writing `memory.max`, so the box failed every
+ * run while its boot log claimed the feature was simply disabled. Same rule as the
+ * per-run path — a ceiling that cannot be applied must never quietly become no
+ * ceiling — and refusing at boot is the cheapest place to say so.
  */
 function prepareCeilingSubtreeAtBoot(): void {
   const cfg = loadWorkerConfig();
@@ -76,17 +83,15 @@ function prepareCeilingSubtreeAtBoot(): void {
   try {
     procSelfCgroup = readFileSync("/proc/self/cgroup", "utf8");
   } catch {
-    console.log(
-      "[worker-boot] memory ceiling requested but /proc/self/cgroup is unreadable — ceiling OFF",
+    throw new Error(
+      "memory ceiling requested (WORKER_RUN_MEMORY_MAX) but /proc/self/cgroup is unreadable",
     );
-    return;
   }
   const support = assessCgroupSupport({ procSelfCgroup });
   if (!support.supported) {
-    console.log(
-      `[worker-boot] memory ceiling requested but unavailable: ${support.reason} — ceiling OFF`,
+    throw new Error(
+      `memory ceiling requested (WORKER_RUN_MEMORY_MAX) but unavailable: ${support.reason}`,
     );
-    return;
   }
   try {
     prepareDelegatedRoot({ root: support.root, pid: process.pid });
@@ -94,8 +99,8 @@ function prepareCeilingSubtreeAtBoot(): void {
       `[worker-boot] memory ceiling armed: ${support.root} (memory.max=${cfg.memoryMaxBytes} per run, pids.max=${cfg.tasksMax})`,
     );
   } catch (e) {
-    console.log(
-      `[worker-boot] memory ceiling requested but subtree preparation failed: ${e instanceof Error ? e.message : String(e)} — ceiling OFF`,
+    throw new Error(
+      `memory ceiling requested (WORKER_RUN_MEMORY_MAX) but subtree preparation failed: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 }
@@ -200,7 +205,15 @@ async function main() {
   // today's behaviour exactly. It logs whichever precondition failed, because an
   // operator who meant to enable the ceiling and mistyped `Delegate=` should see
   // that rather than quietly getting no ceiling.
-  prepareCeilingSubtreeAtBoot();
+  try {
+    prepareCeilingSubtreeAtBoot();
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: the per-run memory ceiling is configured but cannot be armed — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
   const worker = await hatchet.worker(`automata-worker-${boxId}`, {
     workflows,
     // #125 C4 / #183: ONE slot per worker process and ONE unit per box:

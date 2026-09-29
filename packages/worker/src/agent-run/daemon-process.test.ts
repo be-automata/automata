@@ -647,5 +647,95 @@ setInterval(() => {}, 1000);
       daemons.push(daemon);
       expect(daemon.oomKills()).toBe(0);
     });
+
+    it("a start() that dies at the handshake still clears the ready marker", async () => {
+      // The marker is the ONE piece of handshake state that outlives the process
+      // tree: the cgroup goes with `cgroup.kill` + rmdir, but a stale marker left
+      // beside a reused pidfile would tell the next wrapper it may exec before the
+      // worker has capped it. teardown() runs from workflow.ts's finally on every
+      // exit path, including a start() that threw — so it is the only place this
+      // has to be true, and this pins it.
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+      });
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        {
+          spawnFn: (() => {
+            throw new Error("spawn blew up before the handshake");
+          }) as unknown as typeof spawn,
+        },
+      );
+      daemons.push(daemon);
+      const marker = `${runPidPath(root, getProcessWorkerId(), input.threadId)}.cgroup-ready`;
+      fs.mkdirSync(path.dirname(marker), { recursive: true });
+      fs.writeFileSync(marker, "");
+      await expect(daemon.start()).rejects.toThrow();
+      daemon.teardown();
+      expect(fs.existsSync(marker)).toBe(false);
+    });
+
+    it("agentFailure: null while alive, the classified cause once dead, null after teardown", async () => {
+      // This is what turns a mid-run OOM into a resource-limit error instead of a
+      // poll that spins until Hatchet cancels the task. The `null` after teardown
+      // matters just as much: teardown SIGKILLs the agent itself, and a corpse we
+      // made must never be reported as the run's cause.
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+      });
+      const recorded: Recorded[] = [];
+      const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+      fs.mkdirSync(path.dirname(socket), { recursive: true });
+      const inner = fakeSpawn({ recorded });
+      let spawned: ChildProcess | null = null;
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        {
+          spawnFn: ((file: string, args: string[], o: SpawnOptions) => {
+            spawned = inner(file, args, o);
+            return spawned;
+          }) as unknown as typeof spawn,
+        },
+      );
+      daemons.push(daemon);
+      expect(daemon.agentFailure()).toBeNull(); // nothing spawned yet
+      await daemon.start();
+      expect(daemon.agentFailure()).toBeNull(); // alive
+
+      const child = spawned as unknown as {
+        exitCode: number | null;
+        signalCode: string | null;
+      };
+      child.exitCode = 137;
+      child.signalCode = "SIGKILL";
+      const failure = daemon.agentFailure();
+      expect(failure).toBeInstanceOf(Error);
+      // No cgroup here ⇒ oomKills 0 ⇒ the generic cause survives, never
+      // "exceeded its memory ceiling". Confidently-wrong causes are the thing
+      // classifyAgentExit exists to refuse.
+      expect(String((failure as Error).message)).toContain("exited mid-run");
+      expect(String((failure as Error).message)).not.toContain(
+        "memory ceiling",
+      );
+
+      daemon.teardown();
+      expect(daemon.agentFailure()).toBeNull();
+    });
   });
 });

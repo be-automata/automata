@@ -164,6 +164,32 @@ export function assessCgroupSupport(opts: {
       reason: `delegated cgroup lacks controller(s) ${missing.join(", ")} (have: ${controllers.join(", ") || "none"})`,
     };
   }
+
+  // AVAILABLE IS NOT THE SAME AS ENABLED, and the difference is a whole class of
+  // failure. `cgroup.controllers` lists what the parent GRANTED; children only get
+  // `memory.max` once `+memory` has actually been written to this cgroup's
+  // `cgroup.subtree_control`. Checking only the former means a box whose boot-time
+  // preparation FAILED still reports `supported` at run time, so every run creates
+  // a cgroup and then dies writing `memory.max` — while the boot log says the
+  // ceiling is off. Check what is enabled, not what is merely on offer.
+  let enabled: string[];
+  try {
+    enabled = parseControllers(
+      readFile(path.join(root, "cgroup.subtree_control")),
+    );
+  } catch (e) {
+    return {
+      supported: false,
+      reason: `cannot read ${root}/cgroup.subtree_control: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  const notEnabled = REQUIRED_CONTROLLERS.filter((c) => !enabled.includes(c));
+  if (notEnabled.length > 0) {
+    return {
+      supported: false,
+      reason: `delegated cgroup has controller(s) ${notEnabled.join(", ")} available but not enabled in subtree_control (enabled: ${enabled.join(", ") || "none"}) — boot-time preparation did not run or failed`,
+    };
+  }
   return { supported: true, root, controllers };
 }
 

@@ -412,6 +412,14 @@ export interface PollContext {
   log: (message: string) => unknown;
   /** Aborted when Hatchet cancels the run (scheduleTimeout/executionTimeout). */
   signal?: AbortSignal;
+  /**
+   * #204: has the agent process died without www ever reaching terminal? Returns the
+   * error to fail the run with, already classified (an OOM inside the run's cgroup
+   * becomes a terminal `ResourceLimitError`), or null while the agent is alive.
+   *
+   * Optional: omitted ⇒ this loop behaves exactly as it did before.
+   */
+  agentFailure?: () => unknown | null;
 }
 
 export interface PollResult {
@@ -467,6 +475,7 @@ export async function pollUntilTerminal(
 ): Promise<PollResult> {
   let hadSuccessfulPoll = false;
   let lastStatus: string | undefined;
+  let agentSeenDead = false;
 
   for (;;) {
     if (ctx.cancelled || ctx.signal?.aborted) {
@@ -512,6 +521,32 @@ export async function pollUntilTerminal(
     }
     if (poll.status === "stopping") {
       return { outcome: "stopped", finalStatus: poll.status };
+    }
+
+    // #204 THE MID-RUN DEATH, WHICH IS THE ONE THAT MATTERS. This loop has no
+    // deadline of its own: it polls until www says terminal. So when the kernel
+    // OOM-kills the agent mid-run, nothing ever reports terminal and the loop spins
+    // until Hatchet's step timeout cancels the task — the run is then reported as a
+    // CANCELLATION, which is the most misleading cause available for a run that blew
+    // its memory budget. (The socket-startup window was already classified; it is
+    // also the window an OOM is least likely to happen in.)
+    //
+    // ONE POLL INTERVAL OF GRACE, deliberately. The daemon can legitimately exit a
+    // moment before www records the terminal status, and failing on that race would
+    // turn successful runs into resource-limit errors. So a dead agent must be seen
+    // on two consecutive passes, with a poll in between — the poll above is what
+    // gives a genuinely-finished run its chance to return `completed` first.
+    const failure = ctx.agentFailure?.() ?? null;
+    if (failure !== null) {
+      if (agentSeenDead) {
+        throw failure;
+      }
+      agentSeenDead = true;
+      ctx.log(
+        "agent process is gone and the thread is not terminal — confirming on the next poll",
+      );
+    } else {
+      agentSeenDead = false;
     }
 
     await sleep(pollIntervalMs);
