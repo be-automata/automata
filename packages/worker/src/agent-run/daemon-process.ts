@@ -192,6 +192,9 @@ export class DaemonProcess {
       // Inside the workdir, so it inherits the run's ACE. Provisioning created
       // it in the same `if (agentUser)` branch that applied that ACE.
       runTmpDir: this.config.agentUser ? path.join(this.workdir, "tmp") : null,
+      // Marked safe.directory for the agent uid: the worker cloned it, the agent
+      // runs in it, and git refuses a repo owned by someone else.
+      workdir: this.workdir,
     });
     return this.env;
   }
