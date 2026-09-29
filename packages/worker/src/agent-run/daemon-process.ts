@@ -4,7 +4,6 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import type { AceExec } from "./agent-uid-fs";
 import { buildDaemonEnv, type BrokerHandoff } from "./daemon-env";
@@ -575,7 +574,6 @@ export class DaemonProcess {
         threadId: this.input.threadId,
         memoryMaxBytes,
         tasksMax,
-        ...(this.agentIds() ?? {}),
       });
       logCgroup(
         `run cgroup ${dir}: memory.max=${memoryMaxBytes} memory.swap.max=0 pids.max=${tasksMax}`,
@@ -588,34 +586,6 @@ export class DaemonProcess {
       throw new Error(
         `could not create this run's cgroup under ${support.root}: ${e instanceof Error ? e.message : String(e)}`,
       );
-    }
-  }
-
-  /**
-   * uid/gid of the agent role account, or null when it cannot be resolved.
-   *
-   * Resolved with `id`, not `os.userInfo()` — that reports the CURRENT process's
-   * user, which is the worker, and chowning `cgroup.procs` to the worker would
-   * leave the wrapper unable to join its own cgroup.
-   */
-  private agentIds(): { agentUid: number; agentGid: number } | null {
-    try {
-      const uid = Number(
-        execFileSync("/usr/bin/id", ["-u", this.config.agentUser], {
-          encoding: "utf8",
-        }).trim(),
-      );
-      const gid = Number(
-        execFileSync("/usr/bin/id", ["-g", this.config.agentUser], {
-          encoding: "utf8",
-        }).trim(),
-      );
-      if (!Number.isInteger(uid) || !Number.isInteger(gid)) {
-        return null;
-      }
-      return { agentUid: uid, agentGid: gid };
-    } catch {
-      return null;
     }
   }
 

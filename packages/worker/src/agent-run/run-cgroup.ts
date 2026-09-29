@@ -26,12 +26,15 @@ import path from "node:path";
  * this was found. Moving the worker into a leaf (`supervisor/`) vacates the root
  * and the enable then succeeds.
  *
- * WHY THE CHILD JOINS FROM INSIDE THE WRAPPER. Moving a process into a cgroup
- * after it has started leaves a window in which it allocates outside the ceiling.
- * The wrapper writes its own `$$` into `cgroup.procs` BEFORE `exec`, the same
- * shape it already uses for the pidfile, so the agent is never outside its
- * ceiling. That needs the one file `cgroup.procs` to be writable by the agent
- * uid; everything else in the per-run cgroup stays owned by the worker.
+ * WHY THE WORKER MOVES THE CHILD, AND THE CHILD WAITS. The agent cannot join the
+ * cgroup itself: writing `cgroup.procs` requires write access to the common
+ * ANCESTOR of source and destination, which the agent uid does not have, and
+ * handing it over is not possible either — chowning `cgroup.procs` to the agent
+ * is EPERM, since an unprivileged user cannot give a file away. So the worker
+ * performs the move, and the wrapper blocks on a ready marker until it has, then
+ * `exec`s. The agent therefore never runs outside its ceiling, and every file in
+ * the per-run cgroup stays worker-owned — which is also what stops the agent
+ * raising its own `memory.max`.
  *
  * DEFAULT-OFF AND LINUX-ONLY. Every function here is a no-op when the ceiling is
  * unset or the subtree is not delegated, so the pilot Mac, CI and any

@@ -62,12 +62,6 @@ async function claimNamespaceAndReclaim(): Promise<void> {
 }
 
 /**
- * Starts a worker that registers every workflow in the registry and long-polls the
- * engine over outbound gRPC for work. On a real customer box this is the process the
- * installer runs and keeps alive. Run locally with `pnpm --filter @terragon/worker worker`.
- */
-
-/**
  * #204 boot step: vacate the delegated cgroup root and enable the controllers.
  *
  * Never throws. The ceiling is opt-in, and a box that has not opted in must boot
@@ -106,6 +100,11 @@ function prepareCeilingSubtreeAtBoot(): void {
   }
 }
 
+/**
+ * Starts a worker that registers every workflow in the registry and long-polls the
+ * engine over outbound gRPC for work. On a real customer box this is the process the
+ * installer runs and keeps alive. Run locally with `pnpm --filter @terragon/worker worker`.
+ */
 async function main() {
   // #5 fail-closed gate: refuse to boot against an auth-DISABLED engine (a
   // -dev/auth-off hatchet-lite embeds a public signing key → tenancy void). Runs
