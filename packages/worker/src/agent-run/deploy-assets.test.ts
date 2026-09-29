@@ -646,3 +646,31 @@ describe("#204: hardening must not fence out the delegated subtree", () => {
     expect(unit).toMatch(/^ProtectSystem=full$/m);
   });
 });
+
+describe("#192: cloud-init installs the agent the runs actually need", () => {
+  const ci = () =>
+    read(path.join(workerRoot, "deploy", "linux", "cloud-init.yaml"));
+
+  it("installs the claude CLI system-wide, not into a user home", () => {
+    // Omitted originally, and the box looked healthy for hours: dispatch worked,
+    // the ceiling applied, the daemon started, runs "completed" — while every
+    // review came back "intent could not be parsed" because the agent had died
+    // at `claude: command not found`. That string appears ONLY in the thread's
+    // error_message_info in the production database, never on the box.
+    //
+    // /usr/local because the AGENT uid runs it and cannot traverse the service
+    // account's home.
+    const s = ci();
+    expect(s).toMatch(/npm install -g @anthropic-ai\/claude-code/);
+    expect(s).toMatch(/NPM_CONFIG_PREFIX=\/usr\/local/);
+  });
+
+  it("asserts the AGENT uid can run it, not merely that it exists", () => {
+    // `command -v claude` as root proves nothing about the account that invokes
+    // it — the whole failure was a PATH/permission question for a different uid.
+    const s = ci();
+    expect(s).toMatch(
+      /runuser -u "\$AGENT_USER" -- \/usr\/local\/bin\/claude --version/,
+    );
+  });
+});
