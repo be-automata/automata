@@ -196,9 +196,43 @@ export function prepareDelegatedRoot(opts: {
   const supervisor = path.join(root, SUPERVISOR_CGROUP);
 
   io.mkdir(supervisor);
-  // Moving an already-present pid is accepted by the kernel, so this is safe to
-  // repeat. Writing the pid is what vacates the root.
-  io.write(path.join(supervisor, "cgroup.procs"), String(pid));
+
+  // Vacate the root COMPLETELY, not just this process.
+  //
+  // The "no internal process" rule counts every member, and the worker is not
+  // alone in its cgroup: `run-worker.sh` rebuilds the daemon bundle on each
+  // start, and esbuild leaves a service process behind. Moving only `process.pid`
+  // therefore works or fails depending on whether that child happens to have
+  // exited yet — it passed in a drill and then failed on a real deploy with
+  // `EBUSY: resource busy or locked`, which is the kernel refusing the enable
+  // below while a sibling is still in the root.
+  //
+  // `cgroup.procs` is read fresh and each pid migrated; the kernel accepts a pid
+  // that is already there, so this is safe to repeat and safe if one exits
+  // mid-loop.
+  let members: string[] = [];
+  try {
+    members = io
+      .read(path.join(root, "cgroup.procs"))
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+  } catch {
+    // Unreadable root ⇒ fall back to moving just ourselves, which is strictly
+    // better than moving nothing.
+  }
+  if (!members.includes(String(pid))) {
+    members.push(String(pid));
+  }
+  for (const member of members) {
+    try {
+      io.write(path.join(supervisor, "cgroup.procs"), member);
+    } catch {
+      // A pid that exited between the read and the write is gone, which is the
+      // outcome we wanted anyway. Anything still there will surface as the EBUSY
+      // below, named.
+    }
+  }
 
   const current = io.read(path.join(root, "cgroup.subtree_control"));
   const enabled = parseControllers(current);

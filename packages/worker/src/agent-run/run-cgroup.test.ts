@@ -135,12 +135,43 @@ describe("assessCgroupSupport", () => {
 describe("prepareDelegatedRoot", () => {
   const root = "/sys/fs/cgroup/system.slice/w.service";
 
+  it("vacates EVERY member of the root, not just this process", () => {
+    // The no-internal-process rule counts all members, and the worker is not
+    // alone: run-worker.sh rebuilds the daemon bundle and esbuild leaves a
+    // service process in the cgroup. Moving only process.pid passed a drill and
+    // then failed a real deploy with EBUSY — the kernel refusing the enable
+    // while a sibling was still in the root.
+    const f = fakeFs({
+      [`${root}/cgroup.subtree_control`]: "",
+      [`${root}/cgroup.procs`]: "111\n222\n",
+    });
+    prepareDelegatedRoot({ root, pid: 111, fsi: f.fsi });
+    const moved = f.writes
+      .filter(([file]) => file === `${root}/${SUPERVISOR_CGROUP}/cgroup.procs`)
+      .map(([, v]) => v);
+    expect(moved).toEqual(["111", "222"]);
+  });
+
+  it("still moves itself when the root's member list is unreadable", () => {
+    // Moving nothing would guarantee the EBUSY; moving ourselves is strictly
+    // better than that.
+    const f = fakeFs({ [`${root}/cgroup.subtree_control`]: "" });
+    prepareDelegatedRoot({ root, pid: 777, fsi: f.fsi });
+    expect(f.writes[0]).toEqual([
+      `${root}/${SUPERVISOR_CGROUP}/cgroup.procs`,
+      "777",
+    ]);
+  });
+
   it("moves the worker into the supervisor leaf BEFORE enabling controllers", () => {
     // Load-bearing ordering, and a kernel rule rather than a preference: cgroup
     // v2 refuses `+memory` on a cgroup that still holds processes, with EBUSY
     // ("Device or resource busy") and nothing naming the cause. Reversing these
     // two writes is the mistake this test exists to catch.
-    const f = fakeFs({ [`${root}/cgroup.subtree_control`]: "" });
+    const f = fakeFs({
+      [`${root}/cgroup.subtree_control`]: "",
+      [`${root}/cgroup.procs`]: "4242\n",
+    });
     prepareDelegatedRoot({ root, pid: 4242, fsi: f.fsi });
 
     expect(f.dirs).toContain(`${root}/${SUPERVISOR_CGROUP}`);
@@ -153,7 +184,10 @@ describe("prepareDelegatedRoot", () => {
 
   it("is idempotent: an already-delegated subtree gets no second enable", () => {
     // A worker restart must not need the box reset.
-    const f = fakeFs({ [`${root}/cgroup.subtree_control`]: "memory pids" });
+    const f = fakeFs({
+      [`${root}/cgroup.subtree_control`]: "memory pids",
+      [`${root}/cgroup.procs`]: "1\n",
+    });
     prepareDelegatedRoot({ root, pid: 1, fsi: f.fsi });
     expect(
       f.writes.filter(([file]) => file.endsWith("cgroup.subtree_control")),
@@ -165,7 +199,10 @@ describe("prepareDelegatedRoot", () => {
   });
 
   it("enables only what is missing", () => {
-    const f = fakeFs({ [`${root}/cgroup.subtree_control`]: "pids" });
+    const f = fakeFs({
+      [`${root}/cgroup.subtree_control`]: "pids",
+      [`${root}/cgroup.procs`]: "1\n",
+    });
     prepareDelegatedRoot({ root, pid: 1, fsi: f.fsi });
     expect(f.writes[1]?.[1]).toBe("+memory");
   });
