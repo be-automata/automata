@@ -1028,7 +1028,15 @@ describe("reapAgentUidEscapees", () => {
     );
     expect(listProcesses).toHaveBeenCalledTimes(1);
     expect(firstListAt).toBeDefined();
-    expect((firstListAt ?? 0) - startedAt).toBeGreaterThanOrEqual(250);
+    // TOLERANCE, NOT A WEAKER TEST. `setTimeout(250)` does not guarantee that the
+    // `Date.now()` you measure with has advanced 250 — the timer and the wall
+    // clock are different sources at coarse resolution, so the observed delta can
+    // land a millisecond short. CI produced exactly that: "expected 249 to be
+    // greater than or equal to 250". The invariant worth pinning is "it waited the
+    // settle rather than scanning immediately", and 240 separates that from 0 just
+    // as decisively as 250 does, without failing on clock slop.
+    const waited = (firstListAt ?? 0) - startedAt;
+    expect(waited).toBeGreaterThanOrEqual(240);
   });
 
   it("AC4: admission with settleMs omitted does not settle — first listProcesses within ~50 ms", async () => {
