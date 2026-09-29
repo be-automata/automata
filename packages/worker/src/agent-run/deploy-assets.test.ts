@@ -187,3 +187,55 @@ describe("#183: single worker unit", () => {
     expect(plist).toContain("com.automata.worker</string>");
   });
 });
+
+describe("packages/worker/docker-compose.hatchet.prod.yml (#192)", () => {
+  const overlay = read(
+    path.join(workerRoot, "docker-compose.hatchet.prod.yml"),
+  );
+  const base = read(path.join(workerRoot, "docker-compose.hatchet.yml"));
+
+  it("binds both engine ports to loopback", () => {
+    // The base file publishes them with no host prefix, i.e. 0.0.0.0. That was
+    // survivable behind a home router; on a public VM it is the engine
+    // dashboard, the REST API and engine gRPC open to the internet. www reaches
+    // the engine through the named tunnel and the worker over loopback, so an
+    // external binding serves nothing.
+    expect(overlay).toContain('"127.0.0.1:8888:8888"');
+    expect(overlay).toContain('"127.0.0.1:7077:7077"');
+    expect(base).toContain('"8888:8888"'); // the thing being overridden
+  });
+
+  it("REPLACES the base ports list instead of appending to it", () => {
+    // Load-bearing, and the reason this test exists. Compose MERGES
+    // list-valued keys: without `!override` the loopback mappings are appended
+    // to the base file's world-facing ones and 0.0.0.0 stays published
+    // alongside. Deleting the tag looks like tidying and silently re-exposes
+    // the engine, with no error anywhere.
+    expect(overlay).toMatch(/ports:\s*!override/);
+  });
+
+  it("caps engine memory, and forbids the containers from leaking into swap", () => {
+    // Invisible on the 48 GB pilot laptop, dangerous on the 8 GB box where the
+    // engine shares the machine with the worker and the agent runs. The
+    // capacity model assumes the engine stays near what the pilot measured
+    // (hatchet-lite ~66 MB, Postgres ~474 MB); nothing enforced it, and the
+    // failure mode is a box-wide fork ENOMEM, not a tidy per-process OOM.
+    expect(overlay).toMatch(/mem_limit:\s*1g/);
+    expect(overlay).toMatch(/mem_limit:\s*512m/);
+
+    // memswap_limit must equal mem_limit on every capped service, or the
+    // container swaps instead of being capped and spends the worker's budget.
+    const caps = [...overlay.matchAll(/mem_limit:\s*(\S+)/g)].map((m) => m[1]);
+    const swaps = [...overlay.matchAll(/memswap_limit:\s*(\S+)/g)].map(
+      (m) => m[1],
+    );
+    expect(swaps, overlay).toEqual(caps);
+  });
+
+  it("is an overlay, never a standalone stack", () => {
+    // Applied alone it would define services with no image and no environment.
+    // The header says so; this asserts the header keeps saying so.
+    expect(overlay).toContain("docker-compose.hatchet.yml");
+    expect(overlay).not.toContain("image:");
+  });
+});

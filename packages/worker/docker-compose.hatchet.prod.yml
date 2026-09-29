@@ -1,0 +1,57 @@
+# Production overlay for the shared execution box (#192).
+#
+# Use ONLY layered on top of docker-compose.hatchet.yml, never alone:
+#
+#   docker compose -f docker-compose.hatchet.yml -f docker-compose.hatchet.prod.yml up -d
+#
+# It changes two things the base file deliberately leaves open for the laptop
+# pilot, and both of them stop being acceptable the moment this stack runs on a
+# public VM.
+#
+# ── 1. The ports stop being world-reachable ────────────────────────────────
+#
+# The base file publishes "8888:8888" and "7077:7077" with no host prefix, so
+# Docker binds 0.0.0.0. On the pilot Mac that sat behind a home router; on a
+# Hetzner box it is the engine dashboard, the REST API and the engine gRPC port
+# exposed to the internet. www reaches the engine through the named cloudflared
+# tunnel, and the worker reaches it over loopback on the same host, so nothing
+# legitimate needs an external binding.
+#
+# `!override` is load-bearing, not style. Compose MERGES list-valued keys: a
+# plain `ports:` here would APPEND the loopback mappings to the base file's
+# world-facing ones and leave 0.0.0.0 published alongside. The tag replaces the
+# list instead. `deploy-assets.test.ts` asserts the tag is present precisely
+# because deleting it looks harmless and silently re-exposes the engine.
+#
+# ── 2. The engine gets a memory ceiling ────────────────────────────────────
+#
+# The base file caps nothing. That is invisible on a 48 GB laptop and dangerous
+# on the 8 GB CX33, where this stack shares the box with the worker and with the
+# agent runs themselves. The whole capacity model (~2 GB base + ~1.3 GB per
+# concurrent run, ADR-002 §6) assumes the engine stays near what the pilot
+# measured: hatchet-lite ~66 MB, its Postgres ~474 MB. Nothing enforced that.
+# An unbounded Postgres can starve the worker, and the failure mode is the
+# box-wide fork/posix_spawn ENOMEM already debugged in production, not a tidy
+# per-process OOM.
+#
+# The limits below are roughly 2x measured, which leaves headroom for growth
+# while bounding the blast radius. `memswap_limit` equals `mem_limit` on both
+# services so a container cannot leak into swap and spend the worker's budget —
+# the same rule #152 set for agent-run containers.
+#
+# Raise these together with the RAM tier if the box is resized; they are part of
+# the {global cap, worker slots, per-run MemoryMax, swap} tuple that must move
+# as one.
+
+services:
+  postgres:
+    mem_limit: 1g
+    memswap_limit: 1g
+
+  hatchet-lite:
+    # Replace, never append — see the note above.
+    ports: !override
+      - "127.0.0.1:8888:8888" # dashboard + REST API, loopback only
+      - "127.0.0.1:7077:7077" # engine gRPC, loopback only
+    mem_limit: 512m
+    memswap_limit: 512m
