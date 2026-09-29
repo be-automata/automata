@@ -2,17 +2,17 @@
 
 `hatchet.beautomata.com` is how the Cloudflare Worker control plane reaches the
 execution plane's engine. The Worker cannot speak gRPC and the engine's ports are
-loopback-only (#192), so this named tunnel is the *only* path in.
+loopback-only (#192), so this named tunnel is the _only_ path in.
 
 **Since the Phase 1 cutover it is served by the shared Linux box**, not the
 operator's laptop.
 
-| | |
-|:--|:--|
-| Tunnel | `automata-hatchet`, id `73d79054-70f6-40f8-901a-d445eff83577` |
-| Hostname | `hatchet.beautomata.com` → `http://127.0.0.1:8888` on whichever host runs the connector |
-| On the box | `cloudflared-automata-hatchet.service`, config `/etc/cloudflared/config.yml`, credential `/etc/cloudflared/<tunnel-id>.json` (0600) |
-| On the laptop (now unloaded) | launchd agent `com.automata.hatchet-tunnel`, config `~/.cloudflared/automata-hatchet.yml` |
+|                              |                                                                                                                                     |
+| :--------------------------- | :---------------------------------------------------------------------------------------------------------------------------------- |
+| Tunnel                       | `automata-hatchet`, id `73d79054-70f6-40f8-901a-d445eff83577`                                                                       |
+| Hostname                     | `hatchet.beautomata.com` → `http://127.0.0.1:8888` on whichever host runs the connector                                             |
+| On the box                   | `cloudflared-automata-hatchet.service`, config `/etc/cloudflared/config.yml`, credential `/etc/cloudflared/<tunnel-id>.json` (0600) |
+| On the laptop (now unloaded) | launchd agent `com.automata.hatchet-tunnel`, config `~/.cloudflared/automata-hatchet.yml`                                           |
 
 ## ⚠ Exactly one connector at a time
 
@@ -55,7 +55,7 @@ Worker secrets take effect on the next invocation; no redeploy is needed.
 
 ## Verifying a cutover
 
-The endpoint returning 200 is not by itself proof that the *intended* host is
+The endpoint returning 200 is not by itself proof that the _intended_ host is
 serving it — check that the other host's engine is NOT answering locally, or the
 200 could be coming from either:
 

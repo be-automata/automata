@@ -119,7 +119,20 @@ export function assessCgroupSupport(opts: {
       reason: "no cgroup v2 path in /proc/self/cgroup",
     };
   }
-  const root = path.join(mount, rel);
+  // Climb out of the supervisor leaf.
+  //
+  // This is read at RUN time as well as at boot, and by run time the worker has
+  // already moved itself into `<root>/supervisor` — so /proc/self/cgroup reports
+  // the LEAF, not the delegated root. Taking it at face value creates every run
+  // cgroup under the supervisor, where `memory` is not in subtree_control, so
+  // `memory.max` does not exist and the create fails EACCES.
+  //
+  // Production traffic found this on the first real run. The drill could not:
+  // it was handed the root explicitly, a convenience that bypassed the exact
+  // line being exercised here.
+  const delegatedRel =
+    path.basename(rel) === SUPERVISOR_CGROUP ? path.dirname(rel) : rel;
+  const root = path.join(mount, delegatedRel);
 
   // `cgroup.subtree_control` is the file delegation chowns to the unit's User=.
   // If it is not writable, the unit has no `Delegate=` and nothing below works.

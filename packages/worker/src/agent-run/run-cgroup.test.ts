@@ -363,3 +363,39 @@ describe("#204: the dead-daemon path names the ceiling", () => {
     expect(call).toMatch(/oomKills: this\.oomKills\(\)/);
   });
 });
+
+describe("assessCgroupSupport — the supervisor leaf is not the root", () => {
+  it("climbs out of supervisor/, which is where the worker lives at run time", () => {
+    // Read at boot, /proc/self/cgroup reports the delegated root. Read at RUN
+    // time it reports `<root>/supervisor`, because prepareDelegatedRoot moved
+    // the worker there. Taking the leaf at face value puts every run cgroup
+    // under it, where `memory` is not in subtree_control — so `memory.max` does
+    // not exist and creation fails EACCES. Production traffic found this on the
+    // first real run; the drill had been handed the root explicitly and so
+    // never executed this line.
+    const r = assessCgroupSupport({
+      platform: "linux",
+      procSelfCgroup: `0::/system.slice/automata-worker.service/${SUPERVISOR_CGROUP}\n`,
+      mountPoint: "/sys/fs/cgroup",
+      access: () => true,
+      readFile: () => "memory pids",
+    });
+    expect(r).toMatchObject({
+      supported: true,
+      root: "/sys/fs/cgroup/system.slice/automata-worker.service",
+    });
+  });
+
+  it("leaves a non-supervisor path alone (the boot-time read)", () => {
+    const r = assessCgroupSupport({
+      platform: "linux",
+      procSelfCgroup: "0::/system.slice/automata-worker.service\n",
+      mountPoint: "/sys/fs/cgroup",
+      access: () => true,
+      readFile: () => "memory pids",
+    });
+    expect(r).toMatchObject({
+      root: "/sys/fs/cgroup/system.slice/automata-worker.service",
+    });
+  });
+});
