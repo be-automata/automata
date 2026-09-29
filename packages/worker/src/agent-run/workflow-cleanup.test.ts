@@ -104,9 +104,7 @@ const ensureRunNamespace = vi.fn(async (_opts: unknown) => {
 });
 vi.mock("./run-namespace", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./run-namespace")>()),
-  ensureRunNamespace: (...args: unknown[]) =>
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ensureRunNamespace(...(args as [any])),
+  ensureRunNamespace: (opts: unknown) => ensureRunNamespace(opts),
 }));
 // #184 (#152 Stage B2): the real reaper's default spawnKill is a REAL
 // `sudo kill -9 -- -1` as the agent uid — lethal to live work on the pilot
@@ -222,6 +220,7 @@ beforeEach(() => {
   process.env.WORKER_BOX_TRUST = "owner";
   provisionWorkdir.mockClear();
   cleanupWorkdir.mockClear();
+  ensureRunNamespace.mockClear();
   pullAgentCredentials.mockReset();
   materialiseAgentCredentials.mockReset();
   postEgressEvents.mockClear();
