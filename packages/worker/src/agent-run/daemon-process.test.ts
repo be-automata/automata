@@ -8,7 +8,7 @@ import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { DaemonProcess, writeDaemonMessage } from "./daemon-process";
 import { loadWorkerConfig } from "./config";
@@ -574,55 +574,21 @@ setInterval(() => {}, 1000);
    * cannot OOM anything.
    */
   describe("per-run memory ceiling (#204)", () => {
-    it("declines, with a reason, when the ceiling is set but agent-uid mode is off", async () => {
-      // Without the uid drop the agent is this process's own child in this
-      // process's own cgroup, so capping it would cap the WORKER. Declining is
-      // correct; declining SILENTLY is the failure #192's cloud-init taught.
-      const { root, workdir, input } = fixture();
-      const logs: string[] = [];
-      const spy = vi.spyOn(console, "error").mockImplementation((m) => {
-        logs.push(String(m));
-      });
-      try {
-        const config = loadWorkerConfig({
-          WORKER_RUN_NAMESPACE_ROOT: root,
+    it("REFUSES to load a config with a ceiling and no uid drop", () => {
+      // This used to decline per run with a log line and carry on, which is the
+      // fail-open the whole feature argues against: the operator asked for a
+      // ceiling, the box booted happily, and every run went uncapped with one
+      // line in a stream nobody reads. Rejecting in loadWorkerConfig fails at
+      // boot and at every run, because every caller loads this config.
+      expect(() =>
+        loadWorkerConfig({
+          WORKER_RUN_NAMESPACE_ROOT: "/tmp/x",
           WORKER_DAEMON_DIST: "/opt/daemon/index.js",
           WORKER_NODE_BIN: "/usr/bin/node",
           WORKER_RUN_MEMORY_MAX: "1G",
           // WORKER_AGENT_USER deliberately absent
-        });
-        expect(config.memoryMaxBytes).toBe(1024 ** 3);
-        const recorded: Recorded[] = [];
-        const socket = runSocketPath(
-          root,
-          getProcessWorkerId(),
-          input.threadId,
-        );
-        fs.mkdirSync(path.dirname(socket), { recursive: true });
-        const daemon = new DaemonProcess(
-          config,
-          input,
-          workdir,
-          null,
-          null,
-          null,
-          { spawnFn: fakeSpawn({ recorded }) },
-        );
-        daemons.push(daemon);
-        await daemon.start();
-
-        // The spawn is the plain default one — no sudo, no wrapper, so no
-        // cgroup join could have been requested. (`Recorded` keeps file+args;
-        // asserting the argv is the stronger check anyway.)
-        expect(recorded[0]?.file).toBe("/usr/bin/node");
-        expect(recorded[0]?.args?.join(" ")).not.toContain(
-          "AUTOMATA_CGROUP_PROCS",
-        );
-        expect(logs.join("\n")).toMatch(/WORKER_AGENT_USER is empty/);
-        expect(daemon.oomKills()).toBe(0);
-      } finally {
-        spy.mockRestore();
-      }
+        }),
+      ).toThrow(/WORKER_AGENT_USER is empty/);
     });
 
     it("reports no OOM when the ceiling was never applied", () => {
@@ -716,23 +682,23 @@ setInterval(() => {}, 1000);
       expect(fs.existsSync(marker)).toBe(false);
     });
 
-    it("agentFailure: null while alive, the classified cause once dead, null after teardown", async () => {
-      // This is what turns a mid-run OOM into a resource-limit error instead of a
-      // poll that spins until Hatchet cancels the task. The `null` after teardown
-      // matters just as much: teardown SIGKILLs the agent itself, and a corpse we
-      // made must never be reported as the run's cause.
+    it("a configured ceiling on a box that cannot apply it FAILS the run, loudly", async () => {
+      // The run-time counterpart of the boot refusal, and the point of the whole
+      // feature: a box told to cap its runs must not run them uncapped. This used
+      // to log "run cgroup skipped: <reason>" and spawn the agent anyway. Any
+      // platform without a delegated cgroup v2 subtree exercises it — including
+      // this one, which is why the assertion is on the message, not the platform.
       const { root, workdir, input } = fixture();
       const config = loadWorkerConfig({
         WORKER_RUN_NAMESPACE_ROOT: root,
         WORKER_DAEMON_DIST: "/opt/daemon/index.js",
         WORKER_NODE_BIN: "/usr/bin/node",
         WORKER_RUN_MEMORY_MAX: "1G",
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_WORKDIR_ROOT: root,
       });
-      const recorded: Recorded[] = [];
       const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
       fs.mkdirSync(path.dirname(socket), { recursive: true });
-      const inner = fakeSpawn({ recorded });
-      let spawned: ChildProcess | null = null;
       const daemon = new DaemonProcess(
         config,
         input,
@@ -740,36 +706,12 @@ setInterval(() => {}, 1000);
         null,
         null,
         null,
-        {
-          spawnFn: ((file: string, args: string[], o: SpawnOptions) => {
-            spawned = inner(file, args, o);
-            return spawned;
-          }) as unknown as typeof spawn,
-        },
+        { spawnFn: fakeSpawn({ recorded: [] }) },
       );
       daemons.push(daemon);
-      expect(daemon.agentFailure()).toBeNull(); // nothing spawned yet
-      await daemon.start();
-      expect(daemon.agentFailure()).toBeNull(); // alive
-
-      const child = spawned as unknown as {
-        exitCode: number | null;
-        signalCode: string | null;
-      };
-      child.exitCode = 137;
-      child.signalCode = "SIGKILL";
-      const failure = daemon.agentFailure();
-      expect(failure).toBeInstanceOf(Error);
-      // No cgroup here ⇒ oomKills 0 ⇒ the generic cause survives, never
-      // "exceeded its memory ceiling". Confidently-wrong causes are the thing
-      // classifyAgentExit exists to refuse.
-      expect(String((failure as Error).message)).toContain("exited mid-run");
-      expect(String((failure as Error).message)).not.toContain(
-        "memory ceiling",
+      await expect(daemon.start()).rejects.toThrow(
+        /per-run memory ceiling is configured but/,
       );
-
-      daemon.teardown();
-      expect(daemon.agentFailure()).toBeNull();
     });
 
     it("agentFailure stays silent on a box with no ceiling — default-off is literal", async () => {

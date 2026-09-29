@@ -294,6 +294,10 @@ describe("createRunCgroup", () => {
       [`${dir}/memory.max`, "1400000000"],
       [`${dir}/memory.swap.max`, "0"],
       [`${dir}/pids.max`, "512"],
+      // The OOM takes the whole run, not just its largest process — otherwise a
+      // dying tool subprocess leaves the daemon alive holding a half-dead run
+      // that nothing classifies.
+      [`${dir}/memory.oom.group`, "1"],
     ]);
   });
 
@@ -317,6 +321,7 @@ describe("createRunCgroup", () => {
       `${dir}/memory.max`,
       `${dir}/memory.swap.max`,
       `${dir}/pids.max`,
+      `${dir}/memory.oom.group`,
     ]);
   });
 

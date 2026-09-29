@@ -295,6 +295,23 @@ export function loadWorkerConfig(
       );
     }
   }
+  // THE CEILING NEEDS THE UID DROP, so asking for one without the other is a
+  // misconfiguration, not a degraded mode. Without the drop the agent is this
+  // process's own child in this process's own cgroup, and capping it would cap
+  // the WORKER — so the per-run path declines. It used to decline with a log
+  // line and run on, which is the fail-open this whole feature argues against:
+  // the operator asked for a ceiling, the box booted happily, and every run went
+  // uncapped with one 'skipped' line to show for it. Rejecting here fails at
+  // boot AND at every run, because every caller loads this config.
+  if (memoryMaxBytes > 0 && !agentUser) {
+    throw new Error(
+      "WORKER_RUN_MEMORY_MAX is set but WORKER_AGENT_USER is empty: the per-run " +
+        "memory ceiling caps the AGENT, which only exists as a separate process " +
+        "under the uid drop. Without it the ceiling would cap this worker, so it " +
+        "is declined — and a box told to cap its runs must not run them uncapped. " +
+        "Set WORKER_AGENT_USER, or unset WORKER_RUN_MEMORY_MAX.",
+    );
+  }
   return {
     agentUser,
     boxId: resolveBoxId(env.WORKER_BOX_ID),

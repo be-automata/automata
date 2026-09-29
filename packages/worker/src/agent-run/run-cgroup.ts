@@ -397,6 +397,20 @@ export function createRunCgroup(opts: {
   io.write(path.join(dir, "memory.max"), String(memoryMaxBytes));
   io.write(path.join(dir, "memory.swap.max"), "0");
   io.write(path.join(dir, "pids.max"), String(tasksMax));
+  // `memory.oom.group = 1` — KILL THE RUN, NOT ITS BIGGEST PROCESS.
+  //
+  // By default the kernel OOM-kills the single largest task in the cgroup. On an
+  // agent run that is often a tool subprocess (a compiler, a test runner), not
+  // the daemon: `oom_kill` goes above zero, the subprocess dies, and the daemon
+  // survives holding a half-dead run. Nothing then classifies it, because the
+  // classification fires when the top-level child exits — so the run limps on
+  // and reports whatever confusing failure the dead tool produced.
+  //
+  // With this set the OOM takes every process in the cgroup, the daemon included,
+  // so the exit the classifier is watching for actually happens and the run is
+  // reported as `resource-limit`. That is also the honest semantics: the ceiling
+  // is per RUN, so exceeding it ends the run.
+  io.write(path.join(dir, "memory.oom.group"), "1");
 
   return dir;
 }

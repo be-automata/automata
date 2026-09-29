@@ -548,38 +548,40 @@ export class DaemonProcess {
   }
 
   /**
-   * #204: create this run's capped cgroup, or return null with a logged reason.
+   * #204: create this run's capped cgroup, or return null when there is no
+   * ceiling to apply.
    *
-   * Returns null — never throws — for every "feature is off" case, because a box
-   * without the ceiling must behave exactly as it does today. It DOES log the
-   * reason when the ceiling was asked for and could not be applied: a silent
-   * absence is the failure mode #192's cloud-init taught, and an operator who
-   * mistyped `Delegate=` needs to see it.
+   * `null` means ONE thing: `WORKER_RUN_MEMORY_MAX` is unset, so this box never
+   * asked for a ceiling and must behave exactly as it does today.
+   *
+   * Every other path throws. A box that asked for a ceiling and cannot apply it
+   * must not run the agent uncapped — that fail-open is the failure mode this
+   * whole feature argues against, and a per-run `skipped` log line is not a
+   * mitigation: it appears once per run in a stream nobody reads while every
+   * agent runs without a limit. Boot has already proved the subtree is delegated
+   * and the controllers enabled, so losing that at run time is an anomaly, not a
+   * degraded mode.
    */
   private prepareRunCgroup(): string | null {
-    const { memoryMaxBytes, tasksMax, agentUser } = this.config;
+    const { memoryMaxBytes, tasksMax } = this.config;
     if (memoryMaxBytes <= 0) {
       return null;
     }
-    if (!agentUser) {
-      // Without the uid drop the agent is this process's own child in this
-      // process's own cgroup; capping it would cap the worker.
-      logCgroup(
-        "run cgroup skipped: WORKER_RUN_MEMORY_MAX is set but WORKER_AGENT_USER is empty",
-      );
-      return null;
-    }
+    // `agentUser` is guaranteed non-empty here: loadWorkerConfig rejects the
+    // combination, so the box cannot boot with a ceiling and no uid drop.
     let procSelfCgroup: string;
     try {
       procSelfCgroup = fs.readFileSync("/proc/self/cgroup", "utf8");
-    } catch {
-      logCgroup("run cgroup skipped: /proc/self/cgroup is unreadable");
-      return null;
+    } catch (e) {
+      throw new Error(
+        `the per-run memory ceiling is configured but /proc/self/cgroup is unreadable: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
     const support = assessCgroupSupport({ procSelfCgroup });
     if (!support.supported) {
-      logCgroup(`run cgroup skipped: ${support.reason}`);
-      return null;
+      throw new Error(
+        `the per-run memory ceiling is configured but unavailable at run time: ${support.reason}`,
+      );
     }
     try {
       const dir = createRunCgroup({
@@ -667,6 +669,15 @@ export class DaemonProcess {
       // the agent inside its cgroup, the socket never appears, and this is the
       // first code to notice. `signalCode` matters as much as `exitCode` —
       // a killed process reports exitCode null.
+      //
+      // DELIBERATELY NOT GATED ON THE CEILING, unlike `agentFailure()`. This one
+      // is not a new failure: a child that died during startup already failed the
+      // run on every box. It changes only the CAUSE reported — "daemon exited
+      // before its socket was ready (signal SIGKILL)" instead of "socket not
+      // ready after 15000ms" fifteen seconds later — and reporting a timeout for
+      // a process killed 200ms in was simply wrong. So the precise default-off
+      // claim is: the argv, the spawn and which runs fail are unchanged; this one
+      // error names its cause sooner.
       if (this.child?.exitCode != null || this.child?.signalCode != null) {
         const generic = new Error(
           `daemon exited before its socket was ready (code ${this.child.exitCode}, signal ${this.child.signalCode ?? "none"})` +
