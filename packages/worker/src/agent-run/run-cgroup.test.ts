@@ -301,6 +301,32 @@ describe("createRunCgroup", () => {
     ]);
   });
 
+  it("removes the directory when a write fails — no half-built cgroup", () => {
+    // Otherwise the dir is left behind with the caller's `cgroupDir` never
+    // assigned, so teardown does not know about it: one leaked directory per
+    // failure, each still holding whatever limits DID get written.
+    const f = fakeFs();
+    const io = {
+      ...f.fsi,
+      write: (file: string, value: string) => {
+        if (file.endsWith("pids.max")) {
+          throw new Error("EACCES");
+        }
+        f.fsi.write(file, value);
+      },
+    };
+    expect(() =>
+      createRunCgroup({
+        root,
+        threadId: "thr-1",
+        memoryMaxBytes: 1,
+        tasksMax: 1,
+        fsi: io,
+      }),
+    ).toThrow(/EACCES/);
+    expect(f.removed).toEqual([runCgroupPath(root, "thr-1")]);
+  });
+
   it("hands NOTHING to the agent — every file stays worker-owned", () => {
     // An earlier shape chowned cgroup.procs to the agent so the wrapper could
     // join itself. That is EPERM (an unprivileged user cannot give a file away)
