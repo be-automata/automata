@@ -24,6 +24,10 @@ import type { AgentRunInput } from "./types";
 
 let servers: net.Server[] = [];
 let socketPaths: string[] = [];
+// Bind failures from fakeSpawn's fire-and-forget listen() (see below) — an
+// unhandled 'error' event would crash the whole run with no test named, so
+// they are collected here and rethrown by afterEach against the right test.
+const bindErrors: Error[] = [];
 
 function socketPath(): string {
   const p = path.join(
@@ -73,6 +77,11 @@ afterEach(() => {
     }
   }
   socketPaths = [];
+  if (bindErrors.length > 0) {
+    const first = bindErrors[0];
+    bindErrors.length = 0;
+    throw first;
+  }
 });
 
 describe("writeDaemonMessage", () => {
@@ -141,6 +150,15 @@ describe("DaemonProcess per-run socket (Phase 0.2b)", () => {
   const tmpDirs: string[] = [];
   const daemons: DaemonProcess[] = [];
 
+  /**
+   * Fail loudly if a fixture ever grows past Darwin's sun_path cap again —
+   * over it, macOS bind(2)/connect(2) silently truncate and the suite tests
+   * a different path than it thinks (the false pass this file used to have).
+   */
+  function assertUnderSunPathCap(socket: string): void {
+    expect(Buffer.byteLength(socket)).toBeLessThan(104);
+  }
+
   afterEach(() => {
     for (const d of daemons) d.teardown();
     daemons.length = 0;
@@ -203,12 +221,14 @@ setInterval(() => {}, 1000);
       orgId: "org-1",
     };
 
+    const workerId = getProcessWorkerId();
+    const expectedSocket = runSocketPath(root, workerId, threadId);
+    assertUnderSunPathCap(expectedSocket);
+
     const daemon = new DaemonProcess(config, input, workdir);
     daemons.push(daemon);
     await daemon.start();
 
-    const workerId = getProcessWorkerId();
-    const expectedSocket = runSocketPath(root, workerId, threadId);
     const expectedPidFile = runPidPath(root, workerId, threadId);
 
     // The fake daemon bound EXACTLY the per-run socket it was handed → the flag
@@ -252,6 +272,7 @@ setInterval(() => {}, 1000);
       const boundSocket = flagIdx === -1 ? undefined : args[flagIdx + 1];
       if (boundSocket !== undefined) {
         const server = net.createServer();
+        server.on("error", (err) => void bindErrors.push(err));
         servers.push(server);
         server.listen(boundSocket);
       }
@@ -541,6 +562,9 @@ setInterval(() => {}, 1000);
       daemonToken: "daemon",
       orgId: "org-1",
     };
+    assertUnderSunPathCap(
+      runSocketPath(root, getProcessWorkerId(), input.threadId),
+    );
     return { root, scriptDir, workdir, input };
   }
 });

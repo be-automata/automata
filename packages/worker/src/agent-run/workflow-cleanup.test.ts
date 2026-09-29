@@ -95,10 +95,18 @@ vi.mock("./box-lock", () => ({
 // setfacl) for that account on the box's production namespace root. That only
 // ever passed on machines where the agent account exists — on any other box
 // (CI runners included) the exec fails and takes the run down with it.
-// Everything else run-namespace exports stays real.
+// Recorded in admissionOrder so the wiring (grant re-asserted BEFORE anything
+// touches the namespace dir) stays asserted, not assumed. Everything else
+// run-namespace exports stays real.
+const ensureRunNamespace = vi.fn(async (_opts: unknown) => {
+  admissionOrder.push("ensure-ns");
+  return "/tmp/automata-agent-run/test";
+});
 vi.mock("./run-namespace", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./run-namespace")>()),
-  ensureRunNamespace: vi.fn(async () => "/tmp/automata-agent-run/test"),
+  ensureRunNamespace: (...args: unknown[]) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ensureRunNamespace(...(args as [any])),
 }));
 // #184 (#152 Stage B2): the real reaper's default spawnKill is a REAL
 // `sudo kill -9 -- -1` as the agent uid — lethal to live work on the pilot
@@ -434,6 +442,14 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
       });
       // and the daemon child is pointed at it
       expect(daemonCtorArgs[0]![4]).toBe("http://127.0.0.1:41234");
+      // The #108 grant repair got the agent account and the configured root —
+      // the mock (see top of file) stands in for real chmod +a / setfacl.
+      expect(ensureRunNamespace).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentUser: "_automata-agent",
+          root: "/tmp/automata-agent-run",
+        }),
+      );
     } finally {
       delete process.env.WORKER_AGENT_USER;
       delete process.env.WORKER_WORKDIR_ROOT;
@@ -979,17 +995,15 @@ describe("#152 Stage A: admission wiring order", () => {
     // Fail at the credential pull — everything at and before the lock has run.
     pullAgentCredentials.mockRejectedValue(new Error("stop here"));
     await expect(runFn({ ...INPUT }, ctx())).rejects.toThrow("stop here");
+    // The namespace grant is re-asserted before ANYTHING touches the dir.
+    expect(admissionOrder[0]).toBe("ensure-ns");
     // The load-bearing invariant is set-before-lock, not reclaim-vs-reap
     // order (either order yields the same end state — see reclaim.ts docs).
-    expect(admissionOrder.slice(0, 3).sort()).toEqual([
-      "lock",
-      "reap",
-      "reclaim",
-    ]);
-    expect(admissionOrder[2]).toBe("lock");
+    expect(admissionOrder.slice(1, 3).sort()).toEqual(["reap", "reclaim"]);
+    expect(admissionOrder[3]).toBe("lock");
     // #184 AC11: the uid-scan runs UNDER the lock, before the credential pull
     // (which rejects here and stops the run right after).
-    expect(admissionOrder[3]).toBe("uid-reap:admission");
+    expect(admissionOrder[4]).toBe("uid-reap:admission");
     expect(vi.mocked(reapOwnThreadAttempts)).toHaveBeenCalledWith(
       expect.objectContaining({ threadId: INPUT.threadId }),
     );
@@ -1017,9 +1031,10 @@ describe("#152 Stage A: admission wiring order", () => {
     });
     postRunTerminal.mockReset().mockResolvedValue("applied");
     await runFn(INPUT, ctx());
-    expect(admissionOrder.slice(0, 2).sort()).toEqual(["reap", "reclaim"]);
+    expect(admissionOrder[0]).toBe("ensure-ns");
+    expect(admissionOrder.slice(1, 3).sort()).toEqual(["reap", "reclaim"]);
     // The mock records BOTH phases here, so the teardown scan closes the list.
-    expect(admissionOrder.slice(2)).toEqual([
+    expect(admissionOrder.slice(3)).toEqual([
       "lock",
       "uid-reap:admission",
       "daemon-start",
