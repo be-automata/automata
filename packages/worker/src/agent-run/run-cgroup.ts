@@ -94,6 +94,15 @@ export function assessCgroupSupport(opts: {
   procSelfCgroup: string;
   /** cgroup v2 mount point; the only place it ever is in practice. */
   mountPoint?: string;
+  /**
+   * Must the controllers already be ENABLED in `cgroup.subtree_control`?
+   *
+   * True at RUN time: by then boot has enabled them, and if it has not, creating a
+   * run cgroup would fail writing `memory.max`. False at BOOT time, where this is
+   * called immediately BEFORE `prepareDelegatedRoot` does the enabling — requiring
+   * it there is circular and refuses every boot, which is how this was found.
+   */
+  requireEnabled?: boolean;
   /** Injected for tests. */
   readFile?: (p: string) => string;
   access?: (p: string) => boolean;
@@ -163,6 +172,10 @@ export function assessCgroupSupport(opts: {
       supported: false,
       reason: `delegated cgroup lacks controller(s) ${missing.join(", ")} (have: ${controllers.join(", ") || "none"})`,
     };
+  }
+
+  if (opts.requireEnabled === false) {
+    return { supported: true, root, controllers };
   }
 
   // AVAILABLE IS NOT THE SAME AS ENABLED, and the difference is a whole class of

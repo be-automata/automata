@@ -87,7 +87,12 @@ function prepareCeilingSubtreeAtBoot(): void {
       "memory ceiling requested (WORKER_RUN_MEMORY_MAX) but /proc/self/cgroup is unreadable",
     );
   }
-  const support = assessCgroupSupport({ procSelfCgroup });
+  // requireEnabled:false — this call runs immediately before the line that does
+  // the enabling. Asking for it here would refuse every boot.
+  const support = assessCgroupSupport({
+    procSelfCgroup,
+    requireEnabled: false,
+  });
   if (!support.supported) {
     throw new Error(
       `memory ceiling requested (WORKER_RUN_MEMORY_MAX) but unavailable: ${support.reason}`,

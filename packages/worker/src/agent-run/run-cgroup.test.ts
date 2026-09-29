@@ -121,6 +121,21 @@ describe("assessCgroupSupport", () => {
     });
   });
 
+  it("does NOT require enablement at boot — that call precedes the enabling", () => {
+    // The boot step calls this immediately before writing `+memory` into
+    // subtree_control. Requiring enablement there is circular: it refused every
+    // boot on the live box, which is how the option got added.
+    const r = assessCgroupSupport({
+      platform: "linux",
+      procSelfCgroup: procV2,
+      requireEnabled: false,
+      access: () => true,
+      readFile: (p: string) =>
+        p.endsWith("cgroup.subtree_control") ? "" : "memory pids",
+    });
+    expect(r.supported).toBe(true);
+  });
+
   it("names the missing controller when Delegate= is too narrow", () => {
     const r = assessCgroupSupport({
       platform: "linux",
