@@ -136,7 +136,9 @@ export class DaemonRuntime implements IDaemonRuntime {
       // socket file, and — the part that is easy to miss — when a POSIX ACL is
       // present the mode's group bits ARE the ACL mask, which caps every
       // named-user entry. So the run dir's inherited grant for the worker lands
-      // on the socket as `user:worker:rwx #effective:r-x`: listed, and inert.
+      // on the socket as `user:<worker account>:rwx #effective:r-x` — listed by
+      // getfacl, and inert. (The account name is the deployment's, `automata` on
+      // the Linux execution box; the unit file templates it as `User=`.)
       // Every run then dies with
       //
       //   daemon socket not ready after 15000ms: connect EACCES <socket>

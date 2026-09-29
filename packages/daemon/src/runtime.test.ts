@@ -37,8 +37,8 @@ describe("runtime", () => {
     // cgroup work: node binds unix sockets 0755. On Linux, connect(2) needs
     // WRITE on the socket file, and where a POSIX ACL is present the mode's
     // GROUP bits ARE the ACL mask — so the run dir's inherited grant lands on a
-    // bind(2)-created socket as `user:automata:rwx #effective:r-x`: listed,
-    // and inert. Every agent-uid run on Linux died with
+    // bind(2)-created socket as `user:<worker account>:rwx #effective:r-x` —
+    // listed, and inert. Every agent-uid run on Linux died with
     // `daemon socket not ready after 15000ms: connect EACCES`.
     //
     // Only the OWNER can raise the mask, and the daemon is the owner, so it
