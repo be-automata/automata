@@ -69,6 +69,11 @@ export interface WorkerConfig {
    * package still typechecks and tests on any platform.
    */
   agentUser: string;
+  /**
+   * Stable identity for this box, used in the engine worker name so two boxes
+   * are distinguishable. See resolveBoxId.
+   */
+  boxId: string;
   /** Root under which each run gets an isolated clone directory. */
   workdirRoot: string;
   /** thread-status poll interval, ms (5-10s; runs are minutes-long — ADR-003). */
@@ -180,6 +185,34 @@ function parseModeOrInherit(
     : "inherit";
 }
 
+/**
+ * Stable identity for THIS box (#192 P5).
+ *
+ * Every worker registered with the engine under the same name is
+ * indistinguishable from every other, which was fine while one laptop was the
+ * whole execution plane and stops being fine the moment a second box exists:
+ * the engine's worker list, the dashboard and any per-box question ("which box
+ * ran this?", "is the Frankfurt box alive?") all collapse into one row.
+ *
+ * Defaults to the hostname, which is already unique per box and needs no
+ * provisioning step. `WORKER_BOX_ID` overrides it for boxes whose hostname is
+ * an opaque cloud id, or when two boxes must be told apart by role rather than
+ * by host.
+ *
+ * Sanitised, not trusted: the value reaches the engine as part of a worker name,
+ * so it is reduced to a conservative charset and bounded. An empty or
+ * all-invalid value falls back rather than producing a nameless worker.
+ */
+export function resolveBoxId(raw: string | undefined): string {
+  const candidate = (raw ?? "").trim() || os.hostname();
+  const cleaned = candidate
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return cleaned || "unknown-box";
+}
+
 export function loadWorkerConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): WorkerConfig {
@@ -201,6 +234,7 @@ export function loadWorkerConfig(
   }
   return {
     agentUser,
+    boxId: resolveBoxId(env.WORKER_BOX_ID),
     nodeBin: env.WORKER_NODE_BIN?.trim() || process.execPath,
     daemonDist: env.WORKER_DAEMON_DIST?.trim() || defaultDaemonDist(),
     claudeBinDir: resolveClaudeBinDir(env.CLAUDE_BIN),

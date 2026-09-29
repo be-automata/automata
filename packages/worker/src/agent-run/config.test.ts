@@ -1,6 +1,7 @@
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadWorkerConfig } from "./config";
+import { loadWorkerConfig, resolveBoxId } from "./config";
 
 describe("loadWorkerConfig", () => {
   it("falls back to sensible defaults when nothing is set", () => {
@@ -276,5 +277,36 @@ describe("loadWorkerConfig", () => {
         loadWorkerConfig({ WORKER_HEALTH_PORT: "0" }).healthPort,
       ).toBeNull();
     });
+  });
+});
+
+describe("resolveBoxId (#192 P5)", () => {
+  it("defaults to the hostname — unique per box, no provisioning step", () => {
+    expect(resolveBoxId(undefined)).toBe(
+      os
+        .hostname()
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 40),
+    );
+    expect(resolveBoxId("  ")).toBe(resolveBoxId(undefined));
+  });
+
+  it("takes an explicit override", () => {
+    expect(resolveBoxId("fsn1-exec-1")).toBe("fsn1-exec-1");
+  });
+
+  it("sanitises, because the value becomes part of an engine worker name", () => {
+    expect(resolveBoxId("FSN1 Exec/1")).toBe("fsn1-exec-1");
+    expect(resolveBoxId("--weird--")).toBe("weird");
+    expect(resolveBoxId("a".repeat(80))).toHaveLength(40);
+  });
+
+  it("never yields an empty name", () => {
+    // A worker registered under "automata-worker-" is worse than one under a
+    // fallback: it looks like a truncation bug rather than a missing config.
+    expect(resolveBoxId("!!!")).toBe("unknown-box");
+    expect(resolveBoxId("///")).toBe("unknown-box");
   });
 });
