@@ -441,12 +441,14 @@ export async function reapAgentUidEscapees(
     // #210: scope the scan to the worker's own cgroup subtree. Null scope (no
     // cgroup v2 — macOS, cgroup v1) ⇒ uid alone decides, as before.
     const workerScope = cgroupScope();
-    const selected = selectAgentRows(
-      rows,
-      uid,
-      selfPid,
-      workerScope ? (pid) => inWorkerScope(pid, workerScope) : undefined,
-    );
+    // ONE predicate, used by BOTH scans. Scoping only the first one would spare a
+    // foreign process and then count it as a residual: the poll would never
+    // empty, spin the whole residualBoundMs, and report a residual that is really
+    // someone else's healthy process.
+    const inScope = workerScope
+      ? (pid: number) => inWorkerScope(pid, workerScope)
+      : undefined;
+    const selected = selectAgentRows(rows, uid, selfPid, inScope);
     if (selected.foreign.length > 0) {
       // Loud, because this is the line that would have caught #210 on day one:
       // processes sharing the agent's uid that are NOT ours, and are therefore
@@ -510,6 +512,7 @@ export async function reapAgentUidEscapees(
             await listProcesses(),
             uid,
             selfPid,
+            inScope,
           ).targets;
         } catch (e) {
           log(

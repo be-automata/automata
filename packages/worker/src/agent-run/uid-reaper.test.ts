@@ -274,6 +274,72 @@ describe("cgroup scoping (#210 — the uid is not ours alone)", () => {
 });
 
 describe("reapAgentUidEscapees", () => {
+  it("#210 end to end: a foreign same-uid process is spared AND is not a residual", async () => {
+    // The residual poll re-scans. Scoping only the FIRST scan would spare the
+    // container's postgres and then count it as a residual — the loop would never
+    // empty, would spin the whole residualBoundMs, and would report someone
+    // else's healthy process as our failed kill.
+    const WORKER = "/system.slice/automata-worker.service";
+    const ours = { pid: 4242, pgid: 4242, uid: 999, comm: "node" };
+    const foreign = { pid: 22096, pgid: 22096, uid: 999, comm: "postgres" };
+    const cgroupOf: Record<number, string> = {
+      4242: `${WORKER}/run-thread-abcd1234`,
+      22096: "/system.slice/docker-0b6149d99a12.scope",
+    };
+    // Ours dies on the kill; the foreign one stays alive forever, as it should.
+    let killed = false;
+    const lines: string[] = [];
+    const result = await reapAgentUidEscapees({
+      agentUser: AGENT,
+      phase: "admission",
+      log: (l) => lines.push(l),
+      listProcesses: async () => (killed ? [foreign] : [ours, foreign]),
+      resolveUid: async () => 999,
+      spawnKill: async () => {
+        killed = true;
+      },
+      selfPid: 1,
+      settleMs: 0,
+      residualBoundMs: 500,
+      cgroupScope: () => WORKER,
+      inWorkerScope: (pid, scope) => {
+        const cg = cgroupOf[pid] ?? "";
+        return cg === scope || cg.startsWith(`${scope}/`);
+      },
+    });
+    expect(result.scanned).toBe(1);
+    expect(result.killed).toBe(1);
+    expect(result.residual).toBe(0);
+    // And it says out loud what it spared, rather than dropping it silently.
+    expect(lines.join("\n")).toMatch(/box\.escapees_out_of_scope/);
+    expect(lines.join("\n")).toMatch(/"spared":1/);
+  });
+
+  it("no cgroup v2 ⇒ the reaper behaves exactly as it did before", async () => {
+    // macOS and cgroup v1 yield a null scope: uid alone decides, nothing is
+    // spared, and no out-of-scope line is logged.
+    const rows = [{ pid: 4242, pgid: 4242, uid: 999, comm: "node" }];
+    let killed = false;
+    const lines: string[] = [];
+    const result = await reapAgentUidEscapees({
+      agentUser: AGENT,
+      phase: "admission",
+      log: (l) => lines.push(l),
+      listProcesses: async () => (killed ? [] : rows),
+      resolveUid: async () => 999,
+      spawnKill: async () => {
+        killed = true;
+      },
+      selfPid: 1,
+      settleMs: 0,
+      residualBoundMs: 500,
+      cgroupScope: () => null,
+    });
+    expect(result.killed).toBe(1);
+    expect(result.residual).toBe(0);
+    expect(lines.join("\n")).not.toMatch(/out_of_scope/);
+  });
+
   it("AC1: empty agentUser skips without listing; logs 'disabled' only at boot", async () => {
     const listProcesses = vi.fn(async () => DARWIN_ROWS);
     const spawnKill = vi.fn(async () => {});
