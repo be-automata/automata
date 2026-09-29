@@ -1,0 +1,93 @@
+# Automata execution-plane worker — the Linux box's single systemd unit (#192).
+#
+# This is a TEMPLATE. Replace the __PLACEHOLDER__ tokens, install to
+# /etc/systemd/system/automata-worker.service, then `systemctl daemon-reload`.
+# It replaces the macOS launchd unit (../com.automata.worker.plist) one-for-one:
+# ONE unit, no standby, `slots: 1` plus the kernel box lock keep the box to one
+# agent run at a time.
+#
+# Tokens:
+#   __USER__   service account the worker runs as (NOT root, NOT the agent uid)
+#   __HOME__   that account's home — holds .automata/{run-worker.sh,worker-box.env}
+#   __REPO__   absolute path to the automata-platform checkout
+
+[Unit]
+Description=Automata execution-plane worker
+Documentation=file://__REPO__/packages/worker/deploy/README.md
+# The worker dials the engine over loopback, and the engine is a compose stack.
+# Ordering only — Requires= would take the worker down with a compose restart,
+# and the SDK reconnects on its own.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=__USER__
+Group=__USER__
+WorkingDirectory=__REPO__/packages/worker
+
+# ── Wait for the engine before the auth gate can mean anything ─────────────
+#
+# `After=docker.service` orders against the DAEMON, not against the compose
+# stack's readiness, so on a cold boot the worker wins the race. The launcher's
+# first act is the fail-closed auth gate, which probes the engine — and a probe
+# against a socket that is not listening yet returns curl's `000`, which the gate
+# correctly refuses. Observed on the first reboot drill (2026-09-28):
+#
+#   [assert-auth-enabled] FAIL: negative probe returned unexpected status 000000
+#
+# The unit self-healed via Restart=always, so it costs no availability. It costs
+# something worse: every reboot stamps a line that reads exactly like an auth
+# failure, so anyone alerting on `assert-auth-enabled.*FAIL` gets a false positive
+# per boot and learns to ignore the one line that stands between this box and a
+# `-dev` engine with a publicly known signing key.
+#
+# So wait for readiness here, where "not up yet" is a known state, instead of
+# making the security gate guess. Bounded, not infinite: a genuinely dead engine
+# must keep failing visibly on the 15s Restart cycle, never hang the unit in
+# `activating`.
+ExecStartPre=/bin/bash -c 'for _ in $(seq 1 30); do curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:8888/api/ready && exit 0; sleep 2; done; echo "engine not ready on 127.0.0.1:8888 after 60s" >&2; exit 1'
+
+ExecStart=/bin/bash __HOME__/.automata/run-worker.sh
+
+# ── Drain, not kill ────────────────────────────────────────────────────────
+#
+# The SDK's SIGTERM handler pauses assignment on the engine and then AWAITS the
+# in-flight run to completion. Everything here exists to let that finish.
+#
+# KillMode=mixed: SIGTERM goes to MainPID alone, so the worker decides when its
+# children die. `control-group` would SIGTERM the agent and its daemon directly
+# and drop the in-flight review — the exact loss this unit is shaped to prevent.
+KillMode=mixed
+KillSignal=SIGTERM
+# A real agent run is minutes, and a review can sit behind one. This is the
+# budget before systemd escalates to SIGKILL; too small silently reintroduces
+# the mid-run drop under a different name. It is deliberately above the 30-minute
+# scheduleTimeout other variants wait on (definition.ts).
+TimeoutStopSec=2100
+SendSIGKILL=yes
+
+# Relaunch on graceful exit and on crash, rate-limited the same 15s the launchd
+# unit used via ThrottleInterval.
+Restart=always
+RestartSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=automata-worker
+
+# ── Hardening that does NOT fight the agent-uid design ─────────────────────
+#
+# The worker legitimately spawns an agent under a DIFFERENT uid via sudo, so
+# NoNewPrivileges MUST stay off — it would break the uid drop that the whole
+# egress fence depends on. The rest is free.
+NoNewPrivileges=no
+PrivateTmp=no
+ProtectSystem=full
+ProtectHome=no
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=no
+
+[Install]
+WantedBy=multi-user.target

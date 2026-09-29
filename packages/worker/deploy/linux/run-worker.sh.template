@@ -1,0 +1,60 @@
+#!/bin/bash
+# Launcher for the Linux execution box's single worker unit (#192).
+#
+# This is a TEMPLATE. Replace the __PLACEHOLDER__ tokens for the target box and
+# install to <service-user-home>/.automata/run-worker.sh, mode 0755. It is the
+# Linux counterpart of the macOS script documented in ../README.md; the contract
+# below is the same on both platforms, and the reasons it is shaped this way were
+# all paid for once already.
+#
+# Tokens:
+#   __REPO__   absolute path to the automata-platform checkout
+#   __HOME__   absolute home of the service user (holds .automata/)
+#
+# ── SIGNAL CONTRACT — this file MUST end in `exec node …` ───────────────────
+#
+# A `pnpm run` wrapper chain (systemd -> pnpm -> pnpm -> sh -> tsx -> node)
+# swallows SIGTERM at the top pnpm layer, so `systemctl stop` never reaches the
+# worker and the drain silently breaks — live-verified on macOS 2026-07-25, and
+# systemd's MainPID has exactly the same problem. Sourcing the env in-shell and
+# loading tsx IN-PROCESS (`node --import tsx`) leaves the worker as the unit's
+# own MainPID, so the Hatchet SDK's SIGTERM handler receives the signal, pauses
+# assignment on the engine and awaits the in-flight run.
+#
+# There is deliberately NO custom signal handler in worker.ts — a second handler
+# would race the SDK's and risk tearing the daemon down mid-run.
+
+set -uo pipefail
+
+# node/pnpm from the system install; corepack shims live in /usr/local/bin.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+cd __REPO__/packages/worker || exit 1
+
+# The box's secrets. 0600, owned by the service user, never in git.
+set -a
+# shellcheck disable=SC1091
+source __HOME__/.automata/worker-box.env
+set +a
+
+# Fail-closed auth gate. A `-dev` / auth-disabled hatchet-lite image embeds a
+# PUBLICLY KNOWN JWT signing key, which voids tenant isolation — a worker must
+# never attach to one. This blocks boot; the worker's TS boot gate
+# (assertAuthEnabledFromEnv) is the second, cross-platform layer, so a box whose
+# script was never updated still fails closed.
+bash scripts/assert-auth-enabled.sh || exit 1
+
+# The worker consumes packages/daemon/dist at runtime, so the bundle must be
+# current for THIS revision, not whatever the last deploy left behind.
+pnpm run daemon:build || exit 1
+
+# Agent-uid mode only: publish the just-built bundle where the agent uid can
+# read it. The agent account cannot read the service user's home, and staging it
+# here is what keeps WORKER_DAEMON_DIST matching the build rather than drifting.
+# /usr/local/automata/daemon is owned by the operator precisely so this needs no
+# sudo grant.
+if [ -n "${WORKER_AGENT_USER:-}" ]; then
+  install -m 0444 ../daemon/dist/index.js /usr/local/automata/daemon/index.js || exit 1
+fi
+
+exec node --import tsx src/hello/worker.ts

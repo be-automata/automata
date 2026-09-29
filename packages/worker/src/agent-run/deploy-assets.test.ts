@@ -302,3 +302,103 @@ describe("packages/worker/deploy/linux/cloud-init.yaml (#192)", () => {
     expect(cloudInit).toMatch(/command -v setfacl/);
   });
 });
+
+describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () => {
+  const linux = (f: string) =>
+    read(path.join(workerRoot, "deploy", "linux", f));
+
+  it("the launcher ends in `exec node`, with nothing wrapping it", () => {
+    // A `pnpm run` chain swallows SIGTERM at the top pnpm layer, so the signal
+    // never reaches the worker and the drain silently breaks — live-verified on
+    // macOS 2026-07-25, and systemd's MainPID has the same problem. The exec
+    // must be the LAST line, not merely present somewhere.
+    const script = linux("run-worker.sh.template");
+    const lines = script.trimEnd().split("\n");
+    expect(lines[lines.length - 1]).toBe(
+      "exec node --import tsx src/hello/worker.ts",
+    );
+    expect(script).not.toMatch(/exec\s+pnpm/);
+  });
+
+  it("the launcher gates on auth and rebuilds the daemon BEFORE exec'ing", () => {
+    // A `-dev` hatchet-lite image embeds a publicly known JWT signing key, so a
+    // worker must never attach to one; and the worker consumes the daemon dist
+    // at runtime, so a stale bundle is a wrong-code run, not a missing file.
+    const script = linux("run-worker.sh.template");
+    const gate = script.indexOf("assert-auth-enabled.sh");
+    const build = script.indexOf("pnpm run daemon:build");
+    // lastIndexOf on the FULL command: the header comment also says "exec node"
+    // while explaining the signal contract, and matching that instead puts the
+    // exec at the top of the file and inverts every ordering below.
+    const exec = script.lastIndexOf(
+      "exec node --import tsx src/hello/worker.ts",
+    );
+    expect(gate).toBeGreaterThan(-1);
+    expect(build).toBeGreaterThan(gate);
+    expect(exec).toBeGreaterThan(build);
+  });
+
+  it("the unit signals only MainPID, so the SDK owns the drain", () => {
+    // KillMode=control-group SIGTERMs the agent and its daemon directly and
+    // drops the in-flight review. `mixed` sends SIGTERM to MainPID alone and
+    // lets the worker decide when its children die.
+    const unit = linux("automata-worker.service");
+    expect(unit).toMatch(/^KillMode=mixed$/m);
+    expect(unit).not.toMatch(/^KillMode=control-group$/m);
+    expect(unit).toMatch(/^KillSignal=SIGTERM$/m);
+
+    // The stop budget must clear a real agent run. Anything small silently
+    // reintroduces the mid-run SIGKILL under a different name.
+    const stop = unit.match(/^TimeoutStopSec=(\d+)$/m);
+    expect(stop, unit).toBeTruthy();
+    expect(Number(stop![1])).toBeGreaterThanOrEqual(1800);
+  });
+
+  it("keeps NoNewPrivileges OFF — the agent-uid drop depends on it", () => {
+    // The worker spawns the agent under a DIFFERENT uid via sudo. Turning this
+    // on reads like hardening and instead breaks the uid boundary the whole
+    // egress fence is keyed on.
+    const unit = linux("automata-worker.service");
+    expect(unit).toMatch(/^NoNewPrivileges=no$/m);
+    expect(unit).not.toMatch(/^NoNewPrivileges=(yes|true)$/m);
+  });
+
+  it("runs as a service account, never root, and relaunches rate-limited", () => {
+    const unit = linux("automata-worker.service");
+    expect(unit).toMatch(/^User=__USER__$/m);
+    expect(unit).not.toMatch(/^User=root$/m);
+    expect(unit).toMatch(/^Restart=always$/m);
+    expect(unit).toMatch(/^RestartSec=15$/m);
+  });
+});
+
+describe("#192: the unit waits for the engine before the auth gate runs", () => {
+  const unit = read(
+    path.join(workerRoot, "deploy", "linux", "automata-worker.service"),
+  );
+
+  it("gates start on engine readiness over loopback", () => {
+    // `After=docker.service` orders against the daemon, not the compose stack's
+    // readiness. Without this wait the launcher's fail-closed auth gate probes a
+    // socket that is not listening and refuses curl's `000` — observed on the
+    // first reboot drill. It self-heals, and that is the trap: it also stamps a
+    // line indistinguishable from a real auth failure on every single boot.
+    expect(unit).toMatch(/^ExecStartPre=.*api\/ready/m);
+    expect(unit).toMatch(/127\.0\.0\.1:8888/);
+  });
+
+  it("bounds the wait — a dead engine must fail visibly, not hang", () => {
+    // An unbounded wait parks the unit in `activating` forever, where
+    // Restart=always never fires and nothing alerts.
+    const pre = unit.match(/^ExecStartPre=.*$/m)?.[0] ?? "";
+    expect(pre).toMatch(/seq 1 \d+/);
+    expect(pre).not.toMatch(/while true|until .*; do .*done *'?$/);
+    expect(pre).toMatch(/exit 1/);
+  });
+
+  it("runs the readiness wait BEFORE the launcher", () => {
+    expect(unit.indexOf("ExecStartPre=")).toBeLessThan(
+      unit.indexOf("ExecStart=/bin/bash"),
+    );
+  });
+});
