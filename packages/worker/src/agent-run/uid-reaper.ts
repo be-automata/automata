@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -80,6 +81,10 @@ export interface ReapAgentUidOpts {
   /** How long the post-kill residual poll may run; default 2000 ms. */
   residualBoundMs?: number;
   now?: () => number;
+  /** #210, injected for tests. Default: read `/proc/self/cgroup`. */
+  cgroupScope?: () => string | null;
+  /** #210, injected for tests. Default: read `/proc/<pid>/cgroup`. */
+  inWorkerScope?: (pid: number, scope: string) => boolean;
 }
 
 export interface ReapAgentUidResult {
@@ -195,6 +200,87 @@ export function parsePsOutput(text: string): ProcRow[] {
 }
 
 /**
+ * The worker's own cgroup v2 path, or null when there is no cgroup v2 to read
+ * (macOS, cgroup v1, an unreadable /proc) — null means "do not filter", which
+ * keeps every non-Linux box behaving exactly as it does today.
+ *
+ * The `supervisor/` leaf is stripped because #204 moves the worker into it at
+ * boot: the scope we care about is the DELEGATED ROOT, which is that leaf's
+ * parent and contains both the supervisor and every run cgroup.
+ */
+export function readSelfCgroupScope(
+  read: (p: string) => string = (f) => fs.readFileSync(f, "utf8"),
+): string | null {
+  let raw: string;
+  try {
+    raw = read("/proc/self/cgroup");
+  } catch {
+    return null;
+  }
+  const line = raw
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.startsWith("0::"));
+  const rel = line?.slice("0::".length);
+  if (!rel || !rel.startsWith("/")) return null;
+  return path.basename(rel) === "supervisor" ? path.dirname(rel) : rel;
+}
+
+/**
+ * Is this pid inside the worker's own cgroup subtree?
+ *
+ * WHY THIS EXISTS. The uid scan assumed the agent uid belongs to the agent and
+ * nothing else. On a box that also runs the execution plane's containers that is
+ * false: the `postgres` image uses uid 999, the agent account was created at uid
+ * 999, and the host sees container processes by their host-side uid — so the
+ * scan killed the engine's own database three times per run, 45 restarts deep
+ * before anyone noticed (#210).
+ *
+ * WHY THE CGROUP IS THE RIGHT DISCRIMINATOR, and not a `docker-*.scope` denylist:
+ * cgroup membership is INHERITED at fork and does not change on `setsid`, on
+ * re-parenting to pid 1, or on anything else an escapee does. That is exactly the
+ * property the escapee hunt needs — a process that fled its process group cannot
+ * flee its cgroup — so scoping by cgroup is strictly more precise than matching a
+ * uid, collision or no collision. A denylist would also have to be maintained
+ * against every future runtime on the box; this does not.
+ *
+ * Unreadable `/proc/<pid>/cgroup` ⇒ NOT ours. A process we cannot place is one we
+ * cannot justify SIGKILLing, and the cost of missing an escapee is bounded (the
+ * next phase rescans) while the cost of a false positive is a dead database.
+ */
+export function isInWorkerCgroupScope(
+  pid: number,
+  workerScope: string,
+  read: (p: string) => string = (f) => fs.readFileSync(f, "utf8"),
+): boolean {
+  let raw: string;
+  try {
+    raw = read(`/proc/${pid}/cgroup`);
+  } catch {
+    return false;
+  }
+  const line = raw
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.startsWith("0::"));
+  const rel = line?.slice("0::".length);
+  if (!rel) return false;
+  // A ROOT SCOPE MATCHES EVERYTHING, and getting this wrong disables the reaper
+  // in silence. Under a private cgroup namespace (`cgroupns=private`)
+  // /proc/self/cgroup reads `0::/` or `0::/supervisor`, so the scope resolves to
+  // "/" — and `startsWith("//")` matches nothing, so every process looks foreign
+  // and nothing is ever reaped. The only trace would be an out-of-scope log line.
+  //
+  // Semantically "/" is also the right answer to match on: in that namespace the
+  // visible cgroup tree IS the worker's own. On a host where the worker genuinely
+  // sits in the root cgroup this degrades to the old uid-only behaviour, which is
+  // why `reapAgentUidEscapees` says so out loud rather than leaving the operator
+  // to believe the scoping is protecting them.
+  if (workerScope === "/") return true;
+  return rel === workerScope || rel.startsWith(`${workerScope}/`);
+}
+
+/**
  * The agent-uid rows minus ourselves, pid 1 and kernel-owned groups (pgid ≤
  * 0), split into kill targets and the known per-user helpers.
  */
@@ -202,20 +288,30 @@ export function selectAgentRows(
   rows: ProcRow[],
   uid: number,
   selfPid: number,
-): { targets: ProcRow[]; helpers: ProcRow[] } {
+  /**
+   * #210: when given, a row must ALSO be inside the worker's cgroup subtree.
+   * Omitted (macOS, no cgroup v2) ⇒ uid alone decides, exactly as before.
+   */
+  inScope?: (pid: number) => boolean,
+): { targets: ProcRow[]; helpers: ProcRow[]; foreign: ProcRow[] } {
   const targets: ProcRow[] = [];
   const helpers: ProcRow[] = [];
+  const foreign: ProcRow[] = [];
   for (const row of rows) {
     if (row.uid !== uid) continue;
     if (row.pid === selfPid || row.pid === 1) continue;
     if (row.pgid <= 0) continue;
+    if (inScope && !inScope(row.pid)) {
+      foreign.push(row);
+      continue;
+    }
     if (MACOS_PER_USER_HELPERS.has(path.basename(row.comm))) {
       helpers.push(row);
     } else {
       targets.push(row);
     }
   }
-  return { targets, helpers };
+  return { targets, helpers, foreign };
 }
 
 /** The default enumerator: `ps -A -o pid,pgid,uid,comm` (UNIX-style options). */
@@ -323,6 +419,8 @@ export async function reapAgentUidEscapees(
     settleMs = phase === "teardown" ? TEARDOWN_SETTLE_MS : 0,
     residualBoundMs = DEFAULT_RESIDUAL_BOUND_MS,
     now = Date.now,
+    cgroupScope = readSelfCgroupScope,
+    inWorkerScope = isInWorkerCgroupScope,
   } = opts;
 
   if (!agentUser) {
@@ -352,7 +450,61 @@ export async function reapAgentUidEscapees(
       return { ...zeroResult(false, now() - startedAt), error };
     }
 
-    const selected = selectAgentRows(rows, uid, selfPid);
+    // #210: scope the scan to the worker's own cgroup subtree. Null scope (no
+    // cgroup v2 — macOS, cgroup v1) ⇒ uid alone decides, as before.
+    const workerScope = cgroupScope();
+    // ONE predicate, used by BOTH scans. Scoping only the first one would spare a
+    // foreign process and then count it as a residual: the poll would never
+    // empty, spin the whole residualBoundMs, and report a residual that is really
+    // someone else's healthy process.
+    const inScope = workerScope
+      ? (pid: number) => inWorkerScope(pid, workerScope)
+      : undefined;
+    if (workerScope === "/") {
+      // Not a failure, but not the protection the scope is meant to give either:
+      // everything visible matches, so this is uid-only matching wearing a scope.
+      log(
+        `box.escapees_scope_degraded ${JSON.stringify({
+          ...base,
+          scope: workerScope,
+          reason:
+            "worker is at the cgroup root (private namespace or unscoped host) — uid alone decides",
+        })}`,
+      );
+    }
+    const selected = selectAgentRows(rows, uid, selfPid, inScope);
+    // EVERY candidate foreign is not a scoping success, it is a scoping FAILURE.
+    //
+    // It is what `/proc` mounted with `hidepid=` produces: the worker cannot read
+    // any other uid's `/proc/<pid>/cgroup`, every row is unplaceable, and the
+    // reaper quietly stops reaping while its counters read like a clean run. CI
+    // showed this exact signature with synthetic fixture pids, which is the same
+    // shape for a different reason.
+    //
+    // Loud, and not fatal: refusing to run would be worse than a fence that
+    // reports it cannot see. The operator gets the one line that explains it.
+    if (selected.targets.length === 0 && selected.foreign.length > 0) {
+      log(
+        `box.escapees_all_out_of_scope ${JSON.stringify({
+          ...base,
+          scope: workerScope,
+          spared: selected.foreign.length,
+          reason:
+            "every same-uid process was unplaceable — /proc hidepid, a pid namespace, or a scope that cannot match; NOTHING was reaped",
+        })}`,
+      );
+    } else if (selected.foreign.length > 0) {
+      // Loud, because this is the line that would have caught #210 on day one:
+      // processes sharing the agent's uid that are NOT ours, and are therefore
+      // never killed.
+      log(
+        `box.escapees_out_of_scope ${JSON.stringify({
+          ...base,
+          scope: workerScope,
+          spared: selected.foreign.length,
+        })}`,
+      );
+    }
     const scanned = selected.targets.length;
     const groups = new Set(selected.targets.map((r) => r.pgid)).size;
     const helpers = selected.helpers.length;
@@ -404,6 +556,7 @@ export async function reapAgentUidEscapees(
             await listProcesses(),
             uid,
             selfPid,
+            inScope,
           ).targets;
         } catch (e) {
           log(

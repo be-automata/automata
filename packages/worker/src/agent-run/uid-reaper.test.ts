@@ -16,6 +16,8 @@ import {
   parsePsOutput,
   reapAgentUidEscapees,
   selectAgentRows,
+  readSelfCgroupScope,
+  isInWorkerCgroupScope,
   type BootUidScanOpts,
   type BoxBudgetSnapshot,
   type KillExit,
@@ -99,6 +101,14 @@ function baseReapOpts<
     resolveUid: resolve450,
     spawnKill: killExit0(),
     selfPid: 70001,
+    // #210: these tests feed SYNTHETIC pids from a fixture, so cgroup scoping is
+    // meaningless for them — and on Linux it is actively wrong: the default
+    // predicate reads the REAL /proc/<pid>/cgroup, finds nothing for pid 4242,
+    // and classes every fixture row as foreign, so `scanned` collapses to 0.
+    // macOS has no /proc, the scope resolves to null, and the same tests pass —
+    // which is exactly how this shipped green locally and red in CI.
+    // Scoping has its own tests; these are about kill argv and counts.
+    cgroupScope: () => null,
     ...overrides,
   };
 }
@@ -189,7 +199,234 @@ describe("selectAgentRows (AC2, AC5)", () => {
   });
 });
 
+describe("cgroup scoping (#210 — the uid is not ours alone)", () => {
+  const WORKER = "/system.slice/automata-worker.service";
+
+  it("readSelfCgroupScope climbs out of the supervisor leaf", () => {
+    // #204 moves the worker into `<root>/supervisor` at boot, so the scope we
+    // want is that leaf's PARENT — it contains the supervisor and every run.
+    expect(readSelfCgroupScope(() => `0::${WORKER}/supervisor\n`)).toBe(WORKER);
+    expect(readSelfCgroupScope(() => `0::${WORKER}\n`)).toBe(WORKER);
+  });
+
+  it("readSelfCgroupScope returns null where there is no cgroup v2", () => {
+    // macOS and cgroup v1: null means "do not filter", so those boxes keep
+    // today's behaviour exactly.
+    expect(
+      readSelfCgroupScope(() => {
+        throw new Error("ENOENT");
+      }),
+    ).toBeNull();
+    expect(
+      readSelfCgroupScope(() => "1:name=systemd:/user.slice\n"),
+    ).toBeNull();
+  });
+
+  it("a pid is in scope only under the worker's subtree, prefix-safely", () => {
+    const at = (p: string) => () => `0::${p}\n`;
+    expect(isInWorkerCgroupScope(1, WORKER, at(WORKER))).toBe(true);
+    expect(isInWorkerCgroupScope(1, WORKER, at(`${WORKER}/run-abc-1234`))).toBe(
+      true,
+    );
+    // A sibling unit whose name merely STARTS with ours is not ours.
+    expect(
+      isInWorkerCgroupScope(1, WORKER, at(`${WORKER}-other.service`)),
+    ).toBe(false);
+    expect(
+      isInWorkerCgroupScope(1, WORKER, at("/system.slice/docker-abc123.scope")),
+    ).toBe(false);
+  });
+
+  it("a private cgroup namespace resolves to the ROOT scope, which matches all", () => {
+    // `cgroupns=private` makes /proc/self/cgroup read `0::/` or `0::/supervisor`,
+    // and dirname('/supervisor') is '/'. Before this was handled, the prefix
+    // became '//', nothing matched, every process looked foreign and the reaper
+    // silently reaped nothing — the exact silent downgrade it exists to prevent.
+    expect(readSelfCgroupScope(() => "0::/\n")).toBe("/");
+    expect(readSelfCgroupScope(() => "0::/supervisor\n")).toBe("/");
+
+    const at = (p: string) => () => `0::${p}\n`;
+    expect(isInWorkerCgroupScope(1, "/", at("/"))).toBe(true);
+    expect(isInWorkerCgroupScope(1, "/", at("/run-x"))).toBe(true);
+    expect(isInWorkerCgroupScope(1, "/", at("/system.slice/anything"))).toBe(
+      true,
+    );
+  });
+
+  it("an unreadable /proc/<pid>/cgroup is NOT ours", () => {
+    // A process we cannot place is one we cannot justify SIGKILLing. Missing an
+    // escapee costs a rescan; a false positive cost the engine's database.
+    expect(
+      isInWorkerCgroupScope(1, WORKER, () => {
+        throw new Error("ESRCH");
+      }),
+    ).toBe(false);
+  });
+
+  it("THE #210 REGRESSION: a container's postgres shares the uid and is spared", () => {
+    // Reproduces production exactly: the postgres image runs as uid 999, the
+    // agent account was created at uid 999, and the host sees container
+    // processes by their host-side uid — so the uid scan killed the engine's own
+    // database three times per run, 45 restarts deep.
+    const rows: ProcRow[] = [
+      { pid: 4242, pgid: 4242, uid: 999, comm: "node" },
+      { pid: 22096, pgid: 22096, uid: 999, comm: "postgres" },
+      { pid: 22148, pgid: 22096, uid: 999, comm: "postgres: checkpointer" },
+    ];
+    const cgroupOf: Record<number, string> = {
+      4242: `${WORKER}/run-thread-abcd1234`,
+      22096: "/system.slice/docker-0b6149d99a12.scope",
+      22148: "/system.slice/docker-0b6149d99a12.scope",
+    };
+    const { targets, foreign } = selectAgentRows(rows, 999, 1, (pid) =>
+      isInWorkerCgroupScope(pid, WORKER, () => `0::${cgroupOf[pid]}\n`),
+    );
+    expect(targets.map((r) => r.pid)).toEqual([4242]);
+    expect(foreign.map((r) => r.pid)).toEqual([22096, 22148]);
+  });
+
+  it("without a scope the selection is byte-for-byte what it was", () => {
+    const { targets, helpers, foreign } = selectAgentRows(
+      LINUX_ROWS,
+      999,
+      5000,
+    );
+    expect(targets.map((r) => r.pid).sort()).toEqual([4242, 4300, 4301]);
+    expect(helpers).toHaveLength(0);
+    expect(foreign).toEqual([]);
+  });
+});
+
 describe("reapAgentUidEscapees", () => {
+  it("#210 end to end: a foreign same-uid process is spared AND is not a residual", async () => {
+    // The residual poll re-scans. Scoping only the FIRST scan would spare the
+    // container's postgres and then count it as a residual — the loop would never
+    // empty, would spin the whole residualBoundMs, and would report someone
+    // else's healthy process as our failed kill.
+    const WORKER = "/system.slice/automata-worker.service";
+    const ours = { pid: 4242, pgid: 4242, uid: 999, comm: "node" };
+    const foreign = { pid: 22096, pgid: 22096, uid: 999, comm: "postgres" };
+    const cgroupOf: Record<number, string> = {
+      4242: `${WORKER}/run-thread-abcd1234`,
+      22096: "/system.slice/docker-0b6149d99a12.scope",
+    };
+    // Ours dies on the kill; the foreign one stays alive forever, as it should.
+    let killed = false;
+    const lines: string[] = [];
+    const result = await reapAgentUidEscapees({
+      agentUser: AGENT,
+      phase: "admission",
+      log: (l) => lines.push(l),
+      listProcesses: async () => (killed ? [foreign] : [ours, foreign]),
+      resolveUid: async () => 999,
+      spawnKill: async () => {
+        killed = true;
+      },
+      selfPid: 1,
+      settleMs: 0,
+      residualBoundMs: 500,
+      cgroupScope: () => WORKER,
+      inWorkerScope: (pid, scope) => {
+        const cg = cgroupOf[pid] ?? "";
+        return cg === scope || cg.startsWith(`${scope}/`);
+      },
+    });
+    expect(result.scanned).toBe(1);
+    expect(result.killed).toBe(1);
+    expect(result.residual).toBe(0);
+    // And it says out loud what it spared, rather than dropping it silently.
+    expect(lines.join("\n")).toMatch(/box\.escapees_out_of_scope/);
+    expect(lines.join("\n")).toMatch(/"spared":1/);
+  });
+
+  it("a root scope reaps normally AND says the scoping is degraded", async () => {
+    // Matching everything is right in a private namespace, and is uid-only
+    // matching on an unscoped host. Either way the operator is told, rather than
+    // left believing a scope is protecting them.
+    const rows = [{ pid: 4242, pgid: 4242, uid: 999, comm: "node" }];
+    let killed = false;
+    const lines: string[] = [];
+    const result = await reapAgentUidEscapees({
+      agentUser: AGENT,
+      phase: "admission",
+      log: (l) => lines.push(l),
+      listProcesses: async () => (killed ? [] : rows),
+      resolveUid: async () => 999,
+      spawnKill: async () => {
+        killed = true;
+      },
+      selfPid: 1,
+      settleMs: 0,
+      residualBoundMs: 500,
+      cgroupScope: () => "/",
+      inWorkerScope: (pid, scope) =>
+        isInWorkerCgroupScope(pid, scope, () => "0::/run-x\n"),
+    });
+    // Reaped, not silently spared — this is the regression the finding named.
+    expect(result.killed).toBe(1);
+    expect(result.residual).toBe(0);
+    expect(lines.join("\n")).toMatch(/box\.escapees_scope_degraded/);
+    expect(lines.join("\n")).not.toMatch(/out_of_scope/);
+  });
+
+  it("EVERY row unplaceable is reported loudly, not as a clean zero-kill run", async () => {
+    // Two different causes, one signature. In CI it was synthetic fixture pids
+    // with no /proc entry on the runner. In production it is `/proc` mounted with
+    // hidepid=, where the worker cannot read another uid's cgroup at all. Either
+    // way the reaper reaps nothing while its counters read like a quiet box —
+    // which is the silent downgrade this whole fence exists to prevent.
+    const lines: string[] = [];
+    const result = await reapAgentUidEscapees({
+      agentUser: AGENT,
+      phase: "boot",
+      log: (l) => lines.push(l),
+      listProcesses: async () => [
+        { pid: 4242, pgid: 4242, uid: 999, comm: "node" },
+        { pid: 4300, pgid: 4300, uid: 999, comm: "claude" },
+      ],
+      resolveUid: async () => 999,
+      spawnKill: async () => {},
+      selfPid: 1,
+      settleMs: 0,
+      residualBoundMs: 100,
+      cgroupScope: () => "/system.slice/automata-worker.service",
+      // Nothing can be placed — exactly what an unreadable /proc/<pid>/cgroup does.
+      inWorkerScope: () => false,
+    });
+    expect(result.scanned).toBe(0);
+    expect(result.killed).toBe(0);
+    const log = lines.join("\n");
+    expect(log).toMatch(/box\.escapees_all_out_of_scope/);
+    expect(log).toMatch(/hidepid/);
+    // And NOT the ordinary "some were spared" line, which would understate it.
+    expect(log).not.toMatch(/escapees_out_of_scope /);
+  });
+
+  it("no cgroup v2 ⇒ the reaper behaves exactly as it did before", async () => {
+    // macOS and cgroup v1 yield a null scope: uid alone decides, nothing is
+    // spared, and no out-of-scope line is logged.
+    const rows = [{ pid: 4242, pgid: 4242, uid: 999, comm: "node" }];
+    let killed = false;
+    const lines: string[] = [];
+    const result = await reapAgentUidEscapees({
+      agentUser: AGENT,
+      phase: "admission",
+      log: (l) => lines.push(l),
+      listProcesses: async () => (killed ? [] : rows),
+      resolveUid: async () => 999,
+      spawnKill: async () => {
+        killed = true;
+      },
+      selfPid: 1,
+      settleMs: 0,
+      residualBoundMs: 500,
+      cgroupScope: () => null,
+    });
+    expect(result.killed).toBe(1);
+    expect(result.residual).toBe(0);
+    expect(lines.join("\n")).not.toMatch(/out_of_scope/);
+  });
+
   it("AC1: empty agentUser skips without listing; logs 'disabled' only at boot", async () => {
     const listProcesses = vi.fn(async () => DARWIN_ROWS);
     const spawnKill = vi.fn(async () => {});
@@ -791,7 +1028,15 @@ describe("reapAgentUidEscapees", () => {
     );
     expect(listProcesses).toHaveBeenCalledTimes(1);
     expect(firstListAt).toBeDefined();
-    expect((firstListAt ?? 0) - startedAt).toBeGreaterThanOrEqual(250);
+    // TOLERANCE, NOT A WEAKER TEST. `setTimeout(250)` does not guarantee that the
+    // `Date.now()` you measure with has advanced 250 — the timer and the wall
+    // clock are different sources at coarse resolution, so the observed delta can
+    // land a millisecond short. CI produced exactly that: "expected 249 to be
+    // greater than or equal to 250". The invariant worth pinning is "it waited the
+    // settle rather than scanning immediately", and 240 separates that from 0 just
+    // as decisively as 250 does, without failing on clock slop.
+    const waited = (firstListAt ?? 0) - startedAt;
+    expect(waited).toBeGreaterThanOrEqual(240);
   });
 
   it("AC4: admission with settleMs omitted does not settle — first listProcesses within ~50 ms", async () => {
