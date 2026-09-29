@@ -187,3 +187,415 @@ describe("#183: single worker unit", () => {
     expect(plist).toContain("com.automata.worker</string>");
   });
 });
+
+describe("packages/worker/docker-compose.hatchet.prod.yml (#192)", () => {
+  const overlay = read(
+    path.join(workerRoot, "docker-compose.hatchet.prod.yml"),
+  );
+  const base = read(path.join(workerRoot, "docker-compose.hatchet.yml"));
+
+  it("binds both engine ports to loopback", () => {
+    // The base file publishes them with no host prefix, i.e. 0.0.0.0. That was
+    // survivable behind a home router; on a public VM it is the engine
+    // dashboard, the REST API and engine gRPC open to the internet. www reaches
+    // the engine through the named tunnel and the worker over loopback, so an
+    // external binding serves nothing.
+    expect(overlay).toContain('"127.0.0.1:8888:8888"');
+    expect(overlay).toContain('"127.0.0.1:7077:7077"');
+    expect(base).toContain('"8888:8888"'); // the thing being overridden
+  });
+
+  it("REPLACES the base ports list instead of appending to it", () => {
+    // Load-bearing, and the reason this test exists. Compose MERGES
+    // list-valued keys: without `!override` the loopback mappings are appended
+    // to the base file's world-facing ones and 0.0.0.0 stays published
+    // alongside. Deleting the tag looks like tidying and silently re-exposes
+    // the engine, with no error anywhere.
+    expect(overlay).toMatch(/ports:\s*!override/);
+  });
+
+  it("caps engine memory, and forbids the containers from leaking into swap", () => {
+    // Invisible on the 48 GB pilot laptop, dangerous on the 8 GB box where the
+    // engine shares the machine with the worker and the agent runs. The
+    // capacity model assumes the engine stays near what the pilot measured
+    // (hatchet-lite ~66 MB, Postgres ~474 MB); nothing enforced it, and the
+    // failure mode is a box-wide fork ENOMEM, not a tidy per-process OOM.
+    expect(overlay).toMatch(/mem_limit:\s*1g/);
+    expect(overlay).toMatch(/mem_limit:\s*512m/);
+
+    // memswap_limit must equal mem_limit on every capped service, or the
+    // container swaps instead of being capped and spends the worker's budget.
+    const caps = [...overlay.matchAll(/mem_limit:\s*(\S+)/g)].map((m) => m[1]);
+    const swaps = [...overlay.matchAll(/memswap_limit:\s*(\S+)/g)].map(
+      (m) => m[1],
+    );
+    expect(swaps, overlay).toEqual(caps);
+  });
+
+  it("is an overlay, never a standalone stack", () => {
+    // Applied alone it would define services with no image and no environment.
+    // The header says so; this asserts the header keeps saying so.
+    expect(overlay).toContain("docker-compose.hatchet.yml");
+    expect(overlay).not.toContain("image:");
+  });
+});
+
+describe("packages/worker/deploy/linux/cloud-init.yaml (#192)", () => {
+  const cloudInit = read(
+    path.join(workerRoot, "deploy", "linux", "cloud-init.yaml"),
+  );
+
+  it("provisions from ONE fail-fast script, not a list of runcmd entries", () => {
+    // The first box built from this file came up with Node 18 and no pnpm
+    // while cloud-init reported `status: done` and `errors: []`. cloud-init
+    // ignores each runcmd entry's exit code, so a failed step is invisible and
+    // the NEXT step happily works on the broken state. Going back to a list
+    // reintroduces exactly that, silently.
+    expect(cloudInit).toMatch(/set -euo pipefail/);
+    const runcmd = cloudInit.slice(cloudInit.indexOf("\nruncmd:"));
+    const entries = runcmd.split("\n").filter((l) => l.trim().startsWith("- "));
+    expect(entries.length, runcmd).toBe(1);
+    expect(entries[0]).toContain("automata-provision.sh");
+  });
+
+  it("waits for the dpkg/apt lock instead of racing it", () => {
+    // This is the root cause of the Node 18 box: `package_upgrade` and
+    // apt-daily still held the lock, the NodeSource repo script lost the race,
+    // and nothing checked. Every apt call goes through the waiter.
+    expect(cloudInit).toMatch(/wait_for_apt\(\)/);
+    expect(cloudInit).toMatch(/lock-frontend/);
+    expect(cloudInit).toMatch(/apt_get\(\)\s*\{\s*wait_for_apt;/);
+  });
+
+  it("detects a failed NodeSource repo add by CONTENT, not by filename", () => {
+    // Two ways to get this wrong, both observed here:
+    //   - no check at all -> Ubuntu's nodejs 18 installs and looks like success
+    //   - a check pinned to `nodesource.list` -> false alarm on 24.04, which
+    //     emits deb822 `nodesource.sources`
+    expect(cloudInit).toMatch(
+      /grep -rqs nodesource \/etc\/apt\/sources\.list\.d\//,
+    );
+    expect(cloudInit).not.toMatch(/sources\.list\.d\/nodesource\.list/);
+    expect(cloudInit).toMatch(/FATAL: NodeSource repo was not configured/);
+  });
+
+  it("writes the sentinel only AFTER the assertions", () => {
+    // `/usr/local/automata/.provisioned` is the contract downstream checks
+    // instead of cloud-init's own status. Hoisting it above the assertions
+    // would make it mean nothing while still appearing to work.
+    // Anchored on the line that WRITES it — the path is also named in the
+    // header comment, and matching that instead would pass no matter where
+    // the write actually sits.
+    const floorCheck = cloudInit.indexOf("is below");
+    const sentinel = cloudInit.indexOf(
+      "date -uIseconds > /usr/local/automata/.provisioned",
+    );
+    expect(floorCheck).toBeGreaterThan(-1);
+    expect(sentinel).toBeGreaterThan(-1);
+    expect(sentinel).toBeGreaterThan(floorCheck);
+  });
+
+  it("installs acl, which the Linux agent-uid fence needs to exist at all", () => {
+    // setfacl/getfacl are how the fence works on Linux. Absent, it degrades
+    // silently — the precise failure #192 exists to remove on this platform.
+    expect(cloudInit).toMatch(/^\s+- acl$/m);
+    expect(cloudInit).toMatch(/command -v setfacl/);
+  });
+});
+
+describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () => {
+  const linux = (f: string) =>
+    read(path.join(workerRoot, "deploy", "linux", f));
+
+  it("the launcher ends in `exec node`, with nothing wrapping it", () => {
+    // A `pnpm run` chain swallows SIGTERM at the top pnpm layer, so the signal
+    // never reaches the worker and the drain silently breaks — live-verified on
+    // macOS 2026-07-25, and systemd's MainPID has the same problem. The exec
+    // must be the LAST line, not merely present somewhere.
+    const script = linux("run-worker.sh.template");
+    const lines = script.trimEnd().split("\n");
+    expect(lines[lines.length - 1]).toBe(
+      "exec node --import tsx src/hello/worker.ts",
+    );
+    expect(script).not.toMatch(/exec\s+pnpm/);
+  });
+
+  it("the launcher gates on auth and rebuilds the daemon BEFORE exec'ing", () => {
+    // A `-dev` hatchet-lite image embeds a publicly known JWT signing key, so a
+    // worker must never attach to one; and the worker consumes the daemon dist
+    // at runtime, so a stale bundle is a wrong-code run, not a missing file.
+    const script = linux("run-worker.sh.template");
+    const gate = script.indexOf("assert-auth-enabled.sh");
+    const build = script.indexOf("pnpm run daemon:build");
+    // lastIndexOf on the FULL command: the header comment also says "exec node"
+    // while explaining the signal contract, and matching that instead puts the
+    // exec at the top of the file and inverts every ordering below.
+    const exec = script.lastIndexOf(
+      "exec node --import tsx src/hello/worker.ts",
+    );
+    expect(gate).toBeGreaterThan(-1);
+    expect(build).toBeGreaterThan(gate);
+    expect(exec).toBeGreaterThan(build);
+  });
+
+  it("the unit signals only MainPID, so the SDK owns the drain", () => {
+    // KillMode=control-group SIGTERMs the agent and its daemon directly and
+    // drops the in-flight review. `mixed` sends SIGTERM to MainPID alone and
+    // lets the worker decide when its children die.
+    const unit = linux("automata-worker.service");
+    expect(unit).toMatch(/^KillMode=mixed$/m);
+    expect(unit).not.toMatch(/^KillMode=control-group$/m);
+    expect(unit).toMatch(/^KillSignal=SIGTERM$/m);
+
+    // The stop budget must clear a real agent run. Anything small silently
+    // reintroduces the mid-run SIGKILL under a different name.
+    const stop = unit.match(/^TimeoutStopSec=(\d+)$/m);
+    expect(stop, unit).toBeTruthy();
+    expect(Number(stop![1])).toBeGreaterThanOrEqual(1800);
+  });
+
+  it("keeps NoNewPrivileges OFF — the agent-uid drop depends on it", () => {
+    // The worker spawns the agent under a DIFFERENT uid via sudo. Turning this
+    // on reads like hardening and instead breaks the uid boundary the whole
+    // egress fence is keyed on.
+    const unit = linux("automata-worker.service");
+    expect(unit).toMatch(/^NoNewPrivileges=no$/m);
+    expect(unit).not.toMatch(/^NoNewPrivileges=(yes|true)$/m);
+  });
+
+  it("runs as a service account, never root, and relaunches rate-limited", () => {
+    const unit = linux("automata-worker.service");
+    expect(unit).toMatch(/^User=__USER__$/m);
+    expect(unit).not.toMatch(/^User=root$/m);
+    expect(unit).toMatch(/^Restart=always$/m);
+    expect(unit).toMatch(/^RestartSec=15$/m);
+  });
+});
+
+describe("#192: the unit waits for the engine before the auth gate runs", () => {
+  const unit = read(
+    path.join(workerRoot, "deploy", "linux", "automata-worker.service"),
+  );
+
+  it("gates start on engine readiness over loopback", () => {
+    // `After=docker.service` orders against the daemon, not the compose stack's
+    // readiness. Without this wait the launcher's fail-closed auth gate probes a
+    // socket that is not listening and refuses curl's `000` — observed on the
+    // first reboot drill. It self-heals, and that is the trap: it also stamps a
+    // line indistinguishable from a real auth failure on every single boot.
+    expect(unit).toMatch(/^ExecStartPre=.*api\/ready/m);
+    expect(unit).toMatch(/127\.0\.0\.1:8888/);
+  });
+
+  it("bounds the wait — a dead engine must fail visibly, not hang", () => {
+    // An unbounded wait parks the unit in `activating` forever, where
+    // Restart=always never fires and nothing alerts.
+    const pre = unit.match(/^ExecStartPre=.*$/m)?.[0] ?? "";
+    expect(pre).toMatch(/seq 1 \d+/);
+    expect(pre).not.toMatch(/while true|until .*; do .*done *'?$/);
+    expect(pre).toMatch(/exit 1/);
+  });
+
+  it("runs the readiness wait BEFORE the launcher", () => {
+    expect(unit.indexOf("ExecStartPre=")).toBeLessThan(
+      unit.indexOf("ExecStart=/bin/bash"),
+    );
+  });
+});
+
+describe("#192: the unit's sandbox must not fence out the launcher's own writes", () => {
+  const linux = (f: string) =>
+    read(path.join(workerRoot, "deploy", "linux", f));
+
+  it("every /usr path the launcher writes to is in ReadWritePaths", () => {
+    // The bug this exists for: ProtectSystem=full remounts /usr read-only
+    // inside the unit's namespace, and /usr/local/automata is under /usr. The
+    // launcher stages the daemon bundle there on every agent-uid run, so the
+    // install fails "Read-only file system" the moment WORKER_AGENT_USER is
+    // set — and never before, which is why it survived review of both files
+    // read separately. Only comparing them catches it.
+    const unit = linux("automata-worker.service");
+    const script = linux("run-worker.sh.template");
+
+    const protectsUsr = /^ProtectSystem=(full|strict|yes|true)$/m.test(unit);
+    if (!protectsUsr) return;
+
+    const rw = [...unit.matchAll(/^ReadWritePaths=(.+)$/gm)].flatMap((m) =>
+      m[1] ? m[1].trim().split(/\s+/) : [],
+    );
+
+    // Destinations the launcher writes to, not every path it mentions.
+    const written = [
+      ...script.matchAll(/^\s*install\s+[^\n]*?\s(\/usr\/\S+)/gm),
+      ...script.matchAll(/^\s*(?:cp|mv|tee)\s+[^\n]*?\s(\/usr\/\S+)/gm),
+      ...script.matchAll(/>\s*(\/usr\/\S+)/gm),
+    ].flatMap((m) => (m[1] ? [m[1]] : []));
+
+    expect(
+      written.length,
+      "launcher writes nothing under /usr",
+    ).toBeGreaterThan(0);
+    for (const target of written) {
+      const covered = rw.some(
+        (p) => target === p || target.startsWith(p.replace(/\/$/, "") + "/"),
+      );
+      expect(
+        covered,
+        `${target} is written by run-worker.sh but no ReadWritePaths= covers it, ` +
+          `and ProtectSystem makes /usr read-only`,
+      ).toBe(true);
+    }
+  });
+
+  it("the exception stays narrow — never all of /usr or /usr/local", () => {
+    // Widening it hands the unit every other thing installed there.
+    const unit = linux("automata-worker.service");
+    const rw = [...unit.matchAll(/^ReadWritePaths=(.+)$/gm)].flatMap((m) =>
+      m[1] ? m[1].trim().split(/\s+/) : [],
+    );
+    for (const p of rw) {
+      expect(["/usr", "/usr/local", "/"]).not.toContain(p.replace(/\/$/, ""));
+    }
+  });
+
+  it("cloud-init gives the runtime tree to the service account, not root", () => {
+    // cloud-init runs as root, so a bare `install -d` leaves root:root and the
+    // non-root worker gets EACCES — a second, independent cause of the same
+    // failure, which survives fixing ReadWritePaths alone.
+    const ci = linux("cloud-init.yaml");
+    const treeInstall = ci.match(
+      /install -d[^\n]*(?:\\\n\s*)?[^\n]*\/usr\/local\/automata\b[^\n]*/,
+    );
+    if (!treeInstall) {
+      throw new Error("no install of /usr/local/automata found in cloud-init");
+    }
+    expect(treeInstall[0]).toMatch(/-o \S+/);
+    expect(treeInstall[0]).not.toMatch(/-o root\b/);
+  });
+});
+
+describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)", () => {
+  const linux = (f: string) =>
+    read(path.join(workerRoot, "deploy", "linux", f));
+
+  it("the ruleset owns ONE table and never flushes the kernel's", () => {
+    // Ubuntu's stock /etc/nftables.conf opens with `flush ruleset`, and Docker
+    // keeps 34 chains in the kernel ruleset that it does NOT rebuild on demand.
+    // A global flush here takes container networking — and on this box that is
+    // the Hatchet engine and its Postgres — down with it.
+    const conf = linux("egress-nft.conf");
+    expect(conf).not.toMatch(/^\s*flush ruleset/m);
+    expect(conf).toMatch(/^table inet automata_egress$/m);
+    expect(conf).toMatch(/^delete table inet automata_egress$/m);
+  });
+
+  it("fences tcp AND udp, so QUIC is not a hole", () => {
+    // udp/443 is HTTP-3. A tcp-only rule leaves an https path that never meets
+    // the cooperative proxy.
+    const conf = linux("egress-nft.conf");
+    expect(conf).toMatch(/meta skuid __AGENT_UID__ tcp dport \{ 80, 443 \}/);
+    expect(conf).toMatch(/meta skuid __AGENT_UID__ udp dport \{ 80, 443 \}/);
+  });
+
+  it("accepts loopback and never sets a drop policy on output", () => {
+    // The per-run proxy, both brokers and the engine are all on 127.0.0.1. A
+    // drop policy on the output hook fences the whole box, sshd included.
+    const conf = linux("egress-nft.conf");
+    expect(conf).toMatch(/oif "lo" accept/);
+    expect(conf).toMatch(/policy accept;/);
+    expect(conf).not.toMatch(/policy drop;/);
+    // Loopback must be accepted BEFORE the skuid rejects.
+    expect(conf.indexOf('oif "lo" accept')).toBeLessThan(
+      conf.indexOf("meta skuid"),
+    );
+  });
+
+  it("the preflight refuses uid 0 and the worker's own uid before loading", () => {
+    // Fencing either kills the control-plane poll, the git broker's upstream
+    // fetch and the credential pull — every run on the box — and both are one
+    // typo from the agent uid.
+    const pre = linux("nft-preflight.sh");
+    expect(pre).toMatch(/refusing to fence uid 0/);
+    expect(pre).toMatch(/refusing to fence the worker's own uid/);
+    expect(pre).toMatch(/__AGENT_UID__.*unrendered|unrendered/);
+    // Parse-check must precede the load.
+    expect(pre.indexOf("nft -c -f")).toBeLessThan(pre.indexOf("nft -f"));
+  });
+
+  it("the sudoers rule drops to the role account, never root or ALL", () => {
+    const sudoers = linux("sudoers.d-automata");
+    const rules = sudoers
+      .split("\n")
+      .filter((l) => !l.startsWith("#") && l.includes("NOPASSWD"));
+    expect(rules.length).toBe(2);
+    for (const rule of rules) {
+      expect(rule, rule).toContain("(AGENT)");
+      expect(rule, rule).not.toContain("(root)");
+      expect(rule, rule).not.toContain("(ALL)");
+    }
+    expect(sudoers).toMatch(/Runas_Alias AGENT = __AGENT_USER__/);
+    // SETENV on the daemon rule, or `sudo -E` is refused and every spawn dies.
+    expect(sudoers).toMatch(/NOPASSWD:\s*SETENV:\s*AUTOMATA_DAEMON/);
+  });
+
+  it("uses the usr-merged command paths Linux actually resolves", () => {
+    // /bin is a symlink to /usr/bin on Ubuntu, and /usr/bin/kill is procps'
+    // binary — `command -v kill` reports the shell builtin and misleads.
+    const sudoers = linux("sudoers.d-automata");
+    expect(sudoers).toMatch(/AUTOMATA_DAEMON = \/usr\/bin\/sh/);
+    expect(sudoers).toMatch(/AUTOMATA_KILL\s+= \/usr\/bin\/kill/);
+  });
+});
+
+describe("packages/worker/deploy/linux — engine backup (#192)", () => {
+  const linux = (f: string) =>
+    read(path.join(workerRoot, "deploy", "linux", f));
+  const script = linux("automata-engine-backup.sh");
+
+  it("verifies the dump before keeping it, and writes via a temp name", () => {
+    // The classic silent failure is a job that "succeeds" for months into a
+    // zero-byte file and is discovered on the one day it is needed. Both guards
+    // must survive: a size floor AND a real archive read.
+    expect(script).toMatch(/pg_restore --list/);
+    expect(script).toMatch(/MIN_BYTES/);
+    // Dump to .partial, rename only after verification — a crash mid-write must
+    // never leave a half-file wearing a good name.
+    expect(script).toMatch(/\.partial/);
+    const verify = script.indexOf("pg_restore --list");
+    const rename = script.indexOf('mv -f "$TMP" "$FINAL"');
+    expect(rename).toBeGreaterThan(verify);
+  });
+
+  it("dumps in a format pg_restore can actually read back", () => {
+    // Plain SQL cannot be verified with `pg_restore --list`, so -Fc is what
+    // makes the verification step above possible at all.
+    expect(script).toMatch(/pg_dump[^\n]*-Fc/);
+  });
+
+  it("never prunes the last surviving dump", () => {
+    // A fortnight of failures followed by a successful prune is how a backup
+    // story ends with no backups.
+    expect(script).toMatch(/REMAINING.*-gt 1|-gt 1/);
+    expect(script).toMatch(/mtime "\+\$\{KEEP_DAYS\}"/);
+  });
+
+  it("keeps dumps unreadable by the agent and the worker accounts", () => {
+    // A dump is the whole execution history, including the tenant the worker's
+    // token is scoped to.
+    expect(script).toMatch(/install -d -m 0700/);
+    expect(script).toMatch(/chmod 0600/);
+  });
+
+  it("the unit fails loudly rather than retrying into silence", () => {
+    const unit = linux("automata-engine-backup.service");
+    expect(unit).toMatch(/^Type=oneshot$/m);
+    expect(unit).not.toMatch(/^Restart=/m);
+    expect(unit).toMatch(/^TimeoutStartSec=\d+$/m);
+  });
+
+  it("the timer catches up a run missed while the box was down", () => {
+    const timer = linux("automata-engine-backup.timer");
+    expect(timer).toMatch(/^Persistent=true$/m);
+    expect(timer).toMatch(/^OnCalendar=/m);
+  });
+});

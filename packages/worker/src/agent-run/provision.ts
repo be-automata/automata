@@ -54,6 +54,27 @@ export async function gitExec(
 }
 
 /**
+ * Marks a directory that has been renamed out of the way and is no longer any
+ * run's workdir. Chosen so it cannot collide with a runId (which is a uuid).
+ */
+const TOMBSTONE_SUFFIX = ".tombstone-";
+
+/**
+ * Best-effort removal of tombstones an earlier run could not free — a live
+ * escapee holding one is exactly the case that leaves it behind. Never throws:
+ * failing to sweep is residue, failing the run is an outage.
+ */
+async function sweepTombstones(workdirRoot: string): Promise<void> {
+  const entries = await fs.readdir(workdirRoot).catch(() => [] as string[]);
+  for (const entry of entries) {
+    if (!entry.includes(TOMBSTONE_SUFFIX)) continue;
+    await fs
+      .rm(path.join(workdirRoot, entry), { recursive: true, force: true })
+      .catch(() => {});
+  }
+}
+
+/**
  * Clone `repoFullName@branch` into a fresh per-run workdir using the short-lived
  * installation token (ADR-003 provision step). The token authenticates via a
  * command-scoped `http.extraHeader` (base64 Basic) rather than being embedded in
@@ -101,7 +122,46 @@ export async function provisionWorkdir({
   runGit?: typeof gitExec;
 }): Promise<string> {
   const workdir = path.join(workdirRoot, runId);
-  await fs.rm(workdir, { recursive: true, force: true });
+
+  // Clear residue from a PRIOR attempt of this same runId — by RENAME, never by
+  // removing in place.
+  //
+  // `force: true` suppresses ENOENT and nothing else. A recursive remove still
+  // throws ENOTEMPTY when anything is writing into the tree while it is walked,
+  // and that is not hypothetical here: the engine redelivers a run while the
+  // previous attempt's agent may still be alive, which is the whole reason this
+  // line clears the directory at all. Observed in production 2026-09-28 — a
+  // review that had been working for five minutes was redelivered, the new
+  // attempt threw
+  //
+  //   ENOTEMPTY: directory not empty, rmdir '/usr/local/automata/runs/<id>'
+  //
+  // and the run died with no verdict, surfacing to the user as "Review intent
+  // could not be parsed". The repo already learned this for lock directories;
+  // this path never got it.
+  //
+  // rename(2) does not care what is inside or who is writing, so the new attempt
+  // always starts on a clean path. The tombstone is then removed best-effort: if
+  // a live escapee still holds it, the removal fails, the tombstone remains, and
+  // the NEXT run sweeps it — a bounded, visible residue instead of a failed run.
+  const stale = await fs.stat(workdir).catch(() => null);
+  if (stale) {
+    const tombstone = `${workdir}${TOMBSTONE_SUFFIX}${Date.now()}`;
+    try {
+      await fs.rename(workdir, tombstone);
+      await fs.rm(tombstone, { recursive: true, force: true }).catch(() => {});
+    } catch {
+      // The rename itself can fail where the stale directory is unwritable:
+      // macOS updates `..` on a directory rename, so it needs write on the
+      // directory being MOVED, not just on its parent. That is a permissions
+      // problem, not the redelivery race this guards, and it deserves to
+      // surface with its own error rather than be papered over — so fall back
+      // to the original in-place removal and let it throw.
+      await fs.rm(workdir, { recursive: true, force: true });
+    }
+  }
+  await sweepTombstones(workdirRoot);
+
   await fs.mkdir(workdir, { recursive: true });
 
   // #108: open THIS run's dir to the agent uid, and the shared root by traverse

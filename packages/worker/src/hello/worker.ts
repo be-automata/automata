@@ -137,7 +137,14 @@ async function main() {
   // unconfigured or unreachable engine DB must never block boot.
   await bootTimeSlotReclaim(loadWorkerConfig());
 
-  const worker = await hatchet.worker("automata-worker", {
+  // #192 P5: the registered name carries the box, so two execution boxes are
+  // two rows in the engine instead of one ambiguous one. Nothing queries this
+  // name — the reapers key on getProcessWorkerId(), a separate per-process uuid
+  // — so changing it costs an extra stale row after the first restart and
+  // nothing else.
+  const boxId = loadWorkerConfig().boxId;
+  console.log(`[worker-boot] box id: ${boxId}`);
+  const worker = await hatchet.worker(`automata-worker-${boxId}`, {
     workflows,
     // #125 C4 / #183: ONE slot per worker process and ONE unit per box:
     // `slots: 1` is the engine-native cross-workflow cap (the engine's global

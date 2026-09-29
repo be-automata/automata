@@ -1,0 +1,79 @@
+# /etc/sudoers.d/automata — Automata privilege DROP delegation, Linux (#192 P9).
+#
+# The Linux rendering of packages/worker/deploy/sudoers.d-automata. The safety
+# argument is identical and is repeated here in full, because this file will be
+# read on its own by whoever reviews the box:
+#
+# THIS IS A UID-DROP CAPABILITY, NOT A COMMAND FENCE, and it cannot be made one.
+# sudoers(5): "If no command line arguments are specified, the user may run the
+# command with any arguments they choose." A bare command path therefore permits
+# `sh -c ...`, and SETENV (which `sudo -E` requires) additionally hands the caller
+# NODE_OPTIONS. Anyone who can use this rule has arbitrary code execution as the
+# runas account. That is acceptable for reasons of DIRECTION, not scoping:
+#
+#   - the grantee is the worker's own service account, already strictly MORE
+#     privileged than the runas account. Nothing is escalated.
+#   - the runas target is an unprivileged role account (nologin shell, no sudoers
+#     entry of its own), so nothing flows back.
+#   - the untrusted party is the AGENT, which runs AS that account and therefore
+#     cannot use this rule at all: this file is 0440 root:root.
+#   - the kill rule runs as the role account, so the kernel's own kill(2) check
+#     bounds it to that uid's processes. It cannot signal root or the worker.
+#     This is why the runas is the role account and NEVER (root): `sudo -u root
+#     kill -9 -- -1` would be a box-killer.
+#
+# Runas MUST be the role account. Never (ALL) — SETENV is IMPLIED when the
+# command is ALL, granting it far more widely than intended.
+#
+# ── LINUX DIFFERENCES FROM THE macOS FILE, ALL CHECKED ON THE BOX ───────────
+#
+#   - group is root, not wheel; /etc/sudoers.d is root:root.
+#   - command paths are /usr/bin/..., not /bin/.... Ubuntu is usr-merged, so
+#     /bin is a SYMLINK to /usr/bin: the two spellings are the same inode, and
+#     the canonical path is the one written here.
+#   - /usr/bin/kill is procps' binary, not the shell builtin. `command -v kill`
+#     reports the builtin and will mislead you; `dpkg -S /usr/bin/kill` says
+#     procps.
+#   - /usr/bin/sh is dash, not bash. It is only ever exec'd with -c by
+#     spawn-as-user.ts, which is dash-safe.
+#   - the role account's shell is /usr/sbin/nologin (macOS uses /usr/bin/false).
+#
+# PLACEHOLDERS:
+#   __WORKER_LOGIN__  the account the worker unit runs as (`User=` in
+#                     automata-worker.service). NOT root, NOT the agent account.
+#   __AGENT_USER__    the dedicated unprivileged role account.
+#
+# INSTALL (validate on a COPY first — a syntax error in ANY sudoers.d file
+# breaks sudo for the whole box, and on a cloud VM with no console that is a
+# rebuild):
+#   sed -e "s/__WORKER_LOGIN__/automata/" -e "s/__AGENT_USER__/automata-agent/" \
+#       sudoers.d-automata > /tmp/automata.sudoers
+#   visudo -cf /tmp/automata.sudoers          # MUST say "parsed OK"
+#   install -o root -g root -m 0440 /tmp/automata.sudoers /etc/sudoers.d/automata
+#   grep -q includedir /etc/sudoers || echo "MISSING @includedir /etc/sudoers.d"
+
+Runas_Alias AGENT = __AGENT_USER__
+Cmnd_Alias AUTOMATA_DAEMON = /usr/bin/sh
+Cmnd_Alias AUTOMATA_KILL   = /usr/bin/kill
+
+# Belt and braces for the process model. use_pty became the DEFAULT in sudo
+# 1.9.14 (this box runs 1.9.15p5, so it IS on unless turned off): with it on,
+# sudo's monitor setsid()s into a NEW session and then setpgid()s the command
+# into its own group, so a pgid the worker recorded before sudo ran reaches
+# neither process and every run leaks a live agent at teardown. log_input and
+# log_output imply the same monitor. Turning them off also biases sudo toward
+# exec()ing in place rather than forking at all.
+#
+# Correctness does NOT depend on these: the spawned wrapper records its own `$$`
+# as the pgid, which is the group leader under both sudo shapes (see
+# packages/worker/src/agent-run/spawn-as-user.ts). They remove a whole failure
+# mode rather than being load-bearing for the happy path.
+Defaults!AUTOMATA_DAEMON !use_pty, !log_output, !log_input, !pam_session, !pam_setcred
+Defaults!AUTOMATA_KILL   !use_pty, !log_output, !log_input
+
+# SETENV is MANDATORY on the daemon rule: without it `sudo -E` is refused with
+# "sorry, you are not allowed to preserve the environment", every spawn exits
+# non-zero before the daemon runs, and the symptom is a bare 15s socket timeout
+# with nothing naming the cause.
+__WORKER_LOGIN__ ALL=(AGENT) NOPASSWD: SETENV: AUTOMATA_DAEMON
+__WORKER_LOGIN__ ALL=(AGENT) NOPASSWD: AUTOMATA_KILL

@@ -57,7 +57,17 @@
       "Write(**/service-account*.json)",
       "Write(**/*credentials*.json)",
       "Write(**/auth.json)",
-      "Write(**/.netrc)"
+      "Write(**/.netrc)",
+      "Bash(hcloud server delete *)",
+      "Bash(hcloud volume delete *)",
+      "Bash(hcloud firewall delete *)",
+      "Bash(hcloud ssh-key delete *)",
+      "Bash(hcloud network delete *)",
+      "Bash(hcloud load-balancer delete *)",
+      "Bash(hcloud image delete *)",
+      "Bash(hcloud floating-ip delete *)",
+      "Bash(hcloud primary-ip delete *)",
+      "Bash(hcloud placement-group delete *)"
     ],
     "allow": [
       "Bash(pnpm:*)",
@@ -133,6 +143,15 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-$PWD}/.claude/hooks/inject-rules.py\" 2>/dev/null || true"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-$PWD}/.claude/hooks/deny-destructive-cloud.py\""
           }
         ]
       }
