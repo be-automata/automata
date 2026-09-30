@@ -600,6 +600,76 @@ describe("packages/worker/deploy/linux — engine backup (#192)", () => {
   });
 });
 
+describe("#192: cloud-init installs the agent the runs actually need", () => {
+  const ci = () =>
+    read(path.join(workerRoot, "deploy", "linux", "cloud-init.yaml"));
+
+  it("installs the claude CLI system-wide, not into a user home", () => {
+    // Omitted originally, and the box looked healthy for hours: dispatch worked,
+    // the ceiling applied, the daemon started, runs "completed" — while every
+    // review came back "intent could not be parsed" because the agent had died
+    // at `claude: command not found`. That string appears ONLY in the thread's
+    // error_message_info in the production database, never on the box.
+    //
+    // /usr/local because the AGENT uid runs it and cannot traverse the service
+    // account's home.
+    const s = ci();
+    // PINNED, like node and pnpm: an unpinned global install means two boxes
+    // provisioned an hour apart run different agent builds.
+    expect(s).toMatch(/CLAUDE_CODE_VERSION=\d+\.\d+\.\d+/);
+    expect(s).toMatch(
+      /npm install -g "@anthropic-ai\/claude-code@\$\{CLAUDE_CODE_VERSION\}"/,
+    );
+    expect(s).toMatch(/NPM_CONFIG_PREFIX=\/usr\/local/);
+  });
+
+  it("asserts the AGENT uid can run it, not merely that it exists", () => {
+    // `command -v claude` as root proves nothing about the account that invokes
+    // it — the whole failure was a PATH/permission question for a different uid.
+    const s = ci();
+    expect(s).toMatch(
+      /runuser -u "\$AGENT_USER" -- \/usr\/local\/bin\/claude --version/,
+    );
+  });
+});
+
+describe("#192: the egress fence is loaded at boot, not by hand", () => {
+  const linux = (f: string) =>
+    read(path.join(workerRoot, "deploy", "linux", f));
+
+  it("ships a unit, because `nft -f` does not survive a reboot", () => {
+    // The fence was loaded by hand and nothing reloaded it at boot, so a reboot
+    // would have left the agent uid with unrestricted egress while every log
+    // line still said the box was fenced. Found by checking, not by an incident.
+    const unit = linux("automata-egress.service");
+    expect(unit).toMatch(/^Type=oneshot$/m);
+    expect(unit).toMatch(/^RemainAfterExit=yes$/m);
+    expect(unit).toMatch(/nft-preflight\.sh/);
+    expect(unit).toMatch(/^WantedBy=multi-user\.target$/m);
+  });
+
+  it("comes up BEFORE the worker accepts work", () => {
+    // A worker that takes a run before the fence exists runs that one unfenced.
+    expect(linux("automata-egress.service")).toMatch(
+      /^Before=automata-worker\.service$/m,
+    );
+  });
+
+  it("tears down only OUR table, never the ruleset", () => {
+    // `flush ruleset` here would take Docker's chains — and with them the engine
+    // and its Postgres. Same trap the ruleset file itself documents.
+    // Anchored to the ExecStop LINE, not the file: the header comment names
+    // `flush ruleset` precisely to explain why it must not be used, and a
+    // whole-file match reads that explanation as the thing it warns about.
+    // (Third time this session a comment mentioning the forbidden string broke
+    // one of my own assertions.)
+    const unit = linux("automata-egress.service");
+    const execStop = unit.match(/^ExecStop=.*$/m)?.[0] ?? "";
+    expect(execStop).toMatch(/delete table inet automata_egress/);
+    expect(execStop).not.toMatch(/flush ruleset/);
+  });
+});
+
 describe("#204: the unit delegates a cgroup subtree, narrowly", () => {
   const linux = (f: string) =>
     read(path.join(workerRoot, "deploy", "linux", f));
@@ -674,75 +744,5 @@ describe("#204: hardening must not fence out the delegated subtree", () => {
     const unit = unitFile();
     expect(unit).toMatch(/^ProtectKernelTunables=yes$/m);
     expect(unit).toMatch(/^ProtectSystem=full$/m);
-  });
-});
-
-describe("#192: cloud-init installs the agent the runs actually need", () => {
-  const ci = () =>
-    read(path.join(workerRoot, "deploy", "linux", "cloud-init.yaml"));
-
-  it("installs the claude CLI system-wide, not into a user home", () => {
-    // Omitted originally, and the box looked healthy for hours: dispatch worked,
-    // the ceiling applied, the daemon started, runs "completed" — while every
-    // review came back "intent could not be parsed" because the agent had died
-    // at `claude: command not found`. That string appears ONLY in the thread's
-    // error_message_info in the production database, never on the box.
-    //
-    // /usr/local because the AGENT uid runs it and cannot traverse the service
-    // account's home.
-    const s = ci();
-    // PINNED, like node and pnpm: an unpinned global install means two boxes
-    // provisioned an hour apart run different agent builds.
-    expect(s).toMatch(/CLAUDE_CODE_VERSION=\d+\.\d+\.\d+/);
-    expect(s).toMatch(
-      /npm install -g "@anthropic-ai\/claude-code@\$\{CLAUDE_CODE_VERSION\}"/,
-    );
-    expect(s).toMatch(/NPM_CONFIG_PREFIX=\/usr\/local/);
-  });
-
-  it("asserts the AGENT uid can run it, not merely that it exists", () => {
-    // `command -v claude` as root proves nothing about the account that invokes
-    // it — the whole failure was a PATH/permission question for a different uid.
-    const s = ci();
-    expect(s).toMatch(
-      /runuser -u "\$AGENT_USER" -- \/usr\/local\/bin\/claude --version/,
-    );
-  });
-});
-
-describe("#192: the egress fence is loaded at boot, not by hand", () => {
-  const linux = (f: string) =>
-    read(path.join(workerRoot, "deploy", "linux", f));
-
-  it("ships a unit, because `nft -f` does not survive a reboot", () => {
-    // The fence was loaded by hand and nothing reloaded it at boot, so a reboot
-    // would have left the agent uid with unrestricted egress while every log
-    // line still said the box was fenced. Found by checking, not by an incident.
-    const unit = linux("automata-egress.service");
-    expect(unit).toMatch(/^Type=oneshot$/m);
-    expect(unit).toMatch(/^RemainAfterExit=yes$/m);
-    expect(unit).toMatch(/nft-preflight\.sh/);
-    expect(unit).toMatch(/^WantedBy=multi-user\.target$/m);
-  });
-
-  it("comes up BEFORE the worker accepts work", () => {
-    // A worker that takes a run before the fence exists runs that one unfenced.
-    expect(linux("automata-egress.service")).toMatch(
-      /^Before=automata-worker\.service$/m,
-    );
-  });
-
-  it("tears down only OUR table, never the ruleset", () => {
-    // `flush ruleset` here would take Docker's chains — and with them the engine
-    // and its Postgres. Same trap the ruleset file itself documents.
-    // Anchored to the ExecStop LINE, not the file: the header comment names
-    // `flush ruleset` precisely to explain why it must not be used, and a
-    // whole-file match reads that explanation as the thing it warns about.
-    // (Third time this session a comment mentioning the forbidden string broke
-    // one of my own assertions.)
-    const unit = linux("automata-egress.service");
-    const execStop = unit.match(/^ExecStop=.*$/m)?.[0] ?? "";
-    expect(execStop).toMatch(/delete table inet automata_egress/);
-    expect(execStop).not.toMatch(/flush ruleset/);
   });
 });

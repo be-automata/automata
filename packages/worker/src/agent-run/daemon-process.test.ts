@@ -298,6 +298,49 @@ setInterval(() => {}, 1000);
     }) as unknown as typeof spawn;
   }
 
+  it("#108: the spawned env carries safe.directory for the run's workdir", async () => {
+    // AT THE CALL SITE, not on buildDaemonEnv. The unit tests for that function
+    // supply the workdir themselves, so they passed while the caller was not
+    // passing it at all and the fix was dead in every real run. This asserts the
+    // env the agent is actually spawned with.
+    const { root, workdir, input } = fixture();
+    const recorded: Recorded[] = [];
+    const config = loadWorkerConfig({
+      WORKER_RUN_NAMESPACE_ROOT: root,
+      WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+      WORKER_NODE_BIN: "/usr/bin/node",
+      WORKER_AGENT_USER: "automata-agent",
+      WORKER_WORKDIR_ROOT: root,
+    });
+    const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+    fs.mkdirSync(path.dirname(socket), { recursive: true });
+    let spawnedEnv: Record<string, string> = {};
+    const inner = fakeSpawn({ recorded, wrapperPgid: process.pid });
+    const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      aceExec: async () => {},
+      spawnFn: ((f: string, a: string[], o: SpawnOptions) => {
+        spawnedEnv = (o?.env ?? {}) as Record<string, string>;
+        return inner(f, a, o);
+      }) as unknown as typeof spawn,
+    });
+    daemons.push(daemon);
+    await daemon.start();
+
+    // Read the GIT_CONFIG_* list the way git does, and find the entry.
+    const count = Number(spawnedEnv.GIT_CONFIG_COUNT ?? "0");
+    expect(count).toBeGreaterThan(0);
+    const pairs = Array.from({ length: count }, (_, i) => [
+      spawnedEnv[`GIT_CONFIG_KEY_${i}`],
+      spawnedEnv[`GIT_CONFIG_VALUE_${i}`],
+    ]);
+    const safe = pairs.filter(([k]) => k === "safe.directory");
+    expect(safe).toHaveLength(1);
+    expect(safe[0]?.[1]).toBe(workdir);
+    // Never the wildcard: that would trust every repository on the box,
+    // including other runs' checkouts and the operator's own.
+    expect(safe[0]?.[1]).not.toBe("*");
+  });
+
   it("applies no ACE and spawns nodeBin DIRECTLY when agentUser is empty (default-off proof)", async () => {
     const { root, workdir, input } = fixture();
     const aceCalls: string[][] = [];
