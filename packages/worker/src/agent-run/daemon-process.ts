@@ -632,11 +632,9 @@ export class DaemonProcess {
     // GATED ON THE CEILING, to keep the default-off promise literally true.
     // Noticing a dead agent mid-run would help every box — today the poll loop
     // spins until Hatchet cancels the task, on a capped box and an uncapped one
-    // alike. But turning that on everywhere is a behaviour change for boxes this
-    // PR is not about: a daemon that exits cleanly a poll interval before www
-    // records terminal would start failing runs that pass today. That fix is
-    // worth making, in its own change, with its own evidence. Here it exists
-    // only where the ceiling does, which is the case #204 has to classify.
+    // alike. Turning that on everywhere is a behaviour change this PR does not
+    // own, so it exists only where the ceiling does: the case #204 has to
+    // classify.
     if (this.config.memoryMaxBytes <= 0) {
       return null;
     }
@@ -645,6 +643,19 @@ export class DaemonProcess {
       return null;
     }
     if (child.exitCode == null && child.signalCode == null) {
+      return null;
+    }
+    // A CLEAN EXIT IS NOT A FAILURE, and treating it as one fails runs that
+    // succeeded. The daemon exiting 0 means it finished its work; www records the
+    // terminal status independently, and it may do so AFTER the exit. The grace
+    // below was one poll interval, so a www write slower than that turned a good
+    // run into a retryable error — on exactly the boxes this feature is enabled
+    // on. An earlier comment here conceded that race and deferred it; deferring
+    // it was wrong, because the ceiling is what puts the race in production.
+    //
+    // What remains covered: a non-zero exit, and any signal — which is how an OOM
+    // kill and a supersede both arrive.
+    if (child.exitCode === 0 && child.signalCode == null) {
       return null;
     }
     return classifyAgentExit({

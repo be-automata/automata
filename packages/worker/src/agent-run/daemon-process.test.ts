@@ -757,6 +757,50 @@ setInterval(() => {}, 1000);
       );
     });
 
+    it("a CLEAN exit 0 is not a failure, even with the ceiling on", () => {
+      // The daemon exiting 0 means it finished; www records the terminal status
+      // independently and may write it AFTER the exit. Treating that exit as a
+      // failure turned a run that SUCCEEDED into a retryable error — on exactly
+      // the boxes the ceiling is enabled on, which is where it matters.
+      //
+      // Driven without start(): with a ceiling configured and no /proc, start()
+      // now refuses by design (the fail-closed path), so the child is planted
+      // directly. The branch under test is a predicate on (exitCode, signalCode)
+      // and needs nothing else.
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+        WORKER_RUN_MEMORY_MAX: "1G",
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_WORKDIR_ROOT: root,
+      });
+      const daemon = new DaemonProcess(config, input, workdir);
+      daemons.push(daemon);
+      const planted = {
+        exitCode: 0 as number | null,
+        signalCode: null as string | null,
+      };
+      (daemon as unknown as { child: unknown }).child = planted;
+
+      // Clean exit, no signal: the run finished.
+      expect(daemon.agentFailure()).toBeNull();
+
+      // Still covered — a non-zero exit, and a signal, which is how an OOM kill
+      // and a supersede both arrive.
+      planted.exitCode = 1;
+      expect(daemon.agentFailure()).toBeInstanceOf(Error);
+      planted.exitCode = null;
+      planted.signalCode = "SIGKILL";
+      expect(daemon.agentFailure()).toBeInstanceOf(Error);
+
+      // And still running is still not a failure.
+      planted.exitCode = null;
+      planted.signalCode = null;
+      expect(daemon.agentFailure()).toBeNull();
+    });
+
     it("agentFailure stays silent on a box with no ceiling — default-off is literal", async () => {
       // Noticing a dead agent mid-run would help every box, but switching it on
       // everywhere is a behaviour change this PR does not own: a daemon that
