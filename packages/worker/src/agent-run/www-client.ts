@@ -125,22 +125,68 @@ const CREDITS_ONLY: PulledAgentCredentialsResult = {
   credentials: { type: "built-in-credits" },
 };
 
+/** Attempts for the credential pull, and the pause between them. */
+export const CREDENTIAL_PULL_ATTEMPTS = 3;
+export const CREDENTIAL_PULL_BACKOFF_MS = 500;
+
 export async function pullAgentCredentials(
   opts: WwwClientOpts,
   signal?: AbortSignal,
+  /** Injected for tests; the retry pause must cost a suite nothing. */
+  sleep: (ms: number) => Promise<void> = (ms) =>
+    new Promise((r) => setTimeout(r, ms)),
 ): Promise<PulledAgentCredentialsResult> {
-  const res = await fetch(
-    endpoint(opts.baseUrl, "/api/daemon/agent-credentials"),
-    {
-      method: "POST",
-      headers: headers(opts),
-      body: JSON.stringify({
+  // WHAT THIS FIXES, AND WHAT IT DELIBERATELY DOES NOT. Below, an HTTP error is
+  // already tolerated: a 404 from an older control plane and a transient 5xx
+  // both fall back to built-in-credits rather than stranding the run. A fetch
+  // that THROWS is different and stays different — it propagates, because the
+  // caller cleans up the workdir on that path and swallowing it would hide a
+  // cancelled run behind a successful-looking credits fallback. That is a
+  // decision with a test on it, not an oversight, and this change keeps it.
+  //
+  // What was missing is that ONE network blip was enough. Observed in production
+  // 2026-09-29 (#212): a single `TypeError: fetch failed` here ended a review
+  // run, and the PR was left carrying "review intent could not be parsed",
+  // which reads like the agent misbehaved. It was the network.
+  //
+  // So: retry the throw a bounded number of times, then propagate as before.
+  // Retrying is safe here specifically — this runs ONCE per run, before any
+  // agent work, with no side effects to duplicate.
+  //
+  // An ABORT is never retried: a cancelled run has its answer already, and
+  // retrying into it would delay the teardown the abort exists to trigger.
+  let res: Response;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      res = await fetch(
+        endpoint(opts.baseUrl, "/api/daemon/agent-credentials"),
+        {
+          method: "POST",
+          headers: headers(opts),
+          body: JSON.stringify({
+            threadId: opts.threadId,
+            threadChatId: opts.threadChatId,
+          }),
+          signal,
+        },
+      );
+      break;
+    } catch (e) {
+      const aborted =
+        signal?.aborted === true ||
+        (e instanceof Error && e.name === "AbortError");
+      if (aborted || attempt >= CREDENTIAL_PULL_ATTEMPTS) {
+        throw e;
+      }
+      console.warn("[agent-run] agent-credentials fetch failed, retrying", {
         threadId: opts.threadId,
-        threadChatId: opts.threadChatId,
-      }),
-      signal,
-    },
-  );
+        attempt,
+        of: CREDENTIAL_PULL_ATTEMPTS,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      await sleep(CREDENTIAL_PULL_BACKOFF_MS * attempt);
+    }
+  }
   if (res.status === 204) {
     return CREDITS_ONLY;
   }
