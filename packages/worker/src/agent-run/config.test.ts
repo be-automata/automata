@@ -1,7 +1,12 @@
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadWorkerConfig, resolveBoxId } from "./config";
+import {
+  loadWorkerConfig,
+  parseMemoryMax,
+  parseTasksMax,
+  resolveBoxId,
+} from "./config";
 
 describe("loadWorkerConfig", () => {
   it("falls back to sensible defaults when nothing is set", () => {
@@ -308,5 +313,84 @@ describe("resolveBoxId (#192 P5)", () => {
     // fallback: it looks like a truncation bug rather than a missing config.
     expect(resolveBoxId("!!!")).toBe("unknown-box");
     expect(resolveBoxId("///")).toBe("unknown-box");
+  });
+});
+
+describe("#204: memory-ceiling knobs are validated at boot", () => {
+  it("is OFF when unset — the default-off contract", () => {
+    expect(parseMemoryMax(undefined)).toBe(0);
+    expect(parseMemoryMax("")).toBe(0);
+    expect(parseMemoryMax("   ")).toBe(0);
+  });
+
+  it("accepts bytes and K/M/G, because a byte count gets mistyped", () => {
+    expect(parseMemoryMax("1073741824")).toBe(1024 ** 3);
+    expect(parseMemoryMax("1G")).toBe(1024 ** 3);
+    expect(parseMemoryMax("1500M")).toBe(1500 * 1024 ** 2);
+    expect(parseMemoryMax("2g")).toBe(2 * 1024 ** 3);
+  });
+
+  it("THROWS on a value it cannot parse rather than silently disabling", () => {
+    // A typo that quietly turned the ceiling off would leave the box exposed
+    // while the config claims it is protected — the #192 cloud-init lesson.
+    for (const bad of ["1.5G", "lots", "1GB", "-1", "1 G", "G"]) {
+      expect(() => parseMemoryMax(bad), bad).toThrow(/WORKER_RUN_MEMORY_MAX/);
+    }
+  });
+
+  it("refuses a ceiling that would kill every run", () => {
+    // One agent session measures ~1.1 GB (ADR-002 §6). A 64M ceiling is not a
+    // budget, it is an outage, and it should fail at boot not per run.
+    expect(() => parseMemoryMax("64M")).toThrow(/below 256M/);
+    expect(parseMemoryMax("256M")).toBe(256 * 1024 ** 2);
+    // A typo that the regex happily accepts must not reach `memory.max`:
+    // past 2^53 the product is imprecise, and further out it is Infinity.
+    for (const huge of [
+      "99999999999999999999G",
+      "9007199254740993",
+      "1000000000000G",
+    ]) {
+      expect(() => parseMemoryMax(huge), huge).toThrow(
+        /exact integer number of bytes/,
+      );
+    }
+    // And the realistic end of the range still parses exactly.
+    expect(parseMemoryMax("1500M")).toBe(1500 * 1024 ** 2);
+    expect(parseMemoryMax("8G")).toBe(8 * 1024 ** 3);
+  });
+
+  it("a stray WORKER_RUN_TASKS_MAX does NOT stop a box without the ceiling", () => {
+    // `parseTasksMax` throws on a set-but-invalid value. Running it
+    // unconditionally meant a box that never enabled the ceiling could be
+    // stopped from booting — and from running — by a leftover env var it does
+    // not use. That breaks the default-off promise this feature makes twice.
+    const base = {
+      WORKER_RUN_NAMESPACE_ROOT: "/tmp/x",
+      WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+      WORKER_NODE_BIN: "/usr/bin/node",
+      WORKER_RUN_TASKS_MAX: "not-a-number",
+    };
+    // Ceiling OFF: the value is unused, so it is not this feature's business.
+    const off = loadWorkerConfig(base);
+    expect(off.memoryMaxBytes).toBe(0);
+    expect(off.tasksMax).toBe(0);
+
+    // Ceiling ON: now it IS used, so a typo must still be refused at boot.
+    expect(() =>
+      loadWorkerConfig({
+        ...base,
+        WORKER_RUN_MEMORY_MAX: "1G",
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_WORKDIR_ROOT: "/tmp/x",
+      }),
+    ).toThrow(/WORKER_RUN_TASKS_MAX/);
+  });
+
+  it("defaults tasksMax generously — it is a runaway guard, not a budget", () => {
+    expect(parseTasksMax(undefined)).toBe(4096);
+    expect(parseTasksMax("512")).toBe(512);
+    for (const bad of ["0", "63", "abc", "1.5"]) {
+      expect(() => parseTasksMax(bad), bad).toThrow(/WORKER_RUN_TASKS_MAX/);
+    }
   });
 });

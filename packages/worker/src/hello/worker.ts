@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { hatchet } from "../hatchet-client";
@@ -18,6 +19,10 @@ import {
   claimRunNamespace,
   getProcessWorkerId,
 } from "../agent-run/run-namespace";
+import {
+  assessCgroupSupport,
+  prepareDelegatedRoot,
+} from "../agent-run/run-cgroup";
 import { workflows } from "../registry";
 
 const execFileAsync = promisify(execFile);
@@ -54,6 +59,55 @@ async function claimNamespaceAndReclaim(): Promise<void> {
     agentUser: loadWorkerConfig().agentUser,
     log: (message) => console.log(`[worker-boot] ${message}`),
   });
+}
+
+/**
+ * #204 boot step: vacate the delegated cgroup root and enable the controllers.
+ *
+ * A box that did NOT ask for a ceiling (`memoryMaxBytes <= 0`) returns immediately
+ * and boots exactly as it does today — that is the whole of the default-off path.
+ *
+ * A box that DID ask and cannot deliver refuses to boot. The earlier version logged
+ * "ceiling OFF" and carried on, which was the worst of both: every subsequent run
+ * still built a cgroup and then died writing `memory.max`, so the box failed every
+ * run while its boot log claimed the feature was simply disabled. Same rule as the
+ * per-run path — a ceiling that cannot be applied must never quietly become no
+ * ceiling — and refusing at boot is the cheapest place to say so.
+ */
+function prepareCeilingSubtreeAtBoot(): void {
+  const cfg = loadWorkerConfig();
+  if (cfg.memoryMaxBytes <= 0) {
+    return;
+  }
+  let procSelfCgroup: string;
+  try {
+    procSelfCgroup = readFileSync("/proc/self/cgroup", "utf8");
+  } catch {
+    throw new Error(
+      "memory ceiling requested (WORKER_RUN_MEMORY_MAX) but /proc/self/cgroup is unreadable",
+    );
+  }
+  // requireEnabled:false — this call runs immediately before the line that does
+  // the enabling. Asking for it here would refuse every boot.
+  const support = assessCgroupSupport({
+    procSelfCgroup,
+    requireEnabled: false,
+  });
+  if (!support.supported) {
+    throw new Error(
+      `memory ceiling requested (WORKER_RUN_MEMORY_MAX) but unavailable: ${support.reason}`,
+    );
+  }
+  try {
+    prepareDelegatedRoot({ root: support.root, pid: process.pid });
+    console.log(
+      `[worker-boot] memory ceiling armed: ${support.root} (memory.max=${cfg.memoryMaxBytes} per run, pids.max=${cfg.tasksMax})`,
+    );
+  } catch (e) {
+    throw new Error(
+      `memory ceiling requested (WORKER_RUN_MEMORY_MAX) but subtree preparation failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
 }
 
 /**
@@ -144,6 +198,29 @@ async function main() {
   // nothing else.
   const boxId = loadWorkerConfig().boxId;
   console.log(`[worker-boot] box id: ${boxId}`);
+
+  // #204: prepare the delegated cgroup subtree once, at boot, before any run.
+  //
+  // Two reasons it cannot be per-run. The worker must move ITSELF out of the
+  // delegated root (cgroup v2 refuses to enable controllers for the children of
+  // a cgroup that holds processes), and doing that repeatedly is pointless; and
+  // `cgroup.subtree_control` is a property of the root, not of a run.
+  //
+  // FAIL-CLOSED, and only for a box that asked. With `WORKER_RUN_MEMORY_MAX`
+  // unset this returns immediately and the boot is what it has always been. With
+  // it set and unarmable — no delegation, a mistyped `Delegate=`, not Linux — the
+  // worker refuses to start and names the precondition that failed. The earlier
+  // "log it and carry on" was the worst of both: the box then failed every run
+  // while its boot log said the feature was simply off.
+  try {
+    prepareCeilingSubtreeAtBoot();
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: the per-run memory ceiling is configured but cannot be armed — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
   const worker = await hatchet.worker(`automata-worker-${boxId}`, {
     workflows,
     // #125 C4 / #183: ONE slot per worker process and ONE unit per box:

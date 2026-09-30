@@ -610,4 +610,238 @@ setInterval(() => {}, 1000);
     );
     return { root, scriptDir, workdir, input };
   }
+
+  /**
+   * #204: the ceiling's WIRING — which branch is taken and in what order. The
+   * kernel behaviour itself is drilled on the box, because a mocked cgroup
+   * cannot OOM anything.
+   */
+  describe("per-run memory ceiling (#204)", () => {
+    it("REFUSES to load a config with a ceiling and no uid drop", () => {
+      // This used to decline per run with a log line and carry on, which is the
+      // fail-open the whole feature argues against: the operator asked for a
+      // ceiling, the box booted happily, and every run went uncapped with one
+      // line in a stream nobody reads. Rejecting in loadWorkerConfig fails at
+      // boot and at every run, because every caller loads this config.
+      expect(() =>
+        loadWorkerConfig({
+          WORKER_RUN_NAMESPACE_ROOT: "/tmp/x",
+          WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+          WORKER_NODE_BIN: "/usr/bin/node",
+          WORKER_RUN_MEMORY_MAX: "1G",
+          // WORKER_AGENT_USER deliberately absent
+        }),
+      ).toThrow(/WORKER_AGENT_USER is empty/);
+    });
+
+    it("reports no OOM when the ceiling was never applied", () => {
+      // A run with no cgroup must never be classified resource-limit, whatever
+      // its exit code was.
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+      });
+      expect(config.memoryMaxBytes).toBe(0);
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        { spawnFn: fakeSpawn({ recorded: [] }) },
+      );
+      daemons.push(daemon);
+      expect(daemon.oomKills()).toBe(0);
+    });
+
+    it("a start() that dies at the handshake still clears the ready marker", async () => {
+      // The marker is the ONE piece of handshake state that outlives the process
+      // tree: the cgroup goes with `cgroup.kill` + rmdir, but a stale marker left
+      // beside a reused pidfile would tell the next wrapper it may exec before the
+      // worker has capped it. teardown() runs from workflow.ts's finally on every
+      // exit path, including a start() that threw — so it is the only place this
+      // has to be true, and this pins it.
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+      });
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        {
+          spawnFn: (() => {
+            throw new Error("spawn blew up before the handshake");
+          }) as unknown as typeof spawn,
+        },
+      );
+      daemons.push(daemon);
+      const marker = `${runPidPath(root, getProcessWorkerId(), input.threadId)}.cgroup-ready`;
+      fs.mkdirSync(path.dirname(marker), { recursive: true });
+      fs.writeFileSync(marker, "");
+      await expect(daemon.start()).rejects.toThrow();
+      daemon.teardown();
+      expect(fs.existsSync(marker)).toBe(false);
+    });
+
+    it("a stale ready marker from a crashed run is cleared BEFORE the next spawn", async () => {
+      // The marker is a safety interlock: the wrapper execs the moment it exists.
+      // A leftover from a crashed run of the same threadId would let the next
+      // agent start before the worker had capped it — uncapped, while every log
+      // said capped. teardown covers the run that ends; this covers the run that
+      // never got to.
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+      });
+      const recorded: Recorded[] = [];
+      const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+      fs.mkdirSync(path.dirname(socket), { recursive: true });
+      const marker = `${runPidPath(root, getProcessWorkerId(), input.threadId)}.cgroup-ready`;
+      fs.writeFileSync(marker, "");
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        { spawnFn: fakeSpawn({ recorded }) },
+      );
+      daemons.push(daemon);
+      await daemon.start();
+      // No ceiling in this config, so nothing re-creates it: if start() had not
+      // cleared it, it would still be here.
+      expect(fs.existsSync(marker)).toBe(false);
+    });
+
+    it("a configured ceiling on a box that cannot apply it FAILS the run, loudly", async () => {
+      // The run-time counterpart of the boot refusal, and the point of the whole
+      // feature: a box told to cap its runs must not run them uncapped. This used
+      // to log "run cgroup skipped: <reason>" and spawn the agent anyway. Any
+      // platform without a delegated cgroup v2 subtree exercises it — including
+      // this one, which is why the assertion is on the message, not the platform.
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+        WORKER_RUN_MEMORY_MAX: "1G",
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_WORKDIR_ROOT: root,
+      });
+      const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+      fs.mkdirSync(path.dirname(socket), { recursive: true });
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        { spawnFn: fakeSpawn({ recorded: [] }) },
+      );
+      daemons.push(daemon);
+      await expect(daemon.start()).rejects.toThrow(
+        /per-run memory ceiling is configured but/,
+      );
+    });
+
+    it("a CLEAN exit 0 is not a failure, even with the ceiling on", () => {
+      // The daemon exiting 0 means it finished; www records the terminal status
+      // independently and may write it AFTER the exit. Treating that exit as a
+      // failure turned a run that SUCCEEDED into a retryable error — on exactly
+      // the boxes the ceiling is enabled on, which is where it matters.
+      //
+      // Driven without start(): with a ceiling configured and no /proc, start()
+      // now refuses by design (the fail-closed path), so the child is planted
+      // directly. The branch under test is a predicate on (exitCode, signalCode)
+      // and needs nothing else.
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+        WORKER_RUN_MEMORY_MAX: "1G",
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_WORKDIR_ROOT: root,
+      });
+      const daemon = new DaemonProcess(config, input, workdir);
+      daemons.push(daemon);
+      const planted = {
+        exitCode: 0 as number | null,
+        signalCode: null as string | null,
+      };
+      (daemon as unknown as { child: unknown }).child = planted;
+
+      // Clean exit, no signal: the run finished.
+      expect(daemon.agentFailure()).toBeNull();
+
+      // Still covered — a non-zero exit, and a signal, which is how an OOM kill
+      // and a supersede both arrive.
+      planted.exitCode = 1;
+      expect(daemon.agentFailure()).toBeInstanceOf(Error);
+      planted.exitCode = null;
+      planted.signalCode = "SIGKILL";
+      expect(daemon.agentFailure()).toBeInstanceOf(Error);
+
+      // And still running is still not a failure.
+      planted.exitCode = null;
+      planted.signalCode = null;
+      expect(daemon.agentFailure()).toBeNull();
+    });
+
+    it("agentFailure stays silent on a box with no ceiling — default-off is literal", async () => {
+      // Noticing a dead agent mid-run would help every box, but switching it on
+      // everywhere is a behaviour change this PR does not own: a daemon that
+      // exits cleanly just before www records terminal would start failing runs
+      // that pass today. So the check exists only where the ceiling does.
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+        // WORKER_RUN_MEMORY_MAX deliberately absent
+      });
+      const recorded: Recorded[] = [];
+      const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+      fs.mkdirSync(path.dirname(socket), { recursive: true });
+      const inner = fakeSpawn({ recorded });
+      let spawned: ChildProcess | null = null;
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        {
+          spawnFn: ((file: string, args: string[], o: SpawnOptions) => {
+            spawned = inner(file, args, o);
+            return spawned;
+          }) as unknown as typeof spawn,
+        },
+      );
+      daemons.push(daemon);
+      await daemon.start();
+      const child = spawned as unknown as {
+        exitCode: number | null;
+        signalCode: string | null;
+      };
+      // A clean exit 0, which is the case that would newly fail runs.
+      child.exitCode = 0;
+      child.signalCode = null;
+      expect(daemon.agentFailure()).toBeNull();
+    });
+  });
 });

@@ -669,3 +669,80 @@ describe("#192: the egress fence is loaded at boot, not by hand", () => {
     expect(execStop).not.toMatch(/flush ruleset/);
   });
 });
+
+describe("#204: the unit delegates a cgroup subtree, narrowly", () => {
+  const linux = (f: string) =>
+    read(path.join(workerRoot, "deploy", "linux", f));
+
+  it("delegates exactly the two controllers, and ONLY from the opt-in drop-in", () => {
+    // `Delegate=yes` would hand the worker every controller for no gain. The
+    // narrow form is the whole reason this needs no privilege elsewhere.
+    //
+    // And it lives in the drop-in, not the base unit: delegation is useless
+    // without relaxing ProtectControlGroups, so shipping it in the base would
+    // mean relaxing hardening on every box, including ones that never cap a run.
+    const dropin = linux("automata-worker.service.d/10-ceiling.conf");
+    expect(dropin).toMatch(/^Delegate=memory pids$/m);
+    expect(dropin).not.toMatch(/^Delegate=(yes|true)$/m);
+    expect(linux("automata-worker.service")).not.toMatch(/^Delegate=/m);
+  });
+
+  it("records why a transient scope was not used, WITH the delegation", () => {
+    // Someone will propose `systemd-run --scope` again, because #193 specified
+    // it. The measurement that killed it belongs next to the line that replaced
+    // it, or the next person repeats the polkit discovery from scratch — so it
+    // travelled into the drop-in with `Delegate=`, not left behind in the unit.
+    const dropin = linux("automata-worker.service.d/10-ceiling.conf");
+    expect(dropin).toMatch(/polkit/i);
+    expect(dropin).toMatch(/systemd-run/);
+  });
+});
+
+describe("#204: hardening must not fence out the delegated subtree", () => {
+  const unitFile = () =>
+    read(path.join(workerRoot, "deploy", "linux", "automata-worker.service"));
+
+  it("the base unit KEEPS ProtectControlGroups; only the drop-in relaxes it", () => {
+    // `ProtectControlGroups=yes` remounts /sys/fs/cgroup read-only inside the
+    // unit's namespace, so a delegated subtree is correctly OWNED and totally
+    // unwritable. The worker then reports a missing `Delegate=` that is in fact
+    // present — a one-line cause with a maximally misleading symptom. Isolated on
+    // the box: this setting alone breaks it; ProtectKernelTunables and
+    // ProtectSystem=full do not.
+    //
+    // The pair is what matters, so assert BOTH halves. A box that never enables
+    // the ceiling must not pay for it: the base unit stays hardened, and the
+    // relaxation is confined to the drop-in that a ceiling-enabled box installs.
+    expect(unitFile()).toMatch(/^ProtectControlGroups=yes$/m);
+    const dropin = read(
+      path.join(
+        workerRoot,
+        "deploy",
+        "linux",
+        "automata-worker.service.d",
+        "10-ceiling.conf",
+      ),
+    );
+    expect(dropin).toMatch(/^ProtectControlGroups=no$/m);
+    // Delegation is inert without the relaxation, so they must travel together.
+    expect(dropin).toMatch(/^Delegate=memory pids$/m);
+  });
+
+  it("a ceiling-enabled box that forgets the drop-in fails LOUDLY, not uncapped", () => {
+    // The base unit alone cannot arm the ceiling. That is only safe because the
+    // boot step refuses to start rather than running every job uncapped — the
+    // whole point of the fail-closed path. Pin the pairing so neither half can
+    // drift away from the other.
+    const boot = read(path.join(workerRoot, "src", "hello", "worker.ts"));
+    expect(boot).toMatch(/refusing to start/);
+    expect(unitFile()).toMatch(/10-ceiling\.conf/);
+  });
+
+  it("keeps the hardening that does NOT conflict", () => {
+    // The fix is one line, not the whole block — removing more than necessary
+    // would be the wrong trade.
+    const unit = unitFile();
+    expect(unit).toMatch(/^ProtectKernelTunables=yes$/m);
+    expect(unit).toMatch(/^ProtectSystem=full$/m);
+  });
+});

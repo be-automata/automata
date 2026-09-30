@@ -32,3 +32,52 @@ export function nonRetryablePreflight(err: unknown): NonRetryableError {
     }`,
   );
 }
+
+/**
+ * #204: the agent exceeded its per-run memory ceiling.
+ *
+ * Terminal, not retryable: a run that did not fit will not fit on a retry, and
+ * burning agent-minutes on backoff to prove it is waste. The client sees a cause
+ * instead of an opaque crash.
+ *
+ * WHY THE CALLER MUST PASS `oomKills` AND NOT JUST THE EXIT CODE. Every SIGKILL
+ * exits 137 — including our OWN teardown kill and a supersede. Classifying on 137
+ * alone would report a cancelled run as having blown its memory budget, which is
+ * a confidently wrong cause and worse than a generic failure. The kernel's
+ * `memory.events` `oom_kill` counter is the only positive signal, so this asks
+ * for it and refuses to guess.
+ */
+export class ResourceLimitError extends Error {
+  constructor(
+    readonly memoryMaxBytes: number,
+    readonly oomKills: number,
+  ) {
+    super(
+      `agent run exceeded its memory ceiling (${memoryMaxBytes} bytes); ` +
+        `the kernel OOM-killed it ${oomKills} time(s) inside its cgroup`,
+    );
+    this.name = "ResourceLimitError";
+  }
+}
+
+/**
+ * Classify a dead agent child. Returns a terminal `ResourceLimitError` ONLY when
+ * the kernel says it OOM-killed something in this run's cgroup; anything else is
+ * returned untouched so its own cause survives.
+ */
+export function classifyAgentExit(opts: {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  /** From memory.events; 0 when the feature is off or the file is gone. */
+  oomKills: number;
+  memoryMaxBytes: number;
+  fallback: unknown;
+}): unknown {
+  const killed = opts.signal === "SIGKILL" || opts.exitCode === 137;
+  if (killed && opts.oomKills > 0) {
+    return new NonRetryableError(
+      new ResourceLimitError(opts.memoryMaxBytes, opts.oomKills).message,
+    );
+  }
+  return opts.fallback;
+}

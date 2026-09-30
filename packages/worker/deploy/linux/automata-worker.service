@@ -76,6 +76,29 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=automata-worker
 
+# ── #204: the per-run memory ceiling is an OPT-IN DROP-IN, not part of this unit ──
+#
+# The ceiling needs two things this unit deliberately does NOT provide:
+# `Delegate=memory pids` and the absence of `ProtectControlGroups=`. Both live in
+# `automata-worker.service.d/10-ceiling.conf`, installed only on a box that
+# enables the ceiling.
+#
+# WHY IT IS SPLIT. `ProtectControlGroups=yes` remounts /sys/fs/cgroup read-only
+# inside the unit's namespace, so a delegated subtree is correctly OWNED and
+# completely unwritable and the ceiling cannot be armed. Shipping it relaxed in
+# the base unit would weaken hardening on every box, including the ones that
+# never enable the ceiling — a regression they get nothing for. The drop-in
+# confines the relaxation to the boxes that need it.
+#
+# A MISCONFIGURED BOX FAILS LOUDLY, it does not run uncapped: with
+# `WORKER_RUN_MEMORY_MAX` set and the drop-in absent, the worker refuses to boot
+# and names the missing delegation (`hello/worker.ts`). With the ceiling unset,
+# this unit boots exactly as it did before #204.
+#
+# Install:  install -D -m0644 automata-worker.service.d/10-ceiling.conf \
+#             /etc/systemd/system/automata-worker.service.d/10-ceiling.conf
+#           systemctl daemon-reload && systemctl restart automata-worker.service
+
 # ── Hardening that does NOT fight the agent-uid design ─────────────────────
 #
 # The worker legitimately spawns an agent under a DIFFERENT uid via sudo, so
@@ -100,7 +123,23 @@ ReadWritePaths=/usr/local/automata
 
 ProtectHome=no
 ProtectKernelTunables=yes
+
+# ProtectControlGroups IS set here, and the ceiling's drop-in is what turns it
+# off where the ceiling is enabled. `=yes` remounts /sys/fs/cgroup READ-ONLY
+# inside this unit's namespace, so a delegated subtree stays correctly owned and
+# entirely unwritable — the worker then reports a missing `Delegate=` that is in
+# fact present, a maximally confusing symptom for a one-line cause.
+#
+# Isolated on the box rather than assumed, because relaxing more hardening than
+# necessary would be the wrong trade. With Delegate=memory pids:
+#   baseline (no hardening) ............ subtree_control WRITABLE
+#   ProtectControlGroups=yes ........... read-only   <-- the only culprit
+#   ProtectKernelTunables=yes .......... WRITABLE
+#   ProtectSystem=full ................. WRITABLE
+#   the other two together ............. WRITABLE
+# So the drop-in relaxes exactly this one line, and only on boxes that cap runs.
 ProtectControlGroups=yes
+
 RestrictSUIDSGID=no
 
 [Install]
