@@ -7,6 +7,7 @@ import {
   postRunTerminal,
   checkRunStaleness,
   pullAgentCredentials,
+  CREDENTIAL_PULL_ATTEMPTS,
   pullNextMessage,
   type PollContext,
   type WwwClientOpts,
@@ -733,5 +734,77 @@ describe("pollUntilTerminal: the agent dies mid-run (#204)", () => {
       noSleep,
     );
     expect(result.outcome).toBe("completed");
+  });
+});
+
+describe("pullAgentCredentials: one network blip must not end a run (#212)", () => {
+  const noSleep = async () => {};
+
+  it("retries a throwing fetch and succeeds on a later attempt", async () => {
+    // The exact transient that ended a real review run on 2026-09-29. The PR was
+    // then left saying the review intent could not be parsed, which reads like
+    // the agent misbehaved; it was the network.
+    let calls = 0;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async () => {
+        calls += 1;
+        if (calls < 3) throw new TypeError("fetch failed");
+        return jsonResponse(200, {
+          agent: "claude",
+          credentials: { type: "oauth" },
+        });
+      }),
+    );
+    const out = await pullAgentCredentials(opts, undefined, noSleep);
+    expect(calls).toBe(3);
+    expect(out.agent).toBe("claude");
+    warn.mockRestore();
+  });
+
+  it("STILL propagates once the attempts are spent — never masked as credits", async () => {
+    // Deliberate, and pinned by the pre-existing test above: the caller cleans
+    // up the workdir on this path, so swallowing it would hide a cancelled run
+    // behind a successful-looking credits fallback. Retrying changes how OFTEN
+    // we get here, never what happens when we do.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = vi.fn().mockImplementation(async () => {
+      throw new TypeError("fetch failed");
+    });
+    vi.stubGlobal("fetch", f);
+    await expect(
+      pullAgentCredentials(opts, undefined, noSleep),
+    ).rejects.toThrow(/fetch failed/);
+    expect(f).toHaveBeenCalledTimes(CREDENTIAL_PULL_ATTEMPTS);
+    warn.mockRestore();
+  });
+
+  it("never retries an abort — the cancelled run has its answer", async () => {
+    const f = vi
+      .fn()
+      .mockRejectedValue(new DOMException("aborted", "AbortError"));
+    vi.stubGlobal("fetch", f);
+    await expect(
+      pullAgentCredentials(opts, undefined, noSleep),
+    ).rejects.toThrow(/aborted/);
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it("an HTTP error still falls back on the FIRST try, unchanged", async () => {
+    // A 5xx or a 404 from an older control plane is not a network throw and must
+    // not spend retries — that path was already correct.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = vi.fn().mockResolvedValue(jsonResponse(500, { error: "boom" }));
+    vi.stubGlobal("fetch", f);
+    const out = await pullAgentCredentials(opts, undefined, noSleep);
+    expect(out.credentials.type).toBe("built-in-credits");
+    expect(f).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("bounds the attempts", () => {
+    expect(CREDENTIAL_PULL_ATTEMPTS).toBeGreaterThan(1);
+    expect(CREDENTIAL_PULL_ATTEMPTS).toBeLessThanOrEqual(5);
   });
 });
