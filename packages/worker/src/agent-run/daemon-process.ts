@@ -149,6 +149,13 @@ export class DaemonProcess {
       // Inside the workdir, so it inherits the run's ACE. Provisioning created
       // it in the same `if (agentUser)` branch that applied that ACE.
       runTmpDir: this.config.agentUser ? path.join(this.workdir, "tmp") : null,
+      // THE CALL SITE IS HALF THE FIX. `buildDaemonEnv` adds the
+      // `safe.directory` entry only when it is given the workdir, so without
+      // this line the option defaults to null, the `agentUser && workdir` guard
+      // is always false, and the #108 fix is dead code — which its own unit
+      // tests still pass, because they call buildDaemonEnv directly and supply
+      // the workdir themselves.
+      workdir: this.workdir,
     });
     return this.env;
   }

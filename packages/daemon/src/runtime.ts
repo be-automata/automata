@@ -129,6 +129,35 @@ export class DaemonRuntime implements IDaemonRuntime {
     this.unixSocketServer = net.createServer();
     this.unixSocketServer.listen(this.unixSocketPath);
     this.unixSocketServer.on("listening", () => {
+      // Widen the socket's GROUP class so the worker can connect across the uid
+      // split (#108 agent-uid mode on Linux).
+      //
+      // Node binds unix sockets 0755. On Linux, connect(2) needs WRITE on the
+      // socket file, and — the part that is easy to miss — when a POSIX ACL is
+      // present the mode's group bits ARE the ACL mask, which caps every
+      // named-user entry. So the run dir's inherited grant for the worker lands
+      // on the socket as `user:<worker account>:rwx #effective:r-x` — listed by
+      // getfacl, and inert. (The account name is the deployment's, `automata` on
+      // the Linux execution box; the unit file templates it as `User=`.)
+      // Every run then dies with
+      //
+      //   daemon socket not ready after 15000ms: connect EACCES <socket>
+      //
+      // observed in production on the first agent-uid run. `chmod 0660` raises
+      // the mask to rw- so the named grant becomes effective, and pins `other`
+      // to none. Measured on the box: the granted worker connects, an ungranted
+      // account still cannot.
+      //
+      // Harmless where no ACL exists (macOS, single-uid boxes) — 0660 on a
+      // socket that only the owner and its group could reach anyway.
+      try {
+        fs.chmodSync(this.unixSocketPath, 0o660);
+      } catch (error) {
+        // Not fatal by itself: without a uid split the worker can still connect.
+        // Logged because if the connect DOES fail, this is the first place to
+        // look.
+        this.logger.error("Could not chmod the unix socket", { error });
+      }
       this.logger.info("Unix socket server listening");
     });
     this.unixSocketServer.on("error", (error) => {

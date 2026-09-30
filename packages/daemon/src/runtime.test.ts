@@ -32,6 +32,24 @@ describe("runtime", () => {
     expect(fs.existsSync(runtime.unixSocketPath)).toBe(false);
   });
 
+  it("the unix socket is chmod 0660, not the 0755 bind(2) gives it (#108)", async () => {
+    // WHY THIS EXISTS, since it is a daemon-wide change and not part of any
+    // cgroup work: node binds unix sockets 0755. On Linux, connect(2) needs
+    // WRITE on the socket file, and where a POSIX ACL is present the mode's
+    // GROUP bits ARE the ACL mask — so the run dir's inherited grant lands on a
+    // bind(2)-created socket as `user:<worker account>:rwx #effective:r-x` —
+    // listed, and inert. Every agent-uid run on Linux died with
+    // `daemon socket not ready after 15000ms: connect EACCES`.
+    //
+    // Only the OWNER can raise the mask, and the daemon is the owner, so it
+    // chmods its own socket after `listening`. 0660 also pins `other` to none,
+    // which is strictly tighter than the 0755 it replaces — the reason this is
+    // safe to apply on every platform rather than only where an ACL exists.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const mode = fs.statSync(runtime.unixSocketPath).mode & 0o777;
+    expect(mode.toString(8)).toBe("660");
+  });
+
   it("can read and write a single message to a unix socket", async () => {
     const messages: string[] = [];
     await runtime.listenToUnixSocket((message) => {
