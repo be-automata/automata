@@ -78,6 +78,22 @@ export interface WorkerConfig {
   /** #204: per-run `pids.max`. Only read when the ceiling is on. */
   tasksMax: number;
   /**
+   * #215: engine-liveness watchdog. Seconds of observed staleness in THIS
+   * worker's engine `Worker.lastHeartbeatAt` after which the process exits
+   * non-zero so systemd's Restart=always relaunches it.
+   *
+   * 0 (the DEFAULT) = OFF: no timer, no probe, no exit — byte-for-byte today's
+   * boot.
+   *
+   * Deliberately generous. An idle worker is not a wedged worker, and a watchdog
+   * that restart-loops a healthy box is worse than the bug it covers, so the
+   * loader REFUSES anything below LIVENESS_STALE_FLOOR_S rather than accepting a
+   * hair-trigger.
+   */
+  livenessStaleAfterS: number;
+  /** #215: watchdog tick period, seconds. Only read when the watchdog is on. */
+  livenessPollS: number;
+  /**
    * Stable identity for this box, used in the engine worker name so two boxes
    * are distinguishable. See resolveBoxId.
    */
@@ -281,6 +297,59 @@ export function parseTasksMax(raw: string | undefined): number {
   return n;
 }
 
+/** Minimum accepted WORKER_LIVENESS_STALE_S. See parseLivenessStaleAfterS. */
+const LIVENESS_STALE_FLOOR_S = 300;
+/** Default tick period when the watchdog is on. */
+const LIVENESS_POLL_DEFAULT_S = 60;
+
+/**
+ * Parse `WORKER_LIVENESS_STALE_S` (#215) — the engine-observed heartbeat
+ * staleness, in seconds, past which the worker exits non-zero.
+ *
+ * Unset or empty = 0 = OFF, exactly like the #204 ceiling: an unconfigured box
+ * gets no timer, no probe and no behaviour change. Anything present but
+ * unparseable THROWS, because a typo that silently disabled the watchdog would
+ * leave a box LOOKING guarded while running unguarded — the same failure mode
+ * the whole ticket exists to remove.
+ */
+export function parseLivenessStaleAfterS(raw: string | undefined): number {
+  const v = (raw ?? "").trim();
+  if (!v) {
+    return 0;
+  }
+  const n = Number(v);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(
+      `WORKER_LIVENESS_STALE_S must be a positive integer number of seconds, got ${JSON.stringify(v)}`,
+    );
+  }
+  // AN IDLE WORKER IS NOT A WEDGED WORKER. A short threshold turns ordinary
+  // quiet — or a slow engine heartbeat write — into a restart, and a box that
+  // restart-loops while healthy is strictly worse than the bug this guards.
+  if (n < LIVENESS_STALE_FLOOR_S) {
+    throw new Error(
+      `WORKER_LIVENESS_STALE_S=${v} is below ${LIVENESS_STALE_FLOOR_S}s; a threshold ` +
+        `that short restart-loops an idle box (an idle worker is not a wedged worker)`,
+    );
+  }
+  return n;
+}
+
+/** Parse `WORKER_LIVENESS_POLL_S` (#215); unset ⇒ LIVENESS_POLL_DEFAULT_S. */
+export function parseLivenessPollS(raw: string | undefined): number {
+  const v = (raw ?? "").trim();
+  if (!v) {
+    return LIVENESS_POLL_DEFAULT_S;
+  }
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 5) {
+    throw new Error(
+      `WORKER_LIVENESS_POLL_S must be an integer >= 5, got ${JSON.stringify(v)}`,
+    );
+  }
+  return n;
+}
+
 export function loadWorkerConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): WorkerConfig {
@@ -301,6 +370,32 @@ export function loadWorkerConfig(
   // reject it.
   const tasksMax =
     memoryMaxBytes > 0 ? parseTasksMax(env.WORKER_RUN_TASKS_MAX) : 0;
+
+  // #215. Parsed here, alongside the #204 block, so a typo is refused at boot
+  // rather than at the first tick.
+  const livenessStaleAfterS = parseLivenessStaleAfterS(
+    env.WORKER_LIVENESS_STALE_S,
+  );
+  // Only validated when the watchdog is ON — same reasoning as parseTasksMax:
+  // with the feature off the value is unused, and a stray env var must not stop
+  // an unrelated box from booting.
+  const livenessPollS =
+    livenessStaleAfterS > 0
+      ? parseLivenessPollS(env.WORKER_LIVENESS_POLL_S)
+      : 0;
+  // A POLL PERIOD AT OR ABOVE THE THRESHOLD CANNOT DETECT ANYTHING. The first
+  // tick after the wedge would already be past the deadline in the best case and
+  // could be a whole period late, so the box would look guarded and be guarded by
+  // nothing. Refuse, the same way WORKER_RUN_MEMORY_MAX without
+  // WORKER_AGENT_USER is refused.
+  if (livenessStaleAfterS > 0 && livenessPollS >= livenessStaleAfterS) {
+    throw new Error(
+      `WORKER_LIVENESS_POLL_S=${livenessPollS} must be well below ` +
+        `WORKER_LIVENESS_STALE_S=${livenessStaleAfterS}: a watchdog that ticks no more ` +
+        `often than its own threshold cannot observe staleness, and a box told to guard ` +
+        `itself must not run unguarded.`,
+    );
+  }
 
   const agentUser = env.WORKER_AGENT_USER?.trim() || "";
   if (agentUser) {
@@ -336,6 +431,8 @@ export function loadWorkerConfig(
     boxId: resolveBoxId(env.WORKER_BOX_ID),
     memoryMaxBytes,
     tasksMax,
+    livenessStaleAfterS,
+    livenessPollS,
     nodeBin: env.WORKER_NODE_BIN?.trim() || process.execPath,
     daemonDist: env.WORKER_DAEMON_DIST?.trim() || defaultDaemonDist(),
     claudeBinDir: resolveClaudeBinDir(env.CLAUDE_BIN),

@@ -3,6 +3,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   loadWorkerConfig,
+  parseLivenessPollS,
+  parseLivenessStaleAfterS,
   parseMemoryMax,
   parseTasksMax,
   resolveBoxId,
@@ -391,6 +393,97 @@ describe("#204: memory-ceiling knobs are validated at boot", () => {
     expect(parseTasksMax("512")).toBe(512);
     for (const bad of ["0", "63", "abc", "1.5"]) {
       expect(() => parseTasksMax(bad), bad).toThrow(/WORKER_RUN_TASKS_MAX/);
+    }
+  });
+});
+
+describe("#215: engine-liveness watchdog knobs are validated at boot", () => {
+  it("is OFF when unset — the default-off contract", () => {
+    expect(parseLivenessStaleAfterS(undefined)).toBe(0);
+    expect(parseLivenessStaleAfterS("")).toBe(0);
+    expect(parseLivenessStaleAfterS("   ")).toBe(0);
+
+    const cfg = loadWorkerConfig({});
+    expect(cfg.livenessStaleAfterS).toBe(0);
+    expect(cfg.livenessPollS).toBe(0);
+  });
+
+  it("turns on with the default poll period when only the threshold is set", () => {
+    const cfg = loadWorkerConfig({ WORKER_LIVENESS_STALE_S: "900" });
+    expect(cfg.livenessStaleAfterS).toBe(900);
+    expect(cfg.livenessPollS).toBe(60);
+  });
+
+  it("honours an explicit poll period", () => {
+    const cfg = loadWorkerConfig({
+      WORKER_LIVENESS_STALE_S: "900",
+      WORKER_LIVENESS_POLL_S: "30",
+    });
+    expect(cfg.livenessStaleAfterS).toBe(900);
+    expect(cfg.livenessPollS).toBe(30);
+  });
+
+  it("THROWS on a threshold it cannot parse rather than silently disabling", () => {
+    // A typo that quietly turned the watchdog off would leave the box LOOKING
+    // guarded while running unguarded — the exact failure this ticket removes.
+    for (const bad of ["abc", "0", "-1", "900.5", "900s"]) {
+      expect(() => parseLivenessStaleAfterS(bad), bad).toThrow(
+        /WORKER_LIVENESS_STALE_S/,
+      );
+    }
+  });
+
+  it("refuses a hair-trigger threshold, naming the 300s floor", () => {
+    // An idle worker is not a wedged worker; a short threshold restart-loops a
+    // healthy box, which is worse than the bug it guards against.
+    expect(() => parseLivenessStaleAfterS("60")).toThrow(/below 300s/);
+    expect(() => loadWorkerConfig({ WORKER_LIVENESS_STALE_S: "60" })).toThrow(
+      /below 300s/,
+    );
+    expect(parseLivenessStaleAfterS("300")).toBe(300);
+  });
+
+  it("refuses a poll period at or above the threshold — a hard boot failure", () => {
+    // A watchdog that ticks no more often than its own threshold cannot observe
+    // staleness: the box would look guarded and be guarded by nothing.
+    expect(() =>
+      loadWorkerConfig({
+        WORKER_LIVENESS_STALE_S: "900",
+        WORKER_LIVENESS_POLL_S: "900",
+      }),
+    ).toThrow(/WORKER_LIVENESS_POLL_S=900 must be well below/);
+    expect(() =>
+      loadWorkerConfig({
+        WORKER_LIVENESS_STALE_S: "900",
+        WORKER_LIVENESS_POLL_S: "1200",
+      }),
+    ).toThrow(/WORKER_LIVENESS_STALE_S=900/);
+  });
+
+  it("a stray WORKER_LIVENESS_POLL_S does NOT stop a box with the watchdog OFF", () => {
+    // Same doctrine as WORKER_RUN_TASKS_MAX: with the feature off the value is
+    // unused, so a leftover env var is not this feature's business to reject.
+    const off = loadWorkerConfig({ WORKER_LIVENESS_POLL_S: "not-a-number" });
+    expect(off.livenessStaleAfterS).toBe(0);
+    expect(off.livenessPollS).toBe(0);
+
+    // Watchdog ON: now it IS used, so a typo must be refused at boot.
+    expect(() =>
+      loadWorkerConfig({
+        WORKER_LIVENESS_STALE_S: "900",
+        WORKER_LIVENESS_POLL_S: "not-a-number",
+      }),
+    ).toThrow(/WORKER_LIVENESS_POLL_S/);
+  });
+
+  it("defaults the poll period and refuses one below 5s", () => {
+    expect(parseLivenessPollS(undefined)).toBe(60);
+    expect(parseLivenessPollS("")).toBe(60);
+    expect(parseLivenessPollS("15")).toBe(15);
+    for (const bad of ["4", "0", "-5", "abc", "1.5"]) {
+      expect(() => parseLivenessPollS(bad), bad).toThrow(
+        /WORKER_LIVENESS_POLL_S must be an integer >= 5/,
+      );
     }
   });
 });
