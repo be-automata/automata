@@ -142,6 +142,38 @@ export function describeTerminalCause(cause: TerminalCause): string {
   }
 }
 
+/**
+ * Which credential path this run actually took (#209 item 1). Structural
+ * mirror of the control plane's `CREDENTIAL_SOURCES`
+ * (packages/shared/src/model/credential-source.ts) — never imported across the
+ * plane boundary. The type derives from the tuple so the two cannot drift
+ * within this plane; `describeCredentialSource` is the exhaustive switch that
+ * fails compilation when the mirror drifts from www.
+ */
+export const CREDENTIAL_SOURCES = [
+  "user-credential",
+  "built-in-credits",
+  "box-key",
+] as const;
+export type CredentialSource = (typeof CREDENTIAL_SOURCES)[number];
+
+/**
+ * One LOG line per source — the worker-side wording. The user-facing copy
+ * lives only in the control plane's credential-source.ts.
+ */
+export function describeCredentialSource(source: CredentialSource): string {
+  switch (source) {
+    case "user-credential":
+      return "delivered user credential (run HOME)";
+    case "built-in-credits":
+      return "built-in credits (control-plane proxy)";
+    case "box-key":
+      return "box ANTHROPIC_API_KEY";
+    default:
+      return assertNever(source);
+  }
+}
+
 export type AgentRunOutput = {
   threadId: string;
   threadChatId: string;
