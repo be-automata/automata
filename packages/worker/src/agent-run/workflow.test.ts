@@ -64,12 +64,14 @@ process.env.HATCHET_CLIENT_TLS_STRATEGY = "none";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let workflowDef: any;
 let resolveUseCredits: typeof import("./workflow").resolveUseCredits;
+let resolveCredentialSource: typeof import("./workflow").resolveCredentialSource;
 
 beforeAll(async () => {
   const mod = await import("./workflow");
   workflowDef = (mod.agentRunWorkflow as unknown as { definition: unknown })
     .definition;
   resolveUseCredits = mod.resolveUseCredits;
+  resolveCredentialSource = mod.resolveCredentialSource;
 });
 
 afterEach(() => {
@@ -246,6 +248,81 @@ describe("resolveUseCredits — the worker's final say", () => {
       }
     },
   );
+});
+
+describe("resolveCredentialSource — the attribution (#209 item 1)", () => {
+  it("owner + delivered → user-credential", () => {
+    expect(
+      resolveCredentialSource({
+        boxTrust: "owner",
+        credentialDelivered: true,
+      }),
+    ).toBe("user-credential");
+  });
+
+  it("shared + not delivered → built-in-credits (the #209 defect's exact configuration)", () => {
+    // The connected credential read ENABLED on the admin page and was never
+    // consulted: a shared box forces the credits path. This is the line that
+    // makes that legible without a production database query.
+    expect(
+      resolveCredentialSource({
+        boxTrust: "shared",
+        credentialDelivered: false,
+      }),
+    ).toBe("built-in-credits");
+  });
+
+  it("box-key + not delivered → box-key", () => {
+    expect(
+      resolveCredentialSource({
+        boxTrust: "box-key",
+        credentialDelivered: false,
+      }),
+    ).toBe("box-key");
+  });
+
+  it("the three paths carry three PAIRWISE DISTINCT attributions", () => {
+    const sources = [
+      resolveCredentialSource({ boxTrust: "owner", credentialDelivered: true }),
+      resolveCredentialSource({
+        boxTrust: "shared",
+        credentialDelivered: false,
+      }),
+      resolveCredentialSource({
+        boxTrust: "box-key",
+        credentialDelivered: false,
+      }),
+    ];
+    expect(new Set(sources).size).toBe(3);
+  });
+
+  it("agrees with resolveUseCredits across the WHOLE input space", () => {
+    // The attribution and the credential actually used are decided from the
+    // same two inputs; if they ever disagree the thread line is a lie.
+    for (const boxTrust of ["owner", "shared", "box-key"] as const) {
+      for (const credentialDelivered of [true, false]) {
+        for (const incomingUseCredits of [true, false]) {
+          const source = resolveCredentialSource({
+            boxTrust,
+            credentialDelivered,
+          });
+          const { useCredits } = resolveUseCredits({
+            boxTrust,
+            credentialDelivered,
+            incomingUseCredits,
+          });
+          if (credentialDelivered) {
+            expect(source).toBe("user-credential");
+            expect(useCredits).toBe(false);
+          } else if (useCredits) {
+            expect(source).toBe("built-in-credits");
+          } else {
+            expect(source).toBe("box-key");
+          }
+        }
+      }
+    }
+  });
 });
 
 describe("#125 C1: makeAgentRunWorkflow variants", () => {
