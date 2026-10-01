@@ -2,12 +2,21 @@ import { readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { hatchet } from "../hatchet-client";
-import { assertAuthEnabledFromEnv } from "../agent-run/assert-auth";
+import {
+  assertAuthEnabledFromEnv,
+  loadAuthProbeConfig,
+} from "../agent-run/assert-auth";
 import {
   assertBoxLockHelperAvailable,
   boxLockPath,
 } from "../agent-run/box-lock";
 import { loadWorkerConfig } from "../agent-run/config";
+import {
+  LIVENESS_PROBE_TIMEOUT_CAP_MS,
+  probeEngineLiveness,
+  resolveProbeWorkerName,
+  startEngineLivenessWatchdog,
+} from "../agent-run/engine-liveness";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
 import { bootUidScan } from "../agent-run/uid-reaper";
@@ -231,6 +240,62 @@ async function main() {
     // free and no timeout clock is running.
     slots: 1,
   });
+
+  // #215: in-process engine-liveness watchdog. OFF unless WORKER_LIVENESS_STALE_S is
+  // set, in which case this is the only thing that turns a wedged-but-alive worker back
+  // into a running one — the unit's Restart=always cannot fire on a process that never
+  // exits. Started AFTER registration (there is no engine row before it) and BEFORE
+  // `worker.start()`, which never returns.
+  try {
+    const cfg = loadWorkerConfig();
+    if (cfg.livenessStaleAfterS <= 0) {
+      console.log(
+        "[worker-boot] engine-liveness watchdog: OFF (WORKER_LIVENESS_STALE_S unset)",
+      );
+    } else {
+      // Resolved ONCE at arm time and closed over — never re-derived per tick (§17).
+      const probeConfig = loadAuthProbeConfig();
+      const probeWorkerName = resolveProbeWorkerName(
+        `automata-worker-${boxId}`,
+        hatchet.config.namespace,
+      );
+      const pollIntervalMs = cfg.livenessPollS * 1000;
+      // §17: the abort budget must sit well below the tick period so a hung request
+      // cannot stack ticks. Half a period, capped at LIVENESS_PROBE_TIMEOUT_CAP_MS.
+      const timeoutMs = Math.min(
+        LIVENESS_PROBE_TIMEOUT_CAP_MS,
+        Math.floor(pollIntervalMs / 2),
+      );
+      startEngineLivenessWatchdog({
+        staleAfterMs: cfg.livenessStaleAfterS * 1000,
+        pollIntervalMs,
+        probeWorkerName,
+        probe: () =>
+          probeEngineLiveness({
+            apiUrl: probeConfig.apiUrl,
+            tenantId: probeConfig.tenantId,
+            token: probeConfig.realToken,
+            probeWorkerName,
+            timeoutMs,
+          }),
+        now: () => Date.now(),
+        onWedged: (message) => {
+          console.error(message);
+          process.exit(1);
+        },
+        log: (m) => console.log(`[worker-liveness] ${m}`),
+      });
+      console.log(
+        `[worker-liveness] armed: worker "${probeWorkerName}", stale after ${cfg.livenessStaleAfterS}s, poll ${cfg.livenessPollS}s`,
+      );
+    }
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: the engine-liveness watchdog is configured but cannot be armed — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
 
   // #69 §3.2.4 item 1 (PRIMARY path) + §3.1 rot repair + §3.3 stuck-QUEUED
   // detection. Runs AFTER registration so it observes the strategy rows THIS
