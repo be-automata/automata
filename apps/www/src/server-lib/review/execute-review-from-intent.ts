@@ -389,7 +389,15 @@ function mapOutcome(o: ReviewIntentOutcome): ReviewFromIntentOutcome {
  * this one.
  */
 export function isDegradedComment(review: GitHubReview): boolean {
-  return review.body.includes(DEGRADED_INTENT_MARKER);
+  // STRUCTURAL, NOT A SUBSTRING SEARCH. `postDegradedComment` is the single
+  // emission site and always builds the body as `${MARKER}\n\n_Reason: …`, so
+  // the marker is a PREFIX by construction. `includes` was wider than the thing
+  // it meant to recognise: one of our own REAL verdicts that merely QUOTES the
+  // marker — and reviews of this very code plausibly do — was read as silence,
+  // which made the sweep run its backstop on a PR that already had a verdict.
+  // Matching the prefix closes that without any author heuristic, and because
+  // it lives in the one shared helper, all three guards stay identical.
+  return review.body.startsWith(DEGRADED_INTENT_MARKER);
 }
 
 /**

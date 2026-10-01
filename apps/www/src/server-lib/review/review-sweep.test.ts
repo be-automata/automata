@@ -286,24 +286,19 @@ describe("runReviewSweep — a degraded comment is silence, not a verdict (#224)
     expect(executeReviewFromIntent).not.toHaveBeenCalled();
   });
 
-  it("ACCEPTED RESIDUAL: our own verdict that QUOTES the marker is read as silence", async () => {
-    // `isDegradedComment` is a bare body match with no author check, and it runs
-    // before the guard's login filter. Two consequences, and only one is real:
+  it("our own verdict that QUOTES the marker is still a verdict — the sweep skips", async () => {
+    // `isDegradedComment` used to be `body.includes(MARKER)`, which was wider
+    // than the thing it meant to recognise. A real verdict of ours that merely
+    // QUOTES the marker was read as silence, so the sweep stopped seeing a
+    // verdict at HEAD and ran its backstop on a PR that already had one — and
+    // that is self-referential, because reviews OF THIS REPO'S CODE plausibly
+    // quote it.
     //
-    //  - a FOREIGN review carrying the marker is discounted early — harmless,
-    //    because the login check inside `findBotReviewAtHead` would have
-    //    excluded it anyway. No behavioural difference either way.
-    //  - OUR OWN real verdict whose body happens to quote the marker is read as
-    //    silence, so the sweep stops seeing a verdict at HEAD and runs the
-    //    backstop. THAT is the sharp edge, and it is self-referential: a review
-    //    OF THIS REPO'S CODE can quote the marker verbatim.
-    //
-    // Tightening the filter to our own login would not close it (this IS our
-    // login) and would make the sweep's filter differ in shape from the two in
-    // execute-review-from-intent.ts — the drift that produced #213, #221 and
-    // #224 in the first place. Closing it properly means matching on structure
-    // rather than substring, which is its own change. Pinned here so the
-    // behaviour is a recorded decision rather than a surprise.
+    // The single emission site builds the body as `${MARKER}\n\n_Reason: …`,
+    // so the marker is a PREFIX by construction and `startsWith` recognises
+    // exactly what we emit — no author heuristic, no second shape. The fix
+    // lives in the one shared helper, so all three guards keep matching
+    // identically; there is no residual left to accept.
     prReviews.rows = [
       review({
         body: `We should rename ${DEGRADED_INTENT_MARKER} in this PR.`,
@@ -313,7 +308,7 @@ describe("runReviewSweep — a degraded comment is silence, not a verdict (#224)
 
     await runReviewSweep();
 
-    expect(executeReviewFromIntent).toHaveBeenCalledTimes(1);
+    expect(executeReviewFromIntent).not.toHaveBeenCalled();
   });
 
   it("hands the writer the candidate at HEAD — the writer, not the sweep, decides whether to post", async () => {
