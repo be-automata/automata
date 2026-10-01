@@ -1,4 +1,5 @@
 import type {
+  GitHubReview,
   ReviewGitHubClient,
   ReviewLogger,
 } from "@terragon/review/state/review-github-client";
@@ -30,6 +31,10 @@ import { parseReviewIntent, toExecutorIntent } from "./parse-review-intent";
  *    sits at the live HEAD (then skip as superseded, logged).
  *  - IDEMPOTENT: delegates to executeReviewIntent's (headSha,verdict) HEAD-guard,
  *    so a finish-hook/sweep double-fire converges to skipped_existing.
+ *  - AT MOST ONE VERDICT PER COMMIT: a redelivered run whose intent names a commit
+ *    we have already delivered a verdict for posts nothing (#213 — a worker restart
+ *    re-posted 12 stale verdicts onto PR #208 in 63 seconds). A prior DEGRADED
+ *    comment is silence, not a verdict, and does not suppress a later real one.
  */
 
 export const DEGRADED_INTENT_MARKER =
@@ -40,6 +45,7 @@ export type ReviewFromIntentOutcome =
   | { outcome: "posted_stale_comment"; intendedVerdict: string }
   | { outcome: "skipped_existing" }
   | { outcome: "skipped_superseded" }
+  | { outcome: "skipped_duplicate_at_commit"; commit: string }
   | { outcome: "skipped_stale_degrade"; reason: string; workFailed: true }
   | { outcome: "degraded_comment"; reason: string; workFailed: true }
   | { outcome: "post_failed"; failureReason: string; workFailed: true };
@@ -174,18 +180,88 @@ export async function executeReviewFromIntent(
     // posts at the LATEST commit (no commit_id), which would mis-attribute a stale
     // verdict to code the agent never saw — team-lead's blessed minimum-acceptable
     // path (a marked COMMENT "reviewed at <sha>, PR has moved" + telemetry).
-    let newerAtHead = null;
+    // #213 REPLAY GUARD. The worker's lease can end without a clean ack, and the
+    // redelivered task re-parses the SAME persisted terminal text — same intent,
+    // same `emitted.commit`. The probe below only asks whether something sits at
+    // LIVE head, which is false for a replay *and* for a late first delivery, so
+    // it cannot tell them apart; on 2026-09-29 one restart therefore re-posted
+    // twelve already-delivered verdicts onto PR #208 in 63 seconds, each at its
+    // own original sha.
+    //
+    // The signal that DOES separate them is whether a non-dismissed review by us
+    // already exists AT `emitted.commit`:
+    //   - present  → we already said this; the reader has it. Drop the replay.
+    //   - absent   → never delivered. Post it (the marked COMMENT below), because
+    //                losing a first-and-only finding is worse than this bug.
+    // A degraded "could not be parsed" COMMENT does NOT count as present — see
+    // `isDegradedComment`. Derived from GitHub's own state — the PR's reviews carry `commit_id` and an
+    // author — deliberately NOT from a new DB column (prod schema migration here
+    // is manual and the prod DATABASE_URL is a write-only Worker secret).
+    //
+    // `findBotReviewAtHead` is named for its usual caller but is parameterised by
+    // an arbitrary sha, so passing `emitted.commit` asks exactly "has the bot
+    // already reviewed THIS commit?" across all states including COMMENTED.
+    //
+    // ONE round trip serves BOTH guards: the primitive's only I/O is listReviews,
+    // so a single snapshot answers "already reviewed `emitted.commit`?" and
+    // "superseded at live HEAD?" without the two answers being able to disagree.
+    //
+    // LOOKUP FAILED → EMPTY SNAPSHOT → BOTH GUARDS OPEN → POST ANYWAY. Deliberate,
+    // and the posture this module already took at the supersession probe: a rare
+    // duplicate is recoverable by a reader, a permanently lost first-and-only
+    // finding is not. A transient listReviews failure is independent of replay, so
+    // post-anyway bounds the damage to the rare-failure window instead of
+    // re-opening the deterministic 12x storm.
+    let reviews: GitHubReview[] = [];
     try {
-      newerAtHead = await findBotReviewAtHead({
-        github,
-        repo: repoFullName,
-        prNumber,
-        headSha: currentHeadSha,
-        botLogin,
-      });
-    } catch {
-      // read failure → fall through and post (missed verdict worse than rare dup).
+      reviews = await github.listReviews(repoFullName, prNumber);
+    } catch (err) {
+      logger?.warn(
+        "review-from-intent: review lookup failed (replay + supersession guards); posting the stale COMMENT anyway",
+        {
+          repoFullName,
+          prNumber,
+          intentCommit: emitted.commit,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
     }
+    const snapshotOf = (rs: GitHubReview[]) => ({
+      listReviews: async () => rs,
+    });
+
+    const alreadyAtIntentCommit = await findBotReviewAtHead({
+      github: snapshotOf(reviews.filter((r) => !isDegradedComment(r))),
+      repo: repoFullName,
+      prNumber,
+      headSha: emitted.commit,
+      botLogin,
+    });
+    if (alreadyAtIntentCommit) {
+      logger?.info(
+        "review-from-intent: replay of an already-delivered verdict at this commit; skipping",
+        {
+          repoFullName,
+          prNumber,
+          intentCommit: emitted.commit,
+          currentHeadSha,
+          existingReviewId: alreadyAtIntentCommit.id,
+          existingReviewState: alreadyAtIntentCommit.state,
+        },
+      );
+      return {
+        outcome: "skipped_duplicate_at_commit",
+        commit: emitted.commit,
+      };
+    }
+
+    const newerAtHead = await findBotReviewAtHead({
+      github: snapshotOf(reviews),
+      repo: repoFullName,
+      prNumber,
+      headSha: currentHeadSha,
+      botLogin,
+    });
     if (newerAtHead) {
       logger?.info(
         "review-from-intent: stale intent superseded by review at HEAD",
@@ -276,6 +352,19 @@ function mapOutcome(o: ReviewIntentOutcome): ReviewFromIntentOutcome {
     failureReason: o.failureReason,
     workFailed: true,
   };
+}
+
+/**
+ * A degraded COMMENT is a run's CONFESSION that it produced no parseable verdict —
+ * it is evidence of silence at that commit, never of a delivered verdict. It must
+ * therefore not satisfy the #213 replay guard: a later run that DID produce a real
+ * finding at the same commit would otherwise be dropped by the earlier run's
+ * silence, which is exactly the lost-verdict failure #213's fix exists to avoid.
+ * It cannot re-open the 12x storm either — a degraded comment is only ever emitted
+ * by the unparseable branch above, which returns long before this guard.
+ */
+function isDegradedComment(review: GitHubReview): boolean {
+  return review.body.includes(DEGRADED_INTENT_MARKER);
 }
 
 async function postDegradedComment(args: {
