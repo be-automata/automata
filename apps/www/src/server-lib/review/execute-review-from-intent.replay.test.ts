@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { executeReviewFromIntent } from "./execute-review-from-intent";
+import {
+  DEGRADED_INTENT_MARKER,
+  executeReviewFromIntent,
+} from "./execute-review-from-intent";
 import type {
   GitHubReview,
   ReviewGitHubClient,
@@ -17,9 +20,11 @@ import type {
  * #208 in 63 seconds. The guard under test asks instead whether we already have
  * a non-dismissed review AT `emitted.commit`.
  *
- * These five scenarios pin the guard AND the two behaviours it must not eat:
- * a stale-but-first finding still reaches the PR, and a lookup failure posts
- * anyway (a lost first-and-only verdict is worse than a rare duplicate).
+ * These scenarios pin the guard AND the deliveries it must not eat: a
+ * stale-but-first finding still reaches the PR, a lookup failure posts anyway,
+ * and neither another bot's review, a dismissed review, nor an earlier run's
+ * degraded "could not be parsed" silence counts as a verdict we already gave.
+ * A lost first-and-only verdict is worse than a rare duplicate.
  */
 
 const BOT = "automata-ai-bot[bot]";
@@ -137,6 +142,22 @@ const RC_AT_OLD = fenced({
   summary: "Off-by-one in isAdult.",
   findings: [{ severity: "error", path: "a.ts", line: 3, body: "use >=" }],
 });
+
+function reviewAt(
+  commitId: string,
+  over: Partial<GitHubReview> = {},
+): GitHubReview {
+  return {
+    id: 99,
+    user: { login: BOT },
+    state: "COMMENTED",
+    submittedAt: "2026-09-29T00:00:00Z",
+    dismissedAt: null,
+    commitId,
+    body: "an earlier verdict",
+    ...over,
+  };
+}
 
 describe("#213 replay guard — a redelivered run does not re-post a delivered verdict", () => {
   it("the same (thread, commit) delivered twice posts exactly ONE review", async () => {
@@ -265,7 +286,7 @@ describe("#213 replay guard — a redelivered run does not re-post a delivered v
       expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(OLD);
       expect(
         loggedMessages(logger.warn).some((m) =>
-          m.includes("replay lookup failed"),
+          m.includes("review lookup failed"),
         ),
       ).toBe(true);
     }
@@ -291,5 +312,84 @@ describe("#213 replay guard — a redelivered run does not re-post a delivered v
     expect(github.submitReview).not.toHaveBeenCalled();
     expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
     expect(github.submitReviewWithComments.mock.calls[0]![3]).toBe("COMMENT");
+  });
+
+  it("ONE listReviews round trip serves both the replay and supersession guards", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: RC_AT_OLD,
+    });
+
+    expect(res).toMatchObject({ outcome: "posted_stale_comment" });
+    expect(github.listReviews).toHaveBeenCalledTimes(1);
+  });
+
+  it("a review at that commit by a DIFFERENT bot does not suppress our delivery", async () => {
+    const github = makeGithub([
+      reviewAt(OLD, { user: { login: "some-other-bot[bot]" } }),
+    ]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: RC_AT_OLD,
+    });
+
+    expect(res).toMatchObject({ outcome: "posted_stale_comment" });
+    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
+    expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(OLD);
+  });
+
+  it("a DISMISSED review at that commit does not suppress our delivery", async () => {
+    // Intended: the primitive filters `dismissedAt === null`, and a dismissed
+    // review is no longer in force — so the verdict is restored rather than lost.
+    const github = makeGithub([
+      reviewAt(OLD, {
+        state: "DISMISSED",
+        dismissedAt: "2026-09-29T01:00:00Z",
+      }),
+    ]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: RC_AT_OLD,
+    });
+
+    expect(res).toMatchObject({ outcome: "posted_stale_comment" });
+    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
+    expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(OLD);
+  });
+
+  it("a prior DEGRADED comment at that commit is silence, not a delivered verdict", async () => {
+    // An earlier run at OLD produced no parseable intent and stamped the marked
+    // COMMENT. A later run DID find something at OLD; dropping it as a "replay"
+    // of that silence would lose a first-and-only finding — the #213 fix's own
+    // worst outcome.
+    const github = makeGithub([
+      reviewAt(OLD, { body: `${DEGRADED_INTENT_MARKER}\n\n_Reason: x._` }),
+    ]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: RC_AT_OLD,
+    });
+
+    expect(res).toMatchObject({ outcome: "posted_stale_comment" });
+    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
+    const body = github.submitReviewWithComments.mock.calls[0]![4];
+    expect(body).toContain("Off-by-one in isAdult.");
   });
 });
