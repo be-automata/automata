@@ -35,6 +35,13 @@ import { parseReviewIntent, toExecutorIntent } from "./parse-review-intent";
  *    we have already delivered a verdict for posts nothing (#213 — a worker restart
  *    re-posted 12 stale verdicts onto PR #208 in 63 seconds). A prior DEGRADED
  *    comment is silence, not a verdict, and does not suppress a later real one.
+ *  - AT MOST ONE DEGRADED COMMENT PER COMMIT: a thread re-driven through the state
+ *    machine (a redelivered run that restarts the agent, a resume, a follow-up)
+ *    re-reads the SAME unparseable terminal text and would degrade again at the
+ *    same sha (#220). One warning per commit, whatever the reason; the message
+ *    already says the only actionable thing, so a second adds noise, not
+ *    information. The key is deliberately the COMMIT, not (commit, reason) — see
+ *    #107, which must relax it if it ever wants two reasons to coexist at one sha.
  */
 
 export const DEGRADED_INTENT_MARKER =
@@ -47,6 +54,12 @@ export type ReviewFromIntentOutcome =
   | { outcome: "skipped_superseded" }
   | { outcome: "skipped_duplicate_at_commit"; commit: string }
   | { outcome: "skipped_stale_degrade"; reason: string; workFailed: true }
+  | {
+      outcome: "skipped_duplicate_degrade_at_commit";
+      commit: string;
+      reason: string;
+      workFailed: true;
+    }
   | { outcome: "degraded_comment"; reason: string; workFailed: true }
   | { outcome: "post_failed"; failureReason: string; workFailed: true };
 
@@ -150,6 +163,7 @@ export async function executeReviewFromIntent(
       github,
       repoFullName,
       prNumber,
+      botLogin,
       currentHeadSha,
       reason: parsed.reason,
       logger,
@@ -226,10 +240,6 @@ export async function executeReviewFromIntent(
         },
       );
     }
-    const snapshotOf = (rs: GitHubReview[]) => ({
-      listReviews: async () => rs,
-    });
-
     // #221: ONE filtered list feeds BOTH guards, and that is the whole point.
     // A degraded comment is a run's confession that it produced NOTHING — it is
     // evidence of silence at a commit, never a verdict. Counting it as a prior
@@ -372,19 +382,102 @@ function mapOutcome(o: ReviewIntentOutcome): ReviewFromIntentOutcome {
  * silence, which is exactly the lost-verdict failure #213's fix exists to avoid.
  * It cannot re-open the 12x storm either — a degraded comment is only ever emitted
  * by the unparseable branch above, which returns long before this guard.
+ *
+ * NO AUTHOR CHECK: this is a bare body match, so a HUMAN quoting the marker in a
+ * review satisfies it. Every consumer must layer an author filter of its own —
+ * in practice `findBotReviewAtHead`'s `r.user?.login === botLogin`, applied AFTER
+ * this one.
  */
 function isDegradedComment(review: GitHubReview): boolean {
   return review.body.includes(DEGRADED_INTENT_MARKER);
+}
+
+/**
+ * Freeze an already-fetched review list into the `Pick<ReviewGitHubClient,
+ * "listReviews">` seam `findBotReviewAtHead` takes. Every guard in this module
+ * fetches ONCE and then re-asks the primitive over filtered views of that one
+ * snapshot, so two guards reading the same PR can never see different states.
+ */
+function snapshotOf(reviews: GitHubReview[]) {
+  return { listReviews: async () => reviews };
 }
 
 async function postDegradedComment(args: {
   github: ReviewGitHubClient;
   repoFullName: string;
   prNumber: number;
+  botLogin: string;
   currentHeadSha: string;
   reason: string;
   logger?: ReviewLogger;
 }): Promise<ReviewFromIntentOutcome> {
+  // #220 PER-SHA DEDUP. Nothing between the unparseable branch and GitHub stops
+  // a SECOND warning at the same commit: a thread re-driven through the state
+  // machine (a redelivered run that restarts the agent, a resume, a follow-up
+  // `system.message` taking complete → queued → working → working-done) makes the
+  // finish hook fire legitimately, and `extractTerminalAgentText` re-reads the
+  // PREVIOUS run's unparseable text. The sweep is already protected by its own
+  // `findBotReviewAtHead`; this path calls the writer directly.
+  //
+  // The guard needs its own listReviews: the stale branch's snapshot is sixty-odd
+  // lines below and never runs on this path. Hoisting that fetch above both
+  // branches was rejected — it would add a round trip to EVERY review post, while
+  // the degraded path is rare by construction.
+  //
+  // LOOKUP FAILED → EMPTY SNAPSHOT → GUARD OPEN → POST ANYWAY, the same posture
+  // the stale path takes: a duplicate warning is recoverable by a reader, a lost
+  // warning is not. This whole guard is therefore non-throwing, because the
+  // degraded path it fronts cannot throw at all.
+  let reviews: GitHubReview[] = [];
+  try {
+    reviews = await args.github.listReviews(args.repoFullName, args.prNumber);
+  } catch (err) {
+    args.logger?.warn(
+      "review-from-intent: review lookup failed (degraded dedup guard); posting the degraded COMMENT anyway",
+      {
+        repoFullName: args.repoFullName,
+        prNumber: args.prNumber,
+        currentHeadSha: args.currentHeadSha,
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
+  }
+  // COMPOSE IN THIS ORDER — the order is what makes it safe. `isDegradedComment`
+  // carries no author check, so on its own a human quoting the marker matches it;
+  // `findBotReviewAtHead`'s `r.user?.login === botLogin` is what makes it safe,
+  // and only layered AFTER. Passing the UNFILTERED list would silently widen the
+  // key to "any bot review at this sha" — not the decided key, and it would
+  // withhold a degraded warning sitting under an existing real verdict.
+  // Complement of the stale path's `reviews.filter((r) => !isDegradedComment(r))`
+  // — the two read as a pair; do not re-inline either filter.
+  const degraded = reviews.filter(isDegradedComment);
+  const alreadyDegradedAtCommit = await findBotReviewAtHead({
+    github: snapshotOf(degraded),
+    repo: args.repoFullName,
+    prNumber: args.prNumber,
+    headSha: args.currentHeadSha,
+    botLogin: args.botLogin,
+  });
+  if (alreadyDegradedAtCommit) {
+    args.logger?.info(
+      "review-from-intent: a degraded COMMENT already exists at this commit; skipping the duplicate",
+      {
+        repoFullName: args.repoFullName,
+        prNumber: args.prNumber,
+        currentHeadSha: args.currentHeadSha,
+        reason: args.reason,
+        existingReviewId: alreadyDegradedAtCommit.id,
+        existingReviewState: alreadyDegradedAtCommit.state,
+      },
+    );
+    return {
+      outcome: "skipped_duplicate_degrade_at_commit",
+      commit: args.currentHeadSha,
+      reason: args.reason,
+      workFailed: true,
+    };
+  }
+
   const body = `${DEGRADED_INTENT_MARKER}\n\n_Reason: ${args.reason}. The review agent produced no parseable verdict; a human should review this PR._`;
   try {
     await args.github.submitReviewWithComments(

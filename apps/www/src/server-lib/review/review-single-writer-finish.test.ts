@@ -3,8 +3,10 @@ import { env } from "@terragon/env/pkg-shared";
 import { nanoid } from "nanoid";
 import {
   extractTerminalAgentText,
+  isWorkFailedOutcome,
   maybePromoteSkillLastKnownGood,
 } from "./review-single-writer-finish";
+import type { ReviewFromIntentOutcome } from "./execute-review-from-intent";
 import { createOrganization } from "@terragon/shared/model/organizations";
 import {
   createRepoSkillVersion,
@@ -59,6 +61,37 @@ describe("extractTerminalAgentText", () => {
 
   it("returns empty string for null messages", () => {
     expect(extractTerminalAgentText(null)).toBe("");
+  });
+});
+
+describe("isWorkFailedOutcome — which outcomes page an operator", () => {
+  it("pages for every outcome that applied no review", () => {
+    for (const outcome of [
+      "degraded_comment",
+      "post_failed",
+      "skipped_stale_degrade",
+      // #220 DECISION, pinned here: a SUPPRESSED duplicate degrade still pages.
+      // The per-sha key suppresses the PR comment a human reads, not the
+      // telemetry that an additional run emitted no verdict. Flipping this to
+      // "one page per sha" would blind the only channel that can see an agent
+      // failing over and over at one commit — the count #107 needs to size its
+      // bounded auto-requeue.
+      "skipped_duplicate_degrade_at_commit",
+    ] satisfies ReviewFromIntentOutcome["outcome"][]) {
+      expect(isWorkFailedOutcome(outcome)).toBe(true);
+    }
+  });
+
+  it("stays silent for outcomes where a review IS in force", () => {
+    for (const outcome of [
+      "posted",
+      "posted_stale_comment",
+      "skipped_existing",
+      "skipped_superseded",
+      "skipped_duplicate_at_commit",
+    ] satisfies ReviewFromIntentOutcome["outcome"][]) {
+      expect(isWorkFailedOutcome(outcome)).toBe(false);
+    }
   });
 });
 
