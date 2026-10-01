@@ -301,6 +301,7 @@ function SystemMessage({ message }: { message: UISystemMessage }) {
         return "Fixing GitHub Checks...";
       case "stop":
       case "git-diff":
+      case "credential-source":
         return "";
       default:
         const _exhaustiveCheck: never = message;
@@ -322,6 +323,7 @@ function SystemMessage({ message }: { message: UISystemMessage }) {
         return "bg-muted-foreground";
       case "stop":
       case "git-diff":
+      case "credential-source":
         return "";
       default:
         const _exhaustiveCheck: never = message;
@@ -333,6 +335,13 @@ function SystemMessage({ message }: { message: UISystemMessage }) {
 
   if (message.message_type === "stop") {
     return <div className="p-2">Execution interrupted by user.</div>;
+  }
+  if (message.message_type === "credential-source") {
+    return (
+      <div className="p-2 text-muted-foreground text-sm">
+        Credential: {message.parts[0]?.text}
+      </div>
+    );
   }
   if (message.message_type === "git-diff") {
     return (

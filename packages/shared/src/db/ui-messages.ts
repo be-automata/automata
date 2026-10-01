@@ -42,6 +42,16 @@ export type UISystemMessage =
       role: "system";
       message_type: "git-diff";
       parts: UIGitDiffPart[];
+    }
+  /**
+   * Which credential path the run took (#209 item 1). Exactly one text part,
+   * holding the label already resolved by describeCredentialSource — the UI
+   * never re-derives the copy and never carries the raw enum.
+   */
+  | {
+      role: "system";
+      message_type: "credential-source";
+      parts: UITextPart[];
     };
 
 /////////////////

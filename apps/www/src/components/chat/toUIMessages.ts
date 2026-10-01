@@ -8,6 +8,10 @@ import type {
   UIGitDiffPart,
   ThreadStatus,
 } from "@terragon/shared";
+import {
+  describeCredentialSource,
+  isCredentialSource,
+} from "@terragon/shared/model/credential-source";
 
 /**
  * Converts a collection of DBMessages to UIMessages.
@@ -203,6 +207,20 @@ export function toUIMessages({
         message_type: "stop",
         parts: [{ type: "stop" }],
       });
+    } else if (dbMessage.type === "credential-source") {
+      clearCurrentAgentMessage();
+      clearCurrentUserMessage();
+      // A value this build does not know (a future or corrupted writer) renders
+      // nothing at all — never a guessed label.
+      if (isCredentialSource(dbMessage.source)) {
+        uiMessages.push({
+          role: "system",
+          message_type: "credential-source",
+          parts: [
+            { type: "text", text: describeCredentialSource(dbMessage.source) },
+          ],
+        });
+      }
     } else if (dbMessage.type === "error") {
       // Mark any pending tools as completed when agent encounters an error
       markPendingToolsAsCompleted();

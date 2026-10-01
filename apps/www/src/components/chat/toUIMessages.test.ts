@@ -2031,4 +2031,86 @@ describe("toUIMessages", () => {
       },
     ]);
   });
+  test("renders one system line per credential source", () => {
+    const cases = [
+      ["user-credential", "your connected Claude Code credential"],
+      ["built-in-credits", "built-in credits"],
+      ["box-key", "this box's own API key"],
+    ] as const;
+
+    for (const [source, label] of cases) {
+      const dbMessages: DBMessage[] = [
+        {
+          type: "credential-source",
+          source,
+          timestamp: "2026-09-30T00:00:00Z",
+        },
+      ];
+      expect(toUIMessages({ dbMessages, agent: "claudeCode" })).toEqual([
+        {
+          role: "system",
+          message_type: "credential-source",
+          parts: [{ type: "text", text: label }],
+        },
+      ]);
+    }
+  });
+
+  test("produces no credential-source message when none was recorded", () => {
+    const dbMessages: DBMessage[] = [
+      {
+        type: "user",
+        model: null,
+        parts: [{ type: "text", text: "hi" }],
+      },
+    ];
+
+    const result = toUIMessages({ dbMessages, agent: "claudeCode" });
+    expect(
+      result.filter(
+        (m) => m.role === "system" && m.message_type === "credential-source",
+      ),
+    ).toEqual([]);
+  });
+
+  test("renders nothing for an unknown credential source value", () => {
+    const dbMessages = [
+      { type: "credential-source", source: "from-the-future" },
+    ] as unknown as DBMessage[];
+
+    expect(toUIMessages({ dbMessages, agent: "claudeCode" })).toEqual([]);
+  });
+
+  test("credential-source closes the current agent and user messages", () => {
+    const dbMessages: DBMessage[] = [
+      {
+        type: "user",
+        model: null,
+        parts: [{ type: "text", text: "go" }],
+      },
+      {
+        type: "credential-source",
+        source: "built-in-credits",
+      },
+      {
+        type: "agent",
+        parts: [{ type: "text", text: "working" }],
+        parent_tool_use_id: null,
+      },
+    ];
+
+    expect(toUIMessages({ dbMessages, agent: "claudeCode" })).toEqual([
+      { role: "user", parts: [{ type: "text", text: "go" }], model: null },
+      {
+        role: "system",
+        message_type: "credential-source",
+        parts: [{ type: "text", text: "built-in credits" }],
+      },
+      {
+        role: "agent",
+        agent: "claudeCode",
+        parts: [{ type: "text", text: "working" }],
+      },
+    ]);
+  });
 });
