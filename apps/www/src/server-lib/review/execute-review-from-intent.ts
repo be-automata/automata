@@ -230,8 +230,18 @@ export async function executeReviewFromIntent(
       listReviews: async () => rs,
     });
 
+    // #221: ONE filtered list feeds BOTH guards, and that is the whole point.
+    // A degraded comment is a run's confession that it produced NOTHING — it is
+    // evidence of silence at a commit, never a verdict. Counting it as a prior
+    // DELIVERY ate a real first-and-only finding (found in #213's refinement and
+    // fixed at the replay guard); counting it as a NEWER verdict here drops a real
+    // verdict that merely arrived late. Same defect, two guards, and only one was
+    // fixed. They share a single `const` now so they cannot drift apart again —
+    // do not re-inline either filter.
+    const verdicts = reviews.filter((r) => !isDegradedComment(r));
+
     const alreadyAtIntentCommit = await findBotReviewAtHead({
-      github: snapshotOf(reviews.filter((r) => !isDegradedComment(r))),
+      github: snapshotOf(verdicts),
       repo: repoFullName,
       prNumber,
       headSha: emitted.commit,
@@ -256,7 +266,7 @@ export async function executeReviewFromIntent(
     }
 
     const newerAtHead = await findBotReviewAtHead({
-      github: snapshotOf(reviews),
+      github: snapshotOf(verdicts),
       repo: repoFullName,
       prNumber,
       headSha: currentHeadSha,
