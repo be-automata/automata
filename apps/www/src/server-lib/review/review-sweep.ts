@@ -142,6 +142,20 @@ export async function runReviewSweep(): Promise<void> {
       // the writer for a thread whose sole review at HEAD is a degraded comment,
       // and before #220 a still-unparseable thread would have re-posted that
       // comment on EVERY hourly sweep. #220's per-sha dedup absorbs it.
+      // AUTHOR-BLIND BY DESIGN, and the consequences are recorded rather than
+      // accidental. `isDegradedComment` is a bare body match with no author
+      // check, and it runs BEFORE the guard's login filter:
+      //   - a FOREIGN review carrying the marker is discounted early, which is
+      //     harmless: `findBotReviewAtHead`'s login check would have excluded it
+      //     anyway, so the outcome is identical either way;
+      //   - OUR OWN verdict whose body QUOTES the marker is read as silence, so
+      //     the backstop runs on a PR that already has a verdict. That one is
+      //     real, and self-referential — a review of this repo's code can quote
+      //     the marker. Tightening to our own login does not close it (it IS our
+      //     login) and would make this filter differ in shape from the two in
+      //     execute-review-from-intent.ts, which is the drift that produced
+      //     #213, #221 and this issue. Closing it properly means matching on
+      //     structure, not substring. Pinned by a test as an accepted residual.
       const reviews = await github.listReviews(c.repoFullName, c.prNumber);
       const existing = await findBotReviewAtHead({
         github: snapshotOf(reviews.filter((r) => !isDegradedComment(r))),

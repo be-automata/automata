@@ -286,27 +286,44 @@ describe("runReviewSweep — a degraded comment is silence, not a verdict (#224)
     expect(executeReviewFromIntent).not.toHaveBeenCalled();
   });
 
-  it("a degraded comment by SOMEONE ELSE's bot still skips — we only discount OUR silence", async () => {
-    // `isDegradedComment` is a bare body match with no author check. Filtering
-    // it out of the list before the author filter runs means a third party's
-    // review carrying that text would stop counting as a verdict. It must not:
-    // the login check inside the guard is what decides, and a foreign review
-    // was never ours to discount.
-    prReviews.rows = [review({ user: { login: "other-bot[bot]" } })];
+  it("ACCEPTED RESIDUAL: our own verdict that QUOTES the marker is read as silence", async () => {
+    // `isDegradedComment` is a bare body match with no author check, and it runs
+    // before the guard's login filter. Two consequences, and only one is real:
+    //
+    //  - a FOREIGN review carrying the marker is discounted early — harmless,
+    //    because the login check inside `findBotReviewAtHead` would have
+    //    excluded it anyway. No behavioural difference either way.
+    //  - OUR OWN real verdict whose body happens to quote the marker is read as
+    //    silence, so the sweep stops seeing a verdict at HEAD and runs the
+    //    backstop. THAT is the sharp edge, and it is self-referential: a review
+    //    OF THIS REPO'S CODE can quote the marker verbatim.
+    //
+    // Tightening the filter to our own login would not close it (this IS our
+    // login) and would make the sweep's filter differ in shape from the two in
+    // execute-review-from-intent.ts — the drift that produced #213, #221 and
+    // #224 in the first place. Closing it properly means matching on structure
+    // rather than substring, which is its own change. Pinned here so the
+    // behaviour is a recorded decision rather than a surprise.
+    prReviews.rows = [
+      review({
+        body: `We should rename ${DEGRADED_INTENT_MARKER} in this PR.`,
+      }),
+    ];
     selected.rows = [candidate({ terminalCause: "timeout" })];
 
     await runReviewSweep();
 
-    // No review by OUR bot at HEAD → nothing to skip for → the backstop runs.
     expect(executeReviewFromIntent).toHaveBeenCalledTimes(1);
   });
 
-  it("an unparseable candidate posts nothing — #220 absorbs the hourly storm", async () => {
-    // This is the risk the fix creates and #220 closes. Filtering means the
-    // sweep RUNS the writer for a thread whose only review at HEAD is a
-    // degraded comment; without #220's per-sha dedup that thread would re-post
-    // the comment every hour. The executor is stubbed here, so what this pins
-    // is the contract: the sweep hands it the work and the writer decides.
+  it("hands the writer the candidate at HEAD — the writer, not the sweep, decides whether to post", async () => {
+    // The risk this fix creates and #220 closes: filtering means the sweep RUNS
+    // the writer for a thread whose only review at HEAD is a degraded comment,
+    // and before #220's per-sha dedup a still-unparseable thread would have
+    // re-posted that comment every hour. The executor is stubbed here, so this
+    // cannot assert "nothing is posted" — #220's own tests own that. What it
+    // pins is the division of labour: the sweep delivers the work at the right
+    // head and does not decide the outcome itself.
     prReviews.rows = [
       review({ body: `${DEGRADED_INTENT_MARKER}\n\n_Reason: x._` }),
     ];
