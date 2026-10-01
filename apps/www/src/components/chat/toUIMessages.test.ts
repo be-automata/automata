@@ -2033,7 +2033,7 @@ describe("toUIMessages", () => {
   });
   test("renders one system line per credential source", () => {
     const cases = [
-      ["user-credential", "your connected Claude Code credential"],
+      ["user-credential", "your connected credential"],
       ["built-in-credits", "built-in credits"],
       ["box-key", "this box's own API key"],
     ] as const;

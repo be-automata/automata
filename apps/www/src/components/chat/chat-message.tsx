@@ -337,9 +337,14 @@ function SystemMessage({ message }: { message: UISystemMessage }) {
     return <div className="p-2">Execution interrupted by user.</div>;
   }
   if (message.message_type === "credential-source") {
+    // No label ⇒ render NOTHING. toUIMessages already drops a source this
+    // build does not know; this is the same rule one layer down, so a bare
+    // "Credential:" can never appear.
+    const label = message.parts[0]?.text;
+    if (!label) return null;
     return (
       <div className="p-2 text-muted-foreground text-sm">
-        Credential: {message.parts[0]?.text}
+        Credential: {label}
       </div>
     );
   }

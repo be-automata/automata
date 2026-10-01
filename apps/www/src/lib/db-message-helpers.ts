@@ -102,7 +102,13 @@ export function getUserMessageToSend({
         message.type === "stop" ||
         message.type === "error" ||
         message.type === "meta" ||
-        message.type === "git-diff"
+        message.type === "git-diff" ||
+        // #209 item 1: the credential attribution is an operator artifact
+        // appended AFTER the prompt was built, so it sits between the user's
+        // message and any agent output. It is not a response — breaking here
+        // would make a retried run see "nothing to run" and silently drop the
+        // user's prompt.
+        message.type === "credential-source"
       ) {
         continue;
       }

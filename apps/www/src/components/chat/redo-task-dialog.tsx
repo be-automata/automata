@@ -102,7 +102,9 @@ export function RedoTaskDialog({
       if (
         message.type === "stop" ||
         message.type === "error" ||
-        message.type === "meta"
+        message.type === "meta" ||
+        // #209 item 1: not agent output — it must not end the prefill scan.
+        message.type === "credential-source"
       ) {
         continue;
       }

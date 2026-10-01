@@ -28,7 +28,10 @@ export function isCredentialSource(value: string): value is CredentialSource {
 export function describeCredentialSource(source: CredentialSource): string {
   switch (source) {
     case "user-credential":
-      return "your connected Claude Code credential";
+      // Agent-neutral on purpose: a delivered credential may be a Claude Code
+      // auth file OR an env-var key (Gemini, Amp), so naming one agent here
+      // would be wrong for the others.
+      return "your connected credential";
     case "built-in-credits":
       return "built-in credits";
     case "box-key":
