@@ -393,3 +393,65 @@ describe("#213 replay guard — a redelivered run does not re-post a delivered v
     expect(body).toContain("Off-by-one in isAdult.");
   });
 });
+
+/**
+ * #221 — the SAME defect at the OTHER guard.
+ *
+ * #213's refinement taught the replay guard that a degraded comment is silence,
+ * not a delivery. The supersession probe, twenty-five lines further down, kept
+ * reading the unfiltered list, so a degraded comment at live HEAD still counted
+ * as a NEWER verdict and dropped a real one that merely arrived late. Both
+ * guards now read one filtered `const`.
+ */
+describe("#221 supersession guard — silence at HEAD does not supersede a verdict", () => {
+  it("a DEGRADED comment at live HEAD does NOT supersede a real stale verdict", async () => {
+    // The exact fixture: a real verdict computed at OLD, live HEAD is HEAD, a
+    // degraded comment sits at HEAD left by a later run that produced nothing,
+    // and there is no real review by us at HEAD. Without the fix the probe
+    // matches that comment and returns skipped_superseded, losing the finding.
+    const github = makeGithub([
+      reviewAt(HEAD, {
+        id: 7,
+        body: `${DEGRADED_INTENT_MARKER}\n\n_Reason: no JSON intent block found._`,
+      }),
+    ]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: RC_AT_OLD,
+    });
+
+    expect(res).toMatchObject({ outcome: "posted_stale_comment" });
+    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
+    // Posted at the commit it was computed for, with the finding intact.
+    expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(OLD);
+    expect(github.submitReviewWithComments.mock.calls[0]![4]).toContain(
+      "Off-by-one in isAdult.",
+    );
+  });
+
+  it("a REAL review at live HEAD still supersedes the stale verdict", async () => {
+    // The other direction, so the fix cannot be mistaken for "never supersede".
+    // A genuine verdict at HEAD is newer and must still win.
+    const logger = makeLogger();
+    const github = makeGithub([reviewAt(HEAD, { id: 8, state: "APPROVED" })]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: RC_AT_OLD,
+      logger,
+    });
+
+    expect(res).toMatchObject({ outcome: "skipped_superseded" });
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+    expect(loggedMessages(logger.info).join(" ")).toContain(
+      "superseded by review at HEAD",
+    );
+  });
+});
