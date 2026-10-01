@@ -2,12 +2,21 @@ import { readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { hatchet } from "../hatchet-client";
-import { assertAuthEnabledFromEnv } from "../agent-run/assert-auth";
+import {
+  assertAuthEnabledFromEnv,
+  loadAuthProbeConfig,
+} from "../agent-run/assert-auth";
 import {
   assertBoxLockHelperAvailable,
   boxLockPath,
 } from "../agent-run/box-lock";
 import { loadWorkerConfig } from "../agent-run/config";
+import {
+  LIVENESS_PROBE_TIMEOUT_CAP_MS,
+  probeEngineLiveness,
+  resolveProbeWorkerName,
+  startEngineLivenessWatchdog,
+} from "../agent-run/engine-liveness";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
 import { bootUidScan } from "../agent-run/uid-reaper";
@@ -221,7 +230,11 @@ async function main() {
     );
     process.exit(1);
   }
-  const worker = await hatchet.worker(`automata-worker-${boxId}`, {
+  // ONE source for the name the engine knows this worker by: the #215 watchdog
+  // probes for a row with exactly this name (namespaced), so a second literal
+  // here could drift from it and leave the box silently unguarded.
+  const workerName = `automata-worker-${boxId}`;
+  const worker = await hatchet.worker(workerName, {
     workflows,
     // #125 C4 / #183: ONE slot per worker process and ONE unit per box:
     // `slots: 1` is the engine-native cross-workflow cap (the engine's global
@@ -231,6 +244,64 @@ async function main() {
     // free and no timeout clock is running.
     slots: 1,
   });
+
+  // #215: in-process engine-liveness watchdog. OFF unless WORKER_LIVENESS_STALE_S is
+  // set, in which case this is the only thing that turns a wedged-but-alive worker back
+  // into a running one — the unit's Restart=always cannot fire on a process that never
+  // exits. Armed here because `worker.start()` below never returns; note that the
+  // engine Worker row does not exist yet either — `hatchet.worker()` only registers
+  // workflows, and the row is minted by the gRPC Register inside `start()`. The
+  // watchdog's own boot grace covers that window (see startEngineLivenessWatchdog).
+  try {
+    const cfg = loadWorkerConfig();
+    if (cfg.livenessStaleAfterS <= 0) {
+      console.log(
+        "[worker-boot] engine-liveness watchdog: OFF (WORKER_LIVENESS_STALE_S unset)",
+      );
+    } else {
+      // Resolved ONCE at arm time and closed over — never re-derived per tick (§17).
+      const probeConfig = loadAuthProbeConfig();
+      const probeWorkerName = resolveProbeWorkerName(
+        workerName,
+        hatchet.config.namespace,
+      );
+      const pollIntervalMs = cfg.livenessPollS * 1000;
+      // §17: the abort budget must sit well below the tick period so a hung request
+      // cannot stack ticks. Half a period, capped at LIVENESS_PROBE_TIMEOUT_CAP_MS.
+      const timeoutMs = Math.min(
+        LIVENESS_PROBE_TIMEOUT_CAP_MS,
+        Math.floor(pollIntervalMs / 2),
+      );
+      startEngineLivenessWatchdog({
+        staleAfterMs: cfg.livenessStaleAfterS * 1000,
+        pollIntervalMs,
+        probeWorkerName,
+        probe: () =>
+          probeEngineLiveness({
+            apiUrl: probeConfig.apiUrl,
+            tenantId: probeConfig.tenantId,
+            token: probeConfig.realToken,
+            probeWorkerName,
+            timeoutMs,
+          }),
+        now: () => Date.now(),
+        onWedged: (message) => {
+          console.error(message);
+          process.exit(1);
+        },
+        log: (m) => console.log(`[worker-liveness] ${m}`),
+      });
+      console.log(
+        `[worker-liveness] armed: worker "${probeWorkerName}", stale after ${cfg.livenessStaleAfterS}s, poll ${cfg.livenessPollS}s`,
+      );
+    }
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: the engine-liveness watchdog is configured but cannot be armed — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
 
   // #69 §3.2.4 item 1 (PRIMARY path) + §3.1 rot repair + §3.3 stuck-QUEUED
   // detection. Runs AFTER registration so it observes the strategy rows THIS

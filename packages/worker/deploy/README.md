@@ -70,6 +70,45 @@ are in `AGENT-UID-PROVISIONING.md`. Two things that will otherwise bite:
   by any other.
 - `WORKER_NODE_BIN` must be node **≥22.21.0 (22.x) or ≥24.0.0**. The worker
   probes it at boot and refuses to start below that floor.
+- `WORKER_RUN_MEMORY_MAX` (#204) is the per-run memory ceiling and **requires**
+  `WORKER_AGENT_USER` plus the `automata-worker.service.d/10-ceiling.conf`
+  drop-in; set without either, the worker refuses to boot.
+
+## Engine-liveness watchdog (#215)
+
+`WORKER_LIVENESS_STALE_S` is the number of seconds of engine-observed heartbeat
+staleness after which the worker exits non-zero. It exists because the worker can
+wedge _alive_: the SDK's gRPC connection to the engine breaks, it never reconnects
+and never throws, and the process stays up — so the only honest signal is this
+worker's own `Worker.lastHeartbeatAt` read back from the engine over REST.
+It is OFF by default — unset means byte-for-byte the behaviour above, no timer
+and no probe. Suggested starting value `900`.
+
+`WORKER_LIVENESS_POLL_S` is the tick period, default `60`; it is only read when
+the watchdog is on. Two things that will otherwise bite:
+
+- `WORKER_LIVENESS_POLL_S` at or above `WORKER_LIVENESS_STALE_S` is a hard boot
+  failure. A watchdog that ticks no more often than its own threshold cannot
+  observe staleness, so the box would look guarded and be guarded by nothing.
+- `WORKER_LIVENESS_STALE_S` below `300` is refused. An idle worker is not a
+  wedged worker, and a hair-trigger restart-loops a healthy box.
+
+Recovery is the unit's existing `Restart=always` / `RestartSec=15` — **nothing
+needs adding on the systemd side**. An unreadable probe (network error, non-2xx,
+an unexpected body, no row for this worker) is never a restart: it reads as
+UNKNOWN for as long as it lasts, however long that is.
+
+A worker is **unguarded for its first `WORKER_LIVENESS_STALE_S` of life** (15
+minutes at the suggested `900`), and that is deliberate. The engine's `Worker`
+row is minted inside `worker.start()`, not when the worker registers its
+workflows, so for the first moments of every boot the only row under this
+worker's name is the DEAD PREDECESSOR's — whose heartbeat, after exactly the
+wedge this watchdog exists to catch, is staler than the threshold by
+construction. Without the grace the new process would read its predecessor's
+corpse, declare itself wedged and exit, and `Restart=always` would relaunch it
+into the same verdict every `RestartSec` until the engine expired the row. The
+grace is bounded by one threshold window: a process older than that which is
+still reading a stale heartbeat does exit.
 
 ## Install
 
