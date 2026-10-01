@@ -152,6 +152,7 @@ vi.mock("./www-client", () => ({
   postRunTerminal: (...args: unknown[]) => postRunTerminal(...args),
   checkRunStaleness: (...args: unknown[]) => checkRunStaleness(...args),
   postEgressEvents: (...args: unknown[]) => postEgressEvents(...args),
+  postRunCredentialSource: vi.fn(),
 }));
 
 const assertEgressProxyReachable = vi.fn(async (..._args: unknown[]) => {});

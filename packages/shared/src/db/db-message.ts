@@ -1,4 +1,5 @@
 import type { AIModel } from "@terragon/agent/types";
+import type { CredentialSource } from "../model/credential-source";
 import type { GitDiffStats } from "./types";
 
 export type DBMessage =
@@ -12,7 +13,8 @@ export type DBMessage =
   | DBErrorMessage
   | DBMetaMessage
   | DBThreadContextMessage
-  | DBThreadContextResultMessage;
+  | DBThreadContextResultMessage
+  | DBCredentialSourceMessage;
 
 export type DBUserMessage = {
   type: "user";
@@ -58,6 +60,18 @@ export type DBThreadContextMessage = {
 export type DBThreadContextResultMessage = {
   type: "thread-context-result";
   summary: string;
+};
+
+/**
+ * Which credential path an agent run actually took (#209 item 1), appended by
+ * POST /api/daemon/run-credential-source. The payload is the closed enum and
+ * nothing else — there is no free-text field, so no credential material can
+ * reach the message stream by construction.
+ */
+export type DBCredentialSourceMessage = {
+  type: "credential-source";
+  source: CredentialSource;
+  timestamp?: string;
 };
 
 export type DBRichTextPart = {

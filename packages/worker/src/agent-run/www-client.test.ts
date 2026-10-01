@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   pollThreadStatus,
   postEgressEvents,
+  postRunCredentialSource,
   pollUntilTerminal,
   postRunFailed,
   postRunTerminal,
@@ -198,6 +199,88 @@ describe("postEgressEvents (#66 audit sink, worker half)", () => {
       postEgressEvents(opts, [
         { destinationHost: "a.example.com", action: "deny", source: "worker" },
       ]),
+    ).resolves.toBeUndefined();
+    expect(errSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("postRunCredentialSource (#209 item 1, worker half)", () => {
+  // Patterns that must NEVER appear in an attribution payload. The function
+  // takes a closed union, so this is asserted rather than assumed.
+  const SECRET_SHAPED =
+    /sk-ant|sk-|ghp_|ghs_|Bearer |-----BEGIN|"contents"|"value"/;
+
+  it("POSTs exactly {threadId, threadChatId, source} to the attribution route", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { recorded: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await postRunCredentialSource(opts, { source: "user-credential" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(
+      "https://www.example.com/api/daemon/run-credential-source",
+    );
+    expect(init.method).toBe("POST");
+    expect(init.headers["x-daemon-token"]).toBe("daemon-token-abc");
+    expect(JSON.parse(init.body)).toEqual({
+      threadId: "thread-1",
+      threadChatId: "chat-1",
+      source: "user-credential",
+    });
+  });
+
+  it("carries the trace + generation headers when the opts have them", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { recorded: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await postRunCredentialSource(
+      { ...opts, traceparent: "00-abc-def-01", runExternalId: "run-ext-9" },
+      { source: "box-key" },
+    );
+
+    const init = fetchMock.mock.calls[0]![1];
+    expect(init.headers.traceparent).toBe("00-abc-def-01");
+    expect(init.headers["x-run-external-id"]).toBe("run-ext-9");
+  });
+
+  it.each(["user-credential", "built-in-credits", "box-key"] as const)(
+    "the serialized body for %s matches no secret-shaped pattern",
+    async (source) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(jsonResponse(200, { recorded: true }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await postRunCredentialSource(opts, { source });
+
+      const body = fetchMock.mock.calls[0]![1].body as string;
+      expect(JSON.parse(body)).toEqual({
+        threadId: "thread-1",
+        threadChatId: "chat-1",
+        source,
+      });
+      expect(SECRET_SHAPED.test(body)).toBe(false);
+    },
+  );
+
+  it("NEVER throws: a non-2xx and a network error are both logged and swallowed", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(500, { error: "x" })),
+    );
+    await expect(
+      postRunCredentialSource(opts, { source: "built-in-credits" }),
+    ).resolves.toBeUndefined();
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNRESET")));
+    await expect(
+      postRunCredentialSource(opts, { source: "built-in-credits" }),
     ).resolves.toBeUndefined();
     expect(errSpy).toHaveBeenCalledTimes(2);
   });

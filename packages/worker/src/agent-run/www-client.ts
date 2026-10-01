@@ -1,6 +1,10 @@
 import type { DaemonEventAPIBody } from "@terragon/daemon/shared";
 import { redactSecrets } from "./redact";
-import type { PulledDaemonMessage, TerminalCause } from "./types";
+import type {
+  CredentialSource,
+  PulledDaemonMessage,
+  TerminalCause,
+} from "./types";
 
 /**
  * The worker's HTTP client for the control plane's daemon endpoints (ADR-003).
@@ -415,6 +419,57 @@ export async function postEgressEvents(
       threadId: opts.threadId,
       status: res.status,
     });
+  }
+}
+
+/**
+ * POST this run's credential ATTRIBUTION (#209 item 1) — a closed three-value
+ * enum and nothing else. NEVER a credential, a token, or any fragment of one:
+ * the parameter type IS the union, so there is no shape in which a secret could
+ * be passed in. Nothing is redacted here because there is nothing to redact,
+ * and adding redaction would imply there might be.
+ *
+ * NEVER throws — attribution is reporting, and reporting must not fail a run
+ * (the postRunFailed / postEgressEvents contract). A request error and a
+ * non-2xx are both logged and swallowed; the thread simply carries no
+ * credential line, which renders as nothing rather than as a guess.
+ */
+export async function postRunCredentialSource(
+  opts: WwwClientOpts,
+  { source }: { source: CredentialSource },
+): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(
+      endpoint(opts.baseUrl, "/api/daemon/run-credential-source"),
+      {
+        method: "POST",
+        headers: headers(opts),
+        body: JSON.stringify({
+          threadId: opts.threadId,
+          threadChatId: opts.threadChatId,
+          source,
+        }),
+      },
+    );
+  } catch (error) {
+    console.error(
+      "[agent-run] postRunCredentialSource request failed (swallowed)",
+      {
+        threadId: opts.threadId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
+    return;
+  }
+  if (!res.ok) {
+    console.error(
+      "[agent-run] postRunCredentialSource non-2xx (no credential line on the thread)",
+      {
+        threadId: opts.threadId,
+        status: res.status,
+      },
+    );
   }
 }
 

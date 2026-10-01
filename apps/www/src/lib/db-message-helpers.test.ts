@@ -260,6 +260,21 @@ describe("getUserMessageToSend", () => {
     result,
   });
 
+  it("a credential-source line does not end the un-answered window (#209 item 1)", () => {
+    // The worker appends the attribution AFTER next-message built the prompt,
+    // so a retried run re-reads [user, credential-source]. Breaking there
+    // returned null and the retry silently ran nothing.
+    const userMessage = createUserMessage("do the thing");
+    const result = getUserMessageToSend({
+      messages: [
+        userMessage,
+        { type: "credential-source", source: "built-in-credits" },
+      ],
+      currentMessage: null,
+    });
+    expect(result?.parts).toEqual(userMessage.parts);
+  });
+
   it("should return current message when messages is null", () => {
     const currentMessage = createUserMessage("Hello");
     const result = getUserMessageToSend({

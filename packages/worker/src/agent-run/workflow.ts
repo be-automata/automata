@@ -19,6 +19,7 @@ import {
 import {
   pollUntilTerminal,
   postEgressEvents,
+  postRunCredentialSource,
   postRunFailed,
   postRunTerminal,
   checkRunStaleness,
@@ -45,7 +46,12 @@ import {
   materialiseAgentCredentials,
   type MaterialisedCredentials,
 } from "./agent-credentials";
-import type { AgentRunInput, AgentRunOutput } from "./types";
+import {
+  describeCredentialSource,
+  type AgentRunInput,
+  type AgentRunOutput,
+  type CredentialSource,
+} from "./types";
 
 export type { AgentRunInput, AgentRunOutput } from "./types";
 
@@ -144,6 +150,34 @@ export function resolveUseCredits({
         useCredits: true,
         log: "no delivered credential → forcing credits (proxy)",
       };
+}
+
+/**
+ * The ONE place the execution plane names which credential a run actually took
+ * (#209 item 1). Called exactly once, at the branch that already decides it,
+ * and never re-derived at read time: a value recomputed from WORKER_BOX_TRUST
+ * somewhere downstream would be a second source of truth and would go stale
+ * the way the admin credentials page did.
+ *
+ * It is the attribution twin of `resolveUseCredits` above and must agree with
+ * it across the whole input space: delivered ⇒ "user-credential";
+ * not delivered + box-key ⇒ "box-key"; otherwise ⇒ "built-in-credits" (the
+ * arm `resolveUseCredits` serves by forcing the credits proxy).
+ */
+export function resolveCredentialSource({
+  boxTrust,
+  credentialDelivered,
+}: {
+  boxTrust: "owner" | "shared" | "box-key";
+  credentialDelivered: boolean;
+}): CredentialSource {
+  if (credentialDelivered) {
+    return "user-credential";
+  }
+  if (boxTrust === "box-key") {
+    return "box-key";
+  }
+  return "built-in-credits";
 }
 
 /**
@@ -539,19 +573,21 @@ async function runAgentInner(
     await cleanupWorkdir(workdir);
     throw err;
   }
+  // #209 item 1: capture WHICH credential path this run took, once, here —
+  // the branch that already decides it. The log line below is DERIVED from the
+  // captured value, so the operator's log and the attribution persisted on the
+  // thread cannot disagree.
+  const credentialSource = resolveCredentialSource({
+    boxTrust: config.boxTrust,
+    credentialDelivered: materialised.delivered,
+  });
   // H2: log the MODE, never the credential.
   // Name the credential the run will ACTUALLY use. The earlier version said
   // "→ credits" for every undelivered run, which is a lie under box-key and
   // would have sent the next person debugging this down the wrong path — the
   // same way it took two rollbacks to find the last one.
   step(
-    `agent credential: ${
-      materialised.delivered
-        ? "delivered (run HOME)"
-        : config.boxTrust === "box-key"
-          ? "none → box ANTHROPIC_API_KEY (box trust: box-key)"
-          : `none → credits proxy (box trust: ${config.boxTrust})`
-    }`,
+    `agent credential: ${describeCredentialSource(credentialSource)} (box trust: ${config.boxTrust})`,
   );
 
   // #66 slice 2: per-run egress enforcement, iff the control plane resolved a
@@ -713,6 +749,12 @@ async function runAgentInner(
       step(resolved.log);
     }
     message.useCredits = resolved.useCredits;
+    // #209 item 1: report the attribution decided at the branch above. Posted
+    // HERE and not at the branch so a 204 "nothing to run" never puts a
+    // credential line on a thread that never ran an agent. The VALUE is still
+    // frozen at the branch; only the transport happens here. Never throws —
+    // reporting must not fail a run.
+    await postRunCredentialSource(wwwOpts, { source: credentialSource });
     const bytes = await daemon.sendMessage(message);
     step(`socket write ok: ${bytes} bytes → daemon ACKed`);
 
