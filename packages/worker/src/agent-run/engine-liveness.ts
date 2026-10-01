@@ -76,6 +76,12 @@ export interface EngineLivenessWatchdogOptions {
 export interface EngineLivenessWatchdogHandle {
   /** One evaluation. Exported for tests: no real timers anywhere in the suite. */
   tick: () => Promise<LivenessVerdict>;
+  /**
+   * The immediate best-effort tick the driver fires at arm time. Production ignores it;
+   * a test awaits it so its assertions are not racing a floating promise that reads the
+   * injected clock at whatever value the test has since moved it to.
+   */
+  firstTick: Promise<LivenessVerdict>;
   stop: () => void;
 }
 
@@ -227,11 +233,39 @@ export function startEngineLivenessWatchdog(
   opts: EngineLivenessWatchdogOptions,
 ): EngineLivenessWatchdogHandle {
   if (opts.staleAfterMs <= 0) {
+    const off: LivenessVerdict = { kind: "unreadable", reason: "off" };
     return {
-      tick: async () => ({ kind: "unreadable", reason: "off" }),
+      tick: async () => off,
+      firstTick: Promise.resolve(off),
       stop: () => {},
     };
   }
+
+  /**
+   * BOOT GRACE — the one input under which a HEALTHY worker would otherwise exit, and it
+   * is reachable on exactly the restart this watchdog itself causes.
+   *
+   * The engine Worker row is NOT created by `hatchet.worker(name, …)` (that only
+   * registers workflows over REST); it is created inside `worker.start()`, when
+   * `createListener()` does the gRPC Register and the SDK finally learns its `workerId`
+   * (`v1/client/worker/worker-internal.js:764-765`). The watchdog is armed before that
+   * call, so for the first moments of every boot the ONLY row the engine holds under this
+   * worker's name is the DEAD PREDECESSOR's — and after a wedge that predecessor's
+   * `lastHeartbeatAt` is, by construction, staler than the threshold. The "take the
+   * greatest heartbeat" rule in probeEngineLiveness cannot help here: before registration
+   * there is no fresher row to beat it. Unguarded, the immediate first tick would read
+   * 41-minute-old heartbeat, declare the brand-new process wedged and exit it — then
+   * systemd restarts, and the whole thing repeats every RestartSec until the engine
+   * expires the row. A restart loop on a healthy box is worse than the bug this guards.
+   *
+   * So: for the first `staleAfterMs` of this process's life a `wedged` verdict is not
+   * evidence about THIS process — it cannot be, since a process younger than the
+   * threshold cannot have been silent for longer than the threshold — and is reported as
+   * UNKNOWN, like every other thing the watchdog cannot honestly read. The inertness is
+   * bounded by exactly one threshold window, after which a still-stale row does mean this
+   * worker is not heartbeating and does exit.
+   */
+  const armedAtMs = opts.now();
 
   // `fired` makes onWedged at-most-once per process: a synchronous onWedged in a test
   // cannot be re-entered, and a real process.exit in flight is not raced.
@@ -250,7 +284,17 @@ export function startEngineLivenessWatchdog(
       };
     }
 
-    const verdict = evaluateLiveness(reading, opts.now(), opts.staleAfterMs);
+    const nowMs = opts.now();
+    const evaluated = evaluateLiveness(reading, nowMs, opts.staleAfterMs);
+    const verdict: LivenessVerdict =
+      evaluated.kind === "wedged" && nowMs - armedAtMs < opts.staleAfterMs
+        ? {
+            kind: "unreadable",
+            reason:
+              "stale heartbeat older than this process — a dead predecessor's row, " +
+              "not yet guarded",
+          }
+        : evaluated;
 
     if (verdict.kind === "unreadable") {
       if (!unreadableLogged) {
@@ -280,7 +324,7 @@ export function startEngineLivenessWatchdog(
     void tick();
   }, opts.pollIntervalMs);
   timer.unref?.();
-  void tick();
+  const firstTick = tick();
 
-  return { tick, stop: () => clearInterval(timer) };
+  return { tick, firstTick, stop: () => clearInterval(timer) };
 }

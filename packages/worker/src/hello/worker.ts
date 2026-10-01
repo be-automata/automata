@@ -230,7 +230,11 @@ async function main() {
     );
     process.exit(1);
   }
-  const worker = await hatchet.worker(`automata-worker-${boxId}`, {
+  // ONE source for the name the engine knows this worker by: the #215 watchdog
+  // probes for a row with exactly this name (namespaced), so a second literal
+  // here could drift from it and leave the box silently unguarded.
+  const workerName = `automata-worker-${boxId}`;
+  const worker = await hatchet.worker(workerName, {
     workflows,
     // #125 C4 / #183: ONE slot per worker process and ONE unit per box:
     // `slots: 1` is the engine-native cross-workflow cap (the engine's global
@@ -244,8 +248,10 @@ async function main() {
   // #215: in-process engine-liveness watchdog. OFF unless WORKER_LIVENESS_STALE_S is
   // set, in which case this is the only thing that turns a wedged-but-alive worker back
   // into a running one — the unit's Restart=always cannot fire on a process that never
-  // exits. Started AFTER registration (there is no engine row before it) and BEFORE
-  // `worker.start()`, which never returns.
+  // exits. Armed here because `worker.start()` below never returns; note that the
+  // engine Worker row does not exist yet either — `hatchet.worker()` only registers
+  // workflows, and the row is minted by the gRPC Register inside `start()`. The
+  // watchdog's own boot grace covers that window (see startEngineLivenessWatchdog).
   try {
     const cfg = loadWorkerConfig();
     if (cfg.livenessStaleAfterS <= 0) {
@@ -256,7 +262,7 @@ async function main() {
       // Resolved ONCE at arm time and closed over — never re-derived per tick (§17).
       const probeConfig = loadAuthProbeConfig();
       const probeWorkerName = resolveProbeWorkerName(
-        `automata-worker-${boxId}`,
+        workerName,
         hatchet.config.namespace,
       );
       const pollIntervalMs = cfg.livenessPollS * 1000;

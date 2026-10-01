@@ -98,6 +98,18 @@ needs adding on the systemd side**. An unreadable probe (network error, non-2xx,
 an unexpected body, no row for this worker) is never a restart: it reads as
 UNKNOWN for as long as it lasts, however long that is.
 
+A worker is **unguarded for its first `WORKER_LIVENESS_STALE_S` of life** (15
+minutes at the suggested `900`), and that is deliberate. The engine's `Worker`
+row is minted inside `worker.start()`, not when the worker registers its
+workflows, so for the first moments of every boot the only row under this
+worker's name is the DEAD PREDECESSOR's — whose heartbeat, after exactly the
+wedge this watchdog exists to catch, is staler than the threshold by
+construction. Without the grace the new process would read its predecessor's
+corpse, declare itself wedged and exit, and `Restart=always` would relaunch it
+into the same verdict every `RestartSec` until the engine expired the row. The
+grace is bounded by one threshold window: a process older than that which is
+still reading a stale heartbeat does exit.
+
 ## Install
 
 ```bash

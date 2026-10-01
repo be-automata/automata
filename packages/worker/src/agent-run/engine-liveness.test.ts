@@ -38,8 +38,13 @@ function fetchJson(body: unknown, status = 200): typeof fetch {
  * A driver harness with an injected clock and an onWedged spy. No real timers: the
  * interval is created under fake timers and discarded, so only explicit `tick()` calls
  * ever run. The probe is handed the clock so a test can mint a heartbeat relative to it.
+ *
+ * The driver also fires ONE immediate best-effort tick at arm time, at clock `nowMs`
+ * (i.e. zero uptime, inside the boot grace). The harness AWAITS it before returning, so
+ * every count below includes it and nothing races a floating promise that would read the
+ * clock at whatever value the test has moved it to by then.
  */
-function harness(opts: {
+async function harness(opts: {
   probe: (now: () => number) => Promise<LivenessReading>;
   staleAfterMs?: number;
   nowMs?: number;
@@ -59,6 +64,7 @@ function harness(opts: {
     log,
   });
   vi.useRealTimers();
+  await handle.firstTick;
   return {
     handle,
     onWedged,
@@ -246,7 +252,7 @@ describe("unreadable → never an exit (D-6)", () => {
   for (const testCase of UNREADABLE_CASES) {
     it(`${testCase.name}: unreadable for 40 ticks across 2400s, no exit`, async () => {
       const probe = () => probeEngineLiveness(PROBE_CONFIG, testCase.fetchImpl);
-      const h = harness({ probe });
+      const h = await harness({ probe });
       for (let i = 0; i < 40; i += 1) {
         const verdict = await h.handle.tick();
         expect(verdict.kind).toBe("unreadable");
@@ -264,12 +270,15 @@ describe("startEngineLivenessWatchdog", () => {
   it("stale → calls onWedged exactly once with the exact operator-visible line", async () => {
     const nowMs = Date.parse("2026-09-29T20:00:00.000Z");
     const probe = vi.fn(
-      async (): Promise<LivenessReading> => ({
+      async (now: () => number): Promise<LivenessReading> => ({
         kind: "reading",
-        lastHeartbeatAtMs: nowMs - 2_400_000, // 2400s stale
+        lastHeartbeatAtMs: now() - 2_400_000, // 2400s stale, whatever the clock
       }),
     );
-    const h = harness({ probe, nowMs });
+    const h = await harness({ probe, nowMs });
+    // Past the boot grace: a process younger than the threshold can never be the one
+    // that went silent for longer than the threshold.
+    h.advance(STALE_AFTER_MS + 1);
     const verdict = await h.handle.tick();
     expect(verdict).toEqual({ kind: "wedged", stalenessMs: 2_400_000 });
     expect(h.onWedged).toHaveBeenCalledTimes(1);
@@ -290,7 +299,7 @@ describe("startEngineLivenessWatchdog", () => {
   });
 
   it("fresh heartbeat → no exit across a simulated window longer than the threshold", async () => {
-    const h = harness({
+    const h = await harness({
       probe: async (now) => ({ kind: "reading", lastHeartbeatAtMs: now() }),
     });
     for (let i = 0; i < 40; i += 1) {
@@ -306,7 +315,7 @@ describe("startEngineLivenessWatchdog", () => {
     // A real engine row for a worker that has taken no work: slots unused, no recent
     // step runs — but the heartbeat is fresh, which is the only field that decides.
     let heartbeat = Date.parse("2026-09-29T19:00:00.000Z");
-    const h = harness({
+    const h = await harness({
       nowMs: heartbeat,
       probe: () =>
         probeEngineLiveness(
@@ -334,7 +343,7 @@ describe("startEngineLivenessWatchdog", () => {
   });
 
   it("a rejected probe becomes unreadable; tick never throws", async () => {
-    const h = harness({
+    const h = await harness({
       probe: async () => {
         throw new Error("boom");
       },
@@ -347,7 +356,7 @@ describe("startEngineLivenessWatchdog", () => {
 
   it("logs a new unreadable line only when the streak restarts", async () => {
     let readable = false;
-    const h = harness({
+    const h = await harness({
       probe: async (now): Promise<LivenessReading> =>
         readable
           ? { kind: "reading", lastHeartbeatAtMs: now() }
@@ -364,11 +373,13 @@ describe("startEngineLivenessWatchdog", () => {
     h.handle.stop();
   });
 
-  it("drives tick() directly with a frozen clock — no Date.now, no process.exit", async () => {
+  it("drives tick() directly off the injected clock — no Date.now, no process.exit", async () => {
     // The driver reads time only through the injected `now` and exits only through the
-    // injected `onWedged` (D-9). Freezing the clock at a value that makes the SAME
-    // reading wedged proves the verdict came from the injection, not from the wall clock.
+    // injected `onWedged` (D-9). The clock is set to a value, far from any wall clock,
+    // that makes the SAME reading wedged: the verdict can only have come from the
+    // injection. Armed one threshold earlier so the boot grace is behind us.
     const frozen = 10_000_000;
+    let clock = frozen - STALE_AFTER_MS - 1;
     const probe = vi.fn(
       async (): Promise<LivenessReading> => ({
         kind: "reading",
@@ -381,10 +392,11 @@ describe("startEngineLivenessWatchdog", () => {
       pollIntervalMs: POLL_MS,
       probeWorkerName: "automata-worker-b1",
       probe,
-      now: () => frozen,
+      now: () => clock,
       onWedged,
     });
     handle.stop();
+    clock = frozen;
     const verdict = await handle.tick();
     expect(verdict).toEqual({ kind: "wedged", stalenessMs: 1_000_000 });
     expect(onWedged).toHaveBeenCalledTimes(1);
@@ -411,6 +423,77 @@ describe("startEngineLivenessWatchdog", () => {
     expect(onWedged).not.toHaveBeenCalled();
     handle.stop();
     handle.stop();
+  });
+});
+
+describe("boot grace: a dead predecessor's row never restart-loops a fresh process", () => {
+  // The engine Worker row is minted by the gRPC Register inside `worker.start()`, which
+  // runs AFTER the watchdog is armed. On the restart that follows a wedge, the only row
+  // under this worker's name is the dead predecessor's, and its heartbeat is — by
+  // construction — staler than the threshold. Without the grace the brand-new process
+  // would read that row, call itself wedged and exit, every RestartSec, forever.
+  const DEAD_PREDECESSOR = {
+    rows: [
+      {
+        name: "automata-worker-b1",
+        lastHeartbeatAt: "2026-09-29T19:19:05.000Z", // the real outage's last heartbeat
+      },
+    ],
+  };
+  const BOOT = Date.parse("2026-09-29T20:00:30.000Z"); // the operator's SIGTERM minute
+
+  it("reads UNKNOWN, not wedged, for a whole threshold window after arming", async () => {
+    const h = await harness({
+      nowMs: BOOT,
+      probe: () =>
+        probeEngineLiveness(PROBE_CONFIG, fetchJson(DEAD_PREDECESSOR)),
+    });
+    // 15 ticks over 900s — the entire grace — on a row that evaluateLiveness alone
+    // calls wedged at every one of them.
+    for (let i = 0; i < 15; i += 1) {
+      expect((await h.handle.tick()).kind).toBe("unreadable");
+      h.advance(POLL_MS);
+    }
+    expect(h.onWedged).not.toHaveBeenCalled();
+    expect(h.log).toHaveBeenCalledTimes(1);
+    h.handle.stop();
+  });
+
+  it("the suppression is bounded: past the grace a still-stale row does exit", async () => {
+    // Bounded inertness is the point — if the row is STILL pre-boot after a full
+    // threshold of uptime, this worker really is not heartbeating.
+    const h = await harness({
+      nowMs: BOOT,
+      probe: () =>
+        probeEngineLiveness(PROBE_CONFIG, fetchJson(DEAD_PREDECESSOR)),
+    });
+    expect((await h.handle.tick()).kind).toBe("unreadable");
+    h.advance(STALE_AFTER_MS + 1);
+    expect((await h.handle.tick()).kind).toBe("wedged");
+    expect(h.onWedged).toHaveBeenCalledTimes(1);
+    h.handle.stop();
+  });
+
+  it("the grace does not swallow a wedge of THIS process", async () => {
+    // Registers at boot, heartbeats for 20 minutes, then the gRPC connection dies: the
+    // heartbeat is from after arming, so the verdict is wedged the moment it is stale
+    // — no second grace window.
+    let heartbeat = BOOT;
+    const h = await harness({
+      nowMs: BOOT,
+      probe: async () => ({ kind: "reading", lastHeartbeatAtMs: heartbeat }),
+    });
+    // 20 minutes of ordinary life: the clock and the heartbeat advance together.
+    for (let i = 0; i < 20; i += 1) {
+      h.advance(60_000);
+      heartbeat += 60_000;
+      expect((await h.handle.tick()).kind).toBe("healthy");
+    }
+    // The gRPC connection dies here: `heartbeat` stops advancing while the clock does.
+    h.advance(STALE_AFTER_MS + 1);
+    expect((await h.handle.tick()).kind).toBe("wedged");
+    expect(h.onWedged).toHaveBeenCalledTimes(1);
+    h.handle.stop();
   });
 });
 

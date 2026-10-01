@@ -376,25 +376,25 @@ export function loadWorkerConfig(
   const livenessStaleAfterS = parseLivenessStaleAfterS(
     env.WORKER_LIVENESS_STALE_S,
   );
-  // Only validated when the watchdog is ON — same reasoning as parseTasksMax:
-  // with the feature off the value is unused, and a stray env var must not stop
-  // an unrelated box from booting.
-  const livenessPollS =
-    livenessStaleAfterS > 0
-      ? parseLivenessPollS(env.WORKER_LIVENESS_POLL_S)
-      : 0;
-  // A POLL PERIOD AT OR ABOVE THE THRESHOLD CANNOT DETECT ANYTHING. The first
-  // tick after the wedge would already be past the deadline in the best case and
-  // could be a whole period late, so the box would look guarded and be guarded by
-  // nothing. Refuse, the same way WORKER_RUN_MEMORY_MAX without
-  // WORKER_AGENT_USER is refused.
-  if (livenessStaleAfterS > 0 && livenessPollS >= livenessStaleAfterS) {
-    throw new Error(
-      `WORKER_LIVENESS_POLL_S=${livenessPollS} must be well below ` +
-        `WORKER_LIVENESS_STALE_S=${livenessStaleAfterS}: a watchdog that ticks no more ` +
-        `often than its own threshold cannot observe staleness, and a box told to guard ` +
-        `itself must not run unguarded.`,
-    );
+  // The poll period is read and checked ONLY when the watchdog is on — same
+  // reasoning as parseTasksMax: with the feature off the value is unused, and a
+  // stray env var must not stop an unrelated box from booting.
+  let livenessPollS = 0;
+  if (livenessStaleAfterS > 0) {
+    livenessPollS = parseLivenessPollS(env.WORKER_LIVENESS_POLL_S);
+    // A POLL PERIOD AT OR ABOVE THE THRESHOLD CANNOT DETECT ANYTHING. The first
+    // tick after the wedge would already be past the deadline in the best case
+    // and could be a whole period late, so the box would look guarded and be
+    // guarded by nothing. Refuse, the same way WORKER_RUN_MEMORY_MAX without
+    // WORKER_AGENT_USER is refused.
+    if (livenessPollS >= livenessStaleAfterS) {
+      throw new Error(
+        `WORKER_LIVENESS_POLL_S=${livenessPollS} must be well below ` +
+          `WORKER_LIVENESS_STALE_S=${livenessStaleAfterS}: a watchdog that ticks no more ` +
+          `often than its own threshold cannot observe staleness, and a box told to guard ` +
+          `itself must not run unguarded.`,
+      );
+    }
   }
 
   const agentUser = env.WORKER_AGENT_USER?.trim() || "";
