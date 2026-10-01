@@ -16,7 +16,10 @@ import {
   createOctokitReviewClient,
   getPrHeadState,
 } from "./octokit-review-client";
-import { executeReviewFromIntent } from "./execute-review-from-intent";
+import {
+  executeReviewFromIntent,
+  type ReviewFromIntentOutcome,
+} from "./execute-review-from-intent";
 import { resolveApproveFloor } from "./resolve-approve-floor";
 
 /**
@@ -61,6 +64,65 @@ export async function isReviewThread({
     organizationId,
   });
   return automation?.triggerType === "pull_request";
+}
+
+type WorkFailedByOutcome = Record<
+  ReviewFromIntentOutcome["outcome"],
+  boolean
+> &
+  // The union carries its OWN `workFailed: true` literal on the failing
+  // variants, so this map is a second source of truth and the two could
+  // silently disagree. Intersecting with the `true`-valued projection of that
+  // literal makes the union the floor: a variant that declares
+  // `workFailed: true` cannot be mapped to `false` here. The map may still add
+  // failures the union does not mark — a deliberate decision, not drift.
+  Record<
+    Extract<ReviewFromIntentOutcome, { workFailed: true }>["outcome"],
+    true
+  >;
+
+/**
+ * The outcomes that page an operator: a run that reached a terminal state without
+ * cleanly applying a review. Exported so the membership is pinnable by a unit
+ * test rather than buried in an `if` inside a DB/octokit-bound function.
+ *
+ * Membership rationale, per entry:
+ *  - `degraded_comment` / `post_failed` — the original two: no verdict applied.
+ *  - `skipped_stale_degrade` — withheld-warning is still a failed run: nothing
+ *    reached GitHub, so telemetry is the ONLY signal an operator gets that an
+ *    agent never emitted a verdict. Silent here would re-open the gap #107 is about.
+ *  - `skipped_duplicate_degrade_at_commit` (#220) — DELIBERATELY INCLUDED. The
+ *    per-sha dedup suppresses the duplicate COMMENT, not the fact that ANOTHER
+ *    run emitted no verdict. The damage #220 fixes is PR noise a human reads; this
+ *    signal is a PostHog event plus a console line, which no human reads one by
+ *    one, and the repeat count at one sha is exactly what #107 needs to size a
+ *    bounded auto-requeue. Suppressing it would trade a cheap duplicate event for
+ *    a blind spot in the only channel that sees a serially-failing agent. The
+ *    `outcome` property distinguishes it from a first degrade for anyone counting.
+ *
+ * EXHAUSTIVE BY CONSTRUCTION, and that is the point. A `||` chain over a widened
+ * `string` would let a new `ReviewFromIntentOutcome` variant land tomorrow and
+ * silently never page — this repo has been bitten by that exact shape of silent
+ * inertness more than once. The Record forces a compile error instead: add a
+ * variant to the union and this map stops type-checking until someone decides,
+ * in writing, whether it is a failure.
+ */
+const WORK_FAILED_BY_OUTCOME: WorkFailedByOutcome = {
+  posted: false,
+  posted_stale_comment: false,
+  skipped_existing: false,
+  skipped_superseded: false,
+  skipped_duplicate_at_commit: false,
+  skipped_stale_degrade: true,
+  degraded_comment: true,
+  post_failed: true,
+  skipped_duplicate_degrade_at_commit: true,
+};
+
+export function isWorkFailedOutcome(
+  outcome: ReviewFromIntentOutcome["outcome"],
+): boolean {
+  return WORK_FAILED_BY_OUTCOME[outcome];
 }
 
 /** Concatenate the LAST agent message's text parts — where the emitted intent lives. */
@@ -255,14 +317,7 @@ export async function handleReviewEffectAtFinish({
         outcome: outcome.outcome,
       });
 
-      if (
-        outcome.outcome === "degraded_comment" ||
-        outcome.outcome === "post_failed" ||
-        // Withheld-warning is still a failed run: nothing reached GitHub, so
-        // telemetry is the ONLY signal an operator gets that an agent never
-        // emitted a verdict. Silent here would re-open the gap #107 is about.
-        outcome.outcome === "skipped_stale_degrade"
-      ) {
+      if (isWorkFailedOutcome(outcome.outcome)) {
         console.error(
           "[review-single-writer] WorkFailed — review not cleanly applied",
           { threadId, repoFullName, prNumber, outcome },
