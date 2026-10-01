@@ -388,7 +388,7 @@ function mapOutcome(o: ReviewIntentOutcome): ReviewFromIntentOutcome {
  * in practice `findBotReviewAtHead`'s `r.user?.login === botLogin`, applied AFTER
  * this one.
  */
-function isDegradedComment(review: GitHubReview): boolean {
+export function isDegradedComment(review: GitHubReview): boolean {
   return review.body.includes(DEGRADED_INTENT_MARKER);
 }
 
@@ -398,7 +398,7 @@ function isDegradedComment(review: GitHubReview): boolean {
  * fetches ONCE and then re-asks the primitive over filtered views of that one
  * snapshot, so two guards reading the same PR can never see different states.
  */
-function snapshotOf(reviews: GitHubReview[]) {
+export function snapshotOf(reviews: GitHubReview[]) {
   return { listReviews: async () => reviews };
 }
 

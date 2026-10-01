@@ -13,7 +13,11 @@ import {
   createOctokitReviewClient,
   getPrHeadSha,
 } from "./octokit-review-client";
-import { executeReviewFromIntent } from "./execute-review-from-intent";
+import {
+  executeReviewFromIntent,
+  isDegradedComment,
+  snapshotOf,
+} from "./execute-review-from-intent";
 import {
   extractTerminalAgentText,
   isReviewThread,
@@ -120,9 +124,27 @@ export async function runReviewSweep(): Promise<void> {
         c.prNumber,
       );
 
-      // Already has a bot review at HEAD → the finish-hook handled it; skip.
+      // Already has a bot VERDICT at HEAD → the finish-hook handled it; skip.
+      //
+      // #224: the filter is load-bearing, and its absence lost verdicts. A
+      // degraded "could not be parsed" comment is a bot COMMENTED review at the
+      // sha, so `findBotReviewAtHead` — which matches every state — used to
+      // satisfy this guard. Because the sweep iterates PER THREAD, the verdict
+      // that went missing belonged to a DIFFERENT thread: run A degrades at X
+      // and leaves the comment; run B produces a real verdict at X but its
+      // finish hook never fires; the sweep picks B up, matches A's silence, and
+      // skips. The backstop declined to back anything up — inside the exact
+      // mechanism built so a review thread is never "terminal with ZERO review,
+      // silently". Same defect as #213 (replay guard) and #221 (supersession
+      // guard); this was the third guard and the last one holding it.
+      //
+      // Safe only because #220 landed first: filtering means the sweep now RUNS
+      // the writer for a thread whose sole review at HEAD is a degraded comment,
+      // and before #220 a still-unparseable thread would have re-posted that
+      // comment on EVERY hourly sweep. #220's per-sha dedup absorbs it.
+      const reviews = await github.listReviews(c.repoFullName, c.prNumber);
       const existing = await findBotReviewAtHead({
-        github,
+        github: snapshotOf(reviews.filter((r) => !isDegradedComment(r))),
         repo: c.repoFullName,
         prNumber: c.prNumber,
         headSha: currentHeadSha,
