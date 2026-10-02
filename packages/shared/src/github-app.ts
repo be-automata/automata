@@ -82,6 +82,28 @@ export async function getInstallationToken(
 }
 
 /**
+ * The id of the App installation that covers a repository, or null when the
+ * App is not installed on it.
+ */
+export async function getRepoInstallationId(
+  owner: string,
+  repo: string,
+): Promise<number | null> {
+  try {
+    const { data } = await getGitHubApp().octokit.request(
+      "GET /repos/{owner}/{repo}/installation",
+      { owner, repo },
+    );
+    return data.id;
+  } catch (error) {
+    if ((error as { status?: number } | null)?.status === 404) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
  * Check if the GitHub App is installed on a repository
  * @param owner Repository owner
  * @param repo Repository name

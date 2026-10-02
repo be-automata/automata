@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { newThreadInternal } from "@/server-lib/new-thread-internal";
+import { getRepoInstallationId } from "@terragon/shared/github-app";
 import { getInstallationOrgAndMode } from "@terragon/shared/model/github-installation";
 import { getOrganizationOwnerUserId } from "@terragon/shared/model/organizations";
 import { DBUserMessage } from "@terragon/shared/db/db-message";
@@ -265,9 +266,25 @@ export async function createMirrorTask({
   accountLogin?: string | null;
   intent: MirrorIntent;
 }): Promise<void> {
+  // A repo-level webhook delivery carries no installation, so a repo wired that
+  // way could never reach this lane. Resolve it from the App for a merged PR
+  // only, and only to run a configured audit (see the skip below): every other
+  // mirror row stays off for such deliveries, as it always was.
+  //
+  // A lookup failure other than "not installed" propagates on purpose: the
+  // delivery then shows as failed in GitHub and can be redelivered. Turning an
+  // outage into a skip would lose the audit for that merge without a trace.
+  const viaRepoLookup =
+    (installationId === null || installationId === undefined) &&
+    intent.kind === "pr-merged";
+  const [owner, repo] = repoFullName.split("/");
+  const resolvedInstallationId =
+    viaRepoLookup && owner && repo
+      ? await getRepoInstallationId(owner, repo)
+      : installationId;
   const { organizationId, mode } = await getInstallationOrgAndMode({
     db,
-    installationId,
+    installationId: resolvedInstallationId,
   });
   if (!organizationId) {
     // WI-8: unbound installation is a business rejection, not an error. Fast-ack
@@ -306,6 +323,13 @@ export async function createMirrorTask({
           shadow,
         })
       : null;
+  if (viaRepoLookup && !skillMessage) {
+    throw new WebhookSkip(
+      "unconfigured_repo",
+      `No '${PR_MERGED_SKILL_NAME}' skill for ${repoFullName}`,
+      { installationId, accountLogin, repoFullName, intent: intent.kind },
+    );
+  }
 
   const message: DBUserMessage = {
     type: "user",

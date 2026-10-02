@@ -12,6 +12,7 @@ import { bindGithubInstallationToOrg } from "@terragon/shared/model/github-insta
 import { createRepoSkillVersion } from "@terragon/shared/model/repo-skills";
 import { nanoid } from "nanoid";
 import { resolveTrackerConfig } from "@/server-lib/tracker/tracker-config";
+import { getRepoInstallationId } from "@terragon/shared/github-app";
 
 vi.mock("@/server-lib/new-thread-internal", () => ({
   newThreadInternal: vi
@@ -21,6 +22,9 @@ vi.mock("@/server-lib/new-thread-internal", () => ({
 
 // The repo-file override tier would call GitHub; the DB tiers are what is
 // under test here.
+vi.mock("@terragon/shared/github-app", () => ({
+  getRepoInstallationId: vi.fn(),
+}));
 vi.mock("@/server-lib/review/repo-skill-override", () => ({
   buildRepoOverrideFetcher: () => async () => null,
 }));
@@ -231,6 +235,79 @@ describe("createMirrorTask (mirror-intake)", () => {
       });
       expect(args.githubPRNumber).toBe(7);
       expect(args.baseBranchName).toBe("develop");
+    });
+
+    describe("a repo-level webhook delivery (no installation in the payload)", () => {
+      it("resolves the installation from the App and runs the configured audit", async () => {
+        const { user, org, instId } = await seedBoundOrg("active");
+        const repo = `acme-inc/core-${nanoid(6).toLowerCase()}`;
+        await seedSkill(org.id, user.id, repo);
+        vi.mocked(getRepoInstallationId).mockResolvedValueOnce(instId);
+
+        await createMirrorTask({
+          repoFullName: repo,
+          installationId: undefined,
+          intent: mergedIntent,
+        });
+
+        const [owner, name] = repo.split("/");
+        expect(getRepoInstallationId).toHaveBeenCalledWith(owner, name);
+        const args = vi.mocked(newThreadInternal).mock.calls[0]![0];
+        expect(args.organizationId).toBe(org.id);
+        expect(args.sourceMetadata).toMatchObject({
+          skillName: "github-pr-merged",
+        });
+      });
+
+      it("a repo without the skill stays a skip, as before", async () => {
+        const { instId } = await seedBoundOrg("active");
+        vi.mocked(getRepoInstallationId).mockResolvedValueOnce(instId);
+
+        await expect(
+          createMirrorTask({
+            repoFullName,
+            installationId: undefined,
+            intent: mergedIntent,
+          }),
+        ).rejects.toMatchObject({ category: "unconfigured_repo" });
+        expect(newThreadInternal).not.toHaveBeenCalled();
+      });
+
+      it("an App that is not installed on the repo stays unmapped", async () => {
+        vi.mocked(getRepoInstallationId).mockResolvedValueOnce(null);
+        await expect(
+          createMirrorTask({
+            repoFullName,
+            installationId: undefined,
+            intent: mergedIntent,
+          }),
+        ).rejects.toMatchObject({ category: "unmapped_installation" });
+      });
+
+      it("a failed lookup fails the delivery instead of skipping it", async () => {
+        vi.mocked(getRepoInstallationId).mockRejectedValueOnce(
+          new Error("GitHub 503"),
+        );
+        const error = await createMirrorTask({
+          repoFullName,
+          installationId: undefined,
+          intent: mergedIntent,
+        }).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(Error);
+        expect(findWebhookSkip(error)).toBeNull();
+        expect(newThreadInternal).not.toHaveBeenCalled();
+      });
+
+      it("the other mirror rows are not revived", async () => {
+        await expect(
+          createMirrorTask({
+            repoFullName,
+            installationId: undefined,
+            intent: { kind: "pr-review-requested", prNumber: 7 },
+          }),
+        ).rejects.toMatchObject({ category: "unmapped_installation" });
+        expect(getRepoInstallationId).not.toHaveBeenCalled();
+      });
     });
 
     it("a repo WITHOUT the skill keeps the legacy prompt and no stamp", async () => {
