@@ -21,7 +21,7 @@ import {
  *                            the control plane (tracker config, the owner's
  *                            own dashboard page).
  *
- * `env-audience.guard.test.ts` fails if any other module imports the shared
+ * `env-audience.test.ts` fails if any other module imports the shared
  * decrypt functions directly, so a new consumer cannot skip the choice.
  */
 
