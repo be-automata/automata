@@ -270,6 +270,10 @@ export async function createMirrorTask({
   // way could never reach this lane. Resolve it from the App for a merged PR
   // only, and only to run a configured audit (see the skip below): every other
   // mirror row stays off for such deliveries, as it always was.
+  //
+  // A lookup failure other than "not installed" propagates on purpose: the
+  // delivery then shows as failed in GitHub and can be redelivered. Turning an
+  // outage into a skip would lose the audit for that merge without a trace.
   const viaRepoLookup =
     (installationId === null || installationId === undefined) &&
     intent.kind === "pr-merged";

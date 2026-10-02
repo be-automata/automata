@@ -284,6 +284,20 @@ describe("createMirrorTask (mirror-intake)", () => {
         ).rejects.toMatchObject({ category: "unmapped_installation" });
       });
 
+      it("a failed lookup fails the delivery instead of skipping it", async () => {
+        vi.mocked(getRepoInstallationId).mockRejectedValueOnce(
+          new Error("GitHub 503"),
+        );
+        const error = await createMirrorTask({
+          repoFullName,
+          installationId: undefined,
+          intent: mergedIntent,
+        }).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(Error);
+        expect(findWebhookSkip(error)).toBeNull();
+        expect(newThreadInternal).not.toHaveBeenCalled();
+      });
+
       it("the other mirror rows are not revived", async () => {
         await expect(
           createMirrorTask({
