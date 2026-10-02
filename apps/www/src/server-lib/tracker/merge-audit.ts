@@ -308,6 +308,18 @@ export function mergeAuditMarker(prNumber: number): string {
 }
 
 /**
+ * Cuts at the last space inside the window so a line never ends mid-word
+ * ("no devel…"). A single long token with no usable space is hard-cut.
+ */
+function clipAtWord(text: string, maxLength: number): string {
+  const window = text.slice(0, maxLength - 1);
+  const lastSpace = window.lastIndexOf(" ");
+  const cut =
+    lastSpace >= maxLength * 0.6 ? window.slice(0, lastSpace) : window;
+  return `${cut.replace(/[\s,;:.-]+$/, "")}…`;
+}
+
+/**
  * Agent- and ticket-authored text is rendered into comments posted under the
  * bot's name, so it is treated as untrusted: collapsed to one line, truncated,
  * `<` escaped, and `@mentions` defused so an audit can never page anyone.
@@ -320,9 +332,7 @@ export function mergeAuditMarker(prNumber: number): string {
 export function sanitizeInline(text: string, maxLength: number): string {
   const collapsed = text.replace(/\s+/g, " ").trim();
   const clipped =
-    collapsed.length > maxLength
-      ? `${collapsed.slice(0, maxLength - 1)}…`
-      : collapsed;
+    collapsed.length > maxLength ? clipAtWord(collapsed, maxLength) : collapsed;
   // Escaped after clipping, so an entity is never cut in half.
   return (
     clipped
@@ -604,7 +614,7 @@ export function renderTrackerComment({
     for (const criterion of misses) {
       const accepted = criterion.acceptedBy?.trim();
       lines.push(
-        `- [ ] ${missHead(criterion)}: ${sanitizeInline(criterion.text, 140)}${
+        `- [ ] ${missHead(criterion)}: ${sanitizeInline(criterion.text, 240)}${
           accepted
             ? ` (accepted: "${sanitizeInline(accepted, 160)}"${followUpSuffix(criterion.followUp)})`
             : " (not acknowledged in the PR)"
@@ -629,6 +639,6 @@ export function renderTrackerComment({
     );
   }
 
-  lines.push("", "Full audit on the PR.");
+  lines.push("", `[Full audit with evidence on the PR](${prUrl})`);
   return lines.join("\n");
 }
