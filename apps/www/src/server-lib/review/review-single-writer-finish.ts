@@ -12,6 +12,7 @@ import type { ThreadSourceMetadata } from "@terragon/shared";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { getOctokitForApp } from "@/lib/github";
 import { reconcilePrReviews } from "@/server-lib/reconcile-pr-reviews";
+import { runMergeAuditAtFinish } from "@/server-lib/tracker/merge-audit-finish";
 import {
   createOctokitReviewClient,
   getPrHeadState,
@@ -21,6 +22,7 @@ import {
   type ReviewFromIntentOutcome,
 } from "./execute-review-from-intent";
 import { resolveApproveFloor } from "./resolve-approve-floor";
+import { PR_MERGED_SKILL_NAME } from "./review-skill";
 
 /**
  * Review-effect dispatch at thread-finish (ADR-036). One entry the daemon-event
@@ -66,10 +68,7 @@ export async function isReviewThread({
   return automation?.triggerType === "pull_request";
 }
 
-type WorkFailedByOutcome = Record<
-  ReviewFromIntentOutcome["outcome"],
-  boolean
-> &
+type WorkFailedByOutcome = Record<ReviewFromIntentOutcome["outcome"], boolean> &
   // The union carries its OWN `workFailed: true` literal on the failing
   // variants, so this map is a second source of truth and the two could
   // silently disagree. Intersecting with the `true`-valued projection of that
@@ -189,6 +188,100 @@ export async function maybePromoteSkillLastKnownGood({
   }
 }
 
+type MergeAuditStamp = Extract<
+  ThreadSourceMetadata,
+  { type: "automation-skill" }
+>;
+
+/**
+ * The merged-PR skill stamp of a thread the audit executor should act on, or
+ * null. Null for a thread without the stamp, and for an ABANDONED run
+ * (superseded / reclaimed): it never finished its audit, so a "no usable
+ * result" notice for it would be noise.
+ */
+export function getMergeAuditStamp(
+  thread:
+    | {
+        sourceMetadata?: ThreadSourceMetadata | null;
+        terminalCause?: Parameters<typeof isAbandonedTerminalCause>[0];
+      }
+    | null
+    | undefined,
+): MergeAuditStamp | null {
+  const metadata = thread?.sourceMetadata;
+  if (
+    metadata?.type !== "automation-skill" ||
+    metadata.skillName !== PR_MERGED_SKILL_NAME
+  ) {
+    return null;
+  }
+  if (isAbandonedTerminalCause(thread?.terminalCause ?? null)) return null;
+  return metadata;
+}
+
+/** The post-merge audit lane's finish effect: execute, record, promote. */
+async function handleMergeAuditAtFinish({
+  db,
+  userId,
+  threadId,
+  threadChatId,
+  repoFullName,
+  prNumber,
+  organizationId,
+  stamp,
+}: {
+  db: DB;
+  userId: string;
+  threadId: string;
+  threadChatId: string;
+  repoFullName: string;
+  prNumber: number;
+  organizationId: string | null;
+  stamp: MergeAuditStamp;
+}): Promise<void> {
+  const threadChat = await getThreadChat({
+    db,
+    threadId,
+    threadChatId,
+    userId,
+  });
+  const outcome = await runMergeAuditAtFinish({
+    db,
+    userId,
+    organizationId,
+    repoFullName,
+    prNumber,
+    terminalText: extractTerminalAgentText(threadChat?.messages ?? null),
+    botLogin: resolveBotLogin(),
+  });
+  getPostHogServer().capture({
+    distinctId: userId,
+    event: "merge_audit_outcome",
+    properties: { threadId, repoFullName, prNumber, ...outcome },
+  });
+  // The health signal for this skill body is an audit the agent actually
+  // produced — a posted comment where every ticket was unreadable, or the
+  // agent emitted no tickets, proves nothing about the skill.
+  await maybePromoteSkillLastKnownGood({
+    db,
+    organizationId,
+    repoFullName,
+    sourceMetadata: stamp,
+    outcome:
+      outcome.outcome === "posted" && outcome.audited > 0
+        ? "posted"
+        : "no_health_signal",
+  });
+  if (outcome.outcome === "degraded_comment") {
+    console.error("[merge-audit] WorkFailed — audit not applied", {
+      threadId,
+      repoFullName,
+      prNumber,
+      reason: outcome.reason,
+    });
+  }
+}
+
 export async function handleReviewEffectAtFinish({
   db,
   userId,
@@ -238,8 +331,26 @@ export async function handleReviewEffectAtFinish({
         })
       : false;
 
+    // A post-merge audit thread (ADR-008): mirror-intake stamped it with the
+    // merged-PR skill. Same emit-only shape as a review — the agent's final
+    // message carries an intent and the control plane does every write — but
+    // it has no automation row, so it is recognised by its stamp, not `review`.
+    // The two lanes are exclusive: one thread has one emit-only effect.
+    const mergeAuditStamp = getMergeAuditStamp(thread);
+    if (mergeAuditStamp) {
+      await handleMergeAuditAtFinish({
+        db,
+        userId,
+        threadId,
+        threadChatId,
+        repoFullName,
+        prNumber,
+        organizationId: thread?.organizationId ?? null,
+        stamp: mergeAuditStamp,
+      });
+    }
     // A PR thread that isn't a review (e.g. a mention) → reconciler only (below).
-    if (review) {
+    else if (review) {
       const threadChat = await getThreadChat({
         db,
         threadId,

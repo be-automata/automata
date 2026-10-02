@@ -15,11 +15,15 @@
  * Example:
  *   ... deploy/skill-push.ts beautomata be-automata/automata github-ops \
  *     deploy/skills/github-ops/SKILL.md
+ *   # post-merge ticket audit (ADR-008) — the lane name is `github-pr-merged`:
+ *   ... deploy/skill-push.ts <orgSlug> <owner/repo> github-pr-merged \
+ *     deploy/skills/github-pr-merged-youtrack/SKILL.md
  *   ... deploy/skill-push.ts beautomata be-automata/automata github-ops \
  *     --from-git be-automata/skill-library@<sha>:github-ops/SKILL.md
  *
  * The body is validated LOCALLY with the SAME per-skill registry the resolver
- * applies at dispatch (github-ops: fenced-json verdict contract; others:
+ * applies at dispatch (github-ops: fenced-json verdict contract;
+ * github-pr-merged: fenced-json audit-intent contract + hard rules; others:
  * non-empty) BEFORE any DB write — a push that would only be rejected or
  * fallen-back-from at run time must fail here, loudly, instead. Frontmatter is
  * stripped exactly like the seed loader (deploy/lib/review-skill-file) so a SKILL.md

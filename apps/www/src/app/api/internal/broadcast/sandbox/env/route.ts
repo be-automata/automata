@@ -5,16 +5,13 @@ import {
 } from "@/lib/auth-server";
 import { getThread } from "@terragon/shared/model/threads";
 import { db } from "@/lib/db";
-import { env } from "@terragon/env/apps-www";
-import {
-  getDecryptedEnvironmentVariables,
-  getOrCreateEnvironment,
-} from "@terragon/shared/model/environments";
+import { getOrCreateEnvironment } from "@terragon/shared/model/environments";
 import { getGitHubTokenForBackground } from "@/lib/github";
 import { getEnv } from "@terragon/sandbox/env";
 import { getAndVerifyCredentials } from "@/agent/credentials";
 import { isSandboxTerminalSupported } from "@/lib/sandbox-terminal";
 import { getPrimaryThreadChat } from "@terragon/shared/utils/thread-utils";
+import { getExecutionPlaneEnvironmentVariables } from "@/server-lib/env-audience";
 
 export async function POST(request: Request) {
   const userId =
@@ -44,11 +41,10 @@ export async function POST(request: Request) {
   });
   const [environmentVariables, githubAccessToken, agentCredentials] =
     await Promise.all([
-      getDecryptedEnvironmentVariables({
+      getExecutionPlaneEnvironmentVariables({
         db,
         userId,
         environmentId: environment.id,
-        encryptionMasterKey: env.ENCRYPTION_MASTER_KEY,
       }),
       // Background-capable: App installation token fallback for identity-less owners.
       getGitHubTokenForBackground({

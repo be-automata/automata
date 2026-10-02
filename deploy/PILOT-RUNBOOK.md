@@ -94,18 +94,18 @@ Prod orch-agents routes these repo event classes (from its `WORKFLOW.md`) to
 skills. The pilot needs **intake parity**: every routed event class must produce
 a correctly-attributed task/thread in the bound org.
 
-| #   | Event class                                         | Prod skill (intent)                            | Chassis today                                                                                                                      | Gap → plan                                                                                                |
-| --- | --------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| 1   | `pull_request.opened`                               | github-ops (PR review)                         | `handlePullRequestUpdated` runs a PR **automation** only if a user created one (`on.open`); else PR-status DB update — **no task** | **Seeded automation** (`on.open`, `includeAllAuthors`, shadow-aware) → "Review PR" for every PR           |
-| 2   | `pull_request.synchronize`                          | github-ops                                     | PR automation only, `on.update`                                                                                                    | Same seeded automation (`on.update`)                                                                      |
-| 3   | `pull_request.review_requested`                     | github-ops                                     | **Not handled** (action absent from route)                                                                                         | **Mirror-intake** → "Review PR #N (review requested)"                                                     |
-| 4   | `pull_request.closed` (merged=true)                 | github-pr-merged-jira                          | `handlePullRequestStatusChange` → status DB update only, **no task**                                                               | Mirror-intake, `merged===true` only → "Post-merge follow-up for PR #N"                                    |
-| 5   | `pull_request_review.changes_requested`             | github-ops (re-review)                         | `handlePullRequestReviewEvent` fires only on `submitted` **and** is mention-gated; state not inspected → **no task**               | Mirror-intake, `review.state==="changes_requested"` → "Address changes requested on PR #N"                |
-| 6   | `workflow_run` failure                              | gh-fix-ci                                      | **Not handled** (event absent from route)                                                                                          | Mirror-intake, new `workflow_run.completed` sub, `conclusion==="failure"` → "Fix CI: run '<name>' failed" |
-| 7   | `issues.opened`                                     | github-deep-research                           | `handleIssueEvent` runs an issue **automation** only if a user created one (`on.open`); else **no task**                           | **Seeded automation** (`on.open`, `includeAllAuthors`, shadow-aware) → "Research issue"                   |
-| 8   | `issues.labeled` [`bug`\|`enhancement`]             | github-ops                                     | **Not handled** (only `issues.opened` subscribed)                                                                                  | Mirror-intake, new `issues.labeled` sub + label allowlist → "Handle issue #N (labeled <label>)"           |
-| 9   | `issue_comment.created` + bot mention               | github-mention-respond (chassis-native)        | `handleIssueCommentEvent` → `handleAppMention`                                                                                     | **COVERED** (native; shadow-aware)                                                                        |
-| 10  | `pull_request_review_comment.created` + bot mention | github-review-comment-respond (chassis-native) | `handlePullRequestReviewCommentEvent` → `handleAppMention`                                                                         | **COVERED** (native; shadow-aware)                                                                        |
+| #   | Event class                                         | Prod skill (intent)                                             | Chassis today                                                                                                                      | Gap → plan                                                                                                |
+| --- | --------------------------------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| 1   | `pull_request.opened`                               | github-ops (PR review)                                          | `handlePullRequestUpdated` runs a PR **automation** only if a user created one (`on.open`); else PR-status DB update — **no task** | **Seeded automation** (`on.open`, `includeAllAuthors`, shadow-aware) → "Review PR" for every PR           |
+| 2   | `pull_request.synchronize`                          | github-ops                                                      | PR automation only, `on.update`                                                                                                    | Same seeded automation (`on.update`)                                                                      |
+| 3   | `pull_request.review_requested`                     | github-ops                                                      | **Not handled** (action absent from route)                                                                                         | **Mirror-intake** → "Review PR #N (review requested)"                                                     |
+| 4   | `pull_request.closed` (merged=true)                 | github-pr-merged-jira · `github-pr-merged` live skill (ADR-008) | `handlePullRequestStatusChange` → status DB update only, **no task**                                                               | Mirror-intake, `merged===true` only → "Post-merge follow-up for PR #N"                                    |
+| 5   | `pull_request_review.changes_requested`             | github-ops (re-review)                                          | `handlePullRequestReviewEvent` fires only on `submitted` **and** is mention-gated; state not inspected → **no task**               | Mirror-intake, `review.state==="changes_requested"` → "Address changes requested on PR #N"                |
+| 6   | `workflow_run` failure                              | gh-fix-ci                                                       | **Not handled** (event absent from route)                                                                                          | Mirror-intake, new `workflow_run.completed` sub, `conclusion==="failure"` → "Fix CI: run '<name>' failed" |
+| 7   | `issues.opened`                                     | github-deep-research                                            | `handleIssueEvent` runs an issue **automation** only if a user created one (`on.open`); else **no task**                           | **Seeded automation** (`on.open`, `includeAllAuthors`, shadow-aware) → "Research issue"                   |
+| 8   | `issues.labeled` [`bug`\|`enhancement`]             | github-ops                                                      | **Not handled** (only `issues.opened` subscribed)                                                                                  | Mirror-intake, new `issues.labeled` sub + label allowlist → "Handle issue #N (labeled <label>)"           |
+| 9   | `issue_comment.created` + bot mention               | github-mention-respond (chassis-native)                         | `handleIssueCommentEvent` → `handleAppMention`                                                                                     | **COVERED** (native; shadow-aware)                                                                        |
+| 10  | `pull_request_review_comment.created` + bot mention | github-review-comment-respond (chassis-native)                  | `handlePullRequestReviewCommentEvent` → `handleAppMention`                                                                         | **COVERED** (native; shadow-aware)                                                                        |
 
 **Two implementation mechanisms.** The automation trigger schema
 (`packages/shared/src/automations/index.ts`) expresses only `pull_request`
@@ -131,9 +131,61 @@ opening has no "commenter"), so it's attributed to the **bound org's owner**
 (`role: "owner"` member) + the org id. Mention tasks keep their existing
 commenter attribution.
 
-**Tracker note (out of pilot scope):** prod's per-repo config names a Linear team
-as the tracker. The pilot proves GitHub intake only; no Linear/Jira wiring is in
-scope here.
+**Tracker note:** prod's per-repo config names a Linear team as the tracker; no Linear/Jira wiring
+is in scope here. The one tracker integration the chassis has is the **post-merge audit**
+(ADR-008), described next.
+
+## Post-merge ticket audit (YouTrack)
+
+A repo that has a live `github-pr-merged` skill gets its merged PRs audited against the ticket they
+reference. Mirror-intake (row 4) resolves the skill, fetches the tickets the PR names, and hands
+both to a read-only agent. The agent emits a verdict per acceptance criterion. The control plane
+then posts one comment on the PR and, when writes are enabled, comments on the ticket and moves it
+to `PR Merged`. The agent never holds the tracker token. A repo without the skill keeps the fixed
+prompt in row 4.
+
+**Onboard a repo** (repeat per repo; start with one):
+
+1. Bind the GitHub App installation to the org in shadow mode
+   (`deploy/bind-github-installation.ts`).
+2. Push the skill under the lane name:
+
+   ```bash
+   DATABASE_URL=... pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> \
+     github-pr-merged deploy/skills/github-pr-merged-youtrack/SKILL.md
+   ```
+
+3. As the org owner, open the repository environment in the dashboard and set:
+
+   | Variable                  | Value                                                        |
+   | ------------------------- | ------------------------------------------------------------ |
+   | `YOUTRACK_URL`            | `https://<instance>.youtrack.cloud` (https, public hostname) |
+   | `YOUTRACK_TOKEN`          | a permanent token, ideally of a dedicated bot account        |
+   | `YOUTRACK_PROJECTS`       | project short names, comma-separated (e.g. `ACME`)           |
+   | `AUTOMATA_TRACKER_WRITES` | leave unset for now                                          |
+
+   `YOUTRACK_TOKEN` is control-plane only: it is stripped before environment variables are handed
+   to any sandbox, worker or terminal.
+
+4. Flip the installation to active. With `AUTOMATA_TRACKER_WRITES` unset the audit runs in shadow:
+   it reads the tickets and posts the PR comment, worded as "would move", and writes nothing to the
+   tracker. Calibrate on a handful of real merges.
+5. Set `AUTOMATA_TRACKER_WRITES=live` to enable ticket comments and stage moves.
+
+**What it will and will not do.** Stage moves are limited to `PR Merged` for the ticket the PR
+closes, `In Progress` for a `Backlog`/`To Do` ticket whose work is split across PRs, and `To Do` for
+a `Backlog` ticket whose last blocker just merged. It never moves a ticket to `Done`,
+`Staging (TF)` or `Won't do`, never moves one already at or past `PR Merged`, and never edits a
+ticket's summary or description. A PR with no ticket reference gets a single comment saying so.
+
+**Which ticket a PR is audited against.** The ticket it delivers: the key in the PR title, else in
+the head branch name, else one named by a closing keyword (`Closes ACME-123`). Tickets the PR merely
+mentions ("depends on", "related", "deferred to") are listed on the comment as "also referenced"
+and are never audited, commented on or moved.
+
+**Editing the skill** is live on the next merge: re-run `skill-push`, edit it in the Skills panel
+on `/settings/review`, or commit `.automata/skills/github-pr-merged.md` to the repo's default
+branch (the file refines a pushed skill; it cannot enable the lane by itself).
 
 ## Capturing the installation id (first delivery)
 

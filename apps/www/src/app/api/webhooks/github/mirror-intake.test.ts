@@ -9,7 +9,9 @@ import {
   addOrganizationMember,
 } from "@terragon/shared/model/organizations";
 import { bindGithubInstallationToOrg } from "@terragon/shared/model/github-installation";
+import { createRepoSkillVersion } from "@terragon/shared/model/repo-skills";
 import { nanoid } from "nanoid";
+import { resolveTrackerConfig } from "@/server-lib/tracker/tracker-config";
 
 vi.mock("@/server-lib/new-thread-internal", () => ({
   newThreadInternal: vi
@@ -17,7 +19,26 @@ vi.mock("@/server-lib/new-thread-internal", () => ({
     .mockResolvedValue({ threadId: "t", threadChatId: "c" }),
 }));
 
+// The repo-file override tier would call GitHub; the DB tiers are what is
+// under test here.
+vi.mock("@/server-lib/review/repo-skill-override", () => ({
+  buildRepoOverrideFetcher: () => async () => null,
+}));
+
+vi.mock("@/server-lib/tracker/tracker-config", () => ({
+  resolveTrackerConfig: vi.fn().mockResolvedValue(null),
+}));
+
 const repoFullName = "be-automata/automata";
+
+const MERGE_SKILL_BODY = [
+  "# Post-merge audit for {{repoFullName}} (merged into {{baseBranch}})",
+  "```json",
+  '{ "kind": "pr-merged-audit", "pr": 1, "tickets": [{ "key": "X-1", "acSource": "formal", "criteria": [], "taskComplete": true }] }',
+  "```",
+  "## Hard rules",
+  "- Read-only.",
+].join("\n");
 
 function installationId() {
   return Math.floor(Math.random() * 1_000_000_000);
@@ -148,5 +169,151 @@ describe("createMirrorTask (mirror-intake)", () => {
       (e: unknown) => findWebhookSkip(e)?.category === "no_mapped_users",
     );
     expect(newThreadInternal).not.toHaveBeenCalled();
+  });
+
+  describe("pr-merged with a live github-pr-merged skill (ADR-008)", () => {
+    async function seedSkill(orgId: string, userId: string, repo: string) {
+      return await createRepoSkillVersion({
+        db,
+        organizationId: orgId,
+        repoFullName: repo,
+        skillName: "github-pr-merged",
+        body: MERGE_SKILL_BODY,
+        source: "api",
+        createdByUserId: userId,
+      });
+    }
+
+    const mergedIntent = {
+      kind: "pr-merged" as const,
+      prNumber: 7,
+      baseBranch: "develop",
+      headBranch: "ACME-812-void",
+      title: "feat(ACME-812): void predictions",
+      body: "Implements the void flow.",
+      htmlUrl: "https://github.com/acme-inc/acme-core/pull/7",
+      mergedBy: "octocat",
+      mergeCommitSha: "abc123",
+    };
+
+    it("the skill body IS the task: rendered, with the trigger block, and stamped for the finish hook", async () => {
+      const { user, org, instId } = await seedBoundOrg("active");
+      const repo = `acme-inc/core-${nanoid(6).toLowerCase()}`;
+      const { version } = await seedSkill(org.id, user.id, repo);
+
+      await createMirrorTask({
+        repoFullName: repo,
+        installationId: instId,
+        intent: mergedIntent,
+      });
+
+      const args = vi.mocked(newThreadInternal).mock.calls[0]![0];
+      const text = args.message.parts.map((p: any) => p.text ?? "").join("");
+      // Placeholders rendered: repo, and the PR BASE as {{baseBranch}}.
+      expect(text).toContain(
+        `# Post-merge audit for ${repo} (merged into develop)`,
+      );
+      expect(text).not.toContain("{{");
+      expect(text).toContain("## Trigger");
+      expect(text).toContain("- Pull request: #7");
+      expect(text).toContain("title: feat(ACME-812): void predictions");
+      expect(text).toContain("## Tracker context");
+      expect(text).toContain("No tracker is configured");
+      // Not the legacy prompt.
+      expect(text).not.toContain("prod skill: github-pr-merged-jira");
+
+      expect(args.sourceMetadata).toEqual({
+        type: "automation-skill",
+        skillName: "github-pr-merged",
+        contentSha: version.contentSha,
+        source: "db-version",
+        versionId: version.id,
+      });
+      expect(args.githubPRNumber).toBe(7);
+      expect(args.baseBranchName).toBe("develop");
+    });
+
+    it("a repo WITHOUT the skill keeps the legacy prompt and no stamp", async () => {
+      const { user, org, instId } = await seedBoundOrg("active");
+      // Same org, skill pushed for a DIFFERENT repo: opt-in is per repo.
+      await seedSkill(
+        org.id,
+        user.id,
+        `acme-inc/other-${nanoid(6).toLowerCase()}`,
+      );
+
+      await createMirrorTask({
+        repoFullName,
+        installationId: instId,
+        intent: mergedIntent,
+      });
+
+      const args = vi.mocked(newThreadInternal).mock.calls[0]![0];
+      const text = args.message.parts.map((p: any) => p.text ?? "").join("");
+      expect(text).toContain("was merged");
+      expect(text).not.toContain("## Trigger");
+      expect(args.sourceMetadata).toBeUndefined();
+      expect(resolveTrackerConfig).not.toHaveBeenCalled();
+    });
+
+    it("a tracker failure at intake never loses the task", async () => {
+      const { user, org, instId } = await seedBoundOrg("active");
+      const repo = `acme-inc/core-${nanoid(6).toLowerCase()}`;
+      await seedSkill(org.id, user.id, repo);
+      vi.mocked(resolveTrackerConfig).mockRejectedValueOnce(
+        new Error("tracker base URL must use https"),
+      );
+
+      await createMirrorTask({
+        repoFullName: repo,
+        installationId: instId,
+        intent: mergedIntent,
+      });
+
+      expect(newThreadInternal).toHaveBeenCalledTimes(1);
+      const args = vi.mocked(newThreadInternal).mock.calls[0]![0];
+      const text = args.message.parts.map((p: any) => p.text ?? "").join("");
+      expect(text).toContain("Tracker unavailable");
+      expect(args.sourceMetadata?.type).toBe("automation-skill");
+    });
+
+    it("shadow installation: stamped task, but the tracker is never contacted", async () => {
+      const { user, org, instId } = await seedBoundOrg("shadow");
+      const repo = `acme-inc/core-${nanoid(6).toLowerCase()}`;
+      await seedSkill(org.id, user.id, repo);
+
+      await createMirrorTask({
+        repoFullName: repo,
+        installationId: instId,
+        intent: mergedIntent,
+      });
+
+      const args = vi.mocked(newThreadInternal).mock.calls[0]![0];
+      expect(args.shadow).toBe(true);
+      expect(resolveTrackerConfig).not.toHaveBeenCalled();
+      const text = args.message.parts.map((p: any) => p.text ?? "").join("");
+      expect(text).toContain("shadow mode");
+    });
+
+    it("other mirror intents never resolve the merged-PR skill", async () => {
+      const { user, org, instId } = await seedBoundOrg("active");
+      const repo = `acme-inc/core-${nanoid(6).toLowerCase()}`;
+      await seedSkill(org.id, user.id, repo);
+
+      await createMirrorTask({
+        repoFullName: repo,
+        installationId: instId,
+        intent: {
+          kind: "pr-review-requested",
+          prNumber: 7,
+          baseBranch: "main",
+        },
+      });
+
+      const args = vi.mocked(newThreadInternal).mock.calls[0]![0];
+      expect(args.sourceMetadata).toBeUndefined();
+      const text = args.message.parts.map((p: any) => p.text ?? "").join("");
+      expect(text).toContain("Review requested on PR #7");
+    });
   });
 });
