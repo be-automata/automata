@@ -53,6 +53,36 @@ describe("mirror handlers — routing + filtering", () => {
       expect(intentKind()).toBe("pr-merged");
     });
 
+    it("closed + merged=true carries the PR fields the post-merge audit reads", async () => {
+      await handlePullRequestMirror({
+        action: "closed",
+        repository: repo,
+        installation,
+        pull_request: pr({
+          merged: true,
+          number: 7,
+          title: "feat(ACME-812): void predictions",
+          body: "Closes ACME-812",
+          html_url: "https://github.com/be-automata/automata/pull/7",
+          merged_by: { login: "octocat" },
+          merge_commit_sha: "abc123",
+          head: { ref: "ACME-812-void" },
+          base: { ref: "develop" },
+        }),
+      } as any);
+      expect(vi.mocked(createMirrorTask).mock.calls[0]![0].intent).toEqual({
+        kind: "pr-merged",
+        prNumber: 7,
+        baseBranch: "develop",
+        headBranch: "ACME-812-void",
+        title: "feat(ACME-812): void predictions",
+        body: "Closes ACME-812",
+        htmlUrl: "https://github.com/be-automata/automata/pull/7",
+        mergedBy: "octocat",
+        mergeCommitSha: "abc123",
+      });
+    });
+
     it("closed + merged=false → no task", async () => {
       await handlePullRequestMirror({
         action: "closed",

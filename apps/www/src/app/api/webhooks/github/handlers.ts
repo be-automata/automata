@@ -711,6 +711,14 @@ export async function handlePullRequestMirror(
         kind: "pr-merged",
         prNumber: pr.number,
         baseBranch: pr.base?.ref,
+        // Carried for the post-merge audit skill (ADR-008): the trigger block
+        // and the server-side ticket-key extraction read these.
+        headBranch: pr.head?.ref,
+        title: pr.title,
+        body: pr.body,
+        htmlUrl: pr.html_url,
+        mergedBy: pr.merged_by?.login,
+        mergeCommitSha: pr.merge_commit_sha,
       },
     });
   }

@@ -12,9 +12,7 @@ import { getGitHubTokenForBackground } from "@/lib/github";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
 import {
   getOrCreateEnvironment,
-  getDecryptedEnvironmentVariables,
   getDecryptedMcpConfig,
-  getDecryptedGlobalEnvironmentVariables,
 } from "@terragon/shared/model/environments";
 import { env } from "@terragon/env/apps-www";
 import type {
@@ -38,6 +36,10 @@ import { getPostHogServer } from "@/lib/posthog-server";
 import { trackSandboxCreation } from "@/lib/rate-limit";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
 import { resolveEgressPolicy } from "@/server-lib/egress/resolve-egress-policy";
+import {
+  getExecutionPlaneEnvironmentVariables,
+  getExecutionPlaneGlobalEnvironmentVariables,
+} from "@/server-lib/env-audience";
 import { generateBranchName } from "@/server-lib/generate-branch-name";
 import { sandboxTimeoutMs } from "@terragon/sandbox/constants";
 import { getAndVerifyCredentials } from "./credentials";
@@ -202,17 +204,14 @@ async function getOrCreateSandboxForThread({
     mcpConfig,
     githubAccessToken,
   ] = await Promise.all([
-    getDecryptedEnvironmentVariables({
+    // ADR-008: the execution-plane getters drop control-plane-only keys (the
+    // tracker token) — nothing read here may reach the sandbox otherwise.
+    getExecutionPlaneEnvironmentVariables({
       db,
       userId,
       environmentId: repositoryEnvironment.id,
-      encryptionMasterKey: env.ENCRYPTION_MASTER_KEY,
     }),
-    getDecryptedGlobalEnvironmentVariables({
-      db,
-      userId,
-      encryptionMasterKey: env.ENCRYPTION_MASTER_KEY,
-    }),
+    getExecutionPlaneGlobalEnvironmentVariables({ db, userId }),
     getDecryptedMcpConfig({
       db,
       userId,

@@ -56,6 +56,49 @@ export function assertReviewSkillContract(
 }
 
 /**
+ * The fixed LANE name the merged-PR path looks up (mirror-intake.ts). The lane
+ * name is tracker-agnostic on purpose: what a repo does after a merge is
+ * decided by the BODY pushed under this name (a YouTrack audit for one org, a
+ * different tracker for the next), never by a second lookup key.
+ */
+export const PR_MERGED_SKILL_NAME = "github-pr-merged";
+
+/**
+ * Contract check for the post-merge audit skill (ADR-008). The control-plane
+ * executor acts only on an emitted `pr-merged-audit` intent, so a body that
+ * cannot instruct the agent to emit one produces a degraded notice on every
+ * merge.
+ *
+ * A `## Hard rules` section is required too. It is the tail of the skill, so
+ * its absence means the body was truncated — and the heading is deliberately
+ * tracker-neutral: the lane name is, and a different team's body must not have
+ * to quote another board's stage names to be accepted.
+ */
+export function assertMergeAuditSkillContract(
+  body: string,
+  sourceLabel: string,
+): void {
+  // indexOf, not one regex: three unbounded wildcards backtrack polynomially
+  // on a repo-controlled override body.
+  const fence = body.indexOf("```json");
+  const kind = fence < 0 ? -1 : body.indexOf('"pr-merged-audit"', fence);
+  const criteria = kind < 0 ? -1 : body.indexOf('"criteria"', kind);
+  if (criteria < 0 || body.indexOf("```", criteria) < 0) {
+    throw new Error(
+      `Post-merge audit skill from ${sourceLabel} has no fenced-json ` +
+        `"pr-merged-audit" intent contract — wrong content or a truncated ` +
+        `skill. Refusing to dispatch an audit whose result could not be parsed.`,
+    );
+  }
+  if (!/^## Hard rules\s*$/m.test(body)) {
+    throw new Error(
+      `Post-merge audit skill from ${sourceLabel} has no "## Hard rules" ` +
+        `section — the body looks truncated.`,
+    );
+  }
+}
+
+/**
  * Per-skill body validators — THE single registry shared by every surface that
  * accepts or dispatches a skill body: the resolver (read side,
  * resolve-review-skill.ts) and the write surfaces (API route PUT, dashboard
@@ -73,6 +116,7 @@ const SKILL_VALIDATORS: Record<
   (body: string, sourceLabel: string) => void
 > = {
   "github-ops": assertReviewSkillContract,
+  [PR_MERGED_SKILL_NAME]: assertMergeAuditSkillContract,
 };
 
 export function validateSkillBody(

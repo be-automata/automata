@@ -1,19 +1,16 @@
 import { randomBytes } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { getUserOrNull } from "@/lib/auth-server";
-import {
-  getDecryptedEnvironmentVariables,
-  getEnvironment,
-} from "@terragon/shared/model/environments";
+import { getEnvironment } from "@terragon/shared/model/environments";
 import { db } from "@/lib/db";
 import { getUserSettings } from "@terragon/shared/model/user";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
-import { env } from "@terragon/env/apps-www";
 import { getOrCreateSandbox, getSandboxProvider } from "@/agent/sandbox";
 import { CreateSandboxOptions } from "@terragon/sandbox/types";
 import { runSetupScript } from "@terragon/sandbox";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
 import { resolveCredentialBrokerForCreate } from "@/server-lib/credential-broker/resolve-credential-broker";
+import { getExecutionPlaneEnvironmentVariables } from "@/server-lib/env-audience";
 import {
   getDefaultBranchForRepo,
   getGitHubTokenForBackground,
@@ -185,12 +182,12 @@ export async function POST(request: NextRequest) {
         await new Promise((resolve) => setTimeout(resolve, 2000));
         await sendStatus("running");
         // Get environment variables
-        const environmentVariables = await getDecryptedEnvironmentVariables({
-          db,
-          userId,
-          environmentId,
-          encryptionMasterKey: env.ENCRYPTION_MASTER_KEY,
-        });
+        const environmentVariables =
+          await getExecutionPlaneEnvironmentVariables({
+            db,
+            userId,
+            environmentId,
+          });
         const setupScriptPath = `/tmp/sandbox-session-${Date.now()}.sh`;
         try {
           await runSetupScript({

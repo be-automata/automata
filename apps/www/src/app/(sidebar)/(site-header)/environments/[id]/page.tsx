@@ -1,5 +1,4 @@
 import {
-  getDecryptedEnvironmentVariables,
   getOrCreateGlobalEnvironment,
   getEnvironment,
   getDecryptedMcpConfig,
@@ -11,6 +10,7 @@ import {
 } from "@/lib/auth-server";
 import { notFound } from "next/navigation";
 import { db } from "@/lib/db";
+import { getControlPlaneEnvironmentVariables } from "@/server-lib/env-audience";
 import { EnvironmentUI } from "@/components/environments/main";
 import type { Metadata } from "next";
 import { env } from "@terragon/env/apps-www";
@@ -60,11 +60,11 @@ export default async function EnvironmentPage({
   }
   const [environmentVariables, mcpConfig, globalEnvironmentVariableKeys] =
     await Promise.all([
-      getDecryptedEnvironmentVariables({
+      // The owner's own settings page: the raw set, tracker token included.
+      getControlPlaneEnvironmentVariables({
         db,
         userId,
         environmentId: id,
-        encryptionMasterKey: env.ENCRYPTION_MASTER_KEY,
       }),
       getDecryptedMcpConfig({
         db,

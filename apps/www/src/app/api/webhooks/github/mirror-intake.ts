@@ -3,7 +3,25 @@ import { newThreadInternal } from "@/server-lib/new-thread-internal";
 import { getInstallationOrgAndMode } from "@terragon/shared/model/github-installation";
 import { getOrganizationOwnerUserId } from "@terragon/shared/model/organizations";
 import { DBUserMessage } from "@terragon/shared/db/db-message";
+import { getRepoSkill } from "@terragon/shared/model/repo-skills";
+import type { ThreadSourceMetadata } from "@terragon/shared";
 import { effectiveShadow } from "@/lib/github-side-effects";
+import { buildRepoOverrideFetcher } from "@/server-lib/review/repo-skill-override";
+import {
+  renderSkillPlaceholders,
+  resolveReviewSkill,
+} from "@/server-lib/review/resolve-review-skill";
+import { PR_MERGED_SKILL_NAME } from "@/server-lib/review/review-skill";
+import { extractTicketKeys } from "@/server-lib/tracker/extract-ticket-keys";
+import { createTrackerClient } from "@/server-lib/tracker/tracker-client";
+import { resolveTrackerConfig } from "@/server-lib/tracker/tracker-config";
+import {
+  buildTrackerContextBlock,
+  buildTriggerBlock,
+  type MergedPrTrigger,
+  trackerContextNotice,
+} from "@/server-lib/tracker/tracker-context";
+import { describeTrackerError } from "@/server-lib/tracker/youtrack-client";
 import { WebhookSkip } from "./webhook-skip";
 
 /**
@@ -21,6 +39,12 @@ import { WebhookSkip } from "./webhook-skip";
  * (opened/synchronize/issues.opened are mirrored via seeded automations, not here,
  * to avoid double-firing — see deploy/PILOT-RUNBOOK.md.)
  *
+ * The merged-PR class is the one exception to "the prompt is a fixed string":
+ * when the repo has a live `github-pr-merged` skill, that skill body IS the
+ * task (ADR-008 post-merge audit) — rendered here with the trigger and the
+ * tickets the PR names, fetched by the control plane. A repo without the skill
+ * keeps the fixed prompt, so onboarding is one `deploy/skill-push.ts` per repo.
+ *
  * Each event produces one task in the bound org, attributed to the org owner (a
  * PR opening has no "commenter"), created SHADOW when the installation is in
  * shadow mode (row created + dashboard-visible, no boot, zero GitHub side
@@ -34,7 +58,8 @@ export type MirrorIntent =
       headBranch?: string | null;
       baseBranch?: string | null;
     }
-  | { kind: "pr-merged"; prNumber: number; baseBranch?: string | null }
+  // Carries the PR fields the post-merge audit reads (ADR-008).
+  | ({ kind: "pr-merged"; baseBranch?: string | null } & MergedPrTrigger)
   | {
       kind: "pr-changes-requested";
       prNumber: number;
@@ -69,7 +94,7 @@ function describeIntent(
       };
     case "pr-merged":
       return {
-        prompt: `PR #${intent.prNumber} in ${repoFullName} was merged. Run the post-merge follow-up (prod skill: github-pr-merged-jira).`,
+        prompt: `PR #${intent.prNumber} in ${repoFullName} was merged. Run the post-merge follow-up (no 'github-pr-merged' skill is configured for this repository).`,
         githubPRNumber: intent.prNumber,
         baseBranch: intent.baseBranch,
       };
@@ -92,8 +117,140 @@ function describeIntent(
       };
     default: {
       const _exhaustive: never = intent;
-      throw new Error(`Unhandled mirror intent: ${JSON.stringify(_exhaustive)}`);
+      throw new Error(
+        `Unhandled mirror intent: ${JSON.stringify(_exhaustive)}`,
+      );
     }
+  }
+}
+
+type MergedPrIntent = Extract<MirrorIntent, { kind: "pr-merged" }>;
+
+/**
+ * The post-merge audit message for a repo that has the `github-pr-merged`
+ * skill, or null to fall back to the fixed prompt.
+ *
+ * Opt-in is a DB skill row, checked BEFORE the resolver: most repos have no
+ * such skill, and the resolver logs a missing skill as an error and would
+ * spend a GitHub contents request on the repo-file override for every merged
+ * PR. A repo-file override therefore refines a pushed skill; it cannot enable
+ * the lane by itself.
+ */
+async function buildMergedPrSkillMessage({
+  organizationId,
+  ownerUserId,
+  repoFullName,
+  intent,
+  shadow,
+}: {
+  organizationId: string;
+  ownerUserId: string;
+  repoFullName: string;
+  intent: MergedPrIntent;
+  shadow: boolean;
+}): Promise<{ text: string; sourceMetadata: ThreadSourceMetadata } | null> {
+  const configured = await getRepoSkill({
+    db,
+    organizationId,
+    repoFullName,
+    skillName: PR_MERGED_SKILL_NAME,
+  });
+  if (!configured) return null;
+
+  const resolved = await resolveReviewSkill({
+    db,
+    organizationId,
+    repoFullName,
+    skillName: PR_MERGED_SKILL_NAME,
+    version: "latest",
+    fetchRepoOverride: buildRepoOverrideFetcher({
+      userId: ownerUserId,
+      repoFullName,
+      skillName: PR_MERGED_SKILL_NAME,
+    }),
+  });
+  // Every version failed validation: the resolver already logged it loudly.
+  if (!resolved) return null;
+
+  const trackerBlock = shadow
+    ? trackerContextNotice("Omitted: this installation is in shadow mode.")
+    : await buildTrackerBlockSafely({
+        organizationId,
+        ownerUserId,
+        repoFullName,
+        intent,
+      });
+
+  return {
+    text: [
+      renderSkillPlaceholders(resolved.body, {
+        repoFullName,
+        baseBranch: intent.baseBranch ?? "the default branch",
+      }),
+      buildTriggerBlock(repoFullName, intent),
+      trackerBlock,
+    ].join("\n\n"),
+    sourceMetadata: {
+      type: "automation-skill",
+      skillName: PR_MERGED_SKILL_NAME,
+      contentSha: resolved.contentSha,
+      source: resolved.source,
+      ...(resolved.versionId ? { versionId: resolved.versionId } : {}),
+    },
+  };
+}
+
+/**
+ * GitHub gives a webhook delivery ten seconds. A tracker that hangs must cost
+ * the audit its context, never the delivery — a timed-out delivery is retried
+ * and would create a second thread.
+ */
+const INTAKE_TRACKER_TIMEOUT_MS = 4_000;
+
+/**
+ * A misconfigured or unreachable tracker must not lose the task: the thread is
+ * still created and the finish executor reports the problem on the PR.
+ */
+async function buildTrackerBlockSafely({
+  organizationId,
+  ownerUserId,
+  repoFullName,
+  intent,
+}: {
+  organizationId: string;
+  ownerUserId: string;
+  repoFullName: string;
+  intent: MergedPrIntent;
+}): Promise<string> {
+  try {
+    const config = await resolveTrackerConfig({
+      db,
+      userId: ownerUserId,
+      organizationId,
+      repoFullName,
+    });
+    if (!config) {
+      return trackerContextNotice(
+        "No tracker is configured for this repository.",
+      );
+    }
+    return await buildTrackerContextBlock({
+      tracker: createTrackerClient(config, {
+        timeoutMs: INTAKE_TRACKER_TIMEOUT_MS,
+      }),
+      extraction: extractTicketKeys({
+        title: intent.title,
+        body: intent.body,
+        headBranch: intent.headBranch,
+        projects: config.projects,
+      }),
+    });
+  } catch (error) {
+    console.error("[mirror-intake] tracker context unavailable", {
+      repoFullName,
+      error: describeTrackerError(error),
+    });
+    return trackerContextNotice("Tracker unavailable.");
   }
 }
 
@@ -136,15 +293,26 @@ export async function createMirrorTask({
   const { prompt, githubPRNumber, githubIssueNumber, headBranch, baseBranch } =
     describeIntent(intent, repoFullName);
 
+  // Per-installation mode, folded with the deployment-level side-effects switch.
+  const shadow = effectiveShadow(mode);
+
+  const skillMessage =
+    intent.kind === "pr-merged"
+      ? await buildMergedPrSkillMessage({
+          organizationId,
+          ownerUserId,
+          repoFullName,
+          intent,
+          shadow,
+        })
+      : null;
+
   const message: DBUserMessage = {
     type: "user",
     model: null,
-    parts: [{ type: "text", text: prompt }],
+    parts: [{ type: "text", text: skillMessage?.text ?? prompt }],
     timestamp: new Date().toISOString(),
   };
-
-  // Per-installation mode, folded with the deployment-level side-effects switch.
-  const shadow = effectiveShadow(mode);
   console.log("[mirror-intake] creating task", {
     repoFullName,
     organizationId,
@@ -163,5 +331,8 @@ export async function createMirrorTask({
     githubPRNumber,
     githubIssueNumber,
     sourceType: "automation",
+    // Traceability + the finish hook's routing key: a thread stamped with the
+    // merged-PR skill is the one the audit executor acts on.
+    ...(skillMessage ? { sourceMetadata: skillMessage.sourceMetadata } : {}),
   });
 }

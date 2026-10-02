@@ -3,6 +3,7 @@ import { env } from "@terragon/env/pkg-shared";
 import { nanoid } from "nanoid";
 import {
   extractTerminalAgentText,
+  getMergeAuditStamp,
   isWorkFailedOutcome,
   maybePromoteSkillLastKnownGood,
 } from "./review-single-writer-finish";
@@ -210,5 +211,51 @@ describe("maybePromoteSkillLastKnownGood (real test DB)", () => {
         outcome: "posted",
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("getMergeAuditStamp — which threads the post-merge executor acts on (ADR-008)", () => {
+  const stamp = {
+    type: "automation-skill" as const,
+    skillName: "github-pr-merged",
+    contentSha: "sha",
+    source: "db-version",
+    versionId: "v1",
+  };
+
+  it("returns the stamp for a merged-PR skill thread", () => {
+    expect(
+      getMergeAuditStamp({ sourceMetadata: stamp, terminalCause: null }),
+    ).toEqual(stamp);
+    expect(getMergeAuditStamp({ sourceMetadata: stamp })).toEqual(stamp);
+  });
+
+  it("ignores every other thread, so reviews and mentions are untouched", () => {
+    expect(getMergeAuditStamp(null)).toBeNull();
+    expect(getMergeAuditStamp({ sourceMetadata: null })).toBeNull();
+    expect(
+      getMergeAuditStamp({
+        sourceMetadata: { ...stamp, skillName: "github-ops" },
+      }),
+    ).toBeNull();
+    expect(
+      getMergeAuditStamp({
+        sourceMetadata: {
+          type: "github-mention",
+          repoFullName: "o/r",
+          issueOrPrNumber: 1,
+          commentId: 1,
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it("skips an abandoned run: it never finished its audit", () => {
+    expect(
+      getMergeAuditStamp({
+        sourceMetadata: stamp,
+        terminalCause: "superseded",
+      }),
+    ).toBeNull();
   });
 });
