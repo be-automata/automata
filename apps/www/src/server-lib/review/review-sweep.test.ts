@@ -57,7 +57,10 @@ vi.mock("@terragon/review/state/head-review-guard", async (importOriginal) => {
     await importOriginal<
       typeof import("@terragon/review/state/head-review-guard")
     >();
-  return { ...actual, findBotReviewAtHead: vi.fn(actual.findBotReviewAtHead) };
+  return {
+    ...actual,
+    findAnyBotReviewAtCommit: vi.fn(actual.findAnyBotReviewAtCommit),
+  };
 });
 vi.mock("@terragon/shared/model/threads", () => ({
   getThreadChat: vi.fn(async () => ({ messages: [] })),
@@ -76,7 +79,7 @@ vi.mock("./execute-review-from-intent", async (importOriginal) => ({
 import { getThreadChat } from "@terragon/shared/model/threads";
 import { getOctokitForApp } from "@/lib/github";
 import { getPrHeadState } from "./octokit-review-client";
-import { findBotReviewAtHead } from "@terragon/review/state/head-review-guard";
+import { findAnyBotReviewAtCommit } from "@terragon/review/state/head-review-guard";
 import { runReviewSweep } from "./review-sweep";
 import {
   executeReviewFromIntent,
@@ -229,7 +232,7 @@ describe("runReviewSweep — addressing chat state across thread versions", () =
     await runReviewSweep();
     expect(getOctokitForApp).not.toHaveBeenCalled();
     expect(getPrHeadState).not.toHaveBeenCalled();
-    expect(findBotReviewAtHead).not.toHaveBeenCalled();
+    expect(findAnyBotReviewAtCommit).not.toHaveBeenCalled();
   });
 
   it("a v1 candidate never aborts the loop — the v0 sibling is still served", async () => {
@@ -299,6 +302,19 @@ describe("runReviewSweep — a degraded comment is silence, not a verdict (#224)
     // The other direction: this must not become a double-poster. A genuine
     // verdict at HEAD means the finish-hook did its job.
     prReviews.rows = [review()];
+    selected.rows = [candidate({ terminalCause: "timeout" })];
+
+    await runReviewSweep();
+
+    expect(executeReviewFromIntent).not.toHaveBeenCalled();
+  });
+
+  it("a DISMISSED bot verdict at HEAD still skips the candidate", async () => {
+    // The sweep sees threads whose finish hook already posted. When a person
+    // dismisses that verdict, the next hourly sweep must not post it again.
+    prReviews.rows = [
+      review({ state: "DISMISSED", dismissedAt: "2026-10-01T01:00:00Z" }),
+    ];
     selected.rows = [candidate({ terminalCause: "timeout" })];
 
     await runReviewSweep();

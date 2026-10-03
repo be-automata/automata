@@ -7,8 +7,8 @@
  * as reconcile-pr-reviews.ts already does).
  *
  * Unlike `findAllOutstandingBotChangesRequested` (which filters
- * `state === 'CHANGES_REQUESTED'`) and `findAnyBotReviewAtHead` (which omits the
- * `dismissedAt` filter), this guard matches a bot review at HEAD in ANY state —
+ * `state === 'CHANGES_REQUESTED'`) and `findAnyBotReviewAtCommit` below (which
+ * omits the `dismissedAt` filter), this guard matches a bot review at HEAD in ANY state —
  * APPROVED, CHANGES_REQUESTED, COMMENTED — that has not been dismissed. COMMENTED
  * is the verdict type that escaped every prior dedup layer and cannot be cleaned
  * up after the fact, so prevention at HEAD across all states is the only real fix.
@@ -54,6 +54,31 @@ export async function findBotReviewAtHead(
       r.user?.login === opts.botLogin &&
       r.commitId === opts.headSha &&
       r.dismissedAt === null,
+  );
+  return match ?? null;
+}
+
+/**
+ * Return the first bot review whose `commitId` matches `headSha`, INCLUDING a
+ * dismissed one. This answers "did the bot ever deliver a review at this
+ * commit?", where `findBotReviewAtHead` answers "is one in force there?".
+ *
+ * The two questions differ every time the PR advances: the reconciler dismisses
+ * the bot's older verdicts after each run, so every commit behind the newest
+ * reviewed one carries a DISMISSED review. Dismissal changes whether a verdict
+ * is in force, not whether it was delivered — a caller deciding whether to post
+ * AGAIN at a commit must use this one, or it re-posts the PR's verdict history.
+ *
+ * A dismissed review has lost its original state (GitHub reports `DISMISSED`),
+ * so do not compare the result's `state` to a verdict.
+ */
+export async function findAnyBotReviewAtCommit(
+  opts: FindBotReviewAtHeadOpts,
+): Promise<GitHubReview | null> {
+  if (!opts.headSha) return null;
+  const reviews = await opts.github.listReviews(opts.repo, opts.prNumber);
+  const match = reviews.find(
+    (r) => r.user?.login === opts.botLogin && r.commitId === opts.headSha,
   );
   return match ?? null;
 }

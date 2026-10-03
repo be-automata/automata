@@ -7,7 +7,10 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { findBotReviewAtHead } from "../../../src/review/state/head-review-guard";
+import {
+  findAnyBotReviewAtCommit,
+  findBotReviewAtHead,
+} from "../../../src/review/state/head-review-guard";
 import type {
   GitHubReview,
   ReviewGitHubClient,
@@ -145,5 +148,41 @@ describe("findBotReviewAtHead", () => {
       botLogin: "other-bot[bot]",
     });
     assert.equal(result?.id, 5);
+  });
+});
+
+describe("findAnyBotReviewAtCommit", () => {
+  const at = (reviews: GitHubReview[], headSha = HEAD) =>
+    findAnyBotReviewAtCommit({
+      github: fakeClient(reviews),
+      repo: "a/b",
+      prNumber: 1,
+      headSha,
+      botLogin: BOT,
+    });
+
+  it("matches a DISMISSED bot review at the commit", async () => {
+    const r = review({
+      id: 7,
+      state: "DISMISSED",
+      dismissedAt: "2026-06-12T17:00:00Z",
+    });
+    assert.equal((await at([r]))?.id, 7);
+  });
+
+  it("matches a bot review that is still in force", async () => {
+    assert.equal((await at([review({ id: 8, state: "APPROVED" })]))?.id, 8);
+  });
+
+  it("rejects a review at a different commit", async () => {
+    assert.equal(await at([review({ commitId: "another-sha" })]), null);
+  });
+
+  it("rejects a review by a human author", async () => {
+    assert.equal(await at([review({ user: { login: "some-human" } })]), null);
+  });
+
+  it("returns null when the sha is empty", async () => {
+    assert.equal(await at([review({ commitId: "" })], ""), null);
   });
 });
