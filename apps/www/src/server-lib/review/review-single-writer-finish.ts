@@ -87,6 +87,8 @@ type WorkFailedByOutcome = Record<ReviewFromIntentOutcome["outcome"], boolean> &
  *
  * Membership rationale, per entry:
  *  - `degraded_comment` / `post_failed` — the original two: no verdict applied.
+ *    Since ADR-009 `degraded_comment` means a no-verdict NOTICE went to the PR
+ *    conversation (never a review); its `cause` says why there was no verdict.
  *  - `skipped_stale_degrade` — withheld-warning is still a failed run: nothing
  *    reached GitHub, so telemetry is the ONLY signal an operator gets that an
  *    agent never emitted a verdict. Silent here would re-open the gap #107 is about.

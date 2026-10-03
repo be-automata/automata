@@ -1,9 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { executeReviewFromIntent } from "./execute-review-from-intent";
-import type {
-  GitHubReview,
-  ReviewGitHubClient,
-} from "@terragon/review/state/review-github-client";
+import type { GitHubReview } from "@terragon/review/state/review-github-client";
+import type { ReviewWriterClient } from "./review-notice";
+import { makeNoticeFake } from "./review-notice.fake";
 
 /**
  * Enterprise-hardening #1 (Phase 1.4) — exactly-once GitHub review post under
@@ -56,7 +55,8 @@ function makeStatefulGithub(headSha: string, bot: string) {
       body,
     });
   };
-  const client: ReviewGitHubClient & { reviews: GitHubReview[] } = {
+  const client: ReviewWriterClient & { reviews: GitHubReview[] } = {
+    ...makeNoticeFake(bot),
     reviews,
     listReviews: vi.fn(async () => reviews),
     submitReview: vi.fn(async (_repo, _pr, verdict, body) => {

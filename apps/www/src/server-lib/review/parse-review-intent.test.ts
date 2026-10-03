@@ -69,6 +69,43 @@ describe("parseReviewIntent", () => {
   });
 });
 
+describe("parseReviewIntent — unable_to_review (ADR-009)", () => {
+  it("reads a well-formed unable intent as NO verdict, attributed to the agent", () => {
+    const res = parseReviewIntent(
+      fenced({ verdict: "unable_to_review", reason: "no diff: base ref missing" }),
+    );
+    expect(res).toEqual({
+      ok: false,
+      source: "agent",
+      reason: "no diff: base ref missing",
+    });
+  });
+
+  it("carries the commit when the agent could name one", () => {
+    const res = parseReviewIntent(
+      fenced({ verdict: "unable_to_review", reason: "truncated", commit: "abc" }),
+    );
+    expect(res).toEqual({
+      ok: false,
+      source: "agent",
+      reason: "truncated",
+      commit: "abc",
+    });
+  });
+
+  it("an unable intent WITHOUT a reason is a parse failure, not an agent report", () => {
+    const res = parseReviewIntent(fenced({ verdict: "unable_to_review" }));
+    expect(res).toMatchObject({ ok: false, source: "parser" });
+  });
+
+  it("a parse failure is attributed to the parser", () => {
+    expect(parseReviewIntent("no json here")).toMatchObject({
+      ok: false,
+      source: "parser",
+    });
+  });
+});
+
 describe("toExecutorIntent", () => {
   it("maps summary→body and findings→comments", () => {
     const res = parseReviewIntent(fenced(validIntent));

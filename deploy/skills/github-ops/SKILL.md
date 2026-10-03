@@ -23,11 +23,32 @@ push. Obtain the diff yourself with git:
   `origin/<base>` and the clone is deepened to the merge-base, so this three-dot diff
   resolves OFFLINE (no gh, no token). Do NOT use `git diff HEAD~1...HEAD` — the clone is
   shallow (head-only) and HEAD~1 is the wrong delta for a re-review. If you genuinely
-  cannot obtain a diff (base ref missing), say so and choose `comment`.
+  cannot obtain a diff, follow "If you cannot review" below — do not pick a verdict.
 - `Read`/`Grep`/`Glob` — inspect any file at HEAD, not just the diffed lines.
 
 Do **not** attempt `gh` (it is denied and you have no credentials) and do **not**
 write files.
+
+## If you cannot review
+
+If git refuses to run, the base ref is missing, or the diff is truncated and you cannot
+read the rest with `Read`/`Grep`, you have not reviewed the change. Do **not** pick a
+verdict for code you could not read. Emit this block instead, as your final message:
+
+```json
+{
+  "verdict": "unable_to_review",
+  "reason": "`git diff origin/main...HEAD` failed: fatal: detected dubious ownership in repository",
+  "commit": "fb15616abc1234def5678901234567890abcdef0"
+}
+```
+
+- `reason`: the concrete failure in one or two sentences — quote the error. Required.
+- `commit`: the HEAD SHA if `git rev-parse HEAD` worked; omit the field if it did not.
+
+This is **not** a verdict and nothing is posted as a review: the control plane tells the
+PR author that this commit has no verdict and alerts an operator. Never use `approve`,
+`request_changes` or `comment` to report that you could not review.
 
 ## How you deliver your verdict (read this first)
 
@@ -66,8 +87,10 @@ this exact shape (the control-plane executor parses it and posts the review once
 Emit the block **once, as your final action**, then stop. Do not spawn sub-agents,
 do not run further tools after emitting.
 
-- `comment` is reserved ONLY for (a) draft PRs and (b) when you genuinely cannot reach
-  a verdict (insufficient context). It is NOT a softer stand-in for a verdict.
+- `comment` is reserved ONLY for (a) draft PRs and (b) surfacing findings that sit below
+  the repository's block floor. It is NOT a softer stand-in for a verdict, and it is NOT
+  how you report that you could not review — that is `unable_to_review` above. On a PR
+  that is ready for review, a `comment` with no findings is not posted as a review.
 - **Tag every finding with a `severity`** — `info`, `warning`, `error`, `critical`:
   - `critical` / `error` — a bug, security hole, data-loss risk, broken build/test, or
     an unaddressed prior change request. Blocks merge.
@@ -151,8 +174,9 @@ not checked it — `Read`/`Grep`/`Glob` it, then state it as fact or drop it.
 
 ## Hard rules
 
-- Base the verdict on the full diff. If `git diff` output is truncated, say so in
-  `summary` and choose `comment` rather than guessing.
+- Base the verdict on the full diff. If `git diff` output is truncated, read the rest
+  per file (`git diff origin/<base>...HEAD -- <path>`, `Read`); if you still cannot see
+  the whole change, emit `unable_to_review` rather than guessing.
 - Never choose `approve` for a PR you have questions about — raise them as findings.
 - If any finding is a blocker, or any prior change request is still unaddressed, you
   MUST choose `request_changes`. Never use `comment` to dodge a verdict when a blocker

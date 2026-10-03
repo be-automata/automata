@@ -42,6 +42,38 @@ describe("emit-skill contract ↔ parser (no drift)", () => {
 });
 
 /**
+ * ADR-009: the skill's `unable_to_review` example must parse as the agent's
+ * no-verdict report. If the example and the parser drift, an agent that follows
+ * the skill emits a block the parser reads as garbage — the PR author is told
+ * the run was unreadable instead of being told why no review was possible.
+ */
+describe("emit-skill unable_to_review example ↔ parser (no drift)", () => {
+  it("the SKILL.md unable example parses as a no-verdict report from the agent", () => {
+    const doc = readFileSync(SKILL_MD, "utf8");
+    const section = doc.slice(
+      doc.indexOf("## If you cannot review"),
+      doc.indexOf("## How you deliver your verdict"),
+    );
+    expect(section.length).toBeGreaterThan(0);
+    const res = parseReviewIntent(section);
+    expect(res).toMatchObject({ ok: false, source: "agent" });
+    if (!res.ok && res.source === "agent") {
+      expect(res.reason.length).toBeGreaterThan(0);
+      expect(typeof res.commit).toBe("string");
+    }
+  });
+
+  it("the unable example sits BEFORE the verdict example, which stays the last block", () => {
+    // parseReviewIntent reads the LAST json block; the loader and the first
+    // guard in this file both rely on that block being the verdict contract.
+    const doc = readFileSync(SKILL_MD, "utf8");
+    expect(doc.indexOf("## If you cannot review")).toBeLessThan(
+      doc.indexOf("## How you deliver your verdict"),
+    );
+  });
+});
+
+/**
  * Anti-drift guard #2: the seed must INLINE the methodology from the tracked
  * skill, never point the agent at a box-local path. The previous instruction
  * embedded `/Users/senior/.claude/skills/github-ops/SKILL.md` as literal text,

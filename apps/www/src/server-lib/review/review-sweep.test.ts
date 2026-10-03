@@ -12,6 +12,8 @@ import { describe, it, vi, beforeEach, expect } from "vitest";
 const selected: { rows: unknown[] } = { rows: [] };
 /** #224: the PR's existing reviews, as the sweep's one fetch sees them. */
 const prReviews: { rows: unknown[] } = { rows: [] };
+/** Whether the PR is a draft, as the sweep's head lookup reports it. */
+const prDraft = { value: false };
 
 vi.mock("@/lib/db", () => ({
   db: {
@@ -41,7 +43,10 @@ vi.mock("./octokit-review-client", () => ({
   createOctokitReviewClient: () => ({
     listReviews: async () => prReviews.rows,
   }),
-  getPrHeadSha: vi.fn(async () => HEAD),
+  getPrHeadState: vi.fn(async () => ({
+    headSha: HEAD,
+    isDraft: prDraft.value,
+  })),
 }));
 // #224: the REAL guard, wrapped in a spy. The thing under test is the
 // composition — "does the filtered snapshot reach the primitive" — so a mock
@@ -70,7 +75,7 @@ vi.mock("./execute-review-from-intent", async (importOriginal) => ({
 
 import { getThreadChat } from "@terragon/shared/model/threads";
 import { getOctokitForApp } from "@/lib/github";
-import { getPrHeadSha } from "./octokit-review-client";
+import { getPrHeadState } from "./octokit-review-client";
 import { findBotReviewAtHead } from "@terragon/review/state/head-review-guard";
 import { runReviewSweep } from "./review-sweep";
 import {
@@ -151,6 +156,21 @@ describe("runReviewSweep — which terminal runs it may speak for", () => {
     },
   );
 
+  // ADR-009: whether a bare `comment` is a verdict depends on the draft state,
+  // and the sweep is the only entry for a thread the finish hook never reached.
+  it.each([true, false])(
+    "hands the executor the PR's draft state (isDraft=%s)",
+    async (isDraft) => {
+      prDraft.value = isDraft;
+      selected.rows = [candidate()];
+      await runReviewSweep();
+      prDraft.value = false;
+      expect(executeReviewFromIntent).toHaveBeenCalledWith(
+        expect.objectContaining({ isDraft }),
+      );
+    },
+  );
+
   it("hands the executor the head the run was dispatched against", async () => {
     selected.rows = [candidate({ terminalCause: "timeout", reviewedSha: OLD })];
     await runReviewSweep();
@@ -208,7 +228,7 @@ describe("runReviewSweep — addressing chat state across thread versions", () =
     selected.rows = [candidate({ version: 1 })];
     await runReviewSweep();
     expect(getOctokitForApp).not.toHaveBeenCalled();
-    expect(getPrHeadSha).not.toHaveBeenCalled();
+    expect(getPrHeadState).not.toHaveBeenCalled();
     expect(findBotReviewAtHead).not.toHaveBeenCalled();
   });
 

@@ -4,10 +4,9 @@ import {
   toleranceToPolicy,
   DEFAULT_APPROVE_SEVERITY_POLICY,
 } from "@terragon/review/severity-policy";
-import type {
-  GitHubReview,
-  ReviewGitHubClient,
-} from "@terragon/review/state/review-github-client";
+import type { GitHubReview } from "@terragon/review/state/review-github-client";
+import type { ReviewWriterClient } from "./review-notice";
+import { makeNoticeFake } from "./review-notice.fake";
 
 /**
  * The load-bearing per-repo floor test (ADR-036 review floor): the SAME emitted
@@ -24,6 +23,7 @@ const HEAD = "head-sha";
 
 function makeGithub(reviews: GitHubReview[] = []) {
   return {
+    ...makeNoticeFake(),
     listReviews: vi.fn(async (_repo: string, _pr: number) => reviews),
     submitReview: vi.fn(
       async (
@@ -56,7 +56,7 @@ function makeGithub(reviews: GitHubReview[] = []) {
         _sha: string,
       ) => {},
     ),
-  } satisfies ReviewGitHubClient;
+  } satisfies ReviewWriterClient;
 }
 
 function fenced(obj: unknown): string {

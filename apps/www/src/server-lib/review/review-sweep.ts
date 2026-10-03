@@ -11,7 +11,7 @@ import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 import { findBotReviewAtHead } from "@terragon/review/state/head-review-guard";
 import {
   createOctokitReviewClient,
-  getPrHeadSha,
+  getPrHeadState,
 } from "./octokit-review-client";
 import {
   executeReviewFromIntent,
@@ -31,7 +31,7 @@ import {
  * with ZERO review, silently. This periodic sweep is the SECOND idempotent entry to
  * the SAME single writer: it finds terminal PR review-threads that never posted a
  * review and runs executeReviewFromIntent from the PERSISTED intent (real verdict;
- * degraded COMMENT only if absent/malformed). HEAD-guarded, so it never double-posts.
+ * a no-verdict notice in the PR conversation only if absent/malformed). HEAD-guarded, so it never double-posts.
  *
  * GRACE window: only threads terminal for longer than REVIEW_SWEEP_GRACE_MS are
  * considered, so the finish-hook (which completes in seconds) owns the normal path
@@ -118,13 +118,18 @@ export async function runReviewSweep(): Promise<void> {
         repo: c.repoFullName.split("/")[1]!,
       });
       const github = createOctokitReviewClient(octokit);
-      const currentHeadSha = await getPrHeadSha(
+      const { headSha: currentHeadSha, isDraft } = await getPrHeadState(
         octokit,
         c.repoFullName,
         c.prNumber,
       );
 
       // Already has a bot VERDICT at HEAD → the finish-hook handled it; skip.
+      //
+      // Since ADR-009 a no-verdict run leaves a conversation notice, not a
+      // review, so a NEW silent run cannot satisfy this guard at all. The filter
+      // stays for the degraded reviews posted before that, which open PRs still
+      // carry.
       //
       // #224: the filter is load-bearing, and its absence lost verdicts. A
       // degraded "could not be parsed" comment is a bot COMMENTED review at the
@@ -177,7 +182,10 @@ export async function runReviewSweep(): Promise<void> {
         botLogin: resolveBotLogin(),
         currentHeadSha,
         terminalText,
-        // Both flags gate the DEGRADED warning ONLY — never a verdict. An
+        // The same draft state the finish hook passes: it caps the floor at
+        // `comment` and decides whether a bare `comment` is a verdict at all.
+        isDraft,
+        // Both flags gate the NO-VERDICT notice ONLY — never a verdict. An
         // abandoned run (#125 C4 typed terminal) is deliberately still swept
         // rather than skipped outright: supersession marks a thread terminal
         // concurrently with cancellation, so a run that already persisted a
