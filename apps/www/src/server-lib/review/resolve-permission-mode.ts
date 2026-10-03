@@ -121,8 +121,10 @@ export async function resolvePermissionModeForDispatch({
  * the locked "MEMBER" default via
  * `resolveComposedTrustedAuthorThreshold(undefined, undefined)` — exactly
  * today's behavior for the review-severity axis.
+ * Exported for resolve-review-agent.ts, which reuses it for the phase 4
+ * runTests trust gate.
  */
-async function resolveTrustedAuthorThreshold({
+export async function resolveTrustedAuthorThreshold({
   db,
   organizationId,
   repoFullName,
