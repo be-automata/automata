@@ -248,6 +248,9 @@ export async function getOctokitForApp({
 }
 
 const GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token";
+// The refresh runs inline on repo lookups; a hung github.com connection must
+// fail fast so callers fall back instead of stalling.
+const GITHUB_TOKEN_REFRESH_TIMEOUT_MS = 10_000;
 
 function expiresInToDate(seconds: unknown): Date | null {
   return typeof seconds === "number" && seconds > 0
@@ -275,6 +278,7 @@ export async function refreshGitHubUserTokenViaOAuth(
       grant_type: "refresh_token",
       refresh_token: refreshToken,
     }),
+    signal: AbortSignal.timeout(GITHUB_TOKEN_REFRESH_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`GitHub token refresh failed: HTTP ${response.status}`);

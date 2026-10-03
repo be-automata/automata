@@ -50,6 +50,22 @@ describe("refreshGitHubUserTokenViaOAuth", () => {
     const body = new URLSearchParams(init.body as URLSearchParams);
     expect(body.get("grant_type")).toBe("refresh_token");
     expect(body.get("refresh_token")).toBe("ghr_old");
+    // Bounded: a hung github.com must not stall the inline refresh.
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("rejects when the request times out, so callers can fall back", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockRejectedValue(
+          new DOMException("The operation timed out.", "TimeoutError"),
+        ),
+    );
+    await expect(refreshGitHubUserTokenViaOAuth("ghr_old")).rejects.toThrow(
+      /timed out/,
+    );
   });
 
   // GitHub reports a dead refresh token as HTTP 200 + { error }.
