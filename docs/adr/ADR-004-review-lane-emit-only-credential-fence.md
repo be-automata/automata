@@ -67,6 +67,12 @@ below is what any implementation must preserve.
    failure through telemetry (`skipped_stale_degrade`, `workFailed`) instead of onto the
    PR. This narrows the marker, never the verdict: a parsed intent from such a run still
    posts, at the commit it reviewed. Exactly-once and no-second-writer are unchanged.
+   **Scoped 2026-10-03:** exactly-once is counted per commit and is permanent. A verdict the
+   bot delivered at a commit and later dismissed (the reconciler dismisses older verdicts on
+   every run) was still delivered; dismissal changes whether it is in force, not whether it
+   was posted. The replay guard, the supersession guard and the sweep's HEAD guard all ask
+   "did the bot ever review this commit?" (`findAnyBotReviewAtCommit`), so the hourly sweep
+   cannot re-post a PR's dismissed verdicts and cannot undo a person's dismissal.
 
 ## Anti-deviation invariants (what the protected harness must always hold)
 

@@ -8,7 +8,7 @@ import { isAbandonedTerminalCause } from "@terragon/shared/model/terminal-cause"
 import { getPostHogServer } from "@/lib/posthog-server";
 import { getOctokitForApp } from "@/lib/github";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
-import { findBotReviewAtHead } from "@terragon/review/state/head-review-guard";
+import { findAnyBotReviewAtCommit } from "@terragon/review/state/head-review-guard";
 import {
   createOctokitReviewClient,
   getPrHeadState,
@@ -133,7 +133,7 @@ export async function runReviewSweep(): Promise<void> {
       //
       // #224: the filter is load-bearing, and its absence lost verdicts. A
       // degraded "could not be parsed" comment is a bot COMMENTED review at the
-      // sha, so `findBotReviewAtHead` — which matches every state — used to
+      // sha, so the guard — which matches every state — used to
       // satisfy this guard. Because the sweep iterates PER THREAD, the verdict
       // that went missing belonged to a DIFFERENT thread: run A degrades at X
       // and leaves the comment; run B produces a real verdict at X but its
@@ -155,8 +155,14 @@ export async function runReviewSweep(): Promise<void> {
       // check lives in the one shared helper, so this guard and the two in
       // execute-review-from-intent.ts cannot diverge — divergence is what
       // produced #213, #221 and this issue.
+      //
+      // A DISMISSED verdict at HEAD also skips. The sweep sees every terminal
+      // review thread in the window, including ones whose finish hook posted
+      // normally, so a guard that required a review still in force re-posted a
+      // verdict within the hour of a person dismissing it. Dismissal is that
+      // person's decision; a delivered verdict is never delivered twice.
       const reviews = await github.listReviews(c.repoFullName, c.prNumber);
-      const existing = await findBotReviewAtHead({
+      const existing = await findAnyBotReviewAtCommit({
         github: snapshotOf(reviews.filter((r) => !isDegradedComment(r))),
         repo: c.repoFullName,
         prNumber: c.prNumber,

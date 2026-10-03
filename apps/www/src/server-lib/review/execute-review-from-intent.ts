@@ -7,7 +7,7 @@ import {
   executeReviewIntent,
   type ReviewIntentOutcome,
 } from "@terragon/review/state/review-intent-executor";
-import { findBotReviewAtHead } from "@terragon/review/state/head-review-guard";
+import { findAnyBotReviewAtCommit } from "@terragon/review/state/head-review-guard";
 import {
   applyApproveSeverityFloor,
   DEFAULT_APPROVE_SEVERITY_POLICY,
@@ -49,6 +49,9 @@ import {
  *    we have already delivered a verdict for posts nothing (#213 — a worker restart
  *    re-posted 12 stale verdicts onto PR #208 in 63 seconds). A legacy DEGRADED
  *    review is silence, not a verdict, and does not suppress a later real one.
+ *    A DISMISSED verdict was still delivered: the reconciler dismisses our older
+ *    verdicts on every run, so reading dismissal as "never delivered" re-posted
+ *    them from the hourly sweep whenever HEAD had no verdict.
  *  - AT MOST ONE NOTICE PER COMMIT: a thread re-driven through the state
  *    machine (a redelivered run that restarts the agent, a resume, a follow-up)
  *    re-reads the SAME silent terminal text and would report it again at the
@@ -204,8 +207,8 @@ export async function executeReviewFromIntent(
     // twelve already-delivered verdicts onto PR #208 in 63 seconds, each at its
     // own original sha.
     //
-    // The signal that DOES separate them is whether a non-dismissed review by us
-    // already exists AT `emitted.commit`:
+    // The signal that DOES separate them is whether a review by us already
+    // exists AT `emitted.commit`, dismissed or not:
     //   - present  → we already said this; the reader has it. Drop the replay.
     //   - absent   → never delivered. Post it (the marked COMMENT below), because
     //                losing a first-and-only finding is worse than this bug.
@@ -214,9 +217,13 @@ export async function executeReviewFromIntent(
     // author — deliberately NOT from a new DB column (prod schema migration here
     // is manual and the prod DATABASE_URL is a write-only Worker secret).
     //
-    // `findBotReviewAtHead` is named for its usual caller but is parameterised by
-    // an arbitrary sha, so passing `emitted.commit` asks exactly "has the bot
-    // already reviewed THIS commit?" across all states including COMMENTED.
+    // DISMISSED COUNTS AS PRESENT. Only a formal verdict can be dismissed, so a
+    // dismissed review of ours is always a verdict we delivered, and the
+    // reconciler dismisses every older one as the PR advances. The guard used to
+    // require a review still in force; the hourly sweep then re-posted each
+    // older commit's verdict as a stale COMMENT whenever HEAD had none.
+    // `findAnyBotReviewAtCommit` asks "did the bot ever review THIS commit?"
+    // across all states including COMMENTED and DISMISSED.
     //
     // ONE round trip serves BOTH guards: the primitive's only I/O is listReviews,
     // so a single snapshot answers "already reviewed `emitted.commit`?" and
@@ -252,7 +259,7 @@ export async function executeReviewFromIntent(
     // do not re-inline either filter.
     const verdicts = reviews.filter((r) => !isDegradedComment(r));
 
-    const alreadyAtIntentCommit = await findBotReviewAtHead({
+    const alreadyAtIntentCommit = await findAnyBotReviewAtCommit({
       github: snapshotOf(verdicts),
       repo: repoFullName,
       prNumber,
@@ -277,7 +284,7 @@ export async function executeReviewFromIntent(
       };
     }
 
-    const newerAtHead = await findBotReviewAtHead({
+    const newerAtHead = await findAnyBotReviewAtCommit({
       github: snapshotOf(verdicts),
       repo: repoFullName,
       prNumber,

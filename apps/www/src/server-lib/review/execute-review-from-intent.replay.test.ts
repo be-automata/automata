@@ -19,12 +19,14 @@ import { makeNoticeFake } from "./review-notice.fake";
  * head, which is false both for a replay and for a late first delivery — so on
  * 2026-09-29 one restart re-posted twelve already-delivered verdicts onto PR
  * #208 in 63 seconds. The guard under test asks instead whether we already have
- * a non-dismissed review AT `emitted.commit`.
+ * a review AT `emitted.commit`, dismissed or not.
  *
  * These scenarios pin the guard AND the deliveries it must not eat: a
  * stale-but-first finding still reaches the PR, a lookup failure posts anyway,
- * and neither another bot's review, a dismissed review, nor an earlier run's
- * degraded "could not be parsed" silence counts as a verdict we already gave.
+ * and neither another bot's review nor an earlier run's degraded "could not be
+ * parsed" silence counts as a verdict we already gave. A DISMISSED review of
+ * ours does count: it was delivered, and the reconciler dismisses our older
+ * verdicts on every run.
  * A lost first-and-only verdict is worse than a rare duplicate.
  */
 
@@ -354,9 +356,10 @@ describe("#213 replay guard — a redelivered run does not re-post a delivered v
     expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(OLD);
   });
 
-  it("a DISMISSED review at that commit does not suppress our delivery", async () => {
-    // Intended: the primitive filters `dismissedAt === null`, and a dismissed
-    // review is no longer in force — so the verdict is restored rather than lost.
+  it("a DISMISSED review at that commit was still delivered — the replay posts nothing", async () => {
+    // The reconciler dismisses our older verdicts as the PR advances, so every
+    // commit behind the newest reviewed one looks like this. Reading dismissal
+    // as "never delivered" re-posted them from the hourly sweep.
     const github = makeGithub([
       reviewAt(OLD, {
         state: "DISMISSED",
@@ -372,9 +375,62 @@ describe("#213 replay guard — a redelivered run does not re-post a delivered v
       terminalText: RC_AT_OLD,
     });
 
-    expect(res).toMatchObject({ outcome: "posted_stale_comment" });
-    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
-    expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(OLD);
+    expect(res).toMatchObject({
+      outcome: "skipped_duplicate_at_commit",
+      commit: OLD,
+    });
+    expect(github.submitReview).not.toHaveBeenCalled();
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+  });
+
+  it("the sweep over a PR's older threads re-posts none of their dismissed verdicts", async () => {
+    // Two pushes were reviewed and their verdicts dismissed by the reconciler;
+    // HEAD has no verdict (its run never dispatched). The sweep runs the writer
+    // once per older thread.
+    const OLDER = "older-sha";
+    const dismissed = {
+      state: "DISMISSED",
+      dismissedAt: "2026-10-03T20:35:00Z",
+    } as const;
+    const github = makeGithub([
+      reviewAt(OLDER, { id: 1, ...dismissed }),
+      reviewAt(OLD, { id: 2, ...dismissed }),
+    ]);
+    for (const commit of [OLDER, OLD]) {
+      const res = await executeReviewFromIntent({
+        github,
+        repoFullName: REPO,
+        prNumber: PR,
+        botLogin: BOT,
+        currentHeadSha: HEAD,
+        terminalText: RC_AT_OLD.replace(OLD, commit),
+      });
+      expect(res).toMatchObject({ outcome: "skipped_duplicate_at_commit" });
+    }
+
+    expect(github.submitReview).not.toHaveBeenCalled();
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+    expect(github.comments).toHaveLength(0);
+  });
+
+  it("a DISMISSED verdict at HEAD means HEAD was served — an undelivered stale intent is superseded", async () => {
+    const github = makeGithub([
+      reviewAt(HEAD, {
+        state: "DISMISSED",
+        dismissedAt: "2026-09-29T01:00:00Z",
+      }),
+    ]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: RC_AT_OLD,
+    });
+
+    expect(res).toMatchObject({ outcome: "skipped_superseded" });
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
   });
 
   it("a prior DEGRADED comment at that commit is silence, not a delivered verdict", async () => {
