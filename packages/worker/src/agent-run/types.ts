@@ -23,6 +23,23 @@ export type EgressPolicyShape = {
   allowlist: string[];
 };
 
+/**
+ * Effective review-agent settings (phase 4), resolved control-plane-side for
+ * PR-review runs only. Structural mirror of the www-side `ReviewAgentDispatch`
+ * per this file's header rule.
+ */
+export type ReviewAgentShape = {
+  mode: "classic" | "orchestrated";
+  batteries: string[];
+  runTests: boolean;
+  runTestsDowngradedReason?: "fork" | "untrusted-author";
+  commandTimeoutMs: number;
+  /**
+   * Limits the lead reviewer's turns. Sub-agent turns are not counted, so this is not a cost limit.
+   */
+  maxTurns?: number;
+};
+
 // `type` (not `interface`): Hatchet's task input/output generics require an
 // implicit index signature (JsonObject), which TS infers for type-literal aliases
 // but not for interfaces.
@@ -69,6 +86,11 @@ export type AgentRunInput = {
    * (egress-proxy.ts) and daemon-env points the child at it.
    */
   egressPolicy?: EgressPolicyShape;
+  /**
+   * Phase 4 pass-through; unread until Phase 5; old workers ignore it (no
+   * runtime input validation). PR-review runs only.
+   */
+  reviewAgent?: ReviewAgentShape;
   /**
    * #125 (C2 stamps, C1 consumes): per-PR concurrency key
    * `${orgId}/${repo}/${prNumber}`. Present ONLY on runs dispatched to a

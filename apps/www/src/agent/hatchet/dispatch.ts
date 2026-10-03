@@ -17,6 +17,10 @@ import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import type { ThreadSourceMetadata } from "@terragon/shared/db/types";
 import { resolveEgressPolicy } from "@/server-lib/egress/resolve-egress-policy";
 import {
+  resolveReviewAgentForDispatch,
+  type ReviewAgentDispatch,
+} from "@/server-lib/review/resolve-review-agent";
+import {
   resolveSupersedePolicy,
   normalizeRepo,
   type SupersedePolicy,
@@ -162,6 +166,16 @@ export interface AgentRunInput {
    * forward proxy (egress-proxy.ts) and daemon-env points the child at it.
    */
   egressPolicy?: EgressPolicyShape;
+  /**
+   * Phase 4, PR-review runs only: the effective review-agent settings,
+   * resolved LIVE at dispatch (repo row → '*' org default → system default).
+   * Classic = exactly today (runTests false, 60000 ms, no maxTurns). runTests
+   * is already downgraded for fork / cross-repo / untrusted PRs, with the
+   * reason recorded. maxTurns: Limits the lead reviewer's turns. Sub-agent turns are not counted, so this is not a cost limit.
+   * Absent for non-review runs (byte-identical legacy payload). Consumed by
+   * the worker in Phase 5; mirrored structurally in packages/worker types.
+   */
+  reviewAgent?: ReviewAgentDispatch;
   /**
    * #125/#127 review runs only: the per-PR concurrency key,
    * `${orgId}/${normalizedRepo}/${prNumber}`. The worker variants' per-PR CEL
@@ -490,16 +504,42 @@ export async function dispatchAgentRun({
     // SNAPSHOT, and the metadata is enriched. Supersession of prior runs is
     // ENGINE-ONLY (#165, ADR-007): www owns no cancel path — the variant's
     // per-PR strategy supersedes, and the C4 sweep reconciles.
-    const plan = await planSupersede({
-      reviewContext,
-      thread,
-      threadId,
-      threadChatId,
-      orgId,
-      repoFullName,
-      deliveryId,
-    });
-    const input: AgentRunInput = { ...baseInput, ...plan?.inputExtension };
+    // Phase 4: review runs also resolve the review-agent settings, in
+    // parallel with the plan. An invalid stored value throws into the catch
+    // below, which revokes the minted token — no local catch.
+    const [plan, reviewAgent] = await Promise.all([
+      planSupersede({
+        reviewContext,
+        thread,
+        threadId,
+        threadChatId,
+        orgId,
+        repoFullName,
+        deliveryId,
+      }),
+      reviewContext
+        ? resolveReviewAgentForDispatch({
+            db,
+            organizationId: reviewContext.organizationId,
+            repoFullName,
+            trustContext: thread?.trustContext ?? null,
+          })
+        : Promise.resolve(undefined),
+    ]);
+    if (reviewAgent) {
+      console.log("[hatchet] review-agent settings", {
+        threadId,
+        mode: reviewAgent.mode,
+        runTests: reviewAgent.runTests,
+        runTestsDowngradedReason: reviewAgent.runTestsDowngradedReason,
+        commandTimeoutMs: reviewAgent.commandTimeoutMs,
+      });
+    }
+    const input: AgentRunInput = {
+      ...baseInput,
+      ...plan?.inputExtension,
+      ...(reviewAgent ? { reviewAgent } : {}),
+    };
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry
     // absorbs transients; only a FINAL failure lands in the catch below.
