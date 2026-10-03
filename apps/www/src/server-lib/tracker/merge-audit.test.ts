@@ -620,6 +620,30 @@ describe("rendering", () => {
     expect(sanitizeInline("mail user@example.com", 100)).toContain("@​");
   });
 
+  it("sanitizeInline cuts at a word boundary, never mid-word", () => {
+    const clipped = sanitizeInline(
+      "release.yml refuses, without pushing or deploying: short SHA, no development record found",
+      60,
+    );
+    expect(clipped).toBe(
+      "release.yml refuses, without pushing or deploying: short…",
+    );
+    expect(clipped.length).toBeLessThanOrEqual(60);
+    // A token with no usable space is hard-cut at the limit.
+    expect(sanitizeInline("x".repeat(80), 20)).toBe(`${"x".repeat(19)}…`);
+  });
+
+  it("the tracker comment ends with a link to the full audit on the PR", () => {
+    const text = renderTrackerComment({
+      prUrl: "https://github.com/acme-inc/acme-core/pull/7",
+      mergedBy: null,
+      result: result(),
+    });
+    expect(text.split("\n").at(-1)).toBe(
+      "[Full audit with evidence on the PR](https://github.com/acme-inc/acme-core/pull/7)",
+    );
+  });
+
   it("an unchanged stage is said once, not three times", () => {
     const body = renderPrComment({
       prNumber: 7,
