@@ -10,6 +10,7 @@ import {
 } from "@terragon/utils/encryption";
 import {
   getGitHubUserAccessTokenOrThrow,
+  GitHubTokenRefreshError,
   GitHubUserTokenRefresher,
 } from "./user";
 
@@ -223,7 +224,7 @@ describe("getGitHubUserAccessTokenOrThrow refresh", () => {
         encryptionKey: ENCRYPTION_KEY,
         refresh,
       }),
-    ).rejects.toThrow(/bad_refresh_token/);
+    ).rejects.toThrow(GitHubTokenRefreshError);
     const after = await readGitHubAccount(userId);
     expect(after.accessToken).toBe(before.accessToken);
     expect(after.refreshToken).toBe(before.refreshToken);

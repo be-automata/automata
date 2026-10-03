@@ -19,6 +19,7 @@ import {
   getGitHubAccountIdForUser,
   getGitHubUserAccessTokenOrThrow,
   getUserSettings,
+  GitHubTokenRefreshError,
   RefreshedGitHubUserToken,
 } from "@terragon/shared/model/user";
 import { env } from "@terragon/env/apps-www";
@@ -322,12 +323,12 @@ async function getUsableGitHubUserToken({
       refresh: refreshGitHubUserTokenViaOAuth,
     });
   } catch (error) {
-    // Expected for email/password accounts; logged so a failing refresh is
-    // visible instead of silently emptying every repo list.
-    console.warn(
-      `No usable GitHub user token for ${userId}:`,
-      error instanceof Error ? error.message : error,
-    );
+    // Only a refresh that was attempted and failed is worth a log line. No
+    // account, no token, or an expired token with nothing to refresh it with is
+    // the normal state for email/password users and runs on every repo lookup.
+    if (error instanceof GitHubTokenRefreshError) {
+      console.warn(`GitHub token refresh failed for ${userId}:`, error.message);
+    }
     return null;
   }
 }

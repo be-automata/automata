@@ -114,7 +114,8 @@ describe("expired GitHub user token in the token helpers", () => {
     expect(getInstallationToken).not.toHaveBeenCalled();
   });
 
-  it("still falls back to the App installation token when the refresh fails", async () => {
+  it("still falls back to the App installation token when the refresh fails, and logs it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     mockGitHubTokenResponse({ error: "bad_refresh_token" });
     await expect(
       getGitHubTokenForBackground({
@@ -122,5 +123,25 @@ describe("expired GitHub user token in the token helpers", () => {
         repoFullName: "be-automata/automata",
       }),
     ).resolves.toBe("mock-install-token");
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("GitHub token refresh failed"),
+      expect.stringContaining("bad_refresh_token"),
+    );
+    warn.mockRestore();
+  });
+
+  // Review finding: email/password users have no GitHub account, and every repo
+  // lookup for them used to log a warning, burying real refresh failures.
+  it("does not log for a user with no GitHub account", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await db.delete(schema.account).where(eq(schema.account.userId, userId));
+    await expect(
+      getGitHubTokenForBackground({
+        userId,
+        repoFullName: "be-automata/automata",
+      }),
+    ).resolves.toBe("mock-install-token");
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
