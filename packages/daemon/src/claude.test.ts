@@ -68,6 +68,9 @@ describe("claudeCommand — permissionMode policy (phase-2 single-writer)", () =
 });
 
 describe("stripGithubCredentials — review-run token withhold (single-writer)", () => {
+  // Mirrors the real worker layout (packages/worker/src/agent-run/daemon-env.ts):
+  // extraheader first, then credential.helper, user.*, and (agent-uid mode)
+  // safe.directory last.
   const fullEnv = {
     PATH: "/usr/bin",
     HOME: "/home/x",
@@ -76,21 +79,150 @@ describe("stripGithubCredentials — review-run token withhold (single-writer)",
     GITHUB_TOKEN: "ghs_write_token",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_SYSTEM: "/dev/null",
-    GIT_CONFIG_COUNT: "4",
+    GIT_CONFIG_COUNT: "5",
     GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
     GIT_CONFIG_VALUE_0: "AUTHORIZATION: basic <base64-token>",
     GIT_CONFIG_KEY_1: "credential.helper",
     GIT_CONFIG_VALUE_1: "",
+    GIT_CONFIG_KEY_2: "user.name",
+    GIT_CONFIG_VALUE_2: "automata-ai-bot[bot]",
+    GIT_CONFIG_KEY_3: "user.email",
+    GIT_CONFIG_VALUE_3: "bot@users.noreply.github.com",
+    GIT_CONFIG_KEY_4: "safe.directory",
+    GIT_CONFIG_VALUE_4: "/work/run",
     GIT_AUTHOR_NAME: "automata-ai-bot[bot]",
   };
+
+  function gitConfigEntries(
+    env: Record<string, string | undefined>,
+  ): Array<[string, string | undefined]> {
+    return Object.keys(env)
+      .filter((key) => /^GIT_CONFIG_KEY_\d+$/.test(key))
+      .map((key) => {
+        const index = key.slice("GIT_CONFIG_KEY_".length);
+        return [env[key] ?? "", env[`GIT_CONFIG_VALUE_${index}`]];
+      });
+  }
+
+  function hasNoGitConfigGroup(env: Record<string, string | undefined>) {
+    return !Object.keys(env).some((key) =>
+      /^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$/.test(key),
+    );
+  }
+
+  it("keeps non-credential git config (safe.directory, user.*, credential.helper) renumbered from 0 (#228)", () => {
+    const out = stripGithubCredentials(fullEnv);
+    expect(out.GIT_CONFIG_COUNT).toBe("4");
+    expect(out.GIT_CONFIG_KEY_0).toBe("credential.helper");
+    expect(out.GIT_CONFIG_VALUE_0).toBe("");
+    expect(out.GIT_CONFIG_KEY_1).toBe("user.name");
+    expect(out.GIT_CONFIG_VALUE_1).toBe("automata-ai-bot[bot]");
+    expect(out.GIT_CONFIG_KEY_2).toBe("user.email");
+    expect(out.GIT_CONFIG_VALUE_2).toBe("bot@users.noreply.github.com");
+    expect(out.GIT_CONFIG_KEY_3).toBe("safe.directory");
+    expect(out.GIT_CONFIG_VALUE_3).toBe("/work/run");
+    expect(out.GIT_CONFIG_KEY_4).toBeUndefined();
+    expect(out.GIT_CONFIG_VALUE_4).toBeUndefined();
+  });
 
   it("removes every GitHub credential vector (token + git extraheader auth)", () => {
     const out = stripGithubCredentials(fullEnv);
     expect(out.GH_TOKEN).toBeUndefined();
     expect(out.GITHUB_TOKEN).toBeUndefined();
+    for (const [key, value] of gitConfigEntries(out)) {
+      expect(key).not.toMatch(/extraheader$/i);
+      expect(key).not.toMatch(/insteadof$/i);
+      expect(value ?? "").not.toContain("ghs_write_token");
+      expect(value ?? "").not.toContain("AUTHORIZATION");
+    }
+  });
+
+  it("removes extraheader and insteadOf / pushInsteadOf keys case-insensitively", () => {
+    const credentialKeys = [
+      "HTTP.https://github.com/.ExtraHeader",
+      "http.extraheader",
+      "url.http://broker:8080/.insteadOf",
+      "url.https://x-access-token:T@github.com/.InsteadOf",
+      "url.x.pushInsteadOf",
+    ];
+    const env: Record<string, string | undefined> = {
+      GIT_CONFIG_COUNT: String(credentialKeys.length + 1),
+    };
+    credentialKeys.forEach((key, i) => {
+      env[`GIT_CONFIG_KEY_${i}`] = key;
+      env[`GIT_CONFIG_VALUE_${i}`] = "credential-bearing";
+    });
+    env[`GIT_CONFIG_KEY_${credentialKeys.length}`] = "safe.directory";
+    env[`GIT_CONFIG_VALUE_${credentialKeys.length}`] = "/work/run";
+
+    const out = stripGithubCredentials(env);
+    expect(out.GIT_CONFIG_COUNT).toBe("1");
+    expect(out.GIT_CONFIG_KEY_0).toBe("safe.directory");
+    expect(out.GIT_CONFIG_VALUE_0).toBe("/work/run");
+    expect(gitConfigEntries(out)).toHaveLength(1);
+  });
+
+  it("drops an entry whose value embeds the GitHub token under any key", () => {
+    const out = stripGithubCredentials({
+      GH_TOKEN: "ghs_write_token",
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: "remote.origin.url",
+      GIT_CONFIG_VALUE_0:
+        "https://x-access-token:ghs_write_token@github.com/o/r",
+      GIT_CONFIG_KEY_1: "safe.directory",
+      GIT_CONFIG_VALUE_1: "/work/run",
+    });
+    expect(out.GIT_CONFIG_COUNT).toBe("1");
+    expect(out.GIT_CONFIG_KEY_0).toBe("safe.directory");
+    expect(out.GIT_CONFIG_KEY_1).toBeUndefined();
+  });
+
+  it("removes GIT_CONFIG_COUNT when no entry survives", () => {
+    const out = stripGithubCredentials({
+      PATH: "/usr/bin",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+      GIT_CONFIG_VALUE_0: "AUTHORIZATION: basic <base64-token>",
+    });
     expect(out.GIT_CONFIG_COUNT).toBeUndefined();
-    expect(out.GIT_CONFIG_KEY_0).toBeUndefined();
-    expect(out.GIT_CONFIG_VALUE_0).toBeUndefined();
+    expect(hasNoGitConfigGroup(out)).toBe(true);
+    expect(out.PATH).toBe("/usr/bin");
+  });
+
+  it.each([
+    ["non-numeric COUNT", { GIT_CONFIG_COUNT: "abc" }],
+    ["negative COUNT", { GIT_CONFIG_COUNT: "-1" }],
+    ["missing COUNT", {}],
+  ])("fails closed on %s (drops the whole group)", (_label, countEnv) => {
+    const out = stripGithubCredentials({
+      ...countEnv,
+      GIT_CONFIG_KEY_0: "safe.directory",
+      GIT_CONFIG_VALUE_0: "/work/run",
+      GIT_CONFIG_KEY_1: "http.https://github.com/.extraheader",
+      GIT_CONFIG_VALUE_1: "AUTHORIZATION: basic <base64-token>",
+    });
+    expect(hasNoGitConfigGroup(out)).toBe(true);
+  });
+
+  it("fails closed when an index below COUNT has no key", () => {
+    const out = stripGithubCredentials({
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_1: "safe.directory",
+      GIT_CONFIG_VALUE_1: "/work/run",
+    });
+    expect(hasNoGitConfigGroup(out)).toBe(true);
+  });
+
+  it("drops orphan entries at indices >= COUNT", () => {
+    const out = stripGithubCredentials({
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "safe.directory",
+      GIT_CONFIG_VALUE_0: "/work/run",
+      GIT_CONFIG_KEY_1: "core.sshCommand",
+      GIT_CONFIG_VALUE_1: "orphan",
+    });
+    expect(out.GIT_CONFIG_COUNT).toBe("1");
+    expect(out.GIT_CONFIG_KEY_0).toBe("safe.directory");
     expect(out.GIT_CONFIG_KEY_1).toBeUndefined();
     expect(out.GIT_CONFIG_VALUE_1).toBeUndefined();
   });
@@ -105,9 +237,11 @@ describe("stripGithubCredentials — review-run token withhold (single-writer)",
     expect(out.GIT_AUTHOR_NAME).toBe("automata-ai-bot[bot]");
   });
 
-  it("is pure (does not mutate the input)", () => {
+  it("is pure (does not mutate the input, including surviving entries)", () => {
     const copy = { ...fullEnv };
-    stripGithubCredentials(fullEnv);
+    const out = stripGithubCredentials(fullEnv);
     expect(fullEnv).toEqual(copy);
+    expect(out).not.toBe(fullEnv);
+    expect(out.GIT_CONFIG_COUNT).toBe("4");
   });
 });

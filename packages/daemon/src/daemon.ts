@@ -46,14 +46,44 @@ type ActiveProcessState = {
   pollInterval: NodeJS.Timeout | null;
 };
 
+const GIT_CONFIG_GROUP_KEY_PATTERN = /^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$/;
+const GIT_CONFIG_COUNT_PATTERN = /^\d+$/;
+// Git config keys that carry or route a GitHub credential: the auth header
+// (`http.<url>.extraheader`, any URL scope, any case) and URL rewrites
+// (`url.<base>.insteadOf` / `pushInsteadOf`) that point git at a credentialed
+// endpoint (e.g. the sandbox credential broker). pushInsteadOf is the same
+// rewrite channel for pushes — dropped as defense-in-depth.
+const CREDENTIAL_GIT_CONFIG_KEY_PATTERNS: readonly RegExp[] = [
+  /^http\.(.+\.)?extraheader$/i,
+  /^url\..+\.(push)?insteadof$/i,
+];
+
+function isCredentialGitConfigKey(key: string): boolean {
+  return CREDENTIAL_GIT_CONFIG_KEY_PATTERNS.some((pattern) =>
+    pattern.test(key),
+  );
+}
+
 /**
  * Strip every GitHub credential from a review-run agent env (single-writer, ADR-036
- * phase-2): the installation token (GH_TOKEN/GITHUB_TOKEN) and the git http.extraheader
- * that base64-carries it (the indexed GIT_CONFIG_COUNT/KEY_n/VALUE_n auth entries that
- * buildDaemonEnv injects). GIT_CONFIG_GLOBAL/SYSTEM (=/dev/null host isolation, which
- * keeps the osxkeychain helper unreachable) are intentionally KEPT. Combined with the
- * worktree already being cloned token-free (provision.ts one-shot -c extraheader), the
- * review agent then has NO reachable GitHub credential — gh/curl/git-push all lack auth.
+ * phase-2, ADR-004 emit-only fence): the installation token (GH_TOKEN/GITHUB_TOKEN)
+ * and every credential-bearing entry of the indexed GIT_CONFIG_COUNT/KEY_n/VALUE_n
+ * group that buildDaemonEnv injects — `http.*extraheader` (base64-carries the token
+ * or the broker bearer) and `url.*.insteadOf` / `pushInsteadOf` (credential routing),
+ * matched case-insensitively — plus any entry whose value embeds the token.
+ *
+ * Every OTHER git-config entry (credential.helper="", user.name/email,
+ * safe.directory) is KEPT, in its original order, renumbered contiguously from 0 with
+ * GIT_CONFIG_COUNT set to the kept count (removed when none survive). #228: the
+ * whole-group strip used to drop safe.directory too, and with GIT_CONFIG_GLOBAL=
+ * /dev/null nothing restores it, so agent-uid review runs died on "dubious
+ * ownership". A malformed or absent COUNT, or a missing KEY_i below COUNT, fails
+ * closed (the whole group is dropped); orphan indices >= COUNT are dropped.
+ *
+ * GIT_CONFIG_GLOBAL/SYSTEM (=/dev/null host isolation, which keeps the osxkeychain
+ * helper unreachable) are intentionally KEPT. Combined with the worktree already
+ * being cloned token-free (provision.ts one-shot -c extraheader), the review agent
+ * then has NO reachable GitHub credential — gh/curl/git-push all lack auth.
  * Pure; returns a new object.
  */
 export function stripGithubCredentials(
@@ -62,9 +92,35 @@ export function stripGithubCredentials(
   const out: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(env)) {
     if (key === "GH_TOKEN" || key === "GITHUB_TOKEN") continue;
-    if (/^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$/.test(key)) continue;
+    if (GIT_CONFIG_GROUP_KEY_PATTERN.test(key)) continue;
     out[key] = value;
   }
+
+  const rawCount = env.GIT_CONFIG_COUNT;
+  if (rawCount === undefined || !GIT_CONFIG_COUNT_PATTERN.test(rawCount)) {
+    return out;
+  }
+  const count = Number(rawCount);
+  const tokens = [env.GH_TOKEN, env.GITHUB_TOKEN].filter(
+    (token): token is string => token !== undefined && token !== "",
+  );
+
+  const kept: Array<[string, string]> = [];
+  for (let i = 0; i < count; i++) {
+    const key = env[`GIT_CONFIG_KEY_${i}`];
+    if (key === undefined) return out;
+    const value = env[`GIT_CONFIG_VALUE_${i}`] ?? "";
+    if (isCredentialGitConfigKey(key)) continue;
+    if (tokens.some((token) => value.includes(token))) continue;
+    kept.push([key, value]);
+  }
+
+  if (kept.length === 0) return out;
+  out.GIT_CONFIG_COUNT = String(kept.length);
+  kept.forEach(([key, value], j) => {
+    out[`GIT_CONFIG_KEY_${j}`] = key;
+    out[`GIT_CONFIG_VALUE_${j}`] = value;
+  });
   return out;
 }
 
