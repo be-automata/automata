@@ -25,6 +25,7 @@ import { getEnvironments } from "@/server-actions/get-environments";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { getGHAppInstallUrl } from "@/lib/gh-app-url";
+import { githubReconnectActionItem } from "@/components/repo-branch-selector";
 import {
   useServerActionMutation,
   useServerActionQuery,
@@ -63,6 +64,11 @@ export function CreateEnvironmentButton() {
   );
 
   const repos = repoData?.repos || [];
+  // An expired GitHub connection lists ZERO repos, including ones that already
+  // have an environment. Say so instead of "No repositories found.", which
+  // points the user at the App-install page, a fix that cannot work.
+  const githubTokenMissing = repoData?.githubTokenMissing === true;
+  const reconnectGithub = githubReconnectActionItem("/environments");
   const filteredRepos = repos.filter((repo) =>
     repo.full_name.toLowerCase().includes(searchQuery.toLowerCase()),
   );
@@ -134,6 +140,21 @@ export function CreateEnvironmentButton() {
                         Loading repositories...
                       </span>
                     </div>
+                  </div>
+                ) : githubTokenMissing ? (
+                  <div className="min-h-[56px] flex flex-col items-center justify-center gap-3 p-4">
+                    <div className="text-center text-sm text-muted-foreground">
+                      Your GitHub connection expired. Reconnect to list your
+                      repos.
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={reconnectGithub.action}
+                    >
+                      {reconnectGithub.icon}
+                      {reconnectGithub.label}
+                    </Button>
                   </div>
                 ) : filteredRepos.length === 0 ? (
                   <div className="min-h-[56px] flex items-center justify-center p-4">

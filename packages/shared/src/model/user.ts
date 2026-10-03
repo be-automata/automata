@@ -3,17 +3,31 @@ import { DB } from "../db";
 import * as schema from "../db/schema";
 import { publishBroadcastUserMessage } from "../broadcast-server";
 import { UserInfoServerSide, UserSettings } from "../db/types";
-import { decryptTokenWithBackwardsCompatibility } from "@terragon/utils/encryption";
+import {
+  decryptTokenWithBackwardsCompatibility,
+  encryptToken,
+} from "@terragon/utils/encryption";
 
-export async function getGitHubUserAccessTokenOrThrow({
-  db,
-  userId,
-  encryptionKey,
-}: {
-  db: DB;
-  userId: string;
-  encryptionKey: string;
-}) {
+export interface RefreshedGitHubUserToken {
+  accessToken: string;
+  accessTokenExpiresAt: Date | null;
+  refreshToken: string | null;
+  refreshTokenExpiresAt: Date | null;
+}
+
+/**
+ * Exchanges a (plaintext) GitHub refresh token for a new token pair. Injected so
+ * this package never holds the OAuth client secret.
+ */
+export type GitHubUserTokenRefresher = (
+  refreshToken: string,
+) => Promise<RefreshedGitHubUserToken>;
+
+function isExpired(at: Date | null): boolean {
+  return at !== null && at.getTime() <= Date.now();
+}
+
+async function getGitHubAccountRow({ db, userId }: { db: DB; userId: string }) {
   const githubAccounts = await db
     .select()
     .from(schema.account)
@@ -24,10 +38,26 @@ export async function getGitHubUserAccessTokenOrThrow({
       ),
     )
     .execute();
-  if (githubAccounts.length === 0) {
+  return githubAccounts[0];
+}
+
+export async function getGitHubUserAccessTokenOrThrow({
+  db,
+  userId,
+  encryptionKey,
+  refresh,
+}: {
+  db: DB;
+  userId: string;
+  encryptionKey: string;
+  // When provided, an expired access token is renewed with the stored refresh
+  // token instead of being rejected.
+  refresh?: GitHubUserTokenRefresher;
+}) {
+  const githubAccount = await getGitHubAccountRow({ db, userId });
+  if (!githubAccount) {
     throw new Error("No GitHub account found");
   }
-  const githubAccount = githubAccounts[0]!;
 
   if (!githubAccount.accessToken) {
     throw new Error("No GitHub access token found");
@@ -37,13 +67,19 @@ export async function getGitHubUserAccessTokenOrThrow({
   // credential: passing it to the API yields "Bad credentials", and callers that
   // prefer a user token over the App installation token (getOctokitForBackground,
   // getGitHubTokenForBackground) would pick the dead one and break background
-  // work. Treat it as absent so those callers fall back. A NULL expiry means the
-  // provider issues non-expiring tokens — those stay valid.
-  if (
-    githubAccount.accessTokenExpiresAt &&
-    githubAccount.accessTokenExpiresAt.getTime() <= Date.now()
-  ) {
-    throw new Error("GitHub access token expired");
+  // work. Refresh it if we can, otherwise treat it as absent so those callers
+  // fall back. A NULL expiry means the provider issues non-expiring tokens —
+  // those stay valid.
+  if (isExpired(githubAccount.accessTokenExpiresAt)) {
+    if (!refresh) {
+      throw new Error("GitHub access token expired");
+    }
+    return refreshGitHubUserAccessTokenOrThrow({
+      db,
+      account: githubAccount,
+      encryptionKey,
+      refresh,
+    });
   }
 
   // Decrypt the token if it's encrypted, otherwise return as-is (backwards compatibility)
@@ -51,6 +87,86 @@ export async function getGitHubUserAccessTokenOrThrow({
     githubAccount.accessToken,
     encryptionKey,
   );
+}
+
+async function refreshGitHubUserAccessTokenOrThrow({
+  db,
+  account,
+  encryptionKey,
+  refresh,
+}: {
+  db: DB;
+  account: typeof schema.account.$inferSelect;
+  encryptionKey: string;
+  refresh: GitHubUserTokenRefresher;
+}): Promise<string> {
+  const storedRefreshToken = account.refreshToken;
+  if (!storedRefreshToken || isExpired(account.refreshTokenExpiresAt)) {
+    throw new Error("GitHub access token expired");
+  }
+
+  // GitHub rotates refresh tokens: the one we send is dead once it is used. If a
+  // concurrent request already rotated it, our exchange fails or our write
+  // loses the compare-and-swap below. Either way the winner's token is in the
+  // row, so re-read it before giving up.
+  const readWinnerOrThrow = async (cause: string): Promise<string> => {
+    const current = await getGitHubAccountRow({ db, userId: account.userId });
+    if (
+      current?.accessToken &&
+      current.accessToken !== account.accessToken &&
+      !isExpired(current.accessTokenExpiresAt)
+    ) {
+      return decryptTokenWithBackwardsCompatibility(
+        current.accessToken,
+        encryptionKey,
+      );
+    }
+    throw new Error(`GitHub access token expired; refresh failed: ${cause}`);
+  };
+
+  let refreshed: RefreshedGitHubUserToken;
+  try {
+    refreshed = await refresh(
+      decryptTokenWithBackwardsCompatibility(storedRefreshToken, encryptionKey),
+    );
+  } catch (error) {
+    return readWinnerOrThrow(
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+
+  const updated = await db
+    .update(schema.account)
+    .set({
+      accessToken: encryptToken(refreshed.accessToken, encryptionKey),
+      accessTokenExpiresAt: refreshed.accessTokenExpiresAt,
+      // GitHub returns a new refresh token on every exchange; keep the old one
+      // only if a provider ever omits it.
+      refreshToken: refreshed.refreshToken
+        ? encryptToken(refreshed.refreshToken, encryptionKey)
+        : storedRefreshToken,
+      refreshTokenExpiresAt: refreshed.refreshToken
+        ? refreshed.refreshTokenExpiresAt
+        : account.refreshTokenExpiresAt,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.account.id, account.id),
+        eq(schema.account.refreshToken, storedRefreshToken),
+      ),
+    )
+    .returning({ id: schema.account.id });
+  if (updated.length === 0) {
+    // Someone rewrote the row (re-link or a racing refresh). Prefer what is
+    // stored; the token we were just issued is still a valid fallback.
+    try {
+      return await readWinnerOrThrow("refresh token rotated concurrently");
+    } catch {
+      return refreshed.accessToken;
+    }
+  }
+  return refreshed.accessToken;
 }
 
 export async function getUser({ db, userId }: { db: DB; userId: string }) {
