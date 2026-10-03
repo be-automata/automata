@@ -31,6 +31,11 @@ export async function GET(): Promise<NextResponse> {
       reviewDraftPrs: r.reviewDraftPrs,
       supersedePolicy: r.supersedePolicy,
       recheckOnComplete: r.recheckOnComplete,
+      reviewMode: r.reviewMode,
+      reviewBatteries: r.reviewBatteries,
+      reviewRunTests: r.reviewRunTests,
+      reviewCommandTimeoutS: r.reviewCommandTimeoutS,
+      reviewMaxTurns: r.reviewMaxTurns,
       updatedAt: r.updatedAt,
     })),
   });

@@ -271,3 +271,104 @@ describe("/api/review-settings/default — reviewDraftPrs (org draft toggle)", (
     expect(row?.reviewDraftPrs).toBe(false);
   });
 });
+
+describe("/api/review-settings/default — review-agent fields (phase 4)", () => {
+  let userId: string;
+  let orgId: string;
+
+  async function actor(role: "owner" | "admin" | "member") {
+    userId = (await createTestUser({ db })).user.id;
+    const org = await createTestOrganization({ db, userId, role });
+    orgId = org.organization.id;
+    vi.mocked(getTenantContextOrNull).mockResolvedValue({
+      userId,
+      organizationId: orgId,
+    });
+  }
+
+  async function sentinel() {
+    return getRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+    });
+  }
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("an org admin sets the org default; GET returns all five fields", async () => {
+    await actor("admin");
+    const res = await put({
+      reviewMode: "orchestrated",
+      reviewBatteries: ["gsd-reviewers"],
+      expectedUpdatedAt: null,
+    });
+    expect(res.status).toBe(200);
+    const got = (await (await GET()).json()) as {
+      setting: Record<string, unknown>;
+    };
+    expect(got.setting).toMatchObject({
+      reviewMode: "orchestrated",
+      reviewBatteries: ["gsd-reviewers"],
+      reviewRunTests: null,
+      reviewCommandTimeoutS: null,
+      reviewMaxTurns: null,
+    });
+  });
+
+  it("a member is 403'd and nothing is stored", async () => {
+    await actor("member");
+    const res = await put({ reviewMode: "orchestrated" });
+    expect(res.status).toBe(403);
+    expect(await sentinel()).toBeUndefined();
+  });
+
+  it.each([
+    ["reviewCommandTimeoutS", 601],
+    ["reviewBatteries", ["nope"]],
+  ])("400 on %s = %j, nothing stored", async (field, value) => {
+    await actor("admin");
+    const res = await put({ [field]: value });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain(field);
+    expect(await sentinel()).toBeUndefined();
+  });
+
+  it("a review-agent write does not clobber supersede/draft values, and vice versa", async () => {
+    await actor("admin");
+    await put({ supersedePolicy: "complete-run-queue", reviewDraftPrs: true });
+    await put({ reviewMode: "orchestrated", reviewMaxTurns: 80 });
+    let row = await sentinel();
+    expect(row?.supersedePolicy).toBe("complete-run-queue");
+    expect(row?.reviewDraftPrs).toBe(true);
+    expect(row?.reviewMode).toBe("orchestrated");
+    await put({ supersedePolicy: "newest-wins" });
+    row = await sentinel();
+    expect(row?.reviewMode).toBe("orchestrated");
+    expect(row?.reviewMaxTurns).toBe(80);
+  });
+
+  it("null with the current version clears back to inherit", async () => {
+    await actor("admin");
+    await put({ reviewMode: "orchestrated" });
+    const current = (await sentinel())!.updatedAt.toISOString();
+    const res = await put({ reviewMode: null, expectedUpdatedAt: current });
+    expect(res.status).toBe(200);
+    const got = (await (await GET()).json()) as {
+      setting: { reviewMode: string | null };
+    };
+    expect(got.setting.reviewMode).toBeNull();
+  });
+
+  it("a stale expectedUpdatedAt on a review-agent write → 409, value untouched", async () => {
+    await actor("owner");
+    await put({ reviewMode: "orchestrated" });
+    const current = (await sentinel())!.updatedAt;
+    const res = await put({
+      reviewMode: "classic",
+      expectedUpdatedAt: new Date(current.getTime() - 60_000).toISOString(),
+    });
+    expect(res.status).toBe(409);
+    expect((await sentinel())?.reviewMode).toBe("orchestrated");
+  });
+});

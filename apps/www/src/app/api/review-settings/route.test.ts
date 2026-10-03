@@ -84,4 +84,42 @@ describe("GET /api/review-settings", () => {
     expect(json.settings[0]!.blockTolerance).toBe("info");
     expect(json.settings[0]!.reviewDraftPrs).toBe(false);
   });
+
+  it("phase 4: lists a repo row that carries only review-agent overrides, with the five fields", async () => {
+    vi.mocked(listRepoReviewSettings).mockResolvedValue([
+      {
+        id: "s2",
+        organizationId: ORG,
+        repoFullName: "acme/agents",
+        blockTolerance: "warning",
+        reviewDraftPrs: null,
+        trustedAuthorThreshold: null,
+        egressPolicy: null,
+        egressAllowlist: null,
+        supersedePolicy: null,
+        recheckOnComplete: false,
+        reviewMode: "orchestrated",
+        reviewBatteries: ["somnio-review"],
+        reviewRunTests: true,
+        reviewCommandTimeoutS: 120,
+        reviewMaxTurns: 30,
+        updatedByUserId: USER,
+        createdAt: new Date(),
+        updatedAt: new Date("2026-10-03T00:00:00Z"),
+      },
+    ]);
+    const res = await GET();
+    const json = (await res.json()) as {
+      settings: Array<Record<string, unknown>>;
+    };
+    expect(json.settings).toHaveLength(1);
+    expect(json.settings[0]).toMatchObject({
+      repoFullName: "acme/agents",
+      reviewMode: "orchestrated",
+      reviewBatteries: ["somnio-review"],
+      reviewRunTests: true,
+      reviewCommandTimeoutS: 120,
+      reviewMaxTurns: 30,
+    });
+  });
 });
