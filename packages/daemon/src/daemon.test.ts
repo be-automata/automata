@@ -210,7 +210,7 @@ describe("daemon", () => {
     expect(killChildProcessGroupMock).not.toHaveBeenCalled();
   });
 
-  it("review-mode run strips every GitHub credential from the agent env; a normal run keeps them (#65 wiring)", async () => {
+  it("review-mode run strips every GitHub credential from the agent env but keeps safe.directory (#228); a normal run keeps them (#65 wiring)", async () => {
     // Pin the ACTUAL security property at its decision point (daemon.ts:
     // withholdGitCredentials = permissionMode === "review"), not just the
     // stripGithubCredentials helper in isolation: a review agent (emit-only,
@@ -219,9 +219,11 @@ describe("daemon", () => {
     // keeps them. These enter the child env via process.env, so stub them there.
     vi.stubEnv("GH_TOKEN", "ghs_secret_token");
     vi.stubEnv("GITHUB_TOKEN", "ghs_secret_token");
-    vi.stubEnv("GIT_CONFIG_COUNT", "1");
+    vi.stubEnv("GIT_CONFIG_COUNT", "2");
     vi.stubEnv("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader");
     vi.stubEnv("GIT_CONFIG_VALUE_0", "AUTHORIZATION: basic REDACTED");
+    vi.stubEnv("GIT_CONFIG_KEY_1", "safe.directory");
+    vi.stubEnv("GIT_CONFIG_VALUE_1", "/work/run-228");
 
     await daemon.start();
     await writeToUnixSocket({
@@ -238,9 +240,17 @@ describe("daemon", () => {
     >;
     expect(reviewEnv.GH_TOKEN).toBeUndefined();
     expect(reviewEnv.GITHUB_TOKEN).toBeUndefined();
-    expect(reviewEnv.GIT_CONFIG_COUNT).toBeUndefined();
-    expect(reviewEnv.GIT_CONFIG_KEY_0).toBeUndefined();
-    expect(reviewEnv.GIT_CONFIG_VALUE_0).toBeUndefined();
+    // #228: safe.directory survives the strip (GIT_CONFIG_GLOBAL=/dev/null
+    // means nothing else restores it), renumbered to index 0.
+    expect(reviewEnv.GIT_CONFIG_COUNT).toBe("1");
+    expect(reviewEnv.GIT_CONFIG_KEY_0).toBe("safe.directory");
+    expect(reviewEnv.GIT_CONFIG_VALUE_0).toBe("/work/run-228");
+    expect(reviewEnv.GIT_CONFIG_KEY_1).toBeUndefined();
+    expect(reviewEnv.GIT_CONFIG_VALUE_1).toBeUndefined();
+    for (const value of Object.values(reviewEnv)) {
+      expect(value ?? "").not.toContain("AUTHORIZATION");
+      expect(value ?? "").not.toContain("ghs_secret_token");
+    }
 
     // End the review run, then a normal-mode run keeps the credentials.
     spawnCommandLineMock.mock.calls[0]![1].onClose?.(0);
