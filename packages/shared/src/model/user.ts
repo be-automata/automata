@@ -16,10 +16,6 @@ export interface RefreshedGitHubUserToken {
 }
 
 /**
- * Exchanges a (plaintext) GitHub refresh token for a new token pair. Injected so
- * this package never holds the OAuth client secret.
- */
-/**
  * The access token had expired and renewing it failed. Distinct from "no GitHub
  * account / no token" so callers can surface real refresh failures without
  * logging every email/password user.
@@ -31,6 +27,10 @@ export class GitHubTokenRefreshError extends Error {
   }
 }
 
+/**
+ * Exchanges a (plaintext) GitHub refresh token for a new token pair. Injected so
+ * this package never holds the OAuth client secret.
+ */
 export type GitHubUserTokenRefresher = (
   refreshToken: string,
 ) => Promise<RefreshedGitHubUserToken>;
