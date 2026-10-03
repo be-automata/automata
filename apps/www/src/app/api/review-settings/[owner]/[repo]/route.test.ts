@@ -6,6 +6,7 @@ import {
   upsertRepoReviewSetting,
   removeRepoReviewSetting,
   getRepoReviewSetting,
+  RepoReviewSettingConflictError,
 } from "@terragon/shared/model/repo-review-settings";
 
 // #125 C6: these cases exercise validation/DTO shape; the permission gate has
@@ -286,5 +287,144 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
     const res = await DELETE(putReq({ blockTolerance: "error" }), { params });
     expect(res.status).toBe(401);
     expect(removeRepoReviewSetting).not.toHaveBeenCalled();
+  });
+
+  describe("review-agent fields (phase 4)", () => {
+    it("sets only the sent field and returns all five in the DTO", async () => {
+      const res = await PUT(putReq({ reviewMode: "orchestrated" }), {
+        params,
+      });
+      expect(res.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({ patch: { reviewMode: "orchestrated" } }),
+      );
+      const json = (await res.json()) as { setting: Record<string, unknown> };
+      for (const key of [
+        "reviewMode",
+        "reviewBatteries",
+        "reviewRunTests",
+        "reviewCommandTimeoutS",
+        "reviewMaxTurns",
+      ]) {
+        expect(key in json.setting).toBe(true);
+      }
+    });
+
+    it("null clears each field back to inherit", async () => {
+      const cleared = {
+        reviewMode: null,
+        reviewBatteries: null,
+        reviewRunTests: null,
+        reviewCommandTimeoutS: null,
+        reviewMaxTurns: null,
+      };
+      const res = await PUT(putReq(cleared), { params });
+      expect(res.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({ patch: cleared }),
+      );
+    });
+
+    it.each([
+      ["reviewMode", "turbo"],
+      ["reviewBatteries", ["nope"]],
+      ["reviewBatteries", ["gstack-review", "gstack-review"]],
+      ["reviewBatteries", "gstack-review"],
+      ["reviewRunTests", "yes"],
+      ["reviewCommandTimeoutS", 59],
+      ["reviewCommandTimeoutS", 601],
+      ["reviewCommandTimeoutS", 90.5],
+      ["reviewMaxTurns", 0],
+      ["reviewMaxTurns", 501],
+    ])("400 on %s = %j, nothing written", async (field, value) => {
+      const res = await PUT(putReq({ [field]: value }), { params });
+      expect(res.status).toBe(400);
+      const json = (await res.json()) as { error: string };
+      expect(json.error).toContain(field);
+      expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
+    });
+
+    it("the empty-patch 400 names the review-agent fields", async () => {
+      const res = await PUT(putReq({}), { params });
+      expect(res.status).toBe(400);
+      const json = (await res.json()) as { error: string };
+      expect(json.error).toContain("review-agent field");
+    });
+
+    it("a review-agent-only first write uses the whole-row fence", async () => {
+      const res = await PUT(
+        putReq({ reviewMaxTurns: 40, expectedUpdatedAt: null }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      const call = vi.mocked(upsertRepoReviewSetting).mock.calls[0]![0];
+      expect(call.expectRowAbsent).toBe(true);
+      expect(call.expectAbsentSupersedeOverride).toBeUndefined();
+      expect(call.expectedUpdatedAt).toBeUndefined();
+    });
+
+    it("a mixed first write keeps the supersede fence", async () => {
+      const res = await PUT(
+        putReq({
+          supersedePolicy: "newest-wins",
+          reviewMode: "classic",
+          expectedUpdatedAt: null,
+        }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      const call = vi.mocked(upsertRepoReviewSetting).mock.calls[0]![0];
+      expect(call.expectAbsentSupersedeOverride).toBe(true);
+      expect(call.expectRowAbsent).toBeUndefined();
+    });
+
+    it("409 with currentUpdatedAt when the review-agent write loses the CAS", async () => {
+      const current = new Date("2026-10-03T12:00:00.000Z");
+      vi.mocked(upsertRepoReviewSetting).mockRejectedValue(
+        new RepoReviewSettingConflictError(),
+      );
+      vi.mocked(getRepoReviewSetting).mockResolvedValue({
+        id: "s1",
+        organizationId: ORG,
+        repoFullName: "acme/widgets",
+        blockTolerance: "warning",
+        reviewDraftPrs: null,
+        trustedAuthorThreshold: null,
+        egressPolicy: null,
+        egressAllowlist: null,
+        supersedePolicy: null,
+        recheckOnComplete: false,
+        reviewMode: "orchestrated",
+        reviewBatteries: null,
+        reviewRunTests: null,
+        reviewCommandTimeoutS: null,
+        reviewMaxTurns: null,
+        updatedByUserId: USER,
+        createdAt: current,
+        updatedAt: current,
+      });
+      const res = await PUT(
+        putReq({
+          reviewMode: "classic",
+          expectedUpdatedAt: "2026-10-03T11:00:00.000Z",
+        }),
+        { params },
+      );
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: "conflict",
+        currentUpdatedAt: current.toISOString(),
+      });
+    });
+
+    it("the audit event lists the changed review-agent keys", async () => {
+      await PUT(putReq({ reviewMode: "orchestrated" }), { params });
+      expect(captureMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "review_tolerance_set",
+          properties: expect.objectContaining({ changed: ["reviewMode"] }),
+        }),
+      );
+    });
   });
 });

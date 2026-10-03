@@ -3,12 +3,18 @@ import {
   isSupersedePolicy,
   SUPERSEDE_POLICIES,
 } from "@terragon/shared/model/repo-review-settings";
+import {
+  REVIEW_AGENT_FIELDS,
+  findReviewAgentFieldError,
+  type ReviewAgentFieldsPatch,
+} from "@terragon/shared/model/review-agent-settings";
 
 /**
  * #125 C6 pieces shared by the two writers of the repo_review_settings table
  * (the per-repo route and the org-default sentinel route). Both the accepted
  * values and the 409 body shape are protocol with the client's ConflictError
- * parser — one copy here so they can't drift.
+ * parser — one copy here so they can't drift. Phase 4: this module also owns
+ * the review-agent family's body parsing for both writers.
  */
 
 export type SupersedePatch = {
@@ -75,4 +81,30 @@ export function parseReviewDraftPrs(body: {
     };
   }
   return { reviewDraftPrs: body.reviewDraftPrs };
+}
+
+export type ReviewAgentPatch = ReviewAgentFieldsPatch;
+
+/**
+ * Validate the review-agent fields of a PUT body (phase 4). Copies only the
+ * review-agent keys that are present; null clears (= inherit). Returns the
+ * patch or a 400 naming the first invalid field.
+ */
+export function parseReviewAgentPatch(
+  body: Record<string, unknown>,
+): { patch: ReviewAgentPatch } | { errorResponse: NextResponse } {
+  const raw: Record<string, unknown> = {};
+  for (const field of REVIEW_AGENT_FIELDS) {
+    if (body[field] !== undefined) {
+      raw[field] = body[field];
+    }
+  }
+  const error = findReviewAgentFieldError(raw);
+  if (error !== undefined) {
+    return {
+      errorResponse: NextResponse.json({ error }, { status: 400 }),
+    };
+  }
+  // findReviewAgentFieldError has checked every present value's type.
+  return { patch: raw as ReviewAgentPatch };
 }

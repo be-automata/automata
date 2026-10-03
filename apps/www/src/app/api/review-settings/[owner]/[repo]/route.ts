@@ -8,9 +8,12 @@ import {
   getRepoReviewSetting,
 } from "@terragon/shared/model/repo-review-settings";
 import {
+  parseReviewAgentPatch,
   parseReviewDraftPrs,
   parseSupersedePatch,
+  type ReviewAgentPatch,
 } from "../../supersede-route-shared";
+import { REVIEW_AGENT_FIELDS } from "@terragon/shared/model/review-agent-settings";
 import { isOrgAdmin } from "@/lib/org-role";
 import { checkRepoAdmin } from "@/lib/repo-admin";
 import {
@@ -35,7 +38,7 @@ function repoFromParams(owner: string, repo: string): string {
 
 /**
  * #125 C6 two-level permission for repo-level writes (all three settings of
- * the family): an ORG admin may write any repo's override; anyone else must
+ * the family, plus the phase 4 review-agent family): an ORG admin may write any repo's override; anyone else must
  * administer THAT repo on GitHub (caller's own token; fail-closed). Returns
  * a NextResponse to send, or null when allowed.
  */
@@ -89,6 +92,11 @@ export async function PUT(
     reviewDraftPrs?: unknown;
     supersedePolicy?: unknown;
     recheckOnComplete?: unknown;
+    reviewMode?: unknown;
+    reviewBatteries?: unknown;
+    reviewRunTests?: unknown;
+    reviewCommandTimeoutS?: unknown;
+    reviewMaxTurns?: unknown;
     expectedUpdatedAt?: unknown;
   };
   try {
@@ -102,7 +110,7 @@ export async function PUT(
     reviewDraftPrs?: boolean | null;
     supersedePolicy?: string | null;
     recheckOnComplete?: boolean;
-  } = {};
+  } & ReviewAgentPatch = {};
   if (body.blockTolerance !== undefined) {
     if (!isBlockTolerance(body.blockTolerance)) {
       return NextResponse.json(
@@ -121,16 +129,14 @@ export async function PUT(
   const supersede = parseSupersedePatch(body);
   if ("errorResponse" in supersede) return supersede.errorResponse;
   Object.assign(patch, supersede.patch);
-  if (
-    patch.blockTolerance === undefined &&
-    patch.reviewDraftPrs === undefined &&
-    patch.supersedePolicy === undefined &&
-    patch.recheckOnComplete === undefined
-  ) {
+  const reviewAgent = parseReviewAgentPatch(body);
+  if ("errorResponse" in reviewAgent) return reviewAgent.errorResponse;
+  Object.assign(patch, reviewAgent.patch);
+  if (Object.keys(patch).length === 0) {
     return NextResponse.json(
       {
         error:
-          "provide blockTolerance, reviewDraftPrs, supersedePolicy and/or recheckOnComplete",
+          "provide blockTolerance, reviewDraftPrs, supersedePolicy, recheckOnComplete and/or a review-agent field",
       },
       { status: 400 },
     );
@@ -140,7 +146,8 @@ export async function PUT(
   const repoFullName = repoFromParams(owner, repo);
 
   // #125 C6: two-level permission — previously ANY member with an active org
-  // could write. Applies to all three settings of the family.
+  // could write. Applies to all three settings of the family and to the
+  // phase 4 review-agent family.
   const denied = await requireRepoWriteAccess({
     userId: ctx.userId,
     organizationId: ctx.organizationId,
@@ -154,7 +161,17 @@ export async function PUT(
   // a silent last-write-wins.
   // `expectedUpdatedAt: null` is the FIRST-WRITE fence: the caller read "no
   // override yet" and the write must only apply while that is still true.
-  const expectAbsentSupersedeOverride = body.expectedUpdatedAt === null;
+  // Phase 4: a review-agent-only first write is sent only when the repo has
+  // no row at all, so it takes the whole-row fence — the per-family
+  // supersede fence would let a racing review-agent first write slip
+  // through. Exactly one fence is ever passed.
+  const firstWrite = body.expectedUpdatedAt === null;
+  const reviewAgentOnly = Object.keys(patch).every((key) =>
+    (REVIEW_AGENT_FIELDS as readonly string[]).includes(key),
+  );
+  const expectRowAbsent = firstWrite && reviewAgentOnly ? true : undefined;
+  const expectAbsentSupersedeOverride =
+    firstWrite && !reviewAgentOnly ? true : undefined;
   const expectedUpdatedAt =
     typeof body.expectedUpdatedAt === "string"
       ? new Date(body.expectedUpdatedAt)
@@ -175,6 +192,7 @@ export async function PUT(
       updatedByUserId: ctx.userId,
       expectedUpdatedAt,
       expectAbsentSupersedeOverride,
+      expectRowAbsent,
     });
   } catch (error) {
     if (error instanceof RepoReviewSettingConflictError) {
@@ -217,6 +235,11 @@ export async function PUT(
       reviewDraftPrs: row.reviewDraftPrs,
       supersedePolicy: row.supersedePolicy,
       recheckOnComplete: row.recheckOnComplete,
+      reviewMode: row.reviewMode,
+      reviewBatteries: row.reviewBatteries,
+      reviewRunTests: row.reviewRunTests,
+      reviewCommandTimeoutS: row.reviewCommandTimeoutS,
+      reviewMaxTurns: row.reviewMaxTurns,
       updatedAt: row.updatedAt,
     },
   });
