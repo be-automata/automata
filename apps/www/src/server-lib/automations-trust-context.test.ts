@@ -34,17 +34,34 @@ vi.mock("@/app/api/webhooks/github/utils", async (importOriginal) => {
 function makeMockOctokit({
   isFork,
   authorAssociation,
+  headFullName = "acme/widgets",
+  baseFullName = "acme/widgets",
 }: {
   isFork: boolean;
   authorAssociation: string | null;
+  /** null = head.repo is null (deleted fork). */
+  headFullName?: string | null;
+  /** null = base.repo is missing. */
+  baseFullName?: string | null;
 }) {
   return {
     rest: {
       pulls: {
         get: vi.fn().mockResolvedValue({
           data: {
-            head: { ref: "feature", repo: { fork: isFork } },
-            base: { ref: "main" },
+            head: {
+              ref: "feature",
+              repo:
+                headFullName === null
+                  ? null
+                  : { fork: isFork, full_name: headFullName },
+            },
+            base: {
+              ref: "main",
+              ...(baseFullName === null
+                ? {}
+                : { repo: { full_name: baseFullName } }),
+            },
             author_association: authorAssociation,
           },
         }),
@@ -177,6 +194,93 @@ describe("PR trust-snapshot intake (#82, ADR-005 §3a)", () => {
     // The whole run degrades (matches today's behavior on a pulls.get throw) —
     // no thread, hence no trust snapshot forged from thin air.
     expect(createNewThread).not.toHaveBeenCalled();
+  });
+
+  describe("isCrossRepo (phase 4)", () => {
+    async function runWith(octokit: ReturnType<typeof makeMockOctokit>) {
+      vi.mocked(getOctokitForBackground).mockResolvedValue(octokit as any);
+      const automation = await createTestAutomation({
+        db,
+        userId: user.id,
+        values: { triggerType: "pull_request", repoFullName: "acme/widgets" },
+      });
+      await runPullRequestAutomation({
+        userId: user.id,
+        automationId: automation.id,
+        repoFullName: "acme/widgets",
+        prEventAction: "opened",
+        prNumber: 1,
+        source: "automated",
+      });
+    }
+
+    it("non-fork head in a different repo -> isCrossRepo true", async () => {
+      await runWith(
+        makeMockOctokit({
+          isFork: false,
+          authorAssociation: "MEMBER",
+          headFullName: "Evil/Widgets",
+          baseFullName: "acme/widgets",
+        }),
+      );
+      expect(createNewThread).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trustContext: expect.objectContaining({
+            isFork: false,
+            isCrossRepo: true,
+          }),
+        }),
+      );
+    });
+
+    it("same repo, different casing -> isCrossRepo false", async () => {
+      await runWith(
+        makeMockOctokit({
+          isFork: false,
+          authorAssociation: "MEMBER",
+          headFullName: "Acme/Widgets",
+          baseFullName: "acme/widgets",
+        }),
+      );
+      expect(createNewThread).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trustContext: expect.objectContaining({ isCrossRepo: false }),
+        }),
+      );
+    });
+
+    it("head.repo null (deleted fork) -> isCrossRepo true, isFork true", async () => {
+      await runWith(
+        makeMockOctokit({
+          isFork: false,
+          authorAssociation: "MEMBER",
+          headFullName: null,
+        }),
+      );
+      expect(createNewThread).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trustContext: expect.objectContaining({
+            isFork: true,
+            isCrossRepo: true,
+          }),
+        }),
+      );
+    });
+
+    it("base.repo missing -> isCrossRepo true (fail closed)", async () => {
+      await runWith(
+        makeMockOctokit({
+          isFork: false,
+          authorAssociation: "MEMBER",
+          baseFullName: null,
+        }),
+      );
+      expect(createNewThread).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trustContext: expect.objectContaining({ isCrossRepo: true }),
+        }),
+      );
+    });
   });
 
   it("forgery: no caller-suppliable path sets trustContext (grep-pinned, structural)", () => {

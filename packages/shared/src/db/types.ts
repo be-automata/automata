@@ -157,6 +157,13 @@ export type ThreadTrustContext = {
   isFork: boolean;
   authorAssociation: string;
   capturedAt: string;
+  /**
+   * Phase 4: true when the PR head repo differs from the base repo
+   * (case-insensitive full_name) or either is unknown. OPTIONAL because
+   * snapshots captured before phase 4 lack it — readers MUST treat anything
+   * but an explicit `false` as cross-repo (fail closed).
+   */
+  isCrossRepo?: boolean;
 };
 
 export type ThreadStatusDeprecated =

@@ -577,11 +577,18 @@ export async function runPullRequestAutomation({
     // for BOTH source: "automated" and "manual" — runs unconditionally.
     // Unforgeable by construction: nothing in the request path lets a caller
     // set isFork/authorAssociation — this is the ONLY writer.
+    // Phase 4: isCrossRepo comes from the SAME read and covers a same-owner,
+    // non-fork head in another repo that `fork` alone misses. Missing head or
+    // base repo data fails closed (true).
+    const headFullName = pr.data.head?.repo?.full_name?.toLowerCase();
+    const baseFullName = pr.data.base?.repo?.full_name?.toLowerCase();
     const trustContext: ThreadTrustContext = {
       source: "github-pr",
       isFork: pr.data.head?.repo?.fork ?? true,
       authorAssociation: pr.data.author_association ?? "NONE",
       capturedAt: new Date().toISOString(),
+      isCrossRepo:
+        headFullName && baseFullName ? headFullName !== baseFullName : true,
     };
 
     // #165 (ADR-007): www owns NO supersession path. Prior review threads of
