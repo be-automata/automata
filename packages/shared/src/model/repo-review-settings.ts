@@ -13,6 +13,7 @@ import {
   sql,
 } from "drizzle-orm";
 import { buildEgressPolicyShape } from "./egress-policy";
+import { findReviewAgentFieldError } from "./review-agent-settings";
 
 /**
  * Per-repository REQUESTED_CHANGES severity tolerance (ADR-036 review floor),
@@ -259,6 +260,13 @@ export async function upsertRepoReviewSetting({
     supersedePolicy?: string | null;
     /** #125 discard-mode recheck toggle. */
     recheckOnComplete?: boolean;
+    /** Phase 4 review-agent family; null clears (= inherit). Validated by
+     * findReviewAgentFieldError before the write. */
+    reviewMode?: string | null;
+    reviewBatteries?: string[] | null;
+    reviewRunTests?: boolean | null;
+    reviewCommandTimeoutS?: number | null;
+    reviewMaxTurns?: number | null;
   };
   updatedByUserId?: string | null;
   /**
@@ -340,6 +348,13 @@ export async function upsertRepoReviewSetting({
       `Unknown supersedePolicy '${patch.supersedePolicy}' — expected one of ${SUPERSEDE_POLICIES.join(", ")}`,
     );
   }
+  // Phase 4: same write-boundary rule for the review-agent family — an
+  // unknown mode/pack id or an out-of-range number never lands in the table
+  // (the resolver throws on read as backstop).
+  const reviewAgentError = findReviewAgentFieldError(patch);
+  if (reviewAgentError !== undefined) {
+    throw new Error(reviewAgentError);
+  }
   const set: {
     blockTolerance?: string;
     reviewDraftPrs?: boolean | null;
@@ -347,6 +362,11 @@ export async function upsertRepoReviewSetting({
     egressAllowlist?: string[] | null;
     supersedePolicy?: string | null;
     recheckOnComplete?: boolean;
+    reviewMode?: string | null;
+    reviewBatteries?: string[] | null;
+    reviewRunTests?: boolean | null;
+    reviewCommandTimeoutS?: number | null;
+    reviewMaxTurns?: number | null;
     updatedByUserId: string | null;
     updatedAt: Date;
   } = { updatedByUserId: updatedByUserId ?? null, updatedAt: new Date() };
@@ -361,6 +381,15 @@ export async function upsertRepoReviewSetting({
     set.supersedePolicy = patch.supersedePolicy;
   if (patch.recheckOnComplete !== undefined)
     set.recheckOnComplete = patch.recheckOnComplete;
+  if (patch.reviewMode !== undefined) set.reviewMode = patch.reviewMode;
+  if (patch.reviewBatteries !== undefined)
+    set.reviewBatteries = patch.reviewBatteries;
+  if (patch.reviewRunTests !== undefined)
+    set.reviewRunTests = patch.reviewRunTests;
+  if (patch.reviewCommandTimeoutS !== undefined)
+    set.reviewCommandTimeoutS = patch.reviewCommandTimeoutS;
+  if (patch.reviewMaxTurns !== undefined)
+    set.reviewMaxTurns = patch.reviewMaxTurns;
 
   // CAS has two shapes: a version fence for edits (updated_at must still be
   // the value the admin read), and an ABSENCE fence for first writes
@@ -426,7 +455,8 @@ export async function setRepoReviewSetting({
  * "Reset to default" for the TOLERANCE family (block tolerance only — the
  * draft-PR policy is its OWN family since the tri-state migration and a
  * tolerance reset must NOT touch it) of one repo. The row is shared with the
- * other per-repo families (#66 egress, #125 supersede policy, drafts): when
+ * other per-repo families (#66 egress, #125 supersede policy, drafts, the
+ * phase 4 review-agent family): when
  * any of those still carries an override the row is KEPT and only the
  * tolerance columns go back to their defaults; the row is deleted only when
  * nothing else lives on it. Resetting a repo's tolerance must never silently
@@ -465,6 +495,13 @@ export async function removeRepoReviewSetting({
     // content is a draft override must survive a tolerance reset — and the
     // reset below no longer touches reviewDraftPrs at all.
     isNotNull(repoReviewSettings.reviewDraftPrs),
+    // Review-agent family, phase 4: a row whose only other content is a
+    // review-agent override (even an explicit empty battery list) survives.
+    isNotNull(repoReviewSettings.reviewMode),
+    isNotNull(repoReviewSettings.reviewBatteries),
+    isNotNull(repoReviewSettings.reviewRunTests),
+    isNotNull(repoReviewSettings.reviewCommandTimeoutS),
+    isNotNull(repoReviewSettings.reviewMaxTurns),
   )!;
   const reset = await db
     .update(repoReviewSettings)
