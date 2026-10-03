@@ -13,7 +13,17 @@ import {
   DEFAULT_APPROVE_SEVERITY_POLICY,
   type ApproveSeverityPolicy,
 } from "@terragon/review/severity-policy";
-import { parseReviewIntent, toExecutorIntent } from "./parse-review-intent";
+import {
+  parseReviewIntent,
+  toExecutorIntent,
+  type EmittedReviewIntent,
+} from "./parse-review-intent";
+import {
+  publishReviewNotice,
+  retireReviewNotices,
+  type NoVerdictCause,
+  type ReviewWriterClient,
+} from "./review-notice";
 
 /**
  * The control-plane single writer for a review thread's effect (ADR-036 phase-2).
@@ -24,8 +34,12 @@ import { parseReviewIntent, toExecutorIntent } from "./parse-review-intent";
  * provided current HEAD sha, so it is fully unit-testable.
  *
  * Guarantees:
- *  - POSTED-ZERO IMPOSSIBLE: a missing/malformed intent degrades to a visibly
- *    marked COMMENT review + a workFailed signal — never a silent no-review.
+ *  - A NON-VERDICT IS NEVER A REVIEW (ADR-009): a run with no verdict — an
+ *    unparseable intent, an agent that reports it could not review, or a bare
+ *    `comment` on a ready PR — is reported as a marked notice in the PR
+ *    conversation + a workFailed signal. The PR's review state stays empty, so
+ *    nobody waiting on a verdict mistakes the bot's silence for one.
+ *  - POSTED-ZERO IMPOSSIBLE: that notice is the floor — never a silent no-review.
  *  - STALE-INTENT NEVER SILENT-DROP: an intent for an older commit is posted at
  *    that commit (GitHub records it truthfully) UNLESS a newer bot review already
  *    sits at the live HEAD (then skip as superseded, logged).
@@ -33,17 +47,24 @@ import { parseReviewIntent, toExecutorIntent } from "./parse-review-intent";
  *    so a finish-hook/sweep double-fire converges to skipped_existing.
  *  - AT MOST ONE VERDICT PER COMMIT: a redelivered run whose intent names a commit
  *    we have already delivered a verdict for posts nothing (#213 — a worker restart
- *    re-posted 12 stale verdicts onto PR #208 in 63 seconds). A prior DEGRADED
- *    comment is silence, not a verdict, and does not suppress a later real one.
- *  - AT MOST ONE DEGRADED COMMENT PER COMMIT: a thread re-driven through the state
+ *    re-posted 12 stale verdicts onto PR #208 in 63 seconds). A legacy DEGRADED
+ *    review is silence, not a verdict, and does not suppress a later real one.
+ *  - AT MOST ONE NOTICE PER COMMIT: a thread re-driven through the state
  *    machine (a redelivered run that restarts the agent, a resume, a follow-up)
- *    re-reads the SAME unparseable terminal text and would degrade again at the
- *    same sha (#220). One warning per commit, whatever the reason; the message
+ *    re-reads the SAME silent terminal text and would report it again at the
+ *    same sha (#220). One notice per commit, whatever the reason; the message
  *    already says the only actionable thing, so a second adds noise, not
  *    information. The key is deliberately the COMMIT, not (commit, reason) — see
  *    #107, which must relax it if it ever wants two reasons to coexist at one sha.
  */
 
+/**
+ * The body prefix of the degraded COMMENT review this module posted before
+ * ADR-009. NO LONGER EMITTED — a no-verdict run is a conversation notice now —
+ * but PRs reviewed before that change still carry these reviews, and every
+ * guard must keep reading them as silence. Do not remove while such PRs can
+ * still be open.
+ */
 export const DEGRADED_INTENT_MARKER =
   "⚠️ Review intent could not be parsed — verdict NOT applied. This is NOT a clean pass.";
 
@@ -53,18 +74,29 @@ export type ReviewFromIntentOutcome =
   | { outcome: "skipped_existing" }
   | { outcome: "skipped_superseded" }
   | { outcome: "skipped_duplicate_at_commit"; commit: string }
-  | { outcome: "skipped_stale_degrade"; reason: string; workFailed: true }
+  | {
+      outcome: "skipped_stale_degrade";
+      cause: NoVerdictCause;
+      reason: string;
+      workFailed: true;
+    }
   | {
       outcome: "skipped_duplicate_degrade_at_commit";
+      cause: NoVerdictCause;
       commit: string;
       reason: string;
       workFailed: true;
     }
-  | { outcome: "degraded_comment"; reason: string; workFailed: true }
+  | {
+      outcome: "degraded_comment";
+      cause: NoVerdictCause;
+      reason: string;
+      workFailed: true;
+    }
   | { outcome: "post_failed"; failureReason: string; workFailed: true };
 
 export interface ExecuteReviewFromIntentOpts {
-  github: ReviewGitHubClient;
+  github: ReviewWriterClient;
   repoFullName: string;
   prNumber: number;
   botLogin: string;
@@ -81,24 +113,29 @@ export interface ExecuteReviewFromIntentOpts {
    * enforced even absent a per-repo override — never a verbatim pass-through.
    */
   approveFloorPolicy?: ApproveSeverityPolicy;
-  /** Draft PR → the floor caps at `comment` (never a formal request_changes). */
+  /**
+   * Draft PR → the floor caps at `comment` (never a formal request_changes),
+   * and an agent's bare `comment` is its legitimate draft verdict. Absent is
+   * treated as READY: the stricter reading, so a caller that forgets the flag
+   * cannot post a non-verdict as a review.
+   */
   isDraft?: boolean;
   /**
    * The head SHA this run was dispatched to review (thread.reviewedSha, #125 C5).
-   * Consulted ONLY on the DEGRADED path: a run that produced no parseable intent
-   * has nothing to anchor its warning to except the commit it was pointed at, so
-   * when that commit is no longer HEAD the warning is not about live HEAD and is
+   * Consulted ONLY on the NO-VERDICT path: a run that produced no verdict
+   * has nothing to anchor its notice to except the commit it was pointed at, so
+   * when that commit is no longer HEAD the notice is not about live HEAD and is
    * skipped — a newer run owns the PR. Omit (or NULL for a legacy/in-process
    * thread) to keep the pre-existing behaviour of degrading at live HEAD.
    */
   reviewedSha?: string | null;
   /**
    * This run was abandoned by policy or by a user (see ABANDONED_TERMINAL_CAUSES).
-   * Also DEGRADED-path only, and deliberately NOT a reason to skip the candidate
+   * Also NO-VERDICT-path only, and deliberately NOT a reason to skip the candidate
    * outright: a superseded run can still have persisted a real verdict that the
    * generation fence stopped its finish hook from posting, and discarding that is
    * the worst outcome this module has. An abandoned run's SILENCE proves nothing,
-   * so only the "could not be parsed" warning is withheld; a parsed verdict posts
+   * so only the no-verdict notice is withheld; a parsed verdict posts
    * through the normal (or stale) path exactly as it would otherwise.
    */
   runAbandoned?: boolean;
@@ -121,56 +158,21 @@ export async function executeReviewFromIntent(
 
   const parsed = parseReviewIntent(terminalText);
   if (!parsed.ok) {
-    // A DEGRADED COMMENT IS A CLAIM ABOUT LIVE HEAD. There is no emitted commit
-    // to anchor it to, so it can only be posted at whatever HEAD is now. Two
-    // cases make that claim false, and in BOTH the run's silence is evidence of
-    // nothing about the code at HEAD:
-    //   - the run was dispatched against an older commit (a newer run owns HEAD);
-    //   - the run was abandoned by policy or by a user before it could speak.
-    // Observed on #140 (2026-08-25): the hourly sweep reaped a run killed with
-    // the worker box and stamped "no parseable verdict — a human should review
-    // this PR" onto a commit pushed 73 seconds earlier, whose own review was
-    // still running.
-    //
-    // This withholds ONLY the warning, never a verdict — a parsed intent has
-    // already taken the branch below by the time we reach here. And it stays
-    // loud where it matters: workFailed still fires, so an agent that failed to
-    // emit pages an operator instead of shouting at the PR author (see #107).
-    const canSpeakForHead =
-      !opts.runAbandoned &&
-      !(opts.reviewedSha && opts.reviewedSha !== currentHeadSha);
-    if (!canSpeakForHead) {
-      logger?.warn(
-        "review-from-intent: unparseable intent from a run that cannot speak for HEAD — warning withheld",
-        {
-          repoFullName,
-          prNumber,
-          reviewedSha: opts.reviewedSha ?? null,
-          currentHeadSha,
-          runAbandoned: opts.runAbandoned ?? false,
-          reason: parsed.reason,
-        },
-      );
-      return {
-        outcome: "skipped_stale_degrade",
-        reason: parsed.reason,
-        workFailed: true,
-      };
-    }
-    // Zero-effects / malformed → degraded COMMENT + loud workFailed. The COMMENT
-    // is visibly marked so a lost request_changes can't masquerade as a clean pass.
-    return await postDegradedComment({
-      github,
-      repoFullName,
-      prNumber,
-      botLogin,
-      currentHeadSha,
+    return await reportNoVerdict(opts, {
+      cause: parsed.source === "agent" ? "agent_unable" : "unparseable",
       reason: parsed.reason,
-      logger,
+      commit: parsed.source === "agent" ? parsed.commit : undefined,
     });
   }
 
   const emitted = parsed.intent;
+  if (isBareCommentOnReadyPr(emitted, opts.isDraft)) {
+    return await reportNoVerdict(opts, {
+      cause: "agent_comment_without_findings",
+      reason: emitted.summary,
+      commit: emitted.commit,
+    });
+  }
   // Apply the per-repo approve-severity floor server-side BEFORE anything is
   // posted — the load-bearing guarantee. `applyApproveSeverityFloor` only ever
   // downgrades a too-generous `approve` (comment/request_changes pass through),
@@ -339,7 +341,139 @@ export async function executeReviewFromIntent(
     postInlineComments: opts.postInlineComments,
     logger,
   });
+  if (outcome.outcome === "posted") {
+    // A verdict now sits at HEAD, so a notice saying there is none is false.
+    await retireReviewNotices({
+      github,
+      repoFullName,
+      prNumber,
+      botLogin,
+      logger,
+    });
+  }
   return mapOutcome(outcome);
+}
+
+/**
+ * An agent-chosen `comment` that carries no findings, on a PR that is ready for
+ * review. The skill reserves `comment` for drafts and for findings surfaced
+ * below the block floor; with neither, it can only mean "I could not reach a
+ * verdict" — the review #228 received when the agent had no git access. That
+ * is a non-verdict and must not be posted as a review.
+ *
+ * Keyed on the EMITTED verdict, before the approve floor: a server-side
+ * downgrade of `approve` to `comment` always carries the findings that caused
+ * it, and stays a review.
+ */
+function isBareCommentOnReadyPr(
+  emitted: EmittedReviewIntent,
+  isDraft: boolean | undefined,
+): boolean {
+  return (
+    emitted.verdict === "comment" &&
+    isDraft !== true &&
+    (emitted.findings?.length ?? 0) === 0
+  );
+}
+
+/**
+ * Report a run that produced no verdict: a notice in the PR conversation, never
+ * a review, and always a workFailed outcome so an operator hears about it.
+ */
+async function reportNoVerdict(
+  opts: ExecuteReviewFromIntentOpts,
+  noVerdict: { cause: NoVerdictCause; reason: string; commit?: string },
+): Promise<ReviewFromIntentOutcome> {
+  const { github, repoFullName, prNumber, botLogin, currentHeadSha, logger } =
+    opts;
+  const { cause, reason } = noVerdict;
+
+  // A NOTICE IS A CLAIM ABOUT LIVE HEAD: "this commit has no verdict". Three
+  // cases make that claim false, and in ALL of them the run's silence is
+  // evidence of nothing about the code at HEAD:
+  //   - the run was dispatched against an older commit (a newer run owns HEAD);
+  //   - the run itself names an older commit as the one it looked at;
+  //   - the run was abandoned by policy or by a user before it could speak.
+  // Observed on #140 (2026-08-25): the hourly sweep reaped a run killed with
+  // the worker box and stamped "no parseable verdict — a human should review
+  // this PR" onto a commit pushed 73 seconds earlier, whose own review was
+  // still running.
+  //
+  // This withholds ONLY the notice, never a verdict — a real verdict never
+  // reaches this function. And it stays loud where it matters: workFailed still
+  // fires, so an agent that failed to emit pages an operator instead of
+  // shouting at the PR author (see #107).
+  const canSpeakForHead =
+    !opts.runAbandoned &&
+    !(opts.reviewedSha && opts.reviewedSha !== currentHeadSha) &&
+    !(noVerdict.commit && noVerdict.commit !== currentHeadSha);
+  if (!canSpeakForHead) {
+    logger?.warn(
+      "review-from-intent: no verdict from a run that cannot speak for HEAD — notice withheld",
+      {
+        repoFullName,
+        prNumber,
+        reviewedSha: opts.reviewedSha ?? null,
+        intentCommit: noVerdict.commit ?? null,
+        currentHeadSha,
+        runAbandoned: opts.runAbandoned ?? false,
+        cause,
+        reason,
+      },
+    );
+    return {
+      outcome: "skipped_stale_degrade",
+      cause,
+      reason,
+      workFailed: true,
+    };
+  }
+
+  const published = await publishReviewNotice({
+    github,
+    repoFullName,
+    prNumber,
+    botLogin,
+    sha: currentHeadSha,
+    cause,
+    reason,
+    logger,
+  });
+  if (published.result === "duplicate_at_commit") {
+    logger?.info(
+      "review-from-intent: a no-verdict notice already exists at this commit; skipping the duplicate",
+      {
+        repoFullName,
+        prNumber,
+        currentHeadSha,
+        cause,
+        reason,
+        existingCommentId: published.commentId,
+      },
+    );
+    return {
+      outcome: "skipped_duplicate_degrade_at_commit",
+      cause,
+      commit: currentHeadSha,
+      reason,
+      workFailed: true,
+    };
+  }
+  if (published.result === "post_failed") {
+    logger?.error("review-from-intent: no-verdict notice post ALSO failed", {
+      repoFullName,
+      prNumber,
+      cause,
+      reason,
+      error: published.failureReason,
+    });
+  } else {
+    logger?.error(
+      "review-from-intent: NO VERDICT — posted a notice in the PR conversation",
+      { repoFullName, prNumber, cause, reason },
+    );
+  }
+  return { outcome: "degraded_comment", cause, reason, workFailed: true };
 }
 
 async function runExecutor(args: {
@@ -375,13 +509,15 @@ function mapOutcome(o: ReviewIntentOutcome): ReviewFromIntentOutcome {
 }
 
 /**
+ * LEGACY (pre-ADR-009) reviews only — see `DEGRADED_INTENT_MARKER`.
+ *
  * A degraded COMMENT is a run's CONFESSION that it produced no parseable verdict —
  * it is evidence of silence at that commit, never of a delivered verdict. It must
  * therefore not satisfy the #213 replay guard: a later run that DID produce a real
  * finding at the same commit would otherwise be dropped by the earlier run's
  * silence, which is exactly the lost-verdict failure #213's fix exists to avoid.
- * It cannot re-open the 12x storm either — a degraded comment is only ever emitted
- * by the unparseable branch above, which returns long before this guard.
+ * It cannot re-open the 12x storm either — a degraded comment was only ever emitted
+ * by the no-verdict branch, which returns long before this guard.
  *
  * NO AUTHOR CHECK: this is a bare body match, so a HUMAN quoting the marker in a
  * review satisfies it. Every consumer must layer an author filter of its own —
@@ -389,10 +525,10 @@ function mapOutcome(o: ReviewIntentOutcome): ReviewFromIntentOutcome {
  * this one.
  */
 export function isDegradedComment(review: GitHubReview): boolean {
-  // STRUCTURAL, NOT A SUBSTRING SEARCH. `postDegradedComment` is the single
-  // emission site and always builds the body as `${MARKER}\n\n_Reason: …`, so
-  // the marker is a PREFIX by construction. `includes` was wider than the thing
-  // it meant to recognise: one of our own REAL verdicts that merely QUOTES the
+  // STRUCTURAL, NOT A SUBSTRING SEARCH. The retired emission site always built
+  // the body as `${MARKER}\n\n_Reason: …`, so the marker is a PREFIX by
+  // construction. `includes` was wider than the thing it meant to recognise:
+  // one of our own REAL verdicts that merely QUOTES the
   // marker — and reviews of this very code plausibly do — was read as silence,
   // which made the sweep run its backstop on a PR that already had a verdict.
   // Matching the prefix closes that without any author heuristic, and because
@@ -408,112 +544,4 @@ export function isDegradedComment(review: GitHubReview): boolean {
  */
 export function snapshotOf(reviews: GitHubReview[]) {
   return { listReviews: async () => reviews };
-}
-
-async function postDegradedComment(args: {
-  github: ReviewGitHubClient;
-  repoFullName: string;
-  prNumber: number;
-  botLogin: string;
-  currentHeadSha: string;
-  reason: string;
-  logger?: ReviewLogger;
-}): Promise<ReviewFromIntentOutcome> {
-  // #220 PER-SHA DEDUP. Nothing between the unparseable branch and GitHub stops
-  // a SECOND warning at the same commit: a thread re-driven through the state
-  // machine (a redelivered run that restarts the agent, a resume, a follow-up
-  // `system.message` taking complete → queued → working → working-done) makes the
-  // finish hook fire legitimately, and `extractTerminalAgentText` re-reads the
-  // PREVIOUS run's unparseable text. The sweep is already protected by its own
-  // `findBotReviewAtHead`; this path calls the writer directly.
-  //
-  // The guard needs its own listReviews: the stale branch's snapshot is sixty-odd
-  // lines below and never runs on this path. Hoisting that fetch above both
-  // branches was rejected — it would add a round trip to EVERY review post, while
-  // the degraded path is rare by construction.
-  //
-  // LOOKUP FAILED → EMPTY SNAPSHOT → GUARD OPEN → POST ANYWAY, the same posture
-  // the stale path takes: a duplicate warning is recoverable by a reader, a lost
-  // warning is not. This whole guard is therefore non-throwing, because the
-  // degraded path it fronts cannot throw at all.
-  let reviews: GitHubReview[] = [];
-  try {
-    reviews = await args.github.listReviews(args.repoFullName, args.prNumber);
-  } catch (err) {
-    args.logger?.warn(
-      "review-from-intent: review lookup failed (degraded dedup guard); posting the degraded COMMENT anyway",
-      {
-        repoFullName: args.repoFullName,
-        prNumber: args.prNumber,
-        currentHeadSha: args.currentHeadSha,
-        error: err instanceof Error ? err.message : String(err),
-      },
-    );
-  }
-  // COMPOSE IN THIS ORDER — the order is what makes it safe. `isDegradedComment`
-  // carries no author check, so on its own a human quoting the marker matches it;
-  // `findBotReviewAtHead`'s `r.user?.login === botLogin` is what makes it safe,
-  // and only layered AFTER. Passing the UNFILTERED list would silently widen the
-  // key to "any bot review at this sha" — not the decided key, and it would
-  // withhold a degraded warning sitting under an existing real verdict.
-  // Complement of the stale path's `reviews.filter((r) => !isDegradedComment(r))`
-  // — the two read as a pair; do not re-inline either filter.
-  const degraded = reviews.filter(isDegradedComment);
-  const alreadyDegradedAtCommit = await findBotReviewAtHead({
-    github: snapshotOf(degraded),
-    repo: args.repoFullName,
-    prNumber: args.prNumber,
-    headSha: args.currentHeadSha,
-    botLogin: args.botLogin,
-  });
-  if (alreadyDegradedAtCommit) {
-    args.logger?.info(
-      "review-from-intent: a degraded COMMENT already exists at this commit; skipping the duplicate",
-      {
-        repoFullName: args.repoFullName,
-        prNumber: args.prNumber,
-        currentHeadSha: args.currentHeadSha,
-        reason: args.reason,
-        existingReviewId: alreadyDegradedAtCommit.id,
-        existingReviewState: alreadyDegradedAtCommit.state,
-      },
-    );
-    return {
-      outcome: "skipped_duplicate_degrade_at_commit",
-      commit: args.currentHeadSha,
-      reason: args.reason,
-      workFailed: true,
-    };
-  }
-
-  const body = `${DEGRADED_INTENT_MARKER}\n\n_Reason: ${args.reason}. The review agent produced no parseable verdict; a human should review this PR._`;
-  try {
-    await args.github.submitReviewWithComments(
-      args.repoFullName,
-      args.prNumber,
-      args.currentHeadSha,
-      "COMMENT",
-      body,
-      [],
-    );
-    args.logger?.error(
-      "review-from-intent: DEGRADED — no parseable intent, posted marked COMMENT",
-      {
-        repoFullName: args.repoFullName,
-        prNumber: args.prNumber,
-        reason: args.reason,
-      },
-    );
-  } catch (err) {
-    args.logger?.error(
-      "review-from-intent: degraded COMMENT post ALSO failed",
-      {
-        repoFullName: args.repoFullName,
-        prNumber: args.prNumber,
-        reason: args.reason,
-        error: err instanceof Error ? err.message : String(err),
-      },
-    );
-  }
-  return { outcome: "degraded_comment", reason: args.reason, workFailed: true };
 }

@@ -5,9 +5,10 @@ import {
 } from "./execute-review-from-intent";
 import type {
   GitHubReview,
-  ReviewGitHubClient,
   ReviewLogger,
 } from "@terragon/review/state/review-github-client";
+import { reviewNoticeSha, type ReviewWriterClient } from "./review-notice";
+import { makeNoticeFake } from "./review-notice.fake";
 
 /**
  * #213 — a worker restart must not re-post a PR's whole verdict history.
@@ -38,6 +39,7 @@ const OLD = "old-sha";
 function makeGithub(reviews: GitHubReview[] = []) {
   // Explicit param signatures so `.mock.calls[i]` is a correctly-typed tuple.
   return {
+    ...makeNoticeFake(BOT),
     listReviews: vi.fn(async (_repo: string, _pr: number) => reviews),
     submitReview: vi.fn(
       async (
@@ -70,7 +72,7 @@ function makeGithub(reviews: GitHubReview[] = []) {
         _sha: string,
       ) => {},
     ),
-  } satisfies ReviewGitHubClient;
+  } satisfies ReviewWriterClient;
 }
 
 function fenced(obj: unknown): string {
@@ -96,7 +98,8 @@ function makeStatefulGithub(headSha: string, bot: string) {
       body,
     });
   };
-  const client: ReviewGitHubClient & { reviews: GitHubReview[] } = {
+  const client: ReviewWriterClient & { reviews: GitHubReview[] } = {
+    ...makeNoticeFake(bot),
     reviews,
     listReviews: vi.fn(async () => reviews),
     submitReview: vi.fn(async (_repo, _pr, verdict, body) => {
@@ -203,7 +206,9 @@ describe("#213 replay guard — a redelivered run does not re-post a delivered v
       });
     }
     expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
-    expect(github.reviews.filter((r) => r.dismissedAt === null)).toHaveLength(1);
+    expect(github.reviews.filter((r) => r.dismissedAt === null)).toHaveLength(
+      1,
+    );
   });
 
   it("a stale-but-first delivery still reaches the PR as a COMMENT", async () => {
@@ -252,7 +257,9 @@ describe("#213 replay guard — a redelivered run does not re-post a delivered v
         verdict: "request_changes",
         commit: HEAD,
         summary: "Off-by-one in isAdult.",
-        findings: [{ severity: "error", path: "a.ts", line: 3, body: "use >=" }],
+        findings: [
+          { severity: "error", path: "a.ts", line: 3, body: "use >=" },
+        ],
       }),
     });
 
@@ -457,26 +464,27 @@ describe("#221 supersession guard — silence at HEAD does not supersede a verdi
 });
 
 /**
- * #220 — one degraded comment per commit.
+ * #220 — one no-verdict report per commit.
  *
- * `postDegradedComment` posted unconditionally. A thread re-driven through the
+ * The report used to be posted unconditionally. A thread re-driven through the
  * state machine (a redelivered run that restarts the agent, a resume, a follow-up
  * `system.message` taking complete → queued → working → working-done) makes the
  * finish hook fire legitimately, `extractTerminalAgentText` re-reads the PREVIOUS
- * run's unparseable text, and the warning lands again at the same sha. Nothing
- * between the degraded early-return and GitHub stopped it.
+ * run's unparseable text, and the report lands again at the same sha. Nothing
+ * between the no-verdict early-return and GitHub stopped it.
  *
- * Dedup key: THE COMMIT, any reason. These pin both halves of that — that the
- * key is per-sha (not per-PR), and that it is DEGRADED-only and OURS-only, so
- * neither a human quoting the marker nor a real bot verdict can stand in for the
- * warning we are deduping.
+ * Dedup key: THE COMMIT, any reason. Since ADR-009 the report is a notice in
+ * the PR conversation rather than a COMMENTED review, so the key is read from
+ * the conversation. These pin both halves of it — that it is per-sha (not
+ * per-PR), and that it is NOTICE-only and OURS-only, so neither a human quoting
+ * the marker nor a real bot verdict can stand in for the notice we are deduping.
  */
-describe("#220 degraded dedup — one 'could not be parsed' comment per commit", () => {
+describe("#220 no-verdict dedup — one notice per commit", () => {
   const UNPARSEABLE = "I looked at it and it seems fine.";
   const NEW_HEAD = "new-head-sha";
 
-  function degradeOpts(
-    github: ReviewGitHubClient,
+  function silentRunOpts(
+    github: ReviewWriterClient,
     sha: string,
     logger?: ReviewLogger,
   ) {
@@ -488,102 +496,154 @@ describe("#220 degraded dedup — one 'could not be parsed' comment per commit",
       currentHeadSha: sha,
       terminalText: UNPARSEABLE,
       // The run was dispatched at this very sha, so `canSpeakForHead` holds and
-      // the degraded path is actually reached.
+      // the no-verdict path actually publishes.
       reviewedSha: sha,
       ...(logger ? { logger } : {}),
     };
   }
 
-  it("two degraded deliveries at the SAME sha post exactly ONE comment", async () => {
-    const github = makeStatefulGithub(HEAD, BOT);
+  it("two silent deliveries at the SAME sha leave exactly ONE notice", async () => {
+    const github = makeGithub([]);
     const logger = makeLogger();
 
-    const first = await executeReviewFromIntent(degradeOpts(github, HEAD));
+    const first = await executeReviewFromIntent(silentRunOpts(github, HEAD));
     const second = await executeReviewFromIntent(
-      degradeOpts(github, HEAD, logger),
+      silentRunOpts(github, HEAD, logger),
     );
 
     expect(first).toMatchObject({ outcome: "degraded_comment" });
     expect(second).toEqual({
       outcome: "skipped_duplicate_degrade_at_commit",
+      cause: "unparseable",
       commit: HEAD,
       reason: expect.any(String),
       workFailed: true,
     });
-    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
-    expect(github.reviews).toHaveLength(1);
-    expect(github.reviews[0]!.body).toContain(DEGRADED_INTENT_MARKER);
-    expect(github.reviews[0]!.commitId).toBe(HEAD);
+    expect(github.createConversationComment).toHaveBeenCalledTimes(1);
+    expect(github.comments).toHaveLength(1);
+    expect(reviewNoticeSha(github.comments[0]!, BOT)).toBe(HEAD);
     expect(
       loggedMessages(logger.info).some((m) =>
-        m.includes("a degraded COMMENT already exists at this commit"),
+        m.includes("a no-verdict notice already exists at this commit"),
       ),
     ).toBe(true);
 
     // The storm shape: ten further re-drives add nothing to the PR.
     for (let i = 0; i < 10; i++) {
       expect(
-        (await executeReviewFromIntent(degradeOpts(github, HEAD))).outcome,
+        (await executeReviewFromIntent(silentRunOpts(github, HEAD))).outcome,
       ).toBe("skipped_duplicate_degrade_at_commit");
     }
-    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
-    expect(
-      github.reviews.filter((r) => r.body.includes(DEGRADED_INTENT_MARKER)),
-    ).toHaveLength(1);
+    expect(github.createConversationComment).toHaveBeenCalledTimes(1);
+    expect(github.comments).toHaveLength(1);
+    // And at no point did the silence become a review.
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
   });
 
-  it("the key is PER-COMMIT: a new run at an advanced HEAD may warn again", async () => {
-    // `canSpeakForHead` withholds the warning whenever reviewedSha !== HEAD, so
+  it("the key is PER-COMMIT: a new run at an advanced HEAD reports again, replacing the old notice", async () => {
+    // `canSpeakForHead` withholds the notice whenever reviewedSha !== HEAD, so
     // this is only reachable via a NEW run DISPATCHED at the new sha — not by
     // re-running the old run against moved HEAD. Constructed that way on purpose.
-    const github = makeStatefulGithub(HEAD, BOT);
+    const github = makeGithub([]);
 
-    const atOldHead = await executeReviewFromIntent(degradeOpts(github, HEAD));
+    const atOldHead = await executeReviewFromIntent(
+      silentRunOpts(github, HEAD),
+    );
     const atNewHead = await executeReviewFromIntent(
-      degradeOpts(github, NEW_HEAD),
+      silentRunOpts(github, NEW_HEAD),
     );
 
     expect(atOldHead).toMatchObject({ outcome: "degraded_comment" });
     expect(atNewHead).toMatchObject({ outcome: "degraded_comment" });
-    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(2);
-    expect(github.reviews.map((r) => r.commitId)).toEqual([HEAD, NEW_HEAD]);
+    expect(github.createConversationComment).toHaveBeenCalledTimes(2);
+    // One LIVE notice per PR, about the newest commit without a verdict.
+    expect(
+      github.comments.map((comment) => reviewNoticeSha(comment, BOT)),
+    ).toEqual([NEW_HEAD]);
 
     // And the new sha dedups on its own terms from then on.
     expect(
-      (await executeReviewFromIntent(degradeOpts(github, NEW_HEAD))).outcome,
+      (await executeReviewFromIntent(silentRunOpts(github, NEW_HEAD))).outcome,
     ).toBe("skipped_duplicate_degrade_at_commit");
-    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(2);
+    expect(github.createConversationComment).toHaveBeenCalledTimes(2);
   });
 
-  it("a failing dedup lookup posts anyway (lost warning is worse than a duplicate)", async () => {
+  it("a failing dedup lookup posts anyway (a lost notice is worse than a duplicate)", async () => {
     for (const rejection of [
       new Error("gh 502"),
       Object.assign(new Error("Not Found"), { status: 404 }),
     ]) {
       const github = makeGithub([]);
-      github.listReviews.mockRejectedValue(rejection);
+      github.listConversationComments.mockRejectedValue(rejection);
       const logger = makeLogger();
 
       const res = await executeReviewFromIntent(
-        degradeOpts(github, HEAD, logger),
+        silentRunOpts(github, HEAD, logger),
       );
 
       expect(res).toMatchObject({
         outcome: "degraded_comment",
         workFailed: true,
       });
-      expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
-      expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(HEAD);
+      expect(github.createConversationComment).toHaveBeenCalledTimes(1);
       expect(
         loggedMessages(logger.warn).some((m) =>
-          m.includes("review lookup failed (degraded dedup guard)"),
+          m.includes("comment lookup failed (per-commit dedup)"),
         ),
       ).toBe(true);
     }
   });
 
-  it("never suppresses a REAL verdict — the guard only ever gates the warning", async () => {
-    // Our own degraded comment sits at HEAD; this run DID parse a verdict there.
+  it("a failing notice post is still a workFailed outcome, never a throw", async () => {
+    const github = makeGithub([]);
+    github.createConversationComment.mockRejectedValue(new Error("gh 500"));
+    const logger = makeLogger();
+
+    const res = await executeReviewFromIntent(
+      silentRunOpts(github, HEAD, logger),
+    );
+
+    expect(res).toMatchObject({
+      outcome: "degraded_comment",
+      workFailed: true,
+    });
+    expect(
+      loggedMessages(logger.error).some((m) =>
+        m.includes("no-verdict notice post ALSO failed"),
+      ),
+    ).toBe(true);
+  });
+
+  it("never suppresses a REAL verdict — the guard only ever gates the notice", async () => {
+    // Our own notice sits at HEAD; this run DID parse a verdict there.
+    const github = makeGithub([]);
+    await executeReviewFromIntent(silentRunOpts(github, HEAD));
+    expect(github.comments).toHaveLength(1);
+
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: fenced({
+        verdict: "request_changes",
+        commit: HEAD,
+        summary: "Off-by-one in isAdult.",
+        findings: [
+          { severity: "error", path: "a.ts", line: 3, body: "use >=" },
+        ],
+      }),
+      reviewedSha: HEAD,
+    });
+
+    expect(res).toEqual({ outcome: "posted", verdict: "request_changes" });
+    expect(github.submitReview).toHaveBeenCalledTimes(1);
+    expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
+  });
+
+  it("a LEGACY degraded review at HEAD does not suppress a real verdict either", async () => {
+    // Posted before ADR-009; open PRs still carry them.
     const github = makeGithub([
       reviewAt(HEAD, {
         id: 11,
@@ -609,43 +669,55 @@ describe("#220 degraded dedup — one 'could not be parsed' comment per commit",
 
     expect(res).toEqual({ outcome: "posted", verdict: "request_changes" });
     expect(github.submitReview).toHaveBeenCalledTimes(1);
-    expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
   });
 
-  it("a HUMAN quoting the marker at that sha does NOT suppress our warning", async () => {
-    // Pins the FILTER ORDER. `isDegradedComment` is a bare body match with no
-    // author check; the safety comes from layering `findBotReviewAtHead`'s
-    // login check AFTER it. Drop that layering and this human comment silences
-    // the bot's own warning forever at this commit.
-    const github = makeGithub([
-      reviewAt(HEAD, {
-        id: 12,
-        user: { login: "a-human" },
-        body: `Quoting the bot: ${DEGRADED_INTENT_MARKER} — why did this fire?`,
-      }),
-    ]);
+  it("a HUMAN pasting the marker at that sha does NOT suppress our notice", async () => {
+    // Pins the AUTHOR CHECK. The marker is public text; without the login
+    // check a pasted copy would silence the bot's own notice at this commit —
+    // and the bot could not delete a comment it does not own.
+    const github = makeGithub([]);
+    github.comments.push({
+      id: 900,
+      user: { login: "a-human" },
+      body: `<!-- automata:review-notice sha=${HEAD} -->\nwhy did this fire?`,
+    });
 
-    const res = await executeReviewFromIntent(degradeOpts(github, HEAD));
+    const res = await executeReviewFromIntent(silentRunOpts(github, HEAD));
 
     expect(res).toMatchObject({ outcome: "degraded_comment" });
-    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
-    expect(github.submitReviewWithComments.mock.calls[0]![4]).toContain(
-      DEGRADED_INTENT_MARKER,
-    );
+    expect(github.createConversationComment).toHaveBeenCalledTimes(1);
+    expect(github.deleteConversationComment).not.toHaveBeenCalled();
+    expect(github.comments).toHaveLength(2);
   });
 
-  it("a real BOT verdict at that sha does NOT suppress the warning (key is degraded-only)", async () => {
-    // The decided key is "a DEGRADED comment of ours at this sha", not "any bot
-    // review at this sha". Passing the unfiltered list to findBotReviewAtHead
-    // would widen it here and withhold a warning that belongs under the verdict.
+  it("the bot QUOTING the marker mid-comment is not a notice", async () => {
+    // The marker is matched as a PREFIX: an audit comment or a reply of ours
+    // that merely mentions it must neither dedup a notice nor be deleted.
+    const github = makeGithub([]);
+    github.comments.push({
+      id: 901,
+      user: { login: BOT },
+      body: `Earlier: <!-- automata:review-notice sha=${HEAD} --> was posted.`,
+    });
+
+    const res = await executeReviewFromIntent(silentRunOpts(github, HEAD));
+
+    expect(res).toMatchObject({ outcome: "degraded_comment" });
+    expect(github.deleteConversationComment).not.toHaveBeenCalled();
+    expect(github.comments).toHaveLength(2);
+  });
+
+  it("a real BOT verdict at that sha does NOT suppress the notice (key is notice-only)", async () => {
+    // The decided key is "a NOTICE of ours at this sha", not "any bot review at
+    // this sha": a later silent run at a commit that already has a verdict is
+    // still a failed run a reader should hear about once.
     const github = makeGithub([
       reviewAt(HEAD, { id: 13, state: "APPROVED", body: "LGTM" }),
     ]);
 
-    const res = await executeReviewFromIntent(degradeOpts(github, HEAD));
+    const res = await executeReviewFromIntent(silentRunOpts(github, HEAD));
 
     expect(res).toMatchObject({ outcome: "degraded_comment" });
-    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
-    expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(HEAD);
+    expect(github.createConversationComment).toHaveBeenCalledTimes(1);
   });
 });

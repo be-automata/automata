@@ -1,12 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import {
-  executeReviewFromIntent,
-  DEGRADED_INTENT_MARKER,
-} from "./execute-review-from-intent";
-import type {
-  GitHubReview,
-  ReviewGitHubClient,
-} from "@terragon/review/state/review-github-client";
+import { executeReviewFromIntent } from "./execute-review-from-intent";
+import type { GitHubReview } from "@terragon/review/state/review-github-client";
+import { reviewNoticeSha, type ReviewWriterClient } from "./review-notice";
+import { makeNoticeFake } from "./review-notice.fake";
 
 const BOT = "automata-ai-bot[bot]";
 const REPO = "o/r";
@@ -17,6 +13,7 @@ const OLD = "old-sha";
 function makeGithub(reviews: GitHubReview[] = []) {
   // Explicit param signatures so `.mock.calls[i]` is a correctly-typed tuple.
   return {
+    ...makeNoticeFake(BOT),
     listReviews: vi.fn(async (_repo: string, _pr: number) => reviews),
     submitReview: vi.fn(
       async (
@@ -49,7 +46,7 @@ function makeGithub(reviews: GitHubReview[] = []) {
         _sha: string,
       ) => {},
     ),
-  } satisfies ReviewGitHubClient;
+  } satisfies ReviewWriterClient;
 }
 
 function fenced(obj: unknown): string {
@@ -79,7 +76,7 @@ describe("executeReviewFromIntent", () => {
     expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
   });
 
-  it("MALFORMED intent → degraded marked COMMENT + workFailed (never silent)", async () => {
+  it("MALFORMED intent → a notice in the conversation + workFailed, NEVER a review", async () => {
     const github = makeGithub([]);
     const res = await executeReviewFromIntent({
       github,
@@ -91,16 +88,19 @@ describe("executeReviewFromIntent", () => {
     });
     expect(res).toMatchObject({
       outcome: "degraded_comment",
+      cause: "unparseable",
       workFailed: true,
     });
+    // ADR-009: the PR's review state stays empty — no review of any kind.
     expect(github.submitReview).not.toHaveBeenCalled();
-    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
-    const body = github.submitReviewWithComments.mock.calls[0]![4] as string;
-    expect(body).toContain(DEGRADED_INTENT_MARKER);
-    expect(github.submitReviewWithComments.mock.calls[0]![3]).toBe("COMMENT");
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+    expect(github.comments).toHaveLength(1);
+    expect(reviewNoticeSha(github.comments[0]!, BOT)).toBe(HEAD);
+    expect(github.comments[0]!.body).toContain("has no verdict");
+    expect(github.comments[0]!.body).toContain("This is not a pass");
   });
 
-  it("TRUNCATED fenced-json → degraded COMMENT, not a crash or silent skip", async () => {
+  it("TRUNCATED fenced-json → a notice, not a crash or silent skip", async () => {
     const github = makeGithub([]);
     const res = await executeReviewFromIntent({
       github,
@@ -111,7 +111,8 @@ describe("executeReviewFromIntent", () => {
       terminalText: '```json\n{ "verdict": "request_changes", "commit": "he',
     });
     expect(res.outcome).toBe("degraded_comment");
-    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+    expect(github.comments).toHaveLength(1);
   });
 
   it("STALE intent + no newer review → posts a COMMENT at the reviewed commit (never silent-drop)", async () => {
@@ -212,11 +213,11 @@ describe("executeReviewFromIntent", () => {
   });
 });
 
-describe("executeReviewFromIntent — degraded path never speaks for a stale head", () => {
+describe("executeReviewFromIntent — the no-verdict path never speaks for a stale head", () => {
   // Regression for #140 (2026-08-25): a run reaped by the hourly sweep produced
   // ZERO output, and the degraded warning ("a human should review this PR") was
   // posted at a commit pushed 73s earlier whose own review was still in flight.
-  it("skips the degraded COMMENT when the run reviewed an older head", async () => {
+  it("withholds the notice when the run reviewed an older head", async () => {
     const github = makeGithub([]);
     const res = await executeReviewFromIntent({
       github,
@@ -235,9 +236,10 @@ describe("executeReviewFromIntent — degraded path never speaks for a stale hea
       workFailed: true,
     });
     expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+    expect(github.createConversationComment).not.toHaveBeenCalled();
   });
 
-  it("still degrades loudly when the run reviewed the CURRENT head", async () => {
+  it("still reports loudly when the run reviewed the CURRENT head", async () => {
     const github = makeGithub([]);
     const res = await executeReviewFromIntent({
       github,
@@ -249,13 +251,11 @@ describe("executeReviewFromIntent — degraded path never speaks for a stale hea
       reviewedSha: HEAD,
     });
     expect(res.outcome).toBe("degraded_comment");
-    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
-    expect(github.submitReviewWithComments.mock.calls[0]![4]).toContain(
-      DEGRADED_INTENT_MARKER,
-    );
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+    expect(github.comments).toHaveLength(1);
   });
 
-  it("degrades at live HEAD when the thread carries no reviewedSha (legacy)", async () => {
+  it("reports at live HEAD when the thread carries no reviewedSha (legacy)", async () => {
     const github = makeGithub([]);
     const res = await executeReviewFromIntent({
       github,
@@ -267,7 +267,7 @@ describe("executeReviewFromIntent — degraded path never speaks for a stale hea
       reviewedSha: null,
     });
     expect(res.outcome).toBe("degraded_comment");
-    expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(HEAD);
+    expect(reviewNoticeSha(github.comments[0]!, BOT)).toBe(HEAD);
   });
 
   it("a real verdict from an older head still posts (stale path unchanged)", async () => {
@@ -293,12 +293,12 @@ describe("executeReviewFromIntent — degraded path never speaks for a stale hea
   });
 });
 
-describe("executeReviewFromIntent — an abandoned run withholds only the warning", () => {
+describe("executeReviewFromIntent — an abandoned run withholds only the notice", () => {
   // Codex adversarial review, 2026-08-25: terminal cause is NOT proof the run
   // produced nothing. Supersession stamps a thread terminal concurrently with
   // cancellation, so a run can persist a verdict and have its finish-hook write
   // fenced out. Suppressing the whole run would discard that verdict forever.
-  it("withholds the degraded warning for an abandoned run at HEAD", async () => {
+  it("withholds the notice for an abandoned run at HEAD", async () => {
     const github = makeGithub([]);
     const res = await executeReviewFromIntent({
       github,
@@ -315,6 +315,7 @@ describe("executeReviewFromIntent — an abandoned run withholds only the warnin
       workFailed: true,
     });
     expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+    expect(github.createConversationComment).not.toHaveBeenCalled();
   });
 
   it("STILL POSTS a real verdict an abandoned run managed to persist", async () => {
@@ -355,5 +356,198 @@ describe("executeReviewFromIntent — an abandoned run withholds only the warnin
     });
     expect(res.outcome).toBe("posted_stale_comment");
     expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(OLD);
+  });
+});
+
+describe("ADR-009 — a non-verdict is never posted as a review", () => {
+  const UNABLE = fenced({
+    verdict: "unable_to_review",
+    reason: "git refused the checkout: detected dubious ownership",
+  });
+
+  function expectNoReview(github: ReturnType<typeof makeGithub>) {
+    expect(github.submitReview).not.toHaveBeenCalled();
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+    expect(github.postInlineComment).not.toHaveBeenCalled();
+  }
+
+  it("an agent that reports it could not review gets a notice carrying its reason", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: UNABLE,
+    });
+    expect(res).toEqual({
+      outcome: "degraded_comment",
+      cause: "agent_unable",
+      reason: "git refused the checkout: detected dubious ownership",
+      workFailed: true,
+    });
+    expectNoReview(github);
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]!.body).toContain(
+      "could not review this commit: git refused the checkout",
+    );
+  });
+
+  it("an unable intent naming an OLDER commit says nothing about HEAD", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: fenced({
+        verdict: "unable_to_review",
+        reason: "diff was truncated",
+        commit: OLD,
+      }),
+    });
+    expect(res).toMatchObject({
+      outcome: "skipped_stale_degrade",
+      cause: "agent_unable",
+      workFailed: true,
+    });
+    expectNoReview(github);
+    expect(github.createConversationComment).not.toHaveBeenCalled();
+  });
+
+  // The review #228 received: an agent with no git access followed the old
+  // skill and chose `comment`. Enforced server-side so a repo still running an
+  // older skill body gets the same guarantee.
+  it("a bare `comment` on a READY PR is a non-verdict: notice, not a COMMENTED review", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      isDraft: false,
+      terminalText: fenced({
+        verdict: "comment",
+        commit: HEAD,
+        summary: "I could not review this PR: no diff was available.",
+      }),
+    });
+    expect(res).toMatchObject({
+      outcome: "degraded_comment",
+      cause: "agent_comment_without_findings",
+      workFailed: true,
+    });
+    expectNoReview(github);
+    expect(github.comments[0]!.body).toContain(
+      "left a note instead of a verdict: I could not review this PR",
+    );
+  });
+
+  it("an absent draft flag is read as READY (the stricter reading)", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: fenced({ verdict: "comment", commit: HEAD, summary: "?" }),
+    });
+    expect(res.outcome).toBe("degraded_comment");
+    expectNoReview(github);
+  });
+
+  it("a bare `comment` on a DRAFT stays a review — it is the draft verdict", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      isDraft: true,
+      terminalText: fenced({
+        verdict: "comment",
+        commit: HEAD,
+        summary: "Draft: the approach looks right so far.",
+      }),
+    });
+    expect(res).toEqual({ outcome: "posted", verdict: "comment" });
+    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
+    expect(github.createConversationComment).not.toHaveBeenCalled();
+  });
+
+  it("a `comment` WITH findings on a ready PR stays a review — it surfaces them", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      isDraft: false,
+      terminalText: fenced({
+        verdict: "comment",
+        commit: HEAD,
+        summary: "One thing worth a look.",
+        findings: [
+          { severity: "warning", path: "a.ts", line: 3, body: "untested" },
+        ],
+      }),
+    });
+    expect(res).toEqual({ outcome: "posted", verdict: "comment" });
+    expect(github.createConversationComment).not.toHaveBeenCalled();
+  });
+
+  it("a verdict at HEAD retires the notice an earlier silent run left", async () => {
+    const github = makeGithub([]);
+    const base = {
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+    };
+    await executeReviewFromIntent({ ...base, terminalText: UNABLE });
+    expect(github.comments).toHaveLength(1);
+
+    const res = await executeReviewFromIntent({
+      ...base,
+      terminalText: RC_AT_HEAD,
+    });
+    expect(res.outcome).toBe("posted");
+    expect(github.comments).toHaveLength(0);
+  });
+
+  it("a notice for a NEW commit replaces the one for the previous commit", async () => {
+    const github = makeGithub([]);
+    const base = {
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      terminalText: UNABLE,
+    };
+    await executeReviewFromIntent({ ...base, currentHeadSha: OLD });
+    await executeReviewFromIntent({ ...base, currentHeadSha: HEAD });
+    expect(github.comments).toHaveLength(1);
+    expect(reviewNoticeSha(github.comments[0]!, BOT)).toBe(HEAD);
+  });
+
+  it("a failing notice cleanup never costs the verdict", async () => {
+    const github = makeGithub([]);
+    github.listConversationComments.mockRejectedValue(new Error("502"));
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: RC_AT_HEAD,
+    });
+    expect(res.outcome).toBe("posted");
   });
 });

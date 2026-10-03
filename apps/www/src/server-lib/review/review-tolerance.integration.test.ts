@@ -5,10 +5,9 @@ import { nanoid } from "nanoid";
 import { createOrganization } from "@terragon/shared/model/organizations";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import { upsertOrganizationReviewSetting } from "@terragon/shared/model/organization-review-settings";
-import type {
-  GitHubReview,
-  ReviewGitHubClient,
-} from "@terragon/review/state/review-github-client";
+import type { GitHubReview } from "@terragon/review/state/review-github-client";
+import type { ReviewWriterClient } from "./review-notice";
+import { makeNoticeFake } from "./review-notice.fake";
 import { resolveApproveFloor } from "./resolve-approve-floor";
 import { resolveReviewDraftPolicy } from "./resolve-review-draft-policy";
 import { executeReviewFromIntent } from "./execute-review-from-intent";
@@ -34,6 +33,7 @@ const HEAD = "head-sha-42";
 
 function makeGithub(reviews: GitHubReview[] = []) {
   return {
+    ...makeNoticeFake(),
     listReviews: vi.fn(async (_repo: string, _pr: number) => reviews),
     submitReview: vi.fn(
       async (
@@ -66,7 +66,7 @@ function makeGithub(reviews: GitHubReview[] = []) {
         _sha: string,
       ) => {},
     ),
-  } satisfies ReviewGitHubClient;
+  } satisfies ReviewWriterClient;
 }
 
 /** An emit-only agent output: `approve` verdict carrying one finding. */

@@ -1,12 +1,11 @@
-import type {
-  GitHubReview,
-  ReviewGitHubClient,
-} from "@terragon/review/state/review-github-client";
+import type { GitHubReview } from "@terragon/review/state/review-github-client";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
+import type { ReviewWriterClient } from "./review-notice";
 
 /**
  * Control-plane implementation of the pure `ReviewGitHubClient` (ADR-036
- * single-writer channel). The review executor + finders are dependency-injected
+ * single-writer channel), plus the PR-conversation surface the no-verdict
+ * notice uses (ADR-009). The review executor + finders are dependency-injected
  * on this — the App-scoped octokit client. Posting/dismissing with APP creds keeps
  * write rights off the customer box (ADR-002), the same posture as the interim
  * reconciler (`reconcile-pr-reviews.ts`).
@@ -41,10 +40,10 @@ function mapReview(r: {
   };
 }
 
-/** Build a ReviewGitHubClient bound to an App-scoped octokit instance. */
+/** Build the single writer's client, bound to an App-scoped octokit instance. */
 export function createOctokitReviewClient(
   octokit: Octokit,
-): ReviewGitHubClient {
+): ReviewWriterClient {
   return {
     async listReviews(repo, prNumber) {
       const [owner, name] = parseRepoFullName(repo);
@@ -115,23 +114,47 @@ export function createOctokitReviewClient(
         body,
       });
     },
+
+    async listConversationComments(repo, prNumber) {
+      const [owner, name] = parseRepoFullName(repo);
+      const comments = await octokit.paginate(
+        octokit.rest.issues.listComments,
+        { owner, repo: name, issue_number: prNumber, per_page: 100 },
+      );
+      return comments.map((comment) => ({
+        id: comment.id,
+        user: comment.user ? { login: comment.user.login } : null,
+        body: comment.body ?? "",
+      }));
+    },
+
+    async createConversationComment(repo, prNumber, body) {
+      const [owner, name] = parseRepoFullName(repo);
+      await octokit.rest.issues.createComment({
+        owner,
+        repo: name,
+        issue_number: prNumber,
+        body,
+      });
+    },
+
+    async deleteConversationComment(repo, commentId) {
+      const [owner, name] = parseRepoFullName(repo);
+      await octokit.rest.issues.deleteComment({
+        owner,
+        repo: name,
+        comment_id: commentId,
+      });
+    },
   };
 }
 
-/** Current HEAD SHA of a PR — the idempotency + stale-intent key. */
-export async function getPrHeadSha(
-  octokit: Octokit,
-  repoFullName: string,
-  prNumber: number,
-): Promise<string> {
-  return (await getPrHeadState(octokit, repoFullName, prNumber)).headSha;
-}
-
 /**
- * HEAD sha AND draft state of a PR in one call. The draft flag feeds the
- * approve-floor draft cap (a draft PR must never receive a formal
- * `request_changes`), fetched alongside the head sha to avoid a second API round
- * trip in the finish hook.
+ * HEAD sha (the idempotency + stale-intent key) AND draft state of a PR in one
+ * call. The draft flag feeds the approve-floor draft cap (a draft PR must never
+ * receive a formal `request_changes`) and the no-verdict rule (a bare `comment`
+ * is a verdict only on a draft), fetched alongside the head sha to avoid a
+ * second API round trip.
  */
 export async function getPrHeadState(
   octokit: Octokit,
