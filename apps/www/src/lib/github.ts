@@ -19,6 +19,8 @@ import {
   getGitHubAccountIdForUser,
   getGitHubUserAccessTokenOrThrow,
   getUserSettings,
+  GitHubTokenRefreshError,
+  RefreshedGitHubUserToken,
 } from "@terragon/shared/model/user";
 import { env } from "@terragon/env/apps-www";
 import { UserFacingError } from "./server-actions";
@@ -245,15 +247,72 @@ export async function getOctokitForApp({
   return new Octokit({ auth: githubAccessToken });
 }
 
+const GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token";
+// The refresh runs inline on repo lookups; a hung github.com connection must
+// fail fast so callers fall back instead of stalling.
+const GITHUB_TOKEN_REFRESH_TIMEOUT_MS = 10_000;
+
+function expiresInToDate(seconds: unknown): Date | null {
+  return typeof seconds === "number" && seconds > 0
+    ? new Date(Date.now() + seconds * 1000)
+    : null;
+}
+
 /**
- * Usable GitHub user access token, or null. getGitHubUserAccessTokenOrThrow
- * rejects EXPIRED tokens (GitHub App user tokens live 8h), which is what makes
+ * Exchanges a GitHub App user refresh token for a new token pair. GitHub answers
+ * a bad/expired refresh token with HTTP 200 and an `error` body, so the body is
+ * checked, not just the status.
+ */
+export async function refreshGitHubUserTokenViaOAuth(
+  refreshToken: string,
+): Promise<RefreshedGitHubUserToken> {
+  const response = await fetch(GITHUB_OAUTH_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      client_id: env.GITHUB_CLIENT_ID,
+      client_secret: env.GITHUB_CLIENT_SECRET,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }),
+    signal: AbortSignal.timeout(GITHUB_TOKEN_REFRESH_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`GitHub token refresh failed: HTTP ${response.status}`);
+  }
+  const body: unknown = await response.json();
+  if (typeof body !== "object" || body === null) {
+    throw new Error("GitHub token refresh failed: malformed response");
+  }
+  const data = body as Record<string, unknown>;
+  if (typeof data.access_token !== "string" || !data.access_token) {
+    const reason = typeof data.error === "string" ? data.error : "no token";
+    throw new Error(`GitHub token refresh failed: ${reason}`);
+  }
+  return {
+    accessToken: data.access_token,
+    accessTokenExpiresAt: expiresInToDate(data.expires_in),
+    refreshToken:
+      typeof data.refresh_token === "string" && data.refresh_token
+        ? data.refresh_token
+        : null,
+    refreshTokenExpiresAt: expiresInToDate(data.refresh_token_expires_in),
+  };
+}
+
+/**
+ * Usable GitHub user access token, or null. GitHub App user tokens live 8h; an
+ * expired one is renewed with the stored refresh token (6 months). Only when
+ * that fails too is the user treated as having no token, which is what makes
  * the App-installation fallback in the background helpers below correct: a dead
  * user token must never win over a working installation token.
  *
  * Note we do NOT route this through better-auth's refresh: this app encrypts
  * account tokens in its own databaseHooks, so better-auth would hand GitHub the
- * ciphertext. Re-linking GitHub mints a fresh token.
+ * ciphertext. The refresh here decrypts and re-encrypts itself.
  */
 async function getUsableGitHubUserToken({
   userId,
@@ -265,8 +324,15 @@ async function getUsableGitHubUserToken({
       db,
       userId,
       encryptionKey: env.ENCRYPTION_MASTER_KEY,
+      refresh: refreshGitHubUserTokenViaOAuth,
     });
-  } catch {
+  } catch (error) {
+    // Only a refresh that was attempted and failed is worth a log line. No
+    // account, no token, or an expired token with nothing to refresh it with is
+    // the normal state for email/password users and runs on every repo lookup.
+    if (error instanceof GitHubTokenRefreshError) {
+      console.warn(`GitHub token refresh failed for ${userId}:`, error.message);
+    }
     return null;
   }
 }

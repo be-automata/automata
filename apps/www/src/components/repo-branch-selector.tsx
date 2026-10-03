@@ -14,22 +14,23 @@ import { cn } from "@/lib/utils";
 /**
  * The repo list comes from the user's GitHub OAuth token; the branch list comes
  * from the App INSTALLATION token (see server-actions/user-repos.ts). GitHub App
- * user tokens expire after 8h and this app deliberately does not refresh them
- * (lib/github.ts) — so the repo picker empties out while the branch picker keeps
- * working, and the fix is re-linking GitHub, NOT installing the App again.
+ * user tokens expire after 8h; lib/github.ts renews them with the stored refresh
+ * token, but when that fails too (refresh token expired or revoked) the repo
+ * picker empties out while the branch picker keeps working, and the fix is
+ * re-linking GitHub, NOT installing the App again.
  *
  * Without this, the expired-token state renders as the generic "Add a repo to get
  * started." + "Manage repository access", which sends the user to the App install
  * page and cannot fix it. Onboarding already branches on the same flag.
  */
-function githubReconnectActionItem() {
+export function githubReconnectActionItem(returnUrl = "/dashboard") {
   return {
     value: "reconnect-github",
     label: "Reconnect GitHub",
     icon: <Github className="size-4 shrink-0" />,
     action: () => {
       void signInWithGithub({
-        returnUrl: "/dashboard",
+        returnUrl,
         location: "repo_picker",
       });
     },

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -25,10 +25,49 @@ import { getEnvironments } from "@/server-actions/get-environments";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { getGHAppInstallUrl } from "@/lib/gh-app-url";
+import { githubReconnectActionItem } from "@/components/repo-branch-selector";
 import {
   useServerActionMutation,
   useServerActionQuery,
 } from "@/queries/server-action-helpers";
+
+/**
+ * Empty repo list. An expired GitHub connection lists ZERO repos, including
+ * ones that already have an environment, so it gets a reconnect action instead
+ * of "No repositories found.", which points at the App-install page, a fix
+ * that cannot work. Hook-free so it can be rendered and invoked in tests.
+ */
+export function RepoListEmptyState({
+  githubTokenMissing,
+  searchQuery,
+}: {
+  githubTokenMissing: boolean;
+  searchQuery: string;
+}) {
+  if (githubTokenMissing) {
+    const reconnectGithub = githubReconnectActionItem("/environments");
+    return (
+      <div className="min-h-[56px] flex flex-col items-center justify-center gap-3 p-4">
+        <div className="text-center text-sm text-muted-foreground">
+          Your GitHub connection expired. Reconnect to list your repos.
+        </div>
+        <Button variant="outline" size="sm" onClick={reconnectGithub.action}>
+          {reconnectGithub.icon}
+          {reconnectGithub.label}
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="min-h-[56px] flex items-center justify-center p-4">
+      <div className="text-center text-sm text-muted-foreground">
+        {searchQuery
+          ? "No repositories found matching your search."
+          : "No repositories found."}
+      </div>
+    </div>
+  );
+}
 
 export function CreateEnvironmentButton() {
   const router = useRouter();
@@ -63,6 +102,7 @@ export function CreateEnvironmentButton() {
   );
 
   const repos = repoData?.repos || [];
+  const githubTokenMissing = repoData?.githubTokenMissing === true;
   const filteredRepos = repos.filter((repo) =>
     repo.full_name.toLowerCase().includes(searchQuery.toLowerCase()),
   );
@@ -136,13 +176,10 @@ export function CreateEnvironmentButton() {
                     </div>
                   </div>
                 ) : filteredRepos.length === 0 ? (
-                  <div className="min-h-[56px] flex items-center justify-center p-4">
-                    <div className="text-center text-sm text-muted-foreground">
-                      {searchQuery
-                        ? "No repositories found matching your search."
-                        : "No repositories found."}
-                    </div>
-                  </div>
+                  <RepoListEmptyState
+                    githubTokenMissing={githubTokenMissing}
+                    searchQuery={searchQuery}
+                  />
                 ) : (
                   <div className="divide-y">
                     {filteredRepos.map((repo) => {
