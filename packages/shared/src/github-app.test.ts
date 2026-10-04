@@ -3,6 +3,7 @@ import {
   READ_ONLY_TOKEN_PERMISSIONS,
   getGitHubApp,
   getInstallationToken,
+  getRepoInstallationPermissions,
   getReadOnlyInstallationToken,
   isAppInstalledOnRepo,
   lookupInstallationId,
@@ -194,6 +195,36 @@ describe("GitHub App", () => {
       await expect(lookupInstallationId("o", "r")).rejects.toThrow(
         "GitHub App is not installed on repository o/r",
       );
+    });
+
+    it("forwards a provided signal as request.signal on the lookup and the mint", async () => {
+      const calls = mockRequests();
+      const signal = new AbortController().signal;
+      await getInstallationToken("o", "r", undefined, { signal });
+      expect(calls[0]!.params).toEqual({
+        owner: "o",
+        repo: "r",
+        request: { signal },
+      });
+      expect(calls[1]!.params.request).toEqual({ signal });
+    });
+
+    it("getRepoInstallationPermissions returns the id and granted permissions", async () => {
+      process.env.GITHUB_APP_ID = "123456";
+      process.env.GITHUB_APP_PRIVATE_KEY = "fake-private-key";
+      const spy = vi
+        .spyOn(getGitHubApp().octokit, "request")
+        .mockResolvedValue({
+          data: { id: 9, permissions: { issues: "write", contents: "read" } },
+        } as never);
+      const signal = new AbortController().signal;
+      await expect(
+        getRepoInstallationPermissions("o", "r", { signal }),
+      ).resolves.toEqual({
+        installationId: 9,
+        permissions: { issues: "write", contents: "read" },
+      });
+      expect(spy.mock.calls[0]![1]).toMatchObject({ request: { signal } });
     });
   });
 });
