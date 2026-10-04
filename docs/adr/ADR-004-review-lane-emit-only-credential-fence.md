@@ -38,8 +38,14 @@ below is what any implementation must preserve.
 
 1. **No resident credential.** When `permissionMode === "review"`, the daemon sets
    `withholdGitCredentials`, and `spawnAgentProcess` applies `stripGithubCredentials(childEnv)`,
-   which removes `GH_TOKEN`, `GITHUB_TOKEN`, and `GIT_CONFIG_COUNT|KEY_n|VALUE_n` from the agent
-   **environment**. A review run is intended to perform **no authenticated git op and no `gh` call**
+   which removes `GH_TOKEN`, `GITHUB_TOKEN`, and every credential-bearing entry of the
+   `GIT_CONFIG_COUNT|KEY_n|VALUE_n` group (`http.*extraheader`, `url.*.insteadOf` /
+   `pushInsteadOf`, and any value embedding the token) from the agent **environment**. Since #229
+   the strip is selective: non-credential entries (`safe.directory`, `user.*`,
+   `credential.helper=""`) are kept and renumbered, because the agent-uid review run needs
+   `safe.directory` and `GIT_CONFIG_GLOBAL=/dev/null` leaves nothing else to supply it. (The #229
+   squash commit on main, 5f9a6d4, is titled "(#228) (#229)"; the "#228" is wrong — #228 is the
+   unrelated ticket-comment PR whose bot review first hit the bug.) A review run is intended to perform **no authenticated git op and no `gh` call**
    — it reads a pre-provisioned diff offline. **⚠ This env-strip is necessary but NOT sufficient — see
    the 2026-08-21 amendment below: an on-disk credential channel survives it, so the invariant is not
    yet fully enforced.**

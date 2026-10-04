@@ -74,10 +74,12 @@ function isCredentialGitConfigKey(key: string): boolean {
  *
  * Every OTHER git-config entry (credential.helper="", user.name/email,
  * safe.directory) is KEPT, in its original order, renumbered contiguously from 0 with
- * GIT_CONFIG_COUNT set to the kept count (removed when none survive). #228: the
+ * GIT_CONFIG_COUNT set to the kept count (removed when none survive). #229: the
  * whole-group strip used to drop safe.directory too, and with GIT_CONFIG_GLOBAL=
  * /dev/null nothing restores it, so agent-uid review runs died on "dubious
- * ownership". A malformed or absent COUNT, or a missing KEY_i below COUNT, fails
+ * ownership" (first seen on PR #228's bot review). The fix's squash commit on
+ * main, 5f9a6d4, is titled "(#228) (#229)": that "#228" is a mistake — #228 is
+ * the unrelated ticket-comment PR, and there is no separate issue. A malformed or absent COUNT, or a missing KEY_i below COUNT, fails
  * closed (the whole group is dropped); orphan indices >= COUNT are dropped.
  *
  * GIT_CONFIG_GLOBAL/SYSTEM (=/dev/null host isolation, which keeps the osxkeychain

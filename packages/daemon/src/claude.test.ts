@@ -110,7 +110,7 @@ describe("stripGithubCredentials — review-run token withhold (single-writer)",
     );
   }
 
-  it("keeps non-credential git config (safe.directory, user.*, credential.helper) renumbered from 0 (#228)", () => {
+  it("keeps non-credential git config (safe.directory, user.*, credential.helper) renumbered from 0 (#229)", () => {
     const out = stripGithubCredentials(fullEnv);
     expect(out.GIT_CONFIG_COUNT).toBe("4");
     expect(out.GIT_CONFIG_KEY_0).toBe("credential.helper");

@@ -12,6 +12,7 @@ import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { reapAgentUidEscapees } from "./uid-reaper";
 import { DaemonProcess } from "./daemon-process";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
+import { formatRunStartLine } from "./run-lane";
 import {
   classifyNextMessageError,
   nonRetryablePreflight,
@@ -445,6 +446,10 @@ async function runAgentInner(
   const tracePrefix = input.traceparent ? ` trace=${input.traceparent}` : "";
   const step = (msg: string) =>
     ctx.log(`[agent-run ${input.threadId}${tracePrefix}] ${msg}`);
+
+  // UAT #229 F2: say which lane this run is (and its PR) before anything can
+  // fail, so the journal can be matched to a GitHub review without timestamps.
+  step(formatRunStartLine(input));
 
   // Provision: clone into a per-run workdir keyed on threadId. threadId is unique
   // per thread; threadChatId is the shared legacy sentinel when

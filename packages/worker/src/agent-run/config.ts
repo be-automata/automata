@@ -159,7 +159,10 @@ function defaultDaemonDist(): string {
   // provisioning documents this. We can't require.resolve the dist path — the
   // daemon package's "." export is the TS source and its exports map blocks
   // package.json — so we derive it from this file's monorepo location. On a bundled
-  // deploy set WORKER_DAEMON_DIST explicitly to override this.
+  // deploy set WORKER_DAEMON_DIST explicitly to override this. In agent-uid mode
+  // the launcher (deploy/linux/run-worker.sh.template) exports it to the copy it
+  // stages under /usr/local/automata/daemon, so this default is the non-agent-uid
+  // path only.
   // this file: packages/worker/src/agent-run/config.ts → up 3 = packages/worker.
   const workerPkgRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),

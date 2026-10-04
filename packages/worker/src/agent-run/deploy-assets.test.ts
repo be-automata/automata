@@ -338,6 +338,42 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
     expect(exec).toBeGreaterThan(build);
   });
 
+  it("the launcher points WORKER_DAEMON_DIST at the bundle it stages (UAT #229 F1)", () => {
+    // The launcher used to stage the daemon into /usr/local/automata/daemon on
+    // every agent-uid boot while the worker, with WORKER_DAEMON_DIST unset,
+    // spawned the checkout's packages/daemon/dist instead. The staged snapshot
+    // is the one pinned to this boot's revision; a later build in the checkout
+    // must not change what the running worker's agents execute. Pin that the
+    // block which writes the file also exports its path — same path, after the
+    // install, inside the agent-uid branch, before the exec.
+    const script = linux("run-worker.sh.template");
+    const block = script.match(
+      /^if \[ -n "\$\{WORKER_AGENT_USER:-\}" \]; then\n([\s\S]*?)^fi$/m,
+    );
+    expect(block, "agent-uid staging block not found").toBeTruthy();
+    const body = block![1]!;
+    const install = body.match(/install -m 0444 \S+ (\S+)/);
+    const exported = body.match(/^\s*export WORKER_DAEMON_DIST=(\S+)$/m);
+    expect(install, body).toBeTruthy();
+    expect(exported, body).toBeTruthy();
+    expect(exported![1]).toBe(install![1]);
+    expect(body.indexOf("export WORKER_DAEMON_DIST")).toBeGreaterThan(
+      body.indexOf("install -m 0444"),
+    );
+    expect(script.indexOf(block![0])).toBeLessThan(
+      script.lastIndexOf("exec node --import tsx src/hello/worker.ts"),
+    );
+    // Exported nowhere else: outside agent-uid mode the checkout's dist is
+    // correct (the agent is this worker's own child and can read it).
+    expect(script.match(/export WORKER_DAEMON_DIST=/g)).toHaveLength(1);
+
+    // The macOS runbook's launcher snippet carries the same contract.
+    const readme = read(path.join(workerRoot, "deploy", "README.md"));
+    expect(readme).toMatch(
+      /install -m 0444 \S+ \/usr\/local\/automata\/daemon\/index\.js[^\n]*\n(?:\s*#[^\n]*\n)*\s*export WORKER_DAEMON_DIST=\/usr\/local\/automata\/daemon\/index\.js\n/,
+    );
+  });
+
   it("the unit signals only MainPID, so the SDK owns the drain", () => {
     // KillMode=control-group SIGTERMs the agent and its daemon directly and
     // drops the in-flight review. `mixed` sends SIGTERM to MainPID alone and

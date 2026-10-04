@@ -153,7 +153,9 @@ every fenced run into a 90-second stall with no output rather than an error.
 
 `/usr/local/automata/daemon/index.js` must be the freshly built bundle. Prefer
 `chown $(id -un)` on that one directory so `run-worker.sh` can copy the build in
-without another sudo grant.
+without another sudo grant. The launcher that copies it in also exports
+`WORKER_DAEMON_DIST` to that path, so the worker always runs the copy staged at
+its own boot; the env line in §5 is kept for launchers older than that.
 
 ## 3. sudoers
 

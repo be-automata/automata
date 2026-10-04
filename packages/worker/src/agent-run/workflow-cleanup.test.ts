@@ -256,6 +256,35 @@ function ctx() {
   };
 }
 
+describe("agent-run run task — the run's lane is journaled first (UAT #229 F2)", () => {
+  it("logs `run start: lane=…` before the clone, so a run that dies cloning still says what it was", async () => {
+    provisionWorkdir.mockRejectedValueOnce(new Error("clone failed"));
+    const c = ctx();
+
+    await expect(
+      runFn(
+        {
+          ...INPUT,
+          prNumber: 7,
+          prKey: "org-1/o/r/7",
+          supersedePolicy: "newest-wins",
+        },
+        c,
+      ),
+    ).rejects.toThrow(/clone failed/);
+
+    const lines = c.log.mock.calls.map((call) => String(call[0]));
+    const start = lines.findIndex((l) => l.includes("run start:"));
+    expect(start, lines.join("\n")).toBeGreaterThan(-1);
+    expect(lines[start]).toContain(
+      "[agent-run thr_leak_1] run start: lane=review pr=7 repo=o/r branch=main policy=newest-wins",
+    );
+    expect(lines.some((l) => l.includes("clone complete"))).toBe(false);
+    expect(lines.join("\n")).not.toContain("inst-secret");
+    expect(lines.join("\n")).not.toContain("daemon-tok");
+  });
+});
+
 describe("agent-run run task — workdir is never leaked by a failed credential step", () => {
   it("removes the clone when the credential pull rejects (network error / cancel abort)", async () => {
     pullAgentCredentials.mockRejectedValue(
