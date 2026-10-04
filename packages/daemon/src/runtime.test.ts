@@ -1,5 +1,9 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { DaemonRuntime, writeToUnixSocket } from "./runtime";
+import {
+  DaemonRuntime,
+  STDOUT_DRAIN_CAP_MS,
+  writeToUnixSocket,
+} from "./runtime";
 import { nanoid } from "nanoid/non-secure";
 import fs from "node:fs";
 
@@ -281,6 +285,51 @@ describe("runtime", () => {
     expect(onCloseMock).toHaveBeenCalledTimes(1);
     expect(onCloseMock).toHaveBeenCalledWith(0);
   });
+
+  it("spawnCommandLine delivers a stdout line that arrives after bash exits, BEFORE onClose (Phase 5)", async () => {
+    const events: string[] = [];
+    const onCloseMock = vi.fn((code: number | null) => {
+      events.push(`close:${code}`);
+    });
+    runtime.spawnCommandLine("(sleep 0.3; echo last-line) & exit 0", {
+      // Only the marker counts: a noisy login shell may print its own lines.
+      onStdoutLine: (line) => {
+        if (line === "last-line") events.push("line");
+      },
+      onStderr: () => {},
+      onError: () => {},
+      onClose: onCloseMock,
+      env: {},
+    });
+    await sleep(1200);
+    expect(events).toEqual(["line", "close:0"]);
+    expect(onCloseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("spawnCommandLine caps the stdout drain when a detached child keeps stdout open (Phase 5)", async () => {
+    const lines: string[] = [];
+    const start = Date.now();
+    let closedAfterMs: number | undefined;
+    const onCloseMock = vi.fn(() => {
+      closedAfterMs = Date.now() - start;
+    });
+    runtime.spawnCommandLine("(sleep 5; echo too-late) & exit 0", {
+      onStdoutLine: (line) => {
+        if (line === "too-late") lines.push(line);
+      },
+      onStderr: () => {},
+      onError: () => {},
+      onClose: onCloseMock,
+      env: {},
+    });
+    await sleep(STDOUT_DRAIN_CAP_MS + 1000);
+    expect(onCloseMock).toHaveBeenCalledTimes(1);
+    expect(closedAfterMs).toBeLessThanOrEqual(STDOUT_DRAIN_CAP_MS + 1000);
+    // The line the grandchild prints after the cap is never delivered.
+    await sleep(5500 - (STDOUT_DRAIN_CAP_MS + 1000));
+    expect(lines).toEqual([]);
+    expect(onCloseMock).toHaveBeenCalledTimes(1);
+  }, 10000);
 
   it("spawnCommand calls onClose only once even when multiple events fire", async () => {
     const onStdoutMock = vi.fn();
