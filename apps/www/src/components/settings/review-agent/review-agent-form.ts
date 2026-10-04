@@ -8,6 +8,7 @@ import {
   REVIEW_MAX_TURNS_MIN,
   REVIEW_ORCHESTRATED_COMMAND_TIMEOUT_S_DEFAULT,
   findReviewAgentFieldError,
+  type BatteryPackId,
   type ReviewAgentValues,
   type ReviewBatteryPackId,
   type ReviewMode,
@@ -97,6 +98,8 @@ export interface ReviewAgentDraft {
   reviewRunTests: boolean | null;
   timeoutText: string;
   maxTurnsText: string;
+  /** Task-run packs (phase 7); null = inherit. Independent of review mode. */
+  taskBatteries: BatteryPackId[] | null;
 }
 
 export function draftFromValues(values: ReviewAgentValues): ReviewAgentDraft {
@@ -106,6 +109,7 @@ export function draftFromValues(values: ReviewAgentValues): ReviewAgentDraft {
     reviewRunTests: values.reviewRunTests,
     timeoutText: values.reviewCommandTimeoutS?.toString() ?? "",
     maxTurnsText: values.reviewMaxTurns?.toString() ?? "",
+    taskBatteries: values.taskBatteries,
   };
 }
 
@@ -167,6 +171,9 @@ export function draftToPatch(
   }
   if (draft.reviewRunTests !== stored.reviewRunTests) {
     patch.reviewRunTests = draft.reviewRunTests;
+  }
+  if (!isEqual(draft.taskBatteries, stored.taskBatteries)) {
+    patch.taskBatteries = draft.taskBatteries;
   }
   const errors: { timeoutError?: string; maxTurnsError?: string } = {};
   for (const spec of NUMBER_FIELDS) {

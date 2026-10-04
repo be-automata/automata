@@ -21,6 +21,7 @@ import {
   draftFromValues,
   draftToPatch,
   firstWriteFence,
+  hasReviewAgentOverride,
   parseOptionalInt,
   reviewAgentOverrides,
   type ReviewAgentOverrideRow,
@@ -145,8 +146,52 @@ describe("firstWriteFence", () => {
 });
 
 describe("REVIEW_AGENT_CLEAR_PATCH", () => {
-  it("clears all five fields", () => {
+  it("clears all six fields, task packs included", () => {
     expect(REVIEW_AGENT_CLEAR_PATCH).toEqual(NO_AGENT);
+    expect(Object.keys(REVIEW_AGENT_CLEAR_PATCH)).toHaveLength(6);
+    expect(REVIEW_AGENT_CLEAR_PATCH.taskBatteries).toBeNull();
+  });
+});
+
+describe("task packs (phase 7) — form helpers", () => {
+  it("a row with only task packs is an override, an empty list included", () => {
+    expect(hasReviewAgentOverride({ ...NO_AGENT, taskBatteries: [] })).toBe(
+      true,
+    );
+    expect(
+      hasReviewAgentOverride({ ...NO_AGENT, taskBatteries: ["somnio-skills"] }),
+    ).toBe(true);
+    expect(hasReviewAgentOverride(NO_AGENT)).toBe(false);
+  });
+
+  it("draftFromValues / draftToPatch round-trip taskBatteries", () => {
+    const stored: ReviewAgentValues = {
+      ...NO_AGENT,
+      taskBatteries: ["somnio-skills"],
+    };
+    const draft = draftFromValues(stored);
+    expect(draft.taskBatteries).toEqual(["somnio-skills"]);
+    expect(draftToPatch(draft, stored)).toEqual({ patch: {} });
+  });
+
+  it("changing only the task packs sends exactly {taskBatteries}", () => {
+    const stored: ReviewAgentValues = {
+      ...NO_AGENT,
+      reviewMode: "orchestrated",
+    };
+    const draft = {
+      ...draftFromValues(stored),
+      taskBatteries: ["somnio-skills" as const],
+    };
+    expect(draftToPatch(draft, stored)).toEqual({
+      patch: { taskBatteries: ["somnio-skills"] },
+    });
+  });
+
+  it("choosing Inherit again clears to null", () => {
+    const stored: ReviewAgentValues = { ...NO_AGENT, taskBatteries: [] };
+    const draft = { ...draftFromValues(stored), taskBatteries: null };
+    expect(draftToPatch(draft, stored).patch).toEqual({ taskBatteries: null });
   });
 });
 

@@ -372,3 +372,69 @@ describe("/api/review-settings/default — review-agent fields (phase 4)", () =>
     expect((await sentinel())?.reviewMode).toBe("orchestrated");
   });
 });
+
+describe("/api/review-settings/default — taskBatteries (phase 7)", () => {
+  let userId: string;
+  let orgId: string;
+
+  async function actor(role: "owner" | "admin" | "member") {
+    userId = (await createTestUser({ db })).user.id;
+    const org = await createTestOrganization({ db, userId, role });
+    orgId = org.organization.id;
+    vi.mocked(getTenantContextOrNull).mockResolvedValue({
+      userId,
+      organizationId: orgId,
+    });
+  }
+
+  async function sentinel() {
+    return getRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+    });
+  }
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("an org admin sets the org default task packs on the '*' row; GET returns them; null clears", async () => {
+    await actor("admin");
+    const res = await put({
+      taskBatteries: ["somnio-skills"],
+      expectedUpdatedAt: null,
+    });
+    expect(res.status).toBe(200);
+    expect((await sentinel())?.taskBatteries).toEqual(["somnio-skills"]);
+    const got = (await (await GET()).json()) as {
+      setting: { taskBatteries: string[] | null; updatedAt: string };
+    };
+    expect(got.setting.taskBatteries).toEqual(["somnio-skills"]);
+
+    const cleared = await put({
+      taskBatteries: null,
+      expectedUpdatedAt: got.setting.updatedAt,
+    });
+    expect(cleared.status).toBe(200);
+    expect((await sentinel())?.taskBatteries).toBeNull();
+  });
+
+  it("a member is 403'd and nothing is stored", async () => {
+    await actor("member");
+    const res = await put({ taskBatteries: ["somnio-skills"] });
+    expect(res.status).toBe(403);
+    expect(await sentinel()).toBeUndefined();
+  });
+
+  it.each([[["nope"]], ["somnio-skills"]])(
+    "400 naming taskBatteries on %j, nothing stored",
+    async (value) => {
+      await actor("admin");
+      const res = await put({ taskBatteries: value });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain(
+        "taskBatteries",
+      );
+      expect(await sentinel()).toBeUndefined();
+    },
+  );
+});

@@ -2,7 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { BlockTolerance } from "@terragon/review/severity-policy";
 import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
-import type { ReviewAgentValues } from "@terragon/shared/model/review-agent-settings";
+import type {
+  BatteryPackId,
+  ReviewAgentValues,
+} from "@terragon/shared/model/review-agent-settings";
 import { findSettingByRepo } from "@/lib/review-settings-rows";
 import { ConflictError, errorFromResponse } from "./error-from-response";
 
@@ -22,6 +25,8 @@ export interface RepoReviewSettingDto extends ReviewAgentValues {
   supersedePolicy: string | null;
   recheckOnComplete: boolean;
   // Phase 4 review-agent family (ReviewAgentValues): null = inherit the org default.
+  // Phase 7: includes taskBatteries (task-run packs, BatteryPackId[] | null).
+  taskBatteries: BatteryPackId[] | null;
   updatedAt: string;
 }
 
@@ -34,6 +39,8 @@ export interface RepoReviewSettingPatch extends Partial<ReviewAgentValues> {
   supersedePolicy?: SupersedePolicy | null;
   recheckOnComplete?: boolean;
   // Phase 4 review-agent fields (Partial<ReviewAgentValues>): null = inherit.
+  /** Phase 7 task-run packs; null = inherit the org default. */
+  taskBatteries?: BatteryPackId[] | null;
   /**
    * Optimistic concurrency fence — a stale value gets a ConflictError.
    * `null` is the first-write fence: "I read no override yet"; the create

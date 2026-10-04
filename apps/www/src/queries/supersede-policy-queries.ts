@@ -1,7 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
-import type { ReviewAgentValues } from "@terragon/shared/model/review-agent-settings";
+import type {
+  BatteryPackId,
+  ReviewAgentValues,
+} from "@terragon/shared/model/review-agent-settings";
 import { ConflictError, errorFromResponse } from "./error-from-response";
 
 /**
@@ -21,6 +24,8 @@ export interface SupersedeDefaultDto extends ReviewAgentValues {
    * (falls through to the legacy automation filter, then FALSE). */
   reviewDraftPrs: boolean | null;
   // Phase 4 org-default review-agent settings (ReviewAgentValues): null = system default.
+  /** Phase 7 org-default task-run packs; null = none (today). */
+  taskBatteries: BatteryPackId[] | null;
   updatedAt: string;
 }
 

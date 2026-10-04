@@ -151,7 +151,7 @@ describe("ReviewAgentSection (container)", () => {
     );
   });
 
-  it("Restore default clears all five fields with the row's version, via the restore writer", () => {
+  it("Restore default clears all six fields (task packs included) with the row's version, via the restore writer", () => {
     const { state, actions } = captureModel();
     if (state.kind !== "ready") throw new Error("not ready");
     const row = state.overrides[0]!;
@@ -167,6 +167,23 @@ describe("ReviewAgentSection (container)", () => {
       expect.anything(),
     );
     expect(mutations.setOverride).not.toHaveBeenCalled();
+  });
+
+  it("saving only the task packs sends exactly {taskBatteries} with the row's version", () => {
+    const { state, actions } = captureModel();
+    if (state.kind !== "ready") throw new Error("not ready");
+    const row = state.overrides[0]!;
+    actions.onSaveOverride(row, { taskBatteries: ["somnio-skills"] });
+    expect(mutations.setOverride).toHaveBeenCalledWith(
+      {
+        repoFullName: "acme/api",
+        patch: {
+          taskBatteries: ["somnio-skills"],
+          expectedUpdatedAt: row.updatedAt,
+        },
+      },
+      expect.anything(),
+    );
   });
 
   it("Add override: no row → null fence; a supersede-only row → its version", () => {
