@@ -1,5 +1,3 @@
-import type { Octokit } from "octokit";
-
 import { getRepoInstallationPermissions } from "@terragon/shared/github-app";
 import * as breakerModel from "@terragon/shared/model/self-heal-breaker";
 import type { PermissionName } from "@terragon/shared/model/self-heal-breaker";
@@ -12,9 +10,9 @@ import {
 } from "./with-self-heal-call";
 
 /**
- * Pre-effect checks for the self-heal lane. Both preflights go through
+ * Pre-effect checks for the self-heal lane. The preflight goes through
  * withSelfHealCall (kind "preflight", 5 s) and fail closed: an unreachable
- * GitHub yields `unavailable` / "unknown", never a latch and never a pass.
+ * GitHub yields `unavailable`, never a latch and never a pass.
  *
  * Capability preflight: one `GET /repos/{o}/{r}/installation` (App JWT)
  * returns the installation's permissions. A permission below the required
@@ -22,9 +20,8 @@ import {
  * satisfied clears the latch. The latch rows double as the cache: a row
  * updated within the last hour answers without a GitHub call.
  *
- * Protection preflight (PROT-01): reads the branch summary and the effective
- * branch rules. It never reads `/branches/{b}/protection`, which needs
- * administration:read that the App does not hold.
+ * Branch protection is not preflighted: it is optional (a free-plan private
+ * repo cannot have it) and never gates the lane.
  */
 
 export type SelfHealCapability = "writer" | "fixLoop";
@@ -170,114 +167,4 @@ export async function preflightCapabilities({
 interface InstallationPermissions {
   installationId: number;
   permissions: Record<string, string | undefined>;
-}
-
-export type BranchProtectionResult = "protected" | "unprotected" | "unknown";
-
-interface BranchSummary {
-  protected?: boolean;
-  protection?: {
-    required_status_checks?: {
-      contexts?: string[];
-      checks?: unknown[];
-    } | null;
-  } | null;
-}
-
-interface BranchRule {
-  type?: string;
-  parameters?: { required_status_checks?: unknown[] } | null;
-}
-
-function classicHasChecks(branch: BranchSummary): boolean {
-  const checks = branch.protection?.required_status_checks;
-  return (
-    (checks?.contexts?.length ?? 0) > 0 || (checks?.checks?.length ?? 0) > 0
-  );
-}
-
-/**
- * PROT-01: "protected" only when the default branch is protected AND requires
- * at least one status check (classic summary or a required_status_checks
- * ruleset rule). Anything we could not read is "unknown" (fail closed).
- */
-export async function preflightBranchProtection({
-  octokit,
-  organizationId,
-  installationKey,
-  owner,
-  repo,
-  defaultBranch,
-  deadlineAt,
-  deps,
-}: {
-  octokit: Octokit;
-  organizationId: string;
-  installationKey: string;
-  owner: string;
-  repo: string;
-  defaultBranch: string;
-  deadlineAt: Date;
-  deps: PreflightDeps;
-}): Promise<BranchProtectionResult> {
-  const branchResult = await withSelfHealCall({
-    kind: "preflight",
-    organizationId,
-    installationKey,
-    signalName: "gh_preflight_branch",
-    deadlineAt,
-    deps,
-    call: async (signal) => {
-      const response = await octokit.request(
-        "GET /repos/{owner}/{repo}/branches/{branch}",
-        { owner, repo, branch: defaultBranch, request: { signal } },
-      );
-      return {
-        data: response.data as BranchSummary,
-        status: response.status,
-        headers: response.headers as GithubResponse<unknown>["headers"],
-      };
-    },
-  });
-  if (!branchResult.ok) return "unknown";
-  const branch = branchResult.data;
-  if (branch.protected === true && classicHasChecks(branch)) return "protected";
-
-  const rulesResult = await withSelfHealCall({
-    kind: "preflight",
-    organizationId,
-    installationKey,
-    signalName: "gh_preflight_rules",
-    deadlineAt,
-    deps,
-    call: async (signal) => {
-      const response = await octokit.request(
-        "GET /repos/{owner}/{repo}/rules/branches/{branch}",
-        { owner, repo, branch: defaultBranch, request: { signal } },
-      );
-      return {
-        data: response.data as BranchRule[],
-        status: response.status,
-        headers: response.headers as GithubResponse<unknown>["headers"],
-      };
-    },
-  });
-  let rules: BranchRule[];
-  if (rulesResult.ok) {
-    rules = rulesResult.data;
-  } else if (rulesResult.outcome === "not_found") {
-    rules = [];
-  } else {
-    return "unknown";
-  }
-
-  const rulesetChecks = rules.some(
-    (rule) =>
-      rule.type === "required_status_checks" &&
-      (rule.parameters?.required_status_checks?.length ?? 0) > 0,
-  );
-  const rulesetPullRequest = rules.some((rule) => rule.type === "pull_request");
-  const isProtected = branch.protected === true || rulesetPullRequest;
-  const hasChecks = classicHasChecks(branch) || rulesetChecks;
-  return isProtected && hasChecks ? "protected" : "unprotected";
 }

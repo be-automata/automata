@@ -36,7 +36,6 @@ const h = vi.hoisted(() => ({
   messages: { value: [] as unknown[] },
   run: { value: null as Record<string, unknown> | null },
   context: { value: null as Record<string, unknown> | null },
-  protection: { value: "protected" as string },
   capability: { value: { ok: true, installationId: 77 } as unknown },
   mintFails: { value: false },
   executeImpl: { value: null as null | (() => Promise<unknown>) },
@@ -73,7 +72,6 @@ vi.mock("./self-heal-octokit", () => ({
 }));
 vi.mock("./self-heal-preflight", () => ({
   preflightCapabilities: vi.fn(async () => h.capability.value),
-  preflightBranchProtection: vi.fn(async () => h.protection.value),
 }));
 vi.mock("./issue-writer", () => ({
   createIssueWriter: vi.fn(() => ({
@@ -173,7 +171,6 @@ beforeEach(() => {
   h.messages.value = leadMessages(FULL_TEXT);
   h.run.value = { id: "run_1", claimCount: 1, checkResults: null };
   h.context.value = context();
-  h.protection.value = "protected";
   h.capability.value = { ok: true, installationId: 77 };
   h.mintFails.value = false;
   h.executeImpl.value = null;
@@ -374,13 +371,11 @@ describe("handleAuditFindingsAtFinish", () => {
     });
   });
 
-  it("on mode with an unprotected default branch still files issues (protection is optional)", async () => {
-    h.protection.value = "unprotected";
+  it("on mode files issues without any branch-protection read (protection is optional)", async () => {
     await call();
     expect(
       vi.mocked(executor.executeAuditFindings).mock.calls[0]![0].input.mode,
     ).toBe("on");
-    expect(preflight.preflightBranchProtection).not.toHaveBeenCalled();
   });
 
   it("RES-04: an executor that eats the whole budget cannot hold the hook past the deadline", async () => {
