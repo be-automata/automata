@@ -2409,3 +2409,281 @@ describe("#204: hardening must not fence out the delegated subtree", () => {
     expect(unit).toMatch(/^ProtectSystem=full$/m);
   });
 });
+
+describe("#task batteries (phase 7): acceptance script", () => {
+  const scriptRel = "packages/worker/deploy/linux/task-batteries-acceptance.sh";
+  const scriptPath = path.join(repoRoot, scriptRel);
+  const exists = fs.existsSync(scriptPath);
+  const script = exists ? read(scriptPath) : "";
+  const body = (name: string) => fnBody(script, name);
+  const runbook = read(path.join(repoRoot, "deploy", "PILOT-RUNBOOK.md"));
+  const isRoot = process.getuid?.() === 0;
+
+  function run(args: string[]) {
+    return spawnSync("/bin/bash", [scriptPath, ...args], {
+      encoding: "utf8",
+      timeout: 30_000,
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: os.tmpdir() },
+    });
+  }
+
+  it("is tracked as an executable bash script in strict mode", () => {
+    expect(exists).toBe(true);
+    const mode = execFileSync("git", ["ls-files", "-s", scriptRel], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }).slice(0, 6);
+    expect(mode).toBe("100755");
+    const lines = script.split("\n");
+    expect(lines[0]).toBe("#!/bin/bash");
+    expect(lines[1]).toBe("set -euo pipefail");
+  });
+
+  it("parses with bash -n", () => {
+    expect(() =>
+      execFileSync("bash", ["-n", scriptPath], { stdio: "pipe" }),
+    ).not.toThrow();
+  });
+
+  it("is shellcheck clean", (ctx) => {
+    if (
+      spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
+    ) {
+      ctx.skip();
+    }
+    const result = spawnSync("shellcheck", ["-s", "bash", scriptPath], {
+      encoding: "utf8",
+    });
+    expect(result.stdout + result.stderr).toBe("");
+    expect(result.status).toBe(0);
+  });
+
+  it.each<[string, string[], RegExp]>([
+    ["no args", [], /usage/i],
+    ["an unknown mode", ["deploy"], /usage/i],
+    ["box without --since", ["box", "--repo", "a/b"], /--since/],
+    ["box without --repo", ["box", "--since", "now"], /--repo/],
+    [
+      "box with a malformed --repo",
+      ["box", "--since", "now", "--repo", "a/b;id"],
+      /--repo/,
+    ],
+  ])("exits 2 on %s", (_name, args, message) => {
+    const result = run(args);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toMatch(message);
+    expect(result.stdout).not.toContain("ACCEPTANCE:");
+  });
+
+  it.skipIf(isRoot)(
+    "box refuses a non-root caller with exit 2 before reading anything",
+    () => {
+      const result = run(["box", "--since", "now", "--repo", "a/b"]);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toMatch(/root/);
+      expect(result.stdout).toBe("");
+    },
+  );
+
+  it("box checks uid 0 and Linux before the first box read", () => {
+    const box = body("box_mode");
+    const guard = box.indexOf('[ "$(id -u)" = "0" ]');
+    const linux = box.indexOf('[ "$(uname -s)" = "Linux" ]');
+    expect(guard).toBeGreaterThan(-1);
+    expect(linux).toBeGreaterThan(-1);
+    for (const read of [
+      "manifest.sha256",
+      "journalctl",
+      "git_ro",
+      "as_agent",
+    ]) {
+      expect(box.indexOf(read), read).toBeGreaterThan(Math.max(guard, linux));
+    }
+  });
+
+  it("every git call goes through ONE hardened helper", () => {
+    const helper = body("git_ro");
+    for (const token of [
+      "-c safe.directory=",
+      "-c core.fsmonitor=false",
+      "-c core.hooksPath=/dev/null",
+      "--no-pager",
+      "export GIT_CONFIG_NOSYSTEM=1",
+      "export GIT_CONFIG_GLOBAL=/dev/null",
+      "unset GIT_DIR GIT_WORK_TREE GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT",
+    ]) {
+      expect(helper, token).toContain(token);
+    }
+    const rest = code(script.replace(helper, ""));
+    expect(rest).not.toMatch(/(^|[\s;&|(`$])git\s/m);
+  });
+
+  it("is read-only on the box: no restarts, installs, git writes, schema pushes or chmod/chown outside its own temp dir", () => {
+    const c = code(script);
+    expect(c).not.toMatch(/systemctl\s+(restart|stop|start)/);
+    expect(c).not.toMatch(/install-batteries\.sh/);
+    expect(c).not.toMatch(/rm -rf \//);
+    expect(c).not.toMatch(
+      /\bgit(_ro)?\s+(fetch|merge|pull|push|commit|checkout|switch|reset)\b/,
+    );
+    expect(c).not.toMatch(/drizzle/);
+    const perms = c.split("\n").filter((l) => /\b(chmod|chown)\b/.test(l));
+    expect(perms.length).toBeGreaterThan(0);
+    for (const line of perms) {
+      expect(line).toContain('"$AGENT_HOME"');
+    }
+    expect(c).toContain('AGENT_HOME="$(mktemp -d');
+    expect(c).toContain("trap cleanup EXIT");
+  });
+
+  it("box mode checks the install, the agent view and the journal", () => {
+    const c = code(script);
+    for (const token of [
+      "manifest.sha256",
+      "manifest.sha256.invalid",
+      "/tools/",
+      "cat-file blob HEAD:packages/worker/deploy/batteries.json",
+      "command -v dart",
+      "import requests",
+      "journalctl -u automata-worker.service",
+      "--no-pager -o cat",
+      "batteries: lane=task packs=",
+      "task agent: github read token → GITHUB_TOKEN",
+      "read token required but not delivered",
+      "read token expired before start",
+      "run start: lane=",
+      "batteries: mode=",
+    ]) {
+      expect(c, token).toContain(token);
+    }
+  });
+
+  it("agent checks use the Phase 3 sudo spawn shape with constant command strings", () => {
+    const spawn = body("as_agent");
+    for (const token of [
+      'runuser -u "$WORKER_USER" -- env -i',
+      '/usr/bin/sudo -n -u "$AGENT_USER" -E --',
+      `/bin/sh -c 'exec bash -lc "$1"' sh`,
+      "</dev/null",
+    ]) {
+      expect(spawn, token).toContain(token);
+    }
+    expect(code(script)).not.toMatch(
+      /as_agent '[^']*\$\{?(wrapper|args|line|repo|since|tid|path|ROOT|BIN_DIR)\b/,
+    );
+  });
+
+  it("prints the SC4 manual evidence rules exactly", () => {
+    for (const token of [
+      "EVIDENCE manual",
+      "reports = each report's content (DORA, react-health, security) quoted or summarised in the transcript or final message — a branch is not evidence (reports/ is gitignored)",
+      "somnio exit codes: record verbatim; never pass/fail evidence",
+      "DORA: Deployment Frequency + Lead Time computed from GitHub in the unchanged run — no 401",
+    ]) {
+      expect(script, token).toContain(token);
+    }
+    expect(script).toContain('echo "ACCEPTANCE: PASS"');
+    expect(script).toContain('echo "ACCEPTANCE: FAIL ($FAILURES)"');
+  });
+
+  it("local mode runs the phase gates and maps them to SC1-SC3", () => {
+    const local = body("local_mode");
+    for (const token of [
+      "SC1",
+      "SC2",
+      "SC3",
+      "NODE_OPTIONS=--max-old-space-size=12288",
+      "transport.golden.json",
+      "batteries-dry-run.sh",
+      "--no-file-parallelism",
+    ]) {
+      expect(local, token).toContain(token);
+    }
+  });
+
+  it("names no customer (public repo)", () => {
+    expect(script).not.toMatch(/bangr/i);
+    expect(runbook).not.toMatch(/bangr/i);
+  });
+
+  describe("journal analysis (sourced, fixture journal)", () => {
+    const PREFIX = "0123456789ab";
+    const T = "thr_task_1";
+    const R = "thr_review_1";
+
+    function analyse(journal: string, repo = "acme/admin") {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tba-journal-"));
+      try {
+        const file = path.join(dir, "journal.txt");
+        fs.writeFileSync(file, journal);
+        const result = spawnSync(
+          "/bin/bash",
+          [
+            "-c",
+            'source "$1"; FAILURES=0; analyse_journal "$2" "$3" "$4"; echo "FAILURES=$FAILURES"',
+            "sh",
+            scriptPath,
+            file,
+            repo,
+            PREFIX,
+          ],
+          { encoding: "utf8", timeout: 30_000 },
+        );
+        return result.stdout + result.stderr;
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    const taskRun = (extra: string[] = []) =>
+      [
+        `[agent-run ${T} trace=00-a-b-01] run start: lane=task repo=acme/admin branch=main`,
+        `[agent-run ${T} trace=00-a-b-01] agent credential: credits (box trust: shared)`,
+        `[agent-run ${T} trace=00-a-b-01] batteries: lane=task packs=somnio-skills manifest=${PREFIX}`,
+        ...extra,
+      ].join("\n");
+    const APPLIED = `[agent-run ${T} trace=00-a-b-01] task agent: github read token → GITHUB_TOKEN (read-only, single repo)`;
+    const reviewRun = [
+      `[agent-run ${R}] run start: lane=review pr=3 repo=acme/web branch=f policy=newest-wins`,
+      `[agent-run ${R}] batteries: mode=classic`,
+    ].join("\n");
+
+    it("a seeded task run with the read token and a clean review run pass", () => {
+      const out = analyse(`${taskRun([APPLIED])}\n${reviewRun}\n`);
+      expect(out).toContain("FAILURES=0");
+      expect(out).toContain(`EVIDENCE task-run thread: ${T}`);
+    });
+
+    it("a manifest prefix that differs from manifest.sha256 fails", () => {
+      const out = analyse(
+        `${taskRun([APPLIED]).replace(PREFIX, "ffffffffffff")}\n`,
+      );
+      expect(out).not.toContain("FAILURES=0");
+    });
+
+    it("no read-token line (or a not-delivered line) fails", () => {
+      expect(analyse(`${taskRun()}\n`)).not.toContain("FAILURES=0");
+      expect(
+        analyse(
+          `${taskRun([APPLIED, `[agent-run ${T}] task agent: read token required but not delivered`])}\n`,
+        ),
+      ).not.toContain("FAILURES=0");
+    });
+
+    it("a task run for another repo is not evidence", () => {
+      expect(analyse(`${taskRun([APPLIED])}\n`, "acme/other")).not.toContain(
+        "FAILURES=0",
+      );
+    });
+
+    it("a review run with a lane= line or a read-token line fails the regression check", () => {
+      const bad = [
+        `[agent-run ${R}] run start: lane=review pr=3 repo=acme/web branch=f`,
+        `[agent-run ${R}] batteries: lane=task packs=somnio-skills manifest=${PREFIX}`,
+      ].join("\n");
+      expect(analyse(`${taskRun([APPLIED])}\n${bad}\n`)).not.toContain(
+        "FAILURES=0",
+      );
+    });
+  });
+});
