@@ -1,7 +1,8 @@
 /**
  * Review-agent settings (phase 4): the five admin-panel knobs that shape a
  * PR-review run — mode, battery packs, whether tests may run, the per-command
- * timeout and the lead reviewer's turn limit.
+ * timeout and the lead reviewer's turn limit — plus, since phase 7, the
+ * task-run packs (`taskBatteries`, see TASK PACKS below).
  *
  * STORAGE: nullable columns on `repo_review_settings`; NULL = inherit. The org
  * default is the existing '*' sentinel row (`ORG_DEFAULT_REPO_SENTINEL`) on
@@ -18,6 +19,13 @@
  * worker's deploy-assets test pins the two lists equal. `REVIEW_BATTERY_PACK_IDS`
  * is the review setting's allowed subset and stays exactly the three review
  * packs. The phase 7 task setting validates against `BATTERY_PACK_IDS`.
+ *
+ * TASK PACKS (phase 7): `taskBatteries` is NOT a review knob. It names the
+ * packs non-review runs (manual, scheduled and mention task runs) get, and it
+ * shares this family only for storage, routes, DTOs and the override/remove
+ * logic. Review resolution must iterate `REVIEW_ONLY_AGENT_FIELDS`, so an
+ * invalid stored task value can never fail a review dispatch. System default:
+ * none (`DEFAULT_TASK_BATTERIES`), i.e. today's task runs.
  *
  * `reviewMaxTurns`: Limits the lead reviewer's turns. Sub-agent turns are not counted, so this is not a cost limit.
  *
@@ -73,12 +81,23 @@ export const REVIEW_COMMAND_TIMEOUT_S_MAX = 600;
 export const REVIEW_MAX_TURNS_MIN = 1;
 export const REVIEW_MAX_TURNS_MAX = 500;
 
-export const REVIEW_AGENT_FIELDS = [
+/** The review knobs proper; review resolution iterates exactly these. */
+export const REVIEW_ONLY_AGENT_FIELDS = [
   "reviewMode",
   "reviewBatteries",
   "reviewRunTests",
   "reviewCommandTimeoutS",
   "reviewMaxTurns",
+] as const;
+export type ReviewOnlyAgentField = (typeof REVIEW_ONLY_AGENT_FIELDS)[number];
+
+/** The task-run packs field (phase 7); see the module docblock. */
+export const TASK_AGENT_FIELD = "taskBatteries";
+
+/** The whole family as stored, routed and cleared: review knobs + task packs. */
+export const REVIEW_AGENT_FIELDS = [
+  ...REVIEW_ONLY_AGENT_FIELDS,
+  TASK_AGENT_FIELD,
 ] as const;
 export type ReviewAgentField = (typeof REVIEW_AGENT_FIELDS)[number];
 
@@ -93,6 +112,7 @@ export type ReviewAgentFieldsPatch = {
   reviewRunTests?: boolean | null;
   reviewCommandTimeoutS?: number | null;
   reviewMaxTurns?: number | null;
+  taskBatteries?: string[] | null;
 };
 
 /** The review-agent fields of a settings row, typed (null = inherit). */
@@ -102,6 +122,7 @@ export interface ReviewAgentValues {
   reviewRunTests: boolean | null;
   reviewCommandTimeoutS: number | null;
   reviewMaxTurns: number | null;
+  taskBatteries: BatteryPackId[] | null;
 }
 
 /** System defaults — what an all-inherit (repo and org) field resolves to. */
@@ -110,6 +131,8 @@ export const REVIEW_ORCHESTRATED_COMMAND_TIMEOUT_S_DEFAULT = 300;
 export const DEFAULT_REVIEW_BATTERIES: readonly ReviewBatteryPackId[] =
   REVIEW_BATTERY_PACK_IDS;
 export const DEFAULT_REVIEW_RUN_TESTS = false;
+/** Task runs get no packs unless a repo or '*' row says otherwise (today). */
+export const DEFAULT_TASK_BATTERIES: readonly BatteryPackId[] = [];
 
 /** The one human wording per mode (SUPERSEDE_POLICY_LABELS precedent). */
 export const REVIEW_MODE_LABELS: Record<ReviewMode, string> = {
@@ -130,7 +153,7 @@ export const BATTERY_PACK_LABELS: Record<BatteryPackId, string> = {
   "somnio-skills": "Somnio skills (DORA, health, security)",
 };
 
-/** The five review-agent fields of any row-shaped object, nothing else. */
+/** The review-agent family fields (REVIEW_AGENT_FIELDS) of any row-shaped object, nothing else. */
 export function pickReviewAgentFields<
   T extends Record<ReviewAgentField, unknown>,
 >(row: T): Pick<T, ReviewAgentField> {
@@ -179,6 +202,24 @@ function findBatteriesError(value: unknown): string | undefined {
   return undefined;
 }
 
+function findTaskBatteriesError(value: unknown): string | undefined {
+  const allowed = BATTERY_PACK_IDS.join(", ");
+  if (!Array.isArray(value)) {
+    return `taskBatteries must be a list of pack ids (${allowed}), or null (inherit)`;
+  }
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!isBatteryPackId(item)) {
+      return `taskBatteries has an unknown pack id ${JSON.stringify(item)}; allowed: ${allowed}`;
+    }
+    if (seen.has(item)) {
+      return `taskBatteries has a duplicate pack id "${item}"`;
+    }
+    seen.add(item);
+  }
+  return undefined;
+}
+
 function findFieldError(
   field: ReviewAgentField,
   value: unknown,
@@ -206,6 +247,8 @@ function findFieldError(
       return isIntegerInRange(value, REVIEW_MAX_TURNS_MIN, REVIEW_MAX_TURNS_MAX)
         ? undefined
         : `reviewMaxTurns must be an integer from ${REVIEW_MAX_TURNS_MIN} to ${REVIEW_MAX_TURNS_MAX}, or null (inherit)`;
+    case "taskBatteries":
+      return findTaskBatteriesError(value);
   }
 }
 

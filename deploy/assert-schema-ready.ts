@@ -78,6 +78,11 @@ const REQUIRED: ReadonlyArray<{
     column: "review_max_turns",
     since: REVIEW_AGENT_SINCE,
   },
+  {
+    table: "repo_review_settings",
+    column: "task_batteries",
+    since: "phase 7: task-run batteries (Admin panel task agent packs)",
+  },
 ];
 
 async function main(): Promise<void> {
