@@ -57,6 +57,7 @@ const NO_AGENT = {
   reviewRunTests: null,
   reviewCommandTimeoutS: null,
   reviewMaxTurns: null,
+  taskBatteries: null,
 };
 
 function row(

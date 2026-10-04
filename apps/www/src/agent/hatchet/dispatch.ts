@@ -24,6 +24,10 @@ import {
   type ReviewAgentDispatch,
 } from "@/server-lib/review/resolve-review-agent";
 import {
+  resolveTaskAgentForDispatch,
+  type TaskAgentDispatch,
+} from "@/server-lib/review/resolve-task-agent";
+import {
   getRepoReviewSettingWithOrgDefault,
   supersedeFromRows,
   normalizeRepo,
@@ -180,6 +184,16 @@ export interface AgentRunInput {
    * the worker in Phase 5; mirrored structurally in packages/worker types.
    */
   reviewAgent?: ReviewAgentDispatch;
+  /**
+   * Phase 7, NON-review runs only (manual, scheduled, mention task runs of an
+   * org thread): the battery packs the run gets in its per-run HOME, resolved
+   * LIVE at dispatch (repo row → '*' org default → none). Present only when
+   * the list is non-empty, so a repo without the setting dispatches a
+   * byte-identical payload; review runs never carry it. An invalid stored
+   * value degrades to absent plus a warn line, never a failed dispatch.
+   * Consumed by the worker in 07-05; mirrored structurally in worker types.
+   */
+  taskAgent?: TaskAgentDispatch;
   /**
    * #125/#127 review runs only: the per-PR concurrency key,
    * `${orgId}/${normalizedRepo}/${prNumber}`. The worker variants' per-PR CEL
@@ -548,9 +562,40 @@ export async function dispatchAgentRun({
       repoFullName,
       deliveryId,
     });
+    // Phase 7: task-run packs, non-review org threads only (the review plan
+    // never carries them, and a personal/no-org thread has no settings row).
+    // An invalid stored value degrades to "no packs" with a warn line, never a
+    // failed dispatch; a DB read failure propagates like any other read here.
+    const taskResolution =
+      plan === null && thread?.organizationId != null
+        ? await resolveTaskAgentForDispatch({
+            db,
+            organizationId: thread.organizationId,
+            repoFullName,
+          })
+        : undefined;
+    if (taskResolution !== undefined && "invalid" in taskResolution) {
+      console.warn(
+        "[hatchet] task agent: invalid stored taskBatteries — dispatching without packs",
+        {
+          threadId,
+          organizationId: thread?.organizationId,
+          repoFullName,
+          detail: taskResolution.invalid,
+        },
+      );
+    }
+    const taskAgent = taskResolution?.taskAgent;
+    if (taskAgent !== undefined) {
+      console.log("[hatchet] task agent", {
+        threadId,
+        packs: taskAgent.batteries,
+      });
+    }
     const input: AgentRunInput = {
       ...baseInput,
       ...plan?.inputExtension,
+      ...(taskAgent !== undefined ? { taskAgent } : {}),
     };
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry

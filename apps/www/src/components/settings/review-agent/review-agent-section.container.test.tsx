@@ -41,6 +41,7 @@ const OVERRIDE_ROW = {
   reviewRunTests: null,
   reviewCommandTimeoutS: null,
   reviewMaxTurns: null,
+  taskBatteries: null,
   updatedAt: "2026-10-02T00:00:00.000Z",
 };
 const SUPERSEDE_ONLY_ROW = {
@@ -69,6 +70,7 @@ vi.mock("@/queries/supersede-policy-queries", () => ({
       reviewRunTests: null,
       reviewCommandTimeoutS: null,
       reviewMaxTurns: null,
+      taskBatteries: null,
       updatedAt: DEFAULT_VERSION,
     },
     isLoading: false,

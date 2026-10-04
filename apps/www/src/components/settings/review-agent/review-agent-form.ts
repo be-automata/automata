@@ -30,13 +30,14 @@ export interface ReviewAgentOverrideRow extends ReviewAgentValues {
   updatedAt: string;
 }
 
-/** "Restore default": clear all five fields back to inherit. */
+/** "Restore default": clear every family field (REVIEW_AGENT_FIELDS) back to inherit. */
 export const REVIEW_AGENT_CLEAR_PATCH = {
   reviewMode: null,
   reviewBatteries: null,
   reviewRunTests: null,
   reviewCommandTimeoutS: null,
   reviewMaxTurns: null,
+  taskBatteries: null,
 } as const satisfies ReviewAgentValues;
 
 export const NO_REVIEW_AGENT_VALUES: ReviewAgentValues = {

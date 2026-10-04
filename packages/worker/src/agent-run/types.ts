@@ -42,6 +42,16 @@ export type ReviewAgentShape = {
   maxTurns?: number;
 };
 
+/**
+ * Task-run packs (phase 7), resolved control-plane-side for NON-review runs
+ * only. Structural mirror of www `TaskAgentDispatch` per this file's header
+ * rule. Consumed by task-agent.ts (07-05); old workers ignore it. A `type`
+ * for the same Hatchet JsonObject reason as AgentRunInput below.
+ */
+export type TaskAgentShape = {
+  batteries: string[];
+};
+
 // `type` (not `interface`): Hatchet's task input/output generics require an
 // implicit index signature (JsonObject), which TS infers for type-literal aliases
 // but not for interfaces.
@@ -96,6 +106,12 @@ export type AgentRunInput = {
    * forwarded (Phase 6). PR-review runs only; old workers ignore it.
    */
   reviewAgent?: ReviewAgentShape;
+  /**
+   * Phase 7: the battery packs a non-review (manual, scheduled, mention) task
+   * run gets in its per-run HOME. Present only when the resolved list is
+   * non-empty; review runs never carry it. Seeded by the worker in 07-05.
+   */
+  taskAgent?: TaskAgentShape;
   /**
    * #125 (C2 stamps, C1 consumes): per-PR concurrency key
    * `${orgId}/${repo}/${prNumber}`. Present ONLY on runs dispatched to a

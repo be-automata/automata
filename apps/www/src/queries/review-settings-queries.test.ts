@@ -28,6 +28,7 @@ function dto(
     reviewRunTests: null,
     reviewCommandTimeoutS: null,
     reviewMaxTurns: null,
+    taskBatteries: null,
     updatedAt,
     ...over,
   };

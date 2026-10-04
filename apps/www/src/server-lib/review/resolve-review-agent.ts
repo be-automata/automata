@@ -8,15 +8,15 @@ import { getRepoReviewSettingWithOrgDefault } from "@terragon/shared/model/repo-
 import {
   DEFAULT_REVIEW_BATTERIES,
   DEFAULT_REVIEW_RUN_TESTS,
-  REVIEW_AGENT_FIELDS,
   REVIEW_CLASSIC_COMMAND_TIMEOUT_S,
+  REVIEW_ONLY_AGENT_FIELDS,
   REVIEW_ORCHESTRATED_COMMAND_TIMEOUT_S_DEFAULT,
   effectiveReviewMode,
   findReviewAgentFieldError,
   isReviewBatteryPackId,
-  type ReviewAgentField,
   type ReviewBatteryPackId,
   type ReviewMode,
+  type ReviewOnlyAgentField,
 } from "@terragon/shared/model/review-agent-settings";
 import {
   capPermissionMode,
@@ -71,9 +71,14 @@ export type ReviewAgentDispatch = {
   maxTurns?: number;
 };
 
+/**
+ * The review knobs of a settings row. Deliberately NOT the whole family: the
+ * phase 7 task field (taskBatteries) is never read, so an invalid stored task
+ * value cannot fail a review dispatch.
+ */
 export type ReviewAgentStoredRow = Pick<
   RepoReviewSetting,
-  "repoFullName" | ReviewAgentField
+  "repoFullName" | ReviewOnlyAgentField
 >;
 
 type ReviewAgentTrust = Pick<
@@ -82,15 +87,17 @@ type ReviewAgentTrust = Pick<
 >;
 
 /**
- * Per field, the first non-null value across `rows` (repo, then '*'),
- * validated. Throws naming the field and the row it came from.
+ * Per review field, the first non-null value across `rows` (repo, then '*'),
+ * validated. Throws naming the field and the row it came from. Iterates
+ * REVIEW_ONLY_AGENT_FIELDS, never the whole family: taskBatteries is resolved
+ * separately (resolve-task-agent.ts) and must not be able to fail a review.
  */
 function pickStoredValues(
   organizationId: string,
   rows: ReadonlyArray<ReviewAgentStoredRow | undefined>,
-): Partial<Pick<ReviewAgentStoredRow, ReviewAgentField>> {
-  const picked: Partial<Pick<ReviewAgentStoredRow, ReviewAgentField>> = {};
-  for (const field of REVIEW_AGENT_FIELDS) {
+): Partial<Pick<ReviewAgentStoredRow, ReviewOnlyAgentField>> {
+  const picked: Partial<Pick<ReviewAgentStoredRow, ReviewOnlyAgentField>> = {};
+  for (const field of REVIEW_ONLY_AGENT_FIELDS) {
     const row = rows.find(
       (candidate) =>
         candidate !== undefined &&
