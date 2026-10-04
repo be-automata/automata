@@ -37,6 +37,9 @@ pnpm run daemon:build || exit 1
 # needs no extra sudo grant.
 if [ -n "${WORKER_AGENT_USER:-}" ]; then
   install -m 0444 dist/../../daemon/dist/index.js /usr/local/automata/daemon/index.js || exit 1
+  # The launcher stages the bundle, so the launcher names it: without this the
+  # worker runs the checkout's dist and the staged copy is dead weight.
+  export WORKER_DAEMON_DIST=/usr/local/automata/daemon/index.js
 fi
 exec node --import tsx src/hello/worker.ts
 ```
