@@ -203,6 +203,52 @@ by `setupGitCredentials`) is untouched by this PR and remains the primary way AD
 not yet fully true. #89 tracks closing it. Do not read #88 as making the review fence complete — it
 closes the tool-policy and OpenCode-plugin gaps only.
 
+## Amendment 2026-10-04 (review-agent batteries, D2) — in-run fan-out allowed for orchestrated mode; the PR surface stays single-writer
+
+**What D2 changes.** An ORCHESTRATED review run (Phase 4 admin setting, resolved control-plane-side
+and stamped on the daemon message by the worker) may spawn sub-agents and invoke skills inside the
+run. What this ADR protects is the PR surface, not the agent's internal structure, and that surface
+is unchanged. The review agent still holds no GitHub credential (`withholdGitCredentials` /
+`stripGithubCredentials`). `'Bash(gh:*)'` and `'Bash(git push:*)'` stay denied for the lead AND for
+every sub-agent, because sub-agents inherit the parent's deny list (Phase 2 spike, Q4: gh, git push,
+Write and WebFetch were refused inside a sub-agent with no `tools:` frontmatter). The platform still
+posts exactly one review, from the lead's final fenced JSON.
+
+**Orchestrated delta vs the classic golden.** `REVIEW_POLICY_JOINED` is unchanged, and classic runs
+(reviewAgent absent, `mode: "classic"`, malformed, or any non-review run) are byte-identical to
+before. The orchestrated variant is pinned as `ORCHESTRATED_REVIEW_POLICY_JOINED`, and its env as
+`expectedClaudeEnvOrchestratedReview`, both in `packages/daemon/src/adapters/__golden-fixtures.ts`:
+
+| Element                   | Classic (ADR-004 golden)          | Orchestrated (D2)                                                                                                 |
+| ------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `--allowedTools`          | `Read Grep Glob Bash`             | `Read Grep Glob Bash Agent Task Skill` (both sub-agent names: CLI 2.1.284 lists `Task` in init but emits `Agent`) |
+| `--disallowedTools`       | `'Bash(gh:*)' 'Bash(git push:*)'` | the same two, plus `Write Edit WebFetch WebSearch` (an explicit deny beats a skill's `allowed-tools`)             |
+| `--setting-sources`       | `user`                            | `user` (kept: the PR's project `.claude/` and `.mcp.json` never load, spike Q3)                                   |
+| `--max-turns`             | absent                            | `--max-turns N` only when set. It bounds the lead loop only and is not a cost bound (spike Q5)                    |
+| env `BASH_MAX_TIMEOUT_MS` | `60000`                           | the payload's `commandTimeoutMs` (60000..600000). Every other run stays `60000`                                   |
+
+**Per-run HOME.** The selected battery packs are symlinked at the USER layer
+(`<home>/.claude/skills/<id>`, `<home>/.claude/agents/<id>.md`) from root-owned
+`/usr/local/lib/automata-batteries/<id>@<sha>`. Every target is realpath-contained under that root.
+The root and each pack must be root-owned and not group- or other-writable. A pack is skipped on any
+doubt: a symlink inside it, or any `hooks` / `bin` / `.claude-plugin` / `settings.json` /
+`settings.local.json` / `.mcp.json` / `plugin.json` segment. A missing, invalidated, malformed or
+drifted install manifest means no packs; the run is still orchestrated and the review never fails
+for it. `~/.claude/settings.json` gets `disableAllHooks: true`, so user-level SubagentStart/Stop
+hooks cannot fire per sub-agent. Nothing from the PR's project layer loads (`--setting-sources user`).
+
+**Completion.** With a background sub-agent the CLI emits two `result` messages, and the first holds
+the lead's interim text. The daemon holds results once the lead's own Agent/Task call is confirmed
+backgrounded, and releases only the LAST one at process exit. `extractTerminalAgentText` ignores
+sub-agent messages (`parent_tool_use_id` non-null), so a sub-agent fence can never become the review.
+Residual risk, owned by Phase 6 (prompt rules + parser fixtures): a lead that quotes a sub-agent's
+fence verbatim (spike q4sub).
+
+**Wallet bound.** Unchanged: the Hatchet `executionTimeout` plus the idle watchdog.
+
+**Rollback.** Set the repo/org review mode back to classic in Settings → Review. Classic
+argv/env/HOME are byte-identical to before this amendment.
+
 ## Options considered
 
 - **Strip credentials from the review env (chosen)** vs a scoped read-only token. Chosen: absence is
