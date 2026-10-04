@@ -13,7 +13,8 @@ set -euo pipefail
 #       --repo <owner/name> --pr <n> --expect orchestrated|classic
 #       Operator evidence on the execution box, as root, Linux only:
 #       manifest.sha256 valid, the gsd-reviewers agent file installed as a
-#       regular root-owned file, and the worker journal since --since holds
+#       regular root-owned file, the staged daemon carrying the Phase 5
+#       `--max-turns` flag and result hold, and the worker journal since --since holds
 #       exactly ONE lane=review run for --repo/--pr whose batteries and
 #       review-agent lines match --expect, within the 30-minute budget. The
 #       transcript half lives in the control plane, so it is printed as
@@ -43,6 +44,7 @@ SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd -P "$SCRIPT_DIR/../../../.." && pwd -P)"
 
 BATTERIES_ROOT=/usr/local/lib/automata-batteries
+DAEMON_BUNDLE=/usr/local/automata/daemon/index.js
 BOX_CHECKOUT=/opt/automata-platform
 BUDGET_SECONDS=1800
 REPO_RE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
@@ -165,6 +167,26 @@ local_mode() {
 # ---------------------------------------------------------------------------
 # box mode
 # ---------------------------------------------------------------------------
+
+# analyse_daemon_bundle <staged daemon index.js>
+# The Phase 5 canary precondition: the bundle the worker spawns carries the
+# review `--max-turns` flag and the background sub-agent result hold
+# (createResultHold, packages/daemon/src/adapters/result-hold.ts). The bundle
+# is unminified esbuild output, so both identifiers survive.
+analyse_daemon_bundle() {
+  local bundle="$1" missing=""
+  if [ ! -s "$bundle" ]; then
+    check "box staged daemon" FAIL "($bundle missing or empty)"
+    return 0
+  fi
+  grep -q -- '--max-turns' "$bundle" || missing="$missing --max-turns"
+  grep -q 'createResultHold' "$bundle" || missing="$missing createResultHold"
+  if [ -z "$missing" ]; then
+    check "box staged daemon" PASS "(--max-turns and createResultHold present)"
+  else
+    check "box staged daemon" FAIL "(missing:$missing — the daemon predates Phase 5)"
+  fi
+}
 
 # analyse_review_journal <journal file> <owner/name> <pr> <expect> <manifest 12-hex prefix>
 # The journal comes from `journalctl -o short-unix`: every line starts with
@@ -381,6 +403,8 @@ box_mode() {
       *) check "box gsd agent file" FAIL "($agent_stat)" ;;
     esac
   fi
+
+  analyse_daemon_bundle "$DAEMON_BUNDLE"
 
   if journalctl -u automata-worker.service --since "$since" --no-pager -o short-unix >"$WORK/journal.txt" 2>"$WORK/journal.err"; then
     evidence "journal lines since $since" "$(wc -l <"$WORK/journal.txt" | tr -d ' ')"

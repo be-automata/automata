@@ -347,6 +347,7 @@ describe("orchestrated-review-acceptance.sh (phase 6): contract", () => {
       "gsd-reviewers",
       "agents/gsd-code-reviewer.md",
       "stat -c",
+      'analyse_daemon_bundle "$DAEMON_BUNDLE"',
       "journalctl -u automata-worker.service",
       "--no-pager -o short-unix",
       "analyse_review_journal",
@@ -401,6 +402,7 @@ describe("orchestrated-review-acceptance.sh (phase 6): contract", () => {
       "SC2 review latency within budget",
       "box install manifest",
       "box gsd agent file",
+      "box staged daemon",
     ]) {
       expect(script, name).toContain(name);
     }
@@ -652,6 +654,39 @@ describe("analyse_review_journal (sourced, fixture journal)", () => {
         expect(checkLine(out, check), `${name}: ${fixture}`).toContain(verdict);
       }
     }
+  });
+});
+
+describe("analyse_daemon_bundle (sourced, fixture bundle)", () => {
+  const run = (content: string | null) =>
+    content === null
+      ? callAnalyser("analyse_daemon_bundle", ["/nonexistent/index.js"])
+      : withFiles({ "index.js": content }, (p) =>
+          callAnalyser("analyse_daemon_bundle", [p["index.js"]!]),
+        );
+
+  it("both Phase 5 identifiers present: PASS", () => {
+    const out = run(
+      'args.push("--max-turns", n);\nconst hold = createResultHold();\n',
+    );
+    expect(out).toContain("CHECK box staged daemon: PASS");
+    expect(out).toContain("FAILURES=0");
+  });
+
+  it("a pre-Phase-5 bundle names what is missing", () => {
+    const out = run('args.push("--max-turns", n);\n');
+    expect(out).toContain(
+      "CHECK box staged daemon: FAIL (missing: createResultHold",
+    );
+    expect(out).toContain("FAILURES=1");
+  });
+
+  it("no bundle fails", () => {
+    const out = run(null);
+    expect(out).toContain(
+      "CHECK box staged daemon: FAIL (/nonexistent/index.js missing or empty)",
+    );
+    expect(out).toContain("FAILURES=1");
   });
 });
 

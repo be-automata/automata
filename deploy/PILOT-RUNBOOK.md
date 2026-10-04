@@ -957,7 +957,8 @@ must revert the skill version first, then roll back www.
   `grep -c -- '--max-turns' /usr/local/automata/daemon/index.js` ≥ 1 and
   `grep -c createResultHold /usr/local/automata/daemon/index.js` ≥ 1. (An
   earlier draft named `holdResultAfterBackgroundTask`, which never existed, so
-  that grep always printed 0.)
+  that grep always printed 0.) Box-mode acceptance (step 7) checks both as
+  `CHECK box staged daemon`.
 - Batteries are installed: `cat /usr/local/lib/automata-batteries/manifest.sha256`
   prints a 64-hex hash, and there is no `manifest.sha256.invalid`.
 - This phase has no schema change, so there is no new `assert-schema-ready`
