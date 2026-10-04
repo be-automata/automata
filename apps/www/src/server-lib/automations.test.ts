@@ -14,14 +14,29 @@ import { automations as automationsTable } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { User } from "@terragon/shared";
+import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import { createNewThread } from "./new-thread-shared";
 import { runAutomation } from "./automations";
+import { renderSkillPlaceholders } from "./review/resolve-review-skill";
+import { resolveReviewPromptMode } from "./review/resolve-review-prompt-mode";
 
 vi.mock("./new-thread-shared", () => ({
   createNewThread: vi
     .fn()
     .mockResolvedValue({ threadId: "t1", threadChatId: "tc1" }),
 }));
+
+// Pass-through spy: the real resolver runs, the tests can assert whether it
+// was consulted at all.
+vi.mock("./review/resolve-review-prompt-mode", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("./review/resolve-review-prompt-mode")
+    >();
+  return {
+    resolveReviewPromptMode: vi.fn(actual.resolveReviewPromptMode),
+  };
+});
 
 describe("runAutomation — org inheritance (WI-5)", () => {
   let user: User;
@@ -336,5 +351,271 @@ describe("runAutomation — skill_message resolution (#54 C2)", () => {
     });
     expect(result).toBeUndefined();
     expect(createNewThread).not.toHaveBeenCalled();
+  });
+});
+
+describe("runAutomation — review prompt mode (phase 6)", () => {
+  let user: User;
+  let orgId: string;
+
+  /**
+   * A marker body: classic paragraph, orchestrated block, the run-tests pair
+   * and the github-ops verdict contract.
+   */
+  const MARKER_BODY =
+    "Review {{repoFullName}} against origin/{{baseBranch}}.\n" +
+    "<!-- automata:if classic -->\nCLASSIC ONLY.\n<!-- automata:endif -->\n" +
+    "<!-- automata:if orchestrated -->\nLEAD REVIEWER.\n<!-- automata:endif -->\n" +
+    "<!-- automata:if orchestrated run-tests -->\nRUN TESTS.\n<!-- automata:endif -->\n" +
+    "<!-- automata:if orchestrated no-run-tests -->\nNO TESTS.\n<!-- automata:endif -->\n" +
+    '```json\n{ "verdict": "approve" }\n```\n';
+  const PLAIN_BODY =
+    "Review {{repoFullName}}.\n" + '```json\n{ "verdict": "approve" }\n```\n';
+
+  const PR_OPTIONS = {
+    branchName: "feat/head",
+    prBaseBranchName: "develop",
+    prNumber: 7,
+  };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.mocked(createNewThread).mockResolvedValue({
+      threadId: "t1",
+      threadChatId: "tc1",
+    });
+    user = (await createTestUser({ db })).user;
+    const org = await createOrganization({
+      db,
+      name: "PromptModeOrg",
+      slug: `pm-${nanoid(8).toLowerCase()}`,
+    });
+    orgId = org.id;
+  });
+
+  async function makeAutomation({
+    triggerType = "pull_request",
+    skillName = "github-ops",
+  }: {
+    triggerType?: "pull_request" | "schedule";
+    skillName?: string;
+  } = {}) {
+    const automation = await createTestAutomation({
+      db,
+      userId: user.id,
+      values: {
+        triggerType,
+        action: {
+          type: "skill_message",
+          config: { skillName, version: "latest" },
+        },
+      },
+    });
+    await db
+      .update(automationsTable)
+      .set({ organizationId: orgId })
+      .where(eq(automationsTable.id, automation.id));
+    return automation;
+  }
+
+  async function storeBody(skillName: string, body: string, repo: string) {
+    return createRepoSkillVersion({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      skillName,
+      body,
+      source: "seed",
+    });
+  }
+
+  async function setRepoMode(repo: string, mode: "orchestrated" | null) {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { reviewMode: mode },
+    });
+  }
+
+  function threadCall(index: number) {
+    const call = vi.mocked(createNewThread).mock.calls[index]?.[0];
+    if (!call) throw new Error(`createNewThread call ${index} missing`);
+    return {
+      text: (call.message.parts[0] as { text: string }).text,
+      sourceMetadata: call.sourceMetadata,
+    };
+  }
+
+  it("orchestrated repo + PR review → orchestrated render and the stamp", async () => {
+    const automation = await makeAutomation();
+    const { version } = await storeBody(
+      "github-ops",
+      MARKER_BODY,
+      automation.repoFullName,
+    );
+    await setRepoMode(automation.repoFullName, "orchestrated");
+
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "automated",
+      options: PR_OPTIONS,
+    });
+
+    const { text, sourceMetadata } = threadCall(0);
+    expect(text).toBe(
+      renderSkillPlaceholders(MARKER_BODY, {
+        repoFullName: automation.repoFullName,
+        baseBranch: "develop",
+        reviewPrompt: { mode: "orchestrated", runTests: false },
+      }),
+    );
+    expect(text).toContain("LEAD REVIEWER.");
+    expect(text).toContain("NO TESTS.");
+    expect(sourceMetadata).toEqual({
+      type: "automation-skill",
+      skillName: "github-ops",
+      contentSha: computeContentSha(MARKER_BODY),
+      source: "db-version",
+      versionId: version.id,
+      reviewPromptMode: "orchestrated",
+    });
+  });
+
+  it("no review-settings rows → classic render and today's sourceMetadata", async () => {
+    const automation = await makeAutomation();
+    const { version } = await storeBody(
+      "github-ops",
+      MARKER_BODY,
+      automation.repoFullName,
+    );
+
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "automated",
+      options: PR_OPTIONS,
+    });
+
+    const { text, sourceMetadata } = threadCall(0);
+    expect(text).toBe(
+      "Review terragon/test-repo against origin/develop.\nCLASSIC ONLY.\n" +
+        '```json\n{ "verdict": "approve" }\n```\n',
+    );
+    expect(sourceMetadata).toEqual({
+      type: "automation-skill",
+      skillName: "github-ops",
+      contentSha: computeContentSha(MARKER_BODY),
+      source: "db-version",
+      versionId: version.id,
+    });
+  });
+
+  it("orchestrated repo but a marker-free body → unchanged text, no stamp", async () => {
+    const automation = await makeAutomation();
+    await storeBody("github-ops", PLAIN_BODY, automation.repoFullName);
+    await setRepoMode(automation.repoFullName, "orchestrated");
+
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "automated",
+      options: PR_OPTIONS,
+    });
+
+    const { text, sourceMetadata } = threadCall(0);
+    expect(text).toBe(
+      "Review terragon/test-repo.\n" +
+        '```json\n{ "verdict": "approve" }\n```\n',
+    );
+    expect(sourceMetadata).not.toHaveProperty("reviewPromptMode");
+  });
+
+  it("orchestrated repo but not a PR review → classic render, no resolver call", async () => {
+    const scheduled = await makeAutomation({ triggerType: "schedule" });
+    await storeBody("github-ops", MARKER_BODY, scheduled.repoFullName);
+    await setRepoMode(scheduled.repoFullName, "orchestrated");
+
+    await runAutomation({
+      userId: user.id,
+      automationId: scheduled.id,
+      source: "manual",
+      options: PR_OPTIONS,
+    });
+    // A pull_request automation run without a PR number is not a review either.
+    const prAutomation = await makeAutomation();
+    await runAutomation({
+      userId: user.id,
+      automationId: prAutomation.id,
+      source: "manual",
+      options: { branchName: "feat/head", prBaseBranchName: "develop" },
+    });
+
+    for (const index of [0, 1]) {
+      const { text, sourceMetadata } = threadCall(index);
+      expect(text).toContain("CLASSIC ONLY.");
+      expect(text).not.toContain("LEAD REVIEWER.");
+      expect(text).not.toContain("<!-- automata:");
+      expect(sourceMetadata).not.toHaveProperty("reviewPromptMode");
+    }
+    expect(resolveReviewPromptMode).not.toHaveBeenCalled();
+  });
+
+  it("a non-github-ops skill keeps its marker lines verbatim", async () => {
+    const automation = await makeAutomation({ skillName: "custom-skill" });
+    await storeBody("custom-skill", MARKER_BODY, automation.repoFullName);
+    await setRepoMode(automation.repoFullName, "orchestrated");
+
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "automated",
+      options: PR_OPTIONS,
+    });
+
+    const { text, sourceMetadata } = threadCall(0);
+    expect(text).toBe(
+      MARKER_BODY.replaceAll(
+        "{{repoFullName}}",
+        automation.repoFullName,
+      ).replaceAll("{{baseBranch}}", "develop"),
+    );
+    expect(sourceMetadata).not.toHaveProperty("reviewPromptMode");
+    expect(resolveReviewPromptMode).not.toHaveBeenCalled();
+  });
+
+  it("flip-back: the next run after returning to classic gets the classic render", async () => {
+    const automation = await makeAutomation();
+    await storeBody("github-ops", MARKER_BODY, automation.repoFullName);
+    await setRepoMode(automation.repoFullName, "orchestrated");
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "automated",
+      options: PR_OPTIONS,
+    });
+    await setRepoMode(automation.repoFullName, null);
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "automated",
+      options: PR_OPTIONS,
+    });
+
+    const first = threadCall(0);
+    expect(first.text).toContain("LEAD REVIEWER.");
+    expect(first.sourceMetadata).toMatchObject({
+      reviewPromptMode: "orchestrated",
+    });
+    const second = threadCall(1);
+    expect(second.text).toBe(
+      renderSkillPlaceholders(MARKER_BODY, {
+        repoFullName: automation.repoFullName,
+        baseBranch: "develop",
+        reviewPrompt: { mode: "classic", runTests: false },
+      }),
+    );
+    expect(second.sourceMetadata).not.toHaveProperty("reviewPromptMode");
   });
 });

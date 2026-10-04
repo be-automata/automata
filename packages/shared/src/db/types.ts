@@ -136,6 +136,10 @@ export type ThreadSourceMetadata =
       contentSha: string;
       source: string;
       versionId?: string;
+      // Phase 6: set ONLY when the orchestrated review-mode sections were
+      // rendered into this thread's prompt. The tagged `json review-intent`
+      // parser is gated on it; absent = classic (today's object, unchanged).
+      reviewPromptMode?: "orchestrated";
     };
 
 /**
