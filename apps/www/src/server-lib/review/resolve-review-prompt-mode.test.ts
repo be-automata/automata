@@ -113,9 +113,8 @@ describe("resolveReviewPromptMode", () => {
     expect(errorSpy).toHaveBeenCalledTimes(1);
     // Exact arguments: no argument carries the resolver's message or "turbo".
     expect(errorSpy).toHaveBeenCalledWith(
-      orgId,
-      REPO,
-      "invalid review-agent setting; rendering classic prompt",
+      "[review-prompt-mode] invalid review-agent setting; rendering classic prompt",
+      { organizationId: orgId, repoFullName: REPO },
     );
   });
 });

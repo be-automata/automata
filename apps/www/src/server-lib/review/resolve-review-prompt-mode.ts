@@ -45,9 +45,8 @@ export async function resolveReviewPromptMode({
     return { mode: dispatch.mode, runTests: dispatch.runTests };
   } catch {
     console.error(
-      organizationId,
-      repoFullName,
-      "invalid review-agent setting; rendering classic prompt",
+      "[review-prompt-mode] invalid review-agent setting; rendering classic prompt",
+      { organizationId, repoFullName },
     );
     return CLASSIC_REVIEW_PROMPT;
   }
