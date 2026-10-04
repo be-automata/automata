@@ -63,6 +63,36 @@ describe("extractTerminalAgentText", () => {
   it("returns empty string for null messages", () => {
     expect(extractTerminalAgentText(null)).toBe("");
   });
+
+  // Phase 5 (02-FINDINGS Q7): a sub-agent message can arrive after the lead's
+  // final text; it must never become the review.
+  const subAgent = (text: string): DBMessage => ({
+    type: "agent",
+    parent_tool_use_id: "toolu_1",
+    parts: [{ type: "text", text }],
+  });
+
+  it("skips a sub-agent message that arrives LAST and returns the lead's text", () => {
+    const text = extractTerminalAgentText([
+      userMsg,
+      agent('lead final\n```json\n{"verdict":"approve"}\n```'),
+      subAgent('sub\n```json\n{"verdict":"ZZ_SUBAGENT_VERDICT"}\n```'),
+    ]);
+    expect(text).toContain("approve");
+    expect(text).not.toContain("ZZ_SUBAGENT_VERDICT");
+  });
+
+  it("returns empty string when only sub-agent messages exist", () => {
+    expect(extractTerminalAgentText([userMsg, subAgent("sub only")])).toBe("");
+  });
+
+  it("treats a legacy agent row with no parent_tool_use_id as a lead message", () => {
+    const legacy = {
+      type: "agent",
+      parts: [{ type: "text", text: "legacy lead" }],
+    } as unknown as DBMessage;
+    expect(extractTerminalAgentText([userMsg, legacy])).toBe("legacy lead");
+  });
 });
 
 describe("isWorkFailedOutcome — which outcomes page an operator", () => {

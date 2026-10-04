@@ -126,12 +126,17 @@ export function isWorkFailedOutcome(
   return WORK_FAILED_BY_OUTCOME[outcome];
 }
 
-/** Concatenate the LAST agent message's text parts — where the emitted intent lives. */
+/**
+ * Concatenate the text parts of the LAST lead (parent_tool_use_id null) agent
+ * message — where the emitted intent lives. Sub-agent messages are never the
+ * review (02-FINDINGS Q7; D2 single-writer): one can arrive after the lead's
+ * final text. A legacy row without the field counts as a lead message.
+ */
 export function extractTerminalAgentText(messages: DBMessage[] | null): string {
   if (!messages) return "";
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
-    if (m.type === "agent") {
+    if (m.type === "agent" && m.parent_tool_use_id == null) {
       return m.parts
         .filter((p): p is { type: "text"; text: string } => p.type === "text")
         .map((p) => p.text)
