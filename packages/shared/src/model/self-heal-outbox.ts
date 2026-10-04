@@ -278,6 +278,39 @@ export async function markEffectFailed({
 }
 
 /**
+ * Give a claimed effect back without counting an attempt (the applier stopped
+ * before reaching it, or a rate limit or breaker held it). `nextAttemptAt`
+ * defers it to the rate-limit horizon; omitted, it stays due.
+ */
+export async function releaseEffectLease({
+  db,
+  organizationId,
+  id,
+  nextAttemptAt,
+}: {
+  db: DB;
+  organizationId: string;
+  id: string;
+  nextAttemptAt?: Date;
+}): Promise<void> {
+  await withSelfHealTx(db, async (tx) => {
+    await tx
+      .update(auditEffects)
+      .set({
+        leaseUntil: null,
+        ...(nextAttemptAt ? { nextAttemptAt } : {}),
+      })
+      .where(
+        and(
+          eq(auditEffects.id, id),
+          eq(auditEffects.organizationId, organizationId),
+          eq(auditEffects.status, "pending"),
+        ),
+      );
+  });
+}
+
+/**
  * Record a failed attempt. Attempts 1..4 reschedule on OUTBOX_BACKOFF_MS with
  * 0-30% jitter (`rand` in [0,1) injected for tests); the 5th is terminal.
  * Returns the resulting status.

@@ -25,6 +25,7 @@ import {
   markEffectRetry,
   OUTBOX_BACKOFF_MS,
   pruneSelfHealRows,
+  releaseEffectLease,
 } from "./self-heal-outbox";
 import { createTestThread, createTestUser } from "./test-helpers";
 
@@ -176,6 +177,37 @@ describe("self-heal outbox", () => {
     expect(
       await claimDueEffectsForRun({ db, organizationId: orgA, runId }),
     ).toHaveLength(1);
+  });
+
+  it("releaseEffectLease frees a claimed row without counting an attempt and is org-fenced", async () => {
+    const runId = await newRun(orgA);
+    await enqueueEffects({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+      runId,
+      effects: [{ fingerprint: "f", action: "create_issue" }],
+    });
+    const [claimed] = await claimDueEffectsForRun({
+      db,
+      organizationId: orgA,
+      runId,
+    });
+    expect(claimed!.leaseUntil).not.toBeNull(); // claimed above
+    await releaseEffectLease({ db, organizationId: orgB, id: claimed!.id });
+    const [stillLeased] = await db
+      .select()
+      .from(auditEffects)
+      .where(eq(auditEffects.id, claimed!.id));
+    expect(stillLeased!.leaseUntil).not.toBeNull(); // row exists
+    await releaseEffectLease({ db, organizationId: orgA, id: claimed!.id });
+    const [freed] = await db
+      .select()
+      .from(auditEffects)
+      .where(eq(auditEffects.id, claimed!.id));
+    expect(freed!.leaseUntil).toBeNull();
+    expect(freed!.attempts).toBe(0);
+    expect(freed!.status).toBe("pending");
   });
 
   it("markEffectRetry walks the backoff table with jitter; the 5th failure is terminal", async () => {
