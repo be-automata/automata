@@ -50,6 +50,7 @@ import {
 import { buildRepoOverrideFetcher } from "./review/repo-skill-override";
 import { resolveReviewPromptMode } from "./review/resolve-review-prompt-mode";
 import {
+  CLASSIC_REVIEW_PROMPT,
   hasReviewModeSections,
   type ReviewPromptMode,
 } from "./review/review-skill";
@@ -213,7 +214,7 @@ export async function runAutomation({
                   repoFullName: automation.repoFullName,
                   trustContext: options?.trustContext ?? null,
                 })
-              : { mode: "classic", runTests: false };
+              : CLASSIC_REVIEW_PROMPT;
         }
         const orchestratedApplied =
           reviewPrompt?.mode === "orchestrated" &&

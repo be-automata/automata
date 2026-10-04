@@ -82,6 +82,12 @@ export type ReviewPromptMode = {
   runTests: boolean;
 };
 
+/** The classic render — today's prompt, and the fallback wherever no mode resolves. */
+export const CLASSIC_REVIEW_PROMPT: Readonly<ReviewPromptMode> = {
+  mode: "classic",
+  runTests: false,
+};
+
 const MARKER_PREFIX = "<!-- automata:";
 const SECTION_BEGIN = /^<!-- automata:if ([^\r\n]*?) -->[ \t]*\r?$/;
 const SECTION_END = /^<!-- automata:endif -->[ \t]*\r?$/;
@@ -202,7 +208,7 @@ export function renderReviewModeSections(
 }
 
 const REVIEW_CONTRACT_RENDERS: readonly ReviewPromptMode[] = [
-  { mode: "classic", runTests: false },
+  CLASSIC_REVIEW_PROMPT,
   { mode: "orchestrated", runTests: true },
   { mode: "orchestrated", runTests: false },
 ];

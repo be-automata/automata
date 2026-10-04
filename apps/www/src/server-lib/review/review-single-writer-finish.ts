@@ -134,26 +134,29 @@ export function isWorkFailedOutcome(
  * final text. A legacy row without the field counts as a lead message.
  */
 export function extractTerminalAgentText(messages: DBMessage[] | null): string {
-  if (!messages) return "";
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    if (m.type === "agent" && m.parent_tool_use_id == null) {
-      return m.parts
-        .filter((p): p is { type: "text"; text: string } => p.type === "text")
-        .map((p) => p.text)
-        .join("\n");
-    }
-  }
-  return "";
+  return findLastLeadAgentText(messages, () => true) ?? "";
 }
 
-/** The joined text parts of one message, exactly as extractTerminalAgentText joins them. */
-function joinTextParts(message: DBMessage): string {
-  if (message.type !== "agent") return "";
-  return message.parts
-    .filter((p): p is { type: "text"; text: string } => p.type === "text")
-    .map((p) => p.text)
-    .join("\n");
+/**
+ * The joined text parts of the LAST lead agent message whose text `accept`s,
+ * or null when none does. The one walk behind both extractTerminalAgentText
+ * and selectReviewTerminalText.
+ */
+function findLastLeadAgentText(
+  messages: DBMessage[] | null,
+  accept: (text: string) => boolean,
+): string | null {
+  if (!messages) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.type !== "agent" || m.parent_tool_use_id != null) continue;
+    const text = m.parts
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("\n");
+    if (accept(text)) return text;
+  }
+  return null;
 }
 
 /**
@@ -187,16 +190,10 @@ export function selectReviewTerminalText({
       preferTaggedIntent: false,
     };
   }
-  for (let i = (messages?.length ?? 0) - 1; i >= 0; i--) {
-    const m = messages?.[i];
-    if (m?.type !== "agent" || m.parent_tool_use_id != null) continue;
-    const text = joinTextParts(m);
-    if (hasTaggedReviewIntentOpener(text)) {
-      return { terminalText: text, preferTaggedIntent: true };
-    }
-  }
   return {
-    terminalText: extractTerminalAgentText(messages),
+    terminalText:
+      findLastLeadAgentText(messages, hasTaggedReviewIntentOpener) ??
+      extractTerminalAgentText(messages),
     preferTaggedIntent: true,
   };
 }

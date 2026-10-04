@@ -2,9 +2,7 @@ import type { DB } from "@terragon/shared/db";
 import type { ThreadTrustContext } from "@terragon/shared/db/types";
 
 import { resolveReviewAgentForDispatch } from "./resolve-review-agent";
-import type { ReviewPromptMode } from "./review-skill";
-
-const CLASSIC_PROMPT: ReviewPromptMode = { mode: "classic", runTests: false };
+import { CLASSIC_REVIEW_PROMPT, type ReviewPromptMode } from "./review-skill";
 
 /**
  * The review mode a PR-review thread's PROMPT is rendered with (phase 6).
@@ -42,19 +40,15 @@ export async function resolveReviewPromptMode({
       repoFullName,
       trustContext,
     });
-    // Assigning ReviewMode into the local literal union is the compile-time
+    // Returning ReviewMode as the local literal union is the compile-time
     // drift check: a third mode fails tsc here.
-    const prompt: ReviewPromptMode = {
-      mode: dispatch.mode,
-      runTests: dispatch.runTests,
-    };
-    return prompt;
+    return { mode: dispatch.mode, runTests: dispatch.runTests };
   } catch {
     console.error(
       organizationId,
       repoFullName,
       "invalid review-agent setting; rendering classic prompt",
     );
-    return CLASSIC_PROMPT;
+    return CLASSIC_REVIEW_PROMPT;
   }
 }
