@@ -1716,6 +1716,12 @@ describe("#batteries (phase 7): tools in install-batteries.sh — AOT + wrapper 
     expect(stale).toContain('record "STALE $noun $dir (left in place)"');
   });
 
+  it("list_stale pins static-bin dirs by version, like dart-sdk (never reported stale)", () => {
+    const stale = body("list_stale");
+    expect(stale).toContain('.kind == "dart-sdk" or .kind == "static-bin"');
+    expect(stale).not.toContain('if .kind == "dart-sdk" then');
+  });
+
   it("verifies tools as the agent, values via env only", () => {
     expect(body("verify_as_agent")).toContain("verify_tools_as_agent");
     const verify = body("verify_tools_as_agent");
