@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 
 import { createDb } from "../db";
-import { auditRuns } from "../db/schema";
+import { auditFixAttempts, auditRuns } from "../db/schema";
 import {
   claimAuditRun,
   countOpenFindingIssues,
@@ -13,12 +13,17 @@ import {
   getAuditRunByThread,
   getFindingByIssue,
   insertFinding,
+  listAuditRunsForRepo,
+  listEffectsForRepo,
   listFindingsForRepo,
+  listFixAttemptsForRepo,
   listReclaimableAuditRuns,
   recordAuditCheckResults,
   releaseAuditRunClaim,
+  summarizeOutbox,
   type AuditFindingInsert,
 } from "./audit-findings";
+import { enqueueEffects, markEffectFailed } from "./self-heal-outbox";
 import { createOrganization } from "./organizations";
 import { createTestThread, createTestUser } from "./test-helpers";
 
@@ -398,5 +403,150 @@ describe("audit findings (org-fenced)", () => {
         })
       )?.fingerprint,
     ).toBe("f000000000000006");
+  });
+});
+
+describe("self-heal activity reads (org-fenced, no token hashes)", () => {
+  let orgA: string;
+  let orgB: string;
+  let userId: string;
+
+  beforeEach(async () => {
+    orgA = await makeOrg("acme");
+    orgB = await makeOrg("globex");
+    userId = (await createTestUser({ db })).user.id;
+  });
+
+  async function seedRun(
+    organizationId: string,
+    createdAt: Date,
+  ): Promise<string> {
+    const { threadId } = await createTestThread({ db, userId });
+    await createAuditRunAtDispatch({
+      db,
+      organizationId,
+      repoFullName: REPO,
+      threadId,
+      audit: "security",
+      checkTokenHash: "secret-hash",
+    });
+    const [row] = await db
+      .update(auditRuns)
+      .set({ createdAt })
+      .where(eq(auditRuns.threadId, threadId))
+      .returning({ id: auditRuns.id });
+    return row!.id;
+  }
+
+  it("lists runs newest first, limited, fenced, without check_token_hash", async () => {
+    const old = await seedRun(orgA, new Date("2026-01-01T00:00:00Z"));
+    const mid = await seedRun(orgA, new Date("2026-02-01T00:00:00Z"));
+    const recent = await seedRun(orgA, new Date("2026-03-01T00:00:00Z"));
+    await seedRun(orgB, new Date("2026-04-01T00:00:00Z"));
+
+    const all = await listAuditRunsForRepo({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+      limit: 20,
+    });
+    expect(all.map((r) => r.id)).toEqual([recent, mid, old]);
+    expect(all.every((r) => !("checkTokenHash" in r))).toBe(true);
+    expect(JSON.stringify(all)).not.toContain("secret-hash");
+
+    const limited = await listAuditRunsForRepo({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+      limit: 2,
+    });
+    expect(limited.map((r) => r.id)).toEqual([recent, mid]);
+  });
+
+  it("lists fix attempts without gate_token_hash and fenced by org", async () => {
+    const f = await insertFinding({
+      db,
+      organizationId: orgA,
+      finding: finding("a000000000000001"),
+    });
+    await db.insert(auditFixAttempts).values({
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      findingId: f.id,
+      attemptNo: 1,
+      gateTokenHash: "gate-secret",
+    });
+    const rows = await listFixAttemptsForRepo({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+      limit: 50,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows.every((r) => !("gateTokenHash" in r))).toBe(true);
+    expect(JSON.stringify(rows)).not.toContain("gate-secret");
+    expect(
+      await listFixAttemptsForRepo({
+        db,
+        organizationId: orgB,
+        repoFullName: REPO,
+        limit: 50,
+      }),
+    ).toEqual([]);
+  });
+
+  it("summarizes the outbox per status with the oldest pending age", async () => {
+    const runId = await seedRun(orgA, new Date());
+    const otherRun = await seedRun(orgB, new Date());
+    const t0 = new Date("2026-03-01T00:00:00Z");
+    await enqueueEffects({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+      runId,
+      now: t0,
+      effects: [
+        { fingerprint: "f000000000000001", action: "create_issue" },
+        { fingerprint: "f000000000000002", action: "create_issue" },
+        { fingerprint: "f000000000000003", action: "create_issue" },
+      ],
+    });
+    await enqueueEffects({
+      db,
+      organizationId: orgB,
+      repoFullName: REPO,
+      runId: otherRun,
+      effects: [{ fingerprint: "f000000000000009", action: "create_issue" }],
+    });
+    const [victim] = await listEffectsForRepo({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+      limit: 1,
+    });
+    await markEffectFailed({
+      db,
+      organizationId: orgA,
+      id: victim!.id,
+      error: "boom",
+    });
+    const summary = await summarizeOutbox({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+    });
+    expect(summary.pending).toBe(2);
+    expect(summary.failed).toBe(1);
+    expect(summary.oldestPendingAt?.getTime()).toBe(t0.getTime());
+    expect(
+      (
+        await listEffectsForRepo({
+          db,
+          organizationId: orgB,
+          repoFullName: REPO,
+          limit: 10,
+        })
+      ).length,
+    ).toBe(1);
   });
 });

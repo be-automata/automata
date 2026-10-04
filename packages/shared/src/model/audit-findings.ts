@@ -1,4 +1,15 @@
-import { and, asc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  getTableColumns,
+  inArray,
+  isNull,
+  lt,
+  or,
+  sql,
+} from "drizzle-orm";
 
 import type { DB } from "../db";
 import {
@@ -447,4 +458,154 @@ export async function countOpenFindingIssues({
       ),
     );
   return rows[0]?.n ?? 0;
+}
+
+/** Run row without the check-token hash (admin and export reads). */
+export type AuditRunPublicRow = Omit<AuditRunRow, "checkTokenHash">;
+/** Fix-attempt row without the gate-token hash. */
+export type AuditFixAttemptPublicRow = Omit<
+  AuditFixAttemptRow,
+  "gateTokenHash"
+>;
+
+const { checkTokenHash: _runTokenHash, ...AUDIT_RUN_PUBLIC_COLUMNS } =
+  getTableColumns(auditRuns);
+const { gateTokenHash: _gateTokenHash, ...FIX_ATTEMPT_PUBLIC_COLUMNS } =
+  getTableColumns(auditFixAttempts);
+
+/** Newest first. Never selects check_token_hash (OBS-01 / T-08-18-1). */
+export async function listAuditRunsForRepo({
+  db,
+  organizationId,
+  repoFullName,
+  limit,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  limit: number;
+}): Promise<AuditRunPublicRow[]> {
+  return db
+    .select(AUDIT_RUN_PUBLIC_COLUMNS)
+    .from(auditRuns)
+    .where(
+      and(
+        eq(auditRuns.organizationId, organizationId),
+        eq(auditRuns.repoFullName, normalizeRepo(repoFullName)),
+      ),
+    )
+    .orderBy(desc(auditRuns.createdAt), desc(auditRuns.id))
+    .limit(limit);
+}
+
+/** Newest first. Never selects gate_token_hash. Empty until Phase 9. */
+export async function listFixAttemptsForRepo({
+  db,
+  organizationId,
+  repoFullName,
+  limit,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  limit: number;
+}): Promise<AuditFixAttemptPublicRow[]> {
+  return db
+    .select(FIX_ATTEMPT_PUBLIC_COLUMNS)
+    .from(auditFixAttempts)
+    .where(
+      and(
+        eq(auditFixAttempts.organizationId, organizationId),
+        eq(auditFixAttempts.repoFullName, normalizeRepo(repoFullName)),
+      ),
+    )
+    .orderBy(desc(auditFixAttempts.createdAt), desc(auditFixAttempts.id))
+    .limit(limit);
+}
+
+/** Newest first; the export feeds the benchmark scorer. */
+export async function listEffectsForRepo({
+  db,
+  organizationId,
+  repoFullName,
+  limit,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  limit: number;
+}): Promise<AuditEffectRow[]> {
+  return db
+    .select()
+    .from(auditEffects)
+    .where(
+      and(
+        eq(auditEffects.organizationId, organizationId),
+        eq(auditEffects.repoFullName, normalizeRepo(repoFullName)),
+      ),
+    )
+    .orderBy(desc(auditEffects.createdAt), desc(auditEffects.id))
+    .limit(limit);
+}
+
+export interface OutboxSummary {
+  pending: number;
+  failed: number;
+  oldestPendingAt: Date | null;
+}
+
+export async function summarizeOutbox({
+  db,
+  organizationId,
+  repoFullName,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+}): Promise<OutboxSummary> {
+  const where = (status: "pending" | "failed") =>
+    and(
+      eq(auditEffects.organizationId, organizationId),
+      eq(auditEffects.repoFullName, normalizeRepo(repoFullName)),
+      eq(auditEffects.status, status),
+    );
+  // Timestamps are read through the column decoder (never a raw aggregate:
+  // the timestamp-without-tz columns mis-parse in the process timezone).
+  const [counts, oldest] = await Promise.all([
+    db
+      .select({
+        status: auditEffects.status,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(auditEffects)
+      .where(
+        and(
+          eq(auditEffects.organizationId, organizationId),
+          eq(auditEffects.repoFullName, normalizeRepo(repoFullName)),
+          inArray(auditEffects.status, ["pending", "failed"]),
+        ),
+      )
+      .groupBy(auditEffects.status),
+    db
+      .select({
+        pendingSince: auditEffects.pendingSince,
+        createdAt: auditEffects.createdAt,
+      })
+      .from(auditEffects)
+      .where(where("pending"))
+      .orderBy(
+        asc(
+          sql`coalesce(${auditEffects.pendingSince}, ${auditEffects.createdAt})`,
+        ),
+      )
+      .limit(1),
+  ]);
+  const pending = counts.find((r) => r.status === "pending");
+  const failed = counts.find((r) => r.status === "failed");
+  const first = oldest[0];
+  return {
+    pending: pending?.count ?? 0,
+    failed: failed?.count ?? 0,
+    oldestPendingAt: first ? (first.pendingSince ?? first.createdAt) : null,
+  };
 }

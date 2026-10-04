@@ -1,5 +1,6 @@
 import {
   and,
+  asc,
   count,
   desc,
   eq,
@@ -7,6 +8,7 @@ import {
   gt,
   inArray,
   lt,
+  notInArray,
   or,
   sql,
 } from "drizzle-orm";
@@ -150,6 +152,30 @@ export async function getBreakerState({
     .where(scopeWhere(organizationId, scopeKind, scopeKey))
     .limit(1);
   return row ?? syntheticClosed(organizationId, scopeKind, scopeKey);
+}
+
+/**
+ * Every installation-scoped breaker row of the org (github_write, github_read,
+ * permission, hatchet_dispatch, exec_plane): the admin view of "its
+ * installation". Repo-scoped loop breakers come from getBreakerState.
+ */
+export async function listInstallationBreakers({
+  db,
+  organizationId,
+}: {
+  db: DB;
+  organizationId: string;
+}): Promise<BreakerRow[]> {
+  return db
+    .select()
+    .from(selfHealBreaker)
+    .where(
+      and(
+        eq(selfHealBreaker.organizationId, organizationId),
+        notInArray(selfHealBreaker.scopeKind, ["loop_audit", "loop_fix"]),
+      ),
+    )
+    .orderBy(asc(selfHealBreaker.scopeKind), asc(selfHealBreaker.scopeKey));
 }
 
 function syntheticClosed(
