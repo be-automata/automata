@@ -3,6 +3,12 @@ import path from "node:path";
 import { authFilePathForAgent } from "@terragon/agent/auth-file";
 import type { PulledAgentCredentials } from "./www-client";
 import { reapplyPathGrant } from "./agent-uid-fs";
+import {
+  seedBatteries,
+  type SeedBatteriesOptions,
+  type SeedBatteriesResult,
+} from "./batteries-seed";
+import type { ReviewAgentShape } from "./types";
 
 /**
  * Materialises a run's agent provider credential on the execution box (D1).
@@ -28,6 +34,8 @@ export interface MaterialisedCredentials {
   env: Record<string, string>;
   /** Remove every credential byte this wrote. Safe to call twice. */
   cleanup: () => Promise<void>;
+  /** Battery seeding outcome — present ONLY for orchestrated review runs. */
+  batteries?: SeedBatteriesResult;
 }
 
 /**
@@ -120,12 +128,20 @@ async function seedWorkspaceTrust({
  * (`@terragon/agent/auth-file` — the shared source of truth for both this
  * worker and the daemon's per-agent adapters, #77); an agent we have no path
  * for degrades to built-in-credits rather than guessing a location.
+ *
+ * ORCHESTRATED review runs (D2) also get the selected battery packs and a
+ * hooks-off `settings.json` at the user layer of this HOME (seedBatteries).
+ * That is safe because the review argv keeps `--setting-sources user`, so the
+ * PR's own project `.claude/` and `.mcp.json` never load (02-FINDINGS Q3).
+ * Classic runs never reach seedBatteries: their HOME is exactly as before.
  */
 export async function materialiseAgentCredentials({
   credentials,
   agent,
   runRoot,
   agentUser,
+  reviewAgent,
+  batteries,
 }: {
   credentials: PulledAgentCredentials;
   agent: string;
@@ -135,6 +151,10 @@ export async function materialiseAgentCredentials({
    * on. Empty/absent = default-off, and every grant below is a no-op.
    */
   agentUser?: string;
+  /** The run's review shape; only `mode: "orchestrated"` seeds batteries. */
+  reviewAgent?: Pick<ReviewAgentShape, "mode" | "batteries">;
+  /** Test/override seam for seedBatteries; production passes only `log`. */
+  batteries?: Omit<SeedBatteriesOptions, "agentUser">;
 }): Promise<MaterialisedCredentials> {
   const home = path.join(runRoot, "home");
   await fs.mkdir(home, { recursive: true, mode: 0o700 });
@@ -147,6 +167,14 @@ export async function materialiseAgentCredentials({
     users: agentUser ? [agentUser] : [],
   });
   await seedWorkspaceTrust({ home, workdir: runRoot, agentUser });
+  const seeded =
+    reviewAgent?.mode === "orchestrated"
+      ? await seedBatteries(home, reviewAgent.batteries, {
+          ...batteries,
+          log: batteries?.log ?? console.log,
+          agentUser,
+        })
+      : undefined;
   const cleanup = async () => {
     await fs.rm(home, { recursive: true, force: true }).catch(() => {});
   };
@@ -155,6 +183,7 @@ export async function materialiseAgentCredentials({
     delivered: false,
     env: {},
     cleanup,
+    batteries: seeded,
   };
 
   if (credentials.type === "built-in-credits") {
@@ -166,6 +195,7 @@ export async function materialiseAgentCredentials({
       delivered: true,
       env: { [credentials.key]: credentials.value },
       cleanup,
+      batteries: seeded,
     };
   }
 
@@ -206,5 +236,5 @@ export async function materialiseAgentCredentials({
     users: agentUser ? [agentUser] : [],
   });
 
-  return { home, delivered: true, env: {}, cleanup };
+  return { home, delivered: true, env: {}, cleanup, batteries: seeded };
 }
