@@ -14,8 +14,12 @@
  * existing `upsertAutomation` action-content update.
  *
  * Dependency-free on purpose (node builtins only) so `deploy/*.ts` scripts can
- * import it under tsx without dragging in Next/alias resolution.
+ * import it under tsx without dragging in Next/alias resolution. The one
+ * exception is the audit rule vocabulary, imported by relative path from a
+ * module that itself imports nothing.
  */
+import { AUDIT_RULES } from "../../../../../packages/shared/src/self-heal/audit-rules";
+
 /**
  * Strip the Claude Code YAML frontmatter. It carries skill-registry metadata
  * (name/description) that is meaningless inside an automation instruction, and
@@ -296,6 +300,52 @@ export function assertMergeAuditSkillContract(
 }
 
 /**
+ * The audit lane's fixed skill name (phase 8). Like PR_MERGED_SKILL_NAME the
+ * lane is looked up by name; the BODY pushed under it is what a repo audits.
+ */
+export const AUDIT_FINDINGS_SKILL_NAME = "audit-findings";
+
+/** Skills whose threads reach the self-heal writer at finish (Phase 9 appends "audit-fix"). */
+export const SELF_HEAL_SKILL_NAMES = [AUDIT_FINDINGS_SKILL_NAME] as const;
+
+/** Must equal the parser's tagged opener (pinned by skill-contract-drift.test.ts). */
+const AUDIT_FINDINGS_OPENER = "```json audit-findings";
+
+/**
+ * Contract check for the audit skill: it must teach the one tagged block, every
+ * rule id of the closed vocabulary, the deterministic dependency audit fallback,
+ * the 20 minute budget and the Hard rules tail, and must not carry a second
+ * block after the Hard rules (the parser reads the LAST one).
+ */
+export function assertAuditFindingsSkillContract(
+  body: string,
+  sourceLabel: string,
+): void {
+  const fail = (what: string): never => {
+    throw new Error(
+      `Audit skill from ${sourceLabel} ${what} — wrong content or a ` +
+        `truncated skill. Refusing to dispatch an audit whose result could ` +
+        `not be parsed.`,
+    );
+  };
+  if (!body.includes(AUDIT_FINDINGS_OPENER)) {
+    fail(`has no "${AUDIT_FINDINGS_OPENER}" block`);
+  }
+  for (const rule of AUDIT_RULES) {
+    if (!body.includes(rule.id)) fail(`does not list rule "${rule.id}"`);
+  }
+  if (!body.includes("pnpm audit --prod --json")) {
+    fail('has no "pnpm audit --prod --json" dependency fallback');
+  }
+  if (!body.includes("20 minutes")) fail("has no 20 minute budget");
+  const hard = body.search(/^## Hard rules\s*$/m);
+  if (hard < 0) fail('has no "## Hard rules" section');
+  if (body.indexOf(AUDIT_FINDINGS_OPENER, hard) >= 0) {
+    fail('has a second "json audit-findings" block after the Hard rules');
+  }
+}
+
+/**
  * Per-skill body validators — THE single registry shared by every surface that
  * accepts or dispatches a skill body: the resolver (read side,
  * resolve-review-skill.ts) and the write surfaces (API route PUT, dashboard
@@ -314,6 +364,7 @@ const SKILL_VALIDATORS: Record<
 > = {
   "github-ops": assertReviewSkillContract,
   [PR_MERGED_SKILL_NAME]: assertMergeAuditSkillContract,
+  [AUDIT_FINDINGS_SKILL_NAME]: assertAuditFindingsSkillContract,
 };
 
 export function validateSkillBody(
