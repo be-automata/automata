@@ -153,4 +153,44 @@ describe("assert-schema-ready REQUIRED stays in sync with schema.ts", () => {
     }
     expect(missing).toEqual([]);
   });
+
+  it("treats every phase 8 ledger table as new, not baseline (RES-23)", () => {
+    const baseline = new Set(BASELINE_TABLES);
+    for (const name of [
+      "audit_runs",
+      "audit_findings",
+      "audit_effects",
+      "audit_fix_attempts",
+      "self_heal_breaker",
+      "self_heal_breaker_event",
+      "self_heal_slot",
+      "self_heal_admin_log",
+    ]) {
+      expect(baseline.has(name)).toBe(false);
+      expect(tables.some((t) => t.table === name)).toBe(true);
+    }
+  });
+
+  it("lists the lease, token and retry columns phase 8 and 9 depend on", () => {
+    const wanted = [
+      "audit_runs.claim_expires_at",
+      "audit_runs.check_token_hash",
+      "audit_effects.next_attempt_at",
+      "audit_fix_attempts.dispatch_lease_until",
+      "audit_fix_attempts.infra_refunded",
+      "audit_fix_attempts.pr_open_attempts",
+      "audit_fix_attempts.next_pr_open_at",
+      "audit_fix_attempts.gate_kind",
+      "self_heal_breaker.rate_limited_until",
+      "self_heal_breaker.probe_in_flight_until",
+      "self_heal_slot.lease_until",
+    ];
+    const inSchema = new Set(
+      tables.flatMap((t) => t.columns.map((c) => `${t.table}.${c}`)),
+    );
+    for (const key of wanted) {
+      expect(inSchema.has(key), `schema.ts lacks ${key}`).toBe(true);
+      expect(required.has(key), `REQUIRED lacks ${key}`).toBe(true);
+    }
+  });
 });

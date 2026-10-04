@@ -1938,3 +1938,428 @@ export const egressEvents = pgTable(
     ),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Phase 8 self-heal ledger. ONE schema change carries every table and column
+// both the audit writer (phase 8) and the fix loop (phase 9) read, so
+// production is migrated by exactly one manual push. Every column here must
+// also be listed in deploy/assert-schema-ready.ts REQUIRED (schema-gate.test.ts
+// derives that expectation from this file).
+// ---------------------------------------------------------------------------
+
+/** One audit run per dispatched audit thread; the claim is a leased CAS. */
+export const auditRuns = pgTable(
+  "audit_runs",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    /** Lowercased 'owner/name' slug. */
+    repoFullName: text("repo_full_name").notNull(),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => thread.id, { onDelete: "cascade" }),
+    audit: text("audit").notNull(),
+    status: text("status")
+      .notNull()
+      .$type<"dispatched" | "claimed" | "done" | "failed">()
+      .default("dispatched"),
+    claimedAt: timestamp("claimed_at", { mode: "date" }),
+    /** Lease end: a claimed run past this is reclaimable (RES-08). */
+    claimExpiresAt: timestamp("claim_expires_at", { mode: "date" }),
+    claimCount: integer("claim_count").notNull().default(0),
+    mode: text("mode"),
+    outcome: text("outcome"),
+    complete: boolean("complete"),
+    requestedChecks: jsonb("requested_checks"),
+    /** sha256 of the check token; the token itself is never stored. */
+    checkTokenHash: text("check_token_hash"),
+    checkTokenExpiresAt: timestamp("check_token_expires_at", { mode: "date" }),
+    checkResults: jsonb("check_results"),
+    checksReportedAt: timestamp("checks_reported_at", { mode: "date" }),
+    parsedCount: integer("parsed_count").notNull().default(0),
+    createdCount: integer("created_count").notNull().default(0),
+    updatedCount: integer("updated_count").notNull().default(0),
+    closedCount: integer("closed_count").notNull().default(0),
+    skipped: jsonb("skipped"),
+    decisions: jsonb("decisions"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    finishedAt: timestamp("finished_at", { mode: "date" }),
+  },
+  (table) => [
+    uniqueIndex("audit_runs_thread_id_index").on(table.threadId),
+    index("audit_runs_status_claim_expires_index").on(
+      table.status,
+      table.claimExpiresAt,
+    ),
+  ],
+);
+
+/** One row per distinct finding fingerprint per (org, repo). */
+export const auditFindings = pgTable(
+  "audit_findings",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    repoFullName: text("repo_full_name").notNull(),
+    /** 16 hex chars. */
+    fingerprint: text("fingerprint").notNull(),
+    audit: text("audit").notNull(),
+    ruleId: text("rule_id").notNull(),
+    section: text("section"),
+    severity: text("severity").notNull(),
+    checkKind: text("check_kind").$type<"script" | "rubric">().notNull(),
+    title: text("title").notNull(),
+    subject: text("subject"),
+    findingKey: text("finding_key"),
+    planMd: text("plan_md"),
+    acceptanceMd: text("acceptance_md"),
+    planFiles: text("plan_files").array(),
+    planHash: text("plan_hash"),
+    issueNumber: integer("issue_number"),
+    /** 'needs_human' is the internal token; the GitHub label is needs-human-approve. */
+    status: text("status")
+      .notNull()
+      .$type<"candidate" | "open" | "resolved" | "needs_human" | "suppressed">()
+      .default("candidate"),
+    recentSightings: boolean("recent_sightings")
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
+    consecutiveCheckPasses: integer("consecutive_check_passes")
+      .notNull()
+      .default(0),
+    lastCheckOutcome: text("last_check_outcome"),
+    absentCount: integer("absent_count").notNull().default(0),
+    attempts: integer("attempts").notNull().default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { mode: "date" }),
+    activeThreadId: text("active_thread_id").references(() => thread.id, {
+      onDelete: "set null",
+    }),
+    activeAttemptId: text("active_attempt_id"),
+    prNumber: integer("pr_number"),
+    autoFixLabeled: boolean("auto_fix_labeled").notNull().default(false),
+    fixReadyAt: timestamp("fix_ready_at", { mode: "date" }),
+    lastSeenRunId: text("last_seen_run_id").references(() => auditRuns.id, {
+      onDelete: "set null",
+    }),
+    lastReopenedAt: timestamp("last_reopened_at", { mode: "date" }),
+    lastDecision: text("last_decision"),
+    lastDecisionReason: text("last_decision_reason"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("audit_findings_org_repo_fingerprint_index").on(
+      table.organizationId,
+      table.repoFullName,
+      table.fingerprint,
+    ),
+    uniqueIndex("audit_findings_org_repo_issue_index")
+      .on(table.organizationId, table.repoFullName, table.issueNumber)
+      .where(sql`issue_number is not null`),
+    index("audit_findings_org_repo_status_index").on(
+      table.organizationId,
+      table.repoFullName,
+      table.status,
+    ),
+    index("audit_findings_fix_ready_at_index")
+      .on(table.fixReadyAt)
+      .where(sql`fix_ready_at is not null`),
+  ],
+);
+
+/** Outbox of GitHub side effects an audit run decided on (OUTBOX-01). */
+export const auditEffects = pgTable(
+  "audit_effects",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    repoFullName: text("repo_full_name").notNull(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => auditRuns.id, { onDelete: "cascade" }),
+    findingId: text("finding_id").references(() => auditFindings.id, {
+      onDelete: "set null",
+    }),
+    fingerprint: text("fingerprint").notNull(),
+    action: text("action")
+      .notNull()
+      .$type<
+        | "create_issue"
+        | "update_issue"
+        | "set_issue_state"
+        | "set_labels"
+        | "upsert_comment"
+      >(),
+    payload: jsonb("payload"),
+    status: text("status")
+      .notNull()
+      .$type<"pending" | "applied" | "failed" | "skipped">()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { mode: "date" }),
+    leaseUntil: timestamp("lease_until", { mode: "date" }),
+    pendingSince: timestamp("pending_since", { mode: "date" }),
+    lastError: text("last_error"),
+    appliedAt: timestamp("applied_at", { mode: "date" }),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("audit_effects_run_fingerprint_action_index").on(
+      table.runId,
+      table.fingerprint,
+      table.action,
+    ),
+    index("audit_effects_status_next_attempt_index").on(
+      table.status,
+      table.nextAttemptAt,
+    ),
+  ],
+);
+
+/** Phase 9 writes this; the schema ships now so prod is pushed once. */
+export const auditFixAttempts = pgTable(
+  "audit_fix_attempts",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    repoFullName: text("repo_full_name").notNull(),
+    findingId: text("finding_id")
+      .notNull()
+      .references(() => auditFindings.id, { onDelete: "cascade" }),
+    attemptNo: integer("attempt_no").notNull(),
+    threadId: text("thread_id").references(() => thread.id, {
+      onDelete: "set null",
+    }),
+    branch: text("branch"),
+    phase: text("phase")
+      .notNull()
+      .$type<
+        | "claimed"
+        | "dispatched"
+        | "checking"
+        | "draft_open"
+        | "ci_pending"
+        | "ready"
+        | "closed"
+      >()
+      .default("claimed"),
+    claimedAt: timestamp("claimed_at", { mode: "date" }),
+    claimExpiresAt: timestamp("claim_expires_at", { mode: "date" }),
+    dispatchLeaseUntil: timestamp("dispatch_lease_until", { mode: "date" }),
+    gateKind: text("gate_kind").$type<"ci-draft" | "box-check">(),
+    /** sha256 of the gate token; the token itself is never stored. */
+    gateTokenHash: text("gate_token_hash"),
+    gateTokenExpiresAt: timestamp("gate_token_expires_at", { mode: "date" }),
+    checkReportedAt: timestamp("check_reported_at", { mode: "date" }),
+    checkStatus: text("check_status").$type<
+      "passed" | "failed" | "error" | "missing"
+    >(),
+    checkResults: jsonb("check_results"),
+    gatedHeadSha: text("gated_head_sha"),
+    deniedPaths: jsonb("denied_paths"),
+    guardStatus: text("guard_status").$type<"passed" | "rejected">(),
+    guardReasons: jsonb("guard_reasons"),
+    diffLines: integer("diff_lines"),
+    ciStatus: text("ci_status").$type<
+      "pending" | "passed" | "failed" | "stuck"
+    >(),
+    ciResults: jsonb("ci_results"),
+    ciEvaluatedAt: timestamp("ci_evaluated_at", { mode: "date" }),
+    leaseUntil: timestamp("lease_until", { mode: "date" }),
+    prNumber: integer("pr_number"),
+    prState: text("pr_state").$type<
+      | "pending_open"
+      | "draft"
+      | "ready"
+      | "merged"
+      | "closed"
+      | "expired"
+      | "open_failed"
+    >(),
+    prOpenAttempts: integer("pr_open_attempts").notNull().default(0),
+    nextPrOpenAt: timestamp("next_pr_open_at", { mode: "date" }),
+    prOpenedAt: timestamp("pr_opened_at", { mode: "date" }),
+    readyAt: timestamp("ready_at", { mode: "date" }),
+    mergedAt: timestamp("merged_at", { mode: "date" }),
+    mergeSha: text("merge_sha"),
+    mergedBy: text("merged_by"),
+    humanCommitCount: integer("human_commit_count"),
+    changedRanges: jsonb("changed_ranges"),
+    regression: jsonb("regression"),
+    regressionCheckedAt: timestamp("regression_checked_at", { mode: "date" }),
+    regressionWindowEndsAt: timestamp("regression_window_ends_at", {
+      mode: "date",
+    }),
+    outcome: text("outcome"),
+    terminalCause: text("terminal_cause"),
+    infraRefunded: boolean("infra_refunded").notNull().default(false),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("audit_fix_attempts_finding_attempt_index").on(
+      table.findingId,
+      table.attemptNo,
+    ),
+    uniqueIndex("audit_fix_attempts_thread_id_index").on(table.threadId),
+    index("audit_fix_attempts_org_repo_pr_index").on(
+      table.organizationId,
+      table.repoFullName,
+      table.prNumber,
+    ),
+    index("audit_fix_attempts_pr_state_window_index").on(
+      table.prState,
+      table.regressionWindowEndsAt,
+    ),
+    index("audit_fix_attempts_gated_head_sha_index").on(table.gatedHeadSha),
+  ],
+);
+
+/** Circuit-breaker state per (org, scope) (BRK-01). */
+export const selfHealBreaker = pgTable(
+  "self_heal_breaker",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    scopeKind: text("scope_kind")
+      .notNull()
+      .$type<
+        | "github_write"
+        | "github_read"
+        | "permission"
+        | "hatchet_dispatch"
+        | "exec_plane"
+        | "loop_fix"
+        | "loop_audit"
+      >(),
+    scopeKey: text("scope_key").notNull(),
+    state: text("state")
+      .notNull()
+      .$type<"closed" | "open" | "half_open" | "paused_manual">()
+      .default("closed"),
+    openedAt: timestamp("opened_at", { mode: "date" }),
+    openUntil: timestamp("open_until", { mode: "date" }),
+    halfOpenProbesLeft: integer("half_open_probes_left").notNull().default(0),
+    probeInFlightUntil: timestamp("probe_in_flight_until", { mode: "date" }),
+    tripCount: integer("trip_count").notNull().default(0),
+    lastTripReason: text("last_trip_reason"),
+    lastTripEvidence: jsonb("last_trip_evidence"),
+    rateLimitedUntil: timestamp("rate_limited_until", { mode: "date" }),
+    version: integer("version").notNull().default(0),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("self_heal_breaker_org_scope_index").on(
+      table.organizationId,
+      table.scopeKind,
+      table.scopeKey,
+    ),
+  ],
+);
+
+/** Append-only breaker signal log. */
+export const selfHealBreakerEvent = pgTable(
+  "self_heal_breaker_event",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    scopeKind: text("scope_kind").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    outcome: text("outcome")
+      .notNull()
+      .$type<"success" | "failure" | "timeout" | "ignored" | "trip">(),
+    signal: text("signal"),
+    latencyMs: integer("latency_ms"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("self_heal_breaker_event_scope_created_index").on(
+      table.organizationId,
+      table.scopeKind,
+      table.scopeKey,
+      table.createdAt,
+    ),
+  ],
+);
+
+/** Bulk-concurrency slot (BULK-01, phase 9). */
+export const selfHealSlot = pgTable("self_heal_slot", {
+  slotKey: text("slot_key").primaryKey(),
+  organizationId: text("organization_id").references(() => organization.id, {
+    onDelete: "set null",
+  }),
+  holderThreadId: text("holder_thread_id").references(() => thread.id, {
+    onDelete: "set null",
+  }),
+  holderKind: text("holder_kind").$type<"audit" | "fix">(),
+  leaseUntil: timestamp("lease_until", { mode: "date" }),
+  acquiredAt: timestamp("acquired_at", { mode: "date" }),
+  updatedAt: timestamp("updated_at", { mode: "date" })
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+});
+
+/** Operator actor log for drain / breaker reset / settings / kill switch. */
+export const selfHealAdminLog = pgTable(
+  "self_heal_admin_log",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    actorUserId: text("actor_user_id").notNull(),
+    action: text("action")
+      .notNull()
+      .$type<"drain" | "breaker_reset" | "settings_change" | "kill_switch">(),
+    target: jsonb("target"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("self_heal_admin_log_org_created_index").on(
+      table.organizationId,
+      table.createdAt,
+    ),
+  ],
+);

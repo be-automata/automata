@@ -43,6 +43,9 @@ const REVIEW_AGENT_SINCE =
 const SELF_HEAL_SINCE =
   "phase 8: self-heal settings — the audit writer, dispatcher and fix trigger read these columns";
 
+const AUDIT_LEDGER_SINCE =
+  "phase 8: self-heal ledger — audit writer, outbox, breakers and the phase 9 fix loop read these tables";
+
 /** Columns this revision of the code cannot run without. */
 const REQUIRED: ReadonlyArray<{
   table: string;
@@ -140,6 +143,801 @@ const REQUIRED: ReadonlyArray<{
     table: "repo_review_settings",
     column: "self_heal_run_window",
     since: SELF_HEAL_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "organization_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "repo_full_name",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "thread_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "audit",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "status",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "claimed_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "claim_expires_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "claim_count",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "mode",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "outcome",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "complete",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "requested_checks",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "check_token_hash",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "check_token_expires_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "check_results",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "checks_reported_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "parsed_count",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "created_count",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "updated_count",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "closed_count",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "skipped",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "decisions",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "error",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "created_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_runs",
+    column: "finished_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "organization_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "repo_full_name",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "fingerprint",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "audit",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "rule_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "section",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "severity",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "check_kind",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "title",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "subject",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "finding_key",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "plan_md",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "acceptance_md",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "plan_files",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "plan_hash",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "issue_number",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "status",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "recent_sightings",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "consecutive_check_passes",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "last_check_outcome",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "absent_count",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "attempts",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "last_attempt_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "active_thread_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "active_attempt_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "pr_number",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "auto_fix_labeled",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "fix_ready_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "last_seen_run_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "last_reopened_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "last_decision",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "last_decision_reason",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "created_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_findings",
+    column: "updated_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "organization_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "repo_full_name",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "run_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "finding_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "fingerprint",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "action",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "payload",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "status",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "attempts",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "next_attempt_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "lease_until",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "pending_since",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "last_error",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "applied_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "created_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_effects",
+    column: "updated_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "organization_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "repo_full_name",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "finding_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "attempt_no",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "thread_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "branch",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "phase",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "claimed_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "claim_expires_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "dispatch_lease_until",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "gate_kind",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "gate_token_hash",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "gate_token_expires_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "check_reported_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "check_status",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "check_results",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "gated_head_sha",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "denied_paths",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "guard_status",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "guard_reasons",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "diff_lines",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "ci_status",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "ci_results",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "ci_evaluated_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "lease_until",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "pr_number",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "pr_state",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "pr_open_attempts",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "next_pr_open_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "pr_opened_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "ready_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "merged_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "merge_sha",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "merged_by",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "human_commit_count",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "changed_ranges",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "regression",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "regression_checked_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "regression_window_ends_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "outcome",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "terminal_cause",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "infra_refunded",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "created_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "audit_fix_attempts",
+    column: "updated_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "organization_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "scope_kind",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "scope_key",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "state",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "opened_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "open_until",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "half_open_probes_left",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "probe_in_flight_until",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "trip_count",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "last_trip_reason",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "last_trip_evidence",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "rate_limited_until",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "version",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker",
+    column: "updated_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker_event",
+    column: "id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker_event",
+    column: "organization_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker_event",
+    column: "scope_kind",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker_event",
+    column: "scope_key",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker_event",
+    column: "outcome",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker_event",
+    column: "signal",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker_event",
+    column: "latency_ms",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_breaker_event",
+    column: "created_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_slot",
+    column: "slot_key",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_slot",
+    column: "organization_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_slot",
+    column: "holder_thread_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_slot",
+    column: "holder_kind",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_slot",
+    column: "lease_until",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_slot",
+    column: "acquired_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_slot",
+    column: "updated_at",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_admin_log",
+    column: "id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_admin_log",
+    column: "organization_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_admin_log",
+    column: "actor_user_id",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_admin_log",
+    column: "action",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_admin_log",
+    column: "target",
+    since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "self_heal_admin_log",
+    column: "created_at",
+    since: AUDIT_LEDGER_SINCE,
   },
 ];
 
