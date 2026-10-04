@@ -142,6 +142,12 @@ export interface ExecuteReviewFromIntentOpts {
    * through the normal (or stale) path exactly as it would otherwise.
    */
   runAbandoned?: boolean;
+  /**
+   * Prefer the lead's tagged `json review-intent` block (phase 6). Set from
+   * selectReviewTerminalText, true ONLY for threads whose prompt was rendered
+   * orchestrated; absent = today's last-block rule.
+   */
+  preferTaggedIntent?: boolean;
   logger?: ReviewLogger;
 }
 
@@ -159,7 +165,9 @@ export async function executeReviewFromIntent(
     logger,
   } = opts;
 
-  const parsed = parseReviewIntent(terminalText);
+  const parsed = parseReviewIntent(terminalText, {
+    preferTaggedIntent: opts.preferTaggedIntent,
+  });
   if (!parsed.ok) {
     return await reportNoVerdict(opts, {
       cause: parsed.source === "agent" ? "agent_unable" : "unparseable",

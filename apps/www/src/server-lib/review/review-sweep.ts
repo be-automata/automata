@@ -19,8 +19,8 @@ import {
   snapshotOf,
 } from "./execute-review-from-intent";
 import {
-  extractTerminalAgentText,
   isReviewThread,
+  selectReviewTerminalText,
 } from "./review-single-writer-finish";
 
 /**
@@ -64,6 +64,8 @@ export async function runReviewSweep(): Promise<void> {
       terminalCause: threadTable.terminalCause,
       reviewedSha: threadTable.reviewedSha,
       version: threadTable.version,
+      // Phase 6: the render-time reviewPromptMode stamp selects the parse rule.
+      sourceMetadata: threadTable.sourceMetadata,
     })
     .from(threadTable)
     .where(
@@ -177,9 +179,12 @@ export async function runReviewSweep(): Promise<void> {
         threadChatId: LEGACY_THREAD_CHAT_ID,
         userId: c.userId,
       });
-      const terminalText = extractTerminalAgentText(
-        threadChat?.messages ?? null,
-      );
+      // The SAME selector the finish hook uses (phase 6), so the backstop can
+      // never read a different verdict than the hook would have.
+      const { terminalText, preferTaggedIntent } = selectReviewTerminalText({
+        thread: c,
+        messages: threadChat?.messages ?? null,
+      });
 
       const outcome = await executeReviewFromIntent({
         github,
@@ -188,6 +193,7 @@ export async function runReviewSweep(): Promise<void> {
         botLogin: resolveBotLogin(),
         currentHeadSha,
         terminalText,
+        preferTaggedIntent,
         // The same draft state the finish hook passes: it caps the floor at
         // `comment` and decides whether a bare `comment` is a verdict at all.
         isDraft,

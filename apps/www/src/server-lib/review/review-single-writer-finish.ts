@@ -21,6 +21,7 @@ import {
   executeReviewFromIntent,
   type ReviewFromIntentOutcome,
 } from "./execute-review-from-intent";
+import { hasTaggedReviewIntentOpener } from "./parse-review-intent";
 import { resolveApproveFloor } from "./resolve-approve-floor";
 import { PR_MERGED_SKILL_NAME } from "./review-skill";
 
@@ -133,17 +134,68 @@ export function isWorkFailedOutcome(
  * final text. A legacy row without the field counts as a lead message.
  */
 export function extractTerminalAgentText(messages: DBMessage[] | null): string {
-  if (!messages) return "";
+  return findLastLeadAgentText(messages, () => true) ?? "";
+}
+
+/**
+ * The joined text parts of the LAST lead agent message whose text `accept`s,
+ * or null when none does. The one walk behind both extractTerminalAgentText
+ * and selectReviewTerminalText.
+ */
+function findLastLeadAgentText(
+  messages: DBMessage[] | null,
+  accept: (text: string) => boolean,
+): string | null {
+  if (!messages) return null;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
-    if (m.type === "agent" && m.parent_tool_use_id == null) {
-      return m.parts
-        .filter((p): p is { type: "text"; text: string } => p.type === "text")
-        .map((p) => p.text)
-        .join("\n");
-    }
+    if (m.type !== "agent" || m.parent_tool_use_id != null) continue;
+    const text = m.parts
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("\n");
+    if (accept(text)) return text;
   }
-  return "";
+  return null;
+}
+
+/**
+ * THE terminal-text decision for a review thread — one pure function used by
+ * BOTH the finish hook and the hourly sweep, so the two paths cannot diverge
+ * (the #213/#221/#224 lesson).
+ *
+ * A thread stamped `reviewPromptMode: "orchestrated"` at render time (phase 6)
+ * was told to tag its final block `json review-intent`. In -p mode a
+ * background sub-agent can resume the lead AFTER it emitted that block, so
+ * the lead's LAST message may carry no fence (Phase 2 Q2/Q7). For those
+ * threads the terminal text is the last LEAD message containing a tagged
+ * opener (sub-agent messages are never candidates, as in 05-03's
+ * extractTerminalAgentText), falling back to today's text; the parser then
+ * prefers the tagged block. Every other thread gets exactly today's text.
+ */
+export function selectReviewTerminalText({
+  thread,
+  messages,
+}: {
+  thread: { sourceMetadata?: ThreadSourceMetadata | null } | null | undefined;
+  messages: DBMessage[] | null;
+}): { terminalText: string; preferTaggedIntent: boolean } {
+  const metadata = thread?.sourceMetadata;
+  const preferTaggedIntent =
+    metadata?.type === "automation-skill" &&
+    metadata.reviewPromptMode === "orchestrated";
+  if (!preferTaggedIntent) {
+    return {
+      terminalText: extractTerminalAgentText(messages),
+      preferTaggedIntent: false,
+    };
+  }
+  return {
+    terminalText:
+      findLastLeadAgentText(messages, hasTaggedReviewIntentOpener) ??
+      extractTerminalAgentText(messages),
+    preferTaggedIntent: true,
+  };
 }
 
 /**
@@ -374,9 +426,13 @@ export async function handleReviewEffectAtFinish({
         repoFullName,
         prNumber,
       );
-      const terminalText = extractTerminalAgentText(
-        threadChat?.messages ?? null,
-      );
+      // One selector for hook and sweep (phase 6): orchestrated-prompt threads
+      // read the lead's tagged verdict even when a background sub-agent
+      // resumed the lead afterwards (Phase 2 Q2/Q7; 05-03 drops sub-agents).
+      const { terminalText, preferTaggedIntent } = selectReviewTerminalText({
+        thread,
+        messages: threadChat?.messages ?? null,
+      });
 
       // Resolve ONE approve-floor snapshot for this run, fenced to the thread's
       // org (ADR-036 review floor). Read live from Neon — a dashboard change
@@ -394,6 +450,7 @@ export async function handleReviewEffectAtFinish({
         botLogin: resolveBotLogin(),
         currentHeadSha,
         terminalText,
+        preferTaggedIntent,
         approveFloorPolicy,
         isDraft,
         // Same two degraded-path gates as the sweep: a run that produced no

@@ -3,6 +3,11 @@ import { executeReviewFromIntent } from "./execute-review-from-intent";
 import type { GitHubReview } from "@terragon/review/state/review-github-client";
 import { reviewNoticeSha, type ReviewWriterClient } from "./review-notice";
 import { makeNoticeFake } from "./review-notice.fake";
+import {
+  LEAD_SUMMARY,
+  LEAD_TAGGED_TEXT,
+  SUB_AGENT_APPROVE_FENCE,
+} from "./__fixtures__/orchestrated-terminal-messages";
 
 const BOT = "automata-ai-bot[bot]";
 const REPO = "o/r";
@@ -549,5 +554,43 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
       terminalText: RC_AT_HEAD,
     });
     expect(res.outcome).toBe("posted");
+  });
+});
+
+describe("executeReviewFromIntent — preferTaggedIntent passthrough (phase 6)", () => {
+  // The lead's tagged verdict, then an echoed sub-agent fence after it.
+  const echoed = `${LEAD_TAGGED_TEXT}\nThe security agent said:\n${SUB_AGENT_APPROVE_FENCE}\n`;
+
+  it("with the option the lead's tagged verdict is posted", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: echoed,
+      preferTaggedIntent: true,
+    });
+    expect(res).toMatchObject({ outcome: "posted" });
+    expect(github.submitReview).toHaveBeenCalledTimes(1);
+    expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
+    expect(github.submitReview.mock.calls[0]![3]).toContain(LEAD_SUMMARY);
+  });
+
+  it("without the option today's last-block rule applies (the echoed approve)", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: echoed,
+    });
+    expect(res).toMatchObject({ outcome: "posted" });
+    expect(github.submitReview).toHaveBeenCalledTimes(1);
+    expect(github.submitReview.mock.calls[0]![2]).toBe("APPROVE");
+    expect(github.submitReview.mock.calls[0]![3]).not.toContain(LEAD_SUMMARY);
   });
 });

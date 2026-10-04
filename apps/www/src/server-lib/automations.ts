@@ -48,6 +48,12 @@ import {
   renderSkillPlaceholders,
 } from "./review/resolve-review-skill";
 import { buildRepoOverrideFetcher } from "./review/repo-skill-override";
+import { resolveReviewPromptMode } from "./review/resolve-review-prompt-mode";
+import {
+  CLASSIC_REVIEW_PROMPT,
+  hasReviewModeSections,
+  type ReviewPromptMode,
+} from "./review/review-skill";
 
 /**
  * Effective shadow state for an automation's org: the org's installation mode
@@ -190,6 +196,29 @@ export async function runAutomation({
         const baseBranchName = options?.branchName ?? automation.branchName;
         const reviewDiffBase =
           options?.prBaseBranchName ?? automation.branchName;
+        // Review-mode sections (phase 6) are opt-in and github-ops only. A PR
+        // review (the same predicate dispatch's isReviewThread uses) renders
+        // the mode the Phase 4 resolver picks; anything else renders classic;
+        // every other skill gets its body verbatim. The render happens per
+        // thread creation (per push), so flipping a repo back to classic
+        // restores today's prompt on the next push (ROADMAP Phase 6 SC3).
+        let reviewPrompt: ReviewPromptMode | undefined;
+        if (skillName === "github-ops") {
+          reviewPrompt =
+            automation.triggerType === "pull_request" &&
+            automation.organizationId &&
+            options?.prNumber !== undefined
+              ? await resolveReviewPromptMode({
+                  db,
+                  organizationId: automation.organizationId,
+                  repoFullName: automation.repoFullName,
+                  trustContext: options?.trustContext ?? null,
+                })
+              : CLASSIC_REVIEW_PROMPT;
+        }
+        const orchestratedApplied =
+          reviewPrompt?.mode === "orchestrated" &&
+          hasReviewModeSections(resolved.body);
         const message: DBUserMessage = {
           type: "user",
           model: null,
@@ -199,6 +228,7 @@ export async function runAutomation({
               text: renderSkillPlaceholders(resolved.body, {
                 repoFullName: automation.repoFullName,
                 baseBranch: reviewDiffBase,
+                reviewPrompt,
               }),
             },
           ],
@@ -225,6 +255,10 @@ export async function runAutomation({
             // Absent for a repo-file override (no version row; provenance is
             // contentSha + the repo's git history).
             ...(resolved.versionId ? { versionId: resolved.versionId } : {}),
+            // Last, so a classic thread's object stays key-for-key today's.
+            ...(orchestratedApplied
+              ? { reviewPromptMode: "orchestrated" as const }
+              : {}),
           },
           automation: automation,
           trustContext: options?.trustContext,
