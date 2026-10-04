@@ -41,11 +41,13 @@ umask 022
 # - Upstream gstack review/SKILL.md is never installed: its preamble can fall
 #   back to executing a script from the PR checkout. Its knowledge files are
 #   vendored and an automata adapter SKILL.md is overlaid instead.
-# - Exactly ONE helper reference is tolerated: the decision-ledger helper named
-#   once in the vendored gstack checklist. It is safe because the adapter
-#   declares that ledger unavailable and forbids running any command named in
-#   the vendored files. Any other reference, or a different count after a pin
-#   bump, fails the pack.
+# - No installed file may contain a `forbiddenHelperTokens` string (gstack
+#   helper programs) except an `allowedHelperRefs` entry of its pack, which must
+#   occur exactly `count` times in its file. Both lists are data in the
+#   manifest. Today that is the decision-ledger helper named once in the
+#   vendored gstack checklist: safe because the adapter declares that ledger
+#   unavailable and forbids running any command named in the vendored files. A
+#   different count after a pin bump fails the pack.
 # - Pack dirs are published by rename from a staging dir on the same
 #   filesystem, because Phase 5 links runs into these paths. Old dirs are never
 #   pruned: they are reported STALE and removed by hand with no run in flight.
@@ -56,7 +58,6 @@ umask 022
 # Commit first: the manifest and overlays are read from HEAD.
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-SCRIPT_SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 cd /
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS \
@@ -70,10 +71,15 @@ MANIFEST_REPO_PATH="packages/worker/deploy/batteries.json"
 OVERLAY_DIR_PREFIX="packages/worker/deploy/batteries/"
 AGENT_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# The single tolerated helper reference (see header). Single-quoted on purpose.
-ALLOWED_HELPER_REF_FILE="skills/gstack-review/checklist.md"
-# shellcheck disable=SC2088 # a literal string to search for, never a path to expand
-ALLOWED_HELPER_REF='~/.claude/skills/gstack/bin/gstack-decision-search'
+# Part of every pack stamp. Bump it whenever extract_object, strip_frontmatter,
+# verify_staging or GRANT_KEYS_RE change what lands in a pack dir, so the next
+# run reinstalls instead of SKIPPING packs built by the old code. A test hashes
+# those bodies against the value recorded for this version.
+INSTALLER_OUTPUT_VERSION=1
+# Frontmatter keys that GRANT the invoking turn something (see header).
+GRANT_KEYS_RE='^(allowed-tools|hooks|permissionMode|mcpServers):'
+# Same list as FORBIDDEN_NAMES in packages/worker/src/agent-run/batteries-manifest.ts.
+FORBIDDEN_NAMES=(hooks bin .claude-plugin settings.json settings.local.json .mcp.json plugin.json)
 
 AGENT_USER="${AGENT_USER:-automata-agent}"
 WORKER_USER="${WORKER_USER:-automata}"
@@ -98,6 +104,7 @@ if [ -d "$PREFIX" ]; then
   PREFIX="$(cd -P "$PREFIX" && pwd -P)"
 fi
 
+# DRY_RUN=0 implies root: every non-root path below exits 2.
 DRY_RUN=0
 if [ -n "$SKIP_SUDO_VERIFY" ] || [ -n "$BATTERIES_MANIFEST" ]; then
   if [ "$(id -u)" = "0" ]; then
@@ -128,8 +135,6 @@ esac
 
 ROOT="$PREFIX/lib/automata-batteries"
 BIN_DIR="$PREFIX/bin"
-IS_ROOT=0
-[ "$(id -u)" = "0" ] && IS_ROOT=1
 
 FAILURES=0
 WORK=""
@@ -138,9 +143,13 @@ VERIFY_HOME=""
 FINISHED=0
 HEAD_SHA=""
 MANIFEST=""
-SCRIPT_HASH=""
 FETCH_REPO=""
 STEP_ERROR=""
+# Read once by preflight, after the control-character check: one @tsv row per
+# CLI / pack, and one forbidden helper token per line.
+CLI_ROWS=""
+PACK_ROWS=""
+HELPER_TOKENS=""
 
 # Every git call against the automata-owned checkout goes through here.
 git_repo() {
@@ -170,20 +179,28 @@ sha256_of() {
   sha256sum "$1" | awk '{print $1}'
 }
 
-# jq on one compact JSON entry: a raw scalar field.
-jf() {
-  printf '%s' "$1" | jq -r "$2"
+# Per-pack lists as @tsv rows. Every field is a non-empty string (preflight),
+# so no column is empty and shifts its neighbours on an IFS=$'\t' read.
+subpath_rows() {
+  jq -r --argjson i "$1" '.packs[$i].subpaths[] | [.src, .dest, .gitId] + (.exclude // []) | @tsv' "$MANIFEST"
 }
 
-# jq on one compact JSON entry: a list of objects, one compact object per line.
-jl() {
-  printf '%s' "$1" | jq -c "$2"
+overlay_rows() {
+  jq -r --argjson i "$1" '.packs[$i].overlays // [] | .[] | [.from, .dest] | @tsv' "$MANIFEST"
+}
+
+helper_ref_rows() {
+  jq -r --argjson i "$1" '.packs[$i].allowedHelperRefs // [] | .[] | [.file, .ref, (.count | tostring)] | @tsv' "$MANIFEST"
+}
+
+print_summary() {
+  echo "== automata batteries summary =="
+  cat "$SUMMARY"
 }
 
 finish() {
   FINISHED=1
-  echo "== automata batteries summary =="
-  cat "$SUMMARY"
+  print_summary
   if [ "$FAILURES" -eq 0 ]; then
     echo "RESULT: PASS"
     exit 0
@@ -196,8 +213,7 @@ finish() {
 on_exit() {
   local status=$?
   if [ -n "$SUMMARY" ] && [ "$FINISHED" -eq 0 ]; then
-    echo "== automata batteries summary =="
-    cat "$SUMMARY"
+    print_summary
     echo "FAIL script: aborted with status ${status} (see the log above)"
     echo "RESULT: FAIL ($((FAILURES + 1)) failure(s))"
     status=1
@@ -218,7 +234,25 @@ safe_rel_path() {
   return 0
 }
 
-# Same shapes as packages/worker/src/agent-run/batteries-manifest.ts; names and
+# True when any segment of the relative path is in FORBIDDEN_NAMES.
+has_forbidden_name() {
+  local name
+  for name in "${FORBIDDEN_NAMES[@]}"; do
+    case "/$1/" in
+      */"$name"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# check_vendored_path <pack id> <field> <value>: safe and not a forbidden name.
+check_vendored_path() {
+  if ! safe_rel_path "$3" || has_forbidden_name "$3"; then
+    record "FAIL preflight $1: unsafe or forbidden $2"
+  fi
+}
+
+# Same rules as packages/worker/src/agent-run/batteries-manifest.ts; names and
 # versionArgs reach a root shell and an agent shell, so they are re-checked here.
 preflight() {
   local re_id='^[a-z0-9][a-z0-9-]*$'
@@ -228,7 +262,9 @@ preflight() {
   local re_semver='^[0-9]+\.[0-9]+\.[0-9]+$'
   local re_github='^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
   local re_dest='^(LICENSE|skills/[a-z0-9-]+(/.+)?|agents/[a-z0-9-]+\.md)$'
-  local cmd entry sub ov ex id name value field
+  local cmd i id repo sha src dest git_id ex_rest ex from file ref token named
+  local name version url sha256 member license_member args
+  local -a excludes
 
   for cmd in git jq curl sha256sum tar gzip awk find mktemp; do
     command -v "$cmd" >/dev/null 2>&1 || record "FAIL preflight $cmd: required command not found"
@@ -240,74 +276,99 @@ preflight() {
   fi
   [ "$FAILURES" -eq 0 ] || return 1
 
-  if ! jq -e '.schemaVersion == 1 and (.packs | type == "array") and (.clis | type == "array")' \
-    "$MANIFEST" >/dev/null; then
-    record "FAIL preflight manifest: schemaVersion must be 1 with packs and clis arrays"
+  # FIRST, before any value is read: every read below splits jq's @tsv output
+  # on tabs and newlines, so a control character inside a value could forge a
+  # field, and @tsv escapes backslashes, so the value read back would differ
+  # from the one checked.
+  if ! jq -e '[.. | strings | test("[\u0000-\u001f\u007f\\\\]")] | any | not' "$MANIFEST" >/dev/null; then
+    record "FAIL preflight manifest: a string contains a control character or backslash"
     return 1
   fi
-  # Raw (-r) reads below are line-based: a control character in any string
-  # could split one value into two that each pass the checks.
-  if ! jq -e '[.. | strings | test("[\u0000-\u001f\u007f]")] | any | not' "$MANIFEST" >/dev/null; then
-    record "FAIL preflight manifest: a string contains a control character"
+  if ! jq -e '
+    def str: type == "string" and test("\\S");
+    .schemaVersion == 1
+    and (.forbiddenHelperTokens | type == "array" and length > 0 and all(.[]; str))
+    and (.packs | type == "array" and length > 0)
+    and (.clis | type == "array")
+    and all(.packs[]; (.id, .repo, .sha, .license | str)
+      and (.subpaths | type == "array" and length > 0)
+      and all(.subpaths[]; (.src, .dest, .gitId | str)
+        and ((.exclude // []) | type == "array" and all(.[]; str)))
+      and all((.overlays // [])[]; .from, .dest | str)
+      and all((.allowedHelperRefs // [])[]; (.file, .ref | str)
+        and (.count | type == "number" and . >= 1 and . == floor)))
+    and all(.clis[]; .name, .version, .url, .sha256, .member, .licenseMember, .license, .versionArgs | str)
+    and (.packs | map(.id) | length == (unique | length))
+    and (.clis | map(.name) | length == (unique | length))' "$MANIFEST" >/dev/null 2>&1; then
+    record "FAIL preflight manifest: schemaVersion 1, non-empty packs and forbiddenHelperTokens, every field a non-empty string, a positive integer count, unique pack ids and CLI names"
     return 1
   fi
+  CLI_ROWS="$(jq -r '.clis[] | [.name, .version, .url, .sha256, .member, .licenseMember, .versionArgs] | @tsv' "$MANIFEST")"
+  PACK_ROWS="$(jq -r '.packs | to_entries[] | [(.key | tostring), .value.id, .value.repo, .value.sha] | @tsv' "$MANIFEST")"
+  HELPER_TOKENS="$(jq -r '.forbiddenHelperTokens[]' "$MANIFEST")"
 
-  while IFS= read -r -u 3 entry; do
-    id="$(jf "$entry" '.id')"
+  while IFS=$'\t' read -r -u 3 i id repo sha; do
     [[ "$id" =~ $re_id ]] || record "FAIL preflight pack: bad id"
-    value="$(jf "$entry" '.repo')"
-    [ "$value" = "self" ] || [[ "$value" =~ $re_github ]] ||
+    [ "$repo" = "self" ] || [[ "$repo" =~ $re_github ]] ||
       record "FAIL preflight $id: repo must be self or a github https url"
-    value="$(jf "$entry" '.sha')"
-    [[ "$value" =~ $re_sha1 ]] || record "FAIL preflight $id: sha is not 40 hex"
-    while IFS= read -r -u 4 sub; do
-      for field in src dest; do
-        value="$(jf "$sub" ".$field")"
-        safe_rel_path "$value" || record "FAIL preflight $id: unsafe $field"
-      done
-      value="$(jf "$sub" '.dest')"
-      [[ "$value" =~ $re_dest ]] || record "FAIL preflight $id: dest outside the pack layout"
-      value="$(jf "$sub" '.gitId')"
-      [[ "$value" =~ $re_sha1 ]] || record "FAIL preflight $id: gitId is not 40 hex"
-      while IFS= read -r -u 5 ex; do
+    [[ "$sha" =~ $re_sha1 ]] || record "FAIL preflight $id: sha is not 40 hex"
+    while IFS=$'\t' read -r -u 4 src dest git_id ex_rest; do
+      check_vendored_path "$id" src "$src"
+      check_vendored_path "$id" dest "$dest"
+      [[ "$dest" =~ $re_dest ]] || record "FAIL preflight $id: dest outside the pack layout"
+      [[ "$git_id" =~ $re_sha1 ]] || record "FAIL preflight $id: gitId is not 40 hex"
+      excludes=()
+      [ -z "$ex_rest" ] || IFS=$'\t' read -r -a excludes <<<"$ex_rest"
+      for ex in ${excludes[@]+"${excludes[@]}"}; do
         safe_rel_path "$ex" || record "FAIL preflight $id: unsafe exclude"
-      done 5< <(jf "$sub" '.exclude // [] | .[]')
-    done 4< <(jl "$entry" '.subpaths[]')
-    while IFS= read -r -u 4 ov; do
-      value="$(jf "$ov" '.from')"
-      safe_rel_path "$value" || record "FAIL preflight $id: unsafe overlay from"
-      case "$value" in
+      done
+    done 4< <(subpath_rows "$i")
+    while IFS=$'\t' read -r -u 4 from dest; do
+      check_vendored_path "$id" "overlay from" "$from"
+      case "$from" in
         "$OVERLAY_DIR_PREFIX"*) ;;
         *) record "FAIL preflight $id: overlay from outside $OVERLAY_DIR_PREFIX" ;;
       esac
-      value="$(jf "$ov" '.dest')"
-      safe_rel_path "$value" || record "FAIL preflight $id: unsafe overlay dest"
-      case "$value" in
-        skills/*) ;;
+      check_vendored_path "$id" "overlay dest" "$dest"
+      case "$dest" in
+        skills/*) [[ "$dest" =~ $re_dest ]] || record "FAIL preflight $id: overlay dest outside the pack layout" ;;
         *) record "FAIL preflight $id: overlay dest outside skills/" ;;
       esac
-    done 4< <(jl "$entry" '.overlays // [] | .[]')
-  done 3< <(jq -c '.packs[]' "$MANIFEST")
+    done 4< <(overlay_rows "$i")
+    while IFS=$'\t' read -r -u 4 file ref _; do
+      check_vendored_path "$id" "allowedHelperRefs file" "$file"
+      [[ "$file" =~ $re_dest ]] || record "FAIL preflight $id: allowedHelperRefs file outside the pack layout"
+      named=0
+      while IFS= read -r token; do
+        case "$ref" in
+          *"$token"*) named=1 ;;
+        esac
+      done <<<"$HELPER_TOKENS"
+      [ "$named" -eq 1 ] || record "FAIL preflight $id: allowedHelperRefs ref names no forbiddenHelperTokens entry"
+    done 4< <(helper_ref_rows "$i")
+  done 3<<<"$PACK_ROWS"
 
-  while IFS= read -r -u 3 entry; do
-    name="$(jf "$entry" '.name')"
+  while IFS=$'\t' read -r -u 3 name version url sha256 member license_member args; do
+    [ -n "$name" ] || continue
     [[ "$name" =~ $re_id ]] || record "FAIL preflight cli: bad name"
-    value="$(jf "$entry" '.version')"
-    [[ "$value" =~ $re_semver ]] || record "FAIL preflight $name: bad version"
-    value="$(jf "$entry" '.versionArgs')"
-    [[ "$value" =~ $re_version_args ]] || record "FAIL preflight $name: bad versionArgs"
-    value="$(jf "$entry" '.sha256')"
-    [[ "$value" =~ $re_sha256 ]] || record "FAIL preflight $name: sha256 is not 64 hex"
-    value="$(jf "$entry" '.url')"
-    case "$value" in
+    [[ "$version" =~ $re_semver ]] || record "FAIL preflight $name: bad version"
+    [[ "$args" =~ $re_version_args ]] || record "FAIL preflight $name: bad versionArgs"
+    [[ "$sha256" =~ $re_sha256 ]] || record "FAIL preflight $name: sha256 is not 64 hex"
+    case "$url" in
       https://github.com/*) ;;
       *) record "FAIL preflight $name: url is not a github https url" ;;
     esac
-    for field in member licenseMember; do
-      value="$(jf "$entry" ".$field")"
-      safe_rel_path "$value" || record "FAIL preflight $name: unsafe $field"
-    done
-  done 3< <(jq -c '.clis[]' "$MANIFEST")
+    case "$url" in
+      *"/releases/download/v$version/"*) ;;
+      *) record "FAIL preflight $name: url lacks /releases/download/v$version/" ;;
+    esac
+    case "$url" in
+      *linux*) ;;
+      *) record "FAIL preflight $name: url names no linux asset" ;;
+    esac
+    safe_rel_path "$member" || record "FAIL preflight $name: unsafe member"
+    safe_rel_path "$license_member" || record "FAIL preflight $name: unsafe licenseMember"
+  done 3<<<"$CLI_ROWS"
 
   [ "$FAILURES" -eq 0 ]
 }
@@ -412,11 +473,11 @@ strip_frontmatter() {
   local file="$1" tmp
   [ "$(head -n 1 "$file" | tr -d '\r')" = "---" ] || return 0
   tmp="$file.strip.$$"
-  awk '
+  awk -v grant_re="$GRANT_KEYS_RE" '
     { line = $0; sub(/\r$/, "", line) }
     NR == 1 && line == "---" { fm = 1; print; next }
     fm && line == "---" { fm = 0; skip = 0; print; next }
-    fm && line ~ /^(allowed-tools|hooks|permissionMode|mcpServers):/ { skip = 1; next }
+    fm && line ~ grant_re { skip = 1; next }
     fm && skip && line ~ /^([[:space:]]|-)/ { next }
     fm { skip = 0 }
     { print }
@@ -431,11 +492,15 @@ strip_frontmatter() {
   fi
 }
 
-# Any hit is a FAIL for the whole pack (STEP_ERROR set).
+# verify_staging <stage> <pack index>. Any hit is a FAIL for the whole pack
+# (STEP_ERROR set).
 verify_staging() {
-  local stage="$1" hit file total allowed=0 skill_dir
-  hit="$(find "$stage" \( -name hooks -o -name settings.json -o -name settings.local.json \
-    -o -name .mcp.json -o -name plugin.json -o -name .claude-plugin \) -print | head -n 1)"
+  local stage="$1" i="$2" hit file rel ref count n skill_dir name token allowed hits refs
+  local -a find_names=() token_args=()
+  for name in "${FORBIDDEN_NAMES[@]}"; do
+    find_names+=(-o -name "$name")
+  done
+  hit="$(find "$stage" \( "${find_names[@]:1}" \) -print | head -n 1)"
   if [ -n "$hit" ]; then
     STEP_ERROR="forbidden entry ${hit#"$stage"/}"
     return 1
@@ -446,11 +511,11 @@ verify_staging() {
     return 1
   fi
   while IFS= read -r -d '' file; do
-    if awk '
+    if awk -v grant_re="$GRANT_KEYS_RE" '
       { line = $0; sub(/\r$/, "", line) }
       NR == 1 { if (line != "---") exit 1; fm = 1; next }
       fm && line == "---" { exit 1 }
-      fm && line ~ /^(allowed-tools|hooks|permissionMode|mcpServers):/ { exit 0 }
+      fm && line ~ grant_re { exit 0 }
       END { exit 1 }
     ' "$file"; then
       STEP_ERROR="grant key left in the frontmatter of ${file#"$stage"/}"
@@ -466,18 +531,58 @@ verify_staging() {
       fi
     done
   fi
-  total="$({ grep -roF -e 'gstack/bin' -e 'gstack-skill-start' "$stage" || true; } | wc -l | tr -d ' ')"
-  if [ -f "$stage/$ALLOWED_HELPER_REF_FILE" ]; then
-    allowed="$({ grep -oF -- "$ALLOWED_HELPER_REF" "$stage/$ALLOWED_HELPER_REF_FILE" || true; } | wc -l | tr -d ' ')"
-    if [ "$allowed" -ne 1 ]; then
-      STEP_ERROR="$ALLOWED_HELPER_REF_FILE holds the allowlisted helper reference $allowed times (expected 1); re-review the allowlist"
+
+  # Helper references. Each allowedHelperRefs entry must occur exactly `count`
+  # times in its file; then no forbidden token may remain anywhere once those
+  # occurrences are cut out.
+  allowed="$(helper_ref_rows "$i")"
+  while IFS=$'\t' read -r file ref count; do
+    [ -n "$file" ] || continue
+    n=0
+    if [ -f "$stage/$file" ]; then
+      n="$({ grep -oF -- "$ref" "$stage/$file" || true; } | wc -l | tr -d ' ')"
+    fi
+    if [ "$n" != "$count" ]; then
+      STEP_ERROR="$file holds the allowlisted helper reference $n times (manifest allows $count); re-review allowedHelperRefs"
       return 1
     fi
-  fi
-  if [ "$((total - allowed))" -ne 0 ]; then
-    STEP_ERROR="$((total - allowed)) helper reference(s) beyond the single allowlisted one"
+  done <<<"$allowed"
+  while IFS= read -r token; do
+    token_args+=(-e "$token")
+  done <<<"$HELPER_TOKENS"
+  hits="$(grep -rlF "${token_args[@]}" -- "$stage")" || [ $? -eq 1 ] || {
+    STEP_ERROR="cannot scan $stage for helper references"
     return 1
-  fi
+  }
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    rel="${file#"$stage"/}"
+    refs="$(printf '%s\n' "$allowed" | awk -F '\t' -v f="$rel" '$1 == f { print $2 }')"
+    # Cut each allowed ref out of every line (leaving a newline, so the text on
+    # either side cannot join into a token), then look for any token left.
+    if [ -z "$refs" ] || ! HELPER_REFS="$refs" HELPER_TOKENS="$HELPER_TOKENS" awk '
+      BEGIN {
+        nr = split(ENVIRON["HELPER_REFS"], refs, "\n")
+        nt = split(ENVIRON["HELPER_TOKENS"], toks, "\n")
+      }
+      {
+        line = $0
+        for (r = 1; r <= nr; r++) {
+          rest = line
+          line = ""
+          while ((p = index(rest, refs[r])) > 0) {
+            line = line substr(rest, 1, p - 1) "\n"
+            rest = substr(rest, p + length(refs[r]))
+          }
+          line = line rest
+        }
+        for (t = 1; t <= nt; t++) if (index(line, toks[t]) > 0) exit 1
+      }
+    ' "$file"; then
+      STEP_ERROR="helper reference in $rel beyond its allowedHelperRefs"
+      return 1
+    fi
+  done <<<"$hits"
   return 0
 }
 
@@ -515,14 +620,10 @@ cli_at_pin() {
     [ "$recorded_bin" = "$(sha256_of "$bin")" ]
 }
 
+# install_cli <name> <version> <url> <sha256> <member> <licenseMember>
 install_cli() {
-  local entry="$1" name version url sha256 member license_member stamp dl x tmp lic_dir lic_file bin_sha
-  name="$(jf "$entry" '.name')"
-  version="$(jf "$entry" '.version')"
-  url="$(jf "$entry" '.url')"
-  sha256="$(jf "$entry" '.sha256')"
-  member="$(jf "$entry" '.member')"
-  license_member="$(jf "$entry" '.licenseMember')"
+  local name="$1" version="$2" url="$3" sha256="$4" member="$5" license_member="$6"
+  local stamp dl x tmp lic_dir lic_file bin_sha
   stamp="$ROOT/clis/$name@$version.stamp"
 
   if cli_at_pin "$name" "$stamp" "$sha256"; then
@@ -558,7 +659,7 @@ install_cli() {
   if ! { mkdir -p "$BIN_DIR" "$ROOT/clis" "$lic_dir" &&
     cat "$x/$member" >"$tmp" &&
     chmod 0755 "$tmp" &&
-    { [ "$IS_ROOT" -eq 0 ] || chown root:root "$tmp"; } &&
+    { [ "$DRY_RUN" -eq 1 ] || chown root:root "$tmp"; } &&
     mv -f "$tmp" "$BIN_DIR/$name" &&
     cat "$x/$license_member" >"$lic_file" &&
     chmod 0644 "$lic_file"; }; then
@@ -577,114 +678,110 @@ install_cli() {
   record "INSTALLED cli $name $version"
 }
 
-# The stamp's hash covers the manifest entry, the overlay blob ids at HEAD and
-# this script; the `source` line records provenance and is not compared, so a
-# new unrelated commit does not reinstall (and rename aside) an unchanged pack.
+# The stamp's hash covers the manifest's pack entry, the forbidden helper
+# tokens, the overlay blob ids at HEAD and INSTALLER_OUTPUT_VERSION; the
+# `source` line records provenance and is not compared, so a new unrelated
+# commit does not reinstall (and rename aside) an unchanged pack.
 pack_stamp_hash() {
-  local entry="$1" ov from
+  local i="$1" from
   {
-    printf '%s\n' "$entry"
-    while IFS= read -r -u 6 ov; do
-      from="$(jf "$ov" '.from')"
+    jq -c --argjson i "$i" '.packs[$i]' "$MANIFEST"
+    printf '%s\n' "$HELPER_TOKENS"
+    while IFS=$'\t' read -r -u 6 from _; do
       git_repo rev-parse --verify --quiet "$HEAD_SHA:$from" || printf 'absent %s\n' "$from"
-    done 6< <(jl "$entry" '.overlays // [] | .[]')
-    printf '%s\n' "$SCRIPT_HASH"
+    done 6< <(overlay_rows "$i")
+    printf 'installer-output %s\n' "$INSTALLER_OUTPUT_VERSION"
   } | sha256sum | awk '{print $1}'
 }
 
-install_pack() {
-  local entry="$1" id repo sha target expected g stage sub src dest git_id ov from md
+# stage_pack <index> <id> <repo> <sha> <stage> <stamp hash>
+# Fetches, extracts, overlays, strips, verifies and stamps the pack in <stage>
+# with root ownership and read-only modes. Sets STEP_ERROR and returns 1 on any
+# failure; install_pack removes <stage> and records the FAIL.
+stage_pack() {
+  local i="$1" id="$2" repo="$3" sha="$4" stage="$5" expected="$6" g src dest git_id ex_rest from md
   local -a excludes
-  id="$(jf "$entry" '.id')"
-  repo="$(jf "$entry" '.repo')"
-  sha="$(jf "$entry" '.sha')"
-  target="$ROOT/$id@$sha"
-  expected="$(pack_stamp_hash "$entry")"
-
-  if [ -f "$target/.stamp" ] && [ "$(head -n 1 "$target/.stamp")" = "stamp $expected" ]; then
-    record "SKIPPED pack $id $sha (already at pin)"
-    return 0
-  fi
-
   if [ "$repo" = "self" ]; then
     if ! git_repo cat-file -e "$sha^{commit}" 2>/dev/null; then
-      record "FAIL pack $id: pinned sha not in $AUTOMATA_REPO history — fetch origin as the automata user first"
+      STEP_ERROR="pinned sha not in $AUTOMATA_REPO history — fetch origin as the automata user first"
       return 1
     fi
     g=git_repo
   else
     FETCH_REPO="$WORK/fetch-$id"
     log "fetching $id @ $sha"
-    if ! git init -q "$FETCH_REPO" ||
-      ! git_fetch -c protocol.version=2 fetch -q --depth 1 "$repo" "$sha"; then
-      record "FAIL pack $id: fetch of $sha from $repo failed"
+    # A partial fetch of the one pinned commit: trees now, each blob on its
+    # first cat-file. The named remote is where those lazy blob fetches go.
+    if ! { git init -q "$FETCH_REPO" &&
+      git_fetch remote add origin "$repo" &&
+      git_fetch -c protocol.version=2 fetch -q --filter=blob:none --depth 1 origin "$sha"; }; then
+      STEP_ERROR="fetch of $sha from $repo failed"
       return 1
     fi
     if [ "$(git_fetch rev-parse FETCH_HEAD)" != "$sha" ]; then
-      record "FAIL pack $id: fetched commit is not the pinned sha"
+      STEP_ERROR="fetched commit is not the pinned sha"
       return 1
     fi
     g=git_fetch
+  fi
+
+  while IFS=$'\t' read -r -u 6 src dest git_id ex_rest; do
+    excludes=()
+    [ -z "$ex_rest" ] || IFS=$'\t' read -r -a excludes <<<"$ex_rest"
+    extract_object "$g" "$sha" "$src" "$git_id" "$stage/$dest" ${excludes[@]+"${excludes[@]}"} || return 1
+  done 6< <(subpath_rows "$i")
+
+  while IFS=$'\t' read -r -u 6 from dest; do
+    mkdir -p "$(dirname "$stage/$dest")"
+    if ! git_repo cat-file blob "$HEAD_SHA:$from" >"$stage/$dest" 2>/dev/null; then
+      STEP_ERROR="overlay $from is absent at $HEAD_SHA"
+      return 1
+    fi
+  done 6< <(overlay_rows "$i")
+
+  while IFS= read -r -d '' md; do
+    if ! strip_frontmatter "$md"; then
+      STEP_ERROR="frontmatter strip failed"
+      return 1
+    fi
+  done < <(find "$stage" -type f -name '*.md' -print0)
+
+  verify_staging "$stage" "$i" || return 1
+
+  if ! { printf 'stamp %s\nsource %s\n' "$expected" "$HEAD_SHA" >"$stage/.stamp" &&
+    find "$stage" -type d -exec chmod 0755 {} + &&
+    find "$stage" -type f -exec chmod 0644 {} + &&
+    { [ "$DRY_RUN" -eq 1 ] || chown -R root:root "$stage"; }; }; then
+    STEP_ERROR="could not set modes or ownership"
+    return 1
+  fi
+}
+
+# install_pack <index> <id> <repo> <sha>
+install_pack() {
+  local i="$1" id="$2" repo="$3" sha="$4" target expected stage
+  target="$ROOT/$id@$sha"
+  expected="$(pack_stamp_hash "$i")"
+
+  if [ -f "$target/.stamp" ] && [ "$(head -n 1 "$target/.stamp")" = "stamp $expected" ]; then
+    record "SKIPPED pack $id $sha (already at pin)"
+    return 0
   fi
 
   if ! stage="$(mktemp -d "$ROOT/.staging.$id.XXXXXX")"; then
     record "FAIL pack $id: cannot create a staging dir under $ROOT"
     return 1
   fi
-  while IFS= read -r -u 6 sub; do
-    src="$(jf "$sub" '.src')"
-    dest="$(jf "$sub" '.dest')"
-    git_id="$(jf "$sub" '.gitId')"
-    excludes=()
-    while IFS= read -r ex; do
-      excludes+=("$ex")
-    done < <(jf "$sub" '.exclude // [] | .[]')
-    if ! extract_object "$g" "$sha" "$src" "$git_id" "$stage/$dest" ${excludes[@]+"${excludes[@]}"}; then
-      rm -rf "$stage"
-      record "FAIL pack $id: $STEP_ERROR"
-      return 1
+  if stage_pack "$i" "$id" "$repo" "$sha" "$stage" "$expected"; then
+    if publish_dir "$stage" "$target"; then
+      record "INSTALLED pack $id $sha"
+      return 0
     fi
-  done 6< <(jl "$entry" '.subpaths[]')
-
-  while IFS= read -r -u 6 ov; do
-    from="$(jf "$ov" '.from')"
-    dest="$(jf "$ov" '.dest')"
-    mkdir -p "$(dirname "$stage/$dest")"
-    if ! git_repo cat-file blob "$HEAD_SHA:$from" >"$stage/$dest" 2>/dev/null; then
-      rm -rf "$stage"
-      record "FAIL pack $id: overlay $from is absent at $HEAD_SHA"
-      return 1
-    fi
-  done 6< <(jl "$entry" '.overlays // [] | .[]')
-
-  while IFS= read -r -d '' md; do
-    if ! strip_frontmatter "$md"; then
-      rm -rf "$stage"
-      record "FAIL pack $id: frontmatter strip failed"
-      return 1
-    fi
-  done < <(find "$stage" -type f -name '*.md' -print0)
-
-  if ! verify_staging "$stage"; then
-    rm -rf "$stage"
-    record "FAIL pack $id: $STEP_ERROR"
-    return 1
+    STEP_ERROR="could not publish $target"
   fi
-
-  if ! { printf 'stamp %s\nsource %s\n' "$expected" "$HEAD_SHA" >"$stage/.stamp" &&
-    find "$stage" -type d -exec chmod 0755 {} + &&
-    find "$stage" -type f -exec chmod 0644 {} + &&
-    { [ "$IS_ROOT" -eq 0 ] || chown -R root:root "$stage"; }; }; then
-    rm -rf "$stage"
-    record "FAIL pack $id: could not set modes or ownership"
-    return 1
-  fi
-  if ! publish_dir "$stage" "$target"; then
-    rm -rf "$stage"
-    record "FAIL pack $id: could not publish $target"
-    return 1
-  fi
-  record "INSTALLED pack $id $sha"
+  rm -rf "$stage"
+  record "FAIL pack $id: $STEP_ERROR"
+  return 1
 }
 
 list_stale() {
@@ -710,50 +807,52 @@ as_agent() {
     /usr/bin/sudo -n -u "$AGENT_USER" -E -- /bin/sh -c 'exec bash -lc "$1"' sh "$command_string" </dev/null
 }
 
+# One as_agent spawn per CLI and one per pack.
 # shellcheck disable=SC2016 # constant command strings: values expand in the agent shell from env
 verify_as_agent() {
-  local entry name args found id sha target root_count agent_count
+  local i id repo sha name args found status target root_count
   VERIFY_HOME="$(mktemp -d /tmp/automata-batteries-verify.XXXXXX)"
   chown "$AGENT_USER" "$VERIFY_HOME"
   chmod 700 "$VERIFY_HOME"
 
-  while IFS= read -r -u 3 entry; do
-    name="$(jf "$entry" '.name')"
-    args="$(jf "$entry" '.versionArgs')"
-    # stdout only: a noisy login profile must not break the compare.
-    found="$(as_agent 'command -v -- "$BATTERIES_CHECK_NAME"' "$name" "" "" 2>/dev/null)" || found=""
+  while IFS=$'\t' read -r -u 3 name _ _ _ _ _ args; do
+    [ -n "$name" ] || continue
+    # Resolve on the agent's PATH and print it (the LAST stdout line: a noisy
+    # login profile prints before it), and run the version flag only when it
+    # resolves to the installed binary. versionArgs is shape-checked to a
+    # single word, so it is left unquoted.
+    status=0
+    found="$(as_agent 'p="$(command -v -- "$BATTERIES_CHECK_NAME")"; printf "%s\n" "$p"; [ "$p" = "$BATTERIES_CHECK_PATH" ] || exit 3; "$BATTERIES_CHECK_NAME" $BATTERIES_CHECK_ARGS >/dev/null 2>&1' \
+      "$name" "$args" "$BIN_DIR/$name" 2>/dev/null)" || status=$?
+    found="${found##*$'\n'}"
     if [ "$found" != "$BIN_DIR/$name" ]; then
       record "FAIL verify $name: agent resolves '${found:-nothing}', expected $BIN_DIR/$name"
-      continue
-    fi
-    # versionArgs is shape-checked to a single word, so it is left unquoted.
-    if as_agent '"$BATTERIES_CHECK_NAME" $BATTERIES_CHECK_ARGS >/dev/null 2>&1' "$name" "$args" "" 2>/dev/null; then
-      record "VERIFIED agent cli $name"
-    else
+    elif [ "$status" -ne 0 ]; then
       record "FAIL verify $name: '$name $args' failed as $AGENT_USER"
+    else
+      record "VERIFIED agent cli $name"
     fi
-  done 3< <(jq -c '.clis[]' "$MANIFEST")
+  done 3<<<"$CLI_ROWS"
 
-  while IFS= read -r -u 3 entry; do
-    id="$(jf "$entry" '.id')"
-    sha="$(jf "$entry" '.sha')"
+  while IFS=$'\t' read -r -u 3 i id repo sha; do
     target="$ROOT/$id@$sha"
     if [ ! -d "$target" ]; then
       record "FAIL verify $id: $target is missing"
       continue
     fi
     root_count="$(find "$target" -type f | wc -l | tr -d ' ')"
-    agent_count="$(as_agent 'find "$BATTERIES_CHECK_PATH" -type f -exec test -r {} \; -print | wc -l' "" "" "$target" 2>/dev/null | tr -d ' ')" || agent_count=""
-    if [ "$agent_count" != "$root_count" ]; then
-      record "FAIL verify $id: agent can read ${agent_count:-0} of $root_count files"
-      continue
-    fi
-    if ! as_agent 'test ! -w "$BATTERIES_CHECK_PATH"' "" "" "$target" 2>/dev/null; then
-      record "FAIL verify $id: $target is writable by $AGENT_USER"
-      continue
-    fi
-    record "VERIFIED agent pack $id ($root_count files readable, dir read-only)"
-  done 3< <(jq -c '.packs[]' "$MANIFEST")
+    # GNU find. A find error (a dir the agent cannot traverse) fails too.
+    status=0
+    as_agent 'u="$(find "$BATTERIES_CHECK_PATH" -type f ! -readable -print)" || exit 3; [ -z "$u" ] || exit 4; w="$(find "$BATTERIES_CHECK_PATH" -writable -print)" || exit 3; [ -z "$w" ] || exit 5' \
+      "" "" "$target" >/dev/null 2>&1 || status=$?
+    case "$status" in
+      0) record "VERIFIED agent pack $id ($root_count files readable, none writable)" ;;
+      3) record "FAIL verify $id: $AGENT_USER cannot traverse $target" ;;
+      4) record "FAIL verify $id: $AGENT_USER cannot read every file of $root_count under $target" ;;
+      5) record "FAIL verify $id: part of $target is writable by $AGENT_USER" ;;
+      *) record "FAIL verify $id: the check could not run as $AGENT_USER (status $status)" ;;
+    esac
+  done 3<<<"$PACK_ROWS"
 }
 
 invalidate_manifest_hash() {
@@ -778,7 +877,7 @@ write_manifest_hash() {
 }
 
 main() {
-  local entry
+  local i id repo sha name version url sha256 member license_member
   if ! git_repo rev-parse --git-dir >/dev/null 2>&1; then
     usage_error "AUTOMATA_REPO=$AUTOMATA_REPO is not a git checkout (set AUTOMATA_REPO=/opt/automata-platform)"
   fi
@@ -796,20 +895,20 @@ main() {
   else
     git_repo cat-file blob "$HEAD_SHA:$MANIFEST_REPO_PATH" >"$MANIFEST"
   fi
-  SCRIPT_HASH="$(sha256_of "$SCRIPT_SELF")"
 
   preflight || finish
   mkdir -p "$ROOT"
 
   invalidate_manifest_hash
 
-  while IFS= read -r -u 3 entry; do
-    install_cli "$entry" || true
-  done 3< <(jq -c '.clis[]' "$MANIFEST")
+  while IFS=$'\t' read -r -u 3 name version url sha256 member license_member _; do
+    [ -n "$name" ] || continue
+    install_cli "$name" "$version" "$url" "$sha256" "$member" "$license_member" || true
+  done 3<<<"$CLI_ROWS"
 
-  while IFS= read -r -u 3 entry; do
-    install_pack "$entry" || true
-  done 3< <(jq -c '.packs[]' "$MANIFEST")
+  while IFS=$'\t' read -r -u 3 i id repo sha; do
+    install_pack "$i" "$id" "$repo" "$sha" || true
+  done 3<<<"$PACK_ROWS"
 
   list_stale
 

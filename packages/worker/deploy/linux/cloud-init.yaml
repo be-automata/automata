@@ -224,18 +224,12 @@ write_files:
       echo "automata execution plane base ready"
 
       # ── review batteries (phase 3) ───────────────────────────────────────
-      # On first boot the checkout is the empty dir created above, so this is
-      # skipped with a message: run install-batteries.sh as root once the
-      # checkout lands. When the checkout exists the installer runs under this
-      # script's set -euo pipefail, so a FAIL makes provisioning exit non-zero —
-      # but only AFTER the sentinel, so batteries never block base provisioning.
-      # The batteries contract is the installer's own RESULT line and
+      # Not installed here: on first boot /opt/automata-platform is the empty
+      # dir created above, and the installer must run from a root-owned copy
+      # taken from a commit verified against the public origin, never from the
+      # worker-writable checkout. The batteries contract is
       # /usr/local/lib/automata-batteries/manifest.sha256, not .provisioned.
-      if [ -f /opt/automata-platform/packages/worker/deploy/batteries.json ]; then
-        bash /opt/automata-platform/packages/worker/deploy/linux/install-batteries.sh
-      else
-        echo "batteries: SKIPPED (no checkout) — run packages/worker/deploy/linux/install-batteries.sh as root after the checkout lands"
-      fi
+      echo "batteries: not installed at provisioning — follow deploy/PILOT-RUNBOOK.md, \"Review batteries on the execution box (phase 3)\", once the checkout lands"
 
 runcmd:
   - [/usr/local/sbin/automata-provision.sh]

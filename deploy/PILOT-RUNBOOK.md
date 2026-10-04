@@ -649,8 +649,9 @@ checking through sudo.
    `git rev-parse <sha>:<path>`.
 2. For a CLI, take `sha256` from the publisher's checksum file and re-hash the
    tarball locally.
-3. Re-check the helper-reference allowlist in `install-batteries.sh`: exactly
-   one token in the gstack `checklist.md`.
+3. Re-check `allowedHelperRefs` on the gstack-review pack in `batteries.json`:
+   each `ref` must still occur exactly `count` times in its `file`, and the
+   adapter must still neutralise it.
 4. Run the dry run and `pnpm --filter @terragon/worker exec vitest run src/agent-run/deploy-assets.test.ts src/agent-run/batteries-manifest.test.ts`.
 
 **Recorded decisions and Phase 5 caveats**
