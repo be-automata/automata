@@ -916,3 +916,129 @@ first, because it reads HEAD). The last line is `DRY-RUN-PROOF-OK`.
 - Vendored agent files keep their `model: cheap|mid|frontier` tier words.
 - python3-requests is a box prerequisite. The acceptance script checks it as
   the agent uid.
+
+## Orchestrated review canary (phase 6)
+
+**What it is.** In orchestrated mode the review agent works as a lead reviewer.
+It fans out to sub-agents (security, correctness, tests, conventions) with the
+seeded battery packs and the static CLIs, then consolidates their findings
+itself. Exactly one review per push still comes from the platform (D2): the
+lead emits one tagged `json review-intent` block and the control plane posts it.
+Classic stays the default, and switching a repo is a per-repo Admin setting
+(D1). The classic prompt bytes are pinned by sha in
+`apps/www/src/server-lib/review/github-ops-review-mode.test.ts`, so a classic
+repo receives exactly today's prompt.
+
+**How the prompt is chosen.** The github-ops skill body carries review-mode
+sections (`<!-- automata:if orchestrated -->` … `<!-- automata:endif -->`).
+www renders them when it creates the thread, once per push, from the repo's
+resolved review mode, and stamps orchestrated threads with
+`sourceMetadata.reviewPromptMode = "orchestrated"`. Only stamped threads parse
+the tagged block. Flipping a repo back to classic therefore restores today's
+prompt on the next push.
+
+**Deploy hazard.** A www older than this phase does not know the section markers
+and serves a marker-bearing body verbatim, orchestrated text included, to every
+repo that uses it. The order below exists because of that: the www deploy comes
+before the skill push, the push goes to the canary repo only, and a rollback
+must revert the skill version first, then roll back www.
+
+**Preconditions.**
+
+- Phase 5 is live on the box. The staged daemon has `--max-turns` and
+  `holdResultAfterBackgroundTask` (05-04 rollout notes:
+  `grep -c -- '--max-turns' /usr/local/automata/daemon/index.js` ≥ 1 and
+  `grep -c holdResultAfterBackgroundTask /usr/local/automata/daemon/index.js` ≥ 1).
+- Batteries are installed: `cat /usr/local/lib/automata-batteries/manifest.sha256`
+  prints a 64-hex hash, and there is no `manifest.sha256.invalid`.
+- This phase has no schema change, so there is no new `assert-schema-ready`
+  entry. Still run `DATABASE_URL=... pnpm exec tsx deploy/assert-schema-ready.ts`
+  before the www deploy, as AGENTS.md requires.
+
+**Rollout (operator).** Each step is gated on the previous one. Nothing here is
+run by an agent.
+
+1. Merge the PR.
+2. www deploy with the usual recipe. Confirm the new deployment is live:
+   `wrangler deployments list` must show a deployment created after the merge
+   time. The new renderer and parser MUST be live before step 3. No worker
+   deploy is needed unless 06-04 Task 2 (copying agent files instead of
+   symlinking) shipped in the same PR; in that case deploy the worker per the
+   05-04 rollout notes before step 5.
+3. Prepare the canary repo's skill:
+   - In the dashboard skill panel, record the canary repo's CURRENT github-ops
+     version id. It is the rollback target.
+   - Confirm the repo has no `.automata/skills/github-ops.md` on its default
+     branch. Tier 0 would shadow the pushed body.
+   - Push the new body to the CANARY repo ONLY. If the current body is the seed
+     composition (it starts with "A pull request was opened or updated in"), run
+     `DATABASE_URL=... pnpm exec tsx deploy/seed-pilot-mirror.ts <orgSlug> <owner/repo> --dry-run`.
+     The only expected diff is a new github-ops skill version. Then run the same
+     command without `--dry-run`. If the current body is the raw SKILL.md body (it
+     starts with "# GitHub PR Review (emit-only)"), run
+     `DATABASE_URL=... pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> github-ops deploy/skills/github-ops/SKILL.md`.
+     Either way the body keeps its shape and its classic render is unchanged.
+4. In Admin → Review, set the canary repo's review mode to Orchestrated with
+   tests OFF and all three packs (gstack-review, gsd-reviewers, somnio-review).
+   Leave the timeout and max turns inherited.
+5. On the box, note `systemctl show -p NRestarts --value automata-worker.service`
+   and `date -u` as T0.
+6. Push one commit to an open SAME-repo PR on the canary. Include a shell script
+   or workflow change so a CLI has something to say. Trigger with a PUSH,
+   never a bot mention: mentions run the github_mention lane.
+7. Wait for the review (at most 30 minutes). Then collect the evidence:
+   - Take a root-owned copy of the acceptance script, the same way as the phase 3
+     installer, because the checkout is worker-writable. As root, first confirm
+     nothing is in flight:
+     `ls -d /sys/fs/cgroup/system.slice/automata-worker.service/run-* 2>/dev/null | wc -l`
+     must print 0. Never mid-review: wait otherwise. Then run
+     `runuser -u automata -- git -C /opt/automata-platform -c safe.directory=/opt/automata-platform fetch origin`
+     and
+     `runuser -u automata -- git -C /opt/automata-platform -c safe.directory=/opt/automata-platform merge --ff-only origin/main`.
+     Stop on divergence; never force.
+     `H=$(git -C /opt/automata-platform -c safe.directory=/opt/automata-platform rev-parse HEAD)`
+     must equal the sha printed by
+     `git ls-remote https://github.com/be-automata/automata refs/heads/main`.
+     Then run
+     `git -C /opt/automata-platform -c safe.directory=/opt/automata-platform cat-file blob "$H:packages/worker/deploy/linux/orchestrated-review-acceptance.sh" > /root/orchestrated-review-acceptance.sh`.
+     This needs no worker restart and no install, because the script only reads.
+   - As root on the box:
+     `bash /root/orchestrated-review-acceptance.sh box --since "<T0>" --repo <owner/repo> --pr <n> --expect orchestrated`
+     must end with `ACCEPTANCE: PASS`.
+   - From the laptop:
+     `bash packages/worker/deploy/linux/orchestrated-review-acceptance.sh github --repo <owner/repo> --pr <n> --head-sha <pushed sha> --since <T0 as YYYY-MM-DDTHH:MM:SSZ> --bot <bot login>`
+     must end with `ACCEPTANCE: PASS`.
+   - Walk the printed `EVIDENCE manual` checklist in the thread view and the
+     daemon log. Record the latency, the cost (thread usage) and the verdict.
+8. If init `agents` lacks gsd-code-reviewer or gsd-security-auditor while
+   `skills` has gstack-review, symlinked agent FILES do not load. Execute
+   06-04 Task 2 (the copy fix), deploy the worker, then redo steps 6-7.
+9. Flip back. Set the repo's review mode to inherit/Classic, note T1, and push
+   again. Then run
+   `bash /root/orchestrated-review-acceptance.sh box --since "<T1>" --repo <owner/repo> --pr <n> --expect classic`
+   and the github mode again with the new head sha and T1. Confirm that the new
+   thread's first message has no "## Orchestrated review — you are the lead
+   reviewer" heading and that its sourceMetadata has no reviewPromptMode.
+   NRestarts must be unchanged throughout.
+
+**Rollback.**
+
+- Mode: set the repo to Classic in the UI. This is instant and applies from the
+  next push.
+- Prompt: revert the canary's github-ops skill to the recorded version in the
+  dashboard skill panel (revertSkillToVersion). Classic bytes are identical, so
+  this is only needed if the new body itself misbehaves.
+- Code: always revert the skill version first, then roll back www. An older www
+  would serve the section markers and the orchestrated text verbatim.
+
+**Widening (not part of this phase).** Compare verdicts, latency and cost on the
+canary for a week before enabling tests or other repos (EPIC Rollout).
+
+**Evidence for the PR / UAT.** Attach both `ACCEPTANCE: PASS` outputs, the
+answers to the manual checklist, the GitHub review URL, the latency and the
+cost.
+
+**Developer gate.** On a checkout,
+`bash packages/worker/deploy/linux/orchestrated-review-acceptance.sh local`
+runs the www server-lib suite, the drift-test-unchanged check, www tsc and the
+script's own tests.

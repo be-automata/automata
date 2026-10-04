@@ -677,3 +677,57 @@ describe("analyse_github (sourced, fixture JSON)", () => {
     expect(analyse(fixture)).not.toContain("FAILURES=0");
   });
 });
+
+describe("runbook (phase 6)", () => {
+  const runbook = fs.readFileSync(
+    path.join(repoRoot, "deploy", "PILOT-RUNBOOK.md"),
+    "utf8",
+  );
+  const HEADING = "## Orchestrated review canary (phase 6)";
+  const PHASE7 = "## Task-run batteries and the Somnio CLI (phase 7)";
+  const start = runbook.indexOf(HEADING);
+  const next = runbook.indexOf("\n## ", start + HEADING.length);
+  const section = runbook.slice(start, next === -1 ? undefined : next);
+
+  it("has the section exactly once, after the phase 7 section", () => {
+    expect(runbook.split(HEADING).length - 1).toBe(1);
+    expect(runbook.indexOf(PHASE7)).toBeGreaterThan(-1);
+    expect(start).toBeGreaterThan(runbook.indexOf(PHASE7));
+  });
+
+  it("takes the root-owned script copy from the verified HEAD, never mid-review", () => {
+    for (const phrase of [
+      "merge --ff-only",
+      "ls-remote",
+      "cat-file blob",
+      "Never mid-review",
+    ]) {
+      expect(section, phrase).toContain(phrase);
+    }
+  });
+
+  it("names both acceptance angles, the flip-back and the push-only trigger", () => {
+    for (const phrase of [
+      "orchestrated-review-acceptance.sh box",
+      "orchestrated-review-acceptance.sh github",
+      "--expect classic",
+      "never a bot mention",
+      "seed-pilot-mirror.ts",
+      "skill-push.ts",
+      "--dry-run",
+      "always revert the skill version first, then roll back www",
+    ]) {
+      expect(section, phrase).toContain(phrase);
+    }
+  });
+
+  it("orders the www deploy before the skill push", () => {
+    const deploy = section.indexOf("www deploy");
+    expect(deploy).toBeGreaterThan(-1);
+    expect(deploy).toBeLessThan(section.indexOf("skill-push.ts"));
+  });
+
+  it("names no customer (public repo)", () => {
+    expect(section).not.toMatch(/bangr/i);
+  });
+});
