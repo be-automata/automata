@@ -903,6 +903,7 @@ setInterval(() => {}, 1000);
       });
       const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
       fs.mkdirSync(path.dirname(socket), { recursive: true });
+      const aclCalls: Recorded[] = [];
       const daemon = new DaemonProcess(
         config,
         input,
@@ -910,12 +911,25 @@ setInterval(() => {}, 1000);
         null,
         null,
         null,
-        { spawnFn: fakeSpawn({ recorded: [] }) },
+        {
+          spawnFn: fakeSpawn({ recorded: [] }),
+          // Linux semantics on every host, and an ACL runner that fails the way
+          // a real `setfacl` does on a box without the agent account (CI).
+          // The suite never shells out to setfacl; this also pins that the
+          // ceiling refusal is reported before any per-run grant is attempted,
+          // so an operator sees the misconfiguration, not an incidental error.
+          platform: "linux",
+          aceExec: async (file, args) => {
+            aclCalls.push({ file, args });
+            throw new Error(`Command failed: ${file} ${args.join(" ")}`);
+          },
+        },
       );
       daemons.push(daemon);
       await expect(daemon.start()).rejects.toThrow(
         /per-run memory ceiling is configured but/,
       );
+      expect(aclCalls).toEqual([]);
     });
 
     it("a CLEAN exit 0 is not a failure, even with the ceiling on", () => {

@@ -293,17 +293,22 @@ export class DaemonProcess {
     // unix-socket permissions). They are applied ONCE at worker boot, on the
     // empty dir, by claimRunNamespace() (run-namespace.ts).
 
-    const env = await this.ensureEnv();
-
-    // #108: with agentUser empty this returns the command UNCHANGED and an empty
-    // env — byte-for-byte today's spawn.
     // #204: the per-run memory ceiling. Everything here is skipped unless the
     // ceiling is configured AND agent-uid mode is on (without the uid drop there
     // is no separate process to cap) AND the subtree is delegated. The support
     // check reports a REASON when it declines, because an operator who meant to
     // enable this and mistyped `Delegate=` should be told which precondition
     // failed rather than silently getting no ceiling.
+    //
+    // BEFORE ensureEnv(): building the env can grant the agent its gh config
+    // dir (an ACL call that fails on its own terms), and a box that cannot cap
+    // its runs must report THAT, not whatever per-run setup tripped first. A
+    // cgroup created here is still removed by teardown() if ensureEnv throws.
     this.cgroupDir = this.prepareRunCgroup();
+
+    // #108: with agentUser empty this returns the command UNCHANGED and an empty
+    // env — byte-for-byte today's spawn.
+    const env = await this.ensureEnv();
 
     const invocation = buildSpawnInvocation({
       agentUser: this.config.agentUser,
