@@ -1261,13 +1261,13 @@ describe("review agent wire + batteries line (Phase 5)", () => {
       maxTurns: 30,
     });
     expect(JSON.stringify(sent)).not.toMatch(/runTests|batteries/);
-    expect(materialiseAgentCredentials).toHaveBeenCalledWith(
-      expect.objectContaining({ reviewAgent: ORCHESTRATED }),
-    );
     const [arg] = materialiseAgentCredentials.mock.calls[0]! as [
-      { reviewAgent: unknown },
+      { seed: unknown },
     ];
-    expect(arg.reviewAgent).toBe(ORCHESTRATED);
+    expect(arg.seed).toEqual({
+      batteries: ORCHESTRATED.batteries,
+      hooksOff: true,
+    });
     const bl = batteriesLines(lines);
     expect(bl).toHaveLength(1);
     expect(bl[0]).toContain(
@@ -1305,9 +1305,9 @@ describe("review agent wire + batteries line (Phase 5)", () => {
     const { lines, sent } = await run({ ...ORCHESTRATED, commandTimeoutMs: 5 });
     expect("reviewAgent" in sent).toBe(false);
     const [arg] = materialiseAgentCredentials.mock.calls[0]! as [
-      { reviewAgent: unknown },
+      { seed: unknown },
     ];
-    expect(arg.reviewAgent).toBeUndefined();
+    expect(arg.seed).toBeUndefined();
     const rejected = lines.filter((l) => l.includes("bounds-rejected"));
     expect(rejected).toHaveLength(1);
     expect(rejected[0]).toContain("commandTimeoutMs");
@@ -1328,5 +1328,307 @@ describe("review agent wire + batteries line (Phase 5)", () => {
     });
     const { sent } = await run(ORCHESTRATED, SEEDED);
     expect("reviewAgent" in sent).toBe(false);
+  });
+});
+
+describe("task agent packs + one batteries line per run (phase 7)", () => {
+  const TASK_MESSAGE = {
+    type: "claude",
+    model: "sonnet",
+    agent: "claudeCode",
+    agentVersion: 1,
+    prompt: "audit",
+    sessionId: null,
+    permissionMode: "allowAll",
+    featureFlags: {},
+  };
+  const SEEDED = {
+    ok: true as const,
+    packs: ["somnio-skills"],
+    manifestHash: "0123456789ab".padEnd(64, "f"),
+  };
+
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    pullNextMessage.mockReset().mockResolvedValue({ ...TASK_MESSAGE });
+    pollUntilTerminal.mockReset().mockResolvedValue({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+  });
+
+  async function run(
+    extra: Record<string, unknown>,
+    batteries: unknown = undefined,
+  ): Promise<{
+    lines: string[];
+    sent: Record<string, unknown>;
+    arg: { seed?: unknown };
+  }> {
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+      batteries,
+    });
+    const c = ctx();
+    await expect(runFn({ ...INPUT, ...extra }, c)).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    expect(sendMessageCalls).toHaveLength(1);
+    const [arg] = materialiseAgentCredentials.mock.calls[0]! as [
+      { seed?: unknown },
+    ];
+    return {
+      lines: c.log.mock.calls.map((call) => String(call[0])),
+      sent: sendMessageCalls[0] as Record<string, unknown>,
+      arg,
+    };
+  }
+
+  const batteriesLines = (lines: string[]) =>
+    lines.filter((l) => /\] batteries: /.test(l));
+
+  it("task lane with packs: materialise gets the hooks-on task seed, one lane=task line after the credential line", async () => {
+    const { lines, sent, arg } = await run(
+      { taskAgent: { batteries: ["somnio-skills"] } },
+      SEEDED,
+    );
+    expect(arg.seed).toEqual({ batteries: ["somnio-skills"], hooksOff: false });
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(
+      /\] batteries: lane=task packs=somnio-skills manifest=0123456789ab$/,
+    );
+    const credIdx = lines.findIndex((l) => l.includes("agent credential:"));
+    expect(lines.indexOf(bl[0]!)).toBeGreaterThan(credIdx);
+    // No wire change: the daemon never sees the task packs.
+    expect(JSON.stringify(sent)).not.toMatch(/taskAgent|batteries/);
+    expect(Object.keys(sent).sort()).toEqual(
+      [...Object.keys(TASK_MESSAGE), "useCredits"].sort(),
+    );
+  });
+
+  it("task lane with an unavailable seed: unavailable lane=task reason=<r>", async () => {
+    const { lines } = await run(
+      { taskAgent: { batteries: ["somnio-skills"] } },
+      { ok: false, reason: "manifest-drift" },
+    );
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(
+      /\] batteries: unavailable lane=task reason=manifest-drift$/,
+    );
+  });
+
+  it("a mention on a PR (prNumber only): lane=pr", async () => {
+    const { lines, arg } = await run(
+      { prNumber: 7, taskAgent: { batteries: ["somnio-skills"] } },
+      SEEDED,
+    );
+    expect(arg.seed).toEqual({ batteries: ["somnio-skills"], hooksOff: false });
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(/\] batteries: lane=pr packs=somnio-skills /);
+  });
+
+  it("a malformed taskAgent: rejected line (reason only), nothing seeded, task-agent-invalid", async () => {
+    const { lines, arg } = await run({
+      taskAgent: { batteries: ["Bad Id"] },
+    });
+    expect(arg.seed).toBeUndefined();
+    const rejected = lines.filter((l) => l.includes("task agent: rejected"));
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toContain("batteries[0]");
+    expect(lines.join("\n")).not.toContain("Bad Id");
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(
+      /\] batteries: unavailable lane=task reason=task-agent-invalid$/,
+    );
+  });
+
+  it("a review-lane run carrying taskAgent: ignored, nothing seeded, today's review line", async () => {
+    const { lines, arg } = await run({
+      prNumber: 7,
+      prKey: "org-1/o/r/7",
+      supersedePolicy: "newest-wins",
+      taskAgent: { batteries: ["somnio-skills"] },
+    });
+    expect(arg.seed).toBeUndefined();
+    expect(
+      lines.filter((l) => l.includes("task agent: ignored (review-lane)")),
+    ).toHaveLength(1);
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(/\] batteries: mode=classic$/);
+  });
+
+  it("no taskAgent: today's classic line, no task-agent line, today's message keys", async () => {
+    const { lines, sent, arg } = await run({});
+    expect(arg.seed).toBeUndefined();
+    expect(lines.some((l) => l.includes("task agent:"))).toBe(false);
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(/\] batteries: mode=classic$/);
+    expect(Object.keys(sent).sort()).toEqual(
+      [...Object.keys(TASK_MESSAGE), "useCredits"].sort(),
+    );
+  });
+});
+
+describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
+  const TASK_MESSAGE = {
+    type: "claude",
+    model: "sonnet",
+    agent: "claudeCode",
+    agentVersion: 1,
+    prompt: "audit",
+    sessionId: null,
+    permissionMode: "allowAll",
+    featureFlags: {},
+  };
+  const READ = "ghs_fake_read_token_value";
+  const SEEDED_REQUIRING = {
+    ok: true as const,
+    packs: ["somnio-skills"],
+    manifestHash: "0123456789ab".padEnd(64, "f"),
+    requires: ["github-read-token"],
+  };
+  const future = () => new Date(Date.now() + 30 * 60_000).toISOString();
+
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    pullNextMessage.mockReset().mockResolvedValue({ ...TASK_MESSAGE });
+    pollUntilTerminal.mockReset().mockResolvedValue({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+  });
+
+  async function run(
+    extra: Record<string, unknown>,
+    batteries: unknown,
+  ): Promise<{ lines: string[]; options: unknown }> {
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+      batteries,
+    });
+    const c = ctx();
+    await expect(runFn({ ...INPUT, ...extra }, c)).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    const lines = c.log.mock.calls.map((call) => String(call[0]));
+    // Never logged, whatever happened.
+    expect(lines.join("\n")).not.toContain(READ);
+    return { lines, options: daemonCtorArgs[0]![6] };
+  }
+
+  const tokenLines = (lines: string[]) =>
+    lines.filter((l) => l.includes("read-token"));
+  /** The one fixed-format line, or nothing. */
+  const tokenLine = (lines: string[]) => {
+    const found = tokenLines(lines);
+    expect(found.length).toBeLessThanOrEqual(1);
+    return found[0]?.replace(/^.*\] /, "");
+  };
+
+  it("task lane + requiring seed + token + future expiry ⇒ DaemonProcess gets the token; one applied line after the brokers", async () => {
+    const { lines, options } = await run(
+      {
+        taskAgent: { batteries: ["somnio-skills"] },
+        githubReadToken: READ,
+        githubReadTokenExpiresAt: future(),
+      },
+      SEEDED_REQUIRING,
+    );
+    expect(options).toEqual({ githubReadToken: READ });
+    expect(tokenLine(lines)).toBe("task agent: read-token=applied");
+    const brokersIdx = lines.findIndex((l) =>
+      l.includes("credential brokers up"),
+    );
+    expect(brokersIdx).toBeGreaterThan(-1);
+    expect(lines.indexOf(tokenLines(lines)[0]!)).toBeGreaterThan(brokersIdx);
+  });
+
+  it.each<[string, Record<string, unknown>, unknown, string]>([
+    [
+      "expired",
+      {
+        githubReadToken: READ,
+        githubReadTokenExpiresAt: new Date(Date.now() - 1000).toISOString(),
+      },
+      SEEDED_REQUIRING,
+      "expired",
+    ],
+    ["requiring pack but no token", {}, SEEDED_REQUIRING, "not-delivered"],
+    [
+      "non-requiring pack + token",
+      { githubReadToken: READ, githubReadTokenExpiresAt: future() },
+      { ok: true, packs: ["somnio-review"], manifestHash: "0".repeat(64) },
+      "no-requiring-pack",
+    ],
+    [
+      "seeding unavailable",
+      { githubReadToken: READ, githubReadTokenExpiresAt: future() },
+      { ok: false, reason: "manifest-drift" },
+      "no-requiring-pack",
+    ],
+  ])(
+    "%s ⇒ no token passed; one skip line",
+    async (_name, extra, seeded, reason) => {
+      const { lines, options } = await run(
+        { taskAgent: { batteries: ["somnio-skills"] }, ...extra },
+        seeded,
+      );
+      expect(options).toEqual({});
+      expect(tokenLine(lines)).toBe(`task agent: read-token=skip=${reason}`);
+    },
+  );
+
+  it("legacy-direct (no broker) ⇒ no token passed; skip=no-broker", async () => {
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    const { lines, options } = await run(
+      {
+        taskAgent: { batteries: ["somnio-skills"] },
+        githubReadToken: READ,
+        githubReadTokenExpiresAt: future(),
+      },
+      SEEDED_REQUIRING,
+    );
+    expect(options).toEqual({});
+    expect(tokenLine(lines)).toBe("task agent: read-token=skip=no-broker");
+  });
+
+  it("REVIEW lane with a forged token ⇒ not passed, no line", async () => {
+    pullNextMessage.mockResolvedValue({
+      ...TASK_MESSAGE,
+      permissionMode: "review",
+    });
+    const { lines, options } = await run(
+      {
+        prNumber: 7,
+        prKey: "org-1/o/r/7",
+        supersedePolicy: "newest-wins",
+        taskAgent: { batteries: ["somnio-skills"] },
+        githubReadToken: READ,
+        githubReadTokenExpiresAt: future(),
+      },
+      SEEDED_REQUIRING,
+    );
+    expect(options).toEqual({});
+    expect(tokenLines(lines)).toEqual([]);
+  });
+
+  it("no taskAgent (an unconfigured repo), even with a forged token ⇒ not passed, no line", async () => {
+    const { lines, options } = await run(
+      { githubReadToken: READ, githubReadTokenExpiresAt: future() },
+      undefined,
+    );
+    expect(options).toEqual({});
+    expect(tokenLines(lines)).toEqual([]);
   });
 });

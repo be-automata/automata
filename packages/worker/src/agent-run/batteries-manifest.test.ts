@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   BATTERIES_OVERLAY_DIR,
+  BATTERY_REQUIREMENTS,
+  DART_SDK_URL_TEMPLATE,
   FORBIDDEN_NAMES,
   findBatteriesManifestError,
   isBatteriesManifest,
   type BatteriesManifest,
+  type BatteryTool,
 } from "./batteries-manifest";
 
 /**
@@ -543,6 +546,317 @@ describe("findBatteriesManifestError — strict keys", () => {
       "clis[0].sha265",
     ],
   ])("rejects an unknown key on the %s", (_name, mutate, fragment) => {
+    expectRejected(mutate, fragment);
+  });
+});
+
+describe("findBatteriesManifestError — pack requires (phase 7)", () => {
+  it("names exactly one requirement", () => {
+    expect([...BATTERY_REQUIREMENTS]).toEqual(["github-read-token"]);
+  });
+
+  it.each<[string, unknown]>([
+    ["absent", undefined],
+    ["empty", []],
+    ["github-read-token", ["github-read-token"]],
+  ])("accepts requires %s", (_name, requires) => {
+    const f = mutated((m) => {
+      if (requires !== undefined) Object.assign(m.packs[0]!, { requires });
+    });
+    expect(findBatteriesManifestError(f)).toBeUndefined();
+  });
+
+  it.each<[string, unknown]>([
+    ["not an array", "github-read-token"],
+    ["an unknown requirement", ["github-write-token"]],
+    ["a duplicate", ["github-read-token", "github-read-token"]],
+    ["a non-string entry", [1]],
+  ])("rejects requires %s", (_name, requires) => {
+    expectRejected(
+      (m) => Object.assign(m.packs[0]!, { requires }),
+      "packs[0].requires",
+    );
+  });
+});
+
+describe("findBatteriesManifestError — tools (phase 7)", () => {
+  // tools[] are BUILD inputs (a Dart SDK and a CLI compiled from a pinned
+  // tree), installed outside every pack and never linked into a run's HOME.
+  // Every string here later reaches a root shell (the installer) or the agent
+  // shell (the wrapper), so each field has an exact shape; the bash preflight
+  // in install-batteries.sh mirrors these rules. toolsFixture() always builds
+  // tools[0] (dart-sdk) and tools[1] (dart-aot), so the mutators index them
+  // with `!`.
+  function toolsFixture(): BatteryTool[] {
+    return [
+      {
+        name: "dart-sdk",
+        kind: "dart-sdk",
+        version: "3.13.5",
+        url: DART_SDK_URL_TEMPLATE("3.13.5", "linux-x64"),
+        sha256: SHA256,
+        licenseMember: "dart-sdk/LICENSE",
+        license: "BSD-3-Clause",
+      },
+      {
+        name: "somnio-cli",
+        kind: "dart-aot",
+        version: "3.1.1",
+        repo: "https://github.com/owner/tools",
+        sha: SHA_A,
+        subpaths: [
+          { src: "skills", dest: "skills", gitId: SHA_B },
+          { src: "cli", dest: "cli", gitId: SHA_B },
+          { src: "LICENSE", dest: "LICENSE", gitId: SHA_B },
+        ],
+        packageDir: "cli",
+        entrypoint: "bin/somnio.dart",
+        lockOverlay: `${BATTERIES_OVERLAY_DIR}somnio-cli/pubspec.lock`,
+        lockSha256: SHA256,
+        sdk: "dart-sdk",
+        license: "MIT",
+        wrapper: "somnio",
+        rootEnv: "SOMNIO_ROOT",
+        versionArgs: "--version",
+        versionLine: "somnio v3.1.1",
+        smokeArgs: ["skills", "install", "--agent", "claude"],
+        smokeExpect: ".claude/skills/dora-metrics/SKILL.md",
+      },
+    ];
+  }
+
+  function withTools(mutate: (tools: BatteryTool[]) => void): Mutator {
+    return (f) => {
+      const tools = toolsFixture();
+      mutate(tools);
+      Object.assign(f, { tools });
+    };
+  }
+
+  /** tools[1] (the dart-aot entry) with one field replaced. */
+  function aot(patch: Record<string, unknown>): Mutator {
+    return withTools((tools) => {
+      Object.assign(tools[1]!, patch);
+    });
+  }
+
+  /** tools[0] (the dart-sdk entry) with one field replaced. */
+  function sdk(patch: Record<string, unknown>): Mutator {
+    return withTools((tools) => {
+      Object.assign(tools[0]!, patch);
+    });
+  }
+
+  /** A second dart-aot entry, appended as tools[2]. */
+  function extraAot(patch: Record<string, unknown>): Mutator {
+    return withTools((tools) => {
+      tools.push({ ...tools[1]!, ...patch } as BatteryTool);
+    });
+  }
+
+  it("accepts a manifest without a tools key", () => {
+    const f = validFixture();
+    expect("tools" in f).toBe(false);
+    expect(findBatteriesManifestError(f)).toBeUndefined();
+  });
+
+  it("accepts the two phase 7 entries", () => {
+    const f = mutated(withTools(() => undefined));
+    expect(findBatteriesManifestError(f)).toBeUndefined();
+    expect(isBatteriesManifest(f)).toBe(true);
+  });
+
+  it("accepts an empty tools list", () => {
+    const f = mutated((m) => Object.assign(m, { tools: [] }));
+    expect(findBatteriesManifestError(f)).toBeUndefined();
+  });
+
+  it("builds the exact dart-archive URL", () => {
+    expect(DART_SDK_URL_TEMPLATE("3.13.5", "linux-x64")).toBe(
+      "https://storage.googleapis.com/dart-archive/channels/stable/release/3.13.5/sdk/dartsdk-linux-x64-release.zip",
+    );
+  });
+
+  it.each<[string, Mutator, string]>([
+    ["tools not an array", (f) => Object.assign(f, { tools: {} }), "tools"],
+    ["unknown key on dart-aot", aot({ extra: 1 }), "tools[1].extra"],
+    ["unknown key on dart-sdk", sdk({ extra: 1 }), "tools[0].extra"],
+    ["kind dart-jit", aot({ kind: "dart-jit" }), "tools[1].kind"],
+    [
+      "dart-sdk url for another version",
+      sdk({ url: DART_SDK_URL_TEMPLATE("3.13.4", "linux-x64") }),
+      "tools[0].url",
+    ],
+    [
+      "dart-sdk url for macos-arm64",
+      sdk({ url: DART_SDK_URL_TEMPLATE("3.13.5", "macos-arm64") }),
+      "tools[0].url",
+    ],
+    [
+      "dart-sdk url over http",
+      sdk({
+        url: DART_SDK_URL_TEMPLATE("3.13.5", "linux-x64").replace(
+          "https://",
+          "http://",
+        ),
+      }),
+      "tools[0].url",
+    ],
+    [
+      "dart-sdk url with a trailing query",
+      sdk({ url: `${DART_SDK_URL_TEMPLATE("3.13.5", "linux-x64")}?x=1` }),
+      "tools[0].url",
+    ],
+    ["dart-sdk bad sha256", sdk({ sha256: "c".repeat(63) }), "tools[0].sha256"],
+    [
+      "dart-sdk licenseMember outside dart-sdk/",
+      sdk({ licenseMember: "LICENSE" }),
+      "tools[0].licenseMember",
+    ],
+    ["a wrapper key on dart-sdk", sdk({ wrapper: "dart" }), "tools[0].wrapper"],
+    ['dart-aot repo "self"', aot({ repo: "self" }), "tools[1].repo"],
+    [
+      "subpath src with ..",
+      withTools((tools) => {
+        Object.assign(tools[1]!, {
+          subpaths: [{ src: "../x", dest: "x", gitId: SHA_B }],
+          packageDir: "x",
+        });
+      }),
+      "tools[1].subpaths[0].src",
+    ],
+    [
+      "subpath with an exclude",
+      withTools((tools) => {
+        Object.assign(tools[1]!, {
+          subpaths: [{ src: "cli", dest: "cli", gitId: SHA_B, exclude: ["a"] }],
+        });
+      }),
+      "tools[1].subpaths[0].exclude",
+    ],
+    [
+      "duplicate subpath dest",
+      withTools((tools) => {
+        Object.assign(tools[1]!, {
+          subpaths: [
+            { src: "cli", dest: "cli", gitId: SHA_B },
+            { src: "other", dest: "cli", gitId: SHA_B },
+          ],
+        });
+      }),
+      "tools[1].subpaths[1].dest",
+    ],
+    ["empty subpaths", aot({ subpaths: [] }), "tools[1].subpaths"],
+    [
+      "packageDir naming no subpath dest",
+      aot({ packageDir: "nope" }),
+      "tools[1].packageDir",
+    ],
+    [
+      "entrypoint escaping the package",
+      aot({ entrypoint: "../bin/x.dart" }),
+      "tools[1].entrypoint",
+    ],
+    [
+      "entrypoint not a .dart file",
+      aot({ entrypoint: "bin/x.sh" }),
+      "tools[1].entrypoint",
+    ],
+    [
+      "lockOverlay outside the overlay dir",
+      aot({ lockOverlay: "packages/other/pubspec.lock" }),
+      "tools[1].lockOverlay",
+    ],
+    [
+      "lockOverlay not a pubspec.lock",
+      aot({ lockOverlay: `${BATTERIES_OVERLAY_DIR}somnio-cli/lock.yaml` }),
+      "tools[1].lockOverlay",
+    ],
+    ["short lockSha256", aot({ lockSha256: "abc" }), "tools[1].lockSha256"],
+    ["sdk naming a missing entry", aot({ sdk: "nope" }), "tools[1].sdk"],
+    [
+      "sdk naming a later entry",
+      withTools((tools) => {
+        tools.reverse();
+      }),
+      "tools[0].sdk",
+    ],
+    [
+      "sdk naming a dart-aot entry",
+      extraAot({ name: "other-cli", wrapper: "other", sdk: "somnio-cli" }),
+      "tools[2].sdk",
+    ],
+    ["rootEnv PATH", aot({ rootEnv: "PATH" }), "tools[1].rootEnv"],
+    ["rootEnv LD_PRELOAD", aot({ rootEnv: "LD_PRELOAD" }), "tools[1].rootEnv"],
+    [
+      "rootEnv in lowercase",
+      aot({ rootEnv: "somnio_root" }),
+      "tools[1].rootEnv",
+    ],
+    [
+      "versionArgs of two words",
+      aot({ versionArgs: "--version x" }),
+      "tools[1].versionArgs",
+    ],
+    [
+      "versionLine without the version suffix",
+      aot({ versionLine: "somnio v3.1.0" }),
+      "tools[1].versionLine",
+    ],
+    [
+      "versionLine with a $",
+      aot({ versionLine: "$somnio v3.1.1" }),
+      "tools[1].versionLine",
+    ],
+    ["empty smokeArgs", aot({ smokeArgs: [] }), "tools[1].smokeArgs"],
+    [
+      "13 smokeArgs",
+      aot({ smokeArgs: Array.from({ length: 13 }, () => "x") }),
+      "tools[1].smokeArgs",
+    ],
+    [
+      "a smoke word with a space",
+      aot({ smokeArgs: ["skills", "a b"] }),
+      "tools[1].smokeArgs[1]",
+    ],
+    [
+      "a smoke word with a command substitution",
+      aot({ smokeArgs: ["$(x)"] }),
+      "tools[1].smokeArgs[0]",
+    ],
+    ["a glob smoke word", aot({ smokeArgs: ["*"] }), "tools[1].smokeArgs[0]"],
+    [
+      "an absolute smokeExpect",
+      aot({ smokeExpect: "/abs" }),
+      "tools[1].smokeExpect",
+    ],
+    [
+      "a tool name equal to a pack id",
+      aot({ name: "upstream-pack" }),
+      "tools[1].name",
+    ],
+    [
+      "a tool name equal to a CLI name",
+      aot({ name: "toolx" }),
+      "tools[1].name",
+    ],
+    [
+      "a wrapper equal to a CLI name",
+      aot({ wrapper: "toolx" }),
+      "tools[1].wrapper",
+    ],
+    ["two tools with the same name", extraAot({}), "tools[2].name"],
+    [
+      "two tools with the same wrapper",
+      extraAot({ name: "other-cli" }),
+      "tools[2].wrapper",
+    ],
+    [
+      "a control character in a tools string",
+      aot({ license: "MI\tT" }),
+      "tools[1].license",
+    ],
+  ])("rejects %s", (_name, mutate, fragment) => {
     expectRejected(mutate, fragment);
   });
 });

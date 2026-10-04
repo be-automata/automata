@@ -1233,6 +1233,9 @@ importers:
       '@terragon/daemon':
         specifier: workspace:*
         version: link:../daemon
+      '@terragon/utils':
+        specifier: workspace:*
+        version: link:../utils
       pg:
         specifier: ^8.16.0
         version: 8.16.0

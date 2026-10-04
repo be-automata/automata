@@ -4,7 +4,10 @@ import React, { useMemo, useState } from "react";
 import { AlertCircle, RotateCcw } from "lucide-react";
 
 import {
+  BATTERY_PACK_IDS,
+  BATTERY_PACK_LABELS,
   DEFAULT_REVIEW_BATTERIES,
+  DEFAULT_TASK_BATTERIES,
   DEFAULT_REVIEW_RUN_TESTS,
   REVIEW_BATTERY_PACK_IDS,
   REVIEW_BATTERY_PACK_LABELS,
@@ -12,8 +15,8 @@ import {
   REVIEW_MODE_LABELS,
   effectiveReviewMode,
   pickReviewAgentFields,
+  type BatteryPackId,
   type ReviewAgentValues,
-  type ReviewBatteryPackId,
   type ReviewMode,
 } from "@terragon/shared/model/review-agent-settings";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -54,6 +57,7 @@ import {
   draftToPatch,
   firstWriteFence,
   reviewAgentOverrides,
+  toggleIn,
   type NumberFieldSpec,
   type ReviewAgentDraft,
   type ReviewAgentOverrideRow,
@@ -67,6 +71,10 @@ import {
  * max turns only apply when the mode resolves to orchestrated — they are
  * disabled (values kept visible) under classic.
  *
+ * Phase 7 — "Task agent packs" (taskBatteries) lives in the same block but is
+ * not a review knob: it names the packs non-review task runs get, so it is
+ * never disabled by the review mode.
+ *
  * Same shape as the supersede section: a PURE view (every state is a prop,
  * testable with renderToStaticMarkup), a model hook binding the queries and
  * mutations, and a thin container. A lost write race lands in one conflict
@@ -78,6 +86,17 @@ export const CLASSIC_HINT =
   "Only used in orchestrated mode. Classic runs exactly as today.";
 export const RUN_TESTS_NOTE =
   "Pull requests from forks or untrusted authors never run tests.";
+export const TASK_PACKS_NOTE =
+  "Packs that manual, scheduled and mention task runs get. Inherit uses the org default; none = today.";
+export const TASK_PACKS_OVERLAP_NOTE =
+  "Somnio skills and Somnio review both provide a security-audit skill; if both are selected, the first in this list wins.";
+
+/** The packs' labels joined for an "Inherit (…)" choice; "none" when empty. */
+function packListLabel(ids: readonly BatteryPackId[]): string {
+  return ids.length === 0
+    ? "none"
+    : ids.map((id) => BATTERY_PACK_LABELS[id]).join(", ");
+}
 
 const INHERIT = "inherit";
 
@@ -130,6 +149,82 @@ function InheritSelect<T extends string>({
       </Select>
       {children}
     </div>
+  );
+}
+
+/**
+ * One pack-list setting: an "Inherit (…)" checkbox (null) plus one checkbox
+ * per pack in `ids` order. Unchecking inherit starts from the inherited list.
+ */
+function PackChecklist<Id extends string>({
+  legend,
+  note,
+  footnote,
+  inheritId,
+  inheritLabel,
+  packIdPrefix,
+  ids,
+  labels,
+  value,
+  inherited,
+  disabled,
+  onChange,
+}: {
+  legend: string;
+  /** Rendered under the legend. */
+  note?: string;
+  /** Rendered under the checkboxes. */
+  footnote?: string;
+  inheritId: string;
+  inheritLabel: string;
+  /** Each pack checkbox's id is this prefix + the pack id. */
+  packIdPrefix: string;
+  ids: readonly Id[];
+  labels: Record<Id, string>;
+  value: Id[] | null;
+  inherited: readonly Id[];
+  disabled: boolean;
+  onChange: (value: Id[] | null) => void;
+}) {
+  const shown = value ?? inherited;
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="text-sm font-medium">{legend}</legend>
+      {note !== undefined && (
+        <p className="text-xs text-muted-foreground">{note}</p>
+      )}
+      <div className="flex min-h-11 items-center gap-2">
+        <Checkbox
+          id={inheritId}
+          checked={value === null}
+          onCheckedChange={(on) =>
+            onChange(on === true ? null : [...inherited])
+          }
+          disabled={disabled}
+        />
+        <Label htmlFor={inheritId} className="text-sm">
+          {inheritLabel}
+        </Label>
+      </div>
+      {ids.map((id) => (
+        <div key={id} className="flex min-h-11 items-center gap-2">
+          <Checkbox
+            id={`${packIdPrefix}${id}`}
+            checked={shown.includes(id)}
+            onCheckedChange={(on) =>
+              onChange(toggleIn(ids, shown, id, on === true))
+            }
+            disabled={disabled}
+          />
+          <Label htmlFor={`${packIdPrefix}${id}`} className="text-sm">
+            {labels[id]}
+          </Label>
+        </div>
+      ))}
+      {footnote !== undefined && (
+        <p className="text-xs text-muted-foreground">{footnote}</p>
+      )}
+    </fieldset>
   );
 }
 
@@ -226,9 +321,18 @@ export function ReviewAgentFieldsView({
   const inheritedBatteries = inherited?.reviewBatteries ?? [
     ...DEFAULT_REVIEW_BATTERIES,
   ];
-  const shownBatteries = draft.reviewBatteries ?? inheritedBatteries;
   const inheritedRunTests =
     inherited?.reviewRunTests ?? DEFAULT_REVIEW_RUN_TESTS;
+  // Task packs are not a review knob: gated only by `disabled`, never by mode.
+  const inheritedTaskBatteries = inherited?.taskBatteries ?? [
+    ...DEFAULT_TASK_BATTERIES,
+  ];
+  const taskInheritLabel =
+    scope === "org"
+      ? "Inherit (none)"
+      : inherited !== null && inherited.taskBatteries !== null
+        ? `Inherit (org default: ${packListLabel(inherited.taskBatteries)})`
+        : "Inherit (org default)";
   const result = draftToPatch(draft, stored);
   const { patch } = result;
   const canSave =
@@ -236,13 +340,6 @@ export function ReviewAgentFieldsView({
     !saveBlocked &&
     NUMBER_FIELDS.every((spec) => result[spec.errorKey] === undefined) &&
     Object.keys(patch).length > 0;
-
-  function togglePack(id: ReviewBatteryPackId, on: boolean) {
-    const next = REVIEW_BATTERY_PACK_IDS.filter((pack) =>
-      pack === id ? on : shownBatteries.includes(pack),
-    );
-    onChange({ ...draft, reviewBatteries: next });
-  }
 
   return (
     <div className="grid gap-4" data-testid={`${idPrefix}-fields`}>
@@ -265,38 +362,35 @@ export function ReviewAgentFieldsView({
         )}
       </InheritSelect>
 
-      <fieldset className="grid gap-2">
-        <legend className="text-sm font-medium">Review packs</legend>
-        <div className="flex min-h-11 items-center gap-2">
-          <Checkbox
-            id={`${idPrefix}-packs-inherit`}
-            checked={draft.reviewBatteries === null}
-            onCheckedChange={(on) =>
-              onChange({
-                ...draft,
-                reviewBatteries: on === true ? null : [...inheritedBatteries],
-              })
-            }
-            disabled={orchestratedOnlyDisabled}
-          />
-          <Label htmlFor={`${idPrefix}-packs-inherit`} className="text-sm">
-            {scope === "org" ? "Inherit (all packs)" : "Inherit (org default)"}
-          </Label>
-        </div>
-        {REVIEW_BATTERY_PACK_IDS.map((id) => (
-          <div key={id} className="flex min-h-11 items-center gap-2">
-            <Checkbox
-              id={`${idPrefix}-pack-${id}`}
-              checked={shownBatteries.includes(id)}
-              onCheckedChange={(on) => togglePack(id, on === true)}
-              disabled={orchestratedOnlyDisabled}
-            />
-            <Label htmlFor={`${idPrefix}-pack-${id}`} className="text-sm">
-              {REVIEW_BATTERY_PACK_LABELS[id]}
-            </Label>
-          </div>
-        ))}
-      </fieldset>
+      <PackChecklist
+        legend="Review packs"
+        inheritId={`${idPrefix}-packs-inherit`}
+        inheritLabel={
+          scope === "org" ? "Inherit (all packs)" : "Inherit (org default)"
+        }
+        packIdPrefix={`${idPrefix}-pack-`}
+        ids={REVIEW_BATTERY_PACK_IDS}
+        labels={REVIEW_BATTERY_PACK_LABELS}
+        value={draft.reviewBatteries}
+        inherited={inheritedBatteries}
+        disabled={orchestratedOnlyDisabled}
+        onChange={(reviewBatteries) => onChange({ ...draft, reviewBatteries })}
+      />
+
+      <PackChecklist
+        legend="Task agent packs"
+        note={TASK_PACKS_NOTE}
+        footnote={TASK_PACKS_OVERLAP_NOTE}
+        inheritId={`${idPrefix}-task-packs-inherit`}
+        inheritLabel={taskInheritLabel}
+        packIdPrefix={`${idPrefix}-task-pack-`}
+        ids={BATTERY_PACK_IDS}
+        labels={BATTERY_PACK_LABELS}
+        value={draft.taskBatteries}
+        inherited={inheritedTaskBatteries}
+        disabled={disabled}
+        onChange={(taskBatteries) => onChange({ ...draft, taskBatteries })}
+      />
 
       <InheritSelect
         id={`${idPrefix}-run-tests`}

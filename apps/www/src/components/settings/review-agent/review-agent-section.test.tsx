@@ -3,12 +3,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  BATTERY_PACK_IDS,
+  BATTERY_PACK_LABELS,
   effectiveReviewMode,
   type ReviewAgentValues,
 } from "@terragon/shared/model/review-agent-settings";
 import {
   CLASSIC_HINT,
   ReviewAgentFieldsView,
+  TASK_PACKS_OVERLAP_NOTE,
   ReviewAgentSectionView,
   type ReviewAgentSectionActions,
   type ReviewAgentSectionState,
@@ -21,6 +24,7 @@ import {
   draftFromValues,
   draftToPatch,
   firstWriteFence,
+  hasReviewAgentOverride,
   parseOptionalInt,
   reviewAgentOverrides,
   type ReviewAgentOverrideRow,
@@ -57,6 +61,7 @@ const NO_AGENT = {
   reviewRunTests: null,
   reviewCommandTimeoutS: null,
   reviewMaxTurns: null,
+  taskBatteries: null,
 };
 
 function row(
@@ -144,8 +149,52 @@ describe("firstWriteFence", () => {
 });
 
 describe("REVIEW_AGENT_CLEAR_PATCH", () => {
-  it("clears all five fields", () => {
+  it("clears all six fields, task packs included", () => {
     expect(REVIEW_AGENT_CLEAR_PATCH).toEqual(NO_AGENT);
+    expect(Object.keys(REVIEW_AGENT_CLEAR_PATCH)).toHaveLength(6);
+    expect(REVIEW_AGENT_CLEAR_PATCH.taskBatteries).toBeNull();
+  });
+});
+
+describe("task packs (phase 7) — form helpers", () => {
+  it("a row with only task packs is an override, an empty list included", () => {
+    expect(hasReviewAgentOverride({ ...NO_AGENT, taskBatteries: [] })).toBe(
+      true,
+    );
+    expect(
+      hasReviewAgentOverride({ ...NO_AGENT, taskBatteries: ["somnio-skills"] }),
+    ).toBe(true);
+    expect(hasReviewAgentOverride(NO_AGENT)).toBe(false);
+  });
+
+  it("draftFromValues / draftToPatch round-trip taskBatteries", () => {
+    const stored: ReviewAgentValues = {
+      ...NO_AGENT,
+      taskBatteries: ["somnio-skills"],
+    };
+    const draft = draftFromValues(stored);
+    expect(draft.taskBatteries).toEqual(["somnio-skills"]);
+    expect(draftToPatch(draft, stored)).toEqual({ patch: {} });
+  });
+
+  it("changing only the task packs sends exactly {taskBatteries}", () => {
+    const stored: ReviewAgentValues = {
+      ...NO_AGENT,
+      reviewMode: "orchestrated",
+    };
+    const draft = {
+      ...draftFromValues(stored),
+      taskBatteries: ["somnio-skills" as const],
+    };
+    expect(draftToPatch(draft, stored)).toEqual({
+      patch: { taskBatteries: ["somnio-skills"] },
+    });
+  });
+
+  it("choosing Inherit again clears to null", () => {
+    const stored: ReviewAgentValues = { ...NO_AGENT, taskBatteries: [] };
+    const draft = { ...draftFromValues(stored), taskBatteries: null };
+    expect(draftToPatch(draft, stored).patch).toEqual({ taskBatteries: null });
   });
 });
 
@@ -392,5 +441,100 @@ describe("ReviewAgentFieldsView — inline validation", () => {
       />,
     );
     expect(isDisabled(html, "t-save")).toBe(false);
+  });
+});
+
+describe("ReviewAgentFieldsView — Task agent packs (phase 7)", () => {
+  const view = (
+    over: Partial<{
+      scope: "org" | "repo";
+      stored: ReviewAgentValues;
+      inherited: ReviewAgentValues | null;
+      disabled: boolean;
+    }> = {},
+  ) => {
+    const stored = over.stored ?? { ...NO_AGENT };
+    return renderToStaticMarkup(
+      <ReviewAgentFieldsView
+        idPrefix="t"
+        scope={over.scope ?? "org"}
+        draft={draftFromValues(stored)}
+        stored={stored}
+        inherited={over.inherited ?? null}
+        disabled={over.disabled ?? false}
+        saveLabel="Save"
+        onChange={vi.fn()}
+        onSave={vi.fn()}
+      />,
+    );
+  };
+
+  it("renders one checkbox per manifest pack plus Inherit, labelled from the shared labels", () => {
+    const html = view();
+    expect(html).toContain("Task agent packs");
+    for (const id of BATTERY_PACK_IDS) {
+      expect(tagWithId(html, `t-task-pack-${id}`)).toBeTruthy();
+      expect(html).toContain(BATTERY_PACK_LABELS[id]);
+    }
+    expect(tagWithId(html, "t-task-packs-inherit")).toBeTruthy();
+    expect(html).toContain("Inherit (none)");
+  });
+
+  it("classic mode keeps the task checkboxes enabled while the review packs are disabled", () => {
+    const html = view();
+    expect(isDisabled(html, "t-pack-gstack-review")).toBe(true);
+    expect(isDisabled(html, "t-task-packs-inherit")).toBe(false);
+    for (const id of BATTERY_PACK_IDS) {
+      expect(isDisabled(html, `t-task-pack-${id}`)).toBe(false);
+    }
+  });
+
+  it("disabled (saving) disables the task checkboxes too", () => {
+    const html = view({ disabled: true });
+    expect(isDisabled(html, "t-task-packs-inherit")).toBe(true);
+    for (const id of BATTERY_PACK_IDS) {
+      expect(isDisabled(html, `t-task-pack-${id}`)).toBe(true);
+    }
+  });
+
+  it("the help text names the runs that get the packs and the security-audit overlap", () => {
+    const html = view();
+    expect(html).toContain("manual, scheduled and mention task runs");
+    expect(html).toContain("none = today");
+    expect(html).toContain(TASK_PACKS_OVERLAP_NOTE);
+    expect(TASK_PACKS_OVERLAP_NOTE).toMatch(/security-audit/);
+  });
+
+  it("a repo row inheriting an org list shows it; the stored list is checked", () => {
+    const html = view({
+      scope: "repo",
+      inherited: { ...NO_AGENT, taskBatteries: ["somnio-skills"] },
+    });
+    expect(html).toContain(
+      `Inherit (org default: ${BATTERY_PACK_LABELS["somnio-skills"]})`,
+    );
+    expect(tagWithId(html, "t-task-pack-somnio-skills")).toContain(
+      'data-state="checked"',
+    );
+    expect(tagWithId(html, "t-task-packs-inherit")).toContain(
+      'data-state="checked"',
+    );
+  });
+
+  it("a repo row inheriting nothing says so", () => {
+    const html = view({ scope: "repo", inherited: { ...NO_AGENT } });
+    expect(html).toContain("Inherit (org default)");
+  });
+
+  it("a stored empty list unchecks Inherit and every pack", () => {
+    const html = view({ stored: { ...NO_AGENT, taskBatteries: [] } });
+    expect(tagWithId(html, "t-task-packs-inherit")).toContain(
+      'data-state="unchecked"',
+    );
+    for (const id of BATTERY_PACK_IDS) {
+      expect(tagWithId(html, `t-task-pack-${id}`)).toContain(
+        'data-state="unchecked"',
+      );
+    }
   });
 });

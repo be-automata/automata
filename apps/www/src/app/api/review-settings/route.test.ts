@@ -63,6 +63,7 @@ describe("GET /api/review-settings", () => {
         reviewRunTests: null,
         reviewCommandTimeoutS: null,
         reviewMaxTurns: null,
+        taskBatteries: null,
         updatedByUserId: USER,
         createdAt: new Date(),
         updatedAt: new Date("2026-07-20T00:00:00Z"),
@@ -103,6 +104,7 @@ describe("GET /api/review-settings", () => {
         reviewRunTests: true,
         reviewCommandTimeoutS: 120,
         reviewMaxTurns: 30,
+        taskBatteries: null,
         updatedByUserId: USER,
         createdAt: new Date(),
         updatedAt: new Date("2026-10-03T00:00:00Z"),
@@ -120,6 +122,40 @@ describe("GET /api/review-settings", () => {
       reviewRunTests: true,
       reviewCommandTimeoutS: 120,
       reviewMaxTurns: 30,
+    });
+  });
+
+  it("phase 7: lists a repo row that carries only task packs, with taskBatteries", async () => {
+    vi.mocked(listRepoReviewSettings).mockResolvedValue([
+      {
+        id: "s3",
+        organizationId: ORG,
+        repoFullName: "acme/tasks",
+        blockTolerance: "warning",
+        reviewDraftPrs: null,
+        trustedAuthorThreshold: null,
+        egressPolicy: null,
+        egressAllowlist: null,
+        supersedePolicy: null,
+        recheckOnComplete: false,
+        reviewMode: null,
+        reviewBatteries: null,
+        reviewRunTests: null,
+        reviewCommandTimeoutS: null,
+        reviewMaxTurns: null,
+        taskBatteries: ["somnio-skills"],
+        updatedByUserId: USER,
+        createdAt: new Date(),
+        updatedAt: new Date("2026-10-04T00:00:00Z"),
+      },
+    ]);
+    const res = await GET();
+    const json = (await res.json()) as {
+      settings: Array<Record<string, unknown>>;
+    };
+    expect(json.settings[0]).toMatchObject({
+      repoFullName: "acme/tasks",
+      taskBatteries: ["somnio-skills"],
     });
   });
 });

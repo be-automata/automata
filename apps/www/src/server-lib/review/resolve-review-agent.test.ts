@@ -354,4 +354,36 @@ describe("resolveReviewAgentForDispatch (real DB)", () => {
       }),
     ).rejects.toThrow(/reviewMode/);
   });
+
+  it("ignores an invalid stored taskBatteries: the review resolves normally (phase 7)", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { reviewMode: "orchestrated", taskBatteries: ["somnio-skills"] },
+    });
+    // A pack id removed from the manifest after it was stored.
+    await db
+      .update(repoReviewSettings)
+      .set({ taskBatteries: ["nope"] })
+      .where(
+        and(
+          eq(repoReviewSettings.organizationId, orgId),
+          eq(repoReviewSettings.repoFullName, REPO),
+        ),
+      );
+    const result = await resolveReviewAgentForDispatch({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      trustContext,
+    });
+    expect(result).toEqual({
+      mode: "orchestrated",
+      batteries: ALL_PACKS,
+      runTests: false,
+      commandTimeoutMs: 300000,
+    });
+    expect("taskBatteries" in result).toBe(false);
+  });
 });

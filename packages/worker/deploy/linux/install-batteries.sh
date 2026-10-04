@@ -52,10 +52,42 @@ umask 022
 #   filesystem, because Phase 5 links runs into these paths. Old dirs are never
 #   pruned: they are reported STALE and removed by hand with no run in flight.
 #
+#
+# tools (phase 7) are BUILD inputs installed outside every pack and never
+# linked into a run's HOME:
+#   dart-sdk -> <root>/<name>@<version>/  (top dir 0700: build-only, no <bin> entry)
+#   dart-aot -> <root>/<name>@<sha>/{src,bin}, plus a fixed-text <bin>/<wrapper>
+#   stamps   -> <root>/tools/<name>@<version>.stamp; build cache <root>/pub-cache (0700)
+# - The SDK zip (~240 MB of foreign bytes) is sha256-checked BEFORE any
+#   extraction, also when a dry run takes it from its download cache (the cached
+#   file is copied into the work dir and checked there). A python pre-scan then
+#   rejects entries outside dart-sdk/, absolute or `..` names, symlink entries
+#   and a total size over 2 GiB, before python3 -m zipfile extracts it: the box
+#   has no unzip, and no apt dependency is added for one.
+# - The SDK is build-only: a dart on the agent's PATH would resolve packages
+#   against the root-owned cache and fail, so no wrapper is written for it and
+#   its top dir is not traversable by the agent.
+# - A dart-aot CLI is COMPILED (`dart compile exe`) from tree-id-verified
+#   sources of its pinned commit plus OUR committed pubspec.lock, read as a HEAD
+#   blob and checked against the manifest's lockSha256. Not activated: `pub
+#   global activate --source git` re-resolves the hosted dependencies at install
+#   time (the closure floats) and path activation needs a writable tree at run
+#   time. `pub get --enforce-lockfile` checks every package's content hash
+#   against the lock. No resolved package may carry a `hook/` dir, because a
+#   build hook would execute as root. The build runs under `env -i` so
+#   PUB_HOSTED_URL, proxies or HOME cannot redirect it, with a root-owned build
+#   PUB_CACHE. The wrapper exports that same PUB_CACHE, so a CLI self-update
+#   fails closed instead of writing anywhere.
+# - Production installs tools only on Linux x86_64 from the linux-x64 URL. A
+#   non-root dry run may instead name its own host's platform (macOS developers),
+#   and only a dry run may use BATTERIES_DOWNLOAD_CACHE.
+#
 # Dry run (developers, non-root): PREFIX=<absolute tmp dir> SKIP_SUDO_VERIFY=1,
-# optionally BATTERIES_MANIFEST=<absolute path> to test a modified manifest.
-# Both knobs are refused for root and for a PREFIX that resolves to /usr/local.
-# Commit first: the manifest and overlays are read from HEAD.
+# optionally BATTERIES_MANIFEST=<absolute path> to test a modified manifest,
+# BATTERIES_DOWNLOAD_CACHE=<absolute dir> to reuse a verified SDK zip across
+# runs, and BATTERIES_PREFLIGHT_ONLY=1 to stop after preflight (no network, no
+# writes). Every knob is refused for root and for a PREFIX that resolves to
+# /usr/local. Commit first: the manifest and overlays are read from HEAD.
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cd /
@@ -76,15 +108,32 @@ AGENT_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # run reinstalls instead of SKIPPING packs built by the old code. A test hashes
 # those bodies against the value recorded for this version.
 INSTALLER_OUTPUT_VERSION=1
+# Part of every tool stamp, for the same reason. Bump it whenever
+# stage_dart_sdk, stage_dart_aot or write_wrapper change what lands on disk.
+TOOLS_OUTPUT_VERSION=1
 # Frontmatter keys that GRANT the invoking turn something (see header).
 GRANT_KEYS_RE='^(allowed-tools|hooks|permissionMode|mcpServers):'
 # Same list as FORBIDDEN_NAMES in packages/worker/src/agent-run/batteries-manifest.ts.
 FORBIDDEN_NAMES=(hooks bin .claude-plugin settings.json settings.local.json .mcp.json plugin.json)
+# Manifest value shapes shared by preflight and preflight_tools (same rules as
+# packages/worker/src/agent-run/batteries-manifest.ts).
+readonly RE_ID='^[a-z0-9][a-z0-9-]*$'
+readonly RE_VERSION_ARGS='^-{0,2}[a-z]+$'
+readonly RE_SHA1='^[0-9a-f]{40}$'
+readonly RE_SHA256='^[0-9a-f]{64}$'
+readonly RE_SEMVER='^[0-9]+\.[0-9]+\.[0-9]+$'
+readonly RE_GITHUB='^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+# The closed set of pack `requires` entries, as a JSON array for jq. Pinned
+# equal to BATTERY_REQUIREMENTS in batteries-manifest.ts (and the shared
+# review-agent-settings.ts) by the deploy-assets parity test.
+readonly PACK_REQUIREMENTS_JSON='["github-read-token"]'
 
 AGENT_USER="${AGENT_USER:-automata-agent}"
 WORKER_USER="${WORKER_USER:-automata}"
 SKIP_SUDO_VERIFY="${SKIP_SUDO_VERIFY:-}"
 BATTERIES_MANIFEST="${BATTERIES_MANIFEST:-}"
+BATTERIES_DOWNLOAD_CACHE="${BATTERIES_DOWNLOAD_CACHE:-}"
+BATTERIES_PREFLIGHT_ONLY="${BATTERIES_PREFLIGHT_ONLY:-}"
 PREFIX="${PREFIX:-/usr/local}"
 
 usage_error() {
@@ -106,12 +155,13 @@ fi
 
 # DRY_RUN=0 implies root: every non-root path below exits 2.
 DRY_RUN=0
-if [ -n "$SKIP_SUDO_VERIFY" ] || [ -n "$BATTERIES_MANIFEST" ]; then
+if [ -n "$SKIP_SUDO_VERIFY" ] || [ -n "$BATTERIES_MANIFEST" ] ||
+  [ -n "$BATTERIES_DOWNLOAD_CACHE" ] || [ -n "$BATTERIES_PREFLIGHT_ONLY" ]; then
   if [ "$(id -u)" = "0" ]; then
-    usage_error "dry-run knobs are refused for root (SKIP_SUDO_VERIFY / BATTERIES_MANIFEST)"
+    usage_error "dry-run knobs are refused for root (SKIP_SUDO_VERIFY / BATTERIES_MANIFEST / BATTERIES_DOWNLOAD_CACHE / BATTERIES_PREFLIGHT_ONLY)"
   fi
   if [ "$PREFIX" = "/usr/local" ]; then
-    usage_error "SKIP_SUDO_VERIFY=1 / BATTERIES_MANIFEST require a non-default PREFIX"
+    usage_error "SKIP_SUDO_VERIFY=1 / BATTERIES_MANIFEST / BATTERIES_DOWNLOAD_CACHE / BATTERIES_PREFLIGHT_ONLY require a non-default PREFIX"
   fi
   if [ "$SKIP_SUDO_VERIFY" != "1" ]; then
     usage_error "a dry run needs SKIP_SUDO_VERIFY=1 (non-root cannot verify through sudo)"
@@ -119,6 +169,14 @@ if [ -n "$SKIP_SUDO_VERIFY" ] || [ -n "$BATTERIES_MANIFEST" ]; then
   case "$BATTERIES_MANIFEST" in
     "" | /*) ;;
     *) usage_error "BATTERIES_MANIFEST must be an absolute path" ;;
+  esac
+  case "$BATTERIES_DOWNLOAD_CACHE" in
+    "" | /*) ;;
+    *) usage_error "BATTERIES_DOWNLOAD_CACHE must be an absolute path" ;;
+  esac
+  case "$BATTERIES_PREFLIGHT_ONLY" in
+    "" | 1) ;;
+    *) usage_error "BATTERIES_PREFLIGHT_ONLY must be 1 when set" ;;
   esac
   DRY_RUN=1
 elif [ "$(id -u)" != "0" ]; then
@@ -150,6 +208,11 @@ STEP_ERROR=""
 CLI_ROWS=""
 PACK_ROWS=""
 HELPER_TOKENS=""
+# One compact `{"key": <index>, "value": <tool>}` object per line (jq -c);
+# fields are read from the manifest by index after the control-character check.
+TOOL_ROWS=""
+# Space-delimited names of the tools INSTALLED or SKIPPED (at pin) in this run.
+TOOLS_OK=" "
 
 # Every git call against the automata-owned checkout goes through here.
 git_repo() {
@@ -177,6 +240,50 @@ record() {
 
 sha256_of() {
   sha256sum "$1" | awk '{print $1}'
+}
+
+# fetch_verified <label> <url> <sha256> <out> [<cache file>]: the pinned
+# download in <out>, its sha256 checked BEFORE the caller extracts anything.
+# With <cache file> (dry runs only), a cached copy is COPIED to <out> and
+# checked there — a cached copy that does not match is a FAIL, never silently
+# replaced — and a verified download is cached for the next run. Sets
+# STEP_ERROR and returns 1 on failure.
+fetch_verified() {
+  local label="$1" url="$2" sha256="$3" out="$4" cache="${5:-}"
+  if [ -n "$cache" ] && [ -f "$cache" ]; then
+    log "using the cached $label zip (sha256 re-checked below)"
+    if ! cp "$cache" "$out"; then
+      STEP_ERROR="cannot copy the cached zip"
+      return 1
+    fi
+  else
+    log "downloading $label"
+    if ! curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$out" "$url"; then
+      STEP_ERROR="download failed"
+      return 1
+    fi
+  fi
+  if ! printf '%s  %s\n' "$sha256" "$out" | sha256sum -c - >/dev/null 2>&1; then
+    STEP_ERROR="sha256 mismatch (got $(sha256_of "$out"))"
+    return 1
+  fi
+  if [ -n "$cache" ] && [ ! -f "$cache" ]; then
+    if ! { mkdir -p "$(dirname "$cache")" && cp "$out" "$cache.tmp.$$" &&
+      mv -f "$cache.tmp.$$" "$cache"; }; then
+      log "could not cache $label (continuing)"
+    fi
+  fi
+}
+
+# write_stamp <stamp> <printf format> [<arg>…]: a 0644 stamp, written to a temp
+# file and renamed into place, so a half-written stamp is never read.
+write_stamp() {
+  local stamp="$1" format="$2"
+  shift 2
+  # shellcheck disable=SC2059 # the format is a fixed literal at every call site
+  printf "$format" "$@" >"$stamp.tmp" &&
+    chmod 0644 "$stamp.tmp" &&
+    mv -f "$stamp.tmp" "$stamp"
 }
 
 # Per-pack lists as @tsv rows. Every field is a non-empty string (preflight),
@@ -255,12 +362,6 @@ check_vendored_path() {
 # Same rules as packages/worker/src/agent-run/batteries-manifest.ts; names and
 # versionArgs reach a root shell and an agent shell, so they are re-checked here.
 preflight() {
-  local re_id='^[a-z0-9][a-z0-9-]*$'
-  local re_version_args='^-{0,2}[a-z]+$'
-  local re_sha1='^[0-9a-f]{40}$'
-  local re_sha256='^[0-9a-f]{64}$'
-  local re_semver='^[0-9]+\.[0-9]+\.[0-9]+$'
-  local re_github='^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
   local re_dest='^(LICENSE|skills/[a-z0-9-]+(/.+)?|agents/[a-z0-9-]+\.md)$'
   local cmd i id repo sha src dest git_id ex_rest ex from file ref token named
   local name version url sha256 member license_member args
@@ -308,15 +409,24 @@ preflight() {
   HELPER_TOKENS="$(jq -r '.forbiddenHelperTokens[]' "$MANIFEST")"
 
   while IFS=$'\t' read -r -u 3 i id repo sha; do
-    [[ "$id" =~ $re_id ]] || record "FAIL preflight pack: bad id"
-    [ "$repo" = "self" ] || [[ "$repo" =~ $re_github ]] ||
+    [[ "$id" =~ $RE_ID ]] || record "FAIL preflight pack: bad id"
+    [ "$repo" = "self" ] || [[ "$repo" =~ $RE_GITHUB ]] ||
       record "FAIL preflight $id: repo must be self or a github https url"
-    [[ "$sha" =~ $re_sha1 ]] || record "FAIL preflight $id: sha is not 40 hex"
+    [[ "$sha" =~ $RE_SHA1 ]] || record "FAIL preflight $id: sha is not 40 hex"
+    # Phase 7: `requires` names a capability the control plane grants runs
+    # that select the pack (closed set PACK_REQUIREMENTS_JSON, mirrored by the
+    # TS guard). It is part
+    # of the pack entry, so adding it re-stages that pack once (harmless).
+    jq -e --argjson i "$i" --argjson allowed "$PACK_REQUIREMENTS_JSON" '
+      (.packs[$i].requires // []) | type == "array"
+        and all(.[]; . as $r | any($allowed[]; . == $r))
+        and length == (unique | length)' "$MANIFEST" >/dev/null 2>&1 ||
+      record "FAIL preflight $id: requires must be a list drawn from $(jq -r 'join(", ")' <<<"$PACK_REQUIREMENTS_JSON")"
     while IFS=$'\t' read -r -u 4 src dest git_id ex_rest; do
       check_vendored_path "$id" src "$src"
       check_vendored_path "$id" dest "$dest"
       [[ "$dest" =~ $re_dest ]] || record "FAIL preflight $id: dest outside the pack layout"
-      [[ "$git_id" =~ $re_sha1 ]] || record "FAIL preflight $id: gitId is not 40 hex"
+      [[ "$git_id" =~ $RE_SHA1 ]] || record "FAIL preflight $id: gitId is not 40 hex"
       excludes=()
       [ -z "$ex_rest" ] || IFS=$'\t' read -r -a excludes <<<"$ex_rest"
       for ex in ${excludes[@]+"${excludes[@]}"}; do
@@ -350,10 +460,10 @@ preflight() {
 
   while IFS=$'\t' read -r -u 3 name version url sha256 member license_member args; do
     [ -n "$name" ] || continue
-    [[ "$name" =~ $re_id ]] || record "FAIL preflight cli: bad name"
-    [[ "$version" =~ $re_semver ]] || record "FAIL preflight $name: bad version"
-    [[ "$args" =~ $re_version_args ]] || record "FAIL preflight $name: bad versionArgs"
-    [[ "$sha256" =~ $re_sha256 ]] || record "FAIL preflight $name: sha256 is not 64 hex"
+    [[ "$name" =~ $RE_ID ]] || record "FAIL preflight cli: bad name"
+    [[ "$version" =~ $RE_SEMVER ]] || record "FAIL preflight $name: bad version"
+    [[ "$args" =~ $RE_VERSION_ARGS ]] || record "FAIL preflight $name: bad versionArgs"
+    [[ "$sha256" =~ $RE_SHA256 ]] || record "FAIL preflight $name: sha256 is not 64 hex"
     case "$url" in
       https://github.com/*) ;;
       *) record "FAIL preflight $name: url is not a github https url" ;;
@@ -370,7 +480,200 @@ preflight() {
     safe_rel_path "$license_member" || record "FAIL preflight $name: unsafe licenseMember"
   done 3<<<"$CLI_ROWS"
 
+  preflight_tools || true
+
   [ "$FAILURES" -eq 0 ]
+}
+
+# The Dart SDK platform name for `uname -s`/`uname -m`; fails for any other host.
+host_dart_platform() {
+  case "$1" in
+    Darwin/arm64) echo macos-arm64 ;;
+    Darwin/x86_64) echo macos-x64 ;;
+    Linux/x86_64) echo linux-x64 ;;
+    Linux/aarch64) echo linux-arm64 ;;
+    *) return 1 ;;
+  esac
+}
+
+# One field of tools[<index>] (preflight proved it is a control-free string).
+tool_field() {
+  jq -r --argjson i "$1" --arg f "$2" '.tools[$i][$f]' "$MANIFEST"
+}
+
+# Same tools rules as packages/worker/src/agent-run/batteries-manifest.ts, one
+# FAIL text per rule (a deploy-assets test runs both validators on the same
+# malformed entries). Called by preflight after the control-character check.
+preflight_tools() {
+  local re_root_env='^[A-Z][A-Z0-9]*_ROOT$'
+  local re_version_line='^[A-Za-z0-9 ._-]+$'
+  local re_smoke_word='^-{0,2}[a-z0-9][a-z0-9_-]*$'
+  local re_platform='^[a-z0-9]+-[a-z0-9]+$'
+  local sdk_keys='["name","kind","version","url","sha256","licenseMember","license"]'
+  local aot_keys='["name","kind","version","repo","sha","subpaths","packageDir","entrypoint","lockOverlay","lockSha256","sdk","license","wrapper","rootEnv","versionArgs","versionLine","smokeArgs","smokeExpect"]'
+  local row i label name kind keys host expected version url sha256 license_member
+  local url_prefix url_suffix platform repo sha src dest git_id entrypoint
+  local lock_overlay lock_sha256 sdk wrapper root_env args version_line smoke_expect word
+  local words bad_word taken cli_names seen wrappers
+
+  if ! jq -e '(.tools // []) | type == "array"' "$MANIFEST" >/dev/null 2>&1; then
+    record "FAIL preflight manifest: tools must be an array"
+    return 1
+  fi
+  TOOL_ROWS="$(jq -c '.tools // [] | to_entries[]' "$MANIFEST")"
+  [ -n "$TOOL_ROWS" ] || return 0
+
+  command -v python3 >/dev/null 2>&1 || record "FAIL preflight python3: required command not found (tools)"
+  host="$(uname -s)/$(uname -m)"
+  expected=""
+  if [ "$DRY_RUN" -eq 0 ]; then
+    if [ "$host" = "Linux/x86_64" ]; then
+      expected="linux-x64"
+    else
+      record "FAIL preflight tools: host $host cannot install tools"
+    fi
+  elif ! expected="$(host_dart_platform "$host")"; then
+    expected=""
+    record "FAIL preflight tools: host $host cannot install tools"
+  fi
+
+  taken="$(jq -r '(.packs[].id), (.clis[].name)' "$MANIFEST")"
+  cli_names="$(jq -r '.clis[].name' "$MANIFEST")"
+  seen=""
+  wrappers=""
+  while IFS= read -r -u 3 row; do
+    [ -n "$row" ] || continue
+    i="$(jq -r '.key' <<<"$row")"
+    name="$(jq -r '.value.name // "" | strings' <<<"$row")"
+    label="tools[$i]"
+    if [[ "$name" =~ $RE_ID ]]; then
+      label="$name"
+    else
+      record "FAIL preflight $label: bad name"
+    fi
+    kind="$(jq -r '.value.kind // "" | strings' <<<"$row")"
+    case "$kind" in
+      dart-sdk) keys="$sdk_keys" ;;
+      dart-aot) keys="$aot_keys" ;;
+      *)
+        record "FAIL preflight $label: unknown kind"
+        continue
+        ;;
+    esac
+    if ! jq -e --argjson k "$keys" '(.value | keys) - $k | length == 0' <<<"$row" >/dev/null; then
+      record "FAIL preflight $label: unknown key in tools entry"
+      continue
+    fi
+    if ! jq -e --argjson k "$keys" '
+      def str: type == "string" and test("\\S");
+      .value as $t
+      | all($k[]; . as $key | $t | has($key))
+      and all($t | to_entries[];
+        if .key == "subpaths" then
+          (.value | type == "array" and length > 0
+            and all(.[]; type == "object" and (keys == ["dest", "gitId", "src"])
+              and (.src, .dest, .gitId | str)))
+        elif .key == "smokeArgs" then
+          (.value | type == "array" and all(.[]; type == "string"))
+        else (.value | str) end)' <<<"$row" >/dev/null; then
+      record "FAIL preflight $label: every tools field must be present with its type"
+      continue
+    fi
+    if grep -qxF -- "$name" <<<"$taken"; then
+      record "FAIL preflight $label: tool name collides with a pack id or CLI name"
+    fi
+    case $'\n'"$seen" in
+      *$'\n'"$name "*) record "FAIL preflight $label: duplicate tool name" ;;
+    esac
+    version="$(tool_field "$i" version)"
+    [[ "$version" =~ $RE_SEMVER ]] || record "FAIL preflight $label: bad version"
+
+    if [ "$kind" = "dart-sdk" ]; then
+      url="$(tool_field "$i" url)"
+      sha256="$(tool_field "$i" sha256)"
+      license_member="$(tool_field "$i" licenseMember)"
+      [[ "$sha256" =~ $RE_SHA256 ]] || record "FAIL preflight $label: sha256 is not 64 hex"
+      case "$license_member" in
+        dart-sdk/*) safe_rel_path "$license_member" || record "FAIL preflight $label: licenseMember must be a safe path under dart-sdk/" ;;
+        *) record "FAIL preflight $label: licenseMember must be a safe path under dart-sdk/" ;;
+      esac
+      url_prefix="https://storage.googleapis.com/dart-archive/channels/stable/release/$version/sdk/dartsdk-"
+      url_suffix="-release.zip"
+      platform=""
+      case "$url" in
+        "$url_prefix"*"$url_suffix")
+          platform="${url#"$url_prefix"}"
+          platform="${platform%"$url_suffix"}"
+          ;;
+      esac
+      if ! [[ "$platform" =~ $re_platform ]]; then
+        record "FAIL preflight $label: url is not the dart-archive template for $version/${expected:-linux-x64}"
+      elif [ "$platform" != "$expected" ]; then
+        record "FAIL preflight $label: platform $platform is not this host's (${expected:-none})"
+      fi
+      seen="$seen$name $kind"$'\n'
+      continue
+    fi
+
+    repo="$(tool_field "$i" repo)"
+    sha="$(tool_field "$i" sha)"
+    [[ "$repo" =~ $RE_GITHUB ]] || record "FAIL preflight $label: repo must be a github https url"
+    [[ "$sha" =~ $RE_SHA1 ]] || record "FAIL preflight $label: sha is not 40 hex"
+    while IFS=$'\t' read -r -u 4 src dest git_id; do
+      if ! safe_rel_path "$src" || ! safe_rel_path "$dest"; then
+        record "FAIL preflight $label: unsafe subpath"
+      fi
+      [[ "$git_id" =~ $RE_SHA1 ]] || record "FAIL preflight $label: gitId is not 40 hex"
+    done 4< <(jq -r --argjson i "$i" '.tools[$i].subpaths[] | [.src, .dest, .gitId] | @tsv' "$MANIFEST")
+    jq -e --argjson i "$i" '.tools[$i].subpaths | map(.dest) | length == (unique | length)' "$MANIFEST" >/dev/null ||
+      record "FAIL preflight $label: duplicate subpath dest"
+    jq -e --argjson i "$i" '.tools[$i] as $t | any($t.subpaths[]; .dest == $t.packageDir)' "$MANIFEST" >/dev/null ||
+      record "FAIL preflight $label: packageDir must equal one subpath dest"
+    entrypoint="$(tool_field "$i" entrypoint)"
+    case "$entrypoint" in
+      *.dart) safe_rel_path "$entrypoint" || record "FAIL preflight $label: entrypoint must be a safe relative .dart path" ;;
+      *) record "FAIL preflight $label: entrypoint must be a safe relative .dart path" ;;
+    esac
+    lock_overlay="$(tool_field "$i" lockOverlay)"
+    case "$lock_overlay" in
+      "$OVERLAY_DIR_PREFIX"*/pubspec.lock) safe_rel_path "$lock_overlay" || lock_overlay="" ;;
+      *) lock_overlay="" ;;
+    esac
+    [ -n "$lock_overlay" ] || record "FAIL preflight $label: lockOverlay must be under $OVERLAY_DIR_PREFIX and end /pubspec.lock"
+    lock_sha256="$(tool_field "$i" lockSha256)"
+    [[ "$lock_sha256" =~ $RE_SHA256 ]] || record "FAIL preflight $label: lockSha256 is not 64 hex"
+    sdk="$(tool_field "$i" sdk)"
+    grep -qxF -- "$sdk dart-sdk" <<<"$seen" || record "FAIL preflight $label: sdk must name an earlier dart-sdk tool"
+    wrapper="$(tool_field "$i" wrapper)"
+    [[ "$wrapper" =~ $RE_ID ]] || record "FAIL preflight $label: bad wrapper"
+    if grep -qxF -- "$wrapper" <<<"$cli_names" || grep -qxF -- "$wrapper" <<<"$wrappers"; then
+      record "FAIL preflight $label: wrapper collides with a CLI name or another wrapper"
+    fi
+    wrappers="$wrappers$wrapper"$'\n'
+    root_env="$(tool_field "$i" rootEnv)"
+    [[ "$root_env" =~ $re_root_env ]] || record "FAIL preflight $label: rootEnv must match $re_root_env"
+    args="$(tool_field "$i" versionArgs)"
+    [[ "$args" =~ $RE_VERSION_ARGS ]] || record "FAIL preflight $label: versionArgs must be one word"
+    version_line="$(tool_field "$i" versionLine)"
+    case "$version_line" in
+      *" v$version") [[ "$version_line" =~ $re_version_line ]] || version_line="" ;;
+      *) version_line="" ;;
+    esac
+    [ -n "$version_line" ] || record "FAIL preflight $label: versionLine must be plain text ending \" v<version>\""
+    words="$(jq -r --argjson i "$i" '.tools[$i].smokeArgs | length' "$MANIFEST")"
+    if [ "$words" -lt 1 ] || [ "$words" -gt 12 ]; then
+      record "FAIL preflight $label: smokeArgs must hold 1 to 12 words"
+    fi
+    bad_word=0
+    while IFS= read -r word; do
+      [[ "$word" =~ $re_smoke_word ]] || bad_word=1
+    done < <(jq -r --argjson i "$i" '.tools[$i].smokeArgs[]' "$MANIFEST")
+    [ "$bad_word" -eq 0 ] || record "FAIL preflight $label: smokeArgs word is unsafe"
+    smoke_expect="$(tool_field "$i" smokeExpect)"
+    safe_rel_path "$smoke_expect" || record "FAIL preflight $label: unsafe smokeExpect"
+    seen="$seen$name $kind"$'\n'
+  done 3<<<"$TOOL_ROWS"
+  return 0
 }
 
 # extract_object <git-fn> <commit> <src> <gitId> <dest> [exclude...]
@@ -586,8 +889,8 @@ verify_staging() {
   return 0
 }
 
-# Rename a staged pack dir into place. An existing dir is moved aside (never
-# deleted) and reported STALE.
+# Rename a staged pack (or tool) dir into place. An existing dir is moved aside
+# (never deleted) and reported STALE under the optional noun in $3 (default pack).
 publish_dir() {
   local stage="$1" target="$2" aside
   if [ ! -e "$target" ]; then
@@ -605,7 +908,7 @@ publish_dir() {
     mv "$target" "$aside" || return 1
     mv "$stage" "$target" || return 1
   fi
-  record "STALE pack $aside (left in place)"
+  record "STALE ${3:-pack} $aside (left in place)"
 }
 
 # Stamp-and-binary check, kept out of install_cli so nothing there touches the
@@ -632,13 +935,8 @@ install_cli() {
   fi
 
   dl="$WORK/cli-$name.tar.gz"
-  log "downloading $name $version"
-  if ! curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$dl" "$url"; then
-    record "FAIL cli $name: download failed"
-    return 1
-  fi
-  if ! printf '%s  %s\n' "$sha256" "$dl" | sha256sum -c - >/dev/null 2>&1; then
-    record "FAIL cli $name: sha256 mismatch (got $(sha256_of "$dl"))"
+  if ! fetch_verified "$name $version" "$url" "$sha256" "$dl"; then
+    record "FAIL cli $name: $STEP_ERROR"
     return 1
   fi
   x="$WORK/cli-$name.x"
@@ -669,9 +967,7 @@ install_cli() {
   fi
 
   bin_sha="$(sha256_of "$BIN_DIR/$name")"
-  if ! { printf 'tarball_sha256 %s\nbinary_sha256 %s\n' "$sha256" "$bin_sha" >"$stamp.tmp" &&
-    chmod 0644 "$stamp.tmp" &&
-    mv -f "$stamp.tmp" "$stamp"; }; then
+  if ! write_stamp "$stamp" 'tarball_sha256 %s\nbinary_sha256 %s\n' "$sha256" "$bin_sha"; then
     record "FAIL cli $name: could not write its stamp"
     return 1
   fi
@@ -694,6 +990,38 @@ pack_stamp_hash() {
   } | sha256sum | awk '{print $1}'
 }
 
+# fetch_pinned <id> <repo> <sha> <blobless|full>: the one pinned commit into a
+# fresh root-owned scratch repo (FETCH_REPO). Sets STEP_ERROR and returns 1 on
+# failure.
+fetch_pinned() {
+  local id="$1" repo="$2" sha="$3" mode="$4"
+  FETCH_REPO="$WORK/fetch-$id"
+  log "fetching $id @ $sha"
+  if ! { git init -q "$FETCH_REPO" && git_fetch remote add origin "$repo"; }; then
+    STEP_ERROR="cannot create a scratch repo for $id"
+    return 1
+  fi
+  if [ "$mode" = "blobless" ]; then
+    # A partial fetch of the one pinned commit: trees now, each blob on its
+    # first cat-file. The named remote is where those lazy blob fetches go.
+    git_fetch -c protocol.version=2 fetch -q --filter=blob:none --depth 1 origin "$sha" || {
+      STEP_ERROR="fetch of $sha from $repo failed"
+      return 1
+    }
+  else
+    # Every object at once: a tool builds a whole tree, and one lazy fetch per
+    # blob would be hundreds of round trips.
+    git_fetch -c protocol.version=2 fetch -q --depth 1 origin "$sha" || {
+      STEP_ERROR="fetch of $sha from $repo failed"
+      return 1
+    }
+  fi
+  if [ "$(git_fetch rev-parse FETCH_HEAD)" != "$sha" ]; then
+    STEP_ERROR="fetched commit is not the pinned sha"
+    return 1
+  fi
+}
+
 # stage_pack <index> <id> <repo> <sha> <stage> <stamp hash>
 # Fetches, extracts, overlays, strips, verifies and stamps the pack in <stage>
 # with root ownership and read-only modes. Sets STEP_ERROR and returns 1 on any
@@ -708,20 +1036,7 @@ stage_pack() {
     fi
     g=git_repo
   else
-    FETCH_REPO="$WORK/fetch-$id"
-    log "fetching $id @ $sha"
-    # A partial fetch of the one pinned commit: trees now, each blob on its
-    # first cat-file. The named remote is where those lazy blob fetches go.
-    if ! { git init -q "$FETCH_REPO" &&
-      git_fetch remote add origin "$repo" &&
-      git_fetch -c protocol.version=2 fetch -q --filter=blob:none --depth 1 origin "$sha"; }; then
-      STEP_ERROR="fetch of $sha from $repo failed"
-      return 1
-    fi
-    if [ "$(git_fetch rev-parse FETCH_HEAD)" != "$sha" ]; then
-      STEP_ERROR="fetched commit is not the pinned sha"
-      return 1
-    fi
+    fetch_pinned "$id" "$repo" "$sha" blobless || return 1
     g=git_fetch
   fi
 
@@ -784,14 +1099,362 @@ install_pack() {
   return 1
 }
 
+# The stamp's hash covers the manifest's tool entry, for a dart-aot tool also
+# its sdk entry and the lock overlay's blob id at HEAD, and TOOLS_OUTPUT_VERSION.
+tool_stamp_hash() {
+  local i="$1" sdk lock_overlay
+  {
+    jq -c --argjson i "$i" '.tools[$i]' "$MANIFEST"
+    if [ "$(tool_field "$i" kind)" = "dart-aot" ]; then
+      sdk="$(tool_field "$i" sdk)"
+      jq -c --arg n "$sdk" '.tools[] | select(.name == $n)' "$MANIFEST"
+      lock_overlay="$(tool_field "$i" lockOverlay)"
+      git_repo rev-parse --verify --quiet "$HEAD_SHA:$lock_overlay" || printf 'absent %s\n' "$lock_overlay"
+    fi
+    printf 'tools-output %s\n' "$TOOLS_OUTPUT_VERSION"
+  } | sha256sum | awk '{print $1}'
+}
+
+# tool_at_pin <index> <stamp> <expected hash> <target>: the stamp matches, the
+# published artifact still has the recorded sha256 and (dart-aot) the installed
+# wrapper is byte-identical to the template. Reads nothing remote.
+tool_at_pin() {
+  local i="$1" stamp="$2" expected="$3" target="$4" artifact recorded name wrapper check
+  [ -f "$stamp" ] && [ -d "$target" ] || return 1
+  [ "$(head -n 1 "$stamp")" = "stamp $expected" ] || return 1
+  case "$(tool_field "$i" kind)" in
+    dart-sdk) artifact="$target/bin/dart" ;;
+    dart-aot)
+      name="$(tool_field "$i" name)"
+      wrapper="$(tool_field "$i" wrapper)"
+      artifact="$target/bin/$wrapper"
+      check="$WORK/wrapper-check.$name"
+      write_wrapper "$(tool_field "$i" rootEnv)" "$(basename "$target")" "$wrapper" "$check" || return 1
+      cmp -s "$check" "$BIN_DIR/$wrapper" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  recorded="$(sed -n 's/^artifact_sha256 //p' "$stamp")"
+  [ -f "$artifact" ] && [ -n "$recorded" ] && [ "$recorded" = "$(sha256_of "$artifact")" ]
+}
+
+# stage_dart_sdk <index> <stage>: the verified zip's dart-sdk/ contents, in
+# <stage>, root-owned, top dir 0700. Sets STEP_ERROR and returns 1 on failure.
+stage_dart_sdk() {
+  local i="$1" stage="$2" name version url sha256 zip cached x execs scan_out
+  name="$(tool_field "$i" name)"
+  version="$(tool_field "$i" version)"
+  url="$(tool_field "$i" url)"
+  sha256="$(tool_field "$i" sha256)"
+  zip="$WORK/tool-$name.zip"
+  cached=""
+  if [ "$DRY_RUN" -eq 1 ] && [ -n "$BATTERIES_DOWNLOAD_CACHE" ]; then
+    cached="$BATTERIES_DOWNLOAD_CACHE/$sha256.zip"
+  fi
+  # Checked before ANY extraction below, a cached copy included.
+  fetch_verified "$name $version" "$url" "$sha256" "$zip" "$cached" || return 1
+
+  execs="$WORK/tool-$name.execs"
+  scan_out="$WORK/tool-$name.scan"
+  if ! python3 - "$zip" "$execs" >"$scan_out" 2>&1 <<'PY'; then
+import stat
+import sys
+import zipfile
+
+zip_path, execs_path = sys.argv[1], sys.argv[2]
+limit = 2 * 1024 ** 3
+total = 0
+execs = []
+with zipfile.ZipFile(zip_path) as archive:
+    for info in archive.infolist():
+        name = info.filename
+        if not name.startswith("dart-sdk/"):
+            sys.exit("outside dart-sdk/: " + repr(name))
+        if "\x00" in name or "\\" in name or name.startswith("/"):
+            sys.exit("unsafe name: " + repr(name))
+        if any(part in ("", ".", "..") for part in name.rstrip("/").split("/")):
+            sys.exit("unsafe path: " + repr(name))
+        mode = info.external_attr >> 16
+        if stat.S_ISLNK(mode):
+            sys.exit("symlink: " + repr(name))
+        total += info.file_size
+        if total > limit:
+            sys.exit("total size over 2 GiB")
+        if not name.endswith("/") and mode & 0o111:
+            execs.append(name[len("dart-sdk/"):])
+with open(execs_path, "wb") as out:
+    for name in execs:
+        out.write(name.encode() + b"\0")
+PY
+    STEP_ERROR="zip entry rejected: $(head -n 1 "$scan_out")"
+    return 1
+  fi
+
+  x="$stage/.x"
+  if ! python3 -m zipfile -e "$zip" "$x"; then
+    STEP_ERROR="extraction failed"
+    return 1
+  fi
+  if [ -n "$(find "$x" -type l -print | head -n 1)" ]; then
+    STEP_ERROR="zip entry rejected: a symlink appeared after extraction"
+    return 1
+  fi
+  if [ "$(cat "$x/dart-sdk/version" 2>/dev/null)" != "$version" ]; then
+    STEP_ERROR="dart-sdk/version is not $version"
+    return 1
+  fi
+  if ! { find "$x/dart-sdk" -mindepth 1 -maxdepth 1 -exec mv {} "$stage/" \; &&
+    rmdir "$x/dart-sdk" "$x" &&
+    find "$stage" -type d -exec chmod 0755 {} + &&
+    find "$stage" -type f -exec chmod 0644 {} + &&
+    { [ ! -s "$execs" ] || (cd "$stage" && xargs -0 chmod 0755 <"$execs"); } &&
+    { [ "$DRY_RUN" -eq 1 ] || chown -R root:root "$stage"; } &&
+    chmod 0700 "$stage"; }; then
+    STEP_ERROR="could not set modes or ownership"
+    return 1
+  fi
+}
+
+# stage_dart_aot <index> <stage>: <stage>/src/<dest…> from the pinned commit,
+# the committed lock, and <stage>/bin/<wrapper> compiled from them. Sets
+# STEP_ERROR and returns 1 on failure.
+stage_dart_aot() {
+  local i="$1" stage="$2" name repo sha package_dir entrypoint lock_overlay lock_sha256 sdk
+  local sdk_dir wrapper src dest git_id pkg_dir lock build_log status pname root_uri pkg_root
+  name="$(tool_field "$i" name)"
+  repo="$(tool_field "$i" repo)"
+  sha="$(tool_field "$i" sha)"
+  package_dir="$(tool_field "$i" packageDir)"
+  entrypoint="$(tool_field "$i" entrypoint)"
+  lock_overlay="$(tool_field "$i" lockOverlay)"
+  lock_sha256="$(tool_field "$i" lockSha256)"
+  sdk="$(tool_field "$i" sdk)"
+  wrapper="$(tool_field "$i" wrapper)"
+  sdk_dir="$ROOT/$sdk@$(jq -r --arg n "$sdk" '.tools[] | select(.name == $n) | .version' "$MANIFEST")"
+  pkg_dir="$stage/src/$package_dir"
+  lock="$pkg_dir/pubspec.lock"
+  build_log="$WORK/build-$name.log"
+
+  fetch_pinned "$name" "$repo" "$sha" full || return 1
+  # Plumbing only, each subpath tree-id verified. The source tree is a build
+  # input that is never linked into HOME, so the pack scan (forbidden names,
+  # grant keys) does not apply to it: cli/bin is legitimate here.
+  while IFS=$'\t' read -r -u 6 src dest git_id; do
+    extract_object git_fetch "$sha" "$src" "$git_id" "$stage/src/$dest" || return 1
+  done 6< <(jq -r --argjson i "$i" '.tools[$i].subpaths[] | [.src, .dest, .gitId] | @tsv' "$MANIFEST")
+
+  if ! git_repo cat-file blob "$HEAD_SHA:$lock_overlay" >"$lock" 2>/dev/null; then
+    STEP_ERROR="lock overlay $lock_overlay is absent at $HEAD_SHA"
+    return 1
+  fi
+  if [ "$(sha256_of "$lock")" != "$lock_sha256" ]; then
+    STEP_ERROR="lock overlay sha256 mismatch"
+    return 1
+  fi
+
+  if ! { mkdir -p "$ROOT/pub-cache" "$WORK/build-home" "$stage/bin" &&
+    chmod 0700 "$ROOT/pub-cache" &&
+    { [ "$DRY_RUN" -eq 1 ] || chown root:root "$ROOT/pub-cache"; }; }; then
+    STEP_ERROR="cannot prepare the build cache"
+    return 1
+  fi
+  status=0
+  env -i HOME="$WORK/build-home" PATH="$sdk_dir/bin:/usr/bin:/bin" PUB_CACHE="$ROOT/pub-cache" LANG=C \
+    "$sdk_dir/bin/dart" --suppress-analytics pub get --enforce-lockfile --directory "$pkg_dir" \
+    >"$build_log" 2>&1 || status=$?
+  if [ "$status" -ne 0 ]; then
+    log "pub get output (tail):"
+    tail -n 20 "$build_log" >&2
+    STEP_ERROR="pub get --enforce-lockfile failed (exit $status)"
+    return 1
+  fi
+
+  if [ ! -f "$pkg_dir/.dart_tool/package_config.json" ]; then
+    STEP_ERROR="pub get wrote no package_config.json"
+    return 1
+  fi
+  while IFS=$'\t' read -r -u 6 pname root_uri; do
+    case "$root_uri" in
+      *%*)
+        STEP_ERROR="dependency $pname has an encoded root uri"
+        return 1
+        ;;
+      file://*) pkg_root="${root_uri#file://}" ;;
+      /*)
+        STEP_ERROR="dependency $pname has an unexpected root uri"
+        return 1
+        ;;
+      *) pkg_root="$pkg_dir/.dart_tool/$root_uri" ;;
+    esac
+    if [ -e "$pkg_root/hook" ]; then
+      STEP_ERROR="dependency $pname has a build hook"
+      return 1
+    fi
+  done 6< <(jq -r '.packages[] | [.name, .rootUri] | @tsv' "$pkg_dir/.dart_tool/package_config.json")
+
+  status=0
+  env -i HOME="$WORK/build-home" PATH="$sdk_dir/bin:/usr/bin:/bin" PUB_CACHE="$ROOT/pub-cache" LANG=C \
+    "$sdk_dir/bin/dart" --suppress-analytics compile exe "$pkg_dir/$entrypoint" -o "$stage/bin/$wrapper" \
+    >>"$build_log" 2>&1 || status=$?
+  if [ "$status" -ne 0 ]; then
+    log "compile output (tail):"
+    tail -n 20 "$build_log" >&2
+    STEP_ERROR="compile failed (exit $status)"
+    return 1
+  fi
+  rm -rf "$pkg_dir/.dart_tool"
+  if [ "$(sha256_of "$lock")" != "$lock_sha256" ]; then
+    STEP_ERROR="the build rewrote the lock"
+    return 1
+  fi
+  if ! { find "$stage" -type d -exec chmod 0755 {} + &&
+    find "$stage" -type f -exec chmod 0644 {} + &&
+    chmod 0755 "$stage/bin/$wrapper" &&
+    { [ "$DRY_RUN" -eq 1 ] || chown -R root:root "$stage"; }; }; then
+    STEP_ERROR="could not set modes or ownership"
+    return 1
+  fi
+}
+
+# write_wrapper <rootEnv> <tool dir name> <wrapper> [<out>]: the FIXED wrapper
+# text. Only ROOT and shape-checked tokens are interpolated, every path
+# single-quoted. With <out> it only writes the text there (tool_at_pin compares
+# it); without, it installs <bin>/<wrapper> through a temp file and mv -f.
+# shellcheck disable=SC2016 # "$@" is wrapper text, expanded when the wrapper runs
+write_wrapper() {
+  local root_env="$1" dir="$2" wrapper="$3" out="${4:-}" tmp
+  case "$ROOT" in
+    *"'"*)
+      STEP_ERROR="the install root contains a single quote"
+      return 1
+      ;;
+  esac
+  tmp="$out"
+  if [ -z "$out" ]; then
+    mkdir -p "$BIN_DIR" || {
+      STEP_ERROR="cannot create $BIN_DIR"
+      return 1
+    }
+    tmp="$BIN_DIR/.$wrapper.new.$$"
+  fi
+  if ! {
+    printf '#!/bin/sh\n'
+    printf '# Written by install-batteries.sh (batteries tools). Do not edit.\n'
+    printf "%s='%s'\n" "$root_env" "$ROOT/$dir/src"
+    printf "PUB_CACHE='%s'\n" "$ROOT/pub-cache"
+    printf 'export %s PUB_CACHE\n' "$root_env"
+    printf "exec '%s' " "$ROOT/$dir/bin/$wrapper"
+    printf '"$@"\n'
+  } >"$tmp"; then
+    rm -f "$tmp"
+    STEP_ERROR="cannot write the $wrapper wrapper"
+    return 1
+  fi
+  [ -z "$out" ] || return 0
+  if ! { chmod 0755 "$tmp" &&
+    { [ "$DRY_RUN" -eq 1 ] || chown root:root "$tmp"; } &&
+    mv -f "$tmp" "$BIN_DIR/$wrapper"; }; then
+    rm -f "$tmp"
+    STEP_ERROR="cannot install the $wrapper wrapper"
+    return 1
+  fi
+}
+
+# install_tool <index>: SKIPPED at pin, else staged in <root>, published by
+# rename, license copied, stamped last. An aot tool needs its sdk INSTALLED or
+# SKIPPED earlier in this run.
+install_tool() {
+  local i="$1" name kind version sha target stamp expected stage license_member license_file lic_dir
+  local artifact sdk wrapper
+  name="$(tool_field "$i" name)"
+  kind="$(tool_field "$i" kind)"
+  version="$(tool_field "$i" version)"
+  case "$kind" in
+    dart-sdk) target="$ROOT/$name@$version" ;;
+    *)
+      sha="$(tool_field "$i" sha)"
+      target="$ROOT/$name@$sha"
+      ;;
+  esac
+  stamp="$ROOT/tools/$name@$version.stamp"
+  expected="$(tool_stamp_hash "$i")"
+
+  if tool_at_pin "$i" "$stamp" "$expected" "$target"; then
+    record "SKIPPED tool $name $version (already at pin)"
+    TOOLS_OK="$TOOLS_OK$name "
+    return 0
+  fi
+  if [ "$kind" = "dart-aot" ]; then
+    sdk="$(tool_field "$i" sdk)"
+    case "$TOOLS_OK" in
+      *" $sdk "*) ;;
+      *)
+        record "FAIL tool $name: sdk $sdk is not installed at its pin"
+        return 1
+        ;;
+    esac
+  fi
+
+  if ! stage="$(mktemp -d "$ROOT/.staging.$name.XXXXXX")"; then
+    record "FAIL tool $name: cannot create a staging dir under $ROOT"
+    return 1
+  fi
+  STEP_ERROR=""
+  case "$kind" in
+    dart-sdk) stage_dart_sdk "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-staging failed}" ;;
+    *) stage_dart_aot "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-staging failed}" ;;
+  esac
+  if [ -n "$STEP_ERROR" ]; then
+    rm -rf "$stage"
+    record "FAIL tool $name: $STEP_ERROR"
+    return 1
+  fi
+  if ! publish_dir "$stage" "$target" tool; then
+    rm -rf "$stage"
+    record "FAIL tool $name: could not publish $target"
+    return 1
+  fi
+  if [ "$kind" = "dart-sdk" ]; then
+    license_member="$(tool_field "$i" licenseMember)"
+    license_file="$target/${license_member#*/}"
+    artifact="$target/bin/dart"
+  else
+    wrapper="$(tool_field "$i" wrapper)"
+    license_file="$target/src/LICENSE"
+    artifact="$target/bin/$wrapper"
+    if ! write_wrapper "$(tool_field "$i" rootEnv)" "$(basename "$target")" "$wrapper"; then
+      record "FAIL tool $name: $STEP_ERROR"
+      return 1
+    fi
+  fi
+  lic_dir="$ROOT/licenses/$name-$version"
+  if ! { mkdir -p "$lic_dir" "$ROOT/tools" &&
+    { [ ! -f "$license_file" ] || { cat "$license_file" >"$lic_dir/LICENSE" && chmod 0644 "$lic_dir/LICENSE"; }; } &&
+    write_stamp "$stamp" 'stamp %s\nartifact_sha256 %s\nsource %s\n' "$expected" "$(sha256_of "$artifact")" "$HEAD_SHA"; }; then
+    record "FAIL tool $name: could not write its license or stamp"
+    return 1
+  fi
+  record "INSTALLED tool $name $version"
+  TOOLS_OK="$TOOLS_OK$name "
+}
+
 list_stale() {
-  local dir base
+  local dir base noun
   for dir in "$ROOT"/*@*; do
     [ -d "$dir" ] || continue
     base="$(basename "$dir")"
-    if ! jq -e --arg d "$base" 'any(.packs[]; (.id + "@" + .sha) == $d)' "$MANIFEST" >/dev/null; then
-      record "STALE pack $dir (left in place)"
+    if jq -e --arg d "$base" '
+      any(.packs[]; (.id + "@" + .sha) == $d)
+      or any((.tools // [])[];
+        (.name + "@" + (if .kind == "dart-sdk" then .version else .sha end)) == $d)' \
+      "$MANIFEST" >/dev/null; then
+      continue
     fi
+    noun=pack
+    if jq -e --arg n "${base%%@*}" 'any((.tools // [])[]; .name == $n)' "$MANIFEST" >/dev/null; then
+      noun=tool
+    fi
+    record "STALE $noun $dir (left in place)"
   done
 }
 
@@ -853,6 +1516,89 @@ verify_as_agent() {
       *) record "FAIL verify $id: the check could not run as $AGENT_USER (status $status)" ;;
     esac
   done 3<<<"$PACK_ROWS"
+
+  verify_tools_as_agent
+}
+
+# Per tool, through as_agent; manifest values reach the agent shell only via
+# BATTERIES_CHECK_* env. dart-aot: the wrapper resolves on the agent PATH, the
+# LAST stdout line of <wrapper> <versionArgs> is versionLine, the smoke command
+# creates smokeExpect in a fresh dir under the agent HOME, and the agent can
+# write neither the tool dir, the wrapper nor the build cache. dart-sdk: the
+# agent cannot list the build-only SDK dir.
+# shellcheck disable=SC2016 # constant command strings: values expand in the agent shell from env
+verify_tools_as_agent() {
+  local row i name kind version sha wrapper args version_line smoke_args smoke_expect target out last status
+  while IFS= read -r -u 3 row; do
+    [ -n "$row" ] || continue
+    i="$(jq -r '.key' <<<"$row")"
+    name="$(tool_field "$i" name)"
+    kind="$(tool_field "$i" kind)"
+    version="$(tool_field "$i" version)"
+    if [ "$kind" = "dart-sdk" ]; then
+      status=0
+      as_agent 'ls "$BATTERIES_CHECK_PATH" >/dev/null 2>&1 && exit 4; exit 0' \
+        "" "" "$ROOT/$name@$version" >/dev/null 2>&1 || status=$?
+      case "$status" in
+        0) record "VERIFIED agent tool $name (build-only, not traversable)" ;;
+        4) record "FAIL verify $name: $AGENT_USER can list the build-only $ROOT/$name@$version" ;;
+        *) record "FAIL verify $name: the check could not run as $AGENT_USER (status $status)" ;;
+      esac
+      continue
+    fi
+    sha="$(tool_field "$i" sha)"
+    wrapper="$(tool_field "$i" wrapper)"
+    args="$(tool_field "$i" versionArgs)"
+    version_line="$(tool_field "$i" versionLine)"
+    smoke_args="$(jq -r --argjson i "$i" '.tools[$i].smokeArgs | join(" ")' "$MANIFEST")"
+    smoke_expect="$(tool_field "$i" smokeExpect)"
+    target="$ROOT/$name@$sha"
+
+    # Shape-checked single words (versionArgs, smokeArgs) are left unquoted.
+    status=0
+    out="$(as_agent 'p="$(command -v -- "$BATTERIES_CHECK_NAME")"; [ "$p" = "$BATTERIES_CHECK_PATH" ] || { printf "resolves %s\n" "${p:-nothing}"; exit 3; }; "$BATTERIES_CHECK_NAME" $BATTERIES_CHECK_ARGS' \
+      "$wrapper" "$args" "$BIN_DIR/$wrapper" 2>/dev/null)" || status=$?
+    last="${out##*$'\n'}"
+    if [ "$status" -eq 3 ]; then
+      record "FAIL verify $name: agent $last, expected $BIN_DIR/$wrapper"
+      continue
+    fi
+    if [ "$status" -ne 0 ] || [ "$last" != "$version_line" ]; then
+      record "FAIL verify $name: '$wrapper $args' as $AGENT_USER printed '$last' (status $status), expected '$version_line'"
+      continue
+    fi
+
+    status=0
+    as_agent 'd="$(mktemp -d "$HOME/tool-smoke.XXXXXX")" || exit 3; cd "$d" || exit 3; "$BATTERIES_CHECK_NAME" $BATTERIES_CHECK_ARGS >/dev/null 2>&1 || exit 4; [ -f "$d/$BATTERIES_CHECK_PATH" ] || exit 5' \
+      "$wrapper" "$smoke_args" "$smoke_expect" >/dev/null 2>&1 || status=$?
+    case "$status" in
+      0) ;;
+      4)
+        record "FAIL verify $name: the smoke command failed as $AGENT_USER"
+        continue
+        ;;
+      5)
+        record "FAIL verify $name: the smoke command did not create $smoke_expect"
+        continue
+        ;;
+      *)
+        record "FAIL verify $name: the smoke check could not run as $AGENT_USER (status $status)"
+        continue
+        ;;
+    esac
+
+    # NAME = the wrapper, PATH = the tool dir, ARGS = the build cache.
+    status=0
+    as_agent 'w="$(find "$BATTERIES_CHECK_PATH" "$BATTERIES_CHECK_NAME" -writable -print)" || exit 3; [ -z "$w" ] || exit 5; [ ! -w "$BATTERIES_CHECK_ARGS" ] || exit 6' \
+      "$BIN_DIR/$wrapper" "$ROOT/pub-cache" "$target" >/dev/null 2>&1 || status=$?
+    case "$status" in
+      0) record "VERIFIED agent tool $name ($version_line; smoke ok)" ;;
+      3) record "FAIL verify $name: $AGENT_USER cannot traverse $target" ;;
+      5) record "FAIL verify $name: part of $target or its wrapper is writable by $AGENT_USER" ;;
+      6) record "FAIL verify $name: the build cache is writable by $AGENT_USER" ;;
+      *) record "FAIL verify $name: the check could not run as $AGENT_USER (status $status)" ;;
+    esac
+  done 3<<<"$TOOL_ROWS"
 }
 
 invalidate_manifest_hash() {
@@ -877,7 +1623,7 @@ write_manifest_hash() {
 }
 
 main() {
-  local i id repo sha name version url sha256 member license_member
+  local i id repo sha name version url sha256 member license_member row
   if ! git_repo rev-parse --git-dir >/dev/null 2>&1; then
     usage_error "AUTOMATA_REPO=$AUTOMATA_REPO is not a git checkout (set AUTOMATA_REPO=/opt/automata-platform)"
   fi
@@ -897,6 +1643,10 @@ main() {
   fi
 
   preflight || finish
+  if [ "$BATTERIES_PREFLIGHT_ONLY" = "1" ]; then
+    record "PREFLIGHT ONLY (dry run): nothing installed"
+    finish
+  fi
   mkdir -p "$ROOT"
 
   invalidate_manifest_hash
@@ -909,6 +1659,12 @@ main() {
   while IFS=$'\t' read -r -u 3 i id repo sha; do
     install_pack "$i" "$id" "$repo" "$sha" || true
   done 3<<<"$PACK_ROWS"
+
+  # Tools after packs, in manifest order (an aot tool's sdk comes first).
+  while IFS= read -r -u 3 row; do
+    [ -n "$row" ] || continue
+    install_tool "$(jq -r '.key' <<<"$row")" || true
+  done 3<<<"$TOOL_ROWS"
 
   list_stale
 

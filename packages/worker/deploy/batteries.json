@@ -82,6 +82,44 @@
           "gitId": "33268753639eeabc2f1b25aff79a50359152968c"
         }
       ]
+    },
+    {
+      "id": "somnio-skills",
+      "repo": "https://github.com/somnio-software/somnio-ai-tools",
+      "sha": "aa53f071128a32bdafe4fbf77a7b0e0940b33db9",
+      "license": "MIT",
+      "requires": ["github-read-token"],
+      "subpaths": [
+        {
+          "src": "skills/dora-metrics",
+          "dest": "skills/dora-metrics",
+          "gitId": "33659094d6a829dc01af402d363e2576a3b1c6db",
+          "exclude": [
+            "tests/e2e/run_e2e.py",
+            "tests/test_dora_metrics.py",
+            "tests/test_practice_guidance.py",
+            "tests/test_troubleshooting.py",
+            "evals/evals.json"
+          ]
+        },
+        {
+          "src": "skills/react-health-audit",
+          "dest": "skills/react-health-audit",
+          "gitId": "8e9a07ad933408a28da2ef4b3ca25ee84e244d16",
+          "exclude": [".agent/workflows/react_health_audit.md"]
+        },
+        {
+          "src": "skills/security-audit",
+          "dest": "skills/security-audit",
+          "gitId": "9660e00d89d444c4d1bd505a4a628ec215158326",
+          "exclude": [".agent/workflows/security_audit.md"]
+        },
+        {
+          "src": "LICENSE",
+          "dest": "LICENSE",
+          "gitId": "0cdd8a5c076691ebe0980ca7e8d2f741778894d4"
+        }
+      ]
     }
   ],
   "clis": [
@@ -128,6 +166,66 @@
     {
       "name": "gsd-integration-checker",
       "reason": "It audits .planning/ phase summaries rather than a pull request diff, so it has no role in the review lane."
+    }
+  ],
+  "tools": [
+    {
+      "name": "dart-sdk",
+      "kind": "dart-sdk",
+      "version": "3.13.5",
+      "url": "https://storage.googleapis.com/dart-archive/channels/stable/release/3.13.5/sdk/dartsdk-linux-x64-release.zip",
+      "sha256": "ea864bc64df30a6b8bdf30b2e32550f7717d9a890de8f40293aeabb924fe232b",
+      "licenseMember": "dart-sdk/LICENSE",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "somnio-cli",
+      "kind": "dart-aot",
+      "version": "3.1.1",
+      "repo": "https://github.com/somnio-software/somnio-ai-tools",
+      "sha": "aa53f071128a32bdafe4fbf77a7b0e0940b33db9",
+      "subpaths": [
+        {
+          "src": "skills",
+          "dest": "skills",
+          "gitId": "0c6874a27e61f1f112c724c787445704c8dec7b2"
+        },
+        {
+          "src": "agent-rules",
+          "dest": "agent-rules",
+          "gitId": "3db495ec60e5de6474da2be9e497f97c839945b9"
+        },
+        {
+          "src": "cli",
+          "dest": "cli",
+          "gitId": "0d49975aa94339a05bb4f150ac3f76098f24331b"
+        },
+        {
+          "src": "LICENSE",
+          "dest": "LICENSE",
+          "gitId": "0cdd8a5c076691ebe0980ca7e8d2f741778894d4"
+        }
+      ],
+      "packageDir": "cli",
+      "entrypoint": "bin/somnio.dart",
+      "lockOverlay": "packages/worker/deploy/batteries/somnio-cli/pubspec.lock",
+      "lockSha256": "382a7234b0a98fd98ee5622193fe5632ef83d5ac3bd91056b080b423787e349d",
+      "sdk": "dart-sdk",
+      "license": "MIT",
+      "wrapper": "somnio",
+      "rootEnv": "SOMNIO_ROOT",
+      "versionArgs": "--version",
+      "versionLine": "somnio v3.1.1",
+      "smokeArgs": [
+        "skills",
+        "install",
+        "--agent",
+        "claude",
+        "--project",
+        "--skills",
+        "dora_metrics"
+      ],
+      "smokeExpect": ".claude/skills/dora-metrics/SKILL.md"
     }
   ]
 }

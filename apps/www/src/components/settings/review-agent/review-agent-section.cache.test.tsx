@@ -37,6 +37,7 @@ function dto(updatedAt: string, maxTurns: number | null): RepoReviewSettingDto {
     reviewRunTests: null,
     reviewCommandTimeoutS: null,
     reviewMaxTurns: maxTurns,
+    taskBatteries: null,
     updatedAt,
   };
 }

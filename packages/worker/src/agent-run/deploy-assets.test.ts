@@ -1,17 +1,27 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { REVIEW_BATTERY_PACK_IDS } from "../../../shared/src/model/review-agent-settings";
+import {
+  BATTERY_PACK_IDS,
+  BATTERY_PACK_REQUIRES,
+  BATTERY_REQUIREMENTS as SHARED_BATTERY_REQUIREMENTS,
+  REVIEW_BATTERY_PACK_IDS,
+} from "../../../shared/src/model/review-agent-settings";
 import {
   BATTERIES_MANIFEST_REPO_PATH,
+  BATTERY_REQUIREMENTS,
+  DART_SDK_URL_TEMPLATE,
   FORBIDDEN_NAMES,
   findBatteriesManifestError,
   isBatteriesManifest,
   type BatteriesManifest,
+  type BatteryDartAotTool,
+  type BatteryDartSdkTool,
 } from "./batteries-manifest";
 
 /**
@@ -322,6 +332,285 @@ function frontmatterLines(md: string): string[] {
   return end === -1 ? [] : lines.slice(1, end);
 }
 
+const SOMNIO_CLI_LOCK =
+  "packages/worker/deploy/batteries/somnio-cli/pubspec.lock";
+
+/** The phase 3 review packs as merged (origin/main 846c598). */
+const PHASE3_REVIEW_PACKS: Record<string, unknown> = {
+  "gstack-review": {
+    id: "gstack-review",
+    repo: "https://github.com/garrytan/gstack",
+    sha: "fe6d1ae62a42e67bfb12b7f8e6143c705f375f38",
+    license: "MIT",
+    subpaths: [
+      {
+        src: "review/checklist.md",
+        dest: "skills/gstack-review/checklist.md",
+        gitId: "7692f35ec845b777800704ebdd9e3d4a9a5ed88b",
+      },
+      {
+        src: "review/specialists",
+        dest: "skills/gstack-review/specialists",
+        gitId: "d53a993b862bd09a13b1ff26db568f167d992319",
+      },
+      {
+        src: "LICENSE",
+        dest: "LICENSE",
+        gitId: "35029511144443297cad2d26e4bac17d0e352f93",
+      },
+      {
+        src: "LICENSE",
+        dest: "skills/gstack-review/LICENSE",
+        gitId: "35029511144443297cad2d26e4bac17d0e352f93",
+      },
+    ],
+    overlays: [
+      {
+        from: "packages/worker/deploy/batteries/gstack-review/SKILL.md",
+        dest: "skills/gstack-review/SKILL.md",
+      },
+    ],
+    allowedHelperRefs: [
+      {
+        file: "skills/gstack-review/checklist.md",
+        ref: "~/.claude/skills/gstack/bin/gstack-decision-search",
+        count: 1,
+      },
+    ],
+  },
+  "somnio-review": {
+    id: "somnio-review",
+    repo: "self",
+    sha: "e2716a48d0528a42cbb343307280069b2556680c",
+    license:
+      "internal (Somnio material vendored via the somnio-engineering-ai plugin; see .claude/harness.json)",
+    subpaths: [
+      {
+        src: ".claude/skills/security-audit",
+        dest: "skills/security-audit",
+        gitId: "4d97eeeafb6c9f46ad62e3ed71d47416816f5341",
+        exclude: ["references/gemini-analysis.md", "agents/gemini-analyzer.md"],
+      },
+    ],
+  },
+  "gsd-reviewers": {
+    id: "gsd-reviewers",
+    repo: "https://github.com/gsd-build/get-shit-done",
+    sha: "7dfeb7ad8acbd6febd2c8c6cf7d3dcb7d1aeb7b9",
+    license: "MIT",
+    subpaths: [
+      {
+        src: "agents/gsd-code-reviewer.md",
+        dest: "agents/gsd-code-reviewer.md",
+        gitId: "17a01abec822b38bcbbab6e1ace235126dcad1a9",
+      },
+      {
+        src: "agents/gsd-security-auditor.md",
+        dest: "agents/gsd-security-auditor.md",
+        gitId: "31847360fbd6554e9016f34121481bcf188fd63f",
+      },
+      {
+        src: "LICENSE",
+        dest: "LICENSE",
+        gitId: "33268753639eeabc2f1b25aff79a50359152968c",
+      },
+    ],
+  },
+};
+
+/** The 29 runtime packages of somnio CLI 3.1.1, resolved with Dart SDK 3.13.5 (07-RESEARCH). */
+const SOMNIO_CLI_RUNTIME_CLOSURE: readonly (readonly [
+  string,
+  string,
+  string,
+])[] = [
+  [
+    "args",
+    "2.7.0",
+    "d0481093c50b1da8910eb0bb301626d4d8eb7284aa739614d2b394ee09e3ea04",
+  ],
+  [
+    "async",
+    "2.13.1",
+    "e2eb0491ba5ddb6177742d2da23904574082139b07c1e33b8503b9f46f3e1a37",
+  ],
+  [
+    "characters",
+    "1.4.1",
+    "faf38497bda5ead2a8c7615f4f7939df04333478bf32e4173fcb06d428b5716b",
+  ],
+  [
+    "clock",
+    "1.1.3",
+    "e51d50bca3217c9a9fa2b41a30e4a38971133f5f9ec7a3d57bae095007f1d28e",
+  ],
+  [
+    "collection",
+    "1.19.1",
+    "2f5709ae4d3d59dd8f7cd309b4e023046b57d8a6c82130785d2b0e5868084e76",
+  ],
+  [
+    "dart_console",
+    "4.1.4",
+    "bf62b8016530fef83557c1f01867c281d0937dceb84204128819e6e925ddf73f",
+  ],
+  [
+    "ffi",
+    "2.2.0",
+    "6d7fd89431262d8f3125e81b50d3847a091d846eafcd4fdb88dd06f36d705a45",
+  ],
+  [
+    "file",
+    "7.0.1",
+    "a3b4f84adafef897088c160faf7dfffb7696046cb13ae90b508c2cbc95d3b8d4",
+  ],
+  [
+    "http",
+    "1.6.0",
+    "87721a4a50b19c7f1d49001e51409bddc46303966ce89a65af4f4e6004896412",
+  ],
+  [
+    "http_parser",
+    "4.1.2",
+    "178d74305e7866013777bab2c3d8726205dc5a4dd935297175b19a23a2e66571",
+  ],
+  [
+    "interact_cli",
+    "2.4.0",
+    "936422743e3538ab8dc110795ecd686f1f252295679e85c3146cfa8b6c9ee98a",
+  ],
+  [
+    "intl",
+    "0.20.3",
+    "1ca20c894b1717686a2319b8548763d812bc0aabdac580420a44c5178c57a867",
+  ],
+  [
+    "io",
+    "1.1.0",
+    "2635216ca6a737e60de577ffa1a48a0bec76ca8a62917cfc1bb88c14c570646f",
+  ],
+  [
+    "json_annotation",
+    "4.12.0",
+    "2a743920d81b7910627f68ee2c9ac1fc0bfee32b9fc3403587d7c6791ca12f80",
+  ],
+  [
+    "mason_logger",
+    "0.3.5",
+    "1d46102c6f299c0df7fe986dd3dd3271d57c2ec7c00ae590660b7c3018810048",
+  ],
+  [
+    "meta",
+    "1.19.0",
+    "307249ce4ff29d58a18e97f6345f539382eb9c9c29ecda628900f31de0443dd9",
+  ],
+  [
+    "path",
+    "1.9.1",
+    "75cca69d1490965be98c73ceaea117e8a04dd21217b37b292c9ddbec0d955bc5",
+  ],
+  [
+    "platform",
+    "3.2.0",
+    "a36d119c13416516a7b5913fbe8af8531e11633d784c550b2125f76c758524ec",
+  ],
+  [
+    "process",
+    "5.0.6",
+    "4242ba3508d37e01808bdf71ad1d5bb93a8d671bf2e7450e6b1b353fb0808891",
+  ],
+  [
+    "pub_semver",
+    "2.2.1",
+    "261236774e8b1d69cfc6b9eabbc96c40f25e7a2d6b171f3385d4f65d5734fb24",
+  ],
+  [
+    "pub_updater",
+    "0.5.0",
+    "739a0161d73a6974c0675b864fb0cf5147305f7b077b7f03a58fa7a9ab3e7e7d",
+  ],
+  [
+    "source_span",
+    "1.10.2",
+    "56a02f1f4cd1a2d96303c0144c93bd6d909eea6bee6bf5a0e0b685edbd4c47ab",
+  ],
+  [
+    "string_scanner",
+    "1.4.1",
+    "921cd31725b72fe181906c6a94d987c78e3b98c2e205b397ea399d4054872b43",
+  ],
+  [
+    "term_glyph",
+    "1.2.2",
+    "7f554798625ea768a7518313e58f83891c7f5024f88e46e7182a4558850a4b8e",
+  ],
+  [
+    "tint",
+    "2.0.1",
+    "9652d9a589f4536d5e392cf790263d120474f15da3cf1bee7f1fdb31b4de5f46",
+  ],
+  [
+    "typed_data",
+    "1.4.0",
+    "f9049c039ebfeb4cf7a7104a675823cd72dba8297f264b6637062516699fa006",
+  ],
+  [
+    "web",
+    "1.1.1",
+    "868d88a33d8a87b18ffc05f9f030ba328ffefba92d6c127917a2ba740f9cfe4a",
+  ],
+  [
+    "win32",
+    "5.15.0",
+    "d7cb55e04cd34096cd3a79b3330245f54cb96a370a1c27adb3c84b917de8b08e",
+  ],
+  [
+    "yaml",
+    "3.1.4",
+    "f67cdd8e07d3c6329146aaef1ba043542b3134c12489f553ca9a7435d1068aea",
+  ],
+];
+
+interface PubLockEntry {
+  version?: string;
+  sha256?: string;
+  source?: string;
+  url?: string;
+}
+
+/**
+ * The `packages:` entries of a pubspec.lock as pub writes it. Pub's YAML
+ * writer quotes a scalar only when it would otherwise parse as a non-string,
+ * so a sha256 that starts with a digit is quoted and one that starts with a
+ * letter is not; both forms are accepted.
+ */
+function parsePubspecLock(text: string): Map<string, PubLockEntry> {
+  const entries = new Map<string, PubLockEntry>();
+  let current: PubLockEntry | undefined;
+  let inPackages = false;
+  for (const line of text.split("\n")) {
+    if (/^\S/.test(line)) {
+      inPackages = line === "packages:";
+      current = undefined;
+      continue;
+    }
+    if (!inPackages) continue;
+    const pkgName = /^  ([a-z0-9_]+):$/.exec(line)?.[1];
+    if (pkgName !== undefined) {
+      current = {};
+      entries.set(pkgName, current);
+      continue;
+    }
+    if (current === undefined) continue;
+    const field = /^ {4,6}(version|sha256|source|url): "?([^"]*)"?$/.exec(line);
+    const key = field?.[1];
+    if (key !== undefined) {
+      Object.assign(current, { [key]: field?.[2] });
+    }
+  }
+  return entries;
+}
+
 function readBatteriesManifest(): BatteriesManifest {
   const parsed: unknown = JSON.parse(
     read(path.join(repoRoot, BATTERIES_MANIFEST_REPO_PATH)),
@@ -346,10 +635,13 @@ describe("#batteries (phase 3): batteries.json", () => {
     return found;
   };
 
-  it("lists exactly the shared REVIEW_BATTERY_PACK_IDS, in order", () => {
-    // The admin panel (Phase 4) offers these ids; a pack the box does not
-    // install, or an install the panel cannot select, is a silent no-op.
-    expect(manifest.packs.map((p) => p.id)).toEqual([
+  it("lists exactly the shared BATTERY_PACK_IDS, in order; the review packs first", () => {
+    // The admin panel offers these ids (Phase 4: the review setting offers
+    // REVIEW_BATTERY_PACK_IDS; Phase 7: the task setting offers every id). A
+    // pack the box does not install, or an install the panel cannot select,
+    // is a silent no-op.
+    expect(manifest.packs.map((p) => p.id)).toEqual([...BATTERY_PACK_IDS]);
+    expect(manifest.packs.slice(0, 3).map((p) => p.id)).toEqual([
       ...REVIEW_BATTERY_PACK_IDS,
     ]);
   });
@@ -367,6 +659,162 @@ describe("#batteries (phase 3): batteries.json", () => {
     expect(somnio.subpaths.map((s) => s.gitId)).toEqual([
       "4d97eeeafb6c9f46ad62e3ed71d47416816f5341",
     ]);
+  });
+
+  it("keeps the three review packs byte-identical to their phase 3 pins", () => {
+    // Phase 7 only appends; an accidental edit to a review pack changes what
+    // every orchestrated review loads.
+    for (const id of REVIEW_BATTERY_PACK_IDS) {
+      expect(packById(id), id).toEqual(PHASE3_REVIEW_PACKS[id]);
+    }
+  });
+
+  it("somnio-skills requires a read-only GitHub token; the review packs declare nothing (phase 7)", () => {
+    expect(packById("somnio-skills").requires).toEqual(["github-read-token"]);
+    for (const id of REVIEW_BATTERY_PACK_IDS) {
+      expect("requires" in packById(id), id).toBe(false);
+    }
+  });
+
+  it("every pack's requires equals the shared BATTERY_PACK_REQUIRES (www decides from the shared map)", () => {
+    for (const pack of readBatteriesManifest().packs) {
+      expect(pack.requires ?? [], pack.id).toEqual([
+        ...BATTERY_PACK_REQUIRES[pack.id as keyof typeof BATTERY_PACK_REQUIRES],
+      ]);
+    }
+  });
+
+  it("pins the somnio-skills pack (phase 7)", () => {
+    const pack = packById("somnio-skills");
+    expect(pack.repo).toBe(
+      "https://github.com/somnio-software/somnio-ai-tools",
+    );
+    expect(pack.sha).toBe("aa53f071128a32bdafe4fbf77a7b0e0940b33db9");
+    expect(pack.license).toBe("MIT");
+    expect(pack.overlays).toBeUndefined();
+    expect(pack.allowedHelperRefs).toBeUndefined();
+    expect(pack.subpaths).toEqual([
+      {
+        src: "skills/dora-metrics",
+        dest: "skills/dora-metrics",
+        gitId: "33659094d6a829dc01af402d363e2576a3b1c6db",
+        exclude: [
+          "tests/e2e/run_e2e.py",
+          "tests/test_dora_metrics.py",
+          "tests/test_practice_guidance.py",
+          "tests/test_troubleshooting.py",
+          "evals/evals.json",
+        ],
+      },
+      {
+        src: "skills/react-health-audit",
+        dest: "skills/react-health-audit",
+        gitId: "8e9a07ad933408a28da2ef4b3ca25ee84e244d16",
+        exclude: [".agent/workflows/react_health_audit.md"],
+      },
+      {
+        src: "skills/security-audit",
+        dest: "skills/security-audit",
+        gitId: "9660e00d89d444c4d1bd505a4a628ec215158326",
+        exclude: [".agent/workflows/security_audit.md"],
+      },
+      {
+        src: "LICENSE",
+        dest: "LICENSE",
+        gitId: "0cdd8a5c076691ebe0980ca7e8d2f741778894d4",
+      },
+    ]);
+  });
+
+  it("pins the dart-sdk and somnio-cli tools (phase 7)", () => {
+    const tools = manifest.tools ?? [];
+    expect(tools.map((t) => t.name)).toEqual(["dart-sdk", "somnio-cli"]);
+    expect(tools[0]).toEqual({
+      name: "dart-sdk",
+      kind: "dart-sdk",
+      version: "3.13.5",
+      url: DART_SDK_URL_TEMPLATE("3.13.5", "linux-x64"),
+      sha256:
+        "ea864bc64df30a6b8bdf30b2e32550f7717d9a890de8f40293aeabb924fe232b",
+      licenseMember: "dart-sdk/LICENSE",
+      license: "BSD-3-Clause",
+    });
+    expect(tools[0]?.kind === "dart-sdk" && tools[0].url).toBe(
+      "https://storage.googleapis.com/dart-archive/channels/stable/release/3.13.5/sdk/dartsdk-linux-x64-release.zip",
+    );
+    const cli = tools[1];
+    if (cli?.kind !== "dart-aot") throw new Error("tools[1] is not dart-aot");
+    expect(cli.version).toBe("3.1.1");
+    expect(cli.repo).toBe("https://github.com/somnio-software/somnio-ai-tools");
+    expect(cli.sha).toBe("aa53f071128a32bdafe4fbf77a7b0e0940b33db9");
+    expect(cli.subpaths).toEqual([
+      {
+        src: "skills",
+        dest: "skills",
+        gitId: "0c6874a27e61f1f112c724c787445704c8dec7b2",
+      },
+      {
+        src: "agent-rules",
+        dest: "agent-rules",
+        gitId: "3db495ec60e5de6474da2be9e497f97c839945b9",
+      },
+      {
+        src: "cli",
+        dest: "cli",
+        gitId: "0d49975aa94339a05bb4f150ac3f76098f24331b",
+      },
+      {
+        src: "LICENSE",
+        dest: "LICENSE",
+        gitId: "0cdd8a5c076691ebe0980ca7e8d2f741778894d4",
+      },
+    ]);
+    expect(cli.packageDir).toBe("cli");
+    expect(cli.entrypoint).toBe("bin/somnio.dart");
+    expect(cli.lockOverlay).toBe(SOMNIO_CLI_LOCK);
+    expect(cli.sdk).toBe("dart-sdk");
+    expect(cli.license).toBe("MIT");
+    expect(cli.wrapper).toBe("somnio");
+    expect(cli.rootEnv).toBe("SOMNIO_ROOT");
+    expect(cli.versionArgs).toBe("--version");
+    expect(cli.versionLine).toBe("somnio v3.1.1");
+    expect(cli.smokeArgs).toEqual([
+      "skills",
+      "install",
+      "--agent",
+      "claude",
+      "--project",
+      "--skills",
+      "dora_metrics",
+    ]);
+    expect(cli.smokeExpect).toBe(".claude/skills/dora-metrics/SKILL.md");
+  });
+
+  it("pins lockSha256 to the committed somnio-cli pubspec.lock", () => {
+    const cli = (manifest.tools ?? []).find((t) => t.name === "somnio-cli");
+    if (cli?.kind !== "dart-aot") throw new Error("no dart-aot somnio-cli");
+    const digest = createHash("sha256")
+      .update(fs.readFileSync(path.join(repoRoot, SOMNIO_CLI_LOCK)))
+      .digest("hex");
+    expect(cli.lockSha256).toBe(digest);
+  });
+
+  it("locks every researched runtime package of the somnio CLI", () => {
+    // A lock bump shows up in review as a diff of this table. Every entry is
+    // hosted on pub.dev and content-hashed, so `pub get --enforce-lockfile`
+    // fails closed on a changed archive.
+    const entries = parsePubspecLock(
+      read(path.join(repoRoot, SOMNIO_CLI_LOCK)),
+    );
+    expect(entries.size).toBe(62);
+    for (const [name, entry] of entries) {
+      expect(entry.source, name).toBe("hosted");
+      expect(entry.url, name).toBe("https://pub.dev");
+      expect(entry.sha256, name).toMatch(/^[0-9a-f]{64}$/);
+    }
+    for (const [name, version, sha256] of SOMNIO_CLI_RUNTIME_CLOSURE) {
+      expect(entries.get(name), name).toMatchObject({ version, sha256 });
+    }
   });
 
   it("installs exactly shellcheck, actionlint and gitleaks; semgrep is dropped", () => {
@@ -550,6 +998,54 @@ function assignment(script: string, name: string): string {
 }
 
 /**
+ * The hygiene every deploy bash script keeps: tracked executable, bash with
+ * strict mode on line 2, parses with `bash -n`, shellcheck clean. bash and
+ * shellcheck are local static checkers (no network, no sudo); shellcheck is
+ * skipped where it is not installed.
+ */
+function describeBashScriptHygiene(relPath: string): void {
+  describe(`${path.basename(relPath)}: bash script hygiene`, () => {
+    const scriptPath = path.join(repoRoot, relPath);
+
+    it("is tracked as an executable bash script in strict mode", () => {
+      const mode = execFileSync("git", ["ls-files", "-s", relPath], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      }).slice(0, 6);
+      expect(mode).toBe("100755");
+      const lines = read(scriptPath).split("\n");
+      expect(lines[0]).toBe("#!/bin/bash");
+      expect(lines[1]).toBe("set -euo pipefail");
+    });
+
+    it("parses with bash -n", () => {
+      expect(() =>
+        execFileSync("bash", ["-n", scriptPath], { stdio: "pipe" }),
+      ).not.toThrow();
+    });
+
+    it("is shellcheck clean", (ctx) => {
+      if (
+        spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
+      ) {
+        ctx.skip();
+      }
+      const result = spawnSync("shellcheck", ["-s", "bash", scriptPath], {
+        encoding: "utf8",
+      });
+      expect(result.stdout + result.stderr).toBe("");
+      expect(result.status).toBe(0);
+    });
+  });
+}
+
+describeBashScriptHygiene("packages/worker/deploy/linux/install-batteries.sh");
+describeBashScriptHygiene("packages/worker/deploy/linux/batteries-dry-run.sh");
+describeBashScriptHygiene(
+  "packages/worker/deploy/linux/task-batteries-acceptance.sh",
+);
+
+/**
  * What decides the bytes install-batteries.sh writes into a pack dir, paired
  * with the INSTALLER_OUTPUT_VERSION it was recorded for. Packs whose stamp
  * holds the current version are SKIPPED, so a change here that ships without
@@ -567,21 +1063,12 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
   // The installer runs as root against a worker-writable checkout and
   // fetches from the internet. Each assertion pins a safety property in the
   // function that owns it, so a refactor cannot quietly move it out.
-  const scriptPath = path.join(
-    workerRoot,
-    "deploy",
-    "linux",
-    "install-batteries.sh",
-  );
   const script = deployFile("linux", "install-batteries.sh");
   const src = code(script);
   const body = (name: string) => fnBody(script, name);
 
-  it("is an executable bash script with strict mode, umask and a neutral cwd", () => {
-    expect(fs.statSync(scriptPath).mode & 0o100).not.toBe(0);
+  it("sets a umask and a neutral cwd (hygiene: describeBashScriptHygiene)", () => {
     const lines = script.split("\n");
-    expect(lines[0]).toBe("#!/bin/bash");
-    expect(lines[1]).toBe("set -euo pipefail");
     expect(lines[2]).toBe("umask 022");
     expect(src).toMatch(/^cd \/$/m);
     expect(src).toContain("unset GIT_DIR");
@@ -600,8 +1087,14 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
     expect(src).toContain('cat-file blob "$HEAD_SHA:');
     const preflight = body("preflight");
     expect(preflight).toContain("jq -e");
-    expect(preflight).toContain("[a-z0-9][a-z0-9-]*");
-    expect(preflight).toContain("-{0,2}[a-z]+");
+    expect(assignment(script, "readonly RE_ID")).toContain(
+      "[a-z0-9][a-z0-9-]*",
+    );
+    expect(assignment(script, "readonly RE_VERSION_ARGS")).toContain(
+      "-{0,2}[a-z]+",
+    );
+    expect(preflight).toContain("$RE_ID");
+    expect(preflight).toContain("$RE_VERSION_ARGS");
     expect(preflight).toContain("safe_rel_path");
     expect(preflight).toContain("check_vendored_path");
     expect(body("safe_rel_path")).toContain("..");
@@ -674,7 +1167,8 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
     expect(stage).toContain("git_repo");
     expect(stage).toContain("git_fetch");
     expect(src).not.toContain("git archive");
-    expect(src).not.toContain("archive ");
+    // "dart-archive" (phase 7) is the Dart SDK download host's path, not git.
+    expect(src.replaceAll("dart-archive", "")).not.toContain("archive ");
     expect(src).not.toMatch(/\bcp\b[^\n]*AUTOMATA_REPO/);
     expect(stage).toContain('cat-file blob "$HEAD_SHA:');
     expect(src).toContain("SOURCE checkout");
@@ -687,22 +1181,38 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
     expect(gitRepo).toContain("core.hooksPath=/dev/null");
   });
 
-  it("checks a CLI's sha256 before anything reaches the bin dir", () => {
+  it("fetch_verified checks the sha256 of a download or a cached copy before returning", () => {
+    const fetch = code(body("fetch_verified"));
+    const check = fetch.indexOf("sha256sum -c");
+    expect(check).toBeGreaterThan(-1);
+    expect(fetch).toContain("curl -fsSL --proto '=https' --tlsv1.2 --retry 3");
+    // A cache hit is COPIED to <out> and checked there; a mismatch fails, and
+    // only a verified download is written back to the cache.
+    const cacheCopy = fetch.indexOf('cp "$cache" "$out"');
+    expect(cacheCopy).toBeGreaterThan(-1);
+    expect(cacheCopy).toBeLessThan(check);
+    expect(fetch.indexOf('cp "$out" "$cache.tmp.')).toBeGreaterThan(check);
+    expect(fetch).toContain('STEP_ERROR="sha256 mismatch');
+  });
+
+  it("checks a CLI's sha256 before anything is extracted or reaches the bin dir", () => {
     const cli = body("install_cli");
-    expect(cli).toContain("sha256sum -c");
-    expect(cli).toContain("curl -fsSL");
-    expect(cli).toContain("--proto '=https'");
-    expect(cli).toContain("tar -xzf");
-    expect(cli.indexOf("$BIN_DIR")).toBeGreaterThan(
-      cli.indexOf("sha256sum -c"),
+    const fetch = cli.indexOf(
+      'fetch_verified "$name $version" "$url" "$sha256" "$dl"',
     );
+    expect(fetch).toBeGreaterThan(-1);
+    expect(cli.indexOf("tar -xzf")).toBeGreaterThan(fetch);
+    expect(cli.indexOf("$BIN_DIR")).toBeGreaterThan(fetch);
     expect(cli).toContain("mv -f");
+    expect(cli).toContain("write_stamp");
   });
 
   it("fetches packs by sha, checks object ids before publishing, never prunes", () => {
     const stage = body("stage_pack");
-    expect(stage).toContain("--filter=blob:none --depth 1");
-    expect(stage).toContain("FETCH_HEAD");
+    // Phase 7 factored the fetch into fetch_pinned; packs keep the blobless mode.
+    expect(stage).toContain('fetch_pinned "$id" "$repo" "$sha" blobless');
+    expect(body("fetch_pinned")).toContain("--filter=blob:none --depth 1");
+    expect(body("fetch_pinned")).toContain("FETCH_HEAD");
     expect(body("extract_object")).toContain("rev-parse");
     const pack = body("install_pack");
     expect(pack.indexOf("stage_pack")).toBeLessThan(
@@ -838,24 +1348,576 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
     expect(script).not.toContain("pip install");
   });
 
-  // The only two tests in this file that spawn a process: bash and
-  // shellcheck are local static checkers (no network, no sudo).
-  it("parses with bash -n", () => {
-    expect(() =>
-      execFileSync("bash", ["-n", scriptPath], { stdio: "pipe" }),
-    ).not.toThrow();
+  it("writes every CLI and tool stamp through write_stamp (temp file, 0644, rename)", () => {
+    const stamp = body("write_stamp");
+    expect(stamp).toContain('>"$stamp.tmp"');
+    expect(stamp).toContain('chmod 0644 "$stamp.tmp"');
+    expect(stamp).toContain('mv -f "$stamp.tmp" "$stamp"');
+    expect(body("install_tool")).toContain("write_stamp");
   });
 
-  it("is shellcheck clean", (ctx) => {
-    if (
-      spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
-    ) {
-      ctx.skip();
+  it("pins the pack `requires` set to the TS guards' BATTERY_REQUIREMENTS (worker and shared)", () => {
+    expect(assignment(script, "readonly PACK_REQUIREMENTS_JSON")).toBe(
+      `readonly PACK_REQUIREMENTS_JSON='${JSON.stringify([...BATTERY_REQUIREMENTS])}'`,
+    );
+    expect([...SHARED_BATTERY_REQUIREMENTS]).toEqual([...BATTERY_REQUIREMENTS]);
+    expect(body("preflight")).toContain(
+      '--argjson allowed "$PACK_REQUIREMENTS_JSON"',
+    );
+  });
+});
+
+/** The host's Dart SDK platform, or undefined where no SDK is published for it. */
+const HOST_DART_PLATFORM: string | undefined = (
+  {
+    "darwin/arm64": "macos-arm64",
+    "darwin/x64": "macos-x64",
+    "linux/x64": "linux-x64",
+    "linux/arm64": "linux-arm64",
+  } as Record<string, string>
+)[`${process.platform}/${process.arch}`];
+
+/** Placeholder replaced by a per-test temp dir in the executed guard tests. */
+const GUARD_PREFIX = "<per-test temp prefix>";
+
+function dartSdkOf(m: BatteriesManifest): BatteryDartSdkTool {
+  const found = (m.tools ?? []).find((t) => t.kind === "dart-sdk");
+  if (found?.kind !== "dart-sdk") throw new Error("no dart-sdk tool");
+  return found;
+}
+
+function dartAotOf(m: BatteriesManifest): BatteryDartAotTool {
+  const found = (m.tools ?? []).find((t) => t.kind === "dart-aot");
+  if (found?.kind !== "dart-aot") throw new Error("no dart-aot tool");
+  return found;
+}
+
+describe("#batteries (phase 7): tools in install-batteries.sh — preflight + SDK", () => {
+  // tools[] reach a root shell (the build) and the agent's PATH (a wrapper).
+  // The SDK is 238 MB of foreign bytes: its sha256 is checked before ANY
+  // extraction (also of a cached dry-run copy), and a python pre-scan rejects
+  // zip-slip, symlink and size-bomb entries before python3 -m zipfile runs.
+  const scriptPath = path.join(
+    workerRoot,
+    "deploy",
+    "linux",
+    "install-batteries.sh",
+  );
+  const script = deployFile("linux", "install-batteries.sh");
+  const src = code(script);
+  const body = (name: string) => fnBody(script, name);
+
+  it("stays generic: no tool name, SDK version or commit in code", () => {
+    expect(src.toLowerCase()).not.toContain("somnio");
+    expect(src).not.toContain("3.13.5");
+    expect(src).not.toContain("aa53f071");
+  });
+
+  it("declares TOOLS_OUTPUT_VERSION exactly once", () => {
+    expect(assignment(script, "TOOLS_OUTPUT_VERSION")).toBe(
+      "TOOLS_OUTPUT_VERSION=1",
+    );
+  });
+
+  it("treats the download cache and preflight-only knobs as dry-run knobs", () => {
+    const guard = src.slice(src.indexOf("DRY_RUN=0"), src.indexOf("DRY_RUN=1"));
+    expect(guard).toContain('[ -n "$BATTERIES_DOWNLOAD_CACHE" ]');
+    expect(guard).toContain('[ -n "$BATTERIES_PREFLIGHT_ONLY" ]');
+    expect(guard).toContain("dry-run knobs are refused for root");
+    expect(guard).toContain(
+      "BATTERIES_DOWNLOAD_CACHE must be an absolute path",
+    );
+    expect(guard).toContain("BATTERIES_PREFLIGHT_ONLY must be 1");
+  });
+
+  it.each<[string, Record<string, string>, string]>([
+    [
+      "the cache without SKIP_SUDO_VERIFY=1",
+      { PREFIX: GUARD_PREFIX, BATTERIES_DOWNLOAD_CACHE: "/tmp/c" },
+      "a dry run needs SKIP_SUDO_VERIFY=1",
+    ],
+    [
+      "the cache with the real prefix",
+      { SKIP_SUDO_VERIFY: "1", BATTERIES_DOWNLOAD_CACHE: "/tmp/c" },
+      "require a non-default PREFIX",
+    ],
+    [
+      "a relative cache dir",
+      {
+        PREFIX: GUARD_PREFIX,
+        SKIP_SUDO_VERIFY: "1",
+        BATTERIES_DOWNLOAD_CACHE: "cache",
+      },
+      "BATTERIES_DOWNLOAD_CACHE must be an absolute path",
+    ],
+    [
+      "preflight-only with the real prefix",
+      { SKIP_SUDO_VERIFY: "1", BATTERIES_PREFLIGHT_ONLY: "1" },
+      "require a non-default PREFIX",
+    ],
+    [
+      "preflight-only set to anything but 1",
+      {
+        PREFIX: GUARD_PREFIX,
+        SKIP_SUDO_VERIFY: "1",
+        BATTERIES_PREFLIGHT_ONLY: "yes",
+      },
+      "BATTERIES_PREFLIGHT_ONLY must be 1",
+    ],
+  ])("refuses %s (exit 2, executed)", (_name, env, message) => {
+    // Guards run before anything is read or written; only bash is spawned.
+    // GUARD_PREFIX lives in a fresh temp dir so a guard that let the run
+    // through could not install anywhere that outlives the test.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "batteries-guard-"));
+    const prefix =
+      env.PREFIX === GUARD_PREFIX ? path.join(dir, "p") : undefined;
+    try {
+      const result = spawnSync("/bin/bash", [scriptPath], {
+        encoding: "utf8",
+        timeout: 30_000,
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          ...env,
+          ...(prefix === undefined ? {} : { PREFIX: prefix }),
+        },
+      });
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stderr).toContain(message);
+      expect(prefix === undefined || !fs.existsSync(prefix)).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
-    const result = spawnSync("shellcheck", ["-s", "bash", scriptPath], {
-      encoding: "utf8",
-    });
-    expect(result.status, result.stdout).toBe(0);
+  });
+
+  it("re-checks the tools contract in preflight, host rules included", () => {
+    const preflight = body("preflight") + body("preflight_tools");
+    expect(body("preflight")).toContain("preflight_tools");
+    for (const token of [
+      "python3",
+      "dartsdk-",
+      "_ROOT$",
+      "pubspec.lock",
+      "uname -s",
+      "uname -m",
+      "Linux/x86_64",
+      "linux-x64",
+      "host_dart_platform",
+      "cannot install tools",
+    ]) {
+      expect(preflight, token).toContain(token);
+    }
+    const platform = body("host_dart_platform");
+    expect(platform).toContain("Darwin/arm64) echo macos-arm64");
+    expect(platform).toContain("Darwin/x86_64) echo macos-x64");
+    expect(platform).toContain("Linux/x86_64) echo linux-x64");
+    expect(platform).toContain("Linux/aarch64) echo linux-arm64");
+  });
+
+  it("checks the SDK zip's sha256 before any extraction, cached copies included", () => {
+    const stage = code(body("stage_dart_sdk"));
+    // fetch_verified checks the sha256 (of a cached copy too, copied into
+    // $WORK first); nothing is extracted from the cache path itself.
+    const fetch = stage.indexOf(
+      'fetch_verified "$name $version" "$url" "$sha256" "$zip" "$cached" || return 1',
+    );
+    expect(fetch).toBeGreaterThan(-1);
+    expect(fetch).toBeLessThan(stage.indexOf("zipfile"));
+    // Only a dry run may name a download cache.
+    expect(stage).toContain('[ "$DRY_RUN" -eq 1 ]');
+  });
+
+  it("pre-scans the zip, extracts with python3, and publishes a build-only SDK", () => {
+    const stage = body("stage_dart_sdk");
+    for (const token of [
+      "python3 -",
+      "S_ISLNK",
+      'startswith("dart-sdk/")',
+      '".."',
+      "2 * 1024 ** 3",
+      "-m zipfile -e",
+      "-type l",
+      "/version",
+      "xargs -0 chmod 0755",
+      'chmod 0700 "$stage"',
+    ]) {
+      expect(stage, token).toContain(token);
+    }
+    expect(src).not.toContain("unzip");
+    // Build-only: nothing of the SDK is placed in the bin dir.
+    expect(stage).not.toContain("$BIN_DIR");
+  });
+
+  it("records STALE tool dirs under their own noun, pack output unchanged", () => {
+    expect(body("publish_dir")).toContain('record "STALE ${3:-pack} $aside');
+  });
+});
+
+/**
+ * What decides the bytes install-batteries.sh writes for a tool, paired with
+ * the TOOLS_OUTPUT_VERSION it was recorded for (same rule as
+ * RECORDED_INSTALLER_OUTPUT): a change here that ships without a version bump
+ * leaves boxes SKIPPING tools built by the old code.
+ *
+ * When this test fails: if the change alters what lands on disk for a tool,
+ * bump TOOLS_OUTPUT_VERSION; either way, record the new hash it prints.
+ */
+const RECORDED_TOOLS_OUTPUT = {
+  version: "1",
+  sha256: "bca0a84d7960e42f2d966085b0df1de0bc254597e304847f1efbdcfc3fb27e28",
+};
+
+describe("#batteries (phase 7): tools in install-batteries.sh — AOT + wrapper + verify", () => {
+  // The CLI is COMPILED as root from tree-id-verified sources and a
+  // sha256-pinned lock, then run by the agent through a fixed wrapper.
+  const script = deployFile("linux", "install-batteries.sh");
+  const body = (name: string) => fnBody(script, name);
+
+  it("stamps tools with TOOLS_OUTPUT_VERSION, bumped with the code that shapes them", () => {
+    expect(body("tool_stamp_hash")).toContain("$TOOLS_OUTPUT_VERSION");
+    expect(assignment(script, "TOOLS_OUTPUT_VERSION")).toBe(
+      `TOOLS_OUTPUT_VERSION=${RECORDED_TOOLS_OUTPUT.version}`,
+    );
+    // fetch_verified was factored out of stage_dart_sdk (no output change);
+    // it stays covered so the hash still sees everything the SDK step runs.
+    const shaping = [
+      body("stage_dart_sdk"),
+      body("fetch_verified"),
+      body("stage_dart_aot"),
+      body("write_wrapper"),
+    ].join("\n");
+    const actual = createHash("sha256").update(shaping).digest("hex");
+    expect(actual, `record sha256: "${actual}"`).toBe(
+      RECORDED_TOOLS_OUTPUT.sha256,
+    );
+  });
+
+  it("fetches a tool's whole pinned commit and checks FETCH_HEAD", () => {
+    const fetch = body("fetch_pinned");
+    expect(fetch).toContain("fetch -q --depth 1 origin");
+    expect(fetch).toContain("FETCH_HEAD");
+    expect(body("stage_dart_aot")).toContain(
+      'fetch_pinned "$name" "$repo" "$sha" full',
+    );
+  });
+
+  it("builds only from object-bound sources and the pinned lock", () => {
+    const stage = code(body("stage_dart_aot"));
+    expect(stage).toContain("extract_object git_fetch");
+    expect(stage).toContain('cat-file blob "$HEAD_SHA:');
+    const lockCheck = stage.indexOf("lock overlay sha256 mismatch");
+    const pubGet = stage.indexOf("pub get --enforce-lockfile");
+    expect(lockCheck).toBeGreaterThan(-1);
+    expect(lockCheck).toBeLessThan(pubGet);
+    expect(stage.indexOf("env -i")).toBeLessThan(pubGet);
+    for (const token of [
+      "--enforce-lockfile",
+      "--suppress-analytics",
+      "package_config.json",
+      "has a build hook",
+      "compile exe",
+      'rm -rf "$pkg_dir/.dart_tool"',
+      'PUB_CACHE="$ROOT/pub-cache"',
+    ]) {
+      expect(stage, token).toContain(token);
+    }
+    expect(stage.indexOf("has a build hook")).toBeLessThan(
+      stage.indexOf("compile exe"),
+    );
+    // The source tree is a build input, never linked into HOME: the pack
+    // scan does not apply (cli/bin is legitimate there).
+    expect(stage).not.toContain("verify_staging");
+    expect(body("stage_dart_aot")).toMatch(/#[^\n]*never linked into HOME/);
+  });
+
+  it("refuses an aot tool whose sdk is not at its pin in this run", () => {
+    const install = body("install_tool");
+    expect(install).toContain("is not installed at its pin");
+    expect(install).toContain("$TOOLS_OK");
+    expect(install.indexOf("is not installed at its pin")).toBeLessThan(
+      install.indexOf("mktemp -d"),
+    );
+  });
+
+  it("writes a fixed-text wrapper through a temp file and mv -f", () => {
+    const wrapper = body("write_wrapper");
+    for (const token of [
+      "exec '",
+      '"$@"',
+      "export",
+      "PUB_CACHE=",
+      'tmp="$BIN_DIR/.$wrapper.new.$$"',
+      'mv -f "$tmp" "$BIN_DIR/$wrapper"',
+      "contains a single quote",
+    ]) {
+      expect(wrapper, token).toContain(token);
+    }
+    // tool_at_pin also requires the installed wrapper to equal the template.
+    expect(body("tool_at_pin")).toContain("write_wrapper");
+    expect(body("tool_at_pin")).toContain("cmp -s");
+  });
+
+  it("installs tools after packs and reports stale tool dirs as tools", () => {
+    const main = body("main");
+    expect(main.indexOf("install_tool")).toBeGreaterThan(
+      main.indexOf("install_pack"),
+    );
+    expect(main.indexOf("invalidate_manifest_hash")).toBeLessThan(
+      main.indexOf("install_tool"),
+    );
+    const stale = body("list_stale");
+    expect(stale).toContain(".tools");
+    expect(stale).toContain("noun=pack");
+    expect(stale).toContain("noun=tool");
+    expect(stale).toContain('record "STALE $noun $dir (left in place)"');
+  });
+
+  it("verifies tools as the agent, values via env only", () => {
+    expect(body("verify_as_agent")).toContain("verify_tools_as_agent");
+    const verify = body("verify_tools_as_agent");
+    for (const token of [
+      "as_agent '",
+      "BATTERIES_CHECK_NAME",
+      "BATTERIES_CHECK_ARGS",
+      "BATTERIES_CHECK_PATH",
+      "command -v",
+      "${out##*$'\\n'}",
+      'mktemp -d "$HOME/',
+      "-writable",
+      "! -w",
+      "VERIFIED agent tool $name ($version_line; smoke ok)",
+      "VERIFIED agent tool $name (build-only, not traversable)",
+    ]) {
+      expect(verify, token).toContain(token);
+    }
+    expect(verify).not.toMatch(
+      /as_agent '[^']*\$\{?(name|wrapper|version|target|smoke|args)\b/,
+    );
+  });
+});
+
+describe("#batteries (phase 7): batteries-dry-run.sh (developer proof)", () => {
+  // The proof needs network and is run by hand (07-02); these checks keep it
+  // runnable and honest between runs.
+  const proof = deployFile("linux", "batteries-dry-run.sh");
+
+  it("refuses root, uses the shared download cache and ends with the proof line", () => {
+    expect(proof).toContain(
+      '[ "$(id -u)" != "0" ] || die "refuses to run as root"',
+    );
+    expect(proof).toContain("BATTERIES_DOWNLOAD_CACHE=");
+    expect(proof).toContain("SKIP_SUDO_VERIFY=1");
+    expect(proof).toContain('echo "DRY-RUN-PROOF-OK"');
+    expect(proof).toContain("worktree add -q --detach");
+    expect(proof).toContain("worktree remove --force");
+    expect(proof).toContain("trap cleanup EXIT");
+    expect(
+      proof
+        .split("\n")
+        .filter((l) => l.startsWith("DRY_RUN_MACOS_ARM64_SDK_SHA256=")),
+    ).toEqual([
+      "DRY_RUN_MACOS_ARM64_SDK_SHA256=9dfe7d6f2558816c2a978aff6c80e8a4509c6cb726c0702a616c64d286f60e88",
+    ]);
+  });
+});
+
+describe("#batteries (phase 7): bash preflight parity with the TS guard (executed)", () => {
+  // Both validators must reject the same malformed tools entry, each with the
+  // rule named. Only /bin/bash install-batteries.sh is spawned, with
+  // BATTERIES_PREFLIGHT_ONLY=1: it stops right after preflight, so nothing is
+  // downloaded or written under PREFIX even when preflight passes.
+  //
+  // The committed manifest names the linux-x64 SDK, which a dry run refuses
+  // on any other host; the bash base therefore rewrites ONLY that url to this
+  // host's platform, while the TS guard always sees the linux-x64 base.
+  const scriptPath = path.join(
+    workerRoot,
+    "deploy",
+    "linux",
+    "install-batteries.sh",
+  );
+  const committed = readBatteriesManifest();
+  const platform = HOST_DART_PLATFORM;
+
+  function somnioSkillsOf(m: BatteriesManifest) {
+    const pack = m.packs.find((p) => p.id === "somnio-skills");
+    if (!pack) throw new Error("no somnio-skills pack");
+    return pack;
+  }
+
+  function based(
+    targetPlatform: string,
+    change: (m: BatteriesManifest, p: string) => void,
+  ): BatteriesManifest {
+    const m = structuredClone(committed);
+    const sdk = dartSdkOf(m);
+    sdk.url = DART_SDK_URL_TEMPLATE(sdk.version, targetPlatform);
+    change(m, targetPlatform);
+    return m;
+  }
+
+  function runPreflight(manifest: BatteriesManifest): {
+    status: number | null;
+    stdout: string;
+    published: boolean;
+  } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "batteries-parity-"));
+    const prefix = path.join(dir, "prefix");
+    const manifestPath = path.join(dir, "batteries.json");
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    try {
+      // The timeout bounds a script that ignores BATTERIES_PREFLIGHT_ONLY and
+      // carries on into a real install (network); preflight alone is seconds.
+      const result = spawnSync("/bin/bash", [scriptPath], {
+        encoding: "utf8",
+        timeout: 30_000,
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: dir,
+          TMPDIR: dir,
+          PREFIX: prefix,
+          SKIP_SUDO_VERIFY: "1",
+          BATTERIES_MANIFEST: manifestPath,
+          BATTERIES_PREFLIGHT_ONLY: "1",
+          AUTOMATA_REPO: repoRoot,
+        },
+      });
+      return {
+        status: result.status,
+        stdout: result.stdout,
+        published: fs.existsSync(prefix),
+      };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("accepts the committed manifest (TS) and its host-platform twin (bash)", (ctx) => {
+    expect(findBatteriesManifestError(committed)).toBeUndefined();
+    if (platform === undefined) {
+      ctx.skip(); // no Dart SDK is published for this host's platform
+      return;
+    }
+    const result = runPreflight(based(platform, () => undefined));
+    expect(result.stdout).not.toContain("FAIL preflight");
+    expect(result.stdout).toContain("RESULT: PASS");
+    expect(result.status).toBe(0);
+    expect(result.published).toBe(false);
+  });
+
+  it.each<[string, (m: BatteriesManifest, p: string) => void, string]>([
+    [
+      "an SDK url for another version",
+      (m, p) => {
+        dartSdkOf(m).url = DART_SDK_URL_TEMPLATE("3.13.4", p);
+      },
+      "url is not the dart-archive template for",
+    ],
+    [
+      "an SDK url for windows-x64",
+      (m) => {
+        const sdk = dartSdkOf(m);
+        sdk.url = DART_SDK_URL_TEMPLATE(sdk.version, "windows-x64");
+      },
+      "platform windows-x64 is not this host's (",
+    ],
+    [
+      'rootEnv "PATH"',
+      (m) => {
+        dartAotOf(m).rootEnv = "PATH";
+      },
+      "rootEnv must match ^[A-Z][A-Z0-9]*_ROOT$",
+    ],
+    [
+      "a two-word versionArgs",
+      (m) => {
+        dartAotOf(m).versionArgs = "--version x";
+      },
+      "versionArgs must be one word",
+    ],
+    [
+      'a smoke word "$(id)"',
+      (m) => {
+        dartAotOf(m).smokeArgs = ["skills", "$(id)"];
+      },
+      "smokeArgs word is unsafe",
+    ],
+    [
+      "a lockOverlay outside the overlay dir",
+      (m) => {
+        dartAotOf(m).lockOverlay = "../x/pubspec.lock";
+      },
+      "lockOverlay must be under packages/worker/deploy/batteries/ and end /pubspec.lock",
+    ],
+    [
+      "an sdk listed after its tool",
+      (m) => {
+        m.tools?.reverse();
+      },
+      "sdk must name an earlier dart-sdk tool",
+    ],
+    [
+      'a tool named "gitleaks"',
+      (m) => {
+        dartAotOf(m).name = "gitleaks";
+      },
+      "tool name collides with a pack id or CLI name",
+    ],
+    [
+      'a wrapper named "shellcheck"',
+      (m) => {
+        dartAotOf(m).wrapper = "shellcheck";
+      },
+      "wrapper collides with a CLI name or another wrapper",
+    ],
+    [
+      "an unknown key",
+      (m) => {
+        Object.assign(dartAotOf(m), { extra: "x" });
+      },
+      "unknown key in tools entry",
+    ],
+    [
+      'kind "dart-jit"',
+      (m) => {
+        Object.assign(dartAotOf(m), { kind: "dart-jit" });
+      },
+      "unknown kind",
+    ],
+    [
+      'pack requires ["github-write-token"]',
+      (m) => {
+        Object.assign(somnioSkillsOf(m), { requires: ["github-write-token"] });
+      },
+      "FAIL preflight somnio-skills: requires must be a list drawn from github-read-token",
+    ],
+    [
+      "a duplicate pack requires entry",
+      (m) => {
+        Object.assign(somnioSkillsOf(m), {
+          requires: ["github-read-token", "github-read-token"],
+        });
+      },
+      "FAIL preflight somnio-skills: requires must be a list drawn from github-read-token",
+    ],
+    [
+      "a non-array pack requires",
+      (m) => {
+        Object.assign(somnioSkillsOf(m), { requires: "github-read-token" });
+      },
+      "FAIL preflight somnio-skills: requires must be a list drawn from github-read-token",
+    ],
+  ])("both reject %s", (_name, change, failText) => {
+    expect(
+      findBatteriesManifestError(based("linux-x64", change)),
+      "TS guard",
+    ).toBeDefined();
+    if (platform === undefined) return; // bash half needs a host SDK platform
+    const result = runPreflight(based(platform, change));
+    expect(result.stdout).toContain(`FAIL preflight `);
+    expect(result.stdout).toContain(failText);
+    expect(result.stdout).toContain("RESULT: FAIL");
+    expect(result.status).toBe(1);
+    expect(result.published).toBe(false);
   });
 });
 
@@ -1370,5 +2432,268 @@ describe("#204: hardening must not fence out the delegated subtree", () => {
     const unit = unitFile();
     expect(unit).toMatch(/^ProtectKernelTunables=yes$/m);
     expect(unit).toMatch(/^ProtectSystem=full$/m);
+  });
+});
+
+describe("#task batteries (phase 7): acceptance script", () => {
+  const scriptRel = "packages/worker/deploy/linux/task-batteries-acceptance.sh";
+  const scriptPath = path.join(repoRoot, scriptRel);
+  const exists = fs.existsSync(scriptPath);
+  const script = exists ? read(scriptPath) : "";
+  const body = (name: string) => fnBody(script, name);
+  const runbook = read(path.join(repoRoot, "deploy", "PILOT-RUNBOOK.md"));
+  const isRoot = process.getuid?.() === 0;
+
+  function run(args: string[]) {
+    return spawnSync("/bin/bash", [scriptPath, ...args], {
+      encoding: "utf8",
+      timeout: 30_000,
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: os.tmpdir() },
+    });
+  }
+
+  it("exists (hygiene: describeBashScriptHygiene)", () => {
+    expect(exists).toBe(true);
+  });
+
+  it("keeps a byte-identical copy of the installer's as_agent and AGENT_PATH", () => {
+    // The installer runs as a single root-owned blob copied out of the
+    // checkout (PILOT-RUNBOOK), so it cannot source a shared lib from the
+    // worker-writable tree; the copies are pinned equal here instead.
+    const installer = deployFile("linux", "install-batteries.sh");
+    expect(body("as_agent")).toBe(fnBody(installer, "as_agent"));
+    expect(assignment(script, "AGENT_PATH")).toBe(
+      assignment(installer, "AGENT_PATH"),
+    );
+  });
+
+  it.each<[string, string[], RegExp]>([
+    ["no args", [], /usage/i],
+    ["an unknown mode", ["deploy"], /usage/i],
+    ["box without --since", ["box", "--repo", "a/b"], /--since/],
+    ["box without --repo", ["box", "--since", "now"], /--repo/],
+    [
+      "box with a malformed --repo",
+      ["box", "--since", "now", "--repo", "a/b;id"],
+      /--repo/,
+    ],
+  ])("exits 2 on %s", (_name, args, message) => {
+    const result = run(args);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toMatch(message);
+    expect(result.stdout).not.toContain("ACCEPTANCE:");
+  });
+
+  it.skipIf(isRoot)(
+    "box refuses a non-root caller with exit 2 before reading anything",
+    () => {
+      const result = run(["box", "--since", "now", "--repo", "a/b"]);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toMatch(/root/);
+      expect(result.stdout).toBe("");
+    },
+  );
+
+  it("box checks uid 0 and Linux before the first box read", () => {
+    const box = body("box_mode");
+    const guard = box.indexOf('[ "$(id -u)" = "0" ]');
+    const linux = box.indexOf('[ "$(uname -s)" = "Linux" ]');
+    expect(guard).toBeGreaterThan(-1);
+    expect(linux).toBeGreaterThan(-1);
+    for (const read of [
+      "manifest.sha256",
+      "journalctl",
+      "git_ro",
+      "as_agent",
+    ]) {
+      expect(box.indexOf(read), read).toBeGreaterThan(Math.max(guard, linux));
+    }
+  });
+
+  it("every git call goes through ONE hardened helper", () => {
+    const helper = body("git_ro");
+    for (const token of [
+      "-c safe.directory=",
+      "-c core.fsmonitor=false",
+      "-c core.hooksPath=/dev/null",
+      "--no-pager",
+      "export GIT_CONFIG_NOSYSTEM=1",
+      "export GIT_CONFIG_GLOBAL=/dev/null",
+      "unset GIT_DIR GIT_WORK_TREE GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT",
+    ]) {
+      expect(helper, token).toContain(token);
+    }
+    const rest = code(script.replace(helper, ""));
+    expect(rest).not.toMatch(/(^|[\s;&|(`$])git\s/m);
+  });
+
+  it("is read-only on the box: no restarts, installs, git writes, schema pushes or chmod/chown outside its own temp dir", () => {
+    const c = code(script);
+    expect(c).not.toMatch(/systemctl\s+(restart|stop|start)/);
+    expect(c).not.toMatch(/install-batteries\.sh/);
+    expect(c).not.toMatch(/rm -rf \//);
+    expect(c).not.toMatch(
+      /\bgit(_ro)?\s+(fetch|merge|pull|push|commit|checkout|switch|reset)\b/,
+    );
+    expect(c).not.toMatch(/drizzle/);
+    const perms = c.split("\n").filter((l) => /\b(chmod|chown)\b/.test(l));
+    expect(perms.length).toBeGreaterThan(0);
+    for (const line of perms) {
+      expect(line).toContain('"$VERIFY_HOME"');
+    }
+    expect(c).toContain('VERIFY_HOME="$(mktemp -d');
+    expect(c).toContain("trap cleanup EXIT");
+  });
+
+  it("box mode checks the install, the agent view and the journal", () => {
+    const c = code(script);
+    for (const token of [
+      "manifest.sha256",
+      "manifest.sha256.invalid",
+      "/tools/",
+      "cat-file blob HEAD:packages/worker/deploy/batteries.json",
+      "command -v dart",
+      "import requests",
+      "journalctl -u automata-worker.service",
+      "--no-pager -o cat",
+      "batteries: lane=task packs=",
+      "] task agent: read-token=",
+      "run start: lane=",
+      "batteries: mode=",
+    ]) {
+      expect(c, token).toContain(token);
+    }
+  });
+
+  it("agent checks use the Phase 3 sudo spawn shape with constant command strings", () => {
+    const spawn = body("as_agent");
+    for (const token of [
+      'runuser -u "$WORKER_USER" -- env -i',
+      '/usr/bin/sudo -n -u "$AGENT_USER" -E --',
+      `/bin/sh -c 'exec bash -lc "$1"' sh`,
+      "</dev/null",
+    ]) {
+      expect(spawn, token).toContain(token);
+    }
+    expect(code(script)).not.toMatch(
+      /as_agent '[^']*\$\{?(wrapper|args|line|repo|since|tid|path|ROOT|BIN_DIR)\b/,
+    );
+  });
+
+  it("prints the SC4 manual evidence rules exactly", () => {
+    for (const token of [
+      "EVIDENCE manual",
+      "reports = each report's content (DORA, react-health, security) quoted or summarised in the transcript or final message — a branch is not evidence (reports/ is gitignored)",
+      "somnio exit codes: record verbatim; never pass/fail evidence",
+      "DORA: Deployment Frequency + Lead Time computed from GitHub in the unchanged run — no 401",
+    ]) {
+      expect(script, token).toContain(token);
+    }
+    expect(script).toContain('echo "ACCEPTANCE: PASS"');
+    expect(script).toContain('echo "ACCEPTANCE: FAIL ($FAILURES)"');
+  });
+
+  it("local mode runs the phase gates and maps them to SC1-SC3", () => {
+    const local = body("local_mode");
+    for (const token of [
+      "SC1",
+      "SC2",
+      "SC3",
+      "NODE_OPTIONS=--max-old-space-size=12288",
+      "transport.golden.json",
+      "batteries-dry-run.sh",
+      "--no-file-parallelism",
+    ]) {
+      expect(local, token).toContain(token);
+    }
+  });
+
+  it("names no customer (public repo)", () => {
+    expect(script).not.toMatch(/bangr/i);
+    expect(runbook).not.toMatch(/bangr/i);
+  });
+
+  describe("journal analysis (sourced, fixture journal)", () => {
+    const PREFIX = "0123456789ab";
+    const T = "thr_task_1";
+    const R = "thr_review_1";
+
+    function analyse(journal: string, repo = "acme/admin") {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tba-journal-"));
+      try {
+        const file = path.join(dir, "journal.txt");
+        fs.writeFileSync(file, journal);
+        const result = spawnSync(
+          "/bin/bash",
+          [
+            "-c",
+            'source "$1"; FAILURES=0; analyse_journal "$2" "$3" "$4"; echo "FAILURES=$FAILURES"',
+            "sh",
+            scriptPath,
+            file,
+            repo,
+            PREFIX,
+          ],
+          { encoding: "utf8", timeout: 30_000 },
+        );
+        return result.stdout + result.stderr;
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    const taskRun = (extra: string[] = []) =>
+      [
+        `[agent-run ${T} trace=00-a-b-01] run start: lane=task repo=acme/admin branch=main`,
+        `[agent-run ${T} trace=00-a-b-01] agent credential: credits (box trust: shared)`,
+        `[agent-run ${T} trace=00-a-b-01] batteries: lane=task packs=somnio-skills manifest=${PREFIX}`,
+        ...extra,
+      ].join("\n");
+    const APPLIED = `[agent-run ${T} trace=00-a-b-01] task agent: read-token=applied`;
+    const reviewRun = [
+      `[agent-run ${R}] run start: lane=review pr=3 repo=acme/web branch=f policy=newest-wins`,
+      `[agent-run ${R}] batteries: mode=classic`,
+    ].join("\n");
+
+    it("a seeded task run with the read token and a clean review run pass", () => {
+      const out = analyse(`${taskRun([APPLIED])}\n${reviewRun}\n`);
+      expect(out).toContain("FAILURES=0");
+      expect(out).toContain(`EVIDENCE task-run thread: ${T}`);
+    });
+
+    it("a manifest prefix that differs from manifest.sha256 fails", () => {
+      const out = analyse(
+        `${taskRun([APPLIED]).replace(PREFIX, "ffffffffffff")}\n`,
+      );
+      expect(out).not.toContain("FAILURES=0");
+    });
+
+    it("no read-token line, or any skip=<reason> line, fails (a skip sticks)", () => {
+      expect(analyse(`${taskRun()}\n`)).not.toContain("FAILURES=0");
+      const skip = `[agent-run ${T}] task agent: read-token=skip=not-delivered`;
+      for (const lines of [[skip], [APPLIED, skip], [skip, APPLIED]]) {
+        const out = analyse(`${taskRun(lines)}\n`);
+        expect(out).not.toContain("FAILURES=0");
+        expect(out).toContain("(read-token=skip=not-delivered)");
+      }
+    });
+
+    it("a task run for another repo is not evidence", () => {
+      expect(analyse(`${taskRun([APPLIED])}\n`, "acme/other")).not.toContain(
+        "FAILURES=0",
+      );
+    });
+
+    it("a review run with a lane= line or a read-token line fails the regression check", () => {
+      const start = `[agent-run ${R}] run start: lane=review pr=3 repo=acme/web branch=f`;
+      for (const bad of [
+        `${start}\n[agent-run ${R}] batteries: lane=task packs=somnio-skills manifest=${PREFIX}`,
+        `${start}\n[agent-run ${R}] batteries: mode=classic\n[agent-run ${R}] task agent: read-token=skip=no-requiring-pack`,
+      ]) {
+        expect(analyse(`${taskRun([APPLIED])}\n${bad}\n`)).not.toContain(
+          "FAILURES=0",
+        );
+      }
+    });
   });
 });

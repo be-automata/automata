@@ -42,6 +42,12 @@ import {
  * Nothing is ever copied: only links, the two link dirs and settings.json are
  * written under `<home>/.claude`. `fs.rm(home, {recursive})` removes a link
  * without following it, so HOME cleanup never touches the install.
+ *
+ * TASK runs (Phase 7) reuse exactly the same verified-install fences with
+ * `hooksOff: false`: the admin-selected packs are linked, but NO settings.json
+ * is read or written, so the repo's own hooks keep today's semantics for the
+ * task lane (its argv has no `--setting-sources`, so the user layer in this
+ * HOME loads alongside the project layer).
  */
 
 export const BATTERIES_ROOT_DEFAULT = "/usr/local/lib/automata-batteries";
@@ -69,9 +75,15 @@ export interface SeedBatteriesOptions {
   log: (line: string) => void;
   aclExec?: AceExec;
   platform?: NodeJS.Platform;
+  /**
+   * Write `disableAllHooks: true` into `<home>/.claude/settings.json`.
+   * Default true = an orchestrated review. Task runs pass false: their hook
+   * semantics must stay exactly as today, so no settings file is touched.
+   */
+  hooksOff?: boolean;
 }
 
-/** An orchestrated run's seeding outcome: verified packs, or why none. */
+/** A seeded run's outcome (orchestrated review or task packs): verified packs, or why none. */
 export type SeedBatteriesResult =
   | {
       ok: true;
@@ -79,6 +91,12 @@ export type SeedBatteriesResult =
       packs: string[];
       /** The verified manifest hash. */
       manifestHash: string;
+      /**
+       * Phase 7: the union of the contributing packs' manifest `requires`
+       * (manifest order, deduped). Present ONLY when non-empty, so results
+       * without a requirement keep their exact shape.
+       */
+      requires?: string[];
     }
   | { ok: false; reason: string };
 
@@ -111,12 +129,42 @@ export async function computeBatteriesManifestHash(
 }
 
 /**
+ * The task gate's decision (task-agent.ts TaskAgentGate), as far as the
+ * batteries line is concerned. `none` for every run that carried no taskAgent.
+ */
+export type BatteriesLineGate =
+  | { kind: "none" }
+  | { kind: "seed"; lane: "task" | "pr" }
+  | { kind: "rejected"; lane: "task" | "pr" | "review" };
+
+/**
  * One line for the run log; ids, reasons and a 12-hex hash prefix only.
- * `undefined` is a classic run (only orchestrated runs are seeded).
+ * Owns the form selection, so every run logs exactly one line:
+ * - a task/pr-lane run whose taskAgent was rejected: `unavailable lane=…
+ *   reason=task-agent-invalid` (nothing was seeded for it);
+ * - a task/pr-lane run that carried packs: `lane=<lane>` replaces
+ *   `mode=orchestrated`, and `undefined` means the packs were never seeded;
+ * - every other run (reviews, runs without taskAgent, a review-lane taskAgent
+ *   that was ignored): today's review forms, `undefined` being a classic run.
  */
 export function formatBatteriesLine(
   result: SeedBatteriesResult | undefined,
+  taskGate: BatteriesLineGate = { kind: "none" },
 ): string {
+  if (taskGate.kind === "rejected" && taskGate.lane !== "review") {
+    return `batteries: unavailable lane=${taskGate.lane} reason=task-agent-invalid`;
+  }
+  if (taskGate.kind === "seed") {
+    const { lane } = taskGate;
+    if (!result) {
+      return `batteries: unavailable lane=${lane} reason=not-seeded`;
+    }
+    if (!result.ok) {
+      return `batteries: unavailable lane=${lane} reason=${result.reason}`;
+    }
+    const packs = result.packs.length > 0 ? result.packs.join(",") : "none";
+    return `batteries: lane=${lane} packs=${packs} manifest=${result.manifestHash.slice(0, 12)}`;
+  }
   if (!result) {
     return "batteries: mode=classic";
   }
@@ -159,13 +207,19 @@ function safeId(id: string): string {
   return ID_OR_NAME.test(id) ? id : "<invalid-id>";
 }
 
-async function writeHooksOffSettings(
-  claudeDir: string,
-  grant: (target: string, kind: "file" | "directory") => Promise<void>,
-  log: (line: string) => void,
-): Promise<void> {
+type Grant = (target: string, kind: "file" | "directory") => Promise<void>;
+
+/** `<home>/.claude` at 0700, granted to the agent — both seeding modes. */
+async function ensureClaudeDir(claudeDir: string, grant: Grant): Promise<void> {
   await fs.mkdir(claudeDir, { recursive: true, mode: 0o700 });
   await grant(claudeDir, "directory");
+}
+
+async function writeHooksOffSettings(
+  claudeDir: string,
+  grant: Grant,
+  log: (line: string) => void,
+): Promise<void> {
   const settingsPath = path.join(claudeDir, "settings.json");
   let existing: Record<string, unknown> = {};
   try {
@@ -496,7 +550,7 @@ export async function seedBatteries(
 ): Promise<SeedBatteriesResult> {
   const { log } = opts;
   const users = opts.agentUser ? [opts.agentUser] : [];
-  const grant = (target: string, kind: "file" | "directory") =>
+  const grant: Grant = (target, kind) =>
     reapplyPathGrant({
       target,
       kind,
@@ -507,7 +561,12 @@ export async function seedBatteries(
   const claudeDir = path.join(home, ".claude");
 
   // (1) HOME writes: errors propagate (a real fault, like the trust seed).
-  await writeHooksOffSettings(claudeDir, grant, log);
+  // The dir is created and granted in both modes (the credential write in
+  // agent-credentials.ts relies on that); only reviews write settings.json.
+  await ensureClaudeDir(claudeDir, grant);
+  if (opts.hooksOff !== false) {
+    await writeHooksOffSettings(claudeDir, grant, log);
+  }
 
   // (2..8) Battery resolution: every failure degrades, nothing throws.
   try {
@@ -577,12 +636,17 @@ export async function seedBatteries(
       }
     }
 
+    const contributedPacks = manifest.packs.filter((p) =>
+      contributed.has(p.id),
+    );
+    const requires = [
+      ...new Set(contributedPacks.flatMap((p) => p.requires ?? [])),
+    ];
     return {
       ok: true,
-      packs: manifest.packs
-        .map((p) => p.id)
-        .filter((id) => contributed.has(id)),
+      packs: contributedPacks.map((p) => p.id),
       manifestHash,
+      ...(requires.length > 0 ? { requires } : {}),
     };
   } catch (e) {
     const reason =

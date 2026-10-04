@@ -165,46 +165,38 @@ describe("materialiseAgentCredentials (D1)", () => {
       log: (line: string) => logs.push(line),
     });
 
-    it.each([
-      ["absent", undefined],
-      ["classic", { mode: "classic" as const, batteries: ["gstack-review"] }],
-    ])(
-      "%s reviewAgent: HOME is exactly today's, no batteries result",
-      async (_label, reviewAgent) => {
-        const credits = await materialiseAgentCredentials({
-          credentials: { type: "built-in-credits" },
-          agent: "claudeCode",
-          runRoot,
-          reviewAgent,
-          batteries: batteries(),
-        });
-        expect(await listTree(credits.home)).toEqual([".claude.json"]);
-        expect(credits.batteries).toBeUndefined();
-        await credits.cleanup();
+    it("no seed (classic review, no task packs): HOME is exactly today's, no batteries result", async () => {
+      const credits = await materialiseAgentCredentials({
+        credentials: { type: "built-in-credits" },
+        agent: "claudeCode",
+        runRoot,
+        batteries: batteries(),
+      });
+      expect(await listTree(credits.home)).toEqual([".claude.json"]);
+      expect(credits.batteries).toBeUndefined();
+      await credits.cleanup();
 
-        const claude = await materialiseAgentCredentials({
-          credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
-          agent: "claudeCode",
-          runRoot,
-          reviewAgent,
-          batteries: batteries(),
-        });
-        expect(await listTree(claude.home)).toEqual([
-          ".claude",
-          ".claude.json",
-          ".claude/.credentials.json",
-        ]);
-        expect(claude.batteries).toBeUndefined();
-        expect(logs).toEqual([]);
-      },
-    );
+      const claude = await materialiseAgentCredentials({
+        credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
+        agent: "claudeCode",
+        runRoot,
+        batteries: batteries(),
+      });
+      expect(await listTree(claude.home)).toEqual([
+        ".claude",
+        ".claude.json",
+        ".claude/.credentials.json",
+      ]);
+      expect(claude.batteries).toBeUndefined();
+      expect(logs).toEqual([]);
+    });
 
     it("orchestrated: packs linked, hooks off, AND the credential still written at 0600", async () => {
       const result = await materialiseAgentCredentials({
         credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
         agent: "claudeCode",
         runRoot,
-        reviewAgent: { mode: "orchestrated", batteries: ["gstack-review"] },
+        seed: { batteries: ["gstack-review"], hooksOff: true },
         batteries: batteries(),
       });
       expect(result.batteries).toMatchObject({
@@ -232,7 +224,7 @@ describe("materialiseAgentCredentials (D1)", () => {
         credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
         agent: "claudeCode",
         runRoot,
-        reviewAgent: { mode: "orchestrated", batteries: ["gstack-review"] },
+        seed: { batteries: ["gstack-review"], hooksOff: true },
         batteries: { ...batteries(), root: path.join(fx.base, "missing") },
       });
       expect(result.batteries).toEqual({
@@ -252,7 +244,7 @@ describe("materialiseAgentCredentials (D1)", () => {
         credentials: { type: "built-in-credits" },
         agent: "claudeCode",
         runRoot,
-        reviewAgent: { mode: "orchestrated", batteries: ["gsd-reviewers"] },
+        seed: { batteries: ["gsd-reviewers"], hooksOff: true },
         batteries: batteries(),
       });
       expect(result.delivered).toBe(false);
@@ -267,9 +259,9 @@ describe("materialiseAgentCredentials (D1)", () => {
         credentials: { type: "built-in-credits" },
         agent: "claudeCode",
         runRoot,
-        reviewAgent: {
-          mode: "orchestrated",
+        seed: {
           batteries: ["gstack-review", "gsd-reviewers"],
+          hooksOff: true,
         },
         batteries: batteries(),
       });
@@ -292,6 +284,52 @@ describe("materialiseAgentCredentials (D1)", () => {
           )
         ).isFile(),
       ).toBe(true);
+    });
+
+    describe("task packs (phase 7)", () => {
+      it("a hooks-on task seed: packs linked, NO settings.json, credential written in the seeded .claude", async () => {
+        const result = await materialiseAgentCredentials({
+          credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
+          agent: "claudeCode",
+          runRoot,
+          seed: { batteries: ["somnio-skills"], hooksOff: false },
+          batteries: batteries(),
+        });
+        expect(result.batteries).toEqual({
+          ok: true,
+          packs: ["somnio-skills"],
+          manifestHash: fx.manifestHash,
+          requires: ["github-read-token"],
+        });
+        const claudeDir = path.join(result.home, ".claude");
+        expect(await listTree(result.home)).toEqual([
+          ".claude",
+          ".claude.json",
+          ".claude/.credentials.json",
+          ".claude/skills",
+          ".claude/skills/dora-metrics",
+          ".claude/skills/react-health-audit",
+          ".claude/skills/security-audit",
+        ]);
+        expect((await fs.stat(claudeDir)).mode & 0o777).toBe(0o700);
+        const cred = path.join(claudeDir, ".credentials.json");
+        expect(await fs.readFile(cred, "utf8")).toBe('{"claudeAiOauth":{}}');
+        expect((await fs.stat(cred)).mode & 0o777).toBe(0o600);
+      });
+
+      it("a hooks-on task seed with built-in-credits: links only, no settings.json", async () => {
+        const result = await materialiseAgentCredentials({
+          credentials: { type: "built-in-credits" },
+          agent: "claudeCode",
+          runRoot,
+          seed: { batteries: ["somnio-skills"], hooksOff: false },
+          batteries: batteries(),
+        });
+        expect(result.batteries).toMatchObject({ ok: true });
+        await expect(
+          fs.lstat(path.join(result.home, ".claude/settings.json")),
+        ).rejects.toThrow();
+      });
     });
   });
 });

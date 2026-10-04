@@ -119,6 +119,76 @@ describe.skipIf(!hasGh)("gh through the gh broker (the preflight path)", () => {
   });
 });
 
+describe.skipIf(!hasGh)(
+  "phase 7: a read-only GITHUB_TOKEN does not pull gh off the broker",
+  () => {
+    it("real `gh api` still reaches the gh broker with the per-run BEARER, and `gh auth token` prints only the bearer", async () => {
+      const READ_TOKEN = "ghs_fake_read_token";
+      const socketDir = tmpDir("broker-int-rt-");
+      const ghConfigDir = tmpDir("broker-int-rtcfg-");
+      const upstream: Array<{ url: string; auth: string | null }> = [];
+      ghBroker = await startGhBroker({
+        installationToken: TOKEN,
+        runBearer: BEARER,
+        socketPath: path.join(socketDir, "gh.sock"),
+        // The broker forwards ONLY after the caller's bearer matched; this sees
+        // the upstream request with the broker-injected installation token.
+        fetchImpl: (async (url: string, init?: RequestInit) => {
+          upstream.push({
+            url: String(url),
+            auth: new Headers(init?.headers).get("authorization"),
+          });
+          return new Response(JSON.stringify({ full_name: REPO }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }) as unknown as typeof fetch,
+      });
+      fs.writeFileSync(
+        path.join(ghConfigDir, "config.yml"),
+        `version: 1\nhttp_unix_socket: ${ghBroker.socketPath}\n`,
+      );
+      const env = buildDaemonEnv({
+        baseEnv: process.env,
+        anthropicApiKey: "",
+        claudeBinDir: "",
+        installationToken: TOKEN,
+        ghConfigDir,
+        botLogin: "automata-ai-bot[bot]",
+        broker: {
+          gitUrl: "http://127.0.0.1:1",
+          ghSocketPath: "",
+          bearer: BEARER,
+          repoFullName: REPO,
+        },
+        githubReadToken: READ_TOKEN,
+      });
+      expect(env.GITHUB_TOKEN).toBe(READ_TOKEN);
+      expect(env.GH_TOKEN).toBe(BEARER);
+
+      // No login shell: execFile resolves gh on the env's PATH directly.
+      const api = await execFileAsync("gh", ["api", `repos/${REPO}`], {
+        env,
+        timeout: 15_000,
+      });
+      expect(api.stdout).toContain(REPO);
+      // The broker accepted the call (bearer matched) and forwarded it with the
+      // installation token it holds — never the read token gh had in its env.
+      expect(upstream).toHaveLength(1);
+      expect(upstream[0]!.url).toContain(`/repos/${REPO}`);
+      expect(upstream[0]!.auth ?? "").toContain(TOKEN);
+      expect(upstream[0]!.auth ?? "").not.toContain(READ_TOKEN);
+
+      const token = await execFileAsync("gh", ["auth", "token"], {
+        env,
+        timeout: 15_000,
+      });
+      expect(token.stdout.trim()).toBe(BEARER);
+      expect(token.stdout).not.toContain(READ_TOKEN);
+    });
+  },
+);
+
 describe.skipIf(!hasGit)(
   "git through the git broker (insteadOf + Bearer)",
   () => {

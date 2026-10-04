@@ -1,4 +1,5 @@
 import type { DB } from "@terragon/shared/db";
+import type { RepoReviewSetting } from "@terragon/shared/db/types";
 import { getRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import {
   buildEgressPolicyShape,
@@ -90,6 +91,19 @@ export async function resolveEgressPolicy({
     return null;
   }
   const row = await getRepoReviewSetting({ db, organizationId, repoFullName });
+  return egressPolicyFromRow(row, plane);
+}
+
+/**
+ * The pure half of resolveEgressPolicy, for a caller that already holds the
+ * (org, repo) settings row (the hatchet dispatch reads it once for every
+ * per-run setting). No row → null; an invalid stored policy throws, exactly
+ * as resolveEgressPolicy does.
+ */
+export function egressPolicyFromRow(
+  row: Pick<RepoReviewSetting, "egressPolicy" | "egressAllowlist"> | undefined,
+  plane: EgressPlane,
+): EgressPolicyShape | null {
   if (!row) {
     return null;
   }

@@ -1,6 +1,12 @@
 import { env } from "@terragon/env/apps-www";
 import { db } from "@/lib/db";
-import { getInstallationToken } from "@terragon/shared/github-app";
+import {
+  getInstallationToken,
+  getReadOnlyInstallationToken,
+  lookupInstallationId,
+} from "@terragon/shared/github-app";
+import { packsRequire } from "@terragon/shared/model/review-agent-settings";
+import { redactSecrets } from "@terragon/utils/redact";
 import { getThreadMinimal } from "@terragon/shared/model/threads";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import {
@@ -18,11 +24,15 @@ import type {
   ThreadSourceMetadata,
   ThreadTrustContext,
 } from "@terragon/shared/db/types";
-import { resolveEgressPolicy } from "@/server-lib/egress/resolve-egress-policy";
+import { egressPolicyFromRow } from "@/server-lib/egress/resolve-egress-policy";
 import {
   resolveReviewAgentFromRows,
   type ReviewAgentDispatch,
 } from "@/server-lib/review/resolve-review-agent";
+import {
+  resolveTaskAgentFromRows,
+  type TaskAgentDispatch,
+} from "@/server-lib/task/resolve-task-agent";
 import {
   getRepoReviewSettingWithOrgDefault,
   supersedeFromRows,
@@ -141,6 +151,18 @@ export interface AgentRunInput {
   daemonCallbackUrl: string;
   /** Short-lived, installation-scoped GitHub token for the clone (x-access-token). */
   installationToken: string;
+  /**
+   * Phase 7, SECRET — handled exactly like installationToken: never logged,
+   * only ever in the Hatchet input. A READ-ONLY (contents/metadata/
+   * pull_requests/issues: read), single-repo, ≤1h GitHub App token, minted
+   * ONLY for a non-review org dispatch whose resolved taskAgent includes a
+   * pack that requires `github-read-token` (BATTERY_PACK_REQUIRES). Never on
+   * review runs. Absent otherwise ⇒ byte-identical payload. The worker puts it
+   * in the agent's GITHUB_TOKEN (07-07 gate); GH_TOKEN stays the broker bearer.
+   */
+  githubReadToken?: string;
+  /** Not secret: the read token's ISO-8601 expiry, so the worker refuses an expired one. */
+  githubReadTokenExpiresAt?: string;
   /** Short-lived, org+thread-scoped daemon token (events + next-message auth). */
   daemonToken: string;
   /**
@@ -180,6 +202,16 @@ export interface AgentRunInput {
    * the worker in Phase 5; mirrored structurally in packages/worker types.
    */
   reviewAgent?: ReviewAgentDispatch;
+  /**
+   * Phase 7, NON-review runs only (manual, scheduled, mention task runs of an
+   * org thread): the battery packs the run gets in its per-run HOME, resolved
+   * LIVE at dispatch (repo row → '*' org default → none). Present only when
+   * the list is non-empty, so a repo without the setting dispatches a
+   * byte-identical payload; review runs never carry it. An invalid stored
+   * value degrades to absent plus a warn line, never a failed dispatch.
+   * Consumed by the worker in 07-05; mirrored structurally in worker types.
+   */
+  taskAgent?: TaskAgentDispatch;
   /**
    * #125/#127 review runs only: the per-PR concurrency key,
    * `${orgId}/${normalizedRepo}/${prNumber}`. The worker variants' per-PR CEL
@@ -237,13 +269,19 @@ type ReviewPlan = {
   snapshot: SupersedeSnapshot;
 };
 
+/** An org thread's (org, repo) + '*' settings rows, read ONCE per dispatch. */
+type OrgSettings = {
+  organizationId: string;
+  rows: Awaited<ReturnType<typeof getRepoReviewSettingWithOrgDefault>>;
+};
+
 /**
  * Decide the dispatch mode ONCE (#125/#127/#165). Legacy plan only for a
- * non-review run. A review run reads the (org, repo) + '*' settings rows ONCE
- * and resolves from them both the supersede policy and (phase 4) the
- * review-agent settings — an unknown stored value in either throws here,
- * failing the dispatch loudly — then derives the variant, the input extension
- * and the metadata from the SNAPSHOT.
+ * non-review run. A review run resolves from the dispatch's settings rows
+ * both the supersede policy and (phase 4) the review-agent settings — an
+ * unknown stored value in either throws here, failing the dispatch loudly —
+ * then derives the variant, the input extension and the metadata from the
+ * SNAPSHOT.
  */
 async function planReviewRun({
   reviewContext,
@@ -254,7 +292,7 @@ async function planReviewRun({
   repoFullName,
   deliveryId,
 }: {
-  reviewContext: { organizationId: string; prNumber: number } | null;
+  reviewContext: (OrgSettings & { prNumber: number }) | null;
   thread: {
     sourceMetadata?: ThreadSourceMetadata | null;
     trustContext?: ThreadTrustContext | null;
@@ -272,12 +310,7 @@ async function planReviewRun({
     // out-of-scope value.
     return null;
   }
-  const { organizationId } = reviewContext;
-  const rows = await getRepoReviewSettingWithOrgDefault({
-    db,
-    organizationId,
-    repoFullName,
-  });
+  const { organizationId, rows } = reviewContext;
   const snapshot = supersedeFromRows({ organizationId, ...rows });
   const reviewAgent = await resolveReviewAgentFromRows({
     db,
@@ -335,6 +368,96 @@ async function planReviewRun({
     commandTimeoutMs: reviewAgent.commandTimeoutMs,
   });
   return plan;
+}
+
+/** The task-run fields of the input; spread like a review plan's extension. */
+type TaskRunExtension = Pick<
+  AgentRunInput,
+  "taskAgent" | "githubReadToken" | "githubReadTokenExpiresAt"
+>;
+
+/**
+ * Phase 7: the task-run plan for a NON-review org dispatch (the caller only
+ * calls it when the review plan is null). Resolves the packs from the
+ * dispatch's settings rows; an invalid stored value degrades to "no packs"
+ * with one warn line, never a failed dispatch.
+ *
+ * DORA auth = Option 3: selecting a pack that requires a read-only GitHub
+ * token IS the opt-in. Minted only here — review dispatches never reach this
+ * — single repo, READ_ONLY_TOKEN_PERMISSIONS, against the installation the
+ * clone token already looked up. A mint failure degrades to "no token" + one
+ * warn line (message only, secrets redacted; never the request body): it
+ * never fails the dispatch, so the daemon token is not revoked for it. The
+ * token value is never logged.
+ *
+ * Key order (taskAgent, then the token pair) is the payload order.
+ */
+async function planTaskRun({
+  rows,
+  organizationId,
+  threadId,
+  repoFullName,
+  owner,
+  repo,
+  installationId,
+}: OrgSettings & {
+  threadId: string;
+  repoFullName: string;
+  owner: string;
+  repo: string;
+  installationId: number;
+}): Promise<TaskRunExtension> {
+  const resolution = resolveTaskAgentFromRows({ organizationId, ...rows });
+  if ("invalid" in resolution) {
+    console.warn(
+      "[hatchet] task agent: invalid stored taskBatteries — dispatching without packs",
+      {
+        threadId,
+        organizationId,
+        repoFullName,
+        detail: resolution.invalid,
+      },
+    );
+  }
+  const { taskAgent } = resolution;
+  if (taskAgent === undefined) {
+    return {};
+  }
+  console.log("[hatchet] task agent", {
+    threadId,
+    packs: taskAgent.batteries,
+  });
+  if (!packsRequire(taskAgent.batteries, "github-read-token")) {
+    return { taskAgent };
+  }
+  try {
+    const minted = await getReadOnlyInstallationToken(
+      owner,
+      repo,
+      installationId,
+    );
+    console.log("[hatchet] task agent: read-only GitHub token minted", {
+      threadId,
+      expiresAt: minted.expiresAt,
+    });
+    return {
+      taskAgent,
+      githubReadToken: minted.token,
+      githubReadTokenExpiresAt: minted.expiresAt,
+    };
+  } catch (error) {
+    console.warn(
+      "[hatchet] task agent: read token mint failed — dispatching without it",
+      {
+        threadId,
+        repoFullName,
+        error: redactSecrets(
+          error instanceof Error ? error.message : String(error),
+        ),
+      },
+    );
+    return { taskAgent };
+  }
 }
 
 /**
@@ -397,7 +520,7 @@ export async function dispatchAgentRun({
   // first sibling failure without waiting for the mint, so a sibling that
   // rejects after the mint's row landed would otherwise leak the token. From
   // the mint on, EVERY failure before the trigger (sibling reads, base-branch
-  // resolve, egress resolve, planReviewRun — which throws on a corrupt stored
+  // resolve, settings read, egress build, planReviewRun — which throws on a corrupt stored
   // policy) revokes it in the catch below, or
   // hasActiveDaemonToken() would report a phantom run for this runKey and
   // silently no-op every retry for the token's TTL (reviews on #135). The
@@ -409,8 +532,15 @@ export async function dispatchAgentRun({
     // run BEFORE the token lands — a phantom token (seen as a flaky CI
     // failure of the sibling-rejection test). With every promise settled the
     // revoke below always sees the minted row.
+    // The installation is looked up ONCE per dispatch: the clone token here
+    // and (phase 7) the read-only task token below both mint against it.
+    const mintInstallationToken = async () => {
+      const installationId = await lookupInstallationId(owner, repo);
+      const token = await getInstallationToken(owner, repo, installationId);
+      return { installationId, token };
+    };
     const settled = await Promise.allSettled([
-      getInstallationToken(owner, repo),
+      mintInstallationToken(),
       mintDaemonToken({ userId, threadId, threadChatId, name: runKey }),
       getThreadMinimal({ db, userId, threadId }),
     ]);
@@ -418,13 +548,14 @@ export async function dispatchAgentRun({
     if (failed && failed.status === "rejected") {
       throw failed.reason;
     }
-    const [installationToken, daemonToken, thread] = settled.map((r) =>
+    const [installation, daemonToken, thread] = settled.map((r) =>
       r.status === "fulfilled" ? r.value : undefined,
     ) as [
-      Awaited<ReturnType<typeof getInstallationToken>>,
+      Awaited<ReturnType<typeof mintInstallationToken>>,
       Awaited<ReturnType<typeof mintDaemonToken>>,
       Awaited<ReturnType<typeof getThreadMinimal>>,
     ];
+    const { installationId, token: installationToken } = installation;
     // BUG-EXEC-02: the review agent needs the PR's BASE branch to compute the delta
     // offline (`git diff origin/<base>...HEAD`). thread.repoBaseBranchName is NOT the
     // base — for a thread working on an existing branch it holds the HEAD/working branch
@@ -459,22 +590,35 @@ export async function dispatchAgentRun({
       return undefined;
     };
 
-    // #66 slice 1: resolve the per-repo egress SHAPE alongside the PR base-branch
-    // fetch (both depend only on the thread row already loaded — no reason to
-    // serialize a DB read behind a GitHub round-trip), LIVE from the settings row
-    // (a dashboard write applies on the next dispatch). null (no org / no row /
-    // policy unset) → field omitted = no enforcement, today's behavior. An INVALID
-    // stored policy throws here, failing the dispatch loudly rather than launching
-    // with a silently-wrong policy.
-    const [baseBranch, egressPolicy] = await Promise.all([
-      resolveBaseBranch(),
-      resolveEgressPolicy({
+    // ONE settings read per dispatch: the (org, repo) + '*' rows feed the
+    // egress shape, the review plan and the task plan. A personal/no-org
+    // thread has none (undefined). LIVE: a dashboard write applies on the
+    // next dispatch.
+    const readOrgSettings = async (): Promise<OrgSettings | undefined> => {
+      const organizationId = thread?.organizationId;
+      if (organizationId == null) {
+        return undefined;
+      }
+      const rows = await getRepoReviewSettingWithOrgDefault({
         db,
-        organizationId: thread?.organizationId,
+        organizationId,
         repoFullName,
-        plane: "worker",
-      }).then((shape) => shape ?? undefined),
+      });
+      return { organizationId, rows };
+    };
+
+    // Both depend only on the thread row already loaded — no reason to
+    // serialize a DB read behind a GitHub round-trip.
+    const [baseBranch, orgSettings] = await Promise.all([
+      resolveBaseBranch(),
+      readOrgSettings(),
     ]);
+    // #66 slice 1: the per-repo egress SHAPE from the repo row. null (no org /
+    // no row / policy unset) → field omitted = no enforcement, today's
+    // behavior. An INVALID stored policy throws here, failing the dispatch
+    // loudly rather than launching with a silently-wrong policy.
+    const egressPolicy =
+      egressPolicyFromRow(orgSettings?.rows.repo, "worker") ?? undefined;
 
     // #3/#7 wire contract: orgId is NEVER null (a personal/no-org thread falls back
     // to a per-user key) so the Phase-2 per-org concurrency CEL never dereferences
@@ -518,15 +662,15 @@ export async function dispatchAgentRun({
     // thread (its automationId), so no extra fetch. The narrowed object is null unless
     // all conditions hold (so `organizationId`/`prNumber` are non-null downstream).
     const reviewContext =
-      thread?.organizationId != null &&
+      orgSettings !== undefined &&
       prNumber !== undefined &&
       (await isReviewThread({
         db,
         userId,
-        automationId: thread.automationId ?? null,
-        organizationId: thread.organizationId,
+        automationId: thread?.automationId ?? null,
+        organizationId: orgSettings.organizationId,
       }))
-        ? { organizationId: thread.organizationId, prNumber }
+        ? { ...orgSettings, prNumber }
         : null;
 
     // #125/#127/#165: ONE plan for the dispatch mode. Non-review runs keep the
@@ -548,9 +692,24 @@ export async function dispatchAgentRun({
       repoFullName,
       deliveryId,
     });
+    // Phase 7: task-run packs (+ the read-only token their packs may
+    // require), non-review org threads only: the review plan never carries
+    // them, and a personal/no-org thread has no settings rows.
+    const taskPlan =
+      plan === null && orgSettings !== undefined
+        ? await planTaskRun({
+            ...orgSettings,
+            threadId,
+            repoFullName,
+            owner,
+            repo,
+            installationId,
+          })
+        : undefined;
     const input: AgentRunInput = {
       ...baseInput,
       ...plan?.inputExtension,
+      ...taskPlan,
     };
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry

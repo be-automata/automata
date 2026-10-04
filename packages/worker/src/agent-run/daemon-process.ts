@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
+import { redactSecrets } from "@terragon/utils/redact";
 import type { AceExec } from "./agent-uid-fs";
 import { buildDaemonEnv, type BrokerHandoff } from "./daemon-env";
 import { ghBrokerConfigYaml } from "./gh-broker";
@@ -22,7 +23,6 @@ import {
   readOomKillCount,
 } from "./run-cgroup";
 import { classifyAgentExit } from "./retry-classification";
-import { redactSecrets } from "./redact";
 import { buildKillInvocation, buildSpawnInvocation } from "./spawn-as-user";
 import { verifyGhAuth } from "./verify-gh-auth";
 import type { WorkerConfig } from "./config";
@@ -102,11 +102,17 @@ export class DaemonProcess {
      */
     private readonly broker: BrokerHandoff | null = null,
     /**
-     * Injectable side-effects, for tests only. Production callers pass nothing
-     * and get the real /bin/chmod. Keeping this last preserves every existing
-     * call site unchanged.
+     * Run options decided by the workflow, plus injectable side-effects for
+     * tests (production passes no side-effect and gets the real /bin/chmod).
+     * Keeping this last preserves every existing call site unchanged.
      */
     private readonly deps: {
+      /**
+       * Phase 7: set ONLY when readTokenForRun returned a token (brokered
+       * non-review run, seeded requiring pack, unexpired token); never read
+       * from the input here. Secret: never logged.
+       */
+      githubReadToken?: string;
       aceExec?: AceExec;
       spawnFn?: typeof spawn;
       platform?: NodeJS.Platform;
@@ -187,6 +193,7 @@ export class DaemonProcess {
       credentialEnv: this.credentials?.env ?? {},
       egressProxyUrl: this.egressProxyUrl,
       broker: this.broker,
+      githubReadToken: this.deps.githubReadToken ?? null,
       agentUser: this.config.agentUser,
       // Inside the workdir, so it inherits the run's ACE. Provisioning created
       // it in the same `if (agentUser)` branch that applied that ACE.

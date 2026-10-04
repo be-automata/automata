@@ -8,6 +8,7 @@ import {
   REVIEW_MAX_TURNS_MIN,
   REVIEW_ORCHESTRATED_COMMAND_TIMEOUT_S_DEFAULT,
   findReviewAgentFieldError,
+  type BatteryPackId,
   type ReviewAgentValues,
   type ReviewBatteryPackId,
   type ReviewMode,
@@ -30,13 +31,14 @@ export interface ReviewAgentOverrideRow extends ReviewAgentValues {
   updatedAt: string;
 }
 
-/** "Restore default": clear all five fields back to inherit. */
+/** "Restore default": clear every family field (REVIEW_AGENT_FIELDS) back to inherit. */
 export const REVIEW_AGENT_CLEAR_PATCH = {
   reviewMode: null,
   reviewBatteries: null,
   reviewRunTests: null,
   reviewCommandTimeoutS: null,
   reviewMaxTurns: null,
+  taskBatteries: null,
 } as const satisfies ReviewAgentValues;
 
 export const NO_REVIEW_AGENT_VALUES: ReviewAgentValues = {
@@ -96,6 +98,21 @@ export interface ReviewAgentDraft {
   reviewRunTests: boolean | null;
   timeoutText: string;
   maxTurnsText: string;
+  /** Task-run packs (phase 7); null = inherit. Independent of review mode. */
+  taskBatteries: BatteryPackId[] | null;
+}
+
+/**
+ * `selected` with `id` switched on or off, in `order`'s order (a pack list is
+ * stored in canonical order, so toggling never reorders it).
+ */
+export function toggleIn<Id extends string>(
+  order: readonly Id[],
+  selected: readonly Id[],
+  id: Id,
+  on: boolean,
+): Id[] {
+  return order.filter((item) => (item === id ? on : selected.includes(item)));
 }
 
 export function draftFromValues(values: ReviewAgentValues): ReviewAgentDraft {
@@ -105,6 +122,7 @@ export function draftFromValues(values: ReviewAgentValues): ReviewAgentDraft {
     reviewRunTests: values.reviewRunTests,
     timeoutText: values.reviewCommandTimeoutS?.toString() ?? "",
     maxTurnsText: values.reviewMaxTurns?.toString() ?? "",
+    taskBatteries: values.taskBatteries,
   };
 }
 
@@ -166,6 +184,9 @@ export function draftToPatch(
   }
   if (draft.reviewRunTests !== stored.reviewRunTests) {
     patch.reviewRunTests = draft.reviewRunTests;
+  }
+  if (!isEqual(draft.taskBatteries, stored.taskBatteries)) {
+    patch.taskBatteries = draft.taskBatteries;
   }
   const errors: { timeoutError?: string; maxTurnsError?: string } = {};
   for (const spec of NUMBER_FIELDS) {

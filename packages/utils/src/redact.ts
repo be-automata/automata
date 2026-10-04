@@ -1,8 +1,9 @@
 /**
- * Scrub credential material out of free text before it leaves the worker —
- * failure reasons posted to www (persisted on the thread), log lines, and
- * error messages that echo a command line. Conservative patterns: anything
- * that looks like a token is replaced, never partially kept.
+ * Scrub credential material out of free text before it leaves a process —
+ * the worker's failure reasons posted to www (persisted on the thread), log
+ * lines, error messages that echo a command line, and www's own warn lines
+ * about a failed token mint. The ONE redactor for both planes. Conservative
+ * patterns: anything that looks like a token is replaced, never partially kept.
  */
 const PATTERNS: RegExp[] = [
   // `AUTHORIZATION: basic <b64>` as passed via `git -c http.extraHeader=…`

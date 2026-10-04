@@ -505,6 +505,140 @@ function hasCommand(name: string): boolean {
 const PARITY_TOOLS = ["bash", "git", "jq"];
 const missingTool = PARITY_TOOLS.find((t) => !hasCommand(t));
 
+describe("seedBatteries hooksOff:false (phase 7, task runs)", () => {
+  let fx: BatteriesFixture;
+  let logs: string[];
+  let opts: SeedBatteriesOptions;
+
+  beforeEach(async () => {
+    fx = await makeBatteriesFixture();
+    logs = [];
+    opts = {
+      root: fx.root,
+      repoRoot: fx.repoRoot,
+      rootOwnerUid: UID,
+      packOwnerUid: UID,
+      log: (line) => logs.push(line),
+      hooksOff: false,
+    };
+  });
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  const claudeDir = () => path.join(fx.home, ".claude");
+
+  it("links the somnio-skills skills and writes NO settings.json; .claude is a 0700 dir", async () => {
+    const result = await seedBatteries(fx.home, ["somnio-skills"], opts);
+    expect(result).toEqual({
+      ok: true,
+      packs: ["somnio-skills"],
+      manifestHash: fx.manifestHash,
+      requires: ["github-read-token"],
+    });
+    expect(await listTree(claudeDir())).toEqual([
+      "skills",
+      "skills/dora-metrics",
+      "skills/react-health-audit",
+      "skills/security-audit",
+    ]);
+    const st = await fs.lstat(claudeDir());
+    expect(st.isDirectory()).toBe(true);
+    expect(st.mode & 0o777).toBe(0o700);
+  });
+
+  it("a pre-existing settings.json is left byte-identical", async () => {
+    await fs.mkdir(claudeDir(), { recursive: true, mode: 0o700 });
+    const settings = path.join(claudeDir(), "settings.json");
+    const bytes = '{"hooks":{"x":1}, "foo": true}\n';
+    await fs.writeFile(settings, bytes, { mode: 0o644 });
+    await seedBatteries(fx.home, ["somnio-skills"], opts);
+    expect(await fs.readFile(settings, "utf8")).toBe(bytes);
+    expect((await fs.stat(settings)).mode & 0o777).toBe(0o644);
+  });
+
+  it("install unavailable ⇒ no-manifest-hash, still no settings.json", async () => {
+    await fs.rm(path.join(fx.root, "manifest.sha256"));
+    const result = await seedBatteries(fx.home, ["somnio-skills"], opts);
+    expect(result).toEqual({ ok: false, reason: "no-manifest-hash" });
+    expect(await listTree(claudeDir())).toEqual([]);
+  });
+
+  it("grants .claude and skills (directory) and never touches settings.json on linux", async () => {
+    const calls: Array<{ file: string; args: string[] }> = [];
+    await seedBatteries(fx.home, ["somnio-skills"], {
+      ...opts,
+      agentUser: "agent",
+      platform: "linux",
+      aclExec: async (file, args) => {
+        calls.push({ file, args });
+      },
+    });
+    const targets = calls.map((c) => c.args[2]);
+    expect(targets).toContain(claudeDir());
+    expect(targets).toContain(path.join(claudeDir(), "skills"));
+    expect(targets).not.toContain(path.join(claudeDir(), "settings.json"));
+  });
+
+  it("the default (hooksOff absent) still writes disableAllHooks:true", async () => {
+    const { hooksOff: _omit, ...reviewOpts } = opts;
+    void _omit;
+    await seedBatteries(fx.home, ["somnio-skills"], reviewOpts);
+    expect(
+      JSON.parse(
+        await fs.readFile(path.join(claudeDir(), "settings.json"), "utf8"),
+      ),
+    ).toEqual({ disableAllHooks: true });
+  });
+});
+
+describe("seedBatteries requires (phase 7)", () => {
+  let fx: BatteriesFixture;
+  let opts: SeedBatteriesOptions;
+
+  beforeEach(async () => {
+    fx = await makeBatteriesFixture();
+    opts = {
+      root: fx.root,
+      repoRoot: fx.repoRoot,
+      rootOwnerUid: UID,
+      packOwnerUid: UID,
+      log: () => undefined,
+      hooksOff: false,
+    };
+  });
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  it("a contributing requiring pack surfaces requires on the ok result", async () => {
+    expect(await seedBatteries(fx.home, ["somnio-skills"], opts)).toEqual({
+      ok: true,
+      packs: ["somnio-skills"],
+      manifestHash: fx.manifestHash,
+      requires: ["github-read-token"],
+    });
+  });
+
+  it("no contributing pack requires anything: NO requires key", async () => {
+    const result = await seedBatteries(fx.home, ["somnio-review"], opts);
+    expect(result.ok).toBe(true);
+    expect("requires" in result).toBe(false);
+  });
+
+  it("a requiring pack that is skipped contributes nothing", async () => {
+    const result = await seedBatteries(fx.home, ["somnio-skills"], {
+      ...opts,
+      packOwnerUid: UID + 1,
+    });
+    expect(result).toEqual({
+      ok: true,
+      packs: [],
+      manifestHash: fx.manifestHash,
+    });
+  });
+});
+
 describe("computeBatteriesManifestHash ⇔ install-batteries.sh write_manifest_hash (W3, executed)", () => {
   it.skipIf(missingTool !== undefined)(
     `matches the installer's own function byte for byte${missingTool ? ` (skipped: ${missingTool} missing)` : ""}`,
@@ -616,5 +750,69 @@ describe("formatBatteriesLine", () => {
     expect(formatBatteriesLine({ ok: false, reason: "no-manifest-hash" })).toBe(
       "batteries: unavailable mode=orchestrated reason=no-manifest-hash",
     );
+  });
+
+  describe("with a task gate (phase 7, task runs)", () => {
+    it.each(["task", "pr"] as const)(
+      "seed, lane %s: packs, none, unavailable, not-seeded",
+      (lane) => {
+        const gate = { kind: "seed", lane } as const;
+        expect(
+          formatBatteriesLine(
+            { ok: true, packs: ["somnio-skills"], manifestHash: hash },
+            gate,
+          ),
+        ).toBe(
+          `batteries: lane=${lane} packs=somnio-skills manifest=aaaaaaaaaaaa`,
+        );
+        expect(
+          formatBatteriesLine(
+            { ok: true, packs: [], manifestHash: hash },
+            gate,
+          ),
+        ).toBe(`batteries: lane=${lane} packs=none manifest=aaaaaaaaaaaa`);
+        expect(
+          formatBatteriesLine({ ok: false, reason: "manifest-drift" }, gate),
+        ).toBe(`batteries: unavailable lane=${lane} reason=manifest-drift`);
+        expect(formatBatteriesLine(undefined, gate)).toBe(
+          `batteries: unavailable lane=${lane} reason=not-seeded`,
+        );
+      },
+    );
+
+    it.each(["task", "pr"] as const)(
+      "rejected, lane %s: task-agent-invalid whatever was seeded",
+      (lane) => {
+        const gate = { kind: "rejected", lane } as const;
+        expect(formatBatteriesLine(undefined, gate)).toBe(
+          `batteries: unavailable lane=${lane} reason=task-agent-invalid`,
+        );
+        expect(
+          formatBatteriesLine(
+            { ok: true, packs: ["gstack-review"], manifestHash: hash },
+            gate,
+          ),
+        ).toBe(`batteries: unavailable lane=${lane} reason=task-agent-invalid`);
+      },
+    );
+
+    it("rejected on the review lane and none keep today's review forms", () => {
+      for (const gate of [
+        { kind: "rejected", lane: "review" } as const,
+        { kind: "none" } as const,
+      ]) {
+        expect(formatBatteriesLine(undefined, gate)).toBe(
+          "batteries: mode=classic",
+        );
+        expect(
+          formatBatteriesLine(
+            { ok: true, packs: ["gstack-review"], manifestHash: hash },
+            gate,
+          ),
+        ).toBe(
+          "batteries: mode=orchestrated packs=gstack-review manifest=aaaaaaaaaaaa",
+        );
+      }
+    });
   });
 });

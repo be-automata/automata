@@ -1027,3 +1027,129 @@ describe("review-agent columns (phase 4)", () => {
     expect(row?.reviewBatteries).toEqual([]);
   });
 });
+
+describe("task_batteries column (phase 7)", () => {
+  let orgId: string;
+  const repo = "acme/tasks";
+  beforeEach(async () => {
+    orgId = await makeOrg("acme-task-batteries");
+  });
+
+  async function read(repoFullName = repo) {
+    return getRepoReviewSetting({ db, organizationId: orgId, repoFullName });
+  }
+
+  it("stores taskBatteries on a repo row and on the '*' row; null clears it", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { taskBatteries: ["somnio-skills"] },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { taskBatteries: ["somnio-skills", "gsd-reviewers"] },
+    });
+    expect((await read())?.taskBatteries).toEqual(["somnio-skills"]);
+    expect((await read(ORG_DEFAULT_REPO_SENTINEL))?.taskBatteries).toEqual([
+      "somnio-skills",
+      "gsd-reviewers",
+    ]);
+
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { taskBatteries: null },
+    });
+    expect((await read())?.taskBatteries).toBeNull();
+  });
+
+  it("throws on an invalid list before writing and leaves an existing row unchanged", async () => {
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: repo,
+        patch: { taskBatteries: ["nope"] },
+      }),
+    ).rejects.toThrow("taskBatteries");
+    expect(await read()).toBeUndefined();
+
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { taskBatteries: ["somnio-skills"] },
+    });
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: repo,
+        patch: { taskBatteries: ["somnio-skills", "somnio-skills"] },
+      }),
+    ).rejects.toThrow("duplicate");
+    expect((await read())?.taskBatteries).toEqual(["somnio-skills"]);
+  });
+
+  it.each<[string, string[]]>([
+    ["a pack list", ["somnio-skills"]],
+    ["an empty list (explicit none)", []],
+  ])(
+    "a tolerance reset keeps a row whose only other content is %s",
+    async (_name, taskBatteries) => {
+      await upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: repo,
+        patch: { blockTolerance: "error", taskBatteries },
+      });
+      const { removed } = await removeRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: repo,
+      });
+      expect(removed).toBe(true);
+      const row = await read();
+      expect(row).toBeDefined();
+      expect(row?.blockTolerance).toBe("warning");
+      expect(row?.taskBatteries).toEqual(taskBatteries);
+    },
+  );
+
+  it("a tolerance-only row has task_batteries NULL (no column default)", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { blockTolerance: "error" },
+    });
+    expect((await read())?.taskBatteries).toBeNull();
+  });
+
+  it("getRepoReviewSettingWithOrgDefault returns taskBatteries on both rows", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { taskBatteries: [] },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { taskBatteries: ["somnio-skills"] },
+    });
+    const { repo: repoRow, orgDefault } =
+      await getRepoReviewSettingWithOrgDefault({
+        db,
+        organizationId: orgId,
+        repoFullName: repo,
+      });
+    expect(repoRow?.taskBatteries).toEqual([]);
+    expect(orgDefault?.taskBatteries).toEqual(["somnio-skills"]);
+  });
+});

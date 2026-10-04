@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BATTERY_PACK_IDS,
+  BATTERY_PACK_LABELS,
+  BATTERY_PACK_REQUIRES,
+  BATTERY_REQUIREMENTS,
   DEFAULT_REVIEW_MODE,
+  DEFAULT_TASK_BATTERIES,
   REVIEW_AGENT_FIELDS,
   REVIEW_BATTERY_PACK_IDS,
   REVIEW_COMMAND_TIMEOUT_S_MAX,
@@ -9,9 +14,14 @@ import {
   REVIEW_MAX_TURNS_MAX,
   REVIEW_MAX_TURNS_MIN,
   REVIEW_MODES,
+  REVIEW_ONLY_AGENT_FIELDS,
+  TASK_AGENT_FIELD,
   findReviewAgentFieldError,
+  isBatteryPackId,
   isReviewBatteryPackId,
   isReviewMode,
+  packsRequire,
+  pickReviewAgentFields,
 } from "./review-agent-settings";
 
 describe("review-agent settings constants", () => {
@@ -33,7 +43,22 @@ describe("review-agent settings constants", () => {
       "reviewRunTests",
       "reviewCommandTimeoutS",
       "reviewMaxTurns",
+      "taskBatteries",
     ]);
+  });
+
+  it("names the review-only fields and the task field apart (phase 7)", () => {
+    // Review resolution iterates REVIEW_ONLY_AGENT_FIELDS, so a bad task
+    // value can never fail a review dispatch.
+    expect(REVIEW_ONLY_AGENT_FIELDS).toEqual([
+      "reviewMode",
+      "reviewBatteries",
+      "reviewRunTests",
+      "reviewCommandTimeoutS",
+      "reviewMaxTurns",
+    ]);
+    expect(TASK_AGENT_FIELD).toBe("taskBatteries");
+    expect(DEFAULT_TASK_BATTERIES).toEqual([]);
   });
 });
 
@@ -58,6 +83,108 @@ describe("isReviewBatteryPackId", () => {
 
   it.each(["gstack", "GSTACK-REVIEW", 3])("rejects %j", (value) => {
     expect(isReviewBatteryPackId(value)).toBe(false);
+  });
+});
+
+describe("BATTERY_PACK_IDS (phase 7)", () => {
+  it("lists every manifest pack, review packs first, in manifest order", () => {
+    expect(BATTERY_PACK_IDS).toEqual([
+      "gstack-review",
+      "somnio-review",
+      "gsd-reviewers",
+      "somnio-skills",
+    ]);
+  });
+
+  it("keeps REVIEW_BATTERY_PACK_IDS unchanged as its first three entries", () => {
+    expect(REVIEW_BATTERY_PACK_IDS).toHaveLength(3);
+    expect(BATTERY_PACK_IDS.slice(0, 3)).toEqual([...REVIEW_BATTERY_PACK_IDS]);
+  });
+
+  it("isBatteryPackId accepts every id and rejects anything else", () => {
+    for (const id of BATTERY_PACK_IDS) {
+      expect(isBatteryPackId(id)).toBe(true);
+    }
+    expect(isBatteryPackId("nope")).toBe(false);
+    expect(isBatteryPackId(4)).toBe(false);
+  });
+
+  it("does not widen the review setting", () => {
+    expect(isReviewBatteryPackId("somnio-skills")).toBe(false);
+    expect(
+      findReviewAgentFieldError({ reviewBatteries: ["somnio-skills"] }),
+    ).toContain("somnio-skills");
+  });
+
+  it("labels every pack", () => {
+    for (const id of BATTERY_PACK_IDS) {
+      expect(BATTERY_PACK_LABELS[id].trim()).not.toBe("");
+    }
+    expect(BATTERY_PACK_LABELS["somnio-skills"]).toBe(
+      "Somnio skills (DORA, health, security)",
+    );
+  });
+});
+
+describe("taskBatteries (phase 7)", () => {
+  it.each<[string, unknown]>([
+    ["a manifest pack", ["somnio-skills"]],
+    ["a review pack", ["gsd-reviewers"]],
+    [
+      "every pack",
+      ["gstack-review", "somnio-review", "gsd-reviewers", "somnio-skills"],
+    ],
+    ["an empty list (explicit none)", []],
+    ["null (inherit)", null],
+  ])("accepts %s", (_name, value) => {
+    expect(findReviewAgentFieldError({ taskBatteries: value })).toBeUndefined();
+  });
+
+  it("rejects a duplicate pack id", () => {
+    const error = findReviewAgentFieldError({
+      taskBatteries: ["somnio-skills", "somnio-skills"],
+    });
+    expect(error).toContain("taskBatteries");
+    expect(error).toContain("duplicate");
+  });
+
+  it("rejects an unknown pack id, naming the field and the allowed ids", () => {
+    const error = findReviewAgentFieldError({ taskBatteries: ["nope"] });
+    expect(error).toContain("taskBatteries");
+    expect(error).toContain('"nope"');
+    expect(error).toContain("somnio-skills");
+  });
+
+  it("rejects a bare string", () => {
+    expect(
+      findReviewAgentFieldError({ taskBatteries: "somnio-skills" }),
+    ).toContain("taskBatteries");
+  });
+
+  it("leaves the review setting narrow", () => {
+    expect(
+      findReviewAgentFieldError({ reviewBatteries: ["somnio-skills"] }),
+    ).toContain("reviewBatteries");
+  });
+
+  it("is picked with the rest of the family", () => {
+    const row = {
+      reviewMode: null,
+      reviewBatteries: null,
+      reviewRunTests: null,
+      reviewCommandTimeoutS: null,
+      reviewMaxTurns: null,
+      taskBatteries: ["somnio-skills"],
+      blockTolerance: "warning",
+    };
+    expect(pickReviewAgentFields(row)).toEqual({
+      reviewMode: null,
+      reviewBatteries: null,
+      reviewRunTests: null,
+      reviewCommandTimeoutS: null,
+      reviewMaxTurns: null,
+      taskBatteries: ["somnio-skills"],
+    });
   });
 });
 
@@ -189,5 +316,33 @@ describe("findReviewAgentFieldError", () => {
     expect(
       findReviewAgentFieldError({ supersedePolicy: "junk" }),
     ).toBeUndefined();
+  });
+});
+
+describe("pack requirements (phase 7)", () => {
+  it("names exactly one requirement", () => {
+    expect([...BATTERY_REQUIREMENTS]).toEqual(["github-read-token"]);
+  });
+
+  it("has an entry for every pack id and nothing else", () => {
+    expect(Object.keys(BATTERY_PACK_REQUIRES).sort()).toEqual(
+      [...BATTERY_PACK_IDS].sort(),
+    );
+    expect(BATTERY_PACK_REQUIRES["somnio-skills"]).toEqual([
+      "github-read-token",
+    ]);
+    for (const id of REVIEW_BATTERY_PACK_IDS) {
+      expect(BATTERY_PACK_REQUIRES[id], id).toEqual([]);
+    }
+  });
+
+  it.each<[string[], boolean]>([
+    [["somnio-skills"], true],
+    [["somnio-review", "somnio-skills"], true],
+    [["somnio-review"], false],
+    [["nope"], false],
+    [[], false],
+  ])("packsRequire(%j, github-read-token) = %s", (ids, expected) => {
+    expect(packsRequire(ids, "github-read-token")).toBe(expected);
   });
 });

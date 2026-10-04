@@ -76,6 +76,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       reviewRunTests: null,
       reviewCommandTimeoutS: null,
       reviewMaxTurns: null,
+      taskBatteries: null,
       updatedByUserId: USER,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -164,6 +165,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       reviewRunTests: null,
       reviewCommandTimeoutS: null,
       reviewMaxTurns: null,
+      taskBatteries: null,
       updatedByUserId: USER,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -194,6 +196,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       reviewRunTests: null,
       reviewCommandTimeoutS: null,
       reviewMaxTurns: null,
+      taskBatteries: null,
       updatedByUserId: USER,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -264,6 +267,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       reviewRunTests: null,
       reviewCommandTimeoutS: null,
       reviewMaxTurns: null,
+      taskBatteries: null,
       updatedByUserId: USER,
       createdAt: current,
       updatedAt: current,
@@ -399,6 +403,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
         reviewRunTests: null,
         reviewCommandTimeoutS: null,
         reviewMaxTurns: null,
+        taskBatteries: null,
         updatedByUserId: USER,
         createdAt: current,
         updatedAt: current,
@@ -425,6 +430,61 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
           properties: expect.objectContaining({ changed: ["reviewMode"] }),
         }),
       );
+    });
+  });
+
+  describe("taskBatteries (phase 7)", () => {
+    it("an org admin sets task packs; the upsert receives exactly that patch; the DTO carries the field", async () => {
+      const res = await PUT(putReq({ taskBatteries: ["somnio-skills"] }), {
+        params,
+      });
+      expect(res.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({
+          patch: { taskBatteries: ["somnio-skills"] },
+        }),
+      );
+      const json = (await res.json()) as { setting: Record<string, unknown> };
+      expect("taskBatteries" in json.setting).toBe(true);
+    });
+
+    it("null clears the task packs back to inherit", async () => {
+      const res = await PUT(putReq({ taskBatteries: null }), { params });
+      expect(res.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({ patch: { taskBatteries: null } }),
+      );
+    });
+
+    it("an empty list (= no packs, explicitly) is accepted", async () => {
+      const res = await PUT(putReq({ taskBatteries: [] }), { params });
+      expect(res.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({ patch: { taskBatteries: [] } }),
+      );
+    });
+
+    it.each([
+      [["nope"]],
+      ["somnio-skills"],
+      [["somnio-skills", "somnio-skills"]],
+    ])("400 naming taskBatteries on %j, nothing written", async (value) => {
+      const res = await PUT(putReq({ taskBatteries: value }), { params });
+      expect(res.status).toBe(400);
+      const json = (await res.json()) as { error: string };
+      expect(json.error).toContain("taskBatteries");
+      expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
+    });
+
+    it("a taskBatteries-only first write uses the whole-row fence", async () => {
+      const res = await PUT(
+        putReq({ taskBatteries: ["somnio-skills"], expectedUpdatedAt: null }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      const call = vi.mocked(upsertRepoReviewSetting).mock.calls[0]![0];
+      expect(call.expectRowAbsent).toBe(true);
+      expect(call.expectAbsentSupersedeOverride).toBeUndefined();
     });
   });
 });

@@ -1550,6 +1550,16 @@ export const repoReviewSettings = pgTable(
     reviewRunTests: boolean("review_run_tests"),
     reviewCommandTimeoutS: integer("review_command_timeout_s"),
     reviewMaxTurns: integer("review_max_turns"),
+    /**
+     * Phase 7: battery pack ids that NON-review runs (manual, scheduled,
+     * mention task runs) get seeded into their HOME. Same family for storage
+     * and routes, but not a review knob: review resolution never reads it.
+     * Nullable, NO column default: NULL = inherit (repo row → '*' row →
+     * none, today's behaviour); [] = explicit none. Validated against every
+     * manifest pack id (BATTERY_PACK_IDS) at the write boundary; an invalid
+     * stored value degrades a task dispatch to no packs, never fails it.
+     */
+    taskBatteries: text("task_batteries").array(),
     /** Provenance: the user who last wrote this override (audit trail). */
     updatedByUserId: text("updated_by_user_id").references(() => user.id, {
       onDelete: "set null",

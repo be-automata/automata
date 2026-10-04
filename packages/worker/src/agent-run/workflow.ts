@@ -12,9 +12,13 @@ import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { reapAgentUidEscapees } from "./uid-reaper";
 import { DaemonProcess } from "./daemon-process";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
-import { formatRunStartLine } from "./run-lane";
-import { formatBatteriesLine } from "./batteries-seed";
+import { formatRunStartLine, resolveRunLane } from "./run-lane";
 import { reviewAgentForRun, withReviewAgentWire } from "./review-agent-wire";
+import {
+  batterySeedForRun,
+  taskAgentForRun,
+  taskRunOutcome,
+} from "./task-agent";
 import {
   classifyNextMessageError,
   nonRetryablePreflight,
@@ -499,6 +503,17 @@ async function runAgentInner(
       `review agent: bounds-rejected (${reviewAgentGate.rejected}) → classic`,
     );
   }
+  // Phase 7: task-run packs, shape-gated BEFORE seeding (reason only, H2).
+  // The review lane never takes task packs, whatever the input carries.
+  const lane = resolveRunLane(input);
+  const taskGate = taskAgentForRun(input.taskAgent, lane);
+  if (taskGate.kind === "rejected") {
+    step(
+      taskGate.reason === "review-lane"
+        ? "task agent: ignored (review-lane)"
+        : `task agent: rejected (${taskGate.reason})`,
+    );
+  }
 
   let boxLock: BoxLock | null = null;
   let materialised: MaterialisedCredentials;
@@ -585,7 +600,7 @@ async function runAgentInner(
       agent: pulled.agent,
       runRoot: workdir,
       agentUser: config.agentUser,
-      reviewAgent: runReviewAgent,
+      seed: batterySeedForRun(runReviewAgent, taskGate),
       batteries: { log: admissionLog },
     });
   } catch (err) {
@@ -609,8 +624,23 @@ async function runAgentInner(
   step(
     `agent credential: ${describeCredentialSource(credentialSource)} (box trust: ${config.boxTrust})`,
   );
-  // Phase 5: one line per run — classic, or the seeded packs + manifest hash.
-  step(formatBatteriesLine(materialised.batteries));
+  // Phase 5/7: exactly one `batteries:` line per run. A task/pr-lane run that
+  // carried packs names its lane: seeded, or why not. Every other run —
+  // reviews and runs without taskAgent — keeps today's exact line
+  // (`mode=classic` / `mode=orchestrated …`), so unconfigured repos are
+  // byte-identical in HOME and in the log. The same call decides the
+  // read-only task token (brokered is config-decided: a broker start failure
+  // below throws, so the run never reaches the daemon without its brokers);
+  // its line is logged after the brokers come up, as before.
+  const taskOutcome = taskRunOutcome({
+    lane,
+    taskGate,
+    seeded: materialised.batteries,
+    input,
+    brokered: config.credentialBroker === "on",
+    now: Date.now(),
+  });
+  step(taskOutcome.batteriesLine);
 
   // #66 slice 2: per-run egress enforcement, iff the control plane resolved a
   // policy onto this run's input. Absent policy ⇒ nothing starts and nothing
@@ -709,6 +739,11 @@ async function runAgentInner(
     );
   }
 
+  // Phase 7: the read-only task token (decided above). Logged by outcome
+  // only — never the value; runs without task packs log nothing here.
+  if (taskOutcome.readTokenLine !== undefined) {
+    step(taskOutcome.readTokenLine);
+  }
   const daemon = new DaemonProcess(
     config,
     input,
@@ -716,6 +751,9 @@ async function runAgentInner(
     materialised,
     egressProxy?.url ?? null,
     broker,
+    taskOutcome.githubReadToken !== undefined
+      ? { githubReadToken: taskOutcome.githubReadToken }
+      : {},
   );
   daemonForPoll = daemon;
   try {

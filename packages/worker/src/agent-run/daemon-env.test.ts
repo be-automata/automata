@@ -406,6 +406,59 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       expect(entries.get("user.name")).toBe("automata-ai-bot[bot]");
     });
 
+    describe("phase 7 — read-only task token (GITHUB_TOKEN only, brokered only)", () => {
+      const READ = "ghs_read";
+      const brokeredWith = (githubReadToken?: string | null) =>
+        buildDaemonEnv({
+          baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
+          anthropicApiKey: "sk-ant-xxx",
+          claudeBinDir: "",
+          installationToken: INSTALL_TOKEN,
+          ghConfigDir: "/tmp/isolated-gh",
+          botLogin: "automata-ai-bot[bot]",
+          broker: BROKER,
+          githubReadToken,
+        });
+
+      it("brokered + read token: GITHUB_TOKEN is the read token, everything else is today's brokered env", () => {
+        const env = brokeredWith(READ);
+        const today = buildBrokered();
+        expect(env.GITHUB_TOKEN).toBe(READ);
+        expect(env.GH_TOKEN).toBe(BROKER.bearer);
+        expect({ ...env, GITHUB_TOKEN: today.GITHUB_TOKEN }).toEqual(today);
+        // git still authenticates to the git broker with the bearer.
+        const values = Object.entries(env)
+          .filter(([k]) => k.startsWith("GIT_CONFIG_VALUE_"))
+          .map(([, v]) => v);
+        expect(values).toContain(`Authorization: Bearer ${BROKER.bearer}`);
+        expect(values.some((v) => v?.includes(READ))).toBe(false);
+        // The write-capable installation token is still nowhere.
+        expect(JSON.stringify(env)).not.toContain(INSTALL_TOKEN);
+      });
+
+      it.each([[undefined], [null], [""]])(
+        "brokered with githubReadToken %j: byte-identical to today's brokered env",
+        (value) => {
+          expect(brokeredWith(value)).toEqual(buildBrokered());
+        },
+      );
+
+      it("legacy (no broker) ignores the read token: byte-identical to today's legacy env", () => {
+        const legacy = (githubReadToken?: string) =>
+          buildDaemonEnv({
+            baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
+            anthropicApiKey: "sk-ant-xxx",
+            claudeBinDir: "",
+            installationToken: INSTALL_TOKEN,
+            ghConfigDir: "/tmp/isolated-gh",
+            botLogin: "automata-ai-bot[bot]",
+            githubReadToken,
+          });
+        expect(legacy(READ)).toEqual(legacy());
+        expect(JSON.stringify(legacy(READ))).not.toContain(READ);
+      });
+    });
+
     it("broker: null is the verbatim legacy env — the rollback contract", () => {
       const env = build();
       expect(env.GH_TOKEN).toBe(INSTALL_TOKEN);
