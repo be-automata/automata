@@ -20,21 +20,22 @@ import { eq } from "drizzle-orm";
 import {
   getInstallationToken,
   getReadOnlyInstallationToken,
+  lookupInstallationId,
 } from "@terragon/shared/github-app";
 import { thread as threadTable } from "@terragon/shared/db/schema";
-import { resolveTaskAgentForDispatch } from "@/server-lib/review/resolve-task-agent";
+import { resolveTaskAgentFromRows } from "@/server-lib/task/resolve-task-agent";
 import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
 
-// Pass-through spy: the real resolver runs against the test DB; the spy only
-// lets a test assert it was (not) consulted.
-vi.mock("@/server-lib/review/resolve-task-agent", async (importOriginal) => {
+// Pass-through spy: the real resolver runs on the rows the dispatch read from
+// the test DB; the spy only lets a test assert it was (not) consulted.
+vi.mock("@/server-lib/task/resolve-task-agent", async (importOriginal) => {
   const actual =
     await importOriginal<
-      typeof import("@/server-lib/review/resolve-task-agent")
+      typeof import("@/server-lib/task/resolve-task-agent")
     >();
   return {
     ...actual,
-    resolveTaskAgentForDispatch: vi.fn(actual.resolveTaskAgentForDispatch),
+    resolveTaskAgentFromRows: vi.fn(actual.resolveTaskAgentFromRows),
   };
 });
 import {
@@ -1028,14 +1029,14 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       runTests: false,
       commandTimeoutMs: 60000,
     });
-    expect(vi.mocked(resolveTaskAgentForDispatch)).not.toHaveBeenCalled();
+    expect(vi.mocked(resolveTaskAgentFromRows)).not.toHaveBeenCalled();
   });
 
   it("a personal (no-org) thread neither carries taskAgent nor reads the setting", async () => {
     const t = await createTestThread({ db, userId: user.id });
     const input = await dispatchAndRead(t);
     expect("taskAgent" in input).toBe(false);
-    expect(vi.mocked(resolveTaskAgentForDispatch)).not.toHaveBeenCalled();
+    expect(vi.mocked(resolveTaskAgentFromRows)).not.toHaveBeenCalled();
   });
 
   it("an invalid stored value dispatches the task run without packs, logs once and keeps the token", async () => {
@@ -1083,10 +1084,13 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       await setTaskBatteries(REPO, ["somnio-skills"]);
       const input = await dispatchAndRead(await orgTaskThread());
       expect(vi.mocked(getReadOnlyInstallationToken)).toHaveBeenCalledTimes(1);
+      // Minted against the installation the clone token already looked up.
       expect(vi.mocked(getReadOnlyInstallationToken)).toHaveBeenCalledWith(
         "be-automata",
         "automata",
+        424242,
       );
+      expect(vi.mocked(lookupInstallationId)).toHaveBeenCalledTimes(1);
       expect(input.githubReadToken).toBe(READ_TOKEN);
       expect(input.githubReadToken).not.toBe(input.installationToken);
       expect(input.githubReadTokenExpiresAt).toBe("2026-10-04T03:00:00Z");

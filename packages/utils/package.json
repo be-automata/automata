@@ -6,7 +6,8 @@
   "exports": {
     "./error": "./src/error.ts",
     "./retry": "./src/retry.ts",
-    "./encryption": "./src/encryption.ts"
+    "./encryption": "./src/encryption.ts",
+    "./redact": "./src/redact.ts"
   },
   "scripts": {
     "tsc-check": "tsc --noEmit",

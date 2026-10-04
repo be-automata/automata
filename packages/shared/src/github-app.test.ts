@@ -5,6 +5,7 @@ import {
   getInstallationToken,
   getReadOnlyInstallationToken,
   isAppInstalledOnRepo,
+  lookupInstallationId,
   resetAppInstance,
 } from "./github-app.js";
 
@@ -156,6 +157,43 @@ describe("GitHub App", () => {
         "repositories",
       ]);
       expect(body.repositories).toEqual(["r"]);
+    });
+
+    it("a known installation id skips the lookup; both bodies keep their exact scope", async () => {
+      const calls = mockRequests();
+      await expect(lookupInstallationId("o", "r")).resolves.toBe(42);
+      await getInstallationToken("o", "r", 7);
+      await getReadOnlyInstallationToken("o", "r", 7);
+      expect(calls.map((c) => c.route)).toEqual([
+        "GET /repos/{owner}/{repo}/installation",
+        "POST /app/installations/{installation_id}/access_tokens",
+        "POST /app/installations/{installation_id}/access_tokens",
+      ]);
+      expect(Object.keys(calls[1]!.params).sort()).toEqual([
+        "expires_at",
+        "installation_id",
+        "repositories",
+      ]);
+      expect(calls[1]!.params).toMatchObject({
+        installation_id: 7,
+        repositories: ["r"],
+      });
+      expect(calls[2]!.params).toEqual({
+        installation_id: 7,
+        repositories: ["r"],
+        permissions: READ_ONLY_TOKEN_PERMISSIONS,
+      });
+    });
+
+    it("lookupInstallationId maps a 404 to the 'not installed' error", async () => {
+      process.env.GITHUB_APP_ID = "123456";
+      process.env.GITHUB_APP_PRIVATE_KEY = "fake-private-key";
+      vi.spyOn(getGitHubApp().octokit, "request").mockRejectedValue(
+        Object.assign(new Error("Not Found"), { status: 404 }),
+      );
+      await expect(lookupInstallationId("o", "r")).rejects.toThrow(
+        "GitHub App is not installed on repository o/r",
+      );
     });
   });
 });

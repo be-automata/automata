@@ -3,12 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { redactSecrets } from "@terragon/utils/redact";
 import {
   applyInheritableAces,
   applyTraverseAce,
   type AceExec,
 } from "./agent-uid-fs";
-import { redactSecrets } from "./redact";
 
 const execFileAsync = promisify(execFile);
 

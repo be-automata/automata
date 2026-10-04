@@ -218,36 +218,28 @@ function isIntegerInRange(value: unknown, min: number, max: number): boolean {
   );
 }
 
-function findBatteriesError(value: unknown): string | undefined {
-  const allowed = REVIEW_BATTERY_PACK_IDS.join(", ");
+/**
+ * A pack-id list setting: an array of distinct ids drawn from `allowedIds`.
+ * Shared by the review packs (`reviewBatteries`) and the task packs
+ * (`taskBatteries`); the field name prefixes every message.
+ */
+function findPackListError(
+  field: "reviewBatteries" | "taskBatteries",
+  value: unknown,
+  allowedIds: readonly string[],
+  isId: (item: unknown) => boolean,
+): string | undefined {
+  const allowed = allowedIds.join(", ");
   if (!Array.isArray(value)) {
-    return `reviewBatteries must be a list of pack ids (${allowed}), or null (inherit)`;
+    return `${field} must be a list of pack ids (${allowed}), or null (inherit)`;
   }
-  const seen = new Set<string>();
+  const seen = new Set<unknown>();
   for (const item of value) {
-    if (!isReviewBatteryPackId(item)) {
-      return `reviewBatteries has an unknown pack id ${JSON.stringify(item)}; allowed: ${allowed}`;
+    if (!isId(item)) {
+      return `${field} has an unknown pack id ${JSON.stringify(item)}; allowed: ${allowed}`;
     }
     if (seen.has(item)) {
-      return `reviewBatteries has a duplicate pack id "${item}"`;
-    }
-    seen.add(item);
-  }
-  return undefined;
-}
-
-function findTaskBatteriesError(value: unknown): string | undefined {
-  const allowed = BATTERY_PACK_IDS.join(", ");
-  if (!Array.isArray(value)) {
-    return `taskBatteries must be a list of pack ids (${allowed}), or null (inherit)`;
-  }
-  const seen = new Set<string>();
-  for (const item of value) {
-    if (!isBatteryPackId(item)) {
-      return `taskBatteries has an unknown pack id ${JSON.stringify(item)}; allowed: ${allowed}`;
-    }
-    if (seen.has(item)) {
-      return `taskBatteries has a duplicate pack id "${item}"`;
+      return `${field} has a duplicate pack id "${String(item)}"`;
     }
     seen.add(item);
   }
@@ -264,7 +256,12 @@ function findFieldError(
         ? undefined
         : `reviewMode must be one of ${REVIEW_MODES.join(", ")}, or null (inherit)`;
     case "reviewBatteries":
-      return findBatteriesError(value);
+      return findPackListError(
+        field,
+        value,
+        REVIEW_BATTERY_PACK_IDS,
+        isReviewBatteryPackId,
+      );
     case "reviewRunTests":
       return typeof value === "boolean"
         ? undefined
@@ -282,7 +279,7 @@ function findFieldError(
         ? undefined
         : `reviewMaxTurns must be an integer from ${REVIEW_MAX_TURNS_MIN} to ${REVIEW_MAX_TURNS_MAX}, or null (inherit)`;
     case "taskBatteries":
-      return findTaskBatteriesError(value);
+      return findPackListError(field, value, BATTERY_PACK_IDS, isBatteryPackId);
   }
 }
 

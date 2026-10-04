@@ -1,6 +1,4 @@
-import type { DB } from "@terragon/shared/db";
 import type { RepoReviewSetting } from "@terragon/shared/db/types";
-import { getRepoReviewSettingWithOrgDefault } from "@terragon/shared/model/repo-review-settings";
 import {
   TASK_AGENT_FIELD,
   findReviewAgentFieldError,
@@ -22,6 +20,8 @@ import {
  *
  * The result is the shape the worker sees; the settings table never crosses
  * the plane (mirrored structurally as TaskAgentShape in packages/worker).
+ * The dispatcher reads the (repo, '*') rows once per dispatch and passes them
+ * in, so this module never touches the DB.
  */
 
 /** Effective task-run packs; non-review runs only. Structural twin of worker TaskAgentShape. */
@@ -39,6 +39,13 @@ type TaskAgentStoredRow = Pick<
   "repoFullName" | typeof TASK_AGENT_FIELD
 >;
 
+/** A stored row whose `taskBatteries` is set (non-null): the precedence winner. */
+function hasTaskBatteries(
+  row: TaskAgentStoredRow | undefined,
+): row is TaskAgentStoredRow & { taskBatteries: string[] } {
+  return row?.taskBatteries != null;
+}
+
 /** Pure resolution (no DB, never throws). Returns a fresh array. */
 export function resolveTaskAgentFromRows({
   organizationId,
@@ -49,43 +56,20 @@ export function resolveTaskAgentFromRows({
   repo: TaskAgentStoredRow | undefined;
   orgDefault: TaskAgentStoredRow | undefined;
 }): TaskAgentResolution {
-  const winner = [repo, orgDefault].find(
-    (row) =>
-      row !== undefined &&
-      row.taskBatteries !== null &&
-      row.taskBatteries !== undefined,
-  );
+  const winner = [repo, orgDefault].find(hasTaskBatteries);
   if (winner === undefined) {
     return { taskAgent: undefined };
   }
   const value = winner.taskBatteries;
   const error = findReviewAgentFieldError({ [TASK_AGENT_FIELD]: value });
-  if (error !== undefined || !Array.isArray(value)) {
+  if (error !== undefined) {
     return {
       taskAgent: undefined,
-      invalid: `(${organizationId}, ${winner.repoFullName}) ${error ?? "taskBatteries is not a list"}`,
+      invalid: `(${organizationId}, ${winner.repoFullName}) ${error}`,
     };
   }
   if (value.length === 0) {
     return { taskAgent: undefined };
   }
   return { taskAgent: { batteries: [...value] } };
-}
-
-/** Thin DB loader: one read for the repo + '*' rows, then the pure resolver. */
-export async function resolveTaskAgentForDispatch({
-  db,
-  organizationId,
-  repoFullName,
-}: {
-  db: DB;
-  organizationId: string;
-  repoFullName: string;
-}): Promise<TaskAgentResolution> {
-  const { repo, orgDefault } = await getRepoReviewSettingWithOrgDefault({
-    db,
-    organizationId,
-    repoFullName,
-  });
-  return resolveTaskAgentFromRows({ organizationId, repo, orgDefault });
 }

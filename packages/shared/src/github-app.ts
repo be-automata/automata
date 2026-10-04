@@ -46,37 +46,48 @@ function notInstalledOr(error: unknown, owner: string, repo: string): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-/** The App installation id covering owner/repo (throws on 404 → not installed). */
-async function lookupInstallationId(
-  app: App,
+/**
+ * The App installation id covering owner/repo. A 404 throws the same "not
+ * installed" error as the minters. Exported so a caller minting several
+ * tokens for one repo looks the installation up once and passes the id in.
+ */
+export async function lookupInstallationId(
   owner: string,
   repo: string,
 ): Promise<number> {
-  const { data: installation } = await app.octokit.request(
-    "GET /repos/{owner}/{repo}/installation",
-    {
-      owner,
-      repo,
-    },
-  );
-  return installation.id;
+  try {
+    const { data: installation } = await getGitHubApp().octokit.request(
+      "GET /repos/{owner}/{repo}/installation",
+      {
+        owner,
+        repo,
+      },
+    );
+    return installation.id;
+  } catch (error: unknown) {
+    throw notInstalledOr(error, owner, repo);
+  }
 }
 
 /**
  * Get installation access token for a repository
  * @param owner Repository owner
  * @param repo Repository name
+ * @param knownInstallationId The repo's installation id when the caller
+ *   already looked it up (lookupInstallationId); otherwise looked up here
  * @returns Installation access token
  */
 export async function getInstallationToken(
   owner: string,
   repo: string,
+  knownInstallationId?: number,
 ): Promise<string> {
   const app = getGitHubApp();
 
   try {
     // Get the installation for this repository
-    const installationId = await lookupInstallationId(app, owner, repo);
+    const installationId =
+      knownInstallationId ?? (await lookupInstallationId(owner, repo));
 
     // Create an installation access token with 30-day expiry
     const expirationDate = new Date();
@@ -118,15 +129,18 @@ export const READ_ONLY_TOKEN_PERMISSIONS = {
  * token. Used ONLY for task runs whose admin-selected packs require
  * `github-read-token` (BATTERY_PACK_REQUIRES) — never for review runs, which
  * keep the #81/ADR-004 fence (no GitHub credential in the agent at all).
+ * `knownInstallationId` skips the lookup, exactly as for getInstallationToken.
  */
 export async function getReadOnlyInstallationToken(
   owner: string,
   repo: string,
+  knownInstallationId?: number,
 ): Promise<{ token: string; expiresAt: string }> {
   const app = getGitHubApp();
   let data: { token?: unknown; expires_at?: unknown };
   try {
-    const installationId = await lookupInstallationId(app, owner, repo);
+    const installationId =
+      knownInstallationId ?? (await lookupInstallationId(owner, repo));
     ({ data } = await app.octokit.request(
       "POST /app/installations/{installation_id}/access_tokens",
       {

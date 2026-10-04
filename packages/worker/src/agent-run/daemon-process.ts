@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
+import { redactSecrets } from "@terragon/utils/redact";
 import type { AceExec } from "./agent-uid-fs";
 import { buildDaemonEnv, type BrokerHandoff } from "./daemon-env";
 import { ghBrokerConfigYaml } from "./gh-broker";
@@ -22,7 +23,6 @@ import {
   readOomKillCount,
 } from "./run-cgroup";
 import { classifyAgentExit } from "./retry-classification";
-import { redactSecrets } from "./redact";
 import { buildKillInvocation, buildSpawnInvocation } from "./spawn-as-user";
 import { verifyGhAuth } from "./verify-gh-auth";
 import type { WorkerConfig } from "./config";

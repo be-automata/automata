@@ -174,7 +174,7 @@ local_mode() {
   gate SC2 "www routes, Review tab, resolver and dispatch" \
     pnpm --filter @terragon/www exec vitest run --no-file-parallelism \
     src/app/api/review-settings src/components/settings/review-agent \
-    src/queries/review-settings-queries.test.ts src/server-lib/review \
+    src/queries/review-settings-queries.test.ts src/server-lib/review src/server-lib/task \
     src/agent/hatchet/dispatch.test.ts src/agent/hatchet/dispatch-golden.test.ts \
     src/agent/hatchet/transport.test.ts
   gate SC2 "transport golden unchanged vs origin/main (transport.golden.json)" \

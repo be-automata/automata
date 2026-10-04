@@ -1,5 +1,5 @@
 import type { DaemonEventAPIBody } from "@terragon/daemon/shared";
-import { redactSecrets } from "./redact";
+import { redactSecrets } from "@terragon/utils/redact";
 import type {
   CredentialSource,
   PulledDaemonMessage,
