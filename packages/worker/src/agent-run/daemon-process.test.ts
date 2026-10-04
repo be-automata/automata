@@ -8,7 +8,7 @@ import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { DaemonProcess, writeDaemonMessage } from "./daemon-process";
 import { loadWorkerConfig } from "./config";
@@ -1017,6 +1017,104 @@ setInterval(() => {}, 1000);
       child.exitCode = 0;
       child.signalCode = null;
       expect(daemon.agentFailure()).toBeNull();
+    });
+
+    /**
+     * Prod 2026-10-04 (e335c83d): 16 OOM kills in a task run's cgroup, thread
+     * "complete". The cgroup is planted as a tmp dir holding `memory.events`,
+     * the same way the child is planted above — a mocked cgroup cannot OOM.
+     */
+    function ceilingDaemon(memoryEvents: string) {
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+        WORKER_RUN_MEMORY_MAX: "1500M",
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_WORKDIR_ROOT: root,
+      });
+      const cgroupDir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-cg-"));
+      tmpDirs.push(cgroupDir);
+      fs.writeFileSync(path.join(cgroupDir, "memory.events"), memoryEvents);
+      const daemon = new DaemonProcess(config, input, workdir);
+      daemons.push(daemon);
+      (daemon as unknown as { cgroupDir: string | null }).cgroupDir = cgroupDir;
+      return { daemon, cgroupDir, input };
+    }
+
+    it("memoryStarvation fails the run while the agent is still ALIVE", () => {
+      // The prod shape: children OOM-killed, the agent itself never exited, so
+      // agentFailure() (which keys on the agent's exit) stays null forever.
+      const { daemon } = ceilingDaemon("oom 3\noom_kill 16\n");
+      (daemon as unknown as { child: unknown }).child = {
+        exitCode: null,
+        signalCode: null,
+      };
+      expect(daemon.agentFailure()).toBeNull();
+      const starved = daemon.memoryStarvation();
+      expect(starved).toBeInstanceOf(NonRetryableError);
+      expect((starved as Error).message).toMatch(
+        /^Out of memory: 16 process\(es\) killed by the per-run memory limit \(memory\.max=1500M\)/,
+      );
+    });
+
+    it("memoryStarvation is null for a run that never hit oom_kill", () => {
+      // `oom` alone (the ceiling was hit but reclaim won) killed nothing.
+      const { daemon } = ceilingDaemon("oom 2\noom_kill 0\n");
+      expect(daemon.memoryStarvation()).toBeNull();
+    });
+
+    it("teardown ALWAYS journals both counters, read before the cgroup goes", () => {
+      const { daemon, input } = ceilingDaemon("oom 3\noom_kill 16\n");
+      const lines: string[] = [];
+      const spy = vi
+        .spyOn(console, "error")
+        .mockImplementation((...args: unknown[]) => {
+          lines.push(args.map(String).join(" "));
+        });
+      try {
+        daemon.teardown();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(lines).toContainEqual(
+        expect.stringContaining(
+          `run cgroup: oom_kill=16 oom=3 thread=${input.threadId} memory.max=1500M`,
+        ),
+      );
+      // Cached across the removal: the classification can still run after.
+      expect(daemon.memoryStarvation()).toBeInstanceOf(NonRetryableError);
+    });
+
+    it("teardown journals a clean run too — zero is evidence, not noise", () => {
+      const { daemon } = ceilingDaemon("oom 0\noom_kill 0\n");
+      const lines: string[] = [];
+      const spy = vi
+        .spyOn(console, "error")
+        .mockImplementation((...args: unknown[]) => {
+          lines.push(args.map(String).join(" "));
+        });
+      try {
+        daemon.teardown();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(lines).toContainEqual(
+        expect.stringContaining("run cgroup: oom_kill=0 oom=0"),
+      );
+    });
+
+    it("memoryStarvation stays silent on a box with no ceiling", () => {
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+      });
+      const daemon = new DaemonProcess(config, input, workdir);
+      daemons.push(daemon);
+      expect(daemon.memoryStarvation()).toBeNull();
     });
   });
 });

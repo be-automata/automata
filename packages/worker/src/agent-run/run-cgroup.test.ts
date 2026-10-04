@@ -9,7 +9,7 @@ import {
   parseCgroupPath,
   parseControllers,
   prepareDelegatedRoot,
-  readOomKillCount,
+  readMemoryEvents,
   REQUIRED_CONTROLLERS,
   runCgroupPath,
   SUPERVISOR_CGROUP,
@@ -371,7 +371,7 @@ describe("createRunCgroup", () => {
   });
 });
 
-describe("readOomKillCount", () => {
+describe("readMemoryEvents oom_kill", () => {
   it("reads the counter, which is what distinguishes an OOM from our own kill", () => {
     // Every SIGKILL exits 137, including teardown's. Without this counter a
     // superseded run would be reported as `resource-limit` — a wrong cause,
@@ -379,17 +379,45 @@ describe("readOomKillCount", () => {
     const f = fakeFs({
       "/cg/memory.events": "low 0\nhigh 0\nmax 12\noom 1\noom_kill 3\n",
     });
-    expect(readOomKillCount({ cgroupDir: "/cg", fsi: f.fsi })).toBe(3);
+    expect(readMemoryEvents({ cgroupDir: "/cg", fsi: f.fsi }).oomKill).toBe(3);
   });
 
   it("returns 0 — never a false OOM — when the file is gone", () => {
     const f = fakeFs();
-    expect(readOomKillCount({ cgroupDir: "/cg", fsi: f.fsi })).toBe(0);
+    expect(readMemoryEvents({ cgroupDir: "/cg", fsi: f.fsi }).oomKill).toBe(0);
   });
 
   it("returns 0 on a malformed counter rather than NaN", () => {
     const f = fakeFs({ "/cg/memory.events": "oom_kill abc\n" });
-    expect(readOomKillCount({ cgroupDir: "/cg", fsi: f.fsi })).toBe(0);
+    expect(readMemoryEvents({ cgroupDir: "/cg", fsi: f.fsi }).oomKill).toBe(0);
+  });
+});
+
+describe("readMemoryEvents", () => {
+  it("reads both oom and oom_kill — the teardown journal line needs each", () => {
+    // `oom` counts the times the ceiling was hit; `oom_kill` the processes the
+    // kernel killed for it. One oom event can carry many kills (memory.oom.group),
+    // and oom>0 with oom_kill=0 is a ceiling hit that reclaim survived.
+    const f = fakeFs({
+      "/cg/memory.events":
+        "low 0\nhigh 0\nmax 40\noom 3\noom_kill 16\noom_group_kill 1\n",
+    });
+    expect(readMemoryEvents({ cgroupDir: "/cg", fsi: f.fsi })).toEqual({
+      oom: 3,
+      oomKill: 16,
+    });
+  });
+
+  it("reports zeros — never a false OOM — when the file is gone or malformed", () => {
+    expect(readMemoryEvents({ cgroupDir: "/cg", fsi: fakeFs().fsi })).toEqual({
+      oom: 0,
+      oomKill: 0,
+    });
+    const f = fakeFs({ "/cg/memory.events": "oom x\noom_kill -1\n" });
+    expect(readMemoryEvents({ cgroupDir: "/cg", fsi: f.fsi })).toEqual({
+      oom: 0,
+      oomKill: 0,
+    });
   });
 });
 

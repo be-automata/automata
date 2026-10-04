@@ -521,6 +521,14 @@ export interface PollContext {
    * Optional: omitted ⇒ this loop behaves exactly as it did before.
    */
   agentFailure?: () => unknown | null;
+  /**
+   * Did the kernel OOM-kill any process in the run's cgroup? Returns the terminal
+   * error to fail the run with, or null. Unlike `agentFailure` it fires while the
+   * agent is ALIVE — a child OOM kill does not end the agent's turn.
+   *
+   * Optional: omitted ⇒ this loop behaves exactly as it did before.
+   */
+  memoryStarvation?: () => unknown | null;
 }
 
 export interface PollResult {
@@ -583,6 +591,19 @@ export async function pollUntilTerminal(
       return { outcome: "cancelled", finalStatus: lastStatus };
     }
 
+    // MEMORY STARVATION, CHECKED BEFORE THE STATUS READ. Prod 2026-10-04: 16
+    // processes OOM-killed inside a task run's cgroup and the thread still ended
+    // a clean "complete" — the kills hit children, the agent finished its turn,
+    // nothing looked. The order is load-bearing: the read that serves
+    // terminal=true also revokes the daemon token, and onFailure needs that
+    // token to put the error on the thread. Thrown with no grace — the kernel
+    // counter is a positive signal, not the exit-vs-write race agentFailure
+    // has to ride out.
+    const starved = ctx.memoryStarvation?.() ?? null;
+    if (starved !== null) {
+      throw starved;
+    }
+
     let poll: ThreadStatusPoll;
     try {
       poll = await pollThreadStatus(opts, ctx.signal);
@@ -618,6 +639,16 @@ export async function pollUntilTerminal(
     lastStatus = poll.status;
     ctx.log(`thread-status: ${poll.status} (terminal=${poll.terminal})`);
     if (poll.terminal) {
+      // The residual window: clean at the check above, starved by the time
+      // terminal came back. The token is already being revoked, so the thread
+      // may keep its clean status — but the run still must not report success.
+      const lateStarved = ctx.memoryStarvation?.() ?? null;
+      if (lateStarved !== null) {
+        ctx.log(
+          `run was memory-starved after the thread reached '${poll.status}' — failing the run; the thread may not show the error (token revoked on the terminal read)`,
+        );
+        throw lateStarved;
+      }
       return { outcome: "completed", finalStatus: poll.status };
     }
     if (poll.status === "stopping") {

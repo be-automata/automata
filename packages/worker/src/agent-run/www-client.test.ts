@@ -891,3 +891,119 @@ describe("pullAgentCredentials: one network blip must not end a run (#212)", () 
     expect(CREDENTIAL_PULL_ATTEMPTS).toBeLessThanOrEqual(5);
   });
 });
+
+/**
+ * Prod 2026-10-04 (e335c83d): 16 processes were OOM-killed inside a task run's
+ * cgroup and the thread still ended as a clean "complete". A child OOM kill
+ * (`next build` under the agent's Bash tool) does not end the agent's turn, so
+ * the only signal is the cgroup's counter — and it has to be acted on BEFORE
+ * the read that serves terminal=true, because that read revokes the daemon
+ * token and onFailure could no longer mark the thread.
+ */
+describe("pollUntilTerminal: the run was memory-starved", () => {
+  const noSleep = async () => {};
+
+  it("fails the run with the starvation error while the thread is still working", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(200, { status: "working", terminal: false }),
+        ),
+    );
+    const oom = new Error("Out of memory: 16 process(es) killed");
+    let looks = 0;
+    const ctx: PollContext = {
+      cancelled: false,
+      log: () => {},
+      // Healthy on the first pass, starved on the second: no grace — the
+      // kernel counter is a positive signal, not an exit-vs-write race.
+      memoryStarvation: () => (++looks >= 2 ? oom : null),
+    };
+    await expect(pollUntilTerminal(ctx, opts, 0, noSleep)).rejects.toBe(oom);
+    expect(looks).toBe(2);
+  });
+
+  it("checks BEFORE the status read, so a finished-but-starved run never consumes its terminal read", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(200, { status: "complete", terminal: true }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const oom = new Error("Out of memory: 2 process(es) killed");
+    await expect(
+      pollUntilTerminal(
+        { cancelled: false, log: () => {}, memoryStarvation: () => oom },
+        opts,
+        0,
+        noSleep,
+      ),
+    ).rejects.toBe(oom);
+    // The terminal read is what revokes the token onFailure needs.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("an OOM that lands during the terminal read still fails the run", async () => {
+    // The narrow residual: clean at the pre-read check, starved by the time
+    // terminal comes back. The thread may no longer be markable (token
+    // revoked), but the run must not report success.
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(200, { status: "complete", terminal: true }),
+        ),
+    );
+    const oom = new Error("Out of memory: 1 process(es) killed");
+    let looks = 0;
+    const logs: string[] = [];
+    await expect(
+      pollUntilTerminal(
+        {
+          cancelled: false,
+          log: (m) => logs.push(m),
+          memoryStarvation: () => (++looks >= 2 ? oom : null),
+        },
+        opts,
+        0,
+        noSleep,
+      ),
+    ).rejects.toBe(oom);
+    expect(logs.join("\n")).toMatch(/memory-starved after the thread/);
+  });
+
+  it("a healthy run completes exactly as before", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(200, { status: "complete", terminal: true }),
+        ),
+    );
+    const result = await pollUntilTerminal(
+      { cancelled: false, log: () => {}, memoryStarvation: () => null },
+      opts,
+      0,
+      noSleep,
+    );
+    expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
+  });
+
+  it("a cancellation still wins — a superseded run is not re-labelled OOM", async () => {
+    const result = await pollUntilTerminal(
+      {
+        cancelled: true,
+        log: () => {},
+        memoryStarvation: () => new Error("Out of memory"),
+      },
+      opts,
+      0,
+      noSleep,
+    );
+    expect(result.outcome).toBe("cancelled");
+  });
+});

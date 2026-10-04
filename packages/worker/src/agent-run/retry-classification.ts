@@ -52,12 +52,37 @@ export class ResourceLimitError extends Error {
     readonly memoryMaxBytes: number,
     readonly oomKills: number,
   ) {
+    // Operator-facing: onFailure posts this as the thread's error text, which
+    // the UI renders under "Agent exited with an error".
     super(
-      `agent run exceeded its memory ceiling (${memoryMaxBytes} bytes); ` +
-        `the kernel OOM-killed it ${oomKills} time(s) inside its cgroup`,
+      `Out of memory: ${oomKills} process(es) killed by the per-run memory limit ` +
+        `(memory.max=${formatMemoryMax(memoryMaxBytes)}); the run exceeded its ` +
+        `memory ceiling, so its results are not trustworthy`,
     );
     this.name = "ResourceLimitError";
   }
+}
+
+/** `1500M` / `2G` when the limit is a whole unit (how boxes configure it), else bytes. */
+export function formatMemoryMax(bytes: number): string {
+  const mib = 1024 ** 2;
+  if (bytes > 0 && bytes % (1024 * mib) === 0) {
+    return `${bytes / (1024 * mib)}G`;
+  }
+  if (bytes > 0 && bytes % mib === 0) {
+    return `${bytes / mib}M`;
+  }
+  return `${bytes} bytes`;
+}
+
+/** The terminal error a memory-starved run fails with. */
+export function resourceLimitFailure(
+  memoryMaxBytes: number,
+  oomKills: number,
+): NonRetryableError {
+  return new NonRetryableError(
+    new ResourceLimitError(memoryMaxBytes, oomKills).message,
+  );
 }
 
 /**
@@ -75,9 +100,7 @@ export function classifyAgentExit(opts: {
 }): unknown {
   const killed = opts.signal === "SIGKILL" || opts.exitCode === 137;
   if (killed && opts.oomKills > 0) {
-    return new NonRetryableError(
-      new ResourceLimitError(opts.memoryMaxBytes, opts.oomKills).message,
-    );
+    return resourceLimitFailure(opts.memoryMaxBytes, opts.oomKills);
   }
   return opts.fallback;
 }

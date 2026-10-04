@@ -20,9 +20,14 @@ import {
   createRunCgroup,
   killAndRemoveRunCgroup,
   moveIntoCgroup,
-  readOomKillCount,
+  readMemoryEvents,
+  type MemoryEvents,
 } from "./run-cgroup";
-import { classifyAgentExit } from "./retry-classification";
+import {
+  classifyAgentExit,
+  formatMemoryMax,
+  resourceLimitFailure,
+} from "./retry-classification";
 import { buildKillInvocation, buildSpawnInvocation } from "./spawn-as-user";
 import { RUN_GH_CONFIG_DIR, RUN_TMP_DIR } from "./run-owned-paths";
 import { verifyGhAuth } from "./verify-gh-auth";
@@ -142,14 +147,14 @@ export class DaemonProcess {
   private cgroupDir: string | null = null;
 
   /**
-   * #204: the OOM count observed at teardown.
+   * #204: the `memory.events` counters observed at teardown.
    *
    * Cached because teardown REMOVES the cgroup, and the caller classifies the
    * exit afterwards — a live read at that point would find nothing and report 0,
    * so the ceiling would never be reported as the cause. Without this the whole
    * `resource-limit` classification is dead code.
    */
-  private observedOomKills = 0;
+  private observedMemoryEvents: MemoryEvents = { oom: 0, oomKill: 0 };
 
   /**
    * The marker the wrapper blocks on. Lives beside the pidfile — the same dir the
@@ -482,14 +487,14 @@ export class DaemonProcess {
     // must be read before the directory goes, and `rmdir` fails while members
     // remain, so the kill must precede it.
     if (this.cgroupDir) {
-      // Reads through oomKills(), which caches — the classification happens
-      // after this method has removed the cgroup.
-      const oom = this.oomKills();
-      if (oom > 0) {
-        logCgroup(
-          `run ${this.input.threadId} was OOM-killed ${oom} time(s) inside its cgroup (memory.max=${this.config.memoryMaxBytes})`,
-        );
-      }
+      // Reads through memoryEvents(), which caches — the classification happens
+      // after this method has removed the cgroup. Logged on EVERY run, zeros
+      // included: prod 2026-10-04 had 16 OOM kills behind a "complete" thread,
+      // and a line that only appears on failure cannot prove a run was clean.
+      const { oom, oomKill } = this.memoryEvents();
+      logCgroup(
+        `run cgroup: oom_kill=${oomKill} oom=${oom} thread=${this.input.threadId} memory.max=${formatMemoryMax(this.config.memoryMaxBytes)}`,
+      );
       killAndRemoveRunCgroup({ cgroupDir: this.cgroupDir, log: logCgroup });
       this.cgroupDir = null;
     }
@@ -739,11 +744,38 @@ export class DaemonProcess {
    * classify the exit. Zero whenever the ceiling was off.
    */
   oomKills(): number {
+    return this.memoryEvents().oomKill;
+  }
+
+  private memoryEvents(): MemoryEvents {
     if (this.cgroupDir) {
-      this.observedOomKills = readOomKillCount({ cgroupDir: this.cgroupDir });
+      this.observedMemoryEvents = readMemoryEvents({
+        cgroupDir: this.cgroupDir,
+      });
     }
     // After teardown the cgroup is gone; the value observed then is the answer.
-    return this.observedOomKills;
+    return this.observedMemoryEvents;
+  }
+
+  /**
+   * The run's failure when the kernel OOM-killed ANY process in its cgroup, or
+   * null. Consumed by the poll loop (`PollContext.memoryStarvation`).
+   *
+   * Distinct from `agentFailure()`, which keys on the agent's own exit: an OOM
+   * kill of a child (`next build` under the agent's Bash tool) leaves the agent
+   * alive, its turn ends normally, and www records a clean "complete" — prod
+   * 2026-10-04 (e335c83d), 16 kills. A run whose builds and tests were killed
+   * under it has no trustworthy result, and the ceiling is per RUN (see
+   * `memory.oom.group` in createRunCgroup), so any kill fails the run.
+   *
+   * Zero/null whenever the ceiling is off: no cgroup, nothing to read.
+   */
+  memoryStarvation(): unknown | null {
+    const oomKills = this.oomKills();
+    if (oomKills === 0) {
+      return null;
+    }
+    return resourceLimitFailure(this.config.memoryMaxBytes, oomKills);
   }
 
   private async waitForSocket(timeoutMs = 15_000): Promise<void> {
