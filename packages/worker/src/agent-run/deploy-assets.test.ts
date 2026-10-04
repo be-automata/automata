@@ -748,6 +748,24 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
     );
   });
 
+  it("counts a FAIL line by its first word, whatever the argument split", () => {
+    // Dry-run finding: callers pass the whole line as ONE argument, so a
+    // `case "$1" in FAIL)` never matched — every failure was silently
+    // dropped, the run printed RESULT: PASS and wrote manifest.sha256.
+    const record = body("record");
+    expect(record).toContain('case "$*" in');
+    expect(record).toContain('"FAIL "*)');
+    expect(record).not.toMatch(/case "\$1" in/);
+  });
+
+  it("iterates object lists compactly, one entry per line", () => {
+    // Dry-run finding: `jq -r` pretty-prints objects across many lines, so
+    // reading `.subpaths[]` / overlays line by line split every entry.
+    expect(src).not.toMatch(/jf "\$[a-z_]+" '\.(subpaths|overlays)/);
+    expect(body("jl")).toContain("jq -c");
+    expect(body("preflight")).toContain("control character");
+  });
+
   it("ends with a PASS/FAIL result and installs nothing from PyPI", () => {
     expect(script).toContain("RESULT: PASS");
     expect(script).toContain("RESULT: FAIL");

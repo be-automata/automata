@@ -157,11 +157,12 @@ log() {
   echo "[batteries] $*" >&2
 }
 
-# One summary line; FAIL lines are counted.
+# One summary line; FAIL lines are counted. Callers pass the whole line as
+# one argument, so match the line's first word, not "$1".
 record() {
   printf '%s\n' "$*" >>"$SUMMARY"
-  case "$1" in
-    FAIL) FAILURES=$((FAILURES + 1)) ;;
+  case "$*" in
+    "FAIL "*) FAILURES=$((FAILURES + 1)) ;;
   esac
 }
 
@@ -169,9 +170,14 @@ sha256_of() {
   sha256sum "$1" | awk '{print $1}'
 }
 
-# jq on one compact JSON entry.
+# jq on one compact JSON entry: a raw scalar field.
 jf() {
   printf '%s' "$1" | jq -r "$2"
+}
+
+# jq on one compact JSON entry: a list of objects, one compact object per line.
+jl() {
+  printf '%s' "$1" | jq -c "$2"
 }
 
 finish() {
@@ -239,6 +245,12 @@ preflight() {
     record "FAIL preflight manifest: schemaVersion must be 1 with packs and clis arrays"
     return 1
   fi
+  # Raw (-r) reads below are line-based: a control character in any string
+  # could split one value into two that each pass the checks.
+  if ! jq -e '[.. | strings | test("[\u0000-\u001f\u007f]")] | any | not' "$MANIFEST" >/dev/null; then
+    record "FAIL preflight manifest: a string contains a control character"
+    return 1
+  fi
 
   while IFS= read -r -u 3 entry; do
     id="$(jf "$entry" '.id')"
@@ -260,7 +272,7 @@ preflight() {
       while IFS= read -r -u 5 ex; do
         safe_rel_path "$ex" || record "FAIL preflight $id: unsafe exclude"
       done 5< <(jf "$sub" '.exclude // [] | .[]')
-    done 4< <(jf "$entry" '.subpaths[]')
+    done 4< <(jl "$entry" '.subpaths[]')
     while IFS= read -r -u 4 ov; do
       value="$(jf "$ov" '.from')"
       safe_rel_path "$value" || record "FAIL preflight $id: unsafe overlay from"
@@ -274,7 +286,7 @@ preflight() {
         skills/*) ;;
         *) record "FAIL preflight $id: overlay dest outside skills/" ;;
       esac
-    done 4< <(jf "$entry" '.overlays // [] | .[]')
+    done 4< <(jl "$entry" '.overlays // [] | .[]')
   done 3< <(jq -c '.packs[]' "$MANIFEST")
 
   while IFS= read -r -u 3 entry; do
@@ -575,7 +587,7 @@ pack_stamp_hash() {
     while IFS= read -r -u 6 ov; do
       from="$(jf "$ov" '.from')"
       git_repo rev-parse --verify --quiet "$HEAD_SHA:$from" || printf 'absent %s\n' "$from"
-    done 6< <(jf "$entry" '.overlays // [] | .[]')
+    done 6< <(jl "$entry" '.overlays // [] | .[]')
     printf '%s\n' "$SCRIPT_HASH"
   } | sha256sum | awk '{print $1}'
 }
@@ -632,7 +644,7 @@ install_pack() {
       record "FAIL pack $id: $STEP_ERROR"
       return 1
     fi
-  done 6< <(jf "$entry" '.subpaths[]')
+  done 6< <(jl "$entry" '.subpaths[]')
 
   while IFS= read -r -u 6 ov; do
     from="$(jf "$ov" '.from')"
@@ -643,7 +655,7 @@ install_pack() {
       record "FAIL pack $id: overlay $from is absent at $HEAD_SHA"
       return 1
     fi
-  done 6< <(jf "$entry" '.overlays // [] | .[]')
+  done 6< <(jl "$entry" '.overlays // [] | .[]')
 
   while IFS= read -r -d '' md; do
     if ! strip_frontmatter "$md"; then
