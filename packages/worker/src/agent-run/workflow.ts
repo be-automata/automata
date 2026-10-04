@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import path from "node:path";
 import { hatchet } from "../hatchet-client";
 import {
   AGENT_RUN_VARIANTS,
@@ -10,7 +11,12 @@ import { loadWorkerConfig } from "./config";
 import { acquireBoxLock, type BoxLock } from "./box-lock";
 import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { reapAgentUidEscapees } from "./uid-reaper";
+import { runAsAgent } from "./agent-command";
 import { DaemonProcess } from "./daemon-process";
+import {
+  runSelfHealChecks,
+  type SelfHealCheckResult,
+} from "./self-heal-checks";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
 import { formatRunStartLine, resolveRunLane } from "./run-lane";
 import { reviewAgentForRun, withReviewAgentWire } from "./review-agent-wire";
@@ -30,6 +36,7 @@ import {
   postRunCredentialSource,
   postRunFailed,
   postRunTerminal,
+  postSelfHealAuditChecks,
   checkRunStaleness,
   pullAgentCredentials,
   pullNextMessage,
@@ -44,7 +51,8 @@ import {
 } from "./egress-proxy";
 import { startGitBroker, type GitBroker } from "./git-broker";
 import { startGhBroker, type GhBroker } from "./gh-broker";
-import type { BrokerHandoff } from "./daemon-env";
+import { buildRunProxyEnv, type BrokerHandoff } from "./daemon-env";
+import { RUN_HOME_DIR, RUN_TMP_DIR } from "./run-owned-paths";
 import {
   ensureRunNamespace,
   getProcessWorkerId,
@@ -424,6 +432,99 @@ export const agentRunWorkflow = agentRunWorkflows.find(
   (w) => w.definition.name === "agent-run",
 )!;
 
+export interface SelfHealAuditStepDeps {
+  runChecks: typeof runSelfHealChecks;
+  postReport: typeof postSelfHealAuditChecks;
+}
+
+const DEFAULT_SELF_HEAL_DEPS: SelfHealAuditStepDeps = {
+  runChecks: runSelfHealChecks,
+  postReport: (args) => postSelfHealAuditChecks(args),
+};
+
+/**
+ * FORGE-01: for an audit-stamped run, run the platform checks on the clean
+ * checkout and post ONE sealing report BEFORE the agent exists. Runner failure
+ * reports "error" for every requested check. Never throws and never fails the
+ * run; the check token is used only for the report header and never logged.
+ * A run without `selfHeal` does nothing (no step line, no request).
+ */
+export async function runSelfHealAuditStep({
+  input,
+  workdir,
+  agentUser,
+  egressProxyUrl,
+  step,
+  signal,
+  deps = DEFAULT_SELF_HEAL_DEPS,
+}: {
+  input: Pick<AgentRunInput, "selfHeal" | "threadId" | "daemonCallbackUrl">;
+  workdir: string;
+  agentUser: string;
+  egressProxyUrl: string | null;
+  step: (msg: string) => void;
+  signal?: AbortSignal;
+  deps?: SelfHealAuditStepDeps;
+}): Promise<void> {
+  const selfHeal = input.selfHeal;
+  if (!selfHeal || selfHeal.kind !== "audit") return;
+  const requested = selfHeal.checks;
+  let results: SelfHealCheckResult[];
+  try {
+    if (requested.length === 0) {
+      results = [];
+    } else {
+      let env: NodeJS.ProcessEnv = {};
+      for (const key of ["PATH", "LANG", "LC_ALL"]) {
+        const value = process.env[key];
+        if (value !== undefined) env[key] = value;
+      }
+      env.HOME = path.join(workdir, RUN_HOME_DIR);
+      if (agentUser) {
+        env.USER = agentUser;
+        env.LOGNAME = agentUser;
+        env.TMPDIR = path.join(workdir, RUN_TMP_DIR);
+        env.GIT_CONFIG_COUNT = "1";
+        env.GIT_CONFIG_KEY_0 = "safe.directory";
+        env.GIT_CONFIG_VALUE_0 = workdir;
+      }
+      if (egressProxyUrl) env = buildRunProxyEnv(egressProxyUrl, env);
+      results = await deps.runChecks({
+        checks: requested,
+        run: runAsAgent,
+        agentUser,
+        workdir,
+        env,
+        signal,
+      });
+    }
+  } catch (err) {
+    step(
+      `self-heal checks: runner failed (${err instanceof Error ? err.name : "unknown"})`,
+    );
+    results = requested.map((c) => ({
+      fingerprint: c.fingerprint,
+      outcome: "error" as const,
+    }));
+  }
+  let report: Awaited<ReturnType<typeof postSelfHealAuditChecks>> = "error";
+  try {
+    report = await deps.postReport({
+      baseUrl: input.daemonCallbackUrl,
+      checkToken: selfHeal.checkToken,
+      threadId: input.threadId,
+      results,
+    });
+  } catch {
+    report = "error";
+  }
+  const count = (o: SelfHealCheckResult["outcome"]) =>
+    results.filter((r) => r.outcome === o).length;
+  step(
+    `self-heal checks: requested=${requested.length} pass=${count("pass")} fail=${count("fail")} error=${count("error")} report=${report}`,
+  );
+}
+
 async function runAgentInner(
   input: AgentRunInput,
   ctx: RunCtx,
@@ -784,6 +885,17 @@ async function runAgentInner(
       throw nonRetryablePreflight(err);
     }
     step("gh auth precondition ok (bot identity)");
+
+    // FORGE-01: seal the deterministic check outcomes on the clean checkout
+    // before the agent exists. Never throws, never fails the run.
+    await runSelfHealAuditStep({
+      input,
+      workdir,
+      agentUser: config.agentUser,
+      egressProxyUrl: egressProxy?.url ?? null,
+      step,
+      signal,
+    });
 
     // Run: bring up the daemon, then pull the message it should execute.
     await daemon.start();

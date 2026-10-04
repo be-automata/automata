@@ -65,3 +65,23 @@ describe("formatRunStartLine (UAT #229 F2)", () => {
     expect(line).not.toContain("SECRET");
   });
 });
+
+describe("formatRunStartLine lane tag for self-heal (OBS-01)", () => {
+  it("tags an audit-stamped run lane=self-heal-audit", () => {
+    const line = formatRunStartLine({
+      ...base,
+      selfHeal: { kind: "audit", checks: [], checkToken: "TOKEN_SENTINEL" },
+    });
+    expect(line).toBe(
+      "run start: lane=self-heal-audit repo=acme/widgets branch=feat/x",
+    );
+    expect(line).not.toContain("TOKEN_SENTINEL");
+  });
+
+  it("keeps lane=review and lane=task for other runs", () => {
+    expect(formatRunStartLine({ ...base, prKey: "k" })).toContain(
+      "lane=review",
+    );
+    expect(formatRunStartLine(base)).toContain("lane=task");
+  });
+});

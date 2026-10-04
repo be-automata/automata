@@ -65,6 +65,7 @@ process.env.HATCHET_CLIENT_TLS_STRATEGY = "none";
 let workflowDef: any;
 let resolveUseCredits: typeof import("./workflow").resolveUseCredits;
 let resolveCredentialSource: typeof import("./workflow").resolveCredentialSource;
+let runSelfHealAuditStep: typeof import("./workflow").runSelfHealAuditStep;
 
 beforeAll(async () => {
   const mod = await import("./workflow");
@@ -72,6 +73,7 @@ beforeAll(async () => {
     .definition;
   resolveUseCredits = mod.resolveUseCredits;
   resolveCredentialSource = mod.resolveCredentialSource;
+  runSelfHealAuditStep = mod.runSelfHealAuditStep;
 });
 
 afterEach(() => {
@@ -399,5 +401,140 @@ describe("#125 C1: makeAgentRunWorkflow variants", () => {
         999 as unknown as ConcurrencyLimitStrategy,
       ),
     ).toThrow(/unsupported per-PR concurrency strategy 999/);
+  });
+});
+
+describe("runSelfHealAuditStep (FORGE-01 / OBS-01 / SKEW-01)", () => {
+  const TOKEN = "TOKEN_SENTINEL";
+  const checks = [
+    { fingerprint: "aaaaaaaaaaaaaaaa", check: "file-exists", subject: "a" },
+    { fingerprint: "bbbbbbbbbbbbbbbb", check: "file-exists", subject: "b" },
+    { fingerprint: "cccccccccccccccc", check: "file-exists", subject: "c" },
+  ];
+  const base = {
+    threadId: "thr_sh_1",
+    daemonCallbackUrl: "https://www.example.com",
+  };
+
+  function harness(
+    runChecks: import("./workflow").SelfHealAuditStepDeps["runChecks"],
+  ) {
+    const order: string[] = [];
+    const lines: string[] = [];
+    const runSpy = vi.fn(runChecks);
+    const postSpy = vi.fn(async (_a: { results: unknown[] }) => {
+      order.push("post");
+      return "recorded" as const;
+    });
+    const deps = {
+      runChecks: ((a) => {
+        order.push("run");
+        return runSpy(a);
+      }) as typeof runChecks,
+      postReport:
+        postSpy as unknown as import("./workflow").SelfHealAuditStepDeps["postReport"],
+    };
+    return { order, lines, runSpy, postSpy, deps };
+  }
+
+  it("runs the checks then posts the real outcomes once, in one step line", async () => {
+    const h = harness(async () => [
+      { fingerprint: "aaaaaaaaaaaaaaaa", outcome: "pass" },
+      { fingerprint: "bbbbbbbbbbbbbbbb", outcome: "fail" },
+      { fingerprint: "cccccccccccccccc", outcome: "error" },
+    ]);
+    await runSelfHealAuditStep({
+      input: {
+        ...base,
+        selfHeal: { kind: "audit", checks, checkToken: TOKEN },
+      },
+      workdir: "/w",
+      agentUser: "",
+      egressProxyUrl: "http://127.0.0.1:1",
+      step: (m) => h.lines.push(m),
+      deps: h.deps,
+    });
+    expect(h.order).toEqual(["run", "post"]);
+    const env = h.runSpy.mock.calls[0]?.[0].env ?? {};
+    expect(env.HTTPS_PROXY).toBe("http://127.0.0.1:1");
+    expect(h.lines).toEqual([
+      "self-heal checks: requested=3 pass=1 fail=1 error=1 report=recorded",
+    ]);
+    expect(h.lines.join("\n")).not.toContain(TOKEN);
+  });
+
+  it("a throwing runner still posts a sealing report of errors", async () => {
+    const h = harness(async () => {
+      throw new Error("boom");
+    });
+    await runSelfHealAuditStep({
+      input: {
+        ...base,
+        selfHeal: { kind: "audit", checks, checkToken: TOKEN },
+      },
+      workdir: "/w",
+      agentUser: "",
+      egressProxyUrl: null,
+      step: (m) => h.lines.push(m),
+      deps: h.deps,
+    });
+    expect(h.postSpy).toHaveBeenCalledTimes(1);
+    const results = h.postSpy.mock.calls[0]?.[0].results as {
+      outcome: string;
+    }[];
+    expect(results.map((r) => r.outcome)).toEqual(["error", "error", "error"]);
+  });
+
+  it("empty checks: runner not called, a zero-result report is still posted", async () => {
+    const h = harness(async () => []);
+    await runSelfHealAuditStep({
+      input: {
+        ...base,
+        selfHeal: { kind: "audit", checks: [], checkToken: TOKEN },
+      },
+      workdir: "/w",
+      agentUser: "",
+      egressProxyUrl: null,
+      step: (m) => h.lines.push(m),
+      deps: h.deps,
+    });
+    expect(h.runSpy).not.toHaveBeenCalled();
+    expect(h.postSpy).toHaveBeenCalledTimes(1);
+    expect(h.postSpy.mock.calls[0]?.[0].results).toEqual([]);
+  });
+
+  it("no selfHeal (old www): neither function called, no step line", async () => {
+    const h = harness(async () => []);
+    await runSelfHealAuditStep({
+      input: base,
+      workdir: "/w",
+      agentUser: "",
+      egressProxyUrl: null,
+      step: (m) => h.lines.push(m),
+      deps: h.deps,
+    });
+    expect(h.runSpy).not.toHaveBeenCalled();
+    expect(h.postSpy).not.toHaveBeenCalled();
+    expect(h.lines).toEqual([]);
+  });
+
+  it("a report error does not throw (the run proceeds)", async () => {
+    const h = harness(async () => []);
+    h.postSpy.mockResolvedValueOnce("error" as never);
+    const lines: string[] = [];
+    await expect(
+      runSelfHealAuditStep({
+        input: {
+          ...base,
+          selfHeal: { kind: "audit", checks: [], checkToken: TOKEN },
+        },
+        workdir: "/w",
+        agentUser: "",
+        egressProxyUrl: null,
+        step: (m) => lines.push(m),
+        deps: h.deps,
+      }),
+    ).resolves.toBeUndefined();
+    expect(lines[0]).toContain("report=error");
   });
 });
