@@ -792,6 +792,61 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
   });
 });
 
+describe("#batteries (phase 3): cloud-init + runbook", () => {
+  const cloudInit = read(
+    path.join(workerRoot, "deploy", "linux", "cloud-init.yaml"),
+  );
+  const runbook = read(path.join(repoRoot, "deploy", "PILOT-RUNBOOK.md"));
+  const agentUidDoc = read(
+    path.join(workerRoot, "deploy", "AGENT-UID-PROVISIONING.md"),
+  );
+
+  it("calls install-batteries.sh only when the checkout's manifest exists", () => {
+    // On first boot /opt/automata-platform is the empty dir created above;
+    // the call must skip with a message, not fail provisioning.
+    expect(cloudInit).toContain("install-batteries.sh");
+    expect(cloudInit).toMatch(
+      /\[ -f \/opt\/automata-platform\/packages\/worker\/deploy\/batteries\.json \]/,
+    );
+    expect(cloudInit).toContain("batteries: SKIPPED");
+  });
+
+  it("installs batteries only AFTER the base-provisioned sentinel", () => {
+    // Batteries must never block base provisioning: the sentinel means the
+    // box is usable, and manifest.sha256 is the separate batteries contract.
+    const sentinel = cloudInit.indexOf(
+      "date -uIseconds > /usr/local/automata/.provisioned",
+    );
+    const call = cloudInit.indexOf(
+      "bash /opt/automata-platform/packages/worker/deploy/linux/install-batteries.sh",
+    );
+    expect(sentinel).toBeGreaterThan(-1);
+    expect(call).toBeGreaterThan(sentinel);
+  });
+
+  it("documents the production step: a verified root-owned copy, never the stale provision script", () => {
+    for (const token of [
+      "install-batteries.sh",
+      "safe.directory",
+      "--ff-only",
+      "ls-remote",
+      "cat-file blob",
+      "manifest.sha256",
+      "RESULT: PASS",
+    ]) {
+      expect(runbook, token).toContain(token);
+    }
+    expect(runbook).toMatch(/do not re-run[^\n]*automata-provision\.sh/i);
+    expect(runbook).toMatch(/no worker restart/i);
+    expect(runbook).toMatch(/verify_as_agent[^\n]*(finding|bug)/i);
+    expect(runbook).toMatch(/semgrep[^\n]*dropped|dropped[^\n]*semgrep/i);
+  });
+
+  it("points Linux operators from the agent-uid doc to the battery install", () => {
+    expect(agentUidDoc).toContain("install-batteries.sh");
+  });
+});
+
 describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () => {
   const linux = (f: string) =>
     read(path.join(workerRoot, "deploy", "linux", f));
