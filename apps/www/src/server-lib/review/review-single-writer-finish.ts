@@ -21,6 +21,7 @@ import {
   executeReviewFromIntent,
   type ReviewFromIntentOutcome,
 } from "./execute-review-from-intent";
+import { findLastLeadAgentText } from "./lead-text";
 import { hasTaggedReviewIntentOpener } from "./parse-review-intent";
 import { resolveApproveFloor } from "./resolve-approve-floor";
 import { PR_MERGED_SKILL_NAME } from "./review-skill";
@@ -135,28 +136,6 @@ export function isWorkFailedOutcome(
  */
 export function extractTerminalAgentText(messages: DBMessage[] | null): string {
   return findLastLeadAgentText(messages, () => true) ?? "";
-}
-
-/**
- * The joined text parts of the LAST lead agent message whose text `accept`s,
- * or null when none does. The one walk behind both extractTerminalAgentText
- * and selectReviewTerminalText.
- */
-function findLastLeadAgentText(
-  messages: DBMessage[] | null,
-  accept: (text: string) => boolean,
-): string | null {
-  if (!messages) return null;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    if (m.type !== "agent" || m.parent_tool_use_id != null) continue;
-    const text = m.parts
-      .filter((p): p is { type: "text"; text: string } => p.type === "text")
-      .map((p) => p.text)
-      .join("\n");
-    if (accept(text)) return text;
-  }
-  return null;
 }
 
 /**
