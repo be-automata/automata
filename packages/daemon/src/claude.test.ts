@@ -1,7 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { claudeCommand } from "./claude";
+import { claudeCommand, reviewPolicyArgs } from "./claude";
 import { stripGithubCredentials } from "./daemon";
 import type { IDaemonRuntime } from "./runtime";
+import {
+  DaemonMessageClaudeSchema,
+  parseDaemonReviewAgent,
+  reviewPolicyVariantFor,
+  type DaemonReviewAgent,
+} from "./shared";
+import {
+  ORCHESTRATED_REVIEW_POLICY_JOINED,
+  REVIEW_POLICY_JOINED,
+} from "./adapters/__golden-fixtures";
 
 // Minimal runtime: claudeCommand only writes the prompt file + (for a non-null
 // sessionId) logs. sessionId=null keeps it to writeFileSync.
@@ -64,6 +74,186 @@ describe("claudeCommand — permissionMode policy (phase-2 single-writer)", () =
     expect(cmd).toContain("--allowedTools WebSearch WebFetch Read Bash");
     expect(cmd).not.toContain("--dangerously-skip-permissions");
     expect(cmd).not.toContain("Bash(gh:*)");
+  });
+});
+
+const normalizePrompt = (cmd: string) =>
+  cmd.replace(/\/tmp\/claude-prompt-[^ ]+\.txt/, "/tmp/claude-prompt-X.txt");
+
+const ORCHESTRATED: DaemonReviewAgent = {
+  mode: "orchestrated",
+  commandTimeoutMs: 300000,
+  maxTurns: 12,
+};
+
+describe("reviewPolicyArgs(variant) — classic pin + D2 orchestrated variant", () => {
+  it("classic (no argument / explicit) is the ADR-004 pin byte-for-byte", () => {
+    expect(reviewPolicyArgs().join(" ")).toBe(REVIEW_POLICY_JOINED);
+    expect(reviewPolicyArgs({ mode: "classic" })).toEqual(reviewPolicyArgs());
+  });
+
+  it("orchestrated adds Agent/Task/Skill + explicit denies, keeps the classic fences", () => {
+    const joined = reviewPolicyArgs({ mode: "orchestrated" }).join(" ");
+    expect(joined).toBe(ORCHESTRATED_REVIEW_POLICY_JOINED);
+    expect(joined).toContain("'Bash(gh:*)' 'Bash(git push:*)'");
+    expect(joined).toContain("--setting-sources user");
+    expect(joined).not.toContain("--dangerously-skip-permissions");
+    expect(joined).not.toContain("--max-turns");
+  });
+
+  it("orchestrated with maxTurns appends --max-turns N last", () => {
+    expect(
+      reviewPolicyArgs({ mode: "orchestrated", maxTurns: 40 }).join(" "),
+    ).toBe(`${ORCHESTRATED_REVIEW_POLICY_JOINED} --max-turns 40`);
+  });
+});
+
+describe("reviewPolicyVariantFor — resolved review shape (ADR-006)", () => {
+  it("is classic for review without reviewAgent or with mode classic", () => {
+    expect(reviewPolicyVariantFor("review", undefined)).toEqual({
+      mode: "classic",
+    });
+    expect(
+      reviewPolicyVariantFor("review", {
+        mode: "classic",
+        commandTimeoutMs: 60000,
+      }),
+    ).toEqual({ mode: "classic" });
+  });
+
+  it("is orchestrated (with maxTurns) only for review + orchestrated", () => {
+    expect(
+      reviewPolicyVariantFor("review", {
+        mode: "orchestrated",
+        commandTimeoutMs: 300000,
+        maxTurns: 40,
+      }),
+    ).toEqual({ mode: "orchestrated", maxTurns: 40 });
+    expect(
+      reviewPolicyVariantFor("review", {
+        mode: "orchestrated",
+        commandTimeoutMs: 300000,
+      }),
+    ).toEqual({ mode: "orchestrated" });
+  });
+
+  it("any non-review permissionMode is classic whatever reviewAgent says", () => {
+    for (const pm of ["allowAll", "plan", undefined] as const) {
+      expect(reviewPolicyVariantFor(pm, ORCHESTRATED)).toEqual({
+        mode: "classic",
+      });
+    }
+  });
+});
+
+describe("claudeCommand — reviewAgent", () => {
+  it("review without reviewAgent and with classic reviewAgent are today's command", () => {
+    const today = normalizePrompt(
+      claudeCommand({ ...base, permissionMode: "review" }),
+    );
+    expect(today).toContain(REVIEW_POLICY_JOINED);
+    expect(today).not.toContain("Agent");
+    expect(
+      normalizePrompt(
+        claudeCommand({
+          ...base,
+          permissionMode: "review",
+          reviewAgent: { mode: "classic", commandTimeoutMs: 120000 },
+        }),
+      ),
+    ).toBe(today);
+  });
+
+  it("review + orchestrated reviewAgent carries the orchestrated policy and --max-turns", () => {
+    const cmd = claudeCommand({
+      ...base,
+      permissionMode: "review",
+      reviewAgent: ORCHESTRATED,
+    });
+    expect(cmd).toContain(
+      `${ORCHESTRATED_REVIEW_POLICY_JOINED} --max-turns 12`,
+    );
+    expect(cmd).not.toContain("--dangerously-skip-permissions");
+  });
+
+  it("allowAll + orchestrated reviewAgent is still the unrestricted command", () => {
+    const cmd = claudeCommand({
+      ...base,
+      permissionMode: "allowAll",
+      reviewAgent: ORCHESTRATED,
+    });
+    expect(cmd).toContain("--dangerously-skip-permissions");
+    expect(cmd).not.toContain("Agent");
+    expect(cmd).not.toContain("--max-turns");
+  });
+});
+
+describe("DaemonMessageClaudeSchema.reviewAgent + parseDaemonReviewAgent", () => {
+  const message = {
+    type: "claude",
+    token: "t",
+    prompt: "p",
+    model: "sonnet",
+    agent: "claudeCode",
+    agentVersion: 1,
+    sessionId: null,
+    threadId: "th",
+    threadChatId: "tc",
+    permissionMode: "review",
+  };
+
+  it("accepts the message with or without reviewAgent, and with ANY reviewAgent value", () => {
+    expect(DaemonMessageClaudeSchema.safeParse(message).success).toBe(true);
+    for (const reviewAgent of [
+      ORCHESTRATED,
+      { mode: "turbo" },
+      "x",
+      42,
+      null,
+    ]) {
+      expect(
+        DaemonMessageClaudeSchema.safeParse({ ...message, reviewAgent })
+          .success,
+      ).toBe(true);
+    }
+  });
+
+  it("undefined ⇒ {} (no reviewAgent, not rejected)", () => {
+    expect(parseDaemonReviewAgent(undefined)).toEqual({});
+  });
+
+  it("a valid value ⇒ {reviewAgent}", () => {
+    expect(parseDaemonReviewAgent(ORCHESTRATED)).toEqual({
+      reviewAgent: ORCHESTRATED,
+    });
+  });
+
+  it.each([
+    [{ mode: "orchestrated", commandTimeoutMs: 5 }, "commandTimeoutMs"],
+    [{ mode: "orchestrated", commandTimeoutMs: 600001 }, "commandTimeoutMs"],
+    [{ mode: "orchestrated", commandTimeoutMs: 1.5 }, "commandTimeoutMs"],
+    [
+      { mode: "orchestrated", commandTimeoutMs: 60000, maxTurns: 0 },
+      "maxTurns",
+    ],
+    [
+      { mode: "orchestrated", commandTimeoutMs: 60000, maxTurns: 501 },
+      "maxTurns",
+    ],
+    [{ mode: "turbo", commandTimeoutMs: 60000 }, "mode"],
+  ])("rejects %j naming %s and never echoing the value", (raw, path) => {
+    const result = parseDaemonReviewAgent(raw);
+    expect(result.reviewAgent).toBeUndefined();
+    expect(result.rejected).toContain(path);
+    expect(result.rejected).not.toContain("turbo");
+    expect(result.rejected).not.toContain("600001");
+  });
+
+  it('rejects a non-object ("x") without echoing it', () => {
+    const result = parseDaemonReviewAgent("x");
+    expect(result.reviewAgent).toBeUndefined();
+    expect(typeof result.rejected).toBe("string");
+    expect(result.rejected).not.toContain('"x"');
   });
 });
 

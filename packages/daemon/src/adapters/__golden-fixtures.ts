@@ -20,6 +20,20 @@ export const TOKEN = "TEST_TOKEN_STRING";
 export const REVIEW_POLICY_JOINED =
   "--permission-mode default --allowedTools Read Grep Glob Bash --disallowedTools 'Bash(gh:*)' 'Bash(git push:*)' --setting-sources user";
 
+/**
+ * The D2 ORCHESTRATED review tool-policy (Phase 5): the classic pin above
+ * plus in-run fan-out. `Agent` and `Task` are BOTH allowlisted because CLI
+ * 2.1.284's init `tools` list names the sub-agent tool `Task` while the
+ * tool_use the model emits is named `Agent` (02-FINDINGS Q2). Write / Edit /
+ * WebFetch / WebSearch are denied EXPLICITLY because a skill's
+ * `allowed-tools` can grant tools in -p mode and an explicit deny wins over
+ * it. The two classic deny matchers and `--setting-sources user` are kept
+ * verbatim. `--max-turns N` is appended only when the payload sets it.
+ * This is an ADDITION — REVIEW_POLICY_JOINED is not edited.
+ */
+export const ORCHESTRATED_REVIEW_POLICY_JOINED =
+  "--permission-mode default --allowedTools Read Grep Glob Bash Agent Task Skill --disallowedTools 'Bash(gh:*)' 'Bash(git push:*)' Write Edit WebFetch WebSearch --setting-sources user";
+
 export function expectedClaudeEnvNoCredits(
   anthropicApiKey: string,
 ): Record<string, string> {

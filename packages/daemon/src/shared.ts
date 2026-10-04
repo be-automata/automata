@@ -29,7 +29,76 @@ export const DaemonMessageClaudeSchema = z.object({
   >,
   permissionMode: z.enum(["allowAll", "plan", "review"]).optional(),
   useCredits: z.boolean().optional(),
+  // RAW on purpose (Phase 5): a malformed reviewAgent must degrade the run to
+  // the classic review policy, never reject the whole run message. The value
+  // is validated separately by parseDaemonReviewAgent (DaemonReviewAgentSchema).
+  reviewAgent: z.unknown().optional(),
 });
+
+/**
+ * The orchestrated-review knobs the worker stamps on a `claude` message
+ * (Phase 5, D2). A resolved review SHAPE under ADR-006 — it carries no
+ * credential kind, user or org. Bounds mirror the Phase 4 admin ranges
+ * (REVIEW_COMMAND_TIMEOUT 60..600 s, MAX_TURNS 1..500).
+ */
+export const DaemonReviewAgentSchema = z.object({
+  mode: z.enum(["classic", "orchestrated"]),
+  commandTimeoutMs: z.number().int().min(60000).max(600000),
+  maxTurns: z.number().int().min(1).max(500).optional(),
+});
+
+export type DaemonReviewAgent = z.infer<typeof DaemonReviewAgentSchema>;
+
+export interface ParsedDaemonReviewAgent {
+  reviewAgent?: DaemonReviewAgent;
+  /** `<path>:<code>` per zod issue — never the input value. */
+  rejected?: string;
+}
+
+/**
+ * Validate the raw `reviewAgent` wire field. Absent ⇒ `{}`; valid ⇒
+ * `{ reviewAgent }`; anything else ⇒ `{ rejected }` naming the failing field
+ * paths and issue codes only (the value could be anything, so it is never
+ * echoed). The caller logs the rejection and runs classic.
+ */
+export function parseDaemonReviewAgent(raw: unknown): ParsedDaemonReviewAgent {
+  if (raw === undefined) {
+    return {};
+  }
+  const result = DaemonReviewAgentSchema.safeParse(raw);
+  if (result.success) {
+    return { reviewAgent: result.data };
+  }
+  return {
+    rejected: result.error.issues
+      .map((issue) => `${issue.path.join(".") || "(root)"}:${issue.code}`)
+      .join(", "),
+  };
+}
+
+/**
+ * Which review tool-policy a run gets. A resolved SHAPE (ADR-006): no
+ * credential kind, user or org decides it.
+ */
+export type ReviewPolicyVariant =
+  | { mode: "classic" }
+  | { mode: "orchestrated"; maxTurns?: number };
+
+/**
+ * Orchestrated only when the run is a review AND the worker stamped an
+ * orchestrated reviewAgent; every other combination is classic.
+ */
+export function reviewPolicyVariantFor(
+  permissionMode: PermissionMode | undefined,
+  reviewAgent: DaemonReviewAgent | undefined,
+): ReviewPolicyVariant {
+  if (permissionMode !== "review" || reviewAgent?.mode !== "orchestrated") {
+    return { mode: "classic" };
+  }
+  return reviewAgent.maxTurns !== undefined
+    ? { mode: "orchestrated", maxTurns: reviewAgent.maxTurns }
+    : { mode: "orchestrated" };
+}
 
 /**
  * The resolved permission mode for a run, derived from the wire schema above

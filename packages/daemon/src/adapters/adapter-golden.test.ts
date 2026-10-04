@@ -19,6 +19,7 @@ import {
   NORMALIZED_URL,
   TOKEN,
   REVIEW_POLICY_JOINED,
+  ORCHESTRATED_REVIEW_POLICY_JOINED,
   normalizePromptPath,
   expectedClaudeEnvNoCredits,
   expectedClaudeEnvWithCredits,
@@ -81,6 +82,28 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
       });
       expect(cmd).toContain(REVIEW_POLICY_JOINED);
       expect(cmd).not.toContain("--dangerously-skip-permissions");
+    });
+
+    it("the classic variant is the same pin as the no-argument call", () => {
+      expect(reviewPolicyArgs({ mode: "classic" })).toEqual(reviewPolicyArgs());
+      expect(reviewPolicyArgs({ mode: "classic" }).join(" ")).toBe(
+        REVIEW_POLICY_JOINED,
+      );
+    });
+
+    it("the orchestrated variant (D2) is pinned to its exact joined policy", () => {
+      expect(reviewPolicyArgs({ mode: "orchestrated" }).join(" ")).toBe(
+        ORCHESTRATED_REVIEW_POLICY_JOINED,
+      );
+    });
+
+    it("the orchestrated variant appends --max-turns N only when maxTurns is set", () => {
+      expect(
+        reviewPolicyArgs({ mode: "orchestrated", maxTurns: 40 }).join(" "),
+      ).toBe(`${ORCHESTRATED_REVIEW_POLICY_JOINED} --max-turns 40`);
+      expect(reviewPolicyArgs({ mode: "orchestrated" })).not.toContain(
+        "--max-turns",
+      );
     });
   });
 
