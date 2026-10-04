@@ -145,8 +145,9 @@ while IFS= read -r word; do
   SMOKE_ARGS+=("$word")
 done < <(jq -r "$AOT | .smokeArgs[]" "$M")
 PACK_SHA="$(jq -r --arg p "$PROOF_PACK" '.packs[] | select(.id == $p) | .sha' "$M")"
-[ -n "$SDK_NAME" ] && [ -n "$AOT_NAME" ] && [ -n "$PACK_SHA" ] ||
+if [ -z "$SDK_NAME" ] || [ -z "$AOT_NAME" ] || [ -z "$PACK_SHA" ]; then
   die "the manifest lacks a dart-sdk tool, a dart-aot tool or the $PROOF_PACK pack"
+fi
 ITEM_COUNT="$(jq '(.clis | length) + (.packs | length) + ((.tools // []) | length)' "$M")"
 
 RUN_STATUS=0
