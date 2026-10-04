@@ -209,7 +209,7 @@ finish() {
   exit 1
 }
 
-# shellcheck disable=SC2329 # invoked by `trap on_exit EXIT` in main
+# shellcheck disable=SC2317,SC2329 # invoked by `trap on_exit EXIT` in main (SC2317 on shellcheck <0.10, SC2329 on >=0.10)
 on_exit() {
   local status=$?
   if [ -n "$SUMMARY" ] && [ "$FINISHED" -eq 0 ]; then
