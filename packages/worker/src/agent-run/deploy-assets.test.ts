@@ -3,6 +3,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
+import { REVIEW_BATTERY_PACK_IDS } from "../../../shared/src/model/review-agent-settings";
+import {
+  BATTERIES_MANIFEST_REPO_PATH,
+  BATTERIES_OVERLAY_DIR,
+  isBatteriesManifest,
+  type BatteriesManifest,
+} from "./batteries-manifest";
+
 /**
  * Rot guards for the #108 deploy templates. These are pure file reads: no sudo,
  * no pfctl, no visudo, no network — they pass on Linux CI.
@@ -300,6 +308,214 @@ describe("packages/worker/deploy/linux/cloud-init.yaml (#192)", () => {
     // silently — the precise failure #192 exists to remove on this platform.
     expect(cloudInit).toMatch(/^\s+- acl$/m);
     expect(cloudInit).toMatch(/command -v setfacl/);
+  });
+});
+
+/**
+ * Lines between the first two `---` lines, or [] when the file has no leading
+ * frontmatter block.
+ */
+function frontmatterLines(md: string): string[] {
+  const lines = md.split("\n");
+  if (lines[0] !== "---") return [];
+  const end = lines.indexOf("---", 1);
+  return end === -1 ? [] : lines.slice(1, end);
+}
+
+function readBatteriesManifest(): BatteriesManifest {
+  const parsed: unknown = JSON.parse(
+    read(path.join(repoRoot, BATTERIES_MANIFEST_REPO_PATH)),
+  );
+  if (!isBatteriesManifest(parsed)) {
+    throw new Error(
+      `${BATTERIES_MANIFEST_REPO_PATH} is not a valid batteries manifest`,
+    );
+  }
+  return parsed;
+}
+
+describe("#batteries (phase 3): batteries.json", () => {
+  // The box installs exactly what this file pins (install-batteries.sh), and
+  // Phase 5 seeds runs from it. Every assertion here is a decision that was
+  // expensive to research and cheap to undo in an unrelated edit.
+  const manifest = readBatteriesManifest();
+  const packById = (id: string) => {
+    const found = manifest.packs.find((p) => p.id === id);
+    if (found === undefined) throw new Error(`no pack ${id} in the manifest`);
+    return found;
+  };
+
+  it("is schemaVersion 1 and passes the strict guard", () => {
+    expect(manifest.schemaVersion).toBe(1);
+  });
+
+  it("lists exactly the shared REVIEW_BATTERY_PACK_IDS, in order", () => {
+    // The admin panel (Phase 4) offers these ids; a pack the box does not
+    // install, or an install the panel cannot select, is a silent no-op.
+    expect(manifest.packs.map((p) => p.id)).toEqual([
+      ...REVIEW_BATTERY_PACK_IDS,
+    ]);
+  });
+
+  it("pins every pack, path and CLI by a full content address", () => {
+    for (const pack of manifest.packs) {
+      expect(pack.sha, pack.id).toMatch(/^[0-9a-f]{40}$/);
+      expect(pack.license.trim(), pack.id).not.toBe("");
+      for (const sub of pack.subpaths) {
+        expect(sub.gitId, `${pack.id} ${sub.src}`).toMatch(/^[0-9a-f]{40}$/);
+      }
+    }
+    for (const cli of manifest.clis) {
+      expect(cli.sha256, cli.name).toMatch(/^[0-9a-f]{64}$/);
+      expect(cli.license.trim(), cli.name).not.toBe("");
+    }
+  });
+
+  it("keeps the researched pins", () => {
+    expect(packById("gstack-review").sha).toBe(
+      "fe6d1ae62a42e67bfb12b7f8e6143c705f375f38",
+    );
+    expect(packById("gsd-reviewers").sha).toBe(
+      "7dfeb7ad8acbd6febd2c8c6cf7d3dcb7d1aeb7b9",
+    );
+    const somnio = packById("somnio-review");
+    expect(somnio.repo).toBe("self");
+    expect(somnio.sha).toBe("e2716a48d0528a42cbb343307280069b2556680c");
+    expect(somnio.subpaths.map((s) => s.gitId)).toEqual([
+      "4d97eeeafb6c9f46ad62e3ed71d47416816f5341",
+    ]);
+  });
+
+  it("installs exactly shellcheck, actionlint and gitleaks; semgrep is dropped", () => {
+    expect(manifest.clis.map((c) => c.name)).toEqual([
+      "shellcheck",
+      "actionlint",
+      "gitleaks",
+    ]);
+    expect(manifest.clis.map((c) => c.name)).not.toContain("semgrep");
+    expect(manifest.dropped.map((d) => d.name)).toContain("semgrep");
+  });
+
+  it("vendors no hook, bin, plugin, settings, cso, sections or upstream review SKILL.md", () => {
+    // Upstream review/SKILL.md's preamble can fall back to executing a
+    // PR-supplied script from the checkout; cso needs a native launcher.
+    const forbidden =
+      /(^|\/)(hooks|bin|\.claude-plugin|cso|sections)(\/|$)|(^|\/)(settings(\.local)?\.json|\.mcp\.json|plugin\.json)$|review\/SKILL\.md/;
+    for (const pack of manifest.packs) {
+      for (const sub of pack.subpaths) {
+        expect(sub.src, pack.id).not.toMatch(forbidden);
+        expect(sub.dest, pack.id).not.toMatch(forbidden);
+      }
+    }
+  });
+
+  it("selects only the knowledge files of each pack", () => {
+    expect(
+      [...new Set(packById("gstack-review").subpaths.map((s) => s.src))].sort(),
+    ).toEqual(["LICENSE", "review/checklist.md", "review/specialists"]);
+    expect(packById("gsd-reviewers").subpaths.map((s) => s.src)).toEqual([
+      "agents/gsd-code-reviewer.md",
+      "agents/gsd-security-auditor.md",
+      "LICENSE",
+    ]);
+    const somnio = packById("somnio-review");
+    const excluded = somnio.subpaths.flatMap((s) => s.exclude ?? []);
+    expect(excluded).toContain("references/gemini-analysis.md");
+    expect(excluded).toContain("agents/gemini-analyzer.md");
+    // The skill's internal agents (model: opus, Write tools) must stay inside
+    // the skill dir; under agents/ they would register as user agents.
+    for (const sub of somnio.subpaths) {
+      expect(sub.dest).not.toMatch(/^agents\//);
+    }
+  });
+
+  it("ships every overlay from this repo", () => {
+    for (const pack of manifest.packs) {
+      for (const overlay of pack.overlays ?? []) {
+        expect(overlay.from.startsWith(BATTERIES_OVERLAY_DIR)).toBe(true);
+        expect(
+          fs.existsSync(path.join(repoRoot, overlay.from)),
+          overlay.from,
+        ).toBe(true);
+      }
+    }
+  });
+});
+
+describe("#batteries (phase 3): gstack-review adapter skill", () => {
+  // The upstream interactive review skill is never installed; this adapter is
+  // what the review lane reads instead. It must stay read-only, helper-free
+  // and fence-free, and it must override two hazards in the pinned files.
+  const adapterPath = path.join(
+    workerRoot,
+    "deploy",
+    "batteries",
+    "gstack-review",
+    "SKILL.md",
+  );
+  const adapter = fs.existsSync(adapterPath) ? read(adapterPath) : "";
+  const front = frontmatterLines(adapter);
+  const body = adapter
+    .split("\n")
+    .slice(front.length + 2)
+    .join("\n");
+
+  it("has a minimal frontmatter: name + description only, no grants", () => {
+    // allowed-tools in a skill GRANTS tools for the invoking turn in -p mode.
+    expect(front).toContain("name: gstack-review");
+    expect(front.some((l) => /^description:\s*\S/.test(l))).toBe(true);
+    for (const key of [
+      "allowed-tools:",
+      "hooks:",
+      "model:",
+      "context:",
+      "permissionMode:",
+      "mcpServers:",
+      "disable-model-invocation:",
+    ]) {
+      expect(
+        front.some((l) => l.startsWith(key)),
+        key,
+      ).toBe(false);
+    }
+  });
+
+  it("names no gstack helper, interactive-question tool or JSON fence", () => {
+    // Phase 2 Q7: a sub-agent's fenced JSON can become the last fence the
+    // review-intent parser reads, hijacking the lead's verdict.
+    for (const token of [
+      "gstack/bin",
+      "gstack-skill-start",
+      "gstack-decision-search",
+      "AskUserQuestion",
+      "```json",
+    ]) {
+      expect(adapter, token).not.toContain(token);
+    }
+  });
+
+  it("reads the vendored checklist and specialists from its own dir", () => {
+    expect(body).toContain("${CLAUDE_SKILL_DIR}/checklist.md");
+    expect(body).toContain("${CLAUDE_SKILL_DIR}/specialists/");
+  });
+
+  it("is read-only and reports to the lead", () => {
+    expect(body).toMatch(/read-only/i);
+    expect(body).toMatch(/never (write|edit)/i);
+    expect(body).toMatch(/lead/);
+  });
+
+  it("treats decision-ledger markers as UNVERIFIED and never runs vendored commands", () => {
+    // checklist.md (blob 7692f35) tells the reader to resolve these markers
+    // with a gstack helper that is not, and must never be, installed.
+    expect(body).toMatch(/gstack-shortcut/);
+    expect(body).toMatch(/UNVERIFIED/);
+    expect(body).toMatch(/never run[^\n]*command[^\n]*(checklist|specialist)/i);
+  });
+
+  it("supersedes the specialists' JSON output format", () => {
+    // Every specialists/*.md line 4 says "Output: JSON objects … Schema:".
+    expect(body).toMatch(/(ignore|supersede)[^\n]*(output|schema)/i);
   });
 });
 
