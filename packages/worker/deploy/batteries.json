@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "packs": [
+    {
+      "id": "gstack-review",
+      "repo": "https://github.com/garrytan/gstack",
+      "sha": "fe6d1ae62a42e67bfb12b7f8e6143c705f375f38",
+      "license": "MIT",
+      "subpaths": [
+        {
+          "src": "review/checklist.md",
+          "dest": "skills/gstack-review/checklist.md",
+          "gitId": "7692f35ec845b777800704ebdd9e3d4a9a5ed88b"
+        },
+        {
+          "src": "review/specialists",
+          "dest": "skills/gstack-review/specialists",
+          "gitId": "d53a993b862bd09a13b1ff26db568f167d992319"
+        },
+        {
+          "src": "LICENSE",
+          "dest": "LICENSE",
+          "gitId": "35029511144443297cad2d26e4bac17d0e352f93"
+        },
+        {
+          "src": "LICENSE",
+          "dest": "skills/gstack-review/LICENSE",
+          "gitId": "35029511144443297cad2d26e4bac17d0e352f93"
+        }
+      ],
+      "overlays": [
+        {
+          "from": "packages/worker/deploy/batteries/gstack-review/SKILL.md",
+          "dest": "skills/gstack-review/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "somnio-review",
+      "repo": "self",
+      "sha": "e2716a48d0528a42cbb343307280069b2556680c",
+      "license": "internal (Somnio material vendored via the somnio-engineering-ai plugin; see .claude/harness.json)",
+      "subpaths": [
+        {
+          "src": ".claude/skills/security-audit",
+          "dest": "skills/security-audit",
+          "gitId": "4d97eeeafb6c9f46ad62e3ed71d47416816f5341",
+          "exclude": [
+            "references/gemini-analysis.md",
+            "agents/gemini-analyzer.md"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gsd-reviewers",
+      "repo": "https://github.com/gsd-build/get-shit-done",
+      "sha": "7dfeb7ad8acbd6febd2c8c6cf7d3dcb7d1aeb7b9",
+      "license": "MIT",
+      "subpaths": [
+        {
+          "src": "agents/gsd-code-reviewer.md",
+          "dest": "agents/gsd-code-reviewer.md",
+          "gitId": "17a01abec822b38bcbbab6e1ace235126dcad1a9"
+        },
+        {
+          "src": "agents/gsd-security-auditor.md",
+          "dest": "agents/gsd-security-auditor.md",
+          "gitId": "31847360fbd6554e9016f34121481bcf188fd63f"
+        },
+        {
+          "src": "LICENSE",
+          "dest": "LICENSE",
+          "gitId": "33268753639eeabc2f1b25aff79a50359152968c"
+        }
+      ]
+    }
+  ],
+  "clis": [
+    {
+      "name": "shellcheck",
+      "version": "0.11.0",
+      "url": "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.gz",
+      "sha256": "b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6",
+      "member": "shellcheck-v0.11.0/shellcheck",
+      "licenseMember": "shellcheck-v0.11.0/LICENSE.txt",
+      "license": "GPL-3.0",
+      "versionArgs": "--version"
+    },
+    {
+      "name": "actionlint",
+      "version": "1.7.12",
+      "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz",
+      "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+      "member": "actionlint",
+      "licenseMember": "LICENSE.txt",
+      "license": "MIT",
+      "versionArgs": "-version"
+    },
+    {
+      "name": "gitleaks",
+      "version": "8.30.1",
+      "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz",
+      "sha256": "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+      "member": "gitleaks",
+      "licenseMember": "LICENSE",
+      "license": "MIT",
+      "versionArgs": "version"
+    }
+  ],
+  "dropped": [
+    {
+      "name": "semgrep",
+      "reason": "A hash-pinned install needs a lockfile for a ~60-package PyPI closure, its useful rules come from the semgrep.dev registry (network plus metrics), and the offline semgrep-rules set is under the restrictive Semgrep Rules License v1.0."
+    },
+    {
+      "name": "gstack-cso",
+      "reason": "gstack cso v3 routes every read through a 62 MB bun-compiled launcher that is gitignored upstream, and its preamble can fall back to executing a PR-supplied script from the checkout."
+    },
+    {
+      "name": "gsd-integration-checker",
+      "reason": "It audits .planning/ phase summaries rather than a pull request diff, so it has no role in the review lane."
+    }
+  ]
+}
