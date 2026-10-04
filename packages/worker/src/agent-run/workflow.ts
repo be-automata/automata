@@ -610,7 +610,7 @@ async function runAgentInner(
     `agent credential: ${describeCredentialSource(credentialSource)} (box trust: ${config.boxTrust})`,
   );
   // Phase 5: one line per run — classic, or the seeded packs + manifest hash.
-  step(formatBatteriesLine(runReviewAgent, materialised.batteries));
+  step(formatBatteriesLine(materialised.batteries));
 
   // #66 slice 2: per-run egress enforcement, iff the control plane resolved a
   // policy onto this run's input. Absent policy ⇒ nothing starts and nothing
@@ -777,17 +777,15 @@ async function runAgentInner(
     // frozen at the branch; only the transport happens here. Never throws —
     // reporting must not fail a run.
     await postRunCredentialSource(wwwOpts, { source: credentialSource });
-    // Phase 5: stamp the daemon wire for in-bounds orchestrated review runs
-    // only; anything else sends today's exact message object.
+    // Phase 5: stamp the daemon wire for orchestrated review runs that passed
+    // the bounds gate above; anything else sends today's exact message object.
     const stamped = withReviewAgentWire(message, runReviewAgent);
-    if (stamped.rejected) {
-      step(`review agent: bounds-rejected (${stamped.rejected}) → classic`);
-    } else if (stamped.message.reviewAgent) {
+    if (stamped.reviewAgent) {
       step(
-        `review agent: orchestrated → daemon (bashTimeoutMs=${stamped.message.reviewAgent.commandTimeoutMs}, maxTurns=${stamped.message.reviewAgent.maxTurns ?? "unset"})`,
+        `review agent: orchestrated → daemon (bashTimeoutMs=${stamped.reviewAgent.commandTimeoutMs}, maxTurns=${stamped.reviewAgent.maxTurns ?? "unset"})`,
       );
     }
-    const bytes = await daemon.sendMessage(stamped.message);
+    const bytes = await daemon.sendMessage(stamped);
     step(`socket write ok: ${bytes} bytes → daemon ACKed`);
 
     // Poll www for terminal. The daemon streams events to www, which owns the

@@ -71,17 +71,19 @@ export interface SeedBatteriesOptions {
   platform?: NodeJS.Platform;
 }
 
-export interface SeedBatteriesResult {
-  mode: "orchestrated";
-  /** Pack ids that contributed at least one link, in MANIFEST order. */
-  packs: string[];
-  /** The verified manifest hash; null when the install is unavailable. */
-  manifestHash: string | null;
-  unavailableReason?: string;
-}
+/** An orchestrated run's seeding outcome: verified packs, or why none. */
+export type SeedBatteriesResult =
+  | {
+      ok: true;
+      /** Pack ids that contributed at least one link, in MANIFEST order. */
+      packs: string[];
+      /** The verified manifest hash. */
+      manifestHash: string;
+    }
+  | { ok: false; reason: string };
 
 /** this file: packages/worker/src/agent-run → up 2 = packages/worker → up 2 = repo. */
-function defaultRepoRoot(): string {
+export function defaultRepoRoot(): string {
   const workerPkgRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     "..",
@@ -108,19 +110,18 @@ export async function computeBatteriesManifestHash(
   return hash.digest("hex");
 }
 
-/** One line for the run log; ids, reasons and a 12-hex hash prefix only. */
+/**
+ * One line for the run log; ids, reasons and a 12-hex hash prefix only.
+ * `undefined` is a classic run (only orchestrated runs are seeded).
+ */
 export function formatBatteriesLine(
-  reviewAgent: { mode: "classic" | "orchestrated" } | undefined,
   result: SeedBatteriesResult | undefined,
 ): string {
-  if (reviewAgent?.mode !== "orchestrated") {
+  if (!result) {
     return "batteries: mode=classic";
   }
-  if (!result) {
-    return "batteries: unavailable mode=orchestrated reason=not-seeded";
-  }
-  if (result.unavailableReason !== undefined || result.manifestHash === null) {
-    return `batteries: unavailable mode=orchestrated reason=${result.unavailableReason ?? "unknown"}`;
+  if (!result.ok) {
+    return `batteries: unavailable mode=orchestrated reason=${result.reason}`;
   }
   const packs = result.packs.length > 0 ? result.packs.join(",") : "none";
   return `batteries: mode=orchestrated packs=${packs} manifest=${result.manifestHash.slice(0, 12)}`;
@@ -219,6 +220,82 @@ async function checkRoot(
   return fs.realpath(root);
 }
 
+interface ParsedManifest {
+  manifest: BatteriesManifest;
+  /** The installer recipe recomputed over this checkout. */
+  computedHash: string;
+}
+
+interface ManifestCacheEntry extends ParsedManifest {
+  /** size/mtime of the manifest and every overlay, taken BEFORE reading them. */
+  signature: string;
+  overlayPaths: string[];
+}
+
+/**
+ * Per process, keyed on manifestPath + repoRoot: the parsed manifest and its
+ * recomputed hash. A hit needs an unchanged stat signature for the manifest
+ * AND every overlay it hashes; the install's `manifest.sha256` is still
+ * re-read and compared on every run.
+ */
+const manifestCache = new Map<string, ManifestCacheEntry>();
+
+async function statSignature(paths: readonly string[]): Promise<string> {
+  const stats = await Promise.all(paths.map((p) => fs.stat(p)));
+  return stats.map((st) => `${st.size}:${st.mtimeMs}`).join("|");
+}
+
+async function loadManifest(
+  manifestPath: string,
+  repoRoot: string,
+  log: (line: string) => void,
+): Promise<ParsedManifest> {
+  const key = `${manifestPath}\0${repoRoot}`;
+  const cached = manifestCache.get(key);
+  if (cached) {
+    // A stat failure is a miss: the read path below reports it properly.
+    const signature = await statSignature([
+      manifestPath,
+      ...cached.overlayPaths,
+    ]).catch(() => undefined);
+    if (signature === cached.signature) {
+      return cached;
+    }
+  }
+
+  let manifestSignature: string;
+  let bytes: Buffer;
+  let parsed: unknown;
+  try {
+    manifestSignature = await statSignature([manifestPath]);
+    bytes = await fs.readFile(manifestPath);
+    parsed = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new BatteriesUnavailable("manifest-invalid");
+  }
+  if (!isBatteriesManifest(parsed)) {
+    log(
+      `batteries: manifest rejected (${findBatteriesManifestError(parsed) ?? "unknown"})`,
+    );
+    throw new BatteriesUnavailable("manifest-invalid");
+  }
+  const overlayPaths = parsed.packs.flatMap((pack) =>
+    (pack.overlays ?? []).map((o) => path.join(repoRoot, o.from)),
+  );
+  const overlaySignature = await statSignature(overlayPaths);
+  const entry: ManifestCacheEntry = {
+    manifest: parsed,
+    computedHash: await computeBatteriesManifestHash(bytes, parsed, repoRoot),
+    signature:
+      overlayPaths.length > 0
+        ? `${manifestSignature}|${overlaySignature}`
+        : manifestSignature,
+    overlayPaths,
+  };
+  manifestCache.set(key, entry);
+  return entry;
+}
+
 async function readVerifiedManifest(
   root: string,
   manifestPath: string,
@@ -243,25 +320,15 @@ async function readVerifiedManifest(
     throw new BatteriesUnavailable("manifest-hash-malformed");
   }
 
-  let bytes: Buffer;
-  let parsed: unknown;
-  try {
-    bytes = await fs.readFile(manifestPath);
-    parsed = JSON.parse(bytes.toString("utf8"));
-  } catch {
-    throw new BatteriesUnavailable("manifest-invalid");
-  }
-  if (!isBatteriesManifest(parsed)) {
-    log(
-      `batteries: manifest rejected (${findBatteriesManifestError(parsed) ?? "unknown"})`,
-    );
-    throw new BatteriesUnavailable("manifest-invalid");
-  }
-  const computed = await computeBatteriesManifestHash(bytes, parsed, repoRoot);
-  if (computed !== recordedHash) {
+  const { manifest, computedHash } = await loadManifest(
+    manifestPath,
+    repoRoot,
+    log,
+  );
+  if (computedHash !== recordedHash) {
     throw new BatteriesUnavailable("manifest-drift");
   }
-  return { manifest: parsed, manifestHash: computed };
+  return { manifest, manifestHash: computedHash };
 }
 
 interface PackCheckContext {
@@ -280,34 +347,96 @@ function ownershipReason(
   return undefined;
 }
 
-/** Full lstat walk: a reason the pack must be skipped, or undefined. */
+interface LinkEntry {
+  /** `skills/<name>` or `agents/<name>.md`, relative to `<home>/.claude`. */
+  rel: string;
+  target: string;
+  packId: string;
+}
+
+interface PackWalk extends PackCheckContext {
+  pack: BatteryPack;
+  realPackDir: string;
+  skills: LinkEntry[];
+  agents: LinkEntry[];
+  /** A top-level `skills`/`agents` that is not a directory. */
+  notADirectory?: string;
+}
+
+/** Only `skills/<id>` directories and `agents/<id>.md` regular files link. */
+function collectLinkEntry(
+  walk: PackWalk,
+  rel: string,
+  name: string,
+  st: LstatResult,
+): void {
+  if (rel === "" && (name === "skills" || name === "agents")) {
+    if (!st.isDirectory()) walk.notADirectory ??= name;
+    return;
+  }
+  const entry = {
+    rel: `${rel}/${name}`,
+    target: path.join(walk.realPackDir, rel, name),
+    packId: walk.pack.id,
+  };
+  if (rel === "skills" && ID_OR_NAME.test(name) && st.isDirectory()) {
+    walk.skills.push(entry);
+  } else if (
+    rel === "agents" &&
+    name.endsWith(".md") &&
+    ID_OR_NAME.test(name.slice(0, -3)) &&
+    st.isFile()
+  ) {
+    walk.agents.push(entry);
+  }
+}
+
+/**
+ * Full lstat walk: the first reason the pack must be skipped, or undefined,
+ * collecting the link entries on the way. A directory's entries are lstat'd
+ * together, but reasons are still taken in readdir order and an lstat error
+ * only surfaces once its entry is reached.
+ */
 async function walkPack(
   dir: string,
   rel: string,
-  ctx: PackCheckContext,
+  walk: PackWalk,
 ): Promise<string | undefined> {
-  for (const name of await fs.readdir(dir)) {
+  const names = await fs.readdir(dir);
+  const stats = await Promise.allSettled(
+    names.map((name) => walk.lstat(path.join(dir, name))),
+  );
+  for (const [i, name] of names.entries()) {
     const relPath = rel ? `${rel}/${name}` : name;
     if (relPath.split("/").some((seg) => FORBIDDEN_NAMES.includes(seg))) {
       return "forbidden-entry";
     }
-    const full = path.join(dir, name);
-    const st = await ctx.lstat(full);
+    const settled = stats[i]!; // allSettled keeps one result per name
+    if (settled.status === "rejected") {
+      throw settled.reason;
+    }
+    const st = settled.value;
     if (st.isSymbolicLink()) return "symlink-in-pack";
-    const owner = ownershipReason(st, ctx.packOwnerUid);
+    const owner = ownershipReason(st, walk.packOwnerUid);
     if (owner) return owner;
+    collectLinkEntry(walk, rel, name, st);
     if (st.isDirectory()) {
-      const nested = await walkPack(full, relPath, ctx);
+      const nested = await walkPack(path.join(dir, name), relPath, walk);
       if (nested) return nested;
     }
   }
   return undefined;
 }
 
+const byRel = (a: LinkEntry, b: LinkEntry): number =>
+  a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0;
+
+/** The pack's link entries (skills, then agents, each sorted), or a skip reason. */
 async function checkPack(
+  pack: BatteryPack,
   packDir: string,
   ctx: PackCheckContext,
-): Promise<{ reason?: string; realPackDir?: string }> {
+): Promise<{ reason: string } | { entries: LinkEntry[] }> {
   let st: LstatResult;
   try {
     st = await ctx.lstat(packDir);
@@ -323,48 +452,20 @@ async function checkPack(
   if (!realPackDir.startsWith(ctx.realRoot + path.sep)) {
     return { reason: "escapes-root" };
   }
-  const walked = await walkPack(packDir, "", ctx);
-  if (walked) return { reason: walked };
-  return { realPackDir };
-}
-
-interface LinkEntry {
-  /** `skills/<name>` or `agents/<name>.md`, relative to `<home>/.claude`. */
-  rel: string;
-  target: string;
-  packId: string;
-}
-
-async function listDir(dir: string): Promise<string[]> {
-  try {
-    return (await fs.readdir(dir)).sort();
-  } catch (e) {
-    if (errnoCode(e) === "ENOENT") return [];
-    throw e;
+  const walk: PackWalk = { ...ctx, pack, realPackDir, skills: [], agents: [] };
+  const reason = await walkPack(packDir, "", walk);
+  if (reason) return { reason };
+  if (walk.notADirectory) {
+    // Listing a non-directory fails the whole seed (seed-error-ENOTDIR), as
+    // reading it as a directory always has.
+    throw Object.assign(
+      new Error(`batteries: ${walk.notADirectory} is not a directory`),
+      { code: "ENOTDIR" },
+    );
   }
-}
-
-/** Only `skills/<id>` directories and `agents/<id>.md` regular files. */
-async function collectEntries(
-  pack: BatteryPack,
-  realPackDir: string,
-  lstat: (p: string) => Promise<LstatResult>,
-): Promise<LinkEntry[]> {
-  const entries: LinkEntry[] = [];
-  for (const name of await listDir(path.join(realPackDir, "skills"))) {
-    const full = path.join(realPackDir, "skills", name);
-    if (ID_OR_NAME.test(name) && (await lstat(full)).isDirectory()) {
-      entries.push({ rel: `skills/${name}`, target: full, packId: pack.id });
-    }
-  }
-  for (const name of await listDir(path.join(realPackDir, "agents"))) {
-    const full = path.join(realPackDir, "agents", name);
-    const base = name.endsWith(".md") ? name.slice(0, -3) : "";
-    if (ID_OR_NAME.test(base) && (await lstat(full)).isFile()) {
-      entries.push({ rel: `agents/${name}`, target: full, packId: pack.id });
-    }
-  }
-  return entries;
+  return {
+    entries: [...walk.skills.sort(byRel), ...walk.agents.sort(byRel)],
+  };
 }
 
 /** Replace an existing link; leave anything else alone. Returns whether linked. */
@@ -440,20 +541,15 @@ export async function seedBatteries(
     const winners = new Map<string, LinkEntry>();
     for (const pack of selected) {
       const checked = await checkPack(
+        pack,
         path.join(root, `${pack.id}@${pack.sha}`),
         ctx,
       );
-      if (checked.reason || !checked.realPackDir) {
-        log(
-          `batteries: skip pack ${pack.id} reason=${checked.reason ?? "missing"}`,
-        );
+      if ("reason" in checked) {
+        log(`batteries: skip pack ${pack.id} reason=${checked.reason}`);
         continue;
       }
-      for (const entry of await collectEntries(
-        pack,
-        checked.realPackDir,
-        lstat,
-      )) {
+      for (const entry of checked.entries) {
         const first = winners.get(entry.rel);
         if (first) {
           log(
@@ -482,12 +578,11 @@ export async function seedBatteries(
     }
 
     return {
-      mode: "orchestrated",
+      ok: true,
       packs: manifest.packs
         .map((p) => p.id)
         .filter((id) => contributed.has(id)),
       manifestHash,
-      unavailableReason: undefined,
     };
   } catch (e) {
     const reason =
@@ -495,11 +590,6 @@ export async function seedBatteries(
         ? e.reason
         : `seed-error-${errnoCode(e) ?? "unknown"}`;
     log(`batteries: unavailable reason=${reason}`);
-    return {
-      mode: "orchestrated",
-      packs: [],
-      manifestHash: null,
-      unavailableReason: reason,
-    };
+    return { ok: false, reason };
   }
 }

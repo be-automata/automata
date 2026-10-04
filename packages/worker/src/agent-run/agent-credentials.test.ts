@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { materialiseAgentCredentials } from "./agent-credentials";
 import {
+  listTree,
   makeBatteriesFixture,
   type BatteriesFixture,
 } from "./__fixtures__/batteries-fixture";
@@ -164,19 +165,6 @@ describe("materialiseAgentCredentials (D1)", () => {
       log: (line: string) => logs.push(line),
     });
 
-    async function tree(dir: string): Promise<string[]> {
-      const out: string[] = [];
-      const walk = async (d: string, rel: string) => {
-        for (const e of await fs.readdir(d, { withFileTypes: true })) {
-          const r = rel ? `${rel}/${e.name}` : e.name;
-          out.push(r);
-          if (e.isDirectory()) await walk(path.join(d, e.name), r);
-        }
-      };
-      await walk(dir, "");
-      return out.sort();
-    }
-
     it.each([
       ["absent", undefined],
       ["classic", { mode: "classic" as const, batteries: ["gstack-review"] }],
@@ -190,7 +178,7 @@ describe("materialiseAgentCredentials (D1)", () => {
           reviewAgent,
           batteries: batteries(),
         });
-        expect(await tree(credits.home)).toEqual([".claude.json"]);
+        expect(await listTree(credits.home)).toEqual([".claude.json"]);
         expect(credits.batteries).toBeUndefined();
         await credits.cleanup();
 
@@ -201,7 +189,7 @@ describe("materialiseAgentCredentials (D1)", () => {
           reviewAgent,
           batteries: batteries(),
         });
-        expect(await tree(claude.home)).toEqual([
+        expect(await listTree(claude.home)).toEqual([
           ".claude",
           ".claude.json",
           ".claude/.credentials.json",
@@ -219,8 +207,10 @@ describe("materialiseAgentCredentials (D1)", () => {
         reviewAgent: { mode: "orchestrated", batteries: ["gstack-review"] },
         batteries: batteries(),
       });
-      expect(result.batteries?.packs).toEqual(["gstack-review"]);
-      expect(result.batteries?.unavailableReason).toBeUndefined();
+      expect(result.batteries).toMatchObject({
+        ok: true,
+        packs: ["gstack-review"],
+      });
       const claudeDir = path.join(result.home, ".claude");
       expect(
         (
@@ -245,8 +235,10 @@ describe("materialiseAgentCredentials (D1)", () => {
         reviewAgent: { mode: "orchestrated", batteries: ["gstack-review"] },
         batteries: { ...batteries(), root: path.join(fx.base, "missing") },
       });
-      expect(result.batteries?.unavailableReason).toBe("root-not-trusted");
-      expect(result.batteries?.packs).toEqual([]);
+      expect(result.batteries).toEqual({
+        ok: false,
+        reason: "root-not-trusted",
+      });
       expect(
         await fs.readFile(
           path.join(result.home, ".claude/.credentials.json"),
@@ -264,7 +256,10 @@ describe("materialiseAgentCredentials (D1)", () => {
         batteries: batteries(),
       });
       expect(result.delivered).toBe(false);
-      expect(result.batteries?.packs).toEqual(["gsd-reviewers"]);
+      expect(result.batteries).toMatchObject({
+        ok: true,
+        packs: ["gsd-reviewers"],
+      });
     });
 
     it("cleanup removes the HOME including links; ROOT targets intact", async () => {

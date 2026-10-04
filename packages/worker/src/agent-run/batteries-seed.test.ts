@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  listTree,
   makeBatteriesFixture,
   REAL_REPO_ROOT,
   type BatteriesFixture,
@@ -46,19 +47,6 @@ describe("seedBatteries (Phase 5)", () => {
 
   const claudeDir = () => path.join(fx.home, ".claude");
 
-  async function listTree(dir: string): Promise<string[]> {
-    const out: string[] = [];
-    const walk = async (d: string, rel: string) => {
-      for (const e of await fs.readdir(d, { withFileTypes: true })) {
-        const r = rel ? `${rel}/${e.name}` : e.name;
-        out.push(r);
-        if (e.isDirectory()) await walk(path.join(d, e.name), r);
-      }
-    };
-    await walk(dir, "");
-    return out.sort();
-  }
-
   async function readSettings(): Promise<Record<string, unknown>> {
     return JSON.parse(
       await fs.readFile(path.join(claudeDir(), "settings.json"), "utf8"),
@@ -76,12 +64,11 @@ describe("seedBatteries (Phase 5)", () => {
       opts,
     );
     expect(result).toEqual({
-      mode: "orchestrated",
+      ok: true,
       packs: ["gstack-review", "gsd-reviewers"],
       manifestHash: fx.manifestHash,
-      unavailableReason: undefined,
     });
-    expect(result.manifestHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(fx.manifestHash).toMatch(/^[0-9a-f]{64}$/);
     expect(await listTree(claudeDir())).toEqual([
       "agents",
       "agents/gsd-code-reviewer.md",
@@ -148,10 +135,7 @@ describe("seedBatteries (Phase 5)", () => {
   describe("unavailable ⇒ no packs, never throws, settings still written", () => {
     async function expectUnavailable(reason: string) {
       const result = await seedBatteries(fx.home, ["gstack-review"], opts);
-      expect(result.mode).toBe("orchestrated");
-      expect(result.packs).toEqual([]);
-      expect(result.manifestHash).toBeNull();
-      expect(result.unavailableReason).toBe(reason);
+      expect(result).toEqual({ ok: false, reason });
       expect(await listTree(claudeDir())).toEqual(["settings.json"]);
       expect((await readSettings()).disableAllHooks).toBe(true);
       expect(logs.some((l) => l.includes(`reason=${reason}`))).toBe(true);
@@ -199,6 +183,24 @@ describe("seedBatteries (Phase 5)", () => {
       await expectUnavailable("manifest-drift");
     });
 
+    it("a checkout edit after a verified run is re-hashed (per-process cache) ⇒ manifest-drift", async () => {
+      expect((await seedBatteries(fx.home, ["gstack-review"], opts)).ok).toBe(
+        true,
+      );
+      const overlay = fx.manifest.packs
+        .flatMap((p) => p.overlays ?? [])
+        .find(Boolean);
+      if (!overlay) {
+        throw new Error("fixture: the real manifest has no overlay");
+      }
+      await fs.appendFile(path.join(fx.repoRoot, overlay.from), "\nedited\n");
+      await fs.rm(path.join(fx.home, ".claude"), {
+        recursive: true,
+        force: true,
+      });
+      await expectUnavailable("manifest-drift");
+    });
+
     it("ROOT missing ⇒ root-not-trusted", async () => {
       opts = { ...opts, root: path.join(fx.base, "nope") };
       await expectUnavailable("root-not-trusted");
@@ -226,8 +228,11 @@ describe("seedBatteries (Phase 5)", () => {
     it("pack owned by a uid ≠ packOwnerUid is skipped while ROOT passes", async () => {
       opts = { ...opts, packOwnerUid: UID + 1 };
       const result = await seedBatteries(fx.home, ["gstack-review"], opts);
-      expect(result.unavailableReason).toBeUndefined();
-      expect(result.packs).toEqual([]);
+      expect(result).toEqual({
+        ok: true,
+        packs: [],
+        manifestHash: fx.manifestHash,
+      });
       expect(logs).toContain(
         "batteries: skip pack gstack-review reason=not-root-owned",
       );
@@ -256,7 +261,7 @@ describe("seedBatteries (Phase 5)", () => {
         lstat,
         log: (l) => logs.push(l),
       });
-      expect(result.packs).toEqual(["gstack-review"]);
+      expect(result).toMatchObject({ ok: true, packs: ["gstack-review"] });
 
       // Without the seam, the same defaults reject a non-root-owned ROOT.
       if (UID !== 0) {
@@ -269,7 +274,7 @@ describe("seedBatteries (Phase 5)", () => {
           repoRoot: fx.repoRoot,
           log: (l) => logs.push(l),
         });
-        expect(plain.unavailableReason).toBe("root-not-trusted");
+        expect(plain).toEqual({ ok: false, reason: "root-not-trusted" });
       }
     });
   });
@@ -281,6 +286,9 @@ describe("seedBatteries (Phase 5)", () => {
         [id, "gsd-reviewers"].filter((v, i, a) => a.indexOf(v) === i),
         opts,
       );
+      if (!result.ok) {
+        throw new Error(`expected a verified manifest, got ${result.reason}`);
+      }
       expect(result.packs).not.toContain(id);
       if (id !== "gsd-reviewers") {
         expect(result.packs).toContain("gsd-reviewers");
@@ -375,7 +383,10 @@ describe("seedBatteries (Phase 5)", () => {
       ["gsd-reviewers", "gstack-review"],
       opts,
     );
-    expect(result.packs).toEqual(["gstack-review", "gsd-reviewers"]);
+    expect(result).toMatchObject({
+      ok: true,
+      packs: ["gstack-review", "gsd-reviewers"],
+    });
     expect(
       await fs.realpath(path.join(claudeDir(), "skills/gstack-review")),
     ).toBe(
@@ -397,7 +408,7 @@ describe("seedBatteries (Phase 5)", () => {
       "mine",
     );
     const result = await seedBatteries(fx.home, ["gsd-reviewers"], opts);
-    expect(result.packs).toEqual(["gsd-reviewers"]);
+    expect(result).toMatchObject({ ok: true, packs: ["gsd-reviewers"] });
     expect(
       (
         await fs.lstat(path.join(claudeDir(), "agents/gsd-code-reviewer.md"))
@@ -579,25 +590,17 @@ describe("computeBatteriesManifestHash ⇔ install-batteries.sh write_manifest_h
 describe("formatBatteriesLine", () => {
   const hash = "a".repeat(12) + "b".repeat(52);
 
-  it("classic (absent or explicit)", () => {
-    expect(formatBatteriesLine(undefined, undefined)).toBe(
-      "batteries: mode=classic",
-    );
-    expect(formatBatteriesLine({ mode: "classic" }, undefined)).toBe(
-      "batteries: mode=classic",
-    );
+  it("classic (not seeded)", () => {
+    expect(formatBatteriesLine(undefined)).toBe("batteries: mode=classic");
   });
 
   it("orchestrated with packs", () => {
     expect(
-      formatBatteriesLine(
-        { mode: "orchestrated" },
-        {
-          mode: "orchestrated",
-          packs: ["gstack-review", "gsd-reviewers"],
-          manifestHash: hash,
-        },
-      ),
+      formatBatteriesLine({
+        ok: true,
+        packs: ["gstack-review", "gsd-reviewers"],
+        manifestHash: hash,
+      }),
     ).toBe(
       "batteries: mode=orchestrated packs=gstack-review,gsd-reviewers manifest=aaaaaaaaaaaa",
     );
@@ -605,24 +608,13 @@ describe("formatBatteriesLine", () => {
 
   it("orchestrated, manifest ok, zero packs", () => {
     expect(
-      formatBatteriesLine(
-        { mode: "orchestrated" },
-        { mode: "orchestrated", packs: [], manifestHash: hash },
-      ),
+      formatBatteriesLine({ ok: true, packs: [], manifestHash: hash }),
     ).toBe("batteries: mode=orchestrated packs=none manifest=aaaaaaaaaaaa");
   });
 
   it("unavailable", () => {
-    expect(
-      formatBatteriesLine(
-        { mode: "orchestrated" },
-        {
-          mode: "orchestrated",
-          packs: [],
-          manifestHash: null,
-          unavailableReason: "no-manifest-hash",
-        },
-      ),
-    ).toBe("batteries: unavailable mode=orchestrated reason=no-manifest-hash");
+    expect(formatBatteriesLine({ ok: false, reason: "no-manifest-hash" })).toBe(
+      "batteries: unavailable mode=orchestrated reason=no-manifest-hash",
+    );
   });
 });

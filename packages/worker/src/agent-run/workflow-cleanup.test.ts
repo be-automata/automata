@@ -1214,7 +1214,7 @@ describe("review agent wire + batteries line (Phase 5)", () => {
     commandTimeoutMs: 60000,
   };
   const SEEDED = {
-    mode: "orchestrated" as const,
+    ok: true as const,
     packs: ["gstack-review"],
     manifestHash: "abcdef012345".padEnd(64, "0"),
   };

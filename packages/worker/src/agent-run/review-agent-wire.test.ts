@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { DaemonReviewAgentSchema } from "@terragon/daemon/shared";
+
 import {
-  REVIEW_WIRE_COMMAND_TIMEOUT_MS_RANGE,
-  REVIEW_WIRE_MAX_TURNS_RANGE,
   buildDaemonReviewAgentWire,
   reviewAgentForRun,
   withReviewAgentWire,
@@ -34,34 +34,22 @@ const MESSAGE: PulledDaemonMessage = {
   featureFlags: {},
 };
 
-describe("ranges mirror Phase 4", () => {
-  it("are 60000..600000 ms and 1..500 turns", () => {
-    expect(REVIEW_WIRE_COMMAND_TIMEOUT_MS_RANGE).toEqual([60000, 600000]);
-    expect(REVIEW_WIRE_MAX_TURNS_RANGE).toEqual([1, 500]);
-  });
-});
-
 describe("buildDaemonReviewAgentWire", () => {
-  it("is none without reviewAgent, for classic, and for non-review runs", () => {
-    expect(buildDaemonReviewAgentWire(undefined, "review")).toEqual({
-      kind: "none",
-    });
-    expect(buildDaemonReviewAgentWire(CLASSIC, "review")).toEqual({
-      kind: "none",
-    });
-    expect(buildDaemonReviewAgentWire(ORCHESTRATED, "allowAll")).toEqual({
-      kind: "none",
-    });
-    expect(buildDaemonReviewAgentWire(ORCHESTRATED, "plan")).toEqual({
-      kind: "none",
-    });
+  it("is undefined without reviewAgent, for classic, and for non-review runs", () => {
+    expect(buildDaemonReviewAgentWire(undefined, "review")).toBeUndefined();
+    expect(buildDaemonReviewAgentWire(CLASSIC, "review")).toBeUndefined();
+    expect(
+      buildDaemonReviewAgentWire(ORCHESTRATED, "allowAll"),
+    ).toBeUndefined();
+    expect(buildDaemonReviewAgentWire(ORCHESTRATED, "plan")).toBeUndefined();
   });
 
   it("forwards exactly {mode, commandTimeoutMs, maxTurns} — never runTests/batteries", () => {
     const out = buildDaemonReviewAgentWire(ORCHESTRATED, "review");
     expect(out).toEqual({
-      kind: "wire",
-      wire: { mode: "orchestrated", commandTimeoutMs: 300000, maxTurns: 40 },
+      mode: "orchestrated",
+      commandTimeoutMs: 300000,
+      maxTurns: 40,
     });
     expect(JSON.stringify(out)).not.toMatch(
       /runTests|batteries|Downgraded|gstack/,
@@ -71,68 +59,31 @@ describe("buildDaemonReviewAgentWire", () => {
   it("omits the maxTurns key when maxTurns is absent", () => {
     const { maxTurns: _drop, ...noTurns } = ORCHESTRATED;
     const out = buildDaemonReviewAgentWire(noTurns, "review");
-    expect(out.kind).toBe("wire");
-    if (out.kind === "wire") {
-      expect("maxTurns" in out.wire).toBe(false);
-    }
+    expect(out).toBeDefined();
+    expect(out && "maxTurns" in out).toBe(false);
   });
 
-  it.each([
-    [{ commandTimeoutMs: 59999 }, "commandTimeoutMs", "60000..600000"],
-    [{ commandTimeoutMs: 600001 }, "commandTimeoutMs", "60000..600000"],
-    [{ commandTimeoutMs: 1.5 }, "commandTimeoutMs", "60000..600000"],
-    [{ maxTurns: 0 }, "maxTurns", "1..500"],
-    [{ maxTurns: 501 }, "maxTurns", "1..500"],
-    [{ maxTurns: 2.5 }, "maxTurns", "1..500"],
-  ])("rejects %j naming %s and its bound", (patch, field, bound) => {
-    const out = buildDaemonReviewAgentWire(
-      { ...ORCHESTRATED, ...patch },
-      "review",
-    );
-    expect(out.kind).toBe("rejected");
-    if (out.kind === "rejected") {
-      expect(out.reason).toContain(field);
-      expect(out.reason).toContain(bound);
-      expect(out.reason).not.toMatch(/gstack|fork|runTests/);
-    }
-  });
-
-  it.each([
-    [{ commandTimeoutMs: 60000 }],
-    [{ commandTimeoutMs: 600000 }],
-    [{ maxTurns: 1 }],
-    [{ maxTurns: 500 }],
-  ])("accepts the boundary %j", (patch) => {
-    expect(
-      buildDaemonReviewAgentWire({ ...ORCHESTRATED, ...patch }, "review").kind,
-    ).toBe("wire");
+  it("every wire it builds from a gated reviewAgent passes the daemon's own schema", () => {
+    const gated = reviewAgentForRun(ORCHESTRATED).reviewAgent;
+    const out = buildDaemonReviewAgentWire(gated, "review");
+    expect(DaemonReviewAgentSchema.safeParse(out).success).toBe(true);
   });
 });
 
 describe("withReviewAgentWire", () => {
-  it("returns the SAME message for none (byte-identical JSON)", () => {
+  it("returns the SAME message without a wire (byte-identical JSON)", () => {
     const before = JSON.stringify(MESSAGE);
     const out = withReviewAgentWire(MESSAGE, CLASSIC);
-    expect(out.message).toBe(MESSAGE);
-    expect(out.rejected).toBeUndefined();
-    expect(JSON.stringify(out.message)).toBe(before);
-    expect(withReviewAgentWire(MESSAGE, undefined).message).toBe(MESSAGE);
+    expect(out).toBe(MESSAGE);
+    expect(JSON.stringify(out)).toBe(before);
+    expect(withReviewAgentWire(MESSAGE, undefined)).toBe(MESSAGE);
   });
 
-  it("returns the SAME message and surfaces the reason for rejected", () => {
-    const out = withReviewAgentWire(MESSAGE, {
-      ...ORCHESTRATED,
-      commandTimeoutMs: 5,
-    });
-    expect(out.message).toBe(MESSAGE);
-    expect(out.rejected).toContain("commandTimeoutMs");
-  });
-
-  it("stamps a NEW message for wire and never mutates the input", () => {
+  it("stamps a NEW message for an orchestrated review and never mutates the input", () => {
     const before = JSON.stringify(MESSAGE);
     const out = withReviewAgentWire(MESSAGE, ORCHESTRATED);
-    expect(out.message).not.toBe(MESSAGE);
-    expect(out.message).toEqual({
+    expect(out).not.toBe(MESSAGE);
+    expect(out).toEqual({
       ...MESSAGE,
       reviewAgent: {
         mode: "orchestrated",
@@ -144,16 +95,38 @@ describe("withReviewAgentWire", () => {
   });
 });
 
-describe("reviewAgentForRun (bounds BEFORE seeding)", () => {
+describe("reviewAgentForRun (the one bounds gate, BEFORE seeding)", () => {
   it("passes classic, absent and in-bounds orchestrated through by reference", () => {
     expect(reviewAgentForRun(undefined)).toEqual({});
     expect(reviewAgentForRun(CLASSIC).reviewAgent).toBe(CLASSIC);
     expect(reviewAgentForRun(ORCHESTRATED).reviewAgent).toBe(ORCHESTRATED);
   });
 
-  it("drops an out-of-bounds orchestrated reviewAgent so the run seeds and runs classic", () => {
-    const out = reviewAgentForRun({ ...ORCHESTRATED, maxTurns: 501 });
-    expect(out.reviewAgent).toBeUndefined();
-    expect(out.rejected).toContain("maxTurns");
+  it.each([
+    [{ commandTimeoutMs: 59999 }, "commandTimeoutMs", "60000..600000"],
+    [{ commandTimeoutMs: 600001 }, "commandTimeoutMs", "60000..600000"],
+    [{ commandTimeoutMs: 1.5 }, "commandTimeoutMs", "60000..600000"],
+    [{ maxTurns: 0 }, "maxTurns", "1..500"],
+    [{ maxTurns: 501 }, "maxTurns", "1..500"],
+    [{ maxTurns: 2.5 }, "maxTurns", "1..500"],
+  ])(
+    "drops %j (run seeds and runs classic), naming %s and its bound",
+    (patch, field, bound) => {
+      const out = reviewAgentForRun({ ...ORCHESTRATED, ...patch });
+      expect(out.reviewAgent).toBeUndefined();
+      expect(out.rejected).toContain(field);
+      expect(out.rejected).toContain(bound);
+      expect(out.rejected).not.toMatch(/gstack|fork|runTests/);
+    },
+  );
+
+  it.each([
+    [{ commandTimeoutMs: 60000 }],
+    [{ commandTimeoutMs: 600000 }],
+    [{ maxTurns: 1 }],
+    [{ maxTurns: 500 }],
+  ])("accepts the boundary %j", (patch) => {
+    const candidate = { ...ORCHESTRATED, ...patch };
+    expect(reviewAgentForRun(candidate).reviewAgent).toBe(candidate);
   });
 });

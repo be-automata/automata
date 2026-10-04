@@ -1,3 +1,5 @@
+import type { DaemonReviewAgent } from "@terragon/daemon/shared";
+
 /**
  * The wire contract between the control plane (apps/www) and this worker (ADR-003).
  * These types intentionally MIRROR — they do not import — the www-side shapes
@@ -90,8 +92,8 @@ export type AgentRunInput = {
    * Phase 4 resolution, consumed by Phase 5: bounds-checked first
    * (review-agent-wire.ts), then orchestrated runs seed battery packs into the
    * per-run HOME (batteries-seed.ts) and stamp the daemon wire
-   * (DaemonReviewAgentWire). runTests is prompt-level and is NOT forwarded
-   * (Phase 6). PR-review runs only; old workers ignore it.
+   * (PulledDaemonMessage.reviewAgent). runTests is prompt-level and is NOT
+   * forwarded (Phase 6). PR-review runs only; old workers ignore it.
    */
   reviewAgent?: ReviewAgentShape;
   /**
@@ -232,19 +234,8 @@ export interface PulledDaemonMessage {
   /**
    * Worker-stamped (Phase 5) from AgentRunInput.reviewAgent for in-bounds
    * orchestrated review runs only; NOT part of www's RemoteDaemonMessage.
+   * The daemon's own wire type — the daemon runs on this box, so importing
+   * it does not cross the control-plane boundary this file's header guards.
    */
-  reviewAgent?: DaemonReviewAgentWire;
+  reviewAgent?: DaemonReviewAgent;
 }
-
-/**
- * The daemon's `reviewAgent` wire field: a structural mirror of
- * DaemonReviewAgentSchema (packages/daemon/src/shared.ts), per this file's
- * no-cross-plane-import rule. Worker-stamped from AgentRunInput.reviewAgent,
- * never served by www. Bounds-checked here (review-agent-wire.ts) AND by the
- * daemon (defense in depth): commandTimeoutMs 60000..600000, maxTurns 1..500.
- */
-export type DaemonReviewAgentWire = {
-  mode: "classic" | "orchestrated";
-  commandTimeoutMs: number;
-  maxTurns?: number;
-};

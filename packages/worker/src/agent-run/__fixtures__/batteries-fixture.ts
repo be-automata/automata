@@ -1,13 +1,16 @@
-import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   BATTERIES_MANIFEST_REPO_PATH,
+  isBatteriesManifest,
   type BatteriesManifest,
 } from "../batteries-manifest";
+import {
+  computeBatteriesManifestHash,
+  defaultRepoRoot,
+} from "../batteries-seed";
 
 /**
  * A fake install of the review batteries, shaped like install-batteries.sh
@@ -27,14 +30,21 @@ export interface BatteriesFixture {
   cleanup: () => Promise<void>;
 }
 
-/** this file: packages/worker/src/agent-run/__fixtures__ → up 3 = packages/worker. */
-const WORKER_PKG_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-);
-export const REAL_REPO_ROOT = path.resolve(WORKER_PKG_ROOT, "..", "..");
+export const REAL_REPO_ROOT = defaultRepoRoot();
+
+/** Every path under `dir`, relative and sorted (links are not followed). */
+export async function listTree(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  const walk = async (d: string, rel: string) => {
+    for (const e of await fs.readdir(d, { withFileTypes: true })) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      out.push(r);
+      if (e.isDirectory()) await walk(path.join(d, e.name), r);
+    }
+  };
+  await walk(dir, "");
+  return out.sort();
+}
 
 /** dests that are files; every other dest is a directory (a vendored subtree). */
 function isFileDest(dest: string): boolean {
@@ -71,9 +81,10 @@ export async function makeBatteriesFixture(): Promise<BatteriesFixture> {
   const manifestBytes = await fs.readFile(
     path.join(REAL_REPO_ROOT, BATTERIES_MANIFEST_REPO_PATH),
   );
-  const manifest = JSON.parse(
-    manifestBytes.toString("utf8"),
-  ) as BatteriesManifest;
+  const manifest: unknown = JSON.parse(manifestBytes.toString("utf8"));
+  if (!isBatteriesManifest(manifest)) {
+    throw new Error("fixture: the real batteries.json is not a valid manifest");
+  }
   await fs.mkdir(
     path.dirname(path.join(repoRoot, BATTERIES_MANIFEST_REPO_PATH)),
     {
@@ -85,18 +96,22 @@ export async function makeBatteriesFixture(): Promise<BatteriesFixture> {
     manifestBytes,
   );
 
-  const hash = createHash("sha256").update(manifestBytes);
   for (const pack of manifest.packs) {
     for (const overlay of pack.overlays ?? []) {
-      const bytes = await fs.readFile(path.join(REAL_REPO_ROOT, overlay.from));
       await fs.mkdir(path.dirname(path.join(repoRoot, overlay.from)), {
         recursive: true,
       });
-      await fs.writeFile(path.join(repoRoot, overlay.from), bytes);
-      hash.update(bytes);
+      await fs.copyFile(
+        path.join(REAL_REPO_ROOT, overlay.from),
+        path.join(repoRoot, overlay.from),
+      );
     }
   }
-  const manifestHash = hash.digest("hex");
+  const manifestHash = await computeBatteriesManifestHash(
+    manifestBytes,
+    manifest,
+    repoRoot,
+  );
 
   const packDir = (id: string): string => {
     const pack = manifest.packs.find((p) => p.id === id);
