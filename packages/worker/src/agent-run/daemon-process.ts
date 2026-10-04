@@ -113,6 +113,13 @@ export class DaemonProcess {
       /** Injectable so the suite never SIGKILLs a real process group. */
       killFn?: (pid: number, signal: NodeJS.Signals) => void;
     } = {},
+    /**
+     * Phase 7: run options decided by the workflow's gates. `githubReadToken`
+     * is set ONLY when readTokenForRun returned a token (brokered non-review
+     * run, seeded requiring pack, unexpired token); it is never read from the
+     * input here. Secret: never logged.
+     */
+    private readonly runOptions: { githubReadToken?: string } = {},
   ) {
     const workerId = getProcessWorkerId();
     this.runDir = workerRunDir(config.runNamespaceRoot, workerId);
@@ -187,6 +194,7 @@ export class DaemonProcess {
       credentialEnv: this.credentials?.env ?? {},
       egressProxyUrl: this.egressProxyUrl,
       broker: this.broker,
+      githubReadToken: this.runOptions.githubReadToken ?? null,
       agentUser: this.config.agentUser,
       // Inside the workdir, so it inherits the run's ACE. Provisioning created
       // it in the same `if (agentUser)` branch that applied that ACE.

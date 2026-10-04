@@ -212,6 +212,7 @@ const INPUT = {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let runFn: any;
 let createEgressEventBatcher: typeof import("./workflow").createEgressEventBatcher;
+let readTokenForRun: typeof import("./workflow").readTokenForRun;
 
 beforeAll(async () => {
   const mod = await import("./workflow");
@@ -219,6 +220,7 @@ beforeAll(async () => {
   const def = (mod.agentRunWorkflow as any).definition;
   runFn = def._tasks[0].fn;
   createEgressEventBatcher = mod.createEgressEventBatcher;
+  readTokenForRun = mod.readTokenForRun;
 });
 
 beforeEach(() => {
@@ -1476,5 +1478,266 @@ describe("task agent packs + one batteries line per run (phase 7)", () => {
     expect(Object.keys(sent).sort()).toEqual(
       [...Object.keys(TASK_MESSAGE), "useCredits"].sort(),
     );
+  });
+});
+
+describe("readTokenForRun (phase 7, read-only task token gate)", () => {
+  const NOW = Date.parse("2026-10-04T02:00:00Z");
+  const BROKER = {
+    gitUrl: "http://127.0.0.1:1",
+    ghSocketPath: "/tmp/x.sock",
+    bearer: "bearer",
+    repoFullName: "o/r",
+  };
+  const SEED_GATE = {
+    kind: "seed" as const,
+    batteries: ["somnio-skills"],
+    lane: "task" as const,
+  };
+  const SEEDED = {
+    ok: true as const,
+    packs: ["somnio-skills"],
+    manifestHash: "a".repeat(64),
+    requires: ["github-read-token"],
+  };
+  const inMs = (ms: number) => new Date(NOW + ms).toISOString();
+  const gate = (over: Record<string, unknown> = {}) =>
+    readTokenForRun({
+      lane: "task",
+      taskGate: SEED_GATE,
+      seeded: SEEDED,
+      input: {
+        githubReadToken: "ghs_read",
+        githubReadTokenExpiresAt: inMs(30 * 60_000),
+      },
+      broker: BROKER,
+      now: NOW,
+      ...over,
+    } as Parameters<typeof readTokenForRun>[0]);
+
+  it("all conditions hold ⇒ the token", () => {
+    expect(gate()).toEqual({ token: "ghs_read" });
+  });
+
+  it("no expiry shipped ⇒ allowed (GitHub caps the token at 1h)", () => {
+    expect(gate({ input: { githubReadToken: "ghs_read" } })).toEqual({
+      token: "ghs_read",
+    });
+  });
+
+  it.each([
+    ["30 s from now (inside the 1-minute margin)", inMs(30_000)],
+    ["in the past", inMs(-1)],
+    ["unparseable", "garbage"],
+  ])("expiresAt %s ⇒ expired", (_name, expiresAt) => {
+    expect(
+      gate({
+        input: {
+          githubReadToken: "ghs_read",
+          githubReadTokenExpiresAt: expiresAt,
+        },
+      }),
+    ).toEqual({ skip: "expired" });
+  });
+
+  it("review lane with a forged token ⇒ review-lane", () => {
+    expect(
+      gate({
+        lane: "review",
+        taskGate: { kind: "rejected", lane: "review", reason: "review-lane" },
+      }),
+    ).toEqual({ skip: "review-lane" });
+    expect(gate({ lane: "review" })).toEqual({ skip: "review-lane" });
+  });
+
+  it.each([
+    ["no task gate seed", { taskGate: { kind: "none" } }],
+    [
+      "seeding unavailable",
+      { seeded: { ok: false, reason: "manifest-drift" } },
+    ],
+    ["not seeded at all", { seeded: undefined }],
+    [
+      "no seeded pack requires it",
+      {
+        seeded: {
+          ok: true,
+          packs: ["somnio-review"],
+          manifestHash: "a".repeat(64),
+        },
+      },
+    ],
+  ])("%s ⇒ no-requiring-pack", (_name, over) => {
+    expect(gate(over)).toEqual({ skip: "no-requiring-pack" });
+  });
+
+  it.each([[{}], [{ githubReadToken: "" }]])(
+    "token absent (%j) ⇒ not-delivered",
+    (input) => {
+      expect(gate({ input })).toEqual({ skip: "not-delivered" });
+    },
+  );
+
+  it("legacy (no broker) ⇒ no-broker", () => {
+    expect(gate({ broker: null })).toEqual({ skip: "no-broker" });
+  });
+});
+
+describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
+  const TASK_MESSAGE = {
+    type: "claude",
+    model: "sonnet",
+    agent: "claudeCode",
+    agentVersion: 1,
+    prompt: "audit",
+    sessionId: null,
+    permissionMode: "allowAll",
+    featureFlags: {},
+  };
+  const READ = "ghs_fake_read_token_value";
+  const SEEDED_REQUIRING = {
+    ok: true as const,
+    packs: ["somnio-skills"],
+    manifestHash: "0123456789ab".padEnd(64, "f"),
+    requires: ["github-read-token"],
+  };
+  const future = () => new Date(Date.now() + 30 * 60_000).toISOString();
+
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    pullNextMessage.mockReset().mockResolvedValue({ ...TASK_MESSAGE });
+    pollUntilTerminal.mockReset().mockResolvedValue({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+  });
+
+  async function run(
+    extra: Record<string, unknown>,
+    batteries: unknown,
+  ): Promise<{ lines: string[]; options: unknown }> {
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+      batteries,
+    });
+    const c = ctx();
+    await expect(runFn({ ...INPUT, ...extra }, c)).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    const lines = c.log.mock.calls.map((call) => String(call[0]));
+    // Never logged, whatever happened.
+    expect(lines.join("\n")).not.toContain(READ);
+    return { lines, options: daemonCtorArgs[0]![7] };
+  }
+
+  const APPLIED =
+    "task agent: github read token → GITHUB_TOKEN (read-only, single repo)";
+  const EXPIRED = "task agent: read token expired before start";
+  const MISSING = "task agent: read token required but not delivered";
+  const tokenLines = (lines: string[]) =>
+    lines.filter((l) => l.includes("read token"));
+
+  it("task lane + requiring seed + token + future expiry ⇒ DaemonProcess gets the token; one applied line", async () => {
+    const { lines, options } = await run(
+      {
+        taskAgent: { batteries: ["somnio-skills"] },
+        githubReadToken: READ,
+        githubReadTokenExpiresAt: future(),
+      },
+      SEEDED_REQUIRING,
+    );
+    expect(options).toEqual({ githubReadToken: READ });
+    expect(tokenLines(lines)).toHaveLength(1);
+    expect(tokenLines(lines)[0]).toContain(APPLIED);
+  });
+
+  it("expired ⇒ no token passed; the expired line", async () => {
+    const { lines, options } = await run(
+      {
+        taskAgent: { batteries: ["somnio-skills"] },
+        githubReadToken: READ,
+        githubReadTokenExpiresAt: new Date(Date.now() - 1000).toISOString(),
+      },
+      SEEDED_REQUIRING,
+    );
+    expect(options).toEqual({});
+    expect(tokenLines(lines)).toHaveLength(1);
+    expect(tokenLines(lines)[0]).toContain(EXPIRED);
+  });
+
+  it("requiring pack but no token ⇒ the not-delivered line", async () => {
+    const { lines, options } = await run(
+      { taskAgent: { batteries: ["somnio-skills"] } },
+      SEEDED_REQUIRING,
+    );
+    expect(options).toEqual({});
+    expect(tokenLines(lines)).toHaveLength(1);
+    expect(tokenLines(lines)[0]).toContain(MISSING);
+  });
+
+  it("non-requiring pack + token ⇒ not passed, no line", async () => {
+    const { lines, options } = await run(
+      {
+        taskAgent: { batteries: ["somnio-review"] },
+        githubReadToken: READ,
+        githubReadTokenExpiresAt: future(),
+      },
+      {
+        ok: true,
+        packs: ["somnio-review"],
+        manifestHash: "0".repeat(64),
+      },
+    );
+    expect(options).toEqual({});
+    expect(tokenLines(lines)).toEqual([]);
+  });
+
+  it("seeding unavailable ⇒ not passed, no line", async () => {
+    const { lines, options } = await run(
+      {
+        taskAgent: { batteries: ["somnio-skills"] },
+        githubReadToken: READ,
+        githubReadTokenExpiresAt: future(),
+      },
+      { ok: false, reason: "manifest-drift" },
+    );
+    expect(options).toEqual({});
+    expect(tokenLines(lines)).toEqual([]);
+  });
+
+  it("REVIEW lane with a forged token ⇒ not passed, no line", async () => {
+    pullNextMessage.mockResolvedValue({
+      ...TASK_MESSAGE,
+      permissionMode: "review",
+    });
+    const { lines, options } = await run(
+      {
+        prNumber: 7,
+        prKey: "org-1/o/r/7",
+        supersedePolicy: "newest-wins",
+        taskAgent: { batteries: ["somnio-skills"] },
+        githubReadToken: READ,
+        githubReadTokenExpiresAt: future(),
+      },
+      SEEDED_REQUIRING,
+    );
+    expect(options).toEqual({});
+    expect(tokenLines(lines)).toEqual([]);
+  });
+
+  it("legacy-direct (no broker) ⇒ not passed, no line", async () => {
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    const { lines, options } = await run(
+      {
+        taskAgent: { batteries: ["somnio-skills"] },
+        githubReadToken: READ,
+        githubReadTokenExpiresAt: future(),
+      },
+      SEEDED_REQUIRING,
+    );
+    expect(options).toEqual({});
+    expect(tokenLines(lines)).toEqual([]);
   });
 });

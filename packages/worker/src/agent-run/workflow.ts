@@ -12,10 +12,13 @@ import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { reapAgentUidEscapees } from "./uid-reaper";
 import { DaemonProcess } from "./daemon-process";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
-import { formatRunStartLine } from "./run-lane";
-import { formatBatteriesLine } from "./batteries-seed";
+import { formatRunStartLine, resolveRunLane, type RunLane } from "./run-lane";
+import {
+  formatBatteriesLine,
+  type SeedBatteriesResult,
+} from "./batteries-seed";
 import { reviewAgentForRun, withReviewAgentWire } from "./review-agent-wire";
-import { taskAgentForRun } from "./task-agent";
+import { taskAgentForRun, type TaskAgentGate } from "./task-agent";
 import {
   classifyNextMessageError,
   nonRetryablePreflight,
@@ -255,6 +258,71 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
  * Register one agent-run workflow from its pure definition with the real run
  * fn + onFailure handler.
  */
+/** Why a run does NOT get the read-only task token (phase 7). */
+export type ReadTokenSkip =
+  | "review-lane"
+  | "no-requiring-pack"
+  | "not-delivered"
+  | "expired"
+  | "no-broker";
+
+/** Refuse a token that expires within this margin of the gate (fail closed). */
+const READ_TOKEN_EXPIRY_MARGIN_MS = 60_000;
+
+/**
+ * Phase 7 (DORA auth = Option 3): whether this run's agent gets the read-only,
+ * single-repo GitHub token in GITHUB_TOKEN. ALL must hold:
+ * - not the review lane (the #81/ADR-004 fence: a forged field is refused);
+ * - the task gate seeded AND seeding succeeded AND a seeded pack's OWN
+ *   manifest entry requires `github-read-token` (not only www's decision);
+ * - the token was delivered (non-empty);
+ * - it is not expired: an expiry within 1 minute, in the past or unparseable
+ *   fails closed; an absent expiry is allowed (GitHub caps the token at 1h);
+ * - the run is brokered (legacy runs already carry the installation token).
+ * Pure; the caller logs the outcome (never the value).
+ */
+export function readTokenForRun({
+  lane,
+  taskGate,
+  seeded,
+  input,
+  broker,
+  now,
+}: {
+  lane: RunLane;
+  taskGate: TaskAgentGate;
+  seeded: SeedBatteriesResult | undefined;
+  input: Pick<AgentRunInput, "githubReadToken" | "githubReadTokenExpiresAt">;
+  broker: BrokerHandoff | null;
+  now: number;
+}): { token: string } | { skip: ReadTokenSkip } {
+  if (lane === "review") {
+    return { skip: "review-lane" };
+  }
+  if (
+    taskGate.kind !== "seed" ||
+    !seeded?.ok ||
+    !(seeded.requires ?? []).includes("github-read-token")
+  ) {
+    return { skip: "no-requiring-pack" };
+  }
+  const token = input.githubReadToken;
+  if (typeof token !== "string" || token === "") {
+    return { skip: "not-delivered" };
+  }
+  const expiresAt = input.githubReadTokenExpiresAt;
+  if (expiresAt !== undefined) {
+    const expiry = Date.parse(expiresAt);
+    if (Number.isNaN(expiry) || expiry <= now + READ_TOKEN_EXPIRY_MARGIN_MS) {
+      return { skip: "expired" };
+    }
+  }
+  if (!broker) {
+    return { skip: "no-broker" };
+  }
+  return { token };
+}
+
 export function makeAgentRunWorkflow(
   name: string,
   perPrStrategy: PerPrStrategy,
@@ -737,6 +805,25 @@ async function runAgentInner(
     );
   }
 
+  // Phase 7: the read-only task token (gate above). Logged by event only —
+  // never the value; unconfigured runs log nothing here (byte-identical log).
+  const readToken = readTokenForRun({
+    lane: resolveRunLane(input),
+    taskGate,
+    seeded: materialised.batteries,
+    input,
+    broker,
+    now: Date.now(),
+  });
+  if ("token" in readToken) {
+    step(
+      "task agent: github read token → GITHUB_TOKEN (read-only, single repo)",
+    );
+  } else if (readToken.skip === "not-delivered") {
+    step("task agent: read token required but not delivered");
+  } else if (readToken.skip === "expired") {
+    step("task agent: read token expired before start");
+  }
   const daemon = new DaemonProcess(
     config,
     input,
@@ -744,6 +831,8 @@ async function runAgentInner(
     materialised,
     egressProxy?.url ?? null,
     broker,
+    {},
+    "token" in readToken ? { githubReadToken: readToken.token } : {},
   );
   daemonForPoll = daemon;
   try {

@@ -307,6 +307,7 @@ describe("materialiseAgentCredentials (D1)", () => {
           ok: true,
           packs: ["somnio-skills"],
           manifestHash: fx.manifestHash,
+          requires: ["github-read-token"],
         });
         const claudeDir = path.join(result.home, ".claude");
         expect(await listTree(result.home)).toEqual([

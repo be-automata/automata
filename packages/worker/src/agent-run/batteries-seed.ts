@@ -91,6 +91,12 @@ export type SeedBatteriesResult =
       packs: string[];
       /** The verified manifest hash. */
       manifestHash: string;
+      /**
+       * Phase 7: the union of the contributing packs' manifest `requires`
+       * (manifest order, deduped). Present ONLY when non-empty, so results
+       * without a requirement keep their exact shape.
+       */
+      requires?: string[];
     }
   | { ok: false; reason: string };
 
@@ -616,12 +622,17 @@ export async function seedBatteries(
       }
     }
 
+    const contributedPacks = manifest.packs.filter((p) =>
+      contributed.has(p.id),
+    );
+    const requires = [
+      ...new Set(contributedPacks.flatMap((p) => p.requires ?? [])),
+    ];
     return {
       ok: true,
-      packs: manifest.packs
-        .map((p) => p.id)
-        .filter((id) => contributed.has(id)),
+      packs: contributedPacks.map((p) => p.id),
       manifestHash,
+      ...(requires.length > 0 ? { requires } : {}),
     };
   } catch (e) {
     const reason =

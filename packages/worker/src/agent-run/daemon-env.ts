@@ -171,6 +171,16 @@ export interface BuildDaemonEnvOpts {
    */
   broker?: BrokerHandoff | null;
   /**
+   * Phase 7: a READ-ONLY (contents/metadata/pull_requests/issues: read),
+   * single-repo, ≤1h GitHub App token, for task runs whose seeded packs
+   * require `github-read-token` (the workflow's readTokenForRun gate decides).
+   * Applied ONLY in the brokered branch, and ONLY to GITHUB_TOKEN: GH_TOKEN
+   * stays the per-run bearer, and gh prefers GH_TOKEN, so gh keeps going
+   * through the gh broker; git stays on the git broker. Legacy (unbrokered)
+   * runs ignore it. Null/empty = today's env, byte for byte.
+   */
+  githubReadToken?: string | null;
+  /**
    * #108: the unix account the child will actually run as. Empty (the default)
    * = nothing below happens and the built env is byte-for-byte today's.
    *
@@ -211,6 +221,7 @@ export function buildDaemonEnv({
   credentialEnv = {},
   egressProxyUrl = null,
   broker = null,
+  githubReadToken = null,
   agentUser = "",
   runTmpDir = null,
   workdir = null,
@@ -307,7 +318,10 @@ export function buildDaemonEnv({
   //    (hosts.yml) — and, brokered, it carries the `http_unix_socket` entry.
   if (broker) {
     env.GH_TOKEN = broker.bearer;
-    env.GITHUB_TOKEN = broker.bearer;
+    // Phase 7: only a brokered task run with a requiring pack carries a real
+    // (read-only) token, and only here — for tools such as the vendored
+    // dora_metrics.py that call api.github.com directly with GITHUB_TOKEN.
+    env.GITHUB_TOKEN = githubReadToken ? githubReadToken : broker.bearer;
     env.GH_REPO = broker.repoFullName;
   } else {
     env.GH_TOKEN = installationToken;

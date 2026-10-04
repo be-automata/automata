@@ -534,6 +534,7 @@ describe("seedBatteries hooksOff:false (phase 7, task runs)", () => {
       ok: true,
       packs: ["somnio-skills"],
       manifestHash: fx.manifestHash,
+      requires: ["github-read-token"],
     });
     expect(await listTree(claudeDir())).toEqual([
       "skills",
@@ -588,6 +589,53 @@ describe("seedBatteries hooksOff:false (phase 7, task runs)", () => {
         await fs.readFile(path.join(claudeDir(), "settings.json"), "utf8"),
       ),
     ).toEqual({ disableAllHooks: true });
+  });
+});
+
+describe("seedBatteries requires (phase 7)", () => {
+  let fx: BatteriesFixture;
+  let opts: SeedBatteriesOptions;
+
+  beforeEach(async () => {
+    fx = await makeBatteriesFixture();
+    opts = {
+      root: fx.root,
+      repoRoot: fx.repoRoot,
+      rootOwnerUid: UID,
+      packOwnerUid: UID,
+      log: () => undefined,
+      hooksOff: false,
+    };
+  });
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  it("a contributing requiring pack surfaces requires on the ok result", async () => {
+    expect(await seedBatteries(fx.home, ["somnio-skills"], opts)).toEqual({
+      ok: true,
+      packs: ["somnio-skills"],
+      manifestHash: fx.manifestHash,
+      requires: ["github-read-token"],
+    });
+  });
+
+  it("no contributing pack requires anything: NO requires key", async () => {
+    const result = await seedBatteries(fx.home, ["somnio-review"], opts);
+    expect(result.ok).toBe(true);
+    expect("requires" in result).toBe(false);
+  });
+
+  it("a requiring pack that is skipped contributes nothing", async () => {
+    const result = await seedBatteries(fx.home, ["somnio-skills"], {
+      ...opts,
+      packOwnerUid: UID + 1,
+    });
+    expect(result).toEqual({
+      ok: true,
+      packs: [],
+      manifestHash: fx.manifestHash,
+    });
   });
 });
 
