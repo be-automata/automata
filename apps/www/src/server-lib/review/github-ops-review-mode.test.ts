@@ -3,7 +3,11 @@ import { createHash } from "node:crypto";
 import { describe, it, expect } from "vitest";
 
 import { loadReviewSkillBody } from "../../../../../deploy/lib/review-skill-file";
-import { parseReviewIntent } from "./parse-review-intent";
+import {
+  REVIEW_INTENT_FENCE_INFO,
+  hasTaggedReviewIntentOpener,
+  parseReviewIntent,
+} from "./parse-review-intent";
 import {
   hasReviewModeSections,
   renderReviewModeSections,
@@ -149,5 +153,22 @@ describe("github-ops SKILL.md drift safety", () => {
   it("the tracked body has sections and passes the github-ops validator", () => {
     expect(hasReviewModeSections(raw)).toBe(true);
     expect(() => validateSkillBody("github-ops", raw, "tracked")).not.toThrow();
+  });
+});
+
+describe("github-ops SKILL.md ↔ tagged review-intent parser (phase 6, no drift)", () => {
+  it("both orchestrated renders instruct the parser's fence info; classic does not", () => {
+    expect(orchTests).toContain(REVIEW_INTENT_FENCE_INFO);
+    expect(orchNoTests).toContain(REVIEW_INTENT_FENCE_INFO);
+    expect(classic).not.toContain(REVIEW_INTENT_FENCE_INFO);
+  });
+
+  it("no render contains a real tagged opener, and the option changes nothing", () => {
+    for (const body of [raw, classic, orchTests, orchNoTests]) {
+      expect(hasTaggedReviewIntentOpener(body)).toBe(false);
+      expect(parseReviewIntent(body, { preferTaggedIntent: true })).toEqual(
+        parseReviewIntent(body),
+      );
+    }
   });
 });

@@ -86,9 +86,99 @@ function extractJsonPayload(text: string): string | null {
   return null;
 }
 
-/** Parse + validate the emitted review intent from the agent's terminal text. */
-export function parseReviewIntent(text: string): ParseReviewIntentResult {
-  const payload = extractJsonPayload(text);
+/**
+ * The fence info string the orchestrated github-ops render (phase 6) tells the
+ * LEAD reviewer to put on its one final block: the opening fence line is three
+ * backticks immediately followed by this string. Sub-agents are never given
+ * it. Anti-drift-tested against SKILL.md (github-ops-review-mode.test.ts).
+ */
+export const REVIEW_INTENT_FENCE_INFO = "json review-intent";
+
+/**
+ * THE tagged-opener pattern — the only place it exists. A whole opening fence
+ * line at a line start: three backticks, `json`, spaces/tabs, `review-intent`,
+ * optional trailing spaces/tabs, optional CR, LF. Mid-line mentions in prose
+ * are not openers.
+ */
+const TAGGED_OPENER_RE = /(?:^|\n)```json[ \t]+review-intent[ \t]*\r?\n/;
+/** A closing fence: a line that is exactly three backticks. */
+const TAGGED_CLOSE_RE = /(?:^|\r?\n)```(?=[ \t]*(?:\r?\n|$))/;
+
+/** Byte offset just past the LAST tagged opener line, or -1 when none. */
+function findLastTaggedOpenerEnd(text: string): number {
+  const scan = new RegExp(TAGGED_OPENER_RE.source, "g");
+  let end = -1;
+  let match: RegExpExecArray | null;
+  while ((match = scan.exec(text)) !== null) {
+    end = match.index + match[0].length;
+    // Let the opener's trailing LF serve as the next opener's leading LF.
+    scan.lastIndex = end - 1;
+  }
+  return end;
+}
+
+/** Whether `text` contains a tagged `json review-intent` opener line. */
+export function hasTaggedReviewIntentOpener(text: string): boolean {
+  return TAGGED_OPENER_RE.test(text);
+}
+
+export interface ParseReviewIntentOptions {
+  /**
+   * Set ONLY for threads whose prompt was rendered orchestrated
+   * (sourceMetadata.reviewPromptMode === "orchestrated"): the last tagged
+   * block decides. Classic callers omit it and get today's behaviour
+   * byte-for-byte.
+   */
+  preferTaggedIntent?: boolean;
+}
+
+type PayloadResult =
+  | { payload: string | null }
+  | { failure: ParseReviewIntentResult };
+
+function extractTaggedPayload(text: string): PayloadResult | null {
+  const bodyStart = findLastTaggedOpenerEnd(text);
+  if (bodyStart < 0) return null;
+  const rest = text.slice(bodyStart);
+  const close = TAGGED_CLOSE_RE.exec(rest);
+  if (!close) {
+    return {
+      failure: {
+        ok: false,
+        source: "parser",
+        reason: "tagged review-intent block is incomplete (no closing fence)",
+      },
+    };
+  }
+  return { payload: rest.slice(0, close.index).trim() };
+}
+
+/**
+ * Parse + validate the emitted review intent from the agent's terminal text.
+ *
+ * Two paths:
+ * - Default (classic, and any caller without options): today's rule — the
+ *   LAST ```json fence, else the last balanced brace object.
+ * - `preferTaggedIntent` (orchestrated-prompt threads): the block after the
+ *   LAST `json review-intent` opener decides, because a lead that echoes a
+ *   sub-agent's fence after its own makes the sub-agent's fence the last one
+ *   (Phase 2 Q7, q4sub). An unclosed or malformed tagged block is a parser
+ *   failure — it never falls back to an untagged block, which may be a
+ *   sub-agent's. With no opener in the text, today's rule applies.
+ */
+export function parseReviewIntent(
+  text: string,
+  options: ParseReviewIntentOptions = {},
+): ParseReviewIntentResult {
+  let payload: string | null;
+  const tagged = options.preferTaggedIntent ? extractTaggedPayload(text) : null;
+  if (tagged === null) {
+    payload = extractJsonPayload(text);
+  } else if ("failure" in tagged) {
+    return tagged.failure;
+  } else {
+    payload = tagged.payload;
+  }
   if (!payload) {
     return {
       ok: false,
