@@ -82,6 +82,11 @@ git -C "$REPO" diff --quiet HEAD -- packages/worker/deploy ||
 
 WORK="${TMPDIR:-/tmp}"
 WORK="${WORK%/}/batteries-dry-run.$$"
+mkdir -p "$WORK"
+# Canonical (macOS: /var -> /private/var). The installer canonicalises a
+# PREFIX only once it exists, so a non-canonical prefix would be written into
+# run 1's wrapper and differ from run 2's template (a spurious reinstall).
+WORK="$(cd -P "$WORK" && pwd -P)"
 CACHE="$WORK/sdk-cache"
 WT="$WORK/wt"
 D="$WORK/prefix-d"
