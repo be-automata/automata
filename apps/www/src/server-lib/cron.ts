@@ -246,13 +246,22 @@ export async function runScheduledCron(cron: string): Promise<void> {
   console.log(`[cron] scheduled trigger: ${cron}`);
   switch (cron) {
     case "0 * * * *": // hourly — stalled-task recovery
-      await runStalledTasksCron();
+      try {
+        await runStalledTasksCron();
+      } finally {
+        // CRON-01: LAST, so self-heal work can never delay or skip recovery.
+        await runSelfHealCronSafe("hourly");
+      }
       return;
     case "*/1 * * * *": // every 1m — fire due scheduled thread-chats
       await runScheduledTasksCron();
       return;
     case "*/10 * * * *": // every 10m — queue drain
-      await runQueuedTasksCron();
+      try {
+        await runQueuedTasksCron();
+      } finally {
+        await runSelfHealCronSafe("tick");
+      }
       return;
     case "*/30 * * * *": // every 30m — fire due automations
       await runAutomationsCron();
@@ -260,5 +269,22 @@ export async function runScheduledCron(cron: string): Promise<void> {
     default:
       console.warn(`[cron] no runner mapped for pattern: ${cron}`);
       return;
+  }
+}
+
+/**
+ * Self-heal backstops (audit sweep, outbox drain, retention) run in a function
+ * of their own, bulkheaded from the runners above (CRON-01). Dynamic import so
+ * the heavy audit deps do not load with this module; every failure is logged
+ * and swallowed.
+ */
+async function runSelfHealCronSafe(kind: "tick" | "hourly"): Promise<void> {
+  try {
+    const { runSelfHealCron } = await import(
+      "@/server-lib/audit/self-heal-cron"
+    );
+    await runSelfHealCron(kind);
+  } catch (error) {
+    console.error("[cron:self-heal] failed (non-fatal)", error);
   }
 }
