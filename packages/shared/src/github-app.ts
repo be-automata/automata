@@ -32,6 +32,36 @@ export function getGitHubApp(): App {
   return appInstance;
 }
 
+/** Rethrow a 404 from the installation lookup as the "not installed" error. */
+function notInstalledOr(error: unknown, owner: string, repo: string): Error {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { status?: unknown }).status === 404
+  ) {
+    return new Error(
+      `GitHub App is not installed on repository ${owner}/${repo}`,
+    );
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+/** The App installation id covering owner/repo (throws on 404 → not installed). */
+async function lookupInstallationId(
+  app: App,
+  owner: string,
+  repo: string,
+): Promise<number> {
+  const { data: installation } = await app.octokit.request(
+    "GET /repos/{owner}/{repo}/installation",
+    {
+      owner,
+      repo,
+    },
+  );
+  return installation.id;
+}
+
 /**
  * Get installation access token for a repository
  * @param owner Repository owner
@@ -46,16 +76,7 @@ export async function getInstallationToken(
 
   try {
     // Get the installation for this repository
-    const { data: installation } = await app.octokit.request(
-      "GET /repos/{owner}/{repo}/installation",
-      {
-        owner,
-        repo,
-      },
-    );
-
-    // Get an authenticated Octokit instance for this installation
-    // Note: We don't need to use this octokit instance here, we're just getting the token
+    const installationId = await lookupInstallationId(app, owner, repo);
 
     // Create an installation access token with 30-day expiry
     const expirationDate = new Date();
@@ -64,21 +85,65 @@ export async function getInstallationToken(
     const { data: tokenData } = await app.octokit.request(
       "POST /app/installations/{installation_id}/access_tokens",
       {
-        installation_id: installation.id,
+        installation_id: installationId,
         repositories: [repo],
         expires_at: expirationDate.toISOString(),
       },
     );
 
     return tokenData.token;
-  } catch (error: any) {
-    if (error.status === 404) {
-      throw new Error(
-        `GitHub App is not installed on repository ${owner}/${repo}`,
-      );
-    }
-    throw error;
+  } catch (error: unknown) {
+    throw notInstalledOr(error, owner, repo);
   }
+}
+
+/**
+ * The ONLY permissions a read-only task token is ever minted with (phase 7).
+ * No write and no admin key, by construction: the request body below spreads
+ * nothing else in.
+ */
+export const READ_ONLY_TOKEN_PERMISSIONS = {
+  contents: "read",
+  metadata: "read",
+  pull_requests: "read",
+  issues: "read",
+} as const;
+
+/**
+ * A READ-ONLY installation token for exactly one repository (phase 7).
+ *
+ * Scope: READ_ONLY_TOKEN_PERMISSIONS on `[repo]` only. Lifetime: GitHub caps
+ * installation tokens at one hour, so no `expires_at` is requested; the
+ * response's own expiry is returned so the worker can refuse an expired
+ * token. Used ONLY for task runs whose admin-selected packs require
+ * `github-read-token` (BATTERY_PACK_REQUIRES) — never for review runs, which
+ * keep the #81/ADR-004 fence (no GitHub credential in the agent at all).
+ */
+export async function getReadOnlyInstallationToken(
+  owner: string,
+  repo: string,
+): Promise<{ token: string; expiresAt: string }> {
+  const app = getGitHubApp();
+  let data: { token?: unknown; expires_at?: unknown };
+  try {
+    const installationId = await lookupInstallationId(app, owner, repo);
+    ({ data } = await app.octokit.request(
+      "POST /app/installations/{installation_id}/access_tokens",
+      {
+        installation_id: installationId,
+        repositories: [repo],
+        permissions: READ_ONLY_TOKEN_PERMISSIONS,
+      },
+    ));
+  } catch (error: unknown) {
+    throw notInstalledOr(error, owner, repo);
+  }
+  if (typeof data.token !== "string" || typeof data.expires_at !== "string") {
+    throw new Error(
+      "GitHub App token response has no token or no expires_at (read-only token)",
+    );
+  }
+  return { token: data.token, expiresAt: data.expires_at };
 }
 
 /**

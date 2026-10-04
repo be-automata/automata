@@ -17,7 +17,10 @@ import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-sett
 import { repoReviewSettings } from "@terragon/shared/db/schema";
 import { createTestRemoteRun } from "@terragon/shared/model/test-helpers";
 import { eq } from "drizzle-orm";
-import { getInstallationToken } from "@terragon/shared/github-app";
+import {
+  getInstallationToken,
+  getReadOnlyInstallationToken,
+} from "@terragon/shared/github-app";
 import { thread as threadTable } from "@terragon/shared/db/schema";
 import { resolveTaskAgentForDispatch } from "@/server-lib/review/resolve-task-agent";
 import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
@@ -1069,5 +1072,106 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
     expect(input.reviewAgent).toMatchObject({ mode: "classic" });
     expect(warn.mock.calls.some((call) => call[0] === INVALID_LOG)).toBe(false);
     warn.mockRestore();
+  });
+
+  describe("read-only GitHub token (phase 7, DORA auth = Option 3)", () => {
+    const READ_TOKEN = "mock-github-read-token";
+    const MINT_FAILED_LOG =
+      "[hatchet] task agent: read token mint failed — dispatching without it";
+
+    it("a task run whose packs require it carries a read-only token and its expiry, never the write-capable token", async () => {
+      await setTaskBatteries(REPO, ["somnio-skills"]);
+      const input = await dispatchAndRead(await orgTaskThread());
+      expect(vi.mocked(getReadOnlyInstallationToken)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(getReadOnlyInstallationToken)).toHaveBeenCalledWith(
+        "be-automata",
+        "automata",
+      );
+      expect(input.githubReadToken).toBe(READ_TOKEN);
+      expect(input.githubReadToken).not.toBe(input.installationToken);
+      expect(input.githubReadTokenExpiresAt).toBe("2026-10-04T03:00:00Z");
+      expect(input.taskAgent).toEqual({ batteries: ["somnio-skills"] });
+    });
+
+    it("packs that require nothing: no mint, no token keys", async () => {
+      await setTaskBatteries(REPO, ["somnio-review"]);
+      const input = await dispatchAndRead(await orgTaskThread());
+      expect(input.taskAgent).toEqual({ batteries: ["somnio-review"] });
+      expect(vi.mocked(getReadOnlyInstallationToken)).not.toHaveBeenCalled();
+      expect("githubReadToken" in input).toBe(false);
+      expect("githubReadTokenExpiresAt" in input).toBe(false);
+    });
+
+    it("no taskAgent: no mint, no token keys", async () => {
+      const input = await dispatchAndRead(await orgTaskThread());
+      expect(vi.mocked(getReadOnlyInstallationToken)).not.toHaveBeenCalled();
+      expect("githubReadToken" in input).toBe(false);
+      expect("githubReadTokenExpiresAt" in input).toBe(false);
+    });
+
+    it("a review dispatch never mints or carries it, even with a requiring pack stored", async () => {
+      await setTaskBatteries(REPO, ["somnio-skills"]);
+      await setTaskBatteries("*", ["somnio-skills"]);
+      const input = await dispatchAndRead(await reviewThread(913));
+      expect(vi.mocked(getReadOnlyInstallationToken)).not.toHaveBeenCalled();
+      expect("githubReadToken" in input).toBe(false);
+      expect("githubReadTokenExpiresAt" in input).toBe(false);
+    });
+
+    it("a personal (no-org) thread never mints", async () => {
+      const t = await createTestThread({ db, userId: user.id });
+      const input = await dispatchAndRead(t);
+      expect(vi.mocked(getReadOnlyInstallationToken)).not.toHaveBeenCalled();
+      expect("githubReadToken" in input).toBe(false);
+    });
+
+    it("a mint failure dispatches with taskAgent and without the token, warns once (message only, redacted) and keeps the daemon token", async () => {
+      await setTaskBatteries(REPO, ["somnio-skills"]);
+      vi.mocked(getReadOnlyInstallationToken).mockRejectedValueOnce(
+        Object.assign(
+          new Error("Resource not accessible (saw ghs_leakedTokenValue123)"),
+          { request: { body: '{"permissions":{"contents":"read"}}' } },
+        ),
+      );
+      const warn = vi.spyOn(console, "warn");
+      const t = await orgTaskThread();
+      const input = await dispatchAndRead(t);
+      expect(input.taskAgent).toEqual({ batteries: ["somnio-skills"] });
+      expect("githubReadToken" in input).toBe(false);
+      expect("githubReadTokenExpiresAt" in input).toBe(false);
+      const hits = warn.mock.calls.filter(
+        (call) => call[0] === MINT_FAILED_LOG,
+      );
+      expect(hits).toHaveLength(1);
+      const logged = JSON.stringify(hits[0]);
+      expect(logged).toContain(t.threadId);
+      expect(logged).not.toContain("ghs_leakedTokenValue123");
+      expect(logged).not.toContain("permissions");
+      expect(
+        await hasActiveDaemonToken({
+          userId: user.id,
+          name: daemonRunKey({
+            threadId: t.threadId,
+            threadChatId: t.threadChatId,
+          }),
+        }),
+      ).toBe(true);
+      warn.mockRestore();
+    });
+
+    it("log hygiene: no console argument of a requiring dispatch contains the read token", async () => {
+      await setTaskBatteries(REPO, ["somnio-skills"]);
+      const spies = (["log", "warn", "error", "info", "debug"] as const).map(
+        (level) => vi.spyOn(console, level),
+      );
+      const input = await dispatchAndRead(await orgTaskThread());
+      expect(input.githubReadToken).toBe(READ_TOKEN);
+      for (const spy of spies) {
+        for (const call of spy.mock.calls) {
+          expect(JSON.stringify(call)).not.toContain(READ_TOKEN);
+        }
+        spy.mockRestore();
+      }
+    });
   });
 });

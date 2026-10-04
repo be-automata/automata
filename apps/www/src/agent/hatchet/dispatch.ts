@@ -1,6 +1,10 @@
 import { env } from "@terragon/env/apps-www";
 import { db } from "@/lib/db";
-import { getInstallationToken } from "@terragon/shared/github-app";
+import {
+  getInstallationToken,
+  getReadOnlyInstallationToken,
+} from "@terragon/shared/github-app";
+import { packsRequire } from "@terragon/shared/model/review-agent-settings";
 import { getThreadMinimal } from "@terragon/shared/model/threads";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import {
@@ -115,6 +119,51 @@ async function triggerWithRetry(
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+/** Scrub token-shaped substrings from an error message before it is logged. */
+function redactTokenText(text: string): string {
+  return text
+    .replace(/\bgh[pousr]_[A-Za-z0-9_]+/g, "[redacted]")
+    .replace(/\bgithub_pat_[A-Za-z0-9_]+/g, "[redacted]");
+}
+
+/**
+ * Phase 7: mint the read-only, single-repo task token. Never throws: a
+ * failure logs one warn line (message only, token-shaped text redacted; never
+ * the request body) and returns undefined, so the run dispatches without it.
+ */
+async function mintReadOnlyTaskToken({
+  owner,
+  repo,
+  threadId,
+  repoFullName,
+}: {
+  owner: string;
+  repo: string;
+  threadId: string;
+  repoFullName: string;
+}): Promise<{ token: string; expiresAt: string } | undefined> {
+  try {
+    const minted = await getReadOnlyInstallationToken(owner, repo);
+    console.log("[hatchet] task agent: read-only GitHub token minted", {
+      threadId,
+      expiresAt: minted.expiresAt,
+    });
+    return minted;
+  } catch (error) {
+    console.warn(
+      "[hatchet] task agent: read token mint failed — dispatching without it",
+      {
+        threadId,
+        repoFullName,
+        error: redactTokenText(
+          error instanceof Error ? error.message : String(error),
+        ),
+      },
+    );
+    return undefined;
+  }
+}
+
 /**
  * www → Hatchet dispatch (ADR-003). When HATCHET_ENABLED, a booting thread runs
  * on a remote worker instead of the in-process sandbox: www mints the short-lived
@@ -145,6 +194,18 @@ export interface AgentRunInput {
   daemonCallbackUrl: string;
   /** Short-lived, installation-scoped GitHub token for the clone (x-access-token). */
   installationToken: string;
+  /**
+   * Phase 7, SECRET — handled exactly like installationToken: never logged,
+   * only ever in the Hatchet input. A READ-ONLY (contents/metadata/
+   * pull_requests/issues: read), single-repo, ≤1h GitHub App token, minted
+   * ONLY for a non-review org dispatch whose resolved taskAgent includes a
+   * pack that requires `github-read-token` (BATTERY_PACK_REQUIRES). Never on
+   * review runs. Absent otherwise ⇒ byte-identical payload. The worker puts it
+   * in the agent's GITHUB_TOKEN (07-07 gate); GH_TOKEN stays the broker bearer.
+   */
+  githubReadToken?: string;
+  /** Not secret: the read token's ISO-8601 expiry, so the worker refuses an expired one. */
+  githubReadTokenExpiresAt?: string;
   /** Short-lived, org+thread-scoped daemon token (events + next-message auth). */
   daemonToken: string;
   /**
@@ -592,10 +653,26 @@ export async function dispatchAgentRun({
         packs: taskAgent.batteries,
       });
     }
+    // Phase 7 (DORA auth = Option 3): selecting a pack that requires a
+    // read-only GitHub token IS the opt-in. Minted only here — taskAgent is
+    // never resolved for review dispatches — and a mint failure degrades to
+    // "no token" + one warn line; it never fails the dispatch, so the daemon
+    // token is not revoked for it. The token value is never logged.
+    const readToken =
+      taskAgent !== undefined &&
+      packsRequire(taskAgent.batteries, "github-read-token")
+        ? await mintReadOnlyTaskToken({ owner, repo, threadId, repoFullName })
+        : undefined;
     const input: AgentRunInput = {
       ...baseInput,
       ...plan?.inputExtension,
       ...(taskAgent !== undefined ? { taskAgent } : {}),
+      ...(readToken !== undefined
+        ? {
+            githubReadToken: readToken.token,
+            githubReadTokenExpiresAt: readToken.expiresAt,
+          }
+        : {}),
     };
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry

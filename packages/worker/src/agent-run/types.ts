@@ -71,6 +71,16 @@ export type AgentRunInput = {
   daemonCallbackUrl: string;
   /** Short-lived, installation-scoped GitHub token for the clone (x-access-token). */
   installationToken: string;
+  /**
+   * Phase 7, SECRET (never logged): a READ-ONLY, single-repo, ≤1h GitHub App
+   * token, present only on task runs whose selected packs require
+   * `github-read-token`. Mirror of www AgentRunInput.githubReadToken. Consumed
+   * only by the 07-07 env gate (GITHUB_TOKEN for brokered non-review runs with
+   * a seeded requiring pack); ignored everywhere else.
+   */
+  githubReadToken?: string;
+  /** Not secret: the read token's ISO-8601 expiry (the worker refuses an expired token). */
+  githubReadTokenExpiresAt?: string;
   /** Short-lived, org+thread-scoped daemon token (events + next-message auth). */
   daemonToken: string;
   /**
