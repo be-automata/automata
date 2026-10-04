@@ -15,6 +15,7 @@ import { cleanupWorkdir, provisionWorkdir } from "./provision";
 import { formatRunStartLine } from "./run-lane";
 import { formatBatteriesLine } from "./batteries-seed";
 import { reviewAgentForRun, withReviewAgentWire } from "./review-agent-wire";
+import { taskAgentForRun } from "./task-agent";
 import {
   classifyNextMessageError,
   nonRetryablePreflight,
@@ -499,6 +500,16 @@ async function runAgentInner(
       `review agent: bounds-rejected (${reviewAgentGate.rejected}) → classic`,
     );
   }
+  // Phase 7: task-run packs, shape-gated BEFORE seeding (reason only, H2).
+  // The review lane never takes task packs, whatever the input carries.
+  const taskGate = taskAgentForRun(input);
+  if (taskGate.kind === "rejected") {
+    step(
+      taskGate.reason === "review-lane"
+        ? "task agent: ignored (review-lane)"
+        : `task agent: rejected (${taskGate.reason})`,
+    );
+  }
 
   let boxLock: BoxLock | null = null;
   let materialised: MaterialisedCredentials;
@@ -586,6 +597,10 @@ async function runAgentInner(
       runRoot: workdir,
       agentUser: config.agentUser,
       reviewAgent: runReviewAgent,
+      taskAgent:
+        taskGate.kind === "seed"
+          ? { batteries: taskGate.batteries }
+          : undefined,
       batteries: { log: admissionLog },
     });
   } catch (err) {
@@ -609,8 +624,21 @@ async function runAgentInner(
   step(
     `agent credential: ${describeCredentialSource(credentialSource)} (box trust: ${config.boxTrust})`,
   );
-  // Phase 5: one line per run — classic, or the seeded packs + manifest hash.
-  step(formatBatteriesLine(materialised.batteries));
+  // Phase 5/7: exactly one `batteries:` line per run. A task/pr-lane run that
+  // carried packs names its lane (resolveRunLane): seeded, or why not. Every
+  // other run — reviews and runs without taskAgent — keeps today's exact
+  // line (`mode=classic` / `mode=orchestrated …`), so unconfigured repos are
+  // byte-identical in HOME and in the log.
+  step(
+    taskGate.kind === "seed"
+      ? formatBatteriesLine(materialised.batteries, taskGate.lane)
+      : taskGate.kind === "rejected" && taskGate.lane !== "review"
+        ? formatBatteriesLine(
+            { ok: false, reason: "task-agent-invalid" },
+            taskGate.lane,
+          )
+        : formatBatteriesLine(materialised.batteries),
+  );
 
   // #66 slice 2: per-run egress enforcement, iff the control plane resolved a
   // policy onto this run's input. Absent policy ⇒ nothing starts and nothing

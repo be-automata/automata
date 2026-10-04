@@ -1330,3 +1330,151 @@ describe("review agent wire + batteries line (Phase 5)", () => {
     expect("reviewAgent" in sent).toBe(false);
   });
 });
+
+describe("task agent packs + one batteries line per run (phase 7)", () => {
+  const TASK_MESSAGE = {
+    type: "claude",
+    model: "sonnet",
+    agent: "claudeCode",
+    agentVersion: 1,
+    prompt: "audit",
+    sessionId: null,
+    permissionMode: "allowAll",
+    featureFlags: {},
+  };
+  const SEEDED = {
+    ok: true as const,
+    packs: ["somnio-skills"],
+    manifestHash: "0123456789ab".padEnd(64, "f"),
+  };
+
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    pullNextMessage.mockReset().mockResolvedValue({ ...TASK_MESSAGE });
+    pollUntilTerminal.mockReset().mockResolvedValue({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+  });
+
+  async function run(
+    extra: Record<string, unknown>,
+    batteries: unknown = undefined,
+  ): Promise<{
+    lines: string[];
+    sent: Record<string, unknown>;
+    arg: { taskAgent?: unknown; reviewAgent?: unknown };
+  }> {
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+      batteries,
+    });
+    const c = ctx();
+    await expect(runFn({ ...INPUT, ...extra }, c)).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    expect(sendMessageCalls).toHaveLength(1);
+    const [arg] = materialiseAgentCredentials.mock.calls[0]! as [
+      { taskAgent?: unknown; reviewAgent?: unknown },
+    ];
+    return {
+      lines: c.log.mock.calls.map((call) => String(call[0])),
+      sent: sendMessageCalls[0] as Record<string, unknown>,
+      arg,
+    };
+  }
+
+  const batteriesLines = (lines: string[]) =>
+    lines.filter((l) => /\] batteries: /.test(l));
+
+  it("task lane with packs: materialise gets taskAgent, one lane=task line after the credential line", async () => {
+    const { lines, sent, arg } = await run(
+      { taskAgent: { batteries: ["somnio-skills"] } },
+      SEEDED,
+    );
+    expect(arg.taskAgent).toEqual({ batteries: ["somnio-skills"] });
+    expect(arg.reviewAgent).toBeUndefined();
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(
+      /\] batteries: lane=task packs=somnio-skills manifest=0123456789ab$/,
+    );
+    const credIdx = lines.findIndex((l) => l.includes("agent credential:"));
+    expect(lines.indexOf(bl[0]!)).toBeGreaterThan(credIdx);
+    // No wire change: the daemon never sees the task packs.
+    expect(JSON.stringify(sent)).not.toMatch(/taskAgent|batteries/);
+    expect(Object.keys(sent).sort()).toEqual(
+      [...Object.keys(TASK_MESSAGE), "useCredits"].sort(),
+    );
+  });
+
+  it("task lane with an unavailable seed: unavailable lane=task reason=<r>", async () => {
+    const { lines } = await run(
+      { taskAgent: { batteries: ["somnio-skills"] } },
+      { ok: false, reason: "manifest-drift" },
+    );
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(
+      /\] batteries: unavailable lane=task reason=manifest-drift$/,
+    );
+  });
+
+  it("a mention on a PR (prNumber only): lane=pr", async () => {
+    const { lines, arg } = await run(
+      { prNumber: 7, taskAgent: { batteries: ["somnio-skills"] } },
+      SEEDED,
+    );
+    expect(arg.taskAgent).toEqual({ batteries: ["somnio-skills"] });
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(/\] batteries: lane=pr packs=somnio-skills /);
+  });
+
+  it("a malformed taskAgent: rejected line (reason only), nothing seeded, task-agent-invalid", async () => {
+    const { lines, arg } = await run({
+      taskAgent: { batteries: ["Bad Id"] },
+    });
+    expect(arg.taskAgent).toBeUndefined();
+    const rejected = lines.filter((l) => l.includes("task agent: rejected"));
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toContain("batteries[0]");
+    expect(lines.join("\n")).not.toContain("Bad Id");
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(
+      /\] batteries: unavailable lane=task reason=task-agent-invalid$/,
+    );
+  });
+
+  it("a review-lane run carrying taskAgent: ignored, nothing seeded, today's review line", async () => {
+    const { lines, arg } = await run({
+      prNumber: 7,
+      prKey: "org-1/o/r/7",
+      supersedePolicy: "newest-wins",
+      taskAgent: { batteries: ["somnio-skills"] },
+    });
+    expect(arg.taskAgent).toBeUndefined();
+    expect(
+      lines.filter((l) => l.includes("task agent: ignored (review-lane)")),
+    ).toHaveLength(1);
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(/\] batteries: mode=classic$/);
+  });
+
+  it("no taskAgent: today's classic line, no task-agent line, today's message keys", async () => {
+    const { lines, sent, arg } = await run({});
+    expect(arg.taskAgent).toBeUndefined();
+    expect(lines.some((l) => l.includes("task agent:"))).toBe(false);
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(/\] batteries: mode=classic$/);
+    expect(Object.keys(sent).sort()).toEqual(
+      [...Object.keys(TASK_MESSAGE), "useCredits"].sort(),
+    );
+  });
+});
