@@ -1,0 +1,7 @@
+deployed_head=5f9a6d47f2134963ee5e144ca128fde801b3674d
+contains_5f9a6d4=yes
+daemon_bundle_symbol_count=2
+bundle_mtime=2026-10-03 17:16:33.107262586 +0000
+worker_started=Sat Oct  3 17:16:31 2026
+NRestarts=0
+ActiveState=active

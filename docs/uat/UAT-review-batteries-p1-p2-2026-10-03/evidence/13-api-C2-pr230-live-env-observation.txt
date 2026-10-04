@@ -1,0 +1,1 @@
+Closing unmerged: this was a throwaway PR to trigger a live review run after the worker redeploy with #229. Observed: the review agent's child env had safe.directory for its checkout, no GH_TOKEN/GITHUB_TOKEN, no extraheader/insteadOf entries, and git worked as the agent uid.

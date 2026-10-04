@@ -1,0 +1,20 @@
+{
+  "scope": "PR #229 + Phase 2 spike",
+  "input_kind": "pr",
+  "ticket": null,
+  "env": { "name": "production execution box", "host": "automata-exec-1" },
+  "build": "5f9a6d47f2134963ee5e144ca128fde801b3674d",
+  "date": "2026-10-03",
+  "verdict": { "phase1": "PASS", "phase2": "RECORDED", "phases3to6": "NOT_SHIPPED" },
+  "validator": "PASS_WITH_WARNINGS",
+  "criteria": [
+    { "id": "C1", "verdict": "PASS", "evidence": ["01", "13", "04"] },
+    { "id": "C2", "verdict": "PASS", "evidence": ["01", "13"] },
+    { "id": "C3", "verdict": "PASS", "evidence": ["00", "01", "02"] },
+    { "id": "C4", "verdict": "PASS", "evidence": ["03", "12"] },
+    { "id": "C5", "verdict": "PASS", "evidence": ["04", "05"] },
+    { "id": "C6", "verdict": "PASS", "evidence": ["03", "04"] }
+  ],
+  "terraform": "not applicable",
+  "artifact_url": "https://claude.ai/artifact/TMTxisf5is97VJvLnBLGTv"
+}
