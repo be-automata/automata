@@ -556,3 +556,128 @@ remains.
 shape — ops gates (E2B template rebuild with envd ≥ 0.2.0 before deploy;
 Daytona org-tier verification) and audit limitations are documented in
 `docs/egress-enforcement.md`.
+
+## Review batteries on the execution box (phase 3)
+
+The review lane's "batteries" are pinned in `packages/worker/deploy/batteries.json`
+and installed by `packages/worker/deploy/linux/install-batteries.sh` (root only).
+Nothing reads them before Phase 5 seeds them into runs, so installing them needs
+**no worker restart**.
+
+**What lands where**
+
+- Packs: `/usr/local/lib/automata-batteries/<packId>@<sha>/` (`skills/`,
+  `agents/`, `LICENSE`, `.stamp`). These are root-owned, with dirs 0755 and
+  files 0644.
+- CLIs: `/usr/local/bin/{shellcheck,actionlint,gitleaks}` (0755). Their licenses
+  are under `/usr/local/lib/automata-batteries/licenses/<name>-<version>/`.
+- `/usr/local/lib/automata-batteries/manifest.sha256` is the sha256 of the
+  manifest plus the overlay files that were installed. It is the contract that
+  Phase 5 logs per run, and it is written only by a fully passing run.
+  `manifest.sha256.invalid` means the last run did not fully pass.
+- The script prints `SOURCE checkout <sha>`, one
+  `INSTALLED`/`SKIPPED`/`FAIL`/`STALE`/`VERIFIED` line per item, and ends with
+  exactly `RESULT: PASS` (exit 0) or `RESULT: FAIL (<n> failure(s))` (exit 1).
+
+**Production step (after the PR merges; operator, as root on the box)**
+
+1. Preflight: confirm no run is in flight. `ls -d /sys/fs/cgroup/system.slice/automata-worker.service/run-* 2>/dev/null | wc -l`
+   must print 0; otherwise wait. Never disturb an in-flight review: on this box,
+   replacing a same-sha dir takes two renames. Note
+   `systemctl show -p NRestarts --value automata-worker.service` before and after.
+2. Update the checkout as the automata user:
+   `runuser -u automata -- git -C /opt/automata-platform -c safe.directory=/opt/automata-platform fetch origin`,
+   then
+   `runuser -u automata -- git -C /opt/automata-platform -c safe.directory=/opt/automata-platform merge --ff-only origin/main`.
+   `--ff-only` fails loudly if the checkout has diverged. Investigate that; do
+   not force.
+3. Verify HEAD against the public origin and take a root-owned copy of the
+   script from that commit:
+   `H=$(git -C /opt/automata-platform -c safe.directory=/opt/automata-platform rev-parse HEAD)`.
+   `git ls-remote https://github.com/be-automata/automata refs/heads/main` must
+   print the same sha. Then run
+   `git -C /opt/automata-platform -c safe.directory=/opt/automata-platform cat-file blob "$H:packages/worker/deploy/linux/install-batteries.sh" > /root/install-batteries.sh`.
+4. Run it:
+   `AUTOMATA_REPO=/opt/automata-platform bash /root/install-batteries.sh 2>&1 | tee /root/install-batteries.$(date -u +%Y%m%dT%H%M%SZ).log`.
+   `${PIPESTATUS[0]}` must be 0, the `SOURCE checkout` line must equal `$H`, the
+   last line must be `RESULT: PASS`, and every `VERIFIED agent …` line must be
+   present. **Do not re-run `/usr/local/sbin/automata-provision.sh`**: it is a
+   stale first-boot copy of cloud-init's `write_files`, it does not contain the
+   battery call, and it would redo apt, npm and sysctl work.
+5. Re-run it once. Every item must report `SKIPPED`. Record the output of
+   `cat /usr/local/lib/automata-batteries/manifest.sha256`.
+6. Attach the PASS summary and the manifest hash to the PR. No worker restart is
+   needed, and NRestarts must be unchanged.
+7. A `FAIL verify …` line from verify_as_agent is a script finding (drift in the
+   spawn shape, permissions or PATH), not something to hand-fix on the box.
+   Capture the log, leave `manifest.sha256.invalid` in place, and fix it in a
+   follow-up PR. The same goes for a CLI smoke check that fails only on its
+   version flag (actionlint `-version`, gitleaks `version`): fix `versionArgs` in
+   `batteries.json` and re-run.
+
+**Why a root-owned copy from the verified commit.** `/opt/automata-platform` is
+writable by the worker uid, including `.git/config` and `.gitattributes`. The
+installer therefore reads pack content, overlays and the manifest only as git
+objects bound to commit ids (`rev-parse`, `ls-tree -r -z`, `cat-file blob`),
+never the working tree. Every git call adds a scoped `-c safe.directory`. The
+script file itself is the one input that is not object-bound, so you run a copy
+taken from the HEAD you verified against the public origin.
+
+**STALE dirs** are pack dirs for pins that are no longer in the manifest, plus
+`.<id>@<sha>.replaced.<timestamp>` dirs moved aside when a same-sha pack was
+re-installed (for example after an adapter edit). They are left in place on
+purpose, because Phase 5 links runs into these paths. Remove them by hand only
+when no run is in flight. Replacing a same-sha dir is atomic only with
+`mv --exchange` (coreutils ≥ 9.5). Ubuntu 24.04 ships 9.4, so the script falls
+back to two renames, which is another reason for the no-run-in-flight preflight.
+
+**Rollback:** `rm -rf /usr/local/lib/automata-batteries` and
+`rm -f /usr/local/bin/{shellcheck,actionlint,gitleaks}`. Nothing reads them
+before Phase 5.
+
+**Local dry run (developers, non-root):** commit first, because the manifest
+and overlays are read from HEAD. Then run
+`PREFIX="$TMPDIR/batt-dry" SKIP_SUDO_VERIFY=1 bash packages/worker/deploy/linux/install-batteries.sh`.
+The prefix must be absolute. Add `BATTERIES_MANIFEST=<absolute path>` to try a
+modified manifest. Both knobs are refused for root and for any prefix that
+resolves to `/usr/local`. The dry run prints `VERIFY SKIPPED` instead of
+checking through sudo.
+
+**Bumping a pin:**
+
+1. Set the new commit `sha` and recompute every `gitId` with
+   `git rev-parse <sha>:<path>`.
+2. For a CLI, take `sha256` from the publisher's checksum file and re-hash the
+   tarball locally.
+3. Re-check `allowedHelperRefs` on the gstack-review pack in `batteries.json`:
+   each `ref` must still occur exactly `count` times in its `file`, and the
+   adapter must still neutralise it.
+4. Run the dry run and `pnpm --filter @terragon/worker exec vitest run src/agent-run/deploy-assets.test.ts src/agent-run/batteries-manifest.test.ts`.
+
+**Recorded decisions and Phase 5 caveats**
+
+- semgrep was dropped. A hash-pinned install needs a lockfile for a PyPI
+  closure of about 60 packages. Its useful rules come from the semgrep.dev
+  registry, which means network access plus metrics. The offline rule set is
+  under the restrictive Semgrep Rules License v1.0.
+- gstack `cso` was dropped. v3 routes every read through a 62 MB bun-compiled
+  launcher that is gitignored upstream.
+- `gsd-integration-checker` was dropped because it audits `.planning/`
+  summaries, not a PR.
+- Upstream gstack `review/SKILL.md` is never installed, because its preamble can
+  execute a script from the PR checkout. The automata adapter
+  (`packages/worker/deploy/batteries/gstack-review/SKILL.md`) replaces it. The
+  adapter treats `gstack-shortcut(dec-*)` markers as UNVERIFIED and supersedes
+  the specialists' JSON output format with plain-text bullets.
+- `gsd-code-reviewer` and `gsd-security-auditor` declare Write/Edit, which the
+  review lane denies (Phase 2 Q4).
+  - `gsd-code-reviewer` fails closed without a files list or `diff_base`, and
+    it wants to write `REVIEW.md`.
+  - `gsd-security-auditor` targets a PLAN threat model. It also reads the
+    project's `.claude/skills/`, which is PR-controlled, untrusted input.
+- The somnio security-audit pipeline writes `reports/` through Bash redirects,
+  which bypass the Write denial. Phase 5 should use its references as rules,
+  not run the 11-step pipeline. Its `allowed-tools` line is stripped at install.
+- Phase 5 adds an explicit
+  `--disallowedTools Write Edit NotebookEdit WebFetch WebSearch` for the
+  orchestrated lane, because a deny rule beats a skill's `allowed-tools`.

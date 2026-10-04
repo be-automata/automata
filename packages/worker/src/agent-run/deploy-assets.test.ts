@@ -1,7 +1,18 @@
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+
+import { REVIEW_BATTERY_PACK_IDS } from "../../../shared/src/model/review-agent-settings";
+import {
+  BATTERIES_MANIFEST_REPO_PATH,
+  FORBIDDEN_NAMES,
+  findBatteriesManifestError,
+  isBatteriesManifest,
+  type BatteriesManifest,
+} from "./batteries-manifest";
 
 /**
  * Rot guards for the #108 deploy templates. These are pure file reads: no sudo,
@@ -20,6 +31,9 @@ const workerRoot = path.resolve(
 );
 const repoRoot = path.resolve(workerRoot, "..", "..");
 const read = (p: string) => fs.readFileSync(p, "utf8");
+/** A file under packages/worker/deploy/. */
+const deployFile = (...segments: string[]) =>
+  read(path.join(workerRoot, "deploy", ...segments));
 
 describe("deploy/egress-pf.conf", () => {
   const conf = read(path.join(repoRoot, "deploy", "egress-pf.conf"));
@@ -53,7 +67,7 @@ describe("deploy/egress-pf.conf", () => {
 });
 
 describe("packages/worker/deploy/sudoers.d-automata", () => {
-  const sudoers = read(path.join(workerRoot, "deploy", "sudoers.d-automata"));
+  const sudoers = deployFile("sudoers.d-automata");
 
   it("carries SETENV on the daemon rule (without it sudo -E is refused)", () => {
     expect(sudoers).toMatch(/NOPASSWD:\s*SETENV:\s*AUTOMATA_DAEMON/);
@@ -93,11 +107,9 @@ describe("packages/worker/deploy/sudoers.d-automata", () => {
 });
 
 describe("packages/worker/deploy — PF wrapper, scripts and LaunchDaemon", () => {
-  const deploy = (f: string) => read(path.join(workerRoot, "deploy", f));
-
   it("the wrapper conf INCLUDES /etc/pf.conf rather than editing it", () => {
     // /etc/pf.conf is rewritten by OS updates; an edit there silently vanishes.
-    const wrapper = deploy("automata-pf.conf");
+    const wrapper = deployFile("automata-pf.conf");
     expect(wrapper).toMatch(/^include "\/etc\/pf\.conf"$/m);
     expect(wrapper).toMatch(/anchor "automata-egress"/);
     expect(wrapper).toMatch(
@@ -106,7 +118,7 @@ describe("packages/worker/deploy — PF wrapper, scripts and LaunchDaemon", () =
   });
 
   it("the LaunchDaemon loads the WRAPPER with -E, never -e", () => {
-    const plist = deploy("com.automata.pf.plist");
+    const plist = deployFile("com.automata.pf.plist");
     expect(plist).toContain("<string>-E</string>");
     expect(plist).not.toContain("<string>-e</string>");
     expect(plist).toContain("<string>/etc/automata-pf.conf</string>");
@@ -114,7 +126,7 @@ describe("packages/worker/deploy — PF wrapper, scripts and LaunchDaemon", () =
   });
 
   it("the preflight script refuses uid 501, an unsubstituted placeholder, and parses first", () => {
-    const preflight = deploy("pf-preflight.sh");
+    const preflight = deployFile("pf-preflight.sh");
     expect(preflight).toContain("__AGENT_UID__");
     expect(preflight).toMatch(/= "501" \] && fail/);
     expect(preflight).toMatch(/pfctl -n -f/);
@@ -126,14 +138,14 @@ describe("packages/worker/deploy — PF wrapper, scripts and LaunchDaemon", () =
   });
 
   it("the verify script checks BOTH that PF is enabled and that the anchor has rules", () => {
-    const verify = deploy("pf-verify.sh");
+    const verify = deployFile("pf-verify.sh");
     expect(verify).toMatch(/pfctl -s info/);
     expect(verify).toMatch(/Status: Enabled/);
     expect(verify).toMatch(/pfctl -a automata-egress -sr/);
   });
 
   it("the provisioning doc states the PF limits instead of overclaiming", () => {
-    const doc = deploy("AGENT-UID-PROVISIONING.md");
+    const doc = deployFile("AGENT-UID-PROVISIONING.md");
     expect(doc).toMatch(/TN3165/);
     expect(doc).toMatch(/15\.0–15\.3\.1|15\.0-15\.3\.1/);
     expect(doc).toMatch(/forwarded packets/);
@@ -150,7 +162,7 @@ describe("packages/worker/deploy — PF wrapper, scripts and LaunchDaemon", () =
     // staff, so a staff member traverses the operator's home and lists ~/.ssh,
     // ~/.claude and ~/Library/Keychains. If this assertion ever fails because
     // someone trimmed the doc, the boundary silently stops existing.
-    const doc = deploy("AGENT-UID-PROVISIONING.md");
+    const doc = deployFile("AGENT-UID-PROVISIONING.md");
     expect(doc).toMatch(/dseditgroup -o edit -d _automata-agent -t user staff/);
     expect(doc).toMatch(/dseditgroup -o create/);
     expect(doc).toMatch(/STILL IN STAFF/);
@@ -161,20 +173,18 @@ describe("packages/worker/deploy — PF wrapper, scripts and LaunchDaemon", () =
 });
 
 describe("#183: single worker unit", () => {
-  const deploy = (f: string) => read(path.join(workerRoot, "deploy", f));
-
   it("no deploy asset entry names the retired second unit", () => {
     const entries = fs.readdirSync(path.join(workerRoot, "deploy"));
     expect(entries.some((entry) => /worker-2/.test(entry))).toBe(false);
   });
 
   it("the runbook and provisioning doc no longer mention the second unit", () => {
-    expect(deploy("README.md")).not.toContain("worker-2");
-    expect(deploy("AGENT-UID-PROVISIONING.md")).not.toContain("worker-2");
+    expect(deployFile("README.md")).not.toContain("worker-2");
+    expect(deployFile("AGENT-UID-PROVISIONING.md")).not.toContain("worker-2");
   });
 
   it("the concurrency-cap citation points at definition.ts, not workflow.ts", () => {
-    const readme = deploy("README.md");
+    const readme = deployFile("README.md");
     expect(readme).not.toContain("src/agent-run/workflow.ts");
     const paragraphs = readme.split(/\n{2,}/);
     const capParagraph = paragraphs.find((p) => p.includes("GLOBAL_MAX_RUNS"));
@@ -183,7 +193,7 @@ describe("#183: single worker unit", () => {
   });
 
   it("only the single worker unit plist remains, and it declares the right label", () => {
-    const plist = deploy("com.automata.worker.plist");
+    const plist = deployFile("com.automata.worker.plist");
     expect(plist).toContain("com.automata.worker</string>");
   });
 });
@@ -241,9 +251,7 @@ describe("packages/worker/docker-compose.hatchet.prod.yml (#192)", () => {
 });
 
 describe("packages/worker/deploy/linux/cloud-init.yaml (#192)", () => {
-  const cloudInit = read(
-    path.join(workerRoot, "deploy", "linux", "cloud-init.yaml"),
-  );
+  const cloudInit = deployFile("linux", "cloud-init.yaml");
 
   it("provisions from ONE fail-fast script, not a list of runcmd entries", () => {
     // The first box built from this file came up with Node 18 and no pnpm
@@ -303,16 +311,612 @@ describe("packages/worker/deploy/linux/cloud-init.yaml (#192)", () => {
   });
 });
 
-describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () => {
-  const linux = (f: string) =>
-    read(path.join(workerRoot, "deploy", "linux", f));
+/**
+ * Lines between the first two `---` lines, or [] when the file has no leading
+ * frontmatter block.
+ */
+function frontmatterLines(md: string): string[] {
+  const lines = md.split("\n");
+  if (lines[0] !== "---") return [];
+  const end = lines.indexOf("---", 1);
+  return end === -1 ? [] : lines.slice(1, end);
+}
 
+function readBatteriesManifest(): BatteriesManifest {
+  const parsed: unknown = JSON.parse(
+    read(path.join(repoRoot, BATTERIES_MANIFEST_REPO_PATH)),
+  );
+  const error = findBatteriesManifestError(parsed);
+  if (error !== undefined || !isBatteriesManifest(parsed)) {
+    throw new Error(`${BATTERIES_MANIFEST_REPO_PATH}: ${error}`);
+  }
+  return parsed;
+}
+
+describe("#batteries (phase 3): batteries.json", () => {
+  // The box installs exactly what this file pins (install-batteries.sh), and
+  // Phase 5 seeds runs from it. Reading it already runs the strict guard
+  // (shapes, content-address formats, licenses, forbidden names); the
+  // assertions below are the decisions the guard cannot know about, each
+  // expensive to research and cheap to undo in an unrelated edit.
+  const manifest = readBatteriesManifest();
+  const packById = (id: string) => {
+    const found = manifest.packs.find((p) => p.id === id);
+    if (found === undefined) throw new Error(`no pack ${id} in the manifest`);
+    return found;
+  };
+
+  it("lists exactly the shared REVIEW_BATTERY_PACK_IDS, in order", () => {
+    // The admin panel (Phase 4) offers these ids; a pack the box does not
+    // install, or an install the panel cannot select, is a silent no-op.
+    expect(manifest.packs.map((p) => p.id)).toEqual([
+      ...REVIEW_BATTERY_PACK_IDS,
+    ]);
+  });
+
+  it("keeps the researched pins", () => {
+    expect(packById("gstack-review").sha).toBe(
+      "fe6d1ae62a42e67bfb12b7f8e6143c705f375f38",
+    );
+    expect(packById("gsd-reviewers").sha).toBe(
+      "7dfeb7ad8acbd6febd2c8c6cf7d3dcb7d1aeb7b9",
+    );
+    const somnio = packById("somnio-review");
+    expect(somnio.repo).toBe("self");
+    expect(somnio.sha).toBe("e2716a48d0528a42cbb343307280069b2556680c");
+    expect(somnio.subpaths.map((s) => s.gitId)).toEqual([
+      "4d97eeeafb6c9f46ad62e3ed71d47416816f5341",
+    ]);
+  });
+
+  it("installs exactly shellcheck, actionlint and gitleaks; semgrep is dropped", () => {
+    expect(manifest.clis.map((c) => c.name)).toEqual([
+      "shellcheck",
+      "actionlint",
+      "gitleaks",
+    ]);
+    expect(manifest.dropped.map((d) => d.name)).toContain("semgrep");
+  });
+
+  it("vendors no cso, sections or upstream review SKILL.md", () => {
+    // Upstream review/SKILL.md's preamble can fall back to executing a
+    // PR-supplied script from the checkout; cso needs a native launcher.
+    // (Hooks, bin, plugin and settings paths are FORBIDDEN_NAMES in the guard.)
+    const forbidden = /(^|\/)(cso|sections)(\/|$)|review\/SKILL\.md/;
+    for (const pack of manifest.packs) {
+      for (const sub of pack.subpaths) {
+        expect(sub.src, pack.id).not.toMatch(forbidden);
+        expect(sub.dest, pack.id).not.toMatch(forbidden);
+      }
+    }
+  });
+
+  it("selects only the knowledge files of each pack", () => {
+    expect(
+      [...new Set(packById("gstack-review").subpaths.map((s) => s.src))].sort(),
+    ).toEqual(["LICENSE", "review/checklist.md", "review/specialists"]);
+    expect(packById("gsd-reviewers").subpaths.map((s) => s.src)).toEqual([
+      "agents/gsd-code-reviewer.md",
+      "agents/gsd-security-auditor.md",
+      "LICENSE",
+    ]);
+    const somnio = packById("somnio-review");
+    const excluded = somnio.subpaths.flatMap((s) => s.exclude ?? []);
+    expect(excluded).toContain("references/gemini-analysis.md");
+    expect(excluded).toContain("agents/gemini-analyzer.md");
+    // The skill's internal agents (model: opus, Write tools) must stay inside
+    // the skill dir; under agents/ they would register as user agents.
+    for (const sub of somnio.subpaths) {
+      expect(sub.dest).not.toMatch(/^agents\//);
+    }
+  });
+
+  it("allowlists exactly one helper reference, in the gstack checklist", () => {
+    // gstack checklist.md (blob 7692f35) names the decision-ledger helper
+    // once; the adapter declares that ledger unavailable. install-batteries.sh
+    // fails the pack on any other occurrence of a forbidden token, or on a
+    // different count after a pin bump.
+    expect(manifest.forbiddenHelperTokens).toEqual([
+      "gstack/bin",
+      "gstack-skill-start",
+    ]);
+    for (const pack of manifest.packs) {
+      if (pack.id === "gstack-review") continue;
+      expect(pack.allowedHelperRefs, pack.id).toBeUndefined();
+    }
+    expect(packById("gstack-review").allowedHelperRefs).toEqual([
+      {
+        file: "skills/gstack-review/checklist.md",
+        ref: "~/.claude/skills/gstack/bin/gstack-decision-search",
+        count: 1,
+      },
+    ]);
+  });
+
+  it("ships every overlay from this repo", () => {
+    for (const pack of manifest.packs) {
+      for (const overlay of pack.overlays ?? []) {
+        expect(
+          fs.existsSync(path.join(repoRoot, overlay.from)),
+          overlay.from,
+        ).toBe(true);
+      }
+    }
+  });
+});
+
+describe("#batteries (phase 3): gstack-review adapter skill", () => {
+  // The upstream interactive review skill is never installed; this adapter is
+  // what the review lane reads instead. It must stay read-only, helper-free
+  // and fence-free, and it must override two hazards in the pinned files.
+  const adapter = deployFile("batteries", "gstack-review", "SKILL.md");
+  const front = frontmatterLines(adapter);
+  const body = adapter
+    .split("\n")
+    .slice(front.length + 2)
+    .join("\n");
+
+  it("has a minimal frontmatter: name + description only, no grants", () => {
+    // allowed-tools in a skill GRANTS tools for the invoking turn in -p mode.
+    expect(front).toContain("name: gstack-review");
+    expect(front.some((l) => /^description:\s*\S/.test(l))).toBe(true);
+    for (const key of [
+      "allowed-tools:",
+      "hooks:",
+      "model:",
+      "context:",
+      "permissionMode:",
+      "mcpServers:",
+      "disable-model-invocation:",
+    ]) {
+      expect(
+        front.some((l) => l.startsWith(key)),
+        key,
+      ).toBe(false);
+    }
+  });
+
+  it("names no gstack helper, interactive-question tool or JSON fence", () => {
+    // Phase 2 Q7: a sub-agent's fenced JSON can become the last fence the
+    // review-intent parser reads, hijacking the lead's verdict.
+    for (const token of [
+      ...readBatteriesManifest().forbiddenHelperTokens,
+      "gstack-decision-search",
+      "AskUserQuestion",
+      "```json",
+    ]) {
+      expect(adapter, token).not.toContain(token);
+    }
+  });
+
+  it("reads the vendored checklist and specialists from its own dir", () => {
+    expect(body).toContain("${CLAUDE_SKILL_DIR}/checklist.md");
+    expect(body).toContain("${CLAUDE_SKILL_DIR}/specialists/");
+  });
+
+  it("is read-only and reports to the lead", () => {
+    expect(body).toMatch(/read-only/i);
+    expect(body).toMatch(/never (write|edit)/i);
+    expect(body).toMatch(/lead/);
+  });
+
+  it("treats decision-ledger markers as UNVERIFIED and never runs vendored commands", () => {
+    // checklist.md (blob 7692f35) tells the reader to resolve these markers
+    // with a gstack helper that is not, and must never be, installed.
+    expect(body).toMatch(/gstack-shortcut/);
+    expect(body).toMatch(/UNVERIFIED/);
+    expect(body).toMatch(/never run[^\n]*command[^\n]*(checklist|specialist)/i);
+  });
+
+  it("supersedes the specialists' JSON output format", () => {
+    // Every specialists/*.md line 4 says "Output: JSON objects … Schema:".
+    expect(body).toMatch(/(ignore|supersede)[^\n]*(output|schema)/i);
+  });
+
+  it("names the static CLIs in one place, the procedure", () => {
+    const split = body.indexOf("## Procedure");
+    expect(split).toBeGreaterThan(-1);
+    for (const cli of ["shellcheck", "actionlint", "gitleaks"]) {
+      expect(body.slice(split), cli).toContain(cli);
+      expect(body.slice(0, split), cli).not.toContain(cli);
+    }
+  });
+});
+
+/** Text from `name() {` to the next line that is exactly `}`. */
+function fnBody(script: string, name: string): string {
+  const start = script.indexOf(`\n${name}() {\n`);
+  if (start === -1) throw new Error(`function ${name}() not found`);
+  const end = script.indexOf("\n}\n", start + 1);
+  if (end === -1) throw new Error(`function ${name}() is not closed`);
+  return script.slice(start + 1, end + 2);
+}
+
+/** The script without its full-line `#` comments. */
+function code(script: string): string {
+  return script
+    .split("\n")
+    .filter((l) => !/^\s*#/.test(l))
+    .join("\n");
+}
+
+/** The single `NAME=...` line of the script. */
+function assignment(script: string, name: string): string {
+  const lines = script.split("\n").filter((l) => l.startsWith(`${name}=`));
+  if (lines.length !== 1 || lines[0] === undefined) {
+    throw new Error(`expected exactly one ${name}= line`);
+  }
+  return lines[0];
+}
+
+/**
+ * What decides the bytes install-batteries.sh writes into a pack dir, paired
+ * with the INSTALLER_OUTPUT_VERSION it was recorded for. Packs whose stamp
+ * holds the current version are SKIPPED, so a change here that ships without
+ * a version bump leaves boxes running packs built by the old code.
+ *
+ * When this test fails: if the change alters what lands in a pack dir, bump
+ * INSTALLER_OUTPUT_VERSION; either way, record the new hash it prints.
+ */
+const RECORDED_INSTALLER_OUTPUT = {
+  version: "1",
+  sha256: "7c5032e6d3eb73a7906451bffa44da49ada06d416b17a82f1f327eeb1e108852",
+};
+
+describe("#batteries (phase 3): install-batteries.sh", () => {
+  // The installer runs as root against a worker-writable checkout and
+  // fetches from the internet. Each assertion pins a safety property in the
+  // function that owns it, so a refactor cannot quietly move it out.
+  const scriptPath = path.join(
+    workerRoot,
+    "deploy",
+    "linux",
+    "install-batteries.sh",
+  );
+  const script = deployFile("linux", "install-batteries.sh");
+  const src = code(script);
+  const body = (name: string) => fnBody(script, name);
+
+  it("is an executable bash script with strict mode, umask and a neutral cwd", () => {
+    expect(fs.statSync(scriptPath).mode & 0o100).not.toBe(0);
+    const lines = script.split("\n");
+    expect(lines[0]).toBe("#!/bin/bash");
+    expect(lines[1]).toBe("set -euo pipefail");
+    expect(lines[2]).toBe("umask 022");
+    expect(src).toMatch(/^cd \/$/m);
+    expect(src).toContain("unset GIT_DIR");
+  });
+
+  it("refuses non-root, and dry-run knobs for root or the real prefix", () => {
+    expect(src).toContain("id -u");
+    expect(src).toContain("must run as root");
+    expect(src).toContain("dry-run knobs are refused for root");
+    expect(src).toContain("require a non-default PREFIX");
+    expect(src).toContain("pwd -P");
+  });
+
+  it("reads the manifest from the checkout's HEAD commit and re-checks its shapes", () => {
+    expect(src).toContain("packages/worker/deploy/batteries.json");
+    expect(src).toContain('cat-file blob "$HEAD_SHA:');
+    const preflight = body("preflight");
+    expect(preflight).toContain("jq -e");
+    expect(preflight).toContain("[a-z0-9][a-z0-9-]*");
+    expect(preflight).toContain("-{0,2}[a-z]+");
+    expect(preflight).toContain("safe_rel_path");
+    expect(preflight).toContain("check_vendored_path");
+    expect(body("safe_rel_path")).toContain("..");
+  });
+
+  it("re-checks the rules the TS guard has, so both validators agree", () => {
+    const preflight = body("preflight");
+    // duplicate pack ids / CLI names
+    expect(preflight).toContain("map(.id) | length == (unique | length)");
+    expect(preflight).toContain("map(.name) | length == (unique | length)");
+    // CLI url: the pinned version's release asset, for linux
+    expect(preflight).toContain('*"/releases/download/v$version/"*');
+    expect(preflight).toContain("*linux*");
+    // forbidden names, the same list as the guard
+    expect(body("has_forbidden_name")).toContain("FORBIDDEN_NAMES");
+    expect(assignment(script, "FORBIDDEN_NAMES")).toBe(
+      `FORBIDDEN_NAMES=(${FORBIDDEN_NAMES.join(" ")})`,
+    );
+    // helper allowlist shape, and a ref that names a forbidden token
+    expect(preflight).toContain("allowedHelperRefs");
+    expect(preflight).toContain("forbiddenHelperTokens");
+  });
+
+  it("rejects control characters before it reads any @tsv row", () => {
+    // Dry-run finding (first form): `jq -r` printed objects across lines and
+    // split every entry. Rows are now @tsv, split on tabs and newlines, so a
+    // control character inside a value could forge a field: the check must
+    // come FIRST.
+    const preflight = code(body("preflight"));
+    const controlCheck = preflight.indexOf('test("[\\u0000-\\u001f');
+    expect(controlCheck).toBeGreaterThan(-1);
+    expect(controlCheck).toBeLessThan(preflight.indexOf("| @tsv"));
+    expect(controlCheck).toBeLessThan(preflight.indexOf("read -r"));
+    expect(src).toContain("IFS=$'\\t' read -r");
+    expect(src).not.toMatch(/jq -c '\.(packs|clis)\[\]'/);
+  });
+
+  it("is generic over the manifest: no pack, CLI or helper is named in code", () => {
+    for (const name of [
+      "shellcheck",
+      "actionlint",
+      "gitleaks",
+      "gstack",
+      "somnio",
+      "gsd-",
+    ]) {
+      expect(src, name).not.toContain(name);
+    }
+  });
+
+  it("enforces the manifest's helper allowlist: exact count, nothing else", () => {
+    const verify = body("verify_staging");
+    expect(verify).toContain('helper_ref_rows "$i"');
+    expect(verify).toContain('[ "$n" != "$count" ]');
+    expect(verify).toContain("$HELPER_TOKENS");
+    expect(verify).toContain("grep -rlF");
+    expect(body("helper_ref_rows")).toContain(".allowedHelperRefs");
+  });
+
+  it("materialises content only through git object plumbing", () => {
+    // The checkout is worker-writable: porcelain honours .gitattributes and
+    // repo config, so its bytes need not match the pinned object ids.
+    const extract = body("extract_object");
+    expect(extract).toContain("ls-tree -r -z");
+    expect(extract).toContain("cat-file blob");
+    expect(extract).toContain("120000");
+    expect(extract).toContain("160000");
+    const stage = body("stage_pack");
+    expect(stage).toContain("extract_object ");
+    expect(stage).toContain("git_repo");
+    expect(stage).toContain("git_fetch");
+    expect(src).not.toContain("git archive");
+    expect(src).not.toContain("archive ");
+    expect(src).not.toMatch(/\bcp\b[^\n]*AUTOMATA_REPO/);
+    expect(stage).toContain('cat-file blob "$HEAD_SHA:');
+    expect(src).toContain("SOURCE checkout");
+  });
+
+  it("hardens every git call against the automata-owned checkout", () => {
+    const gitRepo = body("git_repo");
+    expect(gitRepo).toContain("safe.directory");
+    expect(gitRepo).toContain("core.fsmonitor=false");
+    expect(gitRepo).toContain("core.hooksPath=/dev/null");
+  });
+
+  it("checks a CLI's sha256 before anything reaches the bin dir", () => {
+    const cli = body("install_cli");
+    expect(cli).toContain("sha256sum -c");
+    expect(cli).toContain("curl -fsSL");
+    expect(cli).toContain("--proto '=https'");
+    expect(cli).toContain("tar -xzf");
+    expect(cli.indexOf("$BIN_DIR")).toBeGreaterThan(
+      cli.indexOf("sha256sum -c"),
+    );
+    expect(cli).toContain("mv -f");
+  });
+
+  it("fetches packs by sha, checks object ids before publishing, never prunes", () => {
+    const stage = body("stage_pack");
+    expect(stage).toContain("--filter=blob:none --depth 1");
+    expect(stage).toContain("FETCH_HEAD");
+    expect(body("extract_object")).toContain("rev-parse");
+    const pack = body("install_pack");
+    expect(pack.indexOf("stage_pack")).toBeLessThan(
+      pack.indexOf("publish_dir"),
+    );
+    expect(src).toContain("STALE");
+    expect(src).not.toMatch(/rm -rf "?\$\{?ROOT\}?\/[^"\n]*@/);
+  });
+
+  it("records a pack FAIL in one place, after removing the staging dir", () => {
+    const pack = body("install_pack");
+    expect(pack.match(/record "FAIL pack/g)).toHaveLength(2); // mktemp + the one path
+    expect(pack.indexOf('rm -rf "$stage"')).toBeLessThan(
+      pack.indexOf('record "FAIL pack $id: $STEP_ERROR"'),
+    );
+    expect(body("stage_pack")).not.toContain("record ");
+  });
+
+  it("publishes atomically when it can and documents the fallback window", () => {
+    const publish = body("publish_dir");
+    expect(publish).toContain("--exchange");
+    expect(publish).toMatch(/#[^\n]*run in flight/);
+  });
+
+  it("strips grant keys and re-verifies the staged tree", () => {
+    const grantKeys = assignment(script, "GRANT_KEYS_RE");
+    for (const key of [
+      "allowed-tools",
+      "hooks",
+      "permissionMode",
+      "mcpServers",
+    ]) {
+      expect(grantKeys, key).toContain(key);
+    }
+    const strip = body("strip_frontmatter");
+    const verify = body("verify_staging");
+    for (const fn of [strip, verify]) {
+      expect(fn).toContain('-v grant_re="$GRANT_KEYS_RE"');
+      expect(fn).toContain("line ~ grant_re");
+    }
+    expect(verify).toContain("FORBIDDEN_NAMES");
+    expect(verify).toContain("-type l");
+    expect(body("stage_pack").indexOf("strip_frontmatter")).toBeLessThan(
+      body("stage_pack").indexOf("verify_staging"),
+    );
+  });
+
+  it("stamps packs with INSTALLER_OUTPUT_VERSION, bumped with the code that shapes them", () => {
+    expect(body("pack_stamp_hash")).toContain("$INSTALLER_OUTPUT_VERSION");
+    expect(body("pack_stamp_hash")).toContain("$HELPER_TOKENS");
+    expect(src).not.toContain("SCRIPT_HASH");
+    expect(assignment(script, "INSTALLER_OUTPUT_VERSION")).toBe(
+      `INSTALLER_OUTPUT_VERSION=${RECORDED_INSTALLER_OUTPUT.version}`,
+    );
+    const shaping = [
+      assignment(script, "GRANT_KEYS_RE"),
+      assignment(script, "FORBIDDEN_NAMES"),
+      body("extract_object"),
+      body("strip_frontmatter"),
+      body("verify_staging"),
+    ].join("\n");
+    const actual = createHash("sha256").update(shaping).digest("hex");
+    expect(actual, `record sha256: "${actual}"`).toBe(
+      RECORDED_INSTALLER_OUTPUT.sha256,
+    );
+  });
+
+  it("forces root ownership and read-only modes", () => {
+    expect(src).toContain("chmod 0644");
+    expect(src).toContain("chmod 0755");
+    expect(src).toContain("chown -R root:root");
+    expect(src).not.toContain("IS_ROOT");
+  });
+
+  it("verifies through the real worker → sudo → agent spawn shape, values via env only", () => {
+    const verifyAs = body("verify_as_agent");
+    const verify = verifyAs + body("as_agent");
+    expect(verify).toMatch(/runuser -u "?\$\{?WORKER_USER\}?"? --/);
+    expect(verify).toMatch(
+      /\/usr\/bin\/sudo -n -u "?\$\{?AGENT_USER\}?"? -E -- \/bin\/sh -c/,
+    );
+    for (const token of [
+      "bash -lc",
+      "command -v",
+      "</dev/null",
+      "mktemp -d",
+      "BATTERIES_CHECK_NAME",
+      "! -readable",
+      "-writable",
+    ]) {
+      expect(verify, token).toContain(token);
+    }
+    // One spawn per CLI and one per pack: one call site in each loop.
+    expect(code(verifyAs).match(/\bas_agent '/g)).toHaveLength(2);
+    expect(verify).not.toMatch(
+      /bash -lc[^\n]*\$\{?(name|cli|args|path|pack)\b/,
+    );
+    expect(script).toContain('AGENT_USER="${AGENT_USER:-automata-agent}"');
+  });
+
+  it("invalidates manifest.sha256 first and rewrites it only on a clean run", () => {
+    const main = body("main");
+    const invalidate = main.indexOf("invalidate_manifest_hash");
+    const firstCli = main.indexOf("install_cli");
+    const verifyCall = main.indexOf("verify_as_agent");
+    const write = main.indexOf("write_manifest_hash");
+    expect(invalidate).toBeGreaterThan(-1);
+    expect(invalidate).toBeLessThan(firstCli);
+    expect(write).toBeGreaterThan(verifyCall);
+    expect(main.slice(verifyCall, write)).toMatch(/FAILURES"? -eq 0/);
+    expect(body("invalidate_manifest_hash")).toContain(
+      "manifest.sha256.invalid",
+    );
+  });
+
+  it("counts a FAIL line by its first word, whatever the argument split", () => {
+    // Dry-run finding: callers pass the whole line as ONE argument, so a
+    // `case "$1" in FAIL)` never matched — every failure was silently
+    // dropped, the run printed RESULT: PASS and wrote manifest.sha256.
+    const record = body("record");
+    expect(record).toContain('case "$*" in');
+    expect(record).toContain('"FAIL "*)');
+    expect(record).not.toMatch(/case "\$1" in/);
+  });
+
+  it("ends with a PASS/FAIL result and installs nothing from PyPI", () => {
+    expect(body("finish")).toContain("print_summary");
+    expect(body("on_exit")).toContain("print_summary");
+    expect(script).toContain("RESULT: PASS");
+    expect(script).toContain("RESULT: FAIL");
+    expect(src).toContain("exit 1");
+    expect(script).not.toContain("semgrep");
+    expect(script).not.toContain("pip install");
+  });
+
+  // The only two tests in this file that spawn a process: bash and
+  // shellcheck are local static checkers (no network, no sudo).
+  it("parses with bash -n", () => {
+    expect(() =>
+      execFileSync("bash", ["-n", scriptPath], { stdio: "pipe" }),
+    ).not.toThrow();
+  });
+
+  it("is shellcheck clean", (ctx) => {
+    if (
+      spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
+    ) {
+      ctx.skip();
+    }
+    const result = spawnSync("shellcheck", ["-s", "bash", scriptPath], {
+      encoding: "utf8",
+    });
+    expect(result.status, result.stdout).toBe(0);
+  });
+});
+
+describe("#batteries (phase 3): cloud-init + runbook", () => {
+  const cloudInit = deployFile("linux", "cloud-init.yaml");
+  const runbook = read(path.join(repoRoot, "deploy", "PILOT-RUNBOOK.md"));
+  const agentUidDoc = deployFile("AGENT-UID-PROVISIONING.md");
+  const RUNBOOK_SECTION = "Review batteries on the execution box (phase 3)";
+
+  it("never runs the installer at provisioning; it points at the runbook rollout", () => {
+    // The installer must run from a root-owned copy taken from a commit
+    // verified against the public origin, never from the worker-writable
+    // checkout, and on first boot that checkout is still empty.
+    expect(cloudInit).not.toMatch(/^\s*bash [^\n]*install-batteries\.sh/m);
+    expect(cloudInit).toContain("deploy/PILOT-RUNBOOK.md");
+    expect(cloudInit).toContain(RUNBOOK_SECTION);
+    expect(runbook).toContain(`## ${RUNBOOK_SECTION}`);
+  });
+
+  it("prints the batteries note only AFTER the base-provisioned sentinel", () => {
+    // The sentinel means the box is usable; manifest.sha256 is the separate
+    // batteries contract, written by the operator's rollout run.
+    const sentinel = cloudInit.indexOf(
+      "date -uIseconds > /usr/local/automata/.provisioned",
+    );
+    const note = cloudInit.indexOf(RUNBOOK_SECTION);
+    expect(sentinel).toBeGreaterThan(-1);
+    expect(note).toBeGreaterThan(sentinel);
+  });
+
+  it("documents the production step: a verified root-owned copy, never the stale provision script", () => {
+    for (const token of [
+      "install-batteries.sh",
+      "safe.directory",
+      "--ff-only",
+      "ls-remote",
+      "cat-file blob",
+      "manifest.sha256",
+      "RESULT: PASS",
+      "allowedHelperRefs",
+    ]) {
+      expect(runbook, token).toContain(token);
+    }
+    expect(runbook).toMatch(/do not re-run[^\n]*automata-provision\.sh/i);
+    expect(runbook).toMatch(/no worker restart/i);
+    expect(runbook).toMatch(/verify_as_agent[^\n]*(finding|bug)/i);
+    expect(runbook).toMatch(/semgrep[^\n]*dropped|dropped[^\n]*semgrep/i);
+  });
+
+  it("points Linux operators from the agent-uid doc to the battery install", () => {
+    expect(agentUidDoc).toContain("install-batteries.sh");
+  });
+});
+
+describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () => {
   it("the launcher ends in `exec node`, with nothing wrapping it", () => {
     // A `pnpm run` chain swallows SIGTERM at the top pnpm layer, so the signal
     // never reaches the worker and the drain silently breaks — live-verified on
     // macOS 2026-07-25, and systemd's MainPID has the same problem. The exec
     // must be the LAST line, not merely present somewhere.
-    const script = linux("run-worker.sh.template");
+    const script = deployFile("linux", "run-worker.sh.template");
     const lines = script.trimEnd().split("\n");
     expect(lines[lines.length - 1]).toBe(
       "exec node --import tsx src/hello/worker.ts",
@@ -324,7 +928,7 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
     // A `-dev` hatchet-lite image embeds a publicly known JWT signing key, so a
     // worker must never attach to one; and the worker consumes the daemon dist
     // at runtime, so a stale bundle is a wrong-code run, not a missing file.
-    const script = linux("run-worker.sh.template");
+    const script = deployFile("linux", "run-worker.sh.template");
     const gate = script.indexOf("assert-auth-enabled.sh");
     const build = script.indexOf("pnpm run daemon:build");
     // lastIndexOf on the FULL command: the header comment also says "exec node"
@@ -346,7 +950,7 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
     // must not change what the running worker's agents execute. Pin that the
     // block which writes the file also exports its path — same path, after the
     // install, inside the agent-uid branch, before the exec.
-    const script = linux("run-worker.sh.template");
+    const script = deployFile("linux", "run-worker.sh.template");
     const block = script.match(
       /^if \[ -n "\$\{WORKER_AGENT_USER:-\}" \]; then\n([\s\S]*?)^fi$/m,
     );
@@ -368,7 +972,7 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
     expect(script.match(/export WORKER_DAEMON_DIST=/g)).toHaveLength(1);
 
     // The macOS runbook's launcher snippet carries the same contract.
-    const readme = read(path.join(workerRoot, "deploy", "README.md"));
+    const readme = deployFile("README.md");
     expect(readme).toMatch(
       /install -m 0444 \S+ \/usr\/local\/automata\/daemon\/index\.js[^\n]*\n(?:\s*#[^\n]*\n)*\s*export WORKER_DAEMON_DIST=\/usr\/local\/automata\/daemon\/index\.js\n/,
     );
@@ -378,7 +982,7 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
     // KillMode=control-group SIGTERMs the agent and its daemon directly and
     // drops the in-flight review. `mixed` sends SIGTERM to MainPID alone and
     // lets the worker decide when its children die.
-    const unit = linux("automata-worker.service");
+    const unit = deployFile("linux", "automata-worker.service");
     expect(unit).toMatch(/^KillMode=mixed$/m);
     expect(unit).not.toMatch(/^KillMode=control-group$/m);
     expect(unit).toMatch(/^KillSignal=SIGTERM$/m);
@@ -394,13 +998,13 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
     // The worker spawns the agent under a DIFFERENT uid via sudo. Turning this
     // on reads like hardening and instead breaks the uid boundary the whole
     // egress fence is keyed on.
-    const unit = linux("automata-worker.service");
+    const unit = deployFile("linux", "automata-worker.service");
     expect(unit).toMatch(/^NoNewPrivileges=no$/m);
     expect(unit).not.toMatch(/^NoNewPrivileges=(yes|true)$/m);
   });
 
   it("runs as a service account, never root, and relaunches rate-limited", () => {
-    const unit = linux("automata-worker.service");
+    const unit = deployFile("linux", "automata-worker.service");
     expect(unit).toMatch(/^User=__USER__$/m);
     expect(unit).not.toMatch(/^User=root$/m);
     expect(unit).toMatch(/^Restart=always$/m);
@@ -409,9 +1013,7 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
 });
 
 describe("#192: the unit waits for the engine before the auth gate runs", () => {
-  const unit = read(
-    path.join(workerRoot, "deploy", "linux", "automata-worker.service"),
-  );
+  const unit = deployFile("linux", "automata-worker.service");
 
   it("gates start on engine readiness over loopback", () => {
     // `After=docker.service` orders against the daemon, not the compose stack's
@@ -440,9 +1042,6 @@ describe("#192: the unit waits for the engine before the auth gate runs", () => 
 });
 
 describe("#192: the unit's sandbox must not fence out the launcher's own writes", () => {
-  const linux = (f: string) =>
-    read(path.join(workerRoot, "deploy", "linux", f));
-
   it("every /usr path the launcher writes to is in ReadWritePaths", () => {
     // The bug this exists for: ProtectSystem=full remounts /usr read-only
     // inside the unit's namespace, and /usr/local/automata is under /usr. The
@@ -450,8 +1049,8 @@ describe("#192: the unit's sandbox must not fence out the launcher's own writes"
     // install fails "Read-only file system" the moment WORKER_AGENT_USER is
     // set — and never before, which is why it survived review of both files
     // read separately. Only comparing them catches it.
-    const unit = linux("automata-worker.service");
-    const script = linux("run-worker.sh.template");
+    const unit = deployFile("linux", "automata-worker.service");
+    const script = deployFile("linux", "run-worker.sh.template");
 
     const protectsUsr = /^ProtectSystem=(full|strict|yes|true)$/m.test(unit);
     if (!protectsUsr) return;
@@ -485,7 +1084,7 @@ describe("#192: the unit's sandbox must not fence out the launcher's own writes"
 
   it("the exception stays narrow — never all of /usr or /usr/local", () => {
     // Widening it hands the unit every other thing installed there.
-    const unit = linux("automata-worker.service");
+    const unit = deployFile("linux", "automata-worker.service");
     const rw = [...unit.matchAll(/^ReadWritePaths=(.+)$/gm)].flatMap((m) =>
       m[1] ? m[1].trim().split(/\s+/) : [],
     );
@@ -498,7 +1097,7 @@ describe("#192: the unit's sandbox must not fence out the launcher's own writes"
     // cloud-init runs as root, so a bare `install -d` leaves root:root and the
     // non-root worker gets EACCES — a second, independent cause of the same
     // failure, which survives fixing ReadWritePaths alone.
-    const ci = linux("cloud-init.yaml");
+    const ci = deployFile("linux", "cloud-init.yaml");
     const treeInstall = ci.match(
       /install -d[^\n]*(?:\\\n\s*)?[^\n]*\/usr\/local\/automata\b[^\n]*/,
     );
@@ -511,15 +1110,12 @@ describe("#192: the unit's sandbox must not fence out the launcher's own writes"
 });
 
 describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)", () => {
-  const linux = (f: string) =>
-    read(path.join(workerRoot, "deploy", "linux", f));
-
   it("the ruleset owns ONE table and never flushes the kernel's", () => {
     // Ubuntu's stock /etc/nftables.conf opens with `flush ruleset`, and Docker
     // keeps 34 chains in the kernel ruleset that it does NOT rebuild on demand.
     // A global flush here takes container networking — and on this box that is
     // the Hatchet engine and its Postgres — down with it.
-    const conf = linux("egress-nft.conf");
+    const conf = deployFile("linux", "egress-nft.conf");
     expect(conf).not.toMatch(/^\s*flush ruleset/m);
     expect(conf).toMatch(/^table inet automata_egress$/m);
     expect(conf).toMatch(/^delete table inet automata_egress$/m);
@@ -528,7 +1124,7 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
   it("fences tcp AND udp, so QUIC is not a hole", () => {
     // udp/443 is HTTP-3. A tcp-only rule leaves an https path that never meets
     // the cooperative proxy.
-    const conf = linux("egress-nft.conf");
+    const conf = deployFile("linux", "egress-nft.conf");
     expect(conf).toMatch(/meta skuid __AGENT_UID__ tcp dport \{ 80, 443 \}/);
     expect(conf).toMatch(/meta skuid __AGENT_UID__ udp dport \{ 80, 443 \}/);
   });
@@ -536,7 +1132,7 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
   it("accepts loopback and never sets a drop policy on output", () => {
     // The per-run proxy, both brokers and the engine are all on 127.0.0.1. A
     // drop policy on the output hook fences the whole box, sshd included.
-    const conf = linux("egress-nft.conf");
+    const conf = deployFile("linux", "egress-nft.conf");
     expect(conf).toMatch(/oif "lo" accept/);
     expect(conf).toMatch(/policy accept;/);
     expect(conf).not.toMatch(/policy drop;/);
@@ -550,7 +1146,7 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
     // Fencing either kills the control-plane poll, the git broker's upstream
     // fetch and the credential pull — every run on the box — and both are one
     // typo from the agent uid.
-    const pre = linux("nft-preflight.sh");
+    const pre = deployFile("linux", "nft-preflight.sh");
     expect(pre).toMatch(/refusing to fence uid 0/);
     expect(pre).toMatch(/refusing to fence the worker's own uid/);
     expect(pre).toMatch(/__AGENT_UID__.*unrendered|unrendered/);
@@ -559,7 +1155,7 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
   });
 
   it("the sudoers rule drops to the role account, never root or ALL", () => {
-    const sudoers = linux("sudoers.d-automata");
+    const sudoers = deployFile("linux", "sudoers.d-automata");
     const rules = sudoers
       .split("\n")
       .filter((l) => !l.startsWith("#") && l.includes("NOPASSWD"));
@@ -577,16 +1173,14 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
   it("uses the usr-merged command paths Linux actually resolves", () => {
     // /bin is a symlink to /usr/bin on Ubuntu, and /usr/bin/kill is procps'
     // binary — `command -v kill` reports the shell builtin and misleads.
-    const sudoers = linux("sudoers.d-automata");
+    const sudoers = deployFile("linux", "sudoers.d-automata");
     expect(sudoers).toMatch(/AUTOMATA_DAEMON = \/usr\/bin\/sh/);
     expect(sudoers).toMatch(/AUTOMATA_KILL\s+= \/usr\/bin\/kill/);
   });
 });
 
 describe("packages/worker/deploy/linux — engine backup (#192)", () => {
-  const linux = (f: string) =>
-    read(path.join(workerRoot, "deploy", "linux", f));
-  const script = linux("automata-engine-backup.sh");
+  const script = deployFile("linux", "automata-engine-backup.sh");
 
   it("verifies the dump before keeping it, and writes via a temp name", () => {
     // The classic silent failure is a job that "succeeds" for months into a
@@ -623,22 +1217,21 @@ describe("packages/worker/deploy/linux — engine backup (#192)", () => {
   });
 
   it("the unit fails loudly rather than retrying into silence", () => {
-    const unit = linux("automata-engine-backup.service");
+    const unit = deployFile("linux", "automata-engine-backup.service");
     expect(unit).toMatch(/^Type=oneshot$/m);
     expect(unit).not.toMatch(/^Restart=/m);
     expect(unit).toMatch(/^TimeoutStartSec=\d+$/m);
   });
 
   it("the timer catches up a run missed while the box was down", () => {
-    const timer = linux("automata-engine-backup.timer");
+    const timer = deployFile("linux", "automata-engine-backup.timer");
     expect(timer).toMatch(/^Persistent=true$/m);
     expect(timer).toMatch(/^OnCalendar=/m);
   });
 });
 
 describe("#192: cloud-init installs the agent the runs actually need", () => {
-  const ci = () =>
-    read(path.join(workerRoot, "deploy", "linux", "cloud-init.yaml"));
+  const ci = () => deployFile("linux", "cloud-init.yaml");
 
   it("installs the claude CLI system-wide, not into a user home", () => {
     // Omitted originally, and the box looked healthy for hours: dispatch worked,
@@ -670,14 +1263,11 @@ describe("#192: cloud-init installs the agent the runs actually need", () => {
 });
 
 describe("#192: the egress fence is loaded at boot, not by hand", () => {
-  const linux = (f: string) =>
-    read(path.join(workerRoot, "deploy", "linux", f));
-
   it("ships a unit, because `nft -f` does not survive a reboot", () => {
     // The fence was loaded by hand and nothing reloaded it at boot, so a reboot
     // would have left the agent uid with unrestricted egress while every log
     // line still said the box was fenced. Found by checking, not by an incident.
-    const unit = linux("automata-egress.service");
+    const unit = deployFile("linux", "automata-egress.service");
     expect(unit).toMatch(/^Type=oneshot$/m);
     expect(unit).toMatch(/^RemainAfterExit=yes$/m);
     expect(unit).toMatch(/nft-preflight\.sh/);
@@ -686,7 +1276,7 @@ describe("#192: the egress fence is loaded at boot, not by hand", () => {
 
   it("comes up BEFORE the worker accepts work", () => {
     // A worker that takes a run before the fence exists runs that one unfenced.
-    expect(linux("automata-egress.service")).toMatch(
+    expect(deployFile("linux", "automata-egress.service")).toMatch(
       /^Before=automata-worker\.service$/m,
     );
   });
@@ -699,7 +1289,7 @@ describe("#192: the egress fence is loaded at boot, not by hand", () => {
     // whole-file match reads that explanation as the thing it warns about.
     // (Third time this session a comment mentioning the forbidden string broke
     // one of my own assertions.)
-    const unit = linux("automata-egress.service");
+    const unit = deployFile("linux", "automata-egress.service");
     const execStop = unit.match(/^ExecStop=.*$/m)?.[0] ?? "";
     expect(execStop).toMatch(/delete table inet automata_egress/);
     expect(execStop).not.toMatch(/flush ruleset/);
@@ -707,9 +1297,6 @@ describe("#192: the egress fence is loaded at boot, not by hand", () => {
 });
 
 describe("#204: the unit delegates a cgroup subtree, narrowly", () => {
-  const linux = (f: string) =>
-    read(path.join(workerRoot, "deploy", "linux", f));
-
   it("delegates exactly the two controllers, and ONLY from the opt-in drop-in", () => {
     // `Delegate=yes` would hand the worker every controller for no gain. The
     // narrow form is the whole reason this needs no privilege elsewhere.
@@ -717,10 +1304,15 @@ describe("#204: the unit delegates a cgroup subtree, narrowly", () => {
     // And it lives in the drop-in, not the base unit: delegation is useless
     // without relaxing ProtectControlGroups, so shipping it in the base would
     // mean relaxing hardening on every box, including ones that never cap a run.
-    const dropin = linux("automata-worker.service.d/10-ceiling.conf");
+    const dropin = deployFile(
+      "linux",
+      "automata-worker.service.d/10-ceiling.conf",
+    );
     expect(dropin).toMatch(/^Delegate=memory pids$/m);
     expect(dropin).not.toMatch(/^Delegate=(yes|true)$/m);
-    expect(linux("automata-worker.service")).not.toMatch(/^Delegate=/m);
+    expect(deployFile("linux", "automata-worker.service")).not.toMatch(
+      /^Delegate=/m,
+    );
   });
 
   it("records why a transient scope was not used, WITH the delegation", () => {
@@ -728,15 +1320,17 @@ describe("#204: the unit delegates a cgroup subtree, narrowly", () => {
     // it. The measurement that killed it belongs next to the line that replaced
     // it, or the next person repeats the polkit discovery from scratch — so it
     // travelled into the drop-in with `Delegate=`, not left behind in the unit.
-    const dropin = linux("automata-worker.service.d/10-ceiling.conf");
+    const dropin = deployFile(
+      "linux",
+      "automata-worker.service.d/10-ceiling.conf",
+    );
     expect(dropin).toMatch(/polkit/i);
     expect(dropin).toMatch(/systemd-run/);
   });
 });
 
 describe("#204: hardening must not fence out the delegated subtree", () => {
-  const unitFile = () =>
-    read(path.join(workerRoot, "deploy", "linux", "automata-worker.service"));
+  const unitFile = () => deployFile("linux", "automata-worker.service");
 
   it("the base unit KEEPS ProtectControlGroups; only the drop-in relaxes it", () => {
     // `ProtectControlGroups=yes` remounts /sys/fs/cgroup read-only inside the
@@ -750,14 +1344,10 @@ describe("#204: hardening must not fence out the delegated subtree", () => {
     // the ceiling must not pay for it: the base unit stays hardened, and the
     // relaxation is confined to the drop-in that a ceiling-enabled box installs.
     expect(unitFile()).toMatch(/^ProtectControlGroups=yes$/m);
-    const dropin = read(
-      path.join(
-        workerRoot,
-        "deploy",
-        "linux",
-        "automata-worker.service.d",
-        "10-ceiling.conf",
-      ),
+    const dropin = deployFile(
+      "linux",
+      "automata-worker.service.d",
+      "10-ceiling.conf",
     );
     expect(dropin).toMatch(/^ProtectControlGroups=no$/m);
     // Delegation is inert without the relaxation, so they must travel together.

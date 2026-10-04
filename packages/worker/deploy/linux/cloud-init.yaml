@@ -223,5 +223,13 @@ write_files:
       date -uIseconds > /usr/local/automata/.provisioned
       echo "automata execution plane base ready"
 
+      # ── review batteries (phase 3) ───────────────────────────────────────
+      # Not installed here: on first boot /opt/automata-platform is the empty
+      # dir created above, and the installer must run from a root-owned copy
+      # taken from a commit verified against the public origin, never from the
+      # worker-writable checkout. The batteries contract is
+      # /usr/local/lib/automata-batteries/manifest.sha256, not .provisioned.
+      echo "batteries: not installed at provisioning — follow deploy/PILOT-RUNBOOK.md, \"Review batteries on the execution box (phase 3)\", once the checkout lands"
+
 runcmd:
   - [/usr/local/sbin/automata-provision.sh]

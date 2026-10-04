@@ -278,6 +278,17 @@ ready" (an ACE did not land), "not allowed to preserve the environment"
 did not run — it must precede every bind), and zero daemon events with a live
 daemon (the proxy-aware daemon bundle is not the one deployed).
 
+### Linux boxes: review batteries
+
+On a Linux execution box the review batteries (pinned skill/agent packs and the
+shellcheck / actionlint / gitleaks CLIs) are installed by
+`packages/worker/deploy/linux/install-batteries.sh`, run as root. It is not part
+of the macOS #108 steps above. The script verifies its own install through the
+same worker → sudo → agent spawn shape that G2/G3 exercise. The procedure (a
+root-owned copy of the script taken from the verified HEAD commit, the
+no-run-in-flight preflight, and rollback) is in `deploy/PILOT-RUNBOOK.md`,
+section "Review batteries on the execution box (phase 3)".
+
 ---
 
 ## PF honesty — required reading before this is cited as a control
