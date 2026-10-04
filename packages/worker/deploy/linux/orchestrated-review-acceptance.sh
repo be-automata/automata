@@ -22,6 +22,8 @@ set -euo pipefail
 #
 #   orchestrated-review-acceptance.sh github --repo <owner/name> --pr <n> \
 #       --head-sha <40 hex> --since <YYYY-MM-DDTHH:MM:SSZ> --bot <login>
+#       (--bot matches the login with or without GitHub's "[bot]" suffix, so
+#       a plain app login can never make the zero-comments check undercount)
 #       From the operator's laptop (gh + jq, GETs only): the bot posted exactly
 #       ONE review on --head-sha, no bot conversation comment and no stray bot
 #       review comment since --since, the PR head is still --head-sha (the run
@@ -437,7 +439,7 @@ analyse_github() {
   fi
 
   on_head="$(jq --arg bot "$bot" --arg head "$head" \
-    '[.[] | select(.user.login == $bot and .commit_id == $head)] | length' "$reviews")"
+    '[.[] | select((.user.login == $bot or .user.login == ($bot + "[bot]")) and .commit_id == $head)] | length' "$reviews")"
   if [ "$on_head" != "1" ]; then
     check "SC2 exactly one review on head" FAIL "($on_head bot reviews on $head)"
     check "SC2 review latency within budget" FAIL "(no single review on head)"
@@ -446,7 +448,7 @@ analyse_github() {
     # One lookup, three fields joined by US (0x1f, non-whitespace so an empty
     # field cannot shift the others).
     fields="$(jq -r --arg bot "$bot" --arg head "$head" \
-      '[.[] | select(.user.login == $bot and .commit_id == $head)][0] | [.id, .state, .submitted_at] | map(tostring) | join("\u001f")' "$reviews")"
+      '[.[] | select((.user.login == $bot or .user.login == ($bot + "[bot]")) and .commit_id == $head)][0] | [.id, .state, .submitted_at] | map(tostring) | join("\u001f")' "$reviews")"
     IFS=$'\x1f' read -r review_id state submitted <<<"$fields"
     latency="$(jq -n --arg at "$submitted" --argjson since "$since" '($at | fromdateiso8601) - $since')"
     evidence "review id" "$review_id"
@@ -462,9 +464,9 @@ analyse_github() {
   fi
 
   stray_issue="$(jq --arg bot "$bot" --argjson since "$since" \
-    '[.[] | select(.user.login == $bot and (.created_at | fromdateiso8601) >= $since)] | length' "$issue_comments")"
+    '[.[] | select((.user.login == $bot or .user.login == ($bot + "[bot]")) and (.created_at | fromdateiso8601) >= $since)] | length' "$issue_comments")"
   stray_review="$(jq --arg bot "$bot" --argjson since "$since" --arg rid "$review_id" \
-    '[.[] | select(.user.login == $bot and (.created_at | fromdateiso8601) >= $since and ((.pull_request_review_id | tostring) != $rid))] | length' "$review_comments")"
+    '[.[] | select((.user.login == $bot or .user.login == ($bot + "[bot]")) and (.created_at | fromdateiso8601) >= $since and ((.pull_request_review_id | tostring) != $rid))] | length' "$review_comments")"
   evidence "bot conversation comments since --since" "$stray_issue"
   evidence "bot review comments outside the one review" "$stray_review"
   if [ "$stray_issue" = "0" ] && [ "$stray_review" = "0" ]; then

@@ -725,6 +725,7 @@ describe("analyse_github (sourced, fixture JSON)", () => {
     reviews = [review()] as unknown[],
     issueComments = [] as unknown[],
     reviewComments = [] as unknown[],
+    bot = BOT,
   } = {}) {
     return withFiles(
       {
@@ -741,7 +742,7 @@ describe("analyse_github (sourced, fixture JSON)", () => {
           p["review_comments.json"]!,
           HEAD,
           String(SINCE),
-          BOT,
+          bot,
         ]),
     );
   }
@@ -766,6 +767,20 @@ describe("analyse_github (sourced, fixture JSON)", () => {
     expect(out).toContain("EVIDENCE review state: CHANGES_REQUESTED");
     expect(out).toContain(`EVIDENCE review submitted_at: ${iso(900)}`);
     expect(out).toContain("EVIDENCE review latency seconds: 900");
+  });
+
+  it("--bot without the [bot] suffix still finds the app's review", () => {
+    const out = analyse({ bot: "automata-ai-bot" });
+    expect(out).toContain("CHECK SC2 exactly one review on head: PASS");
+    expect(out).toContain("FAILURES=0");
+  });
+
+  it("--bot without the [bot] suffix still counts the app's stray comments", () => {
+    const out = analyse({
+      bot: "automata-ai-bot",
+      issueComments: [{ user: { login: BOT }, created_at: iso(30) }],
+    });
+    expect(out).toContain("CHECK SC2 zero bot comments: FAIL");
   });
 
   it.each<[string, Parameters<typeof analyse>[0]]>([
