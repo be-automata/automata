@@ -113,7 +113,7 @@ export function workflowActionsPinned(yaml: string, key?: string): boolean {
   return usesRefs(yaml)
     .filter(
       (u) =>
-        key === undefined || u.action === key || u.action.startsWith(`${key}/`),
+        key === undefined || u.action === key || u.action.startsWith(key + "/"),
     )
     .every((u) => u.ref !== null && FULL_SHA.test(u.ref));
 }
