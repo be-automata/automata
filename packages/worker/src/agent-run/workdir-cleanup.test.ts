@@ -206,6 +206,14 @@ describe("cleanupWorkdir", () => {
   });
 });
 
+describe("HAND_BACK_SCRIPT shape", () => {
+  it("leaves the worker's cwd before find (the agent uid cannot enter it; GNU find then aborts)", () => {
+    // Reproduced on the box: without `cd /`, find exits 1 with "Failed to
+    // restore initial working directory" and chmods nothing.
+    expect(HAND_BACK_SCRIPT.startsWith("cd / && find ")).toBe(true);
+  });
+});
+
 describe("HAND_BACK_SCRIPT (real sh, as the current user)", () => {
   let root: string;
 

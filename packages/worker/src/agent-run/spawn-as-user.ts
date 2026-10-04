@@ -245,9 +245,14 @@ export function buildKillAllAsAgentInvocation(opts: {
  * walking, `-xdev` stays on the workdir's filesystem, and `! -type l` keeps
  * chmod (which DOES follow a symlink named on its command line) from reaching
  * a link's target outside the run.
+ *
+ * `cd /` first: sudo keeps the worker's cwd, which the agent uid usually cannot
+ * enter, and GNU find aborts ("Failed to restore initial working directory")
+ * before touching anything — reproduced on the box, where it left every file
+ * locked.
  */
 export const HAND_BACK_SCRIPT =
-  'find "$1" -xdev -user "$(id -un)" ! -type l -exec chmod g+rwX {} +';
+  'cd / && find "$1" -xdev -user "$(id -un)" ! -type l -exec chmod g+rwX {} +';
 
 /**
  * Build the hand-back invocation. `agentUser` empty ⇒ null: there is no agent
