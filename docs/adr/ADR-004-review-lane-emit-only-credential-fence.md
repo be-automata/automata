@@ -249,6 +249,80 @@ fence verbatim (spike q4sub).
 **Rollback.** Set the repo/org review mode back to classic in Settings → Review. Classic
 argv/env/HOME are byte-identical to before this amendment.
 
+## Amendment 2026-10-04 (phase 7) — read-only task token
+
+**What changes.** A TASK run (manual, scheduled or mention; never a review) may hold a real GitHub
+credential in its agent env: a read-only, single-repo, ≤1h GitHub App installation token in
+`GITHUB_TOKEN`. It gets one only when an admin-selected pack (Settings → Review → Task agent packs)
+declares `requires: ["github-read-token"]` in `packages/worker/deploy/batteries.json`. Today only
+`somnio-skills` declares it. Selecting the pack IS the opt-in (D1); there is no extra toggle and no
+env var.
+
+**Why.** The vendored `skills/dora-metrics/scripts/dora_metrics.py` (somnio-ai-tools @ aa53f071)
+hard-codes `API_ROOT = "https://api.github.com"` and reads `GITHUB_TOKEN`, then `gh auth token`.
+Under the credential broker both yield the per-run bearer, which GitHub rejects with 401. A loopback
+forwarder would need the vendored code patched (rejected), and a CONNECT proxy cannot rewrite a
+header inside TLS.
+
+**Token shape.** `getReadOnlyInstallationToken` (`packages/shared/src/github-app.ts`) POSTs
+`/app/installations/{id}/access_tokens` with exactly
+`{ repositories: [repo], permissions: { contents: "read", metadata: "read", pull_requests: "read", issues: "read" } }`.
+The body has no write or admin key, by construction. GitHub caps installation tokens at one hour.
+
+**Where it flows.**
+
+- www mints the token at dispatch, ONLY for a non-review org dispatch whose resolved task packs
+  require it. It ships the token in the Hatchet run input as the secret `githubReadToken`, handled
+  exactly like `installationToken` (never logged), plus the non-secret `githubReadTokenExpiresAt`.
+- A mint failure dispatches without the token and logs one warn line (message only, redacted).
+
+**Worker gate (`readTokenForRun`, `packages/worker/src/agent-run/workflow.ts`).** The token reaches
+the agent only when ALL of these hold:
+
+1. the run is not the review lane;
+2. the task-pack gate seeded, seeding succeeded, and a seeded pack's OWN manifest entry requires
+   `github-read-token`;
+3. the token was delivered;
+4. `githubReadTokenExpiresAt` is more than one minute away (in the past or unparseable fails
+   closed);
+5. the run is brokered.
+
+**gh and git stay brokered.**
+
+- `GH_TOKEN` stays the per-run broker bearer. gh prefers `GH_TOKEN` over `GITHUB_TOKEN`, so gh still
+  reaches the gh broker over its unix socket.
+- git stays on the git broker (`url.insteadOf` + bearer).
+- Every other run's env is byte-identical to before: no requiring pack, review lane, token absent or
+  expired, or legacy unbrokered.
+
+**The review lane is untouched.** www never mints for a review dispatch. The worker gate refuses a
+forged `githubReadToken` on the review lane, and the daemon's review-mode `stripGithubCredentials`
+still removes `GH_TOKEN`/`GITHUB_TOKEN` on top. The invariant of this ADR stands: no write credential
+ever reaches an agent, and a review agent holds no GitHub credential at all.
+
+**Residual risks, accepted for a read-only, single-repo, ≤1h token:**
+
+1. The token sits in the Hatchet run input, exactly like `installationToken`. Anyone who can read
+   run inputs in the engine can read it while it is valid.
+2. The agent runs with skip-permissions and can print its env. Anything it prints lands in the
+   transcript, which the control plane stores. A leaked token can read that one repository (code,
+   issues, PR metadata) for at most an hour. That is no more than the agent already has from its
+   clone, plus issue and PR metadata.
+
+**Pinned by tests.**
+
+| Concern                         | Test                                                                                                                                                                                                      |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Minter body                     | `packages/shared/src/github-app.test.ts`: exactly four `read` permissions + `[repo]`, no write/admin, no `expires_at`                                                                                     |
+| Dispatch gating and log hygiene | `apps/www/src/agent/hatchet/dispatch.test.ts`: minted only for a requiring pack; never on review or no-org; read token ≠ installation token; mint failure degrades; no console argument carries the token |
+| Manifest/shared parity          | `deploy-assets.test.ts` (`requires` == `BATTERY_PACK_REQUIRES`, executed bash/TS parity) and `batteries-manifest.test.ts`                                                                                 |
+| Env matrix                      | `daemon-env.test.ts`: brokered + token ⇒ only `GITHUB_TOKEN` changes; otherwise byte-identical; legacy ignores it                                                                                         |
+| Gate and expiry                 | `workflow-cleanup.test.ts`: `readTokenForRun` units plus run-fn cases (applied, expired, not delivered, non-requiring, seed unavailable, forged on review, legacy); no log line carries the token         |
+| Real gh                         | `broker-integration.test.ts`: real `gh api` with `GITHUB_TOKEN` = read token still reaches the gh broker with the bearer, and `gh auth token` prints only the bearer                                      |
+
+**Rollback.** Clear the pack from Task agent packs, or drop `requires` from the manifest entry. Task
+runs then get today's env (bearer in both `GH_TOKEN` and `GITHUB_TOKEN`).
+
 ## Options considered
 
 - **Strip credentials from the review env (chosen)** vs a scoped read-only token. Chosen: absence is
