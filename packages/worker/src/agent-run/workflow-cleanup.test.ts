@@ -1240,8 +1240,21 @@ describe("review agent wire + batteries line (Phase 5)", () => {
       batteries,
     });
     const c = ctx();
+    // A real review dispatch always carries prKey + supersedePolicy, which
+    // is what puts the run in the review lane.
+    const reviewInput = {
+      ...INPUT,
+      prNumber: 7,
+      prKey: "org-1/o/r/7",
+      supersedePolicy: "newest-wins",
+    };
     await expect(
-      runFn(reviewAgent === undefined ? INPUT : { ...INPUT, reviewAgent }, c),
+      runFn(
+        reviewAgent === undefined
+          ? reviewInput
+          : { ...reviewInput, reviewAgent },
+        c,
+      ),
     ).resolves.toMatchObject({ outcome: "completed" });
     expect(sendMessageCalls).toHaveLength(1);
     return {
@@ -1366,7 +1379,7 @@ describe("task agent packs + one batteries line per run (phase 7)", () => {
   ): Promise<{
     lines: string[];
     sent: Record<string, unknown>;
-    arg: { seed?: unknown };
+    arg: { seed?: unknown; foregroundOnly?: boolean };
   }> {
     materialiseAgentCredentials.mockResolvedValue({
       delivered: false,
@@ -1380,7 +1393,7 @@ describe("task agent packs + one batteries line per run (phase 7)", () => {
     });
     expect(sendMessageCalls).toHaveLength(1);
     const [arg] = materialiseAgentCredentials.mock.calls[0]! as [
-      { seed?: unknown },
+      { seed?: unknown; foregroundOnly?: boolean },
     ];
     return {
       lines: c.log.mock.calls.map((call) => String(call[0])),
@@ -1402,8 +1415,8 @@ describe("task agent packs + one batteries line per run (phase 7)", () => {
     expect(arg.seed).toEqual({
       batteries: ["somnio-skills"],
       hooksOff: false,
-      foregroundOnly: true,
     });
+    expect(arg.foregroundOnly).toBe(true);
     const bl = batteriesLines(lines);
     expect(bl).toHaveLength(1);
     expect(bl[0]).toMatch(
@@ -1443,8 +1456,8 @@ describe("task agent packs + one batteries line per run (phase 7)", () => {
     expect(arg.seed).toEqual({
       batteries: ["somnio-skills"],
       hooksOff: false,
-      foregroundOnly: true,
     });
+    expect(arg.foregroundOnly).toBe(true);
     const bl = batteriesLines(lines);
     expect(bl).toHaveLength(1);
     expect(bl[0]).toMatch(/\] batteries: lane=pr packs=somnio-skills /);
@@ -1459,7 +1472,9 @@ describe("task agent packs + one batteries line per run (phase 7)", () => {
     expect(rejected).toHaveLength(1);
     expect(rejected[0]).toContain("batteries[0]");
     expect(lines.join("\n")).not.toContain("Bad Id");
-    expect(foregroundLines(lines)).toEqual([]);
+    // Still a headless task run: the guard does not depend on packs.
+    expect(arg.foregroundOnly).toBe(true);
+    expect(foregroundLines(lines)).toHaveLength(1);
     const bl = batteriesLines(lines);
     expect(bl).toHaveLength(1);
     expect(bl[0]).toMatch(
@@ -1475,6 +1490,7 @@ describe("task agent packs + one batteries line per run (phase 7)", () => {
       taskAgent: { batteries: ["somnio-skills"] },
     });
     expect(arg.seed).toBeUndefined();
+    expect(arg.foregroundOnly).toBe(false);
     expect(
       lines.filter((l) => l.includes("task agent: ignored (review-lane)")),
     ).toHaveLength(1);
@@ -1484,10 +1500,13 @@ describe("task agent packs + one batteries line per run (phase 7)", () => {
     expect(bl[0]).toMatch(/\] batteries: mode=classic$/);
   });
 
-  it("no taskAgent: today's classic line, no task-agent line, today's message keys", async () => {
+  it("no taskAgent: today's classic line, the foreground-only guard, today's message keys", async () => {
     const { lines, sent, arg } = await run({});
     expect(arg.seed).toBeUndefined();
-    expect(lines.some((l) => l.includes("task agent:"))).toBe(false);
+    expect(arg.foregroundOnly).toBe(true);
+    expect(lines.filter((l) => l.includes("task agent:"))).toEqual([
+      expect.stringMatching(/\] task agent: foreground-only hook installed$/),
+    ]);
     const bl = batteriesLines(lines);
     expect(bl).toHaveLength(1);
     expect(bl[0]).toMatch(/\] batteries: mode=classic$/);

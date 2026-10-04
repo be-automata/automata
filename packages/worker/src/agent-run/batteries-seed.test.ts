@@ -20,6 +20,7 @@ import {
   computeBatteriesManifestHash,
   formatBatteriesLine,
   seedBatteries,
+  seedForegroundOnly,
   type SeedBatteriesOptions,
 } from "./batteries-seed";
 import { FOREGROUND_ONLY_PRE_TOOL_USE } from "./foreground-only-hook";
@@ -691,6 +692,48 @@ describe("seedBatteries foregroundOnly (task runs)", () => {
     expect(await fs.readFile(settingsPath(), "utf8")).toBe(
       '{"disableAllHooks":true}',
     );
+  });
+});
+
+describe("seedForegroundOnly (non-review runs without packs)", () => {
+  let fx: BatteriesFixture;
+  beforeEach(async () => {
+    fx = await makeBatteriesFixture();
+  });
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  it("writes only the guard (0644) and links nothing; idempotent", async () => {
+    const logs: string[] = [];
+    const opts = { log: (line: string) => logs.push(line) };
+    await seedForegroundOnly(fx.home, opts);
+    const claudeDir = path.join(fx.home, ".claude");
+    const settings = path.join(claudeDir, "settings.json");
+    expect(await listTree(claudeDir)).toEqual(["settings.json"]);
+    expect(JSON.parse(await fs.readFile(settings, "utf8"))).toEqual({
+      hooks: { PreToolUse: [...FOREGROUND_ONLY_PRE_TOOL_USE] },
+    });
+    expect((await fs.stat(settings)).mode & 0o777).toBe(0o644);
+    const first = await fs.readFile(settings, "utf8");
+    await seedForegroundOnly(fx.home, opts);
+    expect(await fs.readFile(settings, "utf8")).toBe(first);
+    expect(logs).toEqual([]);
+  });
+
+  it("grants .claude (dir) and settings.json (file) to the agent user on linux", async () => {
+    const calls: Array<{ args: string[] }> = [];
+    await seedForegroundOnly(fx.home, {
+      log: () => {},
+      agentUser: "agent",
+      platform: "linux",
+      aclExec: async (_file, args) => {
+        calls.push({ args });
+      },
+    });
+    const targets = calls.map((c) => c.args[2]);
+    expect(targets).toContain(path.join(fx.home, ".claude"));
+    expect(targets).toContain(path.join(fx.home, ".claude", "settings.json"));
   });
 });
 

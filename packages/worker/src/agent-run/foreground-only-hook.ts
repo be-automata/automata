@@ -1,5 +1,6 @@
 /**
- * Foreground-only guard for headless TASK runs.
+ * Foreground-only guard for every headless non-review run (task and pr
+ * lanes, with or without task packs; foregroundOnlyForRun decides).
  *
  * A task run is `claude -p`: when the agent ends its turn the session exits,
  * and background Bash (`run_in_background: true`) is killed about five seconds
@@ -11,8 +12,8 @@
  *
  * There is no CLI flag that disables only background Bash, and
  * `--disallowedTools` is ignored under `--dangerously-skip-permissions` (the
- * task lane's mode), but hooks still fire there. So the task-lane seed writes
- * a user-level PreToolUse hook into the per-run HOME that blocks (exit 2) a
+ * task lane's mode), but hooks still fire there. So every non-review run's
+ * HOME gets a user-level PreToolUse hook into the per-run HOME that blocks (exit 2) a
  * Bash call with `run_in_background: true` and every Monitor call.
  *
  * The commands are self-contained shell (no file in the PR checkout or the

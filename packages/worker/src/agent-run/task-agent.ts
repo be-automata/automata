@@ -85,21 +85,14 @@ export interface BatterySeed {
   batteries: readonly string[];
   /** true = an orchestrated review (settings.json disableAllHooks). */
   hooksOff: boolean;
-  /**
-   * Task runs only: install the foreground-only PreToolUse hooks (block
-   * background Bash and Monitor, which die when the headless session ends).
-   * Absent on review seeds, so their seed is unchanged.
-   */
-  foregroundOnly?: true;
 }
 
 /**
- * The run's battery seed, or undefined (HOME exactly as before). An
- * ORCHESTRATED review seeds its packs with hooks off; otherwise a task gate
- * that seeds links its packs with hooks on, plus the foreground-only
- * PreToolUse guard (the repo's own hooks keep today's semantics). The review
- * wins when both are
- * present (the dispatcher never sends both).
+ * The run's battery seed, or undefined (no packs linked). An ORCHESTRATED
+ * review seeds its packs with hooks off; otherwise a task gate that seeds
+ * links its packs with hooks on (the repo's own hooks keep today's
+ * semantics). The review wins when both are present (the dispatcher never
+ * sends both).
  */
 export function batterySeedForRun(
   reviewAgent: Pick<ReviewAgentShape, "mode" | "batteries"> | undefined,
@@ -109,13 +102,24 @@ export function batterySeedForRun(
     return { batteries: reviewAgent.batteries, hooksOff: true };
   }
   if (taskGate.kind === "seed" && taskGate.batteries.length > 0) {
-    return {
-      batteries: taskGate.batteries,
-      hooksOff: false,
-      foregroundOnly: true,
-    };
+    return { batteries: taskGate.batteries, hooksOff: false };
   }
   return undefined;
+}
+
+/**
+ * Whether the run's HOME gets the foreground-only PreToolUse guard (block
+ * background Bash and Monitor, which die when the headless session ends and
+ * leave a run "complete" with the work abandoned). EVERY non-review run is
+ * headless, so the guard does not depend on task packs. Review runs never
+ * get it: classic reviews keep an untouched HOME and orchestrated reviews
+ * keep their hooks-off settings exactly as before.
+ */
+export function foregroundOnlyForRun(
+  lane: RunLane,
+  seed: BatterySeed | undefined,
+): boolean {
+  return lane !== "review" && seed?.hooksOff !== true;
 }
 
 /** Why a run does NOT get the read-only task token (phase 7). */

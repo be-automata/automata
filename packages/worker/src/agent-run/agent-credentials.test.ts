@@ -318,16 +318,13 @@ describe("materialiseAgentCredentials (D1)", () => {
         expect((await fs.stat(cred)).mode & 0o777).toBe(0o600);
       });
 
-      it("a foregroundOnly task seed (batterySeedForRun's task shape): the guard is the ONLY settings content, 0644, credential intact", async () => {
+      it("a task seed with foregroundOnly: the guard is the ONLY settings content, 0644, credential intact", async () => {
         const result = await materialiseAgentCredentials({
           credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
           agent: "claudeCode",
           runRoot,
-          seed: {
-            batteries: ["somnio-skills"],
-            hooksOff: false,
-            foregroundOnly: true,
-          },
+          seed: { batteries: ["somnio-skills"], hooksOff: false },
+          foregroundOnly: true,
           batteries: batteries(),
         });
         expect(result.batteries).toMatchObject({ ok: true });
@@ -350,6 +347,28 @@ describe("materialiseAgentCredentials (D1)", () => {
         const cred = path.join(claudeDir, ".credentials.json");
         expect(await fs.readFile(cred, "utf8")).toBe('{"claudeAiOauth":{}}');
         expect((await fs.stat(cred)).mode & 0o777).toBe(0o600);
+      });
+
+      it("foregroundOnly WITHOUT a seed (a task run with no packs): guard only, no packs, no seed result", async () => {
+        const result = await materialiseAgentCredentials({
+          credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
+          agent: "claudeCode",
+          runRoot,
+          foregroundOnly: true,
+          batteries: batteries(),
+        });
+        expect(result.batteries).toBeUndefined();
+        expect(await listTree(result.home)).toEqual([
+          ".claude",
+          ".claude.json",
+          ".claude/.credentials.json",
+          ".claude/settings.json",
+        ]);
+        const settings = path.join(result.home, ".claude", "settings.json");
+        expect(JSON.parse(await fs.readFile(settings, "utf8"))).toEqual({
+          hooks: { PreToolUse: [...FOREGROUND_ONLY_PRE_TOOL_USE] },
+        });
+        expect((await fs.stat(settings)).mode & 0o777).toBe(0o644);
       });
 
       it("a hooks-on task seed with built-in-credits: links only, no settings.json", async () => {

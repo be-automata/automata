@@ -585,6 +585,33 @@ async function placeLink(
   return true;
 }
 
+/**
+ * The foreground-only guard alone, for a non-review run that links no packs:
+ * creates and grants `<home>/.claude` and merges the guard into its
+ * settings.json. No battery resolution, so the run's `batteries:` line and
+ * seed result stay exactly as before. Errors propagate (a real HOME fault).
+ */
+export async function seedForegroundOnly(
+  home: string,
+  opts: Pick<
+    SeedBatteriesOptions,
+    "agentUser" | "log" | "aclExec" | "platform"
+  >,
+): Promise<void> {
+  const users = opts.agentUser ? [opts.agentUser] : [];
+  const grant: Grant = (target, kind) =>
+    reapplyPathGrant({
+      target,
+      kind,
+      users,
+      exec: opts.aclExec,
+      platform: opts.platform,
+    });
+  const claudeDir = path.join(home, ".claude");
+  await ensureClaudeDir(claudeDir, grant);
+  await writeForegroundOnlySettings(claudeDir, grant, opts.log);
+}
+
 export async function seedBatteries(
   home: string,
   packIds: readonly string[],
