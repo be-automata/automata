@@ -672,6 +672,28 @@ async function handleThreadFinish({
       ),
     );
   }
+  // Phase 8: the audit lane has no PR number, so its hook is a SIBLING of the
+  // block above, never inside it. It no-ops for any thread that is not stamped
+  // with the audit-findings skill.
+  // Dynamic import: the audit writer (GitHub client, ledger, flag reads) loads
+  // only when a daemon event reaches this point, not with this module.
+  waitUntil(
+    import("@/server-lib/audit/audit-finish")
+      .then(({ handleAuditFindingsAtFinish }) =>
+        handleAuditFindingsAtFinish({
+          db,
+          userId,
+          threadId,
+          threadChatId,
+        }),
+      )
+      .catch((error) =>
+        console.error("[audit-findings] finish-hook failed (non-fatal)", {
+          threadId,
+          error,
+        }),
+      ),
+  );
 
   // ADR-003 F3 (S12 fix — DECOUPLED): the daemon token is NO LONGER revoked here.
   // Revoking at thread-finish let the background revoke beat the worker's next

@@ -52,10 +52,34 @@ export type TaskAgentShape = {
   batteries: string[];
 };
 
+/**
+ * Phase 8 self-heal audit run: one platform check per finding. Structural
+ * mirror of www `SelfHealRunInput`. `type` (not `interface`) for the same
+ * Hatchet JsonObject reason as AgentRunInput below.
+ */
+export type SelfHealCheckShape = {
+  fingerprint: string;
+  check: string;
+  subject: string;
+  key?: string;
+};
+
+export type SelfHealRunShape = {
+  kind: "audit";
+  checks: SelfHealCheckShape[];
+  /** SECRET, worker-only; never logged. */
+  checkToken: string;
+};
+
 // `type` (not `interface`): Hatchet's task input/output generics require an
 // implicit index signature (JsonObject), which TS infers for type-literal aliases
 // but not for interfaces.
 export type AgentRunInput = {
+  /**
+   * Structural mirror of www SelfHealRunInput; old workers ignore it. Phase 9
+   * adds a "fix" kind.
+   */
+  selfHeal?: SelfHealRunShape;
   threadId: string;
   threadChatId: string;
   repoFullName: string;

@@ -1,4 +1,5 @@
 import { createElement } from "react";
+import { SELF_HEAL_CLEAR_PATCH } from "@terragon/shared/model/self-heal-settings";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -29,6 +30,7 @@ function dto(
     reviewCommandTimeoutS: null,
     reviewMaxTurns: null,
     taskBatteries: null,
+    ...SELF_HEAL_CLEAR_PATCH,
     updatedAt,
     ...over,
   };

@@ -34,12 +34,23 @@ vi.mock(
   }),
 );
 
+const recordActionMock = vi.fn();
+vi.mock("@terragon/shared/model/self-heal-admin-log", () => ({
+  recordSelfHealAdminAction: (...args: unknown[]) => recordActionMock(...args),
+}));
+
 const captureMock = vi.fn();
 vi.mock("@/lib/posthog-server", () => ({
   getPostHogServer: () => ({ capture: captureMock }),
 }));
 
-vi.mock("@/lib/db", () => ({ db: {} }));
+vi.mock("@/lib/db", () => {
+  // The route writes the setting and its actor-log row in one transaction;
+  // the mock runs the callback with the same object so `db` identity holds.
+  const db: { transaction?: unknown } = {};
+  db.transaction = (fn: (tx: unknown) => unknown) => fn(db);
+  return { db };
+});
 
 const ORG = "org_1";
 const USER = "user_1";
@@ -77,6 +88,17 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       reviewCommandTimeoutS: null,
       reviewMaxTurns: null,
       taskBatteries: null,
+      selfHealMode: null,
+      selfHealKillSwitch: null,
+      selfHealMaxOpenIssues: null,
+      selfHealMaxAttempts: null,
+      selfHealCooldownMin: null,
+      selfHealMinSeverity: null,
+      selfHealAbsentAudits: null,
+      selfHealAutoLabel: null,
+      selfHealMaxDiffLines: null,
+      selfHealPrExpiryDays: null,
+      selfHealRunWindow: null,
       updatedByUserId: USER,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -166,6 +188,17 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       reviewCommandTimeoutS: null,
       reviewMaxTurns: null,
       taskBatteries: null,
+      selfHealMode: null,
+      selfHealKillSwitch: null,
+      selfHealMaxOpenIssues: null,
+      selfHealMaxAttempts: null,
+      selfHealCooldownMin: null,
+      selfHealMinSeverity: null,
+      selfHealAbsentAudits: null,
+      selfHealAutoLabel: null,
+      selfHealMaxDiffLines: null,
+      selfHealPrExpiryDays: null,
+      selfHealRunWindow: null,
       updatedByUserId: USER,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -197,6 +230,17 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       reviewCommandTimeoutS: null,
       reviewMaxTurns: null,
       taskBatteries: null,
+      selfHealMode: null,
+      selfHealKillSwitch: null,
+      selfHealMaxOpenIssues: null,
+      selfHealMaxAttempts: null,
+      selfHealCooldownMin: null,
+      selfHealMinSeverity: null,
+      selfHealAbsentAudits: null,
+      selfHealAutoLabel: null,
+      selfHealMaxDiffLines: null,
+      selfHealPrExpiryDays: null,
+      selfHealRunWindow: null,
       updatedByUserId: USER,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -268,6 +312,17 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       reviewCommandTimeoutS: null,
       reviewMaxTurns: null,
       taskBatteries: null,
+      selfHealMode: null,
+      selfHealKillSwitch: null,
+      selfHealMaxOpenIssues: null,
+      selfHealMaxAttempts: null,
+      selfHealCooldownMin: null,
+      selfHealMinSeverity: null,
+      selfHealAbsentAudits: null,
+      selfHealAutoLabel: null,
+      selfHealMaxDiffLines: null,
+      selfHealPrExpiryDays: null,
+      selfHealRunWindow: null,
       updatedByUserId: USER,
       createdAt: current,
       updatedAt: current,
@@ -404,6 +459,17 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
         reviewCommandTimeoutS: null,
         reviewMaxTurns: null,
         taskBatteries: null,
+        selfHealMode: null,
+        selfHealKillSwitch: null,
+        selfHealMaxOpenIssues: null,
+        selfHealMaxAttempts: null,
+        selfHealCooldownMin: null,
+        selfHealMinSeverity: null,
+        selfHealAbsentAudits: null,
+        selfHealAutoLabel: null,
+        selfHealMaxDiffLines: null,
+        selfHealPrExpiryDays: null,
+        selfHealRunWindow: null,
         updatedByUserId: USER,
         createdAt: current,
         updatedAt: current,
@@ -485,6 +551,70 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       const call = vi.mocked(upsertRepoReviewSetting).mock.calls[0]![0];
       expect(call.expectRowAbsent).toBe(true);
       expect(call.expectAbsentSupersedeOverride).toBeUndefined();
+    });
+  });
+
+  describe("self-heal fields (phase 8)", () => {
+    it("sets a field: upsert gets exactly that key, one settings_change log row with the actor", async () => {
+      const res = await PUT(putReq({ selfHealMode: "dry-run" }), { params });
+      expect(res.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({ patch: { selfHealMode: "dry-run" } }),
+      );
+      expect(recordActionMock).toHaveBeenCalledTimes(1);
+      expect(recordActionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          organizationId: ORG,
+          actorUserId: USER,
+          action: "settings_change",
+          target: { repoFullName: "acme/widgets", fields: ["selfHealMode"] },
+        }),
+      );
+    });
+
+    it("null clears the field and is logged", async () => {
+      const res = await PUT(putReq({ selfHealMaxAttempts: null }), { params });
+      expect(res.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({ patch: { selfHealMaxAttempts: null } }),
+      );
+      expect(recordActionMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      [{ selfHealMode: "auto" }, "selfHealMode"],
+      [{ selfHealKillSwitch: true }, "selfHealKillSwitch"],
+      [{ selfHealGateCommands: ["x"] }, "unknown field"],
+    ])("400 on %j, no upsert and no log row", async (body, needle) => {
+      const res = await PUT(putReq(body), { params });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain(needle);
+      expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
+      expect(recordActionMock).not.toHaveBeenCalled();
+    });
+
+    it("a mixed body upserts ONE merged patch; review-agent-only writes no self-heal log row", async () => {
+      await PUT(
+        putReq({ reviewMode: "orchestrated", selfHealMinSeverity: "high" }),
+        { params },
+      );
+      expect(upsertRepoReviewSetting).toHaveBeenCalledTimes(1);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({
+          patch: { reviewMode: "orchestrated", selfHealMinSeverity: "high" },
+        }),
+      );
+      expect(recordActionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: {
+            repoFullName: "acme/widgets",
+            fields: ["selfHealMinSeverity"],
+          },
+        }),
+      );
+      recordActionMock.mockClear();
+      await PUT(putReq({ reviewMode: "classic" }), { params });
+      expect(recordActionMock).not.toHaveBeenCalled();
     });
   });
 });

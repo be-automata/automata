@@ -6,6 +6,7 @@ import {
   pollUntilTerminal,
   postRunFailed,
   postRunTerminal,
+  postSelfHealAuditChecks,
   checkRunStaleness,
   pullAgentCredentials,
   CREDENTIAL_PULL_ATTEMPTS,
@@ -1005,5 +1006,100 @@ describe("pollUntilTerminal: the run was memory-starved", () => {
       noSleep,
     );
     expect(result.outcome).toBe("cancelled");
+  });
+});
+
+describe("postSelfHealAuditChecks (FORGE-01 / TMO-01)", () => {
+  const TOKEN = "CHECK_TOKEN_SENTINEL_123";
+  const RESULTS = [
+    { fingerprint: "0123456789abcdef", outcome: "pass" as const },
+  ];
+  const noSleep = vi.fn(async (_ms: number) => {});
+
+  function post(fetchImpl: typeof fetch, sleep = noSleep) {
+    return postSelfHealAuditChecks({
+      baseUrl: "https://www.example.com/",
+      checkToken: TOKEN,
+      threadId: "thread-1",
+      results: RESULTS,
+      fetchImpl,
+      sleep,
+    });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    noSleep.mockClear();
+  });
+
+  it("maps recorded true/false to recorded/duplicate", async () => {
+    const f1 = vi.fn(async () => jsonResponse(200, { recorded: true }));
+    expect(await post(f1 as unknown as typeof fetch)).toBe("recorded");
+    const f2 = vi.fn(async () => jsonResponse(200, { recorded: false }));
+    expect(await post(f2 as unknown as typeof fetch)).toBe("duplicate");
+  });
+
+  it.each([
+    [409, "sealed"],
+    [401, "error"],
+    [403, "error"],
+    [404, "error"],
+  ])("status %i is final (no retry) -> %s", async (status, expected) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = vi.fn(async () => jsonResponse(status, {}));
+    expect(await post(f as unknown as typeof fetch)).toBe(expected);
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a 503 after a 2 s backoff with the SAME token and never sends the daemon token", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(503, {}))
+      .mockResolvedValueOnce(jsonResponse(200, { recorded: true }));
+    expect(await post(f as unknown as typeof fetch)).toBe("recorded");
+    expect(noSleep).toHaveBeenCalledWith(2_000);
+    for (const call of f.mock.calls) {
+      const init = call[1] as RequestInit;
+      const h = init.headers as Record<string, string>;
+      expect(h["x-self-heal-check-token"]).toBe(TOKEN);
+      expect(h["x-daemon-token"]).toBeUndefined();
+      expect(call[0]).toBe(
+        "https://www.example.com/api/self-heal/audit-checks",
+      );
+    }
+  });
+
+  it("bounds each attempt with a 10 s abort signal, tries 3 times with 2/4 s backoff, then errors", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const f = vi.fn(async (_u: unknown, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      throw new DOMException("timed out", "TimeoutError");
+    });
+    expect(await post(f as unknown as typeof fetch)).toBe("error");
+    expect(f).toHaveBeenCalledTimes(3);
+    expect(noSleep.mock.calls.map((c) => c[0])).toEqual([2_000, 4_000]);
+  });
+
+  it("never logs the token", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await post(
+      vi.fn(async () => jsonResponse(503, {})) as unknown as typeof fetch,
+    );
+    await post(
+      vi.fn(async () => jsonResponse(404, {})) as unknown as typeof fetch,
+    );
+    await post(
+      vi.fn(async () => jsonResponse(401, {})) as unknown as typeof fetch,
+    );
+    const logged = JSON.stringify([
+      err.mock.calls,
+      warn.mock.calls,
+      log.mock.calls,
+    ]);
+    expect(logged).not.toContain(TOKEN);
   });
 });

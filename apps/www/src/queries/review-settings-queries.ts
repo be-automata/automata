@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import type { BlockTolerance } from "@terragon/review/severity-policy";
 import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
 import type { ReviewAgentValues } from "@terragon/shared/model/review-agent-settings";
+import type { SelfHealValues } from "@terragon/shared/model/self-heal-settings";
 import { findSettingByRepo } from "@/lib/review-settings-rows";
 import { ConflictError, errorFromResponse } from "./error-from-response";
 
@@ -14,7 +15,9 @@ import { ConflictError, errorFromResponse } from "./error-from-response";
  * default. Uses the app's react-query client the same way the other settings
  * queries do, just against a REST route instead of a server action.
  */
-export interface RepoReviewSettingDto extends ReviewAgentValues {
+export interface RepoReviewSettingDto
+  extends ReviewAgentValues,
+    SelfHealValues {
   repoFullName: string;
   blockTolerance: BlockTolerance;
   /** Tri-state: null = inherit (org sentinel → legacy filter → true). */
@@ -26,7 +29,9 @@ export interface RepoReviewSettingDto extends ReviewAgentValues {
 }
 
 /** Partial patch — send only the field(s) being changed (at least one). */
-export interface RepoReviewSettingPatch extends Partial<ReviewAgentValues> {
+export interface RepoReviewSettingPatch
+  extends Partial<ReviewAgentValues>,
+    Partial<SelfHealValues> {
   blockTolerance?: BlockTolerance;
   /** Explicit true/false sets an override; null clears it (inherit). */
   reviewDraftPrs?: boolean | null;

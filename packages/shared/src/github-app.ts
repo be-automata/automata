@@ -32,6 +32,18 @@ export function getGitHubApp(): App {
   return appInstance;
 }
 
+/** Optional per-call abort signal (self-heal passes a bounded one). */
+export interface GitHubCallOptions {
+  signal?: AbortSignal;
+}
+
+/** `{ request: { signal } }` only when a signal was given: callers without one are unchanged. */
+function requestSignal(options?: GitHubCallOptions): {
+  request?: { signal: AbortSignal };
+} {
+  return options?.signal ? { request: { signal: options.signal } } : {};
+}
+
 /** Rethrow a 404 from the installation lookup as the "not installed" error. */
 function notInstalledOr(error: unknown, owner: string, repo: string): Error {
   if (
@@ -54,6 +66,7 @@ function notInstalledOr(error: unknown, owner: string, repo: string): Error {
 export async function lookupInstallationId(
   owner: string,
   repo: string,
+  options?: GitHubCallOptions,
 ): Promise<number> {
   try {
     const { data: installation } = await getGitHubApp().octokit.request(
@@ -61,6 +74,7 @@ export async function lookupInstallationId(
       {
         owner,
         repo,
+        ...requestSignal(options),
       },
     );
     return installation.id;
@@ -81,13 +95,14 @@ export async function getInstallationToken(
   owner: string,
   repo: string,
   knownInstallationId?: number,
+  options?: GitHubCallOptions,
 ): Promise<string> {
   const app = getGitHubApp();
 
   try {
     // Get the installation for this repository
     const installationId =
-      knownInstallationId ?? (await lookupInstallationId(owner, repo));
+      knownInstallationId ?? (await lookupInstallationId(owner, repo, options));
 
     // Create an installation access token with 30-day expiry
     const expirationDate = new Date();
@@ -99,6 +114,7 @@ export async function getInstallationToken(
         installation_id: installationId,
         repositories: [repo],
         expires_at: expirationDate.toISOString(),
+        ...requestSignal(options),
       },
     );
 
@@ -179,6 +195,33 @@ export async function getRepoInstallationId(
       return null;
     }
     throw error;
+  }
+}
+
+/**
+ * The installation covering a repository and the permissions it was granted
+ * (`GET /repos/{owner}/{repo}/installation`). Feeds the self-heal permission
+ * preflight and latch. A 404 throws the "not installed" error.
+ */
+export async function getRepoInstallationPermissions(
+  owner: string,
+  repo: string,
+  options?: GitHubCallOptions,
+): Promise<{
+  installationId: number;
+  permissions: Record<string, string | undefined>;
+}> {
+  try {
+    const { data } = await getGitHubApp().octokit.request(
+      "GET /repos/{owner}/{repo}/installation",
+      { owner, repo, ...requestSignal(options) },
+    );
+    return {
+      installationId: data.id,
+      permissions: { ...(data.permissions as Record<string, string>) },
+    };
+  } catch (error: unknown) {
+    throw notInstalledOr(error, owner, repo);
   }
 }
 

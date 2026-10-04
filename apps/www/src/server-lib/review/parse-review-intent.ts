@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { buildTaggedFence } from "./tagged-fence";
 import type {
   ReviewIntent,
   ReviewIntentComment,
@@ -94,32 +95,11 @@ function extractJsonPayload(text: string): string | null {
  */
 export const REVIEW_INTENT_FENCE_INFO = "json review-intent";
 
-/**
- * THE tagged-opener pattern — the only place it exists. A whole opening fence
- * line at a line start: three backticks, `json`, spaces/tabs, `review-intent`,
- * optional trailing spaces/tabs, optional CR, LF. Mid-line mentions in prose
- * are not openers.
- */
-const TAGGED_OPENER_RE = /(?:^|\n)```json[ \t]+review-intent[ \t]*\r?\n/;
-/** A closing fence: a line that is exactly three backticks. */
-const TAGGED_CLOSE_RE = /(?:^|\r?\n)```(?=[ \t]*(?:\r?\n|$))/;
-
-/** Byte offset just past the LAST tagged opener line, or -1 when none. */
-function findLastTaggedOpenerEnd(text: string): number {
-  const scan = new RegExp(TAGGED_OPENER_RE.source, "g");
-  let end = -1;
-  let match: RegExpExecArray | null;
-  while ((match = scan.exec(text)) !== null) {
-    end = match.index + match[0].length;
-    // Let the opener's trailing LF serve as the next opener's leading LF.
-    scan.lastIndex = end - 1;
-  }
-  return end;
-}
+const REVIEW_INTENT_FENCE = buildTaggedFence("review-intent");
 
 /** Whether `text` contains a tagged `json review-intent` opener line. */
 export function hasTaggedReviewIntentOpener(text: string): boolean {
-  return TAGGED_OPENER_RE.test(text);
+  return REVIEW_INTENT_FENCE.hasOpener(text);
 }
 
 export interface ParseReviewIntentOptions {
@@ -137,11 +117,9 @@ type PayloadResult =
   | { failure: ParseReviewIntentResult };
 
 function extractTaggedPayload(text: string): PayloadResult | null {
-  const bodyStart = findLastTaggedOpenerEnd(text);
-  if (bodyStart < 0) return null;
-  const rest = text.slice(bodyStart);
-  const close = TAGGED_CLOSE_RE.exec(rest);
-  if (!close) {
+  const extracted = REVIEW_INTENT_FENCE.extractLast(text);
+  if (extracted === null) return null;
+  if (!extracted.ok) {
     return {
       failure: {
         ok: false,
@@ -150,7 +128,7 @@ function extractTaggedPayload(text: string): PayloadResult | null {
       },
     };
   }
-  return { payload: rest.slice(0, close.index).trim() };
+  return { payload: extracted.payload };
 }
 
 /**

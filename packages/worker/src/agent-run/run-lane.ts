@@ -29,10 +29,21 @@ export function resolveRunLane(
 export function formatRunStartLine(
   input: Pick<
     AgentRunInput,
-    "prKey" | "supersedePolicy" | "prNumber" | "repoFullName" | "branch"
+    | "prKey"
+    | "supersedePolicy"
+    | "prNumber"
+    | "repoFullName"
+    | "branch"
+    | "selfHeal"
   >,
 ): string {
-  const parts = [`run start: lane=${resolveRunLane(input)}`];
+  // OBS-01: an audit-stamped run is filterable with `grep lane=self-heal`.
+  // Display-only: resolveRunLane (which gates task packs) is untouched.
+  const lane =
+    input.selfHeal?.kind === "audit"
+      ? "self-heal-audit"
+      : resolveRunLane(input);
+  const parts = [`run start: lane=${lane}`];
   if (input.prNumber !== undefined) parts.push(`pr=${input.prNumber}`);
   parts.push(`repo=${input.repoFullName}`, `branch=${input.branch}`);
   if (input.supersedePolicy) parts.push(`policy=${input.supersedePolicy}`);

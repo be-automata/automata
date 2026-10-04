@@ -17,6 +17,9 @@ import * as schema from "./schema";
  * neon-http cannot do. Node 22+ and workerd both provide a global WebSocket, so no
  * `ws` polyfill is imported (keeping the Workers bundle free of node-only modules).
  */
+/** Max wait for a pooled connection before the checkout rejects (TMO-01). */
+const DB_CONNECT_TIMEOUT_MS = 5000;
+
 function selectDriver(
   databaseUrl: string,
 ): "neon-serverless" | "node-postgres" {
@@ -34,7 +37,15 @@ function selectDriver(
 // The neon-serverless instance is query/transaction-API-compatible for this
 // codebase's usage and is cast to it.
 function createNodePgDb(databaseUrl: string) {
-  return drizzle(databaseUrl, { schema });
+  // connectionTimeoutMillis: a saturated pool must fail a checkout fast, not
+  // hang a 30s waitUntil (TMO-01). drizzle forwards `connection` to pg.Pool.
+  return drizzle({
+    connection: {
+      connectionString: databaseUrl,
+      connectionTimeoutMillis: DB_CONNECT_TIMEOUT_MS,
+    },
+    schema,
+  });
 }
 
 /**
@@ -52,7 +63,10 @@ export type DB = ReturnType<typeof createNodePgDb>;
 
 export function createDb(databaseUrl: string): DB {
   if (selectDriver(databaseUrl) === "neon-serverless") {
-    const pool = new NeonPool({ connectionString: databaseUrl });
+    const pool = new NeonPool({
+      connectionString: databaseUrl,
+      connectionTimeoutMillis: DB_CONNECT_TIMEOUT_MS,
+    });
     return drizzleNeon(pool, { schema }) as unknown as DB;
   }
   return createNodePgDb(databaseUrl);

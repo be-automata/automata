@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import type { DB } from "@terragon/shared/db";
 import { getTenantContextOrNull } from "@/lib/auth-server";
 import { isOrgAdmin } from "@/lib/org-role";
 import {
@@ -11,12 +12,18 @@ import {
 import {
   parseReviewAgentPatch,
   parseReviewDraftPrs,
+  parseSelfHealPatch,
   parseSupersedePatch,
+  recordSelfHealSettingsChange,
 } from "../review-settings-route-shared";
 import {
   pickReviewAgentFields,
   type ReviewAgentField,
 } from "@terragon/shared/model/review-agent-settings";
+import {
+  pickSelfHealFields,
+  type SelfHealField,
+} from "@terragon/shared/model/self-heal-settings";
 import type { RepoReviewSetting } from "@terragon/shared/db/types";
 import { getPostHogServer } from "@/lib/posthog-server";
 
@@ -42,6 +49,7 @@ function toDto(row: RepoReviewSetting) {
     recheckOnComplete: row.recheckOnComplete,
     reviewDraftPrs: row.reviewDraftPrs,
     ...pickReviewAgentFields(row),
+    ...pickSelfHealFields(row),
     updatedAt: row.updatedAt,
   };
 }
@@ -94,7 +102,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     recheckOnComplete?: unknown;
     reviewDraftPrs?: unknown;
     expectedUpdatedAt?: unknown;
-  } & Partial<Record<ReviewAgentField, unknown>>;
+  } & Partial<Record<ReviewAgentField | SelfHealField, unknown>>;
   try {
     body = await request.json();
   } catch {
@@ -106,12 +114,19 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   if ("errorResponse" in drafts) return drafts.errorResponse;
   const reviewAgent = parseReviewAgentPatch(body);
   if ("errorResponse" in reviewAgent) return reviewAgent.errorResponse;
-  const patch = { ...supersede.patch, ...drafts, ...reviewAgent.patch };
+  const selfHeal = parseSelfHealPatch(body, { isOrgDefaultRow: true });
+  if ("errorResponse" in selfHeal) return selfHeal.errorResponse;
+  const patch = {
+    ...supersede.patch,
+    ...drafts,
+    ...reviewAgent.patch,
+    ...selfHeal.patch,
+  };
   if (Object.keys(patch).length === 0) {
     return NextResponse.json(
       {
         error:
-          "provide supersedePolicy, recheckOnComplete, reviewDraftPrs and/or a review-agent field",
+          "provide supersedePolicy, recheckOnComplete, reviewDraftPrs and/or a review-agent field or self-heal field",
       },
       { status: 400 },
     );
@@ -137,14 +152,31 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   }
   let row;
   try {
-    row = await upsertRepoReviewSetting({
-      db,
-      organizationId: ctx.organizationId,
-      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
-      patch,
-      updatedByUserId: ctx.userId,
-      expectedUpdatedAt,
-      expectRowAbsent,
+    // One transaction: the settings write and its OBS-01 actor-log row land
+    // together or not at all, so an applied change (the kill switch above all)
+    // is never left unattributed, and a failed log never reports a 500 for a
+    // write that already took effect.
+    const organizationId = ctx.organizationId;
+    const actorUserId = ctx.userId;
+    row = await db.transaction(async (tx) => {
+      const txDb = tx as unknown as DB;
+      const written = await upsertRepoReviewSetting({
+        db: txDb,
+        organizationId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+        patch,
+        updatedByUserId: actorUserId,
+        expectedUpdatedAt,
+        expectRowAbsent,
+      });
+      await recordSelfHealSettingsChange({
+        db: txDb,
+        organizationId,
+        actorUserId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+        patch,
+      });
+      return written;
     });
   } catch (error) {
     if (error instanceof RepoReviewSettingConflictError) {

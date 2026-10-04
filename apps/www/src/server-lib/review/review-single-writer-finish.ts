@@ -21,6 +21,8 @@ import {
   executeReviewFromIntent,
   type ReviewFromIntentOutcome,
 } from "./execute-review-from-intent";
+import { resolveBotLogin } from "./bot-login";
+import { findLastLeadAgentText } from "./lead-text";
 import { hasTaggedReviewIntentOpener } from "./parse-review-intent";
 import { resolveApproveFloor } from "./resolve-approve-floor";
 import { PR_MERGED_SKILL_NAME } from "./review-skill";
@@ -36,12 +38,6 @@ import { PR_MERGED_SKILL_NAME } from "./review-skill";
  * GITHUB_SIDE_EFFECTS_ENABLED gates all of it (a shadow thread never boots, but
  * this guards the global switch regardless).
  */
-
-/** The App bot's review-author login (mirrors reconcile-pr-reviews.resolveBotLogin). */
-function resolveBotLogin(): string {
-  const explicit = env.GITHUB_BOT_LOGIN.trim();
-  return explicit || `${env.NEXT_PUBLIC_GITHUB_APP_NAME}[bot]`;
-}
 
 /**
  * A review thread = one dispatched from a `pull_request`-triggered automation
@@ -135,28 +131,6 @@ export function isWorkFailedOutcome(
  */
 export function extractTerminalAgentText(messages: DBMessage[] | null): string {
   return findLastLeadAgentText(messages, () => true) ?? "";
-}
-
-/**
- * The joined text parts of the LAST lead agent message whose text `accept`s,
- * or null when none does. The one walk behind both extractTerminalAgentText
- * and selectReviewTerminalText.
- */
-function findLastLeadAgentText(
-  messages: DBMessage[] | null,
-  accept: (text: string) => boolean,
-): string | null {
-  if (!messages) return null;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    if (m.type !== "agent" || m.parent_tool_use_id != null) continue;
-    const text = m.parts
-      .filter((p): p is { type: "text"; text: string } => p.type === "text")
-      .map((p) => p.text)
-      .join("\n");
-    if (accept(text)) return text;
-  }
-  return null;
 }
 
 /**

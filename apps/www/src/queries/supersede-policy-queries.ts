@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
 import type { ReviewAgentValues } from "@terragon/shared/model/review-agent-settings";
+import type { SelfHealValues } from "@terragon/shared/model/self-heal-settings";
 import { ConflictError, errorFromResponse } from "./error-from-response";
 
 /**
@@ -14,7 +15,7 @@ import { ConflictError, errorFromResponse } from "./error-from-response";
  * (supersede, drafts, review agent), so the synchronous setQueryData on
  * success matters even more.
  */
-export interface SupersedeDefaultDto extends ReviewAgentValues {
+export interface SupersedeDefaultDto extends ReviewAgentValues, SelfHealValues {
   supersedePolicy: SupersedePolicy | null;
   recheckOnComplete: boolean;
   /** Org-wide draft-PR default. Tri-state: null = the org has not chosen
@@ -57,7 +58,8 @@ export function useSetSupersedeDefaultMutation(options?: {
         recheckOnComplete?: boolean;
         reviewDraftPrs?: boolean | null;
         expectedUpdatedAt?: string | null;
-      } & Partial<ReviewAgentValues>,
+      } & Partial<ReviewAgentValues> &
+        Partial<SelfHealValues>,
     ): Promise<SupersedeDefaultDto> => {
       const res = await fetch("/api/review-settings/default", {
         method: "PUT",

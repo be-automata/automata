@@ -2,7 +2,20 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseReviewIntent } from "./parse-review-intent";
-import { stripFrontmatter } from "./review-skill";
+import {
+  AUDIT_FINDINGS_SKILL_NAME,
+  SELF_HEAL_SKILL_NAMES,
+  stripFrontmatter,
+  validateSkillBody,
+} from "./review-skill";
+import {
+  AUDIT_FINDINGS_FENCE_INFO,
+  parseAuditFindings,
+} from "../audit/parse-audit-findings";
+import {
+  AUDIT_RULES,
+  AUDIT_SECTIONS,
+} from "@terragon/shared/self-heal/audit-rules";
 import {
   loadReviewSkillBody,
   TRACKED_REVIEW_SKILL_PATH,
@@ -193,5 +206,76 @@ describe("seed inlines the tracked review skill (no box-local path)", () => {
   it("stripFrontmatter accepts a fence with trailing whitespace and CRLF", () => {
     const md = ["---", "name: x", "---  ", "# Body", "text"].join("\r\n");
     expect(stripFrontmatter(md)).toBe("# Body\r\ntext");
+  });
+});
+
+/**
+ * Phase 8: the audit skill is a versioned prompt whose fence and closed
+ * vocabulary must equal the parser's. A renamed fence, a rule id the skill no
+ * longer teaches or a section the parser would drop fails CI here.
+ */
+describe("audit-findings skill contract <-> parser (no drift)", () => {
+  const AUDIT_SKILL_MD = fileURLToPath(
+    new URL(
+      "../../../../../deploy/skills/audit-findings/SKILL.md",
+      import.meta.url,
+    ),
+  );
+  const doc = readFileSync(AUDIT_SKILL_MD, "utf8");
+
+  function firstCells(prefixRe: RegExp): string[] {
+    return doc
+      .split("\n")
+      .map((line) => prefixRe.exec(line)?.[1])
+      .filter((cell): cell is string => cell !== undefined);
+  }
+
+  it("the committed body passes the write/resolve-time validator", () => {
+    expect(() =>
+      validateSkillBody(AUDIT_FINDINGS_SKILL_NAME, doc, "test"),
+    ).not.toThrow();
+  });
+
+  it("the opener uses exactly the parser fence info, once", () => {
+    const opener = "```json " + AUDIT_FINDINGS_FENCE_INFO;
+    expect(doc.split(opener).length - 1).toBe(1);
+  });
+
+  it("the example block parses with the real parser and no drops", () => {
+    const res = parseAuditFindings(doc, { repoFullName: "acme/repo" });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.block.findings).toHaveLength(1);
+      expect(Object.values(res.dropped).every((n) => n === 0)).toBe(true);
+    }
+  });
+
+  it("rule ids in the vocabulary table equal AUDIT_RULES", () => {
+    const ids = firstCells(/^\| `([a-z]+\.[a-z.-]+)` \|/);
+    expect([...ids].sort()).toEqual(AUDIT_RULES.map((r) => r.id).sort());
+  });
+
+  it("section ids in the sections table equal AUDIT_SECTIONS", () => {
+    const ids = firstCells(/^\| `([a-z]+(?:-[a-z]+)*)` \|/);
+    expect([...ids].sort()).toEqual(
+      [...AUDIT_SECTIONS["security-audit"]].sort(),
+    );
+  });
+
+  it("SELF_HEAL_SKILL_NAMES contains the audit skill", () => {
+    expect(SELF_HEAL_SKILL_NAMES).toContain(AUDIT_FINDINGS_SKILL_NAME);
+  });
+
+  it("the validator rejects each missing contract element", () => {
+    const check = (body: string) =>
+      expect(() =>
+        validateSkillBody(AUDIT_FINDINGS_SKILL_NAME, body, "test"),
+      ).toThrow();
+    check(doc.replace("```json audit-findings", "```json other"));
+    check(doc.replaceAll("dep.vulnerable", "dep.x"));
+    check(doc.replaceAll("pnpm audit --prod --json", "pnpm audit"));
+    check(doc.replace("## Hard rules", "## Rules"));
+    check(doc.replaceAll("20 minutes", "a while"));
+    check(doc + "\n```json audit-findings\n{}\n```\n");
   });
 });

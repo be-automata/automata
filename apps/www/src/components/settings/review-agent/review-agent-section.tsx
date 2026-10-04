@@ -101,7 +101,7 @@ function packListLabel(ids: readonly BatteryPackId[]): string {
 const INHERIT = "inherit";
 
 /** A Select whose first option is "Inherit (…)" (null); the rest are values. */
-function InheritSelect<T extends string>({
+export function InheritSelect<T extends string>({
   id,
   label,
   value,

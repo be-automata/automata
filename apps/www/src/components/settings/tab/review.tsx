@@ -23,6 +23,7 @@ import {
 import { useSupersedeDefaultQuery } from "@/queries/supersede-policy-queries";
 import { SupersedePolicySection } from "@/components/settings/review-supersede/supersede-policy-section";
 import { ReviewAgentSection } from "@/components/settings/review-agent/review-agent-section";
+import { SelfHealSection } from "@/components/settings/self-heal/self-heal-section";
 import { RepoRow } from "@/components/settings/review-tolerance/repo-row";
 import {
   ConfirmLoosenDialog,
@@ -242,6 +243,7 @@ export function ReviewSettings() {
       <OrgDraftDefaultCard />
       <SupersedePolicySection />
       <ReviewAgentSection />
+      <SelfHealSection />
 
       <SettingsSection
         label="Review Tolerance"
