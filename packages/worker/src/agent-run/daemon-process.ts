@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { redactSecrets } from "@terragon/utils/redact";
-import type { AceExec } from "./agent-uid-fs";
+import { reapplyPathGrant, type AceExec } from "./agent-uid-fs";
 import { buildDaemonEnv, type BrokerHandoff } from "./daemon-env";
 import { ghBrokerConfigYaml } from "./gh-broker";
 import {
@@ -164,23 +164,11 @@ export class DaemonProcess {
    * and post as the human — it must use the installation token → the App bot. The dir
    * is cleaned up in teardown.
    */
-  private ensureEnv(): NodeJS.ProcessEnv {
+  private async ensureEnv(): Promise<NodeJS.ProcessEnv> {
     if (this.env) {
       return this.env;
     }
-    this.ghConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "automata-gh-"));
-    if (this.broker) {
-      // #81: `http_unix_socket` has NO env-var equivalent — it is a config.yml
-      // key only. Writing it into the per-run dir routes every gh API call
-      // through the gh broker; teardown's ghConfigDir removal cleans it up.
-      // The agent CAN edit this file to drop the socket — then gh dials
-      // api.github.com directly with the bearer, which GitHub rejects.
-      // Self-inflicted breakage, never a credential leak.
-      fs.writeFileSync(
-        path.join(this.ghConfigDir, "config.yml"),
-        ghBrokerConfigYaml(this.broker.ghSocketPath),
-      );
-    }
+    this.ghConfigDir = await this.createGhConfigDir();
     this.env = buildDaemonEnv({
       baseEnv: process.env,
       anthropicApiKey: this.config.anthropicApiKey,
@@ -210,6 +198,65 @@ export class DaemonProcess {
   }
 
   /**
+   * The run's isolated gh config dir, plus the #81 broker route when brokered.
+   * `http_unix_socket` has NO env-var equivalent — it is a config.yml key only,
+   * so writing it here is what routes every gh API call through the gh broker.
+   *
+   * WHERE IT LIVES DEPENDS ON THE UID SPLIT. Default mode: a private 0700
+   * mkdtemp under the worker's tmpdir — the agent IS the worker uid, so it can
+   * read it. Agent-uid mode: that same dir is owned by the worker and closed to
+   * the agent, so every agent `gh` call failed `open .../config.yml: permission
+   * denied` (observed live on the execution box). There it goes INSIDE the run
+   * workdir instead, like the run's TMPDIR, so it inherits the per-run grant
+   * provisioning put on the workdir — scoped to this run, never another's.
+   *
+   * The agent CAN edit config.yml to drop the socket — then gh dials
+   * api.github.com directly with the bearer, which GitHub rejects.
+   * Self-inflicted breakage, never a credential leak. The worker runs `gh` with
+   * this dir only in preflightGhAuth, which completes before the agent is
+   * spawned, so nothing the agent writes here can redirect the worker's gh.
+   */
+  private async createGhConfigDir(): Promise<string> {
+    const agentUser = this.config.agentUser;
+    if (!agentUser) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "automata-gh-"));
+      if (this.broker) {
+        fs.writeFileSync(
+          path.join(dir, "config.yml"),
+          ghBrokerConfigYaml(this.broker.ghSocketPath),
+        );
+      }
+      return dir;
+    }
+
+    const dir = path.join(this.workdir, "gh-config");
+    // Fresh every time: a retry into the same workdir must not inherit whatever
+    // a previous attempt's agent left here (e.g. a planted hosts.yml).
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(dir, { mode: 0o700 });
+    const grant = {
+      users: [agentUser],
+      exec: this.deps.aceExec,
+      platform: this.deps.platform,
+    };
+    // LINUX: the 0700 creation mode zeroes the POSIX ACL mask on this dir, so
+    // the inherited grant is born dead and the agent cannot even traverse it.
+    // Same trap, same remedy as the run HOME (agent-credentials.ts). No-op on
+    // macOS, where the inherited ACE survives the mode.
+    await reapplyPathGrant({ ...grant, target: dir, kind: "directory" });
+    if (this.broker) {
+      const file = path.join(dir, "config.yml");
+      // Not a secret — a socket path — so no 0600. Re-granted regardless: the
+      // agent's read must not hinge on the creation mode staying what it is.
+      fs.writeFileSync(file, ghBrokerConfigYaml(this.broker.ghSocketPath), {
+        mode: 0o644,
+      });
+      await reapplyPathGrant({ ...grant, target: file, kind: "file" });
+    }
+    return dir;
+  }
+
+  /**
    * Fail-closed gh-auth precondition (ADR-002 F3). Run BEFORE start(): confirm `gh`
    * authenticates (as the bot, via the injected token + isolated config) inside the
    * workdir with the sanitized env. Throws if it can't — the run is blocked rather
@@ -220,7 +267,7 @@ export class DaemonProcess {
   ): Promise<void> {
     const result = await verifyGhAuth({
       workdir: this.workdir,
-      env: this.ensureEnv(),
+      env: await this.ensureEnv(),
       exec,
     });
     if (!result.ok) {
@@ -246,7 +293,7 @@ export class DaemonProcess {
     // unix-socket permissions). They are applied ONCE at worker boot, on the
     // empty dir, by claimRunNamespace() (run-namespace.ts).
 
-    const env = this.ensureEnv();
+    const env = await this.ensureEnv();
 
     // #108: with agentUser empty this returns the command UNCHANGED and an empty
     // env — byte-for-byte today's spawn.

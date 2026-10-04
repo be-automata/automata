@@ -586,6 +586,167 @@ setInterval(() => {}, 1000);
     expect(fs.existsSync(socket)).toBe(false);
   });
 
+  /**
+   * The isolated gh config dir (#81 broker route). Live on the box, agent-uid
+   * mode: `gh auth status` failed `open /tmp/automata-gh-XXXX/config.yml:
+   * permission denied` — the dir was a 0700 mkdtemp owned by the WORKER uid, so
+   * the agent could not read the config that routes gh through the broker, and
+   * every gh call in mention/task runs failed.
+   */
+  describe("gh config dir", () => {
+    const BROKER = {
+      gitUrl: "http://127.0.0.1:1",
+      ghSocketPath: "/run/automata/t-gh.sock",
+      bearer: "bearer-x",
+      repoFullName: "o/r",
+    };
+
+    function spawnCapturingEnv(
+      recorded: Recorded[],
+      sink: { env: Record<string, string> },
+    ) {
+      const inner = fakeSpawn({ recorded, wrapperPgid: process.pid });
+      return ((f: string, a: string[], o: SpawnOptions) => {
+        sink.env = (o?.env ?? {}) as Record<string, string>;
+        return inner(f, a, o);
+      }) as unknown as typeof spawn;
+    }
+
+    it("agent-uid mode: lives INSIDE the run workdir, carries the broker route, is granted to the agent, and is removed on teardown", async () => {
+      const { root, workdir, input } = fixture();
+      const recorded: Recorded[] = [];
+      const aclCalls: Recorded[] = [];
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_WORKDIR_ROOT: root,
+      });
+      const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+      fs.mkdirSync(path.dirname(socket), { recursive: true });
+      const sink = { env: {} as Record<string, string> };
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        BROKER,
+        {
+          aceExec: async (file, args) => void aclCalls.push({ file, args }),
+          spawnFn: spawnCapturingEnv(recorded, sink),
+          // Linux is where the 0700 creation mode zeroes the ACL mask.
+          platform: "linux",
+        },
+      );
+      daemons.push(daemon);
+      await daemon.start();
+
+      const ghDir = path.join(workdir, "gh-config");
+      // Under the workdir (inherits the run's grant), never the worker's tmpdir.
+      expect(sink.env.GH_CONFIG_DIR).toBe(ghDir);
+      const configFile = path.join(ghDir, "config.yml");
+      expect(fs.readFileSync(configFile, "utf8")).toBe(
+        `version: 1\nhttp_unix_socket: ${BROKER.ghSocketPath}\n`,
+      );
+      // Not a secret (a socket path); group/other read so the 0700-dir mask
+      // trap is the only thing the grant has to undo.
+      expect(fs.statSync(configFile).mode & 0o777).toBe(0o644);
+      // The mask is restored for the AGENT on both the dir (traverse) and the
+      // file (read) — and for nobody else.
+      expect(aclCalls).toEqual([
+        {
+          file: "/usr/bin/setfacl",
+          args: ["-m", "u:automata-agent:rwx", ghDir],
+        },
+        {
+          file: "/usr/bin/setfacl",
+          args: ["-m", "u:automata-agent:rw-", configFile],
+        },
+      ]);
+
+      daemon.teardown();
+      expect(fs.existsSync(ghDir)).toBe(false);
+    });
+
+    it("agent-uid mode: a dir left by a previous attempt is replaced, not reused", async () => {
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_WORKDIR_ROOT: root,
+      });
+      const ghDir = path.join(workdir, "gh-config");
+      fs.mkdirSync(ghDir);
+      fs.writeFileSync(path.join(ghDir, "hosts.yml"), "planted");
+      fs.writeFileSync(path.join(ghDir, "config.yml"), "version: 1\n");
+      const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+      fs.mkdirSync(path.dirname(socket), { recursive: true });
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        BROKER,
+        {
+          aceExec: async () => {},
+          spawnFn: fakeSpawn({ recorded: [], wrapperPgid: process.pid }),
+          platform: "linux",
+        },
+      );
+      daemons.push(daemon);
+      await daemon.start();
+      expect(fs.readdirSync(ghDir)).toEqual(["config.yml"]);
+      expect(fs.readFileSync(path.join(ghDir, "config.yml"), "utf8")).toContain(
+        `http_unix_socket: ${BROKER.ghSocketPath}`,
+      );
+    });
+
+    it("default mode: unchanged — a private mkdtemp under os.tmpdir(), no ACL call, removed on teardown", async () => {
+      const { root, workdir, input } = fixture();
+      const recorded: Recorded[] = [];
+      const aclCalls: Recorded[] = [];
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+      });
+      const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+      fs.mkdirSync(path.dirname(socket), { recursive: true });
+      const sink = { env: {} as Record<string, string> };
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        BROKER,
+        {
+          aceExec: async (file, args) => void aclCalls.push({ file, args }),
+          spawnFn: spawnCapturingEnv(recorded, sink),
+          platform: "linux",
+        },
+      );
+      daemons.push(daemon);
+      await daemon.start();
+
+      const ghDir = sink.env.GH_CONFIG_DIR ?? "";
+      expect(path.dirname(ghDir)).toBe(os.tmpdir());
+      expect(path.basename(ghDir)).toMatch(/^automata-gh-/);
+      expect(fs.existsSync(path.join(workdir, "gh-config"))).toBe(false);
+      expect(fs.readFileSync(path.join(ghDir, "config.yml"), "utf8")).toBe(
+        `version: 1\nhttp_unix_socket: ${BROKER.ghSocketPath}\n`,
+      );
+      expect(fs.statSync(ghDir).mode & 0o777).toBe(0o700);
+      expect(aclCalls).toEqual([]);
+
+      daemon.teardown();
+      expect(fs.existsSync(ghDir)).toBe(false);
+    });
+  });
+
   function fixture() {
     // Short prefixes + a short threadId on purpose: the socket path must stay
     // under sun_path's cap (104 bytes on Darwin, where os.tmpdir() is already
