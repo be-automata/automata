@@ -33,7 +33,14 @@ const EXIT_ABSENT = 3;
 
 // Absent file exits 3 so it is distinguishable from an unreadable one.
 const READ_SCRIPT = `test -e "$1" || exit ${EXIT_ABSENT}; cat -- "$1"`;
-const FILE_EXISTS_SCRIPT = 'test -f -- "$1"';
+/**
+ * POSIX `test` takes no `--`: under dash `test -f -- "$1"` is an operator
+ * error (exit 2), which made every probe neither "present" (0) nor "absent"
+ * (1) and silently skipped the dependency audit. A leading "-" subject is
+ * already rejected by isSafeSubject, so the guard `--` was meant to add is
+ * not needed.
+ */
+export const FILE_EXISTS_SCRIPT = 'test -f "$1"';
 const UNTRACKED_SCRIPT = 'git ls-files --error-unmatch -- "$1" >/dev/null 2>&1';
 // gitleaks output may contain secrets: it is redirected away, only the exit
 // status is observed.
