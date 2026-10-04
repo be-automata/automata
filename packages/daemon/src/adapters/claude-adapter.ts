@@ -4,7 +4,7 @@ import {
   getAnthropicApiKeyOrNull,
   reviewPolicyArgs,
 } from "../claude";
-import type { ClaudeMessage } from "../shared";
+import { reviewPolicyVariantFor, type ClaudeMessage } from "../shared";
 import { formatError } from "./format-error";
 import type {
   BuildArgsConfig,
@@ -18,6 +18,11 @@ import type {
  * `claude.ts` (#75 AC4) — `claudeCommand` still builds the review branch by
  * spreading it, so this adapter's `buildArgs` output is byte-identical to
  * `runClaudeCodeCommand`'s command string (daemon.ts:657-665).
+ *
+ * Phase 5: the only new logic is the review-policy VARIANT. An orchestrated
+ * review run (permissionMode "review" + reviewAgent.mode "orchestrated")
+ * gets the D2 policy from `claudeCommand` and its payload
+ * `BASH_MAX_TIMEOUT_MS`; every other run is byte-identical to before.
  */
 export const claudeAdapter: HarnessAdapter = {
   agent: "claudeCode",
@@ -31,7 +36,12 @@ export const claudeAdapter: HarnessAdapter = {
       ANTHROPIC_API_KEY: ctx.useCredits
         ? ""
         : getAnthropicApiKeyOrNull(ctx.runtime),
-      BASH_MAX_TIMEOUT_MS: (60 * 1000).toString(),
+      BASH_MAX_TIMEOUT_MS:
+        ctx.reviewAgent &&
+        reviewPolicyVariantFor(ctx.permissionMode, ctx.reviewAgent).mode ===
+          "orchestrated"
+          ? String(ctx.reviewAgent.commandTimeoutMs)
+          : (60 * 1000).toString(),
       ...(ctx.useCredits
         ? {
             ANTHROPIC_BASE_URL: `${ctx.normalizedUrl}/api/proxy/anthropic`,
@@ -49,6 +59,7 @@ export const claudeAdapter: HarnessAdapter = {
       model: cfg.model,
       mcpConfigPath: cfg.mcpConfigPath ?? null,
       permissionMode: cfg.permissionMode,
+      reviewAgent: cfg.reviewAgent,
       enableMcpPermissionPrompt: cfg.enableMcpPermissionPrompt ?? false,
     });
   },

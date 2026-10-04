@@ -1,6 +1,11 @@
 import type { AIAgent, AIAgentCredentials } from "@terragon/agent/types";
 import type { IDaemonRuntime } from "../runtime";
-import type { ClaudeMessage, PermissionMode } from "../shared";
+import type {
+  ClaudeMessage,
+  DaemonReviewAgent,
+  PermissionMode,
+  ReviewPolicyVariant,
+} from "../shared";
 
 /**
  * HarnessAdapter contract (#75, ADR-006).
@@ -44,6 +49,15 @@ export interface PrepareEnvContext {
    * value `buildArgs` already consumes.
    */
   permissionMode?: PermissionMode;
+  /**
+   * The already-validated orchestrated-review knobs for this run (Phase 5).
+   * Added under ADR-006 exactly like `permissionMode` (#88): it crosses the
+   * wire on `DaemonMessageClaudeSchema` (validated by
+   * `parseDaemonReviewAgent`) and is a resolved review SHAPE — not a
+   * credential kind, userId or organizationId. claude uses it for the
+   * review-only `BASH_MAX_TIMEOUT_MS`.
+   */
+  reviewAgent?: DaemonReviewAgent;
 }
 
 /** Config passed to `buildArgs` — the union of every `*Command()` builder's params today. */
@@ -53,6 +67,8 @@ export interface BuildArgsConfig {
   sessionId: string | null;
   model: string;
   permissionMode?: PermissionMode;
+  /** Same resolved review SHAPE as `PrepareEnvContext.reviewAgent` (ADR-006). */
+  reviewAgent?: DaemonReviewAgent;
   mcpConfigPath?: string | null;
   enableMcpPermissionPrompt?: boolean;
   useCredits?: boolean;
@@ -166,6 +182,9 @@ export interface HarnessAdapter {
    * document why in its own JSDoc (naming the pinned version and what was
    * checked) rather than guess — see claude-adapter.ts (shipped),
    * codex/gemini/amp/opencode-adapter.ts ([] + reason).
+   *
+   * `variant` (Phase 5, D2): only claude implements an orchestrated
+   * variant; omitted ⇒ classic. Adapters that return `[]` ignore it.
    */
-  reviewPolicyArgs(): string[];
+  reviewPolicyArgs(variant?: ReviewPolicyVariant): string[];
 }

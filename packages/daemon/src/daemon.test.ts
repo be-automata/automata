@@ -11,6 +11,10 @@ import {
   MockInstance,
 } from "vitest";
 import { nanoid } from "nanoid/non-secure";
+import {
+  ORCHESTRATED_REVIEW_POLICY_JOINED,
+  REVIEW_POLICY_JOINED,
+} from "./adapters/__golden-fixtures";
 
 async function sleep(ms: number = 10) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1673,6 +1677,84 @@ describe("daemon", () => {
       // Should NOT include --permission-mode
       expect(claudeCommand).not.toContain("--permission-mode");
     });
+
+    it("an orchestrated reviewAgent spawns the D2 policy + payload timeout end to end, GitHub credentials still stripped (Phase 5)", async () => {
+      vi.stubEnv("GH_TOKEN", "ghs_secret_token");
+      vi.stubEnv("GITHUB_TOKEN", "ghs_secret_token");
+      const warnSpy = vi.spyOn(runtime.logger, "warn");
+
+      await daemon.start();
+      await writeToUnixSocket({
+        unixSocketPath: runtime.unixSocketPath,
+        dataStr: JSON.stringify({
+          ...TEST_INPUT_MESSAGE,
+          permissionMode: "review",
+          reviewAgent: {
+            mode: "orchestrated",
+            commandTimeoutMs: 240000,
+            maxTurns: 30,
+          },
+        }),
+      });
+      await sleepUntil(() => spawnCommandLineMock.mock.calls.length === 1);
+      const command = spawnCommandLineMock.mock.calls[0]![0];
+      const env = spawnCommandLineMock.mock.calls[0]![1].env as Record<
+        string,
+        string | undefined
+      >;
+      expect(command).toContain(
+        `${ORCHESTRATED_REVIEW_POLICY_JOINED} --max-turns 30`,
+      );
+      expect(command).not.toContain("--dangerously-skip-permissions");
+      expect(env.BASH_MAX_TIMEOUT_MS).toBe("240000");
+      expect(env.GH_TOKEN).toBeUndefined();
+      expect(env.GITHUB_TOKEN).toBeUndefined();
+      expect(
+        warnSpy.mock.calls.filter(([msg]) =>
+          String(msg).includes("reviewAgent rejected"),
+        ),
+      ).toHaveLength(0);
+    });
+
+    it.each([
+      ["absent", undefined, false],
+      ["malformed", { mode: "orchestrated", commandTimeoutMs: 5 }, true],
+    ])(
+      "a review message with %s reviewAgent spawns today's classic command and 60000 timeout",
+      async (_label, reviewAgent, expectWarning) => {
+        const warnSpy = vi.spyOn(runtime.logger, "warn");
+        await daemon.start();
+        await writeToUnixSocket({
+          unixSocketPath: runtime.unixSocketPath,
+          dataStr: JSON.stringify({
+            ...TEST_INPUT_MESSAGE,
+            permissionMode: "review",
+            ...(reviewAgent ? { reviewAgent } : {}),
+          }),
+        });
+        await sleepUntil(() => spawnCommandLineMock.mock.calls.length === 1);
+        const command = spawnCommandLineMock.mock.calls[0]![0];
+        const env = spawnCommandLineMock.mock.calls[0]![1].env as Record<
+          string,
+          string | undefined
+        >;
+        expect(command).toContain(REVIEW_POLICY_JOINED);
+        expect(command).not.toContain("--max-turns");
+        expect(command).not.toContain("Agent");
+        expect(env.BASH_MAX_TIMEOUT_MS).toBe("60000");
+        const rejections = warnSpy.mock.calls.filter(([msg]) =>
+          String(msg).includes("reviewAgent rejected"),
+        );
+        if (expectWarning) {
+          expect(rejections).toHaveLength(1);
+          expect(JSON.stringify(rejections[0]![1])).toContain(
+            "commandTimeoutMs",
+          );
+        } else {
+          expect(rejections).toHaveLength(0);
+        }
+      },
+    );
 
     it("should handle permission mode changes between messages", async () => {
       const planMessage: DaemonMessageClaude = {

@@ -43,6 +43,21 @@ export function expectedClaudeEnvNoCredits(
   };
 }
 
+/**
+ * Phase 5: an ORCHESTRATED review run's env — the no-credits golden with
+ * BASH_MAX_TIMEOUT_MS taken from the payload's commandTimeoutMs. Every other
+ * combination keeps "60000" (the goldens above).
+ */
+export function expectedClaudeEnvOrchestratedReview(
+  anthropicApiKey: string,
+  commandTimeoutMs: number,
+): Record<string, string> {
+  return {
+    ANTHROPIC_API_KEY: anthropicApiKey,
+    BASH_MAX_TIMEOUT_MS: String(commandTimeoutMs),
+  };
+}
+
 export function expectedClaudeEnvWithCredits(): Record<string, string> {
   return {
     ANTHROPIC_API_KEY: "",

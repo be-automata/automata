@@ -23,6 +23,7 @@ import {
   normalizePromptPath,
   expectedClaudeEnvNoCredits,
   expectedClaudeEnvWithCredits,
+  expectedClaudeEnvOrchestratedReview,
   expectedGeminiEnv,
   expectedOpencodeEnv,
   expectedAmpEnv,
@@ -129,6 +130,61 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
         normalizedUrl: NORMALIZED_URL,
       });
       expect(env).toEqual(expectedClaudeEnvWithCredits());
+    });
+
+    it("prepareEnv for an orchestrated review run takes BASH_MAX_TIMEOUT_MS from the payload (Phase 5)", () => {
+      const env = claudeAdapter.prepareEnv({
+        runtime: fakeRuntime(),
+        useCredits: false,
+        token: TOKEN,
+        normalizedUrl: NORMALIZED_URL,
+        permissionMode: "review",
+        reviewAgent: { mode: "orchestrated", commandTimeoutMs: 300000 },
+      });
+      expect(env).toEqual(
+        expectedClaudeEnvOrchestratedReview("test-api-key-from-env", 300000),
+      );
+    });
+
+    it.each([
+      ["review", { mode: "classic", commandTimeoutMs: 60000 }],
+      ["review", { mode: "classic", commandTimeoutMs: 420000 }],
+      ["allowAll", { mode: "orchestrated", commandTimeoutMs: 420000 }],
+      ["plan", { mode: "orchestrated", commandTimeoutMs: 420000 }],
+      [undefined, { mode: "orchestrated", commandTimeoutMs: 420000 }],
+    ] as const)(
+      "prepareEnv(permissionMode=%s, reviewAgent=%j) keeps BASH_MAX_TIMEOUT_MS 60000 (classic golden)",
+      (permissionMode, reviewAgent) => {
+        const env = claudeAdapter.prepareEnv({
+          runtime: fakeRuntime(),
+          useCredits: false,
+          token: TOKEN,
+          normalizedUrl: NORMALIZED_URL,
+          permissionMode,
+          reviewAgent,
+        });
+        expect(env).toEqual(
+          expectedClaudeEnvNoCredits("test-api-key-from-env"),
+        );
+      },
+    );
+
+    it("buildArgs forwards reviewAgent: orchestrated review gets the D2 policy, absent stays classic", () => {
+      const cfg = {
+        runtime: fakeRuntime(),
+        prompt: "review this PR",
+        sessionId: null,
+        model: "sonnet",
+        permissionMode: "review",
+      } as const;
+      const orchestrated = claudeAdapter.buildArgs({
+        ...cfg,
+        reviewAgent: { mode: "orchestrated", commandTimeoutMs: 300000 },
+      });
+      expect(orchestrated).toContain(ORCHESTRATED_REVIEW_POLICY_JOINED);
+      const classic = claudeAdapter.buildArgs(cfg);
+      expect(classic).toContain(REVIEW_POLICY_JOINED);
+      expect(classic).not.toContain("Agent Task Skill");
     });
 
     it("authFilePath is '.claude/.credentials.json'; normalizeModel is identity", () => {

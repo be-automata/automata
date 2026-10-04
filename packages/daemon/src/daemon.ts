@@ -8,6 +8,7 @@ import {
   ClaudeMessage,
   DaemonMessage,
   DAEMON_VERSION,
+  parseDaemonReviewAgent,
 } from "./shared";
 import { performance } from "node:perf_hooks";
 import { RetryBackoff, RetryConfig, DEFAULT_RETRY_CONFIG } from "./retry";
@@ -678,6 +679,18 @@ export class TerragonDaemon {
   private async runAgentCommand(input: DaemonMessageClaude): Promise<void> {
     const adapter = getAdapter(input.agent);
 
+    // Phase 5: validate the raw reviewAgent ONCE. A malformed value degrades
+    // to the classic review policy (never a rejected run) with one warning
+    // naming the failing field paths — never the value itself.
+    const parsed = parseDaemonReviewAgent(input.reviewAgent);
+    const parsedReviewAgent = parsed.reviewAgent;
+    if (parsed.rejected) {
+      this.runtime.logger.warn(
+        "reviewAgent rejected; running the classic review policy",
+        { threadChatId: input.threadChatId, issues: parsed.rejected },
+      );
+    }
+
     // Gap A: only claudeCode fixes up on-disk session logs pre-spawn
     // (mirrors the deleted runClaudeCodeCommand's pre-spawn call).
     if (adapter.capabilities.fixesSessionLogs && input.sessionId) {
@@ -700,6 +713,7 @@ export class TerragonDaemon {
         sessionId: input.sessionId,
         model: input.model,
         permissionMode: input.permissionMode,
+        reviewAgent: parsedReviewAgent,
         mcpConfigPath: this.mcpConfigPath ?? null,
         enableMcpPermissionPrompt: this.getFeatureFlag("mcpPermissionPrompt"),
         useCredits: input.useCredits,
@@ -710,6 +724,7 @@ export class TerragonDaemon {
         token: input.token,
         normalizedUrl: this.runtime.normalizedUrl,
         permissionMode: input.permissionMode,
+        reviewAgent: parsedReviewAgent,
       }),
       getMockSuccessResult: adapter.capabilities.mockSuccessResult
         ? () => adapter.capabilities.mockSuccessResult!

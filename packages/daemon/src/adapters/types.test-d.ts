@@ -27,6 +27,16 @@ const validCtx: PrepareEnvContext = {
 };
 claudeAdapter.prepareEnv(validCtx);
 
+// Phase 5: the resolved review SHAPE (reviewAgent) is allowed — it already
+// crosses the wire on DaemonMessageClaudeSchema and is not a credential
+// kind, user or org. Must compile with NO error.
+const reviewAgentCtx: PrepareEnvContext = {
+  ...validCtx,
+  permissionMode: "review",
+  reviewAgent: { mode: "orchestrated", commandTimeoutMs: 300000, maxTurns: 40 },
+};
+claudeAdapter.prepareEnv(reviewAgentCtx);
+
 // PrepareEnvContext must never accept a userId. Nothing below the control
 // plane may branch on user identity (ADR-006 anti-deviation invariant:
 // "Nothing below the control plane may branch on credential kind, user, or
