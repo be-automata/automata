@@ -1052,3 +1052,105 @@ cost.
 `bash packages/worker/deploy/linux/orchestrated-review-acceptance.sh local`
 runs the www server-lib suite, the drift-test-unchanged check, www tsc and the
 script's own tests.
+
+## Audit self-healing loop — audit to issues (phase 8)
+
+The audit lane turns a scheduled repository audit into GitHub issues. The agent emits one tagged
+findings block and writes nothing; the control plane parses it, decides, persists and is the only
+writer (ADR-010). Everything ships OFF and in dry-run first. Nothing here is run by an agent.
+
+**Rollout (operator, in this order; each step is gated on the previous one).**
+
+1. Production is never migrated by CI. BEFORE merging or deploying anything, push the schema to
+   production by hand from the PR head: `DATABASE_URL=<prod> pnpm -C packages/shared exec drizzle-kit push --config drizzle.config.ts`.
+   Read the statement list first: it must add tables and nullable columns and contain no DROP.
+   This one push covers the phase 8 tables and settings columns AND the phase 9 columns. The prod
+   URL is a write-only Worker secret; obtain it out of band.
+2. Gate the deploy on it: `DATABASE_URL=<prod> pnpm exec tsx deploy/assert-schema-ready.ts` must
+   exit 0 with no MISSING line. It fails closed on an unset URL or an unreachable database.
+3. Merge the PR.
+4. Deploy www with the usual recipe. Confirm the new deployment is live: the deployed `BUILD_ID`
+   must match the merge commit's build, and `wrangler deployments list` must show a deployment
+   created after the merge time. Probe the webhook: an unsigned
+   `curl -s -o /dev/null -w '%{http_code}' -X POST <www>/api/webhooks/github` must print 401.
+5. Deploy the worker ONLY on an idle box. As root, `ls -d /sys/fs/cgroup/system.slice/automata-worker.service/run-* 2>/dev/null | wc -l`
+   must print 0; never restart mid-review (a wedged restart costs about 35 minutes), and note
+   `systemctl show -p NRestarts --value automata-worker.service` before and after.
+6. Turn the global flag on: set the `selfHealLoop` feature flag in Admin → Feature flags. With the
+   repo mode still `off` nothing happens.
+7. Push the audit skill per repo, canary repo only first. Record the repo's current audit-findings
+   version id as the rollback target, then
+   `DATABASE_URL=<...> pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> audit-findings deploy/skills/audit-findings/SKILL.md`.
+8. Create the scheduled automation for the canary repo that runs the audit-findings skill (the
+   audit-findings skill name must be the automation's skill). Keep the run window
+   (default 02:00-06:00) so audits stay off review hours.
+9. In Admin → Review → Self-heal, set the canary repo's mode to `dry-run`. Leave every other field
+   inherited. Do not set `on` in this phase.
+
+**Pre-flight checklist (no fix loop yet).**
+
+- The org kill switch is OFF but reachable: you know where the Drain button is (Admin → Review →
+  Self-heal → Activity).
+- GitHub App permissions on the canary: issues write, contents read, metadata read. A missing
+  permission trips the permission latch and the run reports `missing-permission` instead of writing.
+- The repo's default-branch protection is understood: the lane never pushes in phase 8.
+- No other automation or person depends on the labels below.
+
+**Labels** (created on first use by the writer): `automata:finding`, `automata:auto-fix`,
+`needs-human-approve`, `automata:wontfix`, `automata:paused`, and `audit:<name>`. The lane NEVER
+applies `bug` or `enhancement`.
+
+**SLOs.**
+
+| SLO   | Objective                                                                                                                                          |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SLO-1 | Review p95 queue+run during self-heal windows is at most baseline + 5 min; zero reviews killed by `executionTimeout` while waiting at the box lock |
+| SLO-2 | The writer applies all decisions within 15 min of audit finish (finish hook plus the `*/10` drainer)                                               |
+| SLO-3 | Zero duplicate issues per fingerprint                                                                                                              |
+| SLO-4 | Zero agent-authored GitHub writes                                                                                                                  |
+
+**Dry-run exit criteria** (all must hold on the canary before anything is switched on):
+
+- at least 3 (≥ 3) COMPLETE dry-run audits;
+- zero unparseable runs;
+- fingerprint churn at most 10% between consecutive complete runs (the Activity view highlights
+  chips over 10%);
+- every `would_create` has been read by the operator and judged a real, correctly worded finding;
+- zero `automata:finding` issues exist on GitHub (dry-run writes nothing).
+
+Evidence: `bash packages/worker/deploy/linux/self-heal-acceptance.sh local` (developer gate),
+`... box --since "<time>"` as root on the box (read-only; checks the platform checks ran and posted
+before the daemon spawned and that no journal line carries the check token), and
+`... github --repo <owner/repo> --since <YYYY-MM-DDTHH:MM:SSZ> --bot <login>` from the laptop (GETs
+only; checks authorship, one issue per fingerprint, marker on line 1, no closing keyword or
+mention, label hygiene, no duplicate comment marker). Each ends `ACCEPTANCE: PASS`.
+
+**Retention** (the cron prunes; pending rows are never pruned):
+
+| Rows                                       | Kept for |
+| ------------------------------------------ | -------- |
+| Applied or failed outbox effects           | 30 days  |
+| Breaker events                             | 30 days  |
+| Finished audit runs (with their decisions) | 90 days  |
+
+**Reading the settings actor log.** Every accepted change to the self-heal fields writes one row
+with the actor, the scope (`*` or the repo) and the FIELD NAMES changed, never the values of
+secrets (there are none). Admin → Review → Self-heal → Activity shows the last 20 entries per
+repo; `GET /api/self-heal/<owner>/<repo>?format=export` (org admin) returns the runs, ledger,
+effects and attempts for offline review (capped at 500).
+
+**Stop, Drain, bulk-clean, rollback, re-arm.**
+
+- Stop (instant, writes nothing further): set the org kill switch on the org default row, or turn
+  the `selfHealLoop` flag off. Both turn the next decision into outcome `killed`.
+- Drain (Admin → Review → Self-heal → Activity, org scope): sets the kill switch FIRST, then
+  cancels live self-heal runs. Use it when an audit is misbehaving right now. A breaker banner has
+  its own Reset button; reset only after the cause is understood.
+- Bulk-clean (only if issues were filed that should not exist): with the switch on, list with
+  `gh issue list --repo <owner/repo> --label automata:finding --state open --json number`, review,
+  then close them yourself with a comment. Do not delete ledger rows by hand.
+- Rollback order, always in this order: flag off → disable the audit automations → revert the
+  audit-findings skill version in the dashboard skill panel → revert www → roll back the worker
+  (idle box only). An older www would not understand the stamped runs.
+- Re-arm: clear the kill switch, turn the flag on, set the repo back to `dry-run` and repeat the
+  exit criteria before `on`. A tripped breaker needs its Reset.
