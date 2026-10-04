@@ -69,16 +69,31 @@ function asRecord(payload: unknown): Record<string, unknown> {
     : {};
 }
 
+/**
+ * The run's claim moved on (released at the hook deadline, or re-leased by
+ * another invocation): this invocation must not add sightings or check passes,
+ * or one audit could cast two consensus votes.
+ */
+export class StaleAuditClaimError extends Error {
+  constructor(public readonly runId: string) {
+    super(`audit run claim is no longer held: ${runId}`);
+    this.name = "StaleAuditClaimError";
+  }
+}
+
 export function createDbAuditLedger({
   db,
   organizationId,
   repoFullName,
   runId,
+  claimCount,
 }: {
   db: DB;
   organizationId: string;
   repoFullName: string;
   runId: string;
+  /** When set, `persist` commits only while this claim is still held. */
+  claimCount?: number;
 }): AuditLedger {
   async function findRow(
     effect: Pick<AuditEffectRow, "findingId" | "fingerprint">,
@@ -111,6 +126,24 @@ export function createDbAuditLedger({
         // A drizzle transaction handle is a database for these helpers; their
         // own withSelfHealTx nests as a savepoint, so everything stays atomic.
         const txDb = tx as unknown as DB;
+        if (claimCount !== undefined) {
+          const [held] = await tx
+            .select({
+              status: auditRuns.status,
+              claimCount: auditRuns.claimCount,
+            })
+            .from(auditRuns)
+            .where(
+              and(
+                eq(auditRuns.id, runId),
+                eq(auditRuns.organizationId, organizationId),
+              ),
+            )
+            .for("update");
+          if (held?.status !== "claimed" || held.claimCount !== claimCount) {
+            throw new StaleAuditClaimError(runId);
+          }
+        }
         const idByFingerprint = new Map<string, string>();
         for (const finding of batch.inserts) {
           const row = await insertFinding({

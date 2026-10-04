@@ -39,6 +39,7 @@ const h = vi.hoisted(() => ({
   capability: { value: { ok: true, installationId: 77 } as unknown },
   mintFails: { value: false },
   executeImpl: { value: null as null | (() => Promise<unknown>) },
+  isPrivateImpl: { value: null as null | (() => Promise<boolean>) },
 }));
 
 vi.mock("@/lib/posthog-server", () => ({
@@ -76,7 +77,9 @@ vi.mock("./self-heal-preflight", () => ({
 vi.mock("./issue-writer", () => ({
   createIssueWriter: vi.fn(() => ({
     readIssueStates: vi.fn(async () => new Map()),
-    isPrivateRepo: vi.fn(async () => false),
+    isPrivateRepo: vi.fn(async () =>
+      h.isPrivateImpl.value ? h.isPrivateImpl.value() : false,
+    ),
   })),
 }));
 vi.mock("./audit-ledger", () => ({
@@ -108,6 +111,7 @@ const threads = await import("@terragon/shared/model/threads");
 const octokit = await import("./self-heal-octokit");
 const preflight = await import("./self-heal-preflight");
 const executor = await import("./execute-audit-findings");
+const ledgerModule = await import("./audit-ledger");
 const { handleAuditFindingsAtFinish, getAuditFindingsStamp } = await import(
   "./audit-finish"
 );
@@ -174,6 +178,7 @@ beforeEach(() => {
   h.capability.value = { ok: true, installationId: 77 };
   h.mintFails.value = false;
   h.executeImpl.value = null;
+  h.isPrivateImpl.value = null;
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -392,6 +397,28 @@ describe("handleAuditFindingsAtFinish", () => {
       status: "done",
       outcome: "applied_partial",
     });
+  });
+
+  it("W1: a claim released at the deadline never reaches the executor, even when the pipeline resumes", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-04T10:00:00Z") });
+    h.isPrivateImpl.value = () =>
+      new Promise((resolve) => setTimeout(() => resolve(false), 30_000));
+    const running = call();
+    await vi.advanceTimersByTimeAsync(20_999);
+    await running;
+    expect(audit.releaseAuditRunClaim).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(executor.executeAuditFindings).not.toHaveBeenCalled();
+    expect(audit.finishAuditRun).not.toHaveBeenCalled();
+  });
+
+  it("W1: the ledger and the finish are fenced on this invocation's claim", async () => {
+    h.run.value = { id: "run_1", claimCount: 3, checkResults: null };
+    await call();
+    expect(
+      vi.mocked(ledgerModule.createDbAuditLedger).mock.calls[0]![0],
+    ).toMatchObject({ runId: "run_1", claimCount: 3 });
+    expect(lastFinish()).toMatchObject({ claimCount: 3 });
   });
 
   it("an executor that throws finishes the run failed with a redacted error and resolves", async () => {

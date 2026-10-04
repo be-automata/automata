@@ -16,8 +16,8 @@ import {
  * sleeping in process.
  *
  * The shared per-call Octokit helpers in lib/github are forbidden in the
- * self-heal lane (they mint per call and keep the retry policy); a grep gate
- * enforces it. The token is the App
+ * self-heal lane (they mint per call and keep the retry policy);
+ * no-shared-octokit.static.test.ts enforces it. The token is the App
  * installation token only, so no write is ever attributed to a human.
  */
 export const SELF_HEAL_OCTOKIT_OPTIONS = {

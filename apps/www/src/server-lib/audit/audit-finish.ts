@@ -173,6 +173,7 @@ export async function handleAuditFindingsAtFinish({
         db,
         organizationId: state.organizationId,
         id: state.run.id,
+        claimCount: state.run.claimCount,
         ...finish,
       });
     } catch (error) {
@@ -411,6 +412,7 @@ export async function handleAuditFindingsAtFinish({
       organizationId,
       repoFullName,
       runId: run.id,
+      claimCount: run.claimCount,
     });
     const writer = createIssueWriter({
       octokit,
@@ -430,6 +432,16 @@ export async function handleAuditFindingsAtFinish({
     );
     const isPrivate = await writer.isPrivateRepo();
 
+    // W1: the deadline may have released the claim while we were reading
+    // GitHub. The check and the flag are synchronous with the timeout's
+    // executorStarted test, so exactly one of the two wins: a released run is
+    // reprocessed by the sweep, never also counted here.
+    if (state.closed) {
+      console.log("[audit-findings] claim released at the deadline", {
+        threadId,
+      });
+      return;
+    }
     state.executorStarted = true;
     const summary: AuditExecutionSummary = await executeAuditFindings({
       deps: {
