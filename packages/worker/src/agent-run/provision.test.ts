@@ -476,3 +476,133 @@ describe("provisionWorkdir — a stale workdir is renamed, never removed in plac
     await expect(fs.stat(workdir)).resolves.toBeTruthy();
   });
 });
+
+/**
+ * LINUX ACL MASK TRAP on the run's TMPDIR. `<workdir>/tmp` is created 0700, and
+ * on Linux a 0700 creation mode zeroes the POSIX ACL mask — the grant inherited
+ * from the workdir's default ACL is born `#effective:---`, so the agent cannot
+ * use its own TMPDIR. The run HOME and gh-config re-grant after mkdir for the
+ * same reason; tmp never did.
+ */
+describe("provisionWorkdir — the run TMPDIR is re-granted on Linux", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-tmp-grant-"));
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  async function provisionOn(
+    platform: NodeJS.Platform,
+    agentUser: string,
+  ): Promise<{ calls: string[][]; workdir: string }> {
+    const calls: string[][] = [];
+    const workdir = await provisionWorkdir({
+      repoFullName: "o/r",
+      branch: "main",
+      installationToken: "t",
+      workdirRoot: root,
+      runId: "thr_tmp",
+      agentUser,
+      workerLogin: "the-operator",
+      platform,
+      aceExec: async (file, args) => {
+        calls.push([file, ...args]);
+      },
+      runGit: async (args) => {
+        calls.push(["git", args.includes("clone") ? "clone" : "other"]);
+        return { stdout: "", stderr: "" };
+      },
+    });
+    return { calls, workdir };
+  }
+
+  it("restores the agent's access entry on tmp AFTER creating it", async () => {
+    const { calls, workdir } = await provisionOn("linux", "automata-agent");
+    const tmp = path.join(workdir, "tmp");
+    const regrant = calls.findIndex(
+      (c) =>
+        c[0] === "/usr/bin/setfacl" &&
+        c[1] === "-m" &&
+        c[2] === "u:automata-agent:rwx" &&
+        c[3] === tmp,
+    );
+    expect(regrant).toBeGreaterThan(calls.findIndex((c) => c[0] === "git"));
+    expect((await fs.stat(tmp)).isDirectory()).toBe(true);
+  });
+
+  it("no re-grant on macOS (the inherited ACE survives the mode)", async () => {
+    const { calls, workdir } = await provisionOn("darwin", "automata-agent");
+    const tmp = path.join(workdir, "tmp");
+    expect(calls.some((c) => c.includes(tmp))).toBe(false);
+  });
+
+  it("no ACL call at all when agentUser is empty", async () => {
+    const { calls } = await provisionOn("linux", "");
+    expect(calls).toEqual([["git", "clone"]]);
+  });
+});
+
+describe("provisionWorkdir — run-owned dirs are excluded from git", () => {
+  let root: string;
+  let origin: string;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-exclude-"));
+    origin = path.join(root, "origin");
+    await fs.mkdir(origin, { recursive: true });
+    const git = (args: string[]) =>
+      execFileAsync("git", ["-C", origin, ...args]);
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "t@t"]);
+    await git(["config", "user.name", "t"]);
+    await fs.writeFile(path.join(origin, "app.txt"), "hello\n");
+    await git(["add", "app.txt"]);
+    await git(["commit", "-q", "-m", "init"]);
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it.each([
+    ["default mode", ""],
+    ["agent-uid mode", "_automata-agent"],
+  ])(
+    "%s: home/, gh-config/ and tmp/ never show as untracked",
+    async (_label, agentUser) => {
+      const workdir = await provisionWorkdir({
+        repoFullName: "irrelevant/local",
+        branch: "main",
+        installationToken: "unused",
+        workdirRoot: path.join(root, "runs"),
+        runId: "thr_x",
+        agentUser,
+        // Pinned off-Linux/off-macOS: this test is about git, not ACLs.
+        platform: "freebsd",
+        aceExec: async () => {},
+        runGit: (args) =>
+          execFileAsync(
+            "git",
+            args.map((a) => (a.startsWith("https://github.com/") ? origin : a)),
+          ),
+      });
+      // What the worker creates after provisioning (HOME, gh-config) plus tmp.
+      for (const name of ["home", "gh-config", "tmp"]) {
+        await fs.mkdir(path.join(workdir, name, ".claude"), {
+          recursive: true,
+        });
+        await fs.writeFile(path.join(workdir, name, ".claude", "f"), "x");
+      }
+      const { stdout } = await execFileAsync("git", [
+        "-C",
+        workdir,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+      ]);
+      expect(stdout).toBe("");
+    },
+  );
+});
