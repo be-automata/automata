@@ -673,11 +673,25 @@ describe("analyse_daemon_bundle (sourced, fixture bundle)", () => {
     expect(out).toContain("FAILURES=0");
   });
 
-  it("a pre-Phase-5 bundle names what is missing", () => {
-    const out = run('args.push("--max-turns", n);\n');
-    expect(out).toContain(
-      "CHECK box staged daemon: FAIL (missing: createResultHold",
-    );
+  it.each([
+    [
+      "only createResultHold missing (pre-Phase-5 hold)",
+      'args.push("--max-turns", n);\n',
+      "(missing: createResultHold — the daemon predates Phase 5)",
+    ],
+    [
+      "only --max-turns missing",
+      "const hold = createResultHold();\n",
+      "(missing: --max-turns — the daemon predates Phase 5)",
+    ],
+    [
+      "both missing",
+      "console.log(1);\n",
+      "(missing: --max-turns createResultHold — the daemon predates Phase 5)",
+    ],
+  ])("%s: FAIL names exactly what is missing", (_label, bundle, detail) => {
+    const out = run(bundle);
+    expect(out).toContain(`CHECK box staged daemon: FAIL ${detail}`);
     expect(out).toContain("FAILURES=1");
   });
 

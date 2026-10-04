@@ -72,10 +72,11 @@ describes.
    what you have verified. Sub-agents may run in the background: collect the results
    you are waiting for before your final message.
 6. **Output.** Start the summary with one line naming the lenses you fanned out
-   and the CLIs you ran (or why you reviewed alone). Emit ONE final fenced block with the same shape as the verdict and
-   `unable_to_review` examples below, whose opening fence line is three backticks
-   immediately followed by `json review-intent` (this tag replaces the plain json
-   fence named elsewhere in this instruction), and nothing after it. If you are
+   and the CLIs you ran (or why you reviewed alone). Emit ONE final fenced block
+   with the same shape as the verdict and `unable_to_review` examples below, whose
+   opening fence line is three backticks immediately followed by
+   `json review-intent` (this tag replaces the plain json fence named elsewhere in
+   this instruction), and nothing after it. If you are
    resumed after you emitted it (a background sub-agent finished), reply with the
    identical block again and nothing else. Never commit, push or comment — the
    platform posts the one review.
