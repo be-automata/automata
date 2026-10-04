@@ -210,7 +210,7 @@ describe("daemon", () => {
     expect(killChildProcessGroupMock).not.toHaveBeenCalled();
   });
 
-  it("review-mode run strips every GitHub credential from the agent env but keeps safe.directory (#228); a normal run keeps them (#65 wiring)", async () => {
+  it("review-mode run strips every GitHub credential from the agent env but keeps safe.directory (#229); a normal run keeps them (#65 wiring)", async () => {
     // Pin the ACTUAL security property at its decision point (daemon.ts:
     // withholdGitCredentials = permissionMode === "review"), not just the
     // stripGithubCredentials helper in isolation: a review agent (emit-only,
@@ -240,7 +240,7 @@ describe("daemon", () => {
     >;
     expect(reviewEnv.GH_TOKEN).toBeUndefined();
     expect(reviewEnv.GITHUB_TOKEN).toBeUndefined();
-    // #228: safe.directory survives the strip (GIT_CONFIG_GLOBAL=/dev/null
+    // #229: safe.directory survives the strip (GIT_CONFIG_GLOBAL=/dev/null
     // means nothing else restores it), renumbered to index 0.
     expect(reviewEnv.GIT_CONFIG_COUNT).toBe("1");
     expect(reviewEnv.GIT_CONFIG_KEY_0).toBe("safe.directory");
