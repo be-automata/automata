@@ -68,7 +68,7 @@ import {
  */
 
 export const SELF_HEAL_ON_PRECONDITIONS_NOTE =
-  "On files issues on GitHub. It also needs: the selfHealLoop flag on (admin page), a protected default branch with required status checks (otherwise On runs as dry-run), and the GitHub App with issues: write. Nothing is ever merged automatically.";
+  "On files issues on GitHub. It also needs: the selfHealLoop flag on (admin page) and the GitHub App with issues: write. Branch protection is optional. Nothing is ever merged automatically.";
 
 export const KILL_SWITCH_NOTE =
   "Stops every self-heal effect for every repo in this organization";

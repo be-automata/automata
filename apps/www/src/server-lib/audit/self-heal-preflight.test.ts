@@ -2,10 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { DB } from "@terragon/shared/db";
 import type { BreakerRow } from "@terragon/shared/model/self-heal-breaker";
-import type { Octokit } from "octokit";
 
 import {
-  preflightBranchProtection,
   preflightCapabilities,
   SELF_HEAL_CAPABILITIES,
   type PreflightBreakerOps,
@@ -198,105 +196,5 @@ describe("preflightCapabilities", () => {
     expect(await run(f)).toMatchObject({ ok: true });
     expect(f.getPermissions).toHaveBeenCalledTimes(1);
     expect(f.breaker.clearPermissionLatch).toHaveBeenCalled();
-  });
-});
-
-function httpError(status: number) {
-  return Object.assign(new Error(`http ${status}`), {
-    status,
-    response: { headers: {} },
-  });
-}
-
-function octokitFor(routes: Record<string, unknown>) {
-  const request = vi.fn(async (route: string) => {
-    const hit = routes[route];
-    if (hit instanceof Error) throw hit;
-    if (hit === undefined) throw httpError(404);
-    return { data: hit, status: 200, headers: {} };
-  });
-  return { octokit: { request } as unknown as Octokit, request };
-}
-
-const BRANCH = "GET /repos/{owner}/{repo}/branches/{branch}";
-const RULES = "GET /repos/{owner}/{repo}/rules/branches/{branch}";
-
-function protect(octokit: Octokit, f = fixture()) {
-  return preflightBranchProtection({
-    octokit,
-    organizationId: ORG,
-    installationKey: KEY,
-    owner: "o",
-    repo: "r",
-    defaultBranch: "main",
-    deadlineAt: DEADLINE,
-    deps: f.deps,
-  });
-}
-
-describe("preflightBranchProtection", () => {
-  it("protected with required contexts is protected", async () => {
-    const { octokit, request } = octokitFor({
-      [BRANCH]: {
-        protected: true,
-        protection: { required_status_checks: { contexts: ["check"] } },
-      },
-    });
-    expect(await protect(octokit)).toBe("protected");
-    expect(request).toHaveBeenCalledTimes(1);
-  });
-
-  it("protected with empty checks and no ruleset rule is unprotected", async () => {
-    const { octokit } = octokitFor({
-      [BRANCH]: {
-        protected: true,
-        protection: { required_status_checks: { contexts: [], checks: [] } },
-      },
-      [RULES]: [],
-    });
-    expect(await protect(octokit)).toBe("unprotected");
-  });
-
-  it("a ruleset with required checks and a pull_request rule is protected", async () => {
-    const { octokit } = octokitFor({
-      [BRANCH]: { protected: false },
-      [RULES]: [
-        { type: "pull_request" },
-        {
-          type: "required_status_checks",
-          parameters: { required_status_checks: [{ context: "check" }] },
-        },
-      ],
-    });
-    expect(await protect(octokit)).toBe("protected");
-  });
-
-  it("a 404 on the rules endpoint means no rulesets", async () => {
-    const { octokit } = octokitFor({ [BRANCH]: { protected: false } });
-    expect(await protect(octokit)).toBe("unprotected");
-  });
-
-  it("a 5xx on the branch read is unknown", async () => {
-    const { octokit } = octokitFor({ [BRANCH]: httpError(502) });
-    expect(await protect(octokit)).toBe("unknown");
-  });
-
-  it("a 5xx on the rules read is unknown", async () => {
-    const { octokit } = octokitFor({
-      [BRANCH]: { protected: false },
-      [RULES]: httpError(500),
-    });
-    expect(await protect(octokit)).toBe("unknown");
-  });
-
-  it("never requests the administration-only protection endpoint", async () => {
-    const { octokit, request } = octokitFor({
-      [BRANCH]: { protected: false },
-      [RULES]: [],
-    });
-    await protect(octokit);
-    for (const call of request.mock.calls) {
-      expect(String(call[0])).not.toMatch(/protection/);
-    }
   });
 });

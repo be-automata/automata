@@ -127,8 +127,6 @@ export type SelfHealEffectiveReason =
   | "missing_permission"
   | "loop_audit_open"
   | "mode_dry_run"
-  | "default_branch_unprotected"
-  | "protection_unknown"
   | "on";
 
 export interface SelfHealEffective {
@@ -144,26 +142,25 @@ export interface SelfHealBreakerFlags {
   loopFixOpen: boolean;
 }
 
-export type BranchProtectionState =
-  | "protected"
-  | "unprotected"
-  | "unknown"
-  | "not_checked";
-
 export interface SelfHealEffectiveInput {
   flagEnabled: boolean;
   sideEffectsEnabled: boolean;
   shadow: boolean;
   resolved: ResolvedSelfHealRows;
   breakers: SelfHealBreakerFlags;
-  protection: BranchProtectionState;
 }
 
-/** RESILIENCE 3.4: first match wins. Pure. */
+/**
+ * RESILIENCE 3.4: first match wins. Pure.
+ *
+ * Branch protection is deliberately not an input: a free-plan account cannot
+ * protect a private repo, and the loop must not depend on it. Main is kept
+ * safe by the git-broker ref fence and the human merge, not by protection.
+ */
 export function resolveSelfHealEffective(
   input: SelfHealEffectiveInput,
 ): SelfHealEffective {
-  const { resolved, breakers, protection } = input;
+  const { resolved, breakers } = input;
   const fixAllowed = (mode: SelfHealMode) =>
     mode !== "off" && !breakers.loopFixOpen;
   const decide = (
@@ -184,10 +181,6 @@ export function resolveSelfHealEffective(
   if (resolved.settings.mode === "dry-run") {
     return decide("dry-run", "mode_dry_run");
   }
-  if (protection === "unprotected") {
-    return decide("dry-run", "default_branch_unprotected");
-  }
-  if (protection === "unknown") return decide("dry-run", "protection_unknown");
   return decide("on", "on");
 }
 
@@ -214,8 +207,7 @@ export interface SelfHealContext {
 
 /**
  * One settings read, one flag read, the installation mode and the breaker
- * reads. Everything except branch protection, which needs a GitHub call and is
- * supplied by the caller that has an Octokit.
+ * reads.
  */
 export async function loadSelfHealContext({
   db,

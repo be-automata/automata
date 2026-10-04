@@ -22,7 +22,6 @@ import { resolveBotLogin } from "../review/bot-login";
 import { AUDIT_FINDINGS_SKILL_NAME } from "../review/review-skill";
 import { createDbAuditLedger } from "./audit-ledger";
 import type { CheckOutcome } from "./decide-audit-actions";
-import { logSelfHealDecision } from "./decision-log";
 import {
   executeAuditFindings,
   type AuditExecutionSummary,
@@ -35,14 +34,10 @@ import {
 import {
   loadSelfHealContext,
   resolveSelfHealEffective,
-  type BranchProtectionState,
   type SelfHealEffective,
 } from "./resolve-self-heal";
 import { createSelfHealOctokit } from "./self-heal-octokit";
-import {
-  preflightBranchProtection,
-  preflightCapabilities,
-} from "./self-heal-preflight";
+import { preflightCapabilities } from "./self-heal-preflight";
 
 /**
  * The audit lane's finish effect (SC1, D2). Runs for a thread stamped
@@ -298,7 +293,6 @@ export async function handleAuditFindingsAtFinish({
       flagEnabled: pre.flagEnabled,
       sideEffectsEnabled: pre.sideEffectsEnabled,
       shadow: pre.shadow,
-      protection: "not_checked",
     });
     if (first.mode === "off") {
       await close({
@@ -352,7 +346,6 @@ export async function handleAuditFindingsAtFinish({
     });
     const afterLatch = resolveSelfHealEffective({
       ...ctx,
-      protection: "not_checked",
     });
     // A latch set by THIS preflight is reported as missing permission below,
     // not as an off decision, so dry-run can still produce its decisions.
@@ -378,7 +371,6 @@ export async function handleAuditFindingsAtFinish({
       const withoutLatch = resolveSelfHealEffective({
         ...ctx,
         breakers: { ...ctx.breakers, permissionLatched: false },
-        protection: "not_checked",
       });
       effective = withoutLatch;
       if (withoutLatch.mode === "off") {
@@ -395,34 +387,6 @@ export async function handleAuditFindingsAtFinish({
       if (missing.length === 0) missing.push("issues");
     }
 
-    if (effective.mode === "on") {
-      const protection = await preflightBranchProtection({
-        octokit,
-        organizationId,
-        installationKey,
-        owner,
-        repo,
-        defaultBranch: thread.repoBaseBranchName,
-        deadlineAt: deadline,
-        deps: callDeps,
-      });
-      const state2: BranchProtectionState = protection;
-      effective = resolveSelfHealEffective({ ...ctx, protection: state2 });
-      if (effective.reason !== "on") {
-        logSelfHealDecision(
-          { log: (line) => console.log(line), capture },
-          {
-            organizationId,
-            repoFullName,
-            runId: run.id,
-            fingerprint: "-",
-            decision: "gate",
-            reason: effective.reason,
-            mode: effective.mode,
-          },
-        );
-      }
-    }
     mode = effective.mode === "on" ? "on" : "dry-run";
 
     if (missing.length > 0 && mode === "on") {

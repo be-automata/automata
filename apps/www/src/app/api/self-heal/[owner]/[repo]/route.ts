@@ -168,8 +168,6 @@ export async function GET(
   const effective = resolveSelfHealEffective({
     ...selfHealContext,
     breakers: { ...selfHealContext.breakers, permissionLatched },
-    // Branch protection needs a GitHub call; the live gate evaluates it.
-    protection: "not_checked",
   });
 
   const churn = computeFingerprintChurn(
