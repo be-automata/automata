@@ -1,0 +1,2 @@
+markers=[zz-hook-sessionstart zz-hook-stop zz-hook-userpromptsubmit zz-mcp-spawned ]
+proj_write_file=ABSENT

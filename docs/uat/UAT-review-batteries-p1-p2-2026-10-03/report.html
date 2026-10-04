@@ -1,0 +1,339 @@
+<title>Review Batteries UAT</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column; verdict ledger up top, criteria as a dense table, evidence as labelled terminal captures. */
+:root {
+  --bg: #f6f7f4;
+  --surface: #ffffff;
+  --fg: #1b211d;
+  --muted: #5d675f;
+  --line: #d9ddd5;
+  --accent: #2f6b4f;
+  --code-bg: #eef0eb;
+  --pass: #1f7a46;
+  --pass-bg: #e2f2e8;
+  --warn: #8a5a00;
+  --warn-bg: #fbefd6;
+  --fail: #a3262a;
+  --fail-bg: #f9e1df;
+  --idle: #5d675f;
+  --idle-bg: #e9ece6;
+  --font-body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121613; --surface: #1a201c; --fg: #e3e8e2; --muted: #9aa59c; --line: #2c342e;
+    --accent: #7cc39c; --code-bg: #0e1210;
+    --pass: #79d3a0; --pass-bg: #163222; --warn: #e8c070; --warn-bg: #352a10;
+    --fail: #f19b96; --fail-bg: #3a1a19; --idle: #9aa59c; --idle-bg: #232a25;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121613; --surface: #1a201c; --fg: #e3e8e2; --muted: #9aa59c; --line: #2c342e;
+  --accent: #7cc39c; --code-bg: #0e1210;
+  --pass: #79d3a0; --pass-bg: #163222; --warn: #e8c070; --warn-bg: #352a10;
+  --fail: #f19b96; --fail-bg: #3a1a19; --idle: #9aa59c; --idle-bg: #232a25;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.55; }
+.wrap { max-width: 980px; margin: 0 auto; padding-inline: 16px; padding-block: 32px 64px; display: flex; flex-direction: column; gap: 40px; }
+h1, h2, h3 { text-wrap: balance; line-height: 1.2; margin: 0; }
+h1 { font-size: 1.9rem; font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 1.25rem; font-weight: 650; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+h3 { font-size: 1rem; font-weight: 650; }
+p { margin: 0; max-width: 68ch; }
+section { display: flex; flex-direction: column; gap: 14px; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+a { color: var(--accent); }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.muted { color: var(--muted); }
+
+.header { display: flex; flex-direction: column; gap: 14px; }
+.verdict-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 0.78rem; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+.pill.pass { color: var(--pass); background: var(--pass-bg); }
+.pill.warn { color: var(--warn); background: var(--warn-bg); }
+.pill.fail { color: var(--fail); background: var(--fail-bg); }
+.pill.idle { color: var(--idle); background: var(--idle-bg); }
+.pill.big { font-size: 0.95rem; padding: 6px 14px; }
+
+.ledger { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.ledger div { background: var(--surface); padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ledger dt { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.ledger dd { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
+
+.phases { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.phase { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.phase .n { font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); }
+.phase .t { font-weight: 600; font-size: 0.92rem; }
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 0.9rem; }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+th { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 500; background: var(--code-bg); }
+tr:last-child td { border-bottom: 0; }
+td.id { font-family: var(--font-mono); white-space: nowrap; }
+td.num { font-variant-numeric: tabular-nums; font-family: var(--font-mono); white-space: nowrap; }
+
+.findings { display: flex; flex-direction: column; gap: 10px; }
+.finding { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
+.finding .head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+.ev { display: flex; flex-direction: column; gap: 6px; }
+.ev .label { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.ev .file { font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); overflow-wrap: anywhere; }
+pre { margin: 0; background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; overflow-x: auto; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.5; color: var(--fg); }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.grid2 > * { min-width: 0; }
+ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 4px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+<header class="header">
+  <span class="eyebrow">UAT run · review agent batteries epic · 2026-10-03</span>
+  <h1>Review Batteries UAT</h1>
+  <div class="verdict-row">
+    <span class="pill pass big">Phase 1: PASS</span>
+    <span class="pill pass">Phase 2: evidence recorded</span>
+    <span class="pill idle">Phases 3–6: not shipped</span>
+    <span class="pill warn">No Jira ticket (GitHub-tracked)</span>
+  </div>
+  <p>Proof of work for every phase of the epic that has shipped. Phase 1 (PR #229) is merged, deployed to the production execution box and graded here against its success criteria with live evidence. Phase 2 was an evidence-only spike with no deploy; its findings are attached. Phases 3 to 6 have not shipped yet, so they have nothing to grade.</p>
+  <dl class="ledger">
+    <div><dt>Scope</dt><dd><a href="https://github.com/be-automata/automata/pull/229">PR #229</a> (merged into main)</dd></div>
+    <div><dt>Environment</dt><dd>Production execution box <span class="mono">automata-exec-1</span></dd></div>
+    <div><dt>Build</dt><dd class="mono">5f9a6d47 (contains merge)</dd></div>
+    <div><dt>Deployed</dt><dd>2026-10-03 17:16 UTC</dd></div>
+    <div><dt>Lane</dt><dd>API / backend (worker + daemon)</dd></div>
+    <div><dt>Validator</dt><dd>PASS_WITH_WARNINGS</dd></div>
+  </dl>
+</header>
+
+<section>
+  <h2>Epic phases</h2>
+  <div class="phases">
+    <div class="phase"><span class="n">Phase 1</span><span class="t">Review-lane git fix</span><span class="pill pass">Shipped · PASS</span></div>
+    <div class="phase"><span class="n">Phase 2</span><span class="t">Headless capability spike</span><span class="pill pass">Done · evidence</span></div>
+    <div class="phase"><span class="n">Phase 3</span><span class="t">Battery manifest &amp; provisioning</span><span class="pill idle">Planning</span></div>
+    <div class="phase"><span class="n">Phase 4</span><span class="t">Admin-panel settings</span><span class="pill idle">In build</span></div>
+    <div class="phase"><span class="n">Phase 5</span><span class="t">Worker &amp; daemon wiring</span><span class="pill idle">Not started</span></div>
+    <div class="phase"><span class="n">Phase 6</span><span class="t">Orchestrated prompt &amp; canary</span><span class="pill idle">Not started</span></div>
+  </div>
+</section>
+
+<section>
+  <h2>Context frame</h2>
+  <ul>
+    <li><strong>Use case under test:</strong> a PR review run on the Linux box keeps git access to its own checkout while holding no GitHub credential.</li>
+    <li><strong>Defect fixed:</strong> the credential strip for review runs removed the whole <span class="mono">GIT_CONFIG_*</span> group, including the worker's <span class="mono">safe.directory</span> entry. In agent-uid mode git then refused the checkout ("dubious ownership"), and the review agent had no diff to read.</li>
+    <li><strong>Reproduction path:</strong> push a commit to a PR on a monitored repo → the platform dispatches a review run → the worker clones as <span class="mono">automata</span> and spawns the agent as <span class="mono">automata-agent</span> → the agent reads the diff → the platform posts one review.</li>
+    <li><strong>Prior UAT records:</strong> none in <span class="mono">docs/uat/</span> reached the re-run threshold for these keys, paths and terms.</li>
+    <li><strong>Criteria source:</strong> the epic roadmap's Phase 1 success criteria and the PR #229 body. This project tracks work in GitHub and the repo's planning files, not Jira, so there is no ticket to bind.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Access manifest</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Need</th><th>Locator</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>GitHub API (PRs, reviews, CI)</td><td class="mono">gh, authenticated operator account</td><td><span class="pill pass">verified</span></td></tr>
+      <tr><td>Execution box, read-only</td><td class="mono">ssh key automata_box_ed25519 → automata-exec-1</td><td><span class="pill pass">verified</span></td></tr>
+      <tr><td>Local test run on main</td><td class="mono">UAT worktree at origin/main 9e02b6f</td><td><span class="pill pass">verified</span></td></tr>
+      <tr><td>Production database (thread lanes)</td><td class="mono">not used</td><td><span class="pill idle">not needed</span></td></tr>
+    </tbody>
+  </table></div>
+  <p class="muted">No credential values were requested or recorded. The production database was not needed: the review lane is proven by the formal reviews the runs produced (C5).</p>
+</section>
+
+<section>
+  <h2>Criteria</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>ID</th><th>Criterion</th><th>Source</th><th>Verdict</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td class="id">C1</td><td>Review-mode child env keeps <span class="mono">safe.directory</span> and <span class="mono">user.*</span>, with <span class="mono">GIT_CONFIG_COUNT</span> renumbered contiguously</td><td>Roadmap P1 SC1</td><td><span class="pill pass">PASS</span></td><td>53/53 strip tests on main (E1); live observation on #230 (E7); 12 runs, 0 ownership errors (E5)</td></tr>
+      <tr><td class="id">C2</td><td>Review-mode child env holds no GitHub token, extraheader or insteadOf entry</td><td>Roadmap P1 SC2</td><td><span class="pill pass">PASS</span></td><td>Strip tests (E1); live env observation recorded on #230 at 19:02 UTC (E7)</td></tr>
+      <tr><td class="id">C3</td><td>Daemon tests pin both behaviours; suite and type-check green</td><td>Roadmap P1 SC3</td><td><span class="pill pass">PASS</span></td><td>CI on #229: audit, check, test, worker-e2e all pass; local vitest exit 0, tsc exit 0 (E1, E2)</td></tr>
+      <tr><td class="id">C4</td><td>Production box runs a build containing the merge, and the spawned daemon bundle has the new strip code</td><td>PR #229 body</td><td><span class="pill pass">PASS</span></td><td>Box HEAD 5f9a6d47, ancestor check passes, symbol present, bundle rebuilt at worker start (E3, E6)</td></tr>
+      <tr><td class="id">C5</td><td>After the deploy, review runs read the diff and post real verdicts with no "dubious ownership"</td><td>PR #229 body</td><td><span class="pill pass">PASS</span></td><td>12 runs; 10 posted a formal review 25–45 s later, 1 was a deliberate no-verdict test, 1 was cut off when its PR closed; 0 matching errors (E4, E5)</td></tr>
+      <tr><td class="id">C6</td><td>Regression: the worker stays healthy after the deploy</td><td>Epic rollout</td><td><span class="pill pass">PASS</span></td><td>active, NRestarts 0, 0 ERROR/FATAL journal lines since 17:16:31 UTC (E3, E4)</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>Deviations</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Spec said</th><th>PR delivered</th><th>Consequence for UAT</th></tr></thead>
+    <tbody>
+      <tr><td>Fix tracked as issue #228</td><td>Commit title cites #228, but #228 is a different, merged PR (ticket-comment truncation); no separate issue exists</td><td>Traceability only; graded by PR #229 instead</td></tr>
+      <tr><td>Spawned bundle is <span class="mono">/usr/local/automata/daemon</span></td><td>The worker spawns <span class="mono">/opt/…/packages/daemon/dist/index.js</span>; the <span class="mono">/usr/local</span> copy is byte-identical</td><td>None for behaviour; recorded as validator V-1</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>Findings</h2>
+  <div class="findings">
+    <div class="finding">
+      <div class="head"><span class="pill warn">Low</span><h3>Commit title points at the wrong number</h3></div>
+      <p>The squash commit is titled "…(#228) (#229)". #228 is the ticket-comment truncation PR. Anyone following the reference lands on unrelated work. Fix going forward: reference the PR or a real issue; history is left as is.</p>
+    </div>
+    <div class="finding">
+      <div class="head"><span class="pill warn">Low</span><h3>Two copies of the daemon bundle on the box</h3></div>
+      <p>The worker spawns the <span class="mono">/opt</span> build output because <span class="mono">WORKER_DAEMON_DIST</span> is unset; <span class="mono">run-worker.sh</span> also stages an identical copy under <span class="mono">/usr/local/automata/daemon</span>. Today both match (same sha256). If they ever diverge, debugging the wrong one is easy. Worth one line in the runbook.</p>
+    </div>
+    <div class="finding">
+      <div class="head"><span class="pill idle">Info</span><h3>The worker log does not name a run's lane</h3></div>
+      <p>The validator could not tell review runs from other runs in the box journal. This run closed the gap by matching each run to the formal review it produced. Logging the lane per run would make the next UAT a single grep.</p>
+    </div>
+    <div class="finding">
+      <div class="head"><span class="pill idle">Info</span><h3>Carried into later phases from the Phase 2 spike</h3></div>
+      <p>Runs that use sub-agents emit two final results, and a lead that quotes a sub-agent can make the sub-agent's verdict block the last one the parser sees. Neither affects Phase 1. Both are now success criteria of Phases 5 and 6.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Phase 2 spike results</h2>
+  <p>Claude Code 2.1.284, the box's version, run with the review lane's exact arguments plus <span class="mono">Agent</span>, <span class="mono">Task</span> and <span class="mono">Skill</span>. Model probes ran locally on the operator's subscription; the PATH probe ran on the box. No deploy.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Q</th><th>Question</th><th>Verdict</th><th>Key evidence</th></tr></thead>
+    <tbody>
+      <tr><td class="id">Q1</td><td>User-level skills load and can be invoked</td><td><span class="pill pass">Yes</span></td><td>Skill invoked, returned its token without reading the file</td></tr>
+      <tr><td class="id">Q2</td><td>User-level agents load; sub-agent tool name</td><td><span class="pill pass">Yes</span></td><td>Tool call is named <span class="mono">Agent</span>, init lists <span class="mono">Task</span>; either alone works; two result messages per run</td></tr>
+      <tr><td class="id">Q3</td><td>PR-supplied skills, agents, hooks or MCP load under <span class="mono">--setting-sources user</span></td><td><span class="pill pass">No (safe)</span></td><td>With the flag: no markers fired. Without it: 3 hooks fired and the MCP server spawned (E9)</td></tr>
+      <tr><td class="id">Q4</td><td>Sub-agents inherit the gh / git push / Write / WebFetch denials</td><td><span class="pill pass">Yes</span></td><td>All four denied inside the sub-agent; remote got 0 refs; no file written (E9)</td></tr>
+      <tr><td class="id">Q5</td><td><span class="mono">--max-turns</span> bounds sub-agent turns</td><td><span class="pill warn">No</span></td><td>5 API turns against a limit of 3 still completed; not a cost cap</td></tr>
+      <tr><td class="id">Q6</td><td>Agent PATH on the box under the real sudo path</td><td><span class="pill pass">Yes</span></td><td>sudo <span class="mono">secure_path</span> includes <span class="mono">/usr/local/bin</span>; claude 2.1.284; shellcheck missing (E8)</td></tr>
+      <tr><td class="id">Q7</td><td>The final result carries only the lead's verdict</td><td><span class="pill warn">Partial</span></td><td>An echoed sub-agent verdict block became the last one</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>Evidence</h2>
+  <p class="muted">Every file below passed the UAT evidence collector (stable names, redaction) and is stored in this run's <span class="mono">evidence/</span> folder with a manifest.</p>
+
+  <div class="ev">
+    <div class="label"><strong>E1 · Strip tests on main</strong><span class="file">01-api-C3-daemon-vitest-on-main.txt</span></div>
+<pre> ✓ src/daemon.test.ts (36 tests) 4634ms
+ ✓ src/claude.test.ts (17 tests) 4ms
+
+ Test Files  2 passed (2)
+      Tests  53 passed (53)
+vitest_exit=0
+
+# daemon.test.ts:246 (the #228 assertion)
+expect(reviewEnv.GIT_CONFIG_KEY_0).toBe("safe.directory");</pre>
+  </div>
+
+  <div class="grid2">
+    <div class="ev">
+      <div class="label"><strong>E2 · CI on PR #229</strong><span class="file">00-api-C3-ci-checks-pr229.txt</span></div>
+<pre>audit       pass   9s
+check       pass   44s
+test        pass   8m35s
+worker-e2e  pass   2m38s
+tsc --noEmit (daemon, local)  exit 0</pre>
+    </div>
+    <div class="ev">
+      <div class="label"><strong>E3 · Deployed build on the box</strong><span class="file">03-api-C4-box-deployed-build.txt</span></div>
+<pre>deployed_head=5f9a6d47f2134963ee5e144ca128fde801b3674d
+contains_5f9a6d4=yes
+daemon_bundle_symbol_count=2
+bundle_mtime=2026-10-03 17:16:33 UTC
+worker_started=Sat Oct  3 17:16:31 2026
+ActiveState=active  NRestarts=0</pre>
+    </div>
+  </div>
+
+  <div class="ev">
+    <div class="label"><strong>E4 · Every post-deploy run and what it produced</strong><span class="file">04-api-C5-box-post-deploy-runs.txt · 05-api-C5-post-deploy-bot-reviews.json</span></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Run cloned (UTC)</th><th>Branch</th><th>PR</th><th>Result on GitHub</th></tr></thead>
+      <tbody>
+        <tr><td class="num">18:59:39</td><td class="mono">chore/uat-229-review-git-access</td><td>#230</td><td>APPROVED 19:00:07</td></tr>
+        <tr><td class="num">19:01:12</td><td class="mono">chore/uat-229-review-git-access</td><td>#230</td><td class="muted">PR closed 19:02 before a verdict</td></tr>
+        <tr><td class="num">19:06:50</td><td class="mono">fix/github-user-token-refresh</td><td>#231</td><td>review 19:07:28 (later dismissed)</td></tr>
+        <tr><td class="num">19:21:58</td><td class="mono">fix/non-verdict-never-a-review</td><td>#232</td><td>APPROVED 19:22:38</td></tr>
+        <tr><td class="num">20:31:43</td><td class="mono">fix/github-user-token-refresh</td><td>#231</td><td>review 20:32:22 (later dismissed)</td></tr>
+        <tr><td class="num">20:32:27</td><td class="mono">chore/uat-232-no-verdict-notice</td><td>#233</td><td>APPROVED 20:32:52</td></tr>
+        <tr><td class="num">20:35:10</td><td class="mono">fix/github-user-token-refresh</td><td>#231</td><td>review 20:35:51 (later dismissed)</td></tr>
+        <tr><td class="num">20:55:04</td><td class="mono">chore/uat-adr-009-do-not-merge</td><td>#234</td><td class="muted">deliberate no-verdict test: one notice, no review</td></tr>
+        <tr><td class="num">21:06:20</td><td class="mono">chore/uat-adr-009-do-not-merge</td><td>#234</td><td>CHANGES_REQUESTED 21:07:06</td></tr>
+        <tr><td class="num">22:14:25</td><td class="mono">fix/github-user-token-refresh</td><td>#231</td><td>review 22:15:06 (later dismissed)</td></tr>
+        <tr><td class="num">22:18:14</td><td class="mono">fix/github-user-token-refresh</td><td>#231</td><td>APPROVED 22:18:51</td></tr>
+        <tr><td class="num">23:00:55</td><td class="mono">fix/sweep-reposts-dismissed-verdicts</td><td>#235</td><td>APPROVED 23:01:21</td></tr>
+      </tbody>
+    </table></div>
+    <p class="muted">Two further COMMENTED reviews on #231 at 21:00 are the hourly sweep re-stating earlier verdicts after the PR advanced; no run produced them.</p>
+  </div>
+
+  <div class="grid2">
+    <div class="ev">
+      <div class="label"><strong>E5 · Box journal since the deploy</strong><span class="file">04-api-C5-box-post-deploy-runs.txt</span></div>
+<pre>runs_cloned=12
+runs_daemon_spawned=12
+dubious_lines=0
+error_lines=0</pre>
+    </div>
+    <div class="ev">
+      <div class="label"><strong>E6 · Production validator</strong><span class="file">12-validator-C4-production-validator.md</span></div>
+<pre>VERDICT: PASS_WITH_WARNINGS
+code lens: no mock/stub/TODO in the
+  delivered path (scanner proven on a
+  planted marker)
+infra lens: bundle defines and calls
+  isCredentialGitConfigKey; call site
+  wired; NRestarts=0</pre>
+    </div>
+  </div>
+
+  <div class="ev">
+    <div class="label"><strong>E7 · Live environment observation on #230</strong><span class="file">13-api-C2-pr230-live-env-observation.txt</span></div>
+<pre>Observed: the review agent's child env had safe.directory for its checkout,
+no GH_TOKEN/GITHUB_TOKEN, no extraheader/insteadOf entries, and git worked
+as the agent uid.</pre>
+    <p class="muted">Recorded by the operator's session when closing the throwaway PR, 2026-10-03 19:02 UTC. A run's environment is destroyed at teardown, so it cannot be re-read now.</p>
+  </div>
+
+  <div class="grid2">
+    <div class="ev">
+      <div class="label"><strong>E8 · Box PATH probe (Phase 2 Q6)</strong><span class="file">07-infra-P2-box-q6-path-probe.txt</span></div>
+<pre>inflight_runs=0  NRestarts 0 → 0
+secure_path=/usr/local/sbin:/usr/local/bin:
+  /usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+inner_user=automata-agent
+claude=/usr/local/bin/claude  2.1.284
+LOCALBIN_ON_PATH=yes
+shellcheck=MISSING</pre>
+    </div>
+    <div class="ev">
+      <div class="label"><strong>E9 · Security probes (Phase 2 Q3, Q4)</strong><span class="file">08–11-infra-P2-*-checks.txt</span></div>
+<pre># Q4 sub-agent / lead
+remote_refs=0  write_probe_file=ABSENT
+remote_refs=0  write_probe_file=ABSENT
+# Q3 with --setting-sources user
+markers=[]
+# Q3 control, flag removed
+markers=[sessionstart stop userpromptsubmit
+         mcp-spawned]</pre>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Terraform drift</h2>
+  <p>Not applicable: the repository has no <span class="mono">*.tf</span> files. The box is provisioned by cloud-init and systemd units checked into <span class="mono">packages/worker/deploy/linux/</span>.</p>
+</section>
+
+</div>

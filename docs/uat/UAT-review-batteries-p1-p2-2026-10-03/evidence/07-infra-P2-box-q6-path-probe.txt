@@ -1,0 +1,37 @@
+NRestarts_before=0
+inflight_runs=0
+worker_user=automata
+worker_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+worker_CLAUDE_BIN=
+claude_bin_dir=
+pre_sudo_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+sudo_version=Sudo version 1.9.15p5
+--- sudo -l for the worker user (Defaults: secure_path / env_keep / setenv) ---
+Matching Defaults entries for automata on automata-exec-1:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+Runas and Command-specific defaults for automata:
+    Defaults!/usr/bin/sh !use_pty, !log_output, !log_input, !pam_session, !pam_setcred
+    Defaults!/usr/bin/kill !use_pty, !log_output, !log_input
+
+User automata may run the following commands on automata-exec-1:
+    (automata-agent) SETENV: NOPASSWD: <redacted>
+    (automata-agent) NOPASSWD: <redacted>
+--- via worker user automata ---
+inner_user=automata-agent HOME=/tmp/zz-spike-home.IaM8Je
+inner_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+claude=/usr/local/bin/claude
+git=/usr/bin/git
+node=/usr/bin/node
+npm=/usr/bin/npm
+npx=/usr/bin/npx
+gh=/usr/bin/gh
+jq=/usr/bin/jq
+shellcheck=MISSING
+LOCALBIN_ON_PATH=yes
+claude_realpath=/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+claude_pkg_version=UNKNOWN (no package.json next to /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe)
+2.1.284 (Claude Code)
+home_entries=[inner.sh ]
+NRestarts_after=0
+box_probe_done

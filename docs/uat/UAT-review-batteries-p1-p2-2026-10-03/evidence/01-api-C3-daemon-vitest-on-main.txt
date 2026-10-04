@@ -1,0 +1,15 @@
+
+ RUN  v3.2.7 <repo>/packages/daemon
+
+ ✓ src/daemon.test.ts (36 tests) 4634ms
+   ✓ daemon > Multiple process tracking > should kill only the corresponding process when stop message is received  307ms
+   ✓ daemon > Multiple process tracking > should flush buffered messages per thread when multiple processes emit output  361ms
+   ✓ daemon > Multiple process tracking > should send custom-stop message only for the stopped process  306ms
+ ✓ src/claude.test.ts (17 tests) 4ms
+
+ Test Files  2 passed (2)
+      Tests  53 passed (53)
+   Start at  19:00:22
+   Duration  5.02s (transform 100ms, setup 0ms, collect 180ms, tests 4.64s, environment 0ms, prepare 57ms)
+
+vitest_exit=0

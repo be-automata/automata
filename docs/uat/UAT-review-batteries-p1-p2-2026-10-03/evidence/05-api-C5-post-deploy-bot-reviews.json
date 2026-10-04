@@ -1,0 +1,98 @@
+[
+  {
+    "commit": "76de26a",
+    "dubious": false,
+    "excerpt": "Adds `findAnyBotReviewAtCommit`, which matches a bot review at a commit in any state including DISMISSED. The replay guard, the supersession",
+    "pr": 235,
+    "state": "APPROVED",
+    "submitted_at": "2026-10-03T23:01:21Z"
+  },
+  {
+    "commit": "b4eebf1",
+    "dubious": false,
+    "excerpt": "The refresh logic is sound. It refreshes only when the access token has expired, sends the plaintext refresh token to GitHub and stores the ",
+    "pr": 231,
+    "state": "DISMISSED",
+    "submitted_at": "2026-10-03T19:07:28Z"
+  },
+  {
+    "commit": "6c7db53",
+    "dubious": false,
+    "excerpt": "The refresh logic is sound. It decrypts and re-encrypts the tokens itself, checks the 200-with-error body, guards the write with a compare-a",
+    "pr": 231,
+    "state": "DISMISSED",
+    "submitted_at": "2026-10-03T20:32:22Z"
+  },
+  {
+    "commit": "96078b5",
+    "dubious": false,
+    "excerpt": "The refresh logic is sound and well tested. It decrypts the refresh token before sending it to GitHub and re-encrypts the rotated pair. It c",
+    "pr": 231,
+    "state": "DISMISSED",
+    "submitted_at": "2026-10-03T20:35:51Z"
+  },
+  {
+    "commit": "b4eebf1",
+    "dubious": false,
+    "excerpt": "_Intended verdict: **request_changes**, reviewed at `b4eebf13904e9176a827ea3319e0dcb815918a4f`; the PR has since advanced to `e4b3082a1af0d5",
+    "pr": 231,
+    "state": "COMMENTED",
+    "submitted_at": "2026-10-03T21:00:43Z"
+  },
+  {
+    "commit": "6c7db53",
+    "dubious": false,
+    "excerpt": "_Intended verdict: **request_changes**, reviewed at `6c7db538e40142939d832b42a6d9bba9f0284699`; the PR has since advanced to `e4b3082a1af0d5",
+    "pr": 231,
+    "state": "COMMENTED",
+    "submitted_at": "2026-10-03T21:00:49Z"
+  },
+  {
+    "commit": "65c814e",
+    "dubious": false,
+    "excerpt": "The refresh logic is sound. The expired-token path refreshes with the decrypted refresh token and re-encrypts the rotated pair. The compare-",
+    "pr": 231,
+    "state": "DISMISSED",
+    "submitted_at": "2026-10-03T22:15:06Z"
+  },
+  {
+    "commit": "ebb9cee",
+    "dubious": false,
+    "excerpt": "I read the full diff and found no defects. The refresh path in `getGitHubUserAccessTokenOrThrow` decrypts the stored refresh token before se",
+    "pr": 231,
+    "state": "APPROVED",
+    "submitted_at": "2026-10-03T22:18:51Z"
+  },
+  {
+    "commit": "9df0b70",
+    "dubious": false,
+    "excerpt": "The PR adds one docs file, docs/uat/UAT-ADR-009-notice.md. The file calls itself a throwaway record and says the notice should be removed. T",
+    "pr": 234,
+    "state": "CHANGES_REQUESTED",
+    "submitted_at": "2026-10-03T21:07:06Z"
+  },
+  {
+    "commit": "93d3957",
+    "dubious": false,
+    "excerpt": "`git diff origin/main...HEAD` is empty. The only commit, 93d3957, is an intentionally empty UAT commit used to observe a no-verdict review r",
+    "pr": 233,
+    "state": "APPROVED",
+    "submitted_at": "2026-10-03T20:32:52Z"
+  },
+  {
+    "commit": "e682e9c",
+    "dubious": false,
+    "excerpt": "I found no defects. A run with no verdict now becomes a marked PR-conversation notice instead of a COMMENTED review. I reviewed the executor",
+    "pr": 232,
+    "state": "APPROVED",
+    "submitted_at": "2026-10-03T19:22:38Z"
+  },
+  {
+    "commit": "6b0bfb8",
+    "dubious": false,
+    "excerpt": "The PR adds one markdown file, docs/uat/UAT-229-review-git-access.md. It is a throwaway UAT record that triggers a live review run, and the ",
+    "pr": 230,
+    "state": "APPROVED",
+    "submitted_at": "2026-10-03T19:00:07Z"
+  }
+]
