@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getTenantContextOrNull } from "@/lib/auth-server";
 import { listRepoReviewSettings } from "@terragon/shared/model/repo-review-settings";
+import { toRepoReviewSettingDto } from "./review-settings-route-shared";
 
 /**
  * GET /api/review-settings
@@ -25,18 +26,6 @@ export async function GET(): Promise<NextResponse> {
     organizationId: ctx.organizationId,
   });
   return NextResponse.json({
-    settings: rows.map((r) => ({
-      repoFullName: r.repoFullName,
-      blockTolerance: r.blockTolerance,
-      reviewDraftPrs: r.reviewDraftPrs,
-      supersedePolicy: r.supersedePolicy,
-      recheckOnComplete: r.recheckOnComplete,
-      reviewMode: r.reviewMode,
-      reviewBatteries: r.reviewBatteries,
-      reviewRunTests: r.reviewRunTests,
-      reviewCommandTimeoutS: r.reviewCommandTimeoutS,
-      reviewMaxTurns: r.reviewMaxTurns,
-      updatedAt: r.updatedAt,
-    })),
+    settings: rows.map(toRepoReviewSettingDto),
   });
 }

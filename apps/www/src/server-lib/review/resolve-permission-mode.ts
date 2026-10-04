@@ -8,6 +8,7 @@ import {
   isPermissionMode,
   type PermissionMode,
   type PermissionContext,
+  type TrustedAuthorThreshold,
 } from "@terragon/review/settings/permission-floor";
 
 /**
@@ -121,10 +122,8 @@ export async function resolvePermissionModeForDispatch({
  * the locked "MEMBER" default via
  * `resolveComposedTrustedAuthorThreshold(undefined, undefined)` — exactly
  * today's behavior for the review-severity axis.
- * Exported for resolve-review-agent.ts, which reuses it for the phase 4
- * runTests trust gate.
  */
-export async function resolveTrustedAuthorThreshold({
+async function resolveTrustedAuthorThreshold({
   db,
   organizationId,
   repoFullName,
@@ -142,6 +141,18 @@ export async function resolveTrustedAuthorThreshold({
       ? getRepoReviewSetting({ db, organizationId, repoFullName })
       : Promise.resolve(undefined),
   ]);
+  return composeTrustedAuthorThreshold(orgRow, repoRow);
+}
+
+/**
+ * The pure composition behind {@link resolveTrustedAuthorThreshold}, for
+ * callers that already hold the rows. Exported for resolve-review-agent.ts
+ * (the phase 4 runTests trust gate), which has the repo row from its own read.
+ */
+export function composeTrustedAuthorThreshold(
+  orgRow: { trustedAuthorThreshold: string | null } | undefined,
+  repoRow: { trustedAuthorThreshold: string | null } | undefined,
+): TrustedAuthorThreshold {
   return resolveComposedTrustedAuthorThreshold(
     orgRow?.trustedAuthorThreshold
       ? { trustedAuthorThreshold: orgRow.trustedAuthorThreshold }

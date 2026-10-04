@@ -12,7 +12,12 @@ import {
   parseReviewAgentPatch,
   parseReviewDraftPrs,
   parseSupersedePatch,
-} from "../supersede-route-shared";
+} from "../review-settings-route-shared";
+import {
+  pickReviewAgentFields,
+  type ReviewAgentField,
+} from "@terragon/shared/model/review-agent-settings";
+import type { RepoReviewSetting } from "@terragon/shared/db/types";
 import { getPostHogServer } from "@/lib/posthog-server";
 
 /**
@@ -31,26 +36,12 @@ import { getPostHogServer } from "@/lib/posthog-server";
  * null = inherit the system default. Same admin gate, same fences.
  */
 
-function toDto(row: {
-  supersedePolicy: string | null;
-  recheckOnComplete: boolean;
-  reviewDraftPrs: boolean | null;
-  reviewMode: string | null;
-  reviewBatteries: string[] | null;
-  reviewRunTests: boolean | null;
-  reviewCommandTimeoutS: number | null;
-  reviewMaxTurns: number | null;
-  updatedAt: Date;
-}) {
+function toDto(row: RepoReviewSetting) {
   return {
     supersedePolicy: row.supersedePolicy,
     recheckOnComplete: row.recheckOnComplete,
     reviewDraftPrs: row.reviewDraftPrs,
-    reviewMode: row.reviewMode,
-    reviewBatteries: row.reviewBatteries,
-    reviewRunTests: row.reviewRunTests,
-    reviewCommandTimeoutS: row.reviewCommandTimeoutS,
-    reviewMaxTurns: row.reviewMaxTurns,
+    ...pickReviewAgentFields(row),
     updatedAt: row.updatedAt,
   };
 }
@@ -102,13 +93,8 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     supersedePolicy?: unknown;
     recheckOnComplete?: unknown;
     reviewDraftPrs?: unknown;
-    reviewMode?: unknown;
-    reviewBatteries?: unknown;
-    reviewRunTests?: unknown;
-    reviewCommandTimeoutS?: unknown;
-    reviewMaxTurns?: unknown;
     expectedUpdatedAt?: unknown;
-  };
+  } & Partial<Record<ReviewAgentField, unknown>>;
   try {
     body = await request.json();
   } catch {
@@ -185,11 +171,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       supersedePolicy: row.supersedePolicy,
       recheckOnComplete: row.recheckOnComplete,
       reviewDraftPrs: row.reviewDraftPrs,
-      reviewMode: row.reviewMode,
-      reviewBatteries: row.reviewBatteries,
-      reviewRunTests: row.reviewRunTests,
-      reviewCommandTimeoutS: row.reviewCommandTimeoutS,
-      reviewMaxTurns: row.reviewMaxTurns,
+      ...pickReviewAgentFields(row),
       changed: Object.keys(patch),
     },
   });

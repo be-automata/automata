@@ -11,9 +11,13 @@ import {
   parseReviewAgentPatch,
   parseReviewDraftPrs,
   parseSupersedePatch,
-  type ReviewAgentPatch,
-} from "../../supersede-route-shared";
-import { REVIEW_AGENT_FIELDS } from "@terragon/shared/model/review-agent-settings";
+  toRepoReviewSettingDto,
+} from "../../review-settings-route-shared";
+import {
+  REVIEW_AGENT_FIELDS,
+  type ReviewAgentField,
+  type ReviewAgentFieldsPatch,
+} from "@terragon/shared/model/review-agent-settings";
 import { isOrgAdmin } from "@/lib/org-role";
 import { checkRepoAdmin } from "@/lib/repo-admin";
 import {
@@ -92,13 +96,8 @@ export async function PUT(
     reviewDraftPrs?: unknown;
     supersedePolicy?: unknown;
     recheckOnComplete?: unknown;
-    reviewMode?: unknown;
-    reviewBatteries?: unknown;
-    reviewRunTests?: unknown;
-    reviewCommandTimeoutS?: unknown;
-    reviewMaxTurns?: unknown;
     expectedUpdatedAt?: unknown;
-  };
+  } & Partial<Record<ReviewAgentField, unknown>>;
   try {
     body = await request.json();
   } catch {
@@ -110,7 +109,7 @@ export async function PUT(
     reviewDraftPrs?: boolean | null;
     supersedePolicy?: string | null;
     recheckOnComplete?: boolean;
-  } & ReviewAgentPatch = {};
+  } & ReviewAgentFieldsPatch = {};
   if (body.blockTolerance !== undefined) {
     if (!isBlockTolerance(body.blockTolerance)) {
       return NextResponse.json(
@@ -228,21 +227,7 @@ export async function PUT(
     },
   });
 
-  return NextResponse.json({
-    setting: {
-      repoFullName: row.repoFullName,
-      blockTolerance: row.blockTolerance,
-      reviewDraftPrs: row.reviewDraftPrs,
-      supersedePolicy: row.supersedePolicy,
-      recheckOnComplete: row.recheckOnComplete,
-      reviewMode: row.reviewMode,
-      reviewBatteries: row.reviewBatteries,
-      reviewRunTests: row.reviewRunTests,
-      reviewCommandTimeoutS: row.reviewCommandTimeoutS,
-      reviewMaxTurns: row.reviewMaxTurns,
-      updatedAt: row.updatedAt,
-    },
-  });
+  return NextResponse.json({ setting: toRepoReviewSettingDto(row) });
 }
 
 export async function DELETE(
@@ -286,7 +271,7 @@ export async function DELETE(
     expectedUpdatedAt,
   });
   if (conflict) {
-    // Same 409 shape as PUT (supersede-route-shared.ts): the client's
+    // Same 409 shape as PUT (review-settings-route-shared.ts): the client's
     // ConflictError parser reads currentUpdatedAt on every conflict.
     const current = await getRepoReviewSetting({
       db,

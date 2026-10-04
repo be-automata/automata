@@ -3,11 +3,18 @@ import type {
   RepoReviewSetting,
   ThreadTrustContext,
 } from "@terragon/shared/db/types";
+import { getOrganizationReviewSetting } from "@terragon/shared/model/organization-review-settings";
 import { getRepoReviewSettingWithOrgDefault } from "@terragon/shared/model/repo-review-settings";
 import {
-  DEFAULT_REVIEW_MODE,
-  REVIEW_BATTERY_PACK_IDS,
+  DEFAULT_REVIEW_BATTERIES,
+  DEFAULT_REVIEW_RUN_TESTS,
+  REVIEW_AGENT_FIELDS,
+  REVIEW_CLASSIC_COMMAND_TIMEOUT_S,
+  REVIEW_ORCHESTRATED_COMMAND_TIMEOUT_S_DEFAULT,
+  effectiveReviewMode,
   findReviewAgentFieldError,
+  isReviewBatteryPackId,
+  type ReviewAgentField,
   type ReviewBatteryPackId,
   type ReviewMode,
 } from "@terragon/shared/model/review-agent-settings";
@@ -16,7 +23,7 @@ import {
   type TrustedAuthorThreshold,
 } from "@terragon/review/settings/permission-floor";
 
-import { resolveTrustedAuthorThreshold } from "./resolve-permission-mode";
+import { composeTrustedAuthorThreshold } from "./resolve-permission-mode";
 
 /**
  * Effective review-agent settings for one PR-review dispatch (phase 4).
@@ -42,9 +49,11 @@ import { resolveTrustedAuthorThreshold } from "./resolve-permission-mode";
  */
 
 /** Today's per-command timeout; always used under classic. */
-export const CLASSIC_COMMAND_TIMEOUT_MS = 60_000;
+export const CLASSIC_COMMAND_TIMEOUT_MS =
+  REVIEW_CLASSIC_COMMAND_TIMEOUT_S * 1000;
 /** Orchestrated default when no timeout is stored. */
-export const ORCHESTRATED_COMMAND_TIMEOUT_MS = 300_000;
+export const ORCHESTRATED_COMMAND_TIMEOUT_MS =
+  REVIEW_ORCHESTRATED_COMMAND_TIMEOUT_S_DEFAULT * 1000;
 
 export type RunTestsDowngradedReason = "fork" | "untrusted-author";
 
@@ -64,12 +73,7 @@ export type ReviewAgentDispatch = {
 
 export type ReviewAgentStoredRow = Pick<
   RepoReviewSetting,
-  | "repoFullName"
-  | "reviewMode"
-  | "reviewBatteries"
-  | "reviewRunTests"
-  | "reviewCommandTimeoutS"
-  | "reviewMaxTurns"
+  "repoFullName" | ReviewAgentField
 >;
 
 type ReviewAgentTrust = Pick<
@@ -77,18 +81,26 @@ type ReviewAgentTrust = Pick<
   "isFork" | "authorAssociation" | "isCrossRepo"
 >;
 
-type StoredField = Exclude<keyof ReviewAgentStoredRow, "repoFullName">;
-
-function pickValidated<F extends StoredField>(
-  field: F,
+/**
+ * Per field, the first non-null value across `rows` (repo, then '*'),
+ * validated. Throws naming the field and the row it came from.
+ */
+function pickStoredValues(
   organizationId: string,
   rows: ReadonlyArray<ReviewAgentStoredRow | undefined>,
-): NonNullable<ReviewAgentStoredRow[F]> | undefined {
-  for (const row of rows) {
-    const value = row?.[field];
-    if (row === undefined || value === null || value === undefined) {
+): Partial<Pick<ReviewAgentStoredRow, ReviewAgentField>> {
+  const picked: Partial<Pick<ReviewAgentStoredRow, ReviewAgentField>> = {};
+  for (const field of REVIEW_AGENT_FIELDS) {
+    const row = rows.find(
+      (candidate) =>
+        candidate !== undefined &&
+        candidate[field] !== null &&
+        candidate[field] !== undefined,
+    );
+    if (row === undefined) {
       continue;
     }
+    const value = row[field];
     const error = findReviewAgentFieldError({ [field]: value });
     if (error !== undefined) {
       throw new Error(
@@ -96,9 +108,9 @@ function pickValidated<F extends StoredField>(
           `refusing to dispatch with a silently-degraded review-agent setting (${error})`,
       );
     }
-    return value;
+    Object.assign(picked, { [field]: value });
   }
-  return undefined;
+  return picked;
 }
 
 function findRunTestsDowngrade(
@@ -120,6 +132,75 @@ function findRunTestsDowngrade(
   return trusted ? undefined : "untrusted-author";
 }
 
+/**
+ * Everything but the trust gate: the dispatch with runTests false, plus
+ * whether runTests was requested (only ever true under orchestrated).
+ */
+function resolveStored({
+  organizationId,
+  repo,
+  orgDefault,
+}: {
+  organizationId: string;
+  repo: ReviewAgentStoredRow | undefined;
+  orgDefault: ReviewAgentStoredRow | undefined;
+}): { dispatch: ReviewAgentDispatch; runTestsRequested: boolean } {
+  // Validate every picked value BEFORE mode gating, so an invalid stored
+  // value throws even when classic would ignore it.
+  const stored = pickStoredValues(organizationId, [repo, orgDefault]);
+  const mode = effectiveReviewMode(stored.reviewMode, null);
+  // Validated above, so the filter only narrows the type.
+  const batteries = stored.reviewBatteries
+    ? stored.reviewBatteries.filter(isReviewBatteryPackId)
+    : [...DEFAULT_REVIEW_BATTERIES];
+
+  if (mode === "classic") {
+    return {
+      dispatch: {
+        mode,
+        batteries,
+        runTests: false,
+        commandTimeoutMs: CLASSIC_COMMAND_TIMEOUT_MS,
+      },
+      runTestsRequested: false,
+    };
+  }
+  return {
+    dispatch: {
+      mode,
+      batteries,
+      runTests: false,
+      commandTimeoutMs:
+        typeof stored.reviewCommandTimeoutS === "number"
+          ? stored.reviewCommandTimeoutS * 1000
+          : ORCHESTRATED_COMMAND_TIMEOUT_MS,
+      ...(typeof stored.reviewMaxTurns === "number"
+        ? { maxTurns: stored.reviewMaxTurns }
+        : {}),
+    },
+    runTestsRequested: stored.reviewRunTests ?? DEFAULT_REVIEW_RUN_TESTS,
+  };
+}
+
+/** Apply the runTests trust gate to a dispatch whose runTests was requested. */
+function applyRunTestsGate(
+  dispatch: ReviewAgentDispatch,
+  trust: ReviewAgentTrust | null,
+  trustedAuthorThreshold: TrustedAuthorThreshold,
+): ReviewAgentDispatch {
+  const downgrade = findRunTestsDowngrade(trust, trustedAuthorThreshold);
+  const { mode, batteries, commandTimeoutMs, maxTurns } = dispatch;
+  // Key order is the payload's serialized order (the transport golden).
+  return {
+    mode,
+    batteries,
+    runTests: downgrade === undefined,
+    ...(downgrade !== undefined ? { runTestsDowngradedReason: downgrade } : {}),
+    commandTimeoutMs,
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
+  };
+}
+
 /** Pure resolution (no DB). See the module docblock for the rules. */
 export function resolveReviewAgentSettings({
   organizationId,
@@ -134,62 +215,56 @@ export function resolveReviewAgentSettings({
   trust: ReviewAgentTrust | null;
   trustedAuthorThreshold: TrustedAuthorThreshold;
 }): ReviewAgentDispatch {
-  const rows = [repo, orgDefault] as const;
-  // Validate every picked value BEFORE mode gating, so an invalid stored
-  // value throws even when classic would ignore it.
-  const storedMode = pickValidated("reviewMode", organizationId, rows);
-  const storedBatteries = pickValidated(
-    "reviewBatteries",
+  const { dispatch, runTestsRequested } = resolveStored({
     organizationId,
-    rows,
-  );
-  const storedRunTests = pickValidated("reviewRunTests", organizationId, rows);
-  const storedTimeoutS = pickValidated(
-    "reviewCommandTimeoutS",
-    organizationId,
-    rows,
-  );
-  const storedMaxTurns = pickValidated("reviewMaxTurns", organizationId, rows);
-
-  // pickValidated has checked these against the allowed values.
-  const mode = (storedMode as ReviewMode | undefined) ?? DEFAULT_REVIEW_MODE;
-  const batteries = storedBatteries
-    ? [...(storedBatteries as ReviewBatteryPackId[])]
-    : [...REVIEW_BATTERY_PACK_IDS];
-
-  if (mode === "classic") {
-    return {
-      mode,
-      batteries,
-      runTests: false,
-      commandTimeoutMs: CLASSIC_COMMAND_TIMEOUT_MS,
-    };
-  }
-
-  const commandTimeoutMs =
-    storedTimeoutS !== undefined
-      ? storedTimeoutS * 1000
-      : ORCHESTRATED_COMMAND_TIMEOUT_MS;
-  const requestedRunTests = storedRunTests ?? false;
-  const downgrade = requestedRunTests
-    ? findRunTestsDowngrade(trust, trustedAuthorThreshold)
-    : undefined;
-
-  return {
-    mode,
-    batteries,
-    runTests: requestedRunTests && downgrade === undefined,
-    ...(downgrade !== undefined ? { runTestsDowngradedReason: downgrade } : {}),
-    commandTimeoutMs,
-    ...(storedMaxTurns !== undefined ? { maxTurns: storedMaxTurns } : {}),
-  };
+    repo,
+    orgDefault,
+  });
+  return runTestsRequested
+    ? applyRunTestsGate(dispatch, trust, trustedAuthorThreshold)
+    : dispatch;
 }
 
 /**
- * Thin DB loader: one query for the repo + '*' rows and the composed
- * trusted-author threshold, then the pure resolver. Throws on an invalid
+ * Resolve from the already-fetched repo and '*' rows (dispatch reads them
+ * once for every review family). The trusted-author threshold's repo half
+ * comes from the same repo row; the org half is read ONLY when the trust gate
+ * actually runs (orchestrated with runTests requested). Throws on an invalid
  * stored value; the dispatch caller decides what that means.
  */
+export async function resolveReviewAgentFromRows({
+  db,
+  organizationId,
+  repo,
+  orgDefault,
+  trustContext,
+}: {
+  db: DB;
+  organizationId: string;
+  repo: RepoReviewSetting | undefined;
+  orgDefault: RepoReviewSetting | undefined;
+  trustContext: ThreadTrustContext | null;
+}): Promise<ReviewAgentDispatch> {
+  const { dispatch, runTestsRequested } = resolveStored({
+    organizationId,
+    repo,
+    orgDefault,
+  });
+  if (!runTestsRequested) {
+    return dispatch;
+  }
+  const orgSetting = await getOrganizationReviewSetting({
+    db,
+    organizationId,
+  });
+  return applyRunTestsGate(
+    dispatch,
+    trustContext,
+    composeTrustedAuthorThreshold(orgSetting, repo),
+  );
+}
+
+/** Thin DB loader: one query for the repo + '*' rows, then the resolver. */
 export async function resolveReviewAgentForDispatch({
   db,
   organizationId,
@@ -201,21 +276,16 @@ export async function resolveReviewAgentForDispatch({
   repoFullName: string;
   trustContext: ThreadTrustContext | null;
 }): Promise<ReviewAgentDispatch> {
-  const [{ repo, orgDefault }, trustedAuthorThreshold] = await Promise.all([
-    getRepoReviewSettingWithOrgDefault({ db, organizationId, repoFullName }),
-    resolveTrustedAuthorThreshold({ db, organizationId, repoFullName }),
-  ]);
-  return resolveReviewAgentSettings({
+  const { repo, orgDefault } = await getRepoReviewSettingWithOrgDefault({
+    db,
+    organizationId,
+    repoFullName,
+  });
+  return resolveReviewAgentFromRows({
+    db,
     organizationId,
     repo,
     orgDefault,
-    trust: trustContext
-      ? {
-          isFork: trustContext.isFork,
-          isCrossRepo: trustContext.isCrossRepo,
-          authorAssociation: trustContext.authorAssociation,
-        }
-      : null,
-    trustedAuthorThreshold,
+    trustContext,
   });
 }

@@ -18,7 +18,7 @@ vi.mock("@/lib/auth-server", () => ({
   getTenantContextOrNull: vi.fn(),
 }));
 
-// Partial mock: route.ts (via supersede-route-shared.ts) also uses
+// Partial mock: route.ts (via review-settings-route-shared.ts) also uses
 // getRepoReviewSetting / isSupersedePolicy / SUPERSEDE_POLICIES — keep the
 // real ones so a future case that sends supersedePolicy or expectedUpdatedAt
 // fails on its assertion, not on a "not a function" TypeError.
