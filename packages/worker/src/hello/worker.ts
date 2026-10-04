@@ -18,6 +18,7 @@ import {
   startEngineLivenessWatchdog,
 } from "../agent-run/engine-liveness";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
+import { sweepStaleRunDirs } from "../agent-run/provision";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
 import { bootUidScan } from "../agent-run/uid-reaper";
 import {
@@ -192,6 +193,23 @@ async function main() {
     agentUser: bootUidScanConfig.agentUser,
     log: (m) => console.log(`[worker-boot] ${m}`),
   });
+
+  // Remove run dirs older than 24h that earlier teardowns could not (the box
+  // runs one agent at a time and runs are hard-capped at 30 min, so none of
+  // them can belong to a live run). AFTER the uid scan, so no escapee is still
+  // writing into them; BEFORE registration, so the hand-back's own agent-uid
+  // processes are not mistaken for escapees by a first run's admission scan.
+  // Never throws, and the catch is belt and braces: residue must never stop a
+  // boot.
+  try {
+    await sweepStaleRunDirs({
+      workdirRoot: bootUidScanConfig.workdirRoot,
+      agentUser: bootUidScanConfig.agentUser,
+      log: (m) => console.log(`[worker-boot] ${m}`),
+    });
+  } catch (err) {
+    console.error("[worker-boot] stale run dirs sweep failed", err);
+  }
 
   // #69 §3.2.4 item 2 — boot-time (secondary) engine-DB slot reclaim, BEFORE
   // registration so this registration's own fresh strategy rows are never

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,7 @@ import {
   type AceExec,
 } from "./agent-uid-fs";
 import { excludeRunOwnedPaths, RUN_TMP_DIR } from "./run-owned-paths";
+import { buildHandBackInvocation, type Invocation } from "./spawn-as-user";
 
 const execFileAsync = promisify(execFile);
 
@@ -343,7 +345,205 @@ async function mergeBaseResolves(
   }
 }
 
-/** Remove a run's workdir. Best-effort — a cleanup failure must not fail the run. */
-export async function cleanupWorkdir(workdir: string): Promise<void> {
-  await fs.rm(workdir, { recursive: true, force: true }).catch(() => {});
+/** How the hand-back process ended. `stderrTail` is its last ≤ 200 chars. */
+export interface HandBackExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stderrTail?: string;
+}
+
+/** Runs one agent-uid invocation to completion; rejects only when it cannot start. */
+export type RunAsAgent = (inv: Invocation) => Promise<HandBackExit>;
+
+/**
+ * Bound on the hand-back. It walks only the run's own tree and chmods only the
+ * agent's inodes, so seconds is the norm; a hung sudo/PAM hop must not hold the
+ * run's finally (and with it the box lock) open.
+ */
+const HAND_BACK_TIMEOUT_MS = 30_000;
+const HAND_BACK_STDERR_TAIL_CHARS = 200;
+
+/** The default runner: execFile, bounded, SIGKILLed on expiry. */
+const runAsAgentViaSudo: RunAsAgent = async (inv) => {
+  try {
+    await execFileAsync(inv.file, inv.args, {
+      timeout: HAND_BACK_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      maxBuffer: 1024 * 1024,
+    });
+    return { code: 0, signal: null };
+  } catch (error) {
+    const e = error as { code?: unknown; signal?: unknown; stderr?: unknown };
+    // A string code (ENOENT, EACCES) is a spawn failure: nothing ran.
+    if (typeof e.code === "string") throw error;
+    const stderr = typeof e.stderr === "string" ? e.stderr.trim() : "";
+    return {
+      code: typeof e.code === "number" ? e.code : null,
+      signal:
+        typeof e.signal === "string" ? (e.signal as NodeJS.Signals) : null,
+      stderrTail: stderr.slice(-HAND_BACK_STDERR_TAIL_CHARS),
+    };
+  }
+};
+
+export interface CleanupWorkdirOpts {
+  /** #108: the agent account. Empty (the default) ⇒ no hand-back, rm only. */
+  agentUser?: string;
+  /** Where the hand-back failure / incomplete-cleanup lines go. */
+  log?: (line: string) => void;
+  /** Injectable platform (tests only) — defaults to the host's. */
+  platform?: NodeJS.Platform;
+  /** Injectable agent-uid runner (tests only) — defaults to bounded sudo. */
+  runAsAgent?: RunAsAgent;
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Agent-uid mode on Linux: chmod every agent-owned inode under `workdir` back
+ * into the worker's reach (see HAND_BACK_SCRIPT for the ACL-mask mechanism).
+ * Never throws — a failure is logged and the rm that follows reports whatever
+ * it then could not remove. No-op without an agent user, off Linux (a macOS
+ * allow-ACE survives a 0700/0600 creation mode), or when the dir is gone.
+ */
+async function handBackAgentFiles(
+  workdir: string,
+  opts: CleanupWorkdirOpts,
+  log: (line: string) => void,
+): Promise<void> {
+  const agentUser = opts.agentUser ?? "";
+  const platform = opts.platform ?? process.platform;
+  if (!agentUser || platform !== "linux") return;
+  if (!(await fs.lstat(workdir).catch(() => null))) return;
+  try {
+    const inv = buildHandBackInvocation({ agentUser, workdir });
+    if (!inv) return;
+    const exit = await (opts.runAsAgent ?? runAsAgentViaSudo)(inv);
+    if (exit.code !== 0) {
+      log(
+        `workdir hand-back incomplete: ${workdir} (exit ${String(exit.code)}${
+          exit.signal ? ` ${exit.signal}` : ""
+        }${exit.stderrTail ? `: ${exit.stderrTail}` : ""})`,
+      );
+    }
+  } catch (e) {
+    log(`workdir hand-back failed: ${workdir} (${errorMessage(e)})`);
+  }
+}
+
+/**
+ * Remove a run's workdir. Best-effort — a cleanup failure must not fail the
+ * run, so this never throws; but it is no longer SILENT: a workdir that
+ * survives the rm is logged once, with the errno. Resolves true when the
+ * workdir is gone.
+ *
+ * In agent-uid mode on Linux the agent first hands its files back (see
+ * HAND_BACK_SCRIPT). Without that step every run's HOME — session keys
+ * included — outlived the run, and the swallowed EACCES hid it for a week.
+ */
+export async function cleanupWorkdir(
+  workdir: string,
+  opts: CleanupWorkdirOpts = {},
+): Promise<boolean> {
+  const log = opts.log ?? ((line: string) => console.warn(line));
+  await handBackAgentFiles(workdir, opts, log);
+  let rmError: unknown = null;
+  try {
+    await fs.rm(workdir, { recursive: true, force: true });
+  } catch (e) {
+    rmError = e;
+  }
+  if (!(await fs.lstat(workdir).catch(() => null))) return true;
+  const code = (rmError as { code?: unknown } | null)?.code;
+  log(
+    `workdir cleanup incomplete: ${workdir} (${
+      typeof code === "string"
+        ? code
+        : rmError
+          ? errorMessage(rmError)
+          : "unknown"
+    })`,
+  );
+  return false;
+}
+
+/**
+ * The names the worker gives run dirs under the workdir root: the thread id (a
+ * Postgres `gen_random_uuid()`), optionally with the tombstone suffix a
+ * redelivered attempt renames residue to. Nothing else there is ours to sweep.
+ */
+const RUN_DIR_NAME_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\.tombstone-\d+)?$/i;
+
+/** A run dir older than this cannot belong to a live run (see sweepStaleRunDirs). */
+export const STALE_RUN_DIR_AGE_MS = 24 * 60 * 60 * 1000;
+
+export interface SweepStaleRunDirsResult {
+  removed: number;
+  kept: number;
+  failed: number;
+}
+
+/**
+ * Boot-time sweep of run dirs earlier teardowns could not remove (the hand-back
+ * above did not exist yet, or a worker died mid-run and never reached its
+ * finally). Same hand-back + rm path as a run's own teardown.
+ *
+ * WHY AGE ALONE IS SAFE. The box runs one agent at a time and every run is
+ * hard-capped at 30 minutes, so a dir whose mtime is older than 24h cannot
+ * belong to a live run. Only DIRECT children of the root are considered, only
+ * real directories (a symlink is never followed or removed) whose name is a run
+ * dir name; the root itself is never touched.
+ *
+ * Never throws: residue is a disk-hygiene problem, a worker that refuses to
+ * boot over it is an outage.
+ */
+export async function sweepStaleRunDirs(opts: {
+  workdirRoot: string;
+  agentUser: string;
+  log: (line: string) => void;
+  now?: () => number;
+  platform?: NodeJS.Platform;
+  runAsAgent?: RunAsAgent;
+}): Promise<SweepStaleRunDirsResult> {
+  const { workdirRoot, agentUser, log, platform, runAsAgent } = opts;
+  const now = opts.now ?? Date.now;
+  const result: SweepStaleRunDirsResult = { removed: 0, kept: 0, failed: 0 };
+  let entries: Dirent[];
+  try {
+    entries = await fs.readdir(workdirRoot, { withFileTypes: true });
+  } catch (e) {
+    const code = (e as { code?: unknown }).code;
+    // No root yet (a fresh box) is not worth a line; anything else is.
+    if (code !== "ENOENT") {
+      log(`stale run dirs sweep skipped: ${workdirRoot} (${errorMessage(e)})`);
+    }
+    return result;
+  }
+  for (const entry of entries) {
+    const target = path.join(workdirRoot, entry.name);
+    if (!entry.isDirectory() || !RUN_DIR_NAME_RE.test(entry.name)) {
+      result.kept += 1;
+      continue;
+    }
+    const st = await fs.lstat(target).catch(() => null);
+    if (!st?.isDirectory() || now() - st.mtimeMs < STALE_RUN_DIR_AGE_MS) {
+      result.kept += 1;
+      continue;
+    }
+    const gone = await cleanupWorkdir(target, {
+      agentUser,
+      log,
+      platform,
+      runAsAgent,
+    });
+    if (gone) result.removed += 1;
+    else result.failed += 1;
+  }
+  log(
+    `stale run dirs swept: removed=${result.removed} kept=${result.kept} failed=${result.failed}`,
+  );
+  return result;
 }
