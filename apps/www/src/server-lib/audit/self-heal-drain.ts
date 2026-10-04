@@ -3,12 +3,17 @@ import { and, desc, eq, exists, inArray, or, sql } from "drizzle-orm";
 import type { DB } from "@terragon/shared/db";
 import { thread as threadTable, threadChat } from "@terragon/shared/db/schema";
 import type { ThreadStatus } from "@terragon/shared/db/types";
+import {
+  finishAuditRun,
+  getAuditRunByThread,
+} from "@terragon/shared/model/audit-findings";
 import { getLatestHatchetRunForThread } from "@terragon/shared/model/hatchet-run";
 import {
   ORG_DEFAULT_REPO_SENTINEL,
   upsertRepoReviewSetting,
 } from "@terragon/shared/model/repo-review-settings";
 import { recordSelfHealAdminAction } from "@terragon/shared/model/self-heal-admin-log";
+import { markThreadTerminal } from "@terragon/shared/model/threads";
 import { redactSecrets } from "@terragon/utils/redact";
 
 import type {
@@ -63,6 +68,54 @@ export interface DrainDeps {
   cancel: (externalIds: string[]) => Promise<void>;
   now: () => Date;
   log: (message: string, fields?: Record<string, unknown>) => void;
+}
+
+/**
+ * Close the books on a thread whose runs the engine just cancelled. The
+ * cancelled run never posts its terminal, so without this the thread stays
+ * 'working' and its audit run 'dispatched' forever (observed live: 22+ min,
+ * no sweep closes them).
+ *
+ * Thread: the shared typed-terminal writer (`markThreadTerminal`, the one the
+ * supersede/C4 sweep and run-terminal route use) stamps thread AND threadChat
+ * in one transaction; it only moves a still-reapable thread, so it is
+ * idempotent. Cause is 'user-cancelled' (an admin cancel). Audit run: finished
+ * done/killed, unless it already reached a terminal state.
+ * Best-effort per thread: a failure here is logged, never fails the Drain.
+ */
+async function closeCancelledThread({
+  db,
+  organizationId,
+  threadId,
+  log,
+}: {
+  db: DB;
+  organizationId: string;
+  threadId: string;
+  log: DrainDeps["log"];
+}): Promise<void> {
+  try {
+    await markThreadTerminal({ db, threadId, cause: "user-cancelled" });
+    const run = await getAuditRunByThread({ db, organizationId, threadId });
+    if (run && run.status !== "done" && run.status !== "failed") {
+      await finishAuditRun({
+        db,
+        organizationId,
+        id: run.id,
+        status: "done",
+        outcome: "killed",
+      });
+    }
+    log("[self-heal-drain] thread closed after cancel", {
+      threadId,
+      reason: "stopped by self-heal drain",
+    });
+  } catch (error) {
+    log("[self-heal-drain] closing cancelled thread failed", {
+      threadId,
+      error: errorText(error),
+    });
+  }
 }
 
 function errorText(error: unknown): string {
@@ -180,6 +233,12 @@ export async function drainSelfHeal({
       log("[self-heal-drain] cancelled runs", {
         threadId: t.id,
         runs: live.length,
+      });
+      await closeCancelledThread({
+        db,
+        organizationId,
+        threadId: t.id,
+        log,
       });
     } catch (error) {
       cancelFailed.push(t.id);
