@@ -467,6 +467,28 @@ export function createInMemoryOutbox(clock: () => Date = () => new Date()) {
       for (const r of due) r.leaseUntil = new Date(now.getTime() + leaseMs);
       return due.map((r) => ({ ...r }));
     },
+    /** Cross-run drain used by the cron drainer (the real one is UNFENCED). */
+    async claimDueEffects({
+      now = clock(),
+      leaseMs = 60_000,
+      limit = 20,
+    }: {
+      db?: DB;
+      now?: Date;
+      leaseMs?: number;
+      limit?: number;
+    } = {}): Promise<AuditEffectRow[]> {
+      const due = [...rows.values()]
+        .filter(
+          (r) =>
+            r.status === "pending" &&
+            (r.nextAttemptAt?.getTime() ?? 0) <= now.getTime() &&
+            (!r.leaseUntil || r.leaseUntil.getTime() < now.getTime()),
+        )
+        .slice(0, limit);
+      for (const r of due) r.leaseUntil = new Date(now.getTime() + leaseMs);
+      return due.map((r) => ({ ...r }));
+    },
     async markEffectApplied({
       organizationId,
       id,
