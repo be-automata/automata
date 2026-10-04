@@ -22,7 +22,13 @@ import {
   getReadOnlyInstallationToken,
   lookupInstallationId,
 } from "@terragon/shared/github-app";
-import { thread as threadTable } from "@terragon/shared/db/schema";
+import { auditRuns, thread as threadTable } from "@terragon/shared/db/schema";
+import { upsertFeatureFlag } from "@terragon/shared/model/feature-flags";
+import { insertFinding } from "@terragon/shared/model/audit-findings";
+import {
+  hashSelfHealToken,
+  type SelfHealRunInput,
+} from "@/server-lib/audit/plan-self-heal-run";
 import { resolveTaskAgentFromRows } from "@/server-lib/task/resolve-task-agent";
 import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
 
@@ -1177,5 +1183,155 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
         spy.mockRestore();
       }
     });
+  });
+});
+
+describe("dispatchAgentRun — phase 8 selfHeal payload", () => {
+  let user: User;
+  let orgId: string;
+  const REPO = "be-automata/automata";
+
+  const setFlag = (on: boolean) =>
+    upsertFeatureFlag({
+      db,
+      name: "selfHealLoop",
+      updates: { defaultValue: false, globalOverride: on },
+    });
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    user = (await createTestUser({ db })).user;
+    orgId = (
+      await createOrganization({
+        db,
+        name: "Org",
+        slug: `org-${nanoid(8).toLowerCase()}`,
+      })
+    ).id;
+    await setFlag(true);
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { selfHealMode: "dry-run" },
+    });
+  });
+
+  const dispatchAndRead = async (t: {
+    threadId: string;
+    threadChatId: string;
+  }) => {
+    const f = routedHatchetFetch("run-agent");
+    vi.stubGlobal("fetch", f.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      repoFullName: REPO,
+      branch: "feature",
+    });
+    const body = triggerBody(f.mock);
+    vi.unstubAllGlobals();
+    return body.input;
+  };
+
+  const auditThread = () =>
+    createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        organizationId: orgId,
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: "audit-findings",
+          contentSha: "sha",
+          source: "db",
+        },
+      },
+    });
+
+  const seedFinding = () =>
+    insertFinding({
+      db,
+      organizationId: orgId,
+      finding: {
+        repoFullName: REPO,
+        fingerprint: "0123456789abcdef",
+        audit: "security-audit",
+        ruleId: "supply.lockfile-missing",
+        severity: "high",
+        checkKind: "script",
+        title: "Lockfile missing",
+        subject: "pnpm-lock.yaml",
+        status: "open",
+      },
+    });
+
+  it("an audit-stamped dispatch carries the planned selfHeal and never logs the token", async () => {
+    await seedFinding();
+    const spies = (["log", "warn", "error", "info", "debug"] as const).map(
+      (level) => vi.spyOn(console, level),
+    );
+    const t = await auditThread();
+    const input = await dispatchAndRead(t);
+    const selfHeal = input.selfHeal as SelfHealRunInput;
+    expect(selfHeal.kind).toBe("audit");
+    expect(selfHeal.checks).toEqual([
+      {
+        fingerprint: "0123456789abcdef",
+        check: "file-exists",
+        subject: "pnpm-lock.yaml",
+      },
+    ]);
+    const token = selfHeal.checkToken;
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const [run] = await db
+      .select()
+      .from(auditRuns)
+      .where(eq(auditRuns.threadId, t.threadId));
+    expect(run?.checkTokenHash).toBe(hashSelfHealToken(token));
+    for (const spy of spies) {
+      for (const call of spy.mock.calls) {
+        expect(JSON.stringify(call)).not.toContain(token);
+      }
+      spy.mockRestore();
+    }
+  });
+
+  it("flag off: an audit-stamped dispatch has no selfHeal key and no audit run", async () => {
+    await setFlag(false);
+    const t = await auditThread();
+    const input = await dispatchAndRead(t);
+    expect("selfHeal" in input).toBe(false);
+    const rows = await db
+      .select()
+      .from(auditRuns)
+      .where(eq(auditRuns.threadId, t.threadId));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("a plain task dispatch has no selfHeal key", async () => {
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { organizationId: orgId },
+    });
+    const input = await dispatchAndRead(t);
+    expect("selfHeal" in input).toBe(false);
+  });
+
+  it("a review dispatch never carries selfHeal", async () => {
+    const t = await createBootingPRThread({
+      userId: user.id,
+      orgId,
+      automationId: await createReviewAutomation({
+        userId: user.id,
+        orgId,
+        triggerType: "pull_request",
+      }),
+      prNumber: 7,
+    });
+    const input = await dispatchAndRead(t);
+    expect("selfHeal" in input).toBe(false);
   });
 });

@@ -46,6 +46,10 @@ import {
 } from "@terragon/shared/model/threads";
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
 import {
+  planSelfHealAuditRun,
+  type SelfHealRunInput,
+} from "@/server-lib/audit/plan-self-heal-run";
+import {
   triggerAgentRun,
   workflowNameForPolicy,
   buildReviewRunMetadata,
@@ -235,6 +239,14 @@ export interface AgentRunInput {
   supersedePolicy?: SupersedePolicy;
   /** #125/#127 review runs only: the other half of the snapshot (discard recheck). */
   recheckOnComplete?: boolean;
+  /**
+   * Phase 8, NON-review runs only: the platform-defined checks the worker runs
+   * on a pristine checkout before the audit agent starts, plus the per-run
+   * check token that authenticates the report (FORGE-01). SECRET: checkToken
+   * is never logged and never reaches the daemon or agent environment. Absent
+   * for every other dispatch (byte-identical payload); old workers ignore it.
+   */
+  selfHeal?: SelfHealRunInput;
 }
 
 /** True when a thread should dispatch to the remote execution plane. */
@@ -706,10 +718,23 @@ export async function dispatchAgentRun({
             installationId,
           })
         : undefined;
+    // Phase 8: an audit-stamped org run asks the worker for the platform's
+    // deterministic checks. Never throws; {} for every other dispatch.
+    const selfHealPlan =
+      plan === null && orgSettings !== undefined
+        ? await planSelfHealAuditRun({
+            db,
+            organizationId: orgSettings.organizationId,
+            repoFullName,
+            threadId,
+            sourceMetadata: thread?.sourceMetadata,
+          })
+        : undefined;
     const input: AgentRunInput = {
       ...baseInput,
       ...plan?.inputExtension,
       ...taskPlan,
+      ...selfHealPlan,
     };
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry
