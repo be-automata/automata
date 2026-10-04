@@ -14,7 +14,7 @@ import { withSelfHealTx } from "./self-heal-tx";
  * Audit-run and finding ledger.
  *
  * MULTI-TENANT (ADR-001): every function takes `organizationId` and filters on
- * it, except the ones named in UNFENCED_SELF_HEAL_MODEL_FUNCTIONS below, which
+ * it, except the ones named in UNFENCED_SELF_HEAL_MODEL_FUNCTIONS (self-heal-breaker.ts), which
  * are cross-org by design (a sweep, or a token-authenticated report).
  */
 
@@ -27,12 +27,6 @@ export interface AuditCheckResult {
   fingerprint: string;
   outcome: "pass" | "fail" | "error";
 }
-
-/** Functions that deliberately read across organizations (08-03 static test). */
-export const UNFENCED_SELF_HEAL_MODEL_FUNCTIONS: readonly string[] = [
-  "listReclaimableAuditRuns",
-  "getAuditRunForCheckReport",
-];
 
 /** An audit run claim is leased for 10 minutes (RES-08). */
 export const AUDIT_RUN_LEASE_MS = 600_000;
