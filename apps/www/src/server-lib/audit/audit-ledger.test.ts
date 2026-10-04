@@ -14,7 +14,7 @@ import {
   createTestUser,
 } from "@terragon/shared/model/test-helpers";
 
-import { createDbAuditLedger } from "./audit-ledger";
+import { createDbAuditLedger, StaleAuditClaimError } from "./audit-ledger";
 
 const REPO = "Acme/Widgets";
 const FP = "aaaaaaaaaaaaaaaa";
@@ -95,6 +95,53 @@ describe("createDbAuditLedger", () => {
       { fingerprint: FP, action: "create", reason: "consensus" },
     ]);
     expect([...(await l.pendingCreateFingerprints())]).toEqual([FP]);
+  });
+
+  describe("W1: persist is fenced on the claim", () => {
+    async function setClaim(status: "claimed" | "dispatched", count: number) {
+      await db
+        .update(auditRuns)
+        .set({ status, claimCount: count })
+        .where(eq(auditRuns.id, runId));
+    }
+    const batch = () => ({
+      inserts: [insert],
+      patches: [],
+      effects: [],
+      runDecisions: [{ fingerprint: FP, action: "sighting", reason: "seen" }],
+    });
+    const fenced = (claimCount: number) =>
+      createDbAuditLedger({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+        runId,
+        claimCount,
+      });
+    const findings = () =>
+      listFindingsForRepo({ db, organizationId: orgId, repoFullName: REPO });
+
+    it("a re-leased claim (count moved on) writes nothing", async () => {
+      await setClaim("claimed", 2);
+      await expect(fenced(1).persist(batch())).rejects.toBeInstanceOf(
+        StaleAuditClaimError,
+      );
+      expect(await findings()).toHaveLength(0);
+    });
+
+    it("a released claim (back to dispatched) writes nothing", async () => {
+      await setClaim("dispatched", 1);
+      await expect(fenced(1).persist(batch())).rejects.toBeInstanceOf(
+        StaleAuditClaimError,
+      );
+      expect(await findings()).toHaveLength(0);
+    });
+
+    it("the held claim persists", async () => {
+      await setClaim("claimed", 2);
+      await fenced(2).persist(batch());
+      expect(await findings()).toHaveLength(1);
+    });
   });
 
   it("rolls back every write when one statement fails", async () => {

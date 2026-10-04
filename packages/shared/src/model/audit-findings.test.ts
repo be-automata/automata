@@ -265,6 +265,47 @@ describe("audit runs (leased claim)", () => {
     ).toBeNull();
   });
 
+  it("W1: a finish fenced on a stale claim count does not touch the re-leased run", async () => {
+    const threadId = await newThread();
+    const first = await claimAuditRun({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+      threadId,
+      audit: "security",
+    });
+    await releaseAuditRunClaim({
+      db,
+      organizationId: orgA,
+      id: first?.id ?? "",
+    });
+    const second = await claimAuditRun({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+      threadId,
+      audit: "security",
+    });
+    expect(second?.claimCount).toBe(2);
+    expect(
+      await finishAuditRun({
+        db,
+        organizationId: orgA,
+        id: first?.id ?? "",
+        status: "failed",
+        claimCount: 1,
+      }),
+    ).toBeNull();
+    const finished = await finishAuditRun({
+      db,
+      organizationId: orgA,
+      id: second?.id ?? "",
+      status: "done",
+      claimCount: 2,
+    });
+    expect(finished?.status).toBe("done");
+  });
+
   it("records check results once, fenced by org", async () => {
     const threadId = await newThread();
     await createAuditRunAtDispatch({

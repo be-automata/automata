@@ -185,6 +185,8 @@ export interface FinishAuditRunInput {
   decisions?: unknown;
   error?: string;
   now?: Date;
+  /** When set, finishes the run only while this claim is still held. */
+  claimCount?: number;
 }
 
 export async function finishAuditRun({
@@ -200,6 +202,7 @@ export async function finishAuditRun({
   decisions,
   error,
   now = new Date(),
+  claimCount,
 }: FinishAuditRunInput): Promise<AuditRunRow | null> {
   return withSelfHealTx(db, async (tx) => {
     const rows = await tx
@@ -220,7 +223,13 @@ export async function finishAuditRun({
         finishedAt: now,
       })
       .where(
-        and(eq(auditRuns.id, id), eq(auditRuns.organizationId, organizationId)),
+        and(
+          eq(auditRuns.id, id),
+          eq(auditRuns.organizationId, organizationId),
+          claimCount === undefined
+            ? undefined
+            : eq(auditRuns.claimCount, claimCount),
+        ),
       )
       .returning();
     return rows[0] ?? null;
