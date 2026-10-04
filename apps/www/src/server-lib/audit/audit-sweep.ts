@@ -358,7 +358,6 @@ export async function runOutboxDrain({
       });
       const effective = resolveSelfHealEffective({
         ...ctx,
-        protection: "not_checked",
       });
       if (effective.mode !== "on") {
         await releaseGroup(db, group, DEFER_OFF_MS, deps.now());

@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { DB } from "@terragon/shared/db";
@@ -127,7 +131,6 @@ function input(
       loopAuditOpen: false,
       loopFixOpen: false,
     },
-    protection: "protected",
     ...overrides,
   };
 }
@@ -223,22 +226,20 @@ describe("resolveSelfHealEffective", () => {
     ).toEqual({ mode: "on", reason: "on", fixAllowed: false });
   });
 
-  it("an unprotected default branch downgrades on to dry-run", () => {
-    expect(
-      resolveSelfHealEffective(input({ protection: "unprotected" })),
-    ).toMatchObject({ mode: "dry-run", reason: "default_branch_unprotected" });
+  it("on mode needs no branch protection (free-plan repos can turn it on)", () => {
+    expect(resolveSelfHealEffective(input())).toEqual({
+      mode: "on",
+      reason: "on",
+      fixAllowed: true,
+    });
   });
 
-  it("unknown protection fails closed in on mode", () => {
-    expect(
-      resolveSelfHealEffective(input({ protection: "unknown" })),
-    ).toMatchObject({ mode: "dry-run", reason: "protection_unknown" });
-  });
-
-  it("dry-run mode ignores protection", () => {
-    expect(
-      resolveSelfHealEffective(input({ protection: "unprotected" }, "dry-run")),
-    ).toMatchObject({ mode: "dry-run", reason: "mode_dry_run" });
+  it("branch protection is never a resolver input or reason", () => {
+    const source = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "resolve-self-heal.ts"),
+      "utf8",
+    );
+    expect(source).not.toMatch(/unprotected|protection_unknown|protection:/);
   });
 
   it("a breaker never turns anything on", () => {
@@ -250,7 +251,7 @@ describe("resolveSelfHealEffective", () => {
     interface Rule {
       reason: SelfHealEffectiveReason;
       apply: (i: SelfHealEffectiveInput) => SelfHealEffectiveInput;
-      modeRule?: "off" | "dry-run" | "on";
+      modeRule?: "off" | "dry-run";
     }
     const withMode = (
       i: SelfHealEffectiveInput,
@@ -300,11 +301,6 @@ describe("resolveSelfHealEffective", () => {
         modeRule: "dry-run",
         apply: (i) => withMode(i, "dry-run"),
       },
-      {
-        reason: "default_branch_unprotected",
-        modeRule: "on",
-        apply: (i) => ({ ...i, protection: "unprotected" }),
-      },
     ];
 
     for (let a = 0; a < rules.length; a++) {
@@ -313,10 +309,6 @@ describe("resolveSelfHealEffective", () => {
         const second = rules[b]!;
         // Mode-defining rules are mutually exclusive in one input.
         if (first.modeRule && second.modeRule) continue;
-        // Protection only matters in on mode.
-        if (second.reason === "default_branch_unprotected" && first.modeRule) {
-          continue;
-        }
         it(`${first.reason} beats ${second.reason}`, () => {
           const both = second.apply(first.apply(input()));
           expect(resolveSelfHealEffective(both).reason).toBe(first.reason);

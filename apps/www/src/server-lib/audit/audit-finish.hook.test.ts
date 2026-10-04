@@ -374,18 +374,13 @@ describe("handleAuditFindingsAtFinish", () => {
     });
   });
 
-  it("on mode with an unprotected default branch runs dry-run and logs default_branch_unprotected", async () => {
+  it("on mode with an unprotected default branch still files issues (protection is optional)", async () => {
     h.protection.value = "unprotected";
     await call();
     expect(
       vi.mocked(executor.executeAuditFindings).mock.calls[0]![0].input.mode,
-    ).toBe("dry-run");
-    const lines = vi
-      .mocked(console.log)
-      .mock.calls.map((c) => String(c[0]))
-      .filter((line) => line.includes("reason=default_branch_unprotected"));
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain("decision=gate");
+    ).toBe("on");
+    expect(preflight.preflightBranchProtection).not.toHaveBeenCalled();
   });
 
   it("RES-04: an executor that eats the whole budget cannot hold the hook past the deadline", async () => {

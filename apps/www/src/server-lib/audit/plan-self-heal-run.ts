@@ -93,7 +93,6 @@ export async function planSelfHealAuditRun({
     });
     const effective = resolveSelfHealEffective({
       ...ctx,
-      protection: "not_checked",
     });
     if (effective.mode === "off") return {};
 

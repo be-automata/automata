@@ -1093,7 +1093,7 @@ writer (ADR-010). Everything ships OFF and in dry-run first. Nothing here is run
   Self-heal → Activity).
 - GitHub App permissions on the canary: issues write, contents read, metadata read. A missing
   permission trips the permission latch and the run reports `missing-permission` instead of writing.
-- The repo's default-branch protection is understood: the lane never pushes in phase 8.
+- Branch protection is optional (a free-plan private repo cannot have it) and never gates the lane: it never pushes in phase 8, and in phase 9 the git-broker ref fence plus the human merge keep main safe.
 - No other automation or person depends on the labels below.
 
 **Labels** (created on first use by the writer): `automata:finding`, `automata:auto-fix`,
