@@ -19,9 +19,11 @@ import {
   NORMALIZED_URL,
   TOKEN,
   REVIEW_POLICY_JOINED,
+  ORCHESTRATED_REVIEW_POLICY_JOINED,
   normalizePromptPath,
   expectedClaudeEnvNoCredits,
   expectedClaudeEnvWithCredits,
+  expectedClaudeEnvOrchestratedReview,
   expectedGeminiEnv,
   expectedOpencodeEnv,
   expectedAmpEnv,
@@ -82,6 +84,35 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
       expect(cmd).toContain(REVIEW_POLICY_JOINED);
       expect(cmd).not.toContain("--dangerously-skip-permissions");
     });
+
+    it("the classic variant is the same pin as the no-argument call", () => {
+      expect(reviewPolicyArgs({ mode: "classic" })).toEqual(reviewPolicyArgs());
+      expect(reviewPolicyArgs({ mode: "classic" }).join(" ")).toBe(
+        REVIEW_POLICY_JOINED,
+      );
+    });
+
+    it("the orchestrated variant (D2) is pinned to its exact joined policy", () => {
+      expect(
+        reviewPolicyArgs({
+          mode: "orchestrated",
+          commandTimeoutMs: 300000,
+        }).join(" "),
+      ).toBe(ORCHESTRATED_REVIEW_POLICY_JOINED);
+    });
+
+    it("the orchestrated variant appends --max-turns N only when maxTurns is set", () => {
+      expect(
+        reviewPolicyArgs({
+          mode: "orchestrated",
+          commandTimeoutMs: 300000,
+          maxTurns: 40,
+        }).join(" "),
+      ).toBe(`${ORCHESTRATED_REVIEW_POLICY_JOINED} --max-turns 40`);
+      expect(
+        reviewPolicyArgs({ mode: "orchestrated", commandTimeoutMs: 300000 }),
+      ).not.toContain("--max-turns");
+    });
   });
 
   describe("claudeAdapter", () => {
@@ -106,6 +137,54 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
         normalizedUrl: NORMALIZED_URL,
       });
       expect(env).toEqual(expectedClaudeEnvWithCredits());
+    });
+
+    it("prepareEnv for an orchestrated review run takes BASH_MAX_TIMEOUT_MS from the payload (Phase 5)", () => {
+      const env = claudeAdapter.prepareEnv({
+        runtime: fakeRuntime(),
+        useCredits: false,
+        token: TOKEN,
+        normalizedUrl: NORMALIZED_URL,
+        permissionMode: "review",
+        orchestratedReview: { mode: "orchestrated", commandTimeoutMs: 300000 },
+      });
+      expect(env).toEqual(
+        expectedClaudeEnvOrchestratedReview("test-api-key-from-env", 300000),
+      );
+    });
+
+    it.each(["review", "allowAll", "plan", undefined] as const)(
+      "prepareEnv(permissionMode=%s) without orchestratedReview keeps BASH_MAX_TIMEOUT_MS 60000 (classic golden)",
+      (permissionMode) => {
+        const env = claudeAdapter.prepareEnv({
+          runtime: fakeRuntime(),
+          useCredits: false,
+          token: TOKEN,
+          normalizedUrl: NORMALIZED_URL,
+          permissionMode,
+        });
+        expect(env).toEqual(
+          expectedClaudeEnvNoCredits("test-api-key-from-env"),
+        );
+      },
+    );
+
+    it("buildArgs forwards orchestratedReview: orchestrated review gets the D2 policy, absent stays classic", () => {
+      const cfg = {
+        runtime: fakeRuntime(),
+        prompt: "review this PR",
+        sessionId: null,
+        model: "sonnet",
+        permissionMode: "review",
+      } as const;
+      const orchestrated = claudeAdapter.buildArgs({
+        ...cfg,
+        orchestratedReview: { mode: "orchestrated", commandTimeoutMs: 300000 },
+      });
+      expect(orchestrated).toContain(ORCHESTRATED_REVIEW_POLICY_JOINED);
+      const classic = claudeAdapter.buildArgs(cfg);
+      expect(classic).toContain(REVIEW_POLICY_JOINED);
+      expect(classic).not.toContain("Agent Task Skill");
     });
 
     it("authFilePath is '.claude/.credentials.json'; normalizeModel is identity", () => {

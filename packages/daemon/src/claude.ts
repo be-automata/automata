@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { nanoid } from "nanoid/non-secure";
 import { IDaemonRuntime } from "./runtime";
+import type { OrchestratedReviewPolicy, ReviewPolicyVariant } from "./shared";
 
 export function getAnthropicApiKeyOrNull(runtime: IDaemonRuntime) {
   // Check if the user has Claude credentials.
@@ -187,8 +188,51 @@ export function maybeFixLogsForSessionId(
  * Extracted verbatim (#75 AC4) so a golden test can pin the review tool
  * policy at a single named seam (ADR-004) — every HarnessAdapter's review
  * policy is expected to converge on an equivalent shape.
+ *
+ * Variants (Phase 5):
+ * - classic (the default, and the no-argument call) is the ADR-004 golden
+ *   `REVIEW_POLICY_JOINED`, byte-for-byte.
+ * - orchestrated is D2: in-run fan-out is allowed (`Agent` + `Task` + `Skill`
+ *   — 2.1.284 lists `Task` in init but names the tool_use `Agent`), while the
+ *   PR surface stays single-writer: the gh / git push denies are kept
+ *   verbatim and Write / Edit / WebFetch / WebSearch are denied explicitly
+ *   (an explicit deny beats a skill's allowed-tools). Sub-agents inherit
+ *   this deny list (02-FINDINGS Q4). `--max-turns N` bounds the LEAD loop
+ *   only — it is not a cost limit (02-FINDINGS Q5); the wallet bound stays
+ *   the Hatchet timeout + idle watchdog.
  */
-export function reviewPolicyArgs(): string[] {
+export function reviewPolicyArgs(
+  variant: ReviewPolicyVariant = { mode: "classic" },
+): string[] {
+  if (variant.mode === "orchestrated") {
+    return [
+      "--permission-mode",
+      "default",
+      "--allowedTools",
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash",
+      "Agent",
+      "Task",
+      "Skill",
+      // Same shell-quoting rule as the classic branch below.
+      "--disallowedTools",
+      "'Bash(gh:*)'",
+      "'Bash(git push:*)'",
+      "Write",
+      "Edit",
+      "WebFetch",
+      "WebSearch",
+      // Load-bearing (02-FINDINGS Q3): the PR's project skills / agents /
+      // hooks / permissions / .mcp.json never load under it.
+      "--setting-sources",
+      "user",
+      ...(variant.maxTurns !== undefined
+        ? ["--max-turns", String(variant.maxTurns)]
+        : []),
+    ];
+  }
   return [
     "--permission-mode",
     "default",
@@ -225,6 +269,7 @@ export function claudeCommand({
   model,
   mcpConfigPath,
   permissionMode,
+  orchestratedReview,
   enableMcpPermissionPrompt = false,
 }: {
   runtime: IDaemonRuntime;
@@ -233,6 +278,8 @@ export function claudeCommand({
   model: string;
   mcpConfigPath: string | null;
   permissionMode?: "allowAll" | "plan" | "review";
+  /** The run's resolved D2 policy (review runs only); absent ⇒ classic. */
+  orchestratedReview?: OrchestratedReviewPolicy;
   enableMcpPermissionPrompt?: boolean;
 }) {
   // Write prompt to a file.
@@ -275,7 +322,7 @@ export function claudeCommand({
           "Bash",
         ]
       : permissionMode === "review"
-        ? reviewPolicyArgs()
+        ? reviewPolicyArgs(orchestratedReview)
         : ["--dangerously-skip-permissions"]),
     "--output-format",
     "stream-json",

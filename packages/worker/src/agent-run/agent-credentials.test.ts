@@ -3,6 +3,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { materialiseAgentCredentials } from "./agent-credentials";
+import {
+  listTree,
+  makeBatteriesFixture,
+  type BatteriesFixture,
+} from "./__fixtures__/batteries-fixture";
 
 describe("materialiseAgentCredentials (D1)", () => {
   let runRoot: string;
@@ -137,5 +142,156 @@ describe("materialiseAgentCredentials (D1)", () => {
     expect(result.home).toBe(path.join(runRoot, "home"));
     expect(result.delivered).toBe(true);
     expect(result.env).toEqual({ AMP_API_KEY: "sgamp_x" });
+  });
+
+  describe("review batteries (Phase 5, D2)", () => {
+    let fx: BatteriesFixture;
+    let logs: string[];
+    const uid = process.getuid?.() ?? 0;
+
+    beforeEach(async () => {
+      fx = await makeBatteriesFixture();
+      logs = [];
+    });
+    afterEach(async () => {
+      await fx.cleanup();
+    });
+
+    const batteries = () => ({
+      root: fx.root,
+      repoRoot: fx.repoRoot,
+      rootOwnerUid: uid,
+      packOwnerUid: uid,
+      log: (line: string) => logs.push(line),
+    });
+
+    it.each([
+      ["absent", undefined],
+      ["classic", { mode: "classic" as const, batteries: ["gstack-review"] }],
+    ])(
+      "%s reviewAgent: HOME is exactly today's, no batteries result",
+      async (_label, reviewAgent) => {
+        const credits = await materialiseAgentCredentials({
+          credentials: { type: "built-in-credits" },
+          agent: "claudeCode",
+          runRoot,
+          reviewAgent,
+          batteries: batteries(),
+        });
+        expect(await listTree(credits.home)).toEqual([".claude.json"]);
+        expect(credits.batteries).toBeUndefined();
+        await credits.cleanup();
+
+        const claude = await materialiseAgentCredentials({
+          credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
+          agent: "claudeCode",
+          runRoot,
+          reviewAgent,
+          batteries: batteries(),
+        });
+        expect(await listTree(claude.home)).toEqual([
+          ".claude",
+          ".claude.json",
+          ".claude/.credentials.json",
+        ]);
+        expect(claude.batteries).toBeUndefined();
+        expect(logs).toEqual([]);
+      },
+    );
+
+    it("orchestrated: packs linked, hooks off, AND the credential still written at 0600", async () => {
+      const result = await materialiseAgentCredentials({
+        credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
+        agent: "claudeCode",
+        runRoot,
+        reviewAgent: { mode: "orchestrated", batteries: ["gstack-review"] },
+        batteries: batteries(),
+      });
+      expect(result.batteries).toMatchObject({
+        ok: true,
+        packs: ["gstack-review"],
+      });
+      const claudeDir = path.join(result.home, ".claude");
+      expect(
+        (
+          await fs.lstat(path.join(claudeDir, "skills/gstack-review"))
+        ).isSymbolicLink(),
+      ).toBe(true);
+      expect(
+        JSON.parse(
+          await fs.readFile(path.join(claudeDir, "settings.json"), "utf8"),
+        ),
+      ).toEqual({ disableAllHooks: true });
+      const cred = path.join(claudeDir, ".credentials.json");
+      expect(await fs.readFile(cred, "utf8")).toBe('{"claudeAiOauth":{}}');
+      expect((await fs.stat(cred)).mode & 0o777).toBe(0o600);
+    });
+
+    it("orchestrated with an unavailable ROOT still resolves and still writes the credential", async () => {
+      const result = await materialiseAgentCredentials({
+        credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
+        agent: "claudeCode",
+        runRoot,
+        reviewAgent: { mode: "orchestrated", batteries: ["gstack-review"] },
+        batteries: { ...batteries(), root: path.join(fx.base, "missing") },
+      });
+      expect(result.batteries).toEqual({
+        ok: false,
+        reason: "root-not-trusted",
+      });
+      expect(
+        await fs.readFile(
+          path.join(result.home, ".claude/.credentials.json"),
+          "utf8",
+        ),
+      ).toBe('{"claudeAiOauth":{}}');
+    });
+
+    it("orchestrated with built-in-credits carries the batteries result too", async () => {
+      const result = await materialiseAgentCredentials({
+        credentials: { type: "built-in-credits" },
+        agent: "claudeCode",
+        runRoot,
+        reviewAgent: { mode: "orchestrated", batteries: ["gsd-reviewers"] },
+        batteries: batteries(),
+      });
+      expect(result.delivered).toBe(false);
+      expect(result.batteries).toMatchObject({
+        ok: true,
+        packs: ["gsd-reviewers"],
+      });
+    });
+
+    it("cleanup removes the HOME including links; ROOT targets intact", async () => {
+      const result = await materialiseAgentCredentials({
+        credentials: { type: "built-in-credits" },
+        agent: "claudeCode",
+        runRoot,
+        reviewAgent: {
+          mode: "orchestrated",
+          batteries: ["gstack-review", "gsd-reviewers"],
+        },
+        batteries: batteries(),
+      });
+      await result.cleanup();
+      await expect(fs.lstat(result.home)).rejects.toThrow();
+      expect(
+        (
+          await fs.stat(
+            path.join(fx.packDir("gstack-review"), "skills/gstack-review"),
+          )
+        ).isDirectory(),
+      ).toBe(true);
+      expect(
+        (
+          await fs.stat(
+            path.join(
+              fx.packDir("gsd-reviewers"),
+              "agents/gsd-code-reviewer.md",
+            ),
+          )
+        ).isFile(),
+      ).toBe(true);
+    });
   });
 });

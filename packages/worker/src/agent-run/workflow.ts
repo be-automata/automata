@@ -13,6 +13,8 @@ import { reapAgentUidEscapees } from "./uid-reaper";
 import { DaemonProcess } from "./daemon-process";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
 import { formatRunStartLine } from "./run-lane";
+import { formatBatteriesLine } from "./batteries-seed";
+import { reviewAgentForRun, withReviewAgentWire } from "./review-agent-wire";
 import {
   classifyNextMessageError,
   nonRetryablePreflight,
@@ -487,6 +489,17 @@ async function runAgentInner(
   // the try is ever entered, and the cloned workdir is stranded on the box's
   // disk for good. Cleaning the workdir also removes the per-run HOME beneath
   // it, so a half-written credential cannot survive either.
+  // Phase 5: bounds-check the review shape BEFORE seeding, so a rejected
+  // orchestrated run seeds AND runs classic, and its `batteries:` line says
+  // what actually runs. Numbers/field names only (H2).
+  const reviewAgentGate = reviewAgentForRun(input.reviewAgent);
+  const runReviewAgent = reviewAgentGate.reviewAgent;
+  if (reviewAgentGate.rejected) {
+    step(
+      `review agent: bounds-rejected (${reviewAgentGate.rejected}) → classic`,
+    );
+  }
+
   let boxLock: BoxLock | null = null;
   let materialised: MaterialisedCredentials;
   // Hoisted above the try so the main finally (#184 teardown uid-scan) can
@@ -572,6 +585,8 @@ async function runAgentInner(
       agent: pulled.agent,
       runRoot: workdir,
       agentUser: config.agentUser,
+      reviewAgent: runReviewAgent,
+      batteries: { log: admissionLog },
     });
   } catch (err) {
     await boxLock?.release();
@@ -594,6 +609,8 @@ async function runAgentInner(
   step(
     `agent credential: ${describeCredentialSource(credentialSource)} (box trust: ${config.boxTrust})`,
   );
+  // Phase 5: one line per run — classic, or the seeded packs + manifest hash.
+  step(formatBatteriesLine(materialised.batteries));
 
   // #66 slice 2: per-run egress enforcement, iff the control plane resolved a
   // policy onto this run's input. Absent policy ⇒ nothing starts and nothing
@@ -760,7 +777,15 @@ async function runAgentInner(
     // frozen at the branch; only the transport happens here. Never throws —
     // reporting must not fail a run.
     await postRunCredentialSource(wwwOpts, { source: credentialSource });
-    const bytes = await daemon.sendMessage(message);
+    // Phase 5: stamp the daemon wire for orchestrated review runs that passed
+    // the bounds gate above; anything else sends today's exact message object.
+    const stamped = withReviewAgentWire(message, runReviewAgent);
+    if (stamped.reviewAgent) {
+      step(
+        `review agent: orchestrated → daemon (bashTimeoutMs=${stamped.reviewAgent.commandTimeoutMs}, maxTurns=${stamped.reviewAgent.maxTurns ?? "unset"})`,
+      );
+    }
+    const bytes = await daemon.sendMessage(stamped);
     step(`socket write ok: ${bytes} bytes → daemon ACKed`);
 
     // Poll www for terminal. The daemon streams events to www, which owns the

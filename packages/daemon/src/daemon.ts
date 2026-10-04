@@ -8,6 +8,8 @@ import {
   ClaudeMessage,
   DaemonMessage,
   DAEMON_VERSION,
+  parseDaemonReviewAgent,
+  reviewPolicyVariantFor,
 } from "./shared";
 import { performance } from "node:perf_hooks";
 import { RetryBackoff, RetryConfig, DEFAULT_RETRY_CONFIG } from "./retry";
@@ -473,12 +475,15 @@ export class TerragonDaemon {
     exitCode,
     threadChatId,
     getMockSuccessResult,
+    takeHeldResult,
   }: {
     agent: string;
     processId: number | undefined;
     exitCode: number | null;
     threadChatId: string;
     getMockSuccessResult?: () => string;
+    /** Phase 5: the result held after a background sub-agent, if any. */
+    takeHeldResult?: () => ClaudeMessage | null;
   }) => {
     this.runtime.logger.info(`${agent} command finished`, {
       exitCode,
@@ -493,6 +498,26 @@ export class TerragonDaemon {
         threadChatId,
       });
       return;
+    }
+    // Phase 5: release the held (LAST) result. On the user-stop and replace
+    // paths killActiveProcess has already deleted the map entry, so the early
+    // return above is what drops a held result there; the isStopping branch
+    // is defensive and unreachable on the stop path today.
+    const heldResult = takeHeldResult?.() ?? null;
+    if (heldResult) {
+      if (activeState.isStopping) {
+        this.runtime.logger.info("Dropping held result of a stopped run", {
+          threadChatId,
+        });
+      } else {
+        this.addMessageToBuffer({
+          agent: activeState.agent,
+          message: heldResult,
+          threadId: activeState.threadId,
+          threadChatId: activeState.threadChatId,
+          token: activeState.token,
+        });
+      }
     }
     if (exitCode !== 0 && !activeState.isStopping && !activeState.isCompleted) {
       this.addMessageToBuffer({
@@ -540,6 +565,7 @@ export class TerragonDaemon {
     onStdoutLine,
     onClose,
     getMockSuccessResult,
+    takeHeldResult,
   }: {
     agentName: string;
     input: DaemonMessageClaude;
@@ -552,6 +578,8 @@ export class TerragonDaemon {
     onStdoutLine: (line: string) => void;
     onClose?: (code: number | null) => void;
     getMockSuccessResult?: () => string;
+    /** Phase 5: take (and clear) a held result; see handleProcessClose. */
+    takeHeldResult?: () => ClaudeMessage | null;
   }): Promise<void> {
     this.runtime.logger.info("Spawning agent process", {
       agentName,
@@ -578,9 +606,12 @@ export class TerragonDaemon {
             watchdogTimeoutMs,
             durationMs,
           });
+          // Phase 5: a held result is the run's real answer — release it
+          // instead of the synthetic "no output" error.
+          const heldResult = takeHeldResult?.() ?? null;
           this.addMessageToBuffer({
             agent: input.agent,
-            message: {
+            message: heldResult ?? {
               type: "result",
               subtype: "success",
               total_cost_usd: 0,
@@ -642,6 +673,7 @@ export class TerragonDaemon {
               processId,
               threadChatId: input.threadChatId,
               getMockSuccessResult,
+              takeHeldResult,
             });
             this.flushMessageBuffer();
             resolve();
@@ -678,6 +710,24 @@ export class TerragonDaemon {
   private async runAgentCommand(input: DaemonMessageClaude): Promise<void> {
     const adapter = getAdapter(input.agent);
 
+    // Phase 5: validate the raw reviewAgent and resolve the review policy
+    // ONCE. A malformed value degrades to the classic review policy (never a
+    // rejected run) with one warning naming the failing field paths — never
+    // the value itself. Adapters only ever see the orchestrated policy.
+    const parsed = parseDaemonReviewAgent(input.reviewAgent);
+    if (parsed.rejected) {
+      this.runtime.logger.warn(
+        "reviewAgent rejected; running the classic review policy",
+        { threadChatId: input.threadChatId, issues: parsed.rejected },
+      );
+    }
+    const reviewPolicy = reviewPolicyVariantFor(
+      input.permissionMode,
+      parsed.reviewAgent,
+    );
+    const orchestratedReview =
+      reviewPolicy.mode === "orchestrated" ? reviewPolicy : undefined;
+
     // Gap A: only claudeCode fixes up on-disk session logs pre-spawn
     // (mirrors the deleted runClaudeCodeCommand's pre-spawn call).
     if (adapter.capabilities.fixesSessionLogs && input.sessionId) {
@@ -700,6 +750,7 @@ export class TerragonDaemon {
         sessionId: input.sessionId,
         model: input.model,
         permissionMode: input.permissionMode,
+        orchestratedReview,
         mcpConfigPath: this.mcpConfigPath ?? null,
         enableMcpPermissionPrompt: this.getFeatureFlag("mcpPermissionPrompt"),
         useCredits: input.useCredits,
@@ -710,19 +761,20 @@ export class TerragonDaemon {
         token: input.token,
         normalizedUrl: this.runtime.normalizedUrl,
         permissionMode: input.permissionMode,
+        orchestratedReview,
       }),
       getMockSuccessResult: adapter.capabilities.mockSuccessResult
         ? () => adapter.capabilities.mockSuccessResult!
         : undefined,
+      // Phase 5: claude's parser holds results after a lead background
+      // sub-agent (adapters/result-hold.ts); released at close or idle timeout.
+      takeHeldResult: () => parser.drainHeld?.() ?? null,
       onStdoutLine: (line) => {
         // Snapshot staleness: read the active process state ONCE per stdout
         // line, BEFORE the message loop — a system message earlier in the
         // same batch must NOT backfill later messages of that same batch.
         const activeProcessState = this.activeProcesses.get(input.threadChatId);
-        const parsedMessages = parser.parse(line, {
-          isWorking: !!activeProcessState?.isWorking,
-        });
-        for (const parsedMessage of parsedMessages) {
+        const trackSession = (parsedMessage: ClaudeMessage) => {
           const type = (parsedMessage as { type?: string }).type;
           const sessionId = (parsedMessage as { session_id?: string })
             .session_id;
@@ -753,6 +805,27 @@ export class TerragonDaemon {
             }
           }
           // sessionTracking === "none" (amp): never touch sessionId/isWorking.
+        };
+        const parsedMessages = parser.parse(line, {
+          isWorking: !!activeProcessState?.isWorking,
+          // Phase 5: a held result is tracked and completes the run like any
+          // result, but is not buffered until drainHeld releases it.
+          onResultHeld: (heldResult, replacedEarlier) => {
+            trackSession(heldResult);
+            this.updateActiveProcessState(input.threadChatId, {
+              isCompleted: true,
+            });
+            this.runtime.logger.info("holding result until exit", {
+              threadChatId: input.threadChatId,
+              subtype: (heldResult as { subtype?: string }).subtype,
+              num_turns: (heldResult as { num_turns?: number }).num_turns,
+              replacedEarlier,
+            });
+          },
+        });
+        for (const parsedMessage of parsedMessages) {
+          const type = (parsedMessage as { type?: string }).type;
+          trackSession(parsedMessage);
 
           this.addMessageToBuffer({
             agent: input.agent,

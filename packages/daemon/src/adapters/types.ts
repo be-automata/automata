@@ -1,6 +1,11 @@
 import type { AIAgent, AIAgentCredentials } from "@terragon/agent/types";
 import type { IDaemonRuntime } from "../runtime";
-import type { ClaudeMessage, PermissionMode } from "../shared";
+import type {
+  ClaudeMessage,
+  OrchestratedReviewPolicy,
+  PermissionMode,
+  ReviewPolicyVariant,
+} from "../shared";
 
 /**
  * HarnessAdapter contract (#75, ADR-006).
@@ -44,6 +49,15 @@ export interface PrepareEnvContext {
    * value `buildArgs` already consumes.
    */
   permissionMode?: PermissionMode;
+  /**
+   * The run's orchestrated review policy (Phase 5), resolved ONCE by the
+   * daemon (`reviewPolicyVariantFor`) — present only for a review run whose
+   * validated `reviewAgent` is orchestrated; absent ⇒ classic. Added under
+   * ADR-006 exactly like `permissionMode` (#88): a resolved review SHAPE —
+   * not a credential kind, userId or organizationId. claude uses it for the
+   * review-only `BASH_MAX_TIMEOUT_MS`.
+   */
+  orchestratedReview?: OrchestratedReviewPolicy;
 }
 
 /** Config passed to `buildArgs` — the union of every `*Command()` builder's params today. */
@@ -53,6 +67,8 @@ export interface BuildArgsConfig {
   sessionId: string | null;
   model: string;
   permissionMode?: PermissionMode;
+  /** Same resolved review SHAPE as `PrepareEnvContext.orchestratedReview` (ADR-006). */
+  orchestratedReview?: OrchestratedReviewPolicy;
   mcpConfigPath?: string | null;
   enableMcpPermissionPrompt?: boolean;
   useCredits?: boolean;
@@ -72,6 +88,13 @@ export interface MakeLineParserContext {
  */
 export interface ParseLineCallContext {
   isWorking: boolean;
+  /**
+   * Called when `parse` swallows a `result` it now holds until exit (claude
+   * background sub-agents, see result-hold.ts). The caller still treats the
+   * run as completed; `replacedEarlier` says a previously held result was
+   * dropped in its favour.
+   */
+  onResultHeld?: (result: ClaudeMessage, replacedEarlier: boolean) => void;
 }
 
 /**
@@ -86,6 +109,12 @@ export interface ParseLineCallContext {
 export interface HarnessLineParser {
   parse(line: string, ctx: ParseLineCallContext): ClaudeMessage[];
   finalize?(): ClaudeMessage[];
+  /**
+   * Take (and clear) the result `parse` is holding, if any. Called by the
+   * daemon at process close (released unless the run was stopped/replaced)
+   * and by the idle watchdog (released instead of the synthetic error).
+   */
+  drainHeld?(): ClaudeMessage | null;
 }
 
 /**
@@ -166,6 +195,9 @@ export interface HarnessAdapter {
    * document why in its own JSDoc (naming the pinned version and what was
    * checked) rather than guess — see claude-adapter.ts (shipped),
    * codex/gemini/amp/opencode-adapter.ts ([] + reason).
+   *
+   * `variant` (Phase 5, D2): only claude implements an orchestrated
+   * variant; omitted ⇒ classic. Adapters that return `[]` ignore it.
    */
-  reviewPolicyArgs(): string[];
+  reviewPolicyArgs(variant?: ReviewPolicyVariant): string[];
 }

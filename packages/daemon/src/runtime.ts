@@ -13,6 +13,15 @@ import { DaemonEventAPIBody } from "./shared";
 import { nanoid } from "nanoid/non-secure";
 import { postJson } from "./proxy-fetch";
 
+/**
+ * How long spawnCommandLine waits, after the agent's 'exit', for its stdout to
+ * reach 'end' before it closes the run anyway (Phase 5). 'exit' can beat the
+ * last stdout line — and with a held result (claude background sub-agents)
+ * that line is the verdict. The cap stops a detached grandchild that keeps
+ * stdout open from pinning the run.
+ */
+export const STDOUT_DRAIN_CAP_MS = 2000;
+
 export interface IDaemonRuntime {
   url: string;
   unixSocketPath: string;
@@ -324,6 +333,10 @@ export class DaemonRuntime implements IDaemonRuntime {
     let pollInterval: NodeJS.Timeout | undefined;
     let rl: readline.Interface | undefined;
     let errorToReport: Error | null = null;
+    // 'exit' waits for stdout to drain (see STDOUT_DRAIN_CAP_MS).
+    let stdoutEnded = !child.stdout;
+    let pendingExitCode: number | null | undefined;
+    let drainTimer: NodeJS.Timeout | undefined;
     const handleClose = (
       code: number | null,
       source: string,
@@ -335,6 +348,9 @@ export class DaemonRuntime implements IDaemonRuntime {
       closeHandled = true;
       if (pollInterval) {
         clearInterval(pollInterval);
+      }
+      if (drainTimer) {
+        clearTimeout(drainTimer);
       }
       // Close readline interface to ensure cleanup happens promptly
       if (rl) {
@@ -365,8 +381,13 @@ export class DaemonRuntime implements IDaemonRuntime {
       });
       // Handle stdout stream closing
       child.stdout.on("end", () => {
+        stdoutEnded = true;
         if (rl) {
           rl.close();
+        }
+        // An 'exit' that arrived first is completed now that every line is in.
+        if (pendingExitCode !== undefined) {
+          handleClose(pendingExitCode, "exit");
         }
       });
     } else {
@@ -384,8 +405,18 @@ export class DaemonRuntime implements IDaemonRuntime {
     // Listen for both 'exit' and 'close' events
     // 'exit' fires when the process exits (more reliable for detached processes)
     // 'close' fires when all stdio streams are closed
+    // 'exit' can fire while stdout still holds the last line(s), so it only
+    // closes once stdout has ended — or after STDOUT_DRAIN_CAP_MS, so a
+    // detached grandchild holding stdout cannot keep the run open.
     child.on("exit", (code) => {
-      handleClose(code, "exit");
+      if (stdoutEnded) {
+        handleClose(code, "exit");
+        return;
+      }
+      pendingExitCode = code;
+      drainTimer = setTimeout(() => {
+        handleClose(code, "exit");
+      }, STDOUT_DRAIN_CAP_MS);
     });
     child.on("close", (code) => {
       handleClose(code, "close");
