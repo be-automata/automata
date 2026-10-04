@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cleanupWorkdir,
   STALE_RUN_DIR_AGE_MS,
+  SWEEP_BUDGET_MS,
   sweepStaleRunDirs,
   type RunAsAgent,
 } from "./provision";
@@ -289,7 +290,7 @@ describe("sweepStaleRunDirs", () => {
       log,
     });
 
-    expect(result).toEqual({ removed: 2, kept: 3, failed: 0 });
+    expect(result).toEqual({ removed: 2, kept: 3, failed: 0, deferred: 0 });
     expect(await fs.stat(stale).catch(() => null)).toBe(null);
     expect(await fs.stat(tombstone).catch(() => null)).toBe(null);
     expect(await fs.stat(fresh)).toBeTruthy();
@@ -297,7 +298,9 @@ describe("sweepStaleRunDirs", () => {
     expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
     expect(await fs.stat(outside)).toBeTruthy();
     expect(await fs.stat(root)).toBeTruthy();
-    expect(lines).toEqual(["stale run dirs swept: removed=2 kept=3 failed=0"]);
+    expect(lines).toEqual([
+      "stale run dirs swept: removed=2 kept=3 failed=0 deferred=0",
+    ]);
   });
 
   it("hands back each stale dir as the agent on linux, and only those", async () => {
@@ -322,7 +325,7 @@ describe("sweepStaleRunDirs", () => {
     });
   });
 
-  it("counts a dir it could not remove as failed, and keeps going", async () => {
+  it("counts a dir it could not remove as failed and stops: the rest wait for the next boot", async () => {
     if (process.getuid?.() === 0) return; // root ignores the mode bits
     const stuck = await runDir(RUN_A, false);
     const locked = path.join(stuck, "home");
@@ -335,10 +338,11 @@ describe("sweepStaleRunDirs", () => {
         agentUser: "",
         log,
       });
-      expect(result).toEqual({ removed: 1, kept: 0, failed: 1 });
+      // RUN_A sorts first, so the failure is hit before RUN_B is reached.
+      expect(result).toEqual({ removed: 0, kept: 0, failed: 1, deferred: 1 });
       expect(lines).toEqual([
         `workdir cleanup incomplete: ${stuck} (EACCES)`,
-        "stale run dirs swept: removed=1 kept=0 failed=1",
+        "stale run dirs swept: removed=0 kept=0 failed=1 deferred=1",
       ]);
     } finally {
       await fs.chmod(locked, 0o755);
@@ -351,7 +355,30 @@ describe("sweepStaleRunDirs", () => {
       agentUser: "",
       log,
     });
-    expect(result).toEqual({ removed: 0, kept: 0, failed: 0 });
+    expect(result).toEqual({ removed: 0, kept: 0, failed: 0, deferred: 0 });
     expect(lines).toEqual([]);
+  });
+
+  it("stops at the total budget: boot is never held past SWEEP_BUDGET_MS", async () => {
+    const first = await runDir(RUN_A, true);
+    const second = await runDir(RUN_B, true);
+    let t = Date.now();
+    // Every clean-up "takes" the whole budget.
+    const runAsAgent = vi.fn<RunAsAgent>(async () => {
+      t += SWEEP_BUDGET_MS;
+      return { code: 0, signal: null };
+    });
+    const result = await sweepStaleRunDirs({
+      workdirRoot: root,
+      agentUser: AGENT,
+      log,
+      platform: "linux",
+      runAsAgent,
+      now: () => t,
+    });
+    expect(runAsAgent).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ removed: 1, kept: 0, failed: 0, deferred: 1 });
+    expect(await fs.stat(first).catch(() => null)).toBe(null);
+    expect(await fs.stat(second)).toBeTruthy();
   });
 });

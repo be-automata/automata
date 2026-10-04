@@ -479,11 +479,20 @@ const RUN_DIR_NAME_RE =
 
 /** A run dir older than this cannot belong to a live run (see sweepStaleRunDirs). */
 export const STALE_RUN_DIR_AGE_MS = 24 * 60 * 60 * 1000;
+/**
+ * Total time the boot sweep may spend. The worker awaits the sweep before it
+ * registers, and each hand-back may take up to its own timeout, so the sweep is
+ * bounded as a whole: past the budget, or after the first dir that could not be
+ * removed (a hung sudo/PAM, a broken grant), the rest wait for the next boot.
+ */
+export const SWEEP_BUDGET_MS = 60_000;
 
 export interface SweepStaleRunDirsResult {
   removed: number;
   kept: number;
   failed: number;
+  /** Stale dirs left for the next boot (budget spent, or a failure stopped the sweep). */
+  deferred: number;
 }
 
 /**
@@ -510,7 +519,13 @@ export async function sweepStaleRunDirs(opts: {
 }): Promise<SweepStaleRunDirsResult> {
   const { workdirRoot, agentUser, log, platform, runAsAgent } = opts;
   const now = opts.now ?? Date.now;
-  const result: SweepStaleRunDirsResult = { removed: 0, kept: 0, failed: 0 };
+  const result: SweepStaleRunDirsResult = {
+    removed: 0,
+    kept: 0,
+    failed: 0,
+    deferred: 0,
+  };
+  const startedAt = now();
   let entries: Dirent[];
   try {
     entries = await fs.readdir(workdirRoot, { withFileTypes: true });
@@ -522,6 +537,9 @@ export async function sweepStaleRunDirs(opts: {
     }
     return result;
   }
+  // Sorted, so which dirs a bounded sweep reaches first is deterministic.
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  let stopped = false;
   for (const entry of entries) {
     const target = path.join(workdirRoot, entry.name);
     if (!entry.isDirectory() || !RUN_DIR_NAME_RE.test(entry.name)) {
@@ -533,17 +551,25 @@ export async function sweepStaleRunDirs(opts: {
       result.kept += 1;
       continue;
     }
+    if (stopped || now() - startedAt >= SWEEP_BUDGET_MS) {
+      result.deferred += 1;
+      continue;
+    }
     const gone = await cleanupWorkdir(target, {
       agentUser,
       log,
       platform,
       runAsAgent,
     });
-    if (gone) result.removed += 1;
-    else result.failed += 1;
+    if (gone) {
+      result.removed += 1;
+    } else {
+      result.failed += 1;
+      stopped = true;
+    }
   }
   log(
-    `stale run dirs swept: removed=${result.removed} kept=${result.kept} failed=${result.failed}`,
+    `stale run dirs swept: removed=${result.removed} kept=${result.kept} failed=${result.failed} deferred=${result.deferred}`,
   );
   return result;
 }
