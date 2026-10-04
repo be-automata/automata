@@ -952,10 +952,12 @@ must revert the skill version first, then roll back www.
 
 **Preconditions.**
 
-- Phase 5 is live on the box. The staged daemon has `--max-turns` and
-  `holdResultAfterBackgroundTask` (05-04 rollout notes:
+- Phase 5 is live on the box. The staged daemon has `--max-turns` and the
+  background sub-agent result hold (`packages/daemon/src/adapters/result-hold.ts`):
   `grep -c -- '--max-turns' /usr/local/automata/daemon/index.js` ≥ 1 and
-  `grep -c holdResultAfterBackgroundTask /usr/local/automata/daemon/index.js` ≥ 1).
+  `grep -c createResultHold /usr/local/automata/daemon/index.js` ≥ 1. (An
+  earlier draft named `holdResultAfterBackgroundTask`, which never existed, so
+  that grep always printed 0.)
 - Batteries are installed: `cat /usr/local/lib/automata-batteries/manifest.sha256`
   prints a 64-hex hash, and there is no `manifest.sha256.invalid`.
 - This phase has no schema change, so there is no new `assert-schema-ready`
