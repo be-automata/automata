@@ -57,6 +57,8 @@ const startGitBroker = vi.fn();
 const startGhBroker = vi.fn();
 // Ctor args of every DaemonProcess the run built (the broker handoff pin).
 const daemonCtorArgs: unknown[][] = [];
+// Phase 5: every message the run wrote to the daemon socket.
+const sendMessageCalls: unknown[] = [];
 
 // #152 Stage A: the admission reap scans the REAL namespace root and issues
 // real group-SIGKILLs for dead-sibling debris — on a box that also runs
@@ -186,7 +188,10 @@ vi.mock("./daemon-process", () => ({
     start = vi.fn(() => {
       admissionOrder.push("daemon-start");
     });
-    sendMessage = vi.fn(async () => 42);
+    sendMessage = vi.fn(async (message: unknown) => {
+      sendMessageCalls.push(message);
+      return 42;
+    });
     teardown = vi.fn(() => {
       finallyOrder.push("teardown");
     });
@@ -241,6 +246,7 @@ beforeEach(() => {
     close: vi.fn(async () => {}),
   });
   daemonCtorArgs.length = 0;
+  sendMessageCalls.length = 0;
 });
 
 afterEach(() => {
@@ -1179,5 +1185,148 @@ describe("#183: finally order — box lock released last, after teardown and cle
       "release",
     ]);
     expect(releaseMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("review agent wire + batteries line (Phase 5)", () => {
+  const REVIEW_MESSAGE = {
+    type: "claude",
+    model: "sonnet",
+    agent: "claudeCode",
+    agentVersion: 1,
+    prompt: "review",
+    sessionId: null,
+    permissionMode: "review",
+    featureFlags: {},
+  };
+  const ORCHESTRATED = {
+    mode: "orchestrated" as const,
+    batteries: ["gstack-review"],
+    runTests: true,
+    runTestsDowngradedReason: "fork" as const,
+    commandTimeoutMs: 240000,
+    maxTurns: 30,
+  };
+  const CLASSIC = {
+    mode: "classic" as const,
+    batteries: [],
+    runTests: false,
+    commandTimeoutMs: 60000,
+  };
+  const SEEDED = {
+    mode: "orchestrated" as const,
+    packs: ["gstack-review"],
+    manifestHash: "abcdef012345".padEnd(64, "0"),
+  };
+
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    pullNextMessage.mockReset().mockResolvedValue({ ...REVIEW_MESSAGE });
+    pollUntilTerminal.mockReset().mockResolvedValue({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+  });
+
+  async function run(
+    reviewAgent: unknown,
+    batteries: unknown = undefined,
+  ): Promise<{ lines: string[]; sent: Record<string, unknown> }> {
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+      batteries,
+    });
+    const c = ctx();
+    await expect(
+      runFn(reviewAgent === undefined ? INPUT : { ...INPUT, reviewAgent }, c),
+    ).resolves.toMatchObject({ outcome: "completed" });
+    expect(sendMessageCalls).toHaveLength(1);
+    return {
+      lines: c.log.mock.calls.map((call) => String(call[0])),
+      sent: sendMessageCalls[0] as Record<string, unknown>,
+    };
+  }
+
+  const batteriesLines = (lines: string[]) =>
+    lines.filter((l) => /\] batteries: /.test(l));
+
+  it("orchestrated: the daemon message carries exactly {mode, commandTimeoutMs, maxTurns}", async () => {
+    const { lines, sent } = await run(ORCHESTRATED, SEEDED);
+    expect(sent.reviewAgent).toEqual({
+      mode: "orchestrated",
+      commandTimeoutMs: 240000,
+      maxTurns: 30,
+    });
+    expect(JSON.stringify(sent)).not.toMatch(/runTests|batteries/);
+    expect(materialiseAgentCredentials).toHaveBeenCalledWith(
+      expect.objectContaining({ reviewAgent: ORCHESTRATED }),
+    );
+    const [arg] = materialiseAgentCredentials.mock.calls[0]! as [
+      { reviewAgent: unknown },
+    ];
+    expect(arg.reviewAgent).toBe(ORCHESTRATED);
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toContain(
+      "batteries: mode=orchestrated packs=gstack-review manifest=abcdef012345",
+    );
+    expect(
+      lines.some((l) =>
+        l.includes(
+          "review agent: orchestrated → daemon (bashTimeoutMs=240000, maxTurns=30)",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["classic", CLASSIC],
+    ["absent", undefined],
+  ])(
+    "%s: the daemon message has no reviewAgent key and one classic batteries line",
+    async (_label, reviewAgent) => {
+      const { lines, sent } = await run(reviewAgent);
+      expect("reviewAgent" in sent).toBe(false);
+      // Exactly today's keys: the pulled message + the worker's useCredits.
+      expect(Object.keys(sent).sort()).toEqual(
+        [...Object.keys(REVIEW_MESSAGE), "useCredits"].sort(),
+      );
+      const bl = batteriesLines(lines);
+      expect(bl).toHaveLength(1);
+      expect(bl[0]).toMatch(/\] batteries: mode=classic$/);
+      expect(lines.some((l) => l.includes("review agent:"))).toBe(false);
+    },
+  );
+
+  it("out-of-bounds orchestrated: bounds-rejected BEFORE seeding, so it seeds, logs and runs classic", async () => {
+    const { lines, sent } = await run({ ...ORCHESTRATED, commandTimeoutMs: 5 });
+    expect("reviewAgent" in sent).toBe(false);
+    const [arg] = materialiseAgentCredentials.mock.calls[0]! as [
+      { reviewAgent: unknown },
+    ];
+    expect(arg.reviewAgent).toBeUndefined();
+    const rejected = lines.filter((l) => l.includes("bounds-rejected"));
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toContain("commandTimeoutMs");
+    expect(rejected[0]).toContain("→ classic");
+    const bl = batteriesLines(lines);
+    expect(bl).toHaveLength(1);
+    expect(bl[0]).toMatch(/\] batteries: mode=classic$/);
+    // The bounds check runs before materialise (seeding), not at send time.
+    const rejectIdx = lines.findIndex((l) => l.includes("bounds-rejected"));
+    const credIdx = lines.findIndex((l) => l.includes("agent credential:"));
+    expect(rejectIdx).toBeLessThan(credIdx);
+  });
+
+  it("orchestrated on a non-review pulled message: no wire is stamped", async () => {
+    pullNextMessage.mockResolvedValue({
+      ...REVIEW_MESSAGE,
+      permissionMode: "allowAll",
+    });
+    const { sent } = await run(ORCHESTRATED, SEEDED);
+    expect("reviewAgent" in sent).toBe(false);
   });
 });

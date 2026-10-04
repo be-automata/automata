@@ -87,8 +87,11 @@ export type AgentRunInput = {
    */
   egressPolicy?: EgressPolicyShape;
   /**
-   * Phase 4 pass-through; unread until Phase 5; old workers ignore it (no
-   * runtime input validation). PR-review runs only.
+   * Phase 4 resolution, consumed by Phase 5: bounds-checked first
+   * (review-agent-wire.ts), then orchestrated runs seed battery packs into the
+   * per-run HOME (batteries-seed.ts) and stamp the daemon wire
+   * (DaemonReviewAgentWire). runTests is prompt-level and is NOT forwarded
+   * (Phase 6). PR-review runs only; old workers ignore it.
    */
   reviewAgent?: ReviewAgentShape;
   /**
@@ -226,4 +229,22 @@ export interface PulledDaemonMessage {
   permissionMode: "allowAll" | "plan" | "review";
   useCredits?: boolean;
   featureFlags: Record<string, boolean>;
+  /**
+   * Worker-stamped (Phase 5) from AgentRunInput.reviewAgent for in-bounds
+   * orchestrated review runs only; NOT part of www's RemoteDaemonMessage.
+   */
+  reviewAgent?: DaemonReviewAgentWire;
 }
+
+/**
+ * The daemon's `reviewAgent` wire field: a structural mirror of
+ * DaemonReviewAgentSchema (packages/daemon/src/shared.ts), per this file's
+ * no-cross-plane-import rule. Worker-stamped from AgentRunInput.reviewAgent,
+ * never served by www. Bounds-checked here (review-agent-wire.ts) AND by the
+ * daemon (defense in depth): commandTimeoutMs 60000..600000, maxTurns 1..500.
+ */
+export type DaemonReviewAgentWire = {
+  mode: "classic" | "orchestrated";
+  commandTimeoutMs: number;
+  maxTurns?: number;
+};
