@@ -6,6 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
+import { AUDIT_PNPM_PATH } from "./self-heal-checks";
+
 import {
   BATTERY_PACK_IDS,
   BATTERY_PACK_REQUIRES,
@@ -726,9 +728,30 @@ describe("#batteries (phase 3): batteries.json", () => {
     ]);
   });
 
+  it("pins a standalone pnpm for the audit checks, at the path the runner uses", () => {
+    const pnpm = (manifest.tools ?? []).find((t) => t.name === "pnpm");
+    expect(pnpm).toEqual({
+      name: "pnpm",
+      kind: "static-bin",
+      version: "10.14.0",
+      url: "https://github.com/pnpm/pnpm/releases/download/v10.14.0/pnpm-linuxstatic-x64",
+      sha256:
+        "b61ab8922a7d82794623460345964597d264c862a579b814eaa3468ac7b80375",
+      license: "MIT",
+    });
+    // <root>/<name>@<version>/bin/<name>, mirrored by install_tool.
+    expect(AUDIT_PNPM_PATH).toBe(
+      `/usr/local/lib/automata-batteries/pnpm@${pnpm?.version}/bin/pnpm`,
+    );
+  });
+
   it("pins the dart-sdk and somnio-cli tools (phase 7)", () => {
     const tools = manifest.tools ?? [];
-    expect(tools.map((t) => t.name)).toEqual(["dart-sdk", "somnio-cli"]);
+    expect(tools.map((t) => t.name)).toEqual([
+      "dart-sdk",
+      "somnio-cli",
+      "pnpm",
+    ]);
     expect(tools[0]).toEqual({
       name: "dart-sdk",
       kind: "dart-sdk",
@@ -1569,7 +1592,7 @@ describe("#batteries (phase 7): tools in install-batteries.sh — preflight + SD
  */
 const RECORDED_TOOLS_OUTPUT = {
   version: "1",
-  sha256: "bca0a84d7960e42f2d966085b0df1de0bc254597e304847f1efbdcfc3fb27e28",
+  sha256: "95a326bcab98cb46995c9b2a70aa4164e299c3a9842988104c33453d3935e0a2",
 };
 
 describe("#batteries (phase 7): tools in install-batteries.sh — AOT + wrapper + verify", () => {
@@ -1589,12 +1612,28 @@ describe("#batteries (phase 7): tools in install-batteries.sh — AOT + wrapper 
       body("stage_dart_sdk"),
       body("fetch_verified"),
       body("stage_dart_aot"),
+      body("stage_static_bin"),
       body("write_wrapper"),
     ].join("\n");
     const actual = createHash("sha256").update(shaping).digest("hex");
     expect(actual, `record sha256: "${actual}"`).toBe(
       RECORDED_TOOLS_OUTPUT.sha256,
     );
+  });
+
+  it("installs a static-bin tool sha256-verified, root-owned, off the agent PATH, and verifies it as the agent", () => {
+    const stage = body("stage_static_bin");
+    expect(stage).toContain('fetch_verified "$name $version" "$url" "$sha256"');
+    expect(stage).toContain("chown -R root:root");
+    expect(stage).not.toContain("$BIN_DIR");
+    expect(body("install_tool")).toContain("stage_static_bin");
+    expect(body("tool_at_pin")).toContain("static-bin)");
+    expect(body("preflight_tools")).toContain("static-bin) keys=");
+    const verify = body("verify_tools_as_agent");
+    expect(verify).toContain(
+      '"$BATTERIES_CHECK_PATH/bin/$BATTERIES_CHECK_NAME" --version',
+    );
+    expect(verify).toContain("-writable");
   });
 
   it("fetches a tool's whole pinned commit and checks FETCH_HEAD", () => {

@@ -510,6 +510,8 @@ preflight_tools() {
   local re_smoke_word='^-{0,2}[a-z0-9][a-z0-9_-]*$'
   local re_platform='^[a-z0-9]+-[a-z0-9]+$'
   local sdk_keys='["name","kind","version","url","sha256","licenseMember","license"]'
+  local static_keys='["name","kind","version","url","sha256","license"]'
+  local re_static_url='^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/v([0-9]+\.[0-9]+\.[0-9]+)/[A-Za-z0-9_.-]*linux[A-Za-z0-9_.-]*$'
   local aot_keys='["name","kind","version","repo","sha","subpaths","packageDir","entrypoint","lockOverlay","lockSha256","sdk","license","wrapper","rootEnv","versionArgs","versionLine","smokeArgs","smokeExpect"]'
   local row i label name kind keys host expected version url sha256 license_member
   local url_prefix url_suffix platform repo sha src dest git_id entrypoint
@@ -555,6 +557,7 @@ preflight_tools() {
     case "$kind" in
       dart-sdk) keys="$sdk_keys" ;;
       dart-aot) keys="$aot_keys" ;;
+      static-bin) keys="$static_keys" ;;
       *)
         record "FAIL preflight $label: unknown kind"
         continue
@@ -587,6 +590,17 @@ preflight_tools() {
     esac
     version="$(tool_field "$i" version)"
     [[ "$version" =~ $RE_SEMVER ]] || record "FAIL preflight $label: bad version"
+
+    if [ "$kind" = "static-bin" ]; then
+      url="$(tool_field "$i" url)"
+      sha256="$(tool_field "$i" sha256)"
+      [[ "$sha256" =~ $RE_SHA256 ]] || record "FAIL preflight $label: sha256 is not 64 hex"
+      if ! [[ "$url" =~ $re_static_url ]] || [ "${BASH_REMATCH[1]}" != "$version" ]; then
+        record "FAIL preflight $label: url must be a github release download of v$version naming a linux asset"
+      fi
+      seen="$seen$name $kind"$'\n'
+      continue
+    fi
 
     if [ "$kind" = "dart-sdk" ]; then
       url="$(tool_field "$i" url)"
@@ -1124,6 +1138,7 @@ tool_at_pin() {
   [ "$(head -n 1 "$stamp")" = "stamp $expected" ] || return 1
   case "$(tool_field "$i" kind)" in
     dart-sdk) artifact="$target/bin/dart" ;;
+    static-bin) artifact="$target/bin/$(tool_field "$i" name)" ;;
     dart-aot)
       name="$(tool_field "$i" name)"
       wrapper="$(tool_field "$i" wrapper)"
@@ -1211,6 +1226,27 @@ PY
     { [ "$DRY_RUN" -eq 1 ] || chown -R root:root "$stage"; } &&
     chmod 0700 "$stage"; }; then
     STEP_ERROR="could not set modes or ownership"
+    return 1
+  fi
+}
+
+# stage_static_bin <index> <stage>: the sha256-verified executable as
+# <stage>/bin/<name>, root-owned, 0755 all the way down so the agent uid can
+# run it by absolute path. It is never given a bin-dir entry. Sets STEP_ERROR
+# and returns 1 on failure.
+stage_static_bin() {
+  local i="$1" stage="$2" name version url sha256 dl
+  name="$(tool_field "$i" name)"
+  version="$(tool_field "$i" version)"
+  url="$(tool_field "$i" url)"
+  sha256="$(tool_field "$i" sha256)"
+  dl="$WORK/tool-$name.bin"
+  fetch_verified "$name $version" "$url" "$sha256" "$dl" || return 1
+  if ! { mkdir -p "$stage/bin" &&
+    cat "$dl" >"$stage/bin/$name" &&
+    chmod 0755 "$stage" "$stage/bin" "$stage/bin/$name" &&
+    { [ "$DRY_RUN" -eq 1 ] || chown -R root:root "$stage"; }; }; then
+    STEP_ERROR="could not write the executable"
     return 1
   fi
 }
@@ -1370,7 +1406,7 @@ install_tool() {
   kind="$(tool_field "$i" kind)"
   version="$(tool_field "$i" version)"
   case "$kind" in
-    dart-sdk) target="$ROOT/$name@$version" ;;
+    dart-sdk | static-bin) target="$ROOT/$name@$version" ;;
     *)
       sha="$(tool_field "$i" sha)"
       target="$ROOT/$name@$sha"
@@ -1402,6 +1438,7 @@ install_tool() {
   STEP_ERROR=""
   case "$kind" in
     dart-sdk) stage_dart_sdk "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-staging failed}" ;;
+    static-bin) stage_static_bin "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-staging failed}" ;;
     *) stage_dart_aot "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-staging failed}" ;;
   esac
   if [ -n "$STEP_ERROR" ]; then
@@ -1418,6 +1455,9 @@ install_tool() {
     license_member="$(tool_field "$i" licenseMember)"
     license_file="$target/${license_member#*/}"
     artifact="$target/bin/dart"
+  elif [ "$kind" = "static-bin" ]; then
+    license_file=""
+    artifact="$target/bin/$name"
   else
     wrapper="$(tool_field "$i" wrapper)"
     license_file="$target/src/LICENSE"
@@ -1544,6 +1584,36 @@ verify_tools_as_agent() {
         4) record "FAIL verify $name: $AGENT_USER can list the build-only $ROOT/$name@$version" ;;
         *) record "FAIL verify $name: the check could not run as $AGENT_USER (status $status)" ;;
       esac
+      continue
+    fi
+    if [ "$kind" = "static-bin" ]; then
+      # The agent uid runs it by absolute path (never on PATH), may not modify
+      # it, and its --version must print the pinned version as the last line.
+      target="$ROOT/$name@$version"
+      status=0
+      out="$(as_agent 'w="$(find "$BATTERIES_CHECK_PATH" -writable -print)" || exit 3; [ -z "$w" ] || exit 5; "$BATTERIES_CHECK_PATH/bin/$BATTERIES_CHECK_NAME" --version' \
+        "$name" "" "$target" 2>/dev/null)" || status=$?
+      last="${out##*$'\n'}"
+      case "$status" in
+        0) ;;
+        3)
+          record "FAIL verify $name: $AGENT_USER cannot traverse $target"
+          continue
+          ;;
+        5)
+          record "FAIL verify $name: part of $target is writable by $AGENT_USER"
+          continue
+          ;;
+        *)
+          record "FAIL verify $name: '$target/bin/$name --version' failed as $AGENT_USER (status $status)"
+          continue
+          ;;
+      esac
+      if [ "$last" = "$version" ]; then
+        record "VERIFIED agent tool $name ($version; runs by absolute path, not writable)"
+      else
+        record "FAIL verify $name: printed '$last' as $AGENT_USER, expected '$version'"
+      fi
       continue
     fi
     sha="$(tool_field "$i" sha)"

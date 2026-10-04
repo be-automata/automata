@@ -192,7 +192,25 @@ export interface BatteryDartAotTool {
   smokeExpect: string;
 }
 
-export type BatteryTool = BatteryDartSdkTool | BatteryDartAotTool;
+/**
+ * One sha256-pinned standalone executable (e.g. pnpm for the deterministic
+ * audit checks), installed root-owned at `<root>/<name>@<version>/bin/<name>`
+ * and NEVER put on the agent's PATH or linked into a run.
+ */
+export interface BatteryStaticBinTool {
+  name: string;
+  kind: "static-bin";
+  version: string;
+  /** A GitHub release download of v<version> naming a linux asset. */
+  url: string;
+  sha256: string;
+  license: string;
+}
+
+export type BatteryTool =
+  | BatteryDartSdkTool
+  | BatteryDartAotTool
+  | BatteryStaticBinTool;
 
 export interface BatteriesManifest {
   schemaVersion: 1;
@@ -237,7 +255,18 @@ const CLI_KEYS = [
   "versionArgs",
 ] as const;
 const DROPPED_KEYS = ["name", "reason"] as const;
-const TOOL_KINDS = ["dart-sdk", "dart-aot"] as const;
+const TOOL_KINDS = ["dart-sdk", "dart-aot", "static-bin"] as const;
+const STATIC_BIN_KEYS = [
+  "name",
+  "kind",
+  "version",
+  "url",
+  "sha256",
+  "license",
+] as const;
+/** A static-bin asset is a GitHub release download for the pinned version. */
+const STATIC_BIN_URL =
+  /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/releases\/download\/v(\d+\.\d+\.\d+)\/[A-Za-z0-9_.-]*linux[A-Za-z0-9_.-]*$/;
 const DART_SDK_KEYS = [
   "name",
   "kind",
@@ -564,6 +593,24 @@ function findDartSdkToolError(
   );
 }
 
+function findStaticBinToolError(
+  value: Record<string, unknown>,
+  at: string,
+): string | undefined {
+  const match =
+    typeof value.url === "string" ? STATIC_BIN_URL.exec(value.url) : null;
+  return (
+    findUnknownKey(value, STATIC_BIN_KEYS, at) ??
+    findStringError(value.name, ID_OR_NAME, `${at}.name`) ??
+    findStringError(value.version, SEMVER, `${at}.version`) ??
+    (match !== null && match[1] === value.version
+      ? undefined
+      : `${at}.url: must be a github release download of v<version> naming a linux asset`) ??
+    findStringError(value.sha256, SHA256_HEX, `${at}.sha256`) ??
+    findNonEmptyError(value.license, `${at}.license`)
+  );
+}
+
 function findToolSubpathError(value: unknown, at: string): string | undefined {
   if (!isRecord(value)) return `${at}: must be an object`;
   return (
@@ -682,6 +729,7 @@ function findToolError(value: unknown, at: string): string | undefined {
   if (!isRecord(value)) return `${at}: must be an object`;
   if (value.kind === "dart-sdk") return findDartSdkToolError(value, at);
   if (value.kind === "dart-aot") return findDartAotToolError(value, at);
+  if (value.kind === "static-bin") return findStaticBinToolError(value, at);
   return `${at}.kind: must be one of ${TOOL_KINDS.join(", ")}`;
 }
 
