@@ -1618,6 +1618,67 @@ describe("#batteries (phase 7): tools in install-batteries.sh — AOT + wrapper 
   });
 });
 
+describe("#batteries (phase 7): batteries-dry-run.sh (developer proof)", () => {
+  // The proof needs network and is run by hand (07-02); these checks keep it
+  // runnable and honest between runs.
+  const proofPath = path.join(
+    workerRoot,
+    "deploy",
+    "linux",
+    "batteries-dry-run.sh",
+  );
+  const proof = deployFile("linux", "batteries-dry-run.sh");
+
+  it("is tracked as an executable bash script in strict mode", () => {
+    const mode = execFileSync(
+      "git",
+      ["ls-files", "-s", "packages/worker/deploy/linux/batteries-dry-run.sh"],
+      { cwd: repoRoot, encoding: "utf8" },
+    ).slice(0, 6);
+    expect(mode).toBe("100755");
+    const lines = proof.split("\n");
+    expect(lines[0]).toBe("#!/bin/bash");
+    expect(lines[1]).toBe("set -euo pipefail");
+  });
+
+  it("refuses root, uses the shared download cache and ends with the proof line", () => {
+    expect(proof).toContain(
+      '[ "$(id -u)" != "0" ] || die "refuses to run as root"',
+    );
+    expect(proof).toContain("BATTERIES_DOWNLOAD_CACHE=");
+    expect(proof).toContain("SKIP_SUDO_VERIFY=1");
+    expect(proof).toContain('echo "DRY-RUN-PROOF-OK"');
+    expect(proof).toContain("worktree add -q --detach");
+    expect(proof).toContain("worktree remove --force");
+    expect(proof).toContain("trap cleanup EXIT");
+    expect(
+      proof
+        .split("\n")
+        .filter((l) => l.startsWith("DRY_RUN_MACOS_ARM64_SDK_SHA256=")),
+    ).toEqual([
+      "DRY_RUN_MACOS_ARM64_SDK_SHA256=9dfe7d6f2558816c2a978aff6c80e8a4509c6cb726c0702a616c64d286f60e88",
+    ]);
+  });
+
+  it("parses with bash -n", () => {
+    expect(() =>
+      execFileSync("bash", ["-n", proofPath], { stdio: "pipe" }),
+    ).not.toThrow();
+  });
+
+  it("is shellcheck clean", (ctx) => {
+    if (
+      spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
+    ) {
+      ctx.skip();
+    }
+    const result = spawnSync("shellcheck", ["-s", "bash", proofPath], {
+      encoding: "utf8",
+    });
+    expect(result.status, result.stdout).toBe(0);
+  });
+});
+
 describe("#batteries (phase 7): bash preflight parity with the TS guard (executed)", () => {
   // Both validators must reject the same malformed tools entry, each with the
   // rule named. Only /bin/bash install-batteries.sh is spawned, with
