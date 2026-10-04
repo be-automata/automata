@@ -25,6 +25,7 @@ import {
   RepoPickerSelect,
 } from "@/components/settings/review-settings-parts";
 import { InheritSelect } from "@/components/settings/review-agent/review-agent-section";
+import { SelfHealActivity } from "./self-heal-activity";
 import {
   useReviewSettingsQuery,
   useSetReviewSettingMutation,
@@ -403,9 +404,12 @@ export interface SelfHealSectionActions {
 export function SelfHealSectionView({
   state,
   actions,
+  activity,
 }: {
   state: SelfHealSectionState;
   actions: SelfHealSectionActions;
+  /** Activity card, rendered once the settings are ready (container-provided). */
+  activity?: React.ReactNode;
 }) {
   return (
     <SettingsSection
@@ -503,6 +507,7 @@ export function SelfHealSectionView({
               />
             )}
           </div>
+          {activity}
         </>
       )}
     </SettingsSection>
@@ -672,8 +677,42 @@ export function useSelfHealSectionModel(): {
   return { state, actions };
 }
 
+/**
+ * Activity block: a repo picker over the caller's repos, the picked repo's
+ * activity card and the org-scope Drain control (which works with no repo).
+ */
+export function SelfHealActivityPanel() {
+  const reposQuery = useUserReposQuery();
+  const [repo, setRepo] = useState("");
+  const repos = useMemo(
+    () => (reposQuery.data?.repos ?? []).map((r) => r.full_name),
+    [reposQuery.data],
+  );
+  return (
+    <div className="mt-6 grid gap-3" data-testid="self-heal-activity-panel">
+      <h4 className="text-sm font-medium">Activity</h4>
+      {repos.length > 0 && (
+        <RepoPickerSelect
+          repos={repos}
+          value={repo}
+          onChange={setRepo}
+          disabled={false}
+          ariaLabel="Repository to show self-heal activity for"
+        />
+      )}
+      <SelfHealActivity repoFullName={repo === "" ? null : repo} scope="org" />
+    </div>
+  );
+}
+
 /** Thin container: binds the model to the pure view. */
 export function SelfHealSection() {
   const { state, actions } = useSelfHealSectionModel();
-  return <SelfHealSectionView state={state} actions={actions} />;
+  return (
+    <SelfHealSectionView
+      state={state}
+      actions={actions}
+      activity={<SelfHealActivityPanel />}
+    />
+  );
 }
