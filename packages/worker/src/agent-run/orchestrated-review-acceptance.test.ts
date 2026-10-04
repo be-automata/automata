@@ -347,6 +347,7 @@ describe("orchestrated-review-acceptance.sh (phase 6): contract", () => {
       "gsd-reviewers",
       "agents/gsd-code-reviewer.md",
       "stat -c",
+      'analyse_daemon_bundle "$DAEMON_BUNDLE"',
       "journalctl -u automata-worker.service",
       "--no-pager -o short-unix",
       "analyse_review_journal",
@@ -401,6 +402,7 @@ describe("orchestrated-review-acceptance.sh (phase 6): contract", () => {
       "SC2 review latency within budget",
       "box install manifest",
       "box gsd agent file",
+      "box staged daemon",
     ]) {
       expect(script, name).toContain(name);
     }
@@ -655,6 +657,53 @@ describe("analyse_review_journal (sourced, fixture journal)", () => {
   });
 });
 
+describe("analyse_daemon_bundle (sourced, fixture bundle)", () => {
+  const run = (content: string | null) =>
+    content === null
+      ? callAnalyser("analyse_daemon_bundle", ["/nonexistent/index.js"])
+      : withFiles({ "index.js": content }, (p) =>
+          callAnalyser("analyse_daemon_bundle", [p["index.js"]!]),
+        );
+
+  it("both Phase 5 identifiers present: PASS", () => {
+    const out = run(
+      'args.push("--max-turns", n);\nconst hold = createResultHold();\n',
+    );
+    expect(out).toContain("CHECK box staged daemon: PASS");
+    expect(out).toContain("FAILURES=0");
+  });
+
+  it.each([
+    [
+      "only createResultHold missing (pre-Phase-5 hold)",
+      'args.push("--max-turns", n);\n',
+      "(missing: createResultHold — the daemon predates Phase 5)",
+    ],
+    [
+      "only --max-turns missing",
+      "const hold = createResultHold();\n",
+      "(missing: --max-turns — the daemon predates Phase 5)",
+    ],
+    [
+      "both missing",
+      "console.log(1);\n",
+      "(missing: --max-turns createResultHold — the daemon predates Phase 5)",
+    ],
+  ])("%s: FAIL names exactly what is missing", (_label, bundle, detail) => {
+    const out = run(bundle);
+    expect(out).toContain(`CHECK box staged daemon: FAIL ${detail}`);
+    expect(out).toContain("FAILURES=1");
+  });
+
+  it("no bundle fails", () => {
+    const out = run(null);
+    expect(out).toContain(
+      "CHECK box staged daemon: FAIL (/nonexistent/index.js missing or empty)",
+    );
+    expect(out).toContain("FAILURES=1");
+  });
+});
+
 describe("analyse_github (sourced, fixture JSON)", () => {
   const HEAD = "a".repeat(40);
   const SINCE = 1759550000;
@@ -676,6 +725,7 @@ describe("analyse_github (sourced, fixture JSON)", () => {
     reviews = [review()] as unknown[],
     issueComments = [] as unknown[],
     reviewComments = [] as unknown[],
+    bot = BOT,
   } = {}) {
     return withFiles(
       {
@@ -692,7 +742,7 @@ describe("analyse_github (sourced, fixture JSON)", () => {
           p["review_comments.json"]!,
           HEAD,
           String(SINCE),
-          BOT,
+          bot,
         ]),
     );
   }
@@ -717,6 +767,20 @@ describe("analyse_github (sourced, fixture JSON)", () => {
     expect(out).toContain("EVIDENCE review state: CHANGES_REQUESTED");
     expect(out).toContain(`EVIDENCE review submitted_at: ${iso(900)}`);
     expect(out).toContain("EVIDENCE review latency seconds: 900");
+  });
+
+  it("--bot without the [bot] suffix still finds the app's review", () => {
+    const out = analyse({ bot: "automata-ai-bot" });
+    expect(out).toContain("CHECK SC2 exactly one review on head: PASS");
+    expect(out).toContain("FAILURES=0");
+  });
+
+  it("--bot without the [bot] suffix still counts the app's stray comments", () => {
+    const out = analyse({
+      bot: "automata-ai-bot",
+      issueComments: [{ user: { login: BOT }, created_at: iso(30) }],
+    });
+    expect(out).toContain("CHECK SC2 zero bot comments: FAIL");
   });
 
   it.each<[string, Parameters<typeof analyse>[0]]>([

@@ -13,7 +13,8 @@ set -euo pipefail
 #       --repo <owner/name> --pr <n> --expect orchestrated|classic
 #       Operator evidence on the execution box, as root, Linux only:
 #       manifest.sha256 valid, the gsd-reviewers agent file installed as a
-#       regular root-owned file, and the worker journal since --since holds
+#       regular root-owned file, the staged daemon carrying the Phase 5
+#       `--max-turns` flag and result hold, and the worker journal since --since holds
 #       exactly ONE lane=review run for --repo/--pr whose batteries and
 #       review-agent lines match --expect, within the 30-minute budget. The
 #       transcript half lives in the control plane, so it is printed as
@@ -21,6 +22,8 @@ set -euo pipefail
 #
 #   orchestrated-review-acceptance.sh github --repo <owner/name> --pr <n> \
 #       --head-sha <40 hex> --since <YYYY-MM-DDTHH:MM:SSZ> --bot <login>
+#       (--bot matches the login with or without GitHub's "[bot]" suffix, so
+#       a plain app login can never make the zero-comments check undercount)
 #       From the operator's laptop (gh + jq, GETs only): the bot posted exactly
 #       ONE review on --head-sha, no bot conversation comment and no stray bot
 #       review comment since --since, the PR head is still --head-sha (the run
@@ -43,6 +46,7 @@ SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd -P "$SCRIPT_DIR/../../../.." && pwd -P)"
 
 BATTERIES_ROOT=/usr/local/lib/automata-batteries
+DAEMON_BUNDLE=/usr/local/automata/daemon/index.js
 BOX_CHECKOUT=/opt/automata-platform
 BUDGET_SECONDS=1800
 REPO_RE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
@@ -165,6 +169,26 @@ local_mode() {
 # ---------------------------------------------------------------------------
 # box mode
 # ---------------------------------------------------------------------------
+
+# analyse_daemon_bundle <staged daemon index.js>
+# The Phase 5 canary precondition: the bundle the worker spawns carries the
+# review `--max-turns` flag and the background sub-agent result hold
+# (createResultHold, packages/daemon/src/adapters/result-hold.ts). The bundle
+# is unminified esbuild output, so both identifiers survive.
+analyse_daemon_bundle() {
+  local bundle="$1" missing=""
+  if [ ! -s "$bundle" ]; then
+    check "box staged daemon" FAIL "($bundle missing or empty)"
+    return 0
+  fi
+  grep -q -- '--max-turns' "$bundle" || missing="$missing --max-turns"
+  grep -q 'createResultHold' "$bundle" || missing="$missing createResultHold"
+  if [ -z "$missing" ]; then
+    check "box staged daemon" PASS "(--max-turns and createResultHold present)"
+  else
+    check "box staged daemon" FAIL "(missing:$missing — the daemon predates Phase 5)"
+  fi
+}
 
 # analyse_review_journal <journal file> <owner/name> <pr> <expect> <manifest 12-hex prefix>
 # The journal comes from `journalctl -o short-unix`: every line starts with
@@ -382,6 +406,8 @@ box_mode() {
     esac
   fi
 
+  analyse_daemon_bundle "$DAEMON_BUNDLE"
+
   if journalctl -u automata-worker.service --since "$since" --no-pager -o short-unix >"$WORK/journal.txt" 2>"$WORK/journal.err"; then
     evidence "journal lines since $since" "$(wc -l <"$WORK/journal.txt" | tr -d ' ')"
     analyse_review_journal "$WORK/journal.txt" "$repo" "$pr" "$expect" "$prefix"
@@ -413,7 +439,7 @@ analyse_github() {
   fi
 
   on_head="$(jq --arg bot "$bot" --arg head "$head" \
-    '[.[] | select(.user.login == $bot and .commit_id == $head)] | length' "$reviews")"
+    '[.[] | select((.user.login == $bot or .user.login == ($bot + "[bot]")) and .commit_id == $head)] | length' "$reviews")"
   if [ "$on_head" != "1" ]; then
     check "SC2 exactly one review on head" FAIL "($on_head bot reviews on $head)"
     check "SC2 review latency within budget" FAIL "(no single review on head)"
@@ -422,7 +448,7 @@ analyse_github() {
     # One lookup, three fields joined by US (0x1f, non-whitespace so an empty
     # field cannot shift the others).
     fields="$(jq -r --arg bot "$bot" --arg head "$head" \
-      '[.[] | select(.user.login == $bot and .commit_id == $head)][0] | [.id, .state, .submitted_at] | map(tostring) | join("\u001f")' "$reviews")"
+      '[.[] | select((.user.login == $bot or .user.login == ($bot + "[bot]")) and .commit_id == $head)][0] | [.id, .state, .submitted_at] | map(tostring) | join("\u001f")' "$reviews")"
     IFS=$'\x1f' read -r review_id state submitted <<<"$fields"
     latency="$(jq -n --arg at "$submitted" --argjson since "$since" '($at | fromdateiso8601) - $since')"
     evidence "review id" "$review_id"
@@ -438,9 +464,9 @@ analyse_github() {
   fi
 
   stray_issue="$(jq --arg bot "$bot" --argjson since "$since" \
-    '[.[] | select(.user.login == $bot and (.created_at | fromdateiso8601) >= $since)] | length' "$issue_comments")"
+    '[.[] | select((.user.login == $bot or .user.login == ($bot + "[bot]")) and (.created_at | fromdateiso8601) >= $since)] | length' "$issue_comments")"
   stray_review="$(jq --arg bot "$bot" --argjson since "$since" --arg rid "$review_id" \
-    '[.[] | select(.user.login == $bot and (.created_at | fromdateiso8601) >= $since and ((.pull_request_review_id | tostring) != $rid))] | length' "$review_comments")"
+    '[.[] | select((.user.login == $bot or .user.login == ($bot + "[bot]")) and (.created_at | fromdateiso8601) >= $since and ((.pull_request_review_id | tostring) != $rid))] | length' "$review_comments")"
   evidence "bot conversation comments since --since" "$stray_issue"
   evidence "bot review comments outside the one review" "$stray_review"
   if [ "$stray_issue" = "0" ] && [ "$stray_review" = "0" ]; then
