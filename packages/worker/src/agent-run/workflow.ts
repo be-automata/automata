@@ -514,6 +514,7 @@ async function runAgentInner(
         : `task agent: rejected (${taskGate.reason})`,
     );
   }
+  const batterySeed = batterySeedForRun(runReviewAgent, taskGate);
 
   let boxLock: BoxLock | null = null;
   let materialised: MaterialisedCredentials;
@@ -600,7 +601,7 @@ async function runAgentInner(
       agent: pulled.agent,
       runRoot: workdir,
       agentUser: config.agentUser,
-      seed: batterySeedForRun(runReviewAgent, taskGate),
+      seed: batterySeed,
       batteries: { log: admissionLog },
     });
   } catch (err) {
@@ -641,6 +642,12 @@ async function runAgentInner(
     now: Date.now(),
   });
   step(taskOutcome.batteriesLine);
+  // Task runs only: materialise either wrote the foreground-only guard into
+  // the HOME settings or threw, so reaching here means it is installed.
+  // Reviews and runs without task packs log nothing new.
+  if (batterySeed?.foregroundOnly) {
+    step("task agent: foreground-only hook installed");
+  }
 
   // #66 slice 2: per-run egress enforcement, iff the control plane resolved a
   // policy onto this run's input. Absent policy ⇒ nothing starts and nothing

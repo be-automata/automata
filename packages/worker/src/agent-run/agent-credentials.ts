@@ -136,8 +136,10 @@ async function seedWorkspaceTrust({
  *   review argv keeps `--setting-sources user`, so the PR's own project
  *   `.claude/` and `.mcp.json` never load (02-FINDINGS Q3).
  * - TASK runs (Phase 7) with admin-selected packs (already shape-gated by
- *   taskAgentForRun): the same fences with `hooksOff: false` — no
- *   settings.json, so the task lane's hook semantics are unchanged.
+ *   taskAgentForRun): the same fences with `hooksOff: false` and
+ *   `foregroundOnly: true` — a user-level settings.json holding only the
+ *   foreground-only PreToolUse guard, so background Bash/Monitor (killed
+ *   when the headless session ends) are refused.
  * No seed (classic reviews, runs without task packs): HOME exactly as before.
  */
 export async function materialiseAgentCredentials({
@@ -177,6 +179,7 @@ export async function materialiseAgentCredentials({
         log: batteries?.log ?? console.log,
         agentUser,
         hooksOff: seed.hooksOff,
+        ...(seed.foregroundOnly ? { foregroundOnly: true } : {}),
       })
     : undefined;
   const cleanup = async () => {

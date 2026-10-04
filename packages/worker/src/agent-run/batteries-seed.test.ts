@@ -22,6 +22,7 @@ import {
   seedBatteries,
   type SeedBatteriesOptions,
 } from "./batteries-seed";
+import { FOREGROUND_ONLY_PRE_TOOL_USE } from "./foreground-only-hook";
 
 const UID = process.getuid?.() ?? 0;
 
@@ -589,6 +590,107 @@ describe("seedBatteries hooksOff:false (phase 7, task runs)", () => {
         await fs.readFile(path.join(claudeDir(), "settings.json"), "utf8"),
       ),
     ).toEqual({ disableAllHooks: true });
+  });
+});
+
+describe("seedBatteries foregroundOnly (task runs)", () => {
+  let fx: BatteriesFixture;
+  let logs: string[];
+  let opts: SeedBatteriesOptions;
+
+  beforeEach(async () => {
+    fx = await makeBatteriesFixture();
+    logs = [];
+    opts = {
+      root: fx.root,
+      repoRoot: fx.repoRoot,
+      rootOwnerUid: UID,
+      packOwnerUid: UID,
+      log: (line) => logs.push(line),
+      hooksOff: false,
+      foregroundOnly: true,
+    };
+  });
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  const claudeDir = () => path.join(fx.home, ".claude");
+  const settingsPath = () => path.join(claudeDir(), "settings.json");
+
+  it("writes ONLY the foreground-only PreToolUse hooks, 0644, packs still linked", async () => {
+    const result = await seedBatteries(fx.home, ["somnio-skills"], opts);
+    expect(result).toMatchObject({ ok: true, packs: ["somnio-skills"] });
+    expect(JSON.parse(await fs.readFile(settingsPath(), "utf8"))).toEqual({
+      hooks: { PreToolUse: [...FOREGROUND_ONLY_PRE_TOOL_USE] },
+    });
+    expect((await fs.stat(settingsPath())).mode & 0o777).toBe(0o644);
+    expect(await listTree(claudeDir())).toEqual([
+      "settings.json",
+      "skills",
+      "skills/dora-metrics",
+      "skills/react-health-audit",
+      "skills/security-audit",
+    ]);
+    expect(logs.join("\n")).not.toContain("settings.json");
+  });
+
+  it("merges over an existing settings.json (keys + hooks kept), mode reset to 0644", async () => {
+    await fs.mkdir(claudeDir(), { recursive: true, mode: 0o700 });
+    const mine = {
+      matcher: "Write",
+      hooks: [{ type: "command", command: "x" }],
+    };
+    await fs.writeFile(
+      settingsPath(),
+      JSON.stringify({ model: "sonnet", hooks: { PreToolUse: [mine] } }),
+      { mode: 0o600 },
+    );
+    await seedBatteries(fx.home, ["somnio-skills"], opts);
+    expect(JSON.parse(await fs.readFile(settingsPath(), "utf8"))).toEqual({
+      model: "sonnet",
+      hooks: { PreToolUse: [mine, ...FOREGROUND_ONLY_PRE_TOOL_USE] },
+    });
+    expect((await fs.stat(settingsPath())).mode & 0o777).toBe(0o644);
+  });
+
+  it("a retry into the same HOME does not duplicate the hooks", async () => {
+    await seedBatteries(fx.home, ["somnio-skills"], opts);
+    const first = await fs.readFile(settingsPath(), "utf8");
+    await seedBatteries(fx.home, ["somnio-skills"], opts);
+    expect(await fs.readFile(settingsPath(), "utf8")).toBe(first);
+  });
+
+  it("installed even when the battery install is unavailable (a HOME write, not a pack)", async () => {
+    await fs.rm(path.join(fx.root, "manifest.sha256"));
+    const result = await seedBatteries(fx.home, ["somnio-skills"], opts);
+    expect(result).toEqual({ ok: false, reason: "no-manifest-hash" });
+    expect(await listTree(claudeDir())).toEqual(["settings.json"]);
+  });
+
+  it("re-grants settings.json (file) to the agent user on linux", async () => {
+    const calls: Array<{ file: string; args: string[] }> = [];
+    await seedBatteries(fx.home, ["somnio-skills"], {
+      ...opts,
+      agentUser: "agent",
+      platform: "linux",
+      aclExec: async (file, args) => {
+        calls.push({ file, args });
+      },
+    });
+    const byTarget = new Map(calls.map((c) => [c.args[2], c.args[1]]));
+    expect(byTarget.get(settingsPath())).toBe(
+      `u:agent:${LINUX_FILE_REGRANT_RIGHTS}`,
+    );
+  });
+
+  it("a review seed (hooksOff on) ignores foregroundOnly: settings byte-identical to today", async () => {
+    const { hooksOff: _omit, ...reviewOpts } = opts;
+    void _omit;
+    await seedBatteries(fx.home, ["somnio-skills"], reviewOpts);
+    expect(await fs.readFile(settingsPath(), "utf8")).toBe(
+      '{"disableAllHooks":true}',
+    );
   });
 });
 

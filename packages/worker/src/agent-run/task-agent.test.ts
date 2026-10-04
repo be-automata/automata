@@ -120,11 +120,20 @@ describe("batterySeedForRun (phase 5/7)", () => {
     ).toEqual({ batteries: ["gstack-review"], hooksOff: true });
   });
 
-  it("a task seed links its packs with hooks untouched", () => {
+  it("a task seed links its packs with hooks on plus the foreground-only guard", () => {
     expect(batterySeedForRun(undefined, SEED_GATE)).toEqual({
       batteries: ["somnio-skills"],
       hooksOff: false,
+      foregroundOnly: true,
     });
+  });
+
+  it("an orchestrated review seed carries NO foregroundOnly key", () => {
+    const seed = batterySeedForRun(
+      { mode: "orchestrated", batteries: ["gstack-review"] },
+      SEED_GATE,
+    );
+    expect(seed && "foregroundOnly" in seed).toBe(false);
   });
 
   it("an orchestrated review wins over a task seed", () => {

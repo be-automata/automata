@@ -8,6 +8,7 @@ import {
   makeBatteriesFixture,
   type BatteriesFixture,
 } from "./__fixtures__/batteries-fixture";
+import { FOREGROUND_ONLY_PRE_TOOL_USE } from "./foreground-only-hook";
 
 describe("materialiseAgentCredentials (D1)", () => {
   let runRoot: string;
@@ -312,6 +313,40 @@ describe("materialiseAgentCredentials (D1)", () => {
           ".claude/skills/security-audit",
         ]);
         expect((await fs.stat(claudeDir)).mode & 0o777).toBe(0o700);
+        const cred = path.join(claudeDir, ".credentials.json");
+        expect(await fs.readFile(cred, "utf8")).toBe('{"claudeAiOauth":{}}');
+        expect((await fs.stat(cred)).mode & 0o777).toBe(0o600);
+      });
+
+      it("a foregroundOnly task seed (batterySeedForRun's task shape): the guard is the ONLY settings content, 0644, credential intact", async () => {
+        const result = await materialiseAgentCredentials({
+          credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
+          agent: "claudeCode",
+          runRoot,
+          seed: {
+            batteries: ["somnio-skills"],
+            hooksOff: false,
+            foregroundOnly: true,
+          },
+          batteries: batteries(),
+        });
+        expect(result.batteries).toMatchObject({ ok: true });
+        const claudeDir = path.join(result.home, ".claude");
+        expect(await listTree(result.home)).toEqual([
+          ".claude",
+          ".claude.json",
+          ".claude/.credentials.json",
+          ".claude/settings.json",
+          ".claude/skills",
+          ".claude/skills/dora-metrics",
+          ".claude/skills/react-health-audit",
+          ".claude/skills/security-audit",
+        ]);
+        const settings = path.join(claudeDir, "settings.json");
+        expect(JSON.parse(await fs.readFile(settings, "utf8"))).toEqual({
+          hooks: { PreToolUse: [...FOREGROUND_ONLY_PRE_TOOL_USE] },
+        });
+        expect((await fs.stat(settings)).mode & 0o777).toBe(0o644);
         const cred = path.join(claudeDir, ".credentials.json");
         expect(await fs.readFile(cred, "utf8")).toBe('{"claudeAiOauth":{}}');
         expect((await fs.stat(cred)).mode & 0o777).toBe(0o600);
