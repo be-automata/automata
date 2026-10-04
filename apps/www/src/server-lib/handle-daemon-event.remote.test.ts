@@ -12,6 +12,8 @@ import {
   setThreadActiveRun,
 } from "@terragon/shared/model/threads";
 import { handleDaemonEvent } from "./handle-daemon-event";
+import { handleAuditFindingsAtFinish } from "@/server-lib/audit/audit-finish";
+import { handleReviewEffectAtFinish } from "./review/review-single-writer-finish";
 import { checkpointThread } from "@/server-lib/checkpoint-thread";
 import { extendSandboxLife } from "@terragon/sandbox";
 import { getClaudeResultMessage } from "@/test-helpers/agent";
@@ -27,6 +29,13 @@ import { eq } from "drizzle-orm";
 
 vi.mock("@/server-lib/checkpoint-thread", () => ({
   checkpointThread: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/server-lib/audit/audit-finish", () => ({
+  handleAuditFindingsAtFinish: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("./review/review-single-writer-finish", async (importOriginal) => ({
+  ...((await importOriginal()) as object),
+  handleReviewEffectAtFinish: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@terragon/sandbox", async (importOriginal) => {
   const actual = (await importOriginal()) as any;
@@ -92,6 +101,41 @@ describe("handleDaemonEvent for sandbox-less remote threads", () => {
     expect(threadChat!.errorMessage).toBeNull();
     expect(checkpointThread).not.toHaveBeenCalled();
     expect(extendSandboxLife).not.toHaveBeenCalled();
+  });
+
+  it("schedules the audit finish hook exactly once for a thread with no PR number", async () => {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { sandboxProvider: "hatchet-remote" },
+      chatOverrides: { status: "working" },
+    });
+
+    await finishThread({ threadId, threadChatId });
+
+    expect(handleAuditFindingsAtFinish).toHaveBeenCalledTimes(1);
+    expect(handleAuditFindingsAtFinish).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: user.id, threadId, threadChatId }),
+    );
+    expect(handleReviewEffectAtFinish).not.toHaveBeenCalled();
+  });
+
+  it("schedules both the review effect and the audit hook for a PR thread", async () => {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        sandboxProvider: "hatchet-remote",
+        githubRepoFullName: "acme/widgets",
+        githubPRNumber: 7,
+      },
+      chatOverrides: { status: "working" },
+    });
+
+    await finishThread({ threadId, threadChatId });
+
+    expect(handleReviewEffectAtFinish).toHaveBeenCalledTimes(1);
+    expect(handleAuditFindingsAtFinish).toHaveBeenCalledTimes(1);
   });
 
   it("still checkpoints local-sandbox threads", async () => {
