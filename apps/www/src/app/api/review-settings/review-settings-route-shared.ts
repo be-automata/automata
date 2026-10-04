@@ -11,6 +11,14 @@ import {
   pickReviewAgentFields,
   type ReviewAgentFieldsPatch,
 } from "@terragon/shared/model/review-agent-settings";
+import {
+  SELF_HEAL_FIELDS,
+  findSelfHealFieldError,
+  pickSelfHealFields,
+  type SelfHealFieldsPatch,
+} from "@terragon/shared/model/self-heal-settings";
+import { recordSelfHealAdminAction } from "@terragon/shared/model/self-heal-admin-log";
+import type { DB } from "@terragon/shared/db";
 
 /**
  * #125 C6 pieces shared by the two writers of the repo_review_settings table
@@ -30,6 +38,7 @@ export function toRepoReviewSettingDto(row: RepoReviewSetting) {
     supersedePolicy: row.supersedePolicy,
     recheckOnComplete: row.recheckOnComplete,
     ...pickReviewAgentFields(row),
+    ...pickSelfHealFields(row),
     updatedAt: row.updatedAt,
   };
 }
@@ -123,4 +132,71 @@ export function parseReviewAgentPatch(
     };
   }
   return { patch: raw };
+}
+
+/**
+ * Validate the self-heal fields of a PUT body (phase 8, D1). Copies only the
+ * self-heal keys that are present; null clears (= inherit). The kill switch is
+ * accepted on the org-default row only, and any gate-command key is rejected
+ * as unknown: the loop never takes a command from the settings API.
+ */
+export function parseSelfHealPatch(
+  body: Record<string, unknown>,
+  options: { isOrgDefaultRow: boolean },
+): { patch: SelfHealFieldsPatch } | { errorResponse: NextResponse } {
+  const unknownKey = Object.keys(body).find((key) =>
+    key.toLowerCase().includes("gatecommand"),
+  );
+  if (unknownKey !== undefined) {
+    return {
+      errorResponse: NextResponse.json(
+        { error: `unknown field: ${unknownKey}` },
+        { status: 400 },
+      ),
+    };
+  }
+  const raw: Record<string, unknown> = {};
+  for (const field of SELF_HEAL_FIELDS) {
+    if (body[field] !== undefined) {
+      raw[field] = body[field];
+    }
+  }
+  const error = findSelfHealFieldError(raw, options);
+  if (error !== undefined) {
+    return {
+      errorResponse: NextResponse.json({ error }, { status: 400 }),
+    };
+  }
+  return { patch: raw };
+}
+
+/**
+ * Attribute a self-heal settings change (OBS-01): one admin-log row per
+ * accepted write that touches at least one self-heal field. Logs the changed
+ * field names only, never values. No-op for patches without a self-heal key.
+ */
+export async function recordSelfHealSettingsChange({
+  db,
+  organizationId,
+  actorUserId,
+  repoFullName,
+  patch,
+}: {
+  db: DB;
+  organizationId: string;
+  actorUserId: string;
+  repoFullName: string;
+  patch: Record<string, unknown>;
+}): Promise<void> {
+  const fields = SELF_HEAL_FIELDS.filter((field) => field in patch);
+  if (fields.length === 0) return;
+  await recordSelfHealAdminAction({
+    db,
+    organizationId,
+    actorUserId,
+    action: fields.includes("selfHealKillSwitch")
+      ? "kill_switch"
+      : "settings_change",
+    target: { repoFullName, fields },
+  });
 }
