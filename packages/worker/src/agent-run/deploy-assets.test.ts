@@ -1,3 +1,4 @@
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -516,6 +517,260 @@ describe("#batteries (phase 3): gstack-review adapter skill", () => {
   it("supersedes the specialists' JSON output format", () => {
     // Every specialists/*.md line 4 says "Output: JSON objects … Schema:".
     expect(body).toMatch(/(ignore|supersede)[^\n]*(output|schema)/i);
+  });
+});
+
+/** Text from `name() {` to the next line that is exactly `}`. */
+function fnBody(script: string, name: string): string {
+  const start = script.indexOf(`\n${name}() {\n`);
+  if (start === -1) throw new Error(`function ${name}() not found`);
+  const end = script.indexOf("\n}\n", start + 1);
+  if (end === -1) throw new Error(`function ${name}() is not closed`);
+  return script.slice(start + 1, end + 2);
+}
+
+/** The script without its full-line `#` comments. */
+function code(script: string): string {
+  return script
+    .split("\n")
+    .filter((l) => !/^\s*#/.test(l))
+    .join("\n");
+}
+
+describe("#batteries (phase 3): install-batteries.sh", () => {
+  // The installer runs as root against a worker-writable checkout and
+  // fetches from the internet. Each assertion pins a safety property in the
+  // function that owns it, so a refactor cannot quietly move it out.
+  const scriptPath = path.join(
+    workerRoot,
+    "deploy",
+    "linux",
+    "install-batteries.sh",
+  );
+  const script = fs.existsSync(scriptPath) ? read(scriptPath) : "";
+  const src = code(script);
+  const body = (name: string) => fnBody(script, name);
+
+  it("is an executable bash script with strict mode, umask and a neutral cwd", () => {
+    expect(fs.statSync(scriptPath).mode & 0o100).not.toBe(0);
+    const lines = script.split("\n");
+    expect(lines[0]).toBe("#!/bin/bash");
+    expect(lines[1]).toBe("set -euo pipefail");
+    expect(lines[2]).toBe("umask 022");
+    expect(src).toMatch(/^cd \/$/m);
+    expect(src).toContain("unset GIT_DIR");
+  });
+
+  it("refuses non-root, and dry-run knobs for root or the real prefix", () => {
+    expect(src).toContain("id -u");
+    expect(src).toContain("must run as root");
+    expect(src).toContain("dry-run knobs are refused for root");
+    expect(src).toContain("require a non-default PREFIX");
+    expect(src).toContain("pwd -P");
+  });
+
+  it("reads the manifest from the checkout's HEAD commit and re-checks its shapes", () => {
+    expect(src).toContain("packages/worker/deploy/batteries.json");
+    expect(src).toContain('cat-file blob "$HEAD_SHA:');
+    expect(src).toContain("jq -e");
+    expect(src).toContain(".clis[]");
+    expect(src).toContain(".packs[]");
+    const preflight = body("preflight");
+    expect(preflight).toContain("[a-z0-9][a-z0-9-]*");
+    expect(preflight).toContain("-{0,2}[a-z]+");
+    expect(preflight).toContain("licenseMember");
+    expect(preflight).toContain("safe_rel_path");
+    expect(body("safe_rel_path")).toContain("..");
+  });
+
+  it("is generic over the manifest: no pack or CLI is named in code", () => {
+    const generic = src
+      .split("\n")
+      .filter((l) => !/^ALLOWED_HELPER_REF(_FILE)?=/.test(l))
+      .join("\n");
+    for (const name of [
+      "shellcheck",
+      "actionlint",
+      "gitleaks",
+      "gstack-review",
+      "somnio",
+      "gsd-",
+    ]) {
+      expect(generic, name).not.toContain(name);
+    }
+  });
+
+  it("allowlists exactly one helper reference in exactly one file", () => {
+    // gstack checklist.md (blob 7692f35) names the decision-ledger helper
+    // once; the adapter declares that ledger unavailable. Any other
+    // occurrence, or a different count after a pin bump, must fail.
+    const fileLines = script
+      .split("\n")
+      .filter((l) => l.startsWith("ALLOWED_HELPER_REF_FILE="));
+    const refLines = script
+      .split("\n")
+      .filter((l) => l.startsWith("ALLOWED_HELPER_REF="));
+    expect(fileLines).toEqual([
+      'ALLOWED_HELPER_REF_FILE="skills/gstack-review/checklist.md"',
+    ]);
+    expect(refLines).toEqual([
+      "ALLOWED_HELPER_REF='~/.claude/skills/gstack/bin/gstack-decision-search'",
+    ]);
+    const verify = body("verify_staging");
+    expect(verify).toContain("$ALLOWED_HELPER_REF_FILE");
+    expect(verify).toContain('$ALLOWED_HELPER_REF"');
+    expect(verify).toMatch(/-ne 1|!= 1|-eq 1/);
+  });
+
+  it("materialises content only through git object plumbing", () => {
+    // The checkout is worker-writable: porcelain honours .gitattributes and
+    // repo config, so its bytes need not match the pinned object ids.
+    const extract = body("extract_object");
+    expect(extract).toContain("ls-tree -r -z");
+    expect(extract).toContain("cat-file blob");
+    expect(extract).toContain("120000");
+    expect(extract).toContain("160000");
+    const pack = body("install_pack");
+    expect(pack.match(/extract_object /g)?.length ?? 0).toBeGreaterThanOrEqual(
+      1,
+    );
+    expect(pack).toContain("git_repo");
+    expect(pack).toContain("git_fetch");
+    expect(src).not.toContain("git archive");
+    expect(src).not.toContain("archive ");
+    expect(src).not.toMatch(/\bcp\b[^\n]*AUTOMATA_REPO/);
+    expect(pack).toContain('cat-file blob "$HEAD_SHA:');
+    expect(src).toContain("SOURCE checkout");
+  });
+
+  it("hardens every git call against the automata-owned checkout", () => {
+    const gitRepo = body("git_repo");
+    expect(gitRepo).toContain("safe.directory");
+    expect(gitRepo).toContain("core.fsmonitor=false");
+    expect(gitRepo).toContain("core.hooksPath=/dev/null");
+  });
+
+  it("checks a CLI's sha256 before anything reaches the bin dir", () => {
+    const cli = body("install_cli");
+    expect(cli).toContain("sha256sum -c");
+    expect(cli).toContain("curl -fsSL");
+    expect(cli).toContain("--proto '=https'");
+    expect(cli).toContain("tar -xzf");
+    expect(cli.indexOf("$BIN_DIR")).toBeGreaterThan(
+      cli.indexOf("sha256sum -c"),
+    );
+    expect(cli).toContain("mv -f");
+  });
+
+  it("fetches packs by sha, checks object ids before publishing, never prunes", () => {
+    const pack = body("install_pack");
+    expect(pack).toContain("fetch");
+    expect(pack).toContain("--depth 1");
+    expect(pack).toContain("FETCH_HEAD");
+    expect(pack).toContain("rev-parse");
+    expect(pack.indexOf("extract_object")).toBeLessThan(
+      pack.indexOf("publish_dir"),
+    );
+    expect(body("extract_object")).toContain("rev-parse");
+    expect(src).toContain("STALE");
+    expect(src).not.toMatch(/rm -rf "?\$\{?ROOT\}?\/[^"\n]*@/);
+  });
+
+  it("publishes atomically when it can and documents the fallback window", () => {
+    const publish = body("publish_dir");
+    expect(publish).toContain("--exchange");
+    expect(publish).toMatch(/#[^\n]*run in flight/);
+  });
+
+  it("strips grant keys and re-verifies the staged tree", () => {
+    const strip = body("strip_frontmatter");
+    const verify = body("verify_staging");
+    for (const key of [
+      "allowed-tools",
+      "hooks",
+      "permissionMode",
+      "mcpServers",
+    ]) {
+      expect(strip, key).toContain(key);
+      expect(verify, key).toContain(key);
+    }
+    for (const token of [
+      ".mcp.json",
+      "settings",
+      "plugin.json",
+      "gstack/bin",
+      "gstack-skill-start",
+      "-type l",
+    ]) {
+      expect(verify, token).toContain(token);
+    }
+  });
+
+  it("forces root ownership and read-only modes", () => {
+    expect(src).toContain("chmod 0644");
+    expect(src).toContain("chmod 0755");
+    expect(src).toContain("chown -R root:root");
+  });
+
+  it("verifies through the real worker → sudo → agent spawn shape, values via env only", () => {
+    const verify = body("verify_as_agent") + body("as_agent");
+    expect(verify).toMatch(/runuser -u "?\$\{?WORKER_USER\}?"? --/);
+    expect(verify).toMatch(
+      /\/usr\/bin\/sudo -n -u "?\$\{?AGENT_USER\}?"? -E -- \/bin\/sh -c/,
+    );
+    for (const token of [
+      "bash -lc",
+      "command -v",
+      "</dev/null",
+      "mktemp -d",
+      "BATTERIES_CHECK_NAME",
+    ]) {
+      expect(verify, token).toContain(token);
+    }
+    expect(verify).not.toMatch(
+      /bash -lc[^\n]*\$\{?(name|cli|args|path|pack)\b/,
+    );
+    expect(script).toContain('AGENT_USER="${AGENT_USER:-automata-agent}"');
+  });
+
+  it("invalidates manifest.sha256 first and rewrites it only on a clean run", () => {
+    const main = body("main");
+    const invalidate = main.indexOf("invalidate_manifest_hash");
+    const firstCli = main.indexOf("install_cli");
+    const verifyCall = main.indexOf("verify_as_agent");
+    const write = main.indexOf("write_manifest_hash");
+    expect(invalidate).toBeGreaterThan(-1);
+    expect(invalidate).toBeLessThan(firstCli);
+    expect(write).toBeGreaterThan(verifyCall);
+    expect(main.slice(verifyCall, write)).toMatch(/FAILURES"? -eq 0/);
+    expect(body("invalidate_manifest_hash")).toContain(
+      "manifest.sha256.invalid",
+    );
+  });
+
+  it("ends with a PASS/FAIL result and installs nothing from PyPI", () => {
+    expect(script).toContain("RESULT: PASS");
+    expect(script).toContain("RESULT: FAIL");
+    expect(src).toContain("exit 1");
+    expect(script).not.toContain("semgrep");
+    expect(script).not.toContain("pip install");
+  });
+
+  // The only two tests in this file that spawn a process: bash and
+  // shellcheck are local static checkers (no network, no sudo).
+  it("parses with bash -n", () => {
+    expect(() =>
+      execFileSync("bash", ["-n", scriptPath], { stdio: "pipe" }),
+    ).not.toThrow();
+  });
+
+  const hasShellcheck =
+    spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status === 0;
+  it.skipIf(!hasShellcheck)("is shellcheck clean", () => {
+    const result = spawnSync("shellcheck", ["-s", "bash", scriptPath], {
+      encoding: "utf8",
+    });
+    expect(result.status, result.stdout).toBe(0);
   });
 });
 
