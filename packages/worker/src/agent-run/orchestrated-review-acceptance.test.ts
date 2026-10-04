@@ -573,17 +573,84 @@ describe("analyse_review_journal (sourced, fixture journal)", () => {
     expect(out).toContain("EVIDENCE review thread: thr_1");
   });
 
-  it("re-runs the fixtures with mawk or busybox awk when installed", (ctx) => {
-    const alternates: string[] = [];
-    if (spawnSync("mawk", ["-W", "version"], { stdio: "ignore" }).status === 0)
-      alternates.push("mawk");
-    if (spawnSync("busybox", ["awk", "BEGIN{}"]).status === 0)
-      alternates.push("busybox awk");
+  /**
+   * Alternate awks the box or CI may run: Ubuntu's default awk is mawk, and
+   * BWK ("one true awk") is macOS /usr/bin/awk and Debian's original-awk.
+   * Values are passed to the script verbatim as AWK, including the
+   * multi-word `busybox awk` (the script splits AWK into an argv).
+   */
+  function alternateAwks(): string[] {
+    const found: string[] = [];
+    const runs = (cmd: string, args: string[]) =>
+      spawnSync(cmd, args, { stdio: "ignore" }).status === 0;
+    if (runs("mawk", ["-W", "version"])) found.push("mawk");
+    if (runs("busybox", ["awk", "BEGIN{}"])) found.push("busybox awk");
+    if (runs("original-awk", ["BEGIN{}"])) found.push("original-awk");
+    const macAwk = spawnSync("/usr/bin/awk", ["--version"], {
+      encoding: "utf8",
+    });
+    if (macAwk.status === 0 && /^awk version \d+/.test(macAwk.stdout)) {
+      found.push("/usr/bin/awk");
+    }
+    return found;
+  }
+
+  it('accepts a multi-word AWK (the CI regression: AWK="busybox awk")', () => {
+    const out = analyse(orchestratedRun("thr_1"), "orchestrated", "env awk");
+    expect(out).not.toMatch(/not found/);
+    expect(out).toContain("FAILURES=0");
+  });
+
+  it("re-runs the journal fixtures under mawk, busybox awk and BWK awk when installed", (ctx) => {
+    const alternates = alternateAwks();
     if (alternates.length === 0) ctx.skip();
-    for (const awk of alternates) {
-      expect(analyse(orchestratedRun("thr_1"), "orchestrated", awk)).toContain(
-        "FAILURES=0",
-      );
+    const classic = [
+      start("thr_c"),
+      line(5, "thr_c", "batteries: mode=classic"),
+      line(300, "thr_c", "run finished: complete"),
+    ].join("\n");
+    const traced = orchestratedRun("thr_1").replaceAll(
+      "[agent-run thr_1]",
+      "[agent-run thr_1 trace=00-a-b-01]",
+    );
+    for (const name of alternates) {
+      const pass: Array<[string, string, string]> = [
+        ["orchestrated-ok", orchestratedRun("thr_1"), "orchestrated"],
+        ["classic-ok", classic, "classic"],
+        ["trace suffix", traced, "orchestrated"],
+      ];
+      for (const [fixture, journal, mode] of pass) {
+        const out = analyse(journal, mode, name);
+        expect(out, `${name}: ${fixture}`).not.toMatch(/not found/);
+        expect(out, `${name}: ${fixture}`).toContain("FAILURES=0");
+        expect(out, `${name}: ${fixture}`).toContain("EVIDENCE review thread:");
+      }
+      const fail: Array<[string, string, string, string]> = [
+        [
+          "two threads",
+          `${orchestratedRun("thr_1")}\n${orchestratedRun("thr_2")}`,
+          "SC2 one review run per push",
+          "FAIL (2 review runs: thr_1 thr_2)",
+        ],
+        [
+          "unavailable batteries",
+          orchestratedRun("thr_1", {
+            batt: "batteries: unavailable mode=orchestrated reason=manifest-drift",
+          }),
+          "SC2 orchestrated batteries seeded",
+          "FAIL (unavailable: reason=manifest-drift)",
+        ],
+        [
+          "span 1900 s",
+          orchestratedRun("thr_1", { span: 1900 }),
+          "SC2 latency within budget",
+          "FAIL (1900s",
+        ],
+      ];
+      for (const [fixture, journal, check, verdict] of fail) {
+        const out = analyse(journal, "orchestrated", name);
+        expect(checkLine(out, check), `${name}: ${fixture}`).toContain(verdict);
+      }
     }
   });
 });

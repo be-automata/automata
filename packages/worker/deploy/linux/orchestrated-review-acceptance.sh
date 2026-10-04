@@ -114,6 +114,16 @@ no_control_chars() {
   esac
 }
 
+# run_awk <awk args…>: the ONE way this script runs awk. AWK may name a
+# multi-word command (AWK="busybox awk"), so it is split into an argv once
+# instead of being run as a single quoted command name. Default: awk (mawk on
+# Ubuntu, BWK on macOS; every program here is POSIX awk).
+run_awk() {
+  local -a awk_cmd
+  read -r -a awk_cmd <<<"${AWK:-awk}"
+  "${awk_cmd[@]}" "$@"
+}
+
 # ---------------------------------------------------------------------------
 # local mode
 # ---------------------------------------------------------------------------
@@ -179,7 +189,7 @@ analyse_review_journal() {
     sel_batt="$batt"
     sel_agent="$agent"
     sel_bounds="$bounds"
-  done < <("${AWK:-awk}" '
+  done < <(run_awk '
     {
       if (!match($0, /\[agent-run [^] ]+/)) next
       tid = substr($0, RSTART + 11, RLENGTH - 11)
@@ -338,7 +348,7 @@ box_mode() {
   hash=""
   if [ -s "$BATTERIES_ROOT/manifest.sha256" ]; then
     # shellcheck disable=SC2016 # the single-quoted text is an awk program
-    hash="$("${AWK:-awk}" 'NR == 1 { print $1 }' "$BATTERIES_ROOT/manifest.sha256")"
+    hash="$(run_awk 'NR == 1 { print $1 }' "$BATTERIES_ROOT/manifest.sha256")"
   fi
   if [ -e "$BATTERIES_ROOT/manifest.sha256.invalid" ]; then
     check "box install manifest" FAIL "(manifest.sha256.invalid present: the last install failed)"
