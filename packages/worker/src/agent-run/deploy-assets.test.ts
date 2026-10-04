@@ -1047,6 +1047,9 @@ describeBashScriptHygiene(
 describeBashScriptHygiene(
   "packages/worker/deploy/linux/orchestrated-review-acceptance.sh",
 );
+describeBashScriptHygiene(
+  "packages/worker/deploy/linux/self-heal-acceptance.sh",
+);
 
 /**
  * What decides the bytes install-batteries.sh writes into a pack dir, paired
