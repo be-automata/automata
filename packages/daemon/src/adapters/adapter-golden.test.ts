@@ -93,18 +93,25 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
     });
 
     it("the orchestrated variant (D2) is pinned to its exact joined policy", () => {
-      expect(reviewPolicyArgs({ mode: "orchestrated" }).join(" ")).toBe(
-        ORCHESTRATED_REVIEW_POLICY_JOINED,
-      );
+      expect(
+        reviewPolicyArgs({
+          mode: "orchestrated",
+          commandTimeoutMs: 300000,
+        }).join(" "),
+      ).toBe(ORCHESTRATED_REVIEW_POLICY_JOINED);
     });
 
     it("the orchestrated variant appends --max-turns N only when maxTurns is set", () => {
       expect(
-        reviewPolicyArgs({ mode: "orchestrated", maxTurns: 40 }).join(" "),
+        reviewPolicyArgs({
+          mode: "orchestrated",
+          commandTimeoutMs: 300000,
+          maxTurns: 40,
+        }).join(" "),
       ).toBe(`${ORCHESTRATED_REVIEW_POLICY_JOINED} --max-turns 40`);
-      expect(reviewPolicyArgs({ mode: "orchestrated" })).not.toContain(
-        "--max-turns",
-      );
+      expect(
+        reviewPolicyArgs({ mode: "orchestrated", commandTimeoutMs: 300000 }),
+      ).not.toContain("--max-turns");
     });
   });
 
@@ -139,29 +146,22 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
         token: TOKEN,
         normalizedUrl: NORMALIZED_URL,
         permissionMode: "review",
-        reviewAgent: { mode: "orchestrated", commandTimeoutMs: 300000 },
+        orchestratedReview: { mode: "orchestrated", commandTimeoutMs: 300000 },
       });
       expect(env).toEqual(
         expectedClaudeEnvOrchestratedReview("test-api-key-from-env", 300000),
       );
     });
 
-    it.each([
-      ["review", { mode: "classic", commandTimeoutMs: 60000 }],
-      ["review", { mode: "classic", commandTimeoutMs: 420000 }],
-      ["allowAll", { mode: "orchestrated", commandTimeoutMs: 420000 }],
-      ["plan", { mode: "orchestrated", commandTimeoutMs: 420000 }],
-      [undefined, { mode: "orchestrated", commandTimeoutMs: 420000 }],
-    ] as const)(
-      "prepareEnv(permissionMode=%s, reviewAgent=%j) keeps BASH_MAX_TIMEOUT_MS 60000 (classic golden)",
-      (permissionMode, reviewAgent) => {
+    it.each(["review", "allowAll", "plan", undefined] as const)(
+      "prepareEnv(permissionMode=%s) without orchestratedReview keeps BASH_MAX_TIMEOUT_MS 60000 (classic golden)",
+      (permissionMode) => {
         const env = claudeAdapter.prepareEnv({
           runtime: fakeRuntime(),
           useCredits: false,
           token: TOKEN,
           normalizedUrl: NORMALIZED_URL,
           permissionMode,
-          reviewAgent,
         });
         expect(env).toEqual(
           expectedClaudeEnvNoCredits("test-api-key-from-env"),
@@ -169,7 +169,7 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
       },
     );
 
-    it("buildArgs forwards reviewAgent: orchestrated review gets the D2 policy, absent stays classic", () => {
+    it("buildArgs forwards orchestratedReview: orchestrated review gets the D2 policy, absent stays classic", () => {
       const cfg = {
         runtime: fakeRuntime(),
         prompt: "review this PR",
@@ -179,7 +179,7 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
       } as const;
       const orchestrated = claudeAdapter.buildArgs({
         ...cfg,
-        reviewAgent: { mode: "orchestrated", commandTimeoutMs: 300000 },
+        orchestratedReview: { mode: "orchestrated", commandTimeoutMs: 300000 },
       });
       expect(orchestrated).toContain(ORCHESTRATED_REVIEW_POLICY_JOINED);
       const classic = claudeAdapter.buildArgs(cfg);

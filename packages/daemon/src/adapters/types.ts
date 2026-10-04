@@ -2,7 +2,7 @@ import type { AIAgent, AIAgentCredentials } from "@terragon/agent/types";
 import type { IDaemonRuntime } from "../runtime";
 import type {
   ClaudeMessage,
-  DaemonReviewAgent,
+  OrchestratedReviewPolicy,
   PermissionMode,
   ReviewPolicyVariant,
 } from "../shared";
@@ -50,14 +50,14 @@ export interface PrepareEnvContext {
    */
   permissionMode?: PermissionMode;
   /**
-   * The already-validated orchestrated-review knobs for this run (Phase 5).
-   * Added under ADR-006 exactly like `permissionMode` (#88): it crosses the
-   * wire on `DaemonMessageClaudeSchema` (validated by
-   * `parseDaemonReviewAgent`) and is a resolved review SHAPE — not a
-   * credential kind, userId or organizationId. claude uses it for the
+   * The run's orchestrated review policy (Phase 5), resolved ONCE by the
+   * daemon (`reviewPolicyVariantFor`) — present only for a review run whose
+   * validated `reviewAgent` is orchestrated; absent ⇒ classic. Added under
+   * ADR-006 exactly like `permissionMode` (#88): a resolved review SHAPE —
+   * not a credential kind, userId or organizationId. claude uses it for the
    * review-only `BASH_MAX_TIMEOUT_MS`.
    */
-  reviewAgent?: DaemonReviewAgent;
+  orchestratedReview?: OrchestratedReviewPolicy;
 }
 
 /** Config passed to `buildArgs` — the union of every `*Command()` builder's params today. */
@@ -67,8 +67,8 @@ export interface BuildArgsConfig {
   sessionId: string | null;
   model: string;
   permissionMode?: PermissionMode;
-  /** Same resolved review SHAPE as `PrepareEnvContext.reviewAgent` (ADR-006). */
-  reviewAgent?: DaemonReviewAgent;
+  /** Same resolved review SHAPE as `PrepareEnvContext.orchestratedReview` (ADR-006). */
+  orchestratedReview?: OrchestratedReviewPolicy;
   mcpConfigPath?: string | null;
   enableMcpPermissionPrompt?: boolean;
   useCredits?: boolean;
@@ -88,6 +88,13 @@ export interface MakeLineParserContext {
  */
 export interface ParseLineCallContext {
   isWorking: boolean;
+  /**
+   * Called when `parse` swallows a `result` it now holds until exit (claude
+   * background sub-agents, see result-hold.ts). The caller still treats the
+   * run as completed; `replacedEarlier` says a previously held result was
+   * dropped in its favour.
+   */
+  onResultHeld?: (result: ClaudeMessage, replacedEarlier: boolean) => void;
 }
 
 /**
@@ -102,6 +109,12 @@ export interface ParseLineCallContext {
 export interface HarnessLineParser {
   parse(line: string, ctx: ParseLineCallContext): ClaudeMessage[];
   finalize?(): ClaudeMessage[];
+  /**
+   * Take (and clear) the result `parse` is holding, if any. Called by the
+   * daemon at process close (released unless the run was stopped/replaced)
+   * and by the idle watchdog (released instead of the synthetic error).
+   */
+  drainHeld?(): ClaudeMessage | null;
 }
 
 /**
@@ -143,18 +156,6 @@ export interface HarnessCapabilities {
   fixesSessionLogs?: boolean;
   flushBufferOnErrorResult?: boolean;
   sessionTracking: "any-message" | "system-init-with-backfill" | "none";
-  /**
-   * Phase 5 (02-FINDINGS Q2/Q7). Claude 2.1.284 runs the Agent tool in the
-   * background in -p mode and then emits TWO `result` messages — the first
-   * holds the lead's interim text ("Waiting for the agent…"), the second its
-   * real answer (q2q7.jsonl lines 5/7/29/30). Once the LEAD's own Agent/Task
-   * tool_use is confirmed backgrounded (`system/task_started` with
-   * `is_backgrounded: true` and that same `tool_use_id`), every result is
-   * held and only the LAST is released at process exit. `total_cost_usd` is
-   * cumulative, so dropping the interim result loses no accounting. Runs
-   * that never arm keep today's exact timing.
-   */
-  holdResultAfterBackgroundTask?: boolean;
 }
 
 export interface HarnessAdapter {

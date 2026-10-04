@@ -1716,8 +1716,30 @@ describe("daemon", () => {
       ).toHaveLength(0);
     });
 
+    it("an orchestrated reviewAgent on a non-review run keeps the unrestricted command and 60000 timeout", async () => {
+      await daemon.start();
+      await writeToUnixSocket({
+        unixSocketPath: runtime.unixSocketPath,
+        dataStr: JSON.stringify({
+          ...TEST_INPUT_MESSAGE,
+          permissionMode: "allowAll",
+          reviewAgent: { mode: "orchestrated", commandTimeoutMs: 420000 },
+        }),
+      });
+      await sleepUntil(() => spawnCommandLineMock.mock.calls.length === 1);
+      const command = spawnCommandLineMock.mock.calls[0]![0];
+      const env = spawnCommandLineMock.mock.calls[0]![1].env as Record<
+        string,
+        string | undefined
+      >;
+      expect(command).toContain("--dangerously-skip-permissions");
+      expect(command).not.toContain("--max-turns");
+      expect(env.BASH_MAX_TIMEOUT_MS).toBe("60000");
+    });
+
     it.each([
       ["absent", undefined, false],
+      ["classic", { mode: "classic", commandTimeoutMs: 420000 }, false],
       ["malformed", { mode: "orchestrated", commandTimeoutMs: 5 }, true],
     ])(
       "a review message with %s reviewAgent spawns today's classic command and 60000 timeout",
@@ -1923,57 +1945,13 @@ describe("daemon", () => {
       expect(sentResults()).toHaveLength(1);
     }
 
-    it("NEGATIVE: a DENIED lead Task (no task_started) does not arm; the result is sent before exit", async () => {
-      await expectNotHeld([
-        init,
-        leadToolUse("Task"),
-        {
-          type: "user",
-          parent_tool_use_id: null,
-          message: {
-            role: "user",
-            content: [
-              {
-                type: "tool_result",
-                tool_use_id: "toolu_1",
-                is_error: true,
-                content: "Permission to use Task has been denied.",
-              },
-            ],
-          },
-          session_id: S,
-        },
-        result2,
-      ]);
-    });
-
-    it("NEGATIVE: a backgrounded task_started for an unknown tool_use id does not arm", async () => {
+    // The arming NEGATIVEs (denied Task, unknown id, sub-agent tool_use,
+    // is_backgrounded false) are unit tests on adapters/result-hold.ts.
+    it("NEGATIVE: a backgrounded task_started for an unknown tool_use id does not arm (end to end)", async () => {
       await expectNotHeld([
         init,
         leadToolUse("Agent"),
         taskStarted("toolu_other"),
-        result2,
-      ]);
-    });
-
-    it("NEGATIVE: a SUB-AGENT's Agent tool_use matched by task_started does not arm", async () => {
-      const subAgentToolUse = {
-        ...leadToolUse("Agent", "toolu_sub"),
-        parent_tool_use_id: "toolu_1",
-      };
-      await expectNotHeld([
-        init,
-        subAgentToolUse,
-        taskStarted("toolu_sub"),
-        result2,
-      ]);
-    });
-
-    it("NEGATIVE: a lead task_started with is_backgrounded false does not arm", async () => {
-      await expectNotHeld([
-        init,
-        leadToolUse("Agent"),
-        taskStarted("toolu_1", false),
         result2,
       ]);
     });

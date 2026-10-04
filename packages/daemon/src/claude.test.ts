@@ -93,7 +93,10 @@ describe("reviewPolicyArgs(variant) — classic pin + D2 orchestrated variant", 
   });
 
   it("orchestrated adds Agent/Task/Skill + explicit denies, keeps the classic fences", () => {
-    const joined = reviewPolicyArgs({ mode: "orchestrated" }).join(" ");
+    const joined = reviewPolicyArgs({
+      mode: "orchestrated",
+      commandTimeoutMs: 300000,
+    }).join(" ");
     expect(joined).toBe(ORCHESTRATED_REVIEW_POLICY_JOINED);
     expect(joined).toContain("'Bash(gh:*)' 'Bash(git push:*)'");
     expect(joined).toContain("--setting-sources user");
@@ -103,7 +106,11 @@ describe("reviewPolicyArgs(variant) — classic pin + D2 orchestrated variant", 
 
   it("orchestrated with maxTurns appends --max-turns N last", () => {
     expect(
-      reviewPolicyArgs({ mode: "orchestrated", maxTurns: 40 }).join(" "),
+      reviewPolicyArgs({
+        mode: "orchestrated",
+        commandTimeoutMs: 300000,
+        maxTurns: 40,
+      }).join(" "),
     ).toBe(`${ORCHESTRATED_REVIEW_POLICY_JOINED} --max-turns 40`);
   });
 });
@@ -128,13 +135,13 @@ describe("reviewPolicyVariantFor — resolved review shape (ADR-006)", () => {
         commandTimeoutMs: 300000,
         maxTurns: 40,
       }),
-    ).toEqual({ mode: "orchestrated", maxTurns: 40 });
+    ).toEqual({ mode: "orchestrated", commandTimeoutMs: 300000, maxTurns: 40 });
     expect(
       reviewPolicyVariantFor("review", {
         mode: "orchestrated",
         commandTimeoutMs: 300000,
       }),
-    ).toEqual({ mode: "orchestrated" });
+    ).toEqual({ mode: "orchestrated", commandTimeoutMs: 300000 });
   });
 
   it("any non-review permissionMode is classic whatever reviewAgent says", () => {
@@ -146,29 +153,26 @@ describe("reviewPolicyVariantFor — resolved review shape (ADR-006)", () => {
   });
 });
 
-describe("claudeCommand — reviewAgent", () => {
-  it("review without reviewAgent and with classic reviewAgent are today's command", () => {
+const ORCHESTRATED_POLICY = {
+  mode: "orchestrated",
+  commandTimeoutMs: 300000,
+  maxTurns: 12,
+} as const;
+
+describe("claudeCommand — orchestratedReview", () => {
+  it("review without orchestratedReview is today's command", () => {
     const today = normalizePrompt(
       claudeCommand({ ...base, permissionMode: "review" }),
     );
     expect(today).toContain(REVIEW_POLICY_JOINED);
     expect(today).not.toContain("Agent");
-    expect(
-      normalizePrompt(
-        claudeCommand({
-          ...base,
-          permissionMode: "review",
-          reviewAgent: { mode: "classic", commandTimeoutMs: 120000 },
-        }),
-      ),
-    ).toBe(today);
   });
 
-  it("review + orchestrated reviewAgent carries the orchestrated policy and --max-turns", () => {
+  it("review + orchestratedReview carries the orchestrated policy and --max-turns", () => {
     const cmd = claudeCommand({
       ...base,
       permissionMode: "review",
-      reviewAgent: ORCHESTRATED,
+      orchestratedReview: ORCHESTRATED_POLICY,
     });
     expect(cmd).toContain(
       `${ORCHESTRATED_REVIEW_POLICY_JOINED} --max-turns 12`,
@@ -176,11 +180,11 @@ describe("claudeCommand — reviewAgent", () => {
     expect(cmd).not.toContain("--dangerously-skip-permissions");
   });
 
-  it("allowAll + orchestrated reviewAgent is still the unrestricted command", () => {
+  it("allowAll + orchestratedReview is still the unrestricted command", () => {
     const cmd = claudeCommand({
       ...base,
       permissionMode: "allowAll",
-      reviewAgent: ORCHESTRATED,
+      orchestratedReview: ORCHESTRATED_POLICY,
     });
     expect(cmd).toContain("--dangerously-skip-permissions");
     expect(cmd).not.toContain("Agent");

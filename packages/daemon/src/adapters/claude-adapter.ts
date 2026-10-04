@@ -4,8 +4,9 @@ import {
   getAnthropicApiKeyOrNull,
   reviewPolicyArgs,
 } from "../claude";
-import { reviewPolicyVariantFor, type ClaudeMessage } from "../shared";
+import type { ClaudeMessage } from "../shared";
 import { formatError } from "./format-error";
+import { createResultHold } from "./result-hold";
 import type {
   BuildArgsConfig,
   HarnessAdapter,
@@ -19,10 +20,11 @@ import type {
  * spreading it, so this adapter's `buildArgs` output is byte-identical to
  * `runClaudeCodeCommand`'s command string (daemon.ts:657-665).
  *
- * Phase 5: the only new logic is the review-policy VARIANT. An orchestrated
- * review run (permissionMode "review" + reviewAgent.mode "orchestrated")
- * gets the D2 policy from `claudeCommand` and its payload
- * `BASH_MAX_TIMEOUT_MS`; every other run is byte-identical to before.
+ * Phase 5: an orchestrated review run (the daemon-resolved
+ * `orchestratedReview`) gets the D2 policy from `claudeCommand` and its
+ * payload `BASH_MAX_TIMEOUT_MS`; every other run is byte-identical to before.
+ * The line parser also holds results after a lead background sub-agent
+ * (result-hold.ts).
  */
 export const claudeAdapter: HarnessAdapter = {
   agent: "claudeCode",
@@ -36,12 +38,9 @@ export const claudeAdapter: HarnessAdapter = {
       ANTHROPIC_API_KEY: ctx.useCredits
         ? ""
         : getAnthropicApiKeyOrNull(ctx.runtime),
-      BASH_MAX_TIMEOUT_MS:
-        ctx.reviewAgent &&
-        reviewPolicyVariantFor(ctx.permissionMode, ctx.reviewAgent).mode ===
-          "orchestrated"
-          ? String(ctx.reviewAgent.commandTimeoutMs)
-          : (60 * 1000).toString(),
+      BASH_MAX_TIMEOUT_MS: ctx.orchestratedReview
+        ? String(ctx.orchestratedReview.commandTimeoutMs)
+        : (60 * 1000).toString(),
       ...(ctx.useCredits
         ? {
             ANTHROPIC_BASE_URL: `${ctx.normalizedUrl}/api/proxy/anthropic`,
@@ -59,31 +58,42 @@ export const claudeAdapter: HarnessAdapter = {
       model: cfg.model,
       mcpConfigPath: cfg.mcpConfigPath ?? null,
       permissionMode: cfg.permissionMode,
-      reviewAgent: cfg.reviewAgent,
+      orchestratedReview: cfg.orchestratedReview,
       enableMcpPermissionPrompt: cfg.enableMcpPermissionPrompt ?? false,
     });
   },
 
   normalizeModel: (model: string) => model,
 
-  makeLineParser: (ctx) => ({
-    // Mirrors the inline JSON.parse the pre-#76 runClaudeCodeCommand did in
-    // its onStdoutLine. Session/isCompleted state tracking and
-    // addMessageToBuffer stay in the daemon's generic runAgentCommand —
-    // this façade only reproduces the parse step.
-    parse(line: string): ClaudeMessage[] {
-      try {
-        const outputMessage = JSON.parse(line) as ClaudeMessage;
+  makeLineParser: (ctx) => {
+    const hold = createResultHold();
+    return {
+      // Mirrors the inline JSON.parse the pre-#76 runClaudeCodeCommand did in
+      // its onStdoutLine. Session/isCompleted state tracking and
+      // addMessageToBuffer stay in the daemon's generic runAgentCommand —
+      // this façade only reproduces the parse step, plus the Phase 5 hold:
+      // a held result is swallowed here and signalled via onResultHeld.
+      parse(line, callCtx): ClaudeMessage[] {
+        let outputMessage: ClaudeMessage;
+        try {
+          outputMessage = JSON.parse(line) as ClaudeMessage;
+        } catch (e) {
+          ctx.runtime.logger.error("Failed to parse Claude output line", {
+            line,
+            error: formatError(e),
+          });
+          return [];
+        }
+        const observed = hold.observe(outputMessage);
+        if (observed.held) {
+          callCtx.onResultHeld?.(outputMessage, observed.replacedEarlier);
+          return [];
+        }
         return [outputMessage];
-      } catch (e) {
-        ctx.runtime.logger.error("Failed to parse Claude output line", {
-          line,
-          error: formatError(e),
-        });
-        return [];
-      }
-    },
-  }),
+      },
+      drainHeld: () => hold.drain(),
+    };
+  },
 
   capabilities: {
     // Contract (ADR-004/ADR-006): true for every adapter. Claude was the
@@ -97,9 +107,6 @@ export const claudeAdapter: HarnessAdapter = {
     // Any message carrying a session_id sets it; no backfill of later
     // messages within the same stdout batch.
     sessionTracking: "any-message",
-    // Phase 5: background sub-agents emit two results; release only the
-    // last, at exit (see HarnessCapabilities.holdResultAfterBackgroundTask).
-    holdResultAfterBackgroundTask: true,
   },
 
   // SHIPPED (#88): exposes claude.ts's existing named seam through the

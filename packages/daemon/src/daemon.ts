@@ -9,6 +9,7 @@ import {
   DaemonMessage,
   DAEMON_VERSION,
   parseDaemonReviewAgent,
+  reviewPolicyVariantFor,
 } from "./shared";
 import { performance } from "node:perf_hooks";
 import { RetryBackoff, RetryConfig, DEFAULT_RETRY_CONFIG } from "./retry";
@@ -30,49 +31,6 @@ function formatError(error: unknown): object {
     };
   }
   return { value: error };
-}
-
-/** Lead (parent_tool_use_id null) Agent/Task tool_use ids in an assistant message. */
-function leadSubAgentToolUseIds(message: unknown): string[] {
-  const m = message as {
-    type?: unknown;
-    parent_tool_use_id?: unknown;
-    message?: { content?: unknown };
-  };
-  if (m.type !== "assistant" || m.parent_tool_use_id !== null) {
-    return [];
-  }
-  const content = m.message?.content;
-  if (!Array.isArray(content)) {
-    return [];
-  }
-  const ids: string[] = [];
-  for (const part of content as Array<Record<string, unknown>>) {
-    if (
-      part?.type === "tool_use" &&
-      (part.name === "Agent" || part.name === "Task") &&
-      typeof part.id === "string"
-    ) {
-      ids.push(part.id);
-    }
-  }
-  return ids;
-}
-
-/** tool_use_id of a backgrounded `system/task_started`, else undefined. */
-function backgroundedTaskToolUseId(message: unknown): string | undefined {
-  const m = message as {
-    type?: unknown;
-    subtype?: unknown;
-    is_backgrounded?: unknown;
-    tool_use_id?: unknown;
-  };
-  return m.type === "system" &&
-    m.subtype === "task_started" &&
-    m.is_backgrounded === true &&
-    typeof m.tool_use_id === "string"
-    ? m.tool_use_id
-    : undefined;
 }
 
 type ActiveProcessState = {
@@ -752,17 +710,23 @@ export class TerragonDaemon {
   private async runAgentCommand(input: DaemonMessageClaude): Promise<void> {
     const adapter = getAdapter(input.agent);
 
-    // Phase 5: validate the raw reviewAgent ONCE. A malformed value degrades
-    // to the classic review policy (never a rejected run) with one warning
-    // naming the failing field paths — never the value itself.
+    // Phase 5: validate the raw reviewAgent and resolve the review policy
+    // ONCE. A malformed value degrades to the classic review policy (never a
+    // rejected run) with one warning naming the failing field paths — never
+    // the value itself. Adapters only ever see the orchestrated policy.
     const parsed = parseDaemonReviewAgent(input.reviewAgent);
-    const parsedReviewAgent = parsed.reviewAgent;
     if (parsed.rejected) {
       this.runtime.logger.warn(
         "reviewAgent rejected; running the classic review policy",
         { threadChatId: input.threadChatId, issues: parsed.rejected },
       );
     }
+    const reviewPolicy = reviewPolicyVariantFor(
+      input.permissionMode,
+      parsed.reviewAgent,
+    );
+    const orchestratedReview =
+      reviewPolicy.mode === "orchestrated" ? reviewPolicy : undefined;
 
     // Gap A: only claudeCode fixes up on-disk session logs pre-spawn
     // (mirrors the deleted runClaudeCodeCommand's pre-spawn call).
@@ -771,18 +735,6 @@ export class TerragonDaemon {
     }
 
     const parser = adapter.makeLineParser({ runtime: this.runtime });
-
-    // Phase 5 held-result state (adapter.capabilities.holdResultAfterBackgroundTask):
-    // armed only by a task_started is_backgrounded:true whose tool_use_id is
-    // one of the LEAD's own Agent/Task tool_use ids.
-    const leadTaskToolUseIds = new Set<string>();
-    let holdArmed = false;
-    let heldResult: ClaudeMessage | null = null;
-    const takeHeldResult = (): ClaudeMessage | null => {
-      const held = heldResult;
-      heldResult = null;
-      return held;
-    };
 
     return this.spawnAgentProcess({
       agentName: adapter.displayName,
@@ -798,7 +750,7 @@ export class TerragonDaemon {
         sessionId: input.sessionId,
         model: input.model,
         permissionMode: input.permissionMode,
-        reviewAgent: parsedReviewAgent,
+        orchestratedReview,
         mcpConfigPath: this.mcpConfigPath ?? null,
         enableMcpPermissionPrompt: this.getFeatureFlag("mcpPermissionPrompt"),
         useCredits: input.useCredits,
@@ -809,21 +761,20 @@ export class TerragonDaemon {
         token: input.token,
         normalizedUrl: this.runtime.normalizedUrl,
         permissionMode: input.permissionMode,
-        reviewAgent: parsedReviewAgent,
+        orchestratedReview,
       }),
       getMockSuccessResult: adapter.capabilities.mockSuccessResult
         ? () => adapter.capabilities.mockSuccessResult!
         : undefined,
-      takeHeldResult,
+      // Phase 5: claude's parser holds results after a lead background
+      // sub-agent (adapters/result-hold.ts); released at close or idle timeout.
+      takeHeldResult: () => parser.drainHeld?.() ?? null,
       onStdoutLine: (line) => {
         // Snapshot staleness: read the active process state ONCE per stdout
         // line, BEFORE the message loop — a system message earlier in the
         // same batch must NOT backfill later messages of that same batch.
         const activeProcessState = this.activeProcesses.get(input.threadChatId);
-        const parsedMessages = parser.parse(line, {
-          isWorking: !!activeProcessState?.isWorking,
-        });
-        for (const parsedMessage of parsedMessages) {
+        const trackSession = (parsedMessage: ClaudeMessage) => {
           const type = (parsedMessage as { type?: string }).type;
           const sessionId = (parsedMessage as { session_id?: string })
             .session_id;
@@ -854,29 +805,27 @@ export class TerragonDaemon {
             }
           }
           // sessionTracking === "none" (amp): never touch sessionId/isWorking.
-
-          if (adapter.capabilities.holdResultAfterBackgroundTask) {
-            for (const id of leadSubAgentToolUseIds(parsedMessage)) {
-              leadTaskToolUseIds.add(id);
-            }
-            const backgrounded = backgroundedTaskToolUseId(parsedMessage);
-            if (backgrounded && leadTaskToolUseIds.has(backgrounded)) {
-              holdArmed = true;
-            }
-            if (type === "result" && holdArmed) {
-              this.updateActiveProcessState(input.threadChatId, {
-                isCompleted: true,
-              });
-              this.runtime.logger.info("holding result until exit", {
-                threadChatId: input.threadChatId,
-                subtype: (parsedMessage as { subtype?: string }).subtype,
-                num_turns: (parsedMessage as { num_turns?: number }).num_turns,
-                replacedEarlier: heldResult !== null,
-              });
-              heldResult = parsedMessage;
-              continue;
-            }
-          }
+        };
+        const parsedMessages = parser.parse(line, {
+          isWorking: !!activeProcessState?.isWorking,
+          // Phase 5: a held result is tracked and completes the run like any
+          // result, but is not buffered until drainHeld releases it.
+          onResultHeld: (heldResult, replacedEarlier) => {
+            trackSession(heldResult);
+            this.updateActiveProcessState(input.threadChatId, {
+              isCompleted: true,
+            });
+            this.runtime.logger.info("holding result until exit", {
+              threadChatId: input.threadChatId,
+              subtype: (heldResult as { subtype?: string }).subtype,
+              num_turns: (heldResult as { num_turns?: number }).num_turns,
+              replacedEarlier,
+            });
+          },
+        });
+        for (const parsedMessage of parsedMessages) {
+          const type = (parsedMessage as { type?: string }).type;
+          trackSession(parsedMessage);
 
           this.addMessageToBuffer({
             agent: input.agent,

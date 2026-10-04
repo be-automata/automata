@@ -1,11 +1,7 @@
 import crypto from "node:crypto";
 import { nanoid } from "nanoid/non-secure";
 import { IDaemonRuntime } from "./runtime";
-import {
-  reviewPolicyVariantFor,
-  type DaemonReviewAgent,
-  type ReviewPolicyVariant,
-} from "./shared";
+import type { OrchestratedReviewPolicy, ReviewPolicyVariant } from "./shared";
 
 export function getAnthropicApiKeyOrNull(runtime: IDaemonRuntime) {
   // Check if the user has Claude credentials.
@@ -273,7 +269,7 @@ export function claudeCommand({
   model,
   mcpConfigPath,
   permissionMode,
-  reviewAgent,
+  orchestratedReview,
   enableMcpPermissionPrompt = false,
 }: {
   runtime: IDaemonRuntime;
@@ -282,7 +278,8 @@ export function claudeCommand({
   model: string;
   mcpConfigPath: string | null;
   permissionMode?: "allowAll" | "plan" | "review";
-  reviewAgent?: DaemonReviewAgent;
+  /** The run's resolved D2 policy (review runs only); absent ⇒ classic. */
+  orchestratedReview?: OrchestratedReviewPolicy;
   enableMcpPermissionPrompt?: boolean;
 }) {
   // Write prompt to a file.
@@ -325,7 +322,7 @@ export function claudeCommand({
           "Bash",
         ]
       : permissionMode === "review"
-        ? reviewPolicyArgs(reviewPolicyVariantFor(permissionMode, reviewAgent))
+        ? reviewPolicyArgs(orchestratedReview)
         : ["--dangerously-skip-permissions"]),
     "--output-format",
     "stream-json",
