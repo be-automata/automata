@@ -18,6 +18,11 @@ import {
   findReviewAgentFieldError,
   type ReviewAgentFieldsPatch,
 } from "./review-agent-settings";
+import {
+  SELF_HEAL_FIELDS,
+  findSelfHealFieldError,
+  type SelfHealFieldsPatch,
+} from "./self-heal-settings";
 
 /**
  * Per-repository REQUESTED_CHANGES severity tolerance (ADR-036 review floor),
@@ -282,7 +287,8 @@ export async function upsertRepoReviewSetting({
     recheckOnComplete?: boolean;
     /* Phase 4 review-agent family (ReviewAgentFieldsPatch); null clears
      * (= inherit). Validated by findReviewAgentFieldError before the write. */
-  } & ReviewAgentFieldsPatch;
+  } & ReviewAgentFieldsPatch &
+    SelfHealFieldsPatch;
   updatedByUserId?: string | null;
   /**
    * Optimistic concurrency (#131): when given, the write applies ONLY if the
@@ -370,6 +376,14 @@ export async function upsertRepoReviewSetting({
   if (reviewAgentError !== undefined) {
     throw new Error(reviewAgentError);
   }
+  // Phase 8: same write-boundary rule for the self-heal family; the kill
+  // switch is accepted on the '*' org-default row only.
+  const selfHealError = findSelfHealFieldError(patch, {
+    isOrgDefaultRow: repo === ORG_DEFAULT_REPO_SENTINEL,
+  });
+  if (selfHealError !== undefined) {
+    throw new Error(selfHealError);
+  }
   const set: {
     blockTolerance?: string;
     reviewDraftPrs?: boolean | null;
@@ -379,7 +393,8 @@ export async function upsertRepoReviewSetting({
     recheckOnComplete?: boolean;
     updatedByUserId: string | null;
     updatedAt: Date;
-  } & ReviewAgentFieldsPatch = {
+  } & ReviewAgentFieldsPatch &
+    SelfHealFieldsPatch = {
     updatedByUserId: updatedByUserId ?? null,
     updatedAt: new Date(),
   };
@@ -395,6 +410,11 @@ export async function upsertRepoReviewSetting({
   if (patch.recheckOnComplete !== undefined)
     set.recheckOnComplete = patch.recheckOnComplete;
   for (const field of REVIEW_AGENT_FIELDS) {
+    if (patch[field] !== undefined) {
+      Object.assign(set, { [field]: patch[field] });
+    }
+  }
+  for (const field of SELF_HEAL_FIELDS) {
     if (patch[field] !== undefined) {
       Object.assign(set, { [field]: patch[field] });
     }
@@ -507,6 +527,8 @@ export async function removeRepoReviewSetting({
     // Review-agent family, phase 4: a row whose only other content is a
     // review-agent override (even an explicit empty battery list) survives.
     ...REVIEW_AGENT_FIELDS.map((field) => isNotNull(repoReviewSettings[field])),
+    // Self-heal family, phase 8: a row carrying only self-heal values survives.
+    ...SELF_HEAL_FIELDS.map((field) => isNotNull(repoReviewSettings[field])),
   )!;
   const reset = await db
     .update(repoReviewSettings)

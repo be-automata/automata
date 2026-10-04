@@ -40,6 +40,9 @@ const REVIEW_AGENT_SINCE =
   "phase 4 (review-agent settings) — the dispatch resolver selects this " +
   "column on every PR-review run; without it every review dispatch fails";
 
+const SELF_HEAL_SINCE =
+  "phase 8: self-heal settings — the audit writer, dispatcher and fix trigger read these columns";
+
 /** Columns this revision of the code cannot run without. */
 const REQUIRED: ReadonlyArray<{
   table: string;
@@ -82,6 +85,61 @@ const REQUIRED: ReadonlyArray<{
     table: "repo_review_settings",
     column: "task_batteries",
     since: "phase 7: task-run batteries (Admin panel task agent packs)",
+  },
+  {
+    table: "repo_review_settings",
+    column: "self_heal_mode",
+    since: SELF_HEAL_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "self_heal_kill_switch",
+    since: SELF_HEAL_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "self_heal_max_open_issues",
+    since: SELF_HEAL_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "self_heal_max_attempts",
+    since: SELF_HEAL_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "self_heal_cooldown_min",
+    since: SELF_HEAL_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "self_heal_min_severity",
+    since: SELF_HEAL_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "self_heal_auto_label",
+    since: SELF_HEAL_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "self_heal_absent_audits",
+    since: SELF_HEAL_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "self_heal_max_diff_lines",
+    since: SELF_HEAL_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "self_heal_pr_expiry_days",
+    since: SELF_HEAL_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "self_heal_run_window",
+    since: SELF_HEAL_SINCE,
   },
 ];
 

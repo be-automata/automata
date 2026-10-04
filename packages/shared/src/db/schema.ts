@@ -1560,6 +1560,26 @@ export const repoReviewSettings = pgTable(
      * stored value degrades a task dispatch to no packs, never fails it.
      */
     taskBatteries: text("task_batteries").array(),
+    /**
+     * Phase 8 self-heal family (audit findings -> issues -> fix runs). All
+     * nullable with NO column default: NULL = inherit (repo row -> '*' org
+     * default row -> system default, mode "off"). Raw values (dependency-free),
+     * validated by `findSelfHealFieldError` (model/self-heal-settings.ts) at
+     * the write boundary. `self_heal_kill_switch` is org-level: only the '*'
+     * row may carry it. Every column is listed in deploy/assert-schema-ready.ts
+     * REQUIRED (guarded by model/schema-gate.test.ts).
+     */
+    selfHealMode: text("self_heal_mode"),
+    selfHealKillSwitch: boolean("self_heal_kill_switch"),
+    selfHealMaxOpenIssues: integer("self_heal_max_open_issues"),
+    selfHealMaxAttempts: integer("self_heal_max_attempts"),
+    selfHealCooldownMin: integer("self_heal_cooldown_min"),
+    selfHealMinSeverity: text("self_heal_min_severity"),
+    selfHealAutoLabel: boolean("self_heal_auto_label"),
+    selfHealAbsentAudits: integer("self_heal_absent_audits"),
+    selfHealMaxDiffLines: integer("self_heal_max_diff_lines"),
+    selfHealPrExpiryDays: integer("self_heal_pr_expiry_days"),
+    selfHealRunWindow: text("self_heal_run_window"),
     /** Provenance: the user who last wrote this override (audit trail). */
     updatedByUserId: text("updated_by_user_id").references(() => user.id, {
       onDelete: "set null",

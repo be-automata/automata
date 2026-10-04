@@ -17,6 +17,7 @@ import {
   getRepoReviewSettingWithOrgDefault,
 } from "./repo-review-settings";
 import type { ReviewAgentFieldsPatch } from "./review-agent-settings";
+import { SELF_HEAL_FIELDS } from "./self-heal-settings";
 
 const db = createDb(env.DATABASE_URL!);
 
@@ -1151,5 +1152,142 @@ describe("task_batteries column (phase 7)", () => {
       });
     expect(repoRow?.taskBatteries).toEqual([]);
     expect(orgDefault?.taskBatteries).toEqual(["somnio-skills"]);
+  });
+});
+
+describe("self-heal family (phase 8)", () => {
+  let orgId: string;
+  const repo = "acme/heal";
+  beforeEach(async () => {
+    orgId = await makeOrg("acme-self-heal");
+  });
+
+  async function read(repoFullName = repo) {
+    return getRepoReviewSetting({ db, organizationId: orgId, repoFullName });
+  }
+
+  it("stores every self-heal field on a repo row and on the '*' row; null clears", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: {
+        selfHealMode: "dry-run",
+        selfHealMaxOpenIssues: 4,
+        selfHealMaxAttempts: 3,
+        selfHealCooldownMin: 0,
+        selfHealMinSeverity: "high",
+        selfHealAutoLabel: true,
+        selfHealAbsentAudits: 3,
+        selfHealMaxDiffLines: 500,
+        selfHealPrExpiryDays: 14,
+        selfHealRunWindow: "22:00-04:00",
+      },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { selfHealMode: "on", selfHealKillSwitch: true },
+    });
+    const { repo: repoRow, orgDefault } =
+      await getRepoReviewSettingWithOrgDefault({
+        db,
+        organizationId: orgId,
+        repoFullName: repo,
+      });
+    expect(repoRow?.selfHealMode).toBe("dry-run");
+    expect(repoRow?.selfHealMaxOpenIssues).toBe(4);
+    expect(repoRow?.selfHealRunWindow).toBe("22:00-04:00");
+    expect(repoRow?.selfHealAutoLabel).toBe(true);
+    expect(orgDefault?.selfHealMode).toBe("on");
+    expect(orgDefault?.selfHealKillSwitch).toBe(true);
+
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { selfHealMode: null },
+    });
+    expect((await read())?.selfHealMode).toBeNull();
+  });
+
+  it("throws on an invalid patch before writing and leaves an existing row unchanged", async () => {
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: repo,
+        patch: { selfHealMaxAttempts: 9, selfHealRunWindow: "25:00-01:00" },
+      }),
+    ).rejects.toThrow("selfHeal");
+    expect(await read()).toBeUndefined();
+
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { selfHealMaxAttempts: 2 },
+    });
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: repo,
+        patch: { selfHealMaxAttempts: 9 },
+      }),
+    ).rejects.toThrow("selfHealMaxAttempts");
+    expect((await read())?.selfHealMaxAttempts).toBe(2);
+  });
+
+  it("rejects the kill switch on a repo row and stores it on '*'", async () => {
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: "acme/web",
+        patch: { selfHealKillSwitch: true },
+      }),
+    ).rejects.toThrow("org-level");
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { selfHealKillSwitch: true },
+    });
+    expect((await read(ORG_DEFAULT_REPO_SENTINEL))?.selfHealKillSwitch).toBe(
+      true,
+    );
+  });
+
+  it("a tolerance reset keeps a row whose only other content is self-heal", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { blockTolerance: "error", selfHealMode: "dry-run" },
+    });
+    const { removed } = await removeRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+    });
+    expect(removed).toBe(true);
+    const row = await read();
+    expect(row?.blockTolerance).toBe("warning");
+    expect(row?.selfHealMode).toBe("dry-run");
+  });
+
+  it("a tolerance-only row has every self_heal_* column NULL (no column default)", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { blockTolerance: "error" },
+    });
+    const row = await read();
+    for (const field of SELF_HEAL_FIELDS) {
+      expect(row?.[field]).toBeNull();
+    }
   });
 });
