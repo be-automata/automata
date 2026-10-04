@@ -65,13 +65,68 @@ export const REVIEW_AGENT_FIELDS = [
 ] as const;
 export type ReviewAgentField = (typeof REVIEW_AGENT_FIELDS)[number];
 
-/** A write patch for the review-agent family; `null` clears (= inherit). */
-export interface ReviewAgentFieldsPatch {
+/**
+ * A write patch for the review-agent family; `null` clears (= inherit).
+ * A `type` (not an interface) so patches that include it stay assignable to
+ * `Record<string, unknown>` for {@link findReviewAgentFieldError}.
+ */
+export type ReviewAgentFieldsPatch = {
   reviewMode?: string | null;
   reviewBatteries?: string[] | null;
   reviewRunTests?: boolean | null;
   reviewCommandTimeoutS?: number | null;
   reviewMaxTurns?: number | null;
+};
+
+/** The review-agent fields of a settings row, typed (null = inherit). */
+export interface ReviewAgentValues {
+  reviewMode: ReviewMode | null;
+  reviewBatteries: ReviewBatteryPackId[] | null;
+  reviewRunTests: boolean | null;
+  reviewCommandTimeoutS: number | null;
+  reviewMaxTurns: number | null;
+}
+
+/** System defaults — what an all-inherit (repo and org) field resolves to. */
+export const REVIEW_CLASSIC_COMMAND_TIMEOUT_S = 60;
+export const REVIEW_ORCHESTRATED_COMMAND_TIMEOUT_S_DEFAULT = 300;
+export const DEFAULT_REVIEW_BATTERIES: readonly ReviewBatteryPackId[] =
+  REVIEW_BATTERY_PACK_IDS;
+export const DEFAULT_REVIEW_RUN_TESTS = false;
+
+/** The one human wording per mode (SUPERSEDE_POLICY_LABELS precedent). */
+export const REVIEW_MODE_LABELS: Record<ReviewMode, string> = {
+  classic: "Classic",
+  orchestrated: "Orchestrated",
+};
+
+/** Short plain labels for the battery packs. */
+export const REVIEW_BATTERY_PACK_LABELS: Record<ReviewBatteryPackId, string> = {
+  "gstack-review": "gstack review",
+  "somnio-review": "Somnio review",
+  "gsd-reviewers": "GSD reviewers",
+};
+
+/** The five review-agent fields of any row-shaped object, nothing else. */
+export function pickReviewAgentFields<
+  T extends Record<ReviewAgentField, unknown>,
+>(row: T): Pick<T, ReviewAgentField> {
+  const picked: Partial<Pick<T, ReviewAgentField>> = {};
+  for (const field of REVIEW_AGENT_FIELDS) {
+    Object.assign(picked, { [field]: row[field] });
+  }
+  // Every key of REVIEW_AGENT_FIELDS was assigned by the loop above.
+  return picked as Pick<T, ReviewAgentField>;
+}
+
+/** The mode a run would use: repo value → org value → system default. */
+export function effectiveReviewMode(
+  repoValue: string | null | undefined,
+  orgValue: string | null | undefined,
+): ReviewMode {
+  if (isReviewMode(repoValue)) return repoValue;
+  if (isReviewMode(orgValue)) return orgValue;
+  return DEFAULT_REVIEW_MODE;
 }
 
 function isIntegerInRange(value: unknown, min: number, max: number): boolean {
@@ -151,4 +206,14 @@ export function findReviewAgentFieldError(
     }
   }
   return undefined;
+}
+
+/**
+ * Type-guard form of {@link findReviewAgentFieldError}: true when every
+ * review-agent key present in `patch` holds a valid value (or null).
+ */
+export function isValidReviewAgentPatch(
+  patch: Record<string, unknown>,
+): patch is Record<string, unknown> & ReviewAgentFieldsPatch {
+  return findReviewAgentFieldError(patch) === undefined;
 }

@@ -13,7 +13,11 @@ import {
   sql,
 } from "drizzle-orm";
 import { buildEgressPolicyShape } from "./egress-policy";
-import { findReviewAgentFieldError } from "./review-agent-settings";
+import {
+  REVIEW_AGENT_FIELDS,
+  findReviewAgentFieldError,
+  type ReviewAgentFieldsPatch,
+} from "./review-agent-settings";
 
 /**
  * Per-repository REQUESTED_CHANGES severity tolerance (ADR-036 review floor),
@@ -162,13 +166,29 @@ export async function resolveSupersedePolicy({
   organizationId: string;
   repoFullName: string;
 }): Promise<SupersedeSnapshot> {
-  const { repo: repoRow, orgDefault } =
-    await getRepoReviewSettingWithOrgDefault({
-      db,
-      organizationId,
-      repoFullName,
-    });
-  for (const row of [repoRow, orgDefault]) {
+  const { repo, orgDefault } = await getRepoReviewSettingWithOrgDefault({
+    db,
+    organizationId,
+    repoFullName,
+  });
+  return supersedeFromRows({ organizationId, repo, orgDefault });
+}
+
+/**
+ * The pure half of {@link resolveSupersedePolicy}: resolve the snapshot from
+ * the already-fetched repo and '*' rows (callers that need the rows for other
+ * families too fetch them once). Same throw-on-unknown contract.
+ */
+export function supersedeFromRows({
+  organizationId,
+  repo,
+  orgDefault,
+}: {
+  organizationId: string;
+  repo: RepoReviewSetting | undefined;
+  orgDefault: RepoReviewSetting | undefined;
+}): SupersedeSnapshot {
+  for (const row of [repo, orgDefault]) {
     if (!row?.supersedePolicy) continue;
     if (row.supersedePolicy === RETIRED_SUPERSEDE_POLICY) {
       // TODO(#165): transient cutover shim — delete this branch once the
@@ -260,14 +280,9 @@ export async function upsertRepoReviewSetting({
     supersedePolicy?: string | null;
     /** #125 discard-mode recheck toggle. */
     recheckOnComplete?: boolean;
-    /** Phase 4 review-agent family; null clears (= inherit). Validated by
-     * findReviewAgentFieldError before the write. */
-    reviewMode?: string | null;
-    reviewBatteries?: string[] | null;
-    reviewRunTests?: boolean | null;
-    reviewCommandTimeoutS?: number | null;
-    reviewMaxTurns?: number | null;
-  };
+    /* Phase 4 review-agent family (ReviewAgentFieldsPatch); null clears
+     * (= inherit). Validated by findReviewAgentFieldError before the write. */
+  } & ReviewAgentFieldsPatch;
   updatedByUserId?: string | null;
   /**
    * Optimistic concurrency (#131): when given, the write applies ONLY if the
@@ -362,14 +377,12 @@ export async function upsertRepoReviewSetting({
     egressAllowlist?: string[] | null;
     supersedePolicy?: string | null;
     recheckOnComplete?: boolean;
-    reviewMode?: string | null;
-    reviewBatteries?: string[] | null;
-    reviewRunTests?: boolean | null;
-    reviewCommandTimeoutS?: number | null;
-    reviewMaxTurns?: number | null;
     updatedByUserId: string | null;
     updatedAt: Date;
-  } = { updatedByUserId: updatedByUserId ?? null, updatedAt: new Date() };
+  } & ReviewAgentFieldsPatch = {
+    updatedByUserId: updatedByUserId ?? null,
+    updatedAt: new Date(),
+  };
   if (patch.blockTolerance !== undefined)
     set.blockTolerance = patch.blockTolerance;
   if (patch.reviewDraftPrs !== undefined)
@@ -381,15 +394,11 @@ export async function upsertRepoReviewSetting({
     set.supersedePolicy = patch.supersedePolicy;
   if (patch.recheckOnComplete !== undefined)
     set.recheckOnComplete = patch.recheckOnComplete;
-  if (patch.reviewMode !== undefined) set.reviewMode = patch.reviewMode;
-  if (patch.reviewBatteries !== undefined)
-    set.reviewBatteries = patch.reviewBatteries;
-  if (patch.reviewRunTests !== undefined)
-    set.reviewRunTests = patch.reviewRunTests;
-  if (patch.reviewCommandTimeoutS !== undefined)
-    set.reviewCommandTimeoutS = patch.reviewCommandTimeoutS;
-  if (patch.reviewMaxTurns !== undefined)
-    set.reviewMaxTurns = patch.reviewMaxTurns;
+  for (const field of REVIEW_AGENT_FIELDS) {
+    if (patch[field] !== undefined) {
+      Object.assign(set, { [field]: patch[field] });
+    }
+  }
 
   // CAS has two shapes: a version fence for edits (updated_at must still be
   // the value the admin read), and an ABSENCE fence for first writes
@@ -497,11 +506,7 @@ export async function removeRepoReviewSetting({
     isNotNull(repoReviewSettings.reviewDraftPrs),
     // Review-agent family, phase 4: a row whose only other content is a
     // review-agent override (even an explicit empty battery list) survives.
-    isNotNull(repoReviewSettings.reviewMode),
-    isNotNull(repoReviewSettings.reviewBatteries),
-    isNotNull(repoReviewSettings.reviewRunTests),
-    isNotNull(repoReviewSettings.reviewCommandTimeoutS),
-    isNotNull(repoReviewSettings.reviewMaxTurns),
+    ...REVIEW_AGENT_FIELDS.map((field) => isNotNull(repoReviewSettings[field])),
   )!;
   const reset = await db
     .update(repoReviewSettings)
