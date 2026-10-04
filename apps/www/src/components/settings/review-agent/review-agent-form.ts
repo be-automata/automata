@@ -102,6 +102,19 @@ export interface ReviewAgentDraft {
   taskBatteries: BatteryPackId[] | null;
 }
 
+/**
+ * `selected` with `id` switched on or off, in `order`'s order (a pack list is
+ * stored in canonical order, so toggling never reorders it).
+ */
+export function toggleIn<Id extends string>(
+  order: readonly Id[],
+  selected: readonly Id[],
+  id: Id,
+  on: boolean,
+): Id[] {
+  return order.filter((item) => (item === id ? on : selected.includes(item)));
+}
+
 export function draftFromValues(values: ReviewAgentValues): ReviewAgentDraft {
   return {
     reviewMode: values.reviewMode,
