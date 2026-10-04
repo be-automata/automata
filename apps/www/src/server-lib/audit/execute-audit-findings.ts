@@ -811,8 +811,8 @@ export async function executeAuditFindings({
 }
 
 /** Labels are created before use; a failure here surfaces on the write itself. */
-async function ensureLabelsBestEffort(
-  deps: ExecuteAuditDeps,
+export async function ensureLabelsBestEffort(
+  deps: Pick<ExecuteAuditDeps, "writer" | "log">,
   claimed: readonly AuditEffectRow[],
 ): Promise<void> {
   const labels = new Set<string>();
