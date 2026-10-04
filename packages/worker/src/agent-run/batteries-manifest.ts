@@ -7,7 +7,8 @@
  * - packages/worker/deploy/linux/install-batteries.sh, which re-checks the
  *   same shapes in bash with jq and the same regexes (defense in depth: pack
  *   ids, CLI names and versionArgs reach a root shell and an agent shell, so a
- *   loose shape is an injection path, not a cosmetic problem);
+ *   loose shape is an injection path, not a cosmetic problem). Keep the two
+ *   validators in agreement: a rule added here belongs in its preflight too;
  * - the operator, who reviews pin changes in a PR.
  *
  * Pins are content addresses (commit → tree/blob ids, release tarball →
@@ -35,19 +36,24 @@ export const SEMVER = /^\d+\.\d+\.\d+$/;
 export const PACK_DEST =
   /^(LICENSE|skills\/[a-z0-9-]+(\/.+)?|agents\/[a-z0-9-]+\.md)$/;
 
-/** A path segment that must never be vendored (executable or config surface). */
-const FORBIDDEN_SEGMENTS: readonly string[] = [
+/**
+ * Path segments that must never be vendored: an executable or plugin surface
+ * (`hooks`, `bin`, `.claude-plugin`), or a file that would configure Claude
+ * Code instead of informing it. install-batteries.sh carries the same list as
+ * FORBIDDEN_NAMES, for both its preflight and its scan of the staged tree.
+ */
+export const FORBIDDEN_NAMES: readonly string[] = [
   "hooks",
   "bin",
   ".claude-plugin",
-];
-/** A file name that would configure Claude Code instead of informing it. */
-const FORBIDDEN_BASENAMES: readonly string[] = [
   "settings.json",
   "settings.local.json",
   ".mcp.json",
   "plugin.json",
 ];
+
+/** Control characters split the installer's tab/line-based reads; backslashes are escaped by jq's @tsv. */
+const UNSAFE_CHAR = /[\u0000-\u001f\u007f\\]/;
 
 export interface BatteryPackSubpath {
   src: string;
@@ -61,6 +67,18 @@ export interface BatteryPackOverlay {
   dest: string;
 }
 
+/**
+ * A gstack helper reference that a vendored file may contain exactly `count`
+ * times, because the adapter skill neutralises it. Any other occurrence of a
+ * `forbiddenHelperTokens` entry in an installed pack fails the install.
+ */
+export interface AllowedHelperRef {
+  /** Path inside the pack dir, e.g. `skills/gstack-review/checklist.md`. */
+  file: string;
+  ref: string;
+  count: number;
+}
+
 export interface BatteryPack {
   id: string;
   /** `https://github.com/<owner>/<repo>`, or `"self"` for this repository. */
@@ -69,6 +87,7 @@ export interface BatteryPack {
   license: string;
   subpaths: BatteryPackSubpath[];
   overlays?: BatteryPackOverlay[];
+  allowedHelperRefs?: AllowedHelperRef[];
 }
 
 export interface BatteryCli {
@@ -89,12 +108,20 @@ export interface DroppedBattery {
 
 export interface BatteriesManifest {
   schemaVersion: 1;
+  /** Strings no installed pack may contain outside its allowedHelperRefs. */
+  forbiddenHelperTokens: string[];
   packs: BatteryPack[];
   clis: BatteryCli[];
   dropped: DroppedBattery[];
 }
 
-const TOP_KEYS = ["schemaVersion", "packs", "clis", "dropped"] as const;
+const TOP_KEYS = [
+  "schemaVersion",
+  "forbiddenHelperTokens",
+  "packs",
+  "clis",
+  "dropped",
+] as const;
 const PACK_KEYS = [
   "id",
   "repo",
@@ -102,9 +129,11 @@ const PACK_KEYS = [
   "license",
   "subpaths",
   "overlays",
+  "allowedHelperRefs",
 ] as const;
 const SUBPATH_KEYS = ["src", "dest", "gitId", "exclude"] as const;
 const OVERLAY_KEYS = ["from", "dest"] as const;
+const HELPER_REF_KEYS = ["file", "ref", "count"] as const;
 const CLI_KEYS = [
   "name",
   "version",
@@ -133,8 +162,44 @@ function findUnknownKey(
   return `${where}: unknown key`;
 }
 
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== "";
+function findNonEmptyError(value: unknown, at: string): string | undefined {
+  return typeof value === "string" && value.trim() !== ""
+    ? undefined
+    : `${at}: must be a non-empty string`;
+}
+
+/** `error` unless `value` is a string starting with `prefix`. */
+function findPrefixError(
+  value: unknown,
+  prefix: string,
+  error: string,
+): string | undefined {
+  return typeof value === "string" && value.startsWith(prefix)
+    ? undefined
+    : error;
+}
+
+/** First string anywhere in `value` holding a control character or backslash. */
+function findUnsafeCharError(value: unknown, at: string): string | undefined {
+  if (typeof value === "string") {
+    return UNSAFE_CHAR.test(value)
+      ? `${at}: contains a control character or backslash`
+      : undefined;
+  }
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      const error = findUnsafeCharError(item, `${at}[${index}]`);
+      if (error !== undefined) return error;
+    }
+    return undefined;
+  }
+  if (isRecord(value)) {
+    for (const [key, item] of Object.entries(value)) {
+      const error = findUnsafeCharError(item, at === "" ? key : `${at}.${key}`);
+      if (error !== undefined) return error;
+    }
+  }
+  return undefined;
 }
 
 /** Relative, forward-slash, no `..`/`.`/empty segments, no backslash. */
@@ -147,12 +212,9 @@ function isSafeRelPath(value: unknown): value is string {
 }
 
 function hasForbiddenName(relPath: string): boolean {
-  const segments = relPath.split("/");
-  const basename = segments[segments.length - 1] ?? "";
-  return (
-    segments.some((segment) => FORBIDDEN_SEGMENTS.includes(segment)) ||
-    FORBIDDEN_BASENAMES.includes(basename)
-  );
+  return relPath
+    .split("/")
+    .some((segment) => FORBIDDEN_NAMES.includes(segment));
 }
 
 function findStringError(
@@ -211,18 +273,33 @@ function findExcludeError(value: unknown, at: string): string | undefined {
 
 function findOverlayError(value: unknown, at: string): string | undefined {
   if (!isRecord(value)) return `${at}: must be an object`;
-  const fromError =
+  return (
+    findUnknownKey(value, OVERLAY_KEYS, at) ??
     findPathError(value.from, `${at}.from`, { checkForbidden: true }) ??
-    (typeof value.from === "string" &&
-    value.from.startsWith(BATTERIES_OVERLAY_DIR)
-      ? undefined
-      : `${at}.from: must live under ${BATTERIES_OVERLAY_DIR}`);
-  const destError =
+    findPrefixError(
+      value.from,
+      BATTERIES_OVERLAY_DIR,
+      `${at}.from: must live under ${BATTERIES_OVERLAY_DIR}`,
+    ) ??
     findDestError(value.dest, `${at}.dest`) ??
-    (typeof value.dest === "string" && value.dest.startsWith("skills/")
+    findPrefixError(
+      value.dest,
+      "skills/",
+      `${at}.dest: an overlay must land under skills/`,
+    )
+  );
+}
+
+function findHelperRefError(value: unknown, at: string): string | undefined {
+  if (!isRecord(value)) return `${at}: must be an object`;
+  return (
+    findUnknownKey(value, HELPER_REF_KEYS, at) ??
+    findDestError(value.file, `${at}.file`) ??
+    findNonEmptyError(value.ref, `${at}.ref`) ??
+    (Number.isInteger(value.count) && (value.count as number) >= 1
       ? undefined
-      : `${at}.dest: an overlay must land under skills/`);
-  return findUnknownKey(value, OVERLAY_KEYS, at) ?? fromError ?? destError;
+      : `${at}.count: must be an integer >= 1`)
+  );
 }
 
 function findListError(
@@ -240,6 +317,15 @@ function findListError(
   return undefined;
 }
 
+function findOptionalListError(
+  value: unknown,
+  at: string,
+  findItemError: (item: unknown, itemAt: string) => string | undefined,
+): string | undefined {
+  if (value === undefined) return undefined;
+  return findListError(value, at, findItemError, { allowEmpty: true });
+}
+
 function findPackError(value: unknown, at: string): string | undefined {
   if (!isRecord(value)) return `${at}: must be an object`;
   const repoError =
@@ -252,17 +338,16 @@ function findPackError(value: unknown, at: string): string | undefined {
     findStringError(value.id, ID_OR_NAME, `${at}.id`) ??
     repoError ??
     findStringError(value.sha, SHA1_HEX, `${at}.sha`) ??
-    (isNonEmptyString(value.license)
-      ? undefined
-      : `${at}.license: must be a non-empty string`) ??
+    findNonEmptyError(value.license, `${at}.license`) ??
     findListError(value.subpaths, `${at}.subpaths`, findSubpathError, {
       allowEmpty: false,
     }) ??
-    (value.overlays === undefined
-      ? undefined
-      : findListError(value.overlays, `${at}.overlays`, findOverlayError, {
-          allowEmpty: true,
-        }))
+    findOptionalListError(value.overlays, `${at}.overlays`, findOverlayError) ??
+    findOptionalListError(
+      value.allowedHelperRefs,
+      `${at}.allowedHelperRefs`,
+      findHelperRefError,
+    )
   );
 }
 
@@ -296,9 +381,7 @@ function findCliError(value: unknown, at: string): string | undefined {
     findPathError(value.licenseMember, `${at}.licenseMember`, {
       checkForbidden: false,
     }) ??
-    (isNonEmptyString(value.license)
-      ? undefined
-      : `${at}.license: must be a non-empty string`) ??
+    findNonEmptyError(value.license, `${at}.license`) ??
     findStringError(value.versionArgs, VERSION_ARGS, `${at}.versionArgs`)
   );
 }
@@ -307,27 +390,37 @@ function findDroppedError(value: unknown, at: string): string | undefined {
   if (!isRecord(value)) return `${at}: must be an object`;
   return (
     findUnknownKey(value, DROPPED_KEYS, at) ??
-    (isNonEmptyString(value.name)
-      ? undefined
-      : `${at}.name: must be a non-empty string`) ??
-    (isNonEmptyString(value.reason)
-      ? undefined
-      : `${at}.reason: must be a non-empty string`)
+    findNonEmptyError(value.name, `${at}.name`) ??
+    findNonEmptyError(value.reason, `${at}.reason`)
   );
 }
 
 /** Reports the first repeated `key` value as `<at>[i].<key>`. */
 function findDuplicateError(
-  items: unknown[],
+  items: readonly object[],
   key: string,
   at: string,
 ): string | undefined {
   const seen = new Set<unknown>();
   for (const [index, item] of items.entries()) {
-    if (!isRecord(item)) continue;
-    const value = item[key];
+    const value = (item as Record<string, unknown>)[key];
     if (seen.has(value)) return `${at}[${index}].${key}: duplicate`;
     seen.add(value);
+  }
+  return undefined;
+}
+
+/** An allowlisted ref must name a forbidden token, or allowing it is meaningless. */
+function findUnusedHelperRefError(
+  packs: BatteryPack[],
+  tokens: string[],
+): string | undefined {
+  for (const [packIndex, pack] of packs.entries()) {
+    for (const [refIndex, entry] of (pack.allowedHelperRefs ?? []).entries()) {
+      if (!tokens.some((token) => entry.ref.includes(token))) {
+        return `packs[${packIndex}].allowedHelperRefs[${refIndex}].ref: names no forbiddenHelperTokens entry`;
+      }
+    }
   }
   return undefined;
 }
@@ -339,8 +432,15 @@ function findDuplicateError(
 export function findBatteriesManifestError(value: unknown): string | undefined {
   if (!isRecord(value)) return "manifest: must be a JSON object";
   const shapeError =
+    findUnsafeCharError(value, "") ??
     findUnknownKey(value, TOP_KEYS, "") ??
     (value.schemaVersion === 1 ? undefined : "schemaVersion: must be 1") ??
+    findListError(
+      value.forbiddenHelperTokens,
+      "forbiddenHelperTokens",
+      findNonEmptyError,
+      { allowEmpty: false },
+    ) ??
     findListError(value.packs, "packs", findPackError, {
       allowEmpty: false,
     }) ??
@@ -349,12 +449,13 @@ export function findBatteriesManifestError(value: unknown): string | undefined {
       allowEmpty: true,
     });
   if (shapeError !== undefined) return shapeError;
-  // The list checks above proved these are arrays.
-  const packs = value.packs as unknown[];
-  const clis = value.clis as unknown[];
+  // The shape checks above proved these types.
+  const packs = value.packs as BatteryPack[];
+  const clis = value.clis as BatteryCli[];
   return (
     findDuplicateError(packs, "id", "packs") ??
-    findDuplicateError(clis, "name", "clis")
+    findDuplicateError(clis, "name", "clis") ??
+    findUnusedHelperRefError(packs, value.forbiddenHelperTokens as string[])
   );
 }
 

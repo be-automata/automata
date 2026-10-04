@@ -1,45 +1,33 @@
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { describe, expect, it } from "vitest";
 
 import {
-  BATTERIES_MANIFEST_REPO_PATH,
   BATTERIES_OVERLAY_DIR,
+  FORBIDDEN_NAMES,
   findBatteriesManifestError,
   isBatteriesManifest,
+  type BatteriesManifest,
 } from "./batteries-manifest";
 
 /**
  * Pins the strict shape of packages/worker/deploy/batteries.json. The guard is
  * pure and dependency-free; install-batteries.sh re-checks the same shapes in
- * bash, and Phase 5's seeding reuses this parser.
+ * bash, and Phase 5's seeding reuses this parser. The committed manifest is
+ * checked in deploy-assets.test.ts.
+ *
+ * Mutators index the fixture with `!`: validFixture() builds packs[0..1],
+ * their subpaths[0..1], packs[0].overlays[0], packs[0].allowedHelperRefs[0]
+ * and clis[0], so those elements always exist. Invalid values are written
+ * with Object.assign / Reflect.deleteProperty, which the types allow.
  */
-
-const repoRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-  "..",
-);
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 const SHA256 = "c".repeat(64);
 
-interface Fixture {
-  schemaVersion: number;
-  packs: Array<Record<string, unknown>>;
-  clis: Array<Record<string, unknown>>;
-  dropped: Array<Record<string, unknown>>;
-  [key: string]: unknown;
-}
-
-function validFixture(): Fixture {
+function validFixture(): BatteriesManifest {
   return {
     schemaVersion: 1,
+    forbiddenHelperTokens: ["helper/bin"],
     packs: [
       {
         id: "upstream-pack",
@@ -58,6 +46,13 @@ function validFixture(): Fixture {
           {
             from: `${BATTERIES_OVERLAY_DIR}upstream-pack/SKILL.md`,
             dest: "skills/upstream-pack/SKILL.md",
+          },
+        ],
+        allowedHelperRefs: [
+          {
+            file: "skills/upstream-pack/checklist.md",
+            ref: "~/helper/bin/ledger",
+            count: 1,
           },
         ],
       },
@@ -93,40 +88,10 @@ function validFixture(): Fixture {
   };
 }
 
-type Mutator = (f: Fixture) => void;
+type Mutator = (f: BatteriesManifest) => void;
 
-function pack(f: Fixture, i: number): Record<string, unknown> {
-  const p = f.packs[i];
-  if (p === undefined) throw new Error(`fixture has no pack ${i}`);
-  return p;
-}
-
-function cli(f: Fixture): Record<string, unknown> {
-  const c = f.clis[0];
-  if (c === undefined) throw new Error("fixture has no cli");
-  return c;
-}
-
-function subpath(f: Fixture, i: number, j: number): Record<string, unknown> {
-  const subs = pack(f, i).subpaths;
-  if (!Array.isArray(subs)) throw new Error("fixture subpaths not an array");
-  const s: unknown = subs[j];
-  if (typeof s !== "object" || s === null) {
-    throw new Error(`fixture has no subpath ${i}/${j}`);
-  }
-  return s as Record<string, unknown>;
-}
-
-function overlay(f: Fixture): Record<string, unknown> {
-  const ovs = pack(f, 0).overlays;
-  if (!Array.isArray(ovs)) throw new Error("fixture overlays not an array");
-  const o: unknown = ovs[0];
-  if (typeof o !== "object" || o === null) throw new Error("no overlay");
-  return o as Record<string, unknown>;
-}
-
-function mutated(mutate: Mutator): Fixture {
-  const f = structuredClone(validFixture());
+function mutated(mutate: Mutator): BatteriesManifest {
+  const f = validFixture();
   mutate(f);
   return f;
 }
@@ -146,16 +111,6 @@ describe("findBatteriesManifestError — valid input", () => {
     expect(isBatteriesManifest(f)).toBe(true);
   });
 
-  it("accepts the committed packages/worker/deploy/batteries.json", () => {
-    const raw = fs.readFileSync(
-      path.join(repoRoot, BATTERIES_MANIFEST_REPO_PATH),
-      "utf8",
-    );
-    const parsed: unknown = JSON.parse(raw);
-    const error = findBatteriesManifestError(parsed);
-    expect(error, error).toBeUndefined();
-  });
-
   it("rejects non-objects", () => {
     expect(findBatteriesManifestError(null)).toBeDefined();
     expect(findBatteriesManifestError([])).toBeDefined();
@@ -167,57 +122,49 @@ describe("findBatteriesManifestError — pins", () => {
   it.each<[string, Mutator, string]>([
     [
       "schemaVersion 2",
-      (f) => {
-        f.schemaVersion = 2;
-      },
+      (f) => Object.assign(f, { schemaVersion: 2 }),
       "schemaVersion",
     ],
-    [
-      "missing packs",
-      (f) => {
-        delete (f as Record<string, unknown>).packs;
-      },
-      "packs",
-    ],
+    ["missing packs", (f) => Reflect.deleteProperty(f, "packs"), "packs"],
     [
       "pack sha of 39 hex",
       (f) => {
-        pack(f, 1).sha = "a".repeat(39);
+        f.packs[1]!.sha = "a".repeat(39);
       },
       "packs[1].sha",
     ],
     [
       "pack sha with uppercase hex",
       (f) => {
-        pack(f, 0).sha = "A".repeat(40);
+        f.packs[0]!.sha = "A".repeat(40);
       },
       "packs[0].sha",
     ],
     [
       "gitId not 40-hex",
       (f) => {
-        subpath(f, 0, 1).gitId = "deadbeef";
+        f.packs[0]!.subpaths[1]!.gitId = "deadbeef";
       },
       "packs[0].subpaths[1].gitId",
     ],
     [
       "cli sha256 of 63 hex",
       (f) => {
-        cli(f).sha256 = "c".repeat(63);
+        f.clis[0]!.sha256 = "c".repeat(63);
       },
       "clis[0].sha256",
     ],
     [
       "http repo",
       (f) => {
-        pack(f, 0).repo = "http://github.com/a/b";
+        f.packs[0]!.repo = "http://github.com/a/b";
       },
       "packs[0].repo",
     ],
     [
       "gitlab repo",
       (f) => {
-        pack(f, 0).repo = "https://gitlab.com/a/b";
+        f.packs[0]!.repo = "https://gitlab.com/a/b";
       },
       "packs[0].repo",
     ],
@@ -227,7 +174,7 @@ describe("findBatteriesManifestError — pins", () => {
 
   it('accepts repo "self"', () => {
     const f = mutated((m) => {
-      pack(m, 0).repo = "self";
+      m.packs[0]!.repo = "self";
     });
     expect(findBatteriesManifestError(f)).toBeUndefined();
   });
@@ -238,35 +185,35 @@ describe("findBatteriesManifestError — licenses and duplicates", () => {
     [
       "empty pack license",
       (f) => {
-        pack(f, 0).license = "";
+        f.packs[0]!.license = "";
       },
       "packs[0].license",
     ],
     [
       "whitespace pack license",
       (f) => {
-        pack(f, 1).license = "   ";
+        f.packs[1]!.license = "   ";
       },
       "packs[1].license",
     ],
     [
       "empty cli license",
       (f) => {
-        cli(f).license = "";
+        f.clis[0]!.license = "";
       },
       "clis[0].license",
     ],
     [
       "duplicate pack id",
       (f) => {
-        pack(f, 1).id = "upstream-pack";
+        f.packs[1]!.id = "upstream-pack";
       },
       "packs[1].id",
     ],
     [
       "duplicate cli name",
       (f) => {
-        f.clis.push({ ...cli(f) });
+        f.clis.push({ ...f.clis[0]! });
       },
       "clis[1].name",
     ],
@@ -280,7 +227,7 @@ describe("findBatteriesManifestError — id, name and versionArgs shapes", () =>
     "rejects pack id %j",
     (id) => {
       expectRejected((f) => {
-        pack(f, 0).id = id;
+        f.packs[0]!.id = id;
       }, "packs[0].id");
     },
   );
@@ -289,7 +236,7 @@ describe("findBatteriesManifestError — id, name and versionArgs shapes", () =>
     "rejects cli name %j",
     (name) => {
       expectRejected((f) => {
-        cli(f).name = name;
+        f.clis[0]!.name = name;
       }, "clis[0].name");
     },
   );
@@ -298,7 +245,7 @@ describe("findBatteriesManifestError — id, name and versionArgs shapes", () =>
     "accepts versionArgs %j",
     (versionArgs) => {
       const f = mutated((m) => {
-        cli(m).versionArgs = versionArgs;
+        m.clis[0]!.versionArgs = versionArgs;
       });
       expect(findBatteriesManifestError(f)).toBeUndefined();
     },
@@ -308,7 +255,7 @@ describe("findBatteriesManifestError — id, name and versionArgs shapes", () =>
     "rejects versionArgs %j",
     (versionArgs) => {
       expectRejected((f) => {
-        cli(f).versionArgs = versionArgs;
+        f.clis[0]!.versionArgs = versionArgs;
       }, "clis[0].versionArgs");
     },
   );
@@ -319,21 +266,21 @@ describe("findBatteriesManifestError — cli release fields", () => {
     [
       "version with a v prefix",
       (f) => {
-        cli(f).version = "v1.2.3";
+        f.clis[0]!.version = "v1.2.3";
       },
       "clis[0].version",
     ],
     [
       "two-part version",
       (f) => {
-        cli(f).version = "1.2";
+        f.clis[0]!.version = "1.2";
       },
       "clis[0].version",
     ],
     [
       "url off github",
       (f) => {
-        cli(f).url =
+        f.clis[0]!.url =
           "https://example.com/o/toolx/releases/download/v1.2.3/toolx_linux.tar.gz";
       },
       "clis[0].url",
@@ -341,7 +288,7 @@ describe("findBatteriesManifestError — cli release fields", () => {
     [
       "url for another version",
       (f) => {
-        cli(f).url =
+        f.clis[0]!.url =
           "https://github.com/o/toolx/releases/download/v9.9.9/toolx_linux.tar.gz";
       },
       "clis[0].url",
@@ -349,29 +296,27 @@ describe("findBatteriesManifestError — cli release fields", () => {
     [
       "url without linux",
       (f) => {
-        cli(f).url =
+        f.clis[0]!.url =
           "https://github.com/o/toolx/releases/download/v1.2.3/toolx_darwin.tar.gz";
       },
       "clis[0].url",
     ],
     [
       "missing versionArgs",
-      (f) => {
-        delete cli(f).versionArgs;
-      },
+      (f) => Reflect.deleteProperty(f.clis[0]!, "versionArgs"),
       "clis[0].versionArgs",
     ],
     [
       "empty member",
       (f) => {
-        cli(f).member = "";
+        f.clis[0]!.member = "";
       },
       "clis[0].member",
     ],
     [
       "empty licenseMember",
       (f) => {
-        cli(f).licenseMember = "";
+        f.clis[0]!.licenseMember = "";
       },
       "clis[0].licenseMember",
     ],
@@ -383,53 +328,62 @@ describe("findBatteriesManifestError — cli release fields", () => {
 describe("findBatteriesManifestError — path traversal", () => {
   const BAD_PATHS = ["/etc/passwd", "../x", "a/../b", "a\\b", "", "a/.."];
 
-  const targets: Array<[string, (f: Fixture, bad: string) => void, string]> = [
+  const targets: Array<
+    [string, (f: BatteriesManifest, bad: string) => void, string]
+  > = [
     [
       "subpath src",
       (f, bad) => {
-        subpath(f, 0, 0).src = bad;
+        f.packs[0]!.subpaths[0]!.src = bad;
       },
       "packs[0].subpaths[0].src",
     ],
     [
       "subpath dest",
       (f, bad) => {
-        subpath(f, 0, 0).dest = bad;
+        f.packs[0]!.subpaths[0]!.dest = bad;
       },
       "packs[0].subpaths[0].dest",
     ],
     [
       "exclude entry",
       (f, bad) => {
-        subpath(f, 1, 0).exclude = [bad];
+        f.packs[1]!.subpaths[0]!.exclude = [bad];
       },
       "packs[1].subpaths[0].exclude[0]",
     ],
     [
       "overlay from",
       (f, bad) => {
-        overlay(f).from = bad;
+        f.packs[0]!.overlays![0]!.from = bad;
       },
       "packs[0].overlays[0].from",
     ],
     [
       "overlay dest",
       (f, bad) => {
-        overlay(f).dest = bad;
+        f.packs[0]!.overlays![0]!.dest = bad;
       },
       "packs[0].overlays[0].dest",
     ],
     [
+      "helper ref file",
+      (f, bad) => {
+        f.packs[0]!.allowedHelperRefs![0]!.file = bad;
+      },
+      "packs[0].allowedHelperRefs[0].file",
+    ],
+    [
       "cli member",
       (f, bad) => {
-        cli(f).member = bad;
+        f.clis[0]!.member = bad;
       },
       "clis[0].member",
     ],
     [
       "cli licenseMember",
       (f, bad) => {
-        cli(f).licenseMember = bad;
+        f.clis[0]!.licenseMember = bad;
       },
       "clis[0].licenseMember",
     ],
@@ -442,92 +396,150 @@ describe("findBatteriesManifestError — path traversal", () => {
   }
 });
 
+describe("findBatteriesManifestError — control characters and backslashes", () => {
+  // install-batteries.sh reads the manifest as jq @tsv rows split on tabs and
+  // newlines, and @tsv escapes backslashes: either would change a value
+  // between the check and its use. Its preflight rejects them first, in any
+  // string; this guard must agree.
+  it.each(["a\tb", "a\nb", "a\u0000b", "a\u007fb", "a\\b"])(
+    "rejects %j in any string, even a free-text one",
+    (bad) => {
+      expectRejected((f) => {
+        f.dropped.push({ name: "x", reason: bad });
+      }, "dropped[0].reason");
+    },
+  );
+});
+
 describe("findBatteriesManifestError — destinations and forbidden names", () => {
   it.each(["hooks/pre.sh", "settings.json", "bin/x", "skills", "agents/x.sh"])(
     "rejects dest %j outside PACK_DEST",
     (dest) => {
       expectRejected((f) => {
-        subpath(f, 0, 0).dest = dest;
+        f.packs[0]!.subpaths[0]!.dest = dest;
       }, "packs[0].subpaths[0].dest");
     },
   );
 
-  it.each([
-    "skills/p/hooks/pre.sh",
-    "skills/p/bin/helper",
-    "skills/p/.claude-plugin/x.md",
-    "skills/p/settings.json",
-    "skills/p/settings.local.json",
-    "skills/p/.mcp.json",
-    "skills/p/plugin.json",
-  ])("rejects forbidden name in dest %j", (dest) => {
+  it.each([...FORBIDDEN_NAMES])("rejects forbidden name %j in dest", (name) => {
     expectRejected((f) => {
-      subpath(f, 0, 0).dest = dest;
+      f.packs[0]!.subpaths[0]!.dest = `skills/p/${name}/x.md`;
     }, "packs[0].subpaths[0].dest");
   });
 
-  it.each([
-    "hooks",
-    "a/bin",
-    ".claude-plugin/plugin.json",
-    "x/settings.json",
-    "x/settings.local.json",
-    ".mcp.json",
-    "plugin.json",
-  ])("rejects forbidden name in src %j", (src) => {
+  it.each([...FORBIDDEN_NAMES])("rejects forbidden name %j in src", (name) => {
     expectRejected((f) => {
-      subpath(f, 0, 0).src = src;
+      f.packs[0]!.subpaths[0]!.src = `x/${name}`;
     }, "packs[0].subpaths[0].src");
   });
 
   it("rejects an overlay from outside the overlay dir", () => {
     expectRejected((f) => {
-      overlay(f).from = "packages/worker/src/x/SKILL.md";
+      f.packs[0]!.overlays![0]!.from = "packages/worker/src/x/SKILL.md";
     }, "packs[0].overlays[0].from");
   });
 
   it("rejects an overlay dest outside skills/", () => {
     expectRejected((f) => {
-      overlay(f).dest = "agents/x.md";
+      f.packs[0]!.overlays![0]!.dest = "agents/x.md";
     }, "packs[0].overlays[0].dest");
+  });
+});
+
+describe("findBatteriesManifestError — helper tokens and allowlist", () => {
+  it.each<[string, Mutator, string]>([
+    [
+      "missing forbiddenHelperTokens",
+      (f) => Reflect.deleteProperty(f, "forbiddenHelperTokens"),
+      "forbiddenHelperTokens",
+    ],
+    [
+      "empty forbiddenHelperTokens",
+      (f) => {
+        f.forbiddenHelperTokens = [];
+      },
+      "forbiddenHelperTokens",
+    ],
+    [
+      "blank token",
+      (f) => {
+        f.forbiddenHelperTokens = [" "];
+      },
+      "forbiddenHelperTokens[0]",
+    ],
+    [
+      "count 0",
+      (f) => {
+        f.packs[0]!.allowedHelperRefs![0]!.count = 0;
+      },
+      "packs[0].allowedHelperRefs[0].count",
+    ],
+    [
+      "fractional count",
+      (f) => {
+        f.packs[0]!.allowedHelperRefs![0]!.count = 1.5;
+      },
+      "packs[0].allowedHelperRefs[0].count",
+    ],
+    [
+      "empty ref",
+      (f) => {
+        f.packs[0]!.allowedHelperRefs![0]!.ref = "";
+      },
+      "packs[0].allowedHelperRefs[0].ref",
+    ],
+    [
+      "ref that names no forbidden token",
+      (f) => {
+        f.packs[0]!.allowedHelperRefs![0]!.ref = "harmless";
+      },
+      "packs[0].allowedHelperRefs[0].ref",
+    ],
+    [
+      "file outside the pack layout",
+      (f) => {
+        f.packs[0]!.allowedHelperRefs![0]!.file = "notes/checklist.md";
+      },
+      "packs[0].allowedHelperRefs[0].file",
+    ],
+  ])("rejects %s", (_name, mutate, fragment) => {
+    expectRejected(mutate, fragment);
+  });
+
+  it("allows a pack with no allowedHelperRefs", () => {
+    const f = mutated((m) =>
+      Reflect.deleteProperty(m.packs[0]!, "allowedHelperRefs"),
+    );
+    expect(findBatteriesManifestError(f)).toBeUndefined();
   });
 });
 
 describe("findBatteriesManifestError — strict keys", () => {
   it.each<[string, Mutator, string]>([
-    [
-      "top level",
-      (f) => {
-        f.extra = 1;
-      },
-      "extra",
-    ],
+    ["top level", (f) => Object.assign(f, { extra: 1 }), "extra"],
     [
       "pack",
-      (f) => {
-        pack(f, 0).sha265 = SHA256;
-      },
+      (f) => Object.assign(f.packs[0]!, { sha265: SHA256 }),
       "packs[0].sha265",
     ],
     [
       "subpath",
-      (f) => {
-        subpath(f, 0, 0).mode = "0755";
-      },
+      (f) => Object.assign(f.packs[0]!.subpaths[0]!, { mode: "0755" }),
       "packs[0].subpaths[0].mode",
     ],
     [
       "overlay",
-      (f) => {
-        overlay(f).chmod = "0755";
-      },
+      (f) => Object.assign(f.packs[0]!.overlays![0]!, { chmod: "0755" }),
       "packs[0].overlays[0].chmod",
     ],
     [
+      "helper ref",
+      (f) => Object.assign(f.packs[0]!.allowedHelperRefs![0]!, { regex: "x" }),
+      "packs[0].allowedHelperRefs[0].regex",
+    ],
+    [
       "cli",
-      (f) => {
-        cli(f).sha265 = SHA256;
-      },
+      (f) => Object.assign(f.clis[0]!, { sha265: SHA256 }),
       "clis[0].sha265",
     ],
   ])("rejects an unknown key on the %s", (_name, mutate, fragment) => {

@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "forbiddenHelperTokens": ["gstack/bin", "gstack-skill-start"],
   "packs": [
     {
       "id": "gstack-review",
@@ -32,6 +33,13 @@
         {
           "from": "packages/worker/deploy/batteries/gstack-review/SKILL.md",
           "dest": "skills/gstack-review/SKILL.md"
+        }
+      ],
+      "allowedHelperRefs": [
+        {
+          "file": "skills/gstack-review/checklist.md",
+          "ref": "~/.claude/skills/gstack/bin/gstack-decision-search",
+          "count": 1
         }
       ]
     },
