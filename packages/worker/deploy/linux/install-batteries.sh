@@ -1486,7 +1486,7 @@ list_stale() {
     if jq -e --arg d "$base" '
       any(.packs[]; (.id + "@" + .sha) == $d)
       or any((.tools // [])[];
-        (.name + "@" + (if .kind == "dart-sdk" then .version else .sha end)) == $d)' \
+        (.name + "@" + (if .kind == "dart-sdk" or .kind == "static-bin" then .version else .sha end)) == $d)' \
       "$MANIFEST" >/dev/null; then
       continue
     fi

@@ -2,7 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db";
-import { thread as threadTable } from "@terragon/shared/db/schema";
+import {
+  thread as threadTable,
+  threadChat as threadChatTable,
+} from "@terragon/shared/db/schema";
+import {
+  claimAuditRun,
+  createAuditRunAtDispatch,
+  finishAuditRun,
+  getAuditRunByThread,
+} from "@terragon/shared/model/audit-findings";
 import type { ThreadSourceMetadata } from "@terragon/shared";
 import {
   ORG_DEFAULT_REPO_SENTINEL,
@@ -199,5 +208,188 @@ describe("drainSelfHeal", () => {
     expect(result.cancelled).toEqual([]);
     expect(result.cancelFailed).toEqual([a]);
     expect(result.killSwitchSet).toBe(true);
+  });
+
+  describe("terminal write after a successful cancel", () => {
+    const REPO = "acme/widgets";
+
+    async function makeAuditThread(chatMode = false): Promise<string> {
+      const threadId = chatMode
+        ? (
+            await createTestThread({
+              db,
+              userId,
+              enableThreadChatCreation: true,
+            })
+          ).threadId
+        : await makeThread(AUDIT_STAMP);
+      if (chatMode) {
+        await db
+          .update(threadTable)
+          .set({
+            organizationId: orgId,
+            sourceMetadata: AUDIT_STAMP,
+            version: 1,
+            status: "working",
+          })
+          .where(eq(threadTable.id, threadId));
+      }
+      await db
+        .update(threadChatTable)
+        .set({ status: "working" })
+        .where(eq(threadChatTable.threadId, threadId));
+      await createAuditRunAtDispatch({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+        threadId,
+        audit: "security-audit",
+      });
+      return threadId;
+    }
+
+    async function threadState(threadId: string) {
+      const [t] = await db
+        .select({
+          status: threadTable.status,
+          terminalCause: threadTable.terminalCause,
+        })
+        .from(threadTable)
+        .where(eq(threadTable.id, threadId));
+      const chats = await db
+        .select({
+          status: threadChatTable.status,
+          terminalCause: threadChatTable.terminalCause,
+        })
+        .from(threadChatTable)
+        .where(eq(threadChatTable.threadId, threadId));
+      return { thread: t, chats };
+    }
+
+    function drain(deps: DrainDeps) {
+      return drainSelfHeal({
+        db,
+        organizationId: orgId,
+        actorUserId: userId,
+        deps,
+      });
+    }
+
+    it("marks the thread terminal on both tables and finishes the audit run done/killed", async () => {
+      const a = await makeAuditThread(true);
+      const { deps } = makeDeps({
+        [a]: [{ externalId: "run-a", status: "RUNNING" }],
+      });
+      const result = await drain(deps);
+      expect(result.cancelled).toEqual([a]);
+
+      const state = await threadState(a);
+      expect(state.thread?.status).toBe("complete");
+      expect(state.thread?.terminalCause).toBe("user-cancelled");
+      expect(state.chats.length).toBeGreaterThan(0);
+      for (const chat of state.chats) {
+        expect(chat.status).toBe("complete");
+        expect(chat.terminalCause).toBe("user-cancelled");
+      }
+      const run = await getAuditRunByThread({
+        db,
+        organizationId: orgId,
+        threadId: a,
+      });
+      expect(run?.status).toBe("done");
+      expect(run?.outcome).toBe("killed");
+      expect(run?.finishedAt).not.toBeNull();
+    });
+
+    it("leaves an audit run that is already done unchanged", async () => {
+      const a = await makeAuditThread();
+      const claimed = await claimAuditRun({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+        threadId: a,
+        audit: "security-audit",
+      });
+      await finishAuditRun({
+        db,
+        organizationId: orgId,
+        id: claimed?.id ?? "",
+        status: "done",
+        outcome: "published",
+        now: new Date("2026-10-04T10:00:00.000Z"),
+      });
+      const { deps } = makeDeps({
+        [a]: [{ externalId: "run-a", status: "RUNNING" }],
+      });
+      await drain(deps);
+      const run = await getAuditRunByThread({
+        db,
+        organizationId: orgId,
+        threadId: a,
+      });
+      expect(run?.status).toBe("done");
+      expect(run?.outcome).toBe("published");
+      expect(run?.finishedAt?.toISOString()).toBe("2026-10-04T10:00:00.000Z");
+    });
+
+    it("leaves thread and audit run untouched when the cancel fails", async () => {
+      const a = await makeAuditThread();
+      const { deps, cancel } = makeDeps({
+        [a]: [{ externalId: "run-a", status: "RUNNING" }],
+      });
+      cancel.mockRejectedValueOnce(new Error("Hatchet cancel failed: 500"));
+      const result = await drain(deps);
+      expect(result.cancelFailed).toEqual([a]);
+      const state = await threadState(a);
+      expect(state.thread?.status).toBe("working");
+      expect(state.chats.every((c) => c.status === "working")).toBe(true);
+      const run = await getAuditRunByThread({
+        db,
+        organizationId: orgId,
+        threadId: a,
+      });
+      expect(run?.status).toBe("dispatched");
+      expect(run?.outcome).toBeNull();
+    });
+
+    it("leaves thread and audit run untouched when the lookup fails", async () => {
+      const a = await makeAuditThread();
+      const { deps } = makeDeps({ [a]: new Error("502") });
+      const result = await drain(deps);
+      expect(result.lookupFailed).toEqual([a]);
+      expect((await threadState(a)).thread?.status).toBe("working");
+      const run = await getAuditRunByThread({
+        db,
+        organizationId: orgId,
+        threadId: a,
+      });
+      expect(run?.status).toBe("dispatched");
+    });
+
+    it("is idempotent: a second Drain changes nothing and does not throw", async () => {
+      const a = await makeAuditThread();
+      const { deps } = makeDeps({
+        [a]: [{ externalId: "run-a", status: "RUNNING" }],
+      });
+      await drain(deps);
+      const before = await getAuditRunByThread({
+        db,
+        organizationId: orgId,
+        threadId: a,
+      });
+      const second = await drain(deps);
+      expect(second.nothingInFlight).toBe(true);
+      const after = await getAuditRunByThread({
+        db,
+        organizationId: orgId,
+        threadId: a,
+      });
+      expect(after?.status).toBe("done");
+      expect(after?.outcome).toBe("killed");
+      expect(after?.finishedAt?.toISOString()).toBe(
+        before?.finishedAt?.toISOString(),
+      );
+      expect((await threadState(a)).thread?.status).toBe("complete");
+    });
   });
 });
