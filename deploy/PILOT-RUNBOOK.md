@@ -681,3 +681,236 @@ checking through sudo.
 - Phase 5 adds an explicit
   `--disallowedTools Write Edit NotebookEdit WebFetch WebSearch` for the
   orchestrated lane, because a deny rule beats a skill's `allowed-tools`.
+
+## Task-run batteries and the Somnio CLI (phase 7)
+
+**What it is.** The `task_batteries` setting (Settings → Review → **Task agent
+packs**; a repo override and the org default on the `'*'` row; null = inherit;
+none = today) gives manual, scheduled and mention **task** runs the selected
+battery packs in their per-run HOME. Review runs never take task packs.
+
+- Task runs get the packs linked through the same verified-install fences as
+  orchestrated reviews, but **no hooks-off `settings.json`**: a repo's own
+  hooks keep today's semantics in the task lane.
+- The worker logs exactly one batteries line per run. A task run that carried
+  packs logs `batteries: lane=task packs=<ids|none> manifest=<12hex>` (or
+  `batteries: unavailable lane=task reason=<r>`). A mention on a PR logs
+  `lane=pr`. Every other run keeps today's `batteries: mode=…` line, and
+  unconfigured repos are byte-identical in HOME and log.
+- An invalid stored value never fails a dispatch: www logs
+  `[hatchet] task agent: invalid stored taskBatteries — dispatching without packs`
+  and the run goes without packs.
+
+**Read-only GitHub token (DORA auth = Option 3; ADR-004 amendment 2026-10-04).**
+A pack that declares `requires: ["github-read-token"]` in `batteries.json`
+(today only `somnio-skills`) makes www mint a **read-only** (contents,
+metadata, pull_requests, issues: read), **single-repo**, ≤1h GitHub App
+installation token for that task run. Selecting the pack is the opt-in; there
+is no other toggle.
+
+- The agent gets it as `GITHUB_TOKEN`, while `GH_TOKEN` stays the per-run
+  broker bearer. gh prefers `GH_TOKEN`, so gh and git stay brokered.
+- It is never minted for review runs, and the worker refuses a forged one on
+  the review lane.
+- Why: the vendored `dora_metrics.py` hard-codes `https://api.github.com` and
+  reads `GITHUB_TOKEN`, so the broker bearer gets a 401.
+- **Prerequisite:** the GitHub App installation on the org must grant those
+  four READ permissions. Otherwise the mint fails, the run proceeds without the
+  token, www logs `[hatchet] task agent: read token mint failed — dispatching without it`,
+  and DORA 401s.
+- The worker refuses an expired token (`task agent: read token expired before start`)
+  and logs `task agent: read token required but not delivered` when a
+  requiring pack was seeded but no token arrived. The applied case logs
+  `task agent: github read token → GITHUB_TOKEN (read-only, single repo)`. The
+  token value is never logged.
+- A per-repo egress allowlist must include `api.github.com`, else DORA fails
+  with a network error (not a 401).
+
+**What is installed** (by `install-batteries.sh`, as root):
+
+- The `somnio-skills` pack (`skills/dora-metrics`, `skills/react-health-audit`,
+  `skills/security-audit` + LICENSE) at
+  `/usr/local/lib/automata-batteries/somnio-skills@<sha>/`.
+- A **build-only** Dart SDK at `/usr/local/lib/automata-batteries/dart-sdk@3.13.5/`
+  (top dir 0700, sha256-checked before extraction, extracted with
+  `python3 -m zipfile`). There is no `/usr/local/bin/dart`: agents never need
+  Dart, and a writable or reachable SDK would be a second toolchain on PATH.
+- The somnio CLI, compiled ahead of time from the pinned commit with OUR
+  committed `pubspec.lock` (`pub get --enforce-lockfile`, then `dart compile exe`).
+  It is installed root-owned under `somnio-cli@<sha>/`, behind a
+  `/usr/local/bin/somnio` wrapper that exports `SOMNIO_ROOT` and a root-owned
+  `PUB_CACHE`, so `somnio update` fails closed. We do not use
+  `dart pub global activate`: its dependency closure floats and its tree would
+  be writable by whoever activates it.
+- The first install downloads about 240 MB (the SDK zip) and 62 pub archives
+  as root, so it needs outbound github.com, storage.googleapis.com and pub.dev.
+
+**Production rollout (operator; Phase 7 is not done until step 10 is recorded).**
+Never run two worktrees' suites at once on the laptop, caffeinate the pilot
+session, and restart the worker only when idle.
+
+1. Prod schema push FIRST: `pnpm -C packages/shared drizzle-kit-push-prod` with
+   the prod DATABASE_URL supplied out of band (write-only Worker secret).
+   - Expect exactly one statement:
+     `ALTER TABLE "repo_review_settings" ADD COLUMN "task_batteries" text[]`.
+     Abort on any drop, rename or other change.
+   - Then `DATABASE_URL=… pnpm exec tsx deploy/assert-schema-ready.ts` must
+     print ok for task_batteries and exit 0.
+2. Merge the single PR with CI green (check = tsc + lint + format-check, plus
+   worker-e2e). The branch has no upstream: push with an explicit refspec, never
+   a bare `git push` (push.default=upstream).
+3. Box preflight, as root on the execution box:
+   - No run in flight:
+     `ls -d /sys/fs/cgroup/system.slice/automata-worker.service/run-* 2>/dev/null | wc -l` = 0.
+   - Record `systemctl show -p NRestarts --value automata-worker.service`.
+   - Confirm `sudo -u automata-agent python3 -c 'import requests'` (python3-requests
+     is a box prerequisite of `dora_metrics.py`).
+   - GitHub App prerequisite: the App's installation on the target org grants
+     contents, metadata, pull_requests and issues READ (check the App settings /
+     installation permissions page). Otherwise the read-token mint fails and DORA
+     401s.
+4. Checkout fast-forward as the service user:
+   `runuser -u automata -- git -C /opt/automata-platform -c safe.directory=/opt/automata-platform fetch origin`,
+   then `… merge --ff-only origin/main`. `H=$(git … rev-parse HEAD)` must equal
+   `git ls-remote https://github.com/be-automata/automata refs/heads/main`.
+   MANIFEST-DRIFT WINDOW OPENS HERE: the running worker (#240, 846c598)
+   recomputes the manifest hash from this checkout, so from this ff until step 5
+   writes the new manifest.sha256, orchestrated reviews log
+   `batteries: unavailable … reason=manifest-drift` and run without packs (and
+   from step 5 until step 6 the old worker's validator rejects the new `tools`
+   key → `manifest-invalid`, same effect). Classic reviews and task runs without
+   the setting are unaffected. Run step 5 immediately after step 4 and step 6
+   right after step 5.
+5. Installer as root from a root-owned copy of the verified commit:
+   - `git … cat-file blob "$H:packages/worker/deploy/linux/install-batteries.sh" > /root/install-batteries.sh`
+   - `AUTOMATA_REPO=/opt/automata-platform bash /root/install-batteries.sh 2>&1 | tee /root/install-batteries.$(date -u +%Y%m%dT%H%M%SZ).log`
+   - Require: `${PIPESTATUS[0]}` = 0, `SOURCE checkout` = $H,
+     `INSTALLED tool dart-sdk 3.13.5`, `INSTALLED tool somnio-cli 3.1.1`,
+     `INSTALLED pack somnio-skills aa53f071…`,
+     `VERIFIED agent tool somnio-cli (somnio v3.1.1; smoke ok)`,
+     `VERIFIED agent tool dart-sdk (build-only, not traversable)`, every other
+     VERIFIED line, and the last line `RESULT: PASS`.
+   - Re-run once: every item SKIPPED. Record
+     `cat /usr/local/lib/automata-batteries/manifest.sha256`.
+   - A `FAIL verify …` is a script finding: keep the log, leave
+     manifest.sha256.invalid, fix in a follow-up PR.
+   - Adding `requires` to the somnio-skills entry changes its pack stamp, so a
+     box that already had the pack re-stages it once. That is expected.
+6. Worker restart (idle only):
+   - Re-check step 3's idle test; then, unpiped,
+     `cd /opt/automata-platform && CI=1 pnpm install --frozen-lockfile; echo "exit=$?"`.
+     Require `exit=0`, and that `/opt/automata-platform/node_modules/.modules.yaml`
+     exists and is newer than the ff (`stat`); else stop.
+   - This runs the checkout's lifecycle scripts as root: the established worker
+     deploy recipe (05-04), on the commit verified in step 4.
+   - Then restart automata-worker.service. Confirm it booted (journal) and that
+     NRestarts changed only by this restart.
+7. www deploy (usual recipe; the build needs the NEXT_PUBLIC values +
+   DATABASE_URL + placeholders). www needs step 1 first.
+8. Set the setting for the target repo: Settings → Review → Task agent packs →
+   Somnio skills, or `PUT /api/review-settings/<owner>/<repo>` with
+   `{"taskBatteries":["somnio-skills"]}` as an org admin. Confirm the
+   automation's thread has an organizationId; otherwise no taskAgent is shipped.
+9. Re-run the target automation UNCHANGED (gstack browser with the operator's
+   imported cookies). Do not edit the prompt first.
+10. Evidence checklist (attach to the PR and 07-08-SUMMARY):
+    - `bash packages/worker/deploy/linux/task-batteries-acceptance.sh box --since "<step 9 start>" --repo <owner/name>`
+      → `ACCEPTANCE: PASS`, including `batteries: lane=task packs=somnio-skills manifest=<12hex>`
+      with the prefix = manifest.sha256.
+    - Transcript: `somnio --version` → `somnio v3.1.1`; Skill invocations of
+      dora-metrics, react-health-audit and security-audit; thread status complete.
+    - Egress: if the target repo has a per-repo egress allowlist, it must include
+      api.github.com, otherwise DORA fails with a network error (not a 401).
+      Re-check before the run.
+    - DORA computes from GitHub in the UNCHANGED run: Deployment Frequency and
+      Lead Time present in the transcript or final message, and NO
+      "401 Unauthorized" from dora_metrics.py. The box journal shows
+      `task agent: github read token → GITHUB_TOKEN` for that thread, and www
+      shows no `read token mint failed` line.
+    - Reports produced = each report's CONTENT (DORA, react-health, security)
+      quoted or summarised in the transcript or the final message. A branch is
+      NOT a destination: reports/ is gitignored in the target repo, and the
+      clone is deleted at run end.
+    - somnio exit codes: record verbatim, NEVER as pass/fail evidence (v3.1.1
+      `somnio run rh` returned 70 after "Audit completed successfully 13/13").
+    - Review runs unaffected: the next PR review on any repo logs
+      `run start: lane=review` + `batteries: mode=…`, posts exactly one review,
+      and no `lane=task` line appears for it.
+    - Record what failed or degraded, verbatim. Candidates: the read-only dora
+      config, the report destination, model tier words. A DORA 401 now means the
+      token was not delivered: check the two log lines above. Propose any prompt
+      change to the operator with that evidence; never apply it silently.
+      Rollback if needed: set Task agent packs back to Inherit/none.
+
+**Acceptance script.** `task-batteries-acceptance.sh` is read-only on the box
+and safe with runs in flight: no restart, no install, no repository write. Every
+git call is hardened against the worker-writable checkout. Its last line is
+`ACCEPTANCE: PASS` or `ACCEPTANCE: FAIL (<n>)`. On a developer checkout,
+`bash packages/worker/deploy/linux/task-batteries-acceptance.sh local [--dry-run]`
+runs the SC1-SC3 gates.
+
+**Dry run for developers:**
+`/bin/bash --noprofile --norc packages/worker/deploy/linux/batteries-dry-run.sh`
+(network: github.com, storage.googleapis.com, pub.dev; never as root; commit
+first, because it reads HEAD). The last line is `DRY-RUN-PROOF-OK`.
+
+- On macOS arm64 the script pins the macos-arm64 3.13.5 SDK zip
+  (sha256 cross-checked against the publisher's `.sha256sum`). The installer
+  accepts that override only in a non-root dry run that names the host's own
+  platform; as root it requires Linux x86_64 + linux-x64.
+- The verified SDK zip is cached across dry runs (`BATTERIES_DOWNLOAD_CACHE`),
+  and its sha256 is re-checked before every extraction.
+- Linux x86_64 dev hosts use the exact production manifest.
+
+**Bumping pins.**
+
+- **Dart SDK:** the `url` comes from the dart-archive template for the new
+  version/linux-x64, and the `sha256` from the publisher's `.sha256sum`
+  (re-hash locally).
+- **somnio commit:**
+  1. Set the new `sha` and recompute every subpath `gitId` with
+     `git rev-parse <sha>:<path>`.
+  2. Regenerate and vet the lock as 07-01 Task 1 did: SDK-verified,
+     hosted-only, every runtime row checked, no `hook/` dirs, compile proof.
+  3. Update `lockSha256` and the deploy-assets lock table.
+  4. Run the dry run, then the box steps above.
+- **Output-shaping change:** bump `TOOLS_OUTPUT_VERSION` whenever
+  `stage_dart_sdk`, `stage_dart_aot` or `write_wrapper` changes what lands on
+  disk (RECORDED_TOOLS_OUTPUT pins it).
+- **REMOVING a pack id** (from `batteries.json` and `BATTERY_PACK_IDS`): first
+  clear every task_batteries / review_batteries value that references it, on
+  every org and repo row (UI Restore default, or the routes). THEN ship the
+  removal. Otherwise those task runs dispatch without packs (logged) until
+  cleared.
+
+**Rollback.**
+
+- Set Task agent packs to Inherit/none: the worker seeds nothing, and no read
+  token is minted.
+- Code rollback: revert, then redeploy the worker and www.
+- The installed tools may stay, because nothing reads them without the setting.
+  Remove `/usr/local/lib/automata-batteries/{dart-sdk@*,somnio-cli@*,pub-cache,tools}`
+  and `/usr/local/bin/somnio` by hand only with no run in flight.
+
+**Known caveats.**
+
+- dora's `config/projects.json` is read-only in the pack: copy it into the
+  clone before editing.
+- Report evidence is each report's CONTENT (DORA, react-health, security),
+  quoted or summarised in the transcript or final message. A branch is NOT a
+  destination: reports/ is gitignored in the target repo, and the clone is
+  deleted at run end.
+- somnio exit codes are recorded verbatim but are never pass/fail evidence
+  (v3.1.1 `somnio run rh` returned 70 after "Audit completed successfully
+  13/13").
+- Agents should not run:
+  - `somnio run`: it spawns nested claude processes, double-bills, and has
+    30-minute steps;
+  - `somnio skills install --project` in the clone: about 60 untracked files
+    the agent may commit;
+  - `somnio update`: it fails closed by design.
+- Somnio skills and Somnio review both provide `security-audit`. If both are
+  selected, the first in list order wins.
+- Vendored agent files keep their `model: cheap|mid|frontier` tier words.
+- python3-requests is a box prerequisite. The acceptance script checks it as
+  the agent uid.
