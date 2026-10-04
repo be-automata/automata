@@ -1044,6 +1044,9 @@ describeBashScriptHygiene("packages/worker/deploy/linux/batteries-dry-run.sh");
 describeBashScriptHygiene(
   "packages/worker/deploy/linux/task-batteries-acceptance.sh",
 );
+describeBashScriptHygiene(
+  "packages/worker/deploy/linux/orchestrated-review-acceptance.sh",
+);
 
 /**
  * What decides the bytes install-batteries.sh writes into a pack dir, paired
