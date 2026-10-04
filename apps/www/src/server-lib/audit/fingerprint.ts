@@ -37,14 +37,42 @@ export function normalizeSubject(
   raw: string,
   subjectKind: "path" | "npm",
 ): string | null {
-  const trimmed = raw.trim();
+  const trimmed = stripMarkdownNoise(raw);
   if (trimmed === "" || trimmed.length > MAX_SUBJECT_LENGTH) return null;
   return subjectKind === "npm"
     ? normalizeNpmSubject(trimmed)
     : normalizePathSubject(trimmed);
 }
 
+/**
+ * The agent sometimes wraps a subject in Markdown code spans or quotes, e.g.
+ * npm:`@grpc/grpc-js`. Strip that decoration so the identity (and the
+ * downstream package-name check) never depends on formatting. Clean input is
+ * returned unchanged, so existing fingerprints do not move.
+ */
+function stripMarkdownNoise(raw: string): string {
+  let value = raw.replace(/`/g, "").replace(/\s+/g, " ").trim();
+  const unwrap = (input: string): string => {
+    let out = input;
+    while (
+      out.length >= 2 &&
+      (out[0] === '"' || out[0] === "'") &&
+      out[out.length - 1] === out[0]
+    ) {
+      out = out.slice(1, -1).trim();
+    }
+    return out;
+  };
+  value = unwrap(value);
+  if (/^npm:/i.test(value)) {
+    value = `${value.slice(0, 4)}${unwrap(value.slice(4).trim())}`;
+  }
+  return value;
+}
+
 function normalizePathSubject(value: string): string | null {
+  // Shell substitution and control characters never belong in a repo path.
+  if (/\$[({]/.test(value) || /[\u0000-\u001f\u007f]/.test(value)) return null;
   let path = value.replace(/\\/g, "/");
   path = path.replace(/#L\d+(?:-L?\d+)?$/i, "");
   path = path.replace(/:\d+(?::\d+)?$/, "");

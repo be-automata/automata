@@ -73,4 +73,38 @@ describe("normalizeSubject", () => {
   });
 });
 
+describe("normalizeSubject markdown decoration", () => {
+  it("treats a backticked npm subject as the clean one (same fingerprint)", () => {
+    const dirty = normalizeSubject("npm:`@grpc/grpc-js`", "npm");
+    const clean = normalizeSubject("npm:@grpc/grpc-js", "npm");
+    expect(dirty).toBe("npm:@grpc/grpc-js");
+    expect(dirty).toBe(clean);
+    expect(fingerprintFinding({ ...BASE, subject: dirty! })).toBe(
+      fingerprintFinding({ ...BASE, subject: clean! }),
+    );
+  });
+
+  it("strips backticks and quotes around paths and npm names", () => {
+    expect(normalizeSubject("`.github/workflows/ci.yml`", "path")).toBe(
+      ".github/workflows/ci.yml",
+    );
+    expect(normalizeSubject('"src/a.ts"', "path")).toBe("src/a.ts");
+    expect(normalizeSubject("'src/a.ts'", "path")).toBe("src/a.ts");
+    expect(normalizeSubject('npm:"lodash"', "npm")).toBe("npm:lodash");
+    expect(normalizeSubject("  `lodash`  ", "npm")).toBe("npm:lodash");
+    expect(normalizeSubject("src/  a.ts", "path")).toBe("src/ a.ts");
+  });
+
+  it.each([
+    ["path", "`../../etc/passwd`"],
+    ["path", "src/$(rm -rf x).ts"],
+    ["path", "src/${HOME}/a.ts"],
+    ["npm", "npm:`$(curl evil)`"],
+    ["npm", "npm:foo;rm"],
+    ["npm", "npm:../x"],
+  ] as const)("still rejects malicious %s subject %j", (kind, raw) => {
+    expect(normalizeSubject(raw, kind)).toBeNull();
+  });
+});
+
 const GOLDEN = "b208fa3e0da9a061";
