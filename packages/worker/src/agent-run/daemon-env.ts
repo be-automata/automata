@@ -209,6 +209,33 @@ export interface BuildDaemonEnvOpts {
   workdir?: string | null;
 }
 
+/**
+ * The proxy subset of the run env: HTTP(S)_PROXY (both cases), a loopback
+ * NO_PROXY and node's env-proxy switch. Shared by the daemon env and the
+ * self-heal check env so both route through the same per-run egress proxy.
+ * Returns `base` plus the proxy keys (a copy; `base` is not mutated).
+ */
+export function buildRunProxyEnv(
+  egressProxyUrl: string,
+  base: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  return {
+    ...base,
+    HTTPS_PROXY: egressProxyUrl,
+    HTTP_PROXY: egressProxyUrl,
+    https_proxy: egressProxyUrl,
+    http_proxy: egressProxyUrl,
+    NO_PROXY: "127.0.0.1,localhost",
+    no_proxy: "127.0.0.1,localhost",
+    // Belt-and-braces for the AGENT CLI child (a separate node process whose
+    // HTTP client we do not own): node's built-in env proxy support, which
+    // exists only on node >=22.21.0 / >=24.0.0. The DAEMON does not depend on
+    // it (packages/daemon/src/proxy-fetch.ts proxies explicitly), so its
+    // absence on an older runtime is inert.
+    NODE_USE_ENV_PROXY: "1",
+  };
+}
+
 export function buildDaemonEnv({
   baseEnv,
   anthropicApiKey,
@@ -278,18 +305,7 @@ export function buildDaemonEnv({
   // all live there. Honesty: env-var proxying is cooperative — the PF anchor
   // (deploy/egress-pf.conf) is the bypass backstop, not this injection.
   if (egressProxyUrl) {
-    env.HTTPS_PROXY = egressProxyUrl;
-    env.HTTP_PROXY = egressProxyUrl;
-    env.https_proxy = egressProxyUrl;
-    env.http_proxy = egressProxyUrl;
-    env.NO_PROXY = "127.0.0.1,localhost";
-    env.no_proxy = "127.0.0.1,localhost";
-    // Belt-and-braces for the AGENT CLI child (a separate node process whose
-    // HTTP client we do not own): node's built-in env proxy support, which
-    // exists only on node >=22.21.0 / >=24.0.0. The DAEMON does not depend on
-    // it — packages/daemon/src/proxy-fetch.ts proxies explicitly — so its
-    // absence on an older runtime is inert rather than a silent callback loss.
-    env.NODE_USE_ENV_PROXY = "1";
+    Object.assign(env, buildRunProxyEnv(egressProxyUrl, {}));
     // #108 F5: the DAEMON's own control-plane callback moves onto the proxy
     // ONLY in agent-uid mode, where the PF anchor makes the direct route
     // unusable. A run that merely carries an egress policy (#66 slice 2, live

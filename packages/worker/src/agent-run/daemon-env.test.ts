@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDaemonEnv, SAFE_ENV_KEYS } from "./daemon-env";
+import { buildDaemonEnv, buildRunProxyEnv, SAFE_ENV_KEYS } from "./daemon-env";
 
 const INSTALL_TOKEN = "ghs_installationtoken123";
 
@@ -576,5 +576,52 @@ describe("#108: git must not refuse the agent's own checkout", () => {
   it("adds nothing in default mode, where owner and runner are one uid", () => {
     const env = buildDaemonEnv({ ...base, agentUser: "" });
     expect(gitConfigOf(env)).not.toHaveProperty("safe.directory");
+  });
+});
+
+describe("buildRunProxyEnv (phase 8 shared proxy subset)", () => {
+  it("returns exactly the proxy subset for an empty base", () => {
+    expect(buildRunProxyEnv("http://127.0.0.1:9999", {})).toEqual({
+      HTTPS_PROXY: "http://127.0.0.1:9999",
+      HTTP_PROXY: "http://127.0.0.1:9999",
+      https_proxy: "http://127.0.0.1:9999",
+      http_proxy: "http://127.0.0.1:9999",
+      NO_PROXY: "127.0.0.1,localhost",
+      no_proxy: "127.0.0.1,localhost",
+      NODE_USE_ENV_PROXY: "1",
+    });
+  });
+
+  it("does not mutate base and keeps its keys", () => {
+    const base = { PATH: "/bin" };
+    const out = buildRunProxyEnv("http://127.0.0.1:1", base);
+    expect(base).toEqual({ PATH: "/bin" });
+    expect(out.PATH).toBe("/bin");
+  });
+
+  it("buildDaemonEnv with a proxy url carries the same subset", () => {
+    const env = buildDaemonEnv({
+      baseEnv: { PATH: "/bin" },
+      anthropicApiKey: "k",
+      claudeBinDir: "",
+      installationToken: "t",
+      ghConfigDir: "/g",
+      botLogin: "b",
+      egressProxyUrl: "http://127.0.0.1:4242",
+    });
+    const subset = buildRunProxyEnv("http://127.0.0.1:4242", {});
+    for (const [k, v] of Object.entries(subset)) expect(env[k]).toBe(v);
+  });
+
+  it("a run input carrying a selfHeal check token never reaches the daemon env", () => {
+    const env = buildDaemonEnv({
+      baseEnv: { PATH: "/bin", CHECK_TOKEN: "TOKEN_SENTINEL" },
+      anthropicApiKey: "k",
+      claudeBinDir: "",
+      installationToken: "t",
+      ghConfigDir: "/g",
+      botLogin: "b",
+    });
+    expect(JSON.stringify(env)).not.toContain("TOKEN_SENTINEL");
   });
 });

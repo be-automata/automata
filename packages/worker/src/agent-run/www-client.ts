@@ -684,3 +684,97 @@ export async function pollUntilTerminal(
     await sleep(pollIntervalMs);
   }
 }
+
+export type SelfHealAuditReportResult =
+  | "recorded"
+  | "duplicate"
+  | "sealed"
+  | "error";
+
+export interface PostSelfHealAuditChecksArgs {
+  baseUrl: string;
+  /** SECRET, worker-only. Sent in x-self-heal-check-token; never logged. */
+  checkToken: string;
+  threadId: string;
+  results: { fingerprint: string; outcome: "pass" | "fail" | "error" }[];
+  fetchImpl?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const SELF_HEAL_REPORT_TIMEOUT_MS = 10_000;
+const SELF_HEAL_REPORT_BACKOFF_MS = [2_000, 4_000, 8_000] as const;
+
+/**
+ * POST the sealing self-heal check report (FORGE-01). Authenticated by the
+ * per-run check token (NOT the daemon token). Up to 3 attempts with 2/4/8 s
+ * backoff reuse the same token and body (the endpoint is first-write-wins, so
+ * a retry is idempotent). 401/403/404/409 are final. Never throws; logs
+ * statuses only.
+ */
+export async function postSelfHealAuditChecks(
+  args: PostSelfHealAuditChecksArgs,
+): Promise<SelfHealAuditReportResult> {
+  const doFetch = args.fetchImpl ?? fetch;
+  const sleep =
+    args.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const url = endpoint(args.baseUrl, "/api/self-heal/audit-checks");
+  const body = JSON.stringify({
+    threadId: args.threadId,
+    results: args.results,
+  });
+  for (
+    let attempt = 0;
+    attempt < SELF_HEAL_REPORT_BACKOFF_MS.length;
+    attempt++
+  ) {
+    if (attempt > 0) {
+      await sleep(SELF_HEAL_REPORT_BACKOFF_MS[attempt - 1] ?? 2_000);
+    }
+    let res: Response;
+    try {
+      res = await doFetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-self-heal-check-token": args.checkToken,
+        },
+        body,
+        signal: AbortSignal.timeout(SELF_HEAL_REPORT_TIMEOUT_MS),
+      });
+    } catch (error) {
+      console.error("[agent-run] postSelfHealAuditChecks request failed", {
+        threadId: args.threadId,
+        attempt: attempt + 1,
+        error: error instanceof Error ? error.name : "unknown",
+      });
+      continue;
+    }
+    if (res.ok) {
+      const json = (await res.json().catch(() => ({}))) as {
+        recorded?: boolean;
+      };
+      return json.recorded === false ? "duplicate" : "recorded";
+    }
+    if (res.status === 409) return "sealed";
+    if (res.status === 404) {
+      console.warn(
+        "[agent-run] postSelfHealAuditChecks: endpoint absent (older control plane); continuing",
+        { threadId: args.threadId },
+      );
+      return "error";
+    }
+    if (res.status === 401 || res.status === 403) {
+      console.error("[agent-run] postSelfHealAuditChecks rejected", {
+        threadId: args.threadId,
+        status: res.status,
+      });
+      return "error";
+    }
+    console.error("[agent-run] postSelfHealAuditChecks non-2xx", {
+      threadId: args.threadId,
+      attempt: attempt + 1,
+      status: res.status,
+    });
+  }
+  return "error";
+}
