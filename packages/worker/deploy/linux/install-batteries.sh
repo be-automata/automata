@@ -67,6 +67,17 @@ umask 022
 # - The SDK is build-only: a dart on the agent's PATH would resolve packages
 #   against the root-owned cache and fail, so no wrapper is written for it and
 #   its top dir is not traversable by the agent.
+# - A dart-aot CLI is COMPILED (`dart compile exe`) from tree-id-verified
+#   sources of its pinned commit plus OUR committed pubspec.lock, read as a HEAD
+#   blob and checked against the manifest's lockSha256. Not activated: `pub
+#   global activate --source git` re-resolves the hosted dependencies at install
+#   time (the closure floats) and path activation needs a writable tree at run
+#   time. `pub get --enforce-lockfile` checks every package's content hash
+#   against the lock. No resolved package may carry a `hook/` dir, because a
+#   build hook would execute as root. The build runs under `env -i` so
+#   PUB_HOSTED_URL, proxies or HOME cannot redirect it, with a root-owned build
+#   PUB_CACHE. The wrapper exports that same PUB_CACHE, so a CLI self-update
+#   fails closed instead of writing anywhere.
 # - Production installs tools only on Linux x86_64 from the linux-x64 URL. A
 #   non-root dry run may instead name its own host's platform (macOS developers),
 #   and only a dry run may use BATTERIES_DOWNLOAD_CACHE.
@@ -933,6 +944,38 @@ pack_stamp_hash() {
   } | sha256sum | awk '{print $1}'
 }
 
+# fetch_pinned <id> <repo> <sha> <blobless|full>: the one pinned commit into a
+# fresh root-owned scratch repo (FETCH_REPO). Sets STEP_ERROR and returns 1 on
+# failure.
+fetch_pinned() {
+  local id="$1" repo="$2" sha="$3" mode="$4"
+  FETCH_REPO="$WORK/fetch-$id"
+  log "fetching $id @ $sha"
+  if ! { git init -q "$FETCH_REPO" && git_fetch remote add origin "$repo"; }; then
+    STEP_ERROR="cannot create a scratch repo for $id"
+    return 1
+  fi
+  if [ "$mode" = "blobless" ]; then
+    # A partial fetch of the one pinned commit: trees now, each blob on its
+    # first cat-file. The named remote is where those lazy blob fetches go.
+    git_fetch -c protocol.version=2 fetch -q --filter=blob:none --depth 1 origin "$sha" || {
+      STEP_ERROR="fetch of $sha from $repo failed"
+      return 1
+    }
+  else
+    # Every object at once: a tool builds a whole tree, and one lazy fetch per
+    # blob would be hundreds of round trips.
+    git_fetch -c protocol.version=2 fetch -q --depth 1 origin "$sha" || {
+      STEP_ERROR="fetch of $sha from $repo failed"
+      return 1
+    }
+  fi
+  if [ "$(git_fetch rev-parse FETCH_HEAD)" != "$sha" ]; then
+    STEP_ERROR="fetched commit is not the pinned sha"
+    return 1
+  fi
+}
+
 # stage_pack <index> <id> <repo> <sha> <stage> <stamp hash>
 # Fetches, extracts, overlays, strips, verifies and stamps the pack in <stage>
 # with root ownership and read-only modes. Sets STEP_ERROR and returns 1 on any
@@ -947,20 +990,7 @@ stage_pack() {
     fi
     g=git_repo
   else
-    FETCH_REPO="$WORK/fetch-$id"
-    log "fetching $id @ $sha"
-    # A partial fetch of the one pinned commit: trees now, each blob on its
-    # first cat-file. The named remote is where those lazy blob fetches go.
-    if ! { git init -q "$FETCH_REPO" &&
-      git_fetch remote add origin "$repo" &&
-      git_fetch -c protocol.version=2 fetch -q --filter=blob:none --depth 1 origin "$sha"; }; then
-      STEP_ERROR="fetch of $sha from $repo failed"
-      return 1
-    fi
-    if [ "$(git_fetch rev-parse FETCH_HEAD)" != "$sha" ]; then
-      STEP_ERROR="fetched commit is not the pinned sha"
-      return 1
-    fi
+    fetch_pinned "$id" "$repo" "$sha" blobless || return 1
     g=git_fetch
   fi
 
@@ -1039,14 +1069,23 @@ tool_stamp_hash() {
   } | sha256sum | awk '{print $1}'
 }
 
-# tool_at_pin <index> <stamp> <expected hash> <target>: the stamp matches and
-# the published artifact still has the recorded sha256. Reads nothing remote.
+# tool_at_pin <index> <stamp> <expected hash> <target>: the stamp matches, the
+# published artifact still has the recorded sha256 and (dart-aot) the installed
+# wrapper is byte-identical to the template. Reads nothing remote.
 tool_at_pin() {
-  local i="$1" stamp="$2" expected="$3" target="$4" artifact recorded
+  local i="$1" stamp="$2" expected="$3" target="$4" artifact recorded name wrapper check
   [ -f "$stamp" ] && [ -d "$target" ] || return 1
   [ "$(head -n 1 "$stamp")" = "stamp $expected" ] || return 1
   case "$(tool_field "$i" kind)" in
     dart-sdk) artifact="$target/bin/dart" ;;
+    dart-aot)
+      name="$(tool_field "$i" name)"
+      wrapper="$(tool_field "$i" wrapper)"
+      artifact="$target/bin/$wrapper"
+      check="$WORK/wrapper-check.$name"
+      write_wrapper "$(tool_field "$i" rootEnv)" "$(basename "$target")" "$wrapper" "$check" || return 1
+      cmp -s "$check" "$BIN_DIR/$wrapper" || return 1
+      ;;
     *) return 1 ;;
   esac
   recorded="$(sed -n 's/^artifact_sha256 //p' "$stamp")"
@@ -1153,11 +1192,157 @@ PY
   fi
 }
 
+# stage_dart_aot <index> <stage>: <stage>/src/<dest…> from the pinned commit,
+# the committed lock, and <stage>/bin/<wrapper> compiled from them. Sets
+# STEP_ERROR and returns 1 on failure.
+stage_dart_aot() {
+  local i="$1" stage="$2" name repo sha package_dir entrypoint lock_overlay lock_sha256 sdk
+  local sdk_dir wrapper src dest git_id pkg_dir lock build_log status pname root_uri pkg_root
+  name="$(tool_field "$i" name)"
+  repo="$(tool_field "$i" repo)"
+  sha="$(tool_field "$i" sha)"
+  package_dir="$(tool_field "$i" packageDir)"
+  entrypoint="$(tool_field "$i" entrypoint)"
+  lock_overlay="$(tool_field "$i" lockOverlay)"
+  lock_sha256="$(tool_field "$i" lockSha256)"
+  sdk="$(tool_field "$i" sdk)"
+  wrapper="$(tool_field "$i" wrapper)"
+  sdk_dir="$ROOT/$sdk@$(jq -r --arg n "$sdk" '.tools[] | select(.name == $n) | .version' "$MANIFEST")"
+  pkg_dir="$stage/src/$package_dir"
+  lock="$pkg_dir/pubspec.lock"
+  build_log="$WORK/build-$name.log"
+
+  fetch_pinned "$name" "$repo" "$sha" full || return 1
+  # Plumbing only, each subpath tree-id verified. The source tree is a build
+  # input that is never linked into HOME, so the pack scan (forbidden names,
+  # grant keys) does not apply to it: cli/bin is legitimate here.
+  while IFS=$'\t' read -r -u 6 src dest git_id; do
+    extract_object git_fetch "$sha" "$src" "$git_id" "$stage/src/$dest" || return 1
+  done 6< <(jq -r --argjson i "$i" '.tools[$i].subpaths[] | [.src, .dest, .gitId] | @tsv' "$MANIFEST")
+
+  if ! git_repo cat-file blob "$HEAD_SHA:$lock_overlay" >"$lock" 2>/dev/null; then
+    STEP_ERROR="lock overlay $lock_overlay is absent at $HEAD_SHA"
+    return 1
+  fi
+  if [ "$(sha256_of "$lock")" != "$lock_sha256" ]; then
+    STEP_ERROR="lock overlay sha256 mismatch"
+    return 1
+  fi
+
+  if ! { mkdir -p "$ROOT/pub-cache" "$WORK/build-home" "$stage/bin" &&
+    chmod 0700 "$ROOT/pub-cache" &&
+    { [ "$DRY_RUN" -eq 1 ] || chown root:root "$ROOT/pub-cache"; }; }; then
+    STEP_ERROR="cannot prepare the build cache"
+    return 1
+  fi
+  status=0
+  env -i HOME="$WORK/build-home" PATH="$sdk_dir/bin:/usr/bin:/bin" PUB_CACHE="$ROOT/pub-cache" LANG=C \
+    "$sdk_dir/bin/dart" --suppress-analytics pub get --enforce-lockfile --directory "$pkg_dir" \
+    >"$build_log" 2>&1 || status=$?
+  if [ "$status" -ne 0 ]; then
+    log "pub get output (tail):"
+    tail -n 20 "$build_log" >&2
+    STEP_ERROR="pub get --enforce-lockfile failed (exit $status)"
+    return 1
+  fi
+
+  if [ ! -f "$pkg_dir/.dart_tool/package_config.json" ]; then
+    STEP_ERROR="pub get wrote no package_config.json"
+    return 1
+  fi
+  while IFS=$'\t' read -r -u 6 pname root_uri; do
+    case "$root_uri" in
+      *%*)
+        STEP_ERROR="dependency $pname has an encoded root uri"
+        return 1
+        ;;
+      file://*) pkg_root="${root_uri#file://}" ;;
+      /*)
+        STEP_ERROR="dependency $pname has an unexpected root uri"
+        return 1
+        ;;
+      *) pkg_root="$pkg_dir/.dart_tool/$root_uri" ;;
+    esac
+    if [ -e "$pkg_root/hook" ]; then
+      STEP_ERROR="dependency $pname has a build hook"
+      return 1
+    fi
+  done 6< <(jq -r '.packages[] | [.name, .rootUri] | @tsv' "$pkg_dir/.dart_tool/package_config.json")
+
+  status=0
+  env -i HOME="$WORK/build-home" PATH="$sdk_dir/bin:/usr/bin:/bin" PUB_CACHE="$ROOT/pub-cache" LANG=C \
+    "$sdk_dir/bin/dart" --suppress-analytics compile exe "$pkg_dir/$entrypoint" -o "$stage/bin/$wrapper" \
+    >>"$build_log" 2>&1 || status=$?
+  if [ "$status" -ne 0 ]; then
+    log "compile output (tail):"
+    tail -n 20 "$build_log" >&2
+    STEP_ERROR="compile failed (exit $status)"
+    return 1
+  fi
+  rm -rf "$pkg_dir/.dart_tool"
+  if [ "$(sha256_of "$lock")" != "$lock_sha256" ]; then
+    STEP_ERROR="the build rewrote the lock"
+    return 1
+  fi
+  if ! { find "$stage" -type d -exec chmod 0755 {} + &&
+    find "$stage" -type f -exec chmod 0644 {} + &&
+    chmod 0755 "$stage/bin/$wrapper" &&
+    { [ "$DRY_RUN" -eq 1 ] || chown -R root:root "$stage"; }; }; then
+    STEP_ERROR="could not set modes or ownership"
+    return 1
+  fi
+}
+
+# write_wrapper <rootEnv> <tool dir name> <wrapper> [<out>]: the FIXED wrapper
+# text. Only ROOT and shape-checked tokens are interpolated, every path
+# single-quoted. With <out> it only writes the text there (tool_at_pin compares
+# it); without, it installs <bin>/<wrapper> through a temp file and mv -f.
+# shellcheck disable=SC2016 # "$@" is wrapper text, expanded when the wrapper runs
+write_wrapper() {
+  local root_env="$1" dir="$2" wrapper="$3" out="${4:-}" tmp
+  case "$ROOT" in
+    *"'"*)
+      STEP_ERROR="the install root contains a single quote"
+      return 1
+      ;;
+  esac
+  tmp="$out"
+  if [ -z "$out" ]; then
+    mkdir -p "$BIN_DIR" || {
+      STEP_ERROR="cannot create $BIN_DIR"
+      return 1
+    }
+    tmp="$BIN_DIR/.$wrapper.new.$$"
+  fi
+  if ! {
+    printf '#!/bin/sh\n'
+    printf '# Written by install-batteries.sh (batteries tools). Do not edit.\n'
+    printf "%s='%s'\n" "$root_env" "$ROOT/$dir/src"
+    printf "PUB_CACHE='%s'\n" "$ROOT/pub-cache"
+    printf 'export %s PUB_CACHE\n' "$root_env"
+    printf "exec '%s' " "$ROOT/$dir/bin/$wrapper"
+    printf '"$@"\n'
+  } >"$tmp"; then
+    rm -f "$tmp"
+    STEP_ERROR="cannot write the $wrapper wrapper"
+    return 1
+  fi
+  [ -z "$out" ] || return 0
+  if ! { chmod 0755 "$tmp" &&
+    { [ "$DRY_RUN" -eq 1 ] || chown root:root "$tmp"; } &&
+    mv -f "$tmp" "$BIN_DIR/$wrapper"; }; then
+    rm -f "$tmp"
+    STEP_ERROR="cannot install the $wrapper wrapper"
+    return 1
+  fi
+}
+
 # install_tool <index>: SKIPPED at pin, else staged in <root>, published by
 # rename, license copied, stamped last. An aot tool needs its sdk INSTALLED or
 # SKIPPED earlier in this run.
 install_tool() {
-  local i="$1" name kind version sha target stamp expected stage license_member lic_dir artifact
+  local i="$1" name kind version sha target stamp expected stage license_member license_file lic_dir
+  local artifact sdk wrapper
   name="$(tool_field "$i" name)"
   kind="$(tool_field "$i" kind)"
   version="$(tool_field "$i" version)"
@@ -1176,16 +1361,27 @@ install_tool() {
     TOOLS_OK="$TOOLS_OK$name "
     return 0
   fi
-  if [ "$kind" != "dart-sdk" ]; then
-    record "FAIL tool $name: kind $kind is not supported by this installer"
-    return 1
+  if [ "$kind" = "dart-aot" ]; then
+    sdk="$(tool_field "$i" sdk)"
+    case "$TOOLS_OK" in
+      *" $sdk "*) ;;
+      *)
+        record "FAIL tool $name: sdk $sdk is not installed at its pin"
+        return 1
+        ;;
+    esac
   fi
 
   if ! stage="$(mktemp -d "$ROOT/.staging.$name.XXXXXX")"; then
     record "FAIL tool $name: cannot create a staging dir under $ROOT"
     return 1
   fi
-  if ! stage_dart_sdk "$i" "$stage"; then
+  STEP_ERROR=""
+  case "$kind" in
+    dart-sdk) stage_dart_sdk "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-staging failed}" ;;
+    *) stage_dart_aot "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-staging failed}" ;;
+  esac
+  if [ -n "$STEP_ERROR" ]; then
     rm -rf "$stage"
     record "FAIL tool $name: $STEP_ERROR"
     return 1
@@ -1195,12 +1391,22 @@ install_tool() {
     record "FAIL tool $name: could not publish $target"
     return 1
   fi
-  license_member="$(tool_field "$i" licenseMember)"
-  artifact="$target/bin/dart"
+  if [ "$kind" = "dart-sdk" ]; then
+    license_member="$(tool_field "$i" licenseMember)"
+    license_file="$target/${license_member#*/}"
+    artifact="$target/bin/dart"
+  else
+    wrapper="$(tool_field "$i" wrapper)"
+    license_file="$target/src/LICENSE"
+    artifact="$target/bin/$wrapper"
+    if ! write_wrapper "$(tool_field "$i" rootEnv)" "$(basename "$target")" "$wrapper"; then
+      record "FAIL tool $name: $STEP_ERROR"
+      return 1
+    fi
+  fi
   lic_dir="$ROOT/licenses/$name-$version"
   if ! { mkdir -p "$lic_dir" "$ROOT/tools" &&
-    cat "$target/${license_member#*/}" >"$lic_dir/LICENSE" &&
-    chmod 0644 "$lic_dir/LICENSE" &&
+    { [ ! -f "$license_file" ] || { cat "$license_file" >"$lic_dir/LICENSE" && chmod 0644 "$lic_dir/LICENSE"; }; } &&
     printf 'stamp %s\nartifact_sha256 %s\nsource %s\n' "$expected" "$(sha256_of "$artifact")" "$HEAD_SHA" >"$stamp.tmp" &&
     chmod 0644 "$stamp.tmp" &&
     mv -f "$stamp.tmp" "$stamp"; }; then
@@ -1212,13 +1418,22 @@ install_tool() {
 }
 
 list_stale() {
-  local dir base
+  local dir base noun
   for dir in "$ROOT"/*@*; do
     [ -d "$dir" ] || continue
     base="$(basename "$dir")"
-    if ! jq -e --arg d "$base" 'any(.packs[]; (.id + "@" + .sha) == $d)' "$MANIFEST" >/dev/null; then
-      record "STALE pack $dir (left in place)"
+    if jq -e --arg d "$base" '
+      any(.packs[]; (.id + "@" + .sha) == $d)
+      or any((.tools // [])[];
+        (.name + "@" + (if .kind == "dart-sdk" then .version else .sha end)) == $d)' \
+      "$MANIFEST" >/dev/null; then
+      continue
     fi
+    noun=pack
+    if jq -e --arg n "${base%%@*}" 'any((.tools // [])[]; .name == $n)' "$MANIFEST" >/dev/null; then
+      noun=tool
+    fi
+    record "STALE $noun $dir (left in place)"
   done
 }
 
@@ -1280,6 +1495,89 @@ verify_as_agent() {
       *) record "FAIL verify $id: the check could not run as $AGENT_USER (status $status)" ;;
     esac
   done 3<<<"$PACK_ROWS"
+
+  verify_tools_as_agent
+}
+
+# Per tool, through as_agent; manifest values reach the agent shell only via
+# BATTERIES_CHECK_* env. dart-aot: the wrapper resolves on the agent PATH, the
+# LAST stdout line of <wrapper> <versionArgs> is versionLine, the smoke command
+# creates smokeExpect in a fresh dir under the agent HOME, and the agent can
+# write neither the tool dir, the wrapper nor the build cache. dart-sdk: the
+# agent cannot list the build-only SDK dir.
+# shellcheck disable=SC2016 # constant command strings: values expand in the agent shell from env
+verify_tools_as_agent() {
+  local row i name kind version sha wrapper args version_line smoke_args smoke_expect target out last status
+  while IFS= read -r -u 3 row; do
+    [ -n "$row" ] || continue
+    i="$(jq -r '.key' <<<"$row")"
+    name="$(tool_field "$i" name)"
+    kind="$(tool_field "$i" kind)"
+    version="$(tool_field "$i" version)"
+    if [ "$kind" = "dart-sdk" ]; then
+      status=0
+      as_agent 'ls "$BATTERIES_CHECK_PATH" >/dev/null 2>&1 && exit 4; exit 0' \
+        "" "" "$ROOT/$name@$version" >/dev/null 2>&1 || status=$?
+      case "$status" in
+        0) record "VERIFIED agent tool $name (build-only, not traversable)" ;;
+        4) record "FAIL verify $name: $AGENT_USER can list the build-only $ROOT/$name@$version" ;;
+        *) record "FAIL verify $name: the check could not run as $AGENT_USER (status $status)" ;;
+      esac
+      continue
+    fi
+    sha="$(tool_field "$i" sha)"
+    wrapper="$(tool_field "$i" wrapper)"
+    args="$(tool_field "$i" versionArgs)"
+    version_line="$(tool_field "$i" versionLine)"
+    smoke_args="$(jq -r --argjson i "$i" '.tools[$i].smokeArgs | join(" ")' "$MANIFEST")"
+    smoke_expect="$(tool_field "$i" smokeExpect)"
+    target="$ROOT/$name@$sha"
+
+    # Shape-checked single words (versionArgs, smokeArgs) are left unquoted.
+    status=0
+    out="$(as_agent 'p="$(command -v -- "$BATTERIES_CHECK_NAME")"; [ "$p" = "$BATTERIES_CHECK_PATH" ] || { printf "resolves %s\n" "${p:-nothing}"; exit 3; }; "$BATTERIES_CHECK_NAME" $BATTERIES_CHECK_ARGS' \
+      "$wrapper" "$args" "$BIN_DIR/$wrapper" 2>/dev/null)" || status=$?
+    last="${out##*$'\n'}"
+    if [ "$status" -eq 3 ]; then
+      record "FAIL verify $name: agent $last, expected $BIN_DIR/$wrapper"
+      continue
+    fi
+    if [ "$status" -ne 0 ] || [ "$last" != "$version_line" ]; then
+      record "FAIL verify $name: '$wrapper $args' as $AGENT_USER printed '$last' (status $status), expected '$version_line'"
+      continue
+    fi
+
+    status=0
+    as_agent 'd="$(mktemp -d "$HOME/tool-smoke.XXXXXX")" || exit 3; cd "$d" || exit 3; "$BATTERIES_CHECK_NAME" $BATTERIES_CHECK_ARGS >/dev/null 2>&1 || exit 4; [ -f "$d/$BATTERIES_CHECK_PATH" ] || exit 5' \
+      "$wrapper" "$smoke_args" "$smoke_expect" >/dev/null 2>&1 || status=$?
+    case "$status" in
+      0) ;;
+      4)
+        record "FAIL verify $name: the smoke command failed as $AGENT_USER"
+        continue
+        ;;
+      5)
+        record "FAIL verify $name: the smoke command did not create $smoke_expect"
+        continue
+        ;;
+      *)
+        record "FAIL verify $name: the smoke check could not run as $AGENT_USER (status $status)"
+        continue
+        ;;
+    esac
+
+    # NAME = the wrapper, PATH = the tool dir, ARGS = the build cache.
+    status=0
+    as_agent 'w="$(find "$BATTERIES_CHECK_PATH" "$BATTERIES_CHECK_NAME" -writable -print)" || exit 3; [ -z "$w" ] || exit 5; [ ! -w "$BATTERIES_CHECK_ARGS" ] || exit 6' \
+      "$BIN_DIR/$wrapper" "$ROOT/pub-cache" "$target" >/dev/null 2>&1 || status=$?
+    case "$status" in
+      0) record "VERIFIED agent tool $name ($version_line; smoke ok)" ;;
+      3) record "FAIL verify $name: $AGENT_USER cannot traverse $target" ;;
+      5) record "FAIL verify $name: part of $target or its wrapper is writable by $AGENT_USER" ;;
+      6) record "FAIL verify $name: the build cache is writable by $AGENT_USER" ;;
+      *) record "FAIL verify $name: the check could not run as $AGENT_USER (status $status)" ;;
+    esac
+  done 3<<<"$TOOL_ROWS"
 }
 
 invalidate_manifest_hash() {

@@ -1132,8 +1132,10 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
 
   it("fetches packs by sha, checks object ids before publishing, never prunes", () => {
     const stage = body("stage_pack");
-    expect(stage).toContain("--filter=blob:none --depth 1");
-    expect(stage).toContain("FETCH_HEAD");
+    // Phase 7 factored the fetch into fetch_pinned; packs keep the blobless mode.
+    expect(stage).toContain('fetch_pinned "$id" "$repo" "$sha" blobless');
+    expect(body("fetch_pinned")).toContain("--filter=blob:none --depth 1");
+    expect(body("fetch_pinned")).toContain("FETCH_HEAD");
     expect(body("extract_object")).toContain("rev-parse");
     const pack = body("install_pack");
     expect(pack.indexOf("stage_pack")).toBeLessThan(
@@ -1473,6 +1475,146 @@ describe("#batteries (phase 7): tools in install-batteries.sh — preflight + SD
 
   it("records STALE tool dirs under their own noun, pack output unchanged", () => {
     expect(body("publish_dir")).toContain('record "STALE ${3:-pack} $aside');
+  });
+});
+
+/**
+ * What decides the bytes install-batteries.sh writes for a tool, paired with
+ * the TOOLS_OUTPUT_VERSION it was recorded for (same rule as
+ * RECORDED_INSTALLER_OUTPUT): a change here that ships without a version bump
+ * leaves boxes SKIPPING tools built by the old code.
+ *
+ * When this test fails: if the change alters what lands on disk for a tool,
+ * bump TOOLS_OUTPUT_VERSION; either way, record the new hash it prints.
+ */
+const RECORDED_TOOLS_OUTPUT = {
+  version: "1",
+  sha256: "db3ae91e67751fdaa7001dc0cdfbbfcf88f675e327f416c70f322382d0daada5",
+};
+
+describe("#batteries (phase 7): tools in install-batteries.sh — AOT + wrapper + verify", () => {
+  // The CLI is COMPILED as root from tree-id-verified sources and a
+  // sha256-pinned lock, then run by the agent through a fixed wrapper.
+  const script = deployFile("linux", "install-batteries.sh");
+  const body = (name: string) => fnBody(script, name);
+
+  it("stamps tools with TOOLS_OUTPUT_VERSION, bumped with the code that shapes them", () => {
+    expect(body("tool_stamp_hash")).toContain("$TOOLS_OUTPUT_VERSION");
+    expect(assignment(script, "TOOLS_OUTPUT_VERSION")).toBe(
+      `TOOLS_OUTPUT_VERSION=${RECORDED_TOOLS_OUTPUT.version}`,
+    );
+    const shaping = [
+      body("stage_dart_sdk"),
+      body("stage_dart_aot"),
+      body("write_wrapper"),
+    ].join("\n");
+    const actual = createHash("sha256").update(shaping).digest("hex");
+    expect(actual, `record sha256: "${actual}"`).toBe(
+      RECORDED_TOOLS_OUTPUT.sha256,
+    );
+  });
+
+  it("fetches a tool's whole pinned commit and checks FETCH_HEAD", () => {
+    const fetch = body("fetch_pinned");
+    expect(fetch).toContain("fetch -q --depth 1 origin");
+    expect(fetch).toContain("FETCH_HEAD");
+    expect(body("stage_dart_aot")).toContain(
+      'fetch_pinned "$name" "$repo" "$sha" full',
+    );
+  });
+
+  it("builds only from object-bound sources and the pinned lock", () => {
+    const stage = code(body("stage_dart_aot"));
+    expect(stage).toContain("extract_object git_fetch");
+    expect(stage).toContain('cat-file blob "$HEAD_SHA:');
+    const lockCheck = stage.indexOf("lock overlay sha256 mismatch");
+    const pubGet = stage.indexOf("pub get --enforce-lockfile");
+    expect(lockCheck).toBeGreaterThan(-1);
+    expect(lockCheck).toBeLessThan(pubGet);
+    expect(stage.indexOf("env -i")).toBeLessThan(pubGet);
+    for (const token of [
+      "--enforce-lockfile",
+      "--suppress-analytics",
+      "package_config.json",
+      "has a build hook",
+      "compile exe",
+      'rm -rf "$pkg_dir/.dart_tool"',
+      'PUB_CACHE="$ROOT/pub-cache"',
+    ]) {
+      expect(stage, token).toContain(token);
+    }
+    expect(stage.indexOf("has a build hook")).toBeLessThan(
+      stage.indexOf("compile exe"),
+    );
+    // The source tree is a build input, never linked into HOME: the pack
+    // scan does not apply (cli/bin is legitimate there).
+    expect(stage).not.toContain("verify_staging");
+    expect(body("stage_dart_aot")).toMatch(/#[^\n]*never linked into HOME/);
+  });
+
+  it("refuses an aot tool whose sdk is not at its pin in this run", () => {
+    const install = body("install_tool");
+    expect(install).toContain("is not installed at its pin");
+    expect(install).toContain("$TOOLS_OK");
+    expect(install.indexOf("is not installed at its pin")).toBeLessThan(
+      install.indexOf("mktemp -d"),
+    );
+  });
+
+  it("writes a fixed-text wrapper through a temp file and mv -f", () => {
+    const wrapper = body("write_wrapper");
+    for (const token of [
+      "exec '",
+      '"$@"',
+      "export",
+      "PUB_CACHE=",
+      'tmp="$BIN_DIR/.$wrapper.new.$$"',
+      'mv -f "$tmp" "$BIN_DIR/$wrapper"',
+      "contains a single quote",
+    ]) {
+      expect(wrapper, token).toContain(token);
+    }
+    // tool_at_pin also requires the installed wrapper to equal the template.
+    expect(body("tool_at_pin")).toContain("write_wrapper");
+    expect(body("tool_at_pin")).toContain("cmp -s");
+  });
+
+  it("installs tools after packs and reports stale tool dirs as tools", () => {
+    const main = body("main");
+    expect(main.indexOf("install_tool")).toBeGreaterThan(
+      main.indexOf("install_pack"),
+    );
+    expect(main.indexOf("invalidate_manifest_hash")).toBeLessThan(
+      main.indexOf("install_tool"),
+    );
+    const stale = body("list_stale");
+    expect(stale).toContain(".tools");
+    expect(stale).toContain("noun=pack");
+    expect(stale).toContain("noun=tool");
+    expect(stale).toContain('record "STALE $noun $dir (left in place)"');
+  });
+
+  it("verifies tools as the agent, values via env only", () => {
+    expect(body("verify_as_agent")).toContain("verify_tools_as_agent");
+    const verify = body("verify_tools_as_agent");
+    for (const token of [
+      "as_agent '",
+      "BATTERIES_CHECK_NAME",
+      "BATTERIES_CHECK_ARGS",
+      "BATTERIES_CHECK_PATH",
+      "command -v",
+      "${out##*$'\\n'}",
+      'mktemp -d "$HOME/',
+      "-writable",
+      "! -w",
+      "VERIFIED agent tool $name ($version_line; smoke ok)",
+      "VERIFIED agent tool $name (build-only, not traversable)",
+    ]) {
+      expect(verify, token).toContain(token);
+    }
+    expect(verify).not.toMatch(
+      /as_agent '[^']*\$\{?(name|wrapper|version|target|smoke|args)\b/,
+    );
   });
 });
 
