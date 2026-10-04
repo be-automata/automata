@@ -6,7 +6,17 @@ import {
   getMergeAuditStamp,
   isWorkFailedOutcome,
   maybePromoteSkillLastKnownGood,
+  selectReviewTerminalText,
 } from "./review-single-writer-finish";
+import {
+  F1,
+  F2,
+  F3,
+  LEAD_RESUMED_TEXT,
+  LEAD_TAGGED_TEXT,
+  STAMPED_METADATA,
+  UNSTAMPED_METADATA,
+} from "./__fixtures__/orchestrated-terminal-messages";
 import type { ReviewFromIntentOutcome } from "./execute-review-from-intent";
 import { createOrganization } from "@terragon/shared/model/organizations";
 import {
@@ -287,5 +297,85 @@ describe("getMergeAuditStamp — which threads the post-merge executor acts on (
         terminalCause: "superseded",
       }),
     ).toBeNull();
+  });
+});
+
+describe("selectReviewTerminalText — one selector for hook and sweep (phase 6)", () => {
+  it("stamped thread → the last LEAD message with a tagged opener, tag preferred", () => {
+    expect(
+      selectReviewTerminalText({
+        thread: { sourceMetadata: STAMPED_METADATA },
+        messages: F1,
+      }),
+    ).toEqual({ preferTaggedIntent: true, terminalText: LEAD_TAGGED_TEXT });
+  });
+
+  it("unstamped thread → exactly today's terminal text, no tag preference", () => {
+    const result = selectReviewTerminalText({
+      thread: { sourceMetadata: UNSTAMPED_METADATA },
+      messages: F2,
+    });
+    expect(result).toEqual({
+      preferTaggedIntent: false,
+      terminalText: LEAD_RESUMED_TEXT,
+    });
+    expect(result.terminalText).toBe(extractTerminalAgentText(F2));
+  });
+
+  it("stamped thread without any tagged lead message → today's terminal text", () => {
+    expect(
+      selectReviewTerminalText({
+        thread: { sourceMetadata: STAMPED_METADATA },
+        messages: F3,
+      }),
+    ).toEqual({
+      preferTaggedIntent: true,
+      terminalText: extractTerminalAgentText(F3),
+    });
+  });
+
+  it("detects the stamp only on an orchestrated automation-skill object", () => {
+    const notStamped = [
+      null,
+      undefined,
+      { sourceMetadata: null },
+      {},
+      { sourceMetadata: UNSTAMPED_METADATA },
+      {
+        sourceMetadata: {
+          type: "www-fork" as const,
+          parentThreadId: "p",
+          parentThreadChatId: "c",
+        },
+      },
+    ];
+    for (const thread of notStamped) {
+      expect(
+        selectReviewTerminalText({ thread, messages: F1 }).preferTaggedIntent,
+      ).toBe(false);
+    }
+  });
+
+  it("never selects a sub-agent message, even one with a tagged opener", () => {
+    const subTagged: DBMessage = {
+      type: "agent",
+      parent_tool_use_id: "toolu_y",
+      parts: [
+        {
+          type: "text",
+          text: '```json review-intent\n{"verdict":"approve"}\n```',
+        },
+      ],
+    };
+    const result = selectReviewTerminalText({
+      thread: { sourceMetadata: STAMPED_METADATA },
+      messages: [...F1, subTagged],
+    });
+    expect(result.terminalText).toBe(LEAD_TAGGED_TEXT);
+    const noLeadTag = selectReviewTerminalText({
+      thread: { sourceMetadata: STAMPED_METADATA },
+      messages: [...F3, subTagged],
+    });
+    expect(noLeadTag.terminalText).toBe(extractTerminalAgentText(F3));
   });
 });
