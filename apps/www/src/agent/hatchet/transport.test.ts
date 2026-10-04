@@ -3,6 +3,7 @@ import {
   triggerAgentRun,
   cancelAgentRun,
   getAgentRunStatus,
+  listAgentRunsForThread,
   POLICY_TO_WORKFLOW,
   workflowNameForPolicy,
   validateRunMetadata,
@@ -295,6 +296,112 @@ describe("getAgentRunStatus (#125 C4 sweep reader)", () => {
     await expect(getAgentRunStatus("r4", CONFIG, HINT)).rejects.toThrow(
       /unrecognised/,
     );
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("listAgentRunsForThread (KILL-01 Drain reader)", () => {
+  const HINT = {
+    createdAt: new Date("2026-08-25T17:20:24.000Z"),
+    threadId: "thread-1",
+  };
+  const page = (
+    r: { id: string; status: string }[],
+    pagination: { num_pages: number },
+  ) =>
+    new Response(
+      JSON.stringify({
+        rows: r.map(({ id, status }) => ({ metadata: { id }, status })),
+        pagination,
+      }),
+      { status: 200 },
+    );
+  const full = Array.from({ length: 50 }, (_, i) => ({
+    id: `filler-${i}`,
+    status: "COMPLETED",
+  }));
+
+  it("returns every run of the thread from the windowed collection route and stops at a short page", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      page(
+        [
+          { id: "r1", status: "RUNNING" },
+          { id: "r2", status: "COMPLETED" },
+        ],
+        { num_pages: 1 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await listAgentRunsForThread(HINT, CONFIG)).toEqual([
+      { externalId: "r1", status: "RUNNING" },
+      { externalId: "r2", status: "COMPLETED" },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const url = new URL(String(fetchMock.mock.calls[0]![0]));
+    expect(url.pathname).toBe("/api/v1/stable/tenants/tenant-1/workflow-runs");
+    expect(url.searchParams.get("additional_metadata")).toBe(
+      "threadId:thread-1",
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("pages until a short page", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(page(full, { num_pages: 2 }))
+      .mockResolvedValueOnce(
+        page([{ id: "r-late", status: "QUEUED" }], {
+          num_pages: 2,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const runs = await listAgentRunsForThread(HINT, CONFIG);
+    expect(runs).toHaveLength(51);
+    expect(runs.at(-1)).toEqual({ externalId: "r-late", status: "QUEUED" });
+    vi.unstubAllGlobals();
+  });
+
+  it("throws (fails closed) past maxPages", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(async () => page(full, { num_pages: 999 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      listAgentRunsForThread(HINT, CONFIG, { maxPages: 3 }),
+    ).rejects.toThrow(/more than 3 pages/);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    vi.unstubAllGlobals();
+  });
+
+  it("throws on non-2xx and on a malformed body", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("boom", { status: 403 }))
+      .mockResolvedValueOnce(new Response("", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(listAgentRunsForThread(HINT, CONFIG)).rejects.toThrow(/403/);
+    await expect(listAgentRunsForThread(HINT, CONFIG)).rejects.toThrow(
+      /malformed/,
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("forwards the abort signal so a hung fetch aborts", async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const pending = listAgentRunsForThread(HINT, CONFIG, {
+      signal: controller.signal,
+    });
+    controller.abort();
+    await expect(pending).rejects.toThrow(/aborted/);
     vi.unstubAllGlobals();
   });
 });
