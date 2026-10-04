@@ -293,5 +293,86 @@ describe("materialiseAgentCredentials (D1)", () => {
         ).isFile(),
       ).toBe(true);
     });
+
+    describe("task packs (phase 7)", () => {
+      it("taskAgent without reviewAgent: packs linked, NO settings.json, credential written in the seeded .claude", async () => {
+        const result = await materialiseAgentCredentials({
+          credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
+          agent: "claudeCode",
+          runRoot,
+          taskAgent: { batteries: ["somnio-skills"] },
+          batteries: batteries(),
+        });
+        expect(result.batteries).toEqual({
+          ok: true,
+          packs: ["somnio-skills"],
+          manifestHash: fx.manifestHash,
+        });
+        const claudeDir = path.join(result.home, ".claude");
+        expect(await listTree(result.home)).toEqual([
+          ".claude",
+          ".claude.json",
+          ".claude/.credentials.json",
+          ".claude/skills",
+          ".claude/skills/dora-metrics",
+          ".claude/skills/react-health-audit",
+          ".claude/skills/security-audit",
+        ]);
+        expect((await fs.stat(claudeDir)).mode & 0o777).toBe(0o700);
+        const cred = path.join(claudeDir, ".credentials.json");
+        expect(await fs.readFile(cred, "utf8")).toBe('{"claudeAiOauth":{}}');
+        expect((await fs.stat(cred)).mode & 0o777).toBe(0o600);
+      });
+
+      it("taskAgent with built-in-credits: links only, no settings.json", async () => {
+        const result = await materialiseAgentCredentials({
+          credentials: { type: "built-in-credits" },
+          agent: "claudeCode",
+          runRoot,
+          taskAgent: { batteries: ["somnio-skills"] },
+          batteries: batteries(),
+        });
+        expect(result.batteries).toMatchObject({ ok: true });
+        await expect(
+          fs.lstat(path.join(result.home, ".claude/settings.json")),
+        ).rejects.toThrow();
+      });
+
+      it("an orchestrated reviewAgent wins over a taskAgent: hooks off, review packs only", async () => {
+        const result = await materialiseAgentCredentials({
+          credentials: { type: "built-in-credits" },
+          agent: "claudeCode",
+          runRoot,
+          reviewAgent: { mode: "orchestrated", batteries: ["gstack-review"] },
+          taskAgent: { batteries: ["somnio-skills"] },
+          batteries: batteries(),
+        });
+        expect(result.batteries).toMatchObject({
+          ok: true,
+          packs: ["gstack-review"],
+        });
+        const claudeDir = path.join(result.home, ".claude");
+        expect(
+          JSON.parse(
+            await fs.readFile(path.join(claudeDir, "settings.json"), "utf8"),
+          ),
+        ).toEqual({ disableAllHooks: true });
+        await expect(
+          fs.lstat(path.join(claudeDir, "skills/dora-metrics")),
+        ).rejects.toThrow();
+      });
+
+      it("an empty taskAgent list seeds nothing: HOME is exactly today's", async () => {
+        const result = await materialiseAgentCredentials({
+          credentials: { type: "built-in-credits" },
+          agent: "claudeCode",
+          runRoot,
+          taskAgent: { batteries: [] },
+          batteries: batteries(),
+        });
+        expect(result.batteries).toBeUndefined();
+        expect(await listTree(result.home)).toEqual([".claude.json"]);
+      });
+    });
   });
 });

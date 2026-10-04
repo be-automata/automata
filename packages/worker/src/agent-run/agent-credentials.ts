@@ -34,7 +34,7 @@ export interface MaterialisedCredentials {
   env: Record<string, string>;
   /** Remove every credential byte this wrote. Safe to call twice. */
   cleanup: () => Promise<void>;
-  /** Battery seeding outcome — present ONLY for orchestrated review runs. */
+  /** Battery seeding outcome — present ONLY for orchestrated review runs and task runs with packs. */
   batteries?: SeedBatteriesResult;
 }
 
@@ -134,6 +134,12 @@ async function seedWorkspaceTrust({
  * That is safe because the review argv keeps `--setting-sources user`, so the
  * PR's own project `.claude/` and `.mcp.json` never load (02-FINDINGS Q3).
  * Classic runs never reach seedBatteries: their HOME is exactly as before.
+ *
+ * TASK runs (Phase 7) whose input carried admin-selected packs (`taskAgent`,
+ * already shape-gated by taskAgentForRun) get those packs linked through the
+ * same seedBatteries fences, with `hooksOff: false` — no settings.json, so the
+ * task lane's hook semantics are unchanged. An orchestrated reviewAgent always
+ * wins over a taskAgent (the dispatcher never sends both).
  */
 export async function materialiseAgentCredentials({
   credentials,
@@ -141,6 +147,7 @@ export async function materialiseAgentCredentials({
   runRoot,
   agentUser,
   reviewAgent,
+  taskAgent,
   batteries,
 }: {
   credentials: PulledAgentCredentials;
@@ -153,6 +160,8 @@ export async function materialiseAgentCredentials({
   agentUser?: string;
   /** The run's review shape; only `mode: "orchestrated"` seeds batteries. */
   reviewAgent?: Pick<ReviewAgentShape, "mode" | "batteries">;
+  /** Task-run packs (phase 7), already gated by taskAgentForRun. */
+  taskAgent?: { batteries: readonly string[] };
   /** Test/override seam for seedBatteries; production passes only `log`. */
   batteries?: Omit<SeedBatteriesOptions, "agentUser">;
 }): Promise<MaterialisedCredentials> {
@@ -164,16 +173,24 @@ export async function materialiseAgentCredentials({
   // Restore the access entry; the inherited default ACL is untouched by mode.
   await reapplyPathGrant({ target: home, kind: "directory", users });
   await seedWorkspaceTrust({ home, workdir: runRoot, agentUser });
-  // seedBatteries creates and grants `<home>/.claude` (its settings.json
-  // lives there), so the credential write below does not repeat that.
+  // seedBatteries creates and grants `<home>/.claude` in both modes, so the
+  // credential write below does not repeat that.
+  const seedLog = batteries?.log ?? console.log;
   const seeded =
     reviewAgent?.mode === "orchestrated"
       ? await seedBatteries(home, reviewAgent.batteries, {
           ...batteries,
-          log: batteries?.log ?? console.log,
+          log: seedLog,
           agentUser,
         })
-      : undefined;
+      : taskAgent && taskAgent.batteries.length > 0
+        ? await seedBatteries(home, taskAgent.batteries, {
+            ...batteries,
+            log: seedLog,
+            agentUser,
+            hooksOff: false,
+          })
+        : undefined;
   const cleanup = async () => {
     await fs.rm(home, { recursive: true, force: true }).catch(() => {});
   };
