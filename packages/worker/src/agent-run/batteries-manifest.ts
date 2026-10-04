@@ -15,6 +15,17 @@
  * sha256). This guard checks SHAPE only; the installer checks CONTENT against
  * the pins before anything is written under the install root.
  *
+ * `tools` (phase 7, optional, absent = none) are BUILD inputs, not packs: a
+ * Dart SDK zip (build-only, never on PATH) and a CLI compiled ahead-of-time
+ * from a pinned source tree with OUR committed pubspec.lock. They are
+ * installed outside every pack and never linked into a run's HOME, which is
+ * why FORBIDDEN_NAMES and PACK_DEST do not apply to their source subpaths
+ * (`cli/bin/somnio.dart` is a legitimate build input). The dart-sdk url is an
+ * exact template (`DART_SDK_URL_TEMPLATE`, linux-x64 only), not "any https".
+ * The manifest hash recipe is unchanged: `lockSha256` lives in the manifest
+ * bytes and the installer refuses an overlay whose sha256 differs, so the
+ * drift guard covers the lock transitively.
+ *
  * Zero imports on purpose, so tests and Phase 5 can use it without adding a
  * dependency.
  */
@@ -32,6 +43,23 @@ export const SHA256_HEX = /^[0-9a-f]{64}$/;
 export const GITHUB_REPO =
   /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 export const SEMVER = /^\d+\.\d+\.\d+$/;
+/** The env var a dart-aot wrapper exports; `_ROOT`-suffixed so it can never name PATH or LD_PRELOAD. */
+export const ROOT_ENV = /^[A-Z][A-Z0-9]*_ROOT$/;
+/** The exact last stdout line of `<wrapper> <versionArgs>`; no shell metacharacters. */
+export const VERSION_LINE = /^[A-Za-z0-9 ._-]+$/;
+/** One word of a dart-aot smoke command (a flag, subcommand or plain value). */
+export const SMOKE_WORD = /^-{0,2}[a-z0-9][a-z0-9_-]*$/;
+const SMOKE_ARGS_MAX = 12;
+/** The only platform a manifest may name; dev dry runs override it outside the manifest. */
+export const DART_SDK_MANIFEST_PLATFORM = "linux-x64";
+
+/** The official dart-archive stable zip for `version` on `platform`. */
+export function DART_SDK_URL_TEMPLATE(
+  version: string,
+  platform: string,
+): string {
+  return `https://storage.googleapis.com/dart-archive/channels/stable/release/${version}/sdk/dartsdk-${platform}-release.zip`;
+}
 /** Where a pack may place files inside `<root>/<packId>@<sha>/`. */
 export const PACK_DEST =
   /^(LICENSE|skills\/[a-z0-9-]+(\/.+)?|agents\/[a-z0-9-]+\.md)$/;
@@ -106,6 +134,55 @@ export interface DroppedBattery {
   reason: string;
 }
 
+/** A source tree a dart-aot tool is built from (no exclude: the build needs the whole tree). */
+export interface BatteryToolSubpath {
+  src: string;
+  dest: string;
+  gitId: string;
+}
+
+/** A Dart SDK zip, sha256-pinned; build-only (no wrapper, never on PATH). */
+export interface BatteryDartSdkTool {
+  name: string;
+  kind: "dart-sdk";
+  version: string;
+  url: string;
+  sha256: string;
+  licenseMember: string;
+  license: string;
+}
+
+/** A CLI compiled with `dart compile exe` from a pinned tree and a committed lock. */
+export interface BatteryDartAotTool {
+  name: string;
+  kind: "dart-aot";
+  version: string;
+  repo: string;
+  sha: string;
+  subpaths: BatteryToolSubpath[];
+  /** The subpath dest holding pubspec.yaml. */
+  packageDir: string;
+  /** Relative to packageDir, ends `.dart`. */
+  entrypoint: string;
+  /** Repo path under BATTERIES_OVERLAY_DIR, ends `/pubspec.lock`. */
+  lockOverlay: string;
+  lockSha256: string;
+  /** Names an EARLIER tools entry of kind dart-sdk. */
+  sdk: string;
+  license: string;
+  /** /usr/local/bin/<wrapper>. */
+  wrapper: string;
+  /** Exported by the wrapper as the source tree root. */
+  rootEnv: string;
+  versionArgs: string;
+  versionLine: string;
+  smokeArgs: string[];
+  /** A file the smoke command must create in a throwaway cwd. */
+  smokeExpect: string;
+}
+
+export type BatteryTool = BatteryDartSdkTool | BatteryDartAotTool;
+
 export interface BatteriesManifest {
   schemaVersion: 1;
   /** Strings no installed pack may contain outside its allowedHelperRefs. */
@@ -113,6 +190,8 @@ export interface BatteriesManifest {
   packs: BatteryPack[];
   clis: BatteryCli[];
   dropped: DroppedBattery[];
+  /** Phase 7 build-time tools; absent = none. */
+  tools?: BatteryTool[];
 }
 
 const TOP_KEYS = [
@@ -121,6 +200,7 @@ const TOP_KEYS = [
   "packs",
   "clis",
   "dropped",
+  "tools",
 ] as const;
 const PACK_KEYS = [
   "id",
@@ -145,6 +225,37 @@ const CLI_KEYS = [
   "versionArgs",
 ] as const;
 const DROPPED_KEYS = ["name", "reason"] as const;
+const TOOL_KINDS = ["dart-sdk", "dart-aot"] as const;
+const DART_SDK_KEYS = [
+  "name",
+  "kind",
+  "version",
+  "url",
+  "sha256",
+  "licenseMember",
+  "license",
+] as const;
+const DART_AOT_KEYS = [
+  "name",
+  "kind",
+  "version",
+  "repo",
+  "sha",
+  "subpaths",
+  "packageDir",
+  "entrypoint",
+  "lockOverlay",
+  "lockSha256",
+  "sdk",
+  "license",
+  "wrapper",
+  "rootEnv",
+  "versionArgs",
+  "versionLine",
+  "smokeArgs",
+  "smokeExpect",
+] as const;
+const TOOL_SUBPATH_KEYS = ["src", "dest", "gitId"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -386,6 +497,204 @@ function findCliError(value: unknown, at: string): string | undefined {
   );
 }
 
+function findDartSdkUrlError(
+  url: unknown,
+  version: unknown,
+  at: string,
+): string | undefined {
+  if (
+    typeof version === "string" &&
+    url === DART_SDK_URL_TEMPLATE(version, DART_SDK_MANIFEST_PLATFORM)
+  ) {
+    return undefined;
+  }
+  return `${at}: must equal the dart-archive ${DART_SDK_MANIFEST_PLATFORM} URL for the version`;
+}
+
+function findDartSdkToolError(
+  value: Record<string, unknown>,
+  at: string,
+): string | undefined {
+  return (
+    findUnknownKey(value, DART_SDK_KEYS, at) ??
+    findStringError(value.name, ID_OR_NAME, `${at}.name`) ??
+    findStringError(value.version, SEMVER, `${at}.version`) ??
+    findDartSdkUrlError(value.url, value.version, `${at}.url`) ??
+    findStringError(value.sha256, SHA256_HEX, `${at}.sha256`) ??
+    findPathError(value.licenseMember, `${at}.licenseMember`, {
+      checkForbidden: false,
+    }) ??
+    findPrefixError(
+      value.licenseMember,
+      "dart-sdk/",
+      `${at}.licenseMember: must live under dart-sdk/`,
+    ) ??
+    findNonEmptyError(value.license, `${at}.license`)
+  );
+}
+
+function findToolSubpathError(value: unknown, at: string): string | undefined {
+  if (!isRecord(value)) return `${at}: must be an object`;
+  return (
+    findUnknownKey(value, TOOL_SUBPATH_KEYS, at) ??
+    findPathError(value.src, `${at}.src`, { checkForbidden: false }) ??
+    findPathError(value.dest, `${at}.dest`, { checkForbidden: false }) ??
+    findStringError(value.gitId, SHA1_HEX, `${at}.gitId`)
+  );
+}
+
+function findPackageDirError(
+  value: Record<string, unknown>,
+  at: string,
+): string | undefined {
+  // findListError proved subpaths is a list of valid subpath objects.
+  const dests = (value.subpaths as BatteryToolSubpath[]).map((s) => s.dest);
+  return typeof value.packageDir === "string" &&
+    dests.includes(value.packageDir)
+    ? undefined
+    : `${at}.packageDir: must equal one subpath dest`;
+}
+
+function findEntrypointError(value: unknown, at: string): string | undefined {
+  return (
+    findPathError(value, at, { checkForbidden: false }) ??
+    (typeof value === "string" && value.endsWith(".dart")
+      ? undefined
+      : `${at}: must end with .dart`)
+  );
+}
+
+function findLockOverlayError(value: unknown, at: string): string | undefined {
+  return (
+    findPathError(value, at, { checkForbidden: false }) ??
+    findPrefixError(
+      value,
+      BATTERIES_OVERLAY_DIR,
+      `${at}: must live under ${BATTERIES_OVERLAY_DIR}`,
+    ) ??
+    (typeof value === "string" && value.endsWith("/pubspec.lock")
+      ? undefined
+      : `${at}: must end with /pubspec.lock`)
+  );
+}
+
+function findVersionLineError(
+  value: unknown,
+  version: unknown,
+  at: string,
+): string | undefined {
+  return (
+    findStringError(value, VERSION_LINE, at) ??
+    (typeof value === "string" &&
+    typeof version === "string" &&
+    value.endsWith(` v${version}`)
+      ? undefined
+      : `${at}: must end with " v<version>"`)
+  );
+}
+
+function findSmokeArgsError(value: unknown, at: string): string | undefined {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > SMOKE_ARGS_MAX
+  ) {
+    return `${at}: must be a list of 1 to ${SMOKE_ARGS_MAX} words`;
+  }
+  for (const [index, word] of value.entries()) {
+    const error = findStringError(word, SMOKE_WORD, `${at}[${index}]`);
+    if (error !== undefined) return error;
+  }
+  return undefined;
+}
+
+function findDartAotToolError(
+  value: Record<string, unknown>,
+  at: string,
+): string | undefined {
+  return (
+    findUnknownKey(value, DART_AOT_KEYS, at) ??
+    findStringError(value.name, ID_OR_NAME, `${at}.name`) ??
+    findStringError(value.version, SEMVER, `${at}.version`) ??
+    findStringError(value.repo, GITHUB_REPO, `${at}.repo`) ??
+    findStringError(value.sha, SHA1_HEX, `${at}.sha`) ??
+    findListError(value.subpaths, `${at}.subpaths`, findToolSubpathError, {
+      allowEmpty: false,
+    }) ??
+    findDuplicateError(
+      value.subpaths as BatteryToolSubpath[],
+      "dest",
+      `${at}.subpaths`,
+    ) ??
+    findPackageDirError(value, at) ??
+    findEntrypointError(value.entrypoint, `${at}.entrypoint`) ??
+    findLockOverlayError(value.lockOverlay, `${at}.lockOverlay`) ??
+    findStringError(value.lockSha256, SHA256_HEX, `${at}.lockSha256`) ??
+    findStringError(value.sdk, ID_OR_NAME, `${at}.sdk`) ??
+    findNonEmptyError(value.license, `${at}.license`) ??
+    findStringError(value.wrapper, ID_OR_NAME, `${at}.wrapper`) ??
+    findStringError(value.rootEnv, ROOT_ENV, `${at}.rootEnv`) ??
+    findStringError(value.versionArgs, VERSION_ARGS, `${at}.versionArgs`) ??
+    findVersionLineError(
+      value.versionLine,
+      value.version,
+      `${at}.versionLine`,
+    ) ??
+    findSmokeArgsError(value.smokeArgs, `${at}.smokeArgs`) ??
+    findPathError(value.smokeExpect, `${at}.smokeExpect`, {
+      checkForbidden: false,
+    })
+  );
+}
+
+function findToolError(value: unknown, at: string): string | undefined {
+  if (!isRecord(value)) return `${at}: must be an object`;
+  if (value.kind === "dart-sdk") return findDartSdkToolError(value, at);
+  if (value.kind === "dart-aot") return findDartAotToolError(value, at);
+  return `${at}.kind: must be one of ${TOOL_KINDS.join(", ")}`;
+}
+
+/**
+ * Tools share the install root's `<name>@…` namespace with packs and CLIs,
+ * and wrappers share /usr/local/bin with the CLIs: no collisions. A dart-aot
+ * tool builds with an SDK installed before it.
+ */
+function findToolCrossError(
+  tools: BatteryTool[],
+  packs: BatteryPack[],
+  clis: BatteryCli[],
+): string | undefined {
+  const duplicateName = findDuplicateError(tools, "name", "tools");
+  if (duplicateName !== undefined) return duplicateName;
+  const taken = new Set([
+    ...packs.map((p) => p.id),
+    ...clis.map((c) => c.name),
+  ]);
+  const cliNames = new Set(clis.map((c) => c.name));
+  const wrappers = new Set<string>();
+  for (const [index, tool] of tools.entries()) {
+    const at = `tools[${index}]`;
+    if (taken.has(tool.name)) {
+      return `${at}.name: collides with a pack id or CLI name`;
+    }
+    if (tool.kind !== "dart-aot") continue;
+    if (cliNames.has(tool.wrapper)) {
+      return `${at}.wrapper: collides with a CLI name`;
+    }
+    if (wrappers.has(tool.wrapper)) return `${at}.wrapper: duplicate`;
+    wrappers.add(tool.wrapper);
+    const sdkIndex = tools.findIndex((t) => t.name === tool.sdk);
+    if (
+      sdkIndex === -1 ||
+      sdkIndex >= index ||
+      tools[sdkIndex]?.kind !== "dart-sdk"
+    ) {
+      return `${at}.sdk: must name an earlier tools entry of kind dart-sdk`;
+    }
+  }
+  return undefined;
+}
+
 function findDroppedError(value: unknown, at: string): string | undefined {
   if (!isRecord(value)) return `${at}: must be an object`;
   return (
@@ -447,15 +756,18 @@ export function findBatteriesManifestError(value: unknown): string | undefined {
     findListError(value.clis, "clis", findCliError, { allowEmpty: true }) ??
     findListError(value.dropped, "dropped", findDroppedError, {
       allowEmpty: true,
-    });
+    }) ??
+    findOptionalListError(value.tools, "tools", findToolError);
   if (shapeError !== undefined) return shapeError;
   // The shape checks above proved these types.
   const packs = value.packs as BatteryPack[];
   const clis = value.clis as BatteryCli[];
+  const tools = (value.tools ?? []) as BatteryTool[];
   return (
     findDuplicateError(packs, "id", "packs") ??
     findDuplicateError(clis, "name", "clis") ??
-    findUnusedHelperRefError(packs, value.forbiddenHelperTokens as string[])
+    findUnusedHelperRefError(packs, value.forbiddenHelperTokens as string[]) ??
+    findToolCrossError(tools, packs, clis)
   );
 }
 

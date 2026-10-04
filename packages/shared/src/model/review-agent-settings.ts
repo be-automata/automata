@@ -13,8 +13,11 @@
  * unknown stored value at resolve time throws (supersede precedent); it never
  * degrades silently.
  *
- * `REVIEW_BATTERY_PACK_IDS` is the contract Phase 3's battery manifest must
- * match (Phase 3 adds that cross-check test).
+ * PACK IDS: `BATTERY_PACK_IDS` is every pack the battery manifest
+ * (packages/worker/deploy/batteries.json) installs, in manifest order; the
+ * worker's deploy-assets test pins the two lists equal. `REVIEW_BATTERY_PACK_IDS`
+ * is the review setting's allowed subset and stays exactly the three review
+ * packs. The phase 7 task setting validates against `BATTERY_PACK_IDS`.
  *
  * `reviewMaxTurns`: Limits the lead reviewer's turns. Sub-agent turns are not counted, so this is not a cost limit.
  *
@@ -48,6 +51,20 @@ export function isReviewBatteryPackId(
   return (
     typeof value === "string" &&
     (REVIEW_BATTERY_PACK_IDS as readonly string[]).includes(value)
+  );
+}
+
+/** Every pack the battery manifest installs: the review packs, then the task-only packs. */
+export const BATTERY_PACK_IDS = [
+  ...REVIEW_BATTERY_PACK_IDS,
+  "somnio-skills",
+] as const;
+export type BatteryPackId = (typeof BATTERY_PACK_IDS)[number];
+
+export function isBatteryPackId(value: unknown): value is BatteryPackId {
+  return (
+    typeof value === "string" &&
+    (BATTERY_PACK_IDS as readonly string[]).includes(value)
   );
 }
 
@@ -105,6 +122,12 @@ export const REVIEW_BATTERY_PACK_LABELS: Record<ReviewBatteryPackId, string> = {
   "gstack-review": "gstack review",
   "somnio-review": "Somnio review",
   "gsd-reviewers": "GSD reviewers",
+};
+
+/** Short plain labels for every battery pack (the task setting offers all of them). */
+export const BATTERY_PACK_LABELS: Record<BatteryPackId, string> = {
+  ...REVIEW_BATTERY_PACK_LABELS,
+  "somnio-skills": "Somnio skills (DORA, health, security)",
 };
 
 /** The five review-agent fields of any row-shaped object, nothing else. */

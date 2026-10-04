@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BATTERY_PACK_IDS,
+  BATTERY_PACK_LABELS,
   DEFAULT_REVIEW_MODE,
   REVIEW_AGENT_FIELDS,
   REVIEW_BATTERY_PACK_IDS,
@@ -10,6 +12,7 @@ import {
   REVIEW_MAX_TURNS_MIN,
   REVIEW_MODES,
   findReviewAgentFieldError,
+  isBatteryPackId,
   isReviewBatteryPackId,
   isReviewMode,
 } from "./review-agent-settings";
@@ -58,6 +61,46 @@ describe("isReviewBatteryPackId", () => {
 
   it.each(["gstack", "GSTACK-REVIEW", 3])("rejects %j", (value) => {
     expect(isReviewBatteryPackId(value)).toBe(false);
+  });
+});
+
+describe("BATTERY_PACK_IDS (phase 7)", () => {
+  it("lists every manifest pack, review packs first, in manifest order", () => {
+    expect(BATTERY_PACK_IDS).toEqual([
+      "gstack-review",
+      "somnio-review",
+      "gsd-reviewers",
+      "somnio-skills",
+    ]);
+  });
+
+  it("keeps REVIEW_BATTERY_PACK_IDS unchanged as its first three entries", () => {
+    expect(REVIEW_BATTERY_PACK_IDS).toHaveLength(3);
+    expect(BATTERY_PACK_IDS.slice(0, 3)).toEqual([...REVIEW_BATTERY_PACK_IDS]);
+  });
+
+  it("isBatteryPackId accepts every id and rejects anything else", () => {
+    for (const id of BATTERY_PACK_IDS) {
+      expect(isBatteryPackId(id)).toBe(true);
+    }
+    expect(isBatteryPackId("nope")).toBe(false);
+    expect(isBatteryPackId(4)).toBe(false);
+  });
+
+  it("does not widen the review setting", () => {
+    expect(isReviewBatteryPackId("somnio-skills")).toBe(false);
+    expect(
+      findReviewAgentFieldError({ reviewBatteries: ["somnio-skills"] }),
+    ).toContain("somnio-skills");
+  });
+
+  it("labels every pack", () => {
+    for (const id of BATTERY_PACK_IDS) {
+      expect(BATTERY_PACK_LABELS[id].trim()).not.toBe("");
+    }
+    expect(BATTERY_PACK_LABELS["somnio-skills"]).toBe(
+      "Somnio skills (DORA, health, security)",
+    );
   });
 });
 

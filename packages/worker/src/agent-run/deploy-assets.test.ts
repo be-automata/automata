@@ -5,9 +5,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { REVIEW_BATTERY_PACK_IDS } from "../../../shared/src/model/review-agent-settings";
+import {
+  BATTERY_PACK_IDS,
+  REVIEW_BATTERY_PACK_IDS,
+} from "../../../shared/src/model/review-agent-settings";
 import {
   BATTERIES_MANIFEST_REPO_PATH,
+  DART_SDK_URL_TEMPLATE,
   FORBIDDEN_NAMES,
   findBatteriesManifestError,
   isBatteriesManifest,
@@ -322,6 +326,285 @@ function frontmatterLines(md: string): string[] {
   return end === -1 ? [] : lines.slice(1, end);
 }
 
+const SOMNIO_CLI_LOCK =
+  "packages/worker/deploy/batteries/somnio-cli/pubspec.lock";
+
+/** The phase 3 review packs as merged (origin/main 846c598). */
+const PHASE3_REVIEW_PACKS: Record<string, unknown> = {
+  "gstack-review": {
+    id: "gstack-review",
+    repo: "https://github.com/garrytan/gstack",
+    sha: "fe6d1ae62a42e67bfb12b7f8e6143c705f375f38",
+    license: "MIT",
+    subpaths: [
+      {
+        src: "review/checklist.md",
+        dest: "skills/gstack-review/checklist.md",
+        gitId: "7692f35ec845b777800704ebdd9e3d4a9a5ed88b",
+      },
+      {
+        src: "review/specialists",
+        dest: "skills/gstack-review/specialists",
+        gitId: "d53a993b862bd09a13b1ff26db568f167d992319",
+      },
+      {
+        src: "LICENSE",
+        dest: "LICENSE",
+        gitId: "35029511144443297cad2d26e4bac17d0e352f93",
+      },
+      {
+        src: "LICENSE",
+        dest: "skills/gstack-review/LICENSE",
+        gitId: "35029511144443297cad2d26e4bac17d0e352f93",
+      },
+    ],
+    overlays: [
+      {
+        from: "packages/worker/deploy/batteries/gstack-review/SKILL.md",
+        dest: "skills/gstack-review/SKILL.md",
+      },
+    ],
+    allowedHelperRefs: [
+      {
+        file: "skills/gstack-review/checklist.md",
+        ref: "~/.claude/skills/gstack/bin/gstack-decision-search",
+        count: 1,
+      },
+    ],
+  },
+  "somnio-review": {
+    id: "somnio-review",
+    repo: "self",
+    sha: "e2716a48d0528a42cbb343307280069b2556680c",
+    license:
+      "internal (Somnio material vendored via the somnio-engineering-ai plugin; see .claude/harness.json)",
+    subpaths: [
+      {
+        src: ".claude/skills/security-audit",
+        dest: "skills/security-audit",
+        gitId: "4d97eeeafb6c9f46ad62e3ed71d47416816f5341",
+        exclude: ["references/gemini-analysis.md", "agents/gemini-analyzer.md"],
+      },
+    ],
+  },
+  "gsd-reviewers": {
+    id: "gsd-reviewers",
+    repo: "https://github.com/gsd-build/get-shit-done",
+    sha: "7dfeb7ad8acbd6febd2c8c6cf7d3dcb7d1aeb7b9",
+    license: "MIT",
+    subpaths: [
+      {
+        src: "agents/gsd-code-reviewer.md",
+        dest: "agents/gsd-code-reviewer.md",
+        gitId: "17a01abec822b38bcbbab6e1ace235126dcad1a9",
+      },
+      {
+        src: "agents/gsd-security-auditor.md",
+        dest: "agents/gsd-security-auditor.md",
+        gitId: "31847360fbd6554e9016f34121481bcf188fd63f",
+      },
+      {
+        src: "LICENSE",
+        dest: "LICENSE",
+        gitId: "33268753639eeabc2f1b25aff79a50359152968c",
+      },
+    ],
+  },
+};
+
+/** The 29 runtime packages of somnio CLI 3.1.1, resolved with Dart SDK 3.13.5 (07-RESEARCH). */
+const SOMNIO_CLI_RUNTIME_CLOSURE: readonly (readonly [
+  string,
+  string,
+  string,
+])[] = [
+  [
+    "args",
+    "2.7.0",
+    "d0481093c50b1da8910eb0bb301626d4d8eb7284aa739614d2b394ee09e3ea04",
+  ],
+  [
+    "async",
+    "2.13.1",
+    "e2eb0491ba5ddb6177742d2da23904574082139b07c1e33b8503b9f46f3e1a37",
+  ],
+  [
+    "characters",
+    "1.4.1",
+    "faf38497bda5ead2a8c7615f4f7939df04333478bf32e4173fcb06d428b5716b",
+  ],
+  [
+    "clock",
+    "1.1.3",
+    "e51d50bca3217c9a9fa2b41a30e4a38971133f5f9ec7a3d57bae095007f1d28e",
+  ],
+  [
+    "collection",
+    "1.19.1",
+    "2f5709ae4d3d59dd8f7cd309b4e023046b57d8a6c82130785d2b0e5868084e76",
+  ],
+  [
+    "dart_console",
+    "4.1.4",
+    "bf62b8016530fef83557c1f01867c281d0937dceb84204128819e6e925ddf73f",
+  ],
+  [
+    "ffi",
+    "2.2.0",
+    "6d7fd89431262d8f3125e81b50d3847a091d846eafcd4fdb88dd06f36d705a45",
+  ],
+  [
+    "file",
+    "7.0.1",
+    "a3b4f84adafef897088c160faf7dfffb7696046cb13ae90b508c2cbc95d3b8d4",
+  ],
+  [
+    "http",
+    "1.6.0",
+    "87721a4a50b19c7f1d49001e51409bddc46303966ce89a65af4f4e6004896412",
+  ],
+  [
+    "http_parser",
+    "4.1.2",
+    "178d74305e7866013777bab2c3d8726205dc5a4dd935297175b19a23a2e66571",
+  ],
+  [
+    "interact_cli",
+    "2.4.0",
+    "936422743e3538ab8dc110795ecd686f1f252295679e85c3146cfa8b6c9ee98a",
+  ],
+  [
+    "intl",
+    "0.20.3",
+    "1ca20c894b1717686a2319b8548763d812bc0aabdac580420a44c5178c57a867",
+  ],
+  [
+    "io",
+    "1.1.0",
+    "2635216ca6a737e60de577ffa1a48a0bec76ca8a62917cfc1bb88c14c570646f",
+  ],
+  [
+    "json_annotation",
+    "4.12.0",
+    "2a743920d81b7910627f68ee2c9ac1fc0bfee32b9fc3403587d7c6791ca12f80",
+  ],
+  [
+    "mason_logger",
+    "0.3.5",
+    "1d46102c6f299c0df7fe986dd3dd3271d57c2ec7c00ae590660b7c3018810048",
+  ],
+  [
+    "meta",
+    "1.19.0",
+    "307249ce4ff29d58a18e97f6345f539382eb9c9c29ecda628900f31de0443dd9",
+  ],
+  [
+    "path",
+    "1.9.1",
+    "75cca69d1490965be98c73ceaea117e8a04dd21217b37b292c9ddbec0d955bc5",
+  ],
+  [
+    "platform",
+    "3.2.0",
+    "a36d119c13416516a7b5913fbe8af8531e11633d784c550b2125f76c758524ec",
+  ],
+  [
+    "process",
+    "5.0.6",
+    "4242ba3508d37e01808bdf71ad1d5bb93a8d671bf2e7450e6b1b353fb0808891",
+  ],
+  [
+    "pub_semver",
+    "2.2.1",
+    "261236774e8b1d69cfc6b9eabbc96c40f25e7a2d6b171f3385d4f65d5734fb24",
+  ],
+  [
+    "pub_updater",
+    "0.5.0",
+    "739a0161d73a6974c0675b864fb0cf5147305f7b077b7f03a58fa7a9ab3e7e7d",
+  ],
+  [
+    "source_span",
+    "1.10.2",
+    "56a02f1f4cd1a2d96303c0144c93bd6d909eea6bee6bf5a0e0b685edbd4c47ab",
+  ],
+  [
+    "string_scanner",
+    "1.4.1",
+    "921cd31725b72fe181906c6a94d987c78e3b98c2e205b397ea399d4054872b43",
+  ],
+  [
+    "term_glyph",
+    "1.2.2",
+    "7f554798625ea768a7518313e58f83891c7f5024f88e46e7182a4558850a4b8e",
+  ],
+  [
+    "tint",
+    "2.0.1",
+    "9652d9a589f4536d5e392cf790263d120474f15da3cf1bee7f1fdb31b4de5f46",
+  ],
+  [
+    "typed_data",
+    "1.4.0",
+    "f9049c039ebfeb4cf7a7104a675823cd72dba8297f264b6637062516699fa006",
+  ],
+  [
+    "web",
+    "1.1.1",
+    "868d88a33d8a87b18ffc05f9f030ba328ffefba92d6c127917a2ba740f9cfe4a",
+  ],
+  [
+    "win32",
+    "5.15.0",
+    "d7cb55e04cd34096cd3a79b3330245f54cb96a370a1c27adb3c84b917de8b08e",
+  ],
+  [
+    "yaml",
+    "3.1.4",
+    "f67cdd8e07d3c6329146aaef1ba043542b3134c12489f553ca9a7435d1068aea",
+  ],
+];
+
+interface PubLockEntry {
+  version?: string;
+  sha256?: string;
+  source?: string;
+  url?: string;
+}
+
+/**
+ * The `packages:` entries of a pubspec.lock as pub writes it. Pub's YAML
+ * writer quotes a scalar only when it would otherwise parse as a non-string,
+ * so a sha256 that starts with a digit is quoted and one that starts with a
+ * letter is not; both forms are accepted.
+ */
+function parsePubspecLock(text: string): Map<string, PubLockEntry> {
+  const entries = new Map<string, PubLockEntry>();
+  let current: PubLockEntry | undefined;
+  let inPackages = false;
+  for (const line of text.split("\n")) {
+    if (/^\S/.test(line)) {
+      inPackages = line === "packages:";
+      current = undefined;
+      continue;
+    }
+    if (!inPackages) continue;
+    const pkgName = /^  ([a-z0-9_]+):$/.exec(line)?.[1];
+    if (pkgName !== undefined) {
+      current = {};
+      entries.set(pkgName, current);
+      continue;
+    }
+    if (current === undefined) continue;
+    const field = /^ {4,6}(version|sha256|source|url): "?([^"]*)"?$/.exec(line);
+    const key = field?.[1];
+    if (key !== undefined) {
+      Object.assign(current, { [key]: field?.[2] });
+    }
+  }
+  return entries;
+}
+
 function readBatteriesManifest(): BatteriesManifest {
   const parsed: unknown = JSON.parse(
     read(path.join(repoRoot, BATTERIES_MANIFEST_REPO_PATH)),
@@ -346,10 +629,13 @@ describe("#batteries (phase 3): batteries.json", () => {
     return found;
   };
 
-  it("lists exactly the shared REVIEW_BATTERY_PACK_IDS, in order", () => {
-    // The admin panel (Phase 4) offers these ids; a pack the box does not
-    // install, or an install the panel cannot select, is a silent no-op.
-    expect(manifest.packs.map((p) => p.id)).toEqual([
+  it("lists exactly the shared BATTERY_PACK_IDS, in order; the review packs first", () => {
+    // The admin panel offers these ids (Phase 4: the review setting offers
+    // REVIEW_BATTERY_PACK_IDS; Phase 7: the task setting offers every id). A
+    // pack the box does not install, or an install the panel cannot select,
+    // is a silent no-op.
+    expect(manifest.packs.map((p) => p.id)).toEqual([...BATTERY_PACK_IDS]);
+    expect(manifest.packs.slice(0, 3).map((p) => p.id)).toEqual([
       ...REVIEW_BATTERY_PACK_IDS,
     ]);
   });
@@ -367,6 +653,147 @@ describe("#batteries (phase 3): batteries.json", () => {
     expect(somnio.subpaths.map((s) => s.gitId)).toEqual([
       "4d97eeeafb6c9f46ad62e3ed71d47416816f5341",
     ]);
+  });
+
+  it("keeps the three review packs byte-identical to their phase 3 pins", () => {
+    // Phase 7 only appends; an accidental edit to a review pack changes what
+    // every orchestrated review loads.
+    for (const id of REVIEW_BATTERY_PACK_IDS) {
+      expect(packById(id), id).toEqual(PHASE3_REVIEW_PACKS[id]);
+    }
+  });
+
+  it("pins the somnio-skills pack (phase 7)", () => {
+    const pack = packById("somnio-skills");
+    expect(pack.repo).toBe(
+      "https://github.com/somnio-software/somnio-ai-tools",
+    );
+    expect(pack.sha).toBe("aa53f071128a32bdafe4fbf77a7b0e0940b33db9");
+    expect(pack.license).toBe("MIT");
+    expect(pack.overlays).toBeUndefined();
+    expect(pack.allowedHelperRefs).toBeUndefined();
+    expect(pack.subpaths).toEqual([
+      {
+        src: "skills/dora-metrics",
+        dest: "skills/dora-metrics",
+        gitId: "33659094d6a829dc01af402d363e2576a3b1c6db",
+        exclude: [
+          "tests/e2e/run_e2e.py",
+          "tests/test_dora_metrics.py",
+          "tests/test_practice_guidance.py",
+          "tests/test_troubleshooting.py",
+          "evals/evals.json",
+        ],
+      },
+      {
+        src: "skills/react-health-audit",
+        dest: "skills/react-health-audit",
+        gitId: "8e9a07ad933408a28da2ef4b3ca25ee84e244d16",
+        exclude: [".agent/workflows/react_health_audit.md"],
+      },
+      {
+        src: "skills/security-audit",
+        dest: "skills/security-audit",
+        gitId: "9660e00d89d444c4d1bd505a4a628ec215158326",
+        exclude: [".agent/workflows/security_audit.md"],
+      },
+      {
+        src: "LICENSE",
+        dest: "LICENSE",
+        gitId: "0cdd8a5c076691ebe0980ca7e8d2f741778894d4",
+      },
+    ]);
+  });
+
+  it("pins the dart-sdk and somnio-cli tools (phase 7)", () => {
+    const tools = manifest.tools ?? [];
+    expect(tools.map((t) => t.name)).toEqual(["dart-sdk", "somnio-cli"]);
+    expect(tools[0]).toEqual({
+      name: "dart-sdk",
+      kind: "dart-sdk",
+      version: "3.13.5",
+      url: DART_SDK_URL_TEMPLATE("3.13.5", "linux-x64"),
+      sha256:
+        "ea864bc64df30a6b8bdf30b2e32550f7717d9a890de8f40293aeabb924fe232b",
+      licenseMember: "dart-sdk/LICENSE",
+      license: "BSD-3-Clause",
+    });
+    expect(tools[0]?.kind === "dart-sdk" && tools[0].url).toBe(
+      "https://storage.googleapis.com/dart-archive/channels/stable/release/3.13.5/sdk/dartsdk-linux-x64-release.zip",
+    );
+    const cli = tools[1];
+    if (cli?.kind !== "dart-aot") throw new Error("tools[1] is not dart-aot");
+    expect(cli.version).toBe("3.1.1");
+    expect(cli.repo).toBe("https://github.com/somnio-software/somnio-ai-tools");
+    expect(cli.sha).toBe("aa53f071128a32bdafe4fbf77a7b0e0940b33db9");
+    expect(cli.subpaths).toEqual([
+      {
+        src: "skills",
+        dest: "skills",
+        gitId: "0c6874a27e61f1f112c724c787445704c8dec7b2",
+      },
+      {
+        src: "agent-rules",
+        dest: "agent-rules",
+        gitId: "3db495ec60e5de6474da2be9e497f97c839945b9",
+      },
+      {
+        src: "cli",
+        dest: "cli",
+        gitId: "0d49975aa94339a05bb4f150ac3f76098f24331b",
+      },
+      {
+        src: "LICENSE",
+        dest: "LICENSE",
+        gitId: "0cdd8a5c076691ebe0980ca7e8d2f741778894d4",
+      },
+    ]);
+    expect(cli.packageDir).toBe("cli");
+    expect(cli.entrypoint).toBe("bin/somnio.dart");
+    expect(cli.lockOverlay).toBe(SOMNIO_CLI_LOCK);
+    expect(cli.sdk).toBe("dart-sdk");
+    expect(cli.license).toBe("MIT");
+    expect(cli.wrapper).toBe("somnio");
+    expect(cli.rootEnv).toBe("SOMNIO_ROOT");
+    expect(cli.versionArgs).toBe("--version");
+    expect(cli.versionLine).toBe("somnio v3.1.1");
+    expect(cli.smokeArgs).toEqual([
+      "skills",
+      "install",
+      "--agent",
+      "claude",
+      "--project",
+      "--skills",
+      "dora_metrics",
+    ]);
+    expect(cli.smokeExpect).toBe(".claude/skills/dora-metrics/SKILL.md");
+  });
+
+  it("pins lockSha256 to the committed somnio-cli pubspec.lock", () => {
+    const cli = (manifest.tools ?? []).find((t) => t.name === "somnio-cli");
+    if (cli?.kind !== "dart-aot") throw new Error("no dart-aot somnio-cli");
+    const digest = createHash("sha256")
+      .update(fs.readFileSync(path.join(repoRoot, SOMNIO_CLI_LOCK)))
+      .digest("hex");
+    expect(cli.lockSha256).toBe(digest);
+  });
+
+  it("locks every researched runtime package of the somnio CLI", () => {
+    // A lock bump shows up in review as a diff of this table. Every entry is
+    // hosted on pub.dev and content-hashed, so `pub get --enforce-lockfile`
+    // fails closed on a changed archive.
+    const entries = parsePubspecLock(
+      read(path.join(repoRoot, SOMNIO_CLI_LOCK)),
+    );
+    expect(entries.size).toBe(62);
+    for (const [name, entry] of entries) {
+      expect(entry.source, name).toBe("hosted");
+      expect(entry.url, name).toBe("https://pub.dev");
+      expect(entry.sha256, name).toMatch(/^[0-9a-f]{64}$/);
+    }
+    for (const [name, version, sha256] of SOMNIO_CLI_RUNTIME_CLOSURE) {
+      expect(entries.get(name), name).toMatchObject({ version, sha256 });
+    }
   });
 
   it("installs exactly shellcheck, actionlint and gitleaks; semgrep is dropped", () => {
