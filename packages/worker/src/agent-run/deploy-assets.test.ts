@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -16,6 +17,8 @@ import {
   findBatteriesManifestError,
   isBatteriesManifest,
   type BatteriesManifest,
+  type BatteryDartAotTool,
+  type BatteryDartSdkTool,
 } from "./batteries-manifest";
 
 /**
@@ -1101,7 +1104,8 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
     expect(stage).toContain("git_repo");
     expect(stage).toContain("git_fetch");
     expect(src).not.toContain("git archive");
-    expect(src).not.toContain("archive ");
+    // "dart-archive" (phase 7) is the Dart SDK download host's path, not git.
+    expect(src.replaceAll("dart-archive", "")).not.toContain("archive ");
     expect(src).not.toMatch(/\bcp\b[^\n]*AUTOMATA_REPO/);
     expect(stage).toContain('cat-file blob "$HEAD_SHA:');
     expect(src).toContain("SOURCE checkout");
@@ -1283,6 +1287,364 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
       encoding: "utf8",
     });
     expect(result.status, result.stdout).toBe(0);
+  });
+});
+
+/** The host's Dart SDK platform, or undefined where no SDK is published for it. */
+const HOST_DART_PLATFORM: string | undefined = (
+  {
+    "darwin/arm64": "macos-arm64",
+    "darwin/x64": "macos-x64",
+    "linux/x64": "linux-x64",
+    "linux/arm64": "linux-arm64",
+  } as Record<string, string>
+)[`${process.platform}/${process.arch}`];
+
+/** Placeholder replaced by a per-test temp dir in the executed guard tests. */
+const GUARD_PREFIX = "<per-test temp prefix>";
+
+function dartSdkOf(m: BatteriesManifest): BatteryDartSdkTool {
+  const found = (m.tools ?? []).find((t) => t.kind === "dart-sdk");
+  if (found?.kind !== "dart-sdk") throw new Error("no dart-sdk tool");
+  return found;
+}
+
+function dartAotOf(m: BatteriesManifest): BatteryDartAotTool {
+  const found = (m.tools ?? []).find((t) => t.kind === "dart-aot");
+  if (found?.kind !== "dart-aot") throw new Error("no dart-aot tool");
+  return found;
+}
+
+describe("#batteries (phase 7): tools in install-batteries.sh — preflight + SDK", () => {
+  // tools[] reach a root shell (the build) and the agent's PATH (a wrapper).
+  // The SDK is 238 MB of foreign bytes: its sha256 is checked before ANY
+  // extraction (also of a cached dry-run copy), and a python pre-scan rejects
+  // zip-slip, symlink and size-bomb entries before python3 -m zipfile runs.
+  const scriptPath = path.join(
+    workerRoot,
+    "deploy",
+    "linux",
+    "install-batteries.sh",
+  );
+  const script = deployFile("linux", "install-batteries.sh");
+  const src = code(script);
+  const body = (name: string) => fnBody(script, name);
+
+  it("stays generic: no tool name, SDK version or commit in code", () => {
+    expect(src.toLowerCase()).not.toContain("somnio");
+    expect(src).not.toContain("3.13.5");
+    expect(src).not.toContain("aa53f071");
+  });
+
+  it("declares TOOLS_OUTPUT_VERSION exactly once", () => {
+    expect(assignment(script, "TOOLS_OUTPUT_VERSION")).toBe(
+      "TOOLS_OUTPUT_VERSION=1",
+    );
+  });
+
+  it("treats the download cache and preflight-only knobs as dry-run knobs", () => {
+    const guard = src.slice(src.indexOf("DRY_RUN=0"), src.indexOf("DRY_RUN=1"));
+    expect(guard).toContain('[ -n "$BATTERIES_DOWNLOAD_CACHE" ]');
+    expect(guard).toContain('[ -n "$BATTERIES_PREFLIGHT_ONLY" ]');
+    expect(guard).toContain("dry-run knobs are refused for root");
+    expect(guard).toContain(
+      "BATTERIES_DOWNLOAD_CACHE must be an absolute path",
+    );
+    expect(guard).toContain("BATTERIES_PREFLIGHT_ONLY must be 1");
+  });
+
+  it.each<[string, Record<string, string>, string]>([
+    [
+      "the cache without SKIP_SUDO_VERIFY=1",
+      { PREFIX: GUARD_PREFIX, BATTERIES_DOWNLOAD_CACHE: "/tmp/c" },
+      "a dry run needs SKIP_SUDO_VERIFY=1",
+    ],
+    [
+      "the cache with the real prefix",
+      { SKIP_SUDO_VERIFY: "1", BATTERIES_DOWNLOAD_CACHE: "/tmp/c" },
+      "require a non-default PREFIX",
+    ],
+    [
+      "a relative cache dir",
+      {
+        PREFIX: GUARD_PREFIX,
+        SKIP_SUDO_VERIFY: "1",
+        BATTERIES_DOWNLOAD_CACHE: "cache",
+      },
+      "BATTERIES_DOWNLOAD_CACHE must be an absolute path",
+    ],
+    [
+      "preflight-only with the real prefix",
+      { SKIP_SUDO_VERIFY: "1", BATTERIES_PREFLIGHT_ONLY: "1" },
+      "require a non-default PREFIX",
+    ],
+    [
+      "preflight-only set to anything but 1",
+      {
+        PREFIX: GUARD_PREFIX,
+        SKIP_SUDO_VERIFY: "1",
+        BATTERIES_PREFLIGHT_ONLY: "yes",
+      },
+      "BATTERIES_PREFLIGHT_ONLY must be 1",
+    ],
+  ])("refuses %s (exit 2, executed)", (_name, env, message) => {
+    // Guards run before anything is read or written; only bash is spawned.
+    // GUARD_PREFIX lives in a fresh temp dir so a guard that let the run
+    // through could not install anywhere that outlives the test.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "batteries-guard-"));
+    const prefix =
+      env.PREFIX === GUARD_PREFIX ? path.join(dir, "p") : undefined;
+    try {
+      const result = spawnSync("/bin/bash", [scriptPath], {
+        encoding: "utf8",
+        timeout: 30_000,
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          ...env,
+          ...(prefix === undefined ? {} : { PREFIX: prefix }),
+        },
+      });
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stderr).toContain(message);
+      expect(prefix === undefined || !fs.existsSync(prefix)).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-checks the tools contract in preflight, host rules included", () => {
+    const preflight = body("preflight") + body("preflight_tools");
+    expect(body("preflight")).toContain("preflight_tools");
+    for (const token of [
+      "python3",
+      "dartsdk-",
+      "_ROOT$",
+      "pubspec.lock",
+      "uname -s",
+      "uname -m",
+      "Linux/x86_64",
+      "linux-x64",
+      "host_dart_platform",
+      "cannot install tools",
+    ]) {
+      expect(preflight, token).toContain(token);
+    }
+    const platform = body("host_dart_platform");
+    expect(platform).toContain("Darwin/arm64) echo macos-arm64");
+    expect(platform).toContain("Darwin/x86_64) echo macos-x64");
+    expect(platform).toContain("Linux/x86_64) echo linux-x64");
+    expect(platform).toContain("Linux/aarch64) echo linux-arm64");
+  });
+
+  it("checks the SDK zip's sha256 before any extraction, cached copies included", () => {
+    const stage = code(body("stage_dart_sdk"));
+    const check = stage.indexOf("sha256sum -c");
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(stage.indexOf("zipfile"));
+    // A cache hit is COPIED into $WORK and checked there; nothing is
+    // extracted from the cache path itself.
+    const cacheCopy = stage.indexOf('cp "$cached" "$zip"');
+    expect(cacheCopy).toBeGreaterThan(-1);
+    expect(cacheCopy).toBeLessThan(check);
+    expect(stage).toContain("curl -fsSL --proto '=https' --tlsv1.2 --retry 3");
+    expect(stage).toContain('[ "$DRY_RUN" -eq 1 ]');
+  });
+
+  it("pre-scans the zip, extracts with python3, and publishes a build-only SDK", () => {
+    const stage = body("stage_dart_sdk");
+    for (const token of [
+      "python3 -",
+      "S_ISLNK",
+      'startswith("dart-sdk/")',
+      '".."',
+      "2 * 1024 ** 3",
+      "-m zipfile -e",
+      "-type l",
+      "/version",
+      "xargs -0 chmod 0755",
+      'chmod 0700 "$stage"',
+    ]) {
+      expect(stage, token).toContain(token);
+    }
+    expect(src).not.toContain("unzip");
+    // Build-only: nothing of the SDK is placed in the bin dir.
+    expect(stage).not.toContain("$BIN_DIR");
+  });
+
+  it("records STALE tool dirs under their own noun, pack output unchanged", () => {
+    expect(body("publish_dir")).toContain('record "STALE ${3:-pack} $aside');
+  });
+});
+
+describe("#batteries (phase 7): bash preflight parity with the TS guard (executed)", () => {
+  // Both validators must reject the same malformed tools entry, each with the
+  // rule named. Only /bin/bash install-batteries.sh is spawned, with
+  // BATTERIES_PREFLIGHT_ONLY=1: it stops right after preflight, so nothing is
+  // downloaded or written under PREFIX even when preflight passes.
+  //
+  // The committed manifest names the linux-x64 SDK, which a dry run refuses
+  // on any other host; the bash base therefore rewrites ONLY that url to this
+  // host's platform, while the TS guard always sees the linux-x64 base.
+  const scriptPath = path.join(
+    workerRoot,
+    "deploy",
+    "linux",
+    "install-batteries.sh",
+  );
+  const committed = readBatteriesManifest();
+  const platform = HOST_DART_PLATFORM;
+
+  function based(
+    targetPlatform: string,
+    change: (m: BatteriesManifest, p: string) => void,
+  ): BatteriesManifest {
+    const m = structuredClone(committed);
+    const sdk = dartSdkOf(m);
+    sdk.url = DART_SDK_URL_TEMPLATE(sdk.version, targetPlatform);
+    change(m, targetPlatform);
+    return m;
+  }
+
+  function runPreflight(manifest: BatteriesManifest): {
+    status: number | null;
+    stdout: string;
+    published: boolean;
+  } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "batteries-parity-"));
+    const prefix = path.join(dir, "prefix");
+    const manifestPath = path.join(dir, "batteries.json");
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    try {
+      // The timeout bounds a script that ignores BATTERIES_PREFLIGHT_ONLY and
+      // carries on into a real install (network); preflight alone is seconds.
+      const result = spawnSync("/bin/bash", [scriptPath], {
+        encoding: "utf8",
+        timeout: 30_000,
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: dir,
+          TMPDIR: dir,
+          PREFIX: prefix,
+          SKIP_SUDO_VERIFY: "1",
+          BATTERIES_MANIFEST: manifestPath,
+          BATTERIES_PREFLIGHT_ONLY: "1",
+          AUTOMATA_REPO: repoRoot,
+        },
+      });
+      return {
+        status: result.status,
+        stdout: result.stdout,
+        published: fs.existsSync(prefix),
+      };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("accepts the committed manifest (TS) and its host-platform twin (bash)", (ctx) => {
+    expect(findBatteriesManifestError(committed)).toBeUndefined();
+    if (platform === undefined) {
+      ctx.skip(); // no Dart SDK is published for this host's platform
+      return;
+    }
+    const result = runPreflight(based(platform, () => undefined));
+    expect(result.stdout).not.toContain("FAIL preflight");
+    expect(result.stdout).toContain("RESULT: PASS");
+    expect(result.status).toBe(0);
+    expect(result.published).toBe(false);
+  });
+
+  it.each<[string, (m: BatteriesManifest, p: string) => void, string]>([
+    [
+      "an SDK url for another version",
+      (m, p) => {
+        dartSdkOf(m).url = DART_SDK_URL_TEMPLATE("3.13.4", p);
+      },
+      "url is not the dart-archive template for",
+    ],
+    [
+      "an SDK url for windows-x64",
+      (m) => {
+        const sdk = dartSdkOf(m);
+        sdk.url = DART_SDK_URL_TEMPLATE(sdk.version, "windows-x64");
+      },
+      "platform windows-x64 is not this host's (",
+    ],
+    [
+      'rootEnv "PATH"',
+      (m) => {
+        dartAotOf(m).rootEnv = "PATH";
+      },
+      "rootEnv must match ^[A-Z][A-Z0-9]*_ROOT$",
+    ],
+    [
+      "a two-word versionArgs",
+      (m) => {
+        dartAotOf(m).versionArgs = "--version x";
+      },
+      "versionArgs must be one word",
+    ],
+    [
+      'a smoke word "$(id)"',
+      (m) => {
+        dartAotOf(m).smokeArgs = ["skills", "$(id)"];
+      },
+      "smokeArgs word is unsafe",
+    ],
+    [
+      "a lockOverlay outside the overlay dir",
+      (m) => {
+        dartAotOf(m).lockOverlay = "../x/pubspec.lock";
+      },
+      "lockOverlay must be under packages/worker/deploy/batteries/ and end /pubspec.lock",
+    ],
+    [
+      "an sdk listed after its tool",
+      (m) => {
+        m.tools?.reverse();
+      },
+      "sdk must name an earlier dart-sdk tool",
+    ],
+    [
+      'a tool named "gitleaks"',
+      (m) => {
+        dartAotOf(m).name = "gitleaks";
+      },
+      "tool name collides with a pack id or CLI name",
+    ],
+    [
+      'a wrapper named "shellcheck"',
+      (m) => {
+        dartAotOf(m).wrapper = "shellcheck";
+      },
+      "wrapper collides with a CLI name or another wrapper",
+    ],
+    [
+      "an unknown key",
+      (m) => {
+        Object.assign(dartAotOf(m), { extra: "x" });
+      },
+      "unknown key in tools entry",
+    ],
+    [
+      'kind "dart-jit"',
+      (m) => {
+        Object.assign(dartAotOf(m), { kind: "dart-jit" });
+      },
+      "unknown kind",
+    ],
+  ])("both reject %s", (_name, change, failText) => {
+    expect(
+      findBatteriesManifestError(based("linux-x64", change)),
+      "TS guard",
+    ).toBeDefined();
+    if (platform === undefined) return; // bash half needs a host SDK platform
+    const result = runPreflight(based(platform, change));
+    expect(result.stdout).toContain(`FAIL preflight `);
+    expect(result.stdout).toContain(failText);
+    expect(result.stdout).toContain("RESULT: FAIL");
+    expect(result.status).toBe(1);
+    expect(result.published).toBe(false);
   });
 });
 
