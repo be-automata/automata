@@ -97,6 +97,9 @@ export const claudeAdapter: HarnessAdapter = {
     // Any message carrying a session_id sets it; no backfill of later
     // messages within the same stdout batch.
     sessionTracking: "any-message",
+    // Phase 5: background sub-agents emit two results; release only the
+    // last, at exit (see HarnessCapabilities.holdResultAfterBackgroundTask).
+    holdResultAfterBackgroundTask: true,
   },
 
   // SHIPPED (#88): exposes claude.ts's existing named seam through the

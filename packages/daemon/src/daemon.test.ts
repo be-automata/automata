@@ -1797,4 +1797,236 @@ describe("daemon", () => {
       expect(claudeCommand).not.toContain("--permission-mode");
     });
   });
+
+  describe("two results (background sub-agent, Phase 2 Q2/Q7)", () => {
+    const S = "SESSION_Q2Q7";
+    const init = {
+      type: "system",
+      subtype: "init",
+      session_id: S,
+      tools: ["Task"],
+      mcp_servers: [],
+    };
+    const leadToolUse = (name: string, id = "toolu_1") => ({
+      type: "assistant",
+      parent_tool_use_id: null,
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            name,
+            id,
+            input: { subagent_type: "x", prompt: "p" },
+          },
+        ],
+      },
+      session_id: S,
+    });
+    const taskStarted = (toolUseId = "toolu_1", backgrounded = true) => ({
+      type: "system",
+      subtype: "task_started",
+      task_id: "t1",
+      tool_use_id: toolUseId,
+      is_backgrounded: backgrounded,
+      session_id: S,
+    });
+    const subAgentText = {
+      type: "assistant",
+      parent_tool_use_id: "toolu_1",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "sub-agent findings" }],
+      },
+      session_id: S,
+    };
+    const leadText = (text: string) => ({
+      type: "assistant",
+      parent_tool_use_id: null,
+      message: { role: "assistant", content: [{ type: "text", text }] },
+      session_id: S,
+    });
+    const result1 = {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      num_turns: 2,
+      total_cost_usd: 0.12,
+      duration_ms: 5541,
+      duration_api_ms: 11573,
+      result: "Waiting for the spike agent…",
+      session_id: S,
+    };
+    const result2 = {
+      ...result1,
+      num_turns: 1,
+      result: 'Done.\n```json\n{"verdict":"approve"}\n```',
+    };
+
+    function sentMessages(): Array<Record<string, unknown>> {
+      return serverPostMock.mock.calls.flatMap(
+        (call) =>
+          (call[0] as { messages: Array<Record<string, unknown>> }).messages,
+      );
+    }
+    const sentResults = () => sentMessages().filter((m) => m.type === "result");
+
+    async function startRun(message: DaemonMessageClaude = TEST_INPUT_MESSAGE) {
+      await daemon.start();
+      await writeToUnixSocket({
+        unixSocketPath: runtime.unixSocketPath,
+        dataStr: JSON.stringify(message),
+      });
+      await sleepUntil(() => spawnCommandLineMock.mock.calls.length === 1);
+    }
+
+    function feedTwoResultRun(toolName = "Agent") {
+      for (const line of [
+        init,
+        leadToolUse(toolName),
+        taskStarted(),
+        subAgentText,
+        leadText("Waiting for the agent"),
+        result1,
+        result2,
+      ]) {
+        mockSpawnCommandStdoutLine(line);
+      }
+    }
+
+    it.each(["Agent", "Task"])(
+      "a lead %s background task holds every result; only the LAST is sent, after exit",
+      async (toolName) => {
+        await startRun();
+        feedTwoResultRun(toolName);
+        await sleep(50);
+        expect(sentResults()).toHaveLength(0);
+
+        spawnCommandLineMock.mock.calls[0]![1].onClose(0);
+        await sleep(50);
+        const results = sentResults();
+        expect(results).toHaveLength(1);
+        expect(results[0]!.result).toBe(result2.result);
+        const all = sentMessages();
+        expect(all[all.length - 1]).toEqual(result2);
+        expect(all.some((m) => m.type === "custom-error")).toBe(false);
+      },
+    );
+
+    async function expectNotHeld(lines: unknown[]) {
+      await startRun();
+      for (const line of lines) mockSpawnCommandStdoutLine(line);
+      await sleep(50);
+      expect(sentResults()).toHaveLength(1);
+      spawnCommandLineMock.mock.calls[0]![1].onClose(0);
+      await sleep(30);
+      expect(sentResults()).toHaveLength(1);
+    }
+
+    it("NEGATIVE: a DENIED lead Task (no task_started) does not arm; the result is sent before exit", async () => {
+      await expectNotHeld([
+        init,
+        leadToolUse("Task"),
+        {
+          type: "user",
+          parent_tool_use_id: null,
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_1",
+                is_error: true,
+                content: "Permission to use Task has been denied.",
+              },
+            ],
+          },
+          session_id: S,
+        },
+        result2,
+      ]);
+    });
+
+    it("NEGATIVE: a backgrounded task_started for an unknown tool_use id does not arm", async () => {
+      await expectNotHeld([
+        init,
+        leadToolUse("Agent"),
+        taskStarted("toolu_other"),
+        result2,
+      ]);
+    });
+
+    it("NEGATIVE: a SUB-AGENT's Agent tool_use matched by task_started does not arm", async () => {
+      const subAgentToolUse = {
+        ...leadToolUse("Agent", "toolu_sub"),
+        parent_tool_use_id: "toolu_1",
+      };
+      await expectNotHeld([
+        init,
+        subAgentToolUse,
+        taskStarted("toolu_sub"),
+        result2,
+      ]);
+    });
+
+    it("NEGATIVE: a lead task_started with is_backgrounded false does not arm", async () => {
+      await expectNotHeld([
+        init,
+        leadToolUse("Agent"),
+        taskStarted("toolu_1", false),
+        result2,
+      ]);
+    });
+
+    it("a single-result run keeps today's timing: the result is sent before exit", async () => {
+      await expectNotHeld([init, leadText("hello"), result2]);
+    });
+
+    it("a held result is dropped when the run is stopped; custom-stop is sent", async () => {
+      await startRun();
+      feedTwoResultRun();
+      await sleep(30);
+      await writeToUnixSocket({
+        unixSocketPath: runtime.unixSocketPath,
+        dataStr: JSON.stringify(TEST_STOP_MESSAGE),
+      });
+      await sleep(50);
+      spawnCommandLineMock.mock.calls[0]![1].onClose(0);
+      await sleep(50);
+      expect(sentResults()).toHaveLength(0);
+      expect(sentMessages().some((m) => m.type === "custom-stop")).toBe(true);
+    });
+
+    it("a held result is dropped when the process is replaced by a new run", async () => {
+      await startRun();
+      feedTwoResultRun();
+      await sleep(30);
+      await writeToUnixSocket({
+        unixSocketPath: runtime.unixSocketPath,
+        dataStr: JSON.stringify({ ...TEST_INPUT_MESSAGE, prompt: "again" }),
+      });
+      await sleepUntil(() => spawnCommandLineMock.mock.calls.length === 2);
+      spawnCommandLineMock.mock.calls[0]![1].onClose(0);
+      await sleep(50);
+      expect(sentResults()).toHaveLength(0);
+    });
+
+    it("the idle watchdog releases the held result instead of the synthetic error", async () => {
+      // 300 ms, not 50: startRun's sleepUntil polls every 100 ms, and a
+      // 50 ms watchdog fires (no output yet) before the lines are fed.
+      vi.stubEnv("IDLE_TIMEOUT_MS", "300");
+      await startRun();
+      feedTwoResultRun();
+      await sleepUntil(() => sentResults().length >= 1, 3000);
+      await sleep(50);
+      const results = sentResults();
+      expect(results).toHaveLength(1);
+      expect(results[0]!.result).toBe(result2.result);
+      expect(
+        sentMessages().some((m) =>
+          String(m.result ?? "").includes("no output for"),
+        ),
+      ).toBe(false);
+    });
+  });
 });

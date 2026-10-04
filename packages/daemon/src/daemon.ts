@@ -32,6 +32,49 @@ function formatError(error: unknown): object {
   return { value: error };
 }
 
+/** Lead (parent_tool_use_id null) Agent/Task tool_use ids in an assistant message. */
+function leadSubAgentToolUseIds(message: unknown): string[] {
+  const m = message as {
+    type?: unknown;
+    parent_tool_use_id?: unknown;
+    message?: { content?: unknown };
+  };
+  if (m.type !== "assistant" || m.parent_tool_use_id !== null) {
+    return [];
+  }
+  const content = m.message?.content;
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  const ids: string[] = [];
+  for (const part of content as Array<Record<string, unknown>>) {
+    if (
+      part?.type === "tool_use" &&
+      (part.name === "Agent" || part.name === "Task") &&
+      typeof part.id === "string"
+    ) {
+      ids.push(part.id);
+    }
+  }
+  return ids;
+}
+
+/** tool_use_id of a backgrounded `system/task_started`, else undefined. */
+function backgroundedTaskToolUseId(message: unknown): string | undefined {
+  const m = message as {
+    type?: unknown;
+    subtype?: unknown;
+    is_backgrounded?: unknown;
+    tool_use_id?: unknown;
+  };
+  return m.type === "system" &&
+    m.subtype === "task_started" &&
+    m.is_backgrounded === true &&
+    typeof m.tool_use_id === "string"
+    ? m.tool_use_id
+    : undefined;
+}
+
 type ActiveProcessState = {
   agent: AIAgent;
   threadId: string;
@@ -474,12 +517,15 @@ export class TerragonDaemon {
     exitCode,
     threadChatId,
     getMockSuccessResult,
+    takeHeldResult,
   }: {
     agent: string;
     processId: number | undefined;
     exitCode: number | null;
     threadChatId: string;
     getMockSuccessResult?: () => string;
+    /** Phase 5: the result held after a background sub-agent, if any. */
+    takeHeldResult?: () => ClaudeMessage | null;
   }) => {
     this.runtime.logger.info(`${agent} command finished`, {
       exitCode,
@@ -494,6 +540,26 @@ export class TerragonDaemon {
         threadChatId,
       });
       return;
+    }
+    // Phase 5: release the held (LAST) result. On the user-stop and replace
+    // paths killActiveProcess has already deleted the map entry, so the early
+    // return above is what drops a held result there; the isStopping branch
+    // is defensive and unreachable on the stop path today.
+    const heldResult = takeHeldResult?.() ?? null;
+    if (heldResult) {
+      if (activeState.isStopping) {
+        this.runtime.logger.info("Dropping held result of a stopped run", {
+          threadChatId,
+        });
+      } else {
+        this.addMessageToBuffer({
+          agent: activeState.agent,
+          message: heldResult,
+          threadId: activeState.threadId,
+          threadChatId: activeState.threadChatId,
+          token: activeState.token,
+        });
+      }
     }
     if (exitCode !== 0 && !activeState.isStopping && !activeState.isCompleted) {
       this.addMessageToBuffer({
@@ -541,6 +607,7 @@ export class TerragonDaemon {
     onStdoutLine,
     onClose,
     getMockSuccessResult,
+    takeHeldResult,
   }: {
     agentName: string;
     input: DaemonMessageClaude;
@@ -553,6 +620,8 @@ export class TerragonDaemon {
     onStdoutLine: (line: string) => void;
     onClose?: (code: number | null) => void;
     getMockSuccessResult?: () => string;
+    /** Phase 5: take (and clear) a held result; see handleProcessClose. */
+    takeHeldResult?: () => ClaudeMessage | null;
   }): Promise<void> {
     this.runtime.logger.info("Spawning agent process", {
       agentName,
@@ -579,9 +648,12 @@ export class TerragonDaemon {
             watchdogTimeoutMs,
             durationMs,
           });
+          // Phase 5: a held result is the run's real answer — release it
+          // instead of the synthetic "no output" error.
+          const heldResult = takeHeldResult?.() ?? null;
           this.addMessageToBuffer({
             agent: input.agent,
-            message: {
+            message: heldResult ?? {
               type: "result",
               subtype: "success",
               total_cost_usd: 0,
@@ -643,6 +715,7 @@ export class TerragonDaemon {
               processId,
               threadChatId: input.threadChatId,
               getMockSuccessResult,
+              takeHeldResult,
             });
             this.flushMessageBuffer();
             resolve();
@@ -699,6 +772,18 @@ export class TerragonDaemon {
 
     const parser = adapter.makeLineParser({ runtime: this.runtime });
 
+    // Phase 5 held-result state (adapter.capabilities.holdResultAfterBackgroundTask):
+    // armed only by a task_started is_backgrounded:true whose tool_use_id is
+    // one of the LEAD's own Agent/Task tool_use ids.
+    const leadTaskToolUseIds = new Set<string>();
+    let holdArmed = false;
+    let heldResult: ClaudeMessage | null = null;
+    const takeHeldResult = (): ClaudeMessage | null => {
+      const held = heldResult;
+      heldResult = null;
+      return held;
+    };
+
     return this.spawnAgentProcess({
       agentName: adapter.displayName,
       input,
@@ -729,6 +814,7 @@ export class TerragonDaemon {
       getMockSuccessResult: adapter.capabilities.mockSuccessResult
         ? () => adapter.capabilities.mockSuccessResult!
         : undefined,
+      takeHeldResult,
       onStdoutLine: (line) => {
         // Snapshot staleness: read the active process state ONCE per stdout
         // line, BEFORE the message loop — a system message earlier in the
@@ -768,6 +854,29 @@ export class TerragonDaemon {
             }
           }
           // sessionTracking === "none" (amp): never touch sessionId/isWorking.
+
+          if (adapter.capabilities.holdResultAfterBackgroundTask) {
+            for (const id of leadSubAgentToolUseIds(parsedMessage)) {
+              leadTaskToolUseIds.add(id);
+            }
+            const backgrounded = backgroundedTaskToolUseId(parsedMessage);
+            if (backgrounded && leadTaskToolUseIds.has(backgrounded)) {
+              holdArmed = true;
+            }
+            if (type === "result" && holdArmed) {
+              this.updateActiveProcessState(input.threadChatId, {
+                isCompleted: true,
+              });
+              this.runtime.logger.info("holding result until exit", {
+                threadChatId: input.threadChatId,
+                subtype: (parsedMessage as { subtype?: string }).subtype,
+                num_turns: (parsedMessage as { num_turns?: number }).num_turns,
+                replacedEarlier: heldResult !== null,
+              });
+              heldResult = parsedMessage;
+              continue;
+            }
+          }
 
           this.addMessageToBuffer({
             agent: input.agent,

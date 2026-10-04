@@ -143,6 +143,18 @@ export interface HarnessCapabilities {
   fixesSessionLogs?: boolean;
   flushBufferOnErrorResult?: boolean;
   sessionTracking: "any-message" | "system-init-with-backfill" | "none";
+  /**
+   * Phase 5 (02-FINDINGS Q2/Q7). Claude 2.1.284 runs the Agent tool in the
+   * background in -p mode and then emits TWO `result` messages — the first
+   * holds the lead's interim text ("Waiting for the agent…"), the second its
+   * real answer (q2q7.jsonl lines 5/7/29/30). Once the LEAD's own Agent/Task
+   * tool_use is confirmed backgrounded (`system/task_started` with
+   * `is_backgrounded: true` and that same `tool_use_id`), every result is
+   * held and only the LAST is released at process exit. `total_cost_usd` is
+   * cumulative, so dropping the interim result loses no accounting. Runs
+   * that never arm keep today's exact timing.
+   */
+  holdResultAfterBackgroundTask?: boolean;
 }
 
 export interface HarnessAdapter {
