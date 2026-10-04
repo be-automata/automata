@@ -1534,6 +1534,22 @@ export const repoReviewSettings = pgTable(
      * commits were discarded mid-run. Default false — discard means discard.
      */
     recheckOnComplete: boolean("recheck_on_complete").notNull().default(false),
+    /**
+     * Review-agent family (phase 4): mode ('classic' | 'orchestrated'),
+     * battery pack ids, run-tests toggle, per-command timeout (s, 60..600)
+     * and the lead reviewer's max turns (1..500). All nullable with NO column
+     * default: NULL = inherit (repo row → '*' org-default row → system
+     * default, resolved in apps/www/src/server-lib/review/resolve-review-agent.ts).
+     * Raw values (dependency-free), validated by `findReviewAgentFieldError`
+     * (model/review-agent-settings.ts) at the write boundary AND at resolve
+     * time — an unknown stored value throws, never degrades (supersede
+     * precedent). Nothing on the worker consumes them until Phase 5.
+     */
+    reviewMode: text("review_mode"),
+    reviewBatteries: text("review_batteries").array(),
+    reviewRunTests: boolean("review_run_tests"),
+    reviewCommandTimeoutS: integer("review_command_timeout_s"),
+    reviewMaxTurns: integer("review_max_turns"),
     /** Provenance: the user who last wrote this override (audit trail). */
     updatedByUserId: text("updated_by_user_id").references(() => user.id, {
       onDelete: "set null",

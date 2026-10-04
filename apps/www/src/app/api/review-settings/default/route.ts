@@ -9,9 +9,15 @@ import {
   RepoReviewSettingConflictError,
 } from "@terragon/shared/model/repo-review-settings";
 import {
+  parseReviewAgentPatch,
   parseReviewDraftPrs,
   parseSupersedePatch,
-} from "../supersede-route-shared";
+} from "../review-settings-route-shared";
+import {
+  pickReviewAgentFields,
+  type ReviewAgentField,
+} from "@terragon/shared/model/review-agent-settings";
+import type { RepoReviewSetting } from "@terragon/shared/db/types";
 import { getPostHogServer } from "@/lib/posthog-server";
 
 /**
@@ -24,18 +30,18 @@ import { getPostHogServer } from "@/lib/posthog-server";
  * the org review floor). Writes carry optimistic concurrency: a PUT with a
  * stale `expectedUpdatedAt` gets 409 {error:"conflict", currentUpdatedAt} —
  * never a silent last-write-wins between two admins.
+ *
+ * Phase 4: the sentinel row also carries the org-default review-agent
+ * settings (mode, battery packs, run tests, command timeout, max turns);
+ * null = inherit the system default. Same admin gate, same fences.
  */
 
-function toDto(row: {
-  supersedePolicy: string | null;
-  recheckOnComplete: boolean;
-  reviewDraftPrs: boolean | null;
-  updatedAt: Date;
-}) {
+function toDto(row: RepoReviewSetting) {
   return {
     supersedePolicy: row.supersedePolicy,
     recheckOnComplete: row.recheckOnComplete,
     reviewDraftPrs: row.reviewDraftPrs,
+    ...pickReviewAgentFields(row),
     updatedAt: row.updatedAt,
   };
 }
@@ -88,7 +94,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     recheckOnComplete?: unknown;
     reviewDraftPrs?: unknown;
     expectedUpdatedAt?: unknown;
-  };
+  } & Partial<Record<ReviewAgentField, unknown>>;
   try {
     body = await request.json();
   } catch {
@@ -98,16 +104,14 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   if ("errorResponse" in supersede) return supersede.errorResponse;
   const drafts = parseReviewDraftPrs(body);
   if ("errorResponse" in drafts) return drafts.errorResponse;
-  const patch = { ...supersede.patch, ...drafts };
-  if (
-    patch.supersedePolicy === undefined &&
-    patch.recheckOnComplete === undefined &&
-    patch.reviewDraftPrs === undefined
-  ) {
+  const reviewAgent = parseReviewAgentPatch(body);
+  if ("errorResponse" in reviewAgent) return reviewAgent.errorResponse;
+  const patch = { ...supersede.patch, ...drafts, ...reviewAgent.patch };
+  if (Object.keys(patch).length === 0) {
     return NextResponse.json(
       {
         error:
-          "provide supersedePolicy, recheckOnComplete and/or reviewDraftPrs",
+          "provide supersedePolicy, recheckOnComplete, reviewDraftPrs and/or a review-agent field",
       },
       { status: 400 },
     );
@@ -167,6 +171,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       supersedePolicy: row.supersedePolicy,
       recheckOnComplete: row.recheckOnComplete,
       reviewDraftPrs: row.reviewDraftPrs,
+      ...pickReviewAgentFields(row),
       changed: Object.keys(patch),
     },
   });

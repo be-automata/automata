@@ -16,6 +16,7 @@ import {
   RepoReviewSettingConflictError,
   getRepoReviewSettingWithOrgDefault,
 } from "./repo-review-settings";
+import type { ReviewAgentFieldsPatch } from "./review-agent-settings";
 
 const db = createDb(env.DATABASE_URL!);
 
@@ -842,5 +843,187 @@ describe("tri-state drafts: tolerance reset preserves the draft family", () => {
     // and the draft override UNTOUCHED — drafts are their own family now.
     expect(row?.blockTolerance).toBe("warning");
     expect(row?.reviewDraftPrs).toBe(false);
+  });
+});
+
+describe("review-agent columns (phase 4)", () => {
+  let orgId: string;
+  const repo = "acme/agents";
+  beforeEach(async () => {
+    orgId = await makeOrg("acme-review-agent");
+  });
+
+  async function read(repoFullName = repo) {
+    return getRepoReviewSetting({ db, organizationId: orgId, repoFullName });
+  }
+
+  it("stores all five fields on a fresh row without touching other families", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: {
+        reviewMode: "orchestrated",
+        reviewBatteries: ["somnio-review"],
+        reviewRunTests: true,
+        reviewCommandTimeoutS: 300,
+        reviewMaxTurns: 40,
+      },
+    });
+    const row = await read();
+    expect(row?.reviewMode).toBe("orchestrated");
+    expect(row?.reviewBatteries).toEqual(["somnio-review"]);
+    expect(row?.reviewRunTests).toBe(true);
+    expect(row?.reviewCommandTimeoutS).toBe(300);
+    expect(row?.reviewMaxTurns).toBe(40);
+    expect(row?.blockTolerance).toBe("warning");
+    expect(row?.supersedePolicy).toBeNull();
+  });
+
+  it("clears one field with null and leaves the other four unchanged", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: {
+        reviewMode: "orchestrated",
+        reviewBatteries: ["somnio-review"],
+        reviewRunTests: true,
+        reviewCommandTimeoutS: 300,
+        reviewMaxTurns: 40,
+      },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { reviewRunTests: null },
+    });
+    const row = await read();
+    expect(row?.reviewRunTests).toBeNull();
+    expect(row?.reviewMode).toBe("orchestrated");
+    expect(row?.reviewBatteries).toEqual(["somnio-review"]);
+    expect(row?.reviewCommandTimeoutS).toBe(300);
+    expect(row?.reviewMaxTurns).toBe(40);
+  });
+
+  it("review-agent and supersede/draft writes on the '*' row do not clobber each other", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { supersedePolicy: "complete-run-queue", reviewDraftPrs: true },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { reviewMode: "orchestrated", reviewMaxTurns: 100 },
+    });
+    let row = await read(ORG_DEFAULT_REPO_SENTINEL);
+    expect(row?.supersedePolicy).toBe("complete-run-queue");
+    expect(row?.reviewDraftPrs).toBe(true);
+    expect(row?.reviewMode).toBe("orchestrated");
+    expect(row?.reviewMaxTurns).toBe(100);
+
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { supersedePolicy: "newest-wins" },
+    });
+    row = await read(ORG_DEFAULT_REPO_SENTINEL);
+    expect(row?.supersedePolicy).toBe("newest-wins");
+    expect(row?.reviewMode).toBe("orchestrated");
+    expect(row?.reviewMaxTurns).toBe(100);
+  });
+
+  it.each<[string, ReviewAgentFieldsPatch]>([
+    ["reviewMode", { reviewMode: "turbo" }],
+    ["reviewBatteries", { reviewBatteries: ["nope"] }],
+    ["reviewCommandTimeoutS", { reviewCommandTimeoutS: 59 }],
+    ["reviewMaxTurns", { reviewMaxTurns: 501 }],
+  ])("throws on an invalid %s and writes nothing", async (field, patch) => {
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: repo,
+        patch,
+      }),
+    ).rejects.toThrow(field);
+    expect(await read()).toBeUndefined();
+  });
+
+  it("throws on an invalid value and leaves an existing row unchanged", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { reviewMode: "classic", reviewMaxTurns: 10 },
+    });
+    await expect(
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: repo,
+        patch: { reviewMode: "orchestrated", reviewMaxTurns: 501 },
+      }),
+    ).rejects.toThrow("reviewMaxTurns");
+    const row = await read();
+    expect(row?.reviewMode).toBe("classic");
+    expect(row?.reviewMaxTurns).toBe(10);
+  });
+
+  it("a row created by another family has all five review-agent columns NULL", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { blockTolerance: "error" },
+    });
+    const row = await read();
+    expect(row?.reviewMode).toBeNull();
+    expect(row?.reviewBatteries).toBeNull();
+    expect(row?.reviewRunTests).toBeNull();
+    expect(row?.reviewCommandTimeoutS).toBeNull();
+    expect(row?.reviewMaxTurns).toBeNull();
+  });
+
+  it("a tolerance reset keeps a row whose only other content is a review-agent override", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { blockTolerance: "error", reviewMode: "orchestrated" },
+    });
+    const { removed } = await removeRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+    });
+    expect(removed).toBe(true);
+    const row = await read();
+    expect(row).toBeDefined();
+    expect(row?.blockTolerance).toBe("warning");
+    expect(row?.reviewMode).toBe("orchestrated");
+  });
+
+  it("a tolerance reset keeps a row holding only an empty battery list", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { blockTolerance: "info", reviewBatteries: [] },
+    });
+    const { removed } = await removeRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+    });
+    expect(removed).toBe(true);
+    const row = await read();
+    expect(row).toBeDefined();
+    expect(row?.reviewBatteries).toEqual([]);
   });
 });

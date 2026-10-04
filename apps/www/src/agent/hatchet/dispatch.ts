@@ -14,10 +14,18 @@ import { ThreadError } from "@/agent/error";
 import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
 import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
-import type { ThreadSourceMetadata } from "@terragon/shared/db/types";
+import type {
+  ThreadSourceMetadata,
+  ThreadTrustContext,
+} from "@terragon/shared/db/types";
 import { resolveEgressPolicy } from "@/server-lib/egress/resolve-egress-policy";
 import {
-  resolveSupersedePolicy,
+  resolveReviewAgentFromRows,
+  type ReviewAgentDispatch,
+} from "@/server-lib/review/resolve-review-agent";
+import {
+  getRepoReviewSettingWithOrgDefault,
+  supersedeFromRows,
   normalizeRepo,
   type SupersedePolicy,
   type SupersedeSnapshot,
@@ -163,6 +171,16 @@ export interface AgentRunInput {
    */
   egressPolicy?: EgressPolicyShape;
   /**
+   * Phase 4, PR-review runs only: the effective review-agent settings,
+   * resolved LIVE at dispatch (repo row → '*' org default → system default).
+   * Classic = exactly today (runTests false, 60000 ms, no maxTurns). runTests
+   * is already downgraded for fork / cross-repo / untrusted PRs, with the
+   * reason recorded. maxTurns: Limits the lead reviewer's turns. Sub-agent turns are not counted, so this is not a cost limit.
+   * Absent for non-review runs (byte-identical legacy payload). Consumed by
+   * the worker in Phase 5; mirrored structurally in packages/worker types.
+   */
+  reviewAgent?: ReviewAgentDispatch;
+  /**
    * #125/#127 review runs only: the per-PR concurrency key,
    * `${orgId}/${normalizedRepo}/${prNumber}`. The worker variants' per-PR CEL
    * entry references `input.prKey` — the field, never an interpolation. Absent
@@ -201,10 +219,17 @@ export function hatchetDispatchEnabled(thread: {
  * present together, so "is this a review plan" is ONE predicate everywhere.
  */
 type ReviewPlan = {
-  /** Spread into the base input (prKey/deliveryId + the policy snapshot). */
+  /**
+   * Spread into the base input (prKey/deliveryId + the policy snapshot +
+   * the phase 4 review-agent settings).
+   */
   inputExtension: Pick<
     AgentRunInput,
-    "prKey" | "deliveryId" | "supersedePolicy" | "recheckOnComplete"
+    | "prKey"
+    | "deliveryId"
+    | "supersedePolicy"
+    | "recheckOnComplete"
+    | "reviewAgent"
   >;
   /** Variant workflow name + enriched metadata. */
   triggerOpts: TriggerOpts;
@@ -214,11 +239,13 @@ type ReviewPlan = {
 
 /**
  * Decide the dispatch mode ONCE (#125/#127/#165). Legacy plan only for a
- * non-review run. A review run resolves the (org, repo) policy — an
- * unknown stored value throws here, failing the dispatch loudly — and derive
- * the variant, the input extension and the metadata from the SNAPSHOT.
+ * non-review run. A review run reads the (org, repo) + '*' settings rows ONCE
+ * and resolves from them both the supersede policy and (phase 4) the
+ * review-agent settings — an unknown stored value in either throws here,
+ * failing the dispatch loudly — then derives the variant, the input extension
+ * and the metadata from the SNAPSHOT.
  */
-async function planSupersede({
+async function planReviewRun({
   reviewContext,
   thread,
   threadId,
@@ -228,7 +255,10 @@ async function planSupersede({
   deliveryId,
 }: {
   reviewContext: { organizationId: string; prNumber: number } | null;
-  thread: { sourceMetadata?: ThreadSourceMetadata | null } | null;
+  thread: {
+    sourceMetadata?: ThreadSourceMetadata | null;
+    trustContext?: ThreadTrustContext | null;
+  } | null;
   threadId: string;
   threadChatId: string;
   orgId: string;
@@ -242,10 +272,18 @@ async function planSupersede({
     // out-of-scope value.
     return null;
   }
-  const snapshot = await resolveSupersedePolicy({
+  const { organizationId } = reviewContext;
+  const rows = await getRepoReviewSettingWithOrgDefault({
     db,
-    organizationId: reviewContext.organizationId,
+    organizationId,
     repoFullName,
+  });
+  const snapshot = supersedeFromRows({ organizationId, ...rows });
+  const reviewAgent = await resolveReviewAgentFromRows({
+    db,
+    organizationId,
+    ...rows,
+    trustContext: thread?.trustContext ?? null,
   });
   const repo = normalizeRepo(repoFullName);
   const sourceMetadata = thread?.sourceMetadata;
@@ -278,6 +316,7 @@ async function planSupersede({
       deliveryId: deliveryId || `manual:${threadId}:${randomHex(8)}`,
       supersedePolicy: snapshot.policy,
       recheckOnComplete: snapshot.recheckOnComplete,
+      reviewAgent,
     },
     triggerOpts,
     snapshot,
@@ -287,6 +326,13 @@ async function planSupersede({
     ...snapshot,
     workflowName: triggerOpts.workflowName,
     deliveryId: plan.inputExtension.deliveryId,
+  });
+  console.log("[hatchet] review-agent settings", {
+    threadId,
+    mode: reviewAgent.mode,
+    runTests: reviewAgent.runTests,
+    runTestsDowngradedReason: reviewAgent.runTestsDowngradedReason,
+    commandTimeoutMs: reviewAgent.commandTimeoutMs,
   });
   return plan;
 }
@@ -351,7 +397,7 @@ export async function dispatchAgentRun({
   // first sibling failure without waiting for the mint, so a sibling that
   // rejects after the mint's row landed would otherwise leak the token. From
   // the mint on, EVERY failure before the trigger (sibling reads, base-branch
-  // resolve, egress resolve, planSupersede — which throws on a corrupt stored
+  // resolve, egress resolve, planReviewRun — which throws on a corrupt stored
   // policy) revokes it in the catch below, or
   // hasActiveDaemonToken() would report a phantom run for this runKey and
   // silently no-op every retry for the token's TTL (reviews on #135). The
@@ -490,7 +536,10 @@ export async function dispatchAgentRun({
     // SNAPSHOT, and the metadata is enriched. Supersession of prior runs is
     // ENGINE-ONLY (#165, ADR-007): www owns no cancel path — the variant's
     // per-PR strategy supersedes, and the C4 sweep reconciles.
-    const plan = await planSupersede({
+    // Phase 4: the same plan carries the review-agent settings. An invalid
+    // stored value throws into the catch below, which revokes the minted
+    // token — no local catch.
+    const plan = await planReviewRun({
       reviewContext,
       thread,
       threadId,
@@ -499,7 +548,10 @@ export async function dispatchAgentRun({
       repoFullName,
       deliveryId,
     });
-    const input: AgentRunInput = { ...baseInput, ...plan?.inputExtension };
+    const input: AgentRunInput = {
+      ...baseInput,
+      ...plan?.inputExtension,
+    };
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry
     // absorbs transients; only a FINAL failure lands in the catch below.

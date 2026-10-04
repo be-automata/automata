@@ -22,6 +22,7 @@ import {
 } from "@/components/settings/review-tolerance/org-draft-default-card";
 import { useSupersedeDefaultQuery } from "@/queries/supersede-policy-queries";
 import { SupersedePolicySection } from "@/components/settings/review-supersede/supersede-policy-section";
+import { ReviewAgentSection } from "@/components/settings/review-agent/review-agent-section";
 import { RepoRow } from "@/components/settings/review-tolerance/repo-row";
 import {
   ConfirmLoosenDialog,
@@ -240,6 +241,7 @@ export function ReviewSettings() {
       <OrgFloorCard />
       <OrgDraftDefaultCard />
       <SupersedePolicySection />
+      <ReviewAgentSection />
 
       <SettingsSection
         label="Review Tolerance"

@@ -186,4 +186,38 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
     expect(row?.supersedePolicy).toBe("complete-run-discard");
     expect(row?.blockTolerance).toBe("warning");
   });
+
+  describe("review-agent fields (phase 4)", () => {
+    it("a plain member who is not a repo admin is 403'd and nothing is stored", async () => {
+      await actor("member");
+      const res = await put({ reviewRunTests: true });
+      expect(res.status).toBe(403);
+      const row = await getRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      });
+      expect(row).toBeUndefined();
+    });
+
+    it("a repo admin who is not an org admin can set a review-agent field", async () => {
+      await actor("member");
+      vi.mocked(checkRepoAdmin).mockResolvedValue("admin");
+      const res = await put({ reviewRunTests: true });
+      expect(res.status).toBe(200);
+      const row = await getRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      });
+      expect(row?.reviewRunTests).toBe(true);
+    });
+
+    it("a failed GitHub lookup is 403 for a review-agent write", async () => {
+      await actor("member");
+      vi.mocked(checkRepoAdmin).mockResolvedValue("lookup-failed");
+      const res = await put({ reviewRunTests: true });
+      expect(res.status).toBe(403);
+    });
+  });
 });

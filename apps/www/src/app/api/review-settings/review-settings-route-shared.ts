@@ -3,13 +3,36 @@ import {
   isSupersedePolicy,
   SUPERSEDE_POLICIES,
 } from "@terragon/shared/model/repo-review-settings";
+import type { RepoReviewSetting } from "@terragon/shared/db/types";
+import {
+  REVIEW_AGENT_FIELDS,
+  findReviewAgentFieldError,
+  isValidReviewAgentPatch,
+  pickReviewAgentFields,
+  type ReviewAgentFieldsPatch,
+} from "@terragon/shared/model/review-agent-settings";
 
 /**
  * #125 C6 pieces shared by the two writers of the repo_review_settings table
  * (the per-repo route and the org-default sentinel route). Both the accepted
  * values and the 409 body shape are protocol with the client's ConflictError
- * parser — one copy here so they can't drift.
+ * parser — one copy here so they can't drift. Phase 4: this module also owns
+ * the review-agent family's body parsing for both writers and the per-repo
+ * row DTO shared by the list and per-repo routes.
  */
+
+/** The wire shape of one per-repo row (GET list and PUT response). */
+export function toRepoReviewSettingDto(row: RepoReviewSetting) {
+  return {
+    repoFullName: row.repoFullName,
+    blockTolerance: row.blockTolerance,
+    reviewDraftPrs: row.reviewDraftPrs,
+    supersedePolicy: row.supersedePolicy,
+    recheckOnComplete: row.recheckOnComplete,
+    ...pickReviewAgentFields(row),
+    updatedAt: row.updatedAt,
+  };
+}
 
 export type SupersedePatch = {
   supersedePolicy?: string | null;
@@ -75,4 +98,29 @@ export function parseReviewDraftPrs(body: {
     };
   }
   return { reviewDraftPrs: body.reviewDraftPrs };
+}
+
+/**
+ * Validate the review-agent fields of a PUT body (phase 4). Copies only the
+ * review-agent keys that are present; null clears (= inherit). Returns the
+ * patch or a 400 naming the first invalid field.
+ */
+export function parseReviewAgentPatch(
+  body: Record<string, unknown>,
+): { patch: ReviewAgentFieldsPatch } | { errorResponse: NextResponse } {
+  const raw: Record<string, unknown> = {};
+  for (const field of REVIEW_AGENT_FIELDS) {
+    if (body[field] !== undefined) {
+      raw[field] = body[field];
+    }
+  }
+  if (!isValidReviewAgentPatch(raw)) {
+    return {
+      errorResponse: NextResponse.json(
+        { error: findReviewAgentFieldError(raw) },
+        { status: 400 },
+      ),
+    };
+  }
+  return { patch: raw };
 }

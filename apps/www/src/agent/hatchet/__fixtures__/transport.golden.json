@@ -33,7 +33,13 @@
       "prKey": "__PR_KEY__",
       "deliveryId": "__DELIVERY_ID__",
       "supersedePolicy": "newest-wins",
-      "recheckOnComplete": false
+      "recheckOnComplete": false,
+      "reviewAgent": {
+        "mode": "classic",
+        "batteries": ["gstack-review", "somnio-review", "gsd-reviewers"],
+        "runTests": false,
+        "commandTimeoutMs": 60000
+      }
     },
     "additionalMetadata": {
       "metaVersion": "1",

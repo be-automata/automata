@@ -13,6 +13,11 @@ import {
   sql,
 } from "drizzle-orm";
 import { buildEgressPolicyShape } from "./egress-policy";
+import {
+  REVIEW_AGENT_FIELDS,
+  findReviewAgentFieldError,
+  type ReviewAgentFieldsPatch,
+} from "./review-agent-settings";
 
 /**
  * Per-repository REQUESTED_CHANGES severity tolerance (ADR-036 review floor),
@@ -161,13 +166,29 @@ export async function resolveSupersedePolicy({
   organizationId: string;
   repoFullName: string;
 }): Promise<SupersedeSnapshot> {
-  const { repo: repoRow, orgDefault } =
-    await getRepoReviewSettingWithOrgDefault({
-      db,
-      organizationId,
-      repoFullName,
-    });
-  for (const row of [repoRow, orgDefault]) {
+  const { repo, orgDefault } = await getRepoReviewSettingWithOrgDefault({
+    db,
+    organizationId,
+    repoFullName,
+  });
+  return supersedeFromRows({ organizationId, repo, orgDefault });
+}
+
+/**
+ * The pure half of {@link resolveSupersedePolicy}: resolve the snapshot from
+ * the already-fetched repo and '*' rows (callers that need the rows for other
+ * families too fetch them once). Same throw-on-unknown contract.
+ */
+export function supersedeFromRows({
+  organizationId,
+  repo,
+  orgDefault,
+}: {
+  organizationId: string;
+  repo: RepoReviewSetting | undefined;
+  orgDefault: RepoReviewSetting | undefined;
+}): SupersedeSnapshot {
+  for (const row of [repo, orgDefault]) {
     if (!row?.supersedePolicy) continue;
     if (row.supersedePolicy === RETIRED_SUPERSEDE_POLICY) {
       // TODO(#165): transient cutover shim — delete this branch once the
@@ -259,7 +280,9 @@ export async function upsertRepoReviewSetting({
     supersedePolicy?: string | null;
     /** #125 discard-mode recheck toggle. */
     recheckOnComplete?: boolean;
-  };
+    /* Phase 4 review-agent family (ReviewAgentFieldsPatch); null clears
+     * (= inherit). Validated by findReviewAgentFieldError before the write. */
+  } & ReviewAgentFieldsPatch;
   updatedByUserId?: string | null;
   /**
    * Optimistic concurrency (#131): when given, the write applies ONLY if the
@@ -340,6 +363,13 @@ export async function upsertRepoReviewSetting({
       `Unknown supersedePolicy '${patch.supersedePolicy}' — expected one of ${SUPERSEDE_POLICIES.join(", ")}`,
     );
   }
+  // Phase 4: same write-boundary rule for the review-agent family — an
+  // unknown mode/pack id or an out-of-range number never lands in the table
+  // (the resolver throws on read as backstop).
+  const reviewAgentError = findReviewAgentFieldError(patch);
+  if (reviewAgentError !== undefined) {
+    throw new Error(reviewAgentError);
+  }
   const set: {
     blockTolerance?: string;
     reviewDraftPrs?: boolean | null;
@@ -349,7 +379,10 @@ export async function upsertRepoReviewSetting({
     recheckOnComplete?: boolean;
     updatedByUserId: string | null;
     updatedAt: Date;
-  } = { updatedByUserId: updatedByUserId ?? null, updatedAt: new Date() };
+  } & ReviewAgentFieldsPatch = {
+    updatedByUserId: updatedByUserId ?? null,
+    updatedAt: new Date(),
+  };
   if (patch.blockTolerance !== undefined)
     set.blockTolerance = patch.blockTolerance;
   if (patch.reviewDraftPrs !== undefined)
@@ -361,6 +394,11 @@ export async function upsertRepoReviewSetting({
     set.supersedePolicy = patch.supersedePolicy;
   if (patch.recheckOnComplete !== undefined)
     set.recheckOnComplete = patch.recheckOnComplete;
+  for (const field of REVIEW_AGENT_FIELDS) {
+    if (patch[field] !== undefined) {
+      Object.assign(set, { [field]: patch[field] });
+    }
+  }
 
   // CAS has two shapes: a version fence for edits (updated_at must still be
   // the value the admin read), and an ABSENCE fence for first writes
@@ -426,7 +464,8 @@ export async function setRepoReviewSetting({
  * "Reset to default" for the TOLERANCE family (block tolerance only — the
  * draft-PR policy is its OWN family since the tri-state migration and a
  * tolerance reset must NOT touch it) of one repo. The row is shared with the
- * other per-repo families (#66 egress, #125 supersede policy, drafts): when
+ * other per-repo families (#66 egress, #125 supersede policy, drafts, the
+ * phase 4 review-agent family): when
  * any of those still carries an override the row is KEPT and only the
  * tolerance columns go back to their defaults; the row is deleted only when
  * nothing else lives on it. Resetting a repo's tolerance must never silently
@@ -465,6 +504,9 @@ export async function removeRepoReviewSetting({
     // content is a draft override must survive a tolerance reset — and the
     // reset below no longer touches reviewDraftPrs at all.
     isNotNull(repoReviewSettings.reviewDraftPrs),
+    // Review-agent family, phase 4: a row whose only other content is a
+    // review-agent override (even an explicit empty battery list) survives.
+    ...REVIEW_AGENT_FIELDS.map((field) => isNotNull(repoReviewSettings[field])),
   )!;
   const reset = await db
     .update(repoReviewSettings)

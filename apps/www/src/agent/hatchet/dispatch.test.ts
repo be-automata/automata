@@ -704,3 +704,208 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
     vi.unstubAllGlobals();
   });
 });
+
+describe("dispatchAgentRun — phase 4 reviewAgent payload", () => {
+  let user: User;
+  let orgId: string;
+  const REPO = "be-automata/automata";
+  const CLASSIC_DEFAULTS = {
+    mode: "classic",
+    batteries: ["gstack-review", "somnio-review", "gsd-reviewers"],
+    runTests: false,
+    commandTimeoutMs: 60000,
+  };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    user = (await createTestUser({ db })).user;
+    const org = await createOrganization({
+      db,
+      name: "Org",
+      slug: `org-${nanoid(8).toLowerCase()}`,
+    });
+    orgId = org.id;
+  });
+
+  const makeReviewThread = async (
+    prNumber: number,
+    triggerType: "pull_request" | "github_mention" = "pull_request",
+  ) =>
+    createBootingPRThread({
+      userId: user.id,
+      orgId,
+      automationId: await createReviewAutomation({
+        userId: user.id,
+        orgId,
+        triggerType,
+      }),
+      prNumber,
+    });
+
+  const setTrust = async (
+    threadId: string,
+    trust: { isFork: boolean; isCrossRepo: boolean; authorAssociation: string },
+  ) =>
+    db
+      .update(threadTable)
+      .set({
+        trustContext: {
+          source: "github-pr",
+          capturedAt: new Date().toISOString(),
+          ...trust,
+        },
+      })
+      .where(eq(threadTable.id, threadId));
+
+  const orchestratedWithRunTests = async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "*",
+      patch: { reviewMode: "orchestrated" },
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { reviewRunTests: true },
+    });
+  };
+
+  const dispatchAndRead = async (t: {
+    threadId: string;
+    threadChatId: string;
+  }) => {
+    const f = routedHatchetFetch("run-agent");
+    vi.stubGlobal("fetch", f.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      repoFullName: REPO,
+      branch: "feature",
+    });
+    const body = triggerBody(f.mock);
+    vi.unstubAllGlobals();
+    return body.input;
+  };
+
+  it("review thread with no settings rows carries the classic defaults", async () => {
+    const t = await makeReviewThread(901);
+    const input = await dispatchAndRead(t);
+    expect(input.reviewAgent).toEqual(CLASSIC_DEFAULTS);
+  });
+
+  it("orchestrated + runTests on a fork PR → runTests false, reason fork", async () => {
+    await orchestratedWithRunTests();
+    const t = await makeReviewThread(902);
+    await setTrust(t.threadId, {
+      isFork: true,
+      isCrossRepo: true,
+      authorAssociation: "OWNER",
+    });
+    const input = await dispatchAndRead(t);
+    expect(input.reviewAgent).toEqual({
+      mode: "orchestrated",
+      batteries: CLASSIC_DEFAULTS.batteries,
+      runTests: false,
+      runTestsDowngradedReason: "fork",
+      commandTimeoutMs: 300000,
+    });
+  });
+
+  it("orchestrated + runTests on a trusted same-repo PR → runTests true", async () => {
+    await orchestratedWithRunTests();
+    const t = await makeReviewThread(903);
+    await setTrust(t.threadId, {
+      isFork: false,
+      isCrossRepo: false,
+      authorAssociation: "MEMBER",
+    });
+    const input = await dispatchAndRead(t);
+    expect(input.reviewAgent).toEqual({
+      mode: "orchestrated",
+      batteries: CLASSIC_DEFAULTS.batteries,
+      runTests: true,
+      commandTimeoutMs: 300000,
+    });
+  });
+
+  it("classic repo row ignores stored runTests/timeout/maxTurns (W4)", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: {
+        reviewMode: "classic",
+        reviewRunTests: true,
+        reviewCommandTimeoutS: 600,
+        reviewMaxTurns: 50,
+      },
+    });
+    const t = await makeReviewThread(904);
+    const input = await dispatchAndRead(t);
+    expect(input.reviewAgent).toEqual(CLASSIC_DEFAULTS);
+  });
+
+  it("plain org thread carries no reviewAgent even with an orchestrated '*' row", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "*",
+      patch: { reviewMode: "orchestrated" },
+    });
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { organizationId: orgId },
+    });
+    const input = await dispatchAndRead(t);
+    expect("reviewAgent" in input).toBe(false);
+  });
+
+  it("mention thread carries no reviewAgent", async () => {
+    const t = await makeReviewThread(905, "github_mention");
+    const input = await dispatchAndRead(t);
+    expect("reviewAgent" in input).toBe(false);
+  });
+
+  it("a corrupt stored review-agent value fails the dispatch and revokes the token", async () => {
+    const t = await makeReviewThread(906);
+    const runKey = daemonRunKey({
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+    });
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { reviewMode: "classic" },
+    });
+    await db
+      .update(repoReviewSettings)
+      .set({ reviewMode: "turbo" })
+      .where(eq(repoReviewSettings.organizationId, orgId));
+    const f = routedHatchetFetch("never");
+    vi.stubGlobal("fetch", f.mock);
+    await expect(
+      dispatchAgentRun({
+        userId: user.id,
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        repoFullName: REPO,
+        branch: "feature",
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/Failed to dispatch/),
+      cause: expect.objectContaining({
+        message: expect.stringMatching(/reviewMode/),
+      }),
+    });
+    expect(f.mock).not.toHaveBeenCalled();
+    expect(await hasActiveDaemonToken({ userId: user.id, name: runKey })).toBe(
+      false,
+    );
+    vi.unstubAllGlobals();
+  });
+});

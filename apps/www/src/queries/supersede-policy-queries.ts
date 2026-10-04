@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
+import type { ReviewAgentValues } from "@terragon/shared/model/review-agent-settings";
 import { ConflictError, errorFromResponse } from "./error-from-response";
 
 /**
@@ -9,13 +10,17 @@ import { ConflictError, errorFromResponse } from "./error-from-response";
  * `useSetReviewSettingMutation` (same endpoint as the tolerance overrides).
  * A 409 (another admin saved concurrently) surfaces as {@link ConflictError},
  * which the section renders with a Reload action — never a silent overwrite.
+ * Phase 4: the sentinel row's cache entry is now shared by three cards
+ * (supersede, drafts, review agent), so the synchronous setQueryData on
+ * success matters even more.
  */
-export interface SupersedeDefaultDto {
+export interface SupersedeDefaultDto extends ReviewAgentValues {
   supersedePolicy: SupersedePolicy | null;
   recheckOnComplete: boolean;
   /** Org-wide draft-PR default. Tri-state: null = the org has not chosen
    * (falls through to the legacy automation filter, then FALSE). */
   reviewDraftPrs: boolean | null;
+  // Phase 4 org-default review-agent settings (ReviewAgentValues): null = system default.
   updatedAt: string;
 }
 
@@ -46,12 +51,14 @@ export function useSetSupersedeDefaultMutation(options?: {
   const successMessage =
     options?.successMessage ?? "Org default saved. Applies to new runs.";
   return useMutation({
-    mutationFn: async (args: {
-      supersedePolicy?: SupersedePolicy | null;
-      recheckOnComplete?: boolean;
-      reviewDraftPrs?: boolean | null;
-      expectedUpdatedAt?: string | null;
-    }): Promise<SupersedeDefaultDto> => {
+    mutationFn: async (
+      args: {
+        supersedePolicy?: SupersedePolicy | null;
+        recheckOnComplete?: boolean;
+        reviewDraftPrs?: boolean | null;
+        expectedUpdatedAt?: string | null;
+      } & Partial<ReviewAgentValues>,
+    ): Promise<SupersedeDefaultDto> => {
       const res = await fetch("/api/review-settings/default", {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -63,7 +70,7 @@ export function useSetSupersedeDefaultMutation(options?: {
     },
     onSuccess: (setting) => {
       toast.success(successMessage);
-      // Synchronous cache write of the returned row. Two cards share this
+      // Synchronous cache write of the returned row. Three cards share this
       // sentinel row's cache entry; invalidate-only left a window where the
       // sibling still held the prior updatedAt and self-409ed on its next
       // save. The PUT response IS the stored row, so no refetch needed.

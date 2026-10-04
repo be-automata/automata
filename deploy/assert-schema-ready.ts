@@ -36,6 +36,10 @@
 // in packages/shared, which really does depend on drizzle-orm. (#173 review.)
 import { createDb, sql } from "../packages/shared/src/db";
 
+const REVIEW_AGENT_SINCE =
+  "phase 4 (review-agent settings) — the dispatch resolver selects this " +
+  "column on every PR-review run; without it every review dispatch fails";
+
 /** Columns this revision of the code cannot run without. */
 const REQUIRED: ReadonlyArray<{
   table: string;
@@ -45,8 +49,34 @@ const REQUIRED: ReadonlyArray<{
   {
     table: "egress_events",
     column: "mode",
-    since: "#108 — distinguishes an observe-mode allow from an enforced one; " +
+    since:
+      "#108 — distinguishes an observe-mode allow from an enforced one; " +
       "without it the audit trail cannot say which traffic was actually fenced",
+  },
+  {
+    table: "repo_review_settings",
+    column: "review_mode",
+    since: REVIEW_AGENT_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "review_batteries",
+    since: REVIEW_AGENT_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "review_run_tests",
+    since: REVIEW_AGENT_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "review_command_timeout_s",
+    since: REVIEW_AGENT_SINCE,
+  },
+  {
+    table: "repo_review_settings",
+    column: "review_max_turns",
+    since: REVIEW_AGENT_SINCE,
   },
 ];
 
