@@ -527,6 +527,9 @@ async function runAgentInner(
   // log through the same prefix as the admission steps.
   const admissionLog = (m: string) =>
     ctx.log(`[agent-run ${input.threadId}] ${m}`);
+  // Every cleanupWorkdir below: agent-uid mode hands the agent's files back
+  // before the rm, and a workdir that still survives is logged, not swallowed.
+  const workdirCleanup = { agentUser: config.agentUser, log: admissionLog };
   try {
     // #183 (#152 Stage B1): the box's ONE agent-run lock (box-lock.ts) — a
     // kernel flock(2) held by a helper child, so the kernel drops it the
@@ -612,7 +615,7 @@ async function runAgentInner(
     });
   } catch (err) {
     await boxLock?.release();
-    await cleanupWorkdir(workdir);
+    await cleanupWorkdir(workdir, workdirCleanup);
     throw err;
   }
   // #209 item 1: capture WHICH credential path this run took, once, here —
@@ -690,7 +693,7 @@ async function runAgentInner(
       await closeQuietly(egressEvents);
       await materialised.cleanup();
       await boxLock?.release();
-      await cleanupWorkdir(workdir);
+      await cleanupWorkdir(workdir, workdirCleanup);
       throw err;
     }
     step(
@@ -744,7 +747,7 @@ async function runAgentInner(
       await closeQuietly(egressEvents);
       await materialised.cleanup();
       await boxLock?.release();
-      await cleanupWorkdir(workdir);
+      await cleanupWorkdir(workdir, workdirCleanup);
       throw err;
     }
     step(
@@ -893,7 +896,7 @@ async function runAgentInner(
     // Wipe the delivered credential before the workdir goes, so a cleanup
     // failure on the workdir can never leave a live token behind.
     await materialised.cleanup();
-    await cleanupWorkdir(workdir);
+    await cleanupWorkdir(workdir, workdirCleanup);
     // The box lock goes last (ADR-007 I2): the next run may start only once
     // this one's daemon is dead and its disk footprint is gone.
     await boxLock?.release();

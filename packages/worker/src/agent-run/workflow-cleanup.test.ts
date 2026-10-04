@@ -301,7 +301,7 @@ describe("agent-run run task — workdir is never leaked by a failed credential 
 
     expect(provisionWorkdir).toHaveBeenCalledTimes(1);
     expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
-    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
+    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR, expect.anything());
   });
 
   it("removes the clone when materialising the credential throws (fs failure)", async () => {
@@ -316,7 +316,7 @@ describe("agent-run run task — workdir is never leaked by a failed credential 
     await expect(runFn(INPUT, ctx())).rejects.toThrow(/EACCES/);
 
     expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
-    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
+    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR, expect.anything());
   });
 
   it("propagates the original error unchanged, so retry classification still sees it", async () => {
@@ -371,7 +371,7 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
 
     expect(credentialCleanup).toHaveBeenCalledTimes(1);
     expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
-    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
+    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR, expect.anything());
   });
 
   it("teardown: a run that started the proxy closes it exactly once in the finally", async () => {
@@ -422,7 +422,7 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
     expect(daemonCtorArgs).toHaveLength(0);
     expect(close).toHaveBeenCalledTimes(1);
     expect(credentialCleanup).toHaveBeenCalledTimes(1);
-    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
+    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR, expect.anything());
   });
 
   it("#108: no policy AND no agentUser: the proxy is never started (default-off proof)", async () => {
@@ -596,7 +596,7 @@ describe("agent-run run task — credential brokers (#81)", () => {
     expect(startGhBroker).not.toHaveBeenCalled();
     expect(credentialCleanup).toHaveBeenCalledTimes(1);
     expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
-    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
+    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR, expect.anything());
   });
 
   it("gh broker start failure: closes the already-started git broker AND the egress proxy, then rethrows", async () => {
@@ -870,7 +870,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     await expect(
       runFn({ ...PR_INPUT, supersedePolicy: "complete-run-queue" }, ctx),
     ).rejects.toThrow("aborted during pull");
-    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
+    expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR, expect.anything());
     expect(postRunTerminal).toHaveBeenCalledTimes(1);
   });
 
@@ -932,7 +932,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
         }),
       );
       expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
-      expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR);
+      expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR, expect.anything());
       expect(postRunFailed).not.toHaveBeenCalled();
       expect(releaseMock).not.toHaveBeenCalled();
     } finally {

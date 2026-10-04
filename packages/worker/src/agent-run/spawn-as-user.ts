@@ -227,3 +227,67 @@ export function buildKillAllAsAgentInvocation(opts: {
     env: {},
   };
 }
+
+/**
+ * The teardown hand-back, run AS the agent account before the worker's rm.
+ *
+ * WHY IT EXISTS (Linux only). The agent CLI creates its dirs and files 0700 /
+ * 0600, and on an ACL'd inode the creation mode's group bits ARE the POSIX ACL
+ * mask: the worker's inherited `user:<worker>:rwx` entry is born
+ * `#effective:---`, so the worker can neither traverse nor unlink inside, and
+ * every run left its HOME behind — session `.key` files included. Only the
+ * owner (the agent) may chmod those inodes back, and `chmod g+rwX` on an ACL'd
+ * inode raises the mask, which re-enables the entry the workdir's default ACL
+ * already gave the worker.
+ *
+ * Fixed and parameter-free like the daemon wrapper: the workdir arrives as `$1`,
+ * never interpolated. `find` without `-L` does not follow symlinks while
+ * walking, `-xdev` stays on the workdir's filesystem, and `! -type l` keeps
+ * chmod (which DOES follow a symlink named on its command line) from reaching
+ * a link's target outside the run.
+ *
+ * `cd /` first: sudo keeps the worker's cwd, which the agent uid usually cannot
+ * enter, and GNU find aborts ("Failed to restore initial working directory")
+ * before touching anything — reproduced on the box, where it left every file
+ * locked.
+ */
+export const HAND_BACK_SCRIPT =
+  'cd / && find "$1" -xdev -user "$(id -un)" ! -type l -exec chmod g+rwX {} +';
+
+/**
+ * Build the hand-back invocation. `agentUser` empty ⇒ null: there is no agent
+ * uid, so every file in the workdir is already the worker's to remove. No `-E`,
+ * as on the kill paths — the script needs no environment, so no SETENV.
+ */
+export function buildHandBackInvocation(opts: {
+  agentUser: string;
+  workdir: string;
+}): Invocation | null {
+  const { agentUser, workdir } = opts;
+  if (!agentUser) {
+    return null;
+  }
+  assertAgentUser(agentUser);
+  // Absolute, so `find` can never read it as a flag or an expression; and never
+  // the filesystem root, which is no run's workdir under any configuration.
+  if (!workdir.startsWith("/") || workdir.replace(/\/+$/, "") === "") {
+    throw new Error(
+      `buildHandBackInvocation: workdir must be an absolute path below /, got ${JSON.stringify(workdir)}`,
+    );
+  }
+  return {
+    file: SUDO_BIN,
+    args: [
+      "-n",
+      "-u",
+      agentUser,
+      "--",
+      SH_BIN,
+      "-c",
+      HAND_BACK_SCRIPT,
+      "sh",
+      workdir,
+    ],
+    env: {},
+  };
+}
