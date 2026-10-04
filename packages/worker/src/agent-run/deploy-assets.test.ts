@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   BATTERY_PACK_IDS,
+  BATTERY_PACK_REQUIRES,
   REVIEW_BATTERY_PACK_IDS,
 } from "../../../shared/src/model/review-agent-settings";
 import {
@@ -663,6 +664,21 @@ describe("#batteries (phase 3): batteries.json", () => {
     // every orchestrated review loads.
     for (const id of REVIEW_BATTERY_PACK_IDS) {
       expect(packById(id), id).toEqual(PHASE3_REVIEW_PACKS[id]);
+    }
+  });
+
+  it("somnio-skills requires a read-only GitHub token; the review packs declare nothing (phase 7)", () => {
+    expect(packById("somnio-skills").requires).toEqual(["github-read-token"]);
+    for (const id of REVIEW_BATTERY_PACK_IDS) {
+      expect("requires" in packById(id), id).toBe(false);
+    }
+  });
+
+  it("every pack's requires equals the shared BATTERY_PACK_REQUIRES (www decides from the shared map)", () => {
+    for (const pack of readBatteriesManifest().packs) {
+      expect(pack.requires ?? [], pack.id).toEqual([
+        ...BATTERY_PACK_REQUIRES[pack.id as keyof typeof BATTERY_PACK_REQUIRES],
+      ]);
     }
   });
 
@@ -1697,6 +1713,12 @@ describe("#batteries (phase 7): bash preflight parity with the TS guard (execute
   const committed = readBatteriesManifest();
   const platform = HOST_DART_PLATFORM;
 
+  function somnioSkillsOf(m: BatteriesManifest) {
+    const pack = m.packs.find((p) => p.id === "somnio-skills");
+    if (!pack) throw new Error("no somnio-skills pack");
+    return pack;
+  }
+
   function based(
     targetPlatform: string,
     change: (m: BatteriesManifest, p: string) => void,
@@ -1835,6 +1857,29 @@ describe("#batteries (phase 7): bash preflight parity with the TS guard (execute
         Object.assign(dartAotOf(m), { kind: "dart-jit" });
       },
       "unknown kind",
+    ],
+    [
+      'pack requires ["github-write-token"]',
+      (m) => {
+        Object.assign(somnioSkillsOf(m), { requires: ["github-write-token"] });
+      },
+      "FAIL preflight somnio-skills: requires must be a list drawn from github-read-token",
+    ],
+    [
+      "a duplicate pack requires entry",
+      (m) => {
+        Object.assign(somnioSkillsOf(m), {
+          requires: ["github-read-token", "github-read-token"],
+        });
+      },
+      "FAIL preflight somnio-skills: requires must be a list drawn from github-read-token",
+    ],
+    [
+      "a non-array pack requires",
+      (m) => {
+        Object.assign(somnioSkillsOf(m), { requires: "github-read-token" });
+      },
+      "FAIL preflight somnio-skills: requires must be a list drawn from github-read-token",
     ],
   ])("both reject %s", (_name, change, failText) => {
     expect(

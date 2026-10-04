@@ -88,6 +88,7 @@
       "repo": "https://github.com/somnio-software/somnio-ai-tools",
       "sha": "aa53f071128a32bdafe4fbf77a7b0e0940b33db9",
       "license": "MIT",
+      "requires": ["github-read-token"],
       "subpaths": [
         {
           "src": "skills/dora-metrics",

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   BATTERIES_OVERLAY_DIR,
+  BATTERY_REQUIREMENTS,
   DART_SDK_URL_TEMPLATE,
   FORBIDDEN_NAMES,
   findBatteriesManifestError,
@@ -546,6 +547,35 @@ describe("findBatteriesManifestError — strict keys", () => {
     ],
   ])("rejects an unknown key on the %s", (_name, mutate, fragment) => {
     expectRejected(mutate, fragment);
+  });
+});
+
+describe("findBatteriesManifestError — pack requires (phase 7)", () => {
+  it("names exactly one requirement", () => {
+    expect([...BATTERY_REQUIREMENTS]).toEqual(["github-read-token"]);
+  });
+
+  it.each<[string, unknown]>([
+    ["absent", undefined],
+    ["empty", []],
+    ["github-read-token", ["github-read-token"]],
+  ])("accepts requires %s", (_name, requires) => {
+    const f = mutated((m) => {
+      if (requires !== undefined) Object.assign(m.packs[0]!, { requires });
+    });
+    expect(findBatteriesManifestError(f)).toBeUndefined();
+  });
+
+  it.each<[string, unknown]>([
+    ["not an array", "github-read-token"],
+    ["an unknown requirement", ["github-write-token"]],
+    ["a duplicate", ["github-read-token", "github-read-token"]],
+    ["a non-string entry", [1]],
+  ])("rejects requires %s", (_name, requires) => {
+    expectRejected(
+      (m) => Object.assign(m.packs[0]!, { requires }),
+      "packs[0].requires",
+    );
   });
 });
 

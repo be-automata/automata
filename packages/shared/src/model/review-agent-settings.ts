@@ -69,6 +69,40 @@ export const BATTERY_PACK_IDS = [
 ] as const;
 export type BatteryPackId = (typeof BATTERY_PACK_IDS)[number];
 
+/**
+ * Capabilities a pack can require of the control plane (phase 7). Mirrors
+ * the manifest's `packs[].requires` closed set (batteries-manifest.ts
+ * BATTERY_REQUIREMENTS + the installer preflight).
+ */
+export const BATTERY_REQUIREMENTS = ["github-read-token"] as const;
+export type BatteryRequirement = (typeof BATTERY_REQUIREMENTS)[number];
+
+/**
+ * What each pack requires; pinned equal to batteries.json by deploy-assets.
+ * Selecting a pack that requires `github-read-token` in the Admin panel IS the
+ * opt-in (D1) for a read-only, single-repo, ≤1h GitHub App token on task runs
+ * — never on review runs.
+ */
+export const BATTERY_PACK_REQUIRES: Record<
+  BatteryPackId,
+  readonly BatteryRequirement[]
+> = {
+  "gstack-review": [],
+  "somnio-review": [],
+  "gsd-reviewers": [],
+  "somnio-skills": ["github-read-token"],
+};
+
+/** True when any known id in `ids` requires `req`; unknown ids are ignored. */
+export function packsRequire(
+  ids: readonly string[],
+  req: BatteryRequirement,
+): boolean {
+  return ids.some(
+    (id) => isBatteryPackId(id) && BATTERY_PACK_REQUIRES[id].includes(req),
+  );
+}
+
 export function isBatteryPackId(value: unknown): value is BatteryPackId {
   return (
     typeof value === "string" &&

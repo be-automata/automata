@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   BATTERY_PACK_IDS,
   BATTERY_PACK_LABELS,
+  BATTERY_PACK_REQUIRES,
+  BATTERY_REQUIREMENTS,
   DEFAULT_REVIEW_MODE,
   DEFAULT_TASK_BATTERIES,
   REVIEW_AGENT_FIELDS,
@@ -18,6 +20,7 @@ import {
   isBatteryPackId,
   isReviewBatteryPackId,
   isReviewMode,
+  packsRequire,
   pickReviewAgentFields,
 } from "./review-agent-settings";
 
@@ -313,5 +316,33 @@ describe("findReviewAgentFieldError", () => {
     expect(
       findReviewAgentFieldError({ supersedePolicy: "junk" }),
     ).toBeUndefined();
+  });
+});
+
+describe("pack requirements (phase 7)", () => {
+  it("names exactly one requirement", () => {
+    expect([...BATTERY_REQUIREMENTS]).toEqual(["github-read-token"]);
+  });
+
+  it("has an entry for every pack id and nothing else", () => {
+    expect(Object.keys(BATTERY_PACK_REQUIRES).sort()).toEqual(
+      [...BATTERY_PACK_IDS].sort(),
+    );
+    expect(BATTERY_PACK_REQUIRES["somnio-skills"]).toEqual([
+      "github-read-token",
+    ]);
+    for (const id of REVIEW_BATTERY_PACK_IDS) {
+      expect(BATTERY_PACK_REQUIRES[id], id).toEqual([]);
+    }
+  });
+
+  it.each<[string[], boolean]>([
+    [["somnio-skills"], true],
+    [["somnio-review", "somnio-skills"], true],
+    [["somnio-review"], false],
+    [["nope"], false],
+    [[], false],
+  ])("packsRequire(%j, github-read-token) = %s", (ids, expected) => {
+    expect(packsRequire(ids, "github-read-token")).toBe(expected);
   });
 });

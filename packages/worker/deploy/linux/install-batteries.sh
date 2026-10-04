@@ -363,6 +363,14 @@ preflight() {
     [ "$repo" = "self" ] || [[ "$repo" =~ $re_github ]] ||
       record "FAIL preflight $id: repo must be self or a github https url"
     [[ "$sha" =~ $re_sha1 ]] || record "FAIL preflight $id: sha is not 40 hex"
+    # Phase 7: `requires` names a capability the control plane grants runs
+    # that select the pack (closed set, mirrored by the TS guard). It is part
+    # of the pack entry, so adding it re-stages that pack once (harmless).
+    jq -e --argjson i "$i" '
+      (.packs[$i].requires // []) | type == "array"
+        and all(.[]; . == "github-read-token")
+        and length == (unique | length)' "$MANIFEST" >/dev/null 2>&1 ||
+      record "FAIL preflight $id: requires must be a list drawn from github-read-token"
     while IFS=$'\t' read -r -u 4 src dest git_id ex_rest; do
       check_vendored_path "$id" src "$src"
       check_vendored_path "$id" dest "$dest"

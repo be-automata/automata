@@ -26,6 +26,12 @@
  * bytes and the installer refuses an overlay whose sha256 differs, so the
  * drift guard covers the lock transitively.
  *
+ * `requires` (phase 7, optional per pack, absent = none) names a capability
+ * the CONTROL PLANE grants to runs that select the pack — today only
+ * `github-read-token` (a read-only, single-repo, ≤1h GitHub App token for task
+ * runs). It never changes what is installed. Closed set: BATTERY_REQUIREMENTS,
+ * mirrored by shared BATTERY_PACK_REQUIRES and by the bash preflight.
+ *
  * Zero imports on purpose, so tests and Phase 5 can use it without adding a
  * dependency.
  */
@@ -33,6 +39,9 @@
 export const BATTERIES_MANIFEST_REPO_PATH =
   "packages/worker/deploy/batteries.json";
 export const BATTERIES_OVERLAY_DIR = "packages/worker/deploy/batteries/";
+
+/** The closed set of pack `requires` entries (mirror of shared BATTERY_REQUIREMENTS). */
+export const BATTERY_REQUIREMENTS = ["github-read-token"] as const;
 
 /** Pack id AND CLI name. Both end up in filesystem paths and shell words. */
 export const ID_OR_NAME = /^[a-z0-9][a-z0-9-]*$/;
@@ -116,6 +125,8 @@ export interface BatteryPack {
   subpaths: BatteryPackSubpath[];
   overlays?: BatteryPackOverlay[];
   allowedHelperRefs?: AllowedHelperRef[];
+  /** Capabilities the control plane grants runs that select this pack (phase 7). */
+  requires?: string[];
 }
 
 export interface BatteryCli {
@@ -210,6 +221,7 @@ const PACK_KEYS = [
   "subpaths",
   "overlays",
   "allowedHelperRefs",
+  "requires",
 ] as const;
 const SUBPATH_KEYS = ["src", "dest", "gitId", "exclude"] as const;
 const OVERLAY_KEYS = ["from", "dest"] as const;
@@ -437,6 +449,24 @@ function findOptionalListError(
   return findListError(value, at, findItemError, { allowEmpty: true });
 }
 
+function findRequiresError(value: unknown, at: string): string | undefined {
+  if (value === undefined) return undefined;
+  const allowed = `must be a list drawn from ${BATTERY_REQUIREMENTS.join(", ")}, without duplicates`;
+  if (!Array.isArray(value)) return `${at}: ${allowed}`;
+  const seen = new Set<unknown>();
+  for (const [index, item] of value.entries()) {
+    if (
+      typeof item !== "string" ||
+      !(BATTERY_REQUIREMENTS as readonly string[]).includes(item) ||
+      seen.has(item)
+    ) {
+      return `${at}[${index}]: ${allowed}`;
+    }
+    seen.add(item);
+  }
+  return undefined;
+}
+
 function findPackError(value: unknown, at: string): string | undefined {
   if (!isRecord(value)) return `${at}: must be an object`;
   const repoError =
@@ -458,7 +488,8 @@ function findPackError(value: unknown, at: string): string | undefined {
       value.allowedHelperRefs,
       `${at}.allowedHelperRefs`,
       findHelperRefError,
-    )
+    ) ??
+    findRequiresError(value.requires, `${at}.requires`)
   );
 }
 
