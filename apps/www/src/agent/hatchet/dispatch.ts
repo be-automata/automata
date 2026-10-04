@@ -45,10 +45,7 @@ import {
   clearThreadTerminalForResume,
 } from "@terragon/shared/model/threads";
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
-import {
-  planSelfHealAuditRun,
-  type SelfHealRunInput,
-} from "@/server-lib/audit/plan-self-heal-run";
+import type { SelfHealRunInput } from "@/server-lib/audit/plan-self-heal-run";
 import {
   triggerAgentRun,
   workflowNameForPolicy,
@@ -722,7 +719,9 @@ export async function dispatchAgentRun({
     // deterministic checks. Never throws; {} for every other dispatch.
     const selfHealPlan =
       plan === null && orgSettings !== undefined
-        ? await planSelfHealAuditRun({
+        ? await (
+            await import("@/server-lib/audit/plan-self-heal-run")
+          ).planSelfHealAuditRun({
             db,
             organizationId: orgSettings.organizationId,
             repoFullName,

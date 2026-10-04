@@ -34,7 +34,6 @@ import {
   parseClaudeOAuthTokenRevokedMessage,
 } from "@/agent/msg/helpers";
 import { maybeStartQueuedThreadChat } from "./process-queued-thread";
-import { handleAuditFindingsAtFinish } from "@/server-lib/audit/audit-finish";
 import { handleReviewEffectAtFinish } from "./review/review-single-writer-finish";
 import {
   maybeRecheckOnComplete,
@@ -676,18 +675,24 @@ async function handleThreadFinish({
   // Phase 8: the audit lane has no PR number, so its hook is a SIBLING of the
   // block above, never inside it. It no-ops for any thread that is not stamped
   // with the audit-findings skill.
+  // Dynamic import: the audit writer (GitHub client, ledger, flag reads) loads
+  // only when a daemon event reaches this point, not with this module.
   waitUntil(
-    handleAuditFindingsAtFinish({
-      db,
-      userId,
-      threadId,
-      threadChatId,
-    }).catch((error) =>
-      console.error("[audit-findings] finish-hook failed (non-fatal)", {
-        threadId,
-        error,
-      }),
-    ),
+    import("@/server-lib/audit/audit-finish")
+      .then(({ handleAuditFindingsAtFinish }) =>
+        handleAuditFindingsAtFinish({
+          db,
+          userId,
+          threadId,
+          threadChatId,
+        }),
+      )
+      .catch((error) =>
+        console.error("[audit-findings] finish-hook failed (non-fatal)", {
+          threadId,
+          error,
+        }),
+      ),
   );
 
   // ADR-003 F3 (S12 fix — DECOUPLED): the daemon token is NO LONGER revoked here.
