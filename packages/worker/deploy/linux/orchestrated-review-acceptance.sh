@@ -44,7 +44,6 @@ REPO_DIR="$(cd -P "$SCRIPT_DIR/../../../.." && pwd -P)"
 
 BATTERIES_ROOT=/usr/local/lib/automata-batteries
 BOX_CHECKOUT=/opt/automata-platform
-WORKER_UNIT=automata-worker.service
 BUDGET_SECONDS=1800
 REPO_RE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 PR_RE='^[0-9]+$'
@@ -377,7 +376,7 @@ box_mode() {
     evidence "journal lines since $since" "$(wc -l <"$WORK/journal.txt" | tr -d ' ')"
     analyse_review_journal "$WORK/journal.txt" "$repo" "$pr" "$expect" "$prefix"
   else
-    check "SC2 one review run per push" FAIL "(journalctl -u $WORKER_UNIT failed: $(head -n 1 "$WORK/journal.err"))"
+    check "SC2 one review run per push" FAIL "(journalctl -u automata-worker.service failed: $(head -n 1 "$WORK/journal.err"))"
   fi
 
   print_manual_checklist "$expect"
@@ -393,7 +392,7 @@ box_mode() {
 analyse_github() {
   local pull="$1" reviews="$2" issue_comments="$3" review_comments="$4"
   local head="$5" since="$6" bot="$7"
-  local live_head on_head review_id state submitted latency stray_issue stray_review
+  local live_head on_head fields review_id state submitted latency stray_issue stray_review
 
   live_head="$(jq -r '.head.sha // "-"' "$pull")"
   evidence "PR head" "$live_head"
@@ -410,12 +409,11 @@ analyse_github() {
     check "SC2 review latency within budget" FAIL "(no single review on head)"
     review_id="-"
   else
-    review_id="$(jq -r --arg bot "$bot" --arg head "$head" \
-      '[.[] | select(.user.login == $bot and .commit_id == $head)][0].id' "$reviews")"
-    state="$(jq -r --arg bot "$bot" --arg head "$head" \
-      '[.[] | select(.user.login == $bot and .commit_id == $head)][0].state' "$reviews")"
-    submitted="$(jq -r --arg bot "$bot" --arg head "$head" \
-      '[.[] | select(.user.login == $bot and .commit_id == $head)][0].submitted_at' "$reviews")"
+    # One lookup, three fields joined by US (0x1f, non-whitespace so an empty
+    # field cannot shift the others).
+    fields="$(jq -r --arg bot "$bot" --arg head "$head" \
+      '[.[] | select(.user.login == $bot and .commit_id == $head)][0] | [.id, .state, .submitted_at] | map(tostring) | join("\u001f")' "$reviews")"
+    IFS=$'\x1f' read -r review_id state submitted <<<"$fields"
     latency="$(jq -n --arg at "$submitted" --argjson since "$since" '($at | fromdateiso8601) - $since')"
     evidence "review id" "$review_id"
     evidence "review state" "$state"
