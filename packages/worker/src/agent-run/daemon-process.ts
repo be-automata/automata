@@ -24,6 +24,7 @@ import {
 } from "./run-cgroup";
 import { classifyAgentExit } from "./retry-classification";
 import { buildKillInvocation, buildSpawnInvocation } from "./spawn-as-user";
+import { RUN_GH_CONFIG_DIR, RUN_TMP_DIR } from "./run-owned-paths";
 import { verifyGhAuth } from "./verify-gh-auth";
 import type { WorkerConfig } from "./config";
 import type { AgentRunInput, PulledDaemonMessage } from "./types";
@@ -185,7 +186,9 @@ export class DaemonProcess {
       agentUser: this.config.agentUser,
       // Inside the workdir, so it inherits the run's ACE. Provisioning created
       // it in the same `if (agentUser)` branch that applied that ACE.
-      runTmpDir: this.config.agentUser ? path.join(this.workdir, "tmp") : null,
+      runTmpDir: this.config.agentUser
+        ? path.join(this.workdir, RUN_TMP_DIR)
+        : null,
       // THE CALL SITE IS HALF THE FIX. `buildDaemonEnv` adds the
       // `safe.directory` entry only when it is given the workdir, so without
       // this line the option defaults to null, the `agentUser && workdir` guard
@@ -229,7 +232,7 @@ export class DaemonProcess {
       return dir;
     }
 
-    const dir = path.join(this.workdir, "gh-config");
+    const dir = path.join(this.workdir, RUN_GH_CONFIG_DIR);
     // Fresh every time: a retry into the same workdir must not inherit whatever
     // a previous attempt's agent left here (e.g. a planted hosts.yml).
     fs.rmSync(dir, { recursive: true, force: true });

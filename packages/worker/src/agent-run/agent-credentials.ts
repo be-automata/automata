@@ -3,6 +3,7 @@ import path from "node:path";
 import { authFilePathForAgent } from "@terragon/agent/auth-file";
 import type { PulledAgentCredentials } from "./www-client";
 import { reapplyPathGrant } from "./agent-uid-fs";
+import { RUN_HOME_DIR } from "./run-owned-paths";
 import {
   seedBatteries,
   seedForegroundOnly,
@@ -169,7 +170,7 @@ export async function materialiseAgentCredentials({
   /** Test/override seam for seedBatteries; production passes only `log`. */
   batteries?: Omit<SeedBatteriesOptions, "agentUser">;
 }): Promise<MaterialisedCredentials> {
-  const home = path.join(runRoot, "home");
+  const home = path.join(runRoot, RUN_HOME_DIR);
   const users = agentUser ? [agentUser] : [];
   await fs.mkdir(home, { recursive: true, mode: 0o700 });
   // 0700 at creation zeroes the POSIX ACL mask on Linux, so the agent cannot

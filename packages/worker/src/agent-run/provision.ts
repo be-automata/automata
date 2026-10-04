@@ -7,8 +7,10 @@ import { redactSecrets } from "@terragon/utils/redact";
 import {
   applyInheritableAces,
   applyTraverseAce,
+  reapplyPathGrant,
   type AceExec,
 } from "./agent-uid-fs";
+import { excludeRunOwnedPaths, RUN_TMP_DIR } from "./run-owned-paths";
 
 const execFileAsync = promisify(execFile);
 
@@ -91,6 +93,7 @@ export async function provisionWorkdir({
   agentUser = "",
   workerLogin = os.userInfo().username,
   aceExec,
+  platform,
   runGit = gitExec,
 }: {
   repoFullName: string;
@@ -118,6 +121,8 @@ export async function provisionWorkdir({
   workerLogin?: string;
   /** Injectable ACE runner (tests only). */
   aceExec?: AceExec;
+  /** Injectable platform for the ACL calls (tests only) — defaults to the host's. */
+  platform?: NodeJS.Platform;
   /** Injectable git runner (tests only) — defaults to the real gitExec. */
   runGit?: typeof gitExec;
 }): Promise<string> {
@@ -176,6 +181,7 @@ export async function provisionWorkdir({
       dir: workdirRoot,
       users: [agentUser],
       exec: aceExec,
+      platform,
     });
     // BOTH users, exactly as claimRunNamespace does for the rendezvous dir
     // (agent-uid-fs.ts). Granting the agent alone is not enough: every
@@ -190,6 +196,7 @@ export async function provisionWorkdir({
       dir: workdir,
       users: [agentUser, workerLogin],
       exec: aceExec,
+      platform,
     });
   }
 
@@ -239,8 +246,24 @@ export async function provisionWorkdir({
   // Creating it here still inherits the ACE: macOS applies inheritance at
   // create time, and the grant is already on `workdir`.
   if (agentUser) {
-    await fs.mkdir(path.join(workdir, "tmp"), { recursive: true, mode: 0o700 });
+    const tmp = path.join(workdir, RUN_TMP_DIR);
+    await fs.mkdir(tmp, { recursive: true, mode: 0o700 });
+    // LINUX: the 0700 creation mode zeroes the POSIX ACL mask, so the grant
+    // inherited from the workdir's default ACL is born `#effective:---` and
+    // the agent cannot use its own TMPDIR. Same trap, same remedy as the run
+    // HOME (agent-credentials.ts) and gh-config. No-op on macOS.
+    await reapplyPathGrant({
+      target: tmp,
+      kind: "directory",
+      users: [agentUser],
+      exec: aceExec,
+      platform,
+    });
   }
+
+  // The worker's run-owned dirs (HOME, gh-config, tmp) live inside the clone;
+  // keep them out of the agent's `git status` / `git add -A`.
+  await excludeRunOwnedPaths(workdir);
 
   return workdir;
 }
