@@ -2,6 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { BlockTolerance } from "@terragon/review/severity-policy";
 import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
+import type {
+  ReviewBatteryPackId,
+  ReviewMode,
+} from "@terragon/shared/model/review-agent-settings";
 import { ConflictError, errorFromResponse } from "./error-from-response";
 
 /**
@@ -19,6 +23,12 @@ export interface RepoReviewSettingDto {
   reviewDraftPrs: boolean | null;
   supersedePolicy: string | null;
   recheckOnComplete: boolean;
+  /** Phase 4 review-agent family: null = inherit the org default. */
+  reviewMode: ReviewMode | null;
+  reviewBatteries: ReviewBatteryPackId[] | null;
+  reviewRunTests: boolean | null;
+  reviewCommandTimeoutS: number | null;
+  reviewMaxTurns: number | null;
   updatedAt: string;
 }
 
@@ -30,6 +40,12 @@ export interface RepoReviewSettingPatch {
   /** null clears the override (falls back to the org default). */
   supersedePolicy?: SupersedePolicy | null;
   recheckOnComplete?: boolean;
+  /** Phase 4 review-agent fields: a value sets an override; null = inherit. */
+  reviewMode?: ReviewMode | null;
+  reviewBatteries?: ReviewBatteryPackId[] | null;
+  reviewRunTests?: boolean | null;
+  reviewCommandTimeoutS?: number | null;
+  reviewMaxTurns?: number | null;
   /**
    * Optimistic concurrency fence — a stale value gets a ConflictError.
    * `null` is the first-write fence: "I read no override yet"; the create
@@ -41,6 +57,22 @@ export interface RepoReviewSettingPatch {
 export const reviewSettingsQueryKeys = {
   list: () => ["review-settings", "list"] as const,
 };
+
+/**
+ * Put a saved row into the cached list: replaces the row for the same repo
+ * (slugs compare case-insensitively) or appends it. Pure — returns a new list.
+ */
+export function mergeReviewSetting(
+  list: readonly RepoReviewSettingDto[],
+  setting: RepoReviewSettingDto,
+): RepoReviewSettingDto[] {
+  const key = setting.repoFullName.toLowerCase();
+  const index = list.findIndex((r) => r.repoFullName.toLowerCase() === key);
+  if (index === -1) {
+    return [...list, setting];
+  }
+  return list.map((r, i) => (i === index ? setting : r));
+}
 
 /** Split `owner/name` into its two path segments (name may itself be a slug). */
 export function splitRepoFullName(
@@ -103,8 +135,16 @@ export function useSetReviewSettingMutation(options?: {
       const json = (await res.json()) as { setting: RepoReviewSettingDto };
       return json.setting;
     },
-    onSuccess: () => {
+    onSuccess: (setting) => {
       if (options?.successMessage) toast.success(options.successMessage);
+      // Synchronous cache write of the returned row, mirroring
+      // useSetSupersedeDefaultMutation: invalidate-only left the old updatedAt
+      // in the cache until the refetch landed, so a second save in a row sent
+      // a stale version and self-409ed. Invalidate afterwards to resync.
+      queryClient.setQueryData<RepoReviewSettingDto[]>(
+        reviewSettingsQueryKeys.list(),
+        (prev) => mergeReviewSetting(prev ?? [], setting),
+      );
       queryClient.invalidateQueries({
         queryKey: reviewSettingsQueryKeys.list(),
       });
