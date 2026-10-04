@@ -86,6 +86,13 @@ import {
   DEGRADED_INTENT_MARKER,
 } from "./execute-review-from-intent";
 
+import {
+  F1,
+  F2,
+  LEAD_RESUMED_TEXT,
+  STAMPED_METADATA,
+} from "./__fixtures__/orchestrated-terminal-messages";
+
 const HEAD = "head-sha";
 const OLD = "old-sha";
 
@@ -366,5 +373,42 @@ describe("runReviewSweep — a degraded comment is silence, not a verdict (#224)
     expect(
       vi.mocked(executeReviewFromIntent).mock.calls[0]![0].currentHeadSha,
     ).toBe(HEAD);
+  });
+});
+
+describe("runReviewSweep — shared terminal-text selector (phase 6)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    selected.rows = [];
+    prReviews.rows = [];
+  });
+
+  it("an orchestrated-prompt candidate hands the writer the lead's tagged text", async () => {
+    selected.rows = [candidate({ sourceMetadata: STAMPED_METADATA })];
+    vi.mocked(getThreadChat).mockResolvedValueOnce({
+      messages: F1,
+    } as never);
+
+    await runReviewSweep();
+
+    expect(executeReviewFromIntent).toHaveBeenCalledTimes(1);
+    const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
+    expect(args.preferTaggedIntent).toBe(true);
+    expect(args.terminalText).toContain("```json review-intent");
+    expect(args.terminalText).not.toContain("nothing to add");
+  });
+
+  it("an unstamped candidate hands the writer exactly today's terminal text", async () => {
+    selected.rows = [candidate({ sourceMetadata: null })];
+    vi.mocked(getThreadChat).mockResolvedValueOnce({
+      messages: F2,
+    } as never);
+
+    await runReviewSweep();
+
+    expect(executeReviewFromIntent).toHaveBeenCalledTimes(1);
+    const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
+    expect(args.preferTaggedIntent).toBeFalsy();
+    expect(args.terminalText).toBe(LEAD_RESUMED_TEXT);
   });
 });
