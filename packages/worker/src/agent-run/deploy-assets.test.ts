@@ -9,10 +9,12 @@ import { describe, expect, it } from "vitest";
 import {
   BATTERY_PACK_IDS,
   BATTERY_PACK_REQUIRES,
+  BATTERY_REQUIREMENTS as SHARED_BATTERY_REQUIREMENTS,
   REVIEW_BATTERY_PACK_IDS,
 } from "../../../shared/src/model/review-agent-settings";
 import {
   BATTERIES_MANIFEST_REPO_PATH,
+  BATTERY_REQUIREMENTS,
   DART_SDK_URL_TEMPLATE,
   FORBIDDEN_NAMES,
   findBatteriesManifestError,
@@ -996,6 +998,54 @@ function assignment(script: string, name: string): string {
 }
 
 /**
+ * The hygiene every deploy bash script keeps: tracked executable, bash with
+ * strict mode on line 2, parses with `bash -n`, shellcheck clean. bash and
+ * shellcheck are local static checkers (no network, no sudo); shellcheck is
+ * skipped where it is not installed.
+ */
+function describeBashScriptHygiene(relPath: string): void {
+  describe(`${path.basename(relPath)}: bash script hygiene`, () => {
+    const scriptPath = path.join(repoRoot, relPath);
+
+    it("is tracked as an executable bash script in strict mode", () => {
+      const mode = execFileSync("git", ["ls-files", "-s", relPath], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      }).slice(0, 6);
+      expect(mode).toBe("100755");
+      const lines = read(scriptPath).split("\n");
+      expect(lines[0]).toBe("#!/bin/bash");
+      expect(lines[1]).toBe("set -euo pipefail");
+    });
+
+    it("parses with bash -n", () => {
+      expect(() =>
+        execFileSync("bash", ["-n", scriptPath], { stdio: "pipe" }),
+      ).not.toThrow();
+    });
+
+    it("is shellcheck clean", (ctx) => {
+      if (
+        spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
+      ) {
+        ctx.skip();
+      }
+      const result = spawnSync("shellcheck", ["-s", "bash", scriptPath], {
+        encoding: "utf8",
+      });
+      expect(result.stdout + result.stderr).toBe("");
+      expect(result.status).toBe(0);
+    });
+  });
+}
+
+describeBashScriptHygiene("packages/worker/deploy/linux/install-batteries.sh");
+describeBashScriptHygiene("packages/worker/deploy/linux/batteries-dry-run.sh");
+describeBashScriptHygiene(
+  "packages/worker/deploy/linux/task-batteries-acceptance.sh",
+);
+
+/**
  * What decides the bytes install-batteries.sh writes into a pack dir, paired
  * with the INSTALLER_OUTPUT_VERSION it was recorded for. Packs whose stamp
  * holds the current version are SKIPPED, so a change here that ships without
@@ -1013,21 +1063,12 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
   // The installer runs as root against a worker-writable checkout and
   // fetches from the internet. Each assertion pins a safety property in the
   // function that owns it, so a refactor cannot quietly move it out.
-  const scriptPath = path.join(
-    workerRoot,
-    "deploy",
-    "linux",
-    "install-batteries.sh",
-  );
   const script = deployFile("linux", "install-batteries.sh");
   const src = code(script);
   const body = (name: string) => fnBody(script, name);
 
-  it("is an executable bash script with strict mode, umask and a neutral cwd", () => {
-    expect(fs.statSync(scriptPath).mode & 0o100).not.toBe(0);
+  it("sets a umask and a neutral cwd (hygiene: describeBashScriptHygiene)", () => {
     const lines = script.split("\n");
-    expect(lines[0]).toBe("#!/bin/bash");
-    expect(lines[1]).toBe("set -euo pipefail");
     expect(lines[2]).toBe("umask 022");
     expect(src).toMatch(/^cd \/$/m);
     expect(src).toContain("unset GIT_DIR");
@@ -1046,8 +1087,14 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
     expect(src).toContain('cat-file blob "$HEAD_SHA:');
     const preflight = body("preflight");
     expect(preflight).toContain("jq -e");
-    expect(preflight).toContain("[a-z0-9][a-z0-9-]*");
-    expect(preflight).toContain("-{0,2}[a-z]+");
+    expect(assignment(script, "readonly RE_ID")).toContain(
+      "[a-z0-9][a-z0-9-]*",
+    );
+    expect(assignment(script, "readonly RE_VERSION_ARGS")).toContain(
+      "-{0,2}[a-z]+",
+    );
+    expect(preflight).toContain("$RE_ID");
+    expect(preflight).toContain("$RE_VERSION_ARGS");
     expect(preflight).toContain("safe_rel_path");
     expect(preflight).toContain("check_vendored_path");
     expect(body("safe_rel_path")).toContain("..");
@@ -1134,16 +1181,30 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
     expect(gitRepo).toContain("core.hooksPath=/dev/null");
   });
 
-  it("checks a CLI's sha256 before anything reaches the bin dir", () => {
+  it("fetch_verified checks the sha256 of a download or a cached copy before returning", () => {
+    const fetch = code(body("fetch_verified"));
+    const check = fetch.indexOf("sha256sum -c");
+    expect(check).toBeGreaterThan(-1);
+    expect(fetch).toContain("curl -fsSL --proto '=https' --tlsv1.2 --retry 3");
+    // A cache hit is COPIED to <out> and checked there; a mismatch fails, and
+    // only a verified download is written back to the cache.
+    const cacheCopy = fetch.indexOf('cp "$cache" "$out"');
+    expect(cacheCopy).toBeGreaterThan(-1);
+    expect(cacheCopy).toBeLessThan(check);
+    expect(fetch.indexOf('cp "$out" "$cache.tmp.')).toBeGreaterThan(check);
+    expect(fetch).toContain('STEP_ERROR="sha256 mismatch');
+  });
+
+  it("checks a CLI's sha256 before anything is extracted or reaches the bin dir", () => {
     const cli = body("install_cli");
-    expect(cli).toContain("sha256sum -c");
-    expect(cli).toContain("curl -fsSL");
-    expect(cli).toContain("--proto '=https'");
-    expect(cli).toContain("tar -xzf");
-    expect(cli.indexOf("$BIN_DIR")).toBeGreaterThan(
-      cli.indexOf("sha256sum -c"),
+    const fetch = cli.indexOf(
+      'fetch_verified "$name $version" "$url" "$sha256" "$dl"',
     );
+    expect(fetch).toBeGreaterThan(-1);
+    expect(cli.indexOf("tar -xzf")).toBeGreaterThan(fetch);
+    expect(cli.indexOf("$BIN_DIR")).toBeGreaterThan(fetch);
     expect(cli).toContain("mv -f");
+    expect(cli).toContain("write_stamp");
   });
 
   it("fetches packs by sha, checks object ids before publishing, never prunes", () => {
@@ -1287,24 +1348,22 @@ describe("#batteries (phase 3): install-batteries.sh", () => {
     expect(script).not.toContain("pip install");
   });
 
-  // The only two tests in this file that spawn a process: bash and
-  // shellcheck are local static checkers (no network, no sudo).
-  it("parses with bash -n", () => {
-    expect(() =>
-      execFileSync("bash", ["-n", scriptPath], { stdio: "pipe" }),
-    ).not.toThrow();
+  it("writes every CLI and tool stamp through write_stamp (temp file, 0644, rename)", () => {
+    const stamp = body("write_stamp");
+    expect(stamp).toContain('>"$stamp.tmp"');
+    expect(stamp).toContain('chmod 0644 "$stamp.tmp"');
+    expect(stamp).toContain('mv -f "$stamp.tmp" "$stamp"');
+    expect(body("install_tool")).toContain("write_stamp");
   });
 
-  it("is shellcheck clean", (ctx) => {
-    if (
-      spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
-    ) {
-      ctx.skip();
-    }
-    const result = spawnSync("shellcheck", ["-s", "bash", scriptPath], {
-      encoding: "utf8",
-    });
-    expect(result.status, result.stdout).toBe(0);
+  it("pins the pack `requires` set to the TS guards' BATTERY_REQUIREMENTS (worker and shared)", () => {
+    expect(assignment(script, "readonly PACK_REQUIREMENTS_JSON")).toBe(
+      `readonly PACK_REQUIREMENTS_JSON='${JSON.stringify([...BATTERY_REQUIREMENTS])}'`,
+    );
+    expect([...SHARED_BATTERY_REQUIREMENTS]).toEqual([...BATTERY_REQUIREMENTS]);
+    expect(body("preflight")).toContain(
+      '--argjson allowed "$PACK_REQUIREMENTS_JSON"',
+    );
   });
 });
 
@@ -1456,15 +1515,14 @@ describe("#batteries (phase 7): tools in install-batteries.sh — preflight + SD
 
   it("checks the SDK zip's sha256 before any extraction, cached copies included", () => {
     const stage = code(body("stage_dart_sdk"));
-    const check = stage.indexOf("sha256sum -c");
-    expect(check).toBeGreaterThan(-1);
-    expect(check).toBeLessThan(stage.indexOf("zipfile"));
-    // A cache hit is COPIED into $WORK and checked there; nothing is
-    // extracted from the cache path itself.
-    const cacheCopy = stage.indexOf('cp "$cached" "$zip"');
-    expect(cacheCopy).toBeGreaterThan(-1);
-    expect(cacheCopy).toBeLessThan(check);
-    expect(stage).toContain("curl -fsSL --proto '=https' --tlsv1.2 --retry 3");
+    // fetch_verified checks the sha256 (of a cached copy too, copied into
+    // $WORK first); nothing is extracted from the cache path itself.
+    const fetch = stage.indexOf(
+      'fetch_verified "$name $version" "$url" "$sha256" "$zip" "$cached" || return 1',
+    );
+    expect(fetch).toBeGreaterThan(-1);
+    expect(fetch).toBeLessThan(stage.indexOf("zipfile"));
+    // Only a dry run may name a download cache.
     expect(stage).toContain('[ "$DRY_RUN" -eq 1 ]');
   });
 
@@ -1505,7 +1563,7 @@ describe("#batteries (phase 7): tools in install-batteries.sh — preflight + SD
  */
 const RECORDED_TOOLS_OUTPUT = {
   version: "1",
-  sha256: "db3ae91e67751fdaa7001dc0cdfbbfcf88f675e327f416c70f322382d0daada5",
+  sha256: "bca0a84d7960e42f2d966085b0df1de0bc254597e304847f1efbdcfc3fb27e28",
 };
 
 describe("#batteries (phase 7): tools in install-batteries.sh — AOT + wrapper + verify", () => {
@@ -1519,8 +1577,11 @@ describe("#batteries (phase 7): tools in install-batteries.sh — AOT + wrapper 
     expect(assignment(script, "TOOLS_OUTPUT_VERSION")).toBe(
       `TOOLS_OUTPUT_VERSION=${RECORDED_TOOLS_OUTPUT.version}`,
     );
+    // fetch_verified was factored out of stage_dart_sdk (no output change);
+    // it stays covered so the hash still sees everything the SDK step runs.
     const shaping = [
       body("stage_dart_sdk"),
+      body("fetch_verified"),
       body("stage_dart_aot"),
       body("write_wrapper"),
     ].join("\n");
@@ -1637,25 +1698,7 @@ describe("#batteries (phase 7): tools in install-batteries.sh — AOT + wrapper 
 describe("#batteries (phase 7): batteries-dry-run.sh (developer proof)", () => {
   // The proof needs network and is run by hand (07-02); these checks keep it
   // runnable and honest between runs.
-  const proofPath = path.join(
-    workerRoot,
-    "deploy",
-    "linux",
-    "batteries-dry-run.sh",
-  );
   const proof = deployFile("linux", "batteries-dry-run.sh");
-
-  it("is tracked as an executable bash script in strict mode", () => {
-    const mode = execFileSync(
-      "git",
-      ["ls-files", "-s", "packages/worker/deploy/linux/batteries-dry-run.sh"],
-      { cwd: repoRoot, encoding: "utf8" },
-    ).slice(0, 6);
-    expect(mode).toBe("100755");
-    const lines = proof.split("\n");
-    expect(lines[0]).toBe("#!/bin/bash");
-    expect(lines[1]).toBe("set -euo pipefail");
-  });
 
   it("refuses root, uses the shared download cache and ends with the proof line", () => {
     expect(proof).toContain(
@@ -1674,24 +1717,6 @@ describe("#batteries (phase 7): batteries-dry-run.sh (developer proof)", () => {
     ).toEqual([
       "DRY_RUN_MACOS_ARM64_SDK_SHA256=9dfe7d6f2558816c2a978aff6c80e8a4509c6cb726c0702a616c64d286f60e88",
     ]);
-  });
-
-  it("parses with bash -n", () => {
-    expect(() =>
-      execFileSync("bash", ["-n", proofPath], { stdio: "pipe" }),
-    ).not.toThrow();
-  });
-
-  it("is shellcheck clean", (ctx) => {
-    if (
-      spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
-    ) {
-      ctx.skip();
-    }
-    const result = spawnSync("shellcheck", ["-s", "bash", proofPath], {
-      encoding: "utf8",
-    });
-    expect(result.status, result.stdout).toBe(0);
   });
 });
 
@@ -2427,35 +2452,19 @@ describe("#task batteries (phase 7): acceptance script", () => {
     });
   }
 
-  it("is tracked as an executable bash script in strict mode", () => {
+  it("exists (hygiene: describeBashScriptHygiene)", () => {
     expect(exists).toBe(true);
-    const mode = execFileSync("git", ["ls-files", "-s", scriptRel], {
-      cwd: repoRoot,
-      encoding: "utf8",
-    }).slice(0, 6);
-    expect(mode).toBe("100755");
-    const lines = script.split("\n");
-    expect(lines[0]).toBe("#!/bin/bash");
-    expect(lines[1]).toBe("set -euo pipefail");
   });
 
-  it("parses with bash -n", () => {
-    expect(() =>
-      execFileSync("bash", ["-n", scriptPath], { stdio: "pipe" }),
-    ).not.toThrow();
-  });
-
-  it("is shellcheck clean", (ctx) => {
-    if (
-      spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
-    ) {
-      ctx.skip();
-    }
-    const result = spawnSync("shellcheck", ["-s", "bash", scriptPath], {
-      encoding: "utf8",
-    });
-    expect(result.stdout + result.stderr).toBe("");
-    expect(result.status).toBe(0);
+  it("keeps a byte-identical copy of the installer's as_agent and AGENT_PATH", () => {
+    // The installer runs as a single root-owned blob copied out of the
+    // checkout (PILOT-RUNBOOK), so it cannot source a shared lib from the
+    // worker-writable tree; the copies are pinned equal here instead.
+    const installer = deployFile("linux", "install-batteries.sh");
+    expect(body("as_agent")).toBe(fnBody(installer, "as_agent"));
+    expect(assignment(script, "AGENT_PATH")).toBe(
+      assignment(installer, "AGENT_PATH"),
+    );
   });
 
   it.each<[string, string[], RegExp]>([
@@ -2530,9 +2539,9 @@ describe("#task batteries (phase 7): acceptance script", () => {
     const perms = c.split("\n").filter((l) => /\b(chmod|chown)\b/.test(l));
     expect(perms.length).toBeGreaterThan(0);
     for (const line of perms) {
-      expect(line).toContain('"$AGENT_HOME"');
+      expect(line).toContain('"$VERIFY_HOME"');
     }
-    expect(c).toContain('AGENT_HOME="$(mktemp -d');
+    expect(c).toContain('VERIFY_HOME="$(mktemp -d');
     expect(c).toContain("trap cleanup EXIT");
   });
 
@@ -2548,9 +2557,7 @@ describe("#task batteries (phase 7): acceptance script", () => {
       "journalctl -u automata-worker.service",
       "--no-pager -o cat",
       "batteries: lane=task packs=",
-      "task agent: github read token → GITHUB_TOKEN",
-      "read token required but not delivered",
-      "read token expired before start",
+      "] task agent: read-token=",
       "run start: lane=",
       "batteries: mode=",
     ]) {
@@ -2642,7 +2649,7 @@ describe("#task batteries (phase 7): acceptance script", () => {
         `[agent-run ${T} trace=00-a-b-01] batteries: lane=task packs=somnio-skills manifest=${PREFIX}`,
         ...extra,
       ].join("\n");
-    const APPLIED = `[agent-run ${T} trace=00-a-b-01] task agent: github read token → GITHUB_TOKEN (read-only, single repo)`;
+    const APPLIED = `[agent-run ${T} trace=00-a-b-01] task agent: read-token=applied`;
     const reviewRun = [
       `[agent-run ${R}] run start: lane=review pr=3 repo=acme/web branch=f policy=newest-wins`,
       `[agent-run ${R}] batteries: mode=classic`,
@@ -2661,13 +2668,14 @@ describe("#task batteries (phase 7): acceptance script", () => {
       expect(out).not.toContain("FAILURES=0");
     });
 
-    it("no read-token line (or a not-delivered line) fails", () => {
+    it("no read-token line, or any skip=<reason> line, fails (a skip sticks)", () => {
       expect(analyse(`${taskRun()}\n`)).not.toContain("FAILURES=0");
-      expect(
-        analyse(
-          `${taskRun([APPLIED, `[agent-run ${T}] task agent: read token required but not delivered`])}\n`,
-        ),
-      ).not.toContain("FAILURES=0");
+      const skip = `[agent-run ${T}] task agent: read-token=skip=not-delivered`;
+      for (const lines of [[skip], [APPLIED, skip], [skip, APPLIED]]) {
+        const out = analyse(`${taskRun(lines)}\n`);
+        expect(out).not.toContain("FAILURES=0");
+        expect(out).toContain("(read-token=skip=not-delivered)");
+      }
     });
 
     it("a task run for another repo is not evidence", () => {
@@ -2677,13 +2685,15 @@ describe("#task batteries (phase 7): acceptance script", () => {
     });
 
     it("a review run with a lane= line or a read-token line fails the regression check", () => {
-      const bad = [
-        `[agent-run ${R}] run start: lane=review pr=3 repo=acme/web branch=f`,
-        `[agent-run ${R}] batteries: lane=task packs=somnio-skills manifest=${PREFIX}`,
-      ].join("\n");
-      expect(analyse(`${taskRun([APPLIED])}\n${bad}\n`)).not.toContain(
-        "FAILURES=0",
-      );
+      const start = `[agent-run ${R}] run start: lane=review pr=3 repo=acme/web branch=f`;
+      for (const bad of [
+        `${start}\n[agent-run ${R}] batteries: lane=task packs=somnio-skills manifest=${PREFIX}`,
+        `${start}\n[agent-run ${R}] batteries: mode=classic\n[agent-run ${R}] task agent: read-token=skip=no-requiring-pack`,
+      ]) {
+        expect(analyse(`${taskRun([APPLIED])}\n${bad}\n`)).not.toContain(
+          "FAILURES=0",
+        );
+      }
     });
   });
 });

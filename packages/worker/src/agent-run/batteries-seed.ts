@@ -128,20 +128,34 @@ export async function computeBatteriesManifestHash(
   return hash.digest("hex");
 }
 
-/** The non-review lanes a task-pack line names (run-lane.ts). */
-export type BatteriesLineLane = "task" | "pr";
+/**
+ * The task gate's decision (task-agent.ts TaskAgentGate), as far as the
+ * batteries line is concerned. `none` for every run that carried no taskAgent.
+ */
+export type BatteriesLineGate =
+  | { kind: "none" }
+  | { kind: "seed"; lane: "task" | "pr" }
+  | { kind: "rejected"; lane: "task" | "pr" | "review" };
 
 /**
  * One line for the run log; ids, reasons and a 12-hex hash prefix only.
- * Without a lane: the review forms, `undefined` being a classic run. With a
- * lane (a task run that carried packs): `lane=<lane>` replaces
- * `mode=orchestrated`, and `undefined` means the packs were never seeded.
+ * Owns the form selection, so every run logs exactly one line:
+ * - a task/pr-lane run whose taskAgent was rejected: `unavailable lane=…
+ *   reason=task-agent-invalid` (nothing was seeded for it);
+ * - a task/pr-lane run that carried packs: `lane=<lane>` replaces
+ *   `mode=orchestrated`, and `undefined` means the packs were never seeded;
+ * - every other run (reviews, runs without taskAgent, a review-lane taskAgent
+ *   that was ignored): today's review forms, `undefined` being a classic run.
  */
 export function formatBatteriesLine(
   result: SeedBatteriesResult | undefined,
-  lane?: BatteriesLineLane,
+  taskGate: BatteriesLineGate = { kind: "none" },
 ): string {
-  if (lane !== undefined) {
+  if (taskGate.kind === "rejected" && taskGate.lane !== "review") {
+    return `batteries: unavailable lane=${taskGate.lane} reason=task-agent-invalid`;
+  }
+  if (taskGate.kind === "seed") {
+    const { lane } = taskGate;
     if (!result) {
       return `batteries: unavailable lane=${lane} reason=not-seeded`;
     }

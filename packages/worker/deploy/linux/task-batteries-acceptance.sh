@@ -21,10 +21,10 @@ set -euo pipefail
 #       SC3  the worker journal since --since has a lane=task run for --repo
 #            whose `batteries: lane=task packs=…somnio-skills… manifest=<12hex>`
 #            prefix equals manifest.sha256
-#       SC4  (box half) that same thread logged the read-only token line and
-#            no not-delivered/expired line; python3 requests importable; every
-#            review run since --since still logs `batteries: mode=…` with no
-#            lane= line and no read-token line. The transcript half of SC4
+#       SC4  (box half) that same thread logged `task agent: read-token=applied`
+#            (not `read-token=skip=<reason>`); python3 requests importable;
+#            every review run since --since still logs `batteries: mode=…` with
+#            no lane= line and no read-token line. The transcript half of SC4
 #            lives in the control plane, so it is printed as EVIDENCE manual
 #            lines for the operator to judge.
 #
@@ -50,7 +50,7 @@ BOX_CHECKOUT=/opt/automata-platform
 WORKER_UNIT=automata-worker.service
 WORKER_USER=automata
 AGENT_USER=automata-agent
-AGENT_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+AGENT_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 MANIFEST_REL=packages/worker/deploy/batteries.json
 TASK_PACK=somnio-skills
 REPO_RE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
@@ -58,7 +58,7 @@ REPO_RE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 FAILURES=0
 GIT_CHECKOUT=""
 WORK=""
-AGENT_HOME=""
+VERIFY_HOME=""
 
 usage() {
   cat >&2 <<'EOF'
@@ -99,8 +99,8 @@ cleanup() {
   if [ -n "$WORK" ]; then
     rm -rf -- "$WORK"
   fi
-  if [ -n "$AGENT_HOME" ]; then
-    rm -rf -- "$AGENT_HOME"
+  if [ -n "$VERIFY_HOME" ]; then
+    rm -rf -- "$VERIFY_HOME"
   fi
 }
 
@@ -120,7 +120,7 @@ git_ro() {
 # shellcheck disable=SC2016 # "$1" must expand in the agent's sh, not here
 as_agent() {
   local command_string="$1" check_name="$2" check_args="$3" check_path="$4"
-  runuser -u "$WORKER_USER" -- env -i HOME="$AGENT_HOME" PATH="$AGENT_PATH" \
+  runuser -u "$WORKER_USER" -- env -i HOME="$VERIFY_HOME" PATH="$AGENT_PATH" \
     BATTERIES_CHECK_NAME="$check_name" BATTERIES_CHECK_ARGS="$check_args" \
     BATTERIES_CHECK_PATH="$check_path" \
     /usr/bin/sudo -n -u "$AGENT_USER" -E -- /bin/sh -c 'exec bash -lc "$1"' sh "$command_string" </dev/null
@@ -203,19 +203,17 @@ local_mode() {
 # lane=task run for the repo, then every review run.
 analyse_journal() {
   local journal="$1" repo="$2" prefix="$3"
-  local tid lane run_repo batt applied missing expired
-  local task_tid="" task_batt="" task_applied=0 task_missing=0 task_expired=0
+  local tid lane run_repo batt read_token
+  local task_tid="" task_batt="" task_read_token=""
   local review_n=0 review_bad=0 review_bad_tids="" review_short=0 packs manifest
 
-  while IFS=$'\t' read -r tid lane run_repo batt applied missing expired; do
+  while IFS=$'\t' read -r tid lane run_repo batt read_token; do
     case "$lane" in
       task)
         if [ "$run_repo" = "$repo" ]; then
           task_tid="$tid"
           task_batt="$batt"
-          task_applied="$applied"
-          task_missing="$missing"
-          task_expired="$expired"
+          task_read_token="$read_token"
         fi
         ;;
       review)
@@ -228,7 +226,7 @@ analyse_journal() {
         review_n=$((review_n + 1))
         case "$batt" in
           "batteries: mode="* | "batteries: unavailable mode="*)
-            if [ "$applied" != "0" ]; then
+            if [ "$read_token" != "-" ]; then
               review_bad=$((review_bad + 1))
               review_bad_tids="$review_bad_tids $tid"
             fi
@@ -244,7 +242,7 @@ analyse_journal() {
     {
       if (!match($0, /\[agent-run [^] ]+/)) next
       tid = substr($0, RSTART + 11, RLENGTH - 11)
-      if (!(tid in seen)) { seen[tid] = 1; order[++n] = tid; applied[tid] = 0; missing[tid] = 0; expired[tid] = 0 }
+      if (!(tid in seen)) { seen[tid] = 1; order[++n] = tid }
       if (index($0, "] run start: lane=") > 0) {
         l = $0; sub(/.*\] run start: lane=/, "", l); sub(/ .*/, "", l); lane[tid] = l
         r = ""
@@ -255,14 +253,18 @@ analyse_journal() {
           index($0, "] batteries: unavailable lane=") > 0 || index($0, "] batteries: unavailable mode=") > 0) {
         b = $0; sub(/.*\] batteries: /, "batteries: ", b); batt[tid] = b
       }
-      if (index($0, "] task agent: github read token → GITHUB_TOKEN") > 0) applied[tid] = 1
-      if (index($0, "] task agent: read token required but not delivered") > 0) missing[tid] = 1
-      if (index($0, "] task agent: read token expired before start") > 0) expired[tid] = 1
+      # One fixed key=value line per seeded task run: read-token=applied or
+      # read-token=skip=<reason>; the value is the rest of the line. A skip
+      # sticks: one run of the thread that did not apply it is a FAIL.
+      if (index($0, "] task agent: read-token=") > 0) {
+        v = $0; sub(/.*\] task agent: read-token=/, "", v)
+        if (!(tid in rt) || rt[tid] == "applied") rt[tid] = v
+      }
     }
     END {
       for (i = 1; i <= n; i++) {
         t = order[i]
-        printf "%s\t%s\t%s\t%s\t%d\t%d\t%d\n", t, (t in lane ? lane[t] : "-"), (t in repo ? repo[t] : "-"), (t in batt ? batt[t] : "-"), applied[t], missing[t], expired[t]
+        printf "%s\t%s\t%s\t%s\t%s\n", t, (t in lane ? lane[t] : "-"), (t in repo ? repo[t] : "-"), (t in batt ? batt[t] : "-"), (t in rt ? rt[t] : "-")
       }
     }
   ' "$journal")
@@ -292,15 +294,11 @@ analyse_journal() {
         *) check "SC3 task run seeded" FAIL "(packs=$packs lacks $TASK_PACK)" ;;
       esac
     fi
-    if [ "$task_missing" != "0" ]; then
-      check "SC4 read-only token delivered" FAIL "(read token required but not delivered)"
-    elif [ "$task_expired" != "0" ]; then
-      check "SC4 read-only token delivered" FAIL "(read token expired before start)"
-    elif [ "$task_applied" != "1" ]; then
-      check "SC4 read-only token delivered" FAIL "(no task agent: github read token → GITHUB_TOKEN line)"
-    else
-      check "SC4 read-only token delivered" PASS "(GITHUB_TOKEN = read-only token; GH_TOKEN stays the broker bearer)"
-    fi
+    case "$task_read_token" in
+      applied) check "SC4 read-only token delivered" PASS "(read-token=applied: GITHUB_TOKEN = read-only token; GH_TOKEN stays the broker bearer)" ;;
+      -) check "SC4 read-only token delivered" FAIL "(no task agent: read-token= line)" ;;
+      *) check "SC4 read-only token delivered" FAIL "(read-token=$task_read_token)" ;;
+    esac
   fi
 
   evidence "review runs inspected" "$review_n"
@@ -345,9 +343,9 @@ box_mode() {
 
   GIT_CHECKOUT="$BOX_CHECKOUT"
   WORK="$(mktemp -d /tmp/task-batteries-acceptance.XXXXXX)"
-  AGENT_HOME="$(mktemp -d /tmp/task-batteries-agent-home.XXXXXX)"
-  chown "$AGENT_USER" "$AGENT_HOME"
-  chmod 700 "$AGENT_HOME"
+  VERIFY_HOME="$(mktemp -d /tmp/task-batteries-agent-home.XXXXXX)"
+  chown "$AGENT_USER" "$VERIFY_HOME"
+  chmod 700 "$VERIFY_HOME"
 
   # --- SC1: the install -----------------------------------------------------
   hash=""

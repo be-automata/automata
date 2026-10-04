@@ -115,6 +115,18 @@ TOOLS_OUTPUT_VERSION=1
 GRANT_KEYS_RE='^(allowed-tools|hooks|permissionMode|mcpServers):'
 # Same list as FORBIDDEN_NAMES in packages/worker/src/agent-run/batteries-manifest.ts.
 FORBIDDEN_NAMES=(hooks bin .claude-plugin settings.json settings.local.json .mcp.json plugin.json)
+# Manifest value shapes shared by preflight and preflight_tools (same rules as
+# packages/worker/src/agent-run/batteries-manifest.ts).
+readonly RE_ID='^[a-z0-9][a-z0-9-]*$'
+readonly RE_VERSION_ARGS='^-{0,2}[a-z]+$'
+readonly RE_SHA1='^[0-9a-f]{40}$'
+readonly RE_SHA256='^[0-9a-f]{64}$'
+readonly RE_SEMVER='^[0-9]+\.[0-9]+\.[0-9]+$'
+readonly RE_GITHUB='^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+# The closed set of pack `requires` entries, as a JSON array for jq. Pinned
+# equal to BATTERY_REQUIREMENTS in batteries-manifest.ts (and the shared
+# review-agent-settings.ts) by the deploy-assets parity test.
+readonly PACK_REQUIREMENTS_JSON='["github-read-token"]'
 
 AGENT_USER="${AGENT_USER:-automata-agent}"
 WORKER_USER="${WORKER_USER:-automata}"
@@ -230,6 +242,50 @@ sha256_of() {
   sha256sum "$1" | awk '{print $1}'
 }
 
+# fetch_verified <label> <url> <sha256> <out> [<cache file>]: the pinned
+# download in <out>, its sha256 checked BEFORE the caller extracts anything.
+# With <cache file> (dry runs only), a cached copy is COPIED to <out> and
+# checked there — a cached copy that does not match is a FAIL, never silently
+# replaced — and a verified download is cached for the next run. Sets
+# STEP_ERROR and returns 1 on failure.
+fetch_verified() {
+  local label="$1" url="$2" sha256="$3" out="$4" cache="${5:-}"
+  if [ -n "$cache" ] && [ -f "$cache" ]; then
+    log "using the cached $label zip (sha256 re-checked below)"
+    if ! cp "$cache" "$out"; then
+      STEP_ERROR="cannot copy the cached zip"
+      return 1
+    fi
+  else
+    log "downloading $label"
+    if ! curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$out" "$url"; then
+      STEP_ERROR="download failed"
+      return 1
+    fi
+  fi
+  if ! printf '%s  %s\n' "$sha256" "$out" | sha256sum -c - >/dev/null 2>&1; then
+    STEP_ERROR="sha256 mismatch (got $(sha256_of "$out"))"
+    return 1
+  fi
+  if [ -n "$cache" ] && [ ! -f "$cache" ]; then
+    if ! { mkdir -p "$(dirname "$cache")" && cp "$out" "$cache.tmp.$$" &&
+      mv -f "$cache.tmp.$$" "$cache"; }; then
+      log "could not cache $label (continuing)"
+    fi
+  fi
+}
+
+# write_stamp <stamp> <printf format> [<arg>…]: a 0644 stamp, written to a temp
+# file and renamed into place, so a half-written stamp is never read.
+write_stamp() {
+  local stamp="$1" format="$2"
+  shift 2
+  # shellcheck disable=SC2059 # the format is a fixed literal at every call site
+  printf "$format" "$@" >"$stamp.tmp" &&
+    chmod 0644 "$stamp.tmp" &&
+    mv -f "$stamp.tmp" "$stamp"
+}
+
 # Per-pack lists as @tsv rows. Every field is a non-empty string (preflight),
 # so no column is empty and shifts its neighbours on an IFS=$'\t' read.
 subpath_rows() {
@@ -306,12 +362,6 @@ check_vendored_path() {
 # Same rules as packages/worker/src/agent-run/batteries-manifest.ts; names and
 # versionArgs reach a root shell and an agent shell, so they are re-checked here.
 preflight() {
-  local re_id='^[a-z0-9][a-z0-9-]*$'
-  local re_version_args='^-{0,2}[a-z]+$'
-  local re_sha1='^[0-9a-f]{40}$'
-  local re_sha256='^[0-9a-f]{64}$'
-  local re_semver='^[0-9]+\.[0-9]+\.[0-9]+$'
-  local re_github='^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
   local re_dest='^(LICENSE|skills/[a-z0-9-]+(/.+)?|agents/[a-z0-9-]+\.md)$'
   local cmd i id repo sha src dest git_id ex_rest ex from file ref token named
   local name version url sha256 member license_member args
@@ -359,23 +409,24 @@ preflight() {
   HELPER_TOKENS="$(jq -r '.forbiddenHelperTokens[]' "$MANIFEST")"
 
   while IFS=$'\t' read -r -u 3 i id repo sha; do
-    [[ "$id" =~ $re_id ]] || record "FAIL preflight pack: bad id"
-    [ "$repo" = "self" ] || [[ "$repo" =~ $re_github ]] ||
+    [[ "$id" =~ $RE_ID ]] || record "FAIL preflight pack: bad id"
+    [ "$repo" = "self" ] || [[ "$repo" =~ $RE_GITHUB ]] ||
       record "FAIL preflight $id: repo must be self or a github https url"
-    [[ "$sha" =~ $re_sha1 ]] || record "FAIL preflight $id: sha is not 40 hex"
+    [[ "$sha" =~ $RE_SHA1 ]] || record "FAIL preflight $id: sha is not 40 hex"
     # Phase 7: `requires` names a capability the control plane grants runs
-    # that select the pack (closed set, mirrored by the TS guard). It is part
+    # that select the pack (closed set PACK_REQUIREMENTS_JSON, mirrored by the
+    # TS guard). It is part
     # of the pack entry, so adding it re-stages that pack once (harmless).
-    jq -e --argjson i "$i" '
+    jq -e --argjson i "$i" --argjson allowed "$PACK_REQUIREMENTS_JSON" '
       (.packs[$i].requires // []) | type == "array"
-        and all(.[]; . == "github-read-token")
+        and all(.[]; . as $r | any($allowed[]; . == $r))
         and length == (unique | length)' "$MANIFEST" >/dev/null 2>&1 ||
-      record "FAIL preflight $id: requires must be a list drawn from github-read-token"
+      record "FAIL preflight $id: requires must be a list drawn from $(jq -r 'join(", ")' <<<"$PACK_REQUIREMENTS_JSON")"
     while IFS=$'\t' read -r -u 4 src dest git_id ex_rest; do
       check_vendored_path "$id" src "$src"
       check_vendored_path "$id" dest "$dest"
       [[ "$dest" =~ $re_dest ]] || record "FAIL preflight $id: dest outside the pack layout"
-      [[ "$git_id" =~ $re_sha1 ]] || record "FAIL preflight $id: gitId is not 40 hex"
+      [[ "$git_id" =~ $RE_SHA1 ]] || record "FAIL preflight $id: gitId is not 40 hex"
       excludes=()
       [ -z "$ex_rest" ] || IFS=$'\t' read -r -a excludes <<<"$ex_rest"
       for ex in ${excludes[@]+"${excludes[@]}"}; do
@@ -409,10 +460,10 @@ preflight() {
 
   while IFS=$'\t' read -r -u 3 name version url sha256 member license_member args; do
     [ -n "$name" ] || continue
-    [[ "$name" =~ $re_id ]] || record "FAIL preflight cli: bad name"
-    [[ "$version" =~ $re_semver ]] || record "FAIL preflight $name: bad version"
-    [[ "$args" =~ $re_version_args ]] || record "FAIL preflight $name: bad versionArgs"
-    [[ "$sha256" =~ $re_sha256 ]] || record "FAIL preflight $name: sha256 is not 64 hex"
+    [[ "$name" =~ $RE_ID ]] || record "FAIL preflight cli: bad name"
+    [[ "$version" =~ $RE_SEMVER ]] || record "FAIL preflight $name: bad version"
+    [[ "$args" =~ $RE_VERSION_ARGS ]] || record "FAIL preflight $name: bad versionArgs"
+    [[ "$sha256" =~ $RE_SHA256 ]] || record "FAIL preflight $name: sha256 is not 64 hex"
     case "$url" in
       https://github.com/*) ;;
       *) record "FAIL preflight $name: url is not a github https url" ;;
@@ -454,12 +505,6 @@ tool_field() {
 # FAIL text per rule (a deploy-assets test runs both validators on the same
 # malformed entries). Called by preflight after the control-character check.
 preflight_tools() {
-  local re_id='^[a-z0-9][a-z0-9-]*$'
-  local re_version_args='^-{0,2}[a-z]+$'
-  local re_sha1='^[0-9a-f]{40}$'
-  local re_sha256='^[0-9a-f]{64}$'
-  local re_semver='^[0-9]+\.[0-9]+\.[0-9]+$'
-  local re_github='^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
   local re_root_env='^[A-Z][A-Z0-9]*_ROOT$'
   local re_version_line='^[A-Za-z0-9 ._-]+$'
   local re_smoke_word='^-{0,2}[a-z0-9][a-z0-9_-]*$'
@@ -501,7 +546,7 @@ preflight_tools() {
     i="$(jq -r '.key' <<<"$row")"
     name="$(jq -r '.value.name // "" | strings' <<<"$row")"
     label="tools[$i]"
-    if [[ "$name" =~ $re_id ]]; then
+    if [[ "$name" =~ $RE_ID ]]; then
       label="$name"
     else
       record "FAIL preflight $label: bad name"
@@ -541,13 +586,13 @@ preflight_tools() {
       *$'\n'"$name "*) record "FAIL preflight $label: duplicate tool name" ;;
     esac
     version="$(tool_field "$i" version)"
-    [[ "$version" =~ $re_semver ]] || record "FAIL preflight $label: bad version"
+    [[ "$version" =~ $RE_SEMVER ]] || record "FAIL preflight $label: bad version"
 
     if [ "$kind" = "dart-sdk" ]; then
       url="$(tool_field "$i" url)"
       sha256="$(tool_field "$i" sha256)"
       license_member="$(tool_field "$i" licenseMember)"
-      [[ "$sha256" =~ $re_sha256 ]] || record "FAIL preflight $label: sha256 is not 64 hex"
+      [[ "$sha256" =~ $RE_SHA256 ]] || record "FAIL preflight $label: sha256 is not 64 hex"
       case "$license_member" in
         dart-sdk/*) safe_rel_path "$license_member" || record "FAIL preflight $label: licenseMember must be a safe path under dart-sdk/" ;;
         *) record "FAIL preflight $label: licenseMember must be a safe path under dart-sdk/" ;;
@@ -572,13 +617,13 @@ preflight_tools() {
 
     repo="$(tool_field "$i" repo)"
     sha="$(tool_field "$i" sha)"
-    [[ "$repo" =~ $re_github ]] || record "FAIL preflight $label: repo must be a github https url"
-    [[ "$sha" =~ $re_sha1 ]] || record "FAIL preflight $label: sha is not 40 hex"
+    [[ "$repo" =~ $RE_GITHUB ]] || record "FAIL preflight $label: repo must be a github https url"
+    [[ "$sha" =~ $RE_SHA1 ]] || record "FAIL preflight $label: sha is not 40 hex"
     while IFS=$'\t' read -r -u 4 src dest git_id; do
       if ! safe_rel_path "$src" || ! safe_rel_path "$dest"; then
         record "FAIL preflight $label: unsafe subpath"
       fi
-      [[ "$git_id" =~ $re_sha1 ]] || record "FAIL preflight $label: gitId is not 40 hex"
+      [[ "$git_id" =~ $RE_SHA1 ]] || record "FAIL preflight $label: gitId is not 40 hex"
     done 4< <(jq -r --argjson i "$i" '.tools[$i].subpaths[] | [.src, .dest, .gitId] | @tsv' "$MANIFEST")
     jq -e --argjson i "$i" '.tools[$i].subpaths | map(.dest) | length == (unique | length)' "$MANIFEST" >/dev/null ||
       record "FAIL preflight $label: duplicate subpath dest"
@@ -596,11 +641,11 @@ preflight_tools() {
     esac
     [ -n "$lock_overlay" ] || record "FAIL preflight $label: lockOverlay must be under $OVERLAY_DIR_PREFIX and end /pubspec.lock"
     lock_sha256="$(tool_field "$i" lockSha256)"
-    [[ "$lock_sha256" =~ $re_sha256 ]] || record "FAIL preflight $label: lockSha256 is not 64 hex"
+    [[ "$lock_sha256" =~ $RE_SHA256 ]] || record "FAIL preflight $label: lockSha256 is not 64 hex"
     sdk="$(tool_field "$i" sdk)"
     grep -qxF -- "$sdk dart-sdk" <<<"$seen" || record "FAIL preflight $label: sdk must name an earlier dart-sdk tool"
     wrapper="$(tool_field "$i" wrapper)"
-    [[ "$wrapper" =~ $re_id ]] || record "FAIL preflight $label: bad wrapper"
+    [[ "$wrapper" =~ $RE_ID ]] || record "FAIL preflight $label: bad wrapper"
     if grep -qxF -- "$wrapper" <<<"$cli_names" || grep -qxF -- "$wrapper" <<<"$wrappers"; then
       record "FAIL preflight $label: wrapper collides with a CLI name or another wrapper"
     fi
@@ -608,7 +653,7 @@ preflight_tools() {
     root_env="$(tool_field "$i" rootEnv)"
     [[ "$root_env" =~ $re_root_env ]] || record "FAIL preflight $label: rootEnv must match $re_root_env"
     args="$(tool_field "$i" versionArgs)"
-    [[ "$args" =~ $re_version_args ]] || record "FAIL preflight $label: versionArgs must be one word"
+    [[ "$args" =~ $RE_VERSION_ARGS ]] || record "FAIL preflight $label: versionArgs must be one word"
     version_line="$(tool_field "$i" versionLine)"
     case "$version_line" in
       *" v$version") [[ "$version_line" =~ $re_version_line ]] || version_line="" ;;
@@ -890,13 +935,8 @@ install_cli() {
   fi
 
   dl="$WORK/cli-$name.tar.gz"
-  log "downloading $name $version"
-  if ! curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$dl" "$url"; then
-    record "FAIL cli $name: download failed"
-    return 1
-  fi
-  if ! printf '%s  %s\n' "$sha256" "$dl" | sha256sum -c - >/dev/null 2>&1; then
-    record "FAIL cli $name: sha256 mismatch (got $(sha256_of "$dl"))"
+  if ! fetch_verified "$name $version" "$url" "$sha256" "$dl"; then
+    record "FAIL cli $name: $STEP_ERROR"
     return 1
   fi
   x="$WORK/cli-$name.x"
@@ -927,9 +967,7 @@ install_cli() {
   fi
 
   bin_sha="$(sha256_of "$BIN_DIR/$name")"
-  if ! { printf 'tarball_sha256 %s\nbinary_sha256 %s\n' "$sha256" "$bin_sha" >"$stamp.tmp" &&
-    chmod 0644 "$stamp.tmp" &&
-    mv -f "$stamp.tmp" "$stamp"; }; then
+  if ! write_stamp "$stamp" 'tarball_sha256 %s\nbinary_sha256 %s\n' "$sha256" "$bin_sha"; then
     record "FAIL cli $name: could not write its stamp"
     return 1
   fi
@@ -1113,31 +1151,8 @@ stage_dart_sdk() {
   if [ "$DRY_RUN" -eq 1 ] && [ -n "$BATTERIES_DOWNLOAD_CACHE" ]; then
     cached="$BATTERIES_DOWNLOAD_CACHE/$sha256.zip"
   fi
-  if [ -n "$cached" ] && [ -f "$cached" ]; then
-    log "using the cached $name $version zip (sha256 re-checked below)"
-    if ! cp "$cached" "$zip"; then
-      STEP_ERROR="cannot copy the cached zip"
-      return 1
-    fi
-  else
-    log "downloading $name $version"
-    if ! curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$zip" "$url"; then
-      STEP_ERROR="download failed"
-      return 1
-    fi
-  fi
-  # Before ANY extraction; a cached copy that does not match is a FAIL, never
-  # silently replaced.
-  if ! printf '%s  %s\n' "$sha256" "$zip" | sha256sum -c - >/dev/null 2>&1; then
-    STEP_ERROR="sha256 mismatch (got $(sha256_of "$zip"))"
-    return 1
-  fi
-  if [ -n "$cached" ] && [ ! -f "$cached" ]; then
-    if ! { mkdir -p "$BATTERIES_DOWNLOAD_CACHE" && cp "$zip" "$cached.tmp.$$" &&
-      mv -f "$cached.tmp.$$" "$cached"; }; then
-      log "could not cache $name $version (continuing)"
-    fi
-  fi
+  # Checked before ANY extraction below, a cached copy included.
+  fetch_verified "$name $version" "$url" "$sha256" "$zip" "$cached" || return 1
 
   execs="$WORK/tool-$name.execs"
   scan_out="$WORK/tool-$name.scan"
@@ -1415,9 +1430,7 @@ install_tool() {
   lic_dir="$ROOT/licenses/$name-$version"
   if ! { mkdir -p "$lic_dir" "$ROOT/tools" &&
     { [ ! -f "$license_file" ] || { cat "$license_file" >"$lic_dir/LICENSE" && chmod 0644 "$lic_dir/LICENSE"; }; } &&
-    printf 'stamp %s\nartifact_sha256 %s\nsource %s\n' "$expected" "$(sha256_of "$artifact")" "$HEAD_SHA" >"$stamp.tmp" &&
-    chmod 0644 "$stamp.tmp" &&
-    mv -f "$stamp.tmp" "$stamp"; }; then
+    write_stamp "$stamp" 'stamp %s\nartifact_sha256 %s\nsource %s\n' "$expected" "$(sha256_of "$artifact")" "$HEAD_SHA"; }; then
     record "FAIL tool $name: could not write its license or stamp"
     return 1
   fi

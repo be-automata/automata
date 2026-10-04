@@ -102,24 +102,23 @@ export class DaemonProcess {
      */
     private readonly broker: BrokerHandoff | null = null,
     /**
-     * Injectable side-effects, for tests only. Production callers pass nothing
-     * and get the real /bin/chmod. Keeping this last preserves every existing
-     * call site unchanged.
+     * Run options decided by the workflow, plus injectable side-effects for
+     * tests (production passes no side-effect and gets the real /bin/chmod).
+     * Keeping this last preserves every existing call site unchanged.
      */
     private readonly deps: {
+      /**
+       * Phase 7: set ONLY when readTokenForRun returned a token (brokered
+       * non-review run, seeded requiring pack, unexpired token); never read
+       * from the input here. Secret: never logged.
+       */
+      githubReadToken?: string;
       aceExec?: AceExec;
       spawnFn?: typeof spawn;
       platform?: NodeJS.Platform;
       /** Injectable so the suite never SIGKILLs a real process group. */
       killFn?: (pid: number, signal: NodeJS.Signals) => void;
     } = {},
-    /**
-     * Phase 7: run options decided by the workflow's gates. `githubReadToken`
-     * is set ONLY when readTokenForRun returned a token (brokered non-review
-     * run, seeded requiring pack, unexpired token); it is never read from the
-     * input here. Secret: never logged.
-     */
-    private readonly runOptions: { githubReadToken?: string } = {},
   ) {
     const workerId = getProcessWorkerId();
     this.runDir = workerRunDir(config.runNamespaceRoot, workerId);
@@ -194,7 +193,7 @@ export class DaemonProcess {
       credentialEnv: this.credentials?.env ?? {},
       egressProxyUrl: this.egressProxyUrl,
       broker: this.broker,
-      githubReadToken: this.runOptions.githubReadToken ?? null,
+      githubReadToken: this.deps.githubReadToken ?? null,
       agentUser: this.config.agentUser,
       // Inside the workdir, so it inherits the run's ACE. Provisioning created
       // it in the same `if (agentUser)` branch that applied that ACE.

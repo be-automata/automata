@@ -1,6 +1,10 @@
 import { ID_OR_NAME } from "./batteries-manifest";
-import { resolveRunLane } from "./run-lane";
-import type { AgentRunInput } from "./types";
+import {
+  formatBatteriesLine,
+  type SeedBatteriesResult,
+} from "./batteries-seed";
+import type { RunLane } from "./run-lane";
+import type { AgentRunInput, ReviewAgentShape } from "./types";
 
 /**
  * Worker-side gate for task-run packs (Phase 7).
@@ -14,6 +18,11 @@ import type { AgentRunInput } from "./types";
  * verified manifest, which is the authority on pack ids.
  *
  * Rejection reasons name the rule and the index only — never the value.
+ *
+ * This module also owns the rest of the task lane's run-time decisions: which
+ * packs seed the HOME (batterySeedForRun), whether the agent gets the
+ * read-only GitHub token (readTokenForRun), and the log lines that report
+ * both (taskRunOutcome).
  */
 
 export const TASK_AGENT_MAX_PACKS = 16;
@@ -53,22 +62,149 @@ function findShapeError(taskAgent: unknown): string | undefined {
   return undefined;
 }
 
+/** `lane` is the run's resolveRunLane(input), computed once by the caller. */
 export function taskAgentForRun(
-  input: Pick<
-    AgentRunInput,
-    "taskAgent" | "prKey" | "supersedePolicy" | "prNumber"
-  >,
+  taskAgent: AgentRunInput["taskAgent"],
+  lane: RunLane,
 ): TaskAgentGate {
-  if (input.taskAgent === undefined) {
+  if (taskAgent === undefined) {
     return { kind: "none" };
   }
-  const lane = resolveRunLane(input);
   if (lane === "review") {
     return { kind: "rejected", lane, reason: "review-lane" };
   }
-  const reason = findShapeError(input.taskAgent);
+  const reason = findShapeError(taskAgent);
   if (reason !== undefined) {
     return { kind: "rejected", lane, reason };
   }
-  return { kind: "seed", batteries: [...input.taskAgent.batteries], lane };
+  return { kind: "seed", batteries: [...taskAgent.batteries], lane };
+}
+
+/** What seedBatteries links into a run's HOME, and whether hooks go off. */
+export interface BatterySeed {
+  batteries: readonly string[];
+  /** true = an orchestrated review (settings.json disableAllHooks). */
+  hooksOff: boolean;
+}
+
+/**
+ * The run's battery seed, or undefined (HOME exactly as before). An
+ * ORCHESTRATED review seeds its packs with hooks off; otherwise a task gate
+ * that seeds links its packs with hooks untouched (no settings.json, so the
+ * task lane's hook semantics are unchanged). The review wins when both are
+ * present (the dispatcher never sends both).
+ */
+export function batterySeedForRun(
+  reviewAgent: Pick<ReviewAgentShape, "mode" | "batteries"> | undefined,
+  taskGate: TaskAgentGate,
+): BatterySeed | undefined {
+  if (reviewAgent?.mode === "orchestrated") {
+    return { batteries: reviewAgent.batteries, hooksOff: true };
+  }
+  if (taskGate.kind === "seed" && taskGate.batteries.length > 0) {
+    return { batteries: taskGate.batteries, hooksOff: false };
+  }
+  return undefined;
+}
+
+/** Why a run does NOT get the read-only task token (phase 7). */
+export type ReadTokenSkip =
+  | "review-lane"
+  | "no-requiring-pack"
+  | "not-delivered"
+  | "expired"
+  | "no-broker";
+
+/** Refuse a token that expires within this margin of the gate (fail closed). */
+const READ_TOKEN_EXPIRY_MARGIN_MS = 60_000;
+
+/**
+ * Phase 7 (DORA auth = Option 3): whether this run's agent gets the read-only,
+ * single-repo GitHub token in GITHUB_TOKEN. ALL must hold:
+ * - not the review lane (the #81/ADR-004 fence: a forged field is refused);
+ * - the task gate seeded AND seeding succeeded AND a seeded pack's OWN
+ *   manifest entry requires `github-read-token` (not only www's decision);
+ * - the token was delivered (non-empty);
+ * - it is not expired: an expiry within 1 minute, in the past or unparseable
+ *   fails closed; an absent expiry is allowed (GitHub caps the token at 1h);
+ * - the run is brokered (legacy runs already carry the installation token).
+ * Pure; the caller logs the outcome (never the value).
+ */
+export function readTokenForRun({
+  lane,
+  taskGate,
+  seeded,
+  input,
+  brokered,
+  now,
+}: {
+  lane: RunLane;
+  taskGate: TaskAgentGate;
+  seeded: SeedBatteriesResult | undefined;
+  input: Pick<AgentRunInput, "githubReadToken" | "githubReadTokenExpiresAt">;
+  /** The run's credential brokers are on (config.credentialBroker). */
+  brokered: boolean;
+  now: number;
+}): { token: string } | { skip: ReadTokenSkip } {
+  if (lane === "review") {
+    return { skip: "review-lane" };
+  }
+  if (
+    taskGate.kind !== "seed" ||
+    !seeded?.ok ||
+    !(seeded.requires ?? []).includes("github-read-token")
+  ) {
+    return { skip: "no-requiring-pack" };
+  }
+  const token = input.githubReadToken;
+  if (typeof token !== "string" || token === "") {
+    return { skip: "not-delivered" };
+  }
+  const expiresAt = input.githubReadTokenExpiresAt;
+  if (expiresAt !== undefined) {
+    const expiry = Date.parse(expiresAt);
+    if (Number.isNaN(expiry) || expiry <= now + READ_TOKEN_EXPIRY_MARGIN_MS) {
+      return { skip: "expired" };
+    }
+  }
+  if (!brokered) {
+    return { skip: "no-broker" };
+  }
+  return { token };
+}
+
+/** The task lane's run-time outcome: its log lines and the token to apply. */
+export interface TaskRunOutcome {
+  /** Exactly one `batteries:` line, for EVERY run (formatBatteriesLine). */
+  batteriesLine: string;
+  /**
+   * `task agent: read-token=applied` or `task agent: read-token=skip=<reason>`
+   * — ONLY when the task gate seeds, so runs without task packs (every review
+   * and every unconfigured repo) log nothing new. Never the token value.
+   */
+  readTokenLine?: string;
+  /** Set only when readTokenForRun returned a token. SECRET: never logged. */
+  githubReadToken?: string;
+}
+
+/** One call per run, after the HOME is seeded (see TaskRunOutcome). */
+export function taskRunOutcome(
+  args: Parameters<typeof readTokenForRun>[0],
+): TaskRunOutcome {
+  const batteriesLine = formatBatteriesLine(args.seeded, args.taskGate);
+  if (args.taskGate.kind !== "seed") {
+    return { batteriesLine };
+  }
+  const readToken = readTokenForRun(args);
+  if ("token" in readToken) {
+    return {
+      batteriesLine,
+      readTokenLine: "task agent: read-token=applied",
+      githubReadToken: readToken.token,
+    };
+  }
+  return {
+    batteriesLine,
+    readTokenLine: `task agent: read-token=skip=${readToken.skip}`,
+  };
 }

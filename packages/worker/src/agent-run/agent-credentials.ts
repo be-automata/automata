@@ -8,7 +8,7 @@ import {
   type SeedBatteriesOptions,
   type SeedBatteriesResult,
 } from "./batteries-seed";
-import type { ReviewAgentShape } from "./types";
+import type { BatterySeed } from "./task-agent";
 
 /**
  * Materialises a run's agent provider credential on the execution box (D1).
@@ -129,25 +129,23 @@ async function seedWorkspaceTrust({
  * worker and the daemon's per-agent adapters, #77); an agent we have no path
  * for degrades to built-in-credits rather than guessing a location.
  *
- * ORCHESTRATED review runs (D2) also get the selected battery packs and a
- * hooks-off `settings.json` at the user layer of this HOME (seedBatteries).
- * That is safe because the review argv keeps `--setting-sources user`, so the
- * PR's own project `.claude/` and `.mcp.json` never load (02-FINDINGS Q3).
- * Classic runs never reach seedBatteries: their HOME is exactly as before.
- *
- * TASK runs (Phase 7) whose input carried admin-selected packs (`taskAgent`,
- * already shape-gated by taskAgentForRun) get those packs linked through the
- * same seedBatteries fences, with `hooksOff: false` — no settings.json, so the
- * task lane's hook semantics are unchanged. An orchestrated reviewAgent always
- * wins over a taskAgent (the dispatcher never sends both).
+ * `seed` (built by the caller with batterySeedForRun) links battery packs
+ * into this HOME through seedBatteries:
+ * - ORCHESTRATED review runs (D2): the selected packs plus a hooks-off
+ *   `settings.json` at the user layer (`hooksOff: true`). Safe because the
+ *   review argv keeps `--setting-sources user`, so the PR's own project
+ *   `.claude/` and `.mcp.json` never load (02-FINDINGS Q3).
+ * - TASK runs (Phase 7) with admin-selected packs (already shape-gated by
+ *   taskAgentForRun): the same fences with `hooksOff: false` — no
+ *   settings.json, so the task lane's hook semantics are unchanged.
+ * No seed (classic reviews, runs without task packs): HOME exactly as before.
  */
 export async function materialiseAgentCredentials({
   credentials,
   agent,
   runRoot,
   agentUser,
-  reviewAgent,
-  taskAgent,
+  seed,
   batteries,
 }: {
   credentials: PulledAgentCredentials;
@@ -158,10 +156,8 @@ export async function materialiseAgentCredentials({
    * on. Empty/absent = default-off, and every grant below is a no-op.
    */
   agentUser?: string;
-  /** The run's review shape; only `mode: "orchestrated"` seeds batteries. */
-  reviewAgent?: Pick<ReviewAgentShape, "mode" | "batteries">;
-  /** Task-run packs (phase 7), already gated by taskAgentForRun. */
-  taskAgent?: { batteries: readonly string[] };
+  /** The packs to seed and whether hooks go off; absent = no seeding. */
+  seed?: BatterySeed;
   /** Test/override seam for seedBatteries; production passes only `log`. */
   batteries?: Omit<SeedBatteriesOptions, "agentUser">;
 }): Promise<MaterialisedCredentials> {
@@ -175,22 +171,14 @@ export async function materialiseAgentCredentials({
   await seedWorkspaceTrust({ home, workdir: runRoot, agentUser });
   // seedBatteries creates and grants `<home>/.claude` in both modes, so the
   // credential write below does not repeat that.
-  const seedLog = batteries?.log ?? console.log;
-  const seeded =
-    reviewAgent?.mode === "orchestrated"
-      ? await seedBatteries(home, reviewAgent.batteries, {
-          ...batteries,
-          log: seedLog,
-          agentUser,
-        })
-      : taskAgent && taskAgent.batteries.length > 0
-        ? await seedBatteries(home, taskAgent.batteries, {
-            ...batteries,
-            log: seedLog,
-            agentUser,
-            hooksOff: false,
-          })
-        : undefined;
+  const seeded = seed
+    ? await seedBatteries(home, seed.batteries, {
+        ...batteries,
+        log: batteries?.log ?? console.log,
+        agentUser,
+        hooksOff: seed.hooksOff,
+      })
+    : undefined;
   const cleanup = async () => {
     await fs.rm(home, { recursive: true, force: true }).catch(() => {});
   };

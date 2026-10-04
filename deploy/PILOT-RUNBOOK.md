@@ -718,11 +718,13 @@ is no other toggle.
   four READ permissions. Otherwise the mint fails, the run proceeds without the
   token, www logs `[hatchet] task agent: read token mint failed — dispatching without it`,
   and DORA 401s.
-- The worker refuses an expired token (`task agent: read token expired before start`)
-  and logs `task agent: read token required but not delivered` when a
-  requiring pack was seeded but no token arrived. The applied case logs
-  `task agent: github read token → GITHUB_TOKEN (read-only, single repo)`. The
-  token value is never logged.
+- Every run whose task packs were seeded logs exactly one
+  `task agent: read-token=<outcome>` line: `read-token=applied` when the agent
+  got the token, otherwise `read-token=skip=<reason>` — `expired` (the worker
+  refuses a token within a minute of expiry), `not-delivered` (a requiring
+  pack was seeded but no token arrived), `no-requiring-pack` or `no-broker`.
+  Runs without task packs (every review, every unconfigured repo) log no such
+  line. The token value is never logged.
 - A per-repo egress allowlist must include `api.github.com`, else DORA fails
   with a network error (not a 401).
 
@@ -825,7 +827,7 @@ session, and restart the worker only when idle.
     - DORA computes from GitHub in the UNCHANGED run: Deployment Frequency and
       Lead Time present in the transcript or final message, and NO
       "401 Unauthorized" from dora_metrics.py. The box journal shows
-      `task agent: github read token → GITHUB_TOKEN` for that thread, and www
+      `task agent: read-token=applied` for that thread, and www
       shows no `read token mint failed` line.
     - Reports produced = each report's CONTENT (DORA, react-health, security)
       quoted or summarised in the transcript or the final message. A branch is

@@ -752,14 +752,15 @@ describe("formatBatteriesLine", () => {
     );
   });
 
-  describe("with a lane (phase 7, task runs)", () => {
+  describe("with a task gate (phase 7, task runs)", () => {
     it.each(["task", "pr"] as const)(
-      "lane %s: packs, none, unavailable, not-seeded",
+      "seed, lane %s: packs, none, unavailable, not-seeded",
       (lane) => {
+        const gate = { kind: "seed", lane } as const;
         expect(
           formatBatteriesLine(
             { ok: true, packs: ["somnio-skills"], manifestHash: hash },
-            lane,
+            gate,
           ),
         ).toBe(
           `batteries: lane=${lane} packs=somnio-skills manifest=aaaaaaaaaaaa`,
@@ -767,16 +768,51 @@ describe("formatBatteriesLine", () => {
         expect(
           formatBatteriesLine(
             { ok: true, packs: [], manifestHash: hash },
-            lane,
+            gate,
           ),
         ).toBe(`batteries: lane=${lane} packs=none manifest=aaaaaaaaaaaa`);
         expect(
-          formatBatteriesLine({ ok: false, reason: "manifest-drift" }, lane),
+          formatBatteriesLine({ ok: false, reason: "manifest-drift" }, gate),
         ).toBe(`batteries: unavailable lane=${lane} reason=manifest-drift`);
-        expect(formatBatteriesLine(undefined, lane)).toBe(
+        expect(formatBatteriesLine(undefined, gate)).toBe(
           `batteries: unavailable lane=${lane} reason=not-seeded`,
         );
       },
     );
+
+    it.each(["task", "pr"] as const)(
+      "rejected, lane %s: task-agent-invalid whatever was seeded",
+      (lane) => {
+        const gate = { kind: "rejected", lane } as const;
+        expect(formatBatteriesLine(undefined, gate)).toBe(
+          `batteries: unavailable lane=${lane} reason=task-agent-invalid`,
+        );
+        expect(
+          formatBatteriesLine(
+            { ok: true, packs: ["gstack-review"], manifestHash: hash },
+            gate,
+          ),
+        ).toBe(`batteries: unavailable lane=${lane} reason=task-agent-invalid`);
+      },
+    );
+
+    it("rejected on the review lane and none keep today's review forms", () => {
+      for (const gate of [
+        { kind: "rejected", lane: "review" } as const,
+        { kind: "none" } as const,
+      ]) {
+        expect(formatBatteriesLine(undefined, gate)).toBe(
+          "batteries: mode=classic",
+        );
+        expect(
+          formatBatteriesLine(
+            { ok: true, packs: ["gstack-review"], manifestHash: hash },
+            gate,
+          ),
+        ).toBe(
+          "batteries: mode=orchestrated packs=gstack-review manifest=aaaaaaaaaaaa",
+        );
+      }
+    });
   });
 });
