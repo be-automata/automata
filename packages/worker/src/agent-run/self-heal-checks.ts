@@ -39,8 +39,30 @@ const UNTRACKED_SCRIPT = 'git ls-files --error-unmatch -- "$1" >/dev/null 2>&1';
 // status is observed.
 const GITLEAKS_SCRIPT =
   'gitleaks detect --no-git --no-banner --redact --source "$1" --exit-code 1 >/dev/null 2>&1';
-const PNPM_AUDIT_SCRIPT = "pnpm audit --prod --json 2>/dev/null";
+// pnpm is the pinned standalone binary the batteries installer provisions at
+// a root-owned path that is NOT on the agent's PATH (the box's pnpm is a
+// Corepack shim that tries to download the repo's pinned pnpm and fails). The
+// path is a positional argument; the script stays a constant. An absent binary
+// exits EXIT_ABSENT so it is distinguishable from an audit that failed.
+const PNPM_AUDIT_SCRIPT = `test -x "$1" || exit ${EXIT_ABSENT}; exec "$1" audit --prod --json 2>/dev/null`;
 const NPM_AUDIT_SCRIPT = "npm audit --omit=dev --json 2>/dev/null";
+
+/**
+ * Where install-batteries.sh puts the pinned pnpm (manifest tool "pnpm",
+ * kind static-bin). A drift test pins this to the manifest version.
+ */
+export const AUDIT_PNPM_PATH =
+  "/usr/local/lib/automata-batteries/pnpm@10.14.0/bin/pnpm";
+
+/**
+ * Keeps pnpm (and a Corepack shim, if one ever runs) from self-switching to
+ * the repo's packageManager version, which would need a download.
+ */
+export const AUDIT_PNPM_ENV: Readonly<Record<string, string>> = {
+  npm_config_manage_package_manager_versions: "false",
+  COREPACK_ENABLE_STRICT: "0",
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+};
 
 const NPM_NAME = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
 const FULL_SHA = /^[0-9a-f]{40}$/;
@@ -129,6 +151,10 @@ export interface RunSelfHealChecksArgs {
   agentUser: string;
   workdir: string;
   env: NodeJS.ProcessEnv;
+  /** Absolute path of the pinned pnpm; defaults to AUDIT_PNPM_PATH. */
+  pnpmPath?: string;
+  /** Operator-visible reason lines (never agent-derived text). */
+  note?: (message: string) => void;
   budgetMs?: number;
   perCheckMs?: number;
   signal?: AbortSignal;
@@ -152,13 +178,14 @@ export async function runSelfHealChecks(
     script: string,
     scriptArgs: string[],
     timeoutMs: number,
+    env: NodeJS.ProcessEnv = args.env,
   ): Promise<AgentCommandResult> =>
     args.run({
       agentUser: args.agentUser,
       cwd: args.workdir,
       script,
       args: scriptArgs,
-      env: args.env,
+      env,
       timeoutMs,
       signal: args.signal,
     });
@@ -184,7 +211,18 @@ export async function runSelfHealChecks(
   const loadDepAudit = async (timeoutMs: number): Promise<DepAudit> => {
     const pnpm = await exec(FILE_EXISTS_SCRIPT, ["pnpm-lock.yaml"], timeoutMs);
     if (pnpm.exitCode === 0) {
-      const r = await exec(PNPM_AUDIT_SCRIPT, [], timeoutMs);
+      const r = await exec(
+        PNPM_AUDIT_SCRIPT,
+        [args.pnpmPath ?? AUDIT_PNPM_PATH],
+        timeoutMs,
+        { ...args.env, ...AUDIT_PNPM_ENV },
+      );
+      if (r.exitCode === EXIT_ABSENT) {
+        args.note?.(
+          "npm-audit-clean: pinned pnpm is not installed on this box",
+        );
+        return { ok: false };
+      }
       if (!usable(r)) return { ok: false };
       try {
         return { ok: true, names: parsePnpmAuditJson(r.stdout) };

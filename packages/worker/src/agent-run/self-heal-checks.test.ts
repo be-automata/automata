@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { AUDIT_CHECK_KINDS } from "../../../shared/src/self-heal/audit-rules";
 import type { AgentCommandResult, RunAsAgent } from "./agent-command";
 import {
+  AUDIT_PNPM_ENV,
+  AUDIT_PNPM_PATH,
   isSafeSubject,
   parseNpmAuditJson,
   parsePnpmAuditJson,
@@ -16,6 +18,7 @@ import type { SelfHealCheckShape } from "./types";
 interface Call {
   script: string;
   args: string[];
+  env: NodeJS.ProcessEnv;
 }
 
 function res(
@@ -32,7 +35,7 @@ function harness(handler: (call: Call) => AgentCommandResult): {
 } {
   const calls: Call[] = [];
   const run: RunAsAgent = async (a) => {
-    const call = { script: a.script, args: a.args };
+    const call = { script: a.script, args: a.args, env: a.env };
     calls.push(call);
     return handler(call);
   };
@@ -110,9 +113,68 @@ describe("npm-audit-clean", () => {
       { fingerprint: "a", outcome: "fail" },
       { fingerprint: "b", outcome: "pass" },
     ]);
-    expect(calls.filter((c) => c.script.startsWith("pnpm audit"))).toHaveLength(
+    expect(calls.filter((c) => c.script.includes("audit --prod"))).toHaveLength(
       1,
     );
+  });
+  it("runs the pinned absolute pnpm with the no-self-switch env, script constant", async () => {
+    const { run, calls } = harness(pnpmHandler);
+    await exec([chk("npm-audit-clean", "npm:lodash")], run);
+    const audit = calls.find((c) => c.script.includes("audit --prod"));
+    expect(audit?.args).toEqual([AUDIT_PNPM_PATH]);
+    expect(audit?.script).toBe(
+      'test -x "$1" || exit 3; exec "$1" audit --prod --json 2>/dev/null',
+    );
+    expect(AUDIT_PNPM_PATH).toMatch(/^\/usr\/local\/lib\/automata-batteries\//);
+    expect(audit?.env).toMatchObject({
+      PATH: "/usr/bin",
+      npm_config_manage_package_manager_versions: "false",
+      COREPACK_ENABLE_STRICT: "0",
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+    });
+    expect(AUDIT_PNPM_ENV).toEqual({
+      npm_config_manage_package_manager_versions: "false",
+      COREPACK_ENABLE_STRICT: "0",
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+    });
+    // The no-self-switch env is for the audit only; other commands keep theirs.
+    expect(
+      calls
+        .filter((c) => c !== audit)
+        .every((c) => !("COREPACK_ENABLE_STRICT" in c.env)),
+    ).toBe(true);
+  });
+  it("honours an injected pnpm path", async () => {
+    const { run, calls } = harness(pnpmHandler);
+    await runSelfHealChecks({
+      checks: [chk("npm-audit-clean", "npm:lodash")],
+      run,
+      agentUser: "",
+      workdir: "/wd",
+      env: {},
+      pnpmPath: "/opt/pnpm",
+    });
+    expect(calls.find((c) => c.script.includes("audit --prod"))?.args).toEqual([
+      "/opt/pnpm",
+    ]);
+  });
+  it("reports error with a distinct note when the pinned pnpm is absent", async () => {
+    const notes: string[] = [];
+    const { run } = harness((c) =>
+      c.args[0] === "pnpm-lock.yaml" ? res(0) : res(3),
+    );
+    const out = await runSelfHealChecks({
+      checks: [chk("npm-audit-clean", "npm:lodash")],
+      run,
+      agentUser: "",
+      workdir: "/wd",
+      env: {},
+      note: (m) => notes.push(m),
+    });
+    expect(out[0]?.outcome).toBe("error");
+    expect(notes).toEqual([
+      "npm-audit-clean: pinned pnpm is not installed on this box",
+    ]);
   });
   it("falls back to npm when only package-lock.json exists", async () => {
     const { run, calls } = harness((c) => {

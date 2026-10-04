@@ -495,6 +495,7 @@ export async function runSelfHealAuditStep({
         agentUser,
         workdir,
         env,
+        note: (message) => step(`self-heal checks: ${message}`),
         signal,
       });
     }

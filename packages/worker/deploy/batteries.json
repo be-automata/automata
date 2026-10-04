@@ -226,6 +226,14 @@
         "dora_metrics"
       ],
       "smokeExpect": ".claude/skills/dora-metrics/SKILL.md"
+    },
+    {
+      "name": "pnpm",
+      "kind": "static-bin",
+      "version": "10.14.0",
+      "url": "https://github.com/pnpm/pnpm/releases/download/v10.14.0/pnpm-linuxstatic-x64",
+      "sha256": "b61ab8922a7d82794623460345964597d264c862a579b814eaa3468ac7b80375",
+      "license": "MIT"
     }
   ]
 }
