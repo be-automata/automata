@@ -4,7 +4,12 @@ import {
   getSkillVersion,
   listRecentSkillVersionsWithBodies,
 } from "@terragon/shared/model/repo-skills";
-import { stripFrontmatter, validateSkillBody } from "./review-skill";
+import {
+  renderReviewModeSections,
+  stripFrontmatter,
+  validateSkillBody,
+  type ReviewPromptMode,
+} from "./review-skill";
 import { computeContentSha } from "@terragon/shared/model/repo-skills";
 
 /**
@@ -67,17 +72,31 @@ export type ResolvedSkill = {
 const FALLBACK_HISTORY_LIMIT = 20;
 
 /**
- * Substitute the supported placeholders into a skill body. Deliberately tiny:
- * only `{{repoFullName}}` and `{{baseBranch}}` are defined; any OTHER
- * `{{...}}` token is left verbatim (a skill author's literal braces must not
- * be silently eaten, and a typoed placeholder surfacing in the prompt is
- * visible, unlike one substituted with 'undefined').
+ * Render a skill body for one run. Two steps, in this order:
+ *   1. Review-mode sections (phase 6) — OPT-IN: only when the caller passes
+ *      `reviewPrompt` (runAutomation for github-ops). Without it the body is
+ *      NOT section-processed, so every other caller (mirror-intake's
+ *      github-pr-merged, non-github-ops skills) stays byte-identical even if
+ *      a body contained marker lines. A placeholder inside a dropped block
+ *      vanishes with it.
+ *   2. Placeholders. Deliberately tiny: only `{{repoFullName}}` and
+ *      `{{baseBranch}}` are defined; any OTHER `{{...}}` token is left
+ *      verbatim (a skill author's literal braces must not be silently eaten,
+ *      and a typoed placeholder surfacing in the prompt is visible, unlike one
+ *      substituted with 'undefined').
  */
 export function renderSkillPlaceholders(
   body: string,
-  vars: { repoFullName: string; baseBranch: string },
+  vars: {
+    repoFullName: string;
+    baseBranch: string;
+    reviewPrompt?: ReviewPromptMode;
+  },
 ): string {
-  return body
+  const sectioned = vars.reviewPrompt
+    ? renderReviewModeSections(body, vars.reviewPrompt)
+    : body;
+  return sectioned
     .replaceAll("{{repoFullName}}", vars.repoFullName)
     .replaceAll("{{baseBranch}}", vars.baseBranch);
 }

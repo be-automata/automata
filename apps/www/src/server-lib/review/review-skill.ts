@@ -35,18 +35,209 @@ export function stripFrontmatter(md: string): string {
 }
 
 /**
+ * Review-mode sections (phase 6): ONE github-ops body carries both the classic
+ * prompt and the orchestrated (lead reviewer + sub-agents) prompt, and the
+ * render step keeps the text that matches the run's resolved review mode.
+ *
+ * Grammar — line-based, each marker is the WHOLE line (trailing spaces/tabs
+ * and a trailing CR tolerated), no nesting:
+ *   `<!-- automata:if <condition> -->`   begins a block
+ *   `<!-- automata:endif -->`            ends it
+ * `<condition>` is one of REVIEW_MODE_SECTION_CONDITIONS. Any other line
+ * starting with `<!-- automata:` is a grammar error. A kept block loses only
+ * its two marker lines; a dropped block loses every line from its begin marker
+ * through its end marker inclusive. Authors keep a block's trailing blank line
+ * INSIDE the block so both renders keep their paragraph spacing.
+ *
+ * Why classic must be byte-identical: the classic render is what every
+ * onboarded repo receives today, and its bytes are pinned by sha
+ * (github-ops-review-mode.test.ts). A marker-free body is returned as the very
+ * same string, so old stored versions, repo overrides and other skills are
+ * untouched in every mode.
+ *
+ * Deploy-ordering hazard: a www that predates this renderer serves a
+ * marker-bearing body VERBATIM (markers and the orchestrated text included)
+ * to every repo. So www ships BEFORE a marker body is pushed, the body goes to
+ * the canary repo only, and a rollback reverts the skill version BEFORE www is
+ * rolled back (deploy/PILOT-RUNBOOK.md, phase 6).
+ */
+export const REVIEW_MODE_SECTION_CONDITIONS = [
+  "classic",
+  "orchestrated",
+  "orchestrated run-tests",
+  "orchestrated no-run-tests",
+] as const;
+
+type ReviewModeSectionCondition =
+  (typeof REVIEW_MODE_SECTION_CONDITIONS)[number];
+
+/**
+ * The render-time review mode. A LOCAL literal union, not an import of the
+ * shared ReviewMode: this module must stay importable by deploy tsx scripts.
+ * resolve-review-prompt-mode.ts assigns a ReviewMode into it, so a future
+ * third mode is a compile error there.
+ */
+export type ReviewPromptMode = {
+  mode: "classic" | "orchestrated";
+  runTests: boolean;
+};
+
+const MARKER_PREFIX = "<!-- automata:";
+const SECTION_BEGIN = /^<!-- automata:if ([^\r\n]*?) -->[ \t]*\r?$/;
+const SECTION_END = /^<!-- automata:endif -->[ \t]*\r?$/;
+
+type SectionScan =
+  | { error: string }
+  | {
+      lines: string[];
+      /** The block condition each line belongs to, or null outside blocks. */
+      conditions: (ReviewModeSectionCondition | null)[];
+      /** Whether each line is a marker line (always dropped). */
+      markers: boolean[];
+    };
+
+function isSectionCondition(
+  value: string,
+): value is ReviewModeSectionCondition {
+  return (REVIEW_MODE_SECTION_CONDITIONS as readonly string[]).includes(value);
+}
+
+function scanReviewModeSections(body: string): SectionScan {
+  const lines = body.split("\n");
+  const conditions: (ReviewModeSectionCondition | null)[] = [];
+  const markers: boolean[] = [];
+  let open: ReviewModeSectionCondition | null = null;
+  for (const [index, line] of lines.entries()) {
+    const lineNo = index + 1;
+    const begin = SECTION_BEGIN.exec(line);
+    if (begin) {
+      const condition = begin[1] ?? "";
+      if (!isSectionCondition(condition)) {
+        return {
+          error: `line ${lineNo}: unknown condition "${condition}" (allowed: ${REVIEW_MODE_SECTION_CONDITIONS.join(", ")})`,
+        };
+      }
+      if (open !== null) {
+        return {
+          error: `line ${lineNo}: nested "if" inside an open "${open}" block`,
+        };
+      }
+      open = condition;
+      conditions.push(condition);
+      markers.push(true);
+      continue;
+    }
+    if (SECTION_END.test(line)) {
+      if (open === null) {
+        return { error: `line ${lineNo}: "endif" without an open "if"` };
+      }
+      conditions.push(open);
+      markers.push(true);
+      open = null;
+      continue;
+    }
+    if (line.trimStart().startsWith(MARKER_PREFIX)) {
+      return {
+        error: `line ${lineNo}: unrecognised review-mode marker (only whole-line "if <condition>" and "endif" exist)`,
+      };
+    }
+    conditions.push(open);
+    markers.push(false);
+  }
+  if (open !== null) {
+    return { error: `unclosed "${open}" block at end of body` };
+  }
+  return { lines, conditions, markers };
+}
+
+/** The grammar error of a body, or undefined when it is valid / marker-free. */
+export function findReviewModeSectionError(body: string): string | undefined {
+  if (!body.includes(MARKER_PREFIX)) return undefined;
+  const scan = scanReviewModeSections(body);
+  return "error" in scan ? scan.error : undefined;
+}
+
+/** True iff the body has at least one valid `orchestrated*` block. */
+export function hasReviewModeSections(body: string): boolean {
+  if (!body.includes(MARKER_PREFIX)) return false;
+  const scan = scanReviewModeSections(body);
+  if ("error" in scan) return false;
+  return scan.conditions.some(
+    (condition) => condition !== null && condition.startsWith("orchestrated"),
+  );
+}
+
+function activeConditions(
+  prompt: ReviewPromptMode | undefined,
+): ReadonlySet<ReviewModeSectionCondition> {
+  if (!prompt || prompt.mode === "classic") return new Set(["classic"]);
+  return new Set([
+    "orchestrated",
+    prompt.runTests ? "orchestrated run-tests" : "orchestrated no-run-tests",
+  ]);
+}
+
+/**
+ * Render a body's review-mode sections for one run. Absent prompt = classic.
+ * Throws on a grammar error: unreachable in production (validateSkillBody
+ * rejects such bodies at every write surface and in the resolver), and a throw
+ * fails the automation run closed instead of leaking orchestrated text into a
+ * classic prompt.
+ */
+export function renderReviewModeSections(
+  body: string,
+  prompt?: ReviewPromptMode,
+): string {
+  if (!body.includes(MARKER_PREFIX)) return body;
+  const scan = scanReviewModeSections(body);
+  if ("error" in scan) throw new Error(scan.error);
+  const active = activeConditions(prompt);
+  const kept: string[] = [];
+  for (const [index, line] of scan.lines.entries()) {
+    if (scan.markers[index]) continue;
+    const condition = scan.conditions[index] ?? null;
+    if (condition === null || active.has(condition)) kept.push(line);
+  }
+  return kept.join("\n");
+}
+
+const REVIEW_CONTRACT_RENDERS: readonly ReviewPromptMode[] = [
+  { mode: "classic", runTests: false },
+  { mode: "orchestrated", runTests: true },
+  { mode: "orchestrated", runTests: false },
+];
+
+/**
  * THE fenced-json verdict-contract check, shared by the tracked-file loader
  * (deploy/lib/review-skill-file.ts) and the live-skill resolver
  * (resolve-review-skill.ts): a github-ops
  * body that cannot instruct the agent to emit a parseable verdict must never
  * be dispatched, whichever store it came from. Throws with a caller-supplied
  * label so the error names the offending source (a file path, a version id).
+ *
+ * Review-mode sections: the grammar must be valid, and the contract must
+ * survive EVERY render (classic, orchestrated with and without run-tests) —
+ * a contract living only inside a dropped block would leave that mode's agent
+ * unable to emit a parseable intent. A marker-free body is checked exactly as
+ * before (all three renders are the body itself).
  */
 export function assertReviewSkillContract(
   body: string,
   sourceLabel: string,
 ): void {
-  if (!/```json[\s\S]*"verdict"[\s\S]*```/.test(body)) {
+  const sectionError = findReviewModeSectionError(body);
+  if (sectionError !== undefined) {
+    throw new Error(
+      `Review skill from ${sourceLabel} has a malformed review-mode section: ${sectionError}`,
+    );
+  }
+  const contract = /```json[\s\S]*"verdict"[\s\S]*```/;
+  const renders = body.includes(MARKER_PREFIX)
+    ? REVIEW_CONTRACT_RENDERS.map((prompt) =>
+        renderReviewModeSections(body, prompt),
+      )
+    : [body];
+  if (!renders.every((render) => contract.test(render))) {
     throw new Error(
       `Review skill from ${sourceLabel} has no fenced-json verdict contract — ` +
         `wrong content or a truncated skill. Refusing to dispatch a review ` +
