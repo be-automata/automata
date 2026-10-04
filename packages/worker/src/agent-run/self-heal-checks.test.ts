@@ -1,8 +1,14 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { AUDIT_CHECK_KINDS } from "../../../shared/src/self-heal/audit-rules";
 import type { AgentCommandResult, RunAsAgent } from "./agent-command";
 import {
+  FILE_EXISTS_SCRIPT,
   AUDIT_PNPM_ENV,
   AUDIT_PNPM_PATH,
   isSafeSubject,
@@ -366,5 +372,18 @@ describe("cross-plane drift", () => {
     expect([...SELF_HEAL_CHECK_KINDS].sort()).toEqual(
       [...AUDIT_CHECK_KINDS].sort(),
     );
+  });
+});
+
+describe("FILE_EXISTS_SCRIPT (real /bin/sh)", () => {
+  it("exits 0 for an existing file and 1 for a missing one — never 2", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fe-"));
+    writeFileSync(join(dir, "pnpm-lock.yaml"), "");
+    const run = (name: string) =>
+      spawnSync("/bin/sh", ["-c", FILE_EXISTS_SCRIPT, "sh", name], {
+        cwd: dir,
+      }).status;
+    expect(run("pnpm-lock.yaml")).toBe(0);
+    expect(run("missing.yaml")).toBe(1);
   });
 });
