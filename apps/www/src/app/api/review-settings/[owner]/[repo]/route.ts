@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import type { DB } from "@terragon/shared/db";
 import { getTenantContextOrNull } from "@/lib/auth-server";
 import {
   upsertRepoReviewSetting,
@@ -196,15 +197,32 @@ export async function PUT(
   }
   let row;
   try {
-    row = await upsertRepoReviewSetting({
-      db,
-      organizationId: ctx.organizationId,
-      repoFullName,
-      patch,
-      updatedByUserId: ctx.userId,
-      expectedUpdatedAt,
-      expectAbsentSupersedeOverride,
-      expectRowAbsent,
+    // One transaction: the settings write and its OBS-01 actor-log row land
+    // together or not at all, so an applied change (the kill switch above all)
+    // is never left unattributed, and a failed log never reports a 500 for a
+    // write that already took effect.
+    const organizationId = ctx.organizationId;
+    const actorUserId = ctx.userId;
+    row = await db.transaction(async (tx) => {
+      const txDb = tx as unknown as DB;
+      const written = await upsertRepoReviewSetting({
+        db: txDb,
+        organizationId,
+        repoFullName,
+        patch,
+        updatedByUserId: actorUserId,
+        expectedUpdatedAt,
+        expectAbsentSupersedeOverride,
+        expectRowAbsent,
+      });
+      await recordSelfHealSettingsChange({
+        db: txDb,
+        organizationId,
+        actorUserId,
+        repoFullName: written.repoFullName,
+        patch,
+      });
+      return written;
     });
   } catch (error) {
     if (error instanceof RepoReviewSettingConflictError) {
@@ -223,14 +241,6 @@ export async function PUT(
     }
     throw error;
   }
-
-  await recordSelfHealSettingsChange({
-    db,
-    organizationId: ctx.organizationId,
-    actorUserId: ctx.userId,
-    repoFullName: row.repoFullName,
-    patch,
-  });
 
   getPostHogServer().capture({
     distinctId: ctx.userId,

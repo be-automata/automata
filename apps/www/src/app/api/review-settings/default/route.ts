@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import type { DB } from "@terragon/shared/db";
 import { getTenantContextOrNull } from "@/lib/auth-server";
 import { isOrgAdmin } from "@/lib/org-role";
 import {
@@ -151,14 +152,31 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   }
   let row;
   try {
-    row = await upsertRepoReviewSetting({
-      db,
-      organizationId: ctx.organizationId,
-      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
-      patch,
-      updatedByUserId: ctx.userId,
-      expectedUpdatedAt,
-      expectRowAbsent,
+    // One transaction: the settings write and its OBS-01 actor-log row land
+    // together or not at all, so an applied change (the kill switch above all)
+    // is never left unattributed, and a failed log never reports a 500 for a
+    // write that already took effect.
+    const organizationId = ctx.organizationId;
+    const actorUserId = ctx.userId;
+    row = await db.transaction(async (tx) => {
+      const txDb = tx as unknown as DB;
+      const written = await upsertRepoReviewSetting({
+        db: txDb,
+        organizationId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+        patch,
+        updatedByUserId: actorUserId,
+        expectedUpdatedAt,
+        expectRowAbsent,
+      });
+      await recordSelfHealSettingsChange({
+        db: txDb,
+        organizationId,
+        actorUserId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+        patch,
+      });
+      return written;
     });
   } catch (error) {
     if (error instanceof RepoReviewSettingConflictError) {
@@ -177,13 +195,6 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     }
     throw error;
   }
-  await recordSelfHealSettingsChange({
-    db,
-    organizationId: ctx.organizationId,
-    actorUserId: ctx.userId,
-    repoFullName: ORG_DEFAULT_REPO_SENTINEL,
-    patch,
-  });
   getPostHogServer().capture({
     distinctId: ctx.userId,
     event: "supersede_policy_default_set",

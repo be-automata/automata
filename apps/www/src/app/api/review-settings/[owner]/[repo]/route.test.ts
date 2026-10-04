@@ -44,7 +44,13 @@ vi.mock("@/lib/posthog-server", () => ({
   getPostHogServer: () => ({ capture: captureMock }),
 }));
 
-vi.mock("@/lib/db", () => ({ db: {} }));
+vi.mock("@/lib/db", () => {
+  // The route writes the setting and its actor-log row in one transaction;
+  // the mock runs the callback with the same object so `db` identity holds.
+  const db: { transaction?: unknown } = {};
+  db.transaction = (fn: (tx: unknown) => unknown) => fn(db);
+  return { db };
+});
 
 const ORG = "org_1";
 const USER = "user_1";
