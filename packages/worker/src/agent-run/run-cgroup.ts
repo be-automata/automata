@@ -455,24 +455,6 @@ export function moveIntoCgroup(opts: {
   io.write(path.join(opts.cgroupDir, "cgroup.procs"), String(opts.pid));
 }
 
-/**
- * Did the kernel OOM-kill anything in this cgroup?
- *
- * This is why `memory.events` is read instead of inferring from exit 137: every
- * SIGKILL looks like 137, INCLUDING our own teardown kill. Without the counter a
- * superseded run would be mislabelled `resource-limit`, which is exactly the kind
- * of wrong-cause report #204 exists to remove.
- *
- * Returns 0 when the file is unreadable — the cgroup may already be gone, and a
- * missing counter must never be read as "yes, OOM".
- */
-export function readOomKillCount(opts: {
-  cgroupDir: string;
-  fsi?: CgroupFs;
-}): number {
-  return readMemoryEvents(opts).oomKill;
-}
-
 /** The two `memory.events` counters the teardown journal line reports. */
 export interface MemoryEvents {
   /** Times the cgroup hit memory.max and the OOM killer was invoked. */
@@ -482,9 +464,17 @@ export interface MemoryEvents {
 }
 
 /**
- * Read `oom` and `oom_kill` from this cgroup's `memory.events`. Zero for any
- * counter that is missing or malformed, and for both when the file is gone —
- * same never-a-false-OOM rule as readOomKillCount.
+ * Read `oom` and `oom_kill` from this cgroup's `memory.events`: did the kernel
+ * OOM-kill anything here?
+ *
+ * This is why the counter is read instead of inferring from exit 137: every
+ * SIGKILL looks like 137, INCLUDING our own teardown kill. Without it a
+ * superseded run would be mislabelled `resource-limit`, which is exactly the
+ * kind of wrong-cause report #204 exists to remove.
+ *
+ * Zero for any counter that is missing or malformed, and for both when the
+ * file is gone (the cgroup may already be removed): a missing counter must
+ * never be read as "yes, OOM".
  */
 export function readMemoryEvents(opts: {
   cgroupDir: string;

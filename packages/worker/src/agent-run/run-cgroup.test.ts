@@ -10,7 +10,6 @@ import {
   parseControllers,
   prepareDelegatedRoot,
   readMemoryEvents,
-  readOomKillCount,
   REQUIRED_CONTROLLERS,
   runCgroupPath,
   SUPERVISOR_CGROUP,
@@ -372,7 +371,7 @@ describe("createRunCgroup", () => {
   });
 });
 
-describe("readOomKillCount", () => {
+describe("readMemoryEvents oom_kill", () => {
   it("reads the counter, which is what distinguishes an OOM from our own kill", () => {
     // Every SIGKILL exits 137, including teardown's. Without this counter a
     // superseded run would be reported as `resource-limit` — a wrong cause,
@@ -380,17 +379,17 @@ describe("readOomKillCount", () => {
     const f = fakeFs({
       "/cg/memory.events": "low 0\nhigh 0\nmax 12\noom 1\noom_kill 3\n",
     });
-    expect(readOomKillCount({ cgroupDir: "/cg", fsi: f.fsi })).toBe(3);
+    expect(readMemoryEvents({ cgroupDir: "/cg", fsi: f.fsi }).oomKill).toBe(3);
   });
 
   it("returns 0 — never a false OOM — when the file is gone", () => {
     const f = fakeFs();
-    expect(readOomKillCount({ cgroupDir: "/cg", fsi: f.fsi })).toBe(0);
+    expect(readMemoryEvents({ cgroupDir: "/cg", fsi: f.fsi }).oomKill).toBe(0);
   });
 
   it("returns 0 on a malformed counter rather than NaN", () => {
     const f = fakeFs({ "/cg/memory.events": "oom_kill abc\n" });
-    expect(readOomKillCount({ cgroupDir: "/cg", fsi: f.fsi })).toBe(0);
+    expect(readMemoryEvents({ cgroupDir: "/cg", fsi: f.fsi }).oomKill).toBe(0);
   });
 });
 
