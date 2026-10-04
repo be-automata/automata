@@ -5,6 +5,7 @@ import type { PulledAgentCredentials } from "./www-client";
 import { reapplyPathGrant } from "./agent-uid-fs";
 import {
   seedBatteries,
+  seedForegroundOnly,
   type SeedBatteriesOptions,
   type SeedBatteriesResult,
 } from "./batteries-seed";
@@ -136,9 +137,13 @@ async function seedWorkspaceTrust({
  *   review argv keeps `--setting-sources user`, so the PR's own project
  *   `.claude/` and `.mcp.json` never load (02-FINDINGS Q3).
  * - TASK runs (Phase 7) with admin-selected packs (already shape-gated by
- *   taskAgentForRun): the same fences with `hooksOff: false` — no
- *   settings.json, so the task lane's hook semantics are unchanged.
- * No seed (classic reviews, runs without task packs): HOME exactly as before.
+ *   taskAgentForRun): the same fences with `hooksOff: false`.
+ * No seed (classic reviews, runs without task packs): no packs linked.
+ *
+ * `foregroundOnly` (foregroundOnlyForRun: every non-review run) writes a
+ * user-level settings.json holding only the foreground-only PreToolUse
+ * guard, so background Bash/Monitor (killed when the headless session ends)
+ * are refused — with or without packs. Review runs: HOME exactly as before.
  */
 export async function materialiseAgentCredentials({
   credentials,
@@ -146,6 +151,7 @@ export async function materialiseAgentCredentials({
   runRoot,
   agentUser,
   seed,
+  foregroundOnly = false,
   batteries,
 }: {
   credentials: PulledAgentCredentials;
@@ -158,6 +164,8 @@ export async function materialiseAgentCredentials({
   agentUser?: string;
   /** The packs to seed and whether hooks go off; absent = no seeding. */
   seed?: BatterySeed;
+  /** Install the foreground-only guard (non-review runs); ignored on a hooks-off seed. */
+  foregroundOnly?: boolean;
   /** Test/override seam for seedBatteries; production passes only `log`. */
   batteries?: Omit<SeedBatteriesOptions, "agentUser">;
 }): Promise<MaterialisedCredentials> {
@@ -171,14 +179,19 @@ export async function materialiseAgentCredentials({
   await seedWorkspaceTrust({ home, workdir: runRoot, agentUser });
   // seedBatteries creates and grants `<home>/.claude` in both modes, so the
   // credential write below does not repeat that.
+  const log = batteries?.log ?? console.log;
   const seeded = seed
     ? await seedBatteries(home, seed.batteries, {
         ...batteries,
-        log: batteries?.log ?? console.log,
+        log,
         agentUser,
         hooksOff: seed.hooksOff,
+        ...(foregroundOnly ? { foregroundOnly: true } : {}),
       })
     : undefined;
+  if (!seed && foregroundOnly) {
+    await seedForegroundOnly(home, { ...batteries, log, agentUser });
+  }
   const cleanup = async () => {
     await fs.rm(home, { recursive: true, force: true }).catch(() => {});
   };

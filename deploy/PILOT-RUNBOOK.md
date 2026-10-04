@@ -697,6 +697,13 @@ battery packs in their per-run HOME. Review runs never take task packs.
   `batteries: unavailable lane=task reason=<r>`). A mention on a PR logs
   `lane=pr`. Every other run keeps today's `batteries: mode=…` line, and
   unconfigured repos are byte-identical in HOME and log.
+- **Foreground-only guard (every non-review run, packs or not).** The per-run
+  HOME gets a user-level `settings.json` whose PreToolUse hooks refuse
+  background Bash (`run_in_background: true`) and Monitor: a headless
+  `claude -p` session kills background work when it ends, so the run would
+  report "complete" with the work abandoned. The worker logs
+  `task agent: foreground-only hook installed` after the batteries line.
+  Review runs never get it. Background sub-agents stay allowed.
 - An invalid stored value never fails a dispatch: www logs
   `[hatchet] task agent: invalid stored taskBatteries — dispatching without packs`
   and the run goes without packs.

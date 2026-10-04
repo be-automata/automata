@@ -15,6 +15,7 @@ import {
   type BatteriesManifest,
   type BatteryPack,
 } from "./batteries-manifest";
+import { mergeForegroundOnlySettings } from "./foreground-only-hook";
 
 /**
  * Per-run seeding of the review batteries (Phase 5, D2).
@@ -44,10 +45,12 @@ import {
  * without following it, so HOME cleanup never touches the install.
  *
  * TASK runs (Phase 7) reuse exactly the same verified-install fences with
- * `hooksOff: false`: the admin-selected packs are linked, but NO settings.json
- * is read or written, so the repo's own hooks keep today's semantics for the
- * task lane (its argv has no `--setting-sources`, so the user layer in this
- * HOME loads alongside the project layer).
+ * `hooksOff: false`: the admin-selected packs are linked and hooks stay on, so
+ * the repo's own hooks keep today's semantics for the task lane (its argv has
+ * no `--setting-sources`, so the user layer in this HOME loads alongside the
+ * project layer). With `foregroundOnly: true` the user-layer settings.json
+ * also gets the foreground-only PreToolUse hooks (foreground-only-hook.ts),
+ * merged over whatever is there; without it no settings.json is touched.
  */
 
 export const BATTERIES_ROOT_DEFAULT = "/usr/local/lib/automata-batteries";
@@ -81,6 +84,14 @@ export interface SeedBatteriesOptions {
    * semantics must stay exactly as today, so no settings file is touched.
    */
   hooksOff?: boolean;
+  /**
+   * Only with `hooksOff: false` (task runs): merge the foreground-only
+   * PreToolUse hooks into `<home>/.claude/settings.json` (0644), blocking
+   * background Bash and Monitor in the headless session. Absent/false = no
+   * settings file is touched (today's task-lane behaviour). Ignored when
+   * hooksOff is on: a review run's settings stay exactly as before.
+   */
+  foregroundOnly?: boolean;
 }
 
 /** A seeded run's outcome (orchestrated review or task packs): verified packs, or why none. */
@@ -215,12 +226,11 @@ async function ensureClaudeDir(claudeDir: string, grant: Grant): Promise<void> {
   await grant(claudeDir, "directory");
 }
 
-async function writeHooksOffSettings(
-  claudeDir: string,
-  grant: Grant,
+/** `<claudeDir>/settings.json` as an object; `{}` when absent or unusable. */
+async function readExistingSettings(
+  settingsPath: string,
   log: (line: string) => void,
-): Promise<void> {
-  const settingsPath = path.join(claudeDir, "settings.json");
+): Promise<Record<string, unknown>> {
   let existing: Record<string, unknown> = {};
   try {
     const parsed: unknown = JSON.parse(await fs.readFile(settingsPath, "utf8"));
@@ -241,6 +251,16 @@ async function writeHooksOffSettings(
       log("batteries: replacing unparseable settings.json");
     }
   }
+  return existing;
+}
+
+async function writeHooksOffSettings(
+  claudeDir: string,
+  grant: Grant,
+  log: (line: string) => void,
+): Promise<void> {
+  const settingsPath = path.join(claudeDir, "settings.json");
+  const existing = await readExistingSettings(settingsPath, log);
   await fs.writeFile(
     settingsPath,
     JSON.stringify({ ...existing, disableAllHooks: true }),
@@ -249,6 +269,28 @@ async function writeHooksOffSettings(
   // writeFile honours `mode` only on create; a retry keeps the old mode.
   await fs.chmod(settingsPath, 0o600);
   // The 0600 above zeroes the Linux ACL mask; restore the agent's grant.
+  await grant(settingsPath, "file");
+}
+
+/**
+ * Task runs: merge the foreground-only PreToolUse hooks (foreground-only-hook.ts)
+ * into `<home>/.claude/settings.json`, 0644, then re-grant the agent.
+ */
+async function writeForegroundOnlySettings(
+  claudeDir: string,
+  grant: Grant,
+  log: (line: string) => void,
+): Promise<void> {
+  const settingsPath = path.join(claudeDir, "settings.json");
+  const existing = await readExistingSettings(settingsPath, log);
+  await fs.writeFile(
+    settingsPath,
+    JSON.stringify(mergeForegroundOnlySettings(existing)),
+    { mode: 0o644 },
+  );
+  // writeFile honours `mode` only on create; a retry keeps the old mode.
+  await fs.chmod(settingsPath, 0o644);
+  // chmod rewrites the Linux ACL mask; restore the agent's grant.
   await grant(settingsPath, "file");
 }
 
@@ -543,6 +585,33 @@ async function placeLink(
   return true;
 }
 
+/**
+ * The foreground-only guard alone, for a non-review run that links no packs:
+ * creates and grants `<home>/.claude` and merges the guard into its
+ * settings.json. No battery resolution, so the run's `batteries:` line and
+ * seed result stay exactly as before. Errors propagate (a real HOME fault).
+ */
+export async function seedForegroundOnly(
+  home: string,
+  opts: Pick<
+    SeedBatteriesOptions,
+    "agentUser" | "log" | "aclExec" | "platform"
+  >,
+): Promise<void> {
+  const users = opts.agentUser ? [opts.agentUser] : [];
+  const grant: Grant = (target, kind) =>
+    reapplyPathGrant({
+      target,
+      kind,
+      users,
+      exec: opts.aclExec,
+      platform: opts.platform,
+    });
+  const claudeDir = path.join(home, ".claude");
+  await ensureClaudeDir(claudeDir, grant);
+  await writeForegroundOnlySettings(claudeDir, grant, opts.log);
+}
+
 export async function seedBatteries(
   home: string,
   packIds: readonly string[],
@@ -566,6 +635,8 @@ export async function seedBatteries(
   await ensureClaudeDir(claudeDir, grant);
   if (opts.hooksOff !== false) {
     await writeHooksOffSettings(claudeDir, grant, log);
+  } else if (opts.foregroundOnly === true) {
+    await writeForegroundOnlySettings(claudeDir, grant, log);
   }
 
   // (2..8) Battery resolution: every failure degrades, nothing throws.

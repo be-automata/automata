@@ -4,6 +4,7 @@ import { resolveRunLane } from "./run-lane";
 import {
   TASK_AGENT_MAX_PACKS,
   batterySeedForRun,
+  foregroundOnlyForRun,
   readTokenForRun,
   taskAgentForRun,
   taskRunOutcome,
@@ -104,6 +105,37 @@ describe("taskAgentForRun (phase 7)", () => {
   });
 });
 
+describe("foregroundOnlyForRun", () => {
+  it.each(["task", "pr"] as const)(
+    "every %s-lane run gets the guard, with or without packs",
+    (lane) => {
+      expect(foregroundOnlyForRun(lane, undefined)).toBe(true);
+      expect(
+        foregroundOnlyForRun(lane, {
+          batteries: ["somnio-skills"],
+          hooksOff: false,
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it("review runs never get it (classic or orchestrated)", () => {
+    expect(foregroundOnlyForRun("review", undefined)).toBe(false);
+    expect(
+      foregroundOnlyForRun("review", {
+        batteries: ["gstack-review"],
+        hooksOff: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("a hooks-off seed keeps its settings, whatever the lane", () => {
+    expect(
+      foregroundOnlyForRun("task", { batteries: [], hooksOff: true }),
+    ).toBe(false);
+  });
+});
+
 describe("batterySeedForRun (phase 5/7)", () => {
   const SEED_GATE: TaskAgentGate = {
     kind: "seed",
@@ -120,7 +152,7 @@ describe("batterySeedForRun (phase 5/7)", () => {
     ).toEqual({ batteries: ["gstack-review"], hooksOff: true });
   });
 
-  it("a task seed links its packs with hooks untouched", () => {
+  it("a task seed links its packs with hooks on", () => {
     expect(batterySeedForRun(undefined, SEED_GATE)).toEqual({
       batteries: ["somnio-skills"],
       hooksOff: false,
