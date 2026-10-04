@@ -1,18 +1,18 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { AlertCircle, RotateCcw } from "lucide-react";
 
 import {
-  DEFAULT_REVIEW_MODE,
-  REVIEW_AGENT_FIELDS,
+  DEFAULT_REVIEW_BATTERIES,
+  DEFAULT_REVIEW_RUN_TESTS,
   REVIEW_BATTERY_PACK_IDS,
-  REVIEW_COMMAND_TIMEOUT_S_MAX,
-  REVIEW_COMMAND_TIMEOUT_S_MIN,
-  REVIEW_MAX_TURNS_MAX,
-  REVIEW_MAX_TURNS_MIN,
+  REVIEW_BATTERY_PACK_LABELS,
   REVIEW_MODES,
-  isReviewMode,
+  REVIEW_MODE_LABELS,
+  effectiveReviewMode,
+  pickReviewAgentFields,
+  type ReviewAgentValues,
   type ReviewBatteryPackId,
   type ReviewMode,
 } from "@terragon/shared/model/review-agent-settings";
@@ -31,6 +31,11 @@ import {
 } from "@/components/ui/select";
 import { SettingsSection } from "@/components/settings/settings-row";
 import {
+  ConflictBanner,
+  RepoOverrideBadge,
+  RepoPickerSelect,
+} from "@/components/settings/review-settings-parts";
+import {
   useReviewSettingsQuery,
   useSetReviewSettingMutation,
 } from "@/queries/review-settings-queries";
@@ -40,6 +45,20 @@ import {
 } from "@/queries/supersede-policy-queries";
 import { ConflictError } from "@/queries/error-from-response";
 import { useUserReposQuery } from "@/queries/user-repo-queries";
+import {
+  NO_REVIEW_AGENT_VALUES,
+  NUMBER_FIELDS,
+  REVIEW_AGENT_CLEAR_PATCH,
+  availableReviewAgentRepos,
+  draftFromValues,
+  draftToPatch,
+  firstWriteFence,
+  reviewAgentOverrides,
+  type NumberFieldSpec,
+  type ReviewAgentDraft,
+  type ReviewAgentOverrideRow,
+  type ReviewAgentPatch,
+} from "./review-agent-form";
 
 /**
  * Phase 4 — "Review agent": the org-default review-agent settings (the '*'
@@ -51,206 +70,123 @@ import { useUserReposQuery } from "@/queries/user-repo-queries";
  * Same shape as the supersede section: a PURE view (every state is a prop,
  * testable with renderToStaticMarkup), a model hook binding the queries and
  * mutations, and a thin container. A lost write race lands in one conflict
- * banner with Reload. Writes are permission-gated server-side.
+ * banner with Reload. Writes are permission-gated server-side. The pure form
+ * logic lives in review-agent-form.ts.
  */
 
-/** Short plain labels for the battery packs. */
-export const REVIEW_BATTERY_PACK_LABELS: Record<ReviewBatteryPackId, string> = {
-  "gstack-review": "gstack review",
-  "somnio-review": "Somnio review",
-  "gsd-reviewers": "GSD reviewers",
-};
-
-const REVIEW_MODE_LABELS: Record<ReviewMode, string> = {
-  classic: "Classic",
-  orchestrated: "Orchestrated",
-};
-
-export const MAX_TURNS_LABEL = "Max turns (lead agent)";
-export const MAX_TURNS_NOTE =
-  "Limits the lead reviewer's turns. Sub-agent turns are not counted, so this is not a cost limit.";
 export const CLASSIC_HINT =
   "Only used in orchestrated mode. Classic runs exactly as today.";
 export const RUN_TESTS_NOTE =
   "Pull requests from forks or untrusted authors never run tests.";
 
-/** The orchestrated per-command timeout when nothing is set (seconds). */
-const ORCHESTRATED_DEFAULT_TIMEOUT_S = 300;
-
-/** The review-agent fields of a settings row (null = inherit). */
-export interface ReviewAgentValues {
-  reviewMode: ReviewMode | null;
-  reviewBatteries: ReviewBatteryPackId[] | null;
-  reviewRunTests: boolean | null;
-  reviewCommandTimeoutS: number | null;
-  reviewMaxTurns: number | null;
-}
-
-/** A write: only the fields being changed; null clears (= inherit). */
-export type ReviewAgentPatch = Partial<ReviewAgentValues>;
-
-export interface ReviewAgentOverrideRow extends ReviewAgentValues {
-  repoFullName: string;
-  updatedAt: string;
-}
-
-/** "Restore default": clear all five fields back to inherit. */
-export const REVIEW_AGENT_CLEAR_PATCH = {
-  reviewMode: null,
-  reviewBatteries: null,
-  reviewRunTests: null,
-  reviewCommandTimeoutS: null,
-  reviewMaxTurns: null,
-} as const;
-
-const NO_VALUES: ReviewAgentValues = { ...REVIEW_AGENT_CLEAR_PATCH };
-
-/** The mode a run would use: repo value → org value → system default. */
-export function effectiveReviewMode(
-  repoValue: string | null | undefined,
-  orgValue: string | null | undefined,
-): ReviewMode {
-  if (isReviewMode(repoValue)) return repoValue;
-  if (isReviewMode(orgValue)) return orgValue;
-  return DEFAULT_REVIEW_MODE;
-}
-
-function hasReviewAgentOverride(row: ReviewAgentValues): boolean {
-  return REVIEW_AGENT_FIELDS.some((field) => row[field] !== null);
-}
-
-/** Rows carrying at least one review-agent override (an empty pack list counts). */
-export function reviewAgentOverrides<T extends ReviewAgentValues>(
-  settings: readonly T[],
-): T[] {
-  return settings.filter(hasReviewAgentOverride);
-}
-
-/**
- * Repos the "Add override" picker may offer: every visible repo minus those
- * that already carry a review-agent override. Slugs compare lowercased, as
- * the model stores them.
- */
-export function availableReviewAgentRepos(
-  repoFullNames: readonly string[],
-  settings: readonly (ReviewAgentValues & { repoFullName: string })[],
-): string[] {
-  const taken = new Set(
-    reviewAgentOverrides(settings).map((s) => s.repoFullName.toLowerCase()),
-  );
-  return repoFullNames.filter((name) => !taken.has(name.toLowerCase())).sort();
-}
-
-/**
- * The fence for a repo's first review-agent write: the row's version when a
- * row exists for another family, else null (the whole-row first-write fence).
- */
-export function firstWriteFence(
-  repoFullName: string,
-  settings: readonly { repoFullName: string; updatedAt: string }[],
-): string | null {
-  const key = repoFullName.toLowerCase();
-  const row = settings.find((s) => s.repoFullName.toLowerCase() === key);
-  return row ? row.updatedAt : null;
-}
-
-/**
- * Parse a number input: empty → null (inherit); a whole number → that
- * number; anything else → undefined (invalid — do not save).
- */
-export function parseOptionalInt(text: string): number | null | undefined {
-  const trimmed = text.trim();
-  if (trimmed === "") return null;
-  if (!/^\d+$/.test(trimmed)) return undefined;
-  return Number(trimmed);
-}
-
-/** Editable form state for one block (org default or one repo). */
-export interface ReviewAgentDraft {
-  reviewMode: ReviewMode | null;
-  reviewBatteries: ReviewBatteryPackId[] | null;
-  reviewRunTests: boolean | null;
-  timeoutText: string;
-  maxTurnsText: string;
-}
-
-export function draftFromValues(values: ReviewAgentValues): ReviewAgentDraft {
-  return {
-    reviewMode: values.reviewMode,
-    reviewBatteries: values.reviewBatteries,
-    reviewRunTests: values.reviewRunTests,
-    timeoutText: values.reviewCommandTimeoutS?.toString() ?? "",
-    maxTurnsText: values.reviewMaxTurns?.toString() ?? "",
-  };
-}
-
-function sameList(
-  a: readonly string[] | null,
-  b: readonly string[] | null,
-): boolean {
-  if (a === null || b === null) return a === b;
-  return a.length === b.length && a.every((value, i) => value === b[i]);
-}
-
-export const TIMEOUT_ERROR = `${REVIEW_COMMAND_TIMEOUT_S_MIN}-${REVIEW_COMMAND_TIMEOUT_S_MAX} seconds`;
-export const MAX_TURNS_ERROR = `${REVIEW_MAX_TURNS_MIN}-${REVIEW_MAX_TURNS_MAX} turns`;
-
-function parseRanged(
-  text: string,
-  min: number,
-  max: number,
-): number | null | undefined {
-  const value = parseOptionalInt(text);
-  if (value === null || value === undefined) return value;
-  return value >= min && value <= max ? value : undefined;
-}
-
-/**
- * The patch a Save sends: only the fields that differ from the stored values.
- * Invalid number inputs yield an inline error per field and no save.
- */
-export function draftToPatch(
-  draft: ReviewAgentDraft,
-  stored: ReviewAgentValues,
-): {
-  patch: ReviewAgentPatch;
-  timeoutError?: string;
-  maxTurnsError?: string;
-} {
-  const patch: ReviewAgentPatch = {};
-  if (draft.reviewMode !== stored.reviewMode) {
-    patch.reviewMode = draft.reviewMode;
-  }
-  if (!sameList(draft.reviewBatteries, stored.reviewBatteries)) {
-    patch.reviewBatteries = draft.reviewBatteries;
-  }
-  if (draft.reviewRunTests !== stored.reviewRunTests) {
-    patch.reviewRunTests = draft.reviewRunTests;
-  }
-  const timeout = parseRanged(
-    draft.timeoutText,
-    REVIEW_COMMAND_TIMEOUT_S_MIN,
-    REVIEW_COMMAND_TIMEOUT_S_MAX,
-  );
-  const maxTurns = parseRanged(
-    draft.maxTurnsText,
-    REVIEW_MAX_TURNS_MIN,
-    REVIEW_MAX_TURNS_MAX,
-  );
-  if (timeout !== undefined && timeout !== stored.reviewCommandTimeoutS) {
-    patch.reviewCommandTimeoutS = timeout;
-  }
-  if (maxTurns !== undefined && maxTurns !== stored.reviewMaxTurns) {
-    patch.reviewMaxTurns = maxTurns;
-  }
-  return {
-    patch,
-    ...(timeout === undefined ? { timeoutError: TIMEOUT_ERROR } : {}),
-    ...(maxTurns === undefined ? { maxTurnsError: MAX_TURNS_ERROR } : {}),
-  };
-}
-
 const INHERIT = "inherit";
+
+/** A Select whose first option is "Inherit (…)" (null); the rest are values. */
+function InheritSelect<T extends string>({
+  id,
+  label,
+  value,
+  options,
+  inheritLabel,
+  disabled,
+  onChange,
+  children,
+}: {
+  id: string;
+  label: string;
+  value: T | null;
+  options: readonly { value: T; label: string }[];
+  inheritLabel: string;
+  disabled: boolean;
+  onChange: (value: T | null) => void;
+  /** Hints rendered under the select. */
+  children?: React.ReactNode;
+}) {
+  const shown =
+    value === null
+      ? inheritLabel
+      : (options.find((option) => option.value === value)?.label ?? value);
+  return (
+    <div className="grid gap-1">
+      <Label htmlFor={id}>{label}</Label>
+      <Select
+        value={value ?? INHERIT}
+        onValueChange={(v) =>
+          onChange(options.find((option) => option.value === v)?.value ?? null)
+        }
+        disabled={disabled}
+      >
+        <SelectTrigger id={id} className="min-h-11 w-full sm:w-64">
+          <SelectValue>{shown}</SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={INHERIT}>{inheritLabel}</SelectItem>
+          {options.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {children}
+    </div>
+  );
+}
+
+/** One free-text number field from the NUMBER_FIELDS table. */
+function NumberField({
+  idPrefix,
+  spec,
+  text,
+  inherited,
+  error,
+  disabled,
+  onChange,
+}: {
+  idPrefix: string;
+  spec: NumberFieldSpec;
+  text: string;
+  inherited: ReviewAgentValues | null;
+  error: string | undefined;
+  disabled: boolean;
+  onChange: (text: string) => void;
+}) {
+  const id = `${idPrefix}-${spec.idSuffix}`;
+  const placeholder = inherited?.[spec.field] ?? spec.systemDefault;
+  return (
+    <div className="grid gap-1">
+      <Label htmlFor={id}>{spec.label}</Label>
+      <Input
+        id={id}
+        inputMode="numeric"
+        className="min-h-11"
+        value={text}
+        placeholder={placeholder === null ? "unset" : String(placeholder)}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        aria-invalid={error !== undefined}
+      />
+      {spec.note !== undefined && (
+        <p className="text-xs text-muted-foreground">{spec.note}</p>
+      )}
+      {error !== undefined && (
+        <p className="text-xs text-destructive" data-testid={`${id}-error`}>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+const MODE_OPTIONS = REVIEW_MODES.map((value) => ({
+  value,
+  label: REVIEW_MODE_LABELS[value],
+}));
+
+const RUN_TESTS_OPTIONS = [
+  { value: "on", label: "On" },
+  { value: "off", label: "Off" },
+] as const;
 
 /**
  * The five fields for one block. Pure: the draft is a prop. `inherited` is
@@ -281,32 +217,25 @@ export function ReviewAgentFieldsView({
   onChange: (draft: ReviewAgentDraft) => void;
   onSave: (patch: ReviewAgentPatch) => void;
 }) {
-  const inheritedMode = effectiveReviewMode(null, inherited?.reviewMode);
+  const inheritedMode: ReviewMode = effectiveReviewMode(
+    null,
+    inherited?.reviewMode,
+  );
   const mode = effectiveReviewMode(draft.reviewMode, inheritedMode);
   const orchestratedOnlyDisabled = disabled || mode === "classic";
   const inheritedBatteries = inherited?.reviewBatteries ?? [
-    ...REVIEW_BATTERY_PACK_IDS,
+    ...DEFAULT_REVIEW_BATTERIES,
   ];
   const shownBatteries = draft.reviewBatteries ?? inheritedBatteries;
-  const inheritedRunTests = inherited?.reviewRunTests ?? false;
-  const { patch, timeoutError, maxTurnsError } = draftToPatch(draft, stored);
+  const inheritedRunTests =
+    inherited?.reviewRunTests ?? DEFAULT_REVIEW_RUN_TESTS;
+  const result = draftToPatch(draft, stored);
+  const { patch } = result;
   const canSave =
     !disabled &&
     !saveBlocked &&
-    timeoutError === undefined &&
-    maxTurnsError === undefined &&
+    NUMBER_FIELDS.every((spec) => result[spec.errorKey] === undefined) &&
     Object.keys(patch).length > 0;
-
-  const modeLabel =
-    draft.reviewMode === null
-      ? `Inherit (${REVIEW_MODE_LABELS[inheritedMode].toLowerCase()})`
-      : REVIEW_MODE_LABELS[draft.reviewMode];
-  const runTestsLabel =
-    draft.reviewRunTests === null
-      ? `Inherit (${inheritedRunTests ? "on" : "off"})`
-      : draft.reviewRunTests
-        ? "On"
-        : "Off";
 
   function togglePack(id: ReviewBatteryPackId, on: boolean) {
     const next = REVIEW_BATTERY_PACK_IDS.filter((pack) =>
@@ -317,32 +246,15 @@ export function ReviewAgentFieldsView({
 
   return (
     <div className="grid gap-4" data-testid={`${idPrefix}-fields`}>
-      <div className="grid gap-1">
-        <Label htmlFor={`${idPrefix}-mode`}>Mode</Label>
-        <Select
-          value={draft.reviewMode ?? INHERIT}
-          onValueChange={(v) =>
-            onChange({ ...draft, reviewMode: isReviewMode(v) ? v : null })
-          }
-          disabled={disabled}
-        >
-          <SelectTrigger
-            id={`${idPrefix}-mode`}
-            className="min-h-11 w-full sm:w-64"
-          >
-            <SelectValue>{modeLabel}</SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={INHERIT}>
-              {`Inherit (${REVIEW_MODE_LABELS[inheritedMode].toLowerCase()})`}
-            </SelectItem>
-            {REVIEW_MODES.map((value) => (
-              <SelectItem key={value} value={value}>
-                {REVIEW_MODE_LABELS[value]}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+      <InheritSelect
+        id={`${idPrefix}-mode`}
+        label="Mode"
+        value={draft.reviewMode}
+        options={MODE_OPTIONS}
+        inheritLabel={`Inherit (${REVIEW_MODE_LABELS[inheritedMode].toLowerCase()})`}
+        disabled={disabled}
+        onChange={(reviewMode) => onChange({ ...draft, reviewMode })}
+      >
         {mode === "classic" && (
           <p
             className="text-xs text-muted-foreground"
@@ -351,7 +263,7 @@ export function ReviewAgentFieldsView({
             {CLASSIC_HINT}
           </p>
         )}
-      </div>
+      </InheritSelect>
 
       <fieldset className="grid gap-2">
         <legend className="text-sm font-medium">Review packs</legend>
@@ -386,98 +298,39 @@ export function ReviewAgentFieldsView({
         ))}
       </fieldset>
 
-      <div className="grid gap-1">
-        <Label htmlFor={`${idPrefix}-run-tests`}>Run tests</Label>
-        <Select
-          value={
-            draft.reviewRunTests === null
-              ? INHERIT
-              : draft.reviewRunTests
-                ? "on"
-                : "off"
-          }
-          onValueChange={(v) =>
-            onChange({
-              ...draft,
-              reviewRunTests: v === INHERIT ? null : v === "on",
-            })
-          }
-          disabled={orchestratedOnlyDisabled}
-        >
-          <SelectTrigger
-            id={`${idPrefix}-run-tests`}
-            className="min-h-11 w-full sm:w-64"
-          >
-            <SelectValue>{runTestsLabel}</SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={INHERIT}>
-              {`Inherit (${inheritedRunTests ? "on" : "off"})`}
-            </SelectItem>
-            <SelectItem value="on">On</SelectItem>
-            <SelectItem value="off">Off</SelectItem>
-          </SelectContent>
-        </Select>
+      <InheritSelect
+        id={`${idPrefix}-run-tests`}
+        label="Run tests"
+        value={
+          draft.reviewRunTests === null
+            ? null
+            : draft.reviewRunTests
+              ? "on"
+              : "off"
+        }
+        options={RUN_TESTS_OPTIONS}
+        inheritLabel={`Inherit (${inheritedRunTests ? "on" : "off"})`}
+        disabled={orchestratedOnlyDisabled}
+        onChange={(v) =>
+          onChange({ ...draft, reviewRunTests: v === null ? null : v === "on" })
+        }
+      >
         <p className="text-xs text-muted-foreground">{RUN_TESTS_NOTE}</p>
-      </div>
+      </InheritSelect>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <div className="grid gap-1">
-          <Label htmlFor={`${idPrefix}-timeout`}>
-            Command timeout (seconds)
-          </Label>
-          <Input
-            id={`${idPrefix}-timeout`}
-            inputMode="numeric"
-            className="min-h-11"
-            value={draft.timeoutText}
-            placeholder={String(
-              inherited?.reviewCommandTimeoutS ??
-                ORCHESTRATED_DEFAULT_TIMEOUT_S,
-            )}
-            onChange={(e) =>
-              onChange({ ...draft, timeoutText: e.target.value })
-            }
+        {NUMBER_FIELDS.map((spec) => (
+          <NumberField
+            key={spec.field}
+            idPrefix={idPrefix}
+            spec={spec}
+            text={draft[spec.textKey]}
+            inherited={inherited}
+            error={result[spec.errorKey]}
             disabled={orchestratedOnlyDisabled}
-            aria-invalid={timeoutError !== undefined}
+            onChange={(text) => onChange({ ...draft, [spec.textKey]: text })}
           />
-          {timeoutError !== undefined && (
-            <p
-              className="text-xs text-destructive"
-              data-testid={`${idPrefix}-timeout-error`}
-            >
-              {timeoutError}
-            </p>
-          )}
-        </div>
-        <div className="grid gap-1">
-          <Label htmlFor={`${idPrefix}-max-turns`}>{MAX_TURNS_LABEL}</Label>
-          <Input
-            id={`${idPrefix}-max-turns`}
-            inputMode="numeric"
-            className="min-h-11"
-            value={draft.maxTurnsText}
-            placeholder={
-              inherited?.reviewMaxTurns != null
-                ? String(inherited.reviewMaxTurns)
-                : "unset"
-            }
-            onChange={(e) =>
-              onChange({ ...draft, maxTurnsText: e.target.value })
-            }
-            disabled={orchestratedOnlyDisabled}
-            aria-invalid={maxTurnsError !== undefined}
-          />
-          <p className="text-xs text-muted-foreground">{MAX_TURNS_NOTE}</p>
-          {maxTurnsError !== undefined && (
-            <p
-              className="text-xs text-destructive"
-              data-testid={`${idPrefix}-max-turns-error`}
-            >
-              {maxTurnsError}
-            </p>
-          )}
-        </div>
+        ))}
       </div>
 
       <div>
@@ -583,17 +436,10 @@ export function ReviewAgentSectionView({
       ) : (
         <>
           {state.conflict && (
-            <Alert role="status" data-testid="review-agent-conflict">
-              <AlertCircle className="h-4 w-4" />
-              <AlertTitle>Another admin just saved changes</AlertTitle>
-              <AlertDescription className="flex items-center gap-2">
-                Your change was not applied. Reload to see the latest before
-                editing again.
-                <Button size="sm" variant="outline" onClick={actions.onReload}>
-                  Reload
-                </Button>
-              </AlertDescription>
-            </Alert>
+            <ConflictBanner
+              testId="review-agent-conflict"
+              onReload={actions.onReload}
+            />
           )}
           <div className="rounded-md border p-3">
             <h4 className="mb-3 text-sm font-medium">Org default</h4>
@@ -632,9 +478,7 @@ export function ReviewAgentSectionView({
                       <span className="truncate font-mono text-sm">
                         {row.repoFullName}
                       </span>
-                      <span className="w-fit rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                        Repo override
-                      </span>
+                      <RepoOverrideBadge />
                       <Button
                         variant="ghost"
                         size="sm"
@@ -688,33 +532,27 @@ function AddReviewAgentOverride({
   onAdd: (repoFullName: string, patch: ReviewAgentPatch) => void;
 }) {
   const [repo, setRepo] = useState("");
-  const [draft, setDraft] = useState(() => draftFromValues(NO_VALUES));
+  const [draft, setDraft] = useState(() =>
+    draftFromValues(NO_REVIEW_AGENT_VALUES),
+  );
   if (repos.length === 0) return null;
   return (
     <div
       className="mt-3 grid gap-3 rounded-md border border-dashed p-3"
       data-testid="review-agent-add-override"
     >
-      <Select value={repo} onValueChange={setRepo} disabled={disabled}>
-        <SelectTrigger
-          className="min-h-11 w-full"
-          aria-label="Repository to add a review agent override for"
-        >
-          <SelectValue placeholder="Choose a repository…" />
-        </SelectTrigger>
-        <SelectContent>
-          {repos.map((r) => (
-            <SelectItem key={r} value={r}>
-              {r}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <RepoPickerSelect
+        repos={repos}
+        value={repo}
+        onChange={setRepo}
+        disabled={disabled}
+        ariaLabel="Repository to add a review agent override for"
+      />
       <ReviewAgentFieldsView
         idPrefix="review-agent-add"
         scope="repo"
         draft={draft}
-        stored={NO_VALUES}
+        stored={NO_REVIEW_AGENT_VALUES}
         inherited={inherited}
         disabled={disabled}
         saveLabel="Add override"
@@ -723,7 +561,7 @@ function AddReviewAgentOverride({
         onSave={(patch) => {
           onAdd(repo, patch);
           setRepo("");
-          setDraft(draftFromValues(NO_VALUES));
+          setDraft(draftFromValues(NO_REVIEW_AGENT_VALUES));
         }}
       />
     </div>
@@ -753,7 +591,17 @@ export function useReviewAgentSectionModel(): {
   const [conflict, setConflict] = useState(false);
 
   const stored = defaultQuery.data ?? null;
-  const list = listQuery.data ?? [];
+  const list = useMemo(() => listQuery.data ?? [], [listQuery.data]);
+  const visibleRepos = reposQuery.data?.repos;
+  const overrides = useMemo(() => reviewAgentOverrides(list), [list]);
+  const availableRepos = useMemo(
+    () =>
+      availableReviewAgentRepos(
+        (visibleRepos ?? []).map((r) => r.full_name),
+        list,
+      ),
+    [visibleRepos, list],
+  );
 
   const onConflict = (error: unknown) => {
     if (error instanceof ConflictError) setConflict(true);
@@ -787,14 +635,8 @@ export function useReviewAgentSectionModel(): {
       : {
           kind: "ready",
           orgDefault: stored
-            ? {
-                reviewMode: stored.reviewMode,
-                reviewBatteries: stored.reviewBatteries,
-                reviewRunTests: stored.reviewRunTests,
-                reviewCommandTimeoutS: stored.reviewCommandTimeoutS,
-                reviewMaxTurns: stored.reviewMaxTurns,
-              }
-            : NO_VALUES,
+            ? pickReviewAgentFields(stored)
+            : NO_REVIEW_AGENT_VALUES,
           orgDefaultVersion: stored?.updatedAt ?? null,
           conflict,
           // Every writer must be here: a separate mutation instance left out
@@ -805,11 +647,8 @@ export function useReviewAgentSectionModel(): {
             setOverride.isPending ||
             restoreOverride.isPending,
           overridesLoading: listQuery.isLoading,
-          overrides: reviewAgentOverrides(list),
-          availableRepos: availableReviewAgentRepos(
-            (reposQuery.data?.repos ?? []).map((r) => r.full_name),
-            list,
-          ),
+          overrides,
+          availableRepos,
         };
 
   const actions: ReviewAgentSectionActions = {

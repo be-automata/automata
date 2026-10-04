@@ -21,6 +21,12 @@ import {
 } from "@/components/ui/select";
 import { SettingsSection } from "@/components/settings/settings-row";
 import {
+  ConflictBanner,
+  RepoOverrideBadge,
+  RepoPickerSelect,
+} from "@/components/settings/review-settings-parts";
+import { availableRepoNames } from "@/lib/review-settings-rows";
+import {
   useReviewSettingsQuery,
   useSetReviewSettingMutation,
 } from "@/queries/review-settings-queries";
@@ -107,17 +113,10 @@ export function SupersedePolicySectionView({
       ) : (
         <>
           {state.conflict && (
-            <Alert role="status" data-testid="supersede-conflict">
-              <AlertCircle className="h-4 w-4" />
-              <AlertTitle>Another admin just saved changes</AlertTitle>
-              <AlertDescription className="flex items-center gap-2">
-                Your change was not applied. Reload to see the latest before
-                editing again.
-                <Button size="sm" variant="outline" onClick={actions.onReload}>
-                  Reload
-                </Button>
-              </AlertDescription>
-            </Alert>
+            <ConflictBanner
+              testId="supersede-conflict"
+              onReload={actions.onReload}
+            />
           )}
           <PolicyRadioGroup
             value={state.policy}
@@ -148,9 +147,7 @@ export function SupersedePolicySectionView({
                     <span className="truncate font-mono text-sm">
                       {s.repoFullName}
                     </span>
-                    <span className="w-fit rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                      Repo override
-                    </span>
+                    <RepoOverrideBadge />
                     <Select
                       value={s.supersedePolicy ?? DEFAULT_SUPERSEDE_POLICY}
                       onValueChange={(v) =>
@@ -264,21 +261,13 @@ function AddOverrideRow({
       className="mt-3 grid grid-cols-1 items-center gap-2 rounded-md border border-dashed p-3 sm:grid-cols-[1fr_auto_auto]"
       data-testid="supersede-add-override"
     >
-      <Select value={repo} onValueChange={setRepo} disabled={disabled}>
-        <SelectTrigger
-          className="min-h-11 w-full"
-          aria-label="Repository to add an override for"
-        >
-          <SelectValue placeholder="Choose a repository…" />
-        </SelectTrigger>
-        <SelectContent>
-          {repos.map((r) => (
-            <SelectItem key={r} value={r}>
-              {r}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <RepoPickerSelect
+        repos={repos}
+        value={repo}
+        onChange={setRepo}
+        disabled={disabled}
+        ariaLabel="Repository to add an override for"
+      />
       <Select
         value={policy}
         onValueChange={(v) => setPolicy(v as SupersedePolicy)}
@@ -318,23 +307,11 @@ function AddOverrideRow({
   );
 }
 
-/**
- * Repos the "Add override" picker may offer: every repo the caller can see
- * minus those that already carry a supersede override. GitHub reports cased
- * slugs ("Acme/Widgets"); the model stores and matches them lowercased
- * (repo-review-settings.ts), so the comparison runs on the normalized key —
- * strict equality would keep offering a cased repo that already has a row.
- */
-export function availableRepoNames(
-  repoFullNames: readonly string[],
-  settings: readonly { repoFullName: string; supersedePolicy: unknown }[],
-): string[] {
-  const taken = new Set(
-    settings
-      .filter((s) => s.supersedePolicy !== null)
-      .map((s) => s.repoFullName.toLowerCase()),
-  );
-  return repoFullNames.filter((name) => !taken.has(name.toLowerCase())).sort();
+/** A row carries a supersede override (the family this section edits). */
+export function hasSupersedeOverride(setting: {
+  supersedePolicy: unknown;
+}): boolean {
+  return setting.supersedePolicy !== null;
 }
 
 /**
@@ -442,12 +419,11 @@ export function SupersedePolicySection() {
             setOverride.isPending ||
             restoreOverride.isPending,
           overridesLoading: listQuery.isLoading,
-          overrides: (listQuery.data ?? []).filter(
-            (s) => s.supersedePolicy !== null,
-          ),
+          overrides: (listQuery.data ?? []).filter(hasSupersedeOverride),
           availableRepos: availableRepoNames(
             (reposQuery.data?.repos ?? []).map((r) => r.full_name),
             listQuery.data ?? [],
+            hasSupersedeOverride,
           ),
         };
 

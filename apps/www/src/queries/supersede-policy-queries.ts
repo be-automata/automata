@@ -1,10 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
-import type {
-  ReviewBatteryPackId,
-  ReviewMode,
-} from "@terragon/shared/model/review-agent-settings";
+import type { ReviewAgentValues } from "@terragon/shared/model/review-agent-settings";
 import { ConflictError, errorFromResponse } from "./error-from-response";
 
 /**
@@ -17,18 +14,13 @@ import { ConflictError, errorFromResponse } from "./error-from-response";
  * (supersede, drafts, review agent), so the synchronous setQueryData on
  * success matters even more.
  */
-export interface SupersedeDefaultDto {
+export interface SupersedeDefaultDto extends ReviewAgentValues {
   supersedePolicy: SupersedePolicy | null;
   recheckOnComplete: boolean;
   /** Org-wide draft-PR default. Tri-state: null = the org has not chosen
    * (falls through to the legacy automation filter, then FALSE). */
   reviewDraftPrs: boolean | null;
-  /** Phase 4 org-default review-agent settings: null = system default. */
-  reviewMode: ReviewMode | null;
-  reviewBatteries: ReviewBatteryPackId[] | null;
-  reviewRunTests: boolean | null;
-  reviewCommandTimeoutS: number | null;
-  reviewMaxTurns: number | null;
+  // Phase 4 org-default review-agent settings (ReviewAgentValues): null = system default.
   updatedAt: string;
 }
 
@@ -59,17 +51,14 @@ export function useSetSupersedeDefaultMutation(options?: {
   const successMessage =
     options?.successMessage ?? "Org default saved. Applies to new runs.";
   return useMutation({
-    mutationFn: async (args: {
-      supersedePolicy?: SupersedePolicy | null;
-      recheckOnComplete?: boolean;
-      reviewDraftPrs?: boolean | null;
-      reviewMode?: ReviewMode | null;
-      reviewBatteries?: ReviewBatteryPackId[] | null;
-      reviewRunTests?: boolean | null;
-      reviewCommandTimeoutS?: number | null;
-      reviewMaxTurns?: number | null;
-      expectedUpdatedAt?: string | null;
-    }): Promise<SupersedeDefaultDto> => {
+    mutationFn: async (
+      args: {
+        supersedePolicy?: SupersedePolicy | null;
+        recheckOnComplete?: boolean;
+        reviewDraftPrs?: boolean | null;
+        expectedUpdatedAt?: string | null;
+      } & Partial<ReviewAgentValues>,
+    ): Promise<SupersedeDefaultDto> => {
       const res = await fetch("/api/review-settings/default", {
         method: "PUT",
         headers: { "content-type": "application/json" },

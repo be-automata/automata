@@ -5,10 +5,11 @@ import {
   SupersedePolicySectionView,
   type SupersedeSectionActions,
   type SupersedeSectionState,
-  availableRepoNames,
   RESTORE_DEFAULT_PATCH,
+  hasSupersedeOverride,
   policyPatch,
 } from "./supersede-policy-section";
+import { availableRepoNames } from "@/lib/review-settings-rows";
 
 // The app compiles JSX with the automatic runtime; vitest here uses the
 // classic one, so presentational wrappers without an explicit React import
@@ -164,7 +165,11 @@ describe("availableRepoNames — Add-override picker excludes repos that already
       { repoFullName: "acme/api", supersedePolicy: null },
     ];
     expect(
-      availableRepoNames(["Acme/Widgets", "acme/api", "Beta/Tool"], settings),
+      availableRepoNames(
+        ["Acme/Widgets", "acme/api", "Beta/Tool"],
+        settings,
+        hasSupersedeOverride,
+      ),
     ).toEqual(["Beta/Tool", "acme/api"]);
   });
 });

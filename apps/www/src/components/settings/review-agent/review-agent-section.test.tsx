@@ -3,24 +3,28 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  effectiveReviewMode,
+  type ReviewAgentValues,
+} from "@terragon/shared/model/review-agent-settings";
+import {
   CLASSIC_HINT,
+  ReviewAgentFieldsView,
+  ReviewAgentSectionView,
+  type ReviewAgentSectionActions,
+  type ReviewAgentSectionState,
+} from "./review-agent-section";
+import {
   MAX_TURNS_LABEL,
   MAX_TURNS_NOTE,
   REVIEW_AGENT_CLEAR_PATCH,
-  ReviewAgentFieldsView,
-  ReviewAgentSectionView,
   availableReviewAgentRepos,
   draftFromValues,
   draftToPatch,
-  effectiveReviewMode,
   firstWriteFence,
   parseOptionalInt,
   reviewAgentOverrides,
   type ReviewAgentOverrideRow,
-  type ReviewAgentSectionActions,
-  type ReviewAgentSectionState,
-  type ReviewAgentValues,
-} from "./review-agent-section";
+} from "./review-agent-form";
 
 // The app compiles JSX with the automatic runtime; vitest here uses the
 // classic one, so wrappers without an explicit React import are stubbed.

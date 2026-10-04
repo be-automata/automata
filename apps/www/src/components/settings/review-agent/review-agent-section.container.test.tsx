@@ -113,11 +113,10 @@ vi.mock("@/queries/user-repo-queries", () => ({
   }),
 }));
 
-const {
-  ReviewAgentSection,
-  useReviewAgentSectionModel,
-  REVIEW_AGENT_CLEAR_PATCH,
-} = await import("./review-agent-section");
+const { ReviewAgentSection, useReviewAgentSectionModel } = await import(
+  "./review-agent-section"
+);
+const { REVIEW_AGENT_CLEAR_PATCH } = await import("./review-agent-form");
 
 function captureModel() {
   let model: ReturnType<typeof useReviewAgentSectionModel> | undefined;

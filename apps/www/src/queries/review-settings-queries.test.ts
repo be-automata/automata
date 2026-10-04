@@ -66,7 +66,7 @@ describe("useSetReviewSettingMutation — W3 synchronous cache write", () => {
     vi.unstubAllGlobals();
   });
 
-  it("writes the returned row into the list cache before any refetch, then invalidates", async () => {
+  it("writes the returned row into the list cache without a refetch", async () => {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -107,8 +107,6 @@ describe("useSetReviewSettingMutation — W3 synchronous cache write", () => {
     );
     expect(cached?.[0]?.updatedAt).toBe("T1");
     expect(cached?.[0]?.reviewMode).toBe("orchestrated");
-    expect(invalidate).toHaveBeenCalledWith({
-      queryKey: reviewSettingsQueryKeys.list(),
-    });
+    expect(invalidate).not.toHaveBeenCalled();
   });
 });

@@ -2,10 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { BlockTolerance } from "@terragon/review/severity-policy";
 import type { SupersedePolicy } from "@terragon/shared/model/repo-review-settings";
-import type {
-  ReviewBatteryPackId,
-  ReviewMode,
-} from "@terragon/shared/model/review-agent-settings";
+import type { ReviewAgentValues } from "@terragon/shared/model/review-agent-settings";
+import { findSettingByRepo } from "@/lib/review-settings-rows";
 import { ConflictError, errorFromResponse } from "./error-from-response";
 
 /**
@@ -16,36 +14,26 @@ import { ConflictError, errorFromResponse } from "./error-from-response";
  * default. Uses the app's react-query client the same way the other settings
  * queries do, just against a REST route instead of a server action.
  */
-export interface RepoReviewSettingDto {
+export interface RepoReviewSettingDto extends ReviewAgentValues {
   repoFullName: string;
   blockTolerance: BlockTolerance;
   /** Tri-state: null = inherit (org sentinel → legacy filter → true). */
   reviewDraftPrs: boolean | null;
   supersedePolicy: string | null;
   recheckOnComplete: boolean;
-  /** Phase 4 review-agent family: null = inherit the org default. */
-  reviewMode: ReviewMode | null;
-  reviewBatteries: ReviewBatteryPackId[] | null;
-  reviewRunTests: boolean | null;
-  reviewCommandTimeoutS: number | null;
-  reviewMaxTurns: number | null;
+  // Phase 4 review-agent family (ReviewAgentValues): null = inherit the org default.
   updatedAt: string;
 }
 
 /** Partial patch — send only the field(s) being changed (at least one). */
-export interface RepoReviewSettingPatch {
+export interface RepoReviewSettingPatch extends Partial<ReviewAgentValues> {
   blockTolerance?: BlockTolerance;
   /** Explicit true/false sets an override; null clears it (inherit). */
   reviewDraftPrs?: boolean | null;
   /** null clears the override (falls back to the org default). */
   supersedePolicy?: SupersedePolicy | null;
   recheckOnComplete?: boolean;
-  /** Phase 4 review-agent fields: a value sets an override; null = inherit. */
-  reviewMode?: ReviewMode | null;
-  reviewBatteries?: ReviewBatteryPackId[] | null;
-  reviewRunTests?: boolean | null;
-  reviewCommandTimeoutS?: number | null;
-  reviewMaxTurns?: number | null;
+  // Phase 4 review-agent fields (Partial<ReviewAgentValues>): null = inherit.
   /**
    * Optimistic concurrency fence — a stale value gets a ConflictError.
    * `null` is the first-write fence: "I read no override yet"; the create
@@ -66,12 +54,11 @@ export function mergeReviewSetting(
   list: readonly RepoReviewSettingDto[],
   setting: RepoReviewSettingDto,
 ): RepoReviewSettingDto[] {
-  const key = setting.repoFullName.toLowerCase();
-  const index = list.findIndex((r) => r.repoFullName.toLowerCase() === key);
-  if (index === -1) {
+  const existing = findSettingByRepo(list, setting.repoFullName);
+  if (existing === undefined) {
     return [...list, setting];
   }
-  return list.map((r, i) => (i === index ? setting : r));
+  return list.map((r) => (r === existing ? setting : r));
 }
 
 /** Split `owner/name` into its two path segments (name may itself be a slug). */
@@ -140,14 +127,12 @@ export function useSetReviewSettingMutation(options?: {
       // Synchronous cache write of the returned row, mirroring
       // useSetSupersedeDefaultMutation: invalidate-only left the old updatedAt
       // in the cache until the refetch landed, so a second save in a row sent
-      // a stale version and self-409ed. Invalidate afterwards to resync.
+      // a stale version and self-409ed. The PUT response IS the stored row,
+      // so no refetch is needed; a conflict reloads explicitly.
       queryClient.setQueryData<RepoReviewSettingDto[]>(
         reviewSettingsQueryKeys.list(),
         (prev) => mergeReviewSetting(prev ?? [], setting),
       );
-      queryClient.invalidateQueries({
-        queryKey: reviewSettingsQueryKeys.list(),
-      });
     },
     onError: (error: unknown) => {
       // Conflicts get a dedicated reload flow at the call site, not a toast.
