@@ -7,6 +7,7 @@ import {
   createTestUser,
   createTestOrganization,
 } from "@terragon/shared/model/test-helpers";
+import { listSelfHealAdminActions } from "@terragon/shared/model/self-heal-admin-log";
 import {
   getRepoReviewSetting,
   ORG_DEFAULT_REPO_SENTINEL,
@@ -437,4 +438,104 @@ describe("/api/review-settings/default — taskBatteries (phase 7)", () => {
       expect(await sentinel()).toBeUndefined();
     },
   );
+});
+
+describe("/api/review-settings/default — self-heal fields (phase 8)", () => {
+  let userId: string;
+  let orgId: string;
+
+  async function actor(role: "owner" | "admin" | "member") {
+    userId = (await createTestUser({ db })).user.id;
+    const org = await createTestOrganization({ db, userId, role });
+    orgId = org.organization.id;
+    vi.mocked(getTenantContextOrNull).mockResolvedValue({
+      userId,
+      organizationId: orgId,
+    });
+  }
+  const logRows = () => listSelfHealAdminActions({ db, organizationId: orgId });
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("kill switch: stored on the sentinel, GET returns it, one kill_switch log row with the actor", async () => {
+    await actor("admin");
+    const res = await put({ selfHealKillSwitch: true });
+    expect(res.status).toBe(200);
+    const got = (await (await GET()).json()) as {
+      setting: { selfHealKillSwitch: boolean | null };
+    };
+    expect(got.setting.selfHealKillSwitch).toBe(true);
+    const rows = await logRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      action: "kill_switch",
+      actorUserId: userId,
+      target: { repoFullName: "*", fields: ["selfHealKillSwitch"] },
+    });
+  });
+
+  it("a mixed body upserts one merged patch and logs only self-heal field names", async () => {
+    await actor("owner");
+    const res = await put({
+      supersedePolicy: "newest-wins",
+      selfHealMode: "dry-run",
+      selfHealMaxAttempts: 3,
+    });
+    expect(res.status).toBe(200);
+    const row = await getRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+    });
+    expect(row?.supersedePolicy).toBe("newest-wins");
+    expect(row?.selfHealMode).toBe("dry-run");
+    const rows = await logRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      action: "settings_change",
+      target: {
+        fields: ["selfHealMode", "selfHealMaxAttempts"],
+      },
+    });
+  });
+
+  it("a review-agent-only body writes no self-heal log row", async () => {
+    await actor("admin");
+    const res = await put({ reviewMode: "orchestrated" });
+    expect(res.status).toBe(200);
+    expect(await logRows()).toHaveLength(0);
+  });
+
+  it("a member is 403'd: nothing stored, no log row", async () => {
+    await actor("member");
+    const res = await put({ selfHealKillSwitch: true });
+    expect(res.status).toBe(403);
+    expect(
+      await getRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      }),
+    ).toBeUndefined();
+    expect(await logRows()).toHaveLength(0);
+  });
+
+  it("invalid value and gate commands -> 400, nothing stored, no log row", async () => {
+    await actor("admin");
+    const bad = await put({ selfHealMode: "auto" });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { error: string }).error).toContain(
+      "selfHealMode",
+    );
+    const gate = await put({ selfHealGateCommands: ["rm -rf /"] });
+    expect(gate.status).toBe(400);
+    expect(
+      await getRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      }),
+    ).toBeUndefined();
+    expect(await logRows()).toHaveLength(0);
+  });
 });

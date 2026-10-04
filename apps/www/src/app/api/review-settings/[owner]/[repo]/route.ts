@@ -10,7 +10,9 @@ import {
 import {
   parseReviewAgentPatch,
   parseReviewDraftPrs,
+  parseSelfHealPatch,
   parseSupersedePatch,
+  recordSelfHealSettingsChange,
   toRepoReviewSettingDto,
 } from "../../review-settings-route-shared";
 import {
@@ -18,6 +20,11 @@ import {
   type ReviewAgentField,
   type ReviewAgentFieldsPatch,
 } from "@terragon/shared/model/review-agent-settings";
+import {
+  SELF_HEAL_FIELDS,
+  type SelfHealField,
+  type SelfHealFieldsPatch,
+} from "@terragon/shared/model/self-heal-settings";
 import { isOrgAdmin } from "@/lib/org-role";
 import { checkRepoAdmin } from "@/lib/repo-admin";
 import {
@@ -97,7 +104,7 @@ export async function PUT(
     supersedePolicy?: unknown;
     recheckOnComplete?: unknown;
     expectedUpdatedAt?: unknown;
-  } & Partial<Record<ReviewAgentField, unknown>>;
+  } & Partial<Record<ReviewAgentField | SelfHealField, unknown>>;
   try {
     body = await request.json();
   } catch {
@@ -109,7 +116,8 @@ export async function PUT(
     reviewDraftPrs?: boolean | null;
     supersedePolicy?: string | null;
     recheckOnComplete?: boolean;
-  } & ReviewAgentFieldsPatch = {};
+  } & ReviewAgentFieldsPatch &
+    SelfHealFieldsPatch = {};
   if (body.blockTolerance !== undefined) {
     if (!isBlockTolerance(body.blockTolerance)) {
       return NextResponse.json(
@@ -131,11 +139,14 @@ export async function PUT(
   const reviewAgent = parseReviewAgentPatch(body);
   if ("errorResponse" in reviewAgent) return reviewAgent.errorResponse;
   Object.assign(patch, reviewAgent.patch);
+  const selfHeal = parseSelfHealPatch(body, { isOrgDefaultRow: false });
+  if ("errorResponse" in selfHeal) return selfHeal.errorResponse;
+  Object.assign(patch, selfHeal.patch);
   if (Object.keys(patch).length === 0) {
     return NextResponse.json(
       {
         error:
-          "provide blockTolerance, reviewDraftPrs, supersedePolicy, recheckOnComplete and/or a review-agent field",
+          "provide blockTolerance, reviewDraftPrs, supersedePolicy, recheckOnComplete and/or a review-agent field or self-heal field",
       },
       { status: 400 },
     );
@@ -165,8 +176,10 @@ export async function PUT(
   // supersede fence would let a racing review-agent first write slip
   // through. Exactly one fence is ever passed.
   const firstWrite = body.expectedUpdatedAt === null;
-  const reviewAgentOnly = Object.keys(patch).every((key) =>
-    (REVIEW_AGENT_FIELDS as readonly string[]).includes(key),
+  const reviewAgentOnly = Object.keys(patch).every(
+    (key) =>
+      (REVIEW_AGENT_FIELDS as readonly string[]).includes(key) ||
+      (SELF_HEAL_FIELDS as readonly string[]).includes(key),
   );
   const expectRowAbsent = firstWrite && reviewAgentOnly ? true : undefined;
   const expectAbsentSupersedeOverride =
@@ -210,6 +223,14 @@ export async function PUT(
     }
     throw error;
   }
+
+  await recordSelfHealSettingsChange({
+    db,
+    organizationId: ctx.organizationId,
+    actorUserId: ctx.userId,
+    repoFullName: row.repoFullName,
+    patch,
+  });
 
   getPostHogServer().capture({
     distinctId: ctx.userId,

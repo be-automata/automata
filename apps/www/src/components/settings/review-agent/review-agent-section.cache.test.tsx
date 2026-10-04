@@ -1,4 +1,5 @@
 import React from "react";
+import { SELF_HEAL_CLEAR_PATCH } from "@terragon/shared/model/self-heal-settings";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +39,7 @@ function dto(updatedAt: string, maxTurns: number | null): RepoReviewSettingDto {
     reviewCommandTimeoutS: null,
     reviewMaxTurns: maxTurns,
     taskBatteries: null,
+    ...SELF_HEAL_CLEAR_PATCH,
     updatedAt,
   };
 }

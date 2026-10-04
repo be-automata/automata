@@ -11,12 +11,18 @@ import {
 import {
   parseReviewAgentPatch,
   parseReviewDraftPrs,
+  parseSelfHealPatch,
   parseSupersedePatch,
+  recordSelfHealSettingsChange,
 } from "../review-settings-route-shared";
 import {
   pickReviewAgentFields,
   type ReviewAgentField,
 } from "@terragon/shared/model/review-agent-settings";
+import {
+  pickSelfHealFields,
+  type SelfHealField,
+} from "@terragon/shared/model/self-heal-settings";
 import type { RepoReviewSetting } from "@terragon/shared/db/types";
 import { getPostHogServer } from "@/lib/posthog-server";
 
@@ -42,6 +48,7 @@ function toDto(row: RepoReviewSetting) {
     recheckOnComplete: row.recheckOnComplete,
     reviewDraftPrs: row.reviewDraftPrs,
     ...pickReviewAgentFields(row),
+    ...pickSelfHealFields(row),
     updatedAt: row.updatedAt,
   };
 }
@@ -94,7 +101,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     recheckOnComplete?: unknown;
     reviewDraftPrs?: unknown;
     expectedUpdatedAt?: unknown;
-  } & Partial<Record<ReviewAgentField, unknown>>;
+  } & Partial<Record<ReviewAgentField | SelfHealField, unknown>>;
   try {
     body = await request.json();
   } catch {
@@ -106,12 +113,19 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   if ("errorResponse" in drafts) return drafts.errorResponse;
   const reviewAgent = parseReviewAgentPatch(body);
   if ("errorResponse" in reviewAgent) return reviewAgent.errorResponse;
-  const patch = { ...supersede.patch, ...drafts, ...reviewAgent.patch };
+  const selfHeal = parseSelfHealPatch(body, { isOrgDefaultRow: true });
+  if ("errorResponse" in selfHeal) return selfHeal.errorResponse;
+  const patch = {
+    ...supersede.patch,
+    ...drafts,
+    ...reviewAgent.patch,
+    ...selfHeal.patch,
+  };
   if (Object.keys(patch).length === 0) {
     return NextResponse.json(
       {
         error:
-          "provide supersedePolicy, recheckOnComplete, reviewDraftPrs and/or a review-agent field",
+          "provide supersedePolicy, recheckOnComplete, reviewDraftPrs and/or a review-agent field or self-heal field",
       },
       { status: 400 },
     );
@@ -163,6 +177,13 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     }
     throw error;
   }
+  await recordSelfHealSettingsChange({
+    db,
+    organizationId: ctx.organizationId,
+    actorUserId: ctx.userId,
+    repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+    patch,
+  });
   getPostHogServer().capture({
     distinctId: ctx.userId,
     event: "supersede_policy_default_set",
