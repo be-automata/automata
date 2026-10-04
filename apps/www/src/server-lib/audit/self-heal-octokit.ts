@@ -22,7 +22,12 @@ import {
  */
 export const SELF_HEAL_OCTOKIT_OPTIONS = {
   retry: { enabled: false },
+  // Disabled outright: the plugin's per-isolate write spacing (~3 s between
+  // notification-producing writes) would by itself exceed the finish hook's
+  // 20 s deadline at the per-run write budget. withSelfHealCall owns rate
+  // limits (Postgres-backed rate_limited_until), so nothing here may sleep.
   throttle: {
+    enabled: false,
     onRateLimit: () => false,
     onSecondaryRateLimit: () => false,
   },

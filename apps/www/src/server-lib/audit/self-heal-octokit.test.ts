@@ -104,6 +104,7 @@ describe("createSelfHealOctokit", () => {
 
   it("exposes retry disabled and non-sleeping throttle handlers", () => {
     expect(SELF_HEAL_OCTOKIT_OPTIONS.retry.enabled).toBe(false);
+    expect(SELF_HEAL_OCTOKIT_OPTIONS.throttle.enabled).toBe(false);
     expect(SELF_HEAL_OCTOKIT_OPTIONS.throttle.onRateLimit()).toBe(false);
     expect(SELF_HEAL_OCTOKIT_OPTIONS.throttle.onSecondaryRateLimit()).toBe(
       false,
