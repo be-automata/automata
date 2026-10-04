@@ -443,6 +443,9 @@ async function runAgentInner(
     // #204: filled in once the daemon exists (below). Until then there is no agent
     // to have died, and the poll loop has not started either.
     agentFailure: () => daemonForPoll?.agentFailure() ?? null,
+    // Any OOM kill in the run's cgroup fails the run, even when only a child
+    // died and the agent finished its turn (prod 2026-10-04, e335c83d).
+    memoryStarvation: () => daemonForPoll?.memoryStarvation() ?? null,
   };
   let daemonForPoll: DaemonProcess | null = null;
 

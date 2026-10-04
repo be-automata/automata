@@ -470,21 +470,45 @@ export function readOomKillCount(opts: {
   cgroupDir: string;
   fsi?: CgroupFs;
 }): number {
+  return readMemoryEvents(opts).oomKill;
+}
+
+/** The two `memory.events` counters the teardown journal line reports. */
+export interface MemoryEvents {
+  /** Times the cgroup hit memory.max and the OOM killer was invoked. */
+  oom: number;
+  /** Processes the kernel killed for it (one `oom` can carry many). */
+  oomKill: number;
+}
+
+/**
+ * Read `oom` and `oom_kill` from this cgroup's `memory.events`. Zero for any
+ * counter that is missing or malformed, and for both when the file is gone —
+ * same never-a-false-OOM rule as readOomKillCount.
+ */
+export function readMemoryEvents(opts: {
+  cgroupDir: string;
+  fsi?: CgroupFs;
+}): MemoryEvents {
   const io = opts.fsi ?? defaultFs;
+  const events: MemoryEvents = { oom: 0, oomKill: 0 };
   let raw: string;
   try {
     raw = io.read(path.join(opts.cgroupDir, "memory.events"));
   } catch {
-    return 0;
+    return events;
   }
   for (const line of raw.split("\n")) {
     const [key, value] = line.trim().split(/\s+/);
-    if (key === "oom_kill") {
-      const n = Number(value);
-      return Number.isInteger(n) && n >= 0 ? n : 0;
+    const n = Number(value);
+    const count = Number.isInteger(n) && n >= 0 ? n : 0;
+    if (key === "oom") {
+      events.oom = count;
+    } else if (key === "oom_kill") {
+      events.oomKill = count;
     }
   }
-  return 0;
+  return events;
 }
 
 /**

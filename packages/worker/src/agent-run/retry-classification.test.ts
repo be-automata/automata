@@ -5,6 +5,7 @@ import {
   classifyNextMessageError,
   nonRetryablePreflight,
   ResourceLimitError,
+  resourceLimitFailure,
 } from "./retry-classification";
 import { NextMessageHttpError } from "./www-client";
 
@@ -103,7 +104,25 @@ describe("classifyAgentExit (#204)", () => {
   it("names the ceiling and the kill count, so the report is actionable", () => {
     const e = new ResourceLimitError(1_073_741_824, 2);
     expect(e.name).toBe("ResourceLimitError");
-    expect(e.message).toContain("1073741824");
-    expect(e.message).toContain("2 time(s)");
+    expect(e.message).toContain("memory.max=1G");
+    expect(e.message).toContain("2 process(es)");
+  });
+
+  it("reads like the operator-facing banner it becomes on the thread", () => {
+    // onFailure posts this message as the thread's error text, so it is
+    // written for the person reading the UI: what happened, how many
+    // processes, and the limit in the unit the box was configured with.
+    const e = new ResourceLimitError(1500 * 1024 ** 2, 16);
+    expect(e.message).toMatch(
+      /^Out of memory: 16 process\(es\) killed by the per-run memory limit \(memory\.max=1500M\)/,
+    );
+  });
+});
+
+describe("resourceLimitFailure", () => {
+  it("is terminal — a run that blew its ceiling is not retried into it again", () => {
+    const out = resourceLimitFailure(1500 * 1024 ** 2, 3);
+    expect(out).toBeInstanceOf(NonRetryableError);
+    expect(out.message).toMatch(/Out of memory: 3 process\(es\)/);
   });
 });
