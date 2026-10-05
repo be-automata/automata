@@ -4,7 +4,10 @@ import { db as defaultDb } from "@/lib/db";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { waitUntil } from "@/lib/wait-until";
 import type { DB } from "@terragon/shared/db";
-import type { AuditFixAttemptRow } from "@terragon/shared/model/audit-findings";
+import type {
+  AuditFindingRow,
+  AuditFixAttemptRow,
+} from "@terragon/shared/model/audit-findings";
 import {
   closeFixAttempt,
   getFindingForAttempt,
@@ -18,6 +21,7 @@ import {
 } from "@terragon/shared/model/audit-fix-attempts";
 import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
 import { recordBreakerEvent } from "@terragon/shared/model/self-heal-breaker";
+import { FIX_BRANCH_PREFIX } from "@terragon/shared/self-heal/fix-paths";
 
 import { logSelfHealDecision, type SelfHealLogMode } from "./decision-log";
 import { parseHunkRanges } from "./hunks";
@@ -194,6 +198,7 @@ export class FixPrLifecycle {
   private readonly repo: string;
   private readonly deadlineAt: Date;
   private modeCache: SelfHealLogMode | null = null;
+  private findingRow: AuditFindingRow | null | undefined = undefined;
   private maxAttempts = 3;
   private prExpiryDays = 7;
 
@@ -240,6 +245,22 @@ export class FixPrLifecycle {
     this.prExpiryDays = context.resolved.settings.prExpiryDays;
     this.modeCache = resolveSelfHealEffective(context).mode;
     return this.modeCache;
+  }
+
+  /**
+   * The attempt's finding, read once per lifecycle. Every reader (decision
+   * line, expiry comment, attempts cap) runs after the attempt's close, so a
+   * row read by the first is what the next would read.
+   */
+  async finding(): Promise<AuditFindingRow | null> {
+    if (this.findingRow !== undefined) return this.findingRow;
+    const row = await getFindingForAttempt({
+      db: this.db,
+      organizationId: this.org,
+      findingId: this.attempt.findingId,
+    });
+    this.findingRow = row;
+    return row;
   }
 
   async openSession(): Promise<FixPrSession | "unavailable"> {
@@ -407,11 +428,7 @@ export class FixPrLifecycle {
     reason: "merged" | "closed_unmerged" | "expired",
   ): Promise<void> {
     try {
-      const finding = await getFindingForAttempt({
-        db: this.db,
-        organizationId: this.org,
-        findingId: this.attempt.findingId,
-      });
+      const finding = await this.finding();
       if (finding === null) return;
       logSelfHealDecision(
         { log: this.deps.line, capture: this.deps.capture },
@@ -440,20 +457,8 @@ export class FixPrLifecycle {
       if (prNumber === null || (await this.mode()) === "off") return;
       const session = await this.openSession();
       if (session === "unavailable") return;
-      const commits = await this.read<RawCommit[]>(session, async (signal) => {
-        const out = await session.octokit.rest.pulls.listCommits({
-          owner: this.owner,
-          repo: this.repo,
-          pull_number: prNumber,
-          per_page: FIX_PR_COMMITS_PAGE,
-          request: { signal },
-        });
-        return { ...out, data: out.data as unknown as RawCommit[] };
-      });
-      const files: RawFile[] = [];
-      let filesOk = true;
-      for (let page = 1; page <= FIX_PR_FILES_MAX_PAGES; page += 1) {
-        const res = await this.read<RawFile[]>(session, async (signal) => {
+      const readFiles = (page: number) =>
+        this.read<RawFile[]>(session, async (signal) => {
           const out = await session.octokit.rest.pulls.listFiles({
             owner: this.owner,
             repo: this.repo,
@@ -464,6 +469,24 @@ export class FixPrLifecycle {
           });
           return { ...out, data: out.data as unknown as RawFile[] };
         });
+      // The commit list and the first files page are independent reads.
+      const [commits, firstFiles] = await Promise.all([
+        this.read<RawCommit[]>(session, async (signal) => {
+          const out = await session.octokit.rest.pulls.listCommits({
+            owner: this.owner,
+            repo: this.repo,
+            pull_number: prNumber,
+            per_page: FIX_PR_COMMITS_PAGE,
+            request: { signal },
+          });
+          return { ...out, data: out.data as unknown as RawCommit[] };
+        }),
+        readFiles(1),
+      ]);
+      const files: RawFile[] = [];
+      let filesOk = true;
+      for (let page = 1; page <= FIX_PR_FILES_MAX_PAGES; page += 1) {
+        const res = page === 1 ? firstFiles : await readFiles(page);
         if (!res.ok) {
           filesOk = false;
           break;
@@ -501,11 +524,7 @@ export class FixPrLifecycle {
 
   /** The attempts cap after a counted close: needs-human-approve. */
   async capCheck(): Promise<void> {
-    const finding = await getFindingForAttempt({
-      db: this.db,
-      organizationId: this.org,
-      findingId: this.attempt.findingId,
-    });
+    const finding = await this.finding();
     const mode = await this.mode();
     if (
       finding === null ||
@@ -630,17 +649,15 @@ function closedPrTarget(payload: unknown): ClosedPrTarget | null {
     return null;
   }
   const mergedAtText = stringOrNull(pr.merged_at);
-  const mergedAt = mergedAtText === null ? null : new Date(mergedAtText);
-  const merged =
-    pr.merged === true ||
-    (mergedAt !== null && !Number.isNaN(mergedAt.getTime()));
+  const parsed = mergedAtText === null ? null : new Date(mergedAtText);
+  const mergedAt =
+    parsed !== null && !Number.isNaN(parsed.getTime()) ? parsed : null;
   return {
     repo,
     prNumber: pr.number,
     headRef: stringOrNull(pr.head?.ref),
-    merged,
-    mergedAt:
-      mergedAt !== null && !Number.isNaN(mergedAt.getTime()) ? mergedAt : null,
+    merged: pr.merged === true || mergedAt !== null,
+    mergedAt,
     mergeSha: stringOrNull(pr.merge_commit_sha),
     mergedBy: stringOrNull(pr.merged_by?.login),
   };
@@ -658,6 +675,13 @@ export async function handleSelfHealPrClosed(
 ): Promise<void> {
   const target = closedPrTarget(payload);
   if (target === null) return;
+  // Not an attempt branch: no fix PR to settle, so no DB lookup.
+  if (
+    target.headRef !== null &&
+    !target.headRef.startsWith(FIX_BRANCH_PREFIX)
+  ) {
+    return;
+  }
   const deps: FixPrLifecycleDeps = {
     ...defaultFixPrLifecycleDeps(),
     ...overrides,

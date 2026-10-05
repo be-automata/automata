@@ -2,7 +2,6 @@ import type { DB } from "@terragon/shared/db";
 import type { AuditFixAttemptRow } from "@terragon/shared/model/audit-findings";
 import {
   closeFixAttempt,
-  getFindingForAttempt,
   listOpenReadyFixPrs,
   recordFixPrClosed,
 } from "@terragon/shared/model/audit-fix-attempts";
@@ -209,11 +208,7 @@ class Expiry {
   private async comment(session: FixPrSession, days: number): Promise<void> {
     const prNumber = this.attempt.prNumber;
     if (prNumber === null) return;
-    const finding = await getFindingForAttempt({
-      db: this.deps.db,
-      organizationId: this.org,
-      findingId: this.attempt.findingId,
-    });
+    const finding = await this.lifecycle.finding();
     if (finding === null) return;
     const res = await this.lifecycle.issueWriter(session).upsertComment({
       number: prNumber,

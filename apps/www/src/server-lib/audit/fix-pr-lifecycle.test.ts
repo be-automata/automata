@@ -565,6 +565,20 @@ describe("fix PR lifecycle (R5, SC4, HUMAN-MERGE-GATE)", () => {
     expect(mint).not.toHaveBeenCalled();
   });
 
+  it("a head branch outside automata/fix-* never reaches the DB", async () => {
+    const select = vi.fn(() => {
+      throw new Error("db must not be read");
+    });
+    const log = vi.fn();
+    await handleSelfHealPrClosed(payload({ head: { ref: "feature/other" } }), {
+      ...deps,
+      db: { select } as unknown as typeof db,
+      log,
+    });
+    expect(select).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+  });
+
   it("not a closed action, or a malformed payload → ignored", async () => {
     await handleSelfHealPrClosed({ ...payload(), action: "opened" }, deps);
     await handleSelfHealPrClosed(null, deps);
