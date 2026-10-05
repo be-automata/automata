@@ -134,6 +134,21 @@ describe("mirror handlers — routing + filtering", () => {
       expect(intentKind()).toBe("ci-failure");
     });
 
+    it("completed + failure on a self-heal fix branch → no task (GATE-01)", async () => {
+      await handleWorkflowRunEvent({
+        action: "completed",
+        repository: repo,
+        installation,
+        workflow_run: {
+          conclusion: "failure",
+          name: "CI",
+          id: 7,
+          head_branch: "automata/fix-12-abcdef01-a1",
+        },
+      } as any);
+      expect(createMirrorTask).not.toHaveBeenCalled();
+    });
+
     it("completed + success → no task", async () => {
       await handleWorkflowRunEvent({
         action: "completed",

@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { IssueTriggerConfig } from "@terragon/shared/automations";
 import { FormLabel } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
@@ -8,6 +9,41 @@ import { Label } from "@/components/ui/label";
 import { RepoSelector } from "../repo-branch-selector";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertTriangle } from "lucide-react";
+
+function parseLabelList(raw: string): string[] | undefined {
+  const labels = raw
+    .split(",")
+    .map((label) => label.trim())
+    .filter(Boolean);
+  return labels.length > 0 ? labels : undefined;
+}
+
+// Comma-separated label list. Keeps the raw text locally so a trailing comma
+// or space survives while typing; the parsed list is what reaches the config.
+function LabelListInput({
+  id,
+  value,
+  placeholder,
+  onChange,
+}: {
+  id: string;
+  value: string[] | undefined;
+  placeholder: string;
+  onChange: (labels: string[] | undefined) => void;
+}) {
+  const [raw, setRaw] = useState((value ?? []).join(", "));
+  return (
+    <Input
+      id={id}
+      value={raw}
+      placeholder={placeholder}
+      onChange={(e) => {
+        setRaw(e.target.value);
+        onChange(parseLabelList(e.target.value));
+      }}
+    />
+  );
+}
 
 export function IssueTriggerForm({
   value,
@@ -52,6 +88,53 @@ export function IssueTriggerForm({
             <Label htmlFor="onOpen" className="text-sm font-normal">
               When an issue is opened
             </Label>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="filterLabels" className="text-sm font-normal">
+              Only issues with all of these labels
+            </Label>
+            <LabelListInput
+              id="filterLabels"
+              value={value.filter.labels}
+              placeholder="e.g., bug, p1 (comma-separated)"
+              onChange={(labels) =>
+                onChange({
+                  ...value,
+                  filter: { ...value.filter, labels },
+                })
+              }
+            />
+          </div>
+          <div className="flex items-center space-x-2">
+            <Checkbox
+              id="onLabeled"
+              checked={value.on.labeled || false}
+              onCheckedChange={(checked) =>
+                onChange({
+                  ...value,
+                  on: { ...value.on, labeled: checked as boolean },
+                })
+              }
+            />
+            <Label htmlFor="onLabeled" className="text-sm font-normal">
+              Trigger when one of these labels is added
+            </Label>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="excludeLabels" className="text-sm font-normal">
+              Skip issues with any of these labels
+            </Label>
+            <LabelListInput
+              id="excludeLabels"
+              value={value.filter.excludeLabels}
+              placeholder="e.g., wontfix, automata:finding (comma-separated)"
+              onChange={(excludeLabels) =>
+                onChange({
+                  ...value,
+                  filter: { ...value.filter, excludeLabels },
+                })
+              }
+            />
           </div>
           <div className="flex items-center space-x-2">
             <Checkbox

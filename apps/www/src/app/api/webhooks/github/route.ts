@@ -124,7 +124,7 @@ export async function POST(request: NextRequest) {
       await handleCheckSuiteEvent(payload);
     },
   );
-  webhooks.on(["issues.opened"], async ({ payload }) => {
+  webhooks.on(["issues.opened", "issues.labeled"], async ({ payload }) => {
     await handleIssueEvent(payload);
   });
   webhooks.onAny(({ name, payload }) => {

@@ -33,9 +33,18 @@ import {
   upsertDesiredHead,
 } from "@terragon/shared/model/supersede-recheck";
 import { createMirrorTask } from "./mirror-intake";
+import { FIX_BRANCH_PREFIX } from "@terragon/shared/self-heal/fix-paths";
+import { markFindingFixReady } from "@/server-lib/audit/mark-fix-ready";
+import { logSelfHealDecision } from "@/server-lib/audit/decision-log";
+import { resolveBotLogin } from "@/server-lib/review/bot-login";
+import { AUDIT_FIX_SKILL_NAME } from "@/server-lib/review/review-skill";
+import { getPostHogServer } from "@/lib/posthog-server";
 // publicAppUrl is used within utils via postBillingLinkComment
 export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
-export type IssueEvent = EmitterWebhookEvent<"issues">["payload"];
+// The issue actions routed to handleIssueEvent / handleIssueLabeledMirror.
+export type IssueEvent = EmitterWebhookEvent<
+  "issues.opened" | "issues.labeled"
+>["payload"];
 export type IssueCommentEvent = EmitterWebhookEvent<"issue_comment">["payload"];
 export type PullRequestReviewCommentEvent =
   EmitterWebhookEvent<"pull_request_review_comment">["payload"];
@@ -580,6 +589,77 @@ export async function handleIssueEvent(event: IssueEvent): Promise<void> {
   }
 }
 
+function normalizeLabel(label: string | null | undefined): string {
+  return (label ?? "").trim().toLowerCase();
+}
+
+function normalizeLabels(labels: readonly string[] | undefined): string[] {
+  return (labels ?? []).map(normalizeLabel).filter(Boolean);
+}
+
+function issueLabelNames(event: IssueEvent): string[] {
+  return (event.issue.labels ?? []).map((label) => label?.name ?? "");
+}
+
+function isAuditFixAutomation(automation: Automation): boolean {
+  const action = automation.action;
+  return (
+    action?.type === "skill_message" &&
+    action.config.skillName.trim().toLowerCase() === AUDIT_FIX_SKILL_NAME
+  );
+}
+
+async function markSelfHealFindingReady(
+  event: IssueEvent,
+  automation: Automation,
+): Promise<void> {
+  const repoFullName = event.repository.full_name;
+  const issueNumber = event.issue.number;
+  const organizationId = automation.organizationId;
+  if (!organizationId) {
+    console.log(
+      `[self-heal] automation ${automation.id} has no organization; issue #${issueNumber} not marked`,
+    );
+    return;
+  }
+  const result = await markFindingFixReady({
+    db,
+    organizationId,
+    repoFullName,
+    issueNumber,
+    issueAuthorLogin: event.issue.user?.login,
+    botLogin: resolveBotLogin(),
+    now: new Date(),
+  });
+  try {
+    logSelfHealDecision(
+      {
+        log: (line) => console.log(line),
+        capture: (name, properties) =>
+          getPostHogServer().capture({
+            distinctId: automation.userId,
+            event: name,
+            properties,
+          }),
+      },
+      {
+        organizationId,
+        repoFullName,
+        runId: `issue-${issueNumber}`,
+        fingerprint: result.fingerprint ?? "-",
+        decision: "claim",
+        reason: result.outcome,
+        mode: "on",
+      },
+    );
+  } catch (error: unknown) {
+    console.error(
+      "[self-heal] decision log failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
 async function handleIssueAutomation(
   event: IssueEvent,
   automation: Automation,
@@ -591,10 +671,22 @@ async function handleIssueAutomation(
   }
   const config = automation.triggerConfig as IssueTriggerConfig;
   // Check if this automation should trigger for the current event
+  const filterLabels = normalizeLabels(config.filter.labels);
+  const excludeLabels = normalizeLabels(config.filter.excludeLabels);
+  const issueLabels = new Set(normalizeLabels(issueLabelNames(event)));
   let shouldTrigger = false;
   switch (event.action) {
     case "opened": {
       shouldTrigger = !!config.on.open;
+      break;
+    }
+    case "labeled": {
+      const added = normalizeLabel(event.label?.name);
+      if (added) {
+        issueLabels.add(added);
+      }
+      shouldTrigger =
+        !!config.on.labeled && !!added && filterLabels.includes(added);
       break;
     }
     default: {
@@ -605,6 +697,22 @@ async function handleIssueAutomation(
     console.log(
       `Automation ${automation.id} not configured to trigger on ${event.action}`,
     );
+    return;
+  }
+  const labelsMatch =
+    filterLabels.every((label) => issueLabels.has(label)) &&
+    !excludeLabels.some((label) => issueLabels.has(label));
+  if (!labelsMatch) {
+    console.log(
+      `Skipping automation ${automation.id} - labels filter not satisfied for issue #${issueNumber}`,
+    );
+    return;
+  }
+  // Self-heal fix loop (BULK-01, WH-01): only mark the ledger finding ready;
+  // the dispatcher starts runs. Runs before any author API check so this path
+  // makes zero GitHub calls inside the webhook budget.
+  if (isAuditFixAutomation(automation)) {
+    await markSelfHealFindingReady(event, automation);
     return;
   }
   const issueAuthorUserName = event.issue.user?.login;
@@ -755,6 +863,11 @@ export async function handleWorkflowRunEvent(
     return;
   }
   if (event.workflow_run.conclusion !== "failure") {
+    return;
+  }
+  // GATE-01: CI on a self-heal fix branch is judged by the fix gate, never
+  // turned into a ci-failure mirror task.
+  if (event.workflow_run.head_branch?.startsWith(FIX_BRANCH_PREFIX)) {
     return;
   }
   await createMirrorTask({

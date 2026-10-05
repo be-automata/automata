@@ -7,6 +7,7 @@ import { db } from "@/lib/db";
 import { updateGitHubPR } from "@/lib/github";
 import { handleAppMention } from "./handle-app-mention";
 import { WebhookSkip } from "./webhook-skip";
+import { handleIssueEvent, handleIssueLabeledMirror } from "./handlers";
 import {
   createTestUser,
   createTestGitHubPR,
@@ -16,6 +17,15 @@ import { env } from "@terragon/env/apps-www";
 vi.mock("./handle-app-mention", () => ({
   handleAppMention: vi.fn(),
 }));
+// Pass-through spies: every other test keeps the real handlers.
+vi.mock("./handlers", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./handlers")>();
+  return {
+    ...actual,
+    handleIssueEvent: vi.fn(actual.handleIssueEvent),
+    handleIssueLabeledMirror: vi.fn(actual.handleIssueLabeledMirror),
+  };
+});
 
 function createSignature(payload: string, secret: string): string {
   const hmac = crypto.createHmac("sha256", secret);
@@ -1335,6 +1345,46 @@ describe("GitHub webhook route", () => {
 
       expect(response.status).toBe(500);
       expect(data.error).toBe("Internal server error");
+    });
+  });
+
+  describe("issue events", () => {
+    function createIssueBody(action: string) {
+      return {
+        action,
+        issue: { number: 7, user: { login: "octocat" }, labels: [] },
+        label: { name: "automata:auto-fix" },
+        repository: {
+          full_name: "owner/repo",
+          owner: { login: "owner" },
+          name: "repo",
+        },
+      };
+    }
+
+    beforeEach(() => {
+      vi.mocked(handleIssueEvent).mockResolvedValue();
+      vi.mocked(handleIssueLabeledMirror).mockResolvedValue();
+    });
+
+    it("issues.labeled reaches both the mirror intake and the issue automations", async () => {
+      const request = await createMockRequest(createIssueBody("labeled"), {
+        "x-github-event": "issues",
+      });
+      const response = await POST(request);
+      expect(response.status).toBe(200);
+      expect(handleIssueLabeledMirror).toHaveBeenCalledTimes(1);
+      expect(handleIssueEvent).toHaveBeenCalledTimes(1);
+    });
+
+    it("issues.opened reaches only the issue automations", async () => {
+      const request = await createMockRequest(createIssueBody("opened"), {
+        "x-github-event": "issues",
+      });
+      const response = await POST(request);
+      expect(response.status).toBe(200);
+      expect(handleIssueEvent).toHaveBeenCalledTimes(1);
+      expect(handleIssueLabeledMirror).not.toHaveBeenCalled();
     });
   });
 });
