@@ -316,6 +316,40 @@ describe("evaluateLoopFix (RES-15)", () => {
     ).toBe(false);
   });
 
+  it("R2: 3 consecutive refunded gate outcomes trip gate_refunds; a decided attempt in between resets", () => {
+    const gate = [
+      event("ci_stuck", 10 * MIN),
+      event("ci_infra", 20 * MIN),
+      event("check_error", 30 * MIN),
+    ];
+    expect(evaluateLoopFix({ attempts: [], events: gate, now: NOW })).toEqual(
+      expect.objectContaining({ trip: true, reason: "gate_refunds" }),
+    );
+    expect(
+      evaluateLoopFix({ attempts: [], events: gate.slice(0, 2), now: NOW })
+        .trip,
+    ).toBe(false);
+    // attempt() is created seq minutes ago: a decided attempt 15 min ago
+    // sits between the refunds and splits the run.
+    seq = 14;
+    expect(
+      evaluateLoopFix({
+        attempts: [attempt("success")],
+        events: gate,
+        now: NOW,
+      }).trip,
+    ).toBe(false);
+    // Refunded/excluded attempts never break the run.
+    seq = 14;
+    expect(
+      evaluateLoopFix({
+        attempts: [attempt("refunded", "stuck"), attempt("excluded")],
+        events: gate,
+        now: NOW,
+      }),
+    ).toEqual(expect.objectContaining({ trip: true, reason: "gate_refunds" }));
+  });
+
   it("2 consecutive pr_expired trip; a merge in between resets", () => {
     expect(
       evaluateLoopFix({
@@ -792,6 +826,75 @@ describe("runLoopBreakerEvaluation (DB)", () => {
     expect(reopened.state).toBe("open");
     expect(reopened.tripCount).toBe(2);
     expect(reopened.openUntil?.getTime()).toBe(at.getTime() + 3 * DAY);
+  });
+
+  it("R2: 3 consecutive stuck withdrawals on one repo trip loop_fix; the attempts stay refunded", async () => {
+    for (let i = 0; i < 3; i++) {
+      const row = await seedAttempt(
+        {
+          phase: "closed",
+          outcome: "stuck",
+          terminalCause: "stuck",
+          infraRefunded: true,
+        },
+        (i + 2) * H,
+      );
+      await recordBreakerEvent({
+        db,
+        organizationId,
+        scopeKind: "loop_fix",
+        scopeKey: REPO,
+        outcome: "failure",
+        signal: "ci_stuck",
+        now: new Date(row.createdAt.getTime() + H),
+      });
+    }
+    await evaluate();
+    const row = await state("loop_fix");
+    expect(row.state).toBe("open");
+    expect(row.lastTripReason).toBe("gate_refunds");
+    const attempts = await db
+      .select({ infraRefunded: auditFixAttempts.infraRefunded })
+      .from(auditFixAttempts)
+      .where(eq(auditFixAttempts.organizationId, organizationId));
+    expect(attempts.every((a) => a.infraRefunded)).toBe(true);
+  });
+
+  it("R2: a half-open probe refunded by the gate re-opens; an infra-refunded probe is released", async () => {
+    await tripBreaker({
+      db,
+      organizationId,
+      scopeKind: "loop_fix",
+      scopeKey: REPO,
+      reason: "gate_refunds",
+      evidence: {},
+      now: new Date(now.getTime() - 2 * DAY),
+    });
+    await evaluate();
+    expect((await state("loop_fix")).state).toBe("half_open");
+    const probe = await seedAttempt(
+      {
+        phase: "closed",
+        outcome: "ci_infra",
+        terminalCause: "ci_infra",
+        infraRefunded: true,
+      },
+      -MIN,
+    );
+    await db
+      .update(selfHealBreaker)
+      .set({
+        halfOpenProbesLeft: 0,
+        lastTripEvidence: { probeAttemptId: probe.id },
+      })
+      .where(
+        and(
+          eq(selfHealBreaker.organizationId, organizationId),
+          eq(selfHealBreaker.scopeKind, "loop_fix"),
+        ),
+      );
+    await evaluate(new Date(now.getTime() + 10 * MIN));
+    expect((await state("loop_fix")).state).toBe("open");
   });
 
   it("3 consecutive unparseable audits trip loop_audit", async () => {

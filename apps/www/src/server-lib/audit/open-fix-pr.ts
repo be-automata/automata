@@ -40,6 +40,8 @@ import type {
 import { PRE_MINT_INSTALLATION_KEY, errorText } from "./audit-shared";
 import {
   classifyFixTerminal,
+  GATE_REFUND_SIGNAL_BY_CAUSE,
+  isGateRefundCause,
   type FixTerminalClassification,
 } from "./fix-outcome-classify";
 import {
@@ -298,8 +300,9 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
   private async refund(
     outcome: DraftOpenOutcome,
     cause: string,
+    onRefunded?: () => Promise<void>,
   ): Promise<DraftOpenOutcome> {
-    await refundFixAttempt({
+    const refunded = await refundFixAttempt({
       db: this.db,
       organizationId: this.org,
       attemptId: this.attempt.id,
@@ -307,6 +310,12 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
       outcome,
       now: this.now(),
     });
+    if (!refunded) return outcome;
+    // R2: a finding check that keeps failing to run must not re-run forever.
+    if (isGateRefundCause(cause)) {
+      await this.recordGateRefund(GATE_REFUND_SIGNAL_BY_CAUSE[cause]);
+    }
+    await onRefunded?.();
     return outcome;
   }
 
@@ -340,9 +349,23 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
     const verdict = recordedVerdict(this.attempt);
     const runEnd = RUN_END_VERDICTS.has(verdict) ? await this.runEnd() : null;
     if (runEnd !== null && runEnd.class === "infra") {
+      const plane = runEnd.execPlaneSignal;
       return this.refund(
         runEnd.outcome === "killed" ? "killed" : "run_refunded",
         runEnd.reason,
+        // The same plane evidence the reconcile records for an unreported end.
+        async () => {
+          if (!plane) return;
+          await recordBreakerEvent({
+            db: this.db,
+            organizationId: this.org,
+            scopeKind: "exec_plane",
+            scopeKey: "*",
+            outcome: "failure",
+            signal: runEnd.reason,
+            now: this.now(),
+          });
+        },
       );
     }
     // A check that could not run says nothing about the fix.

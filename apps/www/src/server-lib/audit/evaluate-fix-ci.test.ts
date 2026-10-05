@@ -8,7 +8,11 @@ import { nanoid } from "nanoid";
 import type { Octokit } from "octokit";
 
 import { db } from "@/lib/db";
-import { auditFindings, auditFixAttempts } from "@terragon/shared/db/schema";
+import {
+  auditFindings,
+  auditFixAttempts,
+  selfHealBreakerEvent,
+} from "@terragon/shared/db/schema";
 import { insertFinding } from "@terragon/shared/model/audit-findings";
 import {
   claimAttemptLease,
@@ -266,6 +270,21 @@ describe("evaluateFixCi (GATE-01 steps 4-5, SC4, R4, KILL-01)", () => {
   const evaluate = () =>
     evaluateFixCi({ db, organizationId: orgId, attemptId, deps });
 
+  /** R2: the repo's loop_fix gate-refund events. */
+  const gateEvents = async () =>
+    (
+      await db
+        .select({ signal: selfHealBreakerEvent.signal })
+        .from(selfHealBreakerEvent)
+        .where(
+          and(
+            eq(selfHealBreakerEvent.organizationId, orgId),
+            eq(selfHealBreakerEvent.scopeKind, "loop_fix"),
+            eq(selfHealBreakerEvent.scopeKey, REPO),
+          ),
+        )
+    ).map((e) => e.signal);
+
   const firstLines = (number: number) =>
     state.comments
       .filter((c) => c.number === number)
@@ -507,6 +526,10 @@ describe("evaluateFixCi (GATE-01 steps 4-5, SC4, R4, KILL-01)", () => {
     expect(row.infraRefunded).toBe(true);
     expect(row.outcome).toBe("ci_infra");
     expect((await finding()).attempts).toBe(0);
+    // R2: one loop_fix failure event; the refund itself is unchanged.
+    expect(await gateEvents()).toEqual(["ci_infra"]);
+    expect(await evaluate()).toBe("not_draft");
+    expect(await gateEvents()).toEqual(["ci_infra"]);
     neverMerges();
   });
 
@@ -662,6 +685,7 @@ describe("evaluateFixCi (GATE-01 steps 4-5, SC4, R4, KILL-01)", () => {
       expect(row.ciStatus).toBe("stuck");
       expect(row.infraRefunded).toBe(true);
       expect(row.outcome).toBe("stuck");
+      expect(await gateEvents()).toEqual(["ci_stuck"]);
       expect(fake.rest.pulls.update).toHaveBeenCalledTimes(1);
       expect(fake.rest.git.deleteRef).toHaveBeenCalledTimes(1);
       neverMerges();

@@ -12,8 +12,10 @@ import {
   updateFixAttempt,
 } from "@terragon/shared/model/audit-fix-attempts";
 import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
+import { recordBreakerEvent } from "@terragon/shared/model/self-heal-breaker";
 
 import { errorText, MIN_ROW_BUDGET_MS } from "./audit-shared";
+import type { GateRefundSignal } from "./fix-outcome-classify";
 import { createIssueWriter, type IssueWriter } from "./issue-writer";
 import type { OpenFixPrDeps } from "./open-fix-pr";
 import {
@@ -498,6 +500,23 @@ export abstract class FixAttemptGithub<D extends FixAttemptGithubDeps> {
         outcome: writes.labels.outcome,
       });
     }
+  }
+
+  /**
+   * R2: a refunded gate outcome is a loop_fix failure event for the repo.
+   * Call it only after the refund was applied (once per attempt); it never
+   * touches the attempt, so the refund and the attempts cap are unchanged.
+   */
+  protected async recordGateRefund(signal: GateRefundSignal): Promise<void> {
+    await recordBreakerEvent({
+      db: this.db,
+      organizationId: this.org,
+      scopeKind: "loop_fix",
+      scopeKey: normalizeRepo(this.attempt.repoFullName),
+      outcome: "failure",
+      signal,
+      now: this.now(),
+    });
   }
 
   protected async patch(

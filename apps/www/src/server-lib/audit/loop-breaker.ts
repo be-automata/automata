@@ -38,7 +38,11 @@ import {
 
 import { getPostHogServer } from "@/lib/posthog-server";
 
-import { BREAKER_EXCLUDED_REASONS } from "./fix-outcome-classify";
+import {
+  BREAKER_EXCLUDED_REASONS,
+  GATE_REFUND_SIGNALS,
+  isGateRefundCause,
+} from "./fix-outcome-classify";
 import { errorText } from "./audit-shared";
 
 /**
@@ -52,7 +56,10 @@ import { errorText } from "./audit-shared";
  *   consecutive CI failures across different findings, ≥ 2 reopen/regressed
  *   events in 30 days, 2 consecutive expired PRs, ≥ 3 gh_403/gh_422 on the
  *   repo's writes in 1 h; draft_unsupported pauses the repo at once.
- *   Refunded (infra) attempts never count.
+ *   Refunded (infra) attempts never count as failures, but 3 consecutive
+ *   refunded GATE outcomes (ci_infra / ci_stuck / check_error events, no
+ *   decided attempt in between) trip it: the refunds stay refunds, the
+ *   breaker just stops the paid re-runs (R2).
  * - loop_audit (per repo): 3 consecutive unparseable/incomplete/over-cap
  *   audits, or churn (≥ 50% of the issues filed in 14 days closed as absent
  *   within 2 audits). While open the writer behaves as dry-run.
@@ -176,6 +183,7 @@ export type LoopFixTripReason =
   | "guard_rejections"
   | "ci_failures"
   | "consecutive_failures"
+  | "gate_refunds"
   | "failure_rate"
   | "regressions"
   | "pr_expired"
@@ -255,6 +263,26 @@ export function evaluateLoopFix({
       trip: true,
       reason: "consecutive_failures",
       evidence: { consecutive: 3, attemptIds: ids(lastThree) },
+    };
+  }
+
+  // R2: refunded gate outcomes are events; a decided attempt breaks the run.
+  const gateTimeline = [
+    ...events
+      .filter((e) => e.signal !== null && GATE_REFUND_SIGNALS.has(e.signal))
+      .map((e) => ({ refund: true, signal: e.signal, at: e.createdAt })),
+    ...decided.map((a) => ({ refund: false, signal: null, at: a.createdAt })),
+  ]
+    .sort((x, y) => y.at.getTime() - x.at.getTime())
+    .slice(0, 3);
+  if (gateTimeline.length === 3 && gateTimeline.every((g) => g.refund)) {
+    return {
+      trip: true,
+      reason: "gate_refunds",
+      evidence: {
+        consecutiveRefunds: 3,
+        signals: gateTimeline.map((g) => g.signal),
+      },
     };
   }
 
@@ -848,8 +876,9 @@ class Evaluation {
 
   /**
    * RES-15: the probe attempt decides. Draft opened with check + guard passed
-   * → closed; counted failure → re-opened with the next cooldown; refunded or
-   * excluded → the probe is given back; in flight → wait.
+   * → closed; counted failure or a gate refund (R2) → re-opened with the next
+   * cooldown; any other refund or excluded → the probe is given back; in
+   * flight → wait.
    */
   private async resolveFixProbe(row: BreakerRow): Promise<void> {
     const attemptId = probeAttemptIdOf(row);
@@ -864,7 +893,14 @@ class Evaluation {
         ),
       )
       .limit(1);
-    const result = attemptRow ? attemptSignalOf(attemptRow).result : "refunded";
+    const signal = attemptRow ? attemptSignalOf(attemptRow).result : "refunded";
+    // R2: a probe refunded by the GATE is the loop failing again, not infra.
+    const result =
+      signal === "refunded" &&
+      attemptRow !== undefined &&
+      isGateRefundCause(attemptRow.terminalCause)
+        ? "failure"
+        : signal;
     this.deps.log("[self-heal:breaker] probe", {
       org: row.organizationId,
       scopeKind: "loop_fix",

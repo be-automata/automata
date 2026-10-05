@@ -652,6 +652,16 @@ describe("openDraftFixPr (GATE-01, SC4, RES-18)", () => {
     expect(row.infraRefunded).toBe(true);
     expect(row.terminalCause).toBe("agent_not_responding");
     expect(mint).not.toHaveBeenCalled();
+    const events = await db
+      .select({
+        scopeKind: selfHealBreakerEvent.scopeKind,
+        signal: selfHealBreakerEvent.signal,
+      })
+      .from(selfHealBreakerEvent)
+      .where(eq(selfHealBreakerEvent.organizationId, orgId));
+    expect(events).toEqual([
+      { scopeKind: "exec_plane", signal: "agent_not_responding" },
+    ]);
   });
 
   it("R1: a no_branch report from a stopped run is killed (refunded)", async () => {
@@ -691,6 +701,17 @@ describe("openDraftFixPr (GATE-01, SC4, RES-18)", () => {
       expect(row.infraRefunded).toBe(true);
       expect((await finding()).attempts).toBe(0);
       expect(mint).not.toHaveBeenCalled();
+      // R2: a loop_fix failure event, the refund unchanged.
+      const events = await db
+        .select({ signal: selfHealBreakerEvent.signal })
+        .from(selfHealBreakerEvent)
+        .where(
+          and(
+            eq(selfHealBreakerEvent.organizationId, orgId),
+            eq(selfHealBreakerEvent.scopeKind, "loop_fix"),
+          ),
+        );
+      expect(events.map((e) => e.signal)).toEqual(["check_error"]);
     },
   );
 

@@ -106,6 +106,37 @@ export const BREAKER_EXCLUDED_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Refunded GATE outcomes (keyed by the attempt's terminal cause) and the
+ * loop_fix event signal each one records (R2). The attempt stays refunded —
+ * the finding's attempts cap is unaffected — but a repo whose gate keeps
+ * refunding (CI cancelled or never starting, a draft stuck for an hour, a
+ * finding check that cannot run) would otherwise re-run a paid fix every
+ * cooldown forever, so three in a row trip loop_fix.
+ */
+export const GATE_REFUND_SIGNAL_BY_CAUSE = {
+  ci_infra: "ci_infra",
+  stuck: "ci_stuck",
+  check_error: "check_error",
+  check_aborted: "check_error",
+} as const;
+
+export type GateRefundSignal =
+  (typeof GATE_REFUND_SIGNAL_BY_CAUSE)[keyof typeof GATE_REFUND_SIGNAL_BY_CAUSE];
+
+export const GATE_REFUND_SIGNALS: ReadonlySet<string> = new Set(
+  Object.values(GATE_REFUND_SIGNAL_BY_CAUSE),
+);
+
+export function isGateRefundCause(
+  cause: string | null,
+): cause is keyof typeof GATE_REFUND_SIGNAL_BY_CAUSE {
+  return (
+    cause !== null &&
+    Object.prototype.hasOwnProperty.call(GATE_REFUND_SIGNAL_BY_CAUSE, cause)
+  );
+}
+
+/**
  * Every thread error type, exhaustively. Sandbox/boot/queue failures are the
  * plane's; credential errors are counted (operator decision); what the agent
  * itself produced (errors, prompt too long, setup script, checkpoint push) is

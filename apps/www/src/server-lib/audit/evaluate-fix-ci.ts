@@ -38,6 +38,10 @@ import {
 import { resolveSelfHealEffective } from "./resolve-self-heal";
 import { PRE_MINT_INSTALLATION_KEY, errorText } from "./audit-shared";
 import {
+  GATE_REFUND_SIGNAL_BY_CAUSE,
+  isGateRefundCause,
+} from "./fix-outcome-classify";
+import {
   closeFixPull,
   deleteFixBranch,
   FixAttemptGithub,
@@ -519,6 +523,10 @@ class FixCiEvaluator extends FixAttemptGithub<EvaluateFixCiDeps> {
       now,
     });
     if (!closed) return outcome;
+    // R2: refunded, but a CI that keeps cancelling/sticking must not re-run forever.
+    if (!spec.counted && isGateRefundCause(outcome)) {
+      await this.recordGateRefund(GATE_REFUND_SIGNAL_BY_CAUSE[outcome]);
+    }
 
     const prNumber = this.attempt.prNumber;
     if (prNumber !== null) {
