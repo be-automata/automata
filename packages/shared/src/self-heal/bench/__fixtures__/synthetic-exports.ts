@@ -289,17 +289,17 @@ const auditFindings = [
 
 const seen = (id: string) => ({
   fingerprint: fp(id),
-  decision: "sighting",
+  action: "sighting",
   reason: "seen",
 });
 const absent = (id: string) => ({
   fingerprint: fp(id),
-  decision: "sighting",
+  action: "sighting",
   reason: "absent",
 });
 const candidate = (id: string) => ({
   fingerprint: fp(id),
-  decision: "candidate",
+  action: "candidate",
   reason: "first_sighting",
 });
 
