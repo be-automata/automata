@@ -1,4 +1,4 @@
-import { and, eq, gte, isNull, not } from "drizzle-orm";
+import { and, eq, gte, not } from "drizzle-orm";
 
 import type { DB } from "@terragon/shared/db";
 import {
@@ -10,10 +10,12 @@ import type { ThreadStatus } from "@terragon/shared/db/types";
 import {
   acquireSelfHealSlot,
   recordAdmissionDeferral,
-  SELF_HEAL_SLOT_TERMINAL_STATUSES,
   type SelfHealSlotKind,
 } from "@terragon/shared/model/self-heal-slot";
-import { threadEffectiveStatusIn } from "@terragon/shared/model/threads";
+import {
+  threadEffectiveStatusIn,
+  threadIsTerminal,
+} from "@terragon/shared/model/thread-effective-status";
 
 import type { SelfHealLogMode } from "./decision-log";
 
@@ -48,10 +50,7 @@ export type AdmissionResult =
 
 /** The thread row being read is not terminal (typed cause or effective status). */
 function threadNotTerminal() {
-  const terminal = threadEffectiveStatusIn(SELF_HEAL_SLOT_TERMINAL_STATUSES);
-  return terminal
-    ? and(isNull(threadTable.terminalCause), not(terminal))
-    : isNull(threadTable.terminalCause);
+  return not(threadIsTerminal());
 }
 
 /**

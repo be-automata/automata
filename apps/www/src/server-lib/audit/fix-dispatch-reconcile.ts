@@ -7,7 +7,6 @@ import {
   closeFixAttempt,
   extendFixDispatchLease,
   FIX_DISPATCH_LEASE_MS,
-  FIX_THREAD_TERMINAL_STATUSES,
   listExpiredFixClaims,
   listStaleDispatchedAttempts,
   listTerminalUnreportedAttempts,
@@ -17,6 +16,7 @@ import {
 import { recordBreakerEvent } from "@terragon/shared/model/self-heal-breaker";
 import { releaseSelfHealSlot } from "@terragon/shared/model/self-heal-slot";
 import type { TerminalCause } from "@terragon/shared/model/terminal-cause";
+import { TERMINAL_THREAD_STATUSES } from "@terragon/shared/model/thread-effective-status";
 import { markThreadTerminal } from "@terragon/shared/model/threads";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 
@@ -169,7 +169,7 @@ export function defaultFixReconcileDeps(): FixReconcileDeps {
 function isTerminalThread(state: NonNullable<FixAttemptThreadState["thread"]>) {
   return (
     state.terminalCause !== null ||
-    FIX_THREAD_TERMINAL_STATUSES.includes(state.status)
+    TERMINAL_THREAD_STATUSES.includes(state.status)
   );
 }
 

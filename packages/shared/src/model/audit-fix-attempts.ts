@@ -27,6 +27,7 @@ import type { ThreadStatus } from "../db/types";
 import type { AuditFindingRow, AuditFixAttemptRow } from "./audit-findings";
 import { normalizeRepo } from "./repo-review-settings";
 import { withSelfHealTx, type SelfHealTx } from "./self-heal-tx";
+import { threadIsTerminal } from "./thread-effective-status";
 
 /**
  * Fix-attempt ledger (Phase 9): leased claims, an idempotent thread bind and
@@ -505,14 +506,6 @@ export interface FixAttemptThreadState {
   } | null;
 }
 
-/** Effective statuses after which a fix thread can no longer report. */
-export const FIX_THREAD_TERMINAL_STATUSES: ThreadStatus[] = [
-  "complete",
-  "stopped",
-  "error",
-  "working-stopped",
-];
-
 function newestChat<T>(column: unknown) {
   return sql<T | null>`(select ${column} from ${threadChat} where ${threadChat.threadId} = ${thread.id} order by ${threadChat.updatedAt} desc limit 1)`;
 }
@@ -566,15 +559,6 @@ function toThreadState(row: ThreadStateRow): FixAttemptThreadState {
       createdAt: row.threadCreatedAt,
     },
   };
-}
-
-/** Typed terminal cause, or a terminal status on the thread or any chat row. */
-function threadIsTerminal() {
-  const statuses = sql.join(
-    FIX_THREAD_TERMINAL_STATUSES.map((s) => sql`${s}`),
-    sql`, `,
-  );
-  return sql`(${thread.terminalCause} is not null or ${thread.status} in (${statuses}) or exists (select 1 from ${threadChat} where ${threadChat.threadId} = ${thread.id} and ${threadChat.status} in (${statuses})))`;
 }
 
 /**

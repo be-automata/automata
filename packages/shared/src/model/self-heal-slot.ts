@@ -12,15 +12,10 @@ import {
 } from "drizzle-orm";
 
 import type { DB } from "../db";
-import {
-  selfHealBreakerEvent,
-  selfHealSlot,
-  thread,
-  threadChat,
-} from "../db/schema";
-import type { ThreadStatus } from "../db/types";
+import { selfHealBreakerEvent, selfHealSlot, thread } from "../db/schema";
 import { normalizeRepo } from "./repo-review-settings";
 import { withSelfHealTx } from "./self-heal-tx";
+import { threadIsTerminal } from "./thread-effective-status";
 
 /**
  * The platform-wide self-heal bulkhead (BULK-01). There is ONE box and ONE
@@ -45,14 +40,6 @@ export const SELF_HEAL_SLOT_HOLDER_LEASE_MS = 75 * 60 * 1000;
 
 export type SelfHealSlotKind = "audit" | "fix";
 
-/** Effective statuses after which a holder thread can no longer use the box. */
-export const SELF_HEAL_SLOT_TERMINAL_STATUSES: ThreadStatus[] = [
-  "complete",
-  "stopped",
-  "error",
-  "working-stopped",
-];
-
 export type AcquireSelfHealSlotResult =
   | { acquired: true }
   | {
@@ -65,17 +52,12 @@ export type AcquireSelfHealSlotResult =
     };
 
 /**
- * The holder thread is terminal: a typed terminal cause, or a terminal status
- * on the thread row or on any of its threadChat rows (chat-mode threads keep
- * their live status on threadChat). Column refs are table-qualified, so inside
- * ON CONFLICT DO UPDATE ... WHERE they address the existing slot row.
+ * The holder thread is terminal (threadIsTerminal). Column refs are
+ * table-qualified, so inside ON CONFLICT DO UPDATE ... WHERE they address the
+ * existing slot row.
  */
 function holderThreadIsTerminal() {
-  const statuses = sql.join(
-    SELF_HEAL_SLOT_TERMINAL_STATUSES.map((s) => sql`${s}`),
-    sql`, `,
-  );
-  return sql`exists (select 1 from ${thread} where ${thread.id} = ${selfHealSlot.holderThreadId} and (${thread.terminalCause} is not null or ${thread.status} in (${statuses}) or exists (select 1 from ${threadChat} where ${threadChat.threadId} = ${thread.id} and ${threadChat.status} in (${statuses}))))`;
+  return sql`exists (select 1 from ${thread} where ${thread.id} = ${selfHealSlot.holderThreadId} and ${threadIsTerminal()})`;
 }
 
 /** The slot is takeable: empty, lease expired, or held by a terminal thread. */

@@ -7,7 +7,6 @@ import {
   count,
   desc,
   eq,
-  exists,
   getTableColumns,
   gte,
   inArray,
@@ -42,6 +41,7 @@ import { BroadcastMessageThreadData } from "@terragon/types/broadcast";
 import type { SandboxProvider } from "@terragon/types/sandbox";
 import { sanitizeForJson } from "../utils/sanitize-json";
 import { toUTC, validateTimezone } from "../utils/timezone";
+import { threadEffectiveStatusIn } from "./thread-effective-status";
 import { getUser } from "./user";
 import { AIAgent } from "@terragon/agent/types";
 
@@ -1418,25 +1418,7 @@ export async function deleteThreadById({
  * The non-terminal statuses a system reap (the stall watchdog) may act on —
  * a future status added here reaches every consumer, never one silently.
  */
-/**
- * SQL predicate: the thread's EFFECTIVE status is one of `statuses`. A legacy
- * thread carries it on the thread row; a chat-mode thread
- * (enableThreadChatCreation) carries it on its threadChat row(s) while the
- * thread row keeps its creation value. Every reaper/sweep predicate on
- * "thread status" must use this, or chat-mode threads are invisible to it.
- */
-export function threadEffectiveStatusIn(statuses: ThreadStatus[]) {
-  return or(
-    inArray(schema.thread.status, statuses),
-    exists(db_select_chat_status(statuses)),
-  );
-}
-function db_select_chat_status(statuses: ThreadStatus[]) {
-  return sql`(select 1 from ${schema.threadChat} where ${schema.threadChat.threadId} = ${schema.thread.id} and ${schema.threadChat.status} in (${sql.join(
-    statuses.map((s) => sql`${s}`),
-    sql`, `,
-  )}))`;
-}
+export { threadEffectiveStatusIn };
 
 /**
  * Clear the typed terminal on a RESUME (new user message / boot of an ended
