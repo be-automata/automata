@@ -167,11 +167,13 @@ describe("runFixCheck (GATE-01, R1)", () => {
     }
   });
 
-  it("git clean runs with -ffdx (ignored files and nested repos go too) and no arguments", async () => {
+  it("git clean runs with -ffdx (ignored files and nested repos go too), keeps the run-owned dirs, no arguments", async () => {
     const { run, calls } = harness();
     await runFixCheck(args(run));
     const clean = calls.find((c) => stepOf(c.script) === "clean")!;
-    expect(clean.script).toBe("git clean -ffdxq");
+    expect(clean.script).toBe(
+      "git clean -ffdxq -e /home/ -e /gh-config/ -e /tmp/",
+    );
     expect(clean.args).toEqual([]);
     const checkout = calls.find((c) => stepOf(c.script) === "checkout")!;
     expect(checkout.script).toBe('git checkout --quiet --force --detach "$1"');
@@ -568,6 +570,10 @@ describe("runFixCheck against a real git checkout (as the current user)", () => 
     mkdirSync(join(dir, "nested"));
     git(join(dir, "nested"), "init", "-q");
     writeFileSync(join(dir, "README.md"), "dirty\n");
+    for (const owned of ["home", "gh-config", "tmp"]) {
+      mkdirSync(join(dir, owned));
+      writeFileSync(join(dir, owned, "keep"), "run-owned\n");
+    }
 
     const report = await runFixCheck({
       fix: FIX,
@@ -587,6 +593,11 @@ describe("runFixCheck against a real git checkout (as the current user)", () => 
     });
     expect(existsSync(join(dir, "dist"))).toBe(false);
     expect(existsSync(join(dir, "nested"))).toBe(false);
+    // The worker's run-owned dirs survive the clean (the agent uid cannot
+    // delete them on Linux, and the run HOME is still in use).
+    for (const owned of ["home", "gh-config", "tmp"]) {
+      expect(existsSync(join(dir, owned, "keep"))).toBe(true);
+    }
     expect(git(dir, "rev-parse", "HEAD")).toBe(pushed);
   });
 

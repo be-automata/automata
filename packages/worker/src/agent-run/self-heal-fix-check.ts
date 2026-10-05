@@ -2,6 +2,7 @@ import path from "node:path";
 
 import type { RunAsAgent } from "./agent-command";
 import { gitExec } from "./provision";
+import { RUN_OWNED_DIRS } from "./run-owned-paths";
 import { runSelfHealChecks } from "./self-heal-checks";
 import type { SelfHealRunShape } from "./types";
 
@@ -145,7 +146,11 @@ const CAT_FILE_SCRIPT = 'git cat-file -e "$1^{commit}"';
 const CHECKOUT_SCRIPT = 'git checkout --quiet --force --detach "$1"';
 // -ff: an untracked nested repository is removed too (one -f skips it).
 // -x: ignored files the agent planted are removed as well.
-const CLEAN_SCRIPT = "git clean -ffdxq";
+// -x ignores info/exclude, so the worker's run-owned dirs (the run HOME with its
+// credential, gh-config, tmp) are kept back with -e, which -x still honours: the
+// agent uid cannot delete them on Linux (worker-owned), and deleting them would
+// tear the run's own HOME away mid-run. They are not repository content.
+const CLEAN_SCRIPT = `git clean -ffdxq ${RUN_OWNED_DIRS.map((d) => `-e /${d}/`).join(" ")}`;
 const SCRATCH_SCRIPT = `mkdir -m 700 ${FIX_CHECK_SCRATCH_DIR} && mkdir -m 700 ${FIX_CHECK_SCRATCH_DIR}/home ${FIX_CHECK_SCRATCH_DIR}/tmp`;
 const MERGE_BASE_SCRIPT = 'git merge-base "$2" "$1"';
 // --no-renames: a rename out of a denied path must list the denied side too.
