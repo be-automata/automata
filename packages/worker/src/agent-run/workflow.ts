@@ -1214,6 +1214,14 @@ async function runAgentInner(
     if (!message) {
       // Nothing to run (no pending user message / empty prompt).
       step("next-message: 204 (nothing to run)");
+      if (input.selfHeal?.kind === "fix") {
+        // R4: a 204 is typically the DUPLICATE of an ambiguous dispatch whose
+        // first run owns the message. Its "aborted" report could win the
+        // single-use check CAS ahead of the real run's, so it reports
+        // nothing; a fix run that truly never ran is the reconcile's.
+        fixReported = true;
+        step("self-heal fix-check: not reported (nothing to run)");
+      }
       return {
         threadId: input.threadId,
         threadChatId: input.threadChatId,

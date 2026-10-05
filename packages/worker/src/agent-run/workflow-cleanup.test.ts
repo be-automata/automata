@@ -1887,6 +1887,23 @@ describe("GATE-01: the fix check runs after the agent is dead, then reports (09-
     },
   );
 
+  it("R4: nothing to run (a 204, e.g. a duplicate dispatch): no check and NO report — the real run's report wins the single-use CAS", async () => {
+    pullNextMessage.mockResolvedValue(null);
+    const c = fixCtx();
+    await expect(runFn(FIX_RUN, c)).resolves.toMatchObject({
+      outcome: "nothing-to-run",
+    });
+    expect(runFixCheck).not.toHaveBeenCalled();
+    expect(postSelfHealFixCheck).not.toHaveBeenCalled();
+    const lines = c.log.mock.calls.map((call) => String(call[0]));
+    expect(
+      lines.some((l) =>
+        l.includes("self-heal fix-check: not reported (nothing to run)"),
+      ),
+    ).toBe(true);
+    expect(finallyOrder.at(-1)).toBe("release");
+  });
+
   it("a fix run that throws mid-run still reports aborted once, and the throw propagates", async () => {
     pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
     pollUntilTerminal.mockRejectedValue(new Error("poll blew up"));
