@@ -169,6 +169,24 @@ function removedLines(patch: string): string[] {
     .map((line) => line.slice(1));
 }
 
+/**
+ * The file's added lines carry a suppression marker. Lockfiles are exempt; a
+ * file without a patch, or with an untrustworthy path, has nothing to scan.
+ */
+export function hasSuppressionMarker(
+  file: Pick<FixDiffFile, "filename" | "patch">,
+): boolean {
+  const path = normalizeFixPath(file.filename);
+  return (
+    path !== null &&
+    file.patch !== undefined &&
+    !isLockfile(path) &&
+    addedLines(file.patch).some((line) =>
+      SUPPRESSION_RES.some((re) => re.test(line)),
+    )
+  );
+}
+
 /** A blank or comment-only line (a removed comment is not removed code). */
 function isCommentOrBlank(line: string): boolean {
   const trimmed = line.trim();
@@ -258,14 +276,7 @@ export function evaluateFixDiff(input: EvaluateFixDiffInput): FixDiffVerdict {
     }
 
     if (file.patch !== undefined) {
-      if (
-        !lockfile &&
-        addedLines(file.patch).some((line) =>
-          SUPPRESSION_RES.some((re) => re.test(line)),
-        )
-      ) {
-        reasons.add("suppression_comment");
-      }
+      if (hasSuppressionMarker(file)) reasons.add("suppression_comment");
     } else if (!lockfile && file.status !== "removed" && file.additions > 0) {
       // Added lines GitHub would not show us cannot be scanned.
       reasons.add("patch_unavailable");

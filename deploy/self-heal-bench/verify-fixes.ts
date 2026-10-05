@@ -4,11 +4,11 @@
  * Usage:
  *   pnpm exec tsx deploy/self-heal-bench/verify-fixes.ts \
  *     --repo <owner/repo> --manifest <manifest.json> --hidden <hidden-tests dir> \
- *     --export <collect.ts output> --out <verification.json> [--force]
+ *     --export <collect.ts output> --out <verification.json> [--pnpm <abs path>] [--force]
  *
  * Read-only on GitHub: `gh api` GETs and one `gh repo clone` (fetches only).
  * It clones the fixture repo into a fresh directory under $TMPDIR and, for
- * every PR whose head branch starts with `automata/fix-`:
+ * every PR whose head branch starts with FIX_BRANCH_PREFIX (`automata/fix-`):
  *   1. maps the PR to its seed through the export (attempt pr_number ->
  *      finding -> matchSeed); a PR with no seed is reported with seedId null;
  *   2. checks out the PR head (refs/pull/<n>/head) on a clean tree;
@@ -16,24 +16,16 @@
  *      (BENCH_REPO_ROOT=<checkout>, scrubbed env, 60 s timeout);
  *   4. runs the seed's deterministic check;
  *   5. scans the PR's added lines for suppression markers with the www
- *      suppression guard (evaluateFixDiff, the same regexes production uses).
- * Then it runs every seed's check on the default branch head (finalChecks,
- * which score.ts uses for the false-closure rate). The clone is deleted on
- * exit, also on failure.
+ *      suppression guard (hasSuppressionMarker, the regexes production uses).
+ * Then it runs every seed's check on the default branch head in one call
+ * (finalChecks, which score.ts uses for the false-closure rate). The clone is
+ * deleted on exit, also on failure.
  *
- * The checks reproduce the worker's check kinds (packages/worker/src/
- * agent-run/self-heal-checks.ts) with the same commands, run as the current
- * user inside the checkout:
- *   npm-audit-clean           pnpm-lock.yaml -> `pnpm audit --prod --json`,
- *                             else package-lock.json -> `npm audit --omit=dev --json`
- *                             (parsed with the worker's parsers; reads the
- *                             lockfile only, installs nothing)
- *   workflow-actions-pinned   the worker's workflowActionsPinned (absent file = pass)
- *   workflow-has-permissions  the worker's workflowHasPermissions (absent file = pass)
- *   file-exists               the subject is a regular file
- *   path-untracked            `git ls-files --error-unmatch -- <subject>` (0 = fail, 1 = pass)
- *   gitignore-has-pattern     .gitignore lines include the key literally
- *   gitleaks-clean            `gitleaks detect --no-git --no-banner --redact --source <subject> --exit-code 1`
+ * The checks ARE the worker's: runSelfHealChecks from packages/worker/src/
+ * agent-run/self-heal-checks.ts (its scripts, subject/key validation, audit
+ * parsers and outcome mapping), run as the current user (agentUser "") inside
+ * the checkout with a scrubbed env. The worker's pnpm is a pinned binary off
+ * PATH; here pnpm audits use --pnpm, else the absolute `command -v pnpm`.
  * An inability to run a check is "error", never "pass".
  *
  * CAUTION: hidden tests import PR-head code written by the fix agent. Run
@@ -41,17 +33,11 @@
  * scrubbed to PATH/HOME/TMPDIR so no token of yours reaches it.
  */
 import { execFile } from "node:child_process";
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
-import { evaluateFixDiff } from "../../apps/www/src/server-lib/audit/suppression-guard";
+import { hasSuppressionMarker } from "../../apps/www/src/server-lib/audit/suppression-guard";
 import {
   parseFixtureManifest,
   type Seed,
@@ -64,14 +50,9 @@ import {
   type PrVerification,
   type VerificationResult,
 } from "../../packages/shared/src/self-heal/bench/score";
-import {
-  AUDIT_PNPM_ENV,
-  isSafeSubject,
-  parseNpmAuditJson,
-  parsePnpmAuditJson,
-  workflowActionsPinned,
-  workflowHasPermissions,
-} from "../../packages/worker/src/agent-run/self-heal-checks";
+import { FIX_BRANCH_PREFIX } from "../../packages/shared/src/self-heal/fix-paths";
+import { runAsAgent } from "../../packages/worker/src/agent-run/agent-command";
+import { runSelfHealChecks } from "../../packages/worker/src/agent-run/self-heal-checks";
 import {
   assertRepo,
   fail,
@@ -82,8 +63,7 @@ import {
 } from "./cli";
 
 const USAGE =
-  "Usage: pnpm exec tsx deploy/self-heal-bench/verify-fixes.ts --repo <owner/repo> --manifest <manifest.json> --hidden <hidden-tests dir> --export <export.json> --out <file> [--force]";
-const FIX_BRANCH_PREFIX = "automata/fix-";
+  "Usage: pnpm exec tsx deploy/self-heal-bench/verify-fixes.ts --repo <owner/repo> --manifest <manifest.json> --hidden <hidden-tests dir> --export <export.json> --out <file> [--pnpm <abs path>] [--force]";
 const HIDDEN_TEST_TIMEOUT_MS = 60_000;
 const CHECK_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT = 64 * 1024 * 1024;
@@ -99,6 +79,7 @@ function parseArgs(): {
   hidden: string;
   exportFile: string;
   out: string;
+  pnpm: string | undefined;
   force: boolean;
 } {
   const { values } = parseCli(
@@ -109,16 +90,20 @@ function parseArgs(): {
         hidden: { type: "string" },
         export: { type: "string" },
         out: { type: "string" },
+        pnpm: { type: "string" },
         force: { type: "boolean", default: false },
       },
     },
     USAGE,
   );
-  const { repo, manifest, hidden, out, force } = values;
+  const { repo, manifest, hidden, out, pnpm, force } = values;
   const exportFile = values.export;
   if (!repo || !manifest || !hidden || !exportFile || !out) fail(USAGE);
   assertRepo(repo);
-  return { repo, manifest, hidden, exportFile, out, force };
+  if (pnpm !== undefined && !isAbsolute(pnpm)) {
+    fail(`--pnpm must be an absolute path, got: ${pnpm}`);
+  }
+  return { repo, manifest, hidden, exportFile, out, pnpm, force };
 }
 
 /** Child processes get no credential of the operator. */
@@ -193,103 +178,71 @@ async function headSha(cwd: string): Promise<string> {
   return (await git(cwd, ["rev-parse", "HEAD"])).stdout.trim();
 }
 
-function readText(path: string): string | null {
-  return existsSync(path) ? readFileSync(path, "utf8") : null;
+/**
+ * The pnpm the audit check runs: --pnpm, else `command -v pnpm` on the
+ * scrubbed PATH. "" when there is none: the worker's check then reports
+ * pnpm audits as "error" (pnpm absent), never "pass".
+ */
+async function resolvePnpm(flag: string | undefined): Promise<string> {
+  if (flag !== undefined) return flag;
+  const found = await run("/bin/sh", ["-c", "command -v pnpm"], {
+    timeoutMs: CHECK_TIMEOUT_MS,
+  });
+  const path = found.stdout.trim();
+  if (found.code === 0 && isAbsolute(path)) return path;
+  console.error(
+    "warning: no pnpm on PATH; pass --pnpm, or pnpm-lock.yaml audits report error",
+  );
+  return "";
 }
 
-async function runCheck(
-  seed: Seed,
+/** The worker's checks for these seeds on the checkout, by seed id. */
+async function runChecks(
+  seeds: readonly Seed[],
   checkout: string,
-): Promise<BenchCheckOutcome> {
-  if (seed.check === null) return "error";
-  if (seed.check === "npm-audit-clean") {
-    const name = seed.subject.slice("npm:".length);
-    const pnpm = existsSync(join(checkout, "pnpm-lock.yaml"));
-    if (!pnpm && !existsSync(join(checkout, "package-lock.json"))) {
-      return "error";
-    }
-    const result = pnpm
-      ? await run("pnpm", ["audit", "--prod", "--json"], {
-          cwd: checkout,
-          env: scrubbedEnv({ ...AUDIT_PNPM_ENV }),
-          timeoutMs: CHECK_TIMEOUT_MS,
-        })
-      : await run("npm", ["audit", "--omit=dev", "--json"], {
-          cwd: checkout,
-          timeoutMs: CHECK_TIMEOUT_MS,
-        });
-    if (result.code === null) return "error";
-    try {
-      const names = pnpm
-        ? parsePnpmAuditJson(result.stdout)
-        : parseNpmAuditJson(result.stdout);
-      return names.has(name) ? "fail" : "pass";
-    } catch {
-      return "error";
-    }
-  }
-  if (!isSafeSubject(seed.subject)) return "error";
-  const path = join(checkout, seed.subject);
-  switch (seed.check) {
-    case "workflow-actions-pinned": {
-      const text = readText(path);
-      return text === null || workflowActionsPinned(text, seed.key)
-        ? "pass"
-        : "fail";
-    }
-    case "workflow-has-permissions": {
-      const text = readText(path);
-      return text === null || workflowHasPermissions(text) ? "pass" : "fail";
-    }
-    case "file-exists":
-      return existsSync(path) && statSync(path).isFile() ? "pass" : "fail";
-    case "gitignore-has-pattern": {
-      if (seed.key === undefined) return "error";
-      const text = readText(path);
-      if (text === null) return "fail";
-      return text
-        .split("\n")
-        .map((line) => line.trim())
-        .includes(seed.key)
-        ? "pass"
-        : "fail";
-    }
-    case "path-untracked": {
-      const result = await git(checkout, [
-        "ls-files",
-        "--error-unmatch",
-        "--",
-        seed.subject,
-      ]);
-      return result.code === 0 ? "fail" : result.code === 1 ? "pass" : "error";
-    }
-    case "gitleaks-clean": {
-      const result = await run(
-        "gitleaks",
-        [
-          "detect",
-          "--no-git",
-          "--no-banner",
-          "--redact",
-          "--source",
-          seed.subject,
-          "--exit-code",
-          "1",
+  pnpmPath: string,
+): Promise<Map<string, BenchCheckOutcome>> {
+  const checks = seeds.flatMap((seed) =>
+    seed.check === null
+      ? []
+      : [
+          {
+            fingerprint: seed.id,
+            check: seed.check,
+            subject: seed.subject,
+            ...(seed.key !== undefined && { key: seed.key }),
+          },
         ],
-        { cwd: checkout, timeoutMs: CHECK_TIMEOUT_MS },
-      );
-      return result.code === 0 ? "pass" : result.code === 1 ? "fail" : "error";
-    }
-    default:
-      return "error";
-  }
+  );
+  const results = await runSelfHealChecks({
+    checks,
+    run: runAsAgent,
+    agentUser: "",
+    workdir: checkout,
+    env: scrubbedEnv(),
+    pnpmPath,
+    perCheckMs: CHECK_TIMEOUT_MS,
+    budgetMs: CHECK_TIMEOUT_MS * Math.max(1, checks.length),
+    note: (message) => console.error(`note: ${message}`),
+  });
+  return new Map(results.map((r) => [r.fingerprint, r.outcome]));
+}
+
+async function checkSeed(
+  seed: Seed | null,
+  checkout: string,
+  pnpmPath: string,
+): Promise<PrVerification["check"]> {
+  if (seed === null || seed.check === null) return "skipped";
+  return (await runChecks([seed], checkout, pnpmPath)).get(seed.id) ?? "error";
 }
 
 async function runHiddenTest(
-  seed: Seed,
+  seed: Seed | null,
   hiddenDir: string,
   checkout: string,
 ): Promise<PrVerification["hiddenTest"]> {
+  if (seed === null) return "missing";
   const file = join(hiddenDir, seed.hiddenTest.replace(/^hidden-tests\//, ""));
   if (!existsSync(file)) return "missing";
   const result = await run("node", ["--test", file], {
@@ -303,36 +256,18 @@ async function runHiddenTest(
 async function suppressionHits(
   repo: string,
   prNumber: number,
-  seed: Seed | null,
 ): Promise<string[]> {
   const files = await ghGet(`repos/${repo}/pulls/${prNumber}/files`);
   if (!Array.isArray(files)) throw new Error("PR files is not an array");
-  const hits: string[] = [];
-  for (const raw of files) {
-    const f = recordOf(raw, "PR file");
-    if (typeof f.filename !== "string" || typeof f.patch !== "string") {
-      continue;
-    }
-    const verdict = evaluateFixDiff({
-      files: [
-        {
-          filename: f.filename,
-          status: typeof f.status === "string" ? f.status : "modified",
-          additions: typeof f.additions === "number" ? f.additions : 0,
-          deletions: typeof f.deletions === "number" ? f.deletions : 0,
-          patch: f.patch,
-        },
-      ],
-      planFiles: null,
-      ruleId: seed?.rule ?? "dep.vulnerable",
-      subject: seed?.subject ?? null,
-      maxDiffLines: Number.MAX_SAFE_INTEGER,
-    });
-    if (verdict.rejections.includes("suppression_comment")) {
-      hits.push(f.filename);
-    }
-  }
-  return hits;
+  return files
+    .map((raw) => recordOf(raw, "PR file"))
+    .flatMap((f) =>
+      typeof f.filename === "string" &&
+      typeof f.patch === "string" &&
+      hasSuppressionMarker({ filename: f.filename, patch: f.patch })
+        ? [f.filename]
+        : [],
+    );
 }
 
 async function main(): Promise<void> {
@@ -348,6 +283,7 @@ async function main(): Promise<void> {
     fail(`the export is for ${snapshot.repoFullName}, not ${args.repo}`);
   }
   const hiddenDir = resolve(args.hidden);
+  const pnpmPath = await resolvePnpm(args.pnpm);
   const findingById = new Map(snapshot.findings.map((f) => [f.id, f]));
   const seedOfPr = (prNumber: number): Seed | null => {
     const attempt = snapshot.attempts.find((a) => a.prNumber === prNumber);
@@ -391,14 +327,9 @@ async function main(): Promise<void> {
         prNumber,
         headSha: await headSha(checkout),
         seedId: seed?.id ?? null,
-        hiddenTest: seed
-          ? await runHiddenTest(seed, hiddenDir, checkout)
-          : "missing",
-        check:
-          seed && seed.check !== null
-            ? await runCheck(seed, checkout)
-            : "skipped",
-        suppressionHits: await suppressionHits(args.repo, prNumber, seed),
+        hiddenTest: await runHiddenTest(seed, hiddenDir, checkout),
+        check: await checkSeed(seed, checkout, pnpmPath),
+        suppressionHits: await suppressionHits(args.repo, prNumber),
       };
       prs.push(entry);
       console.log(
@@ -408,12 +339,9 @@ async function main(): Promise<void> {
 
     await checkoutClean(checkout, `refs/heads/${defaultBranch}`);
     const defaultBranchSha = await headSha(checkout);
-    const finalChecks: Record<string, BenchCheckOutcome> = {};
-    for (const seed of manifest.seeds) {
-      if (seed.check !== null) {
-        finalChecks[seed.id] = await runCheck(seed, checkout);
-      }
-    }
+    const finalChecks: Record<string, BenchCheckOutcome> = Object.fromEntries(
+      await runChecks(manifest.seeds, checkout, pnpmPath),
+    );
 
     const result: VerificationResult = {
       repoFullName: args.repo,
