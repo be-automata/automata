@@ -1,6 +1,8 @@
 import { and, asc, eq, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import type { Octokit } from "octokit";
 
+import { db as defaultDb } from "@/lib/db";
+import { waitUntil } from "@/lib/wait-until";
 import type { DB } from "@terragon/shared/db";
 import { auditFixAttempts } from "@terragon/shared/db/schema";
 import type {
@@ -17,6 +19,7 @@ import {
   releaseAttemptLease,
   updateFixAttempt,
 } from "@terragon/shared/model/audit-fix-attempts";
+import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
 import { withSelfHealTx } from "@terragon/shared/model/self-heal-tx";
 import { redactSecrets } from "@terragon/utils/redact";
 
@@ -1049,4 +1052,88 @@ export async function runStuckDraftSweep({
     result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
   }
   return result;
+}
+
+const HEAD_SHA_RE = /^[0-9a-f]{40}$/;
+/** More drafts than this on one head sha is not a real state; bound it. */
+const CI_EVENT_MATCH_LIMIT = 5;
+
+export interface SelfHealCiEventDeps {
+  db: DB;
+  evaluate: typeof evaluateFixCi;
+  schedule: (promise: Promise<unknown>) => void;
+}
+
+interface CiEventPayload {
+  check_suite?: { head_sha?: unknown } | null;
+  workflow_run?: { head_sha?: unknown } | null;
+  repository?: { full_name?: unknown } | null;
+}
+
+function ciEventTarget(
+  payload: unknown,
+): { headSha: string; repo: string } | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const event = payload as CiEventPayload;
+  const headSha =
+    event.check_suite?.head_sha ?? event.workflow_run?.head_sha ?? null;
+  const repo = event.repository?.full_name;
+  if (typeof headSha !== "string" || !HEAD_SHA_RE.test(headSha)) return null;
+  if (typeof repo !== "string" || repo.length === 0) return null;
+  return { headSha, repo: normalizeRepo(repo) };
+}
+
+/**
+ * check_suite.completed / workflow_run.completed (GATE-01, T-09-12-5): ONE
+ * indexed lookup (gated_head_sha) for drafts awaiting CI on this head; a
+ * match hands the evaluation to waitUntil and returns. No GitHub call is
+ * made inside the webhook, and a non-matching event costs one query. The
+ * payload's conclusion is never trusted: the evaluator re-reads the checks
+ * from GitHub for the gated sha (T-09-12-1). Never throws.
+ */
+export async function handleSelfHealCiEvent(
+  payload: unknown,
+  overrides: Partial<SelfHealCiEventDeps> = {},
+): Promise<void> {
+  const deps: SelfHealCiEventDeps = {
+    db: defaultDb,
+    evaluate: evaluateFixCi,
+    schedule: waitUntil,
+    ...overrides,
+  };
+  const target = ciEventTarget(payload);
+  if (target === null) return;
+  try {
+    const rows = await withSelfHealTx(deps.db, (tx) =>
+      tx
+        .select({
+          id: auditFixAttempts.id,
+          organizationId: auditFixAttempts.organizationId,
+        })
+        .from(auditFixAttempts)
+        .where(
+          and(
+            eq(auditFixAttempts.gatedHeadSha, target.headSha),
+            eq(auditFixAttempts.phase, "ci_pending"),
+            eq(auditFixAttempts.prState, "draft"),
+            sql`lower(${auditFixAttempts.repoFullName}) = ${target.repo}`,
+          ),
+        )
+        .limit(CI_EVENT_MATCH_LIMIT),
+    );
+    for (const row of rows) {
+      deps.schedule(
+        deps.evaluate({
+          db: deps.db,
+          organizationId: row.organizationId,
+          attemptId: row.id,
+        }),
+      );
+    }
+  } catch (error) {
+    console.error("[self-heal] CI event lookup failed", {
+      headSha: target.headSha,
+      error: errorText(error),
+    });
+  }
 }

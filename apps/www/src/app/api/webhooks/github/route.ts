@@ -52,6 +52,7 @@ import {
 import { Webhooks } from "@octokit/webhooks";
 import { env } from "@terragon/env/apps-www";
 import { findWebhookSkip } from "./webhook-skip";
+import { handleSelfHealCiEvent } from "@/server-lib/audit/evaluate-fix-ci";
 
 export async function POST(request: NextRequest) {
   const webhooks = new Webhooks({
@@ -122,6 +123,15 @@ export async function POST(request: NextRequest) {
     ["check_suite.completed", "check_suite.rerequested"],
     async ({ payload }) => {
       await handleCheckSuiteEvent(payload);
+    },
+  );
+  // GATE-01: CI completion on a self-heal draft's gated head. A sibling of the
+  // check_suite / workflow_run handlers above: one DB lookup, evaluation in
+  // waitUntil (and on the tick), no GitHub call here. Never throws.
+  webhooks.on(
+    ["check_suite.completed", "workflow_run.completed"],
+    async ({ payload }) => {
+      await handleSelfHealCiEvent(payload);
     },
   );
   webhooks.on(["issues.opened", "issues.labeled"], async ({ payload }) => {
