@@ -38,7 +38,11 @@ import {
   type SelfHealRunInput,
 } from "@/server-lib/audit/plan-self-heal-run";
 import { resolveTaskAgentFromRows } from "@/server-lib/task/resolve-task-agent";
-import { hatchetDispatchEnabled, dispatchAgentRun } from "./dispatch";
+import {
+  hatchetDispatchEnabled,
+  dispatchAgentRun,
+  selfHealReadbackSettle,
+} from "./dispatch";
 
 // Pass-through spy: the real resolver runs on the rows the dispatch read from
 // the test DB; the spy only lets a test assert it was (not) consulted.
@@ -1363,10 +1367,13 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    selfHealReadbackSettle.ms = 2_000;
   });
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    // R4: the settle is real time; the order of calls is what is asserted.
+    selfHealReadbackSettle.ms = 0;
     user = (await createTestUser({ db })).user;
     orgId = (
       await createOrganization({
@@ -1684,6 +1691,29 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
     expect(triggerCalls(f)).toHaveLength(1);
   });
 
+  it("R4: a run invisible on the first read-back but found after the settle → no second POST", async () => {
+    fastTimeouts();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const attempt = await claim();
+    const t = await fixThread(attempt.id);
+    let lists = 0;
+    const f = vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).includes(TRIGGER)) return hang(init);
+      lists += 1;
+      return lists === 1
+        ? listing([])
+        : listing([{ id: "run-late", status: "QUEUED" }]);
+    });
+    vi.stubGlobal("fetch", f);
+    await dispatch(t);
+    vi.unstubAllGlobals();
+    expect(triggerCalls(f)).toHaveLength(1);
+    expect(listCalls(f)).toHaveLength(2);
+    expect((await events()).map((e) => [e.outcome, e.signal])).toEqual([
+      ["success", "dispatch_visible"],
+    ]);
+  });
+
   it("RES-06: an empty read-back after a timeout → exactly one retry", async () => {
     fastTimeouts();
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1699,7 +1729,8 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
     await dispatch(t);
     vi.unstubAllGlobals();
     expect(triggerCalls(f)).toHaveLength(2);
-    expect(listCalls(f)).toHaveLength(1);
+    // R4: an empty read-back is read again after the settle before the retry.
+    expect(listCalls(f)).toHaveLength(2);
     expect((await events()).map((e) => [e.outcome, e.signal])).toEqual([
       ["success", "dispatch_visible"],
     ]);
@@ -1721,11 +1752,18 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
     );
     vi.unstubAllGlobals();
     expect(triggerCalls(f)).toHaveLength(2);
-    expect(listCalls(f)).toHaveLength(2);
+    expect(listCalls(f)).toHaveLength(4);
     const order = (f.mock.calls as unknown as Call[]).map(([u]) =>
       String(u).includes(TRIGGER) ? "trigger" : "list",
     );
-    expect(order).toEqual(["trigger", "list", "trigger", "list"]);
+    expect(order).toEqual([
+      "trigger",
+      "list",
+      "list",
+      "trigger",
+      "list",
+      "list",
+    ]);
     expect((await events()).map((e) => [e.outcome, e.signal])).toEqual([
       ["failure", "dispatch_lost"],
     ]);

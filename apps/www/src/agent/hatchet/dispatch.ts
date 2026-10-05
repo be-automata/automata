@@ -129,6 +129,13 @@ export const SELF_HEAL_TRIGGER_TIMEOUT_MS = 5_000;
 const SELF_HEAL_READBACK_MAX_PAGES = 3;
 /** One retry after a read-back that found nothing (RES-06). */
 const SELF_HEAL_TRIGGER_MAX_ATTEMPTS = 2;
+/**
+ * R4: Hatchet's run listing is served from OLAP, written asynchronously, so a
+ * run created by an aborted POST can be invisible for a moment. An empty
+ * read-back is read again after this settle before any second POST. Mutable
+ * only so tests can shorten it.
+ */
+export const selfHealReadbackSettle = { ms: 2_000 };
 /** Same breaker key and signal names as the fix reconcile (09-07). */
 const HATCHET_DISPATCH_SCOPE_KEY = "*";
 
@@ -151,7 +158,8 @@ function isAmbiguousTriggerFailure(error: unknown): boolean {
  * AbortSignal. A failure that may have created the run is read back with
  * listAgentRunsForThread BEFORE any retry: a QUEUED/RUNNING run of this
  * thread means the dispatch happened (no second POST, the run id comes from
- * the read-back); nothing found means exactly one retry. A read-back that
+ * the read-back); nothing found is read once more after a 2 s settle (the
+ * listing lags the trigger), and still nothing means exactly one retry. A read-back that
  * fails ends the dispatch (never a blind retry). Every outcome records one
  * hatchet_dispatch breaker event. Review and plain task dispatches never come
  * here: they keep triggerWithRetry, byte-identical.
@@ -211,16 +219,24 @@ async function triggerSelfHealBounded({
         error: error instanceof Error ? error.message : String(error),
       });
       if (!ambiguous) break;
-      let runs: Awaited<ReturnType<typeof listAgentRunsForThread>>;
+      const readBack = async () =>
+        (
+          await listAgentRunsForThread(
+            { createdAt: dispatchedAt, threadId },
+            config,
+            {
+              signal: AbortSignal.timeout(SELF_HEAL_TRIGGER_TIMEOUT_MS),
+              maxPages: SELF_HEAL_READBACK_MAX_PAGES,
+            },
+          )
+        ).find((run) => run.status === "QUEUED" || run.status === "RUNNING");
+      let live: Awaited<ReturnType<typeof readBack>>;
       try {
-        runs = await listAgentRunsForThread(
-          { createdAt: dispatchedAt, threadId },
-          config,
-          {
-            signal: AbortSignal.timeout(SELF_HEAL_TRIGGER_TIMEOUT_MS),
-            maxPages: SELF_HEAL_READBACK_MAX_PAGES,
-          },
-        );
+        live = await readBack();
+        if (!live) {
+          await sleep(selfHealReadbackSettle.ms);
+          live = await readBack();
+        }
       } catch (readError) {
         console.error(
           "[hatchet] self-heal trigger read-back failed — not retrying",
@@ -235,9 +251,6 @@ async function triggerSelfHealBounded({
         );
         break;
       }
-      const live = runs.find(
-        (run) => run.status === "QUEUED" || run.status === "RUNNING",
-      );
       if (live) {
         console.log("[hatchet] self-heal trigger read-back found the run", {
           threadId,
