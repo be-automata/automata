@@ -129,17 +129,26 @@ export async function startGitBroker(
     res: ServerResponse,
   ): Promise<void> {
     // 1. Per-run bearer — the agent's git presents it via http.extraHeader.
+    // Every refusal logs one inert line (method + path, never a header), so a
+    // refused push is always visible whichever gate stopped it.
+    const refuse = (status: 401 | 403 | 404, reason: string, body: string) => {
+      console.error(
+        `git-broker: refused request (${reason}) ` +
+          printable(`${req.method ?? "?"} ${req.url ?? "/"}`),
+      );
+      res.writeHead(status).end(body);
+    };
     if (
       !timingSafeEqualStr(req.headers["authorization"] ?? "", expectedBearerBuf)
     ) {
-      res.writeHead(401).end("unauthorized");
+      refuse(401, "bad_bearer", "unauthorized");
       return;
     }
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     // 2. Repo path fence — case-insensitively, only this run's repo.
     const lowerPath = url.pathname.toLowerCase();
     if (!lowerPath.startsWith(pathPrefix)) {
-      res.writeHead(404).end("not found");
+      refuse(404, "repo_not_allowed", "not found");
       return;
     }
     const endpoint = url.pathname.slice(pathPrefix.length);
@@ -152,7 +161,7 @@ export async function startGitBroker(
       (req.method === "POST" &&
         (endpoint === UPLOAD_PACK || endpoint === RECEIVE_PACK));
     if (!allowed) {
-      res.writeHead(403).end("forbidden");
+      refuse(403, "endpoint_not_allowed", "forbidden");
       return;
     }
 
@@ -179,7 +188,7 @@ export async function startGitBroker(
       if (!gate.ok) {
         console.error(
           `git-broker: ref fence refused push (${gate.reason})` +
-            (gate.ref ? ` ref=${printableRef(gate.ref)}` : ""),
+            (gate.ref ? ` ref=${printable(gate.ref)}` : ""),
         );
         // The rest of the body is never read: close the connection.
         res
@@ -316,7 +325,7 @@ function replayThenStream(
   });
 }
 
-/** Ref names are agent-controlled: print them inert and bounded. */
-function printableRef(ref: string): string {
-  return ref.replace(/[^\x20-\x7e]/g, "?").slice(0, 200);
+/** Ref names and paths are agent-controlled: print them inert and bounded. */
+function printable(text: string): string {
+  return text.replace(/[^\x20-\x7e]/g, "?").slice(0, 200);
 }

@@ -315,13 +315,24 @@ describe.skipIf(!hasGit)(
     async function fencedUpstream() {
       const bare = tmpDir("broker-int-fbare-");
       const seed = tmpDir("broker-int-fseed-");
+      // init.defaultBranch is pinned: without it (CI's git has no global
+      // config) the bare repo's HEAD names a missing `master`, the clone
+      // checks out nothing, and a commit there is an unrelated root — whose
+      // push to main git rejects client-side (non-fast-forward) before ever
+      // POSTing to the broker, so the fence is never exercised.
       const git = (cwd: string, ...args: string[]) =>
         spawnSync(
           "git",
-          ["-c", "user.email=t@t", "-c", "user.name=t", ...args],
-          {
-            cwd,
-          },
+          [
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "init.defaultBranch=main",
+            ...args,
+          ],
+          { cwd },
         );
       const ok = (cwd: string, ...args: string[]) => {
         const res = git(cwd, ...args);
@@ -425,7 +436,7 @@ describe.skipIf(!hasGit)(
     });
 
     it("a push to main, a tag, or a delete is refused and NOTHING reaches the upstream", async () => {
-      const { bare, ok, env, forwarded, broker } = await fencedUpstream();
+      const { bare, git, ok, env, forwarded, broker } = await fencedUpstream();
       const mainBefore = ok(bare, "rev-parse", "refs/heads/main");
       // The attempt branch exists upstream, so the delete really is attempted
       // (git refuses to delete a missing remote ref without dialling).
@@ -435,10 +446,18 @@ describe.skipIf(!hasGit)(
       ok(work, "remote", "set-url", "origin", `https://github.com/${REPO}.git`);
       ok(work, "commit", "--allow-empty", "-m", "evil");
       ok(work, "tag", "v1");
+      // Precondition: the main push is a fast-forward, so git's client-side
+      // check passes and only the fence can refuse it.
+      expect(
+        git(work, "merge-base", "--is-ancestor", "origin/main", "HEAD").status,
+      ).toBe(0);
 
       const refusals = vi.spyOn(console, "error").mockImplementation(() => {});
       for (const refspec of [
         "HEAD:refs/heads/main",
+        // A forced update skips every client-side check: the fence is the
+        // only thing that can stop it.
+        "+HEAD:refs/heads/main",
         "refs/tags/v1",
         `:refs/heads/${FIX_BRANCH}`,
       ]) {
@@ -456,6 +475,7 @@ describe.skipIf(!hasGit)(
       const reasons = refusals.mock.calls.map((c) => String(c[0]));
       refusals.mockRestore();
       expect(reasons).toEqual([
+        expect.stringContaining("ref_not_allowed) ref=refs/heads/main"),
         expect.stringContaining("ref_not_allowed) ref=refs/heads/main"),
         expect.stringContaining("ref_not_allowed) ref=refs/tags/v1"),
         expect.stringContaining("delete_not_allowed"),
