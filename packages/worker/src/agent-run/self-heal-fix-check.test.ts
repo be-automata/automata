@@ -226,15 +226,32 @@ describe("runFixCheck (GATE-01, R1)", () => {
     ]);
   });
 
-  it("an unsafe local git config (filter, include) refuses the check before checkout", async () => {
-    for (const key of ["filter.x.smudge", "include.path", "core.worktree"]) {
+  it("an unsafe local git config (filter, include) refuses the check before checkout, as a counted check failure (R2)", async () => {
+    for (const key of [
+      "filter.x.smudge",
+      "include.path",
+      "core.worktree",
+      "push.x.y",
+    ]) {
       const { run, calls } = harness({
         guard: () => res(0, `core.bare\n${key}\n`),
       });
       const report = await runFixCheck(args(run));
-      expect(report.workerStatus, key).toBe("error");
+      expect(report.workerStatus, key).toBe("completed");
+      expect(report.checkOutcome, key).toBe("fail");
+      expect(report.headSha, key).toMatch(/^[0-9a-f]{40}$/);
       expect(calls.map((c) => stepOf(c.script))).toEqual(["guard"]);
     }
+  });
+
+  it("benign push.* / pull.* keys an agent sets do not refuse the check", async () => {
+    const { run, calls } = harness({
+      guard: () => res(0, "core.bare\npush.autosetupremote\npull.rebase\n"),
+    });
+    const report = await runFixCheck(args(run));
+    expect(report.workerStatus).toBe("completed");
+    expect(report.checkOutcome).toBe("pass");
+    expect(calls.map((c) => stepOf(c.script))).toContain("check");
   });
 
   it("every command overrides hooks and fsmonitor and disables replace refs; the check gets a fresh HOME", async () => {
@@ -573,7 +590,7 @@ describe("runFixCheck against a real git checkout (as the current user)", () => 
     expect(git(dir, "rev-parse", "HEAD")).toBe(pushed);
   });
 
-  it("a filter planted in .git/config refuses the check", async () => {
+  it("a filter planted in .git/config refuses the check (counted fail); push.autoSetupRemote does not", async () => {
     const { dir, base, pushed } = repo();
     git(dir, "config", "filter.evil.smudge", "cat");
     const report = await runFixCheck({
@@ -586,7 +603,22 @@ describe("runFixCheck against a real git checkout (as the current user)", () => 
       env: env(),
       deadlineAt: Date.now() + 60_000,
     });
-    expect(report.workerStatus).toBe("error");
+    expect(report.workerStatus).toBe("completed");
+    expect(report.checkOutcome).toBe("fail");
+
+    const benign = repo();
+    git(benign.dir, "config", "push.autoSetupRemote", "true");
+    const ok = await runFixCheck({
+      fix: FIX,
+      pushedSha: benign.pushed,
+      baseSha: benign.base,
+      workdir: benign.dir,
+      agentUser: "",
+      run: runAsAgent,
+      env: env(),
+      deadlineAt: Date.now() + 60_000,
+    });
+    expect(ok.checkOutcome).toBe("pass");
   });
 
   it("a check that fails on the pushed tree → completed + fail", async () => {

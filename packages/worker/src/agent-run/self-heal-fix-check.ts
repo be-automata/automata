@@ -153,12 +153,14 @@ const DIFF_SCRIPT = 'git diff --no-renames --name-only -z "$2" "$1"';
 
 /**
  * Local config keys a clean clone (plus the agent's own commits and pushes)
- * can legitimately carry. Anything else — filter.*, include.*, core.worktree,
- * diff/alias/extensions keys — could steer the commands below, so the check
- * refuses to run.
+ * can legitimately carry; single-level push.* / pull.* keys (an agent's
+ * `push.autoSetupRemote`) only steer push/pull, which the check never runs.
+ * Anything else — filter.*, include.*, core.worktree, diff/alias/extensions
+ * keys — could steer the commands below, so the check refuses to run and
+ * reports a counted check failure (the agent wrote it).
  */
 const ALLOWED_LOCAL_CONFIG =
-  /^(core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)|remote\.origin\.(url|fetch)|branch\.[^\s]+\.(remote|merge)|user\.(name|email))$/;
+  /^(core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)|remote\.origin\.(url|fetch)|branch\.[^\s]+\.(remote|merge)|user\.(name|email)|(push|pull)\.[a-z]+)$/;
 
 /** Env every command of the check runs with, on top of the caller's. */
 export function hardenGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -286,7 +288,15 @@ export async function runFixCheck(
     }
     const keys = guard.stdout.split("\n").filter((k) => k.length > 0);
     if (keys.some((k) => !ALLOWED_LOCAL_CONFIG.test(k.toLowerCase()))) {
-      return failed("error", "unsafe local git config");
+      // The agent wrote it: a counted failure of the fix (R2), never an
+      // infra error that is refunded and re-run.
+      args.note?.("unsafe local git config");
+      return {
+        workerStatus: "completed",
+        headSha,
+        checkOutcome: "fail",
+        deniedPaths: [],
+      };
     }
     for (const [script, scriptArgs, reason] of steps) {
       early = stop();
