@@ -71,7 +71,8 @@ export function sanitizeAgentText(text: string): string {
   return out;
 }
 
-function oneLine(text: string): string {
+/** Agent text on a single line, sanitized. */
+export function oneLine(text: string): string {
   return sanitizeAgentText(text).replace(/\s+/g, " ").trim();
 }
 

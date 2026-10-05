@@ -32,8 +32,8 @@ import type { FixCheckStatus } from "./plan-self-heal-run";
 import {
   commentMarker,
   FINDING_LABELS,
+  oneLine,
   renderAuditComment,
-  sanitizeAgentText,
 } from "./render-issue";
 import {
   loadSelfHealContext,
@@ -243,10 +243,6 @@ function attemptPrState(
 ): NonNullable<AuditFixAttemptRow["prState"]> {
   const status = pullStatus(pr);
   return status === "open" ? "ready" : status;
-}
-
-function oneLine(text: string): string {
-  return sanitizeAgentText(text).replace(/\s+/g, " ").trim();
 }
 
 export function renderFixPrTitle(finding: Pick<AuditFindingRow, "title">) {

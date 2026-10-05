@@ -8,7 +8,7 @@ import {
   isDeniedPath,
 } from "@terragon/shared/self-heal/fix-paths";
 
-import { sanitizeAgentText } from "./render-issue";
+import { oneLine, sanitizeAgentText } from "./render-issue";
 
 /**
  * The platform section of a self-heal fix run (phase 9). Built ONLY from the
@@ -69,10 +69,6 @@ export interface BuildFixRunTransformInput {
 /** Agent-originated path rendered as an inline code span. */
 function codePath(path: string): string {
   return `\`${path.replace(/[`\r\n]/g, "")}\``;
-}
-
-function oneLine(text: string): string {
-  return sanitizeAgentText(text).replace(/\s+/g, " ").trim();
 }
 
 function requireText(value: string | null, what: string): string {
