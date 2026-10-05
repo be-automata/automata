@@ -77,18 +77,18 @@ interface RawRule {
  * protection read means "no required checks", not an error and never a
  * permission latch. A rate-limit 403 is still a failure.
  */
-function isProtectionAbsent(error: unknown): boolean {
+export function isAbsentOrForbidden(error: unknown): boolean {
   const kind = classifyGithubOutcome(error).kind;
   return kind === "permission" || kind === "not_found";
 }
 
-async function absentAsNull<T>(
+export async function absentAsNull<T>(
   call: () => Promise<GithubResponse<T>>,
 ): Promise<GithubResponse<T | null>> {
   try {
     return await call();
   } catch (error: unknown) {
-    if (isProtectionAbsent(error)) {
+    if (isAbsentOrForbidden(error)) {
       return { data: null, status: 200, headers: {} };
     }
     throw error;

@@ -161,6 +161,8 @@ describe("renderAuditComment", () => {
     "needs_human_attempts_cap",
     "needs_human_rubric_absent",
     "fix_attempt_rejected",
+    "fix_draft_withdrawn",
+    "fix_draft_no_repo_ci",
   ];
   it.each(kinds)("%s leads with a matching marker and is inert", (kind) => {
     const text = renderAuditComment(kind, {
@@ -209,5 +211,36 @@ describe("renderAuditComment", () => {
       keptBranch: "automata/fix-1-abcdef01-a1",
     });
     expect(kept).toContain("`automata/fix-1-abcdef01-a1` is kept");
+    const draft = renderAuditComment("fix_attempt_rejected", {
+      fingerprint: FP,
+      runId: "r",
+      reasons: ["ci_failed"],
+      draftNumber: 501,
+    });
+    expect(draft).toContain("CI failed on the draft pull request");
+    expect(draft).toContain("#501 was withdrawn");
+  });
+
+  it("states whether a withdrawn draft counts and names the no-CI label", () => {
+    const counted = renderAuditComment("fix_draft_withdrawn", {
+      fingerprint: FP,
+      runId: "r",
+      reasons: ["ci_failed"],
+      counted: true,
+    });
+    expect(counted).toContain("counts against the limit");
+    const refunded = renderAuditComment("fix_draft_withdrawn", {
+      fingerprint: FP,
+      runId: "r",
+      reasons: ["ci_infra"],
+      counted: false,
+    });
+    expect(refunded).toContain("does not count against the limit");
+    expect(
+      renderAuditComment("fix_draft_no_repo_ci", {
+        fingerprint: FP,
+        runId: "r",
+      }),
+    ).toContain("needs-human-approve");
   });
 });

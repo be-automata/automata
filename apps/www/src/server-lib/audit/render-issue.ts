@@ -148,7 +148,9 @@ export type AuditCommentKind =
   | "still_present"
   | "needs_human_attempts_cap"
   | "needs_human_rubric_absent"
-  | "fix_attempt_rejected";
+  | "fix_attempt_rejected"
+  | "fix_draft_withdrawn"
+  | "fix_draft_no_repo_ci";
 
 /**
  * Why a self-heal change attempt did not become a pull request. Only these
@@ -169,6 +171,11 @@ export const FIX_ATTEMPT_REJECTION_TEXT: Readonly<Record<string, string>> = {
   no_branch: "no branch was pushed",
   check_failed: "the finding's check did not pass on the pushed commit",
   open_failed: "a draft pull request could not be opened",
+  ci_failed: "the repository's CI failed on the draft pull request",
+  ci_infra:
+    "the repository's CI was cancelled or could not start (not counted against the limit)",
+  ci_stuck:
+    "the repository's CI did not finish within an hour (not counted against the limit)",
 };
 
 export interface AuditCommentData {
@@ -180,6 +187,18 @@ export interface AuditCommentData {
   reasons?: readonly string[];
   /** fix_attempt_rejected: the attempt branch, when it is kept for a person. */
   keptBranch?: string;
+  /** fix_attempt_rejected / fix_draft_withdrawn: a draft PR existed. */
+  draftNumber?: number;
+  /** fix_draft_withdrawn: whether the attempt counts toward the limit. */
+  counted?: boolean;
+}
+
+function rejectionLines(reasons: readonly string[] | undefined): string[] {
+  const lines = (reasons ?? [])
+    .map((reason) => FIX_ATTEMPT_REJECTION_TEXT[reason])
+    .filter((line): line is string => line !== undefined)
+    .map((line) => `- ${line}`);
+  return lines.length > 0 ? lines : ["- unspecified"];
 }
 
 export function renderAuditComment(
@@ -212,23 +231,40 @@ export function renderAuditComment(
       text = `Later audits no longer report this rubric-only finding. Only a person can confirm resolution; labelled \`${FINDING_LABELS.needsHumanApprove}\`.`;
       break;
     case "fix_attempt_rejected": {
-      const reasons = (data.reasons ?? [])
-        .map((reason) => FIX_ATTEMPT_REJECTION_TEXT[reason])
-        .filter((line): line is string => line !== undefined)
-        .map((line) => `- ${line}`);
       const branch =
         data.keptBranch !== undefined
           ? `The branch \`${data.keptBranch.replace(/[`\r\n]/g, "")}\` is kept for a person to pick up.`
-          : "No pull request was opened and the attempt branch was deleted.";
+          : data.draftNumber !== undefined
+            ? `The draft pull request #${data.draftNumber} was withdrawn before review and the attempt branch was deleted.`
+            : "No pull request was opened and the attempt branch was deleted.";
       text = [
         `Automated change attempt ${attempts} of ${max} was not proposed:`,
         "",
-        ...(reasons.length > 0 ? reasons : ["- unspecified"]),
+        ...rejectionLines(data.reasons),
         "",
         branch,
       ].join("\n");
       break;
     }
+    case "fix_draft_withdrawn":
+      text = [
+        `Automata self-heal withdrew this draft before review (attempt ${attempts} of ${max}):`,
+        "",
+        ...rejectionLines(data.reasons),
+        "",
+        "The attempt branch was deleted.",
+        data.counted === false
+          ? "This attempt does not count against the limit."
+          : "This attempt counts against the limit.",
+      ].join("\n");
+      break;
+    case "fix_draft_no_repo_ci":
+      text = [
+        "No repository CI reported a check on this commit within 10 minutes, so the only gate was the finding's own deterministic check on a clean checkout.",
+        "",
+        `Labelled \`${FINDING_LABELS.needsHumanApprove}\`: a person should run the project's tests before merging.`,
+      ].join("\n");
+      break;
   }
   return `${marker}\n${text}`;
 }

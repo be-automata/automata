@@ -4,6 +4,7 @@ import { pruneSelfHealRows } from "@terragon/shared/model/self-heal-outbox";
 import { redactSecrets } from "@terragon/utils/redact";
 
 import { runAuditSweep, runOutboxDrain } from "./audit-sweep";
+import { runStuckDraftSweep } from "./evaluate-fix-ci";
 import { runFixDispatchReconcile } from "./fix-dispatch-reconcile";
 import { runFixPrOpenSweep } from "./open-fix-pr";
 import { runSelfHealDispatcher } from "./self-heal-dispatcher";
@@ -34,6 +35,7 @@ export interface SelfHealCronDeps {
   prune: typeof pruneSelfHealRows;
   reconcile: typeof runFixDispatchReconcile;
   openPrs: typeof runFixPrOpenSweep;
+  evaluateDrafts: typeof runStuckDraftSweep;
   dispatch: typeof runSelfHealDispatcher;
   budget: { totalMs: number; perItemMs: number; limit: number };
 }
@@ -47,6 +49,7 @@ function defaultDeps(): SelfHealCronDeps {
     prune: pruneSelfHealRows,
     reconcile: runFixDispatchReconcile,
     openPrs: runFixPrOpenSweep,
+    evaluateDrafts: runStuckDraftSweep,
     dispatch: runSelfHealDispatcher,
     budget: SELF_HEAL_CRON_BUDGET,
   };
@@ -135,6 +138,19 @@ export async function runSelfHealCron(
         limit: deps.budget.limit,
       });
       console.log("[cron:self-heal] fix draft opens", result);
+    });
+    // GATE-01 steps 4-5: evaluate the repo CI on open drafts after the open
+    // sweep (a draft opened above is seen on this tick). This is what moves a
+    // draft whose CI completed without a later webhook (all-checks settle
+    // window, no repo CI at all) and withdraws drafts stuck for an hour.
+    await withinBudget("fix draft CI", remaining(), async () => {
+      const result = await deps.evaluateDrafts({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+      });
+      console.log("[cron:self-heal] fix draft CI", result);
     });
     // BULK-01: the fix dispatcher runs LAST, so its admission sees the state
     // the drain and the sweep just settled, and it can only use what is left
