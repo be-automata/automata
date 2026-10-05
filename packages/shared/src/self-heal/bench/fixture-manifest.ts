@@ -118,3 +118,62 @@ export function findManifestError(manifest: FixtureManifest): string | null {
   }
   return null;
 }
+
+const SEED_STRING_FIELDS = ["id", "rule", "subject", "kind", "hiddenTest"];
+
+/**
+ * Narrows a parsed manifest.json and validates it with findManifestError.
+ * Throws on the first problem.
+ */
+export function parseFixtureManifest(value: unknown): FixtureManifest {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("manifest must be an object");
+  }
+  const root = value as Record<string, unknown>;
+  if (!Array.isArray(root.seeds)) throw new Error("manifest.seeds is missing");
+  const seeds = root.seeds.map((raw, index): Seed => {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new Error(`manifest.seeds[${index}] must be an object`);
+    }
+    const entry = raw as Record<string, unknown>;
+    for (const name of SEED_STRING_FIELDS) {
+      if (typeof entry[name] !== "string") {
+        throw new Error(`manifest.seeds[${index}].${name} must be a string`);
+      }
+    }
+    if (entry.key !== undefined && typeof entry.key !== "string") {
+      throw new Error(`manifest.seeds[${index}].key must be a string`);
+    }
+    const params: Record<string, string> = {};
+    if (entry.params !== undefined) {
+      if (typeof entry.params !== "object" || entry.params === null) {
+        throw new Error(`manifest.seeds[${index}].params must be an object`);
+      }
+      for (const [k, v] of Object.entries(entry.params)) {
+        if (typeof v !== "string") {
+          throw new Error(
+            `manifest.seeds[${index}].params.${k} must be a string`,
+          );
+        }
+        params[k] = v;
+      }
+    }
+    return {
+      id: entry.id as string,
+      rule: entry.rule as string,
+      subject: entry.subject as string,
+      ...(typeof entry.key === "string" && { key: entry.key }),
+      kind: entry.kind as SeedKind,
+      check: (entry.check ?? null) as AuditCheckKind | null,
+      hiddenTest: entry.hiddenTest as string,
+      ...(entry.params !== undefined && { params }),
+    };
+  });
+  const manifest: FixtureManifest = {
+    version: root.version as FixtureManifest["version"],
+    seeds,
+  };
+  const problem = findManifestError(manifest);
+  if (problem !== null) throw new Error(`manifest is invalid: ${problem}`);
+  return manifest;
+}

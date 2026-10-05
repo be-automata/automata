@@ -3,7 +3,11 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { AUDIT_RULES } from "../audit-rules";
-import { findManifestError, type FixtureManifest } from "./fixture-manifest";
+import {
+  findManifestError,
+  parseFixtureManifest,
+  type FixtureManifest,
+} from "./fixture-manifest";
 import { renderFixture, type RenderedFixture } from "./render-fixture";
 import { BENCH_FAKE_MARKER, SEED_CATALOG } from "./seed-catalog";
 
@@ -165,6 +169,28 @@ describe("findManifestError", () => {
       ],
     };
     expect(findManifestError(dup)).toMatch(/duplicate/);
+  });
+});
+
+describe("parseFixtureManifest", () => {
+  it("round-trips the catalog through JSON", () => {
+    expect(
+      parseFixtureManifest(JSON.parse(JSON.stringify(SEED_CATALOG))),
+    ).toEqual(SEED_CATALOG);
+  });
+
+  it("rejects a malformed or invalid manifest", () => {
+    expect(() => parseFixtureManifest([])).toThrow(/object/);
+    expect(() => parseFixtureManifest({ version: 1 })).toThrow(/seeds/);
+    expect(() =>
+      parseFixtureManifest({ version: 1, seeds: [{ id: 1 }] }),
+    ).toThrow(/id/);
+    expect(() =>
+      parseFixtureManifest({
+        version: 2,
+        seeds: JSON.parse(JSON.stringify(SEED_CATALOG.seeds)),
+      }),
+    ).toThrow(/version/);
   });
 });
 
