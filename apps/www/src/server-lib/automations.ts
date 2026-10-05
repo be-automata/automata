@@ -48,6 +48,7 @@ import {
   resolveReviewSkill,
   renderSkillPlaceholders,
 } from "./review/resolve-review-skill";
+import { FINDING_LABELS, normalizeLabel } from "./audit/render-issue";
 import { buildRepoOverrideFetcher } from "./review/repo-skill-override";
 import { resolveReviewPromptMode } from "./review/resolve-review-prompt-mode";
 import {
@@ -376,8 +377,6 @@ export async function hasReachedLimitOfAutomations({
   return currentCount >= maxAutomations;
 }
 
-const SELF_HEAL_FIX_LABEL = "automata:auto-fix";
-
 /**
  * ROLL-01: a self-heal fix automation (action = the audit-fix skill) may only
  * trigger on the `automata:auto-fix` label — `on.labeled` true, `on.open` not
@@ -396,19 +395,17 @@ function assertSelfHealFixAutomationIsLabeledOnly({
 }): void {
   if (!isAuditFixAction(action)) return;
   const error = new UserFacingError(
-    `Self-heal fix automations must trigger only on the ${SELF_HEAL_FIX_LABEL} label`,
+    `Self-heal fix automations must trigger only on the ${FINDING_LABELS.autoFix} label`,
   );
   if (triggerType !== "issue" || !triggerConfig) {
     throw error;
   }
   const config = triggerConfig as IssueTriggerConfig;
-  const labels = (config.filter?.labels ?? []).map((label) =>
-    label.trim().toLowerCase(),
-  );
+  const labels = (config.filter?.labels ?? []).map(normalizeLabel);
   if (
     config.on?.labeled !== true ||
     config.on?.open === true ||
-    !labels.includes(SELF_HEAL_FIX_LABEL)
+    !labels.includes(FINDING_LABELS.autoFix)
   ) {
     throw error;
   }

@@ -24,6 +24,11 @@ export const FINDING_LABELS = {
   audit: (audit: string): string => `audit:${audit}`,
 } as const;
 
+/** GitHub label names compare trimmed and case-insensitively. */
+export function normalizeLabel(label: string | null | undefined): string {
+  return (label ?? "").trim().toLowerCase();
+}
+
 export const MAX_BODY_CHARS = 30_000;
 export const MAX_TITLE_CHARS = 200;
 const MAX_URLS = 10;

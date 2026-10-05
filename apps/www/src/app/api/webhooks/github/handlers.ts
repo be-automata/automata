@@ -37,6 +37,7 @@ import { FIX_BRANCH_PREFIX } from "@terragon/shared/self-heal/fix-paths";
 import { markFindingFixReady } from "@/server-lib/audit/mark-fix-ready";
 import { logSelfHealDecision } from "@/server-lib/audit/decision-log";
 import { resolveBotLogin } from "@/server-lib/review/bot-login";
+import { normalizeLabel } from "@/server-lib/audit/render-issue";
 import { isAuditFixAction } from "@/server-lib/review/review-skill";
 import { getPostHogServer } from "@/lib/posthog-server";
 // publicAppUrl is used within utils via postBillingLinkComment
@@ -587,10 +588,6 @@ export async function handleIssueEvent(event: IssueEvent): Promise<void> {
   } catch (error) {
     console.error("Error handling issue event:", error);
   }
-}
-
-function normalizeLabel(label: string | null | undefined): string {
-  return (label ?? "").trim().toLowerCase();
 }
 
 function normalizeLabels(labels: readonly string[] | undefined): string[] {
