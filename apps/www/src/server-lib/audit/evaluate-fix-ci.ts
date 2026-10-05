@@ -17,6 +17,7 @@ import {
 } from "@terragon/shared/model/audit-fix-attempts";
 import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
 import { withSelfHealTx } from "@terragon/shared/model/self-heal-tx";
+import { FIX_BRANCH_PREFIX } from "@terragon/shared/self-heal/fix-paths";
 
 import { defaultOpenFixPrDeps, type OpenFixPrDeps } from "./open-fix-pr";
 import {
@@ -817,8 +818,8 @@ export interface SelfHealCiEventDeps {
 }
 
 interface CiEventPayload {
-  check_suite?: { head_sha?: unknown } | null;
-  workflow_run?: { head_sha?: unknown } | null;
+  check_suite?: { head_sha?: unknown; head_branch?: unknown } | null;
+  workflow_run?: { head_sha?: unknown; head_branch?: unknown } | null;
   repository?: { full_name?: unknown } | null;
 }
 
@@ -827,6 +828,16 @@ function ciEventTarget(
 ): { headSha: string; repo: string } | null {
   if (typeof payload !== "object" || payload === null) return null;
   const event = payload as CiEventPayload;
+  // A draft's head is always on its automata/fix-* branch: an event naming
+  // another branch is not one of ours (no branch named: still looked up).
+  const headBranch =
+    event.check_suite?.head_branch ?? event.workflow_run?.head_branch;
+  if (
+    typeof headBranch === "string" &&
+    !headBranch.startsWith(FIX_BRANCH_PREFIX)
+  ) {
+    return null;
+  }
   const headSha =
     event.check_suite?.head_sha ?? event.workflow_run?.head_sha ?? null;
   const repo = event.repository?.full_name;
@@ -838,7 +849,8 @@ function ciEventTarget(
 /**
  * check_suite.completed / workflow_run.completed (GATE-01, T-09-12-5): ONE
  * indexed lookup (gated_head_sha) for drafts awaiting CI on this head; a
- * match hands the evaluation to waitUntil and returns. No GitHub call is
+ * match hands the evaluation to waitUntil and returns. An event whose head
+ * branch is not an automata/fix-* branch costs nothing. No GitHub call is
  * made inside the webhook, and a non-matching event costs one query. The
  * payload's conclusion is never trusted: the evaluator re-reads the checks
  * from GitHub for the gated sha (T-09-12-1). Never throws.

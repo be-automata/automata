@@ -1605,6 +1605,39 @@ describe("GitHub webhook route", () => {
       expect(createSelfHealOctokit).not.toHaveBeenCalled();
     });
 
+    it("a head branch outside automata/fix-* never reaches the DB", async () => {
+      const failing = {
+        select: vi.fn(),
+        transaction: vi.fn(),
+      };
+      const evaluate = vi.fn();
+      await handleSelfHealCiEvent(
+        {
+          ...payload(sha),
+          check_suite: { head_sha: sha, head_branch: "main" },
+        },
+        { db: failing as unknown as typeof db, evaluate },
+      );
+      expect(failing.select).not.toHaveBeenCalled();
+      expect(failing.transaction).not.toHaveBeenCalled();
+      expect(evaluate).not.toHaveBeenCalled();
+    });
+
+    it("the draft's own fix branch is still looked up", async () => {
+      const evaluate = vi.fn(async (_args: unknown) => "pending" as const);
+      await handleSelfHealCiEvent(
+        {
+          ...payload(sha),
+          check_suite: {
+            head_sha: sha,
+            head_branch: "automata/fix-42-01234567-a1",
+          },
+        },
+        { evaluate },
+      );
+      expect(evaluate).toHaveBeenCalledTimes(1);
+    });
+
     it("a draft already marked ready is not re-evaluated", async () => {
       await updateFixAttempt({
         db,
