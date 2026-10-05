@@ -8,7 +8,9 @@ import { selfHealSlot, thread, threadChat } from "../db/schema";
 import { createOrganization } from "./organizations";
 import {
   acquireSelfHealSlot,
+  countAdmissionDeferrals,
   getSelfHealSlot,
+  recordAdmissionDeferral,
   releaseSelfHealSlot,
   SELF_HEAL_SLOT_KEY,
   setSlotHolderThread,
@@ -279,5 +281,56 @@ describe("self-heal box slot", () => {
         now: at(1),
       }),
     ).toEqual({ acquired: true });
+  });
+});
+
+describe("admission deferral events", () => {
+  it("counts a repo's deferrals since a cutoff, fenced to the org and repo", async () => {
+    const slug = nanoid(8).toLowerCase();
+    const org = (await createOrganization({ db, name: "d", slug: `d-${slug}` }))
+      .id;
+    const other = (
+      await createOrganization({ db, name: "e", slug: `e-${slug}` })
+    ).id;
+    const repo = `Acme/Deferred-${slug}`;
+    const since = at(0);
+    await recordAdmissionDeferral({
+      db,
+      organizationId: org,
+      repoFullName: repo,
+      reason: "review_in_flight",
+      now: at(-1),
+    });
+    for (const reason of ["review_in_flight", "slot_held"] as const) {
+      await recordAdmissionDeferral({
+        db,
+        organizationId: org,
+        repoFullName: repo,
+        reason,
+        now: at(1),
+      });
+    }
+    await recordAdmissionDeferral({
+      db,
+      organizationId: other,
+      repoFullName: repo,
+      reason: "slot_held",
+      now: at(1),
+    });
+    await recordAdmissionDeferral({
+      db,
+      organizationId: org,
+      repoFullName: `${repo}-x`,
+      reason: "slot_held",
+      now: at(1),
+    });
+    expect(
+      await countAdmissionDeferrals({
+        db,
+        organizationId: org,
+        repoFullName: repo.toLowerCase(),
+        since,
+      }),
+    ).toBe(2);
   });
 });

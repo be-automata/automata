@@ -1,8 +1,25 @@
-import { and, eq, gt, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
+import {
+  and,
+  count,
+  eq,
+  gt,
+  gte,
+  isNotNull,
+  isNull,
+  lt,
+  or,
+  sql,
+} from "drizzle-orm";
 
 import type { DB } from "../db";
-import { selfHealSlot, thread, threadChat } from "../db/schema";
+import {
+  selfHealBreakerEvent,
+  selfHealSlot,
+  thread,
+  threadChat,
+} from "../db/schema";
 import type { ThreadStatus } from "../db/types";
+import { normalizeRepo } from "./repo-review-settings";
 import { withSelfHealTx } from "./self-heal-tx";
 
 /**
@@ -214,3 +231,61 @@ export async function getSelfHealSlot({ db }: { db: DB }) {
 export type SelfHealSlotRow = NonNullable<
   Awaited<ReturnType<typeof getSelfHealSlot>>
 >;
+
+/**
+ * Admission deferrals are kept as rows of self_heal_breaker_event under their
+ * own scope kind, so the admin metrics can count them per repo (R5) without
+ * a schema change. No breaker reads this scope kind, and the 30-day event
+ * retention (pruneSelfHealRows) bounds the rows to the metrics window.
+ */
+export const ADMISSION_EVENT_SCOPE_KIND = "admission";
+
+export type AdmissionDeferralReason = "review_in_flight" | "slot_held";
+
+export async function recordAdmissionDeferral({
+  db,
+  organizationId,
+  repoFullName,
+  reason,
+  now,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  reason: AdmissionDeferralReason;
+  now?: Date;
+}): Promise<void> {
+  await db.insert(selfHealBreakerEvent).values({
+    organizationId,
+    scopeKind: ADMISSION_EVENT_SCOPE_KIND,
+    scopeKey: normalizeRepo(repoFullName),
+    outcome: "ignored",
+    signal: reason,
+    ...(now ? { createdAt: now } : {}),
+  });
+}
+
+export async function countAdmissionDeferrals({
+  db,
+  organizationId,
+  repoFullName,
+  since,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  since: Date;
+}): Promise<number> {
+  const [row] = await db
+    .select({ n: count() })
+    .from(selfHealBreakerEvent)
+    .where(
+      and(
+        eq(selfHealBreakerEvent.organizationId, organizationId),
+        eq(selfHealBreakerEvent.scopeKind, ADMISSION_EVENT_SCOPE_KIND),
+        eq(selfHealBreakerEvent.scopeKey, normalizeRepo(repoFullName)),
+        gte(selfHealBreakerEvent.createdAt, since),
+      ),
+    );
+  return row?.n ?? 0;
+}

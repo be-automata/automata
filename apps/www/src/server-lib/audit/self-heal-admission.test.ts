@@ -4,7 +4,10 @@ import { nanoid } from "nanoid";
 
 import { db } from "@/lib/db";
 import { hatchetRun, selfHealSlot, thread } from "@terragon/shared/db/schema";
-import { getSelfHealSlot } from "@terragon/shared/model/self-heal-slot";
+import {
+  countAdmissionDeferrals,
+  getSelfHealSlot,
+} from "@terragon/shared/model/self-heal-slot";
 import {
   createTestAutomation,
   createTestOrg,
@@ -144,6 +147,55 @@ describe("self-heal admission (RES-11)", () => {
     expect(lines).toEqual([
       `[self-heal] v=1 org=${orgId} repo=acme/widgets run=- fp=- decision=dispatch reason=admission_deferred:review_in_flight mode=on`,
     ]);
+  });
+
+  it("records each deferral of a repo-scoped run for the admin metrics", async () => {
+    await reviewRun({ ageMin: 10 });
+    const since = new Date(now.getTime() - MIN);
+    await admitSelfHealRun({
+      db,
+      organizationId: orgId,
+      holderKind: "fix",
+      now,
+      context: { repoFullName: "Acme/Widgets" },
+      log,
+    });
+    await admitSelfHealRun({
+      db,
+      organizationId: orgId,
+      holderKind: "audit",
+      now,
+      log,
+    });
+    expect(
+      await countAdmissionDeferrals({
+        db,
+        organizationId: orgId,
+        repoFullName: "acme/widgets",
+        since,
+      }),
+    ).toBe(1);
+  });
+
+  it("a failed deferral record is logged and the run is still deferred", async () => {
+    await reviewRun({ ageMin: 10 });
+    const errors: unknown[] = [];
+    const r = await admitSelfHealRun({
+      db,
+      organizationId: orgId,
+      holderKind: "fix",
+      now,
+      context: { repoFullName: "acme/widgets" },
+      log,
+      error: (...args: unknown[]) => {
+        errors.push(args);
+      },
+      recordDeferral: async () => {
+        throw new Error("db down");
+      },
+    });
+    expect(r).toEqual({ admitted: false, reason: "review_in_flight" });
+    expect(errors).toHaveLength(1);
   });
 
   it("defers for a queued PR-review thread that has no hatchet_run row yet", async () => {

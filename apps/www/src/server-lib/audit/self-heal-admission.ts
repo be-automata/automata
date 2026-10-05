@@ -9,6 +9,7 @@ import {
 import type { ThreadStatus } from "@terragon/shared/db/types";
 import {
   acquireSelfHealSlot,
+  recordAdmissionDeferral,
   SELF_HEAL_SLOT_TERMINAL_STATUSES,
   type SelfHealSlotKind,
 } from "@terragon/shared/model/self-heal-slot";
@@ -121,7 +122,9 @@ export function formatAdmissionDeferredLine({
 
 /**
  * Admit one self-heal run: the review check first, then the slot CAS. Throws
- * on a database error — callers fail closed (treat it as deferred).
+ * on a database error — callers fail closed (treat it as deferred). A deferral
+ * of a run with a known repo is also recorded for the admin metrics (R5);
+ * that record is best effort and never changes the result.
  */
 export async function admitSelfHealRun({
   db,
@@ -130,6 +133,8 @@ export async function admitSelfHealRun({
   now = new Date(),
   context,
   log = console.log,
+  error = console.error,
+  recordDeferral = recordAdmissionDeferral,
 }: {
   db: DB;
   organizationId: string;
@@ -137,9 +142,30 @@ export async function admitSelfHealRun({
   now?: Date;
   context?: AdmissionLogContext;
   log?: (line: string) => void;
+  error?: (message: string, fields: Record<string, unknown>) => void;
+  recordDeferral?: typeof recordAdmissionDeferral;
 }): Promise<AdmissionResult> {
-  const defer = (reason: AdmissionDeferReason): AdmissionResult => {
+  const defer = async (
+    reason: AdmissionDeferReason,
+  ): Promise<AdmissionResult> => {
     log(formatAdmissionDeferredLine({ organizationId, reason, context }));
+    const repoFullName = context?.repoFullName;
+    if (repoFullName) {
+      try {
+        await recordDeferral({
+          db,
+          organizationId,
+          repoFullName,
+          reason,
+          now,
+        });
+      } catch (e) {
+        error("[self-heal] admission deferral record failed", {
+          reason,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
     return { admitted: false, reason };
   };
   if (await hasReviewInFlight({ db, now })) return defer("review_in_flight");
