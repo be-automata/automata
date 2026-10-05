@@ -37,7 +37,7 @@ import { FIX_BRANCH_PREFIX } from "@terragon/shared/self-heal/fix-paths";
 import { markFindingFixReady } from "@/server-lib/audit/mark-fix-ready";
 import { logSelfHealDecision } from "@/server-lib/audit/decision-log";
 import { resolveBotLogin } from "@/server-lib/review/bot-login";
-import { AUDIT_FIX_SKILL_NAME } from "@/server-lib/review/review-skill";
+import { isAuditFixAction } from "@/server-lib/review/review-skill";
 import { getPostHogServer } from "@/lib/posthog-server";
 // publicAppUrl is used within utils via postBillingLinkComment
 export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
@@ -601,14 +601,6 @@ function issueLabelNames(event: IssueEvent): string[] {
   return (event.issue.labels ?? []).map((label) => label?.name ?? "");
 }
 
-function isAuditFixAutomation(automation: Automation): boolean {
-  const action = automation.action;
-  return (
-    action?.type === "skill_message" &&
-    action.config.skillName.trim().toLowerCase() === AUDIT_FIX_SKILL_NAME
-  );
-}
-
 async function markSelfHealFindingReady(
   event: IssueEvent,
   automation: Automation,
@@ -711,7 +703,7 @@ async function handleIssueAutomation(
   // Self-heal fix loop (BULK-01, WH-01): only mark the ledger finding ready;
   // the dispatcher starts runs. Runs before any author API check so this path
   // makes zero GitHub calls inside the webhook budget.
-  if (isAuditFixAutomation(automation)) {
+  if (isAuditFixAction(automation.action)) {
     await markSelfHealFindingReady(event, automation);
     return;
   }

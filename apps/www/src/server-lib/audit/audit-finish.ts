@@ -19,7 +19,7 @@ import { redactSecrets } from "@terragon/utils/redact";
 import { getPostHogServer } from "@/lib/posthog-server";
 
 import { resolveBotLogin } from "../review/bot-login";
-import { AUDIT_FINDINGS_SKILL_NAME } from "../review/review-skill";
+import { isAuditFindingsStamp } from "../review/review-skill";
 import { createDbAuditLedger } from "./audit-ledger";
 import type { CheckOutcome } from "./decide-audit-actions";
 import {
@@ -76,12 +76,7 @@ export function getAuditFindingsStamp(
     | undefined,
 ): AuditFindingsStamp | null {
   const metadata = thread?.sourceMetadata;
-  if (
-    metadata?.type !== "automation-skill" ||
-    metadata.skillName !== AUDIT_FINDINGS_SKILL_NAME
-  ) {
-    return null;
-  }
+  if (!isAuditFindingsStamp(metadata)) return null;
   if (isAbandonedTerminalCause(thread?.terminalCause ?? null)) return null;
   return metadata;
 }

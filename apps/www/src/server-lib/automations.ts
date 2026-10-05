@@ -51,7 +51,7 @@ import {
 import { buildRepoOverrideFetcher } from "./review/repo-skill-override";
 import { resolveReviewPromptMode } from "./review/resolve-review-prompt-mode";
 import {
-  AUDIT_FIX_SKILL_NAME,
+  isAuditFixAction,
   CLASSIC_REVIEW_PROMPT,
   hasReviewModeSections,
   type ReviewPromptMode,
@@ -394,12 +394,7 @@ function assertSelfHealFixAutomationIsLabeledOnly({
   triggerConfig: Automation["triggerConfig"] | undefined;
   action: AutomationAction | undefined;
 }): void {
-  if (
-    action?.type !== "skill_message" ||
-    action.config.skillName.trim().toLowerCase() !== AUDIT_FIX_SKILL_NAME
-  ) {
-    return;
-  }
+  if (!isAuditFixAction(action)) return;
   const error = new UserFacingError(
     `Self-heal fix automations must trigger only on the ${SELF_HEAL_FIX_LABEL} label`,
   );

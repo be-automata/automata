@@ -46,7 +46,7 @@ import {
 } from "@terragon/shared/model/threads";
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
 import type { SelfHealRunInput } from "@/server-lib/audit/plan-self-heal-run";
-import { AUDIT_FIX_SKILL_NAME } from "@/server-lib/review/review-skill";
+import { isAuditFixStamp } from "@/server-lib/review/review-skill";
 import { recordBreakerEvent } from "@terragon/shared/model/self-heal-breaker";
 import {
   triggerAgentRun,
@@ -855,9 +855,7 @@ export async function dispatchAgentRun({
     // below (token revoked, thread failed), so a fix agent without a gate
     // token and a fenced branch never starts. Only one planner matches a stamp.
     const sourceMetadata = thread?.sourceMetadata;
-    const fixStamped =
-      sourceMetadata?.type === "automation-skill" &&
-      sourceMetadata.skillName === AUDIT_FIX_SKILL_NAME;
+    const fixStamped = isAuditFixStamp(sourceMetadata);
     let selfHealPlan: { selfHeal?: SelfHealRunInput } | undefined;
     if (fixStamped) {
       if (plan !== null || orgSettings === undefined) {

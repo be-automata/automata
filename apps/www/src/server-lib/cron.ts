@@ -9,7 +9,10 @@ import {
 import { getScheduledAutomationsDueToRun } from "@terragon/shared/model/automations";
 import { maybeHibernateSandboxById } from "@/agent/sandbox";
 import { maybeStartQueuedThreadChat } from "@/server-lib/process-queued-thread";
-import { AUDIT_FINDINGS_SKILL_NAME } from "@/server-lib/review/review-skill";
+import {
+  AUDIT_FINDINGS_SKILL_NAME,
+  skillNameIs,
+} from "@/server-lib/review/review-skill";
 
 // NOTE: runScheduledThread and runAutomation are imported dynamically inside the
 // runner bodies below (not at module top). This cron module is eagerly loaded by the
@@ -218,7 +221,7 @@ type RunAutomationFn =
 function isAuditFindingsAutomation(automation: DueAutomation): boolean {
   return (
     automation.action.type === "skill_message" &&
-    automation.action.config.skillName === AUDIT_FINDINGS_SKILL_NAME
+    skillNameIs(automation.action.config.skillName, AUDIT_FINDINGS_SKILL_NAME)
   );
 }
 

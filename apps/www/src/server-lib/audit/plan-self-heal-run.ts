@@ -22,10 +22,7 @@ import {
 } from "@terragon/shared/self-heal/audit-rules";
 import { denyExceptionsFor } from "@terragon/shared/self-heal/fix-paths";
 
-import {
-  AUDIT_FINDINGS_SKILL_NAME,
-  AUDIT_FIX_SKILL_NAME,
-} from "../review/review-skill";
+import { isAuditFindingsStamp, isAuditFixStamp } from "../review/review-skill";
 import { fixBranchName } from "./fix-run-prompt";
 import {
   loadSelfHealContext,
@@ -125,12 +122,7 @@ export async function planSelfHealAuditRun({
   sourceMetadata,
   now = new Date(),
 }: PlanSelfHealAuditRunInput): Promise<{ selfHeal?: SelfHealAuditRunInput }> {
-  if (
-    sourceMetadata?.type !== "automation-skill" ||
-    sourceMetadata.skillName !== AUDIT_FINDINGS_SKILL_NAME
-  ) {
-    return {};
-  }
+  if (!isAuditFindingsStamp(sourceMetadata)) return {};
   try {
     const ctx = await loadSelfHealContext({
       db,
@@ -195,16 +187,6 @@ export async function planSelfHealAuditRun({
   }
 }
 
-/** True for a thread stamped by the fix lane (the only stamp planSelfHealFixRun plans). */
-export function isAuditFixStamp(
-  sourceMetadata: ThreadSourceMetadata | null | undefined,
-): boolean {
-  return (
-    sourceMetadata?.type === "automation-skill" &&
-    sourceMetadata.skillName === AUDIT_FIX_SKILL_NAME
-  );
-}
-
 export type SelfHealFixAbort = "killed" | "planning_failed" | "no_attempt";
 
 export type PlanSelfHealFixResult =
@@ -250,12 +232,7 @@ export async function planSelfHealFixRun({
   baseBranch,
   now = new Date(),
 }: PlanSelfHealFixRunInput): Promise<PlanSelfHealFixResult> {
-  if (
-    sourceMetadata?.type !== "automation-skill" ||
-    sourceMetadata.skillName !== AUDIT_FIX_SKILL_NAME
-  ) {
-    return {};
-  }
+  if (!isAuditFixStamp(sourceMetadata)) return {};
   const attemptId = sourceMetadata.selfHealAttemptId;
   const refuse = (
     abort: SelfHealFixAbort,

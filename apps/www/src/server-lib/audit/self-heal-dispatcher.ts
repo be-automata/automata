@@ -32,7 +32,7 @@ import {
 import { getPostHogServer } from "@/lib/posthog-server";
 
 import { resolveBotLogin } from "../review/bot-login";
-import { AUDIT_FIX_SKILL_NAME } from "../review/review-skill";
+import { isAuditFixAction } from "../review/review-skill";
 import {
   logSelfHealDecision,
   type SelfHealDecision,
@@ -244,11 +244,9 @@ export function defaultSelfHealDispatcherDeps(): SelfHealDispatcherDeps {
 
 /** The repo's enabled audit-fix issue automation (newest first). */
 export function isAuditFixAutomation(automation: Automation): boolean {
-  const action = automation.action;
+  // Only an issue-triggered automation is the dispatcher's fix lane.
   return (
-    automation.triggerType === "issue" &&
-    action?.type === "skill_message" &&
-    action.config.skillName.trim().toLowerCase() === AUDIT_FIX_SKILL_NAME
+    automation.triggerType === "issue" && isAuditFixAction(automation.action)
   );
 }
 

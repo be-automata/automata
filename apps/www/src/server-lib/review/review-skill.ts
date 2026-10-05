@@ -16,8 +16,11 @@
  * Dependency-free on purpose (node builtins only) so `deploy/*.ts` scripts can
  * import it under tsx without dragging in Next/alias resolution. The one
  * exception is the audit rule vocabulary, imported by relative path from a
- * module that itself imports nothing.
+ * module that itself imports nothing (type-only imports are erased).
  */
+import type { AutomationAction } from "@terragon/shared/automations";
+import type { ThreadSourceMetadata } from "@terragon/shared/db/types";
+
 import { AUDIT_RULES } from "../../../../../packages/shared/src/self-heal/audit-rules";
 
 /**
@@ -310,6 +313,52 @@ export const AUDIT_FINDINGS_SKILL_NAME = "audit-findings";
  * branch and emits nothing; the platform opens the draft PR.
  */
 export const AUDIT_FIX_SKILL_NAME = "audit-fix";
+
+/** Skill names compare trimmed and case-insensitively, as automations are validated. */
+export function skillNameIs(skillName: string, expected: string): boolean {
+  return skillName.trim().toLowerCase() === expected;
+}
+
+/** A skill_message action that runs the audit-fix skill (any trigger). */
+export function isAuditFixAction(
+  action: AutomationAction | null | undefined,
+): boolean {
+  return (
+    action?.type === "skill_message" &&
+    skillNameIs(action.config.skillName, AUDIT_FIX_SKILL_NAME)
+  );
+}
+
+/** The automation-skill stamp a thread carries. */
+export type AutomationSkillStamp = Extract<
+  ThreadSourceMetadata,
+  { type: "automation-skill" }
+>;
+
+/** A thread stamped by the automation-skill lane for `expected`. */
+function isSkillStamp(
+  sourceMetadata: ThreadSourceMetadata | null | undefined,
+  expected: string,
+): sourceMetadata is AutomationSkillStamp {
+  return (
+    sourceMetadata?.type === "automation-skill" &&
+    skillNameIs(sourceMetadata.skillName, expected)
+  );
+}
+
+/** True for a thread stamped by the fix lane. */
+export function isAuditFixStamp(
+  sourceMetadata: ThreadSourceMetadata | null | undefined,
+): sourceMetadata is AutomationSkillStamp {
+  return isSkillStamp(sourceMetadata, AUDIT_FIX_SKILL_NAME);
+}
+
+/** True for a thread stamped by the audit lane. */
+export function isAuditFindingsStamp(
+  sourceMetadata: ThreadSourceMetadata | null | undefined,
+): sourceMetadata is AutomationSkillStamp {
+  return isSkillStamp(sourceMetadata, AUDIT_FINDINGS_SKILL_NAME);
+}
 
 /** Skills whose threads reach the self-heal writer at finish (Drain and the stamp checks cover both). */
 export const SELF_HEAL_SKILL_NAMES = [
