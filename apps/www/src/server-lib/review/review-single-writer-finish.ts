@@ -21,7 +21,7 @@ import {
   executeReviewFromIntent,
   type ReviewFromIntentOutcome,
 } from "./execute-review-from-intent";
-import { resolveBotLogin } from "./bot-login";
+import { isPrAuthoredByBot, resolveBotLogin } from "./bot-login";
 import { findLastLeadAgentText } from "./lead-text";
 import { hasTaggedReviewIntentOpener } from "./parse-review-intent";
 import { resolveApproveFloor } from "./resolve-approve-floor";
@@ -395,11 +395,12 @@ export async function handleReviewEffectAtFinish({
         repo: repoFullName.split("/")[1]!,
       });
       const github = createOctokitReviewClient(octokit);
-      const { headSha: currentHeadSha, isDraft } = await getPrHeadState(
-        octokit,
-        repoFullName,
-        prNumber,
-      );
+      const {
+        headSha: currentHeadSha,
+        isDraft,
+        authorLogin,
+      } = await getPrHeadState(octokit, repoFullName, prNumber);
+      const botLogin = resolveBotLogin();
       // One selector for hook and sweep (phase 6): orchestrated-prompt threads
       // read the lead's tagged verdict even when a background sub-agent
       // resumed the lead afterwards (Phase 2 Q2/Q7; 05-03 drops sub-agents).
@@ -421,12 +422,15 @@ export async function handleReviewEffectAtFinish({
         github,
         repoFullName,
         prNumber,
-        botLogin: resolveBotLogin(),
+        botLogin,
         currentHeadSha,
         terminalText,
         preferTaggedIntent,
         approveFloorPolicy,
         isDraft,
+        // A self-heal fix PR is opened by this same App, and GitHub refuses a
+        // formal verdict from a PR's author: post it as a COMMENT instead.
+        prAuthoredByBot: isPrAuthoredByBot(authorLogin, botLogin),
         // Same two degraded-path gates as the sweep: a run that produced no
         // parseable intent must not stamp a warning onto a head it was never
         // dispatched against, nor speak at all if it was abandoned before it

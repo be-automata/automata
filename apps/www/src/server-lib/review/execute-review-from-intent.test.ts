@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { executeReviewFromIntent } from "./execute-review-from-intent";
+import {
+  botAuthoredVerdictLine,
+  executeReviewFromIntent,
+  isDegradedComment,
+} from "./execute-review-from-intent";
 import type { GitHubReview } from "@terragon/review/state/review-github-client";
 import { reviewNoticeSha, type ReviewWriterClient } from "./review-notice";
 import { makeNoticeFake } from "./review-notice.fake";
@@ -592,5 +596,224 @@ describe("executeReviewFromIntent — preferTaggedIntent passthrough (phase 6)",
     expect(github.submitReview).toHaveBeenCalledTimes(1);
     expect(github.submitReview.mock.calls[0]![2]).toBe("APPROVE");
     expect(github.submitReview.mock.calls[0]![3]).not.toContain(LEAD_SUMMARY);
+  });
+});
+
+describe("executeReviewFromIntent — a PR the bot opened itself (self-heal fix PR)", () => {
+  // Live on PR #266: the review run reached `approve` at the head, and nothing
+  // reached GitHub — GitHub answers a formal APPROVE / REQUEST_CHANGES from the
+  // PR's own author with a 422, and the self-heal fix PR's author IS the App.
+  const APPROVE_WITH_NIT = fenced({
+    verdict: "approve",
+    commit: HEAD,
+    summary: "Fix is correct.",
+    findings: [{ severity: "info", path: "a.ts", line: 3, body: "a nit" }],
+  });
+
+  it("approve → a COMMENT at HEAD led by the verdict line; findings folded exactly as before", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: APPROVE_WITH_NIT,
+      prAuthoredByBot: true,
+    });
+    expect(res).toEqual({
+      outcome: "posted",
+      verdict: "approve",
+      postedAsComment: true,
+    });
+    expect(github.submitReview).not.toHaveBeenCalled();
+    expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
+    const [, , sha, event, body, comments] =
+      github.submitReviewWithComments.mock.calls[0]!;
+    expect(sha).toBe(HEAD);
+    expect(event).toBe("COMMENT");
+    expect(comments).toEqual([]);
+    expect(body.startsWith(`${botAuthoredVerdictLine("approve")}\n\n`)).toBe(
+      true,
+    );
+    expect(body).toContain("Fix is correct.");
+    expect(body).toContain("**[info]** `a.ts:3` — a nit");
+  });
+
+  it("the verdict line names the verdict and why it is a comment", () => {
+    expect(botAuthoredVerdictLine("approve")).toBe(
+      "**Verdict: approve** (posted as a comment: GitHub does not let an app approve or request changes on a pull request it opened)",
+    );
+  });
+
+  it("inline findings are still posted as inline threads, not folded", async () => {
+    const github = makeGithub([]);
+    await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: APPROVE_WITH_NIT,
+      prAuthoredByBot: true,
+      postInlineComments: true,
+    });
+    const body = github.submitReviewWithComments.mock.calls[0]![4];
+    expect(body).not.toContain("**Findings");
+    expect(github.postInlineComment).toHaveBeenCalledTimes(1);
+    expect(github.postInlineComment.mock.calls[0]!.slice(2)).toEqual([
+      "a.ts",
+      3,
+      "a nit",
+      HEAD,
+    ]);
+  });
+
+  it("request_changes → a COMMENT stating request_changes", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: RC_AT_HEAD,
+      prAuthoredByBot: true,
+    });
+    expect(res).toMatchObject({
+      outcome: "posted",
+      verdict: "request_changes",
+      postedAsComment: true,
+    });
+    expect(github.submitReview).not.toHaveBeenCalled();
+    const [, , , event, body] = github.submitReviewWithComments.mock.calls[0]!;
+    expect(event).toBe("COMMENT");
+    expect(body.startsWith(botAuthoredVerdictLine("request_changes"))).toBe(
+      true,
+    );
+    expect(body).toContain("**[error]** `a.ts:3` — use >=");
+  });
+
+  it("the floor runs first: the stated verdict is the effective one", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: fenced({
+        verdict: "approve",
+        commit: HEAD,
+        summary: "Looks fine.",
+        findings: [{ severity: "error", path: "a.ts", line: 3, body: "bug" }],
+      }),
+      prAuthoredByBot: true,
+    });
+    expect(res).toMatchObject({ verdict: "request_changes" });
+    const body = github.submitReviewWithComments.mock.calls[0]![4];
+    expect(body.startsWith(botAuthoredVerdictLine("request_changes"))).toBe(
+      true,
+    );
+  });
+
+  it.each([false, undefined])(
+    "a PR the bot did NOT open is unchanged: a formal APPROVE (prAuthoredByBot=%s)",
+    async (prAuthoredByBot) => {
+      const github = makeGithub([]);
+      const res = await executeReviewFromIntent({
+        github,
+        repoFullName: REPO,
+        prNumber: PR,
+        botLogin: BOT,
+        currentHeadSha: HEAD,
+        terminalText: APPROVE_WITH_NIT,
+        prAuthoredByBot,
+      });
+      expect(res).toEqual({ outcome: "posted", verdict: "approve" });
+      expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+      expect(github.submitReview).toHaveBeenCalledTimes(1);
+      const [, , event, body] = github.submitReview.mock.calls[0]!;
+      expect(event).toBe("APPROVE");
+      expect(body).not.toContain("**Verdict:");
+    },
+  );
+
+  it("a draft's own `comment` verdict carries no verdict line", async () => {
+    const github = makeGithub([]);
+    await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: fenced({
+        verdict: "comment",
+        commit: HEAD,
+        summary: "Draft looks on track.",
+      }),
+      prAuthoredByBot: true,
+      isDraft: true,
+    });
+    const body = github.submitReviewWithComments.mock.calls[0]![4];
+    expect(body).not.toContain("**Verdict:");
+  });
+
+  it("a redelivery finds its own COMMENT verdict at HEAD and posts nothing", async () => {
+    const delivered: GitHubReview = {
+      id: 9,
+      user: { login: BOT },
+      state: "COMMENTED",
+      submittedAt: "2026-10-05T00:00:00Z",
+      dismissedAt: null,
+      commitId: HEAD,
+      body: `${botAuthoredVerdictLine("approve")}\n\nFix is correct.`,
+    };
+    // A verdict, not silence: every guard filters degraded comments first.
+    expect(isDegradedComment(delivered)).toBe(false);
+    const github = makeGithub([delivered]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: APPROVE_WITH_NIT,
+      prAuthoredByBot: true,
+    });
+    expect(res.outcome).toBe("skipped_existing");
+    expect(github.submitReview).not.toHaveBeenCalled();
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+  });
+
+  it("a stale replay at the commit of its COMMENT verdict is dropped", async () => {
+    const delivered: GitHubReview = {
+      id: 9,
+      user: { login: BOT },
+      state: "COMMENTED",
+      submittedAt: "2026-10-05T00:00:00Z",
+      dismissedAt: null,
+      commitId: OLD,
+      body: `${botAuthoredVerdictLine("approve")}\n\nFix is correct.`,
+    };
+    const github = makeGithub([delivered]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: fenced({
+        verdict: "approve",
+        commit: OLD,
+        summary: "Fix is correct.",
+      }),
+      prAuthoredByBot: true,
+    });
+    expect(res).toEqual({
+      outcome: "skipped_duplicate_at_commit",
+      commit: OLD,
+    });
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
   });
 });

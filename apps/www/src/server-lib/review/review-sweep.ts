@@ -22,6 +22,7 @@ import {
   isReviewThread,
   selectReviewTerminalText,
 } from "./review-single-writer-finish";
+import { isPrAuthoredByBot } from "./bot-login";
 
 /**
  * GAP-1 backstop (ADR-036): the finish-hook single-writer only fires if the thread
@@ -120,11 +121,12 @@ export async function runReviewSweep(): Promise<void> {
         repo: c.repoFullName.split("/")[1]!,
       });
       const github = createOctokitReviewClient(octokit);
-      const { headSha: currentHeadSha, isDraft } = await getPrHeadState(
-        octokit,
-        c.repoFullName,
-        c.prNumber,
-      );
+      const {
+        headSha: currentHeadSha,
+        isDraft,
+        authorLogin,
+      } = await getPrHeadState(octokit, c.repoFullName, c.prNumber);
+      const botLogin = resolveBotLogin();
 
       // Already has a bot VERDICT at HEAD → the finish-hook handled it; skip.
       //
@@ -169,7 +171,7 @@ export async function runReviewSweep(): Promise<void> {
         repo: c.repoFullName,
         prNumber: c.prNumber,
         headSha: currentHeadSha,
-        botLogin: resolveBotLogin(),
+        botLogin,
       });
       if (existing) continue;
 
@@ -190,13 +192,17 @@ export async function runReviewSweep(): Promise<void> {
         github,
         repoFullName: c.repoFullName,
         prNumber: c.prNumber,
-        botLogin: resolveBotLogin(),
+        botLogin,
         currentHeadSha,
         terminalText,
         preferTaggedIntent,
         // The same draft state the finish hook passes: it caps the floor at
         // `comment` and decides whether a bare `comment` is a verdict at all.
         isDraft,
+        // The same author check the finish hook makes: on a PR the bot opened
+        // a formal verdict 422s, so without it this backstop would fail the
+        // same post again every hour for the whole lookback window.
+        prAuthoredByBot: isPrAuthoredByBot(authorLogin, botLogin),
         // Both flags gate the NO-VERDICT notice ONLY — never a verdict. An
         // abandoned run (#125 C4 typed terminal) is deliberately still swept
         // rather than skipped outright: supersession marks a thread terminal
