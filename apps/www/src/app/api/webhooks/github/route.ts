@@ -46,6 +46,7 @@ import {
   handleCheckSuiteEvent,
   handlePullRequestUpdated,
   handleIssueEvent,
+  handleSelfHealIssueReopened,
   handleSelfHealIssueUnready,
   handlePullRequestMirror,
   handlePullRequestReviewMirror,
@@ -151,6 +152,12 @@ export async function POST(request: NextRequest) {
   // finding's readiness. DB-only, never throws.
   webhooks.on(["issues.closed", "issues.unlabeled"], async ({ payload }) => {
     await handleSelfHealIssueUnready(payload);
+  });
+  // A reopened issue (the audit reopens a regressed finding; its trigger
+  // label is still on it, so no issues.labeled fires) restores the finding's
+  // readiness. Audit-fix automations only; DB-only, never throws.
+  webhooks.on("issues.reopened", async ({ payload }) => {
+    await handleSelfHealIssueReopened(payload);
   });
   webhooks.onAny(({ name, payload }) => {
     const payloadInfo: string[] = [];

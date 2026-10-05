@@ -9,6 +9,7 @@ import { handleAppMention } from "./handle-app-mention";
 import { WebhookSkip } from "./webhook-skip";
 import {
   handleIssueEvent,
+  handleSelfHealIssueReopened,
   handleSelfHealIssueUnready,
   handleIssueLabeledMirror,
   handlePullRequestMirror,
@@ -42,6 +43,7 @@ vi.mock("./handlers", async (importOriginal) => {
     ...actual,
     handleIssueEvent: vi.fn(actual.handleIssueEvent),
     handleSelfHealIssueUnready: vi.fn(actual.handleSelfHealIssueUnready),
+    handleSelfHealIssueReopened: vi.fn(actual.handleSelfHealIssueReopened),
     handleIssueLabeledMirror: vi.fn(actual.handleIssueLabeledMirror),
     handleWorkflowRunEvent: vi.fn(actual.handleWorkflowRunEvent),
     handlePullRequestStatusChange: vi.fn(actual.handlePullRequestStatusChange),
@@ -1441,6 +1443,19 @@ describe("GitHub webhook route", () => {
         expect(handleIssueLabeledMirror).not.toHaveBeenCalled();
       },
     );
+
+    it("issues.reopened reaches only the self-heal reopened handler", async () => {
+      vi.mocked(handleSelfHealIssueReopened).mockResolvedValue();
+      const request = await createMockRequest(createIssueBody("reopened"), {
+        "x-github-event": "issues",
+      });
+      const response = await POST(request);
+      expect(response.status).toBe(200);
+      expect(handleSelfHealIssueReopened).toHaveBeenCalledTimes(1);
+      expect(handleSelfHealIssueUnready).not.toHaveBeenCalled();
+      expect(handleIssueEvent).not.toHaveBeenCalled();
+      expect(handleIssueLabeledMirror).not.toHaveBeenCalled();
+    });
 
     it("issues.opened reaches only the issue automations", async () => {
       const request = await createMockRequest(createIssueBody("opened"), {

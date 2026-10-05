@@ -12,8 +12,10 @@ import type { Automation } from "@terragon/shared/db/types";
 
 import {
   handleIssueEvent,
+  handleSelfHealIssueReopened,
   handleSelfHealIssueUnready,
   type IssueEvent,
+  type IssueReopenedEvent,
   type IssueUnreadyEvent,
 } from "./handlers";
 
@@ -410,5 +412,144 @@ describe("handleSelfHealIssueUnready (R7)", () => {
     await expect(
       handleSelfHealIssueUnready(unready("closed")),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("handleSelfHealIssueReopened (a regressed finding re-armed)", () => {
+  let logs: string[];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    logs = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  function reopened({
+    labels = ["automata:finding", "automata:auto-fix"],
+    author = BOT,
+  }: { labels?: string[]; author?: string } = {}): IssueReopenedEvent {
+    return {
+      action: "reopened",
+      issue: {
+        number: 42,
+        user: { login: author },
+        labels: labels.map((name) => ({ name })),
+      },
+      repository: { full_name: REPO, owner: { login: "owner" } },
+    } as unknown as IssueReopenedEvent;
+  }
+
+  it("a reopened bot issue that still carries the trigger label re-marks the finding ready, with zero GitHub calls", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([
+      auditFixAutomation(),
+    ]);
+    await handleSelfHealIssueReopened(
+      reopened({ labels: ["automata:finding", "Automata:Auto-Fix"] }),
+    );
+    expect(markFindingFixReady).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(markFindingFixReady).mock.calls[0]![0]).toMatchObject({
+      organizationId: "org-1",
+      repoFullName: REPO,
+      issueNumber: 42,
+      issueAuthorLogin: BOT,
+      botLogin: BOT,
+    });
+    expect(runIssueAutomation).not.toHaveBeenCalled();
+    expectNoOctokit();
+    expect(
+      logs.some(
+        (l) =>
+          l.startsWith("[self-heal] v=1 org=org-1 repo=owner/repo") &&
+          l.includes("decision=claim reason=reopened_marked"),
+      ),
+    ).toBe(true);
+  });
+
+  it("marks once per org when two audit-fix automations share it", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([
+      auditFixAutomation(),
+      { ...auditFixAutomation(), id: "auto-2" } as Automation,
+    ]);
+    await handleSelfHealIssueReopened(reopened());
+    expect(markFindingFixReady).toHaveBeenCalledTimes(1);
+  });
+
+  it("a reopened issue without the trigger label changes nothing", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([
+      auditFixAutomation(),
+    ]);
+    await handleSelfHealIssueReopened(
+      reopened({ labels: ["automata:finding"] }),
+    );
+    expect(markFindingFixReady).not.toHaveBeenCalled();
+    expect(runIssueAutomation).not.toHaveBeenCalled();
+    expectNoOctokit();
+  });
+
+  it("an exclude label on the issue changes nothing", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([
+      automation({
+        triggerConfig: {
+          filter: {
+            labels: ["automata:auto-fix"],
+            excludeLabels: ["automata:needs-human"],
+          },
+          on: { labeled: true },
+        },
+        action: {
+          type: "skill_message",
+          config: { skillName: "audit-fix" },
+        },
+      } as unknown as Partial<Automation>),
+    ]);
+    await handleSelfHealIssueReopened(
+      reopened({ labels: ["automata:auto-fix", "automata:needs-human"] }),
+    );
+    expect(markFindingFixReady).not.toHaveBeenCalled();
+  });
+
+  it("a human-authored issue goes through the existing author guard and is rejected", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([
+      auditFixAutomation(),
+    ]);
+    vi.mocked(markFindingFixReady).mockResolvedValueOnce({
+      outcome: "author_not_bot",
+      fingerprint: "abcdef0123456789",
+    });
+    await handleSelfHealIssueReopened(reopened({ author: "mallory" }));
+    expect(vi.mocked(markFindingFixReady).mock.calls[0]![0]).toMatchObject({
+      issueAuthorLogin: "mallory",
+      botLogin: BOT,
+    });
+    expect(runIssueAutomation).not.toHaveBeenCalled();
+    expectNoOctokit();
+    expect(logs.some((l) => l.includes("reason=reopened_author_not_bot"))).toBe(
+      true,
+    );
+  });
+
+  it("a non-fix issue automation on.labeled never starts a run on reopen", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([
+      automation({
+        triggerConfig: {
+          filter: { includeAllAuthors: true, labels: ["automata:auto-fix"] },
+          on: { labeled: true, open: true },
+        },
+      }),
+    ]);
+    await handleSelfHealIssueReopened(reopened());
+    expect(markFindingFixReady).not.toHaveBeenCalled();
+    expect(runIssueAutomation).not.toHaveBeenCalled();
+    expectNoOctokit();
+  });
+
+  it("never throws", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockRejectedValue(new Error("db"));
+    await expect(handleSelfHealIssueReopened(reopened())).resolves.toBe(
+      undefined,
+    );
   });
 });

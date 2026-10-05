@@ -53,6 +53,9 @@ export type IssueEvent = EmitterWebhookEvent<
 export type IssueUnreadyEvent = EmitterWebhookEvent<
   "issues.closed" | "issues.unlabeled"
 >["payload"];
+// A reopened issue restores a self-heal finding's readiness (the inverse of R7).
+export type IssueReopenedEvent =
+  EmitterWebhookEvent<"issues.reopened">["payload"];
 export type IssueCommentEvent = EmitterWebhookEvent<"issue_comment">["payload"];
 export type PullRequestReviewCommentEvent =
   EmitterWebhookEvent<"pull_request_review_comment">["payload"];
@@ -606,8 +609,9 @@ function issueLabelNames(event: IssueEvent): string[] {
 }
 
 async function markSelfHealFindingReady(
-  event: IssueEvent,
+  event: IssueEvent | IssueReopenedEvent,
   automation: Automation,
+  reasonPrefix = "",
 ): Promise<void> {
   const repoFullName = event.repository.full_name;
   const issueNumber = event.issue.number;
@@ -644,7 +648,7 @@ async function markSelfHealFindingReady(
         runId: `issue-${issueNumber}`,
         fingerprint: result.fingerprint ?? "-",
         decision: "claim",
-        reason: result.outcome,
+        reason: `${reasonPrefix}${result.outcome}`,
         mode: "on",
       },
     );
@@ -721,6 +725,65 @@ export async function handleSelfHealIssueUnready(
   } catch (error: unknown) {
     console.error(
       "[self-heal] issue unready failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+/**
+ * The inverse of R7 for a reopen. When a merged fix regresses, the audit
+ * reopens the finding (status open) and its issue, which still carries the
+ * trigger label: no issues.labeled fires and R7 already cleared the
+ * readiness on close, so nothing would dispatch the finding again. An
+ * issues.reopened delivery re-marks it ready through the same guarded path
+ * as the label trigger (ledger membership, bot author, status open, script
+ * check), once per org, for every audit-fix automation whose filter labels
+ * are all on the issue and whose exclude labels are not. Only audit-fix
+ * automations are considered: a reopen never starts an agent run.
+ * DB-only (zero GitHub calls); never throws.
+ */
+export async function handleSelfHealIssueReopened(
+  event: IssueReopenedEvent,
+): Promise<void> {
+  const repoFullName = event.repository.full_name;
+  try {
+    const issueLabels = new Set(
+      normalizeLabels(
+        (event.issue.labels ?? []).map((label) => label?.name ?? ""),
+      ),
+    );
+    const automations = (
+      await getIssueAutomationsForRepo({ db, repoFullName })
+    ).filter((automation) => {
+      if (
+        automation.repoFullName !== repoFullName ||
+        !isAuditFixAction(automation.action) ||
+        automation.organizationId === null
+      ) {
+        return false;
+      }
+      const config = automation.triggerConfig as IssueTriggerConfig;
+      if (!config.on.labeled && !config.on.open) return false;
+      const filterLabels = normalizeLabels(config.filter.labels);
+      const excludeLabels = normalizeLabels(config.filter.excludeLabels);
+      return (
+        filterLabels.length > 0 &&
+        filterLabels.every((label) => issueLabels.has(label)) &&
+        !excludeLabels.some((label) => issueLabels.has(label))
+      );
+    });
+    const orgs = new Map<string, Automation>();
+    for (const automation of automations) {
+      if (automation.organizationId && !orgs.has(automation.organizationId)) {
+        orgs.set(automation.organizationId, automation);
+      }
+    }
+    for (const automation of orgs.values()) {
+      await markSelfHealFindingReady(event, automation, "reopened_");
+    }
+  } catch (error: unknown) {
+    console.error(
+      "[self-heal] issue reopen failed:",
       error instanceof Error ? error.message : String(error),
     );
   }
