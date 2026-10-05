@@ -235,10 +235,12 @@ function renderWorkflow(path: string, plan: WorkflowPlan): string {
 function fakeSensitiveContent(path: string): string {
   const name = baseName(path);
   if (name === ".npmrc") {
+    // Scoped to an unresolvable host: an auth line for the public registry
+    // would make every `npm audit` (the worker's dependency check) fail.
     return [
       `# ${BENCH_FAKE_MARKER}`,
-      "registry=https://registry.npmjs.org/",
-      "//registry.npmjs.org/:_authToken=BENCHMARK-FAKE-PLACEHOLDER",
+      "@bench-private:registry=https://npm.bench.invalid/",
+      "//npm.bench.invalid/:_authToken=BENCHMARK-FAKE-PLACEHOLDER",
       "",
     ].join("\n");
   }
