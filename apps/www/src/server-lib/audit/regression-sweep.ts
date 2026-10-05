@@ -53,6 +53,8 @@ import { runBoundedSweep } from "./fix-attempt-session";
 export const FIX_REGRESSION_LIMIT = 10;
 export const FIX_REGRESSION_COMMITS_PAGE = 100;
 export const FIX_REGRESSION_GET_COMMIT_CAP = 20;
+/** Past the window end, a failed read keeps the window open this long (R3). */
+export const FIX_REGRESSION_READ_GRACE_MS = 3 * 24 * 60 * 60_000;
 /** getCommit reads in flight at once (each still through withSelfHealCall). */
 const FOLLOWUP_READ_CONCURRENCY = 3;
 
@@ -159,10 +161,19 @@ class RegressionCheck {
       lastReopenedAt !== null && lastReopenedAt.getTime() > mergedAt.getTime();
 
     const known = previous?.followupShas ?? [];
-    const view =
-      (await this.lifecycle.mode()) === "off"
-        ? null
-        : await this.readGithub(mergedAt, known, finding?.title ?? null);
+    const off = (await this.lifecycle.mode()) === "off";
+    const view = off
+      ? null
+      : await this.readGithub(mergedAt, known, finding?.title ?? null);
+    // R3: the window closes on a successful read past its end (a revert on
+    // the last day is still seen); a GitHub outage keeps it open for up to
+    // FIX_REGRESSION_READ_GRACE_MS more; with the loop off nothing is read.
+    const now = this.now.getTime();
+    const windowComplete =
+      now >= windowEndsAt.getTime() &&
+      (view !== null ||
+        off ||
+        now >= windowEndsAt.getTime() + FIX_REGRESSION_READ_GRACE_MS);
 
     const reverted = (previous?.reverted ?? false) || (view?.reverted ?? false);
     const revertSha = previous?.revertSha ?? view?.revertSha;
@@ -172,7 +183,7 @@ class RegressionCheck {
       followupShas: [...known, ...(view?.newFollowups ?? [])],
       reopened: (previous?.reopened ?? false) || reopenedNow,
       checkedAt: this.now.toISOString(),
-      windowComplete: this.now.getTime() >= windowEndsAt.getTime(),
+      windowComplete,
     };
     await recordFixRegression({
       db: this.deps.db,

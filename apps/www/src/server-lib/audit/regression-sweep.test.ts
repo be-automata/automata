@@ -387,6 +387,51 @@ describe("30-day regression tracking of merged fixes (R5, BRK-01, SC5)", () => {
     });
   });
 
+  it("R3: a failed read at the window end keeps it open; the next tick still sees a last-day revert", async () => {
+    const after = new Date(mergedAt.getTime() + 30 * DAY + HOUR);
+    const unavailable = Object.assign(new Error("unavailable"), {
+      status: 503,
+      response: { headers: {} },
+    });
+    fake.rest.repos.listCommits.mockRejectedValueOnce(unavailable);
+    fake.rest.repos.listCommits.mockRejectedValueOnce(unavailable);
+    fake.rest.repos.listCommits.mockRejectedValueOnce(unavailable);
+    fake.rest.repos.listCommits.mockRejectedValueOnce(unavailable);
+    expect(await sweep(after)).toMatchObject({ checked: 1, regressed: 0 });
+    expect((await record())?.windowComplete).toBe(false);
+
+    fake.rest.repos.listCommits.mockReset();
+    fake.rest.repos.listCommits.mockImplementation(async () =>
+      ok([
+        human(
+          "r1",
+          `Revert "Merge pull request #9"\n\nThis reverts commit ${MERGE_SHA}.`,
+        ),
+      ]),
+    );
+    const next = new Date(after.getTime() + 25 * HOUR);
+    expect(await sweep(next)).toMatchObject({ checked: 1, regressed: 1 });
+    expect(await record()).toMatchObject({
+      reverted: true,
+      windowComplete: true,
+    });
+    expect(await loopFixSignals()).toEqual(["regressed"]);
+  });
+
+  it("R3: reads failing for 3 days past the window end complete it anyway", async () => {
+    fake.rest.repos.listCommits.mockImplementation(async () => {
+      throw Object.assign(new Error("unavailable"), {
+        status: 503,
+        response: { headers: {} },
+      });
+    });
+    const end = mergedAt.getTime() + 30 * DAY;
+    await sweep(new Date(end + 2 * DAY));
+    expect((await record())?.windowComplete).toBe(false);
+    await sweep(new Date(end + 3 * DAY + HOUR));
+    expect((await record())?.windowComplete).toBe(true);
+  });
+
   it("an attempt checked less than 24 h ago is not selected", async () => {
     const now = new Date();
     await sweep(now);
