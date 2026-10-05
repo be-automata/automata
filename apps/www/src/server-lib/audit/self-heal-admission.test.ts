@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { eq, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
 
 import { db } from "@/lib/db";
@@ -27,6 +27,12 @@ const DAY = 24 * 60 * MIN;
  */
 const BASE = Date.parse("2099-01-01T00:00:00.000Z");
 let day = 0;
+/**
+ * Review threads this file dates into the future. They are deleted after
+ * each test (hatchet_run cascades): left behind, they read as in flight to
+ * any later file whose clock is earlier, e.g. the dispatcher's 2097 clock.
+ */
+let createdThreadIds: string[] = [];
 
 describe("self-heal admission (RES-11)", () => {
   let orgId: string;
@@ -59,6 +65,7 @@ describe("self-heal admission (RES-11)", () => {
       .update(hatchetRun)
       .set({ createdAt: new Date(now.getTime() - ageMin * MIN) })
       .where(eq(hatchetRun.id, run.runId));
+    createdThreadIds.push(run.threadId);
     return run.threadId;
   }
 
@@ -103,8 +110,16 @@ describe("self-heal admission (RES-11)", () => {
       .update(thread)
       .set({ status, createdAt: new Date(now.getTime() - ageMin * MIN) })
       .where(eq(thread.id, threadId));
+    createdThreadIds.push(threadId);
     return threadId;
   }
+
+  afterEach(async () => {
+    if (createdThreadIds.length > 0) {
+      await db.delete(thread).where(inArray(thread.id, createdThreadIds));
+    }
+    createdThreadIds = [];
+  });
 
   beforeEach(async () => {
     day += 1;

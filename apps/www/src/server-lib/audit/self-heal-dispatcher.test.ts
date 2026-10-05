@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -72,6 +72,12 @@ const BOT = "automata-app[bot]";
  */
 const BASE = Date.parse("2097-06-01T03:00:00.000Z");
 let day = 0;
+/**
+ * Review threads seeded in flight at the 2097 clock. Deleted after each test:
+ * left behind, they read as in flight to every later file that admits at
+ * wall-clock time.
+ */
+let reviewThreadIds: string[] = [];
 
 function contextFor(mode: SelfHealMode): SelfHealContext {
   return {
@@ -201,6 +207,7 @@ describe("runSelfHealDispatcher (BULK-01)", () => {
       .update(thread)
       .set({ status: "queued", createdAt: new Date(now.getTime() - MIN) })
       .where(eq(thread.id, threadId));
+    reviewThreadIds.push(threadId);
   }
 
   function probe(overrides: Partial<RepoGithubProbe> = {}): RepoGithubProbe {
@@ -322,8 +329,12 @@ describe("runSelfHealDispatcher (BULK-01)", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
   });
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
+    if (reviewThreadIds.length > 0) {
+      await db.delete(thread).where(inArray(thread.id, reviewThreadIds));
+    }
+    reviewThreadIds = [];
   });
 
   it("flag off: returns before admission and before any DB claim", async () => {
