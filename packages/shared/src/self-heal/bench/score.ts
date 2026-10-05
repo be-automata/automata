@@ -228,15 +228,19 @@ export function matchSeed(
   );
 }
 
-/** Fingerprints a run's stored decisions record as seen. */
+/**
+ * Fingerprints a run's stored decisions record as seen. A stored entry is the
+ * audit ledger's RunDecision `{ fingerprint, action, reason }`, where `action`
+ * holds the decision-log literal.
+ */
 function seenFingerprints(decisions: unknown): Set<string> {
   const seen = new Set<string>();
   if (!Array.isArray(decisions)) return seen;
   for (const entry of decisions) {
     if (!isRecord(entry) || typeof entry.fingerprint !== "string") continue;
     if (
-      isIn(SEEN_DECISIONS, entry.decision) ||
-      (entry.decision === "sighting" && entry.reason === "seen")
+      isIn(SEEN_DECISIONS, entry.action) ||
+      (entry.action === "sighting" && entry.reason === "seen")
     ) {
       seen.add(entry.fingerprint);
     }
