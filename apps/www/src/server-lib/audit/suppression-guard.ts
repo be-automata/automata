@@ -6,6 +6,10 @@ import {
   normalizeFixPath,
   type FixPathContext,
 } from "@terragon/shared/self-heal/fix-paths";
+import {
+  GUARD_REASONS,
+  type GuardReason,
+} from "@terragon/shared/self-heal/guard-reasons";
 
 /**
  * The R4 suppression / scope guard (R4, R5, FENCE-01 www half) on the GitHub
@@ -23,20 +27,7 @@ import {
 /** GitHub's compare lists at most this many files. */
 export const COMPARE_FILE_CAP = 300;
 
-/** Declaration order is the reporting order (stable, deduplicated). */
-export const GUARD_REASONS = [
-  "suppression_comment",
-  "test_edit",
-  "ci_edit",
-  "audit_config_edit",
-  "deleted_flagged_code",
-  "out_of_plan_file",
-  "denied_path",
-  "diff_too_large",
-  "patch_unavailable",
-] as const;
-
-export type GuardReason = (typeof GUARD_REASONS)[number];
+export { GUARD_REASONS, type GuardReason };
 export type GuardFlag = "new_test_file";
 
 /** The slice of a GitHub compare `files[]` entry the guard reads. */

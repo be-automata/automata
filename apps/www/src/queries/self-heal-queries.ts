@@ -78,7 +78,7 @@ export interface SelfHealChurnDto {
   churn: number;
 }
 
-/** computeSelfHealMetrics (server-lib/audit/metrics.ts); rates are 0..1 or null. */
+/** computeSelfHealMetrics (@terragon/shared/self-heal/metrics); rates are 0..1 or null. */
 export interface SelfHealMetricsDto {
   prsOpened: number;
   ready: number;

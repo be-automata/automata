@@ -7,35 +7,12 @@
  * version bump of `v=`.
  */
 
-export type SelfHealDecision =
-  | "create"
-  | "update"
-  | "close"
-  | "reopen"
-  | "skip"
-  | "suppress"
-  | "needs_human"
-  | "comment"
-  | "candidate"
-  | "sighting"
-  | "check"
-  | "absence"
-  | "claim"
-  | "dispatch"
-  | "pr_open"
-  | "gate"
-  | "guard"
-  | "breaker";
+import type {
+  SelfHealDecision,
+  SelfHealWouldDecision,
+} from "@terragon/shared/self-heal/decisions";
 
-/** Decisions that would have written to GitHub; logged as would_* in dry-run. */
-export type SelfHealWouldDecision =
-  | "would_create"
-  | "would_update"
-  | "would_close"
-  | "would_reopen"
-  | "would_needs_human"
-  | "would_comment"
-  | "would_dispatch";
+export type { SelfHealDecision, SelfHealWouldDecision };
 
 export type SelfHealLogMode = "off" | "dry-run" | "on";
 

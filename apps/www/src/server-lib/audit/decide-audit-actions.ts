@@ -10,7 +10,7 @@ import {
   getAuditRule,
 } from "@terragon/shared/self-heal/audit-rules";
 
-import { hasQuorum, pushSighting } from "./consensus";
+import { hasQuorum, pushSighting } from "@terragon/shared/self-heal/consensus";
 import type { ParsedFinding } from "./parse-audit-findings";
 import {
   FINDING_LABELS,

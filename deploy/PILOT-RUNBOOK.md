@@ -1247,7 +1247,7 @@ agent-authored GitHub writes), plus: zero PRs merged by the bot, at most one ope
 issue, and exactly one review per ready fix PR.
 
 **Metrics.** The activity card and `?format=export` show the same numbers, computed by
-`computeSelfHealMetrics`. Its definitions, verbatim from `apps/www/src/server-lib/audit/metrics.ts`:
+`computeSelfHealMetrics`. Its definitions, verbatim from `packages/shared/src/self-heal/metrics.ts`:
 
 ```text
 - prsOpened: attempts that opened a PR (pr_number is set).
