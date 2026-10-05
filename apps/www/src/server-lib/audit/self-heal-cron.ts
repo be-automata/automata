@@ -4,6 +4,7 @@ import { pruneSelfHealRows } from "@terragon/shared/model/self-heal-outbox";
 import { redactSecrets } from "@terragon/utils/redact";
 
 import { runAuditSweep, runOutboxDrain } from "./audit-sweep";
+import { runFixDispatchReconcile } from "./fix-dispatch-reconcile";
 import { runSelfHealDispatcher } from "./self-heal-dispatcher";
 
 /**
@@ -30,6 +31,7 @@ export interface SelfHealCronDeps {
   drain: typeof runOutboxDrain;
   sweep: typeof runAuditSweep;
   prune: typeof pruneSelfHealRows;
+  reconcile: typeof runFixDispatchReconcile;
   dispatch: typeof runSelfHealDispatcher;
   budget: { totalMs: number; perItemMs: number; limit: number };
 }
@@ -41,6 +43,7 @@ function defaultDeps(): SelfHealCronDeps {
     drain: runOutboxDrain,
     sweep: runAuditSweep,
     prune: pruneSelfHealRows,
+    reconcile: runFixDispatchReconcile,
     dispatch: runSelfHealDispatcher,
     budget: SELF_HEAL_CRON_BUDGET,
   };
@@ -106,6 +109,18 @@ export async function runSelfHealCron(
   });
 
   if (kind === "tick") {
+    // RECON-01: settle lost dispatches and refund infra failures BEFORE the
+    // dispatcher, so a refunded finding is claimable on this same tick and the
+    // dispatcher's breaker reads include the events recorded here.
+    await withinBudget("fix reconcile", remaining(), async () => {
+      const result = await deps.reconcile({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+      });
+      console.log("[cron:self-heal] fix reconcile", result);
+    });
     // BULK-01: the fix dispatcher runs LAST, so its admission sees the state
     // the drain and the sweep just settled, and it can only use what is left
     // of the shared budget.

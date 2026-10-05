@@ -34,6 +34,17 @@ function harness(overrides: Partial<SelfHealCronDeps> = {}) {
     order.push("prune");
     return { effects: 0, events: 0, runs: 0 };
   });
+  const reconcile = vi.fn(async () => {
+    order.push("reconcile");
+    return {
+      lost: 0,
+      extended: 0,
+      refunded: 0,
+      counted: 0,
+      killed: 0,
+      lookupFailed: 0,
+    };
+  });
   const dispatch = vi.fn(async () => {
     order.push("dispatch");
     return { dispatched: null, considered: 0 };
@@ -44,11 +55,12 @@ function harness(overrides: Partial<SelfHealCronDeps> = {}) {
     drain: drain as unknown as SelfHealCronDeps["drain"],
     sweep: sweep as unknown as SelfHealCronDeps["sweep"],
     prune: prune as unknown as SelfHealCronDeps["prune"],
+    reconcile: reconcile as unknown as SelfHealCronDeps["reconcile"],
     dispatch: dispatch as unknown as SelfHealCronDeps["dispatch"],
     budget: SELF_HEAL_CRON_BUDGET,
     ...overrides,
   };
-  return { deps, order, drain, sweep, prune, dispatch };
+  return { deps, order, drain, sweep, prune, reconcile, dispatch };
 }
 
 describe("runSelfHealCron", () => {
@@ -69,16 +81,40 @@ describe("runSelfHealCron", () => {
     });
   });
 
-  it("a tick drains, sweeps, then runs the fix dispatcher LAST, and does not prune", async () => {
+  it("a tick drains, sweeps, reconciles, then runs the fix dispatcher LAST, and does not prune", async () => {
     const h = harness();
+    await runSelfHealCron("tick", h.deps);
+    expect(h.order).toEqual(["drain", "sweep", "reconcile", "dispatch"]);
+  });
+
+  it("the reconcile gets the shared deadline and the LIMIT 20 budget", async () => {
+    const h = harness();
+    await runSelfHealCron("tick", h.deps);
+    const arg = (
+      h.reconcile.mock.calls[0] as unknown as [
+        { deadlineAt: Date; limit: number; db: unknown },
+      ]
+    )[0];
+    const drainArg = (
+      h.drain.mock.calls[0] as unknown as [{ deadlineAt: Date }]
+    )[0];
+    expect(arg.deadlineAt).toEqual(drainArg.deadlineAt);
+    expect(arg.limit).toBe(20);
+    expect(arg.db).toBe(h.deps.db);
+  });
+
+  it("still dispatches when the reconcile throws", async () => {
+    const h = harness();
+    h.reconcile.mockRejectedValueOnce(new Error("boom"));
     await runSelfHealCron("tick", h.deps);
     expect(h.order).toEqual(["drain", "sweep", "dispatch"]);
   });
 
-  it("the hourly kind prunes and never dispatches", async () => {
+  it("the hourly kind prunes and never reconciles or dispatches", async () => {
     const h = harness();
     await runSelfHealCron("hourly", h.deps);
     expect(h.order).toEqual(["drain", "sweep", "prune"]);
+    expect(h.reconcile).not.toHaveBeenCalled();
     expect(h.dispatch).not.toHaveBeenCalled();
   });
 
@@ -106,7 +142,7 @@ describe("runSelfHealCron", () => {
     h.drain.mockRejectedValueOnce(new Error("boom"));
     h.sweep.mockRejectedValueOnce(new Error("boom"));
     await expect(runSelfHealCron("tick", h.deps)).resolves.toBeUndefined();
-    expect(h.order).toEqual(["dispatch"]);
+    expect(h.order).toEqual(["reconcile", "dispatch"]);
   });
 
   it("abandons a hung dispatcher at the total deadline and resolves", async () => {
