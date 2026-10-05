@@ -439,3 +439,38 @@ export function deriveFixCheckStatus({
       return "error";
   }
 }
+
+export type SelfHealPlanAbort = SelfHealFixAbort | "not_org_task_thread";
+
+export type PlanSelfHealResult =
+  | { selfHeal?: SelfHealRunInput }
+  | { abort: SelfHealPlanAbort };
+
+/**
+ * The one self-heal planner a dispatch calls. An audit-fix stamp is planned
+ * by planSelfHealFixRun (or refused: a fix agent never starts without its
+ * plan); any other org task thread by planSelfHealAuditRun ({} unless
+ * audit-stamped). `organizationId` is null for a thread that is not an org
+ * task thread (a review, or a personal/no-org thread): {} there, and an
+ * audit-fix stamp on it is refused.
+ */
+export async function planSelfHealRun({
+  organizationId,
+  ...input
+}: Omit<PlanSelfHealFixRunInput, "organizationId"> & {
+  organizationId: string | null;
+}): Promise<PlanSelfHealResult> {
+  if (isAuditFixStamp(input.sourceMetadata)) {
+    if (organizationId === null) return { abort: "not_org_task_thread" };
+    return planSelfHealFixRun({ ...input, organizationId });
+  }
+  if (organizationId === null) return {};
+  return planSelfHealAuditRun({
+    db: input.db,
+    organizationId,
+    repoFullName: input.repoFullName,
+    threadId: input.threadId,
+    sourceMetadata: input.sourceMetadata,
+    now: input.now,
+  });
+}

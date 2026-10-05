@@ -46,7 +46,6 @@ import {
 } from "@terragon/shared/model/threads";
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
 import type { SelfHealRunInput } from "@/server-lib/audit/plan-self-heal-run";
-import { isAuditFixStamp } from "@/server-lib/review/review-skill";
 import { recordBreakerEvent } from "@terragon/shared/model/self-heal-breaker";
 import {
   triggerAgentRun,
@@ -854,42 +853,22 @@ export async function dispatchAgentRun({
     // from its stamped attempt or REFUSED: a refusal throws into the catch
     // below (token revoked, thread failed), so a fix agent without a gate
     // token and a fenced branch never starts. Only one planner matches a stamp.
-    const sourceMetadata = thread?.sourceMetadata;
-    const fixStamped = isAuditFixStamp(sourceMetadata);
-    let selfHealPlan: { selfHeal?: SelfHealRunInput } | undefined;
-    if (fixStamped) {
-      if (plan !== null || orgSettings === undefined) {
-        throw new Error(
-          "self-heal fix dispatch refused: not an organization task thread",
-        );
-      }
-      const fixPlan = await (
-        await import("@/server-lib/audit/plan-self-heal-run")
-      ).planSelfHealFixRun({
-        db,
-        organizationId: orgSettings.organizationId,
-        repoFullName,
-        threadId,
-        sourceMetadata,
-        baseBranch: branch,
-      });
-      if ("abort" in fixPlan) {
-        throw new Error(`self-heal fix dispatch refused: ${fixPlan.abort}`);
-      }
-      if (fixPlan.selfHeal === undefined) {
-        throw new Error("self-heal fix dispatch refused: no plan");
-      }
-      selfHealPlan = fixPlan;
-    } else if (plan === null && orgSettings !== undefined) {
-      selfHealPlan = await (
-        await import("@/server-lib/audit/plan-self-heal-run")
-      ).planSelfHealAuditRun({
-        db,
-        organizationId: orgSettings.organizationId,
-        repoFullName,
-        threadId,
-        sourceMetadata,
-      });
+    // Self-heal runs are org task threads only (no review plan, org settings
+    // loaded): null here makes the planner return {} or refuse a fix stamp.
+    const selfHealOrgId =
+      plan === null ? (orgSettings?.organizationId ?? null) : null;
+    const selfHealPlan = await (
+      await import("@/server-lib/audit/plan-self-heal-run")
+    ).planSelfHealRun({
+      db,
+      organizationId: selfHealOrgId,
+      repoFullName,
+      threadId,
+      sourceMetadata: thread?.sourceMetadata,
+      baseBranch: branch,
+    });
+    if ("abort" in selfHealPlan) {
+      throw new Error(`self-heal fix dispatch refused: ${selfHealPlan.abort}`);
     }
     const input: AgentRunInput = {
       ...baseInput,
@@ -904,12 +883,12 @@ export async function dispatchAgentRun({
     // read-back before its one retry, so an ambiguous engine answer never
     // starts a second agent.
     const { externalId } =
-      selfHealPlan?.selfHeal !== undefined && orgSettings !== undefined
+      selfHealPlan.selfHeal !== undefined && selfHealOrgId !== null
         ? await triggerSelfHealBounded({
             input,
             threadId,
             threadChatId,
-            organizationId: orgSettings.organizationId,
+            organizationId: selfHealOrgId,
           })
         : await triggerWithRetry(
             input,

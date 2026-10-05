@@ -32,6 +32,7 @@ import {
   mintSelfHealToken,
   planSelfHealAuditRun,
   planSelfHealFixRun,
+  planSelfHealRun,
 } from "./plan-self-heal-run";
 
 const REPO = "acme/widgets";
@@ -499,4 +500,33 @@ describe("deriveFixCheckStatus", () => {
       ).toBe(expected);
     },
   );
+});
+
+describe("planSelfHealRun", () => {
+  const base = {
+    db,
+    repoFullName: REPO,
+    threadId: "t-1",
+    baseBranch: "main",
+  };
+
+  it("refuses an audit-fix stamp on a thread that is not an org task thread", async () => {
+    expect(
+      await planSelfHealRun({
+        ...base,
+        organizationId: null,
+        sourceMetadata: { ...STAMP, skillName: "audit-fix" },
+      }),
+    ).toEqual({ abort: "not_org_task_thread" });
+  });
+
+  it("plans nothing for a non-org thread without a fix stamp", async () => {
+    expect(
+      await planSelfHealRun({
+        ...base,
+        organizationId: null,
+        sourceMetadata: STAMP,
+      }),
+    ).toEqual({});
+  });
 });
