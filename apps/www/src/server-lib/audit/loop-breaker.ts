@@ -910,24 +910,54 @@ class Evaluation {
             new Date(this.now.getTime() - LOOP_LOOKBACK_MS),
             row.openedAt,
           );
-    const runRows = await this.db
-      .select({
-        id: auditRuns.id,
-        createdAt: auditRuns.createdAt,
-        status: auditRuns.status,
-        outcome: auditRuns.outcome,
-        complete: auditRuns.complete,
-      })
-      .from(auditRuns)
-      .where(
-        and(
-          eq(auditRuns.organizationId, organizationId),
-          eq(auditRuns.repoFullName, repoKey),
-          gt(auditRuns.createdAt, since),
-        ),
-      )
-      .orderBy(desc(auditRuns.createdAt))
-      .limit(RUN_SCAN_LIMIT);
+    const readRuns = () =>
+      this.db
+        .select({
+          id: auditRuns.id,
+          createdAt: auditRuns.createdAt,
+          status: auditRuns.status,
+          outcome: auditRuns.outcome,
+          complete: auditRuns.complete,
+        })
+        .from(auditRuns)
+        .where(
+          and(
+            eq(auditRuns.organizationId, organizationId),
+            eq(auditRuns.repoFullName, repoKey),
+            gt(auditRuns.createdAt, since),
+          ),
+        )
+        .orderBy(desc(auditRuns.createdAt))
+        .limit(RUN_SCAN_LIMIT);
+    const filedSince = laterOf(
+      new Date(this.now.getTime() - RATE_WINDOW_MS),
+      row.openedAt,
+    );
+    const readFindings = () =>
+      this.db
+        .select({
+          createdAt: auditFindings.createdAt,
+          updatedAt: auditFindings.updatedAt,
+          status: auditFindings.status,
+          attempts: auditFindings.attempts,
+          prNumber: auditFindings.prNumber,
+          lastDecisionReason: auditFindings.lastDecisionReason,
+        })
+        .from(auditFindings)
+        .where(
+          and(
+            eq(auditFindings.organizationId, organizationId),
+            eq(auditFindings.repoFullName, repoKey),
+            isNotNull(auditFindings.issueNumber),
+            gt(auditFindings.createdAt, filedSince),
+          ),
+        )
+        .limit(RUN_SCAN_LIMIT);
+    // A closed breaker needs both reads (independent); a half-open one only the runs.
+    const [runRows, findingRows] =
+      row.state === "half_open"
+        ? [await readRuns(), null]
+        : await Promise.all([readRuns(), readFindings()]);
     const runs: LoopAuditRunSignal[] = runRows.map((r) => ({
       id: r.id,
       createdAt: r.createdAt,
@@ -954,30 +984,7 @@ class Evaluation {
       return;
     }
 
-    const filedSince = laterOf(
-      new Date(this.now.getTime() - RATE_WINDOW_MS),
-      row.openedAt,
-    );
-    const findingRows = await this.db
-      .select({
-        createdAt: auditFindings.createdAt,
-        updatedAt: auditFindings.updatedAt,
-        status: auditFindings.status,
-        attempts: auditFindings.attempts,
-        prNumber: auditFindings.prNumber,
-        lastDecisionReason: auditFindings.lastDecisionReason,
-      })
-      .from(auditFindings)
-      .where(
-        and(
-          eq(auditFindings.organizationId, organizationId),
-          eq(auditFindings.repoFullName, repoKey),
-          isNotNull(auditFindings.issueNumber),
-          gt(auditFindings.createdAt, filedSince),
-        ),
-      )
-      .limit(RUN_SCAN_LIMIT);
-    const findings: LoopAuditFindingSignal[] = findingRows.map((f) => {
+    const findings: LoopAuditFindingSignal[] = (findingRows ?? []).map((f) => {
       const absentClose =
         (f.status === "resolved" && f.attempts === 0 && f.prNumber === null) ||
         (f.status === "needs_human" &&
@@ -1148,8 +1155,11 @@ export async function runLoopBreakerEvaluation({
     for (const scope of repos) {
       if (pastDeadline()) break;
       try {
-        await evaluation.loopFix(scope);
-        await evaluation.loopAudit(scope);
+        // Disjoint breaker rows (loop_fix vs loop_audit) and read sets.
+        await Promise.all([
+          evaluation.loopFix(scope),
+          evaluation.loopAudit(scope),
+        ]);
       } catch (error) {
         deps.error("[self-heal:breaker] repo evaluation failed", {
           org: scope.organizationId,
