@@ -46,8 +46,11 @@ import {
 } from "@terragon/shared/model/threads";
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
 import type { SelfHealRunInput } from "@/server-lib/audit/plan-self-heal-run";
+import { AUDIT_FIX_SKILL_NAME } from "@/server-lib/review/review-skill";
+import { recordBreakerEvent } from "@terragon/shared/model/self-heal-breaker";
 import {
   triggerAgentRun,
+  listAgentRunsForThread,
   workflowNameForPolicy,
   buildReviewRunMetadata,
   type TriggerOpts,
@@ -119,6 +122,136 @@ async function triggerWithRetry(
       }
     }
   }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+/** TMO-01: one self-heal trigger POST, and one read-back, may take at most 5 s. */
+export const SELF_HEAL_TRIGGER_TIMEOUT_MS = 5_000;
+const SELF_HEAL_READBACK_MAX_PAGES = 3;
+/** One retry after a read-back that found nothing (RES-06). */
+const SELF_HEAL_TRIGGER_MAX_ATTEMPTS = 2;
+/** Same breaker key and signal names as the fix reconcile (09-07). */
+const HATCHET_DISPATCH_SCOPE_KEY = "*";
+
+/**
+ * True when a failed trigger may still have created the run: a timeout or
+ * abort, a network error, a 5xx, 408 or 429. A definitive 4xx or a missing
+ * transport config cannot have created anything.
+ */
+function isAmbiguousTriggerFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return true;
+  if (error.message.includes("are not all configured")) return false;
+  const status = /^Hatchet trigger failed: (\d{3})/.exec(error.message)?.[1];
+  if (status === undefined) return true;
+  const code = Number(status);
+  return code >= 500 || code === 408 || code === 429;
+}
+
+/**
+ * Self-heal trigger policy (TMO-01, RES-06): every POST carries a 5 s
+ * AbortSignal. A failure that may have created the run is read back with
+ * listAgentRunsForThread BEFORE any retry: a QUEUED/RUNNING run of this
+ * thread means the dispatch happened (no second POST, the run id comes from
+ * the read-back); nothing found means exactly one retry. A read-back that
+ * fails ends the dispatch (never a blind retry). Every outcome records one
+ * hatchet_dispatch breaker event. Review and plain task dispatches never come
+ * here: they keep triggerWithRetry, byte-identical.
+ */
+async function triggerSelfHealBounded({
+  input,
+  threadId,
+  threadChatId,
+  organizationId,
+}: {
+  input: AgentRunInput;
+  threadId: string;
+  threadChatId: string;
+  organizationId: string;
+}): Promise<{ externalId: string | undefined }> {
+  const config = hatchetConfig();
+  const dispatchedAt = new Date();
+  const record = async (
+    outcome: "success" | "failure",
+    signal: "dispatch_visible" | "dispatch_lost",
+  ) => {
+    try {
+      await recordBreakerEvent({
+        db,
+        organizationId,
+        scopeKind: "hatchet_dispatch",
+        scopeKey: HATCHET_DISPATCH_SCOPE_KEY,
+        outcome,
+        signal,
+      });
+    } catch (error) {
+      console.error("[hatchet] self-heal: breaker event write failed", {
+        threadId,
+        outcome,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  let lastError: unknown = new Error("self-heal trigger not attempted");
+  for (let attempt = 1; attempt <= SELF_HEAL_TRIGGER_MAX_ATTEMPTS; attempt++) {
+    try {
+      const result = await triggerAgentRun(input, config, {
+        signal: AbortSignal.timeout(SELF_HEAL_TRIGGER_TIMEOUT_MS),
+      });
+      await record("success", "dispatch_visible");
+      return result;
+    } catch (error) {
+      lastError = error;
+      const ambiguous = isAmbiguousTriggerFailure(error);
+      console.error("[hatchet] self-heal trigger attempt failed", {
+        threadId,
+        threadChatId,
+        attempt,
+        maxAttempts: SELF_HEAL_TRIGGER_MAX_ATTEMPTS,
+        ambiguous,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (!ambiguous) break;
+      let runs: Awaited<ReturnType<typeof listAgentRunsForThread>>;
+      try {
+        runs = await listAgentRunsForThread(
+          { createdAt: dispatchedAt, threadId },
+          config,
+          {
+            signal: AbortSignal.timeout(SELF_HEAL_TRIGGER_TIMEOUT_MS),
+            maxPages: SELF_HEAL_READBACK_MAX_PAGES,
+          },
+        );
+      } catch (readError) {
+        console.error(
+          "[hatchet] self-heal trigger read-back failed — not retrying",
+          {
+            threadId,
+            threadChatId,
+            error:
+              readError instanceof Error
+                ? readError.message
+                : String(readError),
+          },
+        );
+        break;
+      }
+      const live = runs.find(
+        (run) => run.status === "QUEUED" || run.status === "RUNNING",
+      );
+      if (live) {
+        console.log("[hatchet] self-heal trigger read-back found the run", {
+          threadId,
+          threadChatId,
+          externalId: live.externalId,
+          status: live.status,
+        });
+        await record("success", "dispatch_visible");
+        return { externalId: live.externalId };
+      }
+    }
+  }
+  await record("failure", "dispatch_lost");
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
@@ -717,18 +850,49 @@ export async function dispatchAgentRun({
         : undefined;
     // Phase 8: an audit-stamped org run asks the worker for the platform's
     // deterministic checks. Never throws; {} for every other dispatch.
-    const selfHealPlan =
-      plan === null && orgSettings !== undefined
-        ? await (
-            await import("@/server-lib/audit/plan-self-heal-run")
-          ).planSelfHealAuditRun({
-            db,
-            organizationId: orgSettings.organizationId,
-            repoFullName,
-            threadId,
-            sourceMetadata: thread?.sourceMetadata,
-          })
-        : undefined;
+    // Phase 9 (GATE-01, RACE-01): an audit-fix stamped thread is planned
+    // from its stamped attempt or REFUSED: a refusal throws into the catch
+    // below (token revoked, thread failed), so a fix agent without a gate
+    // token and a fenced branch never starts. Only one planner matches a stamp.
+    const sourceMetadata = thread?.sourceMetadata;
+    const fixStamped =
+      sourceMetadata?.type === "automation-skill" &&
+      sourceMetadata.skillName === AUDIT_FIX_SKILL_NAME;
+    let selfHealPlan: { selfHeal?: SelfHealRunInput } | undefined;
+    if (fixStamped) {
+      if (plan !== null || orgSettings === undefined) {
+        throw new Error(
+          "self-heal fix dispatch refused: not an organization task thread",
+        );
+      }
+      const fixPlan = await (
+        await import("@/server-lib/audit/plan-self-heal-run")
+      ).planSelfHealFixRun({
+        db,
+        organizationId: orgSettings.organizationId,
+        repoFullName,
+        threadId,
+        sourceMetadata,
+        baseBranch: branch,
+      });
+      if ("abort" in fixPlan) {
+        throw new Error(`self-heal fix dispatch refused: ${fixPlan.abort}`);
+      }
+      if (fixPlan.selfHeal === undefined) {
+        throw new Error("self-heal fix dispatch refused: no plan");
+      }
+      selfHealPlan = fixPlan;
+    } else if (plan === null && orgSettings !== undefined) {
+      selfHealPlan = await (
+        await import("@/server-lib/audit/plan-self-heal-run")
+      ).planSelfHealAuditRun({
+        db,
+        organizationId: orgSettings.organizationId,
+        repoFullName,
+        threadId,
+        sourceMetadata,
+      });
+    }
     const input: AgentRunInput = {
       ...baseInput,
       ...plan?.inputExtension,
@@ -737,13 +901,24 @@ export async function dispatchAgentRun({
     };
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry
-    // absorbs transients; only a FINAL failure lands in the catch below.
-    const { externalId } = await triggerWithRetry(
-      input,
-      threadId,
-      threadChatId,
-      plan?.triggerOpts,
-    );
+    // absorbs transients; only a FINAL failure lands in the catch below. A
+    // self-heal run uses the bounded policy (TMO-01): 5 s per POST and a
+    // read-back before its one retry, so an ambiguous engine answer never
+    // starts a second agent.
+    const { externalId } =
+      selfHealPlan?.selfHeal !== undefined && orgSettings !== undefined
+        ? await triggerSelfHealBounded({
+            input,
+            threadId,
+            threadChatId,
+            organizationId: orgSettings.organizationId,
+          })
+        : await triggerWithRetry(
+            input,
+            threadId,
+            threadChatId,
+            plan?.triggerOpts,
+          );
 
     // Best-effort bookkeeping after a successful trigger, run concurrently —
     // neither may fail the dispatch (the run is already executing).

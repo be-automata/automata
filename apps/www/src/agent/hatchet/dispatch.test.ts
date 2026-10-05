@@ -1,4 +1,4 @@
-import { describe, it, vi, beforeEach, expect } from "vitest";
+import { describe, it, vi, beforeEach, afterEach, expect } from "vitest";
 import { db } from "@/lib/db";
 import {
   createTestUser,
@@ -22,11 +22,19 @@ import {
   getReadOnlyInstallationToken,
   lookupInstallationId,
 } from "@terragon/shared/github-app";
-import { auditRuns, thread as threadTable } from "@terragon/shared/db/schema";
+import {
+  auditFixAttempts,
+  auditRuns,
+  selfHealBreakerEvent,
+  thread as threadTable,
+} from "@terragon/shared/db/schema";
 import { upsertFeatureFlag } from "@terragon/shared/model/feature-flags";
 import { insertFinding } from "@terragon/shared/model/audit-findings";
+import { claimFixAttempt } from "@terragon/shared/model/audit-fix-attempts";
+import { fixBranchName } from "@/server-lib/audit/fix-run-prompt";
 import {
   hashSelfHealToken,
+  type SelfHealAuditRunInput,
   type SelfHealRunInput,
 } from "@/server-lib/audit/plan-self-heal-run";
 import { resolveTaskAgentFromRows } from "@/server-lib/task/resolve-task-agent";
@@ -1274,7 +1282,7 @@ describe("dispatchAgentRun — phase 8 selfHeal payload", () => {
     );
     const t = await auditThread();
     const input = await dispatchAndRead(t);
-    const selfHeal = input.selfHeal as SelfHealRunInput;
+    const selfHeal = input.selfHeal as SelfHealAuditRunInput;
     expect(selfHeal.kind).toBe("audit");
     expect(selfHeal.checks).toEqual([
       {
@@ -1333,5 +1341,488 @@ describe("dispatchAgentRun — phase 8 selfHeal payload", () => {
     });
     const input = await dispatchAndRead(t);
     expect("selfHeal" in input).toBe(false);
+  });
+});
+
+describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", () => {
+  let user: User;
+  let orgId: string;
+  let findingId: string;
+  let issueNumber: number;
+  const REPO = "be-automata/automata";
+  const FP = "0123456789abcdef";
+  const TRIGGER = "/workflow-runs/trigger";
+
+  const setFlag = (on: boolean) =>
+    upsertFeatureFlag({
+      db,
+      name: "selfHealLoop",
+      updates: { defaultValue: false, globalOverride: on },
+    });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    user = (await createTestUser({ db })).user;
+    orgId = (
+      await createOrganization({
+        db,
+        name: "Org",
+        slug: `org-${nanoid(8).toLowerCase()}`,
+      })
+    ).id;
+    await setFlag(true);
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { selfHealMode: "on" },
+    });
+    issueNumber = Math.floor(Math.random() * 100_000) + 1;
+    findingId = (
+      await insertFinding({
+        db,
+        organizationId: orgId,
+        finding: {
+          repoFullName: REPO,
+          fingerprint: FP,
+          audit: "security-audit",
+          ruleId: "supply.lockfile-missing",
+          severity: "high",
+          checkKind: "script",
+          title: "Lockfile missing",
+          subject: "pnpm-lock.yaml",
+          status: "open",
+          planFiles: ["package.json", "pnpm-lock.yaml"],
+          issueNumber,
+          autoFixLabeled: true,
+          fixReadyAt: new Date(Date.now() - 60_000),
+        },
+      })
+    ).id;
+  });
+
+  const claim = async () => {
+    const claimed = await claimFixAttempt({
+      db,
+      organizationId: orgId,
+      findingId,
+      maxAttempts: 3,
+      cooldownMin: 30,
+      branchFor: (attemptNo) =>
+        fixBranchName({ issueNumber, fingerprint: FP, attemptNo }),
+    });
+    if (!claimed) throw new Error("claim failed");
+    return claimed.attempt;
+  };
+
+  const fixThread = (attemptId: string) =>
+    createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        organizationId: orgId,
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: "audit-fix",
+          contentSha: "sha",
+          source: "db",
+          selfHealAttemptId: attemptId,
+        },
+      },
+    });
+
+  const dispatch = (t: { threadId: string; threadChatId: string }) =>
+    dispatchAgentRun({
+      userId: user.id,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      repoFullName: REPO,
+      branch: "main",
+    });
+
+  const ok = (id: string) =>
+    new Response(JSON.stringify({ run: { metadata: { id } } }), {
+      status: 200,
+    });
+  const listing = (rows: Array<{ id: string; status: string }>) =>
+    new Response(
+      JSON.stringify({
+        rows: rows.map((r) => ({ metadata: { id: r.id }, status: r.status })),
+        pagination: { num_pages: 1 },
+      }),
+      { status: 200 },
+    );
+  /** A trigger POST that never answers until its signal aborts. */
+  const hang = (init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return;
+      signal.addEventListener("abort", () => reject(signal.reason), {
+        once: true,
+      });
+    });
+
+  type Call = [string, RequestInit | undefined];
+  const triggerCalls = (mock: ReturnType<typeof vi.fn>) =>
+    (mock.mock.calls as unknown as Call[]).filter(([u]) =>
+      String(u).includes(TRIGGER),
+    );
+  const listCalls = (mock: ReturnType<typeof vi.fn>) =>
+    (mock.mock.calls as unknown as Call[]).filter(
+      ([u]) => !String(u).includes(TRIGGER),
+    );
+
+  /** Every AbortSignal.timeout(ms) fires almost at once; the requested ms is recorded. */
+  const fastTimeouts = () => {
+    const requested: number[] = [];
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      requested.push(ms);
+      const controller = new AbortController();
+      setTimeout(
+        () =>
+          controller.abort(
+            new DOMException("The operation timed out.", "TimeoutError"),
+          ),
+        5,
+      );
+      return controller.signal;
+    });
+    return requested;
+  };
+
+  const events = () =>
+    db
+      .select()
+      .from(selfHealBreakerEvent)
+      .where(eq(selfHealBreakerEvent.organizationId, orgId));
+
+  const readAttempt = async (id: string) => {
+    const [row] = await db
+      .select()
+      .from(auditFixAttempts)
+      .where(eq(auditFixAttempts.id, id));
+    return row;
+  };
+
+  it("a fix dispatch carries selfHeal.kind fix from the stamped attempt, bounded, and never logs the token", async () => {
+    const spies = (["log", "warn", "error", "info", "debug"] as const).map(
+      (level) => vi.spyOn(console, level),
+    );
+    const attempt = await claim();
+    const t = await fixThread(attempt.id);
+    const f = vi.fn(async (url: string) =>
+      String(url).includes(TRIGGER) ? ok("run-fix") : listing([]),
+    );
+    vi.stubGlobal("fetch", f);
+    await dispatch(t);
+    vi.unstubAllGlobals();
+
+    const calls = triggerCalls(f);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+    const input = JSON.parse(String(calls[0]?.[1]?.body)).input;
+    expect(input.branch).toBe("main");
+    const selfHeal = input.selfHeal as SelfHealRunInput;
+    if (selfHeal.kind !== "fix") throw new Error("expected a fix payload");
+    expect(selfHeal.attemptId).toBe(attempt.id);
+    expect(selfHeal.branch).toBe(attempt.branch);
+    expect(selfHeal.baseBranch).toBe("main");
+    expect(selfHeal.checks).toEqual([
+      { fingerprint: FP, check: "file-exists", subject: "pnpm-lock.yaml" },
+    ]);
+    expect(selfHeal.denyExceptions).toEqual([]);
+    const row = await readAttempt(attempt.id);
+    expect(row?.threadId).toBe(t.threadId);
+    expect(row?.gateTokenHash).toBe(hashSelfHealToken(selfHeal.gateToken));
+    for (const spy of spies) {
+      for (const call of spy.mock.calls) {
+        expect(JSON.stringify(call)).not.toContain(selfHeal.gateToken);
+      }
+      spy.mockRestore();
+    }
+    expect(
+      (await events()).map((e) => [e.scopeKind, e.scopeKey, e.outcome]),
+    ).toEqual([["hatchet_dispatch", "*", "success"]]);
+  });
+
+  it.each([
+    [
+      "the kill switch",
+      () =>
+        upsertRepoReviewSetting({
+          db,
+          organizationId: orgId,
+          repoFullName: "*",
+          patch: { selfHealKillSwitch: true },
+        }),
+      "killed",
+    ],
+    ["the flag off", () => setFlag(false), "killed"],
+    [
+      "dry-run",
+      () =>
+        upsertRepoReviewSetting({
+          db,
+          organizationId: orgId,
+          repoFullName: REPO,
+          patch: { selfHealMode: "dry-run" },
+        }),
+      "killed",
+    ],
+  ])(
+    "fail closed (%s): Hatchet is never triggered, the thread fails and the attempt is refunded",
+    async (_label, arrange, outcome) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const attempt = await claim();
+      const t = await fixThread(attempt.id);
+      await arrange();
+      const f = vi.fn(async () => ok("never"));
+      vi.stubGlobal("fetch", f);
+      await expect(dispatch(t)).rejects.toThrow(
+        "Failed to dispatch the remote agent run.",
+      );
+      vi.unstubAllGlobals();
+      expect(triggerCalls(f)).toHaveLength(0);
+      const runKey = daemonRunKey(t);
+      expect(
+        await hasActiveDaemonToken({ userId: user.id, name: runKey }),
+      ).toBe(false);
+      const row = await readAttempt(attempt.id);
+      expect(row?.phase).toBe("closed");
+      expect(row?.outcome).toBe(outcome);
+    },
+  );
+
+  it("fail closed: a stamp whose attempt does not exist is never triggered", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const t = await fixThread("00000000-0000-4000-8000-000000000000");
+    const f = vi.fn(async () => ok("never"));
+    vi.stubGlobal("fetch", f);
+    await expect(dispatch(t)).rejects.toThrow();
+    vi.unstubAllGlobals();
+    expect(triggerCalls(f)).toHaveLength(0);
+  });
+
+  it("fail closed: a personal (no-org) thread with the fix stamp is never triggered", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: "audit-fix",
+          contentSha: "sha",
+          source: "db",
+          selfHealAttemptId: "00000000-0000-4000-8000-000000000000",
+        },
+      },
+    });
+    const f = vi.fn(async () => ok("never"));
+    vi.stubGlobal("fetch", f);
+    await expect(dispatch(t)).rejects.toThrow();
+    vi.unstubAllGlobals();
+    expect(triggerCalls(f)).toHaveLength(0);
+  });
+
+  it("RES-06: a hung trigger is aborted at 5 s; the read-back finds it QUEUED → no second POST, the run id comes from the read-back", async () => {
+    const requested = fastTimeouts();
+    const log = vi.spyOn(console, "log");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const attempt = await claim();
+    const t = await fixThread(attempt.id);
+    const f = vi.fn(async (url: string, init?: RequestInit) =>
+      String(url).includes(TRIGGER)
+        ? hang(init)
+        : listing([{ id: "run-readback", status: "QUEUED" }]),
+    );
+    vi.stubGlobal("fetch", f);
+    await dispatch(t);
+    vi.unstubAllGlobals();
+    expect(triggerCalls(f)).toHaveLength(1);
+    expect(listCalls(f)).toHaveLength(1);
+    expect(requested[0]).toBe(5000);
+    expect(String(listCalls(f)[0]?.[0])).toContain(
+      encodeURIComponent(`threadId:${t.threadId}`),
+    );
+    expect(JSON.stringify(log.mock.calls)).toContain("run-readback");
+    expect(
+      await hasActiveDaemonToken({
+        userId: user.id,
+        name: daemonRunKey(t),
+      }),
+    ).toBe(true);
+    expect((await events()).map((e) => [e.outcome, e.signal])).toEqual([
+      ["success", "dispatch_visible"],
+    ]);
+  });
+
+  it("RES-06: a RUNNING read-back also counts as dispatched", async () => {
+    fastTimeouts();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const attempt = await claim();
+    const t = await fixThread(attempt.id);
+    const f = vi.fn(async (url: string, init?: RequestInit) =>
+      String(url).includes(TRIGGER)
+        ? hang(init)
+        : listing([{ id: "run-live", status: "RUNNING" }]),
+    );
+    vi.stubGlobal("fetch", f);
+    await dispatch(t);
+    vi.unstubAllGlobals();
+    expect(triggerCalls(f)).toHaveLength(1);
+  });
+
+  it("RES-06: an empty read-back after a timeout → exactly one retry", async () => {
+    fastTimeouts();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const attempt = await claim();
+    const t = await fixThread(attempt.id);
+    let triggers = 0;
+    const f = vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).includes(TRIGGER)) return listing([]);
+      triggers += 1;
+      return triggers === 1 ? hang(init) : ok("run-retry");
+    });
+    vi.stubGlobal("fetch", f);
+    await dispatch(t);
+    vi.unstubAllGlobals();
+    expect(triggerCalls(f)).toHaveLength(2);
+    expect(listCalls(f)).toHaveLength(1);
+    expect((await events()).map((e) => [e.outcome, e.signal])).toEqual([
+      ["success", "dispatch_visible"],
+    ]);
+  });
+
+  it("RES-06: an ambiguous 5xx is read back before the one retry; a second miss fails the thread and records dispatch_lost", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const attempt = await claim();
+    const t = await fixThread(attempt.id);
+    const f = vi.fn(async (url: string) =>
+      String(url).includes(TRIGGER)
+        ? new Response("bad gateway", { status: 502 })
+        : listing([{ id: "old", status: "COMPLETED" }]),
+    );
+    vi.stubGlobal("fetch", f);
+    await expect(dispatch(t)).rejects.toThrow(
+      "Failed to dispatch the remote agent run.",
+    );
+    vi.unstubAllGlobals();
+    expect(triggerCalls(f)).toHaveLength(2);
+    expect(listCalls(f)).toHaveLength(2);
+    const order = (f.mock.calls as unknown as Call[]).map(([u]) =>
+      String(u).includes(TRIGGER) ? "trigger" : "list",
+    );
+    expect(order).toEqual(["trigger", "list", "trigger", "list"]);
+    expect((await events()).map((e) => [e.outcome, e.signal])).toEqual([
+      ["failure", "dispatch_lost"],
+    ]);
+    expect(
+      await hasActiveDaemonToken({ userId: user.id, name: daemonRunKey(t) }),
+    ).toBe(false);
+  });
+
+  it("RES-06: a definitive 4xx is not retried and not read back", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const attempt = await claim();
+    const t = await fixThread(attempt.id);
+    const f = vi.fn(async () => new Response("bad input", { status: 400 }));
+    vi.stubGlobal("fetch", f);
+    await expect(dispatch(t)).rejects.toThrow();
+    vi.unstubAllGlobals();
+    expect(triggerCalls(f)).toHaveLength(1);
+    expect(listCalls(f)).toHaveLength(0);
+    expect((await events()).map((e) => [e.outcome, e.signal])).toEqual([
+      ["failure", "dispatch_lost"],
+    ]);
+  });
+
+  it("RES-06: a failed read-back never retries blindly", async () => {
+    fastTimeouts();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const attempt = await claim();
+    const t = await fixThread(attempt.id);
+    const f = vi.fn(async (url: string, init?: RequestInit) =>
+      String(url).includes(TRIGGER)
+        ? hang(init)
+        : new Response("nope", { status: 500 }),
+    );
+    vi.stubGlobal("fetch", f);
+    await expect(dispatch(t)).rejects.toThrow();
+    vi.unstubAllGlobals();
+    expect(triggerCalls(f)).toHaveLength(1);
+    expect(listCalls(f)).toHaveLength(1);
+    expect((await events()).map((e) => [e.outcome, e.signal])).toEqual([
+      ["failure", "dispatch_lost"],
+    ]);
+  });
+
+  it("an audit-stamped dispatch is bounded too", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { selfHealMode: "dry-run" },
+    });
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        organizationId: orgId,
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: "audit-findings",
+          contentSha: "sha",
+          source: "db",
+        },
+      },
+    });
+    const f = vi.fn(async () => ok("run-audit"));
+    vi.stubGlobal("fetch", f);
+    await dispatch(t);
+    vi.unstubAllGlobals();
+    expect(triggerCalls(f)[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+    expect((await events()).map((e) => e.scopeKind)).toEqual([
+      "hatchet_dispatch",
+    ]);
+  });
+
+  it("plain task and review dispatches keep the legacy trigger: no signal, no breaker event", async () => {
+    const plain = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { organizationId: orgId },
+    });
+    const review = await createBootingPRThread({
+      userId: user.id,
+      orgId,
+      automationId: await createReviewAutomation({
+        userId: user.id,
+        orgId,
+        triggerType: "pull_request",
+      }),
+      prNumber: 7,
+    });
+    for (const t of [plain, review]) {
+      const f = routedHatchetFetch("run-x");
+      vi.stubGlobal("fetch", f.mock);
+      await dispatch(t);
+      vi.unstubAllGlobals();
+      const calls = triggerCalls(f.mock);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.[1] && "signal" in calls[0][1]).toBe(false);
+    }
+    expect(await events()).toEqual([]);
   });
 });
