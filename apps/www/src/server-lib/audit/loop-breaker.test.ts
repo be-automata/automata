@@ -26,9 +26,9 @@ import {
   auditRunSignalOf,
   evaluateLoopAudit,
   evaluateLoopFix,
-  evaluatePlaneBreakers,
+  evaluateExecPlaneBreaker,
+  evaluateHatchetDispatchBreaker,
   LOOP_BREAKER_LIMIT,
-  LOOP_COOLDOWNS_MS,
   runLoopBreakerEvaluation,
   type LoopAuditFindingSignal,
   type LoopAuditRunSignal,
@@ -71,12 +71,6 @@ function event(
 ): LoopBreakerEvent {
   return { signal, outcome, createdAt: ago(msAgo) };
 }
-
-describe("LOOP_COOLDOWNS_MS", () => {
-  it("is 24 h then 72 h", () => {
-    expect(LOOP_COOLDOWNS_MS).toEqual([86_400_000, 259_200_000]);
-  });
-});
 
 describe("LOOP_BREAKER_LIMIT", () => {
   it("evaluates at most 20 repos per tick", () => {
@@ -464,7 +458,7 @@ describe("evaluateLoopAudit", () => {
   });
 });
 
-describe("evaluatePlaneBreakers", () => {
+describe("plane breaker evaluators", () => {
   const pe = (
     outcome: PlaneEvent["outcome"],
     signal: string,
@@ -472,20 +466,19 @@ describe("evaluatePlaneBreakers", () => {
   ): PlaneEvent => ({ outcome, signal, createdAt: ago(msAgo) });
 
   it("3 consecutive dispatch timeouts/connection failures trip hatchet_dispatch", () => {
-    const d = evaluatePlaneBreakers({
-      hatchet: [
+    const d = evaluateHatchetDispatchBreaker(
+      [
         pe("timeout", "dispatch_timeout", 1),
         pe("failure", "dispatch_lost", 2),
         pe("failure", "dispatch_lost", 3),
         pe("success", "dispatch_visible", 4),
       ],
-      exec: [],
-      now: NOW,
-    });
-    expect(d.hatchet_dispatch).toEqual(
+      NOW,
+    );
+    expect(d).toEqual(
       expect.objectContaining({ trip: true, reason: "consecutive_failures" }),
     );
-    expect(d.exec_plane.trip).toBe(false);
+    expect(evaluateExecPlaneBreaker([]).trip).toBe(false);
   });
 
   it("≥ 50% of the last 10 dispatches in 10 min (min 5) trip hatchet_dispatch", () => {
@@ -496,66 +489,50 @@ describe("evaluatePlaneBreakers", () => {
       pe("success", "dispatch_visible", 4 * MIN),
       pe("failure", "dispatch_lost", 5 * MIN),
     ];
-    expect(
-      evaluatePlaneBreakers({ hatchet: events, exec: [], now: NOW })
-        .hatchet_dispatch,
-    ).toEqual(expect.objectContaining({ trip: true, reason: "error_rate" }));
+    expect(evaluateHatchetDispatchBreaker(events, NOW)).toEqual(
+      expect.objectContaining({ trip: true, reason: "error_rate" }),
+    );
     // Outside the 10 minute window, the volume is too small.
     const stale = events.map((e) => ({
       ...e,
       createdAt: new Date(e.createdAt.getTime() - 20 * MIN),
     }));
-    expect(
-      evaluatePlaneBreakers({ hatchet: stale, exec: [], now: NOW })
-        .hatchet_dispatch.trip,
-    ).toBe(false);
+    expect(evaluateHatchetDispatchBreaker(stale, NOW).trip).toBe(false);
   });
 
   it("3 consecutive infra terminal causes trip exec_plane", () => {
-    const d = evaluatePlaneBreakers({
-      hatchet: [],
-      exec: [
-        pe("failure", "timeout", 1),
-        pe("failure", "daemon_failed", 2),
-        pe("failure", "plane_offline", 3),
-      ],
-      now: NOW,
-    });
-    expect(d.exec_plane).toEqual(
+    const d = evaluateExecPlaneBreaker([
+      pe("failure", "timeout", 1),
+      pe("failure", "daemon_failed", 2),
+      pe("failure", "plane_offline", 3),
+    ]);
+    expect(d).toEqual(
       expect.objectContaining({ trip: true, reason: "consecutive_infra" }),
     );
   });
 
   it("≥ 50% of the last 6 runs trip exec_plane", () => {
-    const d = evaluatePlaneBreakers({
-      hatchet: [],
-      exec: [
-        pe("failure", "timeout", 1),
-        pe("success", "check_reported", 2),
-        pe("failure", "sandbox_lost", 3),
-        pe("success", "check_reported", 4),
-        pe("failure", "check_missing", 5),
-        pe("success", "check_reported", 6),
-      ],
-      now: NOW,
-    });
-    expect(d.exec_plane).toEqual(
+    const d = evaluateExecPlaneBreaker([
+      pe("failure", "timeout", 1),
+      pe("success", "check_reported", 2),
+      pe("failure", "sandbox_lost", 3),
+      pe("success", "check_reported", 4),
+      pe("failure", "check_missing", 5),
+      pe("success", "check_reported", 6),
+    ]);
+    expect(d).toEqual(
       expect.objectContaining({ trip: true, reason: "infra_rate" }),
     );
   });
 
   it("login-exhaustion outcomes never contribute", () => {
-    const d = evaluatePlaneBreakers({
-      hatchet: [],
-      exec: [
-        pe("failure", "credential", 1),
-        pe("failure", "credential", 2),
-        pe("failure", "credential", 3),
-        pe("failure", "timeout", 4),
-      ],
-      now: NOW,
-    });
-    expect(d.exec_plane.trip).toBe(false);
+    const d = evaluateExecPlaneBreaker([
+      pe("failure", "credential", 1),
+      pe("failure", "credential", 2),
+      pe("failure", "credential", 3),
+      pe("failure", "timeout", 4),
+    ]);
+    expect(d.trip).toBe(false);
   });
 });
 

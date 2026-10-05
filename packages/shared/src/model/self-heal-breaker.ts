@@ -119,14 +119,33 @@ interface CooldownConfig {
   capMs: number;
 }
 
-const COOLDOWNS: Record<"github_write" | "github_read", CooldownConfig> = {
+/** The breakers whose cooldown doubles per trip (loop breakers escalate instead). */
+type DoublingBreakerKind =
+  | "github_write"
+  | "github_read"
+  | "hatchet_dispatch"
+  | "exec_plane";
+
+const COOLDOWNS: Record<DoublingBreakerKind, CooldownConfig> = {
   github_write: { baseMs: 60_000, capMs: 15 * 60_000 },
   github_read: { baseMs: 30_000, capMs: 5 * 60_000 },
+  hatchet_dispatch: { baseMs: 120_000, capMs: 30 * 60_000 },
+  exec_plane: { baseMs: 3_600_000, capMs: 12 * 3_600_000 },
 };
 
-/** base * 2^(tripCount-1), capped. tripCount below 1 is treated as 1. */
+function isDoublingBreakerKind(
+  scopeKind: BreakerScopeKind,
+): scopeKind is DoublingBreakerKind {
+  return Object.hasOwn(COOLDOWNS, scopeKind);
+}
+
+/**
+ * base * 2^(tripCount-1), capped (github write 60 s → 15 min, read 30 s →
+ * 5 min, hatchet 120 s → 30 min, exec 1 h → 12 h). tripCount below 1 is
+ * treated as 1.
+ */
 export function breakerCooldownMs(
-  scopeKind: "github_write" | "github_read",
+  scopeKind: DoublingBreakerKind,
   tripCount: number,
 ): number {
   const { baseMs, capMs } = COOLDOWNS[scopeKind];
@@ -770,14 +789,6 @@ export async function resetBreaker({
 export const LOOP_COOLDOWNS_MS = [86_400_000, 259_200_000] as const;
 export const LOOP_ESCALATION_WINDOW_MS = 30 * DAY_MS;
 
-const PLANE_COOLDOWNS: Record<
-  "hatchet_dispatch" | "exec_plane",
-  CooldownConfig
-> = {
-  hatchet_dispatch: { baseMs: 120_000, capMs: 30 * 60_000 },
-  exec_plane: { baseMs: 3_600_000, capMs: 12 * 3_600_000 },
-};
-
 export type TripCooldown = number | "paused_manual";
 
 const LOOP_KINDS: ReadonlySet<BreakerScopeKind> = new Set([
@@ -787,16 +798,6 @@ const LOOP_KINDS: ReadonlySet<BreakerScopeKind> = new Set([
 
 export function isLoopBreakerKind(scopeKind: BreakerScopeKind): boolean {
   return LOOP_KINDS.has(scopeKind);
-}
-
-/** base * 2^(tripCount-1), capped (hatchet 120 s → 30 min, exec 1 h → 12 h). */
-export function planeCooldownMs(
-  scopeKind: "hatchet_dispatch" | "exec_plane",
-  tripCount: number,
-): number {
-  const { baseMs, capMs } = PLANE_COOLDOWNS[scopeKind];
-  const exp = Math.min(Math.max(tripCount, 1) - 1, 20);
-  return Math.min(baseMs * 2 ** exp, capMs);
 }
 
 /** The loop escalation: trips already recorded in the last 30 days → cooldown. */
@@ -934,10 +935,7 @@ async function cooldownFor(
     });
     return loopCooldown(prior);
   }
-  if (kind === "hatchet_dispatch" || kind === "exec_plane") {
-    return planeCooldownMs(kind, row.tripCount + 1);
-  }
-  if (kind === "github_write" || kind === "github_read") {
+  if (isDoublingBreakerKind(kind)) {
     return breakerCooldownMs(kind, row.tripCount + 1);
   }
   throw new Error(`tripBreaker: ${kind} is a latch, not a tripping breaker`);

@@ -25,7 +25,6 @@ import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
 import {
   closeBreakerAfterProbe,
   getBreakerState,
-  LOOP_COOLDOWNS_MS as SHARED_LOOP_COOLDOWNS_MS,
   moveExpiredToHalfOpen,
   probeAttemptIdOf,
   releaseHalfOpenProbe,
@@ -67,8 +66,6 @@ import { errorText } from "./audit-shared";
  * Breakers only narrow: a manual switch always wins, and toggling the mode
  * never resets a breaker (only the attributed admin reset does).
  */
-
-export const LOOP_COOLDOWNS_MS = SHARED_LOOP_COOLDOWNS_MS;
 
 const MIN_MS = 60_000;
 const HOUR_MS = 60 * MIN_MS;
@@ -419,11 +416,6 @@ export type PlaneTripReason =
   | "consecutive_infra"
   | "infra_rate";
 
-export interface PlaneDecisions {
-  hatchet_dispatch: BreakerDecision<PlaneTripReason>;
-  exec_plane: BreakerDecision<PlaneTripReason>;
-}
-
 function failed(e: PlaneEvent): boolean {
   return e.outcome === "failure" || e.outcome === "timeout";
 }
@@ -458,42 +450,34 @@ function planeDecision(
 }
 
 /**
- * Pure. Both lists newest first. hatchet_dispatch: 3 consecutive failures or
- * ≥ 50% of the last 10 dispatches in 10 min (min 5). exec_plane: 3
- * consecutive infra terminal causes or ≥ 50% of the last 6 (min 3). Excluded
- * reasons never contribute.
+ * Pure, newest first. hatchet_dispatch: 3 consecutive failures or ≥ 50% of
+ * the last 10 dispatches in 10 min (min 5).
  */
-export function evaluatePlaneBreakers({
-  hatchet,
-  exec,
-  now,
-}: {
-  hatchet: PlaneEvent[];
-  exec: PlaneEvent[];
-  now: Date;
-}): PlaneDecisions {
-  const hatchetWindow = hatchet
+export function evaluateHatchetDispatchBreaker(
+  events: PlaneEvent[],
+  now: Date,
+): BreakerDecision<PlaneTripReason> {
+  const window = events
     .filter((e) => within(e.createdAt, now, HATCHET_RATE_WINDOW_MS))
     .slice(0, 10);
-  const execEvents = exec.filter(
-    (e) => !BREAKER_EXCLUDED_REASONS.has(e.signal),
+  return planeDecision(events, "consecutive_failures", "error_rate", window, 5);
+}
+
+/**
+ * Pure, newest first. exec_plane: 3 consecutive infra terminal causes or
+ * ≥ 50% of the last 6 (min 3). Excluded reasons never contribute.
+ */
+export function evaluateExecPlaneBreaker(
+  events: PlaneEvent[],
+): BreakerDecision<PlaneTripReason> {
+  const counted = events.filter((e) => !BREAKER_EXCLUDED_REASONS.has(e.signal));
+  return planeDecision(
+    counted,
+    "consecutive_infra",
+    "infra_rate",
+    counted.slice(0, 6),
+    3,
   );
-  return {
-    hatchet_dispatch: planeDecision(
-      hatchet,
-      "consecutive_failures",
-      "error_rate",
-      hatchetWindow,
-      5,
-    ),
-    exec_plane: planeDecision(
-      execEvents,
-      "consecutive_infra",
-      "infra_rate",
-      execEvents.slice(0, 6),
-      3,
-    ),
-  };
 }
 
 /** The first decided event at or after `since` (oldest first) decides a half-open plane breaker. */
@@ -1117,12 +1101,10 @@ class Evaluation {
         row.openedAt,
       );
       const events = await this.planeEvents(organizationId, scopeKind, since);
-      const decisions = evaluatePlaneBreakers({
-        hatchet: scopeKind === "hatchet_dispatch" ? events : [],
-        exec: scopeKind === "exec_plane" ? events : [],
-        now: this.now,
-      });
-      const decision = decisions[scopeKind];
+      const decision =
+        scopeKind === "hatchet_dispatch"
+          ? evaluateHatchetDispatchBreaker(events, this.now)
+          : evaluateExecPlaneBreaker(events);
       if (!decision.trip) continue;
       this.count(
         await this.trip(

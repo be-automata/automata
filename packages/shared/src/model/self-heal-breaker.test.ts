@@ -22,7 +22,6 @@ import {
   getBreakerState,
   LOOP_COOLDOWNS_MS,
   moveExpiredToHalfOpen,
-  planeCooldownMs,
   probeAttemptIdOf,
   recordBreakerEvent,
   recordProbeAttempt,
@@ -665,11 +664,11 @@ describe("self-heal breaker trips (loop and plane)", () => {
   });
 
   it("plane cooldowns double and cap: hatchet 120 s → 30 min, exec 1 h → 12 h", () => {
-    expect(planeCooldownMs("hatchet_dispatch", 1)).toBe(120_000);
-    expect(planeCooldownMs("hatchet_dispatch", 2)).toBe(240_000);
-    expect(planeCooldownMs("hatchet_dispatch", 30)).toBe(30 * 60_000);
-    expect(planeCooldownMs("exec_plane", 1)).toBe(H);
-    expect(planeCooldownMs("exec_plane", 30)).toBe(12 * H);
+    expect(breakerCooldownMs("hatchet_dispatch", 1)).toBe(120_000);
+    expect(breakerCooldownMs("hatchet_dispatch", 2)).toBe(240_000);
+    expect(breakerCooldownMs("hatchet_dispatch", 30)).toBe(30 * 60_000);
+    expect(breakerCooldownMs("exec_plane", 1)).toBe(H);
+    expect(breakerCooldownMs("exec_plane", 30)).toBe(12 * H);
   });
 
   it("the probe attempt id is recorded in the evidence and a refunded probe can be released", async () => {
