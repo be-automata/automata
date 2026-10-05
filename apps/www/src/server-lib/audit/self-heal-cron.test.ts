@@ -65,6 +65,14 @@ function harness(overrides: Partial<SelfHealCronDeps> = {}) {
     order.push("dispatch");
     return { dispatched: null, considered: 0 };
   });
+  const expirePrs = vi.fn(async () => {
+    order.push("expirePrs");
+    return { checked: 0, expired: 0, outcomes: {} };
+  });
+  const regressions = vi.fn(async () => {
+    order.push("regressions");
+    return { checked: 0, regressed: 0, reopened: 0, outcomes: {} };
+  });
   const deps: SelfHealCronDeps = {
     db: {} as DB,
     now: () => new Date(),
@@ -78,6 +86,8 @@ function harness(overrides: Partial<SelfHealCronDeps> = {}) {
     settlePrs: settlePrs as unknown as SelfHealCronDeps["settlePrs"],
     breakers: breakers as unknown as SelfHealCronDeps["breakers"],
     dispatch: dispatch as unknown as SelfHealCronDeps["dispatch"],
+    expirePrs: expirePrs as unknown as SelfHealCronDeps["expirePrs"],
+    regressions: regressions as unknown as SelfHealCronDeps["regressions"],
     budget: SELF_HEAL_CRON_BUDGET,
     ...overrides,
   };
@@ -93,6 +103,8 @@ function harness(overrides: Partial<SelfHealCronDeps> = {}) {
     settlePrs,
     breakers,
     dispatch,
+    expirePrs,
+    regressions,
   };
 }
 
@@ -294,10 +306,16 @@ describe("runSelfHealCron", () => {
     ]);
   });
 
-  it("the hourly kind prunes and never reconciles or dispatches", async () => {
+  it("the hourly kind prunes, then expires unreviewed fix PRs, then checks merged fixes for regressions, and never reconciles or dispatches", async () => {
     const h = harness();
     await runSelfHealCron("hourly", h.deps);
-    expect(h.order).toEqual(["drain", "sweep", "prune"]);
+    expect(h.order).toEqual([
+      "drain",
+      "sweep",
+      "prune",
+      "expirePrs",
+      "regressions",
+    ]);
     expect(h.reconcile).not.toHaveBeenCalled();
     expect(h.openPrs).not.toHaveBeenCalled();
     expect(h.evaluateDrafts).not.toHaveBeenCalled();
@@ -364,7 +382,39 @@ describe("runSelfHealCron", () => {
     const h = harness();
     h.drain.mockRejectedValueOnce(new Error("boom"));
     await expect(runSelfHealCron("hourly", h.deps)).resolves.toBeUndefined();
-    expect(h.order).toEqual(["sweep", "prune"]);
+    expect(h.order).toEqual(["sweep", "prune", "expirePrs", "regressions"]);
+  });
+
+  it("the expiry and regression sweeps get the hourly run's shared deadline and LIMIT 20 (R5)", async () => {
+    const h = harness();
+    await runSelfHealCron("hourly", h.deps);
+    const drainArg = (
+      h.drain.mock.calls[0] as unknown as [{ deadlineAt: Date }]
+    )[0];
+    for (const fn of [h.expirePrs, h.regressions]) {
+      const arg = (
+        fn.mock.calls[0] as unknown as [
+          { deadlineAt: Date; limit: number; db: unknown; now: Date },
+        ]
+      )[0];
+      expect(arg.deadlineAt).toEqual(drainArg.deadlineAt);
+      expect(arg.limit).toBe(20);
+      expect(arg.db).toBe(h.deps.db);
+      expect(arg.now).toBeInstanceOf(Date);
+    }
+    expect(h.expirePrs).toHaveBeenCalledTimes(1);
+    expect(h.regressions).toHaveBeenCalledTimes(1);
+  });
+
+  it("still checks regressions when the expiry sweep throws; a tick runs neither", async () => {
+    const h = harness();
+    h.expirePrs.mockRejectedValueOnce(new Error("boom"));
+    await runSelfHealCron("hourly", h.deps);
+    expect(h.order).toEqual(["drain", "sweep", "prune", "regressions"]);
+    const t = harness();
+    await runSelfHealCron("tick", t.deps);
+    expect(t.expirePrs).not.toHaveBeenCalled();
+    expect(t.regressions).not.toHaveBeenCalled();
   });
 
   it("abandons a hung drain at the total deadline and resolves", async () => {

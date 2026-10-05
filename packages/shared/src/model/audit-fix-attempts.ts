@@ -1198,3 +1198,38 @@ export async function recordFixRegression({
     .returning({ id: auditFixAttempts.id });
   return rows.length > 0;
 }
+
+/**
+ * Take the daily regression check of one merged fix (CAS on
+ * regression_checked_at): true for exactly one caller per 24 h, so two
+ * overlapping sweeps never emit the same breaker event twice.
+ */
+export async function claimRegressionCheck({
+  db,
+  organizationId,
+  attemptId,
+  now = new Date(),
+}: {
+  db: DB;
+  organizationId: string;
+  attemptId: string;
+  now?: Date;
+}): Promise<boolean> {
+  const recheckBefore = new Date(now.getTime() - FIX_REGRESSION_RECHECK_MS);
+  const rows = await db
+    .update(auditFixAttempts)
+    .set({ regressionCheckedAt: now })
+    .where(
+      and(
+        eq(auditFixAttempts.id, attemptId),
+        eq(auditFixAttempts.organizationId, organizationId),
+        isNotNull(auditFixAttempts.mergedAt),
+        or(
+          isNull(auditFixAttempts.regressionCheckedAt),
+          lte(auditFixAttempts.regressionCheckedAt, recheckBefore),
+        ),
+      ),
+    )
+    .returning({ id: auditFixAttempts.id });
+  return rows.length > 0;
+}

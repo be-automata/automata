@@ -10,6 +10,7 @@ import {
   bindFixAttemptThread,
   claimAttemptLease,
   claimFixAttempt,
+  claimRegressionCheck,
   closeFixAttempt,
   extendFixDispatchLease,
   getFixAttemptById,
@@ -1278,6 +1279,24 @@ describe("audit fix attempts", () => {
         expect(row?.regression).toEqual(regression);
         expect(row?.regressionCheckedAt).toEqual(NOW);
         expect(regressionRecordOf(row?.regression)).toEqual(regression);
+      });
+
+      it("claimRegressionCheck: one winner per 24 h, org-fenced, merged only", async () => {
+        const a = await withPr();
+        const claimAt = (organizationId: string, now: Date) =>
+          claimRegressionCheck({ db, organizationId, attemptId: a.id, now });
+        expect(await claimAt(orgA, NOW)).toBe(false);
+        await merge(a.id);
+        expect(await claimAt(orgB, NOW)).toBe(false);
+        const both = await Promise.all([
+          claimAt(orgA, NOW),
+          claimAt(orgA, NOW),
+        ]);
+        expect(both.filter(Boolean)).toHaveLength(1);
+        expect(
+          await claimAt(orgA, new Date(NOW.getTime() + 23 * 60 * MIN)),
+        ).toBe(false);
+        expect(await claimAt(orgA, new Date(NOW.getTime() + DAY))).toBe(true);
       });
 
       it("regressionRecordOf reads only a well-formed record", () => {

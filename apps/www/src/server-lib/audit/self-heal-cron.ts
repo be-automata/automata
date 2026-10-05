@@ -6,9 +6,11 @@ import { redactSecrets } from "@terragon/utils/redact";
 import { runAuditSweep, runOutboxDrain } from "./audit-sweep";
 import { runStuckDraftSweep } from "./evaluate-fix-ci";
 import { runFixDispatchReconcile } from "./fix-dispatch-reconcile";
+import { runFixPrExpirySweep } from "./fix-pr-expiry";
 import { runFixPrSettleSweep } from "./fix-pr-lifecycle";
 import { runLoopBreakerEvaluation } from "./loop-breaker";
 import { runFixPrOpenSweep } from "./open-fix-pr";
+import { runFixRegressionSweep } from "./regression-sweep";
 import { runSelfHealDispatcher } from "./self-heal-dispatcher";
 
 /**
@@ -41,6 +43,8 @@ export interface SelfHealCronDeps {
   settlePrs: typeof runFixPrSettleSweep;
   breakers: typeof runLoopBreakerEvaluation;
   dispatch: typeof runSelfHealDispatcher;
+  expirePrs: typeof runFixPrExpirySweep;
+  regressions: typeof runFixRegressionSweep;
   budget: { totalMs: number; perItemMs: number; limit: number };
 }
 
@@ -57,6 +61,8 @@ function defaultDeps(): SelfHealCronDeps {
     settlePrs: runFixPrSettleSweep,
     breakers: runLoopBreakerEvaluation,
     dispatch: runSelfHealDispatcher,
+    expirePrs: runFixPrExpirySweep,
+    regressions: runFixRegressionSweep,
     budget: SELF_HEAL_CRON_BUDGET,
   };
 }
@@ -202,6 +208,28 @@ export async function runSelfHealCron(
     await withinBudget("retention prune", PRUNE_BUDGET_MS, async () => {
       const pruned = await deps.prune({ db: deps.db, now: deps.now() });
       console.log("[cron:self-heal] pruned", pruned);
+    });
+    // R5: withdraw ready fix PRs nobody reviewed within the repo's window,
+    // then the daily read-only regression check of merged fixes. Both feed
+    // the loop_fix breaker (pr_expired / regressed / reopened), which the
+    // next tick evaluates. Bounded by what is left of the shared budget.
+    await withinBudget("fix PR expiry", remaining(), async () => {
+      const result = await deps.expirePrs({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+      });
+      console.log("[cron:self-heal] fix PR expiry", result);
+    });
+    await withinBudget("fix regressions", remaining(), async () => {
+      const result = await deps.regressions({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+      });
+      console.log("[cron:self-heal] fix regressions", result);
     });
   }
 }
