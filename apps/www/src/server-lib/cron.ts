@@ -9,6 +9,7 @@ import {
 import { getScheduledAutomationsDueToRun } from "@terragon/shared/model/automations";
 import { maybeHibernateSandboxById } from "@/agent/sandbox";
 import { maybeStartQueuedThreadChat } from "@/server-lib/process-queued-thread";
+import { AUDIT_FINDINGS_SKILL_NAME } from "@/server-lib/review/review-skill";
 
 // NOTE: runScheduledThread and runAutomation are imported dynamically inside the
 // runner bodies below (not at module top). This cron module is eagerly loaded by the
@@ -207,6 +208,91 @@ export async function runScheduledTasksCron(): Promise<void> {
   }
 }
 
+type DueAutomation = Awaited<
+  ReturnType<typeof getScheduledAutomationsDueToRun>
+>[number];
+type RunAutomationFn =
+  (typeof import("@/server-lib/automations"))["runAutomation"];
+
+/** A scheduled self-heal audit: the audit-findings skill automation. */
+function isAuditFindingsAutomation(automation: DueAutomation): boolean {
+  return (
+    automation.action.type === "skill_message" &&
+    automation.action.config.skillName === AUDIT_FINDINGS_SKILL_NAME
+  );
+}
+
+/**
+ * BULK-01: a scheduled audit is a self-heal run, so it takes the same
+ * review-first admission and the single box slot as a fix run. A deferred
+ * audit never reaches runAutomation — the only writer of nextRunAt — so it
+ * stays due and the next tick retries it. Admission errors fail closed
+ * (deferred) and never throw out of the cron.
+ */
+async function runAdmittedAuditAutomation(
+  automation: DueAutomation,
+  runAutomation: RunAutomationFn,
+): Promise<void> {
+  const { admitSelfHealRun } = await import(
+    "@/server-lib/audit/self-heal-admission"
+  );
+  const { releaseSelfHealSlot, setSlotHolderThread } = await import(
+    "@terragon/shared/model/self-heal-slot"
+  );
+  if (!automation.organizationId) {
+    console.error(
+      "[cron:automations] audit automation has no organization — deferred",
+      { automationId: automation.id },
+    );
+    return;
+  }
+  let admitted: boolean;
+  try {
+    const admission = await admitSelfHealRun({
+      db,
+      organizationId: automation.organizationId,
+      holderKind: "audit",
+      context: { repoFullName: automation.repoFullName },
+    });
+    admitted = admission.admitted;
+  } catch (e) {
+    console.error(
+      "[cron:automations] self-heal admission failed — audit deferred",
+      {
+        automationId: automation.id,
+        error: e instanceof Error ? e.message : String(e),
+      },
+    );
+    return;
+  }
+  if (!admitted) return;
+
+  let started: Awaited<ReturnType<RunAutomationFn>>;
+  try {
+    started = await runAutomation({
+      automationId: automation.id,
+      userId: automation.userId,
+      source: "automated",
+    });
+  } catch (e) {
+    // Nothing was dispatched under the slot: free the pre-holder lease now
+    // rather than let it block the box for 5 min.
+    await releaseSelfHealSlot({ db });
+    throw e;
+  }
+  if (!started) {
+    await releaseSelfHealSlot({ db });
+    return;
+  }
+  const held = await setSlotHolderThread({ db, threadId: started.threadId });
+  if (!held) {
+    console.error(
+      "[cron:automations] audit started but its slot lease had lapsed",
+      { automationId: automation.id, threadId: started.threadId },
+    );
+  }
+}
+
 /**
  * Fire due scheduled automations (recurring event-triggered workflows). Already
  * in-process (runAutomation) — extracted here so the scheduled() worker-entry can
@@ -220,11 +306,13 @@ export async function runAutomationsCron(): Promise<void> {
     const batch = dueAutomations.slice(i, i + BATCH_SIZE);
     const results = await Promise.allSettled(
       batch.map((automation) =>
-        runAutomation({
-          automationId: automation.id,
-          userId: automation.userId,
-          source: "automated",
-        }),
+        isAuditFindingsAutomation(automation)
+          ? runAdmittedAuditAutomation(automation, runAutomation)
+          : runAutomation({
+              automationId: automation.id,
+              userId: automation.userId,
+              source: "automated",
+            }),
       ),
     );
     for (const result of results) {

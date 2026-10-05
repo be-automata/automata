@@ -6,6 +6,11 @@ const h = vi.hoisted(() => ({
   order: [] as string[],
   getStalledThreads: vi.fn(),
   selfHeal: vi.fn(),
+  due: vi.fn(async (): Promise<unknown[]> => []),
+  runAutomation: vi.fn(),
+  admit: vi.fn(),
+  setHolder: vi.fn(),
+  release: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({ db: {} }));
@@ -19,7 +24,17 @@ vi.mock("@terragon/shared/model/threads", () => ({
   getScheduledThreadChatsDueToRun: vi.fn(async () => []),
 }));
 vi.mock("@terragon/shared/model/automations", () => ({
-  getScheduledAutomationsDueToRun: vi.fn(async () => []),
+  getScheduledAutomationsDueToRun: h.due,
+}));
+vi.mock("@/server-lib/automations", () => ({
+  runAutomation: h.runAutomation,
+}));
+vi.mock("@/server-lib/audit/self-heal-admission", () => ({
+  admitSelfHealRun: h.admit,
+}));
+vi.mock("@terragon/shared/model/self-heal-slot", () => ({
+  setSlotHolderThread: h.setHolder,
+  releaseSelfHealSlot: h.release,
 }));
 vi.mock("@/agent/sandbox", () => ({ maybeHibernateSandboxById: vi.fn() }));
 vi.mock("@/server-lib/process-queued-thread", () => ({
@@ -141,5 +156,148 @@ describe("runScheduledCron self-heal bulkhead", () => {
     await runScheduledCron("*/1 * * * *");
     await runScheduledCron("*/30 * * * *");
     expect(h.selfHeal).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * BULK-01: scheduled audit-findings automations obey the same review-first
+ * admission and box slot as fix runs. A deferred audit never reaches
+ * runAutomation — the only writer of nextRunAt (markAutomationExecuted) — so
+ * it stays due and the next tick retries it.
+ */
+describe("runAutomationsCron self-heal admission", () => {
+  let runAutomationsCron: () => Promise<void>;
+
+  const AUDIT = {
+    id: "auto-audit",
+    userId: "u1",
+    organizationId: "org-1",
+    repoFullName: "acme/widgets",
+    action: {
+      type: "skill_message",
+      config: { skillName: "audit-findings", version: "latest" },
+    },
+  };
+  const PLAIN = {
+    id: "auto-plain",
+    userId: "u2",
+    organizationId: "org-1",
+    repoFullName: "acme/widgets",
+    action: {
+      type: "user_message",
+      config: { message: { type: "user", model: null, parts: [] } },
+    },
+  };
+  const OTHER_SKILL = {
+    ...PLAIN,
+    id: "auto-skill",
+    action: {
+      type: "skill_message",
+      config: { skillName: "pr-review", version: "latest" },
+    },
+  };
+
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ runAutomationsCron } = await import("./cron"));
+    for (const fn of [
+      h.due,
+      h.runAutomation,
+      h.admit,
+      h.setHolder,
+      h.release,
+    ]) {
+      fn.mockReset();
+    }
+    h.runAutomation.mockResolvedValue({
+      threadId: "thr-1",
+      threadChatId: "c1",
+    });
+    h.admit.mockResolvedValue({ admitted: true });
+    h.setHolder.mockResolvedValue(true);
+    h.release.mockResolvedValue(true);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("defers an audit while a review is in flight: runAutomation is not called, it stays due", async () => {
+    h.due.mockResolvedValue([AUDIT]);
+    h.admit.mockResolvedValue({ admitted: false, reason: "review_in_flight" });
+    await runAutomationsCron();
+    expect(h.admit).toHaveBeenCalledTimes(1);
+    expect(h.admit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        organizationId: "org-1",
+        holderKind: "audit",
+        context: expect.objectContaining({ repoFullName: "acme/widgets" }),
+      }),
+    );
+    expect(h.runAutomation).not.toHaveBeenCalled();
+    expect(h.setHolder).not.toHaveBeenCalled();
+    expect(h.release).not.toHaveBeenCalled();
+
+    // Next tick: still selected as due (nothing advanced nextRunAt).
+    h.admit.mockResolvedValue({ admitted: true });
+    await runAutomationsCron();
+    expect(h.runAutomation).toHaveBeenCalledTimes(1);
+  });
+
+  it("defers an audit when the slot is held", async () => {
+    h.due.mockResolvedValue([AUDIT]);
+    h.admit.mockResolvedValue({ admitted: false, reason: "slot_held" });
+    await runAutomationsCron();
+    expect(h.runAutomation).not.toHaveBeenCalled();
+  });
+
+  it("admitted: runs the audit and records its thread as the slot holder", async () => {
+    h.due.mockResolvedValue([AUDIT]);
+    await runAutomationsCron();
+    expect(h.runAutomation).toHaveBeenCalledWith({
+      automationId: "auto-audit",
+      userId: "u1",
+      source: "automated",
+    });
+    expect(h.setHolder).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: "thr-1" }),
+    );
+    expect(h.release).not.toHaveBeenCalled();
+  });
+
+  it("admitted but no thread started: the pre-holder slot is released", async () => {
+    h.due.mockResolvedValue([AUDIT]);
+    h.runAutomation.mockResolvedValue(undefined);
+    await runAutomationsCron();
+    expect(h.setHolder).not.toHaveBeenCalled();
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.release.mock.calls[0]![0]).not.toHaveProperty("threadId");
+  });
+
+  it("admitted but runAutomation throws: the slot is released and the cron does not throw", async () => {
+    h.due.mockResolvedValue([AUDIT]);
+    h.runAutomation.mockRejectedValue(new Error("boom"));
+    await expect(runAutomationsCron()).resolves.toBeUndefined();
+    expect(h.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("an admission error fails closed: deferred, no throw out of the cron", async () => {
+    h.due.mockResolvedValue([AUDIT, PLAIN]);
+    h.admit.mockRejectedValue(new Error("db down"));
+    await expect(runAutomationsCron()).resolves.toBeUndefined();
+    expect(h.runAutomation).toHaveBeenCalledTimes(1);
+    expect(h.runAutomation).toHaveBeenCalledWith(
+      expect.objectContaining({ automationId: "auto-plain" }),
+    );
+  });
+
+  it("non-audit automations bypass admission exactly as before", async () => {
+    h.due.mockResolvedValue([PLAIN, OTHER_SKILL]);
+    await runAutomationsCron();
+    expect(h.admit).not.toHaveBeenCalled();
+    expect(h.runAutomation).toHaveBeenCalledTimes(2);
+    expect(h.setHolder).not.toHaveBeenCalled();
+    expect(h.release).not.toHaveBeenCalled();
   });
 });
