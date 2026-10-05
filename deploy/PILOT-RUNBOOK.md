@@ -1422,7 +1422,9 @@ private repo from the same generated output: one repo for the calibration and on
    `pnpm exec tsx deploy/self-heal-bench/verify-fixes.ts --repo <owner/fixture-rN> --manifest <dir>/manifest.json --hidden <dir>/hidden-tests --export loop-<n>.json --out verify-<n>.json`.
    It is read-only on GitHub (`gh api` GETs and one clone into `$TMPDIR`, deleted on exit). Hidden
    tests import PR-head code written by the fix agent, so run it on a disposable machine if in
-   doubt. The child processes get a scrubbed environment.
+   doubt. The child processes get a scrubbed environment. The checks are the worker's own
+   (`runSelfHealChecks`); a `pnpm-lock.yaml` audit uses `--pnpm <absolute path>`, else the
+   absolute `command -v pnpm`.
 4. Score everything:
    `pnpm exec tsx deploy/self-heal-bench/score.ts --manifest <dir>/manifest.json --loop loop-1.json,loop-2.json,loop-3.json --audit-only audit-1.json,...,audit-5.json --verification verify-1.json,verify-2.json,verify-3.json [--costs c1,c2,c3] [--section-scores sections.json]`.
    Costs are optional: one total per loop run, reported only and never a threshold.
