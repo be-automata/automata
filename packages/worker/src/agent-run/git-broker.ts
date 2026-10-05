@@ -171,12 +171,10 @@ export async function startGitBroker(
     }
     fwd.authorization = injectedAuth;
     const hasBody = req.method === "POST";
-    let body: ReadableStream | undefined = hasBody
-      ? (Readable.toWeb(req) as ReadableStream)
-      : undefined;
+    let body: ReadableStream | undefined;
     // 5. FENCE-01: a fenced push is checked before GitHub is dialled.
     let fencedPushSha: string | null = null;
-    if (refFence && req.method === "POST" && endpoint === RECEIVE_PACK) {
+    if (refFence && hasBody && endpoint === RECEIVE_PACK) {
       const gate = await gateReceivePack(req, refFence.exactRef);
       if (!gate.ok) {
         console.error(
@@ -191,6 +189,11 @@ export async function startGitBroker(
       }
       fencedPushSha = gate.pushedSha;
       body = gate.body;
+    } else if (hasBody) {
+      // Only wrap `req` when nothing else reads it: toWeb's 'data' listener
+      // would otherwise mirror every chunk the fence reads into a stream
+      // nobody drains.
+      body = Readable.toWeb(req) as ReadableStream;
     }
     const upstream = await fetchImpl(target, {
       method: req.method,

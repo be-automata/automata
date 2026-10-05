@@ -1,4 +1,7 @@
+import { Readable } from "node:stream";
+
 import { describe, it, expect, afterEach, vi } from "vitest";
+
 import { startGitBroker, type GitBroker } from "./git-broker";
 
 const TOKEN = "ghs_installation_token_secret";
@@ -416,6 +419,21 @@ describe("startGitBroker refFence (FENCE-01 — self-heal fix runs)", () => {
     expect(status).toBe(200);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.body!.equals(body)).toBe(true);
+  });
+
+  it("a multi-chunk fenced push forwards the FULL body and never wraps req in toWeb", async () => {
+    const { b, calls } = await bootFenced();
+    const toWeb = vi.spyOn(Readable, "toWeb");
+    const pack = Buffer.alloc(2 * 1024 * 1024, 7);
+    const body = Buffer.concat([pushBody([[OLD_SHA, NEW_SHA, FIX_REF]]), pack]);
+    // Split inside the command section so the fence must loop over chunks.
+    const { status } = await streamedPost(b, body, 30, () => 0);
+    expect(status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body!.length).toBe(body.length);
+    expect(calls[0]!.body!.equals(body)).toBe(true);
+    expect(toWeb).not.toHaveBeenCalled();
+    toWeb.mockRestore();
   });
 });
 
