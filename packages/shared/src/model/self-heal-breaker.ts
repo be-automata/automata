@@ -95,6 +95,8 @@ export const UNFENCED_SELF_HEAL_MODEL_FUNCTIONS: Record<string, string> = {
     "lifecycle sweep settles merged/closed fix PRs across all orgs; rows carry organizationId",
   listOpenReadyFixPrs:
     "expiry sweep finds unreviewed ready fix PRs across all orgs; rows carry organizationId",
+  listRegressionCandidates:
+    "daily regression sweep reads merged fix PRs across all orgs; rows carry organizationId",
   acquireSelfHealSlot: "platform-wide single box slot",
   setSlotHolderThread: "platform-wide single box slot",
   releaseSelfHealSlot: "platform-wide single box slot",

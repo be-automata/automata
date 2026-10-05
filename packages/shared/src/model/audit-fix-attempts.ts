@@ -1083,3 +1083,118 @@ export async function listOpenReadyFixPrs({
       .limit(limit),
   );
 }
+
+/** A merged fix is re-checked for regressions at most once a day. */
+export const FIX_REGRESSION_RECHECK_MS = 86_400_000;
+
+/**
+ * What the daily regression check last saw for a merged fix (R5). Read-only
+ * observations of GitHub and the finding; the breaker events derive from
+ * the difference between two records.
+ */
+export interface RegressionRecord {
+  /** A commit on the default branch reverts the merge. */
+  reverted: boolean;
+  revertSha?: string;
+  /** Non-bot commits after the merge that touch the merged line ranges. */
+  followupShas: string[];
+  /** The finding was reopened after the merge (last_reopened_at > merged_at). */
+  reopened: boolean;
+  /** ISO time of the check. */
+  checkedAt: string;
+  /** The 30-day window ended: the attempt is never selected again. */
+  windowComplete: boolean;
+}
+
+/** The stored record, or null when absent or malformed. Pure. */
+export function regressionRecordOf(value: unknown): RegressionRecord | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Record<string, unknown>;
+  if (
+    typeof v.reverted !== "boolean" ||
+    typeof v.reopened !== "boolean" ||
+    typeof v.checkedAt !== "string" ||
+    typeof v.windowComplete !== "boolean" ||
+    !Array.isArray(v.followupShas)
+  ) {
+    return null;
+  }
+  return {
+    reverted: v.reverted,
+    ...(typeof v.revertSha === "string" ? { revertSha: v.revertSha } : {}),
+    followupShas: v.followupShas.filter(
+      (sha): sha is string => typeof sha === "string",
+    ),
+    reopened: v.reopened,
+    checkedAt: v.checkedAt,
+    windowComplete: v.windowComplete,
+  };
+}
+
+/**
+ * UNFENCED (R5): merged fixes whose 30-day window is not complete and that
+ * were not checked in the last 24 h, across all orgs; never-checked first,
+ * then the least recently checked. Rows carry organizationId; every later
+ * call re-fences on it.
+ */
+export async function listRegressionCandidates({
+  db,
+  now = new Date(),
+  limit = 10,
+}: {
+  db: DB;
+  now?: Date;
+  limit?: number;
+}): Promise<AuditFixAttemptRow[]> {
+  const recheckBefore = new Date(now.getTime() - FIX_REGRESSION_RECHECK_MS);
+  return withSelfHealTx(db, (tx) =>
+    tx
+      .select()
+      .from(auditFixAttempts)
+      .where(
+        and(
+          eq(auditFixAttempts.prState, "merged"),
+          isNotNull(auditFixAttempts.mergedAt),
+          isNotNull(auditFixAttempts.regressionWindowEndsAt),
+          sql`coalesce((${auditFixAttempts.regression} ->> 'windowComplete')::boolean, false) = false`,
+          or(
+            isNull(auditFixAttempts.regressionCheckedAt),
+            lte(auditFixAttempts.regressionCheckedAt, recheckBefore),
+          ),
+        ),
+      )
+      .orderBy(
+        sql`${auditFixAttempts.regressionCheckedAt} asc nulls first`,
+        asc(auditFixAttempts.mergedAt),
+      )
+      .limit(limit),
+  );
+}
+
+/** Store one regression check of a merged fix. */
+export async function recordFixRegression({
+  db,
+  organizationId,
+  attemptId,
+  regression,
+  now = new Date(),
+}: {
+  db: DB;
+  organizationId: string;
+  attemptId: string;
+  regression: RegressionRecord;
+  now?: Date;
+}): Promise<boolean> {
+  const rows = await db
+    .update(auditFixAttempts)
+    .set({ regression, regressionCheckedAt: now })
+    .where(
+      and(
+        eq(auditFixAttempts.id, attemptId),
+        eq(auditFixAttempts.organizationId, organizationId),
+        isNotNull(auditFixAttempts.mergedAt),
+      ),
+    )
+    .returning({ id: auditFixAttempts.id });
+  return rows.length > 0;
+}

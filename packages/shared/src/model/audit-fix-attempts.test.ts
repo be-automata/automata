@@ -19,6 +19,7 @@ import {
   getFindingForAttempt,
   listPendingPrOpens,
   listExpiredFixClaims,
+  listRegressionCandidates,
   listFixReadyFindings,
   listOpenReadyFixPrs,
   listStaleDispatchedAttempts,
@@ -27,6 +28,10 @@ import {
   recordFixPrClosed,
   recordFixPrMergeDetail,
   recordFixPrMerged,
+  recordFixRegression,
+  regressionRecordOf,
+  FIX_REGRESSION_RECHECK_MS,
+  type RegressionRecord,
   refundFixAttempt,
   releaseAttemptLease,
   updateFixAttempt,
@@ -1168,6 +1173,122 @@ describe("audit fix attempts", () => {
       expect(
         pick(await listOpenReadyFixPrs({ db, now: T0, limit: 1000 })),
       ).toEqual([old.id, young.id].sort());
+    });
+
+    describe("30-day regression tracking (R5)", () => {
+      const NOW = new Date(MERGED_AT.getTime() + 3 * DAY);
+      const record = (
+        over: Partial<RegressionRecord> = {},
+      ): RegressionRecord => ({
+        reverted: false,
+        followupShas: [],
+        reopened: false,
+        checkedAt: NOW.toISOString(),
+        windowComplete: false,
+        ...over,
+      });
+
+      it("listRegressionCandidates: merged, window not complete, unchecked for 24 h; unfenced", async () => {
+        expect(
+          "listRegressionCandidates" in UNFENCED_SELF_HEAL_MODEL_FUNCTIONS,
+        ).toBe(true);
+        expect(FIX_REGRESSION_RECHECK_MS).toBe(DAY);
+        const fresh = await withPr();
+        const stale = await withPr();
+        const recent = await withPr();
+        const complete = await withPr();
+        const notMerged = await withPr();
+        for (const a of [fresh, stale, recent, complete]) await merge(a.id);
+        await recordFixRegression({
+          db,
+          organizationId: orgA,
+          attemptId: stale.id,
+          regression: record(),
+          now: new Date(NOW.getTime() - DAY - MIN),
+        });
+        await recordFixRegression({
+          db,
+          organizationId: orgA,
+          attemptId: recent.id,
+          regression: record(),
+          now: new Date(NOW.getTime() - 60 * MIN),
+        });
+        await recordFixRegression({
+          db,
+          organizationId: orgA,
+          attemptId: complete.id,
+          regression: record({ windowComplete: true }),
+          now: new Date(NOW.getTime() - 2 * DAY),
+        });
+
+        const rows = await listRegressionCandidates({
+          db,
+          now: NOW,
+          limit: 1000,
+        });
+        const mine = new Set(
+          [fresh, stale, recent, complete, notMerged].map((a) => a.id),
+        );
+        const picked = rows.filter((r) => mine.has(r.id)).map((r) => r.id);
+        // Never checked first, then the least recently checked.
+        expect(picked).toEqual([fresh.id, stale.id]);
+      });
+
+      it("recordFixRegression is org-fenced, needs a merge and stamps the check time", async () => {
+        const a = await withPr();
+        const regression = record({
+          reverted: true,
+          revertSha: "e".repeat(40),
+          followupShas: ["s1"],
+          reopened: true,
+        });
+        expect(
+          await recordFixRegression({
+            db,
+            organizationId: orgA,
+            attemptId: a.id,
+            regression,
+            now: NOW,
+          }),
+        ).toBe(false);
+        await merge(a.id);
+        expect(
+          await recordFixRegression({
+            db,
+            organizationId: orgB,
+            attemptId: a.id,
+            regression,
+            now: NOW,
+          }),
+        ).toBe(false);
+        expect(
+          await recordFixRegression({
+            db,
+            organizationId: orgA,
+            attemptId: a.id,
+            regression,
+            now: NOW,
+          }),
+        ).toBe(true);
+        const row = await getFixAttemptById({
+          db,
+          organizationId: orgA,
+          id: a.id,
+        });
+        expect(row?.regression).toEqual(regression);
+        expect(row?.regressionCheckedAt).toEqual(NOW);
+        expect(regressionRecordOf(row?.regression)).toEqual(regression);
+      });
+
+      it("regressionRecordOf reads only a well-formed record", () => {
+        expect(regressionRecordOf(null)).toBeNull();
+        expect(regressionRecordOf({ reverted: "yes" })).toBeNull();
+        expect(regressionRecordOf(record())).toEqual(record());
+        expect(
+          regressionRecordOf({ ...record(), followupShas: [1, "x"] })
+            ?.followupShas,
+        ).toEqual(["x"]);
+      });
     });
   });
 });
