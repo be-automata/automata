@@ -11,12 +11,15 @@
  * every PR whose head branch starts with FIX_BRANCH_PREFIX (`automata/fix-`):
  *   1. maps the PR to its seed through the export (attempt pr_number ->
  *      finding -> matchSeed); a PR with no seed is reported with seedId null;
- *   2. checks out the PR head (refs/pull/<n>/head) on a clean tree;
+ *   2. checks out the PR head on a clean tree (every refs/pull/<n>/head is
+ *      fetched once, right after the clone);
  *   3. runs the seed's hidden test with `node --test`
  *      (BENCH_REPO_ROOT=<checkout>, scrubbed env, 60 s timeout);
  *   4. runs the seed's deterministic check;
  *   5. scans the PR's added lines for suppression markers with the www
- *      suppression guard (hasSuppressionMarker, the regexes production uses).
+ *      suppression guard (hasSuppressionMarker, the regexes production uses);
+ *      the PR file listings are read up front, at most 4 at a time, while
+ *      the clone runs. Checkouts and tests stay sequential.
  * Then it runs every seed's check on the default branch head in one call
  * (finalChecks, which score.ts uses for the false-closure rate). The clone is
  * deleted on exit, also on failure.
@@ -57,6 +60,7 @@ import {
   assertRepo,
   fail,
   parseCli,
+  mapLimit,
   refuseOverwrite,
   runMain,
   writeJson,
@@ -67,6 +71,7 @@ const USAGE =
 const HIDDEN_TEST_TIMEOUT_MS = 60_000;
 const CHECK_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT = 64 * 1024 * 1024;
+const GH_CONCURRENCY = 4;
 
 interface RunResult {
   code: number | null;
@@ -160,15 +165,25 @@ async function git(cwd: string, args: string[]): Promise<RunResult> {
   return run("git", args, { cwd, timeoutMs: CHECK_TIMEOUT_MS });
 }
 
+/** Every PR head as refs/remotes/pr/<n>, and the default branch, in one fetch. */
+async function fetchRefs(cwd: string, defaultBranch: string): Promise<void> {
+  const fetched = await git(cwd, [
+    "fetch",
+    "--quiet",
+    "origin",
+    "+refs/pull/*/head:refs/remotes/pr/*",
+    `+refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`,
+  ]);
+  if (fetched.code !== 0) throw new Error("git fetch of the PR heads failed");
+}
+
 async function checkoutClean(cwd: string, ref: string): Promise<void> {
-  const fetched = await git(cwd, ["fetch", "--quiet", "origin", ref]);
-  if (fetched.code !== 0) throw new Error(`git fetch ${ref} failed`);
   const checkout = await git(cwd, [
     "checkout",
     "--quiet",
     "--detach",
     "--force",
-    "FETCH_HEAD",
+    ref,
   ]);
   if (checkout.code !== 0) throw new Error(`git checkout ${ref} failed`);
   await git(cwd, ["clean", "-ffdxq"]);
@@ -285,9 +300,17 @@ async function main(): Promise<void> {
   const hiddenDir = resolve(args.hidden);
   const pnpmPath = await resolvePnpm(args.pnpm);
   const findingById = new Map(snapshot.findings.map((f) => [f.id, f]));
+  /** The finding of each PR's first attempt. */
+  const findingIdByPr = new Map<number, string>();
+  for (const attempt of snapshot.attempts) {
+    if (attempt.prNumber !== null && !findingIdByPr.has(attempt.prNumber)) {
+      findingIdByPr.set(attempt.prNumber, attempt.findingId);
+    }
+  }
   const seedOfPr = (prNumber: number): Seed | null => {
-    const attempt = snapshot.attempts.find((a) => a.prNumber === prNumber);
-    const finding = attempt ? findingById.get(attempt.findingId) : undefined;
+    const findingId = findingIdByPr.get(prNumber);
+    const finding =
+      findingId === undefined ? undefined : findingById.get(findingId);
     return finding ? matchSeed(manifest, finding) : null;
   };
 
@@ -312,24 +335,39 @@ async function main(): Promise<void> {
   const workDir = mkdtempSync(join(tmpdir(), "bench-verify-"));
   const checkout = join(workDir, "checkout");
   try {
-    const cloned = await run(
-      "gh",
-      ["repo", "clone", args.repo, checkout, "--", "--quiet", "--no-tags"],
-      { env: process.env, timeoutMs: CHECK_TIMEOUT_MS },
-    );
-    if (cloned.code !== 0) throw new Error(`gh repo clone ${args.repo} failed`);
+    const clone = async (): Promise<void> => {
+      const cloned = await run(
+        "gh",
+        ["repo", "clone", args.repo, checkout, "--", "--quiet", "--no-tags"],
+        { env: process.env, timeoutMs: CHECK_TIMEOUT_MS },
+      );
+      if (cloned.code !== 0) {
+        throw new Error(`gh repo clone ${args.repo} failed`);
+      }
+      await fetchRefs(checkout, defaultBranch);
+    };
+    // Settle both before failing, so the clone is never removed mid-write.
+    const [listed, cloned] = await Promise.allSettled([
+      mapLimit(fixPrs, GH_CONCURRENCY, (prNumber) =>
+        suppressionHits(args.repo, prNumber),
+      ),
+      clone(),
+    ]);
+    if (cloned.status === "rejected") throw cloned.reason;
+    if (listed.status === "rejected") throw listed.reason;
+    const hits = listed.value;
 
     const prs: PrVerification[] = [];
-    for (const prNumber of fixPrs) {
+    for (const [index, prNumber] of fixPrs.entries()) {
       const seed = seedOfPr(prNumber);
-      await checkoutClean(checkout, `refs/pull/${prNumber}/head`);
+      await checkoutClean(checkout, `refs/remotes/pr/${prNumber}`);
       const entry: PrVerification = {
         prNumber,
         headSha: await headSha(checkout),
         seedId: seed?.id ?? null,
         hiddenTest: await runHiddenTest(seed, hiddenDir, checkout),
         check: await checkSeed(seed, checkout, pnpmPath),
-        suppressionHits: await suppressionHits(args.repo, prNumber),
+        suppressionHits: hits[index] ?? [],
       };
       prs.push(entry);
       console.log(
@@ -337,7 +375,7 @@ async function main(): Promise<void> {
       );
     }
 
-    await checkoutClean(checkout, `refs/heads/${defaultBranch}`);
+    await checkoutClean(checkout, `refs/remotes/origin/${defaultBranch}`);
     const defaultBranchSha = await headSha(checkout);
     const finalChecks: Record<string, BenchCheckOutcome> = Object.fromEntries(
       await runChecks(manifest.seeds, checkout, pnpmPath),

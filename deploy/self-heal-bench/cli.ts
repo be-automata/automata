@@ -55,3 +55,22 @@ export function refuseOverwrite(path: string, force: boolean): void {
 export function writeJson(path: string, value: unknown): void {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
+
+/** fn over items with at most `limit` calls in flight; results in order. */
+export async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = [];
+  let next = 0;
+  const lane = async (): Promise<void> => {
+    for (let index = next++; index < items.length; index = next++) {
+      // In range by the loop condition; T itself may include undefined.
+      results[index] = await fn(items[index] as T);
+    }
+  };
+  const lanes = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: lanes }, lane));
+  return results;
+}
