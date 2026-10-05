@@ -330,6 +330,22 @@ describe("renderFixture", () => {
     expect(BENCH_FAKE_MARKER).toBe("BENCHMARK FAKE — not a secret");
   });
 
+  it("scopes the fake .npmrc auth away from the public registry", () => {
+    // An auth line or a default registry here would break every `npm audit`
+    // the dependency seeds rely on (worker check and verify-fixes alike).
+    const npmrcs = Object.entries(fixture.repoFiles).filter(
+      ([path]) => path === ".npmrc" || path.endsWith("/.npmrc"),
+    );
+    expect(npmrcs.length).toBeGreaterThan(0);
+    for (const [path, text] of npmrcs) {
+      expect(text, path).not.toMatch(/registry\.npmjs\.org/i);
+      expect(text, path).not.toMatch(/^\s*registry\s*=/m);
+      for (const line of text.split("\n").filter((l) => /_auth/i.test(l))) {
+        expect(line, path).toMatch(/^\/\/[a-z0-9.-]+\.invalid\//);
+      }
+    }
+  });
+
   it("ships no lockfile at the root (the operator generates it once)", () => {
     expect(fixture.repoFiles["package-lock.json"]).toBeUndefined();
     expect(fixture.repoFiles["pnpm-lock.yaml"]).toBeUndefined();

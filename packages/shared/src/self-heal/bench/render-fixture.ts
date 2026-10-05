@@ -46,45 +46,10 @@ const GITIGNORE_BASE = [
   "*.key",
   "*.p12",
 ];
-const GITIGNORE_KEPT = ["node_modules/", "dist/", "coverage/"];
+/** The directory patterns every gitignore fix must keep. */
+const GITIGNORE_KEPT = GITIGNORE_BASE.filter((line) => line.endsWith("/"));
 const SECURITY_LINK =
   "Report vulnerabilities as described in [SECURITY.md](SECURITY.md).";
-
-/** How the root code consumes each vulnerable dependency. */
-const DEPENDENCY_CONSUMERS: Readonly<
-  Record<string, { importLine: string; fn: string; body: string }>
-> = {
-  lodash: {
-    importLine: 'import merge from "lodash/merge.js";',
-    fn: "mergeConfig",
-    body: "export function mergeConfig(base, override) {\n  return merge({}, base, override);\n}",
-  },
-  minimist: {
-    importLine: 'import minimist from "minimist";',
-    fn: "parseArgs",
-    body: "export function parseArgs(argv) {\n  return minimist(argv);\n}",
-  },
-  "node-fetch": {
-    importLine: 'import fetch from "node-fetch";',
-    fn: "getJson",
-    body: "export async function getJson(url) {\n  const response = await fetch(url);\n  return response.json();\n}",
-  },
-  "ansi-regex": {
-    importLine: 'import ansiRegex from "ansi-regex";',
-    fn: "stripAnsi",
-    body: 'export function stripAnsi(text) {\n  return text.replace(ansiRegex(), "");\n}',
-  },
-  axios: {
-    importLine: 'import axios from "axios";',
-    fn: "postWebhook",
-    body: "export async function postWebhook(url, body) {\n  const response = await axios.post(url, body);\n  return response.status;\n}",
-  },
-  json5: {
-    importLine: 'import JSON5 from "json5";',
-    fn: "loadSettings",
-    body: "export function loadSettings(text) {\n  return JSON5.parse(text);\n}",
-  },
-};
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
@@ -119,6 +84,7 @@ function sorted(files: Map<string, string>): Record<string, string> {
   return out;
 }
 
+/** The root module consuming a dep.vulnerable seed (catalog params). */
 function consumerOf(seed: Seed): {
   path: string;
   importLine: string;
@@ -126,10 +92,12 @@ function consumerOf(seed: Seed): {
   body: string;
 } {
   const name = seed.subject.slice("npm:".length);
-  const known = DEPENDENCY_CONSUMERS[name];
-  const path = seed.params?.consumer ?? `src/integrations/${name}.js`;
-  return known
-    ? { path, ...known }
+  const p = seed.params ?? {};
+  const path = p.consumer ?? `src/integrations/${name}.js`;
+  return p.importLine !== undefined &&
+    p.fn !== undefined &&
+    p.body !== undefined
+    ? { path, importLine: p.importLine, fn: p.fn, body: p.body }
     : {
         path,
         importLine: `import * as dependency from "${name}";`,
@@ -291,16 +259,12 @@ function renderRepoFiles(manifest: FixtureManifest): Map<string, string> {
   const ofRule = (rule: string) => seeds.filter((s) => s.rule === rule);
 
   // Root package: vulnerable dependencies and their consumers.
-  const dependencies: Record<string, string> = {};
+  const dependencies = new Map<string, string>();
   for (const seed of ofRule("dep.vulnerable")) {
     const name = seed.subject.slice("npm:".length);
-    dependencies[name] = seed.params?.version ?? "1.0.0";
+    dependencies.set(name, seed.params?.version ?? "1.0.0");
     const consumer = consumerOf(seed);
     files.set(consumer.path, `${consumer.importLine}\n\n${consumer.body}\n`);
-  }
-  const sortedDeps: Record<string, string> = {};
-  for (const name of Object.keys(dependencies).sort()) {
-    sortedDeps[name] = dependencies[name] ?? "";
   }
   files.set(
     "package.json",
@@ -310,7 +274,7 @@ function renderRepoFiles(manifest: FixtureManifest): Map<string, string> {
       private: true,
       type: "module",
       scripts: { test: ROOT_TEST_SCRIPT },
-      dependencies: sortedDeps,
+      dependencies: sorted(dependencies),
     }),
   );
   files.set(

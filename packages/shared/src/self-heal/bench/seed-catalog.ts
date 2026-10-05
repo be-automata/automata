@@ -30,26 +30,83 @@ export const BENCH_FAKE_MARKER = "BENCHMARK FAKE — not a secret";
 type SeedDraft = Omit<Seed, "id" | "hiddenTest" | "check"> & {
   kind: SeedKind;
 };
+type DraftExtra = Pick<SeedDraft, "key" | "params">;
 
-/** dep.vulnerable: root dependencies pinned to an advised version. */
-const VULNERABLE_DEPENDENCIES: readonly SeedDraft[] = [
-  ["lodash", "4.17.11", "CVE-2019-10744", "src/integrations/merge-config.js"],
-  ["minimist", "1.2.0", "CVE-2020-7598", "src/integrations/parse-args.js"],
-  ["node-fetch", "2.6.0", "CVE-2020-15168", "src/integrations/http-client.js"],
-  ["ansi-regex", "5.0.0", "CVE-2021-3807", "src/integrations/strip-ansi.js"],
-  ["axios", "0.21.0", "CVE-2020-28168", "src/integrations/webhook-client.js"],
-  ["json5", "2.2.1", "CVE-2022-46175", "src/integrations/load-settings.js"],
-].map(
-  ([name, version, advisory, consumer]): SeedDraft => ({
-    rule: "dep.vulnerable",
-    subject: `npm:${name}`,
-    kind: "seeded",
-    params: {
-      name: name ?? "",
-      version: version ?? "",
-      advisory: advisory ?? "",
-      consumer: consumer ?? "",
-    },
+/** A planted finding the audit should file and the loop should close. */
+function planted(rule: string, subject: string, extra: DraftExtra = {}) {
+  return { rule, subject, kind: "seeded", ...extra } satisfies SeedDraft;
+}
+
+/** A negative control: looks like a finding of `rule` but is clean. */
+function decoy(rule: string, subject: string, extra: DraftExtra = {}) {
+  return { rule, subject, kind: "decoy", ...extra } satisfies SeedDraft;
+}
+
+/**
+ * dep.vulnerable: root dependencies pinned to an advised version, each with
+ * the root module that consumes it (path, import line, exported function and
+ * body), so the renderer and the hidden test need no table of their own.
+ */
+const VULNERABLE_DEPENDENCIES: readonly SeedDraft[] = (
+  [
+    [
+      "lodash",
+      "4.17.11",
+      "CVE-2019-10744",
+      "src/integrations/merge-config.js",
+      'import merge from "lodash/merge.js";',
+      "mergeConfig",
+      "export function mergeConfig(base, override) {\n  return merge({}, base, override);\n}",
+    ],
+    [
+      "minimist",
+      "1.2.0",
+      "CVE-2020-7598",
+      "src/integrations/parse-args.js",
+      'import minimist from "minimist";',
+      "parseArgs",
+      "export function parseArgs(argv) {\n  return minimist(argv);\n}",
+    ],
+    [
+      "node-fetch",
+      "2.6.0",
+      "CVE-2020-15168",
+      "src/integrations/http-client.js",
+      'import fetch from "node-fetch";',
+      "getJson",
+      "export async function getJson(url) {\n  const response = await fetch(url);\n  return response.json();\n}",
+    ],
+    [
+      "ansi-regex",
+      "5.0.0",
+      "CVE-2021-3807",
+      "src/integrations/strip-ansi.js",
+      'import ansiRegex from "ansi-regex";',
+      "stripAnsi",
+      'export function stripAnsi(text) {\n  return text.replace(ansiRegex(), "");\n}',
+    ],
+    [
+      "axios",
+      "0.21.0",
+      "CVE-2020-28168",
+      "src/integrations/webhook-client.js",
+      'import axios from "axios";',
+      "postWebhook",
+      "export async function postWebhook(url, body) {\n  const response = await axios.post(url, body);\n  return response.status;\n}",
+    ],
+    [
+      "json5",
+      "2.2.1",
+      "CVE-2022-46175",
+      "src/integrations/load-settings.js",
+      'import JSON5 from "json5";',
+      "loadSettings",
+      "export function loadSettings(text) {\n  return JSON5.parse(text);\n}",
+    ],
+  ] as const
+).map(([name, version, advisory, consumer, importLine, fn, body]) =>
+  planted("dep.vulnerable", `npm:${name}`, {
+    params: { version, advisory, consumer, importLine, fn, body },
   }),
 );
 
@@ -99,47 +156,35 @@ export const BENCH_SUB_PACKAGES: readonly {
   },
 ];
 
-const MISSING_LOCKFILES: readonly SeedDraft[] = BENCH_SUB_PACKAGES.map(
-  (pkg): SeedDraft => ({
-    rule: "supply.lockfile-missing",
-    subject: `${pkg.dir}/package-lock.json`,
-    kind: "seeded",
-    params: { dir: pkg.dir, dependency: pkg.dependency },
+const MISSING_LOCKFILES: readonly SeedDraft[] = BENCH_SUB_PACKAGES.map((pkg) =>
+  planted("supply.lockfile-missing", `${pkg.dir}/package-lock.json`, {
+    params: { dependency: pkg.dependency },
   }),
 );
 
 const MISSING_SECURITY_POLICIES: readonly SeedDraft[] = [
-  {
-    rule: "ci.security-policy-missing",
-    subject: "SECURITY.md",
-    kind: "seeded",
-  },
+  planted("ci.security-policy-missing", "SECURITY.md"),
   ...BENCH_SUB_PACKAGES.filter((pkg) => pkg.linksSecurityPolicy)
     .slice(0, 5)
-    .map(
-      (pkg): SeedDraft => ({
-        rule: "ci.security-policy-missing",
-        subject: `${pkg.dir}/SECURITY.md`,
-        kind: "seeded",
-      }),
+    .map((pkg) =>
+      planted("ci.security-policy-missing", `${pkg.dir}/SECURITY.md`),
     ),
 ];
 
 /** One workflow per seed; top-level permissions present, one tag-pinned action. */
-const UNPINNED_ACTIONS: readonly SeedDraft[] = [
-  ["release.yml", "actions/upload-artifact", "v4"],
-  ["nightly.yml", "actions/cache", "v4"],
-  ["docs.yml", "actions/configure-pages", "v5"],
-  ["stale.yml", "actions/stale", "v9"],
-  ["labeler.yml", "actions/labeler", "v5"],
-  ["coverage.yml", "actions/download-artifact", "v4"],
-].map(
-  ([file, action, tag]): SeedDraft => ({
-    rule: "ci.action-unpinned",
-    subject: `.github/workflows/${file}`,
+const UNPINNED_ACTIONS: readonly SeedDraft[] = (
+  [
+    ["release.yml", "actions/upload-artifact", "v4"],
+    ["nightly.yml", "actions/cache", "v4"],
+    ["docs.yml", "actions/configure-pages", "v5"],
+    ["stale.yml", "actions/stale", "v9"],
+    ["labeler.yml", "actions/labeler", "v5"],
+    ["coverage.yml", "actions/download-artifact", "v4"],
+  ] as const
+).map(([file, action, tag]) =>
+  planted("ci.action-unpinned", `.github/workflows/${file}`, {
     key: action,
-    kind: "seeded",
-    params: { tag: tag ?? "" },
+    params: { tag },
   }),
 );
 
@@ -151,12 +196,8 @@ const MISSING_PERMISSIONS: readonly SeedDraft[] = [
   "smoke.yml",
   "bundle-size.yml",
   "changelog.yml",
-].map(
-  (file): SeedDraft => ({
-    rule: "ci.workflow-permissions-missing",
-    subject: `.github/workflows/${file}`,
-    kind: "seeded",
-  }),
+].map((file) =>
+  planted("ci.workflow-permissions-missing", `.github/workflows/${file}`),
 );
 
 /** Literal .gitignore lines the fixture omits (keys use the parser alphabet). */
@@ -167,81 +208,40 @@ const MISSING_GITIGNORE_PATTERNS: readonly SeedDraft[] = [
   ".npmrc",
   "id_rsa",
   "terraform.tfstate",
-].map(
-  (pattern): SeedDraft => ({
-    rule: "files.gitignore-missing-pattern",
-    subject: ".gitignore",
-    key: pattern,
-    kind: "seeded",
-  }),
+].map((pattern) =>
+  planted("files.gitignore-missing-pattern", ".gitignore", { key: pattern }),
 );
 
 /** Committed fake sensitive files; `sibling` must survive the fix. */
-const SENSITIVE_FILES: readonly SeedDraft[] = [
-  ["id_rsa", "README.md"],
-  ["deploy/id_ed25519", "deploy/README.md"],
-  [".npmrc", "package.json"],
-  ["infra/terraform.tfstate", "infra/main.tf"],
-  [".htpasswd", "README.md"],
-  ["config/.pgpass", "config/app.json"],
-].map(
-  ([path, sibling]): SeedDraft => ({
-    rule: "files.sensitive-committed",
-    subject: path ?? "",
-    kind: "seeded",
-    params: { sibling: sibling ?? "" },
-  }),
+const SENSITIVE_FILES: readonly SeedDraft[] = (
+  [
+    ["id_rsa", "README.md"],
+    ["deploy/id_ed25519", "deploy/README.md"],
+    [".npmrc", "package.json"],
+    ["infra/terraform.tfstate", "infra/main.tf"],
+    [".htpasswd", "README.md"],
+    ["config/.pgpass", "config/app.json"],
+  ] as const
+).map(([path, sibling]) =>
+  planted("files.sensitive-committed", path, { params: { sibling } }),
 );
 
-/** Modules with a hardcoded fake credential; `fn` must keep working. */
-const HARDCODED_SECRETS: readonly SeedDraft[] = [
+/**
+ * Modules with a hardcoded fake credential; `<service>AuthHeader` (the
+ * renderer's name for it) must keep working.
+ */
+const HARDCODED_SECRETS: readonly SeedDraft[] = (
   [
-    "payments",
-    "paymentsAuthHeader",
-    "q7Zr2LxV9m",
-    "Te4WkP8sJd",
-    "PAYMENTS_API_KEY",
-  ],
-  [
-    "mailer",
-    "mailerAuthHeader",
-    "Hb3nY8cQ1v",
-    "Rk6TzM2pWx",
-    "MAILER_API_TOKEN",
-  ],
-  [
-    "storage",
-    "storageAuthHeader",
-    "uF5jN0aGs7",
-    "Lq9VbE3yCt",
-    "STORAGE_SECRET_KEY",
-  ],
-  [
-    "analytics",
-    "analyticsAuthHeader",
-    "Pz8mK2wRd4",
-    "Xh6JvS1nBf",
-    "ANALYTICS_WRITE_KEY",
-  ],
-  [
-    "search",
-    "searchAuthHeader",
-    "Ce1TqW7yLo",
-    "Gu4ZpA9rMk",
-    "SEARCH_ADMIN_KEY",
-  ],
-  ["sms", "smsAuthHeader", "Ns6DxH3bVa", "Jy2FeQ8tKw", "SMS_AUTH_TOKEN"],
-].map(
-  ([service, fn, head, tail, envVar]): SeedDraft => ({
-    rule: "secret.hardcoded",
-    subject: `src/services/${service}.js`,
-    kind: "seeded",
-    params: {
-      envVar: envVar ?? "",
-      fn: fn ?? "",
-      head: head ?? "",
-      tail: tail ?? "",
-    },
+    ["payments", "q7Zr2LxV9m", "Te4WkP8sJd", "PAYMENTS_API_KEY"],
+    ["mailer", "Hb3nY8cQ1v", "Rk6TzM2pWx", "MAILER_API_TOKEN"],
+    ["storage", "uF5jN0aGs7", "Lq9VbE3yCt", "STORAGE_SECRET_KEY"],
+    ["analytics", "Pz8mK2wRd4", "Xh6JvS1nBf", "ANALYTICS_WRITE_KEY"],
+    ["search", "Ce1TqW7yLo", "Gu4ZpA9rMk", "SEARCH_ADMIN_KEY"],
+    ["sms", "Ns6DxH3bVa", "Jy2FeQ8tKw", "SMS_AUTH_TOKEN"],
+  ] as const
+).map(([service, head, tail, envVar]) =>
+  planted("secret.hardcoded", `src/services/${service}.js`, {
+    params: { envVar, head, tail },
   }),
 );
 
@@ -285,18 +285,9 @@ const DECOY_WORKFLOWS: readonly [string, keyof typeof BENCH_PINNED_ACTIONS][] =
   ];
 
 const DECOYS: readonly SeedDraft[] = DECOY_WORKFLOWS.flatMap(
-  ([file, action]): SeedDraft[] => [
-    {
-      rule: "ci.action-unpinned",
-      subject: `.github/workflows/${file}`,
-      key: action,
-      kind: "decoy",
-    },
-    {
-      rule: "ci.workflow-permissions-missing",
-      subject: `.github/workflows/${file}`,
-      kind: "decoy",
-    },
+  ([file, action]) => [
+    decoy("ci.action-unpinned", `.github/workflows/${file}`, { key: action }),
+    decoy("ci.workflow-permissions-missing", `.github/workflows/${file}`),
   ],
 );
 
