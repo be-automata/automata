@@ -15,7 +15,6 @@ import {
   extendFixDispatchLease,
   getFixAttemptById,
   getFixAttemptByPr,
-  getFixAttemptByThread,
   getFixAttemptForGateReport,
   getFindingForAttempt,
   listPendingPrOpens,
@@ -316,12 +315,12 @@ describe("audit fix attempts", () => {
         });
 
       expect(await bind(t1)).toBe(true);
-      const a = await getFixAttemptByThread({
+      const a = await getFixAttemptById({
         db,
         organizationId: orgA,
-        threadId: t1,
+        id: attemptId,
       });
-      expect(a?.id).toBe(attemptId);
+      expect(a?.threadId).toBe(t1);
       expect(a?.phase).toBe("dispatched");
       expect(a?.dispatchLeaseUntil?.getTime()).toBe(T0.getTime() + 10 * MIN);
       expect((await readFinding(id)).activeThreadId).toBe(t1);

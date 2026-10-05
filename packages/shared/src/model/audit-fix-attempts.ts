@@ -44,6 +44,22 @@ export const FIX_DISPATCH_LEASE_MS = 600_000;
 
 export type AuditFixAttemptInsert = typeof auditFixAttempts.$inferInsert;
 
+/** One attempt, fenced to its organization (TIER-01). */
+function attemptInOrg(attemptId: string, organizationId: string) {
+  return and(
+    eq(auditFixAttempts.id, attemptId),
+    eq(auditFixAttempts.organizationId, organizationId),
+  );
+}
+
+/** No sweep or handler holds the attempt's row lease. */
+function attemptLeaseFree(now: Date) {
+  return or(
+    isNull(auditFixAttempts.leaseUntil),
+    lte(auditFixAttempts.leaseUntil, now),
+  );
+}
+
 export interface ClaimedFixAttempt {
   finding: AuditFindingRow;
   attempt: AuditFixAttemptRow;
@@ -183,8 +199,7 @@ export async function bindFixAttemptThread({
       })
       .where(
         and(
-          eq(auditFixAttempts.id, attemptId),
-          eq(auditFixAttempts.organizationId, organizationId),
+          attemptInOrg(attemptId, organizationId),
           isNull(auditFixAttempts.threadId),
           eq(auditFixAttempts.phase, "claimed"),
         ),
@@ -209,8 +224,7 @@ export async function bindFixAttemptThread({
       .from(auditFixAttempts)
       .where(
         and(
-          eq(auditFixAttempts.id, attemptId),
-          eq(auditFixAttempts.organizationId, organizationId),
+          attemptInOrg(attemptId, organizationId),
           eq(auditFixAttempts.threadId, threadId),
         ),
       )
@@ -311,8 +325,7 @@ async function finishFixAttempt({
       })
       .where(
         and(
-          eq(auditFixAttempts.id, attemptId),
-          eq(auditFixAttempts.organizationId, organizationId),
+          attemptInOrg(attemptId, organizationId),
           eq(auditFixAttempts.infraRefunded, false),
           ne(auditFixAttempts.phase, "closed"),
         ),
@@ -411,39 +424,11 @@ export async function getFixAttemptById({
   const rows = await db
     .select()
     .from(auditFixAttempts)
-    .where(
-      and(
-        eq(auditFixAttempts.id, id),
-        eq(auditFixAttempts.organizationId, organizationId),
-      ),
-    )
+    .where(and(attemptInOrg(id, organizationId)))
     .limit(1);
   return rows[0] ?? null;
 }
 
-export async function getFixAttemptByThread({
-  db,
-  organizationId,
-  threadId,
-}: {
-  db: DB;
-  organizationId: string;
-  threadId: string;
-}): Promise<AuditFixAttemptRow | null> {
-  const rows = await db
-    .select()
-    .from(auditFixAttempts)
-    .where(
-      and(
-        eq(auditFixAttempts.threadId, threadId),
-        eq(auditFixAttempts.organizationId, organizationId),
-      ),
-    )
-    .limit(1);
-  return rows[0] ?? null;
-}
-
-/** UNFENCED: the gate token is the authority; the row carries organizationId. */
 export async function getFixAttemptForGateReport({
   db,
   attemptId,
@@ -478,12 +463,7 @@ export async function updateFixAttempt({
   const rows = await db
     .update(auditFixAttempts)
     .set(patch)
-    .where(
-      and(
-        eq(auditFixAttempts.id, id),
-        eq(auditFixAttempts.organizationId, organizationId),
-      ),
-    )
+    .where(and(attemptInOrg(id, organizationId)))
     .returning();
   return rows[0] ?? null;
 }
@@ -651,8 +631,7 @@ export async function extendFixDispatchLease({
     .set({ dispatchLeaseUntil: until })
     .where(
       and(
-        eq(auditFixAttempts.id, attemptId),
-        eq(auditFixAttempts.organizationId, organizationId),
+        attemptInOrg(attemptId, organizationId),
         eq(auditFixAttempts.phase, "dispatched"),
       ),
     )
@@ -692,13 +671,9 @@ export async function claimAttemptLease({
     .set({ leaseUntil: new Date(now.getTime() + leaseMs) })
     .where(
       and(
-        eq(auditFixAttempts.id, attemptId),
-        eq(auditFixAttempts.organizationId, organizationId),
+        attemptInOrg(attemptId, organizationId),
         ne(auditFixAttempts.phase, "closed"),
-        or(
-          isNull(auditFixAttempts.leaseUntil),
-          lte(auditFixAttempts.leaseUntil, now),
-        ),
+        attemptLeaseFree(now),
       ),
     )
     .returning({ id: auditFixAttempts.id });
@@ -718,12 +693,7 @@ export async function releaseAttemptLease({
   await db
     .update(auditFixAttempts)
     .set({ leaseUntil: null })
-    .where(
-      and(
-        eq(auditFixAttempts.id, attemptId),
-        eq(auditFixAttempts.organizationId, organizationId),
-      ),
-    );
+    .where(and(attemptInOrg(attemptId, organizationId)));
 }
 
 /**
@@ -751,10 +721,7 @@ export async function listPendingPrOpens({
       .where(
         and(
           ne(auditFixAttempts.phase, "closed"),
-          or(
-            isNull(auditFixAttempts.leaseUntil),
-            lte(auditFixAttempts.leaseUntil, now),
-          ),
+          attemptLeaseFree(now),
           or(
             and(
               eq(auditFixAttempts.prState, "pending_open"),
@@ -893,8 +860,7 @@ export async function recordFixPrMerged({
       })
       .where(
         and(
-          eq(auditFixAttempts.id, attemptId),
-          eq(auditFixAttempts.organizationId, organizationId),
+          attemptInOrg(attemptId, organizationId),
           isNull(auditFixAttempts.mergedAt),
         ),
       )
@@ -944,8 +910,7 @@ export async function recordFixPrMergeDetail({
     .set({ humanCommitCount, changedRanges })
     .where(
       and(
-        eq(auditFixAttempts.id, attemptId),
-        eq(auditFixAttempts.organizationId, organizationId),
+        attemptInOrg(attemptId, organizationId),
         isNotNull(auditFixAttempts.mergedAt),
       ),
     )
@@ -976,8 +941,7 @@ export async function recordFixPrClosed({
     .set({ prState: state, updatedAt: now })
     .where(
       and(
-        eq(auditFixAttempts.id, attemptId),
-        eq(auditFixAttempts.organizationId, organizationId),
+        attemptInOrg(attemptId, organizationId),
         isNull(auditFixAttempts.mergedAt),
         or(
           isNull(auditFixAttempts.prState),
@@ -1013,10 +977,7 @@ export async function listUnsettledFixPrs({
           ne(auditFixAttempts.phase, "closed"),
           isNotNull(auditFixAttempts.prNumber),
           inArray(auditFixAttempts.prState, ["merged", "closed"]),
-          or(
-            isNull(auditFixAttempts.leaseUntil),
-            lte(auditFixAttempts.leaseUntil, now),
-          ),
+          attemptLeaseFree(now),
         ),
       )
       .orderBy(asc(auditFixAttempts.updatedAt))
@@ -1057,10 +1018,7 @@ export async function listOpenReadyFixPrs({
           readyBefore === undefined
             ? undefined
             : lte(auditFixAttempts.readyAt, readyBefore),
-          or(
-            isNull(auditFixAttempts.leaseUntil),
-            lte(auditFixAttempts.leaseUntil, now),
-          ),
+          attemptLeaseFree(now),
         ),
       )
       .orderBy(asc(auditFixAttempts.updatedAt))
@@ -1174,8 +1132,7 @@ export async function recordFixRegression({
     .set({ regression, regressionCheckedAt: now })
     .where(
       and(
-        eq(auditFixAttempts.id, attemptId),
-        eq(auditFixAttempts.organizationId, organizationId),
+        attemptInOrg(attemptId, organizationId),
         isNotNull(auditFixAttempts.mergedAt),
       ),
     )
@@ -1205,8 +1162,7 @@ export async function claimRegressionCheck({
     .set({ regressionCheckedAt: now })
     .where(
       and(
-        eq(auditFixAttempts.id, attemptId),
-        eq(auditFixAttempts.organizationId, organizationId),
+        attemptInOrg(attemptId, organizationId),
         isNotNull(auditFixAttempts.mergedAt),
         or(
           isNull(auditFixAttempts.regressionCheckedAt),

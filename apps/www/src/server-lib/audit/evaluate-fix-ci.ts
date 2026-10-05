@@ -641,24 +641,16 @@ class FixCiEvaluator {
       ...(spec.ciResults ? { ciResults: spec.ciResults } : {}),
       ciEvaluatedAt: now,
     });
-    const closed = spec.counted
-      ? await closeFixAttempt({
-          db: this.db,
-          organizationId: this.org,
-          attemptId: this.attempt.id,
-          outcome,
-          counted: true,
-          terminalCause: outcome,
-          now,
-        })
-      : await refundFixAttempt({
-          db: this.db,
-          organizationId: this.org,
-          attemptId: this.attempt.id,
-          cause: outcome,
-          outcome,
-          now,
-        });
+    // Uncounted is the infra refund (same write as refundFixAttempt).
+    const closed = await closeFixAttempt({
+      db: this.db,
+      organizationId: this.org,
+      attemptId: this.attempt.id,
+      outcome,
+      counted: spec.counted,
+      terminalCause: outcome,
+      now,
+    });
     if (!closed) return outcome;
 
     const prNumber = this.attempt.prNumber;
