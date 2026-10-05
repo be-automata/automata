@@ -1532,6 +1532,9 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
     expect(selfHeal.attemptId).toBe(attempt.id);
     expect(selfHeal.branch).toBe(attempt.branch);
     expect(selfHeal.baseBranch).toBe("main");
+    // 09-10 base pin: the worker pins refs/remotes/origin/<selfHeal.baseBranch>
+    // right after the clone, so the clone branch must BE the base.
+    expect(selfHeal.baseBranch).toBe(input.branch);
     expect(selfHeal.checks).toEqual([
       { fingerprint: FP, check: "file-exists", subject: "pnpm-lock.yaml" },
     ]);

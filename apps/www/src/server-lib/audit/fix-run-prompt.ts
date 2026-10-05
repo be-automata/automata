@@ -143,6 +143,11 @@ function renderFixSection({
       ? `Exception for this \`ci.*\` finding: you may change ${exceptions.map(codePath).join(", ")} and no other file under \`.github/\`.`
       : "No exception applies to this finding.",
     "",
+    "### Git",
+    "",
+    "Never run `git config`, in any scope. The commit identity and the remote are already set up,",
+    "and the platform refuses to check a commit made in a checkout whose git configuration was changed.",
+    "",
     "### After you push",
     "",
     "The platform runs the finding's check on a clean checkout of your pushed commit, opens a",

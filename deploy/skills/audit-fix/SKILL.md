@@ -68,5 +68,7 @@ merges. You never see those steps and you never need to perform them.
   list.
 - Never push to any branch other than the named `automata/fix-` branch. Never force-push, never
   push to the base branch, never delete a branch.
+- Never run `git config`, in any scope. The commit identity and the remote are already set up, and
+  the platform refuses to check a commit made in a checkout whose git configuration was changed.
 - Never merge anything.
 - Your output is the pushed branch and a plain-text note. Do not emit a fenced json block.

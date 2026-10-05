@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import type { DBUserMessage } from "@terragon/shared";
 import {
   FIX_BRANCH_PREFIX,
@@ -117,6 +120,22 @@ describe("buildFixRunTransform", () => {
     for (const path of FIX_DENY_PATHS) {
       expect(text).toContain(`\`${path}\``);
     }
+  });
+
+  it("forbids git config in the prompt and in the skill's Hard rules (09-10 guard)", () => {
+    expect(render()).toContain("Never run `git config`");
+    const skill = readFileSync(
+      fileURLToPath(
+        new URL(
+          "../../../../../deploy/skills/audit-fix/SKILL.md",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    );
+    const hardRules = skill.search(/^## Hard rules\s*$/m);
+    expect(hardRules).toBeGreaterThan(0);
+    expect(skill.indexOf("Never run `git config`")).toBeGreaterThan(hardRules);
   });
 
   it("states that the platform runs the check and CI on a draft PR afterwards", () => {
