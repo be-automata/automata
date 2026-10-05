@@ -83,6 +83,10 @@ export const UNFENCED_SELF_HEAL_MODEL_FUNCTIONS: Record<string, string> = {
     "dispatcher selector across all orgs; callers re-fence by the row's organizationId",
   getFixAttemptForGateReport:
     "the gate token is the authority; the row carries organizationId",
+  acquireSelfHealSlot: "platform-wide single box slot",
+  setSlotHolderThread: "platform-wide single box slot",
+  releaseSelfHealSlot: "platform-wide single box slot",
+  getSelfHealSlot: "platform-wide single box slot",
 };
 
 export const GH_CREATE_SIGNAL = "gh_create";

@@ -11,6 +11,7 @@ const FILES = [
   "self-heal-outbox.ts",
   "self-heal-breaker.ts",
   "self-heal-admin-log.ts",
+  "self-heal-slot.ts",
 ];
 
 interface ExportedFn {
