@@ -1163,26 +1163,51 @@ check on the pushed sha. The platform opens a DRAFT PR, waits for the repo's CI 
 ready (which triggers exactly one review), and a person merges. Nothing in the lane merges
 (ADR-010 part 2, ADR-004 phase 9 amendment). Everything ships OFF. Nothing here is run by an agent.
 
-Phase 9 makes NO schema change: the phase 8 push already created every table and column it uses.
-Still run the schema gate before each deploy.
+Phase 9 adds no column: the phase 8 push already created every table and column it uses. Its one
+schema change is a single index, `audit_fix_attempts_pr_repo_lower_index` on
+`(pr_number, lower(repo_full_name))`, which serves the platform-wide fix-PR lookup on
+`pull_request.closed`. The schema gate fails only on columns; a missing or invalid index is a
+performance gap, not a correctness failure, so the gate prints a WARN for it and still exits 0. It is
+still created before the deploy (step 2). Still run the schema gate before each deploy.
 
 **Rollout (operator, in this order; each step is gated on the previous one).**
 
 1. Schema gate: `DATABASE_URL=<prod> pnpm exec tsx deploy/assert-schema-ready.ts` must exit 0 with
    no MISSING line. If it fails, stop: phase 8's push has not been applied.
-2. Merge the PR. The `selfHealLoop` flag stays OFF and every repo mode stays `off` or `dry-run`.
-3. Deploy the worker first, then www. An older worker has no ref fence: a fix run on it would hand
+2. Create the index on prod, non-blocking, BEFORE the worker-first deploy (idempotent):
+
+   ```sql
+   CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_fix_attempts_pr_repo_lower_index ON audit_fix_attempts (pr_number, lower(repo_full_name));
+   ```
+
+   Run it on its own (CONCURRENTLY cannot run inside a transaction), then verify it is valid:
+
+   ```sql
+   SELECT indexdef FROM pg_indexes WHERE indexname = 'audit_fix_attempts_pr_repo_lower_index';
+   SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+     WHERE c.relname = 'audit_fix_attempts_pr_repo_lower_index';
+   ```
+
+   The definition must read `(pr_number, lower(repo_full_name))` and `indisvalid` must be `t`. An
+   interrupted CONCURRENTLY build leaves an INVALID index that `IF NOT EXISTS` does not repair: run
+   `DROP INDEX CONCURRENTLY audit_fix_attempts_pr_repo_lower_index;` and the CREATE again. Note:
+   `drizzle-kit push` re-creates this expression index on every run (it cannot match the
+   introspected expression) as a plain DROP + CREATE. That is harmless on dev and test databases; on
+   prod use the statement above, never a push.
+
+3. Merge the PR. The `selfHealLoop` flag stays OFF and every repo mode stays `off` or `dry-run`.
+4. Deploy the worker first, then www. An older worker has no ref fence: a fix run on it would hand
    the agent an unfenced push path. Deploy the worker ONLY on an idle box (the phase 8 idle check:
    0 `run-*` cgroups, NRestarts noted before and after). Confirm `WORKER_CREDENTIAL_BROKER=on` on
    the box; a fix run refuses to start without the broker.
-4. Deploy www with the usual recipe and confirm the new `BUILD_ID` and the 401 webhook probe, as in
+5. Deploy www with the usual recipe and confirm the new `BUILD_ID` and the 401 webhook probe, as in
    phase 8.
-5. Only now may the flag or a repo mode be changed. Until BOTH halves run phase 9, keep the flag off
+6. Only now may the flag or a repo mode be changed. Until BOTH halves run phase 9, keep the flag off
    and the mode off or `dry-run`.
-6. Push the fix skill per repo, canary first. Record the current audit-fix version id as the
+7. Push the fix skill per repo, canary first. Record the current audit-fix version id as the
    rollback target, then
    `DATABASE_URL=<...> pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> audit-fix deploy/skills/audit-fix/SKILL.md`.
-7. Automations (Settings → Automations), per repo:
+8. Automations (Settings → Automations), per repo:
    - exactly ONE audit-fix automation: trigger "issue", labelled-only (`on.labeled` with
      `filter.labels: ["automata:auto-fix"]`, no `on.open`), action = the audit-fix skill. The
      validator rejects any other shape, so an older www can never fire it;
@@ -1193,10 +1218,10 @@ Still run the schema gate before each deploy.
      trigger;
    - the "Mirror: issue research" automation has `filter.excludeLabels: ["automata:finding"]`, so a
      filed finding starts no research run.
-8. Turn `autoLabel` ON for the pilot repos (Admin → Review → Self-heal) (AUTO-01). The live cycle is
+9. Turn `autoLabel` ON for the pilot repos (Admin → Review → Self-heal) (AUTO-01). The live cycle is
    proven with the platform's own `automata:auto-fix` label; a hand-added label is not the proof.
-9. Turn the `selfHealLoop` flag on, keep the canary in `dry-run` until the pre-flight checklist
-   holds, then set it to `on`.
+10. Turn the `selfHealLoop` flag on, keep the canary in `dry-run` until the pre-flight checklist
+    holds, then set it to `on`.
 
 **Pre-flight checklist for On.**
 
@@ -1208,7 +1233,7 @@ Still run the schema gate before each deploy.
   every check run and commit status must be green, with a 2-minute settle window), or
   `finding-check-only` (no check appears within 10 minutes: the PR gets `needs-human-approve` and a
   no-repo-CI note). The activity card shows the gate source per attempt.
-- The box is on the credential broker and was deployed before www (step 3).
+- The box is on the credential broker and was deployed before www (step 4).
 - Linux box: the post-agent `git clean -ffdxq` runs as the agent uid and must be able to delete the
   run-owned `home/`, `gh-config/` and `tmp/` in the checkout. An ACL mask that blocks it fails every
   check closed with `self-heal fix-check: clean of the checkout failed`, which shows in the journal

@@ -923,6 +923,20 @@ describe("audit fix attempts", () => {
       ).toBeNull();
     });
 
+    it("I1: getFixAttemptByPr's predicate is served by audit_fix_attempts_pr_repo_lower_index", async () => {
+      await withPr();
+      const plan = await db.transaction(async (tx) => {
+        await tx.execute(sql`set local enable_seqscan = off`);
+        const res = (await tx.execute(
+          sql`explain select * from audit_fix_attempts where pr_number = ${7} and lower(repo_full_name) = ${REPO.toLowerCase()} order by created_at desc limit 1`,
+        )) as unknown as { rows: Array<{ "QUERY PLAN": string }> };
+        return res.rows.map((r) => r["QUERY PLAN"]).join("\n");
+      });
+      expect(plan).toContain(
+        "Index Scan using audit_fix_attempts_pr_repo_lower_index",
+      );
+    });
+
     it("recordFixPrMerged records the merge, opens a 30-day window and clears the active attempt", async () => {
       const { findingId, id } = await withPr();
       expect(await merge(id)).toBe(true);
