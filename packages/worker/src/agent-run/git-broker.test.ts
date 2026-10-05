@@ -81,35 +81,52 @@ describe("startGitBroker (#65 — local git credential broker)", () => {
 
   it("401 without the per-run bearer, and never reaches upstream", async () => {
     const { b, calls } = await boot();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const res = await fetch(
       `${b.url}/be-automata/automata.git/info/refs?service=git-upload-pack`,
     );
     expect(res.status).toBe(401);
     expect(calls).toHaveLength(0);
+    expect(errors.mock.calls.flat().join(" ")).toContain("(bad_bearer)");
+    errors.mockRestore();
   });
 
   it("401 for a wrong bearer (timing-safe compare)", async () => {
     const { b, calls } = await boot();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const res = await fetch(
       `${b.url}/be-automata/automata.git/info/refs?service=git-upload-pack`,
       { headers: { Authorization: "Bearer wrong" } },
     );
     expect(res.status).toBe(401);
     expect(calls).toHaveLength(0);
+    // The refusal is logged without any credential material.
+    const line = errors.mock.calls.flat().join(" ");
+    expect(line).toContain("(bad_bearer)");
+    expect(line).not.toContain("wrong");
+    expect(line).not.toContain(BEARER);
+    expect(line).not.toContain(TOKEN);
+    errors.mockRestore();
   });
 
   it("404 for a different repo — the path fence holds", async () => {
     const { b, calls } = await boot();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const res = await fetch(
       `${b.url}/attacker/other.git/info/refs?service=git-upload-pack`,
       { headers: withBearer },
     );
     expect(res.status).toBe(404);
     expect(calls).toHaveLength(0);
+    expect(errors.mock.calls.flat().join(" ")).toContain(
+      "(repo_not_allowed) GET /attacker/other.git/info/refs",
+    );
+    errors.mockRestore();
   });
 
   it("403 for a non-git method/endpoint (arbitrary GET) — the allowlist holds", async () => {
     const { b, calls } = await boot();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     for (const path of [
       "be-automata/automata.git/config",
       "be-automata/automata.git/info/refs?service=evil",
@@ -119,6 +136,12 @@ describe("startGitBroker (#65 — local git credential broker)", () => {
       expect(res.status, path).toBe(403);
     }
     expect(calls).toHaveLength(0);
+    expect(
+      errors.mock.calls
+        .map((c) => String(c[0]))
+        .filter((l) => l.includes("(endpoint_not_allowed)")),
+    ).toHaveLength(3);
+    errors.mockRestore();
   });
 
   it("POST git-upload-pack (fetch) and git-receive-pack (push) both proxy with a body", async () => {
