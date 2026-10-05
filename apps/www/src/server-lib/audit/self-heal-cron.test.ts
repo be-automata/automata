@@ -53,6 +53,10 @@ function harness(overrides: Partial<SelfHealCronDeps> = {}) {
     order.push("evaluateDrafts");
     return { processed: 0, outcomes: {} };
   });
+  const breakers = vi.fn(async () => {
+    order.push("breakers");
+    return { repos: 0, orgs: 0, transitions: 0 };
+  });
   const dispatch = vi.fn(async () => {
     order.push("dispatch");
     return { dispatched: null, considered: 0 };
@@ -67,6 +71,7 @@ function harness(overrides: Partial<SelfHealCronDeps> = {}) {
     openPrs: openPrs as unknown as SelfHealCronDeps["openPrs"],
     evaluateDrafts:
       evaluateDrafts as unknown as SelfHealCronDeps["evaluateDrafts"],
+    breakers: breakers as unknown as SelfHealCronDeps["breakers"],
     dispatch: dispatch as unknown as SelfHealCronDeps["dispatch"],
     budget: SELF_HEAL_CRON_BUDGET,
     ...overrides,
@@ -80,6 +85,7 @@ function harness(overrides: Partial<SelfHealCronDeps> = {}) {
     reconcile,
     openPrs,
     evaluateDrafts,
+    breakers,
     dispatch,
   };
 }
@@ -102,7 +108,7 @@ describe("runSelfHealCron", () => {
     });
   });
 
-  it("a tick drains, sweeps, reconciles, opens pending drafts, evaluates draft CI, then runs the fix dispatcher LAST, and does not prune", async () => {
+  it("a tick drains, sweeps, reconciles, opens pending drafts, evaluates draft CI and the breakers, then runs the fix dispatcher LAST, and does not prune", async () => {
     const h = harness();
     await runSelfHealCron("tick", h.deps);
     expect(h.order).toEqual([
@@ -111,6 +117,7 @@ describe("runSelfHealCron", () => {
       "reconcile",
       "openPrs",
       "evaluateDrafts",
+      "breakers",
       "dispatch",
     ]);
   });
@@ -141,6 +148,41 @@ describe("runSelfHealCron", () => {
       "sweep",
       "reconcile",
       "openPrs",
+      "breakers",
+      "dispatch",
+    ]);
+  });
+
+  it("the breaker evaluation runs after the draft CI sweep and before the dispatcher, with the shared deadline", async () => {
+    const h = harness();
+    await runSelfHealCron("tick", h.deps);
+    const order = h.order;
+    expect(order.indexOf("breakers")).toBe(order.indexOf("evaluateDrafts") + 1);
+    expect(order.indexOf("dispatch")).toBe(order.indexOf("breakers") + 1);
+    const arg = (
+      h.breakers.mock.calls[0] as unknown as [
+        { deadlineAt: Date; limit: number; db: unknown; now: Date },
+      ]
+    )[0];
+    const drainArg = (
+      h.drain.mock.calls[0] as unknown as [{ deadlineAt: Date }]
+    )[0];
+    expect(arg.deadlineAt).toEqual(drainArg.deadlineAt);
+    expect(arg.limit).toBe(20);
+    expect(arg.db).toBe(h.deps.db);
+    expect(arg.now).toBeInstanceOf(Date);
+  });
+
+  it("still dispatches when the breaker evaluation throws", async () => {
+    const h = harness();
+    h.breakers.mockRejectedValueOnce(new Error("boom"));
+    await runSelfHealCron("tick", h.deps);
+    expect(h.order).toEqual([
+      "drain",
+      "sweep",
+      "reconcile",
+      "openPrs",
+      "evaluateDrafts",
       "dispatch",
     ]);
   });
@@ -171,6 +213,7 @@ describe("runSelfHealCron", () => {
       "sweep",
       "reconcile",
       "evaluateDrafts",
+      "breakers",
       "dispatch",
     ]);
   });
@@ -200,6 +243,7 @@ describe("runSelfHealCron", () => {
       "sweep",
       "openPrs",
       "evaluateDrafts",
+      "breakers",
       "dispatch",
     ]);
   });
@@ -211,6 +255,7 @@ describe("runSelfHealCron", () => {
     expect(h.reconcile).not.toHaveBeenCalled();
     expect(h.openPrs).not.toHaveBeenCalled();
     expect(h.evaluateDrafts).not.toHaveBeenCalled();
+    expect(h.breakers).not.toHaveBeenCalled();
     expect(h.dispatch).not.toHaveBeenCalled();
   });
 
@@ -242,6 +287,7 @@ describe("runSelfHealCron", () => {
       "reconcile",
       "openPrs",
       "evaluateDrafts",
+      "breakers",
       "dispatch",
     ]);
   });

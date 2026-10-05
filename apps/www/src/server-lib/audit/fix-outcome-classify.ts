@@ -97,6 +97,15 @@ const CREDENTIAL: CauseRule = {
 };
 
 /**
+ * Terminal reasons that are counted against the finding but are never a
+ * breaker input (operator decision: an expired or exhausted login never trips
+ * loop_fix nor exec_plane).
+ */
+export const BREAKER_EXCLUDED_REASONS: ReadonlySet<string> = new Set([
+  CREDENTIAL.reason,
+]);
+
+/**
  * Every thread error type, exhaustively. Sandbox/boot/queue failures are the
  * plane's; credential errors are counted (operator decision); what the agent
  * itself produced (errors, prompt too long, setup script, checkpoint push) is

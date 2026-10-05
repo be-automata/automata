@@ -6,6 +6,7 @@ import { redactSecrets } from "@terragon/utils/redact";
 import { runAuditSweep, runOutboxDrain } from "./audit-sweep";
 import { runStuckDraftSweep } from "./evaluate-fix-ci";
 import { runFixDispatchReconcile } from "./fix-dispatch-reconcile";
+import { runLoopBreakerEvaluation } from "./loop-breaker";
 import { runFixPrOpenSweep } from "./open-fix-pr";
 import { runSelfHealDispatcher } from "./self-heal-dispatcher";
 
@@ -36,6 +37,7 @@ export interface SelfHealCronDeps {
   reconcile: typeof runFixDispatchReconcile;
   openPrs: typeof runFixPrOpenSweep;
   evaluateDrafts: typeof runStuckDraftSweep;
+  breakers: typeof runLoopBreakerEvaluation;
   dispatch: typeof runSelfHealDispatcher;
   budget: { totalMs: number; perItemMs: number; limit: number };
 }
@@ -50,6 +52,7 @@ function defaultDeps(): SelfHealCronDeps {
     reconcile: runFixDispatchReconcile,
     openPrs: runFixPrOpenSweep,
     evaluateDrafts: runStuckDraftSweep,
+    breakers: runLoopBreakerEvaluation,
     dispatch: runSelfHealDispatcher,
     budget: SELF_HEAL_CRON_BUDGET,
   };
@@ -151,6 +154,19 @@ export async function runSelfHealCron(
         limit: deps.budget.limit,
       });
       console.log("[cron:self-heal] fix draft CI", result);
+    });
+    // BRK-01: the loop and plane breakers read the outcomes the reconcile,
+    // the open sweep and the CI sweep just recorded, move expired opens to
+    // half_open and resolve half-open probes, so the dispatcher below sees
+    // the breaker state those outcomes imply.
+    await withinBudget("breakers", remaining(), async () => {
+      const result = await deps.breakers({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+      });
+      console.log("[cron:self-heal] breakers", result);
     });
     // BULK-01: the fix dispatcher runs LAST, so its admission sees the state
     // the drain and the sweep just settled, and it can only use what is left
