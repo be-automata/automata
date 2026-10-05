@@ -503,14 +503,14 @@ describe("evaluateFixCi (GATE-01 steps 4-5, SC4, R4, KILL-01)", () => {
     neverMerges();
   });
 
-  it("a counted failure at the attempts cap → needs-human-approve", async () => {
+  it("a counted failure at the attempts cap → needs-human-review", async () => {
     ctx.resolved.settings.maxAttempts = 1;
     state.checkRuns = [run({ name: "check", conclusion: "timed_out" })];
     expect(await evaluate()).toBe("ci_failed");
     const f = await finding();
     expect(f.status).toBe("needs_human");
     expect(f.lastDecisionReason).toBe("attempts_cap");
-    expect(state.labels.get(ISSUE)).toContain(FINDING_LABELS.needsHumanApprove);
+    expect(state.labels.get(ISSUE)).toContain(FINDING_LABELS.needsHumanReview);
   });
 
   it("a cancelled required check → withdrawn, branch deleted, refunded", async () => {
@@ -590,7 +590,7 @@ describe("evaluateFixCi (GATE-01 steps 4-5, SC4, R4, KILL-01)", () => {
     neverMerges();
   });
 
-  it("free plan (403) and no CI within 10 min → finding-check-only: ready + needs-human-approve + note", async () => {
+  it("free plan (403) and no CI within 10 min → finding-check-only: ready + needs-human-review + note", async () => {
     await draft({ prOpenedAt: new Date(Date.now() - 11 * MIN) });
     state.branch = async () => {
       throw httpError(
@@ -602,7 +602,7 @@ describe("evaluateFixCi (GATE-01 steps 4-5, SC4, R4, KILL-01)", () => {
     expect(await evaluate()).toBe("ready");
 
     expect(fake.graphql).toHaveBeenCalledTimes(1);
-    expect(state.labels.get(PR)).toContain(FINDING_LABELS.needsHumanApprove);
+    expect(state.labels.get(PR)).toContain(FINDING_LABELS.needsHumanReview);
     expect(firstLines(PR)).toEqual([
       commentMarker({ fp: FP, kind: "fix_draft_no_repo_ci", runId: attemptId }),
     ]);

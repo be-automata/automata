@@ -15,7 +15,7 @@ import { recordOf } from "./narrow";
  * - "seeded": a planted script-rule finding the audit should file and the fix
  *   loop should close.
  * - "rubric": a planted rubric-only finding; it is filed for a human
- *   (needs-human-approve) and never auto-fixed.
+ *   (needs-human-review) and never auto-fixed.
  * - "decoy": a negative control that looks like a finding but is clean (for
  *   example a SHA-pinned action). Filing it is a false positive.
  *

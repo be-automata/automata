@@ -395,7 +395,7 @@ JQ_FIX_DEFS='
           | [$all[] | select(.name == $c or .context == $c)] as $m
           | ($m | length) > 0 and all($m[]; check_ok($r)))
       elif ($all | length) == 0 then
-        any(.labels[]?; .name == "needs-human-approve")
+        any(.labels[]?; .name == "needs-human-review")
       else all($all[]; check_ok($r)) end;
 '
 

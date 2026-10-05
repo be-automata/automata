@@ -155,7 +155,7 @@ export interface NeedsHumanWrites {
 }
 
 /**
- * needs-human-approve: the ledger row first, then (when the issue exists and
+ * needs-human-review: the ledger row first, then (when the issue exists and
  * `writer` yields one) the label swap and, for the attempts cap, the cap
  * comment. null when no GitHub write was made; the caller logs failures.
  */
@@ -194,7 +194,7 @@ export async function markFindingNeedsHuman({
   if (issueWriter === null) return null;
   const labels = await issueWriter.updateIssue({
     number: issueNumber,
-    labelsAdd: [FINDING_LABELS.needsHumanApprove],
+    labelsAdd: [FINDING_LABELS.needsHumanReview],
     labelsRemove: [FINDING_LABELS.autoFix],
   });
   const comment =
@@ -474,7 +474,7 @@ export abstract class FixAttemptGithub<D extends FixAttemptGithubDeps> {
     };
   }
 
-  /** needs-human-approve; `session` null = ledger only (no GitHub write). */
+  /** needs-human-review; `session` null = ledger only (no GitHub write). */
   protected async needsHuman(
     reason: "attempts_cap" | "open_failed",
     session: () => Promise<FixGithubSession | null>,

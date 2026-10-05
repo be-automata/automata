@@ -217,7 +217,7 @@ export function actionsToEffects(
             action: "set_labels",
             payload: {
               issueNumber: action.issueNumber,
-              add: [FINDING_LABELS.needsHumanApprove],
+              add: [FINDING_LABELS.needsHumanReview],
               remove: [FINDING_LABELS.autoFix],
             },
           },

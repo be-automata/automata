@@ -502,13 +502,13 @@ describe("fix PR lifecycle (R5, SC4, HUMAN-MERGE-GATE)", () => {
     ]);
   });
 
-  it("closed unmerged at the attempts cap → needs-human-approve via the IssueWriter", async () => {
+  it("closed unmerged at the attempts cap → needs-human-review via the IssueWriter", async () => {
     ctx.resolved.settings.maxAttempts = 1;
     await handleSelfHealPrClosed(payload(), deps);
     const f = await finding();
     expect(f.status).toBe("needs_human");
     expect(f.lastDecisionReason).toBe("attempts_cap");
-    expect(state.labels.get(ISSUE)).toContain(FINDING_LABELS.needsHumanApprove);
+    expect(state.labels.get(ISSUE)).toContain(FINDING_LABELS.needsHumanReview);
     expect(state.comments.map((c) => c.body.split("\n")[0])).toEqual([
       commentMarker({
         fp: FP,

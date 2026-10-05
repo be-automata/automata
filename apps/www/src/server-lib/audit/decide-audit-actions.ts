@@ -32,7 +32,7 @@ import {
  *
  * `record_sighting` also zeroes the row's absent_count (the finding was seen).
  * `status` "needs_human" is the internal DB token; the rendered label is
- * `needs-human-approve`.
+ * `needs-human-review`.
  */
 
 export type AuditSkipReason =
@@ -305,7 +305,7 @@ export function decideAuditActions(
     const labels = [
       FINDING_LABELS.finding,
       FINDING_LABELS.audit(input.audit),
-      ...(script ? [] : [FINDING_LABELS.needsHumanApprove]),
+      ...(script ? [] : [FINDING_LABELS.needsHumanReview]),
       ...(autoFix ? [FINDING_LABELS.autoFix] : []),
     ];
     actions.push({

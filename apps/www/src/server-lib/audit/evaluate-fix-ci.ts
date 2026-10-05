@@ -57,7 +57,7 @@ import {
  *    is chosen per head (required-checks.ts): branch protection's required
  *    checks, else every check on the head (+2 min settle), else — no CI at
  *    all within 10 min — the passing finding check alone (the PR then gets
- *    needs-human-approve and a no-repo-CI note);
+ *    needs-human-review and a no-repo-CI note);
  *  - GitHub's PR head still equals gated_head_sha;
  *  - the R4 guard still passes on compare(<base>...<gated sha>);
  *  - the effective mode is on.
@@ -436,13 +436,13 @@ class FixCiEvaluator extends FixAttemptGithub<EvaluateFixCiDeps> {
     return "ready";
   }
 
-  /** No repo CI: the PR carries needs-human-approve and a note. Best effort. */
+  /** No repo CI: the PR carries needs-human-review and a note. Best effort. */
   private async flagNoRepoCi(prNumber: number): Promise<void> {
     const session = this.gh;
     if (session === null) return;
     const labels = await session.writer.updateIssue({
       number: prNumber,
-      labelsAdd: [FINDING_LABELS.needsHumanApprove],
+      labelsAdd: [FINDING_LABELS.needsHumanReview],
     });
     const note = await session.writer.upsertComment({
       number: prNumber,
@@ -500,7 +500,7 @@ class FixCiEvaluator extends FixAttemptGithub<EvaluateFixCiDeps> {
    * Withdraw the draft: close the attempt in the DB first (exactly once via
    * the close CAS), then the PR comment, PR close, branch delete and one
    * issue comment, best effort; a counted outcome at the cap goes
-   * needs-human-approve.
+   * needs-human-review.
    */
   private async withdraw(
     outcome: FixCiOutcome,

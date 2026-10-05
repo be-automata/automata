@@ -70,7 +70,7 @@ import {
  *    drafts unsupported, run_refunded): nothing is held against the finding;
  *  - pending_open: GitHub did not answer the create; the tick sweep retries
  *    after 2 min / 10 min / 1 h, re-listing by head first, and the 4th
- *    failure is open_failed (needs-human-approve).
+ *    failure is open_failed (needs-human-review).
  *
  * A no_branch / aborted / error verdict is first checked against how the fix
  * RUN ended (classifyFixTerminal, the reconcile's classifier): a run that
@@ -808,7 +808,7 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
     }
   }
 
-  /** needs-human-approve (RES-18 open_failed, or the attempts cap). */
+  /** needs-human-review (RES-18 open_failed, or the attempts cap). */
   private async markNeedsHuman(
     reason: "attempts_cap" | "open_failed",
   ): Promise<void> {

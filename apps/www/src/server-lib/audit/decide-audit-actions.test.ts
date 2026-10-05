@@ -179,7 +179,7 @@ describe("decideAuditActions", () => {
     });
     const c = find(r.actions, "create_issue");
     expect(c?.status).toBe("needs_human");
-    expect(c?.labels).toContain("needs-human-approve");
+    expect(c?.labels).toContain("needs-human-review");
     expect(c?.labels).not.toContain("automata:auto-fix");
     expect(c?.autoFix).toBe(false);
   });

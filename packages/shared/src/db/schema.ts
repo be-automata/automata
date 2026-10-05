@@ -2025,7 +2025,7 @@ export const auditFindings = pgTable(
     planFiles: text("plan_files").array(),
     planHash: text("plan_hash"),
     issueNumber: integer("issue_number"),
-    /** 'needs_human' is the internal token; the GitHub label is needs-human-approve. */
+    /** 'needs_human' is the internal token; the GitHub label is needs-human-review. */
     status: text("status")
       .notNull()
       .$type<"candidate" | "open" | "resolved" | "needs_human" | "suppressed">()

@@ -12,13 +12,13 @@ import type { ParsedFinding } from "./parse-audit-findings";
  *
  * `needs_human` is the internal DB status token and is never rendered; the
  * only rendered label for the attempts cap and rubric-only findings is
- * `needs-human-approve` (operator decision 2026-10-04).
+ * `needs-human-review` (operator decision 2026-10-04, renamed 2026-10-05).
  */
 
 export const FINDING_LABELS = {
   finding: "automata:finding",
   autoFix: "automata:auto-fix",
-  needsHumanApprove: "needs-human-approve",
+  needsHumanReview: "needs-human-review",
   wontfix: "automata:wontfix",
   paused: "automata:paused",
   audit: (audit: string): string => `audit:${audit}`,
@@ -235,10 +235,10 @@ export function renderAuditComment(
       text = `The finding is still present after attempt ${attempts} of ${max}.`;
       break;
     case "needs_human_attempts_cap":
-      text = `Automated attempts reached the cap (${attempts} of ${max}). Labelled \`${FINDING_LABELS.needsHumanApprove}\`; a person needs to take over.`;
+      text = `Automated attempts reached the cap (${attempts} of ${max}). Labelled \`${FINDING_LABELS.needsHumanReview}\`; a person needs to take over.`;
       break;
     case "needs_human_rubric_absent":
-      text = `Later audits no longer report this rubric-only finding. Only a person can confirm resolution; labelled \`${FINDING_LABELS.needsHumanApprove}\`.`;
+      text = `Later audits no longer report this rubric-only finding. Only a person can confirm resolution; labelled \`${FINDING_LABELS.needsHumanReview}\`.`;
       break;
     case "fix_attempt_rejected": {
       const branch =
@@ -272,7 +272,7 @@ export function renderAuditComment(
       text = [
         "No repository CI reported a check on this commit within 10 minutes, so the only gate was the finding's own deterministic check on a clean checkout.",
         "",
-        `Labelled \`${FINDING_LABELS.needsHumanApprove}\`: a person should run the project's tests before merging.`,
+        `Labelled \`${FINDING_LABELS.needsHumanReview}\`: a person should run the project's tests before merging.`,
       ].join("\n");
       break;
     case "fix_pr_expired":

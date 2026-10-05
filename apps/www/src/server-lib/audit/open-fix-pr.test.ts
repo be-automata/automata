@@ -469,7 +469,7 @@ describe("openDraftFixPr (GATE-01, SC4, RES-18)", () => {
     expect((await attempt()).prNumber).toBe(700);
   });
 
-  it("the 4th failed open → open_failed, branch kept, needs-human-approve + comment", async () => {
+  it("the 4th failed open → open_failed, branch kept, needs-human-review + comment", async () => {
     await report("passed", {
       prState: "pending_open",
       prOpenAttempts: 3,
@@ -487,7 +487,7 @@ describe("openDraftFixPr (GATE-01, SC4, RES-18)", () => {
     const f = await finding();
     expect(f.status).toBe("needs_human");
     expect(f.activeAttemptId).toBeNull();
-    expect(state.labels).toContain(FINDING_LABELS.needsHumanApprove);
+    expect(state.labels).toContain(FINDING_LABELS.needsHumanReview);
     expect(state.labels).not.toContain(FINDING_LABELS.autoFix);
     expect(fake.rest.git.deleteRef).not.toHaveBeenCalled();
     const body = state.comments[0]?.body ?? "";
@@ -795,7 +795,7 @@ describe("openDraftFixPr (GATE-01, SC4, RES-18)", () => {
     expect(mint).not.toHaveBeenCalled();
   });
 
-  it("a counted outcome at the attempts cap → needs-human-approve", async () => {
+  it("a counted outcome at the attempts cap → needs-human-review", async () => {
     await db
       .update(auditFindings)
       .set({ attempts: 3 })
@@ -806,7 +806,7 @@ describe("openDraftFixPr (GATE-01, SC4, RES-18)", () => {
     const f = await finding();
     expect(f.status).toBe("needs_human");
     expect(f.lastDecisionReason).toBe("attempts_cap");
-    expect(state.labels).toContain(FINDING_LABELS.needsHumanApprove);
+    expect(state.labels).toContain(FINDING_LABELS.needsHumanReview);
     expect(state.comments.map((c) => c.body.split("\n")[0])).toEqual([
       commentMarker({
         fp: "0123456789abcdef",

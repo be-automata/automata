@@ -491,12 +491,12 @@ describe("expiry of unreviewed ready fix PRs (R5, BRK-01)", () => {
     );
   });
 
-  it("at the attempts cap the expired finding goes needs-human-approve", async () => {
+  it("at the attempts cap the expired finding goes needs-human-review", async () => {
     ctx.resolved.settings.maxAttempts = 1;
     await sweep();
     const f = await finding();
     expect(f.status).toBe("needs_human");
-    expect(state.labels.get(ISSUE)).toContain(FINDING_LABELS.needsHumanApprove);
+    expect(state.labels.get(ISSUE)).toContain(FINDING_LABELS.needsHumanReview);
   });
 
   it("a failed close is logged; the attempt stays expired (the webhook is then a no-op)", async () => {
