@@ -18,6 +18,7 @@ import {
   type SelfHealCheckResult,
 } from "./self-heal-checks";
 import {
+  emptyFixReport,
   FIX_CHECK_BUDGET_MS,
   pinFixBaseSha,
   remoteBranchHead,
@@ -664,12 +665,7 @@ export async function reportSelfHealFixAborted({
 }): Promise<void> {
   await reportSelfHealFix({
     input,
-    report: {
-      workerStatus: "aborted",
-      headSha: null,
-      checkOutcome: null,
-      deniedPaths: [],
-    },
+    report: emptyFixReport("aborted"),
     startedAt: now(),
     step,
     now,
@@ -728,20 +724,16 @@ export async function runSelfHealFixStep({
     teardown();
     if (!lockLost) await reap();
     const lastPushed = gitBroker?.lastPushedSha() ?? null;
-    await closeQuietly(gitBroker);
-    await closeQuietly(ghBroker);
+    await Promise.all([closeQuietly(gitBroker), closeQuietly(ghBroker)]);
 
     const failed = (reason: string): FixCheckReport => {
       step(`self-heal fix-check: ${reason}`);
-      return {
-        workerStatus: "error",
-        headSha:
-          lastPushed !== null && /^[0-9a-f]{40}$/.test(lastPushed)
-            ? lastPushed
-            : null,
-        checkOutcome: null,
-        deniedPaths: [],
-      };
+      return emptyFixReport(
+        "error",
+        lastPushed !== null && /^[0-9a-f]{40}$/.test(lastPushed)
+          ? lastPushed
+          : null,
+      );
     };
 
     // A 2xx receive-pack can still carry a per-ref rejection: only a commit
@@ -802,12 +794,7 @@ export async function runSelfHealFixStep({
     step(
       `self-heal fix-check: step failed (${err instanceof Error ? err.name : "unknown"})`,
     );
-    report = {
-      workerStatus: "error",
-      headSha: null,
-      checkOutcome: null,
-      deniedPaths: [],
-    };
+    report = emptyFixReport("error");
   }
   await reportSelfHealFix({ input, report, startedAt, step, now, deps });
 }

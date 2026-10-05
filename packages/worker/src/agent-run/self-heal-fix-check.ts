@@ -36,6 +36,14 @@ export interface FixCheckReport {
   deniedPaths: string[];
 }
 
+/** A report without a check result (the run never got to, or past, the check). */
+export function emptyFixReport(
+  workerStatus: FixWorkerStatus,
+  headSha: string | null = null,
+): FixCheckReport {
+  return { workerStatus, headSha, checkOutcome: null, deniedPaths: [] };
+}
+
 export type SelfHealFixShape = Extract<SelfHealRunShape, { kind: "fix" }>;
 
 /**
@@ -227,21 +235,14 @@ export async function runFixCheck(
 ): Promise<FixCheckReport> {
   const now = args.now ?? Date.now;
   const pushedSha = args.pushedSha;
-  if (pushedSha === null) {
-    return {
-      workerStatus: "no_branch",
-      headSha: null,
-      checkOutcome: null,
-      deniedPaths: [],
-    };
-  }
+  if (pushedSha === null) return emptyFixReport("no_branch");
   const headSha = FULL_SHA.test(pushedSha) ? pushedSha : null;
   const failed = (
     workerStatus: FixWorkerStatus,
     reason?: string,
   ): FixCheckReport => {
     if (reason) args.note?.(reason);
-    return { workerStatus, headSha, checkOutcome: null, deniedPaths: [] };
+    return emptyFixReport(workerStatus, headSha);
   };
   const stop = (): FixCheckReport | null => {
     if (args.signal?.aborted) return failed("aborted");
