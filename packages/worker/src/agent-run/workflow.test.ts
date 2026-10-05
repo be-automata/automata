@@ -68,9 +68,11 @@ let resolveCredentialSource: typeof import("./workflow").resolveCredentialSource
 let runSelfHealAuditStep: typeof import("./workflow").runSelfHealAuditStep;
 let selfHealRefFence: typeof import("./workflow").selfHealRefFence;
 let WORKER_FIX_BRANCH_PREFIX: string;
+let wf: typeof import("./workflow");
 
 beforeAll(async () => {
   const mod = await import("./workflow");
+  wf = mod;
   workflowDef = (mod.agentRunWorkflow as unknown as { definition: unknown })
     .definition;
   resolveUseCredits = mod.resolveUseCredits;
@@ -594,5 +596,251 @@ describe("selfHealRefFence (FENCE-01 wiring)", () => {
     expect(src).toContain(
       `export const FIX_BRANCH_PREFIX = "${WORKER_FIX_BRANCH_PREFIX}";`,
     );
+  });
+});
+
+describe("runSelfHealFixStep (GATE-01 / TMO-01 / OBS-01)", () => {
+  const PUSHED = "a".repeat(40);
+  const BASE = "b".repeat(40);
+  const FIX_SELF_HEAL = {
+    kind: "fix" as const,
+    attemptId: "11111111-1111-4111-8111-111111111111",
+    branch: "automata/fix-12-deadbeef-a1",
+    baseBranch: "main",
+    checks: [
+      {
+        fingerprint: "0123456789abcdef",
+        check: "file-exists",
+        subject: "SECURITY.md",
+      },
+    ],
+    denyExceptions: [],
+    gateToken: "GATE_TOKEN_SENTINEL",
+  };
+  const INPUT = {
+    selfHeal: FIX_SELF_HEAL,
+    daemonCallbackUrl: "https://www.example.com",
+    repoFullName: "o/r",
+    installationToken: "INSTALL_SENTINEL",
+  };
+  const COMPLETED = {
+    workerStatus: "completed" as const,
+    headSha: PUSHED,
+    checkOutcome: "pass" as const,
+    deniedPaths: [],
+  };
+
+  function setup(
+    over: {
+      lastPushed?: string | null;
+      remote?: () => Promise<string | null>;
+      lockLost?: boolean;
+    } = {},
+  ) {
+    const order: string[] = [];
+    const lines: string[] = [];
+    const deps = {
+      remoteHead: vi.fn(async (_args: unknown) => {
+        order.push("remoteHead");
+        return over.remote ? over.remote() : PUSHED;
+      }),
+      runCheck: vi.fn(async (_args: unknown) => {
+        order.push("runFixCheck");
+        return COMPLETED;
+      }),
+      postReport: vi.fn(async (_args: unknown) => {
+        order.push("postSelfHealFixCheck");
+        return "recorded" as const;
+      }),
+    };
+    const lastPushed = "lastPushed" in over ? over.lastPushed! : PUSHED;
+    const run = () =>
+      wf.runSelfHealFixStep({
+        input: INPUT,
+        workdir: "/w",
+        agentUser: "",
+        egressProxyUrl: null,
+        baseSha: BASE,
+        lockLost: over.lockLost ?? false,
+        teardown: () => order.push("teardown"),
+        reap: async () => order.push("reap"),
+        gitBroker: {
+          lastPushedSha: () => {
+            order.push("lastPushedSha");
+            return lastPushed;
+          },
+          close: async () => {
+            order.push("git-close");
+          },
+        },
+        ghBroker: {
+          close: async () => {
+            order.push("gh-close");
+          },
+        },
+        runStartedAt: 1_000_000,
+        step: (m) => lines.push(m),
+        now: () => 1_000_000 + 5_000,
+        deps,
+      });
+    return { order, lines, deps, run };
+  }
+
+  it("kills, reaps, reads the pushed sha, closes both brokers, then checks and reports", async () => {
+    const { order, lines, deps, run } = setup();
+    await run();
+    expect(order).toEqual([
+      "teardown",
+      "reap",
+      "lastPushedSha",
+      "git-close",
+      "gh-close",
+      "remoteHead",
+      "runFixCheck",
+      "postSelfHealFixCheck",
+    ]);
+    const checkArgs = deps.runCheck.mock.calls[0]![0] as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(checkArgs.pushedSha).toBe(PUSHED);
+    expect(checkArgs.baseSha).toBe(BASE);
+    expect(checkArgs.fix).toBe(FIX_SELF_HEAL);
+    // min(now + 3 min, start + 30 min − 60 s)
+    expect(checkArgs.deadlineAt).toBe(1_000_000 + 5_000 + 180_000);
+    expect(deps.postReport).toHaveBeenCalledWith({
+      baseUrl: "https://www.example.com",
+      gateToken: "GATE_TOKEN_SENTINEL",
+      attemptId: FIX_SELF_HEAL.attemptId,
+      report: COMPLETED,
+    });
+    expect(lines).toEqual([
+      "self-heal fix-check: status=completed check=pass denied=0 head=aaaaaaaa ms=0 report=recorded",
+    ]);
+    expect(lines.join("\n")).not.toContain("GATE_TOKEN_SENTINEL");
+    expect(lines.join("\n")).not.toContain("INSTALL_SENTINEL");
+  });
+
+  it("nothing pushed → the check runs with pushedSha null (no_branch); GitHub is not asked", async () => {
+    const { deps, run } = setup({ lastPushed: null });
+    await run();
+    expect(deps.remoteHead).not.toHaveBeenCalled();
+    expect(
+      (deps.runCheck.mock.calls[0]![0] as unknown as { pushedSha: unknown })
+        .pushedSha,
+    ).toBeNull();
+  });
+
+  it("a push GitHub does not hold (per-ref rejection) → pushedSha null", async () => {
+    const { deps, run } = setup({ remote: async () => null });
+    await run();
+    expect(
+      (deps.runCheck.mock.calls[0]![0] as unknown as { pushedSha: unknown })
+        .pushedSha,
+    ).toBeNull();
+  });
+
+  it("a GitHub head that differs from the push → error, nothing checked", async () => {
+    const { deps, lines, run } = setup({ remote: async () => "c".repeat(40) });
+    await run();
+    expect(deps.runCheck).not.toHaveBeenCalled();
+    expect(
+      (deps.postReport.mock.calls[0]![0] as unknown as { report: unknown })
+        .report,
+    ).toEqual({
+      workerStatus: "error",
+      headSha: PUSHED,
+      checkOutcome: null,
+      deniedPaths: [],
+    });
+    expect(lines.at(-1)).toContain("status=error");
+  });
+
+  it("a failed head lookup → error, nothing checked", async () => {
+    const { deps, run } = setup({
+      remote: async () => {
+        throw new Error("git ls-remote failed (exit 128)");
+      },
+    });
+    await run();
+    expect(deps.runCheck).not.toHaveBeenCalled();
+    expect(deps.postReport).toHaveBeenCalledTimes(1);
+  });
+
+  it("a lost box lock skips the reap and the check, and still reports error", async () => {
+    const { order, deps, run } = setup({ lockLost: true });
+    await run();
+    expect(order).not.toContain("reap");
+    expect(deps.runCheck).not.toHaveBeenCalled();
+    expect(
+      (
+        deps.postReport.mock.calls[0]![0] as unknown as {
+          report: { workerStatus: string };
+        }
+      ).report.workerStatus,
+    ).toBe("error");
+  });
+
+  it("never throws: a check that throws becomes an error report and one line", async () => {
+    const { deps, lines, run } = setup();
+    deps.runCheck.mockRejectedValueOnce(new Error("boom"));
+    await expect(run()).resolves.toBeUndefined();
+    expect(deps.postReport).toHaveBeenCalledTimes(1);
+    expect(lines.at(-1)).toContain("status=error");
+  });
+
+  it("does nothing for a run without a fix", async () => {
+    const { order, deps } = setup();
+    await wf.runSelfHealFixStep({
+      input: { ...INPUT, selfHeal: undefined },
+      workdir: "/w",
+      agentUser: "",
+      egressProxyUrl: null,
+      baseSha: BASE,
+      lockLost: false,
+      teardown: () => order.push("teardown"),
+      reap: async () => order.push("reap"),
+      gitBroker: null,
+      ghBroker: null,
+      runStartedAt: 0,
+      step: () => {},
+      deps,
+    });
+    expect(order).toEqual([]);
+    expect(deps.postReport).not.toHaveBeenCalled();
+  });
+
+  it("reportSelfHealFixAborted posts workerStatus aborted once", async () => {
+    const { deps, lines } = setup();
+    await wf.reportSelfHealFixAborted({
+      input: INPUT,
+      step: (m) => lines.push(m),
+      deps,
+    });
+    expect(deps.postReport).toHaveBeenCalledTimes(1);
+    expect(
+      (deps.postReport.mock.calls[0]![0] as unknown as { report: unknown })
+        .report,
+    ).toEqual({
+      workerStatus: "aborted",
+      headSha: null,
+      checkOutcome: null,
+      deniedPaths: [],
+    });
+    expect(lines[0]).toMatch(
+      /^self-heal fix-check: status=aborted check=none denied=0 head=none ms=\d+ report=recorded$/,
+    );
+  });
+
+  it("the deadline is capped by the 30-minute run timeout minus 60 s", () => {
+    const start = 0;
+    const late = 29 * 60_000;
+    expect(wf.fixCheckDeadline(late, start)).toBe(29 * 60_000);
+    expect(wf.fixCheckDeadline(1_000, start)).toBe(181_000);
+  });
+
+  it("RUN_EXECUTION_TIMEOUT_MS mirrors the task's executionTimeout", () => {
+    expect(workflowDef._tasks[0].executionTimeout).toBe("30m");
+    expect(wf.RUN_EXECUTION_TIMEOUT_MS).toBe(30 * 60_000);
   });
 });

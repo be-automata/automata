@@ -141,6 +141,33 @@ vi.mock("./provision", () => ({
   },
 }));
 
+// GATE-01 (09-10): the post-agent fix check and its report, recorded in the
+// finally order so the kill → reap → close → check → report sequence is
+// asserted, not assumed.
+const FIX_PUSHED = "a".repeat(40);
+const FIX_BASE = "b".repeat(40);
+const pinFixBaseSha = vi.fn(async (..._args: unknown[]) => FIX_BASE);
+const remoteBranchHead = vi.fn(async (..._args: unknown[]) => FIX_PUSHED);
+const runFixCheck = vi.fn(async (..._args: unknown[]) => {
+  finallyOrder.push("runFixCheck");
+  return {
+    workerStatus: "completed",
+    headSha: FIX_PUSHED,
+    checkOutcome: "pass",
+    deniedPaths: [],
+  };
+});
+const postSelfHealFixCheck = vi.fn(async (..._args: unknown[]) => {
+  finallyOrder.push("postSelfHealFixCheck");
+  return "recorded";
+});
+vi.mock("./self-heal-fix-check", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./self-heal-fix-check")>()),
+  pinFixBaseSha: (...args: unknown[]) => pinFixBaseSha(...args),
+  remoteBranchHead: (...args: unknown[]) => remoteBranchHead(...args),
+  runFixCheck: (...args: unknown[]) => runFixCheck(...args),
+}));
+
 const pullNextMessage = vi.fn();
 const pollUntilTerminal = vi.fn();
 const postRunTerminal = vi.fn(async (..._args: unknown[]) => "applied");
@@ -155,6 +182,7 @@ vi.mock("./www-client", () => ({
   checkRunStaleness: (...args: unknown[]) => checkRunStaleness(...args),
   postEgressEvents: (...args: unknown[]) => postEgressEvents(...args),
   postRunCredentialSource: vi.fn(),
+  postSelfHealFixCheck: (...args: unknown[]) => postSelfHealFixCheck(...args),
 }));
 
 const assertEgressProxyReachable = vi.fn(async (..._args: unknown[]) => {});
@@ -1719,5 +1747,163 @@ describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
     );
     expect(options).toEqual({});
     expect(tokenLines(lines)).toEqual([]);
+  });
+});
+
+describe("GATE-01: the fix check runs after the agent is dead, then reports (09-10)", () => {
+  const FIX_RUN = {
+    ...INPUT,
+    branch: "main",
+    selfHeal: {
+      kind: "fix" as const,
+      attemptId: "11111111-1111-4111-8111-111111111111",
+      branch: "automata/fix-12-deadbeef-a1",
+      baseBranch: "main",
+      checks: [
+        {
+          fingerprint: "0123456789abcdef",
+          check: "file-exists",
+          subject: "SECURITY.md",
+        },
+      ],
+      denyExceptions: [],
+      gateToken: "GATE_TOKEN_SENTINEL",
+    },
+  };
+  const fixCtx = () => ({
+    abortController: new AbortController(),
+    cancelled: false,
+    log: vi.fn(),
+    workflowRunId: () => "run-ext-fix",
+  });
+
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    finallyOrder.length = 0;
+    releaseMock.mockClear();
+    provisionWorkdir.mockReset().mockResolvedValue(WORKDIR);
+    cleanupWorkdir.mockReset().mockResolvedValue(undefined);
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      cleanup: vi.fn(async () => {}),
+    });
+    startGitBroker.mockResolvedValue({
+      url: "http://127.0.0.1:41999",
+      port: 41999,
+      lastPushedSha: () => {
+        finallyOrder.push("lastPushedSha");
+        return FIX_PUSHED;
+      },
+      close: vi.fn(async () => {
+        finallyOrder.push("git-close");
+      }),
+    });
+    startGhBroker.mockResolvedValue({
+      socketPath: "/tmp/automata-agent-run/w-test/thr_leak_1-gh.sock",
+      close: vi.fn(async () => {
+        finallyOrder.push("gh-close");
+      }),
+    });
+    pinFixBaseSha.mockClear();
+    remoteBranchHead.mockClear();
+    runFixCheck.mockClear();
+    postSelfHealFixCheck.mockClear();
+    pullNextMessage.mockReset();
+    pollUntilTerminal.mockReset();
+  });
+
+  it("completed: teardown → reap → lastPushedSha → git close → gh close → check → report; then the finally sequence, lock last", async () => {
+    pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
+    pollUntilTerminal.mockResolvedValue({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+    const c = fixCtx();
+    await expect(runFn(FIX_RUN, c)).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    expect(finallyOrder.filter((x) => x !== "uid-reap:admission")).toEqual([
+      "teardown",
+      "uid-reap:teardown",
+      "lastPushedSha",
+      "git-close",
+      "gh-close",
+      "runFixCheck",
+      "postSelfHealFixCheck",
+      // the finally block: second teardown/reap/closes are no-ops
+      "teardown",
+      "uid-reap:teardown",
+      "git-close",
+      "gh-close",
+      "cleanupWorkdir",
+      "release",
+    ]);
+    expect(pinFixBaseSha).toHaveBeenCalledWith({
+      workdir: WORKDIR,
+      baseBranch: "main",
+    });
+    const checkArgs = runFixCheck.mock.calls[0]![0] as Record<string, unknown>;
+    expect(checkArgs.pushedSha).toBe(FIX_PUSHED);
+    expect(checkArgs.baseSha).toBe(FIX_BASE);
+    expect(checkArgs.workdir).toBe(WORKDIR);
+    expect(postSelfHealFixCheck).toHaveBeenCalledTimes(1);
+    expect(postSelfHealFixCheck.mock.calls[0]![0]).toMatchObject({
+      gateToken: "GATE_TOKEN_SENTINEL",
+      attemptId: FIX_RUN.selfHeal.attemptId,
+      report: { workerStatus: "completed", checkOutcome: "pass" },
+    });
+    const lines = c.log.mock.calls.map((call) => String(call[0]));
+    const checkLines = lines.filter((l) =>
+      l.includes("self-heal fix-check: status="),
+    );
+    expect(checkLines).toHaveLength(1);
+    expect(checkLines[0]).toMatch(
+      /self-heal fix-check: status=completed check=pass denied=0 head=aaaaaaaa ms=\d+ report=recorded$/,
+    );
+    expect(lines.some((l) => l.includes("run start: lane=self-heal-fix"))).toBe(
+      true,
+    );
+    expect(lines.join("\n")).not.toContain("GATE_TOKEN_SENTINEL");
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["cancelled", "stopped"] as const)(
+    "%s: no check; exactly one report with workerStatus aborted",
+    async (outcome) => {
+      pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
+      pollUntilTerminal.mockResolvedValue({ outcome });
+      await runFn(FIX_RUN, fixCtx());
+      expect(runFixCheck).not.toHaveBeenCalled();
+      expect(postSelfHealFixCheck).toHaveBeenCalledTimes(1);
+      expect(postSelfHealFixCheck.mock.calls[0]![0]).toMatchObject({
+        report: {
+          workerStatus: "aborted",
+          headSha: null,
+          checkOutcome: null,
+          deniedPaths: [],
+        },
+      });
+      expect(finallyOrder.at(-1)).toBe("release");
+    },
+  );
+
+  it("a fix run that throws mid-run still reports aborted once, and the throw propagates", async () => {
+    pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
+    pollUntilTerminal.mockRejectedValue(new Error("poll blew up"));
+    await expect(runFn(FIX_RUN, fixCtx())).rejects.toThrow("poll blew up");
+    expect(runFixCheck).not.toHaveBeenCalled();
+    expect(postSelfHealFixCheck).toHaveBeenCalledTimes(1);
+  });
+
+  it("a non-fix run never checks or reports", async () => {
+    pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
+    pollUntilTerminal.mockResolvedValue({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+    await runFn(INPUT, fixCtx());
+    expect(pinFixBaseSha).not.toHaveBeenCalled();
+    expect(runFixCheck).not.toHaveBeenCalled();
+    expect(postSelfHealFixCheck).not.toHaveBeenCalled();
   });
 });

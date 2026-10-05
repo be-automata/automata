@@ -37,12 +37,14 @@ export function formatRunStartLine(
     | "selfHeal"
   >,
 ): string {
-  // OBS-01: an audit-stamped run is filterable with `grep lane=self-heal`.
+  // OBS-01: audit and fix runs are filterable with `grep lane=self-heal`.
   // Display-only: resolveRunLane (which gates task packs) is untouched.
   const lane =
     input.selfHeal?.kind === "audit"
       ? "self-heal-audit"
-      : resolveRunLane(input);
+      : input.selfHeal?.kind === "fix"
+        ? "self-heal-fix"
+        : resolveRunLane(input);
   const parts = [`run start: lane=${lane}`];
   if (input.prNumber !== undefined) parts.push(`pr=${input.prNumber}`);
   parts.push(`repo=${input.repoFullName}`, `branch=${input.branch}`);
