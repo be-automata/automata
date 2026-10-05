@@ -208,6 +208,8 @@ class FixCiEvaluator {
     signalName: string,
     permission: "pull_requests" | "contents" | "checks",
     call: (signal: AbortSignal) => Promise<GithubResponse<T>>,
+    /** A 403 / 422 here is a real lane failure (09-13 loop_fix rule). */
+    loopFix = false,
   ): Promise<SelfHealCallResult<T>> {
     if (typeof this.session !== "object" || this.session === null) {
       throw new Error("self-heal CI evaluator: GitHub session not open");
@@ -221,6 +223,9 @@ class FixCiEvaluator {
       deadlineAt: this.deadlineAt,
       call,
       deps: this.callDeps,
+      ...(loopFix
+        ? { loopFixScopeKey: normalizeRepo(this.attempt.repoFullName) }
+        : {}),
     });
   }
 
@@ -530,6 +535,7 @@ class FixCiEvaluator {
         status: 200,
         headers: {},
       }),
+      true,
     );
     if (!ready.ok) {
       this.deps.log("[self-heal] fix draft ready transition failed", {
@@ -734,6 +740,7 @@ class FixCiEvaluator {
         });
         return { ...out, data: undefined };
       },
+      true,
     );
     if (!res.ok) {
       this.deps.log("[self-heal] fix draft close failed", {

@@ -298,6 +298,8 @@ export class FixPrLifecycle {
     kind: CallKind,
     permission: "pull_requests" | "contents",
     call: (signal: AbortSignal) => Promise<GithubResponse<T>>,
+    /** A 403 / 422 here is a real lane failure (09-13 loop_fix rule). */
+    loopFix = false,
   ): Promise<SelfHealCallResult<T>> {
     return withSelfHealCall<T>({
       kind,
@@ -308,6 +310,9 @@ export class FixPrLifecycle {
       deadlineAt: this.deadlineAt,
       call,
       deps: { ...this.deps.callDeps, db: this.db },
+      ...(loopFix
+        ? { loopFixScopeKey: normalizeRepo(this.attempt.repoFullName) }
+        : {}),
     });
   }
 

@@ -512,6 +512,11 @@ describe("expiry of unreviewed ready fix PRs (R5, BRK-01)", () => {
       "[self-heal] fix PR expiry close failed",
       expect.objectContaining({ attemptId }),
     );
+    // The 422 also feeds the repo's loop_fix gh_403/gh_422 rule (09-13).
+    expect((await loopFixEvents()).map((e) => e.signal).sort()).toEqual([
+      "gh_422",
+      "pr_expired",
+    ]);
   });
 
   it("an unreadable review list leaves the PR alone", async () => {

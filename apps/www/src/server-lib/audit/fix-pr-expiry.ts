@@ -265,6 +265,7 @@ class Expiry {
         });
         return { ...out, data: undefined };
       },
+      true,
     );
     if (!res.ok) {
       this.deps.log("[self-heal] fix PR expiry close failed", {
