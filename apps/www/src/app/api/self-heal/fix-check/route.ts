@@ -27,7 +27,8 @@ import { getFixAttemptForGateReport } from "@terragon/shared/model/audit-fix-att
  *    delivered in the run payload to the worker process only. The daemon
  *    token is NOT accepted. Only the sha256 is stored; the compare is
  *    constant-time on equal-length digests; an expired token is refused. A
- *    missing, wrong or expired token gets one identical 401.
+ *    missing, wrong or expired token, or an unknown attempt id, gets one
+ *    identical 401.
  *  - Single use: the first report wins (check_reported_at CAS); a later one
  *    is answered 200 { recorded: false } and changes nothing. A report for an
  *    attempt the reconcile already closed is not recorded either.
@@ -103,11 +104,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     parsed.data;
 
   const attempt = await getFixAttemptForGateReport({ db, attemptId });
-  if (!attempt) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
   const now = new Date();
+  // An unknown attempt gets the same 401 as a wrong token: the endpoint is
+  // no oracle for which attempt ids exist.
   if (
+    !attempt ||
     !attempt.gateTokenHash ||
     !attempt.gateTokenExpiresAt ||
     attempt.gateTokenExpiresAt.getTime() <= now.getTime() ||

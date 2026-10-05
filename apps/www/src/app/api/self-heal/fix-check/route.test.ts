@@ -153,6 +153,72 @@ describe("POST /api/self-heal/fix-check", () => {
       expect((await stored()).checkReportedAt).toBeNull();
     });
 
+    it("R6: an unknown attempt gets the same 401 as a wrong token (no existence oracle)", async () => {
+      const unknown = await post(report({ attemptId: randomUUID() }));
+      const wrong = await post(report(), mintSelfHealToken());
+      expect(unknown.status).toBe(401);
+      expect(await unknown.text()).toBe(await wrong.text());
+    });
+
+    it("R6: attempt A's token presented for attempt B → 401, nothing recorded on either", async () => {
+      const finding = await insertFinding({
+        db,
+        organizationId: orgId,
+        finding: {
+          repoFullName: REPO,
+          fingerprint: "fedcba9876543210",
+          audit: "security-audit",
+          ruleId: "supply.lockfile-missing",
+          severity: "high",
+          checkKind: "script",
+          title: "Lockfile missing",
+          subject: "pnpm-lock.yaml",
+          status: "open",
+          issueNumber: 43,
+          autoFixLabeled: true,
+          fixReadyAt: new Date(Date.now() - 60_000),
+        },
+      });
+      const claimed = await claimFixAttempt({
+        db,
+        organizationId: orgId,
+        findingId: finding.id,
+        maxAttempts: 3,
+        cooldownMin: 30,
+        branchFor: (n) => `automata/fix-43-fedcba98-a${n}`,
+      });
+      if (!claimed) throw new Error("claim failed");
+      const tokenB = mintSelfHealToken();
+      await updateFixAttempt({
+        db,
+        organizationId: orgId,
+        id: claimed.attempt.id,
+        patch: {
+          gateTokenHash: hashSelfHealToken(tokenB),
+          gateTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+        },
+      });
+      const res = await post(report({ attemptId: claimed.attempt.id }), token);
+      expect(res.status).toBe(401);
+      const [b] = await db
+        .select()
+        .from(auditFixAttempts)
+        .where(eq(auditFixAttempts.id, claimed.attempt.id));
+      expect(b?.checkReportedAt).toBeNull();
+      expect((await stored()).checkReportedAt).toBeNull();
+      expect(vi.mocked(openDraftFixPr)).not.toHaveBeenCalled();
+    });
+
+    it("R6: after the gate token is rotated, the old token gets 401 and the new one records", async () => {
+      const old = token;
+      token = mintSelfHealToken();
+      await setToken(new Date(Date.now() + 60 * 60 * 1000));
+      expect((await post(report(), old)).status).toBe(401);
+      expect((await stored()).checkReportedAt).toBeNull();
+      expect((await post(report())).status).toBe(200);
+      expect((await stored()).checkReportedAt).not.toBeNull();
+    });
+
     it("an attempt without a stored token rejects every token", async () => {
       await updateFixAttempt({
         db,
@@ -181,12 +247,6 @@ describe("POST /api/self-heal/fix-check", () => {
 
     it("a non-JSON body → 400", async () => {
       expect((await post("{not json")).status).toBe(400);
-    });
-
-    it("an unknown attempt → 404", async () => {
-      expect((await post(report({ attemptId: randomUUID() }))).status).toBe(
-        404,
-      );
     });
   });
 
