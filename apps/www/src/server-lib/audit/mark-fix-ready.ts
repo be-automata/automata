@@ -46,6 +46,26 @@ export async function markFindingFixReady({
   now,
 }: MarkFindingFixReadyInput): Promise<FixReadyResult> {
   const repo = normalizeRepo(repoFullName);
+  const ledgerRow = and(
+    eq(auditFindings.organizationId, organizationId),
+    eq(auditFindings.repoFullName, repo),
+    eq(auditFindings.issueNumber, issueNumber),
+  );
+  const author = (issueAuthorLogin ?? "").trim().toLowerCase();
+  if (!author || author !== botLogin.trim().toLowerCase()) {
+    // Decided by the payload: read the fingerprint without the row lock.
+    const rows = await withSelfHealTx(db, (tx) =>
+      tx
+        .select({ fingerprint: auditFindings.fingerprint })
+        .from(auditFindings)
+        .where(ledgerRow)
+        .limit(1),
+    );
+    const row = rows[0];
+    return row
+      ? { outcome: "author_not_bot", fingerprint: row.fingerprint }
+      : { outcome: "not_a_ledger_issue", fingerprint: null };
+  }
   return withSelfHealTx(db, async (tx) => {
     const rows = await tx
       .select({
@@ -56,13 +76,7 @@ export async function markFindingFixReady({
         fixReadyAt: auditFindings.fixReadyAt,
       })
       .from(auditFindings)
-      .where(
-        and(
-          eq(auditFindings.organizationId, organizationId),
-          eq(auditFindings.repoFullName, repo),
-          eq(auditFindings.issueNumber, issueNumber),
-        ),
-      )
+      .where(ledgerRow)
       .limit(1)
       .for("update");
     const row = rows[0];
@@ -70,10 +84,6 @@ export async function markFindingFixReady({
       return { outcome: "not_a_ledger_issue", fingerprint: null };
     }
     const fingerprint = row.fingerprint;
-    const author = (issueAuthorLogin ?? "").trim().toLowerCase();
-    if (!author || author !== botLogin.trim().toLowerCase()) {
-      return { outcome: "author_not_bot", fingerprint };
-    }
     if (row.checkKind !== "script") {
       return { outcome: "not_script_rule", fingerprint };
     }
