@@ -8,7 +8,7 @@ import {
 } from "@terragon/shared/model/audit-findings";
 import { createTestOrg } from "@terragon/shared/model/test-helpers";
 
-import { markFindingFixReady } from "./mark-fix-ready";
+import { clearFindingFixReady, markFindingFixReady } from "./mark-fix-ready";
 
 const REPO = "Acme/Widgets";
 const BOT = "automata-app[bot]";
@@ -173,5 +173,34 @@ describe("markFindingFixReady", () => {
       issueNumber: 15,
     });
     expect(row?.fixReadyAt).toBeNull();
+  });
+
+  it("R7: clearFindingFixReady withdraws readiness (issue closed / trigger label removed), org-fenced", async () => {
+    await mark(11);
+    const clear = (issueNumber: number, organizationId = orgId) =>
+      clearFindingFixReady({
+        db,
+        organizationId,
+        repoFullName: "acme/widgets",
+        issueNumber,
+      });
+    expect(await clear(11)).toEqual({
+      outcome: "cleared",
+      fingerprint: "a".repeat(16),
+    });
+    const row = await getFindingByIssue({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      issueNumber: 11,
+    });
+    expect(row?.autoFixLabeled).toBe(false);
+    expect(row?.fixReadyAt).toBeNull();
+    expect((await clear(11)).outcome).toBe("not_ready");
+    expect((await clear(999)).outcome).toBe("not_a_ledger_issue");
+    // Another org's issue number is not reachable from this org.
+    expect((await clear(15)).outcome).toBe("not_a_ledger_issue");
+    // Re-labelling marks it again.
+    expect((await mark(11)).outcome).toBe("marked");
   });
 });

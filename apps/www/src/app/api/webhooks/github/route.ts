@@ -26,6 +26,8 @@
  *
  * This handler processes:
  * - PR actions: opened, closed, reopened, ready_for_review, converted_to_draft
+ * - Issue actions: opened/labeled (issue automations, mirror intake),
+ *   closed/unlabeled (withdraw a self-heal finding's fix readiness)
  * - Issue comments: Creates follow-up tasks when the app is mentioned in PR comments
  * - PR review comments: Creates follow-up tasks when the app is mentioned in PR review comments
  * - PR reviews: Creates follow-up tasks when the app is mentioned in PR reviews
@@ -44,6 +46,7 @@ import {
   handleCheckSuiteEvent,
   handlePullRequestUpdated,
   handleIssueEvent,
+  handleSelfHealIssueUnready,
   handlePullRequestMirror,
   handlePullRequestReviewMirror,
   handleWorkflowRunEvent,
@@ -143,6 +146,11 @@ export async function POST(request: NextRequest) {
   );
   webhooks.on(["issues.opened", "issues.labeled"], async ({ payload }) => {
     await handleIssueEvent(payload);
+  });
+  // R7: a closed issue or a removed trigger label withdraws a self-heal
+  // finding's readiness. DB-only, never throws.
+  webhooks.on(["issues.closed", "issues.unlabeled"], async ({ payload }) => {
+    await handleSelfHealIssueUnready(payload);
   });
   webhooks.onAny(({ name, payload }) => {
     const payloadInfo: string[] = [];

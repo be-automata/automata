@@ -34,7 +34,10 @@ import {
 } from "@terragon/shared/model/supersede-recheck";
 import { createMirrorTask } from "./mirror-intake";
 import { FIX_BRANCH_PREFIX } from "@terragon/shared/self-heal/fix-paths";
-import { markFindingFixReady } from "@/server-lib/audit/mark-fix-ready";
+import {
+  clearFindingFixReady,
+  markFindingFixReady,
+} from "@/server-lib/audit/mark-fix-ready";
 import { logSelfHealDecision } from "@/server-lib/audit/decision-log";
 import { resolveBotLogin } from "@/server-lib/review/bot-login";
 import { normalizeLabel } from "@/server-lib/audit/render-issue";
@@ -45,6 +48,10 @@ export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
 // The issue actions routed to handleIssueEvent / handleIssueLabeledMirror.
 export type IssueEvent = EmitterWebhookEvent<
   "issues.opened" | "issues.labeled"
+>["payload"];
+// R7: the issue actions that withdraw a self-heal finding's readiness.
+export type IssueUnreadyEvent = EmitterWebhookEvent<
+  "issues.closed" | "issues.unlabeled"
 >["payload"];
 export type IssueCommentEvent = EmitterWebhookEvent<"issue_comment">["payload"];
 export type PullRequestReviewCommentEvent =
@@ -644,6 +651,76 @@ async function markSelfHealFindingReady(
   } catch (error: unknown) {
     console.error(
       "[self-heal] decision log failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+/**
+ * R7: issues.closed / issues.unlabeled (an audit-fix automation's trigger
+ * label) withdraw the ledger finding's readiness, so the dispatcher does not
+ * start a fix nobody asked for any more. The same shape as the mark: one DB
+ * write per audit-fix automation's org, zero GitHub calls. Never throws.
+ */
+export async function handleSelfHealIssueUnready(
+  event: IssueUnreadyEvent,
+): Promise<void> {
+  const repoFullName = event.repository.full_name;
+  const issueNumber = event.issue.number;
+  try {
+    const removed =
+      event.action === "unlabeled" ? normalizeLabel(event.label?.name) : null;
+    if (event.action === "unlabeled" && !removed) return;
+    const automations = (
+      await getIssueAutomationsForRepo({ db, repoFullName })
+    ).filter(
+      (automation) =>
+        automation.repoFullName === repoFullName &&
+        isAuditFixAction(automation.action) &&
+        automation.organizationId !== null &&
+        (removed === null ||
+          normalizeLabels(
+            (automation.triggerConfig as IssueTriggerConfig).filter.labels,
+          ).includes(removed)),
+    );
+    const orgs = new Map<string, Automation>();
+    for (const automation of automations) {
+      if (automation.organizationId) {
+        orgs.set(automation.organizationId, automation);
+      }
+    }
+    for (const [organizationId, automation] of orgs) {
+      const result = await clearFindingFixReady({
+        db,
+        organizationId,
+        repoFullName,
+        issueNumber,
+      });
+      if (result.outcome === "not_a_ledger_issue") continue;
+      logSelfHealDecision(
+        {
+          log: (line) => console.log(line),
+          capture: (name, properties) =>
+            getPostHogServer().capture({
+              distinctId: automation.userId,
+              event: name,
+              properties,
+            }),
+        },
+        {
+          organizationId,
+          repoFullName,
+          runId: `issue-${issueNumber}`,
+          fingerprint: result.fingerprint ?? "-",
+          decision: "skip",
+          reason: `unready_${event.action}_${result.outcome}`,
+          mode: "on",
+        },
+      );
+    }
+  } catch (error: unknown) {
+    console.error(
+      "[self-heal] issue unready failed:",
       error instanceof Error ? error.message : String(error),
     );
   }

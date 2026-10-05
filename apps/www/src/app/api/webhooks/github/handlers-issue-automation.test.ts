@@ -3,11 +3,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as github from "@/lib/github";
 import { getIssueAutomationsForRepo } from "@terragon/shared/model/automations";
 import { runIssueAutomation } from "@/server-lib/automations";
-import { markFindingFixReady } from "@/server-lib/audit/mark-fix-ready";
+import {
+  clearFindingFixReady,
+  markFindingFixReady,
+} from "@/server-lib/audit/mark-fix-ready";
 import { createSelfHealOctokit } from "@/server-lib/audit/self-heal-octokit";
 import type { Automation } from "@terragon/shared/db/types";
 
-import { handleIssueEvent, type IssueEvent } from "./handlers";
+import {
+  handleIssueEvent,
+  handleSelfHealIssueUnready,
+  type IssueEvent,
+  type IssueUnreadyEvent,
+} from "./handlers";
 
 vi.mock("@terragon/shared/model/automations", async (importOriginal) => ({
   ...(await importOriginal<
@@ -22,6 +30,9 @@ vi.mock("@/server-lib/automations", async (importOriginal) => ({
 vi.mock("@/server-lib/audit/mark-fix-ready", () => ({
   markFindingFixReady: vi.fn(() =>
     Promise.resolve({ outcome: "marked", fingerprint: "abcdef0123456789" }),
+  ),
+  clearFindingFixReady: vi.fn(() =>
+    Promise.resolve({ outcome: "cleared", fingerprint: "abcdef0123456789" }),
   ),
 }));
 vi.mock("@/server-lib/audit/self-heal-octokit", async (importOriginal) => ({
@@ -323,5 +334,81 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
     expect(runIssueAutomation).not.toHaveBeenCalled();
     expectNoOctokit();
     expect(logs.some((l) => l.includes("reason=author_not_bot"))).toBe(true);
+  });
+});
+
+describe("handleSelfHealIssueUnready (R7)", () => {
+  let logs: string[];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    logs = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  function unready(
+    action: "closed" | "unlabeled",
+    removed?: string,
+  ): IssueUnreadyEvent {
+    return {
+      action,
+      issue: { number: 42, user: { login: BOT }, labels: [] },
+      ...(removed ? { label: { name: removed } } : {}),
+      repository: { full_name: REPO, owner: { login: "owner" } },
+    } as unknown as IssueUnreadyEvent;
+  }
+
+  it("removing the trigger label clears readiness in the automation's org, with zero GitHub calls", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([
+      auditFixAutomation(),
+      automation(),
+    ]);
+    await handleSelfHealIssueUnready(unready("unlabeled", "Automata:Auto-Fix"));
+    expect(clearFindingFixReady).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(clearFindingFixReady).mock.calls[0]![0]).toMatchObject({
+      organizationId: "org-1",
+      repoFullName: REPO,
+      issueNumber: 42,
+    });
+    expect(runIssueAutomation).not.toHaveBeenCalled();
+    expectNoOctokit();
+    expect(
+      logs.some((l) =>
+        l.includes("decision=skip reason=unready_unlabeled_cleared"),
+      ),
+    ).toBe(true);
+  });
+
+  it("removing another label changes nothing", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([
+      auditFixAutomation(),
+    ]);
+    await handleSelfHealIssueUnready(unready("unlabeled", "documentation"));
+    expect(clearFindingFixReady).not.toHaveBeenCalled();
+    expectNoOctokit();
+  });
+
+  it("closing the issue clears readiness; a non-audit-fix automation is ignored", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([
+      auditFixAutomation(),
+    ]);
+    await handleSelfHealIssueUnready(unready("closed"));
+    expect(clearFindingFixReady).toHaveBeenCalledTimes(1);
+    expectNoOctokit();
+
+    vi.mocked(clearFindingFixReady).mockClear();
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([automation()]);
+    await handleSelfHealIssueUnready(unready("closed"));
+    expect(clearFindingFixReady).not.toHaveBeenCalled();
+  });
+
+  it("never throws", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockRejectedValue(new Error("db"));
+    await expect(
+      handleSelfHealIssueUnready(unready("closed")),
+    ).resolves.toBeUndefined();
   });
 });

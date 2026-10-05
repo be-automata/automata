@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNotNull, or, sql } from "drizzle-orm";
 
 import type { DB } from "@terragon/shared/db";
 import { auditFindings } from "@terragon/shared/db/schema";
@@ -108,5 +108,63 @@ export async function markFindingFixReady({
       outcome: row.fixReadyAt ? "already_ready" : "marked",
       fingerprint,
     };
+  });
+}
+
+export type FixUnreadyOutcome = "cleared" | "not_ready" | "not_a_ledger_issue";
+
+export interface FixUnreadyResult {
+  outcome: FixUnreadyOutcome;
+  fingerprint: string | null;
+}
+
+/**
+ * R7: the inverse of markFindingFixReady. The issue was closed, or the
+ * trigger label was removed, so the dispatcher must not start a fix for it:
+ * clear `fix_ready_at` and `auto_fix_labeled`. DB-only (no GitHub call inside
+ * the webhook budget) and always safe to apply, so no author check: it only
+ * narrows what the loop may do. An attempt already in flight is untouched.
+ */
+export async function clearFindingFixReady({
+  db,
+  organizationId,
+  repoFullName,
+  issueNumber,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  issueNumber: number;
+}): Promise<FixUnreadyResult> {
+  const ledgerRow = and(
+    eq(auditFindings.organizationId, organizationId),
+    eq(auditFindings.repoFullName, normalizeRepo(repoFullName)),
+    eq(auditFindings.issueNumber, issueNumber),
+  );
+  return withSelfHealTx(db, async (tx) => {
+    const cleared = await tx
+      .update(auditFindings)
+      .set({ autoFixLabeled: false, fixReadyAt: null })
+      .where(
+        and(
+          ledgerRow,
+          or(
+            isNotNull(auditFindings.fixReadyAt),
+            eq(auditFindings.autoFixLabeled, true),
+          ),
+        ),
+      )
+      .returning({ fingerprint: auditFindings.fingerprint });
+    const row = cleared[0];
+    if (row) return { outcome: "cleared", fingerprint: row.fingerprint };
+    const existing = await tx
+      .select({ fingerprint: auditFindings.fingerprint })
+      .from(auditFindings)
+      .where(ledgerRow)
+      .limit(1);
+    const found = existing[0];
+    return found
+      ? { outcome: "not_ready", fingerprint: found.fingerprint }
+      : { outcome: "not_a_ledger_issue", fingerprint: null };
   });
 }
