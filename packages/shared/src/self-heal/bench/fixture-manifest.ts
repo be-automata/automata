@@ -1,4 +1,6 @@
-import { AUDIT_RULES, type AuditCheckKind } from "../audit-rules";
+import { getAuditRule, type AuditCheckKind } from "../audit-rules";
+import { FINDING_KEY_RE, normalizeSubject } from "../fingerprint";
+import { recordOf } from "./narrow";
 
 /**
  * The self-heal benchmark fixture manifest (R6, phase 9).
@@ -21,13 +23,15 @@ import { AUDIT_RULES, type AuditCheckKind } from "../audit-rules";
  * and fake secrets. Push it only to a PRIVATE fixture repo; never run the
  * benchmark against the public pilot repo.
  *
- * This module imports only the rule vocabulary, so any package can use it.
+ * This module imports only the rule vocabulary and the findings parser's
+ * subject/key normalisation, so a seed is valid exactly when the parser would
+ * have produced its subject and key unchanged.
  */
 
 export type SeedKind = "seeded" | "decoy" | "rubric";
 
 export interface Seed {
-  /** "S01", "S02", ... in manifest order. */
+  /** "S01", "S02", ... (seedId), strictly increasing in manifest order. */
   id: string;
   rule: string;
   /** Normalised subject: a repo-relative path, or "npm:<name>". */
@@ -48,28 +52,19 @@ export interface FixtureManifest {
 }
 
 const SEED_ID_RE = /^S\d{2,3}$/;
-/** Same alphabet as the findings parser's FINDING_KEY_RE. */
-const KEY_RE = /^[a-z0-9._:/@-]{1,40}$/;
-const NPM_SUBJECT_RE = /^npm:(?:@[a-z0-9._~-]+\/)?[a-z0-9._~-]+$/;
 const HIDDEN_TEST_RE = /^hidden-tests\/[A-Za-z0-9._-]+\.test\.mjs$/;
 
-function isPathSubject(subject: string): boolean {
-  if (subject === "" || subject.startsWith("/") || subject.startsWith("./")) {
-    return false;
-  }
-  if (subject.includes("\\") || /[\u0000-\u001f\u007f]/.test(subject)) {
-    return false;
-  }
-  const segments = subject.split("/");
-  return (
-    segments.every((s) => s !== "" && s !== "..") && segments[0] !== ".git"
-  );
+/** The id of the seed at catalog position `index` (0-based): S01, S02, ... */
+export function seedId(index: number): string {
+  return `S${String(index + 1).padStart(2, "0")}`;
 }
 
 /**
  * The first problem with a manifest, or null when it is usable. Checks the
- * version, sequential ids, the rule vocabulary, kind/check consistency,
- * subject and key shape, hidden test paths and duplicate identities.
+ * version, unique strictly increasing ids (the full catalog is S01..Snn; a
+ * shard keeps its catalog ids), the rule vocabulary, kind/check consistency,
+ * that subject and key are already in the findings parser's normal form,
+ * hidden test paths and duplicate identities.
  */
 export function findManifestError(manifest: FixtureManifest): string | null {
   if (manifest.version !== 1) return "version must be 1";
@@ -78,12 +73,19 @@ export function findManifestError(manifest: FixtureManifest): string | null {
   }
   const identities = new Set<string>();
   const hiddenTests = new Set<string>();
+  let previous = 0;
   for (const [index, seed] of manifest.seeds.entries()) {
     const at = `seed ${index + 1}`;
     if (!SEED_ID_RE.test(seed.id)) return `${at}: id must look like S01`;
-    const expected = `S${String(index + 1).padStart(2, "0")}`;
-    if (seed.id !== expected) return `${at}: id must be ${expected}`;
-    const rule = AUDIT_RULES.find((r) => r.id === seed.rule);
+    const number = Number(seed.id.slice(1));
+    if (seed.id !== seedId(number - 1)) {
+      return `${at}: id must be written ${seedId(number - 1)}`;
+    }
+    if (number <= previous) {
+      return `${at}: id ${seed.id} must be greater than ${seedId(previous - 1)}`;
+    }
+    previous = number;
+    const rule = getAuditRule(seed.rule);
     if (!rule) return `${seed.id}: rule ${seed.rule} is not in AUDIT_RULES`;
     if (seed.check !== rule.check) {
       return `${seed.id}: check must be ${String(rule.check)} for ${rule.id}`;
@@ -95,12 +97,10 @@ export function findManifestError(manifest: FixtureManifest): string | null {
     if (!["seeded", "decoy", "rubric"].includes(seed.kind)) {
       return `${seed.id}: unknown kind ${String(seed.kind)}`;
     }
-    const subjectOk =
-      rule.subjectKind === "npm"
-        ? NPM_SUBJECT_RE.test(seed.subject)
-        : isPathSubject(seed.subject);
-    if (!subjectOk) return `${seed.id}: bad subject ${seed.subject}`;
-    if (seed.key !== undefined && !KEY_RE.test(seed.key)) {
+    if (normalizeSubject(seed.subject, rule.subjectKind) !== seed.subject) {
+      return `${seed.id}: bad subject ${seed.subject}`;
+    }
+    if (seed.key !== undefined && !FINDING_KEY_RE.test(seed.key)) {
       return `${seed.id}: bad key ${seed.key}`;
     }
     if (!HIDDEN_TEST_RE.test(seed.hiddenTest)) {
@@ -126,16 +126,10 @@ const SEED_STRING_FIELDS = ["id", "rule", "subject", "kind", "hiddenTest"];
  * Throws on the first problem.
  */
 export function parseFixtureManifest(value: unknown): FixtureManifest {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("manifest must be an object");
-  }
-  const root = value as Record<string, unknown>;
+  const root = recordOf(value, "manifest");
   if (!Array.isArray(root.seeds)) throw new Error("manifest.seeds is missing");
   const seeds = root.seeds.map((raw, index): Seed => {
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-      throw new Error(`manifest.seeds[${index}] must be an object`);
-    }
-    const entry = raw as Record<string, unknown>;
+    const entry = recordOf(raw, `manifest.seeds[${index}]`);
     for (const name of SEED_STRING_FIELDS) {
       if (typeof entry[name] !== "string") {
         throw new Error(`manifest.seeds[${index}].${name} must be a string`);

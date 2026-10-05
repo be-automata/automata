@@ -1,5 +1,10 @@
 import { getAuditRule } from "../audit-rules";
-import type { FixtureManifest, Seed, SeedKind } from "./fixture-manifest";
+import {
+  seedId,
+  type FixtureManifest,
+  type Seed,
+  type SeedKind,
+} from "./fixture-manifest";
 
 /**
  * The self-heal benchmark seed catalog (R6, phase 9): 48 seeded script-rule
@@ -299,7 +304,7 @@ function buildCatalog(drafts: readonly SeedDraft[]): FixtureManifest {
   return {
     version: 1,
     seeds: drafts.map((draft, index): Seed => {
-      const id = `S${String(index + 1).padStart(2, "0")}`;
+      const id = seedId(index);
       return {
         id,
         rule: draft.rule,

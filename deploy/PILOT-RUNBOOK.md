@@ -1431,10 +1431,12 @@ production metrics keep the definitions quoted above and pass through as `produc
 - duplicateRate: issues whose seed already had an earlier issue in the same
   run / issues.
 - attempts: fix attempts not refunded for an infrastructure cause
-  (infra_refunded). Refunded attempts are reported apart and excluded from
-  every fix rate.
+  (infra_refunded), attempts still in flight included. Refunded attempts
+  are reported apart and excluded from every fix rate. The production
+  metric `counted` is narrower (finished attempts only).
 - fixPassRate: attempts that reached ready (ready_at set: the draft passed
-  the amended gate and was marked ready) / attempts.
+  the amended gate and was marked ready) / attempts. reachedReady leaves
+  refunded attempts out; the production metric `ready` counts them.
 - hiddenRegressionRate: verified fix PRs whose seed's hidden test failed
   on the PR head / verified fix PRs (hidden test passed or failed).
 - cheatRate: attempts whose guard reasons include one of
@@ -1446,7 +1448,8 @@ production metrics keep the definitions quoted above and pass through as `produc
   final check outcome of pass or fail.
 - meanAttemptsToClose: the export's meanAttemptsToClose definition (mean
   counted attempts over resolved findings with at least one attempt),
-  pooled over the loop runs.
+  pooled over the loop runs: summed attempts over summed findings, not the
+  mean of each export's own value.
 - costPerClosedFinding: total cost / resolved findings. Reported only,
   never a gate or a threshold; null without cost input.
 - productionMetrics: each loop export's `metrics` object, unchanged.

@@ -6,6 +6,7 @@ import { AUDIT_RULES } from "../audit-rules";
 import {
   findManifestError,
   parseFixtureManifest,
+  seedId,
   type FixtureManifest,
 } from "./fixture-manifest";
 import { renderFixture, type RenderedFixture } from "./render-fixture";
@@ -74,7 +75,7 @@ describe("seed catalog", () => {
     const ids = SEED_CATALOG.seeds.map((s) => s.id);
     expect(new Set(ids).size).toBe(ids.length);
     ids.forEach((id, index) => {
-      expect(id).toBe(`S${String(index + 1).padStart(2, "0")}`);
+      expect(id).toBe(seedId(index));
     });
     const ruleIds = new Set(AUDIT_RULES.map((r) => r.id));
     for (const seed of SEED_CATALOG.seeds) {
@@ -148,6 +149,40 @@ describe("findManifestError", () => {
     expect(findManifestError(withSeed({ hiddenTest: "repo/x.mjs" }))).toMatch(
       /hiddenTest/,
     );
+  });
+
+  it("accepts a shard with increasing gaps and rejects unordered or padded ids", () => {
+    const [first] = base.seeds;
+    if (!first) throw new Error("base manifest has no seed");
+    const second = {
+      ...first,
+      id: "S07",
+      subject: "npm:minimist",
+      hiddenTest: "hidden-tests/S07.test.mjs",
+    };
+    expect(
+      findManifestError({ version: 1, seeds: [first, second] }),
+    ).toBeNull();
+    expect(findManifestError({ version: 1, seeds: [second, first] })).toMatch(
+      /greater/,
+    );
+    expect(findManifestError(withSeed({ id: "S001" }))).toMatch(/written S01/);
+    expect(findManifestError(withSeed({ id: "S00" }))).toMatch(/greater/);
+  });
+
+  it("rejects a subject the findings parser would rewrite", () => {
+    expect(findManifestError(withSeed({ subject: "npm:Lodash" }))).toMatch(
+      /subject/,
+    );
+    expect(
+      findManifestError(
+        withSeed({
+          rule: "supply.lockfile-missing",
+          check: "file-exists",
+          subject: "./package-lock.json",
+        }),
+      ),
+    ).toMatch(/subject/);
   });
 
   it("rejects a wrong version, a bad id and duplicate identities", () => {

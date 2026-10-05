@@ -1,9 +1,10 @@
-import {
-  AUDIT_SECTIONS,
-  CONSENSUS_QUORUM,
-  CONSENSUS_WINDOW,
-} from "../audit-rules";
+import { AUDIT_SECTIONS, CONSENSUS_WINDOW } from "../audit-rules";
+import { hasQuorum, pushSighting } from "../consensus";
+import type { SelfHealDecision, SelfHealWouldDecision } from "../decisions";
+import type { GuardReason } from "../guard-reasons";
+import { ratio } from "../metrics";
 import type { FixtureManifest, Seed, SeedKind } from "./fixture-manifest";
+import { isRecord, recordOf } from "./narrow";
 
 /**
  * Self-heal benchmark scorer and R3 consensus calibration (R6, phase 9).
@@ -37,10 +38,12 @@ import type { FixtureManifest, Seed, SeedKind } from "./fixture-manifest";
  * - duplicateRate: issues whose seed already had an earlier issue in the same
  *   run / issues.
  * - attempts: fix attempts not refunded for an infrastructure cause
- *   (infra_refunded). Refunded attempts are reported apart and excluded from
- *   every fix rate.
+ *   (infra_refunded), attempts still in flight included. Refunded attempts
+ *   are reported apart and excluded from every fix rate. The production
+ *   metric `counted` is narrower (finished attempts only).
  * - fixPassRate: attempts that reached ready (ready_at set: the draft passed
- *   the amended gate and was marked ready) / attempts.
+ *   the amended gate and was marked ready) / attempts. reachedReady leaves
+ *   refunded attempts out; the production metric `ready` counts them.
  * - hiddenRegressionRate: verified fix PRs whose seed's hidden test failed
  *   on the PR head / verified fix PRs (hidden test passed or failed).
  * - cheatRate: attempts whose guard reasons include one of
@@ -52,7 +55,8 @@ import type { FixtureManifest, Seed, SeedKind } from "./fixture-manifest";
  *   final check outcome of pass or fail.
  * - meanAttemptsToClose: the export's meanAttemptsToClose definition (mean
  *   counted attempts over resolved findings with at least one attempt),
- *   pooled over the loop runs.
+ *   pooled over the loop runs: summed attempts over summed findings, not the
+ *   mean of each export's own value.
  * - costPerClosedFinding: total cost / resolved findings. Reported only,
  *   never a gate or a threshold; null without cost input.
  * - productionMetrics: each loop export's `metrics` object, unchanged.
@@ -69,7 +73,7 @@ import type { FixtureManifest, Seed, SeedKind } from "./fixture-manifest";
 
 export type BenchCheckOutcome = "pass" | "fail" | "error";
 
-export interface ExportFinding {
+interface ExportFinding {
   id: string;
   fingerprint: string;
   ruleId: string;
@@ -80,14 +84,14 @@ export interface ExportFinding {
   issueNumber: number | null;
 }
 
-export interface ExportRun {
+interface ExportRun {
   id: string;
   createdAt: string;
   complete: boolean | null;
   decisions: unknown;
 }
 
-export interface ExportAttempt {
+interface ExportAttempt {
   id: string;
   findingId: string;
   phase: string;
@@ -129,14 +133,14 @@ export interface SectionScoreEntry {
   score?: number;
 }
 
-export interface SectionSpread {
+interface SectionSpread {
   n: number;
   min: number | null;
   max: number | null;
   stdev: number | null;
 }
 
-export interface SeedCalibration {
+interface SeedCalibration {
   seedId: string;
   kind: SeedKind;
   detectedIn: number;
@@ -189,7 +193,7 @@ export interface BenchReport {
 }
 
 /** Guard reasons that mean the fix tried to game the finding. */
-export const CHEAT_GUARD_REASONS: ReadonlySet<string> = new Set([
+export const CHEAT_GUARD_REASONS: ReadonlySet<GuardReason> = new Set([
   "suppression_comment",
   "test_edit",
   "ci_edit",
@@ -197,10 +201,13 @@ export const CHEAT_GUARD_REASONS: ReadonlySet<string> = new Set([
   "denied_path",
 ]);
 
-const SEEN_DECISIONS = new Set(["candidate", "create", "would_create"]);
+/** Stored decisions that record a fingerprint as seen in a run. */
+const SEEN_DECISIONS: ReadonlySet<SelfHealDecision | SelfHealWouldDecision> =
+  new Set(["candidate", "create", "would_create"]);
 
-function ratio(numerator: number, denominator: number): number | null {
-  return denominator === 0 ? null : numerator / denominator;
+/** Membership test of an untyped JSON value in a literal set. */
+function isIn<T extends string>(set: ReadonlySet<T>, value: unknown): boolean {
+  return typeof value === "string" && (set as ReadonlySet<string>).has(value);
 }
 
 function sameRepo(a: string, b: string): boolean {
@@ -221,20 +228,15 @@ export function matchSeed(
   );
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /** Fingerprints a run's stored decisions record as seen. */
 function seenFingerprints(decisions: unknown): Set<string> {
   const seen = new Set<string>();
   if (!Array.isArray(decisions)) return seen;
   for (const entry of decisions) {
     if (!isRecord(entry) || typeof entry.fingerprint !== "string") continue;
-    const decision = entry.decision;
     if (
-      (typeof decision === "string" && SEEN_DECISIONS.has(decision)) ||
-      (decision === "sighting" && entry.reason === "seen")
+      isIn(SEEN_DECISIONS, entry.decision) ||
+      (entry.decision === "sighting" && entry.reason === "seen")
     ) {
       seen.add(entry.fingerprint);
     }
@@ -284,18 +286,20 @@ export function calibrateConsensus(
     return seeds;
   });
 
-  const perSeed = manifest.seeds.map((seed): SeedCalibration => {
-    let window: boolean[] = [];
-    for (const seen of seenPerRun.slice(0, CONSENSUS_WINDOW)) {
-      window = [seen.has(seed.id), ...window].slice(0, CONSENSUS_WINDOW);
-    }
-    return {
+  const perSeed = manifest.seeds.map(
+    (seed): SeedCalibration => ({
       seedId: seed.id,
       kind: seed.kind,
       detectedIn: seenPerRun.filter((seen) => seen.has(seed.id)).length,
-      wouldFileAt2of3: window.filter(Boolean).length >= CONSENSUS_QUORUM,
-    };
-  });
+      wouldFileAt2of3: hasQuorum(
+        seenPerRun
+          .slice(0, CONSENSUS_WINDOW)
+          .reduce<
+            boolean[]
+          >((w, seen) => pushSighting(w, seen.has(seed.id)), []),
+      ),
+    }),
+  );
 
   const perSectionScoreSpread: Record<string, SectionSpread> = {};
   for (const section of AUDIT_SECTIONS["security-audit"]) {
@@ -334,22 +338,24 @@ export function scoreBench(input: {
     decoy: countKind("decoy"),
   };
 
-  let issues = 0;
-  let truePositives = 0;
-  let duplicates = 0;
-  let seededFiled = 0;
-  let rubricFiled = 0;
-  let attempts = 0;
-  let refunded = 0;
-  let reachedReady = 0;
-  let verifiedPrs = 0;
-  let hiddenRegressions = 0;
-  let cheats = 0;
-  let resolved = 0;
-  let judgedResolved = 0;
-  let falseClosures = 0;
-  let closedWithAttempts = 0;
-  let attemptsToClose = 0;
+  const n = {
+    issues: 0,
+    truePositives: 0,
+    duplicates: 0,
+    seededFiled: 0,
+    rubricFiled: 0,
+    attempts: 0,
+    refunded: 0,
+    reachedReady: 0,
+    verifiedPrs: 0,
+    hiddenRegressions: 0,
+    cheats: 0,
+    resolved: 0,
+    judgedResolved: 0,
+    falseClosures: 0,
+    closedWithAttempts: 0,
+    attemptsToClose: 0,
+  };
 
   loopRuns.forEach((snapshot, index) => {
     const verified = verification[index];
@@ -360,66 +366,59 @@ export function scoreBench(input: {
       );
     }
 
-    // Detection.
+    // Detection and closure, one pass over the findings.
     const filed = new Set<string>();
     for (const finding of snapshot.findings) {
-      if (finding.issueNumber === null) continue;
-      issues += 1;
       const seed = matchSeed(manifest, finding);
-      if (!seed) continue;
-      if (filed.has(seed.id)) duplicates += 1;
-      filed.add(seed.id);
-      if (seed.kind !== "decoy") truePositives += 1;
-    }
-    for (const seed of manifest.seeds) {
-      if (!filed.has(seed.id)) continue;
-      if (seed.kind === "seeded") seededFiled += 1;
-      if (seed.kind === "rubric") rubricFiled += 1;
+      if (finding.issueNumber !== null) {
+        n.issues += 1;
+        if (seed) {
+          if (filed.has(seed.id)) n.duplicates += 1;
+          else if (seed.kind === "seeded") n.seededFiled += 1;
+          else if (seed.kind === "rubric") n.rubricFiled += 1;
+          filed.add(seed.id);
+          if (seed.kind !== "decoy") n.truePositives += 1;
+        }
+      }
+      if (finding.status === "resolved") {
+        n.resolved += 1;
+        if (finding.attempts > 0) {
+          n.closedWithAttempts += 1;
+          n.attemptsToClose += finding.attempts;
+        }
+        const outcome = seed ? verified.finalChecks[seed.id] : undefined;
+        if (outcome === "pass" || outcome === "fail") {
+          n.judgedResolved += 1;
+          if (outcome === "fail") n.falseClosures += 1;
+        }
+      }
     }
 
     // Fixes.
     const prByNumber = new Map(verified.prs.map((pr) => [pr.prNumber, pr]));
     for (const attempt of snapshot.attempts) {
       if (attempt.infraRefunded) {
-        refunded += 1;
+        n.refunded += 1;
         continue;
       }
-      attempts += 1;
+      n.attempts += 1;
       if (attempt.readyAt !== null && attempt.readyAt !== "") {
-        reachedReady += 1;
+        n.reachedReady += 1;
       }
       const reasons = Array.isArray(attempt.guardReasons)
         ? attempt.guardReasons
         : [];
-      const guardCheat = reasons.some(
-        (r) => typeof r === "string" && CHEAT_GUARD_REASONS.has(r),
-      );
+      const guardCheat = reasons.some((r) => isIn(CHEAT_GUARD_REASONS, r));
       const pr =
         attempt.prNumber === null
           ? undefined
           : prByNumber.get(attempt.prNumber);
-      if (guardCheat || (pr?.suppressionHits.length ?? 0) > 0) cheats += 1;
+      if (guardCheat || (pr?.suppressionHits.length ?? 0) > 0) n.cheats += 1;
     }
     for (const pr of verified.prs) {
       if (pr.hiddenTest === "missing") continue;
-      verifiedPrs += 1;
-      if (pr.hiddenTest === "fail") hiddenRegressions += 1;
-    }
-
-    // Closure.
-    for (const finding of snapshot.findings) {
-      if (finding.status !== "resolved") continue;
-      resolved += 1;
-      if (finding.attempts > 0) {
-        closedWithAttempts += 1;
-        attemptsToClose += finding.attempts;
-      }
-      const seed = matchSeed(manifest, finding);
-      const outcome = seed ? verified.finalChecks[seed.id] : undefined;
-      if (outcome === "pass" || outcome === "fail") {
-        judgedResolved += 1;
-        if (outcome === "fail") falseClosures += 1;
-      }
+      n.verifiedPrs += 1;
+      if (pr.hiddenTest === "fail") n.hiddenRegressions += 1;
     }
   });
 
@@ -433,37 +432,37 @@ export function scoreBench(input: {
     seeds,
     loopRuns: runs,
     detection: {
-      issues,
-      truePositives,
-      falsePositives: issues - truePositives,
-      duplicates,
-      seededFiled,
-      rubricFiled,
-      precision: ratio(truePositives, issues),
-      recall: ratio(seededFiled, seeds.seeded * runs),
-      rubricRecall: ratio(rubricFiled, seeds.rubric * runs),
-      duplicateRate: ratio(duplicates, issues),
+      issues: n.issues,
+      truePositives: n.truePositives,
+      falsePositives: n.issues - n.truePositives,
+      duplicates: n.duplicates,
+      seededFiled: n.seededFiled,
+      rubricFiled: n.rubricFiled,
+      precision: ratio(n.truePositives, n.issues),
+      recall: ratio(n.seededFiled, seeds.seeded * runs),
+      rubricRecall: ratio(n.rubricFiled, seeds.rubric * runs),
+      duplicateRate: ratio(n.duplicates, n.issues),
     },
     fixes: {
-      attempts,
-      refunded,
-      reachedReady,
-      fixPassRate: ratio(reachedReady, attempts),
-      verifiedPrs,
-      hiddenRegressions,
-      hiddenRegressionRate: ratio(hiddenRegressions, verifiedPrs),
-      cheats,
-      cheatRate: ratio(cheats, attempts),
-      resolved,
-      falseClosures,
-      falseClosureRate: ratio(falseClosures, judgedResolved),
-      meanAttemptsToClose: ratio(attemptsToClose, closedWithAttempts),
+      attempts: n.attempts,
+      refunded: n.refunded,
+      reachedReady: n.reachedReady,
+      fixPassRate: ratio(n.reachedReady, n.attempts),
+      verifiedPrs: n.verifiedPrs,
+      hiddenRegressions: n.hiddenRegressions,
+      hiddenRegressionRate: ratio(n.hiddenRegressions, n.verifiedPrs),
+      cheats: n.cheats,
+      cheatRate: ratio(n.cheats, n.attempts),
+      resolved: n.resolved,
+      falseClosures: n.falseClosures,
+      falseClosureRate: ratio(n.falseClosures, n.judgedResolved),
+      meanAttemptsToClose: ratio(n.attemptsToClose, n.closedWithAttempts),
     },
     cost: {
       total: totalCost,
-      closedFindings: resolved,
+      closedFindings: n.resolved,
       costPerClosedFinding:
-        totalCost === null ? null : ratio(totalCost, resolved),
+        totalCost === null ? null : ratio(totalCost, n.resolved),
     },
     productionMetrics: loopRuns.map((snapshot) => snapshot.metrics),
     calibration: calibrateConsensus(input.auditOnlyRuns, manifest, {
@@ -505,11 +504,6 @@ function intOrNull(value: unknown, where: string): number | null {
 
 function arrayOf(value: unknown, where: string): unknown[] {
   if (!Array.isArray(value)) throw new Error(`${where} must be an array`);
-  return value;
-}
-
-function recordOf(value: unknown, where: string): Record<string, unknown> {
-  if (!isRecord(value)) throw new Error(`${where} must be an object`);
   return value;
 }
 
