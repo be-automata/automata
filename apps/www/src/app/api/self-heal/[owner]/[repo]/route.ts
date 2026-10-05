@@ -1,4 +1,7 @@
+import { inArray } from "drizzle-orm";
 import { NextRequest, NextResponse } from "next/server";
+
+import { thread as threadTable } from "@terragon/shared/db/schema";
 
 import {
   listAuditRunsForRepo,
@@ -13,11 +16,22 @@ import {
   listInstallationBreakers,
 } from "@terragon/shared/model/self-heal-breaker";
 import { listSelfHealAdminActions } from "@terragon/shared/model/self-heal-admin-log";
+import { countAdmissionDeferrals } from "@terragon/shared/model/self-heal-slot";
 
 import { getTenantContextOrNull } from "@/lib/auth-server";
 import { db } from "@/lib/db";
 import { isOrgAdmin } from "@/lib/org-role";
+import {
+  ATTEMPT_TIMELINE_LIMIT,
+  buildAttemptTimeline,
+  type AttemptTimelineEntry,
+} from "@/server-lib/audit/attempt-timeline";
 import { computeFingerprintChurn } from "@/server-lib/audit/fingerprint-churn";
+import { resolveFixTriggerLogins } from "@/server-lib/audit/fix-trigger-logins";
+import {
+  computeSelfHealMetrics,
+  type SelfHealMetrics,
+} from "@/server-lib/audit/metrics";
 import {
   loadSelfHealContext,
   resolveSelfHealEffective,
@@ -34,12 +48,21 @@ import {
  *
  * `?format=export` returns the org-fenced ledger, runs, effects and fix
  * attempts as JSON. The export feeds the Phase 9 benchmark scorer.
+ *
+ * Both responses carry `metrics` (computeSelfHealMetrics over the same reads,
+ * so the admin view and the scorer agree) and `attemptTimeline` (the 20 newest
+ * attempts with their phase timestamps and CI gate source). The trigger
+ * logins for the merge rate are the bot and the audit-fix automation owner's
+ * GitHub login (omitted on lookup failure: basis bot-only).
  */
 
 const ACTIVITY_RUN_LIMIT = 20;
 const ACTIVITY_ATTEMPT_LIMIT = 50;
 const ACTIVITY_ADMIN_LOG_LIMIT = 20;
 const EXPORT_LIMIT = 500;
+/** Attempts read for the metrics in both responses (same as the export). */
+const METRICS_ATTEMPT_LIMIT = EXPORT_LIMIT;
+const ADMISSION_DEFERRAL_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 /** Runs read to compute churn: enough consecutive complete runs, still bounded. */
 const CHURN_RUN_LIMIT = 50;
 
@@ -65,6 +88,58 @@ function decisionFingerprints(decisions: unknown): string[] {
     }
   }
   return [...seen];
+}
+
+type AttemptRows = Awaited<ReturnType<typeof listFixAttemptsForRepo>>;
+type FindingRows = Awaited<ReturnType<typeof listFindingsForRepo>>;
+
+/** Metrics and the attempt timeline, identical for both responses. */
+async function loadMetricsAndTimeline({
+  organizationId,
+  repoFullName,
+  attempts,
+  findings,
+}: {
+  organizationId: string;
+  repoFullName: string;
+  attempts: AttemptRows;
+  findings: FindingRows;
+}): Promise<{
+  metrics: SelfHealMetrics;
+  attemptTimeline: AttemptTimelineEntry[];
+}> {
+  const threadIds = attempts
+    .slice(0, ATTEMPT_TIMELINE_LIMIT)
+    .map((a) => a.threadId)
+    .filter((id): id is string => id !== null);
+  const [triggerLogins, admissionDeferrals, threads] = await Promise.all([
+    resolveFixTriggerLogins({ db, organizationId, repoFullName }),
+    countAdmissionDeferrals({
+      db,
+      organizationId,
+      repoFullName,
+      since: new Date(Date.now() - ADMISSION_DEFERRAL_WINDOW_MS),
+    }),
+    threadIds.length === 0
+      ? Promise.resolve([])
+      : db
+          .select({ id: threadTable.id, createdAt: threadTable.createdAt })
+          .from(threadTable)
+          .where(inArray(threadTable.id, threadIds)),
+  ]);
+  return {
+    metrics: computeSelfHealMetrics({
+      attempts,
+      findings,
+      triggerLogins,
+      admissionDeferrals,
+    }),
+    attemptTimeline: buildAttemptTimeline({
+      attempts,
+      repoFullName,
+      threadCreatedAt: new Map(threads.map((t) => [t.id, t.createdAt])),
+    }),
+  };
 }
 
 export async function GET(
@@ -108,6 +183,12 @@ export async function GET(
       listEffectsForRepo({ ...base, limit: EXPORT_LIMIT }),
       listFixAttemptsForRepo({ ...base, limit: EXPORT_LIMIT }),
     ]);
+    const { metrics, attemptTimeline } = await loadMetricsAndTimeline({
+      organizationId,
+      repoFullName,
+      attempts,
+      findings,
+    });
     return NextResponse.json({
       exportedAt: new Date().toISOString(),
       repoFullName,
@@ -115,6 +196,8 @@ export async function GET(
       findings,
       effects,
       attempts,
+      metrics,
+      attemptTimeline,
     });
   }
 
@@ -131,7 +214,7 @@ export async function GET(
   ] = await Promise.all([
     listAuditRunsForRepo({ ...base, limit: CHURN_RUN_LIMIT }),
     listFindingsForRepo(base),
-    listFixAttemptsForRepo({ ...base, limit: ACTIVITY_ATTEMPT_LIMIT }),
+    listFixAttemptsForRepo({ ...base, limit: METRICS_ATTEMPT_LIMIT }),
     summarizeOutbox(base),
     listSelfHealAdminActions({
       db,
@@ -178,11 +261,20 @@ export async function GET(
     })),
   );
 
+  const { metrics, attemptTimeline } = await loadMetricsAndTimeline({
+    organizationId,
+    repoFullName,
+    attempts,
+    findings,
+  });
+
   return NextResponse.json({
     effective: { mode: effective.mode, reason: effective.reason },
     runs: churnRuns.slice(0, ACTIVITY_RUN_LIMIT),
     findings,
-    attempts,
+    attempts: attempts.slice(0, ACTIVITY_ATTEMPT_LIMIT),
+    metrics,
+    attemptTimeline,
     outbox,
     breakers: {
       repo: { loopAudit, loopFix },

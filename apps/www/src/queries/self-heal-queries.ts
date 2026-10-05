@@ -78,6 +78,55 @@ export interface SelfHealChurnDto {
   churn: number;
 }
 
+/** computeSelfHealMetrics (server-lib/audit/metrics.ts); rates are 0..1 or null. */
+export interface SelfHealMetricsDto {
+  prsOpened: number;
+  ready: number;
+  merged: number;
+  mergedByNonTrigger: number;
+  mergeRate: number | null;
+  humanEditRatio: number | null;
+  reopenRate: number | null;
+  regressionRate30d: number | null;
+  meanAttemptsToClose: number | null;
+  expiredRate: number | null;
+  refunded: number;
+  counted: number;
+  admissionDeferrals: number;
+  mergeRateBasis: "bot-and-owner" | "bot-only";
+}
+
+export type SelfHealGateSourceDto =
+  | "protection"
+  | "all-checks"
+  | "finding-check-only";
+
+/** One fix attempt's path (server-lib/audit/attempt-timeline.ts). */
+export interface SelfHealAttemptTimelineDto {
+  attemptId: string;
+  findingId: string;
+  attemptNo: number;
+  prNumber: number | null;
+  prUrl: string | null;
+  phase: string;
+  prState: string | null;
+  ciStatus: string | null;
+  /** Null while the CI gate source is undecided. */
+  gateSource: SelfHealGateSourceDto | null;
+  outcome: string | null;
+  infraRefunded: boolean;
+  steps: {
+    claim: string | null;
+    dispatch: string | null;
+    check: string | null;
+    draft: string | null;
+    ci: string | null;
+    ready: string | null;
+    merged: string | null;
+    closed: string | null;
+  };
+}
+
 export interface SelfHealActivityDto {
   effective: { mode: string; reason: string };
   runs: SelfHealRunDto[];
@@ -93,6 +142,9 @@ export interface SelfHealActivityDto {
   };
   adminLog: SelfHealAdminLogDto[];
   churn: SelfHealChurnDto[];
+  /** Absent from servers older than the metrics view. */
+  metrics?: SelfHealMetricsDto;
+  attemptTimeline?: SelfHealAttemptTimelineDto[];
 }
 
 export interface SelfHealDrainResultDto {

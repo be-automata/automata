@@ -74,6 +74,62 @@ describe("triggerAgentRun (Hatchet REST v1)", () => {
     vi.unstubAllGlobals();
   });
 
+  it("passes no signal to fetch when none is given (request unchanged)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await triggerAgentRun(INPUT, CONFIG, { workflowName: "agent-run" });
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect("signal" in init).toBe(false);
+    expect(Object.keys(init)).toEqual(["method", "headers", "body"]);
+    vi.unstubAllGlobals();
+  });
+
+  it("passes the AbortSignal to fetch when given (TMO-01)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ run: { metadata: { id: "run-9" } } }), {
+        status: 200,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const res = await triggerAgentRun(INPUT, CONFIG, {
+      signal: controller.signal,
+    });
+    expect(res.externalId).toBe("run-9");
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(init.signal).toBe(controller.signal);
+    // The signal is a transport option, never part of the engine payload.
+    expect(JSON.parse(init.body)).not.toHaveProperty("signal");
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects when the signal aborts mid-request", async () => {
+    // A fetch that only settles when its signal aborts — the 5 s timeout case.
+    const fetchMock = vi.fn(
+      (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init.signal;
+          if (!signal) return;
+          const fail = () =>
+            reject(
+              new DOMException("The operation was aborted.", "AbortError"),
+            );
+          if (signal.aborted) fail();
+          else signal.addEventListener("abort", fail);
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const pending = triggerAgentRun(INPUT, CONFIG, {
+      signal: controller.signal,
+    });
+    controller.abort();
+    await expect(pending).rejects.toThrow(/aborted/);
+    vi.unstubAllGlobals();
+  });
+
   it("throws when the config is not fully set", async () => {
     await expect(
       triggerAgentRun(INPUT, { apiUrl: "", tenantId: "t", apiToken: "x" }),

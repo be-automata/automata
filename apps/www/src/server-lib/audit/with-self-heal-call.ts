@@ -277,6 +277,7 @@ export async function withSelfHealCall<T>({
   deadlineAt,
   call,
   deps,
+  loopFixScopeKey,
 }: {
   kind: CallKind;
   organizationId: string;
@@ -287,6 +288,13 @@ export async function withSelfHealCall<T>({
   deadlineAt: Date;
   call: (signal: AbortSignal) => Promise<GithubResponse<T>>;
   deps: SelfHealCallDeps;
+  /**
+   * The repo (normalized) of a fix-lane write whose 403 / 422 is a real
+   * failure. Such a response is also recorded on that repo's loop_fix
+   * breaker (the 09-13 gh_403 / gh_422 rule); leave unset where a 422 is
+   * an expected end state (a branch already deleted).
+   */
+  loopFixScopeKey?: string;
 }): Promise<SelfHealCallResult<T>> {
   const { db, now, log, sleep, rand } = deps;
   const breaker = deps.breaker ?? breakerModel;
@@ -436,6 +444,22 @@ export async function withSelfHealCall<T>({
         now: now(),
         logger: log,
       });
+      if (
+        loopFixScopeKey !== undefined &&
+        (kind === "write" || kind === "create") &&
+        (classification.kind === "permission" ||
+          classification.kind === "unprocessable")
+      ) {
+        await breaker.recordBreakerEvent({
+          db,
+          organizationId,
+          scopeKind: "loop_fix",
+          scopeKey: loopFixScopeKey,
+          outcome: "failure",
+          signal: classification.kind === "permission" ? "gh_403" : "gh_422",
+          now: now(),
+        });
+      }
 
       switch (classification.kind) {
         case "rate_limited": {

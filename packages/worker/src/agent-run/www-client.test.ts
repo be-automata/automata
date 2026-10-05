@@ -7,6 +7,7 @@ import {
   postRunFailed,
   postRunTerminal,
   postSelfHealAuditChecks,
+  postSelfHealFixCheck,
   checkRunStaleness,
   pullAgentCredentials,
   CREDENTIAL_PULL_ATTEMPTS,
@@ -1101,5 +1102,121 @@ describe("postSelfHealAuditChecks (FORGE-01 / TMO-01)", () => {
       log.mock.calls,
     ]);
     expect(logged).not.toContain(TOKEN);
+  });
+});
+
+describe("postSelfHealFixCheck (GATE-01 / TMO-01)", () => {
+  const TOKEN = "GATE_TOKEN_SENTINEL_456";
+  const ATTEMPT = "11111111-1111-4111-8111-111111111111";
+  const REPORT = {
+    workerStatus: "completed" as const,
+    headSha: "a".repeat(40),
+    checkOutcome: "pass" as const,
+    deniedPaths: [],
+  };
+  const noSleep = vi.fn(async (_ms: number) => {});
+
+  function post(fetchImpl: typeof fetch, sleep = noSleep) {
+    return postSelfHealFixCheck({
+      baseUrl: "https://www.example.com/",
+      gateToken: TOKEN,
+      attemptId: ATTEMPT,
+      report: REPORT,
+      fetchImpl,
+      sleep,
+    });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    noSleep.mockClear();
+  });
+
+  it("POSTs the 09-09 body to /api/self-heal/fix-check with x-self-heal-gate-token and no daemon token", async () => {
+    const f = vi.fn(async () => jsonResponse(200, { recorded: true }));
+    expect(await post(f as unknown as typeof fetch)).toBe("recorded");
+    const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://www.example.com/api/self-heal/fix-check");
+    const h = init.headers as Record<string, string>;
+    expect(h["x-self-heal-gate-token"]).toBe(TOKEN);
+    expect(h["x-daemon-token"]).toBeUndefined();
+    expect(h["X-Daemon-Token"]).toBeUndefined();
+    expect(JSON.parse(String(init.body))).toEqual({
+      attemptId: ATTEMPT,
+      ...REPORT,
+    });
+  });
+
+  it("recorded:false is a duplicate and is not retried", async () => {
+    const f = vi.fn(async () => jsonResponse(200, { recorded: false }));
+    expect(await post(f as unknown as typeof fetch)).toBe("duplicate");
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it("503 then 200 → recorded, after a 2 s backoff, with the SAME token", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(503, {}))
+      .mockResolvedValueOnce(jsonResponse(200, { recorded: true }));
+    expect(await post(f as unknown as typeof fetch)).toBe("recorded");
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(noSleep).toHaveBeenCalledWith(2_000);
+    const tokens = f.mock.calls.map(
+      (c) =>
+        ((c[1] as RequestInit).headers as Record<string, string>)[
+          "x-self-heal-gate-token"
+        ],
+    );
+    expect(tokens).toEqual([TOKEN, TOKEN]);
+  });
+
+  it.each([400, 401, 403, 404, 422])(
+    "status %i is final: error, no retry",
+    async (status) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const f = vi.fn(async () => jsonResponse(status, {}));
+      expect(await post(f as unknown as typeof fetch)).toBe("error");
+      expect(f).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("a hang is cut at 10 s per attempt; 3 attempts with 2/4 s backoff, then error", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const f = vi.fn(async (_u: unknown, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      throw new DOMException("timed out", "TimeoutError");
+    });
+    expect(await post(f as unknown as typeof fetch)).toBe("error");
+    expect(f).toHaveBeenCalledTimes(3);
+    expect(timeoutSpy.mock.calls.map((c) => c[0])).toEqual([
+      10_000, 10_000, 10_000,
+    ]);
+    expect(noSleep.mock.calls.map((c) => c[0])).toEqual([2_000, 4_000]);
+  });
+
+  it("never logs the token", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await post(
+      vi.fn(async () => jsonResponse(503, {})) as unknown as typeof fetch,
+    );
+    await post(
+      vi.fn(async () => jsonResponse(401, {})) as unknown as typeof fetch,
+    );
+    await post(
+      vi.fn(async () => {
+        throw new Error(`boom ${TOKEN}`);
+      }) as unknown as typeof fetch,
+    );
+    const logged = JSON.stringify([
+      err.mock.calls,
+      warn.mock.calls,
+      log.mock.calls,
+    ]);
+    expect(logged).not.toContain(TOKEN);
+    expect(err).toHaveBeenCalled();
   });
 });

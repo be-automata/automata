@@ -260,6 +260,98 @@ describe("withSelfHealCall", () => {
     );
   });
 
+  describe("09-13 gh_403 / gh_422 rule input: per-repo loop_fix events", () => {
+    const REPO_KEY = "acme/widgets";
+    const loopFixCalls = (f: ReturnType<typeof makeFixture>) =>
+      (
+        f.breaker.recordBreakerEvent.mock.calls as unknown as Array<
+          [
+            {
+              scopeKind: string;
+              scopeKey: string;
+              signal?: string;
+              outcome: string;
+            },
+          ]
+        >
+      )
+        .map(([a]) => a)
+        .filter((a) => a.scopeKind === "loop_fix");
+
+    it.each([
+      [403, "gh_403", "write"],
+      [422, "gh_422", "write"],
+      [403, "gh_403", "create"],
+      [422, "gh_422", "create"],
+    ] as const)(
+      "%s on a lane %s records %s on the repo's loop_fix breaker",
+      async (status, signal, kind) => {
+        const f = makeFixture();
+        await withSelfHealCall({
+          ...base(),
+          kind,
+          loopFixScopeKey: REPO_KEY,
+          call: async () => {
+            throw httpError(status);
+          },
+          deps: f.deps,
+        });
+        expect(loopFixCalls(f)).toEqual([
+          expect.objectContaining({
+            organizationId: ORG,
+            scopeKey: REPO_KEY,
+            outcome: "failure",
+            signal,
+          }),
+        ]);
+      },
+    );
+
+    it("reads, calls without a repo key, rate limits and other failures record nothing on loop_fix", async () => {
+      const f = makeFixture();
+      const fail =
+        (status: number, headers: Record<string, string> = {}) =>
+        async () => {
+          throw httpError(status, "err", headers);
+        };
+      await withSelfHealCall({
+        ...base(),
+        kind: "read",
+        loopFixScopeKey: REPO_KEY,
+        call: fail(403),
+        deps: f.deps,
+      });
+      await withSelfHealCall({
+        ...base(),
+        kind: "write",
+        call: fail(422),
+        deps: f.deps,
+      });
+      await withSelfHealCall({
+        ...base(),
+        kind: "write",
+        loopFixScopeKey: REPO_KEY,
+        call: fail(403, { "x-ratelimit-remaining": "0" }),
+        deps: f.deps,
+      });
+      await withSelfHealCall({
+        ...base(),
+        kind: "write",
+        loopFixScopeKey: REPO_KEY,
+        call: fail(404),
+        deps: f.deps,
+      });
+      await withSelfHealCall({
+        ...base(),
+        kind: "write",
+        loopFixScopeKey: REPO_KEY,
+        call: async () => ok({}),
+        deps: f.deps,
+      });
+      expect(loopFixCalls(f)).toEqual([]);
+    });
+  });
+
   it("502 on create is one call, a failure event, server_error", async () => {
     const f = makeFixture();
     const call = vi.fn(async () => {

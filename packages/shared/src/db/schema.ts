@@ -2240,6 +2240,12 @@ export const auditFixAttempts = pgTable(
       table.regressionWindowEndsAt,
     ),
     index("audit_fix_attempts_gated_head_sha_index").on(table.gatedHeadSha),
+    // getFixAttemptByPr (pull_request.closed, platform-wide) filters
+    // pr_number = ? AND lower(repo_full_name) = ?.
+    index("audit_fix_attempts_pr_repo_lower_index").on(
+      table.prNumber,
+      sql`lower(${table.repoFullName})`,
+    ),
   ],
 );
 

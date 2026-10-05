@@ -157,13 +157,17 @@ function requireHatchetConfig(
  * lives at `run.metadata.id` — NOT a top-level `externalId` (the old cast to
  * `{externalId?}` always read undefined). This id is the handle #8 uses to cancel
  * a superseded in-flight review, so parse it correctly from first dispatch.
+ *
+ * `opts.signal` (optional) aborts the request — the self-heal dispatcher's
+ * 5 s trigger timeout. An abort rejects; the run may still have been created,
+ * so the caller reads back with listAgentRunsForThread before retrying.
  */
 export async function triggerAgentRun<
   T extends { threadId: string; threadChatId: string },
 >(
   input: T,
   config: HatchetTriggerConfig,
-  opts?: TriggerOpts,
+  opts?: TriggerOpts & { signal?: AbortSignal },
 ): Promise<{ externalId: string | undefined }> {
   const { apiUrl, tenantId, apiToken } = requireHatchetConfig(
     config,
@@ -185,6 +189,9 @@ export async function triggerAgentRun<
           threadChatId: input.threadChatId,
         },
       }),
+      // TMO-01: the caller's deadline. Absent → no key, so the legacy request
+      // stays byte-identical.
+      ...(opts?.signal ? { signal: opts.signal } : {}),
     },
   );
   if (!res.ok) {

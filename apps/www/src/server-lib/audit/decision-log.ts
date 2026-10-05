@@ -34,7 +34,8 @@ export type SelfHealWouldDecision =
   | "would_close"
   | "would_reopen"
   | "would_needs_human"
-  | "would_comment";
+  | "would_comment"
+  | "would_dispatch";
 
 export type SelfHealLogMode = "off" | "dry-run" | "on";
 

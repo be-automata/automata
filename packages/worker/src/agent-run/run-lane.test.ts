@@ -78,6 +78,25 @@ describe("formatRunStartLine lane tag for self-heal (OBS-01)", () => {
     expect(line).not.toContain("TOKEN_SENTINEL");
   });
 
+  it("tags a fix run lane=self-heal-fix and never echoes its gate token", () => {
+    const line = formatRunStartLine({
+      ...base,
+      selfHeal: {
+        kind: "fix",
+        attemptId: "att_1",
+        branch: "automata/fix-1-a1",
+        baseBranch: "main",
+        checks: [],
+        denyExceptions: [],
+        gateToken: "TOKEN_SENTINEL",
+      },
+    });
+    expect(line).toBe(
+      "run start: lane=self-heal-fix repo=acme/widgets branch=feat/x",
+    );
+    expect(line).not.toContain("TOKEN_SENTINEL");
+  });
+
   it("keeps lane=review and lane=task for other runs", () => {
     expect(formatRunStartLine({ ...base, prKey: "k" })).toContain(
       "lane=review",

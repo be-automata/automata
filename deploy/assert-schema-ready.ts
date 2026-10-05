@@ -941,6 +941,53 @@ const REQUIRED: ReadonlyArray<{
   },
 ];
 
+/**
+ * Indexes the code relies on for PERFORMANCE only. A missing or invalid one is
+ * reported as a WARN and never fails the gate (columns decide correctness).
+ * Create them on prod with CREATE INDEX CONCURRENTLY (see PILOT-RUNBOOK.md).
+ */
+const RECOMMENDED_INDEXES: ReadonlyArray<{ name: string; create: string }> = [
+  {
+    name: "audit_fix_attempts_pr_repo_lower_index",
+    create:
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_fix_attempts_pr_repo_lower_index ON audit_fix_attempts (pr_number, lower(repo_full_name));",
+  },
+];
+
+async function warnOnMissingIndexes(
+  db: ReturnType<typeof createDb>,
+): Promise<void> {
+  for (const index of RECOMMENDED_INDEXES) {
+    try {
+      const result = await db.execute(sql`
+        SELECT i.indisvalid AS valid
+          FROM pg_index i
+          JOIN pg_class c ON c.oid = i.indexrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relname = ${index.name}
+         LIMIT 1
+      `);
+      const rows =
+        (result as unknown as { rows?: Array<{ valid: boolean }> }).rows ?? [];
+      const row = rows[0];
+      if (row?.valid === true) {
+        console.log(`assert-schema-ready: ok index ${index.name}`);
+      } else {
+        console.warn(
+          `assert-schema-ready: WARN index ${index.name} is ${row ? "INVALID" : "missing"} (performance only, not a failure). Create it:\n  ${index.create}` +
+            (row
+              ? `\n  (drop the invalid one first: DROP INDEX CONCURRENTLY ${index.name};)`
+              : ""),
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `assert-schema-ready: WARN cannot check index ${index.name}: ${(error as Error).message}`,
+      );
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const url = process.env.DATABASE_URL?.trim();
   if (!url) {
@@ -997,6 +1044,7 @@ async function main(): Promise<void> {
   console.log(
     `assert-schema-ready: OK — all ${REQUIRED.length} required column(s) present`,
   );
+  await warnOnMissingIndexes(db);
   // Explicit exit, as every sibling script in deploy/ does after a createDb()
   // run (bind-github-installation, seed-pilot-mirror, seed-selfhost, skill-push).
   // createDb opens a pool that keeps the event loop alive: measured, the success

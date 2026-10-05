@@ -26,6 +26,8 @@
  *
  * This handler processes:
  * - PR actions: opened, closed, reopened, ready_for_review, converted_to_draft
+ * - Issue actions: opened/labeled (issue automations, mirror intake),
+ *   closed/unlabeled (withdraw a self-heal finding's fix readiness)
  * - Issue comments: Creates follow-up tasks when the app is mentioned in PR comments
  * - PR review comments: Creates follow-up tasks when the app is mentioned in PR review comments
  * - PR reviews: Creates follow-up tasks when the app is mentioned in PR reviews
@@ -44,6 +46,7 @@ import {
   handleCheckSuiteEvent,
   handlePullRequestUpdated,
   handleIssueEvent,
+  handleSelfHealIssueUnready,
   handlePullRequestMirror,
   handlePullRequestReviewMirror,
   handleWorkflowRunEvent,
@@ -52,6 +55,8 @@ import {
 import { Webhooks } from "@octokit/webhooks";
 import { env } from "@terragon/env/apps-www";
 import { findWebhookSkip } from "./webhook-skip";
+import { handleSelfHealCiEvent } from "@/server-lib/audit/evaluate-fix-ci";
+import { handleSelfHealPrClosed } from "@/server-lib/audit/fix-pr-lifecycle";
 
 export async function POST(request: NextRequest) {
   const webhooks = new Webhooks({
@@ -94,6 +99,12 @@ export async function POST(request: NextRequest) {
       await handlePullRequestMirror(payload);
     },
   );
+  // R5: a self-heal fix PR a person merged or closed. A sibling of the two
+  // closed handlers above: one DB lookup by (repo, pr_number), the GitHub
+  // reads of a merge in waitUntil. Observation only; never merges, never throws.
+  webhooks.on("pull_request.closed", async ({ payload }) => {
+    await handleSelfHealPrClosed(payload);
+  });
   webhooks.on("pull_request_review.submitted", async ({ payload }) => {
     await handlePullRequestReviewMirror(payload);
   });
@@ -124,8 +135,22 @@ export async function POST(request: NextRequest) {
       await handleCheckSuiteEvent(payload);
     },
   );
-  webhooks.on(["issues.opened"], async ({ payload }) => {
+  // GATE-01: CI completion on a self-heal draft's gated head. A sibling of the
+  // check_suite / workflow_run handlers above: one DB lookup, evaluation in
+  // waitUntil (and on the tick), no GitHub call here. Never throws.
+  webhooks.on(
+    ["check_suite.completed", "workflow_run.completed"],
+    async ({ payload }) => {
+      await handleSelfHealCiEvent(payload);
+    },
+  );
+  webhooks.on(["issues.opened", "issues.labeled"], async ({ payload }) => {
     await handleIssueEvent(payload);
+  });
+  // R7: a closed issue or a removed trigger label withdraws a self-heal
+  // finding's readiness. DB-only, never throws.
+  webhooks.on(["issues.closed", "issues.unlabeled"], async ({ payload }) => {
+    await handleSelfHealIssueUnready(payload);
   });
   webhooks.onAny(({ name, payload }) => {
     const payloadInfo: string[] = [];

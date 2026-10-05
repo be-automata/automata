@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import type {
   SelfHealActivityDto,
+  SelfHealAttemptTimelineDto,
   SelfHealBreakerDto,
+  SelfHealMetricsDto,
 } from "@/queries/self-heal-queries";
 import {
   KILLED_MESSAGE,
@@ -13,6 +15,7 @@ import {
   PAUSED_MESSAGE,
   SelfHealActivityView,
   churnPercent,
+  formatRate,
   issueUrl,
   topSkippedReasons,
 } from "./self-heal-activity";
@@ -292,5 +295,136 @@ describe("helpers", () => {
       "c ×3",
       "d ×2",
     ]);
+  });
+});
+
+function metrics(
+  overrides: Partial<SelfHealMetricsDto> = {},
+): SelfHealMetricsDto {
+  return {
+    prsOpened: 4,
+    ready: 3,
+    merged: 3,
+    mergedByNonTrigger: 1,
+    mergeRate: 0.25,
+    humanEditRatio: 0.5,
+    reopenRate: null,
+    regressionRate30d: 0,
+    meanAttemptsToClose: 1.5,
+    expiredRate: null,
+    refunded: 2,
+    counted: 5,
+    admissionDeferrals: 7,
+    mergeRateBasis: "bot-and-owner",
+    ...overrides,
+  };
+}
+
+function timelineEntry(
+  overrides: Partial<SelfHealAttemptTimelineDto> = {},
+): SelfHealAttemptTimelineDto {
+  return {
+    attemptId: "a1",
+    findingId: "f1",
+    attemptNo: 2,
+    prNumber: 77,
+    prUrl: `https://github.com/${REPO}/pull/77`,
+    phase: "ready",
+    prState: "ready",
+    ciStatus: "passed",
+    gateSource: "all-checks",
+    outcome: null,
+    infraRefunded: false,
+    steps: {
+      claim: "2026-10-04T10:00:00.000Z",
+      dispatch: "2026-10-04T10:01:00.000Z",
+      check: "2026-10-04T10:20:00.000Z",
+      draft: "2026-10-04T10:21:00.000Z",
+      ci: "2026-10-04T10:40:00.000Z",
+      ready: "2026-10-04T10:41:00.000Z",
+      merged: null,
+      closed: null,
+    },
+    ...overrides,
+  };
+}
+
+describe("SelfHealActivityView metrics and attempt timeline", () => {
+  it("renders the metrics row with percentages and n/a for missing rates", () => {
+    const html = render(activity({ metrics: metrics() }));
+    expect(html).toContain('data-testid="self-heal-metrics"');
+    expect(html).toContain("25%");
+    expect(html).toContain("50%");
+    expect(html).toContain("0%");
+    expect(html).toContain("n/a");
+    expect(html).toContain("1.5");
+    expect(html).toContain("2 refunded");
+    expect(html).toContain("5 counted");
+    expect(html).toContain("7");
+  });
+
+  it("says when the merge rate could only exclude the bot", () => {
+    const html = render(
+      activity({ metrics: metrics({ mergeRateBasis: "bot-only" }) }),
+    );
+    expect(html).toContain("login is unknown");
+  });
+
+  it("renders the attempt timeline with PR links, steps and the CI gate source", () => {
+    const html = render(
+      activity({
+        attemptTimeline: [
+          timelineEntry(),
+          timelineEntry({
+            attemptId: "a2",
+            attemptNo: 1,
+            prNumber: null,
+            prUrl: null,
+            phase: "closed",
+            prState: null,
+            ciStatus: null,
+            gateSource: null,
+            outcome: "no_changes",
+            infraRefunded: true,
+            steps: {
+              claim: "2026-10-03T10:00:00.000Z",
+              dispatch: null,
+              check: null,
+              draft: null,
+              ci: null,
+              ready: null,
+              merged: null,
+              closed: "2026-10-03T10:30:00.000Z",
+            },
+          }),
+        ],
+      }),
+    );
+    expect(html).toContain('data-testid="self-heal-attempt-timeline"');
+    expect(html).toContain(`href="https://github.com/${REPO}/pull/77"`);
+    expect(html).toContain("#77");
+    expect(html).toContain("all-checks");
+    expect(html).toContain("undecided");
+    expect(html).toContain("ready 2026-10-04T10:41:00.000Z");
+    expect(html).toContain("closed 2026-10-03T10:30:00.000Z");
+    expect(html).toContain("no_changes (refunded)");
+    expect(html.match(/data-testid="self-heal-attempt"/g)).toHaveLength(2);
+  });
+
+  it("shows nothing for metrics or timeline when the server sent none", () => {
+    const html = render(activity());
+    expect(html).not.toContain("self-heal-metrics");
+    expect(html).not.toContain("self-heal-attempt-timeline");
+  });
+
+  it("says so when there are no fix attempts yet", () => {
+    const html = render(activity({ attemptTimeline: [] }));
+    expect(html).toContain("No fix attempts yet.");
+  });
+
+  it("formats rates", () => {
+    expect(formatRate(null)).toBe("n/a");
+    expect(formatRate(0)).toBe("0%");
+    expect(formatRate(1 / 3)).toBe("33%");
   });
 });

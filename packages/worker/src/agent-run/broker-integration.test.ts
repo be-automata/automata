@@ -2,7 +2,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildDaemonEnv } from "./daemon-env";
 import { startGhBroker, type GhBroker } from "./gh-broker";
 import { startGitBroker, type GitBroker } from "./git-broker";
@@ -298,6 +298,168 @@ describe.skipIf(!hasGit)(
         expect(call.url).toContain(`https://github.com/${REPO}.git/`);
         expect(call.auth).toBe(expectedBasic);
       }
+    });
+  },
+);
+
+describe.skipIf(!hasGit)(
+  "FENCE-01: a REAL git push through the fenced git broker",
+  () => {
+    const FIX_BRANCH = "automata/fix-12-deadbeef-a1";
+
+    /**
+     * A bare upstream served over smart HTTP by `git receive-pack|upload-pack
+     * --stateless-rpc`, behind a broker fenced to FIX_BRANCH. Returns the
+     * broker, the bare repo, and a git helper.
+     */
+    async function fencedUpstream() {
+      const bare = tmpDir("broker-int-fbare-");
+      const seed = tmpDir("broker-int-fseed-");
+      const git = (cwd: string, ...args: string[]) =>
+        spawnSync(
+          "git",
+          ["-c", "user.email=t@t", "-c", "user.name=t", ...args],
+          {
+            cwd,
+          },
+        );
+      const ok = (cwd: string, ...args: string[]) => {
+        const res = git(cwd, ...args);
+        expect(res.status, `git ${args.join(" ")}: ${res.stderr}`).toBe(0);
+        return res.stdout.toString().trim();
+      };
+      ok(bare, "init", "--bare", ".");
+      ok(seed, "init", ".");
+      ok(seed, "commit", "--allow-empty", "-m", "one");
+      ok(seed, "commit", "--allow-empty", "-m", "two");
+      ok(seed, "push", bare, "HEAD:refs/heads/main");
+      const forwarded: string[] = [];
+      gitBroker = await startGitBroker({
+        installationToken: TOKEN,
+        repoFullName: REPO,
+        runBearer: BEARER,
+        refFence: { exactRef: `refs/heads/${FIX_BRANCH}` },
+        fetchImpl: (async (url: string, init?: RequestInit) => {
+          const u = new URL(String(url));
+          if (u.pathname.endsWith("/info/refs")) {
+            const service = u.searchParams.get("service")!;
+            const verb = service.replace(/^git-/, "");
+            const adv = spawnSync("git", [
+              verb,
+              "--stateless-rpc",
+              "--advertise-refs",
+              bare,
+            ]).stdout;
+            const announce = Buffer.from(`# service=${service}\n`);
+            return new Response(
+              Buffer.concat([
+                Buffer.from(
+                  (announce.length + 4).toString(16).padStart(4, "0"),
+                ),
+                announce,
+                Buffer.from("0000"),
+                adv,
+              ]),
+              {
+                status: 200,
+                headers: {
+                  "content-type": `application/x-${service}-advertisement`,
+                },
+              },
+            );
+          }
+          const verb = u.pathname.endsWith("/git-receive-pack")
+            ? "receive-pack"
+            : "upload-pack";
+          forwarded.push(verb);
+          const reqBody = Buffer.from(
+            await new Response(init?.body).arrayBuffer(),
+          );
+          const out = spawnSync("git", [verb, "--stateless-rpc", bare], {
+            input: reqBody,
+          }).stdout;
+          return new Response(out, {
+            status: 200,
+            headers: { "content-type": `application/x-git-${verb}-result` },
+          });
+        }) as unknown as typeof fetch,
+      });
+      const env = brokeredEnv(tmpDir("broker-int-fcfg-"), gitBroker.url);
+      return { bare, git, ok, env, forwarded, broker: gitBroker };
+    }
+
+    async function push(
+      cwd: string,
+      env: NodeJS.ProcessEnv,
+      refspec: string,
+    ): Promise<{ code: number; stderr: string }> {
+      try {
+        const r = await execFileAsync("git", ["push", "origin", refspec], {
+          cwd,
+          env,
+          timeout: 15_000,
+        });
+        return { code: 0, stderr: r.stderr };
+      } catch (err) {
+        const e = err as { code?: number; stderr?: string };
+        return { code: e.code ?? 1, stderr: e.stderr ?? "" };
+      }
+    }
+
+    it("a push of the attempt branch from a SHALLOW clone lands, and the broker records its sha", async () => {
+      const { bare, ok, env, forwarded, broker } = await fencedUpstream();
+      // A shallow clone (provision clones --depth 1): its push sends `shallow`
+      // pkt-lines ahead of the commands, exactly what the parser must accept.
+      const work = tmpDir("broker-int-fwork-");
+      ok(work, "clone", "--depth", "1", `file://${bare}`, ".");
+      ok(work, "remote", "set-url", "origin", `https://github.com/${REPO}.git`);
+      ok(work, "checkout", "-b", FIX_BRANCH);
+      ok(work, "commit", "--allow-empty", "-m", "fix");
+      const head = ok(work, "rev-parse", "HEAD");
+
+      const res = await push(work, env, `HEAD:refs/heads/${FIX_BRANCH}`);
+      expect(res.code, res.stderr).toBe(0);
+      expect(ok(bare, "rev-parse", `refs/heads/${FIX_BRANCH}`)).toBe(head);
+      expect(broker.lastPushedSha()).toBe(head);
+      expect(forwarded).toEqual(["receive-pack"]);
+    });
+
+    it("a push to main, a tag, or a delete is refused and NOTHING reaches the upstream", async () => {
+      const { bare, ok, env, forwarded, broker } = await fencedUpstream();
+      const mainBefore = ok(bare, "rev-parse", "refs/heads/main");
+      // The attempt branch exists upstream, so the delete really is attempted
+      // (git refuses to delete a missing remote ref without dialling).
+      ok(bare, "update-ref", `refs/heads/${FIX_BRANCH}`, mainBefore);
+      const work = tmpDir("broker-int-fwork2-");
+      ok(work, "clone", `file://${bare}`, ".");
+      ok(work, "remote", "set-url", "origin", `https://github.com/${REPO}.git`);
+      ok(work, "commit", "--allow-empty", "-m", "evil");
+      ok(work, "tag", "v1");
+
+      const refusals = vi.spyOn(console, "error").mockImplementation(() => {});
+      for (const refspec of [
+        "HEAD:refs/heads/main",
+        "refs/tags/v1",
+        `:refs/heads/${FIX_BRANCH}`,
+      ]) {
+        const res = await push(work, env, refspec);
+        expect(res.code, refspec).not.toBe(0);
+      }
+      expect(ok(bare, "rev-parse", "refs/heads/main")).toBe(mainBefore);
+      expect(ok(bare, "rev-parse", `refs/heads/${FIX_BRANCH}`)).toBe(
+        mainBefore,
+      );
+      expect(ok(bare, "tag", "--list")).toBe("");
+      expect(forwarded).toEqual([]);
+      expect(broker.lastPushedSha()).toBeNull();
+      // Each push was refused BY THE FENCE, not by git client-side.
+      const reasons = refusals.mock.calls.map((c) => String(c[0]));
+      refusals.mockRestore();
+      expect(reasons).toEqual([
+        expect.stringContaining("ref_not_allowed) ref=refs/heads/main"),
+        expect.stringContaining("ref_not_allowed) ref=refs/tags/v1"),
+        expect.stringContaining("delete_not_allowed"),
+      ]);
     });
   },
 );

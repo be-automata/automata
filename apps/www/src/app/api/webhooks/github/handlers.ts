@@ -33,9 +33,26 @@ import {
   upsertDesiredHead,
 } from "@terragon/shared/model/supersede-recheck";
 import { createMirrorTask } from "./mirror-intake";
+import { FIX_BRANCH_PREFIX } from "@terragon/shared/self-heal/fix-paths";
+import {
+  clearFindingFixReady,
+  markFindingFixReady,
+} from "@/server-lib/audit/mark-fix-ready";
+import { logSelfHealDecision } from "@/server-lib/audit/decision-log";
+import { resolveBotLogin } from "@/server-lib/review/bot-login";
+import { normalizeLabel } from "@/server-lib/audit/render-issue";
+import { isAuditFixAction } from "@/server-lib/review/review-skill";
+import { getPostHogServer } from "@/lib/posthog-server";
 // publicAppUrl is used within utils via postBillingLinkComment
 export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
-export type IssueEvent = EmitterWebhookEvent<"issues">["payload"];
+// The issue actions routed to handleIssueEvent / handleIssueLabeledMirror.
+export type IssueEvent = EmitterWebhookEvent<
+  "issues.opened" | "issues.labeled"
+>["payload"];
+// R7: the issue actions that withdraw a self-heal finding's readiness.
+export type IssueUnreadyEvent = EmitterWebhookEvent<
+  "issues.closed" | "issues.unlabeled"
+>["payload"];
 export type IssueCommentEvent = EmitterWebhookEvent<"issue_comment">["payload"];
 export type PullRequestReviewCommentEvent =
   EmitterWebhookEvent<"pull_request_review_comment">["payload"];
@@ -580,6 +597,135 @@ export async function handleIssueEvent(event: IssueEvent): Promise<void> {
   }
 }
 
+function normalizeLabels(labels: readonly string[] | undefined): string[] {
+  return (labels ?? []).map(normalizeLabel).filter(Boolean);
+}
+
+function issueLabelNames(event: IssueEvent): string[] {
+  return (event.issue.labels ?? []).map((label) => label?.name ?? "");
+}
+
+async function markSelfHealFindingReady(
+  event: IssueEvent,
+  automation: Automation,
+): Promise<void> {
+  const repoFullName = event.repository.full_name;
+  const issueNumber = event.issue.number;
+  const organizationId = automation.organizationId;
+  if (!organizationId) {
+    console.log(
+      `[self-heal] automation ${automation.id} has no organization; issue #${issueNumber} not marked`,
+    );
+    return;
+  }
+  const result = await markFindingFixReady({
+    db,
+    organizationId,
+    repoFullName,
+    issueNumber,
+    issueAuthorLogin: event.issue.user?.login,
+    botLogin: resolveBotLogin(),
+    now: new Date(),
+  });
+  try {
+    logSelfHealDecision(
+      {
+        log: (line) => console.log(line),
+        capture: (name, properties) =>
+          getPostHogServer().capture({
+            distinctId: automation.userId,
+            event: name,
+            properties,
+          }),
+      },
+      {
+        organizationId,
+        repoFullName,
+        runId: `issue-${issueNumber}`,
+        fingerprint: result.fingerprint ?? "-",
+        decision: "claim",
+        reason: result.outcome,
+        mode: "on",
+      },
+    );
+  } catch (error: unknown) {
+    console.error(
+      "[self-heal] decision log failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+/**
+ * R7: issues.closed / issues.unlabeled (an audit-fix automation's trigger
+ * label) withdraw the ledger finding's readiness, so the dispatcher does not
+ * start a fix nobody asked for any more. The same shape as the mark: one DB
+ * write per audit-fix automation's org, zero GitHub calls. Never throws.
+ */
+export async function handleSelfHealIssueUnready(
+  event: IssueUnreadyEvent,
+): Promise<void> {
+  const repoFullName = event.repository.full_name;
+  const issueNumber = event.issue.number;
+  try {
+    const removed =
+      event.action === "unlabeled" ? normalizeLabel(event.label?.name) : null;
+    if (event.action === "unlabeled" && !removed) return;
+    const automations = (
+      await getIssueAutomationsForRepo({ db, repoFullName })
+    ).filter(
+      (automation) =>
+        automation.repoFullName === repoFullName &&
+        isAuditFixAction(automation.action) &&
+        automation.organizationId !== null &&
+        (removed === null ||
+          normalizeLabels(
+            (automation.triggerConfig as IssueTriggerConfig).filter.labels,
+          ).includes(removed)),
+    );
+    const orgs = new Map<string, Automation>();
+    for (const automation of automations) {
+      if (automation.organizationId) {
+        orgs.set(automation.organizationId, automation);
+      }
+    }
+    for (const [organizationId, automation] of orgs) {
+      const result = await clearFindingFixReady({
+        db,
+        organizationId,
+        repoFullName,
+        issueNumber,
+      });
+      if (result.outcome === "not_a_ledger_issue") continue;
+      logSelfHealDecision(
+        {
+          log: (line) => console.log(line),
+          capture: (name, properties) =>
+            getPostHogServer().capture({
+              distinctId: automation.userId,
+              event: name,
+              properties,
+            }),
+        },
+        {
+          organizationId,
+          repoFullName,
+          runId: `issue-${issueNumber}`,
+          fingerprint: result.fingerprint ?? "-",
+          decision: "skip",
+          reason: `unready_${event.action}_${result.outcome}`,
+          mode: "on",
+        },
+      );
+    }
+  } catch (error: unknown) {
+    console.error(
+      "[self-heal] issue unready failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
 async function handleIssueAutomation(
   event: IssueEvent,
   automation: Automation,
@@ -591,10 +737,22 @@ async function handleIssueAutomation(
   }
   const config = automation.triggerConfig as IssueTriggerConfig;
   // Check if this automation should trigger for the current event
+  const filterLabels = normalizeLabels(config.filter.labels);
+  const excludeLabels = normalizeLabels(config.filter.excludeLabels);
+  const issueLabels = new Set(normalizeLabels(issueLabelNames(event)));
   let shouldTrigger = false;
   switch (event.action) {
     case "opened": {
       shouldTrigger = !!config.on.open;
+      break;
+    }
+    case "labeled": {
+      const added = normalizeLabel(event.label?.name);
+      if (added) {
+        issueLabels.add(added);
+      }
+      shouldTrigger =
+        !!config.on.labeled && !!added && filterLabels.includes(added);
       break;
     }
     default: {
@@ -605,6 +763,22 @@ async function handleIssueAutomation(
     console.log(
       `Automation ${automation.id} not configured to trigger on ${event.action}`,
     );
+    return;
+  }
+  const labelsMatch =
+    filterLabels.every((label) => issueLabels.has(label)) &&
+    !excludeLabels.some((label) => issueLabels.has(label));
+  if (!labelsMatch) {
+    console.log(
+      `Skipping automation ${automation.id} - labels filter not satisfied for issue #${issueNumber}`,
+    );
+    return;
+  }
+  // Self-heal fix loop (BULK-01, WH-01): only mark the ledger finding ready;
+  // the dispatcher starts runs. Runs before any author API check so this path
+  // makes zero GitHub calls inside the webhook budget.
+  if (isAuditFixAction(automation.action)) {
+    await markSelfHealFindingReady(event, automation);
     return;
   }
   const issueAuthorUserName = event.issue.user?.login;
@@ -755,6 +929,11 @@ export async function handleWorkflowRunEvent(
     return;
   }
   if (event.workflow_run.conclusion !== "failure") {
+    return;
+  }
+  // GATE-01: CI on a self-heal fix branch is judged by the fix gate, never
+  // turned into a ci-failure mirror task.
+  if (event.workflow_run.head_branch?.startsWith(FIX_BRANCH_PREFIX)) {
     return;
   }
   await createMirrorTask({

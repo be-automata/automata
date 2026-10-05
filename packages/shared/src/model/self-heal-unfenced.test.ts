@@ -7,9 +7,11 @@ import { UNFENCED_SELF_HEAL_MODEL_FUNCTIONS } from "./self-heal-breaker";
 
 const FILES = [
   "audit-findings.ts",
+  "audit-fix-attempts.ts",
   "self-heal-outbox.ts",
   "self-heal-breaker.ts",
   "self-heal-admin-log.ts",
+  "self-heal-slot.ts",
 ];
 
 interface ExportedFn {

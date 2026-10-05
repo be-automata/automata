@@ -8,14 +8,74 @@ import { updateGitHubPR } from "@/lib/github";
 import { handleAppMention } from "./handle-app-mention";
 import { WebhookSkip } from "./webhook-skip";
 import {
+  handleIssueEvent,
+  handleSelfHealIssueUnready,
+  handleIssueLabeledMirror,
+  handlePullRequestMirror,
+  handlePullRequestStatusChange,
+  handleWorkflowRunEvent,
+} from "./handlers";
+import {
   createTestUser,
   createTestGitHubPR,
 } from "@terragon/shared/model/test-helpers";
 import { env } from "@terragon/env/apps-www";
+import { waitUntil } from "@/lib/wait-until";
+import { handleSelfHealCiEvent } from "@/server-lib/audit/evaluate-fix-ci";
+import { handleSelfHealPrClosed } from "@/server-lib/audit/fix-pr-lifecycle";
+import { createSelfHealOctokit } from "@/server-lib/audit/self-heal-octokit";
+import { insertFinding } from "@terragon/shared/model/audit-findings";
+import {
+  claimFixAttempt,
+  updateFixAttempt,
+} from "@terragon/shared/model/audit-fix-attempts";
+import { createOrganization } from "@terragon/shared/model/organizations";
+import { nanoid } from "nanoid";
 
 vi.mock("./handle-app-mention", () => ({
   handleAppMention: vi.fn(),
 }));
+// Pass-through spies: every other test keeps the real handlers.
+vi.mock("./handlers", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./handlers")>();
+  return {
+    ...actual,
+    handleIssueEvent: vi.fn(actual.handleIssueEvent),
+    handleSelfHealIssueUnready: vi.fn(actual.handleSelfHealIssueUnready),
+    handleIssueLabeledMirror: vi.fn(actual.handleIssueLabeledMirror),
+    handleWorkflowRunEvent: vi.fn(actual.handleWorkflowRunEvent),
+    handlePullRequestStatusChange: vi.fn(actual.handlePullRequestStatusChange),
+    handlePullRequestMirror: vi.fn(actual.handlePullRequestMirror),
+  };
+});
+vi.mock("@/server-lib/audit/fix-pr-lifecycle", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@/server-lib/audit/fix-pr-lifecycle")
+    >();
+  return {
+    ...actual,
+    handleSelfHealPrClosed: vi.fn(actual.handleSelfHealPrClosed),
+  };
+});
+vi.mock("@/server-lib/audit/evaluate-fix-ci", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/server-lib/audit/evaluate-fix-ci")>();
+  return {
+    ...actual,
+    handleSelfHealCiEvent: vi.fn(actual.handleSelfHealCiEvent),
+  };
+});
+vi.mock("@/server-lib/audit/self-heal-octokit", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@/server-lib/audit/self-heal-octokit")
+    >();
+  return {
+    ...actual,
+    createSelfHealOctokit: vi.fn(actual.createSelfHealOctokit),
+  };
+});
 
 function createSignature(payload: string, secret: string): string {
   const hmac = crypto.createHmac("sha256", secret);
@@ -1335,6 +1395,328 @@ describe("GitHub webhook route", () => {
 
       expect(response.status).toBe(500);
       expect(data.error).toBe("Internal server error");
+    });
+  });
+
+  describe("issue events", () => {
+    function createIssueBody(action: string) {
+      return {
+        action,
+        issue: { number: 7, user: { login: "octocat" }, labels: [] },
+        label: { name: "automata:auto-fix" },
+        repository: {
+          full_name: "owner/repo",
+          owner: { login: "owner" },
+          name: "repo",
+        },
+      };
+    }
+
+    beforeEach(() => {
+      vi.mocked(handleIssueEvent).mockResolvedValue();
+      vi.mocked(handleIssueLabeledMirror).mockResolvedValue();
+    });
+
+    it("issues.labeled reaches both the mirror intake and the issue automations", async () => {
+      const request = await createMockRequest(createIssueBody("labeled"), {
+        "x-github-event": "issues",
+      });
+      const response = await POST(request);
+      expect(response.status).toBe(200);
+      expect(handleIssueLabeledMirror).toHaveBeenCalledTimes(1);
+      expect(handleIssueEvent).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["closed", "unlabeled"])(
+      "R7: issues.%s reaches only the self-heal unready handler",
+      async (action) => {
+        vi.mocked(handleSelfHealIssueUnready).mockResolvedValue();
+        const request = await createMockRequest(createIssueBody(action), {
+          "x-github-event": "issues",
+        });
+        const response = await POST(request);
+        expect(response.status).toBe(200);
+        expect(handleSelfHealIssueUnready).toHaveBeenCalledTimes(1);
+        expect(handleIssueEvent).not.toHaveBeenCalled();
+        expect(handleIssueLabeledMirror).not.toHaveBeenCalled();
+      },
+    );
+
+    it("issues.opened reaches only the issue automations", async () => {
+      const request = await createMockRequest(createIssueBody("opened"), {
+        "x-github-event": "issues",
+      });
+      const response = await POST(request);
+      expect(response.status).toBe(200);
+      expect(handleIssueEvent).toHaveBeenCalledTimes(1);
+      expect(handleIssueLabeledMirror).not.toHaveBeenCalled();
+    });
+  });
+  describe("self-heal CI completion (GATE-01)", () => {
+    const SHA = "c".repeat(40);
+
+    it("check_suite.completed reaches the self-heal handler AND the existing check handler", async () => {
+      const pr = await createTestGitHubPR({ db });
+      const body = {
+        action: "completed",
+        check_suite: {
+          id: 1,
+          head_sha: SHA,
+          status: "completed",
+          conclusion: "success",
+          pull_requests: [{ number: pr.number }],
+        },
+        repository: {
+          full_name: pr.repoFullName,
+          owner: { login: "owner" },
+          name: "repo",
+        },
+      };
+      const request = await createMockRequest(body, {
+        "x-github-event": "check_suite",
+      });
+      const response = await POST(request);
+      expect(response.status).toBe(200);
+      expect(handleSelfHealCiEvent).toHaveBeenCalledTimes(1);
+      expect(updateGitHubPR).toHaveBeenCalledWith({
+        repoFullName: pr.repoFullName,
+        prNumber: pr.number,
+        createIfNotFound: false,
+      });
+    });
+
+    it("check_suite.rerequested does not reach the self-heal handler", async () => {
+      const request = await createMockRequest(
+        {
+          action: "rerequested",
+          check_suite: { id: 1, head_sha: SHA, pull_requests: [] },
+          repository: {
+            full_name: "owner/repo",
+            owner: { login: "owner" },
+            name: "repo",
+          },
+        },
+        { "x-github-event": "check_suite" },
+      );
+      const response = await POST(request);
+      expect(response.status).toBe(200);
+      expect(handleSelfHealCiEvent).not.toHaveBeenCalled();
+    });
+
+    it("workflow_run.completed reaches the self-heal handler AND the existing workflow handler", async () => {
+      const request = await createMockRequest(
+        {
+          action: "completed",
+          workflow_run: {
+            id: 9,
+            name: "ci",
+            head_sha: SHA,
+            head_branch: "automata/fix-1-abcdef01-a1",
+            conclusion: "success",
+          },
+          repository: {
+            full_name: "owner/repo",
+            owner: { login: "owner" },
+            name: "repo",
+          },
+        },
+        { "x-github-event": "workflow_run" },
+      );
+      const response = await POST(request);
+      expect(response.status).toBe(200);
+      expect(handleSelfHealCiEvent).toHaveBeenCalledTimes(1);
+      expect(handleWorkflowRunEvent).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("handleSelfHealCiEvent (DB-first)", () => {
+    const REPO = "acme/widgets";
+    let orgId: string;
+    let attemptId: string;
+    let sha: string;
+
+    const payload = (headSha: string, repo = REPO) => ({
+      action: "completed",
+      check_suite: { head_sha: headSha },
+      repository: { full_name: repo },
+    });
+
+    beforeEach(async () => {
+      sha = crypto.randomBytes(20).toString("hex");
+      orgId = (
+        await createOrganization({
+          db,
+          name: "Org",
+          slug: `org-${nanoid(8).toLowerCase()}`,
+        })
+      ).id;
+      const finding = await insertFinding({
+        db,
+        organizationId: orgId,
+        finding: {
+          repoFullName: REPO,
+          fingerprint: "0123456789abcdef",
+          audit: "security-audit",
+          ruleId: "dep.vulnerable",
+          severity: "high",
+          checkKind: "script",
+          title: "Vulnerable dependency",
+          subject: "lodash",
+          planFiles: ["src/a.ts"],
+          status: "open",
+          issueNumber: 42,
+          autoFixLabeled: true,
+          fixReadyAt: new Date(),
+        },
+      });
+      const claimed = await claimFixAttempt({
+        db,
+        organizationId: orgId,
+        findingId: finding.id,
+        maxAttempts: 3,
+        cooldownMin: 30,
+        branchFor: (n) => `automata/fix-42-01234567-a${n}`,
+      });
+      if (!claimed) throw new Error("claim failed");
+      attemptId = claimed.attempt.id;
+      await updateFixAttempt({
+        db,
+        organizationId: orgId,
+        id: attemptId,
+        patch: {
+          phase: "ci_pending",
+          prState: "draft",
+          prNumber: 501,
+          prOpenedAt: new Date(),
+          gatedHeadSha: sha,
+          checkStatus: "passed",
+        },
+      });
+    });
+
+    it("a head sha no draft is gated on → no evaluation, no Octokit, no waitUntil", async () => {
+      const evaluate = vi.fn();
+      await handleSelfHealCiEvent(payload("e".repeat(40)), { evaluate });
+      expect(evaluate).not.toHaveBeenCalled();
+      expect(waitUntil).not.toHaveBeenCalled();
+      expect(createSelfHealOctokit).not.toHaveBeenCalled();
+    });
+
+    it("a payload without a head sha or repo is ignored", async () => {
+      const evaluate = vi.fn();
+      await handleSelfHealCiEvent({ action: "completed" }, { evaluate });
+      await handleSelfHealCiEvent(payload(sha, "other/repo"), { evaluate });
+      expect(evaluate).not.toHaveBeenCalled();
+      expect(waitUntil).not.toHaveBeenCalled();
+    });
+
+    it("the gated head of a draft → waitUntil(evaluateFixCi) once, no GitHub call inline", async () => {
+      const evaluate = vi.fn(async (_args: unknown) => "pending" as const);
+      await handleSelfHealCiEvent(payload(sha, "ACME/Widgets"), { evaluate });
+      expect(waitUntil).toHaveBeenCalledTimes(1);
+      expect(evaluate).toHaveBeenCalledTimes(1);
+      expect(evaluate.mock.calls[0]?.[0]).toMatchObject({
+        organizationId: orgId,
+        attemptId,
+      });
+      expect(createSelfHealOctokit).not.toHaveBeenCalled();
+    });
+
+    it("a head branch outside automata/fix-* never reaches the DB", async () => {
+      const failing = {
+        select: vi.fn(),
+        transaction: vi.fn(),
+      };
+      const evaluate = vi.fn();
+      await handleSelfHealCiEvent(
+        {
+          ...payload(sha),
+          check_suite: { head_sha: sha, head_branch: "main" },
+        },
+        { db: failing as unknown as typeof db, evaluate },
+      );
+      expect(failing.select).not.toHaveBeenCalled();
+      expect(failing.transaction).not.toHaveBeenCalled();
+      expect(evaluate).not.toHaveBeenCalled();
+    });
+
+    it("the draft's own fix branch is still looked up", async () => {
+      const evaluate = vi.fn(async (_args: unknown) => "pending" as const);
+      await handleSelfHealCiEvent(
+        {
+          ...payload(sha),
+          check_suite: {
+            head_sha: sha,
+            head_branch: "automata/fix-42-01234567-a1",
+          },
+        },
+        { evaluate },
+      );
+      expect(evaluate).toHaveBeenCalledTimes(1);
+    });
+
+    it("a draft already marked ready is not re-evaluated", async () => {
+      await updateFixAttempt({
+        db,
+        organizationId: orgId,
+        id: attemptId,
+        patch: { prState: "ready", phase: "ready" },
+      });
+      const evaluate = vi.fn();
+      await handleSelfHealCiEvent(payload(sha), { evaluate });
+      expect(evaluate).not.toHaveBeenCalled();
+    });
+
+    it("never throws (a DB failure is logged)", async () => {
+      const failing = {
+        select: () => {
+          throw new Error("db down");
+        },
+        transaction: () => {
+          throw new Error("db down");
+        },
+      } as unknown as typeof db;
+      vi.spyOn(console, "error").mockImplementationOnce(() => undefined);
+      await expect(
+        handleSelfHealCiEvent(payload(sha), { db: failing, evaluate: vi.fn() }),
+      ).resolves.toBeUndefined();
+    });
+  });
+  describe("self-heal fix PR lifecycle (R5)", () => {
+    it("pull_request.closed reaches the self-heal handler AND both existing closed handlers", async () => {
+      const pr = await createTestGitHubPR({ db });
+      const body = createPullRequestBody({
+        action: "closed",
+        repoFullName: pr.repoFullName,
+        prNumber: pr.number,
+      });
+      const response = await POST(await createMockRequest(body));
+      expect(response.status).toBe(200);
+      expect(handleSelfHealPrClosed).toHaveBeenCalledTimes(1);
+      expect(handlePullRequestStatusChange).toHaveBeenCalledTimes(1);
+      expect(handlePullRequestMirror).toHaveBeenCalledTimes(1);
+      expect(updateGitHubPR).toHaveBeenCalledWith({
+        repoFullName: pr.repoFullName,
+        prNumber: pr.number,
+        createIfNotFound: false,
+      });
+      // Not a self-heal fix PR: one lookup, no GitHub client, nothing deferred.
+      expect(createSelfHealOctokit).not.toHaveBeenCalled();
+      expect(waitUntil).not.toHaveBeenCalled();
+    });
+
+    it("other pull_request actions do not reach the self-heal handler", async () => {
+      const pr = await createTestGitHubPR({ db });
+      for (const action of ["opened", "reopened", "ready_for_review"]) {
+        const body = createPullRequestBody({
+          action,
+          repoFullName: pr.repoFullName,
+          prNumber: pr.number,
+        });
+        const response = await POST(await createMockRequest(body));
+        expect(response.status).toBe(200);
+      }
+      expect(handleSelfHealPrClosed).not.toHaveBeenCalled();
     });
   });
 });

@@ -24,6 +24,11 @@ export const FINDING_LABELS = {
   audit: (audit: string): string => `audit:${audit}`,
 } as const;
 
+/** GitHub label names compare trimmed and case-insensitively. */
+export function normalizeLabel(label: string | null | undefined): string {
+  return (label ?? "").trim().toLowerCase();
+}
+
 export const MAX_BODY_CHARS = 30_000;
 export const MAX_TITLE_CHARS = 200;
 const MAX_URLS = 10;
@@ -71,7 +76,8 @@ export function sanitizeAgentText(text: string): string {
   return out;
 }
 
-function oneLine(text: string): string {
+/** Agent text on a single line, sanitized. */
+export function oneLine(text: string): string {
   return sanitizeAgentText(text).replace(/\s+/g, " ").trim();
 }
 
@@ -147,13 +153,62 @@ export type AuditCommentKind =
   | "closed_check_passed"
   | "still_present"
   | "needs_human_attempts_cap"
-  | "needs_human_rubric_absent";
+  | "needs_human_rubric_absent"
+  | "fix_attempt_rejected"
+  | "fix_draft_withdrawn"
+  | "fix_draft_no_repo_ci"
+  | "fix_pr_expired";
+
+/**
+ * Why a self-heal change attempt did not become a pull request. Only these
+ * platform tokens are ever rendered; anything else is dropped.
+ */
+export const FIX_ATTEMPT_REJECTION_TEXT: Readonly<Record<string, string>> = {
+  suppression_comment: "it added a comment that silences a linter or scanner",
+  test_edit: "it changed or deleted an existing test",
+  ci_edit: "it changed a CI definition",
+  audit_config_edit: "it changed audit or lint configuration",
+  deleted_flagged_code: "it deleted the flagged code without a replacement",
+  out_of_plan_file: "it changed files outside the plan",
+  denied_path: "it changed a protected path",
+  diff_too_large: "the change is larger than the configured limit",
+  patch_unavailable: "GitHub did not return a diff that could be inspected",
+  sha_mismatch: "the branch moved after the check ran",
+  no_changes: "the branch has no changes against the default branch",
+  no_branch: "no branch was pushed",
+  run_failed: "the fix run ended with an error before a fix was pushed",
+  check_failed: "the finding's check did not pass on the pushed commit",
+  open_failed: "a draft pull request could not be opened",
+  ci_failed: "the repository's CI failed on the draft pull request",
+  ci_infra:
+    "the repository's CI was cancelled or could not start (not counted against the limit)",
+  ci_stuck:
+    "the repository's CI did not finish within an hour (not counted against the limit)",
+};
 
 export interface AuditCommentData {
   fingerprint: string;
   runId: string;
   attempts?: number;
   maxAttempts?: number;
+  /** fix_attempt_rejected: platform reason tokens (FIX_ATTEMPT_REJECTION_TEXT). */
+  reasons?: readonly string[];
+  /** fix_attempt_rejected: the attempt branch, when it is kept for a person. */
+  keptBranch?: string;
+  /** fix_attempt_rejected / fix_draft_withdrawn: a draft PR existed. */
+  draftNumber?: number;
+  /** fix_draft_withdrawn: whether the attempt counts toward the limit. */
+  counted?: boolean;
+  /** fix_pr_expired: the repo's unreviewed-PR expiry window in days. */
+  expiryDays?: number;
+}
+
+function rejectionLines(reasons: readonly string[] | undefined): string[] {
+  const lines = (reasons ?? [])
+    .map((reason) => FIX_ATTEMPT_REJECTION_TEXT[reason])
+    .filter((line): line is string => line !== undefined)
+    .map((line) => `- ${line}`);
+  return lines.length > 0 ? lines : ["- unspecified"];
 }
 
 export function renderAuditComment(
@@ -184,6 +239,44 @@ export function renderAuditComment(
       break;
     case "needs_human_rubric_absent":
       text = `Later audits no longer report this rubric-only finding. Only a person can confirm resolution; labelled \`${FINDING_LABELS.needsHumanApprove}\`.`;
+      break;
+    case "fix_attempt_rejected": {
+      const branch =
+        data.keptBranch !== undefined
+          ? `The branch \`${data.keptBranch.replace(/[`\r\n]/g, "")}\` is kept for a person to pick up.`
+          : data.draftNumber !== undefined
+            ? `The draft pull request #${data.draftNumber} was withdrawn before review and the attempt branch was deleted.`
+            : "No pull request was opened and the attempt branch was deleted.";
+      text = [
+        `Automated change attempt ${attempts} of ${max} was not proposed:`,
+        "",
+        ...rejectionLines(data.reasons),
+        "",
+        branch,
+      ].join("\n");
+      break;
+    }
+    case "fix_draft_withdrawn":
+      text = [
+        `Automata self-heal withdrew this draft before review (attempt ${attempts} of ${max}):`,
+        "",
+        ...rejectionLines(data.reasons),
+        "",
+        "The attempt branch was deleted.",
+        data.counted === false
+          ? "This attempt does not count against the limit."
+          : "This attempt counts against the limit.",
+      ].join("\n");
+      break;
+    case "fix_draft_no_repo_ci":
+      text = [
+        "No repository CI reported a check on this commit within 10 minutes, so the only gate was the finding's own deterministic check on a clean checkout.",
+        "",
+        `Labelled \`${FINDING_LABELS.needsHumanApprove}\`: a person should run the project's tests before merging.`,
+      ].join("\n");
+      break;
+    case "fix_pr_expired":
+      text = `Withdrawn: no human review within ${data.expiryDays ?? 0} days. The finding stays open and may be retried.`;
       break;
   }
   return `${marker}\n${text}`;

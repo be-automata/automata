@@ -323,6 +323,34 @@ ever reaches an agent, and a review agent holds no GitHub credential at all.
 **Rollback.** Clear the pack from Task agent packs, or drop `requires` from the manifest entry. Task
 runs then get today's env (bearer in both `GH_TOKEN` and `GITHUB_TOKEN`).
 
+## Amendment 2026-10-04 (phase 9) — self-heal fix lane
+
+**What changes.** A self-heal FIX run (ADR-010 part 2) must push a branch. It gets no GitHub write
+credential for that. Its only write path is the fenced git broker on the worker:
+
+- The run is refused before the clone unless the box runs the credential broker
+  (`WORKER_CREDENTIAL_BROKER=on`). Under `legacy-direct` the agent would hold the raw installation
+  token and bypass the fence.
+- The broker parses the receive-pack command list and forwards a push only when every update targets
+  the run's own `refs/heads/automata/fix-*` branch. A delete, any other ref, a malformed list or a
+  compressed body is refused before a byte reaches GitHub (`receive-pack-refs.test.ts`,
+  `git-broker.test.ts`, `broker-integration.test.ts`).
+- gh stays on the gh broker, and nothing else in the fix agent's environment can write. The control
+  plane opens, readies and closes the pull request with the App installation client; it never merges.
+
+**The gate token is not a GitHub credential.** The per-attempt gate token authenticates exactly one
+POST of the worker's finding-check verdict to `/api/self-heal/fix-check`. It is minted at dispatch,
+stored as a sha256, expires after 2 hours, and is accepted once. It reaches the worker only, never
+the daemon environment, argv or the journal (`daemon-env.test.ts`, `fix-check/route.test.ts`,
+`self-heal-acceptance.test.ts`). It grants nothing on GitHub.
+
+**The review lane is unchanged.** Review runs hold no GitHub credential, and the fix PR's single
+review comes from the same review automation, triggered by the App's ready-for-review transition.
+The invariant of this ADR stands: no write credential reaches an agent.
+
+**Rollback.** Turn the `selfHealLoop` flag off and disable the audit-fix automations (runbook,
+"Audit self-healing loop — fix loop (phase 9)"). No fix run starts after that.
+
 ## Options considered
 
 - **Strip credentials from the review env (chosen)** vs a scoped read-only token. Chosen: absence is

@@ -1,5 +1,13 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
+
+import { loadWorkerConfig } from "./config";
+import { DaemonProcess } from "./daemon-process";
 import { buildDaemonEnv, buildRunProxyEnv, SAFE_ENV_KEYS } from "./daemon-env";
+import type { AgentRunInput } from "./types";
 
 const INSTALL_TOKEN = "ghs_installationtoken123";
 
@@ -623,5 +631,57 @@ describe("buildRunProxyEnv (phase 8 shared proxy subset)", () => {
       botLogin: "b",
     });
     expect(JSON.stringify(env)).not.toContain("TOKEN_SENTINEL");
+  });
+});
+
+describe("GATE-01: a fix run's gate token never reaches the daemon/agent env (09-10)", () => {
+  it("the env DaemonProcess builds from a fix input carries no gate token", async () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-gate-"));
+    const input: AgentRunInput = {
+      threadId: "thr_gate",
+      threadChatId: "tc_1",
+      repoFullName: "o/r",
+      branch: "main",
+      daemonCallbackUrl: "http://localhost:3999",
+      installationToken: "inst",
+      daemonToken: "daemon",
+      orgId: "org-1",
+      selfHeal: {
+        kind: "fix",
+        attemptId: "11111111-1111-4111-8111-111111111111",
+        branch: "automata/fix-1-a1",
+        baseBranch: "main",
+        checks: [],
+        denyExceptions: [],
+        gateToken: "TOKEN_SENTINEL",
+      },
+    };
+    const daemon = new DaemonProcess(
+      loadWorkerConfig({}),
+      input,
+      workdir,
+      null,
+      "http://127.0.0.1:4242",
+      {
+        gitUrl: "http://127.0.0.1:41999",
+        ghSocketPath: "/tmp/gate-gh.sock",
+        bearer: "bearer",
+        repoFullName: "o/r",
+      },
+    );
+    const internals = daemon as unknown as {
+      ensureEnv(): Promise<NodeJS.ProcessEnv>;
+      ghConfigDir: string | null;
+    };
+    try {
+      const env = await internals.ensureEnv();
+      expect(Object.keys(env).length).toBeGreaterThan(0);
+      expect(JSON.stringify(env)).not.toContain("TOKEN_SENTINEL");
+    } finally {
+      if (internals.ghConfigDir) {
+        fs.rmSync(internals.ghConfigDir, { recursive: true, force: true });
+      }
+      fs.rmSync(workdir, { recursive: true, force: true });
+    }
   });
 });

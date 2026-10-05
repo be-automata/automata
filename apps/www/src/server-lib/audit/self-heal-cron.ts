@@ -1,9 +1,23 @@
 import { db } from "@/lib/db";
 import type { DB } from "@terragon/shared/db";
 import { pruneSelfHealRows } from "@terragon/shared/model/self-heal-outbox";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import { runAuditSweep, runOutboxDrain } from "./audit-sweep";
+import { runStuckDraftSweep } from "./evaluate-fix-ci";
+import { runFixDispatchReconcile } from "./fix-dispatch-reconcile";
+import { runFixPrExpirySweep } from "./fix-pr-expiry";
+import { runFixPrSettleSweep } from "./fix-pr-lifecycle";
+import { runLoopBreakerEvaluation } from "./loop-breaker";
+import { defaultOpenFixPrDeps, runFixPrOpenSweep } from "./open-fix-pr";
+import { runFixRegressionSweep } from "./regression-sweep";
+import {
+  createRepoGithubProbe,
+  defaultSelfHealDispatcherDeps,
+  runSelfHealDispatcher,
+} from "./self-heal-dispatcher";
+import { createSelfHealOctokit } from "./self-heal-octokit";
+import { errorText } from "./audit-shared";
+import { memoizeMint } from "./fix-attempt-session";
 
 /**
  * The self-heal cron (CRON-01, RESILIENCE 6.6): a function of its own, called
@@ -29,6 +43,14 @@ export interface SelfHealCronDeps {
   drain: typeof runOutboxDrain;
   sweep: typeof runAuditSweep;
   prune: typeof pruneSelfHealRows;
+  reconcile: typeof runFixDispatchReconcile;
+  openPrs: typeof runFixPrOpenSweep;
+  evaluateDrafts: typeof runStuckDraftSweep;
+  settlePrs: typeof runFixPrSettleSweep;
+  breakers: typeof runLoopBreakerEvaluation;
+  dispatch: typeof runSelfHealDispatcher;
+  expirePrs: typeof runFixPrExpirySweep;
+  regressions: typeof runFixRegressionSweep;
   budget: { totalMs: number; perItemMs: number; limit: number };
 }
 
@@ -39,12 +61,16 @@ function defaultDeps(): SelfHealCronDeps {
     drain: runOutboxDrain,
     sweep: runAuditSweep,
     prune: pruneSelfHealRows,
+    reconcile: runFixDispatchReconcile,
+    openPrs: runFixPrOpenSweep,
+    evaluateDrafts: runStuckDraftSweep,
+    settlePrs: runFixPrSettleSweep,
+    breakers: runLoopBreakerEvaluation,
+    dispatch: runSelfHealDispatcher,
+    expirePrs: runFixPrExpirySweep,
+    regressions: runFixRegressionSweep,
     budget: SELF_HEAL_CRON_BUDGET,
   };
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 /** Resolves when `work` settles or `ms` elapses, whichever is first. Never rejects. */
@@ -92,6 +118,10 @@ export async function runSelfHealCron(
     perItemMs: deps.budget.perItemMs,
     limit: deps.budget.limit,
   };
+  // One installation-token mint per repo for this run, shared by every fix
+  // sweep and the dispatcher's probe.
+  const mint = memoizeMint(createSelfHealOctokit);
+  const openDeps = { ...defaultOpenFixPrDeps(), mint };
 
   await withinBudget("outbox drain", remaining(), async () => {
     const result = await deps.drain({ ...shared, now: deps.now() });
@@ -102,11 +132,119 @@ export async function runSelfHealCron(
     console.log("[cron:self-heal] audit sweep", result);
   });
 
+  if (kind === "tick") {
+    // RECON-01: settle lost dispatches and refund infra failures BEFORE the
+    // dispatcher, so a refunded finding is claimable on this same tick and the
+    // dispatcher's breaker reads include the events recorded here.
+    await withinBudget("fix reconcile", remaining(), async () => {
+      const result = await deps.reconcile({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+      });
+      console.log("[cron:self-heal] fix reconcile", result);
+    });
+    // RES-18 / GATE-01: resume draft-PR opens the route's waitUntil did not
+    // finish (pending_open retries and reports nobody processed), before the
+    // dispatcher so a slow GitHub cannot starve PR opens of a finished fix.
+    await withinBudget("fix draft opens", remaining(), async () => {
+      const result = await deps.openPrs({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+        deps: openDeps,
+      });
+      console.log("[cron:self-heal] fix draft opens", result);
+    });
+    // GATE-01 steps 4-5: evaluate the repo CI on open drafts after the open
+    // sweep (a draft opened above is seen on this tick). This is what moves a
+    // draft whose CI completed without a later webhook (all-checks settle
+    // window, no repo CI at all) and withdraws drafts stuck for an hour.
+    await withinBudget("fix draft CI", remaining(), async () => {
+      const result = await deps.evaluateDrafts({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+        deps: openDeps,
+      });
+      console.log("[cron:self-heal] fix draft CI", result);
+    });
+    // R5: settle fix PRs GitHub already showed merged or closed when no
+    // webhook did (an adopted PR, a draft the CI sweep saw a person close),
+    // so the finding is not held by a finished attempt and the breakers
+    // below see the pr_merged / pr_closed events.
+    await withinBudget("fix PR settle", remaining(), async () => {
+      const result = await deps.settlePrs({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+        deps: { mint },
+      });
+      console.log("[cron:self-heal] fix PR settle", result);
+    });
+    // BRK-01: the loop and plane breakers read the outcomes the reconcile,
+    // the open sweep and the CI sweep just recorded, move expired opens to
+    // half_open and resolve half-open probes, so the dispatcher below sees
+    // the breaker state those outcomes imply.
+    await withinBudget("breakers", remaining(), async () => {
+      const result = await deps.breakers({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+      });
+      console.log("[cron:self-heal] breakers", result);
+    });
+    // BULK-01: the fix dispatcher runs LAST, so its admission sees the state
+    // the drain and the sweep just settled, and it can only use what is left
+    // of the shared budget.
+    await withinBudget("fix dispatcher", remaining(), async () => {
+      const result = await deps.dispatch({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        deps: {
+          ...defaultSelfHealDispatcherDeps(),
+          probeRepo: createRepoGithubProbe({ mint }),
+        },
+      });
+      console.log("[cron:self-heal] fix dispatcher", result);
+    });
+  }
+
   if (kind === "hourly") {
     // Retention runs even with the flag off (pending rows are never pruned).
     await withinBudget("retention prune", PRUNE_BUDGET_MS, async () => {
       const pruned = await deps.prune({ db: deps.db, now: deps.now() });
       console.log("[cron:self-heal] pruned", pruned);
+    });
+    // R5: withdraw ready fix PRs nobody reviewed within the repo's window,
+    // then the daily read-only regression check of merged fixes. Both feed
+    // the loop_fix breaker (pr_expired / regressed / reopened), which the
+    // next tick evaluates. Bounded by what is left of the shared budget.
+    await withinBudget("fix PR expiry", remaining(), async () => {
+      const result = await deps.expirePrs({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+        deps: { mint },
+      });
+      console.log("[cron:self-heal] fix PR expiry", result);
+    });
+    await withinBudget("fix regressions", remaining(), async () => {
+      const result = await deps.regressions({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+        deps: { mint },
+      });
+      console.log("[cron:self-heal] fix regressions", result);
     });
   }
 }

@@ -18,7 +18,9 @@ import {
   useSelfHealActionMutation,
   useSelfHealActivityQuery,
   type SelfHealActivityDto,
+  type SelfHealAttemptTimelineDto,
   type SelfHealBreakerDto,
+  type SelfHealMetricsDto,
   type SelfHealDrainResultDto,
   type SelfHealRunDecisionDto,
   type SelfHealRunDto,
@@ -29,6 +31,8 @@ import {
  * (dry-run decisions are shown verbatim with their would_ prefix), the ledger,
  * the outbox backlog, churn, breaker banners with Reset (BRK-01) and, at org
  * scope, the Drain control (KILL-01). Every control is also gated server-side.
+ * Phase 9 adds the production metrics (R5/R6) and the fix-attempt timeline
+ * with each attempt's CI gate source (SC6).
  *
  * Same shape as the other settings cards: a PURE view (all state is a prop,
  * except the drain-confirm dialog's open flag), a model hook binding the
@@ -105,6 +109,139 @@ export function issueUrl(repoFullName: string, issueNumber: number): string {
 
 export function churnPercent(churn: number): string {
   return `${Math.round(churn * 100)}%`;
+}
+
+/** A 0..1 rate as a whole percentage; "n/a" when there is no denominator. */
+export function formatRate(rate: number | null): string {
+  return rate === null ? "n/a" : `${Math.round(rate * 100)}%`;
+}
+
+const TIMELINE_STEPS: Array<{
+  key: keyof SelfHealAttemptTimelineDto["steps"];
+  label: string;
+}> = [
+  { key: "claim", label: "claimed" },
+  { key: "dispatch", label: "dispatched" },
+  { key: "check", label: "checked" },
+  { key: "draft", label: "draft" },
+  { key: "ci", label: "CI" },
+  { key: "ready", label: "ready" },
+  { key: "merged", label: "merged" },
+  { key: "closed", label: "closed" },
+];
+
+function MetricsRow({ metrics }: { metrics: SelfHealMetricsDto }) {
+  const items: Array<[string, string]> = [
+    ["PRs opened", String(metrics.prsOpened)],
+    ["Ready for review", String(metrics.ready)],
+    [
+      "Merged by a person",
+      `${metrics.mergedByNonTrigger} of ${metrics.merged} merged`,
+    ],
+    ["Merge rate", formatRate(metrics.mergeRate)],
+    ["Edited by a person", formatRate(metrics.humanEditRatio)],
+    ["Reopened (30 days)", formatRate(metrics.reopenRate)],
+    ["Regressed (30 days)", formatRate(metrics.regressionRate30d)],
+    [
+      "Attempts per closed finding",
+      metrics.meanAttemptsToClose === null
+        ? "n/a"
+        : String(Math.round(metrics.meanAttemptsToClose * 10) / 10),
+    ],
+    ["Expired unreviewed", formatRate(metrics.expiredRate)],
+    ["Attempts", `${metrics.counted} counted, ${metrics.refunded} refunded`],
+    ["Runs postponed (30 days)", String(metrics.admissionDeferrals)],
+  ];
+  return (
+    <section data-testid="self-heal-metrics">
+      <h5 className="text-sm font-medium">Fix results</h5>
+      <dl className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-3">
+        {items.map(([label, value]) => (
+          <div key={label} className="flex justify-between gap-2">
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="font-medium">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {metrics.mergeRateBasis === "bot-and-owner"
+          ? "Merges by the bot or the fix automation's owner do not count as merged by a person."
+          : "Only merges by the bot are excluded because the fix automation owner's login is unknown, so the merge rate may read high."}
+      </p>
+    </section>
+  );
+}
+
+function AttemptRow({ entry }: { entry: SelfHealAttemptTimelineDto }) {
+  const steps = TIMELINE_STEPS.filter(({ key }) => entry.steps[key] !== null);
+  const result =
+    entry.outcome === null
+      ? (entry.prState ?? entry.phase)
+      : `${entry.outcome}${entry.infraRefunded ? " (refunded)" : ""}`;
+  return (
+    <tr className="border-t align-top" data-testid="self-heal-attempt">
+      <td className="py-1 pr-2">{entry.attemptNo}</td>
+      <td className="py-1 pr-2">
+        {entry.prUrl === null || entry.prNumber === null ? (
+          "-"
+        ) : (
+          <a
+            className="underline"
+            href={entry.prUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            #{entry.prNumber}
+          </a>
+        )}
+      </td>
+      <td className="py-1 pr-2">{entry.gateSource ?? "undecided"}</td>
+      <td className="py-1 pr-2">{result}</td>
+      <td className="py-1">
+        {steps.map(({ key, label }) => (
+          <div key={key} className="font-mono text-xs">
+            {label} {entry.steps[key]}
+          </div>
+        ))}
+      </td>
+    </tr>
+  );
+}
+
+function AttemptTimeline({
+  attempts,
+}: {
+  attempts: SelfHealAttemptTimelineDto[];
+}) {
+  return (
+    <section data-testid="self-heal-attempt-timeline">
+      <h5 className="text-sm font-medium">Fix attempts</h5>
+      {attempts.length === 0 ? (
+        <p className="mt-1 text-sm text-muted-foreground">
+          No fix attempts yet.
+        </p>
+      ) : (
+        <div className="mt-1 overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead>
+              <tr>
+                <th className="pr-2">Attempt</th>
+                <th className="pr-2">PR</th>
+                <th className="pr-2">CI gate</th>
+                <th className="pr-2">Result</th>
+                <th>Path</th>
+              </tr>
+            </thead>
+            <tbody>
+              {attempts.map((entry) => (
+                <AttemptRow key={entry.attemptId} entry={entry} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
 }
 
 function isTripped(b: SelfHealBreakerDto): boolean {
@@ -369,6 +506,12 @@ export function SelfHealActivityView({
               </div>
             )}
           </section>
+
+          {data.metrics !== undefined && <MetricsRow metrics={data.metrics} />}
+
+          {data.attemptTimeline !== undefined && (
+            <AttemptTimeline attempts={data.attemptTimeline} />
+          )}
 
           <p className="text-sm" data-testid="self-heal-outbox">
             Outbox backlog: {data.outbox.pending} pending, {data.outbox.failed}{" "}

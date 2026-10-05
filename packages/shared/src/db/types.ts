@@ -140,6 +140,10 @@ export type ThreadSourceMetadata =
       // rendered into this thread's prompt. The tagged `json review-intent`
       // parser is gated on it; absent = classic (today's object, unchanged).
       reviewPromptMode?: "orchestrated";
+      // Phase 9 (RACE-01): set ONLY on audit-fix threads. The fix attempt this
+      // thread runs, written at thread creation so the dispatch planner reads
+      // it from the thread instead of racing the dispatcher's bind.
+      selfHealAttemptId?: string;
     };
 
 /**

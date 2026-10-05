@@ -24,7 +24,6 @@ import { withSelfHealTx } from "@terragon/shared/model/self-heal-tx";
 import { ABANDONED_TERMINAL_CAUSES } from "@terragon/shared/model/terminal-cause";
 import type { ThreadStatus } from "@terragon/shared/db/types";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import { resolveBotLogin } from "../review/bot-login";
 import { AUDIT_FINDINGS_SKILL_NAME } from "../review/review-skill";
@@ -39,6 +38,7 @@ import {
   resolveSelfHealEffective,
 } from "./resolve-self-heal";
 import { createSelfHealOctokit } from "./self-heal-octokit";
+import { errorText } from "./audit-shared";
 
 /**
  * The self-heal cron's two backstops (RES-08 sweep half, OUTBOX-01 drain).
@@ -81,10 +81,6 @@ const DEFAULT_SWEEP_DEPS: AuditSweepDeps = {
 interface SweepCandidate {
   threadId: string;
   userId: string;
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 async function selectStampedThreads({

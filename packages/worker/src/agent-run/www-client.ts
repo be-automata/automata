@@ -1,5 +1,6 @@
 import type { DaemonEventAPIBody } from "@terragon/daemon/shared";
 import { redactSecrets } from "@terragon/utils/redact";
+import type { FixCheckReport } from "./self-heal-fix-check";
 import type {
   CredentialSource,
   PulledDaemonMessage,
@@ -702,29 +703,43 @@ export interface PostSelfHealAuditChecksArgs {
 }
 
 const SELF_HEAL_REPORT_TIMEOUT_MS = 10_000;
-const SELF_HEAL_REPORT_BACKOFF_MS = [2_000, 4_000, 8_000] as const;
+/** Waits between the (up to 3) attempts of a self-heal report POST. */
+const SELF_HEAL_REPORT_BACKOFF_MS = [2_000, 4_000] as const;
+
+interface SelfHealReportPost<R> {
+  url: string;
+  /** SECRET header (name + token); never logged. */
+  tokenHeader: string;
+  token: string;
+  body: string;
+  /** Function name for the log lines. */
+  label: string;
+  /** Non-secret id fields for the log lines. */
+  logFields: Record<string, string>;
+  /**
+   * A non-2xx status: the final result (the caller logs it), or undefined to
+   * log it and try again with the same token and body.
+   */
+  onStatus: (status: number) => R | undefined;
+  fetchImpl?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+}
 
 /**
- * POST the sealing self-heal check report (FORGE-01). Authenticated by the
- * per-run check token (NOT the daemon token). Up to 3 attempts with 2/4/8 s
- * backoff reuse the same token and body (the endpoint is first-write-wins, so
- * a retry is idempotent). 401/403/404/409 are final. Never throws; logs
- * statuses only.
+ * The shared self-heal report loop: up to 3 attempts, each bounded at 10 s,
+ * with 2/4 s backoff between them, reusing the same token and body (both
+ * endpoints are first-write-wins, so a retry is idempotent). A network error
+ * is retried; 200 `{recorded:false}` is a duplicate. Never throws.
  */
-export async function postSelfHealAuditChecks(
-  args: PostSelfHealAuditChecksArgs,
-): Promise<SelfHealAuditReportResult> {
+async function postSelfHealReport<R>(
+  args: SelfHealReportPost<R>,
+): Promise<R | "recorded" | "duplicate" | "error"> {
   const doFetch = args.fetchImpl ?? fetch;
   const sleep =
     args.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const url = endpoint(args.baseUrl, "/api/self-heal/audit-checks");
-  const body = JSON.stringify({
-    threadId: args.threadId,
-    results: args.results,
-  });
   for (
     let attempt = 0;
-    attempt < SELF_HEAL_REPORT_BACKOFF_MS.length;
+    attempt <= SELF_HEAL_REPORT_BACKOFF_MS.length;
     attempt++
   ) {
     if (attempt > 0) {
@@ -732,18 +747,18 @@ export async function postSelfHealAuditChecks(
     }
     let res: Response;
     try {
-      res = await doFetch(url, {
+      res = await doFetch(args.url, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-self-heal-check-token": args.checkToken,
+          [args.tokenHeader]: args.token,
         },
-        body,
+        body: args.body,
         signal: AbortSignal.timeout(SELF_HEAL_REPORT_TIMEOUT_MS),
       });
     } catch (error) {
-      console.error("[agent-run] postSelfHealAuditChecks request failed", {
-        threadId: args.threadId,
+      console.error(`[agent-run] ${args.label} request failed`, {
+        ...args.logFields,
         attempt: attempt + 1,
         error: error instanceof Error ? error.name : "unknown",
       });
@@ -755,26 +770,101 @@ export async function postSelfHealAuditChecks(
       };
       return json.recorded === false ? "duplicate" : "recorded";
     }
-    if (res.status === 409) return "sealed";
-    if (res.status === 404) {
-      console.warn(
-        "[agent-run] postSelfHealAuditChecks: endpoint absent (older control plane); continuing",
-        { threadId: args.threadId },
-      );
-      return "error";
-    }
-    if (res.status === 401 || res.status === 403) {
-      console.error("[agent-run] postSelfHealAuditChecks rejected", {
-        threadId: args.threadId,
-        status: res.status,
-      });
-      return "error";
-    }
-    console.error("[agent-run] postSelfHealAuditChecks non-2xx", {
-      threadId: args.threadId,
+    const final = args.onStatus(res.status);
+    if (final !== undefined) return final;
+    console.error(`[agent-run] ${args.label} non-2xx`, {
+      ...args.logFields,
       attempt: attempt + 1,
       status: res.status,
     });
   }
   return "error";
+}
+
+/**
+ * POST the sealing self-heal check report (FORGE-01). Authenticated by the
+ * per-run check token (NOT the daemon token). 409 is "sealed"; 401/403/404
+ * are final; every other non-2xx (and a network error) is retried on the
+ * shared 3-attempt, 2/4 s backoff loop. Never throws; logs statuses only.
+ */
+export async function postSelfHealAuditChecks(
+  args: PostSelfHealAuditChecksArgs,
+): Promise<SelfHealAuditReportResult> {
+  const label = "postSelfHealAuditChecks";
+  const logFields = { threadId: args.threadId };
+  return postSelfHealReport<"sealed" | "error">({
+    url: endpoint(args.baseUrl, "/api/self-heal/audit-checks"),
+    tokenHeader: "x-self-heal-check-token",
+    token: args.checkToken,
+    body: JSON.stringify({ threadId: args.threadId, results: args.results }),
+    label,
+    logFields,
+    fetchImpl: args.fetchImpl,
+    sleep: args.sleep,
+    onStatus: (status) => {
+      if (status === 409) return "sealed";
+      if (status === 404) {
+        console.warn(
+          `[agent-run] ${label}: endpoint absent (older control plane); continuing`,
+          logFields,
+        );
+        return "error";
+      }
+      if (status === 401 || status === 403) {
+        console.error(`[agent-run] ${label} rejected`, {
+          ...logFields,
+          status,
+        });
+        return "error";
+      }
+      return undefined;
+    },
+  });
+}
+
+export type SelfHealFixReportResult = "recorded" | "duplicate" | "error";
+
+export interface PostSelfHealFixCheckArgs {
+  baseUrl: string;
+  /** SECRET, worker-only, single-use. Sent in x-self-heal-gate-token; never logged. */
+  gateToken: string;
+  attemptId: string;
+  /** Body of POST /api/self-heal/fix-check (09-09), minus the attempt id. */
+  report: FixCheckReport;
+  fetchImpl?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Worth another attempt with the same token: the request may not have landed. */
+function isRetryableStatus(status: number): boolean {
+  return status >= 500 || status === 408 || status === 429;
+}
+
+/**
+ * POST the fix lane's finding-check report (GATE-01). Authenticated by the
+ * attempt's gate token (NOT the daemon token). Only 5xx/408/429 (and a
+ * network error) are retried on the shared 3-attempt, 2/4 s backoff loop;
+ * 400/401/403/404 and other 4xx are final. Never throws; logs the attempt id
+ * and statuses only.
+ */
+export async function postSelfHealFixCheck(
+  args: PostSelfHealFixCheckArgs,
+): Promise<SelfHealFixReportResult> {
+  const label = "postSelfHealFixCheck";
+  const logFields = { attemptId: args.attemptId };
+  return postSelfHealReport<"error">({
+    url: endpoint(args.baseUrl, "/api/self-heal/fix-check"),
+    tokenHeader: "x-self-heal-gate-token",
+    token: args.gateToken,
+    body: JSON.stringify({ attemptId: args.attemptId, ...args.report }),
+    label,
+    logFields,
+    fetchImpl: args.fetchImpl,
+    sleep: args.sleep,
+    onStatus: (status) => {
+      if (isRetryableStatus(status)) return undefined;
+      console.error(`[agent-run] ${label} rejected`, { ...logFields, status });
+      return "error";
+    },
+  });
 }

@@ -14,6 +14,12 @@ import { DBUserMessage } from "../db/db-message";
  */
 const permissionModeConfig = z.enum(["review", "plan", "allowAll"]).optional();
 
+/**
+ * An optional list of GitHub issue label names (1..50 chars each, at most 10).
+ * Optional so every stored issue automation without it parses unchanged.
+ */
+const issueLabelList = z.array(z.string().min(1).max(50)).max(10).optional();
+
 export const AutomationTriggerSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("manual"),
@@ -64,10 +70,20 @@ export const AutomationTriggerSchema = z.discriminatedUnion("type", [
           .describe("Comma-separated list of authors to include"),
         // Match issues from ANY author (unconditional routing — mirror parity).
         includeAllAuthors: z.boolean().optional(),
+        // Require labels: the issue must carry ALL of these (case-insensitive).
+        // Required (non-empty) when `on.labeled` is set (enforced at
+        // creation/update in www). Absent ⇒ no label requirement.
+        labels: issueLabelList,
+        // Skip issues by label: the automation never triggers when the issue
+        // carries ANY of these (case-insensitive). Absent ⇒ nothing skipped.
+        excludeLabels: issueLabelList,
       }),
       // The events to trigger on.
       on: z.object({
         open: z.boolean().optional(),
+        // Trigger on `issues.labeled` when the added label is one of
+        // `filter.labels`. Requires a non-empty `filter.labels`.
+        labeled: z.boolean().optional(),
       }),
       // Auto-archive the task when the agent completes
       autoArchiveOnComplete: z

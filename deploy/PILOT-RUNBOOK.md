@@ -1154,3 +1154,192 @@ effects and attempts for offline review (capped at 500).
   (idle box only). An older www would not understand the stamped runs.
 - Re-arm: clear the kill switch, turn the flag on, set the repo back to `dry-run` and repeat the
   exit criteria before `on`. A tripped breaker needs its Reset.
+
+## Audit self-healing loop — fix loop (phase 9)
+
+The fix loop lets the platform try to fix a filed finding. One agent run per attempt pushes one
+`automata/fix-*` branch through the fenced git broker. The worker runs the finding's deterministic
+check on the pushed sha. The platform opens a DRAFT PR, waits for the repo's CI gate, marks the PR
+ready (which triggers exactly one review), and a person merges. Nothing in the lane merges
+(ADR-010 part 2, ADR-004 phase 9 amendment). Everything ships OFF. Nothing here is run by an agent.
+
+Phase 9 adds no column: the phase 8 push already created every table and column it uses. Its one
+schema change is a single index, `audit_fix_attempts_pr_repo_lower_index` on
+`(pr_number, lower(repo_full_name))`, which serves the platform-wide fix-PR lookup on
+`pull_request.closed`. The schema gate fails only on columns; a missing or invalid index is a
+performance gap, not a correctness failure, so the gate prints a WARN for it and still exits 0. It is
+still created before the deploy (step 2). Still run the schema gate before each deploy.
+
+**Rollout (operator, in this order; each step is gated on the previous one).**
+
+1. Schema gate: `DATABASE_URL=<prod> pnpm exec tsx deploy/assert-schema-ready.ts` must exit 0 with
+   no MISSING line. If it fails, stop: phase 8's push has not been applied.
+2. Create the index on prod, non-blocking, BEFORE the worker-first deploy (idempotent):
+
+   ```sql
+   CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_fix_attempts_pr_repo_lower_index ON audit_fix_attempts (pr_number, lower(repo_full_name));
+   ```
+
+   Run it on its own (CONCURRENTLY cannot run inside a transaction), then verify it is valid:
+
+   ```sql
+   SELECT indexdef FROM pg_indexes WHERE indexname = 'audit_fix_attempts_pr_repo_lower_index';
+   SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+     WHERE c.relname = 'audit_fix_attempts_pr_repo_lower_index';
+   ```
+
+   The definition must read `(pr_number, lower(repo_full_name))` and `indisvalid` must be `t`. An
+   interrupted CONCURRENTLY build leaves an INVALID index that `IF NOT EXISTS` does not repair: run
+   `DROP INDEX CONCURRENTLY audit_fix_attempts_pr_repo_lower_index;` and the CREATE again. Note:
+   `drizzle-kit push` re-creates this expression index on every run (it cannot match the
+   introspected expression) as a plain DROP + CREATE. That is harmless on dev and test databases; on
+   prod use the statement above, never a push.
+
+3. Merge the PR. The `selfHealLoop` flag stays OFF and every repo mode stays `off` or `dry-run`.
+4. Deploy the worker first, then www. An older worker has no ref fence: a fix run on it would hand
+   the agent an unfenced push path. Deploy the worker ONLY on an idle box (the phase 8 idle check:
+   0 `run-*` cgroups, NRestarts noted before and after). Confirm `WORKER_CREDENTIAL_BROKER=on` on
+   the box; a fix run refuses to start without the broker.
+5. Deploy www with the usual recipe and confirm the new `BUILD_ID` and the 401 webhook probe, as in
+   phase 8.
+6. Only now may the flag or a repo mode be changed. Until BOTH halves run phase 9, keep the flag off
+   and the mode off or `dry-run`.
+7. Push the fix skill per repo, canary first. Record the current audit-fix version id as the
+   rollback target, then
+   `DATABASE_URL=<...> pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> audit-fix deploy/skills/audit-fix/SKILL.md`.
+8. Automations (Settings → Automations), per repo:
+   - exactly ONE audit-fix automation: trigger "issue", labelled-only (`on.labeled` with
+     `filter.labels: ["automata:auto-fix"]`, no `on.open`), action = the audit-fix skill. The
+     validator rejects any other shape, so an older www can never fire it;
+   - a PR review automation that matches bot-authored PRs: `on.open` with `includeAllAuthors`, or the
+     bot login in `otherAuthors` (REV-01). Without it the dispatcher refuses with
+     `no_review_automation` and a ready fix PR would get no review;
+   - `reviewDraftPrs` stays false, so drafts are not reviewed. The ready transition is the review
+     trigger;
+   - the "Mirror: issue research" automation has `filter.excludeLabels: ["automata:finding"]`, so a
+     filed finding starts no research run.
+9. Turn `autoLabel` ON for the pilot repos (Admin → Review → Self-heal) (AUTO-01). The live cycle is
+   proven with the platform's own `automata:auto-fix` label; a hand-added label is not the proof.
+10. Turn the `selfHealLoop` flag on, keep the canary in `dry-run` until the pre-flight checklist
+    holds, then set it to `on`.
+
+**Pre-flight checklist for On.**
+
+- GitHub App permissions on the repo: pull_requests write, contents write, issues write,
+  checks read, actions read, metadata read. A missing permission latches and the lane refunds
+  `missing-permission` instead of writing.
+- Branch protection is OPTIONAL. Record its state and the resulting CI gate source, never require
+  it: `protection` (required checks), `all-checks` (no protection, or unreadable on a free plan:
+  every check run and commit status must be green, with a 2-minute settle window), or
+  `finding-check-only` (no check appears within 10 minutes: the PR gets `needs-human-approve` and a
+  no-repo-CI note). The activity card shows the gate source per attempt.
+- The box is on the credential broker and was deployed before www (step 4).
+- Linux box: the post-agent `git clean -ffdxq` runs as the agent uid and must be able to delete the
+  run-owned `home/`, `gh-config/` and `tmp/` in the checkout. An ACL mask that blocks it fails every
+  check closed with `self-heal fix-check: clean of the checkout failed`, which shows in the journal
+  only. Verify it on the first live drill.
+- No other automation or person pushes to `automata/fix-*` branches.
+- You know where Drain is, and the org kill switch is OFF but reachable.
+
+**SLOs.** The phase 8 SLOs apply unchanged (review p95 within baseline + 5 min during self-heal
+windows, zero reviews killed at the box lock, writer within 15 min, zero duplicate issues, zero
+agent-authored GitHub writes), plus: zero PRs merged by the bot, at most one open fix PR per
+issue, and exactly one review per ready fix PR.
+
+**Metrics.** The activity card and `?format=export` show the same numbers, computed by
+`computeSelfHealMetrics`. Its definitions, verbatim from `apps/www/src/server-lib/audit/metrics.ts`:
+
+```text
+- prsOpened: attempts that opened a PR (pr_number is set).
+- ready: attempts whose PR was marked ready for review (ready_at is set).
+- merged: attempts whose PR was merged (pr_state merged or merged_at set).
+- mergedByNonTrigger: merged PRs whose merged_by login is known and is not
+  one of the trigger logins (the platform bot, and the GitHub login of the
+  owner of the repo's audit-fix automation). Logins compare without case.
+  A merge with an unknown merger is not counted.
+- decided PRs: opened PRs whose pr_state is merged, closed or expired. A PR
+  that is still a draft or ready has no outcome yet and is left out.
+- mergeRate: mergedByNonTrigger / decided PRs.
+- mergeRateBasis: "bot-and-owner" when the owner's login was known and
+  excluded, "bot-only" when only the bot login was (the owner lookup failed
+  or there is no audit-fix automation). Read a bot-only rate as an upper
+  bound: the owner's own merges count as human merges there.
+- humanEditRatio: among merged PRs whose human_commit_count is known, the
+  share with at least one human commit after the gated head.
+- reopenRate: among merged PRs whose 30-day regression window is complete
+  (regression.windowComplete), the share whose finding was reopened.
+- regressionRate30d: over the same set, the share that was reverted or got
+  a non-bot follow-up commit touching the merged lines.
+- meanAttemptsToClose: mean of the counted attempts (audit_findings.attempts,
+  refunds excluded) over resolved findings with at least one attempt.
+- expiredRate: decided PRs that expired unreviewed / decided PRs.
+- refunded: attempts refunded for an infrastructure cause (infra_refunded).
+- counted: finished attempts (phase closed) that were not refunded. Attempts
+  still in flight are neither refunded nor counted.
+- admissionDeferrals: self-heal runs for the repo that review-first
+  admission deferred in the last 30 days (passed in by the caller).
+
+Every rate is null when its denominator is zero.
+```
+
+A `bot-only` merge rate is an upper bound. `admissionDeferrals` counts only deferrals recorded after
+this phase is deployed.
+
+**Log lines.** www: the tick logs `[cron:self-heal] fix reconcile`, `fix draft opens`,
+`fix draft CI`, `fix PR settle`, `breakers` and `fix dispatcher`; the hourly run logs
+`[cron:self-heal] fix PR expiry …` and `[cron:self-heal] fix regressions …`. Decisions keep the
+`[self-heal] v=1 …` layout; breakers log `[self-heal:breaker] transition` and
+`[self-heal:breaker] LOOP_OPEN`. Box: fix runs start with `run start: lane=self-heal-fix`, the check
+logs `self-heal fix-check: …`, and a refused push logs `git-broker: ref fence refused push (…)`.
+
+**Cycle evidence (one full cycle on the canary).** Each command ends `ACCEPTANCE: PASS`.
+
+- `bash packages/worker/deploy/linux/self-heal-acceptance.sh local` (developer gate).
+- On the box, as root (read-only):
+  `... box --since "<time>" --expect-fix`. Every `lane=self-heal-fix` run logs its
+  `self-heal fix-check:` line after the terminal thread poll and before `box lock released`; no
+  journal line carries the gate token header or field; ref-fence refusals are listed as EVIDENCE.
+- From the laptop (GETs only):
+  `... github --repo <owner/repo> --since <YYYY-MM-DDTHH:MM:SSZ> --bot <login> --expect-fix`. On top
+  of the phase 8 checks: fix PRs are bot-authored, were drafts before ready, were readied only after
+  the gate source's checks succeeded on the gated head, say `Fixes #<ledger issue>`, at most one is
+  open per issue, none was merged by the bot, every ready PR has exactly one bot review at its gated
+  head, and every default-branch commit since `--since` reached the branch through a PR merged by a
+  non-bot. Branch protection is reported as `INFO` and never fails the run.
+
+**Known gaps (by design or accepted).**
+
+- PR expiry runs even while `loop_fix` is open: withdrawing a stale PR only narrows the loop.
+- A failed GitHub close on expiry leaves the PR open while the attempt is recorded expired. Nothing
+  retries the close. Close the PR by hand (the `fix PR expiry close failed` log line names it).
+- A failed regression read still counts as that day's check (the 24 h recheck is stamped to bound
+  API use); that day's signal is lost.
+- Follow-up matching uses GitHub's diff hunks, which include 3 context lines on each side; a false
+  positive only stops the loop.
+- A `pull_request.reopened` on a counted fix PR is not handled; a later merge is still recorded.
+
+**Stop, Drain, bulk-clean, rollback (ROLL-01), re-arm.**
+
+- Stop: org kill switch or the `selfHealLoop` flag off, as in phase 8. In-flight drafts are refunded
+  with no GitHub call and stay open for a person.
+- Drain (Admin → Review → Self-heal → Activity, org scope) sets the kill switch first, then cancels
+  live audit AND fix runs.
+- Bulk-clean (only if the lane produced PRs that should not exist), with the switch on:
+  list drafts and PRs with `gh pr list --repo <owner/repo> --state open --search "head:automata/fix-"`,
+  review, then close them yourself with a comment; list leftover branches with
+  `gh api "repos/<owner/repo>/git/matching-refs/heads/automata/fix-"` and delete only those whose
+  PR is closed. Do not delete ledger rows by hand.
+- Rollback order, always in this order: `selfHealLoop` flag off → disable the audit-fix and audit
+  automations → Drain → revert www → revert worker (idle box only). Disabling the automations before
+  the revert keeps an older www from firing anything; the labelled-only shape already prevents it.
+- Re-arm: clear the kill switch, turn the flag on, set the repo to `dry-run`, and walk the
+  pre-flight checklist again before `on`. A `paused_manual` breaker needs its attributed Reset.
+
+**Pilot repo 2 exit criteria** (all must hold before the fix loop is armed on pilot repo 2):
+
+- one full cycle closed on the canary pilot (finding → label → fix → draft → CI → ready → one
+  review → human merge), with both acceptance runs at `ACCEPTANCE: PASS`;
+- zero duplicate issues and zero duplicate PRs;
+- review p95 within baseline + 5 min over the cycle;
+- written sign-off on the notifications and the labels;
+- at least 1 week (≥ 1 week) of dry-run on pilot repo 2.

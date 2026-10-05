@@ -16,6 +16,7 @@ import {
   IssueTriggerConfig,
   GitHubMentionTriggerConfig,
   AutomationTriggerType,
+  AutomationAction,
 } from "@terragon/shared/automations";
 import {
   AccessTier,
@@ -47,9 +48,11 @@ import {
   resolveReviewSkill,
   renderSkillPlaceholders,
 } from "./review/resolve-review-skill";
+import { FINDING_LABELS, normalizeLabel } from "./audit/render-issue";
 import { buildRepoOverrideFetcher } from "./review/repo-skill-override";
 import { resolveReviewPromptMode } from "./review/resolve-review-prompt-mode";
 import {
+  isAuditFixAction,
   CLASSIC_REVIEW_PROMPT,
   hasReviewModeSections,
   type ReviewPromptMode,
@@ -109,6 +112,12 @@ export async function runAutomation({
     deliveryId?: string;
     /** #125 C5: the PR head SHA the run reviews (stamped on the thread). */
     headSha?: string;
+    /**
+     * Phase 9 (RACE-01): extra fields merged into the automation-skill stamp
+     * at thread creation, so the fix attempt travels with the thread. Applies
+     * to skill_message automations only; ignored for user_message.
+     */
+    stampExtra?: { selfHealAttemptId: string };
   };
   source: "automated" | "manual";
 }): Promise<{ threadId: string; threadChatId: string } | undefined> {
@@ -259,6 +268,9 @@ export async function runAutomation({
             ...(orchestratedApplied
               ? { reviewPromptMode: "orchestrated" as const }
               : {}),
+            ...(options?.stampExtra
+              ? { selfHealAttemptId: options.stampExtra.selfHealAttemptId }
+              : {}),
           },
           automation: automation,
           trustContext: options?.trustContext,
@@ -365,6 +377,40 @@ export async function hasReachedLimitOfAutomations({
   return currentCount >= maxAutomations;
 }
 
+/**
+ * ROLL-01: a self-heal fix automation (action = the audit-fix skill) may only
+ * trigger on the `automata:auto-fix` label — `on.labeled` true, `on.open` not
+ * true, and `filter.labels` naming that label. An older www strips the
+ * `labeled`/`labels` keys and fires only on `opened` + `on.open`, so a config
+ * of this shape has no trigger a rolled-back www can ever fire.
+ */
+function assertSelfHealFixAutomationIsLabeledOnly({
+  triggerType,
+  triggerConfig,
+  action,
+}: {
+  triggerType: AutomationTriggerType | undefined;
+  triggerConfig: Automation["triggerConfig"] | undefined;
+  action: AutomationAction | undefined;
+}): void {
+  if (!isAuditFixAction(action)) return;
+  const error = new UserFacingError(
+    `Self-heal fix automations must trigger only on the ${FINDING_LABELS.autoFix} label`,
+  );
+  if (triggerType !== "issue" || !triggerConfig) {
+    throw error;
+  }
+  const config = triggerConfig as IssueTriggerConfig;
+  const labels = (config.filter?.labels ?? []).map(normalizeLabel);
+  if (
+    config.on?.labeled !== true ||
+    config.on?.open === true ||
+    !labels.includes(FINDING_LABELS.autoFix)
+  ) {
+    throw error;
+  }
+}
+
 export async function validateAutomationCreationOrUpdate({
   userId,
   automationId,
@@ -418,6 +464,11 @@ export async function validateAutomationCreationOrUpdate({
   if (!repoFullName) {
     throw new UserFacingError("Repo full name is required");
   }
+  assertSelfHealFixAutomationIsLabeledOnly({
+    triggerType,
+    triggerConfig,
+    action: updates.action ?? automationOrNull?.action,
+  });
   if (triggerType) {
     switch (triggerType) {
       case "schedule": {
@@ -456,6 +507,11 @@ export async function validateAutomationCreationOrUpdate({
         const onTriggers = Object.values(config.on).filter(Boolean);
         if (onTriggers.length === 0) {
           throw new UserFacingError("At least one trigger must be enabled");
+        }
+        if (config.on.labeled && (config.filter.labels ?? []).length === 0) {
+          throw new UserFacingError(
+            "Trigger on label requires at least one label in the filter",
+          );
         }
         break;
       }

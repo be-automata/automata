@@ -17,6 +17,14 @@ import {
   runSelfHealChecks,
   type SelfHealCheckResult,
 } from "./self-heal-checks";
+import {
+  emptyFixReport,
+  FIX_CHECK_BUDGET_MS,
+  pinFixBaseSha,
+  remoteBranchHead,
+  runFixCheck,
+  type FixCheckReport,
+} from "./self-heal-fix-check";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
 import { formatRunStartLine, resolveRunLane } from "./run-lane";
 import { reviewAgentForRun, withReviewAgentWire } from "./review-agent-wire";
@@ -37,6 +45,7 @@ import {
   postRunFailed,
   postRunTerminal,
   postSelfHealAuditChecks,
+  postSelfHealFixCheck,
   checkRunStaleness,
   pullAgentCredentials,
   pullNextMessage,
@@ -315,6 +324,9 @@ async function runAgent(
   input: AgentRunInput,
   ctx: RunCtx,
 ): Promise<AgentRunOutput> {
+  // TMO-01: the 30-minute execution timeout counts from here; the post-agent
+  // fix check must finish inside it.
+  const runStartedAt = Date.now();
   const config = loadWorkerConfig();
   const wwwOpts = wwwOptsFor(input, ctx);
   const runExternalId = wwwOpts.runExternalId ?? "";
@@ -344,7 +356,13 @@ async function runAgent(
     }
   }
   try {
-    const output = await runAgentInner(input, ctx, config, wwwOpts);
+    const output = await runAgentInner(
+      input,
+      ctx,
+      config,
+      wwwOpts,
+      runStartedAt,
+    );
     if (output.outcome === "stopped") {
       // A user Stop put the thread in `stopping`. The daemon never observes
       // that status and www cannot reach a remote-plane daemon, so the
@@ -437,6 +455,39 @@ export interface SelfHealAuditStepDeps {
   postReport: typeof postSelfHealAuditChecks;
 }
 
+/**
+ * Mirror of @terragon/shared `FIX_BRANCH_PREFIX` (the worker does not depend
+ * on shared); a drift test in workflow.test.ts pins the two together.
+ */
+export const WORKER_FIX_BRANCH_PREFIX = "automata/fix-";
+
+/**
+ * FENCE-01: the git-broker ref fence for a self-heal fix run — exactly
+ * `refs/heads/<attempt branch>` — or undefined for every other run (no fence,
+ * no buffering). Fails closed on a branch that is not a plain
+ * `automata/fix-*` name: a fence built from `main` would be no fence at all.
+ */
+export function selfHealRefFence(
+  selfHeal: AgentRunInput["selfHeal"],
+): { exactRef: string } | undefined {
+  if (selfHeal?.kind !== "fix") return undefined;
+  const branch = selfHeal.branch;
+  const suffix = branch.startsWith(WORKER_FIX_BRANCH_PREFIX)
+    ? branch.slice(WORKER_FIX_BRANCH_PREFIX.length)
+    : "";
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(suffix) ||
+    suffix.includes("..") ||
+    suffix.endsWith(".") ||
+    suffix.endsWith(".lock")
+  ) {
+    throw new Error(
+      `self-heal fix run: branch is not a ${WORKER_FIX_BRANCH_PREFIX}* branch name`,
+    );
+  }
+  return { exactRef: `refs/heads/${branch}` };
+}
+
 const DEFAULT_SELF_HEAL_DEPS: SelfHealAuditStepDeps = {
   runChecks: runSelfHealChecks,
   postReport: (args) => postSelfHealAuditChecks(args),
@@ -526,11 +577,234 @@ export async function runSelfHealAuditStep({
   );
 }
 
+/**
+ * Mirror of definition.ts `executionTimeout: "30m"` (pinned by a test): the
+ * post-agent fix check stops a minute before the engine would cancel the run.
+ */
+export const RUN_EXECUTION_TIMEOUT_MS = 30 * 60_000;
+const FIX_CHECK_RUN_MARGIN_MS = 60_000;
+
+/** deadlineAt = min(now + 3 min, run start + 30 min − 60 s). */
+export function fixCheckDeadline(now: number, runStartedAt: number): number {
+  return Math.min(
+    now + FIX_CHECK_BUDGET_MS,
+    runStartedAt + RUN_EXECUTION_TIMEOUT_MS - FIX_CHECK_RUN_MARGIN_MS,
+  );
+}
+
+export interface SelfHealFixStepDeps {
+  remoteHead: typeof remoteBranchHead;
+  runCheck: typeof runFixCheck;
+  postReport: typeof postSelfHealFixCheck;
+}
+
+const DEFAULT_SELF_HEAL_FIX_DEPS: SelfHealFixStepDeps = {
+  remoteHead: (args) => remoteBranchHead(args),
+  runCheck: (args) => runFixCheck(args),
+  postReport: (args) => postSelfHealFixCheck(args),
+};
+
+type FixStepInput = Pick<
+  AgentRunInput,
+  "selfHeal" | "daemonCallbackUrl" | "repoFullName" | "installationToken"
+>;
+
+/** `head=` in the step line: the first 8 hex of a full sha, or none. */
+function shortHead(sha: string | null): string {
+  return sha !== null && /^[0-9a-f]{40}$/.test(sha) ? sha.slice(0, 8) : "none";
+}
+
+/** Post a fix report and journal ONE line; never throws, never logs the token. */
+async function reportSelfHealFix({
+  input,
+  report,
+  startedAt,
+  step,
+  now,
+  deps,
+}: {
+  input: FixStepInput;
+  report: FixCheckReport;
+  startedAt: number;
+  step: (msg: string) => void;
+  now: () => number;
+  deps: SelfHealFixStepDeps;
+}): Promise<void> {
+  const selfHeal = input.selfHeal;
+  if (selfHeal?.kind !== "fix") return;
+  let posted: Awaited<ReturnType<typeof postSelfHealFixCheck>> = "error";
+  try {
+    posted = await deps.postReport({
+      baseUrl: input.daemonCallbackUrl,
+      gateToken: selfHeal.gateToken,
+      attemptId: selfHeal.attemptId,
+      report,
+    });
+  } catch {
+    posted = "error";
+  }
+  step(
+    `self-heal fix-check: status=${report.workerStatus} check=${report.checkOutcome ?? "none"} denied=${report.deniedPaths.length} head=${shortHead(report.headSha)} ms=${Math.max(0, now() - startedAt)} report=${posted}`,
+  );
+}
+
+/**
+ * Best-effort report for a fix run that did not complete (cancelled, stopped,
+ * nothing to run, or threw): workerStatus aborted, nothing checked.
+ */
+export async function reportSelfHealFixAborted({
+  input,
+  step,
+  now = Date.now,
+  deps = DEFAULT_SELF_HEAL_FIX_DEPS,
+}: {
+  input: FixStepInput;
+  step: (msg: string) => void;
+  now?: () => number;
+  deps?: SelfHealFixStepDeps;
+}): Promise<void> {
+  await reportSelfHealFix({
+    input,
+    report: emptyFixReport("aborted"),
+    startedAt: now(),
+    step,
+    now,
+    deps,
+  });
+}
+
+/**
+ * GATE-01 (R1 box step): after a fix run's agent finished, kill everything
+ * the agent could still be (daemon group, agent-uid escapees), close the
+ * brokers it pushed through, then check exactly the commit that landed on
+ * GitHub and report it with the gate token. The finally block's teardown,
+ * reap and closes run again afterwards as no-ops. Never throws and never
+ * changes the run outcome.
+ */
+export async function runSelfHealFixStep({
+  input,
+  workdir,
+  agentUser,
+  egressProxyUrl,
+  baseSha,
+  lockLost,
+  teardown,
+  reap,
+  gitBroker,
+  ghBroker,
+  runStartedAt,
+  step,
+  signal,
+  now = Date.now,
+  deps = DEFAULT_SELF_HEAL_FIX_DEPS,
+}: {
+  input: FixStepInput;
+  workdir: string;
+  agentUser: string;
+  egressProxyUrl: string | null;
+  /** origin/<base>, pinned before the agent ran (pinFixBaseSha). */
+  baseSha: string | null;
+  /** The box lock was lost: another run may own the agent uid now. */
+  lockLost: boolean;
+  teardown: () => void;
+  reap: () => Promise<unknown>;
+  gitBroker: Pick<GitBroker, "lastPushedSha" | "close"> | null;
+  ghBroker: Pick<GhBroker, "close"> | null;
+  runStartedAt: number;
+  step: (msg: string) => void;
+  signal?: AbortSignal;
+  now?: () => number;
+  deps?: SelfHealFixStepDeps;
+}): Promise<void> {
+  const selfHeal = input.selfHeal;
+  if (selfHeal?.kind !== "fix") return;
+  const startedAt = now();
+  let report: FixCheckReport;
+  try {
+    teardown();
+    if (!lockLost) await reap();
+    const lastPushed = gitBroker?.lastPushedSha() ?? null;
+    await Promise.all([closeQuietly(gitBroker), closeQuietly(ghBroker)]);
+
+    const failed = (reason: string): FixCheckReport => {
+      step(`self-heal fix-check: ${reason}`);
+      return emptyFixReport(
+        "error",
+        lastPushed !== null && /^[0-9a-f]{40}$/.test(lastPushed)
+          ? lastPushed
+          : null,
+      );
+    };
+
+    // A 2xx receive-pack can still carry a per-ref rejection: only a commit
+    // GitHub actually holds on the attempt branch is checked.
+    let pushedSha: string | null = null;
+    let refused: FixCheckReport | null = null;
+    if (lockLost) {
+      refused = failed("box lock lost; not checking");
+    } else if (lastPushed !== null) {
+      try {
+        const head = await deps.remoteHead({
+          repoFullName: input.repoFullName,
+          branch: selfHeal.branch,
+          installationToken: input.installationToken,
+        });
+        if (head !== null && head !== lastPushed) {
+          refused = failed("branch head on GitHub differs from the push");
+        } else {
+          pushedSha = head;
+        }
+      } catch (err) {
+        refused = failed(
+          `branch head lookup failed (${err instanceof Error ? err.name : "unknown"})`,
+        );
+      }
+    }
+
+    if (refused !== null) {
+      report = refused;
+    } else {
+      const env: NodeJS.ProcessEnv = {};
+      for (const key of ["PATH", "LANG", "LC_ALL"]) {
+        const value = process.env[key];
+        if (value !== undefined) env[key] = value;
+      }
+      if (agentUser) {
+        env.USER = agentUser;
+        env.LOGNAME = agentUser;
+        env.GIT_CONFIG_COUNT = "1";
+        env.GIT_CONFIG_KEY_0 = "safe.directory";
+        env.GIT_CONFIG_VALUE_0 = workdir;
+      }
+      report = await deps.runCheck({
+        fix: selfHeal,
+        pushedSha,
+        baseSha,
+        workdir,
+        agentUser,
+        run: runAsAgent,
+        env: egressProxyUrl ? buildRunProxyEnv(egressProxyUrl, env) : env,
+        deadlineAt: fixCheckDeadline(now(), runStartedAt),
+        signal,
+        now,
+        note: (message) => step(`self-heal fix-check: ${message}`),
+      });
+    }
+  } catch (err) {
+    step(
+      `self-heal fix-check: step failed (${err instanceof Error ? err.name : "unknown"})`,
+    );
+    report = emptyFixReport("error");
+  }
+  await reportSelfHealFix({ input, report, startedAt, step, now, deps });
+}
+
 async function runAgentInner(
   input: AgentRunInput,
   ctx: RunCtx,
   config: ReturnType<typeof loadWorkerConfig>,
   wwwOpts: WwwClientOpts,
+  runStartedAt: number,
 ): Promise<AgentRunOutput> {
   // Cancellation signal (Hatchet cancel: scheduleTimeout/executionTimeout). Used
   // to abort in-flight pulls/polls so the finally-block daemon teardown runs
@@ -563,6 +837,16 @@ async function runAgentInner(
   // fail, so the journal can be matched to a GitHub review without timestamps.
   step(formatRunStartLine(input));
 
+  // FENCE-01: a self-heal fix run may push only its own attempt branch, and
+  // that fence lives in the git broker. Decide it before the clone, and refuse
+  // a fix run on a box whose agents would hold the raw token instead.
+  const refFence = selfHealRefFence(input.selfHeal);
+  if (refFence && config.credentialBroker !== "on") {
+    throw new Error(
+      "self-heal fix run requires the credential broker (WORKER_CREDENTIAL_BROKER=on): the ref fence lives in the git broker",
+    );
+  }
+
   // Provision: clone into a per-run workdir keyed on threadId. threadId is unique
   // per thread; threadChatId is the shared legacy sentinel when
   // enableThreadChatCreation is off, so it would collide every run onto one dir.
@@ -580,6 +864,19 @@ async function runAgentInner(
     `clone complete: ${input.repoFullName}@${input.branch}` +
       (input.baseBranch ? ` (base ${input.baseBranch} fetched)` : ""),
   );
+  // GATE-01: the fix check diffs the pushed commit against the base as it was
+  // cloned. Pinned now, by the worker, because the agent can rewrite its own
+  // remote-tracking refs. Never throws; null makes the check report error.
+  const fixBaseSha =
+    input.selfHeal?.kind === "fix"
+      ? await pinFixBaseSha({
+          workdir,
+          baseBranch: input.selfHeal.baseBranch,
+        })
+      : null;
+  if (input.selfHeal?.kind === "fix" && fixBaseSha === null) {
+    step("self-heal fix-check: base branch not pinned (check will error)");
+  }
 
   // D1: resolve HOW this run authenticates to the model provider, BEFORE the
   // child env is built (the credential fixes HOME, and the env is built once).
@@ -826,6 +1123,8 @@ async function runAgentInner(
         installationToken: input.installationToken,
         repoFullName: input.repoFullName,
         runBearer,
+        // Only fix runs carry the key at all; every other run is unchanged.
+        ...(refFence ? { refFence } : {}),
       });
       ghBroker = await startGhBroker({
         installationToken: input.installationToken,
@@ -853,7 +1152,8 @@ async function runAgentInner(
       throw err;
     }
     step(
-      `credential brokers up: git=127.0.0.1:${gitBroker.port}, gh=${ghBroker.socketPath}`,
+      `credential brokers up: git=127.0.0.1:${gitBroker.port}, gh=${ghBroker.socketPath}` +
+        (refFence ? ` (pushes fenced to ${refFence.exactRef})` : ""),
     );
   }
 
@@ -874,6 +1174,8 @@ async function runAgentInner(
       : {},
   );
   daemonForPoll = daemon;
+  // Exactly one fix-check report per fix run: the check's, or "aborted".
+  let fixReported = false;
   try {
     // Fail-closed identity precondition (ADR-002): confirm gh authenticates as the
     // bot (installation token + isolated config) in the workdir BEFORE spawning —
@@ -912,6 +1214,14 @@ async function runAgentInner(
     if (!message) {
       // Nothing to run (no pending user message / empty prompt).
       step("next-message: 204 (nothing to run)");
+      if (input.selfHeal?.kind === "fix") {
+        // R4: a 204 is typically the DUPLICATE of an ambiguous dispatch whose
+        // first run owns the message. Its "aborted" report could win the
+        // single-use check CAS ahead of the real run's, so it reports
+        // nothing; a fix run that truly never ran is the reconcile's.
+        fixReported = true;
+        step("self-heal fix-check: not reported (nothing to run)");
+      }
       return {
         threadId: input.threadId,
         threadChatId: input.threadChatId,
@@ -963,6 +1273,31 @@ async function runAgentInner(
       wwwOpts,
       config.pollIntervalMs,
     );
+    if (input.selfHeal?.kind === "fix" && result.outcome === "completed") {
+      fixReported = true;
+      await runSelfHealFixStep({
+        input,
+        workdir,
+        agentUser: config.agentUser,
+        egressProxyUrl: egressProxy?.url ?? null,
+        baseSha: fixBaseSha,
+        lockLost: boxLock?.lost === true,
+        teardown: () => daemon.teardown(),
+        reap: () =>
+          reapAgentUidEscapees({
+            agentUser: config.agentUser,
+            phase: "teardown",
+            threadId: input.threadId,
+            runNamespaceRoot: config.runNamespaceRoot,
+            log: admissionLog,
+          }),
+        gitBroker,
+        ghBroker,
+        runStartedAt,
+        step,
+        signal,
+      });
+    }
     return {
       threadId: input.threadId,
       threadChatId: input.threadChatId,
@@ -1005,6 +1340,11 @@ async function runAgentInner(
     // dies with this process either way.
     await closeQuietly(gitBroker);
     await closeQuietly(ghBroker);
+    // GATE-01: a fix run that did not reach its check still reports, once.
+    if (input.selfHeal?.kind === "fix" && !fixReported) {
+      fixReported = true;
+      await reportSelfHealFixAborted({ input, step });
+    }
     await closeQuietly(egressEvents);
     // Wipe the delivered credential before the workdir goes, so a cleanup
     // failure on the workdir can never leave a live token behind.

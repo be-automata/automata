@@ -14,7 +14,6 @@ import {
 } from "@terragon/shared/model/repo-review-settings";
 import { recordSelfHealAdminAction } from "@terragon/shared/model/self-heal-admin-log";
 import { markThreadTerminal } from "@terragon/shared/model/threads";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import type {
   AgentRunLookupHint,
@@ -22,6 +21,7 @@ import type {
 } from "@/agent/hatchet/transport";
 
 import { SELF_HEAL_SKILL_NAMES } from "../review/review-skill";
+import { errorText } from "./audit-shared";
 
 /**
  * KILL-01 Drain: one admin action that pulls the org kill switch and cancels
@@ -116,10 +116,6 @@ async function closeCancelledThread({
       error: errorText(error),
     });
   }
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 async function selectInFlightThreads({

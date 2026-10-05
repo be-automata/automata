@@ -160,6 +160,10 @@ describe("renderAuditComment", () => {
     "still_present",
     "needs_human_attempts_cap",
     "needs_human_rubric_absent",
+    "fix_attempt_rejected",
+    "fix_draft_withdrawn",
+    "fix_draft_no_repo_ci",
+    "fix_pr_expired",
   ];
   it.each(kinds)("%s leads with a matching marker and is inert", (kind) => {
     const text = renderAuditComment(kind, {
@@ -178,6 +182,17 @@ describe("renderAuditComment", () => {
     expect(text).not.toContain("automata:needs-human");
   });
 
+  it("states the expiry window on an expired fix PR", () => {
+    const text = renderAuditComment("fix_pr_expired", {
+      fingerprint: FP,
+      runId: "r",
+      expiryDays: 7,
+    });
+    expect(text.split("\n")[1]).toBe(
+      "Withdrawn: no human review within 7 days. The finding stays open and may be retried.",
+    );
+  });
+
   it("names the label on needs-human comments", () => {
     const text = renderAuditComment("needs_human_attempts_cap", {
       fingerprint: FP,
@@ -186,5 +201,58 @@ describe("renderAuditComment", () => {
       maxAttempts: 2,
     });
     expect(text).toContain("needs-human-approve");
+  });
+
+  it("lists only known rejection reasons and states the branch outcome", () => {
+    const deleted = renderAuditComment("fix_attempt_rejected", {
+      fingerprint: FP,
+      runId: "r",
+      attempts: 1,
+      maxAttempts: 3,
+      reasons: ["test_edit", "denied_path", "<script>"],
+    });
+    expect(deleted).toContain("attempt 1 of 3");
+    expect(deleted).toContain("changed or deleted an existing test");
+    expect(deleted).toContain("protected path");
+    expect(deleted).not.toContain("<script>");
+    expect(deleted).toContain("branch was deleted");
+    const kept = renderAuditComment("fix_attempt_rejected", {
+      fingerprint: FP,
+      runId: "r",
+      reasons: ["open_failed"],
+      keptBranch: "automata/fix-1-abcdef01-a1",
+    });
+    expect(kept).toContain("`automata/fix-1-abcdef01-a1` is kept");
+    const draft = renderAuditComment("fix_attempt_rejected", {
+      fingerprint: FP,
+      runId: "r",
+      reasons: ["ci_failed"],
+      draftNumber: 501,
+    });
+    expect(draft).toContain("CI failed on the draft pull request");
+    expect(draft).toContain("#501 was withdrawn");
+  });
+
+  it("states whether a withdrawn draft counts and names the no-CI label", () => {
+    const counted = renderAuditComment("fix_draft_withdrawn", {
+      fingerprint: FP,
+      runId: "r",
+      reasons: ["ci_failed"],
+      counted: true,
+    });
+    expect(counted).toContain("counts against the limit");
+    const refunded = renderAuditComment("fix_draft_withdrawn", {
+      fingerprint: FP,
+      runId: "r",
+      reasons: ["ci_infra"],
+      counted: false,
+    });
+    expect(refunded).toContain("does not count against the limit");
+    expect(
+      renderAuditComment("fix_draft_no_repo_ci", {
+        fingerprint: FP,
+        runId: "r",
+      }),
+    ).toContain("needs-human-approve");
   });
 });

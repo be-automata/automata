@@ -147,7 +147,8 @@ jobs:
             src/agent-run/supersede.integration.test.ts \
             src/agent-run/scheduling-health.integration.test.ts \
             src/agent-run/box-lock.test.ts \
-            src/agent-run/uid-reaper.integration.test.ts
+            src/agent-run/uid-reaper.integration.test.ts \
+            src/agent-run/self-heal-box-lock.integration.test.ts
       - name: Tear down (always)
         if: always()
         run: docker compose -p automata-hatchet-it down -v --remove-orphans || true

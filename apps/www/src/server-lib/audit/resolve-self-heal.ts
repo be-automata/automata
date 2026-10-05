@@ -7,7 +7,11 @@ import {
   getRepoReviewSettingWithOrgDefault,
   normalizeRepo,
 } from "@terragon/shared/model/repo-review-settings";
-import { getBreakerState } from "@terragon/shared/model/self-heal-breaker";
+import {
+  getBreakerState,
+  probeAttemptIdOf,
+  type BreakerRow,
+} from "@terragon/shared/model/self-heal-breaker";
 import {
   findSelfHealFieldError,
   SELF_HEAL_DEFAULTS,
@@ -206,19 +210,40 @@ export interface SelfHealContext {
 }
 
 /**
+ * loop_fix withholds fixes unless closed — except for the ONE attempt that
+ * holds a half-open probe (RES-15): the dispatcher stamped its id into the
+ * trip evidence, and that attempt must reach its draft for the probe to
+ * decide anything. open and paused_manual block every attempt.
+ */
+export function loopFixBlocks(
+  row: BreakerRow,
+  probeAttemptId?: string,
+): boolean {
+  if (row.state === "closed") return false;
+  return !(
+    row.state === "half_open" &&
+    probeAttemptId !== undefined &&
+    probeAttemptIdOf(row) === probeAttemptId
+  );
+}
+
+/**
  * One settings read, one flag read, the installation mode and the breaker
- * reads.
+ * reads. `probeAttemptId`: the fix attempt the caller acts for, so the
+ * half-open probe attempt is not refused by its own breaker.
  */
 export async function loadSelfHealContext({
   db,
   organizationId,
   repoFullName,
   installationKey,
+  probeAttemptId,
 }: {
   db: DB;
   organizationId: string;
   repoFullName: string;
   installationKey: string;
+  probeAttemptId?: string;
 }): Promise<SelfHealContext> {
   const repoKey = normalizeRepo(repoFullName);
   const [flagEnabled, rows, installationMode] = await Promise.all([
@@ -263,7 +288,7 @@ export async function loadSelfHealContext({
       permissionLatched: permissionRows.some((r) => r.state !== "closed"),
       // Any non-closed state (open, half_open, paused_manual) withholds effects.
       loopAuditOpen: loopAudit.state !== "closed",
-      loopFixOpen: loopFix.state !== "closed",
+      loopFixOpen: loopFixBlocks(loopFix, probeAttemptId),
     },
   };
 }

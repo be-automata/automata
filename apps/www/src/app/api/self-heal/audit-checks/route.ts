@@ -1,11 +1,9 @@
-import { timingSafeEqual } from "node:crypto";
-
 import { and, eq, sql, type SQL } from "drizzle-orm";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { db } from "@/lib/db";
-import { hashSelfHealToken } from "@/server-lib/audit/plan-self-heal-run";
+import { selfHealTokenMatches } from "@/server-lib/audit/plan-self-heal-run";
 import { thread, threadChat } from "@terragon/shared/db/schema";
 import {
   getAuditRunForCheckReport,
@@ -52,13 +50,6 @@ const bodySchema = z.object({
 
 function unauthorized(): NextResponse {
   return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-}
-
-function tokenMatches(presented: string, storedHash: string): boolean {
-  const a = Buffer.from(hashSelfHealToken(presented), "utf8");
-  const b = Buffer.from(storedHash, "utf8");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
 }
 
 function hasAgentMessage(messages: SQL): SQL {
@@ -130,7 +121,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     !run.checkTokenHash ||
     !run.checkTokenExpiresAt ||
     run.checkTokenExpiresAt.getTime() <= Date.now() ||
-    !tokenMatches(presented, run.checkTokenHash)
+    !selfHealTokenMatches(presented, run.checkTokenHash)
   ) {
     return unauthorized();
   }

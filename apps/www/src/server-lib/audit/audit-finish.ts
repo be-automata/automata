@@ -19,7 +19,7 @@ import { redactSecrets } from "@terragon/utils/redact";
 import { getPostHogServer } from "@/lib/posthog-server";
 
 import { resolveBotLogin } from "../review/bot-login";
-import { AUDIT_FINDINGS_SKILL_NAME } from "../review/review-skill";
+import { isAuditFindingsStamp } from "../review/review-skill";
 import { createDbAuditLedger } from "./audit-ledger";
 import type { CheckOutcome } from "./decide-audit-actions";
 import {
@@ -38,6 +38,7 @@ import {
 } from "./resolve-self-heal";
 import { createSelfHealOctokit } from "./self-heal-octokit";
 import { preflightCapabilities } from "./self-heal-preflight";
+import { PRE_MINT_INSTALLATION_KEY, errorText } from "./audit-shared";
 
 /**
  * The audit lane's finish effect (SC1, D2). Runs for a thread stamped
@@ -54,8 +55,6 @@ const HOOK_GRACE_MS = 500;
 /** A run released for an unavailable preflight is retried at most this often. */
 const MAX_CLAIM_COUNT = 5;
 const AUDIT_ID = "security-audit";
-/** The installation key is unknown until the single token mint. */
-const PRE_MINT_INSTALLATION_KEY = "pending";
 
 type AuditFindingsStamp = Extract<
   ThreadSourceMetadata,
@@ -77,12 +76,7 @@ export function getAuditFindingsStamp(
     | undefined,
 ): AuditFindingsStamp | null {
   const metadata = thread?.sourceMetadata;
-  if (
-    metadata?.type !== "automation-skill" ||
-    metadata.skillName !== AUDIT_FINDINGS_SKILL_NAME
-  ) {
-    return null;
-  }
+  if (!isAuditFindingsStamp(metadata)) return null;
   if (isAbandonedTerminalCause(thread?.terminalCause ?? null)) return null;
   return metadata;
 }
@@ -98,10 +92,6 @@ export type AuditHookOutcome =
   | "preflight_unavailable"
   | "issues_unknown"
   | "error";
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
-}
 
 function toCheckResults(
   raw: unknown,

@@ -16,8 +16,11 @@
  * Dependency-free on purpose (node builtins only) so `deploy/*.ts` scripts can
  * import it under tsx without dragging in Next/alias resolution. The one
  * exception is the audit rule vocabulary, imported by relative path from a
- * module that itself imports nothing.
+ * module that itself imports nothing (type-only imports are erased).
  */
+import type { AutomationAction } from "@terragon/shared/automations";
+import type { ThreadSourceMetadata } from "@terragon/shared/db/types";
+
 import { AUDIT_RULES } from "../../../../../packages/shared/src/self-heal/audit-rules";
 
 /**
@@ -305,8 +308,63 @@ export function assertMergeAuditSkillContract(
  */
 export const AUDIT_FINDINGS_SKILL_NAME = "audit-findings";
 
-/** Skills whose threads reach the self-heal writer at finish (Phase 9 appends "audit-fix"). */
-export const SELF_HEAL_SKILL_NAMES = [AUDIT_FINDINGS_SKILL_NAME] as const;
+/**
+ * The fix lane's fixed skill name (phase 9). The run pushes one automata/fix-*
+ * branch and emits nothing; the platform opens the draft PR.
+ */
+export const AUDIT_FIX_SKILL_NAME = "audit-fix";
+
+/** Skill names compare trimmed and case-insensitively, as automations are validated. */
+export function skillNameIs(skillName: string, expected: string): boolean {
+  return skillName.trim().toLowerCase() === expected;
+}
+
+/** A skill_message action that runs the audit-fix skill (any trigger). */
+export function isAuditFixAction(
+  action: AutomationAction | null | undefined,
+): boolean {
+  return (
+    action?.type === "skill_message" &&
+    skillNameIs(action.config.skillName, AUDIT_FIX_SKILL_NAME)
+  );
+}
+
+/** The automation-skill stamp a thread carries. */
+export type AutomationSkillStamp = Extract<
+  ThreadSourceMetadata,
+  { type: "automation-skill" }
+>;
+
+/** A thread stamped by the automation-skill lane for `expected`. */
+function isSkillStamp(
+  sourceMetadata: ThreadSourceMetadata | null | undefined,
+  expected: string,
+): sourceMetadata is AutomationSkillStamp {
+  return (
+    sourceMetadata?.type === "automation-skill" &&
+    skillNameIs(sourceMetadata.skillName, expected)
+  );
+}
+
+/** True for a thread stamped by the fix lane. */
+export function isAuditFixStamp(
+  sourceMetadata: ThreadSourceMetadata | null | undefined,
+): sourceMetadata is AutomationSkillStamp {
+  return isSkillStamp(sourceMetadata, AUDIT_FIX_SKILL_NAME);
+}
+
+/** True for a thread stamped by the audit lane. */
+export function isAuditFindingsStamp(
+  sourceMetadata: ThreadSourceMetadata | null | undefined,
+): sourceMetadata is AutomationSkillStamp {
+  return isSkillStamp(sourceMetadata, AUDIT_FINDINGS_SKILL_NAME);
+}
+
+/** Skills whose threads reach the self-heal writer at finish (Drain and the stamp checks cover both). */
+export const SELF_HEAL_SKILL_NAMES = [
+  AUDIT_FINDINGS_SKILL_NAME,
+  AUDIT_FIX_SKILL_NAME,
+] as const;
 
 /** Must equal the parser's tagged opener (pinned by skill-contract-drift.test.ts). */
 const AUDIT_FINDINGS_OPENER = "```json audit-findings";
@@ -346,6 +404,56 @@ export function assertAuditFindingsSkillContract(
 }
 
 /**
+ * Phrases the fix skill must carry. Each one is a scope or safety rule the
+ * platform also enforces elsewhere (git-broker ref fence, the worker and www
+ * deny-list checks, the draft-PR opener); the prompt copy is what keeps a
+ * well-behaved agent from tripping those fences in the first place.
+ * `automata/fix-` must equal FIX_BRANCH_PREFIX (pinned by the drift test; not
+ * imported, so this module stays importable by deploy tsx scripts).
+ */
+const AUDIT_FIX_REQUIRED_PHRASES = [
+  "## Hard rules",
+  "Do not open a pull request",
+  "git push",
+  "Only change the files listed",
+  "Do not edit or delete existing tests",
+  "eslint-disable",
+  "@ts-ignore",
+  "nosec",
+  "15 minutes",
+  "automata/fix-",
+] as const;
+
+/**
+ * Contract check for the fix skill: every required scope rule is present, the
+ * Hard rules heading is a real heading (the tail — its absence means
+ * truncation), and the body carries no fenced json block: a fix run emits
+ * nothing for the platform to parse, so a block is the wrong skill pushed
+ * under this name.
+ */
+export function assertAuditFixSkillContract(
+  body: string,
+  sourceLabel: string,
+): void {
+  const fail = (what: string): never => {
+    throw new Error(
+      `Fix skill from ${sourceLabel} ${what} — wrong content or a truncated ` +
+        `skill. Refusing to dispatch a write-capable fix run without its ` +
+        `scope rules.`,
+    );
+  };
+  for (const phrase of AUDIT_FIX_REQUIRED_PHRASES) {
+    if (!body.includes(phrase)) fail(`is missing "${phrase}"`);
+  }
+  if (!/^## Hard rules\s*$/m.test(body)) {
+    fail('has no "## Hard rules" section heading');
+  }
+  if (body.includes("```json")) {
+    fail("carries a fenced json block (a fix run emits nothing)");
+  }
+}
+
+/**
  * Per-skill body validators — THE single registry shared by every surface that
  * accepts or dispatches a skill body: the resolver (read side,
  * resolve-review-skill.ts) and the write surfaces (API route PUT, dashboard
@@ -365,6 +473,7 @@ const SKILL_VALIDATORS: Record<
   "github-ops": assertReviewSkillContract,
   [PR_MERGED_SKILL_NAME]: assertMergeAuditSkillContract,
   [AUDIT_FINDINGS_SKILL_NAME]: assertAuditFindingsSkillContract,
+  [AUDIT_FIX_SKILL_NAME]: assertAuditFixSkillContract,
 };
 
 export function validateSkillBody(

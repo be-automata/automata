@@ -5,12 +5,13 @@ import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db";
 import { getTenantContextOrNull } from "@/lib/auth-server";
-import { auditRuns } from "@terragon/shared/db/schema";
+import { auditFixAttempts, auditRuns } from "@terragon/shared/db/schema";
 import {
   createAuditRunAtDispatch,
   insertFinding,
 } from "@terragon/shared/model/audit-findings";
 import { recordSelfHealAdminAction } from "@terragon/shared/model/self-heal-admin-log";
+import { recordAdmissionDeferral } from "@terragon/shared/model/self-heal-slot";
 import {
   createTestOrganization,
   createTestThread,
@@ -20,6 +21,12 @@ import {
 import { GET } from "./route";
 
 vi.mock("@/lib/auth-server", () => ({ getTenantContextOrNull: vi.fn() }));
+vi.mock("@/server-lib/audit/fix-trigger-logins", () => ({
+  resolveFixTriggerLogins: vi.fn(async () => [
+    "automata-app[bot]",
+    "repo-owner",
+  ]),
+}));
 
 const REPO = "acme/widgets";
 const params = Promise.resolve({ owner: "acme", repo: "widgets" });
@@ -221,5 +228,122 @@ describe("GET /api/self-heal/[owner]/[repo]", () => {
     expect(parsed.runs).toHaveLength(1);
 
     expect((await get("?format=csv")).status).toBe(400);
+  });
+
+  it("activity and export carry the same metrics and a timeline of the 20 newest attempts", async () => {
+    await actor("admin");
+    const finding = await insertFinding({
+      db,
+      organizationId: orgId,
+      finding: {
+        repoFullName: REPO,
+        fingerprint: "eeeeeeeeeeeeeeee",
+        audit: "security",
+        ruleId: "R2",
+        severity: "high",
+        checkKind: "script",
+        title: "finding e",
+      },
+    });
+    const base = Date.UTC(2026, 8, 1);
+    const at = (minutes: number) => new Date(base + minutes * 60_000);
+    const mergedBy = ["automata-app[bot]", "Repo-Owner", "a-reviewer"];
+    // 3 merged (bot, owner, a reviewer), 1 expired, then 18 counted closes.
+    for (let i = 0; i < 22; i++) {
+      const isMerged = i < 3;
+      await db.insert(auditFixAttempts).values({
+        organizationId: orgId,
+        repoFullName: REPO,
+        findingId: finding.id,
+        attemptNo: i + 1,
+        phase: "closed",
+        prNumber: 100 + i,
+        prState: isMerged ? "merged" : i === 3 ? "expired" : "closed",
+        claimedAt: at(i * 10),
+        checkReportedAt: at(i * 10 + 1),
+        prOpenedAt: at(i * 10 + 2),
+        ciStatus: "passed",
+        ciEvaluatedAt: at(i * 10 + 3),
+        ciResults: {
+          gateSource: i === 21 ? "all-checks" : "protection",
+        },
+        readyAt: at(i * 10 + 4),
+        mergedAt: isMerged ? at(i * 10 + 5) : null,
+        mergedBy: isMerged ? mergedBy[i] : null,
+        humanCommitCount: isMerged ? (i === 2 ? 1 : 0) : null,
+        infraRefunded: i === 20,
+        gateTokenHash: "gate-secret-hash",
+        createdAt: at(i * 10),
+      });
+    }
+    await recordAdmissionDeferral({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      reason: "review_in_flight",
+    });
+
+    interface Metrics {
+      prsOpened: number;
+      merged: number;
+      mergedByNonTrigger: number;
+      mergeRate: number | null;
+      humanEditRatio: number | null;
+      expiredRate: number | null;
+      refunded: number;
+      counted: number;
+      admissionDeferrals: number;
+      mergeRateBasis: string;
+      reopenRate: number | null;
+    }
+    interface TimelineEntry {
+      attemptNo: number;
+      prUrl: string | null;
+      gateSource: string | null;
+      steps: Record<string, string | null>;
+    }
+    const activity = (await (await get()).json()) as {
+      metrics: Metrics;
+      attemptTimeline: TimelineEntry[];
+    };
+    const exportText = await (await get("?format=export")).text();
+    expect(exportText).not.toMatch(/token_?hash/i);
+    expect(exportText).not.toContain("gate-secret-hash");
+    const exported = JSON.parse(exportText) as {
+      metrics: Metrics;
+      attempts: unknown[];
+    };
+
+    expect(activity.metrics).toEqual(exported.metrics);
+    expect(exported.attempts).toHaveLength(22);
+    expect(activity.metrics).toMatchObject({
+      prsOpened: 22,
+      merged: 3,
+      mergedByNonTrigger: 1,
+      mergeRate: 1 / 22,
+      humanEditRatio: 1 / 3,
+      expiredRate: 1 / 22,
+      refunded: 1,
+      counted: 21,
+      admissionDeferrals: 1,
+      mergeRateBasis: "bot-and-owner",
+      reopenRate: null,
+    });
+
+    expect(activity.attemptTimeline).toHaveLength(20);
+    const newest = activity.attemptTimeline[0]!;
+    expect(newest.attemptNo).toBe(22);
+    expect(newest.prUrl).toBe(`https://github.com/${REPO}/pull/121`);
+    expect(newest.gateSource).toBe("all-checks");
+    expect(newest.steps).toMatchObject({
+      claim: at(210).toISOString(),
+      check: at(211).toISOString(),
+      draft: at(212).toISOString(),
+      ci: at(213).toISOString(),
+      ready: at(214).toISOString(),
+      merged: null,
+    });
+    expect(newest.steps.closed).not.toBeNull();
+    expect(activity.attemptTimeline.map((e) => e.attemptNo)).not.toContain(1);
   });
 });
