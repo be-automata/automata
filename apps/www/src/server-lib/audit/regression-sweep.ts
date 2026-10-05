@@ -53,6 +53,8 @@ import { runBoundedSweep } from "./fix-attempt-session";
 export const FIX_REGRESSION_LIMIT = 10;
 export const FIX_REGRESSION_COMMITS_PAGE = 100;
 export const FIX_REGRESSION_GET_COMMIT_CAP = 20;
+/** getCommit reads in flight at once (each still through withSelfHealCall). */
+const FOLLOWUP_READ_CONCURRENCY = 3;
 
 export type FixRegressionOutcome =
   | "checked"
@@ -274,8 +276,9 @@ class RegressionCheck {
           !known.includes(c.sha),
       )
       .slice(0, FIX_REGRESSION_GET_COMMIT_CAP);
-    const detailed: FollowupCommit[] = [];
-    for (const commit of candidates) {
+    const read = async (
+      commit: RawListedCommit,
+    ): Promise<FollowupCommit | null> => {
       const res = await this.lifecycle.call<RawCommitDetail>(
         session,
         "read",
@@ -295,13 +298,21 @@ class RegressionCheck {
           attemptId: this.attempt.id,
           outcome: res.outcome,
         });
-        continue;
+        return null;
       }
-      detailed.push({
+      return {
         sha: commit.sha,
         authorLogin: commit.author?.login ?? null,
         files: res.data.files ?? [],
-      });
+      };
+    };
+    // Up to FOLLOWUP_READ_CONCURRENCY reads at a time, in commit order.
+    const detailed: FollowupCommit[] = [];
+    for (let i = 0; i < candidates.length; i += FOLLOWUP_READ_CONCURRENCY) {
+      const batch = await Promise.all(
+        candidates.slice(i, i + FOLLOWUP_READ_CONCURRENCY).map(read),
+      );
+      for (const commit of batch) if (commit !== null) detailed.push(commit);
     }
     return findFollowupOverlaps(detailed, ranges, botLogin);
   }
