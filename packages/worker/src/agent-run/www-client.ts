@@ -778,3 +778,93 @@ export async function postSelfHealAuditChecks(
   }
   return "error";
 }
+
+export type SelfHealFixReportResult = "recorded" | "duplicate" | "error";
+
+/** Body of POST /api/self-heal/fix-check (09-09), minus the attempt id. */
+export interface SelfHealFixReportWire {
+  workerStatus: "completed" | "aborted" | "error" | "no_branch";
+  headSha: string | null;
+  checkOutcome: "pass" | "fail" | "error" | null;
+  deniedPaths: string[];
+}
+
+export interface PostSelfHealFixCheckArgs {
+  baseUrl: string;
+  /** SECRET, worker-only, single-use. Sent in x-self-heal-gate-token; never logged. */
+  gateToken: string;
+  attemptId: string;
+  report: SelfHealFixReportWire;
+  fetchImpl?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Worth another attempt with the same token: the request may not have landed. */
+function isRetryableStatus(status: number): boolean {
+  return status >= 500 || status === 408 || status === 429;
+}
+
+/**
+ * POST the fix lane's finding-check report (GATE-01). Authenticated by the
+ * attempt's gate token (NOT the daemon token). Up to 3 attempts, each bounded
+ * at 10 s, with 2/4 s backoff between them, reuse the same token and body: the
+ * endpoint is first-write-wins, so a retry is idempotent. 200
+ * `{recorded:false}` is a duplicate and is not retried; 400/401/403/404 and
+ * other 4xx are final. Never throws; logs the attempt id and statuses only.
+ */
+export async function postSelfHealFixCheck(
+  args: PostSelfHealFixCheckArgs,
+): Promise<SelfHealFixReportResult> {
+  const doFetch = args.fetchImpl ?? fetch;
+  const sleep =
+    args.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const url = endpoint(args.baseUrl, "/api/self-heal/fix-check");
+  const body = JSON.stringify({ attemptId: args.attemptId, ...args.report });
+  for (
+    let attempt = 0;
+    attempt < SELF_HEAL_REPORT_BACKOFF_MS.length;
+    attempt++
+  ) {
+    if (attempt > 0) {
+      await sleep(SELF_HEAL_REPORT_BACKOFF_MS[attempt - 1] ?? 2_000);
+    }
+    let res: Response;
+    try {
+      res = await doFetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-self-heal-gate-token": args.gateToken,
+        },
+        body,
+        signal: AbortSignal.timeout(SELF_HEAL_REPORT_TIMEOUT_MS),
+      });
+    } catch (error) {
+      console.error("[agent-run] postSelfHealFixCheck request failed", {
+        attemptId: args.attemptId,
+        attempt: attempt + 1,
+        error: error instanceof Error ? error.name : "unknown",
+      });
+      continue;
+    }
+    if (res.ok) {
+      const json = (await res.json().catch(() => ({}))) as {
+        recorded?: boolean;
+      };
+      return json.recorded === false ? "duplicate" : "recorded";
+    }
+    if (!isRetryableStatus(res.status)) {
+      console.error("[agent-run] postSelfHealFixCheck rejected", {
+        attemptId: args.attemptId,
+        status: res.status,
+      });
+      return "error";
+    }
+    console.error("[agent-run] postSelfHealFixCheck non-2xx", {
+      attemptId: args.attemptId,
+      attempt: attempt + 1,
+      status: res.status,
+    });
+  }
+  return "error";
+}
