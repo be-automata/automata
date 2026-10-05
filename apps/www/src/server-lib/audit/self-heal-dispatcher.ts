@@ -1,6 +1,8 @@
+import { and, eq } from "drizzle-orm";
 import type { Octokit } from "octokit";
 
 import type { DB } from "@terragon/shared/db";
+import { selfHealBreaker } from "@terragon/shared/db/schema";
 import type { Automation } from "@terragon/shared/db/types";
 import type { PullRequestTriggerConfig } from "@terragon/shared/automations";
 import type { AuditFindingRow } from "@terragon/shared/model/audit-findings";
@@ -13,8 +15,19 @@ import {
   getIssueAutomationsForRepo,
   getPullRequestAutomationsForRepo,
 } from "@terragon/shared/model/automations";
-import { getBreakerState } from "@terragon/shared/model/self-heal-breaker";
+import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
+import {
+  acquireHalfOpenProbe,
+  getBreakerState,
+  recordProbeAttempt,
+  type BreakerRow,
+  type BreakerScopeKind,
+} from "@terragon/shared/model/self-heal-breaker";
 import { releaseSelfHealSlot } from "@terragon/shared/model/self-heal-slot";
+import {
+  withSelfHealTx,
+  type SelfHealTx,
+} from "@terragon/shared/model/self-heal-tx";
 import { redactSecrets } from "@terragon/utils/redact";
 
 import { getPostHogServer } from "@/lib/posthog-server";
@@ -49,12 +62,26 @@ import { withSelfHealCall, type SelfHealCallDeps } from "./with-self-heal-call";
  *
  * Branch protection is never read here: it is optional hardening, and a
  * free-plan repo without it (or with it unreadable) is dispatched normally.
+ *
+ * Breakers (BRK-01, RES-15): open or paused_manual refuses. A half-open
+ * loop_fix / exec_plane / hatchet_dispatch breaker admits exactly ONE run:
+ * its probe is taken in the SAME withSelfHealTx transaction as the claim
+ * CAS, so a concurrent claim gets breaker_half_open_probe_taken and a lost
+ * claim rolls the probe back. The probe attempt id is stamped into the trip
+ * evidence; the tick evaluation (loop-breaker.ts) resolves it from the
+ * attempt's outcome.
  */
 
 export const SELF_HEAL_DISPATCH_LIMIT = 20;
 /** Below this, the next candidate could not finish its GitHub calls. */
 const MIN_CANDIDATE_BUDGET_MS = 5_000;
 const PRE_MINT_INSTALLATION_KEY = "pending";
+/**
+ * The half-open probe lease covers a fix run up to its draft open (dispatch,
+ * box, finding check, opener retries). The tick evaluation resolves the probe
+ * long before; an expired lease only lets the next claim take the probe.
+ */
+export const FIX_PROBE_LEASE_MS = 6 * 3_600_000;
 
 /** The GitHub facts the dispatcher needs about one repo, cached per tick. */
 export interface RepoGithubProbe {
@@ -83,6 +110,8 @@ export interface SelfHealDispatcherDeps {
   listIssueAutomations: typeof getIssueAutomationsForRepo;
   listPullRequestAutomations: typeof getPullRequestAutomationsForRepo;
   claim: typeof claimFixAttempt;
+  acquireProbe: typeof acquireHalfOpenProbe;
+  recordProbe: typeof recordProbeAttempt;
   runFix: typeof runAuditFixAutomation;
   releaseSlot: typeof releaseSelfHealSlot;
   updateFinding: typeof updateFinding;
@@ -200,6 +229,8 @@ export function defaultSelfHealDispatcherDeps(): SelfHealDispatcherDeps {
     listIssueAutomations: getIssueAutomationsForRepo,
     listPullRequestAutomations: getPullRequestAutomationsForRepo,
     claim: claimFixAttempt,
+    acquireProbe: acquireHalfOpenProbe,
+    recordProbe: recordProbeAttempt,
     runFix: runAuditFixAutomation,
     releaseSlot: releaseSelfHealSlot,
     updateFinding,
@@ -246,6 +277,49 @@ export function reviewsBotPullRequests(
     .map((author) => author.trim().toLowerCase())
     .filter(Boolean);
   return authors.includes(botLogin.trim().toLowerCase());
+}
+
+interface BreakerScope {
+  scopeKind: BreakerScopeKind;
+  scopeKey: string;
+}
+
+/** Thrown inside the claim transaction to roll back a probe already taken. */
+class ClaimAborted extends Error {
+  constructor(readonly reason: string) {
+    super(`fix claim aborted: ${reason}`);
+    this.name = "ClaimAborted";
+  }
+}
+
+const REFUSAL_FOR_KIND: Partial<Record<BreakerScopeKind, string>> = {
+  loop_fix: "loop_fix_open",
+  exec_plane: "exec_plane_open",
+  hatchet_dispatch: "hatchet_dispatch_open",
+};
+
+/** Open and paused_manual refuse; half_open admits one probe. */
+function blocks(row: BreakerRow): boolean {
+  return row.state === "open" || row.state === "paused_manual";
+}
+
+async function breakerStateInTx(
+  tx: SelfHealTx,
+  organizationId: string,
+  scope: BreakerScope,
+): Promise<BreakerRow["state"]> {
+  const [row] = await tx
+    .select({ state: selfHealBreaker.state })
+    .from(selfHealBreaker)
+    .where(
+      and(
+        eq(selfHealBreaker.organizationId, organizationId),
+        eq(selfHealBreaker.scopeKind, scope.scopeKind),
+        eq(selfHealBreaker.scopeKey, scope.scopeKey),
+      ),
+    )
+    .limit(1);
+  return row?.state ?? "closed";
 }
 
 type CandidateOutcome =
@@ -441,10 +515,15 @@ async function considerCandidate({
       installationKey: probe.installationKey,
     });
   }
-  const effective = resolveSelfHealEffective(context);
-
-  const [execPlane, hatchetDispatch, issueAutomations, prAutomations] =
+  const loopKey = normalizeRepo(repoFullName);
+  const [loopFix, execPlane, hatchetDispatch, issueAutomations, prAutomations] =
     await Promise.all([
+      deps.getBreakerState({
+        db,
+        organizationId,
+        scopeKind: "loop_fix",
+        scopeKey: loopKey,
+      }),
       deps.getBreakerState({
         db,
         organizationId,
@@ -473,12 +552,24 @@ async function considerCandidate({
       reviewsBotPullRequests(automation, botLogin),
   );
 
+  // A half-open loop_fix admits one probe run (taken with the claim below);
+  // the context's own read only narrows further.
+  const loopFixHalfOpen = loopFix.state === "half_open";
+  const effective = resolveSelfHealEffective({
+    ...context,
+    breakers: {
+      ...context.breakers,
+      loopFixOpen:
+        blocks(loopFix) || (context.breakers.loopFixOpen && !loopFixHalfOpen),
+    },
+  });
+
   const verdict = evaluateFixTrigger({
     effective,
     capabilitiesOk: probe?.capabilitiesOk ?? true,
     breakers: {
-      execPlaneOpen: execPlane.state !== "closed",
-      hatchetDispatchOpen: hatchetDispatch.state !== "closed",
+      execPlaneOpen: blocks(execPlane),
+      hatchetDispatchOpen: blocks(hatchetDispatch),
     },
     fixAutomation: fixAutomation
       ? { id: fixAutomation.id, userId: fixAutomation.userId }
@@ -517,23 +608,78 @@ async function considerCandidate({
     await record("dispatch", "claim_refused", "on");
     return { kind: "next" };
   }
-  const claimed = await deps.claim({
-    db,
-    organizationId,
-    findingId: finding.id,
-    maxAttempts: context.resolved.settings.maxAttempts,
-    cooldownMin: context.resolved.settings.cooldownMin,
-    branchFor: (attemptNo) =>
-      fixBranchName({
-        issueNumber,
-        fingerprint: finding.fingerprint,
-        attemptNo,
-      }),
-    now,
-  });
+  const scopes: Array<BreakerScope & { row: BreakerRow }> = [
+    { scopeKind: "loop_fix", scopeKey: loopKey, row: loopFix },
+    { scopeKind: "exec_plane", scopeKey: "*", row: execPlane },
+    { scopeKind: "hatchet_dispatch", scopeKey: "*", row: hatchetDispatch },
+  ];
+  const halfOpen = scopes.filter((scope) => scope.row.state === "half_open");
+  let claimed: Awaited<ReturnType<typeof deps.claim>>;
+  try {
+    claimed = await withSelfHealTx(db, async (tx) => {
+      // The claim CAS also requires the breakers it read as closed to still
+      // be closed ("AND <breaker allows>").
+      for (const scope of scopes) {
+        if (scope.row.state !== "closed") continue;
+        if ((await breakerStateInTx(tx, organizationId, scope)) !== "closed") {
+          throw new ClaimAborted(
+            REFUSAL_FOR_KIND[scope.scopeKind] ?? "breaker_open",
+          );
+        }
+      }
+      for (const scope of halfOpen) {
+        const taken = await deps.acquireProbe({
+          db,
+          organizationId,
+          scopeKind: scope.scopeKind,
+          scopeKey: scope.scopeKey,
+          leaseMs: FIX_PROBE_LEASE_MS,
+          now,
+          tx,
+        });
+        if (!taken) throw new ClaimAborted("breaker_half_open_probe_taken");
+      }
+      const won = await deps.claim({
+        db,
+        organizationId,
+        findingId: finding.id,
+        maxAttempts: context.resolved.settings.maxAttempts,
+        cooldownMin: context.resolved.settings.cooldownMin,
+        branchFor: (attemptNo) =>
+          fixBranchName({
+            issueNumber,
+            fingerprint: finding.fingerprint,
+            attemptNo,
+          }),
+        now,
+        tx,
+      });
+      // A lost claim must give the probe back: roll the transaction back.
+      if (won === null) throw new ClaimAborted("claim_refused");
+      for (const scope of halfOpen) {
+        await deps.recordProbe({
+          tx,
+          organizationId,
+          scopeKind: scope.scopeKind,
+          scopeKey: scope.scopeKey,
+          attemptId: won.attempt.id,
+        });
+      }
+      return won;
+    });
+  } catch (error) {
+    if (!(error instanceof ClaimAborted)) throw error;
+    await record("dispatch", error.reason, "on");
+    return { kind: "next" };
+  }
   if (claimed === null) {
     await record("dispatch", "claim_refused", "on");
     return { kind: "next" };
+  }
+  for (const scope of halfOpen) {
+    deps.log(
+      `[self-heal:breaker] probe org=${organizationId} scopeKind=${scope.scopeKind} scopeKey=${scope.scopeKey} probeId=${claimed.attempt.id} outcome=taken`,
+    );
   }
 
   const started = await deps.runFix({

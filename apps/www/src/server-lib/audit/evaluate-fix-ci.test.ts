@@ -423,6 +423,11 @@ describe("evaluateFixCi (GATE-01 steps 4-5, SC4, R4, KILL-01)", () => {
     expect(row.ciStatus).toBe("passed");
     expect(row.ciResults).toMatchObject({ gateSource: "protection" });
     expect(row.leaseUntil).toBeNull();
+    // RES-15: the attempt is named, so a half-open probe attempt is not
+    // refused by its own loop_fix breaker.
+    expect(deps.loadContext).toHaveBeenCalledWith(
+      expect.objectContaining({ probeAttemptId: row.id }),
+    );
     expect(fake.rest.pulls.update).not.toHaveBeenCalled();
     expect(fake.rest.git.deleteRef).not.toHaveBeenCalled();
     neverMerges();

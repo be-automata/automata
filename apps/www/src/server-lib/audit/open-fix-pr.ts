@@ -414,6 +414,7 @@ class FixPrOpener {
       organizationId: this.org,
       repoFullName: this.attempt.repoFullName,
       installationKey: PRE_MINT_INSTALLATION_KEY,
+      probeAttemptId: this.attempt.id,
     });
     this.maxAttempts = context.resolved.settings.maxAttempts;
     const effective = resolveSelfHealEffective(context);

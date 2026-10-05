@@ -35,9 +35,12 @@ function base(): FixTriggerInput {
 
 type Mutation = (input: FixTriggerInput) => FixTriggerInput;
 
-/** One minimal input change per refusal (claim_refused is the CAS, not here). */
+/**
+ * One minimal input change per refusal (claim_refused and the half-open probe
+ * are decided in the claim transaction, not here).
+ */
 const MUTATIONS: Record<
-  Exclude<FixTriggerRefusal, "claim_refused">,
+  Exclude<FixTriggerRefusal, "claim_refused" | "breaker_half_open_probe_taken">,
   Mutation
 > = {
   flag_off: (i) => ({
@@ -117,7 +120,7 @@ describe("evaluateFixTrigger", () => {
     });
   }
 
-  it("the precedence list names every refusal except claim_refused", () => {
+  it("the precedence list names every refusal except the claim-transaction ones", () => {
     expect([...FIX_TRIGGER_PRECEDENCE].sort()).toEqual(
       Object.keys(MUTATIONS).sort(),
     );

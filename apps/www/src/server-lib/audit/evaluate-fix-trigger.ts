@@ -31,7 +31,9 @@ export type FixTriggerRefusal =
   | "cooldown"
   | "active_attempt"
   /** The claim compare-and-set lost (decided by the database, not here). */
-  | "claim_refused";
+  | "claim_refused"
+  /** Another claim holds the single half-open probe (decided in the claim transaction). */
+  | "breaker_half_open_probe_taken";
 
 /**
  * First match wins, in this order. The four mode refusals share one tier:

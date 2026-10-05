@@ -278,6 +278,7 @@ class FixCiEvaluator {
       organizationId: this.org,
       repoFullName: this.attempt.repoFullName,
       installationKey: PRE_MINT_INSTALLATION_KEY,
+      probeAttemptId: this.attempt.id,
     });
     this.maxAttempts = context.resolved.settings.maxAttempts;
     this.maxDiffLines = context.resolved.settings.maxDiffLines;

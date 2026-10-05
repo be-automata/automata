@@ -378,6 +378,11 @@ describe("openDraftFixPr (GATE-01, SC4, RES-18)", () => {
     expect(row.guardStatus).toBe("passed");
     expect(row.diffLines).toBe(2);
     expect(row.leaseUntil).toBeNull();
+    // RES-15: the attempt is named, so a half-open probe attempt is not
+    // refused by its own loop_fix breaker.
+    expect(deps.loadContext).toHaveBeenCalledWith(
+      expect.objectContaining({ probeAttemptId: row.id }),
+    );
     expect((await finding()).prNumber).toBe(501);
     const [prRow] = await db
       .select()

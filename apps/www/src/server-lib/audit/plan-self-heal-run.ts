@@ -306,6 +306,7 @@ export async function planSelfHealFixRun({
       organizationId,
       repoFullName,
       installationKey: PRE_MINT_INSTALLATION_KEY,
+      probeAttemptId: attemptId,
     });
     const effective = resolveSelfHealEffective({ ...ctx });
     if (effective.mode !== "on" || !effective.fixAllowed) {

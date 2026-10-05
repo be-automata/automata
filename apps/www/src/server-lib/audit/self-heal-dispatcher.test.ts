@@ -24,7 +24,14 @@ import {
   getIssueAutomationsForRepo,
   getPullRequestAutomationsForRepo,
 } from "@terragon/shared/model/automations";
-import { getBreakerState } from "@terragon/shared/model/self-heal-breaker";
+import {
+  acquireHalfOpenProbe,
+  getBreakerState,
+  moveExpiredToHalfOpen,
+  probeAttemptIdOf,
+  recordProbeAttempt,
+  tripBreaker,
+} from "@terragon/shared/model/self-heal-breaker";
 import {
   SELF_HEAL_DEFAULTS,
   type SelfHealMode,
@@ -40,7 +47,8 @@ import {
   createTestUser,
 } from "@terragon/shared/model/test-helpers";
 
-import type { SelfHealContext } from "./resolve-self-heal";
+import { runLoopBreakerEvaluation } from "./loop-breaker";
+import { loadSelfHealContext, type SelfHealContext } from "./resolve-self-heal";
 import { defaultRunAuditFixDeps, runAuditFixAutomation } from "./run-audit-fix";
 import { admitSelfHealRun } from "./self-heal-admission";
 import {
@@ -224,6 +232,8 @@ describe("runSelfHealDispatcher (BULK-01)", () => {
       listIssueAutomations: getIssueAutomationsForRepo,
       listPullRequestAutomations: getPullRequestAutomationsForRepo,
       claim,
+      acquireProbe: acquireHalfOpenProbe,
+      recordProbe: recordProbeAttempt,
       runFix: (args) =>
         runAuditFixAutomation({
           ...args,
@@ -599,5 +609,216 @@ describe("runSelfHealDispatcher (BULK-01)", () => {
     });
     expect(await findingRow(other.finding.id)).toMatchObject({ attempts: 0 });
     expect(await findingRow(finding.id)).toMatchObject({ attempts: 1 });
+  });
+
+  /** A real breaker row moved to half_open (one probe) at `now`. */
+  async function halfOpenBreaker(
+    organizationId: string,
+    scopeKind: "loop_fix" | "exec_plane" | "hatchet_dispatch",
+    scopeKey: string,
+  ) {
+    await tripBreaker({
+      db,
+      organizationId,
+      scopeKind,
+      scopeKey,
+      reason: "consecutive_failures",
+      evidence: {},
+      now: new Date(now.getTime() - 4 * DAY),
+    });
+    const moved = await moveExpiredToHalfOpen({
+      db,
+      organizationId,
+      scopeKind,
+      scopeKey,
+      now,
+    });
+    if (moved?.to !== "half_open") throw new Error("breaker not half-open");
+  }
+
+  const loopFixRow = (organizationId: string, repo: string) =>
+    getBreakerState({
+      db,
+      organizationId,
+      scopeKind: "loop_fix",
+      scopeKey: repo,
+    });
+
+  it("RES-15: a half-open loop_fix probe is taken in the claim transaction and stamped with the attempt id", async () => {
+    const { repo, finding } = await dispatchableRepo(orgA, 30);
+    await halfOpenBreaker(orgA, "loop_fix", repo);
+    const result = await dispatch(harness().deps);
+
+    expect(result.dispatched).toEqual(expect.any(String));
+    const [attempt] = await attemptsFor(finding.id);
+    const row = await loopFixRow(orgA, repo);
+    expect(row.state).toBe("half_open");
+    expect(row.halfOpenProbesLeft).toBe(0);
+    expect(row.probeInFlightUntil?.getTime()).toBeGreaterThan(now.getTime());
+    expect(probeAttemptIdOf(row)).toBe(attempt?.id);
+  });
+
+  it("RES-15: two concurrent claims on a half-open repo → exactly one claim; the other records breaker_half_open_probe_taken", async () => {
+    const repo = repoName();
+    await seedFixAutomation(orgA, repo);
+    await seedReviewAutomation(orgA, repo);
+    const f1 = await seedFinding({
+      organizationId: orgA,
+      repoFullName: repo,
+      readyAgoMin: 30,
+    });
+    const f2 = await seedFinding({
+      organizationId: orgA,
+      repoFullName: repo,
+      readyAgoMin: 20,
+    });
+    await halfOpenBreaker(orgA, "loop_fix", repo);
+    // Bypass the box slot so both ticks reach the claim at once.
+    const ticks = () =>
+      harness({
+        admit: vi.fn(async () => ({ admitted: true as const })),
+        runFix: vi.fn(async () => ({ threadId: `t-${nanoid(6)}` })),
+      }).deps;
+    const results = await Promise.all([dispatch(ticks()), dispatch(ticks())]);
+
+    expect(results.filter((r) => r.dispatched !== null)).toHaveLength(1);
+    const attempts = [
+      ...(await attemptsFor(f1.id)),
+      ...(await attemptsFor(f2.id)),
+    ];
+    expect(attempts).toHaveLength(1);
+    const reasons = [
+      (await findingRow(f1.id))?.lastDecisionReason,
+      (await findingRow(f2.id))?.lastDecisionReason,
+    ];
+    expect(reasons).toContain("breaker_half_open_probe_taken");
+    expect(lines.join("\n")).toContain("reason=breaker_half_open_probe_taken");
+  });
+
+  it("RES-15: a failing claim CAS rolls the probe back; the probe is still available", async () => {
+    const { repo, finding } = await dispatchableRepo(orgA, 30);
+    await halfOpenBreaker(orgA, "loop_fix", repo);
+    const h = harness({ claim: vi.fn(async () => null) });
+    const result = await dispatch(h.deps);
+
+    expect(result.dispatched).toBeNull();
+    expect(await findingRow(finding.id)).toMatchObject({
+      lastDecisionReason: "claim_refused",
+    });
+    const row = await loopFixRow(orgA, repo);
+    expect(row.halfOpenProbesLeft).toBe(1);
+    expect(probeAttemptIdOf(row)).toBeNull();
+    expect(
+      await acquireHalfOpenProbe({
+        db,
+        organizationId: orgA,
+        scopeKind: "loop_fix",
+        scopeKey: repo,
+        now,
+      }),
+    ).toBe(true);
+  });
+
+  it("an open or paused loop_fix breaker refuses with loop_fix_open (real breaker read)", async () => {
+    const a = await dispatchableRepo(orgA, 30);
+    await tripBreaker({
+      db,
+      organizationId: orgA,
+      scopeKind: "loop_fix",
+      scopeKey: a.repo,
+      reason: "consecutive_failures",
+      evidence: {},
+      now,
+    });
+    const b = await dispatchableRepo(orgB, 20);
+    await tripBreaker({
+      db,
+      organizationId: orgB,
+      scopeKind: "loop_fix",
+      scopeKey: b.repo,
+      reason: "draft_unsupported",
+      evidence: {},
+      cooldownMs: "paused_manual",
+      now,
+    });
+    const h = harness();
+    const result = await dispatch(h.deps);
+
+    expect(result.dispatched).toBeNull();
+    expect(h.claim).not.toHaveBeenCalled();
+    for (const id of [a.finding.id, b.finding.id]) {
+      expect(await findingRow(id)).toMatchObject({
+        lastDecisionReason: "loop_fix_open",
+        attempts: 0,
+      });
+    }
+  });
+
+  it("a half-open exec_plane breaker lets exactly one claim through as its probe", async () => {
+    const { finding } = await dispatchableRepo(orgA, 30);
+    await halfOpenBreaker(orgA, "exec_plane", "*");
+    const result = await dispatch(harness().deps);
+
+    expect(result.dispatched).toEqual(expect.any(String));
+    const [attempt] = await attemptsFor(finding.id);
+    const row = await getBreakerState({
+      db,
+      organizationId: orgA,
+      scopeKind: "exec_plane",
+      scopeKey: "*",
+    });
+    expect(row.halfOpenProbesLeft).toBe(0);
+    expect(probeAttemptIdOf(row)).toBe(attempt?.id);
+  });
+
+  it("the probe's draft opening (check + guard passed) closes loop_fix on the next tick evaluation", async () => {
+    const { repo, finding } = await dispatchableRepo(orgA, 30);
+    await halfOpenBreaker(orgA, "loop_fix", repo);
+    await dispatch(harness().deps);
+    const [attempt] = await attemptsFor(finding.id);
+    if (!attempt) throw new Error("no probe attempt");
+    await db
+      .update(auditFixAttempts)
+      .set({
+        phase: "ci_pending",
+        prNumber: 41,
+        prState: "draft",
+        guardStatus: "passed",
+        checkStatus: "passed",
+      })
+      .where(eq(auditFixAttempts.id, attempt.id));
+    await runLoopBreakerEvaluation({
+      db,
+      now: new Date(now.getTime() + 10 * MIN),
+      deadlineAt: new Date(Date.now() + 60_000),
+      limit: 1_000,
+      deps: {
+        log: () => undefined,
+        error: () => undefined,
+        capture: () => undefined,
+      },
+    });
+    const row = await loopFixRow(orgA, repo);
+    expect(row.state).toBe("closed");
+    expect(row.tripCount).toBe(1);
+  });
+
+  it("RES-15: downstream gates pass only the probe attempt through a half-open loop_fix", async () => {
+    const { repo, finding } = await dispatchableRepo(orgA, 30);
+    await halfOpenBreaker(orgA, "loop_fix", repo);
+    await dispatch(harness().deps);
+    const [attempt] = await attemptsFor(finding.id);
+    if (!attempt) throw new Error("no probe attempt");
+    const gate = (probeAttemptId?: string) =>
+      loadSelfHealContext({
+        db,
+        organizationId: orgA,
+        repoFullName: repo,
+        installationKey: "1001",
+        ...(probeAttemptId ? { probeAttemptId } : {}),
+      });
+    expect((await gate(attempt.id)).breakers.loopFixOpen).toBe(false);
+    expect((await gate()).breakers.loopFixOpen).toBe(true);
+    expect((await gate("another-attempt")).breakers.loopFixOpen).toBe(true);
   });
 });
