@@ -34,6 +34,14 @@ pressing on.
    branch it names. Use that exact name.
 3. Make the smallest change that satisfies the acceptance criteria. Only change the files listed in
    the platform section (the plan's files and their companions).
+   **Dependency findings** (`dep.vulnerable`): move ONLY the vulnerable package to a patched version,
+   e.g. `pnpm update <package> --lockfile-only` (or `pnpm up <package>@<patched version> --lockfile-only`).
+   Never re-resolve the whole lockfile (no bare `pnpm install`, no deleting `pnpm-lock.yaml`): a full
+   re-resolve can silently move other packages back to older, vulnerable versions and undo earlier
+   fixes. Before committing, read the lockfile diff: when any package other than the one you are
+   fixing changed to a LOWER version, undo and retry the targeted update; if you cannot avoid it, stop
+   and explain instead of pushing. When the platform section lists `package.json`, prefer a
+   `pnpm.overrides` entry for the patched version so a later re-resolve cannot revert it.
 4. Follow the repository's own conventions: read `CLAUDE.md`, `AGENTS.md` and
    `docs/audit-scores/DECISIONS.md` when they exist. When the repository keeps a `VERSION` file or a
    `CHANGELOG.md`, bump the version and record the change the way the repository already does.
