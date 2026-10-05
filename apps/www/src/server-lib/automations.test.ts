@@ -1,4 +1,5 @@
 import { describe, it, vi, beforeEach, expect } from "vitest";
+import * as z from "zod/v4";
 import { db } from "@/lib/db";
 import {
   createTestUser,
@@ -14,9 +15,17 @@ import { automations as automationsTable } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { User } from "@terragon/shared";
+import type {
+  AutomationAction,
+  IssueTriggerConfig,
+} from "@terragon/shared/automations";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import { createNewThread } from "./new-thread-shared";
-import { runAutomation } from "./automations";
+import {
+  runAutomation,
+  validateAutomationCreationOrUpdate,
+} from "./automations";
+import { AUDIT_FIX_SKILL_NAME } from "./review/review-skill";
 import { renderSkillPlaceholders } from "./review/resolve-review-skill";
 import { resolveReviewPromptMode } from "./review/resolve-review-prompt-mode";
 
@@ -617,5 +626,236 @@ describe("runAutomation — review prompt mode (phase 6)", () => {
       }),
     );
     expect(second.sourceMetadata).not.toHaveProperty("reviewPromptMode");
+  });
+});
+
+describe("validateAutomationCreationOrUpdate — issue labels (phase 9)", () => {
+  let user: User;
+
+  beforeEach(async () => {
+    user = (await createTestUser({ db })).user;
+  });
+
+  function validateIssue(
+    config: IssueTriggerConfig,
+    action: AutomationAction = {
+      type: "skill_message",
+      config: { skillName: "mirror", version: "latest" },
+    },
+  ) {
+    return validateAutomationCreationOrUpdate({
+      userId: user.id,
+      automationId: null,
+      updates: {
+        name: "test",
+        repoFullName: "owner/repo",
+        branchName: "main",
+        triggerType: "issue",
+        triggerConfig: config,
+        action,
+      },
+    });
+  }
+
+  it("rejects on.labeled without filter.labels", async () => {
+    await expect(
+      validateIssue({ filter: {}, on: { labeled: true } }),
+    ).rejects.toThrow(
+      "Trigger on label requires at least one label in the filter",
+    );
+    await expect(
+      validateIssue({ filter: { labels: [] }, on: { labeled: true } }),
+    ).rejects.toThrow(
+      "Trigger on label requires at least one label in the filter",
+    );
+  });
+
+  it("accepts on.labeled with filter.labels", async () => {
+    await expect(
+      validateIssue({ filter: { labels: ["bug"] }, on: { labeled: true } }),
+    ).resolves.toBeDefined();
+  });
+
+  it("still requires at least one enabled trigger", async () => {
+    await expect(validateIssue({ filter: {}, on: {} })).rejects.toThrow(
+      "At least one trigger must be enabled",
+    );
+  });
+});
+
+const AUDIT_FIX_ACTION: AutomationAction = {
+  type: "skill_message",
+  config: { skillName: AUDIT_FIX_SKILL_NAME, version: "latest" },
+};
+const SELF_HEAL_ERROR =
+  "Self-heal fix automations must trigger only on the automata:auto-fix label";
+const VALID_AUDIT_FIX_CONFIG: IssueTriggerConfig = {
+  filter: { includeAllAuthors: true, labels: ["Automata:Auto-Fix"] },
+  on: { labeled: true },
+};
+
+describe("validateAutomationCreationOrUpdate — audit-fix is labeled-only (ROLL-01)", () => {
+  let user: User;
+
+  beforeEach(async () => {
+    user = (await createTestUser({ db })).user;
+  });
+
+  function validate(
+    triggerType: "issue" | "pull_request" | "manual",
+    triggerConfig: unknown,
+  ) {
+    return validateAutomationCreationOrUpdate({
+      userId: user.id,
+      automationId: null,
+      updates: {
+        name: "fix",
+        repoFullName: "owner/repo",
+        branchName: "main",
+        triggerType,
+        triggerConfig: triggerConfig as IssueTriggerConfig,
+        action: AUDIT_FIX_ACTION,
+      },
+    });
+  }
+
+  it("rejects an audit-fix automation that triggers on open", async () => {
+    await expect(
+      validate("issue", {
+        filter: { labels: ["automata:auto-fix"] },
+        on: { open: true },
+      }),
+    ).rejects.toThrow(SELF_HEAL_ERROR);
+  });
+
+  it("rejects labeled + open", async () => {
+    await expect(
+      validate("issue", {
+        filter: { labels: ["automata:auto-fix"] },
+        on: { labeled: true, open: true },
+      }),
+    ).rejects.toThrow(SELF_HEAL_ERROR);
+  });
+
+  it("rejects labels that do not include automata:auto-fix", async () => {
+    await expect(
+      validate("issue", {
+        filter: { labels: ["documentation"] },
+        on: { labeled: true },
+      }),
+    ).rejects.toThrow(SELF_HEAL_ERROR);
+  });
+
+  it("rejects a non-issue trigger", async () => {
+    await expect(validate("manual", {})).rejects.toThrow(SELF_HEAL_ERROR);
+    await expect(
+      validate("pull_request", { filter: {}, on: { open: true } }),
+    ).rejects.toThrow(SELF_HEAL_ERROR);
+  });
+
+  it("accepts labeled-only with automata:auto-fix (case-insensitive)", async () => {
+    await expect(
+      validate("issue", VALID_AUDIT_FIX_CONFIG),
+    ).resolves.toBeDefined();
+  });
+
+  it("re-checks an existing audit-fix automation when only its trigger config is updated", async () => {
+    const automation = await createTestAutomation({ db, userId: user.id });
+    await db
+      .update(automationsTable)
+      .set({
+        triggerType: "issue",
+        triggerConfig: VALID_AUDIT_FIX_CONFIG,
+        action: AUDIT_FIX_ACTION,
+      })
+      .where(eq(automationsTable.id, automation.id));
+    await expect(
+      validateAutomationCreationOrUpdate({
+        userId: user.id,
+        automationId: automation.id,
+        updates: {
+          triggerConfig: {
+            filter: { includeAllAuthors: true },
+            on: { open: true },
+          },
+        },
+      }),
+    ).rejects.toThrow(SELF_HEAL_ERROR);
+  });
+});
+
+/**
+ * ROLL-01 rollback simulation. A literal copy of the issue trigger schema as
+ * it stood before phase 9 (origin/main 5481fd3,
+ * packages/shared/src/automations/index.ts lines 56-79). zod strips unknown
+ * keys, so this is what an old www sees when it re-parses a stored config.
+ * Do NOT import it from the live module: the point is to freeze the past.
+ */
+const LEGACY_ISSUE_TRIGGER_SCHEMA = z.object({
+  type: z.literal("issue"),
+  config: z.object({
+    filter: z.object({
+      includeOtherAuthors: z.boolean().optional(),
+      otherAuthors: z
+        .string()
+        .optional()
+        .describe("Comma-separated list of authors to include"),
+      // Match issues from ANY author (unconditional routing — mirror parity).
+      includeAllAuthors: z.boolean().optional(),
+    }),
+    // The events to trigger on.
+    on: z.object({
+      open: z.boolean().optional(),
+    }),
+    // Auto-archive the task when the agent completes
+    autoArchiveOnComplete: z
+      .boolean()
+      .optional()
+      .describe("Automatically archive the task when the agent completes"),
+    permissionMode: z.enum(["review", "plan", "allowAll"]).optional(),
+  }),
+});
+
+/** The legacy handleIssueAutomation trigger condition (origin/main 5481fd3). */
+function legacyShouldTrigger(
+  eventAction: string,
+  config: z.infer<typeof LEGACY_ISSUE_TRIGGER_SCHEMA>["config"],
+): boolean {
+  switch (eventAction) {
+    case "opened":
+      return !!config.on.open;
+    default:
+      return false;
+  }
+}
+
+describe("audit-fix rollback simulation (ROLL-01)", () => {
+  it("a valid audit-fix config has no trigger the legacy www can fire", async () => {
+    const user = (await createTestUser({ db })).user;
+    await expect(
+      validateAutomationCreationOrUpdate({
+        userId: user.id,
+        automationId: null,
+        updates: {
+          name: "fix",
+          repoFullName: "owner/repo",
+          branchName: "main",
+          triggerType: "issue",
+          triggerConfig: VALID_AUDIT_FIX_CONFIG,
+          action: AUDIT_FIX_ACTION,
+        },
+      }),
+    ).resolves.toBeDefined();
+
+    // Round-trip through JSON, as the jsonb column does.
+    const stored: unknown = JSON.parse(
+      JSON.stringify({ type: "issue", config: VALID_AUDIT_FIX_CONFIG }),
+    );
+    const legacy = LEGACY_ISSUE_TRIGGER_SCHEMA.parse(stored);
+    expect(legacy.config.on.open).toBeFalsy();
+    expect(legacy.config.on).not.toHaveProperty("labeled");
+    expect(legacy.config.filter).not.toHaveProperty("labels");
+    expect(legacyShouldTrigger("opened", legacy.config)).toBe(false);
+    expect(legacyShouldTrigger("labeled", legacy.config)).toBe(false);
   });
 });
