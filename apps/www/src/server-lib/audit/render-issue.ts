@@ -150,7 +150,8 @@ export type AuditCommentKind =
   | "needs_human_rubric_absent"
   | "fix_attempt_rejected"
   | "fix_draft_withdrawn"
-  | "fix_draft_no_repo_ci";
+  | "fix_draft_no_repo_ci"
+  | "fix_pr_expired";
 
 /**
  * Why a self-heal change attempt did not become a pull request. Only these
@@ -191,6 +192,8 @@ export interface AuditCommentData {
   draftNumber?: number;
   /** fix_draft_withdrawn: whether the attempt counts toward the limit. */
   counted?: boolean;
+  /** fix_pr_expired: the repo's unreviewed-PR expiry window in days. */
+  expiryDays?: number;
 }
 
 function rejectionLines(reasons: readonly string[] | undefined): string[] {
@@ -264,6 +267,9 @@ export function renderAuditComment(
         "",
         `Labelled \`${FINDING_LABELS.needsHumanApprove}\`: a person should run the project's tests before merging.`,
       ].join("\n");
+      break;
+    case "fix_pr_expired":
+      text = `Withdrawn: no human review within ${data.expiryDays ?? 0} days. The finding stays open and may be retried.`;
       break;
   }
   return `${marker}\n${text}`;

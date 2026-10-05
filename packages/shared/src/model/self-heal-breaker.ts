@@ -93,6 +93,8 @@ export const UNFENCED_SELF_HEAL_MODEL_FUNCTIONS: Record<string, string> = {
     "the pull_request webhook signature is the authority; the row carries organizationId",
   listUnsettledFixPrs:
     "lifecycle sweep settles merged/closed fix PRs across all orgs; rows carry organizationId",
+  listOpenReadyFixPrs:
+    "expiry sweep finds unreviewed ready fix PRs across all orgs; rows carry organizationId",
   acquireSelfHealSlot: "platform-wide single box slot",
   setSlotHolderThread: "platform-wide single box slot",
   releaseSelfHealSlot: "platform-wide single box slot",

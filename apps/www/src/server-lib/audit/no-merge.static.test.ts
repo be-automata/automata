@@ -35,6 +35,7 @@ describe("self-heal lane never merges", () => {
         "/open-fix-pr.ts",
         "/fix-pr-lifecycle.ts",
         "/hunks.ts",
+        "/fix-pr-expiry.ts",
       ]),
     );
   });

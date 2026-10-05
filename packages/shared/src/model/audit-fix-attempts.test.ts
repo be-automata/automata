@@ -20,6 +20,7 @@ import {
   listPendingPrOpens,
   listExpiredFixClaims,
   listFixReadyFindings,
+  listOpenReadyFixPrs,
   listStaleDispatchedAttempts,
   listTerminalUnreportedAttempts,
   listUnsettledFixPrs,
@@ -1106,6 +1107,67 @@ describe("audit fix attempts", () => {
           .map((r) => r.id)
           .sort(),
       ).toEqual([merged.id, closedPr.id].sort());
+    });
+
+    it("listOpenReadyFixPrs returns open ready PRs only, old enough, with a free lease", async () => {
+      expect("listOpenReadyFixPrs" in UNFENCED_SELF_HEAL_MODEL_FUNCTIONS).toBe(
+        true,
+      );
+      const old = await withPr();
+      const young = await withPr();
+      const draft = await withPr("draft");
+      const leased = await withPr();
+      const merged = await withPr();
+      const expired = await withPr();
+      const readyAt = (id: string, at: Date) =>
+        updateFixAttempt({
+          db,
+          organizationId: orgA,
+          id,
+          patch: { readyAt: at },
+        });
+      const oldAt = new Date(T0.getTime() - 10 * DAY);
+      await readyAt(old.id, oldAt);
+      await readyAt(young.id, new Date(T0.getTime() - 60 * MIN));
+      await readyAt(draft.id, oldAt);
+      await readyAt(leased.id, oldAt);
+      await readyAt(merged.id, oldAt);
+      await readyAt(expired.id, oldAt);
+      await claimAttemptLease({
+        db,
+        organizationId: orgA,
+        attemptId: leased.id,
+        now: T0,
+      });
+      await merge(merged.id);
+      await recordFixPrClosed({
+        db,
+        organizationId: orgA,
+        attemptId: expired.id,
+        state: "expired",
+      });
+
+      const mine = new Set(
+        [old, young, draft, leased, merged, expired].map((a) => a.id),
+      );
+      const pick = (rows: Array<{ id: string }>) =>
+        rows
+          .filter((r) => mine.has(r.id))
+          .map((r) => r.id)
+          .sort();
+      expect(
+        pick(
+          await listOpenReadyFixPrs({
+            db,
+            now: T0,
+            readyBefore: new Date(T0.getTime() - DAY),
+            limit: 1000,
+          }),
+        ),
+      ).toEqual([old.id]);
+      expect(
+        pick(await listOpenReadyFixPrs({ db, now: T0, limit: 1000 })),
+      ).toEqual([old.id, young.id].sort());
     });
   });
 });

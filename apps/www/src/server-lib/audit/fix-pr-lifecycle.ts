@@ -35,6 +35,7 @@ import {
 import { resolveSelfHealEffective } from "./resolve-self-heal";
 import {
   withSelfHealCall,
+  type CallKind,
   type GithubResponse,
   type SelfHealCallResult,
 } from "./with-self-heal-call";
@@ -145,7 +146,7 @@ interface RawFile {
   patch?: string;
 }
 
-interface RawPull {
+export interface RawPull {
   state: string;
   draft?: boolean;
   merged?: boolean;
@@ -154,16 +155,24 @@ interface RawPull {
   merged_by?: { login?: string } | null;
 }
 
-interface Session {
+export interface FixPrSession {
   octokit: Octokit;
   installationKey: string;
 }
 
-function isBotAuthor(commit: RawCommit, botLogin: string): boolean {
-  const login = commit.author?.login?.toLowerCase();
-  if (commit.author?.type === "Bot") return true;
+/** A GitHub user that is an App or this platform's bot. */
+export function isBotUser(
+  user: { login?: string; type?: string } | null | undefined,
+  botLogin: string,
+): boolean {
+  const login = user?.login?.toLowerCase();
+  if (user?.type === "Bot") return true;
   if (login === undefined) return false;
   return login === botLogin.toLowerCase() || login.endsWith("[bot]");
+}
+
+function isBotAuthor(commit: RawCommit, botLogin: string): boolean {
+  return isBotUser(commit.author, botLogin);
 }
 
 /**
@@ -197,13 +206,18 @@ export function changedRangesOf(files: readonly RawFile[]): FixChangedRanges {
   return out;
 }
 
-class Lifecycle {
-  private session: Session | "unavailable" | null = null;
+/**
+ * One fix PR's lifecycle helper: the effective mode, the App session and
+ * the DB transitions. Shared with the expiry sweep (fix-pr-expiry.ts).
+ */
+export class FixPrLifecycle {
+  private session: FixPrSession | "unavailable" | null = null;
   private readonly owner: string;
   private readonly repo: string;
   private readonly deadlineAt: Date;
   private modeCache: SelfHealLogMode | null = null;
   private maxAttempts = 3;
+  private prExpiryDays = 7;
 
   constructor(
     private readonly deps: FixPrLifecycleDeps,
@@ -225,6 +239,15 @@ class Lifecycle {
     return this.deps.db;
   }
 
+  get row(): AuditFixAttemptRow {
+    return this.attempt;
+  }
+
+  /** The repo's unreviewed-PR window in days; read by mode(). */
+  get expiryDays(): number {
+    return this.prExpiryDays;
+  }
+
   /** Effective mode (and the attempts cap); GitHub is touched only when not off. */
   async mode(): Promise<SelfHealLogMode> {
     if (this.modeCache !== null) return this.modeCache;
@@ -236,11 +259,12 @@ class Lifecycle {
       probeAttemptId: this.attempt.id,
     });
     this.maxAttempts = context.resolved.settings.maxAttempts;
+    this.prExpiryDays = context.resolved.settings.prExpiryDays;
     this.modeCache = resolveSelfHealEffective(context).mode;
     return this.modeCache;
   }
 
-  private async openSession(): Promise<Session | "unavailable"> {
+  async openSession(): Promise<FixPrSession | "unavailable"> {
     if (this.session !== null) return this.session;
     try {
       const minted = await this.deps.mint({
@@ -262,15 +286,25 @@ class Lifecycle {
   }
 
   private read<T>(
-    session: Session,
+    session: FixPrSession,
+    call: (signal: AbortSignal) => Promise<GithubResponse<T>>,
+  ): Promise<SelfHealCallResult<T>> {
+    return this.call<T>(session, "read", "pull_requests", call);
+  }
+
+  /** Every GitHub call of this PR goes through withSelfHealCall. */
+  call<T>(
+    session: FixPrSession,
+    kind: CallKind,
+    permission: "pull_requests" | "contents",
     call: (signal: AbortSignal) => Promise<GithubResponse<T>>,
   ): Promise<SelfHealCallResult<T>> {
     return withSelfHealCall<T>({
-      kind: "read",
+      kind,
       organizationId: this.org,
       installationKey: session.installationKey,
-      signalName: "gh_read",
-      permission: "pull_requests",
+      signalName: kind === "read" ? "gh_read" : "gh_write",
+      permission,
       deadlineAt: this.deadlineAt,
       call,
       deps: { ...this.deps.callDeps, db: this.db },
@@ -363,9 +397,9 @@ class Lifecycle {
   }
 
   /** 09-13: lifecycle events break (or extend) the pr_expired streak. */
-  private async lifecycleEvent(
+  async lifecycleEvent(
     outcome: "success" | "failure",
-    signal: "pr_merged" | "pr_closed",
+    signal: "pr_merged" | "pr_closed" | "pr_expired",
   ): Promise<void> {
     try {
       await recordBreakerEvent({
@@ -386,7 +420,9 @@ class Lifecycle {
     }
   }
 
-  private async decision(reason: "merged" | "closed_unmerged"): Promise<void> {
+  async decision(
+    reason: "merged" | "closed_unmerged" | "expired",
+  ): Promise<void> {
     try {
       const finding = await getFindingForAttempt({
         db: this.db,
@@ -480,8 +516,8 @@ class Lifecycle {
     }
   }
 
-  /** The attempts cap after a counted human close: needs-human-approve. */
-  private async capCheck(): Promise<void> {
+  /** The attempts cap after a counted close: needs-human-approve. */
+  async capCheck(): Promise<void> {
     const finding = await getFindingForAttempt({
       db: this.db,
       organizationId: this.org,
@@ -589,6 +625,17 @@ function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+/** What pulls.get shows a person did to a closed PR. */
+export function endOfPull(pull: RawPull): FixPrEnd {
+  const mergedAt = stringOrNull(pull.merged_at);
+  return {
+    merged: pull.merged === true || mergedAt !== null,
+    mergedAt: mergedAt === null ? null : new Date(mergedAt),
+    mergeSha: stringOrNull(pull.merge_commit_sha),
+    mergedBy: stringOrNull(pull.merged_by?.login),
+  };
+}
+
 function closedPrTarget(payload: unknown): ClosedPrTarget | null {
   if (typeof payload !== "object" || payload === null) return null;
   const event = payload as ClosedPrPayload;
@@ -651,7 +698,7 @@ export async function handleSelfHealPrClosed(
       });
       return;
     }
-    const outcome = await new Lifecycle(deps, attempt).settle(
+    const outcome = await new FixPrLifecycle(deps, attempt).settle(
       target,
       "schedule",
     );
@@ -686,20 +733,11 @@ async function settleOne(
   });
   if (!leased) return "skipped";
   try {
-    const lifecycle = new Lifecycle(deps, row, deadlineAt);
+    const lifecycle = new FixPrLifecycle(deps, row, deadlineAt);
     const pull = await lifecycle.readPull();
     if (pull === null) return "skipped";
     if (pull.state !== "closed") return lifecycle.reopened(pull);
-    const mergedAt = stringOrNull(pull.merged_at);
-    return await lifecycle.settle(
-      {
-        merged: pull.merged === true || mergedAt !== null,
-        mergedAt: mergedAt === null ? null : new Date(mergedAt),
-        mergeSha: stringOrNull(pull.merge_commit_sha),
-        mergedBy: stringOrNull(pull.merged_by?.login),
-      },
-      "await",
-    );
+    return await lifecycle.settle(endOfPull(pull), "await");
   } finally {
     try {
       await releaseAttemptLease({

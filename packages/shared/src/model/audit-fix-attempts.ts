@@ -1039,3 +1039,47 @@ export async function listUnsettledFixPrs({
       .limit(limit),
   );
 }
+
+/**
+ * UNFENCED (R5): fix PRs marked ready for review and still open, across all
+ * orgs, with a free lease, least recently touched first (claiming the lease
+ * touches updated_at, so a PR a person reviewed does not hold its slot
+ * forever). `readyBefore` drops PRs that cannot be old enough for any repo's
+ * expiry window. The expiry sweep re-fences every later call on the row's
+ * organizationId and applies each repo's own window.
+ */
+export async function listOpenReadyFixPrs({
+  db,
+  readyBefore,
+  now = new Date(),
+  limit = 20,
+}: {
+  db: DB;
+  readyBefore?: Date;
+  now?: Date;
+  limit?: number;
+}): Promise<AuditFixAttemptRow[]> {
+  return withSelfHealTx(db, (tx) =>
+    tx
+      .select()
+      .from(auditFixAttempts)
+      .where(
+        and(
+          ne(auditFixAttempts.phase, "closed"),
+          eq(auditFixAttempts.prState, "ready"),
+          isNotNull(auditFixAttempts.prNumber),
+          isNull(auditFixAttempts.mergedAt),
+          isNotNull(auditFixAttempts.readyAt),
+          readyBefore === undefined
+            ? undefined
+            : lte(auditFixAttempts.readyAt, readyBefore),
+          or(
+            isNull(auditFixAttempts.leaseUntil),
+            lte(auditFixAttempts.leaseUntil, now),
+          ),
+        ),
+      )
+      .orderBy(asc(auditFixAttempts.updatedAt))
+      .limit(limit),
+  );
+}

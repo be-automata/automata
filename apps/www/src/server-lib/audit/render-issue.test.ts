@@ -163,6 +163,7 @@ describe("renderAuditComment", () => {
     "fix_attempt_rejected",
     "fix_draft_withdrawn",
     "fix_draft_no_repo_ci",
+    "fix_pr_expired",
   ];
   it.each(kinds)("%s leads with a matching marker and is inert", (kind) => {
     const text = renderAuditComment(kind, {
@@ -179,6 +180,17 @@ describe("renderAuditComment", () => {
     expect(visible).not.toContain("@");
     expect(visible).not.toMatch(/\b(clos|fix|resolv)\w*/i);
     expect(text).not.toContain("automata:needs-human");
+  });
+
+  it("states the expiry window on an expired fix PR", () => {
+    const text = renderAuditComment("fix_pr_expired", {
+      fingerprint: FP,
+      runId: "r",
+      expiryDays: 7,
+    });
+    expect(text.split("\n")[1]).toBe(
+      "Withdrawn: no human review within 7 days. The finding stays open and may be retried.",
+    );
   });
 
   it("names the label on needs-human comments", () => {
