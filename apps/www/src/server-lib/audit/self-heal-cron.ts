@@ -4,6 +4,7 @@ import { pruneSelfHealRows } from "@terragon/shared/model/self-heal-outbox";
 import { redactSecrets } from "@terragon/utils/redact";
 
 import { runAuditSweep, runOutboxDrain } from "./audit-sweep";
+import { runSelfHealDispatcher } from "./self-heal-dispatcher";
 
 /**
  * The self-heal cron (CRON-01, RESILIENCE 6.6): a function of its own, called
@@ -29,6 +30,7 @@ export interface SelfHealCronDeps {
   drain: typeof runOutboxDrain;
   sweep: typeof runAuditSweep;
   prune: typeof pruneSelfHealRows;
+  dispatch: typeof runSelfHealDispatcher;
   budget: { totalMs: number; perItemMs: number; limit: number };
 }
 
@@ -39,6 +41,7 @@ function defaultDeps(): SelfHealCronDeps {
     drain: runOutboxDrain,
     sweep: runAuditSweep,
     prune: pruneSelfHealRows,
+    dispatch: runSelfHealDispatcher,
     budget: SELF_HEAL_CRON_BUDGET,
   };
 }
@@ -101,6 +104,20 @@ export async function runSelfHealCron(
     const result = await deps.sweep({ ...shared, now: deps.now() });
     console.log("[cron:self-heal] audit sweep", result);
   });
+
+  if (kind === "tick") {
+    // BULK-01: the fix dispatcher runs LAST, so its admission sees the state
+    // the drain and the sweep just settled, and it can only use what is left
+    // of the shared budget.
+    await withinBudget("fix dispatcher", remaining(), async () => {
+      const result = await deps.dispatch({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+      });
+      console.log("[cron:self-heal] fix dispatcher", result);
+    });
+  }
 
   if (kind === "hourly") {
     // Retention runs even with the flag off (pending rows are never pruned).
