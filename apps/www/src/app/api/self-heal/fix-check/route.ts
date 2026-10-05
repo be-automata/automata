@@ -1,5 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
-
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -9,7 +7,7 @@ import { waitUntil } from "@/lib/wait-until";
 import { openDraftFixPr } from "@/server-lib/audit/open-fix-pr";
 import {
   deriveFixCheckStatus,
-  hashSelfHealToken,
+  selfHealTokenMatches,
   type FixCheckStatus,
 } from "@/server-lib/audit/plan-self-heal-run";
 import { auditFixAttempts } from "@terragon/shared/db/schema";
@@ -87,13 +85,6 @@ function unauthorized(): NextResponse {
   return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 }
 
-function tokenMatches(presented: string, storedHash: string): boolean {
-  const a = Buffer.from(hashSelfHealToken(presented), "utf8");
-  const b = Buffer.from(storedHash, "utf8");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
-
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const presented = request.headers.get(TOKEN_HEADER);
   if (!presented) return unauthorized();
@@ -120,7 +111,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     !attempt.gateTokenHash ||
     !attempt.gateTokenExpiresAt ||
     attempt.gateTokenExpiresAt.getTime() <= now.getTime() ||
-    !tokenMatches(presented, attempt.gateTokenHash)
+    !selfHealTokenMatches(presented, attempt.gateTokenHash)
   ) {
     return unauthorized();
   }

@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { and, eq } from "drizzle-orm";
 
@@ -94,6 +94,17 @@ export function mintSelfHealToken(): string {
 
 export function hashSelfHealToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+/** Constant-time check of a presented token against its stored hash. */
+export function selfHealTokenMatches(
+  presented: string,
+  storedHash: string,
+): boolean {
+  const a = Buffer.from(hashSelfHealToken(presented), "utf8");
+  const b = Buffer.from(storedHash, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 export interface PlanSelfHealAuditRunInput {
