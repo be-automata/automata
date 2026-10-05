@@ -13,6 +13,7 @@ import {
   closeFixAttempt,
   extendFixDispatchLease,
   getFixAttemptById,
+  getFixAttemptByPr,
   getFixAttemptByThread,
   getFixAttemptForGateReport,
   getFindingForAttempt,
@@ -21,10 +22,16 @@ import {
   listFixReadyFindings,
   listStaleDispatchedAttempts,
   listTerminalUnreportedAttempts,
+  listUnsettledFixPrs,
+  recordFixPrClosed,
+  recordFixPrMergeDetail,
+  recordFixPrMerged,
   refundFixAttempt,
   releaseAttemptLease,
   updateFixAttempt,
+  FIX_REGRESSION_WINDOW_MS,
 } from "./audit-fix-attempts";
+import { UNFENCED_SELF_HEAL_MODEL_FUNCTIONS } from "./self-heal-breaker";
 import { createOrganization } from "./organizations";
 import { withSelfHealTx } from "./self-heal-tx";
 import { createTestThread, createTestUser } from "./test-helpers";
@@ -844,6 +851,261 @@ describe("audit fix attempts", () => {
       expect(
         await getFindingForAttempt({ db, organizationId: orgB, findingId }),
       ).toBeNull();
+    });
+  });
+  describe("fix PR lifecycle (R5)", () => {
+    const DAY = 86_400_000;
+    const MERGED_AT = new Date("2026-10-05T12:00:00.000Z");
+    const SHA = "d".repeat(40);
+
+    async function withPr(
+      prState: "draft" | "ready" = "ready",
+    ): Promise<{ findingId: string; id: string; prNumber: number }> {
+      const findingId = await makeFinding(orgA);
+      const won = await claim(findingId);
+      if (!won) throw new Error("claim failed");
+      const prNumber = Math.floor(Math.random() * 1_000_000_000) + 1;
+      await updateFixAttempt({
+        db,
+        organizationId: orgA,
+        id: won.attempt.id,
+        patch: {
+          phase: prState === "ready" ? "ready" : "ci_pending",
+          prNumber,
+          prState,
+          checkStatus: "passed",
+          guardStatus: "passed",
+          gatedHeadSha: SHA,
+        },
+      });
+      return { findingId, id: won.attempt.id, prNumber };
+    }
+
+    const merge = (id: string, organizationId = orgA) =>
+      recordFixPrMerged({
+        db,
+        organizationId,
+        attemptId: id,
+        mergedAt: MERGED_AT,
+        mergeSha: SHA,
+        mergedBy: "octocat",
+        humanCommitCount: 1,
+        changedRanges: [{ file: "src/a.ts", ranges: [[3, 5]] }],
+      });
+
+    it("getFixAttemptByPr is unfenced, case-insensitive on the repo and exact on the PR", async () => {
+      expect("getFixAttemptByPr" in UNFENCED_SELF_HEAL_MODEL_FUNCTIONS).toBe(
+        true,
+      );
+      const { id, prNumber } = await withPr();
+      const row = await getFixAttemptByPr({
+        db,
+        repoFullName: "  ACME/widgets ",
+        prNumber,
+      });
+      expect(row?.id).toBe(id);
+      expect(row?.organizationId).toBe(orgA);
+      expect(
+        await getFixAttemptByPr({
+          db,
+          repoFullName: REPO,
+          prNumber: prNumber + 1,
+        }),
+      ).toBeNull();
+      expect(
+        await getFixAttemptByPr({ db, repoFullName: "acme/other", prNumber }),
+      ).toBeNull();
+    });
+
+    it("recordFixPrMerged records the merge, opens a 30-day window and clears the active attempt", async () => {
+      const { findingId, id } = await withPr();
+      expect(await merge(id)).toBe(true);
+      const row = await getFixAttemptById({ db, organizationId: orgA, id });
+      expect(row).toMatchObject({
+        mergedAt: MERGED_AT,
+        mergeSha: SHA,
+        mergedBy: "octocat",
+        humanCommitCount: 1,
+        changedRanges: [{ file: "src/a.ts", ranges: [[3, 5]] }],
+        outcome: "merged",
+        prState: "merged",
+        phase: "closed",
+        infraRefunded: false,
+      });
+      expect(row?.regressionWindowEndsAt?.getTime()).toBe(
+        MERGED_AT.getTime() + 30 * DAY,
+      );
+      expect(FIX_REGRESSION_WINDOW_MS).toBe(30 * DAY);
+      const f = await readFinding(findingId);
+      expect(f.activeAttemptId).toBeNull();
+      expect(f.activeThreadId).toBeNull();
+      // The fix is on the default branch: no new attempt until an audit decides.
+      expect(f.fixReadyAt).toBeNull();
+      expect(f.attempts).toBe(1);
+    });
+
+    it("recordFixPrMerged is exactly-once and org-fenced", async () => {
+      const { id } = await withPr();
+      expect(await merge(id, orgB)).toBe(false);
+      const results = await Promise.all([merge(id), merge(id)]);
+      expect(results.filter(Boolean)).toHaveLength(1);
+      expect(await merge(id)).toBe(false);
+    });
+
+    it("recordFixPrMerged accepts the detail later; the detail write needs a recorded merge", async () => {
+      const { id } = await withPr("draft");
+      expect(
+        await recordFixPrMergeDetail({
+          db,
+          organizationId: orgA,
+          attemptId: id,
+          humanCommitCount: 0,
+          changedRanges: [],
+        }),
+      ).toBe(false);
+      expect(
+        await recordFixPrMerged({
+          db,
+          organizationId: orgA,
+          attemptId: id,
+          mergedAt: MERGED_AT,
+          mergeSha: SHA,
+          mergedBy: "octocat",
+          humanCommitCount: null,
+          changedRanges: null,
+        }),
+      ).toBe(true);
+      expect(
+        await recordFixPrMergeDetail({
+          db,
+          organizationId: orgB,
+          attemptId: id,
+          humanCommitCount: 2,
+          changedRanges: [],
+        }),
+      ).toBe(false);
+      expect(
+        await recordFixPrMergeDetail({
+          db,
+          organizationId: orgA,
+          attemptId: id,
+          humanCommitCount: 2,
+          changedRanges: [{ file: "b.ts", ranges: [[1, 1]] }],
+        }),
+      ).toBe(true);
+      const row = await getFixAttemptById({ db, organizationId: orgA, id });
+      expect(row?.humanCommitCount).toBe(2);
+      expect(row?.changedRanges).toEqual([{ file: "b.ts", ranges: [[1, 1]] }]);
+    });
+
+    it("a merged PR of an already refunded attempt is still recorded; another active attempt is untouched", async () => {
+      const { findingId, id } = await withPr("draft");
+      await refundFixAttempt({
+        db,
+        organizationId: orgA,
+        attemptId: id,
+        cause: "fix_ci_killed",
+        outcome: "killed",
+      });
+      const other = "attempt-in-flight";
+      await db
+        .update(auditFindings)
+        .set({ activeAttemptId: other })
+        .where(eq(auditFindings.id, findingId));
+      expect(await merge(id)).toBe(true);
+      const f = await readFinding(findingId);
+      expect(f.activeAttemptId).toBe(other);
+      expect(f.fixReadyAt).not.toBeNull();
+      const row = await getFixAttemptById({ db, organizationId: orgA, id });
+      expect(row?.outcome).toBe("merged");
+      expect(row?.infraRefunded).toBe(true);
+    });
+
+    it("recordFixPrClosed is org-fenced and never overwrites merged or expired", async () => {
+      const a = await withPr();
+      expect(
+        await recordFixPrClosed({
+          db,
+          organizationId: orgB,
+          attemptId: a.id,
+          state: "closed",
+        }),
+      ).toBe(false);
+      expect(
+        await recordFixPrClosed({
+          db,
+          organizationId: orgA,
+          attemptId: a.id,
+          state: "closed",
+        }),
+      ).toBe(true);
+      let row = await getFixAttemptById({ db, organizationId: orgA, id: a.id });
+      expect(row?.prState).toBe("closed");
+      // Recording the PR state alone does not close or count the attempt.
+      expect(row?.phase).toBe("ready");
+
+      const b = await withPr();
+      await recordFixPrClosed({
+        db,
+        organizationId: orgA,
+        attemptId: b.id,
+        state: "expired",
+      });
+      expect(
+        await recordFixPrClosed({
+          db,
+          organizationId: orgA,
+          attemptId: b.id,
+          state: "closed",
+        }),
+      ).toBe(false);
+      row = await getFixAttemptById({ db, organizationId: orgA, id: b.id });
+      expect(row?.prState).toBe("expired");
+
+      const c = await withPr();
+      await merge(c.id);
+      expect(
+        await recordFixPrClosed({
+          db,
+          organizationId: orgA,
+          attemptId: c.id,
+          state: "closed",
+        }),
+      ).toBe(false);
+    });
+
+    it("listUnsettledFixPrs returns open attempts whose PR is merged or closed, with a free lease", async () => {
+      expect("listUnsettledFixPrs" in UNFENCED_SELF_HEAL_MODEL_FUNCTIONS).toBe(
+        true,
+      );
+      const merged = await withPr("draft");
+      const closedPr = await withPr("draft");
+      const leased = await withPr("draft");
+      const live = await withPr("draft");
+      const settled = await withPr();
+      const patchState = (id: string, prState: "merged" | "closed") =>
+        updateFixAttempt({ db, organizationId: orgA, id, patch: { prState } });
+      await patchState(merged.id, "merged");
+      await patchState(closedPr.id, "closed");
+      await patchState(leased.id, "closed");
+      await claimAttemptLease({
+        db,
+        organizationId: orgA,
+        attemptId: leased.id,
+        now: T0,
+      });
+      await merge(settled.id);
+
+      const rows = await listUnsettledFixPrs({ db, now: T0, limit: 1000 });
+      const mine = new Set(
+        [merged, closedPr, leased, live, settled].map((a) => a.id),
+      );
+      expect(
+        rows
+          .filter((r) => mine.has(r.id))
+          .map((r) => r.id)
+          .sort(),
+      ).toEqual([merged.id, closedPr.id].sort());
     });
   });
 });

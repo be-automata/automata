@@ -89,6 +89,10 @@ export const UNFENCED_SELF_HEAL_MODEL_FUNCTIONS: Record<string, string> = {
     "the gate token is the authority; the row carries organizationId",
   listPendingPrOpens:
     "tick sweep resumes draft-PR opens across all orgs; rows carry organizationId",
+  getFixAttemptByPr:
+    "the pull_request webhook signature is the authority; the row carries organizationId",
+  listUnsettledFixPrs:
+    "lifecycle sweep settles merged/closed fix PRs across all orgs; rows carry organizationId",
   acquireSelfHealSlot: "platform-wide single box slot",
   setSlotHolderThread: "platform-wide single box slot",
   releaseSelfHealSlot: "platform-wide single box slot",

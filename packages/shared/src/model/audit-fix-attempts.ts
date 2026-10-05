@@ -11,6 +11,7 @@ import {
   lt,
   lte,
   ne,
+  notInArray,
   or,
   sql,
 } from "drizzle-orm";
@@ -24,6 +25,7 @@ import {
 } from "../db/schema";
 import type { ThreadStatus } from "../db/types";
 import type { AuditFindingRow, AuditFixAttemptRow } from "./audit-findings";
+import { normalizeRepo } from "./repo-review-settings";
 import { withSelfHealTx, type SelfHealTx } from "./self-heal-tx";
 
 /**
@@ -812,4 +814,228 @@ export async function getFindingForAttempt({
     )
     .limit(1);
   return rows[0] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Fix PR lifecycle (R5): merges and human closes. Observation only — the
+// platform never merges; these record what a person did on GitHub.
+// ---------------------------------------------------------------------------
+
+/** A merged fix is watched for regressions for 30 days. */
+export const FIX_REGRESSION_WINDOW_MS = 30 * 86_400_000;
+
+/** New-side line ranges a merged fix PR touched, per file. */
+export type FixChangedRanges = Array<{
+  file: string;
+  ranges: Array<[number, number]>;
+}>;
+
+/**
+ * UNFENCED (T-09-14-1): a pull_request webhook carries no organization; its
+ * signature is the authority. The row carries organizationId and every
+ * later call re-fences on it. The repo compares case-insensitively; the
+ * newest attempt for the PR wins.
+ */
+export async function getFixAttemptByPr({
+  db,
+  repoFullName,
+  prNumber,
+}: {
+  db: DB;
+  repoFullName: string;
+  prNumber: number;
+}): Promise<AuditFixAttemptRow | null> {
+  const rows = await db
+    .select()
+    .from(auditFixAttempts)
+    .where(
+      and(
+        eq(auditFixAttempts.prNumber, prNumber),
+        sql`lower(${auditFixAttempts.repoFullName}) = ${normalizeRepo(repoFullName)}`,
+      ),
+    )
+    .orderBy(desc(auditFixAttempts.createdAt))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * Record a person's merge, exactly once (merged_at is the CAS). The attempt
+ * is finished (phase closed, outcome merged, pr_state merged) and its
+ * 30-day regression window starts at the merge. The finding's active
+ * attempt is cleared when it is this one, and a finding with no attempt in
+ * flight leaves the fix queue (fix_ready_at null): the fix is on the default
+ * branch and the next audit decides. The commit and file detail may be null
+ * here and filled by recordFixPrMergeDetail once GitHub has been read.
+ */
+export async function recordFixPrMerged({
+  db,
+  organizationId,
+  attemptId,
+  mergedAt,
+  mergeSha,
+  mergedBy,
+  humanCommitCount,
+  changedRanges,
+  now = new Date(),
+}: {
+  db: DB;
+  organizationId: string;
+  attemptId: string;
+  mergedAt: Date;
+  mergeSha: string | null;
+  mergedBy: string | null;
+  humanCommitCount: number | null;
+  changedRanges: FixChangedRanges | null;
+  now?: Date;
+}): Promise<boolean> {
+  return withSelfHealTx(db, async (tx) => {
+    const merged = await tx
+      .update(auditFixAttempts)
+      .set({
+        mergedAt,
+        mergeSha,
+        mergedBy,
+        humanCommitCount,
+        changedRanges,
+        regressionWindowEndsAt: new Date(
+          mergedAt.getTime() + FIX_REGRESSION_WINDOW_MS,
+        ),
+        outcome: "merged",
+        prState: "merged",
+        phase: "closed",
+        leaseUntil: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(auditFixAttempts.id, attemptId),
+          eq(auditFixAttempts.organizationId, organizationId),
+          isNull(auditFixAttempts.mergedAt),
+        ),
+      )
+      .returning({ findingId: auditFixAttempts.findingId });
+    const row = merged[0];
+    if (!row) return false;
+    await tx
+      .update(auditFindings)
+      .set({ activeAttemptId: null, activeThreadId: null })
+      .where(
+        and(
+          eq(auditFindings.id, row.findingId),
+          eq(auditFindings.organizationId, organizationId),
+          eq(auditFindings.activeAttemptId, attemptId),
+        ),
+      );
+    await tx
+      .update(auditFindings)
+      .set({ fixReadyAt: null })
+      .where(
+        and(
+          eq(auditFindings.id, row.findingId),
+          eq(auditFindings.organizationId, organizationId),
+          isNull(auditFindings.activeAttemptId),
+        ),
+      );
+    return true;
+  });
+}
+
+/** The GitHub-read half of a recorded merge (commit authors, hunks). */
+export async function recordFixPrMergeDetail({
+  db,
+  organizationId,
+  attemptId,
+  humanCommitCount,
+  changedRanges,
+}: {
+  db: DB;
+  organizationId: string;
+  attemptId: string;
+  humanCommitCount: number | null;
+  changedRanges: FixChangedRanges | null;
+}): Promise<boolean> {
+  const rows = await db
+    .update(auditFixAttempts)
+    .set({ humanCommitCount, changedRanges })
+    .where(
+      and(
+        eq(auditFixAttempts.id, attemptId),
+        eq(auditFixAttempts.organizationId, organizationId),
+        isNotNull(auditFixAttempts.mergedAt),
+      ),
+    )
+    .returning({ id: auditFixAttempts.id });
+  return rows.length > 0;
+}
+
+/**
+ * Record that the fix PR closed unmerged ('closed' by a person, 'expired'
+ * by the platform). Only the PR state: counting the attempt is
+ * closeFixAttempt's job. A merged or expired PR state is never overwritten.
+ */
+export async function recordFixPrClosed({
+  db,
+  organizationId,
+  attemptId,
+  state,
+  now = new Date(),
+}: {
+  db: DB;
+  organizationId: string;
+  attemptId: string;
+  state: "closed" | "expired";
+  now?: Date;
+}): Promise<boolean> {
+  const rows = await db
+    .update(auditFixAttempts)
+    .set({ prState: state, updatedAt: now })
+    .where(
+      and(
+        eq(auditFixAttempts.id, attemptId),
+        eq(auditFixAttempts.organizationId, organizationId),
+        isNull(auditFixAttempts.mergedAt),
+        or(
+          isNull(auditFixAttempts.prState),
+          notInArray(auditFixAttempts.prState, ["merged", "expired"]),
+        ),
+      ),
+    )
+    .returning({ id: auditFixAttempts.id });
+  return rows.length > 0;
+}
+
+/**
+ * UNFENCED (R5): attempts still open whose PR GitHub already reported merged
+ * or closed (an adopted PR, or a draft the CI evaluator saw a person close
+ * or merge) with a free lease, across all orgs, oldest first. The lifecycle
+ * sweep settles them when no webhook did. Rows carry organizationId.
+ */
+export async function listUnsettledFixPrs({
+  db,
+  now = new Date(),
+  limit = 20,
+}: {
+  db: DB;
+  now?: Date;
+  limit?: number;
+}): Promise<AuditFixAttemptRow[]> {
+  return withSelfHealTx(db, (tx) =>
+    tx
+      .select()
+      .from(auditFixAttempts)
+      .where(
+        and(
+          ne(auditFixAttempts.phase, "closed"),
+          isNotNull(auditFixAttempts.prNumber),
+          inArray(auditFixAttempts.prState, ["merged", "closed"]),
+          or(
+            isNull(auditFixAttempts.leaseUntil),
+            lte(auditFixAttempts.leaseUntil, now),
+          ),
+        ),
+      )
+      .orderBy(asc(auditFixAttempts.updatedAt))
+      .limit(limit),
+  );
 }
