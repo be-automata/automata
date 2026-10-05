@@ -7,6 +7,7 @@ import {
   eq,
   isNotNull,
   isNull,
+  inArray,
   lt,
   lte,
   ne,
@@ -15,7 +16,13 @@ import {
 } from "drizzle-orm";
 
 import type { DB } from "../db";
-import { auditFindings, auditFixAttempts } from "../db/schema";
+import {
+  auditFindings,
+  auditFixAttempts,
+  thread,
+  threadChat,
+} from "../db/schema";
+import type { ThreadStatus } from "../db/types";
 import type { AuditFindingRow, AuditFixAttemptRow } from "./audit-findings";
 import { withSelfHealTx, type SelfHealTx } from "./self-heal-tx";
 
@@ -330,25 +337,31 @@ async function finishFixAttempt({
   });
 }
 
-/** Infra refund (RECON-01). Idempotent: true only for the call that refunded. */
+/**
+ * Infra refund (RECON-01). Idempotent: true only for the call that refunded.
+ * `outcome` defaults to "refunded"; a Drain/kill-switch cancel passes "killed"
+ * (KILL-01) and is refunded all the same.
+ */
 export async function refundFixAttempt({
   db,
   organizationId,
   attemptId,
   cause,
+  outcome = "refunded",
   now = new Date(),
 }: {
   db: DB;
   organizationId: string;
   attemptId: string;
   cause: string;
+  outcome?: string;
   now?: Date;
 }): Promise<boolean> {
   return finishFixAttempt({
     db,
     organizationId,
     attemptId,
-    outcome: "refunded",
+    outcome,
     counted: false,
     terminalCause: cause,
     now,
@@ -470,4 +483,193 @@ export async function updateFixAttempt({
     )
     .returning();
   return rows[0] ?? null;
+}
+
+/**
+ * The thread a fix attempt is bound to, as the reconcile reads it. Status is
+ * the EFFECTIVE status: chat-mode threads (version > 0) keep their live status
+ * on the newest threadChat row, legacy threads on the thread row. The typed
+ * terminal cause and the error message are read from either row.
+ */
+export interface FixAttemptThreadState {
+  attempt: AuditFixAttemptRow;
+  /** null when the attempt has no thread (or the thread row is gone). */
+  thread: {
+    id: string;
+    status: ThreadStatus;
+    terminalCause: string | null;
+    errorMessage: string | null;
+    createdAt: Date;
+  } | null;
+}
+
+/** Effective statuses after which a fix thread can no longer report. */
+export const FIX_THREAD_TERMINAL_STATUSES: ThreadStatus[] = [
+  "complete",
+  "stopped",
+  "error",
+  "working-stopped",
+];
+
+function newestChat<T>(column: unknown) {
+  return sql<T | null>`(select ${column} from ${threadChat} where ${threadChat.threadId} = ${thread.id} order by ${threadChat.updatedAt} desc limit 1)`;
+}
+
+const THREAD_STATE_COLUMNS = {
+  attempt: auditFixAttempts,
+  threadId: thread.id,
+  threadVersion: thread.version,
+  threadStatus: thread.status,
+  threadTerminalCause: thread.terminalCause,
+  threadErrorMessage: thread.errorMessage,
+  threadCreatedAt: thread.createdAt,
+  chatStatus: newestChat<ThreadStatus>(threadChat.status),
+  chatTerminalCause: sql<
+    string | null
+  >`(select ${threadChat.terminalCause} from ${threadChat} where ${threadChat.threadId} = ${thread.id} and ${threadChat.terminalCause} is not null limit 1)`,
+  chatErrorMessage: newestChat<string>(threadChat.errorMessage),
+};
+
+interface ThreadStateRow {
+  attempt: AuditFixAttemptRow;
+  threadId: string | null;
+  threadVersion: number | null;
+  threadStatus: ThreadStatus | null;
+  threadTerminalCause: string | null;
+  threadErrorMessage: string | null;
+  threadCreatedAt: Date | null;
+  chatStatus: ThreadStatus | null;
+  chatTerminalCause: string | null;
+  chatErrorMessage: string | null;
+}
+
+function toThreadState(row: ThreadStateRow): FixAttemptThreadState {
+  if (
+    row.threadId === null ||
+    row.threadStatus === null ||
+    row.threadCreatedAt === null
+  ) {
+    return { attempt: row.attempt, thread: null };
+  }
+  const chatMode = (row.threadVersion ?? 0) > 0;
+  return {
+    attempt: row.attempt,
+    thread: {
+      id: row.threadId,
+      status: chatMode
+        ? (row.chatStatus ?? row.threadStatus)
+        : row.threadStatus,
+      terminalCause: row.threadTerminalCause ?? row.chatTerminalCause,
+      errorMessage: row.chatErrorMessage ?? row.threadErrorMessage,
+      createdAt: row.threadCreatedAt,
+    },
+  };
+}
+
+/** Typed terminal cause, or a terminal status on the thread or any chat row. */
+function threadIsTerminal() {
+  const statuses = sql.join(
+    FIX_THREAD_TERMINAL_STATUSES.map((s) => sql`${s}`),
+    sql`, `,
+  );
+  return sql`(${thread.terminalCause} is not null or ${thread.status} in (${statuses}) or exists (select 1 from ${threadChat} where ${threadChat.threadId} = ${thread.id} and ${threadChat.status} in (${statuses})))`;
+}
+
+/**
+ * UNFENCED (RECON-01): dispatched attempts whose dispatch lease has lapsed,
+ * across all orgs, oldest lease first. The reconcile reads each one back from
+ * Hatchet before deciding anything; rows carry organizationId and every write
+ * that follows is fenced by it.
+ */
+export async function listStaleDispatchedAttempts({
+  db,
+  now = new Date(),
+  limit = 20,
+}: {
+  db: DB;
+  now?: Date;
+  limit?: number;
+}): Promise<FixAttemptThreadState[]> {
+  const rows = await withSelfHealTx(db, (tx) =>
+    tx
+      .select(THREAD_STATE_COLUMNS)
+      .from(auditFixAttempts)
+      .leftJoin(thread, eq(thread.id, auditFixAttempts.threadId))
+      .where(
+        and(
+          eq(auditFixAttempts.phase, "dispatched"),
+          lt(auditFixAttempts.dispatchLeaseUntil, now),
+        ),
+      )
+      .orderBy(asc(auditFixAttempts.dispatchLeaseUntil))
+      .limit(limit),
+  );
+  return rows.map(toThreadState);
+}
+
+/**
+ * UNFENCED (RES-10): attempts still 'dispatched' or 'checking' with no check
+ * report whose thread has been terminal for at least `graceMs` (the newest
+ * write to the thread or any of its chat rows is older than now - grace), so a
+ * report still in flight is not pre-empted. Rows carry organizationId.
+ */
+export async function listTerminalUnreportedAttempts({
+  db,
+  now = new Date(),
+  graceMs = 600_000,
+  limit = 20,
+}: {
+  db: DB;
+  now?: Date;
+  graceMs?: number;
+  limit?: number;
+}): Promise<FixAttemptThreadState[]> {
+  const cutoff = new Date(now.getTime() - graceMs);
+  const rows = await withSelfHealTx(db, (tx) =>
+    tx
+      .select(THREAD_STATE_COLUMNS)
+      .from(auditFixAttempts)
+      .innerJoin(thread, eq(thread.id, auditFixAttempts.threadId))
+      .where(
+        and(
+          inArray(auditFixAttempts.phase, ["dispatched", "checking"]),
+          isNull(auditFixAttempts.checkReportedAt),
+          threadIsTerminal(),
+          lt(thread.updatedAt, cutoff),
+          sql`not exists (select 1 from ${threadChat} where ${threadChat.threadId} = ${thread.id} and ${threadChat.updatedAt} >= ${sql.param(cutoff, threadChat.updatedAt)})`,
+        ),
+      )
+      .orderBy(asc(thread.updatedAt))
+      .limit(limit),
+  );
+  return rows.map(toThreadState);
+}
+
+/**
+ * Push a dispatched attempt's lease forward after Hatchet showed its run
+ * QUEUED or RUNNING. Applies only while the attempt is still 'dispatched'.
+ */
+export async function extendFixDispatchLease({
+  db,
+  organizationId,
+  attemptId,
+  until,
+}: {
+  db: DB;
+  organizationId: string;
+  attemptId: string;
+  until: Date;
+}): Promise<boolean> {
+  const rows = await db
+    .update(auditFixAttempts)
+    .set({ dispatchLeaseUntil: until })
+    .where(
+      and(
+        eq(auditFixAttempts.id, attemptId),
+        eq(auditFixAttempts.organizationId, organizationId),
+        eq(auditFixAttempts.phase, "dispatched"),
+      ),
+    )
+    .returning({ id: auditFixAttempts.id });
+  return rows.length > 0;
 }

@@ -4,17 +4,20 @@ import { eq, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 
 import { createDb } from "../db";
-import { auditFindings } from "../db/schema";
+import { auditFindings, thread, threadChat } from "../db/schema";
 import { insertFinding, type AuditFindingInsert } from "./audit-findings";
 import {
   bindFixAttemptThread,
   claimFixAttempt,
   closeFixAttempt,
+  extendFixDispatchLease,
   getFixAttemptById,
   getFixAttemptByThread,
   getFixAttemptForGateReport,
   listExpiredFixClaims,
   listFixReadyFindings,
+  listStaleDispatchedAttempts,
+  listTerminalUnreportedAttempts,
   refundFixAttempt,
   updateFixAttempt,
 } from "./audit-fix-attempts";
@@ -530,6 +533,188 @@ describe("audit fix attempts", () => {
       expect(
         await getFixAttemptById({ db, organizationId: orgB, id: attemptId }),
       ).toBeNull();
+    });
+  });
+  describe("reconcile selectors (RECON-01, RES-10)", () => {
+    /**
+     * Ancient instants that move EARLIER with every run: no other suite's rows
+     * and no earlier run's leftovers fall before them, so LIMIT/order asserts
+     * see only this run's rows.
+     */
+    const B = Date.UTC(1991, 0, 1) - (Date.now() - Date.UTC(2026, 0, 1));
+    const at = (minutes: number) => new Date(B + minutes * MIN);
+
+    async function dispatched(
+      threadOverrides: Record<string, unknown> = {},
+      opts: { chatMode?: boolean; boundAt?: Date } = {},
+    ) {
+      const id = await makeFinding(orgA);
+      const won = await claim(id, { now: opts.boundAt ?? at(0) });
+      const { threadId } = await createTestThread({
+        db,
+        userId,
+        enableThreadChatCreation: opts.chatMode ?? false,
+      });
+      expect(
+        await bindFixAttemptThread({
+          db,
+          organizationId: orgA,
+          attemptId: won!.attempt.id,
+          threadId,
+          now: opts.boundAt ?? at(0),
+        }),
+      ).toBe(true);
+      if (Object.keys(threadOverrides).length > 0) {
+        await db
+          .update(thread)
+          .set(threadOverrides)
+          .where(eq(thread.id, threadId));
+      }
+      return { findingId: id, attemptId: won!.attempt.id, threadId };
+    }
+
+    async function ageThread(threadId: string, updatedAt: Date) {
+      await db.update(thread).set({ updatedAt }).where(eq(thread.id, threadId));
+      await db
+        .update(threadChat)
+        .set({ updatedAt })
+        .where(eq(threadChat.threadId, threadId));
+    }
+
+    it("listStaleDispatchedAttempts returns only dispatched attempts past their lease, with the thread state", async () => {
+      const stale = await dispatched({ status: "booting" });
+      const fresh = await dispatched({ status: "booting" }, { boundAt: at(5) });
+      const claimedOnly = (await claim(await makeFinding(orgA), {
+        now: at(0),
+      }))!.attempt.id;
+
+      const rows = await listStaleDispatchedAttempts({
+        db,
+        now: at(11),
+        limit: 1000,
+      });
+      const ids = rows.map((r) => r.attempt.id);
+      expect(ids).toContain(stale.attemptId);
+      expect(ids).not.toContain(fresh.attemptId);
+      expect(ids).not.toContain(claimedOnly);
+      const row = rows.find((r) => r.attempt.id === stale.attemptId)!;
+      expect(row.thread?.id).toBe(stale.threadId);
+      expect(row.thread?.status).toBe("booting");
+
+      // The lease extension takes it out until the new lease lapses.
+      expect(
+        await extendFixDispatchLease({
+          db,
+          organizationId: orgB,
+          attemptId: stale.attemptId,
+          until: at(21),
+        }),
+      ).toBe(false);
+      expect(
+        await extendFixDispatchLease({
+          db,
+          organizationId: orgA,
+          attemptId: stale.attemptId,
+          until: at(21),
+        }),
+      ).toBe(true);
+      const after = await listStaleDispatchedAttempts({
+        db,
+        now: at(11),
+        limit: 1000,
+      });
+      expect(after.map((r) => r.attempt.id)).not.toContain(stale.attemptId);
+    });
+
+    it("listStaleDispatchedAttempts honours LIMIT, oldest lease first", async () => {
+      const a = await dispatched({}, { boundAt: at(-30) });
+      await dispatched({}, { boundAt: at(-29) });
+      await dispatched({}, { boundAt: at(-28) });
+      const rows = await listStaleDispatchedAttempts({
+        db,
+        now: at(-17),
+        limit: 2,
+      });
+      expect(rows).toHaveLength(2);
+      expect(rows[0]!.attempt.id).toBe(a.attemptId);
+    });
+
+    it("listTerminalUnreportedAttempts returns terminal, unreported, dispatched/checking attempts after the grace", async () => {
+      const typed = await dispatched({
+        status: "complete",
+        terminalCause: "daemon-failed",
+      });
+      await ageThread(typed.threadId, at(0));
+      const errored = await dispatched({
+        status: "error",
+        errorMessage: "invalid-claude-credentials",
+      });
+      await ageThread(errored.threadId, at(0));
+      const checking = await dispatched({ status: "complete" });
+      await updateFixAttempt({
+        db,
+        organizationId: orgA,
+        id: checking.attemptId,
+        patch: { phase: "checking" },
+      });
+      await ageThread(checking.threadId, at(0));
+      const reported = await dispatched({ status: "complete" });
+      await updateFixAttempt({
+        db,
+        organizationId: orgA,
+        id: reported.attemptId,
+        patch: { checkReportedAt: at(1) },
+      });
+      await ageThread(reported.threadId, at(0));
+      const live = await dispatched({ status: "working" });
+      await ageThread(live.threadId, at(0));
+      const recent = await dispatched({ status: "complete" });
+      await ageThread(recent.threadId, at(5));
+
+      const rows = await listTerminalUnreportedAttempts({
+        db,
+        now: at(11),
+        limit: 1000,
+      });
+      const ids = rows.map((r) => r.attempt.id);
+      expect(ids).toEqual(
+        expect.arrayContaining([
+          typed.attemptId,
+          errored.attemptId,
+          checking.attemptId,
+        ]),
+      );
+      expect(ids).not.toContain(reported.attemptId);
+      expect(ids).not.toContain(live.attemptId);
+      expect(ids).not.toContain(recent.attemptId);
+      const t = rows.find((r) => r.attempt.id === typed.attemptId)!.thread!;
+      expect(t.terminalCause).toBe("daemon-failed");
+      const e = rows.find((r) => r.attempt.id === errored.attemptId)!.thread!;
+      expect(e.errorMessage).toBe("invalid-claude-credentials");
+      expect(e.status).toBe("error");
+
+      const limited = await listTerminalUnreportedAttempts({
+        db,
+        now: at(11),
+        limit: 2,
+      });
+      expect(limited).toHaveLength(2);
+    });
+
+    it("reads a chat-mode thread's effective status from its chat row", async () => {
+      const chat = await dispatched({}, { chatMode: true });
+      await db
+        .update(threadChat)
+        .set({ status: "complete" })
+        .where(eq(threadChat.threadId, chat.threadId));
+      await ageThread(chat.threadId, at(0));
+      const rows = await listTerminalUnreportedAttempts({
+        db,
+        now: at(11),
+        limit: 1000,
+      });
+      const row = rows.find((r) => r.attempt.id === chat.attemptId);
+      expect(row?.thread?.status).toBe("complete");
     });
   });
 });

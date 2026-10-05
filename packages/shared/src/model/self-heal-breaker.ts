@@ -79,6 +79,10 @@ export const UNFENCED_SELF_HEAL_MODEL_FUNCTIONS: Record<string, string> = {
   pruneSelfHealRows: "retention sweep deletes by age across all orgs",
   listExpiredFixClaims:
     "reconcile sweep finds lost fix dispatches across all orgs; rows carry organizationId",
+  listStaleDispatchedAttempts:
+    "reconcile reads lost fix dispatches back from Hatchet across all orgs; rows carry organizationId",
+  listTerminalUnreportedAttempts:
+    "reconcile classifies terminal unreported fix runs across all orgs; rows carry organizationId",
   listFixReadyFindings:
     "dispatcher selector across all orgs; callers re-fence by the row's organizationId",
   getFixAttemptForGateReport:
