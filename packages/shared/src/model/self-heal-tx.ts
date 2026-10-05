@@ -39,9 +39,9 @@ function assertBounded(name: string, value: number): void {
 /**
  * Run `fn` in a transaction whose statement, lock and idle-in-transaction
  * timeouts are bounded with SET LOCAL (scoped to this transaction only, so the
- * pooled session is unchanged afterwards). Overrides are validated BEFORE the
- * transaction opens. The values are validated integers, so interpolating them
- * with sql.raw cannot inject.
+ * pooled session is unchanged afterwards), in one set_config statement.
+ * Overrides are validated BEFORE the transaction opens; the values travel as
+ * bound parameters.
  */
 export async function withSelfHealTx<T>(
   db: DB,
@@ -53,16 +53,9 @@ export async function withSelfHealTx<T>(
   assertBounded("lockTimeoutMs", t.lockTimeoutMs);
   assertBounded("idleInTransactionTimeoutMs", t.idleInTransactionTimeoutMs);
   return db.transaction(async (tx) => {
+    // set_config(..., true) is SET LOCAL: one round trip for all three.
     await tx.execute(
-      sql.raw(`SET LOCAL statement_timeout = '${t.statementTimeoutMs}ms'`),
-    );
-    await tx.execute(
-      sql.raw(`SET LOCAL lock_timeout = '${t.lockTimeoutMs}ms'`),
-    );
-    await tx.execute(
-      sql.raw(
-        `SET LOCAL idle_in_transaction_session_timeout = '${t.idleInTransactionTimeoutMs}ms'`,
-      ),
+      sql`select set_config('statement_timeout', ${`${t.statementTimeoutMs}ms`}, true), set_config('lock_timeout', ${`${t.lockTimeoutMs}ms`}, true), set_config('idle_in_transaction_session_timeout', ${`${t.idleInTransactionTimeoutMs}ms`}, true)`,
     );
     return fn(tx);
   });
