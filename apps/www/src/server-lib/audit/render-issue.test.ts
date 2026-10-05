@@ -140,8 +140,8 @@ describe("renderIssueBody", () => {
 });
 
 describe("labels (LABEL-01)", () => {
-  it("uses needs-human-approve and no legacy names", () => {
-    expect(FINDING_LABELS.needsHumanApprove).toBe("needs-human-approve");
+  it("uses needs-human-review and no legacy names", () => {
+    expect(FINDING_LABELS.needsHumanReview).toBe("needs-human-review");
     const values = Object.values(FINDING_LABELS).map((v) =>
       typeof v === "function" ? v("security-audit") : v,
     );
@@ -200,7 +200,7 @@ describe("renderAuditComment", () => {
       attempts: 2,
       maxAttempts: 2,
     });
-    expect(text).toContain("needs-human-approve");
+    expect(text).toContain("needs-human-review");
   });
 
   it("lists only known rejection reasons and states the branch outcome", () => {
@@ -253,6 +253,6 @@ describe("renderAuditComment", () => {
         fingerprint: FP,
         runId: "r",
       }),
-    ).toContain("needs-human-approve");
+    ).toContain("needs-human-review");
   });
 });

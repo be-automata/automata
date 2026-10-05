@@ -1097,7 +1097,7 @@ writer (ADR-010). Everything ships OFF and in dry-run first. Nothing here is run
 - No other automation or person depends on the labels below.
 
 **Labels** (created on first use by the writer): `automata:finding`, `automata:auto-fix`,
-`needs-human-approve`, `automata:wontfix`, `automata:paused`, and `audit:<name>`. The lane NEVER
+`needs-human-review`, `automata:wontfix`, `automata:paused`, and `audit:<name>`. The lane NEVER
 applies `bug` or `enhancement`.
 
 **SLOs.**
@@ -1231,7 +1231,7 @@ still created before the deploy (step 2). Still run the schema gate before each 
 - Branch protection is OPTIONAL. Record its state and the resulting CI gate source, never require
   it: `protection` (required checks), `all-checks` (no protection, or unreadable on a free plan:
   every check run and commit status must be green, with a 2-minute settle window), or
-  `finding-check-only` (no check appears within 10 minutes: the PR gets `needs-human-approve` and a
+  `finding-check-only` (no check appears within 10 minutes: the PR gets `needs-human-review` and a
   no-repo-CI note). The activity card shows the gate source per attempt.
 - The box is on the credential broker and was deployed before www (step 4).
 - Linux box: the post-agent `git clean -ffdxq` runs as the agent uid and must be able to delete the

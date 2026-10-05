@@ -12,7 +12,7 @@ import {
  * tried and could not fix it". When the box wedges, a worker dies, the plane
  * goes offline or the run expires in the queue, the agent never tried — and
  * without a refund one bad hour on the box would burn every ready finding's
- * attempts and mass-label them needs-human-approve. Infra causes are refunded
+ * attempts and mass-label them needs-human-review. Infra causes are refunded
  * and feed the exec_plane breaker instead, so a box that keeps failing stops
  * the loop rather than eating the backlog.
  *

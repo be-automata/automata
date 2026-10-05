@@ -157,7 +157,7 @@ const NUMBER_LABELS = {
   selfHealMaxAttempts: "Max attempts per finding",
   selfHealCooldownMin: "Cooldown (minutes)",
   selfHealAbsentAudits:
-    "Rubric findings: audits absent before needs-human-approve",
+    "Rubric findings: audits absent before needs-human-review",
   selfHealMaxDiffLines: "Max fix diff lines",
   selfHealPrExpiryDays: "Unreviewed fix PR expiry (days)",
 } as const;

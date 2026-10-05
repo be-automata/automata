@@ -438,7 +438,7 @@ describe("executeAuditFindings", () => {
     expect(summary.outcome).toBe("applied");
     expect(summary.needsHuman).toBe(1);
     const labels = h.writer.issues.get(7)?.labels;
-    expect(labels?.has("needs-human-approve")).toBe(true);
+    expect(labels?.has("needs-human-review")).toBe(true);
     expect(labels?.has("automata:auto-fix")).toBe(false);
     expect(h.writer.comments).toHaveLength(1);
     const row = h.rows().find((r) => r.id === seeded.id);

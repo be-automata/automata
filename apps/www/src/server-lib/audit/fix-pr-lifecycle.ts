@@ -55,7 +55,7 @@ import {
  *    ≤ 3 pages) — in waitUntil when a webhook delivered the merge.
  *  - closed unmerged → pr_state closed and the attempt COUNTED (a person
  *    rejected the fix); the finding can be attempted again after the
- *    cooldown, and at the attempts cap it goes needs-human-approve.
+ *    cooldown, and at the attempts cap it goes needs-human-review.
  *
  * A PR the platform itself closed (a withdrawn draft) arrives here too and
  * is a no-op: its attempt is already closed. Every settled PR records one
@@ -522,7 +522,7 @@ export class FixPrLifecycle {
     }
   }
 
-  /** The attempts cap after a counted close: needs-human-approve. */
+  /** The attempts cap after a counted close: needs-human-review. */
   async capCheck(): Promise<void> {
     const finding = await this.finding();
     const mode = await this.mode();

@@ -59,7 +59,7 @@ parses it, decides, persists, and only then writes to GitHub.**
 5. **Close only on two consecutive sealed deterministic passes.** An issue is closed only after two
    consecutive audits in which the platform's own check ran, reported `pass`, and the finding was
    absent. The agent saying "fixed" never closes anything. A rubric-only finding (no deterministic
-   check exists) is never auto-closed; it gets the `needs-human-approve` label and a comment.
+   check exists) is never auto-closed; it gets the `needs-human-review` label and a comment.
 6. **Sealed worker-only check token.** The platform checks run on the worker, on the clean checkout,
    as the agent uid, BEFORE the daemon spawns. They report once, with a per-run token that is
    delivered only to the worker and never to the daemon environment or the journal. The endpoint
@@ -71,7 +71,7 @@ parses it, decides, persists, and only then writes to GitHub.**
    mode (`off` / `dry-run` / `on`, default `off`) with an org-only kill switch on the `*` row, and an
    admin Drain that sets the kill switch first and then cancels live self-heal runs. Dry-run
    records every decision as `would_*` and performs no GitHub write.
-9. **Labels.** The lane uses `automata:finding`, `automata:auto-fix`, `needs-human-approve`,
+9. **Labels.** The lane uses `automata:finding`, `automata:auto-fix`, `needs-human-review`,
    `automata:wontfix`, `automata:paused` and `audit:<name>`. It never applies `bug` or
    `enhancement`, so a repository's own triage is not overwritten.
 
@@ -228,7 +228,7 @@ the control plane decides, opens, readies and closes the pull request; a person 
 6. **CI gate, then ready, then one review, then a human merge.** The CI gate source is chosen per
    head: `protection` (the default branch's required checks), else `all-checks` (every check run and
    commit status green, with a 2-minute settle window), else `finding-check-only` (no check within
-   10 minutes; the PR gets `needs-human-approve` and a no-repo-CI note). The source is recorded on the
+   10 minutes; the PR gets `needs-human-review` and a no-repo-CI note). The source is recorded on the
    attempt and shown in the activity card. When the gate is green, the PR head still equals the
    gated sha and the guard still passes, the platform marks the PR ready with one App GraphQL
    `markPullRequestReadyForReview` call. That triggers exactly one review from the bot-author-matching

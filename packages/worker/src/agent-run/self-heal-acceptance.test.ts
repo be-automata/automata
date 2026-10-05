@@ -983,9 +983,9 @@ describe("self-heal-acceptance.sh (phase 9): github fix-lane analyser", () => {
     expect(out).toMatch(/CHECK [^\n]*ready after CI gate[^\n]*: FAIL/);
   });
 
-  it("finding-check-only: no check at all needs the needs-human-approve label", () => {
+  it("finding-check-only: no check at all needs the needs-human-review label", () => {
     const flagged = analyseFix([
-      fixPr({ checkRuns: [], labels: ["needs-human-approve"] }),
+      fixPr({ checkRuns: [], labels: ["needs-human-review"] }),
     ]);
     expect(flagged).toContain("FAILURES=0");
     const unflagged = analyseFix([fixPr({ checkRuns: [] })]);
@@ -1165,7 +1165,7 @@ describe("PILOT-RUNBOOK.md: audit self-healing loop section (phase 8)", () => {
     for (const label of [
       "automata:finding",
       "automata:auto-fix",
-      "needs-human-approve",
+      "needs-human-review",
       "automata:wontfix",
       "automata:paused",
     ]) {

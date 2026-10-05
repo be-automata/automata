@@ -84,7 +84,7 @@ describe("SelfHealFieldsView", () => {
     expect(html).toContain("Minimum severity");
     expect(html).toContain("Auto-label new issues for fixing");
     expect(html).toContain(
-      "Rubric findings: audits absent before needs-human-approve",
+      "Rubric findings: audits absent before needs-human-review",
     );
     expect(html).toContain("Max fix diff lines");
     expect(html).toContain("Unreviewed fix PR expiry (days)");
