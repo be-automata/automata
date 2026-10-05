@@ -1,11 +1,13 @@
 import type { NextRequest } from "next/server";
 import { env } from "@terragon/env/apps-www";
-import { runStalledTasksCron } from "@/server-lib/cron";
+import { runScheduledCron } from "@/server-lib/cron";
 
 /**
- * Vercel-cron mirror (does not fire on Workers — see server-lib/cron.ts). The real
- * trigger on Workers is scheduled() → runScheduledCron("0 * * * *"). This GET route
- * stays for external hits / manual pokes; both share the IN-PROCESS runner.
+ * The Workers cron entry point for the hourly trigger: scheduled() in
+ * worker-entry.ts fetches this route in-process, so the Cloudflare request context
+ * exists. It MUST go through runScheduledCron, which composes stalled-task recovery, then the
+ * hourly self-heal backstops (audit sweep, outbox drain, retention).
+ * Calling the base runner alone silently skips the self-heal stage in production.
  */
 export async function GET(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
@@ -16,7 +18,7 @@ export async function GET(request: NextRequest) {
     return new Response("Unauthorized", { status: 401 });
   }
   console.log("Stalled tasks cron task triggered");
-  await runStalledTasksCron();
+  await runScheduledCron("0 * * * *");
   console.log("Stalled tasks cron task completed");
   return Response.json({ success: true });
 }
