@@ -14,15 +14,26 @@ import {
   acquireHalfOpenProbe,
   breakerCooldownMs,
   clearPermissionLatch,
+  closeBreakerAfterProbe,
   countRecentEvents,
+  countTripsSince,
   evaluateApiBreaker,
   extendRateLimitedUntil,
   getBreakerState,
+  LOOP_COOLDOWNS_MS,
+  moveExpiredToHalfOpen,
+  planeCooldownMs,
+  probeAttemptIdOf,
   recordBreakerEvent,
+  recordProbeAttempt,
+  releaseHalfOpenProbe,
   resetBreaker,
   setPermissionLatch,
+  tripBreaker,
   type BreakerEventOutcome,
+  type BreakerScopeKind,
 } from "./self-heal-breaker";
+import { withSelfHealTx } from "./self-heal-tx";
 
 const db = createDb(env.DATABASE_URL!);
 // A second client against the same DB: a second "isolate".
@@ -382,5 +393,316 @@ describe("self-heal breaker", () => {
     });
     expect(s.state).toBe("closed");
     expect(s.version).toBe(-1);
+  });
+});
+
+describe("self-heal breaker trips (loop and plane)", () => {
+  let org: string;
+  let t0: Date;
+  const at = (ms: number) => new Date(t0.getTime() + ms);
+  const H = 3_600_000;
+  const REPO = "acme/widgets";
+
+  beforeEach(async () => {
+    org = await makeOrg();
+    t0 = new Date();
+  });
+
+  const read = (scopeKind: BreakerScopeKind = "loop_fix", scopeKey = REPO) =>
+    getBreakerState({ db, organizationId: org, scopeKind, scopeKey });
+
+  function trip(
+    nowMs: number,
+    opts: {
+      scopeKind?: BreakerScopeKind;
+      scopeKey?: string;
+      cooldownMs?: number | "paused_manual";
+      logs?: unknown[][];
+      events?: unknown[][];
+      reason?: string;
+      client?: typeof db;
+    } = {},
+  ) {
+    return tripBreaker({
+      db: opts.client ?? db,
+      organizationId: org,
+      scopeKind: opts.scopeKind ?? "loop_fix",
+      scopeKey: opts.scopeKey ?? REPO,
+      reason: opts.reason ?? "consecutive_failures",
+      evidence: { counted: 3, attemptIds: ["a1", "a2", "a3"] },
+      ...(opts.cooldownMs !== undefined ? { cooldownMs: opts.cooldownMs } : {}),
+      now: at(nowMs),
+      logger: (m, f) => opts.logs?.push([m, f]),
+      capture: (e, p) => opts.events?.push([e, p]),
+    });
+  }
+
+  const halfOpen = (nowMs: number, scopeKind: BreakerScopeKind = "loop_fix") =>
+    moveExpiredToHalfOpen({
+      db,
+      organizationId: org,
+      scopeKind,
+      scopeKey: scopeKind === "loop_fix" ? REPO : "*",
+      now: at(nowMs),
+    });
+
+  it("loop cooldowns are 24 h then 72 h", () => {
+    expect(LOOP_COOLDOWNS_MS).toEqual([86_400_000, 259_200_000]);
+  });
+
+  it("loop_fix escalates 24 h → 72 h → paused_manual within 30 days", async () => {
+    const first = await trip(0);
+    expect(first?.to).toBe("open");
+    expect((await read()).openUntil?.getTime()).toBe(at(24 * H).getTime());
+
+    expect((await halfOpen(24 * H - 1))?.to).toBeUndefined();
+    expect((await halfOpen(24 * H + 1))?.to).toBe("half_open");
+    const second = await trip(25 * H);
+    expect(second?.to).toBe("open");
+    expect((await read()).openUntil?.getTime()).toBe(
+      at(25 * H + 72 * H).getTime(),
+    );
+    expect((await read()).tripCount).toBe(2);
+
+    expect((await halfOpen(25 * H + 72 * H + 1))?.to).toBe("half_open");
+    const third = await trip(100 * H);
+    expect(third?.to).toBe("paused_manual");
+    const paused = await read();
+    expect(paused.state).toBe("paused_manual");
+    expect(paused.openUntil).toBeNull();
+    expect(paused.tripCount).toBe(3);
+
+    // Nothing automatic leaves paused_manual.
+    expect(await halfOpen(1_000 * H)).toBeNull();
+    expect(await trip(1_000 * H)).toBeNull();
+    expect((await read()).state).toBe("paused_manual");
+
+    // Only the admin reset does.
+    await resetBreaker({
+      db,
+      organizationId: org,
+      scopeKind: "loop_fix",
+      scopeKey: REPO,
+      actorUserId: "admin-1",
+    });
+    expect((await read()).state).toBe("closed");
+  });
+
+  it("trips older than 30 days do not escalate", async () => {
+    for (const ago of [31, 40]) {
+      await db.insert(selfHealBreakerEvent).values({
+        organizationId: org,
+        scopeKind: "loop_fix",
+        scopeKey: REPO,
+        outcome: "trip",
+        signal: "old",
+        createdAt: at(-ago * 24 * H),
+      });
+    }
+    expect(
+      await countTripsSince({
+        db,
+        organizationId: org,
+        scopeKind: "loop_fix",
+        scopeKey: REPO,
+        since: at(-30 * 24 * H),
+      }),
+    ).toBe(0);
+    await trip(0);
+    expect((await read()).openUntil?.getTime()).toBe(at(24 * H).getTime());
+    expect(
+      await countTripsSince({
+        db,
+        organizationId: org,
+        scopeKind: "loop_fix",
+        scopeKey: REPO,
+        since: at(-30 * 24 * H),
+      }),
+    ).toBe(1);
+  });
+
+  it("an explicit paused_manual trips straight from closed", async () => {
+    const tr = await trip(0, {
+      cooldownMs: "paused_manual",
+      reason: "draft_unsupported",
+    });
+    expect(tr?.to).toBe("paused_manual");
+    const row = await read();
+    expect(row.lastTripReason).toBe("draft_unsupported");
+    expect(row.openUntil).toBeNull();
+  });
+
+  it("a trip never applies to an open breaker unless it pauses it", async () => {
+    await trip(0);
+    expect(await trip(1_000)).toBeNull();
+    expect((await read()).tripCount).toBe(1);
+    const paused = await trip(2_000, { cooldownMs: "paused_manual" });
+    expect(paused?.from).toBe("open");
+    expect(paused?.to).toBe("paused_manual");
+  });
+
+  it("closeBreakerAfterProbe: half_open → closed, trip_count kept; anything else is a no-op", async () => {
+    expect(
+      await closeBreakerAfterProbe({
+        db,
+        organizationId: org,
+        scopeKind: "loop_fix",
+        scopeKey: REPO,
+        now: at(0),
+      }),
+    ).toBeNull();
+    await trip(0);
+    expect(
+      await closeBreakerAfterProbe({
+        db,
+        organizationId: org,
+        scopeKind: "loop_fix",
+        scopeKey: REPO,
+        now: at(1_000),
+      }),
+    ).toBeNull();
+    await halfOpen(24 * H + 1);
+    const logs: unknown[][] = [];
+    const tr = await closeBreakerAfterProbe({
+      db,
+      organizationId: org,
+      scopeKind: "loop_fix",
+      scopeKey: REPO,
+      now: at(24 * H + 2),
+      logger: (m, f) => logs.push([m, f]),
+    });
+    expect(tr?.to).toBe("closed");
+    const row = await read();
+    expect(row.state).toBe("closed");
+    expect(row.tripCount).toBe(1);
+    expect(row.openUntil).toBeNull();
+    expect(row.halfOpenProbesLeft).toBe(0);
+    expect(logs.map((l) => l[0])).toEqual(["[self-heal:breaker] transition"]);
+  });
+
+  it("a trip inside an outer transaction rolls back with it", async () => {
+    await expect(
+      withSelfHealTx(db, async (tx) => {
+        const tr = await tripBreaker({
+          db,
+          tx,
+          organizationId: org,
+          scopeKind: "loop_fix",
+          scopeKey: REPO,
+          reason: "consecutive_failures",
+          evidence: {},
+          now: at(0),
+        });
+        expect(tr?.to).toBe("open");
+        throw new Error("rollback");
+      }),
+    ).rejects.toThrow("rollback");
+    const row = await read();
+    expect(row.state).toBe("closed");
+    expect(row.version).toBe(-1);
+    const trips = await db
+      .select()
+      .from(selfHealBreakerEvent)
+      .where(
+        and(
+          eq(selfHealBreakerEvent.organizationId, org),
+          eq(selfHealBreakerEvent.outcome, "trip"),
+        ),
+      );
+    expect(trips).toHaveLength(0);
+  });
+
+  it("two concurrent trips produce exactly one transition", async () => {
+    const logs: unknown[][] = [];
+    const results = await Promise.all([
+      trip(0, { logs }),
+      trip(0, { logs, client: db2 }),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect((await read()).tripCount).toBe(1);
+    expect(
+      logs.filter((l) => l[0] === "[self-heal:breaker] transition"),
+    ).toHaveLength(1);
+  });
+
+  it("a loop trip emits one transition line, one LOOP_OPEN line and one PostHog event each", async () => {
+    const logs: unknown[][] = [];
+    const events: unknown[][] = [];
+    await trip(0, { logs, events });
+    expect(logs.map((l) => l[0])).toEqual([
+      "[self-heal:breaker] transition",
+      "[self-heal:breaker] LOOP_OPEN",
+    ]);
+    const loopOpen = logs[1]![1] as Record<string, unknown>;
+    expect(loopOpen.repo).toBe(REPO);
+    expect(loopOpen.reason).toBe("consecutive_failures");
+    expect(loopOpen.attemptIds).toEqual(["a1", "a2", "a3"]);
+    expect(events.map((e) => e[0])).toEqual([
+      "self_heal_breaker_transition",
+      "self_heal_loop_paused",
+    ]);
+  });
+
+  it("a plane trip emits only the transition line and uses its own cooldown", async () => {
+    const logs: unknown[][] = [];
+    const events: unknown[][] = [];
+    await trip(0, {
+      scopeKind: "exec_plane",
+      scopeKey: "*",
+      logs,
+      events,
+      reason: "consecutive_infra",
+    });
+    expect(logs.map((l) => l[0])).toEqual(["[self-heal:breaker] transition"]);
+    expect(events.map((e) => e[0])).toEqual(["self_heal_breaker_transition"]);
+    const row = await read("exec_plane", "*");
+    expect(row.openUntil?.getTime()).toBe(at(H).getTime());
+    await halfOpen(H + 1, "exec_plane");
+    await trip(H + 2, { scopeKind: "exec_plane", scopeKey: "*" });
+    expect((await read("exec_plane", "*")).openUntil?.getTime()).toBe(
+      at(H + 2 + 2 * H).getTime(),
+    );
+  });
+
+  it("plane cooldowns double and cap: hatchet 120 s → 30 min, exec 1 h → 12 h", () => {
+    expect(planeCooldownMs("hatchet_dispatch", 1)).toBe(120_000);
+    expect(planeCooldownMs("hatchet_dispatch", 2)).toBe(240_000);
+    expect(planeCooldownMs("hatchet_dispatch", 30)).toBe(30 * 60_000);
+    expect(planeCooldownMs("exec_plane", 1)).toBe(H);
+    expect(planeCooldownMs("exec_plane", 30)).toBe(12 * H);
+  });
+
+  it("the probe attempt id is recorded in the evidence and a refunded probe can be released", async () => {
+    await trip(0);
+    await halfOpen(24 * H + 1);
+    const args = {
+      db,
+      organizationId: org,
+      scopeKind: "loop_fix" as const,
+      scopeKey: REPO,
+    };
+    await withSelfHealTx(db, async (tx) => {
+      expect(
+        await acquireHalfOpenProbe({
+          ...args,
+          tx,
+          leaseMs: 6 * H,
+          now: at(24 * H + 2),
+        }),
+      ).toBe(true);
+      await recordProbeAttempt({ ...args, tx, attemptId: "att-1" });
+    });
+    const row = await read();
+    expect(probeAttemptIdOf(row)).toBe("att-1");
+    expect((row.lastTripEvidence as Record<string, unknown>).counted).toBe(3);
+    expect(await acquireHalfOpenProbe({ ...args, now: at(24 * H + 3) })).toBe(
+      false,
+    );
+    expect(await releaseHalfOpenProbe({ ...args, now: at(24 * H + 4) })).toBe(
+      true,
+    );
+    expect(await acquireHalfOpenProbe({ ...args, now: at(24 * H + 5) })).toBe(
+      true,
+    );
   });
 });
