@@ -87,6 +87,8 @@ export const UNFENCED_SELF_HEAL_MODEL_FUNCTIONS: Record<string, string> = {
     "dispatcher selector across all orgs; callers re-fence by the row's organizationId",
   getFixAttemptForGateReport:
     "the gate token is the authority; the row carries organizationId",
+  listPendingPrOpens:
+    "tick sweep resumes draft-PR opens across all orgs; rows carry organizationId",
   acquireSelfHealSlot: "platform-wide single box slot",
   setSlotHolderThread: "platform-wide single box slot",
   releaseSelfHealSlot: "platform-wide single box slot",

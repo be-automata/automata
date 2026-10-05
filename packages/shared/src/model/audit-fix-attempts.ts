@@ -673,3 +673,143 @@ export async function extendFixDispatchLease({
     .returning({ id: auditFixAttempts.id });
   return rows.length > 0;
 }
+
+/** The PR opener holds an attempt for 10 minutes (RES-18). */
+export const FIX_OPEN_LEASE_MS = 600_000;
+
+/**
+ * A report the route recorded but whose opener never ran (its waitUntil was
+ * cut off) is picked up by the tick sweep after this grace.
+ */
+export const FIX_REPORT_SWEEP_GRACE_MS = 120_000;
+
+/**
+ * CAS on lease_until: true for exactly one caller while the lease is free or
+ * expired. The route's opener and the tick sweep both claim it, so a passed
+ * check is never opened twice. A closed attempt is never leased.
+ */
+export async function claimAttemptLease({
+  db,
+  organizationId,
+  attemptId,
+  leaseMs = FIX_OPEN_LEASE_MS,
+  now = new Date(),
+}: {
+  db: DB;
+  organizationId: string;
+  attemptId: string;
+  leaseMs?: number;
+  now?: Date;
+}): Promise<boolean> {
+  const rows = await db
+    .update(auditFixAttempts)
+    .set({ leaseUntil: new Date(now.getTime() + leaseMs) })
+    .where(
+      and(
+        eq(auditFixAttempts.id, attemptId),
+        eq(auditFixAttempts.organizationId, organizationId),
+        ne(auditFixAttempts.phase, "closed"),
+        or(
+          isNull(auditFixAttempts.leaseUntil),
+          lte(auditFixAttempts.leaseUntil, now),
+        ),
+      ),
+    )
+    .returning({ id: auditFixAttempts.id });
+  return rows.length > 0;
+}
+
+/** Give the lease back so a scheduled retry is not held for the full lease. */
+export async function releaseAttemptLease({
+  db,
+  organizationId,
+  attemptId,
+}: {
+  db: DB;
+  organizationId: string;
+  attemptId: string;
+}): Promise<void> {
+  await db
+    .update(auditFixAttempts)
+    .set({ leaseUntil: null })
+    .where(
+      and(
+        eq(auditFixAttempts.id, attemptId),
+        eq(auditFixAttempts.organizationId, organizationId),
+      ),
+    );
+}
+
+/**
+ * UNFENCED (RES-18): attempts the opener still owes a decision, across all
+ * orgs, with a free lease: a pending open whose backoff is due, or a recorded
+ * check report nobody processed within the grace (the route's waitUntil was
+ * cut off). Rows carry organizationId; every later call re-fences on it.
+ */
+export async function listPendingPrOpens({
+  db,
+  now = new Date(),
+  limit = 20,
+  graceMs = FIX_REPORT_SWEEP_GRACE_MS,
+}: {
+  db: DB;
+  now?: Date;
+  limit?: number;
+  graceMs?: number;
+}): Promise<AuditFixAttemptRow[]> {
+  const reportCutoff = new Date(now.getTime() - graceMs);
+  return withSelfHealTx(db, (tx) =>
+    tx
+      .select()
+      .from(auditFixAttempts)
+      .where(
+        and(
+          ne(auditFixAttempts.phase, "closed"),
+          or(
+            isNull(auditFixAttempts.leaseUntil),
+            lte(auditFixAttempts.leaseUntil, now),
+          ),
+          or(
+            and(
+              eq(auditFixAttempts.prState, "pending_open"),
+              lte(auditFixAttempts.nextPrOpenAt, now),
+            ),
+            and(
+              eq(auditFixAttempts.phase, "checking"),
+              isNull(auditFixAttempts.prState),
+              lte(auditFixAttempts.checkReportedAt, reportCutoff),
+            ),
+          ),
+        ),
+      )
+      .orderBy(
+        asc(
+          sql`coalesce(${auditFixAttempts.nextPrOpenAt}, ${auditFixAttempts.checkReportedAt})`,
+        ),
+      )
+      .limit(limit),
+  );
+}
+
+/** The finding an attempt belongs to, inside the org fence. */
+export async function getFindingForAttempt({
+  db,
+  organizationId,
+  findingId,
+}: {
+  db: DB;
+  organizationId: string;
+  findingId: string;
+}): Promise<AuditFindingRow | null> {
+  const rows = await db
+    .select()
+    .from(auditFindings)
+    .where(
+      and(
+        eq(auditFindings.id, findingId),
+        eq(auditFindings.organizationId, organizationId),
+      ),
+    )
+    .limit(1);
+  return rows[0] ?? null;
+}

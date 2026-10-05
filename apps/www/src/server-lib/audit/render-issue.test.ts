@@ -160,6 +160,7 @@ describe("renderAuditComment", () => {
     "still_present",
     "needs_human_attempts_cap",
     "needs_human_rubric_absent",
+    "fix_attempt_rejected",
   ];
   it.each(kinds)("%s leads with a matching marker and is inert", (kind) => {
     const text = renderAuditComment(kind, {
@@ -186,5 +187,27 @@ describe("renderAuditComment", () => {
       maxAttempts: 2,
     });
     expect(text).toContain("needs-human-approve");
+  });
+
+  it("lists only known rejection reasons and states the branch outcome", () => {
+    const deleted = renderAuditComment("fix_attempt_rejected", {
+      fingerprint: FP,
+      runId: "r",
+      attempts: 1,
+      maxAttempts: 3,
+      reasons: ["test_edit", "denied_path", "<script>"],
+    });
+    expect(deleted).toContain("attempt 1 of 3");
+    expect(deleted).toContain("changed or deleted an existing test");
+    expect(deleted).toContain("protected path");
+    expect(deleted).not.toContain("<script>");
+    expect(deleted).toContain("branch was deleted");
+    const kept = renderAuditComment("fix_attempt_rejected", {
+      fingerprint: FP,
+      runId: "r",
+      reasons: ["open_failed"],
+      keptBranch: "automata/fix-1-abcdef01-a1",
+    });
+    expect(kept).toContain("`automata/fix-1-abcdef01-a1` is kept");
   });
 });

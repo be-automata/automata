@@ -147,13 +147,39 @@ export type AuditCommentKind =
   | "closed_check_passed"
   | "still_present"
   | "needs_human_attempts_cap"
-  | "needs_human_rubric_absent";
+  | "needs_human_rubric_absent"
+  | "fix_attempt_rejected";
+
+/**
+ * Why a self-heal change attempt did not become a pull request. Only these
+ * platform tokens are ever rendered; anything else is dropped.
+ */
+export const FIX_ATTEMPT_REJECTION_TEXT: Readonly<Record<string, string>> = {
+  suppression_comment: "it added a comment that silences a linter or scanner",
+  test_edit: "it changed or deleted an existing test",
+  ci_edit: "it changed a CI definition",
+  audit_config_edit: "it changed audit or lint configuration",
+  deleted_flagged_code: "it deleted the flagged code without a replacement",
+  out_of_plan_file: "it changed files outside the plan",
+  denied_path: "it changed a protected path",
+  diff_too_large: "the change is larger than the configured limit",
+  patch_unavailable: "GitHub did not return a diff that could be inspected",
+  sha_mismatch: "the branch moved after the check ran",
+  no_changes: "the branch has no changes against the default branch",
+  no_branch: "no branch was pushed",
+  check_failed: "the finding's check did not pass on the pushed commit",
+  open_failed: "a draft pull request could not be opened",
+};
 
 export interface AuditCommentData {
   fingerprint: string;
   runId: string;
   attempts?: number;
   maxAttempts?: number;
+  /** fix_attempt_rejected: platform reason tokens (FIX_ATTEMPT_REJECTION_TEXT). */
+  reasons?: readonly string[];
+  /** fix_attempt_rejected: the attempt branch, when it is kept for a person. */
+  keptBranch?: string;
 }
 
 export function renderAuditComment(
@@ -185,6 +211,24 @@ export function renderAuditComment(
     case "needs_human_rubric_absent":
       text = `Later audits no longer report this rubric-only finding. Only a person can confirm resolution; labelled \`${FINDING_LABELS.needsHumanApprove}\`.`;
       break;
+    case "fix_attempt_rejected": {
+      const reasons = (data.reasons ?? [])
+        .map((reason) => FIX_ATTEMPT_REJECTION_TEXT[reason])
+        .filter((line): line is string => line !== undefined)
+        .map((line) => `- ${line}`);
+      const branch =
+        data.keptBranch !== undefined
+          ? `The branch \`${data.keptBranch.replace(/[`\r\n]/g, "")}\` is kept for a person to pick up.`
+          : "No pull request was opened and the attempt branch was deleted.";
+      text = [
+        `Automated change attempt ${attempts} of ${max} was not proposed:`,
+        "",
+        ...(reasons.length > 0 ? reasons : ["- unspecified"]),
+        "",
+        branch,
+      ].join("\n");
+      break;
+    }
   }
   return `${marker}\n${text}`;
 }

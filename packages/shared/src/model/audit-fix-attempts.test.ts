@@ -8,17 +8,21 @@ import { auditFindings, thread, threadChat } from "../db/schema";
 import { insertFinding, type AuditFindingInsert } from "./audit-findings";
 import {
   bindFixAttemptThread,
+  claimAttemptLease,
   claimFixAttempt,
   closeFixAttempt,
   extendFixDispatchLease,
   getFixAttemptById,
   getFixAttemptByThread,
   getFixAttemptForGateReport,
+  getFindingForAttempt,
+  listPendingPrOpens,
   listExpiredFixClaims,
   listFixReadyFindings,
   listStaleDispatchedAttempts,
   listTerminalUnreportedAttempts,
   refundFixAttempt,
+  releaseAttemptLease,
   updateFixAttempt,
 } from "./audit-fix-attempts";
 import { createOrganization } from "./organizations";
@@ -715,6 +719,131 @@ describe("audit fix attempts", () => {
       });
       const row = rows.find((r) => r.attempt.id === chat.attemptId);
       expect(row?.thread?.status).toBe("complete");
+    });
+  });
+
+  describe("PR opener lease and pending opens (RES-18)", () => {
+    /** Ancient, moving instants: only this run's rows sort before them. */
+    const B = Date.UTC(1990, 0, 1) - (Date.now() - Date.UTC(2026, 0, 1));
+    const at = (minutes: number) => new Date(B + minutes * MIN);
+
+    async function claimed(): Promise<{ findingId: string; id: string }> {
+      const findingId = await makeFinding(orgA);
+      const won = await claim(findingId);
+      if (!won) throw new Error("claim failed");
+      return { findingId, id: won.attempt.id };
+    }
+
+    const lease = (id: string, now: Date, organizationId = orgA) =>
+      claimAttemptLease({ db, organizationId, attemptId: id, now });
+
+    it("two concurrent lease claims produce exactly one holder", async () => {
+      const { id } = await claimed();
+      const results = await Promise.all([lease(id, T0), lease(id, T0)]);
+      expect(results.filter(Boolean)).toHaveLength(1);
+      const row = await getFixAttemptById({ db, organizationId: orgA, id });
+      expect(row?.leaseUntil?.getTime()).toBe(T0.getTime() + 10 * MIN);
+    });
+
+    it("an expired lease is reclaimable; a live one is not", async () => {
+      const { id } = await claimed();
+      expect(await lease(id, T0)).toBe(true);
+      expect(await lease(id, new Date(T0.getTime() + 9 * MIN))).toBe(false);
+      expect(await lease(id, new Date(T0.getTime() + 10 * MIN))).toBe(true);
+    });
+
+    it("a released lease is claimable at once", async () => {
+      const { id } = await claimed();
+      expect(await lease(id, T0)).toBe(true);
+      await releaseAttemptLease({ db, organizationId: orgA, attemptId: id });
+      expect(await lease(id, T0)).toBe(true);
+    });
+
+    it("refuses another org and a closed attempt", async () => {
+      const { id } = await claimed();
+      expect(await lease(id, T0, orgB)).toBe(false);
+      await refundFixAttempt({
+        db,
+        organizationId: orgA,
+        attemptId: id,
+        cause: "x",
+      });
+      expect(await lease(id, T0)).toBe(false);
+    });
+
+    it("lists due pending opens and stale unprocessed reports only", async () => {
+      const due = await claimed();
+      const notYet = await claimed();
+      const leased = await claimed();
+      const stale = await claimed();
+      const fresh = await claimed();
+      const drafted = await claimed();
+      const closed = await claimed();
+      const pending = (id: string, next: Date) =>
+        updateFixAttempt({
+          db,
+          organizationId: orgA,
+          id,
+          patch: {
+            phase: "checking",
+            checkReportedAt: T0,
+            prState: "pending_open",
+            nextPrOpenAt: next,
+          },
+        });
+      await pending(due.id, at(-1));
+      await pending(notYet.id, at(5));
+      await pending(leased.id, at(-1));
+      await lease(leased.id, at(0));
+      const reported = (id: string, when: Date) =>
+        updateFixAttempt({
+          db,
+          organizationId: orgA,
+          id,
+          patch: { phase: "checking", checkReportedAt: when },
+        });
+      await reported(stale.id, at(-3));
+      await reported(fresh.id, at(-1));
+      await updateFixAttempt({
+        db,
+        organizationId: orgA,
+        id: drafted.id,
+        patch: {
+          phase: "ci_pending",
+          checkReportedAt: at(-30),
+          prState: "draft",
+        },
+      });
+      await pending(closed.id, at(-1));
+      await closeFixAttempt({
+        db,
+        organizationId: orgA,
+        attemptId: closed.id,
+        outcome: "guard_rejected",
+        counted: true,
+      });
+
+      const rows = await listPendingPrOpens({ db, now: at(0), limit: 1000 });
+      const mine = new Set(
+        [due, notYet, leased, stale, fresh, drafted, closed].map((a) => a.id),
+      );
+      expect(
+        rows
+          .filter((r) => mine.has(r.id))
+          .map((r) => r.id)
+          .sort(),
+      ).toEqual([due.id, stale.id].sort());
+    });
+
+    it("reads the attempt's finding inside the org fence", async () => {
+      const { findingId } = await claimed();
+      expect(
+        (await getFindingForAttempt({ db, organizationId: orgA, findingId }))
+          ?.id,
+      ).toBe(findingId);
+      expect(
+        await getFindingForAttempt({ db, organizationId: orgB, findingId }),
+      ).toBeNull();
     });
   });
 });
