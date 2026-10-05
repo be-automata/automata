@@ -6,6 +6,8 @@ import { nanoid } from "nanoid";
 import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db";
+import { waitUntil } from "@/lib/wait-until";
+import { openDraftFixPr } from "@/server-lib/audit/open-fix-pr";
 import {
   hashSelfHealToken,
   mintSelfHealToken,
@@ -25,6 +27,10 @@ import {
 } from "@terragon/shared/model/test-helpers";
 
 import { POST } from "./route";
+
+vi.mock("@/server-lib/audit/open-fix-pr", () => ({
+  openDraftFixPr: vi.fn(async () => "draft_opened"),
+}));
 
 const REPO = "acme/widgets";
 const SHA = "a".repeat(40);
@@ -81,6 +87,8 @@ describe("POST /api/self-heal/fix-check", () => {
 
   beforeEach(async () => {
     vi.restoreAllMocks();
+    vi.mocked(waitUntil).mockClear();
+    vi.mocked(openDraftFixPr).mockClear();
     const user = (await createTestUser({ db })).user;
     orgId = (
       await createOrganization({
@@ -277,6 +285,44 @@ describe("POST /api/self-heal/fix-check", () => {
       const row = await stored();
       expect(row.checkReportedAt).toBeNull();
       expect(row.phase).toBe("closed");
+    });
+  });
+
+  describe("draft opener attachment (GATE-01)", () => {
+    it("a recorded report schedules the opener exactly once, fenced by the attempt's org", async () => {
+      await post(report());
+      expect(vi.mocked(waitUntil)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(openDraftFixPr)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(openDraftFixPr).mock.calls[0]?.[0]).toMatchObject({
+        organizationId: orgId,
+        attemptId,
+      });
+    });
+
+    it("a non-passing recorded report is handed to the opener too (it records the outcome)", async () => {
+      await post(report({ checkOutcome: "fail" }));
+      expect(vi.mocked(openDraftFixPr)).toHaveBeenCalledTimes(1);
+    });
+
+    it("a duplicate report does not schedule it again", async () => {
+      await post(report());
+      await post(report());
+      expect(vi.mocked(waitUntil)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(openDraftFixPr)).toHaveBeenCalledTimes(1);
+    });
+
+    it("a rejected or unrecorded report schedules nothing", async () => {
+      await post(report(), mintSelfHealToken());
+      await post(report({ headSha: "abc" }));
+      await refundFixAttempt({
+        db,
+        organizationId: orgId,
+        attemptId,
+        cause: "check_missing",
+      });
+      await post(report());
+      expect(vi.mocked(waitUntil)).not.toHaveBeenCalled();
+      expect(vi.mocked(openDraftFixPr)).not.toHaveBeenCalled();
     });
   });
 });

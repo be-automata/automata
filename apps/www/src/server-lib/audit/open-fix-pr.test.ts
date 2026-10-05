@@ -718,4 +718,38 @@ describe("openDraftFixPr (GATE-01, SC4, RES-18)", () => {
       }),
     ]);
   });
+
+  describe("runFixPrOpenSweep budget", () => {
+    const rows = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+        organizationId: orgId,
+      })) as unknown as Awaited<ReturnType<typeof listPendingPrOpens>>;
+
+    it("processes at most 20 rows", async () => {
+      vi.mocked(listPendingPrOpens).mockResolvedValueOnce(rows(25));
+      const result = await runFixPrOpenSweep({
+        db,
+        now: new Date(),
+        deadlineAt: new Date(Date.now() + 60_000),
+        deps,
+      });
+      expect(result.processed).toBe(20);
+      expect(result.outcomes.not_pending).toBe(20);
+      expect(
+        vi.mocked(listPendingPrOpens).mock.calls.at(-1)?.[0],
+      ).toMatchObject({ limit: 20 });
+    });
+
+    it("stops at the deadline", async () => {
+      vi.mocked(listPendingPrOpens).mockResolvedValueOnce(rows(3));
+      const result = await runFixPrOpenSweep({
+        db,
+        now: new Date(),
+        deadlineAt: new Date(Date.now() + 1_000),
+        deps,
+      });
+      expect(result.processed).toBe(0);
+    });
+  });
 });

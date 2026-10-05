@@ -5,6 +5,7 @@ import { redactSecrets } from "@terragon/utils/redact";
 
 import { runAuditSweep, runOutboxDrain } from "./audit-sweep";
 import { runFixDispatchReconcile } from "./fix-dispatch-reconcile";
+import { runFixPrOpenSweep } from "./open-fix-pr";
 import { runSelfHealDispatcher } from "./self-heal-dispatcher";
 
 /**
@@ -32,6 +33,7 @@ export interface SelfHealCronDeps {
   sweep: typeof runAuditSweep;
   prune: typeof pruneSelfHealRows;
   reconcile: typeof runFixDispatchReconcile;
+  openPrs: typeof runFixPrOpenSweep;
   dispatch: typeof runSelfHealDispatcher;
   budget: { totalMs: number; perItemMs: number; limit: number };
 }
@@ -44,6 +46,7 @@ function defaultDeps(): SelfHealCronDeps {
     sweep: runAuditSweep,
     prune: pruneSelfHealRows,
     reconcile: runFixDispatchReconcile,
+    openPrs: runFixPrOpenSweep,
     dispatch: runSelfHealDispatcher,
     budget: SELF_HEAL_CRON_BUDGET,
   };
@@ -120,6 +123,18 @@ export async function runSelfHealCron(
         limit: deps.budget.limit,
       });
       console.log("[cron:self-heal] fix reconcile", result);
+    });
+    // RES-18 / GATE-01: resume draft-PR opens the route's waitUntil did not
+    // finish (pending_open retries and reports nobody processed), before the
+    // dispatcher so a slow GitHub cannot starve PR opens of a finished fix.
+    await withinBudget("fix draft opens", remaining(), async () => {
+      const result = await deps.openPrs({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+      });
+      console.log("[cron:self-heal] fix draft opens", result);
     });
     // BULK-01: the fix dispatcher runs LAST, so its admission sees the state
     // the drain and the sweep just settled, and it can only use what is left

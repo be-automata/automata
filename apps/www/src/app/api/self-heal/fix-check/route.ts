@@ -5,6 +5,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { db } from "@/lib/db";
+import { waitUntil } from "@/lib/wait-until";
+import { openDraftFixPr } from "@/server-lib/audit/open-fix-pr";
 import {
   deriveFixCheckStatus,
   hashSelfHealToken,
@@ -34,6 +36,9 @@ import { getFixAttemptForGateReport } from "@terragon/shared/model/audit-fix-att
  *  - `passed` only when the worker completed, the check passed and no denied
  *    path was touched. A check error is never a pass.
  *  - organizationId comes from the attempt row, never from the body.
+ *  - Only a RECORDED report hands the attempt to the draft-PR opener
+ *    (waitUntil, once). The opener decides every verdict's outcome; if the
+ *    waitUntil is cut off, the tick's runFixPrOpenSweep picks the attempt up.
  *
  * Logs carry attemptId and the verdict only, never the token.
  */
@@ -148,6 +153,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     )
     .returning({ id: auditFixAttempts.id });
   const recorded = written.length > 0;
+
+  if (recorded) {
+    waitUntil(
+      openDraftFixPr({
+        db,
+        organizationId: attempt.organizationId,
+        attemptId: attempt.id,
+      }),
+    );
+  }
 
   console.log("[self-heal] fix-check reported", {
     attemptId: attempt.id,
