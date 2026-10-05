@@ -7,8 +7,10 @@ import {
   gte,
   inArray,
   isNotNull,
+  lte,
   max,
   ne,
+  or,
 } from "drizzle-orm";
 
 import type { DB } from "@terragon/shared/db";
@@ -549,7 +551,19 @@ function laterOf(a: Date, b: Date | null): Date {
   return b !== null && b > a ? b : a;
 }
 
-/** Cross-org by design: the repos with self-heal activity in 30 days, non-closed breakers first. */
+/**
+ * A breaker the tick must move: half_open (a probe to resolve) or open past
+ * its cooldown. Open breakers still cooling down and paused_manual ones need
+ * nothing and must not take the LIMIT's slots.
+ */
+function movingBreaker(now: Date) {
+  return or(
+    eq(selfHealBreaker.state, "half_open"),
+    and(eq(selfHealBreaker.state, "open"), lte(selfHealBreaker.openUntil, now)),
+  );
+}
+
+/** Cross-org by design: the repos with self-heal activity in 30 days, moving breakers first. */
 async function listLoopScopes(
   db: DB,
   now: Date,
@@ -566,7 +580,7 @@ async function listLoopScopes(
       .where(
         and(
           inArray(selfHealBreaker.scopeKind, ["loop_fix", "loop_audit"]),
-          inArray(selfHealBreaker.state, ["open", "half_open"]),
+          movingBreaker(now),
         ),
       )
       .orderBy(asc(selfHealBreaker.updatedAt))
@@ -647,7 +661,7 @@ async function listPlaneOrgs(
             "hatchet_dispatch",
             "exec_plane",
           ]),
-          inArray(selfHealBreaker.state, ["open", "half_open"]),
+          movingBreaker(now),
         ),
       )
       .limit(limit),

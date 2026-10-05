@@ -27,6 +27,7 @@ import {
   evaluateLoopAudit,
   evaluateLoopFix,
   evaluatePlaneBreakers,
+  LOOP_BREAKER_LIMIT,
   LOOP_COOLDOWNS_MS,
   runLoopBreakerEvaluation,
   type LoopAuditFindingSignal,
@@ -74,6 +75,12 @@ function event(
 describe("LOOP_COOLDOWNS_MS", () => {
   it("is 24 h then 72 h", () => {
     expect(LOOP_COOLDOWNS_MS).toEqual([86_400_000, 259_200_000]);
+  });
+});
+
+describe("LOOP_BREAKER_LIMIT", () => {
+  it("evaluates at most 20 repos per tick", () => {
+    expect(LOOP_BREAKER_LIMIT).toBe(20);
   });
 });
 
@@ -542,7 +549,7 @@ describe("runLoopBreakerEvaluation (DB)", () => {
   let now: Date;
   const REPO = "acme/widgets";
   let logs: Array<[string, Record<string, unknown>]>;
-  let captured: string[];
+  let captured: Array<[string, Record<string, string>]>;
 
   beforeEach(async () => {
     windowNo += 1;
@@ -559,10 +566,13 @@ describe("runLoopBreakerEvaluation (DB)", () => {
       db,
       now: at,
       deadlineAt: new Date(Date.now() + 60_000),
+      // Other suites in the same database leave moving breakers behind; the
+      // production LIMIT is pinned by the LOOP_BREAKER_LIMIT test.
+      limit: 1_000,
       deps: {
         log: (m, f) => logs.push([m, f]),
         error: (m, f) => logs.push([m, f]),
-        capture: (e) => captured.push(e),
+        capture: (e, p) => captured.push([e, p]),
       },
     });
 
@@ -628,24 +638,25 @@ describe("runLoopBreakerEvaluation (DB)", () => {
       },
       30 * MIN,
     );
-    const result = await evaluate();
-    expect(result.transitions).toBe(1);
+    // Other suites' breakers share the database: count only this org's lines.
+    const mine = () =>
+      logs.filter(([, f]) => f.org === organizationId).map(([m]) => m);
+    await evaluate();
     const row = await state("loop_fix");
     expect(row.state).toBe("open");
     expect(row.lastTripReason).toBe("consecutive_failures");
     expect(row.openUntil?.getTime()).toBe(now.getTime() + DAY);
-    expect(
-      logs.filter(([m]) => m === "[self-heal:breaker] transition"),
-    ).toHaveLength(1);
-    expect(
-      logs.filter(([m]) => m === "[self-heal:breaker] LOOP_OPEN"),
-    ).toHaveLength(1);
-    expect(captured).toEqual([
-      "self_heal_breaker_transition",
-      "self_heal_loop_paused",
+    expect(mine()).toEqual([
+      "[self-heal:breaker] transition",
+      "[self-heal:breaker] LOOP_OPEN",
     ]);
+    expect(
+      captured.filter(([, p]) => p.org === organizationId).map(([e]) => e),
+    ).toEqual(["self_heal_breaker_transition", "self_heal_loop_paused"]);
     // A second evaluation changes nothing.
-    expect((await evaluate()).transitions).toBe(0);
+    await evaluate();
+    expect(mine()).toHaveLength(2);
+    expect((await state("loop_fix")).version).toBe(row.version);
   });
 
   it("refunded attempts never trip", async () => {
