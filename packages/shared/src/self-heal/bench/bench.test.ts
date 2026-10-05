@@ -1,16 +1,23 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-import { AUDIT_RULES } from "../audit-rules";
+import { AUDIT_RULES, MAX_FINDINGS_PER_RUN } from "../audit-rules";
 import {
   findManifestError,
   parseFixtureManifest,
   seedId,
+  selectSeeds,
   type FixtureManifest,
 } from "./fixture-manifest";
 import { renderFixture, type RenderedFixture } from "./render-fixture";
-import { BENCH_FAKE_MARKER, SEED_CATALOG } from "./seed-catalog";
+import {
+  BENCH_FAKE_MARKER,
+  BENCH_GITIGNORE_PATTERNS,
+  BENCH_SHARD_PLAN,
+  SEED_CATALOG,
+} from "./seed-catalog";
 
 /** sha256 over the sorted file map: path NUL content NUL, repo then hidden. */
 function fixtureDigest(fixture: RenderedFixture): string {
@@ -349,5 +356,106 @@ describe("renderFixture", () => {
   it("ships no lockfile at the root (the operator generates it once)", () => {
     expect(fixture.repoFiles["package-lock.json"]).toBeUndefined();
     expect(fixture.repoFiles["pnpm-lock.yaml"]).toBeUndefined();
+  });
+});
+
+describe("selectSeeds", () => {
+  it("selects ids and inclusive ranges in manifest order", () => {
+    const shard = selectSeeds(SEED_CATALOG, "S49-S50, S03,S01");
+    expect(shard.seeds.map((s) => s.id)).toEqual(["S01", "S03", "S49", "S50"]);
+    expect(findManifestError(shard)).toBeNull();
+    expect(selectSeeds(SEED_CATALOG, "S01-S60")).toEqual(SEED_CATALOG);
+  });
+
+  it("rejects malformed items, empty ranges and unknown ids", () => {
+    expect(() => selectSeeds(SEED_CATALOG, "S1")).toThrow(/item/);
+    expect(() => selectSeeds(SEED_CATALOG, "S01,,S02")).toThrow(/item/);
+    expect(() => selectSeeds(SEED_CATALOG, "S05-S02")).toThrow(/empty/);
+    expect(() => selectSeeds(SEED_CATALOG, "S59-S61")).toThrow(/S61/);
+  });
+});
+
+describe("shard plan", () => {
+  /** The per-run issue budget: MAX_FINDINGS_PER_RUN and maxOpenIssues (20). */
+  const SHARD_LIMIT = Math.min(MAX_FINDINGS_PER_RUN, 20);
+  const shards = BENCH_SHARD_PLAN.map((spec) =>
+    selectSeeds(SEED_CATALOG, spec),
+  );
+  const dirOf = (path: string) =>
+    path.slice(0, Math.max(0, path.lastIndexOf("/")));
+
+  it("keeps every shard's non-decoy seeds within the per-run caps", () => {
+    for (const [index, shard] of shards.entries()) {
+      const findings = shard.seeds.filter((s) => s.kind !== "decoy").length;
+      expect(findings, BENCH_SHARD_PLAN[index]).toBeLessThanOrEqual(
+        SHARD_LIMIT,
+      );
+      expect(findManifestError(shard), BENCH_SHARD_PLAN[index]).toBeNull();
+    }
+  });
+
+  it("is the plan the runbook's generate commands use", () => {
+    const runbook = readFileSync(
+      new URL("../../../../../deploy/PILOT-RUNBOOK.md", import.meta.url),
+      "utf8",
+    );
+    const used = [...runbook.matchAll(/generate-fixture\.ts --seeds (\S+)/g)];
+    expect(used.map((m) => m[1])).toEqual([...BENCH_SHARD_PLAN]);
+  });
+
+  it("covers each seeded seed and decoy once and every rubric seed per shard", () => {
+    for (const seed of SEED_CATALOG.seeds) {
+      const holders = shards.filter((shard) =>
+        shard.seeds.some((s) => s.id === seed.id),
+      ).length;
+      expect(holders, seed.id).toBe(seed.kind === "rubric" ? shards.length : 1);
+    }
+  });
+
+  it("renders only the state each shard seeds", () => {
+    for (const [index, shard] of shards.entries()) {
+      const at = BENCH_SHARD_PLAN[index];
+      const files = renderFixture(shard).repoFiles;
+      const ofRule = (rule: string) =>
+        shard.seeds.filter((s) => s.rule === rule && s.kind !== "decoy");
+      const lockfileDirs = ofRule("supply.lockfile-missing").map((s) =>
+        dirOf(s.subject),
+      );
+      const policyDirs = ofRule("ci.security-policy-missing").map((s) =>
+        dirOf(s.subject),
+      );
+      for (const [path, text] of Object.entries(files)) {
+        if (/^packages\/[^/]+\/package\.json$/.test(path)) {
+          expect(lockfileDirs, `${at} ${path}`).toContain(dirOf(path));
+        }
+        if (path.endsWith("README.md") && text.includes("(SECURITY.md)")) {
+          expect(policyDirs, `${at} ${path}`).toContain(dirOf(path));
+        }
+        if (
+          path.startsWith(".github/workflows/") &&
+          path !== ".github/workflows/ci.yml"
+        ) {
+          expect(
+            shard.seeds.some((s) => s.subject === path),
+            `${at} ${path}`,
+          ).toBe(true);
+        }
+      }
+      expect(files["SECURITY.md"] !== undefined, at).toBe(
+        !policyDirs.includes(""),
+      );
+      const gitignore = (files[".gitignore"] ?? "").split("\n");
+      const missing = ofRule("files.gitignore-missing-pattern").map(
+        (s) => s.key,
+      );
+      for (const pattern of BENCH_GITIGNORE_PATTERNS) {
+        expect(gitignore.includes(pattern), `${at} ${pattern}`).toBe(
+          !missing.includes(pattern),
+        );
+      }
+      expect(Object.keys(renderFixture(shard).hiddenTests)).toHaveLength(
+        shard.seeds.length,
+      );
+    }
   });
 });

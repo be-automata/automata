@@ -1,6 +1,7 @@
 import type { FixtureManifest, Seed } from "./fixture-manifest";
 import {
   BENCH_FAKE_MARKER,
+  BENCH_GITIGNORE_PATTERNS,
   BENCH_PINNED_ACTIONS,
   BENCH_SUB_PACKAGES,
 } from "./seed-catalog";
@@ -20,6 +21,12 @@ import {
  *   workflow keeps its jobs). They pass on the unfixed fixture and are run by
  *   verify-fixes on each fix PR head:
  *     BENCH_REPO_ROOT=<checkout> node --test hidden-tests/S01.test.mjs
+ *
+ * A manifest subset (a shard) renders only what its seeds plant: a
+ * sub-package only with its lockfile seed, a SECURITY.md link only with its
+ * policy seed, a root SECURITY.md when the root policy is not seeded, and
+ * every sensitive .gitignore pattern that is not seeded. The full catalog
+ * renders the same bytes either way.
  *
  * Pure and deterministic: no clock, no randomness, no IO; keys are sorted.
  * The root lockfile is NOT rendered (no network here): the operator generates
@@ -50,6 +57,9 @@ const GITIGNORE_BASE = [
 const GITIGNORE_KEPT = GITIGNORE_BASE.filter((line) => line.endsWith("/"));
 const SECURITY_LINK =
   "Report vulnerabilities as described in [SECURITY.md](SECURITY.md).";
+/** Rendered only when a shard does not seed the root policy. */
+const ROOT_SECURITY_POLICY =
+  "# Security policy\n\nReport vulnerabilities privately to the maintainers of this benchmark fixture.\n";
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
@@ -277,10 +287,21 @@ function renderRepoFiles(manifest: FixtureManifest): Map<string, string> {
       dependencies: sorted(dependencies),
     }),
   );
+  // Sub-packages without lockfiles; READMEs link SECURITY.md where seeded.
+  const policyDirs = new Set(
+    ofRule("ci.security-policy-missing")
+      .filter((s) => s.kind !== "decoy")
+      .map((s) => dirOf(s.subject)),
+  );
+  const securitySection = (dir: string): string =>
+    policyDirs.has(dir) ? `\n## Security\n\n${SECURITY_LINK}\n` : "";
   files.set(
     "README.md",
-    `# ${ROOT_PACKAGE_NAME}\n\nA small service used as the self-heal benchmark fixture.\n\n## Security\n\n${SECURITY_LINK}\n`,
+    `# ${ROOT_PACKAGE_NAME}\n\nA small service used as the self-heal benchmark fixture.\n${securitySection("")}`,
   );
+  if (!seeds.some((s) => s.subject === "SECURITY.md")) {
+    files.set("SECURITY.md", ROOT_SECURITY_POLICY);
+  }
 
   // Visible tests the fixture CI runs (dependency free).
   files.set(
@@ -300,13 +321,12 @@ function renderRepoFiles(manifest: FixtureManifest): Map<string, string> {
     'import assert from "node:assert/strict";\nimport { test } from "node:test";\n\nimport { retryDelay } from "../src/util/retry-delay.js";\n\ntest("retryDelay doubles and caps", () => {\n  assert.equal(retryDelay(0), 100);\n  assert.equal(retryDelay(3), 800);\n  assert.equal(retryDelay(20), 10000);\n});\n',
   );
 
-  // Sub-packages without lockfiles; READMEs link SECURITY.md where seeded.
-  const policyDirs = new Set(
-    ofRule("ci.security-policy-missing")
+  const lockfileDirs = new Set(
+    ofRule("supply.lockfile-missing")
       .filter((s) => s.kind !== "decoy")
       .map((s) => dirOf(s.subject)),
   );
-  for (const pkg of BENCH_SUB_PACKAGES) {
+  for (const pkg of BENCH_SUB_PACKAGES.filter((p) => lockfileDirs.has(p.dir))) {
     const name = `@bench/${baseName(pkg.dir)}`;
     files.set(
       `${pkg.dir}/package.json`,
@@ -323,10 +343,9 @@ function renderRepoFiles(manifest: FixtureManifest): Map<string, string> {
       `${pkg.dir}/index.js`,
       `import * as dependency from "${pkg.dependency}";\n\nexport { dependency };\n`,
     );
-    const links = pkg.linksSecurityPolicy || policyDirs.has(pkg.dir);
     files.set(
       `${pkg.dir}/README.md`,
-      `# ${name}\n\nA small utility package of the benchmark fixture.\n${links ? `\n## Security\n\n${SECURITY_LINK}\n` : ""}`,
+      `# ${name}\n\nA small utility package of the benchmark fixture.\n${securitySection(pkg.dir)}`,
     );
   }
   for (const dir of policyDirs) {
@@ -350,9 +369,9 @@ function renderRepoFiles(manifest: FixtureManifest): Map<string, string> {
   const present = ofRule("files.gitignore-missing-pattern")
     .filter((s) => s.kind === "decoy" && s.key !== undefined)
     .map((s) => s.key ?? "");
-  const gitignore = [...GITIGNORE_BASE, ...present].filter(
-    (line) => !missing.has(line),
-  );
+  const gitignore = [
+    ...new Set([...GITIGNORE_BASE, ...present, ...BENCH_GITIGNORE_PATTERNS]),
+  ].filter((line) => !missing.has(line));
   files.set(".gitignore", `${gitignore.join("\n")}\n`);
 
   // Committed fake sensitive files and the siblings a fix must keep.

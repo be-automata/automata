@@ -2,7 +2,12 @@
  * Write the self-heal benchmark fixture (R6, phase 9) to a directory.
  *
  * Usage:
- *   pnpm exec tsx deploy/self-heal-bench/generate-fixture.ts <outDir>
+ *   pnpm exec tsx deploy/self-heal-bench/generate-fixture.ts [--seeds <selection>] <outDir>
+ *
+ * --seeds renders one shard: a comma list of seed ids and inclusive ranges
+ * ("S01-S20", "S01-S16,S49-S54"); BENCH_SHARD_PLAN in seed-catalog.ts lists
+ * the shards the runbook uses. Ids keep their catalog numbers. Without it
+ * the whole catalog is rendered.
  *
  * Writes, from SEED_CATALOG (packages/shared/src/self-heal/bench):
  *   <outDir>/repo/           the fixture repo: push it as the initial commit
@@ -22,13 +27,17 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-import { findManifestError } from "../../packages/shared/src/self-heal/bench/fixture-manifest";
+import {
+  findManifestError,
+  selectSeeds,
+  type FixtureManifest,
+} from "../../packages/shared/src/self-heal/bench/fixture-manifest";
 import { renderFixture } from "../../packages/shared/src/self-heal/bench/render-fixture";
 import { SEED_CATALOG } from "../../packages/shared/src/self-heal/bench/seed-catalog";
-import { fail, writeJson } from "./cli";
+import { errorMessage, fail, parseCli, runMain, writeJson } from "./cli";
 
 const USAGE =
-  "Usage: pnpm exec tsx deploy/self-heal-bench/generate-fixture.ts <outDir>";
+  "Usage: pnpm exec tsx deploy/self-heal-bench/generate-fixture.ts [--seeds <selection>] <outDir>";
 
 function writeTree(root: string, files: Record<string, string>): void {
   for (const [path, text] of Object.entries(files)) {
@@ -38,25 +47,42 @@ function writeTree(root: string, files: Record<string, string>): void {
   }
 }
 
+function selectManifest(selection: string | undefined): FixtureManifest {
+  if (selection === undefined) return SEED_CATALOG;
+  try {
+    return selectSeeds(SEED_CATALOG, selection);
+  } catch (error) {
+    return fail(`--seeds: ${errorMessage(error)}`);
+  }
+}
+
 function main(): void {
-  const [outArg, extra] = process.argv.slice(2);
+  const { values, positionals } = parseCli(
+    {
+      options: { seeds: { type: "string" } },
+      allowPositionals: true,
+    },
+    USAGE,
+  );
+  const [outArg, extra] = positionals;
   if (!outArg || extra !== undefined) fail(USAGE);
   const outDir = resolve(outArg);
   if (existsSync(outDir) && readdirSync(outDir).length > 0) {
     fail(`refusing to write into a non-empty directory: ${outDir}`);
   }
 
-  const problem = findManifestError(SEED_CATALOG);
-  if (problem !== null) fail(`SEED_CATALOG is invalid: ${problem}`);
+  const manifest = selectManifest(values.seeds);
+  const problem = findManifestError(manifest);
+  if (problem !== null) fail(`the seed manifest is invalid: ${problem}`);
 
-  const fixture = renderFixture(SEED_CATALOG);
+  const fixture = renderFixture(manifest);
   mkdirSync(outDir, { recursive: true });
   writeTree(join(outDir, "repo"), fixture.repoFiles);
   writeTree(outDir, fixture.hiddenTests);
-  writeJson(join(outDir, "manifest.json"), SEED_CATALOG);
+  writeJson(join(outDir, "manifest.json"), manifest);
 
   const count = (kind: string) =>
-    SEED_CATALOG.seeds.filter((s) => s.kind === kind).length;
+    manifest.seeds.filter((s) => s.kind === kind).length;
   console.log(
     `wrote ${Object.keys(fixture.repoFiles).length} repo files, ` +
       `${Object.keys(fixture.hiddenTests).length} hidden tests and manifest.json ` +
@@ -67,4 +93,4 @@ function main(): void {
   );
 }
 
-main();
+runMain("generate-fixture", main);

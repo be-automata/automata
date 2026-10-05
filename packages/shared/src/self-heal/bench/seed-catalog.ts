@@ -200,17 +200,24 @@ const MISSING_PERMISSIONS: readonly SeedDraft[] = [
   planted("ci.workflow-permissions-missing", `.github/workflows/${file}`),
 );
 
-/** Literal .gitignore lines the fixture omits (keys use the parser alphabet). */
-const MISSING_GITIGNORE_PATTERNS: readonly SeedDraft[] = [
+/**
+ * Sensitive-file .gitignore lines (keys use the parser alphabet). The fixture
+ * omits exactly the seeded ones and carries the rest, so a shard plants no
+ * gitignore finding it does not score.
+ */
+export const BENCH_GITIGNORE_PATTERNS = [
   ".env",
   ".env.local",
   ".env.production",
   ".npmrc",
   "id_rsa",
   "terraform.tfstate",
-].map((pattern) =>
-  planted("files.gitignore-missing-pattern", ".gitignore", { key: pattern }),
-);
+] as const;
+
+const MISSING_GITIGNORE_PATTERNS: readonly SeedDraft[] =
+  BENCH_GITIGNORE_PATTERNS.map((pattern) =>
+    planted("files.gitignore-missing-pattern", ".gitignore", { key: pattern }),
+  );
 
 /** Committed fake sensitive files; `sibling` must survive the fix. */
 const SENSITIVE_FILES: readonly SeedDraft[] = (
@@ -322,3 +329,18 @@ export const SEED_CATALOG: FixtureManifest = buildCatalog([
   ...RUBRIC,
   ...DECOYS,
 ]);
+
+/**
+ * The benchmark shards (generate-fixture --seeds), one private fixture repo
+ * each. A full-catalog audit reports 52 findings, over MAX_FINDINGS_PER_RUN
+ * (25), and an over-cap run is incomplete and records no sightings; each
+ * shard plants at most 20 non-decoy seeds (maxOpenIssues is at most 20).
+ * Every seeded seed and every decoy is in exactly one shard. The 4 rubric
+ * seeds are in every shard: the fixture always lacks that review automation,
+ * so every shard's audit may report them.
+ */
+export const BENCH_SHARD_PLAN = [
+  "S01-S16,S49-S54",
+  "S17-S32,S49-S52,S55-S56",
+  "S33-S52,S57-S60",
+] as const;

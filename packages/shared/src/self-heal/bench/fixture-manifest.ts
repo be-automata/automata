@@ -119,6 +119,41 @@ export function findManifestError(manifest: FixtureManifest): string | null {
   return null;
 }
 
+const SELECTION_ITEM_RE = /^(S\d{2,3})(?:-(S\d{2,3}))?$/;
+
+/**
+ * The seeds a selection names, in manifest order, as a manifest of their own
+ * (ids unchanged). A selection is a comma list of ids and inclusive ranges:
+ * "S01-S20" or "S01-S16,S49-S54". Throws on a malformed item, an empty
+ * range or an id the manifest does not hold.
+ */
+export function selectSeeds(
+  manifest: FixtureManifest,
+  selection: string,
+): FixtureManifest {
+  const wanted = new Set<number>();
+  for (const item of selection.split(",").map((part) => part.trim())) {
+    const match = SELECTION_ITEM_RE.exec(item);
+    if (!match) throw new Error(`bad seed selection item: ${item}`);
+    const from = Number(match[1]?.slice(1));
+    const to = Number((match[2] ?? match[1])?.slice(1));
+    if (to < from) throw new Error(`empty seed range: ${item}`);
+    for (let n = from; n <= to; n += 1) wanted.add(n);
+  }
+  const known = new Set(manifest.seeds.map((seed) => seed.id));
+  for (const n of wanted) {
+    if (!known.has(seedId(n - 1))) {
+      throw new Error(`seed ${seedId(n - 1)} is not in the manifest`);
+    }
+  }
+  return {
+    version: manifest.version,
+    seeds: manifest.seeds.filter((seed) =>
+      wanted.has(Number(seed.id.slice(1))),
+    ),
+  };
+}
+
 const SEED_STRING_FIELDS = ["id", "rule", "subject", "kind", "hiddenTest"];
 
 /**

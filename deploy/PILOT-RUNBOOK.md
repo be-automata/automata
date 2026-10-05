@@ -1358,19 +1358,30 @@ the benchmark against the public pilot repo. Nothing is installed in this repo: 
 lockfile is generated once inside the fixture checkout. The fixture must be private for another
 reason too: on a public repo the secret and sensitive-file rules are filtered and never filed.
 
-**Known limit — resolve before the first live run.** `MAX_FINDINGS_PER_RUN` is 25 and
-`maxOpenIssues` is at most 20. An audit that reports all 52 planted findings drops the rest as
-`over_cap`, and an over-cap run is incomplete, so it records no sightings at all. Before the live
-benchmark the operator chooses one: raise the per-run cap in a separate reviewed change, or run the
-benchmark on shards of at most 20 seeds (one private fixture repo per shard, rendered from a manifest
-subset). Record the choice with the results. `maxOpenIssues` 20 only limits throughput: issues
-are filed as earlier ones close.
+**Shards (the per-run cap).** `MAX_FINDINGS_PER_RUN` is 25 and `maxOpenIssues` is at most 20. An
+audit that reports all 52 planted findings drops the rest as `over_cap`, and an over-cap run is
+incomplete, so it records no sightings at all. The benchmark therefore runs on the three shards of
+`BENCH_SHARD_PLAN` (`packages/shared/src/self-heal/bench/seed-catalog.ts`), each with at most 20
+non-decoy seeds (a test pins that). Every seeded seed and every decoy is in exactly one shard; the 4
+rubric seeds are in all three, because every shard lacks that review automation. A shard renders only
+what it seeds, so its audit has nothing unscored to report. Generate one directory per shard:
+
+```bash
+pnpm exec tsx deploy/self-heal-bench/generate-fixture.ts --seeds S01-S16,S49-S54 <dir>/shard-1
+pnpm exec tsx deploy/self-heal-bench/generate-fixture.ts --seeds S17-S32,S49-S52,S55-S56 <dir>/shard-2
+pnpm exec tsx deploy/self-heal-bench/generate-fixture.ts --seeds S33-S52,S57-S60 <dir>/shard-3
+```
+
+Run Setup, Phase A and Phase B below once per shard, each with that shard's own fixture repos and its
+own `manifest.json` (`<dir>` below means the shard directory), and keep one report per shard. Raising
+the per-run cap instead would be a separate reviewed change; record which way was used with the
+results. `maxOpenIssues` 20 only limits throughput: issues are filed as earlier ones close.
 
 **Setup (once per fixture repo).**
 
-1. Generate: `pnpm exec tsx deploy/self-heal-bench/generate-fixture.ts <dir>`. The output is
-   byte-identical on every run. `<dir>/hidden-tests/` and `<dir>/manifest.json` stay on the
-   operator machine; only `<dir>/repo/` is pushed.
+1. Generate the shard (commands above). The output is byte-identical on every run.
+   `<dir>/hidden-tests/` and `<dir>/manifest.json` stay on the operator machine; only `<dir>/repo/`
+   is pushed.
 2. Create a PRIVATE repo, push `repo/` as the initial commit of `main`, then in that checkout run
    `npm install --package-lock-only --ignore-scripts` once (it resolves the pinned versions into
    `package-lock.json` without installing anything) and commit the lockfile.
