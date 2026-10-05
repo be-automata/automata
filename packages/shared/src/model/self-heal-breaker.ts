@@ -77,6 +77,12 @@ export const UNFENCED_SELF_HEAL_MODEL_FUNCTIONS: Record<string, string> = {
   claimDueEffects:
     "cron outbox drainer; rows carry organizationId and callers re-fence",
   pruneSelfHealRows: "retention sweep deletes by age across all orgs",
+  listExpiredFixClaims:
+    "reconcile sweep finds lost fix dispatches across all orgs; rows carry organizationId",
+  listFixReadyFindings:
+    "dispatcher selector across all orgs; callers re-fence by the row's organizationId",
+  getFixAttemptForGateReport:
+    "the gate token is the authority; the row carries organizationId",
 };
 
 export const GH_CREATE_SIGNAL = "gh_create";
