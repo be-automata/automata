@@ -5,9 +5,7 @@ import { getPostHogServer } from "@/lib/posthog-server";
 import { waitUntil } from "@/lib/wait-until";
 import type { DB } from "@terragon/shared/db";
 import type { AuditFixAttemptRow } from "@terragon/shared/model/audit-findings";
-import { updateFinding } from "@terragon/shared/model/audit-findings";
 import {
-  claimAttemptLease,
   closeFixAttempt,
   getFindingForAttempt,
   getFixAttemptByPr,
@@ -15,7 +13,6 @@ import {
   recordFixPrClosed,
   recordFixPrMergeDetail,
   recordFixPrMerged,
-  releaseAttemptLease,
   updateFixAttempt,
   type FixChangedRanges,
 } from "@terragon/shared/model/audit-fix-attempts";
@@ -24,14 +21,9 @@ import { recordBreakerEvent } from "@terragon/shared/model/self-heal-breaker";
 
 import { logSelfHealDecision, type SelfHealLogMode } from "./decision-log";
 import { parseHunkRanges } from "./hunks";
-import { createIssueWriter } from "./issue-writer";
+import { createIssueWriter, type IssueWriter } from "./issue-writer";
 import { defaultOpenFixPrDeps, type OpenFixPrDeps } from "./open-fix-pr";
 import { isBotUser } from "./regression";
-import {
-  commentMarker,
-  FINDING_LABELS,
-  renderAuditComment,
-} from "./render-issue";
 import { resolveSelfHealEffective } from "./resolve-self-heal";
 import {
   withSelfHealCall,
@@ -39,11 +31,13 @@ import {
   type GithubResponse,
   type SelfHealCallResult,
 } from "./with-self-heal-call";
+import { PRE_MINT_INSTALLATION_KEY, errorText } from "./audit-shared";
 import {
-  MIN_ROW_BUDGET_MS,
-  PRE_MINT_INSTALLATION_KEY,
-  errorText,
-} from "./audit-shared";
+  markFindingNeedsHuman,
+  runBoundedSweep,
+  withAttemptLease,
+  type FixRefTarget,
+} from "./fix-attempt-session";
 
 /**
  * The end of a self-heal fix PR (R5, SC4, HUMAN-MERGE-GATE). Observation
@@ -520,24 +514,37 @@ export class FixPrLifecycle {
     ) {
       return;
     }
-    await updateFinding({
+    const writes = await markFindingNeedsHuman({
       db: this.db,
       organizationId: this.org,
-      id: finding.id,
-      patch: {
-        status: "needs_human",
-        autoFixLabeled: false,
-        fixReadyAt: null,
-        lastDecision: "needs_human",
-        lastDecisionReason: "attempts_cap",
+      finding,
+      reason: "attempts_cap",
+      // KILL-01: an operator stop (or dry-run) makes no GitHub write.
+      writer: async () => {
+        if (mode !== "on") return null;
+        const session = await this.openSession();
+        return session === "unavailable" ? null : this.issueWriter(session);
+      },
+      capComment: {
+        runId: this.attempt.id,
+        attempts: this.attempt.attemptNo,
+        maxAttempts: this.maxAttempts,
       },
     });
-    const issueNumber = finding.issueNumber;
-    // KILL-01: an operator stop (or dry-run) makes no GitHub write.
-    if (issueNumber === null || mode !== "on") return;
-    const session = await this.openSession();
-    if (session === "unavailable") return;
-    const writer = createIssueWriter({
+    if (writes === null) return;
+    const { labels, comment } = writes;
+    if (!labels.ok || (comment !== null && !comment.ok)) {
+      this.deps.log("[self-heal] needs-human write failed", {
+        attemptId: this.attempt.id,
+        label: labels.ok ? "ok" : labels.outcome,
+        comment: comment === null || comment.ok ? "ok" : comment.outcome,
+      });
+    }
+  }
+
+  /** The issue/PR comment writer on this lifecycle's session. */
+  issueWriter(session: FixPrSession): IssueWriter {
+    return createIssueWriter({
       octokit: session.octokit,
       owner: this.owner,
       repo: this.repo,
@@ -547,32 +554,19 @@ export class FixPrLifecycle {
       deadlineAt: this.deadlineAt,
       deps: { ...this.deps.callDeps, db: this.db },
     });
-    const labels = await writer.updateIssue({
-      number: issueNumber,
-      labelsAdd: [FINDING_LABELS.needsHumanApprove],
-      labelsRemove: [FINDING_LABELS.autoFix],
-    });
-    const comment = await writer.upsertComment({
-      number: issueNumber,
-      marker: commentMarker({
-        fp: finding.fingerprint,
-        kind: "needs_human_attempts_cap",
-        runId: this.attempt.id,
-      }),
-      body: renderAuditComment("needs_human_attempts_cap", {
-        fingerprint: finding.fingerprint,
-        runId: this.attempt.id,
-        attempts: this.attempt.attemptNo,
-        maxAttempts: this.maxAttempts,
-      }),
-    });
-    if (!labels.ok || !comment.ok) {
-      this.deps.log("[self-heal] needs-human write failed", {
-        attemptId: this.attempt.id,
-        label: labels.ok ? "ok" : labels.outcome,
-        comment: comment.ok ? "ok" : comment.outcome,
-      });
-    }
+  }
+
+  /** Branch-delete / PR-close target bound to this lifecycle's calls. */
+  refTarget(session: FixPrSession): FixRefTarget {
+    return {
+      octokit: session.octokit,
+      owner: this.owner,
+      repo: this.repo,
+      attemptId: this.attempt.id,
+      log: this.deps.log,
+      write: (permission, call, loopFix) =>
+        this.call(session, "write", permission, call, loopFix),
+    };
   }
 
   /** The sweep found the PR open again: put the PR state back. */
@@ -713,34 +707,22 @@ async function settleOne(
   row: AuditFixAttemptRow,
   deadlineAt: Date,
 ): Promise<FixPrSettleOutcome> {
-  const organizationId = row.organizationId;
-  const leased = await claimAttemptLease({
+  const leased = await withAttemptLease({
     db: deps.db,
-    organizationId,
+    organizationId: row.organizationId,
     attemptId: row.id,
     now: deps.now(),
+    log: deps.log,
+    releaseFailedMessage: "[self-heal] fix PR lifecycle lease release failed",
+    run: async (): Promise<FixPrSettleOutcome> => {
+      const lifecycle = new FixPrLifecycle(deps, row, deadlineAt);
+      const pull = await lifecycle.readPull();
+      if (pull === null) return "skipped";
+      if (pull.state !== "closed") return lifecycle.reopened(pull);
+      return lifecycle.settle(endOfPull(pull), "await");
+    },
   });
-  if (!leased) return "skipped";
-  try {
-    const lifecycle = new FixPrLifecycle(deps, row, deadlineAt);
-    const pull = await lifecycle.readPull();
-    if (pull === null) return "skipped";
-    if (pull.state !== "closed") return lifecycle.reopened(pull);
-    return await lifecycle.settle(endOfPull(pull), "await");
-  } finally {
-    try {
-      await releaseAttemptLease({
-        db: deps.db,
-        organizationId,
-        attemptId: row.id,
-      });
-    } catch (error) {
-      deps.log("[self-heal] fix PR lifecycle lease release failed", {
-        attemptId: row.id,
-        error: errorText(error),
-      });
-    }
-  }
+  return leased.leased ? leased.value : "skipped";
 }
 
 /**
@@ -768,31 +750,27 @@ export async function runFixPrSettleSweep({
     db,
   };
   const result: FixPrSettleSweepResult = { processed: 0, outcomes: {} };
-  let rows: AuditFixAttemptRow[];
-  try {
-    rows = await listUnsettledFixPrs({ db, now, limit });
-  } catch (error) {
-    deps.log("[self-heal] fix PR settle sweep list failed", {
-      error: errorText(error),
-    });
-    return result;
-  }
-  for (const row of rows.slice(0, limit)) {
-    if (deadlineAt.getTime() - deps.now().getTime() < MIN_ROW_BUDGET_MS) {
-      break;
-    }
-    let outcome: FixPrSettleOutcome;
-    try {
-      outcome = await settleOne(deps, row, deadlineAt);
-    } catch (error) {
-      deps.log("[self-heal] fix PR settle failed", {
-        attemptId: row.id,
-        error: errorText(error),
-      });
-      outcome = "error";
-    }
-    result.processed += 1;
-    result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
-  }
+  await runBoundedSweep({
+    limit,
+    list: () => listUnsettledFixPrs({ db, now, limit }),
+    deadlineAt,
+    now: deps.now,
+    log: deps.log,
+    listFailedMessage: "[self-heal] fix PR settle sweep list failed",
+    each: async (row) => {
+      let outcome: FixPrSettleOutcome;
+      try {
+        outcome = await settleOne(deps, row, deadlineAt);
+      } catch (error) {
+        deps.log("[self-heal] fix PR settle failed", {
+          attemptId: row.id,
+          error: errorText(error),
+        });
+        outcome = "error";
+      }
+      result.processed += 1;
+      result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
+    },
+  });
   return result;
 }

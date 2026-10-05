@@ -1,12 +1,10 @@
 import type { DB } from "@terragon/shared/db";
 import type { AuditFixAttemptRow } from "@terragon/shared/model/audit-findings";
 import {
-  claimAttemptLease,
   closeFixAttempt,
   getFindingForAttempt,
   listOpenReadyFixPrs,
   recordFixPrClosed,
-  releaseAttemptLease,
 } from "@terragon/shared/model/audit-fix-attempts";
 import { SELF_HEAL_BOUNDS } from "@terragon/shared/model/self-heal-settings";
 
@@ -17,10 +15,15 @@ import {
   type FixPrLifecycleDeps,
   type FixPrSession,
 } from "./fix-pr-lifecycle";
-import { createIssueWriter } from "./issue-writer";
 import { isBotUser } from "./regression";
 import { commentMarker, renderAuditComment } from "./render-issue";
-import { MIN_ROW_BUDGET_MS, errorText } from "./audit-shared";
+import { errorText } from "./audit-shared";
+import {
+  closeFixPull,
+  deleteFixBranch,
+  runBoundedSweep,
+  withAttemptLease,
+} from "./fix-attempt-session";
 
 /**
  * Expiry of unreviewed fix PRs (R5, BRK-01). Unreviewed PRs are the largest
@@ -92,7 +95,7 @@ class Expiry {
   constructor(
     private readonly deps: FixPrExpiryDeps,
     private readonly attempt: AuditFixAttemptRow,
-    private readonly deadlineAt: Date,
+    deadlineAt: Date,
   ) {
     this.lifecycle = new FixPrLifecycle(deps, attempt, deadlineAt);
     const [owner = "", repo = ""] = attempt.repoFullName.split("/");
@@ -212,17 +215,7 @@ class Expiry {
       findingId: this.attempt.findingId,
     });
     if (finding === null) return;
-    const writer = createIssueWriter({
-      octokit: session.octokit,
-      owner: this.owner,
-      repo: this.repo,
-      botLogin: this.deps.botLogin(),
-      organizationId: this.org,
-      installationKey: session.installationKey,
-      deadlineAt: this.deadlineAt,
-      deps: { ...this.deps.callDeps, db: this.deps.db },
-    });
-    const res = await writer.upsertComment({
+    const res = await this.lifecycle.issueWriter(session).upsertComment({
       number: prNumber,
       marker: commentMarker({
         fp: finding.fingerprint,
@@ -246,58 +239,17 @@ class Expiry {
   private async closePull(session: FixPrSession): Promise<void> {
     const prNumber = this.attempt.prNumber;
     if (prNumber === null) return;
-    const res = await this.lifecycle.call(
-      session,
-      "write",
-      "pull_requests",
-      async (signal) => {
-        const out = await session.octokit.rest.pulls.update({
-          owner: this.owner,
-          repo: this.repo,
-          pull_number: prNumber,
-          state: "closed",
-          request: { signal },
-        });
-        return { ...out, data: undefined };
-      },
-      true,
+    await closeFixPull(
+      this.lifecycle.refTarget(session),
+      prNumber,
+      "[self-heal] fix PR expiry close failed",
     );
-    if (!res.ok) {
-      this.deps.log("[self-heal] fix PR expiry close failed", {
-        attemptId: this.attempt.id,
-        outcome: res.outcome,
-      });
-    }
   }
 
   private async deleteBranch(session: FixPrSession): Promise<void> {
     const branch = this.attempt.branch;
     if (branch === null) return;
-    const res = await this.lifecycle.call(
-      session,
-      "write",
-      "contents",
-      async (signal) => {
-        const out = await session.octokit.rest.git.deleteRef({
-          owner: this.owner,
-          repo: this.repo,
-          ref: `heads/${branch}`,
-          request: { signal },
-        });
-        return { ...out, data: undefined };
-      },
-    );
-    // Already gone is the desired end state.
-    if (
-      !res.ok &&
-      res.outcome !== "not_found" &&
-      res.outcome !== "unprocessable"
-    ) {
-      this.deps.log("[self-heal] fix branch delete failed", {
-        attemptId: this.attempt.id,
-        outcome: res.outcome,
-      });
-    }
+    await deleteFixBranch(this.lifecycle.refTarget(session), branch);
   }
 }
 
@@ -306,30 +258,16 @@ async function expireOne(
   row: AuditFixAttemptRow,
   deadlineAt: Date,
 ): Promise<FixPrExpiryOutcome> {
-  const organizationId = row.organizationId;
-  const leased = await claimAttemptLease({
+  const leased = await withAttemptLease({
     db: deps.db,
-    organizationId,
+    organizationId: row.organizationId,
     attemptId: row.id,
     now: deps.now(),
+    log: deps.log,
+    releaseFailedMessage: "[self-heal] fix PR expiry lease release failed",
+    run: () => new Expiry(deps, row, deadlineAt).run(),
   });
-  if (!leased) return "skipped";
-  try {
-    return await new Expiry(deps, row, deadlineAt).run();
-  } finally {
-    try {
-      await releaseAttemptLease({
-        db: deps.db,
-        organizationId,
-        attemptId: row.id,
-      });
-    } catch (error) {
-      deps.log("[self-heal] fix PR expiry lease release failed", {
-        attemptId: row.id,
-        error: errorText(error),
-      });
-    }
-  }
+  return leased.leased ? leased.value : "skipped";
 }
 
 /**
@@ -361,39 +299,36 @@ export async function runFixPrExpirySweep({
     outcomes: {},
   };
   const cap = Math.min(limit, FIX_PR_EXPIRY_LIMIT);
-  let rows: AuditFixAttemptRow[];
-  try {
-    rows = await deps.list({
-      db,
-      now,
-      readyBefore: new Date(
-        now.getTime() - SELF_HEAL_BOUNDS.prExpiryDays.min * DAY_MS,
-      ),
-      limit: cap,
-    });
-  } catch (error) {
-    deps.log("[self-heal] fix PR expiry list failed", {
-      error: errorText(error),
-    });
-    return result;
-  }
-  for (const row of rows.slice(0, cap)) {
-    if (deadlineAt.getTime() - deps.now().getTime() < MIN_ROW_BUDGET_MS) {
-      break;
-    }
-    let outcome: FixPrExpiryOutcome;
-    try {
-      outcome = await expireOne(deps, row, deadlineAt);
-    } catch (error) {
-      deps.log("[self-heal] fix PR expiry failed", {
-        attemptId: row.id,
-        error: errorText(error),
-      });
-      outcome = "error";
-    }
-    result.checked += 1;
-    if (outcome === "expired") result.expired += 1;
-    result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
-  }
+  await runBoundedSweep({
+    limit: cap,
+    list: () =>
+      deps.list({
+        db,
+        now,
+        readyBefore: new Date(
+          now.getTime() - SELF_HEAL_BOUNDS.prExpiryDays.min * DAY_MS,
+        ),
+        limit: cap,
+      }),
+    deadlineAt,
+    now: deps.now,
+    log: deps.log,
+    listFailedMessage: "[self-heal] fix PR expiry list failed",
+    each: async (row) => {
+      let outcome: FixPrExpiryOutcome;
+      try {
+        outcome = await expireOne(deps, row, deadlineAt);
+      } catch (error) {
+        deps.log("[self-heal] fix PR expiry failed", {
+          attemptId: row.id,
+          error: errorText(error),
+        });
+        outcome = "error";
+      }
+      result.checked += 1;
+      if (outcome === "expired") result.expired += 1;
+      result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
+    },
+  });
   return result;
 }

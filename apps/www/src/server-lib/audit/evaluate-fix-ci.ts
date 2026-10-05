@@ -9,20 +9,15 @@ import type {
   AuditFindingRow,
   AuditFixAttemptRow,
 } from "@terragon/shared/model/audit-findings";
-import { updateFinding } from "@terragon/shared/model/audit-findings";
 import {
-  claimAttemptLease,
   closeFixAttempt,
   getFindingForAttempt,
   getFixAttemptById,
   refundFixAttempt,
-  releaseAttemptLease,
-  updateFixAttempt,
 } from "@terragon/shared/model/audit-fix-attempts";
 import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
 import { withSelfHealTx } from "@terragon/shared/model/self-heal-tx";
 
-import { createIssueWriter, type IssueWriter } from "./issue-writer";
 import { defaultOpenFixPrDeps, type OpenFixPrDeps } from "./open-fix-pr";
 import {
   commentMarker,
@@ -40,23 +35,14 @@ import {
   type RequiredCheckVerdict,
 } from "./required-checks";
 import { resolveSelfHealEffective } from "./resolve-self-heal";
+import { PRE_MINT_INSTALLATION_KEY, errorText } from "./audit-shared";
 import {
-  COMPARE_FILE_CAP,
-  evaluateFixDiff,
-  type FixDiffFile,
-} from "./suppression-guard";
-import {
-  withSelfHealCall,
-  type CallKind,
-  type GithubResponse,
-  type SelfHealCallDeps,
-  type SelfHealCallResult,
-} from "./with-self-heal-call";
-import {
-  MIN_ROW_BUDGET_MS,
-  PRE_MINT_INSTALLATION_KEY,
-  errorText,
-} from "./audit-shared";
+  closeFixPull,
+  deleteFixBranch,
+  FixAttemptGithub,
+  runBoundedSweep,
+  withAttemptLease,
+} from "./fix-attempt-session";
 
 /**
  * The CI gate of a self-heal draft (GATE-01 steps 4-5, SC4, R4, KILL-01).
@@ -145,11 +131,6 @@ interface RawPull {
   base: { ref: string };
 }
 
-interface CompareData {
-  ahead_by: number;
-  files?: FixDiffFile[];
-}
-
 interface CiResults {
   gateSource: GateSource | null;
   state: RequiredCheckVerdict["state"];
@@ -157,12 +138,6 @@ interface CiResults {
   required: string[];
   checks: number;
   evaluatedAt: string;
-}
-
-interface GithubSession {
-  octokit: Octokit;
-  installationKey: string;
-  writer: IssueWriter;
 }
 
 interface WithdrawSpec {
@@ -173,108 +148,18 @@ interface WithdrawSpec {
 }
 
 /** One evaluation of one leased draft. */
-class FixCiEvaluator {
-  private session: GithubSession | "unavailable" | "missing" | null = null;
-  private readonly owner: string;
-  private readonly repo: string;
-  private readonly callDeps: Omit<SelfHealCallDeps, "breaker">;
-  private maxAttempts = 3;
+class FixCiEvaluator extends FixAttemptGithub<EvaluateFixCiDeps> {
   private maxDiffLines = 0;
 
   constructor(
-    private readonly db: DB,
-    private attempt: AuditFixAttemptRow,
-    private readonly finding: AuditFindingRow,
-    private readonly deadlineAt: Date,
+    db: DB,
+    attempt: AuditFixAttemptRow,
+    finding: AuditFindingRow,
+    deadlineAt: Date,
     private readonly stuckIfPending: boolean,
-    private readonly deps: EvaluateFixCiDeps,
+    deps: EvaluateFixCiDeps,
   ) {
-    const [owner = "", repo = ""] = attempt.repoFullName.split("/");
-    this.owner = owner;
-    this.repo = repo;
-    this.callDeps = { ...deps.callDeps, db };
-  }
-
-  private get org(): string {
-    return this.attempt.organizationId;
-  }
-
-  private now(): Date {
-    return this.deps.now();
-  }
-
-  private call<T>(
-    kind: CallKind,
-    signalName: string,
-    permission: "pull_requests" | "contents" | "checks",
-    call: (signal: AbortSignal) => Promise<GithubResponse<T>>,
-    /** A 403 / 422 here is a real lane failure (09-13 loop_fix rule). */
-    loopFix = false,
-  ): Promise<SelfHealCallResult<T>> {
-    if (typeof this.session !== "object" || this.session === null) {
-      throw new Error("self-heal CI evaluator: GitHub session not open");
-    }
-    return withSelfHealCall<T>({
-      kind,
-      organizationId: this.org,
-      installationKey: this.session.installationKey,
-      signalName,
-      permission,
-      deadlineAt: this.deadlineAt,
-      call,
-      deps: this.callDeps,
-      ...(loopFix
-        ? { loopFixScopeKey: normalizeRepo(this.attempt.repoFullName) }
-        : {}),
-    });
-  }
-
-  /** Mint once and run the fixLoop capability preflight. */
-  private async openSession(): Promise<
-    GithubSession | "unavailable" | "missing"
-  > {
-    if (this.session !== null) return this.session;
-    try {
-      const minted = await this.deps.mint({
-        owner: this.owner,
-        repo: this.repo,
-      });
-      const installationKey = String(minted.installationId);
-      const preflight = await this.deps.preflight({
-        organizationId: this.org,
-        installationKey,
-        owner: this.owner,
-        repo: this.repo,
-        capability: "fixLoop",
-        deadlineAt: this.deadlineAt,
-        deps: this.callDeps,
-      });
-      if (!preflight.ok) {
-        this.session = "unavailable" in preflight ? "unavailable" : "missing";
-        return this.session;
-      }
-      this.session = {
-        octokit: minted.octokit,
-        installationKey,
-        writer: createIssueWriter({
-          octokit: minted.octokit,
-          owner: this.owner,
-          repo: this.repo,
-          botLogin: this.deps.botLogin(),
-          organizationId: this.org,
-          installationKey,
-          deadlineAt: this.deadlineAt,
-          deps: this.callDeps,
-        }),
-      };
-    } catch (error) {
-      this.deps.log("[self-heal] fix CI evaluator token mint failed", {
-        attemptId: this.attempt.id,
-        error: errorText(error),
-      });
-      this.session = "unavailable";
-    }
-    return this.session;
+    super(db, attempt, finding, deadlineAt, deps, "fix CI evaluator");
   }
 
   async run(): Promise<FixCiOutcome> {
@@ -469,27 +354,15 @@ class FixCiEvaluator {
     source: GateSource,
     ciResults: CiResults,
   ): Promise<FixCiOutcome> {
-    const session = this.session;
-    if (typeof session !== "object" || session === null) return this.touch();
-    const compare = await this.call<CompareData>(
-      "read",
-      "gh_read",
-      "contents",
-      async (signal) => {
-        const res = await session.octokit.rest.repos.compareCommitsWithBasehead(
-          {
-            owner: this.owner,
-            repo: this.repo,
-            basehead: `${base}...${pr.head.sha}`,
-            request: { signal },
-          },
-        );
-        return { ...res, data: res.data as unknown as CompareData };
-      },
+    const session = this.gh;
+    if (session === null) return this.touch();
+    const checked = await this.compareAndGuard(
+      session,
+      `${base}...${pr.head.sha}`,
+      this.maxDiffLines,
     );
-    if (!compare.ok) return this.touch();
-    const files = compare.data.files ?? [];
-    if (compare.data.ahead_by <= 0 || files.length === 0) {
+    if (checked.kind === "failed") return this.touch();
+    if (checked.kind === "empty") {
       return this.withdraw("guard_rejected", {
         counted: true,
         reasons: ["no_changes"],
@@ -497,14 +370,7 @@ class FixCiEvaluator {
         ciResults,
       });
     }
-    const guard = evaluateFixDiff({
-      files,
-      planFiles: this.finding.planFiles,
-      ruleId: this.finding.ruleId,
-      subject: this.finding.subject,
-      maxDiffLines: this.maxDiffLines,
-      truncated: files.length >= COMPARE_FILE_CAP,
-    });
+    const guard = checked.guard;
     if (!guard.ok) {
       await this.patch({
         guardStatus: "rejected",
@@ -567,8 +433,8 @@ class FixCiEvaluator {
 
   /** No repo CI: the PR carries needs-human-approve and a note. Best effort. */
   private async flagNoRepoCi(prNumber: number): Promise<void> {
-    const session = this.session;
-    if (typeof session !== "object" || session === null) return;
+    const session = this.gh;
+    if (session === null) return;
     const labels = await session.writer.updateIssue({
       number: prNumber,
       labelsAdd: [FINDING_LABELS.needsHumanApprove],
@@ -679,7 +545,7 @@ class FixCiEvaluator {
         finding.status === "open" &&
         finding.attempts >= this.maxAttempts
       ) {
-        await this.markNeedsHuman();
+        await this.needsHuman("attempts_cap", async () => this.gh);
       }
     }
     return outcome;
@@ -689,8 +555,8 @@ class FixCiEvaluator {
     prNumber: number,
     spec: WithdrawSpec,
   ): Promise<void> {
-    const session = this.session;
-    if (typeof session !== "object" || session === null) return;
+    const session = this.gh;
+    if (session === null) return;
     const res = await session.writer.upsertComment({
       number: prNumber,
       marker: commentMarker({
@@ -716,64 +582,20 @@ class FixCiEvaluator {
   }
 
   private async closePull(prNumber: number): Promise<boolean> {
-    const session = this.session;
-    if (typeof session !== "object" || session === null) return false;
-    const res = await this.call(
-      "write",
-      "gh_write",
-      "pull_requests",
-      async (signal) => {
-        const out = await session.octokit.rest.pulls.update({
-          owner: this.owner,
-          repo: this.repo,
-          pull_number: prNumber,
-          state: "closed",
-          request: { signal },
-        });
-        return { ...out, data: undefined };
-      },
-      true,
+    const session = this.gh;
+    if (session === null) return false;
+    return closeFixPull(
+      this.refTarget(session),
+      prNumber,
+      "[self-heal] fix draft close failed",
     );
-    if (!res.ok) {
-      this.deps.log("[self-heal] fix draft close failed", {
-        attemptId: this.attempt.id,
-        outcome: res.outcome,
-      });
-    }
-    return res.ok;
   }
 
   private async deleteBranch(): Promise<void> {
     const branch = this.attempt.branch;
-    const session = this.session;
-    if (branch === null || typeof session !== "object" || session === null) {
-      return;
-    }
-    const res = await this.call(
-      "write",
-      "gh_write",
-      "contents",
-      async (signal) => {
-        const out = await session.octokit.rest.git.deleteRef({
-          owner: this.owner,
-          repo: this.repo,
-          ref: `heads/${branch}`,
-          request: { signal },
-        });
-        return { ...out, data: undefined };
-      },
-    );
-    // Already gone is the desired end state.
-    if (
-      !res.ok &&
-      res.outcome !== "not_found" &&
-      res.outcome !== "unprocessable"
-    ) {
-      this.deps.log("[self-heal] fix branch delete failed", {
-        attemptId: this.attempt.id,
-        outcome: res.outcome,
-      });
-    }
+    const session = this.gh;
+    if (branch === null || session === null) return;
+    await deleteFixBranch(this.refTarget(session), branch);
   }
 
   private async commentOnIssue(
@@ -781,10 +603,8 @@ class FixCiEvaluator {
     prNumber: number | null,
   ): Promise<void> {
     const issueNumber = this.finding.issueNumber;
-    const session = this.session;
-    if (issueNumber === null || typeof session !== "object" || !session) {
-      return;
-    }
+    const session = this.gh;
+    if (issueNumber === null || session === null) return;
     const res = await session.writer.upsertComment({
       number: issueNumber,
       marker: commentMarker({
@@ -808,68 +628,12 @@ class FixCiEvaluator {
       });
     }
   }
-
-  /** The attempts cap: needs-human-approve on the issue. */
-  private async markNeedsHuman(): Promise<void> {
-    await updateFinding({
-      db: this.db,
-      organizationId: this.org,
-      id: this.finding.id,
-      patch: {
-        status: "needs_human",
-        autoFixLabeled: false,
-        fixReadyAt: null,
-        lastDecision: "needs_human",
-        lastDecisionReason: "attempts_cap",
-      },
-    });
-    const issueNumber = this.finding.issueNumber;
-    const session = this.session;
-    if (issueNumber === null || typeof session !== "object" || !session) {
-      return;
-    }
-    const labels = await session.writer.updateIssue({
-      number: issueNumber,
-      labelsAdd: [FINDING_LABELS.needsHumanApprove],
-      labelsRemove: [FINDING_LABELS.autoFix],
-    });
-    await session.writer.upsertComment({
-      number: issueNumber,
-      marker: commentMarker({
-        fp: this.finding.fingerprint,
-        kind: "needs_human_attempts_cap",
-        runId: this.attempt.id,
-      }),
-      body: renderAuditComment("needs_human_attempts_cap", {
-        fingerprint: this.finding.fingerprint,
-        runId: this.attempt.id,
-        attempts: this.attempt.attemptNo,
-        maxAttempts: this.maxAttempts,
-      }),
-    });
-    if (!labels.ok) {
-      this.deps.log("[self-heal] needs-human label failed", {
-        attemptId: this.attempt.id,
-        outcome: labels.outcome,
-      });
-    }
-  }
-
-  private async patch(
-    patch: Parameters<typeof updateFixAttempt>[0]["patch"],
-  ): Promise<void> {
-    const row = await updateFixAttempt({
-      db: this.db,
-      organizationId: this.org,
-      id: this.attempt.id,
-      patch,
-    });
-    if (row) this.attempt = row;
-  }
 }
 
 /** A draft awaiting its CI verdict. */
-function isEvaluable(attempt: AuditFixAttemptRow | null): boolean {
+function isEvaluable(
+  attempt: AuditFixAttemptRow | null,
+): attempt is AuditFixAttemptRow {
   return (
     attempt !== null &&
     attempt.phase === "ci_pending" &&
@@ -898,7 +662,6 @@ export async function evaluateFixCi({
 }): Promise<FixCiOutcome> {
   const deadline =
     deadlineAt ?? new Date(deps.now().getTime() + EVALUATE_FIX_CI_BUDGET_MS);
-  let leased = false;
   try {
     const before = await getFixAttemptById({
       db,
@@ -906,53 +669,46 @@ export async function evaluateFixCi({
       id: attemptId,
     });
     if (!isEvaluable(before)) return "not_draft";
-    leased = await claimAttemptLease({
+    const leased = await withAttemptLease({
       db,
       organizationId,
       attemptId,
       now: deps.now(),
+      log: deps.log,
+      releaseFailedMessage: "[self-heal] fix CI evaluator lease release failed",
+      run: async (): Promise<FixCiOutcome> => {
+        // Re-read under the lease: another holder may have finished meanwhile.
+        const attempt = await getFixAttemptById({
+          db,
+          organizationId,
+          id: attemptId,
+        });
+        if (!isEvaluable(attempt)) return "not_draft";
+        const finding = await getFindingForAttempt({
+          db,
+          organizationId,
+          findingId: attempt.findingId,
+        });
+        if (finding === null) return "not_draft";
+        const outcome = await new FixCiEvaluator(
+          db,
+          attempt,
+          finding,
+          deadline,
+          stuckIfPending,
+          deps,
+        ).run();
+        deps.log("[self-heal] fix CI evaluator", { attemptId, outcome });
+        return outcome;
+      },
     });
-    if (!leased) return "lease_held";
-    // Re-read under the lease: another holder may have finished meanwhile.
-    const attempt = await getFixAttemptById({
-      db,
-      organizationId,
-      id: attemptId,
-    });
-    if (attempt === null || !isEvaluable(attempt)) return "not_draft";
-    const finding = await getFindingForAttempt({
-      db,
-      organizationId,
-      findingId: attempt.findingId,
-    });
-    if (finding === null) return "not_draft";
-    const outcome = await new FixCiEvaluator(
-      db,
-      attempt,
-      finding,
-      deadline,
-      stuckIfPending,
-      deps,
-    ).run();
-    deps.log("[self-heal] fix CI evaluator", { attemptId, outcome });
-    return outcome;
+    return leased.leased ? leased.value : "lease_held";
   } catch (error) {
     deps.log("[self-heal] fix CI evaluator failed", {
       attemptId,
       error: errorText(error),
     });
     return "error";
-  } finally {
-    if (leased) {
-      try {
-        await releaseAttemptLease({ db, organizationId, attemptId });
-      } catch (error) {
-        deps.log("[self-heal] fix CI evaluator lease release failed", {
-          attemptId,
-          error: errorText(error),
-        });
-      }
-    }
   }
 }
 
@@ -1025,32 +781,28 @@ export async function runStuckDraftSweep({
   deps?: EvaluateFixCiDeps;
 }): Promise<FixCiSweepResult> {
   const result: FixCiSweepResult = { processed: 0, outcomes: {} };
-  let rows: AuditFixAttemptRow[];
-  try {
-    rows = await listCiPendingDrafts({ db, now, limit });
-  } catch (error) {
-    deps.log("[self-heal] fix CI sweep list failed", {
-      error: errorText(error),
-    });
-    return result;
-  }
   const stuckBefore = now.getTime() - FIX_CI_STUCK_MS;
-  for (const row of rows.slice(0, limit)) {
-    if (deadlineAt.getTime() - deps.now().getTime() < MIN_ROW_BUDGET_MS) {
-      break;
-    }
-    const outcome = await evaluateFixCi({
-      db,
-      organizationId: row.organizationId,
-      attemptId: row.id,
-      deadlineAt,
-      stuckIfPending:
-        row.prOpenedAt !== null && row.prOpenedAt.getTime() <= stuckBefore,
-      deps,
-    });
-    result.processed += 1;
-    result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
-  }
+  await runBoundedSweep({
+    limit,
+    list: () => listCiPendingDrafts({ db, now, limit }),
+    deadlineAt,
+    now: deps.now,
+    log: deps.log,
+    listFailedMessage: "[self-heal] fix CI sweep list failed",
+    each: async (row) => {
+      const outcome = await evaluateFixCi({
+        db,
+        organizationId: row.organizationId,
+        attemptId: row.id,
+        deadlineAt,
+        stuckIfPending:
+          row.prOpenedAt !== null && row.prOpenedAt.getTime() <= stuckBefore,
+        deps,
+      });
+      result.processed += 1;
+      result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
+    },
+  });
   return result;
 }
 

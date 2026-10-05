@@ -25,7 +25,8 @@ import {
   isBotUser,
   type FollowupCommit,
 } from "./regression";
-import { MIN_ROW_BUDGET_MS, errorText } from "./audit-shared";
+import { errorText } from "./audit-shared";
+import { runBoundedSweep } from "./fix-attempt-session";
 
 /**
  * 30-day regression tracking of merged self-heal fixes (R5, BRK-01, SC5).
@@ -356,41 +357,42 @@ export async function runFixRegressionSweep({
     outcomes: {},
   };
   const cap = Math.min(limit, FIX_REGRESSION_LIMIT);
-  let rows: AuditFixAttemptRow[];
-  try {
-    rows = await deps.list({ db, now, limit: cap });
-  } catch (error) {
-    deps.log("[self-heal] fix regression list failed", {
-      error: errorText(error),
-    });
-    return result;
-  }
-  for (const row of rows.slice(0, cap)) {
-    if (deadlineAt.getTime() - deps.now().getTime() < MIN_ROW_BUDGET_MS) {
-      break;
-    }
-    let outcome: FixRegressionOutcome;
-    try {
-      const seen = await new RegressionCheck(deps, row, now, deadlineAt).run();
-      if (seen === null) outcome = "skipped";
-      else {
-        result.checked += 1;
-        if (seen.regressed) result.regressed += 1;
-        if (seen.reopened) result.reopened += 1;
-        outcome = seen.regressed
-          ? "regressed"
-          : seen.reopened
-            ? "reopened"
-            : "checked";
+  await runBoundedSweep({
+    limit: cap,
+    list: () => deps.list({ db, now, limit: cap }),
+    deadlineAt,
+    now: deps.now,
+    log: deps.log,
+    listFailedMessage: "[self-heal] fix regression list failed",
+    each: async (row) => {
+      let outcome: FixRegressionOutcome;
+      try {
+        const seen = await new RegressionCheck(
+          deps,
+          row,
+          now,
+          deadlineAt,
+        ).run();
+        if (seen === null) outcome = "skipped";
+        else {
+          result.checked += 1;
+          if (seen.regressed) result.regressed += 1;
+          if (seen.reopened) result.reopened += 1;
+          outcome = seen.regressed
+            ? "regressed"
+            : seen.reopened
+              ? "reopened"
+              : "checked";
+        }
+      } catch (error) {
+        deps.log("[self-heal] fix regression check failed", {
+          attemptId: row.id,
+          error: errorText(error),
+        });
+        outcome = "error";
       }
-    } catch (error) {
-      deps.log("[self-heal] fix regression check failed", {
-        attemptId: row.id,
-        error: errorText(error),
-      });
-      outcome = "error";
-    }
-    result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
-  }
+      result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
+    },
+  });
   return result;
 }

@@ -9,14 +9,11 @@ import type {
 } from "@terragon/shared/model/audit-findings";
 import { updateFinding } from "@terragon/shared/model/audit-findings";
 import {
-  claimAttemptLease,
   closeFixAttempt,
   getFindingForAttempt,
   getFixAttemptById,
   listPendingPrOpens,
   refundFixAttempt,
-  releaseAttemptLease,
-  updateFixAttempt,
 } from "@terragon/shared/model/audit-fix-attempts";
 import { upsertGithubPR } from "@terragon/shared/model/github";
 import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
@@ -27,37 +24,25 @@ import {
 import { updateThread } from "@terragon/shared/model/threads";
 
 import { resolveBotLogin } from "../review/bot-login";
-import { createIssueWriter, type IssueWriter } from "./issue-writer";
 import type { FixCheckStatus } from "./plan-self-heal-run";
-import {
-  commentMarker,
-  FINDING_LABELS,
-  oneLine,
-  renderAuditComment,
-} from "./render-issue";
+import { commentMarker, oneLine, renderAuditComment } from "./render-issue";
 import {
   loadSelfHealContext,
   resolveSelfHealEffective,
 } from "./resolve-self-heal";
 import { createSelfHealOctokit } from "./self-heal-octokit";
 import { preflightCapabilities } from "./self-heal-preflight";
-import {
-  COMPARE_FILE_CAP,
-  evaluateFixDiff,
-  type FixDiffFile,
-} from "./suppression-guard";
-import {
-  withSelfHealCall,
-  type CallKind,
-  type GithubResponse,
-  type SelfHealCallDeps,
-  type SelfHealCallResult,
+import type {
+  SelfHealCallDeps,
+  SelfHealCallResult,
 } from "./with-self-heal-call";
+import { PRE_MINT_INSTALLATION_KEY, errorText } from "./audit-shared";
 import {
-  MIN_ROW_BUDGET_MS,
-  PRE_MINT_INSTALLATION_KEY,
-  errorText,
-} from "./audit-shared";
+  deleteFixBranch,
+  FixAttemptGithub,
+  runBoundedSweep,
+  withAttemptLease,
+} from "./fix-attempt-session";
 
 /**
  * The platform PR writer of the fix lane (GATE-01 steps 1-3, SC4, R4, R5,
@@ -209,11 +194,6 @@ interface RawPull {
   user?: { login?: string } | null;
 }
 
-interface CompareData {
-  ahead_by: number;
-  files?: FixDiffFile[];
-}
-
 const FIX_CHECK_STATUSES: readonly FixCheckStatus[] = [
   "passed",
   "failed",
@@ -280,108 +260,16 @@ export function renderFixPrBody({
   ].join("\n");
 }
 
-interface GithubSession {
-  octokit: Octokit;
-  installationKey: string;
-  writer: IssueWriter;
-}
-
 /** One opener execution for one leased attempt. */
-class FixPrOpener {
-  private session: GithubSession | "unavailable" | "missing" | null = null;
-  private readonly owner: string;
-  private readonly repo: string;
-  private readonly callDeps: Omit<SelfHealCallDeps, "breaker">;
-  private maxAttempts = 3;
-
+class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
   constructor(
-    private readonly db: DB,
-    private attempt: AuditFixAttemptRow,
-    private readonly finding: AuditFindingRow,
-    private readonly deadlineAt: Date,
-    private readonly deps: OpenFixPrDeps,
+    db: DB,
+    attempt: AuditFixAttemptRow,
+    finding: AuditFindingRow,
+    deadlineAt: Date,
+    deps: OpenFixPrDeps,
   ) {
-    const [owner = "", repo = ""] = attempt.repoFullName.split("/");
-    this.owner = owner;
-    this.repo = repo;
-    this.callDeps = { ...deps.callDeps, db };
-  }
-
-  private get org(): string {
-    return this.attempt.organizationId;
-  }
-
-  private now(): Date {
-    return this.deps.now();
-  }
-
-  private call<T>(
-    kind: CallKind,
-    signalName: string,
-    permission: "pull_requests" | "contents",
-    call: (signal: AbortSignal) => Promise<GithubResponse<T>>,
-  ): Promise<SelfHealCallResult<T>> {
-    if (typeof this.session !== "object" || this.session === null) {
-      throw new Error("self-heal opener: GitHub session not open");
-    }
-    return withSelfHealCall<T>({
-      kind,
-      organizationId: this.org,
-      installationKey: this.session.installationKey,
-      signalName,
-      permission,
-      deadlineAt: this.deadlineAt,
-      call,
-      deps: this.callDeps,
-    });
-  }
-
-  /** Mint once and run the fixLoop capability preflight. */
-  private async openSession(): Promise<
-    GithubSession | "unavailable" | "missing"
-  > {
-    if (this.session !== null) return this.session;
-    try {
-      const minted = await this.deps.mint({
-        owner: this.owner,
-        repo: this.repo,
-      });
-      const installationKey = String(minted.installationId);
-      const preflight = await this.deps.preflight({
-        organizationId: this.org,
-        installationKey,
-        owner: this.owner,
-        repo: this.repo,
-        capability: "fixLoop",
-        deadlineAt: this.deadlineAt,
-        deps: this.callDeps,
-      });
-      if (!preflight.ok) {
-        this.session = "unavailable" in preflight ? "unavailable" : "missing";
-        return this.session;
-      }
-      this.session = {
-        octokit: minted.octokit,
-        installationKey,
-        writer: createIssueWriter({
-          octokit: minted.octokit,
-          owner: this.owner,
-          repo: this.repo,
-          botLogin: this.deps.botLogin(),
-          organizationId: this.org,
-          installationKey,
-          deadlineAt: this.deadlineAt,
-          deps: this.callDeps,
-        }),
-      };
-    } catch (error) {
-      this.deps.log("[self-heal] fix PR opener token mint failed", {
-        attemptId: this.attempt.id,
-        error: errorText(error),
-      });
-      this.session = "unavailable";
-    }
-    return this.session;
+    super(db, attempt, finding, deadlineAt, deps, "fix PR opener");
   }
 
   private async refund(
@@ -498,39 +386,16 @@ class FixPrOpener {
     if (!repoInfo.ok) return this.failedCall(repoInfo);
     const base = repoInfo.data;
 
-    const compare = await this.call<CompareData>(
-      "read",
-      "gh_read",
-      "contents",
-      async (signal) => {
-        const res = await session.octokit.rest.repos.compareCommitsWithBasehead(
-          {
-            owner: this.owner,
-            repo: this.repo,
-            basehead: `${base}...${gatedHeadSha}`,
-            request: { signal },
-          },
-        );
-        return {
-          ...res,
-          data: res.data as unknown as CompareData,
-        };
-      },
+    const checked = await this.compareAndGuard(
+      session,
+      `${base}...${gatedHeadSha}`,
+      maxDiffLines,
     );
-    if (!compare.ok) return this.failedCall(compare);
-    const files = compare.data.files ?? [];
-    if (compare.data.ahead_by <= 0 || files.length === 0) {
+    if (checked.kind === "failed") return this.failedCall(checked.result);
+    if (checked.kind === "empty") {
       return this.counted("no_changes", ["no_changes"]);
     }
-
-    const guard = evaluateFixDiff({
-      files,
-      planFiles: this.finding.planFiles,
-      ruleId: this.finding.ruleId,
-      subject: this.finding.subject,
-      maxDiffLines,
-      truncated: files.length >= COMPARE_FILE_CAP,
-    });
+    const guard = checked.guard;
     await this.patch({
       guardStatus: guard.ok ? "passed" : "rejected",
       guardReasons: guard.ok ? [] : guard.rejections,
@@ -638,8 +503,8 @@ class FixPrOpener {
   private async findPull(
     branch: string,
   ): Promise<RawPull | "foreign" | "error" | null> {
-    const session = this.session;
-    if (typeof session !== "object" || session === null) return "error";
+    const session = this.gh;
+    if (session === null) return "error";
     const listed = await this.call<RawPull[]>(
       "read",
       "gh_read",
@@ -807,31 +672,7 @@ class FixPrOpener {
     if (branch === null) return;
     const session = await this.openSession();
     if (typeof session !== "object") return;
-    const res = await this.call(
-      "write",
-      "gh_write",
-      "contents",
-      async (signal) => {
-        const out = await session.octokit.rest.git.deleteRef({
-          owner: this.owner,
-          repo: this.repo,
-          ref: `heads/${branch}`,
-          request: { signal },
-        });
-        return { ...out, data: undefined };
-      },
-    );
-    // Already gone (or never pushed) is the desired end state.
-    if (
-      !res.ok &&
-      res.outcome !== "not_found" &&
-      res.outcome !== "unprocessable"
-    ) {
-      this.deps.log("[self-heal] fix branch delete failed", {
-        attemptId: this.attempt.id,
-        outcome: res.outcome,
-      });
-    }
+    await deleteFixBranch(this.refTarget(session), branch);
   }
 
   private async comment(
@@ -871,67 +712,17 @@ class FixPrOpener {
   private async markNeedsHuman(
     reason: "attempts_cap" | "open_failed",
   ): Promise<void> {
-    await updateFinding({
-      db: this.db,
-      organizationId: this.org,
-      id: this.finding.id,
-      patch: {
-        status: "needs_human",
-        autoFixLabeled: false,
-        fixReadyAt: null,
-        lastDecision: "needs_human",
-        lastDecisionReason: reason,
-      },
+    await this.needsHuman(reason, async () => {
+      const session = await this.openSession();
+      return typeof session === "object" ? session : null;
     });
-    const issueNumber = this.finding.issueNumber;
-    if (issueNumber === null) return;
-    const session = await this.openSession();
-    if (typeof session !== "object") return;
-    const labels = await session.writer.updateIssue({
-      number: issueNumber,
-      labelsAdd: [FINDING_LABELS.needsHumanApprove],
-      labelsRemove: [FINDING_LABELS.autoFix],
-    });
-    if (reason === "attempts_cap") {
-      const marker = commentMarker({
-        fp: this.finding.fingerprint,
-        kind: "needs_human_attempts_cap",
-        runId: this.attempt.id,
-      });
-      await session.writer.upsertComment({
-        number: issueNumber,
-        marker,
-        body: renderAuditComment("needs_human_attempts_cap", {
-          fingerprint: this.finding.fingerprint,
-          runId: this.attempt.id,
-          attempts: this.attempt.attemptNo,
-          maxAttempts: this.maxAttempts,
-        }),
-      });
-    }
-    if (!labels.ok) {
-      this.deps.log("[self-heal] needs-human label failed", {
-        attemptId: this.attempt.id,
-        outcome: labels.outcome,
-      });
-    }
-  }
-
-  private async patch(
-    patch: Parameters<typeof updateFixAttempt>[0]["patch"],
-  ): Promise<void> {
-    const row = await updateFixAttempt({
-      db: this.db,
-      organizationId: this.org,
-      id: this.attempt.id,
-      patch,
-    });
-    if (row) this.attempt = row;
   }
 }
 
 /** Attempts the opener may act on: reported, not closed, no PR yet. */
-function isOpenable(attempt: AuditFixAttemptRow | null): boolean {
+function isOpenable(
+  attempt: AuditFixAttemptRow | null,
+): attempt is AuditFixAttemptRow {
   return (
     attempt !== null &&
     attempt.phase !== "closed" &&
@@ -955,7 +746,6 @@ export async function openDraftFixPr({
 }): Promise<DraftOpenOutcome> {
   const deadline =
     deadlineAt ?? new Date(deps.now().getTime() + OPEN_FIX_PR_BUDGET_MS);
-  let leased = false;
   try {
     const before = await getFixAttemptById({
       db,
@@ -963,52 +753,45 @@ export async function openDraftFixPr({
       id: attemptId,
     });
     if (!isOpenable(before)) return "not_pending";
-    leased = await claimAttemptLease({
+    const leased = await withAttemptLease({
       db,
       organizationId,
       attemptId,
       now: deps.now(),
+      log: deps.log,
+      releaseFailedMessage: "[self-heal] fix PR opener lease release failed",
+      run: async (): Promise<DraftOpenOutcome> => {
+        // Re-read under the lease: another holder may have finished meanwhile.
+        const attempt = await getFixAttemptById({
+          db,
+          organizationId,
+          id: attemptId,
+        });
+        if (!isOpenable(attempt)) return "not_pending";
+        const finding = await getFindingForAttempt({
+          db,
+          organizationId,
+          findingId: attempt.findingId,
+        });
+        if (finding === null) return "not_pending";
+        const outcome = await new FixPrOpener(
+          db,
+          attempt,
+          finding,
+          deadline,
+          deps,
+        ).run();
+        deps.log("[self-heal] fix PR opener", { attemptId, outcome });
+        return outcome;
+      },
     });
-    if (!leased) return "lease_held";
-    // Re-read under the lease: another holder may have finished meanwhile.
-    const attempt = await getFixAttemptById({
-      db,
-      organizationId,
-      id: attemptId,
-    });
-    if (attempt === null || !isOpenable(attempt)) return "not_pending";
-    const finding = await getFindingForAttempt({
-      db,
-      organizationId,
-      findingId: attempt.findingId,
-    });
-    if (finding === null) return "not_pending";
-    const outcome = await new FixPrOpener(
-      db,
-      attempt,
-      finding,
-      deadline,
-      deps,
-    ).run();
-    deps.log("[self-heal] fix PR opener", { attemptId, outcome });
-    return outcome;
+    return leased.leased ? leased.value : "lease_held";
   } catch (error) {
     deps.log("[self-heal] fix PR opener failed", {
       attemptId,
       error: errorText(error),
     });
     return "error";
-  } finally {
-    if (leased) {
-      try {
-        await releaseAttemptLease({ db, organizationId, attemptId });
-      } catch (error) {
-        deps.log("[self-heal] fix PR opener lease release failed", {
-          attemptId,
-          error: errorText(error),
-        });
-      }
-    }
   }
 }
 
@@ -1036,28 +819,24 @@ export async function runFixPrOpenSweep({
   deps?: OpenFixPrDeps;
 }): Promise<FixPrOpenSweepResult> {
   const result: FixPrOpenSweepResult = { processed: 0, outcomes: {} };
-  let rows: AuditFixAttemptRow[];
-  try {
-    rows = await listPendingPrOpens({ db, now, limit });
-  } catch (error) {
-    deps.log("[self-heal] fix PR sweep list failed", {
-      error: errorText(error),
-    });
-    return result;
-  }
-  for (const row of rows.slice(0, limit)) {
-    if (deadlineAt.getTime() - deps.now().getTime() < MIN_ROW_BUDGET_MS) {
-      break;
-    }
-    const outcome = await openDraftFixPr({
-      db,
-      organizationId: row.organizationId,
-      attemptId: row.id,
-      deadlineAt,
-      deps,
-    });
-    result.processed += 1;
-    result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
-  }
+  await runBoundedSweep({
+    limit,
+    list: () => listPendingPrOpens({ db, now, limit }),
+    deadlineAt,
+    now: deps.now,
+    log: deps.log,
+    listFailedMessage: "[self-heal] fix PR sweep list failed",
+    each: async (row) => {
+      const outcome = await openDraftFixPr({
+        db,
+        organizationId: row.organizationId,
+        attemptId: row.id,
+        deadlineAt,
+        deps,
+      });
+      result.processed += 1;
+      result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
+    },
+  });
   return result;
 }
