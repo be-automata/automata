@@ -1,6 +1,6 @@
 # ADR-010: The audit self-healing loop — the agent emits findings, the control plane is the only writer of issues
 
-- **Status:** Accepted (part 1: audit to issues). Part 2 (the fix loop) is appended in Phase 9.
+- **Status:** Accepted. Part 1 (audit to issues) shipped in Phase 8; part 2 (the fix loop) in Phase 9.
 - **Date:** 2026-10-04
 - **Context source:** `apps/www/src/server-lib/audit/` (parser, fingerprint, decide, executor, issue
   writer, outbox applier, sweep, cron, drain), `packages/shared/src/model/audit-findings.ts`,
@@ -168,5 +168,145 @@ Each must keep holding; the named test is the guard.
 
 ## Part 2 — fix loop (Phase 9)
 
-Reserved. Phase 9 appends the fix loop here (auto-fix dispatch, the PR gate, the attempt cap).
-The schema for it already ships with part 1 so one manual production push covers both phases.
+- **Date:** 2026-10-04
+- **Context source:** `apps/www/src/server-lib/audit/` (`self-heal-dispatcher.ts`,
+  `evaluate-fix-trigger.ts`, `run-audit-fix.ts`, `self-heal-admission.ts`, `plan-self-heal-run.ts`,
+  `fix-dispatch-reconcile.ts`, `fix-outcome-classify.ts`, `suppression-guard.ts`, `open-fix-pr.ts`,
+  `required-checks.ts`, `evaluate-fix-ci.ts`, `loop-breaker.ts`, `fix-pr-lifecycle.ts`,
+  `fix-pr-expiry.ts`, `regression-sweep.ts`, `metrics.ts`), `apps/www/src/agent/hatchet/dispatch.ts`,
+  `apps/www/src/app/api/self-heal/fix-check/route.ts`,
+  `packages/shared/src/model/audit-fix-attempts.ts`, `self-heal-slot.ts`, `self-heal-breaker.ts`,
+  `packages/shared/src/self-heal/fix-paths.ts`, `packages/worker/src/agent-run/receive-pack-refs.ts`,
+  `git-broker.ts`, `self-heal-fix-check.ts`, `workflow.ts`, `deploy/skills/audit-fix/SKILL.md`.
+- **Schema:** none. Every table and column the fix loop uses shipped with part 1, so the one manual
+  production push of phase 8 covers both parts.
+
+### Context
+
+Part 1 files a finding as an issue. Part 2 lets the platform try to fix it: one agent run per
+finding attempt, which pushes a branch and nothing else, followed by a pull request that a person
+merges. The constraints of part 1 still hold, plus three more:
+
+- The fix agent needs a write path, but ADR-004 says no agent holds a GitHub write credential.
+- Many repositories are on GitHub's free plan. A private repo there cannot have branch protection,
+  so the design cannot depend on it.
+- Reviews keep priority over self-heal on the single execution box.
+
+### Decision
+
+**The fix lane is single-writer too. The agent pushes one fenced branch through the git broker;
+the control plane decides, opens, readies and closes the pull request; a person merges.**
+
+1. **The dispatcher is the only starter.** A labelled ledger issue only marks the finding fix-ready
+   in the DB; the webhook makes no GitHub call and starts nothing. Fix automations are labelled-only
+   (`automata:auto-fix`), so an older www that strips the label keys can never fire one. The `*/10`
+   tick runs the dispatcher last. It checks the flag, lists ready findings, and then admits through
+   **review-first admission and one platform-wide box slot**: no self-heal run starts while any
+   review is queued or running, and at most one self-heal run (audit or fix) holds the box. Scheduled
+   audits are admitted the same way. Branch protection is never a dispatch refusal.
+2. **Leased claims; the attempt id travels in the stamp.** A claim is one compare-and-set on the
+   finding inside `withSelfHealTx`, leased for 10 minutes. The attempt id is written into the
+   thread's automation-skill stamp, and the planner binds the stamped attempt (an idempotent CAS).
+   A thread that cannot be planned fails closed: no unfenced fix agent starts. The Hatchet trigger
+   is bounded at 5 s and an ambiguous answer is read back before the single retry.
+3. **Ref fence and deny list.** The worker's git broker parses the receive-pack command list before
+   a byte reaches GitHub and accepts only updates of the run's own `refs/heads/automata/fix-*`
+   branch (creates allowed, deletes and every other ref refused, the whole push rejected on one bad
+   update). A fix run on a box without the credential broker fails before the clone. The path deny
+   list (`FIX_DENY_PATHS`, nested `AGENTS.md` / `CLAUDE.md` / `.claude/` at any depth) is enforced
+   twice: by the worker on the pushed diff, and by www on GitHub's compare diff together with the
+   suppression and scope guard.
+4. **Worker finding check on the pushed sha, single-use gate token.** After the agent has exited and
+   been reaped, the worker confirms the pushed sha on GitHub, checks it out clean (`git clean -ffdx`)
+   and runs only the finding's deterministic check as the agent uid, with no LLM and a 3-minute
+   budget. It posts the verdict once with a per-attempt gate token: 32 bytes, only its sha256 at
+   rest, a 2-hour TTL, compared timing-safe, accepted once. The token is not a GitHub credential and
+   never enters the daemon environment or the journal.
+5. **Draft PR through the App client.** A passed check whose sha is still the branch head and that
+   passes the guard becomes ONE bot-authored draft PR (`createSelfHealOctokit`, adopted by head when
+   it already exists). Drafts are not reviewed.
+6. **CI gate, then ready, then one review, then a human merge.** The CI gate source is chosen per
+   head: `protection` (the default branch's required checks), else `all-checks` (every check run and
+   commit status green, with a 2-minute settle window), else `finding-check-only` (no check within
+   10 minutes; the PR gets `needs-human-approve` and a no-repo-CI note). The source is recorded on the
+   attempt and shown in the activity card. When the gate is green, the PR head still equals the
+   gated sha and the guard still passes, the platform marks the PR ready with one App GraphQL
+   `markPullRequestReadyForReview` call. That triggers exactly one review from the bot-author-matching
+   review automation. A person merges. On a gate failure the platform withdraws the draft (marker
+   comment, close, branch delete, one issue comment) and counts the attempt.
+7. **Infrastructure is refunded, the finding's failures are counted.** Every terminal cause is
+   classified exhaustively. Lost dispatches are read back from Hatchet before any refund. Killed,
+   abandoned, cancelled-CI and stuck drafts are refunded; red CI, a guard rejection, a moved head, a
+   human close and an expiry are counted. Credential 401/quota is counted, never refunded and never a
+   breaker input. Drain covers fix runs.
+8. **Loop and plane breakers.** `loop_fix` and `loop_audit` per repo, `hatchet_dispatch` and
+   `exec_plane` per org, trip on consecutive-count and rate rules (including 403/422 on lane writes,
+   expiries and 30-day regressions). Cooldowns escalate 24 h → 72 h → `paused_manual` (third trip in
+   30 days); only the attributed admin reset leaves `paused_manual`. Recovery is exactly one probe
+   run, taken in the same transaction as the claim.
+9. **No merge API.** Nothing in the lane calls merge, auto-merge, enable-auto-merge or update-branch.
+   Merges, human closes, expiries and 30-day regressions are only recorded.
+
+### Options considered
+
+- **A build/test gate run on the box before the PR.** Rejected. It would compete with the run's
+  30-minute cap, the agent uid has no Docker, and admin-supplied gate commands are a remote-code
+  surface on a shared box. The repository's own CI on a draft PR is the build gate.
+- **Open the PR ready for review without waiting for CI.** Rejected by the operator's R1 amendment:
+  a review of a red PR wastes the review and asks a person to read broken code. The draft-then-ready
+  order makes "one review per fix" a property of code.
+- **Engine priority for reviews (Hatchet priority on a separate workflow).** Not adopted. It is
+  unverified on hatchet-lite, and a second workflow adds a competing concurrency group. The www
+  admission gate is the bulkhead, and the RES-12 drill shows a review queued behind a self-heal run
+  starts within milliseconds of the box-lock release.
+- **Require branch protection.** Rejected: a free-plan private repo cannot have it. The ref fence
+  and the human merge keep the default branch safe without it; protection only changes the gate
+  source.
+- **A write token for the fix agent.** Rejected, as in part 1 and ADR-004.
+
+### Consequences
+
+**Positive**
+
+- A fix agent can at worst push a bad commit to its own `automata/fix-*` branch. The guard, the
+  finding check, the CI gate, the review and the human merge all stand between it and the default
+  branch.
+- One review per fix, after CI, and none for a red draft.
+- Reviews keep priority; the box runs one self-heal run at a time.
+
+**Negative / watch**
+
+- A fix needs a passing deterministic check; rubric-only findings are never fixed automatically.
+- Deploy skew is dangerous: an older worker has no ref fence. The worker deploys first, and the
+  flag and mode stay off until both halves run phase 9 (runbook).
+- Known gaps: an expiry close that fails leaves the PR open while the attempt is recorded expired
+  (no retry); a failed regression read still counts as that day's check; follow-up matching includes
+  GitHub's 3 context lines; a `pull_request.reopened` on a counted fix PR is not handled.
+
+### Anti-deviation invariants
+
+Each must keep holding; the named test is the guard.
+
+1. **Nothing in the lane merges.** No non-test source in the lane calls a merge, auto-merge or
+   update-branch API. Guard: `apps/www/src/server-lib/audit/no-merge.static.test.ts`.
+2. **The fix agent can push only its own fix branch.** Receive-pack commands are parsed before
+   forwarding; any other ref, a delete or a malformed or compressed body is refused. Guards:
+   `packages/worker/src/agent-run/receive-pack-refs.test.ts`, `git-broker.test.ts`,
+   `broker-integration.test.ts` (real `git push`), `workflow-cleanup.test.ts` (no broker → no run).
+3. **The guard judges exactly the checked commit.** Suppressions, tests, CI, audit config, denied
+   paths and out-of-plan files are rejected on the compare diff of the gated sha. Guards:
+   `apps/www/src/server-lib/audit/suppression-guard.test.ts`, `packages/shared/src/self-heal/fix-paths.test.ts`,
+   `self-heal-fix-check.test.ts` (worker mirror).
+4. **One attempt per claim, bound once.** The planner and the dispatcher race to bind; exactly one
+   attempt is consumed. Guard: the RACE-01 drill in `apps/www/src/server-lib/audit/run-audit-fix.test.ts`.
+5. **Fix runs start only from the dispatcher, behind admission and the slot.** Concurrent ticks start
+   exactly one run; a review in flight defers; a half-open probe is taken in the claim transaction.
+   Guards: `apps/www/src/server-lib/audit/self-heal-dispatcher.test.ts`, `self-heal-admission.test.ts`,
+   `packages/worker/src/agent-run/self-heal-box-lock.integration.test.ts` (RES-12, `HATCHET_IT=1`).
+6. **The gate token never reaches the agent or a log.** Guards: `daemon-env.test.ts`,
+   `fix-check/route.test.ts`, `dispatch.test.ts`, `self-heal-acceptance.test.ts` (no journal line may
+   carry the gate token header or field).
+7. **Ready only after the gate.** Guards: `evaluate-fix-ci.test.ts`, `required-checks.test.ts`,
+   and the fix-lane checks of `packages/worker/deploy/linux/self-heal-acceptance.sh` on live evidence.
+8. **Every GitHub call of the lane uses the App installation client.** Guards:
+   `no-shared-octokit.static.test.ts`, `with-self-heal-call.test.ts`.
