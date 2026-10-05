@@ -16,40 +16,19 @@
  * printed, logged or written to disk. The URL must be https (http is allowed
  * only for localhost). An existing <file> is kept unless --force is given.
  */
-import { existsSync, writeFileSync } from "node:fs";
-
 import { parseExportSnapshot } from "../../packages/shared/src/self-heal/bench/score";
+import {
+  assertRepo,
+  fail,
+  parseCli,
+  refuseOverwrite,
+  runMain,
+  writeJson,
+} from "./cli";
 
 const USAGE =
   "Usage: BENCH_WWW_URL=... BENCH_SESSION_COOKIE=... pnpm exec tsx deploy/self-heal-bench/collect.ts --repo <owner/repo> --out <file> [--force]";
 const TIMEOUT_MS = 30_000;
-
-function fail(message: string): never {
-  console.error(message);
-  process.exit(1);
-}
-
-function parseArgs(argv: string[]): {
-  repo: string;
-  out: string;
-  force: boolean;
-} {
-  let repo: string | undefined;
-  let out: string | undefined;
-  let force = false;
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === "--force") force = true;
-    else if (arg === "--repo") repo = argv[++i];
-    else if (arg === "--out") out = argv[++i];
-    else fail(`unknown argument: ${arg}\n${USAGE}`);
-  }
-  if (!repo || !out) fail(USAGE);
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
-    fail(`--repo must be owner/repo, got: ${repo}`);
-  }
-  return { repo, out, force };
-}
 
 function exportUrl(base: string, repo: string): URL {
   let url: URL;
@@ -69,14 +48,24 @@ function exportUrl(base: string, repo: string): URL {
 }
 
 async function main(): Promise<void> {
-  const { repo, out, force } = parseArgs(process.argv.slice(2));
+  const { values } = parseCli(
+    {
+      options: {
+        repo: { type: "string" },
+        out: { type: "string" },
+        force: { type: "boolean", default: false },
+      },
+    },
+    USAGE,
+  );
+  const { repo, out, force } = values;
+  if (!repo || !out) fail(USAGE);
+  assertRepo(repo);
   const base = process.env.BENCH_WWW_URL;
   const cookie = process.env.BENCH_SESSION_COOKIE;
   if (!base) fail("BENCH_WWW_URL is not set");
   if (!cookie) fail("BENCH_SESSION_COOKIE is not set");
-  if (existsSync(out) && !force) {
-    fail(`refusing to overwrite ${out} (pass --force)`);
-  }
+  refuseOverwrite(out, force);
 
   const url = exportUrl(base, repo);
   const response = await fetch(url, {
@@ -100,7 +89,7 @@ async function main(): Promise<void> {
 
   const raw: unknown = await response.json();
   const snapshot = parseExportSnapshot(raw);
-  writeFileSync(out, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+  writeJson(out, raw);
   console.log(
     `saved export of ${snapshot.repoFullName} at ${snapshot.exportedAt}: ` +
       `${snapshot.runs.length} runs, ${snapshot.findings.length} findings, ` +
@@ -108,8 +97,4 @@ async function main(): Promise<void> {
   );
 }
 
-main().catch((error: unknown) => {
-  fail(
-    `collect failed: ${error instanceof Error ? error.message : String(error)}`,
-  );
-});
+runMain("collect", main);

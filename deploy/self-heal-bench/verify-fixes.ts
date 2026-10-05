@@ -47,7 +47,6 @@ import {
   readFileSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -57,6 +56,7 @@ import {
   parseFixtureManifest,
   type Seed,
 } from "../../packages/shared/src/self-heal/bench/fixture-manifest";
+import { recordOf } from "../../packages/shared/src/self-heal/bench/narrow";
 import {
   matchSeed,
   parseExportSnapshot,
@@ -72,6 +72,14 @@ import {
   workflowActionsPinned,
   workflowHasPermissions,
 } from "../../packages/worker/src/agent-run/self-heal-checks";
+import {
+  assertRepo,
+  fail,
+  parseCli,
+  refuseOverwrite,
+  runMain,
+  writeJson,
+} from "./cli";
 
 const USAGE =
   "Usage: pnpm exec tsx deploy/self-heal-bench/verify-fixes.ts --repo <owner/repo> --manifest <manifest.json> --hidden <hidden-tests dir> --export <export.json> --out <file> [--force]";
@@ -80,52 +88,36 @@ const HIDDEN_TEST_TIMEOUT_MS = 60_000;
 const CHECK_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT = 64 * 1024 * 1024;
 
-interface Args {
+interface RunResult {
+  code: number | null;
+  stdout: string;
+}
+
+function parseArgs(): {
   repo: string;
   manifest: string;
   hidden: string;
   exportFile: string;
   out: string;
   force: boolean;
-}
-
-interface RunResult {
-  code: number | null;
-  stdout: string;
-}
-
-function fail(message: string): never {
-  console.error(message);
-  process.exit(1);
-}
-
-function parseArgs(argv: string[]): Args {
-  const values: Record<string, string> = {};
-  let force = false;
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i] ?? "";
-    if (arg === "--force") {
-      force = true;
-      continue;
-    }
-    const value = argv[i + 1];
-    if (
-      !["--repo", "--manifest", "--hidden", "--export", "--out"].includes(
-        arg,
-      ) ||
-      value === undefined
-    ) {
-      fail(`bad argument: ${arg}\n${USAGE}`);
-    }
-    values[arg.slice(2)] = value;
-    i += 1;
-  }
-  const { repo, manifest, hidden, out } = values;
+} {
+  const { values } = parseCli(
+    {
+      options: {
+        repo: { type: "string" },
+        manifest: { type: "string" },
+        hidden: { type: "string" },
+        export: { type: "string" },
+        out: { type: "string" },
+        force: { type: "boolean", default: false },
+      },
+    },
+    USAGE,
+  );
+  const { repo, manifest, hidden, out, force } = values;
   const exportFile = values.export;
   if (!repo || !manifest || !hidden || !exportFile || !out) fail(USAGE);
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
-    fail(`--repo must be owner/repo, got: ${repo}`);
-  }
+  assertRepo(repo);
   return { repo, manifest, hidden, exportFile, out, force };
 }
 
@@ -177,13 +169,6 @@ async function ghGet(path: string): Promise<unknown> {
   const pages: unknown = JSON.parse(result.stdout);
   if (!Array.isArray(pages)) throw new Error(`gh api ${path}: not paginated`);
   return pages.every(Array.isArray) ? pages.flat() : pages[0];
-}
-
-function recordOf(value: unknown, where: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`${where} is not an object`);
-  }
-  return value as Record<string, unknown>;
 }
 
 async function git(cwd: string, args: string[]): Promise<RunResult> {
@@ -351,10 +336,8 @@ async function suppressionHits(
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
-  if (existsSync(args.out) && !args.force) {
-    fail(`refusing to overwrite ${args.out} (pass --force)`);
-  }
+  const args = parseArgs();
+  refuseOverwrite(args.out, args.force);
   const manifest = parseFixtureManifest(
     JSON.parse(readFileSync(args.manifest, "utf8")),
   );
@@ -438,7 +421,7 @@ async function main(): Promise<void> {
       finalChecks,
       prs,
     };
-    writeFileSync(args.out, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+    writeJson(args.out, result);
     const failing = Object.values(finalChecks).filter(
       (o) => o === "fail",
     ).length;
@@ -450,8 +433,4 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  fail(
-    `verify-fixes failed: ${error instanceof Error ? error.message : String(error)}`,
-  );
-});
+runMain("verify-fixes", main);

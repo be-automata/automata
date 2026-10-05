@@ -28,37 +28,25 @@
 import { readFileSync } from "node:fs";
 
 import { parseFixtureManifest } from "../../packages/shared/src/self-heal/bench/fixture-manifest";
+import { isRecord } from "../../packages/shared/src/self-heal/bench/narrow";
 import {
   parseExportSnapshot,
   parseVerificationResult,
   scoreBench,
   type SectionScoreEntry,
 } from "../../packages/shared/src/self-heal/bench/score";
+import { errorMessage, fail, parseCli, runMain } from "./cli";
 
 const USAGE =
   "Usage: pnpm exec tsx deploy/self-heal-bench/score.ts --manifest <file> --audit-only <1,..,5> [--loop <a,b,c> --verification <a,b,c>] [--costs <n,n,n>] [--section-scores <file>]";
 const EXPECTED_LOOP_RUNS = 3;
 const EXPECTED_AUDIT_ONLY_RUNS = 5;
-const FLAGS = [
-  "--manifest",
-  "--loop",
-  "--audit-only",
-  "--verification",
-  "--costs",
-  "--section-scores",
-];
-
-function fail(message: string): never {
-  console.error(message);
-  process.exit(1);
-}
 
 function readJson(path: string): unknown {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return fail(`cannot read JSON from ${path}: ${message}`);
+    return fail(`cannot read JSON from ${path}: ${errorMessage(error)}`);
   }
 }
 
@@ -74,33 +62,35 @@ function parseSectionScores(value: unknown): SectionScoreEntry[][] {
   return value.map((run, i) => {
     if (!Array.isArray(run)) fail(`section scores entry ${i} is not an array`);
     return run.map((entry, j): SectionScoreEntry => {
-      if (typeof entry !== "object" || entry === null) {
+      if (!isRecord(entry)) {
         fail(`section scores [${i}][${j}] is not an object`);
       }
-      const e = entry as { id?: unknown; score?: unknown };
-      if (typeof e.id !== "string") fail(`section scores [${i}][${j}].id`);
-      return typeof e.score === "number"
-        ? { id: e.id, score: e.score }
-        : { id: e.id };
+      if (typeof entry.id !== "string") fail(`section scores [${i}][${j}].id`);
+      return typeof entry.score === "number"
+        ? { id: entry.id, score: entry.score }
+        : { id: entry.id };
     });
   });
 }
 
 function main(): void {
-  const argv = process.argv.slice(2);
-  const values: Record<string, string> = {};
-  for (let i = 0; i < argv.length; i += 2) {
-    const flag = argv[i] ?? "";
-    const value = argv[i + 1];
-    if (!FLAGS.includes(flag) || value === undefined) {
-      fail(`bad argument: ${flag}\n${USAGE}`);
-    }
-    values[flag] = value;
-  }
-  const manifestPath = values["--manifest"];
-  const loopPaths = list(values["--loop"]);
-  const auditPaths = list(values["--audit-only"]);
-  const verificationPaths = list(values["--verification"]);
+  const { values } = parseCli(
+    {
+      options: {
+        manifest: { type: "string" },
+        loop: { type: "string" },
+        "audit-only": { type: "string" },
+        verification: { type: "string" },
+        costs: { type: "string" },
+        "section-scores": { type: "string" },
+      },
+    },
+    USAGE,
+  );
+  const manifestPath = values.manifest;
+  const loopPaths = list(values.loop);
+  const auditPaths = list(values["audit-only"]);
+  const verificationPaths = list(values.verification);
   if (!manifestPath || auditPaths.length === 0) fail(USAGE);
   if (loopPaths.length !== verificationPaths.length) {
     fail("--loop and --verification need the same number of files");
@@ -113,9 +103,9 @@ function main(): void {
     parseVerificationResult(readJson(p)),
   );
   const costs =
-    values["--costs"] === undefined
+    values.costs === undefined
       ? undefined
-      : list(values["--costs"]).map((c) => {
+      : list(values.costs).map((c) => {
           const n = Number(c);
           if (!Number.isFinite(n) || n < 0) fail(`bad cost: ${c}`);
           return n;
@@ -124,9 +114,9 @@ function main(): void {
     fail(`--costs needs one value per loop run (${loopRuns.length})`);
   }
   const sectionScores =
-    values["--section-scores"] === undefined
+    values["section-scores"] === undefined
       ? undefined
-      : parseSectionScores(readJson(values["--section-scores"]));
+      : parseSectionScores(readJson(values["section-scores"]));
 
   const report = scoreBench({
     manifest,
@@ -150,10 +140,4 @@ function main(): void {
   console.log(JSON.stringify(report, null, 2));
 }
 
-try {
-  main();
-} catch (error) {
-  fail(
-    `score failed: ${error instanceof Error ? error.message : String(error)}`,
-  );
-}
+runMain("score", main);

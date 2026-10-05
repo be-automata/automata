@@ -25,6 +25,7 @@ import { dirname, join, resolve } from "node:path";
 import { findManifestError } from "../../packages/shared/src/self-heal/bench/fixture-manifest";
 import { renderFixture } from "../../packages/shared/src/self-heal/bench/render-fixture";
 import { SEED_CATALOG } from "../../packages/shared/src/self-heal/bench/seed-catalog";
+import { fail, writeJson } from "./cli";
 
 const USAGE =
   "Usage: pnpm exec tsx deploy/self-heal-bench/generate-fixture.ts <outDir>";
@@ -39,31 +40,20 @@ function writeTree(root: string, files: Record<string, string>): void {
 
 function main(): void {
   const [outArg, extra] = process.argv.slice(2);
-  if (!outArg || extra !== undefined) {
-    console.error(USAGE);
-    process.exit(1);
-  }
+  if (!outArg || extra !== undefined) fail(USAGE);
   const outDir = resolve(outArg);
   if (existsSync(outDir) && readdirSync(outDir).length > 0) {
-    console.error(`refusing to write into a non-empty directory: ${outDir}`);
-    process.exit(1);
+    fail(`refusing to write into a non-empty directory: ${outDir}`);
   }
 
   const problem = findManifestError(SEED_CATALOG);
-  if (problem !== null) {
-    console.error(`SEED_CATALOG is invalid: ${problem}`);
-    process.exit(1);
-  }
+  if (problem !== null) fail(`SEED_CATALOG is invalid: ${problem}`);
 
   const fixture = renderFixture(SEED_CATALOG);
   mkdirSync(outDir, { recursive: true });
   writeTree(join(outDir, "repo"), fixture.repoFiles);
   writeTree(outDir, fixture.hiddenTests);
-  writeFileSync(
-    join(outDir, "manifest.json"),
-    `${JSON.stringify(SEED_CATALOG, null, 2)}\n`,
-    "utf8",
-  );
+  writeJson(join(outDir, "manifest.json"), SEED_CATALOG);
 
   const count = (kind: string) =>
     SEED_CATALOG.seeds.filter((s) => s.kind === kind).length;
