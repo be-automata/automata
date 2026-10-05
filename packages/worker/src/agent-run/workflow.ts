@@ -437,6 +437,39 @@ export interface SelfHealAuditStepDeps {
   postReport: typeof postSelfHealAuditChecks;
 }
 
+/**
+ * Mirror of @terragon/shared `FIX_BRANCH_PREFIX` (the worker does not depend
+ * on shared); a drift test in workflow.test.ts pins the two together.
+ */
+export const WORKER_FIX_BRANCH_PREFIX = "automata/fix-";
+
+/**
+ * FENCE-01: the git-broker ref fence for a self-heal fix run — exactly
+ * `refs/heads/<attempt branch>` — or undefined for every other run (no fence,
+ * no buffering). Fails closed on a branch that is not a plain
+ * `automata/fix-*` name: a fence built from `main` would be no fence at all.
+ */
+export function selfHealRefFence(
+  selfHeal: AgentRunInput["selfHeal"],
+): { exactRef: string } | undefined {
+  if (selfHeal?.kind !== "fix") return undefined;
+  const branch = selfHeal.branch;
+  const suffix = branch.startsWith(WORKER_FIX_BRANCH_PREFIX)
+    ? branch.slice(WORKER_FIX_BRANCH_PREFIX.length)
+    : "";
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(suffix) ||
+    suffix.includes("..") ||
+    suffix.endsWith(".") ||
+    suffix.endsWith(".lock")
+  ) {
+    throw new Error(
+      `self-heal fix run: branch is not a ${WORKER_FIX_BRANCH_PREFIX}* branch name`,
+    );
+  }
+  return { exactRef: `refs/heads/${branch}` };
+}
+
 const DEFAULT_SELF_HEAL_DEPS: SelfHealAuditStepDeps = {
   runChecks: runSelfHealChecks,
   postReport: (args) => postSelfHealAuditChecks(args),
@@ -562,6 +595,16 @@ async function runAgentInner(
   // UAT #229 F2: say which lane this run is (and its PR) before anything can
   // fail, so the journal can be matched to a GitHub review without timestamps.
   step(formatRunStartLine(input));
+
+  // FENCE-01: a self-heal fix run may push only its own attempt branch, and
+  // that fence lives in the git broker. Decide it before the clone, and refuse
+  // a fix run on a box whose agents would hold the raw token instead.
+  const refFence = selfHealRefFence(input.selfHeal);
+  if (refFence && config.credentialBroker !== "on") {
+    throw new Error(
+      "self-heal fix run requires the credential broker (WORKER_CREDENTIAL_BROKER=on): the ref fence lives in the git broker",
+    );
+  }
 
   // Provision: clone into a per-run workdir keyed on threadId. threadId is unique
   // per thread; threadChatId is the shared legacy sentinel when
@@ -826,6 +869,8 @@ async function runAgentInner(
         installationToken: input.installationToken,
         repoFullName: input.repoFullName,
         runBearer,
+        // Only fix runs carry the key at all; every other run is unchanged.
+        ...(refFence ? { refFence } : {}),
       });
       ghBroker = await startGhBroker({
         installationToken: input.installationToken,
@@ -853,7 +898,8 @@ async function runAgentInner(
       throw err;
     }
     step(
-      `credential brokers up: git=127.0.0.1:${gitBroker.port}, gh=${ghBroker.socketPath}`,
+      `credential brokers up: git=127.0.0.1:${gitBroker.port}, gh=${ghBroker.socketPath}` +
+        (refFence ? ` (pushes fenced to ${refFence.exactRef})` : ""),
     );
   }
 

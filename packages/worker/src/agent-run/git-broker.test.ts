@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { startGitBroker, type GitBroker } from "./git-broker";
 
 const TOKEN = "ghs_installation_token_secret";
@@ -195,3 +195,290 @@ describe("startGitBroker (#65 — local git credential broker)", () => {
     expect(calls[0]!.url).toContain("github.com/be-automata/automata.git");
   });
 });
+
+// ---------------------------------------------------------------------------
+// FENCE-01 (phase 9): the self-heal fix lane's ref fence.
+// ---------------------------------------------------------------------------
+
+const FIX_REF = "refs/heads/automata/fix-12-deadbeef-a1";
+const OLD_SHA = "1".repeat(40);
+const NEW_SHA = "a".repeat(40);
+
+function pkt(payload: string): Buffer {
+  const body = Buffer.from(payload, "utf8");
+  return Buffer.concat([
+    Buffer.from((body.length + 4).toString(16).padStart(4, "0"), "ascii"),
+    body,
+  ]);
+}
+
+/** A receive-pack request body as `git push` sends it: commands, flush, PACK. */
+function pushBody(commands: Array<[string, string, string]>): Buffer {
+  const lines = commands.map(([o, n, ref], i) =>
+    pkt(
+      i === 0
+        ? `${o} ${n} ${ref}\u0000 report-status agent=git/2.53.0`
+        : `${o} ${n} ${ref}`,
+    ),
+  );
+  return Buffer.concat([
+    ...lines,
+    Buffer.from("0000", "ascii"),
+    Buffer.from("PACK\u0000\u0000\u0000\u0002pack-object-bytes"),
+  ]);
+}
+
+/** A fetch stand-in that CONSUMES the request body, so byte identity can be asserted. */
+function bodyReadingFetch() {
+  const calls: Array<{ url: string; method?: string; body: Buffer | null }> =
+    [];
+  const dials = { count: 0 };
+  const impl = (async (url: string, init?: RequestInit) => {
+    dials.count += 1;
+    const body =
+      init?.body != null
+        ? Buffer.from(await new Response(init.body).arrayBuffer())
+        : null;
+    calls.push({ url: String(url), method: init?.method, body });
+    return new Response("REPORT-STATUS", { status: 200 });
+  }) as unknown as typeof fetch;
+  return { impl, calls, dials };
+}
+
+async function bootFenced() {
+  const { impl, calls, dials } = bodyReadingFetch();
+  broker = await startGitBroker({
+    installationToken: TOKEN,
+    repoFullName: REPO,
+    runBearer: BEARER,
+    fetchImpl: impl,
+    refFence: { exactRef: FIX_REF },
+  });
+  return { b: broker, calls, dials };
+}
+
+async function postReceivePack(b: GitBroker, body: Buffer) {
+  return fetch(`${b.url}/be-automata/automata.git/git-receive-pack`, {
+    method: "POST",
+    headers: {
+      ...withBearer,
+      "content-type": "application/x-git-receive-pack-request",
+    },
+    body,
+  });
+}
+
+describe("startGitBroker refFence (FENCE-01 — self-heal fix runs)", () => {
+  it("a push to the exact attempt branch is forwarded byte-identically and its sha recorded", async () => {
+    const { b, calls } = await bootFenced();
+    expect(b.lastPushedSha()).toBeNull();
+    const body = pushBody([[OLD_SHA, NEW_SHA, FIX_REF]]);
+    const res = await postReceivePack(b, body);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("REPORT-STATUS");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(
+      "https://github.com/be-automata/automata.git/git-receive-pack",
+    );
+    expect(calls[0]!.body!.equals(body)).toBe(true);
+    expect(b.lastPushedSha()).toBe(NEW_SHA);
+  });
+
+  it("a push to main → 403 and the upstream receives NOTHING", async () => {
+    const { b, calls } = await bootFenced();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await postReceivePack(
+      b,
+      pushBody([[OLD_SHA, NEW_SHA, "refs/heads/main"]]),
+    );
+    expect(res.status).toBe(403);
+    expect(calls).toHaveLength(0);
+    expect(b.lastPushedSha()).toBeNull();
+    // One log line: reason + ref, never the token.
+    expect(errors).toHaveBeenCalledTimes(1);
+    const line = errors.mock.calls.flat().join(" ");
+    expect(line).toContain("ref_not_allowed");
+    expect(line).toContain("refs/heads/main");
+    expect(line).not.toContain(TOKEN);
+    errors.mockRestore();
+  });
+
+  it("a good update bundled with a tag update → 403 as a whole", async () => {
+    const { b, calls } = await bootFenced();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await postReceivePack(
+      b,
+      pushBody([
+        [OLD_SHA, NEW_SHA, FIX_REF],
+        ["0".repeat(40), NEW_SHA, "refs/tags/v1"],
+      ]),
+    );
+    expect(res.status).toBe(403);
+    expect(calls).toHaveLength(0);
+    errors.mockRestore();
+  });
+
+  it("a delete of the attempt branch → 403", async () => {
+    const { b, calls } = await bootFenced();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await postReceivePack(
+      b,
+      pushBody([[OLD_SHA, "0".repeat(40), FIX_REF]]),
+    );
+    expect(res.status).toBe(403);
+    expect(calls).toHaveLength(0);
+    expect(errors.mock.calls.flat().join(" ")).toContain("delete_not_allowed");
+    errors.mockRestore();
+  });
+
+  it("a malformed or truncated command list → 403, nothing forwarded", async () => {
+    const { b, calls } = await bootFenced();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const body of [
+      Buffer.from("zzzz-not-a-pkt-line"),
+      pkt(`${OLD_SHA} ${NEW_SHA} ${FIX_REF}`), // body ends before the flush
+      Buffer.from("0000PACK"), // no commands at all
+    ]) {
+      const res = await postReceivePack(b, body);
+      expect(res.status, body.toString("latin1")).toBe(403);
+    }
+    expect(calls).toHaveLength(0);
+    errors.mockRestore();
+  });
+
+  it("a 70 KiB command section → 413, nothing forwarded", async () => {
+    const { b, calls } = await bootFenced();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const commands: Array<[string, string, string]> = [];
+    // Every update targets the exact ref, so only the size cap can refuse it.
+    while (commands.length * 120 < 72 * 1024) {
+      commands.push([OLD_SHA, NEW_SHA, FIX_REF]);
+    }
+    const body = pushBody(commands);
+    expect(body.length).toBeGreaterThan(70 * 1024);
+    const res = await postReceivePack(b, body);
+    expect(res.status).toBe(413);
+    expect(calls).toHaveLength(0);
+    errors.mockRestore();
+  });
+
+  it("a compressed receive-pack body → 415 (the fence cannot read it)", async () => {
+    const { b, calls } = await bootFenced();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await fetch(
+      `${b.url}/be-automata/automata.git/git-receive-pack`,
+      {
+        method: "POST",
+        headers: { ...withBearer, "content-encoding": "gzip" },
+        body: pushBody([[OLD_SHA, NEW_SHA, FIX_REF]]),
+      },
+    );
+    expect(res.status).toBe(415);
+    expect(calls).toHaveLength(0);
+    errors.mockRestore();
+  });
+
+  it("fetch traffic is unaffected: info/refs and upload-pack pass through", async () => {
+    const { b, calls } = await bootFenced();
+    const adv = await fetch(
+      `${b.url}/be-automata/automata.git/info/refs?service=git-receive-pack`,
+      { headers: withBearer },
+    );
+    expect(adv.status).toBe(200);
+    const up = await fetch(
+      `${b.url}/be-automata/automata.git/git-upload-pack`,
+      {
+        method: "POST",
+        headers: withBearer,
+        body: "not-a-command-list",
+      },
+    );
+    expect(up.status).toBe(200);
+    expect(calls.map((c) => c.body?.toString() ?? null)).toEqual([
+      null,
+      "not-a-command-list",
+    ]);
+    expect(b.lastPushedSha()).toBeNull();
+  });
+
+  it("the command section is checked before the upstream is dialled (buffered prefix)", async () => {
+    const { b, calls, dials } = await bootFenced();
+    const body = pushBody([[OLD_SHA, NEW_SHA, FIX_REF]]);
+    const { status, sentBeforeEnd } = await streamedPost(
+      b,
+      body,
+      10,
+      () => dials.count,
+    );
+    // Only 10 bytes of the command list were sent before we paused: the
+    // broker must not have dialled GitHub yet.
+    expect(sentBeforeEnd).toBe(0);
+    expect(status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body!.equals(body)).toBe(true);
+  });
+});
+
+describe("startGitBroker without refFence — today's behaviour", () => {
+  it("streams a receive-pack body upstream without buffering it", async () => {
+    let dialled = 0;
+    const impl = (async (_url: string, init?: RequestInit) => {
+      dialled += 1;
+      // Drain whatever arrives so the request can complete.
+      if (init?.body != null) await new Response(init.body).arrayBuffer();
+      return new Response("OK", { status: 200 });
+    }) as unknown as typeof fetch;
+    broker = await startGitBroker({
+      installationToken: TOKEN,
+      repoFullName: REPO,
+      runBearer: BEARER,
+      fetchImpl: impl,
+    });
+    const body = pushBody([[OLD_SHA, NEW_SHA, "refs/heads/main"]]);
+    const { status, sentBeforeEnd } = await streamedPost(
+      broker,
+      body,
+      10,
+      () => dialled,
+    );
+    // Upstream was dialled while the body was still open: no buffering.
+    expect(sentBeforeEnd).toBe(1);
+    expect(status).toBe(200);
+    expect(broker.lastPushedSha()).toBeNull();
+  });
+});
+
+/**
+ * POST `body` with node:http, pausing after `splitAt` bytes. Returns how many
+ * upstream dials `probe` saw while the body was still open.
+ */
+async function streamedPost(
+  b: GitBroker,
+  body: Buffer,
+  splitAt: number,
+  probe: () => number,
+): Promise<{ status: number; sentBeforeEnd: number }> {
+  const { request } = await import("node:http");
+  return new Promise((resolve, reject) => {
+    let sentBeforeEnd = -1;
+    const req = request(
+      `${b.url}/be-automata/automata.git/git-receive-pack`,
+      {
+        method: "POST",
+        headers: { ...withBearer, "transfer-encoding": "chunked" },
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () =>
+          resolve({ status: res.statusCode ?? 0, sentBeforeEnd }),
+        );
+      },
+    );
+    req.on("error", reject);
+    req.write(body.subarray(0, splitAt));
+    setTimeout(() => {
+      sentBeforeEnd = probe();
+      req.end(body.subarray(splitAt));
+    }, 150);
+  });
+}

@@ -623,6 +623,57 @@ describe("agent-run run task — credential brokers (#81)", () => {
     expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
   });
 
+  const FIX_INPUT = {
+    ...INPUT,
+    branch: "main",
+    selfHeal: {
+      kind: "fix" as const,
+      attemptId: "att_1",
+      branch: "automata/fix-12-deadbeef-a1",
+      baseBranch: "main",
+      checks: [],
+      denyExceptions: [],
+      gateToken: "GATE_SENTINEL",
+    },
+  };
+
+  it("FENCE-01: a self-heal fix run's git broker is fenced to exactly its attempt branch", async () => {
+    sharedBoxNoCredential();
+
+    await expect(runFn(FIX_INPUT, ctx())).resolves.toMatchObject({
+      outcome: "nothing-to-run",
+    });
+
+    expect(startGitBroker).toHaveBeenCalledTimes(1);
+    expect(startGitBroker).toHaveBeenCalledWith(
+      expect.objectContaining({
+        refFence: { exactRef: "refs/heads/automata/fix-12-deadbeef-a1" },
+      }),
+    );
+  });
+
+  it("FENCE-01: any other run's git broker gets NO refFence key", async () => {
+    sharedBoxNoCredential();
+
+    await expect(runFn(INPUT, ctx())).resolves.toMatchObject({
+      outcome: "nothing-to-run",
+    });
+
+    expect(startGitBroker.mock.calls[0]![0]).not.toHaveProperty("refFence");
+  });
+
+  it("FENCE-01: a fix run refuses to start without the credential broker (the fence lives there)", async () => {
+    sharedBoxNoCredential();
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+
+    await expect(runFn(FIX_INPUT, ctx())).rejects.toThrow(
+      /self-heal fix run requires the credential broker/,
+    );
+
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+    expect(startGitBroker).not.toHaveBeenCalled();
+  });
+
   it("WORKER_CREDENTIAL_BROKER=legacy-direct: no brokers, and the DaemonProcess gets broker=null (rollback)", async () => {
     sharedBoxNoCredential();
     process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";

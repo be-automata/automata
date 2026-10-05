@@ -7,6 +7,11 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { AddressInfo } from "node:net";
 import { HOP_BY_HOP, REQUEST_OWNED, timingSafeEqualStr } from "./broker-common";
+import {
+  checkRefFence,
+  parseReceivePackCommands,
+  type RefFenceResult,
+} from "./receive-pack-refs";
 
 /**
  * Worker-box-LOCAL git credential broker (#65, be-automata/automata).
@@ -31,16 +36,35 @@ import { HOP_BY_HOP, REQUEST_OWNED, timingSafeEqualStr } from "./broker-common";
  *   - repo path fence — only `/<owner>/<repo>.git/…` for THIS run;
  *   - method + endpoint allowlist — GET info/refs (upload|receive), POST
  *     git-upload-pack, POST git-receive-pack. Nothing else.
+ *   - ref fence (FENCE-01, phase 9; only when `refFence` is set — the self-heal
+ *     fix lane): a receive-pack POST is buffered until its pkt-line command
+ *     section ends (flush-pkt, capped at 64 KiB → 413), and EVERY ref update
+ *     must target exactly `refFence.exactRef` with a non-zero new sha. Any
+ *     other ref, a tag, a delete, a malformed/truncated list or a compressed
+ *     body is refused (403/415) before a byte is sent to GitHub; an accepted
+ *     push forwards the buffered prefix plus the rest of the stream unchanged.
+ *     Runs without `refFence` keep the plain streaming proxy, byte for byte.
+ *     The broker does NOT inspect pack objects, so the fix lane's path
+ *     deny-list cannot be enforced here: it is enforced on the pushed diff by
+ *     the worker's post-agent check (09-10) and on the compare diff by the www
+ *     guard (09-11).
  * The token is NEVER logged.
  */
 
 const UPLOAD_PACK = "git-upload-pack";
 const RECEIVE_PACK = "git-receive-pack";
+/** Cap on the buffered receive-pack command section under a ref fence. */
+const MAX_COMMAND_SECTION_BYTES = 64 * 1024;
 
 export type GitBroker = {
   /** `http://127.0.0.1:<port>` — the base the agent's git remote points at. */
   url: string;
   port: number;
+  /**
+   * The new sha of the last fenced push GitHub accepted (HTTP 2xx), or null.
+   * Always null without `refFence`. The post-agent check (09-10) runs on it.
+   */
+  lastPushedSha: () => string | null;
   /** Stop listening; resolves when the socket is closed. */
   close: () => Promise<void>;
 };
@@ -54,13 +78,24 @@ export type StartGitBrokerOptions = {
   runBearer: string;
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch;
+  /**
+   * FENCE-01: when set, pushes may update ONLY this fully-qualified ref
+   * (`refs/heads/automata/fix-…`). Absent ⇒ no fence and no buffering.
+   */
+  refFence?: { exactRef: string };
 };
 
 export async function startGitBroker(
   opts: StartGitBrokerOptions,
 ): Promise<GitBroker> {
-  const { installationToken, repoFullName, runBearer } = opts;
+  const { installationToken, repoFullName, runBearer, refFence } = opts;
   const fetchImpl = opts.fetchImpl ?? fetch;
+  if (refFence && !refFence.exactRef.startsWith("refs/heads/")) {
+    throw new Error(
+      `git-broker: refFence.exactRef must be a refs/heads/ ref, got: ${refFence.exactRef}`,
+    );
+  }
+  let lastPushedSha: string | null = null;
 
   // Trim + lowercase mirrors @terragon/shared's normalizeRepo (the platform's
   // single repo-slug normalization) WITHOUT importing it — the worker is a lean
@@ -136,13 +171,35 @@ export async function startGitBroker(
     }
     fwd.authorization = injectedAuth;
     const hasBody = req.method === "POST";
+    let body: ReadableStream | undefined = hasBody
+      ? (Readable.toWeb(req) as ReadableStream)
+      : undefined;
+    // 5. FENCE-01: a fenced push is checked before GitHub is dialled.
+    let fencedPushSha: string | null = null;
+    if (refFence && req.method === "POST" && endpoint === RECEIVE_PACK) {
+      const gate = await gateReceivePack(req, refFence.exactRef);
+      if (!gate.ok) {
+        console.error(
+          `git-broker: ref fence refused push (${gate.reason})` +
+            (gate.ref ? ` ref=${printableRef(gate.ref)}` : ""),
+        );
+        // The rest of the body is never read: close the connection.
+        res
+          .writeHead(gate.status, { connection: "close" })
+          .end("push refused by the self-heal ref fence");
+        return;
+      }
+      fencedPushSha = gate.pushedSha;
+      body = gate.body;
+    }
     const upstream = await fetchImpl(target, {
       method: req.method,
       headers: fwd,
-      body: hasBody ? (Readable.toWeb(req) as ReadableStream) : undefined,
+      body,
       // Node requires duplex for a streaming request body.
       ...(hasBody ? { duplex: "half" } : {}),
     } as RequestInit);
+    if (fencedPushSha && upstream.ok) lastPushedSha = fencedPushSha;
 
     const outHeaders: Record<string, string> = {};
     upstream.headers.forEach((value, key) => {
@@ -170,9 +227,93 @@ export async function startGitBroker(
   return {
     url: `http://127.0.0.1:${port}`,
     port,
+    lastPushedSha: () => lastPushedSha,
     close: () =>
       new Promise<void>((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve())),
       ),
   };
+}
+
+type ReceivePackGate =
+  | { ok: true; pushedSha: string; body: ReadableStream }
+  | {
+      ok: false;
+      status: 403 | 413 | 415;
+      reason:
+        | Extract<RefFenceResult, { ok: false }>["reason"]
+        | "malformed"
+        | "command_section_too_large"
+        | "encoded_body";
+      ref?: string;
+    };
+
+/**
+ * Buffer a receive-pack body until its command section is complete, check it
+ * against the exact ref, and hand back a stream that replays the buffered
+ * prefix followed by the rest of the request, unchanged.
+ */
+async function gateReceivePack(
+  req: IncomingMessage,
+  exactRef: string,
+): Promise<ReceivePackGate> {
+  // git never compresses a receive-pack request; an encoded body could hide
+  // its command list from the parser, so it is refused rather than guessed at.
+  const encoding = req.headers["content-encoding"];
+  if (encoding !== undefined && encoding.toLowerCase() !== "identity") {
+    return { ok: false, status: 415, reason: "encoded_body" };
+  }
+  const chunks = req[Symbol.asyncIterator]() as AsyncIterator<Buffer>;
+  let buffered = Buffer.alloc(0);
+  for (;;) {
+    const parsed = parseReceivePackCommands(buffered);
+    if (parsed.ok) {
+      if (parsed.consumed > MAX_COMMAND_SECTION_BYTES) {
+        return { ok: false, status: 413, reason: "command_section_too_large" };
+      }
+      const fence = checkRefFence(parsed.commands, { exactRef });
+      if (!fence.ok) {
+        return { ok: false, status: 403, reason: fence.reason, ref: fence.ref };
+      }
+      return {
+        ok: true,
+        pushedSha: fence.pushedSha,
+        body: replayThenStream(buffered, chunks),
+      };
+    }
+    if (parsed.reason === "malformed") {
+      return { ok: false, status: 403, reason: "malformed" };
+    }
+    if (buffered.length > MAX_COMMAND_SECTION_BYTES) {
+      return { ok: false, status: 413, reason: "command_section_too_large" };
+    }
+    const next = await chunks.next();
+    // The body ended before the flush-pkt: a truncated command list.
+    if (next.done) return { ok: false, status: 403, reason: "malformed" };
+    buffered = Buffer.concat([buffered, next.value]);
+  }
+}
+
+function replayThenStream(
+  prefix: Buffer,
+  rest: AsyncIterator<Buffer>,
+): ReadableStream {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(prefix));
+    },
+    async pull(controller) {
+      const next = await rest.next();
+      if (next.done) controller.close();
+      else controller.enqueue(new Uint8Array(next.value));
+    },
+    async cancel() {
+      await rest.return?.();
+    },
+  });
+}
+
+/** Ref names are agent-controlled: print them inert and bounded. */
+function printableRef(ref: string): string {
+  return ref.replace(/[^\x20-\x7e]/g, "?").slice(0, 200);
 }

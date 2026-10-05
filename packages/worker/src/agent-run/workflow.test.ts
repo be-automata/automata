@@ -66,6 +66,8 @@ let workflowDef: any;
 let resolveUseCredits: typeof import("./workflow").resolveUseCredits;
 let resolveCredentialSource: typeof import("./workflow").resolveCredentialSource;
 let runSelfHealAuditStep: typeof import("./workflow").runSelfHealAuditStep;
+let selfHealRefFence: typeof import("./workflow").selfHealRefFence;
+let WORKER_FIX_BRANCH_PREFIX: string;
 
 beforeAll(async () => {
   const mod = await import("./workflow");
@@ -74,6 +76,8 @@ beforeAll(async () => {
   resolveUseCredits = mod.resolveUseCredits;
   resolveCredentialSource = mod.resolveCredentialSource;
   runSelfHealAuditStep = mod.runSelfHealAuditStep;
+  selfHealRefFence = mod.selfHealRefFence;
+  WORKER_FIX_BRANCH_PREFIX = mod.WORKER_FIX_BRANCH_PREFIX;
 });
 
 afterEach(() => {
@@ -536,5 +540,59 @@ describe("runSelfHealAuditStep (FORGE-01 / OBS-01 / SKEW-01)", () => {
       }),
     ).resolves.toBeUndefined();
     expect(lines[0]).toContain("report=error");
+  });
+});
+
+describe("selfHealRefFence (FENCE-01 wiring)", () => {
+  const fix = (branch: string) => ({
+    kind: "fix" as const,
+    attemptId: "att_1",
+    branch,
+    baseBranch: "main",
+    checks: [],
+    denyExceptions: [],
+    gateToken: "GATE_SENTINEL",
+  });
+
+  it("a fix run is fenced to exactly refs/heads/<its branch>", () => {
+    expect(selfHealRefFence(fix("automata/fix-12-deadbeef-a1"))).toEqual({
+      exactRef: "refs/heads/automata/fix-12-deadbeef-a1",
+    });
+  });
+
+  it("no selfHeal or an audit run → no fence", () => {
+    expect(selfHealRefFence(undefined)).toBeUndefined();
+    expect(
+      selfHealRefFence({ kind: "audit", checks: [], checkToken: "t" }),
+    ).toBeUndefined();
+  });
+
+  it("a fix run whose branch is not an automata/fix-* branch fails closed", () => {
+    for (const branch of [
+      "main",
+      "refs/heads/automata/fix-1",
+      "automata/fix-",
+      "automata/fix-1/../main",
+      "automata/fix-1 x",
+      "automata/fix-1.lock",
+      "Automata/fix-1",
+    ]) {
+      expect(() => selfHealRefFence(fix(branch)), branch).toThrow(
+        /self-heal fix run/,
+      );
+    }
+  });
+
+  it("the worker's fix-branch prefix matches shared FIX_BRANCH_PREFIX (drift)", async () => {
+    // The worker does not depend on @terragon/shared; the literal is mirrored
+    // and pinned against the source of truth here.
+    const fs = await import("node:fs/promises");
+    const src = await fs.readFile(
+      new URL("../../../shared/src/self-heal/fix-paths.ts", import.meta.url),
+      "utf8",
+    );
+    expect(src).toContain(
+      `export const FIX_BRANCH_PREFIX = "${WORKER_FIX_BRANCH_PREFIX}";`,
+    );
   });
 });
