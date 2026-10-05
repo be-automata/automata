@@ -53,8 +53,8 @@ export type TaskAgentShape = {
 };
 
 /**
- * Phase 8 self-heal audit run: one platform check per finding. Structural
- * mirror of www `SelfHealRunInput`. `type` (not `interface`) for the same
+ * Phase 8 self-heal audit run: one platform check per finding; phase 9 adds
+ * the fix run. Structural mirror of www `SelfHealRunInput`. `type` (not `interface`) for the same
  * Hatchet JsonObject reason as AgentRunInput below.
  */
 export type SelfHealCheckShape = {
@@ -64,12 +64,29 @@ export type SelfHealCheckShape = {
   key?: string;
 };
 
-export type SelfHealRunShape = {
-  kind: "audit";
-  checks: SelfHealCheckShape[];
-  /** SECRET, worker-only; never logged. */
-  checkToken: string;
-};
+export type SelfHealRunShape =
+  | {
+      kind: "audit";
+      checks: SelfHealCheckShape[];
+      /** SECRET, worker-only; never logged. */
+      checkToken: string;
+    }
+  | {
+      /**
+       * Phase 9 self-heal fix run: one finding, one attempt branch. The git
+       * broker fences this run's pushes to exactly `refs/heads/<branch>`
+       * (FENCE-01).
+       */
+      kind: "fix";
+      attemptId: string;
+      /** `automata/fix-<issue>-<fp8>-a<attempt>` — the only ref this run may push. */
+      branch: string;
+      baseBranch: string;
+      checks: SelfHealCheckShape[];
+      denyExceptions: string[];
+      /** SECRET, worker-only, single-use; never logged. */
+      gateToken: string;
+    };
 
 // `type` (not `interface`): Hatchet's task input/output generics require an
 // implicit index signature (JsonObject), which TS infers for type-literal aliases
