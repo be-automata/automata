@@ -542,6 +542,30 @@ function toThreadState(row: ThreadStateRow): FixAttemptThreadState {
 }
 
 /**
+ * One attempt and its bound thread's effective state, fenced by org. The fix
+ * PR opener reads it to tell a run that ended on an error (credential, infra,
+ * a stop) from a run that finished and pushed nothing.
+ */
+export async function getFixAttemptThreadState({
+  db,
+  organizationId,
+  attemptId,
+}: {
+  db: DB;
+  organizationId: string;
+  attemptId: string;
+}): Promise<FixAttemptThreadState | null> {
+  const rows = await db
+    .select(THREAD_STATE_COLUMNS)
+    .from(auditFixAttempts)
+    .leftJoin(thread, eq(thread.id, auditFixAttempts.threadId))
+    .where(attemptInOrg(attemptId, organizationId))
+    .limit(1);
+  const row = rows[0];
+  return row ? toThreadState(row) : null;
+}
+
+/**
  * UNFENCED (RECON-01): dispatched attempts whose dispatch lease has lapsed,
  * across all orgs, oldest lease first. The reconcile reads each one back from
  * Hatchet before deciding anything; rows carry organizationId and every write

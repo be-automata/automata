@@ -176,6 +176,7 @@ export const FIX_ATTEMPT_REJECTION_TEXT: Readonly<Record<string, string>> = {
   sha_mismatch: "the branch moved after the check ran",
   no_changes: "the branch has no changes against the default branch",
   no_branch: "no branch was pushed",
+  run_failed: "the fix run ended with an error before a fix was pushed",
   check_failed: "the finding's check did not pass on the pushed commit",
   open_failed: "a draft pull request could not be opened",
   ci_failed: "the repository's CI failed on the draft pull request",

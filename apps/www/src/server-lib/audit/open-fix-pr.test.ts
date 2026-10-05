@@ -37,6 +37,7 @@ import {
   type SelfHealContext,
 } from "./resolve-self-heal";
 import { withSelfHealCall } from "./with-self-heal-call";
+import { attemptSignalOf, evaluateLoopFix } from "./loop-breaker";
 
 vi.mock("./with-self-heal-call", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./with-self-heal-call")>();
@@ -600,6 +601,81 @@ describe("openDraftFixPr (GATE-01, SC4, RES-18)", () => {
     expect(await open()).toBe("no_branch");
     expect((await attempt()).infraRefunded).toBe(false);
     expect(fake.rest.git.deleteRef).not.toHaveBeenCalled();
+  });
+
+  const endThread = (errorMessage: string | null, status = "error") =>
+    db
+      .update(thread)
+      .set({ status: status as "error", errorMessage })
+      .where(eq(thread.id, threadId));
+
+  it.each(["no_branch", "aborted", "error"] as const)(
+    "R1: a %s report from a run that died on a credential error is counted (cause credential), never refunded, no breaker input",
+    async (status) => {
+      await report(status);
+      await endThread("invalid-claude-credentials");
+      expect(await open()).toBe("run_failed");
+      const row = await attempt();
+      expect(row.outcome).toBe("run_failed");
+      expect(row.terminalCause).toBe("credential");
+      expect(row.infraRefunded).toBe(false);
+      expect(attemptSignalOf(row).result).toBe("excluded");
+      expect(fake.rest.pulls.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it("R1: free-text quota errors are credential too", async () => {
+    await report("no_branch");
+    await endThread("Claude AI usage limit reached|1760000000");
+    expect(await open()).toBe("run_failed");
+    expect((await attempt()).terminalCause).toBe("credential");
+  });
+
+  it("R1: three credential-ended runs never trip loop_fix", async () => {
+    await report("no_branch");
+    await endThread("invalid-claude-credentials");
+    await open();
+    const row = await attempt();
+    const signals = [0, 1, 2].map((i) =>
+      attemptSignalOf({ ...row, id: `c${i}` }),
+    );
+    expect(
+      evaluateLoopFix({ attempts: signals, events: [], now: new Date() }).trip,
+    ).toBe(false);
+  });
+
+  it("R1: a no_branch report from a run whose agent stopped responding is refunded (infra)", async () => {
+    await report("no_branch");
+    await endThread("agent-not-responding");
+    expect(await open()).toBe("run_refunded");
+    const row = await attempt();
+    expect(row.infraRefunded).toBe(true);
+    expect(row.terminalCause).toBe("agent_not_responding");
+    expect(mint).not.toHaveBeenCalled();
+  });
+
+  it("R1: a no_branch report from a stopped run is killed (refunded)", async () => {
+    await report("no_branch");
+    await endThread(null, "stopped");
+    expect(await open()).toBe("killed");
+    expect((await attempt()).infraRefunded).toBe(true);
+  });
+
+  it("R1: a credential-ended run under the kill switch is still counted, with no GitHub write", async () => {
+    await report("no_branch");
+    await endThread("invalid-claude-credentials");
+    ctx = { ...ctx, resolved: { ...ctx.resolved, killed: true } };
+    expect(await open()).toBe("run_failed");
+    const row = await attempt();
+    expect(row.infraRefunded).toBe(false);
+    expect(row.terminalCause).toBe("credential");
+    expect(totalCalls(fake)).toBe(0);
+  });
+
+  it("R1: a completed run's no_branch keeps the verdict (counted no_branch)", async () => {
+    await report("no_branch");
+    await endThread(null, "complete");
+    expect(await open()).toBe("no_branch");
   });
 
   it.each([

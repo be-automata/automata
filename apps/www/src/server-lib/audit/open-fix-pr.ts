@@ -12,6 +12,7 @@ import {
   closeFixAttempt,
   getFindingForAttempt,
   getFixAttemptById,
+  getFixAttemptThreadState,
   listPendingPrOpens,
   refundFixAttempt,
 } from "@terragon/shared/model/audit-fix-attempts";
@@ -38,6 +39,10 @@ import type {
 } from "./with-self-heal-call";
 import { PRE_MINT_INSTALLATION_KEY, errorText } from "./audit-shared";
 import {
+  classifyFixTerminal,
+  type FixTerminalClassification,
+} from "./fix-outcome-classify";
+import {
   deleteFixBranch,
   FixAttemptGithub,
   runBoundedSweep,
@@ -57,13 +62,20 @@ import {
  *    compare diff. Drafts are not reviewed; the CI evaluator (09-12) decides
  *    whether it becomes ready. Nothing here merges or enables auto-merge.
  *  - a counted non-PR outcome (guard_rejected, sha_mismatch, no_changes,
- *    no_branch, check_failed): the attempt is closed, the branch deleted and
- *    the issue gets one marker-upserted comment;
+ *    no_branch, check_failed, run_failed): the attempt is closed, the branch
+ *    deleted and the issue gets one marker-upserted comment;
  *  - a refund (check error, aborted, killed, dry run, missing permission,
- *    drafts unsupported): nothing is held against the finding;
+ *    drafts unsupported, run_refunded): nothing is held against the finding;
  *  - pending_open: GitHub did not answer the create; the tick sweep retries
  *    after 2 min / 10 min / 1 h, re-listing by head first, and the 4th
  *    failure is open_failed (needs-human-approve).
+ *
+ * A no_branch / aborted / error verdict is first checked against how the fix
+ * RUN ended (classifyFixTerminal, the reconcile's classifier): a run that
+ * died on a credential 401/quota is COUNTED as run_failed with terminal cause
+ * 'credential' (never refunded, never a breaker input); an infra end is
+ * refunded (run_refunded); a stop is killed. Only a run that ended without
+ * such evidence keeps the verdict's own outcome.
  *
  * Fix-lane writes do not go through the audit outbox (its rows are keyed to
  * audit runs). They are idempotent by construction (PR adoption by head,
@@ -84,6 +96,10 @@ export type DraftOpenOutcome =
   | "no_changes"
   | "no_branch"
   | "check_failed"
+  /** The fix run itself ended on a counted error (credential, agent error). */
+  | "run_failed"
+  /** The fix run itself ended on an infrastructure cause (refunded). */
+  | "run_refunded"
   | "check_error"
   | "aborted"
   | "killed"
@@ -194,6 +210,13 @@ interface RawPull {
   user?: { login?: string } | null;
 }
 
+/** Verdicts that may hide how the fix run itself ended. */
+const RUN_END_VERDICTS: ReadonlySet<FixCheckStatus> = new Set([
+  "no_branch",
+  "aborted",
+  "error",
+]);
+
 const FIX_CHECK_STATUSES: readonly FixCheckStatus[] = [
   "passed",
   "failed",
@@ -287,11 +310,48 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
     return outcome;
   }
 
+  /**
+   * R1: how the fix run ended, when its thread carries evidence (a typed
+   * terminal cause, an error, a stop). null when the run completed or left
+   * no evidence; the verdict then decides.
+   */
+  private async runEnd(): Promise<FixTerminalClassification | null> {
+    const state = await getFixAttemptThreadState({
+      db: this.db,
+      organizationId: this.org,
+      attemptId: this.attempt.id,
+    });
+    const t = state?.thread ?? null;
+    if (t === null || t.status === "complete") return null;
+    const stopped = t.status === "stopped" || t.status === "working-stopped";
+    if (t.terminalCause === null && t.errorMessage === null && !stopped) {
+      return null;
+    }
+    return classifyFixTerminal({
+      terminalCause: t.terminalCause,
+      errorMessage: t.errorMessage,
+      status: t.status,
+      hasCheckReport: false,
+      killed: false,
+    });
+  }
+
   async run(): Promise<DraftOpenOutcome> {
     const verdict = recordedVerdict(this.attempt);
+    const runEnd = RUN_END_VERDICTS.has(verdict) ? await this.runEnd() : null;
+    if (runEnd !== null && runEnd.class === "infra") {
+      return this.refund(
+        runEnd.outcome === "killed" ? "killed" : "run_refunded",
+        runEnd.reason,
+      );
+    }
     // A check that could not run says nothing about the fix.
-    if (verdict === "error") return this.refund("check_error", "check_error");
-    if (verdict === "aborted") return this.refund("aborted", "check_aborted");
+    if (runEnd === null && verdict === "error") {
+      return this.refund("check_error", "check_error");
+    }
+    if (runEnd === null && verdict === "aborted") {
+      return this.refund("aborted", "check_aborted");
+    }
 
     const context = await this.deps.loadContext({
       db: this.db,
@@ -302,6 +362,15 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
     });
     this.maxAttempts = context.resolved.settings.maxAttempts;
     const effective = resolveSelfHealEffective(context);
+    if (runEnd !== null) {
+      // Counted whatever the mode (credential is never refunded); GitHub is
+      // only written while the loop may write.
+      return this.counted("run_failed", ["run_failed"], {
+        deleteBranch: verdict !== "no_branch",
+        terminalCause: runEnd.reason,
+        github: effective.mode === "on" && effective.fixAllowed,
+      });
+    }
     // KILL-01: an operator stop or a missing permission is never the fix's fault.
     if (effective.mode === "off") {
       return effective.reason === "missing_permission"
@@ -638,7 +707,15 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
   private async counted(
     outcome: DraftOpenOutcome,
     reasons: readonly string[],
-    { deleteBranch = true }: { deleteBranch?: boolean } = {},
+    {
+      deleteBranch = true,
+      terminalCause = outcome,
+      github = true,
+    }: {
+      deleteBranch?: boolean;
+      terminalCause?: string;
+      github?: boolean;
+    } = {},
   ): Promise<DraftOpenOutcome> {
     const closed = await closeFixAttempt({
       db: this.db,
@@ -646,10 +723,10 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
       attemptId: this.attempt.id,
       outcome,
       counted: true,
-      terminalCause: outcome,
+      terminalCause,
       now: this.now(),
     });
-    if (!closed) return outcome;
+    if (!closed || !github) return outcome;
     if (deleteBranch) await this.deleteBranch();
     await this.comment(reasons);
     const finding = await getFindingForAttempt({
