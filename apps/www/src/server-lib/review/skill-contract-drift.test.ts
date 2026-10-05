@@ -17,6 +17,7 @@ import {
   AUDIT_RULES,
   AUDIT_SECTIONS,
 } from "@terragon/shared/self-heal/audit-rules";
+import { FIX_BRANCH_PREFIX } from "@terragon/shared/self-heal/fix-paths";
 import {
   loadReviewSkillBody,
   TRACKED_REVIEW_SKILL_PATH,
@@ -310,8 +311,9 @@ describe("audit-fix skill contract (no drift)", () => {
     expect(first).toBeGreaterThan(hardRules);
   });
 
-  it("names the automata/fix- branch prefix", () => {
-    expect(doc).toContain("automata/fix-");
+  it("names the automata/fix- branch prefix, equal to FIX_BRANCH_PREFIX", () => {
+    expect(FIX_BRANCH_PREFIX).toBe("automata/fix-");
+    expect(doc).toContain(FIX_BRANCH_PREFIX);
   });
 
   it("never teaches a closing keyword", () => {
