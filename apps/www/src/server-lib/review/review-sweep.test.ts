@@ -82,6 +82,7 @@ import { getPrHeadState } from "./octokit-review-client";
 import { findAnyBotReviewAtCommit } from "@terragon/review/state/head-review-guard";
 import { runReviewSweep } from "./review-sweep";
 import {
+  botAuthoredVerdictLine,
   executeReviewFromIntent,
   DEGRADED_INTENT_MARKER,
 } from "./execute-review-from-intent";
@@ -410,5 +411,73 @@ describe("runReviewSweep — shared terminal-text selector (phase 6)", () => {
     const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
     expect(args.preferTaggedIntent).toBeFalsy();
     expect(args.terminalText).toBe(LEAD_RESUMED_TEXT);
+  });
+});
+
+describe("runReviewSweep — a PR the bot opened itself (self-heal fix PR)", () => {
+  // GitHub refuses a formal verdict from a PR's author. Without the author
+  // check the sweep would retry the same 422 on every hourly pass for the
+  // whole lookback window; with it, the verdict goes out as a COMMENT, and
+  // that COMMENT is what the next pass must recognise as delivered.
+  const BOT = "automata-ai-bot[bot]";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    selected.rows = [];
+    prReviews.rows = [];
+  });
+
+  it("tells the writer the bot opened the PR", async () => {
+    vi.mocked(getPrHeadState).mockResolvedValueOnce({
+      headSha: HEAD,
+      isDraft: false,
+      authorLogin: BOT,
+    });
+    selected.rows = [candidate({ terminalCause: "timeout" })];
+
+    await runReviewSweep();
+
+    expect(executeReviewFromIntent).toHaveBeenCalledWith(
+      expect.objectContaining({ prAuthoredByBot: true, botLogin: BOT }),
+    );
+  });
+
+  it("a PR a person opened stays a formal-verdict PR", async () => {
+    vi.mocked(getPrHeadState).mockResolvedValueOnce({
+      headSha: HEAD,
+      isDraft: false,
+      authorLogin: "octocat",
+    });
+    selected.rows = [candidate({ terminalCause: "timeout" })];
+
+    await runReviewSweep();
+
+    expect(executeReviewFromIntent).toHaveBeenCalledWith(
+      expect.objectContaining({ prAuthoredByBot: false }),
+    );
+  });
+
+  it("does not re-post when the COMMENT verdict already sits at HEAD", async () => {
+    vi.mocked(getPrHeadState).mockResolvedValueOnce({
+      headSha: HEAD,
+      isDraft: false,
+      authorLogin: BOT,
+    });
+    prReviews.rows = [
+      {
+        id: 1,
+        user: { login: BOT },
+        state: "COMMENTED",
+        submittedAt: "2026-10-05T00:00:00Z",
+        dismissedAt: null,
+        commitId: HEAD,
+        body: `${botAuthoredVerdictLine("approve")}\n\nFix is correct.`,
+      },
+    ];
+    selected.rows = [candidate({ terminalCause: "timeout" })];
+
+    await runReviewSweep();
+
+    expect(executeReviewFromIntent).not.toHaveBeenCalled();
   });
 });

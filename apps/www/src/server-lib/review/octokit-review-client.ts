@@ -149,23 +149,40 @@ export function createOctokitReviewClient(
   };
 }
 
+/** What the review writer needs to know about a PR, read in one call. */
+export interface PrHeadState {
+  headSha: string;
+  isDraft: boolean;
+  /**
+   * The PR author's login (`<slug>[bot]` for an App), or null when GitHub
+   * reports no user (a deleted account). Compared against the review bot's
+   * login: GitHub refuses a formal verdict from a PR's own author.
+   */
+  authorLogin: string | null;
+}
+
 /**
- * HEAD sha (the idempotency + stale-intent key) AND draft state of a PR in one
- * call. The draft flag feeds the approve-floor draft cap (a draft PR must never
- * receive a formal `request_changes`) and the no-verdict rule (a bare `comment`
- * is a verdict only on a draft), fetched alongside the head sha to avoid a
- * second API round trip.
+ * HEAD sha (the idempotency + stale-intent key), draft state AND author of a
+ * PR in one call. The draft flag feeds the approve-floor draft cap (a draft PR
+ * must never receive a formal `request_changes`) and the no-verdict rule (a
+ * bare `comment` is a verdict only on a draft); the author decides whether the
+ * bot may submit a formal verdict at all (it may not on a PR it opened). All
+ * three come from the same response, so there is no second API round trip.
  */
 export async function getPrHeadState(
   octokit: Octokit,
   repoFullName: string,
   prNumber: number,
-): Promise<{ headSha: string; isDraft: boolean }> {
+): Promise<PrHeadState> {
   const [owner, repo] = parseRepoFullName(repoFullName);
   const { data } = await octokit.rest.pulls.get({
     owner,
     repo,
     pull_number: prNumber,
   });
-  return { headSha: data.head.sha, isDraft: data.draft === true };
+  return {
+    headSha: data.head.sha,
+    isDraft: data.draft === true,
+    authorLogin: data.user?.login ?? null,
+  };
 }

@@ -71,8 +71,31 @@ import {
 export const DEGRADED_INTENT_MARKER =
   "⚠️ Review intent could not be parsed — verdict NOT applied. This is NOT a clean pass.";
 
+/**
+ * The first line of a verdict the bot posts as a COMMENT on a PR it opened
+ * itself. GitHub answers a formal APPROVE / REQUEST_CHANGES from the PR's own
+ * author with a 422 ("Can not approve your own pull request"), so on a
+ * self-heal fix PR the only review the App can leave is a COMMENT; this line
+ * carries the verdict that review would otherwise have had. It is a VERDICT,
+ * not silence: it never starts with `DEGRADED_INTENT_MARKER`, so every
+ * replay / supersession / sweep guard counts it as "the bot reviewed this
+ * commit".
+ */
+export function botAuthoredVerdictLine(verdict: string): string {
+  return `**Verdict: ${verdict}** (posted as a comment: GitHub does not let an app approve or request changes on a pull request it opened)`;
+}
+
 export type ReviewFromIntentOutcome =
-  | { outcome: "posted"; verdict: string }
+  | {
+      outcome: "posted";
+      verdict: string;
+      /**
+       * Set only when a formal verdict went out as a COMMENT because the bot
+       * opened the PR (see `botAuthoredVerdictLine`). `verdict` stays the
+       * effective verdict the agent reached.
+       */
+      postedAsComment?: true;
+    }
   | { outcome: "posted_stale_comment"; intendedVerdict: string }
   | { outcome: "skipped_existing" }
   | { outcome: "skipped_superseded" }
@@ -148,6 +171,13 @@ export interface ExecuteReviewFromIntentOpts {
    * orchestrated; absent = today's last-block rule.
    */
   preferTaggedIntent?: boolean;
+  /**
+   * The review bot opened this PR (a self-heal fix PR). GitHub rejects a
+   * formal APPROVE / REQUEST_CHANGES from a PR's author, so a fresh verdict is
+   * posted as a COMMENT led by `botAuthoredVerdictLine`. Absent = false: every
+   * other PR is posted exactly as before.
+   */
+  prAuthoredByBot?: boolean;
   logger?: ReviewLogger;
 }
 
@@ -346,13 +376,39 @@ export async function executeReviewFromIntent(
     };
   }
 
+  // SELF-AUTHORED PR. The floor above already ran, so `effectiveVerdict` is
+  // the verdict we would have submitted; only the review EVENT changes. The
+  // findings ride along untouched — inline or folded, exactly as they would
+  // with a formal verdict. The executor's (headSha, verdict) idempotency then
+  // keys on COMMENTED, which is the state GitHub will record. One consequence:
+  // a SECOND run at the same head that reaches a different verdict is skipped
+  // as a redelivery — a COMMENT cannot be dismissed, so there is no supersede to
+  // do, and the first verdict at the commit stands.
+  const postAsComment =
+    opts.prAuthoredByBot === true && effectiveVerdict !== "comment";
+  if (postAsComment) {
+    logger?.info(
+      "review-from-intent: the bot opened this PR; posting the verdict as a COMMENT (GitHub refuses a formal verdict from the PR author)",
+      { repoFullName, prNumber, currentHeadSha, verdict: effectiveVerdict },
+    );
+  }
+  const postedIntent = postAsComment
+    ? {
+        ...execIntent,
+        verdict: "comment" as const,
+        body: [botAuthoredVerdictLine(effectiveVerdict), execIntent.body.trim()]
+          .filter((part) => part.length > 0)
+          .join("\n\n"),
+      }
+    : execIntent;
+
   const outcome = await runExecutor({
     github,
     repoFullName,
     prNumber,
     botLogin,
     headSha: currentHeadSha,
-    execIntent,
+    execIntent: postedIntent,
     postInlineComments: opts.postInlineComments,
     logger,
   });
@@ -365,6 +421,13 @@ export async function executeReviewFromIntent(
       botLogin,
       logger,
     });
+  }
+  if (postAsComment && outcome.outcome === "posted") {
+    return {
+      outcome: "posted",
+      verdict: effectiveVerdict,
+      postedAsComment: true,
+    };
   }
   return mapOutcome(outcome);
 }

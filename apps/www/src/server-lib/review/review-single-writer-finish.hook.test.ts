@@ -78,6 +78,7 @@ const { executeReviewFromIntent } = await import(
 const { handleReviewEffectAtFinish } = await import(
   "./review-single-writer-finish"
 );
+const { getPrHeadState } = await import("./octokit-review-client");
 
 function thread(sourceMetadata: unknown) {
   return {
@@ -124,5 +125,36 @@ describe("handleReviewEffectAtFinish — terminal-text selection (phase 6)", () 
     const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
     expect(args.preferTaggedIntent).toBeFalsy();
     expect(args.terminalText).toBe(LEAD_RESUMED_TEXT);
+  });
+});
+
+describe("handleReviewEffectAtFinish — a PR the bot opened itself", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    threadRow.value = thread(UNSTAMPED_METADATA);
+    chatMessages.value = F2;
+  });
+
+  it("tells the writer the bot opened the PR (self-heal fix PR)", async () => {
+    vi.mocked(getPrHeadState).mockResolvedValueOnce({
+      headSha: "head-sha",
+      isDraft: false,
+      authorLogin: "automata-ai-bot[bot]",
+    });
+    await runHook();
+    const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
+    expect(args.prAuthoredByBot).toBe(true);
+    expect(args.botLogin).toBe("automata-ai-bot[bot]");
+  });
+
+  it("a PR a person opened stays a formal-verdict PR", async () => {
+    vi.mocked(getPrHeadState).mockResolvedValueOnce({
+      headSha: "head-sha",
+      isDraft: false,
+      authorLogin: "octocat",
+    });
+    await runHook();
+    const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
+    expect(args.prAuthoredByBot).toBe(false);
   });
 });
