@@ -10,6 +10,8 @@ import { WebhookSkip } from "./webhook-skip";
 import {
   handleIssueEvent,
   handleIssueLabeledMirror,
+  handlePullRequestMirror,
+  handlePullRequestStatusChange,
   handleWorkflowRunEvent,
 } from "./handlers";
 import {
@@ -19,6 +21,7 @@ import {
 import { env } from "@terragon/env/apps-www";
 import { waitUntil } from "@/lib/wait-until";
 import { handleSelfHealCiEvent } from "@/server-lib/audit/evaluate-fix-ci";
+import { handleSelfHealPrClosed } from "@/server-lib/audit/fix-pr-lifecycle";
 import { createSelfHealOctokit } from "@/server-lib/audit/self-heal-octokit";
 import { insertFinding } from "@terragon/shared/model/audit-findings";
 import {
@@ -39,6 +42,18 @@ vi.mock("./handlers", async (importOriginal) => {
     handleIssueEvent: vi.fn(actual.handleIssueEvent),
     handleIssueLabeledMirror: vi.fn(actual.handleIssueLabeledMirror),
     handleWorkflowRunEvent: vi.fn(actual.handleWorkflowRunEvent),
+    handlePullRequestStatusChange: vi.fn(actual.handlePullRequestStatusChange),
+    handlePullRequestMirror: vi.fn(actual.handlePullRequestMirror),
+  };
+});
+vi.mock("@/server-lib/audit/fix-pr-lifecycle", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@/server-lib/audit/fix-pr-lifecycle")
+    >();
+  return {
+    ...actual,
+    handleSelfHealPrClosed: vi.fn(actual.handleSelfHealPrClosed),
   };
 });
 vi.mock("@/server-lib/audit/evaluate-fix-ci", async (importOriginal) => {
@@ -1615,6 +1630,43 @@ describe("GitHub webhook route", () => {
       await expect(
         handleSelfHealCiEvent(payload(sha), { db: failing, evaluate: vi.fn() }),
       ).resolves.toBeUndefined();
+    });
+  });
+  describe("self-heal fix PR lifecycle (R5)", () => {
+    it("pull_request.closed reaches the self-heal handler AND both existing closed handlers", async () => {
+      const pr = await createTestGitHubPR({ db });
+      const body = createPullRequestBody({
+        action: "closed",
+        repoFullName: pr.repoFullName,
+        prNumber: pr.number,
+      });
+      const response = await POST(await createMockRequest(body));
+      expect(response.status).toBe(200);
+      expect(handleSelfHealPrClosed).toHaveBeenCalledTimes(1);
+      expect(handlePullRequestStatusChange).toHaveBeenCalledTimes(1);
+      expect(handlePullRequestMirror).toHaveBeenCalledTimes(1);
+      expect(updateGitHubPR).toHaveBeenCalledWith({
+        repoFullName: pr.repoFullName,
+        prNumber: pr.number,
+        createIfNotFound: false,
+      });
+      // Not a self-heal fix PR: one lookup, no GitHub client, nothing deferred.
+      expect(createSelfHealOctokit).not.toHaveBeenCalled();
+      expect(waitUntil).not.toHaveBeenCalled();
+    });
+
+    it("other pull_request actions do not reach the self-heal handler", async () => {
+      const pr = await createTestGitHubPR({ db });
+      for (const action of ["opened", "reopened", "ready_for_review"]) {
+        const body = createPullRequestBody({
+          action,
+          repoFullName: pr.repoFullName,
+          prNumber: pr.number,
+        });
+        const response = await POST(await createMockRequest(body));
+        expect(response.status).toBe(200);
+      }
+      expect(handleSelfHealPrClosed).not.toHaveBeenCalled();
     });
   });
 });

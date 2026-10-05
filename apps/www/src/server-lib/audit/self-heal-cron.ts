@@ -6,6 +6,7 @@ import { redactSecrets } from "@terragon/utils/redact";
 import { runAuditSweep, runOutboxDrain } from "./audit-sweep";
 import { runStuckDraftSweep } from "./evaluate-fix-ci";
 import { runFixDispatchReconcile } from "./fix-dispatch-reconcile";
+import { runFixPrSettleSweep } from "./fix-pr-lifecycle";
 import { runLoopBreakerEvaluation } from "./loop-breaker";
 import { runFixPrOpenSweep } from "./open-fix-pr";
 import { runSelfHealDispatcher } from "./self-heal-dispatcher";
@@ -37,6 +38,7 @@ export interface SelfHealCronDeps {
   reconcile: typeof runFixDispatchReconcile;
   openPrs: typeof runFixPrOpenSweep;
   evaluateDrafts: typeof runStuckDraftSweep;
+  settlePrs: typeof runFixPrSettleSweep;
   breakers: typeof runLoopBreakerEvaluation;
   dispatch: typeof runSelfHealDispatcher;
   budget: { totalMs: number; perItemMs: number; limit: number };
@@ -52,6 +54,7 @@ function defaultDeps(): SelfHealCronDeps {
     reconcile: runFixDispatchReconcile,
     openPrs: runFixPrOpenSweep,
     evaluateDrafts: runStuckDraftSweep,
+    settlePrs: runFixPrSettleSweep,
     breakers: runLoopBreakerEvaluation,
     dispatch: runSelfHealDispatcher,
     budget: SELF_HEAL_CRON_BUDGET,
@@ -154,6 +157,19 @@ export async function runSelfHealCron(
         limit: deps.budget.limit,
       });
       console.log("[cron:self-heal] fix draft CI", result);
+    });
+    // R5: settle fix PRs GitHub already showed merged or closed when no
+    // webhook did (an adopted PR, a draft the CI sweep saw a person close),
+    // so the finding is not held by a finished attempt and the breakers
+    // below see the pr_merged / pr_closed events.
+    await withinBudget("fix PR settle", remaining(), async () => {
+      const result = await deps.settlePrs({
+        db: deps.db,
+        now: deps.now(),
+        deadlineAt,
+        limit: deps.budget.limit,
+      });
+      console.log("[cron:self-heal] fix PR settle", result);
     });
     // BRK-01: the loop and plane breakers read the outcomes the reconcile,
     // the open sweep and the CI sweep just recorded, move expired opens to

@@ -110,6 +110,29 @@ describe("attemptSignalOf (counted vs refunded)", () => {
     ).toBe("refunded");
   });
 
+  it("a merged fix PR (closed by the lifecycle) is a success, even after a refund (09-14)", () => {
+    expect(
+      attemptSignalOf({ ...base, outcome: "merged", terminalCause: null })
+        .result,
+    ).toBe("success");
+    expect(
+      attemptSignalOf({
+        ...base,
+        outcome: "merged",
+        infraRefunded: true,
+        terminalCause: "fix_ci_killed",
+      }).result,
+    ).toBe("success");
+    // A person closing the fix PR unmerged is a counted failure.
+    expect(
+      attemptSignalOf({
+        ...base,
+        outcome: "pr_closed",
+        terminalCause: "closed_unmerged",
+      }).result,
+    ).toBe("failure");
+  });
+
   it("a counted close for an exhausted login never counts toward a breaker", () => {
     expect(
       attemptSignalOf({

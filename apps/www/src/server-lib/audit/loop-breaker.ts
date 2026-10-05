@@ -131,6 +131,8 @@ export function attemptSignalOf(row: AttemptRowLike): LoopFixAttemptSignal {
     createdAt: row.createdAt,
     outcome: row.outcome,
   };
+  // 09-14: a person merged the fix PR; the lifecycle closes the attempt.
+  if (row.outcome === "merged") return { ...base, result: "success" };
   if (row.phase === "closed") {
     if (row.infraRefunded) return { ...base, result: "refunded" };
     if (

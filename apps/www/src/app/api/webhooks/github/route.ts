@@ -53,6 +53,7 @@ import { Webhooks } from "@octokit/webhooks";
 import { env } from "@terragon/env/apps-www";
 import { findWebhookSkip } from "./webhook-skip";
 import { handleSelfHealCiEvent } from "@/server-lib/audit/evaluate-fix-ci";
+import { handleSelfHealPrClosed } from "@/server-lib/audit/fix-pr-lifecycle";
 
 export async function POST(request: NextRequest) {
   const webhooks = new Webhooks({
@@ -95,6 +96,12 @@ export async function POST(request: NextRequest) {
       await handlePullRequestMirror(payload);
     },
   );
+  // R5: a self-heal fix PR a person merged or closed. A sibling of the two
+  // closed handlers above: one DB lookup by (repo, pr_number), the GitHub
+  // reads of a merge in waitUntil. Observation only; never merges, never throws.
+  webhooks.on("pull_request.closed", async ({ payload }) => {
+    await handleSelfHealPrClosed(payload);
+  });
   webhooks.on("pull_request_review.submitted", async ({ payload }) => {
     await handlePullRequestReviewMirror(payload);
   });

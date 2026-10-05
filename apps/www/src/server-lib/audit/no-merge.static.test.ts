@@ -27,10 +27,15 @@ function codeLines(source: string): string[] {
 // HUMAN-MERGE-GATE (T-09-12-3): the self-heal lane marks a draft ready at
 // most; a person merges. No file in the lane may call a merge API.
 describe("self-heal lane never merges", () => {
-  it("scans the lane (sanity: the evaluator and the opener are in scope)", () => {
+  it("scans the lane (sanity: the evaluator, the opener and the lifecycle are in scope)", () => {
     const files = ROOTS.flatMap(sourceFiles).map((f) => f.replace(HERE, ""));
     expect(files).toEqual(
-      expect.arrayContaining(["/evaluate-fix-ci.ts", "/open-fix-pr.ts"]),
+      expect.arrayContaining([
+        "/evaluate-fix-ci.ts",
+        "/open-fix-pr.ts",
+        "/fix-pr-lifecycle.ts",
+        "/hunks.ts",
+      ]),
     );
   });
 
