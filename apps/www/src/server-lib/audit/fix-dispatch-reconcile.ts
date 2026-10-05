@@ -19,7 +19,6 @@ import { releaseSelfHealSlot } from "@terragon/shared/model/self-heal-slot";
 import type { TerminalCause } from "@terragon/shared/model/terminal-cause";
 import { markThreadTerminal } from "@terragon/shared/model/threads";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import { hatchetConfig } from "@/agent/hatchet/dispatch";
 import {
@@ -30,6 +29,7 @@ import {
 import { updateThreadChatWithTransition } from "@/agent/update-status";
 
 import { classifyFixTerminal } from "./fix-outcome-classify";
+import { errorText } from "./audit-shared";
 
 /**
  * RECON-01 / RES-09 / RES-10 / KILL-01 / LEASE-01: never let infrastructure
@@ -108,10 +108,6 @@ export interface FixReconcileResult {
   killed: number;
   /** Hatchet lookups that failed; left unchanged this tick. */
   lookupFailed: number;
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 /**

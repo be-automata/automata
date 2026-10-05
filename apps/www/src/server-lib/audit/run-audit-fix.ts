@@ -13,12 +13,12 @@ import {
   releaseSelfHealSlot,
   setSlotHolderThread,
 } from "@terragon/shared/model/self-heal-slot";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import { getPostHogServer } from "@/lib/posthog-server";
 
 import { logSelfHealDecision } from "./decision-log";
 import { buildFixRunTransform } from "./fix-run-prompt";
+import { errorText } from "./audit-shared";
 
 /**
  * Turn one claimed fix attempt into exactly one fix thread (RACE-01, SC2).
@@ -81,10 +81,6 @@ export function defaultRunAuditFixDeps(distinctId: string): RunAuditFixDeps {
       getPostHogServer().capture({ distinctId, event, properties }),
     now: () => new Date(),
   };
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 export async function runAuditFixAutomation({

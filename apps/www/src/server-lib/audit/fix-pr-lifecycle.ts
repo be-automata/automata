@@ -21,7 +21,6 @@ import {
 } from "@terragon/shared/model/audit-fix-attempts";
 import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
 import { recordBreakerEvent } from "@terragon/shared/model/self-heal-breaker";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import { logSelfHealDecision, type SelfHealLogMode } from "./decision-log";
 import { parseHunkRanges } from "./hunks";
@@ -39,6 +38,11 @@ import {
   type GithubResponse,
   type SelfHealCallResult,
 } from "./with-self-heal-call";
+import {
+  MIN_ROW_BUDGET_MS,
+  PRE_MINT_INSTALLATION_KEY,
+  errorText,
+} from "./audit-shared";
 
 /**
  * The end of a self-heal fix PR (R5, SC4, HUMAN-MERGE-GATE). Observation
@@ -75,8 +79,6 @@ export const FIX_PR_RANGES_MAX_FILES = 50;
 /** The waitUntil / per-row budget for the GitHub reads. */
 export const FIX_PR_LIFECYCLE_BUDGET_MS = 25_000;
 export const FIX_PR_SETTLE_LIMIT = 20;
-const MIN_ROW_BUDGET_MS = 5_000;
-const PRE_MINT_INSTALLATION_KEY = "pending";
 
 export type FixPrSettleOutcome =
   | "merged"
@@ -121,10 +123,6 @@ export function defaultFixPrLifecycleDeps(): FixPrLifecycleDeps {
       }),
     schedule: waitUntil,
   };
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 /** What a person did to the PR, from a webhook payload or pulls.get. */

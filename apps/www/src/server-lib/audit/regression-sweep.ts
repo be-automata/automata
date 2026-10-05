@@ -11,7 +11,6 @@ import {
 } from "@terragon/shared/model/audit-fix-attempts";
 import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
 import { recordBreakerEvent } from "@terragon/shared/model/self-heal-breaker";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import {
   defaultFixPrLifecycleDeps,
@@ -26,6 +25,7 @@ import {
   findFollowupOverlaps,
   type FollowupCommit,
 } from "./regression";
+import { MIN_ROW_BUDGET_MS, errorText } from "./audit-shared";
 
 /**
  * 30-day regression tracking of merged self-heal fixes (R5, BRK-01, SC5).
@@ -52,7 +52,6 @@ import {
 export const FIX_REGRESSION_LIMIT = 10;
 export const FIX_REGRESSION_COMMITS_PAGE = 100;
 export const FIX_REGRESSION_GET_COMMIT_CAP = 20;
-const MIN_ROW_BUDGET_MS = 5_000;
 
 export type FixRegressionOutcome =
   | "checked"
@@ -85,10 +84,6 @@ interface RawListedCommit {
 
 interface RawCommitDetail {
   files?: Array<{ filename: string; patch?: string }>;
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 /** The stored merged ranges, or null when unknown (09-14: no backfill). */

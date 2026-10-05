@@ -20,6 +20,9 @@ import {
  * workflow file a `ci.*` rule's plan names (shared isDeniedPath).
  */
 
+/** GitHub's compare lists at most this many files. */
+export const COMPARE_FILE_CAP = 300;
+
 /** Declaration order is the reporting order (stable, deduplicated). */
 export const GUARD_REASONS = [
   "suppression_comment",

@@ -9,7 +9,6 @@ import {
   releaseAttemptLease,
 } from "@terragon/shared/model/audit-fix-attempts";
 import { SELF_HEAL_BOUNDS } from "@terragon/shared/model/self-heal-settings";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import {
   defaultFixPrLifecycleDeps,
@@ -21,6 +20,7 @@ import {
 } from "./fix-pr-lifecycle";
 import { createIssueWriter } from "./issue-writer";
 import { commentMarker, renderAuditComment } from "./render-issue";
+import { MIN_ROW_BUDGET_MS, errorText } from "./audit-shared";
 
 /**
  * Expiry of unreviewed fix PRs (R5, BRK-01). Unreviewed PRs are the largest
@@ -46,7 +46,6 @@ import { commentMarker, renderAuditComment } from "./render-issue";
 export const FIX_PR_EXPIRY_LIMIT = 20;
 export const FIX_PR_REVIEWS_PAGE = 100;
 const DAY_MS = 86_400_000;
-const MIN_ROW_BUDGET_MS = 5_000;
 
 export type FixPrExpiryOutcome =
   | "expired"
@@ -83,10 +82,6 @@ export interface FixPrExpirySweepResult {
 
 interface RawReview {
   user?: { login?: string; type?: string } | null;
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 class Expiry {

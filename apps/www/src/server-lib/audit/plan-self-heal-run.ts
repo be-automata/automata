@@ -31,6 +31,7 @@ import {
   loadSelfHealContext,
   resolveSelfHealEffective,
 } from "./resolve-self-heal";
+import { PRE_MINT_INSTALLATION_KEY } from "./audit-shared";
 
 /**
  * Control-plane half of the audit lane's deterministic checks (R2, FORGE-01).
@@ -47,7 +48,6 @@ const MAX_CHECKS = 50;
 const CHECK_TOKEN_TTL_MS = 45 * 60 * 1000;
 /** The fix gate token outlives the 30 min run plus the report retries. */
 export const FIX_GATE_TOKEN_TTL_MS = 2 * 60 * 60 * 1000;
-const PRE_MINT_INSTALLATION_KEY = "pending";
 const ELIGIBLE_STATUSES = [
   "candidate",
   "open",

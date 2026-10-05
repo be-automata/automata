@@ -21,7 +21,6 @@ import {
 } from "@terragon/shared/model/audit-fix-attempts";
 import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
 import { withSelfHealTx } from "@terragon/shared/model/self-heal-tx";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import { createIssueWriter, type IssueWriter } from "./issue-writer";
 import { defaultOpenFixPrDeps, type OpenFixPrDeps } from "./open-fix-pr";
@@ -41,7 +40,11 @@ import {
   type RequiredCheckVerdict,
 } from "./required-checks";
 import { resolveSelfHealEffective } from "./resolve-self-heal";
-import { evaluateFixDiff, type FixDiffFile } from "./suppression-guard";
+import {
+  COMPARE_FILE_CAP,
+  evaluateFixDiff,
+  type FixDiffFile,
+} from "./suppression-guard";
 import {
   withSelfHealCall,
   type CallKind,
@@ -49,6 +52,11 @@ import {
   type SelfHealCallDeps,
   type SelfHealCallResult,
 } from "./with-self-heal-call";
+import {
+  MIN_ROW_BUDGET_MS,
+  PRE_MINT_INSTALLATION_KEY,
+  errorText,
+} from "./audit-shared";
 
 /**
  * The CI gate of a self-heal draft (GATE-01 steps 4-5, SC4, R4, KILL-01).
@@ -99,10 +107,6 @@ export const EVALUATE_FIX_CI_BUDGET_MS = 25_000;
 /** A draft whose CI is still pending this long after the open is stuck. */
 export const FIX_CI_STUCK_MS = 3_600_000;
 export const FIX_CI_SWEEP_LIMIT = 20;
-const MIN_ROW_BUDGET_MS = 5_000;
-/** GitHub's compare lists at most this many files. */
-const COMPARE_FILE_CAP = 300;
-const PRE_MINT_INSTALLATION_KEY = "pending";
 
 /** The opener's deps minus the thread link the evaluator does not need. */
 export type EvaluateFixCiDeps = Omit<OpenFixPrDeps, "linkThread">;
@@ -153,10 +157,6 @@ interface CiResults {
   required: string[];
   checks: number;
   evaluatedAt: string;
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 interface GithubSession {

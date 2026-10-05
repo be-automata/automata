@@ -1,7 +1,6 @@
 import { db } from "@/lib/db";
 import type { DB } from "@terragon/shared/db";
 import { pruneSelfHealRows } from "@terragon/shared/model/self-heal-outbox";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import { runAuditSweep, runOutboxDrain } from "./audit-sweep";
 import { runStuckDraftSweep } from "./evaluate-fix-ci";
@@ -12,6 +11,7 @@ import { runLoopBreakerEvaluation } from "./loop-breaker";
 import { runFixPrOpenSweep } from "./open-fix-pr";
 import { runFixRegressionSweep } from "./regression-sweep";
 import { runSelfHealDispatcher } from "./self-heal-dispatcher";
+import { errorText } from "./audit-shared";
 
 /**
  * The self-heal cron (CRON-01, RESILIENCE 6.6): a function of its own, called
@@ -65,10 +65,6 @@ function defaultDeps(): SelfHealCronDeps {
     regressions: runFixRegressionSweep,
     budget: SELF_HEAL_CRON_BUDGET,
   };
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 /** Resolves when `work` settles or `ms` elapses, whichever is first. Never rejects. */

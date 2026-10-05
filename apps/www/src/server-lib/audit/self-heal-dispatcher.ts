@@ -28,7 +28,6 @@ import {
   withSelfHealTx,
   type SelfHealTx,
 } from "@terragon/shared/model/self-heal-tx";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import { getPostHogServer } from "@/lib/posthog-server";
 
@@ -51,6 +50,7 @@ import { admitSelfHealRun } from "./self-heal-admission";
 import { createSelfHealOctokit } from "./self-heal-octokit";
 import { preflightCapabilities } from "./self-heal-preflight";
 import { withSelfHealCall, type SelfHealCallDeps } from "./with-self-heal-call";
+import { PRE_MINT_INSTALLATION_KEY, errorText } from "./audit-shared";
 
 /**
  * The fix dispatcher (BULK-01): the ONLY start path of a self-heal fix run.
@@ -75,7 +75,6 @@ import { withSelfHealCall, type SelfHealCallDeps } from "./with-self-heal-call";
 export const SELF_HEAL_DISPATCH_LIMIT = 20;
 /** Below this, the next candidate could not finish its GitHub calls. */
 const MIN_CANDIDATE_BUDGET_MS = 5_000;
-const PRE_MINT_INSTALLATION_KEY = "pending";
 /**
  * The half-open probe lease covers a fix run up to its draft open (dispatch,
  * box, finding check, opener retries). The tick evaluation resolves the probe
@@ -126,10 +125,6 @@ export interface SelfHealDispatchResult {
   dispatched: string | null;
   considered: number;
   deferred?: string;
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 /** Call deps without a breaker override: the shared breaker model is used. */

@@ -36,11 +36,11 @@ import {
   type BreakerScopeKind,
   type BreakerTransition,
 } from "@terragon/shared/model/self-heal-breaker";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import { getPostHogServer } from "@/lib/posthog-server";
 
 import { BREAKER_EXCLUDED_REASONS } from "./fix-outcome-classify";
+import { errorText } from "./audit-shared";
 
 /**
  * The automatic stops of the self-heal loop (BRK-01 remainder, RESILIENCE
@@ -543,10 +543,6 @@ export function defaultLoopBreakerDeps(): LoopBreakerDeps {
 interface RepoScope {
   organizationId: string;
   repoKey: string;
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 function laterOf(a: Date, b: Date | null): Date {

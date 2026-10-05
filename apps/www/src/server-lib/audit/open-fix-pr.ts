@@ -25,7 +25,6 @@ import {
   recordBreakerEvent,
 } from "@terragon/shared/model/self-heal-breaker";
 import { updateThread } from "@terragon/shared/model/threads";
-import { redactSecrets } from "@terragon/utils/redact";
 
 import { resolveBotLogin } from "../review/bot-login";
 import { createIssueWriter, type IssueWriter } from "./issue-writer";
@@ -42,7 +41,11 @@ import {
 } from "./resolve-self-heal";
 import { createSelfHealOctokit } from "./self-heal-octokit";
 import { preflightCapabilities } from "./self-heal-preflight";
-import { evaluateFixDiff, type FixDiffFile } from "./suppression-guard";
+import {
+  COMPARE_FILE_CAP,
+  evaluateFixDiff,
+  type FixDiffFile,
+} from "./suppression-guard";
 import {
   withSelfHealCall,
   type CallKind,
@@ -50,6 +53,11 @@ import {
   type SelfHealCallDeps,
   type SelfHealCallResult,
 } from "./with-self-heal-call";
+import {
+  MIN_ROW_BUDGET_MS,
+  PRE_MINT_INSTALLATION_KEY,
+  errorText,
+} from "./audit-shared";
 
 /**
  * The platform PR writer of the fix lane (GATE-01 steps 1-3, SC4, R4, R5,
@@ -110,11 +118,7 @@ const UNCOUNTED_RETRY_MS = 120_000;
 /** The route's waitUntil budget when the caller passes no deadline. */
 export const OPEN_FIX_PR_BUDGET_MS = 25_000;
 export const FIX_PR_SWEEP_LIMIT = 20;
-const MIN_ROW_BUDGET_MS = 5_000;
-/** GitHub's compare lists at most this many files. */
-const COMPARE_FILE_CAP = 300;
 const MAX_TITLE_CHARS = 200;
-const PRE_MINT_INSTALLATION_KEY = "pending";
 
 export const NEVER_MERGES_LINE =
   "Automata never merges; a person reviews and merges.";
@@ -141,10 +145,6 @@ export interface OpenFixPrDeps {
     prNumber: number;
     prStatus: "draft" | "open" | "closed" | "merged";
   }) => Promise<void>;
-}
-
-function errorText(error: unknown): string {
-  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 /** The two calls pull-request.ts makes after it creates a PR. */
