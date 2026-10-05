@@ -11224,8 +11224,8 @@ packages:
     resolution: {integrity: sha512-IDxfleLmmbSskfWSUATiN1nfn2rDuvnMOqb5CWR92iIfojA0Ud+ulOAAEQ57LPr9rWmsreUyf5lwyao+7GNNVw==}
     engines: {node: '>=20.18.1'}
 
-  undici@8.10.0:
-    resolution: {integrity: sha512-HvltHd7avK13QIw/oLe4qoOLyoVSoafqJ2jYOrtMRBkbYT31eiBQ8O0ehRKZiEZCMEyLFQNIADpgCWC5fALvYQ==}
+  undici@8.11.2:
+    resolution: {integrity: sha512-u4UB2/IrKdU6lFxumHmmo1a3fCQO5tzQllRorfoRS63txhrB7xTpSn1PftwC4qEHkOaqP95fCWW4lJzwErwzhQ==}
     engines: {node: '>=22.19.0'}
 
   unenv@2.0.0-rc.24:
@@ -18193,7 +18193,7 @@ snapshots:
       tar: 7.5.22
       undici: 7.29.0
     optionalDependencies:
-      undici8: undici@8.10.0
+      undici8: undici@8.11.2
 
   eastasianwidth@0.2.0: {}
 
@@ -23305,7 +23305,7 @@ snapshots:
 
   undici@7.29.0: {}
 
-  undici@8.10.0:
+  undici@8.11.2:
     optional: true
 
   unenv@2.0.0-rc.24:
