@@ -290,6 +290,27 @@ export async function runBoundedSweep<Row>({
   }
 }
 
+/**
+ * One installation-token mint per repo (case-insensitive) for the lifetime of
+ * the returned function: the self-heal cron makes one per run, so its sweeps
+ * and the dispatcher's probe share a token. A failed mint stays failed for
+ * that run (the next run mints again).
+ */
+export function memoizeMint<T>(
+  mint: (args: { owner: string; repo: string }) => Promise<T>,
+): (args: { owner: string; repo: string }) => Promise<T> {
+  const minted = new Map<string, Promise<T>>();
+  return ({ owner, repo }) => {
+    const key = `${owner}/${repo}`.toLowerCase();
+    let pending = minted.get(key);
+    if (pending === undefined) {
+      pending = mint({ owner, repo });
+      minted.set(key, pending);
+    }
+    return pending;
+  };
+}
+
 /** One minted, preflighted GitHub session for one fix attempt. */
 export abstract class FixAttemptGithub<D extends FixAttemptGithubDeps> {
   private session: SessionState | null = null;

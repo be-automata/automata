@@ -8,10 +8,16 @@ import { runFixDispatchReconcile } from "./fix-dispatch-reconcile";
 import { runFixPrExpirySweep } from "./fix-pr-expiry";
 import { runFixPrSettleSweep } from "./fix-pr-lifecycle";
 import { runLoopBreakerEvaluation } from "./loop-breaker";
-import { runFixPrOpenSweep } from "./open-fix-pr";
+import { defaultOpenFixPrDeps, runFixPrOpenSweep } from "./open-fix-pr";
 import { runFixRegressionSweep } from "./regression-sweep";
-import { runSelfHealDispatcher } from "./self-heal-dispatcher";
+import {
+  createRepoGithubProbe,
+  defaultSelfHealDispatcherDeps,
+  runSelfHealDispatcher,
+} from "./self-heal-dispatcher";
+import { createSelfHealOctokit } from "./self-heal-octokit";
 import { errorText } from "./audit-shared";
+import { memoizeMint } from "./fix-attempt-session";
 
 /**
  * The self-heal cron (CRON-01, RESILIENCE 6.6): a function of its own, called
@@ -112,6 +118,10 @@ export async function runSelfHealCron(
     perItemMs: deps.budget.perItemMs,
     limit: deps.budget.limit,
   };
+  // One installation-token mint per repo for this run, shared by every fix
+  // sweep and the dispatcher's probe.
+  const mint = memoizeMint(createSelfHealOctokit);
+  const openDeps = { ...defaultOpenFixPrDeps(), mint };
 
   await withinBudget("outbox drain", remaining(), async () => {
     const result = await deps.drain({ ...shared, now: deps.now() });
@@ -144,6 +154,7 @@ export async function runSelfHealCron(
         now: deps.now(),
         deadlineAt,
         limit: deps.budget.limit,
+        deps: openDeps,
       });
       console.log("[cron:self-heal] fix draft opens", result);
     });
@@ -157,6 +168,7 @@ export async function runSelfHealCron(
         now: deps.now(),
         deadlineAt,
         limit: deps.budget.limit,
+        deps: openDeps,
       });
       console.log("[cron:self-heal] fix draft CI", result);
     });
@@ -170,6 +182,7 @@ export async function runSelfHealCron(
         now: deps.now(),
         deadlineAt,
         limit: deps.budget.limit,
+        deps: { mint },
       });
       console.log("[cron:self-heal] fix PR settle", result);
     });
@@ -194,6 +207,10 @@ export async function runSelfHealCron(
         db: deps.db,
         now: deps.now(),
         deadlineAt,
+        deps: {
+          ...defaultSelfHealDispatcherDeps(),
+          probeRepo: createRepoGithubProbe({ mint }),
+        },
       });
       console.log("[cron:self-heal] fix dispatcher", result);
     });
@@ -215,6 +232,7 @@ export async function runSelfHealCron(
         now: deps.now(),
         deadlineAt,
         limit: deps.budget.limit,
+        deps: { mint },
       });
       console.log("[cron:self-heal] fix PR expiry", result);
     });
@@ -224,6 +242,7 @@ export async function runSelfHealCron(
         now: deps.now(),
         deadlineAt,
         limit: deps.budget.limit,
+        deps: { mint },
       });
       console.log("[cron:self-heal] fix regressions", result);
     });
