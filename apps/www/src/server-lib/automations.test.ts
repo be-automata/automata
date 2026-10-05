@@ -337,6 +337,46 @@ describe("runAutomation — skill_message resolution (#54 C2)", () => {
     );
   });
 
+  it("stampExtra carries the self-heal attempt id in the stamp (RACE-01)", async () => {
+    const automation = await makeSkillAutomation();
+    const { version } = await createRepoSkillVersion({
+      db,
+      organizationId: orgId,
+      repoFullName: automation.repoFullName,
+      skillName: "github-ops",
+      body: SKILL_BODY,
+      source: "seed",
+    });
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "automated",
+      options: { stampExtra: { selfHealAttemptId: "att-1" } },
+    });
+    const callArgs = vi.mocked(createNewThread).mock.calls[0]![0];
+    expect(callArgs.sourceMetadata).toEqual({
+      type: "automation-skill",
+      skillName: "github-ops",
+      contentSha: computeContentSha(SKILL_BODY),
+      source: "db-version",
+      versionId: version.id,
+      selfHealAttemptId: "att-1",
+    });
+  });
+
+  it("stampExtra is ignored for a user_message automation", async () => {
+    const automation = await createTestAutomation({ db, userId: user.id });
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "automated",
+      options: { stampExtra: { selfHealAttemptId: "att-1" } },
+    });
+    const callArgs = vi.mocked(createNewThread).mock.calls[0]![0];
+    expect(callArgs.sourceMetadata).toBeUndefined();
+    expect(JSON.stringify(callArgs)).not.toContain("att-1");
+  });
+
   it("a defaultless skill with no usable version SKIPS the run (no thread)", async () => {
     const automation = await createTestAutomation({
       db,

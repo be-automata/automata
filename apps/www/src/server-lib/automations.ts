@@ -111,6 +111,12 @@ export async function runAutomation({
     deliveryId?: string;
     /** #125 C5: the PR head SHA the run reviews (stamped on the thread). */
     headSha?: string;
+    /**
+     * Phase 9 (RACE-01): extra fields merged into the automation-skill stamp
+     * at thread creation, so the fix attempt travels with the thread. Applies
+     * to skill_message automations only; ignored for user_message.
+     */
+    stampExtra?: { selfHealAttemptId: string };
   };
   source: "automated" | "manual";
 }): Promise<{ threadId: string; threadChatId: string } | undefined> {
@@ -260,6 +266,9 @@ export async function runAutomation({
             // Last, so a classic thread's object stays key-for-key today's.
             ...(orchestratedApplied
               ? { reviewPromptMode: "orchestrated" as const }
+              : {}),
+            ...(options?.stampExtra
+              ? { selfHealAttemptId: options.stampExtra.selfHealAttemptId }
               : {}),
           },
           automation: automation,
