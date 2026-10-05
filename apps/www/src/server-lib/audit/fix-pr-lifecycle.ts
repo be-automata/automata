@@ -26,6 +26,7 @@ import { logSelfHealDecision, type SelfHealLogMode } from "./decision-log";
 import { parseHunkRanges } from "./hunks";
 import { createIssueWriter } from "./issue-writer";
 import { defaultOpenFixPrDeps, type OpenFixPrDeps } from "./open-fix-pr";
+import { isBotUser } from "./regression";
 import {
   commentMarker,
   FINDING_LABELS,
@@ -158,21 +159,6 @@ export interface FixPrSession {
   installationKey: string;
 }
 
-/** A GitHub user that is an App or this platform's bot. */
-export function isBotUser(
-  user: { login?: string; type?: string } | null | undefined,
-  botLogin: string,
-): boolean {
-  const login = user?.login?.toLowerCase();
-  if (user?.type === "Bot") return true;
-  if (login === undefined) return false;
-  return login === botLogin.toLowerCase() || login.endsWith("[bot]");
-}
-
-function isBotAuthor(commit: RawCommit, botLogin: string): boolean {
-  return isBotUser(commit.author, botLogin);
-}
-
 /**
  * Commits a person added after the gate. The fix run's commits end at the
  * gated head; anything after it in the PR's commit list that a bot did not
@@ -189,7 +175,7 @@ export function countHumanCommits(
       ? -1
       : commits.findIndex((c) => c.sha === gatedHeadSha);
   const after = gatedAt >= 0 ? commits.slice(gatedAt + 1) : commits;
-  return after.filter((c) => !isBotAuthor(c, botLogin)).length;
+  return after.filter((c) => !isBotUser(c.author, botLogin)).length;
 }
 
 /** New-side ranges per changed file, at most 50 files. */

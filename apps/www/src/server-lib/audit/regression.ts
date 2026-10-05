@@ -87,10 +87,15 @@ export interface FollowupCommit {
   files: ReadonlyArray<{ filename: string; patch?: string }>;
 }
 
-function isBotLogin(login: string | null, botLogin: string): boolean {
-  if (login === null) return false;
-  const lower = login.toLowerCase();
-  return lower === botLogin.toLowerCase() || lower.endsWith("[bot]");
+/** A GitHub user that is an App or this platform's bot. */
+export function isBotUser(
+  user: { login?: string; type?: string } | null | undefined,
+  botLogin: string,
+): boolean {
+  const login = user?.login?.toLowerCase();
+  if (user?.type === "Bot") return true;
+  if (login === undefined) return false;
+  return login === botLogin.toLowerCase() || login.endsWith("[bot]");
 }
 
 /**
@@ -107,7 +112,8 @@ export function findFollowupOverlaps(
   const merged = new Map(changedRanges.map((c) => [c.file, c.ranges]));
   const out: string[] = [];
   for (const commit of commitFiles) {
-    if (isBotLogin(commit.authorLogin, botLogin)) continue;
+    const login = commit.authorLogin ?? undefined;
+    if (isBotUser({ login }, botLogin)) continue;
     const touches = commit.files.some((file) => {
       const ranges = merged.get(file.filename);
       if (ranges === undefined) return false;

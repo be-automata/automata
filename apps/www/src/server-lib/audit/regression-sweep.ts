@@ -15,7 +15,6 @@ import { recordBreakerEvent } from "@terragon/shared/model/self-heal-breaker";
 import {
   defaultFixPrLifecycleDeps,
   FixPrLifecycle,
-  isBotUser,
   type FixPrLifecycleDeps,
   type FixPrSession,
 } from "./fix-pr-lifecycle";
@@ -23,6 +22,7 @@ import { renderFixPrTitle } from "./open-fix-pr";
 import {
   detectRevert,
   findFollowupOverlaps,
+  isBotUser,
   type FollowupCommit,
 } from "./regression";
 import { MIN_ROW_BUDGET_MS, errorText } from "./audit-shared";

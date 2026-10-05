@@ -14,11 +14,11 @@ import {
   defaultFixPrLifecycleDeps,
   endOfPull,
   FixPrLifecycle,
-  isBotUser,
   type FixPrLifecycleDeps,
   type FixPrSession,
 } from "./fix-pr-lifecycle";
 import { createIssueWriter } from "./issue-writer";
+import { isBotUser } from "./regression";
 import { commentMarker, renderAuditComment } from "./render-issue";
 import { MIN_ROW_BUDGET_MS, errorText } from "./audit-shared";
 
