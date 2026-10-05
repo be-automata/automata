@@ -1169,6 +1169,37 @@ describe("#152 Stage A: admission wiring order", () => {
   });
 });
 
+describe("agent-run run task — the terminal poll is journaled per run", () => {
+  it("the poll's thread-status line carries the [agent-run <id>] prefix (the box acceptance check orders the fix check after it, per thread)", async () => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      cleanup: vi.fn(async () => {}),
+    });
+    pullNextMessage.mockReset().mockResolvedValue({
+      agent: "claudeCode",
+      model: "m",
+    });
+    pollUntilTerminal
+      .mockReset()
+      .mockImplementation(async (pollCtx: { log: (m: string) => void }) => {
+        pollCtx.log("thread-status: complete (terminal=true)");
+        return { outcome: "terminal", finalStatus: "complete" };
+      });
+    postRunTerminal.mockReset().mockResolvedValue("applied");
+    const c = ctx();
+
+    await runFn(INPUT, c);
+
+    const lines = c.log.mock.calls.map((call) => String(call[0]));
+    const poll = lines.find((l) => l.includes("thread-status:"));
+    expect(poll, lines.join("\n")).toBe(
+      `[agent-run ${INPUT.threadId}] thread-status: complete (terminal=true)`,
+    );
+  });
+});
+
 /**
  * #183 AC10 (ADR-007 I2): in the run's MAIN finally the box lock is released
  * LAST — after the daemon's process group is torn down and after the workdir

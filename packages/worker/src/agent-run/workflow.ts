@@ -810,11 +810,21 @@ async function runAgentInner(
   // to abort in-flight pulls/polls so the finally-block daemon teardown runs
   // promptly — no orphan daemon survives a cancelled run.
   const signal: AbortSignal | undefined = ctx.abortController?.signal;
+  // Step logging (boot-coder): each boot step is logged so a stalled re-fire
+  // pinpoints exactly where the agent fails to launch. Never logs the prompt (H2)
+  // — only ids, pids, counts, and thread status. #7: the run's traceparent is
+  // stamped on every line (`trace=…`) so worker logs join the end-to-end trace.
+  const tracePrefix = input.traceparent ? ` trace=${input.traceparent}` : "";
+  const step = (msg: string) =>
+    ctx.log(`[agent-run ${input.threadId}${tracePrefix}] ${msg}`);
   const pollCtx = {
     get cancelled() {
       return ctx.cancelled;
     },
-    log: (message: string) => ctx.log(message),
+    // Prefixed like every other line of this run, so the journal ties the
+    // terminal poll to its thread (the box acceptance check orders the fix
+    // check after it, per thread).
+    log: (message: string) => step(message),
     signal,
     // #204: filled in once the daemon exists (below). Until then there is no agent
     // to have died, and the poll loop has not started either.
@@ -824,14 +834,6 @@ async function runAgentInner(
     memoryStarvation: () => daemonForPoll?.memoryStarvation() ?? null,
   };
   let daemonForPoll: DaemonProcess | null = null;
-
-  // Step logging (boot-coder): each boot step is logged so a stalled re-fire
-  // pinpoints exactly where the agent fails to launch. Never logs the prompt (H2)
-  // — only ids, pids, counts, and thread status. #7: the run's traceparent is
-  // stamped on every line (`trace=…`) so worker logs join the end-to-end trace.
-  const tracePrefix = input.traceparent ? ` trace=${input.traceparent}` : "";
-  const step = (msg: string) =>
-    ctx.log(`[agent-run ${input.threadId}${tracePrefix}] ${msg}`);
 
   // UAT #229 F2: say which lane this run is (and its PR) before anything can
   // fail, so the journal can be matched to a GitHub review without timestamps.
