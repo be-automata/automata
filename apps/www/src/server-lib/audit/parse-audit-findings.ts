@@ -6,15 +6,15 @@ import {
   type AuditId,
 } from "@terragon/shared/self-heal/audit-rules";
 import type { DBMessage } from "@terragon/shared/db/db-message";
-import { z } from "zod";
-
-import { buildTaggedFence } from "../review/tagged-fence";
-import { findLastLeadAgentText } from "../review/lead-text";
 import {
   FINDING_KEY_RE,
   fingerprintFinding,
   normalizeSubject,
-} from "./fingerprint";
+} from "@terragon/shared/self-heal/fingerprint";
+import { z } from "zod";
+
+import { buildTaggedFence } from "../review/tagged-fence";
+import { findLastLeadAgentText } from "../review/lead-text";
 
 /**
  * Tagged-only, fail-closed parser for the audit lane's terminal output. Only a

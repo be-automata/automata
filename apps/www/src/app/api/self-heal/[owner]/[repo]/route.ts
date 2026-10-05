@@ -17,6 +17,10 @@ import {
 } from "@terragon/shared/model/self-heal-breaker";
 import { listSelfHealAdminActions } from "@terragon/shared/model/self-heal-admin-log";
 import { countAdmissionDeferrals } from "@terragon/shared/model/self-heal-slot";
+import {
+  computeSelfHealMetrics,
+  type SelfHealMetrics,
+} from "@terragon/shared/self-heal/metrics";
 
 import { getTenantContextOrNull } from "@/lib/auth-server";
 import { db } from "@/lib/db";
@@ -28,10 +32,6 @@ import {
 } from "@/server-lib/audit/attempt-timeline";
 import { computeFingerprintChurn } from "@/server-lib/audit/fingerprint-churn";
 import { resolveFixTriggerLogins } from "@/server-lib/audit/fix-trigger-logins";
-import {
-  computeSelfHealMetrics,
-  type SelfHealMetrics,
-} from "@/server-lib/audit/metrics";
 import {
   loadSelfHealContext,
   resolveSelfHealEffective,

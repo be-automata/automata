@@ -92,7 +92,8 @@ function present(value: MetricsInstant): boolean {
   return value !== null && value !== undefined && value !== "";
 }
 
-function ratio(numerator: number, denominator: number): number | null {
+/** numerator / denominator, or null when there is nothing to divide by. */
+export function ratio(numerator: number, denominator: number): number | null {
   return denominator === 0 ? null : numerator / denominator;
 }
 

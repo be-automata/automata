@@ -1,7 +1,4 @@
-import {
-  CONSENSUS_QUORUM,
-  CONSENSUS_WINDOW,
-} from "@terragon/shared/self-heal/audit-rules";
+import { CONSENSUS_QUORUM, CONSENSUS_WINDOW } from "./audit-rules";
 
 /**
  * R3 consensus over COMPLETE audit runs. A sighting window is newest-first and

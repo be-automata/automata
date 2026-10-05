@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   evaluateFixDiff,
   GUARD_REASONS,
+  hasSuppressionMarker,
   type FixDiffFile,
 } from "./suppression-guard";
 
@@ -313,5 +314,31 @@ describe("evaluateFixDiff (R4, R5, FENCE-01)", () => {
     ]);
     const order = result.rejections.map((r) => GUARD_REASONS.indexOf(r));
     expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+});
+
+describe("hasSuppressionMarker", () => {
+  it("flags a marker on an added line only", () => {
+    expect(
+      hasSuppressionMarker({
+        filename: "src/a.ts",
+        patch: "@@ -1 +1 @@\n+// eslint-disable-next-line\n x",
+      }),
+    ).toBe(true);
+    expect(
+      hasSuppressionMarker({
+        filename: "src/a.ts",
+        patch: "@@ -1 +1 @@\n-// eslint-disable-next-line\n x",
+      }),
+    ).toBe(false);
+  });
+
+  it("skips lockfiles, missing patches and untrustworthy paths", () => {
+    const patch = "@@ -1 +1 @@\n+// @ts-ignore";
+    expect(hasSuppressionMarker({ filename: "pnpm-lock.yaml", patch })).toBe(
+      false,
+    );
+    expect(hasSuppressionMarker({ filename: "src/a.ts" })).toBe(false);
+    expect(hasSuppressionMarker({ filename: "../a.ts", patch })).toBe(false);
   });
 });

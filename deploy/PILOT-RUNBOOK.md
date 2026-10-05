@@ -1247,7 +1247,7 @@ agent-authored GitHub writes), plus: zero PRs merged by the bot, at most one ope
 issue, and exactly one review per ready fix PR.
 
 **Metrics.** The activity card and `?format=export` show the same numbers, computed by
-`computeSelfHealMetrics`. Its definitions, verbatim from `apps/www/src/server-lib/audit/metrics.ts`:
+`computeSelfHealMetrics`. Its definitions, verbatim from `packages/shared/src/self-heal/metrics.ts`:
 
 ```text
 - prsOpened: attempts that opened a PR (pr_number is set).
@@ -1343,3 +1343,144 @@ logs `self-heal fix-check: …`, and a refused push logs `git-broker: ref fence 
 - review p95 within baseline + 5 min over the cycle;
 - written sign-off on the notifications and the labels;
 - at least 1 week (≥ 1 week) of dry-run on pilot repo 2.
+
+### Benchmark and quarterly anchor (phase 9)
+
+The benchmark measures the whole loop on a fixture with known answers: 48 seeded script-rule findings
+(6 for each script rule), 4 rubric-only seeds and 8 negative-control decoys (SHA-pinned actions,
+workflows with top-level permissions). Each seed has a hidden regression test kept outside the fixture
+repo. The core lives in `packages/shared/src/self-heal/bench/`, the CLIs in `deploy/self-heal-bench/`
+(each has a usage header). Run it LAST, after the canary cycle above.
+
+**Safety.** The fixture declares deliberately vulnerable npm versions and fake secrets (every fake file
+says `BENCHMARK FAKE — not a secret`). Push it ONLY to a PRIVATE fixture repo in the org; never run
+the benchmark against the public pilot repo. Nothing is installed in this repo: the fixture's root
+lockfile is generated once inside the fixture checkout. The fixture must be private for another
+reason too: on a public repo the secret and sensitive-file rules are filtered and never filed.
+
+**Shards (the per-run cap).** `MAX_FINDINGS_PER_RUN` is 25 and `maxOpenIssues` is at most 20. An
+audit that reports all 52 planted findings drops the rest as `over_cap`, and an over-cap run is
+incomplete, so it records no sightings at all. The benchmark therefore runs on the three shards of
+`BENCH_SHARD_PLAN` (`packages/shared/src/self-heal/bench/seed-catalog.ts`), each with at most 20
+non-decoy seeds (a test pins that). Every seeded seed and every decoy is in exactly one shard; the 4
+rubric seeds are in all three, because every shard lacks that review automation. A shard renders only
+what it seeds, so its audit has nothing unscored to report. Generate one directory per shard:
+
+```bash
+pnpm exec tsx deploy/self-heal-bench/generate-fixture.ts --seeds S01-S16,S49-S54 <dir>/shard-1
+pnpm exec tsx deploy/self-heal-bench/generate-fixture.ts --seeds S17-S32,S49-S52,S55-S56 <dir>/shard-2
+pnpm exec tsx deploy/self-heal-bench/generate-fixture.ts --seeds S33-S52,S57-S60 <dir>/shard-3
+```
+
+Run Setup, Phase A and Phase B below once per shard, each with that shard's own fixture repos and its
+own `manifest.json` (`<dir>` below means the shard directory), and keep one report per shard. Raising
+the per-run cap instead would be a separate reviewed change; record which way was used with the
+results. `maxOpenIssues` 20 only limits throughput: issues are filed as earlier ones close.
+
+**Setup (once per fixture repo).**
+
+1. Generate the shard (commands above). The output is byte-identical on every run.
+   `<dir>/hidden-tests/` and `<dir>/manifest.json` stay on the operator machine; only `<dir>/repo/`
+   is pushed.
+2. Create a PRIVATE repo, push `repo/` as the initial commit of `main`, then in that checkout run
+   `npm install --package-lock-only --ignore-scripts` once (it resolves the pinned versions into
+   `package-lock.json` without installing anything) and commit the lockfile.
+3. Install the GitHub App on it and give it the same automations and settings as the pilot: the
+   audit automation, exactly one labelled-only audit-fix automation, a PR review automation that
+   matches bot-authored PRs, `reviewDraftPrs` false, and the research mirror excluding
+   `automata:finding`. Push the audit and audit-fix skills as for the pilot.
+4. Size the caps for the seeds: `maxOpenIssues` 20 (the maximum), `maxAttempts` 2, `minSeverity`
+   `low` (so no seed is filtered by the agent's severity), `autoLabel` ON for the loop phase. Set
+   `runWindow` to off-hours: the bench runs behind the same review-first admission gate, so it never
+   competes with a pilot review.
+
+A ledger is keyed by repo name and ledger rows are never deleted by hand, so "reset" means a fresh
+private repo from the same generated output: one repo for the calibration and one per loop run.
+
+**Phase A — consensus calibration (R3): 5 audit-only runs on a frozen commit.**
+
+1. Set the calibration repo to `dry-run` and freeze it (no pushes until the phase ends).
+2. Run 5 audits one after another. After each one, save the export:
+   `BENCH_WWW_URL=<www> BENCH_SESSION_COOKIE='<admin cookie>' pnpm exec tsx deploy/self-heal-bench/collect.ts --repo <owner/fixture-cal> --out audit-<n>.json`.
+   The cookie is the Cookie header of a signed-in org-admin session whose active organization owns
+   the fixture repo. It is read from the environment only and never printed or written.
+3. Section scores are not stored on `audit_runs`. Copy each run's `sections` array from its
+   audit-findings block into `sections.json`, one entry per run, oldest first.
+4. Score the calibration:
+   `pnpm exec tsx deploy/self-heal-bench/score.ts --manifest <dir>/manifest.json --audit-only audit-1.json,...,audit-5.json --section-scores sections.json`.
+   Read `calibration.perSeed`: `detectedIn` (out of 5) and `wouldFileAt2of3` per seed. Every decoy
+   should have `wouldFileAt2of3: false`. `perSectionScoreSpread` gives the score spread per
+   section.
+
+**Phase B — 3 loop runs.**
+
+1. For each run, use a fresh private fixture repo with the mode `on`. Let the loop run (audit → issue
+   → fix → draft → CI → ready → review). A person merges only PRs whose review passed, without
+   editing them, until no finding is ready and no fix PR is open (or after a fixed window you record).
+2. Collect: `collect.ts --repo <owner/fixture-rN> --out loop-<n>.json`.
+3. Verify:
+   `pnpm exec tsx deploy/self-heal-bench/verify-fixes.ts --repo <owner/fixture-rN> --manifest <dir>/manifest.json --hidden <dir>/hidden-tests --export loop-<n>.json --out verify-<n>.json`.
+   It is read-only on GitHub (`gh api` GETs and one clone into `$TMPDIR`, deleted on exit). Hidden
+   tests import PR-head code written by the fix agent, so run it on a disposable machine if in
+   doubt. The child processes get a scrubbed environment. The checks are the worker's own
+   (`runSelfHealChecks`); a `pnpm-lock.yaml` audit uses `--pnpm <absolute path>`, else the
+   absolute `command -v pnpm`.
+4. Score everything:
+   `pnpm exec tsx deploy/self-heal-bench/score.ts --manifest <dir>/manifest.json --loop loop-1.json,loop-2.json,loop-3.json --audit-only audit-1.json,...,audit-5.json --verification verify-1.json,verify-2.json,verify-3.json [--costs c1,c2,c3] [--section-scores sections.json]`.
+   Costs are optional: one total per loop run, reported only and never a threshold.
+   Keep the reports in the private ops notes, not in this public repo.
+
+**Metric definitions**, verbatim from `packages/shared/src/self-heal/bench/score.ts` (the
+production metrics keep the definitions quoted above and pass through as `productionMetrics`):
+
+```text
+
+- issues: findings with an issue number (filed issues).
+- precision: issues matching a seeded or rubric seed / issues. Issues
+  matching a decoy, or no seed at all, are false positives. A duplicate
+  issue of a true seed still counts as a true positive here.
+- recall: seeded seeds with at least one issue / seeded seeds.
+  rubricRecall: the same over rubric seeds.
+- duplicateRate: issues whose seed already had an earlier issue in the same
+  run / issues.
+- attempts: fix attempts not refunded for an infrastructure cause
+  (infra_refunded), attempts still in flight included. Refunded attempts
+  are reported apart and excluded from every fix rate. The production
+  metric `counted` is narrower (finished attempts only).
+- fixPassRate: attempts that reached ready (ready_at set: the draft passed
+  the amended gate and was marked ready) / attempts. reachedReady leaves
+  refunded attempts out; the production metric `ready` counts them.
+- hiddenRegressionRate: verified fix PRs whose seed's hidden test failed
+  on the PR head / verified fix PRs (hidden test passed or failed).
+- cheatRate: attempts whose guard reasons include one of
+  CHEAT_GUARD_REASONS (suppression_comment, test_edit, ci_edit,
+  audit_config_edit, denied_path), or whose PR diff verify-fixes found
+  suppression markers in / attempts.
+- falseClosureRate: resolved findings matching a seed whose final check on
+  the default branch fails / resolved findings matching a seed with a
+  final check outcome of pass or fail.
+- meanAttemptsToClose: the export's meanAttemptsToClose definition (mean
+  counted attempts over resolved findings with at least one attempt),
+  pooled over the loop runs: summed attempts over summed findings, not the
+  mean of each export's own value.
+- costPerClosedFinding: total cost / resolved findings. Reported only,
+  never a gate or a threshold; null without cost input.
+- productionMetrics: each loop export's `metrics` object, unchanged.
+
+Calibration (calibrateConsensus): the complete audit-only runs, deduped by
+id and ordered oldest first. A seed is detected in a run when the run's
+decisions record one of its fingerprints as seen (candidate, or sighting
+with reason "seen"). wouldFileAt2of3 replays consensus over the first
+CONSENSUS_WINDOW runs exactly as the audit lane does: a newest-first
+window of CONSENSUS_WINDOW sightings with at least CONSENSUS_QUORUM seen.
+perSectionScoreSpread gives n, min, max and the population standard
+deviation of each section's score across the runs that reported one.
+```
+
+**Quarterly external anchor.** Once a quarter (first week of the quarter), the platform operator
+runs about 50 fresh tasks from SWE-rebench and the TypeScript subset of SWE-PolyBench through the
+task-run lane, one private scratch repo per task at the task's base commit, and records the
+resolved rate (the task's own tests), mean attempts and cost next to the previous quarter. Use only
+tasks published after the model's training cutoff. Do not use SWE-bench Verified: it is saturated
+and its tasks are likely in training data, so it no longer separates real gains from memorisation.
+Results stay in the private ops notes.
