@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { parseReviewIntent } from "./parse-review-intent";
 import {
   AUDIT_FINDINGS_SKILL_NAME,
+  AUDIT_FIX_SKILL_NAME,
   SELF_HEAL_SKILL_NAMES,
   stripFrontmatter,
   validateSkillBody,
@@ -277,5 +278,70 @@ describe("audit-findings skill contract <-> parser (no drift)", () => {
     check(doc.replace("## Hard rules", "## Rules"));
     check(doc.replaceAll("20 minutes", "a while"));
     check(doc + "\n```json audit-findings\n{}\n```\n");
+  });
+});
+
+/**
+ * Phase 9: the fix skill is a write-capable prompt. It must stay emit-free (the
+ * platform reads no block from a fix run), name the automata/fix-* branch the
+ * git broker will accept, keep `gh pr` only inside the prohibition, and carry
+ * every scope rule the validator pins.
+ */
+describe("audit-fix skill contract (no drift)", () => {
+  const FIX_SKILL_MD = fileURLToPath(
+    new URL("../../../../../deploy/skills/audit-fix/SKILL.md", import.meta.url),
+  );
+  const doc = readFileSync(FIX_SKILL_MD, "utf8");
+  const hardRules = doc.search(/^## Hard rules\s*$/m);
+
+  it("the committed body passes the write/resolve-time validator", () => {
+    expect(() =>
+      validateSkillBody(AUDIT_FIX_SKILL_NAME, doc, "test"),
+    ).not.toThrow();
+  });
+
+  it("the skill emits no fenced json block", () => {
+    expect(doc).not.toContain("```json");
+  });
+
+  it('"gh pr" appears only inside the Hard rules prohibition', () => {
+    expect(hardRules).toBeGreaterThan(0);
+    const first = doc.indexOf("gh pr");
+    expect(first).toBeGreaterThan(hardRules);
+  });
+
+  it("names the automata/fix- branch prefix", () => {
+    expect(doc).toContain("automata/fix-");
+  });
+
+  it("never teaches a closing keyword", () => {
+    expect(doc).not.toMatch(/\b(fixes|closes|resolves) #/i);
+  });
+
+  it("SELF_HEAL_SKILL_NAMES contains both self-heal skills", () => {
+    expect([...SELF_HEAL_SKILL_NAMES]).toEqual([
+      AUDIT_FINDINGS_SKILL_NAME,
+      AUDIT_FIX_SKILL_NAME,
+    ]);
+  });
+
+  const REQUIRED = [
+    "## Hard rules",
+    "Do not open a pull request",
+    "git push",
+    "Only change the files listed",
+    "Do not edit or delete existing tests",
+    "eslint-disable",
+    "@ts-ignore",
+    "nosec",
+    "15 minutes",
+    "automata/fix-",
+  ];
+
+  it.each(REQUIRED)("the validator rejects a body without %j", (phrase) => {
+    const stripped = doc.replaceAll(phrase, "REMOVED");
+    expect(() =>
+      validateSkillBody(AUDIT_FIX_SKILL_NAME, stripped, "test"),
+    ).toThrow(phrase);
   });
 });
