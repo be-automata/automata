@@ -52,6 +52,11 @@ const GITIGNORE_BASE = [
   "*.pem",
   "*.key",
   "*.p12",
+  // Committed sensitive files the seed catalog plants but does not score as
+  // gitignore findings: ignore them so no shard plants an unscored finding.
+  ".pgpass",
+  ".htpasswd",
+  "id_ed25519",
 ];
 /** The directory patterns every gitignore fix must keep. */
 const GITIGNORE_KEPT = GITIGNORE_BASE.filter((line) => line.endsWith("/"));

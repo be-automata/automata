@@ -247,8 +247,14 @@ describe("audit-findings skill contract <-> parser (no drift)", () => {
     const res = parseAuditFindings(doc, { repoFullName: "acme/repo" });
     expect(res.ok).toBe(true);
     if (res.ok) {
-      expect(res.block.findings).toHaveLength(1);
+      expect(res.block.findings).toHaveLength(2);
       expect(Object.values(res.dropped).every((n) => n === 0)).toBe(true);
+      // The keyed example survives with its key, so it fingerprints per pattern.
+      expect(
+        res.block.findings.find(
+          (f) => f.rule === "files.gitignore-missing-pattern",
+        )?.key,
+      ).toBe(".npmrc");
     }
   });
 
