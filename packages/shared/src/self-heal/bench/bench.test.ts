@@ -36,7 +36,7 @@ function fixtureDigest(fixture: RenderedFixture): string {
 
 /** Pinned: any change to the catalog or the templates must update this. */
 const GOLDEN_SHA256 =
-  "baf63c7f0e677c7df7b98c2058fb603cab73f40981bd87e8d5499afb37101424";
+  "c85806d65d4cd138b2c576abed88165a7dd06d430ca6716d09d9cc62e91b158f";
 
 const SCRIPT_RULES = AUDIT_RULES.filter((r) => r.checkKind === "script");
 

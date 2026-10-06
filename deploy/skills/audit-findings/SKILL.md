@@ -56,6 +56,24 @@ format shown. `key` is optional and only used where the table says so.
 | `secret.hardcoded` | `secret-detection` | script | repo-relative path | a hardcoded credential is present in that file |
 | `automation.review-process` | `security-automation` | rubric | repo-relative path | there is no automated review process |
 
+## One finding, one identity
+
+The platform identifies a finding by its `rule`, `subject` and `key`, and files an issue only after
+the same identity shows up in two of three audits. A problem that is named differently from one run
+to the next is never confirmed. So:
+
+- **`.gitignore` patterns: one finding per missing pattern.** Never put several patterns in one
+  finding, and never name a group of patterns after one of its members. `key` is the exact line to
+  add to `.gitignore`: a literal file name, lowercase, with no `*` and no leading `/`. Check these
+  names on every run, in this order, with `git check-ignore -q --no-index <name>`, and report each
+  one that is not ignored: `.env`, `.env.local`, `.env.production`, `.npmrc`, `.pgpass`,
+  `.htpasswd`, `id_rsa`, `id_ed25519`. Check `terraform.tfstate` too when the repo has `*.tf`
+  files. A name that an existing line already covers (for example `.env*`) is not reported.
+- **A file that is itself secret material is `files.sensitive-committed` only.** Private keys,
+  `.npmrc`, `.pgpass`, `.htpasswd` and Terraform state are one finding on the file. Use
+  `secret.hardcoded` only for a credential embedded in a file that otherwise belongs in the repo,
+  such as source code or app config.
+
 ## Dependency findings
 
 For dependency findings run `pnpm audit --prod --json` (or `npm audit --omit=dev --json` when only
@@ -103,6 +121,18 @@ Your final message ends with EXACTLY ONE fenced block opened by three backticks 
       "files": [".github/workflows/ci.yml"],
       "plan": "Add a top-level `permissions: contents: read` block to the workflow and grant extra scopes per job only where needed.",
       "acceptance": "The workflow declares a top-level permissions block and CI still passes.",
+      "effort": "S"
+    },
+    {
+      "rule": "files.gitignore-missing-pattern",
+      "subject": ".gitignore",
+      "key": ".npmrc",
+      "severity": "low",
+      "section": "sensitive-files",
+      "title": ".gitignore does not ignore .npmrc",
+      "files": [".gitignore"],
+      "plan": "Add the line `.npmrc` to .gitignore.",
+      "acceptance": "`git check-ignore .npmrc` reports the file as ignored.",
       "effort": "S"
     }
   ]
