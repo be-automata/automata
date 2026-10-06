@@ -155,6 +155,9 @@ overrides:
   fast-uri@>=3.0.0 <3.1.3: '>=3.1.3 <4'
   fast-uri@>=3.0.0 <=3.1.0: '>=3.1.1 <4'
   fast-uri@>=3.0.0 <=3.1.1: '>=3.1.2 <4'
+  proxy-addr@>=1.1.0 <2.0.8: '>=2.0.8 <3'
+  tinypool@<2.1.2: '>=2.1.2 <3'
+  shell-quote@>=1.8.4 <1.11.0: '>=1.11.0 <2'
 
 pnpmfileChecksum: sha256-mZTS8a/S2OH1VrvEaOTfxQV/NQzgBrUP8zRo9bGFfiU=
 
@@ -10125,8 +10128,8 @@ packages:
     resolution: {integrity: sha512-/FPD0nUc9jH6rfFjji9IBqOz4pcSE3CsT1m7Ep6Mdb0LxSUMj8hgl6GomOvZzpNpAqqGaXA0P3VSrZLFzIhQrw==}
     engines: {node: '>=12.0.0'}
 
-  proxy-addr@2.0.7:
-    resolution: {integrity: sha512-llQsMLSUDUPT44jdrU/O37qlnifitDP+ZwrmmZcoSKyLKvtZxpyV0n2/bD/N4tBAAZ/gJEdZU7KMraoK1+XYAg==}
+  proxy-addr@2.0.8:
+    resolution: {integrity: sha512-5nnx0yGyVUcY6t9RnWcARWtwT9F1D8O9rt08htPvnd49W1IgZtmLkhu9WfMzQj1cFxjHIO6connUNVW5k7AVyQ==}
     engines: {node: '>= 0.10'}
 
   proxy-from-env@2.1.0:
@@ -10639,8 +10642,8 @@ packages:
     resolution: {integrity: sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A==}
     engines: {node: '>=8'}
 
-  shell-quote@1.10.0:
-    resolution: {integrity: sha512-w1aiOKwKuRgtwAReIIj89puqg+I7GvX4IbLrvmhXbzQsj1+Zwi4VO3+fa6ZF91TWSjIxoEkKnMeHcLEODK5ZXA==}
+  shell-quote@1.12.0:
+    resolution: {integrity: sha512-PcByqNyT/38F2kDNi006HAMRJaULuBzq/FOsw3qdZvX/GA9W/jamDaRskgHjubHiftXK5sIFxLNkvrXUwcof6Q==}
     engines: {node: '>= 0.4'}
 
   shiki@3.6.0:
@@ -11026,9 +11029,9 @@ packages:
     resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
     engines: {node: '>=12.0.0'}
 
-  tinypool@1.1.1:
-    resolution: {integrity: sha512-Zba82s87IFq9A9XmjiX5uZA/ARWDrB03OHlq+Vw1fSdt0I+4/Kutwy8BP4Y/y/aORMo61FQ0vIb5j44vSo5Pkg==}
-    engines: {node: ^18.0.0 || >=20.0.0}
+  tinypool@2.2.0:
+    resolution: {integrity: sha512-jBrmx4lYmaC9k/mgPbylxs7kBUxHtD8256up+HjLaDFfXScKJQyil+SWXSvhAtT7XHo+yTVlpB81PGmHP8oLSQ==}
+    engines: {node: ^20.0.0 || >=22.0.0}
 
   tinyrainbow@2.0.0:
     resolution: {integrity: sha512-op4nsTR47R6p0vMUUoYl/a+ljLFVtlfaXkLQmqfLR1qHma1h/ysYk4hEXZ880bf2CYgTskvTa/e196Vd5dDQXw==}
@@ -13058,7 +13061,7 @@ snapshots:
       form-data: 4.0.6
       isomorphic-ws: 5.0.0(ws@8.21.3)
       pathe: 2.0.3
-      shell-quote: 1.10.0
+      shell-quote: 1.12.0
       socket.io-client: 4.8.3
       tar: 7.5.22
       tslib: 2.8.1
@@ -13697,7 +13700,7 @@ snapshots:
       open: 10.1.2
       picomatch: 4.0.5
       read-package-up: 11.0.0
-      shell-quote: 1.10.0
+      shell-quote: 1.12.0
       simple-git: 3.36.0
       strip-ansi: 7.1.0
       tree-sitter-bash: 0.25.0
@@ -17915,7 +17918,7 @@ snapshots:
       chalk: 4.1.2
       lodash: 4.18.1
       rxjs: 7.8.2
-      shell-quote: 1.10.0
+      shell-quote: 1.12.0
       supports-color: 8.1.1
       tree-kill: 1.2.2
       yargs: 17.7.2
@@ -18975,7 +18978,7 @@ snapshots:
       on-finished: 2.4.1
       once: 1.4.0
       parseurl: 1.3.3
-      proxy-addr: 2.0.7
+      proxy-addr: 2.0.8
       qs: 6.15.3
       range-parser: 1.2.1
       router: 2.2.0
@@ -22017,7 +22020,7 @@ snapshots:
       '@types/node': 24.0.1
       long: 5.3.2
 
-  proxy-addr@2.0.7:
+  proxy-addr@2.0.8:
     dependencies:
       forwarded: 0.2.0
       ipaddr.js: 1.9.1
@@ -22751,7 +22754,7 @@ snapshots:
 
   shebang-regex@3.0.0: {}
 
-  shell-quote@1.10.0: {}
+  shell-quote@1.12.0: {}
 
   shiki@3.6.0:
     dependencies:
@@ -23190,7 +23193,7 @@ snapshots:
       fdir: 6.5.0(picomatch@4.0.5)
       picomatch: 4.0.5
 
-  tinypool@1.1.1: {}
+  tinypool@2.2.0: {}
 
   tinyrainbow@2.0.0: {}
 
@@ -23707,7 +23710,7 @@ snapshots:
       tinybench: 2.9.0
       tinyexec: 0.3.2
       tinyglobby: 0.2.17
-      tinypool: 1.1.1
+      tinypool: 2.2.0
       tinyrainbow: 2.0.0
       vite: 6.4.3(@types/node@24.0.1)(jiti@2.4.2)(lightningcss@1.33.0)(terser@5.40.0)(tsx@4.20.3)(yaml@2.9.0)
       vite-node: 3.2.4(@types/node@24.0.1)(jiti@2.4.2)(lightningcss@1.33.0)(terser@5.40.0)(tsx@4.20.3)(yaml@2.9.0)
