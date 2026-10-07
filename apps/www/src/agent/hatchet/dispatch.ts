@@ -20,6 +20,7 @@ import { ThreadError } from "@/agent/error";
 import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
 import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
 import { getExecutionPlaneRunEnvironment } from "@/server-lib/env-audience";
+import { remoteTaskBranchName } from "@/server-lib/task/remote-task-pr";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import type {
   ThreadSourceMetadata,
@@ -399,6 +400,14 @@ export interface AgentRunInput {
    * every review and self-heal run. The worker drops keys it reserves.
    */
   repoEnv?: Record<string, string>;
+  /**
+   * NON-review, non-self-heal org task runs that start on the base branch
+   * only: the branch the worker checks out right after the clone, so the
+   * agent's `git push origin HEAD` publishes it and the finish hook can open
+   * its pull request (server-lib/task/remote-task-pr.ts). Absent otherwise
+   * (byte-identical payload).
+   */
+  workBranch?: string;
 }
 
 /** True when a thread should dispatch to the remote execution plane. */
@@ -910,12 +919,22 @@ export async function dispatchAgentRun({
         keys: Object.keys(repoEnv),
       });
     }
+    // A task run that starts on its base branch works on its own branch, so
+    // the finish hook can turn what it pushed into a pull request.
+    const workBranch =
+      taskPlan !== undefined &&
+      selfHealPlan.selfHeal === undefined &&
+      prNumber === undefined &&
+      branch === thread?.repoBaseBranchName
+        ? remoteTaskBranchName(threadId)
+        : undefined;
     const input: AgentRunInput = {
       ...baseInput,
       ...plan?.inputExtension,
       ...taskPlan,
       ...selfHealPlan,
       ...(Object.keys(repoEnv).length > 0 ? { repoEnv } : {}),
+      ...(workBranch !== undefined ? { workBranch } : {}),
     };
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry

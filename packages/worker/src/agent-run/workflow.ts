@@ -856,6 +856,7 @@ async function runAgentInner(
     repoFullName: input.repoFullName,
     branch: input.branch,
     baseBranch: input.baseBranch,
+    workBranch: input.workBranch,
     installationToken: input.installationToken,
     workdirRoot: config.workdirRoot,
     runId: input.threadId,
@@ -864,7 +865,8 @@ async function runAgentInner(
   });
   step(
     `clone complete: ${input.repoFullName}@${input.branch}` +
-      (input.baseBranch ? ` (base ${input.baseBranch} fetched)` : ""),
+      (input.baseBranch ? ` (base ${input.baseBranch} fetched)` : "") +
+      (input.workBranch ? ` (work branch ${input.workBranch})` : ""),
   );
   // GATE-01: the fix check diffs the pushed commit against the base as it was
   // cloned. Pinned now, by the worker, because the agent can rewrite its own

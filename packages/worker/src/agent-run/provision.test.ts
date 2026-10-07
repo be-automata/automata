@@ -303,6 +303,99 @@ describe("provisionWorkdir — a real clone with agentUser set", () => {
   });
 });
 
+describe("provisionWorkdir — a task run's work branch", () => {
+  let root: string;
+  let origin: string;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-work-"));
+    origin = path.join(root, "origin");
+    await fs.mkdir(origin, { recursive: true });
+    const git = (args: string[]) =>
+      execFileAsync("git", ["-C", origin, ...args]);
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "t@t"]);
+    await git(["config", "user.name", "t"]);
+    await fs.writeFile(path.join(origin, "app.txt"), "hello\n");
+    await git(["add", "app.txt"]);
+    await git(["commit", "-q", "-m", "init"]);
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const localGit = (args: string[]) =>
+    execFileAsync(
+      "git",
+      args.map((a) => (a.startsWith("https://github.com/") ? origin : a)),
+      { maxBuffer: 16 * 1024 * 1024 },
+    );
+
+  const headOf = async (workdir: string) =>
+    (
+      await execFileAsync("git", [
+        "-C",
+        workdir,
+        "rev-parse",
+        "--abbrev-ref",
+        "HEAD",
+      ])
+    ).stdout.trim();
+
+  it("checks the work branch out from the cloned base, so the agent never commits on it", async () => {
+    const workdir = await provisionWorkdir({
+      repoFullName: "irrelevant/local",
+      branch: "main",
+      workBranch: "automata/task-abcdef12",
+      installationToken: "unused",
+      workdirRoot: path.join(root, "runs"),
+      runId: "thr_work",
+      runGit: localGit,
+    });
+    expect(await headOf(workdir)).toBe("automata/task-abcdef12");
+    await expect(
+      fs.readFile(path.join(workdir, "app.txt"), "utf8"),
+    ).resolves.toBe("hello\n");
+  });
+
+  it("continues the remote work branch an earlier run already pushed", async () => {
+    const git = (args: string[]) =>
+      execFileAsync("git", ["-C", origin, ...args]);
+    await git(["checkout", "-q", "-b", "automata/task-abcdef12"]);
+    await fs.writeFile(path.join(origin, "earlier.txt"), "first run\n");
+    await git(["add", "earlier.txt"]);
+    await git(["commit", "-q", "-m", "first run"]);
+    await git(["checkout", "-q", "main"]);
+
+    const workdir = await provisionWorkdir({
+      repoFullName: "irrelevant/local",
+      branch: "main",
+      workBranch: "automata/task-abcdef12",
+      installationToken: "unused",
+      workdirRoot: path.join(root, "runs"),
+      runId: "thr_again",
+      runGit: localGit,
+    });
+    expect(await headOf(workdir)).toBe("automata/task-abcdef12");
+    await expect(
+      fs.readFile(path.join(workdir, "earlier.txt"), "utf8"),
+    ).resolves.toBe("first run\n");
+  });
+
+  it("stays on the cloned branch without one", async () => {
+    const workdir = await provisionWorkdir({
+      repoFullName: "irrelevant/local",
+      branch: "main",
+      installationToken: "unused",
+      workdirRoot: path.join(root, "runs"),
+      runId: "thr_plain",
+      runGit: localGit,
+    });
+    expect(await headOf(workdir)).toBe("main");
+  });
+});
+
 /**
  * The run's workdir must grant the ACE to BOTH the agent and the worker's own
  * login. With the agent alone, every directory the agent creates inside the run

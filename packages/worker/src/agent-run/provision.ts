@@ -89,6 +89,7 @@ export async function provisionWorkdir({
   repoFullName,
   branch,
   baseBranch,
+  workBranch,
   installationToken,
   workdirRoot,
   runId,
@@ -106,6 +107,13 @@ export async function provisionWorkdir({
    * base-fetch block below (BUG-EXEC-02). Omit/empty for non-PR runs (no base fetch).
    */
   baseBranch?: string;
+  /**
+   * A task run's own branch, checked out right after the clone so the agent
+   * never commits on the base branch: the remote branch when an earlier run
+   * already pushed it, else a new branch from the cloned HEAD. Omit for every
+   * other run.
+   */
+  workBranch?: string;
   installationToken: string;
   workdirRoot: string;
   /** Unique per-run directory key — pass threadId, NOT the shared legacy sentinel. */
@@ -222,6 +230,47 @@ export async function provisionWorkdir({
     ],
     { maxBuffer: 64 * 1024 * 1024 },
   );
+
+  // A task run's own branch. It continues the remote branch when an earlier
+  // run of this thread already pushed it (a run whose PR was never recorded,
+  // e.g. auto-create off or a failed finish call): starting it again from the
+  // base would make the agent's push non-fast-forward and orphan that work.
+  if (workBranch) {
+    const auth = ["-c", `http.extraHeader=${authHeader}`];
+    const { stdout: remoteHead } = await runGit([
+      "-C",
+      workdir,
+      ...auth,
+      "ls-remote",
+      "--heads",
+      "origin",
+      workBranch,
+    ]);
+    if (String(remoteHead).trim()) {
+      await runGit([
+        "-C",
+        workdir,
+        ...auth,
+        "fetch",
+        "-q",
+        "--depth",
+        "1",
+        "origin",
+        `+refs/heads/${workBranch}:refs/remotes/origin/${workBranch}`,
+      ]);
+      await runGit([
+        "-C",
+        workdir,
+        "checkout",
+        "-q",
+        "-b",
+        workBranch,
+        `origin/${workBranch}`,
+      ]);
+    } else {
+      await runGit(["-C", workdir, "checkout", "-q", "-b", workBranch]);
+    }
+  }
 
   // BUG-EXEC-02: make `git diff origin/<base>...HEAD` computable OFFLINE for re-reviews.
   // The token stays out of .git/config via the one-shot `-c http.extraHeader`, as the

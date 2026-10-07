@@ -119,6 +119,14 @@ describe("dispatch golden (payload contract)", () => {
       __TRACEPARENT__: input.traceparent as string,
       __DAEMON_TOKEN__: input.daemonToken as string,
     };
+    if (key === "plain") {
+      // A task run on its base branch works on its own branch, named from the
+      // thread id: shape-asserted, then pinned like the other per-run fields.
+      expect(input.workBranch).toBe(
+        `automata/task-${t.threadId.slice(0, 8).toLowerCase()}`,
+      );
+      values.__WORK_BRANCH__ = input.workBranch as string;
+    }
     if (key === "review") {
       // #165: the review payload is the VARIANT contract. Its two composite
       // per-run fields are shape-asserted, then pinned as placeholders —
