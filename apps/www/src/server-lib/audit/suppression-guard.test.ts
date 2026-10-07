@@ -209,6 +209,50 @@ describe("evaluateFixDiff (R4, R5, FENCE-01)", () => {
     expect(result.rejections).toEqual(["deleted_flagged_code"]);
   });
 
+  describe("files.sensitive-committed", () => {
+    const secret = (filename: string): FixDiffFile => ({
+      filename,
+      status: "removed",
+      additions: 0,
+      deletions: 5,
+    });
+    const sensitive = {
+      ruleId: "files.sensitive-committed",
+      planFiles: [".htpasswd"],
+      subject: ".htpasswd",
+    };
+
+    it("removing the committed secret file passes", () => {
+      const result = run([secret(".htpasswd")], sensitive);
+      expect(result.ok).toBe(true);
+    });
+
+    it("emptying the secret file instead → deleted_flagged_code", () => {
+      const result = run(
+        [mod(".htpasswd", "@@ -1,2 +0,0 @@\n-admin:x\n-ops:y")],
+        sensitive,
+      );
+      expect(result.rejections).toEqual(["deleted_flagged_code"]);
+    });
+
+    it("removing another planned file → deleted_flagged_code", () => {
+      const result = run([secret("src/a.ts"), secret(".htpasswd")], {
+        ...sensitive,
+        planFiles: [".htpasswd", "src/a.ts"],
+      });
+      expect(result.rejections).toEqual(["deleted_flagged_code"]);
+    });
+
+    it("a secret file under a denied path stays denied", () => {
+      const result = run([secret("deploy/id_ed25519")], {
+        ruleId: "files.sensitive-committed",
+        planFiles: ["deploy/id_ed25519"],
+        subject: "deploy/id_ed25519",
+      });
+      expect(result.rejections).toEqual(["denied_path"]);
+    });
+  });
+
   it("a plan file whose only change removes comments is fine", () => {
     const result = run([
       mod("src/a.ts", "@@ -1,3 +1 @@\n-// old note\n-\n- * more\n code();", {
