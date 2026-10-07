@@ -685,3 +685,65 @@ describe("GATE-01: a fix run's gate token never reaches the daemon/agent env (09
     }
   });
 });
+
+describe("task-run repo environment (prompt-defined automations)", () => {
+  const base = {
+    baseEnv: { PATH: "/usr/bin:/bin", HOME: "/home/op" },
+    anthropicApiKey: "sk-ant-box",
+    claudeBinDir: "/opt/claude/bin",
+    installationToken: INSTALL_TOKEN,
+    ghConfigDir: "/tmp/isolated-gh",
+    botLogin: "automata-ai-bot[bot]",
+    runHome: "/run/home",
+  };
+
+  it("hands the owner's variables to the agent", () => {
+    const env = buildDaemonEnv({
+      ...base,
+      repoEnv: {
+        YOUTRACK_URL: "https://tracker.example",
+        YOUTRACK_AGENT_TOKEN: "perm:abc",
+      },
+    });
+    expect(env.YOUTRACK_URL).toBe("https://tracker.example");
+    expect(env.YOUTRACK_AGENT_TOKEN).toBe("perm:abc");
+  });
+
+  it("never lets them steer the runtime or replace a platform key", () => {
+    const env = buildDaemonEnv({
+      ...base,
+      egressProxyUrl: "http://127.0.0.1:9999",
+      repoEnv: {
+        PATH: "/evil",
+        home: "/evil",
+        NODE_OPTIONS: "--require /evil.js",
+        LD_PRELOAD: "/evil.so",
+        GH_TOKEN: "x",
+        GITHUB_TOKEN: "x",
+        GIT_CONFIG_COUNT: "0",
+        ANTHROPIC_API_KEY: "sk-ant-user",
+        CLAUDE_CODE_SIMPLE: "1",
+        HTTPS_PROXY: "http://evil",
+        https_proxy: "http://evil",
+      },
+    });
+    expect(env.PATH).toBe("/opt/claude/bin:/usr/bin:/bin");
+    expect(env.HOME).toBe("/run/home");
+    expect(env.home).toBeUndefined();
+    expect(env.NODE_OPTIONS).toBeUndefined();
+    expect(env.LD_PRELOAD).toBeUndefined();
+    expect(env.GH_TOKEN).toBe(INSTALL_TOKEN);
+    expect(env.GITHUB_TOKEN).toBe(INSTALL_TOKEN);
+    expect(env.GIT_CONFIG_COUNT).not.toBe("0");
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-box");
+    expect(env.CLAUDE_CODE_SIMPLE).toBeUndefined();
+    expect(env.HTTPS_PROXY).toBe("http://127.0.0.1:9999");
+    expect(env.https_proxy).toBe("http://127.0.0.1:9999");
+  });
+
+  it("changes nothing when absent", () => {
+    expect(buildDaemonEnv({ ...base, repoEnv: {} })).toEqual(
+      buildDaemonEnv(base),
+    );
+  });
+});

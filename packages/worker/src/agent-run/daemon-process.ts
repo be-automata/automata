@@ -188,6 +188,7 @@ export class DaemonProcess {
       egressProxyUrl: this.egressProxyUrl,
       broker: this.broker,
       githubReadToken: this.deps.githubReadToken ?? null,
+      repoEnv: this.input.repoEnv ?? null,
       agentUser: this.config.agentUser,
       // Inside the workdir, so it inherits the run's ACE. Provisioning created
       // it in the same `if (agentUser)` branch that applied that ACE.

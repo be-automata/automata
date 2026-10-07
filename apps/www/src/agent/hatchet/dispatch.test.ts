@@ -17,6 +17,12 @@ import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-sett
 import { repoReviewSettings } from "@terragon/shared/db/schema";
 import { createTestRemoteRun } from "@terragon/shared/model/test-helpers";
 import { eq } from "drizzle-orm";
+import { env } from "@terragon/env/apps-www";
+import { encryptValue } from "@terragon/utils/encryption";
+import {
+  getOrCreateEnvironment,
+  updateEnvironment,
+} from "@terragon/shared/model/environments";
 import {
   getInstallationToken,
   getReadOnlyInstallationToken,
@@ -1091,6 +1097,55 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
     expect(input.reviewAgent).toMatchObject({ mode: "classic" });
     expect(warn.mock.calls.some((call) => call[0] === INVALID_LOG)).toBe(false);
     warn.mockRestore();
+  });
+
+  describe("repo environment (prompt-defined automations)", () => {
+    const setRepoEnv = async (variables: Record<string, string>) => {
+      const environment = await getOrCreateEnvironment({
+        db,
+        userId: user.id,
+        organizationId: orgId,
+        repoFullName: REPO,
+      });
+      await updateEnvironment({
+        db,
+        userId: user.id,
+        environmentId: environment.id,
+        organizationId: orgId,
+        updates: {
+          environmentVariables: Object.entries(variables).map(
+            ([key, value]) => ({
+              key,
+              valueEncrypted: encryptValue(value, env.ENCRYPTION_MASTER_KEY),
+            }),
+          ),
+        },
+      });
+    };
+
+    it("a task run carries the agent-visible variables, never the control-plane tracker token", async () => {
+      await setRepoEnv({
+        YOUTRACK_URL: "https://tracker.example",
+        YOUTRACK_AGENT_TOKEN: "perm:agent",
+        YOUTRACK_TOKEN: "perm:platform",
+      });
+      const input = await dispatchAndRead(await orgTaskThread());
+      expect(input.repoEnv).toEqual({
+        YOUTRACK_URL: "https://tracker.example",
+        YOUTRACK_AGENT_TOKEN: "perm:agent",
+      });
+    });
+
+    it("a task run with no variables sends no repoEnv key", async () => {
+      const input = await dispatchAndRead(await orgTaskThread());
+      expect("repoEnv" in input).toBe(false);
+    });
+
+    it("a review run never carries the variables", async () => {
+      await setRepoEnv({ YOUTRACK_AGENT_TOKEN: "perm:agent" });
+      const input = await dispatchAndRead(await reviewThread(912));
+      expect("repoEnv" in input).toBe(false);
+    });
   });
 
   describe("read-only GitHub token (phase 7, DORA auth = Option 3)", () => {

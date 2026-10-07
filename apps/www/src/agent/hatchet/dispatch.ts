@@ -19,6 +19,7 @@ import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
 import { ThreadError } from "@/agent/error";
 import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
 import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
+import { getExecutionPlaneRunEnvironment } from "@/server-lib/env-audience";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import type {
   ThreadSourceMetadata,
@@ -389,6 +390,15 @@ export interface AgentRunInput {
    * for every other dispatch (byte-identical payload); old workers ignore it.
    */
   selfHeal?: SelfHealRunInput;
+  /**
+   * NON-review, non-self-heal org task runs only (manual, scheduled, mention):
+   * the owner's environment variables for this repo (global overlaid by the
+   * repo's, control-plane-only keys removed — env-audience.ts), so a
+   * prompt-defined automation can call the services its prompt names. SECRET
+   * values: never logged. Absent when empty (byte-identical payload) and on
+   * every review and self-heal run. The worker drops keys it reserves.
+   */
+  repoEnv?: Record<string, string>;
 }
 
 /** True when a thread should dispatch to the remote execution plane. */
@@ -883,11 +893,29 @@ export async function dispatchAgentRun({
     if ("abort" in selfHealPlan) {
       throw new Error(`self-heal fix dispatch refused: ${selfHealPlan.abort}`);
     }
+    const repoEnv =
+      taskPlan !== undefined &&
+      selfHealPlan.selfHeal === undefined &&
+      orgSettings !== undefined
+        ? await getExecutionPlaneRunEnvironment({
+            db,
+            userId,
+            organizationId: orgSettings.organizationId,
+            repoFullName,
+          })
+        : {};
+    if (Object.keys(repoEnv).length > 0) {
+      console.log("[hatchet] task run environment", {
+        threadId,
+        keys: Object.keys(repoEnv),
+      });
+    }
     const input: AgentRunInput = {
       ...baseInput,
       ...plan?.inputExtension,
       ...taskPlan,
       ...selfHealPlan,
+      ...(Object.keys(repoEnv).length > 0 ? { repoEnv } : {}),
     };
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry

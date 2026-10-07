@@ -181,6 +181,13 @@ export interface BuildDaemonEnvOpts {
    */
   githubReadToken?: string | null;
   /**
+   * The owner's environment variables for a task run (input.repoEnv). Applied
+   * right after the whitelist pass, so every key the platform sets later
+   * (HOME, PATH, gh, git, proxy, credentials) still wins; keys that steer the
+   * runtime itself are dropped first (see {@link isReservedRepoEnvKey}).
+   */
+  repoEnv?: Record<string, string> | null;
+  /**
    * #108: the unix account the child will actually run as. Empty (the default)
    * = nothing below happens and the built env is byte-for-byte today's.
    *
@@ -236,6 +243,54 @@ export function buildRunProxyEnv(
   };
 }
 
+/**
+ * Keys a task run's repo environment may not set: the ones that steer the
+ * runtime (loader, shell init, node flags, the agent CLI's own switches —
+ * CLAUDE_CODE_SIMPLE alone disables file-based auth) or that the platform owns
+ * (identity, credentials, git, gh, proxy routing). Matched case-insensitively.
+ */
+const RESERVED_REPO_ENV_KEYS = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NODE_USE_ENV_PROXY",
+  "BASH_ENV",
+  "ENV",
+  "PROMPT_COMMAND",
+  "FORCE_COLOR",
+  "GITHUB_TOKEN",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+]);
+const RESERVED_REPO_ENV_PREFIXES = [
+  "LD_",
+  "DYLD_",
+  "GIT_",
+  "GH_",
+  "ANTHROPIC_",
+  "CLAUDE_",
+  "AUTOMATA_",
+  "TERRAGON_",
+  "XDG_",
+];
+
+export function isReservedRepoEnvKey(key: string): boolean {
+  const upper = key.toUpperCase();
+  return (
+    RESERVED_REPO_ENV_KEYS.has(upper) ||
+    RESERVED_REPO_ENV_PREFIXES.some((prefix) => upper.startsWith(prefix))
+  );
+}
+
 export function buildDaemonEnv({
   baseEnv,
   anthropicApiKey,
@@ -249,6 +304,7 @@ export function buildDaemonEnv({
   egressProxyUrl = null,
   broker = null,
   githubReadToken = null,
+  repoEnv = null,
   agentUser = "",
   runTmpDir = null,
   workdir = null,
@@ -272,6 +328,14 @@ export function buildDaemonEnv({
     }
     env.USER = agentUser;
     env.LOGNAME = agentUser;
+  }
+
+  // 1c. The owner's repo environment (task runs). Before everything the
+  // platform sets below, so none of it can be shadowed; reserved keys dropped.
+  for (const [key, value] of Object.entries(repoEnv ?? {})) {
+    if (!isReservedRepoEnvKey(key)) {
+      env[key] = value;
+    }
   }
 
   // 2. Agent runtime. ANTHROPIC_API_KEY is an INTENTIONAL secret we inject — never
