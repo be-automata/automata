@@ -24,6 +24,9 @@ import {
  * workflow file a `ci.*` rule's plan names (shared isDeniedPath).
  */
 
+/** The rule whose subject is a tracked file that is itself secret material. */
+const SECRET_FILE_RULE = "files.sensitive-committed";
+
 /** GitHub's compare lists at most this many files. */
 export const COMPARE_FILE_CAP = 300;
 
@@ -269,7 +272,15 @@ export function evaluateFixDiff(input: EvaluateFixDiffInput): FixDiffVerdict {
       planned.has(path) ||
       (previous !== undefined && planned.has(previous)) ||
       (subject !== null && touched.includes(subject));
-    if (flagged && deletesCode(file)) reasons.add("deleted_flagged_code");
+    // A committed secret is fixed by taking it out of the tree: removing the
+    // finding's own file is the remedy, not a way around the check.
+    const removesSecretFile =
+      input.ruleId === SECRET_FILE_RULE &&
+      file.status === "removed" &&
+      path === subject;
+    if (flagged && !removesSecretFile && deletesCode(file)) {
+      reasons.add("deleted_flagged_code");
+    }
 
     if (!categorised && !touched.every((p) => allowed.has(p))) {
       reasons.add("out_of_plan_file");
