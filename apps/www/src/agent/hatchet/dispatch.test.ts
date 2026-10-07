@@ -1138,6 +1138,24 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       });
     });
 
+    it("without an agent token, the tracker token reaches the agent only as YOUTRACK_AGENT_TOKEN", async () => {
+      await setRepoEnv({
+        YOUTRACK_URL: "https://tracker.example",
+        YOUTRACK_TOKEN: "perm:owner",
+      });
+      const input = await dispatchAndRead(await orgTaskThread());
+      expect(input.repoEnv).toEqual({
+        YOUTRACK_URL: "https://tracker.example",
+        YOUTRACK_AGENT_TOKEN: "perm:owner",
+      });
+    });
+
+    it("a review run never gets the tracker token fallback", async () => {
+      await setRepoEnv({ YOUTRACK_TOKEN: "perm:owner" });
+      const input = await dispatchAndRead(await reviewThread(912));
+      expect("repoEnv" in input).toBe(false);
+    });
+
     it("a task run with no variables sends no repoEnv key", async () => {
       const input = await dispatchAndRead(await orgTaskThread());
       expect("repoEnv" in input).toBe(false);
