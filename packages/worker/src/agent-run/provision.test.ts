@@ -359,6 +359,30 @@ describe("provisionWorkdir — a task run's work branch", () => {
     ).resolves.toBe("hello\n");
   });
 
+  it("continues the remote work branch an earlier run already pushed", async () => {
+    const git = (args: string[]) =>
+      execFileAsync("git", ["-C", origin, ...args]);
+    await git(["checkout", "-q", "-b", "automata/task-abcdef12"]);
+    await fs.writeFile(path.join(origin, "earlier.txt"), "first run\n");
+    await git(["add", "earlier.txt"]);
+    await git(["commit", "-q", "-m", "first run"]);
+    await git(["checkout", "-q", "main"]);
+
+    const workdir = await provisionWorkdir({
+      repoFullName: "irrelevant/local",
+      branch: "main",
+      workBranch: "automata/task-abcdef12",
+      installationToken: "unused",
+      workdirRoot: path.join(root, "runs"),
+      runId: "thr_again",
+      runGit: localGit,
+    });
+    expect(await headOf(workdir)).toBe("automata/task-abcdef12");
+    await expect(
+      fs.readFile(path.join(workdir, "earlier.txt"), "utf8"),
+    ).resolves.toBe("first run\n");
+  });
+
   it("stays on the cloned branch without one", async () => {
     const workdir = await provisionWorkdir({
       repoFullName: "irrelevant/local",

@@ -27,7 +27,9 @@ import { generatePRContent } from "@/server-lib/generate-pr-content";
  *
  * The branch name derives from the thread id, so nothing is stored at
  * dispatch: a run that never pushed leaves no name behind that a later
- * dispatch would try to clone.
+ * dispatch would try to clone, and a later run of a thread whose branch was
+ * pushed but never got a PR continues that remote branch (the worker checks
+ * it out when it exists) instead of restarting it from the base.
  */
 
 const DIFF_CHAR_LIMIT = 60_000;
