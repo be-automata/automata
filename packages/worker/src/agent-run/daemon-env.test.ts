@@ -741,6 +741,46 @@ describe("task-run repo environment (prompt-defined automations)", () => {
     expect(env.https_proxy).toBe("http://127.0.0.1:9999");
   });
 
+  it("never overrides an ambient key the whitelist forwards, nor TLS trust", () => {
+    const ambient = {
+      PATH: "/usr/bin:/bin",
+      HOME: "/home/op",
+      EDITOR: "vim",
+      PAGER: "less",
+      NODE_EXTRA_CA_CERTS: "/etc/op-ca.pem",
+      npm_config_cache: "/var/npm",
+      LANG: "en_US.UTF-8",
+    };
+    const env = buildDaemonEnv({
+      ...base,
+      baseEnv: ambient,
+      repoEnv: {
+        EDITOR: "/evil",
+        VISUAL: "/evil",
+        PAGER: "/evil",
+        NODE_EXTRA_CA_CERTS: "/evil-ca.pem",
+        npm_config_cache: "/evil",
+        NPM_CONFIG_PREFIX: "/evil",
+        LANG: "C",
+        SSL_CERT_FILE: "/evil-ca.pem",
+        REQUESTS_CA_BUNDLE: "/evil-ca.pem",
+        CURL_CA_BUNDLE: "/evil-ca.pem",
+        BASH_ENV: "/evil.sh",
+      },
+    });
+    expect(env.EDITOR).toBe("vim");
+    expect(env.VISUAL).toBeUndefined();
+    expect(env.PAGER).toBe("less");
+    expect(env.NODE_EXTRA_CA_CERTS).toBe("/etc/op-ca.pem");
+    expect(env.npm_config_cache).toBe("/var/npm");
+    expect(env.NPM_CONFIG_PREFIX).toBeUndefined();
+    expect(env.LANG).toBe("en_US.UTF-8");
+    expect(env.SSL_CERT_FILE).toBeUndefined();
+    expect(env.REQUESTS_CA_BUNDLE).toBeUndefined();
+    expect(env.CURL_CA_BUNDLE).toBeUndefined();
+    expect(env.BASH_ENV).toBeUndefined();
+  });
+
   it("changes nothing when absent", () => {
     expect(buildDaemonEnv({ ...base, repoEnv: {} })).toEqual(
       buildDaemonEnv(base),

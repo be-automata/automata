@@ -244,27 +244,25 @@ export function buildRunProxyEnv(
 }
 
 /**
- * Keys a task run's repo environment may not set: the ones that steer the
- * runtime (loader, shell init, node flags, the agent CLI's own switches —
- * CLAUDE_CODE_SIMPLE alone disables file-based auth) or that the platform owns
- * (identity, credentials, git, gh, proxy routing). Matched case-insensitively.
+ * Keys a task run's repo environment may not set: every ambient key the
+ * whitelist forwards (the operator's runtime: locale, editors and pagers git
+ * and gh exec, node flags, npm dirs, NODE_EXTRA_CA_CERTS), the TLS trust
+ * stores other clients read (a CA added there undermines the egress proxy),
+ * shell init hooks, and the keys the platform owns (identity, credentials,
+ * git, gh, the agent CLI's switches — CLAUDE_CODE_SIMPLE alone disables
+ * file-based auth — and proxy routing). Matched case-insensitively.
  */
 const RESERVED_REPO_ENV_KEYS = new Set([
-  "PATH",
-  "HOME",
-  "USER",
+  ...[...SAFE_ENV_KEYS].map((key) => key.toUpperCase()),
   "LOGNAME",
-  "SHELL",
-  "TMPDIR",
-  "TMP",
-  "TEMP",
-  "NODE_OPTIONS",
-  "NODE_PATH",
-  "NODE_USE_ENV_PROXY",
   "BASH_ENV",
   "ENV",
   "PROMPT_COMMAND",
-  "FORCE_COLOR",
+  "NODE_USE_ENV_PROXY",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "CURL_CA_BUNDLE",
+  "REQUESTS_CA_BUNDLE",
   "GITHUB_TOKEN",
   "HTTP_PROXY",
   "HTTPS_PROXY",
