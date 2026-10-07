@@ -96,11 +96,31 @@ export async function getExecutionPlaneGlobalEnvironmentVariables(args: {
   );
 }
 
+/** The tracker token a prompt-defined automation's agent reads. */
+export const AGENT_TRACKER_TOKEN_KEY = "YOUTRACK_AGENT_TOKEN";
+
+/**
+ * An owner who can only mint a personal YouTrack token stores it once, as
+ * YOUTRACK_TOKEN. When no dedicated agent token is set, a remote task run's
+ * agent gets that value under YOUTRACK_AGENT_TOKEN — an owner decision
+ * (2026-10-07) accepting that the agent then writes as the owner. The
+ * control-plane key itself is still stripped.
+ */
+export function withAgentTrackerTokenFallback(
+  variables: Record<string, string>,
+): Record<string, string> {
+  const fallback = variables.YOUTRACK_TOKEN;
+  if (variables[AGENT_TRACKER_TOKEN_KEY] || !fallback) {
+    return variables;
+  }
+  return { ...variables, [AGENT_TRACKER_TOKEN_KEY]: fallback };
+}
+
 /**
  * The variables a remote (worker-box) task run hands its agent: the owner's
- * global set overlaid by the repository environment's, control-plane-only
- * keys removed. The same merge the sandbox path performs (agent/sandbox.ts),
- * so a prompt-defined automation sees the same variables on either plane.
+ * global set overlaid by the repository environment's, the tracker token
+ * fallback applied, then control-plane-only keys removed. Otherwise the same
+ * merge the sandbox path performs (agent/sandbox.ts).
  */
 export async function getExecutionPlaneRunEnvironment({
   db,
@@ -123,7 +143,7 @@ export async function getExecutionPlaneRunEnvironment({
       repoFullName,
     });
     return environment
-      ? await getExecutionPlaneEnvironmentVariables({
+      ? await getControlPlaneEnvironmentVariables({
           db,
           userId,
           environmentId: environment.id,
@@ -131,13 +151,20 @@ export async function getExecutionPlaneRunEnvironment({
       : [];
   };
   const [globalVariables, repoVariables] = await Promise.all([
-    getExecutionPlaneGlobalEnvironmentVariables({ db, userId }),
+    getControlPlaneGlobalEnvironmentVariables({ db, userId }),
     readRepoVariables(),
   ]);
+  const merged = withAgentTrackerTokenFallback(
+    Object.fromEntries(
+      [...globalVariables, ...repoVariables].map(({ key, value }) => [
+        key,
+        value,
+      ]),
+    ),
+  );
   return Object.fromEntries(
-    [...globalVariables, ...repoVariables].map(({ key, value }) => [
-      key,
-      value,
-    ]),
+    Object.entries(merged).filter(
+      ([key]) => !CONTROL_PLANE_ONLY_ENV_KEYS.has(key),
+    ),
   );
 }

@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   CONTROL_PLANE_ONLY_ENV_KEYS,
   stripControlPlaneOnlyEnv,
+  withAgentTrackerTokenFallback,
 } from "./env-audience";
 
 const vars = (record: Record<string, string>) =>
@@ -30,6 +31,34 @@ describe("stripControlPlaneOnlyEnv", () => {
     // Non-mutating.
     expect(input).toHaveLength(4);
     expect(CONTROL_PLANE_ONLY_ENV_KEYS.has("YOUTRACK_TOKEN")).toBe(true);
+  });
+});
+
+describe("withAgentTrackerTokenFallback", () => {
+  it("hands the tracker token over as the agent token when none is set", () => {
+    expect(
+      withAgentTrackerTokenFallback({
+        YOUTRACK_URL: "https://yt.example.com",
+        YOUTRACK_TOKEN: "perm:owner",
+      }),
+    ).toEqual({
+      YOUTRACK_URL: "https://yt.example.com",
+      YOUTRACK_TOKEN: "perm:owner",
+      YOUTRACK_AGENT_TOKEN: "perm:owner",
+    });
+  });
+
+  it("keeps a dedicated agent token", () => {
+    const input = {
+      YOUTRACK_TOKEN: "perm:owner",
+      YOUTRACK_AGENT_TOKEN: "perm:bot",
+    };
+    expect(withAgentTrackerTokenFallback(input)).toBe(input);
+  });
+
+  it("adds nothing without a tracker token", () => {
+    const input = { YOUTRACK_URL: "https://yt.example.com" };
+    expect(withAgentTrackerTokenFallback(input)).toBe(input);
   });
 });
 
@@ -96,5 +125,18 @@ describe("env-audience is the only decrypt site (ADR-008 I1)", () => {
       "app/(sidebar)/(site-header)/environments/global/page.tsx",
       "server-lib/tracker/tracker-config.ts",
     ]);
+  });
+
+  it("the remote run environment strips control-plane keys after the fallback", () => {
+    const file = files.find(
+      ({ relative }) => relative === "server-lib/env-audience.ts",
+    );
+    const body = file!.source.slice(
+      file!.source.indexOf(
+        "export async function getExecutionPlaneRunEnvironment",
+      ),
+    );
+    expect(body).toMatch(/withAgentTrackerTokenFallback\(/);
+    expect(body).toMatch(/CONTROL_PLANE_ONLY_ENV_KEYS\.has\(key\)/);
   });
 });
