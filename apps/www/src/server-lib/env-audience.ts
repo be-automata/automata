@@ -120,7 +120,9 @@ export function withAgentTrackerTokenFallback(
  * The variables a remote (worker-box) task run hands its agent: the owner's
  * global set overlaid by the repository environment's, the tracker token
  * fallback applied, then control-plane-only keys removed. Otherwise the same
- * merge the sandbox path performs (agent/sandbox.ts).
+ * merge the sandbox path performs (agent/sandbox.ts). The fallback is
+ * deliberately remote-only: prompt-defined automations run on the worker box,
+ * and no other execution plane needs the owner's tracker token.
  */
 export async function getExecutionPlaneRunEnvironment({
   db,
