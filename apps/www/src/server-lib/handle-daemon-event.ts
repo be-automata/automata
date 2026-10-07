@@ -612,7 +612,7 @@ async function handleThreadFinish({
   statusBeforeUpdate,
   isRateLimited,
   shouldSkipCheckpoint,
-  isStop = false,
+  isStop,
   repoFullName,
   prNumber,
   finishedThread,
@@ -625,7 +625,7 @@ async function handleThreadFinish({
   isRateLimited: boolean;
   shouldSkipCheckpoint: boolean;
   /** The user stopped the run: like a sandbox checkpoint, no PR is opened. */
-  isStop?: boolean;
+  isStop: boolean;
   repoFullName: string | null;
   prNumber: number | null;
   /** The row handleDaemonEvent already loaded — the recheck's zero-read bail. */

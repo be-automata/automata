@@ -76,6 +76,63 @@ function isNotFound(error: unknown): boolean {
   );
 }
 
+async function createPullRequest({
+  octokit,
+  owner,
+  repo,
+  branch,
+  base,
+  threadId,
+  repoFullName,
+  taskTitle,
+  draft,
+  files,
+  generateContent,
+}: {
+  octokit: Octokit;
+  owner: string;
+  repo: string;
+  branch: string;
+  base: string;
+  threadId: string;
+  repoFullName: string;
+  taskTitle: string;
+  draft: boolean;
+  files: readonly CompareFile[];
+  generateContent: typeof generatePRContent;
+}) {
+  let title = taskTitle;
+  let body = "Changes made by an automated task run.";
+  try {
+    const generated = await generateContent({
+      gitDiff: diffFromCompare(files),
+      branchName: branch,
+      repoName: repoFullName,
+      taskTitle,
+    });
+    title = generated.title;
+    body = generated.body;
+  } catch (error) {
+    console.warn(
+      "[remote-task-pr] PR content generation failed, using fallbacks",
+      {
+        threadId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
+  }
+  body += `\n\n---\n\n📎 **Task**: ${publicAppUrl()}/task/${threadId}`;
+  return await octokit.rest.pulls.create({
+    owner,
+    repo,
+    title,
+    body,
+    head: branch,
+    base,
+    draft,
+  });
+}
+
 export async function openRemoteTaskPullRequest({
   db,
   userId,
@@ -136,42 +193,25 @@ export async function openRemoteTaskPullRequest({
     base,
     state: "open",
   });
-  let pr = open[0];
-  let status: "opened" | "adopted" = "adopted";
-  if (!pr) {
-    let title = thread.name ?? "Automated task";
-    let body = "Changes made by an automated task run.";
-    try {
-      const generated = await generateContent({
-        gitDiff: diffFromCompare(compare.data.files ?? []),
-        branchName: branch,
-        repoName: thread.githubRepoFullName,
+  const existing = open[0];
+  const pr =
+    existing ??
+    ((
+      await createPullRequest({
+        octokit,
+        owner,
+        repo,
+        branch,
+        base,
+        threadId,
+        repoFullName: thread.githubRepoFullName,
         taskTitle: thread.name ?? "Automated task",
-      });
-      title = generated.title;
-      body = generated.body;
-    } catch (error) {
-      console.warn(
-        "[remote-task-pr] PR content generation failed, using fallbacks",
-        {
-          threadId,
-          error: error instanceof Error ? error.message : String(error),
-        },
-      );
-    }
-    body += `\n\n---\n\n📎 **Task**: ${publicAppUrl()}/task/${threadId}`;
-    const created = await octokit.rest.pulls.create({
-      owner,
-      repo,
-      title,
-      body,
-      head: branch,
-      base,
-      draft: settings.prType !== "ready",
-    });
-    pr = created.data as unknown as (typeof open)[number];
-    status = "opened";
-  }
+        draft: settings.prType !== "ready",
+        files: compare.data.files ?? [],
+        generateContent,
+      })
+    ).data as unknown as NonNullable<typeof existing>);
+  const status = existing ? "adopted" : "opened";
 
   await Promise.all([
     upsertGithubPR({

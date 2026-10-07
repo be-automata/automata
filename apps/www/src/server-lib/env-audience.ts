@@ -3,7 +3,7 @@ import type { DB } from "@terragon/shared/db";
 import {
   getDecryptedEnvironmentVariables,
   getDecryptedGlobalEnvironmentVariables,
-  getOrCreateEnvironment,
+  getEnvironmentForUserRepo,
 } from "@terragon/shared/model/environments";
 
 /**
@@ -113,19 +113,26 @@ export async function getExecutionPlaneRunEnvironment({
   organizationId: string | null;
   repoFullName: string;
 }): Promise<Record<string, string>> {
-  const environment = await getOrCreateEnvironment({
-    db,
-    userId,
-    organizationId,
-    repoFullName,
-  });
-  const [globalVariables, repoVariables] = await Promise.all([
-    getExecutionPlaneGlobalEnvironmentVariables({ db, userId }),
-    getExecutionPlaneEnvironmentVariables({
+  // A read: a repo without an environment row simply has no variables, so
+  // dispatch never inserts one.
+  const readRepoVariables = async (): Promise<EnvironmentVariable[]> => {
+    const environment = await getEnvironmentForUserRepo({
       db,
       userId,
-      environmentId: environment.id,
-    }),
+      organizationId,
+      repoFullName,
+    });
+    return environment
+      ? await getExecutionPlaneEnvironmentVariables({
+          db,
+          userId,
+          environmentId: environment.id,
+        })
+      : [];
+  };
+  const [globalVariables, repoVariables] = await Promise.all([
+    getExecutionPlaneGlobalEnvironmentVariables({ db, userId }),
+    readRepoVariables(),
   ]);
   return Object.fromEntries(
     [...globalVariables, ...repoVariables].map(({ key, value }) => [

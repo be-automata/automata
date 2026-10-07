@@ -902,28 +902,29 @@ export async function dispatchAgentRun({
     if ("abort" in selfHealPlan) {
       throw new Error(`self-heal fix dispatch refused: ${selfHealPlan.abort}`);
     }
-    const repoEnv =
-      taskPlan !== undefined &&
-      selfHealPlan.selfHeal === undefined &&
-      orgSettings !== undefined
-        ? await getExecutionPlaneRunEnvironment({
-            db,
-            userId,
-            organizationId: orgSettings.organizationId,
-            repoFullName,
-          })
-        : {};
-    if (Object.keys(repoEnv).length > 0) {
+    // A plain task run: not a review, not a self-heal fix (taskPlan is only
+    // set when orgSettings is).
+    const isPlainTaskRun =
+      taskPlan !== undefined && selfHealPlan.selfHeal === undefined;
+    const repoEnv = isPlainTaskRun
+      ? await getExecutionPlaneRunEnvironment({
+          db,
+          userId,
+          organizationId: orgSettings?.organizationId ?? null,
+          repoFullName,
+        })
+      : {};
+    const repoEnvKeys = Object.keys(repoEnv);
+    if (repoEnvKeys.length > 0) {
       console.log("[hatchet] task run environment", {
         threadId,
-        keys: Object.keys(repoEnv),
+        keys: repoEnvKeys,
       });
     }
     // A task run that starts on its base branch works on its own branch, so
     // the finish hook can turn what it pushed into a pull request.
     const workBranch =
-      taskPlan !== undefined &&
-      selfHealPlan.selfHeal === undefined &&
+      isPlainTaskRun &&
       prNumber === undefined &&
       branch === thread?.repoBaseBranchName
         ? remoteTaskBranchName(threadId)
@@ -933,7 +934,7 @@ export async function dispatchAgentRun({
       ...plan?.inputExtension,
       ...taskPlan,
       ...selfHealPlan,
-      ...(Object.keys(repoEnv).length > 0 ? { repoEnv } : {}),
+      ...(repoEnvKeys.length > 0 ? { repoEnv } : {}),
       ...(workBranch !== undefined ? { workBranch } : {}),
     };
 
