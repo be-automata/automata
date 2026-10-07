@@ -672,6 +672,30 @@ async function handleThreadFinish({
       ),
     );
   }
+  // A remote-plane task run has no sandbox to checkpoint: open the pull
+  // request for the work branch its agent pushed, as the checkpoint would
+  // for a sandbox thread. No-ops unless that branch exists and is ahead.
+  if (sandboxId === null && prNumber === null && repoFullName) {
+    waitUntil(
+      import("@/server-lib/task/remote-task-pr")
+        .then(async ({ openRemoteTaskPullRequest }) => {
+          const outcome = await openRemoteTaskPullRequest({
+            db,
+            userId,
+            threadId,
+          });
+          if (outcome.status !== "skipped") {
+            console.log("[remote-task-pr]", { threadId, ...outcome });
+          }
+        })
+        .catch((error) =>
+          console.error("[remote-task-pr] finish-hook failed (non-fatal)", {
+            threadId,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        ),
+    );
+  }
   // Phase 8: the audit lane has no PR number, so its hook is a SIBLING of the
   // block above, never inside it. It no-ops for any thread that is not stamped
   // with the audit-findings skill.

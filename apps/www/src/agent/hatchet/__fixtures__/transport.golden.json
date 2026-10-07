@@ -10,7 +10,8 @@
       "installationToken": "mock-github-token",
       "daemonToken": "__DAEMON_TOKEN__",
       "orgId": "__ORG_ID__",
-      "traceparent": "__TRACEPARENT__"
+      "traceparent": "__TRACEPARENT__",
+      "workBranch": "__WORK_BRANCH__"
     },
     "additionalMetadata": {
       "threadId": "__THREAD_ID__",

@@ -89,6 +89,7 @@ export async function provisionWorkdir({
   repoFullName,
   branch,
   baseBranch,
+  workBranch,
   installationToken,
   workdirRoot,
   runId,
@@ -106,6 +107,12 @@ export async function provisionWorkdir({
    * base-fetch block below (BUG-EXEC-02). Omit/empty for non-PR runs (no base fetch).
    */
   baseBranch?: string;
+  /**
+   * A task run's own branch: created from the cloned HEAD right after the
+   * clone, so the agent never commits on the base branch. Omit for every
+   * other run.
+   */
+  workBranch?: string;
   installationToken: string;
   workdirRoot: string;
   /** Unique per-run directory key — pass threadId, NOT the shared legacy sentinel. */
@@ -222,6 +229,10 @@ export async function provisionWorkdir({
     ],
     { maxBuffer: 64 * 1024 * 1024 },
   );
+
+  if (workBranch) {
+    await runGit(["-C", workdir, "checkout", "-q", "-b", workBranch]);
+  }
 
   // BUG-EXEC-02: make `git diff origin/<base>...HEAD` computable OFFLINE for re-reviews.
   // The token stays out of .git/config via the one-shot `-c http.extraHeader`, as the

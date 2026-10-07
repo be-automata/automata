@@ -23,6 +23,7 @@ import {
   getOrCreateEnvironment,
   updateEnvironment,
 } from "@terragon/shared/model/environments";
+import { remoteTaskBranchName } from "@/server-lib/task/remote-task-pr";
 import {
   getInstallationToken,
   getReadOnlyInstallationToken,
@@ -145,6 +146,7 @@ describe("dispatchAgentRun", () => {
         "threadChatId",
         "threadId",
         "traceparent",
+        "workBranch",
       ].sort(),
     );
     // #7: a well-formed W3C traceparent (version 00, 32-hex trace, 16-hex span,
@@ -1145,6 +1147,42 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       await setRepoEnv({ YOUTRACK_AGENT_TOKEN: "perm:agent" });
       const input = await dispatchAndRead(await reviewThread(912));
       expect("repoEnv" in input).toBe(false);
+    });
+  });
+
+  describe("work branch (remote task PRs)", () => {
+    const dispatchOn = async (
+      t: { threadId: string; threadChatId: string },
+      branch: string,
+    ) => {
+      const f = routedHatchetFetch("run-agent");
+      vi.stubGlobal("fetch", f.mock);
+      await dispatchAgentRun({
+        userId: user.id,
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        repoFullName: REPO,
+        branch,
+      });
+      const body = triggerBody(f.mock);
+      vi.unstubAllGlobals();
+      return body.input;
+    };
+
+    it("a task run starting on its base branch gets its own work branch", async () => {
+      const t = await orgTaskThread();
+      const input = await dispatchOn(t, "main");
+      expect(input.workBranch).toBe(remoteTaskBranchName(t.threadId));
+    });
+
+    it("a task run already on its own branch keeps working there", async () => {
+      const input = await dispatchOn(await orgTaskThread(), "feature");
+      expect("workBranch" in input).toBe(false);
+    });
+
+    it("a review run never gets one", async () => {
+      const input = await dispatchOn(await reviewThread(913), "main");
+      expect("workBranch" in input).toBe(false);
     });
   });
 

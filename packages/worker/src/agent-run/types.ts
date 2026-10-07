@@ -171,6 +171,12 @@ export type AgentRunInput = {
    */
   repoEnv?: Record<string, string>;
   /**
+   * Task runs that start on the base branch: the branch provision checks out
+   * right after the clone, so the agent's commits land on it and
+   * `git push origin HEAD` publishes it. Mirror of www AgentRunInput.workBranch.
+   */
+  workBranch?: string;
+  /**
    * #125 (C2 stamps, C1 consumes): per-PR concurrency key
    * `${orgId}/${repo}/${prNumber}`. Present ONLY on runs dispatched to a
    * policy variant (agent-run-newest / -strict / -discard) — the variants'
