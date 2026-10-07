@@ -586,6 +586,7 @@ export async function handleDaemonEvent({
         statusBeforeUpdate: threadChat.status,
         isRateLimited,
         shouldSkipCheckpoint,
+        isStop,
         repoFullName: thread.githubRepoFullName ?? null,
         prNumber: thread.githubPRNumber ?? null,
         finishedThread: {
@@ -611,6 +612,7 @@ async function handleThreadFinish({
   statusBeforeUpdate,
   isRateLimited,
   shouldSkipCheckpoint,
+  isStop = false,
   repoFullName,
   prNumber,
   finishedThread,
@@ -622,6 +624,8 @@ async function handleThreadFinish({
   statusBeforeUpdate: ThreadStatus;
   isRateLimited: boolean;
   shouldSkipCheckpoint: boolean;
+  /** The user stopped the run: like a sandbox checkpoint, no PR is opened. */
+  isStop?: boolean;
   repoFullName: string | null;
   prNumber: number | null;
   /** The row handleDaemonEvent already loaded — the recheck's zero-read bail. */
@@ -674,8 +678,10 @@ async function handleThreadFinish({
   }
   // A remote-plane task run has no sandbox to checkpoint: open the pull
   // request for the work branch its agent pushed, as the checkpoint would
-  // for a sandbox thread. No-ops unless that branch exists and is ahead.
-  if (sandboxId === null && prNumber === null && repoFullName) {
+  // for a sandbox thread, under the same rules: not after a user stop, not
+  // for a thread that disabled git checkpointing (checked inside), and still
+  // after an error. No-ops unless that branch exists and is ahead.
+  if (sandboxId === null && prNumber === null && repoFullName && !isStop) {
     waitUntil(
       import("@/server-lib/task/remote-task-pr")
         .then(async ({ openRemoteTaskPullRequest }) => {

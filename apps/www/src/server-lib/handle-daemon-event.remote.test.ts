@@ -13,6 +13,7 @@ import {
 } from "@terragon/shared/model/threads";
 import { handleDaemonEvent } from "./handle-daemon-event";
 import { handleAuditFindingsAtFinish } from "@/server-lib/audit/audit-finish";
+import { openRemoteTaskPullRequest } from "@/server-lib/task/remote-task-pr";
 import { handleReviewEffectAtFinish } from "./review/review-single-writer-finish";
 import { checkpointThread } from "@/server-lib/checkpoint-thread";
 import { extendSandboxLife } from "@terragon/sandbox";
@@ -29,6 +30,11 @@ import { eq } from "drizzle-orm";
 
 vi.mock("@/server-lib/checkpoint-thread", () => ({
   checkpointThread: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/server-lib/task/remote-task-pr", () => ({
+  openRemoteTaskPullRequest: vi
+    .fn()
+    .mockResolvedValue({ status: "skipped", reason: "no_branch" }),
 }));
 vi.mock("@/server-lib/audit/audit-finish", () => ({
   handleAuditFindingsAtFinish: vi.fn().mockResolvedValue(undefined),
@@ -118,6 +124,43 @@ describe("handleDaemonEvent for sandbox-less remote threads", () => {
       expect.objectContaining({ userId: user.id, threadId, threadChatId }),
     );
     expect(handleReviewEffectAtFinish).not.toHaveBeenCalled();
+  });
+
+  it("asks for the work branch's pull request when a remote task run finishes", async () => {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { sandboxProvider: "hatchet-remote" },
+      chatOverrides: { status: "working" },
+    });
+
+    await finishThread({ threadId, threadChatId });
+
+    expect(openRemoteTaskPullRequest).toHaveBeenCalledTimes(1);
+    expect(openRemoteTaskPullRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: user.id, threadId }),
+    );
+  });
+
+  it("opens no pull request when the user stopped the run", async () => {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { sandboxProvider: "hatchet-remote" },
+      chatOverrides: { status: "working" },
+    });
+
+    await handleDaemonEvent({
+      threadId,
+      threadChatId,
+      userId: user.id,
+      timezone: "America/New_York",
+      contextUsage: null,
+      messages: [{ type: "custom-stop", session_id: null, duration_ms: 0 }],
+    });
+    await waitUntilResolved();
+
+    expect(openRemoteTaskPullRequest).not.toHaveBeenCalled();
   });
 
   it("schedules both the review effect and the audit hook for a PR thread", async () => {

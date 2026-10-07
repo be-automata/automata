@@ -1,7 +1,7 @@
 import type { Octokit } from "octokit";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getThread } from "@terragon/shared/model/threads";
+import { getThread, updateThread } from "@terragon/shared/model/threads";
 import {
   createTestThread,
   createTestUser,
@@ -150,6 +150,23 @@ describe("openRemoteTaskPullRequest", () => {
       reason: "no_changes",
     });
     expect(gh.created).toHaveLength(0);
+  });
+
+  it("skips a thread that disabled git checkpointing, without calling GitHub", async () => {
+    await updateThread({
+      db,
+      userId,
+      threadId,
+      updates: { disableGitCheckpointing: true },
+    });
+    const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+    await expect(run(gh)).resolves.toEqual({
+      status: "skipped",
+      reason: "checkpointing_off",
+    });
+    expect(
+      vi.mocked(gh.octokit.rest.repos.compareCommitsWithBasehead),
+    ).not.toHaveBeenCalled();
   });
 
   it("skips when the owner turned automatic PRs off, without calling GitHub", async () => {

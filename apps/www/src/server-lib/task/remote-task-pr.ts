@@ -45,6 +45,7 @@ export type RemoteTaskPrOutcome =
       reason:
         | "thread_missing"
         | "has_pr"
+        | "checkpointing_off"
         | "auto_create_off"
         | "no_branch"
         | "no_changes";
@@ -99,6 +100,9 @@ export async function openRemoteTaskPullRequest({
   }
   if (thread.githubPRNumber) {
     return { status: "skipped", reason: "has_pr" };
+  }
+  if (thread.disableGitCheckpointing) {
+    return { status: "skipped", reason: "checkpointing_off" };
   }
   if (!settings.autoCreatePRs) {
     return { status: "skipped", reason: "auto_create_off" };
