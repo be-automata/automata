@@ -235,22 +235,23 @@ export async function provisionWorkdir({
   // run of this thread already pushed it (a run whose PR was never recorded,
   // e.g. auto-create off or a failed finish call): starting it again from the
   // base would make the agent's push non-fast-forward and orphan that work.
+  const authConfigArgs = ["-c", `http.extraHeader=${authHeader}`];
   if (workBranch) {
-    const auth = ["-c", `http.extraHeader=${authHeader}`];
     const { stdout: remoteHead } = await runGit([
       "-C",
       workdir,
-      ...auth,
+      ...authConfigArgs,
       "ls-remote",
       "--heads",
       "origin",
       workBranch,
     ]);
-    if (String(remoteHead).trim()) {
+    const continuesRemote = String(remoteHead).trim() !== "";
+    if (continuesRemote) {
       await runGit([
         "-C",
         workdir,
-        ...auth,
+        ...authConfigArgs,
         "fetch",
         "-q",
         "--depth",
@@ -258,18 +259,16 @@ export async function provisionWorkdir({
         "origin",
         `+refs/heads/${workBranch}:refs/remotes/origin/${workBranch}`,
       ]);
-      await runGit([
-        "-C",
-        workdir,
-        "checkout",
-        "-q",
-        "-b",
-        workBranch,
-        `origin/${workBranch}`,
-      ]);
-    } else {
-      await runGit(["-C", workdir, "checkout", "-q", "-b", workBranch]);
     }
+    await runGit([
+      "-C",
+      workdir,
+      "checkout",
+      "-q",
+      "-b",
+      workBranch,
+      ...(continuesRemote ? [`origin/${workBranch}`] : []),
+    ]);
   }
 
   // BUG-EXEC-02: make `git diff origin/<base>...HEAD` computable OFFLINE for re-reviews.
@@ -280,7 +279,7 @@ export async function provisionWorkdir({
       workdir,
       branch,
       baseBranch,
-      authConfigArgs: ["-c", `http.extraHeader=${authHeader}`],
+      authConfigArgs,
     });
   }
 

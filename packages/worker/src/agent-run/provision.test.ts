@@ -311,19 +311,20 @@ describe("provisionWorkdir — a task run's work branch", () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-work-"));
     origin = path.join(root, "origin");
     await fs.mkdir(origin, { recursive: true });
-    const git = (args: string[]) =>
-      execFileAsync("git", ["-C", origin, ...args]);
-    await git(["init", "-q", "-b", "main"]);
-    await git(["config", "user.email", "t@t"]);
-    await git(["config", "user.name", "t"]);
+    await originGit(["init", "-q", "-b", "main"]);
+    await originGit(["config", "user.email", "t@t"]);
+    await originGit(["config", "user.name", "t"]);
     await fs.writeFile(path.join(origin, "app.txt"), "hello\n");
-    await git(["add", "app.txt"]);
-    await git(["commit", "-q", "-m", "init"]);
+    await originGit(["add", "app.txt"]);
+    await originGit(["commit", "-q", "-m", "init"]);
   });
 
   afterEach(async () => {
     await fs.rm(root, { recursive: true, force: true });
   });
+
+  const originGit = (args: string[]) =>
+    execFileAsync("git", ["-C", origin, ...args]);
 
   const localGit = (args: string[]) =>
     execFileAsync(
@@ -343,16 +344,19 @@ describe("provisionWorkdir — a task run's work branch", () => {
       ])
     ).stdout.trim();
 
-  it("checks the work branch out from the cloned base, so the agent never commits on it", async () => {
-    const workdir = await provisionWorkdir({
+  const provision = (runId: string, workBranch?: string) =>
+    provisionWorkdir({
       repoFullName: "irrelevant/local",
       branch: "main",
-      workBranch: "automata/task-abcdef12",
+      workBranch,
       installationToken: "unused",
       workdirRoot: path.join(root, "runs"),
-      runId: "thr_work",
+      runId,
       runGit: localGit,
     });
+
+  it("checks the work branch out from the cloned base, so the agent never commits on it", async () => {
+    const workdir = await provision("thr_work", "automata/task-abcdef12");
     expect(await headOf(workdir)).toBe("automata/task-abcdef12");
     await expect(
       fs.readFile(path.join(workdir, "app.txt"), "utf8"),
@@ -360,23 +364,13 @@ describe("provisionWorkdir — a task run's work branch", () => {
   });
 
   it("continues the remote work branch an earlier run already pushed", async () => {
-    const git = (args: string[]) =>
-      execFileAsync("git", ["-C", origin, ...args]);
-    await git(["checkout", "-q", "-b", "automata/task-abcdef12"]);
+    await originGit(["checkout", "-q", "-b", "automata/task-abcdef12"]);
     await fs.writeFile(path.join(origin, "earlier.txt"), "first run\n");
-    await git(["add", "earlier.txt"]);
-    await git(["commit", "-q", "-m", "first run"]);
-    await git(["checkout", "-q", "main"]);
+    await originGit(["add", "earlier.txt"]);
+    await originGit(["commit", "-q", "-m", "first run"]);
+    await originGit(["checkout", "-q", "main"]);
 
-    const workdir = await provisionWorkdir({
-      repoFullName: "irrelevant/local",
-      branch: "main",
-      workBranch: "automata/task-abcdef12",
-      installationToken: "unused",
-      workdirRoot: path.join(root, "runs"),
-      runId: "thr_again",
-      runGit: localGit,
-    });
+    const workdir = await provision("thr_again", "automata/task-abcdef12");
     expect(await headOf(workdir)).toBe("automata/task-abcdef12");
     await expect(
       fs.readFile(path.join(workdir, "earlier.txt"), "utf8"),
@@ -384,14 +378,7 @@ describe("provisionWorkdir — a task run's work branch", () => {
   });
 
   it("stays on the cloned branch without one", async () => {
-    const workdir = await provisionWorkdir({
-      repoFullName: "irrelevant/local",
-      branch: "main",
-      installationToken: "unused",
-      workdirRoot: path.join(root, "runs"),
-      runId: "thr_plain",
-      runGit: localGit,
-    });
+    const workdir = await provision("thr_plain");
     expect(await headOf(workdir)).toBe("main");
   });
 });
