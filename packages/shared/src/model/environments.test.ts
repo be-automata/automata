@@ -5,7 +5,9 @@ import {
   getEnvironment,
   updateEnvironment,
   getOrCreateEnvironment,
+  getOrCreateGlobalEnvironment,
 } from "./environments";
+import { createOrganization } from "./organizations";
 import { createTestUser } from "./test-helpers";
 
 describe("environments", () => {
@@ -242,6 +244,80 @@ exit 0`;
 
       expect(environment.id).toBe(environmentId);
       expect(environment.setupScript).toBe("echo 'existing script'");
+    });
+  });
+
+  describe("global environment and the org fence", () => {
+    // A user has exactly one global row (unique on user + repo ""), created
+    // before org scoping with organization_id NULL. The global page finds it
+    // by user alone; saving from inside an org must reach the same row.
+    it("an org-scoped read and write reach the user's legacy global row", async () => {
+      const [global] = await db
+        .insert(schema.environment)
+        .values({ userId, repoFullName: "", isGlobal: true })
+        .returning();
+      const org = await createOrganization({
+        db,
+        name: "Org",
+        slug: `org-${userId.slice(0, 8).toLowerCase()}`,
+      });
+
+      expect(
+        await getEnvironment({
+          db,
+          userId,
+          environmentId: global!.id,
+          organizationId: org.id,
+        }),
+      ).toBeDefined();
+      expect(
+        (
+          await getOrCreateGlobalEnvironment({
+            db,
+            userId,
+            organizationId: org.id,
+          })
+        ).id,
+      ).toBe(global!.id);
+
+      await updateEnvironment({
+        db,
+        userId,
+        environmentId: global!.id,
+        organizationId: org.id,
+        updates: { setupScript: "echo saved" },
+      });
+      const saved = await getEnvironment({
+        db,
+        userId,
+        environmentId: global!.id,
+      });
+      expect(saved?.setupScript).toBe("echo saved");
+    });
+
+    it("an org-scoped read still hides another org's repo environment", async () => {
+      const orgA = await createOrganization({
+        db,
+        name: "A",
+        slug: `a-${userId.slice(0, 8).toLowerCase()}`,
+      });
+      const orgB = await createOrganization({
+        db,
+        name: "B",
+        slug: `b-${userId.slice(0, 8).toLowerCase()}`,
+      });
+      const [inA] = await db
+        .insert(schema.environment)
+        .values({ userId, organizationId: orgA.id, repoFullName: "acme/a" })
+        .returning();
+      expect(
+        await getEnvironment({
+          db,
+          userId,
+          environmentId: inA!.id,
+          organizationId: orgB.id,
+        }),
+      ).toBeUndefined();
     });
   });
 });

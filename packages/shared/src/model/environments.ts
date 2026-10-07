@@ -1,6 +1,6 @@
 import { DB } from "../db";
 import * as schema from "../db/schema";
-import { and, eq, getTableColumns } from "drizzle-orm";
+import { and, eq, getTableColumns, or } from "drizzle-orm";
 import { publishBroadcastUserMessage } from "../broadcast-server";
 import { decryptValue } from "@terragon/utils/encryption";
 
@@ -9,10 +9,19 @@ import { decryptValue } from "@terragon/utils/encryption";
  * owner-scoped within an org: `and(userId, organizationId)`. Optional during the
  * nullable backfill phase — omitted = user-only (legacy); the forTenant accessor
  * always supplies it. drizzle's `and()` drops `undefined`.
+ *
+ * The global environment is exempt: it is per USER, not per org (the
+ * user_id + repo_full_name unique index allows one row with repo ""), and
+ * rows created before org scoping carry organization_id NULL. Fencing it by
+ * org made the global page render the row but every save from inside an org
+ * fail with "Environment not found".
  */
 function environmentOrgFence(organizationId?: string | null) {
   return organizationId
-    ? eq(schema.environment.organizationId, organizationId)
+    ? or(
+        eq(schema.environment.organizationId, organizationId),
+        eq(schema.environment.isGlobal, true),
+      )
     : undefined;
 }
 
