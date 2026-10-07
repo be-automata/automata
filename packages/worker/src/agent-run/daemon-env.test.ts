@@ -685,3 +685,105 @@ describe("GATE-01: a fix run's gate token never reaches the daemon/agent env (09
     }
   });
 });
+
+describe("task-run repo environment (prompt-defined automations)", () => {
+  const base = {
+    baseEnv: { PATH: "/usr/bin:/bin", HOME: "/home/op" },
+    anthropicApiKey: "sk-ant-box",
+    claudeBinDir: "/opt/claude/bin",
+    installationToken: INSTALL_TOKEN,
+    ghConfigDir: "/tmp/isolated-gh",
+    botLogin: "automata-ai-bot[bot]",
+    runHome: "/run/home",
+  };
+
+  it("hands the owner's variables to the agent", () => {
+    const env = buildDaemonEnv({
+      ...base,
+      repoEnv: {
+        YOUTRACK_URL: "https://tracker.example",
+        YOUTRACK_AGENT_TOKEN: "perm:abc",
+      },
+    });
+    expect(env.YOUTRACK_URL).toBe("https://tracker.example");
+    expect(env.YOUTRACK_AGENT_TOKEN).toBe("perm:abc");
+  });
+
+  it("never lets them steer the runtime or replace a platform key", () => {
+    const env = buildDaemonEnv({
+      ...base,
+      egressProxyUrl: "http://127.0.0.1:9999",
+      repoEnv: {
+        PATH: "/evil",
+        home: "/evil",
+        NODE_OPTIONS: "--require /evil.js",
+        LD_PRELOAD: "/evil.so",
+        GH_TOKEN: "x",
+        GITHUB_TOKEN: "x",
+        GIT_CONFIG_COUNT: "0",
+        ANTHROPIC_API_KEY: "sk-ant-user",
+        CLAUDE_CODE_SIMPLE: "1",
+        HTTPS_PROXY: "http://evil",
+        https_proxy: "http://evil",
+      },
+    });
+    expect(env.PATH).toBe("/opt/claude/bin:/usr/bin:/bin");
+    expect(env.HOME).toBe("/run/home");
+    expect(env.home).toBeUndefined();
+    expect(env.NODE_OPTIONS).toBeUndefined();
+    expect(env.LD_PRELOAD).toBeUndefined();
+    expect(env.GH_TOKEN).toBe(INSTALL_TOKEN);
+    expect(env.GITHUB_TOKEN).toBe(INSTALL_TOKEN);
+    expect(env.GIT_CONFIG_COUNT).not.toBe("0");
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-box");
+    expect(env.CLAUDE_CODE_SIMPLE).toBeUndefined();
+    expect(env.HTTPS_PROXY).toBe("http://127.0.0.1:9999");
+    expect(env.https_proxy).toBe("http://127.0.0.1:9999");
+  });
+
+  it("never overrides an ambient key the whitelist forwards, nor TLS trust", () => {
+    const ambient = {
+      PATH: "/usr/bin:/bin",
+      HOME: "/home/op",
+      EDITOR: "vim",
+      PAGER: "less",
+      NODE_EXTRA_CA_CERTS: "/etc/op-ca.pem",
+      npm_config_cache: "/var/npm",
+      LANG: "en_US.UTF-8",
+    };
+    const env = buildDaemonEnv({
+      ...base,
+      baseEnv: ambient,
+      repoEnv: {
+        EDITOR: "/evil",
+        VISUAL: "/evil",
+        PAGER: "/evil",
+        NODE_EXTRA_CA_CERTS: "/evil-ca.pem",
+        npm_config_cache: "/evil",
+        NPM_CONFIG_PREFIX: "/evil",
+        LANG: "C",
+        SSL_CERT_FILE: "/evil-ca.pem",
+        REQUESTS_CA_BUNDLE: "/evil-ca.pem",
+        CURL_CA_BUNDLE: "/evil-ca.pem",
+        BASH_ENV: "/evil.sh",
+      },
+    });
+    expect(env.EDITOR).toBe("vim");
+    expect(env.VISUAL).toBeUndefined();
+    expect(env.PAGER).toBe("less");
+    expect(env.NODE_EXTRA_CA_CERTS).toBe("/etc/op-ca.pem");
+    expect(env.npm_config_cache).toBe("/var/npm");
+    expect(env.NPM_CONFIG_PREFIX).toBeUndefined();
+    expect(env.LANG).toBe("en_US.UTF-8");
+    expect(env.SSL_CERT_FILE).toBeUndefined();
+    expect(env.REQUESTS_CA_BUNDLE).toBeUndefined();
+    expect(env.CURL_CA_BUNDLE).toBeUndefined();
+    expect(env.BASH_ENV).toBeUndefined();
+  });
+
+  it("changes nothing when absent", () => {
+    expect(buildDaemonEnv({ ...base, repoEnv: {} })).toEqual(
+      buildDaemonEnv(base),
+    );
+  });
+});

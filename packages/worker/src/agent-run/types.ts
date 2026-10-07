@@ -164,6 +164,13 @@ export type AgentRunInput = {
    */
   taskAgent?: TaskAgentShape;
   /**
+   * SECRET values (never logged): the owner's environment variables for a
+   * NON-review, non-self-heal task run, so a prompt-defined automation can call
+   * the services its prompt names. Mirror of www AgentRunInput.repoEnv. The
+   * daemon env drops the keys the platform reserves (daemon-env.ts).
+   */
+  repoEnv?: Record<string, string>;
+  /**
    * #125 (C2 stamps, C1 consumes): per-PR concurrency key
    * `${orgId}/${repo}/${prNumber}`. Present ONLY on runs dispatched to a
    * policy variant (agent-run-newest / -strict / -discard) — the variants'

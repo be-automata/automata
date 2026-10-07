@@ -3,6 +3,7 @@ import type { DB } from "@terragon/shared/db";
 import {
   getDecryptedEnvironmentVariables,
   getDecryptedGlobalEnvironmentVariables,
+  getOrCreateEnvironment,
 } from "@terragon/shared/model/environments";
 
 /**
@@ -92,5 +93,44 @@ export async function getExecutionPlaneGlobalEnvironmentVariables(args: {
 }): Promise<EnvironmentVariable[]> {
   return stripControlPlaneOnlyEnv(
     await getControlPlaneGlobalEnvironmentVariables(args),
+  );
+}
+
+/**
+ * The variables a remote (worker-box) task run hands its agent: the owner's
+ * global set overlaid by the repository environment's, control-plane-only
+ * keys removed. The same merge the sandbox path performs (agent/sandbox.ts),
+ * so a prompt-defined automation sees the same variables on either plane.
+ */
+export async function getExecutionPlaneRunEnvironment({
+  db,
+  userId,
+  organizationId,
+  repoFullName,
+}: {
+  db: DB;
+  userId: string;
+  organizationId: string | null;
+  repoFullName: string;
+}): Promise<Record<string, string>> {
+  const environment = await getOrCreateEnvironment({
+    db,
+    userId,
+    organizationId,
+    repoFullName,
+  });
+  const [globalVariables, repoVariables] = await Promise.all([
+    getExecutionPlaneGlobalEnvironmentVariables({ db, userId }),
+    getExecutionPlaneEnvironmentVariables({
+      db,
+      userId,
+      environmentId: environment.id,
+    }),
+  ]);
+  return Object.fromEntries(
+    [...globalVariables, ...repoVariables].map(({ key, value }) => [
+      key,
+      value,
+    ]),
   );
 }
