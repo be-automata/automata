@@ -11,7 +11,11 @@ import {
 import { getUserSettings } from "@terragon/shared/model/user";
 import { publicAppUrl } from "@terragon/env/next-public";
 
-import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
+import {
+  getOctokitForApp,
+  getOctokitForUser,
+  parseRepoFullName,
+} from "@/lib/github";
 import { generatePRContent } from "@/server-lib/generate-pr-content";
 
 import { type AgentPrContent, parseAgentPrContent } from "./agent-pr-content";
@@ -29,9 +33,19 @@ import { type AgentPrContent, parseAgentPrContent } from "./agent-pr-content";
  *              checks it out right after the clone, so `git push origin HEAD`
  *              publishes exactly this branch.
  *   finish   → if that branch is on GitHub and ahead of the base, open a
- *              draft PR as the App (openRemoteTaskPullRequest), titled and
- *              described by the agent's `json pull-request` block when its
- *              final message has one (agent-pr-content.ts).
+ *              draft PR as the thread's user (openRemoteTaskPullRequest),
+ *              titled and described by the agent's `json pull-request` block
+ *              when its final message has one (agent-pr-content.ts).
+ *
+ * The PR is opened with the USER's GitHub token, as the sandbox checkpoint
+ * does, never the App's when the user has one: GitHub refuses a formal
+ * APPROVE / REQUEST_CHANGES from a PR's own author, so a PR the App opened can
+ * only ever get a comment verdict from the review bot. Reads (compare, open
+ * PR lookup) stay on the App token, which sees every installed repo; a user
+ * token that cannot see the repo would turn a pushed branch into "no_branch".
+ * The App still opens the PR when the user has no GitHub token (an org task
+ * attributed to an email/password owner) or GitHub refuses theirs, so the
+ * work is never stranded on an unopened branch.
  *
  * The branch name derives from the thread id, so nothing is stored at
  * dispatch: a run that never pushed leaves no name behind that a later
@@ -86,16 +100,29 @@ function diffFromCompare(files: readonly CompareFile[]): string {
     : text;
 }
 
+function errorStatus(error: unknown): unknown {
+  return typeof error === "object" && error !== null
+    ? (error as { status?: unknown }).status
+    : undefined;
+}
+
 function isNotFound(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    (error as { status?: unknown }).status === 404
-  );
+  return errorStatus(error) === 404;
+}
+
+/**
+ * GitHub refused the user's token for this repo (revoked, no write access, or
+ * the repo hidden from them). Anything else, a 422 validation error included,
+ * would fail the same way as the App, so it propagates.
+ */
+function isUserTokenRefused(error: unknown): boolean {
+  const status = errorStatus(error);
+  return status === 401 || status === 403 || status === 404;
 }
 
 async function createPullRequest({
   octokit,
+  fallbackOctokit,
   owner,
   repo,
   branch,
@@ -109,7 +136,10 @@ async function createPullRequest({
   agentContent,
   generateContent,
 }: {
+  /** The author: the user's client when they have one, else the App's. */
   octokit: Octokit;
+  /** The App's client, used when GitHub refuses the user's token. */
+  fallbackOctokit: Octokit;
   owner: string;
   repo: string;
   branch: string;
@@ -149,15 +179,19 @@ async function createPullRequest({
     }
   }
   body += `\n\n---\n\n📎 **Task**: ${publicAppUrl()}/task/${threadId}`;
-  return await octokit.rest.pulls.create({
-    owner,
-    repo,
-    title,
-    body,
-    head: branch,
-    base,
-    draft,
-  });
+  const params = { owner, repo, title, body, head: branch, base, draft };
+  try {
+    return await octokit.rest.pulls.create(params);
+  } catch (error) {
+    if (octokit === fallbackOctokit || !isUserTokenRefused(error)) {
+      throw error;
+    }
+    console.warn(
+      "[remote-task-pr] GitHub refused the user's token, opening the PR as the App",
+      { threadId, status: errorStatus(error) },
+    );
+    return await fallbackOctokit.rest.pulls.create(params);
+  }
 }
 
 export async function openRemoteTaskPullRequest({
@@ -166,6 +200,7 @@ export async function openRemoteTaskPullRequest({
   threadId,
   threadChatId,
   octokitFor = getOctokitForApp,
+  userOctokitFor = getOctokitForUser,
   generateContent = generatePRContent,
 }: {
   db: DB;
@@ -175,6 +210,8 @@ export async function openRemoteTaskPullRequest({
   threadChatId: string;
   /** Injectable for tests. */
   octokitFor?: (args: { owner: string; repo: string }) => Promise<Octokit>;
+  /** Injectable for tests. Null when the user has no usable GitHub token. */
+  userOctokitFor?: (args: { userId: string }) => Promise<Octokit | null>;
   /** Injectable for tests. */
   generateContent?: typeof generatePRContent;
 }): Promise<RemoteTaskPrOutcome> {
@@ -224,14 +261,18 @@ export async function openRemoteTaskPullRequest({
     state: "open",
   });
   const existing = open[0];
-  const threadChat = existing
-    ? undefined
-    : await getThreadChat({ db, threadId, threadChatId, userId });
+  const [threadChat, userOctokit] = existing
+    ? [undefined, null]
+    : await Promise.all([
+        getThreadChat({ db, threadId, threadChatId, userId }),
+        userOctokitFor({ userId }),
+      ]);
   const pr =
     existing ??
     ((
       await createPullRequest({
-        octokit,
+        octokit: userOctokit ?? octokit,
+        fallbackOctokit: octokit,
         owner,
         repo,
         branch,
