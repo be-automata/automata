@@ -64,6 +64,14 @@ export const updateEnvironmentVariables = userOnlyAction(
         })),
       },
     });
+    // Key names only — never a value.
+    console.log("[env] updated", {
+      environmentId,
+      isGlobal: environment.isGlobal,
+      organizationId,
+      actorUserId: userId,
+      keys: variables.map((variable) => variable.key),
+    });
     return { success: true };
   },
   { defaultErrorMessage: "Failed to update environment variables" },
