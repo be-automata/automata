@@ -689,6 +689,7 @@ async function handleThreadFinish({
             db,
             userId,
             threadId,
+            threadChatId,
           });
           if (outcome.status !== "skipped") {
             console.log("[remote-task-pr]", { threadId, ...outcome });
