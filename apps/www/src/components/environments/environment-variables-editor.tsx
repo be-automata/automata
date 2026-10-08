@@ -17,6 +17,7 @@ import {
 import { DeleteConfirmationDialog } from "@/components/delete-confirmation-dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { parseEnvFile } from "@/lib/parse-env-file";
+import { getEnvKeyHints, type EnvKeyScope } from "@/lib/env-key-hints";
 import isEqual from "fast-deep-equal";
 
 type EnvironmentVariable = {
@@ -24,20 +25,48 @@ type EnvironmentVariable = {
   value: string;
 };
 
+export interface InheritedEnvironmentKey {
+  key: string;
+  source: "global" | "organization";
+}
+
+const INHERITED_SOURCES: ReadonlyArray<{
+  source: InheritedEnvironmentKey["source"];
+  label: string;
+  href: string;
+}> = [
+  {
+    source: "organization",
+    label: "organization environment",
+    href: "/environments/organization",
+  },
+  {
+    source: "global",
+    label: "global (personal) environment",
+    href: "/environments/global",
+  },
+];
+
 interface EnvironmentVariablesEditorProps {
   variables: EnvironmentVariable[];
-  globalEnvironmentVariableKeys: string[];
+  /** Keys set on a broader layer; a key defined here overrides them. */
+  inheritedKeys?: InheritedEnvironmentKey[];
+  /** Which store this editor writes, for the key hints. */
+  scope: EnvKeyScope;
   onChange: (variables: EnvironmentVariable[]) => void;
   onDirtyChange?: (isDirty: boolean) => void;
   disabled?: boolean;
+  saveLabel?: string;
 }
 
 export function EnvironmentVariablesEditor({
   variables,
-  globalEnvironmentVariableKeys,
+  inheritedKeys = [],
+  scope,
   onChange,
   onDirtyChange,
   disabled = false,
+  saveLabel = "Save Environment Variables",
 }: EnvironmentVariablesEditorProps) {
   const [localVariables, setLocalVariables] = useState<EnvironmentVariable[]>(
     variables || [],
@@ -54,6 +83,14 @@ export function EnvironmentVariablesEditor({
   const isDirty = useMemo(
     () => !isEqual(localVariables, variables),
     [localVariables, variables],
+  );
+  const hints = useMemo(
+    () => getEnvKeyHints(localVariables, scope),
+    [localVariables, scope],
+  );
+  const localKeys = useMemo(
+    () => new Set(localVariables.map((variable) => variable.key)),
+    [localVariables],
   );
 
   // Check if there are unsaved changes
@@ -197,38 +234,54 @@ export function EnvironmentVariablesEditor({
       </div>
 
       <div className="space-y-2">
-        {!!globalEnvironmentVariableKeys.length && (
-          <div className="flex flex-col gap-2 items-start p-3 rounded-md border">
-            <p className="text-sm text-muted-foreground/75 font-medium">
-              Defined in the{" "}
-              <Link
-                href="/environments/global"
-                className="underline hover:no-underline"
-              >
-                global environment
-              </Link>
-              :
-            </p>
-            <div className="flex flex-col gap-1 w-full">
-              {globalEnvironmentVariableKeys.map((key) => (
-                <div key={key} className="flex-1">
-                  <div className="flex-1 space-y-2">
-                    <div className="flex gap-2">
-                      <div className="flex-1">
-                        <Input
-                          placeholder="KEY"
-                          value={key}
-                          disabled={true}
-                          className="font-[var(--font-geist-mono)] text-sm"
-                        />
-                      </div>
-                    </div>
+        {INHERITED_SOURCES.map(({ source, label, href }) => {
+          const keys = inheritedKeys.filter((key) => key.source === source);
+          if (keys.length === 0) {
+            return null;
+          }
+          return (
+            <div
+              key={source}
+              className="flex flex-col gap-2 items-start p-3 rounded-md border"
+            >
+              <p className="text-sm text-muted-foreground/75 font-medium">
+                Defined in the{" "}
+                <Link href={href} className="underline hover:no-underline">
+                  {label}
+                </Link>
+                :
+              </p>
+              <div className="flex flex-col gap-1 w-full">
+                {keys.map(({ key }) => (
+                  <div key={key} className="flex gap-2 items-center">
+                    <Input
+                      placeholder="KEY"
+                      value={key}
+                      disabled={true}
+                      className="font-[var(--font-geist-mono)] text-sm flex-1"
+                    />
+                    {localKeys.has(key) && (
+                      <span className="text-xs text-muted-foreground whitespace-nowrap">
+                        overridden here
+                      </span>
+                    )}
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })}
+        {hints
+          .filter((hint) => hint.key === null)
+          .map((hint) => (
+            <p
+              key={hint.message}
+              role="note"
+              className="text-xs text-amber-700 dark:text-amber-400 p-3 rounded-md border border-amber-500/40"
+            >
+              {hint.message}
+            </p>
+          ))}
         {localVariables.map((variable, index) => (
           <div
             key={index}
@@ -255,6 +308,22 @@ export function EnvironmentVariablesEditor({
                       {errors[index]}
                     </p>
                   )}
+                  {hints
+                    .filter((hint) => hint.key === variable.key)
+                    .map((hint) => (
+                      <p
+                        key={hint.message}
+                        role="note"
+                        className={cn(
+                          "text-xs mt-1",
+                          hint.level === "warning"
+                            ? "text-amber-700 dark:text-amber-400"
+                            : "text-muted-foreground",
+                        )}
+                      >
+                        {hint.message}
+                      </p>
+                    ))}
                 </div>
                 <div className="flex-1 relative">
                   <Input
@@ -310,7 +379,7 @@ export function EnvironmentVariablesEditor({
             localVariables.some((v) => !v.key.trim())
           }
         >
-          Save Environment Variables
+          {saveLabel}
         </Button>
       </div>
 

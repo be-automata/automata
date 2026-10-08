@@ -161,6 +161,7 @@ describe("env-audience is the only decrypt site (ADR-008 I1)", () => {
     expect(rawReaders).toEqual([
       "app/(sidebar)/(site-header)/environments/[id]/page.tsx",
       "app/(sidebar)/(site-header)/environments/global/page.tsx",
+      "app/(sidebar)/(site-header)/environments/organization/page.tsx",
       "server-lib/tracker/tracker-config.ts",
     ]);
   });
