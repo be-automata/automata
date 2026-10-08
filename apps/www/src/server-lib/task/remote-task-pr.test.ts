@@ -33,11 +33,14 @@ interface FakeGitHub {
 }
 
 function fakeGitHub({
-  compare,
+  compare = { ahead_by: 1 },
   openPulls = [],
+  createFails,
 }: {
-  compare: { ahead_by: number } | "missing";
+  compare?: { ahead_by: number } | "missing";
   openPulls?: Array<{ number: number }>;
+  /** pulls.create rejects with this HTTP status. */
+  createFails?: number;
 }): FakeGitHub {
   const created: Array<Record<string, unknown>> = [];
   const pull = (number: number) => ({
@@ -70,6 +73,9 @@ function fakeGitHub({
           data: openPulls.map((p) => pull(p.number)),
         })),
         create: vi.fn(async (args: Record<string, unknown>) => {
+          if (createFails) {
+            throw Object.assign(new Error("refused"), { status: createFails });
+          }
           created.push(args);
           return { data: pull(77) };
         }),
@@ -114,15 +120,53 @@ describe("openRemoteTaskPullRequest", () => {
   const pullRequestBlock = (value: unknown) =>
     `Delivered.\n\n\`\`\`json pull-request\n${JSON.stringify(value)}\n\`\`\``;
 
-  const run = (gh: FakeGitHub) =>
+  const run = (gh: FakeGitHub, user: FakeGitHub | null = null) =>
     openRemoteTaskPullRequest({
       db,
       userId,
       threadId,
       threadChatId,
       octokitFor: async () => gh.octokit,
+      userOctokitFor: async () => user?.octokit ?? null,
       generateContent,
     });
+
+  it("opens the PR as the user when they have a GitHub token, reading as the App", async () => {
+    const app = fakeGitHub({ compare: { ahead_by: 2 } });
+    const user = fakeGitHub({});
+    await expect(run(app, user)).resolves.toEqual({
+      status: "opened",
+      prNumber: 77,
+    });
+    expect(user.created).toHaveLength(1);
+    expect(app.created).toHaveLength(0);
+    expect(
+      vi.mocked(app.octokit.rest.repos.compareCommitsWithBasehead),
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      vi.mocked(user.octokit.rest.repos.compareCommitsWithBasehead),
+    ).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403, 404])(
+    "opens the PR as the App when GitHub refuses the user's token (%i)",
+    async (status) => {
+      const app = fakeGitHub({});
+      const user = fakeGitHub({ createFails: status });
+      await expect(run(app, user)).resolves.toEqual({
+        status: "opened",
+        prNumber: 77,
+      });
+      expect(app.created).toHaveLength(1);
+    },
+  );
+
+  it("does not retry as the App on a validation error from the user's create", async () => {
+    const app = fakeGitHub({});
+    const user = fakeGitHub({ createFails: 422 });
+    await expect(run(app, user)).rejects.toThrow("refused");
+    expect(app.created).toHaveLength(0);
+  });
 
   it("opens a draft PR from the work branch and records it on the thread", async () => {
     const gh = fakeGitHub({ compare: { ahead_by: 2 } });
