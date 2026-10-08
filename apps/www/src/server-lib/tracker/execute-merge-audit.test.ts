@@ -816,6 +816,11 @@ describe("executeMergeAudit", () => {
       expect(outcome).toEqual({ outcome: "tracker_unconfigured" });
       expect(comments.upserts[0]!.mode).toBe("create-only");
       expect(comments.upserts[0]!.body).toContain("no tracker is configured");
+      // Points at both stores the audit reads, and says Global is not one.
+      expect(comments.upserts[0]!.body).toContain("organization environment");
+      expect(comments.upserts[0]!.body).toContain(
+        "Personal Global variables are not read",
+      );
     });
 
     it("no ticket key in the PR → the single 'no ticket' notice, no tracker call", async () => {
