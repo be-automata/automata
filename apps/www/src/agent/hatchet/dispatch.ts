@@ -393,8 +393,9 @@ export interface AgentRunInput {
   selfHeal?: SelfHealRunInput;
   /**
    * NON-review, non-self-heal org task runs only (manual, scheduled, mention):
-   * the owner's environment variables for this repo (global overlaid by the
-   * repo's, control-plane-only keys removed — env-audience.ts), so a
+   * the owner's environment variables for this repo (personal global →
+   * organization → repository, control-plane-only keys removed; an org's
+   * tracker token never reaches the agent — env-audience.ts), so a
    * prompt-defined automation can call the services its prompt names. SECRET
    * values: never logged. Absent when empty (byte-identical payload) and on
    * every review and self-heal run. The worker drops keys it reserves.

@@ -36,10 +36,7 @@ import { getPostHogServer } from "@/lib/posthog-server";
 import { trackSandboxCreation } from "@/lib/rate-limit";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
 import { resolveEgressPolicy } from "@/server-lib/egress/resolve-egress-policy";
-import {
-  getExecutionPlaneEnvironmentVariables,
-  getExecutionPlaneGlobalEnvironmentVariables,
-} from "@/server-lib/env-audience";
+import { getExecutionPlaneLayeredEnvironmentVariables } from "@/server-lib/env-audience";
 import { generateBranchName } from "@/server-lib/generate-branch-name";
 import { sandboxTimeoutMs } from "@terragon/sandbox/constants";
 import { getAndVerifyCredentials } from "./credentials";
@@ -198,50 +195,31 @@ async function getOrCreateSandboxForThread({
       repoFullName: thread.githubRepoFullName,
     }),
   ]);
-  const [
-    repositoryEnvironmentVariables,
-    globalEnvironmentVariables,
-    mcpConfig,
-    githubAccessToken,
-  ] = await Promise.all([
-    // ADR-008: the execution-plane getters drop control-plane-only keys (the
-    // tracker token) — nothing read here may reach the sandbox otherwise.
-    getExecutionPlaneEnvironmentVariables({
-      db,
-      userId,
-      environmentId: repositoryEnvironment.id,
-    }),
-    getExecutionPlaneGlobalEnvironmentVariables({ db, userId }),
-    getDecryptedMcpConfig({
-      db,
-      userId,
-      environmentId: repositoryEnvironment.id,
-      encryptionMasterKey: env.ENCRYPTION_MASTER_KEY,
-    }),
-    // Background-capable: falls back to the App installation token for the
-    // thread's repo when the owner has no GitHub identity (git clone uses it as
-    // x-access-token). This is the sandbox boot path (getOrCreateSandboxForThread).
-    getGitHubTokenForBackground({
-      userId,
-      repoFullName: thread.githubRepoFullName,
-    }),
-  ]);
-
-  // Merge global and environment-specific variables
-  // Environment-specific variables take precedence over global ones
-  const mergedEnvironmentVariables = [
-    ...globalEnvironmentVariables,
-    ...repositoryEnvironmentVariables,
-  ].reduce(
-    (acc, variable) => {
-      acc[variable.key] = variable.value;
-      return acc;
-    },
-    {} as Record<string, string>,
-  );
-  const finalEnvironmentVariables = Object.entries(
-    mergedEnvironmentVariables,
-  ).map(([key, value]) => ({ key, value }));
+  const [finalEnvironmentVariables, mcpConfig, githubAccessToken] =
+    await Promise.all([
+      // ADR-008: personal global → organization → repository, with
+      // control-plane-only keys (the tracker token) dropped — nothing read
+      // here may reach the sandbox otherwise.
+      getExecutionPlaneLayeredEnvironmentVariables({
+        db,
+        userId,
+        organizationId: thread.organizationId,
+        repoEnvironmentId: repositoryEnvironment.id,
+      }),
+      getDecryptedMcpConfig({
+        db,
+        userId,
+        environmentId: repositoryEnvironment.id,
+        encryptionMasterKey: env.ENCRYPTION_MASTER_KEY,
+      }),
+      // Background-capable: falls back to the App installation token for the
+      // thread's repo when the owner has no GitHub identity (git clone uses it as
+      // x-access-token). This is the sandbox boot path (getOrCreateSandboxForThread).
+      getGitHubTokenForBackground({
+        userId,
+        repoFullName: thread.githubRepoFullName,
+      }),
+    ]);
   const branchPrefix = userSettings.branchNamePrefix;
   const generateBranchNameWithPrefix = (threadName: string | null) =>
     generateBranchName(threadName, branchPrefix);
@@ -571,7 +549,10 @@ async function getOrCreateSandboxForThread({
   // (brokerResume above) — the provider refreshes the vault secret and env/setup
   // take the brokered branch (never a resident raw token). So only Docker
   // recreates. Legacy threads (mode null/undefined) take the normal resume.
-  if (persistedBrokerMode === "brokered" && thread.sandboxProvider === "docker") {
+  if (
+    persistedBrokerMode === "brokered" &&
+    thread.sandboxProvider === "docker"
+  ) {
     return await recreateBrokeredSandbox(existingSandboxId);
   }
 

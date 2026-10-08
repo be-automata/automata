@@ -46,6 +46,10 @@ const SELF_HEAL_SINCE =
 const AUDIT_LEDGER_SINCE =
   "phase 8: self-heal ledger — audit writer, outbox, breakers and the phase 9 fix loop read these tables";
 
+const ORG_ENV_SINCE =
+  "org-level environment — the tracker resolver and agent env assembly read " +
+  "this table on every call (deploy/migrations/2026-10-08-organization-environment.sql)";
+
 /** Columns this revision of the code cannot run without. */
 const REQUIRED: ReadonlyArray<{
   table: string;
@@ -938,6 +942,66 @@ const REQUIRED: ReadonlyArray<{
     table: "self_heal_admin_log",
     column: "created_at",
     since: AUDIT_LEDGER_SINCE,
+  },
+  {
+    table: "organization_environment",
+    column: "organization_id",
+    since: ORG_ENV_SINCE,
+  },
+  {
+    table: "organization_environment",
+    column: "environment_variables",
+    since: ORG_ENV_SINCE,
+  },
+  {
+    table: "organization_environment",
+    column: "updated_by_user_id",
+    since: ORG_ENV_SINCE,
+  },
+  {
+    table: "organization_environment",
+    column: "created_at",
+    since: ORG_ENV_SINCE,
+  },
+  {
+    table: "organization_environment",
+    column: "updated_at",
+    since: ORG_ENV_SINCE,
+  },
+  {
+    table: "organization_environment_event",
+    column: "id",
+    since: ORG_ENV_SINCE,
+  },
+  {
+    table: "organization_environment_event",
+    column: "organization_id",
+    since: ORG_ENV_SINCE,
+  },
+  {
+    table: "organization_environment_event",
+    column: "actor_user_id",
+    since: ORG_ENV_SINCE,
+  },
+  {
+    table: "organization_environment_event",
+    column: "added_keys",
+    since: ORG_ENV_SINCE,
+  },
+  {
+    table: "organization_environment_event",
+    column: "removed_keys",
+    since: ORG_ENV_SINCE,
+  },
+  {
+    table: "organization_environment_event",
+    column: "changed_keys",
+    since: ORG_ENV_SINCE,
+  },
+  {
+    table: "organization_environment_event",
+    column: "created_at",
+    since: ORG_ENV_SINCE,
   },
 ];
 

@@ -232,7 +232,7 @@ async function buildTrackerBlockSafely({
     });
     if (!config) {
       return trackerContextNotice(
-        "No tracker is configured for this repository.",
+        "No tracker is configured for this repository. Set `YOUTRACK_URL` and `YOUTRACK_TOKEN` on the organization environment or on this repository's environment.",
       );
     }
     return await buildTrackerContextBlock({

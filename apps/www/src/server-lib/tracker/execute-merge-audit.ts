@@ -391,7 +391,7 @@ export async function executeMergeAudit({
 
   if (config === null || tracker === null) {
     return await postNotice(
-      "The post-merge audit is enabled for this repository, but no tracker is configured. Set `YOUTRACK_URL` and `YOUTRACK_TOKEN` on the repository environment.",
+      "The post-merge audit is enabled for this repository, but no tracker is configured. Set `YOUTRACK_URL` and `YOUTRACK_TOKEN` on the organization environment (Environments → Organization) or on this repository's environment. Personal Global variables are not read by the audit.",
       { outcome: "tracker_unconfigured" },
     );
   }

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CONTROL_PLANE_ONLY_ENV_KEYS,
+  mergeEnvironmentLayers,
   stripControlPlaneOnlyEnv,
   withAgentTrackerTokenFallback,
 } from "./env-audience";
@@ -60,6 +61,43 @@ describe("withAgentTrackerTokenFallback", () => {
     const input = { YOUTRACK_URL: "https://yt.example.com" };
     expect(withAgentTrackerTokenFallback(input)).toBe(input);
   });
+
+  it("uses only the personal token it is given, never the merged one", () => {
+    // The merged YOUTRACK_TOKEN came from the organization layer; with no
+    // personal token, nothing is handed to the agent.
+    const input = { YOUTRACK_TOKEN: "perm:org" };
+    expect(
+      withAgentTrackerTokenFallback(input, { personalTrackerToken: undefined }),
+    ).toBe(input);
+    expect(
+      withAgentTrackerTokenFallback(input, {
+        personalTrackerToken: "perm:mine",
+      }),
+    ).toEqual({
+      YOUTRACK_TOKEN: "perm:org",
+      YOUTRACK_AGENT_TOKEN: "perm:mine",
+    });
+  });
+});
+
+describe("mergeEnvironmentLayers", () => {
+  it("overlays in order, records the source, and leaves inputs alone", () => {
+    const global = vars({ A: "global", B: "global" });
+    const organization = vars({ B: "org", C: "org" });
+    const repository = vars({ C: "repo" });
+    expect(
+      mergeEnvironmentLayers([
+        { source: "global", variables: global },
+        { source: "organization", variables: organization },
+        { source: "repository", variables: repository },
+      ]),
+    ).toEqual({
+      A: { value: "global", source: "global" },
+      B: { value: "org", source: "organization" },
+      C: { value: "repo", source: "repository" },
+    });
+    expect(global).toEqual(vars({ A: "global", B: "global" }));
+  });
 });
 
 /**
@@ -71,7 +109,7 @@ describe("withAgentTrackerTokenFallback", () => {
  */
 describe("env-audience is the only decrypt site (ADR-008 I1)", () => {
   const SRC_ROOT = fileURLToPath(new URL("../", import.meta.url));
-  const DECRYPT_IMPORT = /getDecrypted(?:Global)?EnvironmentVariables\b/;
+  const DECRYPT_IMPORT = /getDecrypted\w*EnvironmentVariables\b/;
 
   function sourceFiles(dir: string): string[] {
     return readdirSync(dir).flatMap((entry) => {
@@ -116,15 +154,32 @@ describe("env-audience is the only decrypt site (ADR-008 I1)", () => {
       .filter(
         ({ relative, source }) =>
           relative !== "server-lib/env-audience.ts" &&
-          /getControlPlane(?:Global)?EnvironmentVariables\b/.test(source),
+          /getControlPlane\w*Environment(?:Variables)?\b/.test(source),
       )
       .map(({ relative }) => relative)
       .sort();
     expect(rawReaders).toEqual([
       "app/(sidebar)/(site-header)/environments/[id]/page.tsx",
       "app/(sidebar)/(site-header)/environments/global/page.tsx",
+      "app/(sidebar)/(site-header)/environments/organization/page.tsx",
       "server-lib/tracker/tracker-config.ts",
     ]);
+  });
+
+  it("the tracker path never reads the personal global environment", () => {
+    const trackerConfig = files.find(
+      ({ relative }) => relative === "server-lib/tracker/tracker-config.ts",
+    );
+    expect(trackerConfig!.source).not.toMatch(/Global\w*Environment/);
+    const audience = files.find(
+      ({ relative }) => relative === "server-lib/env-audience.ts",
+    )!.source;
+    const start = audience.indexOf(
+      "export async function getControlPlaneTrackerEnvironment",
+    );
+    const body = audience.slice(start, audience.indexOf("\n}\n", start));
+    expect(body).toMatch(/readOrganizationLayer\(/);
+    expect(body).not.toMatch(/Global/);
   });
 
   it("the remote run environment strips control-plane keys after the fallback", () => {
@@ -138,5 +193,11 @@ describe("env-audience is the only decrypt site (ADR-008 I1)", () => {
     );
     expect(body).toMatch(/withAgentTrackerTokenFallback\(/);
     expect(body).toMatch(/CONTROL_PLANE_ONLY_ENV_KEYS\.has\(key\)/);
+    // The organization layer sits between global and repository, and the
+    // fallback is fed from the personal layers only.
+    expect(body).toMatch(
+      /source: "global"[\s\S]*source: "organization"[\s\S]*source: "repository"/,
+    );
+    expect(body).toMatch(/personalTrackerToken: personal\.YOUTRACK_TOKEN/);
   });
 });

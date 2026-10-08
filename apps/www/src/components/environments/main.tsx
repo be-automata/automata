@@ -5,9 +5,13 @@ import Link from "next/link";
 import { Environment } from "@terragon/shared";
 import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
-import { EnvironmentVariablesEditor } from "@/components/environments/environment-variables-editor";
+import {
+  EnvironmentVariablesEditor,
+  type InheritedEnvironmentKey,
+} from "@/components/environments/environment-variables-editor";
 import { McpConfigEditor } from "@/components/environments/mcp-config-editor";
 import { updateEnvironmentVariables } from "@/server-actions/environment-variables";
+import { updateOrganizationEnvironmentVariables } from "@/server-actions/organization-environment-variables";
 import { updateMcpConfig } from "@/server-actions/mcp-config";
 import { toast } from "sonner";
 import { usePageBreadcrumbs } from "@/hooks/usePageBreadcrumbs";
@@ -32,8 +36,11 @@ function EnvironmentBreadcrumb({ label }: { label: string | null }) {
 
 export function Environments({
   environments,
+  organizationName,
 }: {
   environments: Environment[];
+  /** The active org's name; null when no org is active. */
+  organizationName: string | null;
 }) {
   const router = useRouter();
   const { headerActionContainer } = usePageHeader();
@@ -69,11 +76,29 @@ export function Environments({
             </Link>
           </p>
         </div>
+        {organizationName !== null && (
+          <div className="space-y-2 pb-6 mb-4">
+            <div className="border-b pb-2">
+              <h2 className="text-lg font-semibold">
+                Organization ({organizationName})
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                Variables shared by every repository and member of this
+                organization, such as tracker settings for the post-merge audit.
+                Owners and admins can edit them.
+              </p>
+            </div>
+            <Link className="underline" href="/environments/organization">
+              Manage
+            </Link>
+          </div>
+        )}
         <div className="space-y-2 pb-6 mb-4">
           <div className="border-b pb-2">
-            <h2 className="text-lg font-semibold">Global</h2>
+            <h2 className="text-lg font-semibold">Global (personal)</h2>
             <p className="text-sm text-muted-foreground">
-              Manage environment variables that apply to all your repositories.
+              Variables for your own tasks in every organization. Not read by
+              organization automations such as the post-merge audit.
             </p>
           </div>
           <Link className="underline" href="/environments/global">
@@ -111,27 +136,36 @@ export function Environments({
   );
 }
 
+type EnvironmentVariablesTarget =
+  | { scope: "repository" | "global"; environmentId: string }
+  | { scope: "organization" };
+
 function EnvironmentVariablesSection({
-  environmentId,
+  target,
   environmentVariables,
-  globalEnvironmentVariableKeys,
+  inheritedKeys,
   onDirtyChange,
 }: {
-  environmentId: string;
+  target: EnvironmentVariablesTarget;
   environmentVariables: Array<{ key: string; value: string }>;
-  globalEnvironmentVariableKeys: string[];
+  inheritedKeys: InheritedEnvironmentKey[];
   onDirtyChange: (isDirty: boolean) => void;
 }) {
   const router = useRouter();
   const [envVars, setEnvVars] = useState(environmentVariables);
+  const onSaved = (variables: Array<{ key: string; value: string }>) => {
+    setEnvVars(variables);
+    onDirtyChange(false); // Reset dirty state after successful save
+    toast.success("Environment variables saved successfully");
+    router.refresh();
+  };
   const updateEnvironmentVariablesMutation = useServerActionMutation({
     mutationFn: updateEnvironmentVariables,
-    onSuccess: (_, { variables }) => {
-      setEnvVars(variables);
-      onDirtyChange(false); // Reset dirty state after successful save
-      toast.success("Environment variables saved successfully");
-      router.refresh();
-    },
+    onSuccess: (_, { variables }) => onSaved(variables),
+  });
+  const updateOrganizationVariablesMutation = useServerActionMutation({
+    mutationFn: updateOrganizationEnvironmentVariables,
+    onSuccess: (_, { variables }) => onSaved(variables),
   });
   return (
     <div className="flex flex-col gap-2 mt-6">
@@ -155,15 +189,25 @@ function EnvironmentVariablesSection({
         </span>
         <EnvironmentVariablesEditor
           variables={envVars}
-          globalEnvironmentVariableKeys={globalEnvironmentVariableKeys}
+          inheritedKeys={inheritedKeys}
+          scope={target.scope}
           onChange={async (variables) => {
+            if (target.scope === "organization") {
+              await updateOrganizationVariablesMutation.mutateAsync({
+                variables,
+              });
+              return;
+            }
             await updateEnvironmentVariablesMutation.mutateAsync({
-              environmentId,
+              environmentId: target.environmentId,
               variables,
             });
           }}
           onDirtyChange={onDirtyChange}
-          disabled={updateEnvironmentVariablesMutation.isPending}
+          disabled={
+            updateEnvironmentVariablesMutation.isPending ||
+            updateOrganizationVariablesMutation.isPending
+          }
         />
       </div>
     </div>
@@ -174,13 +218,13 @@ export function EnvironmentUI({
   environmentId,
   environment,
   environmentVariables,
-  globalEnvironmentVariableKeys,
+  inheritedKeys,
   mcpConfig,
 }: {
   environmentId: string;
   environment: Pick<Environment, "repoFullName">;
   environmentVariables: Array<{ key: string; value: string }>;
-  globalEnvironmentVariableKeys: string[];
+  inheritedKeys: InheritedEnvironmentKey[];
   mcpConfig?: McpConfig;
 }) {
   const router = useRouter();
@@ -234,9 +278,9 @@ export function EnvironmentUI({
       <EnvironmentBreadcrumb label={environment.repoFullName} />
       <div className="flex flex-col gap-4 w-full pb-4">
         <EnvironmentVariablesSection
-          environmentId={environmentId}
+          target={{ scope: "repository", environmentId }}
           environmentVariables={environmentVariables}
-          globalEnvironmentVariableKeys={globalEnvironmentVariableKeys}
+          inheritedKeys={inheritedKeys}
           onDirtyChange={setEnvVarsDirty}
         />
         <div className="flex flex-col gap-2 mt-10">
@@ -336,14 +380,127 @@ export function GlobalEnvironmentUI({
 
   return (
     <div className="flex flex-col justify-start h-full w-full max-w-4xl">
-      <EnvironmentBreadcrumb label="Global" />
-      <p>The global environment applies to all your repositories.</p>
+      <EnvironmentBreadcrumb label="Global (personal)" />
+      <p>
+        Your personal global environment applies to your own tasks in every
+        organization. Organization automations such as the post-merge audit do
+        not read it: set shared settings on the organization environment.
+      </p>
       <EnvironmentVariablesSection
-        environmentId={environmentId}
+        target={{ scope: "global", environmentId }}
         environmentVariables={environmentVariables}
-        globalEnvironmentVariableKeys={[]}
+        inheritedKeys={[]}
         onDirtyChange={setEnvVarsDirty}
       />
+    </div>
+  );
+}
+
+export interface OrganizationEnvironmentEventView {
+  id: string;
+  actorName: string | null;
+  addedKeys: string[];
+  removedKeys: string[];
+  changedKeys: string[];
+  createdAt: Date;
+}
+
+function describeEvent(event: OrganizationEnvironmentEventView): string {
+  const parts = [
+    event.addedKeys.length ? `added ${event.addedKeys.join(", ")}` : null,
+    event.changedKeys.length ? `changed ${event.changedKeys.join(", ")}` : null,
+    event.removedKeys.length ? `removed ${event.removedKeys.join(", ")}` : null,
+  ].filter(Boolean);
+  return parts.join("; ");
+}
+
+/**
+ * Org owners/admins get the editor and the change history; members get the
+ * key names only — the page never sends them a value.
+ */
+export function OrganizationEnvironmentUI(
+  props: { organizationName: string } & (
+    | {
+        canEdit: true;
+        environmentVariables: Array<{ key: string; value: string }>;
+        events: OrganizationEnvironmentEventView[];
+      }
+    | { canEdit: false; keys: string[] }
+  ),
+) {
+  const [envVarsDirty, setEnvVarsDirty] = useState(false);
+  useUnsavedChangesWarning(envVarsDirty);
+
+  return (
+    <div className="flex flex-col justify-start h-full w-full max-w-4xl">
+      <EnvironmentBreadcrumb
+        label={`Organization (${props.organizationName})`}
+      />
+      <p>
+        Shared by every repository and member of {props.organizationName}.
+        Applied between your personal global variables and a repository&apos;s
+        own (a repository variable with the same key wins). Org automations,
+        such as the post-merge audit, read tracker settings from here.
+      </p>
+      <p className="text-sm text-muted-foreground mt-2">
+        Values are delivered to agent sandboxes of every member&apos;s tasks in
+        this organization, except control-plane keys such as{" "}
+        <code className="bg-muted px-1 py-0.5 rounded text-xs">
+          YOUTRACK_TOKEN
+        </code>
+        , which never reach an agent.
+      </p>
+      {props.canEdit ? (
+        <>
+          <EnvironmentVariablesSection
+            target={{ scope: "organization" }}
+            environmentVariables={props.environmentVariables}
+            inheritedKeys={[]}
+            onDirtyChange={setEnvVarsDirty}
+          />
+          <div className="flex flex-col gap-2 mt-10 mb-8">
+            <h2 className="text-base font-medium text-muted-foreground">
+              Recent changes
+            </h2>
+            {props.events.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No changes yet.</p>
+            ) : (
+              <ul className="flex flex-col gap-1 text-xs text-muted-foreground">
+                {props.events.map((event) => (
+                  <li key={event.id}>
+                    {new Date(event.createdAt).toLocaleString()} ·{" "}
+                    {event.actorName ?? "Unknown user"} · {describeEvent(event)}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </>
+      ) : (
+        <div className="flex flex-col gap-2 mt-6">
+          <h2 className="text-base font-medium text-muted-foreground">
+            Environment Variables
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            Only organization owners and admins can view values or edit these
+            variables.
+          </p>
+          {props.keys.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No variables set.</p>
+          ) : (
+            <ul className="flex flex-col gap-1">
+              {props.keys.map((key) => (
+                <li
+                  key={key}
+                  className="font-[var(--font-geist-mono)] text-sm p-2 rounded-md border"
+                >
+                  {key}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   );
 }

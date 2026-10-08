@@ -59,6 +59,10 @@ export type Thread = typeof schema.thread.$inferSelect;
 export type ThreadChat = typeof schema.threadChat.$inferSelect;
 export type UserSettings = typeof schema.userSettings.$inferSelect;
 export type Environment = typeof schema.environment.$inferSelect;
+export type OrganizationEnvironment =
+  typeof schema.organizationEnvironment.$inferSelect;
+export type OrganizationEnvironmentEvent =
+  typeof schema.organizationEnvironmentEvent.$inferSelect;
 export type Waitlist = typeof schema.waitlist.$inferSelect;
 export type AgentProviderCredentials =
   typeof schema.agentProviderCredentials.$inferSelect;
