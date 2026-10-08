@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { verifyGhAuth } from "./verify-gh-auth";
 
@@ -10,7 +11,11 @@ describe("verifyGhAuth — fail-closed identity precondition", () => {
         _opts: { cwd: string; env: NodeJS.ProcessEnv; timeout: number },
       ) => ({ stdout: "Logged in", stderr: "" }),
     );
-    const env = { GH_TOKEN: "ghs_bot", GH_CONFIG_DIR: "/tmp/iso" };
+    const env = {
+      GH_TOKEN: "ghs_bot",
+      GH_CONFIG_DIR: "/tmp/iso",
+      HOME: "/runs/r/home",
+    };
 
     const result = await verifyGhAuth({ workdir: "/run/wd", env, exec });
 
@@ -21,7 +26,33 @@ describe("verifyGhAuth — fail-closed identity precondition", () => {
     expect(command).toBe("bash");
     expect(args).toEqual(["-lc", "gh auth status"]);
     expect(opts.cwd).toBe("/run/wd");
-    expect(opts.env).toBe(env); // the sanitized env, not the ambient one
+    // The sanitized env, not the ambient one — with HOME swapped (below).
+    expect(opts.env).toEqual({ ...env, HOME: opts.env.HOME });
+  });
+
+  it("runs gh with a throwaway HOME, never the run's, and removes it (#302)", async () => {
+    // gh writes ~/.local/state/gh even for `auth status`; as the worker uid in
+    // the run HOME that left a .local the agent uid could not write into.
+    let seenHome: string | undefined;
+    const exec = vi.fn(
+      async (
+        _command: string,
+        _args: string[],
+        opts: { cwd: string; env: NodeJS.ProcessEnv; timeout: number },
+      ) => {
+        seenHome = opts.env.HOME;
+        expect(existsSync(seenHome!)).toBe(true);
+        return { stdout: "", stderr: "" };
+      },
+    );
+    const env = { GH_TOKEN: "ghs_bot", HOME: "/runs/r/home" };
+
+    await verifyGhAuth({ workdir: "/run/wd", env, exec });
+
+    expect(seenHome).toBeDefined();
+    expect(seenHome).not.toBe("/runs/r/home");
+    expect(existsSync(seenHome!)).toBe(false);
+    expect(env.HOME).toBe("/runs/r/home"); // the caller's env is not mutated
   });
 
   it("fails closed with detail when gh cannot confirm auth (blocks the run)", async () => {

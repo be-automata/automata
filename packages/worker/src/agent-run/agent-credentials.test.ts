@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { materialiseAgentCredentials } from "./agent-credentials";
+import { runPaths, type RunPaths } from "./run-owned-paths";
 import {
   listTree,
   makeBatteriesFixture,
@@ -12,9 +13,15 @@ import { FOREGROUND_ONLY_PRE_TOOL_USE } from "./foreground-only-hook";
 
 describe("materialiseAgentCredentials (D1)", () => {
   let runRoot: string;
+  /** The clone beside the HOME, as provisionWorkdir lays a run dir out. */
+  let run: RunPaths;
+  let workdir: string;
 
   beforeEach(async () => {
     runRoot = await fs.mkdtemp(path.join(os.tmpdir(), "automata-cred-test-"));
+    run = runPaths(runRoot);
+    workdir = run.repo;
+    await fs.mkdir(workdir);
   });
   afterEach(async () => {
     await fs.rm(runRoot, { recursive: true, force: true }).catch(() => {});
@@ -24,7 +31,7 @@ describe("materialiseAgentCredentials (D1)", () => {
     const result = await materialiseAgentCredentials({
       credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
       agent: "claudeCode",
-      runRoot,
+      run,
     });
 
     // A per-run HOME under the run dir — NOT os.homedir(). The daemon probes
@@ -44,7 +51,7 @@ describe("materialiseAgentCredentials (D1)", () => {
     const result = await materialiseAgentCredentials({
       credentials: { type: "json-file", contents: '{"tokens":{}}' },
       agent: "codex",
-      runRoot,
+      run,
     });
 
     const target = path.join(result.home, ".codex/auth.json");
@@ -59,7 +66,7 @@ describe("materialiseAgentCredentials (D1)", () => {
       const result = await materialiseAgentCredentials({
         credentials: { type: "json-file", contents: "hypothetical-cred" },
         agent,
-        runRoot,
+        run,
       });
       expect(result.delivered).toBe(false);
       expect(result.env).toEqual({});
@@ -76,19 +83,21 @@ describe("materialiseAgentCredentials (D1)", () => {
     const result = await materialiseAgentCredentials({
       credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
       agent: "claudeCode",
-      runRoot,
+      run,
     });
     const seed = JSON.parse(
       await fs.readFile(path.join(result.home, ".claude.json"), "utf8"),
     );
     expect(seed.hasCompletedOnboarding).toBe(true);
-    const resolved = await fs.realpath(runRoot).catch(() => runRoot);
-    for (const key of new Set([runRoot, resolved])) {
+    const resolved = await fs.realpath(workdir).catch(() => workdir);
+    for (const key of new Set([workdir, resolved])) {
       expect(seed.projects[key], `missing trust for ${key}`).toMatchObject({
         hasTrustDialogAccepted: true,
         hasCompletedProjectOnboarding: true,
       });
     }
+    // The CLONE is the trusted workspace, not the run dir that holds it (#302).
+    expect(seed.projects[runRoot]).toBeUndefined();
     // 0600: the seed lives beside the credential and follows its hygiene.
     expect(
       (await fs.stat(path.join(result.home, ".claude.json"))).mode & 0o777,
@@ -99,7 +108,7 @@ describe("materialiseAgentCredentials (D1)", () => {
     const result = await materialiseAgentCredentials({
       credentials: { type: "json-file", contents: "secret-token-material" },
       agent: "claudeCode",
-      runRoot,
+      run,
     });
     await result.cleanup();
     await expect(fs.stat(result.home)).rejects.toThrow();
@@ -114,7 +123,7 @@ describe("materialiseAgentCredentials (D1)", () => {
     const result = await materialiseAgentCredentials({
       credentials: { type: "built-in-credits" },
       agent: "claudeCode",
-      runRoot,
+      run,
     });
     expect(result.home).toBe(path.join(runRoot, "home"));
     expect(result.home).not.toBe(os.homedir());
@@ -128,7 +137,7 @@ describe("materialiseAgentCredentials (D1)", () => {
     const result = await materialiseAgentCredentials({
       credentials: { type: "json-file", contents: "x" },
       agent: "someFutureAgent",
-      runRoot,
+      run,
     });
     expect(result.delivered).toBe(false);
     expect((await fs.readdir(result.home)).length).toBe(1); // trust seed only
@@ -138,7 +147,7 @@ describe("materialiseAgentCredentials (D1)", () => {
     const result = await materialiseAgentCredentials({
       credentials: { type: "env-var", key: "AMP_API_KEY", value: "sgamp_x" },
       agent: "amp",
-      runRoot,
+      run,
     });
     expect(result.home).toBe(path.join(runRoot, "home"));
     expect(result.delivered).toBe(true);
@@ -170,7 +179,7 @@ describe("materialiseAgentCredentials (D1)", () => {
       const credits = await materialiseAgentCredentials({
         credentials: { type: "built-in-credits" },
         agent: "claudeCode",
-        runRoot,
+        run,
         batteries: batteries(),
       });
       expect(await listTree(credits.home)).toEqual([".claude.json"]);
@@ -180,7 +189,7 @@ describe("materialiseAgentCredentials (D1)", () => {
       const claude = await materialiseAgentCredentials({
         credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
         agent: "claudeCode",
-        runRoot,
+        run,
         batteries: batteries(),
       });
       expect(await listTree(claude.home)).toEqual([
@@ -196,7 +205,7 @@ describe("materialiseAgentCredentials (D1)", () => {
       const result = await materialiseAgentCredentials({
         credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
         agent: "claudeCode",
-        runRoot,
+        run,
         seed: { batteries: ["gstack-review"], hooksOff: true },
         batteries: batteries(),
       });
@@ -224,7 +233,7 @@ describe("materialiseAgentCredentials (D1)", () => {
       const result = await materialiseAgentCredentials({
         credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
         agent: "claudeCode",
-        runRoot,
+        run,
         seed: { batteries: ["gstack-review"], hooksOff: true },
         batteries: { ...batteries(), root: path.join(fx.base, "missing") },
       });
@@ -244,7 +253,7 @@ describe("materialiseAgentCredentials (D1)", () => {
       const result = await materialiseAgentCredentials({
         credentials: { type: "built-in-credits" },
         agent: "claudeCode",
-        runRoot,
+        run,
         seed: { batteries: ["gsd-reviewers"], hooksOff: true },
         batteries: batteries(),
       });
@@ -259,7 +268,7 @@ describe("materialiseAgentCredentials (D1)", () => {
       const result = await materialiseAgentCredentials({
         credentials: { type: "built-in-credits" },
         agent: "claudeCode",
-        runRoot,
+        run,
         seed: {
           batteries: ["gstack-review", "gsd-reviewers"],
           hooksOff: true,
@@ -292,7 +301,7 @@ describe("materialiseAgentCredentials (D1)", () => {
         const result = await materialiseAgentCredentials({
           credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
           agent: "claudeCode",
-          runRoot,
+          run,
           seed: { batteries: ["somnio-skills"], hooksOff: false },
           batteries: batteries(),
         });
@@ -322,7 +331,7 @@ describe("materialiseAgentCredentials (D1)", () => {
         const result = await materialiseAgentCredentials({
           credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
           agent: "claudeCode",
-          runRoot,
+          run,
           seed: { batteries: ["somnio-skills"], hooksOff: false },
           foregroundOnly: true,
           batteries: batteries(),
@@ -353,7 +362,7 @@ describe("materialiseAgentCredentials (D1)", () => {
         const result = await materialiseAgentCredentials({
           credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
           agent: "claudeCode",
-          runRoot,
+          run,
           foregroundOnly: true,
           batteries: batteries(),
         });
@@ -375,7 +384,7 @@ describe("materialiseAgentCredentials (D1)", () => {
         const result = await materialiseAgentCredentials({
           credentials: { type: "built-in-credits" },
           agent: "claudeCode",
-          runRoot,
+          run,
           seed: { batteries: ["somnio-skills"], hooksOff: false },
           batteries: batteries(),
         });

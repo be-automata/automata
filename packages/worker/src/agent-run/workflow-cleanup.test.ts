@@ -7,6 +7,7 @@ import {
   it,
   vi,
 } from "vitest";
+import { runPaths } from "./run-owned-paths";
 
 /**
  * Workdir-lifetime proof for the run task.
@@ -42,9 +43,11 @@ function fakeHatchetToken(): string {
 process.env.HATCHET_CLIENT_TOKEN = fakeHatchetToken();
 process.env.HATCHET_CLIENT_TLS_STRATEGY = "none";
 
+/** The run dir — what cleanup removes; the clone is RUN.repo beneath it. */
 const WORKDIR = "/tmp/automata-worker-runs/thr_leak_1";
+const RUN = runPaths(WORKDIR);
 
-const provisionWorkdir = vi.fn(async (..._args: unknown[]) => WORKDIR);
+const provisionWorkdir = vi.fn(async (..._args: unknown[]) => RUN);
 const cleanupWorkdir = vi.fn(async (..._args: unknown[]) => {});
 const pullAgentCredentials = vi.fn();
 const materialiseAgentCredentials = vi.fn();
@@ -835,7 +838,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     process.env.WORKER_BOX_TRUST = "shared";
     process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
     // abortIn() swaps implementations; restore the harness defaults per case.
-    provisionWorkdir.mockReset().mockResolvedValue(WORKDIR);
+    provisionWorkdir.mockReset().mockResolvedValue(RUN);
     cleanupWorkdir.mockReset().mockResolvedValue(undefined);
     pullAgentCredentials.mockReset();
     postRunTerminal.mockReset().mockResolvedValue("applied");
@@ -1048,7 +1051,7 @@ describe("#125 C4: queue-mode staleness self-check", () => {
   beforeEach(() => {
     process.env.WORKER_BOX_TRUST = "shared";
     process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
-    provisionWorkdir.mockReset().mockResolvedValue(WORKDIR);
+    provisionWorkdir.mockReset().mockResolvedValue(RUN);
     cleanupWorkdir.mockReset().mockResolvedValue(undefined);
     postRunTerminal.mockReset().mockResolvedValue("applied");
     checkRunStaleness.mockReset().mockResolvedValue(false);
@@ -1230,7 +1233,7 @@ describe("#183: finally order — box lock released last, after teardown and cle
     process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
     finallyOrder.length = 0;
     releaseMock.mockClear();
-    provisionWorkdir.mockReset().mockResolvedValue(WORKDIR);
+    provisionWorkdir.mockReset().mockResolvedValue(RUN);
     cleanupWorkdir.mockReset().mockResolvedValue(undefined);
     postRunTerminal.mockReset().mockResolvedValue("applied");
     materialiseAgentCredentials.mockResolvedValue({
@@ -1812,7 +1815,7 @@ describe("GATE-01: the fix check runs after the agent is dead, then reports (09-
     process.env.WORKER_BOX_TRUST = "shared";
     finallyOrder.length = 0;
     releaseMock.mockClear();
-    provisionWorkdir.mockReset().mockResolvedValue(WORKDIR);
+    provisionWorkdir.mockReset().mockResolvedValue(RUN);
     cleanupWorkdir.mockReset().mockResolvedValue(undefined);
     materialiseAgentCredentials.mockResolvedValue({
       delivered: false,
@@ -1870,13 +1873,13 @@ describe("GATE-01: the fix check runs after the agent is dead, then reports (09-
       "release",
     ]);
     expect(pinFixBaseSha).toHaveBeenCalledWith({
-      workdir: WORKDIR,
+      workdir: RUN.repo,
       baseBranch: "main",
     });
     const checkArgs = runFixCheck.mock.calls[0]![0] as Record<string, unknown>;
     expect(checkArgs.pushedSha).toBe(FIX_PUSHED);
     expect(checkArgs.baseSha).toBe(FIX_BASE);
-    expect(checkArgs.workdir).toBe(WORKDIR);
+    expect(checkArgs.workdir).toBe(RUN.repo);
     expect(postSelfHealFixCheck).toHaveBeenCalledTimes(1);
     expect(postSelfHealFixCheck.mock.calls[0]![0]).toMatchObject({
       gateToken: "GATE_TOKEN_SENTINEL",

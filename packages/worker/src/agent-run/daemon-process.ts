@@ -29,7 +29,7 @@ import {
   resourceLimitFailure,
 } from "./retry-classification";
 import { buildKillInvocation, buildSpawnInvocation } from "./spawn-as-user";
-import { RUN_GH_CONFIG_DIR, RUN_TMP_DIR } from "./run-owned-paths";
+import { runPathsForRepo } from "./run-owned-paths";
 import { verifyGhAuth } from "./verify-gh-auth";
 import type { WorkerConfig } from "./config";
 import type { AgentRunInput, PulledDaemonMessage } from "./types";
@@ -190,10 +190,11 @@ export class DaemonProcess {
       githubReadToken: this.deps.githubReadToken ?? null,
       repoEnv: this.input.repoEnv ?? null,
       agentUser: this.config.agentUser,
-      // Inside the workdir, so it inherits the run's ACE. Provisioning created
-      // it in the same `if (agentUser)` branch that applied that ACE.
+      // Beside the clone, in the run dir, so it inherits the run's ACE.
+      // Provisioning created it in the same `if (agentUser)` branch that
+      // applied that ACE.
       runTmpDir: this.config.agentUser
-        ? path.join(this.workdir, RUN_TMP_DIR)
+        ? runPathsForRepo(this.workdir).tmp
         : null,
       // THE CALL SITE IS HALF THE FIX. `buildDaemonEnv` adds the
       // `safe.directory` entry only when it is given the workdir, so without
@@ -215,9 +216,10 @@ export class DaemonProcess {
    * mkdtemp under the worker's tmpdir — the agent IS the worker uid, so it can
    * read it. Agent-uid mode: that same dir is owned by the worker and closed to
    * the agent, so every agent `gh` call failed `open .../config.yml: permission
-   * denied` (observed live on the execution box). There it goes INSIDE the run
-   * workdir instead, like the run's TMPDIR, so it inherits the per-run grant
-   * provisioning put on the workdir — scoped to this run, never another's.
+   * denied` (observed live on the execution box). There it goes in the run
+   * dir instead, beside the clone like the run's TMPDIR, so it inherits the
+   * per-run grant provisioning put on the run dir — scoped to this run, never
+   * another's.
    *
    * The agent CAN edit config.yml to drop the socket — then gh dials
    * api.github.com directly with the bearer, which GitHub rejects.
@@ -238,8 +240,8 @@ export class DaemonProcess {
       return dir;
     }
 
-    const dir = path.join(this.workdir, RUN_GH_CONFIG_DIR);
-    // Fresh every time: a retry into the same workdir must not inherit whatever
+    const dir = runPathsForRepo(this.workdir).ghConfig;
+    // Fresh every time: a retry into the same run dir must not inherit whatever
     // a previous attempt's agent left here (e.g. a planted hosts.yml).
     fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir, { mode: 0o700 });

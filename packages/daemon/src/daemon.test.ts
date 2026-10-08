@@ -1716,7 +1716,7 @@ describe("daemon", () => {
       ).toHaveLength(0);
     });
 
-    it("an orchestrated reviewAgent on a non-review run keeps the unrestricted command and 60000 timeout", async () => {
+    it("an orchestrated reviewAgent on a non-review run keeps the unrestricted command and the task timeout", async () => {
       await daemon.start();
       await writeToUnixSocket({
         unixSocketPath: runtime.unixSocketPath,
@@ -1734,7 +1734,8 @@ describe("daemon", () => {
       >;
       expect(command).toContain("--dangerously-skip-permissions");
       expect(command).not.toContain("--max-turns");
-      expect(env.BASH_MAX_TIMEOUT_MS).toBe("60000");
+      expect(env.BASH_MAX_TIMEOUT_MS).toBe("600000");
+      expect(env.BASH_DEFAULT_TIMEOUT_MS).toBe("300000");
     });
 
     it.each([
@@ -1764,6 +1765,7 @@ describe("daemon", () => {
         expect(command).not.toContain("--max-turns");
         expect(command).not.toContain("Agent");
         expect(env.BASH_MAX_TIMEOUT_MS).toBe("60000");
+        expect(env.BASH_DEFAULT_TIMEOUT_MS).toBeUndefined();
         const rejections = warnSpy.mock.calls.filter(([msg]) =>
           String(msg).includes("reviewAgent rejected"),
         );

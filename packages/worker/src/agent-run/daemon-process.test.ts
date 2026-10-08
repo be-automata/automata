@@ -202,8 +202,11 @@ setInterval(() => {}, 1000);
     // under Darwin's 104-byte sun_path cap or bind/connect silently truncate.
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "dpn-"));
     const scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ns-script-"));
-    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ns-wd-"));
-    tmpDirs.push(root, scriptDir, workdir);
+    // The clone sits in a run dir, beside gh-config/ and tmp/ (#302).
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ns-wd-"));
+    const workdir = path.join(runDir, "repo");
+    fs.mkdirSync(workdir);
+    tmpDirs.push(root, scriptDir, runDir);
 
     const config = loadWorkerConfig({
       WORKER_RUN_NAMESPACE_ROOT: root,
@@ -612,7 +615,7 @@ setInterval(() => {}, 1000);
       }) as unknown as typeof spawn;
     }
 
-    it("agent-uid mode: lives INSIDE the run workdir, carries the broker route, is granted to the agent, and is removed on teardown", async () => {
+    it("agent-uid mode: lives in the run dir beside the clone, carries the broker route, is granted to the agent, and is removed on teardown", async () => {
       const { root, workdir, input } = fixture();
       const recorded: Recorded[] = [];
       const aclCalls: Recorded[] = [];
@@ -642,8 +645,9 @@ setInterval(() => {}, 1000);
       daemons.push(daemon);
       await daemon.start();
 
-      const ghDir = path.join(workdir, "gh-config");
-      // Under the workdir (inherits the run's grant), never the worker's tmpdir.
+      const ghDir = path.join(path.dirname(workdir), "gh-config");
+      // In the run dir (inherits the run's grant), never in the clone and never
+      // the worker's tmpdir.
       expect(sink.env.GH_CONFIG_DIR).toBe(ghDir);
       const configFile = path.join(ghDir, "config.yml");
       expect(fs.readFileSync(configFile, "utf8")).toBe(
@@ -677,7 +681,7 @@ setInterval(() => {}, 1000);
         WORKER_AGENT_USER: "automata-agent",
         WORKER_WORKDIR_ROOT: root,
       });
-      const ghDir = path.join(workdir, "gh-config");
+      const ghDir = path.join(path.dirname(workdir), "gh-config");
       fs.mkdirSync(ghDir);
       fs.writeFileSync(path.join(ghDir, "hosts.yml"), "planted");
       fs.writeFileSync(path.join(ghDir, "config.yml"), "version: 1\n");
@@ -735,7 +739,9 @@ setInterval(() => {}, 1000);
       const ghDir = sink.env.GH_CONFIG_DIR ?? "";
       expect(path.dirname(ghDir)).toBe(os.tmpdir());
       expect(path.basename(ghDir)).toMatch(/^automata-gh-/);
-      expect(fs.existsSync(path.join(workdir, "gh-config"))).toBe(false);
+      expect(fs.existsSync(path.join(path.dirname(workdir), "gh-config"))).toBe(
+        false,
+      );
       expect(fs.readFileSync(path.join(ghDir, "config.yml"), "utf8")).toBe(
         `version: 1\nhttp_unix_socket: ${BROKER.ghSocketPath}\n`,
       );
@@ -754,8 +760,11 @@ setInterval(() => {}, 1000);
     // stops testing the path it thinks it does.
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "dpa-"));
     const scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-script-"));
-    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-wd-"));
-    tmpDirs.push(root, scriptDir, workdir);
+    // The clone sits in a run dir, beside gh-config/ and tmp/ (#302).
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-ace-wd-"));
+    const workdir = path.join(runDir, "repo");
+    fs.mkdirSync(workdir);
+    tmpDirs.push(root, scriptDir, runDir);
     const input: AgentRunInput = {
       threadId: `t_${Math.random().toString(36).slice(2, 8)}`,
       threadChatId: "tc_1",

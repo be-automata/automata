@@ -3,7 +3,7 @@ import path from "node:path";
 import { authFilePathForAgent } from "@terragon/agent/auth-file";
 import type { PulledAgentCredentials } from "./www-client";
 import { reapplyPathGrant } from "./agent-uid-fs";
-import { RUN_HOME_DIR } from "./run-owned-paths";
+import type { RunPaths } from "./run-owned-paths";
 import {
   seedBatteries,
   seedForegroundOnly,
@@ -149,7 +149,7 @@ async function seedWorkspaceTrust({
 export async function materialiseAgentCredentials({
   credentials,
   agent,
-  runRoot,
+  run,
   agentUser,
   seed,
   foregroundOnly = false,
@@ -157,7 +157,8 @@ export async function materialiseAgentCredentials({
 }: {
   credentials: PulledAgentCredentials;
   agent: string;
-  runRoot: string;
+  /** The run's paths: the HOME is created at `home`, `repo` is marked trusted. */
+  run: RunPaths;
   /**
    * The dedicated role account the agent child runs as, when agent-uid mode is
    * on. Empty/absent = default-off, and every grant below is a no-op.
@@ -170,14 +171,14 @@ export async function materialiseAgentCredentials({
   /** Test/override seam for seedBatteries; production passes only `log`. */
   batteries?: Omit<SeedBatteriesOptions, "agentUser">;
 }): Promise<MaterialisedCredentials> {
-  const home = path.join(runRoot, RUN_HOME_DIR);
+  const home = run.home;
   const users = agentUser ? [agentUser] : [];
   await fs.mkdir(home, { recursive: true, mode: 0o700 });
   // 0700 at creation zeroes the POSIX ACL mask on Linux, so the agent cannot
   // TRAVERSE its own HOME — and then every grant on the files inside is moot.
   // Restore the access entry; the inherited default ACL is untouched by mode.
   await reapplyPathGrant({ target: home, kind: "directory", users });
-  await seedWorkspaceTrust({ home, workdir: runRoot, agentUser });
+  await seedWorkspaceTrust({ home, workdir: run.repo, agentUser });
   // seedBatteries creates and grants `<home>/.claude` in both modes, so the
   // credential write below does not repeat that.
   const log = batteries?.log ?? console.log;

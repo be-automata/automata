@@ -1234,10 +1234,10 @@ still created before the deploy (step 2). Still run the schema gate before each 
   `finding-check-only` (no check appears within 10 minutes: the PR gets `needs-human-review` and a
   no-repo-CI note). The activity card shows the gate source per attempt.
 - The box is on the credential broker and was deployed before www (step 4).
-- Linux box: the post-agent `git clean -ffdxq` runs as the agent uid and must be able to delete the
-  run-owned `home/`, `gh-config/` and `tmp/` in the checkout. An ACL mask that blocks it fails every
-  check closed with `self-heal fix-check: clean of the checkout failed`, which shows in the journal
-  only. Verify it on the first live drill.
+- Linux box: the post-agent `git clean -ffdxq` runs as the agent uid. The run-owned `home/`,
+  `gh-config/`, `tmp/` and `fix-check/` sit beside the clone in `runs/<id>/` (#302), out of its
+  reach; anything it cannot delete inside `runs/<id>/repo` fails the check closed with
+  `self-heal fix-check: clean of the checkout failed`, which shows in the journal only.
 - No other automation or person pushes to `automata/fix-*` branches.
 - You know where Drain is, and the org kill switch is OFF but reachable.
 

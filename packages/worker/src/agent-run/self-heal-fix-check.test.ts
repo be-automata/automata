@@ -16,7 +16,6 @@ import {
   type RunAsAgent,
 } from "./agent-command";
 import {
-  FIX_CHECK_SCRATCH_DIR,
   hardenGitEnv,
   matchesDenyPath,
   MAX_REPORTED_DENIED_PATHS,
@@ -167,13 +166,11 @@ describe("runFixCheck (GATE-01, R1)", () => {
     }
   });
 
-  it("git clean runs with -ffdx (ignored files and nested repos go too), keeps the run-owned dirs, no arguments", async () => {
+  it("git clean runs with -ffdx (ignored files and nested repos go too), no keep-backs, no arguments", async () => {
     const { run, calls } = harness();
     await runFixCheck(args(run));
     const clean = calls.find((c) => stepOf(c.script) === "clean")!;
-    expect(clean.script).toBe(
-      "git clean -ffdxq -e /home/ -e /gh-config/ -e /tmp/",
-    );
+    expect(clean.script).toBe("git clean -ffdxq");
     expect(clean.args).toEqual([]);
     const checkout = calls.find((c) => stepOf(c.script) === "checkout")!;
     expect(checkout.script).toBe('git checkout --quiet --force --detach "$1"');
@@ -279,8 +276,9 @@ describe("runFixCheck (GATE-01, R1)", () => {
       expect(call.env.GIT_CONFIG_KEY_2).toBe("core.fsmonitor");
     }
     const check = calls.find((c) => stepOf(c.script) === "check")!;
-    expect(check.env.HOME).toBe(`/w/${FIX_CHECK_SCRATCH_DIR}/home`);
-    expect(check.env.TMPDIR).toBe(`/w/${FIX_CHECK_SCRATCH_DIR}/tmp`);
+    // Beside the clone, in the run dir — never in the checkout (#302).
+    expect(check.env.HOME).toBe("/fix-check/home");
+    expect(check.env.TMPDIR).toBe("/fix-check/tmp");
   });
 
   it("a failing check → completed + fail; no checks at all → error (never a pass)", async () => {
@@ -539,7 +537,9 @@ describe("runFixCheck against a real git checkout (as the current user)", () => 
   }
 
   function repo(): { dir: string; base: string; pushed: string } {
-    const dir = mkdtempSync(join(tmpdir(), "fix-check-"));
+    // A run dir with the clone at repo/, as provisionWorkdir lays it out.
+    const dir = join(mkdtempSync(join(tmpdir(), "fix-check-")), "repo");
+    mkdirSync(dir);
     git(dir, "init", "-q", "-b", "main");
     writeFileSync(join(dir, ".gitignore"), "dist/\n");
     writeFileSync(join(dir, "README.md"), "hi\n");
@@ -570,10 +570,10 @@ describe("runFixCheck against a real git checkout (as the current user)", () => 
     mkdirSync(join(dir, "nested"));
     git(join(dir, "nested"), "init", "-q");
     writeFileSync(join(dir, "README.md"), "dirty\n");
-    for (const owned of ["home", "gh-config", "tmp"]) {
-      mkdirSync(join(dir, owned));
-      writeFileSync(join(dir, owned, "keep"), "run-owned\n");
-    }
+    // The run's own dirs live beside the clone now (#302), so a `home/` in
+    // the clone is just something the agent planted.
+    mkdirSync(join(dir, "home"));
+    writeFileSync(join(dir, "home", "planted"), "agent\n");
 
     const report = await runFixCheck({
       fix: FIX,
@@ -593,11 +593,7 @@ describe("runFixCheck against a real git checkout (as the current user)", () => 
     });
     expect(existsSync(join(dir, "dist"))).toBe(false);
     expect(existsSync(join(dir, "nested"))).toBe(false);
-    // The worker's run-owned dirs survive the clean (the agent uid cannot
-    // delete them on Linux, and the run HOME is still in use).
-    for (const owned of ["home", "gh-config", "tmp"]) {
-      expect(existsSync(join(dir, owned, "keep"))).toBe(true);
-    }
+    expect(existsSync(join(dir, "home"))).toBe(false);
     expect(git(dir, "rev-parse", "HEAD")).toBe(pushed);
   });
 
