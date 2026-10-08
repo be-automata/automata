@@ -14,6 +14,35 @@ import type {
 } from "./types";
 
 /**
+ * The Bash tool's timeouts for every non-review run, in every sandbox provider
+ * (#302). The CLI clamps a requested timeout to max(BASH_MAX_TIMEOUT_MS,
+ * BASH_DEFAULT_TIMEOUT_MS) and its default is 120s, so the old 60000 capped a
+ * task agent's `pnpm test` or hooked `git push` at 2 minutes however long it
+ * asked for, then moved the command to the background — which the
+ * foreground-only hook makes the agent poll by hand. The default is raised as
+ * well, so a command the agent gives no timeout (a `git push` whose pre-push
+ * hook runs the suite) is not cut either. Reviews keep theirs: classic stays
+ * 60000 with the CLI default, orchestrated takes the payload's.
+ */
+export const TASK_BASH_MAX_TIMEOUT_MS = 10 * 60 * 1000;
+export const TASK_BASH_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+
+function bashTimeoutEnv(ctx: PrepareEnvContext): Record<string, string> {
+  if (ctx.orchestratedReview) {
+    return {
+      BASH_MAX_TIMEOUT_MS: String(ctx.orchestratedReview.commandTimeoutMs),
+    };
+  }
+  if (ctx.permissionMode === "review") {
+    return { BASH_MAX_TIMEOUT_MS: String(60 * 1000) };
+  }
+  return {
+    BASH_MAX_TIMEOUT_MS: String(TASK_BASH_MAX_TIMEOUT_MS),
+    BASH_DEFAULT_TIMEOUT_MS: String(TASK_BASH_DEFAULT_TIMEOUT_MS),
+  };
+}
+
+/**
  * Thin façade over `claude.ts`'s `claudeCommand` / `getAnthropicApiKeyOrNull`.
  * No logic moves except the `reviewPolicyArgs()` extraction already made in
  * `claude.ts` (#75 AC4) — `claudeCommand` still builds the review branch by
@@ -22,7 +51,7 @@ import type {
  *
  * Phase 5: an orchestrated review run (the daemon-resolved
  * `orchestratedReview`) gets the D2 policy from `claudeCommand` and its
- * payload `BASH_MAX_TIMEOUT_MS`; every other run is byte-identical to before.
+ * payload `BASH_MAX_TIMEOUT_MS`; a non-review run gets the task timeouts.
  * The line parser also holds results after a lead background sub-agent
  * (result-hold.ts).
  */
@@ -38,9 +67,7 @@ export const claudeAdapter: HarnessAdapter = {
       ANTHROPIC_API_KEY: ctx.useCredits
         ? ""
         : getAnthropicApiKeyOrNull(ctx.runtime),
-      BASH_MAX_TIMEOUT_MS: ctx.orchestratedReview
-        ? String(ctx.orchestratedReview.commandTimeoutMs)
-        : (60 * 1000).toString(),
+      ...bashTimeoutEnv(ctx),
       ...(ctx.useCredits
         ? {
             ANTHROPIC_BASE_URL: `${ctx.normalizedUrl}/api/proxy/anthropic`,

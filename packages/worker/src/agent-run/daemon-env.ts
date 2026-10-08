@@ -205,7 +205,8 @@ export interface BuildDaemonEnvOpts {
    */
   agentUser?: string;
   /**
-   * The run's own TMPDIR (inside the workdir, so it inherits the run's ACE).
+   * The run's own TMPDIR (in the run dir beside the clone, so it inherits the
+   * run's ACE).
    * Only consulted when `agentUser` is set.
    */
   runTmpDir?: string | null;

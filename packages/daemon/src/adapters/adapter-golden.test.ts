@@ -126,7 +126,9 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
       // vitest.config.ts sets ANTHROPIC_API_KEY="test-api-key-from-env";
       // execSync stub returns "NOT_EXISTS" so getAnthropicApiKeyOrNull falls
       // back to it exactly as daemon.ts:666-687 does.
-      expect(env).toEqual(expectedClaudeEnvNoCredits("test-api-key-from-env"));
+      expect(env).toEqual(
+        expectedClaudeEnvNoCredits("test-api-key-from-env", "task"),
+      );
     });
 
     it("prepareEnv with useCredits matches expectedClaudeEnvWithCredits (blanked key + proxy vars)", () => {
@@ -136,7 +138,7 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
         token: TOKEN,
         normalizedUrl: NORMALIZED_URL,
       });
-      expect(env).toEqual(expectedClaudeEnvWithCredits());
+      expect(env).toEqual(expectedClaudeEnvWithCredits("task"));
     });
 
     it("prepareEnv for an orchestrated review run takes BASH_MAX_TIMEOUT_MS from the payload (Phase 5)", () => {
@@ -153,9 +155,14 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
       );
     });
 
-    it.each(["review", "allowAll", "plan", undefined] as const)(
-      "prepareEnv(permissionMode=%s) without orchestratedReview keeps BASH_MAX_TIMEOUT_MS 60000 (classic golden)",
-      (permissionMode) => {
+    it.each([
+      ["review", "review"],
+      ["allowAll", "task"],
+      ["plan", "task"],
+      [undefined, "task"],
+    ] as const)(
+      "prepareEnv(permissionMode=%s) without orchestratedReview: %s Bash timeouts (classic review keeps 60000; #302 lifts every other run)",
+      (permissionMode, lane) => {
         const env = claudeAdapter.prepareEnv({
           runtime: fakeRuntime(),
           useCredits: false,
@@ -164,7 +171,7 @@ describe("adapter-golden (#75, part b) — façades reproduce today's exact outp
           permissionMode,
         });
         expect(env).toEqual(
-          expectedClaudeEnvNoCredits("test-api-key-from-env"),
+          expectedClaudeEnvNoCredits("test-api-key-from-env", lane),
         );
       },
     );

@@ -6,6 +6,7 @@ import { inspect, promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { INHERITABLE_ACE_RIGHTS } from "./agent-uid-fs";
 import { ensureBaseDiffable, gitExec, provisionWorkdir } from "./provision";
+import type { RunPaths } from "./run-owned-paths";
 
 const execFileAsync = promisify(execFile);
 
@@ -265,7 +266,7 @@ describe("provisionWorkdir — a real clone with agentUser set", () => {
 
   it("clones successfully — the run's tmp/ must not pre-empty the destination", async () => {
     const aceCalls: string[][] = [];
-    const workdir = await provisionWorkdir({
+    const run = await provisionWorkdir({
       repoFullName: "irrelevant/local",
       branch: "main",
       installationToken: "unused-for-a-local-remote",
@@ -286,11 +287,15 @@ describe("provisionWorkdir — a real clone with agentUser set", () => {
 
     // the clone actually produced a working tree
     await expect(
-      fs.readFile(path.join(workdir, "app.txt"), "utf8"),
+      fs.readFile(path.join(run.repo, "app.txt"), "utf8"),
     ).resolves.toBe("hello\n");
-    // ...and the run's TMPDIR still exists afterwards
-    const tmpStat = await fs.stat(path.join(workdir, "tmp"));
+    // ...and the run's TMPDIR exists beside it, not in it (#302)
+    const tmpStat = await fs.stat(run.tmp);
     expect(tmpStat.isDirectory()).toBe(true);
+    expect(await fs.readdir(run.runDir)).toEqual(
+      expect.arrayContaining(["repo", "tmp"]),
+    );
+    await expect(fs.stat(path.join(run.repo, "tmp"))).rejects.toThrow();
     // The ACE assertions are darwin-only: applyAces is a hard no-op elsewhere
     // (agent-uid-fs.ts) and provisionWorkdir passes no platform override, so
     // aceCalls stays empty on Linux. The CLONE behaviour above is the point of
@@ -344,8 +349,8 @@ describe("provisionWorkdir — a task run's work branch", () => {
       ])
     ).stdout.trim();
 
-  const provision = (runId: string, workBranch?: string) =>
-    provisionWorkdir({
+  const provision = async (runId: string, workBranch?: string) => {
+    const run = await provisionWorkdir({
       repoFullName: "irrelevant/local",
       branch: "main",
       workBranch,
@@ -354,6 +359,8 @@ describe("provisionWorkdir — a task run's work branch", () => {
       runId,
       runGit: localGit,
     });
+    return run.repo;
+  };
 
   it("checks the work branch out from the cloned base, so the agent never commits on it", async () => {
     const workdir = await provision("thr_work", "automata/task-abcdef12");
@@ -453,7 +460,7 @@ describe("provisionWorkdir — a stale workdir is renamed, never removed in plac
     await fs.mkdir(path.join(stale, "deep", "nested"), { recursive: true });
     await fs.writeFile(path.join(stale, "deep", "nested", "leftover"), "x");
 
-    const workdir = await provisionWorkdir({
+    const run = await provisionWorkdir({
       repoFullName: "o/r",
       branch: "main",
       installationToken: "ghs_x",
@@ -462,7 +469,7 @@ describe("provisionWorkdir — a stale workdir is renamed, never removed in plac
       ...noop,
     });
 
-    expect(workdir).toBe(stale);
+    expect(run.runDir).toBe(stale);
     // The residue must not be visible to the new run under the real path.
     await expect(
       fs.stat(path.join(stale, "deep", "nested", "leftover")),
@@ -525,7 +532,7 @@ describe("provisionWorkdir — a stale workdir is renamed, never removed in plac
         fs.rm(stale, { recursive: true, force: true }),
       ).rejects.toThrow();
 
-      const workdir = await provisionWorkdir({
+      const run = await provisionWorkdir({
         repoFullName: "o/r",
         branch: "main",
         installationToken: "ghs_x",
@@ -533,9 +540,11 @@ describe("provisionWorkdir — a stale workdir is renamed, never removed in plac
         runId: "thr_locked",
         ...noop,
       });
-      expect(workdir).toBe(stale);
-      // A fresh, empty directory — the residue went to a tombstone.
-      expect(await fs.readdir(workdir)).toEqual([]);
+      expect(run.runDir).toBe(stale);
+      // A fresh run dir — the residue went to a tombstone; only the (empty,
+      // fake-cloned) repo dir is in it.
+      expect(await fs.readdir(run.runDir)).toEqual(["repo"]);
+      expect(await fs.readdir(run.repo)).toEqual([]);
     } finally {
       for (const e of await fs.readdir(root).catch(() => [])) {
         await fs.chmod(path.join(root, e, "locked"), 0o700).catch(() => {});
@@ -544,7 +553,7 @@ describe("provisionWorkdir — a stale workdir is renamed, never removed in plac
   });
 
   it("provisions normally when there is no residue at all", async () => {
-    const workdir = await provisionWorkdir({
+    const run = await provisionWorkdir({
       repoFullName: "o/r",
       branch: "main",
       installationToken: "ghs_x",
@@ -552,13 +561,14 @@ describe("provisionWorkdir — a stale workdir is renamed, never removed in plac
       runId: "thr_3",
       ...noop,
     });
-    expect(workdir).toBe(path.join(root, "thr_3"));
-    await expect(fs.stat(workdir)).resolves.toBeTruthy();
+    expect(run.runDir).toBe(path.join(root, "thr_3"));
+    expect(run.repo).toBe(path.join(root, "thr_3", "repo"));
+    await expect(fs.stat(run.repo)).resolves.toBeTruthy();
   });
 });
 
 /**
- * LINUX ACL MASK TRAP on the run's TMPDIR. `<workdir>/tmp` is created 0700, and
+ * LINUX ACL MASK TRAP on the run's TMPDIR. `<runDir>/tmp` is created 0700, and
  * on Linux a 0700 creation mode zeroes the POSIX ACL mask — the grant inherited
  * from the workdir's default ACL is born `#effective:---`, so the agent cannot
  * use its own TMPDIR. The run HOME and gh-config re-grant after mkdir for the
@@ -577,9 +587,9 @@ describe("provisionWorkdir — the run TMPDIR is re-granted on Linux", () => {
   async function provisionOn(
     platform: NodeJS.Platform,
     agentUser: string,
-  ): Promise<{ calls: string[][]; workdir: string }> {
+  ): Promise<{ calls: string[][]; run: RunPaths }> {
     const calls: string[][] = [];
-    const workdir = await provisionWorkdir({
+    const run = await provisionWorkdir({
       repoFullName: "o/r",
       branch: "main",
       installationToken: "t",
@@ -596,12 +606,12 @@ describe("provisionWorkdir — the run TMPDIR is re-granted on Linux", () => {
         return { stdout: "", stderr: "" };
       },
     });
-    return { calls, workdir };
+    return { calls, run };
   }
 
   it("restores the agent's access entry on tmp AFTER creating it", async () => {
-    const { calls, workdir } = await provisionOn("linux", "automata-agent");
-    const tmp = path.join(workdir, "tmp");
+    const { calls, run } = await provisionOn("linux", "automata-agent");
+    const tmp = run.tmp;
     const regrant = calls.findIndex(
       (c) =>
         c[0] === "/usr/bin/setfacl" &&
@@ -614,8 +624,8 @@ describe("provisionWorkdir — the run TMPDIR is re-granted on Linux", () => {
   });
 
   it("no re-grant on macOS (the inherited ACE survives the mode)", async () => {
-    const { calls, workdir } = await provisionOn("darwin", "automata-agent");
-    const tmp = path.join(workdir, "tmp");
+    const { calls, run } = await provisionOn("darwin", "automata-agent");
+    const tmp = run.tmp;
     expect(calls.some((c) => c.includes(tmp))).toBe(false);
   });
 
@@ -625,7 +635,7 @@ describe("provisionWorkdir — the run TMPDIR is re-granted on Linux", () => {
   });
 });
 
-describe("provisionWorkdir — run-owned dirs are excluded from git", () => {
+describe("provisionWorkdir — run-owned dirs sit outside the checkout (#302)", () => {
   let root: string;
   let origin: string;
 
@@ -650,9 +660,9 @@ describe("provisionWorkdir — run-owned dirs are excluded from git", () => {
     ["default mode", ""],
     ["agent-uid mode", "_automata-agent"],
   ])(
-    "%s: home/, gh-config/ and tmp/ never show as untracked",
+    "%s: home/, gh-config/ and tmp/ are not in the clone at all",
     async (_label, agentUser) => {
-      const workdir = await provisionWorkdir({
+      const run = await provisionWorkdir({
         repoFullName: "irrelevant/local",
         branch: "main",
         installationToken: "unused",
@@ -669,20 +679,24 @@ describe("provisionWorkdir — run-owned dirs are excluded from git", () => {
           ),
       });
       // What the worker creates after provisioning (HOME, gh-config) plus tmp.
-      for (const name of ["home", "gh-config", "tmp"]) {
-        await fs.mkdir(path.join(workdir, name, ".claude"), {
-          recursive: true,
-        });
-        await fs.writeFile(path.join(workdir, name, ".claude", "f"), "x");
+      for (const dir of [run.home, run.ghConfig, run.tmp]) {
+        await fs.mkdir(path.join(dir, ".claude"), { recursive: true });
+        await fs.writeFile(path.join(dir, ".claude", "f"), "x");
       }
       const { stdout } = await execFileAsync("git", [
         "-C",
-        workdir,
+        run.repo,
         "status",
         "--porcelain",
         "--untracked-files=all",
+        "--ignored",
       ]);
+      // Not even as ignored entries: a tool that walks `.` (eslint, a test
+      // runner) cannot reach them, whatever it thinks of git's ignore rules.
       expect(stdout).toBe("");
+      for (const name of ["home", "gh-config", "tmp"]) {
+        await expect(fs.stat(path.join(run.repo, name))).rejects.toThrow();
+      }
     },
   );
 });

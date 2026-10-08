@@ -11,7 +11,7 @@ import {
   reapplyPathGrant,
   type AceExec,
 } from "./agent-uid-fs";
-import { excludeRunOwnedPaths, RUN_TMP_DIR } from "./run-owned-paths";
+import { runPaths, type RunPaths } from "./run-owned-paths";
 import { buildHandBackInvocation, type Invocation } from "./spawn-as-user";
 
 const execFileAsync = promisify(execFile);
@@ -83,7 +83,7 @@ async function sweepTombstones(workdirRoot: string): Promise<void> {
  * installation token (ADR-003 provision step). The token authenticates via a
  * command-scoped `http.extraHeader` (base64 Basic) rather than being embedded in
  * the remote URL: URL-embedded credentials get persisted into .git/config on disk,
- * the header form does not. Returns the absolute workdir path.
+ * the header form does not. Returns the run's paths; the clone is `repo`.
  */
 export async function provisionWorkdir({
   repoFullName,
@@ -135,8 +135,9 @@ export async function provisionWorkdir({
   platform?: NodeJS.Platform;
   /** Injectable git runner (tests only) — defaults to the real gitExec. */
   runGit?: typeof gitExec;
-}): Promise<string> {
-  const workdir = path.join(workdirRoot, runId);
+}): Promise<RunPaths> {
+  const paths = runPaths(path.join(workdirRoot, runId));
+  const { runDir } = paths;
 
   // Clear residue from a PRIOR attempt of this same runId — by RENAME, never by
   // removing in place.
@@ -159,11 +160,11 @@ export async function provisionWorkdir({
   // always starts on a clean path. The tombstone is then removed best-effort: if
   // a live escapee still holds it, the removal fails, the tombstone remains, and
   // the NEXT run sweeps it — a bounded, visible residue instead of a failed run.
-  const stale = await fs.stat(workdir).catch(() => null);
+  const stale = await fs.stat(runDir).catch(() => null);
   if (stale) {
-    const tombstone = `${workdir}${TOMBSTONE_SUFFIX}${Date.now()}`;
+    const tombstone = `${runDir}${TOMBSTONE_SUFFIX}${Date.now()}`;
     try {
-      await fs.rename(workdir, tombstone);
+      await fs.rename(runDir, tombstone);
       await fs.rm(tombstone, { recursive: true, force: true }).catch(() => {});
     } catch {
       // The rename itself can fail where the stale directory is unwritable:
@@ -172,12 +173,12 @@ export async function provisionWorkdir({
       // problem, not the redelivery race this guards, and it deserves to
       // surface with its own error rather than be papered over — so fall back
       // to the original in-place removal and let it throw.
-      await fs.rm(workdir, { recursive: true, force: true });
+      await fs.rm(runDir, { recursive: true, force: true });
     }
   }
   await sweepTombstones(workdirRoot);
 
-  await fs.mkdir(workdir, { recursive: true });
+  await fs.mkdir(runDir, { recursive: true });
 
   // #108: open THIS run's dir to the agent uid, and the shared root by traverse
   // ONLY (namei needs search on every component; an inheritable ACE on the root
@@ -203,12 +204,21 @@ export async function provisionWorkdir({
     // Observed on the pilot box: `.claude/projects/...` left undeletable after
     // an otherwise-successful review run.
     await applyInheritableAces({
-      dir: workdir,
+      dir: runDir,
       users: [agentUser, workerLogin],
       exec: aceExec,
       platform,
     });
   }
+
+  // The clone goes in `<runDir>/repo`, beside the run's HOME, gh-config and
+  // tmp (#302). Created HERE, not by `git clone`: under the run dir's default
+  // ACL a directory's POSIX mask comes from its creation mode, and git creates
+  // the destination 0755 — `r-x` would deny the agent writes at the repo root.
+  // mkdir's default 0777 keeps the mask `rwx`, exactly as the run dir had it
+  // when it was the clone. git clone accepts an existing EMPTY destination.
+  const workdir = paths.repo;
+  await fs.mkdir(workdir);
 
   const authHeader = `AUTHORIZATION: basic ${Buffer.from(
     `x-access-token:${installationToken}`,
@@ -294,12 +304,12 @@ export async function provisionWorkdir({
   // fake `runGit`, so the real emptiness rule was never exercised.
   //
   // Creating it here still inherits the ACE: macOS applies inheritance at
-  // create time, and the grant is already on `workdir`.
+  // create time, and the grant is already on the run dir.
   if (agentUser) {
-    const tmp = path.join(workdir, RUN_TMP_DIR);
+    const tmp = paths.tmp;
     await fs.mkdir(tmp, { recursive: true, mode: 0o700 });
     // LINUX: the 0700 creation mode zeroes the POSIX ACL mask, so the grant
-    // inherited from the workdir's default ACL is born `#effective:---` and
+    // inherited from the run dir's default ACL is born `#effective:---` and
     // the agent cannot use its own TMPDIR. Same trap, same remedy as the run
     // HOME (agent-credentials.ts) and gh-config. No-op on macOS.
     await reapplyPathGrant({
@@ -311,11 +321,7 @@ export async function provisionWorkdir({
     });
   }
 
-  // The worker's run-owned dirs (HOME, gh-config, tmp) live inside the clone;
-  // keep them out of the agent's `git status` / `git add -A`.
-  await excludeRunOwnedPaths(workdir);
-
-  return workdir;
+  return paths;
 }
 
 /**
@@ -482,31 +488,31 @@ async function handBackAgentFiles(
 }
 
 /**
- * Remove a run's workdir. Best-effort — a cleanup failure must not fail the
- * run, so this never throws; but it is no longer SILENT: a workdir that
- * survives the rm is logged once, with the errno. Resolves true when the
- * workdir is gone.
+ * Remove a run's dir — the clone and the HOME, gh-config and tmp beside it.
+ * Best-effort — a cleanup failure must not fail the run, so this never throws;
+ * but it is no longer SILENT: a run dir that survives the rm is logged once,
+ * with the errno. Resolves true when the run dir is gone.
  *
  * In agent-uid mode on Linux the agent first hands its files back (see
  * HAND_BACK_SCRIPT). Without that step every run's HOME — session keys
  * included — outlived the run, and the swallowed EACCES hid it for a week.
  */
 export async function cleanupWorkdir(
-  workdir: string,
+  runDir: string,
   opts: CleanupWorkdirOpts = {},
 ): Promise<boolean> {
   const log = opts.log ?? ((line: string) => console.warn(line));
-  await handBackAgentFiles(workdir, opts, log);
+  await handBackAgentFiles(runDir, opts, log);
   let rmError: unknown = null;
   try {
-    await fs.rm(workdir, { recursive: true, force: true });
+    await fs.rm(runDir, { recursive: true, force: true });
   } catch (e) {
     rmError = e;
   }
-  if (!(await fs.lstat(workdir).catch(() => null))) return true;
+  if (!(await fs.lstat(runDir).catch(() => null))) return true;
   const code = (rmError as { code?: unknown } | null)?.code;
   log(
-    `workdir cleanup incomplete: ${workdir} (${
+    `workdir cleanup incomplete: ${runDir} (${
       typeof code === "string"
         ? code
         : rmError

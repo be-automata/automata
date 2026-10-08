@@ -34,19 +34,31 @@ export const REVIEW_POLICY_JOINED =
 export const ORCHESTRATED_REVIEW_POLICY_JOINED =
   "--permission-mode default --allowedTools Read Grep Glob Bash Agent Task Skill --disallowedTools 'Bash(gh:*)' 'Bash(git push:*)' Write Edit WebFetch WebSearch --setting-sources user";
 
+/**
+ * A classic review run keeps BASH_MAX_TIMEOUT_MS 60000 and the CLI's default;
+ * every non-review run gets the task timeouts (#302).
+ */
+export type ClaudeEnvLane = "review" | "task";
+
+function expectedBashTimeouts(lane: ClaudeEnvLane): Record<string, string> {
+  return lane === "review"
+    ? { BASH_MAX_TIMEOUT_MS: "60000" }
+    : { BASH_MAX_TIMEOUT_MS: "600000", BASH_DEFAULT_TIMEOUT_MS: "300000" };
+}
+
 export function expectedClaudeEnvNoCredits(
   anthropicApiKey: string,
+  lane: ClaudeEnvLane,
 ): Record<string, string> {
   return {
     ANTHROPIC_API_KEY: anthropicApiKey,
-    BASH_MAX_TIMEOUT_MS: "60000",
+    ...expectedBashTimeouts(lane),
   };
 }
 
 /**
  * Phase 5: an ORCHESTRATED review run's env — the no-credits golden with
- * BASH_MAX_TIMEOUT_MS taken from the payload's commandTimeoutMs. Every other
- * combination keeps "60000" (the goldens above).
+ * BASH_MAX_TIMEOUT_MS taken from the payload's commandTimeoutMs.
  */
 export function expectedClaudeEnvOrchestratedReview(
   anthropicApiKey: string,
@@ -58,10 +70,12 @@ export function expectedClaudeEnvOrchestratedReview(
   };
 }
 
-export function expectedClaudeEnvWithCredits(): Record<string, string> {
+export function expectedClaudeEnvWithCredits(
+  lane: ClaudeEnvLane,
+): Record<string, string> {
   return {
     ANTHROPIC_API_KEY: "",
-    BASH_MAX_TIMEOUT_MS: "60000",
+    ...expectedBashTimeouts(lane),
     ANTHROPIC_BASE_URL: `${NORMALIZED_URL}/api/proxy/anthropic`,
     ANTHROPIC_AUTH_TOKEN: TOKEN,
   };

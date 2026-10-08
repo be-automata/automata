@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import path from "node:path";
 import { hatchet } from "../hatchet-client";
 import {
   AGENT_RUN_VARIANTS,
@@ -61,7 +60,7 @@ import {
 import { startGitBroker, type GitBroker } from "./git-broker";
 import { startGhBroker, type GhBroker } from "./gh-broker";
 import { buildRunProxyEnv, type BrokerHandoff } from "./daemon-env";
-import { RUN_HOME_DIR, RUN_TMP_DIR } from "./run-owned-paths";
+import { runPathsForRepo } from "./run-owned-paths";
 import {
   ensureRunNamespace,
   getProcessWorkerId,
@@ -530,11 +529,12 @@ export async function runSelfHealAuditStep({
         const value = process.env[key];
         if (value !== undefined) env[key] = value;
       }
-      env.HOME = path.join(workdir, RUN_HOME_DIR);
+      const run = runPathsForRepo(workdir);
+      env.HOME = run.home;
       if (agentUser) {
         env.USER = agentUser;
         env.LOGNAME = agentUser;
-        env.TMPDIR = path.join(workdir, RUN_TMP_DIR);
+        env.TMPDIR = run.tmp;
         env.GIT_CONFIG_COUNT = "1";
         env.GIT_CONFIG_KEY_0 = "safe.directory";
         env.GIT_CONFIG_VALUE_0 = workdir;
@@ -852,7 +852,7 @@ async function runAgentInner(
   // Provision: clone into a per-run workdir keyed on threadId. threadId is unique
   // per thread; threadChatId is the shared legacy sentinel when
   // enableThreadChatCreation is off, so it would collide every run onto one dir.
-  const workdir = await provisionWorkdir({
+  const run = await provisionWorkdir({
     repoFullName: input.repoFullName,
     branch: input.branch,
     baseBranch: input.baseBranch,
@@ -863,6 +863,7 @@ async function runAgentInner(
     // #108: empty (the default) ⇒ no ACLs are touched at all.
     agentUser: config.agentUser,
   });
+  const workdir = run.repo;
   step(
     `clone complete: ${input.repoFullName}@${input.branch}` +
       (input.baseBranch ? ` (base ${input.baseBranch} fetched)` : "") +
@@ -1010,7 +1011,7 @@ async function runAgentInner(
     materialised = await materialiseAgentCredentials({
       credentials: pulled.credentials,
       agent: pulled.agent,
-      runRoot: workdir,
+      run,
       agentUser: config.agentUser,
       seed: batterySeed,
       foregroundOnly,
@@ -1018,7 +1019,7 @@ async function runAgentInner(
     });
   } catch (err) {
     await boxLock?.release();
-    await cleanupWorkdir(workdir, workdirCleanup);
+    await cleanupWorkdir(run.runDir, workdirCleanup);
     throw err;
   }
   // #209 item 1: capture WHICH credential path this run took, once, here —
@@ -1096,7 +1097,7 @@ async function runAgentInner(
       await closeQuietly(egressEvents);
       await materialised.cleanup();
       await boxLock?.release();
-      await cleanupWorkdir(workdir, workdirCleanup);
+      await cleanupWorkdir(run.runDir, workdirCleanup);
       throw err;
     }
     step(
@@ -1152,7 +1153,7 @@ async function runAgentInner(
       await closeQuietly(egressEvents);
       await materialised.cleanup();
       await boxLock?.release();
-      await cleanupWorkdir(workdir, workdirCleanup);
+      await cleanupWorkdir(run.runDir, workdirCleanup);
       throw err;
     }
     step(
@@ -1353,7 +1354,7 @@ async function runAgentInner(
     // Wipe the delivered credential before the workdir goes, so a cleanup
     // failure on the workdir can never leave a live token behind.
     await materialised.cleanup();
-    await cleanupWorkdir(workdir, workdirCleanup);
+    await cleanupWorkdir(run.runDir, workdirCleanup);
     // The box lock goes last (ADR-007 I2): the next run may start only once
     // this one's daemon is dead and its disk footprint is gone.
     await boxLock?.release();

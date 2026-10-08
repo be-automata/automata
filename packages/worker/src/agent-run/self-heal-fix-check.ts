@@ -2,7 +2,7 @@ import path from "node:path";
 
 import type { RunAsAgent } from "./agent-command";
 import { gitExec } from "./provision";
-import { RUN_OWNED_DIRS } from "./run-owned-paths";
+import { runPathsForRepo } from "./run-owned-paths";
 import { runSelfHealChecks } from "./self-heal-checks";
 import type { SelfHealRunShape } from "./types";
 
@@ -130,8 +130,6 @@ const MAX_REPORTED_PATH_LENGTH = 300;
 export const FIX_CHECK_BUDGET_MS = 180_000;
 /** Per git step; the whole check is still bounded by the deadline. */
 const GIT_STEP_TIMEOUT_MS = 30_000;
-/** Fresh HOME/TMPDIR for the check, created after the clean (agent-free). */
-export const FIX_CHECK_SCRATCH_DIR = ".automata-fix-check";
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
 
@@ -145,13 +143,14 @@ const GUARD_SCRIPT =
 const CAT_FILE_SCRIPT = 'git cat-file -e "$1^{commit}"';
 const CHECKOUT_SCRIPT = 'git checkout --quiet --force --detach "$1"';
 // -ff: an untracked nested repository is removed too (one -f skips it).
-// -x: ignored files the agent planted are removed as well.
-// -x ignores info/exclude, so the worker's run-owned dirs (the run HOME with its
-// credential, gh-config, tmp) are kept back with -e, which -x still honours: the
-// agent uid cannot delete them on Linux (worker-owned), and deleting them would
-// tear the run's own HOME away mid-run. They are not repository content.
-const CLEAN_SCRIPT = `git clean -ffdxq ${RUN_OWNED_DIRS.map((d) => `-e /${d}/`).join(" ")}`;
-const SCRATCH_SCRIPT = `mkdir -m 700 ${FIX_CHECK_SCRATCH_DIR} && mkdir -m 700 ${FIX_CHECK_SCRATCH_DIR}/home ${FIX_CHECK_SCRATCH_DIR}/tmp`;
+// -x: ignored files the agent planted are removed as well. The worker's
+// run-owned dirs (the run HOME with its credential, gh-config, tmp) sit beside
+// the clone, not in it (run-owned-paths.ts), so nothing here can reach them.
+const CLEAN_SCRIPT = "git clean -ffdxq";
+// Fresh HOME/TMPDIR for the checks, created after the clean (agent-free), in
+// the run dir beside the clone (#302): inside it, a check that walks `.`
+// (`eslint .`) would lint the scratch HOME and fail the fix for nothing.
+const SCRATCH_SCRIPT = 'mkdir -m 700 "$1" && mkdir -m 700 "$1/home" "$1/tmp"';
 const MERGE_BASE_SCRIPT = 'git merge-base "$2" "$1"';
 // --no-renames: a rename out of a denied path must list the denied side too.
 const DIFF_SCRIPT = 'git diff --no-renames --name-only -z "$2" "$1"';
@@ -278,12 +277,13 @@ export async function runFixCheck(
   const ok = (r: Awaited<ReturnType<RunAsAgent>>): boolean =>
     !r.timedOut && !r.truncated && r.exitCode === 0;
 
+  const scratch = runPathsForRepo(args.workdir).fixCheck;
   try {
     const steps: Array<[string, string[], string]> = [
       [CAT_FILE_SCRIPT, [headSha], "pushed commit is not in the checkout"],
       [CHECKOUT_SCRIPT, [headSha], "checkout of the pushed commit failed"],
       [CLEAN_SCRIPT, [], "clean of the checkout failed"],
-      [SCRATCH_SCRIPT, [], "scratch HOME could not be created"],
+      [SCRATCH_SCRIPT, [scratch], "scratch HOME could not be created"],
     ];
     let early = stop();
     if (early) return early;
@@ -328,7 +328,6 @@ export async function runFixCheck(
     );
 
     if (args.signal?.aborted) return failed("aborted");
-    const scratch = path.join(args.workdir, FIX_CHECK_SCRATCH_DIR);
     const checkEnv: NodeJS.ProcessEnv = {
       ...env,
       HOME: path.join(scratch, "home"),
