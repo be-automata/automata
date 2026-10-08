@@ -138,7 +138,7 @@ describe("handleDaemonEvent for sandbox-less remote threads", () => {
 
     expect(openRemoteTaskPullRequest).toHaveBeenCalledTimes(1);
     expect(openRemoteTaskPullRequest).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: user.id, threadId }),
+      expect.objectContaining({ userId: user.id, threadId, threadChatId }),
     );
   });
 

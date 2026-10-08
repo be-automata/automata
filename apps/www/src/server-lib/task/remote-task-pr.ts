@@ -3,12 +3,18 @@ import type { Octokit } from "octokit";
 import type { DB } from "@terragon/shared/db";
 import { getGithubPRStatus } from "@terragon/shared/github-api/helpers";
 import { upsertGithubPR } from "@terragon/shared/model/github";
-import { getThread, updateThread } from "@terragon/shared/model/threads";
+import {
+  getThread,
+  getThreadChat,
+  updateThread,
+} from "@terragon/shared/model/threads";
 import { getUserSettings } from "@terragon/shared/model/user";
 import { publicAppUrl } from "@terragon/env/next-public";
 
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import { generatePRContent } from "@/server-lib/generate-pr-content";
+
+import { type AgentPrContent, parseAgentPrContent } from "./agent-pr-content";
 
 /**
  * Remote-plane task runs (manual, scheduled, mention) have no control-plane
@@ -23,7 +29,9 @@ import { generatePRContent } from "@/server-lib/generate-pr-content";
  *              checks it out right after the clone, so `git push origin HEAD`
  *              publishes exactly this branch.
  *   finish   → if that branch is on GitHub and ahead of the base, open a
- *              draft PR as the App (openRemoteTaskPullRequest).
+ *              draft PR as the App (openRemoteTaskPullRequest), titled and
+ *              described by the agent's `json pull-request` block when its
+ *              final message has one (agent-pr-content.ts).
  *
  * The branch name derives from the thread id, so nothing is stored at
  * dispatch: a run that never pushed leaves no name behind that a later
@@ -54,6 +62,16 @@ export type RemoteTaskPrOutcome =
 interface CompareFile {
   filename: string;
   patch?: string;
+}
+
+interface CompareCommit {
+  commit: { message: string };
+}
+
+/** The newest commit's subject: the branch's own words, never the task name. */
+function latestCommitSubject(commits: readonly CompareCommit[]): string | null {
+  const subject = commits.at(-1)?.commit.message.split("\n", 1)[0]?.trim();
+  return subject ? subject : null;
 }
 
 function diffFromCompare(files: readonly CompareFile[]): string {
@@ -87,6 +105,8 @@ async function createPullRequest({
   taskTitle,
   draft,
   files,
+  commits,
+  agentContent,
   generateContent,
 }: {
   octokit: Octokit;
@@ -99,27 +119,34 @@ async function createPullRequest({
   taskTitle: string;
   draft: boolean;
   files: readonly CompareFile[];
+  commits: readonly CompareCommit[];
+  /** The agent's own `json pull-request` block; wins over generation. */
+  agentContent: AgentPrContent | null;
   generateContent: typeof generatePRContent;
 }) {
-  let title = taskTitle;
+  let title = latestCommitSubject(commits) ?? taskTitle;
   let body = "Changes made by an automated task run.";
-  try {
-    const generated = await generateContent({
-      gitDiff: diffFromCompare(files),
-      branchName: branch,
-      repoName: repoFullName,
-      taskTitle,
-    });
-    title = generated.title;
-    body = generated.body;
-  } catch (error) {
-    console.warn(
-      "[remote-task-pr] PR content generation failed, using fallbacks",
-      {
-        threadId,
-        error: error instanceof Error ? error.message : String(error),
-      },
-    );
+  if (agentContent) {
+    ({ title, body } = agentContent);
+  } else {
+    try {
+      const generated = await generateContent({
+        gitDiff: diffFromCompare(files),
+        branchName: branch,
+        repoName: repoFullName,
+        taskTitle,
+      });
+      title = generated.title;
+      body = generated.body;
+    } catch (error) {
+      console.warn(
+        "[remote-task-pr] PR content generation failed, using fallbacks",
+        {
+          threadId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
+    }
   }
   body += `\n\n---\n\n📎 **Task**: ${publicAppUrl()}/task/${threadId}`;
   return await octokit.rest.pulls.create({
@@ -137,12 +164,15 @@ export async function openRemoteTaskPullRequest({
   db,
   userId,
   threadId,
+  threadChatId,
   octokitFor = getOctokitForApp,
   generateContent = generatePRContent,
 }: {
   db: DB;
   userId: string;
   threadId: string;
+  /** The finished chat, whose last lead message may carry the PR content. */
+  threadChatId: string;
   /** Injectable for tests. */
   octokitFor?: (args: { owner: string; repo: string }) => Promise<Octokit>;
   /** Injectable for tests. */
@@ -194,6 +224,9 @@ export async function openRemoteTaskPullRequest({
     state: "open",
   });
   const existing = open[0];
+  const threadChat = existing
+    ? undefined
+    : await getThreadChat({ db, threadId, threadChatId, userId });
   const pr =
     existing ??
     ((
@@ -208,6 +241,8 @@ export async function openRemoteTaskPullRequest({
         taskTitle: thread.name ?? "Automated task",
         draft: settings.prType !== "ready",
         files: compare.data.files ?? [],
+        commits: compare.data.commits,
+        agentContent: parseAgentPrContent(threadChat?.messages ?? null),
         generateContent,
       })
     ).data as unknown as NonNullable<typeof existing>);

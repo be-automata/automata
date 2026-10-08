@@ -1,7 +1,12 @@
 import type { Octokit } from "octokit";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getThread, updateThread } from "@terragon/shared/model/threads";
+import type { DBMessage } from "@terragon/shared/db/db-message";
+import {
+  getThread,
+  updateThread,
+  updateThreadChat,
+} from "@terragon/shared/model/threads";
 import {
   createTestThread,
   createTestUser,
@@ -52,6 +57,10 @@ function fakeGitHub({
             data: {
               ahead_by: compare.ahead_by,
               files: [{ filename: "a.ts", patch: "+x" }],
+              commits: [
+                { commit: { message: "feat(a): first step" } },
+                { commit: { message: "fix(a): latest step\n\nRefs: X-1" } },
+              ],
             },
           };
         }),
@@ -73,24 +82,44 @@ function fakeGitHub({
 describe("openRemoteTaskPullRequest", () => {
   let userId: string;
   let threadId: string;
+  let threadChatId: string;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     userId = (await createTestUser({ db })).user.id;
-    threadId = (
-      await createTestThread({
-        db,
-        userId,
-        overrides: { githubRepoFullName: REPO, repoBaseBranchName: "main" },
-      })
-    ).threadId;
+    ({ threadId, threadChatId } = await createTestThread({
+      db,
+      userId,
+      overrides: { githubRepoFullName: REPO, repoBaseBranchName: "main" },
+    }));
   });
+
+  const finishWith = (text: string) =>
+    updateThreadChat({
+      db,
+      userId,
+      threadId,
+      threadChatId,
+      updates: {
+        appendMessages: [
+          {
+            type: "agent",
+            parent_tool_use_id: null,
+            parts: [{ type: "text", text }],
+          } as DBMessage,
+        ],
+      },
+    });
+
+  const pullRequestBlock = (value: unknown) =>
+    `Delivered.\n\n\`\`\`json pull-request\n${JSON.stringify(value)}\n\`\`\``;
 
   const run = (gh: FakeGitHub) =>
     openRemoteTaskPullRequest({
       db,
       userId,
       threadId,
+      threadChatId,
       octokitFor: async () => gh.octokit,
       generateContent,
     });
@@ -114,6 +143,51 @@ describe("openRemoteTaskPullRequest", () => {
     const thread = await getThread({ db, threadId, userId });
     expect(thread?.githubPRNumber).toBe(77);
     expect(thread?.branchName).toBe(remoteTaskBranchName(threadId));
+  });
+
+  it("uses the agent's pull-request block for the title and body, without generating", async () => {
+    await finishWith(
+      pullRequestBlock({
+        title: "feat(settings): add the Hockey tab",
+        body: "## Summary\n- Hockey gets its own tab.\n\n## Test plan\n- [x] pnpm jest",
+      }),
+    );
+    const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+    await run(gh);
+    expect(generateContent).not.toHaveBeenCalled();
+    expect(gh.created[0]).toMatchObject({
+      title: "feat(settings): add the Hockey tab",
+    });
+    const body = String(gh.created[0]?.body);
+    expect(body).toMatch(/^## Summary\n- Hockey gets its own tab\./);
+    expect(body).toContain(`/task/${threadId}`);
+  });
+
+  it.each([
+    ["a multi-line title", { title: "feat: a\nb", body: "Body." }],
+    ["an empty body", { title: "feat: a", body: "  " }],
+    ["a missing title", { body: "Body." }],
+    ["an over-long title", { title: "x".repeat(300), body: "Body." }],
+  ])("ignores a block with %s and generates instead", async (_, value) => {
+    await finishWith(pullRequestBlock(value));
+    const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+    await run(gh);
+    expect(generateContent).toHaveBeenCalledTimes(1);
+    expect(gh.created[0]).toMatchObject({ title: "feat: generated title" });
+  });
+
+  it("ignores a block that is not JSON", async () => {
+    await finishWith("Done.\n\n```json pull-request\ntitle: feat: a\n```");
+    const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+    await run(gh);
+    expect(gh.created[0]).toMatchObject({ title: "feat: generated title" });
+  });
+
+  it("falls back to the latest commit subject, not the task name, when generation fails", async () => {
+    generateContent.mockRejectedValueOnce(new Error("no key"));
+    const gh = fakeGitHub({ compare: { ahead_by: 2 } });
+    await run(gh);
+    expect(gh.created[0]).toMatchObject({ title: "fix(a): latest step" });
   });
 
   it("opens a ready PR when the owner's PR type is ready", async () => {
