@@ -155,7 +155,9 @@ prompt in row 4.
      github-pr-merged deploy/skills/github-pr-merged-youtrack/SKILL.md
    ```
 
-3. As the org owner, open the repository environment in the dashboard and set:
+3. As an org owner or admin, with the org active, open **Environments → Organization** in the
+   dashboard and set (a repository environment may override single keys, e.g. its own
+   `YOUTRACK_PROJECTS`; the personal Global environment is never read):
 
    | Variable                  | Value                                                        |
    | ------------------------- | ------------------------------------------------------------ |
@@ -171,6 +173,32 @@ prompt in row 4.
    it reads the tickets and posts the PR comment, worded as "would move", and writes nothing to the
    tracker. Calibrate on a handful of real merges.
 5. Set `AUTOMATA_TRACKER_WRITES=live` to enable ticket comments and stage moves.
+
+**Org-level environment rollout (one time).** The tracker settings moved from the owner's
+repository environment to the organization environment (ADR-008 decision 5, amended 2026-10-08).
+In order:
+
+1. Apply the schema BEFORE the www deploy (additive, idempotent):
+
+   ```bash
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f deploy/migrations/2026-10-08-organization-environment.sql
+   DATABASE_URL=... pnpm exec tsx deploy/assert-schema-ready.ts   # must exit 0
+   ```
+
+   Do not use `drizzle-kit push` on prod for this: it also drops and recreates
+   `audit_fix_attempts_pr_repo_lower_index`.
+
+2. Deploy www. The worker box is unaffected (it takes `repoEnv` as an opaque record).
+3. In each org, an owner or admin sets the tracker variables on **Environments → Organization** and
+   removes them from personal Global (where the audit never read them). Existing repository-level
+   values keep working and override the org key by key.
+4. Verify with **Internal → Admin → Environment → Tracker config check** (org slug + `owner/repo`):
+   expect `status: configured`, the expected `sources`, and `mixedLayers: false`. A `mixedLayers`
+   warning means URL and token come from different layers, usually a stale repository override.
+   The check never shows the token.
+5. Write history: `SELECT actor_user_id, added_keys, removed_keys, changed_keys, created_at FROM
+organization_environment_event WHERE organization_id = '<org id>' ORDER BY created_at DESC;`
+   (key names only, never values).
 
 **What it will and will not do.** Stage moves are limited to `PR Merged` for the ticket the PR
 closes, `In Progress` for a `Backlog`/`To Do` ticket whose work is split across PRs, and `To Do` for

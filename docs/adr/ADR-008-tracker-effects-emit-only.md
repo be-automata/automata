@@ -53,12 +53,20 @@ any ticket the token can reach.
    `PR Merged` and `To Do` (`ALLOWED_STAGE_TARGETS`). `Done`, `Staging (TF)` and `Won't do` are
    unreachable from this code path whatever the agent emits. The ticket summary and description are
    never written.
-5. **Tracker credentials live in the repo environment and are control-plane only.** `YOUTRACK_URL`,
-   `YOUTRACK_TOKEN`, `YOUTRACK_PROJECTS` and `AUTOMATA_TRACKER_WRITES` are stored in the org owner's
-   repository environment (the existing encrypted, org-fenced store). Stored variables are decrypted
-   in exactly one module, `apps/www/src/server-lib/env-audience.ts`, which makes every reader pick
-   an audience: the execution-plane getters drop `CONTROL_PLANE_ONLY_ENV_KEYS` (`YOUTRACK_TOKEN`),
-   the control-plane getters return the raw set.
+5. **Tracker credentials live in the organization environment and are control-plane only.**
+   `YOUTRACK_URL`, `YOUTRACK_TOKEN`, `YOUTRACK_PROJECTS` and `AUTOMATA_TRACKER_WRITES` are read from
+   the organization environment (`organization_environment`, one row per org, fenced by its primary
+   key) overlaid key by key by the org owner's repository environment, so a repository can override
+   a single key (its own `YOUTRACK_PROJECTS`). The owner's personal Global environment is never
+   read: it is user-scoped with no org fence, and one person in two orgs would carry a token
+   across them. Stored variables are decrypted in exactly one module,
+   `apps/www/src/server-lib/env-audience.ts`, which makes every reader pick an audience: the
+   execution-plane getters drop `CONTROL_PLANE_ONLY_ENV_KEYS` (`YOUTRACK_TOKEN`), the control-plane
+   getters return the raw set. An organization's `YOUTRACK_TOKEN` never reaches an agent in any
+   form: the agent-token fallback (`YOUTRACK_TOKEN` → `YOUTRACK_AGENT_TOKEN` for remote task runs)
+   draws only from the user's own layers, so an org that wants agents on the tracker sets
+   `YOUTRACK_AGENT_TOKEN` explicitly. (Amended 2026-10-08; the original decision read the
+   repository environment only.)
 6. **Writes are opt-in per repo.** `AUTOMATA_TRACKER_WRITES` defaults to off: all reads happen, the
    PR comment shows what a live run would do, and no tracker write is made. Only the exact value
    `live` enables writes.
@@ -144,8 +152,9 @@ any ticket the token can reach.
 - Two finish hooks running at the same instant are check-then-write with no lock, so each could
   create a comment. The window is one request wide and the result is a duplicate, not a wrong
   write.
-- Environment variables are attributed to the org owner. If ownership changes, the new owner must
-  set the tracker variables on their own repository environment.
+- Organization variables belong to the org and survive an ownership change. Repository overrides
+  are still read from the org owner's repository environment: if ownership changes, the new owner
+  must re-create any repository-level override on their own repository environment.
 
 ## Testing
 

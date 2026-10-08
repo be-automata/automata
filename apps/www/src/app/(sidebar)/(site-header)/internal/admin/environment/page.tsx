@@ -3,6 +3,7 @@ import { getAdminUserOrThrow } from "@/lib/auth-server";
 import { getThreadForAdmin } from "@/server-actions/admin/thread";
 import { getEnvironmentForAdmin } from "@/server-actions/admin/environment";
 import { AdminEnvironmentIdOrThreadIdInput } from "@/components/admin/environment-content";
+import { TrackerConfigCheck } from "@/components/admin/tracker-config-check";
 import { getEnvironmentForUserRepo } from "@terragon/shared/model/environments";
 import { redirect } from "next/navigation";
 
@@ -35,6 +36,7 @@ export default async function AdminEnvironmentListPage({
         Enter an environment ID or thread ID to view its details
       </p>
       <AdminEnvironmentIdOrThreadIdInput />
+      <TrackerConfigCheck />
     </div>
   );
 }

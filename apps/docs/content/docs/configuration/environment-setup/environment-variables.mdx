@@ -11,12 +11,19 @@ import { Container } from "lucide-react";
   All environment variables are encrypted at rest and in transit for optimal security.
 </Callout>
 
-Environment variables allow you to add secrets and configuration values that will be available in your sandbox. You can configure environment variables at two levels:
+Environment variables allow you to add secrets and configuration values that will be available in your sandbox. You can configure environment variables at three levels:
 
-- **Global Environment**: Variables that apply to all your repositories
+- **Global (personal)**: Variables for your own tasks in every organization you belong to
+- **Organization**: Variables shared by every repository and member of the active organization. Owners and admins can view and edit them; members see the key names only
 - **Repository-Specific Environment**: Variables scoped to individual repositories
 
-Repository-specific variables take precedence over global variables when both define the same key. This allows you to set common defaults globally while overriding them per repository as needed.
+When more than one level defines the same key, the most specific one wins: repository over organization, organization over global. This lets an organization set shared values once while a repository overrides a single key when it needs to.
+
+<Callout type="warn">
+  Organization automations, such as the post-merge ticket audit, read their settings (for example `YOUTRACK_URL` and `YOUTRACK_TOKEN`) from the **Organization** environment or a repository environment, never from your personal Global environment. Global variables are not shared with your organization.
+</Callout>
+
+Some keys are read by the control plane only and are never delivered to an agent, such as `YOUTRACK_TOKEN`. The editor flags common misspellings of the keys the platform reads, for example `AUTOMATA_PROJECTS` instead of `YOUTRACK_PROJECTS`.
 
 ## Common Use Cases
 
