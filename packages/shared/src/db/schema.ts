@@ -10,6 +10,7 @@ import {
   AnyPgColumn,
   numeric,
   bigint,
+  foreignKey,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { DBMessage, DBUserMessage } from "./db-message";
@@ -1646,6 +1647,71 @@ export const organizationReviewSettings = pgTable(
       .defaultNow()
       .$onUpdate(() => new Date()),
   },
+);
+
+/**
+ * Org-level environment variables: one encrypted variable list per
+ * organization, shared by every repository in it. Resolution order is
+ * documented in apps/www/src/server-lib/env-audience.ts — agents read
+ * personal global → organization → repository; control-plane consumers (the
+ * tracker resolver) read organization → repository and never the personal
+ * global row.
+ *
+ * MULTI-TENANT: `organizationId` is both the primary key and the tenant fence
+ * — one row per org, never user-scoped. Kept out of `environment` on purpose:
+ * that table's rows belong to one user (NOT NULL `user_id`, unique per
+ * user+repo), and every user-scoped reader would have to learn to skip an
+ * org row. Values are encrypted exactly like `environment.environment_variables`.
+ */
+export const organizationEnvironment = pgTable("organization_environment", {
+  organizationId: text("organization_id")
+    .primaryKey()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  environmentVariables: jsonb("environment_variables")
+    .$type<Array<{ key: string; valueEncrypted: string }>>()
+    .notNull()
+    .default([]),
+  /** Provenance: the user who last wrote the variables. */
+  updatedByUserId: text("updated_by_user_id").references(() => user.id, {
+    onDelete: "set null",
+  }),
+  createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { mode: "date" })
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+});
+
+/**
+ * Write log for `organization_environment`: who changed which keys, when.
+ * Key names only — a value never lands in this table.
+ */
+export const organizationEnvironmentEvent = pgTable(
+  "organization_environment_event",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id").notNull(),
+    actorUserId: text("actor_user_id").notNull(),
+    addedKeys: jsonb("added_keys").$type<string[]>().notNull().default([]),
+    removedKeys: jsonb("removed_keys").$type<string[]>().notNull().default([]),
+    changedKeys: jsonb("changed_keys").$type<string[]>().notNull().default([]),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [
+    // Explicit name: the generated one is 64 chars, which Postgres truncates
+    // to 63 — drizzle-kit push would then drop and re-add it on every run.
+    foreignKey({
+      name: "organization_environment_event_org_id_fk",
+      columns: [table.organizationId],
+      foreignColumns: [organization.id],
+    }).onDelete("cascade"),
+    index("organization_environment_event_org_created_index").on(
+      table.organizationId,
+      table.createdAt,
+    ),
+  ],
 );
 
 /**

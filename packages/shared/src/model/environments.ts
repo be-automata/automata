@@ -264,14 +264,32 @@ export async function getDecryptedEnvironmentVariables({
   if (!environment) {
     throw new Error("Environment not found");
   }
+  return decryptStoredVariables(
+    environment.environmentVariables,
+    encryptionMasterKey,
+  );
+}
+
+/**
+ * Decrypts a stored variable list. Shared by the user-scoped `environment`
+ * table and `organization_environment` so both stores decrypt identically;
+ * a value that fails to decrypt is dropped (and logged), never thrown.
+ */
+export function decryptStoredVariables(
+  variables:
+    | ReadonlyArray<{ key: string; valueEncrypted: string }>
+    | null
+    | undefined,
+  encryptionMasterKey: string,
+): Array<{ key: string; value: string }> {
   return (
-    (environment.environmentVariables
+    (variables
       ?.map((variable) => {
         // Backwards compatibility with old environment variables
         if ("value" in variable) {
           return {
             key: variable.key,
-            value: variable.value,
+            value: (variable as { value: string }).value,
           };
         }
         try {
