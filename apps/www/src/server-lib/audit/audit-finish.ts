@@ -20,7 +20,7 @@ import { getPostHogServer } from "@/lib/posthog-server";
 
 import { resolveBotLogin } from "../review/bot-login";
 import { isAuditFindingsStamp } from "../review/review-skill";
-import { createDbAuditLedger } from "./audit-ledger";
+import { createDbAuditLedger, type RunDecision } from "./audit-ledger";
 import type { CheckOutcome } from "./decide-audit-actions";
 import {
   executeAuditFindings,
@@ -142,11 +142,19 @@ export async function handleAuditFindingsAtFinish({
     run: AuditRunRow | null;
     organizationId: string | null;
     executorStarted: boolean;
+    /** What the deadline close records once the executor has persisted. */
+    persisted: {
+      mode: "dry-run" | "on";
+      complete: boolean;
+      parsed: number;
+      decisions: RunDecision[];
+    } | null;
     closed: boolean;
   } = {
     run: null,
     organizationId: null,
     executorStarted: false,
+    persisted: null,
     closed: false,
   };
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -446,6 +454,14 @@ export async function handleAuditFindingsAtFinish({
         now: callDeps.now,
         sleep: callDeps.sleep,
         rand: callDeps.rand,
+        onPersisted: (decisions) => {
+          state.persisted = {
+            mode,
+            complete,
+            parsed: block.findings.length,
+            decisions,
+          };
+        },
       },
       input: {
         organizationId,
@@ -546,12 +562,23 @@ export async function handleAuditFindingsAtFinish({
     const result = await Promise.race([runPipeline(), timeout]);
     if (result === "timeout") {
       // The executor persists before it drains, so a started executor leaves
-      // every decision durable and the cron finishes the effects.
+      // every decision durable and the cron finishes the effects. The finish
+      // rewrites the whole run row: carry the persisted decisions over, or
+      // the run would show no check outcome at all.
       if (state.executorStarted) {
+        const persisted = state.persisted;
         await close({
           status: "done",
           outcome: "applied_partial",
           error: "hook_deadline",
+          ...(persisted
+            ? {
+                mode: persisted.mode,
+                complete: persisted.complete,
+                counts: { parsed: persisted.parsed },
+                decisions: persisted.decisions,
+              }
+            : {}),
         });
       } else {
         await release();

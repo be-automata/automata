@@ -399,6 +399,45 @@ describe("handleAuditFindingsAtFinish", () => {
     });
   });
 
+  it("a deadline after the executor persisted keeps the persisted decisions on the run row", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-04T10:00:00Z") });
+    const decisions = [
+      { fingerprint: "abcd1234", action: "check", reason: "pass" },
+    ];
+    h.executeImpl.value = () => {
+      const deps = vi.mocked(executor.executeAuditFindings).mock.calls[0]![0]
+        .deps;
+      deps.onPersisted?.(decisions);
+      return new Promise(() => {});
+    };
+    const running = call();
+    await vi.advanceTimersByTimeAsync(20_999);
+    await running;
+    expect(lastFinish()).toMatchObject({
+      status: "done",
+      mode: "on",
+      outcome: "applied_partial",
+      error: "hook_deadline",
+      complete: true,
+      counts: { parsed: 1 },
+      decisions,
+    });
+  });
+
+  it("a deadline before the executor persisted records no decisions", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-04T10:00:00Z") });
+    h.executeImpl.value = () => new Promise(() => {});
+    const running = call();
+    await vi.advanceTimersByTimeAsync(20_999);
+    await running;
+    const finish = lastFinish();
+    expect(finish).toMatchObject({
+      outcome: "applied_partial",
+      error: "hook_deadline",
+    });
+    expect(finish.decisions).toBeUndefined();
+  });
+
   it("W1: a claim released at the deadline never reaches the executor, even when the pipeline resumes", async () => {
     vi.useFakeTimers({ now: new Date("2026-10-04T10:00:00Z") });
     h.isPrivateImpl.value = () =>
