@@ -63,6 +63,10 @@ export async function setup() {
 
   // Applying drizzle schema to test database
   console.log("Applying drizzle schema to test database...");
+  // Hoisted so the pool is closed on the error path too: left open, teardown's
+  // DROP DATABASE … WITH (FORCE) kills its idle connection and the pool's
+  // unhandled 'error' crashes vitest mid-teardown.
+  let db: DB | undefined;
   try {
     const result = execSync("pnpm drizzle-kit-push-test", {
       cwd: path.join(__dirname, ".."),
@@ -74,7 +78,7 @@ export async function setup() {
     console.log("Drizzle schema applied to test database.");
     console.log("Command output:", result.toString());
 
-    const db = createDb(setupResult.DATABASE_URL);
+    db = createDb(setupResult.DATABASE_URL);
 
     // Fail loudly if the push did not produce the full schema.
     await verifySchemaApplied(db);
@@ -86,11 +90,6 @@ export async function setup() {
     console.log("Seeding feature flags into test database...");
     await seedFeatureFlags({ db });
     console.log("Feature flags seeded.");
-
-    // Close this setup connection so the teardown DROP DATABASE does not have to
-    // force-terminate it (which logs a noisy pg connection error). createDb uses
-    // a connection-string Pool, whose `end()` closes the pool.
-    await (db.$client as unknown as { end: () => Promise<void> }).end();
   } catch (error) {
     console.error("Error applying drizzle schema to test database.");
     console.error(
@@ -98,6 +97,13 @@ export async function setup() {
       error instanceof Error ? error.message : error,
     );
     throw error;
+  } finally {
+    // Close this setup connection so the teardown DROP DATABASE does not have to
+    // force-terminate it (which logs a noisy pg connection error). createDb uses
+    // a connection-string Pool, whose `end()` closes the pool.
+    await (
+      db?.$client as unknown as { end: () => Promise<void> } | undefined
+    )?.end();
   }
 }
 

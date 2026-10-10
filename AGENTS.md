@@ -52,6 +52,15 @@ pnpm -C packages/sandbox test
 pnpm tsc-check
 ```
 
+The `shared` and `www` suites start a docker compose Postgres + Redis by default. Without
+Docker (e.g. agent runs on the Linux execution box), set
+`TEST_DATABASE_ADMIN_URL=postgresql://<role>:<pw>@127.0.0.1:25432/postgres` — a role with
+`CREATEDB` (no superuser) on an already-running Postgres 13+ — and each run creates/drops its
+own throwaway database over TCP with no `docker compose`. Redis then uses the in-memory
+stand-in unless `TEST_REDIS_HTTP_URL`/`TEST_REDIS_HTTP_TOKEN` are set. The box's server is
+provisioned by `packages/worker/deploy/linux/install-test-postgres.sh` (loopback 25432;
+a 15-minute sweep resets the role and drops databases older than 3h).
+
 ### Database (Drizzle ORM)
 
 If you make a change to the db schema, you need to run the following command to push the schema to the development db.

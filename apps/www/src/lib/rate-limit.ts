@@ -1,8 +1,29 @@
-import { redis } from "./redis";
+import { isInMemoryRedis, redis } from "./redis";
 import { Ratelimit } from "@upstash/ratelimit";
 import { db } from "@/lib/db";
 import { getUser } from "@terragon/shared/model/user";
 const PREFIX = "@upstash/ratelimit";
+
+type LimitResult = Awaited<ReturnType<Ratelimit["limit"]>>;
+
+/**
+ * `limiter.limit(id)`, except against the in-memory Redis stand-in, where the
+ * limiters never trip (the stand-in's documented promise): @upstash/ratelimit
+ * runs Lua via `evalsha`, which the stand-in does not implement. Errors from a
+ * REAL Redis still propagate — an outage must not silently disable limiting.
+ */
+async function limit(limiter: Ratelimit, id: string): Promise<LimitResult> {
+  if (isInMemoryRedis) {
+    return {
+      success: true,
+      limit: Number.MAX_SAFE_INTEGER,
+      remaining: Number.MAX_SAFE_INTEGER,
+      reset: 0,
+      pending: Promise.resolve(),
+    };
+  }
+  return limiter.limit(id);
+}
 
 const productionRefillRate = 20;
 const productionWindow = "1h";
@@ -37,6 +58,9 @@ export const sandboxCreationRateLimit = new Ratelimit({
 export async function getSandboxCreationRemaining(
   userId: string,
 ): Promise<{ remaining: number; reset: number }> {
+  if (isInMemoryRedis) {
+    return { remaining: Number.MAX_SAFE_INTEGER, reset: 0 };
+  }
   try {
     return await sandboxCreationRateLimit.getRemaining(userId);
   } catch (e) {
@@ -49,7 +73,7 @@ export async function getSandboxCreationRemaining(
 }
 
 export async function trackSandboxCreation(userId: string) {
-  const result = await sandboxCreationRateLimit.limit(userId);
+  const result = await limit(sandboxCreationRateLimit, userId);
   // Don't throw an error here, just log a warning because there might be a race condition
   // between the rate limit check and the sandbox creation and its okay if we go over.
   if (!result.success) {
@@ -80,7 +104,7 @@ export const onboardingUpdateRateLimit = new Ratelimit({
 });
 
 export async function checkWaitlistRateLimit(ip: string) {
-  const result = await waitlistSubmissionRateLimit.limit(ip);
+  const result = await limit(waitlistSubmissionRateLimit, ip);
   if (!result.success) {
     throw new Error(
       `Too many waitlist submissions. Try again in ${Math.ceil(result.reset / 1000 / 60)} minutes.`,
@@ -90,7 +114,7 @@ export async function checkWaitlistRateLimit(ip: string) {
 }
 
 export async function checkOnboardingRateLimit(ip: string) {
-  const result = await onboardingUpdateRateLimit.limit(ip);
+  const result = await limit(onboardingUpdateRateLimit, ip);
   if (!result.success) {
     throw new Error(
       `Too many form updates. Try again in ${Math.ceil(result.reset / 1000 / 60)} minutes.`,
@@ -110,7 +134,7 @@ export const cliTaskCreationRateLimit = new Ratelimit({
 });
 
 export async function checkCliTaskCreationRateLimit(userId: string) {
-  const result = await cliTaskCreationRateLimit.limit(userId);
+  const result = await limit(cliTaskCreationRateLimit, userId);
   if (!result.success) {
     const hoursUntilReset = Math.ceil(
       (result.reset - Date.now()) / 1000 / 60 / 60,
@@ -133,7 +157,7 @@ export const shadowBanTaskCreationRateLimit = new Ratelimit({
 export async function checkShadowBanTaskCreationRateLimit(userId: string) {
   const user = await getUser({ db, userId });
   if (!user?.shadowBanned) return { success: true } as const;
-  const result = await shadowBanTaskCreationRateLimit.limit(userId);
+  const result = await limit(shadowBanTaskCreationRateLimit, userId);
   if (!result.success) {
     const minutesUntilReset = Math.ceil(
       (result.reset - Date.now()) / 1000 / 60,

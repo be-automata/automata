@@ -4,7 +4,8 @@
   "description": "",
   "type": "module",
   "exports": {
-    "./test-global-setup": "./src/test-global-setup.ts"
+    "./test-global-setup": "./src/test-global-setup.ts",
+    "./test-services-mode": "./src/test-services-mode.ts"
   },
   "scripts": {
     "tunnel": "dotenv -e .env.development.local -- tsx scripts/tunnel.ts",
@@ -22,11 +23,13 @@
   "packageManager": "pnpm@10.14.0",
   "dependencies": {
     "@ngrok/ngrok": "^1.5.1",
-    "@terragon/env": "workspace:*"
+    "@terragon/env": "workspace:*",
+    "pg": "^8.16.0"
   },
   "devDependencies": {
     "@terragon/tsconfig": "workspace:*",
     "@types/node": "^22.15.28",
+    "@types/pg": "^8.15.2",
     "dotenv-cli": "^8.0.0",
     "npm": "^11.4.1",
     "tsx": "^4.19.4",
