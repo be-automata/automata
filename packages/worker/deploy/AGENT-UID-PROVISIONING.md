@@ -289,6 +289,26 @@ root-owned copy of the script taken from the verified HEAD commit, the
 no-run-in-flight preflight, and rollback) is in `deploy/PILOT-RUNBOOK.md`,
 section "Review batteries on the execution box (phase 3)".
 
+### Linux boxes: test Postgres for task runs
+
+`sudo [WORKER_GROUP=automata] [TEST_SERVICES_REPOS=owner/repo,...] packages/worker/deploy/linux/install-test-postgres.sh`
+provisions the loopback test Postgres (127.0.0.1:25432) and writes
+`/etc/automata/agent-test-services.env` (`TEST_DATABASE_ADMIN_URL=` and
+`TEST_SERVICES_REPOS=`, default `be-automata/automata`; `root:<worker group>`
+0640). The worker reads it on every run and injects the URL, below the owner's
+repo env, into task and mention runs of a listed repo only. The login is shared
+by every run that gets it, so list only repos you trust with each other's test
+databases. The worker refuses the file (one warning, no value) unless it is a
+regular file, at most 64 KiB, and not world-accessible; the agent uid cannot
+read it itself. Re-running the script is a no-op; a re-provision takes effect on
+the next run without a worker restart.
+
+Review and self-heal runs never get it. Self-heal has three env builders: the
+fix agent's (DaemonProcess), the audit checks' (`runSelfHealAuditStep` in
+`workflow.ts`) and the fix check's (the GATE-01 step in `workflow.ts`).
+Enabling it for self-heal means changing all three together, or a fix passes
+its agent's tests and then fails the platform's check of the same tree.
+
 ---
 
 ## PF honesty — required reading before this is cited as a control

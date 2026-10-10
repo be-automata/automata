@@ -1696,7 +1696,7 @@ describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
       },
       SEEDED_REQUIRING,
     );
-    expect(options).toEqual({ githubReadToken: READ });
+    expect(options).toEqual({ lane: "task", githubReadToken: READ });
     expect(tokenLine(lines)).toBe("task agent: read-token=applied");
     const brokersIdx = lines.findIndex((l) =>
       l.includes("credential brokers up"),
@@ -1735,7 +1735,7 @@ describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
         { taskAgent: { batteries: ["somnio-skills"] }, ...extra },
         seeded,
       );
-      expect(options).toEqual({});
+      expect(options).toEqual({ lane: "task" });
       expect(tokenLine(lines)).toBe(`task agent: read-token=skip=${reason}`);
     },
   );
@@ -1750,7 +1750,7 @@ describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
       },
       SEEDED_REQUIRING,
     );
-    expect(options).toEqual({});
+    expect(options).toEqual({ lane: "task" });
     expect(tokenLine(lines)).toBe("task agent: read-token=skip=no-broker");
   });
 
@@ -1770,7 +1770,7 @@ describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
       },
       SEEDED_REQUIRING,
     );
-    expect(options).toEqual({});
+    expect(options).toEqual({ lane: "review" });
     expect(tokenLines(lines)).toEqual([]);
   });
 
@@ -1779,7 +1779,7 @@ describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
       { githubReadToken: READ, githubReadTokenExpiresAt: future() },
       undefined,
     );
-    expect(options).toEqual({});
+    expect(options).toEqual({ lane: "task" });
     expect(tokenLines(lines)).toEqual([]);
   });
 });

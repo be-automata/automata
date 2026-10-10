@@ -14,6 +14,10 @@ const PATTERNS: RegExp[] = [
   /\bgithub_pat_[A-Za-z0-9_]{8,}/g,
   // `x-access-token:<token>@` in a URL
   /(x-access-token:)[^@\s]+/g,
+  // `scheme://user:<password>@` in any URL (a Postgres/Redis connection
+  // string in a client error). No `/` in the password, so `host:port/a@b` is
+  // left alone; a real password is percent-encoded and has none.
+  /(\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:)[^\s@/]+(?=@)/gi,
 ];
 
 export function redactSecrets(text: string): string {

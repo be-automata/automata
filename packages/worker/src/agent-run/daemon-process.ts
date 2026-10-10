@@ -7,6 +7,10 @@ import path from "node:path";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { redactSecrets } from "@terragon/utils/redact";
 import { reapplyPathGrant, type AceExec } from "./agent-uid-fs";
+import {
+  readBoxTestServicesEnv,
+  receivesBoxTestServices,
+} from "./box-test-services";
 import { buildDaemonEnv, type BrokerHandoff } from "./daemon-env";
 import { ghBrokerConfigYaml } from "./gh-broker";
 import {
@@ -32,6 +36,7 @@ import { buildKillInvocation, buildSpawnInvocation } from "./spawn-as-user";
 import { runPathsForRepo } from "./run-owned-paths";
 import { verifyGhAuth } from "./verify-gh-auth";
 import type { WorkerConfig } from "./config";
+import type { RunLane } from "./run-lane";
 import type { AgentRunInput, PulledDaemonMessage } from "./types";
 
 /**
@@ -124,6 +129,13 @@ export class DaemonProcess {
       platform?: NodeJS.Platform;
       /** Injectable so the suite never SIGKILLs a real process group. */
       killFn?: (pid: number, signal: NodeJS.Signals) => void;
+      /**
+       * The run's lane, computed once by the workflow (resolveRunLane).
+       * Absent = the box's test services are not injected.
+       */
+      lane?: RunLane;
+      /** Injectable so the suite never reads the real /etc file. */
+      boxTestServicesEnvPath?: string;
     } = {},
   ) {
     const workerId = getProcessWorkerId();
@@ -175,6 +187,19 @@ export class DaemonProcess {
       return this.env;
     }
     this.ghConfigDir = await this.createGhConfigDir();
+    // The box's test-service URLs (install-test-postgres.sh): non-review,
+    // non-self-heal runs of the repos the file lists. No lane = no env (fail
+    // closed). Read per run, so a re-provision needs no restart. Spread BELOW
+    // repoEnv: the owner's value for the same key wins; the reserved-key
+    // filter applies to both.
+    const { lane } = this.deps;
+    const boxTestEnv =
+      lane !== undefined && receivesBoxTestServices(this.input, lane)
+        ? readBoxTestServicesEnv(
+            this.input.repoFullName,
+            this.deps.boxTestServicesEnvPath,
+          )
+        : {};
     this.env = buildDaemonEnv({
       baseEnv: process.env,
       anthropicApiKey: this.config.anthropicApiKey,
@@ -188,7 +213,7 @@ export class DaemonProcess {
       egressProxyUrl: this.egressProxyUrl,
       broker: this.broker,
       githubReadToken: this.deps.githubReadToken ?? null,
-      repoEnv: this.input.repoEnv ?? null,
+      repoEnv: { ...boxTestEnv, ...this.input.repoEnv },
       agentUser: this.config.agentUser,
       // Beside the clone, in the run dir, so it inherits the run's ACE.
       // Provisioning created it in the same `if (agentUser)` branch that

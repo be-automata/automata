@@ -1174,9 +1174,12 @@ async function runAgentInner(
     materialised,
     egressProxy?.url ?? null,
     broker,
-    taskOutcome.githubReadToken !== undefined
-      ? { githubReadToken: taskOutcome.githubReadToken }
-      : {},
+    {
+      lane,
+      ...(taskOutcome.githubReadToken !== undefined
+        ? { githubReadToken: taskOutcome.githubReadToken }
+        : {}),
+    },
   );
   daemonForPoll = daemon;
   // Exactly one fix-check report per fix run: the check's, or "aborted".

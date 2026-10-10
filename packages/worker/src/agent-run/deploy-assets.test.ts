@@ -1194,6 +1194,50 @@ describe("packages/worker/deploy/linux — test Postgres (no-Docker test suites)
     );
   });
 
+  it("writes the worker's env file: URL + repo scope, root:<worker group> 0640, compare-then-write, never printed", () => {
+    expect(script).toMatch(
+      /^AGENT_ENV_FILE=\/etc\/automata\/agent-test-services\.env$/m,
+    );
+    expect(script).toMatch(/^WORKER_GROUP="\$\{WORKER_GROUP:-automata\}"$/m);
+    expect(script).toMatch(/getent group "\$WORKER_GROUP" >\/dev\/null \|\|/);
+    // Two lines: the URL the test harness reads, and the repos whose runs
+    // the worker may hand it to (the login is shared, so it is scoped).
+    expect(script).toMatch(
+      /^AGENT_ENV_CONTENT="TEST_DATABASE_ADMIN_URL=postgresql:\/\/\$\{ROLE\}:\$\{PW\}@127\.0\.0\.1:\$\{PORT\}\/postgres\nTEST_SERVICES_REPOS=\$\{TEST_SERVICES_REPOS\}"$/m,
+    );
+    expect(script).toMatch(
+      /^TEST_SERVICES_REPOS="\$\{TEST_SERVICES_REPOS:-be-automata\/automata\}"$/m,
+    );
+    // Validated before anything is written: owner/repo(,owner/repo)*.
+    expect(script).toMatch(
+      /^REPO_RE='\[A-Za-z0-9\._-\]\+\/\[A-Za-z0-9\._-\]\+'$/m,
+    );
+    expect(script).toMatch(
+      /\[\[ "\$TEST_SERVICES_REPOS" =~ \^\$\{REPO_RE\}\(,\$\{REPO_RE\}\)\*\$ \]\] \|\|\n\s+fail /,
+    );
+    expect(script.indexOf("must be comma-separated owner/repo")).toBeLessThan(
+      script.indexOf('write_file "$DROPIN"'),
+    );
+    // Idempotent: written only when the content differs, via write_file
+    // (mktemp 0600 + mv), and its mode/owner re-asserted every run.
+    expect(script).toMatch(
+      /if differs "\$AGENT_ENV_FILE" "\$AGENT_ENV_CONTENT"; then\n\s+write_file "\$AGENT_ENV_FILE" "root:\$\{WORKER_GROUP\}" 0640 "\$AGENT_ENV_CONTENT"\nfi/,
+    );
+    expect(script).toMatch(
+      /^chown "root:\$\{WORKER_GROUP\}" "\$AGENT_ENV_FILE"$/m,
+    );
+    expect(script).toMatch(/^chmod 0640 "\$AGENT_ENV_FILE"$/m);
+    expect(script).not.toMatch(/0644 "\$AGENT_ENV_CONTENT"/);
+    // Written only after the server is proven (the verify block runs first).
+    expect(script.indexOf('write_file "$AGENT_ENV_FILE"')).toBeGreaterThan(
+      script.indexOf("listening beyond loopback"),
+    );
+    // The content variable is never echoed/logged.
+    for (const text of printedStrings(script)) {
+      expect(text, text).not.toMatch(/AGENT_ENV_CONTENT/);
+    }
+  });
+
   it("installs, enables and runs the sweep", () => {
     expect(script).toMatch(/test-postgres-sweep\.sh" "\$SWEEP_BIN"/);
     expect(script).toMatch(
@@ -1223,6 +1267,10 @@ describe("packages/worker/deploy/linux — test Postgres sweep", () => {
       /^ALTER ROLE \$\{ROLE\} LOGIN CREATEDB NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 40 PASSWORD '\$\{PW\}';$/m,
     );
     expect(sweep).toMatch(/\[\[ "\$PW" =~ \^\[0-9a-f\]\{32,\}\$ \]\]/);
+    // It re-asserts the SAME password and never rotates it: the worker's
+    // agent-test-services.env embeds it and would otherwise go stale.
+    expect(sweep).toMatch(/^PW="\$\(cat "\$PW_FILE"\)"$/m);
+    expect(sweep).not.toMatch(/urandom|>\s*"?\$PW_FILE/);
     for (const text of printedStrings(sweep)) {
       expect(text, text).not.toMatch(/\$\{?PW(\}|\b)/);
     }
