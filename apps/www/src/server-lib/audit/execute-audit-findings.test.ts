@@ -449,6 +449,40 @@ describe("executeAuditFindings", () => {
     });
   });
 
+  it("reports the persisted decisions before the drain makes any GitHub write", async () => {
+    const h = harness();
+    await h.seedCandidate(1, {}, SCRIPT_RULE);
+    const reported: { decisions: unknown[]; events: string[] }[] = [];
+    h.deps.onPersisted = (decisions) => {
+      reported.push({ decisions, events: [...h.events] });
+    };
+    const summary = await h.run({
+      findings: [parsed(1, SCRIPT_RULE)],
+      checkResults: new Map([[fp(1), "fail" as const]]),
+    });
+
+    expect(reported).toHaveLength(1);
+    expect(reported[0]!.decisions).toEqual(summary.decisions);
+    expect(reported[0]!.events).toContain("persist");
+    expect(reported[0]!.events).not.toContain("create");
+    expect(h.writer.createCount()).toBe(1);
+  });
+
+  it("does not report decisions when persisting them fails", async () => {
+    const h = harness();
+    const reported: unknown[] = [];
+    h.deps.onPersisted = (decisions) => {
+      reported.push(decisions);
+    };
+    h.deps.ledger.persist = async () => {
+      throw new Error("db down");
+    };
+    const summary = await h.run({ findings: [parsed(1)] });
+
+    expect(summary.outcome).toBe("error");
+    expect(reported).toHaveLength(0);
+  });
+
   it("logs one pinned line and one event per decision and caps the summary", async () => {
     const h = harness();
     const findings = Array.from({ length: 150 }, (_, i) => parsed(i + 1));

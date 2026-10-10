@@ -288,6 +288,11 @@ export interface ExecuteAuditDeps {
   now: () => Date;
   sleep: (ms: number) => Promise<void>;
   rand: () => number;
+  /**
+   * Called once the decisions are durable, before the drain's first GitHub
+   * write, so a caller cut off by its deadline can still record them.
+   */
+  onPersisted?: (decisions: RunDecision[]) => void;
 }
 
 export interface ExecuteAuditInput {
@@ -717,6 +722,7 @@ export async function executeAuditFindings({
     });
     return summary;
   }
+  deps.onPersisted?.(summary.decisions);
 
   // ---- 3. one log line + event per durable decision
   const emit = (fields: Omit<SelfHealDecisionFields, "mode">): void => {
