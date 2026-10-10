@@ -7,11 +7,17 @@ import type { AgentRunInput } from "./types";
  * Where install-test-postgres.sh writes the box's test-service URLs
  * (root:<worker group> 0640). The values are SECRET: never logged.
  *
- * Self-heal runs never get these. Their check envs are built separately
- * (workflow.ts runSelfHealAuditStep and the fix-check step), and the fix
- * agent's own env comes through DaemonProcess like any run; enabling self-heal
- * means changing all three builders together, or a fix would pass its agent's
- * tests and then fail the platform's check of the same tree.
+ * Self-heal: a FIX run's agent gets them (through DaemonProcess, like any
+ * run), so a fix for a DB-backed finding can run the repo's DB suites. An
+ * AUDIT run's agent does not: it inspects and reports, it fixes nothing.
+ * The two worker-built check envs (workflow.ts runSelfHealAuditStep and the
+ * fix-check step) deliberately do NOT get them: they run only the
+ * deterministic kinds in self-heal-checks.ts (dependency audit, workflow-file
+ * reads, file/gitignore/git-tracked probes, gitleaks), none of which runs a
+ * test suite or opens a database. So no check result can depend on the DB,
+ * and a fix whose agent saw DB tests pass cannot then fail the platform's
+ * check for want of the DB. Adding a check kind that runs a suite means
+ * adding the env to that builder in the same change.
  */
 export const BOX_TEST_SERVICES_ENV_PATH =
   "/etc/automata/agent-test-services.env";
@@ -98,11 +104,11 @@ export function readBoxTestServicesEnv(
 }
 
 /**
- * Whether a run is one the box's test services may go to: a task or PR
- * (mention) run, never a review (neither the review-plan lane nor a run that
- * carries review-agent settings) and never self-heal. `lane` is the run's
- * resolveRunLane(input), computed once by the caller. Which repos get it is
- * the file's TEST_SERVICES_REPOS, not this gate.
+ * Whether a run is one the box's test services may go to: a task, PR
+ * (mention) or self-heal FIX run; never a review (neither the review-plan
+ * lane nor a run that carries review-agent settings) and never a self-heal
+ * AUDIT. `lane` is the run's resolveRunLane(input), computed once by the
+ * caller. Which repos get it is the file's TEST_SERVICES_REPOS, not this gate.
  */
 export function receivesBoxTestServices(
   input: Pick<AgentRunInput, "reviewAgent" | "selfHeal">,
@@ -111,6 +117,6 @@ export function receivesBoxTestServices(
   return (
     lane !== "review" &&
     input.reviewAgent === undefined &&
-    input.selfHeal === undefined
+    (input.selfHeal === undefined || input.selfHeal.kind === "fix")
   );
 }

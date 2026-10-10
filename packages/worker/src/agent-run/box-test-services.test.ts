@@ -144,7 +144,26 @@ describe("receivesBoxTestServices", () => {
     expect(receivesBoxTestServices({ reviewAgent }, "task")).toBe(false);
   });
 
-  it("a self-heal run does not", () => {
+  const fix = {
+    kind: "fix" as const,
+    attemptId: "att-1",
+    branch: "automata/fix-1-abcdef01-a1",
+    baseBranch: "main",
+    checks: [],
+    denyExceptions: [],
+    gateToken: "gt",
+  };
+
+  it("a self-heal FIX run may get it, so its agent can run DB-backed suites", () => {
+    expect(receivesBoxTestServices({ selfHeal: fix }, "task")).toBe(true);
+    expect(receivesBoxTestServices({ selfHeal: fix }, "pr")).toBe(true);
+  });
+
+  it("a self-heal fix run in the review lane still does not", () => {
+    expect(receivesBoxTestServices({ selfHeal: fix }, "review")).toBe(false);
+  });
+
+  it("a self-heal AUDIT run does not (it inspects, it runs no suite)", () => {
     expect(
       receivesBoxTestServices(
         { selfHeal: { kind: "audit", checks: [], checkToken: "ck" } },
