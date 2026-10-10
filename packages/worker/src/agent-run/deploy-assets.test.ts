@@ -1073,6 +1073,76 @@ describeBashScriptHygiene(
 describeBashScriptHygiene(
   "packages/worker/deploy/linux/self-heal-acceptance.sh",
 );
+describeBashScriptHygiene(
+  "packages/worker/deploy/linux/install-test-postgres.sh",
+);
+
+describe("packages/worker/deploy/linux — test Postgres (no-Docker test suites)", () => {
+  const script = deployFile("linux", "install-test-postgres.sh");
+
+  it("refuses to run as anyone but root", () => {
+    expect(script).toMatch(
+      /\[ "\$\(id -u\)" = "0" \] \|\| fail "must run as root"/,
+    );
+  });
+
+  it("listens on loopback only, and verifies it", () => {
+    // Agent runs share the box: the test cluster must never be reachable off it.
+    expect(script).toMatch(/^listen_addresses = '127\.0\.0\.1'$/m);
+    expect(script).not.toMatch(/listen_addresses = '(\*|0\.0\.0\.0)'/);
+    expect(script).toMatch(/^PORT=15432$/m);
+    expect(script).toMatch(/listening beyond loopback/);
+  });
+
+  it("lets only automata_test in, from 127.0.0.1/32 with scram-sha-256", () => {
+    const hostLines = script
+      .split("\n")
+      .filter((l) => /^host(ssl|nossl)?\s/.test(l));
+    expect(hostLines).toHaveLength(1);
+    expect(hostLines[0]).toMatch(
+      /^host\s+all\s+\$\{ROLE\}\s+127\.0\.0\.1\/32\s+scram-sha-256"?$/,
+    );
+    expect(script).toMatch(/^ROLE=automata_test$/m);
+    expect(script).not.toMatch(/\btrust\b\s*"?$/m);
+  });
+
+  it("creates the role with CREATEDB and NOSUPERUSER, and checks it is not super", () => {
+    expect(script).toMatch(
+      /ALTER ROLE \$\{ROLE\} LOGIN CREATEDB NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS/,
+    );
+    expect(script).not.toMatch(/(^|[^O])SUPERUSER PASSWORD/);
+    expect(script).toMatch(/is a superuser/);
+  });
+
+  it("keeps the password root-only and out of argv and stdout", () => {
+    expect(script).toMatch(
+      /^PW_FILE=\/etc\/automata\/test-postgres\.password$/m,
+    );
+    expect(script).toMatch(/umask 077/);
+    expect(script).toMatch(/chmod 0600 "\$PW_FILE"/);
+    // Never echoed/logged, never passed as PGPASSWORD or a psql -c argument:
+    // the client check reads it from a temp PGPASSFILE written by printf.
+    const printed = [
+      ...script.matchAll(/\b(?:echo|log|fail|printf)\s+"([^"]*)"/g),
+    ].map((m) => m[1] ?? "");
+    expect(printed.length).toBeGreaterThan(5);
+    for (const text of printed) {
+      // `${PW_FILE}` (the path) is fine; `$PW` / `${PW}` (the secret) is not.
+      expect(text, text).not.toMatch(/\$\{?PW(\}|\b)/);
+    }
+    expect(script).toMatch(
+      /printf '127\.0\.0\.1:%s:\*:%s:%s\\n'[^\n]*>"\$PGPASSFILE"/,
+    );
+    expect(script).not.toMatch(/PGPASSWORD/);
+    expect(script).not.toMatch(/-c "[^"]*\$\{?PW\b/);
+    expect(script).toMatch(/PGPASSFILE/);
+  });
+
+  it("stays small enough to sit beside runs held to a memory ceiling", () => {
+    expect(script).toMatch(/^shared_buffers = 64MB$/m);
+    expect(script).toMatch(/^max_connections = 50"?$/m);
+  });
+});
 
 /**
  * What decides the bytes install-batteries.sh writes into a pack dir, paired

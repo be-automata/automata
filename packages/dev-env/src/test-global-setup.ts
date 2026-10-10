@@ -1,6 +1,16 @@
 import { execFileSync, execSync } from "child_process";
 import path from "path";
 
+import pg from "pg";
+
+import {
+  assertSafeTestDbName,
+  redactDatabaseUrl,
+  resolveTestServicesMode,
+  testDatabaseUrl,
+  type ExternalTestServicesMode,
+} from "./test-services-mode";
+
 export type SetupResult = {
   DATABASE_URL: string;
   REDIS_URL: string;
@@ -23,6 +33,8 @@ const PG_PORT = "15432";
 // the source of nondeterministic FK violations, missing-relation errors, and
 // "Unauthorized" failures across agents running the same commit.
 let createdDbName: string | null = null;
+// Set only in external mode (TEST_DATABASE_ADMIN_URL): where to drop it from.
+let externalAdminUrl: string | null = null;
 
 function psqlOnMaintenanceDb(sql: string): void {
   // Run against the default `postgres` maintenance database via the container's
@@ -54,7 +66,58 @@ function uniqueDbName(): string {
   return `test_${process.pid}_${Date.now().toString(36)}_${rand}`.toLowerCase();
 }
 
+async function queryAdminDb(adminUrl: string, sql: string): Promise<void> {
+  // CREATE/DROP DATABASE cannot run inside a transaction; a plain client
+  // query is autocommit.
+  const client = new pg.Client({ connectionString: adminUrl });
+  await client.connect();
+  try {
+    await client.query(sql);
+  } finally {
+    await client.end();
+  }
+}
+
+function quotedDbName(dbName: string): string {
+  // The name is the generated safe shape (validated); quoting is belt and braces.
+  assertSafeTestDbName(dbName);
+  return `"${dbName}"`;
+}
+
+// External mode: no Docker. Postgres is an already-running server reached over
+// TCP as a CREATEDB role; Redis is either a provided Upstash-compatible HTTP
+// endpoint or empty, which routes apps/www/src/lib/redis.ts to its in-memory
+// stand-in.
+async function setupExternalServices(
+  mode: ExternalTestServicesMode,
+): Promise<SetupResult> {
+  const dbName = uniqueDbName();
+  const databaseUrl = testDatabaseUrl(mode.adminUrl, dbName);
+  console.log(
+    `TEST_DATABASE_ADMIN_URL is set: using external Postgres at ${redactDatabaseUrl(mode.adminUrl)} (no docker compose)`,
+  );
+  await queryAdminDb(mode.adminUrl, `CREATE DATABASE ${quotedDbName(dbName)};`);
+  createdDbName = dbName;
+  externalAdminUrl = mode.adminUrl;
+  console.log(`Created isolated test database: ${dbName}`);
+  if (!mode.redisHttpUrl) {
+    console.log(
+      "TEST_REDIS_HTTP_URL is unset: Redis-backed code uses the in-memory stand-in",
+    );
+  }
+  return {
+    DATABASE_URL: databaseUrl,
+    REDIS_URL: "",
+    REDIS_HTTP_URL: mode.redisHttpUrl,
+    REDIS_HTTP_TOKEN: mode.redisHttpToken,
+  };
+}
+
 export async function setupTestContainers(): Promise<SetupResult> {
+  const mode = resolveTestServicesMode(process.env);
+  if (mode.kind === "external") {
+    return setupExternalServices(mode);
+  }
   console.log("Starting test containers...");
   // Start the containers using the pnpm script (this is idempotent).
   execSync("pnpm docker-up-tests", {
@@ -93,6 +156,21 @@ export async function teardownTestContainers(): Promise<void> {
   // Drop this run's isolated database. Containers stay up for fast subsequent
   // runs. WITH (FORCE) terminates any lingering pooled connections (PG 13+).
   if (!createdDbName) {
+    return;
+  }
+  if (externalAdminUrl) {
+    try {
+      await queryAdminDb(
+        externalAdminUrl,
+        `DROP DATABASE IF EXISTS ${quotedDbName(createdDbName)} WITH (FORCE);`,
+      );
+      console.log(`Dropped isolated test database: ${createdDbName}`);
+    } catch (error) {
+      console.warn(`Failed to drop test database ${createdDbName}:`, error);
+    } finally {
+      createdDbName = null;
+      externalAdminUrl = null;
+    }
     return;
   }
   try {
