@@ -100,6 +100,9 @@ export function runSocketPath(
  * under the worker's namespaced dir — root defaults to /tmp precisely so these
  * stay under the sun_path limit (the broker asserts the length; macOS bind
  * silently truncates over-long paths rather than erroring).
+ *
+ * Any unix socket bound in this dir for another uid must be chmod 0660 right
+ * after listen, or the Linux ACL mask voids the grant (gh-broker.ts, runtime.ts).
  */
 export function runGhSocketPath(
   root: string,

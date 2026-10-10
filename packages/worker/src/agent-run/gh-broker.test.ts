@@ -1,7 +1,8 @@
+import { execFileSync } from "node:child_process";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { graphqlHasMutation, startGhBroker, type GhBroker } from "./gh-broker";
 
 const TOKEN = "ghs_installation_token_secret";
@@ -151,7 +152,49 @@ describe("startGhBroker — construction fences", () => {
     const b = await start(impl, socketPath);
     expect((await request(b.socketPath)).status).toBe(200);
   });
+
+  it("binds the socket 0660 so the agent uid's ACL grant is effective (Linux ACL mask = group bits)", async () => {
+    const { impl } = recordingFetch();
+    const b = await start(impl);
+    expect(fs.statSync(b.socketPath).mode & 0o777).toBe(0o660);
+  });
+
+  it("closes the server and removes the socket when the chmod fails (no leaked broker)", async () => {
+    const socketPath = shortSocketPath();
+    const spy = vi.spyOn(fs, "chmodSync").mockImplementationOnce(() => {
+      throw new Error("EROFS");
+    });
+    try {
+      await expect(start(recordingFetch().impl, socketPath)).rejects.toThrow(
+        /EROFS/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    expect(fs.existsSync(socketPath)).toBe(false);
+  });
+
+  it.runIf(process.platform === "linux" && hasSetfacl())(
+    "Linux: an inherited agent ACL entry is effective rw- on the bound socket",
+    async () => {
+      const dir = fs.mkdtempSync("/tmp/gh-broker-t-");
+      tmpDirs.push(dir);
+      execFileSync("setfacl", ["-d", "-m", "u:nobody:rwx", dir]);
+      const b = await start(recordingFetch().impl, path.join(dir, "gh.sock"));
+      const acl = execFileSync("getfacl", ["-p", b.socketPath]).toString();
+      expect(acl).toMatch(/user:nobody:rwx\s+#effective:rw-/);
+    },
+  );
 });
+
+function hasSetfacl(): boolean {
+  try {
+    execFileSync("setfacl", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 describe("startGhBroker — per-request fencing", () => {
   it("401s a missing or wrong bearer without touching upstream; accepts both token and Bearer schemes", async () => {

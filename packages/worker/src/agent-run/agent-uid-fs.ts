@@ -22,7 +22,8 @@ const execFileAsync = promisify(execFile);
  * daemon (agent uid) cannot even bind inside a worker-owned run dir, and the
  * worker cannot connect to a socket the daemon binds. Inherited ACEs DO land on
  * bind(2)-created sockets (verified), so ONE ACE per direction on the run
- * namespace dir fixes both, with no daemon and no gh-broker change.
+ * namespace dir fixes both on macOS. Linux also needs each socket chmod 0660
+ * after bind (the ACL mask; see runtime.ts and gh-broker.ts).
  *
  * WHY PER-RUN AND NEVER THE ROOT. Inheritance is applied by the kernel at
  * create time, so an inheritable ACE on the SHARED root would make every run

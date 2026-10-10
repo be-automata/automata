@@ -37,7 +37,8 @@ import { HOP_BY_HOP, REQUEST_OWNED } from "./broker-common";
  *     different uid and Darwin DOES enforce socket permissions (unix(4)) — but
  *     the run-namespace dir carries an inheritable ACE that deliberately
  *     re-opens this socket to the agent uid, because `gh` must reach it. The
- *     per-run bearer is the fence either way.
+ *     per-run bearer is the fence either way. On Linux that inherited grant is
+ *     capped by the ACL mask, so the socket is chmod 0660 after listen.
  *   - Host must be `api.github.com` (uploads.github.com /
  *     objects.githubusercontent.com are out of scope — documented limitation).
  *   - method/path allowlist, v1 = read-only: GET/HEAD any path (reads cannot
@@ -264,6 +265,22 @@ export async function startGhBroker(
       resolve();
     });
   });
+  // Bound 0755 under the umask, the Linux ACL mask (= group bits) leaves the
+  // agent's grant r-x and connect(2) fails EACCES; see the daemon socket in
+  // runtime.ts. Unlike there, fatal: a broker the agent cannot reach is a no-op.
+  // lstat first: the run dir is agent-writable, so never chmod what a stray
+  // process could have swapped in under this name.
+  try {
+    const st = fs.lstatSync(socketPath);
+    if (!st.isSocket() || st.uid !== process.getuid?.()) {
+      throw new Error(`gh-broker: ${socketPath} is not this worker's socket`);
+    }
+    fs.chmodSync(socketPath, 0o660);
+  } catch (err) {
+    // The caller never gets a handle to close, so close here.
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw err;
+  }
   return {
     socketPath,
     close: () =>
