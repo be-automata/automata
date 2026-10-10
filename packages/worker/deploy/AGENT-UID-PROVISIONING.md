@@ -296,18 +296,24 @@ provisions the loopback test Postgres (127.0.0.1:25432) and writes
 `/etc/automata/agent-test-services.env` (`TEST_DATABASE_ADMIN_URL=` and
 `TEST_SERVICES_REPOS=`, default `be-automata/automata`; `root:<worker group>`
 0640). The worker reads it on every run and injects the URL, below the owner's
-repo env, into task and mention runs of a listed repo only. The login is shared
+repo env, into task, mention and self-heal fix runs of a listed repo only. The login is shared
 by every run that gets it, so list only repos you trust with each other's test
 databases. The worker refuses the file (one warning, no value) unless it is a
 regular file, at most 64 KiB, and not world-accessible; the agent uid cannot
 read it itself. Re-running the script is a no-op; a re-provision takes effect on
 the next run without a worker restart.
 
-Review and self-heal runs never get it. Self-heal has three env builders: the
-fix agent's (DaemonProcess), the audit checks' (`runSelfHealAuditStep` in
-`workflow.ts`) and the fix check's (the GATE-01 step in `workflow.ts`).
-Enabling it for self-heal means changing all three together, or a fix passes
-its agent's tests and then fails the platform's check of the same tree.
+Review runs and self-heal audit runs never get it. Self-heal has three env
+builders: the fix agent's (DaemonProcess), the audit checks'
+(`runSelfHealAuditStep` in `workflow.ts`) and the fix check's (the GATE-01 step
+in `workflow.ts`). Only the fix agent's gets it, so a fix for a DB-backed
+finding can run the repo's DB suites. The two check builders do not, on
+purpose: they run only the deterministic kinds in `self-heal-checks.ts`
+(dependency audit, workflow-file reads, file/gitignore/git-tracked probes,
+gitleaks), none of which runs a test suite or opens a database, so no check
+result can depend on it. A new check kind that runs a suite must add it to
+that builder in the same change, or a fix passes its agent's tests and then
+fails the platform's check of the same tree.
 
 ---
 

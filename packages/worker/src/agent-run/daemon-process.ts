@@ -188,7 +188,7 @@ export class DaemonProcess {
     }
     this.ghConfigDir = await this.createGhConfigDir();
     // The box's test-service URLs (install-test-postgres.sh): non-review,
-    // non-self-heal runs of the repos the file lists. No lane = no env (fail
+    // non-self-heal-audit runs of the repos the file lists. No lane = no env (fail
     // closed). Read per run, so a re-provision needs no restart. Spread BELOW
     // repoEnv: the owner's value for the same key wins; the reserved-key
     // filter applies to both.
