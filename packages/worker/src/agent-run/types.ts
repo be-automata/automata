@@ -83,6 +83,13 @@ export type SelfHealRunShape =
       branch: string;
       baseBranch: string;
       checks: SelfHealCheckShape[];
+      /**
+       * #277: the deterministic checks of the repo's recently resolved
+       * findings. Run on the same clean checkout after `checks`; any that
+       * fails there means this fix undid an earlier one, and fails the gate.
+       * Absent from older www payloads (nothing extra runs).
+       */
+      regressionChecks?: SelfHealCheckShape[];
       denyExceptions: string[];
       /** SECRET, worker-only, single-use; never logged. */
       gateToken: string;

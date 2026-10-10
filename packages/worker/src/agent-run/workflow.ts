@@ -644,7 +644,7 @@ async function reportSelfHealFix({
     posted = "error";
   }
   step(
-    `self-heal fix-check: status=${report.workerStatus} check=${report.checkOutcome ?? "none"} denied=${report.deniedPaths.length} head=${shortHead(report.headSha)} ms=${Math.max(0, now() - startedAt)} report=${posted}`,
+    `self-heal fix-check: status=${report.workerStatus} check=${report.checkOutcome ?? "none"} denied=${report.deniedPaths.length}${report.regressedFingerprints !== undefined ? ` regressed=${report.regressedFingerprints.length}` : ""} head=${shortHead(report.headSha)} ms=${Math.max(0, now() - startedAt)} report=${posted}`,
   );
 }
 

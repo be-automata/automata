@@ -292,6 +292,93 @@ describe("runFixCheck (GATE-01, R1)", () => {
     expect(empty.checkOutcome).toBe("error");
   });
 
+  it("#277: a resolved finding's check failing on the fix head fails the gate and names its fingerprint", async () => {
+    const { run, calls } = harness({
+      check: (call) => res(call.args[0] === "README.md" ? 1 : 0),
+    });
+    const report = await runFixCheck(
+      args(run, {
+        fix: {
+          ...FIX,
+          regressionChecks: [
+            {
+              fingerprint: "1111111111111111",
+              check: "file-exists",
+              subject: "LICENSE",
+            },
+            {
+              fingerprint: "2222222222222222",
+              check: "file-exists",
+              subject: "README.md",
+            },
+          ],
+        },
+      }),
+    );
+    expect(calls.filter((c) => stepOf(c.script) === "check")).toHaveLength(3);
+    expect(report).toEqual({
+      workerStatus: "completed",
+      headSha: PUSHED,
+      checkOutcome: "fail",
+      deniedPaths: [],
+      regressedFingerprints: ["2222222222222222"],
+    });
+  });
+
+  it("#277: resolved findings that still pass keep the gate passing; their own fingerprint is not re-run", async () => {
+    const { run, calls } = harness();
+    const report = await runFixCheck(
+      args(run, {
+        fix: {
+          ...FIX,
+          regressionChecks: [
+            { ...FIX.checks[0]! },
+            {
+              fingerprint: "1111111111111111",
+              check: "file-exists",
+              subject: "LICENSE",
+            },
+          ],
+        },
+      }),
+    );
+    expect(calls.filter((c) => stepOf(c.script) === "check")).toHaveLength(2);
+    expect(report.checkOutcome).toBe("pass");
+    expect(report.regressedFingerprints).toEqual([]);
+  });
+
+  it("#277: a resolved finding's check that errors does not fail the gate; the finding's own failure still wins", async () => {
+    const regressionChecks = [
+      { fingerprint: "1111111111111111", check: "no-such-kind", subject: "x" },
+    ];
+    const { run } = harness();
+    const ok = await runFixCheck(
+      args(run, { fix: { ...FIX, regressionChecks } }),
+    );
+    expect(ok.checkOutcome).toBe("pass");
+    expect(ok.regressedFingerprints).toEqual([]);
+
+    const { run: run2 } = harness({
+      check: (call) => res(call.args[0] === "SECURITY.md" ? 1 : 0),
+    });
+    const own = await runFixCheck(
+      args(run2, {
+        fix: {
+          ...FIX,
+          regressionChecks: [
+            {
+              fingerprint: "2222222222222222",
+              check: "file-exists",
+              subject: "LICENSE",
+            },
+          ],
+        },
+      }),
+    );
+    expect(own.checkOutcome).toBe("fail");
+    expect(own.regressedFingerprints).toEqual([]);
+  });
+
   it("check budget exhausted → completed with checkOutcome error", async () => {
     let clock = 1_000;
     const deadlineAt = 10_000;
@@ -626,6 +713,37 @@ describe("runFixCheck against a real git checkout (as the current user)", () => 
       deadlineAt: Date.now() + 60_000,
     });
     expect(ok.checkOutcome).toBe("pass");
+  });
+
+  it("#277: a resolved finding whose check fails on the pushed tree fails the gate on that fingerprint only", async () => {
+    const { dir, base, pushed } = repo();
+    const report = await runFixCheck({
+      fix: {
+        ...FIX,
+        regressionChecks: [
+          {
+            fingerprint: "fedcba9876543210",
+            check: "file-exists",
+            subject: "CODEOWNERS",
+          },
+          {
+            fingerprint: "0011223344556677",
+            check: "file-exists",
+            subject: "README.md",
+          },
+        ],
+      },
+      pushedSha: pushed,
+      baseSha: base,
+      workdir: dir,
+      agentUser: "",
+      run: runAsAgent,
+      env: env(),
+      deadlineAt: Date.now() + 60_000,
+    });
+    expect(report.workerStatus).toBe("completed");
+    expect(report.checkOutcome).toBe("fail");
+    expect(report.regressedFingerprints).toEqual(["fedcba9876543210"]);
   });
 
   it("a check that fails on the pushed tree → completed + fail", async () => {
