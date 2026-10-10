@@ -453,6 +453,37 @@ setInterval(() => {}, 1000);
       const env = await spawnedEnvFor({ repoFullName: "someone/else" });
       expect(env.TEST_DATABASE_ADMIN_URL).toBeUndefined();
     });
+
+    const selfHealFix: AgentRunInput["selfHeal"] = {
+      kind: "fix",
+      attemptId: "att-1",
+      branch: "automata/fix-1-abcdef01-a1",
+      baseBranch: "main",
+      checks: [],
+      denyExceptions: [],
+      gateToken: "gt",
+    };
+
+    it("is injected for a self-heal fix run of an allowlisted repo", async () => {
+      const env = await spawnedEnvFor({ selfHeal: selfHealFix });
+      expect(env.TEST_DATABASE_ADMIN_URL).toBe(BOX_URL);
+      expect(env.TEST_SERVICES_REPOS).toBeUndefined();
+    });
+
+    it("is NOT injected for a self-heal fix run of an unlisted repo", async () => {
+      const env = await spawnedEnvFor({
+        selfHeal: selfHealFix,
+        repoFullName: "someone/else",
+      });
+      expect(env.TEST_DATABASE_ADMIN_URL).toBeUndefined();
+    });
+
+    it("is NOT injected for a self-heal audit run", async () => {
+      const env = await spawnedEnvFor({
+        selfHeal: { kind: "audit", checks: [], checkToken: "ck" },
+      });
+      expect(env.TEST_DATABASE_ADMIN_URL).toBeUndefined();
+    });
   });
 
   it("degraded teardown: a LATE wrapper pidfile is still group-killed as the agent (F3)", async () => {
