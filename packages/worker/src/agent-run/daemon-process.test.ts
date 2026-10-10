@@ -389,6 +389,80 @@ setInterval(() => {}, 1000);
     expect(daemon.pid).toBe(9001);
   });
 
+  describe("box test services (/etc/automata/agent-test-services.env)", () => {
+    const BOX_URL =
+      "postgresql://automata_test:boxpw0123456789abcdef@127.0.0.1:25432/postgres";
+
+    async function spawnedEnvFor(
+      inputPatch: Partial<AgentRunInput>,
+    ): Promise<Record<string, string>> {
+      const { root, workdir, input } = fixture();
+      const envFile = path.join(root, "agent-test-services.env");
+      fs.writeFileSync(
+        envFile,
+        `# managed\nTEST_DATABASE_ADMIN_URL=${BOX_URL}\nPATH=/evil\n`,
+      );
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_NODE_BIN: "/usr/bin/node",
+      });
+      const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
+      fs.mkdirSync(path.dirname(socket), { recursive: true });
+      let spawnedEnv: Record<string, string> = {};
+      const inner = fakeSpawn({ recorded: [] });
+      const daemon = new DaemonProcess(
+        config,
+        { ...input, ...inputPatch },
+        workdir,
+        null,
+        null,
+        null,
+        {
+          aceExec: async () => {},
+          boxTestServicesEnvPath: envFile,
+          spawnFn: ((f: string, a: string[], o: SpawnOptions) => {
+            spawnedEnv = (o?.env ?? {}) as Record<string, string>;
+            return inner(f, a, o);
+          }) as unknown as typeof spawn,
+        },
+      );
+      daemons.push(daemon);
+      await daemon.start();
+      return spawnedEnv;
+    }
+
+    it("a task run's spawned env carries TEST_DATABASE_ADMIN_URL from the box file", async () => {
+      const env = await spawnedEnvFor({});
+      expect(env.TEST_DATABASE_ADMIN_URL).toBe(BOX_URL);
+      // Allowlist: the file cannot steer the runtime.
+      expect(env.PATH).not.toBe("/evil");
+    });
+
+    it("the owner's repoEnv wins over the box value for the same key", async () => {
+      const env = await spawnedEnvFor({
+        repoEnv: { TEST_DATABASE_ADMIN_URL: "postgresql://owner@db/postgres" },
+      });
+      expect(env.TEST_DATABASE_ADMIN_URL).toBe(
+        "postgresql://owner@db/postgres",
+      );
+    });
+
+    it("a review run does NOT get it", async () => {
+      const env = await spawnedEnvFor({
+        prNumber: 7,
+        prKey: "org-1/o/r/7",
+        supersedePolicy: "newest-wins",
+      });
+      expect(env.TEST_DATABASE_ADMIN_URL).toBeUndefined();
+    });
+
+    it("a personal (no-org) run does NOT get it", async () => {
+      const env = await spawnedEnvFor({ orgId: "u:user_1" });
+      expect(env.TEST_DATABASE_ADMIN_URL).toBeUndefined();
+    });
+  });
+
   it("degraded teardown: a LATE wrapper pidfile is still group-killed as the agent (F3)", async () => {
     // resolvePgid()'s bounded wait can expire before a slow sudo/PAM hop lands
     // the pidfile. teardown must take one last look rather than signal the

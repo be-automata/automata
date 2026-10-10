@@ -289,6 +289,16 @@ root-owned copy of the script taken from the verified HEAD commit, the
 no-run-in-flight preflight, and rollback) is in `deploy/PILOT-RUNBOOK.md`,
 section "Review batteries on the execution box (phase 3)".
 
+### Linux boxes: test Postgres for task runs
+
+`sudo [WORKER_GROUP=automata] packages/worker/deploy/linux/install-test-postgres.sh`
+provisions the loopback test Postgres (127.0.0.1:25432) and writes
+`/etc/automata/agent-test-services.env` (one `TEST_DATABASE_ADMIN_URL=` line,
+`root:<worker group>` 0640). The worker reads it on every run and injects it into
+task runs only (never review or self-heal runs), below the owner's repo env; the
+agent uid cannot read the file itself. Re-running the script is a no-op; a
+re-provision takes effect on the next run without a worker restart.
+
 ---
 
 ## PF honesty — required reading before this is cited as a control

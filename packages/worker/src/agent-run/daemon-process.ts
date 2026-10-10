@@ -7,6 +7,10 @@ import path from "node:path";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { redactSecrets } from "@terragon/utils/redact";
 import { reapplyPathGrant, type AceExec } from "./agent-uid-fs";
+import {
+  readBoxTestServicesEnv,
+  receivesBoxTestServices,
+} from "./box-test-services";
 import { buildDaemonEnv, type BrokerHandoff } from "./daemon-env";
 import { ghBrokerConfigYaml } from "./gh-broker";
 import {
@@ -124,6 +128,8 @@ export class DaemonProcess {
       platform?: NodeJS.Platform;
       /** Injectable so the suite never SIGKILLs a real process group. */
       killFn?: (pid: number, signal: NodeJS.Signals) => void;
+      /** Injectable so the suite never reads the real /etc file. */
+      boxTestServicesEnvPath?: string;
     } = {},
   ) {
     const workerId = getProcessWorkerId();
@@ -175,6 +181,13 @@ export class DaemonProcess {
       return this.env;
     }
     this.ghConfigDir = await this.createGhConfigDir();
+    // The box's test-service URLs (install-test-postgres.sh), for exactly the
+    // runs that get an owner's repo environment. Read per run, so a
+    // re-provision needs no restart. Spread BELOW repoEnv: the owner's value
+    // for the same key wins; the reserved-key filter applies to both.
+    const boxTestEnv = receivesBoxTestServices(this.input)
+      ? readBoxTestServicesEnv(this.deps.boxTestServicesEnvPath)
+      : {};
     this.env = buildDaemonEnv({
       baseEnv: process.env,
       anthropicApiKey: this.config.anthropicApiKey,
@@ -188,7 +201,7 @@ export class DaemonProcess {
       egressProxyUrl: this.egressProxyUrl,
       broker: this.broker,
       githubReadToken: this.deps.githubReadToken ?? null,
-      repoEnv: this.input.repoEnv ?? null,
+      repoEnv: { ...boxTestEnv, ...this.input.repoEnv },
       agentUser: this.config.agentUser,
       // Beside the clone, in the run dir, so it inherits the run's ACE.
       // Provisioning created it in the same `if (agentUser)` branch that
