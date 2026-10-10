@@ -32,6 +32,7 @@ import {
   resolveSelfHealEffective,
 } from "./resolve-self-heal";
 import { createSelfHealOctokit } from "./self-heal-octokit";
+import type { GuardFlag } from "./suppression-guard";
 import { preflightCapabilities } from "./self-heal-preflight";
 import type {
   SelfHealCallDeps,
@@ -260,11 +261,13 @@ export function renderFixPrBody({
   finding,
   issueNumber,
   diffLines,
+  flags = [],
 }: {
   attempt: Pick<AuditFixAttemptRow, "id" | "attemptNo" | "gatedHeadSha">;
   finding: Pick<AuditFindingRow, "ruleId" | "fingerprint">;
   issueNumber: number;
   diffLines: number;
+  flags?: readonly GuardFlag[];
 }): string {
   return [
     `<!-- automata-fix-pr:v1 attempt=${attempt.id} -->`,
@@ -276,6 +279,11 @@ export function renderFixPrBody({
     `- Checked commit: \`${attempt.gatedHeadSha ?? "unknown"}\``,
     "- The finding's deterministic check passed on a clean checkout of this commit.",
     `- Changed lines (lockfiles excluded): ${diffLines}`,
+    ...(flags.includes("lockfile_only")
+      ? [
+          "- Lockfile-only change: no `package.json` (`pnpm.overrides` or a version range) pins the patched version, so a later lockfile re-resolve can revert it. Consider pinning it before merging.",
+        ]
+      : []),
     "",
     "This draft is not reviewed yet. It is marked ready for review only after the repository's CI passes on this commit.",
     "",
@@ -524,6 +532,7 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
               finding: this.finding,
               issueNumber,
               diffLines: guard.diffLines,
+              flags: guard.flags,
             }),
             head: branch,
             base,
