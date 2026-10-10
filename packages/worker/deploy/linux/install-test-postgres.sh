@@ -34,11 +34,13 @@ umask 022
 #     reset + aged session/database sweep every 15 min) and runs it once;
 #   - verifies, as automata_test over TCP, that it can create and drop a
 #     database and is not a superuser, and that nothing listens off loopback;
-#   - then writes /etc/automata/agent-test-services.env: the one line
-#     TEST_DATABASE_ADMIN_URL=… (password included), root:<worker group> 0640.
-#     The WORKER reads it per run and injects it into task runs (never review
-#     runs) below the owner's repo env (packages/worker/src/agent-run/
-#     box-test-services.ts). The agent uid is not in that group and cannot read
+#   - then writes /etc/automata/agent-test-services.env, two lines:
+#     TEST_DATABASE_ADMIN_URL=… (password included) and TEST_SERVICES_REPOS=…
+#     (the comma-separated owner/repo list whose runs may use it; the login is
+#     shared, so it is scoped), root:<worker group> 0640. The WORKER reads it
+#     per run and injects the URL into task runs of a listed repo (never review
+#     or self-heal runs) below the owner's repo env (packages/worker/src/
+#     agent-run/box-test-services.ts). The agent uid is not in that group and cannot read
 #     the file itself; it only ever sees the value in its run's env. The sweep
 #     re-asserts the SAME password from PW_FILE, so the file stays valid.
 #
@@ -48,7 +50,7 @@ umask 022
 #
 # Usage: [FORCE=1] install-test-postgres.sh
 #   env: PG_VERSION (default 16), WORKER_GROUP (the worker unit's Group=,
-#   default automata)
+#   default automata), TEST_SERVICES_REPOS (default be-automata/automata)
 
 PG_VERSION="${PG_VERSION:-16}"
 FORCE="${FORCE:-0}"
@@ -65,6 +67,7 @@ SWEEP_BIN=/usr/local/sbin/automata-test-postgres-sweep.sh
 SWEEP_UNIT=automata-test-postgres-sweep
 WORKER_GROUP="${WORKER_GROUP:-automata}"
 AGENT_ENV_FILE=/etc/automata/agent-test-services.env
+TEST_SERVICES_REPOS="${TEST_SERVICES_REPOS:-be-automata/automata}"
 
 log() { echo "[test-postgres] $*"; }
 fail() {
@@ -76,6 +79,9 @@ fail() {
 command -v systemctl >/dev/null || fail "systemctl not on PATH"
 getent group "$WORKER_GROUP" >/dev/null ||
   fail "no group ${WORKER_GROUP} (set WORKER_GROUP to the worker unit's Group=)"
+REPO_RE='[A-Za-z0-9._-]+/[A-Za-z0-9._-]+'
+[[ "$TEST_SERVICES_REPOS" =~ ^${REPO_RE}(,${REPO_RE})*$ ]] ||
+  fail "TEST_SERVICES_REPOS must be comma-separated owner/repo names"
 for f in test-postgres-sweep.sh "${SWEEP_UNIT}.service" "${SWEEP_UNIT}.timer"; do
   [ -r "${SRC_DIR}/${f}" ] || fail "missing ${SRC_DIR}/${f}"
 done
@@ -238,7 +244,8 @@ fi
 # The password is hex (checked above), which is URL-safe as is: no encoding
 # needed. The content holds the secret, so it only ever goes through bash
 # string compares and the printf builtin — never a process argv, never stdout.
-AGENT_ENV_CONTENT="TEST_DATABASE_ADMIN_URL=postgresql://${ROLE}:${PW}@127.0.0.1:${PORT}/postgres"
+AGENT_ENV_CONTENT="TEST_DATABASE_ADMIN_URL=postgresql://${ROLE}:${PW}@127.0.0.1:${PORT}/postgres
+TEST_SERVICES_REPOS=${TEST_SERVICES_REPOS}"
 if differs "$AGENT_ENV_FILE" "$AGENT_ENV_CONTENT"; then
   write_file "$AGENT_ENV_FILE" "root:${WORKER_GROUP}" 0640 "$AGENT_ENV_CONTENT"
 fi
@@ -247,4 +254,4 @@ chmod 0640 "$AGENT_ENV_FILE"
 
 log "OK — PostgreSQL ${PG_VERSION} on 127.0.0.1:${PORT} only; ${ROLE} can create/drop databases and is not a superuser"
 log "TEST_DATABASE_ADMIN_URL=postgresql://${ROLE}:<REDACTED, see ${PW_FILE}>@127.0.0.1:${PORT}/postgres"
-log "task runs get it from ${AGENT_ENV_FILE} (root:${WORKER_GROUP} 0640), injected by the worker"
+log "task runs of ${TEST_SERVICES_REPOS} get it from ${AGENT_ENV_FILE} (root:${WORKER_GROUP} 0640), injected by the worker"

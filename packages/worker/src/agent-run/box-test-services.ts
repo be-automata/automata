@@ -1,117 +1,116 @@
 import fs from "node:fs";
 
-import { resolveRunLane } from "./run-lane";
+import type { RunLane } from "./run-lane";
 import type { AgentRunInput } from "./types";
 
 /**
  * Where install-test-postgres.sh writes the box's test-service URLs
  * (root:<worker group> 0640). The values are SECRET: never logged.
+ *
+ * Self-heal runs never get these. Their check envs are built separately
+ * (workflow.ts runSelfHealAuditStep and the fix-check step), and the fix
+ * agent's own env comes through DaemonProcess like any run; enabling self-heal
+ * means changing all three builders together, or a fix would pass its agent's
+ * tests and then fail the platform's check of the same tree.
  */
 export const BOX_TEST_SERVICES_ENV_PATH =
   "/etc/automata/agent-test-services.env";
 
-/**
- * The only keys the file may set. Anything else is dropped, so the file can
- * never steer the runtime (PATH, NODE_OPTIONS, credentials) of a run.
- */
-const BOX_TEST_SERVICES_KEYS: ReadonlySet<string> = new Set([
+/** The env keys the file may hand a run. Anything else is dropped. */
+const ENV_KEYS: ReadonlySet<string> = new Set([
   "TEST_DATABASE_ADMIN_URL",
   "TEST_REDIS_HTTP_URL",
   "TEST_REDIS_HTTP_TOKEN",
 ]);
 
+/**
+ * Comma-separated `owner/repo` list (case-insensitive) of the repos whose runs
+ * get the env. Absent or empty = no repo. Never itself handed to a run.
+ */
+const REPOS_KEY = "TEST_SERVICES_REPOS";
+
+const MAX_BYTES = 64 * 1024;
 const LINE = /^([A-Za-z_][A-Za-z0-9_]*)=(.+)$/;
 
-type ReadFileSync = (path: string, encoding: "utf8") => string;
-type Warn = (message: string, detail?: Record<string, unknown>) => void;
+function refuse(path: string, reason: string): Record<string, string> {
+  console.warn(`[box-test-services] ignoring ${path}: ${reason}`);
+  return {};
+}
 
-function errorCode(error: unknown): string | undefined {
-  if (error instanceof Error && "code" in error) {
-    const { code } = error as NodeJS.ErrnoException;
-    return code;
+function readGuarded(path: string): string | Record<string, string> {
+  let fd: number;
+  try {
+    // O_NOFOLLOW + fstat on the open fd: the lstat checks, without a window
+    // between checking the path and reading it.
+    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  } catch (error) {
+    const code =
+      error instanceof Error && "code" in error
+        ? String((error as NodeJS.ErrnoException).code)
+        : "unknown";
+    return code === "ENOENT" ? {} : refuse(path, `unreadable (${code})`);
   }
-  return undefined;
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return refuse(path, "not a regular file");
+    if (stat.size > MAX_BYTES) return refuse(path, "larger than 64 KiB");
+    if ((stat.mode & 0o007) !== 0) return refuse(path, "world-accessible");
+    return fs.readFileSync(fd, "utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /**
- * The box's test-service env for an agent run: `KEY=VALUE` lines, blanks and
- * `#` comments ignored, allowlisted keys only.
+ * The box's test-service env for a run of `repoFullName`: `KEY=VALUE` lines,
+ * blanks and `#` comments ignored, allowlisted keys only, and only when the
+ * file's TEST_SERVICES_REPOS names the repo — the login is shared by every run
+ * that gets it, so it is scoped to repos the box operator chose.
  *
  * Read on every call (not cached at boot) so a re-provision takes effect on
  * the next run without a worker restart. A missing file is the normal state
- * off the execution box and yields `{}` silently; an unreadable or malformed
- * one yields `{}` and a warning that names the path and line number, never a
+ * off the execution box and yields `{}` silently; a file that is unsafe,
+ * unreadable or malformed yields `{}` and one warning naming the path, never a
  * value.
  */
 export function readBoxTestServicesEnv(
+  repoFullName: string,
   path: string = BOX_TEST_SERVICES_ENV_PATH,
-  fsImpl: { readFileSync: ReadFileSync } = fs,
-  warn: Warn = (message, detail) => console.warn(message, detail),
 ): Record<string, string> {
-  let text: string;
-  try {
-    text = fsImpl.readFileSync(path, "utf8");
-  } catch (error) {
-    if (errorCode(error) !== "ENOENT") {
-      warn("[box-test-services] cannot read the env file — ignoring it", {
-        path,
-        code: errorCode(error) ?? "unknown",
-      });
-    }
-    return {};
-  }
+  const text = readGuarded(path);
+  if (typeof text !== "string") return text;
 
   const env: Record<string, string> = {};
-  const ignored: string[] = [];
-  const lines = text.split("\n");
-  for (const [index, raw] of lines.entries()) {
-    const line = raw.replace(/\r$/, "").trim();
-    if (line === "" || line.startsWith("#")) {
-      continue;
-    }
+  let repos: string[] = [];
+  for (const [index, raw] of text.split("\n").entries()) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
     const match = LINE.exec(line);
-    if (!match) {
-      warn("[box-test-services] malformed env file — ignoring all of it", {
-        path,
-        line: index + 1,
-      });
-      return {};
-    }
+    if (!match) return refuse(path, `malformed line ${index + 1}`);
     const [, key = "", value = ""] = match;
-    if (BOX_TEST_SERVICES_KEYS.has(key)) {
+    if (key === REPOS_KEY) {
+      repos = value.split(",").map((repo) => repo.trim().toLowerCase());
+    } else if (ENV_KEYS.has(key)) {
       env[key] = value;
-    } else {
-      ignored.push(key);
     }
   }
-  if (ignored.length > 0) {
-    warn("[box-test-services] ignoring keys outside the allowlist", {
-      path,
-      keys: ignored,
-    });
-  }
-  return env;
+  return repos.includes(repoFullName.toLowerCase()) ? env : {};
 }
 
 /**
- * Whether a run gets the box's test-service env: exactly the runs the control
- * plane hands an owner's repo environment to. Mirrors `isPlainTaskRun` in
- * apps/www/src/agent/hatchet/dispatch.ts — no review plan (no prKey /
- * supersedePolicy), an org thread (orgSettings is only read for one; a
- * personal thread's orgId is the `u:<userId>` fallback), and not self-heal.
- * Gated on the lane rather than on `input.repoEnv` being present, because
- * dispatch omits an empty repoEnv and a task run with no owner variables must
- * still reach the test database.
+ * Whether a run is one the box's test services may go to: a task or PR
+ * (mention) run, never a review (neither the review-plan lane nor a run that
+ * carries review-agent settings) and never self-heal. `lane` is the run's
+ * resolveRunLane(input), computed once by the caller. Which repos get it is
+ * the file's TEST_SERVICES_REPOS, not this gate.
  */
 export function receivesBoxTestServices(
-  input: Pick<
-    AgentRunInput,
-    "prKey" | "supersedePolicy" | "prNumber" | "orgId" | "selfHeal"
-  >,
+  input: Pick<AgentRunInput, "reviewAgent" | "selfHeal">,
+  lane: RunLane,
 ): boolean {
   return (
-    resolveRunLane(input) !== "review" &&
-    !input.orgId.startsWith("u:") &&
+    lane !== "review" &&
+    input.reviewAgent === undefined &&
     input.selfHeal === undefined
   );
 }

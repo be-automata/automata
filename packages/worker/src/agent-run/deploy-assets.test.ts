@@ -1194,15 +1194,29 @@ describe("packages/worker/deploy/linux — test Postgres (no-Docker test suites)
     );
   });
 
-  it("writes the worker's env file: one line, root:<worker group> 0640, compare-then-write, never printed", () => {
+  it("writes the worker's env file: URL + repo scope, root:<worker group> 0640, compare-then-write, never printed", () => {
     expect(script).toMatch(
       /^AGENT_ENV_FILE=\/etc\/automata\/agent-test-services\.env$/m,
     );
     expect(script).toMatch(/^WORKER_GROUP="\$\{WORKER_GROUP:-automata\}"$/m);
     expect(script).toMatch(/getent group "\$WORKER_GROUP" >\/dev\/null \|\|/);
-    // Exactly one line, the URL the test harness reads.
+    // Two lines: the URL the test harness reads, and the repos whose runs
+    // the worker may hand it to (the login is shared, so it is scoped).
     expect(script).toMatch(
-      /^AGENT_ENV_CONTENT="TEST_DATABASE_ADMIN_URL=postgresql:\/\/\$\{ROLE\}:\$\{PW\}@127\.0\.0\.1:\$\{PORT\}\/postgres"$/m,
+      /^AGENT_ENV_CONTENT="TEST_DATABASE_ADMIN_URL=postgresql:\/\/\$\{ROLE\}:\$\{PW\}@127\.0\.0\.1:\$\{PORT\}\/postgres\nTEST_SERVICES_REPOS=\$\{TEST_SERVICES_REPOS\}"$/m,
+    );
+    expect(script).toMatch(
+      /^TEST_SERVICES_REPOS="\$\{TEST_SERVICES_REPOS:-be-automata\/automata\}"$/m,
+    );
+    // Validated before anything is written: owner/repo(,owner/repo)*.
+    expect(script).toMatch(
+      /^REPO_RE='\[A-Za-z0-9\._-\]\+\/\[A-Za-z0-9\._-\]\+'$/m,
+    );
+    expect(script).toMatch(
+      /\[\[ "\$TEST_SERVICES_REPOS" =~ \^\$\{REPO_RE\}\(,\$\{REPO_RE\}\)\*\$ \]\] \|\|\n\s+fail /,
+    );
+    expect(script.indexOf("must be comma-separated owner/repo")).toBeLessThan(
+      script.indexOf('write_file "$DROPIN"'),
     );
     // Idempotent: written only when the content differs, via write_file
     // (mktemp 0600 + mv), and its mode/owner re-asserted every run.

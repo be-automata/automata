@@ -400,7 +400,8 @@ setInterval(() => {}, 1000);
       const envFile = path.join(root, "agent-test-services.env");
       fs.writeFileSync(
         envFile,
-        `# managed\nTEST_DATABASE_ADMIN_URL=${BOX_URL}\nPATH=/evil\n`,
+        `TEST_DATABASE_ADMIN_URL=${BOX_URL}\nTEST_SERVICES_REPOS=acme/other,O/R\n`,
+        { mode: 0o640 },
       );
       const config = loadWorkerConfig({
         WORKER_RUN_NAMESPACE_ROOT: root,
@@ -420,6 +421,7 @@ setInterval(() => {}, 1000);
         null,
         {
           aceExec: async () => {},
+          lane: "task",
           boxTestServicesEnvPath: envFile,
           spawnFn: ((f: string, a: string[], o: SpawnOptions) => {
             spawnedEnv = (o?.env ?? {}) as Record<string, string>;
@@ -432,11 +434,10 @@ setInterval(() => {}, 1000);
       return spawnedEnv;
     }
 
-    it("a task run's spawned env carries TEST_DATABASE_ADMIN_URL from the box file", async () => {
+    it("is injected for a task run of an allowlisted repo", async () => {
       const env = await spawnedEnvFor({});
       expect(env.TEST_DATABASE_ADMIN_URL).toBe(BOX_URL);
-      // Allowlist: the file cannot steer the runtime.
-      expect(env.PATH).not.toBe("/evil");
+      expect(env.TEST_SERVICES_REPOS).toBeUndefined();
     });
 
     it("the owner's repoEnv wins over the box value for the same key", async () => {
@@ -448,17 +449,8 @@ setInterval(() => {}, 1000);
       );
     });
 
-    it("a review run does NOT get it", async () => {
-      const env = await spawnedEnvFor({
-        prNumber: 7,
-        prKey: "org-1/o/r/7",
-        supersedePolicy: "newest-wins",
-      });
-      expect(env.TEST_DATABASE_ADMIN_URL).toBeUndefined();
-    });
-
-    it("a personal (no-org) run does NOT get it", async () => {
-      const env = await spawnedEnvFor({ orgId: "u:user_1" });
+    it("is NOT injected for a repo the file does not list", async () => {
+      const env = await spawnedEnvFor({ repoFullName: "someone/else" });
       expect(env.TEST_DATABASE_ADMIN_URL).toBeUndefined();
     });
   });

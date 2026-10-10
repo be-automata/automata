@@ -23,6 +23,26 @@ describe("redactSecrets", () => {
     expect(out).toContain("clone --depth 1");
   });
 
+  it("masks the password in any URL's userinfo, keeping scheme, user and host", () => {
+    const text = [
+      "connect failed: postgresql://automata_test:0a1b2c3d4e5f60718293a4b5c6d7e8f9@127.0.0.1:25432/postgres",
+      "redis://default:p%40ss-w0rd@cache.internal:6379/0",
+    ].join("\n");
+    const out = redactSecrets(text);
+    expect(out).not.toContain("0a1b2c3d4e5f60718293a4b5c6d7e8f9");
+    expect(out).not.toContain("p%40ss-w0rd");
+    expect(out).toContain(
+      "postgresql://automata_test:<redacted>@127.0.0.1:25432/postgres",
+    );
+    expect(out).toContain("redis://default:<redacted>@cache.internal:6379/0");
+  });
+
+  it("leaves a URL without a password (and a host:port path) untouched", () => {
+    const s =
+      "see https://example.com:8443/a@b and postgresql://user@db/postgres";
+    expect(redactSecrets(s)).toBe(s);
+  });
+
   it("leaves ordinary text untouched", () => {
     const s = "fatal: could not read from remote repository (exit 128)";
     expect(redactSecrets(s)).toBe(s);

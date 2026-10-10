@@ -1,57 +1,60 @@
-import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  BOX_TEST_SERVICES_ENV_PATH,
   readBoxTestServicesEnv,
   receivesBoxTestServices,
 } from "./box-test-services";
 
 const SECRET_URL =
   "postgresql://automata_test:s3cr3tpw0123456789abcdef@127.0.0.1:25432/postgres";
+const REPO = "be-automata/automata";
 
-function fileWith(text: string) {
-  return { readFileSync: () => text };
+let dir: string;
+let warn: ReturnType<typeof vi.spyOn>;
+
+beforeEach(() => {
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), "bts-"));
+  warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+});
+
+afterEach(() => {
+  warn.mockRestore();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+/** A file as the installer leaves it: 0640. `mode` overrides. */
+function envFile(text: string, mode = 0o640): string {
+  const p = path.join(dir, "agent-test-services.env");
+  fs.writeFileSync(p, text);
+  fs.chmodSync(p, mode);
+  return p;
 }
 
-function failingWith(code: string) {
-  return {
-    readFileSync: (): string => {
-      throw Object.assign(new Error(`${code}: nope`), { code });
-    },
-  };
-}
-
-function expectNoValueIn(warn: ReturnType<typeof vi.fn>): void {
+function expectOneWarningWithoutValues(): void {
+  expect(warn).toHaveBeenCalledTimes(1);
   const logged = JSON.stringify(warn.mock.calls);
   expect(logged).not.toContain("s3cr3tpw");
   expect(logged).not.toContain("tok_secret");
 }
 
 describe("readBoxTestServicesEnv", () => {
-  it("defaults to the path install-test-postgres.sh writes", () => {
-    expect(BOX_TEST_SERVICES_ENV_PATH).toBe(
-      "/etc/automata/agent-test-services.env",
+  it("reads the allowlisted keys for a listed repo, skipping blanks, comments and other keys", () => {
+    const p = envFile(
+      [
+        "# managed by install-test-postgres.sh",
+        "",
+        `TEST_DATABASE_ADMIN_URL=${SECRET_URL}`,
+        "TEST_REDIS_HTTP_URL=http://127.0.0.1:18079",
+        "TEST_REDIS_HTTP_TOKEN=tok_secret=with=equals",
+        "NODE_OPTIONS=--require /tmp/x.js",
+        "TEST_SERVICES_REPOS=acme/widgets, Be-Automata/Automata",
+        "",
+      ].join("\n"),
     );
-  });
-
-  it("reads the allowlisted keys, skipping blanks and comments", () => {
-    const warn = vi.fn();
-    const env = readBoxTestServicesEnv(
-      "/x.env",
-      fileWith(
-        [
-          "# managed by install-test-postgres.sh",
-          "",
-          `TEST_DATABASE_ADMIN_URL=${SECRET_URL}`,
-          "  ",
-          "TEST_REDIS_HTTP_URL=http://127.0.0.1:18079",
-          "TEST_REDIS_HTTP_TOKEN=tok_secret=with=equals\r",
-          "",
-        ].join("\n"),
-      ),
-      warn,
-    );
-    expect(env).toEqual({
+    expect(readBoxTestServicesEnv(REPO, p)).toEqual({
       TEST_DATABASE_ADMIN_URL: SECRET_URL,
       TEST_REDIS_HTTP_URL: "http://127.0.0.1:18079",
       TEST_REDIS_HTTP_TOKEN: "tok_secret=with=equals",
@@ -59,105 +62,94 @@ describe("readBoxTestServicesEnv", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it("drops keys outside the allowlist, naming the key but not the value", () => {
-    const warn = vi.fn();
-    const env = readBoxTestServicesEnv(
-      "/x.env",
-      fileWith(
-        `TEST_DATABASE_ADMIN_URL=${SECRET_URL}\nNODE_OPTIONS=--require /tmp/s3cr3tpw.js\nPATH=/evil\n`,
-      ),
-      warn,
+  it("is {} for a repo TEST_SERVICES_REPOS does not list", () => {
+    const p = envFile(
+      `TEST_DATABASE_ADMIN_URL=${SECRET_URL}\nTEST_SERVICES_REPOS=${REPO}\n`,
     );
-    expect(env).toEqual({ TEST_DATABASE_ADMIN_URL: SECRET_URL });
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[1]).toMatchObject({
-      keys: ["NODE_OPTIONS", "PATH"],
-    });
-    expectNoValueIn(warn);
+    expect(readBoxTestServicesEnv("someone/else", p)).toEqual({});
+    // A prefix or a suffix of a listed repo is not the repo.
+    expect(readBoxTestServicesEnv("be-automata/automata-x", p)).toEqual({});
+  });
+
+  it("is {} for every repo when TEST_SERVICES_REPOS is absent", () => {
+    const p = envFile(`TEST_DATABASE_ADMIN_URL=${SECRET_URL}\n`);
+    expect(readBoxTestServicesEnv(REPO, p)).toEqual({});
   });
 
   it("is {} and silent when the file does not exist (every non-box host)", () => {
-    const warn = vi.fn();
-    expect(
-      readBoxTestServicesEnv("/x.env", failingWith("ENOENT"), warn),
-    ).toEqual({});
+    expect(readBoxTestServicesEnv(REPO, path.join(dir, "missing.env"))).toEqual(
+      {},
+    );
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it("really reads the filesystem by default, and a missing path is {}", () => {
-    expect(
-      readBoxTestServicesEnv("/nonexistent/automata/agent-test-services.env"),
-    ).toEqual({});
+  it("refuses a world-accessible file", () => {
+    const p = envFile(
+      `TEST_DATABASE_ADMIN_URL=${SECRET_URL}\nTEST_SERVICES_REPOS=${REPO}\n`,
+      0o644,
+    );
+    expect(readBoxTestServicesEnv(REPO, p)).toEqual({});
+    expectOneWarningWithoutValues();
+    expect(String(warn.mock.calls[0]?.[0])).toContain("world-accessible");
   });
 
-  it("is {} with a warning when the file is unreadable", () => {
-    const warn = vi.fn();
-    expect(
-      readBoxTestServicesEnv("/x.env", failingWith("EACCES"), warn),
-    ).toEqual({});
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[1]).toMatchObject({
-      path: "/x.env",
-      code: "EACCES",
-    });
+  it("refuses a symlink, even to a well-formed file", () => {
+    const target = envFile(
+      `TEST_DATABASE_ADMIN_URL=${SECRET_URL}\nTEST_SERVICES_REPOS=${REPO}\n`,
+    );
+    const link = path.join(dir, "link.env");
+    fs.symlinkSync(target, link);
+    expect(readBoxTestServicesEnv(REPO, link)).toEqual({});
+    expectOneWarningWithoutValues();
+  });
+
+  it("refuses a directory and a file over 64 KiB", () => {
+    expect(readBoxTestServicesEnv(REPO, dir)).toEqual({});
+    const p = envFile(`# ${"x".repeat(64 * 1024)}\n`);
+    expect(readBoxTestServicesEnv(REPO, p)).toEqual({});
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 
   it.each([
     ["a line without '='", `TEST_DATABASE_ADMIN_URL ${SECRET_URL}`],
     ["an empty value", "TEST_DATABASE_ADMIN_URL="],
     ["an export prefix", `export TEST_DATABASE_ADMIN_URL=${SECRET_URL}`],
-  ])("is {} with a warning (no value) on %s", (_label, badLine) => {
-    const warn = vi.fn();
-    const env = readBoxTestServicesEnv(
-      "/x.env",
-      fileWith(`TEST_REDIS_HTTP_TOKEN=tok_secret\n${badLine}\n`),
-      warn,
+  ])("is {} with one warning (no value) on %s", (_label, badLine) => {
+    const p = envFile(
+      `TEST_REDIS_HTTP_TOKEN=tok_secret\nTEST_SERVICES_REPOS=${REPO}\n${badLine}\n`,
     );
-    expect(env).toEqual({});
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[1]).toMatchObject({ path: "/x.env", line: 2 });
-    expectNoValueIn(warn);
+    expect(readBoxTestServicesEnv(REPO, p)).toEqual({});
+    expectOneWarningWithoutValues();
   });
 });
 
-describe("receivesBoxTestServices (mirrors www dispatch isPlainTaskRun)", () => {
-  const org = { orgId: "org_1" };
-
-  it("an org task run gets it", () => {
-    expect(receivesBoxTestServices(org)).toBe(true);
+describe("receivesBoxTestServices", () => {
+  it("a task or PR (mention) run may get it", () => {
+    expect(receivesBoxTestServices({}, "task")).toBe(true);
+    expect(receivesBoxTestServices({}, "pr")).toBe(true);
   });
 
-  it("an org PR-scoped non-review run (a mention) gets it", () => {
-    expect(receivesBoxTestServices({ ...org, prNumber: 7 })).toBe(true);
+  it("a review-lane run does not", () => {
+    expect(receivesBoxTestServices({}, "review")).toBe(false);
   });
 
-  it("a review-plan run does not", () => {
-    expect(
-      receivesBoxTestServices({
-        ...org,
-        prNumber: 7,
-        prKey: "org_1/o/r/7",
-        supersedePolicy: "newest-wins",
-      }),
-    ).toBe(false);
-    expect(
-      receivesBoxTestServices({ ...org, supersedePolicy: "newest-wins" }),
-    ).toBe(false);
-  });
-
-  it("a personal (no-org) run does not", () => {
-    expect(receivesBoxTestServices({ orgId: "u:user_1" })).toBe(false);
-    expect(receivesBoxTestServices({ orgId: "u:user_1", prNumber: 7 })).toBe(
-      false,
-    );
+  it("a run carrying review-agent settings does not, whatever its lane", () => {
+    const reviewAgent = {
+      mode: "classic" as const,
+      batteries: [],
+      runTests: false,
+      commandTimeoutMs: 1000,
+    };
+    expect(receivesBoxTestServices({ reviewAgent }, "pr")).toBe(false);
+    expect(receivesBoxTestServices({ reviewAgent }, "task")).toBe(false);
   });
 
   it("a self-heal run does not", () => {
     expect(
-      receivesBoxTestServices({
-        ...org,
-        selfHeal: { kind: "audit", checks: [], checkToken: "ck" },
-      }),
+      receivesBoxTestServices(
+        { selfHeal: { kind: "audit", checks: [], checkToken: "ck" } },
+        "task",
+      ),
     ).toBe(false);
   });
 });

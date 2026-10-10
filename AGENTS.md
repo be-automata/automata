@@ -60,8 +60,9 @@ own throwaway database over TCP with no `docker compose`. Redis then uses the in
 stand-in unless `TEST_REDIS_HTTP_URL`/`TEST_REDIS_HTTP_TOKEN` are set. The box's server is
 provisioned by `packages/worker/deploy/linux/install-test-postgres.sh` (loopback 25432;
 a 15-minute sweep resets the role and drops databases older than 3h). On the execution box
-the worker injects it into task runs (never review runs) from
-`/etc/automata/agent-test-services.env`; an owner's repo env var of the same name wins.
+the worker injects it into task runs (never review runs) of the repos its
+`TEST_SERVICES_REPOS` lists, from `/etc/automata/agent-test-services.env`; an owner's repo
+env var of the same name wins.
 
 ### Database (Drizzle ORM)
 
