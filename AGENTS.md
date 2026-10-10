@@ -63,7 +63,7 @@ a 15-minute sweep resets the role and drops databases older than 3h). On the exe
 the worker injects it into task, mention and self-heal fix runs (never review or
 self-heal audit runs) of the repos its
 `TEST_SERVICES_REPOS` lists, from `/etc/automata/agent-test-services.env`; an owner's repo
-env var of the same name wins.
+env var of the same name wins (task and mention runs only: self-heal runs get no repo env).
 
 ### Database (Drizzle ORM)
 

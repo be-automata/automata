@@ -7,6 +7,7 @@ import {
   readBoxTestServicesEnv,
   receivesBoxTestServices,
 } from "./box-test-services";
+import { SELF_HEAL_CHECK_KINDS } from "./self-heal-checks";
 
 const SECRET_URL =
   "postgresql://automata_test:s3cr3tpw0123456789abcdef@127.0.0.1:25432/postgres";
@@ -120,6 +121,20 @@ describe("readBoxTestServicesEnv", () => {
     );
     expect(readBoxTestServicesEnv(REPO, p)).toEqual({});
     expectOneWarningWithoutValues();
+  });
+});
+
+describe("self-heal check envs stay DB-free", () => {
+  it("every check kind is deterministic (a new kind must decide whether its env builder needs the box test DB)", () => {
+    expect([...SELF_HEAL_CHECK_KINDS].sort()).toEqual([
+      "file-exists",
+      "gitignore-has-pattern",
+      "gitleaks-clean",
+      "npm-audit-clean",
+      "path-untracked",
+      "workflow-actions-pinned",
+      "workflow-has-permissions",
+    ]);
   });
 });
 
