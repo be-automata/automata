@@ -1,0 +1,22 @@
+# Reset the test Postgres role and drop what dead test runs left behind.
+#
+# Oneshot, driven by automata-test-postgres-sweep.timer. Root, because it reads
+# the root-only role password and talks to the cluster as the postgres account.
+#
+# No Restart=: a failed sweep stays `failed` where `systemctl --failed` sees it;
+# the next tick runs it again anyway.
+
+[Unit]
+Description=Sweep the test Postgres (role reset, aged sessions and databases)
+Documentation=file:///opt/automata-platform/packages/worker/deploy/linux/test-postgres-sweep.sh
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/automata-test-postgres-sweep.sh
+# Bounded: a sweep that hangs must not still be running when the next fires.
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=automata-test-postgres-sweep

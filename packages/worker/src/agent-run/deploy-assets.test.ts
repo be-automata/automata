@@ -1076,6 +1076,25 @@ describeBashScriptHygiene(
 describeBashScriptHygiene(
   "packages/worker/deploy/linux/install-test-postgres.sh",
 );
+describeBashScriptHygiene(
+  "packages/worker/deploy/linux/test-postgres-sweep.sh",
+);
+
+/** The quoted `echo|log|fail|printf "…"` arguments of a bash script. */
+function printedStrings(script: string): string[] {
+  return [...script.matchAll(/\b(?:echo|log|fail|printf)\s+"([^"]*)"/g)].map(
+    (m) => m[1] ?? "",
+  );
+}
+
+/** Every heredoc fed to psql starts by keeping failed statements out of the log. */
+function expectPsqlHeredocsQuietOnError(script: string): void {
+  const heredocs = [...script.matchAll(/psql[^\n]*<<SQL\n([^\n]*)/g)];
+  expect(heredocs.length).toBeGreaterThan(0);
+  for (const m of heredocs) {
+    expect(m[1]).toBe("SET log_min_error_statement = panic;");
+  }
+}
 
 describe("packages/worker/deploy/linux — test Postgres (no-Docker test suites)", () => {
   const script = deployFile("linux", "install-test-postgres.sh");
@@ -1086,11 +1105,12 @@ describe("packages/worker/deploy/linux — test Postgres (no-Docker test suites)
     );
   });
 
-  it("listens on loopback only, and verifies it", () => {
+  it("listens on loopback only, on 25432 (not docker-up-tests' 15432), and verifies it", () => {
     // Agent runs share the box: the test cluster must never be reachable off it.
     expect(script).toMatch(/^listen_addresses = '127\.0\.0\.1'$/m);
     expect(script).not.toMatch(/listen_addresses = '(\*|0\.0\.0\.0)'/);
-    expect(script).toMatch(/^PORT=15432$/m);
+    expect(script).toMatch(/^PORT=25432$/m);
+    expect(script).not.toMatch(/^PORT=15432$/m);
     expect(script).toMatch(/listening beyond loopback/);
   });
 
@@ -1108,10 +1128,11 @@ describe("packages/worker/deploy/linux — test Postgres (no-Docker test suites)
 
   it("creates the role with CREATEDB and NOSUPERUSER, and checks it is not super", () => {
     expect(script).toMatch(
-      /ALTER ROLE \$\{ROLE\} LOGIN CREATEDB NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS/,
+      /ALTER ROLE \$\{ROLE\} LOGIN CREATEDB NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 40/,
     );
     expect(script).not.toMatch(/(^|[^O])SUPERUSER PASSWORD/);
     expect(script).toMatch(/is a superuser/);
+    expectPsqlHeredocsQuietOnError(script);
   });
 
   it("keeps the password root-only and out of argv and stdout", () => {
@@ -1122,9 +1143,7 @@ describe("packages/worker/deploy/linux — test Postgres (no-Docker test suites)
     expect(script).toMatch(/chmod 0600 "\$PW_FILE"/);
     // Never echoed/logged, never passed as PGPASSWORD or a psql -c argument:
     // the client check reads it from a temp PGPASSFILE written by printf.
-    const printed = [
-      ...script.matchAll(/\b(?:echo|log|fail|printf)\s+"([^"]*)"/g),
-    ].map((m) => m[1] ?? "");
+    const printed = printedStrings(script);
     expect(printed.length).toBeGreaterThan(5);
     for (const text of printed) {
       // `${PW_FILE}` (the path) is fine; `$PW` / `${PW}` (the secret) is not.
@@ -1138,9 +1157,99 @@ describe("packages/worker/deploy/linux — test Postgres (no-Docker test suites)
     expect(script).toMatch(/PGPASSFILE/);
   });
 
-  it("stays small enough to sit beside runs held to a memory ceiling", () => {
+  it("stays small, and bounds sessions in the conf file (not the role)", () => {
     expect(script).toMatch(/^shared_buffers = 64MB$/m);
-    expect(script).toMatch(/^max_connections = 50"?$/m);
+    expect(script).toMatch(/^max_connections = 50$/m);
+    expect(script).toMatch(/^temp_file_limit = 2GB$/m);
+    expect(script).toMatch(/^client_connection_check_interval = 2s$/m);
+    expect(script).toMatch(/^idle_in_transaction_session_timeout = 10min"?$/m);
+  });
+
+  it("caps the server's memory and CPU with a systemd drop-in on the cluster unit", () => {
+    // The server runs outside every run's cgroup: `SET work_mem = '4GB'` would
+    // otherwise escape the run's 1500M ceiling.
+    expect(script).toMatch(
+      /^LIMITS="\/etc\/systemd\/system\/\$\{UNIT\}\.service\.d\/automata-limits\.conf"$/m,
+    );
+    expect(script).toMatch(/^UNIT="postgresql@\$\{PG_VERSION\}-main"$/m);
+    expect(script).toMatch(/^MemoryHigh=768M$/m);
+    expect(script).toMatch(/^MemoryMax=1G$/m);
+    expect(script).toMatch(/^CPUQuota=200%"?$/m);
+    expect(script).toMatch(/systemctl daemon-reload/);
+  });
+
+  it("will not restart under a running test unless FORCE=1, and reloads for pg_hba only", () => {
+    expect(script).toMatch(/pg_stat_activity WHERE usename = '\$\{ROLE\}'/);
+    expect(script).toMatch(
+      /if \[ "\$ACTIVE" != "0" \] && \[ "\$FORCE" != "1" \]; then\n\s+fail /,
+    );
+    // The guard runs before any file is written, so a refused run leaves the
+    // change pending for the next one.
+    const guard = script.indexOf('[ "$FORCE" != "1" ]');
+    expect(guard).toBeGreaterThan(0);
+    expect(script.indexOf('write_file "$DROPIN"')).toBeGreaterThan(guard);
+    expect(script.indexOf('write_file "$LIMITS"')).toBeGreaterThan(guard);
+    expect(script).toMatch(
+      /elif \[ "\$NEED_RELOAD" = "1" \]; then[^]*?systemctl reload "\$UNIT"/,
+    );
+  });
+
+  it("installs, enables and runs the sweep", () => {
+    expect(script).toMatch(/test-postgres-sweep\.sh" "\$SWEEP_BIN"/);
+    expect(script).toMatch(
+      /systemctl enable --quiet --now "\$\{SWEEP_UNIT\}\.timer"/,
+    );
+    expect(script).toMatch(/^"\$SWEEP_BIN"$/m);
+  });
+});
+
+describe("packages/worker/deploy/linux — test Postgres sweep", () => {
+  const sweep = deployFile("linux", "test-postgres-sweep.sh");
+
+  it("is root-only and talks to the cluster as postgres on 25432", () => {
+    expect(sweep).toMatch(
+      /\[ "\$\(id -u\)" = "0" \] \|\| fail "must run as root"/,
+    );
+    expect(sweep).toMatch(/^PORT=25432$/m);
+    expect(sweep).toMatch(
+      /runuser -u postgres -- psql -X -q -At -v ON_ERROR_STOP=1 -p "\$PORT" -d postgres <<SQL/,
+    );
+    expectPsqlHeredocsQuietOnError(sweep);
+  });
+
+  it("resets what the role can change about itself", () => {
+    expect(sweep).toMatch(/^ALTER ROLE \$\{ROLE\} RESET ALL;$/m);
+    expect(sweep).toMatch(
+      /^ALTER ROLE \$\{ROLE\} LOGIN CREATEDB NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 40 PASSWORD '\$\{PW\}';$/m,
+    );
+    expect(sweep).toMatch(/\[\[ "\$PW" =~ \^\[0-9a-f\]\{32,\}\$ \]\]/);
+    for (const text of printedStrings(sweep)) {
+      expect(text, text).not.toMatch(/\$\{?PW(\}|\b)/);
+    }
+  });
+
+  it("sweeps sessions and databases older than 3h, only the role's own", () => {
+    expect(sweep).toMatch(/backend_start < now\(\) - interval '3 hours'/);
+    expect(sweep).toMatch(
+      /pg_stat_file\('base\/' \|\| d\.oid \|\| '\/PG_VERSION', true\)\)\.modification\s+< now\(\) - interval '3 hours'/,
+    );
+    expect(sweep).toMatch(/WHERE r\.rolname = '\$\{ROLE\}'/);
+    expect(sweep).toMatch(/format\('DROP DATABASE %I WITH \(FORCE\)'/);
+    expect(sweep).toMatch(/^\\gexec$/m);
+  });
+
+  it("runs every 15 minutes from a oneshot unit that fails loudly", () => {
+    const unit = deployFile("linux", "automata-test-postgres-sweep.service");
+    expect(unit).toMatch(/^Type=oneshot$/m);
+    expect(unit).not.toMatch(/^Restart=/m);
+    expect(unit).toMatch(/^TimeoutStartSec=\d+$/m);
+    expect(unit).toMatch(
+      /^ExecStart=\/usr\/local\/sbin\/automata-test-postgres-sweep\.sh$/m,
+    );
+    const timer = deployFile("linux", "automata-test-postgres-sweep.timer");
+    expect(timer).toMatch(/^OnCalendar=\*:0\/15$/m);
+    expect(timer).toMatch(/^Unit=automata-test-postgres-sweep\.service$/m);
+    expect(timer).toMatch(/^WantedBy=timers\.target$/m);
   });
 });
 

@@ -1,0 +1,13 @@
+# Every 15 minutes: a poisoned test role or a pile of abandoned databases
+# lasts at most one tick.
+
+[Unit]
+Description=Sweep the test Postgres every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+Unit=automata-test-postgres-sweep.service
+
+[Install]
+WantedBy=timers.target

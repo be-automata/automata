@@ -12,9 +12,14 @@ umask 022
 #
 # What it does (idempotent; a second run changes nothing and restarts nothing):
 #   - installs Ubuntu's `postgresql` package (24.04 ships PG16);
-#   - conf.d drop-in: listen on 127.0.0.1 ONLY, port 15432, small memory
-#     (shared_buffers 64MB, max_connections 50) so it fits next to runs held to
-#     a 1500M ceiling;
+#   - conf.d drop-in: listen on 127.0.0.1 ONLY, port 25432 (not 15432: that is
+#     the port `pnpm docker-up-tests` publishes, should anyone run it here),
+#     small memory, and per-session bounds (temp_file_limit, idle-in-transaction
+#     timeout, dead-client checks) set in the FILE, where the test role cannot
+#     undo them;
+#   - systemd drop-in on the cluster unit: MemoryHigh/MemoryMax/CPUQuota. The
+#     server runs outside every run's cgroup, so without this one run's
+#     `SET work_mem = '4GB'` escapes that run's 1500M ceiling;
 #   - replaces the cluster's pg_hba.conf: the postgres OS account over the local
 #     socket (peer), and automata_test from 127.0.0.1/32 with scram-sha-256.
 #     Nothing else, so no other role or address can log in;
@@ -25,19 +30,30 @@ umask 022
 #   - the role's password is generated ONCE into /etc/automata/test-postgres.password
 #     (root:root 0600) and never printed. It never appears in a process argv:
 #     SQL goes to psql on stdin and the client check reads a temp PGPASSFILE;
+#   - installs and enables automata-test-postgres-sweep.{service,timer} (role
+#     reset + aged session/database sweep every 15 min) and runs it once;
 #   - verifies, as automata_test over TCP, that it can create and drop a
 #     database and is not a superuser, and that nothing listens off loopback.
 #
-# Usage: install-test-postgres.sh   (env: PG_VERSION, default 16)
+# Restarts are guarded: when a restart is needed and automata_test has open
+# sessions (a test run in flight) it refuses unless FORCE=1. A pg_hba-only
+# change is applied with a reload, which drops nobody.
+#
+# Usage: [FORCE=1] install-test-postgres.sh   (env: PG_VERSION, default 16)
 
 PG_VERSION="${PG_VERSION:-16}"
-PORT=15432
+FORCE="${FORCE:-0}"
+PORT=25432
 ROLE=automata_test
 PW_FILE=/etc/automata/test-postgres.password
 CLUSTER_DIR="/etc/postgresql/${PG_VERSION}/main"
 DROPIN="${CLUSTER_DIR}/conf.d/automata-test.conf"
 HBA="${CLUSTER_DIR}/pg_hba.conf"
 UNIT="postgresql@${PG_VERSION}-main"
+LIMITS="/etc/systemd/system/${UNIT}.service.d/automata-limits.conf"
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SWEEP_BIN=/usr/local/sbin/automata-test-postgres-sweep.sh
+SWEEP_UNIT=automata-test-postgres-sweep
 
 log() { echo "[test-postgres] $*"; }
 fail() {
@@ -47,6 +63,9 @@ fail() {
 
 [ "$(id -u)" = "0" ] || fail "must run as root"
 command -v systemctl >/dev/null || fail "systemctl not on PATH"
+for f in test-postgres-sweep.sh "${SWEEP_UNIT}.service" "${SWEEP_UNIT}.timer"; do
+  [ -r "${SRC_DIR}/${f}" ] || fail "missing ${SRC_DIR}/${f}"
+done
 
 if dpkg-query -W -f='${Status}' postgresql 2>/dev/null | grep -q 'install ok installed'; then
   log "postgresql package already installed"
@@ -60,9 +79,7 @@ fi
 [ -d "${CLUSTER_DIR}/conf.d" ] || fail "${CLUSTER_DIR}/conf.d missing: the drop-in would be ignored"
 
 # ── password: generated once, root-only, hex so it is safe inside a SQL literal ──
-if [ ! -d /etc/automata ]; then
-  install -d -o root -g root -m 0755 /etc/automata
-fi
+install -d -o root -g root -m 0755 /etc/automata
 if [ ! -s "$PW_FILE" ]; then
   (
     umask 077
@@ -75,41 +92,81 @@ chmod 0600 "$PW_FILE"
 PW="$(cat "$PW_FILE")"
 [[ "$PW" =~ ^[0-9a-f]{32,}$ ]] || fail "${PW_FILE} is not the generated hex password; remove it to regenerate"
 
-# ── server config ────────────────────────────────────────────────────────────
-CHANGED=0
-write_if_changed() {
-  local dest="$1" mode="$2" content="$3"
-  if [ -f "$dest" ] && [ "$(cat "$dest")" = "$content" ]; then
-    return 0
-  fi
-  local tmp
-  tmp="$(mktemp "${dest}.XXXXXX")"
-  printf '%s\n' "$content" >"$tmp"
-  chown postgres:postgres "$tmp"
-  chmod "$mode" "$tmp"
-  mv -f "$tmp" "$dest"
-  CHANGED=1
-  log "wrote ${dest}"
-}
-
-write_if_changed "$DROPIN" 0644 "# Managed by install-test-postgres.sh. Test-only cluster.
+# ── desired config ───────────────────────────────────────────────────────────
+DROPIN_CONTENT="# Managed by install-test-postgres.sh. Test-only cluster.
 listen_addresses = '127.0.0.1'
 port = ${PORT}
 shared_buffers = 64MB
-max_connections = 50"
+max_connections = 50
+temp_file_limit = 2GB
+client_connection_check_interval = 2s
+idle_in_transaction_session_timeout = 10min"
 
-if [ ! -f "${HBA}.dist" ]; then
-  cp -p "$HBA" "${HBA}.dist"
-fi
-write_if_changed "$HBA" 0640 "# Managed by install-test-postgres.sh (original kept as pg_hba.conf.dist).
+HBA_CONTENT="# Managed by install-test-postgres.sh (original kept as pg_hba.conf.dist).
 # TYPE  DATABASE  USER           ADDRESS        METHOD
 local   all       postgres                      peer
 host    all       ${ROLE}        127.0.0.1/32   scram-sha-256"
 
+LIMITS_CONTENT="# Managed by install-test-postgres.sh. The server runs outside every
+# test run's cgroup; bound it here so one session cannot take the box.
+[Service]
+MemoryHigh=768M
+MemoryMax=1G
+CPUQuota=200%"
+
+differs() { [ ! -f "$1" ] || [ "$(cat "$1")" != "$2" ]; }
+
+write_file() {
+  local dest="$1" owner="$2" mode="$3" content="$4" tmp
+  tmp="$(mktemp "${dest}.XXXXXX")"
+  printf '%s\n' "$content" >"$tmp"
+  chown "$owner" "$tmp"
+  chmod "$mode" "$tmp"
+  mv -f "$tmp" "$dest"
+  log "wrote ${dest}"
+}
+
+# Decide BEFORE writing anything, so a refused restart leaves the files as they
+# were and the next run still sees the change pending.
+NEED_RESTART=0
+NEED_RELOAD=0
+differs "$DROPIN" "$DROPIN_CONTENT" && NEED_RESTART=1
+differs "$LIMITS" "$LIMITS_CONTENT" && NEED_RESTART=1
+differs "$HBA" "$HBA_CONTENT" && NEED_RELOAD=1
+RUNNING_PORT=""
+if systemctl is-active --quiet "$UNIT"; then
+  RUNNING_PORT="$(pg_lsclusters -h "$PG_VERSION" main | awk '{print $3}')"
+  [ "$RUNNING_PORT" = "$PORT" ] || NEED_RESTART=1
+else
+  NEED_RESTART=1
+fi
+
+if [ "$NEED_RESTART" = "1" ] && [ -n "$RUNNING_PORT" ]; then
+  ACTIVE="$(runuser -u postgres -- psql -X -At -p "$RUNNING_PORT" -d postgres \
+    -c "SELECT count(*) FROM pg_stat_activity WHERE usename = '${ROLE}'")"
+  if [ "$ACTIVE" != "0" ] && [ "$FORCE" != "1" ]; then
+    fail "a restart is needed but ${ROLE} has ${ACTIVE} open session(s) (a test run in flight); re-run when idle, or with FORCE=1"
+  fi
+fi
+
+differs "$DROPIN" "$DROPIN_CONTENT" && write_file "$DROPIN" postgres:postgres 0644 "$DROPIN_CONTENT"
+if [ ! -f "${HBA}.dist" ]; then
+  cp -p "$HBA" "${HBA}.dist"
+fi
+differs "$HBA" "$HBA_CONTENT" && write_file "$HBA" postgres:postgres 0640 "$HBA_CONTENT"
+if differs "$LIMITS" "$LIMITS_CONTENT"; then
+  install -d -o root -g root -m 0755 "$(dirname "$LIMITS")"
+  write_file "$LIMITS" root:root 0644 "$LIMITS_CONTENT"
+  systemctl daemon-reload
+fi
+
 systemctl enable --quiet postgresql
-if [ "$CHANGED" = "1" ] || ! systemctl is-active --quiet "$UNIT"; then
+if [ "$NEED_RESTART" = "1" ]; then
   log "restarting ${UNIT}"
   systemctl restart "$UNIT"
+elif [ "$NEED_RELOAD" = "1" ]; then
+  log "reloading ${UNIT} (pg_hba only)"
+  systemctl reload "$UNIT"
 fi
 for _ in $(seq 1 30); do
   runuser -u postgres -- pg_isready -q -p "$PORT" && break
@@ -117,13 +174,32 @@ for _ in $(seq 1 30); do
 done
 runuser -u postgres -- pg_isready -q -p "$PORT" || fail "${UNIT} is not accepting connections on ${PORT}"
 
-# ── role: SQL on stdin, so the password never reaches a process argv ─────────
+# ── role: SQL on stdin, so the password never reaches a process argv; a failing
+#    statement is kept out of the server log (log_min_error_statement) ────────
 runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -p "$PORT" -d postgres <<SQL
+SET log_min_error_statement = panic;
 SELECT 'CREATE ROLE ${ROLE}' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${ROLE}')
 \gexec
-ALTER ROLE ${ROLE} LOGIN CREATEDB NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${PW}';
+ALTER ROLE ${ROLE} LOGIN CREATEDB NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 40 PASSWORD '${PW}';
 SQL
 log "role ${ROLE} is LOGIN CREATEDB NOSUPERUSER"
+
+# ── sweep: role reset + aged sessions/databases, every 15 minutes ────────────
+UNITS_CHANGED=0
+if ! cmp -s "${SRC_DIR}/test-postgres-sweep.sh" "$SWEEP_BIN"; then
+  install -o root -g root -m 0755 "${SRC_DIR}/test-postgres-sweep.sh" "$SWEEP_BIN"
+  log "installed ${SWEEP_BIN}"
+fi
+for f in "${SWEEP_UNIT}.service" "${SWEEP_UNIT}.timer"; do
+  if ! cmp -s "${SRC_DIR}/${f}" "/etc/systemd/system/${f}"; then
+    install -o root -g root -m 0644 "${SRC_DIR}/${f}" "/etc/systemd/system/${f}"
+    log "installed /etc/systemd/system/${f}"
+    UNITS_CHANGED=1
+  fi
+done
+[ "$UNITS_CHANGED" = "1" ] && systemctl daemon-reload
+systemctl enable --quiet --now "${SWEEP_UNIT}.timer"
+"$SWEEP_BIN"
 
 # ── verify as the role, over TCP ─────────────────────────────────────────────
 PGPASSFILE="$(mktemp)"

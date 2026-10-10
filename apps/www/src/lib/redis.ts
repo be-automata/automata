@@ -119,7 +119,9 @@ function createInMemoryRedis(): Redis {
 
   const keys = (pattern: string) => {
     const regex = new RegExp(
-      "^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$",
+      "^" +
+        pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") +
+        "$",
     );
     const all = new Set([...store.keys(), ...sets.keys()]);
     return [...all].filter((k) => !isExpired(k) && regex.test(k));
@@ -185,6 +187,14 @@ function createInMemoryRedis(): Redis {
   return impl as unknown as Redis;
 }
 
-export const redis: Redis = env.REDIS_URL.trim()
-  ? new Redis({ url: env.REDIS_URL, token: env.REDIS_TOKEN })
-  : createInMemoryRedis();
+/**
+ * True when `redis` is the in-memory stand-in (REDIS_URL unset). Callers whose
+ * backend needs real Redis features the stand-in does not implement (e.g.
+ * @upstash/ratelimit's Lua scripts via `evalsha`) branch on this explicitly,
+ * instead of failing open on every error, which would also hide a real outage.
+ */
+export const isInMemoryRedis: boolean = !env.REDIS_URL.trim();
+
+export const redis: Redis = isInMemoryRedis
+  ? createInMemoryRedis()
+  : new Redis({ url: env.REDIS_URL, token: env.REDIS_TOKEN });

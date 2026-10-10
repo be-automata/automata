@@ -2,19 +2,19 @@
  * Pure helpers that decide where the Postgres/Redis-backed test suites get
  * their services from. Kept free of I/O so they can be unit-tested anywhere.
  *
- * - `docker` (default): `pnpm docker-up-tests` starts the compose stack and the
- *   per-run database is created through `docker exec … psql`.
- * - `external`: `TEST_DATABASE_ADMIN_URL` points at an already-running Postgres
- *   (e.g. a loopback-only cluster on a box without Docker). The per-run database
- *   is created/dropped over TCP with the `pg` client and nothing is started.
+ * Either way the per-run database is created and dropped over TCP with `pg`
+ * through an admin (maintenance-database) URL:
+ * - default: `pnpm docker-up-tests` starts the compose stack and the admin URL
+ *   is its superuser, DOCKER_ADMIN_URL;
+ * - external: `TEST_DATABASE_ADMIN_URL` points at an already-running Postgres
+ *   (e.g. a loopback-only cluster on a box without Docker) as a CREATEDB role,
+ *   and nothing is started.
  */
 
-export interface DockerTestServicesMode {
-  kind: "docker";
-}
+export const DOCKER_ADMIN_URL =
+  "postgresql://postgres:postgres@localhost:15432/postgres";
 
-export interface ExternalTestServicesMode {
-  kind: "external";
+export interface ExternalTestServices {
   /** Maintenance-database URL for a role with CREATEDB. */
   adminUrl: string;
   /**
@@ -25,40 +25,52 @@ export interface ExternalTestServicesMode {
   redisHttpToken: string;
 }
 
-export type TestServicesMode =
-  | DockerTestServicesMode
-  | ExternalTestServicesMode;
-
 /** Exactly the shape `uniqueDbName()` generates; nothing else reaches SQL. */
 const SAFE_TEST_DB_NAME = /^test_[a-z0-9_]{1,58}$/;
 
-export function isSafeTestDbName(name: string): boolean {
-  return SAFE_TEST_DB_NAME.test(name);
-}
-
 export function assertSafeTestDbName(name: string): void {
-  if (!isSafeTestDbName(name)) {
+  if (!SAFE_TEST_DB_NAME.test(name)) {
     throw new Error(
       `Refusing to use test database name ${JSON.stringify(name)}: it must match ${SAFE_TEST_DB_NAME}`,
     );
   }
 }
 
-/** The URL with its password replaced, safe to print. */
+/**
+ * A fresh per-run database name. Lowercase, <63 chars, valid identifier. PID +
+ * time + random keeps concurrent runs on the same host from colliding. This is
+ * the one place a name is made, so it is the one place it is validated.
+ */
+export function uniqueDbName(): string {
+  const rand = Math.random().toString(36).slice(2, 8);
+  const name =
+    `test_${process.pid}_${Date.now().toString(36)}_${rand}`.toLowerCase();
+  assertSafeTestDbName(name);
+  return name;
+}
+
+/** The URL with its password (userinfo or `password` param) hidden, safe to print. */
 export function redactDatabaseUrl(databaseUrl: string): string {
   const url = new URL(databaseUrl);
   if (url.password) {
     url.password = "REDACTED";
   }
+  if (url.searchParams.has("password")) {
+    url.searchParams.set("password", "REDACTED");
+  }
   return url.toString();
 }
 
-function parseAdminUrl(raw: string): string {
+/**
+ * Validates a TEST_DATABASE_ADMIN_URL and returns it with an empty database
+ * path defaulted to `/postgres`. Errors never echo the value: it carries a
+ * password.
+ */
+function normalizeAdminUrl(raw: string): string {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    // Never echo the raw value: it carries a password.
     throw new Error("TEST_DATABASE_ADMIN_URL is not a valid URL");
   }
   if (url.protocol !== "postgresql:" && url.protocol !== "postgres:") {
@@ -69,15 +81,19 @@ function parseAdminUrl(raw: string): string {
   if (!url.hostname) {
     throw new Error("TEST_DATABASE_ADMIN_URL has no host");
   }
-  return raw;
+  if (url.pathname === "" || url.pathname === "/") {
+    url.pathname = "/postgres";
+  }
+  return url.toString();
 }
 
-export function resolveTestServicesMode(
+/** External services from env, or null for the default docker compose path. */
+export function resolveExternalTestServices(
   env: Record<string, string | undefined>,
-): TestServicesMode {
+): ExternalTestServices | null {
   const adminUrl = env.TEST_DATABASE_ADMIN_URL?.trim() ?? "";
   if (!adminUrl) {
-    return { kind: "docker" };
+    return null;
   }
   const redisHttpUrl = env.TEST_REDIS_HTTP_URL?.trim() ?? "";
   const redisHttpToken = env.TEST_REDIS_HTTP_TOKEN?.trim() ?? "";
@@ -87,8 +103,7 @@ export function resolveTestServicesMode(
     );
   }
   return {
-    kind: "external",
-    adminUrl: parseAdminUrl(adminUrl),
+    adminUrl: normalizeAdminUrl(adminUrl),
     redisHttpUrl,
     redisHttpToken,
   };
@@ -99,7 +114,6 @@ export function resolveTestServicesMode(
  * Credentials, host, port and query parameters (e.g. `sslmode`) are kept.
  */
 export function testDatabaseUrl(adminUrl: string, dbName: string): string {
-  assertSafeTestDbName(dbName);
   const url = new URL(adminUrl);
   url.pathname = `/${dbName}`;
   return url.toString();
