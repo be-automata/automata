@@ -11,7 +11,7 @@ import type { SelfHealRunShape } from "./types";
  *
  * After a fix agent is dead (daemon group killed, agent-uid escapees reaped,
  * git and gh brokers closed) the worker runs ONLY the finding's deterministic
- * check, as the agent uid, on a clean checkout of exactly the commit the
+ * check (plus, #277, the checks of recently resolved findings), as the agent uid, on a clean checkout of exactly the commit the
  * broker saw pushed, and lists the files that commit changed against the base
  * so www can refuse a fix that touched a denied path. No LLM, no build, no
  * test suite: those run on the repo's own CI on the draft PR.
@@ -35,6 +35,11 @@ export interface FixCheckReport {
   headSha: string | null;
   checkOutcome: FixCheckOutcome | null;
   deniedPaths: string[];
+  /**
+   * #277: resolved findings whose check FAILED on the fix head (the fix
+   * regressed them). Present only when the payload carried regression checks.
+   */
+  regressedFingerprints?: string[];
 }
 
 /** A report without a check result (the run never got to, or past, the check). */
@@ -125,6 +130,8 @@ export function matchesDenyPath(
 /** The fix-check route's bounds (09-09): at most 50 entries of 1–300 chars. */
 export const MAX_REPORTED_DENIED_PATHS = 50;
 const MAX_REPORTED_PATH_LENGTH = 300;
+/** #277: regressed fingerprints reported per fix, at most. */
+const MAX_REPORTED_REGRESSIONS = 50;
 
 /** The plan's R1 budget for the whole post-agent check. */
 export const FIX_CHECK_BUDGET_MS = 180_000;
@@ -215,6 +222,20 @@ function aggregate(outcomes: FixCheckOutcome[]): FixCheckOutcome {
   if (outcomes.includes("error")) return "error";
   if (outcomes.includes("fail")) return "fail";
   return "pass";
+}
+
+/**
+ * #277: the outcome of the finding's own checks, failed when a resolved
+ * finding's check fails on the same tree. A regression check that errors
+ * (its tool is missing, its subject moved) is not a regression: it never
+ * fails, and never errors, a fix it is not about.
+ */
+export function gateOutcome(
+  own: FixCheckOutcome[],
+  regressed: readonly string[],
+): FixCheckOutcome {
+  const outcome = aggregate(own);
+  return outcome === "pass" && regressed.length > 0 ? "fail" : outcome;
 }
 
 /** Denied paths in diff order, deduplicated and fitted to the route's bounds. */
@@ -333,15 +354,22 @@ export async function runFixCheck(
       HOME: path.join(scratch, "home"),
       TMPDIR: path.join(scratch, "tmp"),
     };
+    const own = args.fix.checks;
+    const ownFingerprints = new Set(own.map((c) => c.fingerprint));
+    const regression = (args.fix.regressionChecks ?? []).filter(
+      (c) => !ownFingerprints.has(c.fingerprint),
+    );
     const remaining = args.deadlineAt - now();
+    // One run, own checks first: they get the budget before the regression
+    // checks, and a dependency audit is loaded once for both.
     const results =
       remaining <= 0
-        ? args.fix.checks.map((c) => ({
+        ? own.map((c) => ({
             fingerprint: c.fingerprint,
             outcome: "error" as const,
           }))
         : await runSelfHealChecks({
-            checks: args.fix.checks,
+            checks: [...own, ...regression],
             run: args.run,
             agentUser: args.agentUser,
             workdir: args.workdir,
@@ -352,11 +380,29 @@ export async function runFixCheck(
             now,
           });
     if (args.signal?.aborted) return failed("aborted");
-    return {
+    const ownResults = results.slice(0, own.length);
+    const report: FixCheckReport = {
       workerStatus: "completed",
       headSha,
-      checkOutcome: aggregate(results.map((r) => r.outcome)),
+      checkOutcome: aggregate(ownResults.map((r) => r.outcome)),
       deniedPaths,
+    };
+    if (args.fix.regressionChecks === undefined) return report;
+    const regressed = results
+      .slice(own.length)
+      .filter((r) => r.outcome === "fail")
+      .map((r) => r.fingerprint)
+      .slice(0, MAX_REPORTED_REGRESSIONS);
+    if (regressed.length > 0) {
+      args.note?.(`regressed ${regressed.length} resolved finding(s)`);
+    }
+    return {
+      ...report,
+      checkOutcome: gateOutcome(
+        ownResults.map((r) => r.outcome),
+        regressed,
+      ),
+      regressedFingerprints: regressed,
     };
   } catch (err) {
     if (args.signal?.aborted) return failed("aborted");
