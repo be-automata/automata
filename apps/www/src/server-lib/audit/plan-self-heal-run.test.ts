@@ -458,6 +458,101 @@ describe("planSelfHealFixRun", () => {
     });
   });
 
+  describe("#277 regression checks", () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const resolved = (
+      fingerprint: string,
+      over: Record<string, unknown> = {},
+    ) =>
+      insertFinding({
+        db,
+        organizationId: orgId,
+        finding: {
+          repoFullName: REPO,
+          fingerprint,
+          audit: "security-audit",
+          ruleId: "dep.vulnerable",
+          severity: "high",
+          checkKind: "script",
+          title: `resolved ${fingerprint}`,
+          subject: "undici",
+          findingKey: "GHSA-0000-0000-0000",
+          status: "resolved",
+          updatedAt: new Date(Date.now() - DAY_MS),
+          ...over,
+        },
+      });
+
+    const planFix = async () => {
+      const attempt = await claim();
+      const result = await plan(fixStamp(attempt.id));
+      const fix = "selfHeal" in result ? result.selfHeal : undefined;
+      if (fix?.kind !== "fix") {
+        throw new Error(`expected a fix plan, got ${JSON.stringify(result)}`);
+      }
+      return fix;
+    };
+
+    it("#277: sends the checks of the repo's findings resolved in the last 30 days, newest first", async () => {
+      await resolved("bbbbbbbbbbbbbbb1", {
+        updatedAt: new Date(Date.now() - 3 * DAY_MS),
+      });
+      await resolved("bbbbbbbbbbbbbbb2", {
+        ruleId: "files.gitignore-missing-pattern",
+        subject: ".gitignore",
+        findingKey: ".env",
+      });
+      const fix = await planFix();
+      expect(fix.regressionChecks).toEqual([
+        {
+          fingerprint: "bbbbbbbbbbbbbbb2",
+          check: "gitignore-has-pattern",
+          subject: ".gitignore",
+          key: ".env",
+        },
+        {
+          fingerprint: "bbbbbbbbbbbbbbb1",
+          check: "npm-audit-clean",
+          subject: "undici",
+          key: "GHSA-0000-0000-0000",
+        },
+      ]);
+    });
+
+    it("#277: leaves out stale, unresolved, rubric, subjectless, unknown-rule and other-repo findings", async () => {
+      await resolved("ccccccccccccccc1", {
+        updatedAt: new Date(Date.now() - 31 * DAY_MS),
+      });
+      await resolved("ccccccccccccccc2", { status: "open" });
+      await resolved("ccccccccccccccc3", { status: "suppressed" });
+      await resolved("ccccccccccccccc4", { checkKind: "rubric" });
+      await resolved("ccccccccccccccc5", { subject: null });
+      await resolved("ccccccccccccccc6", { ruleId: "no.such-rule" });
+      await resolved("ccccccccccccccc7", { repoFullName: "acme/other" });
+      await resolved("ccccccccccccccc8");
+      const fix = await planFix();
+      expect(fix.regressionChecks?.map((c) => c.fingerprint)).toEqual([
+        "ccccccccccccccc8",
+      ]);
+    });
+
+    it("#277: caps the regression checks at 50", async () => {
+      for (let i = 0; i < 52; i++) {
+        await resolved(`dddddddddddd${i.toString(16).padStart(4, "0")}`, {
+          updatedAt: new Date(Date.now() - DAY_MS - i * 60_000),
+        });
+      }
+      const fix = await planFix();
+      expect(fix.regressionChecks).toHaveLength(50);
+      expect(fix.regressionChecks?.[0]?.fingerprint).toBe("dddddddddddd0000");
+    });
+
+    it("#277: omits the field when no finding was recently resolved", async () => {
+      const fix = await planFix();
+      expect(fix).not.toHaveProperty("regressionChecks");
+    });
+  });
+
   it("a ci.* rule ships its plan's workflow files as deny exceptions", async () => {
     await db
       .update(auditFindings)

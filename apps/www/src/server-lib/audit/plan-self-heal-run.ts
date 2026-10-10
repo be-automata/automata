@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, gte, isNotNull, ne } from "drizzle-orm";
 
 import type { DB } from "@terragon/shared/db";
 import { auditFindings } from "@terragon/shared/db/schema";
@@ -52,6 +52,8 @@ const ELIGIBLE_STATUSES = [
   "resolved",
 ] as const;
 const SEVERITY_RANK: Record<string, number> = { high: 2, medium: 1, low: 0 };
+/** #277: how far back a resolved finding still guards against regression. */
+const REGRESSION_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface SelfHealCheckRequest {
   fingerprint: string;
@@ -79,6 +81,12 @@ export interface SelfHealFixRunInput {
   branch: string;
   baseBranch: string;
   checks: SelfHealCheckRequest[];
+  /**
+   * #277: the checks of the repo's recently resolved findings, run by the
+   * worker on the same clean checkout; one failing there fails the gate.
+   * Absent when there are none (the worker then runs nothing extra).
+   */
+  regressionChecks?: SelfHealCheckRequest[];
   denyExceptions: string[];
   gateToken: string;
 }
@@ -102,6 +110,62 @@ export function selfHealTokenMatches(
   const b = Buffer.from(storedHash, "utf8");
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
+}
+
+/**
+ * #277: the deterministic checks of the repo's script findings resolved in
+ * the last 30 days, newest first, at most MAX_CHECKS, excluding the finding
+ * being fixed. There is no resolved-at column; `updatedAt` stands in for it.
+ * It is never earlier than the resolve, so the window only errs toward
+ * checking more. Rows of an unknown rule are skipped, hence the 2x read.
+ */
+async function listRegressionChecks({
+  db,
+  organizationId,
+  repoFullName,
+  excludeFingerprint,
+  now,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  excludeFingerprint: string;
+  now: Date;
+}): Promise<SelfHealCheckRequest[]> {
+  const rows = await db
+    .select()
+    .from(auditFindings)
+    .where(
+      and(
+        eq(auditFindings.organizationId, organizationId),
+        eq(auditFindings.repoFullName, normalizeRepo(repoFullName)),
+        eq(auditFindings.status, "resolved"),
+        eq(auditFindings.checkKind, "script"),
+        isNotNull(auditFindings.subject),
+        ne(auditFindings.fingerprint, excludeFingerprint),
+        gte(
+          auditFindings.updatedAt,
+          new Date(now.getTime() - REGRESSION_WINDOW_MS),
+        ),
+      ),
+    )
+    .orderBy(desc(auditFindings.updatedAt))
+    .limit(MAX_CHECKS * 2);
+  const checks: SelfHealCheckRequest[] = [];
+  for (const row of rows) {
+    const check = getAuditRule(row.ruleId)?.check;
+    if (check === null || check === undefined || row.subject === null) {
+      continue;
+    }
+    checks.push({
+      fingerprint: row.fingerprint,
+      check,
+      subject: row.subject,
+      ...(row.findingKey !== null ? { key: row.findingKey } : {}),
+    });
+    if (checks.length >= MAX_CHECKS) break;
+  }
+  return checks;
 }
 
 export interface PlanSelfHealAuditRunInput {
@@ -348,6 +412,14 @@ export async function planSelfHealFixRun({
       throw new Error("attempt branch does not match fixBranchName");
     }
 
+    const regressionChecks = await listRegressionChecks({
+      db,
+      organizationId,
+      repoFullName,
+      excludeFingerprint: finding.fingerprint,
+      now,
+    });
+
     const gateToken = mintSelfHealToken();
     const updated = await updateFixAttempt({
       db,
@@ -385,6 +457,7 @@ export async function planSelfHealFixRun({
             ...(finding.findingKey !== null ? { key: finding.findingKey } : {}),
           },
         ],
+        ...(regressionChecks.length > 0 ? { regressionChecks } : {}),
         denyExceptions: denyExceptionsFor({
           ruleId: finding.ruleId,
           planFiles: finding.planFiles,
