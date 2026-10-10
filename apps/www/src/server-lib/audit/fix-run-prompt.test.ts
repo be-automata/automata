@@ -115,6 +115,25 @@ describe("buildFixRunTransform", () => {
     }
   });
 
+  it("tells a dep.vulnerable fix to pin the patched version durably (#277)", () => {
+    const text = render();
+    const section = text.slice(text.indexOf("### Dependency fix"));
+    expect(text).toContain("### Dependency fix");
+    expect(section).toContain("`pnpm.overrides`");
+    expect(section).toMatch(/last resort/);
+    expect(section).toMatch(/final note/);
+  });
+
+  it("adds no dependency section for other rules", () => {
+    const text = render({
+      ...FINDING,
+      ruleId: "code.eval",
+      subject: "src/a.ts",
+      planFiles: ["src/a.ts"],
+    });
+    expect(text).not.toContain("### Dependency fix");
+  });
+
   it("lists every deny-listed path", () => {
     const text = render();
     for (const path of FIX_DENY_PATHS) {

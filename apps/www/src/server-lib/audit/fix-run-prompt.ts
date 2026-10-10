@@ -66,6 +66,22 @@ export interface BuildFixRunTransformInput {
   baseBranch: string;
 }
 
+const DEP_VULNERABLE_RULE = "dep.vulnerable";
+
+/**
+ * A lockfile-only bump is undone by the next PR that re-resolves the lockfile
+ * (#277), so a dependency fix pins the patched version in a manifest first.
+ */
+const DEPENDENCY_FIX_LINES = [
+  "### Dependency fix",
+  "",
+  "Make the fix durable: pin the patched version in an allowed `package.json`, preferably with a",
+  "`pnpm.overrides` entry (or by raising the package's version range), then update the lockfile to",
+  "match. Any later lockfile re-resolve can revert a lockfile-only edit, so that edit is a",
+  "last resort: use it only when no `package.json` is in the allowed list, and say so in your final note.",
+  "",
+];
+
 /** Agent-originated path rendered as an inline code span. */
 function codePath(path: string): string {
   return `\`${path.replace(/[`\r\n]/g, "")}\``;
@@ -139,6 +155,7 @@ function renderFixSection({
       ? `Exception for this \`ci.*\` finding: you may change ${exceptions.map(codePath).join(", ")} and no other file under \`.github/\`.`
       : "No exception applies to this finding.",
     "",
+    ...(finding.ruleId === DEP_VULNERABLE_RULE ? DEPENDENCY_FIX_LINES : []),
     "### Git",
     "",
     "Never run `git config`, in any scope. The commit identity and the remote are already set up,",

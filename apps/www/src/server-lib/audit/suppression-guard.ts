@@ -31,7 +31,15 @@ const SECRET_FILE_RULE = "files.sensitive-committed";
 export const COMPARE_FILE_CAP = 300;
 
 export { GUARD_REASONS, type GuardReason };
-export type GuardFlag = "new_test_file";
+/**
+ * `lockfile_only`: a `dep.vulnerable` fix that moved the lockfile but no
+ * `package.json`, so nothing pins the patched version and a later lockfile
+ * re-resolve can silently revert it (#277). Advisory, never a rejection.
+ */
+export type GuardFlag = "new_test_file" | "lockfile_only";
+
+/** The rule whose fix should pin the patched version in a manifest. */
+const DEP_VULNERABLE_RULE = "dep.vulnerable";
 
 /** The slice of a GitHub compare `files[]` entry the guard reads. */
 export interface FixDiffFile {
@@ -226,6 +234,8 @@ export function evaluateFixDiff(input: EvaluateFixDiffInput): FixDiffVerdict {
   const reasons = new Set<GuardReason>();
   const flags = new Set<GuardFlag>();
   let diffLines = 0;
+  let lockfileChanged = false;
+  let manifestChanged = false;
 
   if (input.truncated) reasons.add("patch_unavailable");
 
@@ -246,6 +256,10 @@ export function evaluateFixDiff(input: EvaluateFixDiffInput): FixDiffVerdict {
 
     const lockfile = isLockfile(path);
     if (!lockfile) diffLines += file.additions + file.deletions;
+    if (lockfile) lockfileChanged = true;
+    if (touched.some((p) => basename(p) === "package.json")) {
+      manifestChanged = true;
+    }
 
     let categorised = denied;
     const added = file.status === "added";
@@ -295,6 +309,13 @@ export function evaluateFixDiff(input: EvaluateFixDiffInput): FixDiffVerdict {
   }
 
   if (diffLines > input.maxDiffLines) reasons.add("diff_too_large");
+  if (
+    input.ruleId === DEP_VULNERABLE_RULE &&
+    lockfileChanged &&
+    !manifestChanged
+  ) {
+    flags.add("lockfile_only");
+  }
 
   const rejections = GUARD_REASONS.filter((reason) => reasons.has(reason));
   return {

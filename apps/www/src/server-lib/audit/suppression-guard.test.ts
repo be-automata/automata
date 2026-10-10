@@ -110,6 +110,34 @@ describe("evaluateFixDiff (R4, R5, FENCE-01)", () => {
     expect(result.flags).toEqual(["new_test_file"]);
   });
 
+  it("a dep.vulnerable fix that moves only the lockfile is flagged lockfile_only", () => {
+    const result = run([
+      mod("pnpm-lock.yaml", "@@ -1 +1 @@\n-undici@8.10.0\n+undici@8.11.2"),
+    ]);
+    expect(result.ok).toBe(true);
+    expect(result.flags).toEqual(["lockfile_only"]);
+  });
+
+  it("a dep.vulnerable fix that also changes a package.json is not lockfile_only", () => {
+    const result = run([
+      mod("pnpm-lock.yaml", "@@ -1 +1 @@\n-undici@8.10.0\n+undici@8.11.2"),
+      mod(
+        "package.json",
+        '@@ -1 +1,2 @@\n "overrides": {\n+  "undici": "^8.11.2"',
+      ),
+    ]);
+    expect(result.ok).toBe(true);
+    expect(result.flags).toEqual([]);
+  });
+
+  it("lockfile_only is only raised for dep.vulnerable", () => {
+    const result = run(
+      [mod("pnpm-lock.yaml", "@@ -1 +1 @@\n-a@1.0.0\n+a@1.0.1")],
+      { ruleId: "deps.outdated" },
+    );
+    expect(result.flags).toEqual([]);
+  });
+
   it("deleting a test → test_edit", () => {
     const result = run([
       {
