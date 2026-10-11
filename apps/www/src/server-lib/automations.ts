@@ -1,10 +1,13 @@
 import { db } from "@/lib/db";
+import { redis } from "@/lib/redis";
 import { createNewThread } from "./new-thread-shared";
 import { getPostHogServer } from "@/lib/posthog-server";
 import {
   getAutomation,
   incrementAutomationRunCount,
   getAutomationCount,
+  getIssueAutomationRunStats,
+  type IssueAutomationRunStats,
 } from "@terragon/shared/model/automations";
 import { assertNever } from "@terragon/shared/utils";
 import { Automation, AutomationInsert } from "@terragon/shared/db/types";
@@ -751,6 +754,71 @@ export async function runPullRequestAutomation({
   }
 }
 
+/**
+ * The most runs one issue automation starts for a single issue from webhooks.
+ * Each run opens its own PR, so without a bound an operator re-labeling an
+ * issue chains partial-delivery PRs indefinitely (#277 collected five).
+ */
+export const MAX_ISSUE_RUNS_PER_ISSUE = 3;
+
+/**
+ * How long a webhook-triggered run holds its per-issue claim. Covers the
+ * GitHub round trips between the run check and the thread insert, so an
+ * `opened` + `labeled` pair delivered milliseconds apart starts one run. Left
+ * to expire: once the thread row exists the stats query takes over.
+ */
+const ISSUE_RUN_CLAIM_TTL_SECONDS = 120;
+
+type IssueRunSkipReason = "run-in-flight" | "run-cap-reached";
+
+function issueRunClaimKey(
+  automationId: string,
+  repoFullName: string,
+  issueNumber: number,
+): string {
+  return `issue-automation-run:${automationId}:${repoFullName}#${issueNumber}`;
+}
+
+/**
+ * Why a webhook-triggered issue run must not start (null when it may), with
+ * the counts behind the decision.
+ */
+async function getIssueRunSkipReason({
+  automation,
+  repoFullName,
+  issueNumber,
+}: {
+  automation: Automation;
+  repoFullName: string;
+  issueNumber: number;
+}): Promise<{
+  reason: IssueRunSkipReason | null;
+  stats: IssueAutomationRunStats | null;
+}> {
+  const claim = await redis.set(
+    issueRunClaimKey(automation.id, repoFullName, issueNumber),
+    "1",
+    { nx: true, ex: ISSUE_RUN_CLAIM_TTL_SECONDS },
+  );
+  if (claim !== "OK") {
+    return { reason: "run-in-flight", stats: null };
+  }
+  const stats = await getIssueAutomationRunStats({
+    db,
+    userId: automation.userId,
+    automationId: automation.id,
+    repoFullName,
+    issueNumber,
+  });
+  if (stats.active > 0) {
+    return { reason: "run-in-flight", stats };
+  }
+  if (stats.total >= MAX_ISSUE_RUNS_PER_ISSUE) {
+    return { reason: "run-cap-reached", stats };
+  }
+  return { reason: null, stats };
+}
+
 export async function runIssueAutomation({
   userId,
   automationId,
@@ -778,6 +846,64 @@ export async function runIssueAutomation({
   if (automation.repoFullName !== repoFullName) {
     throw new Error("Automation is not configured for this repository");
   }
+  // A manual run is an explicit operator request, so only webhook-triggered
+  // runs are bounded (a closed issue is filtered earlier, in the webhook
+  // handler). Checked before the eyes reaction: a skipped event leaves no
+  // trace on the issue.
+  if (source === "automated") {
+    const { reason, stats } = await getIssueRunSkipReason({
+      automation,
+      repoFullName,
+      issueNumber,
+    });
+    if (reason) {
+      const counts = stats
+        ? `runs=${stats.total}, inFlight=${stats.active}`
+        : "claim held by a concurrent event";
+      console.log(
+        `Skipping issue automation ${automationId} for ${repoFullName}#${issueNumber}: ${reason} (${counts}, cap=${MAX_ISSUE_RUNS_PER_ISSUE}); archive a stuck run or start a manual run from the UI`,
+      );
+      return;
+    }
+  }
+  try {
+    await startIssueAutomationRun({
+      userId,
+      automation,
+      repoFullName,
+      issueEventAction,
+      issueNumber,
+      source,
+    });
+  } catch (error) {
+    // A run that failed before its thread row existed would otherwise hold the
+    // claim for its full TTL and silently skip a retry. Once the row exists the
+    // stats query covers it, so releasing here never admits a duplicate.
+    if (source === "automated") {
+      await redis
+        .del(issueRunClaimKey(automation.id, repoFullName, issueNumber))
+        .catch(() => {});
+    }
+    throw error;
+  }
+}
+
+async function startIssueAutomationRun({
+  userId,
+  automation,
+  repoFullName,
+  issueEventAction,
+  issueNumber,
+  source,
+}: {
+  userId: string;
+  automation: Automation;
+  repoFullName: string;
+  issueEventAction: IssueEvent["action"];
+  issueNumber: number;
+  source: "automated" | "manual";
+}) {
+  const automationId = automation.id;
   // Shadow mode / kill-switch: suppress the eyes reaction in a shadow org (zero
   // GitHub side effects); the boot is suppressed downstream in runAutomation.
   const shadow = await isAutomationShadow(automation.organizationId);

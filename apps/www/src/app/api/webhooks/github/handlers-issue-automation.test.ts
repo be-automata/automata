@@ -111,16 +111,19 @@ function issueEvent({
   labels = [],
   added,
   author = "octocat",
+  state,
 }: {
   action: "opened" | "labeled";
   labels?: string[];
   added?: string;
   author?: string;
+  state?: "open" | "closed";
 }): IssueEvent {
   return {
     action,
     issue: {
       number: 42,
+      ...(state ? { state } : {}),
       user: { login: author },
       labels: labels.map((name) => ({ name })),
     },
@@ -159,6 +162,30 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
       issueNumber: 42,
       source: "automated",
     });
+  });
+
+  it("skips a label added to a closed issue with zero GitHub calls", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([
+      automation({
+        triggerConfig: {
+          filter: { labels: ["automata:deliver"] },
+          on: { labeled: true },
+        },
+      } as unknown as Partial<Automation>),
+    ]);
+    await handleIssueEvent(
+      issueEvent({
+        action: "labeled",
+        labels: ["automata:deliver"],
+        added: "automata:deliver",
+        state: "closed",
+      }),
+    );
+    expect(runIssueAutomation).not.toHaveBeenCalled();
+    expectNoOctokit();
+    expect(logs.some((l) => l.includes("owner/repo#42: issue-closed"))).toBe(
+      true,
+    );
   });
 
   it("legacy config ignores a labeled event", async () => {

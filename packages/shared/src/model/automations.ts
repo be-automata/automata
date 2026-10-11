@@ -19,6 +19,7 @@ import {
   ScheduleTriggerConfig,
 } from "../automations";
 import { getNextRunTime } from "../automations/cron";
+import { threadIsTerminal } from "./thread-effective-status";
 
 /**
  * Tenant fence for owner-scoped automation access (WI-5). Optional during the
@@ -411,6 +412,58 @@ export async function getIssueAutomationsForRepo({
     ),
     orderBy: desc(schema.automations.createdAt),
   });
+}
+
+export interface IssueAutomationRunStats {
+  /** Every thread this automation has started for the issue, archived or not. */
+  total: number;
+  /** Threads that are neither terminal nor archived — a run still in flight. */
+  active: number;
+}
+
+/**
+ * How many runs an issue automation has already started for one issue, and how
+ * many of them are still in flight. The issue-run cap reads this before every
+ * webhook-triggered run, so a re-label cannot chain unbounded runs.
+ *
+ * Shadow threads are excluded: they are inserted `queued` and never boot, so
+ * nothing ever terminalizes them, and counting them would block the issue
+ * forever once the org leaves shadow mode. `userId` is the automation owner
+ * (every automation thread is created as that user), which also lets the
+ * user_id_automation_id index serve the query.
+ */
+export async function getIssueAutomationRunStats({
+  db,
+  userId,
+  automationId,
+  repoFullName,
+  issueNumber,
+}: {
+  db: DB;
+  userId: string;
+  automationId: string;
+  repoFullName: string;
+  issueNumber: number;
+}): Promise<IssueAutomationRunStats> {
+  const result = await db
+    .select({
+      total: sql<number>`count(*)::int`,
+      active: sql<number>`(count(*) filter (where ${schema.thread.archived} = false and not ${threadIsTerminal()}))::int`,
+    })
+    .from(schema.thread)
+    .where(
+      and(
+        eq(schema.thread.userId, userId),
+        eq(schema.thread.automationId, automationId),
+        eq(schema.thread.githubRepoFullName, repoFullName),
+        eq(schema.thread.githubIssueNumber, issueNumber),
+        eq(schema.thread.shadow, false),
+      ),
+    );
+  return {
+    total: result[0]?.total ?? 0,
+    active: result[0]?.active ?? 0,
+  };
 }
 
 export async function getGitHubMentionAutomationsForRepo({
