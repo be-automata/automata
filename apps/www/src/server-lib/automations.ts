@@ -771,10 +771,6 @@ const ISSUE_RUN_CLAIM_TTL_SECONDS = 120;
 
 type IssueRunSkipReason = "run-in-flight" | "run-cap-reached";
 
-/**
- * Why a webhook-triggered issue run must not start (null when it may), with
- * the counts behind the decision.
- */
 function issueRunClaimKey(
   automationId: string,
   repoFullName: string,
@@ -783,6 +779,10 @@ function issueRunClaimKey(
   return `issue-automation-run:${automationId}:${repoFullName}#${issueNumber}`;
 }
 
+/**
+ * Why a webhook-triggered issue run must not start (null when it may), with
+ * the counts behind the decision.
+ */
 async function getIssueRunSkipReason({
   automation,
   repoFullName,
