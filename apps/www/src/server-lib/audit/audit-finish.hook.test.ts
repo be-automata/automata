@@ -438,6 +438,89 @@ describe("handleAuditFindingsAtFinish", () => {
     expect(finish.decisions).toBeUndefined();
   });
 
+  it("logs how long each hook stage took on the run line", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-04T10:00:00Z") });
+    h.isPrivateImpl.value = () =>
+      new Promise((resolve) => setTimeout(() => resolve(false), 3_000));
+    h.executeImpl.value = () =>
+      new Promise((resolve) =>
+        setTimeout(
+          () =>
+            resolve({
+              outcome: "applied",
+              created: 0,
+              updated: 0,
+              closed: 0,
+              pending: 0,
+              skipped: 0,
+              decisions: [],
+            }),
+          2_000,
+        ),
+      );
+    const running = call();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await running;
+    const line = vi
+      .mocked(console.log)
+      .mock.calls.find(([message]) => message === "[self-heal] audit run");
+    expect(line?.[1]).toMatchObject({
+      outcome: "applied",
+      stagesMs: {
+        claim: 0,
+        parse: 0,
+        switches: 0,
+        mint: 0,
+        preflight: 0,
+        issues: 3_000,
+        executor: 2_000,
+      },
+    });
+  });
+
+  it("an off run logs the stages it reached", async () => {
+    h.context.value = context({ flagEnabled: false });
+    await call();
+    const line = vi
+      .mocked(console.log)
+      .mock.calls.find(([message]) => message === "[self-heal] audit run");
+    expect(
+      Object.keys((line?.[1] as { stagesMs: Record<string, number> }).stagesMs),
+    ).toEqual(["claim", "parse", "switches"]);
+  });
+
+  it("a deadline in the executor logs the stage it cut and the time spent so far", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-04T10:00:00Z") });
+    h.isPrivateImpl.value = () =>
+      new Promise((resolve) => setTimeout(() => resolve(false), 4_000));
+    h.executeImpl.value = () => new Promise(() => {});
+    const running = call();
+    await vi.advanceTimersByTimeAsync(20_999);
+    await running;
+    expect(console.warn).toHaveBeenCalledWith(
+      "[audit-findings] hook deadline",
+      expect.objectContaining({
+        threadId: "thread_1",
+        stage: "executor",
+        stageMs: 16_500,
+        stagesMs: expect.objectContaining({ issues: 4_000 }),
+      }),
+    );
+  });
+
+  it("a deadline before the executor logs the stage that held the claim", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-04T10:00:00Z") });
+    h.isPrivateImpl.value = () =>
+      new Promise((resolve) => setTimeout(() => resolve(false), 30_000));
+    const running = call();
+    await vi.advanceTimersByTimeAsync(20_999);
+    await running;
+    expect(console.warn).toHaveBeenCalledWith(
+      "[audit-findings] hook deadline",
+      expect.objectContaining({ stage: "issues", stageMs: 20_500 }),
+    );
+  });
+
   it("W1: a claim released at the deadline never reaches the executor, even when the pipeline resumes", async () => {
     vi.useFakeTimers({ now: new Date("2026-10-04T10:00:00Z") });
     h.isPrivateImpl.value = () =>
