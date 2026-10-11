@@ -199,6 +199,8 @@ export interface AuditCommentData {
   keptBranch?: string;
   /** fix_attempt_rejected (#277): resolved findings the fix head regressed. */
   regressedFingerprints?: readonly string[];
+  /** fix_attempt_rejected (#277): regressed fingerprint → its issue number. */
+  regressedIssues?: Readonly<Record<string, number>>;
   /** fix_attempt_rejected / fix_draft_withdrawn: a draft PR existed. */
   draftNumber?: number;
   /** fix_draft_withdrawn: whether the attempt counts toward the limit. */
@@ -209,11 +211,23 @@ export interface AuditCommentData {
 
 const FINGERPRINT = /^[0-9a-f]{16}$/;
 
-/** #277: only well-formed fingerprints are rendered; none → no line. */
-function regressedLines(fingerprints: readonly string[] | undefined): string[] {
+/**
+ * #277: only well-formed fingerprints are rendered, each linked to its issue
+ * when the number is known; none → no line.
+ */
+function regressedLines(
+  fingerprints: readonly string[] | undefined,
+  issues: Readonly<Record<string, number>> | undefined,
+): string[] {
   const valid = (fingerprints ?? []).filter((fp) => FINGERPRINT.test(fp));
+  const label = (fp: string): string => {
+    const issue = issues?.[fp];
+    return issue !== undefined && Number.isSafeInteger(issue) && issue > 0
+      ? `#${issue} (\`${fp}\`)`
+      : `\`${fp}\``;
+  };
   return valid.length > 0
-    ? ["", `Regressed findings: ${valid.map((fp) => `\`${fp}\``).join(", ")}`]
+    ? ["", `Regressed findings: ${valid.map(label).join(", ")}`]
     : [];
 }
 
@@ -265,7 +279,7 @@ export function renderAuditComment(
         `Automated change attempt ${attempts} of ${max} was not proposed:`,
         "",
         ...rejectionLines(data.reasons),
-        ...regressedLines(data.regressedFingerprints),
+        ...regressedLines(data.regressedFingerprints, data.regressedIssues),
         "",
         branch,
       ].join("\n");
