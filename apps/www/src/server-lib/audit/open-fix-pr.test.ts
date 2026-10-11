@@ -634,7 +634,7 @@ describe("openDraftFixPr (GATE-01, SC4, RES-18)", () => {
         },
       });
     await finding("1111111111111111", REPO, 262);
-    // The same fingerprint in another repo is a different finding.
+    // A finding of another repo is never linked, even when its fingerprint regressed.
     await finding("2222222222222222", "acme/other", 99);
     await report("failed", {
       checkResults: {
