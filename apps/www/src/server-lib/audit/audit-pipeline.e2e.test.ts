@@ -35,6 +35,14 @@ import {
   FAKE_DB,
   FAKE_ORG,
 } from "./__fixtures__/in-memory-self-heal";
+import {
+  applyDependencyFix,
+  npmAuditCheck,
+  reresolveLockfile,
+  type DependencyFixStrategy,
+  type FixtureAdvisory,
+  type FixtureRepo,
+} from "./__fixtures__/lockfile-reresolve";
 
 /**
  * The whole audit writer, end to end, with no LLM and no network: terminal
@@ -71,6 +79,17 @@ const SECOND_FINDING = makeFinding({
   subject: "config/staging.pem",
   title: "Second private key committed",
   files: ["config/staging.pem"],
+});
+
+const UNDICI_ADVISORY: FixtureAdvisory = { pkg: "undici", patched: "8.11.2" };
+const DEP_FINDING = makeFinding({
+  rule: "dep.vulnerable",
+  subject: "undici",
+  section: "dependency-security",
+  title: "undici has high-severity advisories in production dependencies",
+  files: ["pnpm-lock.yaml"],
+  plan: "Upgrade undici to 8.11.2.",
+  acceptance: "The package manager audit reports no advisory for undici.",
 });
 
 const leadMessage = (text: string): DBMessage => ({
@@ -503,5 +522,75 @@ describe("audit pipeline (deterministic end to end)", () => {
     expect(
       [...h.outbox.rows.values()].filter((e) => e.status === "pending"),
     ).toHaveLength(0);
+  });
+
+  /**
+   * #266 -> #275: fix the undici finding, let the audit close it, then land a
+   * PR that re-resolves the lockfile from a branch cut before the fix. The
+   * next audit's check runs against the merged repository.
+   */
+  async function fixThenReresolve(strategy: DependencyFixStrategy) {
+    const h = pipeline();
+    const base: FixtureRepo = {
+      overrides: {},
+      lock: { undici: "8.10.0", browserslist: "4.21.0" },
+    };
+    const check = (
+      repo: FixtureRepo,
+    ): Array<[FixtureFinding, CheckOutcome]> => [
+      [DEP_FINDING, npmAuditCheck(repo, UNDICI_ADVISORY)],
+    ];
+
+    await h.runAudit({ runId: "run-1", messages: transcript([DEP_FINDING]) });
+    h.advance(60_000);
+    await h.runAudit({
+      runId: "run-2",
+      messages: transcript([DEP_FINDING]),
+      checks: check(base),
+    });
+    const number = h.rows()[0]?.issueNumber ?? -1;
+    expect(h.writer.issues.get(number)?.state).toBe("open");
+
+    const fixed = applyDependencyFix(base, UNDICI_ADVISORY, strategy);
+    for (const runId of ["run-3", "run-4"]) {
+      h.advance(3_600_000);
+      await h.runAudit({
+        runId,
+        messages: transcript([]),
+        checks: check(fixed),
+      });
+    }
+    expect(h.writer.issues.get(number)?.state).toBe("closed");
+    expect(h.rows()[0]?.status).toBe("resolved");
+
+    // The browserslist PR's branch still locks the pre-fix undici.
+    const merged = reresolveLockfile(fixed, {
+      ...base.lock,
+      browserslist: "4.24.5",
+    });
+    h.advance(3_600_000);
+    await h.runAudit({
+      runId: "run-5",
+      messages: transcript([]),
+      checks: check(merged),
+    });
+    return { h, number, merged };
+  }
+
+  it("an overrides-based dependency fix survives a later lockfile re-resolve", async () => {
+    const { h, number, merged } = await fixThenReresolve("overrides");
+
+    expect(h.writer.issues.get(number)?.state).toBe("closed");
+    expect(h.rows()[0]?.status).toBe("resolved");
+    expect(merged.lock.undici).toBe("8.11.2");
+    expect(merged.lock.browserslist).toBe("4.24.5");
+  });
+
+  it("a lockfile-only dependency fix is reverted by the re-resolve and reopened", async () => {
+    const { h, number, merged } = await fixThenReresolve("lockfile-only");
+
+    expect(h.writer.issues.get(number)?.state).toBe("open");
+    expect(h.rows()[0]?.lastCheckOutcome).toBe("fail");
+    expect(merged.lock.undici).toBe("8.10.0");
   });
 });
