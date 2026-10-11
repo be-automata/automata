@@ -89,10 +89,7 @@ async function seedPriorRun(
 function run(
   user: User,
   automation: Automation,
-  over: {
-    issueState?: string;
-    source?: "automated" | "manual";
-  } = {},
+  over: { source?: "automated" | "manual" } = {},
 ): Promise<void> {
   return runIssueAutomation({
     userId: user.id,
@@ -100,7 +97,6 @@ function run(
     repoFullName: REPO,
     issueEventAction: "labeled",
     issueNumber: ISSUE,
-    issueState: over.issueState ?? "open",
     source: over.source ?? "automated",
   });
 }
@@ -134,12 +130,22 @@ describe("runIssueAutomation — per-issue run bound", () => {
     );
   });
 
-  it("skips a closed issue without touching GitHub", async () => {
-    await run(user, automation, { issueState: "closed" });
-    expect(createNewThread).not.toHaveBeenCalled();
-    expect(addEyesReactionToPullRequest).not.toHaveBeenCalled();
-    expect(getOctokitForBackground).not.toHaveBeenCalled();
-    expect(logs.some((l) => l.includes("issue-closed"))).toBe(true);
+  it("starts one run when two events for the issue arrive together", async () => {
+    await Promise.all([run(user, automation), run(user, automation)]);
+    expect(createNewThread).toHaveBeenCalledTimes(1);
+    expect(addEyesReactionToPullRequest).toHaveBeenCalledTimes(1);
+    expect(
+      logs.some((l) =>
+        l.includes("run-in-flight (claim held by a concurrent event"),
+      ),
+    ).toBe(true);
+  });
+
+  it("skips a second event inside the claim window", async () => {
+    await run(user, automation);
+    // createNewThread is mocked, so no thread row exists: only the claim stops it.
+    await run(user, automation);
+    expect(createNewThread).toHaveBeenCalledTimes(1);
   });
 
   it("skips while an earlier run on the issue is still in flight", async () => {
@@ -147,7 +153,9 @@ describe("runIssueAutomation — per-issue run bound", () => {
     await run(user, automation);
     expect(createNewThread).not.toHaveBeenCalled();
     expect(addEyesReactionToPullRequest).not.toHaveBeenCalled();
-    expect(logs.some((l) => l.includes("run-in-flight"))).toBe(true);
+    expect(
+      logs.some((l) => l.includes("run-in-flight (runs=1, inFlight=1, cap=3)")),
+    ).toBe(true);
   });
 
   it("starts another run below the cap once earlier runs finished", async () => {
@@ -165,14 +173,20 @@ describe("runIssueAutomation — per-issue run bound", () => {
     await run(user, automation);
     expect(createNewThread).not.toHaveBeenCalled();
     expect(addEyesReactionToPullRequest).not.toHaveBeenCalled();
-    expect(logs.some((l) => l.includes("run-cap-reached"))).toBe(true);
+    expect(
+      logs.some((l) =>
+        l.includes(
+          `run-cap-reached (runs=${MAX_ISSUE_RUNS_PER_ISSUE}, inFlight=0, cap=${MAX_ISSUE_RUNS_PER_ISSUE})`,
+        ),
+      ),
+    ).toBe(true);
   });
 
   it("does not bound a manual run", async () => {
     for (let i = 0; i < MAX_ISSUE_RUNS_PER_ISSUE; i++) {
       await seedPriorRun(user, automation, "complete");
     }
-    await run(user, automation, { source: "manual", issueState: "closed" });
+    await run(user, automation, { source: "manual" });
     expect(createNewThread).toHaveBeenCalledTimes(1);
   });
 });

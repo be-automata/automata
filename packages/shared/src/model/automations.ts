@@ -425,14 +425,22 @@ export interface IssueAutomationRunStats {
  * How many runs an issue automation has already started for one issue, and how
  * many of them are still in flight. The issue-run cap reads this before every
  * webhook-triggered run, so a re-label cannot chain unbounded runs.
+ *
+ * Shadow threads are excluded: they are inserted `queued` and never boot, so
+ * nothing ever terminalizes them, and counting them would block the issue
+ * forever once the org leaves shadow mode. `userId` is the automation owner
+ * (every automation thread is created as that user), which also lets the
+ * user_id_automation_id index serve the query.
  */
 export async function getIssueAutomationRunStats({
   db,
+  userId,
   automationId,
   repoFullName,
   issueNumber,
 }: {
   db: DB;
+  userId: string;
   automationId: string;
   repoFullName: string;
   issueNumber: number;
@@ -445,9 +453,11 @@ export async function getIssueAutomationRunStats({
     .from(schema.thread)
     .where(
       and(
+        eq(schema.thread.userId, userId),
         eq(schema.thread.automationId, automationId),
         eq(schema.thread.githubRepoFullName, repoFullName),
         eq(schema.thread.githubIssueNumber, issueNumber),
+        eq(schema.thread.shadow, false),
       ),
     );
   return {

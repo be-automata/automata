@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { redis } from "@/lib/redis";
 import { createNewThread } from "./new-thread-shared";
 import { getPostHogServer } from "@/lib/posthog-server";
 import {
@@ -6,6 +7,7 @@ import {
   incrementAutomationRunCount,
   getAutomationCount,
   getIssueAutomationRunStats,
+  type IssueAutomationRunStats,
 } from "@terragon/shared/model/automations";
 import { assertNever } from "@terragon/shared/utils";
 import { Automation, AutomationInsert } from "@terragon/shared/db/types";
@@ -759,43 +761,54 @@ export async function runPullRequestAutomation({
  */
 export const MAX_ISSUE_RUNS_PER_ISSUE = 3;
 
-export type IssueRunSkipReason =
-  | "issue-closed"
-  | "run-in-flight"
-  | "run-cap-reached";
+/**
+ * How long a webhook-triggered run holds its per-issue claim. Covers the
+ * GitHub round trips between the run check and the thread insert, so an
+ * `opened` + `labeled` pair delivered milliseconds apart starts one run. Left
+ * to expire: once the thread row exists the stats query takes over.
+ */
+const ISSUE_RUN_CLAIM_TTL_SECONDS = 120;
+
+type IssueRunSkipReason = "run-in-flight" | "run-cap-reached";
 
 /**
- * Why a webhook-triggered issue run must not start, or null when it may. Reads
- * the webhook payload's issue state (no GitHub call) and this automation's
- * existing threads for the issue.
+ * Why a webhook-triggered issue run must not start (null when it may), with
+ * the counts behind the decision.
  */
-export async function getIssueRunSkipReason({
-  automationId,
+async function getIssueRunSkipReason({
+  automation,
   repoFullName,
   issueNumber,
-  issueState,
 }: {
-  automationId: string;
+  automation: Automation;
   repoFullName: string;
   issueNumber: number;
-  issueState: string | undefined;
-}): Promise<IssueRunSkipReason | null> {
-  if (issueState === "closed") {
-    return "issue-closed";
+}): Promise<{
+  reason: IssueRunSkipReason | null;
+  stats: IssueAutomationRunStats | null;
+}> {
+  const claim = await redis.set(
+    `issue-automation-run:${automation.id}:${repoFullName}#${issueNumber}`,
+    "1",
+    { nx: true, ex: ISSUE_RUN_CLAIM_TTL_SECONDS },
+  );
+  if (claim !== "OK") {
+    return { reason: "run-in-flight", stats: null };
   }
-  const { total, active } = await getIssueAutomationRunStats({
+  const stats = await getIssueAutomationRunStats({
     db,
-    automationId,
+    userId: automation.userId,
+    automationId: automation.id,
     repoFullName,
     issueNumber,
   });
-  if (active > 0) {
-    return "run-in-flight";
+  if (stats.active > 0) {
+    return { reason: "run-in-flight", stats };
   }
-  if (total >= MAX_ISSUE_RUNS_PER_ISSUE) {
-    return "run-cap-reached";
+  if (stats.total >= MAX_ISSUE_RUNS_PER_ISSUE) {
+    return { reason: "run-cap-reached", stats };
   }
-  return null;
+  return { reason: null, stats };
 }
 
 export async function runIssueAutomation({
@@ -804,7 +817,6 @@ export async function runIssueAutomation({
   repoFullName,
   issueEventAction,
   issueNumber,
-  issueState,
   source,
 }: {
   userId: string;
@@ -812,8 +824,6 @@ export async function runIssueAutomation({
   repoFullName: string;
   issueEventAction: IssueEvent["action"];
   issueNumber: number;
-  /** The webhook payload's `issue.state`; only automated runs carry it. */
-  issueState?: string;
   source: "automated" | "manual";
 }) {
   const { automation, canRun } = await validateCanRunAutomation({
@@ -829,18 +839,21 @@ export async function runIssueAutomation({
     throw new Error("Automation is not configured for this repository");
   }
   // A manual run is an explicit operator request, so only webhook-triggered
-  // runs are bounded. Checked before the eyes reaction: a skipped event leaves
-  // no trace on the issue.
+  // runs are bounded (a closed issue is filtered earlier, in the webhook
+  // handler). Checked before the eyes reaction: a skipped event leaves no
+  // trace on the issue.
   if (source === "automated") {
-    const skipReason = await getIssueRunSkipReason({
-      automationId,
+    const { reason, stats } = await getIssueRunSkipReason({
+      automation,
       repoFullName,
       issueNumber,
-      issueState,
     });
-    if (skipReason) {
+    if (reason) {
+      const counts = stats
+        ? `runs=${stats.total}, inFlight=${stats.active}`
+        : "claim held by a concurrent event";
       console.log(
-        `Skipping automation ${automationId} for issue #${issueNumber} in ${repoFullName}: ${skipReason} (cap ${MAX_ISSUE_RUNS_PER_ISSUE} runs per issue)`,
+        `Skipping issue automation ${automationId} for ${repoFullName}#${issueNumber}: ${reason} (${counts}, cap=${MAX_ISSUE_RUNS_PER_ISSUE}); archive a stuck run or start a manual run from the UI`,
       );
       return;
     }

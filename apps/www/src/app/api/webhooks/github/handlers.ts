@@ -844,6 +844,14 @@ async function handleIssueAutomation(
     await markSelfHealFindingReady(event, automation);
     return;
   }
+  // A label added to a closed issue must not start delivery work. Read from the
+  // payload, so the skip costs no GitHub call.
+  if (event.issue.state === "closed") {
+    console.log(
+      `Skipping issue automation ${automation.id} for ${repoFullName}#${issueNumber}: issue-closed`,
+    );
+    return;
+  }
   const issueAuthorUserName = event.issue.user?.login;
   // Unconditional routing (mirror parity): match every issue regardless of author.
   if (config.filter.includeAllAuthors) {
@@ -856,7 +864,6 @@ async function handleIssueAutomation(
       issueEventAction: event.action,
       repoFullName,
       issueNumber,
-      issueState: event.issue.state,
       source: "automated",
     }).catch((error) => {
       console.error(
@@ -901,7 +908,6 @@ async function handleIssueAutomation(
     issueEventAction: event.action,
     repoFullName,
     issueNumber,
-    issueState: event.issue.state,
     source: "automated",
   }).catch((error) => {
     console.error(

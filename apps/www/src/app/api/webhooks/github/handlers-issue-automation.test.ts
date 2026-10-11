@@ -164,15 +164,28 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
     });
   });
 
-  it("hands the payload's issue state to the run so a closed issue is skipped", async () => {
-    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([automation()]);
-    await handleIssueEvent(issueEvent({ action: "opened", state: "closed" }));
-    expect(runIssueAutomation).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(runIssueAutomation).mock.calls[0]![0]).toMatchObject({
-      issueNumber: 42,
-      issueState: "closed",
-      source: "automated",
-    });
+  it("skips a label added to a closed issue with zero GitHub calls", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([
+      automation({
+        triggerConfig: {
+          filter: { labels: ["automata:deliver"] },
+          on: { labeled: true },
+        },
+      } as unknown as Partial<Automation>),
+    ]);
+    await handleIssueEvent(
+      issueEvent({
+        action: "labeled",
+        labels: ["automata:deliver"],
+        added: "automata:deliver",
+        state: "closed",
+      }),
+    );
+    expect(runIssueAutomation).not.toHaveBeenCalled();
+    expectNoOctokit();
+    expect(logs.some((l) => l.includes("owner/repo#42: issue-closed"))).toBe(
+      true,
+    );
   });
 
   it("legacy config ignores a labeled event", async () => {

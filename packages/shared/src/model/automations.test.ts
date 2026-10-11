@@ -2371,6 +2371,7 @@ describe("automations", () => {
       expect(
         await getIssueAutomationRunStats({
           db,
+          userId: user.id,
           automationId: automation.id,
           repoFullName,
           issueNumber: 7,
@@ -2391,6 +2392,7 @@ describe("automations", () => {
       expect(
         await getIssueAutomationRunStats({
           db,
+          userId: user.id,
           automationId: automation.id,
           repoFullName,
           issueNumber: 7,
@@ -2419,11 +2421,65 @@ describe("automations", () => {
       expect(
         await getIssueAutomationRunStats({
           db,
+          userId: user.id,
           automationId: automation.id,
           repoFullName,
           issueNumber: 1,
         }),
       ).toEqual({ total: 1, active: 0 });
+    });
+
+    async function seedIssueAutomation() {
+      const repoFullName = `terragon/test-repo-${nanoid()}`;
+      const automation = await createTestAutomation({
+        db,
+        userId: user.id,
+        values: { triggerType: "issue", repoFullName },
+      });
+      const stats = () =>
+        getIssueAutomationRunStats({
+          db,
+          userId: user.id,
+          automationId: automation.id,
+          repoFullName,
+          issueNumber: 3,
+        });
+      const threadValues = {
+        githubRepoFullName: repoFullName,
+        automationId: automation.id,
+        githubIssueNumber: 3,
+      };
+      return { stats, threadValues };
+    }
+
+    it("ignores shadow threads, which are never terminalized", async () => {
+      const { stats, threadValues } = await seedIssueAutomation();
+      await createTestThread({
+        db,
+        userId: user.id,
+        overrides: { ...threadValues, shadow: true },
+        chatOverrides: { status: "queued" },
+      });
+      expect(await stats()).toEqual({ total: 0, active: 0 });
+    });
+
+    it("treats a chat-mode thread with a terminal thread_chat as not in flight", async () => {
+      const { stats, threadValues } = await seedIssueAutomation();
+      await createTestThread({
+        db,
+        userId: user.id,
+        overrides: threadValues,
+        chatOverrides: { status: "complete" },
+        enableThreadChatCreation: true,
+      });
+      await createTestThread({
+        db,
+        userId: user.id,
+        overrides: threadValues,
+        chatOverrides: { status: "working" },
+        enableThreadChatCreation: true,
+      });
+      expect(await stats()).toEqual({ total: 2, active: 1 });
     });
   });
 });
