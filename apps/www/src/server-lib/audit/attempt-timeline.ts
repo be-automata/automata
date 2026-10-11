@@ -17,6 +17,10 @@ import type { GateSource } from "./required-checks";
  *
  * gateSource is ci_results.gateSource: protection | all-checks |
  * finding-check-only, null while undecided.
+ *
+ * regressed lists check_results.regressedFingerprints (#277: resolved
+ * findings the fix head brought back), each with its issue when the finding
+ * has one.
  */
 
 export const ATTEMPT_TIMELINE_LIMIT = 20;
@@ -33,6 +37,7 @@ export interface TimelineAttemptRow {
   prState: string | null;
   claimedAt: Instant;
   checkReportedAt: Instant;
+  checkResults: unknown;
   prOpenedAt: Instant;
   ciStatus: string | null;
   ciResults: unknown;
@@ -56,6 +61,12 @@ export interface AttemptTimelineSteps {
   closed: string | null;
 }
 
+export interface RegressedFinding {
+  fingerprint: string;
+  issueNumber: number | null;
+  issueUrl: string | null;
+}
+
 export interface AttemptTimelineEntry {
   attemptId: string;
   findingId: string;
@@ -68,6 +79,7 @@ export interface AttemptTimelineEntry {
   gateSource: GateSource | null;
   outcome: string | null;
   infraRefunded: boolean;
+  regressed: RegressedFinding[];
   steps: AttemptTimelineSteps;
 }
 
@@ -87,23 +99,36 @@ export function gateSourceOf(ciResults: unknown): GateSource | null {
     : null;
 }
 
+/** check_results.regressedFingerprints; anything malformed reads as none. */
+export function regressedFingerprintsOf(checkResults: unknown): string[] {
+  if (typeof checkResults !== "object" || checkResults === null) return [];
+  const list = (checkResults as { regressedFingerprints?: unknown })
+    .regressedFingerprints;
+  return Array.isArray(list)
+    ? list.filter((fp): fp is string => typeof fp === "string")
+    : [];
+}
+
 function iso(value: Instant | undefined): string | null {
   return value ? value.toISOString() : null;
 }
 
 /**
  * The newest `limit` attempts (rows arrive newest first) with their steps.
- * `threadCreatedAt` maps thread id → creation time.
+ * `threadCreatedAt` maps thread id → creation time; `regressedIssues` maps
+ * fingerprint → issue number (getFindingIssueNumbers).
  */
 export function buildAttemptTimeline({
   attempts,
   repoFullName,
   threadCreatedAt,
+  regressedIssues = {},
   limit = ATTEMPT_TIMELINE_LIMIT,
 }: {
   attempts: readonly TimelineAttemptRow[];
   repoFullName: string;
   threadCreatedAt: ReadonlyMap<string, Date>;
+  regressedIssues?: Readonly<Record<string, number>>;
   limit?: number;
 }): AttemptTimelineEntry[] {
   return attempts.slice(0, limit).map((a) => {
@@ -123,6 +148,17 @@ export function buildAttemptTimeline({
       gateSource: gateSourceOf(a.ciResults),
       outcome: a.outcome,
       infraRefunded: a.infraRefunded,
+      regressed: regressedFingerprintsOf(a.checkResults).map((fingerprint) => {
+        const issueNumber = regressedIssues[fingerprint] ?? null;
+        return {
+          fingerprint,
+          issueNumber,
+          issueUrl:
+            issueNumber === null
+              ? null
+              : `https://github.com/${repoFullName}/issues/${issueNumber}`,
+        };
+      }),
       steps: {
         claim: iso(a.claimedAt ?? a.createdAt),
         dispatch: iso(

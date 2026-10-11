@@ -115,6 +115,12 @@ export interface SelfHealAttemptTimelineDto {
   gateSource: SelfHealGateSourceDto | null;
   outcome: string | null;
   infraRefunded: boolean;
+  /** #277: findings the fix regressed. Absent from older servers. */
+  regressed?: Array<{
+    fingerprint: string;
+    issueNumber: number | null;
+    issueUrl: string | null;
+  }>;
   steps: {
     claim: string | null;
     dispatch: string | null;

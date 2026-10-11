@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { thread as threadTable } from "@terragon/shared/db/schema";
 
 import {
+  getFindingIssueNumbers,
   listAuditRunsForRepo,
   listEffectsForRepo,
   listFindingsForRepo,
@@ -28,6 +29,7 @@ import { isOrgAdmin } from "@/lib/org-role";
 import {
   ATTEMPT_TIMELINE_LIMIT,
   buildAttemptTimeline,
+  regressedFingerprintsOf,
   type AttemptTimelineEntry,
 } from "@/server-lib/audit/attempt-timeline";
 import { computeFingerprintChurn } from "@/server-lib/audit/fingerprint-churn";
@@ -51,7 +53,8 @@ import {
  *
  * Both responses carry `metrics` (computeSelfHealMetrics over the same reads,
  * so the admin view and the scorer agree) and `attemptTimeline` (the 20 newest
- * attempts with their phase timestamps and CI gate source). The trigger
+ * attempts with their phase timestamps, CI gate source and the findings
+ * each fix regressed, linked to their issues). The trigger
  * logins for the merge rate are the bot and the audit-fix automation owner's
  * GitHub login (omitted on lookup failure: basis bot-only).
  */
@@ -108,25 +111,37 @@ async function loadMetricsAndTimeline({
   metrics: SelfHealMetrics;
   attemptTimeline: AttemptTimelineEntry[];
 }> {
-  const threadIds = attempts
-    .slice(0, ATTEMPT_TIMELINE_LIMIT)
+  const timelineAttempts = attempts.slice(0, ATTEMPT_TIMELINE_LIMIT);
+  const threadIds = timelineAttempts
     .map((a) => a.threadId)
     .filter((id): id is string => id !== null);
-  const [triggerLogins, admissionDeferrals, threads] = await Promise.all([
-    resolveFixTriggerLogins({ db, organizationId, repoFullName }),
-    countAdmissionDeferrals({
-      db,
-      organizationId,
-      repoFullName,
-      since: new Date(Date.now() - ADMISSION_DEFERRAL_WINDOW_MS),
-    }),
-    threadIds.length === 0
-      ? Promise.resolve([])
-      : db
-          .select({ id: threadTable.id, createdAt: threadTable.createdAt })
-          .from(threadTable)
-          .where(inArray(threadTable.id, threadIds)),
-  ]);
+  const regressed = [
+    ...new Set(
+      timelineAttempts.flatMap((a) => regressedFingerprintsOf(a.checkResults)),
+    ),
+  ];
+  const [triggerLogins, admissionDeferrals, threads, regressedIssues] =
+    await Promise.all([
+      resolveFixTriggerLogins({ db, organizationId, repoFullName }),
+      countAdmissionDeferrals({
+        db,
+        organizationId,
+        repoFullName,
+        since: new Date(Date.now() - ADMISSION_DEFERRAL_WINDOW_MS),
+      }),
+      threadIds.length === 0
+        ? Promise.resolve([])
+        : db
+            .select({ id: threadTable.id, createdAt: threadTable.createdAt })
+            .from(threadTable)
+            .where(inArray(threadTable.id, threadIds)),
+      getFindingIssueNumbers({
+        db,
+        organizationId,
+        repoFullName,
+        fingerprints: regressed,
+      }),
+    ]);
   return {
     metrics: computeSelfHealMetrics({
       attempts,
@@ -138,6 +153,7 @@ async function loadMetricsAndTimeline({
       attempts,
       repoFullName,
       threadCreatedAt: new Map(threads.map((t) => [t.id, t.createdAt])),
+      regressedIssues,
     }),
   };
 }

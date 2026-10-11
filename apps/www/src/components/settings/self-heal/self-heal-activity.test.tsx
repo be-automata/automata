@@ -411,6 +411,37 @@ describe("SelfHealActivityView metrics and attempt timeline", () => {
     expect(html.match(/data-testid="self-heal-attempt"/g)).toHaveLength(2);
   });
 
+  it("lists the findings a fix regressed, linking those that have an issue", () => {
+    const html = render(
+      activity({
+        attemptTimeline: [
+          timelineEntry({
+            regressed: [
+              {
+                fingerprint: "1111111111111111",
+                issueNumber: 42,
+                issueUrl: `https://github.com/${REPO}/issues/42`,
+              },
+              {
+                fingerprint: "2222222222222222",
+                issueNumber: null,
+                issueUrl: null,
+              },
+            ],
+          }),
+          timelineEntry({ attemptId: "a2", regressed: [] }),
+        ],
+      }),
+    );
+    expect(
+      html.match(/data-testid="self-heal-attempt-regressed"/g),
+    ).toHaveLength(1);
+    expect(html).toContain(`href="https://github.com/${REPO}/issues/42"`);
+    expect(html).toContain("#42");
+    expect(html).not.toContain("1111111111111111");
+    expect(html).toContain("2222222222222222");
+  });
+
   it("shows nothing for metrics or timeline when the server sent none", () => {
     const html = render(activity());
     expect(html).not.toContain("self-heal-metrics");
