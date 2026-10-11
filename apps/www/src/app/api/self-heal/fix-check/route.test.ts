@@ -240,6 +240,22 @@ describe("POST /api/self-heal/fix-check", () => {
       ["an unknown checkOutcome", { checkOutcome: "maybe" }],
       ["a non-uuid attemptId", { attemptId: "nope" }],
       ["completed without a headSha", { headSha: null }],
+      [
+        "51 regressed fingerprints",
+        {
+          regressedFingerprints: Array.from({ length: 51 }, (_, i) =>
+            i.toString(16).padStart(16, "0"),
+          ),
+        },
+      ],
+      [
+        "a non-hex regressed fingerprint",
+        { regressedFingerprints: ["x".repeat(16)] },
+      ],
+      [
+        "a 17-char regressed fingerprint",
+        { regressedFingerprints: ["a".repeat(17)] },
+      ],
     ])("%s → 400", async (_label, over) => {
       expect((await post(report(over))).status).toBe(400);
       expect((await stored()).checkReportedAt).toBeNull();
@@ -315,6 +331,36 @@ describe("POST /api/self-heal/fix-check", () => {
       const row = await stored();
       expect(row.checkStatus).toBe("error");
       expect(row.checkResults).toMatchObject({ status: "aborted" });
+    });
+  });
+
+  describe("#277 regressed fingerprints", () => {
+    it("#277: a fix that regressed resolved findings records their fingerprints in check_results", async () => {
+      const log = vi.spyOn(console, "log");
+      const regressed = ["bbbb000000000001", "bbbb000000000002"];
+      const res = await post(
+        report({ checkOutcome: "fail", regressedFingerprints: regressed }),
+      );
+      expect(await res.json()).toEqual({ recorded: true, status: "failed" });
+      const row = await stored();
+      expect(row.checkStatus).toBe("failed");
+      expect(row.checkResults).toEqual({
+        status: "failed",
+        workerStatus: "completed",
+        checkOutcome: "fail",
+        regressedFingerprints: regressed,
+      });
+      expect(JSON.stringify(log.mock.calls)).toContain('"regressed":2');
+    });
+
+    it("#277: an empty list is kept, so 'checked, nothing regressed' stays visible", async () => {
+      await post(report({ regressedFingerprints: [] }));
+      expect((await stored()).checkResults).toEqual({
+        status: "passed",
+        workerStatus: "completed",
+        checkOutcome: "pass",
+        regressedFingerprints: [],
+      });
     });
   });
 

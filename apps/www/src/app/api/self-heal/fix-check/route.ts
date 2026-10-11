@@ -35,6 +35,10 @@ import { getFixAttemptForGateReport } from "@terragon/shared/model/audit-fix-att
  *  - `passed` only when the worker completed, the check passed and no denied
  *    path was touched. A check error is never a pass.
  *  - organizationId comes from the attempt row, never from the body.
+ *  - #277: `regressedFingerprints` (sent only when the run carried regression
+ *    checks) names the recently resolved findings the fix head regressed. The
+ *    worker already folded it into checkOutcome; it is stored in
+ *    check_results so the attempt record says WHICH finding it undid.
  *  - Only a RECORDED report hands the attempt to the draft-PR opener
  *    (waitUntil, once). The opener decides every verdict's outcome; if the
  *    waitUntil is cut off, the tick's runFixPrOpenSweep picks the attempt up.
@@ -45,6 +49,8 @@ import { getFixAttemptForGateReport } from "@terragon/shared/model/audit-fix-att
 const TOKEN_HEADER = "x-self-heal-gate-token";
 const MAX_DENIED_PATHS = 50;
 const MAX_PATH_LENGTH = 300;
+/** The worker's MAX_REPORTED_REGRESSIONS. */
+const MAX_REGRESSED_FINGERPRINTS = 50;
 const REPORTABLE_PHASES: AuditFixAttemptRow["phase"][] = [
   "dispatched",
   "checking",
@@ -62,6 +68,10 @@ const bodySchema = z
     deniedPaths: z
       .array(z.string().min(1).max(MAX_PATH_LENGTH))
       .max(MAX_DENIED_PATHS),
+    regressedFingerprints: z
+      .array(z.string().regex(/^[0-9a-f]{16}$/))
+      .max(MAX_REGRESSED_FINGERPRINTS)
+      .optional(),
   })
   // A completed run gates a specific commit; without it nothing can be bound.
   .refine((body) => body.workerStatus !== "completed" || body.headSha !== null);
@@ -100,8 +110,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!parsed.success) {
     return NextResponse.json({ error: "Invalid body" }, { status: 400 });
   }
-  const { attemptId, workerStatus, headSha, checkOutcome, deniedPaths } =
-    parsed.data;
+  const {
+    attemptId,
+    workerStatus,
+    headSha,
+    checkOutcome,
+    deniedPaths,
+    regressedFingerprints,
+  } = parsed.data;
 
   const attempt = await getFixAttemptForGateReport({ db, attemptId });
   const now = new Date();
@@ -126,7 +142,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     .update(auditFixAttempts)
     .set({
       checkStatus: STORED_CHECK_STATUS[status],
-      checkResults: { status, workerStatus, checkOutcome },
+      // Absent when the run carried no regression checks, so older reports
+      // are stored byte-identical.
+      checkResults: {
+        status,
+        workerStatus,
+        checkOutcome,
+        ...(regressedFingerprints && { regressedFingerprints }),
+      },
       gatedHeadSha: headSha,
       deniedPaths,
       checkReportedAt: now,
@@ -162,6 +185,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     recorded,
     workerStatus,
     deniedPaths: deniedPaths.length,
+    ...(regressedFingerprints && { regressed: regressedFingerprints.length }),
   });
   return NextResponse.json({ recorded, status });
 }
