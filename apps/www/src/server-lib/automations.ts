@@ -863,6 +863,17 @@ export async function runIssueAutomation({
       console.log(
         `Skipping issue automation ${automationId} for ${repoFullName}#${issueNumber}: ${reason} (${counts}, cap=${MAX_ISSUE_RUNS_PER_ISSUE}); archive a stuck run or start a manual run from the UI`,
       );
+      getPostHogServer().capture({
+        distinctId: automation.userId,
+        event: "automation_skipped",
+        properties: {
+          automationId,
+          repoFullName,
+          issueNumber,
+          reason,
+          ...(stats ? { runs: stats.total, inFlight: stats.active } : {}),
+        },
+      });
       return;
     }
   }

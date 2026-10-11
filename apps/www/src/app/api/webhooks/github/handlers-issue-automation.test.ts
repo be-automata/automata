@@ -46,8 +46,9 @@ vi.mock("@/server-lib/audit/self-heal-octokit", async (importOriginal) => ({
 vi.mock("@/server-lib/review/bot-login", () => ({
   resolveBotLogin: () => "terragon-app[bot]",
 }));
+const { capture } = vi.hoisted(() => ({ capture: vi.fn() }));
 vi.mock("@/lib/posthog-server", () => ({
-  getPostHogServer: () => ({ capture: vi.fn() }),
+  getPostHogServer: () => ({ capture }),
 }));
 vi.mock("@/lib/github", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/github")>()),
@@ -162,6 +163,9 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
       issueNumber: 42,
       source: "automated",
     });
+    expect(capture).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "automation_skipped" }),
+    );
   });
 
   it("skips a label added to a closed issue with zero GitHub calls", async () => {
@@ -186,6 +190,16 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
     expect(logs.some((l) => l.includes("owner/repo#42: issue-closed"))).toBe(
       true,
     );
+    expect(capture).toHaveBeenCalledWith({
+      distinctId: "user-1",
+      event: "automation_skipped",
+      properties: {
+        automationId: "auto-1",
+        repoFullName: REPO,
+        issueNumber: 42,
+        reason: "issue-closed",
+      },
+    });
   });
 
   it("legacy config ignores a labeled event", async () => {
