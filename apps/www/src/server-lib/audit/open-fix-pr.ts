@@ -7,7 +7,10 @@ import type {
   AuditFindingRow,
   AuditFixAttemptRow,
 } from "@terragon/shared/model/audit-findings";
-import { updateFinding } from "@terragon/shared/model/audit-findings";
+import {
+  getFindingIssueNumbers,
+  updateFinding,
+} from "@terragon/shared/model/audit-findings";
 import {
   closeFixAttempt,
   getFindingForAttempt,
@@ -824,7 +827,17 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
       maxAttempts: this.maxAttempts,
       reasons,
       ...(keptBranch !== undefined ? { keptBranch } : {}),
-      ...(regressedFingerprints !== undefined ? { regressedFingerprints } : {}),
+      ...(regressedFingerprints !== undefined
+        ? {
+            regressedFingerprints,
+            regressedIssues: await getFindingIssueNumbers({
+              db: this.db,
+              organizationId: this.org,
+              repoFullName: this.attempt.repoFullName,
+              fingerprints: regressedFingerprints,
+            }),
+          }
+        : {}),
     };
     const res = await session.writer.upsertComment({
       number: issueNumber,

@@ -246,6 +246,19 @@ describe("renderAuditComment", () => {
     expect(text).not.toContain("@team");
   });
 
+  it("#277: links a regressed finding to its issue when the number is known", () => {
+    const text = renderAuditComment("fix_attempt_rejected", {
+      fingerprint: FP,
+      runId: "r",
+      reasons: ["regressed_finding"],
+      regressedFingerprints: ["0123456789abcdef", "fedcba9876543210"],
+      regressedIssues: { "0123456789abcdef": 7 },
+    });
+    expect(text).toContain(
+      "Regressed findings: #7 (`0123456789abcdef`), `fedcba9876543210`",
+    );
+  });
+
   it("omits the regressed line when none are given", () => {
     const text = renderAuditComment("fix_attempt_rejected", {
       fingerprint: FP,

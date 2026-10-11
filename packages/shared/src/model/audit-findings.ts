@@ -374,6 +374,39 @@ export async function getFindingByIssue({
   return rows[0] ?? null;
 }
 
+/** #277: fingerprint → issue number for the repo's findings that have one. */
+export async function getFindingIssueNumbers({
+  db,
+  organizationId,
+  repoFullName,
+  fingerprints,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  fingerprints: readonly string[];
+}): Promise<Record<string, number>> {
+  if (fingerprints.length === 0) return {};
+  const rows = await db
+    .select({
+      fingerprint: auditFindings.fingerprint,
+      issueNumber: auditFindings.issueNumber,
+    })
+    .from(auditFindings)
+    .where(
+      and(
+        eq(auditFindings.organizationId, organizationId),
+        eq(auditFindings.repoFullName, normalizeRepo(repoFullName)),
+        inArray(auditFindings.fingerprint, [...fingerprints]),
+      ),
+    );
+  const issues: Record<string, number> = {};
+  for (const row of rows) {
+    if (row.issueNumber !== null) issues[row.fingerprint] = row.issueNumber;
+  }
+  return issues;
+}
+
 /** Insert, or return the existing row for the same (org, repo, fingerprint). */
 export async function insertFinding({
   db,

@@ -611,6 +611,45 @@ describe("openDraftFixPr (GATE-01, SC4, RES-18)", () => {
     expect(body).not.toContain("the finding's check did not pass");
   });
 
+  it("#277: a regressed finding with an issue in this repo is linked by number", async () => {
+    const finding = (
+      fingerprint: string,
+      repoFullName: string,
+      issue: number,
+    ) =>
+      insertFinding({
+        db,
+        organizationId: orgId,
+        finding: {
+          repoFullName,
+          fingerprint,
+          audit: "security-audit",
+          ruleId: "dep.vulnerable",
+          severity: "high",
+          checkKind: "script",
+          title: "Vulnerable dependency",
+          subject: "undici",
+          status: "resolved",
+          issueNumber: issue,
+        },
+      });
+    await finding("1111111111111111", REPO, 262);
+    // A finding of another repo is never linked, even when its fingerprint regressed.
+    await finding("2222222222222222", "acme/other", 99);
+    await report("failed", {
+      checkResults: {
+        status: "failed",
+        regressedFingerprints: ["1111111111111111", "2222222222222222"],
+      },
+    });
+    expect(await open()).toBe("check_failed");
+    const body = state.comments[0]?.body ?? "";
+    expect(body).toContain(
+      "Regressed findings: #262 (`1111111111111111`), `2222222222222222`",
+    );
+    expect(body).not.toContain("#99");
+  });
+
   it("a failed check without regressions keeps the plain check_failed reason", async () => {
     await report("failed");
     expect(await open()).toBe("check_failed");
