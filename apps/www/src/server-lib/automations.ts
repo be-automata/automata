@@ -775,6 +775,14 @@ type IssueRunSkipReason = "run-in-flight" | "run-cap-reached";
  * Why a webhook-triggered issue run must not start (null when it may), with
  * the counts behind the decision.
  */
+function issueRunClaimKey(
+  automationId: string,
+  repoFullName: string,
+  issueNumber: number,
+): string {
+  return `issue-automation-run:${automationId}:${repoFullName}#${issueNumber}`;
+}
+
 async function getIssueRunSkipReason({
   automation,
   repoFullName,
@@ -788,7 +796,7 @@ async function getIssueRunSkipReason({
   stats: IssueAutomationRunStats | null;
 }> {
   const claim = await redis.set(
-    `issue-automation-run:${automation.id}:${repoFullName}#${issueNumber}`,
+    issueRunClaimKey(automation.id, repoFullName, issueNumber),
     "1",
     { nx: true, ex: ISSUE_RUN_CLAIM_TTL_SECONDS },
   );
@@ -858,6 +866,44 @@ export async function runIssueAutomation({
       return;
     }
   }
+  try {
+    await startIssueAutomationRun({
+      userId,
+      automation,
+      repoFullName,
+      issueEventAction,
+      issueNumber,
+      source,
+    });
+  } catch (error) {
+    // A run that failed before its thread row existed would otherwise hold the
+    // claim for its full TTL and silently skip a retry. Once the row exists the
+    // stats query covers it, so releasing here never admits a duplicate.
+    if (source === "automated") {
+      await redis
+        .del(issueRunClaimKey(automation.id, repoFullName, issueNumber))
+        .catch(() => {});
+    }
+    throw error;
+  }
+}
+
+async function startIssueAutomationRun({
+  userId,
+  automation,
+  repoFullName,
+  issueEventAction,
+  issueNumber,
+  source,
+}: {
+  userId: string;
+  automation: Automation;
+  repoFullName: string;
+  issueEventAction: IssueEvent["action"];
+  issueNumber: number;
+  source: "automated" | "manual";
+}) {
+  const automationId = automation.id;
   // Shadow mode / kill-switch: suppress the eyes reaction in a shadow org (zero
   // GitHub side effects); the boot is suppressed downstream in runAutomation.
   const shadow = await isAutomationShadow(automation.organizationId);

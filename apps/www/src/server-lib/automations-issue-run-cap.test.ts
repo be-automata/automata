@@ -148,6 +148,15 @@ describe("runIssueAutomation — per-issue run bound", () => {
     expect(createNewThread).toHaveBeenCalledTimes(1);
   });
 
+  it("releases the claim when a run fails before its thread exists, so a retry starts", async () => {
+    vi.mocked(getOctokitForBackground).mockRejectedValueOnce(
+      new Error("github down"),
+    );
+    await expect(run(user, automation)).rejects.toThrow("github down");
+    await run(user, automation);
+    expect(createNewThread).toHaveBeenCalledTimes(1);
+  });
+
   it("skips while an earlier run on the issue is still in flight", async () => {
     await seedPriorRun(user, automation, "working");
     await run(user, automation);
