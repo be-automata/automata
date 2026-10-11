@@ -81,6 +81,16 @@ export function getAuditFindingsStamp(
   return metadata;
 }
 
+/** The hook's stages, in order; each is timed into the run's log line. */
+export type AuditHookStage =
+  | "claim"
+  | "parse"
+  | "switches"
+  | "mint"
+  | "preflight"
+  | "issues"
+  | "executor";
+
 export type AuditHookOutcome =
   | "applied"
   | "applied_partial"
@@ -159,6 +169,41 @@ export async function handleAuditFindingsAtFinish({
   };
   let timer: ReturnType<typeof setTimeout> | undefined;
 
+  // Where the 20 s go (#282): ms per finished stage, plus the stage in flight.
+  const timing: {
+    stagesMs: Partial<Record<AuditHookStage, number>>;
+    current: { stage: AuditHookStage; startedAt: number } | null;
+  } = { stagesMs: {}, current: null };
+  const endStage = (): void => {
+    const current = timing.current;
+    if (!current) return;
+    timing.stagesMs[current.stage] =
+      (timing.stagesMs[current.stage] ?? 0) + (Date.now() - current.startedAt);
+    timing.current = null;
+  };
+  const startStage = (stage: AuditHookStage): void => {
+    endStage();
+    timing.current = { stage, startedAt: Date.now() };
+  };
+  const logRun = (
+    repoFullName: string,
+    mode: string,
+    outcome: AuditHookOutcome,
+  ): void => {
+    endStage();
+    console.log("[self-heal] audit run", {
+      repoFullName,
+      threadId,
+      mode,
+      outcome,
+      created: 0,
+      updated: 0,
+      closed: 0,
+      pending: 0,
+      stagesMs: timing.stagesMs,
+    });
+  };
+
   const close = async (
     finish: Parameters<typeof finishAuditRun>[0] extends infer I
       ? Omit<Extract<I, object>, "db" | "organizationId" | "id">
@@ -200,6 +245,7 @@ export async function handleAuditFindingsAtFinish({
   };
 
   const pipeline = async (): Promise<void> => {
+    startStage("claim");
     const thread = await getThreadMinimal({ db, userId, threadId });
     const stamp = getAuditFindingsStamp(thread);
     if (!thread || !stamp) return;
@@ -238,6 +284,7 @@ export async function handleAuditFindingsAtFinish({
     const signal = AbortSignal.timeout(deadlineMs);
 
     // ---- parse
+    startStage("parse");
     const threadChat = await getThreadChat({
       db,
       threadId,
@@ -254,7 +301,7 @@ export async function handleAuditFindingsAtFinish({
         outcome: "unparseable",
         error: redactSecrets(parsed.reason),
       });
-      logRun(repoFullName, threadId, "off", "unparseable");
+      logRun(repoFullName, "off", "unparseable");
       return;
     }
     const { block, dropped } = parsed;
@@ -281,6 +328,7 @@ export async function handleAuditFindingsAtFinish({
       getPostHogServer().capture({ distinctId: userId, event, properties });
 
     // ---- resolve every switch that needs no GitHub call
+    startStage("switches");
     const pre = await loadSelfHealContext({
       db,
       organizationId,
@@ -301,13 +349,14 @@ export async function handleAuditFindingsAtFinish({
         complete,
         counts: { parsed: block.findings.length },
       });
-      logRun(repoFullName, threadId, "off", offOutcome(first));
+      logRun(repoFullName, "off", offOutcome(first));
       return;
     }
 
     // ---- ONE token mint, then the capability preflight
     let octokit: Awaited<ReturnType<typeof createSelfHealOctokit>>["octokit"];
     let installationKey: string;
+    startStage("mint");
     try {
       const minted = await createSelfHealOctokit({ owner, repo, signal });
       octokit = minted.octokit;
@@ -317,10 +366,11 @@ export async function handleAuditFindingsAtFinish({
         threadId,
         error: errorText(error),
       });
-      await unavailable(run, repoFullName, threadId);
+      await unavailable(run, repoFullName);
       return;
     }
 
+    startStage("preflight");
     const capability = await preflightCapabilities({
       organizationId,
       installationKey,
@@ -331,7 +381,7 @@ export async function handleAuditFindingsAtFinish({
       deps: callDeps,
     });
     if (!capability.ok && "unavailable" in capability) {
-      await unavailable(run, repoFullName, threadId);
+      await unavailable(run, repoFullName);
       return;
     }
     const missing = capability.ok ? [] : capability.missing;
@@ -359,7 +409,7 @@ export async function handleAuditFindingsAtFinish({
         complete,
         counts: { parsed: block.findings.length },
       });
-      logRun(repoFullName, threadId, "off", offOutcome(afterLatch));
+      logRun(repoFullName, "off", offOutcome(afterLatch));
       return;
     }
 
@@ -380,7 +430,7 @@ export async function handleAuditFindingsAtFinish({
           complete,
           counts: { parsed: block.findings.length },
         });
-        logRun(repoFullName, threadId, "off", offOutcome(withoutLatch));
+        logRun(repoFullName, "off", offOutcome(withoutLatch));
         return;
       }
       if (missing.length === 0) missing.push("issues");
@@ -400,11 +450,12 @@ export async function handleAuditFindingsAtFinish({
         complete,
         counts: { parsed: block.findings.length },
       });
-      logRun(repoFullName, threadId, mode, "missing-permission");
+      logRun(repoFullName, mode, "missing-permission");
       return;
     }
 
     // ---- bounded issue listing, then the executor
+    startStage("issues");
     const ledger = createDbAuditLedger({
       db,
       organizationId,
@@ -441,6 +492,7 @@ export async function handleAuditFindingsAtFinish({
       return;
     }
     state.executorStarted = true;
+    startStage("executor");
     const summary: AuditExecutionSummary = await executeAuditFindings({
       deps: {
         db,
@@ -480,6 +532,7 @@ export async function handleAuditFindingsAtFinish({
       },
     });
 
+    endStage();
     const outcome: AuditHookOutcome =
       mode === "dry-run" && summary.outcome === "applied"
         ? "dry_run"
@@ -510,15 +563,15 @@ export async function handleAuditFindingsAtFinish({
       updated: summary.updated,
       closed: summary.closed,
       pending: summary.pending,
+      stagesMs: timing.stagesMs,
     });
   };
 
   const unavailable = async (
     run: AuditRunRow,
     repoFullName: string,
-    id: string,
   ): Promise<void> => {
-    logRun(repoFullName, id, "off", "preflight_unavailable");
+    logRun(repoFullName, "off", "preflight_unavailable");
     if (run.claimCount >= MAX_CLAIM_COUNT) {
       await close({
         status: "failed",
@@ -561,6 +614,13 @@ export async function handleAuditFindingsAtFinish({
   try {
     const result = await Promise.race([runPipeline(), timeout]);
     if (result === "timeout") {
+      const current = timing.current;
+      console.warn("[audit-findings] hook deadline", {
+        threadId,
+        stage: current?.stage ?? null,
+        stageMs: current ? Date.now() - current.startedAt : null,
+        stagesMs: { ...timing.stagesMs },
+      });
       // The executor persists before it drains, so a started executor leaves
       // every decision durable and the cron finishes the effects. The finish
       // rewrites the whole run row: carry the persisted decisions over, or
@@ -592,22 +652,4 @@ export async function handleAuditFindingsAtFinish({
   } finally {
     if (timer) clearTimeout(timer);
   }
-}
-
-function logRun(
-  repoFullName: string,
-  threadId: string,
-  mode: string,
-  outcome: AuditHookOutcome,
-): void {
-  console.log("[self-heal] audit run", {
-    repoFullName,
-    threadId,
-    mode,
-    outcome,
-    created: 0,
-    updated: 0,
-    closed: 0,
-    pending: 0,
-  });
 }
