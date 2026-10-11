@@ -596,6 +596,29 @@ describe("openDraftFixPr (GATE-01, SC4, RES-18)", () => {
     expect(fake.rest.pulls.list).not.toHaveBeenCalled();
   });
 
+  it("#277: a check failed on a regression → the comment names the regressed findings", async () => {
+    const regressed = ["0123456789abcdef", "fedcba9876543210"];
+    await report("failed", {
+      checkResults: { status: "failed", regressedFingerprints: regressed },
+    });
+    expect(await open()).toBe("check_failed");
+    expect((await attempt()).outcome).toBe("check_failed");
+    expect(state.comments).toHaveLength(1);
+    const body = state.comments[0]?.body ?? "";
+    expect(body).toContain("recently resolved finding");
+    expect(body).toContain("`0123456789abcdef`");
+    expect(body).toContain("`fedcba9876543210`");
+    expect(body).not.toContain("the finding's check did not pass");
+  });
+
+  it("a failed check without regressions keeps the plain check_failed reason", async () => {
+    await report("failed");
+    expect(await open()).toBe("check_failed");
+    const body = state.comments[0]?.body ?? "";
+    expect(body).toContain("the finding's check did not pass");
+    expect(body).not.toContain("recently resolved finding");
+  });
+
   it("no_branch report → counted, nothing to delete", async () => {
     await report("no_branch");
     expect(await open()).toBe("no_branch");

@@ -238,6 +238,23 @@ function recordedVerdict(attempt: AuditFixAttemptRow): FixCheckStatus {
   return FIX_CHECK_STATUSES.find((s) => s === status) ?? "error";
 }
 
+/**
+ * #277: the resolved findings the fix head regressed
+ * (check_results.regressedFingerprints); anything malformed reads as none.
+ */
+function recordedRegressions(attempt: AuditFixAttemptRow): readonly string[] {
+  const results = attempt.checkResults;
+  const list =
+    typeof results === "object" &&
+    results !== null &&
+    "regressedFingerprints" in results
+      ? (results as { regressedFingerprints: unknown }).regressedFingerprints
+      : undefined;
+  return Array.isArray(list)
+    ? list.filter((fp): fp is string => typeof fp === "string")
+    : [];
+}
+
 function pullStatus(pr: RawPull): "draft" | "open" | "closed" | "merged" {
   if (pr.merged_at) return "merged";
   if (pr.state === "closed") return "closed";
@@ -419,7 +436,12 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
       return this.counted("no_branch", ["no_branch"], { deleteBranch: false });
     }
     if (verdict === "failed") {
-      return this.counted("check_failed", ["check_failed"]);
+      const regressed = recordedRegressions(this.attempt);
+      return regressed.length > 0
+        ? this.counted("check_failed", ["regressed_finding"], {
+            regressedFingerprints: regressed,
+          })
+        : this.counted("check_failed", ["check_failed"]);
     }
     return this.openDraft(context.resolved.settings.maxDiffLines);
   }
@@ -743,10 +765,12 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
       deleteBranch = true,
       terminalCause = outcome,
       github = true,
+      regressedFingerprints,
     }: {
       deleteBranch?: boolean;
       terminalCause?: string;
       github?: boolean;
+      regressedFingerprints?: readonly string[];
     } = {},
   ): Promise<DraftOpenOutcome> {
     const closed = await closeFixAttempt({
@@ -760,7 +784,7 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
     });
     if (!closed || !github) return outcome;
     if (deleteBranch) await this.deleteBranch();
-    await this.comment(reasons);
+    await this.comment(reasons, undefined, regressedFingerprints);
     const finding = await getFindingForAttempt({
       db: this.db,
       organizationId: this.org,
@@ -787,6 +811,7 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
   private async comment(
     reasons: readonly string[],
     keptBranch?: string,
+    regressedFingerprints?: readonly string[],
   ): Promise<void> {
     const issueNumber = this.finding.issueNumber;
     if (issueNumber === null) return;
@@ -799,6 +824,7 @@ class FixPrOpener extends FixAttemptGithub<OpenFixPrDeps> {
       maxAttempts: this.maxAttempts,
       reasons,
       ...(keptBranch !== undefined ? { keptBranch } : {}),
+      ...(regressedFingerprints !== undefined ? { regressedFingerprints } : {}),
     };
     const res = await session.writer.upsertComment({
       number: issueNumber,

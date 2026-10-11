@@ -178,6 +178,8 @@ export const FIX_ATTEMPT_REJECTION_TEXT: Readonly<Record<string, string>> = {
   no_branch: "no branch was pushed",
   run_failed: "the fix run ended with an error before a fix was pushed",
   check_failed: "the finding's check did not pass on the pushed commit",
+  regressed_finding:
+    "the pushed commit fails the check of a recently resolved finding",
   open_failed: "a draft pull request could not be opened",
   ci_failed: "the repository's CI failed on the draft pull request",
   ci_infra:
@@ -195,12 +197,24 @@ export interface AuditCommentData {
   reasons?: readonly string[];
   /** fix_attempt_rejected: the attempt branch, when it is kept for a person. */
   keptBranch?: string;
+  /** fix_attempt_rejected (#277): resolved findings the fix head regressed. */
+  regressedFingerprints?: readonly string[];
   /** fix_attempt_rejected / fix_draft_withdrawn: a draft PR existed. */
   draftNumber?: number;
   /** fix_draft_withdrawn: whether the attempt counts toward the limit. */
   counted?: boolean;
   /** fix_pr_expired: the repo's unreviewed-PR expiry window in days. */
   expiryDays?: number;
+}
+
+const FINGERPRINT = /^[0-9a-f]{16}$/;
+
+/** #277: only well-formed fingerprints are rendered; none → no line. */
+function regressedLines(fingerprints: readonly string[] | undefined): string[] {
+  const valid = (fingerprints ?? []).filter((fp) => FINGERPRINT.test(fp));
+  return valid.length > 0
+    ? ["", `Regressed findings: ${valid.map((fp) => `\`${fp}\``).join(", ")}`]
+    : [];
 }
 
 function rejectionLines(reasons: readonly string[] | undefined): string[] {
@@ -251,6 +265,7 @@ export function renderAuditComment(
         `Automated change attempt ${attempts} of ${max} was not proposed:`,
         "",
         ...rejectionLines(data.reasons),
+        ...regressedLines(data.regressedFingerprints),
         "",
         branch,
       ].join("\n");
