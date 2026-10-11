@@ -227,14 +227,25 @@ export async function handleAuditFindingsAtFinish({
     }
   };
 
-  const release = async (): Promise<void> => {
-    if (state.closed || !state.run || !state.organizationId) return;
+  /**
+   * Hand the claim back to the sweep. `unpersistedOnly` releases only while
+   * the executor has not persisted (#282); returns false when it refused, and
+   * the caller still owns the close.
+   */
+  const release = async ({
+    unpersistedOnly = false,
+  }: { unpersistedOnly?: boolean } = {}): Promise<boolean> => {
+    if (state.closed || !state.run || !state.organizationId) return false;
     state.closed = true;
+    let released = false;
     try {
-      await releaseAuditRunClaim({
+      released = await releaseAuditRunClaim({
         db,
         organizationId: state.organizationId,
         id: state.run.id,
+        ...(unpersistedOnly
+          ? { claimCount: state.run.claimCount, unpersistedOnly }
+          : {}),
       });
     } catch (error) {
       console.error("[audit-findings] could not release the run claim", {
@@ -242,6 +253,8 @@ export async function handleAuditFindingsAtFinish({
         error: errorText(error),
       });
     }
+    if (unpersistedOnly && !released) state.closed = false;
+    return released;
   };
 
   const pipeline = async (): Promise<void> => {
@@ -624,8 +637,19 @@ export async function handleAuditFindingsAtFinish({
       // The executor persists before it drains, so a started executor leaves
       // every decision durable and the cron finishes the effects. The finish
       // rewrites the whole run row: carry the persisted decisions over, or
-      // the run would show no check outcome at all.
-      if (state.executorStarted) {
+      // the run would show no check outcome at all. An executor cut off
+      // before its persist wrote nothing: hand the run back to the sweep
+      // (#282). The release is fenced on the unwritten decisions, so a persist
+      // committing at the same moment keeps the run and it is closed below.
+      const releasedUnpersisted =
+        state.executorStarted &&
+        !state.persisted &&
+        (await release({ unpersistedOnly: true }));
+      if (releasedUnpersisted) {
+        console.log("[audit-findings] claim released before the persist", {
+          threadId,
+        });
+      } else if (state.executorStarted) {
         const persisted = state.persisted;
         await close({
           status: "done",
