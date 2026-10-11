@@ -1,8 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { createTestUser } from "./test-helpers";
+import {
+  createTestAutomation,
+  createTestThread,
+  createTestUser,
+} from "./test-helpers";
 import { env } from "@terragon/env/pkg-shared";
 import { createDb } from "../db";
-import { User } from "../db/types";
+import { ThreadStatus, ThreadStatusDeprecated, User } from "../db/types";
 import { AutomationAction } from "../automations";
 import * as schema from "../db/schema";
 import { eq } from "drizzle-orm";
@@ -16,6 +20,7 @@ import {
   getScheduledAutomations,
   getScheduledAutomationsDueToRun,
   getPullRequestAutomationsForRepo,
+  getIssueAutomationRunStats,
 } from "./automations";
 import { nanoid } from "nanoid/non-secure";
 
@@ -2329,6 +2334,96 @@ describe("automations", () => {
       // Only automation1 should be due (beforeFutureTime < futureTime)
       expect(dueIds).toContain(automation1.id);
       expect(dueIds).not.toContain(automation2.id);
+    });
+  });
+
+  describe("getIssueAutomationRunStats", () => {
+    it("counts this automation's threads for the issue and the in-flight ones", async () => {
+      const repoFullName = `terragon/test-repo-${nanoid()}`;
+      const automation = await createTestAutomation({
+        db,
+        userId: user.id,
+        values: { triggerType: "issue", repoFullName },
+      });
+      const other = await createTestAutomation({
+        db,
+        userId: user.id,
+        values: { triggerType: "issue", repoFullName },
+      });
+      const issueThread = ({
+        status,
+        ...overrides
+      }: NonNullable<Parameters<typeof createTestThread>[0]["overrides"]> & {
+        status: Exclude<ThreadStatus, ThreadStatusDeprecated>;
+      }) =>
+        createTestThread({
+          db,
+          userId: user.id,
+          overrides: {
+            githubRepoFullName: repoFullName,
+            automationId: automation.id,
+            githubIssueNumber: 7,
+            ...overrides,
+          },
+          chatOverrides: { status },
+        });
+
+      expect(
+        await getIssueAutomationRunStats({
+          db,
+          automationId: automation.id,
+          repoFullName,
+          issueNumber: 7,
+        }),
+      ).toEqual({ total: 0, active: 0 });
+
+      await issueThread({ status: "complete" });
+      await issueThread({ status: "working" });
+      await issueThread({ status: "queued", archived: true });
+      // Not counted: other issue, other automation, other repo.
+      await issueThread({ githubIssueNumber: 8, status: "working" });
+      await issueThread({ automationId: other.id, status: "working" });
+      await issueThread({
+        githubRepoFullName: `terragon/other-${nanoid()}`,
+        status: "working",
+      });
+
+      expect(
+        await getIssueAutomationRunStats({
+          db,
+          automationId: automation.id,
+          repoFullName,
+          issueNumber: 7,
+        }),
+      ).toEqual({ total: 3, active: 1 });
+    });
+
+    it("treats a typed terminal cause as not in flight", async () => {
+      const repoFullName = `terragon/test-repo-${nanoid()}`;
+      const automation = await createTestAutomation({
+        db,
+        userId: user.id,
+        values: { triggerType: "issue", repoFullName },
+      });
+      await createTestThread({
+        db,
+        userId: user.id,
+        overrides: {
+          githubRepoFullName: repoFullName,
+          automationId: automation.id,
+          githubIssueNumber: 1,
+          terminalCause: "superseded",
+        },
+        chatOverrides: { status: "working" },
+      });
+      expect(
+        await getIssueAutomationRunStats({
+          db,
+          automationId: automation.id,
+          repoFullName,
+          issueNumber: 1,
+        }),
+      ).toEqual({ total: 1, active: 0 });
     });
   });
 });

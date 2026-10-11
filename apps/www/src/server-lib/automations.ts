@@ -5,6 +5,7 @@ import {
   getAutomation,
   incrementAutomationRunCount,
   getAutomationCount,
+  getIssueAutomationRunStats,
 } from "@terragon/shared/model/automations";
 import { assertNever } from "@terragon/shared/utils";
 import { Automation, AutomationInsert } from "@terragon/shared/db/types";
@@ -751,12 +752,59 @@ export async function runPullRequestAutomation({
   }
 }
 
+/**
+ * The most runs one issue automation starts for a single issue from webhooks.
+ * Each run opens its own PR, so without a bound an operator re-labeling an
+ * issue chains partial-delivery PRs indefinitely (#277 collected five).
+ */
+export const MAX_ISSUE_RUNS_PER_ISSUE = 3;
+
+export type IssueRunSkipReason =
+  | "issue-closed"
+  | "run-in-flight"
+  | "run-cap-reached";
+
+/**
+ * Why a webhook-triggered issue run must not start, or null when it may. Reads
+ * the webhook payload's issue state (no GitHub call) and this automation's
+ * existing threads for the issue.
+ */
+export async function getIssueRunSkipReason({
+  automationId,
+  repoFullName,
+  issueNumber,
+  issueState,
+}: {
+  automationId: string;
+  repoFullName: string;
+  issueNumber: number;
+  issueState: string | undefined;
+}): Promise<IssueRunSkipReason | null> {
+  if (issueState === "closed") {
+    return "issue-closed";
+  }
+  const { total, active } = await getIssueAutomationRunStats({
+    db,
+    automationId,
+    repoFullName,
+    issueNumber,
+  });
+  if (active > 0) {
+    return "run-in-flight";
+  }
+  if (total >= MAX_ISSUE_RUNS_PER_ISSUE) {
+    return "run-cap-reached";
+  }
+  return null;
+}
+
 export async function runIssueAutomation({
   userId,
   automationId,
   repoFullName,
   issueEventAction,
   issueNumber,
+  issueState,
   source,
 }: {
   userId: string;
@@ -764,6 +812,8 @@ export async function runIssueAutomation({
   repoFullName: string;
   issueEventAction: IssueEvent["action"];
   issueNumber: number;
+  /** The webhook payload's `issue.state`; only automated runs carry it. */
+  issueState?: string;
   source: "automated" | "manual";
 }) {
   const { automation, canRun } = await validateCanRunAutomation({
@@ -777,6 +827,23 @@ export async function runIssueAutomation({
   }
   if (automation.repoFullName !== repoFullName) {
     throw new Error("Automation is not configured for this repository");
+  }
+  // A manual run is an explicit operator request, so only webhook-triggered
+  // runs are bounded. Checked before the eyes reaction: a skipped event leaves
+  // no trace on the issue.
+  if (source === "automated") {
+    const skipReason = await getIssueRunSkipReason({
+      automationId,
+      repoFullName,
+      issueNumber,
+      issueState,
+    });
+    if (skipReason) {
+      console.log(
+        `Skipping automation ${automationId} for issue #${issueNumber} in ${repoFullName}: ${skipReason} (cap ${MAX_ISSUE_RUNS_PER_ISSUE} runs per issue)`,
+      );
+      return;
+    }
   }
   // Shadow mode / kill-switch: suppress the eyes reaction in a shadow org (zero
   // GitHub side effects); the boot is suppressed downstream in runAutomation.

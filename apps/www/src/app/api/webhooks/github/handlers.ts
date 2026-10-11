@@ -856,6 +856,7 @@ async function handleIssueAutomation(
       issueEventAction: event.action,
       repoFullName,
       issueNumber,
+      issueState: event.issue.state,
       source: "automated",
     }).catch((error) => {
       console.error(
@@ -900,6 +901,7 @@ async function handleIssueAutomation(
     issueEventAction: event.action,
     repoFullName,
     issueNumber,
+    issueState: event.issue.state,
     source: "automated",
   }).catch((error) => {
     console.error(

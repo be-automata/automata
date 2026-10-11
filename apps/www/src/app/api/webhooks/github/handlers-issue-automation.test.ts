@@ -111,16 +111,19 @@ function issueEvent({
   labels = [],
   added,
   author = "octocat",
+  state,
 }: {
   action: "opened" | "labeled";
   labels?: string[];
   added?: string;
   author?: string;
+  state?: "open" | "closed";
 }): IssueEvent {
   return {
     action,
     issue: {
       number: 42,
+      ...(state ? { state } : {}),
       user: { login: author },
       labels: labels.map((name) => ({ name })),
     },
@@ -157,6 +160,17 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
       issueEventAction: "opened",
       repoFullName: REPO,
       issueNumber: 42,
+      source: "automated",
+    });
+  });
+
+  it("hands the payload's issue state to the run so a closed issue is skipped", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([automation()]);
+    await handleIssueEvent(issueEvent({ action: "opened", state: "closed" }));
+    expect(runIssueAutomation).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runIssueAutomation).mock.calls[0]![0]).toMatchObject({
+      issueNumber: 42,
+      issueState: "closed",
       source: "automated",
     });
   });
