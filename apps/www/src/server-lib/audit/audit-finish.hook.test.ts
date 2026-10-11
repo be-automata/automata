@@ -59,7 +59,7 @@ vi.mock("@terragon/shared/model/threads", () => ({
 vi.mock("@terragon/shared/model/audit-findings", () => ({
   claimAuditRun: vi.fn(async () => h.run.value),
   finishAuditRun: vi.fn(async () => null),
-  releaseAuditRunClaim: vi.fn(async () => {}),
+  releaseAuditRunClaim: vi.fn(async () => true),
 }));
 vi.mock("./resolve-self-heal", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./resolve-self-heal")>()),
@@ -385,7 +385,12 @@ describe("handleAuditFindingsAtFinish", () => {
 
   it("RES-04: an executor that eats the whole budget cannot hold the hook past the deadline", async () => {
     vi.useFakeTimers({ now: new Date("2026-10-04T10:00:00Z") });
-    h.executeImpl.value = () => new Promise(() => {});
+    h.executeImpl.value = () => {
+      const deps = vi.mocked(executor.executeAuditFindings).mock.calls[0]![0]
+        .deps;
+      deps.onPersisted?.([]);
+      return new Promise(() => {});
+    };
     let settled = false;
     const running = call().then(() => {
       settled = true;
@@ -424,18 +429,65 @@ describe("handleAuditFindingsAtFinish", () => {
     });
   });
 
-  it("a deadline before the executor persisted records no decisions", async () => {
+  it("a deadline before the executor persisted releases the claim for the sweep, fenced on the unpersisted claim", async () => {
     vi.useFakeTimers({ now: new Date("2026-10-04T10:00:00Z") });
+    h.run.value = { id: "run_1", claimCount: 2, checkResults: null };
     h.executeImpl.value = () => new Promise(() => {});
     const running = call();
     await vi.advanceTimersByTimeAsync(20_999);
     await running;
+    expect(audit.releaseAuditRunClaim).toHaveBeenCalledTimes(1);
+    expect(
+      vi.mocked(audit.releaseAuditRunClaim).mock.calls[0]![0],
+    ).toMatchObject({ id: "run_1", claimCount: 2, unpersistedOnly: true });
+    expect(audit.finishAuditRun).not.toHaveBeenCalled();
+  });
+
+  it("a deadline whose release loses to the executor's persist closes applied_partial with no decisions", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-04T10:00:00Z") });
+    vi.mocked(audit.releaseAuditRunClaim).mockResolvedValueOnce(false);
+    h.executeImpl.value = () => new Promise(() => {});
+    const running = call();
+    await vi.advanceTimersByTimeAsync(20_999);
+    await running;
+    expect(audit.releaseAuditRunClaim).toHaveBeenCalledTimes(1);
     const finish = lastFinish();
     expect(finish).toMatchObject({
+      status: "done",
       outcome: "applied_partial",
       error: "hook_deadline",
+      claimCount: 1,
     });
     expect(finish.decisions).toBeUndefined();
+  });
+
+  it("a run released before the executor persisted is not closed when the executor later resolves", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-04T10:00:00Z") });
+    h.executeImpl.value = () =>
+      new Promise((resolve) =>
+        setTimeout(
+          () =>
+            resolve({
+              outcome: "error",
+              created: 0,
+              updated: 0,
+              closed: 0,
+              reopened: 0,
+              needsHuman: 0,
+              suppressed: 0,
+              pending: 0,
+              skipped: 0,
+              decisions: [],
+            }),
+          30_000,
+        ),
+      );
+    const running = call();
+    await vi.advanceTimersByTimeAsync(20_999);
+    await running;
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(audit.releaseAuditRunClaim).toHaveBeenCalledTimes(1);
+    expect(audit.finishAuditRun).not.toHaveBeenCalled();
   });
 
   it("logs how long each hook stage took on the run line", async () => {

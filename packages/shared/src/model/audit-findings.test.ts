@@ -306,6 +306,101 @@ describe("audit runs (leased claim)", () => {
     expect(finished?.status).toBe("done");
   });
 
+  it("#282: an unpersisted-only release hands back a claim whose decisions are not written yet", async () => {
+    const threadId = await newThread();
+    const claimed = await claimAuditRun({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+      threadId,
+      audit: "security",
+    });
+    expect(
+      await releaseAuditRunClaim({
+        db,
+        organizationId: orgA,
+        id: claimed?.id ?? "",
+        claimCount: 1,
+        unpersistedOnly: true,
+      }),
+    ).toBe(true);
+    const run = await getAuditRunByThread({
+      db,
+      organizationId: orgA,
+      threadId,
+    });
+    expect(run?.status).toBe("dispatched");
+  });
+
+  it("#282: an unpersisted-only release refuses a run whose decisions were persisted", async () => {
+    const threadId = await newThread();
+    const claimed = await claimAuditRun({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+      threadId,
+      audit: "security",
+    });
+    await db
+      .update(auditRuns)
+      .set({ decisions: [] })
+      .where(eq(auditRuns.threadId, threadId));
+    expect(
+      await releaseAuditRunClaim({
+        db,
+        organizationId: orgA,
+        id: claimed?.id ?? "",
+        claimCount: 1,
+        unpersistedOnly: true,
+      }),
+    ).toBe(false);
+    const run = await getAuditRunByThread({
+      db,
+      organizationId: orgA,
+      threadId,
+    });
+    expect(run?.status).toBe("claimed");
+  });
+
+  it("#282: a release fenced on a stale claim count does not touch the re-leased run", async () => {
+    const threadId = await newThread();
+    const first = await claimAuditRun({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+      threadId,
+      audit: "security",
+    });
+    await db
+      .update(auditRuns)
+      .set({ claimExpiresAt: new Date(Date.now() - 1000) })
+      .where(eq(auditRuns.threadId, threadId));
+    const second = await claimAuditRun({
+      db,
+      organizationId: orgA,
+      repoFullName: REPO,
+      threadId,
+      audit: "security",
+    });
+    expect(second?.claimCount).toBe(2);
+    expect(
+      await releaseAuditRunClaim({
+        db,
+        organizationId: orgA,
+        id: first?.id ?? "",
+        claimCount: 1,
+        unpersistedOnly: true,
+      }),
+    ).toBe(false);
+    const run = await getAuditRunByThread({
+      db,
+      organizationId: orgA,
+      threadId,
+    });
+    expect(run?.status).toBe("claimed");
+    expect(run?.claimCount).toBe(2);
+  });
+
   it("records check results once, fenced by org", async () => {
     const threadId = await newThread();
     await createAuditRunAtDispatch({

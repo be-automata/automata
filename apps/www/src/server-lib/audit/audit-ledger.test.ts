@@ -7,6 +7,7 @@ import {
   createAuditRunAtDispatch,
   getAuditRunByThread,
   listFindingsForRepo,
+  releaseAuditRunClaim,
 } from "@terragon/shared/model/audit-findings";
 import {
   createTestOrg,
@@ -141,6 +142,51 @@ describe("createDbAuditLedger", () => {
       await setClaim("claimed", 2);
       await fenced(2).persist(batch());
       expect(await findings()).toHaveLength(1);
+    });
+
+    // #282: the hook's deadline releases a started executor's claim only
+    // while nothing is persisted; the persist and the release race for it.
+    const releaseUnpersisted = (claimCount: number) =>
+      releaseAuditRunClaim({
+        db,
+        organizationId: orgId,
+        id: runId,
+        claimCount,
+        unpersistedOnly: true,
+      });
+
+    it("#282: a committed persist refuses the unpersisted-only release", async () => {
+      await setClaim("claimed", 1);
+      await fenced(1).persist(batch());
+      expect(await releaseUnpersisted(1)).toBe(false);
+      const [run] = await db
+        .select()
+        .from(auditRuns)
+        .where(eq(auditRuns.id, runId));
+      expect(run?.status).toBe("claimed");
+    });
+
+    it("#282: a persist and an unpersisted-only release racing: exactly one wins", async () => {
+      await setClaim("claimed", 1);
+      const [persisted, released] = await Promise.all([
+        fenced(1)
+          .persist(batch())
+          .then(
+            () => true,
+            (error: unknown) => {
+              expect(error).toBeInstanceOf(StaleAuditClaimError);
+              return false;
+            },
+          ),
+        releaseUnpersisted(1),
+      ]);
+      expect(persisted !== released).toBe(true);
+      const [run] = await db
+        .select()
+        .from(auditRuns)
+        .where(eq(auditRuns.id, runId));
+      expect(run?.status).toBe(released ? "dispatched" : "claimed");
+      expect(await findings()).toHaveLength(persisted ? 1 : 0);
     });
   });
 

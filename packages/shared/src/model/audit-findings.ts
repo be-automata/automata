@@ -141,20 +141,30 @@ export async function claimAuditRun({
   });
 }
 
-/** Hand a claimed run back so the sweep retries it (preflight unavailable). */
+/**
+ * Hand a claimed run back so the sweep retries it (preflight unavailable, or
+ * a deadline before the executor persisted). Returns whether it released.
+ * `unpersistedOnly` refuses a run whose decisions are already written: the
+ * update and the ledger's persist both lock the row, so exactly one wins.
+ */
 export async function releaseAuditRunClaim({
   db,
   organizationId,
   id,
+  claimCount,
+  unpersistedOnly = false,
   now = new Date(),
 }: {
   db: DB;
   organizationId: string;
   id: string;
+  /** When set, releases the run only while this claim is still held. */
+  claimCount?: number;
+  unpersistedOnly?: boolean;
   now?: Date;
-}): Promise<void> {
-  await withSelfHealTx(db, async (tx) => {
-    await tx
+}): Promise<boolean> {
+  return withSelfHealTx(db, async (tx) => {
+    const rows = await tx
       .update(auditRuns)
       .set({ status: "dispatched", claimExpiresAt: now })
       .where(
@@ -162,8 +172,14 @@ export async function releaseAuditRunClaim({
           eq(auditRuns.id, id),
           eq(auditRuns.organizationId, organizationId),
           eq(auditRuns.status, "claimed"),
+          claimCount === undefined
+            ? undefined
+            : eq(auditRuns.claimCount, claimCount),
+          unpersistedOnly ? isNull(auditRuns.decisions) : undefined,
         ),
-      );
+      )
+      .returning({ id: auditRuns.id });
+    return rows.length > 0;
   });
 }
 
