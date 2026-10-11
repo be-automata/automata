@@ -850,6 +850,16 @@ async function handleIssueAutomation(
     console.log(
       `Skipping issue automation ${automation.id} for ${repoFullName}#${issueNumber}: issue-closed`,
     );
+    getPostHogServer().capture({
+      distinctId: automation.userId,
+      event: "automation_skipped",
+      properties: {
+        automationId: automation.id,
+        repoFullName,
+        issueNumber,
+        reason: "issue-closed",
+      },
+    });
     return;
   }
   const issueAuthorUserName = event.issue.user?.login;

@@ -23,6 +23,11 @@ import { addEyesReactionToPullRequest } from "@/app/api/webhooks/github/utils";
 import { createNewThread } from "./new-thread-shared";
 import { MAX_ISSUE_RUNS_PER_ISSUE, runIssueAutomation } from "./automations";
 
+const { capture } = vi.hoisted(() => ({ capture: vi.fn() }));
+vi.mock("@/lib/posthog-server", () => ({
+  getPostHogServer: () => ({ capture }),
+}));
+
 vi.mock("./new-thread-shared", () => ({
   createNewThread: vi
     .fn()
@@ -86,6 +91,12 @@ async function seedPriorRun(
   });
 }
 
+function skippedEvents(): unknown[] {
+  return capture.mock.calls
+    .map(([arg]) => arg as { event: string })
+    .filter((arg) => arg.event === "automation_skipped");
+}
+
 function run(
   user: User,
   automation: Automation,
@@ -128,6 +139,7 @@ describe("runIssueAutomation — per-issue run bound", () => {
     expect(createNewThread).toHaveBeenCalledWith(
       expect.objectContaining({ githubIssueNumber: ISSUE }),
     );
+    expect(skippedEvents()).toEqual([]);
   });
 
   it("starts one run when two events for the issue arrive together", async () => {
@@ -139,6 +151,18 @@ describe("runIssueAutomation — per-issue run bound", () => {
         l.includes("run-in-flight (claim held by a concurrent event"),
       ),
     ).toBe(true);
+    expect(skippedEvents()).toEqual([
+      {
+        distinctId: user.id,
+        event: "automation_skipped",
+        properties: {
+          automationId: automation.id,
+          repoFullName: REPO,
+          issueNumber: ISSUE,
+          reason: "run-in-flight",
+        },
+      },
+    ]);
   });
 
   it("skips a second event inside the claim window", async () => {
@@ -165,6 +189,20 @@ describe("runIssueAutomation — per-issue run bound", () => {
     expect(
       logs.some((l) => l.includes("run-in-flight (runs=1, inFlight=1, cap=3)")),
     ).toBe(true);
+    expect(skippedEvents()).toEqual([
+      {
+        distinctId: user.id,
+        event: "automation_skipped",
+        properties: {
+          automationId: automation.id,
+          repoFullName: REPO,
+          issueNumber: ISSUE,
+          reason: "run-in-flight",
+          runs: 1,
+          inFlight: 1,
+        },
+      },
+    ]);
   });
 
   it("starts another run below the cap once earlier runs finished", async () => {
@@ -189,6 +227,20 @@ describe("runIssueAutomation — per-issue run bound", () => {
         ),
       ),
     ).toBe(true);
+    expect(skippedEvents()).toEqual([
+      {
+        distinctId: user.id,
+        event: "automation_skipped",
+        properties: {
+          automationId: automation.id,
+          repoFullName: REPO,
+          issueNumber: ISSUE,
+          reason: "run-cap-reached",
+          runs: MAX_ISSUE_RUNS_PER_ISSUE,
+          inFlight: 0,
+        },
+      },
+    ]);
   });
 
   it("does not bound a manual run", async () => {
@@ -197,5 +249,6 @@ describe("runIssueAutomation — per-issue run bound", () => {
     }
     await run(user, automation, { source: "manual" });
     expect(createNewThread).toHaveBeenCalledTimes(1);
+    expect(skippedEvents()).toEqual([]);
   });
 });
