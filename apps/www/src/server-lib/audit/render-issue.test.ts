@@ -233,6 +233,29 @@ describe("renderAuditComment", () => {
     expect(draft).toContain("#501 was withdrawn");
   });
 
+  it("#277: names the regressed findings, dropping anything that is not a fingerprint", () => {
+    const text = renderAuditComment("fix_attempt_rejected", {
+      fingerprint: FP,
+      runId: "r",
+      reasons: ["regressed_finding"],
+      regressedFingerprints: ["0123456789abcdef", "`oops`\n@team"],
+    });
+    expect(text).toContain("fails the check of a recently resolved finding");
+    expect(text).toContain("Regressed findings: `0123456789abcdef`");
+    expect(text).not.toContain("oops");
+    expect(text).not.toContain("@team");
+  });
+
+  it("omits the regressed line when none are given", () => {
+    const text = renderAuditComment("fix_attempt_rejected", {
+      fingerprint: FP,
+      runId: "r",
+      reasons: ["check_failed"],
+      regressedFingerprints: [],
+    });
+    expect(text).not.toContain("Regressed findings");
+  });
+
   it("states whether a withdrawn draft counts and names the no-CI label", () => {
     const counted = renderAuditComment("fix_draft_withdrawn", {
       fingerprint: FP,
