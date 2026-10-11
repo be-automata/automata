@@ -203,6 +203,33 @@ function AttemptRow({ entry }: { entry: SelfHealAttemptTimelineDto }) {
             {label} {entry.steps[key]}
           </div>
         ))}
+        {entry.regressed !== undefined && entry.regressed.length > 0 && (
+          <div
+            className="text-xs text-destructive"
+            data-testid="self-heal-attempt-regressed"
+          >
+            regressed{" "}
+            {entry.regressed.map(
+              ({ fingerprint, issueNumber, issueUrl }, i) => (
+                <span key={fingerprint}>
+                  {i > 0 && ", "}
+                  {issueUrl === null || issueNumber === null ? (
+                    <span className="font-mono">{fingerprint}</span>
+                  ) : (
+                    <a
+                      className="underline"
+                      href={issueUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      #{issueNumber}
+                    </a>
+                  )}
+                </span>
+              ),
+            )}
+          </div>
+        )}
       </td>
     </tr>
   );

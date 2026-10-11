@@ -346,4 +346,90 @@ describe("GET /api/self-heal/[owner]/[repo]", () => {
     expect(newest.steps.closed).not.toBeNull();
     expect(activity.attemptTimeline.map((e) => e.attemptNo)).not.toContain(1);
   });
+
+  it("names the findings each attempt regressed, with their issues from this org only", async () => {
+    await actor("admin");
+    const finding = (fingerprint: string, issueNumber: number | null) => ({
+      repoFullName: REPO,
+      fingerprint,
+      audit: "security" as const,
+      ruleId: "R3",
+      severity: "high" as const,
+      checkKind: "script" as const,
+      title: `finding ${fingerprint}`,
+      issueNumber,
+    });
+    const fixed = await insertFinding({
+      db,
+      organizationId: orgId,
+      finding: finding("ffffffffffffffff", 7),
+    });
+    await insertFinding({
+      db,
+      organizationId: orgId,
+      finding: finding("1111111111111111", 42),
+    });
+    await insertFinding({
+      db,
+      organizationId: orgId,
+      finding: finding("2222222222222222", null),
+    });
+    const other = await createTestOrganization({
+      db,
+      userId,
+      name: `Other ${nanoid(6)}`,
+      role: "admin",
+    });
+    await insertFinding({
+      db,
+      organizationId: other.organization.id,
+      finding: finding("2222222222222222", 99),
+    });
+    const attempt = (attemptNo: number, checkResults: unknown) => ({
+      organizationId: orgId,
+      repoFullName: REPO,
+      findingId: fixed.id,
+      attemptNo,
+      phase: "closed" as const,
+      checkResults,
+      createdAt: new Date(Date.UTC(2026, 8, 1, 0, attemptNo)),
+    });
+    await db.insert(auditFixAttempts).values([
+      attempt(1, { status: "ok" }),
+      attempt(2, {
+        status: "fail",
+        regressedFingerprints: [
+          "1111111111111111",
+          "2222222222222222",
+          "3333333333333333",
+        ],
+      }),
+      attempt(3, { regressedFingerprints: "not-a-list" }),
+    ]);
+
+    const activity = (await (await get()).json()) as {
+      attemptTimeline: Array<{
+        attemptNo: number;
+        regressed: Array<{
+          fingerprint: string;
+          issueNumber: number | null;
+          issueUrl: string | null;
+        }>;
+      }>;
+    };
+    const byNo = new Map(
+      activity.attemptTimeline.map((e) => [e.attemptNo, e.regressed]),
+    );
+    expect(byNo.get(1)).toEqual([]);
+    expect(byNo.get(3)).toEqual([]);
+    expect(byNo.get(2)).toEqual([
+      {
+        fingerprint: "1111111111111111",
+        issueNumber: 42,
+        issueUrl: `https://github.com/${REPO}/issues/42`,
+      },
+      { fingerprint: "2222222222222222", issueNumber: null, issueUrl: null },
+      { fingerprint: "3333333333333333", issueNumber: null, issueUrl: null },
+    ]);
+  });
 });
