@@ -719,8 +719,9 @@ result is settled. They are a separate class: a harness failure is a
 `FAIL harness …` line, never invalidates `manifest.sha256`, and only the
 harness stamp `/usr/local/lib/automata-batteries/harness.sha256` records a
 fully passing harness install (`harness.sha256.invalid` = the last one did
-not). Nothing seeds them into runs before PR4, so installing them needs **no
-worker restart**.
+not). Installing them never touches a review run. Task runs get them only
+once the `harnessBatteries` flag and a Task agent packs setting name them; the
+order (and the worker restart it needs) is "Harness rollout" below.
 
 **What lands where**
 
@@ -884,6 +885,147 @@ the box's npm (`npm install --ignore-scripts` in a linux/amd64 Node 24
 container), record `lockSha256`/`packageJsonSha256` in `harness.json`, and
 re-pin any prebuild for the new version. Then run the deploy-assets tests, the
 dry run and the container drill.
+
+## Harness rollout (gstack, GSD and ruflo in task runs)
+
+Turns the installed harness packs on for task and PR-mention runs: one canary
+repo, a drill, then the org default. Review runs never take harness packs (the
+worker refuses them in the review lane and logs `batteries: skip pack <id>
+reason=review-lane`).
+
+**Settings change only through the admin UI or the settings API, never SQL.**
+The prod `DATABASE_URL` is a write-only Cloudflare Worker secret, and the routes
+are where the `harnessBatteries` gate, the org-admin check and the
+`expectedUpdatedAt` conflict fence live.
+
+**Order.** Each step's evidence goes on the rollout PR or issue before the next
+step starts.
+
+1. **Install PASS, rerun SKIPPED.** The root installer ends `RESULT: PASS` with
+   a `HARNESS STAMP <hash>` line; an immediate re-run shows every review item and
+   every harness pack `SKIPPED` with the same stamp; `automata-batteries
+verify-as-agent` passes. (See "Harness batteries on the execution box".)
+2. **Restart the worker when idle.** The worker checks the installed
+   `harness.sha256` against the hash of its OWN checkout's `harness.json`, so the
+   checkout and the install must be the same commit (the acceptance script's
+   `SC1 installed harness.json = checkout`). Restart only with no run in flight
+   (no `run-*` dir under `/sys/fs/cgroup/system.slice/automata-worker.service/`),
+   per the deploy README's graceful-restart rules.
+3. **Boot line.** The journal shows `[worker-boot] harness: hash=<12hex>
+node=24.… ok=gstack,gsd,ruflo` with the hash equal to the first 12 hex of
+   `harness.sha256` and no `skipped=`. `harness: unavailable reason=…` stops the
+   rollout here.
+4. **Canary.** Turn on the `harnessBatteries` feature flag (admin page; for the
+   operator's user, or globally). Then on ONE repo, Settings → Review → **Task
+   agent packs** → add gstack, GSD and ruflo, keeping what is already selected.
+   Use a repo with no domain egress policy, or one whose allowlist holds the
+   drill's hosts. API form, as an org admin:
+   `PUT /api/review-settings/<owner>/<repo>` with
+   `{"taskBatteries": [<current ids>, "gstack", "gsd", "ruflo"]}`. Without the
+   flag the route answers 400 and writes nothing.
+5. **Drill.** Run the drill automation below on the canary repo, unchanged.
+6. **Acceptance.** As root on the box:
+   `bash packages/worker/deploy/linux/harness-batteries-acceptance.sh box --since "<step 2 restart time>" --repo <owner/name> --thread <drill thread>`
+   must end `ACCEPTANCE: PASS`. Run it once more with `--live` WHILE the drill
+   is in flight: that pass reads the ruflo MCP server's environ names (SC5)
+   and samples the run cgroup's `memory.peak`, `oom_kill` and `pids.peak`.
+   Record those three numbers as the memory budget. Then judge the printed
+   `EVIDENCE manual` lines against the thread in the control plane.
+7. **Org default, MERGED.** `GET /api/review-settings/default` and RECORD the
+   current `taskBatteries` and `updatedAt` (for example `["somnio-skills"]`).
+   Then `PUT /api/review-settings/default` with the union, never a
+   replacement: `{"taskBatteries": [<recorded ids>, "gstack", "gsd", "ruflo"],
+"expectedUpdatedAt": "<recorded updatedAt>"}`. A 409 means another admin
+   wrote in between: re-read, re-merge. Then `GET /api/review-settings` and list
+   every repo row with a non-null `taskBatteries`. Those repos override the
+   default and do NOT get the harness. Decide per repo; never silently.
+8. **Watch the first 10 harness runs or 2 h, whichever is longer.** Re-run the
+   acceptance script with `--since "<step 7 time>"` and without `--thread`.
+   Watch `SC4 harness runs OOM-free` and `SC4 nothing left running`. Also
+   watch egress denies for the runs, MCP startup (the thread's init lists
+   ruflo `connected`, with no `MCP_TIMEOUT` failure) and run duration against
+   the same automations before the change.
+9. **Stop rule.** Any OOM kill in a harness run (`run cgroup: oom_kill=N`, N > 0)
+   or a run taking 2x its usual duration means roll back now. Investigate
+   afterwards.
+
+**Rollback** (instant, no deploy): PUT the recorded prior `taskBatteries` back on
+the org default (and on the canary repo), then turn the `harnessBatteries` flag
+off. New runs seed no harness. Packs on disk are harmless, and removing them
+is the install rollback in the section above.
+
+### Drill automation prompt
+
+The automation the drill runs on the canary repo. Paste it verbatim. It seeds
+its own failing test, so it needs no fixture in the repo.
+
+```text
+You are running the harness-battery drill. Work only in this repository. Report
+each numbered step's result in your final message, verbatim where asked.
+
+1. Run `automata-batteries doctor --json` first. If `.ok` is false, or any of
+   gstack, gsd or ruflo is missing or has `ok: false`, stop immediately and end
+   your final message with `BATTERY_MISSING <name>` (one line per missing pack).
+2. Add a small unit test that fails on purpose (a wrong expected value in a new
+   test file next to an existing test). Use the `investigate` skill through the
+   Skill tool to find the root cause, then fix the TEST (not the code) so it
+   passes. Quote the skill's first output lines.
+3. Use the `gsd-debug` skill through the Skill tool on the same failure, and
+   leave its `.planning/debug/*.md` file in the change. It must not name any
+   customer or private repository.
+4. Generate a random nonce. Call mcp__ruflo__memory_store with it, then
+   mcp__ruflo__memory_retrieve, and report both values. Call
+   mcp__ruflo__system_health and report its status.
+5. Run gstack browse against https://example.com and report the page title.
+6. Try to call one ruflo MCP tool that is NOT in your tool list (for example
+   mcp__ruflo__agent_spawn). Report the refusal or its absence verbatim. Do not
+   work around it.
+7. Do not commit .gstack/, .claude-flow/ or .swarm/. Open the pull request with
+   the test and the .planning/debug file only.
+```
+
+What passes: step 1 continues (no `BATTERY_MISSING`). Step 2 is a Skill
+tool_use for `investigate` whose output shows `SKILL_START_PROTO: 1` /
+`SESSION_KIND: spawned`. Step 3 is a Skill tool_use for `gsd-debug` plus a
+`.planning/debug/*.md` in the PR. Step 4 returns the same nonce, and
+`system_health` answers. Step 5 reports `Example Domain`, and when the repo has
+an egress policy the run's `egress_events` show the example.com decision.
+Step 6 shows the tool absent or refused with -32601, never executed. The PR
+diff has no `.gstack/`, `.claude-flow/` or `.swarm/` path.
+
+### `.planning/` in pull requests (public repo)
+
+GSD writes `.planning/` (debug sessions, phase plans), and harness runs keep it
+in their PRs on purpose. This repository is **public**. A `.planning/` file
+shipped in a PR must not name a customer, a customer's repository or a private
+system. Use neutral placeholders (`acme/app`, "the customer"). Review it like
+code. The other battery state (`.gstack/`, `.claude-flow/`, `.swarm/`) is
+excluded by the worker through `.git/info/exclude` and never belongs in a PR.
+
+### Rebuilding an execution box (ordered)
+
+From a fresh server to harness-ready. Each step's own section holds the detail.
+The order matters because each step checks the one before it.
+
+1. **cloud-init** (`packages/worker/deploy/linux/cloud-init.yaml`): accounts
+   (`automata`, `automata-agent` uid 999, `automata-build` uid 970), the exact
+   Node 24 build held with `apt-mark hold`, Docker and the engine. Do not trust
+   `cloud-init status: done`: check `node -v` and the accounts by hand.
+2. **Ceiling drop-in** (`automata-worker.service.d/10-ceiling.conf`) with
+   `WORKER_RUN_MEMORY_MAX` set. Without it a worker configured for the ceiling
+   refuses to boot.
+3. **nft egress fence** (`egress-nft.conf`, `automata-egress.service`;
+   `nft-preflight.sh`, then `nft-verify.sh` must pass).
+4. **Tunnel** (`TUNNEL-CUTOVER.md`): exactly one connector, on this box.
+5. **Root installer** (`install-batteries.sh` from a root-owned copy at a
+   verified HEAD): `RESULT: PASS`, then a re-run with everything `SKIPPED`.
+6. **`automata-batteries verify-as-agent`** passes, including the sandboxed
+   Chromium launch (the AppArmor proof).
+7. **Worker**: install the unit, start it, and check that the boot journal
+   shows `memory ceiling armed`, `harness: hash=… ok=gstack,gsd,ruflo` and
+   `listening for actions`.
+8. **Drill**: the drill automation above, then
+   `harness-batteries-acceptance.sh box …` → `ACCEPTANCE: PASS`.
 
 ## Task-run batteries and the Somnio CLI (phase 7)
 

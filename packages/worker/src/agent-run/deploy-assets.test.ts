@@ -43,6 +43,9 @@ import {
   harnessPackDirName,
   parseHarnessStamp,
 } from "./harness-layout";
+import { formatBatteriesLine } from "./batteries-seed";
+import type { SeededHarnessPack } from "./harness-seed";
+import { runCgroupPath } from "./run-cgroup";
 
 /**
  * Rot guards for the #108 deploy templates. These are pure file reads: no sudo,
@@ -3893,5 +3896,314 @@ describe("harness batteries: the installer writes exactly the layout the worker 
     expect(gstack?.env.PLAYWRIGHT_BROWSERS_PATH).toBe(
       "{{packDir}}/ms-playwright",
     );
+  });
+});
+
+describeBashScriptHygiene(
+  "packages/worker/deploy/linux/harness-batteries-acceptance.sh",
+);
+
+describe("harness batteries (PR5): acceptance script", () => {
+  const scriptRel =
+    "packages/worker/deploy/linux/harness-batteries-acceptance.sh";
+  const scriptPath = path.join(repoRoot, scriptRel);
+  const script = read(scriptPath);
+  const body = (name: string) => fnBody(script, name);
+  const runbook = read(path.join(repoRoot, "deploy", "PILOT-RUNBOOK.md"));
+  const isRoot = process.getuid?.() === 0;
+
+  function run(args: string[]) {
+    return spawnSync("/bin/bash", [scriptPath, ...args], {
+      encoding: "utf8",
+      timeout: 30_000,
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: os.tmpdir() },
+    });
+  }
+
+  /** Source the script, then run one bash snippet with positional args. */
+  function sourced(snippet: string, args: string[]) {
+    const result = spawnSync(
+      "/bin/bash",
+      ["-c", `source "$1"; shift; ${snippet}`, "sh", scriptPath, ...args],
+      { encoding: "utf8", timeout: 30_000 },
+    );
+    return result.stdout + result.stderr;
+  }
+
+  it.each<[string, string[], RegExp]>([
+    ["no args", [], /usage/i],
+    ["an unknown mode", ["deploy"], /usage/i],
+    ["box without --since", ["box", "--repo", "a/b"], /--since/],
+    ["box without --repo", ["box", "--since", "now"], /--repo/],
+    [
+      "box with a malformed --repo",
+      ["box", "--since", "now", "--repo", "a/b;id"],
+      /--repo/,
+    ],
+    [
+      "box with a malformed --thread",
+      ["box", "--since", "now", "--repo", "a/b", "--thread", "x;id"],
+      /--thread/,
+    ],
+  ])("exits 2 on %s", (_name, args, message) => {
+    const result = run(args);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toMatch(message);
+    expect(result.stdout).not.toContain("ACCEPTANCE:");
+  });
+
+  it.skipIf(isRoot)(
+    "box refuses a non-root caller with exit 2 before reading anything",
+    () => {
+      const result = run(["box", "--since", "now", "--repo", "a/b"]);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toMatch(/root/);
+      expect(result.stdout).toBe("");
+    },
+  );
+
+  it("box checks uid 0 and Linux before the first box read", () => {
+    const box = body("box_mode");
+    const guard = box.indexOf('[ "$(id -u)" = "0" ]');
+    const linux = box.indexOf('[ "$(uname -s)" = "Linux" ]');
+    expect(guard).toBeGreaterThan(-1);
+    expect(linux).toBeGreaterThan(-1);
+    for (const token of [
+      "harness.sha256",
+      "doctor --json",
+      "journalctl",
+      "git_ro",
+      "find ",
+      "agent_leftovers",
+    ]) {
+      expect(box.indexOf(token), token).toBeGreaterThan(Math.max(guard, linux));
+    }
+  });
+
+  it("every git call goes through ONE hardened helper (byte-identical to the task script's)", () => {
+    const helper = body("git_ro");
+    const task = deployFile("linux", "task-batteries-acceptance.sh");
+    expect(helper).toBe(fnBody(task, "git_ro"));
+    const rest = code(script.replace(helper, ""));
+    expect(rest).not.toMatch(/(^|[\s;&|(`$])git\s/m);
+  });
+
+  it("is read-only on the box: no restart, install, signal, permission change or delete outside its mktemp dir", () => {
+    const c = code(script);
+    expect(c).not.toMatch(
+      /systemctl\s+(restart|stop|start|kill|daemon-reload)/,
+    );
+    expect(c).not.toMatch(/install-batteries\.sh/);
+    expect(c).not.toMatch(
+      /\b(chmod|chown|kill|pkill|apparmor_parser|apt-get|npm|useradd)\b/,
+    );
+    expect(c).not.toMatch(/\bfind\b[^\n]*-(delete|exec)/);
+    expect(c).not.toMatch(/drizzle|psql/);
+    expect(c).not.toMatch(
+      /\bgit(_ro)?\s+(fetch|merge|pull|push|commit|checkout|switch|reset)\b/,
+    );
+    const removals = c.split("\n").filter((l) => /\brm\b/.test(l));
+    expect(removals).toEqual(['    rm -rf -- "$WORK"']);
+    expect(c).toContain('WORK="$(mktemp -d /tmp/harness-batteries-acceptance.');
+    expect(c).toContain("trap cleanup EXIT");
+  });
+
+  it("box mode checks the install, the boot line, the run, its resources and the MCP fence", () => {
+    const c = code(script);
+    for (const token of [
+      "harness.sha256.invalid",
+      'cat-file blob "HEAD:$HARNESS_REL"',
+      '"$BIN_DIR/automata-batteries" doctor --json',
+      ".ok == true and .installed == true",
+      "/sys/kernel/security/apparmor/profiles",
+      '"automata-\\($id)-\\(.name)"',
+      "-perm /022",
+      '-user "$BUILD_USER"',
+      "/etc/cron.deny",
+      "/etc/at.deny",
+      "'.staging.*'",
+      "[worker-boot] harness: ",
+      "memory ceiling armed: ",
+      'journalctl -u "$WORKER_UNIT" --since "$since" --no-pager -o cat',
+      "] run cgroup: oom_kill=",
+      "reason=review-lane",
+      "memory.peak",
+      "pids.peak",
+      '"/proc/$pid/environ"',
+      "SECRET_NAME_RE='TOKEN|KEY|SECRET|^GIT_CONFIG_'",
+      "EVIDENCE manual",
+      "BATTERY_MISSING",
+      "mcp__ruflo__memory_store",
+      "mcp__ruflo__system_health",
+    ]) {
+      expect(c, token).toContain(token);
+    }
+    expect(script).toContain('echo "ACCEPTANCE: PASS"');
+    expect(script).toContain('echo "ACCEPTANCE: FAIL ($FAILURES)"');
+  });
+
+  it("names the shared HARNESS_PACK_IDS and the installer's build account", () => {
+    expect(assignment(script, "HARNESS_PACKS")).toBe(
+      `HARNESS_PACKS="${SHARED_HARNESS_PACK_IDS.join(",")}"`,
+    );
+    expect(assignment(script, "BUILD_USER")).toBe(
+      assignment(deployFile("linux", "install-batteries.sh"), "BUILD_USER"),
+    );
+  });
+
+  it("local mode runs the harness gates and per-package tsc", () => {
+    const local = body("local_mode");
+    for (const token of [
+      "harness-manifest.test.ts",
+      "harness-mcp-filter.test.ts",
+      "batteries-seed.test.ts",
+      "agent-credentials.test.ts",
+      "daemon-env.test.ts",
+      "review-agent-settings.test.ts",
+      "src/app/api/review-settings",
+      "batteries-dry-run.sh",
+      "NODE_OPTIONS=--max-old-space-size=12288",
+      "--no-file-parallelism",
+    ]) {
+      expect(local, token).toContain(token);
+    }
+  });
+
+  it("run_cgroup_path agrees with runCgroupPath", () => {
+    for (const tid of ["43413f86-3a8c-4bea-a4f2-26df66348561", "a b/c"]) {
+      expect(sourced('run_cgroup_path "$1" "$2"', ["/cg", tid]).trim()).toBe(
+        runCgroupPath("/cg", tid),
+      );
+    }
+  });
+
+  it("names no customer (public repo)", () => {
+    expect(script).not.toMatch(/bangr/i);
+    expect(runbook).not.toMatch(/bangr/i);
+  });
+
+  describe("journal analysis (sourced, fixture journal)", () => {
+    const HASH = "0123456789ab".padEnd(64, "c");
+    const PREFIX = HASH.slice(0, 12);
+    const T = "thr-task-1";
+    const R = "thr-review-1";
+    const ESC = "\u001b";
+
+    function analyse(journal: string, extra: string[] = []) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hba-journal-"));
+      try {
+        const raw = path.join(dir, "raw.txt");
+        const clean = path.join(dir, "journal.txt");
+        fs.writeFileSync(raw, journal);
+        return sourced(
+          'FAILURES=0; strip_ansi "$1" "$2"; analyse_boot "$2" "$4"; analyse_journal "$2" "$3" "$4" "${5:-}"; echo "RUN=$RUN_TID OOM=$RUN_OOM FAILURES=$FAILURES"',
+          [raw, clean, "acme/app", PREFIX, ...extra],
+        );
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    // The real formatter, so the parser cannot drift from the worker's line.
+    const harnessLine = (lane: "task" | "pr", hash = HASH) =>
+      formatBatteriesLine(
+        {
+          ok: true,
+          packs: ["somnio-skills"],
+          manifestHash: "f".repeat(64),
+          harness: {
+            ok: true,
+            harnessHash: hash,
+            packs: [...SHARED_HARNESS_PACK_IDS].map(
+              (id) => ({ id, linked: [] }) as unknown as SeededHarnessPack,
+            ),
+          },
+        },
+        { kind: "seed", lane },
+      );
+    const BOOT = `[worker-boot] harness: hash=${PREFIX} node=24.21.0 ok=gstack,gsd,ruflo`;
+    // The worker's logger colours its lines; the parser must not care.
+    const taskRun = (opts: { line?: string; oom?: string } = {}) =>
+      [
+        `🪓 1 | x ${ESC}[37m [INFO/ctx] [agent-run ${T} trace=00-a-b-01] run start: lane=task repo=acme/app branch=main${ESC}[0m`,
+        `🪓 1 | x ${ESC}[37m [INFO/ctx] [agent-run ${T} trace=00-a-b-01] ${opts.line ?? harnessLine("task")}${ESC}[0m`,
+        `[agent-run] run cgroup: oom_kill=${opts.oom ?? "0"} oom=0 thread=${T} memory.max=5000M`,
+      ].join("\n");
+    const reviewRun = (line = "batteries: mode=classic") =>
+      [
+        `[agent-run ${R}] run start: lane=review pr=3 repo=acme/web branch=f policy=newest-wins`,
+        `[agent-run ${R}] batteries: skip pack gstack reason=review-lane`,
+        `[agent-run ${R}] ${line}`,
+        `[agent-run] run cgroup: oom_kill=0 oom=0 thread=${R} memory.max=5000M`,
+      ].join("\n");
+
+    it("a booted harness, a seeded task run and a fenced review run pass", () => {
+      const out = analyse(`${BOOT}\n${taskRun()}\n${reviewRun()}\n`);
+      expect(out).toContain(`RUN=${T} OOM=0 FAILURES=0`);
+      expect(out).toContain(
+        "EVIDENCE review runs whose harness ids were refused (skip pack … reason=review-lane): 1",
+      );
+      expect(out).toContain(
+        "CHECK SC4 harness runs OOM-free: PASS (1 harness run(s)",
+      );
+    });
+
+    it("a lane=pr run counts; --thread selects exactly that thread", () => {
+      const pr = taskRun({ line: harnessLine("pr") }).replace(
+        "lane=task",
+        "lane=pr pr=9",
+      );
+      expect(analyse(`${BOOT}\n${pr}\n`)).toContain("FAILURES=0");
+      expect(analyse(`${BOOT}\n${taskRun()}\n`, ["thr-other"])).toContain(
+        "is not a lane=task|pr run",
+      );
+      expect(analyse(`${BOOT}\n${taskRun()}\n`, [T])).toContain("FAILURES=0");
+    });
+
+    it.each<[string, string]>([
+      ["no boot line", taskRun()],
+      [
+        "a boot line for another install",
+        `${BOOT.replace(PREFIX, "ffffffffffff")}\n${taskRun()}`,
+      ],
+      [
+        "a boot line missing a pack",
+        `${BOOT.replace(",ruflo", "")}\n${taskRun()}`,
+      ],
+      [
+        "an unavailable boot harness",
+        `[worker-boot] harness: unavailable reason=no-harness-hash\n${taskRun()}`,
+      ],
+      [
+        "a run for another install",
+        `${BOOT}\n${taskRun({ line: harnessLine("task", "e".repeat(64)) })}`,
+      ],
+      [
+        "a run without harness",
+        `${BOOT}\n${taskRun({ line: "batteries: lane=task packs=somnio-skills manifest=ffffffffffff" })}`,
+      ],
+      [
+        "an unavailable run harness",
+        `${BOOT}\n${taskRun({ line: "batteries: lane=task packs=somnio-skills manifest=ffffffffffff harness=unavailable harness-reason=hash-mismatch" })}`,
+      ],
+      ["a run OOM kill", `${BOOT}\n${taskRun({ oom: "3" })}`],
+      [
+        "a review run carrying a harness",
+        `${BOOT}\n${taskRun()}\n${reviewRun(harnessLine("task").replace("lane=task", "mode=orchestrated"))}`,
+      ],
+      [
+        "a run for another repo only",
+        `${BOOT}\n${taskRun().replace("repo=acme/app", "repo=acme/other")}`,
+      ],
+    ])("fails on %s", (_name, journal) => {
+      expect(analyse(`${journal}\n`)).not.toContain("FAILURES=0");
+    });
+
+    it("an in-flight run (no teardown line yet) is reported as OOM '-'", () => {
+      const live = taskRun().split("\n").slice(0, 2).join("\n");
+      expect(analyse(`${BOOT}\n${live}\n`)).toContain(
+        `RUN=${T} OOM=- FAILURES=0`,
+      );
+    });
   });
 });
