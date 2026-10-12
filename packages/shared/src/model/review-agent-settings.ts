@@ -18,7 +18,11 @@
  * (packages/worker/deploy/batteries.json) installs, in manifest order; the
  * worker's deploy-assets test pins the two lists equal. `REVIEW_BATTERY_PACK_IDS`
  * is the review setting's allowed subset and stays exactly the three review
- * packs. The phase 7 task setting validates against `BATTERY_PACK_IDS`.
+ * packs. `HARNESS_PACK_IDS` are the full upstream tool suites (gstack, GSD,
+ * ruflo) a separate manifest (packages/worker/deploy/harness.json) installs;
+ * the same deploy-assets test pins those two lists equal. The task setting
+ * validates against `TASK_BATTERY_PACK_IDS` (manifest packs + harness packs);
+ * a harness id is never a valid review pack.
  *
  * TASK PACKS (phase 7): `taskBatteries` is NOT a review knob. It names the
  * packs non-review runs (manual, scheduled and mention task runs) get, and it
@@ -70,6 +74,38 @@ export const BATTERY_PACK_IDS = [
 export type BatteryPackId = (typeof BATTERY_PACK_IDS)[number];
 
 /**
+ * The harness packs: full upstream tool suites (bin/, hooks, an MCP server for
+ * ruflo) installed from harness.json, never from batteries.json. Task and PR
+ * lanes only — the review setting rejects them and the worker never seeds
+ * them into a review run.
+ */
+export const HARNESS_PACK_IDS = ["gstack", "gsd", "ruflo"] as const;
+export type HarnessPackId = (typeof HARNESS_PACK_IDS)[number];
+
+export function isHarnessPackId(value: unknown): value is HarnessPackId {
+  return (
+    typeof value === "string" &&
+    (HARNESS_PACK_IDS as readonly string[]).includes(value)
+  );
+}
+
+/** Every pack a task run may select: the manifest packs, then the harness packs. */
+export const TASK_BATTERY_PACK_IDS = [
+  ...BATTERY_PACK_IDS,
+  ...HARNESS_PACK_IDS,
+] as const;
+export type TaskBatteryPackId = (typeof TASK_BATTERY_PACK_IDS)[number];
+
+export function isTaskBatteryPackId(
+  value: unknown,
+): value is TaskBatteryPackId {
+  return (
+    typeof value === "string" &&
+    (TASK_BATTERY_PACK_IDS as readonly string[]).includes(value)
+  );
+}
+
+/**
  * Capabilities a pack can require of the control plane (phase 7). Mirrors
  * the manifest's `packs[].requires` closed set (batteries-manifest.ts
  * BATTERY_REQUIREMENTS + the installer preflight).
@@ -93,7 +129,11 @@ export const BATTERY_PACK_REQUIRES: Record<
   "somnio-skills": ["github-read-token"],
 };
 
-/** True when any known id in `ids` requires `req`; unknown ids are ignored. */
+/**
+ * True when any known id in `ids` requires `req`; unknown ids are ignored.
+ * Harness ids require nothing (they are not in BATTERY_PACK_REQUIRES), so
+ * they are ignored too.
+ */
 export function packsRequire(
   ids: readonly string[],
   req: BatteryRequirement,
@@ -156,7 +196,7 @@ export interface ReviewAgentValues {
   reviewRunTests: boolean | null;
   reviewCommandTimeoutS: number | null;
   reviewMaxTurns: number | null;
-  taskBatteries: BatteryPackId[] | null;
+  taskBatteries: TaskBatteryPackId[] | null;
 }
 
 /** System defaults — what an all-inherit (repo and org) field resolves to. */
@@ -166,7 +206,7 @@ export const DEFAULT_REVIEW_BATTERIES: readonly ReviewBatteryPackId[] =
   REVIEW_BATTERY_PACK_IDS;
 export const DEFAULT_REVIEW_RUN_TESTS = false;
 /** Task runs get no packs unless a repo or '*' row says otherwise (today). */
-export const DEFAULT_TASK_BATTERIES: readonly BatteryPackId[] = [];
+export const DEFAULT_TASK_BATTERIES: readonly TaskBatteryPackId[] = [];
 
 /** The one human wording per mode (SUPERSEDE_POLICY_LABELS precedent). */
 export const REVIEW_MODE_LABELS: Record<ReviewMode, string> = {
@@ -181,10 +221,23 @@ export const REVIEW_BATTERY_PACK_LABELS: Record<ReviewBatteryPackId, string> = {
   "gsd-reviewers": "GSD reviewers",
 };
 
-/** Short plain labels for every battery pack (the task setting offers all of them). */
+/** Short plain labels for every manifest battery pack. */
 export const BATTERY_PACK_LABELS: Record<BatteryPackId, string> = {
   ...REVIEW_BATTERY_PACK_LABELS,
   "somnio-skills": "Somnio skills (DORA, health, security)",
+};
+
+/** Short plain labels for the harness packs. */
+export const HARNESS_PACK_LABELS: Record<HarnessPackId, string> = {
+  gstack: "gstack (full suite)",
+  gsd: "GSD (full suite)",
+  ruflo: "ruflo (MCP memory and tasks)",
+};
+
+/** Short plain labels for every pack the task setting offers. */
+export const TASK_BATTERY_PACK_LABELS: Record<TaskBatteryPackId, string> = {
+  ...BATTERY_PACK_LABELS,
+  ...HARNESS_PACK_LABELS,
 };
 
 /** The review-agent family fields (REVIEW_AGENT_FIELDS) of any row-shaped object, nothing else. */
@@ -279,7 +332,12 @@ function findFieldError(
         ? undefined
         : `reviewMaxTurns must be an integer from ${REVIEW_MAX_TURNS_MIN} to ${REVIEW_MAX_TURNS_MAX}, or null (inherit)`;
     case "taskBatteries":
-      return findPackListError(field, value, BATTERY_PACK_IDS, isBatteryPackId);
+      return findPackListError(
+        field,
+        value,
+        TASK_BATTERY_PACK_IDS,
+        isTaskBatteryPackId,
+      );
   }
 }
 

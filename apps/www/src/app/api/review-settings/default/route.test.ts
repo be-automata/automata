@@ -8,6 +8,7 @@ import {
   createTestOrganization,
 } from "@terragon/shared/model/test-helpers";
 import { listSelfHealAdminActions } from "@terragon/shared/model/self-heal-admin-log";
+import { setUserFeatureFlagOverride } from "@terragon/shared/model/feature-flags";
 import {
   getRepoReviewSetting,
   ORG_DEFAULT_REPO_SENTINEL,
@@ -424,6 +425,54 @@ describe("/api/review-settings/default — taskBatteries (phase 7)", () => {
     const res = await put({ taskBatteries: ["somnio-skills"] });
     expect(res.status).toBe(403);
     expect(await sentinel()).toBeUndefined();
+  });
+
+  it("a harness pack is refused while the harnessBatteries flag is off; nothing stored", async () => {
+    await actor("admin");
+    const res = await put({
+      taskBatteries: ["gstack"],
+      expectedUpdatedAt: null,
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(
+      /taskBatteries: gstack cannot be selected yet/,
+    );
+    expect(await sentinel()).toBeUndefined();
+  });
+
+  it("with the flag on a harness pack is stored; with it back off the pack can be kept and then removed, not re-added", async () => {
+    await actor("admin");
+    const flag = (value: boolean) =>
+      setUserFeatureFlagOverride({
+        db,
+        userId,
+        name: "harnessBatteries",
+        value,
+      });
+    await flag(true);
+    expect(
+      (await put({ taskBatteries: ["gstack"], expectedUpdatedAt: null }))
+        .status,
+    ).toBe(200);
+    expect((await sentinel())?.taskBatteries).toEqual(["gstack"]);
+
+    await flag(false);
+    const kept = await put({
+      taskBatteries: ["somnio-skills", "gstack"],
+      expectedUpdatedAt: (await sentinel())?.updatedAt?.toISOString(),
+    });
+    expect(kept.status).toBe(200);
+    const added = await put({
+      taskBatteries: ["somnio-skills", "gstack", "ruflo"],
+      expectedUpdatedAt: (await sentinel())?.updatedAt?.toISOString(),
+    });
+    expect(added.status).toBe(400);
+    const removed = await put({
+      taskBatteries: ["somnio-skills"],
+      expectedUpdatedAt: (await sentinel())?.updatedAt?.toISOString(),
+    });
+    expect(removed.status).toBe(200);
+    expect((await sentinel())?.taskBatteries).toEqual(["somnio-skills"]);
   });
 
   it.each([[["nope"]], ["somnio-skills"]])(

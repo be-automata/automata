@@ -8,10 +8,10 @@ import {
   REVIEW_MAX_TURNS_MIN,
   REVIEW_ORCHESTRATED_COMMAND_TIMEOUT_S_DEFAULT,
   findReviewAgentFieldError,
-  type BatteryPackId,
   type ReviewAgentValues,
   type ReviewBatteryPackId,
   type ReviewMode,
+  type TaskBatteryPackId,
 } from "@terragon/shared/model/review-agent-settings";
 import {
   availableRepoNames,
@@ -99,7 +99,7 @@ export interface ReviewAgentDraft {
   timeoutText: string;
   maxTurnsText: string;
   /** Task-run packs (phase 7); null = inherit. Independent of review mode. */
-  taskBatteries: BatteryPackId[] | null;
+  taskBatteries: TaskBatteryPackId[] | null;
 }
 
 /**

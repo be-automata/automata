@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "packs": [
+    {
+      "id": "gstack",
+      "class": "harness",
+      "kind": "git-setup",
+      "repo": "https://github.com/garrytan/gstack",
+      "sha": "df89475b1713d2480a5e266e0fd448201817d80e",
+      "license": "MIT",
+      "setupArgs": ["--host", "claude"],
+      "dependencies": [
+        {
+          "name": "bun",
+          "version": "1.4.2",
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip",
+          "sha256": "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913",
+          "license": "MIT"
+        }
+      ],
+      "nodeMajor": 24,
+      "env": {
+        "GSTACK_SESSION_KIND": "spawned",
+        "PLAYWRIGHT_BROWSERS_PATH": "{{packDir}}/ms-playwright"
+      },
+      "headlessSafe": ["investigate", "browse"],
+      "frontmatterHookSkills": [
+        "autoplan",
+        "careful",
+        "freeze",
+        "guard",
+        "investigate"
+      ]
+    },
+    {
+      "id": "gsd",
+      "class": "harness",
+      "kind": "npm-lock",
+      "package": "@opengsd/gsd-core",
+      "version": "1.16.0",
+      "license": "MIT",
+      "nodeMajor": 24,
+      "env": {},
+      "headlessSafe": ["gsd-debug", "gsd-quick", "gsd-code-review"],
+      "frontmatterHookSkills": []
+    },
+    {
+      "id": "ruflo",
+      "class": "harness",
+      "kind": "npm-lock",
+      "package": "ruflo",
+      "version": "3.56.7",
+      "overrides": { "@claude-flow/cli": "3.56.7" },
+      "license": "MIT",
+      "nodeMajor": 24,
+      "env": { "MCP_TIMEOUT": "30000" },
+      "mcpServers": {
+        "ruflo": { "command": "{{packDir}}/bin/ruflo-mcp", "args": [] }
+      },
+      "toolAllowlist": [
+        "memory_store",
+        "memory_retrieve",
+        "memory_search",
+        "memory_list",
+        "memory_delete",
+        "memory_stats",
+        "system_health",
+        "system_status",
+        "system_info",
+        "system_metrics",
+        "guidance_brain",
+        "guidance_capabilities",
+        "guidance_discover",
+        "guidance_quickref",
+        "guidance_recommend",
+        "guidance_workflow",
+        "analyze_diff",
+        "analyze_diff-classify",
+        "analyze_diff-reviewers",
+        "analyze_diff-risk",
+        "analyze_diff-stats",
+        "analyze_file-risk",
+        "task_create",
+        "task_list",
+        "task_status",
+        "task_update",
+        "task_complete",
+        "task_cancel",
+        "task_summary",
+        "workflow_create",
+        "workflow_list",
+        "workflow_status",
+        "workflow_validate",
+        "workflow_delete"
+      ],
+      "headlessSafe": [],
+      "frontmatterHookSkills": []
+    }
+  ]
+}

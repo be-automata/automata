@@ -7,6 +7,8 @@ import {
   BATTERY_REQUIREMENTS,
   DEFAULT_REVIEW_MODE,
   DEFAULT_TASK_BATTERIES,
+  HARNESS_PACK_IDS,
+  HARNESS_PACK_LABELS,
   REVIEW_AGENT_FIELDS,
   REVIEW_BATTERY_PACK_IDS,
   REVIEW_COMMAND_TIMEOUT_S_MAX,
@@ -16,10 +18,14 @@ import {
   REVIEW_MODES,
   REVIEW_ONLY_AGENT_FIELDS,
   TASK_AGENT_FIELD,
+  TASK_BATTERY_PACK_IDS,
+  TASK_BATTERY_PACK_LABELS,
   findReviewAgentFieldError,
   isBatteryPackId,
+  isHarnessPackId,
   isReviewBatteryPackId,
   isReviewMode,
+  isTaskBatteryPackId,
   packsRequire,
   pickReviewAgentFields,
 } from "./review-agent-settings";
@@ -122,6 +128,61 @@ describe("BATTERY_PACK_IDS (phase 7)", () => {
     }
     expect(BATTERY_PACK_LABELS["somnio-skills"]).toBe(
       "Somnio skills (DORA, health, security)",
+    );
+  });
+});
+
+describe("harness packs", () => {
+  it("lists the three upstream suites", () => {
+    expect(HARNESS_PACK_IDS).toEqual(["gstack", "gsd", "ruflo"]);
+  });
+
+  it("keeps BATTERY_PACK_IDS the manifest packs only", () => {
+    for (const id of HARNESS_PACK_IDS) {
+      expect(isBatteryPackId(id), id).toBe(false);
+      expect(isHarnessPackId(id), id).toBe(true);
+    }
+    expect(isHarnessPackId("gstack-review")).toBe(false);
+  });
+
+  it("offers the manifest packs then the harness packs to task runs", () => {
+    expect(TASK_BATTERY_PACK_IDS).toEqual([
+      ...BATTERY_PACK_IDS,
+      ...HARNESS_PACK_IDS,
+    ]);
+    for (const id of TASK_BATTERY_PACK_IDS) {
+      expect(isTaskBatteryPackId(id), id).toBe(true);
+      expect(TASK_BATTERY_PACK_LABELS[id].trim(), id).not.toBe("");
+    }
+    expect(isTaskBatteryPackId("nope")).toBe(false);
+  });
+
+  it("labels every harness pack", () => {
+    for (const id of HARNESS_PACK_IDS) {
+      expect(HARNESS_PACK_LABELS[id].trim(), id).not.toBe("");
+    }
+  });
+
+  it.each([...HARNESS_PACK_IDS])("rejects %s as a review pack", (id) => {
+    expect(isReviewBatteryPackId(id)).toBe(false);
+    const error = findReviewAgentFieldError({ reviewBatteries: [id] });
+    expect(error).toContain("reviewBatteries");
+    expect(error).toContain(`"${id}"`);
+  });
+
+  it.each([...HARNESS_PACK_IDS])("accepts %s as a task pack", (id) => {
+    expect(findReviewAgentFieldError({ taskBatteries: [id] })).toBeUndefined();
+  });
+
+  it("accepts every task pack together", () => {
+    expect(
+      findReviewAgentFieldError({ taskBatteries: [...TASK_BATTERY_PACK_IDS] }),
+    ).toBeUndefined();
+  });
+
+  it("requires nothing of the control plane", () => {
+    expect(packsRequire([...HARNESS_PACK_IDS], "github-read-token")).toBe(
+      false,
     );
   });
 });

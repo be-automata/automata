@@ -1557,7 +1557,8 @@ export const repoReviewSettings = pgTable(
      * and routes, but not a review knob: review resolution never reads it.
      * Nullable, NO column default: NULL = inherit (repo row → '*' row →
      * none, today's behaviour); [] = explicit none. Validated against every
-     * manifest pack id (BATTERY_PACK_IDS) at the write boundary; an invalid
+     * task pack id (TASK_BATTERY_PACK_IDS: manifest + harness packs) at the
+     * write boundary; an invalid
      * stored value degrades a task dispatch to no packs, never fails it.
      */
     taskBatteries: text("task_batteries").array(),

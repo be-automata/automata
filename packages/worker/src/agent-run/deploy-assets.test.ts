@@ -12,6 +12,7 @@ import {
   BATTERY_PACK_IDS,
   BATTERY_PACK_REQUIRES,
   BATTERY_REQUIREMENTS as SHARED_BATTERY_REQUIREMENTS,
+  HARNESS_PACK_IDS as SHARED_HARNESS_PACK_IDS,
   REVIEW_BATTERY_PACK_IDS,
 } from "../../../shared/src/model/review-agent-settings";
 import {
@@ -25,6 +26,13 @@ import {
   type BatteryDartAotTool,
   type BatteryDartSdkTool,
 } from "./batteries-manifest";
+import {
+  HARNESS_MANIFEST_REPO_PATH,
+  HARNESS_PACK_IDS,
+  findHarnessManifestError,
+  isHarnessManifest,
+  type HarnessManifest,
+} from "./harness-manifest";
 
 /**
  * Rot guards for the #108 deploy templates. These are pure file reads: no sudo,
@@ -928,6 +936,101 @@ describe("#batteries (phase 3): batteries.json", () => {
         ).toBe(true);
       }
     }
+  });
+});
+
+function readHarnessManifest(): HarnessManifest {
+  const parsed: unknown = JSON.parse(
+    read(path.join(repoRoot, HARNESS_MANIFEST_REPO_PATH)),
+  );
+  const error = findHarnessManifestError(parsed);
+  if (error !== undefined || !isHarnessManifest(parsed)) {
+    throw new Error(`${HARNESS_MANIFEST_REPO_PATH}: ${error}`);
+  }
+  return parsed;
+}
+
+describe("#harness batteries: harness.json", () => {
+  // Reading it runs the strict guard. The assertions below pin what the
+  // guard cannot know: which ids the panel offers, the researched pins, and
+  // the review/harness separation.
+  const manifest = readHarnessManifest();
+  const packById = (id: string) => {
+    const found = manifest.packs.find((p) => p.id === id);
+    if (found === undefined) throw new Error(`no pack ${id} in harness.json`);
+    return found;
+  };
+
+  it("lists exactly the shared HARNESS_PACK_IDS, in order (the worker mirror agrees)", () => {
+    // The task setting offers these ids; a pack the box does not install, or
+    // an install the panel cannot select, is a silent no-op.
+    expect(manifest.packs.map((p) => p.id)).toEqual([
+      ...SHARED_HARNESS_PACK_IDS,
+    ]);
+    expect([...HARNESS_PACK_IDS]).toEqual([...SHARED_HARNESS_PACK_IDS]);
+  });
+
+  it("shares no id with batteries.json (a harness id is never a review pack)", () => {
+    const batteryIds = new Set(readBatteriesManifest().packs.map((p) => p.id));
+    for (const id of HARNESS_PACK_IDS) {
+      expect(batteryIds.has(id), id).toBe(false);
+    }
+  });
+
+  it("keeps the researched pins", () => {
+    const gstack = packById("gstack");
+    if (gstack.kind !== "git-setup") throw new Error("gstack is git-setup");
+    expect(gstack.repo).toBe("https://github.com/garrytan/gstack");
+    expect(gstack.sha).toBe("df89475b1713d2480a5e266e0fd448201817d80e");
+    expect(gstack.setupArgs).toEqual(["--host", "claude"]);
+    expect(gstack.dependencies).toEqual([
+      {
+        name: "bun",
+        version: "1.4.2",
+        url: "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip",
+        sha256:
+          "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913",
+        license: "MIT",
+      },
+    ]);
+    const gsd = packById("gsd");
+    if (gsd.kind !== "npm-lock") throw new Error("gsd is npm-lock");
+    expect([gsd.package, gsd.version]).toEqual(["@opengsd/gsd-core", "1.16.0"]);
+    const ruflo = packById("ruflo");
+    if (ruflo.kind !== "npm-lock") throw new Error("ruflo is npm-lock");
+    expect([ruflo.package, ruflo.version]).toEqual(["ruflo", "3.56.7"]);
+    expect(ruflo.overrides).toEqual({ "@claude-flow/cli": "3.56.7" });
+    for (const pack of manifest.packs) {
+      expect(pack.nodeMajor, pack.id).toBe(24);
+    }
+  });
+
+  it("only ruflo runs an MCP server, through its in-pack wrapper", () => {
+    expect(packById("ruflo").mcpServers).toEqual({
+      ruflo: { command: "{{packDir}}/bin/ruflo-mcp", args: [] },
+    });
+    expect(packById("gstack").mcpServers).toBeUndefined();
+    expect(packById("gsd").mcpServers).toBeUndefined();
+  });
+
+  it("pins the headless-safe skills and the hook-bearing skills", () => {
+    expect(packById("gstack").headlessSafe).toEqual(["investigate", "browse"]);
+    expect(packById("gsd").headlessSafe).toEqual([
+      "gsd-debug",
+      "gsd-quick",
+      "gsd-code-review",
+    ]);
+    expect(packById("ruflo").headlessSafe).toEqual([]);
+    // Every gstack skill at the pin whose frontmatter declares hooks; each
+    // hook runs a script inside the pack. A pin bump that adds one fails the
+    // tree check until it is reviewed and listed here.
+    expect(packById("gstack").frontmatterHookSkills).toEqual([
+      "autoplan",
+      "careful",
+      "freeze",
+      "guard",
+      "investigate",
+    ]);
   });
 });
 

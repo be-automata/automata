@@ -2,6 +2,7 @@ import { describe, it, vi, beforeEach, expect } from "vitest";
 import { NextRequest } from "next/server";
 import { PUT, DELETE } from "./route";
 import { getTenantContextOrNull } from "@/lib/auth-server";
+import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import {
   upsertRepoReviewSetting,
   removeRepoReviewSetting,
@@ -33,6 +34,12 @@ vi.mock(
     getRepoReviewSetting: vi.fn(),
   }),
 );
+
+// The harness-pack gate reads the caller's `harnessBatteries` flag.
+vi.mock("@terragon/shared/model/feature-flags", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  getFeatureFlagForUser: vi.fn().mockResolvedValue(false),
+}));
 
 const recordActionMock = vi.fn();
 vi.mock("@terragon/shared/model/self-heal-admin-log", () => ({
@@ -512,6 +519,56 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       );
       const json = (await res.json()) as { setting: Record<string, unknown> };
       expect("taskBatteries" in json.setting).toBe(true);
+    });
+
+    it("400 when a harness pack is added with the harnessBatteries flag off; nothing written", async () => {
+      vi.mocked(getRepoReviewSetting).mockResolvedValue(undefined);
+      vi.mocked(getFeatureFlagForUser).mockResolvedValue(false);
+      const res = await PUT(
+        putReq({ taskBatteries: ["somnio-skills", "gsd"] }),
+        {
+          params,
+        },
+      );
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toMatch(
+        /taskBatteries: gsd cannot be selected yet/,
+      );
+      expect(getFeatureFlagForUser).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: USER, flagName: "harnessBatteries" }),
+      );
+      expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
+    });
+
+    it("accepts a harness pack with the harnessBatteries flag on", async () => {
+      vi.mocked(getRepoReviewSetting).mockResolvedValue(undefined);
+      vi.mocked(getFeatureFlagForUser).mockResolvedValueOnce(true);
+      const res = await PUT(putReq({ taskBatteries: ["gstack"] }), { params });
+      expect(res.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({ patch: { taskBatteries: ["gstack"] } }),
+      );
+    });
+
+    it("keeps an already-stored harness pack with the flag off, without reading the flag", async () => {
+      vi.mocked(getRepoReviewSetting).mockResolvedValue({
+        taskBatteries: ["ruflo"],
+      } as Awaited<ReturnType<typeof getRepoReviewSetting>>);
+      const res = await PUT(
+        putReq({ taskBatteries: ["somnio-skills", "ruflo"] }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(getFeatureFlagForUser).not.toHaveBeenCalled();
+    });
+
+    it("never reads the row or the flag when no harness pack is named", async () => {
+      const res = await PUT(putReq({ taskBatteries: ["somnio-skills"] }), {
+        params,
+      });
+      expect(res.status).toBe(200);
+      expect(getRepoReviewSetting).not.toHaveBeenCalled();
+      expect(getFeatureFlagForUser).not.toHaveBeenCalled();
     });
 
     it("null clears the task packs back to inherit", async () => {
