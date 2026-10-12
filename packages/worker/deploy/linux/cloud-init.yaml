@@ -78,6 +78,20 @@ write_files:
       # different agent builds and a bad release breaks provisioning with nothing
       # in the repo to point at. Bump this deliberately.
       CLAUDE_CODE_VERSION=2.1.284
+      # The harness build account (install-batteries.sh builds the gstack/GSD/
+      # ruflo packs as this uid, never as root). Fixed, outside 990-999 where
+      # system accounts are allocated (the agent's 999 already collides with the
+      # engine's Postgres image), and unused by every container image here.
+      BUILD_USER=automata-build
+      BUILD_UID=970
+      # Playwright's Chromium runtime libraries for ubuntu24.04-x64 (the
+      # `playwright install-deps chromium` list, plus fonts) — the same list as
+      # CHROMIUM_RUNTIME_PACKAGES in install-batteries.sh.
+      CHROMIUM_RUNTIME_PACKAGES="libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64
+        libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1
+        libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1
+        libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2
+        libfontconfig1 libfreetype6 fonts-liberation"
 
       # cloud-init's own package_upgrade and Ubuntu's apt-daily timers hold the
       # dpkg lock well into first boot. Every apt call below waits for it
@@ -139,6 +153,8 @@ write_files:
         docker-compose-plugin \
         gh cloudflared "nodejs=${NODE_DEB_VERSION}"
       apt-mark hold nodejs
+      # shellcheck disable=SC2086 # a word list on purpose
+      apt_get install -y --no-install-recommends $CHROMIUM_RUNTIME_PACKAGES
 
       systemctl enable --now docker
 
@@ -178,6 +194,14 @@ write_files:
       id -u automata-agent >/dev/null 2>&1 || useradd --system --create-home \
         --home-dir /home/automata-agent --shell /usr/sbin/nologin automata-agent
       chmod 750 /home/automata-agent
+
+      # ── the harness build account ────────────────────────────────────────
+      # nologin, no home on disk, its own group only: the installer passes a
+      # private staging HOME to every build and runs nothing as it otherwise.
+      getent group "$BUILD_USER" >/dev/null || groupadd --system --gid "$BUILD_UID" "$BUILD_USER"
+      id -u "$BUILD_USER" >/dev/null 2>&1 || useradd --system --uid "$BUILD_UID" \
+        --gid "$BUILD_UID" --no-create-home --home-dir /nonexistent \
+        --shell /usr/sbin/nologin "$BUILD_USER"
 
       # ── the worker's own service account + repo checkout root ────────────
       id -u automata >/dev/null 2>&1 || useradd --system --create-home \
@@ -219,6 +243,14 @@ write_files:
       command -v cloudflared >/dev/null
       id -u automata >/dev/null
       id -u automata-agent >/dev/null
+      [ "$(id -u "$BUILD_USER")" = "$BUILD_UID" ] \
+        || { echo "FATAL: $BUILD_USER is not uid $BUILD_UID" >&2; exit 1; }
+      [ "$(id -G "$BUILD_USER")" = "$BUILD_UID" ] \
+        || { echo "FATAL: $BUILD_USER has supplementary groups" >&2; exit 1; }
+      for pkg in $CHROMIUM_RUNTIME_PACKAGES; do
+        dpkg-query -W -f='${Status}' "$pkg" | grep -q 'install ok installed' \
+          || { echo "FATAL: $pkg is not installed" >&2; exit 1; }
+      done
       swapon --show | grep -q /swapfile
 
       # The sentinel is the contract. cloud-init reports `status: done` even
@@ -233,6 +265,9 @@ write_files:
       # taken from a commit verified against the public origin, never from the
       # worker-writable checkout. The batteries contract is
       # /usr/local/lib/automata-batteries/manifest.sha256, not .provisioned.
+      # The harness packs (gstack, GSD, ruflo) come from the same installer run;
+      # the build account and Chromium libraries above are their only
+      # provisioning-time prerequisites. Their contract is harness.sha256.
       echo "batteries: not installed at provisioning — follow deploy/PILOT-RUNBOOK.md, \"Review batteries on the execution box (phase 3)\", once the checkout lands"
 
 runcmd:

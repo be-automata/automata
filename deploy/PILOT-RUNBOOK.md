@@ -710,6 +710,152 @@ checking through sudo.
   `--disallowedTools Write Edit NotebookEdit WebFetch WebSearch` for the
   orchestrated lane, because a deny rule beats a skill's `allowed-tools`.
 
+## Harness batteries on the execution box
+
+The harness packs — gstack, GSD (`@opengsd/gsd-core`) and ruflo with its MCP
+server — are pinned in `packages/worker/deploy/harness.json` and installed by
+the same `install-batteries.sh` run as the review batteries, AFTER the review
+result is settled. They are a separate class: a harness failure is a
+`FAIL harness …` line, never invalidates `manifest.sha256`, and only the
+harness stamp `/usr/local/lib/automata-batteries/harness.sha256` records a
+fully passing harness install (`harness.sha256.invalid` = the last one did
+not). Nothing seeds them into runs before PR4, so installing them needs **no
+worker restart**.
+
+**What lands where**
+
+- Packs: `/usr/local/lib/automata-batteries/<id>@<pin>/` — `gstack@<sha>`
+  (`claude/skills/…` with the gstack checkout at `claude/skills/gstack`, and the
+  pinned Chromium under `ms-playwright/`), `gsd@<version>`
+  (`claude/{skills,agents,gsd-core,hooks,…}` + `node_modules/`) and
+  `ruflo@<version>` (`node_modules/`, `bin/ruflo-mcp`,
+  `lib/mcp-filter.mjs`, `etc/tool-allowlist.json`). Root-owned, dirs 0755,
+  files 0644, executables 0755. Each has a `.stamp`: the build hash, the HEAD
+  it came from, the Node ABI, and a `file <sha256> <path>` line for every
+  native module (`*.node`), model (`*.onnx`), browser executable and the MCP
+  wrapper — re-hashed on every re-run, so a pack is `SKIPPED` only when all
+  still match.
+- `/usr/local/bin/automata-batteries` (`doctor`, `doctor --json`,
+  `verify-as-agent`), with the installed manifest at
+  `/usr/local/lib/automata-batteries/harness.json` and its MCP probe under
+  `harness-tools/`.
+- `/etc/apparmor.d/automata-harness-gstack`: `userns` for the two pinned
+  Chromium executables only (Ubuntu 24.04 restricts unprivileged user
+  namespaces; Chromium's sandbox needs one). Loaded with `apparmor_parser -r`.
+  The sysctl is never touched and `--no-sandbox` is never configured.
+- The build account `automata-build`, uid/gid **970** (outside 990–999 where
+  system accounts are allocated — the agent's 999 already collides with the
+  engine's Postgres image — and unused by the hatchet-lite and postgres images,
+  which use 0–123, 405, 999, 65534), `/usr/sbin/nologin`, no home, no
+  supplementary group. Created by cloud-init on new boxes and by the installer
+  on this one.
+- The Chromium runtime libraries (24 apt packages: Playwright's
+  `install-deps chromium` list for Ubuntu 24.04 plus fonts), installed through
+  `wait_for_apt`.
+
+**How a pack is built (and why it is safe to run as root)**
+
+- No upstream code runs as root. `git fetch` by sha, gstack's `./setup --host
+claude` (after `gstack-config set telemetry off` / `update_check false`,
+  with `GSTACK_SKIP_ASIDE=1`), `npm install --ignore-scripts` from OUR
+  committed lockfile (`packages/worker/deploy/batteries/<id>/`), the one
+  allowlisted lifecycle script (`@claude-flow/cli`'s pure-JS agentdb patch), GSD's
+  `bin/install.js --claude --global --config-dir … --portable-hooks
+--no-legacy-cleanup` and ruflo's warmup all run as `automata-build` under
+  `env -i` (explicit HOME, PATH, npm cache, registry, empty npmrc), in a 0700
+  staging dir under `/usr/local/lib/automata-batteries/.staging.harness.*`.
+- `npm install` instead of `npm ci`: ruflo's lock names three optional
+  platform packages npm never published, which `npm ci` refuses. The lock bytes
+  are re-checked after every step; any drift fails the pack.
+- Native code is never compiled (the box has no toolchain). ruflo runs on
+  sql.js + the onnxruntime binaries shipped inside its npm tarballs; the one
+  native prebuild is better-sqlite3's, a sha256-pinned GitHub release asset for
+  Node ABI 137 (Node 24) — a Node major without a pinned prebuild fails the
+  pack.
+- bun 1.4.2 and the Chromium archives are sha256-checked before extraction.
+  bun is build-time only: it is never in a pack nor on the agent's PATH (so the
+  gstack `bin/` helpers that are bun scripts are inert at run time).
+- gstack's bundles hard-code their own absolute path, so the gstack build runs
+  in a private mount namespace where the staged pack is bind-mounted at its
+  FINAL path; on disk it stays under its staging name until the rename. (On a
+  first install an empty placeholder dir holds that mount point for the
+  duration of the build: no stamp, so nothing seeds it.)
+- Before publishing, a scan rewrites absolute links into the build dir as
+  relative links, requires every link to resolve inside the pack, fails on any
+  file or link naming the staging path, discards upstream `settings.json`/
+  `settings.local.json`/`.mcp.json` (GSD's hooks are OFF in phase 1) plus the
+  manifest's `discard` list, and rejects `mcpServers`/`permissionMode`
+  frontmatter and `hooks` outside `frontmatterHookSkills`. Whatever the builds
+  wrote outside their staging dirs is listed and deleted
+  (`VERIFIED|DISCARDED harness side writes`).
+- ruflo's MCP server: `mcp start --tools` / `CLAUDE_FLOW_MCP_TOOLS` in 3.56.7
+  only trim the ADVERTISED list ("execution remains registered internally"), so
+  `bin/ruflo-mcp` runs ruflo behind `lib/mcp-filter.mjs`, a stdio JSON-RPC proxy
+  that drops non-allowlisted tools from `tools/list` and refuses their
+  `tools/call`. The wrapper `env -i`s everything except PATH, HOME, LANG and the
+  proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, lower-case forms,
+  `NODE_USE_ENV_PROXY`) and bakes `CLAUDE_FLOW_HEADLESS=true`,
+  `CLAUDE_FLOW_ROUTER_NEURAL=0`, `RUFLO_DAEMON_AUTOSTART=0`.
+- ruflo 3.56.7 downloads `Xenova/all-MiniLM-L6-v2` (~90 MB) on its first memory
+  call. The installer's warmup makes that call at build time, so the model lands
+  in the pack (`node_modules/@huggingface/transformers/.cache/`, hashed in the
+  stamp) and runs need no network for it.
+
+**Production step (after the PR merges; operator, as root on the box)**
+
+Same procedure as "Review batteries on the execution box" above — no run in
+flight, fast-forward the checkout as `automata`, verify HEAD against
+`git ls-remote`, take a root-owned copy of the script, run it — plus:
+
+1. Disk: a pack BUILD needs ≥ 5 GB free under `/usr/local/lib` (below that the
+   pack FAILs, never the review packs; a re-run with every pack at pin needs
+   no space). The three packs take ≈ 4.2 GB (gstack 2.1 GB, gsd 0.4 GB,
+   ruflo 1.7 GB, measured in the container drill).
+2. The first run takes several minutes (≈3 GB downloaded). It must end
+   `RESULT: PASS`, with `INSTALLED harness pack …` for all three packs,
+   `VERIFIED harness side writes: none outside the packs` (or a `DISCARDED`
+   line you have read), every `VERIFIED harness …` line from
+   `verify-as-agent` (including `browser … launch with its sandbox` — this is
+   the AppArmor proof) and a `HARNESS STAMP <hash>` line.
+3. Re-run it once: every review item AND every harness pack must be `SKIPPED`
+   (packs re-hash their recorded files), and the stamp must be unchanged.
+4. `automata-batteries doctor --json | jq '.ok, [.packs[] | {id, ok}]'` and
+   `automata-batteries verify-as-agent` must both pass;
+   `aa-status | grep automata-gstack` lists the two Chromium profiles.
+5. Record `cat /usr/local/lib/automata-batteries/harness.sha256` and
+   `du -sh /usr/local/lib/automata-batteries/{gstack,gsd,ruflo}@*` on the PR.
+
+**STALE harness packs** (`STALE harness pack …`) are older pins; they stay in
+place because runs may link into them, and are removed by hand with no run in
+flight. **Rollback:** remove `/usr/local/lib/automata-batteries/{gstack,gsd,ruflo}@*`,
+`harness.json`, `harness.sha256*`, `harness-tools/`,
+`/usr/local/bin/automata-batteries` and the AppArmor profile
+(`apparmor_parser -R /etc/apparmor.d/automata-harness-gstack && rm` it).
+The review batteries are untouched by any of this.
+
+**Proving it off the box.** `batteries-dry-run.sh` only PREFLIGHTS the harness
+(shapes, lockfile and package.json sha256s) and proves isolation: a tampered
+harness manifest FAILs while every review item is `SKIPPED` and
+`manifest.sha256` is written. The build itself needs root, the build account
+and a mount namespace; run it in a disposable `--platform linux/amd64
+ubuntu:24.04` container with Node `24.21.0-1nodesource1`, an `automata-agent`
+uid 999, no compiler, and `--cap-add SYS_ADMIN --security-opt
+apparmor=unconfined --security-opt seccomp=unconfined` (for the namespace
+bind mount). A container has no AppArmor: the profile step reports `SKIPPED`
+and the browser launch check passes only with
+`AUTOMATA_BATTERIES_TEST_NO_SANDBOX=1`, which the doctor honours only when
+`/.dockerenv` exists and labels `TEST CONTAINER ONLY: --no-sandbox`.
+
+**Bumping a pin:** gstack — set the 40-hex `sha`, re-derive Playwright's
+version from its `bun.lock` and re-pin both Chrome-for-Testing zips
+(`https://cdn.playwright.dev/builds/cft/<version>/linux64/…`, sha256 of each),
+re-check `frontmatterHookSkills`. npm packs — edit
+`packages/worker/deploy/batteries/<id>/package.json`, regenerate the lock with
+the box's npm (`npm install --ignore-scripts` in a linux/amd64 Node 24
+container), record `lockSha256`/`packageJsonSha256` in `harness.json`, and
+re-pin any prebuild for the new version. Then run the deploy-assets tests, the
+dry run and the container drill.
+
 ## Task-run batteries and the Somnio CLI (phase 7)
 
 **What it is.** The `task_batteries` setting (Settings → Review → **Task agent

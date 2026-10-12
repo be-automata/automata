@@ -82,8 +82,39 @@ umask 022
 #   non-root dry run may instead name its own host's platform (macOS developers),
 #   and only a dry run may use BATTERIES_DOWNLOAD_CACHE.
 #
+# Harness packs (packages/worker/deploy/harness.json: full upstream tool suites
+# with bin/, hooks, internal symlinks and an MCP server) are a SEPARATE class
+# with their own failure count and their own stamp, harness.sha256:
+#   packs -> /usr/local/lib/automata-batteries/<id>@<sha | version>/
+#   doctor -> /usr/local/bin/automata-batteries (doctor | doctor --json | verify-as-agent)
+# - A harness FAIL never touches manifest.sha256: every harness summary line is
+#   `... harness ...`, counted in HARNESS_FAILURES, and the harness stages run
+#   only after the review result (and manifest.sha256) is settled.
+# - No upstream build code runs as root. Fetch, setup, npm install, the one
+#   allowlisted lifecycle script per pack and the warmup run as the build
+#   account (fixed uid, nologin, no supplementary group) under `env -i` with an
+#   explicit HOME, PATH, npm cache and registry, inside a private staging dir.
+#   Root only downloads sha256-pinned archives, installs apt runtime packages,
+#   assembles, scans, chowns and publishes.
+# - npm packs install from OUR committed lockfile, `--ignore-scripts`; a native
+#   prebuild is a sha256-pinned download for this host's Node ABI, never a
+#   compile (the box has no toolchain, and a fallback compile would hide a
+#   missing prebuild). Every resulting `.node` file is hashed into the pack
+#   stamp and re-hashed on every rerun.
+# - The staged tree is scanned before publish: absolute links into the build
+#   config dir are rewritten relative, every link must resolve inside the pack,
+#   no file or link may contain the staging path, upstream settings files are
+#   discarded, frontmatter keeps no mcpServers/permissionMode and declares
+#   hooks only in the manifest's frontmatterHookSkills. Whatever the build wrote
+#   outside the pack (its HOME, /tmp, ...) is listed and deleted.
+# - A pack browser gets an AppArmor profile granting `userns` to its exact
+#   pinned executable path; the sysctl is never changed and --no-sandbox is
+#   never configured.
+#
 # Dry run (developers, non-root): PREFIX=<absolute tmp dir> SKIP_SUDO_VERIFY=1,
 # optionally BATTERIES_MANIFEST=<absolute path> to test a modified manifest,
+# HARNESS_MANIFEST=<absolute path> to test a modified harness manifest (a dry
+# run only preflights the harness: the build account needs root),
 # BATTERIES_DOWNLOAD_CACHE=<absolute dir> to reuse a verified SDK zip across
 # runs, and BATTERIES_PREFLIGHT_ONLY=1 to stop after preflight (no network, no
 # writes). Every knob is refused for root and for a PREFIX that resolves to
@@ -128,12 +159,46 @@ readonly RE_GITHUB='^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 # review-agent-settings.ts) by the deploy-assets parity test.
 readonly PACK_REQUIREMENTS_JSON='["github-read-token"]'
 
+HARNESS_MANIFEST_REPO_PATH="packages/worker/deploy/harness.json"
+HARNESS_LOCK_DIR_PREFIX="packages/worker/deploy/batteries/"
+HARNESS_FILTER_REPO_PATH="packages/worker/deploy/linux/harness-mcp-filter.mjs"
+HARNESS_PROBE_REPO_PATH="packages/worker/deploy/linux/harness-mcp-probe.mjs"
+HARNESS_DOCTOR_REPO_PATH="packages/worker/deploy/linux/automata-batteries"
+# Part of every harness pack stamp. Bump it whenever a harness stage changes
+# what lands in a pack dir, so the next run rebuilds instead of SKIPPING.
+HARNESS_OUTPUT_VERSION=1
+# The build account. A FIXED system uid, chosen outside 990-999 (where
+# useradd --system allocates, and where the agent account's 999 already
+# collides with the engine's Postgres image) and absent from every container
+# image on the box (hatchet-lite and postgres:15.6 use 0-123, 405, 999, 65534).
+BUILD_USER="automata-build"
+BUILD_UID=970
+BUILD_PATH="/usr/local/bin:/usr/bin:/bin"
+NODE_BIN="/usr/bin/node"
+NPM_REGISTRY="https://registry.npmjs.org/"
+# Harness builds download ~3 GB and leave ~2.5 GB of packs.
+HARNESS_MIN_FREE_KB=$((5 * 1024 * 1024))
+APPARMOR_DIR="/etc/apparmor.d"
+# The Ubuntu 24.04 runtime libraries Playwright's Chromium needs (the
+# `playwright install-deps chromium` list for ubuntu24.04-x64, plus fonts).
+CHROMIUM_RUNTIME_PACKAGES=(libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64
+  libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1
+  libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1
+  libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2
+  libfontconfig1 libfreetype6 fonts-liberation)
+# Same lists as HARNESS_DISCARD_NAMES / FORBIDDEN_MCP_TOOL_PREFIXES in
+# packages/worker/src/agent-run/harness-manifest.ts.
+HARNESS_DISCARD_NAMES=(settings.json settings.local.json .mcp.json)
+FORBIDDEN_MCP_TOOL_PREFIXES=(agent_ swarm_ hive-mind_ managed_agent_ wasm_agent_
+  federation_ x_federation_ transfer_ http_fetch terminal_ github_ browser_)
+
 AGENT_USER="${AGENT_USER:-automata-agent}"
 WORKER_USER="${WORKER_USER:-automata}"
 SKIP_SUDO_VERIFY="${SKIP_SUDO_VERIFY:-}"
 BATTERIES_MANIFEST="${BATTERIES_MANIFEST:-}"
 BATTERIES_DOWNLOAD_CACHE="${BATTERIES_DOWNLOAD_CACHE:-}"
 BATTERIES_PREFLIGHT_ONLY="${BATTERIES_PREFLIGHT_ONLY:-}"
+HARNESS_MANIFEST="${HARNESS_MANIFEST:-}"
 PREFIX="${PREFIX:-/usr/local}"
 
 usage_error() {
@@ -156,12 +221,13 @@ fi
 # DRY_RUN=0 implies root: every non-root path below exits 2.
 DRY_RUN=0
 if [ -n "$SKIP_SUDO_VERIFY" ] || [ -n "$BATTERIES_MANIFEST" ] ||
-  [ -n "$BATTERIES_DOWNLOAD_CACHE" ] || [ -n "$BATTERIES_PREFLIGHT_ONLY" ]; then
+  [ -n "$BATTERIES_DOWNLOAD_CACHE" ] || [ -n "$BATTERIES_PREFLIGHT_ONLY" ] ||
+  [ -n "$HARNESS_MANIFEST" ]; then
   if [ "$(id -u)" = "0" ]; then
-    usage_error "dry-run knobs are refused for root (SKIP_SUDO_VERIFY / BATTERIES_MANIFEST / BATTERIES_DOWNLOAD_CACHE / BATTERIES_PREFLIGHT_ONLY)"
+    usage_error "dry-run knobs are refused for root (SKIP_SUDO_VERIFY / BATTERIES_MANIFEST / BATTERIES_DOWNLOAD_CACHE / BATTERIES_PREFLIGHT_ONLY / HARNESS_MANIFEST)"
   fi
   if [ "$PREFIX" = "/usr/local" ]; then
-    usage_error "SKIP_SUDO_VERIFY=1 / BATTERIES_MANIFEST / BATTERIES_DOWNLOAD_CACHE / BATTERIES_PREFLIGHT_ONLY require a non-default PREFIX"
+    usage_error "SKIP_SUDO_VERIFY=1 / BATTERIES_MANIFEST / BATTERIES_DOWNLOAD_CACHE / BATTERIES_PREFLIGHT_ONLY / HARNESS_MANIFEST require a non-default PREFIX"
   fi
   if [ "$SKIP_SUDO_VERIFY" != "1" ]; then
     usage_error "a dry run needs SKIP_SUDO_VERIFY=1 (non-root cannot verify through sudo)"
@@ -173,6 +239,10 @@ if [ -n "$SKIP_SUDO_VERIFY" ] || [ -n "$BATTERIES_MANIFEST" ] ||
   case "$BATTERIES_DOWNLOAD_CACHE" in
     "" | /*) ;;
     *) usage_error "BATTERIES_DOWNLOAD_CACHE must be an absolute path" ;;
+  esac
+  case "$HARNESS_MANIFEST" in
+    "" | /*) ;;
+    *) usage_error "HARNESS_MANIFEST must be an absolute path" ;;
   esac
   case "$BATTERIES_PREFLIGHT_ONLY" in
     "" | 1) ;;
@@ -195,6 +265,9 @@ ROOT="$PREFIX/lib/automata-batteries"
 BIN_DIR="$PREFIX/bin"
 
 FAILURES=0
+# Harness FAIL lines (`FAIL harness ...`) are counted here, never in FAILURES,
+# so a harness failure cannot stop manifest.sha256 from being written.
+HARNESS_FAILURES=0
 WORK=""
 SUMMARY=""
 VERIFY_HOME=""
@@ -213,6 +286,8 @@ HELPER_TOKENS=""
 TOOL_ROWS=""
 # Space-delimited names of the tools INSTALLED or SKIPPED (at pin) in this run.
 TOOLS_OK=" "
+# The harness manifest copy read from HEAD (empty when HEAD has none).
+HARNESS=""
 
 # Every git call against the automata-owned checkout goes through here.
 git_repo() {
@@ -234,6 +309,7 @@ log() {
 record() {
   printf '%s\n' "$*" >>"$SUMMARY"
   case "$*" in
+    "FAIL harness "*) HARNESS_FAILURES=$((HARNESS_FAILURES + 1)) ;;
     "FAIL "*) FAILURES=$((FAILURES + 1)) ;;
   esac
 }
@@ -306,13 +382,14 @@ print_summary() {
 }
 
 finish() {
+  local total=$((FAILURES + HARNESS_FAILURES))
   FINISHED=1
   print_summary
-  if [ "$FAILURES" -eq 0 ]; then
+  if [ "$total" -eq 0 ]; then
     echo "RESULT: PASS"
     exit 0
   fi
-  echo "RESULT: FAIL (${FAILURES} failure(s))"
+  echo "RESULT: FAIL (${total} failure(s))"
   exit 1
 }
 
@@ -322,8 +399,14 @@ on_exit() {
   if [ -n "$SUMMARY" ] && [ "$FINISHED" -eq 0 ]; then
     print_summary
     echo "FAIL script: aborted with status ${status} (see the log above)"
-    echo "RESULT: FAIL ($((FAILURES + 1)) failure(s))"
+    echo "RESULT: FAIL ($((FAILURES + HARNESS_FAILURES + 1)) failure(s))"
     status=1
+  fi
+  if [ -n "$WORK" ] && [ "$(id -u)" = "0" ]; then
+    pkill -KILL -u "$BUILD_USER" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$ROOT" ] && [ "$FINISHED" -eq 0 ]; then
+    rm -rf "$ROOT"/.staging.harness.* 2>/dev/null || true
   fi
   [ -n "$VERIFY_HOME" ] && rm -rf "$VERIFY_HOME"
   [ -n "$WORK" ] && rm -rf "$WORK"
@@ -1483,6 +1566,10 @@ list_stale() {
   for dir in "$ROOT"/*@*; do
     [ -d "$dir" ] || continue
     base="$(basename "$dir")"
+    if [ -n "$HARNESS" ] && jq -e --arg n "${base%%@*}" 'any(.packs[]?; .id == $n)' "$HARNESS" >/dev/null 2>&1; then
+      # Harness packs are reported by list_stale_harness.
+      continue
+    fi
     if jq -e --arg d "$base" '
       any(.packs[]; (.id + "@" + .sha) == $d)
       or any((.tools // [])[];
@@ -1688,9 +1775,1165 @@ write_manifest_hash() {
   } | sha256sum | awk '{print $1}')"
   printf '%s\n' "$hash" >"$tmp"
   chmod 0644 "$tmp"
+  # The same hash as the run before: restore that file (inode and mtime
+  # unchanged), so an unchanged install leaves no trace on it.
+  if cmp -s "$tmp" "$ROOT/manifest.sha256.invalid"; then
+    rm -f "$tmp"
+    mv -f "$ROOT/manifest.sha256.invalid" "$ROOT/manifest.sha256"
+    return 0
+  fi
   mv -f "$tmp" "$ROOT/manifest.sha256"
   rm -f "$ROOT/manifest.sha256.invalid"
 }
+
+# ── harness stages ───────────────────────────────────────────────────────────
+# Everything from here to "end harness stages" serves harness.json only. None
+# of it reads or writes manifest.sha256 (a deploy-assets test greps this
+# block): its failures are `FAIL harness ...` lines and its stamp is
+# harness.sha256.
+
+# One field of harness packs[<index>] as raw text ("" when absent).
+hfield() {
+  jq -r --argjson i "$1" ".packs[\$i]$2 // \"\" | if type == \"string\" then . else tojson end" "$HARNESS"
+}
+
+# Every rule a harness.json value must satisfy before it reaches a root shell,
+# the build account or a path, as one error line per violation (jq). Same
+# rules as packages/worker/src/agent-run/harness-manifest.ts plus the keys
+# only the installer reads.
+harness_shape_errors() {
+  jq -r --arg lockprefix "$HARNESS_LOCK_DIR_PREFIX" \
+    --argjson forbidden "$(printf '%s\n' "${FORBIDDEN_MCP_TOOL_PREFIXES[@]}" | jq -R . | jq -s .)" '
+    def str: type == "string" and test("\\S");
+    def safe_rel: type == "string" and test("^[A-Za-z0-9_.@+-]+(/[A-Za-z0-9_.@+-]+)*$")
+      and (split("/") | all(. != "." and . != ".."));
+    def word: type == "string" and test("^-{0,2}[A-Za-z0-9][A-Za-z0-9._:=+-]*$");
+    def plain: type == "string" and test("^[A-Za-z0-9._:-]*$") and (contains("..") | not);
+    def packdir_rel: type == "string" and startswith("{{packDir}}/") and (.[12:] | safe_rel);
+    def env_ok($re): type == "object" and (to_entries | all(.key | test($re)))
+      and (to_entries | all(.value | type == "string"
+        and (plain or . == "{{packDir}}" or (packdir_rel and (.[12:] | split("/") | all(plain))))));
+    def argv_ok: type == "array" and length > 0
+      and (.[0] == "node" or (.[0] | safe_rel))
+      and (.[1:] | all(word or packdir_rel));
+    def sha1: type == "string" and test("^[0-9a-f]{40}$");
+    def sha256: type == "string" and test("^[0-9a-f]{64}$");
+    def semver: type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$");
+    def id: type == "string" and test("^[a-z0-9][a-z0-9-]*$");
+    def errs($p; $checks): $checks | to_entries[] | select(.value | not) | "\($p): \(.key)";
+    if .schemaVersion != 1 or (.packs | type != "array" or length == 0) then "manifest: schemaVersion 1 and a non-empty packs list"
+    elif (.packs | map(.id) | length != (unique | length)) then "manifest: duplicate pack id"
+    else
+      .packs | to_entries[] | .key as $k | .value as $p | ($p.id | if id then . else "packs[\($k)]" end) as $label |
+      errs($label; {
+        "bad id": ($p.id | id),
+        "class must be harness": ($p.class == "harness"),
+        "kind must be git-setup or npm-lock": ($p.kind == "git-setup" or $p.kind == "npm-lock"),
+        "license is empty": ($p.license | str),
+        "nodeMajor must be an integer": ($p.nodeMajor | type == "number" and . == floor and . >= 20),
+        "env keys must be battery prefixes with plain values": ($p.env | env_ok("^(GSTACK|PLAYWRIGHT|MCP|CLAUDE_FLOW)_[A-Z0-9_]+$")),
+        "discard entries must be safe relative paths (a segment may be *)": (($p.discard // []) | type == "array" and all(split("/") | map(if . == "*" then "x" else . end) | join("/") | safe_rel)),
+        "smoke entries must be argv lists": (($p.smoke // []) | type == "array" and all(argv_ok)),
+        "headlessSafe must be names": ($p.headlessSafe | type == "array" and all(id)),
+        "frontmatterHookSkills must be names": ($p.frontmatterHookSkills | type == "array" and all(id))
+      }),
+      (if $p.kind == "git-setup" then errs($label; {
+        "repo must be a github https url": ($p.repo | type == "string" and test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")),
+        "sha is not 40 hex": ($p.sha | sha1),
+        "checkoutDir must be a safe relative path": ($p.checkoutDir | safe_rel),
+        "setupArgs must be words": ($p.setupArgs | type == "array" and all(word)),
+        "setupEnv keys must be battery prefixes with plain values": ($p.setupEnv | env_ok("^(GSTACK|PLAYWRIGHT)_[A-Z0-9_]+$")),
+        "preSetup entries must be argv lists of words": ($p.preSetup | type == "array" and all(type == "array" and length > 0 and (.[0] | safe_rel) and (.[1:] | all(word)))),
+        "dependencies must be pinned github linux release downloads": ($p.dependencies | type == "array" and all(
+          (.name | id) and (.version | semver) and (.sha256 | sha256) and (.license | str)
+          and (.url | type == "string" and test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[A-Za-z0-9_.-]*v[0-9]+\\.[0-9]+\\.[0-9]+/[A-Za-z0-9_.-]*linux[A-Za-z0-9_.-]*\\.zip$")))),
+        "browsers must be pinned Chrome-for-Testing linux64 zips": ($p.browsers | type == "array" and all(
+          (.name | id) and (.revision | type == "string" and test("^[0-9]+$")) and (.sha256 | sha256)
+          and (.version | type == "string" and test("^[0-9]+(\\.[0-9]+){3}$"))
+          and (.dir | type == "string" and test("^[a-z_]+-[0-9]+$") and endswith("-" + $p.browsers[0].revision))
+          and (.executable | safe_rel)
+          and (. as $b | .url | type == "string" and startswith("https://cdn.playwright.dev/builds/cft/" + $b.version + "/linux64/") and test("/[a-z0-9-]+-linux64\\.zip$")))),
+        "browsers need env.PLAYWRIGHT_BROWSERS_PATH = {{packDir}}/<dir>": (($p.browsers | length) == 0 or ($p.env.PLAYWRIGHT_BROWSERS_PATH | packdir_rel))
+      }) elif $p.kind == "npm-lock" then errs($label; {
+        "package must be an npm name": ($p.package | type == "string" and test("^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$")),
+        "version must be exact semver": ($p.version | semver),
+        "overrides must pin exact versions": (($p.overrides // {}) | type == "object" and (to_entries | all(.value | semver))),
+        "lockOverlay must be \($lockprefix)<id>/package-lock.json": ($p.lockOverlay == ($lockprefix + $p.id + "/package-lock.json")),
+        "lockSha256 is not 64 hex": ($p.lockSha256 | sha256),
+        "packageJsonSha256 is not 64 hex": ($p.packageJsonSha256 | sha256),
+        "lifecycleScripts must be npm names": (($p.lifecycleScripts // []) | type == "array" and all(type == "string" and test("^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$"))),
+        "prebuilds must be pinned github linux-x64 node prebuild downloads": (($p.prebuilds // []) | type == "array" and all(
+          (.path | safe_rel and startswith("node_modules/")) and (.member | safe_rel) and (.sha256 | sha256)
+          and (.url | type == "string" and test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*-node-v[0-9]+-linux-x64\\.tar\\.gz$")))),
+        "postInstall must be an argv list": (($p.postInstall // ["x"]) | type == "array" and length > 0 and (.[0] | safe_rel) and (.[1:] | all(word or . == "{{configDir}}"))),
+        "warmup tools must be allowlisted, with plain string arguments": (($p.warmup // []) | type == "array" and all(
+          (.tool as $t | ($p.toolAllowlist // []) | index($t) != null)
+          and (.arguments | type == "object" and (to_entries | all(.value | plain))))),
+        "mcpServe is required exactly with mcpServers": (($p.mcpServers == null) == ($p.mcpServe == null)),
+        "mcpServe must name a safe entrypoint, word args and RUFLO_/CLAUDE_FLOW_ env": ($p.mcpServe == null or (
+          ($p.mcpServe.entrypoint | safe_rel) and ($p.mcpServe.args | type == "array" and all(word))
+          and ($p.mcpServe.env | env_ok("^(CLAUDE_FLOW|RUFLO)_[A-Z0-9_]+$")))),
+        "mcpServers must be one {{packDir}} wrapper with no args": ($p.mcpServers == null or (
+          ($p.mcpServers | type == "object" and length == 1)
+          and ($p.mcpServers | to_entries | all((.key | id) and (.value.command | packdir_rel) and .value.args == [])))),
+        "toolAllowlist must name tools, never a spawn/network/terminal/github/browser/federation tool": ($p.mcpServers == null or (
+          $p.toolAllowlist | type == "array" and length > 0
+          and all(type == "string" and test("^[a-z][a-z0-9_-]*$"))
+          and all(. as $t | $forbidden | all(. as $f | $t | startswith($f) | not))))
+      }) else empty end)
+    end' "$HARNESS" 2>/dev/null || echo "manifest: not valid JSON"
+}
+
+# harness_preflight: shapes, then each committed lockfile and package.json
+# against its pinned sha256 (HEAD blobs). FAILs are harness failures only.
+harness_preflight() {
+  local before="$HARNESS_FAILURES" line i id kind lockfile pkgjson lock_sha pkg_sha
+  if ! jq -e '[.. | strings | test("[\u0000-\u001f\u007f\\\\]")] | any | not' "$HARNESS" >/dev/null 2>&1; then
+    record "FAIL harness preflight manifest: a string contains a control character or backslash"
+    return 1
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] && record "FAIL harness preflight $line"
+  done < <(harness_shape_errors)
+  [ "$HARNESS_FAILURES" -eq "$before" ] || return 1
+  while IFS=$'\t' read -r -u 3 i id kind; do
+    [ "$kind" = "npm-lock" ] || continue
+    lockfile="$(hfield "$i" .lockOverlay)"
+    pkgjson="$(dirname "$lockfile")/package.json"
+    lock_sha="$( { git_repo cat-file blob "$HEAD_SHA:$lockfile" 2>/dev/null || true; } | sha256sum | awk '{print $1}')"
+    pkg_sha="$( { git_repo cat-file blob "$HEAD_SHA:$pkgjson" 2>/dev/null || true; } | sha256sum | awk '{print $1}')"
+    [ "$lock_sha" = "$(hfield "$i" .lockSha256)" ] ||
+      record "FAIL harness preflight $id: lockSha256 does not match $lockfile at HEAD"
+    [ "$pkg_sha" = "$(hfield "$i" .packageJsonSha256)" ] ||
+      record "FAIL harness preflight $id: packageJsonSha256 does not match $pkgjson at HEAD"
+  done 3< <(harness_rows)
+  [ "$HARNESS_FAILURES" -eq "$before" ] || return 1
+  record "PREFLIGHT harness ok ($(jq -r '[.packs[] | "\(.id) \(.kind)"] | join(", ")' "$HARNESS"))"
+}
+
+# One `index<TAB>id<TAB>kind` row per harness pack (after preflight).
+harness_rows() {
+  jq -r '.packs | to_entries[] | [(.key | tostring), .value.id, .value.kind] | @tsv' "$HARNESS"
+}
+
+# The published dir name of harness pack <index>: <id>@<sha> (git-setup) or
+# <id>@<version> (npm-lock) — harnessPackDirName in harness-layout.ts.
+harness_dir_name() {
+  local i="$1"
+  if [ "$(hfield "$i" .kind)" = "git-setup" ]; then
+    printf '%s@%s\n' "$(hfield "$i" .id)" "$(hfield "$i" .sha)"
+  else
+    printf '%s@%s\n' "$(hfield "$i" .id)" "$(hfield "$i" .version)"
+  fi
+}
+
+host_node_abi() {
+  "$NODE_BIN" -p 'process.versions.modules' 2>/dev/null
+}
+
+# The stamp hash covers the manifest's pack entry, the blob ids at HEAD of the
+# lockfile, package.json and the MCP filter, HARNESS_OUTPUT_VERSION and this
+# host's Node ABI (a new Node major must rebuild the native prebuilds).
+harness_stamp_hash() {
+  local i="$1" lockfile
+  {
+    # Run-time-only keys (which skills an automation may call, the agent's
+    # smoke checks) do not change the built bytes, so they do not rebuild.
+    jq -c --argjson i "$i" '.packs[$i] | del(.headlessSafe, .smoke)' "$HARNESS"
+    lockfile="$(hfield "$i" .lockOverlay)"
+    if [ -n "$lockfile" ]; then
+      git_repo rev-parse --verify --quiet "$HEAD_SHA:$lockfile" || printf 'absent %s\n' "$lockfile"
+      git_repo rev-parse --verify --quiet "$HEAD_SHA:$(dirname "$lockfile")/package.json" || printf 'absent package.json\n'
+    fi
+    git_repo rev-parse --verify --quiet "$HEAD_SHA:$HARNESS_FILTER_REPO_PATH" || printf 'absent filter\n'
+    printf 'harness-output %s\nnode-abi %s\n' "$HARNESS_OUTPUT_VERSION" "$(host_node_abi)"
+  } | sha256sum | awk '{print $1}'
+}
+
+# harness_at_pin <target> <expected>: the stamp matches and every file it
+# records (native modules, models, browser executables, wrapper) still has
+# its recorded sha256.
+harness_at_pin() {
+  local target="$1" expected="$2" sha rel
+  [ -f "$target/.stamp" ] || return 1
+  [ "$(head -n 1 "$target/.stamp")" = "stamp $expected" ] || return 1
+  while read -r sha rel; do
+    [ -f "$target/$rel" ] && [ ! -L "$target/$rel" ] || return 1
+    [ "$(sha256_of "$target/$rel")" = "$sha" ] || return 1
+  done < <(sed -n 's/^file //p' "$target/.stamp")
+}
+
+# When set (git-setup stages), every as_build call runs in a private mount
+# namespace where the staged pack is bind-mounted at its FINAL published path.
+# Upstream setups bake their own absolute location into what they build (gstack's
+# bun bundles hard-code __dirname), so the build must see the path the pack will
+# have; on the real filesystem the pack still lives under its private staging
+# name until the rename publishes it.
+BUILD_VIEW_SRC=""
+BUILD_VIEW_DST=""
+
+# as_build <home> <cwd> <PATH> [NAME=value...] -- <argv...>: argv as the build
+# account under env -i, with a fixed npm cache, registry and no user config.
+# <cwd> is entered inside the build view when one is set.
+# shellcheck disable=SC2016 # the sh -c script expands its own positional args
+as_build() {
+  local home="$1" cwd="$2" path="$3"
+  local -a extra=() view=(/bin/sh -c 'cd "$0" && exec "$@"' "$cwd")
+  shift 3
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    extra+=("$1")
+    shift
+  done
+  shift
+  if [ -n "$BUILD_VIEW_DST" ]; then
+    view=(unshare --mount --propagation private -- /bin/sh -c \
+      'mount --bind "$0" "$1" && cd "$2" && shift 2 && exec "$@"' \
+      "$BUILD_VIEW_SRC" "$BUILD_VIEW_DST" "$cwd")
+  fi
+  (
+    cd / &&
+      "${view[@]}" runuser -u "$BUILD_USER" -- env -i HOME="$home" PATH="$path" LANG=C.UTF-8 \
+        TMPDIR="$home/../tmp" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_TERMINAL_PROMPT=0 npm_config_cache="$home/../npm-cache" \
+        npm_config_registry="$NPM_REGISTRY" npm_config_userconfig="$home/../npmrc" \
+        npm_config_globalconfig="$home/../npmrc-global" npm_config_update_notifier=false \
+        npm_config_fund=false npm_config_audit=false ${extra[@]+"${extra[@]}"} \
+        timeout 1800 "$@"
+  )
+}
+
+# kill_build_processes: nothing the build started may outlive its stage. A
+# zombie is already dead (it waits for its parent, or PID 1, to reap it), so
+# only live states count.
+kill_build_processes() {
+  local n
+  pkill -KILL -u "$BUILD_USER" >/dev/null 2>&1 || true
+  for n in 1 2 3 4 5 6 7 8 9 10; do
+    # shellcheck disable=SC2009 # pgrep has no portable "not a zombie" filter
+    ps -u "$BUILD_USER" -o stat= 2>/dev/null | grep -qv '^Z' || return 0
+    sleep 1
+  done
+  STEP_ERROR="build account processes survived SIGKILL"
+  return 1
+}
+
+# The build account: created once with BUILD_UID, nologin, no supplementary
+# group, no home on disk (every build passes an explicit private HOME).
+ensure_build_account() {
+  local uid gid groups shell
+  if id -u "$BUILD_USER" >/dev/null 2>&1; then
+    uid="$(id -u "$BUILD_USER")"
+    gid="$(id -g "$BUILD_USER")"
+    groups="$(id -G "$BUILD_USER")"
+    shell="$(getent passwd "$BUILD_USER" | cut -d: -f7)"
+    if [ "$uid" != "$BUILD_UID" ] || [ "$groups" != "$gid" ] || [ "$shell" != "/usr/sbin/nologin" ]; then
+      record "FAIL harness build account $BUILD_USER: uid $uid groups '$groups' shell $shell (want uid $BUILD_UID, its own group only, /usr/sbin/nologin)"
+      return 1
+    fi
+    record "SKIPPED harness build account $BUILD_USER (uid $BUILD_UID)"
+    return 0
+  fi
+  if getent passwd "$BUILD_UID" >/dev/null || getent group "$BUILD_UID" >/dev/null; then
+    record "FAIL harness build account: uid/gid $BUILD_UID is taken by another account"
+    return 1
+  fi
+  if ! { groupadd --system --gid "$BUILD_UID" "$BUILD_USER" &&
+    useradd --system --uid "$BUILD_UID" --gid "$BUILD_UID" --no-create-home \
+      --home-dir /nonexistent --shell /usr/sbin/nologin "$BUILD_USER"; }; then
+    record "FAIL harness build account: could not create $BUILD_USER"
+    return 1
+  fi
+  record "INSTALLED harness build account $BUILD_USER (uid $BUILD_UID)"
+}
+
+wait_for_apt() {
+  local i
+  for i in $(seq 1 120); do
+    if ! fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock \
+      /var/cache/apt/archives/lock >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+# The Chromium runtime libraries, when any pack ships a browser.
+install_browser_runtime() {
+  local pkg missing=()
+  jq -e 'any(.packs[]; (.browsers // []) | length > 0)' "$HARNESS" >/dev/null || return 0
+  for pkg in "${CHROMIUM_RUNTIME_PACKAGES[@]}"; do
+    dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")
+  done
+  if [ "${#missing[@]}" -eq 0 ]; then
+    record "SKIPPED harness browser runtime (${#CHROMIUM_RUNTIME_PACKAGES[@]} apt packages present)"
+    return 0
+  fi
+  log "installing browser runtime packages: ${missing[*]}"
+  if ! { wait_for_apt && DEBIAN_FRONTEND=noninteractive apt-get update -q >&2 &&
+    wait_for_apt && DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
+    --no-install-recommends "${missing[@]}" >&2; }; then
+    record "FAIL harness browser runtime: apt-get install failed (${missing[*]})"
+    return 1
+  fi
+  record "INSTALLED harness browser runtime (${#missing[@]} apt packages)"
+}
+
+# install_root_file <repo path> <dest> <mode>: a HEAD blob, root-owned,
+# replaced through a temp file only when its bytes differ (ROOT_FILES_CHANGED
+# counts replacements).
+ROOT_FILES_CHANGED=0
+install_root_file() {
+  local from="$1" dest="$2" mode="$3" tmp="$2.new.$$"
+  if ! { mkdir -p "$(dirname "$dest")" && git_repo cat-file blob "$HEAD_SHA:$from" >"$tmp"; }; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if cmp -s "$tmp" "$dest"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  chmod "$mode" "$tmp" && chown root:root "$tmp" && mv -f "$tmp" "$dest" &&
+    ROOT_FILES_CHANGED=$((ROOT_FILES_CHANGED + 1))
+}
+
+# extract_zip <zip> <dest> [<member basename>]: a pre-scanned extraction (no
+# absolute or `..` names, no symlinks, at most 2 GiB) that keeps exec bits.
+# With a basename, only the ONE regular file of that basename is written, to
+# <dest> itself.
+extract_zip() {
+  python3 - "$@" <<'PY'
+import os
+import stat
+import sys
+import zipfile
+
+zip_path, dest = sys.argv[1], sys.argv[2]
+only = sys.argv[3] if len(sys.argv) > 3 else None
+total = 0
+with zipfile.ZipFile(zip_path) as archive:
+    infos = archive.infolist()
+    for info in infos:
+        name = info.filename
+        if "\x00" in name or "\\" in name or name.startswith("/"):
+            sys.exit("unsafe name: " + repr(name))
+        if any(part in ("", ".", "..") for part in name.rstrip("/").split("/")):
+            sys.exit("unsafe path: " + repr(name))
+        if stat.S_ISLNK(info.external_attr >> 16):
+            sys.exit("symlink: " + repr(name))
+        total += info.file_size
+        if total > 2 * 1024 ** 3:
+            sys.exit("total size over 2 GiB")
+    if only is not None:
+        hits = [i for i in infos if not i.is_dir() and os.path.basename(i.filename) == only]
+        if len(hits) != 1:
+            sys.exit("expected exactly one %s, found %d" % (only, len(hits)))
+        with archive.open(hits[0]) as src, open(dest, "wb") as out:
+            out.write(src.read())
+        os.chmod(dest, 0o755)
+        sys.exit(0)
+    for info in infos:
+        archive.extract(info, dest)
+        if not info.is_dir():
+            mode = info.external_attr >> 16
+            os.chmod(os.path.join(dest, info.filename), 0o755 if mode & 0o111 else 0o644)
+PY
+}
+
+# scan_pack <pack> <stage> <build config dir> <final path> <hook skills, one
+# per line>: rewrites absolute links into the build config dir or the final
+# pack path as relative links inside the pack, then checks the harness profile. Prints `DISCARD <rel>`,
+# `NATIVE <sha256> <rel>` and `ERROR <text>` lines; exits non-zero on an ERROR.
+scan_pack() {
+  python3 - "$@" <<'PY'
+import hashlib
+import os
+import re
+import sys
+
+pack, stage, build_claude, final, hook_skills = sys.argv[1:6]
+pack = os.path.realpath(pack)
+hook_skills = set(filter(None, hook_skills.split("\n")))
+discard_names = set(os.environ["HARNESS_DISCARD_NAMES"].split())
+needle = stage.encode()
+errors = []
+
+def rel(path):
+    return os.path.relpath(path, pack)
+
+def scan_file(path, want_hash):
+    """(staging path found, sha256 or None), reading 8 MiB at a time."""
+    digest = hashlib.sha256() if want_hash else None
+    found = False
+    tail = b""
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1 << 23)
+            if not chunk:
+                break
+            if digest is not None:
+                digest.update(chunk)
+            if not found and needle in tail + chunk:
+                found = True
+            tail = chunk[-(len(needle) - 1):]
+    return found, digest.hexdigest() if digest is not None else None
+
+# parseFrontmatter in harness-manifest.ts, rule for rule: a leading BOM is
+# dropped, CRLF/CR become LF, a fence may carry trailing blanks, a top-level
+# key may be quoted, and any top-level line that is not a plain key (a flow
+# mapping, a `?` key, a merge, no closing fence) makes the block opaque.
+FRONTMATTER_KEY = re.compile(r"""^(["']?)([A-Za-z0-9_-]+)\1[ \t]*:""")
+FRONTMATTER_FENCE = re.compile(r"^---[ \t]*$")
+
+def parse_frontmatter(path):
+    with open(path, "rb") as handle:
+        text = handle.read().decode("utf-8", "replace")
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not lines[0].startswith("---"):
+        return [], False
+    if not FRONTMATTER_FENCE.match(lines[0]):
+        return [], True
+    keys, opaque = [], False
+    for line in lines[1:]:
+        if FRONTMATTER_FENCE.match(line):
+            return keys, opaque
+        if line.strip() == "" or re.match(r"^[\s#]", line) or line.startswith("- "):
+            continue
+        match = FRONTMATTER_KEY.match(line)
+        if match is None:
+            opaque = True
+        else:
+            keys.append(match.group(2))
+    return keys, True
+
+def frontmatter_errors(rel_path, file_path):
+    found = []
+    skill = os.path.basename(os.path.dirname(rel_path)) if os.path.basename(rel_path) == "SKILL.md" else None
+    keys, opaque = parse_frontmatter(file_path)
+    if opaque:
+        found.append("%s: frontmatter has a top-level line that is not a plain key" % rel_path)
+    for key in keys:
+        if key in ("mcpServers", "permissionMode"):
+            found.append("%s: frontmatter declares %s" % (rel_path, key))
+        elif key == "hooks" and skill not in hook_skills:
+            found.append("%s: frontmatter declares hooks outside frontmatterHookSkills" % rel_path)
+    return found
+
+for root, dirs, files in os.walk(pack):
+    in_node_modules = "node_modules" in rel(root).split(os.sep)
+    for name in dirs + files:
+        path = os.path.join(root, name)
+        if os.path.islink(path):
+            target = os.readlink(path)
+            if os.path.isabs(target):
+                if target == build_claude or target.startswith(build_claude + "/"):
+                    mapped = os.path.join(pack, "claude", os.path.relpath(target, build_claude))
+                elif target == final or target.startswith(final + "/"):
+                    mapped = os.path.join(pack, os.path.relpath(target, final))
+                else:
+                    errors.append("%s: absolute link outside the build config dir" % rel(path))
+                    continue
+                target = os.path.relpath(mapped, root)
+                os.unlink(path)
+                os.symlink(target, path)
+            if needle in target.encode():
+                errors.append("%s: link names the staging path" % rel(path))
+            try:
+                resolved = os.path.realpath(path, strict=True)
+            except OSError:
+                errors.append("%s: dangling link" % rel(path))
+                continue
+            if not resolved.startswith(pack + os.sep):
+                errors.append("%s: link escapes the pack" % rel(path))
+            elif not in_node_modules and name.lower().endswith(".md") and os.path.isfile(resolved):
+                # Claude Code loads it under the LINK's path: the link's skill
+                # dir decides whether its hooks are allowed.
+                errors.extend(frontmatter_errors(rel(path), resolved))
+    for name in list(dirs):
+        if os.path.islink(os.path.join(root, name)):
+            dirs.remove(name)
+    for name in files:
+        path = os.path.join(root, name)
+        if os.path.islink(path):
+            continue
+        if not in_node_modules and name in discard_names:
+            os.unlink(path)
+            print("DISCARD %s" % rel(path))
+            continue
+        if not os.path.isfile(path):
+            errors.append("%s: not a regular file" % rel(path))
+            continue
+        native = name.endswith((".node", ".onnx"))
+        found, digest = scan_file(path, native)
+        if found:
+            errors.append("%s: names the staging path" % rel(path))
+        if native:
+            print("NATIVE %s %s" % (digest, rel(path)))
+        if not in_node_modules and name.lower().endswith(".md"):
+            errors.extend(frontmatter_errors(rel(path), path))
+
+for error in errors[:20]:
+    print("ERROR %s" % error)
+if len(errors) > 20:
+    print("ERROR ... and %d more" % (len(errors) - 20))
+sys.exit(1 if errors else 0)
+PY
+}
+
+# collect_build_output <build home> <pack> <index>: the build HOME's claude
+# config dir becomes <pack>/claude (minus the manifest's discard list); every
+# other entry of the build HOME is reported and left for deletion.
+collect_build_output() {
+  local bh="$1" pack="$2" i="$3" entry rel hit
+  if [ -L "$bh/.claude" ]; then
+    # A git-setup build HOME links .claude to the pack's own claude dir.
+    rm -f "$bh/.claude"
+  elif [ -d "$bh/.claude" ]; then
+    mv "$bh/.claude" "$pack/claude" || return 1
+  fi
+  if [ -d "$pack/claude" ]; then
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      # A `*` segment matches any one entry name (preflight allows no other glob).
+      # shellcheck disable=SC2086 # the unquoted pattern is what expands the `*`
+      for hit in "$pack/claude/"$rel; do
+        [ -e "$hit" ] || [ -L "$hit" ] || continue
+        rm -rf "$hit"
+        log "harness $(hfield "$i" .id): discarded ${hit#"$pack"/} (manifest discard list)"
+      done
+    done < <(jq -r --argjson i "$i" '.packs[$i].discard // [] | .[]' "$HARNESS")
+  fi
+  for entry in "$bh"/.[!.]* "$bh"/*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    log "harness $(hfield "$i" .id): discarded build-HOME entry ${entry#"$bh"/} ($(du -sh "$entry" 2>/dev/null | cut -f1))"
+  done
+}
+
+# fetch_dependencies <index> <bin dir>: each sha256-pinned dependency zip's one
+# executable named after the dependency, build-time only (never in the pack).
+fetch_dependencies() {
+  local i="$1" bin="$2" n d name version url sha256 zip
+  n="$(jq -r --argjson i "$i" '.packs[$i].dependencies | length' "$HARNESS")"
+  for ((d = 0; d < n; d++)); do
+    name="$(hfield "$i" ".dependencies[$d].name")"
+    version="$(hfield "$i" ".dependencies[$d].version")"
+    url="$(hfield "$i" ".dependencies[$d].url")"
+    sha256="$(hfield "$i" ".dependencies[$d].sha256")"
+    zip="$WORK/harness-dep-$name.zip"
+    fetch_verified "$name $version" "$url" "$sha256" "$zip" || return 1
+    if ! extract_zip "$zip" "$bin/$name" "$name" >"$WORK/zip.log" 2>&1; then
+      STEP_ERROR="dependency $name: $(head -n 1 "$WORK/zip.log")"
+      return 1
+    fi
+  done
+  chmod -R a+rX "$bin"
+}
+
+# place_browsers <index> <pack>: each sha256-pinned browser zip extracted into
+# <pack>/<PLAYWRIGHT_BROWSERS_PATH>/<dir>, marked complete for Playwright, so
+# the upstream setup finds it and never downloads one itself.
+place_browsers() {
+  local i="$1" pack="$2" n b name url sha256 dir exe pw zip
+  n="$(jq -r --argjson i "$i" '.packs[$i].browsers | length' "$HARNESS")"
+  [ "$n" -gt 0 ] || return 0
+  pw="$(hfield "$i" .env.PLAYWRIGHT_BROWSERS_PATH)"
+  pw="$pack/${pw#"{{packDir}}/"}"
+  for ((b = 0; b < n; b++)); do
+    name="$(hfield "$i" ".browsers[$b].name")"
+    url="$(hfield "$i" ".browsers[$b].url")"
+    sha256="$(hfield "$i" ".browsers[$b].sha256")"
+    dir="$(hfield "$i" ".browsers[$b].dir")"
+    exe="$(hfield "$i" ".browsers[$b].executable")"
+    zip="$WORK/harness-browser-$b.zip"
+    fetch_verified "$name" "$url" "$sha256" "$zip" || return 1
+    mkdir -p "$pw/$dir"
+    if ! extract_zip "$zip" "$pw/$dir" >"$WORK/zip.log" 2>&1; then
+      STEP_ERROR="browser $name: $(head -n 1 "$WORK/zip.log")"
+      return 1
+    fi
+    rm -f "$zip"
+    if [ ! -f "$pw/$dir/$exe" ] || [ ! -x "$pw/$dir/$exe" ]; then
+      STEP_ERROR="browser $name: $dir/$exe is not an executable in the archive"
+      return 1
+    fi
+    : >"$pw/$dir/INSTALLATION_COMPLETE"
+  done
+  chmod -R a+rX "$pw"
+}
+
+# stage_git_setup <index> <stage>: the pinned commit checked out at
+# <build HOME>/.claude/<checkoutDir> and its own setup run there, as the
+# build account. Sets STEP_ERROR and returns 1 on failure.
+stage_git_setup() {
+  local i="$1" stage="$2" target="$3" b="$2/build" pack="$2/pack" repo sha checkout_dir co path n p status pw line
+  local -a argv setup_env
+  repo="$(hfield "$i" .repo)"
+  sha="$(hfield "$i" .sha)"
+  checkout_dir="$(hfield "$i" .checkoutDir)"
+  # The checkout lives in the pack, seen by the build at the final path.
+  co="$target/claude/$checkout_dir"
+
+  mkdir -p "$b/deps"
+  fetch_dependencies "$i" "$b/deps" || return 1
+  place_browsers "$i" "$pack" || return 1
+  path="$b/deps:$BUILD_PATH"
+  setup_env=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && setup_env+=("$line")
+  done < <(jq -r --argjson i "$i" '.packs[$i].setupEnv | to_entries[] | "\(.key)=\(.value)"' "$HARNESS")
+  if [ "$(jq -r --argjson i "$i" '.packs[$i].browsers | length' "$HARNESS")" -gt 0 ]; then
+    pw="$(hfield "$i" .env.PLAYWRIGHT_BROWSERS_PATH)"
+    setup_env+=("PLAYWRIGHT_BROWSERS_PATH=$target/${pw#"{{packDir}}/"}")
+  fi
+
+  log "harness: fetching $repo @ $sha as $BUILD_USER (pack seen at $target)"
+  if ! { mkdir -p "$pack/claude/$(dirname "$checkout_dir")" &&
+    chown -R "$BUILD_USER:" "$b" "$pack/claude" &&
+    ln -s "$target/claude" "$b/home/.claude"; }; then
+    STEP_ERROR="cannot prepare the build view"
+    return 1
+  fi
+  BUILD_VIEW_SRC="$pack"
+  BUILD_VIEW_DST="$target"
+  if ! as_build "$b/home" "$target" "$path" -- git -c core.hooksPath=/dev/null -c core.fsmonitor=false init -q "$co" ||
+    ! as_build "$b/home" "$co" "$path" -- git -c core.hooksPath=/dev/null -c protocol.version=2 \
+      fetch -q --depth 1 "$repo" "$sha" ||
+    ! as_build "$b/home" "$co" "$path" -- git -c core.hooksPath=/dev/null checkout -q --detach FETCH_HEAD; then
+    STEP_ERROR="fetch of $sha from $repo failed"
+    return 1
+  fi
+  if [ "$(as_build "$b/home" "$co" "$path" -- git rev-parse HEAD)" != "$sha" ]; then
+    STEP_ERROR="checked-out commit is not the pinned sha"
+    return 1
+  fi
+
+  n="$(jq -r --argjson i "$i" '.packs[$i].preSetup | length' "$HARNESS")"
+  for ((p = 0; p < n; p++)); do
+    argv=()
+    while IFS= read -r line; do
+      argv+=("$line")
+    done < <(jq -r --argjson i "$i" --argjson p "$p" '.packs[$i].preSetup[$p][]' "$HARNESS")
+    argv[0]="$co/${argv[0]}"
+    if ! as_build "$b/home" "$co" "$path" ${setup_env[@]+"${setup_env[@]}"} -- "${argv[@]}" >>"$WORK/harness-build.log" 2>&1; then
+      STEP_ERROR="preSetup '${argv[*]#"$co"/}' failed"
+      return 1
+    fi
+  done
+
+  argv=()
+  while IFS= read -r line; do
+    argv+=("$line")
+  done < <(jq -r --argjson i "$i" '.packs[$i].setupArgs[]' "$HARNESS")
+  log "harness: running the pinned setup as $BUILD_USER (log: $WORK/harness-build.log)"
+  status=0
+  as_build "$b/home" "$co" "$path" ${setup_env[@]+"${setup_env[@]}"} -- \
+    "$co/setup" ${argv[@]+"${argv[@]}"} >>"$WORK/harness-build.log" 2>&1 </dev/null || status=$?
+  if [ "$status" -ne 0 ]; then
+    tail -n 30 "$WORK/harness-build.log" >&2
+    STEP_ERROR="setup failed (exit $status)"
+    return 1
+  fi
+  # The setup may fall back to an unfrozen install: the tracked tree (lock
+  # included) must still be the pinned commit's.
+  if [ -n "$(as_build "$b/home" "$co" "$path" -- git status --porcelain --untracked-files=no)" ]; then
+    STEP_ERROR="setup modified tracked files of the pinned commit (lockfile drift?)"
+    return 1
+  fi
+  BUILD_VIEW_SRC=""
+  BUILD_VIEW_DST=""
+  kill_build_processes || return 1
+  collect_build_output "$b/home" "$pack" "$i"
+}
+
+# stage_npm_lock <index> <stage>: our committed lockfile installed with
+# --ignore-scripts as the build account, then only the manifest's lifecycle
+# scripts, prebuilds, postInstall and warmup. Sets STEP_ERROR and returns 1.
+stage_npm_lock() {
+  local i="$1" stage="$2" b="$2/build" pack="$2/pack" lockfile n p abi url sha256 path member status
+  local -a argv mcp_env
+  local npm_dir="$b/npm" calls entry
+  lockfile="$(hfield "$i" .lockOverlay)"
+  mkdir -p "$npm_dir" "$b/work"
+  if ! { git_repo cat-file blob "$HEAD_SHA:$lockfile" >"$npm_dir/package-lock.json" &&
+    git_repo cat-file blob "$HEAD_SHA:$(dirname "$lockfile")/package.json" >"$npm_dir/package.json"; }; then
+    STEP_ERROR="$lockfile or its package.json is absent at $HEAD_SHA"
+    return 1
+  fi
+  if [ "$(sha256_of "$npm_dir/package-lock.json")" != "$(hfield "$i" .lockSha256)" ] ||
+    [ "$(sha256_of "$npm_dir/package.json")" != "$(hfield "$i" .packageJsonSha256)" ]; then
+    STEP_ERROR="lockfile or package.json sha256 mismatch"
+    return 1
+  fi
+  chown -R "$BUILD_USER:" "$b"
+
+  # `npm install` against the lock, not `npm ci`: npm ci refuses a lock whose
+  # optional platform packages were never published for some other platform
+  # (ruflo's closure has three). The lock bytes are re-checked below, so a
+  # resolution that drifted from the lock fails the pack either way.
+  log "harness: npm install --ignore-scripts from the committed lock as $BUILD_USER"
+  status=0
+  as_build "$b/home" "$npm_dir" "$BUILD_PATH" -- npm install --ignore-scripts --no-save \
+    --no-audit --no-fund >>"$WORK/harness-build.log" 2>&1 </dev/null || status=$?
+  if [ "$status" -ne 0 ]; then
+    tail -n 30 "$WORK/harness-build.log" >&2
+    STEP_ERROR="npm install failed (exit $status)"
+    return 1
+  fi
+  if [ "$(sha256_of "$npm_dir/package-lock.json")" != "$(hfield "$i" .lockSha256)" ]; then
+    STEP_ERROR="npm rewrote the committed lock (the install drifted from it)"
+    return 1
+  fi
+
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if ! as_build "$b/home" "$npm_dir" "$BUILD_PATH" npm_config_ignore_scripts=false -- \
+      npm rebuild "$entry" --foreground-scripts >>"$WORK/harness-build.log" 2>&1 </dev/null; then
+      STEP_ERROR="allowlisted lifecycle script of $entry failed"
+      return 1
+    fi
+  done < <(jq -r --argjson i "$i" '.packs[$i].lifecycleScripts // [] | .[]' "$HARNESS")
+
+  abi="$(host_node_abi)"
+  n="$(jq -r --argjson i "$i" '.packs[$i].prebuilds // [] | length' "$HARNESS")"
+  for ((p = 0; p < n; p++)); do
+    path="$(hfield "$i" ".prebuilds[$p].path")"
+    url="$(hfield "$i" ".prebuilds[$p].url")"
+    sha256="$(hfield "$i" ".prebuilds[$p].sha256")"
+    member="$(hfield "$i" ".prebuilds[$p].member")"
+    case "$url" in
+      *"-node-v$abi-linux-x64.tar.gz") ;;
+      *)
+        STEP_ERROR="no Node ABI $abi prebuild pinned for $path (never compiled here)"
+        return 1
+        ;;
+    esac
+    if [ ! -f "$npm_dir/$path/package.json" ]; then
+      STEP_ERROR="prebuild target $path is not an installed package"
+      return 1
+    fi
+    fetch_verified "$path prebuild" "$url" "$sha256" "$WORK/harness-prebuild.tgz" || return 1
+    mkdir -p "$WORK/harness-prebuild"
+    if ! tar -xzf "$WORK/harness-prebuild.tgz" -C "$WORK/harness-prebuild" "$member" ||
+      [ -L "$WORK/harness-prebuild/$member" ] || [ ! -f "$WORK/harness-prebuild/$member" ]; then
+      STEP_ERROR="prebuild for $path lacks the regular file $member"
+      return 1
+    fi
+    mkdir -p "$(dirname "$npm_dir/$path/$member")"
+    cat "$WORK/harness-prebuild/$member" >"$npm_dir/$path/$member"
+    chmod 0755 "$npm_dir/$path/$member"
+    chown -R "$BUILD_USER:" "$npm_dir/$path"
+    rm -rf "$WORK/harness-prebuild" "$WORK/harness-prebuild.tgz"
+    if ! as_build "$b/home" "$b/work" "$BUILD_PATH" -- "$NODE_BIN" -e 'require(process.argv[1])' \
+      "$npm_dir/$path" >>"$WORK/harness-build.log" 2>&1 </dev/null; then
+      STEP_ERROR="the $path prebuild does not load on this Node"
+      return 1
+    fi
+  done
+
+  if [ "$(hfield "$i" .postInstall)" != "" ]; then
+    argv=()
+    while IFS= read -r entry; do
+      argv+=("${entry//\{\{configDir\}\}/$b/home/.claude}")
+    done < <(jq -r --argjson i "$i" '.packs[$i].postInstall[]' "$HARNESS")
+    argv[0]="$npm_dir/${argv[0]}"
+    log "harness: postInstall as $BUILD_USER"
+    if ! as_build "$b/home" "$b/home" "$BUILD_PATH" -- "$NODE_BIN" "${argv[@]}" \
+      >>"$WORK/harness-build.log" 2>&1 </dev/null; then
+      tail -n 30 "$WORK/harness-build.log" >&2
+      STEP_ERROR="postInstall failed"
+      return 1
+    fi
+  fi
+
+  # An MCP pack's server is started once at build time, unfiltered: its warmup
+  # calls run (first-use downloads land in the pack), and the tools it
+  # registers are recorded as mcp-tools.json (the worker denies the ones
+  # outside the allowlist; every allowlisted tool must exist).
+  if [ "$(hfield "$i" .mcpServe)" != "" ]; then
+    calls="$b/work/warmup.json"
+    jq --argjson i "$i" '.packs[$i].warmup // []' "$HARNESS" >"$calls"
+    chown "$BUILD_USER:" "$calls"
+    mcp_env=()
+    while IFS= read -r entry; do
+      [ -n "$entry" ] && mcp_env+=("$entry")
+    done < <(jq -r --argjson i "$i" '.packs[$i].mcpServe.env // {} | to_entries[] | "\(.key)=\(.value)"' "$HARNESS")
+    argv=()
+    while IFS= read -r entry; do
+      argv+=("$entry")
+    done < <(jq -r --argjson i "$i" '.packs[$i].mcpServe.args // [] | .[]' "$HARNESS")
+    log "harness: warmup (first-use downloads land in the pack) as $BUILD_USER"
+    if ! as_build "$b/home" "$b/work" "$BUILD_PATH" ${mcp_env[@]+"${mcp_env[@]}"} -- \
+      "$NODE_BIN" "$ROOT/harness-tools/mcp-probe.mjs" warmup "$calls" -- \
+      "$NODE_BIN" "$npm_dir/$(hfield "$i" .mcpServe.entrypoint)" ${argv[@]+"${argv[@]}"} \
+      >"$WORK/harness-warmup.json" 2>>"$WORK/harness-build.log" </dev/null; then
+      tail -n 5 "$WORK/harness-build.log" "$WORK/harness-warmup.json" >&2
+      STEP_ERROR="warmup failed"
+      return 1
+    fi
+    if ! tail -n 1 "$WORK/harness-warmup.json" | jq -e '.tools | type == "array" and length > 0 and all(type == "string")' >/dev/null 2>&1 ||
+      ! tail -n 1 "$WORK/harness-warmup.json" | jq -c '.tools | sort' >"$b/mcp-tools.json"; then
+      STEP_ERROR="the MCP server registered no tools"
+      return 1
+    fi
+    entry="$(jq -r --slurpfile have "$b/mcp-tools.json" --argjson i "$i" \
+      '[.packs[$i].toolAllowlist[] | select(. as $t | $have[0] | index($t) | not)] | join(",")' "$HARNESS")"
+    if [ -n "$entry" ]; then
+      STEP_ERROR="toolAllowlist names tools the server does not register: $entry"
+      return 1
+    fi
+  fi
+  if [ "$(sha256_of "$npm_dir/package-lock.json")" != "$(hfield "$i" .lockSha256)" ]; then
+    STEP_ERROR="a build step rewrote the committed lock"
+    return 1
+  fi
+  kill_build_processes || return 1
+
+  if [ -f "$b/mcp-tools.json" ]; then
+    mv "$b/mcp-tools.json" "$pack/mcp-tools.json" || return 1
+  fi
+  mv "$npm_dir/node_modules" "$npm_dir/package.json" "$npm_dir/package-lock.json" "$pack/" || {
+    STEP_ERROR="cannot move the install into the pack"
+    return 1
+  }
+  collect_build_output "$b/home" "$pack" "$i" || {
+    STEP_ERROR="cannot move the installed config dir into the pack"
+    return 1
+  }
+}
+
+# write_mcp_wrapper <index> <pack> <target>: the FIXED wrapper text at the
+# manifest's mcpServers command, the filter proxy and the allowlist. Only the
+# final pack path and shape-checked manifest words are interpolated, every
+# value single-quoted. The wrapper passes the run's proxy settings through and
+# nothing else of the caller's env.
+# shellcheck disable=SC2016 # "$HOME" and the ${VAR+...} words expand when the wrapper runs
+write_mcp_wrapper() {
+  local i="$1" pack="$2" target="$3" command rel wrapper entry
+  command="$(jq -r --argjson i "$i" '.packs[$i].mcpServers | to_entries[0].value.command' "$HARNESS")"
+  rel="${command#"{{packDir}}/"}"
+  wrapper="$pack/$rel"
+  case "$target" in
+    *"'"*)
+      STEP_ERROR="the install root contains a single quote"
+      return 1
+      ;;
+  esac
+  mkdir -p "$(dirname "$wrapper")" "$pack/lib" "$pack/etc" || return 1
+  git_repo cat-file blob "$HEAD_SHA:$HARNESS_FILTER_REPO_PATH" >"$pack/lib/mcp-filter.mjs" || {
+    STEP_ERROR="$HARNESS_FILTER_REPO_PATH is absent at $HEAD_SHA"
+    return 1
+  }
+  jq --argjson i "$i" '.packs[$i].toolAllowlist' "$HARNESS" >"$pack/etc/tool-allowlist.json" || return 1
+  {
+    printf '#!/bin/sh\n'
+    printf '# Written by install-batteries.sh (harness MCP wrapper). Do not edit.\n'
+    printf '# Only PATH, HOME, LANG and the proxy settings reach the server; the\n'
+    printf '# filter proxy enforces etc/tool-allowlist.json on tools/list and tools/call.\n'
+    printf 'exec /usr/bin/env -i PATH=%s HOME="$HOME" LANG=C.UTF-8 \\\n' "'$BUILD_PATH'"
+    for entry in HTTPS_PROXY HTTP_PROXY NO_PROXY https_proxy http_proxy no_proxy NODE_USE_ENV_PROXY; do
+      printf '  ${%s+"%s=$%s"} \\\n' "$entry" "$entry" "$entry"
+    done
+    while IFS= read -r entry; do
+      [ -n "$entry" ] && printf "  '%s' \\\\\n" "$entry"
+    done < <(jq -r --argjson i "$i" '.packs[$i].mcpServe.env | to_entries[] | "\(.key)=\(.value)"' "$HARNESS")
+    printf "  '%s' '%s' '%s' -- \\\\\n" "$NODE_BIN" "$target/lib/mcp-filter.mjs" "$target/etc/tool-allowlist.json"
+    printf "  '%s' '%s'" "$NODE_BIN" "$target/$(hfield "$i" .mcpServe.entrypoint)"
+    while IFS= read -r entry; do
+      printf " '%s'" "$entry"
+    done < <(jq -r --argjson i "$i" '.packs[$i].mcpServe.args[]' "$HARNESS")
+    printf '\n'
+  } >"$wrapper" || {
+    STEP_ERROR="cannot write the MCP wrapper"
+    return 1
+  }
+  chmod 0755 "$wrapper"
+}
+
+# harness_apparmor <index> <target>: one profile per pack granting `userns` to
+# the EXACT pinned browser executables (Chromium's own sandbox needs a user
+# namespace; Ubuntu 24.04 restricts unprivileged ones). Loaded with
+# apparmor_parser -r when AppArmor is enabled; the sysctl is never touched.
+harness_apparmor() {
+  local i="$1" target="$2" id n b pw file tmp name exe
+  n="$(jq -r --argjson i "$i" '.packs[$i].browsers // [] | length' "$HARNESS")"
+  [ "$n" -gt 0 ] || return 0
+  id="$(hfield "$i" .id)"
+  pw="$(hfield "$i" .env.PLAYWRIGHT_BROWSERS_PATH)"
+  pw="$target/${pw#"{{packDir}}/"}"
+  file="$APPARMOR_DIR/automata-harness-$id"
+  tmp="$WORK/apparmor-$id"
+  {
+    printf '# Written by install-batteries.sh (harness %s). Do not edit.\n' "$id"
+    printf '# Grants user namespaces to the pinned browsers of %s only.\n' "$(basename "$target")"
+    printf 'abi <abi/4.0>,\ninclude <tunables/global>\n'
+    for ((b = 0; b < n; b++)); do
+      name="$(hfield "$i" ".browsers[$b].name")"
+      exe="$pw/$(hfield "$i" ".browsers[$b].dir")/$(hfield "$i" ".browsers[$b].executable")"
+      printf '\nprofile automata-%s-%s "%s" flags=(unconfined) {\n  userns,\n}\n' "$id" "$name" "$exe"
+    done
+  } >"$tmp"
+  if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" != "Y" ]; then
+    log "harness apparmor $id: the profile this host would load:"
+    cat "$tmp" >&2
+    record "SKIPPED harness apparmor $id: AppArmor is not enabled on this host (profile not written)"
+    return 0
+  fi
+  if cmp -s "$tmp" "$file" &&
+    grep -q "^automata-$id-" /sys/kernel/security/apparmor/profiles 2>/dev/null; then
+    record "SKIPPED harness apparmor $id (profile loaded)"
+    return 0
+  fi
+  if ! { mkdir -p "$APPARMOR_DIR" && install -o root -g root -m 0644 "$tmp" "$file" &&
+    apparmor_parser -r "$file"; }; then
+    record "FAIL harness apparmor $id: could not write or load $file"
+    return 1
+  fi
+  record "INSTALLED harness apparmor $id ($n browser profile(s))"
+}
+
+# install_harness_pack <index>: SKIPPED at pin; else staged in a private dir
+# under <root>, built as the build account, assembled and scanned by root,
+# stamped and published by rename.
+install_harness_pack() {
+  local i="$1" id kind name target expected stage pack out status line hook_skills file avail placeholder=""
+  id="$(hfield "$i" .id)"
+  kind="$(hfield "$i" .kind)"
+  name="$(harness_dir_name "$i")"
+  target="$ROOT/$name"
+  expected="$(harness_stamp_hash "$i")"
+
+  if harness_at_pin "$target" "$expected"; then
+    record "SKIPPED harness pack $name (at pin; $(grep -c '^file ' "$target/.stamp") recorded files re-verified)"
+    harness_apparmor "$i" "$target" || true
+    return 0
+  fi
+  # Only a build needs the space (downloads + the staged pack beside any old one).
+  avail="$(df -Pk "$ROOT" | awk 'NR == 2 {print $4}')"
+  if [ "${avail:-0}" -lt "$HARNESS_MIN_FREE_KB" ]; then
+    record "FAIL harness pack $id: $((${avail:-0} / 1024 / 1024)) GiB free under $ROOT, a build needs 5"
+    return 1
+  fi
+
+  if ! stage="$(mktemp -d "$ROOT/.staging.harness.$id.XXXXXX")"; then
+    record "FAIL harness pack $id: cannot create a staging dir under $ROOT"
+    return 1
+  fi
+  pack="$stage/pack"
+  STEP_ERROR=""
+  : >"$WORK/harness-build.log"
+  if ! { chmod 0711 "$stage" && mkdir -p "$pack" "$stage/build/home" "$stage/build/tmp" \
+    "$stage/build/npm-cache" && : >"$stage/build/npmrc" && : >"$stage/build/npmrc-global" &&
+    chmod 0755 "$pack" && chmod 0700 "$stage/build" &&
+    chown -R "$BUILD_USER:" "$stage/build"; }; then
+    STEP_ERROR="cannot prepare the staging dir"
+  elif [ "$kind" = "git-setup" ]; then
+    # The build view needs a mount point at the final path: an EMPTY
+    # placeholder when no pack is there yet (no stamp, so nothing seeds it).
+    if [ ! -e "$target" ] && mkdir -m 0755 "$target"; then
+      placeholder="$target"
+    fi
+    stage_git_setup "$i" "$stage" "$target" || STEP_ERROR="${STEP_ERROR:-staging failed}"
+    BUILD_VIEW_SRC=""
+    BUILD_VIEW_DST=""
+    if [ -n "$placeholder" ]; then
+      rmdir "$placeholder" 2>/dev/null || STEP_ERROR="${STEP_ERROR:-the build wrote into the placeholder $placeholder}"
+    fi
+  else
+    stage_npm_lock "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-staging failed}"
+  fi
+  if [ -z "$STEP_ERROR" ] && [ "$(hfield "$i" .mcpServers)" != "" ]; then
+    write_mcp_wrapper "$i" "$pack" "$target" || STEP_ERROR="${STEP_ERROR:-cannot write the MCP wrapper}"
+  fi
+  if [ -z "$STEP_ERROR" ]; then
+    kill_build_processes || true
+    # The build account owns nothing in the pack from here on.
+    if ! { chown -R root:root "$pack" &&
+      find "$pack" -type d -exec chmod 0755 {} + &&
+      find "$pack" -type f -perm /111 -exec chmod 0755 {} + &&
+      find "$pack" -type f ! -perm /111 -exec chmod 0644 {} +; }; then
+      STEP_ERROR="could not set modes or ownership"
+    fi
+  fi
+  if [ -z "$STEP_ERROR" ]; then
+    hook_skills="$(jq -r --argjson i "$i" '.packs[$i].frontmatterHookSkills[]' "$HARNESS")"
+    out="$WORK/harness-scan.out"
+    status=0
+    HARNESS_DISCARD_NAMES="${HARNESS_DISCARD_NAMES[*]}" scan_pack "$pack" "$stage" \
+      "$stage/build/home/.claude" "$target" "$hook_skills" >"$out" 2>&1 || status=$?
+    while IFS= read -r line; do
+      case "$line" in
+        "ERROR "*) log "harness $id scan: ${line#ERROR }" ;;
+        "DISCARD "*) log "harness $id: discarded upstream ${line#DISCARD }" ;;
+      esac
+    done <"$out"
+    if [ "$status" -ne 0 ]; then
+      STEP_ERROR="profile scan failed: $(grep -m 1 '^ERROR ' "$out" | cut -c7-)"
+    fi
+  fi
+  if [ -z "$STEP_ERROR" ]; then
+    {
+      # `node <major>` is what the worker checks against the manifest's nodeMajor.
+      printf 'stamp %s\nsource %s\nnode %s\nnode_abi %s\n' "$expected" "$HEAD_SHA" \
+        "$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')" "$(host_node_abi)"
+      sed -n 's/^NATIVE /file /p' "$out"
+      jq -r --argjson i "$i" --arg pw "$(hfield "$i" .env.PLAYWRIGHT_BROWSERS_PATH)" \
+        '.packs[$i].browsers // [] | .[] | "\($pw | ltrimstr("{{packDir}}/"))/\(.dir)/\(.executable)"' "$HARNESS" |
+        while IFS= read -r file; do
+          printf 'file %s %s\n' "$(sha256_of "$pack/$file")" "$file"
+        done
+      for file in lib/mcp-filter.mjs etc/tool-allowlist.json mcp-tools.json \
+        "$(jq -r --argjson i "$i" '.packs[$i].mcpServers // {} | to_entries[0].value.command // "" | ltrimstr("{{packDir}}/")' "$HARNESS")"; do
+        if [ -n "$file" ] && [ -f "$pack/$file" ]; then
+          printf 'file %s %s\n' "$(sha256_of "$pack/$file")" "$file"
+        fi
+      done
+    } >"$pack/.stamp" && chmod 0644 "$pack/.stamp" || STEP_ERROR="could not write the stamp"
+  fi
+  if [ -z "$STEP_ERROR" ] && ! publish_dir "$pack" "$target" "harness pack"; then
+    STEP_ERROR="could not publish $target"
+  fi
+  rm -rf "$stage"
+  if [ -n "$STEP_ERROR" ]; then
+    record "FAIL harness pack $id: $STEP_ERROR"
+    return 1
+  fi
+  record "INSTALLED harness pack $name ($(du -sh "$target" | cut -f1), $(grep -c '^file ' "$target/.stamp") files recorded)"
+  harness_apparmor "$i" "$target" || true
+}
+
+# Whatever a build wrote outside its staging dir (its packs are published or
+# removed by now) is listed and deleted: it is upstream state nobody vetted.
+discard_build_side_writes() {
+  local path found=0
+  kill_build_processes || record "FAIL harness side writes: $STEP_ERROR"
+  while IFS= read -r -d '' path; do
+    found=$((found + 1))
+    log "harness: discarding a build side write: $path"
+    rm -rf "$path"
+  done < <(find / /tmp /var/tmp /dev/shm -xdev \( -path /proc -o -path /sys \
+    -o -path /var/lib/docker -o -path /var/lib/containerd -o -path "$ROOT" \) -prune \
+    -o -user "$BUILD_USER" -print0 2>/dev/null | sort -zu)
+  if [ "$found" -eq 0 ]; then
+    record "VERIFIED harness side writes: none outside the packs"
+  else
+    record "DISCARDED harness side writes: $found path(s) outside the packs (see the log)"
+  fi
+}
+
+list_stale_harness() {
+  local dir base i current n
+  current="$(while IFS=$'\t' read -r -u 3 i _ _; do harness_dir_name "$i"; done 3< <(harness_rows))"
+  n=0
+  for dir in "$ROOT"/*@*; do
+    [ -d "$dir" ] || continue
+    base="$(basename "$dir")"
+    jq -e --arg n "${base%%@*}" 'any(.packs[]; .id == $n)' "$HARNESS" >/dev/null || continue
+    grep -qxF -- "$base" <<<"$current" && continue
+    record "STALE harness pack $dir (left in place; remove by hand with no run in flight)"
+    n=$((n + 1))
+  done
+  [ "$n" -eq 0 ] || log "WARNING: $n stale harness pack version(s) under $ROOT"
+}
+
+invalidate_harness_hash() {
+  if [ -f "$ROOT/harness.sha256" ]; then
+    mv -f "$ROOT/harness.sha256" "$ROOT/harness.sha256.invalid"
+  fi
+}
+
+# sha256 of the harness manifest bytes, then each pack's lockOverlay blob at
+# HEAD in manifest order — the recipe the worker recomputes over its own
+# checkout (computeHarnessManifestHash in harness-layout.ts), so a harness
+# install that lags the deployed worker seeds nothing. Written only when no
+# harness item failed.
+write_harness_hash() {
+  local hash lockfile tmp="$ROOT/.harness.sha256.tmp"
+  hash="$({
+    cat "$HARNESS"
+    while IFS= read -r lockfile; do
+      git_repo cat-file blob "$HEAD_SHA:$lockfile"
+    done < <(jq -r '.packs[] | .lockOverlay // empty' "$HARNESS")
+  } | sha256sum | awk '{print $1}')"
+  printf '%s\n' "$hash" >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$ROOT/harness.sha256"
+  rm -f "$ROOT/harness.sha256.invalid"
+}
+
+# install_harness: preflight (also in a dry run), then — root only — the host
+# checks, the build account, the doctor, the browser runtime, every pack, the
+# side-write sweep, stale versions and the doctor's verify-as-agent.
+install_harness() {
+  local before="$HARNESS_FAILURES" i status line out cmd
+  if [ -z "$HARNESS" ]; then
+    record "SKIPPED harness: no $HARNESS_MANIFEST_REPO_PATH at $HEAD_SHA"
+    return 0
+  fi
+  # Any harness FAIL from here on, preflight included, leaves the harness
+  # stamp invalid; only a fully passing harness install writes it back.
+  [ "$DRY_RUN" -eq 1 ] || invalidate_harness_hash
+  harness_preflight || return 0
+  if [ "$DRY_RUN" -eq 1 ]; then
+    record "HARNESS BUILD SKIPPED (dry run: the build account needs root)"
+    return 0
+  fi
+
+  for cmd in runuser unshare mount pkill python3 timeout dpkg-query fuser apt-get getent useradd groupadd "$NODE_BIN"; do
+    command -v "$cmd" >/dev/null 2>&1 || record "FAIL harness preflight $cmd: required command not found"
+  done
+  while IFS=$'\t' read -r -u 3 i _ _; do
+    [ "$("$NODE_BIN" -p 'process.versions.node.split(".")[0]' 2>/dev/null)" = "$(hfield "$i" .nodeMajor)" ] ||
+      record "FAIL harness preflight $(hfield "$i" .id): host Node is not the pinned major $(hfield "$i" .nodeMajor)"
+  done 3< <(harness_rows)
+  [ "$HARNESS_FAILURES" -eq "$before" ] || return 0
+
+  ensure_build_account || return 0
+  kill_build_processes || {
+    record "FAIL harness build account: $STEP_ERROR"
+    return 0
+  }
+  rm -rf "$ROOT"/.staging.harness.*
+  if install_root_file "$HARNESS_DOCTOR_REPO_PATH" "$BIN_DIR/automata-batteries" 0755 &&
+    install_root_file "$HARNESS_PROBE_REPO_PATH" "$ROOT/harness-tools/mcp-probe.mjs" 0644 &&
+    install_root_file "$HARNESS_MANIFEST_REPO_PATH" "$ROOT/harness.json" 0644; then
+    chmod 0755 "$ROOT/harness-tools"
+    if [ "$ROOT_FILES_CHANGED" -eq 0 ]; then
+      record "SKIPPED harness doctor $BIN_DIR/automata-batteries (unchanged)"
+    else
+      record "INSTALLED harness doctor $BIN_DIR/automata-batteries (+ $ROOT/harness.json, harness-tools/)"
+    fi
+  else
+    record "FAIL harness doctor: could not install $BIN_DIR/automata-batteries"
+    return 0
+  fi
+  install_browser_runtime || true
+
+  while IFS=$'\t' read -r -u 3 i _ _; do
+    install_harness_pack "$i" || true
+  done 3< <(harness_rows)
+
+  discard_build_side_writes
+  list_stale_harness
+
+  status=0
+  out="$(AUTOMATA_BATTERIES_ROOT="$ROOT" "$BIN_DIR/automata-batteries" verify-as-agent 2>"$WORK/verify.err")" || status=$?
+  while IFS= read -r line; do
+    case "$line" in
+      "VERIFIED harness "* | "FAIL harness "* | "SKIPPED harness "*) record "$line" ;;
+    esac
+  done <<<"$out"
+  if [ "$status" -ne 0 ] && [ "$HARNESS_FAILURES" -eq "$before" ]; then
+    record "FAIL harness verify-as-agent: exit $status ($(head -n 1 "$WORK/verify.err"))"
+  fi
+
+  if [ "$HARNESS_FAILURES" -eq "$before" ]; then
+    write_harness_hash
+    record "HARNESS STAMP $(cat "$ROOT/harness.sha256")"
+  fi
+}
+# ── end harness stages ───────────────────────────────────────────────────────
 
 main() {
   local i id repo sha name version url sha256 member license_member row
@@ -1712,8 +2955,17 @@ main() {
     git_repo cat-file blob "$HEAD_SHA:$MANIFEST_REPO_PATH" >"$MANIFEST"
   fi
 
+  HARNESS="$WORK/harness.json"
+  if [ -n "$HARNESS_MANIFEST" ]; then
+    cat "$HARNESS_MANIFEST" >"$HARNESS"
+    record "SOURCE harness manifest $HARNESS_MANIFEST (dry run)"
+  elif ! git_repo cat-file blob "$HEAD_SHA:$HARNESS_MANIFEST_REPO_PATH" >"$HARNESS" 2>/dev/null; then
+    HARNESS=""
+  fi
+
   preflight || finish
   if [ "$BATTERIES_PREFLIGHT_ONLY" = "1" ]; then
+    [ -z "$HARNESS" ] || harness_preflight || true
     record "PREFLIGHT ONLY (dry run): nothing installed"
     finish
   fi
@@ -1747,6 +2999,9 @@ main() {
   if [ "$FAILURES" -eq 0 ]; then
     write_manifest_hash
   fi
+
+  # After the review result is settled: nothing below can touch it.
+  install_harness
   finish
 }
 

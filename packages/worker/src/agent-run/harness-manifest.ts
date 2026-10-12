@@ -34,11 +34,19 @@ import {
  *   `setupArgs`, with sha256-pinned `dependencies` such as bun) and `npm-lock`
  *   (an exact npm package version, with exact `overrides`). No ranges, no tags,
  *   no `latest`: every version is an exact semver.
- * - lockfiles: the npm-lock lockfile (and its sha256) arrives with the
- *   installer in PR3, together with the keys that pin it. Until then nothing
- *   reads this manifest to install, so no placeholder pin exists to slip
- *   through: PR3 adds the keys as REQUIRED, and this strict-key guard rejects
- *   them before that.
+ * - lockfiles: an npm-lock pack names OUR committed `lockOverlay`
+ *   (packages/worker/deploy/batteries/<id>/package-lock.json, its package.json
+ *   beside it) with `lockSha256`/`packageJsonSha256`; the installer installs
+ *   from it with `--ignore-scripts` and fails on any drift.
+ * - build steps are data, so install-batteries.sh names no pack: git-setup
+ *   `checkoutDir` (where the checkout sits under the claude config dir),
+ *   `setupEnv`, `preSetup` argv lists and sha256-pinned Chrome-for-Testing
+ *   `browsers`; npm-lock `lifecycleScripts` (the only packages whose npm
+ *   scripts run), sha256-pinned native `prebuilds` for one Node ABI (never a
+ *   compile), a `postInstall` argv, MCP `warmup` calls and `mcpServe` (the
+ *   server the pack's wrapper runs behind the allowlist filter). Common:
+ *   `discard` (paths under the claude dir never published; a segment may be
+ *   `*`) and `smoke` (argv lists `automata-batteries verify-as-agent` runs).
  * - `env` keys are confined to the battery prefixes the daemon reserves from
  *   repo env (GSTACK_, PLAYWRIGHT_, MCP_, CLAUDE_FLOW_); a value is either a
  *   plain word/number (no `/`) or a path confined to the pack:
@@ -118,6 +126,40 @@ export interface HarnessDependency {
   license: string;
 }
 
+/** A Chrome-for-Testing zip Playwright would download, pinned instead. */
+export interface HarnessBrowser {
+  name: string;
+  /** Playwright's browser revision; `dir` ends with it. */
+  revision: string;
+  version: string;
+  url: string;
+  sha256: string;
+  /** The dir Playwright looks for under PLAYWRIGHT_BROWSERS_PATH. */
+  dir: string;
+  /** The executable, relative to `dir`. */
+  executable: string;
+}
+
+/** A native module's prebuilt binary for one Node ABI, placed at `path`/`member`. */
+export interface HarnessPrebuild {
+  path: string;
+  url: string;
+  sha256: string;
+  member: string;
+}
+
+export interface HarnessWarmupCall {
+  tool: string;
+  arguments: Record<string, string>;
+}
+
+/** The MCP server a pack's wrapper runs (node `entrypoint` `args`, baked `env`). */
+export interface HarnessMcpServe {
+  entrypoint: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
 export interface HarnessMcpServer {
   /** `{{packDir}}/<relative path>`: a wrapper inside the pack. */
   command: string;
@@ -138,14 +180,25 @@ interface HarnessPackBase {
   mcpServers?: Record<string, HarnessMcpServer>;
   /** Present exactly when `mcpServers` is. */
   toolAllowlist?: string[];
+  /** Paths under the installed claude dir never published (a segment may be `*`). */
+  discard?: string[];
+  /** argv lists verify-as-agent runs as the agent: `node` or a pack path, then words or {{packDir}} paths. */
+  smoke?: string[][];
 }
 
 export interface HarnessGitSetupPack extends HarnessPackBase {
   kind: "git-setup";
   repo: string;
   sha: string;
+  /** Where the checkout sits under the claude config dir (its setup installs around it). */
+  checkoutDir: string;
   setupArgs: string[];
+  /** Build-time env for preSetup and setup (GSTACK_/PLAYWRIGHT_ keys). */
+  setupEnv: Record<string, string>;
+  /** argv lists run in the checkout before setup; argv[0] is a path in it. */
+  preSetup: string[][];
   dependencies: HarnessDependency[];
+  browsers: HarnessBrowser[];
 }
 
 export interface HarnessNpmLockPack extends HarnessPackBase {
@@ -153,6 +206,16 @@ export interface HarnessNpmLockPack extends HarnessPackBase {
   package: string;
   version: string;
   overrides?: Record<string, string>;
+  lockOverlay: string;
+  lockSha256: string;
+  packageJsonSha256: string;
+  lifecycleScripts?: string[];
+  prebuilds?: HarnessPrebuild[];
+  /** argv run with node after install; argv[0] a pack path, `{{configDir}}` = the build's claude dir. */
+  postInstall?: string[];
+  warmup?: HarnessWarmupCall[];
+  /** Present exactly when `mcpServers` is. */
+  mcpServe?: HarnessMcpServe;
 }
 
 export type HarnessPack = HarnessGitSetupPack | HarnessNpmLockPack;
@@ -174,20 +237,62 @@ const BASE_KEYS = [
   "frontmatterHookSkills",
   "mcpServers",
   "toolAllowlist",
+  "discard",
+  "smoke",
 ] as const;
 const GIT_SETUP_KEYS = [
   ...BASE_KEYS,
   "repo",
   "sha",
+  "checkoutDir",
   "setupArgs",
+  "setupEnv",
+  "preSetup",
   "dependencies",
+  "browsers",
 ] as const;
 const NPM_LOCK_KEYS = [
   ...BASE_KEYS,
   "package",
   "version",
   "overrides",
+  "lockOverlay",
+  "lockSha256",
+  "packageJsonSha256",
+  "lifecycleScripts",
+  "prebuilds",
+  "postInstall",
+  "warmup",
+  "mcpServe",
 ] as const;
+const BROWSER_KEYS = [
+  "name",
+  "revision",
+  "version",
+  "url",
+  "sha256",
+  "dir",
+  "executable",
+] as const;
+const PREBUILD_KEYS = ["path", "url", "sha256", "member"] as const;
+const WARMUP_KEYS = ["tool", "arguments"] as const;
+const MCP_SERVE_KEYS = ["entrypoint", "args", "env"] as const;
+/** Where an npm-lock pack's committed lockfiles live: `<prefix><id>/package-lock.json`. */
+export const HARNESS_LOCK_DIR_PREFIX = "packages/worker/deploy/batteries/";
+/** Build-time setupEnv keys. */
+const SETUP_ENV_KEY = /^(GSTACK|PLAYWRIGHT)_[A-Z0-9_]+$/;
+/** Env the MCP wrapper bakes in for its server. */
+const MCP_SERVE_ENV_KEY = /^(CLAUDE_FLOW|RUFLO)_[A-Z0-9_]+$/;
+/** A Chrome-for-Testing linux64 zip on Playwright's CDN, for `version`. */
+const BROWSER_URL =
+  /^https:\/\/cdn\.playwright\.dev\/builds\/cft\/(\d+(?:\.\d+){3})\/linux64\/[a-z0-9-]+-linux64\.zip$/;
+/** A native prebuild: a GitHub release asset for one Node ABI on linux-x64. */
+const PREBUILD_URL =
+  /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/releases\/download\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]*-node-v\d+-linux-x64\.tar\.gz$/;
+/** An argv word: a flag or plain token, no shell metacharacters. */
+const ARGV_WORD = /^-{0,2}[A-Za-z0-9][A-Za-z0-9._:=+-]*$/;
+/** A placeholder an argv word may be in full. */
+const ARGV_PLACEHOLDERS = ["{{configDir}}"] as const;
 const DEPENDENCY_KEYS = [
   "name",
   "version",
@@ -347,6 +452,180 @@ function findOverridesError(value: unknown, at: string): string | undefined {
   return undefined;
 }
 
+/** One literal path segment of a discard entry (`*` alone is the only glob). */
+const DISCARD_SEGMENT = /^[A-Za-z0-9_.@+-]+$/;
+
+/** A safe relative path whose segments may be `*` (one entry name). */
+function findDiscardError(value: unknown, at: string): string | undefined {
+  if (value === undefined) return undefined;
+  return findListError(
+    value,
+    at,
+    (item, itemAt) =>
+      typeof item === "string" &&
+      isSafeRelPath(item) &&
+      item
+        .split("/")
+        .every((segment) => segment === "*" || DISCARD_SEGMENT.test(segment))
+        ? undefined
+        : `${itemAt}: must be a relative path (a segment may be *)`,
+    { allowEmpty: true },
+  );
+}
+
+/** An argv list: argv[0] `first`-checked, then words, {{packDir}} paths or `placeholders`. */
+function findArgvError(
+  value: unknown,
+  at: string,
+  first: (item: unknown) => boolean,
+  placeholders: readonly string[] = [],
+): string | undefined {
+  return findListError(
+    value,
+    at,
+    (item, itemAt) => {
+      if (itemAt === `${at}[0]`) {
+        return first(item) ? undefined : `${itemAt}: bad command`;
+      }
+      return typeof item === "string" &&
+        (ARGV_WORD.test(item) ||
+          placeholders.includes(item) ||
+          findPackCommandError(item, itemAt) === undefined)
+        ? undefined
+        : `${itemAt}: must be a word or a ${HARNESS_PACK_DIR_PLACEHOLDER}/ path`;
+    },
+    { allowEmpty: false },
+  );
+}
+
+function findSmokeError(value: unknown, at: string): string | undefined {
+  if (value === undefined) return undefined;
+  return findListError(
+    value,
+    at,
+    (item, itemAt) =>
+      findArgvError(
+        item,
+        itemAt,
+        (cmd) => cmd === "node" || isSafeRelPath(cmd),
+      ),
+    { allowEmpty: true },
+  );
+}
+
+/** Env with keys matching `key` and plain values (the wrapper/setup bake them in). */
+function findBuildEnvError(
+  value: unknown,
+  key: RegExp,
+  at: string,
+): string | undefined {
+  if (!isRecord(value)) return `${at}: must be an object`;
+  for (const [name, item] of Object.entries(value)) {
+    if (!key.test(name)) return `${at}.${name}: key must match ${key.source}`;
+    const error = findEnvValueError(item, `${at}.${name}`);
+    if (error !== undefined) return error;
+  }
+  return undefined;
+}
+
+function findBrowserError(value: unknown, at: string): string | undefined {
+  if (!isRecord(value)) return `${at}: must be an object`;
+  const match =
+    typeof value.url === "string" ? BROWSER_URL.exec(value.url) : null;
+  return (
+    findUnknownKey(value, BROWSER_KEYS, at) ??
+    findStringError(value.name, ID_OR_NAME, `${at}.name`) ??
+    findStringError(value.revision, /^\d+$/, `${at}.revision`) ??
+    findStringError(value.version, /^\d+(\.\d+){3}$/, `${at}.version`) ??
+    (match !== null && match[1] === value.version
+      ? undefined
+      : `${at}.url: must be a Chrome-for-Testing linux64 zip of <version> on cdn.playwright.dev`) ??
+    findStringError(value.sha256, SHA256_HEX, `${at}.sha256`) ??
+    (typeof value.dir === "string" &&
+    /^[a-z_]+-\d+$/.test(value.dir) &&
+    value.dir.endsWith(`-${String(value.revision)}`)
+      ? undefined
+      : `${at}.dir: must be <name>-<revision>`) ??
+    (isSafeRelPath(value.executable)
+      ? undefined
+      : `${at}.executable: must be a relative path`)
+  );
+}
+
+function findPrebuildError(value: unknown, at: string): string | undefined {
+  if (!isRecord(value)) return `${at}: must be an object`;
+  return (
+    findUnknownKey(value, PREBUILD_KEYS, at) ??
+    (isSafeRelPath(value.path) && value.path.startsWith("node_modules/")
+      ? undefined
+      : `${at}.path: must be a package dir under node_modules/`) ??
+    findStringError(value.url, PREBUILD_URL, `${at}.url`) ??
+    findStringError(value.sha256, SHA256_HEX, `${at}.sha256`) ??
+    (isSafeRelPath(value.member)
+      ? undefined
+      : `${at}.member: must be a relative path`)
+  );
+}
+
+function findWarmupError(
+  value: unknown,
+  allowlist: unknown,
+  at: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  return findListError(
+    value,
+    at,
+    (item, itemAt) => {
+      if (!isRecord(item)) return `${itemAt}: must be an object`;
+      const unknown = findUnknownKey(item, WARMUP_KEYS, itemAt);
+      if (unknown !== undefined) return unknown;
+      if (
+        typeof item.tool !== "string" ||
+        !Array.isArray(allowlist) ||
+        !allowlist.includes(item.tool)
+      ) {
+        return `${itemAt}.tool: must be in toolAllowlist`;
+      }
+      if (!isRecord(item.arguments)) {
+        return `${itemAt}.arguments: must be an object`;
+      }
+      for (const [name, arg] of Object.entries(item.arguments)) {
+        const error = findEnvValueError(arg, `${itemAt}.arguments.${name}`);
+        if (error !== undefined) return error;
+      }
+      return undefined;
+    },
+    { allowEmpty: true },
+  );
+}
+
+function findMcpServeError(
+  value: unknown,
+  hasServers: boolean,
+  at: string,
+): string | undefined {
+  if (!hasServers) {
+    return value === undefined
+      ? undefined
+      : `${at}: only a pack with mcpServers may name one`;
+  }
+  if (!isRecord(value)) return `${at}: required with mcpServers`;
+  return (
+    findUnknownKey(value, MCP_SERVE_KEYS, at) ??
+    (isSafeRelPath(value.entrypoint)
+      ? undefined
+      : `${at}.entrypoint: must be a relative path in the pack`) ??
+    findListError(
+      value.args,
+      `${at}.args`,
+      (item, itemAt) => findStringError(item, ARGV_WORD, itemAt),
+      { allowEmpty: true },
+    ) ??
+    findBuildEnvError(value.env, MCP_SERVE_ENV_KEY, `${at}.env`)
+  );
+}
+
 function findBaseError(
   value: Record<string, unknown>,
   at: string,
@@ -373,7 +652,9 @@ function findBaseError(
       value.toolAllowlist,
       value.mcpServers !== undefined,
       `${at}.toolAllowlist`,
-    )
+    ) ??
+    findDiscardError(value.discard, `${at}.discard`) ??
+    findSmokeError(value.smoke, `${at}.smoke`)
   );
 }
 
@@ -386,10 +667,20 @@ function findGitSetupPackError(
     findBaseError(value, at) ??
     findStringError(value.repo, GITHUB_REPO, `${at}.repo`) ??
     findStringError(value.sha, SHA1_HEX, `${at}.sha`) ??
+    (isSafeRelPath(value.checkoutDir)
+      ? undefined
+      : `${at}.checkoutDir: must be a relative path`) ??
     findListError(
       value.setupArgs,
       `${at}.setupArgs`,
       (item, itemAt) => findStringError(item, SMOKE_WORD, itemAt),
+      { allowEmpty: true },
+    ) ??
+    findBuildEnvError(value.setupEnv, SETUP_ENV_KEY, `${at}.setupEnv`) ??
+    findListError(
+      value.preSetup,
+      `${at}.preSetup`,
+      (item, itemAt) => findArgvError(item, itemAt, isSafeRelPath),
       { allowEmpty: true },
     ) ??
     findListError(
@@ -399,7 +690,21 @@ function findGitSetupPackError(
       {
         allowEmpty: true,
       },
+    ) ??
+    findListError(value.browsers, `${at}.browsers`, findBrowserError, {
+      allowEmpty: true,
+    }) ??
+    (Array.isArray(value.browsers) &&
+    value.browsers.length > 0 &&
+    !(
+      isRecord(value.env) &&
+      typeof value.env.PLAYWRIGHT_BROWSERS_PATH === "string" &&
+      value.env.PLAYWRIGHT_BROWSERS_PATH.startsWith(
+        `${HARNESS_PACK_DIR_PLACEHOLDER}/`,
+      )
     )
+      ? `${at}.env.PLAYWRIGHT_BROWSERS_PATH: required as ${HARNESS_PACK_DIR_PLACEHOLDER}/<dir> with browsers`
+      : undefined)
   );
 }
 
@@ -412,7 +717,47 @@ function findNpmLockPackError(
     findBaseError(value, at) ??
     findStringError(value.package, NPM_PACKAGE, `${at}.package`) ??
     findStringError(value.version, SEMVER, `${at}.version`) ??
-    findOverridesError(value.overrides, `${at}.overrides`)
+    findOverridesError(value.overrides, `${at}.overrides`) ??
+    (typeof value.lockOverlay === "string" &&
+    value.lockOverlay.startsWith(HARNESS_LOCK_DIR_PREFIX) &&
+    /^[a-z0-9][a-z0-9-]*\/package-lock\.json$/.test(
+      value.lockOverlay.slice(HARNESS_LOCK_DIR_PREFIX.length),
+    )
+      ? undefined
+      : `${at}.lockOverlay: must be ${HARNESS_LOCK_DIR_PREFIX}<id>/package-lock.json`) ??
+    findStringError(value.lockSha256, SHA256_HEX, `${at}.lockSha256`) ??
+    findStringError(
+      value.packageJsonSha256,
+      SHA256_HEX,
+      `${at}.packageJsonSha256`,
+    ) ??
+    (value.lifecycleScripts === undefined
+      ? undefined
+      : findNameListError(
+          value.lifecycleScripts,
+          NPM_PACKAGE,
+          `${at}.lifecycleScripts`,
+          { allowEmpty: true },
+        )) ??
+    (value.prebuilds === undefined
+      ? undefined
+      : findListError(value.prebuilds, `${at}.prebuilds`, findPrebuildError, {
+          allowEmpty: true,
+        })) ??
+    (value.postInstall === undefined
+      ? undefined
+      : findArgvError(
+          value.postInstall,
+          `${at}.postInstall`,
+          isSafeRelPath,
+          ARGV_PLACEHOLDERS,
+        )) ??
+    findWarmupError(value.warmup, value.toolAllowlist, `${at}.warmup`) ??
+    findMcpServeError(
+      value.mcpServe,
+      value.mcpServers !== undefined,
+      `${at}.mcpServe`,
+    )
   );
 }
 
@@ -445,7 +790,16 @@ export function findHarnessManifestError(value: unknown): string | undefined {
     (ids.length === HARNESS_PACK_IDS.length &&
     ids.every((id, index) => id === HARNESS_PACK_IDS[index])
       ? undefined
-      : `packs: ids must be exactly ${HARNESS_PACK_IDS.join(", ")}, in that order`)
+      : `packs: ids must be exactly ${HARNESS_PACK_IDS.join(", ")}, in that order`) ??
+    packs
+      .map((pack, index) =>
+        pack.kind === "npm-lock" &&
+        pack.lockOverlay !==
+          `${HARNESS_LOCK_DIR_PREFIX}${pack.id}/package-lock.json`
+          ? `packs[${index}].lockOverlay: must be under ${HARNESS_LOCK_DIR_PREFIX}${pack.id}/`
+          : undefined,
+      )
+      .find((error) => error !== undefined)
   );
 }
 

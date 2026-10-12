@@ -1,0 +1,329 @@
+#!/bin/bash
+set -euo pipefail
+#
+# automata-batteries — what the harness batteries on this box are, and whether
+# the agent account can use them. Installed root-owned 0755 at
+# /usr/local/bin/automata-batteries by install-batteries.sh, which also leaves
+# the manifest it installed at <root>/harness.json.
+#
+#   automata-batteries doctor           human summary
+#   automata-batteries doctor --json    one JSON object: packs, pins, linked
+#                                       names, headlessSafe, MCP servers, Node
+#                                       ABI match, stamp validity
+#   automata-batteries verify-as-agent  (root) runs every check AS the agent
+#                                       account: packs readable and not
+#                                       writable, each pack's smoke argv,
+#                                       each browser's --version, a headless
+#                                       launch WITH its sandbox of the browser
+#                                       Playwright uses for headless runs
+#                                       (chromium_headless_shell-*), and each MCP
+#                                       server through its wrapper (allowlist,
+#                                       memory round-trip, a forbidden tool
+#                                       refused)
+#
+# Every command exits 0 only when everything checked holds. doctor reads
+# nothing remote and writes nothing. verify-as-agent prints one
+# `VERIFIED harness ...` / `FAIL harness ...` line per check (the installer
+# records them) and a last line `VERIFY-AS-AGENT: PASS|FAIL`.
+#
+# Automation prompts gate on `automata-batteries doctor --json`: a pack whose
+# `ok` is false is missing, whatever the run's HOME happens to contain.
+#
+# TEST CONTAINERS ONLY: the browser launch needs AppArmor to grant Chromium a
+# user namespace, which a container cannot. With
+# AUTOMATA_BATTERIES_TEST_NO_SANDBOX=1 AND /.dockerenv present, the launch adds
+# --no-sandbox and its line says so. Nothing else honours that variable, and
+# no box ever sets it.
+
+ROOT="${AUTOMATA_BATTERIES_ROOT:-/usr/local/lib/automata-batteries}"
+AGENT_USER="${AGENT_USER:-automata-agent}"
+NODE_BIN="/usr/bin/node"
+AGENT_PATH="/usr/local/bin:/usr/bin:/bin"
+# A tool every ruflo-like server registers that no allowlist may hold (the
+# agent_ prefix is forbidden by the harness manifest rules): the filter proxy
+# must refuse it.
+DENIED_PROBE_TOOL="agent_spawn"
+MANIFEST="$ROOT/harness.json"
+
+usage() {
+  echo "usage: automata-batteries doctor [--json] | verify-as-agent" >&2
+  exit 2
+}
+
+host_node_major() {
+  "$NODE_BIN" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo ""
+}
+
+host_node_abi() {
+  "$NODE_BIN" -p 'process.versions.modules' 2>/dev/null || echo ""
+}
+
+# The published dir of pack <index>: <id>@<sha> (git-setup) or <id>@<version>.
+pack_dir() {
+  jq -r --argjson i "$1" --arg root "$ROOT" \
+    '.packs[$i] | "\($root)/\(.id)@\(if .kind == "git-setup" then .sha else .version end)"' "$MANIFEST"
+}
+
+# Re-hashes every `file` line of <dir>/.stamp; prints the mismatched paths.
+stamp_mismatches() {
+  local dir="$1" sha rel
+  while read -r sha rel; do
+    if [ ! -f "$dir/$rel" ] || [ -L "$dir/$rel" ] || [ "$(sha256sum "$dir/$rel" | awk '{print $1}')" != "$sha" ]; then
+      printf '%s\n' "$rel"
+    fi
+  done < <(sed -n 's/^file //p' "$dir/.stamp")
+}
+
+# Entry names under <dir>, one per line (no dot entries); "" when absent.
+names_in() {
+  local dir="$1" suffix="${2:-}" entry
+  [ -d "$dir" ] || return 0
+  for entry in "$dir"/*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    entry="$(basename "$entry")"
+    printf '%s\n' "${entry%"$suffix"}"
+  done
+}
+
+# One JSON object per pack, then the whole report.
+doctor_json() {
+  local n i dir stamp_present abi stamp_abi mismatches files skills agents commands packs
+  local harness_hash="" harness_valid=false
+  if [ ! -f "$MANIFEST" ]; then
+    jq -n --arg root "$ROOT" '{ok: false, root: $root, error: "no harness manifest installed (run install-batteries.sh)"}'
+    return 0
+  fi
+  if [ -f "$ROOT/harness.sha256" ]; then
+    harness_hash="$(cat "$ROOT/harness.sha256")"
+    harness_valid=true
+  fi
+  abi="$(host_node_abi)"
+  packs="[]"
+  n="$(jq '.packs | length' "$MANIFEST")"
+  for ((i = 0; i < n; i++)); do
+    dir="$(pack_dir "$i")"
+    stamp_present=false
+    stamp_abi=""
+    mismatches=""
+    files=0
+    if [ -f "$dir/.stamp" ]; then
+      stamp_present=true
+      stamp_abi="$(sed -n 's/^node_abi //p' "$dir/.stamp")"
+      files="$(grep -c '^file ' "$dir/.stamp" || true)"
+      mismatches="$(stamp_mismatches "$dir")"
+    fi
+    skills="$(names_in "$dir/claude/skills")"
+    agents="$(names_in "$dir/claude/agents" .md)"
+    commands="$(names_in "$dir/claude/commands")"
+    packs="$(jq -c --argjson i "$i" --arg dir "$dir" --argjson present "$([ -d "$dir" ] && echo true || echo false)" \
+      --argjson stampPresent "$stamp_present" --arg stampAbi "$stamp_abi" --arg abi "$abi" \
+      --arg major "$(host_node_major)" --arg mismatches "$mismatches" --argjson files "$files" \
+      --arg skills "$skills" --arg agents "$agents" --arg commands "$commands" \
+      --slurpfile m "$MANIFEST" '
+      def lines: split("\n") | map(select(. != ""));
+      ($m[0].packs[$i]) as $p
+      | ($skills | lines) as $skillNames
+      | {
+          id: $p.id,
+          kind: $p.kind,
+          dir: $dir,
+          present: $present,
+          pins: (if $p.kind == "git-setup"
+            then {repo: $p.repo, sha: $p.sha, browsers: [($p.browsers // [])[] | {name, version, sha256}]}
+            else {package: $p.package, version: $p.version, lockSha256: $p.lockSha256} end),
+          linked: {skills: $skillNames, agents: ($agents | lines), commands: ($commands | lines)},
+          headlessSafe: $p.headlessSafe,
+          headlessSafeMissing: [$p.headlessSafe[] | select(. as $s | $skillNames | index($s) | not)],
+          mcpServers: (($p.mcpServers // {}) | map_values({command: (.command | sub("^\\{\\{packDir\\}\\}"; $dir)), args})),
+          env: ($p.env | map_values(sub("^\\{\\{packDir\\}\\}"; $dir))),
+          nodeMajor: $p.nodeMajor,
+          nodeMajorMatch: (($p.nodeMajor | tostring) == $major),
+          nodeAbi: (if $stampAbi == "" then null else $stampAbi end),
+          nodeAbiMatch: ($stampAbi != "" and $stampAbi == $abi),
+          stamp: {present: $stampPresent, recordedFiles: $files, mismatched: ($mismatches | lines)},
+          stampValid: ($stampPresent and ($mismatches | lines | length) == 0)
+        }
+      | .ok = (.present and .stampValid and .nodeAbiMatch and .nodeMajorMatch and (.headlessSafeMissing | length) == 0)
+      ' <<<"null" | jq -c --argjson acc "$packs" '$acc + [.]')"
+  done
+  jq -n --arg root "$ROOT" --arg hash "$harness_hash" --argjson valid "$harness_valid" \
+    --arg node "$("$NODE_BIN" -v 2>/dev/null || echo none)" --arg abi "$abi" \
+    --arg review "$(cat "$ROOT/manifest.sha256" 2>/dev/null || true)" --argjson packs "$packs" '
+    {
+      root: $root,
+      harness: {sha256: (if $hash == "" then null else $hash end), valid: $valid},
+      reviewManifestSha256: (if $review == "" then null else $review end),
+      node: {version: $node, abi: $abi},
+      packs: $packs
+    }
+    | .ok = (.harness.valid and (.packs | length > 0) and all(.packs[]; .ok))'
+}
+
+doctor() {
+  local report
+  report="$(doctor_json)"
+  if [ "${1:-}" = "--json" ]; then
+    printf '%s\n' "$report"
+  else
+    jq -r '
+      if .error then "DOCTOR: FAIL (\(.error))" else
+      "harness stamp: \(.harness.sha256 // "MISSING (last harness install failed or never ran)")",
+      "node: \(.node.version) (ABI \(.node.abi))",
+      (.packs[] |
+        "\(if .ok then "OK  " else "FAIL" end) \(.id) [\(.kind)] \(.dir)",
+        "     pins: \(.pins | tostring)",
+        "     stamp: \(if .stampValid then "valid (\(.stamp.recordedFiles) files re-hashed)" elif .stamp.present then "MISMATCH \(.stamp.mismatched | join(", "))" else "missing" end); node ABI \(.nodeAbi // "?") \(if .nodeAbiMatch then "matches" else "DOES NOT MATCH" end); node major \(.nodeMajor) \(if .nodeMajorMatch then "matches" else "DOES NOT MATCH" end)",
+        "     skills: \(.linked.skills | length), agents: \(.linked.agents | length), commands: \(.linked.commands | length); headlessSafe: \(.headlessSafe | join(", "))\(if (.headlessSafeMissing | length) > 0 then " (MISSING: \(.headlessSafeMissing | join(", ")))" else "" end)",
+        (.mcpServers | to_entries[] | "     mcp \(.key): \(.value.command)")),
+      "DOCTOR: \(if .ok then "PASS" else "FAIL" end)" end' <<<"$report"
+  fi
+  jq -e '.ok' <<<"$report" >/dev/null
+}
+
+FAILED=0
+pass() {
+  echo "VERIFIED harness $*"
+}
+fail() {
+  echo "FAIL harness $*"
+  FAILED=1
+}
+
+VERIFY_HOME=""
+# shellcheck disable=SC2317,SC2329 # invoked by the EXIT trap
+cleanup() {
+  [ -z "$VERIFY_HOME" ] || rm -rf "$VERIFY_HOME"
+}
+
+# as_agent <argv...>: the agent account, env -i, a private HOME as cwd.
+as_agent() {
+  (cd "$VERIFY_HOME" && runuser -u "$AGENT_USER" -- env -i HOME="$VERIFY_HOME" PATH="$AGENT_PATH" \
+    LANG=C.UTF-8 TMPDIR="$VERIFY_HOME" timeout 300 "$@")
+}
+
+verify_as_agent() {
+  local report n i id dir status out word line exe name bdir no_sandbox wrapper
+  local -a argv
+  [ "$(id -u)" = "0" ] || {
+    echo "automata-batteries verify-as-agent: run as root (it switches to $AGENT_USER)" >&2
+    exit 2
+  }
+  id -u "$AGENT_USER" >/dev/null 2>&1 || {
+    echo "automata-batteries verify-as-agent: no $AGENT_USER account" >&2
+    exit 2
+  }
+  report="$(doctor_json)"
+  if jq -e '.error' <<<"$report" >/dev/null; then
+    fail "doctor: $(jq -r '.error' <<<"$report")"
+    echo "VERIFY-AS-AGENT: FAIL"
+    return 1
+  fi
+  VERIFY_HOME="$(mktemp -d /tmp/automata-batteries-verify.XXXXXX)"
+  trap cleanup EXIT
+  chown "$AGENT_USER" "$VERIFY_HOME"
+  chmod 0700 "$VERIFY_HOME"
+  no_sandbox=""
+  if [ "${AUTOMATA_BATTERIES_TEST_NO_SANDBOX:-}" = "1" ] && [ -f /.dockerenv ]; then
+    no_sandbox="--no-sandbox"
+  fi
+
+  n="$(jq '.packs | length' "$MANIFEST")"
+  for ((i = 0; i < n; i++)); do
+    id="$(jq -r --argjson i "$i" '.packs[$i].id' "$MANIFEST")"
+    dir="$(pack_dir "$i")"
+    if ! jq -e --argjson i "$i" '.packs[$i].ok' <<<"$report" >/dev/null; then
+      fail "$id doctor: $(jq -c --argjson i "$i" '.packs[$i] | {present, stampValid, nodeAbiMatch, nodeMajorMatch, headlessSafeMissing, mismatched: .stamp.mismatched}' <<<"$report")"
+      continue
+    fi
+    pass "$id doctor (stamp valid, $(jq -r --argjson i "$i" '.packs[$i].stamp.recordedFiles' <<<"$report") files re-hashed, node ABI matches)"
+
+    status=0
+    # shellcheck disable=SC2016 # expands in the agent's shell
+    as_agent /bin/sh -c 'u="$(find "$1" -type f ! -readable -print -quit)" || exit 3; [ -z "$u" ] || exit 4; w="$(find "$1" -writable -print -quit)" || exit 3; [ -z "$w" ] || exit 5' sh "$dir" || status=$?
+    case "$status" in
+      0) pass "$id readable by $AGENT_USER, nothing writable" ;;
+      3) fail "$id: $AGENT_USER cannot traverse $dir" ;;
+      4) fail "$id: $AGENT_USER cannot read every file under $dir" ;;
+      5) fail "$id: part of $dir is writable by $AGENT_USER" ;;
+      *) fail "$id: the access check could not run as $AGENT_USER (status $status)" ;;
+    esac
+
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      argv=()
+      while IFS= read -r word; do
+        argv+=("${word/\{\{packDir\}\}/$dir}")
+      done < <(jq -r '.[]' <<<"$line")
+      if [ "${argv[0]}" = "node" ]; then
+        argv[0]="$NODE_BIN"
+      else
+        argv[0]="$dir/${argv[0]}"
+      fi
+      if out="$(as_agent "${argv[@]}" 2>&1 </dev/null)"; then
+        pass "$id smoke '$(jq -r 'join(" ")' <<<"$line")' -> $(printf '%s' "$out" | tail -n 1 | cut -c1-80)"
+      else
+        fail "$id smoke '$(jq -r 'join(" ")' <<<"$line")' failed as $AGENT_USER: $(printf '%s' "$out" | tail -n 1 | cut -c1-160)"
+      fi
+    done < <(jq -c --argjson i "$i" '.packs[$i].smoke // [] | .[]' "$MANIFEST")
+
+    while IFS=$'\t' read -r name bdir exe; do
+      [ -n "$name" ] || continue
+      exe="${exe/\{\{packDir\}\}/$dir}"
+      if out="$(as_agent "$exe" --version 2>&1 </dev/null)"; then
+        pass "$id browser $name --version -> $(printf '%s' "$out" | tail -n 1)"
+      else
+        fail "$id browser $name --version failed as $AGENT_USER: $(printf '%s' "$out" | tail -n 1 | cut -c1-160)"
+        continue
+      fi
+      # Headless runs launch Playwright's headless shell; the full browser is
+      # for headed use, which a box without a display never does.
+      case "$bdir" in
+        chromium_headless_shell-*) ;;
+        *) continue ;;
+      esac
+      if out="$(as_agent "$exe" --headless --disable-gpu ${no_sandbox:+"$no_sandbox"} \
+        --user-data-dir="$VERIFY_HOME/browser-$name" --dump-dom 'data:text/html,<p>automata-launch-ok</p>' 2>&1 </dev/null)" &&
+        grep -q 'automata-launch-ok' <<<"$out"; then
+        if [ -n "$no_sandbox" ]; then
+          pass "$id browser $name launch (TEST CONTAINER ONLY: --no-sandbox; the sandbox needs the AppArmor profile)"
+        else
+          pass "$id browser $name launch with its sandbox"
+        fi
+      else
+        fail "$id browser $name headless launch failed as $AGENT_USER (sandbox: ${no_sandbox:-on}): $(printf '%s' "$out" | grep -v '^$' | tail -n 1 | cut -c1-200)"
+      fi
+    done < <(jq -r --argjson i "$i" '.packs[$i] | (.env.PLAYWRIGHT_BROWSERS_PATH // "") as $pw | (.browsers // [])[] | [.name, .dir, "\($pw)/\(.dir)/\(.executable)"] | @tsv' "$MANIFEST")
+
+    while IFS=$'\t' read -r name wrapper; do
+      [ -n "$name" ] || continue
+      wrapper="${wrapper/\{\{packDir\}\}/$dir}"
+      if out="$(as_agent "$NODE_BIN" "$ROOT/harness-tools/mcp-probe.mjs" verify "$dir/etc/tool-allowlist.json" \
+        "$DENIED_PROBE_TOOL" -- "$wrapper" 2>/dev/null </dev/null)"; then
+        pass "$id mcp $name: $(jq -r '"\(.toolCount) allowlisted tools, startup \(.startupMs)ms, \([.checks[] | .name] | join("; "))"' <<<"${out##*$'\n'}")"
+      else
+        fail "$id mcp $name: $(jq -r '[.checks[] | select(.ok | not) | "\(.name): \(.detail // "failed")"] | join("; ")' <<<"${out##*$'\n'}" 2>/dev/null || echo "probe did not run")"
+      fi
+    done < <(jq -r --argjson i "$i" '.packs[$i].mcpServers // {} | to_entries[] | [.key, .value.command] | @tsv' "$MANIFEST")
+  done
+
+  if [ "$FAILED" -eq 0 ]; then
+    echo "VERIFY-AS-AGENT: PASS"
+    return 0
+  fi
+  echo "VERIFY-AS-AGENT: FAIL"
+  return 1
+}
+
+case "${1:-}" in
+  doctor)
+    case "${2:-}" in
+      "" | --json) doctor "${2:-}" ;;
+      *) usage ;;
+    esac
+    ;;
+  verify-as-agent)
+    [ "$#" -eq 1 ] || usage
+    verify_as_agent
+    ;;
+  *) usage ;;
+esac
