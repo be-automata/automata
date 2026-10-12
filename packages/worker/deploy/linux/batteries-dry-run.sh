@@ -362,7 +362,9 @@ expect_status 6 1
 # ── run 7: a harness failure leaves the review result alone ─────────────────
 git -C "$REPO" cat-file blob "$HEAD_SHA:$HARNESS_PATH" >"$WORK/harness.json"
 NPM_PACK="$(jq -r '[.packs[] | select(.kind == "npm-lock") | .id][0]' "$WORK/harness.json")"
-[ -n "$NPM_PACK" ] && [ "$NPM_PACK" != "null" ] || die "harness.json has no npm-lock pack"
+if [ -z "$NPM_PACK" ] || [ "$NPM_PACK" = "null" ]; then
+  die "harness.json has no npm-lock pack"
+fi
 jq --arg p "$NPM_PACK" '(.packs[] | select(.id == $p)).lockSha256 = ("0" * 64)' \
   "$WORK/harness.json" >"$WORK/run7-harness.json"
 run 7 "$D" "$M" "$REPO" "$WORK/run7-harness.json"
