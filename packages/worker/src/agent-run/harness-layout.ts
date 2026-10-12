@@ -28,6 +28,9 @@ import {
  *       <HARNESS_SHARED_DIRS>      pack-wide dirs the pack's own text names
  *                                  as ~/.claude/<dir> (gsd: gsd-core)
  *     bin/ruflo-mcp                ruflo's MCP wrapper (env -i + tool filter)
+ *     bin/bun                      gstack's runtime (a dependency's installTo;
+ *                                  bin/ is the pack's pathDirs entry, prepended
+ *                                  to the agent's PATH)
  *     mcp-tools.json               optional: every tool the UNFILTERED MCP
  *                                  server registers (a JSON string array)
  *     ms-playwright/               gstack's Chromium (PLAYWRIGHT_BROWSERS_PATH)

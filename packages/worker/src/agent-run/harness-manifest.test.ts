@@ -50,6 +50,7 @@ function validFixture(): HarnessManifest {
             url: "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip",
             sha256: SHA256,
             license: "MIT",
+            installTo: "bin/bun",
           },
         ],
         browsers: [
@@ -66,6 +67,8 @@ function validFixture(): HarnessManifest {
         nodeMajor: 24,
         env: { PLAYWRIGHT_BROWSERS_PATH: "{{packDir}}/ms-playwright" },
         smoke: [["claude/skills/gstack/browse/dist/browse", "--help"]],
+        pathDirs: ["{{packDir}}/bin"],
+        browseSmoke: { cli: "claude/skills/gstack/browse/dist/browse" },
         headlessSafe: ["investigate"],
         frontmatterHookSkills: ["careful"],
       },
@@ -450,6 +453,115 @@ describe("findHarnessManifestError — mcpServers and toolAllowlist", () => {
         }),
       ),
     ).toContain("mcpServers.ruflo.env: unknown key");
+  });
+});
+
+describe("findHarnessManifestError — pathDirs and runtime dependencies", () => {
+  it("accepts a pack without pathDirs and a dependency without installTo (build-time only)", () => {
+    expect(
+      errorAfter((m) => {
+        Reflect.deleteProperty(gstackOf(m), "pathDirs");
+        Reflect.deleteProperty(gstackOf(m), "browseSmoke");
+        Reflect.deleteProperty(gstackOf(m).dependencies[0]!, "installTo");
+      }),
+    ).toBeUndefined();
+  });
+
+  it("accepts pathDirs on an npm-lock pack", () => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(rufloOf(m), { pathDirs: ["{{packDir}}/bin"] }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    "/usr/local/bin",
+    "bin",
+    "{{packDir}}",
+    "{{packDir}}/",
+    "{{packDir}}/../bin",
+    "{{packDir}}/a/../../bin",
+    "{{packDir}}/./bin",
+    "{{packDir}}//bin",
+    "{{packDir}}/bin:/usr/bin",
+    "{{packDir}}/b in",
+    "{{packDir}}/$(id)",
+  ])("rejects the path dir %j", (dir) => {
+    expect(
+      errorAfter((m) => Object.assign(gstackOf(m), { pathDirs: [dir] })),
+    ).toContain("packs[0].pathDirs[0]");
+  });
+
+  it("rejects an empty, duplicated or oversized pathDirs list", () => {
+    expect(
+      errorAfter((m) => Object.assign(gstackOf(m), { pathDirs: [] })),
+    ).toContain("pathDirs: must not be empty");
+    expect(
+      errorAfter((m) =>
+        Object.assign(gstackOf(m), {
+          pathDirs: ["{{packDir}}/bin", "{{packDir}}/bin"],
+        }),
+      ),
+    ).toContain("pathDirs: duplicate dir");
+    expect(
+      errorAfter((m) =>
+        Object.assign(gstackOf(m), {
+          pathDirs: ["a", "b", "c", "d", "e"].map((d) => `{{packDir}}/${d}`),
+        }),
+      ),
+    ).toContain("pathDirs: at most 4 dirs");
+  });
+
+  it.each([
+    ["outside every pathDirs dir", "lib/bun"],
+    ["under another name than the dependency", "bin/node"],
+    ["at the pack root", "bun"],
+    ["escaping the pack", "../bin/bun"],
+    ["absolute", "/usr/local/bin/bun"],
+  ])("rejects installTo %s", (_label, installTo) => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(gstackOf(m).dependencies[0]!, { installTo }),
+      ),
+    ).toContain("dependencies[0].installTo");
+  });
+
+  it("rejects installTo when the pack names no pathDirs", () => {
+    expect(
+      errorAfter((m) => Reflect.deleteProperty(gstackOf(m), "pathDirs")),
+    ).toContain("dependencies[0].installTo");
+  });
+
+  it("rejects a browseSmoke with a bad cli, an unknown key, no browsers or no runtime", () => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(gstackOf(m), { browseSmoke: { cli: "../browse" } }),
+      ),
+    ).toContain("browseSmoke.cli");
+    expect(
+      errorAfter((m) =>
+        Object.assign(gstackOf(m), {
+          browseSmoke: { cli: "browse", url: "https://example.com" },
+        }),
+      ),
+    ).toContain("browseSmoke.url: unknown key");
+    expect(
+      errorAfter((m) => Object.assign(gstackOf(m), { browsers: [], env: {} })),
+    ).toContain("browseSmoke: needs browsers");
+    expect(
+      errorAfter((m) =>
+        Reflect.deleteProperty(gstackOf(m).dependencies[0]!, "installTo"),
+      ),
+    ).toContain("browseSmoke: needs a dependency shipped as a runtime");
+  });
+
+  it("rejects browseSmoke on an npm-lock pack", () => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(rufloOf(m), { browseSmoke: { cli: "x" } }),
+      ),
+    ).toContain("packs[2].browseSmoke: unknown key");
   });
 });
 

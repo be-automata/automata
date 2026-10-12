@@ -1,6 +1,10 @@
 import { DaemonMessageStop, DaemonMessageClaude } from "./shared";
 import { DaemonRuntime, writeToUnixSocket } from "./runtime";
-import { TerragonDaemon } from "./daemon";
+import {
+  AGENT_PATH_PREPEND_ENV,
+  TerragonDaemon,
+  withAgentPathPrepend,
+} from "./daemon";
 import {
   describe,
   it,
@@ -276,6 +280,23 @@ describe("daemon", () => {
     expect(normalEnv.GIT_CONFIG_KEY_0).toBe(
       "http.https://github.com/.extraheader",
     );
+  });
+
+  it("the worker's harness PATH dirs reach the agent's PATH (they cannot ride PATH through sudo)", async () => {
+    vi.stubEnv("PATH", "/usr/local/bin:/usr/bin:/bin");
+    vi.stubEnv(AGENT_PATH_PREPEND_ENV, "/packs/gstack@x/bin");
+    await daemon.start();
+    await writeToUnixSocket({
+      unixSocketPath: runtime.unixSocketPath,
+      dataStr: JSON.stringify(TEST_INPUT_MESSAGE),
+    });
+    await sleepUntil(() => spawnCommandLineMock.mock.calls.length === 1);
+    const env = spawnCommandLineMock.mock.calls[0]![1].env as Record<
+      string,
+      string | undefined
+    >;
+    expect(env.PATH).toBe("/packs/gstack@x/bin:/usr/local/bin:/usr/bin:/bin");
+    expect(env[AGENT_PATH_PREPEND_ENV]).toBeUndefined();
   });
 
   it("should spawn the claude command and send output to the API", async () => {
@@ -2008,5 +2029,34 @@ describe("daemon", () => {
         ),
       ).toBe(false);
     });
+  });
+});
+
+describe("withAgentPathPrepend", () => {
+  it("prepends the absolute dirs in order and consumes the key", () => {
+    expect(
+      withAgentPathPrepend({
+        PATH: "/usr/bin:/bin",
+        [AGENT_PATH_PREPEND_ENV]: "/a/bin:/b/bin",
+        HOME: "/h",
+      }),
+    ).toEqual({ PATH: "/a/bin:/b/bin:/usr/bin:/bin", HOME: "/h" });
+  });
+
+  it("drops relative and empty entries; no PATH yields just the dirs", () => {
+    expect(
+      withAgentPathPrepend({ [AGENT_PATH_PREPEND_ENV]: "bin::/a/bin:." }),
+    ).toEqual({ PATH: "/a/bin" });
+    expect(
+      withAgentPathPrepend({
+        PATH: "/usr/bin",
+        [AGENT_PATH_PREPEND_ENV]: "relative",
+      }),
+    ).toEqual({ PATH: "/usr/bin" });
+  });
+
+  it("returns the env unchanged without the key", () => {
+    const env = { PATH: "/usr/bin" };
+    expect(withAgentPathPrepend(env)).toBe(env);
   });
 });

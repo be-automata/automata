@@ -110,6 +110,12 @@ umask 022
 # - A pack browser gets an AppArmor profile granting `userns` to its exact
 #   pinned executable path; the sysctl is never changed and --no-sandbox is
 #   never configured.
+# - A dependency with `installTo` (gstack's bun: its browse CLI spawns `bun` by
+#   PATH lookup) is also a RUNTIME: root extracts its own sha256-verified copy
+#   into a root-only dir before any build code runs, copies it into the
+#   assembled pack (0755 root) and records it as a stamp `file` line. The
+#   pack's `pathDirs` must exist as real dirs; the worker prepends them to the
+#   agent's PATH. A dependency without `installTo` stays build-time only.
 #
 # Dry run (developers, non-root): PREFIX=<absolute tmp dir> SKIP_SUDO_VERIFY=1,
 # optionally BATTERIES_MANIFEST=<absolute path> to test a modified manifest,
@@ -166,7 +172,7 @@ HARNESS_PROBE_REPO_PATH="packages/worker/deploy/linux/harness-mcp-probe.mjs"
 HARNESS_DOCTOR_REPO_PATH="packages/worker/deploy/linux/automata-batteries"
 # Part of every harness pack stamp. Bump it whenever a harness stage changes
 # what lands in a pack dir, so the next run rebuilds instead of SKIPPING.
-HARNESS_OUTPUT_VERSION=2
+HARNESS_OUTPUT_VERSION=3
 # The build account. A FIXED system uid, chosen outside 990-999 (where
 # useradd --system allocates, and where the agent account's 999 already
 # collides with the engine's Postgres image) and absent from every container
@@ -1842,6 +1848,8 @@ harness_shape_errors() {
         "env keys must be battery prefixes with plain values": ($p.env | env_ok("^(GSTACK|PLAYWRIGHT|MCP|CLAUDE_FLOW)_[A-Z0-9_]+$")),
         "discard entries must be safe relative paths (a segment may be *)": (($p.discard // []) | type == "array" and all((split("/") | map(if . == "*" then "x" else . end) | join("/") | safe_rel) and (split("/") | any(. != "*")))),
         "smoke entries must be argv lists": (($p.smoke // []) | type == "array" and all(argv_ok)),
+        "pathDirs must be distinct {{packDir}}/<dir> paths (at most 4, no colon)": ($p.pathDirs == null or ($p.pathDirs | type == "array" and length > 0 and length <= 4
+          and all(packdir_rel and (.[12:] | split("/") | all(plain)) and (contains(":") | not)) and length == (unique | length))),
         "headlessSafe must be names": ($p.headlessSafe | type == "array" and all(id)),
         "frontmatterHookSkills must be names": ($p.frontmatterHookSkills | type == "array" and all(id))
       }),
@@ -1855,6 +1863,13 @@ harness_shape_errors() {
         "dependencies must be pinned github linux release downloads": ($p.dependencies | type == "array" and all(
           (.name | id) and (.version | semver) and (.sha256 | sha256) and (.license | str)
           and (.url | type == "string" and test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[A-Za-z0-9_.-]*v[0-9]+\\.[0-9]+\\.[0-9]+/[A-Za-z0-9_.-]*linux[A-Za-z0-9_.-]*\\.zip$")))),
+        "dependency installTo must be <a pathDirs dir>/<its name>": ($p.dependencies | type == "array" and all(. as $d | $d.installTo == null or (
+          ($d.installTo | safe_rel) and ($d.installTo | contains("/"))
+          and ($d.installTo | split("/") | last) == $d.name
+          and (($p.pathDirs // []) | index("{{packDir}}/" + ($d.installTo | split("/") | .[:-1] | join("/"))) != null)))),
+        "browseSmoke must name a pack-relative cli, with browsers and a runtime dependency": ($p.browseSmoke == null or (
+          ($p.browseSmoke | type == "object" and keys == ["cli"]) and ($p.browseSmoke.cli | safe_rel)
+          and ($p.browsers | length > 0) and ($p.dependencies | any(.installTo != null)))),
         "browsers must be pinned Chrome-for-Testing linux64 zips": ($p.browsers | type == "array" and all(
           (.name | id) and (.revision | type == "string" and test("^[0-9]+$")) and (.sha256 | sha256)
           and (.version | type == "string" and test("^[0-9]+(\\.[0-9]+){3}$"))
@@ -1951,7 +1966,7 @@ harness_stamp_hash() {
   {
     # Run-time-only keys (which skills an automation may call, the agent's
     # smoke checks) do not change the built bytes, so they do not rebuild.
-    jq -c --argjson i "$i" '.packs[$i] | del(.headlessSafe, .smoke)' "$HARNESS"
+    jq -c --argjson i "$i" '.packs[$i] | del(.headlessSafe, .smoke, .browseSmoke)' "$HARNESS"
     lockfile="$(hfield "$i" .lockOverlay)"
     if [ -n "$lockfile" ]; then
       git_repo rev-parse --verify --quiet "$HEAD_SHA:$lockfile" || printf 'absent %s\n' "$lockfile"
@@ -2433,10 +2448,13 @@ collect_build_output() {
   done
 }
 
-# fetch_dependencies <index> <bin dir>: each sha256-pinned dependency zip's one
-# executable named after the dependency, build-time only (never in the pack).
+# fetch_dependencies <index> <bin dir> <out dir>: each sha256-pinned dependency
+# zip's one executable named after the dependency, extracted by root into the
+# root-only <out dir> (0700) BEFORE any build code runs, then copied into the
+# build's <bin dir>. The <out dir> copy is the one place_runtimes ships for an
+# `installTo` dependency: never anything the build could have touched.
 fetch_dependencies() {
-  local i="$1" bin="$2" n d name version url sha256 zip
+  local i="$1" bin="$2" out="$3" n d name version url sha256 zip
   n="$(jq -r --argjson i "$i" '.packs[$i].dependencies | length' "$HARNESS")"
   for ((d = 0; d < n; d++)); do
     name="$(hfield "$i" ".dependencies[$d].name")"
@@ -2445,12 +2463,49 @@ fetch_dependencies() {
     sha256="$(hfield "$i" ".dependencies[$d].sha256")"
     zip="$WORK/harness-dep-$name.zip"
     fetch_verified "$name $version" "$url" "$sha256" "$zip" || return 1
-    if ! extract_zip "$zip" "$bin/$name" "$name" >"$WORK/zip.log" 2>&1; then
+    if ! extract_zip "$zip" "$out/dep-$name" "$name" >"$WORK/zip.log" 2>&1; then
       STEP_ERROR="dependency $name: $(head -n 1 "$WORK/zip.log")"
+      return 1
+    fi
+    rm -f "$zip"
+    if ! install -m 0755 "$out/dep-$name" "$bin/$name"; then
+      STEP_ERROR="dependency $name: cannot place it for the build"
       return 1
     fi
   done
   chmod -R a+rX "$bin"
+}
+
+# place_runtimes <index> <stage>: after assembly (the build is dead and the tree
+# is root's), every `installTo` dependency is copied from root's own
+# extraction in <stage>/out into the pack, 0755 root, never through a link;
+# then every pathDirs entry must be a real dir of the pack.
+place_runtimes() {
+  local i="$1" stage="$2" pack="$2/pack" rel name dir
+  while IFS=$'\t' read -r name rel; do
+    [ -n "$name" ] || continue
+    dir="$pack/$(dirname "$rel")"
+    if [ -e "$pack/$rel" ] || [ -L "$pack/$rel" ]; then
+      STEP_ERROR="runtime $name: $rel already exists in the pack"
+      return 1
+    fi
+    if ! mkdir -p "$dir" || [ "$(realpath -e -- "$dir" 2>/dev/null)" != "$dir" ]; then
+      STEP_ERROR="runtime $name: $(dirname "$rel") is not a plain dir of the pack"
+      return 1
+    fi
+    if ! install -o root -g root -m 0755 "$stage/out/dep-$name" "$pack/$rel"; then
+      STEP_ERROR="runtime $name: cannot install it at $rel"
+      return 1
+    fi
+    log "harness $(hfield "$i" .id): runtime $name at $rel (sha256 $(sha256_of "$pack/$rel"))"
+  done < <(jq -r --argjson i "$i" '.packs[$i].dependencies // [] | .[] | select(.installTo != null) | [.name, .installTo] | @tsv' "$HARNESS")
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    if [ ! -d "$pack/$rel" ] || [ "$(realpath -e -- "$pack/$rel" 2>/dev/null)" != "$pack/$rel" ]; then
+      STEP_ERROR="pathDirs $rel is not a plain dir of the pack"
+      return 1
+    fi
+  done < <(jq -r --argjson i "$i" '.packs[$i].pathDirs // [] | .[] | ltrimstr("{{packDir}}/")' "$HARNESS")
 }
 
 # place_browsers <index> <pack>: each sha256-pinned browser zip extracted into
@@ -2499,7 +2554,7 @@ stage_git_setup() {
   co="$target/claude/$checkout_dir"
 
   mkdir -p "$b/deps"
-  fetch_dependencies "$i" "$b/deps" || return 1
+  fetch_dependencies "$i" "$b/deps" "$stage/out" || return 1
   place_browsers "$i" "$pack" || return 1
   path="$b/deps:$BUILD_PATH"
   setup_env=()
@@ -2926,6 +2981,9 @@ install_harness_pack() {
   if [ -z "$STEP_ERROR" ]; then
     assemble_pack "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-cannot assemble the pack}"
   fi
+  if [ -z "$STEP_ERROR" ]; then
+    place_runtimes "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-cannot place the pack runtimes}"
+  fi
   if [ -z "$STEP_ERROR" ] && [ "$(hfield "$i" .mcpServers)" != "" ]; then
     write_mcp_wrapper "$i" "$pack" "$target" || STEP_ERROR="${STEP_ERROR:-cannot write the MCP wrapper}"
   fi
@@ -2960,8 +3018,12 @@ install_harness_pack() {
       printf 'stamp %s\nsource %s\nnode %s\nnode_abi %s\n' "$expected" "$HEAD_SHA" \
         "$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')" "$(host_node_abi)"
       sed -n 's/^NATIVE /file /p' "$out"
-      jq -r --argjson i "$i" --arg pw "$(hfield "$i" .env.PLAYWRIGHT_BROWSERS_PATH)" \
-        '.packs[$i].browsers // [] | .[] | "\($pw | ltrimstr("{{packDir}}/"))/\(.dir)/\(.executable)"' "$HARNESS" |
+      {
+        jq -r --argjson i "$i" --arg pw "$(hfield "$i" .env.PLAYWRIGHT_BROWSERS_PATH)" \
+          '.packs[$i].browsers // [] | .[] | "\($pw | ltrimstr("{{packDir}}/"))/\(.dir)/\(.executable)"' "$HARNESS"
+        # The runtimes put on the agent's PATH (re-hashed like the browsers).
+        jq -r --argjson i "$i" '.packs[$i].dependencies // [] | .[] | .installTo // empty' "$HARNESS"
+      } |
         while IFS= read -r file; do
           printf 'file %s %s\n' "$(sha256_of "$pack/$file")" "$file"
         done

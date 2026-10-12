@@ -100,6 +100,8 @@ export async function addHarnessInstall(
   );
   await write(path.join(gstack, "claude/settings.json"), '{"hooks":{}}\n');
   await write(path.join(gstack, "ms-playwright/chromium/README"), "chromium\n");
+  // The runtime the manifest ships into its pathDirs dir (installTo bin/bun).
+  await write(path.join(gstack, "bin/bun"), "#!/bin/sh\nexit 0\n");
 
   const gsd = harnessPackDir("gsd");
   await write(

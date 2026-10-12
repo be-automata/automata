@@ -69,6 +69,14 @@ import {
  * - `headlessSafe` names the skills an automation prompt may invoke without a
  *   human; `frontmatterHookSkills` names the only skills whose frontmatter may
  *   declare `hooks` (every one reviewed: each runs a script inside the pack).
+ * - `pathDirs` (`{{packDir}}/<dir>`) are prepended to the agent's PATH when
+ *   the pack seeds. A dependency with `installTo` (`<pathDir>/<name>`) is a
+ *   RUNTIME as well as a build tool: root copies its own sha256-verified
+ *   extraction there (gstack's browse CLI spawns `bun` by PATH lookup), and
+ *   the stamp re-hashes it. A dependency without one stays build-time only.
+ * - `browseSmoke.cli` names a gstack-style browse CLI (`goto`, `text`,
+ *   `stop`) that verify-as-agent drives against a local page, with the pack's
+ *   PATH and env, the way a run's agent would.
  *
  * validateHarnessPackTree checks an INSTALLED pack dir against the same
  * profile; the installer (PR3) and the worker preflight (PR4) call it.
@@ -135,6 +143,17 @@ export interface HarnessDependency {
   url: string;
   sha256: string;
   license: string;
+  /**
+   * `<pathDir>/<name>`, relative to the pack: also ship the executable in the
+   * pack as a runtime, in one of the pack's `pathDirs`. Absent = build-time only.
+   */
+  installTo?: string;
+}
+
+/** A gstack-style browse CLI verify-as-agent drives against a local page. */
+export interface HarnessBrowseSmoke {
+  /** The CLI, relative to the pack. */
+  cli: string;
 }
 
 /** A Chrome-for-Testing zip Playwright would download, pinned instead. */
@@ -204,6 +223,8 @@ interface HarnessPackBase {
   discard?: string[];
   /** argv lists verify-as-agent runs as the agent: `node` or a pack path, then words or {{packDir}} paths. */
   smoke?: string[][];
+  /** `{{packDir}}/<dir>` entries prepended to the agent's PATH, in order. */
+  pathDirs?: string[];
 }
 
 export interface HarnessGitSetupPack extends HarnessPackBase {
@@ -219,6 +240,7 @@ export interface HarnessGitSetupPack extends HarnessPackBase {
   preSetup: string[][];
   dependencies: HarnessDependency[];
   browsers: HarnessBrowser[];
+  browseSmoke?: HarnessBrowseSmoke;
 }
 
 export interface HarnessNpmLockPack extends HarnessPackBase {
@@ -260,6 +282,7 @@ const BASE_KEYS = [
   "toolAllowlist",
   "discard",
   "smoke",
+  "pathDirs",
 ] as const;
 const GIT_SETUP_KEYS = [
   ...BASE_KEYS,
@@ -271,6 +294,7 @@ const GIT_SETUP_KEYS = [
   "preSetup",
   "dependencies",
   "browsers",
+  "browseSmoke",
 ] as const;
 const NPM_LOCK_KEYS = [
   ...BASE_KEYS,
@@ -334,7 +358,11 @@ const DEPENDENCY_KEYS = [
   "url",
   "sha256",
   "license",
+  "installTo",
 ] as const;
+const BROWSE_SMOKE_KEYS = ["cli"] as const;
+/** PATH entries per pack: a few bin dirs, never a tree walk. */
+const PATH_DIRS_MAX = 4;
 const MCP_SERVER_KEYS = ["command", "args"] as const;
 const HARNESS_KINDS = ["git-setup", "npm-lock"] as const;
 
@@ -458,7 +486,11 @@ function findNodeMajorError(value: unknown, at: string): string | undefined {
     : `${at}: must be an integer >= ${NODE_MAJOR_MIN}`;
 }
 
-function findDependencyError(value: unknown, at: string): string | undefined {
+function findDependencyError(
+  value: unknown,
+  pathDirs: unknown,
+  at: string,
+): string | undefined {
   if (!isRecord(value)) return `${at}: must be an object`;
   const match =
     typeof value.url === "string" ? DEPENDENCY_URL.exec(value.url) : null;
@@ -470,7 +502,79 @@ function findDependencyError(value: unknown, at: string): string | undefined {
       ? undefined
       : `${at}.url: must be a github release download of v<version> naming a linux asset`) ??
     findStringError(value.sha256, SHA256_HEX, `${at}.sha256`) ??
-    findNonEmptyError(value.license, `${at}.license`)
+    findNonEmptyError(value.license, `${at}.license`) ??
+    findInstallToError(value.installTo, value.name, pathDirs, `${at}.installTo`)
+  );
+}
+
+/**
+ * `<pathDir>/<name>`: the runtime lands in one of the pack's own PATH dirs,
+ * under the name its callers spawn it by.
+ */
+function findInstallToError(
+  value: unknown,
+  name: unknown,
+  pathDirs: unknown,
+  at: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !isSafeRelPath(value)) {
+    return `${at}: must be a relative path inside the pack`;
+  }
+  const slash = value.lastIndexOf("/");
+  const dir = `${HARNESS_PACK_DIR_PLACEHOLDER}/${value.slice(0, slash)}`;
+  return slash > 0 &&
+    value.slice(slash + 1) === name &&
+    Array.isArray(pathDirs) &&
+    pathDirs.includes(dir)
+    ? undefined
+    : `${at}: must be <a pathDirs dir>/<the dependency name>`;
+}
+
+/** Distinct `{{packDir}}/<dir>` entries, never the pack root itself. */
+function findPathDirsError(value: unknown, at: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (Array.isArray(value) && value.length > PATH_DIRS_MAX) {
+    return `${at}: at most ${PATH_DIRS_MAX} dirs`;
+  }
+  const error = findListError(
+    value,
+    at,
+    (item, itemAt) =>
+      findPackCommandError(item, itemAt) ??
+      findEnvValueError(item, itemAt) ??
+      ((item as string).includes(":")
+        ? `${itemAt}: must not contain ':'`
+        : undefined),
+    { allowEmpty: false },
+  );
+  if (error !== undefined) return error;
+  return new Set(value as string[]).size === (value as string[]).length
+    ? undefined
+    : `${at}: duplicate dir`;
+}
+
+function findBrowseSmokeError(
+  value: unknown,
+  pack: Record<string, unknown>,
+  at: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return `${at}: must be an object`;
+  return (
+    findUnknownKey(value, BROWSE_SMOKE_KEYS, at) ??
+    (isSafeRelPath(value.cli)
+      ? undefined
+      : `${at}.cli: must be a relative path in the pack`) ??
+    (Array.isArray(pack.browsers) && pack.browsers.length > 0
+      ? undefined
+      : `${at}: needs browsers`) ??
+    (Array.isArray(pack.dependencies) &&
+    pack.dependencies.some(
+      (dep: unknown) => isRecord(dep) && dep.installTo !== undefined,
+    )
+      ? undefined
+      : `${at}: needs a dependency shipped as a runtime (installTo)`)
   );
 }
 
@@ -712,7 +816,8 @@ function findBaseError(
       `${at}.toolAllowlist`,
     ) ??
     findDiscardError(value.discard, `${at}.discard`) ??
-    findSmokeError(value.smoke, `${at}.smoke`)
+    findSmokeError(value.smoke, `${at}.smoke`) ??
+    findPathDirsError(value.pathDirs, `${at}.pathDirs`)
   );
 }
 
@@ -744,10 +849,8 @@ function findGitSetupPackError(
     findListError(
       value.dependencies,
       `${at}.dependencies`,
-      findDependencyError,
-      {
-        allowEmpty: true,
-      },
+      (item, itemAt) => findDependencyError(item, value.pathDirs, itemAt),
+      { allowEmpty: true },
     ) ??
     findListError(value.browsers, `${at}.browsers`, findBrowserError, {
       allowEmpty: true,
@@ -762,7 +865,8 @@ function findGitSetupPackError(
       )
     )
       ? `${at}.env.PLAYWRIGHT_BROWSERS_PATH: required as ${HARNESS_PACK_DIR_PLACEHOLDER}/<dir> with browsers`
-      : undefined)
+      : undefined) ??
+    findBrowseSmokeError(value.browseSmoke, value, `${at}.browseSmoke`)
   );
 }
 

@@ -31,6 +31,7 @@ import {
 } from "./batteries-seed";
 import { FOREGROUND_ONLY_PRE_TOOL_USE } from "./foreground-only-hook";
 import { HARNESS_MANIFEST_REPO_PATH } from "./harness-manifest";
+import { harnessRunEnv } from "./harness-seed";
 
 const UID = process.getuid?.() ?? 0;
 
@@ -1042,6 +1043,15 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
         3,
       );
     });
+
+    it("a review seed puts nothing on the agent's PATH", async () => {
+      const result = await seedBatteries(fx.home, HARNESS, {
+        ...opts,
+        hooksOff: true,
+      });
+      expect(result.harness).toBeUndefined();
+      expect(harnessRunEnv(result.harness).pathDirs).toEqual([]);
+    });
   });
 
   it("task lane: links skills, agents (files AND subdirs), commands and gsd-core — never pack hooks or settings", async () => {
@@ -1153,6 +1163,29 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
       ruflo: { command: `${ruflo}/bin/ruflo-mcp`, args: [] },
     });
     expect(JSON.stringify(harness)).not.toMatch(/TOKEN|KEY|SECRET/);
+  });
+
+  it("PATH dirs: gstack's resolved <pack>/bin, only when gstack is selected and verified", async () => {
+    const gstackBin = path.join(
+      await fs.realpath(hx.harnessPackDir("gstack")),
+      "bin",
+    );
+    const all = await seedBatteries(fx.home, HARNESS, opts);
+    expect(harnessRunEnv(all.harness).pathDirs).toEqual([gstackBin]);
+    if (!all.harness?.ok) throw new Error("expected a seeded harness");
+    expect(all.harness.packs.map((p) => [p.id, p.pathDirs])).toEqual([
+      ["gstack", [gstackBin]],
+      ["gsd", []],
+      ["ruflo", []],
+    ]);
+
+    const without = await seedBatteries(fx.home, ["gsd", "ruflo"], opts);
+    expect(harnessRunEnv(without.harness).pathDirs).toEqual([]);
+
+    // Selected but not verified (no stamp): its bin dir is not on PATH.
+    await fs.rm(path.join(hx.harnessPackDir("gstack"), ".stamp"));
+    const unverified = await seedBatteries(fx.home, HARNESS, opts);
+    expect(harnessRunEnv(unverified.harness).pathDirs).toEqual([]);
   });
 
   it("writes the breadcrumb and gstack config (0644) for the agent to read", async () => {
@@ -1406,6 +1439,36 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
             })
           : st;
       });
+    });
+
+    it("a pathDirs dir missing, a file or a symlink ⇒ path-dir-missing", async () => {
+      const bin = path.join(hx.harnessPackDir("gstack"), "bin");
+      await fs.rm(bin, { recursive: true });
+      await expectSkipped("gstack", "path-dir-missing");
+      await fs.writeFile(bin, "not a dir\n");
+      logs.length = 0;
+      await expectSkipped("gstack", "path-dir-missing");
+      await fs.rm(bin);
+      await fs.symlink("ms-playwright", bin);
+      logs.length = 0;
+      await expectSkipped("gstack", "path-dir-missing");
+    });
+
+    it("a pathDirs dir owned by another uid or writable ⇒ skipped (it goes on PATH)", async () => {
+      const bin = path.join(
+        await fs.realpath(hx.harnessPackDir("gstack")),
+        "bin",
+      );
+      await expectSkippedWith("gstack", "not-root-owned", async (p) => {
+        const st = await fs.lstat(p);
+        return p === bin
+          ? Object.assign(Object.create(st) as typeof st, { uid: UID + 1 })
+          : st;
+      });
+      logs.length = 0;
+      await fs.chmod(bin, 0o777);
+      opts = { ...opts, lstat: undefined };
+      await expectSkipped("gstack", "writable");
     });
 
     it("the MCP wrapper missing ⇒ mcp-wrapper-missing", async () => {
