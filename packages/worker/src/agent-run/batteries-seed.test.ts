@@ -1374,6 +1374,40 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
       });
     });
 
+    it("Linux symlink modes (0777) never fail a pack", async () => {
+      // Linux lstat reports every symlink as lrwxrwxrwx; macOS does not.
+      const linuxModes = async (p: string) => {
+        const st = await fs.lstat(p);
+        return st.isSymbolicLink()
+          ? Object.assign(Object.create(st) as typeof st, {
+              mode: 0o120777,
+            })
+          : st;
+      };
+      const result = await seedBatteries(fx.home, HARNESS, {
+        ...opts,
+        lstat: linuxModes,
+      });
+      expect(
+        result.harness?.ok ? result.harness.packs.map((p) => p.id) : [],
+      ).toEqual(HARNESS);
+    });
+
+    it("a claude/ symlink owned by another uid ⇒ not-root-owned", async () => {
+      const skills = await fs.realpath(
+        path.join(hx.harnessPackDir("gstack"), "claude/skills"),
+      );
+      await expectSkippedWith("gstack", "not-root-owned", async (p) => {
+        const st = await fs.lstat(p);
+        return p === path.join(skills, "investigate")
+          ? Object.assign(Object.create(st) as typeof st, {
+              uid: UID + 1,
+              mode: 0o120777,
+            })
+          : st;
+      });
+    });
+
     it("the MCP wrapper missing ⇒ mcp-wrapper-missing", async () => {
       await fs.rm(path.join(hx.harnessPackDir("ruflo"), "bin/ruflo-mcp"));
       await expectSkipped("ruflo", "mcp-wrapper-missing");

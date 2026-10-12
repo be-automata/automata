@@ -17,6 +17,8 @@ import {
 } from "./harness-seed";
 import type { BatterySeed } from "./task-agent";
 
+type Grant = (target: string, kind: "file" | "directory") => Promise<void>;
+
 /**
  * Materialises a run's agent provider credential on the execution box (D1).
  *
@@ -81,15 +83,15 @@ export interface MaterialisedCredentials {
  * lands in this file.
  */
 async function seedWorkspaceTrust({
-  agentUser,
+  grant,
   home,
   workdir,
   mcpServers = {},
 }: {
   home: string;
   workdir: string;
-  /** Role account the agent runs as; empty/absent = agent-uid mode off. */
-  agentUser?: string;
+  /** The run's ACL re-grant (a no-op when agent-uid mode is off). */
+  grant: Grant;
   /** User-scope MCP servers (harnessMcpServers); empty = no key at all. */
   mcpServers?: Record<
     string,
@@ -123,11 +125,7 @@ async function seedWorkspaceTrust({
   // ACL mask — no chmod needed — so the agent's grant on this file is born dead
   // and the CLI reports an untrusted workspace, which ends the run in seconds
   // with no output. No-op on macOS. See reapplyFileGrant.
-  await reapplyPathGrant({
-    target: trustFile,
-    kind: "file",
-    users: agentUser ? [agentUser] : [],
-  });
+  await grant(trustFile, "file");
 }
 
 /**
@@ -191,11 +189,21 @@ export async function materialiseAgentCredentials({
 }): Promise<MaterialisedCredentials> {
   const home = run.home;
   const users = agentUser ? [agentUser] : [];
+  // Every grant below; production passes no exec/platform seam, so this is
+  // reapplyPathGrant exactly as before (tests inject both via `batteries`).
+  const grant: Grant = (target, kind) =>
+    reapplyPathGrant({
+      target,
+      kind,
+      users,
+      ...(batteries?.aclExec ? { exec: batteries.aclExec } : {}),
+      ...(batteries?.platform ? { platform: batteries.platform } : {}),
+    });
   await fs.mkdir(home, { recursive: true, mode: 0o700 });
   // 0700 at creation zeroes the POSIX ACL mask on Linux, so the agent cannot
   // TRAVERSE its own HOME — and then every grant on the files inside is moot.
   // Restore the access entry; the inherited default ACL is untouched by mode.
-  await reapplyPathGrant({ target: home, kind: "directory", users });
+  await grant(home, "directory");
   // seedBatteries creates and grants `<home>/.claude` in both modes, so the
   // credential write below does not repeat that.
   const log = batteries?.log ?? console.log;
@@ -216,21 +224,13 @@ export async function materialiseAgentCredentials({
   await seedWorkspaceTrust({
     home,
     workdir: run.repo,
-    agentUser,
+    grant,
     mcpServers: harnessMcpServers(seeded?.harness),
   });
   // Seeded harness packs write state into the checkout (.gstack/,
   // .claude-flow/, .swarm/); keep it out of the PR, before the agent starts.
   if (seededHarnessPacks(seeded?.harness).length > 0) {
-    await excludeHarnessState(run.repo, (target, kind) =>
-      reapplyPathGrant({
-        target,
-        kind,
-        users,
-        ...(batteries?.aclExec ? { exec: batteries.aclExec } : {}),
-        ...(batteries?.platform ? { platform: batteries.platform } : {}),
-      }),
-    );
+    await excludeHarnessState(run.repo, grant);
   }
   const cleanup = async () => {
     await fs.rm(home, { recursive: true, force: true }).catch(() => {});
@@ -273,7 +273,7 @@ export async function materialiseAgentCredentials({
     // applied.
     await fs.mkdir(credentialDir, { recursive: true, mode: 0o700 });
     // Same 0700 mask trap one level down (e.g. `<home>/.claude`).
-    await reapplyPathGrant({ target: credentialDir, kind: "directory", users });
+    await grant(credentialDir, "directory");
   }
   await fs.writeFile(target, credentials.contents, { mode: 0o600 });
   // writeFile only honours `mode` when it CREATES the file; an existing file
@@ -285,7 +285,7 @@ export async function materialiseAgentCredentials({
   // still lists the entry. Without this the agent cannot read the credential it
   // was just handed, and the run dies in seconds with no output. No-op on macOS,
   // where an ACE survives chmod. See reapplyFileGrant.
-  await reapplyPathGrant({ target, kind: "file", users });
+  await grant(target, "file");
 
   return { ...base, delivered: true };
 }

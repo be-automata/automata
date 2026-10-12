@@ -234,7 +234,14 @@ async function checkClaudeTree(
   for (const name of await fs.readdir(dir)) {
     const full = path.join(dir, name);
     const st = await lstat(full);
-    const owner = ownershipReason(st, packOwnerUid);
+    // A symlink's own mode is meaningless and on Linux always 0777: only its
+    // owner counts. Its target is an in-pack entry this walk (or
+    // validateHarnessPackTree's containment check) covers on its own.
+    const owner = st.isSymbolicLink()
+      ? st.uid === packOwnerUid
+        ? undefined
+        : "not-root-owned"
+      : ownershipReason(st, packOwnerUid);
     if (owner) throw new PackSkip(owner);
     if (st.isDirectory() && !st.isSymbolicLink()) {
       await checkClaudeTree(full, lstat, packOwnerUid);
