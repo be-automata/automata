@@ -62,9 +62,6 @@ const allowed = new Set(parsed);
 const child = spawn(command, commandArgs, {
   stdio: ["pipe", "pipe", "inherit"],
 });
-/** Pending client tools/list requests per id (a client may reuse an id). */
-const listRequests = new Map();
-
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const refuse = (id, code, message) => {
   if (id !== undefined && id !== null) {
@@ -154,10 +151,6 @@ onLines(
         return;
       }
     }
-    if (message.method === "tools/list" && message.id !== undefined) {
-      const key = JSON.stringify(message.id);
-      listRequests.set(key, (listRequests.get(key) ?? 0) + 1);
-    }
     child.stdin.write(`${JSON.stringify(message)}\n`);
   },
   () => process.stderr.write("mcp-filter: dropped an over-long client frame\n"),
@@ -175,18 +168,19 @@ onLines(
       process.stderr.write(`mcp-filter: server stdout (not JSON): ${line}\n`);
       return;
     }
-    if (isObject(message) && message.id !== undefined) {
-      const key = JSON.stringify(message.id);
-      const pending = listRequests.get(key) ?? 0;
-      if (pending > 0) {
-        if (pending === 1) listRequests.delete(key);
-        else listRequests.set(key, pending - 1);
-        if (Array.isArray(message.result?.tools)) {
-          message.result.tools = message.result.tools.filter(
-            (tool) => isObject(tool) && allowed.has(tool.name),
-          );
-        }
-      }
+    // Every RESPONSE (no `method`) that carries a tool list is reduced, whatever
+    // its id: matching responses to pending tools/list ids let a server-initiated
+    // request with a colliding id consume the entry and pass the real list
+    // through unfiltered (#330 review). No other MCP result has `tools`.
+    if (
+      isObject(message) &&
+      message.method === undefined &&
+      isObject(message.result) &&
+      Array.isArray(message.result.tools)
+    ) {
+      message.result.tools = message.result.tools.filter(
+        (tool) => isObject(tool) && allowed.has(tool.name),
+      );
     }
     send(message);
   },
