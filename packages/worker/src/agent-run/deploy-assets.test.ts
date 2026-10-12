@@ -33,6 +33,16 @@ import {
   isHarnessManifest,
   type HarnessManifest,
 } from "./harness-manifest";
+import {
+  HARNESS_CLAUDE_DIR,
+  HARNESS_HASH_FILE,
+  HARNESS_HASH_INVALID_FILE,
+  HARNESS_MCP_TOOLS_FILE,
+  HARNESS_STAMP_FILE,
+  computeHarnessManifestHash,
+  harnessPackDirName,
+  parseHarnessStamp,
+} from "./harness-layout";
 
 /**
  * Rot guards for the #108 deploy templates. These are pure file reads: no sudo,
@@ -3774,5 +3784,114 @@ describe("harness batteries (PR3 review): root never follows a link the build pl
     );
     expect(result.stderr).not.toContain("resources/read");
     expect(result.stderr).toContain("dropped an over-long client frame");
+  });
+});
+
+describe("harness batteries: the installer writes exactly the layout the worker reads (harness-layout.ts)", () => {
+  const script = deployFile("linux", "install-batteries.sh");
+  const body = (name: string) => fnBody(script, name);
+  const manifestPath = path.join(workerRoot, "deploy", "harness.json");
+  const manifestBytes = fs.readFileSync(manifestPath);
+  const manifest = JSON.parse(manifestBytes.toString("utf8")) as Parameters<
+    typeof computeHarnessManifestHash
+  >[1];
+
+  /** bash with the named installer functions; git_repo reads this checkout's files. */
+  function bash(
+    fns: string[],
+    program: string,
+    env: Record<string, string> = {},
+  ) {
+    return spawnSync(
+      "bash",
+      [
+        "-c",
+        [
+          "set -euo pipefail",
+          `HARNESS=${JSON.stringify(manifestPath)}`,
+          "HEAD_SHA=HEAD",
+          `git_repo() { cat ${JSON.stringify(repoRoot)}/"\${3#*:}"; }`,
+          ...fns.map(body),
+          program,
+        ].join("\n"),
+      ],
+      { encoding: "utf8", env: { ...process.env, ...env } },
+    );
+  }
+
+  it("names every pack dir as harnessPackDirName does", () => {
+    const out = bash(
+      ["hfield", "harness_rows", "harness_dir_name"],
+      "while IFS=$'\\t' read -r i _ _; do harness_dir_name \"$i\"; done < <(harness_rows)",
+    );
+    expect(out.status, out.stderr).toBe(0);
+    expect(out.stdout.trim().split("\n")).toEqual(
+      manifest.packs.map((pack) => harnessPackDirName(pack)),
+    );
+  });
+
+  it("writes harness.sha256 with computeHarnessManifestHash's recipe", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "harness-hash-"));
+    const out = bash(
+      ["write_harness_hash"],
+      `ROOT=${JSON.stringify(root)}\nwrite_harness_hash`,
+    );
+    const written = fs
+      .readFileSync(path.join(root, HARNESS_HASH_FILE), "utf8")
+      .trim();
+    fs.rmSync(root, { recursive: true, force: true });
+    expect(out.status, out.stderr).toBe(0);
+    expect(written).toBe(
+      await computeHarnessManifestHash(manifestBytes, manifest, repoRoot),
+    );
+    expect(body("invalidate_harness_hash")).toContain(
+      HARNESS_HASH_INVALID_FILE,
+    );
+  });
+
+  it("writes a .stamp parseHarnessStamp reads, with the `node <major>` line", () => {
+    const install = body("install_harness_pack");
+    expect(install).toContain(`>"$pack/${HARNESS_STAMP_FILE}"`);
+    const printf =
+      /printf '(stamp %s\\nsource %s\\nnode %s\\nnode_abi %s\\n)'/.exec(
+        install,
+      );
+    expect(printf?.[1]).toBeDefined();
+    const text = spawnSync(
+      "bash",
+      ["-c", `printf '${printf?.[1] ?? ""}' ${"a".repeat(64)} HEAD 24 137`],
+      { encoding: "utf8" },
+    ).stdout;
+    expect(parseHarnessStamp(text)).toEqual({
+      stamp: "a".repeat(64),
+      nodeMajor: 24,
+    });
+  });
+
+  it("puts claude/, mcp-tools.json, the MCP wrapper and ms-playwright where the worker looks", () => {
+    expect(body("collect_build_output")).toContain(
+      `"$pack/${HARNESS_CLAUDE_DIR}"`,
+    );
+    expect(body("stage_git_setup")).toContain(
+      `"$target/${HARNESS_CLAUDE_DIR}"`,
+    );
+    expect(body("stage_npm_lock")).toContain(
+      `>"$out/${HARNESS_MCP_TOOLS_FILE}"`,
+    );
+    expect(body("assemble_pack")).toContain(
+      `"$stage/out/${HARNESS_MCP_TOOLS_FILE}"`,
+    );
+    // The wrapper and the browsers are written at the manifest's own
+    // {{packDir}} paths, which the worker resolves the same way.
+    expect(body("write_mcp_wrapper")).toContain(
+      'rel="${command#"{{packDir}}/"}"',
+    );
+    expect(body("place_browsers")).toContain('pw="$pack/${pw#"{{packDir}}/"}"');
+    const ruflo = manifest.packs.find((p) => p.id === "ruflo");
+    expect(ruflo?.mcpServers?.ruflo?.command).toBe("{{packDir}}/bin/ruflo-mcp");
+    const gstack = manifest.packs.find((p) => p.id === "gstack");
+    expect(gstack?.env.PLAYWRIGHT_BROWSERS_PATH).toBe(
+      "{{packDir}}/ms-playwright",
+    );
   });
 });

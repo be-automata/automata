@@ -65,6 +65,15 @@ export async function addHarnessInstall(
     path.join(fx.repoRoot, HARNESS_MANIFEST_REPO_PATH),
     manifestBytes.toString("utf8"),
   );
+  // The hash recipe reads each npm-lock pack's committed lockOverlay too.
+  for (const pack of manifest.packs) {
+    if (pack.kind === "npm-lock") {
+      await write(
+        path.join(fx.repoRoot, pack.lockOverlay),
+        await fs.readFile(path.join(REAL_REPO_ROOT, pack.lockOverlay), "utf8"),
+      );
+    }
+  }
   const harnessHash = await computeHarnessManifestHash(
     manifestBytes,
     manifest,
