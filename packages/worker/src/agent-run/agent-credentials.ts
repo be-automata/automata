@@ -10,6 +10,11 @@ import {
   type SeedBatteriesOptions,
   type SeedBatteriesResult,
 } from "./batteries-seed";
+import {
+  excludeHarnessState,
+  harnessMcpServers,
+  seededHarnessPacks,
+} from "./harness-seed";
 import type { BatterySeed } from "./task-agent";
 
 /**
@@ -68,16 +73,28 @@ export interface MaterialisedCredentials {
  * property of running the agent CLI over a checkout at all; box-level
  * mitigation (e.g. the CLI's `--bare`, which skips hooks) is a separate,
  * run-mode-level decision tracked outside this module.
+ *
+ * THE ONLY WRITER of `~/.claude.json` (it overwrites), so the run's
+ * user-scope MCP servers — the seeded harness packs' wrappers, resolved by
+ * seedBatteries — are written here too, in the same file write. Each entry is
+ * a command inside a root-owned pack and carries no env: nothing secret ever
+ * lands in this file.
  */
 async function seedWorkspaceTrust({
   agentUser,
   home,
   workdir,
+  mcpServers = {},
 }: {
   home: string;
   workdir: string;
   /** Role account the agent runs as; empty/absent = agent-uid mode off. */
   agentUser?: string;
+  /** User-scope MCP servers (harnessMcpServers); empty = no key at all. */
+  mcpServers?: Record<
+    string,
+    { type: "stdio"; command: string; args: string[] }
+  >;
 }): Promise<void> {
   // The CLI keys trust by the RESOLVED cwd. On macOS os.tmpdir() returns
   // /var/folders/…, a symlink to /private/var/folders/…, so seeding the
@@ -96,6 +113,7 @@ async function seedWorkspaceTrust({
       [workdir]: trust,
       [resolved]: trust,
     },
+    ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
   };
   const trustFile = path.join(home, ".claude.json");
   await fs.writeFile(trustFile, JSON.stringify(config), {
@@ -178,7 +196,6 @@ export async function materialiseAgentCredentials({
   // TRAVERSE its own HOME — and then every grant on the files inside is moot.
   // Restore the access entry; the inherited default ACL is untouched by mode.
   await reapplyPathGrant({ target: home, kind: "directory", users });
-  await seedWorkspaceTrust({ home, workdir: run.repo, agentUser });
   // seedBatteries creates and grants `<home>/.claude` in both modes, so the
   // credential write below does not repeat that.
   const log = batteries?.log ?? console.log;
@@ -193,6 +210,27 @@ export async function materialiseAgentCredentials({
     : undefined;
   if (!seed && foregroundOnly) {
     await seedForegroundOnly(home, { ...batteries, log, agentUser });
+  }
+  // AFTER seeding: the trust file is also where the seeded harness packs'
+  // MCP servers go, and it is written whole, once.
+  await seedWorkspaceTrust({
+    home,
+    workdir: run.repo,
+    agentUser,
+    mcpServers: harnessMcpServers(seeded?.harness),
+  });
+  // Seeded harness packs write state into the checkout (.gstack/,
+  // .claude-flow/, .swarm/); keep it out of the PR, before the agent starts.
+  if (seededHarnessPacks(seeded?.harness).length > 0) {
+    await excludeHarnessState(run.repo, (target, kind) =>
+      reapplyPathGrant({
+        target,
+        kind,
+        users,
+        ...(batteries?.aclExec ? { exec: batteries.aclExec } : {}),
+        ...(batteries?.platform ? { platform: batteries.platform } : {}),
+      }),
+    );
   }
   const cleanup = async () => {
     await fs.rm(home, { recursive: true, force: true }).catch(() => {});

@@ -787,3 +787,162 @@ describe("task-run repo environment (prompt-defined automations)", () => {
     );
   });
 });
+
+describe("harness battery env (gstack, gsd, ruflo)", () => {
+  const base = {
+    baseEnv: { PATH: "/usr/bin:/bin", HOME: "/home/op" },
+    anthropicApiKey: "sk-ant-box",
+    claudeBinDir: "/opt/claude/bin",
+    installationToken: INSTALL_TOKEN,
+    ghConfigDir: "/tmp/isolated-gh",
+    botLogin: "automata-ai-bot[bot]",
+    runHome: "/run/home",
+  };
+  const PACK = "/usr/local/lib/automata-batteries/gstack@df89475b";
+  const batteryEnv = {
+    GSTACK_SESSION_KIND: "spawned",
+    PLAYWRIGHT_BROWSERS_PATH: `${PACK}/ms-playwright`,
+    MCP_TIMEOUT: "30000",
+  };
+
+  it("applies the seeded packs' env", () => {
+    const env = buildDaemonEnv({ ...base, batteryEnv });
+    expect(env.GSTACK_SESSION_KIND).toBe("spawned");
+    expect(env.PLAYWRIGHT_BROWSERS_PATH).toBe(`${PACK}/ms-playwright`);
+    expect(env.MCP_TIMEOUT).toBe("30000");
+  });
+
+  it("repoEnv can never set or override a battery key (any case), nor the browse proxy", () => {
+    const repoEnv = {
+      GSTACK_SESSION_KIND: "interactive",
+      PLAYWRIGHT_BROWSERS_PATH: "/evil",
+      playwright_skip_validate_host_requirements: "1",
+      MCP_TIMEOUT: "1",
+      MCP_TOOL_TIMEOUT: "1",
+      CLAUDE_FLOW_MODE: "online",
+      BROWSE_PROXY_URL: "http://evil:1",
+      BROWSE_PROXY_USER: "u",
+    };
+    const withPacks = buildDaemonEnv({
+      ...base,
+      egressProxyUrl: "http://127.0.0.1:9999",
+      browseProxy: true,
+      repoEnv,
+      batteryEnv,
+    });
+    expect(withPacks.GSTACK_SESSION_KIND).toBe("spawned");
+    expect(withPacks.PLAYWRIGHT_BROWSERS_PATH).toBe(`${PACK}/ms-playwright`);
+    expect(withPacks.MCP_TIMEOUT).toBe("30000");
+    expect(withPacks.BROWSE_PROXY_URL).toBe("http://127.0.0.1:9999");
+    for (const key of [
+      "playwright_skip_validate_host_requirements",
+      "MCP_TOOL_TIMEOUT",
+      "CLAUDE_FLOW_MODE",
+      "BROWSE_PROXY_USER",
+    ]) {
+      expect(withPacks[key]).toBeUndefined();
+    }
+    // Without packs the repo still cannot set them.
+    const without = buildDaemonEnv({ ...base, repoEnv });
+    for (const key of Object.keys(repoEnv)) {
+      expect(without[key]).toBeUndefined();
+    }
+  });
+
+  it("only battery-prefixed keys apply (defense in depth past the manifest guard)", () => {
+    const env = buildDaemonEnv({
+      ...base,
+      batteryEnv: {
+        PATH: "/evil",
+        HOME: "/evil",
+        NODE_OPTIONS: "x",
+        MCP_TIMEOUT: "5",
+      },
+    });
+    expect(env.PATH).toBe("/opt/claude/bin:/usr/bin:/bin");
+    expect(env.HOME).toBe("/run/home");
+    expect(env.NODE_OPTIONS).toBeUndefined();
+    expect(env.MCP_TIMEOUT).toBe("5");
+  });
+
+  it("browse proxy: BROWSE_PROXY_URL is the run's egress proxy, only with gstack AND a proxy", () => {
+    const proxy = "http://127.0.0.1:9999";
+    expect(
+      buildDaemonEnv({ ...base, egressProxyUrl: proxy, browseProxy: true })
+        .BROWSE_PROXY_URL,
+    ).toBe(proxy);
+    expect(
+      buildDaemonEnv({ ...base, egressProxyUrl: proxy }).BROWSE_PROXY_URL,
+    ).toBeUndefined();
+    expect(
+      buildDaemonEnv({ ...base, browseProxy: true }).BROWSE_PROXY_URL,
+    ).toBeUndefined();
+  });
+
+  it("changes nothing when absent", () => {
+    expect(
+      buildDaemonEnv({ ...base, batteryEnv: {}, browseProxy: false }),
+    ).toEqual(buildDaemonEnv(base));
+  });
+});
+
+describe("harness battery env: the DaemonProcess call site wires it", () => {
+  it("a seeded gstack reaches the env DaemonProcess builds (env + browse proxy)", async () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-harness-"));
+    const input: AgentRunInput = {
+      threadId: "thr_harness",
+      threadChatId: "tc_1",
+      repoFullName: "o/r",
+      branch: "main",
+      daemonCallbackUrl: "http://localhost:3999",
+      installationToken: "inst",
+      daemonToken: "daemon",
+      orgId: "org-1",
+      repoEnv: { PLAYWRIGHT_BROWSERS_PATH: "/evil" },
+    };
+    const packDir = "/usr/local/lib/automata-batteries/gstack@x";
+    const daemon = new DaemonProcess(
+      loadWorkerConfig({}),
+      input,
+      workdir,
+      {
+        home: path.join(workdir, "home"),
+        delivered: false,
+        env: {},
+        batteries: {
+          harness: {
+            ok: true,
+            harnessHash: "a".repeat(64),
+            packs: [
+              {
+                id: "gstack",
+                pin: "x",
+                packDir,
+                env: { PLAYWRIGHT_BROWSERS_PATH: `${packDir}/ms-playwright` },
+                mcpServers: {},
+                denyTools: [],
+                headlessSafe: [],
+                linked: [],
+              },
+            ],
+          },
+        },
+      },
+      "http://127.0.0.1:4242",
+    );
+    const internals = daemon as unknown as {
+      ensureEnv(): Promise<NodeJS.ProcessEnv>;
+      ghConfigDir: string | null;
+    };
+    try {
+      const env = await internals.ensureEnv();
+      expect(env.PLAYWRIGHT_BROWSERS_PATH).toBe(`${packDir}/ms-playwright`);
+      expect(env.BROWSE_PROXY_URL).toBe("http://127.0.0.1:4242");
+    } finally {
+      if (internals.ghConfigDir) {
+        fs.rmSync(internals.ghConfigDir, { recursive: true, force: true });
+      }
+      fs.rmSync(workdir, { recursive: true, force: true });
+    }
+  });
+});

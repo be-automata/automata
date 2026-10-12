@@ -17,6 +17,7 @@ import {
   resolveProbeWorkerName,
   startEngineLivenessWatchdog,
 } from "../agent-run/engine-liveness";
+import { harnessDoctorLine } from "../agent-run/batteries-seed";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import { sweepStaleRunDirs } from "../agent-run/provision";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
@@ -181,6 +182,13 @@ async function main() {
   }
 
   await claimNamespaceAndReclaim();
+
+  // Harness battery packs (gstack, GSD, ruflo): one doctor line, never fatal.
+  // A box without the harness install (or on the wrong Node) boots and runs
+  // exactly as before; task runs that ask for the packs seed none and say
+  // why. Also warms the per-pack tree validation, so the first run does not
+  // walk node_modules while holding the box lock.
+  console.log(`[worker-boot] ${await harnessDoctorLine()}`);
 
   // #184 (#152 Stage B2): reclaim agent-uid escapees left by a dead worker,
   // under a NON-blocking take of the box lock. Busy ⇒ a live run owns the box
