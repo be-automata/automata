@@ -4,8 +4,6 @@ import React, { useMemo, useState } from "react";
 import { AlertCircle, RotateCcw } from "lucide-react";
 
 import {
-  BATTERY_PACK_IDS,
-  BATTERY_PACK_LABELS,
   DEFAULT_REVIEW_BATTERIES,
   DEFAULT_TASK_BATTERIES,
   DEFAULT_REVIEW_RUN_TESTS,
@@ -13,11 +11,13 @@ import {
   REVIEW_BATTERY_PACK_LABELS,
   REVIEW_MODES,
   REVIEW_MODE_LABELS,
+  TASK_BATTERY_PACK_IDS,
+  TASK_BATTERY_PACK_LABELS,
   effectiveReviewMode,
   pickReviewAgentFields,
-  type BatteryPackId,
   type ReviewAgentValues,
   type ReviewMode,
+  type TaskBatteryPackId,
 } from "@terragon/shared/model/review-agent-settings";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -92,10 +92,10 @@ export const TASK_PACKS_OVERLAP_NOTE =
   "Somnio skills and Somnio review both provide a security-audit skill; if both are selected, the first in this list wins.";
 
 /** The packs' labels joined for an "Inherit (…)" choice; "none" when empty. */
-function packListLabel(ids: readonly BatteryPackId[]): string {
+function packListLabel(ids: readonly TaskBatteryPackId[]): string {
   return ids.length === 0
     ? "none"
-    : ids.map((id) => BATTERY_PACK_LABELS[id]).join(", ");
+    : ids.map((id) => TASK_BATTERY_PACK_LABELS[id]).join(", ");
 }
 
 const INHERIT = "inherit";
@@ -384,8 +384,8 @@ export function ReviewAgentFieldsView({
         inheritId={`${idPrefix}-task-packs-inherit`}
         inheritLabel={taskInheritLabel}
         packIdPrefix={`${idPrefix}-task-pack-`}
-        ids={BATTERY_PACK_IDS}
-        labels={BATTERY_PACK_LABELS}
+        ids={TASK_BATTERY_PACK_IDS}
+        labels={TASK_BATTERY_PACK_LABELS}
         value={draft.taskBatteries}
         inherited={inheritedTaskBatteries}
         disabled={disabled}

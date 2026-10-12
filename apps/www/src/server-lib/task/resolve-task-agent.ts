@@ -13,7 +13,7 @@ import {
  * the repo row means none even when the '*' row lists packs.
  *
  * DEGRADES, NEVER THROWS: an invalid stored value (only possible after a pack
- * id was removed from BATTERY_PACK_IDS, because writes are validated) resolves
+ * id was removed from TASK_BATTERY_PACK_IDS, because writes are validated) resolves
  * to no packs plus an `invalid` detail the dispatch logs. Throwing would stop
  * every task run of a repo that still stores the removed id; the review path
  * never consults this field at all.

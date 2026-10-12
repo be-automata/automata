@@ -3,8 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  BATTERY_PACK_IDS,
-  BATTERY_PACK_LABELS,
+  HARNESS_PACK_IDS,
+  TASK_BATTERY_PACK_IDS,
+  TASK_BATTERY_PACK_LABELS,
   effectiveReviewMode,
   type ReviewAgentValues,
 } from "@terragon/shared/model/review-agent-settings";
@@ -469,22 +470,30 @@ describe("ReviewAgentFieldsView — Task agent packs (phase 7)", () => {
     );
   };
 
-  it("renders one checkbox per manifest pack plus Inherit, labelled from the shared labels", () => {
+  it("renders one checkbox per task pack plus Inherit, labelled from the shared labels", () => {
     const html = view();
     expect(html).toContain("Task agent packs");
-    for (const id of BATTERY_PACK_IDS) {
+    for (const id of TASK_BATTERY_PACK_IDS) {
       expect(tagWithId(html, `t-task-pack-${id}`)).toBeTruthy();
-      expect(html).toContain(BATTERY_PACK_LABELS[id]);
+      expect(html).toContain(TASK_BATTERY_PACK_LABELS[id]);
     }
     expect(tagWithId(html, "t-task-packs-inherit")).toBeTruthy();
     expect(html).toContain("Inherit (none)");
+  });
+
+  it("offers the harness packs to task runs only, never as review packs", () => {
+    const html = view();
+    for (const id of HARNESS_PACK_IDS) {
+      expect(tagWithId(html, `t-task-pack-${id}`), id).toBeTruthy();
+      expect(() => tagWithId(html, `t-pack-${id}`), id).toThrow();
+    }
   });
 
   it("classic mode keeps the task checkboxes enabled while the review packs are disabled", () => {
     const html = view();
     expect(isDisabled(html, "t-pack-gstack-review")).toBe(true);
     expect(isDisabled(html, "t-task-packs-inherit")).toBe(false);
-    for (const id of BATTERY_PACK_IDS) {
+    for (const id of TASK_BATTERY_PACK_IDS) {
       expect(isDisabled(html, `t-task-pack-${id}`)).toBe(false);
     }
   });
@@ -492,7 +501,7 @@ describe("ReviewAgentFieldsView — Task agent packs (phase 7)", () => {
   it("disabled (saving) disables the task checkboxes too", () => {
     const html = view({ disabled: true });
     expect(isDisabled(html, "t-task-packs-inherit")).toBe(true);
-    for (const id of BATTERY_PACK_IDS) {
+    for (const id of TASK_BATTERY_PACK_IDS) {
       expect(isDisabled(html, `t-task-pack-${id}`)).toBe(true);
     }
   });
@@ -511,7 +520,7 @@ describe("ReviewAgentFieldsView — Task agent packs (phase 7)", () => {
       inherited: { ...NO_AGENT, taskBatteries: ["somnio-skills"] },
     });
     expect(html).toContain(
-      `Inherit (org default: ${BATTERY_PACK_LABELS["somnio-skills"]})`,
+      `Inherit (org default: ${TASK_BATTERY_PACK_LABELS["somnio-skills"]})`,
     );
     expect(tagWithId(html, "t-task-pack-somnio-skills")).toContain(
       'data-state="checked"',
@@ -531,7 +540,7 @@ describe("ReviewAgentFieldsView — Task agent packs (phase 7)", () => {
     expect(tagWithId(html, "t-task-packs-inherit")).toContain(
       'data-state="unchecked"',
     );
-    for (const id of BATTERY_PACK_IDS) {
+    for (const id of TASK_BATTERY_PACK_IDS) {
       expect(tagWithId(html, `t-task-pack-${id}`)).toContain(
         'data-state="unchecked"',
       );

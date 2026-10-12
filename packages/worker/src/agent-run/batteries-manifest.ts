@@ -33,7 +33,8 @@
  * mirrored by shared BATTERY_PACK_REQUIRES and by the bash preflight.
  *
  * Zero imports on purpose, so tests and Phase 5 can use it without adding a
- * dependency.
+ * dependency. harness-manifest.ts (the harness packs' separate manifest)
+ * reuses the shape helpers exported here; it never changes this profile.
  */
 
 export const BATTERIES_MANIFEST_REPO_PATH =
@@ -298,12 +299,12 @@ const DART_AOT_KEYS = [
 ] as const;
 const TOOL_SUBPATH_KEYS = ["src", "dest", "gitId"] as const;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** First key not in `allowed`, reported as `<at>.<key>`; strict shapes catch typos like `sha265`. */
-function findUnknownKey(
+export function findUnknownKey(
   record: Record<string, unknown>,
   allowed: readonly string[],
   at: string,
@@ -314,7 +315,10 @@ function findUnknownKey(
   return `${where}: unknown key`;
 }
 
-function findNonEmptyError(value: unknown, at: string): string | undefined {
+export function findNonEmptyError(
+  value: unknown,
+  at: string,
+): string | undefined {
   return typeof value === "string" && value.trim() !== ""
     ? undefined
     : `${at}: must be a non-empty string`;
@@ -332,7 +336,10 @@ function findPrefixError(
 }
 
 /** First string anywhere in `value` holding a control character or backslash. */
-function findUnsafeCharError(value: unknown, at: string): string | undefined {
+export function findUnsafeCharError(
+  value: unknown,
+  at: string,
+): string | undefined {
   if (typeof value === "string") {
     return UNSAFE_CHAR.test(value)
       ? `${at}: contains a control character or backslash`
@@ -355,7 +362,7 @@ function findUnsafeCharError(value: unknown, at: string): string | undefined {
 }
 
 /** Relative, forward-slash, no `..`/`.`/empty segments, no backslash. */
-function isSafeRelPath(value: unknown): value is string {
+export function isSafeRelPath(value: unknown): value is string {
   if (typeof value !== "string" || value === "") return false;
   if (value.startsWith("/") || value.includes("\\")) return false;
   return value
@@ -369,7 +376,7 @@ function hasForbiddenName(relPath: string): boolean {
     .some((segment) => FORBIDDEN_NAMES.includes(segment));
 }
 
-function findStringError(
+export function findStringError(
   value: unknown,
   pattern: RegExp,
   at: string,
@@ -454,7 +461,7 @@ function findHelperRefError(value: unknown, at: string): string | undefined {
   );
 }
 
-function findListError(
+export function findListError(
   value: unknown,
   at: string,
   findItemError: (item: unknown, itemAt: string) => string | undefined,
@@ -784,7 +791,7 @@ function findDroppedError(value: unknown, at: string): string | undefined {
 }
 
 /** Reports the first repeated `key` value as `<at>[i].<key>`. */
-function findDuplicateError(
+export function findDuplicateError(
   items: readonly object[],
   key: string,
   at: string,
