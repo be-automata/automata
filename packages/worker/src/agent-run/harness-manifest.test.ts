@@ -7,7 +7,7 @@ import { FORBIDDEN_NAMES } from "./batteries-manifest";
 import {
   FORBIDDEN_MCP_TOOL_PREFIXES,
   findHarnessManifestError,
-  frontmatterKeys,
+  parseFrontmatter,
   validateHarnessPackTree,
   type HarnessGitSetupPack,
   type HarnessManifest,
@@ -386,20 +386,49 @@ describe("FORBIDDEN_NAMES (review profile) is unchanged", () => {
   });
 });
 
-describe("frontmatterKeys", () => {
+describe("parseFrontmatter", () => {
   it("returns top-level keys only", () => {
     expect(
-      frontmatterKeys(
+      parseFrontmatter(
         "---\nname: x\nhooks:\n  PreToolUse:\n    - matcher: Bash\nallowed-tools:\n  - Read\n---\nbody: no\n",
       ),
-    ).toEqual(["name", "hooks", "allowed-tools"]);
+    ).toEqual({ keys: ["name", "hooks", "allowed-tools"], opaque: false });
   });
 
   it("handles CRLF and ignores a file without a closed leading block", () => {
-    expect(frontmatterKeys("---\r\nname: x\r\n---\r\n")).toEqual(["name"]);
-    expect(frontmatterKeys("name: x\n")).toEqual([]);
-    expect(frontmatterKeys("---\nname: x\n")).toEqual([]);
+    expect(parseFrontmatter("---\r\nname: x\r\n---\r\n").keys).toEqual([
+      "name",
+    ]);
+    expect(parseFrontmatter("name: x\n").keys).toEqual([]);
+    expect(parseFrontmatter("---\nname: x\n").keys).toEqual([]);
   });
+
+  it.each([
+    ['"mcpServers": {}', "mcpServers"],
+    ["'hooks':", "hooks"],
+    ['"permissionMode" : plan', "permissionMode"],
+    ["hooks :", "hooks"],
+  ])("unquotes the key of %j", (line, key) => {
+    expect(parseFrontmatter(`---\n${line}\n---\n`)).toEqual({
+      keys: [key],
+      opaque: false,
+    });
+  });
+
+  it("skips comments, blank lines and top-level list items", () => {
+    expect(parseFrontmatter("---\n# hooks: no\n\nname: x\n- a\n---\n")).toEqual(
+      { keys: ["name"], opaque: false },
+    );
+  });
+
+  it.each(["{hooks: {Stop: []}}", "? hooks", "<<: *grants", "\"hooks': x"])(
+    "marks %j as opaque",
+    (line) => {
+      expect(parseFrontmatter(`---\nname: x\n${line}\n---\n`).opaque).toBe(
+        true,
+      );
+    },
+  );
 });
 
 describe("validateHarnessPackTree", () => {
@@ -514,6 +543,36 @@ describe("validateHarnessPackTree", () => {
     expect(check(["careful"]).errors).toEqual([
       "careful/SKILL.md: frontmatter declares mcpServers",
       "careful/SKILL.md: frontmatter declares permissionMode",
+    ]);
+  });
+
+  it.each([
+    [
+      '"mcpServers":\n  x: {}',
+      "careful/SKILL.md: frontmatter declares mcpServers",
+    ],
+    [
+      "'permissionMode': plan",
+      "careful/SKILL.md: frontmatter declares permissionMode",
+    ],
+    [
+      "'hooks':\n  Stop: []",
+      "ship/SKILL.md: frontmatter declares hooks outside frontmatterHookSkills",
+    ],
+    [
+      '"hooks" :\n  Stop: []',
+      "ship/SKILL.md: frontmatter declares hooks outside frontmatterHookSkills",
+    ],
+  ])("rejects the quoted key in %j", (block, error) => {
+    const skill = error.split("/")[0]!;
+    write(`${skill}/SKILL.md`, `---\nname: ${skill}\n${block}\n---\n`);
+    expect(check(["careful"]).errors).toEqual([error]);
+  });
+
+  it("fails closed on a flow-style frontmatter line, even for an allowlisted skill", () => {
+    write("careful/SKILL.md", "---\nname: careful\n{hooks: {Stop: []}}\n---\n");
+    expect(check(["careful"]).errors).toEqual([
+      "careful/SKILL.md: frontmatter has a top-level line that is not a plain key",
     ]);
   });
 

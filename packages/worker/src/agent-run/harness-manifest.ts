@@ -450,18 +450,42 @@ export interface HarnessTreeReport {
   discard: string[];
 }
 
-/** Top-level keys of a leading `---` frontmatter block; [] when there is none. */
-export function frontmatterKeys(text: string): string[] {
+/** A top-level YAML key, bare or quoted with matching quotes: `hooks:`, `"hooks" :`. */
+const FRONTMATTER_KEY = /^(["']?)([A-Za-z0-9_-]+)\1\s*:/;
+
+/** A leading `---` frontmatter block, reduced to what the harness profile checks. */
+export interface Frontmatter {
+  /** Top-level keys, quotes removed. */
+  keys: string[];
+  /**
+   * True when a top-level line is neither a key, a comment, a list item nor
+   * an indented continuation (a flow mapping `{hooks: …}`, a `?` complex key,
+   * a `<<` merge): keys could hide there, so the caller fails closed.
+   */
+  opaque: boolean;
+}
+
+/** Parses the leading `---` block; no block (or no closing fence) = no keys. */
+export function parseFrontmatter(text: string): Frontmatter {
   const lines = text.split("\n").map((line) => line.replace(/\r$/, ""));
-  if (lines[0] !== "---") return [];
+  const none: Frontmatter = { keys: [], opaque: false };
+  if (lines[0] !== "---") return none;
   const keys: string[] = [];
+  let opaque = false;
   for (const line of lines.slice(1)) {
-    if (line === "---") return keys;
-    const match = /^([A-Za-z0-9_-]+):/.exec(line);
-    if (match?.[1] !== undefined) keys.push(match[1]);
+    if (line === "---") return { keys, opaque };
+    if (line.trim() === "" || /^[\s#]/.test(line) || line.startsWith("- ")) {
+      continue;
+    }
+    const key = FRONTMATTER_KEY.exec(line)?.[2];
+    if (key === undefined) {
+      opaque = true;
+    } else {
+      keys.push(key);
+    }
   }
   // No closing fence: not frontmatter.
-  return [];
+  return none;
 }
 
 function findFrontmatterErrors(
@@ -474,7 +498,13 @@ function findFrontmatterErrors(
     path.posix.basename(relPath) === "SKILL.md"
       ? path.posix.basename(path.posix.dirname(relPath))
       : undefined;
-  for (const key of frontmatterKeys(text)) {
+  const { keys, opaque } = parseFrontmatter(text);
+  if (opaque) {
+    errors.push(
+      `${relPath}: frontmatter has a top-level line that is not a plain key`,
+    );
+  }
+  for (const key of keys) {
     if (HARNESS_FORBIDDEN_FRONTMATTER_KEYS.includes(key)) {
       errors.push(`${relPath}: frontmatter declares ${key}`);
     } else if (
