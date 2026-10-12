@@ -72,7 +72,9 @@ are in `AGENT-UID-PROVISIONING.md`. Two things that will otherwise bite:
   default root is `os.tmpdir()` — 0700, owned by the worker's uid, untraversable
   by any other.
 - `WORKER_NODE_BIN` must be node **≥22.21.0 (22.x) or ≥24.0.0**. The worker
-  probes it at boot and refuses to start below that floor.
+  probes it at boot and refuses to start below that floor. The Linux box runs
+  exactly `nodejs=24.21.0-1nodesource1`, held with `apt-mark hold`
+  (`cloud-init.yaml`); see "Upgrading Node on a live box" below.
 - `WORKER_RUN_MEMORY_MAX` (#204) is the per-run memory ceiling and **requires**
   `WORKER_AGENT_USER` plus the `automata-worker.service.d/10-ceiling.conf`
   drop-in; set without either, the worker refuses to boot.
@@ -173,6 +175,50 @@ not a rolling restart:
 > workflow version across the swap before claiming zero-downtime. If unconfirmed,
 > fully drain (step 2 wait) before the code changes take effect — do not overlap a
 > code swap with a run mid-flight.
+
+## Upgrading Node on a live box (Linux)
+
+The box runs one exact NodeSource build, held with `apt-mark hold`. A major bump
+is a maintenance window, not a deploy: apt swaps `/usr/bin/node` underneath the
+running worker, so every run started afterwards gets its daemon and agent on the
+new Node while the worker is still on the old one. **Stop the worker first.**
+
+NodeSource publishes one repo per major, so once the repo is switched the old
+major can no longer be installed from apt. Download the rollback package
+**before** anything else:
+
+```bash
+# 0. rollback package, while the 22.x repo is still configured
+install -d -m 0700 /var/lib/automata/rollback
+cd /var/lib/automata/rollback && apt-get download nodejs=22.23.3-1nodesource1
+
+# 1. idle check by cgroup (not by uid), then stop
+ls /sys/fs/cgroup/automata-runs.slice/ 2>/dev/null   # no run-* dirs = idle
+systemctl stop automata-worker      # 0s with nothing in flight; if it hangs
+                                    # draining an empty box: systemctl kill -s SIGKILL automata-worker
+
+# 2. switch the repo, install the exact build, hold it
+apt-mark unhold nodejs || true
+curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource.sh && bash /tmp/nodesource.sh
+apt-get install -y --allow-change-held-packages nodejs=24.21.0-1nodesource1
+apt-mark hold nodejs
+
+# 3. reinstall the checkout AS ROOT (node_modules is root-owned; as automata it breaks)
+cd /opt/automata-platform && CI=1 pnpm install --frozen-lockfile; echo "exit=$?"
+
+# 4. verify before starting
+node -v && pnpm -v
+runuser -u automata-agent -- /usr/local/bin/claude --version
+systemctl start automata-worker
+journalctl -u automata-worker -f    # "listening for actions" + liveness heartbeat
+```
+
+Then confirm one review run completes. Keep the window under the 30-minute
+`scheduleTimeout` so queued runs do not expire.
+
+**Rollback:** stop the worker, `dpkg -i /var/lib/automata/rollback/nodejs_22.23.3-1nodesource1_amd64.deb`,
+`apt-mark hold nodejs`, repeat step 3, start. (Point `nodesource.sources` back at
+`node_22.x` if apt should keep resolving 22.)
 
 ## Daemon rebuild (required after any daemon change, e.g. Phase 0.2a)
 

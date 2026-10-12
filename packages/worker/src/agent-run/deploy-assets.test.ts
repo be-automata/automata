@@ -299,6 +299,21 @@ describe("packages/worker/deploy/linux/cloud-init.yaml (#192)", () => {
     expect(cloudInit).toMatch(/FATAL: NodeSource repo was not configured/);
   });
 
+  it("pins ONE exact Node build and holds it", () => {
+    // A floor let a box drift to whatever NodeSource shipped that hour, and the
+    // harness batteries' native prebuilds are built for one Node ABI. The exact
+    // version, the hold, and an exact-major assertion travel together: drop the
+    // hold and unattended-upgrades moves node under the installed batteries.
+    expect(cloudInit).toMatch(/^\s*NODE_MAJOR=24$/m);
+    expect(cloudInit).toMatch(
+      /^\s*NODE_DEB_VERSION=24\.\d+\.\d+-1nodesource1$/m,
+    );
+    expect(cloudInit).toContain('"nodejs=${NODE_DEB_VERSION}"');
+    expect(cloudInit).toMatch(/^\s*apt-mark hold nodejs$/m);
+    expect(cloudInit).toContain("setup_${NODE_MAJOR}.x");
+    expect(cloudInit).not.toMatch(/setup_22\.x/);
+  });
+
   it("writes the sentinel only AFTER the assertions", () => {
     // `/usr/local/automata/.provisioned` is the contract downstream checks
     // instead of cloud-init's own status. Hoisting it above the assertions
@@ -306,7 +321,7 @@ describe("packages/worker/deploy/linux/cloud-init.yaml (#192)", () => {
     // Anchored on the line that WRITES it — the path is also named in the
     // header comment, and matching that instead would pass no matter where
     // the write actually sits.
-    const floorCheck = cloudInit.indexOf("is below");
+    const floorCheck = cloudInit.indexOf("FATAL: nodejs is not held");
     const sentinel = cloudInit.indexOf(
       "date -uIseconds > /usr/local/automata/.provisioned",
     );
