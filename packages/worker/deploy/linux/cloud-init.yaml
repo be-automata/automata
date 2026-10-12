@@ -66,8 +66,12 @@ write_files:
       export DEBIAN_FRONTEND=noninteractive
 
       AGENT_USER=automata-agent
-      NODE_MAJOR_MIN=22
-      NODE_MINOR_MIN=21
+      # Exact, not a floor: the harness batteries (ruflo's better-sqlite3 and
+      # onnxruntime prebuilds) are built against one Node ABI, and a box that
+      # drifted to another major would load them and crash at run time. The
+      # version is held with apt-mark below so unattended-upgrades cannot move it.
+      NODE_MAJOR=24
+      NODE_DEB_VERSION=24.21.0-1nodesource1
       PNPM_VERSION=10.14.0
       # Pinned like node and pnpm above, and for the same reason: without it each
       # box provisions whatever happened to be latest that hour, so two boxes run
@@ -117,9 +121,9 @@ write_files:
         > /etc/apt/sources.list.d/cloudflared.list
 
       # ── Node: the repo script, then PROVE the repo took ──────────────────
-      # `setup_22.x` runs its own apt-get update, so it needs the lock free.
+      # `setup_24.x` runs its own apt-get update, so it needs the lock free.
       wait_for_apt
-      curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource.sh
+      curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/nodesource.sh
       bash /tmp/nodesource.sh
       # Without this check a failed repo add is indistinguishable from success:
       # the install below just picks up Ubuntu's nodejs and everything looks fine.
@@ -133,7 +137,8 @@ write_files:
       apt_get install -y \
         docker-ce docker-ce-cli containerd.io docker-buildx-plugin \
         docker-compose-plugin \
-        gh cloudflared nodejs
+        gh cloudflared "nodejs=${NODE_DEB_VERSION}"
+      apt-mark hold nodejs
 
       systemctl enable --now docker
 
@@ -195,16 +200,15 @@ write_files:
         /usr/local/automata /usr/local/automata/daemon
 
       # ── assertions: the box is provisioned only if these all hold ────────
-      NODE_MAJOR_MIN="$NODE_MAJOR_MIN" NODE_MINOR_MIN="$NODE_MINOR_MIN" \
-        node -e '
-          const [maj, min] = process.versions.node.split(".").map(Number);
-          const MAJ = Number(process.env.NODE_MAJOR_MIN);
-          const MIN = Number(process.env.NODE_MINOR_MIN);
-          if (maj < MAJ || (maj === MAJ && min < MIN)) {
-            console.error("FATAL: node " + process.versions.node + " is below " + MAJ + "." + MIN + ".0");
+      NODE_MAJOR="$NODE_MAJOR" node -e '
+          const maj = Number(process.versions.node.split(".")[0]);
+          if (maj !== Number(process.env.NODE_MAJOR)) {
+            console.error("FATAL: node " + process.versions.node + " is not " + process.env.NODE_MAJOR + ".x");
             process.exit(1);
           }
         '
+      apt-mark showhold | grep -qx nodejs \
+        || { echo "FATAL: nodejs is not held" >&2; exit 1; }
       pnpm --version >/dev/null
       # The agent uid must be able to RUN it, not merely find it on root's PATH.
       runuser -u "$AGENT_USER" -- /usr/local/bin/claude --version >/dev/null
