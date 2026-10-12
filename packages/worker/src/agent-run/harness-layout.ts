@@ -69,7 +69,7 @@ export function resolvePackDirTemplate(value: string, packDir: string): string {
 
 /**
  * The installer's harness hash recipe: sha256 over the harness.json bytes,
- * then, in manifest order, each pack's repo-relative `lockfile` when it names
+ * then, in manifest order, each pack's repo-relative `lockOverlay` when it names
  * one (the key arrives with the npm-lock installer; a pack without it adds
  * nothing).
  */
@@ -80,9 +80,9 @@ export async function computeHarnessManifestHash(
 ): Promise<string> {
   const hash = createHash("sha256").update(manifestBytes);
   for (const pack of manifest.packs) {
-    const lockfile = (pack as { lockfile?: unknown }).lockfile;
-    if (typeof lockfile === "string") {
-      hash.update(await fs.readFile(path.join(repoRoot, lockfile)));
+    const lockOverlay = (pack as { lockOverlay?: unknown }).lockOverlay;
+    if (typeof lockOverlay === "string") {
+      hash.update(await fs.readFile(path.join(repoRoot, lockOverlay)));
     }
   }
   return hash.digest("hex");
