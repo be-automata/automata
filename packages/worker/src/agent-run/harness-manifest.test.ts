@@ -425,12 +425,29 @@ describe("parseFrontmatter", () => {
     ).toEqual({ keys: ["name", "hooks", "allowed-tools"], opaque: false });
   });
 
-  it("handles CRLF and ignores a file without a closed leading block", () => {
-    expect(parseFrontmatter("---\r\nname: x\r\n---\r\n").keys).toEqual([
-      "name",
-    ]);
-    expect(parseFrontmatter("name: x\n").keys).toEqual([]);
-    expect(parseFrontmatter("---\nname: x\n").keys).toEqual([]);
+  it("ignores a file without a leading fence", () => {
+    expect(parseFrontmatter("name: x\n")).toEqual({ keys: [], opaque: false });
+    expect(parseFrontmatter("")).toEqual({ keys: [], opaque: false });
+  });
+
+  it.each([
+    ["CRLF", "---\r\nhooks: x\r\n---\r\n"],
+    ["bare CR", "---\rhooks: x\r---\r"],
+    ["a leading BOM", "\uFEFF---\nhooks: x\n---\n"],
+    ["trailing blanks on both fences", "--- \nhooks: x\n---\t\n"],
+  ])("reads the keys of a block with %s", (_name, text) => {
+    expect(parseFrontmatter(text)).toEqual({ keys: ["hooks"], opaque: false });
+  });
+
+  it("marks a first line that starts with --- but is no fence as opaque", () => {
+    expect(parseFrontmatter("---x\nhooks: x\n---\n").opaque).toBe(true);
+  });
+
+  it("marks an unterminated block as opaque, keeping the keys it saw", () => {
+    expect(parseFrontmatter("---\nhooks: x\n")).toEqual({
+      keys: ["hooks"],
+      opaque: true,
+    });
   });
 
   it.each([
@@ -621,6 +638,33 @@ describe("validateHarnessPackTree", () => {
     const skill = error.split("/")[0]!;
     write(`${skill}/SKILL.md`, `---\nname: ${skill}\n${block}\n---\n`);
     expect(check(["careful"]).errors).toEqual([error]);
+  });
+
+  it.each([
+    [
+      "a fence with trailing blanks",
+      "--- \nname: ship\nhooks:\n  Stop: []\n---\n",
+    ],
+    ["a leading BOM", "\uFEFF---\nname: ship\nhooks:\n  Stop: []\n---\n"],
+    [
+      "CRLF line endings",
+      "---\r\nname: ship\r\nhooks:\r\n  Stop: []\r\n---\r\n",
+    ],
+  ])("rejects hooks behind %s", (_name, text) => {
+    write("ship/SKILL.md", text);
+    expect(check(["careful"]).errors).toEqual([
+      "ship/SKILL.md: frontmatter declares hooks outside frontmatterHookSkills",
+    ]);
+  });
+
+  it.each([
+    ["a ---x first line", "---x\nname: ship\nhooks:\n  Stop: []\n---\n"],
+    ["an unterminated block", "---\nname: ship\nmcpServers:\n  x: {}\n"],
+  ])("fails closed on %s", (_name, text) => {
+    write("ship/SKILL.md", text);
+    expect(check(["careful"]).errors).toContain(
+      "ship/SKILL.md: frontmatter has a top-level line that is not a plain key",
+    );
   });
 
   it("fails closed on a flow-style frontmatter line, even for an allowlisted skill", () => {

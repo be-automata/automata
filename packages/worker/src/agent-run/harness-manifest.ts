@@ -480,15 +480,28 @@ export interface Frontmatter {
   opaque: boolean;
 }
 
-/** Parses the leading `---` block; no block (or no closing fence) = no keys. */
+/** A frontmatter fence as lenient parsers accept it: `---` plus trailing blanks. */
+const FRONTMATTER_FENCE = /^---[ \t]*$/;
+
+/**
+ * Parses the leading `---` block. Fails closed on every variant a lenient
+ * parser might still read as frontmatter: a leading BOM is stripped, CRLF and
+ * CR become LF, and a fence may carry trailing blanks. A first line that
+ * starts with `---` but is no fence, or a block with no closing fence, is
+ * `opaque` (keys found so far are still reported). No leading `---` = none.
+ */
 export function parseFrontmatter(text: string): Frontmatter {
-  const lines = text.split("\n").map((line) => line.replace(/\r$/, ""));
-  const none: Frontmatter = { keys: [], opaque: false };
-  if (lines[0] !== "---") return none;
+  const lines = text
+    .replace(/^\uFEFF/, "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n");
+  const first = lines[0] ?? "";
+  if (!first.startsWith("---")) return { keys: [], opaque: false };
+  if (!FRONTMATTER_FENCE.test(first)) return { keys: [], opaque: true };
   const keys: string[] = [];
   let opaque = false;
   for (const line of lines.slice(1)) {
-    if (line === "---") return { keys, opaque };
+    if (FRONTMATTER_FENCE.test(line)) return { keys, opaque };
     if (line.trim() === "" || /^[\s#]/.test(line) || line.startsWith("- ")) {
       continue;
     }
@@ -499,8 +512,8 @@ export function parseFrontmatter(text: string): Frontmatter {
       keys.push(key);
     }
   }
-  // No closing fence: not frontmatter.
-  return none;
+  // No closing fence: a lenient parser may still read the block.
+  return { keys, opaque: true };
 }
 
 function findFrontmatterErrors(
