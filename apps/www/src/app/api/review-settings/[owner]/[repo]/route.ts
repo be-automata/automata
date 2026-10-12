@@ -9,6 +9,7 @@ import {
   getRepoReviewSetting,
 } from "@terragon/shared/model/repo-review-settings";
 import {
+  findHarnessPacksGateResponse,
   parseReviewAgentPatch,
   parseReviewDraftPrs,
   parseSelfHealPatch,
@@ -165,6 +166,14 @@ export async function PUT(
     repoFullName,
   });
   if (denied) return denied;
+  const harnessGate = await findHarnessPacksGateResponse({
+    db,
+    userId: ctx.userId,
+    organizationId: ctx.organizationId,
+    repoFullName,
+    patch,
+  });
+  if (harnessGate) return harnessGate;
 
   // Optimistic concurrency, enforced by the DATABASE in the write itself
   // (ON CONFLICT … DO UPDATE … WHERE updated_at = expected): two admins who

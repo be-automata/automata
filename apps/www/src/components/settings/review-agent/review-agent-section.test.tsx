@@ -290,6 +290,38 @@ const ORCHESTRATED_ONLY = [
 ];
 
 describe("ReviewAgentSectionView", () => {
+  it("passes the harnessBatteries flag to every editor; off by default", () => {
+    const state = ready({
+      availableRepos: ["o/new"],
+      overrides: [
+        {
+          ...NO_AGENT,
+          repoFullName: "o/r",
+          updatedAt: "2026-10-12T00:00:00.000Z",
+        },
+      ],
+    });
+    const off = render(state);
+    const on = renderToStaticMarkup(
+      <ReviewAgentSectionView
+        state={state}
+        actions={actions}
+        offerHarnessPacks
+      />,
+    );
+    for (const prefix of [
+      "review-agent-org",
+      "review-agent-repo-o/r",
+      "review-agent-add",
+    ]) {
+      expect(
+        () => tagWithId(off, `${prefix}-task-pack-gstack`),
+        prefix,
+      ).toThrow();
+      expect(tagWithId(on, `${prefix}-task-pack-gstack`), prefix).toBeTruthy();
+    }
+  });
+
   it("loading → skeleton", () => {
     expect(render({ kind: "loading" })).toContain(
       'data-testid="review-agent-skeleton"',
@@ -452,6 +484,7 @@ describe("ReviewAgentFieldsView — Task agent packs (phase 7)", () => {
       stored: ReviewAgentValues;
       inherited: ReviewAgentValues | null;
       disabled: boolean;
+      offerHarnessPacks: boolean;
     }> = {},
   ) => {
     const stored = over.stored ?? { ...NO_AGENT };
@@ -463,6 +496,7 @@ describe("ReviewAgentFieldsView — Task agent packs (phase 7)", () => {
         stored={stored}
         inherited={over.inherited ?? null}
         disabled={over.disabled ?? false}
+        offerHarnessPacks={over.offerHarnessPacks ?? true}
         saveLabel="Save"
         onChange={vi.fn()}
         onSave={vi.fn()}
@@ -487,6 +521,40 @@ describe("ReviewAgentFieldsView — Task agent packs (phase 7)", () => {
       expect(tagWithId(html, `t-task-pack-${id}`), id).toBeTruthy();
       expect(() => tagWithId(html, `t-pack-${id}`), id).toThrow();
     }
+  });
+
+  it("hides the harness packs while the harnessBatteries flag is off", () => {
+    const html = view({ offerHarnessPacks: false });
+    for (const id of HARNESS_PACK_IDS) {
+      expect(() => tagWithId(html, `t-task-pack-${id}`), id).toThrow();
+      expect(html).not.toContain(TASK_BATTERY_PACK_LABELS[id]);
+    }
+    expect(tagWithId(html, "t-task-pack-somnio-skills")).toBeTruthy();
+  });
+
+  it("keeps a saved harness pack visible and checked with the flag off, so it can be removed", () => {
+    const html = view({
+      offerHarnessPacks: false,
+      stored: { ...NO_AGENT, taskBatteries: ["ruflo"] },
+    });
+    expect(tagWithId(html, "t-task-pack-ruflo")).toContain(
+      'data-state="checked"',
+    );
+    expect(isDisabled(html, "t-task-pack-ruflo")).toBe(false);
+    expect(() => tagWithId(html, "t-task-pack-gstack")).toThrow();
+    expect(() => tagWithId(html, "t-task-pack-gsd")).toThrow();
+  });
+
+  it("keeps an inherited harness pack visible with the flag off", () => {
+    const html = view({
+      offerHarnessPacks: false,
+      scope: "repo",
+      inherited: { ...NO_AGENT, taskBatteries: ["gsd"] },
+    });
+    expect(tagWithId(html, "t-task-pack-gsd")).toContain(
+      'data-state="checked"',
+    );
+    expect(() => tagWithId(html, "t-task-pack-gstack")).toThrow();
   });
 
   it("classic mode keeps the task checkboxes enabled while the review packs are disabled", () => {

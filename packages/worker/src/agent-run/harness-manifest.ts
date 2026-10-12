@@ -547,6 +547,11 @@ function findFrontmatterErrors(
   return errors;
 }
 
+/** `.md` in any case: a case-insensitive filesystem serves `X.MD` as markdown too. */
+function isMarkdownName(name: string): boolean {
+  return name.toLowerCase().endsWith(".md");
+}
+
 /**
  * Checks an installed harness pack dir against the harness profile. Pure apart
  * from reads; never follows a symlink and never throws for a bad entry.
@@ -557,9 +562,10 @@ function findFrontmatterErrors(
  *   batteries.json `forbiddenHelperTokens` (the helpers ARE the pack).
  * - HARNESS_DISCARD_NAMES outside node_modules are reported in `discard`
  *   (never linked); inside node_modules they are package data.
- * - Markdown frontmatter outside node_modules: `allowed-tools` is allowed,
- *   `hooks` only in the SKILL.md of a `frontmatterHookSkills` skill, and
- *   `mcpServers`/`permissionMode` never.
+ * - Markdown frontmatter outside node_modules (any-case `.md`, including an
+ *   in-pack symlink named `.md`, checked under the link's path): `allowed-tools`
+ *   is allowed, `hooks` only in the SKILL.md of a `frontmatterHookSkills`
+ *   skill, and `mcpServers`/`permissionMode` never.
  */
 export function validateHarnessPackTree(
   packDir: string,
@@ -584,6 +590,20 @@ export function validateHarnessPackTree(
         }
         if (!target.startsWith(realPackDir + path.sep)) {
           report.errors.push(`${relPath}: symlink escapes the pack dir`);
+        } else if (
+          !inNodeModules &&
+          isMarkdownName(entry.name) &&
+          fs.statSync(target).isFile()
+        ) {
+          // Claude Code loads the file under the LINK's path, so the link's
+          // skill dir decides whether its hooks are allowed.
+          report.errors.push(
+            ...findFrontmatterErrors(
+              relPath,
+              fs.readFileSync(target, "utf8"),
+              frontmatterHookSkills,
+            ),
+          );
         }
         continue;
       }
@@ -595,7 +615,7 @@ export function validateHarnessPackTree(
         walk(relPath, inNodeModules || entry.name === "node_modules");
         continue;
       }
-      if (!inNodeModules && entry.isFile() && entry.name.endsWith(".md")) {
+      if (!inNodeModules && entry.isFile() && isMarkdownName(entry.name)) {
         report.errors.push(
           ...findFrontmatterErrors(
             relPath,

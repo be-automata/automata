@@ -141,6 +141,11 @@ export const featureFlagsDefinitions = {
     description:
       "Global switch for the audit self-healing loop. Off stops every self-heal GitHub effect and dispatch immediately; reviews are unaffected.",
   },
+  harnessBatteries: {
+    defaultValue: false,
+    description:
+      "Offer the gstack/GSD/ruflo harness packs in the task-pack picker; turn on only after the harness installer and run seeding are deployed to the execution box. Off also refuses a settings write that adds a harness pack (an already-saved one can still be kept or removed).",
+  },
 } as const satisfies Record<string, FeatureFlagDefinition>;
 
 export type FeatureFlagName = keyof typeof featureFlagsDefinitions;

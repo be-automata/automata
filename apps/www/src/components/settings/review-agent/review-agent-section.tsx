@@ -14,12 +14,14 @@ import {
   TASK_BATTERY_PACK_IDS,
   TASK_BATTERY_PACK_LABELS,
   effectiveReviewMode,
+  isHarnessPackId,
   pickReviewAgentFields,
   type ReviewAgentValues,
   type ReviewMode,
   type TaskBatteryPackId,
 } from "@terragon/shared/model/review-agent-settings";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { useFeatureFlag } from "@/hooks/use-feature-flag";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -297,6 +299,7 @@ export function ReviewAgentFieldsView({
   disabled,
   saveLabel,
   saveBlocked = false,
+  offerHarnessPacks = false,
   onChange,
   onSave,
 }: {
@@ -309,6 +312,8 @@ export function ReviewAgentFieldsView({
   saveLabel: string;
   /** Extra reason the Save button stays disabled (e.g. no repo picked). */
   saveBlocked?: boolean;
+  /** The `harnessBatteries` flag: offer gstack/GSD/ruflo as task packs. */
+  offerHarnessPacks?: boolean;
   onChange: (draft: ReviewAgentDraft) => void;
   onSave: (patch: ReviewAgentPatch) => void;
 }) {
@@ -327,6 +332,18 @@ export function ReviewAgentFieldsView({
   const inheritedTaskBatteries = inherited?.taskBatteries ?? [
     ...DEFAULT_TASK_BATTERIES,
   ];
+  // Harness packs are offered only behind the flag, but one that is already
+  // saved, drafted or inherited stays visible so it can be seen and removed.
+  const taskPackIds = TASK_BATTERY_PACK_IDS.filter(
+    (id) =>
+      !isHarnessPackId(id) ||
+      offerHarnessPacks ||
+      [
+        ...(stored.taskBatteries ?? []),
+        ...(draft.taskBatteries ?? []),
+        ...inheritedTaskBatteries,
+      ].includes(id),
+  );
   const taskInheritLabel =
     scope === "org"
       ? "Inherit (none)"
@@ -384,7 +401,7 @@ export function ReviewAgentFieldsView({
         inheritId={`${idPrefix}-task-packs-inherit`}
         inheritLabel={taskInheritLabel}
         packIdPrefix={`${idPrefix}-task-pack-`}
-        ids={TASK_BATTERY_PACK_IDS}
+        ids={taskPackIds}
         labels={TASK_BATTERY_PACK_LABELS}
         value={draft.taskBatteries}
         inherited={inheritedTaskBatteries}
@@ -450,6 +467,7 @@ function ReviewAgentEditor({
   inherited,
   disabled,
   saveLabel,
+  offerHarnessPacks,
   onSave,
 }: {
   idPrefix: string;
@@ -458,6 +476,7 @@ function ReviewAgentEditor({
   inherited: ReviewAgentValues | null;
   disabled: boolean;
   saveLabel: string;
+  offerHarnessPacks: boolean;
   onSave: (patch: ReviewAgentPatch) => void;
 }) {
   const [draft, setDraft] = useState(() => draftFromValues(stored));
@@ -470,6 +489,7 @@ function ReviewAgentEditor({
       inherited={inherited}
       disabled={disabled}
       saveLabel={saveLabel}
+      offerHarnessPacks={offerHarnessPacks}
       onChange={setDraft}
       onSave={onSave}
     />
@@ -507,9 +527,12 @@ export interface ReviewAgentSectionActions {
 export function ReviewAgentSectionView({
   state,
   actions,
+  offerHarnessPacks = false,
 }: {
   state: ReviewAgentSectionState;
   actions: ReviewAgentSectionActions;
+  /** The `harnessBatteries` flag (see ReviewAgentFieldsView). */
+  offerHarnessPacks?: boolean;
 }) {
   return (
     <SettingsSection
@@ -545,6 +568,7 @@ export function ReviewAgentSectionView({
               inherited={null}
               disabled={state.saving}
               saveLabel="Save org default"
+              offerHarnessPacks={offerHarnessPacks}
               onSave={actions.onSaveDefault}
             />
           </div>
@@ -592,6 +616,7 @@ export function ReviewAgentSectionView({
                       inherited={state.orgDefault}
                       disabled={state.saving}
                       saveLabel="Save override"
+                      offerHarnessPacks={offerHarnessPacks}
                       onSave={(patch) => actions.onSaveOverride(row, patch)}
                     />
                   </li>
@@ -603,6 +628,7 @@ export function ReviewAgentSectionView({
                 repos={state.availableRepos}
                 inherited={state.orgDefault}
                 disabled={state.saving}
+                offerHarnessPacks={offerHarnessPacks}
                 onAdd={actions.onAddOverride}
               />
             )}
@@ -618,11 +644,13 @@ function AddReviewAgentOverride({
   repos,
   inherited,
   disabled,
+  offerHarnessPacks,
   onAdd,
 }: {
   repos: string[];
   inherited: ReviewAgentValues;
   disabled: boolean;
+  offerHarnessPacks: boolean;
   onAdd: (repoFullName: string, patch: ReviewAgentPatch) => void;
 }) {
   const [repo, setRepo] = useState("");
@@ -650,6 +678,7 @@ function AddReviewAgentOverride({
         inherited={inherited}
         disabled={disabled}
         saveLabel="Add override"
+        offerHarnessPacks={offerHarnessPacks}
         saveBlocked={repo === ""}
         onChange={setDraft}
         onSave={(patch) => {
@@ -785,5 +814,12 @@ export function useReviewAgentSectionModel(): {
 /** Thin container: binds the model to the pure view. */
 export function ReviewAgentSection() {
   const { state, actions } = useReviewAgentSectionModel();
-  return <ReviewAgentSectionView state={state} actions={actions} />;
+  const offerHarnessPacks = useFeatureFlag("harnessBatteries");
+  return (
+    <ReviewAgentSectionView
+      state={state}
+      actions={actions}
+      offerHarnessPacks={offerHarnessPacks}
+    />
+  );
 }

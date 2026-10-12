@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
+import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import {
+  getRepoReviewSetting,
   isSupersedePolicy,
   SUPERSEDE_POLICIES,
 } from "@terragon/shared/model/repo-review-settings";
@@ -7,6 +9,7 @@ import type { RepoReviewSetting } from "@terragon/shared/db/types";
 import {
   REVIEW_AGENT_FIELDS,
   findReviewAgentFieldError,
+  isHarnessPackId,
   isValidReviewAgentPatch,
   pickReviewAgentFields,
   type ReviewAgentFieldsPatch,
@@ -132,6 +135,52 @@ export function parseReviewAgentPatch(
     };
   }
   return { patch: raw };
+}
+
+/**
+ * The harness packs (gstack, GSD, ruflo) stay behind the `harnessBatteries`
+ * flag until the box installs and seeds them. A write that ADDS a harness id
+ * the row does not already hold is refused while the flag is off for the
+ * caller. Keeping or removing an already-stored one is always allowed, so
+ * turning the flag back off never strands a row; a rollout that writes the
+ * table directly is not a route caller and is unaffected. The row and the
+ * flag are read only when the patch names a harness id at all.
+ */
+export async function findHarnessPacksGateResponse({
+  db,
+  userId,
+  organizationId,
+  repoFullName,
+  patch,
+}: {
+  db: DB;
+  userId: string;
+  organizationId: string;
+  repoFullName: string;
+  patch: ReviewAgentFieldsPatch;
+}): Promise<NextResponse | undefined> {
+  const harnessIds = (patch.taskBatteries ?? []).filter(isHarnessPackId);
+  if (harnessIds.length === 0) return undefined;
+  const stored = await getRepoReviewSetting({
+    db,
+    organizationId,
+    repoFullName,
+  });
+  const added = harnessIds.filter(
+    (id) => !(stored?.taskBatteries ?? []).includes(id),
+  );
+  if (added.length === 0) return undefined;
+  if (
+    await getFeatureFlagForUser({ db, userId, flagName: "harnessBatteries" })
+  ) {
+    return undefined;
+  }
+  return NextResponse.json(
+    {
+      error: `taskBatteries: ${added.join(", ")} cannot be selected yet; the harness packs are not enabled for this account`,
+    },
+    { status: 400 },
+  );
 }
 
 /**

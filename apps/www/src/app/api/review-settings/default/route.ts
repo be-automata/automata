@@ -10,6 +10,7 @@ import {
   RepoReviewSettingConflictError,
 } from "@terragon/shared/model/repo-review-settings";
 import {
+  findHarnessPacksGateResponse,
   parseReviewAgentPatch,
   parseReviewDraftPrs,
   parseSelfHealPatch,
@@ -114,6 +115,14 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
   if ("errorResponse" in drafts) return drafts.errorResponse;
   const reviewAgent = parseReviewAgentPatch(body);
   if ("errorResponse" in reviewAgent) return reviewAgent.errorResponse;
+  const harnessGate = await findHarnessPacksGateResponse({
+    db,
+    userId: ctx.userId,
+    organizationId: ctx.organizationId,
+    repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+    patch: reviewAgent.patch,
+  });
+  if (harnessGate) return harnessGate;
   const selfHeal = parseSelfHealPatch(body, { isOrgDefaultRow: true });
   if ("errorResponse" in selfHeal) return selfHeal.errorResponse;
   const patch = {

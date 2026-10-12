@@ -674,6 +674,52 @@ describe("validateHarnessPackTree", () => {
     ]);
   });
 
+  it("checks an in-pack symlinked .md under the LINK's skill attribution", () => {
+    write(
+      "careful/real.md",
+      "---\nname: careful\nhooks:\n  PreToolUse: []\n---\n",
+    );
+    fs.mkdirSync(path.join(packDir, "ship"));
+    fs.symlinkSync(
+      "../careful/real.md",
+      path.join(packDir, "ship", "SKILL.md"),
+    );
+    fs.mkdirSync(path.join(packDir, "guard"));
+    fs.symlinkSync(
+      "../careful/real.md",
+      path.join(packDir, "guard", "SKILL.md"),
+    );
+    // careful/real.md itself is not a SKILL.md: its own hooks are refused too.
+    expect(check(["careful", "guard"]).errors).toEqual([
+      "careful/real.md: frontmatter declares hooks outside frontmatterHookSkills",
+      "ship/SKILL.md: frontmatter declares hooks outside frontmatterHookSkills",
+    ]);
+  });
+
+  it("checks a symlinked .md target that is not itself named .md", () => {
+    write("data/notes.txt", "---\nname: x\npermissionMode: plan\n---\n");
+    fs.symlinkSync("data/notes.txt", path.join(packDir, "README.md"));
+    expect(check().errors).toEqual([
+      "README.md: frontmatter declares permissionMode",
+    ]);
+  });
+
+  it("ignores a symlinked .md that points at a directory", () => {
+    fs.mkdirSync(path.join(packDir, "docs"));
+    fs.symlinkSync("docs", path.join(packDir, "docs.md"));
+    expect(check().errors).toEqual([]);
+  });
+
+  it.each(["SKILL.MD", "notes.Md"])(
+    "polices an upper- or mixed-case %s file",
+    (name) => {
+      write(`ship/${name}`, "---\nname: ship\nmcpServers:\n  x: {}\n---\n");
+      expect(check().errors).toEqual([
+        `ship/${name}: frontmatter declares mcpServers`,
+      ]);
+    },
+  );
+
   it("does not police markdown inside node_modules (package data, never linked)", () => {
     write(
       "node_modules/@claude-flow/cli/.claude/agents/a.md",
