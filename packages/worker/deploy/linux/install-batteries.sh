@@ -166,7 +166,7 @@ HARNESS_PROBE_REPO_PATH="packages/worker/deploy/linux/harness-mcp-probe.mjs"
 HARNESS_DOCTOR_REPO_PATH="packages/worker/deploy/linux/automata-batteries"
 # Part of every harness pack stamp. Bump it whenever a harness stage changes
 # what lands in a pack dir, so the next run rebuilds instead of SKIPPING.
-HARNESS_OUTPUT_VERSION=1
+HARNESS_OUTPUT_VERSION=2
 # The build account. A FIXED system uid, chosen outside 990-999 (where
 # useradd --system allocates, and where the agent account's 999 already
 # collides with the engine's Postgres image) and absent from every container
@@ -178,6 +178,8 @@ NODE_BIN="/usr/bin/node"
 NPM_REGISTRY="https://registry.npmjs.org/"
 # Harness builds download ~3 GB and leave ~2.5 GB of packs.
 HARNESS_MIN_FREE_KB=$((5 * 1024 * 1024))
+# ...and their downloads pass through WORK first.
+HARNESS_MIN_WORK_KB=$((1024 * 1024))
 APPARMOR_DIR="/etc/apparmor.d"
 # The Ubuntu 24.04 runtime libraries Playwright's Chromium needs (the
 # `playwright install-deps chromium` list for ubuntu24.04-x64, plus fonts).
@@ -288,6 +290,8 @@ TOOL_ROWS=""
 TOOLS_OK=" "
 # The harness manifest copy read from HEAD (empty when HEAD has none).
 HARNESS=""
+# The empty mount-point placeholder of a gstack build in progress (on_exit).
+HARNESS_PLACEHOLDER=""
 
 # Every git call against the automata-owned checkout goes through here.
 git_repo() {
@@ -403,10 +407,14 @@ on_exit() {
     status=1
   fi
   if [ -n "$WORK" ] && [ "$(id -u)" = "0" ]; then
-    pkill -KILL -u "$BUILD_USER" >/dev/null 2>&1 || true
+    kill_build_processes >/dev/null 2>&1 || true
   fi
   if [ -n "$ROOT" ] && [ "$FINISHED" -eq 0 ]; then
     rm -rf "$ROOT"/.staging.harness.* 2>/dev/null || true
+  fi
+  # An aborted gstack build may leave its EMPTY mount-point placeholder.
+  if [ -n "$HARNESS_PLACEHOLDER" ]; then
+    rmdir "$HARNESS_PLACEHOLDER" 2>/dev/null || true
   fi
   [ -n "$VERIFY_HOME" ] && rm -rf "$VERIFY_HOME"
   [ -n "$WORK" ] && rm -rf "$WORK"
@@ -1865,6 +1873,10 @@ harness_shape_errors() {
         "prebuilds must be pinned github linux-x64 node prebuild downloads": (($p.prebuilds // []) | type == "array" and all(
           (.path | safe_rel and startswith("node_modules/")) and (.member | safe_rel) and (.sha256 | sha256)
           and (.url | type == "string" and test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*-node-v[0-9]+-linux-x64\\.tar\\.gz$")))),
+        "prefetch must be sha256-pinned huggingface files at a fixed revision, placed under node_modules/": ((($p.prefetch // []) | type == "array" and all(
+          (.path | safe_rel and startswith("node_modules/")) and (.sha256 | sha256)
+          and (.url | type == "string" and test("^https://huggingface\\.co/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/resolve/[0-9a-f]{40}/[A-Za-z0-9_./-]+$"))))
+          and (($p.prefetch // []) | map(.path) | length == (unique | length))),
         "postInstall must be an argv list": (($p.postInstall // ["x"]) | type == "array" and length > 0 and (.[0] | safe_rel) and (.[1:] | all(word or . == "{{configDir}}"))),
         "warmup tools must be allowlisted, with plain string arguments": (($p.warmup // []) | type == "array" and all(
           (.tool as $t | ($p.toolAllowlist // []) | index($t) != null)
@@ -1971,14 +1983,29 @@ harness_at_pin() {
 # name until the rename publishes it.
 BUILD_VIEW_SRC=""
 BUILD_VIEW_DST=""
+# When set, as_build runs in a network namespace with no route out: a step that
+# must not download (the warmup) fails instead of fetching unpinned bytes.
+BUILD_OFFLINE=""
+# The transient systemd scopes as_build started (kill_build_processes ends them).
+BUILD_SCOPES=""
 
 # as_build <home> <cwd> <PATH> [NAME=value...] -- <argv...>: argv as the build
-# account under env -i, with a fixed npm cache, registry and no user config.
-# <cwd> is entered inside the build view when one is set.
+# account under env -i, with a fixed npm cache, registry and no user config, in
+# a new session (no controlling terminal to inject keystrokes into) with stdin
+# closed. On a systemd box each call is its own transient scope, so whatever it
+# leaves running is killed with the scope. <cwd> is entered inside the build
+# view when one is set.
+#
+# THE ROOT-SIDE RULE: once any build command has run, root never opens, writes,
+# chmods or chowns a path under the build tree (it is the build account's to
+# replace with a link). Root-produced inputs go to <stage>/in (root, 0755,
+# read-only to the build), root-consumed outputs come back on stdout or into
+# <stage>/out (root, 0700), and the build places inputs itself (place_input).
+# Only after kill_build_processes and harden_build_tree does root assemble.
 # shellcheck disable=SC2016 # the sh -c script expands its own positional args
 as_build() {
-  local home="$1" cwd="$2" path="$3"
-  local -a extra=() view=(/bin/sh -c 'cd "$0" && exec "$@"' "$cwd")
+  local home="$1" cwd="$2" path="$3" unit
+  local -a extra=() view=(/bin/sh -c 'cd "$0" && exec "$@"' "$cwd") wrap=()
   shift 3
   while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
     extra+=("$1")
@@ -1990,25 +2017,36 @@ as_build() {
       'mount --bind "$0" "$1" && cd "$2" && shift 2 && exec "$@"' \
       "$BUILD_VIEW_SRC" "$BUILD_VIEW_DST" "$cwd")
   fi
+  if [ -d /run/systemd/system ]; then
+    unit="automata-harness-build-$$-$RANDOM"
+    BUILD_SCOPES="$BUILD_SCOPES $unit"
+    wrap=(systemd-run --scope --quiet --collect --unit "$unit" -p TasksMax=4096 --)
+  fi
+  [ -z "$BUILD_OFFLINE" ] || wrap+=(unshare --net --)
   (
     cd / &&
-      "${view[@]}" runuser -u "$BUILD_USER" -- env -i HOME="$home" PATH="$path" LANG=C.UTF-8 \
+      ${wrap[@]+"${wrap[@]}"} "${view[@]}" setsid -w runuser -u "$BUILD_USER" -- env -i HOME="$home" PATH="$path" LANG=C.UTF-8 \
         TMPDIR="$home/../tmp" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
         GIT_TERMINAL_PROMPT=0 npm_config_cache="$home/../npm-cache" \
         npm_config_registry="$NPM_REGISTRY" npm_config_userconfig="$home/../npmrc" \
         npm_config_globalconfig="$home/../npmrc-global" npm_config_update_notifier=false \
         npm_config_fund=false npm_config_audit=false ${extra[@]+"${extra[@]}"} \
-        timeout 1800 "$@"
+        timeout 1800 "$@" </dev/null
   )
 }
 
-# kill_build_processes: nothing the build started may outlive its stage. A
-# zombie is already dead (it waits for its parent, or PID 1, to reap it), so
-# only live states count.
+# kill_build_processes: nothing the build started may outlive its stage: every
+# transient scope is SIGKILLed, then every process of the build uid (on a box
+# without systemd that uid sweep is the whole fence). A zombie is already dead
+# (it waits for its parent, or PID 1, to reap it), so only live states count.
 kill_build_processes() {
-  local n
-  pkill -KILL -u "$BUILD_USER" >/dev/null 2>&1 || true
+  local n unit
+  for unit in $BUILD_SCOPES; do
+    systemctl kill --signal=KILL "$unit.scope" >/dev/null 2>&1 || true
+  done
+  BUILD_SCOPES=""
   for n in 1 2 3 4 5 6 7 8 9 10; do
+    pkill -KILL -u "$BUILD_USER" >/dev/null 2>&1 || true
     # shellcheck disable=SC2009 # pgrep has no portable "not a zombie" filter
     ps -u "$BUILD_USER" -o stat= 2>/dev/null | grep -qv '^Z' || return 0
     sleep 1
@@ -2017,10 +2055,89 @@ kill_build_processes() {
   return 1
 }
 
+# write_input <in dir> <name>: stdin into the root-owned input dir, through a
+# temp file and a rename inside that dir (never a path the build can name).
+write_input() {
+  local in="$1" name="$2"
+  cat >"$in/.$name.tmp" && chmod 0644 "$in/.$name.tmp" && mv -f "$in/.$name.tmp" "$in/$name"
+}
+
+# place_input <build home> <input file> <dest> <mode>: the BUILD account copies
+# a root-produced input into its own tree; a link it planted at <dest> can only
+# redirect its own write.
+place_input() {
+  as_build "$1" / "$BUILD_PATH" -- install -D -m "$4" "$2" "$3"
+}
+
+# harden_build_tree <stage>: after the build account's last process is dead it
+# owns nothing under the stage, and no directory root walks below has been
+# swapped for a link.
+harden_build_tree() {
+  local stage="$1" dir
+  if ! chown -hR root:root "$stage/build" "$stage/pack"; then
+    STEP_ERROR="cannot take the build tree back"
+    return 1
+  fi
+  for dir in "$stage/build" "$stage/build/home" "$stage/build/npm" "$stage/build/work" "$stage/pack" "$stage/pack/claude"; do
+    if [ -L "$dir" ]; then
+      STEP_ERROR="the build replaced ${dir#"$stage"/} with a link"
+      return 1
+    fi
+  done
+}
+
+# check_npm_tree <index> <stage>: the installed tree is exactly our committed
+# lock. Every package npm recorded in node_modules/.package-lock.json (read as
+# the build account) must be in the lock with the same version, resolved and
+# integrity; entries the lock names but this platform skips are fine (ruflo's
+# lock names optional platform packages that were never published).
+check_npm_tree() {
+  local i="$1" stage="$2" b="$2/build" installed="$WORK/harness-installed-lock.json" drift
+  if ! as_build "$b/home" "$b/npm" "$BUILD_PATH" -- cat node_modules/.package-lock.json \
+    >"$installed" 2>>"$WORK/harness-build.log"; then
+    STEP_ERROR="npm left no node_modules/.package-lock.json"
+    return 1
+  fi
+  if ! drift="$(git_repo cat-file blob "$HEAD_SHA:$(hfield "$i" .lockOverlay)" | jq -r --slurpfile got "$installed" '
+    .packages as $want
+    | [$got[0].packages | to_entries[] | select(.key != "")
+      | select(($want[.key] // null) as $w
+        | $w == null or $w.version != .value.version
+          or $w.resolved != .value.resolved or $w.integrity != .value.integrity)
+      | .key]
+    | .[0:5] | join(", ")')"; then
+    STEP_ERROR="cannot compare the installed tree with the lock"
+    return 1
+  fi
+  if [ -n "$drift" ]; then
+    STEP_ERROR="installed packages differ from the committed lock: $drift"
+    return 1
+  fi
+}
+
+# build_sha256 <stage> <path>: sha256 of a build-tree file, read by the build.
+build_sha256() {
+  as_build "$1/build/home" / "$BUILD_PATH" -- sha256sum "$2" 2>/dev/null | awk '{print $1}'
+}
+
+# deny_build_scheduling: the build account may never schedule a job that runs
+# after its stage is gone (cron, at).
+deny_build_scheduling() {
+  local file
+  for file in /etc/cron.deny /etc/at.deny; do
+    grep -qxF -- "$BUILD_USER" "$file" 2>/dev/null || printf '%s\n' "$BUILD_USER" >>"$file" || return 1
+  done
+}
+
 # The build account: created once with BUILD_UID, nologin, no supplementary
-# group, no home on disk (every build passes an explicit private HOME).
+# group, no home on disk (every build passes an explicit private HOME), and
+# listed in cron.deny and at.deny.
 ensure_build_account() {
   local uid gid groups shell
+  if ! deny_build_scheduling; then
+    record "FAIL harness build account: cannot list $BUILD_USER in /etc/cron.deny and /etc/at.deny"
+    return 1
+  fi
   if id -u "$BUILD_USER" >/dev/null 2>&1; then
     uid="$(id -u "$BUILD_USER")"
     gid="$(id -g "$BUILD_USER")"
@@ -2300,6 +2417,11 @@ collect_build_output() {
       # shellcheck disable=SC2086 # the unquoted pattern is what expands the `*`
       for hit in "$pack/claude/"$rel; do
         [ -e "$hit" ] || [ -L "$hit" ] || continue
+        # Never through a link the build planted on the way.
+        if [ "$(realpath -e -- "$(dirname -- "$hit")" 2>/dev/null)" != "$(dirname -- "$hit")" ]; then
+          log "harness $(hfield "$i" .id): NOT discarding ${hit#"$pack"/}: its dir is reached through a link"
+          continue
+        fi
         rm -rf "$hit"
         log "harness $(hfield "$i" .id): discarded ${hit#"$pack"/} (manifest discard list)"
       done
@@ -2363,9 +2485,10 @@ place_browsers() {
   chmod -R a+rX "$pw"
 }
 
-# stage_git_setup <index> <stage>: the pinned commit checked out at
-# <build HOME>/.claude/<checkoutDir> and its own setup run there, as the
-# build account. Sets STEP_ERROR and returns 1 on failure.
+# stage_git_setup <index> <stage> <target>: the pinned commit checked out at
+# <pack>/claude/<checkoutDir> (seen by the build at <target>) and its own setup
+# run there, as the build account. Root writes nothing once setup code ran;
+# install_harness_pack assembles. Sets STEP_ERROR and returns 1 on failure.
 stage_git_setup() {
   local i="$1" stage="$2" target="$3" b="$2/build" pack="$2/pack" repo sha checkout_dir co path n p status pw line
   local -a argv setup_env
@@ -2443,18 +2566,20 @@ stage_git_setup() {
   fi
   BUILD_VIEW_SRC=""
   BUILD_VIEW_DST=""
-  kill_build_processes || return 1
-  collect_build_output "$b/home" "$pack" "$i"
 }
 
 # stage_npm_lock <index> <stage>: our committed lockfile installed with
-# --ignore-scripts as the build account, then only the manifest's lifecycle
-# scripts, prebuilds, postInstall and warmup. Sets STEP_ERROR and returns 1.
+# --ignore-scripts as the build account, checked against the lock, then only
+# the manifest's lifecycle scripts, pinned prebuilds and prefetch files (placed
+# BY the build from <stage>/in), postInstall and an OFFLINE warmup. Root writes
+# nothing under the build tree after the install started (see as_build);
+# install_harness_pack assembles. Sets STEP_ERROR and returns 1 on failure.
 stage_npm_lock() {
-  local i="$1" stage="$2" b="$2/build" pack="$2/pack" lockfile n p abi url sha256 path member status
+  local i="$1" stage="$2" b="$2/build" in="$2/in" out="$2/out" lockfile n p abi url sha256 path member status entry
   local -a argv mcp_env
-  local npm_dir="$b/npm" calls entry
+  local npm_dir="$b/npm"
   lockfile="$(hfield "$i" .lockOverlay)"
+  # Before any build command: the build dirs are fresh and root-written.
   mkdir -p "$npm_dir" "$b/work"
   if ! { git_repo cat-file blob "$HEAD_SHA:$lockfile" >"$npm_dir/package-lock.json" &&
     git_repo cat-file blob "$HEAD_SHA:$(dirname "$lockfile")/package.json" >"$npm_dir/package.json"; }; then
@@ -2470,26 +2595,27 @@ stage_npm_lock() {
 
   # `npm install` against the lock, not `npm ci`: npm ci refuses a lock whose
   # optional platform packages were never published for some other platform
-  # (ruflo's closure has three). The lock bytes are re-checked below, so a
-  # resolution that drifted from the lock fails the pack either way.
+  # (ruflo's closure has three). check_npm_tree then proves the installed tree
+  # IS the lock, so a resolution that drifted fails the pack.
   log "harness: npm install --ignore-scripts from the committed lock as $BUILD_USER"
   status=0
   as_build "$b/home" "$npm_dir" "$BUILD_PATH" -- npm install --ignore-scripts --no-save \
-    --no-audit --no-fund >>"$WORK/harness-build.log" 2>&1 </dev/null || status=$?
+    --no-audit --no-fund >>"$WORK/harness-build.log" 2>&1 || status=$?
   if [ "$status" -ne 0 ]; then
     tail -n 30 "$WORK/harness-build.log" >&2
     STEP_ERROR="npm install failed (exit $status)"
     return 1
   fi
-  if [ "$(sha256_of "$npm_dir/package-lock.json")" != "$(hfield "$i" .lockSha256)" ]; then
-    STEP_ERROR="npm rewrote the committed lock (the install drifted from it)"
-    return 1
-  fi
+  check_npm_tree "$i" "$stage" || return 1
 
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
+    if ! jq -e --arg n "node_modules/$entry" '.packages | has($n)' "$WORK/harness-installed-lock.json" >/dev/null; then
+      STEP_ERROR="allowlisted lifecycle script $entry names no installed package"
+      return 1
+    fi
     if ! as_build "$b/home" "$npm_dir" "$BUILD_PATH" npm_config_ignore_scripts=false -- \
-      npm rebuild "$entry" --foreground-scripts >>"$WORK/harness-build.log" 2>&1 </dev/null; then
+      npm rebuild "$entry" --foreground-scripts >>"$WORK/harness-build.log" 2>&1; then
       STEP_ERROR="allowlisted lifecycle script of $entry failed"
       return 1
     fi
@@ -2509,25 +2635,46 @@ stage_npm_lock() {
         return 1
         ;;
     esac
-    if [ ! -f "$npm_dir/$path/package.json" ]; then
+    if ! jq -e --arg n "$path" '.packages | has($n)' "$WORK/harness-installed-lock.json" >/dev/null; then
       STEP_ERROR="prebuild target $path is not an installed package"
       return 1
     fi
     fetch_verified "$path prebuild" "$url" "$sha256" "$WORK/harness-prebuild.tgz" || return 1
-    mkdir -p "$WORK/harness-prebuild"
+    rm -rf "$WORK/harness-prebuild" && mkdir -p "$WORK/harness-prebuild"
     if ! tar -xzf "$WORK/harness-prebuild.tgz" -C "$WORK/harness-prebuild" "$member" ||
       [ -L "$WORK/harness-prebuild/$member" ] || [ ! -f "$WORK/harness-prebuild/$member" ]; then
       STEP_ERROR="prebuild for $path lacks the regular file $member"
       return 1
     fi
-    mkdir -p "$(dirname "$npm_dir/$path/$member")"
-    cat "$WORK/harness-prebuild/$member" >"$npm_dir/$path/$member"
-    chmod 0755 "$npm_dir/$path/$member"
-    chown -R "$BUILD_USER:" "$npm_dir/$path"
-    rm -rf "$WORK/harness-prebuild" "$WORK/harness-prebuild.tgz"
+    write_input "$in" "prebuild-$p" <"$WORK/harness-prebuild/$member" || {
+      STEP_ERROR="cannot stage the $path prebuild"
+      return 1
+    }
+    if ! place_input "$b/home" "$in/prebuild-$p" "$npm_dir/$path/$member" 0755 >>"$WORK/harness-build.log" 2>&1; then
+      STEP_ERROR="the build account could not place the $path prebuild"
+      return 1
+    fi
     if ! as_build "$b/home" "$b/work" "$BUILD_PATH" -- "$NODE_BIN" -e 'require(process.argv[1])' \
-      "$npm_dir/$path" >>"$WORK/harness-build.log" 2>&1 </dev/null; then
+      "$npm_dir/$path" >>"$WORK/harness-build.log" 2>&1; then
       STEP_ERROR="the $path prebuild does not load on this Node"
+      return 1
+    fi
+  done
+
+  # Files a tool would otherwise fetch on first use (ruflo's embedding model):
+  # sha256-pinned, downloaded by root, placed by the build before the warmup.
+  n="$(jq -r --argjson i "$i" '.packs[$i].prefetch // [] | length' "$HARNESS")"
+  for ((p = 0; p < n; p++)); do
+    path="$(hfield "$i" ".prefetch[$p].path")"
+    fetch_verified "$path" "$(hfield "$i" ".prefetch[$p].url")" "$(hfield "$i" ".prefetch[$p].sha256")" \
+      "$WORK/harness-prefetch" || return 1
+    write_input "$in" "prefetch-$p" <"$WORK/harness-prefetch" || {
+      STEP_ERROR="cannot stage $path"
+      return 1
+    }
+    rm -f "$WORK/harness-prefetch"
+    if ! place_input "$b/home" "$in/prefetch-$p" "$npm_dir/$path" 0644 >>"$WORK/harness-build.log" 2>&1; then
+      STEP_ERROR="the build account could not place $path"
       return 1
     fi
   done
@@ -2540,21 +2687,23 @@ stage_npm_lock() {
     argv[0]="$npm_dir/${argv[0]}"
     log "harness: postInstall as $BUILD_USER"
     if ! as_build "$b/home" "$b/home" "$BUILD_PATH" -- "$NODE_BIN" "${argv[@]}" \
-      >>"$WORK/harness-build.log" 2>&1 </dev/null; then
+      >>"$WORK/harness-build.log" 2>&1; then
       tail -n 30 "$WORK/harness-build.log" >&2
       STEP_ERROR="postInstall failed"
       return 1
     fi
   fi
 
-  # An MCP pack's server is started once at build time, unfiltered: its warmup
-  # calls run (first-use downloads land in the pack), and the tools it
-  # registers are recorded as mcp-tools.json (the worker denies the ones
-  # outside the allowlist; every allowlisted tool must exist).
+  # An MCP pack's server is started once at build time, unfiltered and with NO
+  # network: its warmup calls run against the prefetched files (a fetch of
+  # anything unpinned fails the pack), and the tools it registers are
+  # recorded as mcp-tools.json (the worker denies the ones outside the
+  # allowlist; every allowlisted tool must exist).
   if [ "$(hfield "$i" .mcpServe)" != "" ]; then
-    calls="$b/work/warmup.json"
-    jq --argjson i "$i" '.packs[$i].warmup // []' "$HARNESS" >"$calls"
-    chown "$BUILD_USER:" "$calls"
+    jq --argjson i "$i" '.packs[$i].warmup // []' "$HARNESS" | write_input "$in" warmup.json || {
+      STEP_ERROR="cannot stage the warmup calls"
+      return 1
+    }
     mcp_env=()
     while IFS= read -r entry; do
       [ -n "$entry" ] && mcp_env+=("$entry")
@@ -2563,40 +2712,55 @@ stage_npm_lock() {
     while IFS= read -r entry; do
       argv+=("$entry")
     done < <(jq -r --argjson i "$i" '.packs[$i].mcpServe.args // [] | .[]' "$HARNESS")
-    log "harness: warmup (first-use downloads land in the pack) as $BUILD_USER"
-    if ! as_build "$b/home" "$b/work" "$BUILD_PATH" ${mcp_env[@]+"${mcp_env[@]}"} -- \
-      "$NODE_BIN" "$ROOT/harness-tools/mcp-probe.mjs" warmup "$calls" -- \
+    log "harness: offline warmup as $BUILD_USER"
+    BUILD_OFFLINE=1
+    status=0
+    as_build "$b/home" "$b/work" "$BUILD_PATH" ${mcp_env[@]+"${mcp_env[@]}"} -- \
+      "$NODE_BIN" "$ROOT/harness-tools/mcp-probe.mjs" warmup "$in/warmup.json" -- \
       "$NODE_BIN" "$npm_dir/$(hfield "$i" .mcpServe.entrypoint)" ${argv[@]+"${argv[@]}"} \
-      >"$WORK/harness-warmup.json" 2>>"$WORK/harness-build.log" </dev/null; then
+      >"$WORK/harness-warmup.json" 2>>"$WORK/harness-build.log" || status=$?
+    BUILD_OFFLINE=""
+    if [ "$status" -ne 0 ]; then
       tail -n 5 "$WORK/harness-build.log" "$WORK/harness-warmup.json" >&2
-      STEP_ERROR="warmup failed"
+      STEP_ERROR="warmup failed offline (exit $status)"
       return 1
     fi
     if ! tail -n 1 "$WORK/harness-warmup.json" | jq -e '.tools | type == "array" and length > 0 and all(type == "string")' >/dev/null 2>&1 ||
-      ! tail -n 1 "$WORK/harness-warmup.json" | jq -c '.tools | sort' >"$b/mcp-tools.json"; then
+      ! tail -n 1 "$WORK/harness-warmup.json" | jq -c '.tools | sort' >"$out/mcp-tools.json"; then
       STEP_ERROR="the MCP server registered no tools"
       return 1
     fi
-    entry="$(jq -r --slurpfile have "$b/mcp-tools.json" --argjson i "$i" \
+    entry="$(jq -r --slurpfile have "$out/mcp-tools.json" --argjson i "$i" \
       '[.packs[$i].toolAllowlist[] | select(. as $t | $have[0] | index($t) | not)] | join(",")' "$HARNESS")"
     if [ -n "$entry" ]; then
       STEP_ERROR="toolAllowlist names tools the server does not register: $entry"
       return 1
     fi
   fi
-  if [ "$(sha256_of "$npm_dir/package-lock.json")" != "$(hfield "$i" .lockSha256)" ]; then
+  # Nothing after the install may have added, removed or swapped a package.
+  check_npm_tree "$i" "$stage" || return 1
+  if [ "$(build_sha256 "$stage" "$npm_dir/package-lock.json")" != "$(hfield "$i" .lockSha256)" ]; then
     STEP_ERROR="a build step rewrote the committed lock"
     return 1
   fi
-  kill_build_processes || return 1
+}
 
-  if [ -f "$b/mcp-tools.json" ]; then
-    mv "$b/mcp-tools.json" "$pack/mcp-tools.json" || return 1
+# assemble_pack <index> <stage>: root moves the dead build's output into the
+# root-owned pack (after kill_build_processes and harden_build_tree).
+assemble_pack() {
+  local i="$1" stage="$2" b="$2/build" pack="$2/pack" entry
+  if [ "$(hfield "$i" .kind)" = "npm-lock" ]; then
+    for entry in node_modules package.json package-lock.json; do
+      if ! mv "$b/npm/$entry" "$pack/"; then
+        STEP_ERROR="cannot move $entry into the pack"
+        return 1
+      fi
+    done
+    if [ -f "$stage/out/mcp-tools.json" ] && ! mv "$stage/out/mcp-tools.json" "$pack/"; then
+      STEP_ERROR="cannot move mcp-tools.json into the pack"
+      return 1
+    fi
   fi
-  mv "$npm_dir/node_modules" "$npm_dir/package.json" "$npm_dir/package-lock.json" "$pack/" || {
-    STEP_ERROR="cannot move the install into the pack"
-    return 1
-  }
   collect_build_output "$b/home" "$pack" "$i" || {
     STEP_ERROR="cannot move the installed config dir into the pack"
     return 1
@@ -2697,7 +2861,7 @@ harness_apparmor() {
 # under <root>, built as the build account, assembled and scanned by root,
 # stamped and published by rename.
 install_harness_pack() {
-  local i="$1" id kind name target expected stage pack out status line hook_skills file avail placeholder=""
+  local i="$1" id kind name target expected stage pack out status line hook_skills file avail
   id="$(hfield "$i" .id)"
   kind="$(hfield "$i" .kind)"
   name="$(harness_dir_name "$i")"
@@ -2715,6 +2879,11 @@ install_harness_pack() {
     record "FAIL harness pack $id: $((${avail:-0} / 1024 / 1024)) GiB free under $ROOT, a build needs 5"
     return 1
   fi
+  avail="$(df -Pk "$WORK" | awk 'NR == 2 {print $4}')"
+  if [ "${avail:-0}" -lt "$HARNESS_MIN_WORK_KB" ]; then
+    record "FAIL harness pack $id: $((${avail:-0} / 1024)) MiB free under $WORK, a build needs 1 GiB for downloads"
+    return 1
+  fi
 
   if ! stage="$(mktemp -d "$ROOT/.staging.harness.$id.XXXXXX")"; then
     record "FAIL harness pack $id: cannot create a staging dir under $ROOT"
@@ -2723,33 +2892,46 @@ install_harness_pack() {
   pack="$stage/pack"
   STEP_ERROR=""
   : >"$WORK/harness-build.log"
-  if ! { chmod 0711 "$stage" && mkdir -p "$pack" "$stage/build/home" "$stage/build/tmp" \
-    "$stage/build/npm-cache" && : >"$stage/build/npmrc" && : >"$stage/build/npmrc-global" &&
-    chmod 0755 "$pack" && chmod 0700 "$stage/build" &&
+  if ! { chmod 0711 "$stage" && mkdir -p "$pack" "$stage/in" "$stage/out" "$stage/build/home" \
+    "$stage/build/tmp" "$stage/build/npm-cache" && : >"$stage/build/npmrc" &&
+    : >"$stage/build/npmrc-global" && chmod 0755 "$pack" "$stage/in" && chmod 0700 "$stage/out" &&
+    chmod 0700 "$stage/build" &&
     chown -R "$BUILD_USER:" "$stage/build"; }; then
     STEP_ERROR="cannot prepare the staging dir"
   elif [ "$kind" = "git-setup" ]; then
     # The build view needs a mount point at the final path: an EMPTY
     # placeholder when no pack is there yet (no stamp, so nothing seeds it).
     if [ ! -e "$target" ] && mkdir -m 0755 "$target"; then
-      placeholder="$target"
+      HARNESS_PLACEHOLDER="$target"
     fi
     stage_git_setup "$i" "$stage" "$target" || STEP_ERROR="${STEP_ERROR:-staging failed}"
-    BUILD_VIEW_SRC=""
-    BUILD_VIEW_DST=""
-    if [ -n "$placeholder" ]; then
-      rmdir "$placeholder" 2>/dev/null || STEP_ERROR="${STEP_ERROR:-the build wrote into the placeholder $placeholder}"
-    fi
   else
     stage_npm_lock "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-staging failed}"
+  fi
+  BUILD_VIEW_SRC=""
+  BUILD_VIEW_DST=""
+  BUILD_OFFLINE=""
+  # Success or not: nothing the build started survives, before root reads or
+  # removes anything it wrote. A survivor fails the pack.
+  if ! kill_build_processes; then
+    STEP_ERROR="$STEP_ERROR${STEP_ERROR:+; }build account processes survived SIGKILL"
+  fi
+  if [ -n "$HARNESS_PLACEHOLDER" ]; then
+    rmdir "$HARNESS_PLACEHOLDER" 2>/dev/null || STEP_ERROR="${STEP_ERROR:-the build wrote into the placeholder $HARNESS_PLACEHOLDER}"
+    HARNESS_PLACEHOLDER=""
+  fi
+  if [ -z "$STEP_ERROR" ]; then
+    harden_build_tree "$stage" || STEP_ERROR="${STEP_ERROR:-cannot harden the build tree}"
+  fi
+  if [ -z "$STEP_ERROR" ]; then
+    assemble_pack "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-cannot assemble the pack}"
   fi
   if [ -z "$STEP_ERROR" ] && [ "$(hfield "$i" .mcpServers)" != "" ]; then
     write_mcp_wrapper "$i" "$pack" "$target" || STEP_ERROR="${STEP_ERROR:-cannot write the MCP wrapper}"
   fi
   if [ -z "$STEP_ERROR" ]; then
-    kill_build_processes || true
-    # The build account owns nothing in the pack from here on.
-    if ! { chown -R root:root "$pack" &&
+    # Root-owned already (harden_build_tree); the modes are normalised here.
+    if ! { chown -hR root:root "$pack" &&
       find "$pack" -type d -exec chmod 0755 {} + &&
       find "$pack" -type f -perm /111 -exec chmod 0755 {} + &&
       find "$pack" -type f ! -perm /111 -exec chmod 0644 {} +; }; then
@@ -2837,10 +3019,25 @@ list_stale_harness() {
   [ "$n" -eq 0 ] || log "WARNING: $n stale harness pack version(s) under $ROOT"
 }
 
+# write_harness_stamps: the stamp each pack carries after this install, for the
+# doctor (written before verify-as-agent, which checks against it): a pack
+# whose .stamp no longer matches is not the one this install built or SKIPPED.
+write_harness_stamps() {
+  local i name
+  while IFS=$'\t' read -r -u 3 i _ _; do
+    name="$(harness_dir_name "$i")"
+    [ -f "$ROOT/$name/.stamp" ] || continue
+    printf '%s %s\n' "$name" "$(sed -n '1s/^stamp //p' "$ROOT/$name/.stamp")"
+  done 3< <(harness_rows) >"$ROOT/.harness.stamps.tmp"
+  chmod 0644 "$ROOT/.harness.stamps.tmp"
+  mv -f "$ROOT/.harness.stamps.tmp" "$ROOT/harness.stamps"
+}
+
 invalidate_harness_hash() {
   if [ -f "$ROOT/harness.sha256" ]; then
     mv -f "$ROOT/harness.sha256" "$ROOT/harness.sha256.invalid"
   fi
+  rm -f "$ROOT/harness.stamps"
 }
 
 # sha256 of the harness manifest bytes, then each pack's lockOverlay blob at
@@ -2916,6 +3113,7 @@ install_harness() {
 
   discard_build_side_writes
   list_stale_harness
+  write_harness_stamps
 
   status=0
   out="$(AUTOMATA_BATTERIES_ROOT="$ROOT" "$BIN_DIR/automata-batteries" verify-as-agent 2>"$WORK/verify.err")" || status=$?

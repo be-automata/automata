@@ -56,9 +56,16 @@ import {
  *   `toolAllowlist`, which can never name a spawn/network/terminal/GitHub/
  *   federation tool (FORBIDDEN_MCP_TOOL_PREFIXES; ADR-007 one-agent budget).
  *   The allowlist is ENFORCED by the stdio filter proxy the pack's wrapper
- *   runs (deploy/linux/harness-mcp-filter.mjs: tools/list AND tools/call).
- *   Do not swap it for ruflo's `mcp start --tools` / CLAUDE_FLOW_MCP_TOOLS:
- *   in 3.56.7 those only trim the advertised list, and a hidden tool still runs.
+ *   runs (deploy/linux/harness-mcp-filter.mjs: tools/list AND tools/call,
+ *   plus a method allowlist). Do not swap it for ruflo's `mcp start --tools` /
+ *   CLAUDE_FLOW_MCP_TOOLS: in 3.56.7 those only trim the advertised list, and
+ *   a hidden tool still runs. The filter is a GUARDRAIL on the agent's MCP
+ *   channel, not a sandbox: an agent with a shell can run the server's node
+ *   modules directly and reach every tool; the uid/cgroup/egress fences are
+ *   what bound that.
+ * - `prefetch` pins (url at a fixed revision + sha256) the files a tool would
+ *   otherwise download on first use; the installer places them and runs the
+ *   warmup with no network, so nothing unpinned lands in a pack.
  * - `headlessSafe` names the skills an automation prompt may invoke without a
  *   human; `frontmatterHookSkills` names the only skills whose frontmatter may
  *   declare `hooks` (every one reviewed: each runs a script inside the pack).
@@ -152,6 +159,15 @@ export interface HarnessPrebuild {
   member: string;
 }
 
+/** A file a tool would fetch on first use, pinned and placed before the warmup. */
+export interface HarnessPrefetch {
+  /** Where it lands, under node_modules/. */
+  path: string;
+  /** huggingface.co `resolve/<40-hex revision>/…`: an immutable revision. */
+  url: string;
+  sha256: string;
+}
+
 export interface HarnessWarmupCall {
   tool: string;
   arguments: Record<string, string>;
@@ -215,6 +231,7 @@ export interface HarnessNpmLockPack extends HarnessPackBase {
   packageJsonSha256: string;
   lifecycleScripts?: string[];
   prebuilds?: HarnessPrebuild[];
+  prefetch?: HarnessPrefetch[];
   /** argv run with node after install; argv[0] a pack path, `{{configDir}}` = the build's claude dir. */
   postInstall?: string[];
   warmup?: HarnessWarmupCall[];
@@ -265,6 +282,7 @@ const NPM_LOCK_KEYS = [
   "packageJsonSha256",
   "lifecycleScripts",
   "prebuilds",
+  "prefetch",
   "postInstall",
   "warmup",
   "mcpServe",
@@ -279,6 +297,10 @@ const BROWSER_KEYS = [
   "executable",
 ] as const;
 const PREBUILD_KEYS = ["path", "url", "sha256", "member"] as const;
+const PREFETCH_KEYS = ["path", "url", "sha256"] as const;
+/** A file of a Hugging Face repo at a fixed 40-hex revision. */
+const PREFETCH_URL =
+  /^https:\/\/huggingface\.co\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/resolve\/[0-9a-f]{40}\/[A-Za-z0-9_./-]+$/;
 const WARMUP_KEYS = ["tool", "arguments"] as const;
 const MCP_SERVE_KEYS = ["entrypoint", "args", "env"] as const;
 /** Where an npm-lock pack's committed lockfiles live: `<prefix><id>/package-lock.json`. */
@@ -584,6 +606,22 @@ function findPrebuildError(value: unknown, at: string): string | undefined {
   );
 }
 
+function findPrefetchError(value: unknown, at: string): string | undefined {
+  if (!isRecord(value)) return `${at}: must be an object`;
+  return (
+    findUnknownKey(value, PREFETCH_KEYS, at) ??
+    (isSafeRelPath(value.path) && value.path.startsWith("node_modules/")
+      ? undefined
+      : `${at}.path: must be a relative path under node_modules/`) ??
+    (typeof value.url === "string" &&
+    PREFETCH_URL.test(value.url) &&
+    isSafeRelPath(value.url.replace(/^https:\/\/huggingface\.co\//, ""))
+      ? undefined
+      : `${at}.url: must be a huggingface.co resolve/<40-hex revision>/ file`) ??
+    findStringError(value.sha256, SHA256_HEX, `${at}.sha256`)
+  );
+}
+
 function findWarmupError(
   value: unknown,
   allowlist: unknown,
@@ -783,6 +821,16 @@ function findNpmLockPackError(
           isSafeRelPath,
           ARGV_PLACEHOLDERS,
         )) ??
+    (value.prefetch === undefined
+      ? undefined
+      : (findListError(value.prefetch, `${at}.prefetch`, findPrefetchError, {
+          allowEmpty: true,
+        }) ??
+        findDuplicateError(
+          value.prefetch as Record<string, unknown>[],
+          "path",
+          `${at}.prefetch`,
+        ))) ??
     findWarmupError(value.warmup, value.toolAllowlist, `${at}.warmup`) ??
     findMcpServeError(
       value.mcpServe,

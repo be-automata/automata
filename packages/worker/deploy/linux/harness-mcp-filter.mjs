@@ -9,21 +9,37 @@
 // "Execution remains registered internally", so a client that names a hidden
 // tool still runs it. Here the allowlist is enforced on both paths:
 //
-// - client -> server `tools/call` for a name not on the list is answered with
-//   a JSON-RPC error and never forwarded;
+// - client -> server: only the METHODS an MCP tool client needs pass
+//   (initialize, ping, tools/list, tools/call, notifications/*, and responses
+//   to server requests); any other request is answered -32601 and never
+//   forwarded, and a `tools/call` for a name not on the list is refused the
+//   same way;
 // - server -> client `tools/list` results are reduced to the list.
 //
-// MCP stdio frames are one JSON-RPC message per line. A frame that is not a
-// JSON object (a batch array, garbage) from the client is refused rather than
-// forwarded, because the filter could not inspect it. Non-JSON server stdout
-// is diverted to stderr so it cannot corrupt the client's stream.
+// What is forwarded is the re-serialised object the filter inspected, never the
+// raw client bytes. MCP stdio frames are one JSON-RPC message per line; a frame
+// that is not a JSON object (a batch array, garbage) or is longer than
+// MAX_LINE is refused. Non-JSON server stdout is diverted to stderr so it
+// cannot corrupt the client's stream.
+//
+// This is a GUARDRAIL for the agent's MCP channel, not a sandbox: an agent with
+// a shell can still run the server binary (or its node modules) directly and
+// reach every tool. The fence against that is the run's uid, cgroup and egress
+// policy, not this proxy.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import readline from "node:readline";
 
 const DENIED = -32601;
 const INVALID = -32600;
+/** Longest frame accepted in either direction (a full tools/list fits easily). */
+const MAX_LINE = 16 * 1024 * 1024;
+const ALLOWED_METHODS = new Set([
+  "initialize",
+  "ping",
+  "tools/list",
+  "tools/call",
+]);
 
 const argv = process.argv.slice(2);
 const separator = argv.indexOf("--");
@@ -46,8 +62,8 @@ const allowed = new Set(parsed);
 const child = spawn(command, commandArgs, {
   stdio: ["pipe", "pipe", "inherit"],
 });
-/** Ids of client tools/list requests whose responses must be reduced. */
-const listRequests = new Set();
+/** Pending client tools/list requests per id (a client may reuse an id). */
+const listRequests = new Map();
 
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const refuse = (id, code, message) => {
@@ -57,63 +73,125 @@ const refuse = (id, code, message) => {
 };
 const isObject = (value) =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+const isAllowedMethod = (method) =>
+  typeof method === "string" &&
+  (ALLOWED_METHODS.has(method) || method.startsWith("notifications/"));
 
-readline.createInterface({ input: process.stdin }).on("line", (line) => {
-  if (line.trim() === "") return;
-  let message;
-  try {
-    message = JSON.parse(line);
-  } catch {
-    process.stderr.write("mcp-filter: dropped a non-JSON client frame\n");
-    return;
-  }
-  if (!isObject(message)) {
-    for (const item of Array.isArray(message) ? message : []) {
-      refuse(
-        isObject(item) ? item.id : undefined,
-        INVALID,
-        "batches are not supported",
-      );
+/** Calls onLine per newline-terminated line; an over-long line is dropped whole. */
+function onLines(stream, onLine, onOversize) {
+  let buffer = "";
+  let skipping = false;
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk) => {
+    let start = 0;
+    let index;
+    while ((index = chunk.indexOf("\n", start)) !== -1) {
+      const piece = chunk.slice(start, index);
+      start = index + 1;
+      if (skipping) {
+        skipping = false;
+        buffer = "";
+        continue;
+      }
+      const line = buffer + piece;
+      buffer = "";
+      if (line.length > MAX_LINE) {
+        onOversize();
+      } else {
+        onLine(line);
+      }
     }
-    return;
-  }
-  if (message.method === "tools/call") {
-    const name = isObject(message.params) ? message.params.name : undefined;
-    if (typeof name !== "string" || !allowed.has(name)) {
+    if (skipping) return;
+    buffer += chunk.slice(start);
+    if (buffer.length > MAX_LINE) {
+      buffer = "";
+      skipping = true;
+      onOversize();
+    }
+  });
+}
+
+onLines(
+  process.stdin,
+  (line) => {
+    if (line.trim() === "") return;
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      process.stderr.write("mcp-filter: dropped a non-JSON client frame\n");
+      return;
+    }
+    if (!isObject(message)) {
+      for (const item of Array.isArray(message) ? message : []) {
+        refuse(
+          isObject(item) ? item.id : undefined,
+          INVALID,
+          "batches are not supported",
+        );
+      }
+      return;
+    }
+    if (message.method === undefined) {
+      // A response to a server-initiated request.
+      if (message.id === undefined) return;
+    } else if (!isAllowedMethod(message.method)) {
       refuse(
         message.id,
         DENIED,
-        `tool ${String(name)} is not allowed on this box`,
+        `method ${String(message.method)} is not allowed on this box`,
       );
       return;
     }
-  }
-  if (message.method === "tools/list" && message.id !== undefined) {
-    listRequests.add(JSON.stringify(message.id));
-  }
-  child.stdin.write(`${line}\n`);
-});
+    if (message.method === "tools/call") {
+      const name = isObject(message.params) ? message.params.name : undefined;
+      if (typeof name !== "string" || !allowed.has(name)) {
+        refuse(
+          message.id,
+          DENIED,
+          `tool ${String(name)} is not allowed on this box`,
+        );
+        return;
+      }
+    }
+    if (message.method === "tools/list" && message.id !== undefined) {
+      const key = JSON.stringify(message.id);
+      listRequests.set(key, (listRequests.get(key) ?? 0) + 1);
+    }
+    child.stdin.write(`${JSON.stringify(message)}\n`);
+  },
+  () => process.stderr.write("mcp-filter: dropped an over-long client frame\n"),
+);
 process.stdin.on("end", () => child.stdin.end());
 
-readline.createInterface({ input: child.stdout }).on("line", (line) => {
-  if (line.trim() === "") return;
-  let message;
-  try {
-    message = JSON.parse(line);
-  } catch {
-    process.stderr.write(`mcp-filter: server stdout (not JSON): ${line}\n`);
-    return;
-  }
-  if (isObject(message) && message.id !== undefined) {
-    const key = JSON.stringify(message.id);
-    if (listRequests.delete(key) && Array.isArray(message.result?.tools)) {
-      message.result.tools = message.result.tools.filter(
-        (tool) => isObject(tool) && allowed.has(tool.name),
-      );
+onLines(
+  child.stdout,
+  (line) => {
+    if (line.trim() === "") return;
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      process.stderr.write(`mcp-filter: server stdout (not JSON): ${line}\n`);
+      return;
     }
-  }
-  send(message);
-});
+    if (isObject(message) && message.id !== undefined) {
+      const key = JSON.stringify(message.id);
+      const pending = listRequests.get(key) ?? 0;
+      if (pending > 0) {
+        if (pending === 1) listRequests.delete(key);
+        else listRequests.set(key, pending - 1);
+        if (Array.isArray(message.result?.tools)) {
+          message.result.tools = message.result.tools.filter(
+            (tool) => isObject(tool) && allowed.has(tool.name),
+          );
+        }
+      }
+    }
+    send(message);
+  },
+  () => process.stderr.write("mcp-filter: dropped an over-long server frame\n"),
+);
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => child.kill(signal));

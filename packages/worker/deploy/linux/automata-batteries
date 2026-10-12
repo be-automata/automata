@@ -39,10 +39,10 @@ ROOT="${AUTOMATA_BATTERIES_ROOT:-/usr/local/lib/automata-batteries}"
 AGENT_USER="${AGENT_USER:-automata-agent}"
 NODE_BIN="/usr/bin/node"
 AGENT_PATH="/usr/local/bin:/usr/bin:/bin"
-# A tool every ruflo-like server registers that no allowlist may hold (the
-# agent_ prefix is forbidden by the harness manifest rules): the filter proxy
-# must refuse it.
-DENIED_PROBE_TOOL="agent_spawn"
+# A tool name no server registers and no allowlist holds: the probe proves the
+# FILTER refuses it (its -32601 and wording), so a missing filter can never
+# make the check run a real forbidden tool.
+DENIED_PROBE_TOOL="automata_probe_not_allowlisted"
 MANIFEST="$ROOT/harness.json"
 
 usage() {
@@ -87,7 +87,7 @@ names_in() {
 
 # One JSON object per pack, then the whole report.
 doctor_json() {
-  local n i dir stamp_present abi stamp_abi mismatches files skills agents commands packs
+  local n i dir stamp_present abi stamp_abi mismatches files skills agents commands packs recorded stamp_line
   local harness_hash="" harness_valid=false
   if [ ! -f "$MANIFEST" ]; then
     jq -n --arg root "$ROOT" '{ok: false, root: $root, error: "no harness manifest installed (run install-batteries.sh)"}'
@@ -106,7 +106,10 @@ doctor_json() {
     stamp_abi=""
     mismatches=""
     files=0
+    recorded="$(awk -v d="$(basename "$dir")" '$1 == d {print $2}' "$ROOT/harness.stamps" 2>/dev/null || true)"
+    stamp_line=""
     if [ -f "$dir/.stamp" ]; then
+      stamp_line="$(sed -n '1s/^stamp //p' "$dir/.stamp")"
       stamp_present=true
       stamp_abi="$(sed -n 's/^node_abi //p' "$dir/.stamp")"
       files="$(grep -c '^file ' "$dir/.stamp" || true)"
@@ -119,6 +122,7 @@ doctor_json() {
       --argjson stampPresent "$stamp_present" --arg stampAbi "$stamp_abi" --arg abi "$abi" \
       --arg major "$(host_node_major)" --arg mismatches "$mismatches" --argjson files "$files" \
       --arg skills "$skills" --arg agents "$agents" --arg commands "$commands" \
+      --arg recorded "$recorded" --arg stampLine "$stamp_line" --argjson harnessValid "$harness_valid" \
       --slurpfile m "$MANIFEST" '
       def lines: split("\n") | map(select(. != ""));
       ($m[0].packs[$i]) as $p
@@ -140,10 +144,18 @@ doctor_json() {
           nodeMajorMatch: (($p.nodeMajor | tostring) == $major),
           nodeAbi: (if $stampAbi == "" then null else $stampAbi end),
           nodeAbiMatch: ($stampAbi != "" and $stampAbi == $abi),
-          stamp: {present: $stampPresent, recordedFiles: $files, mismatched: ($mismatches | lines)},
+          stamp: {present: $stampPresent, recordedFiles: $files, mismatched: ($mismatches | lines),
+            installRecord: (if $recorded == "" then null else $recorded end),
+            matchesInstallRecord: ($recorded != "" and $recorded == $stampLine)},
           stampValid: ($stampPresent and ($mismatches | lines | length) == 0)
         }
-      | .ok = (.present and .stampValid and .nodeAbiMatch and .nodeMajorMatch and (.headlessSafeMissing | length) == 0)
+      # `installed`: the pack is exactly what the last install built or
+      # SKIPPED (its stamp is the recorded one, every recorded file re-hashes,
+      # Node matches). `ok` also needs that install to have PASSED (a valid
+      # harness stamp): automation gates on `ok`.
+      | .installed = (.present and .stampValid and .stamp.matchesInstallRecord
+          and .nodeAbiMatch and .nodeMajorMatch and (.headlessSafeMissing | length) == 0)
+      | .ok = ($harnessValid and .installed)
       ' <<<"null" | jq -c --argjson acc "$packs" '$acc + [.]')"
   done
   jq -n --arg root "$ROOT" --arg hash "$harness_hash" --argjson valid "$harness_valid" \
@@ -197,8 +209,9 @@ cleanup() {
 
 # as_agent <argv...>: the agent account, env -i, a private HOME as cwd.
 as_agent() {
-  (cd "$VERIFY_HOME" && runuser -u "$AGENT_USER" -- env -i HOME="$VERIFY_HOME" PATH="$AGENT_PATH" \
-    LANG=C.UTF-8 TMPDIR="$VERIFY_HOME" timeout 300 "$@")
+  # A new session (no controlling terminal to push keystrokes into), stdin closed.
+  (cd "$VERIFY_HOME" && setsid -w runuser -u "$AGENT_USER" -- env -i HOME="$VERIFY_HOME" PATH="$AGENT_PATH" \
+    LANG=C.UTF-8 TMPDIR="$VERIFY_HOME" timeout 300 "$@" </dev/null)
 }
 
 verify_as_agent() {
@@ -231,8 +244,10 @@ verify_as_agent() {
   for ((i = 0; i < n; i++)); do
     id="$(jq -r --argjson i "$i" '.packs[$i].id' "$MANIFEST")"
     dir="$(pack_dir "$i")"
-    if ! jq -e --argjson i "$i" '.packs[$i].ok' <<<"$report" >/dev/null; then
-      fail "$id doctor: $(jq -c --argjson i "$i" '.packs[$i] | {present, stampValid, nodeAbiMatch, nodeMajorMatch, headlessSafeMissing, mismatched: .stamp.mismatched}' <<<"$report")"
+    # The install runs this before it writes the harness stamp, so the gate
+    # here is `installed`; `doctor` reports `ok` (which needs the stamp).
+    if ! jq -e --argjson i "$i" '.packs[$i].installed' <<<"$report" >/dev/null; then
+      fail "$id doctor: $(jq -c --argjson i "$i" '{harnessValid: .harness.valid} + (.packs[$i] | {present, stampValid, matchesInstallRecord: .stamp.matchesInstallRecord, nodeAbiMatch, nodeMajorMatch, headlessSafeMissing, mismatched: .stamp.mismatched})' <<<"$report")"
       continue
     fi
     pass "$id doctor (stamp valid, $(jq -r --argjson i "$i" '.packs[$i].stamp.recordedFiles' <<<"$report") files re-hashed, node ABI matches)"

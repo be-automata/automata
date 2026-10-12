@@ -108,6 +108,13 @@ function validFixture(): HarnessManifest {
             member: "build/Release/better_sqlite3.node",
           },
         ],
+        prefetch: [
+          {
+            path: "node_modules/@huggingface/transformers/.cache/Xenova/m/onnx/model.onnx",
+            url: `https://huggingface.co/Xenova/m/resolve/${SHA_A}/onnx/model.onnx`,
+            sha256: SHA256,
+          },
+        ],
         warmup: [
           { tool: "memory_store", arguments: { key: "warm", value: "up" } },
         ],
@@ -919,5 +926,43 @@ describe("findHarnessManifestError — installer keys (PR3)", () => {
         Object.assign(rufloOf(m).mcpServe!.env, { NODE_OPTIONS: "--x" }),
       ),
     ).toContain("mcpServe.env.NODE_OPTIONS");
+  });
+});
+
+describe("findHarnessManifestError — prefetch (PR3 review M3)", () => {
+  it("pins prefetch files to a fixed huggingface revision under node_modules/", () => {
+    const prefetchOf = (m: HarnessManifest) => rufloOf(m).prefetch![0]!;
+    expect(
+      errorAfter((m) =>
+        Object.assign(prefetchOf(m), {
+          url: "https://huggingface.co/Xenova/m/resolve/main/onnx/model.onnx",
+        }),
+      ),
+    ).toContain("prefetch[0].url");
+    expect(
+      errorAfter((m) =>
+        Object.assign(prefetchOf(m), {
+          url: `https://example.com/Xenova/m/resolve/${SHA_A}/x`,
+        }),
+      ),
+    ).toContain("prefetch[0].url");
+    expect(
+      errorAfter((m) =>
+        Object.assign(prefetchOf(m), {
+          url: `https://huggingface.co/Xenova/m/resolve/${SHA_A}/../x`,
+        }),
+      ),
+    ).toContain("prefetch[0].url");
+    expect(
+      errorAfter((m) => Object.assign(prefetchOf(m), { path: "lib/x" })),
+    ).toContain("prefetch[0].path");
+    expect(
+      errorAfter((m) => Object.assign(prefetchOf(m), { sha256: "x" })),
+    ).toContain("prefetch[0].sha256");
+    expect(
+      errorAfter((m) =>
+        rufloOf(m).prefetch!.push({ ...rufloOf(m).prefetch![0]! }),
+      ),
+    ).toContain("duplicate");
   });
 });

@@ -10,7 +10,8 @@
 //   node mcp-probe.mjs verify <allowlist.json> <denied tool> -- <command> [args...]
 //     initialize; tools/list must be non-empty and inside the allowlist;
 //     memory_store then memory_retrieve must round-trip a fresh nonce when both
-//     are listed; calling <denied tool> must come back as an error.
+//     are listed; a tools/call of <denied tool> (a name no server registers)
+//     and a resources/list request must be refused BY THE FILTER (-32601).
 //
 // Prints one JSON summary line on stdout; exit 0 only when every check held.
 
@@ -140,12 +141,26 @@ async function main() {
       retrieved?.includes(nonce) === true,
     );
   }
+  // The refusal must come from the FILTER (its code and wording), so a missing
+  // filter fails here instead of the server running the call: <denied tool>
+  // should be a name no server registers, and a non-allowlisted METHOD is
+  // checked the same way.
   const denied = argv[2];
   const deniedReply = await rpc("tools/call", { name: denied, arguments: {} });
   check(
-    `${denied} is refused`,
-    callText(deniedReply) === undefined,
-    deniedReply.error?.message,
+    `${denied} is refused by the filter`,
+    deniedReply.error?.code === -32601 &&
+      deniedReply.error?.message ===
+        `tool ${denied} is not allowed on this box`,
+    deniedReply.error?.message ?? "the server answered",
+  );
+  const methodReply = await rpc("resources/list", {});
+  check(
+    "resources/list is refused by the filter",
+    methodReply.error?.code === -32601 &&
+      methodReply.error?.message ===
+        "method resources/list is not allowed on this box",
+    methodReply.error?.message ?? "the server answered",
   );
 }
 

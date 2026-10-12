@@ -759,47 +759,76 @@ worker restart**.
 claude` (after `gstack-config set telemetry off` / `update_check false`,
   with `GSTACK_SKIP_ASIDE=1`), `npm install --ignore-scripts` from OUR
   committed lockfile (`packages/worker/deploy/batteries/<id>/`), the one
-  allowlisted lifecycle script (`@claude-flow/cli`'s pure-JS agentdb patch), GSD's
-  `bin/install.js --claude --global --config-dir … --portable-hooks
+  allowlisted lifecycle script (`@claude-flow/cli`'s pure-JS agentdb patch),
+  GSD's `bin/install.js --claude --global --config-dir … --portable-hooks
 --no-legacy-cleanup` and ruflo's warmup all run as `automata-build` under
-  `env -i` (explicit HOME, PATH, npm cache, registry, empty npmrc), in a 0700
-  staging dir under `/usr/local/lib/automata-batteries/.staging.harness.*`.
+  `env -i` (explicit HOME, PATH, npm cache, registry, empty npmrc), in a new
+  session with stdin closed (no terminal to inject into), each command in its
+  own transient systemd scope, inside a 0700 staging dir under
+  `/usr/local/lib/automata-batteries/.staging.harness.*`. `automata-build` is
+  listed in `/etc/cron.deny` and `/etc/at.deny`.
+- **Root never follows the build's links.** Once any build command has run,
+  root never opens, writes, chmods or chowns a path in the build tree (the
+  build could have planted a link to `/etc/passwd` there). Root-made inputs
+  (the warmup calls, the better-sqlite3 prebuild, the model files) go to a
+  root-owned, build-readable `in/` dir and the BUILD account copies them into
+  its tree; root-read outputs come back on stdout or into a root-only `out/`.
+  Only after every scope and build-uid process is SIGKILLed (a survivor FAILs
+  the pack) and the tree is `chown -hR root:root`ed with no directory swapped
+  for a link does root assemble the pack.
 - `npm install` instead of `npm ci`: ruflo's lock names three optional
-  platform packages npm never published, which `npm ci` refuses. The lock bytes
-  are re-checked after every step; any drift fails the pack.
+  platform packages npm never published, which `npm ci` refuses. Instead the
+  installed tree is PROVEN to be the lock: every package in
+  `node_modules/.package-lock.json` must be in the committed lock with the same
+  version, resolved URL and integrity, after the install and again after the
+  lifecycle script, prebuild, postInstall and warmup.
 - Native code is never compiled (the box has no toolchain). ruflo runs on
   sql.js + the onnxruntime binaries shipped inside its npm tarballs; the one
   native prebuild is better-sqlite3's, a sha256-pinned GitHub release asset for
   Node ABI 137 (Node 24) — a Node major without a pinned prebuild fails the
   pack.
-- bun 1.4.2 and the Chromium archives are sha256-checked before extraction.
-  bun is build-time only: it is never in a pack nor on the agent's PATH (so the
-  gstack `bin/` helpers that are bun scripts are inert at run time).
+- bun 1.4.2, the Chromium archives and the model files are sha256-checked
+  before use. bun is build-time only: it is never in a pack nor on the agent's
+  PATH (so the gstack `bin/` helpers that are bun scripts are inert at run
+  time).
 - gstack's bundles hard-code their own absolute path, so the gstack build runs
   in a private mount namespace where the staged pack is bind-mounted at its
   FINAL path; on disk it stays under its staging name until the rename. (On a
   first install an empty placeholder dir holds that mount point for the
-  duration of the build: no stamp, so nothing seeds it.)
+  duration of the build: no stamp, so nothing seeds it; an aborted run removes
+  it.)
 - Before publishing, a scan rewrites absolute links into the build dir as
   relative links, requires every link to resolve inside the pack, fails on any
   file or link naming the staging path, discards upstream `settings.json`/
   `settings.local.json`/`.mcp.json` (GSD's hooks are OFF in phase 1) plus the
-  manifest's `discard` list, and rejects `mcpServers`/`permissionMode`
-  frontmatter and `hooks` outside `frontmatterHookSkills`. Whatever the builds
-  wrote outside their staging dirs is listed and deleted
-  (`VERIFIED|DISCARDED harness side writes`).
+  manifest's `discard` list (never through a link), and rejects
+  `mcpServers`/`permissionMode` frontmatter and `hooks` outside
+  `frontmatterHookSkills`. Whatever the builds wrote outside their staging dirs
+  is listed and deleted (`VERIFIED|DISCARDED harness side writes`).
 - ruflo's MCP server: `mcp start --tools` / `CLAUDE_FLOW_MCP_TOOLS` in 3.56.7
   only trim the ADVERTISED list ("execution remains registered internally"), so
   `bin/ruflo-mcp` runs ruflo behind `lib/mcp-filter.mjs`, a stdio JSON-RPC proxy
-  that drops non-allowlisted tools from `tools/list` and refuses their
-  `tools/call`. The wrapper `env -i`s everything except PATH, HOME, LANG and the
-  proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, lower-case forms,
-  `NODE_USE_ENV_PROXY`) and bakes `CLAUDE_FLOW_HEADLESS=true`,
-  `CLAUDE_FLOW_ROUTER_NEURAL=0`, `RUFLO_DAEMON_AUTOSTART=0`.
-- ruflo 3.56.7 downloads `Xenova/all-MiniLM-L6-v2` (~90 MB) on its first memory
-  call. The installer's warmup makes that call at build time, so the model lands
-  in the pack (`node_modules/@huggingface/transformers/.cache/`, hashed in the
-  stamp) and runs need no network for it.
+  that passes only `initialize`, `ping`, `tools/list`, `tools/call` and
+  `notifications/*` (anything else: -32601), drops non-allowlisted tools from
+  `tools/list` and refuses their `tools/call`, and forwards the object it
+  parsed, never the raw bytes. The wrapper `env -i`s everything except PATH,
+  HOME, LANG and the proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`,
+  lower-case forms, `NODE_USE_ENV_PROXY`) and bakes `CLAUDE_FLOW_HEADLESS=true`,
+  `CLAUDE_FLOW_ROUTER_NEURAL=0`, `RUFLO_DAEMON_AUTOSTART=0`. **The filter is a
+  guardrail on the agent's MCP channel, not a sandbox:** an agent with a shell
+  can still run ruflo's node modules directly and reach every tool. The run's
+  uid, cgroup and egress policy are what bound that.
+- ruflo 3.56.7 loads `Xenova/all-MiniLM-L6-v2` on its first memory call. Its
+  four files are pinned in `harness.json` (`prefetch`: huggingface
+  `resolve/<revision>` URL + sha256), placed into the pack before the warmup,
+  and the warmup runs in a network namespace with NO route out: if it tried to
+  fetch anything unpinned the pack fails. Runs need no network for the model.
+- **Residual trust on first use:** gstack's `./setup` runs with network as the
+  build account. Its `bun install` is checked against the pinned commit's
+  `bun.lock` (the tracked tree must be unchanged afterwards), and the Chromium
+  dir it would otherwise download into is root-owned, but anything else setup
+  fetches is not content-pinned by us. Builds are not egress-restricted to the
+  registry/GitHub/CDN hosts on this box yet; the uid has no access to secrets.
 
 **Production step (after the PR merges; operator, as root on the box)**
 
@@ -819,7 +848,7 @@ flight, fast-forward the checkout as `automata`, verify HEAD against
    the AppArmor proof) and a `HARNESS STAMP <hash>` line.
 3. Re-run it once: every review item AND every harness pack must be `SKIPPED`
    (packs re-hash their recorded files), and the stamp must be unchanged.
-4. `automata-batteries doctor --json | jq '.ok, [.packs[] | {id, ok}]'` and
+4. `automata-batteries doctor --json | jq '.ok, [.packs[] | {id, ok, installed}]'` and
    `automata-batteries verify-as-agent` must both pass;
    `aa-status | grep automata-gstack` lists the two Chromium profiles.
 5. Record `cat /usr/local/lib/automata-batteries/harness.sha256` and
