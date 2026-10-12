@@ -6,7 +6,13 @@ import { describe, expect, it } from "vitest";
 
 import { loadWorkerConfig } from "./config";
 import { DaemonProcess } from "./daemon-process";
-import { buildDaemonEnv, buildRunProxyEnv, SAFE_ENV_KEYS } from "./daemon-env";
+import {
+  AGENT_PATH_PREPEND_ENV,
+  buildDaemonEnv,
+  buildRunProxyEnv,
+  isReservedRepoEnvKey,
+  SAFE_ENV_KEYS,
+} from "./daemon-env";
 import type { AgentRunInput } from "./types";
 
 const INSTALL_TOKEN = "ghs_installationtoken123";
@@ -879,15 +885,57 @@ describe("harness battery env (gstack, gsd, ruflo)", () => {
     ).toBeUndefined();
   });
 
+  it("hands the seeded packs' PATH dirs to the daemon, never PATH itself", () => {
+    const env = buildDaemonEnv({
+      ...base,
+      batteryPathDirs: [`${PACK}/bin`, "/other/pack/bin"],
+    });
+    expect(env[AGENT_PATH_PREPEND_ENV]).toBe(`${PACK}/bin:/other/pack/bin`);
+    // PATH stays today's: sudo's secure_path would replace it in agent-uid
+    // mode anyway, so the daemon applies the prepend on its side of sudo.
+    expect(env.PATH).toBe("/opt/claude/bin:/usr/bin:/bin");
+  });
+
+  it("drops a relative PATH dir or one that would split into more entries", () => {
+    const env = buildDaemonEnv({
+      ...base,
+      batteryPathDirs: ["bin", `${PACK}/bin:/tmp/evil`, `${PACK}/bin`],
+    });
+    expect(env[AGENT_PATH_PREPEND_ENV]).toBe(`${PACK}/bin`);
+    expect(
+      buildDaemonEnv({ ...base, batteryPathDirs: ["relative"] })[
+        AGENT_PATH_PREPEND_ENV
+      ],
+    ).toBeUndefined();
+  });
+
+  it("repoEnv can never set the PATH prepend (the AUTOMATA_ prefix is reserved)", () => {
+    const repoEnv = { [AGENT_PATH_PREPEND_ENV]: "/tmp/evil" };
+    expect(isReservedRepoEnvKey(AGENT_PATH_PREPEND_ENV)).toBe(true);
+    expect(
+      buildDaemonEnv({ ...base, repoEnv })[AGENT_PATH_PREPEND_ENV],
+    ).toBeUndefined();
+    expect(
+      buildDaemonEnv({ ...base, repoEnv, batteryPathDirs: [`${PACK}/bin`] })[
+        AGENT_PATH_PREPEND_ENV
+      ],
+    ).toBe(`${PACK}/bin`);
+  });
+
   it("changes nothing when absent", () => {
     expect(
-      buildDaemonEnv({ ...base, batteryEnv: {}, browseProxy: false }),
+      buildDaemonEnv({
+        ...base,
+        batteryEnv: {},
+        batteryPathDirs: [],
+        browseProxy: false,
+      }),
     ).toEqual(buildDaemonEnv(base));
   });
 });
 
 describe("harness battery env: the DaemonProcess call site wires it", () => {
-  it("a seeded gstack reaches the env DaemonProcess builds (env + browse proxy)", async () => {
+  it("a seeded gstack reaches the env DaemonProcess builds (env + PATH dirs + browse proxy)", async () => {
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-harness-"));
     const input: AgentRunInput = {
       threadId: "thr_harness",
@@ -919,6 +967,7 @@ describe("harness battery env: the DaemonProcess call site wires it", () => {
                 pin: "x",
                 packDir,
                 env: { PLAYWRIGHT_BROWSERS_PATH: `${packDir}/ms-playwright` },
+                pathDirs: [`${packDir}/bin`],
                 mcpServers: {},
                 denyTools: [],
                 headlessSafe: [],
@@ -938,6 +987,7 @@ describe("harness battery env: the DaemonProcess call site wires it", () => {
       const env = await internals.ensureEnv();
       expect(env.PLAYWRIGHT_BROWSERS_PATH).toBe(`${packDir}/ms-playwright`);
       expect(env.BROWSE_PROXY_URL).toBe("http://127.0.0.1:4242");
+      expect(env[AGENT_PATH_PREPEND_ENV]).toBe(`${packDir}/bin`);
     } finally {
       if (internals.ghConfigDir) {
         fs.rmSync(internals.ghConfigDir, { recursive: true, force: true });

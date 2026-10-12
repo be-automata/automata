@@ -22,7 +22,8 @@
           "version": "1.4.2",
           "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip",
           "sha256": "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913",
-          "license": "MIT"
+          "license": "MIT",
+          "installTo": "bin/bun"
         }
       ],
       "browsers": [
@@ -51,6 +52,8 @@
         "PLAYWRIGHT_BROWSERS_PATH": "{{packDir}}/ms-playwright"
       },
       "smoke": [["claude/skills/gstack/browse/dist/browse", "--help"]],
+      "pathDirs": ["{{packDir}}/bin"],
+      "browseSmoke": { "cli": "claude/skills/gstack/browse/dist/browse" },
       "headlessSafe": ["investigate", "browse"],
       "frontmatterHookSkills": [
         "autoplan",

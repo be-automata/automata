@@ -1004,8 +1004,14 @@ describe("#harness batteries: harness.json", () => {
         sha256:
           "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913",
         license: "MIT",
+        // gstack's browse CLI spawns `bun run server.ts` by PATH lookup.
+        installTo: "bin/bun",
       },
     ]);
+    expect(gstack.pathDirs).toEqual(["{{packDir}}/bin"]);
+    expect(gstack.browseSmoke).toEqual({
+      cli: "claude/skills/gstack/browse/dist/browse",
+    });
     const gsd = packById("gsd");
     if (gsd.kind !== "npm-lock") throw new Error("gsd is npm-lock");
     expect([gsd.package, gsd.version]).toEqual(["@opengsd/gsd-core", "1.16.0"]);
@@ -3435,6 +3441,212 @@ describe("harness batteries (PR3): lockfiles, installer stages, doctor", () => {
       "ran memory_store",
     );
     expect(replies.get(4)?.error).toMatchObject({ code: -32600 });
+  });
+});
+
+describe("harness batteries: bun ships with the gstack pack (browse runtime)", () => {
+  const harness = JSON.parse(deployFile("harness.json")) as {
+    packs: { id: string; pathDirs?: string[] }[];
+  };
+  const script = deployFile("linux", "install-batteries.sh");
+  const body = (name: string) => fnBody(script, name);
+  const doctor = deployFile("linux", "automata-batteries");
+
+  it("bumps HARNESS_OUTPUT_VERSION so a box rebuilds and republishes the packs", () => {
+    expect(assignment(script, "HARNESS_OUTPUT_VERSION")).toBe(
+      "HARNESS_OUTPUT_VERSION=3",
+    );
+  });
+
+  it("ships root's OWN verified extraction, after assembly, and stamps it", () => {
+    // Extracted by root into the root-only out/ dir before the build runs;
+    // the build gets a copy, the pack gets the out/ original.
+    const fetch = body("fetch_dependencies");
+    expect(fetch).toContain('extract_zip "$zip" "$out/dep-$name" "$name"');
+    expect(fetch).toContain('install -m 0755 "$out/dep-$name" "$bin/$name"');
+    expect(body("stage_git_setup")).toContain(
+      'fetch_dependencies "$i" "$b/deps" "$stage/out"',
+    );
+    const place = body("place_runtimes");
+    expect(place).toContain('"$stage/out/dep-$name"');
+    expect(place).not.toMatch(/\$b\b|\/build\//);
+    expect(place).toContain("install -o root -g root -m 0755");
+    const install = body("install_harness_pack");
+    expect(install.indexOf("assemble_pack")).toBeLessThan(
+      install.indexOf("place_runtimes"),
+    );
+    expect(install.indexOf("place_runtimes")).toBeLessThan(
+      install.indexOf("scan_pack"),
+    );
+    // A stamp `file` line per runtime: a rerun re-hashes it before SKIPPING.
+    expect(install).toContain(".installTo // empty");
+  });
+
+  it("place_runtimes installs the runtime, refuses a link on the way and checks pathDirs (executed)", () => {
+    const tmp = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "runtimes-")),
+    );
+    const manifest = path.join(tmp, "harness.json");
+    const write = (packs: unknown) =>
+      fs.writeFileSync(manifest, JSON.stringify({ packs }));
+    const stage = path.join(tmp, "stage");
+    const run = () => {
+      const program = [
+        "set -euo pipefail",
+        `HARNESS=${JSON.stringify(manifest)}`,
+        "log() { :; }",
+        "sha256_of() { echo x; }",
+        // Non-root stand-ins: install keeps only src and dest, realpath -e is python's.
+        'install() { while [ "$#" -gt 2 ]; do shift; done; cp "$1" "$2" && chmod 0755 "$2"; }',
+        "realpath() { shift 2; python3 -c 'import os, sys; p = sys.argv[1]; os.path.exists(p) or sys.exit(1); print(os.path.realpath(p))' \"$1\"; }",
+        body("hfield"),
+        body("place_runtimes"),
+        `if place_runtimes 0 ${JSON.stringify(stage)}; then echo OK; else echo "FAIL $STEP_ERROR"; fi`,
+      ].join("\n");
+      return spawnSync("bash", ["-c", program], {
+        encoding: "utf8",
+      }).stdout.trim();
+    };
+    const reset = () => {
+      fs.rmSync(stage, { recursive: true, force: true });
+      fs.mkdirSync(path.join(stage, "out"), { recursive: true });
+      fs.mkdirSync(path.join(stage, "pack"));
+      fs.writeFileSync(path.join(stage, "out", "dep-bun"), "bun-binary\n");
+    };
+    try {
+      write([
+        {
+          id: "gstack",
+          dependencies: [{ name: "bun", installTo: "bin/bun" }],
+          pathDirs: ["{{packDir}}/bin"],
+        },
+      ]);
+      reset();
+      expect(run()).toBe("OK");
+      const bun = path.join(stage, "pack", "bin", "bun");
+      expect(fs.readFileSync(bun, "utf8")).toBe("bun-binary\n");
+      expect(fs.statSync(bun).mode & 0o777).toBe(0o755);
+
+      // A link where the runtime's dir goes: refused, its target untouched.
+      reset();
+      const elsewhere = path.join(tmp, "elsewhere");
+      fs.mkdirSync(elsewhere, { recursive: true });
+      fs.symlinkSync(elsewhere, path.join(stage, "pack", "bin"));
+      expect(run()).toBe(
+        "FAIL runtime bun: bin is not a plain dir of the pack",
+      );
+      expect(fs.readdirSync(elsewhere)).toEqual([]);
+
+      // Something already at the runtime's path: refused, left as it was.
+      reset();
+      fs.mkdirSync(path.join(stage, "pack", "bin"));
+      fs.writeFileSync(path.join(stage, "pack", "bin", "bun"), "planted\n");
+      expect(run()).toBe(
+        "FAIL runtime bun: bin/bun already exists in the pack",
+      );
+      expect(fs.readFileSync(bun, "utf8")).toBe("planted\n");
+
+      // A pathDirs dir nothing created: refused.
+      write([
+        { id: "gstack", dependencies: [], pathDirs: ["{{packDir}}/bin"] },
+      ]);
+      reset();
+      expect(run()).toBe("FAIL pathDirs bin is not a plain dir of the pack");
+
+      // No runtime, no pathDirs (gsd, ruflo): nothing to do.
+      write([{ id: "gsd" }]);
+      reset();
+      expect(run()).toBe("OK");
+      expect(fs.readdirSync(path.join(stage, "pack"))).toEqual([]);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("the installer's shape check agrees with the worker guard on pathDirs, installTo and browseSmoke (executed)", () => {
+    const tmp = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "shape-")),
+    );
+    const file = path.join(tmp, "harness.json");
+    type Manifest = { packs: Record<string, unknown>[] };
+    const errors = (mutate: (m: Manifest) => void) => {
+      const m = JSON.parse(deployFile("harness.json")) as Manifest;
+      mutate(m);
+      fs.writeFileSync(file, JSON.stringify(m));
+      const program = [
+        `HARNESS=${JSON.stringify(file)}`,
+        'HARNESS_LOCK_DIR_PREFIX="packages/worker/deploy/batteries/"',
+        "FORBIDDEN_MCP_TOOL_PREFIXES=(agent_ swarm_)",
+        body("harness_shape_errors"),
+        "harness_shape_errors",
+      ].join("\n");
+      return spawnSync("bash", ["-c", program], {
+        encoding: "utf8",
+      }).stdout.trim();
+    };
+    const gstack = (m: Manifest) => m.packs[0] as Record<string, unknown>;
+    const bunDep = (m: Manifest) =>
+      (gstack(m).dependencies as Record<string, unknown>[])[0] as Record<
+        string,
+        unknown
+      >;
+    try {
+      expect(errors(() => undefined)).toBe("");
+      for (const installTo of ["lib/bun", "bin/node", "bun", "../bin/bun"]) {
+        expect(
+          errors((m) => Object.assign(bunDep(m), { installTo })),
+          installTo,
+        ).toContain("dependency installTo must be");
+      }
+      for (const dir of [
+        "/usr/bin",
+        "{{packDir}}",
+        "{{packDir}}/../bin",
+        "{{packDir}}/bin:/x",
+      ]) {
+        expect(
+          errors((m) => Object.assign(gstack(m), { pathDirs: [dir] })),
+          dir,
+        ).toContain("pathDirs must be");
+      }
+      expect(
+        errors((m) => Reflect.deleteProperty(bunDep(m), "installTo")),
+      ).toContain("browseSmoke must name");
+      expect(
+        errors((m) =>
+          Object.assign(gstack(m), { browseSmoke: { cli: "/bin/sh" } }),
+        ),
+      ).toContain("browseSmoke must name");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("only gstack puts a dir on the agent's PATH", () => {
+    expect(
+      Object.fromEntries(harness.packs.map((p) => [p.id, p.pathDirs ?? []])),
+    ).toEqual({ gstack: ["{{packDir}}/bin"], gsd: [], ruflo: [] });
+  });
+
+  it("verify-as-agent drives the browse CLI with the pack's PATH, a local page and a stop", () => {
+    expect(doctor).toContain('PATH="$PACK_PATH"');
+    expect(doctor).toContain(".packs[$i].pathDirs + [$path]");
+    const from = doctor.indexOf("BROWSE_CHECK='");
+    const check = doctor.slice(from, doctor.indexOf("\n'\n", from));
+    // A local page: the agent uid's direct 80/443 is rejected on a box.
+    expect(check).toContain('"$cli" goto "file://$page"');
+    expect(check).not.toMatch(/https?:\/\//);
+    expect(check).toContain('"$cli" text');
+    expect(check).toContain('"$cli" stop');
+    expect(check).toContain('kill -9 "$pid"');
+    expect(check).toContain("command -v bun");
+    const verify = fnBody(doctor, "verify_browse");
+    // The server must run on the pack's own bun.
+    expect(verify).toContain('"${bun#"$dir"/}" = "$bun"');
+    // The sandbox opt-out exists only on the test-container branch.
+    expect(verify).toContain(
+      '[ -z "$no_sandbox" ] || env+=(GSTACK_CHROMIUM_NO_SANDBOX=1)',
+    );
   });
 });
 

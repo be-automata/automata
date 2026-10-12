@@ -203,7 +203,7 @@ export class DaemonProcess {
             this.deps.boxTestServicesEnvPath,
           )
         : {};
-    // The seeded harness packs' env and browse proxy (task/PR lanes only:
+    // The seeded harness packs' env, PATH dirs and browse proxy (task/PR lanes only:
     // seedBatteries never seeds a harness pack on a review).
     const harness = harnessRunEnv(this.credentials?.batteries?.harness);
     this.env = buildDaemonEnv({
@@ -221,6 +221,7 @@ export class DaemonProcess {
       githubReadToken: this.deps.githubReadToken ?? null,
       repoEnv: { ...boxTestEnv, ...this.input.repoEnv },
       batteryEnv: harness.env,
+      batteryPathDirs: harness.pathDirs,
       browseProxy: harness.browseProxy,
       agentUser: this.config.agentUser,
       // Beside the clone, in the run dir, so it inherits the run's ACE.

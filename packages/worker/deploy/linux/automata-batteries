@@ -16,10 +16,18 @@ set -euo pipefail
 #                                       each browser's --version, a headless
 #                                       launch WITH its sandbox of the browser
 #                                       Playwright uses for headless runs
-#                                       (chromium_headless_shell-*), and each MCP
-#                                       server through its wrapper (allowlist,
-#                                       memory round-trip, a forbidden tool
-#                                       refused)
+#                                       (chromium_headless_shell-*), the pack's
+#                                       browse CLI end to end (goto a local
+#                                       page, text, stop: its server is spawned
+#                                       with the pack's own bun from PATH), and
+#                                       each MCP server through its wrapper
+#                                       (allowlist, memory round-trip, a
+#                                       forbidden tool refused)
+#
+# Every check runs with the PATH a run's agent gets: the pack's `pathDirs`
+# (gstack's <pack>/bin, holding the bun the browse CLI spawns) before the
+# system dirs. bun is on that PATH for the browse server only; it is not a
+# box-wide tool.
 #
 # Every command exits 0 only when everything checked holds. doctor reads
 # nothing remote and writes nothing. verify-as-agent prints one
@@ -32,13 +40,17 @@ set -euo pipefail
 # TEST CONTAINERS ONLY: the browser launch needs AppArmor to grant Chromium a
 # user namespace, which a container cannot. With
 # AUTOMATA_BATTERIES_TEST_NO_SANDBOX=1 AND /.dockerenv present, the launch adds
-# --no-sandbox and its line says so. Nothing else honours that variable, and
-# no box ever sets it.
+# --no-sandbox (the browse check sets GSTACK_CHROMIUM_NO_SANDBOX=1) and its
+# line says so. Nothing else honours that variable, and no box ever sets it.
 
 ROOT="${AUTOMATA_BATTERIES_ROOT:-/usr/local/lib/automata-batteries}"
 AGENT_USER="${AGENT_USER:-automata-agent}"
 NODE_BIN="/usr/bin/node"
 AGENT_PATH="/usr/local/bin:/usr/bin:/bin"
+# The PATH of the pack being checked: its pathDirs, then AGENT_PATH.
+PACK_PATH="$AGENT_PATH"
+# The page the browse check loads, and the text it must read back.
+BROWSE_MARKER="automata-browse-ok"
 # A tool name no server registers and no allowlist holds: the probe proves the
 # FILTER refuses it (its -32601 and wording), so a missing filter can never
 # make the check run a real forbidden tool.
@@ -140,6 +152,7 @@ doctor_json() {
           headlessSafeMissing: [$p.headlessSafe[] | select(. as $s | $skillNames | index($s) | not)],
           mcpServers: (($p.mcpServers // {}) | map_values({command: (.command | sub("^\\{\\{packDir\\}\\}"; $dir)), args})),
           env: ($p.env | map_values(sub("^\\{\\{packDir\\}\\}"; $dir))),
+          pathDirs: [($p.pathDirs // [])[] | sub("^\\{\\{packDir\\}\\}"; $dir)],
           nodeMajor: $p.nodeMajor,
           nodeMajorMatch: (($p.nodeMajor | tostring) == $major),
           nodeAbi: (if $stampAbi == "" then null else $stampAbi end),
@@ -207,16 +220,81 @@ cleanup() {
   [ -z "$VERIFY_HOME" ] || rm -rf "$VERIFY_HOME"
 }
 
-# as_agent <argv...>: the agent account, env -i, a private HOME as cwd.
+# as_agent [NAME=value...] -- <argv...>: the agent account, env -i plus the
+# given env, PACK_PATH, a private HOME as cwd.
 as_agent() {
+  local -a extra=()
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    extra+=("$1")
+    shift
+  done
+  shift
   # A new session (no controlling terminal to push keystrokes into), stdin closed.
-  (cd "$VERIFY_HOME" && setsid -w runuser -u "$AGENT_USER" -- env -i HOME="$VERIFY_HOME" PATH="$AGENT_PATH" \
-    LANG=C.UTF-8 TMPDIR="$VERIFY_HOME" timeout 300 "$@" </dev/null)
+  (cd "$VERIFY_HOME" && setsid -w runuser -u "$AGENT_USER" -- env -i HOME="$VERIFY_HOME" PATH="$PACK_PATH" \
+    LANG=C.UTF-8 TMPDIR="$VERIFY_HOME" ${extra[@]+"${extra[@]}"} timeout 300 "$@" </dev/null)
+}
+
+# The browse check, run by the agent's /bin/sh: $1 the browse CLI, $2 the
+# marker. Writes a page under HOME (the CLI only opens files under the cwd or a
+# temp dir), loads it by file:// URL (no network: the agent uid's direct
+# 80/443 is rejected on a box), reads its text back, then stops the server it
+# started, killing the recorded pid if stop left it running (a zombie is
+# already dead: it waits for whoever reaps it). Exits 3 (page),
+# 4 (goto), 5 (text), 6 (marker missing) or 7 (server survived stop).
+# shellcheck disable=SC2016 # expands in the agent's shell
+BROWSE_CHECK='
+cli="$1"; marker="$2"; page="$HOME/automata-browse.html"
+alive() { s="$(ps -o stat= -p "$1" 2>/dev/null | tr -d " ")"; [ -n "$s" ] && [ "${s#Z}" = "$s" ]; }
+mkdir -p "$HOME/.gstack" && printf "telemetry: off\nupdate_check: false\n" >"$HOME/.gstack/config.yaml" || exit 3
+printf "<!doctype html><title>automata</title><p>%s</p>\n" "$marker" >"$page" || exit 3
+"$cli" goto "file://$page" || exit 4
+text="$("$cli" text)"; status=$?
+pid="$(sed -n "s/.*\"pid\": *\([0-9][0-9]*\).*/\1/p" "$HOME/.gstack/browse.json" 2>/dev/null | head -n 1)"
+"$cli" stop >/dev/null 2>&1
+i=0
+while [ -n "$pid" ] && alive "$pid" && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
+if [ -n "$pid" ] && alive "$pid"; then kill -9 "$pid"; exit 7; fi
+[ "$status" -eq 0 ] || exit 5
+printf "%s\n" "$text" | grep -q "$marker" || exit 6
+printf "%s\n" "$(command -v bun)"
+'
+
+# verify_browse <id> <dir> <cli rel> <no-sandbox flag> [NAME=value...]: the
+# pack's browse CLI end to end as the agent, with the pack's env.
+verify_browse() {
+  local id="$1" dir="$2" cli="$3" no_sandbox="$4" out status bun
+  shift 4
+  local -a env=("$@")
+  [ -z "$no_sandbox" ] || env+=(GSTACK_CHROMIUM_NO_SANDBOX=1)
+  status=0
+  out="$(as_agent ${env[@]+"${env[@]}"} -- /bin/sh -c "$BROWSE_CHECK" sh "$dir/$cli" "$BROWSE_MARKER" 2>&1)" || status=$?
+  bun="${out##*$'\n'}"
+  # The server must have been spawned with the pack's own bun, not one that
+  # happens to be on the box.
+  if [ "$status" -eq 0 ] && [ "${bun#"$dir"/}" = "$bun" ]; then
+    fail "$id browse: the agent resolves bun to '${bun:-nothing}', not one inside $dir"
+    return 0
+  fi
+  case "$status" in
+    0)
+      if [ -n "$no_sandbox" ]; then
+        pass "$id browse goto/text/stop of a local page, server on $bun (TEST CONTAINER ONLY: GSTACK_CHROMIUM_NO_SANDBOX=1)"
+      else
+        pass "$id browse goto/text/stop of a local page, server on $bun"
+      fi
+      ;;
+    3) fail "$id browse: $AGENT_USER could not write the check page under its HOME" ;;
+    4) fail "$id browse goto failed as $AGENT_USER: $(printf '%s' "$out" | grep -v '^$' | tail -n 1 | cut -c1-200)" ;;
+    5) fail "$id browse text failed as $AGENT_USER: $(printf '%s' "$out" | grep -v '^$' | tail -n 1 | cut -c1-200)" ;;
+    6) fail "$id browse text did not return the page ($BROWSE_MARKER missing)" ;;
+    7) fail "$id browse: the server outlived 'stop' (killed)" ;;
+    *) fail "$id browse could not run as $AGENT_USER (status $status): $(printf '%s' "$out" | tail -n 1 | cut -c1-200)" ;;
+  esac
 }
 
 verify_as_agent() {
-  local report n i id dir status out word line exe name bdir no_sandbox wrapper
-  local -a argv
+  local report n i id dir status out word line exe name bdir no_sandbox wrapper cli
+  local -a argv pack_env
   [ "$(id -u)" = "0" ] || {
     echo "automata-batteries verify-as-agent: run as root (it switches to $AGENT_USER)" >&2
     exit 2
@@ -251,10 +329,11 @@ verify_as_agent() {
       continue
     fi
     pass "$id doctor (stamp valid, $(jq -r --argjson i "$i" '.packs[$i].stamp.recordedFiles' <<<"$report") files re-hashed, node ABI matches)"
+    PACK_PATH="$(jq -r --argjson i "$i" --arg path "$AGENT_PATH" '.packs[$i].pathDirs + [$path] | join(":")' <<<"$report")"
 
     status=0
     # shellcheck disable=SC2016 # expands in the agent's shell
-    as_agent /bin/sh -c 'u="$(find "$1" -type f ! -readable -print -quit)" || exit 3; [ -z "$u" ] || exit 4; w="$(find "$1" -writable -print -quit)" || exit 3; [ -z "$w" ] || exit 5' sh "$dir" || status=$?
+    as_agent -- /bin/sh -c 'u="$(find "$1" -type f ! -readable -print -quit)" || exit 3; [ -z "$u" ] || exit 4; w="$(find "$1" -writable -print -quit)" || exit 3; [ -z "$w" ] || exit 5' sh "$dir" || status=$?
     case "$status" in
       0) pass "$id readable by $AGENT_USER, nothing writable" ;;
       3) fail "$id: $AGENT_USER cannot traverse $dir" ;;
@@ -274,7 +353,7 @@ verify_as_agent() {
       else
         argv[0]="$dir/${argv[0]}"
       fi
-      if out="$(as_agent "${argv[@]}" 2>&1 </dev/null)"; then
+      if out="$(as_agent -- "${argv[@]}" 2>&1 </dev/null)"; then
         pass "$id smoke '$(jq -r 'join(" ")' <<<"$line")' -> $(printf '%s' "$out" | tail -n 1 | cut -c1-80)"
       else
         fail "$id smoke '$(jq -r 'join(" ")' <<<"$line")' failed as $AGENT_USER: $(printf '%s' "$out" | tail -n 1 | cut -c1-160)"
@@ -284,7 +363,7 @@ verify_as_agent() {
     while IFS=$'\t' read -r name bdir exe; do
       [ -n "$name" ] || continue
       exe="${exe/\{\{packDir\}\}/$dir}"
-      if out="$(as_agent "$exe" --version 2>&1 </dev/null)"; then
+      if out="$(as_agent -- "$exe" --version 2>&1 </dev/null)"; then
         pass "$id browser $name --version -> $(printf '%s' "$out" | tail -n 1)"
       else
         fail "$id browser $name --version failed as $AGENT_USER: $(printf '%s' "$out" | tail -n 1 | cut -c1-160)"
@@ -296,7 +375,7 @@ verify_as_agent() {
         chromium_headless_shell-*) ;;
         *) continue ;;
       esac
-      if out="$(as_agent "$exe" --headless --disable-gpu ${no_sandbox:+"$no_sandbox"} \
+      if out="$(as_agent -- "$exe" --headless --disable-gpu ${no_sandbox:+"$no_sandbox"} \
         --user-data-dir="$VERIFY_HOME/browser-$name" --dump-dom 'data:text/html,<p>automata-launch-ok</p>' 2>&1 </dev/null)" &&
         grep -q 'automata-launch-ok' <<<"$out"; then
         if [ -n "$no_sandbox" ]; then
@@ -309,10 +388,19 @@ verify_as_agent() {
       fi
     done < <(jq -r --argjson i "$i" '.packs[$i] | (.env.PLAYWRIGHT_BROWSERS_PATH // "") as $pw | (.browsers // [])[] | [.name, .dir, "\($pw)/\(.dir)/\(.executable)"] | @tsv' "$MANIFEST")
 
+    cli="$(jq -r --argjson i "$i" '.packs[$i].browseSmoke.cli // ""' "$MANIFEST")"
+    if [ -n "$cli" ]; then
+      pack_env=()
+      while IFS= read -r line; do
+        [ -n "$line" ] && pack_env+=("$line")
+      done < <(jq -r --argjson i "$i" '.packs[$i].env | to_entries[] | "\(.key)=\(.value)"' <<<"$report")
+      verify_browse "$id" "$dir" "$cli" "$no_sandbox" ${pack_env[@]+"${pack_env[@]}"}
+    fi
+
     while IFS=$'\t' read -r name wrapper; do
       [ -n "$name" ] || continue
       wrapper="${wrapper/\{\{packDir\}\}/$dir}"
-      if out="$(as_agent "$NODE_BIN" "$ROOT/harness-tools/mcp-probe.mjs" verify "$dir/etc/tool-allowlist.json" \
+      if out="$(as_agent -- "$NODE_BIN" "$ROOT/harness-tools/mcp-probe.mjs" verify "$dir/etc/tool-allowlist.json" \
         "$DENIED_PROBE_TOOL" -- "$wrapper" 2>/dev/null </dev/null)"; then
         pass "$id mcp $name: $(jq -r '"\(.toolCount) allowlisted tools, startup \(.startupMs)ms, \([.checks[] | .name] | join("; "))"' <<<"${out##*$'\n'}")"
       else

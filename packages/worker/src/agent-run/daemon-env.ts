@@ -198,6 +198,16 @@ export interface BuildDaemonEnvOpts {
    */
   batteryEnv?: Record<string, string> | null;
   /**
+   * The seeded harness packs' PATH dirs (harnessRunEnv: manifest `pathDirs`
+   * resolved and verified root-owned, e.g. gstack's `<pack>/bin` holding the
+   * bun its browse CLI spawns). Handed to the daemon as
+   * {@link AGENT_PATH_PREPEND_ENV}, which the daemon prepends to the agent's
+   * PATH: setting PATH here would not survive agent-uid mode, where sudo's
+   * `secure_path` replaces PATH even under `-E`. Null/empty = today's env,
+   * byte for byte.
+   */
+  batteryPathDirs?: readonly string[] | null;
+  /**
    * gstack was seeded: point its browse server's Chromium at the run's egress
    * proxy via BROWSE_PROXY_URL, which gstack's browse server passes to
    * chromium.launch({ proxy }). Chromium ignores HTTPS_PROXY, so without this
@@ -308,6 +318,13 @@ const RESERVED_REPO_ENV_PREFIXES = [
   "BROWSE_",
 ];
 
+/**
+ * Dirs the daemon prepends to the agent's PATH (packages/daemon/src/daemon.ts
+ * withAgentPathPrepend), `:`-joined. Under the reserved AUTOMATA_ prefix, so a
+ * repo env can never set it.
+ */
+export const AGENT_PATH_PREPEND_ENV = "AUTOMATA_AGENT_PATH_PREPEND";
+
 export function isReservedRepoEnvKey(key: string): boolean {
   const upper = key.toUpperCase();
   return (
@@ -331,6 +348,7 @@ export function buildDaemonEnv({
   githubReadToken = null,
   repoEnv = null,
   batteryEnv = null,
+  batteryPathDirs = null,
   browseProxy = false,
   agentUser = "",
   runTmpDir = null,
@@ -426,6 +444,14 @@ export function buildDaemonEnv({
   }
   if (claudeBinDir) {
     env.PATH = `${claudeBinDir}:${baseEnv.PATH ?? ""}`;
+  }
+  // The seeded packs' runtimes (gstack's bun). Absolute dirs only, never one
+  // that could split into more PATH entries than it names.
+  const pathDirs = (batteryPathDirs ?? []).filter(
+    (dir) => dir.startsWith("/") && !dir.includes(":"),
+  );
+  if (pathDirs.length > 0) {
+    env[AGENT_PATH_PREPEND_ENV] = pathDirs.join(":");
   }
 
   // 3. gh: brokered (#81) → the per-run bearer is the "token" (the gh broker

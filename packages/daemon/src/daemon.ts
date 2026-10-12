@@ -128,6 +128,34 @@ export function stripGithubCredentials(
   return out;
 }
 
+/**
+ * The worker's harness packs' PATH dirs (`:`-joined absolute dirs, e.g.
+ * gstack's `<pack>/bin` with the bun its browse CLI spawns). Sent as its own
+ * key because PATH itself does not survive the worker's agent-uid hop: sudo's
+ * `secure_path` replaces PATH even under `-E`. Mirrors the worker's
+ * AGENT_PATH_PREPEND_ENV (packages/worker/src/agent-run/daemon-env.ts).
+ */
+export const AGENT_PATH_PREPEND_ENV = "AUTOMATA_AGENT_PATH_PREPEND";
+
+/**
+ * The agent env with {@link AGENT_PATH_PREPEND_ENV}'s dirs prepended to PATH
+ * (absolute dirs only) and the key itself removed. Unset or empty = `env`
+ * unchanged. Pure; returns a new object.
+ */
+export function withAgentPathPrepend(
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  const prepend = env[AGENT_PATH_PREPEND_ENV];
+  if (prepend === undefined) return env;
+  const out = { ...env };
+  delete out[AGENT_PATH_PREPEND_ENV];
+  const dirs = prepend.split(":").filter((dir) => dir.startsWith("/"));
+  if (dirs.length > 0) {
+    out.PATH = [...dirs, ...(env.PATH ? [env.PATH] : [])].join(":");
+  }
+  return out;
+}
+
 export class TerragonDaemon {
   private startTime: number = 0;
   private messageBuffer: MessageBufferEntry[] = [];
@@ -632,11 +660,11 @@ export class TerragonDaemon {
         },
       });
 
-      const baseChildEnv: Record<string, string | undefined> = {
+      const baseChildEnv = withAgentPathPrepend({
         ...process.env,
         ...env,
         DAEMON_TOKEN: input.token,
-      };
+      });
       const childEnv = withholdGitCredentials
         ? stripGithubCredentials(baseChildEnv)
         : baseChildEnv;

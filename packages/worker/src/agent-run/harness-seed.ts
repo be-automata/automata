@@ -48,8 +48,9 @@ import {
  * 3. per pack: validateHarnessPackTree (symlink containment, discarded
  *    upstream config, frontmatter grants) — once per process per stamp, it
  *    walks node_modules;
- * 4. per pack: every `claude/` entry root-owned and not writable, and every
- *    MCP wrapper a root-owned regular file.
+ * 4. per pack: every `claude/` entry root-owned and not writable, every
+ *    MCP wrapper a root-owned regular file, and every `pathDirs` entry a
+ *    root-owned, non-writable real directory (it goes on the agent's PATH).
  *
  * Nothing here ever reads a secret, and the MCP entries carry no env: the
  * wrapper inside the pack owns its server's environment.
@@ -75,6 +76,8 @@ export interface VerifiedHarnessPack {
   packDir: string;
   /** Manifest env with {{packDir}} resolved; keys match HARNESS_ENV_KEY. */
   env: Record<string, string>;
+  /** Manifest pathDirs with {{packDir}} resolved: prepended to the agent's PATH. */
+  pathDirs: string[];
   /** Manifest MCP servers with {{packDir}} resolved; no env, ever. */
   mcpServers: Record<string, { command: string; args: string[] }>;
   /** MCP tools a server registers beyond the allowlist (mcp-tools.json); best-effort deny. */
@@ -415,6 +418,25 @@ async function checkHarnessPack(
     mcpServers[name] = { command, args: [...server.args] };
   }
 
+  const pathDirs: string[] = [];
+  for (const dir of pack.pathDirs ?? []) {
+    const resolved = resolvePackDirTemplate(dir, realPackDir);
+    let dirStat: LstatResult;
+    try {
+      dirStat = await ctx.lstat(resolved);
+    } catch (e) {
+      if (errnoCode(e) === "ENOENT") throw new PackSkip("path-dir-missing");
+      throw e;
+    }
+    // A link would put whatever it names on the agent's PATH.
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+      throw new PackSkip("path-dir-missing");
+    }
+    const dirOwner = ownershipReason(dirStat, ctx.packOwnerUid);
+    if (dirOwner) throw new PackSkip(dirOwner);
+    pathDirs.push(resolved);
+  }
+
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(pack.env)) {
     if (HARNESS_ENV_KEY.test(key)) {
@@ -426,6 +448,7 @@ async function checkHarnessPack(
     pin: harnessPackPin(pack),
     packDir: realPackDir,
     env,
+    pathDirs,
     mcpServers,
     denyTools:
       pack.mcpServers !== undefined
@@ -654,6 +677,8 @@ export function harnessDenyRules(
 /** The agent env the seeded packs contribute (daemon-env applies it after repoEnv). */
 export function harnessRunEnv(harness: HarnessSeedResult | undefined): {
   env: Record<string, string>;
+  /** The seeded packs' PATH dirs, in manifest order (daemon-env prepends them). */
+  pathDirs: string[];
   /** gstack seeded: browse's Chromium must be pointed at the run proxy. */
   browseProxy: boolean;
 } {
@@ -663,6 +688,7 @@ export function harnessRunEnv(harness: HarnessSeedResult | undefined): {
       string,
       string
     >,
+    pathDirs: packs.flatMap((p) => p.pathDirs),
     browseProxy: packs.some((p) => p.id === "gstack"),
   };
 }

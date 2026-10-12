@@ -726,16 +726,17 @@ order (and the worker restart it needs) is "Harness rollout" below.
 **What lands where**
 
 - Packs: `/usr/local/lib/automata-batteries/<id>@<pin>/` — `gstack@<sha>`
-  (`claude/skills/…` with the gstack checkout at `claude/skills/gstack`, and the
-  pinned Chromium under `ms-playwright/`), `gsd@<version>`
+  (`claude/skills/…` with the gstack checkout at `claude/skills/gstack`, the
+  pinned Chromium under `ms-playwright/`, and the pinned bun at `bin/bun`),
+  `gsd@<version>`
   (`claude/{skills,agents,gsd-core,hooks,…}` + `node_modules/`) and
   `ruflo@<version>` (`node_modules/`, `bin/ruflo-mcp`,
   `lib/mcp-filter.mjs`, `etc/tool-allowlist.json`). Root-owned, dirs 0755,
   files 0644, executables 0755. Each has a `.stamp`: the build hash, the HEAD
   it came from, the Node ABI, and a `file <sha256> <path>` line for every
-  native module (`*.node`), model (`*.onnx`), browser executable and the MCP
-  wrapper — re-hashed on every re-run, so a pack is `SKIPPED` only when all
-  still match.
+  native module (`*.node`), model (`*.onnx`), browser executable, runtime
+  (gstack's `bin/bun`) and the MCP wrapper — re-hashed on every re-run, so a
+  pack is `SKIPPED` only when all still match.
 - `/usr/local/bin/automata-batteries` (`doctor`, `doctor --json`,
   `verify-as-agent`), with the installed manifest at
   `/usr/local/lib/automata-batteries/harness.json` and its MCP probe under
@@ -789,9 +790,19 @@ claude` (after `gstack-config set telemetry off` / `update_check false`,
   Node ABI 137 (Node 24) — a Node major without a pinned prebuild fails the
   pack.
 - bun 1.4.2, the Chromium archives and the model files are sha256-checked
-  before use. bun is build-time only: it is never in a pack nor on the agent's
-  PATH (so the gstack `bin/` helpers that are bun scripts are inert at run
-  time).
+  before use. bun is also gstack's RUNTIME: its browse CLI starts its server
+  with `bun run …/browse/src/server.ts`, found by PATH lookup (no override at
+  the pinned sha), so without bun every `browse` call failed with
+  `Executable not found in $PATH: "bun"` (prod drill, 2026-10-12). The
+  manifest marks it with `installTo: "bin/bun"`: root extracts its own
+  verified copy into the root-only `out/` dir before any build code runs,
+  copies it into the assembled pack (0755 root) and stamps it. The pack's
+  `pathDirs` (`{{packDir}}/bin`) go on the PATH of a run that seeded gstack,
+  and only that run: the worker hands them to the daemon as
+  `AUTOMATA_AGENT_PATH_PREPEND` (sudo's `secure_path` replaces PATH itself in
+  agent-uid mode) and the daemon prepends them for the agent. bun is not a
+  box-wide tool: it is not in `/usr/local/bin`, review runs never get it, and
+  the gstack checkout's own `bin/` helpers stay off PATH.
 - gstack's bundles hard-code their own absolute path, so the gstack build runs
   in a private mount namespace where the staged pack is bind-mounted at its
   FINAL path; on disk it stays under its staging name until the rename. (On a
@@ -846,7 +857,9 @@ flight, fast-forward the checkout as `automata`, verify HEAD against
    `VERIFIED harness side writes: none outside the packs` (or a `DISCARDED`
    line you have read), every `VERIFIED harness …` line from
    `verify-as-agent` (including `browser … launch with its sandbox` — this is
-   the AppArmor proof) and a `HARNESS STAMP <hash>` line.
+   the AppArmor proof — and `gstack browse goto/text/stop …`, whose server
+   must run on `<pack>/bin/bun`: the path that failed before bun shipped) and
+   a `HARNESS STAMP <hash>` line.
 3. Re-run it once: every review item AND every harness pack must be `SKIPPED`
    (packs re-hash their recorded files), and the stamp must be unchanged.
 4. `automata-batteries doctor --json | jq '.ok, [.packs[] | {id, ok, installed}]'` and
@@ -874,7 +887,8 @@ apparmor=unconfined --security-opt seccomp=unconfined` (for the namespace
 bind mount). A container has no AppArmor: the profile step reports `SKIPPED`
 and the browser launch check passes only with
 `AUTOMATA_BATTERIES_TEST_NO_SANDBOX=1`, which the doctor honours only when
-`/.dockerenv` exists and labels `TEST CONTAINER ONLY: --no-sandbox`.
+`/.dockerenv` exists and labels `TEST CONTAINER ONLY: --no-sandbox` (the
+browse check then sets `GSTACK_CHROMIUM_NO_SANDBOX=1`, labelled the same way).
 
 **Bumping a pin:** gstack — set the 40-hex `sha`, re-derive Playwright's
 version from its `bun.lock` and re-pin both Chrome-for-Testing zips
@@ -908,7 +922,9 @@ verify-as-agent` passes. (See "Harness batteries on the execution box".)
 2. **Restart the worker when idle.** The worker checks the installed
    `harness.sha256` against the hash of its OWN checkout's `harness.json`, so the
    checkout and the install must be the same commit (the acceptance script's
-   `SC1 installed harness.json = checkout`). Restart only with no run in flight
+   `SC1 installed harness.json = checkout`). The daemon bundle the launcher
+   stages must come from that same commit too: it is what puts the pack's
+   `pathDirs` (gstack's bun) on the agent's PATH. Restart only with no run in flight
    (no `run-*` dir under `/sys/fs/cgroup/system.slice/automata-worker.service/`),
    per the deploy README's graceful-restart rules.
 3. **Boot line.** The journal shows `[worker-boot] harness: hash=<12hex>
