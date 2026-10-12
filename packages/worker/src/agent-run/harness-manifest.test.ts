@@ -268,16 +268,46 @@ describe("findHarnessManifestError — env", () => {
     },
   );
 
-  it.each(["$(id)", "a b", "x;y", "/abs{{packDir}}", "{{other}}/x"])(
-    "rejects env value %j",
-    (value) => {
-      expect(
-        errorAfter((m) =>
-          Object.assign(m.packs[1]!, { env: { GSTACK_X: value } }),
-        ),
-      ).toContain("env.GSTACK_X");
-    },
-  );
+  it.each([
+    "$(id)",
+    "a b",
+    "x;y",
+    "/abs{{packDir}}",
+    "{{other}}/x",
+    "{{packDir}}/../x",
+    "{{packDir}}/a/../../b",
+    "{{packDir}}/./x",
+    "{{packDir}}//x",
+    "{{packDir}}/",
+    "{{packDir}}x",
+    "/etc",
+    "../x",
+    "..",
+    "a/b",
+  ])("rejects env value %j", (value) => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(m.packs[1]!, { env: { GSTACK_X: value } }),
+      ),
+    ).toContain("env.GSTACK_X");
+  });
+});
+
+describe("findHarnessManifestError — env values accepted", () => {
+  it.each([
+    "{{packDir}}/ms-playwright",
+    "{{packDir}}/a/b.c",
+    "{{packDir}}",
+    "spawned",
+    "30000",
+    "1.2.3",
+  ])("accepts env value %j", (value) => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(m.packs[1]!, { env: { GSTACK_X: value } }),
+      ),
+    ).toBeUndefined();
+  });
 });
 
 describe("findHarnessManifestError — mcpServers and toolAllowlist", () => {

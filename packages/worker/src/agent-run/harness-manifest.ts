@@ -40,8 +40,9 @@ import {
  *   through: PR3 adds the keys as REQUIRED, and this strict-key guard rejects
  *   them before that.
  * - `env` keys are confined to the battery prefixes the daemon reserves from
- *   repo env (GSTACK_, PLAYWRIGHT_, MCP_, CLAUDE_FLOW_); values may start with
- *   the `{{packDir}}` placeholder and are otherwise plain path/word text.
+ *   repo env (GSTACK_, PLAYWRIGHT_, MCP_, CLAUDE_FLOW_); a value is either a
+ *   plain word/number (no `/`) or a path confined to the pack:
+ *   `{{packDir}}` or `{{packDir}}/<relative path>` without `..` segments.
  * - `mcpServers` commands are a wrapper inside the pack (`{{packDir}}/…`);
  *   the wrapper owns the server's env. A pack with `mcpServers` must name a
  *   `toolAllowlist`, which can never name a spawn/network/terminal/GitHub/
@@ -65,8 +66,8 @@ export const HARNESS_PACK_DIR_PLACEHOLDER = "{{packDir}}";
 /** Env keys a harness pack may set: the battery prefixes repo env can never set. */
 export const HARNESS_ENV_KEY =
   /^(GSTACK|PLAYWRIGHT|MCP|CLAUDE_FLOW)_[A-Z0-9_]+$/;
-/** An env value after an optional leading {{packDir}}: no shell metacharacters. */
-const ENV_VALUE_REST = /^[A-Za-z0-9._:/-]*$/;
+/** A plain env value (or one path segment under {{packDir}}): a word or number, no `/`, no shell metacharacters. */
+const ENV_VALUE_WORD = /^[A-Za-z0-9._:-]*$/;
 /** An npm package name, optionally scoped. */
 export const NPM_PACKAGE = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 /** One MCP tool name as the server registers it. */
@@ -221,12 +222,22 @@ function findNameListError(
 
 function findEnvValueError(value: unknown, at: string): string | undefined {
   if (typeof value !== "string") return `${at}: must be a string`;
-  const rest = value.startsWith(HARNESS_PACK_DIR_PLACEHOLDER)
-    ? value.slice(HARNESS_PACK_DIR_PLACEHOLDER.length)
-    : value;
-  return ENV_VALUE_REST.test(rest)
+  if (!value.startsWith(HARNESS_PACK_DIR_PLACEHOLDER)) {
+    // A plain value can never name a path: no `/`, so no `..` escape either.
+    return ENV_VALUE_WORD.test(value) && !value.includes("..")
+      ? undefined
+      : `${at}: must be a plain word or number, or a path under ${HARNESS_PACK_DIR_PLACEHOLDER}`;
+  }
+  // A path value stays inside the pack: {{packDir}} alone, or
+  // {{packDir}}/<relative path> with no `..`, `.` or empty segment.
+  const rest = value.slice(HARNESS_PACK_DIR_PLACEHOLDER.length);
+  if (rest === "") return undefined;
+  const relPath = rest.slice(1);
+  return rest.startsWith("/") &&
+    isSafeRelPath(relPath) &&
+    relPath.split("/").every((segment) => ENV_VALUE_WORD.test(segment))
     ? undefined
-    : `${at}: may hold only a leading ${HARNESS_PACK_DIR_PLACEHOLDER} and plain path characters`;
+    : `${at}: must be ${HARNESS_PACK_DIR_PLACEHOLDER} or ${HARNESS_PACK_DIR_PLACEHOLDER}/<relative path inside the pack>`;
 }
 
 function findEnvError(value: unknown, at: string): string | undefined {
