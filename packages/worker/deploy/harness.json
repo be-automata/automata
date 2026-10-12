@@ -8,7 +8,14 @@
       "repo": "https://github.com/garrytan/gstack",
       "sha": "df89475b1713d2480a5e266e0fd448201817d80e",
       "license": "MIT",
+      "checkoutDir": "skills/gstack",
+      "discard": ["skills/*/.gstack-owned"],
       "setupArgs": ["--host", "claude"],
+      "setupEnv": { "GSTACK_SKIP_ASIDE": "1" },
+      "preSetup": [
+        ["bin/gstack-config", "set", "telemetry", "off"],
+        ["bin/gstack-config", "set", "update_check", "false"]
+      ],
       "dependencies": [
         {
           "name": "bun",
@@ -18,11 +25,32 @@
           "license": "MIT"
         }
       ],
+      "browsers": [
+        {
+          "name": "chromium",
+          "revision": "1234",
+          "version": "151.0.7922.34",
+          "url": "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-linux64.zip",
+          "sha256": "ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8",
+          "dir": "chromium-1234",
+          "executable": "chrome-linux64/chrome"
+        },
+        {
+          "name": "chromium-headless-shell",
+          "revision": "1234",
+          "version": "151.0.7922.34",
+          "url": "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip",
+          "sha256": "3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14",
+          "dir": "chromium_headless_shell-1234",
+          "executable": "chrome-headless-shell-linux64/chrome-headless-shell"
+        }
+      ],
       "nodeMajor": 24,
       "env": {
         "GSTACK_SESSION_KIND": "spawned",
         "PLAYWRIGHT_BROWSERS_PATH": "{{packDir}}/ms-playwright"
       },
+      "smoke": [["claude/skills/gstack/browse/dist/browse", "--help"]],
       "headlessSafe": ["investigate", "browse"],
       "frontmatterHookSkills": [
         "autoplan",
@@ -38,9 +66,29 @@
       "kind": "npm-lock",
       "package": "@opengsd/gsd-core",
       "version": "1.16.0",
+      "lockOverlay": "packages/worker/deploy/batteries/gsd/package-lock.json",
+      "lockSha256": "21f19d078cf65e51b422fe623bc9cf0d5d3d3eef917415c73b671b4cb98b75af",
+      "packageJsonSha256": "4e56618fe7b1e6d65679cbde84e99710e249b5fda4b8581d81ba101b5cc4fb4d",
+      "postInstall": [
+        "node_modules/@opengsd/gsd-core/bin/install.js",
+        "--claude",
+        "--global",
+        "--config-dir",
+        "{{configDir}}",
+        "--portable-hooks",
+        "--no-legacy-cleanup"
+      ],
+      "discard": [".gsd-source", ".gsd-staging"],
       "license": "MIT",
       "nodeMajor": 24,
       "env": {},
+      "smoke": [
+        [
+          "node",
+          "{{packDir}}/claude/gsd-core/bin/gsd-tools.cjs",
+          "current-timestamp"
+        ]
+      ],
       "headlessSafe": ["gsd-debug", "gsd-quick", "gsd-code-review"],
       "frontmatterHookSkills": []
     },
@@ -51,11 +99,60 @@
       "package": "ruflo",
       "version": "3.56.7",
       "overrides": { "@claude-flow/cli": "3.56.7" },
+      "lockOverlay": "packages/worker/deploy/batteries/ruflo/package-lock.json",
+      "lockSha256": "cfac0ec4433e1e58ca2208e4e5e2ba953af2b09f76d57579183de068f41c6e50",
+      "packageJsonSha256": "475fc999482577a72e391ffa63a30213358c8ca63f4caf3bc3a5f39386902765",
+      "lifecycleScripts": ["@claude-flow/cli"],
+      "prebuilds": [
+        {
+          "path": "node_modules/better-sqlite3",
+          "url": "https://github.com/WiseLibs/better-sqlite3/releases/download/v12.11.1/better-sqlite3-v12.11.1-node-v137-linux-x64.tar.gz",
+          "sha256": "99c43785639d5d3690c396ba245ee680ac8b469a46b19233a3546f0eb7f8e312",
+          "member": "build/Release/better_sqlite3.node"
+        }
+      ],
+      "prefetch": [
+        {
+          "path": "node_modules/@huggingface/transformers/.cache/Xenova/all-MiniLM-L6-v2/config.json",
+          "url": "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/751bff37182d3f1213fa05d7196b954e230abad9/config.json",
+          "sha256": "7135149f7cffa1a573466c6e4d8423ed73b62fd2332c575bf738a0d033f70df7"
+        },
+        {
+          "path": "node_modules/@huggingface/transformers/.cache/Xenova/all-MiniLM-L6-v2/tokenizer.json",
+          "url": "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/751bff37182d3f1213fa05d7196b954e230abad9/tokenizer.json",
+          "sha256": "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0"
+        },
+        {
+          "path": "node_modules/@huggingface/transformers/.cache/Xenova/all-MiniLM-L6-v2/tokenizer_config.json",
+          "url": "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/751bff37182d3f1213fa05d7196b954e230abad9/tokenizer_config.json",
+          "sha256": "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3"
+        },
+        {
+          "path": "node_modules/@huggingface/transformers/.cache/Xenova/all-MiniLM-L6-v2/onnx/model.onnx",
+          "url": "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/751bff37182d3f1213fa05d7196b954e230abad9/onnx/model.onnx",
+          "sha256": "759c3cd2b7fe7e93933ad23c4c9181b7396442a2ed746ec7c1d46192c469c46e"
+        }
+      ],
+      "warmup": [
+        {
+          "tool": "memory_store",
+          "arguments": { "key": "automata-warmup", "value": "warmup" }
+        }
+      ],
       "license": "MIT",
       "nodeMajor": 24,
       "env": { "MCP_TIMEOUT": "30000" },
       "mcpServers": {
         "ruflo": { "command": "{{packDir}}/bin/ruflo-mcp", "args": [] }
+      },
+      "mcpServe": {
+        "entrypoint": "node_modules/ruflo/bin/ruflo.js",
+        "args": ["mcp", "start"],
+        "env": {
+          "CLAUDE_FLOW_HEADLESS": "true",
+          "CLAUDE_FLOW_ROUTER_NEURAL": "0",
+          "RUFLO_DAEMON_AUTOSTART": "0"
+        }
       },
       "toolAllowlist": [
         "memory_store",
@@ -92,6 +189,9 @@
         "workflow_status",
         "workflow_validate",
         "workflow_delete"
+      ],
+      "smoke": [
+        ["node", "{{packDir}}/node_modules/ruflo/bin/ruflo.js", "--version"]
       ],
       "headlessSafe": [],
       "frontmatterHookSkills": []

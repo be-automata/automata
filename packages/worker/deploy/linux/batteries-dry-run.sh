@@ -7,7 +7,7 @@ set -euo pipefail
 # first. Run it under `/bin/bash --noprofile --norc` (bash 3.2 + BSD or GNU
 # userland). The last line is DRY-RUN-PROOF-OK on success.
 #
-# Six installer runs, every one a dry run (PREFIX=<tmp> SKIP_SUDO_VERIFY=1):
+# Eight installer runs, every one a dry run (PREFIX=<tmp> SKIP_SUDO_VERIFY=1):
 #   1 fresh PREFIX D              everything INSTALLED; pack, SDK, CLI, wrapper,
 #                                 version line, OFFLINE smoke, manifest.sha256
 #   2 same D                      every cli, pack and tool SKIPPED
@@ -17,6 +17,15 @@ set -euo pipefail
 #     tampered INSIDE the lock    (throwaway worktree commit; main checkout untouched)
 #   5 T, lockSha256 tampered      FAIL aot: lock overlay sha256 mismatch
 #   6 D with run 5's manifest     manifest.sha256 invalidated, run 1's CLI untouched
+#   7 D, harness lockSha256       FAIL harness preflight (lock mismatch) while every
+#     tampered                    review item is SKIPPED and manifest.sha256 is
+#                                 written again: a harness failure is isolated
+#   8 D, harness kind unknown     FAIL harness preflight (kind), manifest.sha256 kept
+#
+# The harness packs (harness.json: git-setup and npm-lock kinds) are only
+# PREFLIGHTED here — shapes, and each committed lockfile/package.json against
+# its pinned sha256 at HEAD. Building them needs root and the build account;
+# that is proven in a disposable ubuntu:24.04 container (see the runbook).
 #
 # Host manifest: Linux x86_64 uses the HEAD manifest bytes unchanged (the exact
 # production pins). Darwin arm64 rewrites ONLY the dart-sdk url and sha256 to
@@ -31,6 +40,7 @@ SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd -P "$SCRIPT_DIR/../../../.." && pwd -P)"
 INSTALLER="$SCRIPT_DIR/install-batteries.sh"
 MANIFEST_PATH="packages/worker/deploy/batteries.json"
+HARNESS_PATH="packages/worker/deploy/harness.json"
 PROOF_PACK="somnio-skills"
 
 die() {
@@ -151,11 +161,11 @@ fi
 ITEM_COUNT="$(jq '(.clis | length) + (.packs | length) + ((.tools // []) | length)' "$M")"
 
 RUN_STATUS=0
-# run <n> <prefix> <manifest> [<repo>]
+# run <n> <prefix> <manifest> [<repo>] [<harness manifest>]
 run() {
-  local n="$1" prefix="$2" manifest="$3" repo="${4:-$REPO}"
+  local n="$1" prefix="$2" manifest="$3" repo="${4:-$REPO}" harness="${5:-}"
   RUN_STATUS=0
-  PREFIX="$prefix" SKIP_SUDO_VERIFY=1 BATTERIES_MANIFEST="$manifest" \
+  PREFIX="$prefix" SKIP_SUDO_VERIFY=1 BATTERIES_MANIFEST="$manifest" HARNESS_MANIFEST="$harness" \
     BATTERIES_DOWNLOAD_CACHE="$CACHE" AUTOMATA_REPO="$repo" TMPDIR="$WORK/tmp" \
     /bin/bash "$INSTALLER" >"$WORK/run$n.log" 2>&1 || RUN_STATUS=$?
   echo "== run $n (exit $RUN_STATUS) =="
@@ -202,6 +212,9 @@ has_line 1 "INSTALLED tool $SDK_NAME $SDK_VERSION"
 has_line 1 "INSTALLED tool $AOT_NAME $AOT_VERSION"
 has_line 1 "INSTALLED pack $PROOF_PACK $PACK_SHA"
 has_text 1 "downloading $SDK_NAME $SDK_VERSION"
+HARNESS_KINDS="$(git -C "$REPO" cat-file blob "$HEAD_SHA:$HARNESS_PATH" | jq -r '[.packs[] | "\(.id) \(.kind)"] | join(", ")')"
+has_line 1 "PREFLIGHT harness ok ($HARNESS_KINDS)"
+has_line 1 "HARNESS BUILD SKIPPED (dry run: the build account needs root)"
 
 P="$DR/$PROOF_PACK@$PACK_SHA"
 while IFS= read -r dest; do
@@ -345,6 +358,31 @@ expect_status 6 1
 [ -f "$DR/manifest.sha256.invalid" ] || fail "run 6: no manifest.sha256.invalid"
 [ "$(tree_hash "$C")" = "$CLI_TREE_BEFORE" ] || fail "run 6: run 1's CLI dir changed"
 [ "$(sha256_file "$W")" = "$WRAPPER_BEFORE" ] || fail "run 6: run 1's wrapper changed"
+
+# ── run 7: a harness failure leaves the review result alone ─────────────────
+git -C "$REPO" cat-file blob "$HEAD_SHA:$HARNESS_PATH" >"$WORK/harness.json"
+NPM_PACK="$(jq -r '[.packs[] | select(.kind == "npm-lock") | .id][0]' "$WORK/harness.json")"
+if [ -z "$NPM_PACK" ] || [ "$NPM_PACK" = "null" ]; then
+  die "harness.json has no npm-lock pack"
+fi
+jq --arg p "$NPM_PACK" '(.packs[] | select(.id == $p)).lockSha256 = ("0" * 64)' \
+  "$WORK/harness.json" >"$WORK/run7-harness.json"
+run 7 "$D" "$M" "$REPO" "$WORK/run7-harness.json"
+expect_status 7 1
+has_text 7 "FAIL harness preflight $NPM_PACK: lockSha256 does not match"
+[ "$(grep -c '^FAIL ' "$WORK/run7.log" || true)" -eq 1 ] || fail "run 7: more than the harness FAIL"
+skipped="$(grep -c '^SKIPPED ' "$WORK/run7.log" || true)"
+[ "$skipped" -eq "$ITEM_COUNT" ] || fail "run 7: $skipped review items SKIPPED, expected $ITEM_COUNT"
+[ -f "$DR/manifest.sha256" ] || fail "run 7: a harness failure kept manifest.sha256 from being written"
+[ "$(cat "$DR/manifest.sha256")" = "$(expected_manifest_hash "$M")" ] || fail "run 7: manifest.sha256 is not the review manifest's hash"
+
+# ── run 8: an unknown harness kind ───────────────────────────────────────────
+jq '.packs[0].kind = "curl-pipe-bash"' "$WORK/harness.json" >"$WORK/run8-harness.json"
+BEFORE_HASH="$(cat "$DR/manifest.sha256")"
+run 8 "$D" "$M" "$REPO" "$WORK/run8-harness.json"
+expect_status 8 1
+has_text 8 "kind must be git-setup or npm-lock"
+[ "$(cat "$DR/manifest.sha256" 2>/dev/null)" = "$BEFORE_HASH" ] || fail "run 8: manifest.sha256 changed"
 
 downloads="$(count_in_logs "downloading $SDK_NAME $SDK_VERSION")"
 cache_hits="$(count_in_logs "using the cached $SDK_NAME $SDK_VERSION zip")"

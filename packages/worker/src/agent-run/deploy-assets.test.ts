@@ -33,6 +33,16 @@ import {
   isHarnessManifest,
   type HarnessManifest,
 } from "./harness-manifest";
+import {
+  HARNESS_CLAUDE_DIR,
+  HARNESS_HASH_FILE,
+  HARNESS_HASH_INVALID_FILE,
+  HARNESS_MCP_TOOLS_FILE,
+  HARNESS_STAMP_FILE,
+  computeHarnessManifestHash,
+  harnessPackDirName,
+  parseHarnessStamp,
+} from "./harness-layout";
 
 /**
  * Rot guards for the #108 deploy templates. These are pure file reads: no sudo,
@@ -3091,5 +3101,797 @@ describe("#task batteries (phase 7): acceptance script", () => {
         );
       }
     });
+  });
+});
+
+describeBashScriptHygiene("packages/worker/deploy/linux/automata-batteries");
+
+interface HarnessJsonPack {
+  id: string;
+  kind: string;
+  package?: string;
+  version?: string;
+  overrides?: Record<string, string>;
+  lockOverlay?: string;
+  lockSha256?: string;
+  packageJsonSha256?: string;
+  nodeMajor: number;
+  prebuilds?: { url: string }[];
+  toolAllowlist?: string[];
+  warmup?: { tool: string }[];
+}
+
+/** Node's NODE_MODULE_VERSION per major: a prebuild URL names the ABI. */
+const NODE_ABI_BY_MAJOR: Record<number, number> = { 22: 127, 24: 137 };
+
+describe("harness batteries (PR3): lockfiles, installer stages, doctor", () => {
+  const harness = JSON.parse(deployFile("harness.json")) as {
+    packs: HarnessJsonPack[];
+  };
+  const script = deployFile("linux", "install-batteries.sh");
+  const body = (name: string) => fnBody(script, name);
+  const start = script.indexOf("\n# ── harness stages");
+  const end = script.indexOf("\n# ── end harness stages");
+  const block = script.slice(start, end);
+  const npmPacks = harness.packs.filter((p) => p.kind === "npm-lock");
+  const sha256 = (p: string) =>
+    createHash("sha256").update(fs.readFileSync(p)).digest("hex");
+
+  it("pins lockSha256 and packageJsonSha256 to the committed files", () => {
+    expect(npmPacks.map((p) => p.id)).toEqual(["gsd", "ruflo"]);
+    for (const pack of npmPacks) {
+      const lockfile = path.join(repoRoot, pack.lockOverlay ?? "");
+      expect(pack.lockOverlay).toBe(
+        `packages/worker/deploy/batteries/${pack.id}/package-lock.json`,
+      );
+      expect(sha256(lockfile), pack.id).toBe(pack.lockSha256);
+      expect(
+        sha256(path.join(path.dirname(lockfile), "package.json")),
+        pack.id,
+      ).toBe(pack.packageJsonSha256);
+    }
+  });
+
+  it("each committed package.json/lock pins exactly the manifest's package, version and overrides", () => {
+    for (const pack of npmPacks) {
+      const dir = path.join(repoRoot, path.dirname(pack.lockOverlay ?? ""));
+      const pkg = JSON.parse(read(path.join(dir, "package.json"))) as {
+        dependencies: Record<string, string>;
+        overrides?: Record<string, string>;
+      };
+      const lock = JSON.parse(read(path.join(dir, "package-lock.json"))) as {
+        lockfileVersion: number;
+        packages: Record<
+          string,
+          { version?: string; integrity?: string; inBundle?: boolean }
+        >;
+      };
+      const name = pack.package ?? "";
+      expect(pkg.dependencies, pack.id).toEqual({ [name]: pack.version });
+      expect(pkg.overrides ?? {}, pack.id).toEqual(pack.overrides ?? {});
+      expect(lock.lockfileVersion).toBe(3);
+      expect(lock.packages[`node_modules/${name}`]?.version).toBe(pack.version);
+      for (const [dep, version] of Object.entries(pack.overrides ?? {})) {
+        expect(lock.packages[`node_modules/${dep}`]?.version, dep).toBe(
+          version,
+        );
+      }
+      // Every resolved package carries an integrity hash npm verifies
+      // (bundled ones ship inside their parent's verified tarball).
+      for (const [key, entry] of Object.entries(lock.packages)) {
+        if (key === "" || entry.version === undefined || entry.inBundle)
+          continue;
+        expect(entry.integrity, key).toMatch(/^sha512-/);
+      }
+    }
+  });
+
+  it("pins every native prebuild for the pack's Node major ABI", () => {
+    for (const pack of npmPacks) {
+      for (const prebuild of pack.prebuilds ?? []) {
+        expect(prebuild.url, pack.id).toContain(
+          `-node-v${NODE_ABI_BY_MAJOR[pack.nodeMajor]}-linux-x64.tar.gz`,
+        );
+      }
+    }
+  });
+
+  it("warms up only allowlisted MCP tools", () => {
+    for (const pack of harness.packs) {
+      for (const call of pack.warmup ?? []) {
+        expect(pack.toolAllowlist ?? [], pack.id).toContain(call.tool);
+      }
+    }
+  });
+
+  it("never touches manifest.sha256 in the harness stages", () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const blockCode = code(block);
+    for (const token of [
+      "manifest.sha256",
+      "write_manifest_hash",
+      "invalidate_manifest_hash",
+      "FAILURES=",
+    ]) {
+      expect(blockCode, token).not.toContain(token);
+    }
+    // Every FAIL a harness stage records is a harness failure.
+    for (const m of blockCode.matchAll(/record "FAIL ([a-z-]+)/g)) {
+      expect(m[1]).toBe("harness");
+    }
+  });
+
+  it("counts harness FAIL lines apart, and runs after manifest.sha256 is settled", () => {
+    const record = body("record");
+    expect(record.indexOf('"FAIL harness "*)')).toBeGreaterThan(-1);
+    expect(record.indexOf('"FAIL harness "*)')).toBeLessThan(
+      record.indexOf('"FAIL "*)'),
+    );
+    expect(record).toContain("HARNESS_FAILURES=$((HARNESS_FAILURES + 1))");
+    const main = body("main");
+    expect(main.indexOf("write_manifest_hash")).toBeGreaterThan(-1);
+    expect(main.indexOf("install_harness")).toBeGreaterThan(
+      main.indexOf("write_manifest_hash"),
+    );
+    expect(body("finish")).toContain("FAILURES + HARNESS_FAILURES");
+    expect(body("install_harness")).toContain("invalidate_harness_hash");
+    expect(body("write_harness_hash")).toContain("harness.sha256");
+  });
+
+  it("builds as a fixed-uid build account outside 990-999, never as root", () => {
+    const uid = Number(assignment(script, "BUILD_UID").split("=")[1]);
+    expect(uid).toBe(970);
+    expect(uid < 990 || uid > 999).toBe(true);
+    expect(assignment(script, "BUILD_USER")).toBe(
+      'BUILD_USER="automata-build"',
+    );
+    const asBuild = body("as_build");
+    expect(asBuild).toMatch(/runuser -u "\$BUILD_USER" -- env -i HOME=/);
+    expect(asBuild).toContain("npm_config_registry=");
+    expect(asBuild).toContain("npm_config_cache=");
+    expect(asBuild).toContain("npm_config_userconfig=");
+    expect(asBuild).toContain("npm_config_globalconfig=");
+    const account = body("ensure_build_account");
+    expect(account).toContain("--shell /usr/sbin/nologin");
+    expect(account).toContain('--uid "$BUILD_UID"');
+    // Every upstream command of a stage goes through as_build.
+    for (const fn of ["stage_git_setup", "stage_npm_lock"]) {
+      for (const line of code(body(fn))
+        .replace(/\\\n\s*/g, "")
+        .split("\n")) {
+        if (
+          !/^\s*(log |STEP_ERROR=)/.test(line) &&
+          /\b(npm (install|rebuild)|git (init|fetch|checkout)|\/setup")/.test(
+            line,
+          )
+        ) {
+          expect(line, `${fn}: ${line.trim()}`).toContain("as_build");
+        }
+      }
+    }
+    const cloudInit = deployFile("linux", "cloud-init.yaml");
+    expect(cloudInit).toContain(`BUILD_UID=${uid}`);
+    expect(cloudInit).toContain("BUILD_USER=automata-build");
+    expect(cloudInit).toContain('--shell /usr/sbin/nologin "$BUILD_USER"');
+  });
+
+  it("cloud-init installs the same Chromium runtime packages the installer checks", () => {
+    const words = (text: string) => text.split(/\s+/).filter(Boolean).sort();
+    const installer = /\nCHROMIUM_RUNTIME_PACKAGES=\(([^)]*)\)/.exec(script);
+    const cloudInit = /CHROMIUM_RUNTIME_PACKAGES="([^"]*)"/.exec(
+      deployFile("linux", "cloud-init.yaml"),
+    );
+    expect(installer?.[1]).toBeDefined();
+    expect(words(cloudInit?.[1] ?? "")).toEqual(words(installer?.[1] ?? ""));
+    expect(words(installer?.[1] ?? "")).toContain("libnss3");
+  });
+
+  it("installs from the lock with scripts off and never compiles a native module", () => {
+    const npm = body("stage_npm_lock");
+    expect(npm).toContain("npm install --ignore-scripts --no-save");
+    expect(npm).toContain("check_npm_tree");
+    expect(npm).toContain("a build step rewrote the committed lock");
+    expect(npm).toContain('"-node-v$abi-linux-x64.tar.gz"');
+    for (const token of [
+      "node-gyp",
+      "prebuild-install",
+      "make ",
+      "g++",
+      "cc ",
+    ]) {
+      expect(code(block), token).not.toContain(token);
+    }
+  });
+
+  it("scans before publishing: staging path, links, discards, frontmatter", () => {
+    const scan = body("scan_pack");
+    for (const token of [
+      "names the staging path",
+      "link escapes the pack",
+      "dangling link",
+      "absolute link outside the build config dir",
+      "frontmatter declares hooks outside frontmatterHookSkills",
+      "mcpServers",
+      "permissionMode",
+    ]) {
+      expect(scan, token).toContain(token);
+    }
+    expect(assignment(script, "HARNESS_DISCARD_NAMES")).toBe(
+      "HARNESS_DISCARD_NAMES=(settings.json settings.local.json .mcp.json)",
+    );
+    const install = body("install_harness_pack");
+    expect(install.indexOf("scan_pack")).toBeLessThan(
+      install.indexOf("publish_dir"),
+    );
+    expect(install.indexOf("chown -hR root:root")).toBeGreaterThan(-1);
+    expect(install.indexOf("chown -hR root:root")).toBeLessThan(
+      install.indexOf("publish_dir"),
+    );
+  });
+
+  it("re-hashes every recorded native file before SKIPPING a pack", () => {
+    const atPin = body("harness_at_pin");
+    expect(atPin).toContain("s/^file //p");
+    expect(atPin).toContain("sha256_of");
+    expect(body("install_harness_pack")).toMatch(/NATIVE \/file /);
+  });
+
+  it("grants Chromium userns through AppArmor, never through the sysctl or --no-sandbox", () => {
+    const apparmor = body("harness_apparmor");
+    expect(apparmor).toContain("userns,");
+    expect(apparmor).toContain("apparmor_parser -r");
+    expect(code(script)).not.toContain("apparmor_restrict_unprivileged_userns");
+    expect(code(script)).not.toContain("--no-sandbox");
+    const doctor = deployFile("linux", "automata-batteries");
+    // The doctor adds --no-sandbox only in a test container, and says so.
+    expect(doctor).toContain("[ -f /.dockerenv ]");
+    expect(doctor).toContain("TEST CONTAINER ONLY: --no-sandbox");
+  });
+
+  it("the MCP wrapper clears the env and passes only proxy settings through", () => {
+    const wrapper = body("write_mcp_wrapper");
+    expect(wrapper).toContain("exec /usr/bin/env -i PATH=");
+    for (const name of [
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "NO_PROXY",
+      "NODE_USE_ENV_PROXY",
+    ]) {
+      expect(wrapper, name).toContain(name);
+    }
+    expect(wrapper).toContain("lib/mcp-filter.mjs");
+    expect(wrapper).toContain("etc/tool-allowlist.json");
+  });
+
+  it("the filter proxy drops non-allowlisted tools from tools/list and refuses their calls", () => {
+    const server = [
+      "const rl = require('node:readline').createInterface({ input: process.stdin });",
+      "rl.on('line', (l) => { const m = JSON.parse(l);",
+      "  const r = m.method === 'tools/list'",
+      "    ? { tools: [{ name: 'memory_store' }, { name: 'agent_spawn' }, { name: 'http_fetch' }] }",
+      "    : { content: [{ type: 'text', text: 'ran ' + m.params.name }] };",
+      "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: m.id, result: r }) + '\\n'); });",
+    ].join("\n");
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-filter-"));
+    const allowlist = path.join(tmp, "allow.json");
+    fs.writeFileSync(allowlist, JSON.stringify(["memory_store"]));
+    const frames = [
+      { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "agent_spawn", arguments: {} },
+      },
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "memory_store", arguments: {} },
+      },
+      [
+        {
+          jsonrpc: "2.0",
+          id: 4,
+          method: "tools/call",
+          params: { name: "memory_store" },
+        },
+      ],
+    ];
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(workerRoot, "deploy", "linux", "harness-mcp-filter.mjs"),
+        allowlist,
+        "--",
+        process.execPath,
+        "-e",
+        server,
+      ],
+      {
+        input: frames.map((f) => JSON.stringify(f)).join("\n") + "\n",
+        encoding: "utf8",
+      },
+    );
+    fs.rmSync(tmp, { recursive: true, force: true });
+    const replies = new Map(
+      result.stdout
+        .split("\n")
+        .filter((l) => l.trim() !== "")
+        .map((l) => JSON.parse(l) as { id: number })
+        .map((m) => [m.id, m as Record<string, unknown>]),
+    );
+    expect(replies.get(1)).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { tools: [{ name: "memory_store" }] },
+    });
+    expect(replies.get(2)?.error).toMatchObject({ code: -32601 });
+    expect(JSON.stringify(replies.get(3)?.result)).toContain(
+      "ran memory_store",
+    );
+    expect(replies.get(4)?.error).toMatchObject({ code: -32600 });
+  });
+});
+
+describe("harness batteries (PR3): the pre-publish scan, executed", () => {
+  const script = deployFile("linux", "install-batteries.sh");
+  const scan = fnBody(script, "scan_pack");
+  const python = scan.slice(
+    scan.indexOf("<<'PY'\n") + "<<'PY'\n".length,
+    scan.indexOf("\nPY\n"),
+  );
+
+  it("rewrites build links, and fails on leaks, escapes and every frontmatter fence variant", (ctx) => {
+    if (spawnSync("python3", ["--version"], { stdio: "ignore" }).status !== 0) {
+      ctx.skip();
+    }
+    const tmp = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "scan-")),
+    );
+    const stage = path.join(tmp, ".staging.harness.x.ABC");
+    const pack = path.join(stage, "pack");
+    const buildClaude = path.join(stage, "build", "home", ".claude");
+    const final = path.join(tmp, "x@1.0.0");
+    const write = (rel: string, text: string) => {
+      fs.mkdirSync(path.dirname(path.join(pack, rel)), { recursive: true });
+      fs.writeFileSync(path.join(pack, rel), text);
+    };
+    const hooks = "---\nname: s\nhooks:\n  PreToolUse: []\n---\nbody\n";
+    write("claude/skills/careful/SKILL.md", hooks);
+    write("claude/skills/src/SKILL.md", hooks);
+    write("claude/skills/quoted/SKILL.md", '---\n"hooks" : x\n---\n');
+    write("claude/skills/bom/SKILL.md", "﻿---\r\npermissionMode: x\r\n---\r\n");
+    write("claude/notes.md", "---\n{hooks: x}\n---\n");
+    write("claude/leak.txt", `cwd was ${stage}/build\n`);
+    write("claude/settings.json", "{}");
+    write("node_modules/dep/settings.json", "{}");
+    write(
+      "node_modules/dep/README.md",
+      "---\nhooks: fine-in-node_modules\n---\n",
+    );
+    fs.mkdirSync(path.join(pack, "claude/skills/linked"), { recursive: true });
+    // An absolute link into the build config dir is rewritten, and its
+    // SKILL.md is judged under the LINK's skill dir (linked: no hooks).
+    fs.symlinkSync(
+      path.join(buildClaude, "skills/src/SKILL.md"),
+      path.join(pack, "claude/skills/linked/SKILL.md"),
+    );
+    fs.symlinkSync("/etc/passwd", path.join(pack, "claude/escape"));
+    const result = spawnSync(
+      "python3",
+      ["-", pack, stage, buildClaude, final, "careful\nsrc"],
+      {
+        input: python,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HARNESS_DISCARD_NAMES: "settings.json settings.local.json .mcp.json",
+        },
+      },
+    );
+    const out = result.stdout;
+    const linkTarget = fs.readlinkSync(
+      path.join(pack, "claude/skills/linked/SKILL.md"),
+    );
+    const settingsKept = fs.existsSync(
+      path.join(pack, "node_modules/dep/settings.json"),
+    );
+    const settingsGone = !fs.existsSync(
+      path.join(pack, "claude/settings.json"),
+    );
+    fs.rmSync(tmp, { recursive: true, force: true });
+    expect(result.status).toBe(1);
+    expect(linkTarget).toBe("../src/SKILL.md");
+    expect(settingsKept && settingsGone).toBe(true);
+    expect(out).toContain("DISCARD claude/settings.json");
+    for (const line of [
+      "ERROR claude/skills/linked/SKILL.md: frontmatter declares hooks outside frontmatterHookSkills",
+      "ERROR claude/skills/quoted/SKILL.md: frontmatter declares hooks outside frontmatterHookSkills",
+      "ERROR claude/skills/bom/SKILL.md: frontmatter declares permissionMode",
+      "ERROR claude/notes.md: frontmatter has a top-level line that is not a plain key",
+      "ERROR claude/leak.txt: names the staging path",
+      "ERROR claude/escape: absolute link outside the build config dir",
+    ]) {
+      expect(out, line).toContain(line);
+    }
+    for (const allowed of [
+      "claude/skills/careful/",
+      "claude/skills/src/",
+      "node_modules/dep/README.md",
+    ]) {
+      expect(out, allowed).not.toContain(`ERROR ${allowed}`);
+    }
+  });
+});
+
+describe("harness batteries (PR3 review): root never follows a link the build planted", () => {
+  const script = deployFile("linux", "install-batteries.sh");
+  const body = (name: string) => fnBody(script, name);
+
+  /** Runs bash with the named installer functions and a stubbed as_build that only logs. */
+  function runWithStubs(fns: string[], setup: string, tmp: string) {
+    const program = [
+      "set -euo pipefail",
+      `WORK=${JSON.stringify(tmp)}`,
+      "BUILD_PATH=/usr/bin:/bin",
+      // The build account's commands are only RECORDED: whatever root does
+      // itself is what the planted links could redirect.
+      `as_build() { printf '%s\\n' "$*" >>"$WORK/as_build.log"; [ "\${AS_BUILD_STDOUT:-}" = "" ] || cat "$AS_BUILD_STDOUT"; }`,
+      ...fns.map(body),
+      setup,
+    ].join("\n");
+    return spawnSync("bash", ["-c", program], { encoding: "utf8" });
+  }
+
+  it("stages inputs in the root dir and lets the BUILD place them over planted links (B1, B2)", () => {
+    const tmp = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "harden-")),
+    );
+    const sentinel = path.join(tmp, "etc-passwd");
+    fs.writeFileSync(sentinel, "root:x:0:0\n");
+    const stage = path.join(tmp, "stage");
+    const b = path.join(stage, "build");
+    for (const dir of [
+      "in",
+      "out",
+      "build/work",
+      "build/npm/node_modules/pkg/build/Release",
+    ]) {
+      fs.mkdirSync(path.join(stage, dir), { recursive: true });
+    }
+    // What a hostile lifecycle script / postInstall leaves behind:
+    fs.symlinkSync(sentinel, path.join(b, "work/warmup.json"));
+    fs.symlinkSync(sentinel, path.join(b, "mcp-tools.json"));
+    fs.symlinkSync(
+      sentinel,
+      path.join(b, "npm/node_modules/pkg/build/Release/x.node"),
+    );
+    const result = runWithStubs(
+      ["write_input", "place_input"],
+      [
+        `in=${JSON.stringify(path.join(stage, "in"))}`,
+        `b=${JSON.stringify(b)}`,
+        'printf "[]" | write_input "$in" warmup.json',
+        'printf "ELF" | write_input "$in" prebuild-0',
+        'place_input "$b/home" "$in/prebuild-0" "$b/npm/node_modules/pkg/build/Release/x.node" 0755',
+      ].join("\n"),
+      tmp,
+    );
+    const log = fs.readFileSync(path.join(tmp, "as_build.log"), "utf8");
+    const sentinelAfter = fs.readFileSync(sentinel, "utf8");
+    const sentinelMode = fs.statSync(sentinel).mode & 0o777;
+    const inputs = fs.readdirSync(path.join(stage, "in")).sort();
+    fs.rmSync(tmp, { recursive: true, force: true });
+    expect(result.status, result.stderr).toBe(0);
+    expect(sentinelAfter).toBe("root:x:0:0\n");
+    expect(sentinelMode).not.toBe(0o755);
+    expect(inputs).toEqual(["prebuild-0", "warmup.json"]);
+    // The prebuild reaches the build tree only through the build account.
+    expect(log).toContain("install -D -m 0755");
+    expect(log).toContain("node_modules/pkg/build/Release/x.node");
+  });
+
+  it("writes nothing under the build tree from root once a build command ran (static)", () => {
+    const rootWrite =
+      /(>>?\s*"?\$(b|npm_dir|co)\b|\b(chmod|chown|mkdir|ln|cp|install|tee|touch|truncate)\b[^\n]*"\$(b|npm_dir|co)\b)/;
+    for (const fn of ["stage_npm_lock", "stage_git_setup"]) {
+      const lines = code(body(fn))
+        .replace(/\\\n\s*/g, "")
+        .split("\n");
+      const first = lines.findIndex((l) => /\bas_build\b/.test(l));
+      expect(first, fn).toBeGreaterThan(-1);
+      for (const line of lines.slice(first)) {
+        if (/\b(as_build|place_input)\b/.test(line)) continue;
+        expect(line, `${fn}: ${line.trim()}`).not.toMatch(rootWrite);
+      }
+    }
+    const npm = body("stage_npm_lock");
+    expect(npm).toContain('write_input "$in" warmup.json');
+    expect(npm).toContain('>"$out/mcp-tools.json"');
+    expect(npm).not.toContain('"$b/mcp-tools.json"');
+    expect(npm).not.toContain('warmup.json"\n    chown');
+  });
+
+  it("assembles only after the build is dead and the tree is taken back", () => {
+    const install = body("install_harness_pack");
+    const kill = install.indexOf("kill_build_processes");
+    const harden = install.indexOf("harden_build_tree");
+    const assemble = install.indexOf("assemble_pack");
+    expect(kill).toBeGreaterThan(-1);
+    expect(kill).toBeLessThan(harden);
+    expect(harden).toBeLessThan(assemble);
+    expect(install).not.toContain("kill_build_processes || true");
+    expect(install).toContain("build account processes survived SIGKILL");
+    expect(install.indexOf("kill_build_processes")).toBeLessThan(
+      install.indexOf('rm -rf "$stage"'),
+    );
+    const harden_ = body("harden_build_tree");
+    expect(harden_).toContain("chown -hR root:root");
+    expect(harden_).toContain('[ -L "$dir" ]');
+    expect(body("collect_build_output")).toContain("realpath -e");
+  });
+
+  it("contains the build: scope per command, uid sweep, no cron/at, no tty, offline warmup", () => {
+    const asBuild = body("as_build");
+    expect(asBuild).toContain("systemd-run --scope");
+    expect(asBuild).toContain("setsid -w runuser");
+    expect(asBuild).toContain("</dev/null");
+    expect(asBuild).toContain("unshare --net");
+    const kill = body("kill_build_processes");
+    expect(kill).toContain('systemctl kill --signal=KILL "$unit.scope"');
+    expect(kill).toContain('pkill -KILL -u "$BUILD_USER"');
+    expect(body("deny_build_scheduling")).toContain(
+      "/etc/cron.deny /etc/at.deny",
+    );
+    expect(body("ensure_build_account")).toContain("deny_build_scheduling");
+    expect(body("stage_npm_lock")).toMatch(
+      /BUILD_OFFLINE=1\n[\s\S]*mcp-probe\.mjs" warmup/,
+    );
+    expect(body("on_exit")).toContain('rmdir "$HARNESS_PLACEHOLDER"');
+    expect(body("install_harness_pack")).toContain("HARNESS_MIN_WORK_KB");
+    const doctor = deployFile("linux", "automata-batteries");
+    expect(doctor).toContain("setsid -w runuser");
+  });
+
+  it("check_npm_tree fails on a package the lock does not pin, or pins differently (M1)", () => {
+    const tmp = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "npmtree-")),
+    );
+    const want = {
+      packages: {
+        "": { dependencies: { a: "1.0.0" } },
+        "node_modules/a": {
+          version: "1.0.0",
+          resolved: "https://r/a-1.0.0.tgz",
+          integrity: "sha512-A",
+        },
+        "node_modules/skipped-darwin": {
+          version: "1.0.0",
+          resolved: "https://r/s.tgz",
+          integrity: "sha512-S",
+          optional: true,
+        },
+      },
+    };
+    const lockFile = path.join(tmp, "lock.json");
+    fs.writeFileSync(lockFile, JSON.stringify(want));
+    const run = (got: unknown) => {
+      const installed = path.join(tmp, "got.json");
+      fs.writeFileSync(installed, JSON.stringify(got));
+      return runWithStubs(
+        ["check_npm_tree"],
+        [
+          `git_repo() { cat ${JSON.stringify(lockFile)}; }`,
+          "hfield() { echo lock; }",
+          "HEAD_SHA=x",
+          `AS_BUILD_STDOUT=${JSON.stringify(installed)}`,
+          'if check_npm_tree 0 /stage; then echo OK; else echo "FAIL $STEP_ERROR"; fi',
+        ].join("\n"),
+        tmp,
+      ).stdout.trim();
+    };
+    const exact = {
+      packages: { "": {}, "node_modules/a": want.packages["node_modules/a"] },
+    };
+    expect(run(exact)).toBe("OK");
+    expect(
+      run({
+        packages: {
+          ...exact.packages,
+          "node_modules/evil": { version: "6.6.6" },
+        },
+      }),
+    ).toBe(
+      "FAIL installed packages differ from the committed lock: node_modules/evil",
+    );
+    expect(
+      run({
+        packages: {
+          "node_modules/a": {
+            ...want.packages["node_modules/a"],
+            integrity: "sha512-B",
+          },
+        },
+      }),
+    ).toBe(
+      "FAIL installed packages differ from the committed lock: node_modules/a",
+    );
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("the filter allowlists methods, forwards what it parsed, and counts pending lists (M4, m2)", () => {
+    const server = [
+      "const rl = require('node:readline').createInterface({ input: process.stdin });",
+      "rl.on('line', (l) => { process.stderr.write('SERVER-GOT ' + l + '\\n'); const m = JSON.parse(l);",
+      "  if (m.id === undefined) return;",
+      "  const r = m.method === 'tools/list'",
+      "    ? { tools: [{ name: 'memory_store' }, { name: 'agent_spawn' }] }",
+      "    : { ok: true };",
+      "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: m.id, result: r }) + '\\n'); });",
+    ].join("\n");
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-filter-"));
+    const allowlist = path.join(tmp, "allow.json");
+    fs.writeFileSync(allowlist, JSON.stringify(["memory_store"]));
+    const input = [
+      '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+      '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+      '{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"file:///etc/passwd"}}',
+      '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+      '{ "jsonrpc" : "2.0", "id" : 3, "method" : "ping" }',
+      `{"jsonrpc":"2.0","id":4,"method":"ping","pad":"${"x".repeat(17 * 1024 * 1024)}"}`,
+    ].join("\n");
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(workerRoot, "deploy", "linux", "harness-mcp-filter.mjs"),
+        allowlist,
+        "--",
+        process.execPath,
+        "-e",
+        server,
+      ],
+      { input: `${input}\n`, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+    );
+    fs.rmSync(tmp, { recursive: true, force: true });
+    const replies = result.stdout
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map(
+        (l) =>
+          JSON.parse(l) as {
+            id: number;
+            result?: { tools?: unknown[] };
+            error?: { code: number; message: string };
+          },
+      );
+    const lists = replies.filter((r) => r.id === 1);
+    expect(lists).toHaveLength(2);
+    for (const list of lists)
+      expect(list.result?.tools).toEqual([{ name: "memory_store" }]);
+    expect(replies.find((r) => r.id === 2)?.error).toEqual({
+      code: -32601,
+      message: "method resources/read is not allowed on this box",
+    });
+    expect(replies.some((r) => r.id === 4)).toBe(false);
+    // Forwarded = re-serialised, never the raw bytes; the refused request never reaches it.
+    expect(result.stderr).toContain(
+      'SERVER-GOT {"jsonrpc":"2.0","id":3,"method":"ping"}',
+    );
+    expect(result.stderr).toContain(
+      "SERVER-GOT " + '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    );
+    expect(result.stderr).not.toContain("resources/read");
+    expect(result.stderr).toContain("dropped an over-long client frame");
+  });
+});
+
+describe("harness batteries: the installer writes exactly the layout the worker reads (harness-layout.ts)", () => {
+  const script = deployFile("linux", "install-batteries.sh");
+  const body = (name: string) => fnBody(script, name);
+  const manifestPath = path.join(workerRoot, "deploy", "harness.json");
+  const manifestBytes = fs.readFileSync(manifestPath);
+  const manifest = JSON.parse(manifestBytes.toString("utf8")) as Parameters<
+    typeof computeHarnessManifestHash
+  >[1];
+
+  /** bash with the named installer functions; git_repo reads this checkout's files. */
+  function bash(
+    fns: string[],
+    program: string,
+    env: Record<string, string> = {},
+  ) {
+    return spawnSync(
+      "bash",
+      [
+        "-c",
+        [
+          "set -euo pipefail",
+          `HARNESS=${JSON.stringify(manifestPath)}`,
+          "HEAD_SHA=HEAD",
+          `git_repo() { cat ${JSON.stringify(repoRoot)}/"\${3#*:}"; }`,
+          ...fns.map(body),
+          program,
+        ].join("\n"),
+      ],
+      { encoding: "utf8", env: { ...process.env, ...env } },
+    );
+  }
+
+  it("names every pack dir as harnessPackDirName does", () => {
+    const out = bash(
+      ["hfield", "harness_rows", "harness_dir_name"],
+      "while IFS=$'\\t' read -r i _ _; do harness_dir_name \"$i\"; done < <(harness_rows)",
+    );
+    expect(out.status, out.stderr).toBe(0);
+    expect(out.stdout.trim().split("\n")).toEqual(
+      manifest.packs.map((pack) => harnessPackDirName(pack)),
+    );
+  });
+
+  it("writes harness.sha256 with computeHarnessManifestHash's recipe", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "harness-hash-"));
+    const out = bash(
+      ["write_harness_hash"],
+      `ROOT=${JSON.stringify(root)}\nwrite_harness_hash`,
+    );
+    const written = fs
+      .readFileSync(path.join(root, HARNESS_HASH_FILE), "utf8")
+      .trim();
+    fs.rmSync(root, { recursive: true, force: true });
+    expect(out.status, out.stderr).toBe(0);
+    expect(written).toBe(
+      await computeHarnessManifestHash(manifestBytes, manifest, repoRoot),
+    );
+    expect(body("invalidate_harness_hash")).toContain(
+      HARNESS_HASH_INVALID_FILE,
+    );
+  });
+
+  it("writes a .stamp parseHarnessStamp reads, with the `node <major>` line", () => {
+    const install = body("install_harness_pack");
+    expect(install).toContain(`>"$pack/${HARNESS_STAMP_FILE}"`);
+    const printf =
+      /printf '(stamp %s\\nsource %s\\nnode %s\\nnode_abi %s\\n)'/.exec(
+        install,
+      );
+    expect(printf?.[1]).toBeDefined();
+    const text = spawnSync(
+      "bash",
+      ["-c", `printf '${printf?.[1] ?? ""}' ${"a".repeat(64)} HEAD 24 137`],
+      { encoding: "utf8" },
+    ).stdout;
+    expect(parseHarnessStamp(text)).toEqual({
+      stamp: "a".repeat(64),
+      nodeMajor: 24,
+    });
+  });
+
+  it("puts claude/, mcp-tools.json, the MCP wrapper and ms-playwright where the worker looks", () => {
+    expect(body("collect_build_output")).toContain(
+      `"$pack/${HARNESS_CLAUDE_DIR}"`,
+    );
+    expect(body("stage_git_setup")).toContain(
+      `"$target/${HARNESS_CLAUDE_DIR}"`,
+    );
+    expect(body("stage_npm_lock")).toContain(
+      `>"$out/${HARNESS_MCP_TOOLS_FILE}"`,
+    );
+    expect(body("assemble_pack")).toContain(
+      `"$stage/out/${HARNESS_MCP_TOOLS_FILE}"`,
+    );
+    // The wrapper and the browsers are written at the manifest's own
+    // {{packDir}} paths, which the worker resolves the same way.
+    expect(body("write_mcp_wrapper")).toContain(
+      'rel="${command#"{{packDir}}/"}"',
+    );
+    expect(body("place_browsers")).toContain('pw="$pack/${pw#"{{packDir}}/"}"');
+    const ruflo = manifest.packs.find((p) => p.id === "ruflo");
+    expect(ruflo?.mcpServers?.ruflo?.command).toBe("{{packDir}}/bin/ruflo-mcp");
+    const gstack = manifest.packs.find((p) => p.id === "gstack");
+    expect(gstack?.env.PLAYWRIGHT_BROWSERS_PATH).toBe(
+      "{{packDir}}/ms-playwright",
+    );
   });
 });

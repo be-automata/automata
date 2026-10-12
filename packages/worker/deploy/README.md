@@ -220,6 +220,26 @@ Then confirm one review run completes. Keep the window under the 30-minute
 `apt-mark hold nodejs`, repeat step 3, start. (Point `nodesource.sources` back at
 `node_22.x` if apt should keep resolving 22.)
 
+## Harness batteries on the execution box
+
+gstack, GSD and ruflo (with its MCP server) are installed by the same root
+`linux/install-batteries.sh` run as the review batteries, from
+`harness.json` and the lockfiles under `batteries/<id>/`. The full runbook
+(what lands where, how a pack is built, the production step, rollback, the
+container drill) is "Harness batteries on the execution box" in
+`deploy/PILOT-RUNBOOK.md`. The checks an operator runs:
+
+```bash
+automata-batteries doctor                 # human summary; exit 0 = every pack OK
+automata-batteries doctor --json | jq '.ok, .harness, [.packs[] | {id, ok, stampValid, nodeAbiMatch}]'
+automata-batteries verify-as-agent        # root: every check AS automata-agent,
+                                          # incl. a sandboxed Chromium launch
+cat /usr/local/lib/automata-batteries/harness.sha256   # absent = last harness install failed
+```
+
+A harness failure never invalidates the review batteries' `manifest.sha256`;
+it only leaves `harness.sha256.invalid` behind.
+
 ## Daemon rebuild (required after any daemon change, e.g. Phase 0.2a)
 
 The worker consumes the compiled daemon (`packages/daemon/dist/`), not its source.

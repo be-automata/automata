@@ -38,7 +38,11 @@ function validFixture(): HarnessManifest {
         repo: "https://github.com/owner/gstack",
         sha: SHA_A,
         license: "MIT",
+        checkoutDir: "skills/gstack",
         setupArgs: ["--host", "claude"],
+        setupEnv: { GSTACK_SKIP_ASIDE: "1" },
+        preSetup: [["bin/gstack-config", "set", "telemetry", "off"]],
+        discard: ["skills/*/.gstack-owned"],
         dependencies: [
           {
             name: "bun",
@@ -48,8 +52,20 @@ function validFixture(): HarnessManifest {
             license: "MIT",
           },
         ],
+        browsers: [
+          {
+            name: "chromium-headless-shell",
+            revision: "1234",
+            version: "151.0.7922.34",
+            url: "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip",
+            sha256: SHA256,
+            dir: "chromium_headless_shell-1234",
+            executable: "chrome-headless-shell-linux64/chrome-headless-shell",
+          },
+        ],
         nodeMajor: 24,
         env: { PLAYWRIGHT_BROWSERS_PATH: "{{packDir}}/ms-playwright" },
+        smoke: [["claude/skills/gstack/browse/dist/browse", "--help"]],
         headlessSafe: ["investigate"],
         frontmatterHookSkills: ["careful"],
       },
@@ -59,6 +75,14 @@ function validFixture(): HarnessManifest {
         kind: "npm-lock",
         package: "@opengsd/gsd-core",
         version: "1.16.0",
+        lockOverlay: "packages/worker/deploy/batteries/gsd/package-lock.json",
+        lockSha256: SHA256,
+        packageJsonSha256: SHA256,
+        postInstall: [
+          "node_modules/@opengsd/gsd-core/bin/install.js",
+          "--config-dir",
+          "{{configDir}}",
+        ],
         license: "MIT",
         nodeMajor: 24,
         env: {},
@@ -72,11 +96,38 @@ function validFixture(): HarnessManifest {
         package: "ruflo",
         version: "3.56.7",
         overrides: { "@claude-flow/cli": "3.56.7" },
+        lockOverlay: "packages/worker/deploy/batteries/ruflo/package-lock.json",
+        lockSha256: SHA256,
+        packageJsonSha256: SHA256,
+        lifecycleScripts: ["@claude-flow/cli"],
+        prebuilds: [
+          {
+            path: "node_modules/better-sqlite3",
+            url: "https://github.com/WiseLibs/better-sqlite3/releases/download/v12.11.1/better-sqlite3-v12.11.1-node-v137-linux-x64.tar.gz",
+            sha256: SHA256,
+            member: "build/Release/better_sqlite3.node",
+          },
+        ],
+        prefetch: [
+          {
+            path: "node_modules/@huggingface/transformers/.cache/Xenova/m/onnx/model.onnx",
+            url: `https://huggingface.co/Xenova/m/resolve/${SHA_A}/onnx/model.onnx`,
+            sha256: SHA256,
+          },
+        ],
+        warmup: [
+          { tool: "memory_store", arguments: { key: "warm", value: "up" } },
+        ],
         license: "MIT",
         nodeMajor: 24,
         env: { MCP_TIMEOUT: "30000" },
         mcpServers: {
           ruflo: { command: "{{packDir}}/bin/ruflo-mcp", args: [] },
+        },
+        mcpServe: {
+          entrypoint: "node_modules/ruflo/bin/ruflo.js",
+          args: ["mcp", "start"],
+          env: { CLAUDE_FLOW_HEADLESS: "true" },
         },
         toolAllowlist: ["memory_store", "system_health"],
         headlessSafe: [],
@@ -228,12 +279,12 @@ describe("findHarnessManifestError — strict keys", () => {
     );
   });
 
-  it("rejects a pending lock pin before the installer defines it (PR3)", () => {
+  it("rejects a placeholder lock pin (PR3 defines the key as REQUIRED)", () => {
     expect(
       errorAfter((m) =>
         Object.assign(m.packs[1]!, { lockSha256: "PENDING-PR3" }),
       ),
-    ).toContain("packs[1].lockSha256: unknown key");
+    ).toContain("packs[1].lockSha256: must match");
   });
 
   it("rejects git-setup keys on an npm-lock pack and vice versa", () => {
@@ -726,5 +777,192 @@ describe("validateHarnessPackTree", () => {
       "---\nname: a\nhooks: {}\npermissionMode: plan\n---\n",
     );
     expect(check()).toEqual({ errors: [], discard: [] });
+  });
+});
+
+describe("findHarnessManifestError — installer keys (PR3)", () => {
+  it("requires the npm-lock lock pins, under batteries/<id>/", () => {
+    expect(
+      errorAfter((m) => Reflect.deleteProperty(m.packs[1]!, "lockOverlay")),
+    ).toContain("packs[1].lockOverlay");
+    expect(
+      errorAfter((m) =>
+        Object.assign(m.packs[1]!, {
+          lockOverlay:
+            "packages/worker/deploy/batteries/ruflo/package-lock.json",
+        }),
+      ),
+    ).toContain("packs[1].lockOverlay: must be under");
+    expect(
+      errorAfter((m) => Object.assign(m.packs[2]!, { lockSha256: "abc" })),
+    ).toContain("packs[2].lockSha256");
+    expect(
+      errorAfter((m) =>
+        Reflect.deleteProperty(m.packs[2]!, "packageJsonSha256"),
+      ),
+    ).toContain("packs[2].packageJsonSha256");
+  });
+
+  it("requires the git-setup build keys", () => {
+    for (const key of ["checkoutDir", "setupEnv", "preSetup", "browsers"]) {
+      expect(
+        errorAfter((m) => Reflect.deleteProperty(gstackOf(m), key)),
+        key,
+      ).toContain(`packs[0].${key}`);
+    }
+  });
+
+  it("pins browsers to a Chrome-for-Testing zip of their own version", () => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(gstackOf(m).browsers[0]!, {
+          url: "https://example.com/chrome-linux64.zip",
+        }),
+      ),
+    ).toContain("browsers[0].url");
+    expect(
+      errorAfter((m) =>
+        Object.assign(gstackOf(m).browsers[0]!, { dir: "chromium-999" }),
+      ),
+    ).toContain("browsers[0].dir");
+    expect(
+      errorAfter((m) =>
+        Object.assign(gstackOf(m).env, { PLAYWRIGHT_BROWSERS_PATH: "x" }),
+      ),
+    ).toContain("PLAYWRIGHT_BROWSERS_PATH");
+  });
+
+  it("rejects build env outside its prefixes and argv words with shell syntax", () => {
+    expect(
+      errorAfter((m) => Object.assign(gstackOf(m).setupEnv, { PATH: "/x" })),
+    ).toContain("setupEnv.PATH");
+    expect(
+      errorAfter((m) =>
+        Object.assign(gstackOf(m), { preSetup: [["bin/x", "$(id)"]] }),
+      ),
+    ).toContain("preSetup[0][1]");
+    expect(
+      errorAfter((m) =>
+        Object.assign(gstackOf(m), { preSetup: [["/bin/sh", "-c"]] }),
+      ),
+    ).toContain("preSetup[0][0]");
+    expect(
+      errorAfter((m) => Object.assign(gstackOf(m), { smoke: [["sh", ";"]] })),
+    ).toContain("smoke[0][1]");
+  });
+
+  it("accepts a * segment in discard, and nothing else glob-like", () => {
+    expect(
+      errorAfter((m) => Object.assign(gstackOf(m), { discard: ["skills/*"] })),
+    ).toBeUndefined();
+    expect(
+      errorAfter((m) => Object.assign(gstackOf(m), { discard: ["../x"] })),
+    ).toContain("discard[0]");
+    for (const bad of ["a*b", "*", "*/*", "**/x"]) {
+      expect(
+        errorAfter((m) => Object.assign(gstackOf(m), { discard: [bad] })),
+        bad,
+      ).toContain("discard[0]");
+    }
+  });
+
+  it("pins prebuilds to a node-v<abi>-linux-x64 release asset", () => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(rufloOf(m).prebuilds![0]!, {
+          url: "https://example.com/x-node-v137-linux-x64.tar.gz",
+        }),
+      ),
+    ).toContain("prebuilds[0].url");
+    expect(
+      errorAfter((m) =>
+        Object.assign(rufloOf(m).prebuilds![0]!, { path: "lib/x" }),
+      ),
+    ).toContain("prebuilds[0].path");
+    expect(
+      errorAfter((m) => Object.assign(rufloOf(m), { nodeMajor: 22 })),
+    ).toContain("Node ABI of nodeMajor 22");
+  });
+
+  it("caps warmup calls and argv lists", () => {
+    const call = { tool: "memory_store", arguments: {} };
+    expect(
+      errorAfter((m) =>
+        Object.assign(rufloOf(m), { warmup: Array(5).fill(call) }),
+      ),
+    ).toContain("at most 4 calls");
+    expect(
+      errorAfter((m) =>
+        Object.assign(gstackOf(m), {
+          smoke: [["node", ...Array(12).fill("x")]],
+        }),
+      ),
+    ).toContain("at most 12 words");
+  });
+
+  it("warms up only allowlisted tools", () => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(rufloOf(m), {
+          warmup: [{ tool: "agent_spawn", arguments: {} }],
+        }),
+      ),
+    ).toContain("warmup[0].tool");
+  });
+
+  it("requires mcpServe exactly with mcpServers", () => {
+    expect(
+      errorAfter((m) => Reflect.deleteProperty(rufloOf(m), "mcpServe")),
+    ).toContain("mcpServe: required with mcpServers");
+    expect(
+      errorAfter((m) =>
+        Object.assign(m.packs[1]!, {
+          mcpServe: { entrypoint: "x.js", args: [], env: {} },
+        }),
+      ),
+    ).toContain("packs[1].mcpServe: only a pack with mcpServers");
+    expect(
+      errorAfter((m) =>
+        Object.assign(rufloOf(m).mcpServe!.env, { NODE_OPTIONS: "--x" }),
+      ),
+    ).toContain("mcpServe.env.NODE_OPTIONS");
+  });
+});
+
+describe("findHarnessManifestError — prefetch (PR3 review M3)", () => {
+  it("pins prefetch files to a fixed huggingface revision under node_modules/", () => {
+    const prefetchOf = (m: HarnessManifest) => rufloOf(m).prefetch![0]!;
+    expect(
+      errorAfter((m) =>
+        Object.assign(prefetchOf(m), {
+          url: "https://huggingface.co/Xenova/m/resolve/main/onnx/model.onnx",
+        }),
+      ),
+    ).toContain("prefetch[0].url");
+    expect(
+      errorAfter((m) =>
+        Object.assign(prefetchOf(m), {
+          url: `https://example.com/Xenova/m/resolve/${SHA_A}/x`,
+        }),
+      ),
+    ).toContain("prefetch[0].url");
+    expect(
+      errorAfter((m) =>
+        Object.assign(prefetchOf(m), {
+          url: `https://huggingface.co/Xenova/m/resolve/${SHA_A}/../x`,
+        }),
+      ),
+    ).toContain("prefetch[0].url");
+    expect(
+      errorAfter((m) => Object.assign(prefetchOf(m), { path: "lib/x" })),
+    ).toContain("prefetch[0].path");
+    expect(
+      errorAfter((m) => Object.assign(prefetchOf(m), { sha256: "x" })),
+    ).toContain("prefetch[0].sha256");
+    expect(
+      errorAfter((m) =>
+        rufloOf(m).prefetch!.push({ ...rufloOf(m).prefetch![0]! }),
+      ),
+    ).toContain("duplicate");
   });
 });
