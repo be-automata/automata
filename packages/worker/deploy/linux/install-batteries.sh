@@ -1832,7 +1832,7 @@ harness_shape_errors() {
         "license is empty": ($p.license | str),
         "nodeMajor must be an integer": ($p.nodeMajor | type == "number" and . == floor and . >= 20),
         "env keys must be battery prefixes with plain values": ($p.env | env_ok("^(GSTACK|PLAYWRIGHT|MCP|CLAUDE_FLOW)_[A-Z0-9_]+$")),
-        "discard entries must be safe relative paths (a segment may be *)": (($p.discard // []) | type == "array" and all(split("/") | map(if . == "*" then "x" else . end) | join("/") | safe_rel)),
+        "discard entries must be safe relative paths (a segment may be *)": (($p.discard // []) | type == "array" and all((split("/") | map(if . == "*" then "x" else . end) | join("/") | safe_rel) and (split("/") | any(. != "*")))),
         "smoke entries must be argv lists": (($p.smoke // []) | type == "array" and all(argv_ok)),
         "headlessSafe must be names": ($p.headlessSafe | type == "array" and all(id)),
         "frontmatterHookSkills must be names": ($p.frontmatterHookSkills | type == "array" and all(id))

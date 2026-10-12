@@ -851,9 +851,12 @@ describe("findHarnessManifestError — installer keys (PR3)", () => {
     expect(
       errorAfter((m) => Object.assign(gstackOf(m), { discard: ["../x"] })),
     ).toContain("discard[0]");
-    expect(
-      errorAfter((m) => Object.assign(gstackOf(m), { discard: ["a*b"] })),
-    ).toContain("discard[0]");
+    for (const bad of ["a*b", "*", "*/*", "**/x"]) {
+      expect(
+        errorAfter((m) => Object.assign(gstackOf(m), { discard: [bad] })),
+        bad,
+      ).toContain("discard[0]");
+    }
   });
 
   it("pins prebuilds to a node-v<abi>-linux-x64 release asset", () => {
@@ -869,6 +872,25 @@ describe("findHarnessManifestError — installer keys (PR3)", () => {
         Object.assign(rufloOf(m).prebuilds![0]!, { path: "lib/x" }),
       ),
     ).toContain("prebuilds[0].path");
+    expect(
+      errorAfter((m) => Object.assign(rufloOf(m), { nodeMajor: 22 })),
+    ).toContain("Node ABI of nodeMajor 22");
+  });
+
+  it("caps warmup calls and argv lists", () => {
+    const call = { tool: "memory_store", arguments: {} };
+    expect(
+      errorAfter((m) =>
+        Object.assign(rufloOf(m), { warmup: Array(5).fill(call) }),
+      ),
+    ).toContain("at most 4 calls");
+    expect(
+      errorAfter((m) =>
+        Object.assign(gstackOf(m), {
+          smoke: [["node", ...Array(12).fill("x")]],
+        }),
+      ),
+    ).toContain("at most 12 words");
   });
 
   it("warms up only allowlisted tools", () => {

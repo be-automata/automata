@@ -55,6 +55,10 @@ import {
  *   the wrapper owns the server's env. A pack with `mcpServers` must name a
  *   `toolAllowlist`, which can never name a spawn/network/terminal/GitHub/
  *   federation tool (FORBIDDEN_MCP_TOOL_PREFIXES; ADR-007 one-agent budget).
+ *   The allowlist is ENFORCED by the stdio filter proxy the pack's wrapper
+ *   runs (deploy/linux/harness-mcp-filter.mjs: tools/list AND tools/call).
+ *   Do not swap it for ruflo's `mcp start --tools` / CLAUDE_FLOW_MCP_TOOLS:
+ *   in 3.56.7 those only trim the advertised list, and a hidden tool still runs.
  * - `headlessSafe` names the skills an automation prompt may invoke without a
  *   human; `frontmatterHookSkills` names the only skills whose frontmatter may
  *   declare `hooks` (every one reviewed: each runs a script inside the pack).
@@ -291,6 +295,15 @@ const PREBUILD_URL =
   /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/releases\/download\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]*-node-v\d+-linux-x64\.tar\.gz$/;
 /** An argv word: a flag or plain token, no shell metacharacters. */
 const ARGV_WORD = /^-{0,2}[A-Za-z0-9][A-Za-z0-9._:=+-]*$/;
+/** Build-time warmup calls per pack: the build stays bounded. */
+const WARMUP_MAX = 4;
+/** argv entries per smoke/preSetup/postInstall list, like batteries' smokeArgs. */
+const ARGV_MAX = 12;
+/** NODE_MODULE_VERSION per Node major: a prebuild URL must name the pack's ABI. */
+export const NODE_ABI_BY_MAJOR: Readonly<Record<number, number>> = {
+  22: 127,
+  24: 137,
+};
 /** A placeholder an argv word may be in full. */
 const ARGV_PLACEHOLDERS = ["{{configDir}}"] as const;
 const DEPENDENCY_KEYS = [
@@ -466,7 +479,8 @@ function findDiscardError(value: unknown, at: string): string | undefined {
       isSafeRelPath(item) &&
       item
         .split("/")
-        .every((segment) => segment === "*" || DISCARD_SEGMENT.test(segment))
+        .every((segment) => segment === "*" || DISCARD_SEGMENT.test(segment)) &&
+      item.split("/").some((segment) => segment !== "*")
         ? undefined
         : `${itemAt}: must be a relative path (a segment may be *)`,
     { allowEmpty: true },
@@ -480,6 +494,9 @@ function findArgvError(
   first: (item: unknown) => boolean,
   placeholders: readonly string[] = [],
 ): string | undefined {
+  if (Array.isArray(value) && value.length > ARGV_MAX) {
+    return `${at}: at most ${ARGV_MAX} words`;
+  }
   return findListError(
     value,
     at,
@@ -573,6 +590,9 @@ function findWarmupError(
   at: string,
 ): string | undefined {
   if (value === undefined) return undefined;
+  if (Array.isArray(value) && value.length > WARMUP_MAX) {
+    return `${at}: at most ${WARMUP_MAX} calls`;
+  }
   return findListError(
     value,
     at,
@@ -744,6 +764,17 @@ function findNpmLockPackError(
       : findListError(value.prebuilds, `${at}.prebuilds`, findPrebuildError, {
           allowEmpty: true,
         })) ??
+    (Array.isArray(value.prebuilds) &&
+    value.prebuilds.some(
+      (prebuild: unknown) =>
+        !isRecord(prebuild) ||
+        typeof prebuild.url !== "string" ||
+        !prebuild.url.endsWith(
+          `-node-v${String(NODE_ABI_BY_MAJOR[value.nodeMajor as number])}-linux-x64.tar.gz`,
+        ),
+    )
+      ? `${at}.prebuilds: every url must name the Node ABI of nodeMajor ${String(value.nodeMajor)}`
+      : undefined) ??
     (value.postInstall === undefined
       ? undefined
       : findArgvError(
