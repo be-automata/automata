@@ -352,3 +352,74 @@ describe("taskRunOutcome (phase 7)", () => {
     },
   );
 });
+
+describe("harness packs through the task gate", () => {
+  const HASH = "0123456789ab".padEnd(64, "f");
+  const HARNESS_HASH = "fedcba987654".padEnd(64, "0");
+  const base = {
+    input: {},
+    brokered: true,
+    now: Date.parse("2026-10-04T02:00:00Z"),
+  };
+
+  it("the shape gate passes harness ids on the task lane (seedBatteries is the fence)", () => {
+    expect(
+      gateFor({ batteries: ["somnio-skills", "gstack", "gsd", "ruflo"] }),
+    ).toEqual({
+      kind: "seed",
+      batteries: ["somnio-skills", "gstack", "gsd", "ruflo"],
+      lane: "task",
+    });
+  });
+
+  it("the review lane still never takes them, and its seed keeps hooks off", () => {
+    const gate = gateFor({ batteries: ["gstack"] }, { prKey: "o/r#1" });
+    expect(gate).toEqual({
+      kind: "rejected",
+      lane: "review",
+      reason: "review-lane",
+    });
+    expect(batterySeedForRun(undefined, gate)).toBeUndefined();
+  });
+
+  it("the batteries line names the harness hash and packs; a harness pack never asks for the read token", () => {
+    const outcome = taskRunOutcome({
+      ...base,
+      lane: "task",
+      taskGate: {
+        kind: "seed",
+        batteries: ["somnio-skills", "gstack"],
+        lane: "task",
+      },
+      seeded: {
+        ok: true,
+        packs: ["somnio-skills"],
+        manifestHash: HASH,
+        harness: { ok: true, harnessHash: HARNESS_HASH, packs: [] },
+      },
+    });
+    expect(outcome).toEqual({
+      batteriesLine:
+        "batteries: lane=task packs=somnio-skills manifest=0123456789ab harness=fedcba987654 harness-packs=none",
+      readTokenLine: "task agent: read-token=skip=no-requiring-pack",
+    });
+  });
+
+  it("an unavailable harness says why on the same line", () => {
+    expect(
+      taskRunOutcome({
+        ...base,
+        lane: "pr",
+        taskGate: { kind: "seed", batteries: ["gsd"], lane: "pr" },
+        seeded: {
+          ok: true,
+          packs: [],
+          manifestHash: HASH,
+          harness: { ok: false, reason: "harness-drift" },
+        },
+      }).batteriesLine,
+    ).toBe(
+      "batteries: lane=pr packs=none manifest=0123456789ab harness=unavailable harness-reason=harness-drift",
+    );
+  });
+});

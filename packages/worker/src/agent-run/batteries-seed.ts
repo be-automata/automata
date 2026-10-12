@@ -16,6 +16,16 @@ import {
   type BatteryPack,
 } from "./batteries-manifest";
 import { mergeForegroundOnlySettings } from "./foreground-only-hook";
+import { HARNESS_PACK_IDS } from "./harness-manifest";
+import {
+  harnessDenyRules,
+  isHarnessPackId,
+  resolveHarnessPacks,
+  writeHarnessHomeFiles,
+  type HarnessLinkEntry,
+  type HarnessResolution,
+  type HarnessSeedResult,
+} from "./harness-seed";
 
 /**
  * Per-run seeding of the review batteries (Phase 5, D2).
@@ -51,6 +61,14 @@ import { mergeForegroundOnlySettings } from "./foreground-only-hook";
  * project layer). With `foregroundOnly: true` the user-layer settings.json
  * also gets the foreground-only PreToolUse hooks (foreground-only-hook.ts),
  * merged over whatever is there; without it no settings.json is touched.
+ *
+ * HARNESS packs (gstack, GSD, ruflo; harness.json, harness-seed.ts) ride the
+ * same call for task/PR runs only: a hooks-off seed refuses every one of them
+ * (`reason=review-lane`). They verify against their own `harness.sha256`, so
+ * either install can fail without costing the other, and they add the
+ * `commands/` link dir and whole shared dirs (`gsd-core`) to the HOME, the
+ * best-effort MCP deny rules to the foreground-only settings, and a
+ * breadcrumb (`~/.automata/batteries.json`) plus gstack's per-run config.
  */
 
 export const BATTERIES_ROOT_DEFAULT = "/usr/local/lib/automata-batteries";
@@ -92,6 +110,10 @@ export interface SeedBatteriesOptions {
    * hooksOff is on: a review run's settings stay exactly as before.
    */
   foregroundOnly?: boolean;
+  /** harness.json; default `<repoRoot>/${HARNESS_MANIFEST_REPO_PATH}`. */
+  harnessManifestPath?: string;
+  /** Node major the agent runs on, for the harness ABI check; default this process's. */
+  nodeMajor?: number;
 }
 
 /** A seeded run's outcome (orchestrated review or task packs): verified packs, or why none. */
@@ -108,8 +130,10 @@ export type SeedBatteriesResult =
        * without a requirement keep their exact shape.
        */
       requires?: string[];
+      /** Present ONLY when harness ids were requested (see seedBatteries). */
+      harness?: HarnessSeedResult;
     }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; harness?: HarnessSeedResult };
 
 /** this file: packages/worker/src/agent-run → up 2 = packages/worker → up 2 = repo. */
 export function defaultRepoRoot(): string {
@@ -161,6 +185,31 @@ export type BatteriesLineGate =
 export function formatBatteriesLine(
   result: SeedBatteriesResult | undefined,
   taskGate: BatteriesLineGate = { kind: "none" },
+): string {
+  return `${formatBaseLine(result, taskGate)}${formatHarnessSuffix(result?.harness)}`;
+}
+
+/**
+ * ` harness=<12 hex> harness-packs=<ids|none>` for a seeded harness, or
+ * ` harness=unavailable harness-reason=<reason>`; empty when no harness id
+ * was requested (every run without one keeps its exact line). A review-lane
+ * refusal is logged per pack by seedBatteries and never reaches here.
+ */
+function formatHarnessSuffix(harness: HarnessSeedResult | undefined): string {
+  if (!harness) return "";
+  if (!harness.ok) {
+    return ` harness=unavailable harness-reason=${harness.reason}`;
+  }
+  const packs =
+    harness.packs.length > 0
+      ? harness.packs.map((p) => p.id).join(",")
+      : "none";
+  return ` harness=${harness.harnessHash.slice(0, 12)} harness-packs=${packs}`;
+}
+
+function formatBaseLine(
+  result: SeedBatteriesResult | undefined,
+  taskGate: BatteriesLineGate,
 ): string {
   if (taskGate.kind === "rejected" && taskGate.lane !== "review") {
     return `batteries: unavailable lane=${taskGate.lane} reason=task-agent-invalid`;
@@ -273,6 +322,34 @@ async function writeHooksOffSettings(
 }
 
 /**
+ * `settings` with `denyRules` merged into `permissions.deny` (deduped, every
+ * other permission key kept). No rules = `settings` unchanged, so a run
+ * without a harness MCP server keeps today's exact file. Upstream pack
+ * settings (GSD's hooks, statusLine, update checks) are never merged: phase 1
+ * links no pack hooks at all.
+ */
+function mergeDenyRules(
+  settings: Record<string, unknown>,
+  denyRules: readonly string[],
+): Record<string, unknown> {
+  if (denyRules.length === 0) return settings;
+  const permissions =
+    typeof settings.permissions === "object" &&
+    settings.permissions !== null &&
+    !Array.isArray(settings.permissions)
+      ? (settings.permissions as Record<string, unknown>)
+      : {};
+  const current = Array.isArray(permissions.deny) ? permissions.deny : [];
+  return {
+    ...settings,
+    permissions: {
+      ...permissions,
+      deny: [...new Set([...current, ...denyRules])],
+    },
+  };
+}
+
+/**
  * Task runs: merge the foreground-only PreToolUse hooks (foreground-only-hook.ts)
  * into `<home>/.claude/settings.json`, 0644, then re-grant the agent.
  */
@@ -280,12 +357,15 @@ async function writeForegroundOnlySettings(
   claudeDir: string,
   grant: Grant,
   log: (line: string) => void,
+  denyRules: readonly string[] = [],
 ): Promise<void> {
   const settingsPath = path.join(claudeDir, "settings.json");
   const existing = await readExistingSettings(settingsPath, log);
   await fs.writeFile(
     settingsPath,
-    JSON.stringify(mergeForegroundOnlySettings(existing)),
+    JSON.stringify(
+      mergeDenyRules(mergeForegroundOnlySettings(existing), denyRules),
+    ),
     { mode: 0o644 },
   );
   // writeFile honours `mode` only on create; a retry keeps the old mode.
@@ -443,12 +523,15 @@ function ownershipReason(
   return undefined;
 }
 
-interface LinkEntry {
-  /** `skills/<name>` or `agents/<name>.md`, relative to `<home>/.claude`. */
-  rel: string;
-  target: string;
-  packId: string;
-}
+/**
+ * `skills/<name>` or `agents/<name>.md` (review packs); harness packs add
+ * `agents/*`, `commands/*` and whole shared dirs (`gsd-core`). Relative to
+ * `<home>/.claude`.
+ */
+type LinkEntry = HarnessLinkEntry;
+
+/** The per-entry link dirs under `<home>/.claude`. */
+const LINK_KINDS = ["skills", "agents", "commands"] as const;
 
 interface PackWalk extends PackCheckContext {
   pack: BatteryPack;
@@ -612,6 +695,67 @@ export async function seedForegroundOnly(
   await writeForegroundOnlySettings(claudeDir, grant, opts.log);
 }
 
+/** `<home>/.claude/<rel>` for every winner, grouped under its link dir. */
+async function placeLinks(
+  claudeDir: string,
+  winners: Map<string, LinkEntry>,
+  grant: Grant,
+  log: (line: string) => void,
+): Promise<Set<string>> {
+  const placed = new Set<string>();
+  const entries = [...winners.values()];
+  for (const kind of LINK_KINDS) {
+    const ofKind = entries.filter((e) => e.rel.startsWith(`${kind}/`));
+    if (ofKind.length === 0) continue;
+    const dir = path.join(claudeDir, kind);
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    await grant(dir, "directory");
+    for (const entry of ofKind) {
+      if (await placeLink(claudeDir, entry, log)) placed.add(entry.rel);
+    }
+  }
+  // Harness shared dirs (gsd-core): linked whole at the top of `.claude`.
+  for (const entry of entries.filter((e) => !e.rel.includes("/"))) {
+    if (await placeLink(claudeDir, entry, log)) placed.add(entry.rel);
+  }
+  return placed;
+}
+
+/** First wins: an entry already provided by an earlier pack is dropped and logged. */
+function addWinners(
+  winners: Map<string, LinkEntry>,
+  entries: readonly LinkEntry[],
+  packId: string,
+  log: (line: string) => void,
+): void {
+  for (const entry of entries) {
+    const first = winners.get(entry.rel);
+    if (first) {
+      log(
+        `batteries: drop ${entry.rel} from ${packId} (already provided by ${first.packId})`,
+      );
+      continue;
+    }
+    winners.set(entry.rel, entry);
+  }
+}
+
+function seedFailureReason(e: unknown): string {
+  return e instanceof BatteriesUnavailable
+    ? e.reason
+    : `seed-error-${errnoCode(e) ?? "unknown"}`;
+}
+
+/**
+ * Seeds `home` with the requested packs: review/somnio packs from
+ * batteries.json, and — task/PR runs only — harness packs from harness.json.
+ *
+ * HARNESS FENCE: a hooks-off seed (an orchestrated review) never links a
+ * harness pack, whatever the ids say: each is logged `reason=review-lane` and
+ * nothing of it is read. taskAgentForRun only checks the id SHAPE, so this is
+ * the fence. The two installs verify independently: a harness failure never
+ * costs the review/somnio packs, and the reverse.
+ */
 export async function seedBatteries(
   home: string,
   packIds: readonly string[],
@@ -628,26 +772,37 @@ export async function seedBatteries(
       platform: opts.platform,
     });
   const claudeDir = path.join(home, ".claude");
+  const reviewLane = opts.hooksOff !== false;
+  const harnessIds = packIds.filter(isHarnessPackId);
+  const batteryIds = packIds.filter((id) => !isHarnessPackId(id));
 
   // (1) HOME writes: errors propagate (a real fault, like the trust seed).
   // The dir is created and granted in both modes (the credential write in
-  // agent-credentials.ts relies on that); only reviews write settings.json.
+  // agent-credentials.ts relies on that); only reviews write settings.json
+  // here — the task lane's foreground-only settings wait for the harness
+  // resolution below (its deny rules).
   await ensureClaudeDir(claudeDir, grant);
-  if (opts.hooksOff !== false) {
+  if (reviewLane) {
     await writeHooksOffSettings(claudeDir, grant, log);
-  } else if (opts.foregroundOnly === true) {
-    await writeForegroundOnlySettings(claudeDir, grant, log);
+    for (const id of harnessIds) {
+      log(`batteries: skip pack ${id} reason=review-lane`);
+    }
   }
 
   // (2..8) Battery resolution: every failure degrades, nothing throws.
+  const lstat = opts.lstat ?? fs.lstat;
+  const root = opts.root ?? BATTERIES_ROOT_DEFAULT;
+  const repoRoot = opts.repoRoot ?? defaultRepoRoot();
+  const packOwnerUid = opts.packOwnerUid ?? 0;
+  const winners = new Map<string, LinkEntry>();
+  let realRoot: string | undefined;
+  let batteries:
+    | { ok: true; manifest: BatteriesManifest; manifestHash: string }
+    | { ok: false; reason: string };
   try {
-    const lstat = opts.lstat ?? fs.lstat;
-    const root = opts.root ?? BATTERIES_ROOT_DEFAULT;
-    const repoRoot = opts.repoRoot ?? defaultRepoRoot();
+    realRoot = await checkRoot(root, lstat, opts.rootOwnerUid ?? 0);
     const manifestPath =
       opts.manifestPath ?? path.join(repoRoot, BATTERIES_MANIFEST_REPO_PATH);
-
-    const realRoot = await checkRoot(root, lstat, opts.rootOwnerUid ?? 0);
     const { manifest, manifestHash } = await readVerifiedManifest(
       root,
       manifestPath,
@@ -656,20 +811,15 @@ export async function seedBatteries(
     );
 
     const known = new Set(manifest.packs.map((p) => p.id));
-    for (const id of packIds) {
+    for (const id of batteryIds) {
       if (!known.has(id)) {
         log(`batteries: skip pack ${safeId(id)} reason=unknown-id`);
       }
     }
-    const selected = manifest.packs.filter((p) => packIds.includes(p.id));
-
-    const ctx: PackCheckContext = {
-      realRoot,
-      lstat,
-      packOwnerUid: opts.packOwnerUid ?? 0,
-    };
-    const winners = new Map<string, LinkEntry>();
-    for (const pack of selected) {
+    const ctx: PackCheckContext = { realRoot, lstat, packOwnerUid };
+    for (const pack of manifest.packs.filter((p) =>
+      batteryIds.includes(p.id),
+    )) {
       const checked = await checkPack(
         pack,
         path.join(root, `${pack.id}@${pack.sha}`),
@@ -679,52 +829,161 @@ export async function seedBatteries(
         log(`batteries: skip pack ${pack.id} reason=${checked.reason}`);
         continue;
       }
-      for (const entry of checked.entries) {
-        const first = winners.get(entry.rel);
-        if (first) {
-          log(
-            `batteries: drop ${entry.rel} from ${pack.id} (already provided by ${first.packId})`,
-          );
-          continue;
-        }
-        winners.set(entry.rel, entry);
-      }
+      addWinners(winners, checked.entries, pack.id, log);
     }
-
-    const contributed = new Set<string>();
-    for (const kind of ["skills", "agents"] as const) {
-      const entries = [...winners.values()].filter((e) =>
-        e.rel.startsWith(`${kind}/`),
-      );
-      if (entries.length === 0) continue;
-      const dir = path.join(claudeDir, kind);
-      await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-      await grant(dir, "directory");
-      for (const entry of entries) {
-        if (await placeLink(claudeDir, entry, log)) {
-          contributed.add(entry.packId);
-        }
-      }
-    }
-
-    const contributedPacks = manifest.packs.filter((p) =>
-      contributed.has(p.id),
-    );
-    const requires = [
-      ...new Set(contributedPacks.flatMap((p) => p.requires ?? [])),
-    ];
-    return {
-      ok: true,
-      packs: contributedPacks.map((p) => p.id),
-      manifestHash,
-      ...(requires.length > 0 ? { requires } : {}),
-    };
+    batteries = { ok: true, manifest, manifestHash };
   } catch (e) {
-    const reason =
-      e instanceof BatteriesUnavailable
-        ? e.reason
-        : `seed-error-${errnoCode(e) ?? "unknown"}`;
+    const reason = seedFailureReason(e);
     log(`batteries: unavailable reason=${reason}`);
-    return { ok: false, reason };
+    batteries = { ok: false, reason };
+    // Nothing of the review install links once it failed.
+    winners.clear();
+  }
+
+  // Harness packs (task/PR lanes): after the review packs, so those win a
+  // collision. The same trusted root is required.
+  let harness: HarnessResolution | undefined;
+  if (harnessIds.length > 0 && !reviewLane) {
+    harness =
+      realRoot === undefined
+        ? { ok: false, reason: batteries.ok ? "seed-error" : batteries.reason }
+        : await resolveHarnessPacks(harnessIds, {
+            root,
+            realRoot,
+            repoRoot,
+            ...(opts.harnessManifestPath !== undefined
+              ? { manifestPath: opts.harnessManifestPath }
+              : {}),
+            lstat,
+            packOwnerUid,
+            ...(opts.nodeMajor !== undefined
+              ? { nodeMajor: opts.nodeMajor }
+              : {}),
+            log,
+          });
+    for (const pack of harness.ok ? harness.packs : []) {
+      addWinners(winners, pack.entries, pack.id, log);
+    }
+  }
+
+  let placed = new Set<string>();
+  let placeError: string | undefined;
+  try {
+    placed = await placeLinks(claudeDir, winners, grant, log);
+  } catch (e) {
+    placeError = seedFailureReason(e);
+    log(`batteries: unavailable reason=${placeError}`);
+  }
+
+  const harnessResult: HarnessSeedResult | undefined =
+    harness === undefined
+      ? undefined
+      : placeError !== undefined
+        ? { ok: false, reason: placeError }
+        : harness.ok
+          ? {
+              ok: true,
+              harnessHash: harness.harnessHash,
+              packs: harness.packs.map(({ entries, ...pack }) => ({
+                ...pack,
+                linked: entries
+                  .filter(
+                    (e) =>
+                      placed.has(e.rel) &&
+                      winners.get(e.rel)?.packId === pack.id,
+                  )
+                  .map((e) => e.rel),
+              })),
+            }
+          : harness;
+
+  // Task-lane HOME writes, after resolution: errors propagate.
+  if (!reviewLane && opts.foregroundOnly === true) {
+    await writeForegroundOnlySettings(
+      claudeDir,
+      grant,
+      log,
+      harnessDenyRules(harnessResult),
+    );
+  }
+  if (harnessResult !== undefined) {
+    await writeHarnessHomeFiles(home, harnessResult, grant);
+  }
+  const withHarness = harnessResult ? { harness: harnessResult } : {};
+
+  if (!batteries.ok || placeError !== undefined) {
+    return {
+      ok: false,
+      reason: placeError ?? (batteries.ok ? "seed-error" : batteries.reason),
+      ...withHarness,
+    };
+  }
+  const contributed = new Set(
+    [...placed].map((rel) => winners.get(rel)?.packId),
+  );
+  const contributedPacks = batteries.manifest.packs.filter((p) =>
+    contributed.has(p.id),
+  );
+  const requires = [
+    ...new Set(contributedPacks.flatMap((p) => p.requires ?? [])),
+  ];
+  return {
+    ok: true,
+    packs: contributedPacks.map((p) => p.id),
+    manifestHash: batteries.manifestHash,
+    ...(requires.length > 0 ? { requires } : {}),
+    ...withHarness,
+  };
+}
+
+/**
+ * One boot line: what a task run asking for every harness pack would get on
+ * this box right now. Also warms the per-process tree-validation cache, so
+ * the first run does not pay for the node_modules walk. Never throws.
+ */
+export async function harnessDoctorLine(
+  opts: Pick<
+    SeedBatteriesOptions,
+    | "root"
+    | "repoRoot"
+    | "harnessManifestPath"
+    | "rootOwnerUid"
+    | "packOwnerUid"
+    | "lstat"
+    | "nodeMajor"
+  > = {},
+): Promise<string> {
+  const skipped: string[] = [];
+  const log = (line: string) => {
+    const match = /^batteries: skip pack (\S+) reason=(\S+)$/.exec(line);
+    if (match) skipped.push(`${match[1]}(${match[2]})`);
+  };
+  try {
+    const lstat = opts.lstat ?? fs.lstat;
+    const root = opts.root ?? BATTERIES_ROOT_DEFAULT;
+    const realRoot = await checkRoot(root, lstat, opts.rootOwnerUid ?? 0);
+    const harness = await resolveHarnessPacks(HARNESS_PACK_IDS, {
+      root,
+      realRoot,
+      repoRoot: opts.repoRoot ?? defaultRepoRoot(),
+      ...(opts.harnessManifestPath !== undefined
+        ? { manifestPath: opts.harnessManifestPath }
+        : {}),
+      lstat,
+      packOwnerUid: opts.packOwnerUid ?? 0,
+      ...(opts.nodeMajor !== undefined ? { nodeMajor: opts.nodeMajor } : {}),
+      log,
+    });
+    if (!harness.ok) {
+      return `harness: unavailable reason=${harness.reason}`;
+    }
+    const ok = harness.packs.map((p) => p.id);
+    return (
+      `harness: hash=${harness.harnessHash.slice(0, 12)} node=${process.versions.node} ` +
+      `ok=${ok.length > 0 ? ok.join(",") : "none"}` +
+      (skipped.length > 0 ? ` skipped=${skipped.join(",")}` : "")
+    );
+  } catch (e) {
+    return `harness: unavailable reason=${seedFailureReason(e)}`;
   }
 }

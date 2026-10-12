@@ -9,6 +9,10 @@ import {
   makeBatteriesFixture,
   type BatteriesFixture,
 } from "./__fixtures__/batteries-fixture";
+import {
+  addHarnessInstall,
+  type HarnessFixture,
+} from "./__fixtures__/harness-fixture";
 import { FOREGROUND_ONLY_PRE_TOOL_USE } from "./foreground-only-hook";
 
 describe("materialiseAgentCredentials (D1)", () => {
@@ -392,6 +396,135 @@ describe("materialiseAgentCredentials (D1)", () => {
         await expect(
           fs.lstat(path.join(result.home, ".claude/settings.json")),
         ).rejects.toThrow();
+      });
+    });
+
+    describe("harness packs (gstack, gsd, ruflo)", () => {
+      let hx: HarnessFixture;
+      const HARNESS = ["gstack", "gsd", "ruflo"];
+      const harnessOpts = () => ({ ...batteries(), nodeMajor: 24 });
+
+      beforeEach(async () => {
+        hx = await addHarnessInstall(fx);
+        // The clone's git dir, as provisionWorkdir leaves it.
+        await fs.mkdir(path.join(workdir, ".git/info"), { recursive: true });
+      });
+
+      const readJson = async (file: string) =>
+        JSON.parse(await fs.readFile(file, "utf8")) as Record<string, unknown>;
+      const exclude = () => path.join(workdir, ".git/info/exclude");
+
+      it("ONE .claude.json: trust AND the ruflo MCP wrapper (stdio, no env); credential intact", async () => {
+        const result = await materialiseAgentCredentials({
+          credentials: { type: "json-file", contents: '{"claudeAiOauth":{}}' },
+          agent: "claudeCode",
+          run,
+          seed: { batteries: HARNESS, hooksOff: false },
+          foregroundOnly: true,
+          batteries: harnessOpts(),
+        });
+        const config = await readJson(path.join(result.home, ".claude.json"));
+        const resolved = await fs.realpath(workdir);
+        expect(config).toEqual({
+          hasCompletedOnboarding: true,
+          projects: {
+            [workdir]: {
+              hasTrustDialogAccepted: true,
+              hasCompletedProjectOnboarding: true,
+            },
+            [resolved]: {
+              hasTrustDialogAccepted: true,
+              hasCompletedProjectOnboarding: true,
+            },
+          },
+          mcpServers: {
+            ruflo: {
+              type: "stdio",
+              command: `${await fs.realpath(hx.harnessPackDir("ruflo"))}/bin/ruflo-mcp`,
+              args: [],
+            },
+          },
+        });
+        expect(JSON.stringify(config)).not.toContain('"env"');
+        expect(
+          await fs.readFile(
+            path.join(result.home, ".claude/.credentials.json"),
+            "utf8",
+          ),
+        ).toBe('{"claudeAiOauth":{}}');
+      });
+
+      it("excludes .gstack/, .claude-flow/ and .swarm/ (never .planning/), once, keeping existing lines", async () => {
+        await fs.writeFile(exclude(), "# mine\nnode_modules/");
+        const seed = { batteries: ["gsd"], hooksOff: false };
+        for (let i = 0; i < 2; i++) {
+          await materialiseAgentCredentials({
+            credentials: { type: "built-in-credits" },
+            agent: "claudeCode",
+            run,
+            seed,
+            batteries: harnessOpts(),
+          });
+        }
+        expect(await fs.readFile(exclude(), "utf8")).toBe(
+          "# mine\nnode_modules/\n.gstack/\n.claude-flow/\n.swarm/\n",
+        );
+      });
+
+      it("re-grants the exclude file to the agent user on linux", async () => {
+        const calls: string[][] = [];
+        await materialiseAgentCredentials({
+          credentials: { type: "built-in-credits" },
+          agent: "claudeCode",
+          run,
+          agentUser: "agent",
+          seed: { batteries: ["gsd"], hooksOff: false },
+          batteries: {
+            ...harnessOpts(),
+            platform: "linux",
+            aclExec: async (_file: string, args: string[]) => {
+              calls.push(args);
+            },
+          },
+        });
+        expect(calls.some((args) => args[2] === exclude())).toBe(true);
+      });
+
+      it("a review seed carrying harness ids: no MCP server, no exclude, nothing linked", async () => {
+        const result = await materialiseAgentCredentials({
+          credentials: { type: "built-in-credits" },
+          agent: "claudeCode",
+          run,
+          seed: { batteries: HARNESS, hooksOff: true },
+          batteries: harnessOpts(),
+        });
+        const config = await readJson(path.join(result.home, ".claude.json"));
+        expect(config.mcpServers).toBeUndefined();
+        await expect(fs.lstat(exclude())).rejects.toThrow();
+        expect(await listTree(path.join(result.home, ".claude"))).toEqual([
+          "settings.json",
+        ]);
+        expect(result.batteries?.harness).toBeUndefined();
+      });
+
+      it("an unavailable harness install: no MCP server, no exclude, the breadcrumb says why", async () => {
+        await fs.rm(path.join(fx.root, "harness.sha256"));
+        const result = await materialiseAgentCredentials({
+          credentials: { type: "built-in-credits" },
+          agent: "claudeCode",
+          run,
+          seed: { batteries: HARNESS, hooksOff: false },
+          batteries: harnessOpts(),
+        });
+        const config = await readJson(path.join(result.home, ".claude.json"));
+        expect(config.mcpServers).toBeUndefined();
+        await expect(fs.lstat(exclude())).rejects.toThrow();
+        expect(
+          await readJson(path.join(result.home, ".automata/batteries.json")),
+        ).toEqual({
+          schemaVersion: 1,
+          harness: { ok: false, reason: "no-harness-hash" },
+        });
       });
     });
   });

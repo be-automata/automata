@@ -12,6 +12,7 @@ import {
   receivesBoxTestServices,
 } from "./box-test-services";
 import { buildDaemonEnv, type BrokerHandoff } from "./daemon-env";
+import { harnessRunEnv, type HarnessSeedResult } from "./harness-seed";
 import { ghBrokerConfigYaml } from "./gh-broker";
 import {
   getProcessWorkerId,
@@ -98,6 +99,8 @@ export class DaemonProcess {
       home: string;
       delivered: boolean;
       env: Record<string, string>;
+      /** The seed outcome; only its `harness` half reaches the env. */
+      batteries?: { harness?: HarnessSeedResult };
     } | null = null,
     /**
      * The per-run egress filtering proxy's base url (#66 slice 2), when this
@@ -200,6 +203,9 @@ export class DaemonProcess {
             this.deps.boxTestServicesEnvPath,
           )
         : {};
+    // The seeded harness packs' env and browse proxy (task/PR lanes only:
+    // seedBatteries never seeds a harness pack on a review).
+    const harness = harnessRunEnv(this.credentials?.batteries?.harness);
     this.env = buildDaemonEnv({
       baseEnv: process.env,
       anthropicApiKey: this.config.anthropicApiKey,
@@ -214,6 +220,8 @@ export class DaemonProcess {
       broker: this.broker,
       githubReadToken: this.deps.githubReadToken ?? null,
       repoEnv: { ...boxTestEnv, ...this.input.repoEnv },
+      batteryEnv: harness.env,
+      browseProxy: harness.browseProxy,
       agentUser: this.config.agentUser,
       // Beside the clone, in the run dir, so it inherits the run's ACE.
       // Provisioning created it in the same `if (agentUser)` branch that

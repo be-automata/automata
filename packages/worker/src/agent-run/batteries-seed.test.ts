@@ -11,6 +11,11 @@ import {
   type BatteriesFixture,
 } from "./__fixtures__/batteries-fixture";
 import {
+  addHarnessInstall,
+  FIXTURE_FORBIDDEN_RUFLO_TOOLS,
+  type HarnessFixture,
+} from "./__fixtures__/harness-fixture";
+import {
   LINUX_DIR_REGRANT_RIGHTS,
   LINUX_FILE_REGRANT_RIGHTS,
 } from "./agent-uid-fs";
@@ -19,11 +24,13 @@ import {
   BATTERIES_ROOT_DEFAULT,
   computeBatteriesManifestHash,
   formatBatteriesLine,
+  harnessDoctorLine,
   seedBatteries,
   seedForegroundOnly,
   type SeedBatteriesOptions,
 } from "./batteries-seed";
 import { FOREGROUND_ONLY_PRE_TOOL_USE } from "./foreground-only-hook";
+import { HARNESS_MANIFEST_REPO_PATH } from "./harness-manifest";
 
 const UID = process.getuid?.() ?? 0;
 
@@ -958,6 +965,541 @@ describe("formatBatteriesLine", () => {
           "batteries: mode=orchestrated packs=gstack-review manifest=aaaaaaaaaaaa",
         );
       }
+    });
+  });
+});
+
+describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
+  let fx: BatteriesFixture;
+  let hx: HarnessFixture;
+  let logs: string[];
+  let opts: SeedBatteriesOptions;
+
+  beforeEach(async () => {
+    fx = await makeBatteriesFixture();
+    hx = await addHarnessInstall(fx);
+    logs = [];
+    opts = {
+      root: fx.root,
+      repoRoot: fx.repoRoot,
+      rootOwnerUid: UID,
+      packOwnerUid: UID,
+      log: (line) => logs.push(line),
+      hooksOff: false,
+      foregroundOnly: true,
+      nodeMajor: 24,
+    };
+  });
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  const claudeDir = () => path.join(fx.home, ".claude");
+  const HARNESS = ["gstack", "gsd", "ruflo"];
+  const readJson = async (file: string) =>
+    JSON.parse(await fs.readFile(file, "utf8")) as Record<string, unknown>;
+  const breadcrumb = () =>
+    readJson(path.join(fx.home, ".automata/batteries.json"));
+
+  describe("review-lane fence: a hooks-off seed never links a harness pack", () => {
+    it("hooksOff true: nothing harness is linked or read, each id logged review-lane", async () => {
+      const result = await seedBatteries(
+        fx.home,
+        ["gstack-review", ...HARNESS],
+        { ...opts, hooksOff: true },
+      );
+      expect(result).toEqual({
+        ok: true,
+        packs: ["gstack-review"],
+        manifestHash: fx.manifestHash,
+      });
+      expect(await listTree(claudeDir())).toEqual([
+        "settings.json",
+        "skills",
+        "skills/gstack-review",
+      ]);
+      for (const id of HARNESS) {
+        expect(logs).toContain(`batteries: skip pack ${id} reason=review-lane`);
+      }
+      await expect(fs.lstat(path.join(fx.home, ".automata"))).rejects.toThrow();
+      await expect(fs.lstat(path.join(fx.home, ".gstack"))).rejects.toThrow();
+      expect(await readJson(path.join(claudeDir(), "settings.json"))).toEqual({
+        disableAllHooks: true,
+      });
+    });
+
+    it("hooksOff absent (the review default) is fenced the same way", async () => {
+      const { hooksOff: _omit, ...reviewOpts } = opts;
+      void _omit;
+      const result = await seedBatteries(fx.home, HARNESS, reviewOpts);
+      expect(result).toEqual({
+        ok: true,
+        packs: [],
+        manifestHash: fx.manifestHash,
+      });
+      expect(await listTree(claudeDir())).toEqual(["settings.json"]);
+      expect(logs.filter((l) => l.endsWith("reason=review-lane"))).toHaveLength(
+        3,
+      );
+    });
+  });
+
+  it("task lane: links skills, agents (files AND subdirs), commands and gsd-core — never pack hooks or settings", async () => {
+    const result = await seedBatteries(
+      fx.home,
+      ["somnio-skills", ...HARNESS],
+      opts,
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      packs: ["somnio-skills"],
+      manifestHash: fx.manifestHash,
+      harness: { ok: true, harnessHash: hx.harnessHash },
+    });
+    expect(await listTree(claudeDir())).toEqual([
+      "agents",
+      "agents/gsd-debugger.md",
+      "agents/gsd-planner.compact.md",
+      "agents/sub",
+      "commands",
+      "commands/gsd",
+      "gsd-core",
+      "settings.json",
+      "skills",
+      "skills/dora-metrics",
+      "skills/gsd-debug",
+      "skills/gstack",
+      "skills/investigate",
+      "skills/react-health-audit",
+      "skills/security-audit",
+    ]);
+    const realGsd = await fs.realpath(hx.harnessPackDir("gsd"));
+    expect(await fs.readlink(path.join(claudeDir(), "gsd-core"))).toBe(
+      path.join(realGsd, "claude/gsd-core"),
+    );
+    // The in-pack symlink resolves to the skill dir inside the pack.
+    expect(
+      await fs.readFile(
+        path.join(claudeDir(), "skills/investigate/SKILL.md"),
+        "utf8",
+      ),
+    ).toContain("investigate");
+    const harness = result.harness;
+    if (!harness?.ok) throw new Error("expected a seeded harness");
+    expect(harness.packs.map((p) => [p.id, p.linked])).toEqual([
+      ["gstack", ["skills/gstack", "skills/investigate"]],
+      [
+        "gsd",
+        [
+          "skills/gsd-debug",
+          "agents/gsd-debugger.md",
+          "agents/gsd-planner.compact.md",
+          "agents/sub",
+          "commands/gsd",
+          "gsd-core",
+        ],
+      ],
+      ["ruflo", []],
+    ]);
+  });
+
+  it("settings.json: foreground-only hooks + best-effort ruflo deny; no GSD statusLine or hooks", async () => {
+    await seedBatteries(fx.home, HARNESS, opts);
+    expect(await readJson(path.join(claudeDir(), "settings.json"))).toEqual({
+      hooks: { PreToolUse: [...FOREGROUND_ONLY_PRE_TOOL_USE] },
+      permissions: {
+        deny: FIXTURE_FORBIDDEN_RUFLO_TOOLS.map((t) => `mcp__ruflo__${t}`),
+      },
+    });
+  });
+
+  it("settings.json merge keeps an existing deny list and dedupes on retry", async () => {
+    await fs.mkdir(claudeDir(), { recursive: true, mode: 0o700 });
+    await fs.writeFile(
+      path.join(claudeDir(), "settings.json"),
+      JSON.stringify({ permissions: { allow: ["Bash"], deny: ["WebFetch"] } }),
+    );
+    await seedBatteries(fx.home, HARNESS, opts);
+    await seedBatteries(fx.home, HARNESS, opts);
+    const settings = await readJson(path.join(claudeDir(), "settings.json"));
+    expect(settings.permissions).toEqual({
+      allow: ["Bash"],
+      deny: [
+        "WebFetch",
+        ...FIXTURE_FORBIDDEN_RUFLO_TOOLS.map((t) => `mcp__ruflo__${t}`),
+      ],
+    });
+  });
+
+  it("no mcp-tools.json ⇒ no deny entries (the settings file stays today's)", async () => {
+    await fs.rm(path.join(hx.harnessPackDir("ruflo"), "mcp-tools.json"));
+    await seedBatteries(fx.home, ["ruflo"], opts);
+    expect(await readJson(path.join(claudeDir(), "settings.json"))).toEqual({
+      hooks: { PreToolUse: [...FOREGROUND_ONLY_PRE_TOOL_USE] },
+    });
+  });
+
+  it("resolves {{packDir}} in env and the MCP command; the MCP entry carries no env", async () => {
+    const result = await seedBatteries(fx.home, HARNESS, opts);
+    const harness = result.harness;
+    if (!harness?.ok) throw new Error("expected a seeded harness");
+    const gstack = await fs.realpath(hx.harnessPackDir("gstack"));
+    const ruflo = await fs.realpath(hx.harnessPackDir("ruflo"));
+    expect(harness.packs[0]?.env).toEqual({
+      GSTACK_SESSION_KIND: "spawned",
+      PLAYWRIGHT_BROWSERS_PATH: `${gstack}/ms-playwright`,
+    });
+    expect(harness.packs[2]?.mcpServers).toEqual({
+      ruflo: { command: `${ruflo}/bin/ruflo-mcp`, args: [] },
+    });
+    expect(JSON.stringify(harness)).not.toMatch(/TOKEN|KEY|SECRET/);
+  });
+
+  it("writes the breadcrumb and gstack config (0644) for the agent to read", async () => {
+    await seedBatteries(fx.home, HARNESS, opts);
+    const crumb = await breadcrumb();
+    expect(crumb).toEqual({
+      schemaVersion: 1,
+      harness: {
+        ok: true,
+        hash: hx.harnessHash,
+        packs: [
+          {
+            id: "gstack",
+            pin: "df89475b1713d2480a5e266e0fd448201817d80e",
+            linked: ["skills/gstack", "skills/investigate"],
+            headlessSafe: ["investigate", "browse"],
+            mcpServers: [],
+          },
+          expect.objectContaining({ id: "gsd", pin: "1.16.0" }),
+          {
+            id: "ruflo",
+            pin: "3.56.7",
+            linked: [],
+            headlessSafe: [],
+            mcpServers: ["ruflo"],
+          },
+        ],
+      },
+    });
+    const config = path.join(fx.home, ".gstack/config.yaml");
+    expect(await fs.readFile(config, "utf8")).toBe(
+      "telemetry: off\nupdate_check: false\n",
+    );
+    for (const file of [
+      config,
+      path.join(fx.home, ".automata/batteries.json"),
+    ]) {
+      expect((await fs.stat(file)).mode & 0o777).toBe(0o644);
+    }
+  });
+
+  it("no gstack ⇒ no gstack config", async () => {
+    await seedBatteries(fx.home, ["gsd"], opts);
+    await expect(fs.lstat(path.join(fx.home, ".gstack"))).rejects.toThrow();
+  });
+
+  it("grants the breadcrumb/config dirs and files to the agent user on linux (after the chmod)", async () => {
+    const calls: string[][] = [];
+    await seedBatteries(fx.home, HARNESS, {
+      ...opts,
+      agentUser: "agent",
+      platform: "linux",
+      aclExec: async (_file, args) => {
+        calls.push(args);
+      },
+    });
+    const byTarget = new Map(calls.map((args) => [args[2], args[1]]));
+    for (const [rel, rights] of [
+      [".gstack", LINUX_DIR_REGRANT_RIGHTS],
+      [".gstack/config.yaml", LINUX_FILE_REGRANT_RIGHTS],
+      [".automata", LINUX_DIR_REGRANT_RIGHTS],
+      [".automata/batteries.json", LINUX_FILE_REGRANT_RIGHTS],
+      [".claude/commands", LINUX_DIR_REGRANT_RIGHTS],
+    ] as const) {
+      expect(byTarget.get(path.join(fx.home, rel))).toBe(`u:agent:${rights}`);
+    }
+  });
+
+  describe("preflight: a failed harness check seeds no harness pack, review/somnio packs still seed", () => {
+    async function expectHarnessUnavailable(reason: string) {
+      const result = await seedBatteries(
+        fx.home,
+        ["somnio-skills", ...HARNESS],
+        opts,
+      );
+      expect(result).toEqual({
+        ok: true,
+        packs: ["somnio-skills"],
+        manifestHash: fx.manifestHash,
+        requires: ["github-read-token"],
+        harness: { ok: false, reason },
+      });
+      expect(await listTree(claudeDir())).toEqual([
+        "settings.json",
+        "skills",
+        "skills/dora-metrics",
+        "skills/react-health-audit",
+        "skills/security-audit",
+      ]);
+      expect(logs).toContain(`batteries: harness unavailable reason=${reason}`);
+      expect(await breadcrumb()).toEqual({
+        schemaVersion: 1,
+        harness: { ok: false, reason },
+      });
+    }
+
+    it("no harness.sha256 ⇒ no-harness-hash", async () => {
+      await fs.rm(path.join(fx.root, "harness.sha256"));
+      await expectHarnessUnavailable("no-harness-hash");
+    });
+
+    it("only harness.sha256.invalid ⇒ harness-invalidated", async () => {
+      await fs.rename(
+        path.join(fx.root, "harness.sha256"),
+        path.join(fx.root, "harness.sha256.invalid"),
+      );
+      await expectHarnessUnavailable("harness-invalidated");
+    });
+
+    it("harness.sha256 not 64-hex ⇒ harness-hash-malformed", async () => {
+      await fs.writeFile(path.join(fx.root, "harness.sha256"), "abc\n");
+      await expectHarnessUnavailable("harness-hash-malformed");
+    });
+
+    it("hash ≠ this checkout's harness.json ⇒ harness-drift", async () => {
+      await fs.writeFile(
+        path.join(fx.root, "harness.sha256"),
+        `${"0".repeat(64)}\n`,
+      );
+      await expectHarnessUnavailable("harness-drift");
+    });
+
+    it("harness.json failing the guard ⇒ harness-manifest-invalid", async () => {
+      await fs.writeFile(
+        path.join(fx.repoRoot, HARNESS_MANIFEST_REPO_PATH),
+        JSON.stringify({ schemaVersion: 2 }),
+      );
+      await expectHarnessUnavailable("harness-manifest-invalid");
+    });
+
+    it("the review install failing does not cost the harness packs", async () => {
+      await fs.rm(path.join(fx.root, "manifest.sha256"));
+      const result = await seedBatteries(
+        fx.home,
+        ["somnio-skills", "gsd"],
+        opts,
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        reason: "no-manifest-hash",
+        harness: { ok: true, packs: [expect.objectContaining({ id: "gsd" })] },
+      });
+      const tree = await listTree(claudeDir());
+      expect(tree).toContain("gsd-core");
+      expect(tree).not.toContain("skills/dora-metrics");
+    });
+  });
+
+  describe("per-pack preflight: the pack is skipped and logged, others seed", () => {
+    async function expectSkipped(id: string, reason: string) {
+      const result = await seedBatteries(fx.home, HARNESS, opts);
+      const harness = result.harness;
+      if (!harness?.ok) throw new Error("expected a seeded harness");
+      expect(harness.packs.map((p) => p.id)).toEqual(
+        HARNESS.filter((p) => p !== id),
+      );
+      expect(logs).toContain(`batteries: skip pack ${id} reason=${reason}`);
+    }
+
+    it("this process on another Node major ⇒ every pack node-mismatch", async () => {
+      const result = await seedBatteries(fx.home, HARNESS, {
+        ...opts,
+        nodeMajor: 22,
+      });
+      expect(result.harness).toEqual({
+        ok: true,
+        harnessHash: hx.harnessHash,
+        packs: [],
+      });
+      for (const id of HARNESS) {
+        expect(logs).toContain(
+          `batteries: skip pack ${id} reason=node-mismatch`,
+        );
+      }
+    });
+
+    it("a stamp built for another Node major ⇒ node-abi-mismatch", async () => {
+      await fs.writeFile(
+        path.join(hx.harnessPackDir("gsd"), ".stamp"),
+        `stamp ${"b".repeat(64)}\nnode 22\n`,
+      );
+      await expectSkipped("gsd", "node-abi-mismatch");
+    });
+
+    it("no stamp ⇒ no-stamp; malformed stamp ⇒ stamp-malformed", async () => {
+      await fs.rm(path.join(hx.harnessPackDir("gstack"), ".stamp"));
+      await fs.writeFile(
+        path.join(hx.harnessPackDir("gsd"), ".stamp"),
+        "node 24\n",
+      );
+      await seedBatteries(fx.home, HARNESS, opts);
+      expect(logs).toContain("batteries: skip pack gstack reason=no-stamp");
+      expect(logs).toContain("batteries: skip pack gsd reason=stamp-malformed");
+    });
+
+    it("pack dir missing ⇒ missing", async () => {
+      await fs.rm(hx.harnessPackDir("ruflo"), { recursive: true });
+      await expectSkipped("ruflo", "missing");
+    });
+
+    it("a symlink escaping the pack ⇒ tree-invalid", async () => {
+      await fs.symlink(
+        fx.home,
+        path.join(hx.harnessPackDir("gsd"), "claude/agents/escape"),
+      );
+      await expectSkipped("gsd", "tree-invalid");
+    });
+
+    it("a claude/ entry owned by another uid ⇒ not-root-owned (via the lstat seam)", async () => {
+      // The walk runs under the pack's REAL dir (macOS tmp is a symlink).
+      const victim = await fs.realpath(
+        path.join(hx.harnessPackDir("gsd"), "claude/commands/gsd/debug.md"),
+      );
+      await expectSkippedWith("gsd", "not-root-owned", async (p) => {
+        const st = await fs.lstat(p);
+        return p === victim
+          ? Object.assign(Object.create(st) as typeof st, { uid: UID + 1 })
+          : st;
+      });
+    });
+
+    it("Linux symlink modes (0777) never fail a pack", async () => {
+      // Linux lstat reports every symlink as lrwxrwxrwx; macOS does not.
+      const linuxModes = async (p: string) => {
+        const st = await fs.lstat(p);
+        return st.isSymbolicLink()
+          ? Object.assign(Object.create(st) as typeof st, {
+              mode: 0o120777,
+            })
+          : st;
+      };
+      const result = await seedBatteries(fx.home, HARNESS, {
+        ...opts,
+        lstat: linuxModes,
+      });
+      expect(
+        result.harness?.ok ? result.harness.packs.map((p) => p.id) : [],
+      ).toEqual(HARNESS);
+    });
+
+    it("a claude/ symlink owned by another uid ⇒ not-root-owned", async () => {
+      const skills = await fs.realpath(
+        path.join(hx.harnessPackDir("gstack"), "claude/skills"),
+      );
+      await expectSkippedWith("gstack", "not-root-owned", async (p) => {
+        const st = await fs.lstat(p);
+        return p === path.join(skills, "investigate")
+          ? Object.assign(Object.create(st) as typeof st, {
+              uid: UID + 1,
+              mode: 0o120777,
+            })
+          : st;
+      });
+    });
+
+    it("the MCP wrapper missing ⇒ mcp-wrapper-missing", async () => {
+      await fs.rm(path.join(hx.harnessPackDir("ruflo"), "bin/ruflo-mcp"));
+      await expectSkipped("ruflo", "mcp-wrapper-missing");
+    });
+
+    it("an unparseable mcp-tools.json ⇒ mcp-tools-invalid", async () => {
+      await fs.writeFile(
+        path.join(hx.harnessPackDir("ruflo"), "mcp-tools.json"),
+        '["ok", 7]',
+      );
+      await expectSkipped("ruflo", "mcp-tools-invalid");
+    });
+
+    async function expectSkippedWith(
+      id: string,
+      reason: string,
+      lstat: NonNullable<SeedBatteriesOptions["lstat"]>,
+    ) {
+      opts = { ...opts, lstat };
+      await expectSkipped(id, reason);
+    }
+  });
+
+  it("collision: a review/somnio pack wins over a harness pack (first wins), logged", async () => {
+    const dup = path.join(
+      hx.harnessPackDir("gsd"),
+      "claude/skills/security-audit",
+    );
+    await fs.mkdir(dup, { mode: 0o755 });
+    await fs.writeFile(path.join(dup, "SKILL.md"), "---\nname: x\n---\n");
+    await fs.chmod(path.join(dup, "SKILL.md"), 0o644);
+    await seedBatteries(fx.home, ["somnio-skills", "gsd"], opts);
+    expect(logs).toContain(
+      "batteries: drop skills/security-audit from gsd (already provided by somnio-skills)",
+    );
+    expect(
+      await fs.realpath(path.join(claudeDir(), "skills/security-audit")),
+    ).toBe(
+      path.join(
+        await fs.realpath(fx.packDir("somnio-skills")),
+        "skills/security-audit",
+      ),
+    );
+  });
+
+  it("unknown non-harness ids are still logged against batteries.json; harness ids are not", async () => {
+    await seedBatteries(fx.home, ["nope", "gstack"], opts);
+    expect(logs).toContain("batteries: skip pack nope reason=unknown-id");
+    expect(logs.join("\n")).not.toContain("gstack reason=unknown-id");
+  });
+
+  it("formatBatteriesLine appends the harness hash and packs", async () => {
+    const result = await seedBatteries(
+      fx.home,
+      ["somnio-skills", ...HARNESS],
+      opts,
+    );
+    expect(formatBatteriesLine(result, { kind: "seed", lane: "task" })).toBe(
+      `batteries: lane=task packs=somnio-skills manifest=${fx.manifestHash.slice(0, 12)} harness=${hx.harnessHash.slice(0, 12)} harness-packs=gstack,gsd,ruflo`,
+    );
+  });
+
+  describe("harnessDoctorLine (worker boot)", () => {
+    const doctorOpts = () => ({
+      root: fx.root,
+      repoRoot: fx.repoRoot,
+      rootOwnerUid: UID,
+      packOwnerUid: UID,
+      nodeMajor: 24,
+    });
+
+    it("every pack ok", async () => {
+      expect(await harnessDoctorLine(doctorOpts())).toBe(
+        `harness: hash=${hx.harnessHash.slice(0, 12)} node=${process.versions.node} ok=gstack,gsd,ruflo`,
+      );
+    });
+
+    it("names skipped packs with their reasons", async () => {
+      await fs.rm(hx.harnessPackDir("gsd"), { recursive: true });
+      expect(await harnessDoctorLine(doctorOpts())).toBe(
+        `harness: hash=${hx.harnessHash.slice(0, 12)} node=${process.versions.node} ok=gstack,ruflo skipped=gsd(missing)`,
+      );
+    });
+
+    it("an unavailable install, never a throw", async () => {
+      await fs.rm(path.join(fx.root, "harness.sha256"));
+      expect(await harnessDoctorLine(doctorOpts())).toBe(
+        "harness: unavailable reason=no-harness-hash",
+      );
+      expect(
+        await harnessDoctorLine({ ...doctorOpts(), root: "/nonexistent" }),
+      ).toBe("harness: unavailable reason=root-not-trusted");
     });
   });
 });

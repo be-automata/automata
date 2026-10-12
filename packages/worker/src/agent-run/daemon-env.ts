@@ -1,3 +1,5 @@
+import { HARNESS_ENV_KEY } from "./harness-manifest";
+
 /**
  * Builds the environment for the agent/daemon child process on the execution box
  * (ADR-002 customer-box model). The worker runs on the operator's own machine, so
@@ -188,6 +190,21 @@ export interface BuildDaemonEnvOpts {
    */
   repoEnv?: Record<string, string> | null;
   /**
+   * The seeded harness packs' env (harnessRunEnv: manifest `env` with
+   * {{packDir}} resolved, e.g. PLAYWRIGHT_BROWSERS_PATH, MCP_TIMEOUT). Applied
+   * right AFTER repoEnv, and only keys under a battery prefix the repo env can
+   * never set (HARNESS_ENV_KEY), so neither can shadow the other. Null/empty
+   * = today's env, byte for byte.
+   */
+  batteryEnv?: Record<string, string> | null;
+  /**
+   * gstack was seeded: point its browse server's Chromium at the run's egress
+   * proxy via BROWSE_PROXY_URL, which gstack's browse server passes to
+   * chromium.launch({ proxy }). Chromium ignores HTTPS_PROXY, so without this
+   * a browse call would leave the box directly. No-op without a proxy.
+   */
+  browseProxy?: boolean;
+  /**
    * #108: the unix account the child will actually run as. Empty (the default)
    * = nothing below happens and the built env is byte-for-byte today's.
    *
@@ -280,6 +297,15 @@ const RESERVED_REPO_ENV_PREFIXES = [
   "AUTOMATA_",
   "TERRAGON_",
   "XDG_",
+  // The harness battery packs' env (batteryEnv; HARNESS_ENV_KEY) and the
+  // browse proxy: a repo value would redirect a pack (its Chromium, its MCP
+  // timeout) or route browse around the egress proxy. CLAUDE_FLOW_ is
+  // already under CLAUDE_; listed so the battery set reads whole.
+  "GSTACK_",
+  "PLAYWRIGHT_",
+  "MCP_",
+  "CLAUDE_FLOW_",
+  "BROWSE_",
 ];
 
 export function isReservedRepoEnvKey(key: string): boolean {
@@ -304,6 +330,8 @@ export function buildDaemonEnv({
   broker = null,
   githubReadToken = null,
   repoEnv = null,
+  batteryEnv = null,
+  browseProxy = false,
   agentUser = "",
   runTmpDir = null,
   workdir = null,
@@ -333,6 +361,14 @@ export function buildDaemonEnv({
   // platform sets below, so none of it can be shadowed; reserved keys dropped.
   for (const [key, value] of Object.entries(repoEnv ?? {})) {
     if (!isReservedRepoEnvKey(key)) {
+      env[key] = value;
+    }
+  }
+
+  // 1d. The seeded harness packs' env, after repoEnv. Battery-prefixed keys
+  // only (defense in depth: the manifest guard already enforces it).
+  for (const [key, value] of Object.entries(batteryEnv ?? {})) {
+    if (HARNESS_ENV_KEY.test(key)) {
       env[key] = value;
     }
   }
@@ -379,6 +415,9 @@ export function buildDaemonEnv({
     // packages/daemon/src/proxy-fetch.ts (CALLBACK_VIA_PROXY_ENV).
     if (agentUser) {
       env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY = "1";
+    }
+    if (browseProxy) {
+      env.BROWSE_PROXY_URL = egressProxyUrl;
     }
   }
   // Credential env (Amp). After the whitelist so SECRET_KEY_PATTERN cannot drop it.
