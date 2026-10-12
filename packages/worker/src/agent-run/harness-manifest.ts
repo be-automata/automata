@@ -450,8 +450,12 @@ export interface HarnessTreeReport {
   discard: string[];
 }
 
-/** A top-level YAML key, bare or quoted with matching quotes: `hooks:`, `"hooks" :`. */
-const FRONTMATTER_KEY = /^(["']?)([A-Za-z0-9_-]+)\1\s*:/;
+/**
+ * A TOP-LEVEL YAML key (no indent), bare or quoted with matching quotes:
+ * `hooks:`, `'hooks':`, `"hooks" :`. Indented lines are nested keys and are
+ * skipped by the caller, so they can never be mistaken for one.
+ */
+const FRONTMATTER_KEY = /^(["']?)([A-Za-z0-9_-]+)\1[ \t]*:/;
 
 /** A leading `---` frontmatter block, reduced to what the harness profile checks. */
 export interface Frontmatter {

@@ -415,6 +415,14 @@ describe("parseFrontmatter", () => {
     });
   });
 
+  it("never reads an indented nested key as a top-level one", () => {
+    expect(
+      parseFrontmatter(
+        '---\nmetadata:\n  hooks: x\n  "mcpServers": y\n\tpermissionMode: z\n---\n',
+      ),
+    ).toEqual({ keys: ["metadata"], opaque: false });
+  });
+
   it("skips comments, blank lines and top-level list items", () => {
     expect(parseFrontmatter("---\n# hooks: no\n\nname: x\n- a\n---\n")).toEqual(
       { keys: ["name"], opaque: false },
@@ -562,6 +570,22 @@ describe("validateHarnessPackTree", () => {
     [
       '"hooks" :\n  Stop: []',
       "ship/SKILL.md: frontmatter declares hooks outside frontmatterHookSkills",
+    ],
+    [
+      '"hooks":\n  Stop: []',
+      "ship/SKILL.md: frontmatter declares hooks outside frontmatterHookSkills",
+    ],
+    [
+      "hooks :\n  Stop: []",
+      "ship/SKILL.md: frontmatter declares hooks outside frontmatterHookSkills",
+    ],
+    [
+      "'mcpServers':\n  x: {}",
+      "careful/SKILL.md: frontmatter declares mcpServers",
+    ],
+    [
+      '"permissionMode" : plan',
+      "careful/SKILL.md: frontmatter declares permissionMode",
     ],
   ])("rejects the quoted key in %j", (block, error) => {
     const skill = error.split("/")[0]!;
