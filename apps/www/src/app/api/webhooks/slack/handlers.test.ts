@@ -671,6 +671,76 @@ describe("handleAppMentionEvent", () => {
       expect(newThreadInternal).not.toHaveBeenCalled();
     });
 
+    /** Slack's thread: `replies` answers; `history` must not be consulted. */
+    const slackThreadHolds = (
+      replies: () => Promise<unknown>,
+    ): { history: ReturnType<typeof vi.fn> } => {
+      const history = vi.fn().mockResolvedValue({ messages: [] });
+      vi.mocked(slackWebApi.WebClient).mockImplementation(
+        () =>
+          ({
+            ...getDefaultWebClientMock(),
+            conversations: {
+              ...getDefaultWebClientMock().conversations,
+              replies: vi.fn().mockImplementation(replies),
+              history,
+            },
+          }) as unknown as slackWebApi.WebClient,
+      );
+      return { history };
+    };
+
+    const threadedEvent = () =>
+      createBasicEvent({
+        ts: "1234567890.200000",
+        thread_ts: "1234567890.100000",
+      });
+
+    it("confirms a threaded reply through conversations.replies", async () => {
+      const org = await bindInstallationToMembersOrg();
+      const { history } = slackThreadHolds(async () => ({
+        messages: [
+          { ts: "1234567890.100000", user: "UPARENT", text: "parent" },
+          {
+            ts: "1234567890.200000",
+            user: slackUserId,
+            text: "<@B1> threaded ask",
+          },
+        ],
+      }));
+      await handleAppMentionEvent(threadedEvent(), {
+        kind: "organization",
+        organizationId: org.id,
+      });
+      expect(history).not.toHaveBeenCalled();
+      expect(newThreadInternal).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.stringify(vi.mocked(newThreadInternal).mock.calls[0]?.[0].message),
+      ).toContain("threaded ask");
+    });
+
+    it("drops a threaded reply when Slack cannot be read", async () => {
+      const org = await bindInstallationToMembersOrg();
+      slackThreadHolds(async () => {
+        throw new Error("not_in_channel");
+      });
+      await handleAppMentionEvent(threadedEvent(), {
+        kind: "organization",
+        organizationId: org.id,
+      });
+      expect(newThreadInternal).not.toHaveBeenCalled();
+    });
+
+    it("drops an org-route mention without a ts (e.g. an old retry button)", async () => {
+      const org = await bindInstallationToMembersOrg();
+      slackHolds({ user: slackUserId, text: "<@B1> hi" });
+      await handleAppMentionEvent(
+        { ...createBasicEvent(), ts: undefined as unknown as string },
+        { kind: "organization", organizationId: org.id },
+      );
+      expect(newThreadInternal).not.toHaveBeenCalled();
+    });
+
     it("drops a mention from a linked user outside the org", async () => {
       const org = await bindInstallationToNewOrg();
       slackHolds({ user: slackUserId, text: "<@B1> hi" });
