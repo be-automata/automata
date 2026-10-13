@@ -21,6 +21,7 @@ Three delivery mechanisms, and picking the wrong one silently breaks the app:
    config, not as secrets. R2 via a native binding needs **no** access keys.
 
 Classes used below:
+
 - **[operator-secret]** — reuse the value from the current VPS/orch-agents env
   (GitHub App, AI keys, R2 S3 token). `wrangler secret put`.
 - **[new-generated]** — mint fresh for the pilot (`openssl rand -hex 32`).
@@ -37,28 +38,28 @@ Classes used below:
 
 ### Required to boot / core function
 
-| Var | Class | Mechanism | Notes |
-|---|---|---|---|
-| `DATABASE_URL` | **[Neon]** | secret | Neon Postgres URL. **See the DRIVER BLOCKER below — the current `node-postgres` driver does not run on workerd; this must move to `@neondatabase/serverless`.** |
-| `BETTER_AUTH_SECRET` | **[new-generated]** | secret | `openssl rand -hex 32`. Session/JWT signing. |
-| `BETTER_AUTH_URL` | **[deploy-config]** | secret | The Worker's public origin (e.g. `https://automata-www.<acct>.workers.dev` or the custom domain). |
-| `ENCRYPTION_MASTER_KEY` | **[new-generated]** | secret | Exactly 32 bytes. AES master key for user credentials at rest. Fresh for a fresh DB; if migrating encrypted rows it must match the old key. |
-| `INTERNAL_SHARED_SECRET` | **[new-generated]** | secret | www↔broadcast auth. **Must be identical** to the broadcast Worker's value. |
-| `CRON_SECRET` | **[new-generated]** | secret | Bearer auth on `/api/internal/cron/*`. (Cron driver moves to Hatchet later.) |
-| `AUTH_EMAIL_PASSWORD_ENABLED` | **[deploy-config]** | secret (`"true"`) | Set `true` so the pilot can create the first user via the `/login` email/password form (no SMTP/GitHub OAuth handshake needed). |
-| `ANTHROPIC_API_KEY` | **[operator-secret]** | secret | From current VPS env. Gates real Claude calls. |
-| `OPENAI_API_KEY` | **[operator-secret]** | secret | From current VPS env. |
+| Var                           | Class                 | Mechanism         | Notes                                                                                                                                                           |
+| ----------------------------- | --------------------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                | **[Neon]**            | secret            | Neon Postgres URL. **See the DRIVER BLOCKER below — the current `node-postgres` driver does not run on workerd; this must move to `@neondatabase/serverless`.** |
+| `BETTER_AUTH_SECRET`          | **[new-generated]**   | secret            | `openssl rand -hex 32`. Session/JWT signing.                                                                                                                    |
+| `BETTER_AUTH_URL`             | **[deploy-config]**   | secret            | The Worker's public origin (e.g. `https://automata-www.<acct>.workers.dev` or the custom domain).                                                               |
+| `ENCRYPTION_MASTER_KEY`       | **[new-generated]**   | secret            | Exactly 32 bytes. AES master key for user credentials at rest. Fresh for a fresh DB; if migrating encrypted rows it must match the old key.                     |
+| `INTERNAL_SHARED_SECRET`      | **[new-generated]**   | secret            | www↔broadcast auth. **Must be identical** to the broadcast Worker's value.                                                                                     |
+| `CRON_SECRET`                 | **[new-generated]**   | secret            | Bearer auth on `/api/internal/cron/*`. (Cron driver moves to Hatchet later.)                                                                                    |
+| `AUTH_EMAIL_PASSWORD_ENABLED` | **[deploy-config]**   | secret (`"true"`) | Set `true` so the pilot can create the first user via the `/login` email/password form (no SMTP/GitHub OAuth handshake needed).                                 |
+| `ANTHROPIC_API_KEY`           | **[operator-secret]** | secret            | From current VPS env. Gates real Claude calls.                                                                                                                  |
+| `OPENAI_API_KEY`              | **[operator-secret]** | secret            | From current VPS env.                                                                                                                                           |
 
 ### Public URLs — BUILD VARS (inlined at build, not runtime)
 
-| Var | Class | Mechanism | Notes |
-|---|---|---|---|
-| `NEXT_PUBLIC_APP_URL` | **[deploy-config]** | **build var** | Same origin as `BETTER_AUTH_URL`. |
-| `NEXT_PUBLIC_BROADCAST_URL` | **[deploy-config]** | **build var** | The broadcast Worker's HTTP origin. |
-| `NEXT_PUBLIC_BROADCAST_HOST` | **[deploy-config]** | **build var** | The broadcast Worker's WS host (`host:port` / hostname). |
-| `NEXT_PUBLIC_GITHUB_APP_NAME` | **[operator-secret]** | **build var** | The GitHub App's slug (for install links). |
-| `NEXT_PUBLIC_DOCS_URL` | [unset-by-design] | build var | Optional; falls back to a default. |
-| `NEXT_PUBLIC_VERCEL_ENV` / `NEXT_PUBLIC_VERCEL_BRANCH_URL` | [unset-by-design] | — | Vercel-only; dead off-Vercel. |
+| Var                                                        | Class                 | Mechanism     | Notes                                                    |
+| ---------------------------------------------------------- | --------------------- | ------------- | -------------------------------------------------------- |
+| `NEXT_PUBLIC_APP_URL`                                      | **[deploy-config]**   | **build var** | Same origin as `BETTER_AUTH_URL`.                        |
+| `NEXT_PUBLIC_BROADCAST_URL`                                | **[deploy-config]**   | **build var** | The broadcast Worker's HTTP origin.                      |
+| `NEXT_PUBLIC_BROADCAST_HOST`                               | **[deploy-config]**   | **build var** | The broadcast Worker's WS host (`host:port` / hostname). |
+| `NEXT_PUBLIC_GITHUB_APP_NAME`                              | **[operator-secret]** | **build var** | The GitHub App's slug (for install links).               |
+| `NEXT_PUBLIC_DOCS_URL`                                     | [unset-by-design]     | build var     | Optional; falls back to a default.                       |
+| `NEXT_PUBLIC_VERCEL_ENV` / `NEXT_PUBLIC_VERCEL_BRANCH_URL` | [unset-by-design]     | —             | Vercel-only; dead off-Vercel.                            |
 
 ### Object storage (R2)
 
@@ -67,42 +68,43 @@ so for step-1 parity these are **[operator-secret]** R2 S3 credentials. The
 Workers-native path (recommended follow-up) is an **R2 bucket binding** — no keys,
 but `packages/r2` must be refactored to use `env.<BINDING>` instead of the S3 client.
 
-| Var | Class | Mechanism | Notes |
-|---|---|---|---|
-| `R2_ACCESS_KEY_ID` | **[operator-secret]** | secret | R2 S3 token. (Native binding = drop this.) |
-| `R2_SECRET_ACCESS_KEY` | **[operator-secret]** | secret | " |
-| `R2_ACCOUNT_ID` | **[operator-secret]** | secret | Cloudflare account id (endpoint derivation). |
-| `R2_ENDPOINT` | **[deploy-config]** | secret | `https://<acct>.r2.cloudflarestorage.com` (real R2). |
-| `R2_BUCKET_NAME` | **[deploy-config]** | secret | Real bucket name. |
-| `R2_PRIVATE_BUCKET_NAME` | **[deploy-config]** | secret | Real private bucket name. |
-| `R2_PUBLIC_URL` | **[deploy-config]** | secret | Public bucket base URL (r2.dev or custom domain). |
-| *(follow-up)* `R2_BUCKET` binding | **[CF-binding]** | wrangler.jsonc | Native path: `"r2_buckets":[{ "binding":"R2_BUCKET","bucket_name":"..." }]`. |
+| Var                               | Class                 | Mechanism      | Notes                                                                        |
+| --------------------------------- | --------------------- | -------------- | ---------------------------------------------------------------------------- |
+| `R2_ACCESS_KEY_ID`                | **[operator-secret]** | secret         | R2 S3 token. (Native binding = drop this.)                                   |
+| `R2_SECRET_ACCESS_KEY`            | **[operator-secret]** | secret         | "                                                                            |
+| `R2_ACCOUNT_ID`                   | **[operator-secret]** | secret         | Cloudflare account id (endpoint derivation).                                 |
+| `R2_ENDPOINT`                     | **[deploy-config]**   | secret         | `https://<acct>.r2.cloudflarestorage.com` (real R2).                         |
+| `R2_BUCKET_NAME`                  | **[deploy-config]**   | secret         | Real bucket name.                                                            |
+| `R2_PRIVATE_BUCKET_NAME`          | **[deploy-config]**   | secret         | Real private bucket name.                                                    |
+| `R2_PUBLIC_URL`                   | **[deploy-config]**   | secret         | Public bucket base URL (r2.dev or custom domain).                            |
+| _(follow-up)_ `R2_BUCKET` binding | **[CF-binding]**      | wrangler.jsonc | Native path: `"r2_buckets":[{ "binding":"R2_BUCKET","bucket_name":"..." }]`. |
 
 ### GitHub App (from current VPS — reused per pilot plan)
 
-| Var | Class | Mechanism | Notes |
-|---|---|---|---|
-| `GITHUB_APP_ID` | **[operator-secret]** | secret | Reuse the current App. |
-| `GITHUB_APP_PRIVATE_KEY` | **[operator-secret]** | secret | PEM (single-line escaped or multiline). |
-| `GITHUB_CLIENT_ID` | **[operator-secret]** | secret | |
-| `GITHUB_CLIENT_SECRET` | **[operator-secret]** | secret | |
-| `GITHUB_WEBHOOK_SECRET` | **[new-generated]** | secret | **Pilot uses a FRESH secret** for the new repo-level webhook (do not reuse the prod App webhook secret; prod webhook URL stays pointed at prod — pilot = separate shadow-mode webhook). The **same** fresh value goes on both sides: this Worker secret AND the repo webhook's "Secret" field. |
-| `GITHUB_SIDE_EFFECTS_ENABLED` | **[deploy-config]** | secret (`"false"`) | **Kill-switch. MUST be set `false` on the pilot Worker.** Code default is `true` (back-compat for prod/self-host), so leaving it **unset is unsafe on the pilot** — an event from a resolvable sender before the installation is bound would resolve to `active` (the migration-safe no-row default) and act on a live customer PR. `false` forces shadow behavior (thread rows created + dashboard-visible, no boot, no comments/checks/reviews/reactions) for **every** installation regardless of its per-binding mode. Flip to `true` (or remove) only after the pilot binding is verified in shadow — see PILOT-RUNBOOK.md sequencing. |
+| Var                           | Class                 | Mechanism          | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ----------------------------- | --------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GITHUB_APP_ID`               | **[operator-secret]** | secret             | Reuse the current App.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `GITHUB_APP_PRIVATE_KEY`      | **[operator-secret]** | secret             | PEM (single-line escaped or multiline).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `GITHUB_CLIENT_ID`            | **[operator-secret]** | secret             |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `GITHUB_CLIENT_SECRET`        | **[operator-secret]** | secret             |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `GITHUB_WEBHOOK_SECRET`       | **[new-generated]**   | secret             | **Pilot uses a FRESH secret** for the new repo-level webhook (do not reuse the prod App webhook secret; prod webhook URL stays pointed at prod — pilot = separate shadow-mode webhook). The **same** fresh value goes on both sides: this Worker secret AND the repo webhook's "Secret" field.                                                                                                                                                                                                                                                                                                                                              |
+| `GITHUB_SIDE_EFFECTS_ENABLED` | **[deploy-config]**   | secret (`"false"`) | **Kill-switch. MUST be set `false` on the pilot Worker.** Code default is `true` (back-compat for prod/self-host), so leaving it **unset is unsafe on the pilot** — an event from a resolvable sender before the installation is bound would resolve to `active` (the migration-safe no-row default) and act on a live customer PR. `false` forces shadow behavior (thread rows created + dashboard-visible, no boot, no comments/checks/reviews/reactions) for **every** installation regardless of its per-binding mode. Flip to `true` (or remove) only after the pilot binding is verified in shadow — see PILOT-RUNBOOK.md sequencing. |
 
 ### Deferred SaaS — leave UNSET (app degrades gracefully)
 
-| Var(s) | Class | Behavior when unset |
-|---|---|---|
-| `REDIS_URL`, `REDIS_TOKEN` | [unset-by-design] | In-memory fail-open stand-in (`apps/www/src/lib/redis.ts`). **On Workers this is PER-ISOLATE** — locks/rate-limits are effectively off (not shared across isolates). Acceptable for the pilot; Upstash later for shared state. |
-| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_*` | [unset-by-design] | Billing disabled; lifecycle never blocks on credits. |
-| `NEXT_PUBLIC_POSTHOG_KEY`, `NEXT_PUBLIC_POSTHOG_HOST` | [unset-by-design] | Analytics no-op (client `disabled`). |
-| `E2B_API_KEY`, `DAYTONA_API_KEY` | [unset-by-design] | Execution plane is OFF-Workers (ADR-002 rev 2, customer boxes). |
-| `RESEND_API_KEY` | [unset-by-design]* | Transactional/magic-link email off. *Set (operator-secret) only if you want magic-link signup instead of email/password.* |
-| `LOOPS_API_KEY` | [unset-by-design] | Marketing events off. |
-| `SLACK_SIGNING_SECRET`, `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_FEEDBACK_WEBHOOK_URL` | [unset-by-design] | Slack app off. |
-| `OPENROUTER_API_KEY`, `GOOGLE_AI_STUDIO_API_KEY` | [unset-by-design] | Optional AI providers off. |
-| `NGROK_DOMAIN`, `LOCALHOST_PUBLIC_DOMAIN` | [unset-by-design] | Dev tunnels; N/A on Workers. |
-| `IS_ANTHROPIC_DOWN_URL`, `IS_ANTHROPIC_DOWN_API_SECRET` | [unset-by-design] | Undocumented status side-service; dummy/unset. |
+| Var(s)                                                           | Class               | Behavior when unset                                                                                                                                                                                                              |
+| ---------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `REDIS_URL`, `REDIS_TOKEN`                                       | [unset-by-design]   | In-memory fail-open stand-in (`apps/www/src/lib/redis.ts`). **On Workers this is PER-ISOLATE** — locks/rate-limits are effectively off (not shared across isolates). Acceptable for the pilot; Upstash later for shared state.   |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_*`   | [unset-by-design]   | Billing disabled; lifecycle never blocks on credits.                                                                                                                                                                             |
+| `NEXT_PUBLIC_POSTHOG_KEY`, `NEXT_PUBLIC_POSTHOG_HOST`            | [unset-by-design]   | Analytics no-op (client `disabled`).                                                                                                                                                                                             |
+| `E2B_API_KEY`, `DAYTONA_API_KEY`                                 | [unset-by-design]   | Execution plane is OFF-Workers (ADR-002 rev 2, customer boxes).                                                                                                                                                                  |
+| `RESEND_API_KEY`                                                 | [unset-by-design]\* | Transactional/magic-link email off. _Set (operator-secret) only if you want magic-link signup instead of email/password._                                                                                                        |
+| `LOOPS_API_KEY`                                                  | [unset-by-design]   | Marketing events off.                                                                                                                                                                                                            |
+| `SLACK_SIGNING_SECRET`, `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` | [operator-secret]   | The platform Slack app, created from `deploy/slack-app-manifest.json` (see `deploy/SLACK-APP.md`). Unset ⇒ `/api/webhooks/slack` rejects every request (fail closed) and "Connect Slack Workspace" reports Slack as not enabled. |
+| `SLACK_FEEDBACK_WEBHOOK_URL`                                     | [unset-by-design]   | Feedback-to-Slack forwarding off.                                                                                                                                                                                                |
+| `OPENROUTER_API_KEY`, `GOOGLE_AI_STUDIO_API_KEY`                 | [unset-by-design]   | Optional AI providers off.                                                                                                                                                                                                       |
+| `NGROK_DOMAIN`, `LOCALHOST_PUBLIC_DOMAIN`                        | [unset-by-design]   | Dev tunnels; N/A on Workers.                                                                                                                                                                                                     |
+| `IS_ANTHROPIC_DOWN_URL`, `IS_ANTHROPIC_DOWN_API_SECRET`          | [unset-by-design]   | Undocumented status side-service; dummy/unset.                                                                                                                                                                                   |
 
 ### Optional config (have defaults)
 
@@ -114,11 +116,11 @@ unless overriding.
 
 ## apps/broadcast (broadcast Worker)
 
-| Var | Class | Mechanism | Notes |
-|---|---|---|---|
-| `INTERNAL_SHARED_SECRET` | **[new-generated]** | secret | **Same value as www.** Channel-less auth for www's POSTs. |
-| `NEXT_PUBLIC_APP_URL` (or `BETTER_AUTH_URL`) | **[deploy-config]** | secret | The www Worker origin — broadcast calls back to `www/api/internal/broadcast` to verify connection tokens. |
-| `E2B_API_KEY`, `DAYTONA_API_KEY` | [unset-by-design] | secret | Only the `sandbox` party needs these (execution-plane, DEFERRED). The ported `main` broadcast party does not. |
+| Var                                          | Class               | Mechanism | Notes                                                                                                         |
+| -------------------------------------------- | ------------------- | --------- | ------------------------------------------------------------------------------------------------------------- |
+| `INTERNAL_SHARED_SECRET`                     | **[new-generated]** | secret    | **Same value as www.** Channel-less auth for www's POSTs.                                                     |
+| `NEXT_PUBLIC_APP_URL` (or `BETTER_AUTH_URL`) | **[deploy-config]** | secret    | The www Worker origin — broadcast calls back to `www/api/internal/broadcast` to verify connection tokens.     |
+| `E2B_API_KEY`, `DAYTONA_API_KEY`             | [unset-by-design]   | secret    | Only the `sandbox` party needs these (execution-plane, DEFERRED). The ported `main` broadcast party does not. |
 
 Durable Object binding `Main` (`wrangler.jsonc`) — **[CF-binding]**, no secret.
 

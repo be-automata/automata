@@ -59,21 +59,31 @@ export async function getSlackInstallationForRoute({
 }
 
 /**
- * On the org route, the mention must be one Slack itself holds, posted by the
- * user the payload names, and that user's linked account must belong to the
- * org. Returns the message text as Slack stores it — never the payload's — or
- * null to drop the request. The platform route returns the payload as is.
+ * Whether a mention may start a task, and with which text. Returns null to
+ * drop the request.
+ *
+ * Both routes: a workspace bound to an org starts tasks tagged with that org
+ * (and carrying its environment), so the mention's linked user must be a
+ * member of it — linking a Slack account says nothing about org membership.
+ *
+ * Org route only: the payload itself is the org admins' to forge, so the
+ * mention must be one Slack holds, posted by the user the payload names, and
+ * its text is Slack's copy. The platform route trusts its own signature and
+ * returns the payload's text.
  */
 export async function confirmMentionForRoute({
   db,
   slack,
   route,
+  installationOrganizationId,
   mention,
   userId,
 }: {
   db: DB;
   slack: WebClient;
   route: SlackRequestRoute;
+  /** The org the workspace's installation is bound to, if any. */
+  installationOrganizationId: string | null;
   mention: {
     channel: string;
     ts?: string;
@@ -85,6 +95,16 @@ export async function confirmMentionForRoute({
   userId: string;
 }): Promise<{ text: string } | null> {
   if (route.kind === "platform") {
+    if (
+      installationOrganizationId &&
+      !(await getMembership({
+        db,
+        organizationId: installationOrganizationId,
+        userId,
+      }))
+    ) {
+      return null;
+    }
     return { text: mention.text };
   }
   if (!mention.ts) {

@@ -16,28 +16,10 @@ import {
 import { encryptValue } from "@terragon/utils/encryption";
 import { SlackSettingsInsert } from "@terragon/shared/db/types";
 import { resolveSlackAppConfig } from "@/server-lib/slack-config";
-
-const SLACK_BOT_SCOPES = [
-  "app_mentions:read",
-  "chat:write",
-  "users:read",
-  "users:read.email",
-  "channels:history",
-  "files:read",
-  "files:write",
-  "groups:history",
-  "im:history",
-  "im:read",
-  "im:write",
-  "mpim:history",
-  "reactions:read",
-  "reactions:write",
-  "team:read",
-  "channels:read",
-  "groups:read",
-  "mpim:read",
-];
-const SLACK_OPENID_SCOPES = ["openid", "profile", "email"];
+import {
+  SLACK_BOT_SCOPES,
+  SLACK_OPENID_SCOPES,
+} from "@/lib/slack-app-manifest";
 
 /**
  * The client ID of the session's active org's Slack app (the platform app
@@ -61,7 +43,7 @@ async function getSessionSlackApp(
     throw new UserFacingError(
       config.source === "organization"
         ? "Slack is not configured for this organization: set SLACK_CLIENT_ID, SLACK_CLIENT_SECRET and SLACK_SIGNING_SECRET on the organization environment"
-        : "Slack is not configured: an organization admin can set SLACK_CLIENT_ID, SLACK_CLIENT_SECRET and SLACK_SIGNING_SECRET on the organization environment",
+        : "Slack isn't enabled on this deployment yet. Ask your Automata operator to set up the Slack app.",
     );
   }
   return { organizationId, clientId: config.clientId };

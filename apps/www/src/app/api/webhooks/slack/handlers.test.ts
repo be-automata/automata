@@ -564,6 +564,25 @@ describe("handleAppMentionEvent", () => {
     });
 
     it("derives the thread's org from the Slack installation (WI-5)", async () => {
+      const { organization: org } = await createTestOrganization({
+        db,
+        userId: user.id,
+        role: "member",
+      });
+      await db
+        .update(slackInstallation)
+        .set({ organizationId: org.id })
+        .where(eq(slackInstallation.teamId, teamId));
+
+      await handleAppMentionEvent(createBasicEvent(), PLATFORM_SLACK_ROUTE);
+
+      const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
+      expect(callArgs?.organizationId).toBe(org.id);
+    });
+
+    it("drops a platform-app mention from a linked user outside the workspace's org", async () => {
+      // A linked Slack account proves nothing about org membership; a task
+      // tagged with the org would carry the org's environment.
       const org = await createOrganization({
         db,
         name: "Acme",
@@ -576,8 +595,7 @@ describe("handleAppMentionEvent", () => {
 
       await handleAppMentionEvent(createBasicEvent(), PLATFORM_SLACK_ROUTE);
 
-      const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
-      expect(callArgs?.organizationId).toBe(org.id);
+      expect(newThreadInternal).not.toHaveBeenCalled();
     });
 
     it("passes a null org when the installation has none (nullable-safe)", async () => {

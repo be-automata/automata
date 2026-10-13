@@ -1,0 +1,46 @@
+{
+  "display_information": {
+    "name": "Automata",
+    "description": "Start coding agent tasks from Slack and get their results.",
+    "background_color": "#1a1a1a"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Automata",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://automata-www.dark-water-9247.workers.dev/api/auth/slack/callback"
+    ],
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "users:read",
+        "channels:history",
+        "groups:history",
+        "mpim:history",
+        "channels:read",
+        "groups:read",
+        "mpim:read",
+        "im:write"
+      ],
+      "user": ["openid", "profile", "email"]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://automata-www.dark-water-9247.workers.dev/api/webhooks/slack",
+      "bot_events": ["app_mention", "app_uninstalled", "tokens_revoked"]
+    },
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://automata-www.dark-water-9247.workers.dev/api/webhooks/slack"
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

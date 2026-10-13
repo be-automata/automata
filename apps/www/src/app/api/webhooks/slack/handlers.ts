@@ -453,6 +453,7 @@ export async function handleAppMentionEvent(
       db,
       slack,
       route,
+      installationOrganizationId: slackInstallation.organizationId,
       mention: {
         channel: event.channel,
         ts: event.ts,
