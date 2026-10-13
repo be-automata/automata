@@ -33,6 +33,19 @@ describe("stripControlPlaneOnlyEnv", () => {
     expect(input).toHaveLength(4);
     expect(CONTROL_PLANE_ONLY_ENV_KEYS.has("YOUTRACK_TOKEN")).toBe(true);
   });
+
+  it("never hands an agent the org's Slack app credentials", () => {
+    expect(
+      stripControlPlaneOnlyEnv(
+        vars({
+          SLACK_CLIENT_ID: "c",
+          SLACK_CLIENT_SECRET: "s",
+          SLACK_SIGNING_SECRET: "g",
+          SLACK_WEBHOOK_URL: "kept",
+        }),
+      ),
+    ).toEqual(vars({ SLACK_WEBHOOK_URL: "kept" }));
+  });
 });
 
 describe("withAgentTrackerTokenFallback", () => {
@@ -162,8 +175,21 @@ describe("env-audience is the only decrypt site (ADR-008 I1)", () => {
       "app/(sidebar)/(site-header)/environments/[id]/page.tsx",
       "app/(sidebar)/(site-header)/environments/global/page.tsx",
       "app/(sidebar)/(site-header)/environments/organization/page.tsx",
+      "server-lib/slack-config.ts",
       "server-lib/tracker/tracker-config.ts",
     ]);
+  });
+
+  it("the Slack app config reads only the organization layer", () => {
+    const slackConfig = files.find(
+      ({ relative }) => relative === "server-lib/slack-config.ts",
+    );
+    expect(slackConfig).toBeDefined();
+    const getters =
+      slackConfig!.source.match(/getControlPlane\w*Environment\w*/g) ?? [];
+    expect(new Set(getters)).toEqual(
+      new Set(["getControlPlaneOrganizationEnvironmentVariables"]),
+    );
   });
 
   it("the tracker path never reads the personal global environment", () => {

@@ -27,7 +27,20 @@ export const KNOWN_ENV_KEYS: Readonly<Record<string, string>> = {
     "Set to `live` to let the audit write to the tracker; anything else is shadow mode (reads and a PR comment only).",
   YOUTRACK_AGENT_TOKEN:
     "YouTrack token delivered to agents of prompt-defined automations.",
+  SLACK_CLIENT_ID:
+    "The organization's own Slack app client ID. Organization environment only.",
+  SLACK_CLIENT_SECRET:
+    "The organization's own Slack app client secret. Control-plane only: never delivered to an agent.",
+  SLACK_SIGNING_SECRET:
+    "Verifies requests from the organization's own Slack app. Control-plane only: never delivered to an agent.",
 };
+
+/** The keys of an organization's own Slack app (server-lib/slack-config.ts). */
+export const SLACK_APP_ENV_KEYS = [
+  "SLACK_CLIENT_ID",
+  "SLACK_CLIENT_SECRET",
+  "SLACK_SIGNING_SECRET",
+] as const;
 
 /** Common misspellings → the key the platform actually reads. */
 export const ENV_KEY_ALIASES: Readonly<Record<string, string>> = {
@@ -63,6 +76,27 @@ export function getEnvKeyHints(
         message: `${key} is not read by the platform. Did you mean ${canonical}?`,
       });
     }
+  }
+
+  const slackKeys = SLACK_APP_ENV_KEYS.filter((key) => keys.has(key));
+  if (scope !== "organization" && slackKeys.length > 0) {
+    hints.push({
+      key: null,
+      level: "warning",
+      message: `${slackKeys.join(", ")} ${slackKeys.length === 1 ? "is" : "are"} only read from the Organization environment. Set the Slack app's variables there.`,
+    });
+  }
+  if (
+    scope === "organization" &&
+    slackKeys.length > 0 &&
+    slackKeys.length < SLACK_APP_ENV_KEYS.length
+  ) {
+    const missing = SLACK_APP_ENV_KEYS.filter((key) => !keys.has(key));
+    hints.push({
+      key: null,
+      level: "warning",
+      message: `Setting any SLACK_* variable switches this organization to its own Slack app, which also needs ${missing.join(" and ")}. Until then Slack requests are rejected.`,
+    });
   }
 
   if (scope === "global") {

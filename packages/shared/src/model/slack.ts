@@ -1,4 +1,4 @@
-import { and, eq, getTableColumns, desc } from "drizzle-orm";
+import { and, eq, getTableColumns, desc, isNull, or, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { DB } from "../db";
 import type {
@@ -11,6 +11,15 @@ import type {
   SlackSettings,
 } from "../db/types";
 import { publishBroadcastUserMessage } from "../broadcast-server";
+
+export class SlackWorkspaceBoundElsewhereError extends Error {
+  constructor(public readonly teamId: string) {
+    super(
+      `Slack workspace ${teamId} is already installed for another organization`,
+    );
+    this.name = "SlackWorkspaceBoundElsewhereError";
+  }
+}
 
 export async function getSlackAccounts({
   db,
@@ -175,7 +184,10 @@ export async function upsertSlackInstallation({
   if (!account) {
     throw new Error("User is not part of this team");
   }
-  await db
+  // A workspace belongs to one org (teamId is unique). Reinstalling may bind
+  // an unbound workspace or refresh the same org's install, but never move a
+  // workspace another org already holds.
+  const rows = await db
     .insert(schema.slackInstallation)
     .values({
       ...installation,
@@ -187,7 +199,18 @@ export async function upsertSlackInstallation({
         ...installation,
         updatedAt: new Date(),
       },
-    });
+      setWhere: or(
+        isNull(schema.slackInstallation.organizationId),
+        eq(
+          schema.slackInstallation.organizationId,
+          sql.raw(`excluded."organization_id"`),
+        ),
+      ),
+    })
+    .returning({ id: schema.slackInstallation.id });
+  if (rows.length === 0) {
+    throw new SlackWorkspaceBoundElsewhereError(teamId);
+  }
   await publishBroadcastUserMessage({
     type: "user",
     id: userId,

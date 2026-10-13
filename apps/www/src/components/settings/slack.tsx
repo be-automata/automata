@@ -20,7 +20,13 @@ import { SlackAccountWithMetadata } from "@terragon/shared/db/types";
 import { AIModel } from "@terragon/agent/types";
 import { useServerActionMutation } from "@/queries/server-action-helpers";
 
-function SlackAccountItem({ account }: { account: SlackAccountWithMetadata }) {
+function SlackAccountItem({
+  account,
+  slackAppReady,
+}: {
+  account: SlackAccountWithMetadata;
+  slackAppReady: boolean;
+}) {
   const router = useRouter();
   const updateMutation = useUpdateSlackSettings();
   const [isDisconnecting, setIsDisconnecting] = useState(false);
@@ -76,7 +82,11 @@ function SlackAccountItem({ account }: { account: SlackAccountWithMetadata }) {
             The Slack app needs to be installed in your workspace to complete
             the setup.
           </p>
-          <Button size="sm" onClick={handleInstallApp}>
+          <Button
+            size="sm"
+            onClick={handleInstallApp}
+            disabled={!slackAppReady || getSlackAppInstallUrlMutation.isPending}
+          >
             <Slack className="h-4 w-4" />
             Install Slack App
           </Button>
@@ -144,8 +154,11 @@ function SlackAccountItem({ account }: { account: SlackAccountWithMetadata }) {
 
 export function SlackAccountSettings({
   accounts,
+  slackAppReady,
 }: {
   accounts: SlackAccountWithMetadata[];
+  /** The active org's Slack app has every SLACK_* key it needs. */
+  slackAppReady: boolean;
 }) {
   const router = useRouter();
   useRealtimeUser({
@@ -171,7 +184,7 @@ export function SlackAccountSettings({
           <Button
             size="sm"
             onClick={handleConnect}
-            disabled={getSlackOAuthUrlMutation.isPending}
+            disabled={!slackAppReady || getSlackOAuthUrlMutation.isPending}
           >
             <Slack className="h-4 w-4" />
             {getSlackOAuthUrlMutation.isPending
@@ -186,13 +199,19 @@ export function SlackAccountSettings({
   return (
     <div className="flex flex-col w-full gap-2">
       {accounts.map((account) => {
-        return <SlackAccountItem key={account.id} account={account} />;
+        return (
+          <SlackAccountItem
+            key={account.id}
+            account={account}
+            slackAppReady={slackAppReady}
+          />
+        );
       })}
       <div className="flex">
         <Button
           variant="link"
           onClick={handleConnect}
-          disabled={getSlackOAuthUrlMutation.isPending}
+          disabled={!slackAppReady || getSlackOAuthUrlMutation.isPending}
           className="underline cursor-pointer"
         >
           {getSlackOAuthUrlMutation.isPending

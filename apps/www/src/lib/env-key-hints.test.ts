@@ -70,4 +70,38 @@ describe("getEnvKeyHints", () => {
       getEnvKeyHints(vars({ DATABASE_URL: "x", API_KEY: "y" }), "organization"),
     ).toEqual([]);
   });
+
+  it("warns that Slack app keys are only read from the organization", () => {
+    for (const scope of ["global", "repository"] as const) {
+      const hints = getEnvKeyHints(vars({ SLACK_SIGNING_SECRET: "s" }), scope);
+      expect(hints).toHaveLength(1);
+      expect(hints[0]!.message).toContain(
+        "only read from the Organization environment",
+      );
+    }
+  });
+
+  it("flags a half-configured Slack app on the organization", () => {
+    const hints = getEnvKeyHints(
+      vars({ SLACK_CLIENT_ID: "c" }),
+      "organization",
+    );
+    expect(hints).toHaveLength(1);
+    expect(hints[0]!.message).toContain(
+      "SLACK_CLIENT_SECRET and SLACK_SIGNING_SECRET",
+    );
+  });
+
+  it("accepts a complete Slack app on the organization", () => {
+    expect(
+      getEnvKeyHints(
+        vars({
+          SLACK_CLIENT_ID: "c",
+          SLACK_CLIENT_SECRET: "s",
+          SLACK_SIGNING_SECRET: "g",
+        }),
+        "organization",
+      ),
+    ).toEqual([]);
+  });
 });

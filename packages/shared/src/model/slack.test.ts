@@ -14,7 +14,9 @@ import {
   getSlackInstallationForTeam,
   upsertSlackInstallation,
   upsertSlackSettings,
+  SlackWorkspaceBoundElsewhereError,
 } from "./slack";
+import { createOrganization } from "./organizations";
 import { nanoid } from "nanoid/non-secure";
 
 const db = createDb(env.DATABASE_URL!);
@@ -580,6 +582,80 @@ describe("slack", () => {
       expect(installation?.teamName).toBe("Updated Team");
       expect(installation?.botUserId).toBe("B456");
       expect(installation?.botAccessTokenEncrypted).toBe("encrypted-xoxb-new");
+    });
+  });
+
+  describe("upsertSlackInstallation org binding", () => {
+    const install = (organizationId: string | null) =>
+      upsertSlackInstallation({
+        db,
+        userId: user.id,
+        teamId,
+        installation: {
+          organizationId,
+          teamName: "Test Team",
+          botUserId: "B123",
+          botAccessTokenEncrypted: "encrypted-xoxb-123",
+          scope: "app_mentions:read",
+          appId: "A123",
+        },
+      });
+
+    beforeEach(async () => {
+      await db.insert(schema.slackAccount).values({
+        userId: user.id,
+        teamId,
+        slackUserId,
+        slackTeamName: "Test Team",
+        slackTeamDomain: "test-team",
+        accessTokenEncrypted: "encrypted-token",
+      });
+    });
+
+    it("binds an unbound workspace to the installing org", async () => {
+      const org = await createOrganization({
+        db,
+        name: "Acme",
+        slug: `acme-${nanoid(8).toLowerCase()}`,
+      });
+      await install(null);
+      await install(org.id);
+      const installation = await getSlackInstallationForTeam({ db, teamId });
+      expect(installation?.organizationId).toBe(org.id);
+    });
+
+    it("lets the same org reinstall", async () => {
+      const org = await createOrganization({
+        db,
+        name: "Acme",
+        slug: `acme-${nanoid(8).toLowerCase()}`,
+      });
+      await install(org.id);
+      await expect(install(org.id)).resolves.toBeUndefined();
+    });
+
+    it("refuses to move a workspace another org holds", async () => {
+      const [org, otherOrg] = await Promise.all([
+        createOrganization({
+          db,
+          name: "Acme",
+          slug: `acme-${nanoid(8).toLowerCase()}`,
+        }),
+        createOrganization({
+          db,
+          name: "Other",
+          slug: `other-${nanoid(8).toLowerCase()}`,
+        }),
+      ]);
+      await install(org.id);
+      await expect(install(otherOrg.id)).rejects.toBeInstanceOf(
+        SlackWorkspaceBoundElsewhereError,
+      );
+      await expect(install(null)).rejects.toBeInstanceOf(
+        SlackWorkspaceBoundElsewhereError,
+      );
+      const installation = await getSlackInstallationForTeam({ db, teamId });
+      expect(installation?.organizationId).toBe(org.id);
     });
   });
 
