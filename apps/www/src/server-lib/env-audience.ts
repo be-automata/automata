@@ -8,6 +8,8 @@ import {
 import { getDecryptedOrganizationEnvironmentVariables } from "@terragon/shared/model/organization-environment";
 import { getMembership } from "@terragon/shared/model/organizations";
 
+import { SLACK_APP_ENV_KEYS } from "@/lib/slack-app-keys";
+
 /**
  * The ONLY module that decrypts stored environment variables (ADR-008 I1).
  *
@@ -43,12 +45,17 @@ export const CONTROL_PLANE_ONLY_ENV_KEYS: ReadonlySet<string> = new Set([
   // The post-merge audit's tracker token: every tracker write is performed by
   // the control plane, so the agent has no use for it.
   "YOUTRACK_TOKEN",
-  // The org's own Slack app (server-lib/slack-config.ts): the control plane
-  // verifies Slack's requests and runs the OAuth exchange; no agent needs them.
-  "SLACK_CLIENT_ID",
-  "SLACK_CLIENT_SECRET",
-  "SLACK_SIGNING_SECRET",
 ]);
+
+/**
+ * Stored on the ORGANIZATION environment, but never delivered to an agent
+ * from there: the org's own Slack app (server-lib/slack-config.ts), whose
+ * credentials only the control plane uses. The same keys on a repository or
+ * personal Global environment belong to the user's own project and reach the
+ * agent as usual — the Slack integration never reads those layers.
+ */
+export const ORGANIZATION_CONTROL_PLANE_ONLY_ENV_KEYS: ReadonlySet<string> =
+  new Set(SLACK_APP_ENV_KEYS);
 
 export interface EnvironmentVariable {
   key: string;
@@ -151,15 +158,31 @@ function mergedValues(
 export async function getControlPlaneOrganizationEnvironmentVariables({
   db,
   organizationId,
+  onlyKeys,
 }: {
   db: DB;
   organizationId: string;
+  /** Decrypt just these keys (the rest are never decrypted). */
+  onlyKeys?: readonly string[];
 }): Promise<EnvironmentVariable[]> {
   return await getDecryptedOrganizationEnvironmentVariables({
     db,
     organizationId,
     encryptionMasterKey: env.ENCRYPTION_MASTER_KEY,
+    onlyKeys,
   });
+}
+
+/** The org layer an agent may see: the org's own Slack app removed. */
+async function readExecutionPlaneOrganizationLayer(args: {
+  db: DB;
+  userId: string;
+  organizationId: string | null | undefined;
+}): Promise<EnvironmentVariable[]> {
+  const variables = await readOrganizationLayer(args);
+  return variables.filter(
+    (variable) => !ORGANIZATION_CONTROL_PLANE_ONLY_ENV_KEYS.has(variable.key),
+  );
 }
 
 /**
@@ -269,7 +292,7 @@ export async function getExecutionPlaneLayeredEnvironmentVariables({
   const [globalVariables, organizationVariables, repositoryVariables] =
     await Promise.all([
       getControlPlaneGlobalEnvironmentVariables({ db, userId }),
-      readOrganizationLayer({ db, userId, organizationId }),
+      readExecutionPlaneOrganizationLayer({ db, userId, organizationId }),
       repoEnvironmentId
         ? getControlPlaneEnvironmentVariables({
             db,
@@ -343,7 +366,7 @@ export async function getExecutionPlaneRunEnvironment({
   const [globalVariables, organizationVariables, repositoryVariables] =
     await Promise.all([
       getControlPlaneGlobalEnvironmentVariables({ db, userId }),
-      readOrganizationLayer({ db, userId, organizationId }),
+      readExecutionPlaneOrganizationLayer({ db, userId, organizationId }),
       readRepositoryLayer({ db, userId, organizationId, repoFullName }),
     ]);
   const personal = mergedValues(

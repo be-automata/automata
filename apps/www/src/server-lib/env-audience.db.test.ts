@@ -129,6 +129,32 @@ describe("agent environment layering (global → organization → repository)", 
     expect(JSON.stringify(sandbox)).not.toContain("perm:org-token");
   });
 
+  it("never hands an organization's Slack app credentials to an agent", async () => {
+    await setOrg({
+      SLACK_CLIENT_ID: "org-client",
+      SLACK_CLIENT_SECRET: "org-client-secret",
+      SLACK_SIGNING_SECRET: "org-signing-secret",
+      ONLY_ORG: "o",
+    });
+    expect(await run()).toEqual({ ONLY_ORG: "o" });
+    const sandbox = await getExecutionPlaneLayeredEnvironmentVariables({
+      db,
+      userId,
+      organizationId: orgId,
+      repoEnvironmentId,
+    });
+    expect(JSON.stringify(sandbox)).not.toContain("org-signing-secret");
+  });
+
+  it("still delivers SLACK_* set on the user's own layers", async () => {
+    await setGlobal({ SLACK_CLIENT_ID: "global-client" });
+    await setRepo({ SLACK_SIGNING_SECRET: "repo-signing-secret" });
+    expect(await run()).toEqual({
+      SLACK_CLIENT_ID: "global-client",
+      SLACK_SIGNING_SECRET: "repo-signing-secret",
+    });
+  });
+
   it("delivers an explicit organization agent token", async () => {
     await setOrg({
       YOUTRACK_TOKEN: "perm:org-token",

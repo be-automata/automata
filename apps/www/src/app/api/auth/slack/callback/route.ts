@@ -12,13 +12,28 @@ import {
 } from "@terragon/shared/model/slack";
 import { getUserFlags } from "@terragon/shared/model/user-flags";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
-import { isOrgAdmin } from "@/lib/org-role";
+import { ORG_ADMIN_ROLES } from "@/lib/org-role";
 import { getMembership } from "@terragon/shared/model/organizations";
 import { SlackWorkspaceBoundElsewhereError } from "@terragon/shared/model/slack";
 import { resolveSlackAppConfig } from "@/server-lib/slack-config";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { getUserCredentials } from "@/server-lib/user-credentials";
 import { getDefaultModel } from "@/lib/default-ai-model";
+
+type SlackAuthErrorCode =
+  | "invalid_params"
+  | "invalid_state"
+  | "auth_cancelled"
+  | "auth_error"
+  | "not_org_admin"
+  | "not_configured"
+  | "workspace_bound_elsewhere";
+
+function fail(code: SlackAuthErrorCode): never {
+  redirect(
+    `/settings/integrations?integration=slack&status=error&code=${code}`,
+  );
+}
 
 export async function GET(request: NextRequest) {
   const userId = await getUserIdOrNull();
@@ -32,10 +47,7 @@ export async function GET(request: NextRequest) {
   const error = searchParams.get("error");
   // Validate required parameters
   if (!code || !state) {
-    redirect(
-      "/settings/integrations?integration=slack&status=error&code=invalid_params",
-    );
-    return;
+    return fail("invalid_params");
   }
 
   const decryptedState = decryptValue(state!, env.ENCRYPTION_MASTER_KEY);
@@ -48,60 +60,35 @@ export async function GET(request: NextRequest) {
   // States minted before org-scoped Slack apps carry no org: the platform app.
   const organizationId: string | null = stateOrganizationId ?? null;
   if (stateUserId !== userId) {
-    redirect(
-      "/settings/integrations?integration=slack&status=error&code=invalid_state",
-    );
-    return;
+    return fail("invalid_state");
   }
   // State should be less than 24 hours old
   if (timestamp < Date.now() - 1000 * 60 * 60 * 24) {
-    redirect(
-      "/settings/integrations?integration=slack&status=error&code=invalid_state",
-    );
-    return;
+    return fail("invalid_state");
   }
   // Handle OAuth errors
   if (error) {
     console.error("Slack OAuth error:", error);
     if (error === "access_denied") {
-      redirect(
-        "/settings/integrations?integration=slack&status=error&code=auth_cancelled",
-      );
-      return;
+      return fail("auth_cancelled");
     }
-    redirect(
-      "/settings/integrations?integration=slack&status=error&code=auth_error",
-    );
-    return;
+    return fail("auth_error");
   }
 
   // The state names the org whose Slack app started this flow; the user must
   // still belong to it (and, to bind a workspace, administer it).
-  if (
-    organizationId &&
-    !(await getMembership({ db, organizationId, userId }))
-  ) {
-    redirect(
-      "/settings/integrations?integration=slack&status=error&code=invalid_state",
-    );
-    return;
-  }
-  if (
-    type === "app_install" &&
-    organizationId &&
-    !(await isOrgAdmin({ db, organizationId, userId }))
-  ) {
-    redirect(
-      "/settings/integrations?integration=slack&status=error&code=not_org_admin",
-    );
-    return;
+  if (organizationId) {
+    const membership = await getMembership({ db, organizationId, userId });
+    if (!membership) {
+      return fail("invalid_state");
+    }
+    if (type === "app_install" && !ORG_ADMIN_ROLES.has(membership.role)) {
+      return fail("not_org_admin");
+    }
   }
   const slackApp = await resolveSlackAppConfig({ db, organizationId });
   if (!slackApp.clientId || !slackApp.clientSecret) {
-    redirect(
-      "/settings/integrations?integration=slack&status=error&code=not_configured",
-    );
-    return;
+    return fail("not_configured");
   }
 
   // Exchange authorization code for access token
@@ -128,10 +115,7 @@ export async function GET(request: NextRequest) {
   const tokenData = await tokenResponse.json();
   if (!tokenData.ok) {
     console.error("Slack token exchange failed:", tokenData);
-    redirect(
-      "/settings/integrations?integration=slack&status=error&code=auth_error",
-    );
-    return;
+    return fail("auth_error");
   }
 
   if (type === "app_install") {
@@ -160,10 +144,7 @@ export async function GET(request: NextRequest) {
       });
     } catch (error) {
       if (error instanceof SlackWorkspaceBoundElsewhereError) {
-        redirect(
-          "/settings/integrations?integration=slack&status=error&code=workspace_bound_elsewhere",
-        );
-        return;
+        return fail("workspace_bound_elsewhere");
       }
       throw error;
     }
@@ -176,10 +157,7 @@ export async function GET(request: NextRequest) {
     const idToken = tokenData.id_token;
     if (!idToken) {
       console.error("No id_token in OpenID Connect response");
-      redirect(
-        "/settings/integrations?integration=slack&status=error&code=auth_error",
-      );
-      return;
+      return fail("auth_error");
     }
 
     // Verify the JWT signature and validate claims
@@ -201,17 +179,11 @@ export async function GET(request: NextRequest) {
       verifiedPayload = payload;
     } catch (error) {
       console.error("JWT verification failed:", error);
-      redirect(
-        "/settings/integrations?integration=slack&status=error&code=auth_error",
-      );
-      return;
+      return fail("auth_error");
     }
     if (!verifiedPayload) {
       console.error("No verified payload in OpenID Connect response");
-      redirect(
-        "/settings/integrations?integration=slack&status=error&code=auth_error",
-      );
-      return;
+      return fail("auth_error");
     }
 
     // Extract user and team information from the verified JWT payload

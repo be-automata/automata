@@ -168,6 +168,7 @@ export function SlackAccountSettings({
   const getSlackOAuthUrlMutation = useServerActionMutation({
     mutationFn: getSlackOAuthUrl,
   });
+  const canConnect = slackAppReady && !getSlackOAuthUrlMutation.isPending;
   const handleConnect = async () => {
     const authUrl = await getSlackOAuthUrlMutation.mutateAsync();
     window.location.href = authUrl;
@@ -181,11 +182,7 @@ export function SlackAccountSettings({
           Connect your Slack workspace to interact with Terragon through Slack
         </p>
         <div className="flex">
-          <Button
-            size="sm"
-            onClick={handleConnect}
-            disabled={!slackAppReady || getSlackOAuthUrlMutation.isPending}
-          >
+          <Button size="sm" onClick={handleConnect} disabled={!canConnect}>
             <Slack className="h-4 w-4" />
             {getSlackOAuthUrlMutation.isPending
               ? "Connecting..."
@@ -211,7 +208,7 @@ export function SlackAccountSettings({
         <Button
           variant="link"
           onClick={handleConnect}
-          disabled={!slackAppReady || getSlackOAuthUrlMutation.isPending}
+          disabled={!canConnect}
           className="underline cursor-pointer"
         >
           {getSlackOAuthUrlMutation.isPending

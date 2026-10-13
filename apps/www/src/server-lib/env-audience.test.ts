@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   CONTROL_PLANE_ONLY_ENV_KEYS,
   mergeEnvironmentLayers,
+  ORGANIZATION_CONTROL_PLANE_ONLY_ENV_KEYS,
   stripControlPlaneOnlyEnv,
   withAgentTrackerTokenFallback,
 } from "./env-audience";
@@ -34,17 +35,15 @@ describe("stripControlPlaneOnlyEnv", () => {
     expect(CONTROL_PLANE_ONLY_ENV_KEYS.has("YOUTRACK_TOKEN")).toBe(true);
   });
 
-  it("never hands an agent the org's Slack app credentials", () => {
-    expect(
-      stripControlPlaneOnlyEnv(
-        vars({
-          SLACK_CLIENT_ID: "c",
-          SLACK_CLIENT_SECRET: "s",
-          SLACK_SIGNING_SECRET: "g",
-          SLACK_WEBHOOK_URL: "kept",
-        }),
-      ),
-    ).toEqual(vars({ SLACK_WEBHOOK_URL: "kept" }));
+  it("leaves SLACK_* to the org-layer strip, not the every-layer one", () => {
+    for (const key of [
+      "SLACK_CLIENT_ID",
+      "SLACK_CLIENT_SECRET",
+      "SLACK_SIGNING_SECRET",
+    ]) {
+      expect(CONTROL_PLANE_ONLY_ENV_KEYS.has(key)).toBe(false);
+      expect(ORGANIZATION_CONTROL_PLANE_ONLY_ENV_KEYS.has(key)).toBe(true);
+    }
   });
 });
 

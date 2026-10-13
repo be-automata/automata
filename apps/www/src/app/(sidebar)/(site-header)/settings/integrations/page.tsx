@@ -1,7 +1,10 @@
 import { IntegrationsSettings } from "@/components/settings/tab/integrations";
-import { getTenantContextOrNull, getUserIdOrRedirect } from "@/lib/auth-server";
+import {
+  getActiveOrganizationMembershipOrNull,
+  getUserIdOrRedirect,
+} from "@/lib/auth-server";
 import { db } from "@/lib/db";
-import { isOrgAdmin } from "@/lib/org-role";
+import { ORG_ADMIN_ROLES } from "@/lib/org-role";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
 import {
   describeSlackAppConfig,
@@ -9,10 +12,7 @@ import {
   slackRequestUrlPath,
 } from "@/server-lib/slack-config";
 import { getSlackAccounts } from "@terragon/shared/model/slack";
-import {
-  getMembership,
-  getOrganizationById,
-} from "@terragon/shared/model/organizations";
+import { getOrganizationById } from "@terragon/shared/model/organizations";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
@@ -21,24 +21,17 @@ export const metadata: Metadata = {
 
 export default async function IntegrationsSettingsPage() {
   const userId = await getUserIdOrRedirect();
-  const tenant = await getTenantContextOrNull();
-  const activeOrganizationId = tenant?.organizationId ?? null;
-  const membership = activeOrganizationId
-    ? await getMembership({ db, organizationId: activeOrganizationId, userId })
-    : undefined;
-  const organizationId = membership ? activeOrganizationId : null;
-
-  const [slackAccounts, slackApp, organization, canEditOrganization] =
-    await Promise.all([
-      getSlackAccounts({ db, userId }),
-      resolveSlackAppConfig({ db, organizationId }),
-      organizationId
-        ? getOrganizationById({ db, organizationId })
-        : Promise.resolve(undefined),
-      organizationId
-        ? isOrgAdmin({ db, organizationId, userId })
-        : Promise.resolve(false),
-    ]);
+  const [slackAccounts, membership] = await Promise.all([
+    getSlackAccounts({ db, userId }),
+    getActiveOrganizationMembershipOrNull(userId),
+  ]);
+  const organizationId = membership?.organizationId ?? null;
+  const [slackApp, organization] = await Promise.all([
+    resolveSlackAppConfig({ db, organizationId }),
+    organizationId
+      ? getOrganizationById({ db, organizationId })
+      : Promise.resolve(undefined),
+  ]);
   const appUrl = nonLocalhostPublicAppUrl();
 
   return (
@@ -48,7 +41,8 @@ export default async function IntegrationsSettingsPage() {
         // Key names and presence only: no value leaves the server.
         status: describeSlackAppConfig(slackApp),
         organizationName: organization?.name ?? null,
-        canEditOrganization,
+        canEditOrganization:
+          !!membership && ORG_ADMIN_ROLES.has(membership.role),
         requestUrl: `${appUrl}${slackRequestUrlPath(slackApp)}`,
         redirectUrl: `${appUrl}/api/auth/slack/callback`,
       }}

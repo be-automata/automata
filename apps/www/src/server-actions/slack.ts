@@ -2,21 +2,20 @@
 
 import { env } from "@terragon/env/apps-www";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
-import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
+import {
+  getActiveOrganizationMembershipOrNull,
+  userOnlyAction,
+} from "@/lib/auth-server";
 import { db } from "@/lib/db";
-import { isOrgAdmin } from "@/lib/org-role";
+import { ORG_ADMIN_ROLES } from "@/lib/org-role";
 import { UserFacingError } from "@/lib/server-actions";
 import {
   deleteSlackAccount,
   upsertSlackSettings,
 } from "@terragon/shared/model/slack";
-import { getMembership } from "@terragon/shared/model/organizations";
 import { encryptValue } from "@terragon/utils/encryption";
 import { SlackSettingsInsert } from "@terragon/shared/db/types";
-import {
-  resolveSlackAppConfig,
-  type SlackAppConfig,
-} from "@/server-lib/slack-config";
+import { resolveSlackAppConfig } from "@/server-lib/slack-config";
 
 const SLACK_BOT_SCOPES = [
   "app_mentions:read",
@@ -41,21 +40,22 @@ const SLACK_BOT_SCOPES = [
 const SLACK_OPENID_SCOPES = ["openid", "profile", "email"];
 
 /**
- * The Slack app for the session's active org (the platform app without one),
- * and that org. The org always comes from the session, never the arguments.
+ * The client ID of the session's active org's Slack app (the platform app
+ * without one), and that org. The org always comes from the session, never
+ * the arguments. `requireAdmin`: installing binds the workspace to the org,
+ * an org-governance action, so it is checked before any secret is read.
  */
-async function getSessionSlackApp(userId: string): Promise<{
-  organizationId: string | null;
-  config: SlackAppConfig;
-  clientId: string;
-}> {
-  const tenant = await getTenantContextOrNull();
-  const activeOrganizationId = tenant?.organizationId ?? null;
-  const organizationId =
-    activeOrganizationId &&
-    (await getMembership({ db, organizationId: activeOrganizationId, userId }))
-      ? activeOrganizationId
-      : null;
+async function getSessionSlackApp(
+  userId: string,
+  { requireAdmin }: { requireAdmin: boolean },
+): Promise<{ organizationId: string | null; clientId: string }> {
+  const membership = await getActiveOrganizationMembershipOrNull(userId);
+  if (requireAdmin && membership && !ORG_ADMIN_ROLES.has(membership.role)) {
+    throw new UserFacingError(
+      "Only organization owners and admins can install the Slack app",
+    );
+  }
+  const organizationId = membership?.organizationId ?? null;
   const config = await resolveSlackAppConfig({ db, organizationId });
   if (!config.clientId) {
     throw new UserFacingError(
@@ -64,7 +64,7 @@ async function getSessionSlackApp(userId: string): Promise<{
         : "Slack is not configured: an organization admin can set SLACK_CLIENT_ID, SLACK_CLIENT_SECRET and SLACK_SIGNING_SECRET on the organization environment",
     );
   }
-  return { organizationId, config, clientId: config.clientId };
+  return { organizationId, clientId: config.clientId };
 }
 
 function encryptSlackOAuthState(state: {
@@ -81,13 +81,9 @@ function encryptSlackOAuthState(state: {
 // Used to install the Slack app
 export const getSlackAppInstallUrl = userOnlyAction(
   async function getSlackAppInstallUrl(userId: string): Promise<string> {
-    const { organizationId, clientId } = await getSessionSlackApp(userId);
-    // Installing binds the workspace to the org: an org-governance action.
-    if (organizationId && !(await isOrgAdmin({ db, organizationId, userId }))) {
-      throw new UserFacingError(
-        "Only organization owners and admins can install the Slack app",
-      );
-    }
+    const { organizationId, clientId } = await getSessionSlackApp(userId, {
+      requireAdmin: true,
+    });
     const redirectUri = `${nonLocalhostPublicAppUrl()}/api/auth/slack/callback`;
     const scopes = SLACK_BOT_SCOPES.join(",");
     const slackAuthUrl = new URL("https://slack.com/oauth/v2/authorize");
@@ -106,7 +102,9 @@ export const getSlackAppInstallUrl = userOnlyAction(
 // Used to connect to a users
 export const getSlackOAuthUrl = userOnlyAction(
   async function getSlackOAuthUrl(userId: string): Promise<string> {
-    const { organizationId, clientId } = await getSessionSlackApp(userId);
+    const { organizationId, clientId } = await getSessionSlackApp(userId, {
+      requireAdmin: false,
+    });
     const redirectUri = `${nonLocalhostPublicAppUrl()}/api/auth/slack/callback`;
     const slackAuthUrl = new URL("https://slack.com/openid/connect/authorize");
     slackAuthUrl.searchParams.set("client_id", clientId);
