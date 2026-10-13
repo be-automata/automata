@@ -3,10 +3,9 @@
 import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
-import type {
-  SlackAppConfigStatus,
-  SlackConfigKey,
-} from "@/server-lib/slack-config";
+import { CodeClickToCopy } from "@/components/ui/code";
+import { SLACK_APP_ENV_KEYS, type SlackAppEnvKey } from "@/lib/slack-app-keys";
+import type { SlackAppConfigStatus } from "@/server-lib/slack-config";
 
 export interface SlackAppSetup {
   status: SlackAppConfigStatus;
@@ -18,7 +17,7 @@ export interface SlackAppSetup {
   redirectUrl: string;
 }
 
-const KEY_PURPOSE: Record<SlackConfigKey, string> = {
+const KEY_PURPOSE: Record<SlackAppEnvKey, string> = {
   SLACK_CLIENT_ID: "Starts the install and account-connect flows",
   SLACK_CLIENT_SECRET: "Exchanges Slack's OAuth code for tokens",
   SLACK_SIGNING_SECRET: "Verifies every request Slack sends",
@@ -34,9 +33,10 @@ function UrlRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col gap-0.5">
       <span className="text-xs text-muted-foreground">{label}</span>
-      <code className="text-xs break-all rounded bg-muted px-2 py-1">
-        {value}
-      </code>
+      <CodeClickToCopy
+        text={value}
+        className="text-xs font-normal break-all rounded bg-muted px-2 py-1 cursor-pointer"
+      />
     </div>
   );
 }
@@ -74,7 +74,7 @@ export function SlackAppSetupCard({ setup }: { setup: SlackAppSetup }) {
           </tr>
         </thead>
         <tbody>
-          {(Object.keys(KEY_PURPOSE) as SlackConfigKey[]).map((key) => (
+          {SLACK_APP_ENV_KEYS.map((key) => (
             <tr key={key} className="border-t">
               <td className="py-1.5 pr-2">
                 <code className="text-xs">{key}</code>
@@ -125,8 +125,9 @@ export function SlackAppSetupCard({ setup }: { setup: SlackAppSetup }) {
         />
         {status.source === "organization" && (
           <p className="text-xs text-muted-foreground">
-            Workspaces installed through the platform app keep using it until
-            they are reinstalled with this organization's app.
+            A workspace installed through the platform app stops answering as
+            soon as this organization sets a SLACK_* variable. Reinstall it with
+            this organization's app once all three are set.
           </p>
         )}
       </div>

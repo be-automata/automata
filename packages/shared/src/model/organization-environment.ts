@@ -62,13 +62,21 @@ export async function getDecryptedOrganizationEnvironmentVariables({
   db,
   organizationId,
   encryptionMasterKey,
+  onlyKeys,
 }: {
   db: DB;
   organizationId: string;
   encryptionMasterKey: string;
+  /** Decrypt just these keys; the others are never decrypted. */
+  onlyKeys?: readonly string[];
 }): Promise<Array<{ key: string; value: string }>> {
   const row = await getOrganizationEnvironment({ db, organizationId });
-  return decryptStoredVariables(row?.environmentVariables, encryptionMasterKey);
+  const stored = onlyKeys
+    ? row?.environmentVariables?.filter((variable) =>
+        onlyKeys.includes(variable.key),
+      )
+    : row?.environmentVariables;
+  return decryptStoredVariables(stored, encryptionMasterKey);
 }
 
 /** Which keys a write adds, removes, or changes the value of. Pure. */

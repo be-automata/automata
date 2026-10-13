@@ -2,7 +2,10 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { handleAppMentionEvent, SlackAppMentionEvent } from "./handlers";
 import { PLATFORM_SLACK_ROUTE } from "./route-fence";
 import { User } from "@terragon/shared";
-import { createTestUser } from "@terragon/shared/model/test-helpers";
+import {
+  createTestOrganization,
+  createTestUser,
+} from "@terragon/shared/model/test-helpers";
 import { db } from "@/lib/db";
 import { newThreadInternal } from "@/server-lib/new-thread-internal";
 import { env } from "@terragon/env/apps-www";
@@ -460,7 +463,7 @@ describe("handleAppMentionEvent", () => {
                   "type": "plain_text",
                 },
                 "type": "button",
-                "value": "{"text":"<@B123456789> please help me with this task","channel":"CCHAN123","user":"user-with-no-installation","thread_ts":"1234567890.123456","team":"TTEAM123"}",
+                "value": "{"text":"<@B123456789> please help me with this task","channel":"CCHAN123","user":"user-with-no-installation","ts":"1234567890.123456","thread_ts":"1234567890.123456","team":"TTEAM123"}",
               },
               {
                 "action_id": "go_to_settings",
@@ -605,13 +608,77 @@ describe("handleAppMentionEvent", () => {
       return org;
     };
 
-    it("handles an org's own app request for that org's installation", async () => {
-      const org = await bindInstallationToNewOrg();
+    /** Slack's own copy of the mention, as conversations.history returns it. */
+    const slackHolds = (message: { user: string; text: string }) => {
+      vi.mocked(slackWebApi.WebClient).mockImplementation(
+        () =>
+          ({
+            ...getDefaultWebClientMock(),
+            conversations: {
+              ...getDefaultWebClientMock().conversations,
+              history: vi.fn().mockResolvedValue({
+                messages: [{ ts: createBasicEvent().ts, ...message }],
+              }),
+            },
+          }) as unknown as slackWebApi.WebClient,
+      );
+    };
+
+    const bindInstallationToMembersOrg = async () => {
+      const { organization } = await createTestOrganization({
+        db,
+        userId: user.id,
+        role: "member",
+      });
+      await db
+        .update(slackInstallation)
+        .set({ organizationId: organization.id })
+        .where(eq(slackInstallation.teamId, teamId));
+      return organization;
+    };
+
+    it("handles a confirmed mention, using Slack's copy of the text", async () => {
+      const org = await bindInstallationToMembersOrg();
+      slackHolds({ user: slackUserId, text: "<@B1> the real request" });
+      await handleAppMentionEvent(
+        createBasicEvent({ text: "<@B1> a forged request" }),
+        { kind: "organization", organizationId: org.id },
+      );
+      expect(newThreadInternal).toHaveBeenCalledTimes(1);
+      const text = JSON.stringify(
+        vi.mocked(newThreadInternal).mock.calls[0]?.[0].message,
+      );
+      expect(text).toContain("the real request");
+      expect(text).not.toContain("a forged request");
+    });
+
+    it("drops a signed mention Slack attributes to someone else", async () => {
+      const org = await bindInstallationToMembersOrg();
+      slackHolds({ user: "UOTHER", text: "<@B1> hi" });
       await handleAppMentionEvent(createBasicEvent(), {
         kind: "organization",
         organizationId: org.id,
       });
-      expect(newThreadInternal).toHaveBeenCalledTimes(1);
+      expect(newThreadInternal).not.toHaveBeenCalled();
+    });
+
+    it("drops a mention Slack does not hold", async () => {
+      const org = await bindInstallationToMembersOrg();
+      await handleAppMentionEvent(createBasicEvent(), {
+        kind: "organization",
+        organizationId: org.id,
+      });
+      expect(newThreadInternal).not.toHaveBeenCalled();
+    });
+
+    it("drops a mention from a linked user outside the org", async () => {
+      const org = await bindInstallationToNewOrg();
+      slackHolds({ user: slackUserId, text: "<@B1> hi" });
+      await handleAppMentionEvent(createBasicEvent(), {
+        kind: "organization",
+        organizationId: org.id,
+      });
+      expect(newThreadInternal).not.toHaveBeenCalled();
     });
 
     it("drops an org's app request for another org's installation", async () => {

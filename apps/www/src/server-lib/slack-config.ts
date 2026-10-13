@@ -1,7 +1,11 @@
 import { env } from "@terragon/env/apps-www";
 import type { DB } from "@terragon/shared/db";
 
-import { SLACK_APP_ENV_KEYS } from "@/lib/env-key-hints";
+import {
+  isSlackAppEnvKey,
+  SLACK_APP_ENV_KEYS,
+  type SlackAppEnvKey,
+} from "@/lib/slack-app-keys";
 import {
   type EnvironmentVariable,
   getControlPlaneOrganizationEnvironmentVariables,
@@ -16,12 +20,9 @@ import {
  * are never read: a Slack app answers for a whole workspace, before any repo
  * is known, and the Global layer has no org fence.
  *
- * Every value here is control plane only (CONTROL_PLANE_ONLY_ENV_KEYS).
+ * Every value here stays on the control plane
+ * (ORGANIZATION_CONTROL_PLANE_ONLY_ENV_KEYS).
  */
-
-export const SLACK_CONFIG_KEYS = SLACK_APP_ENV_KEYS;
-
-export type SlackConfigKey = (typeof SLACK_CONFIG_KEYS)[number];
 
 export type SlackConfigSource = "organization" | "platform";
 
@@ -37,7 +38,7 @@ export interface SlackAppConfig {
 /** Key names and presence only — safe to show any org member. */
 export interface SlackAppConfigStatus {
   source: SlackConfigSource;
-  keys: Record<SlackConfigKey, boolean>;
+  keys: Record<SlackAppEnvKey, boolean>;
   /** All three keys are set: requests can be verified and OAuth can run. */
   ready: boolean;
 }
@@ -59,37 +60,33 @@ export function pickSlackAppConfig({
 }: {
   organizationId: string | null;
   organizationVariables: readonly EnvironmentVariable[];
-  platform: Record<SlackConfigKey, string | undefined>;
+  platform: Record<SlackAppEnvKey, string | undefined>;
 }): SlackAppConfig {
-  const organizationValues = new Map(
-    organizationVariables
-      .filter((variable) =>
-        (SLACK_CONFIG_KEYS as readonly string[]).includes(variable.key),
-      )
-      .map((variable) => [variable.key, nonEmpty(variable.value)]),
+  const organizationSlackVariables = organizationVariables.filter((variable) =>
+    isSlackAppEnvKey(variable.key),
   );
-  if (organizationId && organizationValues.size > 0) {
-    return {
-      source: "organization",
-      organizationId,
-      clientId: organizationValues.get("SLACK_CLIENT_ID") ?? null,
-      clientSecret: organizationValues.get("SLACK_CLIENT_SECRET") ?? null,
-      signingSecret: organizationValues.get("SLACK_SIGNING_SECRET") ?? null,
-    };
-  }
+  const ownApp =
+    organizationId !== null && organizationSlackVariables.length > 0;
+  const read = (key: SlackAppEnvKey): string | null =>
+    nonEmpty(
+      ownApp
+        ? organizationSlackVariables.find((variable) => variable.key === key)
+            ?.value
+        : platform[key],
+    );
   return {
-    source: "platform",
-    organizationId: null,
-    clientId: nonEmpty(platform.SLACK_CLIENT_ID),
-    clientSecret: nonEmpty(platform.SLACK_CLIENT_SECRET),
-    signingSecret: nonEmpty(platform.SLACK_SIGNING_SECRET),
+    source: ownApp ? "organization" : "platform",
+    organizationId: ownApp ? organizationId : null,
+    clientId: read("SLACK_CLIENT_ID"),
+    clientSecret: read("SLACK_CLIENT_SECRET"),
+    signingSecret: read("SLACK_SIGNING_SECRET"),
   };
 }
 
 export function describeSlackAppConfig(
   config: SlackAppConfig,
 ): SlackAppConfigStatus {
-  const keys = {
+  const keys: Record<SlackAppEnvKey, boolean> = {
     SLACK_CLIENT_ID: config.clientId !== null,
     SLACK_CLIENT_SECRET: config.clientSecret !== null,
     SLACK_SIGNING_SECRET: config.signingSecret !== null,
@@ -97,7 +94,7 @@ export function describeSlackAppConfig(
   return {
     source: config.source,
     keys,
-    ready: Object.values(keys).every(Boolean),
+    ready: SLACK_APP_ENV_KEYS.every((key) => keys[key]),
   };
 }
 
@@ -105,7 +102,8 @@ export function describeSlackAppConfig(
  * The Slack app for `organizationId` (or the platform app when null). Reads
  * the org's raw values without a membership check: the caller must already
  * be entitled to act for the org — a verified Slack signature, an org member
- * in session, or OAuth state the control plane encrypted itself.
+ * in session, or OAuth state the control plane encrypted itself. Only the
+ * SLACK_* keys are decrypted.
  */
 export async function resolveSlackAppConfig({
   db,
@@ -118,6 +116,7 @@ export async function resolveSlackAppConfig({
     ? await getControlPlaneOrganizationEnvironmentVariables({
         db,
         organizationId,
+        onlyKeys: SLACK_APP_ENV_KEYS,
       })
     : [];
   return pickSlackAppConfig({
@@ -133,7 +132,7 @@ export async function resolveSlackAppConfig({
 
 /** The Slack app's Event Subscriptions and Interactivity request URL. */
 export function slackRequestUrlPath(config: SlackAppConfig): string {
-  return config.source === "organization" && config.organizationId
+  return config.organizationId
     ? `/api/webhooks/slack/${config.organizationId}`
     : "/api/webhooks/slack";
 }

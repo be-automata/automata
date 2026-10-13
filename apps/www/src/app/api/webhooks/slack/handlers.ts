@@ -2,7 +2,6 @@ import { WebClient } from "@slack/web-api";
 import { db } from "@/lib/db";
 import {
   getSlackAccountForSlackUserId,
-  getSlackInstallationForTeam,
   getSlackSettingsForTeam,
 } from "@terragon/shared/model/slack";
 import { SlackAccount } from "@terragon/shared";
@@ -15,7 +14,11 @@ import { getUserCredentials } from "@/server-lib/user-credentials";
 import { getDefaultModel } from "@/lib/default-ai-model";
 import { formatThreadContext } from "@/server-lib/ext-thread-context";
 
-import { installationServesRoute, SlackRequestRoute } from "./route-fence";
+import {
+  confirmMentionForRoute,
+  getSlackInstallationForRoute,
+  SlackRequestRoute,
+} from "./route-fence";
 
 export interface SlackAppMentionEvent {
   type: string;
@@ -343,6 +346,7 @@ async function sendSetupMessage({
     text: event.text,
     channel: event.channel,
     user: event.user,
+    ts: event.ts,
     thread_ts: threadTs,
     team: teamId,
   });
@@ -409,10 +413,7 @@ export async function handleAppMentionEvent(
 
     const slackUserId = event.user;
     const [slackInstallation, slackAccount] = await Promise.all([
-      getSlackInstallationForTeam({
-        db,
-        teamId,
-      }),
+      getSlackInstallationForRoute({ db, teamId, route }),
       getSlackAccountForSlackUserId({
         db,
         teamId,
@@ -421,19 +422,7 @@ export async function handleAppMentionEvent(
     ]);
     if (!slackInstallation) {
       console.error(
-        `[slack webhook] No Slack installation found for team ${teamId}`,
-      );
-      return;
-    }
-    if (
-      !(await installationServesRoute({
-        db,
-        installation: slackInstallation,
-        route,
-      }))
-    ) {
-      console.error(
-        `[slack webhook] Slack installation for team ${teamId} was not made through the app that sent this request`,
+        `[slack webhook] No Slack installation for team ${teamId} made through the app that sent this request`,
         route,
       );
       return;
@@ -460,6 +449,27 @@ export async function handleAppMentionEvent(
       });
       return;
     }
+    const confirmed = await confirmMentionForRoute({
+      db,
+      slack,
+      route,
+      mention: {
+        channel: event.channel,
+        ts: event.ts,
+        threadTs: event.thread_ts,
+        user: event.user,
+        text: event.text,
+      },
+      userId: slackAccount.userId,
+    });
+    if (!confirmed) {
+      console.error(
+        `[slack webhook] Dropped a mention Slack could not confirm for user ${slackUserId} in team ${teamId}`,
+        route,
+      );
+      return;
+    }
+    const mention = { ...event, text: confirmed.text };
     const slackSettings = await getSlackSettingsForTeam({
       db,
       userId: slackAccount.userId,
@@ -506,7 +516,7 @@ export async function handleAppMentionEvent(
       buildSlackMentionMessage({
         slackAccount,
         slack,
-        event,
+        event: mention,
       }),
     ]);
     console.log(

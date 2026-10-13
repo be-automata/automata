@@ -10,6 +10,7 @@ import {
 } from "@terragon/shared";
 import { getUserSettings } from "@terragon/shared/model/user";
 import { getUserFlags } from "@terragon/shared/model/user-flags";
+import { getMembership } from "@terragon/shared/model/organizations";
 import { cache } from "react";
 import { env } from "@terragon/env/apps-www";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
@@ -69,6 +70,23 @@ export async function getTenantContextOrNull(): Promise<TenantContext | null> {
     userId: session.user.id,
     organizationId: session.session.activeOrganizationId ?? null,
   };
+}
+
+/**
+ * The session's active org, only while `userId` is still a member of it —
+ * with that membership's role, so a caller can gate on it without a second
+ * read. Null without an active org or once the membership is gone.
+ */
+export async function getActiveOrganizationMembershipOrNull(
+  userId: string,
+): Promise<{ organizationId: string; role: string } | null> {
+  const tenant = await getTenantContextOrNull();
+  const organizationId = tenant?.organizationId;
+  if (!organizationId) {
+    return null;
+  }
+  const membership = await getMembership({ db, organizationId, userId });
+  return membership ? { organizationId, role: membership.role } : null;
 }
 
 export async function getUserIdOrRedirect(): Promise<User["id"]> {

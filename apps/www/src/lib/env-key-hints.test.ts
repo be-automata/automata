@@ -71,13 +71,12 @@ describe("getEnvKeyHints", () => {
     ).toEqual([]);
   });
 
-  it("warns that Slack app keys are only read from the organization", () => {
+  it("notes that SLACK_* outside the organization reach agents, not the integration", () => {
     for (const scope of ["global", "repository"] as const) {
       const hints = getEnvKeyHints(vars({ SLACK_SIGNING_SECRET: "s" }), scope);
       expect(hints).toHaveLength(1);
-      expect(hints[0]!.message).toContain(
-        "only read from the Organization environment",
-      );
+      expect(hints[0]!.level).toBe("info");
+      expect(hints[0]!.message).toContain("delivered to agents as usual");
     }
   });
 

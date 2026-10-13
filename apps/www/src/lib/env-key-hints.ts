@@ -5,6 +5,8 @@
  * so a misspelled key is surfaced here instead of being silently honored.
  */
 
+import { SLACK_APP_ENV_KEYS } from "./slack-app-keys";
+
 export type EnvKeyScope = "global" | "organization" | "repository";
 
 export type EnvKeyHintLevel = "info" | "warning";
@@ -28,19 +30,12 @@ export const KNOWN_ENV_KEYS: Readonly<Record<string, string>> = {
   YOUTRACK_AGENT_TOKEN:
     "YouTrack token delivered to agents of prompt-defined automations.",
   SLACK_CLIENT_ID:
-    "The organization's own Slack app client ID. Organization environment only.",
+    "The organization's own Slack app client ID. Read from the Organization environment only; never delivered to an agent from there.",
   SLACK_CLIENT_SECRET:
-    "The organization's own Slack app client secret. Control-plane only: never delivered to an agent.",
+    "The organization's own Slack app client secret. Read from the Organization environment only; never delivered to an agent from there.",
   SLACK_SIGNING_SECRET:
-    "Verifies requests from the organization's own Slack app. Control-plane only: never delivered to an agent.",
+    "Verifies requests from the organization's own Slack app. Read from the Organization environment only; never delivered to an agent from there.",
 };
-
-/** The keys of an organization's own Slack app (server-lib/slack-config.ts). */
-export const SLACK_APP_ENV_KEYS = [
-  "SLACK_CLIENT_ID",
-  "SLACK_CLIENT_SECRET",
-  "SLACK_SIGNING_SECRET",
-] as const;
 
 /** Common misspellings → the key the platform actually reads. */
 export const ENV_KEY_ALIASES: Readonly<Record<string, string>> = {
@@ -79,24 +74,21 @@ export function getEnvKeyHints(
   }
 
   const slackKeys = SLACK_APP_ENV_KEYS.filter((key) => keys.has(key));
-  if (scope !== "organization" && slackKeys.length > 0) {
-    hints.push({
-      key: null,
-      level: "warning",
-      message: `${slackKeys.join(", ")} ${slackKeys.length === 1 ? "is" : "are"} only read from the Organization environment. Set the Slack app's variables there.`,
-    });
-  }
-  if (
-    scope === "organization" &&
-    slackKeys.length > 0 &&
-    slackKeys.length < SLACK_APP_ENV_KEYS.length
-  ) {
-    const missing = SLACK_APP_ENV_KEYS.filter((key) => !keys.has(key));
-    hints.push({
-      key: null,
-      level: "warning",
-      message: `Setting any SLACK_* variable switches this organization to its own Slack app, which also needs ${missing.join(" and ")}. Until then Slack requests are rejected.`,
-    });
+  const missingSlackKeys = SLACK_APP_ENV_KEYS.filter((key) => !keys.has(key));
+  if (slackKeys.length > 0) {
+    if (scope !== "organization") {
+      hints.push({
+        key: null,
+        level: "info",
+        message: `${slackKeys.join(", ")} ${slackKeys.length === 1 ? "is" : "are"} delivered to agents as usual but not used by the Slack integration, which reads only the Organization environment.`,
+      });
+    } else if (missingSlackKeys.length > 0) {
+      hints.push({
+        key: null,
+        level: "warning",
+        message: `Setting any SLACK_* variable switches this organization to its own Slack app, which also needs ${missingSlackKeys.join(" and ")}. Until then Slack requests are rejected.`,
+      });
+    }
   }
 
   if (scope === "global") {
