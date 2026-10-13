@@ -24,6 +24,12 @@ export function SlackAuthToasts() {
       invalid_payload: "Authentication failed. Please try again.",
       auth_error: "Authentication failed. Please try again.",
       auth_cancelled: "Slack authorization was cancelled. Please try again.",
+      not_configured:
+        "Slack is not configured for this organization. Set the SLACK_* variables first.",
+      not_org_admin:
+        "Only organization owners and admins can install the Slack app.",
+      workspace_bound_elsewhere:
+        "This Slack workspace is already installed for another organization.",
       // Success codes
       app_installed: "Successfully installed to your workspace",
       account_connected: "Successfully connected to Slack workspace",

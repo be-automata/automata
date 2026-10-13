@@ -7,13 +7,16 @@ import { SlackAuthToasts } from "../slack-auth-toasts";
 import { SlackAccountWithMetadata } from "@terragon/shared/db/types";
 import { SettingsSection } from "../settings-row";
 import Link from "next/link";
+import { SlackAppSetup, SlackAppSetupCard } from "../slack-app-setup";
 
 interface IntegrationsSettingsProps {
   slackAccounts?: SlackAccountWithMetadata[];
+  slackAppSetup: SlackAppSetup;
 }
 
 export function IntegrationsSettings({
   slackAccounts = [],
+  slackAppSetup,
 }: IntegrationsSettingsProps) {
   const user = useAtomValue(userAtom);
   if (!user) {
@@ -41,7 +44,13 @@ export function IntegrationsSettings({
         }
       >
         <SlackAuthToasts />
-        <SlackAccountSettings accounts={slackAccounts} />
+        <div className="flex flex-col gap-4 w-full">
+          <SlackAppSetupCard setup={slackAppSetup} />
+          <SlackAccountSettings
+            accounts={slackAccounts}
+            slackAppReady={slackAppSetup.status.ready}
+          />
+        </div>
       </SettingsSection>
     </div>
   );

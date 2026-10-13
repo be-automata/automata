@@ -12,6 +12,10 @@ import {
 } from "@terragon/shared/model/slack";
 import { getUserFlags } from "@terragon/shared/model/user-flags";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
+import { isOrgAdmin } from "@/lib/org-role";
+import { getMembership } from "@terragon/shared/model/organizations";
+import { SlackWorkspaceBoundElsewhereError } from "@terragon/shared/model/slack";
+import { resolveSlackAppConfig } from "@/server-lib/slack-config";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { getUserCredentials } from "@/server-lib/user-credentials";
 import { getDefaultModel } from "@/lib/default-ai-model";
@@ -35,7 +39,14 @@ export async function GET(request: NextRequest) {
   }
 
   const decryptedState = decryptValue(state!, env.ENCRYPTION_MASTER_KEY);
-  const { userId: stateUserId, timestamp, type } = JSON.parse(decryptedState);
+  const {
+    userId: stateUserId,
+    timestamp,
+    type,
+    organizationId: stateOrganizationId,
+  } = JSON.parse(decryptedState);
+  // States minted before org-scoped Slack apps carry no org: the platform app.
+  const organizationId: string | null = stateOrganizationId ?? null;
   if (stateUserId !== userId) {
     redirect(
       "/settings/integrations?integration=slack&status=error&code=invalid_state",
@@ -64,14 +75,43 @@ export async function GET(request: NextRequest) {
     return;
   }
 
+  // The state names the org whose Slack app started this flow; the user must
+  // still belong to it (and, to bind a workspace, administer it).
+  if (
+    organizationId &&
+    !(await getMembership({ db, organizationId, userId }))
+  ) {
+    redirect(
+      "/settings/integrations?integration=slack&status=error&code=invalid_state",
+    );
+    return;
+  }
+  if (
+    type === "app_install" &&
+    organizationId &&
+    !(await isOrgAdmin({ db, organizationId, userId }))
+  ) {
+    redirect(
+      "/settings/integrations?integration=slack&status=error&code=not_org_admin",
+    );
+    return;
+  }
+  const slackApp = await resolveSlackAppConfig({ db, organizationId });
+  if (!slackApp.clientId || !slackApp.clientSecret) {
+    redirect(
+      "/settings/integrations?integration=slack&status=error&code=not_configured",
+    );
+    return;
+  }
+
   // Exchange authorization code for access token
   const tokenUrl =
     type === "app_install"
       ? "https://slack.com/api/oauth.v2.access"
       : "https://slack.com/api/openid.connect.token";
   const params = new URLSearchParams();
-  params.append("client_id", env.SLACK_CLIENT_ID!);
-  params.append("client_secret", env.SLACK_CLIENT_SECRET!);
+  params.append("client_id", slackApp.clientId);
+  params.append("client_secret", slackApp.clientSecret);
   params.append("code", code);
   params.append(
     "redirect_uri",
@@ -96,26 +136,37 @@ export async function GET(request: NextRequest) {
 
   if (type === "app_install") {
     // Create new connection
-    await upsertSlackInstallation({
-      db,
-      userId,
-      teamId: tokenData.team.id,
-      installation: {
-        teamName: tokenData.team.name,
-        botUserId: tokenData.bot_user_id,
-        botAccessTokenEncrypted: encryptValue(
-          tokenData.access_token,
-          env.ENCRYPTION_MASTER_KEY,
-        ),
-        scope: tokenData.scope,
-        appId: tokenData.app_id,
-        installerUserId: userId,
-        isEnterpriseInstall: !!tokenData.is_enterprise_install,
-        enterpriseId: tokenData.enterprise?.id || null,
-        enterpriseName: tokenData.enterprise?.name,
-        isActive: true,
-      },
-    });
+    try {
+      await upsertSlackInstallation({
+        db,
+        userId,
+        teamId: tokenData.team.id,
+        installation: {
+          organizationId,
+          teamName: tokenData.team.name,
+          botUserId: tokenData.bot_user_id,
+          botAccessTokenEncrypted: encryptValue(
+            tokenData.access_token,
+            env.ENCRYPTION_MASTER_KEY,
+          ),
+          scope: tokenData.scope,
+          appId: tokenData.app_id,
+          installerUserId: userId,
+          isEnterpriseInstall: !!tokenData.is_enterprise_install,
+          enterpriseId: tokenData.enterprise?.id || null,
+          enterpriseName: tokenData.enterprise?.name,
+          isActive: true,
+        },
+      });
+    } catch (error) {
+      if (error instanceof SlackWorkspaceBoundElsewhereError) {
+        redirect(
+          "/settings/integrations?integration=slack&status=error&code=workspace_bound_elsewhere",
+        );
+        return;
+      }
+      throw error;
+    }
     redirect(
       "/settings/integrations?integration=slack&status=success&code=app_installed",
     );
@@ -143,7 +194,7 @@ export async function GET(request: NextRequest) {
         // Validate the issuer
         issuer: "https://slack.com",
         // Validate the audience (should be your client ID)
-        audience: env.SLACK_CLIENT_ID,
+        audience: slackApp.clientId,
         // The token should not be expired
         clockTolerance: 5, // Allow 5 seconds of clock skew
       });

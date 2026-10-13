@@ -2,14 +2,21 @@
 
 import { env } from "@terragon/env/apps-www";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
-import { userOnlyAction } from "@/lib/auth-server";
+import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { db } from "@/lib/db";
+import { isOrgAdmin } from "@/lib/org-role";
+import { UserFacingError } from "@/lib/server-actions";
 import {
   deleteSlackAccount,
   upsertSlackSettings,
 } from "@terragon/shared/model/slack";
+import { getMembership } from "@terragon/shared/model/organizations";
 import { encryptValue } from "@terragon/utils/encryption";
 import { SlackSettingsInsert } from "@terragon/shared/db/types";
+import {
+  resolveSlackAppConfig,
+  type SlackAppConfig,
+} from "@/server-lib/slack-config";
 
 const SLACK_BOT_SCOPES = [
   "app_mentions:read",
@@ -33,28 +40,64 @@ const SLACK_BOT_SCOPES = [
 ];
 const SLACK_OPENID_SCOPES = ["openid", "profile", "email"];
 
+/**
+ * The Slack app for the session's active org (the platform app without one),
+ * and that org. The org always comes from the session, never the arguments.
+ */
+async function getSessionSlackApp(userId: string): Promise<{
+  organizationId: string | null;
+  config: SlackAppConfig;
+  clientId: string;
+}> {
+  const tenant = await getTenantContextOrNull();
+  const activeOrganizationId = tenant?.organizationId ?? null;
+  const organizationId =
+    activeOrganizationId &&
+    (await getMembership({ db, organizationId: activeOrganizationId, userId }))
+      ? activeOrganizationId
+      : null;
+  const config = await resolveSlackAppConfig({ db, organizationId });
+  if (!config.clientId) {
+    throw new UserFacingError(
+      config.source === "organization"
+        ? "Slack is not configured for this organization: set SLACK_CLIENT_ID, SLACK_CLIENT_SECRET and SLACK_SIGNING_SECRET on the organization environment"
+        : "Slack is not configured: an organization admin can set SLACK_CLIENT_ID, SLACK_CLIENT_SECRET and SLACK_SIGNING_SECRET on the organization environment",
+    );
+  }
+  return { organizationId, config, clientId: config.clientId };
+}
+
+function encryptSlackOAuthState(state: {
+  userId: string;
+  organizationId: string | null;
+  type: "app_install" | "openid";
+}): string {
+  return encryptValue(
+    JSON.stringify({ ...state, timestamp: Date.now() }),
+    env.ENCRYPTION_MASTER_KEY,
+  );
+}
+
 // Used to install the Slack app
 export const getSlackAppInstallUrl = userOnlyAction(
   async function getSlackAppInstallUrl(userId: string): Promise<string> {
-    if (!env.SLACK_CLIENT_ID) {
-      throw new Error("Slack OAuth is not configured");
+    const { organizationId, clientId } = await getSessionSlackApp(userId);
+    // Installing binds the workspace to the org: an org-governance action.
+    if (organizationId && !(await isOrgAdmin({ db, organizationId, userId }))) {
+      throw new UserFacingError(
+        "Only organization owners and admins can install the Slack app",
+      );
     }
     const redirectUri = `${nonLocalhostPublicAppUrl()}/api/auth/slack/callback`;
     const scopes = SLACK_BOT_SCOPES.join(",");
     const slackAuthUrl = new URL("https://slack.com/oauth/v2/authorize");
-    slackAuthUrl.searchParams.set("client_id", env.SLACK_CLIENT_ID);
+    slackAuthUrl.searchParams.set("client_id", clientId);
     slackAuthUrl.searchParams.set("scope", scopes);
     slackAuthUrl.searchParams.set("redirect_uri", redirectUri);
-    // Add state parameter with user ID for security
-    const state = encryptValue(
-      JSON.stringify({
-        userId,
-        timestamp: Date.now(),
-        type: "app_install",
-      }),
-      env.ENCRYPTION_MASTER_KEY,
+    slackAuthUrl.searchParams.set(
+      "state",
+      encryptSlackOAuthState({ userId, organizationId, type: "app_install" }),
     );
-    slackAuthUrl.searchParams.set("state", state);
     return slackAuthUrl.toString();
   },
   { defaultErrorMessage: "Failed to get Slack app install URL" },
@@ -63,26 +106,17 @@ export const getSlackAppInstallUrl = userOnlyAction(
 // Used to connect to a users
 export const getSlackOAuthUrl = userOnlyAction(
   async function getSlackOAuthUrl(userId: string): Promise<string> {
-    if (!env.SLACK_CLIENT_ID) {
-      throw new Error("Slack OAuth is not configured");
-    }
+    const { organizationId, clientId } = await getSessionSlackApp(userId);
     const redirectUri = `${nonLocalhostPublicAppUrl()}/api/auth/slack/callback`;
     const slackAuthUrl = new URL("https://slack.com/openid/connect/authorize");
-    slackAuthUrl.searchParams.set("client_id", env.SLACK_CLIENT_ID);
+    slackAuthUrl.searchParams.set("client_id", clientId);
     slackAuthUrl.searchParams.set("scope", SLACK_OPENID_SCOPES.join(","));
     slackAuthUrl.searchParams.set("redirect_uri", redirectUri);
     slackAuthUrl.searchParams.set("response_type", "code");
-
-    // Add state parameter with user ID for security
-    const state = encryptValue(
-      JSON.stringify({
-        userId,
-        timestamp: Date.now(),
-        type: "openid",
-      }),
-      env.ENCRYPTION_MASTER_KEY,
+    slackAuthUrl.searchParams.set(
+      "state",
+      encryptSlackOAuthState({ userId, organizationId, type: "openid" }),
     );
-    slackAuthUrl.searchParams.set("state", state);
     return slackAuthUrl.toString();
   },
   { defaultErrorMessage: "Failed to get Slack OAuth URL" },

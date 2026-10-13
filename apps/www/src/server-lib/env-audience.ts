@@ -43,6 +43,11 @@ export const CONTROL_PLANE_ONLY_ENV_KEYS: ReadonlySet<string> = new Set([
   // The post-merge audit's tracker token: every tracker write is performed by
   // the control plane, so the agent has no use for it.
   "YOUTRACK_TOKEN",
+  // The org's own Slack app (server-lib/slack-config.ts): the control plane
+  // verifies Slack's requests and runs the OAuth exchange; no agent needs them.
+  "SLACK_CLIENT_ID",
+  "SLACK_CLIENT_SECRET",
+  "SLACK_SIGNING_SECRET",
 ]);
 
 export interface EnvironmentVariable {

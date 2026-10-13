@@ -15,6 +15,8 @@ import { getUserCredentials } from "@/server-lib/user-credentials";
 import { getDefaultModel } from "@/lib/default-ai-model";
 import { formatThreadContext } from "@/server-lib/ext-thread-context";
 
+import { installationServesRoute, SlackRequestRoute } from "./route-fence";
+
 export interface SlackAppMentionEvent {
   type: string;
   user: string;
@@ -389,6 +391,7 @@ async function sendSetupMessage({
 
 export async function handleAppMentionEvent(
   event: SlackAppMentionEvent,
+  route: SlackRequestRoute,
 ): Promise<void> {
   console.log("[slack webhook] Received app mention", event);
   // Skip processing if this is an edited message
@@ -419,6 +422,19 @@ export async function handleAppMentionEvent(
     if (!slackInstallation) {
       console.error(
         `[slack webhook] No Slack installation found for team ${teamId}`,
+      );
+      return;
+    }
+    if (
+      !(await installationServesRoute({
+        db,
+        installation: slackInstallation,
+        route,
+      }))
+    ) {
+      console.error(
+        `[slack webhook] Slack installation for team ${teamId} was not made through the app that sent this request`,
+        route,
       );
       return;
     }

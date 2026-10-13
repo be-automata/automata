@@ -112,6 +112,12 @@ The Slack integration allows users to interact with Terragon through Slack. User
    - **Client Secret** → Add to `.env.development.local` as `SLACK_CLIENT_SECRET`
    - **Signing Secret** → Add to `.env.development.local` as `SLACK_SIGNING_SECRET`
 
+These three values configure the **platform** Slack app. Without `SLACK_SIGNING_SECRET`, `/api/webhooks/slack` rejects every request.
+
+#### Organization Slack apps
+
+An organization can bring its own Slack app instead: an owner or admin sets `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` and `SLACK_SIGNING_SECRET` on **Environments → Organization**. Setting any of them switches the org to its own app (values are never mixed with the platform's). The app's Event Subscriptions and Interactivity Request URL is then `/api/webhooks/slack/<organizationId>`. **Settings → Integrations** shows which level supplies each key and the exact URLs to register. These keys are control-plane only and never reach an agent.
+
 #### Development Tips
 
 - Slack OAuth redirect URLs cannot be localhost, you need to use the ngrok URL if you're testing the slack auth flow.

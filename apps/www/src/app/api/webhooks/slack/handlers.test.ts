@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { handleAppMentionEvent, SlackAppMentionEvent } from "./handlers";
+import { PLATFORM_SLACK_ROUTE } from "./route-fence";
 import { User } from "@terragon/shared";
 import { createTestUser } from "@terragon/shared/model/test-helpers";
 import { db } from "@/lib/db";
@@ -12,6 +13,7 @@ import {
   upsertSlackSettings,
 } from "@terragon/shared/model/slack";
 import { createOrganization } from "@terragon/shared/model/organizations";
+import { replaceOrganizationEnvironmentVariables } from "@terragon/shared/model/organization-environment";
 import { slackInstallation } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
@@ -97,6 +99,12 @@ describe("handleAppMentionEvent", () => {
         },
       }),
     ]);
+    // The installation row is shared across tests (constant teamId); unbind
+    // it so a reinstall is not refused as another org's workspace.
+    await db
+      .update(slackInstallation)
+      .set({ organizationId: null })
+      .where(eq(slackInstallation.teamId, teamId));
     await upsertSlackInstallation({
       db,
       userId: user.id,
@@ -139,7 +147,7 @@ describe("handleAppMentionEvent", () => {
       const event = createBasicEvent({
         text: "<@B123456789> Can you fix the bug in login.ts?",
       });
-      await handleAppMentionEvent(event);
+      await handleAppMentionEvent(event, PLATFORM_SLACK_ROUTE);
 
       expect(newThreadInternal).toHaveBeenCalledTimes(1);
       expect(newThreadInternal).toHaveBeenCalledWith(
@@ -216,7 +224,7 @@ describe("handleAppMentionEvent", () => {
         thread_ts: "1234567890.000001",
       });
 
-      await handleAppMentionEvent(event);
+      await handleAppMentionEvent(event, PLATFORM_SLACK_ROUTE);
       const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
       // @ts-expect-error
       const messageText = callArgs?.message.parts[0]?.text;
@@ -278,7 +286,7 @@ describe("handleAppMentionEvent", () => {
         thread_ts: "1234567890.000001",
       });
 
-      await handleAppMentionEvent(event);
+      await handleAppMentionEvent(event, PLATFORM_SLACK_ROUTE);
       const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
       // @ts-expect-error
       const messageText = callArgs?.message.parts[0]?.text;
@@ -302,7 +310,7 @@ describe("handleAppMentionEvent", () => {
       const event = createBasicEvent({
         text: `<@U123456789> Review the PR and check the feedback`,
       });
-      await handleAppMentionEvent(event);
+      await handleAppMentionEvent(event, PLATFORM_SLACK_ROUTE);
       const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
       // @ts-expect-error
       const messageText = callArgs?.message.parts[0]?.text;
@@ -324,7 +332,7 @@ describe("handleAppMentionEvent", () => {
         ts: "1234567890.123456",
       });
 
-      await handleAppMentionEvent(event);
+      await handleAppMentionEvent(event, PLATFORM_SLACK_ROUTE);
       const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
       // @ts-expect-error
       const messageText = callArgs?.message.parts[0]?.text;
@@ -384,7 +392,7 @@ describe("handleAppMentionEvent", () => {
         thread_ts: "1234567890.000001",
       });
 
-      await handleAppMentionEvent(event);
+      await handleAppMentionEvent(event, PLATFORM_SLACK_ROUTE);
       const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
       // @ts-expect-error
       const messageText = callArgs?.message.parts[0]?.text;
@@ -412,7 +420,7 @@ describe("handleAppMentionEvent", () => {
       vi.mocked(slackWebApi.WebClient).mockImplementation(() => {
         return getDefaultWebClientMock({ postMessageFn });
       });
-      await handleAppMentionEvent(event);
+      await handleAppMentionEvent(event, PLATFORM_SLACK_ROUTE);
       expect(newThreadInternal).not.toHaveBeenCalled();
       expect(postMessageFn).not.toHaveBeenCalled();
     });
@@ -425,7 +433,7 @@ describe("handleAppMentionEvent", () => {
         return getDefaultWebClientMock({ postMessageFn });
       });
 
-      await handleAppMentionEvent(event);
+      await handleAppMentionEvent(event, PLATFORM_SLACK_ROUTE);
       expect(newThreadInternal).not.toHaveBeenCalled();
       expect(postMessageFn).toHaveBeenCalled();
       const postMessageCall = postMessageFn.mock.calls[0]?.[0];
@@ -479,7 +487,7 @@ describe("handleAppMentionEvent", () => {
       vi.mocked(slackWebApi.WebClient).mockImplementation(() => {
         return getDefaultWebClientMock({ postMessageFn });
       });
-      await handleAppMentionEvent(event);
+      await handleAppMentionEvent(event, PLATFORM_SLACK_ROUTE);
 
       expect(postMessageFn).toHaveBeenCalledWith({
         channel: channelId,
@@ -496,7 +504,7 @@ describe("handleAppMentionEvent", () => {
       vi.mocked(slackWebApi.WebClient).mockImplementation(() => {
         return getDefaultWebClientMock({ postMessageFn });
       });
-      await handleAppMentionEvent(event);
+      await handleAppMentionEvent(event, PLATFORM_SLACK_ROUTE);
       expect(postMessageFn).toHaveBeenCalledWith({
         channel: channelId,
         thread_ts: "1234567890.000001",
@@ -511,7 +519,7 @@ describe("handleAppMentionEvent", () => {
         text: "<@B123456789> Fix the authentication bug",
       });
 
-      await handleAppMentionEvent(event);
+      await handleAppMentionEvent(event, PLATFORM_SLACK_ROUTE);
 
       expect(newThreadInternal).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -547,7 +555,7 @@ describe("handleAppMentionEvent", () => {
       });
 
       const event = createBasicEvent();
-      await handleAppMentionEvent(event);
+      await handleAppMentionEvent(event, PLATFORM_SLACK_ROUTE);
       const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
       expect(callArgs?.message.model).toBe("gpt-5-codex-high");
     });
@@ -563,7 +571,7 @@ describe("handleAppMentionEvent", () => {
         .set({ organizationId: org.id })
         .where(eq(slackInstallation.teamId, teamId));
 
-      await handleAppMentionEvent(createBasicEvent());
+      await handleAppMentionEvent(createBasicEvent(), PLATFORM_SLACK_ROUTE);
 
       const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
       expect(callArgs?.organizationId).toBe(org.id);
@@ -577,9 +585,65 @@ describe("handleAppMentionEvent", () => {
         .set({ organizationId: null })
         .where(eq(slackInstallation.teamId, teamId));
 
-      await handleAppMentionEvent(createBasicEvent());
+      await handleAppMentionEvent(createBasicEvent(), PLATFORM_SLACK_ROUTE);
       const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
       expect(callArgs?.organizationId ?? null).toBeNull();
+    });
+  });
+
+  describe("route fence", () => {
+    const bindInstallationToNewOrg = async () => {
+      const org = await createOrganization({
+        db,
+        name: "Acme",
+        slug: `acme-${nanoid(8).toLowerCase()}`,
+      });
+      await db
+        .update(slackInstallation)
+        .set({ organizationId: org.id })
+        .where(eq(slackInstallation.teamId, teamId));
+      return org;
+    };
+
+    it("handles an org's own app request for that org's installation", async () => {
+      const org = await bindInstallationToNewOrg();
+      await handleAppMentionEvent(createBasicEvent(), {
+        kind: "organization",
+        organizationId: org.id,
+      });
+      expect(newThreadInternal).toHaveBeenCalledTimes(1);
+    });
+
+    it("drops an org's app request for another org's installation", async () => {
+      await bindInstallationToNewOrg();
+      const otherOrg = await createOrganization({
+        db,
+        name: "Other",
+        slug: `other-${nanoid(8).toLowerCase()}`,
+      });
+      await handleAppMentionEvent(createBasicEvent(), {
+        kind: "organization",
+        organizationId: otherOrg.id,
+      });
+      expect(newThreadInternal).not.toHaveBeenCalled();
+      expect(slackWebApi.WebClient).not.toHaveBeenCalled();
+    });
+
+    it("drops a platform app request for an org that has its own Slack app", async () => {
+      const org = await bindInstallationToNewOrg();
+      await replaceOrganizationEnvironmentVariables({
+        db,
+        organizationId: org.id,
+        actorUserId: user.id,
+        variables: [
+          { key: "SLACK_CLIENT_ID", value: "org-client" },
+          { key: "SLACK_CLIENT_SECRET", value: "org-secret" },
+          { key: "SLACK_SIGNING_SECRET", value: "org-signing" },
+        ],
+        encryptionMasterKey: env.ENCRYPTION_MASTER_KEY,
+      });
+      await handleAppMentionEvent(createBasicEvent(), PLATFORM_SLACK_ROUTE);
+      expect(newThreadInternal).not.toHaveBeenCalled();
     });
   });
 });
