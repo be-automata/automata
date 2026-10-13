@@ -32,6 +32,7 @@ const getDefaultWebClientMock = (overrides?: {
     chat: {
       postMessage:
         overrides?.postMessageFn || vi.fn().mockResolvedValue({ ok: true }),
+      postEphemeral: vi.fn().mockResolvedValue({ ok: true }),
     },
     conversations: {
       replies: vi
@@ -593,9 +594,21 @@ describe("handleAppMentionEvent", () => {
         .set({ organizationId: org.id })
         .where(eq(slackInstallation.teamId, teamId));
 
+      const slack = getDefaultWebClientMock();
+      vi.mocked(slackWebApi.WebClient).mockImplementation(() => slack);
+
       await handleAppMentionEvent(createBasicEvent(), PLATFORM_SLACK_ROUTE);
 
       expect(newThreadInternal).not.toHaveBeenCalled();
+      // Told why, privately, in the mention's thread.
+      expect(slack.chat.postEphemeral).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: channelId,
+          user: slackUserId,
+          text: expect.stringContaining("not a member"),
+        }),
+      );
+      expect(slack.chat.postMessage).not.toHaveBeenCalled();
     });
 
     it("passes a null org when the installation has none (nullable-safe)", async () => {

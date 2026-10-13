@@ -58,9 +58,19 @@ export async function getSlackInstallationForRoute({
   return config.source === "platform" ? installation : null;
 }
 
+/** Why a mention was dropped: the two causes call for different replies. */
+export type MentionRejection =
+  /** Slack does not hold this mention as the payload describes it. */
+  | "unconfirmed"
+  /** The linked user is not a member of the workspace's org. */
+  | "not_org_member";
+
+export type MentionConfirmation =
+  | { ok: true; text: string }
+  | { ok: false; reason: MentionRejection };
+
 /**
- * Whether a mention may start a task, and with which text. Returns null to
- * drop the request.
+ * Whether a mention may start a task, and with which text.
  *
  * Both routes: a workspace bound to an org starts tasks tagged with that org
  * (and carrying its environment), so the mention's linked user must be a
@@ -93,7 +103,7 @@ export async function confirmMentionForRoute({
   };
   /** The app user the mention's Slack user is linked to. */
   userId: string;
-}): Promise<{ text: string } | null> {
+}): Promise<MentionConfirmation> {
   if (route.kind === "platform") {
     if (
       installationOrganizationId &&
@@ -103,12 +113,12 @@ export async function confirmMentionForRoute({
         userId,
       }))
     ) {
-      return null;
+      return { ok: false, reason: "not_org_member" };
     }
-    return { text: mention.text };
+    return { ok: true, text: mention.text };
   }
   if (!mention.ts) {
-    return null;
+    return { ok: false, reason: "unconfirmed" };
   }
   const [stored, membership] = await Promise.all([
     fetchSlackMessage({
@@ -119,10 +129,14 @@ export async function confirmMentionForRoute({
     }),
     getMembership({ db, organizationId: route.organizationId, userId }),
   ]);
-  if (!stored || stored.user !== mention.user || !membership) {
-    return null;
+  // Unconfirmed first: a forged payload must not learn whom the org holds.
+  if (!stored || stored.user !== mention.user) {
+    return { ok: false, reason: "unconfirmed" };
   }
-  return { text: stored.text };
+  if (!membership) {
+    return { ok: false, reason: "not_org_member" };
+  }
+  return { ok: true, text: stored.text };
 }
 
 async function fetchSlackMessage({
