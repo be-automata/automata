@@ -58,22 +58,42 @@ export async function getSlackInstallationForRoute({
   return config.source === "platform" ? installation : null;
 }
 
+/** Why a mention was dropped: the two causes call for different replies. */
+export type MentionRejection =
+  /** Slack does not hold this mention as the payload describes it. */
+  | "unconfirmed"
+  /** The linked user is not a member of the workspace's org. */
+  | "not_org_member";
+
+export type MentionConfirmation =
+  | { ok: true; text: string }
+  | { ok: false; reason: MentionRejection };
+
 /**
- * On the org route, the mention must be one Slack itself holds, posted by the
- * user the payload names, and that user's linked account must belong to the
- * org. Returns the message text as Slack stores it — never the payload's — or
- * null to drop the request. The platform route returns the payload as is.
+ * Whether a mention may start a task, and with which text.
+ *
+ * Both routes: a workspace bound to an org starts tasks tagged with that org
+ * (and carrying its environment), so the mention's linked user must be a
+ * member of it — linking a Slack account says nothing about org membership.
+ *
+ * Org route only: the payload itself is the org admins' to forge, so the
+ * mention must be one Slack holds, posted by the user the payload names, and
+ * its text is Slack's copy. The platform route trusts its own signature and
+ * returns the payload's text.
  */
 export async function confirmMentionForRoute({
   db,
   slack,
   route,
+  installationOrganizationId,
   mention,
   userId,
 }: {
   db: DB;
   slack: WebClient;
   route: SlackRequestRoute;
+  /** The org the workspace's installation is bound to, if any. */
+  installationOrganizationId: string | null;
   mention: {
     channel: string;
     ts?: string;
@@ -83,12 +103,22 @@ export async function confirmMentionForRoute({
   };
   /** The app user the mention's Slack user is linked to. */
   userId: string;
-}): Promise<{ text: string } | null> {
+}): Promise<MentionConfirmation> {
   if (route.kind === "platform") {
-    return { text: mention.text };
+    if (
+      installationOrganizationId &&
+      !(await getMembership({
+        db,
+        organizationId: installationOrganizationId,
+        userId,
+      }))
+    ) {
+      return { ok: false, reason: "not_org_member" };
+    }
+    return { ok: true, text: mention.text };
   }
   if (!mention.ts) {
-    return null;
+    return { ok: false, reason: "unconfirmed" };
   }
   const [stored, membership] = await Promise.all([
     fetchSlackMessage({
@@ -99,10 +129,14 @@ export async function confirmMentionForRoute({
     }),
     getMembership({ db, organizationId: route.organizationId, userId }),
   ]);
-  if (!stored || stored.user !== mention.user || !membership) {
-    return null;
+  // Unconfirmed first: a forged payload must not learn whom the org holds.
+  if (!stored || stored.user !== mention.user) {
+    return { ok: false, reason: "unconfirmed" };
   }
-  return { text: stored.text };
+  if (!membership) {
+    return { ok: false, reason: "not_org_member" };
+  }
+  return { ok: true, text: stored.text };
 }
 
 async function fetchSlackMessage({

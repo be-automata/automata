@@ -453,6 +453,7 @@ export async function handleAppMentionEvent(
       db,
       slack,
       route,
+      installationOrganizationId: slackInstallation.organizationId,
       mention: {
         channel: event.channel,
         ts: event.ts,
@@ -462,11 +463,23 @@ export async function handleAppMentionEvent(
       },
       userId: slackAccount.userId,
     });
-    if (!confirmed) {
+    if (!confirmed.ok) {
       console.error(
-        `[slack webhook] Dropped a mention Slack could not confirm for user ${slackUserId} in team ${teamId}`,
+        confirmed.reason === "not_org_member"
+          ? `[slack webhook] Dropped a mention from user ${slackUserId} in team ${teamId}: not a member of the workspace's organization`
+          : `[slack webhook] Dropped a mention Slack could not confirm for user ${slackUserId} in team ${teamId}`,
         route,
       );
+      // A real member of the workspace who is not in the org gets told why;
+      // an unconfirmed (possibly forged) mention gets no reply at all.
+      if (confirmed.reason === "not_org_member") {
+        await slack.chat.postEphemeral({
+          channel: event.channel,
+          user: event.user,
+          thread_ts: threadTs,
+          text: `This Slack workspace is connected to an Automata organization you are not a member of, so I can't start a task for you. Ask one of its admins to invite you, then mention me again.`,
+        });
+      }
       return;
     }
     const mention = { ...event, text: confirmed.text };
