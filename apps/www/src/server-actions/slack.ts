@@ -13,9 +13,9 @@ import {
   deleteSlackAccount,
   upsertSlackSettings,
 } from "@terragon/shared/model/slack";
-import { encryptValue } from "@terragon/utils/encryption";
 import { SlackSettingsInsert } from "@terragon/shared/db/types";
 import { resolveSlackAppConfig } from "@/server-lib/slack-config";
+import { encodeSlackOAuthState } from "@/lib/slack-oauth-state";
 import {
   SLACK_BOT_SCOPES,
   SLACK_OPENID_SCOPES,
@@ -54,10 +54,7 @@ function encryptSlackOAuthState(state: {
   organizationId: string | null;
   type: "app_install" | "openid";
 }): string {
-  return encryptValue(
-    JSON.stringify({ ...state, timestamp: Date.now() }),
-    env.ENCRYPTION_MASTER_KEY,
-  );
+  return encodeSlackOAuthState(state, env.ENCRYPTION_MASTER_KEY);
 }
 
 // Used to install the Slack app
