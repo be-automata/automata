@@ -641,18 +641,18 @@ describe("handleAppMentionEvent", () => {
 
     /** Slack's own copy of the mention, as conversations.history returns it. */
     const slackHolds = (message: { user: string; text: string }) => {
-      vi.mocked(slackWebApi.WebClient).mockImplementation(
-        () =>
-          ({
-            ...getDefaultWebClientMock(),
-            conversations: {
-              ...getDefaultWebClientMock().conversations,
-              history: vi.fn().mockResolvedValue({
-                messages: [{ ts: createBasicEvent().ts, ...message }],
-              }),
-            },
-          }) as unknown as slackWebApi.WebClient,
-      );
+      const base = getDefaultWebClientMock();
+      const client = {
+        ...base,
+        conversations: {
+          ...base.conversations,
+          history: vi.fn().mockResolvedValue({
+            messages: [{ ts: createBasicEvent().ts, ...message }],
+          }),
+        },
+      } as unknown as slackWebApi.WebClient;
+      vi.mocked(slackWebApi.WebClient).mockImplementation(() => client);
+      return client;
     };
 
     const bindInstallationToMembersOrg = async () => {
@@ -772,14 +772,34 @@ describe("handleAppMentionEvent", () => {
       expect(newThreadInternal).not.toHaveBeenCalled();
     });
 
-    it("drops a mention from a linked user outside the org", async () => {
+    it("drops a genuine mention from a linked user outside the org, telling them privately", async () => {
       const org = await bindInstallationToNewOrg();
-      slackHolds({ user: slackUserId, text: "<@B1> hi" });
+      const slack = slackHolds({ user: slackUserId, text: "<@B1> hi" });
       await handleAppMentionEvent(createBasicEvent(), {
         kind: "organization",
         organizationId: org.id,
       });
       expect(newThreadInternal).not.toHaveBeenCalled();
+      expect(slack.chat.postEphemeral).toHaveBeenCalledWith(
+        expect.objectContaining({
+          user: slackUserId,
+          text: expect.stringContaining("not a member"),
+        }),
+      );
+    });
+
+    it("gives a forged mention from a non-member no reply at all", async () => {
+      // Unconfirmed is checked before membership: a forged payload must not
+      // learn, from a reply, whom the org holds.
+      const org = await bindInstallationToNewOrg();
+      const slack = slackHolds({ user: "UOTHER", text: "<@B1> hi" });
+      await handleAppMentionEvent(createBasicEvent(), {
+        kind: "organization",
+        organizationId: org.id,
+      });
+      expect(newThreadInternal).not.toHaveBeenCalled();
+      expect(slack.chat.postEphemeral).not.toHaveBeenCalled();
+      expect(slack.chat.postMessage).not.toHaveBeenCalled();
     });
 
     it("drops an org's app request for another org's installation", async () => {
