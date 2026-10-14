@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { getUserIdOrNull } from "@/lib/auth-server";
-import { decryptValue, encryptValue } from "@terragon/utils/encryption";
+import { encryptValue } from "@terragon/utils/encryption";
+import { decodeSlackOAuthState } from "@/lib/slack-oauth-state";
 import { env } from "@terragon/env/apps-www";
 import { redirect, notFound } from "next/navigation";
 import { db } from "@/lib/db";
@@ -50,15 +51,11 @@ export async function GET(request: NextRequest) {
     return fail("invalid_params");
   }
 
-  const decryptedState = decryptValue(state!, env.ENCRYPTION_MASTER_KEY);
-  const {
-    userId: stateUserId,
-    timestamp,
-    type,
-    organizationId: stateOrganizationId,
-  } = JSON.parse(decryptedState);
-  // States minted before org-scoped Slack apps carry no org: the platform app.
-  const organizationId: string | null = stateOrganizationId ?? null;
+  const decodedState = decodeSlackOAuthState(state, env.ENCRYPTION_MASTER_KEY);
+  if (!decodedState) {
+    return fail("invalid_state");
+  }
+  const { userId: stateUserId, timestamp, type, organizationId } = decodedState;
   if (stateUserId !== userId) {
     return fail("invalid_state");
   }
