@@ -121,6 +121,62 @@ jobs:
           pnpm --filter @terragon/review test
           echo "::endgroup::"
 
+  # ── Schema drift: deploy/migrations vs packages/shared/src/db/schema.ts ──────
+  # Builds database `a` from the migration files and database `b` from
+  # schema.ts (drizzle-kit push), then compares their pg_catalog. A schema.ts
+  # change without a migration (or a migration schema.ts does not describe)
+  # fails here. Postgres 18 = the production major (the test compose is 16).
+  schema-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PG_BASE: postgres://postgres:postgres@localhost:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+      - name: Create databases a (migrations) and b (schema.ts)
+        run: |
+          createdb a
+          createdb b
+      - name: Apply deploy/migrations to a (twice; the second applies 0)
+        env:
+          DATABASE_URL: ${{ env.PG_BASE }}/a
+        run: |
+          set -eo pipefail
+          pnpm exec tsx deploy/migrate.ts --apply
+          pnpm exec tsx deploy/migrate.ts --apply | tee "$RUNNER_TEMP/second.txt"
+          grep -qx 'applied 0 migration(s)' "$RUNNER_TEMP/second.txt" \
+            || { echo "::error::second migrate run was not a no-op"; exit 1; }
+      - name: Push schema.ts to b (drizzle-kit push)
+        env:
+          DATABASE_URL: ${{ env.PG_BASE }}/b
+        run: pnpm -C packages/shared exec drizzle-kit push --force
+      - name: Compare a with b
+        run: pnpm exec tsx deploy/schema-drift.ts --a "$PG_BASE/a" --b "$PG_BASE/b"
+
   # ── Worker E2E vs dockerized hatchet-lite (#125 C3 / #128) ───────────────────
   # Isolated compose project (own ports; see hatchet-it-harness.ts), ~2 min,
   # torn down in `if: always()` as the backstop for a killed vitest process.

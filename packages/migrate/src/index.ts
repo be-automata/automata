@@ -32,3 +32,20 @@ export {
 } from "./runner";
 export { assertDirectConnection, ConnectionConfigError } from "./connection";
 export { openClient } from "./client";
+export {
+  entryKey,
+  snapshotCatalog,
+  type Catalog,
+  type CatalogEntry,
+  type CatalogKind,
+} from "./drift/catalog";
+export {
+  AllowlistError,
+  diffCatalogs,
+  formatDiffReport,
+  parseAllowlist,
+  type AllowEntry,
+  type CatalogDiff,
+  type DiffChange,
+  type DiffResult,
+} from "./drift/diff";
