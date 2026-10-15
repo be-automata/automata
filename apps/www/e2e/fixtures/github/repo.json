@@ -1,0 +1,11 @@
+{
+  "method": "GET",
+  "path": "/repos/:owner/:repo",
+  "body": {
+    "id": 7000,
+    "name": "repo",
+    "full_name": "e2e/repo",
+    "default_branch": "main",
+    "private": true
+  }
+}

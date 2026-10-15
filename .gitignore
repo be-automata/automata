@@ -13,6 +13,12 @@ node_modules
 # testing
 /coverage
 
+# playwright (apps/www e2e)
+apps/www/e2e/.auth/
+apps/www/e2e/.state/
+apps/www/test-results/
+apps/www/playwright-report/
+
 # next.js
 .next
 dist

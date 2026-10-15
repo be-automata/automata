@@ -1,0 +1,16 @@
+{
+  "method": "GET",
+  "path": "/repos/e2e-beta-gh/:repo/installation",
+  "body": {
+    "id": 9002,
+    "account": {
+      "login": "e2e-beta-gh",
+      "id": 90020,
+      "type": "Organization"
+    },
+    "app_id": 1,
+    "target_type": "Organization",
+    "permissions": {},
+    "events": []
+  }
+}

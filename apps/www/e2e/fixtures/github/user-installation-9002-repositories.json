@@ -1,0 +1,29 @@
+{
+  "method": "GET",
+  "path": "/user/installations/9002/repositories",
+  "body": {
+    "total_count": 1,
+    "repositories": [
+      {
+        "id": 7002,
+        "node_id": "R_e2e7002",
+        "name": "beta-api",
+        "full_name": "e2e-beta-gh/beta-api",
+        "private": true,
+        "owner": {
+          "login": "e2e-beta-gh",
+          "id": 70020,
+          "type": "Organization"
+        },
+        "html_url": "https://github.com/e2e-beta-gh/beta-api",
+        "default_branch": "main",
+        "pushed_at": "2026-10-13T11:00:00Z",
+        "permissions": {
+          "admin": true,
+          "push": true,
+          "pull": true
+        }
+      }
+    ]
+  }
+}

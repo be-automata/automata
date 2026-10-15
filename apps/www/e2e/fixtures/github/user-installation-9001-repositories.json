@@ -1,0 +1,29 @@
+{
+  "method": "GET",
+  "path": "/user/installations/9001/repositories",
+  "body": {
+    "total_count": 1,
+    "repositories": [
+      {
+        "id": 7001,
+        "node_id": "R_e2e7001",
+        "name": "alpha-api",
+        "full_name": "e2e-alpha-gh/alpha-api",
+        "private": true,
+        "owner": {
+          "login": "e2e-alpha-gh",
+          "id": 70010,
+          "type": "Organization"
+        },
+        "html_url": "https://github.com/e2e-alpha-gh/alpha-api",
+        "default_branch": "main",
+        "pushed_at": "2026-10-13T10:00:00Z",
+        "permissions": {
+          "admin": true,
+          "push": true,
+          "pull": true
+        }
+      }
+    ]
+  }
+}

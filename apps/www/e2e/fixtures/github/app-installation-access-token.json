@@ -1,0 +1,11 @@
+{
+  "method": "POST",
+  "path": "/app/installations/:installationId/access_tokens",
+  "status": 201,
+  "body": {
+    "token": "ghs_e2e_installation_placeholder",
+    "expires_at": "2099-01-01T00:00:00Z",
+    "permissions": {},
+    "repository_selection": "selected"
+  }
+}
