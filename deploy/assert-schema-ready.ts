@@ -50,6 +50,10 @@ const ORG_ENV_SINCE =
   "org-level environment — the tracker resolver and agent env assembly read " +
   "this table on every call (deploy/migrations/2026-10-08-organization-environment.sql)";
 
+const ENV_ORG_UNIQUE_SINCE =
+  "environment uniqueness by org — getOrCreateEnvironment names this index as " +
+  "its ON CONFLICT target (deploy/migrations/2026-10-14-environment-org-unique.sql)";
+
 /** Columns this revision of the code cannot run without. */
 const REQUIRED: ReadonlyArray<{
   table: string;
@@ -1003,6 +1007,23 @@ const REQUIRED: ReadonlyArray<{
     column: "created_at",
     since: ORG_ENV_SINCE,
   },
+  {
+    table: "organization",
+    column: "is_personal",
+    since:
+      "organization.is_personal — the org switcher and the default active org " +
+      "read it (deploy/migrations/2026-10-14-environment-org-unique.sql)",
+  },
+];
+
+/**
+ * Unique indexes the code relies on for CORRECTNESS: an INSERT ... ON CONFLICT
+ * naming them as its target errors when they are missing, so a missing or
+ * invalid one FAILS the gate exactly like a missing column.
+ */
+const REQUIRED_INDEXES: ReadonlyArray<{ name: string; since: string }> = [
+  { name: "environment_org_user_repo_unique", since: ENV_ORG_UNIQUE_SINCE },
+  { name: "environment_user_global_unique", since: ENV_ORG_UNIQUE_SINCE },
 ];
 
 /**
@@ -1095,18 +1116,49 @@ async function main(): Promise<void> {
     }
   }
 
+  for (const index of REQUIRED_INDEXES) {
+    let valid: boolean;
+    try {
+      const result = await db.execute(sql`
+        SELECT i.indisvalid AS valid
+          FROM pg_index i
+          JOIN pg_class c ON c.oid = i.indexrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relname = ${index.name}
+           AND i.indisunique
+         LIMIT 1
+      `);
+      const rows =
+        (result as unknown as { rows?: Array<{ valid: boolean }> }).rows ?? [];
+      valid = rows[0]?.valid === true;
+    } catch (error) {
+      console.error(
+        `assert-schema-ready: FAIL: cannot query the database (fail-closed): ${
+          (error as Error).message
+        }`,
+      );
+      process.exit(1);
+    }
+    if (valid) {
+      console.log(`assert-schema-ready: ok unique index ${index.name}`);
+    } else {
+      missing.push(`  unique index ${index.name} — ${index.since}`);
+    }
+  }
+
   if (missing.length > 0) {
     console.error(
       "assert-schema-ready: FAIL: the deployed schema is missing:\n" +
         missing.join("\n") +
-        "\n\nPush the schema BEFORE deploying:\n" +
+        "\n\nPush the schema BEFORE deploying (or apply the hand-written\n" +
+        "migration under deploy/migrations/ that the entry names):\n" +
         "  pnpm -C packages/shared drizzle-kit-push-prod\n" +
         "then re-run this gate.",
     );
     process.exit(1);
   }
   console.log(
-    `assert-schema-ready: OK — all ${REQUIRED.length} required column(s) present`,
+    `assert-schema-ready: OK — all ${REQUIRED.length} required column(s) and ${REQUIRED_INDEXES.length} unique index(es) present`,
   );
   await warnOnMissingIndexes(db);
   // Explicit exit, as every sibling script in deploy/ does after a createDb()

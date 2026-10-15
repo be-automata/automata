@@ -9,7 +9,7 @@ import {
 import { auth } from "@/lib/auth";
 import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { db } from "@/lib/db";
-import { isPersonalOrganizationSlug } from "@/lib/org-identity";
+import { isPersonalOrganization } from "@/lib/org-identity";
 import { UserFacingError } from "@/lib/server-actions";
 
 export interface MyOrganization {
@@ -39,7 +39,10 @@ export const getMyOrganizations = userOnlyAction(
         name: row.name,
         slug: row.slug ?? null,
         logo: row.logo ?? null,
-        isPersonal: isPersonalOrganizationSlug(row.slug ?? null),
+        isPersonal: isPersonalOrganization({
+          isPersonal: row.isPersonal,
+          slug: row.slug ?? null,
+        }),
       }))
       .sort((a, b) => Number(b.isPersonal) - Number(a.isPersonal));
     const activeId = tenant?.organizationId ?? null;

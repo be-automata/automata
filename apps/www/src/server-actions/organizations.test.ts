@@ -9,7 +9,10 @@ import {
   createOrganization,
   addOrganizationMember,
 } from "@terragon/shared/model/organizations";
-import { session as sessionTable } from "@terragon/shared/db/schema";
+import {
+  organization as organizationTable,
+  session as sessionTable,
+} from "@terragon/shared/db/schema";
 import { mockLoggedInUser } from "@/test-helpers/mock-next";
 import { unwrapResult } from "@/lib/server-actions";
 import { getMyOrganizations, switchActiveOrganization } from "./organizations";
@@ -68,6 +71,28 @@ describe("organization server actions", () => {
     ]);
     expect(result.organizations[0]?.isPersonal).toBe(true);
     expect(result.activeOrganizationId).toBe(teamOrgId);
+  });
+
+  it("marks an org personal from the is_personal column, whatever its slug", async () => {
+    const workspace = await createOrg(
+      "Workspace",
+      `workspace-${nanoid(8).toLowerCase()}`,
+    );
+    await db
+      .update(organizationTable)
+      .set({ isPersonal: true })
+      .where(eq(organizationTable.id, workspace.id));
+    await addOrganizationMember({
+      db,
+      organizationId: workspace.id,
+      userId: user.id,
+    });
+    const result = unwrapResult(await getMyOrganizations());
+    const byId = new Map(result.organizations.map((org) => [org.id, org]));
+    expect(byId.get(workspace.id)?.isPersonal).toBe(true);
+    expect(byId.get(personalOrgId)?.isPersonal).toBe(true);
+    expect(byId.get(teamOrgId)?.isPersonal).toBe(false);
+    expect(result.organizations.at(-1)?.id).toBe(teamOrgId);
   });
 
   it("reports no active org when the session points at an org the user left", async () => {

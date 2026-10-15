@@ -1,13 +1,17 @@
 import type { DB } from "@terragon/shared/db";
 import { getOrganizationsForUser } from "@terragon/shared/model/organizations";
 
+import { isPersonalOrganization } from "@/lib/org-identity";
+
 /**
  * Better Auth session.create.before hook body: default activeOrganizationId
  * from the user's org membership so org-gated surfaces (review settings,
  * environments, …) work without an explicit organization.setActive call.
- * Deterministic: sole membership → that org; multiple → oldest-created
- * (getOrganizationsForUser orders by organization.createdAt); none → leave
- * unset. Fail-open: a resolver error must never block sign-in.
+ * Deterministic: sole membership → that org; multiple → the oldest-created
+ * TEAM org (a user who joined a team lands in it, not in their personal
+ * workspace), falling back to the oldest personal org when they have no team
+ * (getOrganizationsForUser orders by organization.createdAt, then id); none →
+ * leave unset. Fail-open: a resolver error must never block sign-in.
  */
 export async function withDefaultActiveOrganization<
   TSession extends { userId: string; activeOrganizationId?: string | null },
@@ -23,7 +27,9 @@ export async function withDefaultActiveOrganization<
   }
   try {
     const orgs = await getOrganizationsForUser({ db, userId: session.userId });
-    const activeOrganizationId = orgs[0]?.id;
+    const activeOrganizationId = (
+      orgs.find((org) => !isPersonalOrganization(org)) ?? orgs[0]
+    )?.id;
     if (!activeOrganizationId) {
       return;
     }

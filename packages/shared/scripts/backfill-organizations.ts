@@ -94,6 +94,7 @@ async function ensurePersonalOrg(
     id: organizationId,
     name: personalOrgName(u.name, u.email),
     slug,
+    isPersonal: true,
     createdAt: new Date(),
   });
   await db.insert(schema.member).values({
