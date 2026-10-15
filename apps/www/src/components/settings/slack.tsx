@@ -149,6 +149,7 @@ function SlackAccountItem({
             open={installOpen}
             onOpenChange={setInstallOpen}
             workspaceName={account.slackTeamName}
+            workspaceId={account.teamId}
             organization={activeOrganization}
             isPending={getSlackAppInstallUrlMutation.isPending}
             onContinue={handleInstallApp}
