@@ -9,87 +9,31 @@ import { isOrgAdmin, ORG_ADMIN_ROLES } from "@/lib/org-role";
 import { UserFacingError } from "@/lib/server-actions";
 import { listVisibleGithubInstallations } from "@/server-lib/github-installations";
 import {
+  listGithubInstallationRows,
+  type GithubInstallationsResult,
+} from "@/server-lib/github-installation-rows";
+import {
   bindGithubInstallationToOrg,
   getGithubInstallation,
-  getGithubInstallationsByInstallationIds,
 } from "@terragon/shared/model/github-installation";
-import { getOrganizationsForUser } from "@terragon/shared/model/organizations";
 
-export type GithubInstallationBinding =
-  | { kind: "unbound" }
-  | {
-      kind: "organization";
-      organization: { id: string; name: string; logo: string | null };
-    }
-  // Bound to an org the caller is not a member of: its name is not theirs to
-  // see, only the fact that the account's work runs somewhere else.
-  | { kind: "other-organization" };
-
-export interface GithubInstallationRow {
-  installationId: string;
-  accountLogin: string | null;
-  accountType: string | null;
-  binding: GithubInstallationBinding;
-  /** Null when the installation has never been bound (no row yet). */
-  mode: "shadow" | "active" | null;
-}
-
-export interface GithubInstallationsResult {
-  installations: GithubInstallationRow[];
-  githubTokenMissing?: boolean;
-}
+export type {
+  GithubInstallationBinding,
+  GithubInstallationRow,
+  GithubInstallationsResult,
+} from "@/server-lib/github-installation-rows";
 
 /**
- * The GitHub App installations the caller's GitHub token can see, each with
- * the org it is bound to. Feeds the GitHub installations card on Settings →
- * Integrations.
+ * Server-action form of GET /api/github/installations. The Settings →
+ * Integrations card reads the route instead, so this slow GitHub listing is
+ * not queued behind (or ahead of) the page's other server actions.
  */
 export const getGithubInstallations = userOnlyAction(
   async function getGithubInstallations(
     userId: string,
   ): Promise<GithubInstallationsResult> {
-    const visible = await listVisibleGithubInstallations(userId);
-    if (!visible) {
-      return { installations: [], githubTokenMissing: true };
-    }
-    const [rows, organizations] = await Promise.all([
-      getGithubInstallationsByInstallationIds({
-        db,
-        installationIds: visible.map((i) => i.installationId),
-      }),
-      getOrganizationsForUser({ db, userId }),
-    ]);
-    const rowByInstallationId = new Map(
-      rows.map((row) => [row.installationId, row]),
-    );
-    const organizationById = new Map(organizations.map((org) => [org.id, org]));
-    return {
-      installations: visible.map((installation) => {
-        const row = rowByInstallationId.get(installation.installationId);
-        const organization = row?.organizationId
-          ? organizationById.get(row.organizationId)
-          : undefined;
-        const binding: GithubInstallationBinding = !row?.organizationId
-          ? { kind: "unbound" }
-          : organization
-            ? {
-                kind: "organization",
-                organization: {
-                  id: organization.id,
-                  name: organization.name,
-                  logo: organization.logo ?? null,
-                },
-              }
-            : { kind: "other-organization" };
-        return {
-          installationId: installation.installationId,
-          accountLogin: installation.accountLogin ?? row?.accountLogin ?? null,
-          accountType: installation.accountType ?? row?.accountType ?? null,
-          binding,
-          mode: row?.mode ?? null,
-        };
-      }),
-    };
+    const { result } = await listGithubInstallationRows({ userId });
+    return result;
   },
   { defaultErrorMessage: "Failed to load GitHub installations" },
 );

@@ -26,8 +26,6 @@
 --   SELECT user_id, count(*) FROM environment
 --    WHERE is_global = true GROUP BY user_id HAVING count(*) > 1;
 
-BEGIN;
-
 ALTER TABLE "organization"
   ADD COLUMN IF NOT EXISTS "is_personal" boolean DEFAULT false NOT NULL;
 
@@ -47,5 +45,3 @@ CREATE UNIQUE INDEX IF NOT EXISTS "environment_user_global_unique"
   ON "environment" USING btree ("user_id") WHERE "is_global" = true;
 
 DROP INDEX IF EXISTS "user_id_repo_full_name_branch_name_unique";
-
-COMMIT;

@@ -195,7 +195,19 @@ export function createEngineDb(
     return null;
   }
   const pool = new Pool({ connectionString, ...ENGINE_DB_POOL_OPTIONS });
+  // pg re-emits an idle client's socket error as a Pool "error" event; with
+  // no listener EventEmitter throws and takes the worker process down. The
+  // pool has already discarded the broken client, so log it and carry on
+  // (same contract as createDb in packages/shared/src/db/index.ts).
+  pool.on("error", onEngineDbIdleError);
   return createEngineDbFromPool(pool);
+}
+
+export function onEngineDbIdleError(error: unknown): void {
+  console.warn(
+    "[engine-db] idle connection error (connection discarded):",
+    error instanceof Error ? error.message : String(error),
+  );
 }
 
 /**

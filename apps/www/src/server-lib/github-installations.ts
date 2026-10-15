@@ -40,15 +40,16 @@ function describeAccount(installation: ListedInstallation): {
   };
 }
 
-/** The installations the token behind `octokit` can see. */
+/** The installations the token behind `octokit` can see (all pages). */
 export async function listInstallationsForOctokit(
   octokit: Octokit,
 ): Promise<VisibleGithubInstallation[]> {
-  const { data } =
-    await octokit.rest.apps.listInstallationsForAuthenticatedUser({
-      per_page: 100,
-    });
-  return data.installations.map((installation) => ({
+  // Every page: a user in more than 100 installations must still see them all.
+  const installations: ListedInstallation[] = await octokit.paginate(
+    octokit.rest.apps.listInstallationsForAuthenticatedUser,
+    { per_page: 100 },
+  );
+  return installations.map((installation) => ({
     installationId: String(installation.id),
     ...describeAccount(installation),
   }));
