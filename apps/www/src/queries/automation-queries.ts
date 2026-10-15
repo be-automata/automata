@@ -8,7 +8,7 @@ import { getServerActionQueryOptions } from "./server-action-helpers";
 export const automationQueryKeys = {
   list: () => ["automations", "list"],
   detail: (id: string) => ["automations", "detail", id],
-  hasReachedLimit: () => ["automations", "hasReachedLimit"],
+  automationLimit: () => ["automations", "automationLimit"],
 };
 
 export function automationQueryOptions() {
@@ -31,9 +31,9 @@ export function automationDetailQueryOptions(id: string) {
   });
 }
 
-export function hasReachedLimitOfAutomationsQueryOptions() {
+export function automationLimitQueryOptions() {
   return getServerActionQueryOptions({
-    queryKey: automationQueryKeys.hasReachedLimit(),
+    queryKey: automationQueryKeys.automationLimit(),
     queryFn: async () => {
       return await getAutomationLimit();
     },

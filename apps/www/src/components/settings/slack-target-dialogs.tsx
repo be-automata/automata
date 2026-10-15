@@ -1,9 +1,9 @@
 "use client";
 
-import { ArrowRight, Slack } from "lucide-react";
+import { ArrowRight, Slack, type LucideIcon } from "lucide-react";
 import { useState } from "react";
 
-import { OrgAvatar } from "@/components/org-avatar";
+import { OrgName } from "@/components/org-avatar";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -16,30 +16,39 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { parseSlackTeamId } from "@/lib/slack-team-id";
+import { cn } from "@/lib/utils";
 import type { MyOrganization } from "@/server-actions/organizations";
 
 /**
- * The org a Slack action will land in, named before the user leaves for
- * Slack. Install binds the workspace to this org for good, so it is a receipt
- * to read, not a generic OAuth hand-off.
+ * The org an action will land in, named before the user commits to it: the
+ * subject (a Slack workspace, a GitHub account) → the org. Install and bind
+ * route future work to this org, so it is a receipt to read, not a generic
+ * OAuth hand-off.
  */
-function TargetLine({
-  workspace,
+export function TargetLine({
+  icon: Icon,
+  subject,
+  subjectClassName,
   organization,
 }: {
-  workspace: string;
+  icon: LucideIcon;
+  subject: string;
+  subjectClassName?: string;
   organization: MyOrganization | null;
 }) {
   return (
     <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm">
-      <Slack className="size-4 shrink-0" />
-      <span className="truncate font-medium">{workspace}</span>
+      <Icon className="size-4 shrink-0" />
+      <span className={cn("truncate font-medium", subjectClassName)}>
+        {subject}
+      </span>
       <ArrowRight className="size-4 shrink-0 text-muted-foreground" />
       {organization ? (
-        <>
-          <OrgAvatar organization={organization} className="size-5" />
-          <span className="truncate font-medium">{organization.name}</span>
-        </>
+        <OrgName
+          organization={organization}
+          size="sm"
+          nameClassName="font-medium"
+        />
       ) : (
         <span className="text-muted-foreground">No organization</span>
       )}
@@ -74,7 +83,11 @@ export function SlackInstallDialog({
             organization, with its environment and credentials.
           </DialogDescription>
         </DialogHeader>
-        <TargetLine workspace={workspaceName} organization={organization} />
+        <TargetLine
+          icon={Slack}
+          subject={workspaceName}
+          organization={organization}
+        />
         <p className="text-xs text-muted-foreground">
           The workspace stays bound to this organization. To use it with a
           different one, switch organization first (top of the sidebar) and

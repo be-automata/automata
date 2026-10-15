@@ -8,7 +8,7 @@ import {
 import { Automations } from "@/components/automations/main";
 import {
   automationQueryOptions,
-  hasReachedLimitOfAutomationsQueryOptions,
+  automationLimitQueryOptions,
 } from "@/queries/automation-queries";
 
 export const metadata: Metadata = {
@@ -20,7 +20,7 @@ export default async function AutomationsPage() {
   const queryClient = new QueryClient();
   await Promise.all([
     queryClient.prefetchQuery(automationQueryOptions()),
-    queryClient.prefetchQuery(hasReachedLimitOfAutomationsQueryOptions()),
+    queryClient.prefetchQuery(automationLimitQueryOptions()),
   ]);
   return (
     <HydrationBoundary state={dehydrate(queryClient)}>

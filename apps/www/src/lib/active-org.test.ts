@@ -100,11 +100,11 @@ describe("withDefaultActiveOrganization (session.create.before hook body)", () =
     expect(result?.data.activeOrganizationId).toBe(team.id);
   });
 
-  it("treats a legacy personal- slug as personal when is_personal is unset", async () => {
+  it("treats a team org with a personal- slug as a team org (is_personal only)", async () => {
     const suffix = nanoid(8).toLowerCase();
-    await joinOrg(`personal-${suffix}`);
+    const team = await joinOrg(`personal-${suffix}`);
     await tick();
-    const team = await joinOrg(`team-${suffix}`);
+    await joinOrg(`team-${suffix}`);
     const result = await withDefaultActiveOrganization({
       db,
       session: { userId: user.id, activeOrganizationId: null },

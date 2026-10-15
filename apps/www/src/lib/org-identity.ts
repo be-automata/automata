@@ -52,18 +52,12 @@ export function orgInitials(name: string): string {
 }
 
 /**
- * Backfilled personal orgs carry a `personal-<userId>` slug
- * (packages/shared/scripts/backfill-organizations.ts). Kept as a fallback for
- * rows the is_personal backfill has not reached; prefer isPersonalOrganization.
+ * organization.is_personal — the only source. The legacy `personal-<userId>`
+ * slug convention is NOT consulted: every row is backfilled, and any user can
+ * create a team org whose slug starts with `personal-`.
  */
-export function isPersonalOrganizationSlug(slug: string | null): boolean {
-  return !!slug && slug.startsWith("personal-");
-}
-
-/** organization.is_personal, or the legacy `personal-` slug convention. */
 export function isPersonalOrganization(org: {
   isPersonal?: boolean | null;
-  slug: string | null;
 }): boolean {
-  return org.isPersonal === true || isPersonalOrganizationSlug(org.slug);
+  return org.isPersonal === true;
 }

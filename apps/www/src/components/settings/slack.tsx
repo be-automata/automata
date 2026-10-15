@@ -23,7 +23,7 @@ import {
   useActiveOrganization,
   useMyOrganizations,
 } from "@/queries/organization-queries";
-import { OrgAvatar } from "../org-avatar";
+import { OrgName } from "../org-avatar";
 import { SlackConnectDialog, SlackInstallDialog } from "./slack-target-dialogs";
 
 function SlackAccountItem({
@@ -80,10 +80,9 @@ function SlackAccountItem({
     myOrganizations?.organizations.find(
       (org) => org.id === boundOrganizationId,
     ) ?? null;
+  // A bound org id implies an installation, so this is connected.
   const boundElsewhere =
-    isConnected &&
-    !!boundOrganizationId &&
-    boundOrganizationId !== activeOrganization?.id;
+    !!boundOrganizationId && boundOrganizationId !== activeOrganization?.id;
 
   return (
     <div className="space-y-4 rounded-lg border p-4">
@@ -101,15 +100,11 @@ function SlackAccountItem({
             <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
               Mentions run in
               {boundOrganization ? (
-                <>
-                  <OrgAvatar
-                    organization={boundOrganization}
-                    className="size-4 text-[8px]"
-                  />
-                  <span className="font-medium text-foreground">
-                    {boundOrganization.name}
-                  </span>
-                </>
+                <OrgName
+                  organization={boundOrganization}
+                  size="xs"
+                  nameClassName="font-medium text-foreground"
+                />
               ) : boundOrganizationId ? (
                 <span className="font-medium text-foreground">
                   an organization you are not a member of

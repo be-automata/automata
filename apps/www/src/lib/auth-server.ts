@@ -11,6 +11,7 @@ import {
 import { getUserSettings } from "@terragon/shared/model/user";
 import { getUserFlags } from "@terragon/shared/model/user-flags";
 import { getMembership } from "@terragon/shared/model/organizations";
+import { ORG_ADMIN_ROLES } from "@/lib/org-role";
 import { cache } from "react";
 import { env } from "@terragon/env/apps-www";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
@@ -87,6 +88,67 @@ export async function getActiveOrganizationMembershipOrNull(
   }
   const membership = await getMembership({ db, organizationId, userId });
   return membership ? { organizationId, role: membership.role } : null;
+}
+
+/** The org-switch race a page-scoped org action refuses. */
+export const ACTIVE_ORGANIZATION_CHANGED_MESSAGE =
+  "Your active organization changed in another tab. Reload the page and try again.";
+
+export interface ExpectedActiveMembershipOptions {
+  /**
+   * The org the page showed when the user clicked: an id, null for "no org",
+   * or undefined when the page did not know yet — undefined skips the check.
+   */
+  expectedOrganizationId: string | null | undefined;
+  /**
+   * Refuse a member who is not an owner/admin of the active org:
+   * "Only organization owners and admins can <action>". Without an active
+   * org there is no role to check.
+   */
+  requireAdmin?: { action: string };
+  /**
+   * Refuse a session without an active org:
+   * "Select an organization before <action>". Omitted = null is returned.
+   */
+  requireOrganization?: { action: string };
+}
+
+/**
+ * The guard for an action the page scoped to an org: the session's active
+ * membership (getActiveOrganizationMembershipOrNull), refused when the session
+ * moved off the org the page showed (another tab switched) or the role is not
+ * enough. Throws UserFacingError; returns null only without an active org and
+ * without `requireOrganization`.
+ */
+export async function requireExpectedActiveMembership(
+  userId: string,
+  {
+    expectedOrganizationId,
+    requireAdmin,
+    requireOrganization,
+  }: ExpectedActiveMembershipOptions,
+): Promise<{ organizationId: string; role: string } | null> {
+  const membership = await getActiveOrganizationMembershipOrNull(userId);
+  if (
+    expectedOrganizationId !== undefined &&
+    (membership?.organizationId ?? null) !== expectedOrganizationId
+  ) {
+    throw new UserFacingError(ACTIVE_ORGANIZATION_CHANGED_MESSAGE);
+  }
+  if (!membership) {
+    if (requireOrganization) {
+      throw new UserFacingError(
+        `Select an organization before ${requireOrganization.action}`,
+      );
+    }
+    return null;
+  }
+  if (requireAdmin && !ORG_ADMIN_ROLES.has(membership.role)) {
+    throw new UserFacingError(
+      `Only organization owners and admins can ${requireAdmin.action}`,
+    );
+  }
+  return membership;
 }
 
 export async function getUserIdOrRedirect(): Promise<User["id"]> {

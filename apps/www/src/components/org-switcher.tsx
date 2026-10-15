@@ -27,10 +27,11 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import {
+  useActiveOrganization,
   useMyOrganizations,
   useSwitchActiveOrganization,
 } from "@/queries/organization-queries";
-import { OrgAvatar } from "./org-avatar";
+import { OrgAvatar, OrgName } from "./org-avatar";
 
 /** Past this many orgs the list gets a filter box. */
 const SEARCH_THRESHOLD = 5;
@@ -41,6 +42,7 @@ const SEARCH_THRESHOLD = 5;
  */
 export function OrgSwitcher() {
   const { data, isLoading } = useMyOrganizations();
+  const { activeOrganization: active } = useActiveOrganization();
   const switchOrganization = useSwitchActiveOrganization();
   const { isMobile, setOpenMobile } = useSidebar();
   const [open, setOpen] = useState(false);
@@ -51,8 +53,6 @@ export function OrgSwitcher() {
     // No membership at all: nothing to switch, and nothing org-scoped works.
     return null;
   }
-  const active =
-    organizations.find((org) => org.id === data?.activeOrganizationId) ?? null;
   const activeSlug = active?.slug ?? null;
 
   const copyOrgLink = async (slug: string) => {
@@ -135,10 +135,11 @@ export function OrgSwitcher() {
                         }}
                         className="gap-2"
                       >
-                        <OrgAvatar organization={org} className="size-5" />
-                        <span className="min-w-0 flex-1 truncate">
-                          {org.name}
-                        </span>
+                        <OrgName
+                          organization={org}
+                          size="sm"
+                          nameClassName="flex-1"
+                        />
                         {org.isPersonal && (
                           <span className="text-[11px] text-muted-foreground">
                             Personal

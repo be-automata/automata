@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ORG_HUES,
-  isPersonalOrganizationSlug,
+  isPersonalOrganization,
   orgHue,
   orgHueIndex,
   orgInitials,
@@ -33,9 +33,15 @@ describe("org identity", () => {
     expect(orgInitials("x")).toBe("X");
   });
 
-  it("recognizes backfilled personal orgs by slug", () => {
-    expect(isPersonalOrganizationSlug("personal-abc123")).toBe(true);
-    expect(isPersonalOrganizationSlug("acme")).toBe(false);
-    expect(isPersonalOrganizationSlug(null)).toBe(false);
+  it("reads personal-ness from is_personal only", () => {
+    expect(isPersonalOrganization({ isPersonal: true })).toBe(true);
+    expect(isPersonalOrganization({ isPersonal: false })).toBe(false);
+    expect(isPersonalOrganization({ isPersonal: null })).toBe(false);
+    expect(isPersonalOrganization({})).toBe(false);
+  });
+
+  it("does not treat a team org with a personal- slug as personal", () => {
+    const teamOrg = { isPersonal: false, slug: "personal-abc123" };
+    expect(isPersonalOrganization(teamOrg)).toBe(false);
   });
 });

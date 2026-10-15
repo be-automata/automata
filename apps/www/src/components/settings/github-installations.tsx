@@ -3,7 +3,7 @@
 import { Github } from "lucide-react";
 import { useState } from "react";
 
-import { OrgAvatar } from "@/components/org-avatar";
+import { OrgName } from "@/components/org-avatar";
 import { Button } from "@/components/ui/button";
 import { getGHAppInstallUrl } from "@/lib/gh-app-url";
 import {
@@ -19,13 +19,11 @@ function BindingLabel({ row }: { row: GithubInstallationRow }) {
   if (row.binding.kind === "organization") {
     return (
       <span className="flex min-w-0 items-center gap-1.5">
-        <OrgAvatar
+        <OrgName
           organization={row.binding.organization}
-          className="size-4 text-[8px]"
+          size="xs"
+          nameClassName="font-medium text-foreground"
         />
-        <span className="truncate font-medium text-foreground">
-          {row.binding.organization.name}
-        </span>
       </span>
     );
   }
