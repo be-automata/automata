@@ -1,0 +1,108 @@
+name: Synthetic
+
+# Read-only probes against production every 15 minutes (deploy/smoke.ts).
+# A failing run opens (or comments on) one issue labelled synthetic-failure;
+# the first passing run after that comments "recovered" and closes it.
+#
+# Setup:
+#   vars.SMOKE_BASE_URL          required, e.g. https://<www host>
+#   secrets.SMOKE_SESSION_COOKIE optional; enables the signed-in probes. The
+#   vars.SMOKE_USER_ID           whole Cookie header of a DEDICATED synthetic
+#   vars.SMOKE_ORG_SLUG          user (GET /o/<slug> switches its active org).
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - deploy/smoke.ts
+      - deploy/smoke.test.ts
+      - .github/workflows/synthetic.yml
+
+permissions:
+  contents: read
+
+jobs:
+  # Unit tests for the probe module, on PRs that touch it. Never hits prod.
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test deploy/smoke.test.ts
+
+  smoke:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: synthetic
+      cancel-in-progress: false
+    env:
+      SMOKE_BASE_URL: ${{ vars.SMOKE_BASE_URL }}
+      SMOKE_SESSION_COOKIE: ${{ secrets.SMOKE_SESSION_COOKIE }}
+      SMOKE_USER_ID: ${{ vars.SMOKE_USER_ID }}
+      SMOKE_ORG_SLUG: ${{ vars.SMOKE_ORG_SLUG }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: deploy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Run production smoke
+        run: |
+          if [ -z "$SMOKE_BASE_URL" ]; then
+            echo "::error::repository variable SMOKE_BASE_URL is not set"
+            exit 1
+          fi
+          set +e
+          node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON deploy/smoke.ts \
+            --base-url "$SMOKE_BASE_URL" --json > smoke.json
+          code=$?
+          cat smoke.json
+          exit $code
+
+      - name: Open or update the failure issue
+        if: failure()
+        run: |
+          gh label create synthetic-failure --force --color B60205 \
+            --description "Production synthetic (deploy/smoke.ts) is failing"
+          {
+            echo "Production synthetic failed: $RUN_URL"
+            echo
+            jq -r '.results[] | select(.status == "fail")
+              | "- **\(.id)** \(.name): `\(.detail)`"' smoke.json 2>/dev/null \
+              || echo "No probe results; see the run log."
+          } > body.md
+          number=$(gh issue list --label synthetic-failure --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file body.md
+          else
+            gh issue create --title "Production synthetic is failing" \
+              --label synthetic-failure --body-file body.md
+          fi
+
+      - name: Close the failure issue on recovery
+        if: success()
+        run: |
+          number=$(gh issue list --label synthetic-failure --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "Recovered: $RUN_URL"
+            gh issue close "$number"
+          fi
