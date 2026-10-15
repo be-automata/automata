@@ -37,6 +37,7 @@ test.describe("Slack install-target dialog", () => {
         isServerAction(request) &&
         (request.postData() ?? "").includes("expectedOrganizationId"),
     );
+    await dialog.getByRole("checkbox").check();
     await dialog.getByRole("button", { name: "Continue to Slack" }).click();
     const body = (await actionRequest).postData() ?? "";
     expect(body).toContain(`"expectedOrganizationId":"${beta.id}"`);
@@ -72,6 +73,7 @@ test.describe("Slack install-target dialog", () => {
     await expect(otherTab).toHaveURL(/\/dashboard$/);
     await otherTab.close();
 
+    await dialog.getByRole("checkbox").check();
     await dialog.getByRole("button", { name: "Continue to Slack" }).click();
     await expect(
       page.getByText(
