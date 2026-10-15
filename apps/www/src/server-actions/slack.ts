@@ -16,6 +16,7 @@ import {
 import { SlackSettingsInsert } from "@terragon/shared/db/types";
 import { resolveSlackAppConfig } from "@/server-lib/slack-config";
 import { encodeSlackOAuthState } from "@/lib/slack-oauth-state";
+import { isSlackTeamId } from "@/lib/slack-team-id";
 import {
   SLACK_BOT_SCOPES,
   SLACK_OPENID_SCOPES,
@@ -29,9 +30,23 @@ import {
  */
 async function getSessionSlackApp(
   userId: string,
-  { requireAdmin }: { requireAdmin: boolean },
+  {
+    requireAdmin,
+    expectedOrganizationId,
+  }: { requireAdmin: boolean; expectedOrganizationId?: string | null },
 ): Promise<{ organizationId: string | null; clientId: string }> {
   const membership = await getActiveOrganizationMembershipOrNull(userId);
+  // The page named an org before the user clicked; the session may have
+  // moved since (another tab switched org). Never bind to an org the user
+  // was not shown.
+  if (
+    expectedOrganizationId !== undefined &&
+    (membership?.organizationId ?? null) !== expectedOrganizationId
+  ) {
+    throw new UserFacingError(
+      "Your active organization changed in another tab. Reload the page and try again.",
+    );
+  }
   if (requireAdmin && membership && !ORG_ADMIN_ROLES.has(membership.role)) {
     throw new UserFacingError(
       "Only organization owners and admins can install the Slack app",
@@ -57,11 +72,40 @@ function encryptSlackOAuthState(state: {
   return encodeSlackOAuthState(state, env.ENCRYPTION_MASTER_KEY);
 }
 
+/**
+ * Slack's `team` parameter picks the workspace the user signs in to. Without
+ * it Slack uses the browser's default workspace, and there is no picker on
+ * the "Sign in with Slack" screen. It is a hint, not a binding: the callback
+ * still trusts only the team Slack returns.
+ */
+function setSlackTeamHint(url: URL, teamId: unknown): void {
+  if (teamId === undefined || teamId === null) {
+    return;
+  }
+  const trimmed = typeof teamId === "string" ? teamId.trim() : "";
+  if (typeof teamId === "string" && !trimmed) {
+    return;
+  }
+  if (!isSlackTeamId(trimmed)) {
+    throw new UserFacingError(
+      "That is not a Slack workspace ID. It starts with T, e.g. T01ABCDEF.",
+    );
+  }
+  url.searchParams.set("team", trimmed);
+}
+
 // Used to install the Slack app
 export const getSlackAppInstallUrl = userOnlyAction(
-  async function getSlackAppInstallUrl(userId: string): Promise<string> {
+  async function getSlackAppInstallUrl(
+    userId: string,
+    {
+      teamId,
+      expectedOrganizationId,
+    }: { teamId?: string; expectedOrganizationId?: string | null } = {},
+  ): Promise<string> {
     const { organizationId, clientId } = await getSessionSlackApp(userId, {
       requireAdmin: true,
+      expectedOrganizationId,
     });
     const redirectUri = `${nonLocalhostPublicAppUrl()}/api/auth/slack/callback`;
     const scopes = SLACK_BOT_SCOPES.join(",");
@@ -69,6 +113,7 @@ export const getSlackAppInstallUrl = userOnlyAction(
     slackAuthUrl.searchParams.set("client_id", clientId);
     slackAuthUrl.searchParams.set("scope", scopes);
     slackAuthUrl.searchParams.set("redirect_uri", redirectUri);
+    setSlackTeamHint(slackAuthUrl, teamId);
     slackAuthUrl.searchParams.set(
       "state",
       encryptSlackOAuthState({ userId, organizationId, type: "app_install" }),
@@ -80,9 +125,16 @@ export const getSlackAppInstallUrl = userOnlyAction(
 
 // Used to connect to a users
 export const getSlackOAuthUrl = userOnlyAction(
-  async function getSlackOAuthUrl(userId: string): Promise<string> {
+  async function getSlackOAuthUrl(
+    userId: string,
+    {
+      teamId,
+      expectedOrganizationId,
+    }: { teamId?: string; expectedOrganizationId?: string | null } = {},
+  ): Promise<string> {
     const { organizationId, clientId } = await getSessionSlackApp(userId, {
       requireAdmin: false,
+      expectedOrganizationId,
     });
     const redirectUri = `${nonLocalhostPublicAppUrl()}/api/auth/slack/callback`;
     const slackAuthUrl = new URL("https://slack.com/openid/connect/authorize");
@@ -90,6 +142,7 @@ export const getSlackOAuthUrl = userOnlyAction(
     slackAuthUrl.searchParams.set("scope", SLACK_OPENID_SCOPES.join(","));
     slackAuthUrl.searchParams.set("redirect_uri", redirectUri);
     slackAuthUrl.searchParams.set("response_type", "code");
+    setSlackTeamHint(slackAuthUrl, teamId);
     slackAuthUrl.searchParams.set(
       "state",
       encryptSlackOAuthState({ userId, organizationId, type: "openid" }),

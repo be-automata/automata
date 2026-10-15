@@ -36,7 +36,8 @@ export default async function OrganizationEnvironmentPage() {
     return (
       <div className="flex flex-col justify-start h-full w-full max-w-4xl">
         <p>
-          Select an organization to manage its shared environment variables.
+          Pick an organization at the top of the sidebar to manage its shared
+          environment variables.
         </p>
       </div>
     );
