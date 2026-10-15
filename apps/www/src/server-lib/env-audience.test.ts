@@ -6,10 +6,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   CONTROL_PLANE_ONLY_ENV_KEYS,
+  describeEffectiveEnvironment,
   mergeEnvironmentLayers,
   ORGANIZATION_CONTROL_PLANE_ONLY_ENV_KEYS,
   stripControlPlaneOnlyEnv,
   withAgentTrackerTokenFallback,
+  type EnvSource,
 } from "./env-audience";
 
 const vars = (record: Record<string, string>) =>
@@ -109,6 +111,108 @@ describe("mergeEnvironmentLayers", () => {
       C: { value: "repo", source: "repository" },
     });
     expect(global).toEqual(vars({ A: "global", B: "global" }));
+  });
+});
+
+describe("describeEffectiveEnvironment", () => {
+  const agent = (
+    key: string,
+    winningSource: EnvSource,
+    shadowedSources: EnvSource[] = [],
+    serverOnlySources: EnvSource[] = [],
+  ) => ({
+    key,
+    audience: "agent",
+    winningSource,
+    shadowedSources,
+    serverOnlySources,
+  });
+
+  it("names the winning layer and the layers it overrides", () => {
+    expect(
+      describeEffectiveEnvironment([
+        { source: "global", keys: ["A", "B", "C"] },
+        { source: "organization", keys: ["B", "C"] },
+        { source: "repository", keys: ["C", "D"] },
+      ]),
+    ).toEqual([
+      agent("A", "global"),
+      agent("B", "organization", ["global"]),
+      agent("C", "repository", ["global", "organization"]),
+      agent("D", "repository"),
+    ]);
+  });
+
+  it("agrees with mergeEnvironmentLayers on every agent key's source", () => {
+    const layers = [
+      { source: "global" as const, keys: ["X", "Y"] },
+      { source: "organization" as const, keys: ["Y", "Z"] },
+      { source: "repository" as const, keys: ["Z"] },
+    ];
+    const merged = mergeEnvironmentLayers(
+      layers.map(({ source, keys }) => ({
+        source,
+        variables: keys.map((key) => ({ key, value: "" })),
+      })),
+    );
+    const entries = describeEffectiveEnvironment(layers);
+    expect(entries.map((entry) => entry.key)).toEqual(["X", "Y", "Z"]);
+    for (const entry of entries) {
+      expect(entry.winningSource).toBe(merged[entry.key]?.source);
+    }
+  });
+
+  it("reports the tracker token as server only, from every layer, last", () => {
+    expect(
+      describeEffectiveEnvironment([
+        { source: "global", keys: ["YOUTRACK_TOKEN"] },
+        { source: "organization", keys: ["YOUTRACK_TOKEN", "API_URL"] },
+        { source: "repository", keys: ["YOUTRACK_TOKEN"] },
+      ]),
+    ).toEqual([
+      agent("API_URL", "organization"),
+      {
+        key: "YOUTRACK_TOKEN",
+        audience: "server",
+        winningSource: "repository",
+        shadowedSources: ["global", "organization"],
+        serverOnlySources: ["global", "organization", "repository"],
+      },
+    ]);
+  });
+
+  it("strips the org's Slack app keys from the org layer only", () => {
+    expect(
+      describeEffectiveEnvironment([
+        { source: "global", keys: ["SLACK_CLIENT_ID"] },
+        {
+          source: "organization",
+          keys: ["SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET"],
+        },
+        { source: "repository", keys: ["SLACK_SIGNING_SECRET"] },
+      ]),
+    ).toEqual([
+      // The org's value never reaches the agent, so it cannot override the
+      // user's own global value: the agent still gets the global one.
+      agent("SLACK_CLIENT_ID", "global", [], ["organization"]),
+      agent("SLACK_SIGNING_SECRET", "repository"),
+      {
+        key: "SLACK_CLIENT_SECRET",
+        audience: "server",
+        winningSource: "organization",
+        shadowedSources: [],
+        serverOnlySources: ["organization"],
+      },
+    ]);
+  });
+
+  it("returns nothing for no layers and ignores a key repeated in a layer", () => {
+    expect(describeEffectiveEnvironment([])).toEqual([]);
+    expect(
+      describeEffectiveEnvironment([
+        { source: "repository", keys: ["A", "A"] },
+      ]),
+    ).toEqual([agent("A", "repository")]);
   });
 });
 

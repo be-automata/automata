@@ -143,6 +143,106 @@ export function mergeEnvironmentLayers(
   return merged;
 }
 
+/** Who reads a key's value: the agent's sandbox, or only the control plane. */
+export type EnvAudience = "agent" | "server";
+
+/** One layer's key names — the effective-configuration view needs no values. */
+export interface EnvironmentKeyLayer {
+  source: EnvSource;
+  keys: readonly string[];
+}
+
+export interface EffectiveEnvironmentEntry {
+  key: string;
+  audience: EnvAudience;
+  /** The layer whose value wins for `audience`. */
+  winningSource: EnvSource;
+  /** Other layers that define the key and lose to `winningSource`, in layer order. */
+  shadowedSources: EnvSource[];
+  /** Layers whose value for this key never leaves the control plane. */
+  serverOnlySources: EnvSource[];
+}
+
+function isServerOnlyInLayer(source: EnvSource, key: string): boolean {
+  return (
+    CONTROL_PLANE_ONLY_ENV_KEYS.has(key) ||
+    (source === "organization" &&
+      ORGANIZATION_CONTROL_PLANE_ONLY_ENV_KEYS.has(key))
+  );
+}
+
+function keysAsVariables(keys: Iterable<string>): EnvironmentVariable[] {
+  return Array.from(keys, (key) => ({ key, value: "" }));
+}
+
+/**
+ * Per-key provenance of what an agent receives, for display: the same
+ * overlay `mergeEnvironmentLayers` performs for the sandbox, applied after
+ * the same strips (control-plane-only keys from every layer, the org's own
+ * Slack app keys from the org layer). A key no agent receives is reported
+ * with audience "server", its winner being the last layer that defines it.
+ * Agent keys come first, then server-only ones, each sorted by key. Pure.
+ */
+export function describeEffectiveEnvironment(
+  layers: readonly EnvironmentKeyLayer[],
+): EffectiveEnvironmentEntry[] {
+  const uniqueLayers = layers.map(({ source, keys }) => ({
+    source,
+    keys: new Set(keys),
+  }));
+  const agentMerged = mergeEnvironmentLayers(
+    uniqueLayers.map(({ source, keys }) => ({
+      source,
+      variables: keysAsVariables(
+        Array.from(keys).filter((key) => !isServerOnlyInLayer(source, key)),
+      ),
+    })),
+  );
+  const allMerged = mergeEnvironmentLayers(
+    uniqueLayers.map(({ source, keys }) => ({
+      source,
+      variables: keysAsVariables(keys),
+    })),
+  );
+  const entries = Object.entries(allMerged).map(
+    ([key, { source: lastSource }]): EffectiveEnvironmentEntry => {
+      const definers = uniqueLayers
+        .filter((layer) => layer.keys.has(key))
+        .map((layer) => layer.source);
+      const serverOnlySources = definers.filter((source) =>
+        isServerOnlyInLayer(source, key),
+      );
+      const agentWinner = agentMerged[key];
+      if (agentWinner) {
+        return {
+          key,
+          audience: "agent",
+          winningSource: agentWinner.source,
+          shadowedSources: definers.filter(
+            (source) =>
+              source !== agentWinner.source &&
+              !isServerOnlyInLayer(source, key),
+          ),
+          serverOnlySources,
+        };
+      }
+      return {
+        key,
+        audience: "server",
+        winningSource: lastSource,
+        shadowedSources: definers.filter((source) => source !== lastSource),
+        serverOnlySources,
+      };
+    },
+  );
+  const byKey = (a: EffectiveEnvironmentEntry, b: EffectiveEnvironmentEntry) =>
+    a.key.localeCompare(b.key);
+  return [
+    ...entries.filter((entry) => entry.audience === "agent").sort(byKey),
+    ...entries.filter((entry) => entry.audience === "server").sort(byKey),
+  ];
+}
+
 function mergedValues(
   merged: Record<string, { value: string; source: EnvSource }>,
 ): Record<string, string> {

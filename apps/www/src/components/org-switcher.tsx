@@ -1,7 +1,9 @@
 "use client";
 
-import { Building2, Check, ChevronsUpDown } from "lucide-react";
+import { Building2, Check, ChevronsUpDown, Link2 } from "lucide-react";
+import { usePathname } from "next/navigation";
 import { useState } from "react";
+import { toast } from "sonner";
 
 import {
   Command,
@@ -10,7 +12,9 @@ import {
   CommandInput,
   CommandItem,
   CommandList,
+  CommandSeparator,
 } from "@/components/ui/command";
+import { buildOrgLink } from "@/lib/org-link";
 import {
   Popover,
   PopoverContent,
@@ -40,6 +44,7 @@ export function OrgSwitcher() {
   const switchOrganization = useSwitchActiveOrganization();
   const { isMobile, setOpenMobile } = useSidebar();
   const [open, setOpen] = useState(false);
+  const pathname = usePathname();
 
   const organizations = data?.organizations ?? [];
   if (!isLoading && organizations.length === 0) {
@@ -48,6 +53,23 @@ export function OrgSwitcher() {
   }
   const active =
     organizations.find((org) => org.id === data?.activeOrganizationId) ?? null;
+  const activeSlug = active?.slug ?? null;
+
+  const copyOrgLink = async (slug: string) => {
+    setOpen(false);
+    try {
+      const url = buildOrgLink({
+        origin: window.location.origin,
+        slug,
+        pathname: pathname ?? "/",
+      });
+      await navigator.clipboard.writeText(url);
+      toast.success("Link to this organization copied");
+    } catch (err) {
+      console.error("Failed to copy organization link", err);
+      toast.error("Failed to copy link");
+    }
+  };
 
   return (
     <SidebarMenu>
@@ -132,6 +154,23 @@ export function OrgSwitcher() {
                     );
                   })}
                 </CommandGroup>
+                {activeSlug && (
+                  <>
+                    <CommandSeparator />
+                    <CommandGroup>
+                      <CommandItem
+                        value="copy link to this organization"
+                        onSelect={() => {
+                          void copyOrgLink(activeSlug);
+                        }}
+                        className="gap-2"
+                      >
+                        <Link2 className="size-4 text-muted-foreground" />
+                        <span>Copy link to this org</span>
+                      </CommandItem>
+                    </CommandGroup>
+                  </>
+                )}
               </CommandList>
             </Command>
             <p className="border-t px-3 py-2 text-[11px] text-muted-foreground">

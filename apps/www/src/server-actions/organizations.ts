@@ -1,16 +1,12 @@
 "use server";
 
-import { headers } from "next/headers";
-import {
-  getMembership,
-  getOrganizationsForUser,
-} from "@terragon/shared/model/organizations";
+import { getOrganizationsForUser } from "@terragon/shared/model/organizations";
 
-import { auth } from "@/lib/auth";
 import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { db } from "@/lib/db";
 import { isPersonalOrganization } from "@/lib/org-identity";
 import { UserFacingError } from "@/lib/server-actions";
+import { activateOrganizationForUser } from "@/server-lib/active-organization";
 
 export interface MyOrganization {
   id: string;
@@ -65,14 +61,13 @@ export const switchActiveOrganization = userOnlyAction(
     userId: string,
     { organizationId }: { organizationId: string },
   ): Promise<void> {
-    const membership = await getMembership({ db, organizationId, userId });
-    if (!membership) {
+    const activated = await activateOrganizationForUser({
+      userId,
+      organizationId,
+    });
+    if (!activated) {
       throw new UserFacingError("You are not a member of that organization");
     }
-    await auth.api.setActiveOrganization({
-      body: { organizationId },
-      headers: await headers(),
-    });
   },
   { defaultErrorMessage: "Failed to switch organization" },
 );

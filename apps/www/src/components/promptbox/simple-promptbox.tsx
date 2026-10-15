@@ -55,6 +55,7 @@ export function SimplePromptBox({
   hideAddContextButton = false,
   hideFileAttachmentButton = false,
   hideVoiceInput = false,
+  submitCue,
 }: {
   forcedAgent: AIAgent | null;
   forcedAgentVersion: number | null;
@@ -87,6 +88,8 @@ export function SimplePromptBox({
   hideAddContextButton?: boolean;
   hideFileAttachmentButton?: boolean;
   hideVoiceInput?: boolean;
+  /** A one-line note shown right above the submit button row. */
+  submitCue?: React.ReactNode;
 }) {
   const showPlanModeSelector = useMemo(() => {
     if (isMultiAgentMode) {
@@ -140,6 +143,11 @@ export function SimplePromptBox({
         <EditorContent editor={editor} className={className} />
       </ScrollArea>
       <AttachedFiles attachedFiles={attachedFiles} onRemoveFile={removeFile} />
+      {submitCue && (
+        <div className="flex min-w-0 justify-end px-4 pb-1 empty:hidden">
+          {submitCue}
+        </div>
+      )}
       <div className="flex flex-row gap-4 items-center px-4">
         <div className="flex flex-row gap-1 items-center flex-1 min-w-0">
           {!hideModelSelector && (
