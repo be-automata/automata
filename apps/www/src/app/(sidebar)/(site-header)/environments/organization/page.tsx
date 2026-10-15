@@ -7,13 +7,13 @@ import {
   getOrganizationEnvironmentKeys,
   listOrganizationEnvironmentEvents,
 } from "@terragon/shared/model/organization-environment";
-import {
-  getMembership,
-  getOrganizationById,
-} from "@terragon/shared/model/organizations";
+import { getOrganizationById } from "@terragon/shared/model/organizations";
 
 import { OrganizationEnvironmentUI } from "@/components/environments/main";
-import { getTenantContextOrNull, getUserIdOrRedirect } from "@/lib/auth-server";
+import {
+  getActiveOrganizationMembershipOrNull,
+  getUserIdOrRedirect,
+} from "@/lib/auth-server";
 import { db } from "@/lib/db";
 import { ORG_ADMIN_ROLES } from "@/lib/org-role";
 import { getControlPlaneOrganizationEnvironmentVariables } from "@/server-lib/env-audience";
@@ -30,9 +30,9 @@ export const metadata: Metadata = {
  */
 export default async function OrganizationEnvironmentPage() {
   const userId = await getUserIdOrRedirect();
-  const tenant = await getTenantContextOrNull();
-  const organizationId = tenant?.organizationId ?? null;
-  if (!organizationId) {
+  // Null too once the user is no longer a member of the session's org.
+  const membership = await getActiveOrganizationMembershipOrNull(userId);
+  if (!membership) {
     return (
       <div className="flex flex-col justify-start h-full w-full max-w-4xl">
         <p>
@@ -42,11 +42,9 @@ export default async function OrganizationEnvironmentPage() {
       </div>
     );
   }
-  const [membership, organization] = await Promise.all([
-    getMembership({ db, organizationId, userId }),
-    getOrganizationById({ db, organizationId }),
-  ]);
-  if (!membership || !organization) {
+  const { organizationId } = membership;
+  const organization = await getOrganizationById({ db, organizationId });
+  if (!organization) {
     return notFound();
   }
   if (!ORG_ADMIN_ROLES.has(membership.role)) {

@@ -34,7 +34,7 @@ export async function getGithubInstallationsByInstallationIds({
   installationIds,
 }: {
   db: DB;
-  installationIds: Array<string | number>;
+  installationIds: string[];
 }): Promise<GithubInstallation[]> {
   if (installationIds.length === 0) {
     return [];
@@ -42,12 +42,7 @@ export async function getGithubInstallationsByInstallationIds({
   return await db
     .select()
     .from(githubInstallation)
-    .where(
-      inArray(
-        githubInstallation.installationId,
-        installationIds.map((id) => String(id)),
-      ),
-    );
+    .where(inArray(githubInstallation.installationId, installationIds));
 }
 
 /** Every installation bound to an org. */

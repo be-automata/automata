@@ -1,7 +1,7 @@
 import type { Endpoints } from "@octokit/types";
 
 import { db } from "@/lib/db";
-import { getOctokitForUser } from "@/lib/github";
+import { getOctokitForUser, parseRepoFullName } from "@/lib/github";
 import {
   getCachedInstallationRepos,
   getCachedInstallations,
@@ -114,6 +114,55 @@ async function selectInstallations({
       .map((row) => row.installationId),
   );
   return visible.filter((i) => !boundElsewhere.has(i.installationId));
+}
+
+/**
+ * Whether a task on `repoFullName` may run in `organizationId`: the same
+ * scope the repo picker shows (resolveRepoScope), enforced on the server so a
+ * hand-crafted request cannot create a task in an org on a repo whose
+ * account is not bound to it. Read from the binding rows only — no GitHub
+ * call on the task-creation path: the repo owner is matched against each
+ * bound installation's `accountLogin`.
+ *
+ * The caller must already have checked that the user is a member of
+ * `organizationId`. True when the org has nothing bound yet ("unassigned"),
+ * and — logged — when a bound row has no `accountLogin` to compare against
+ * (a binding from before the column was stamped), since the owner may be
+ * that installation's account.
+ */
+export async function isRepoInOrganizationScope({
+  organizationId,
+  repoFullName,
+}: {
+  organizationId: string;
+  repoFullName: string;
+}): Promise<boolean> {
+  const bound = await getGithubInstallationsForOrganization({
+    db,
+    organizationId,
+  });
+  if (bound.length === 0) {
+    return true;
+  }
+  const [owner] = parseRepoFullName(repoFullName);
+  // GitHub logins are case-insensitive.
+  const ownerLogin = owner.toLowerCase();
+  if (bound.some((row) => row.accountLogin?.toLowerCase() === ownerLogin)) {
+    return true;
+  }
+  const unlabelled = bound.filter((row) => !row.accountLogin);
+  if (unlabelled.length > 0) {
+    console.warn(
+      "Repo scope check allowed a repo it could not map: a bound installation has no accountLogin",
+      {
+        organizationId,
+        repoFullName,
+        installationIds: unlabelled.map((row) => row.installationId),
+      },
+    );
+    return true;
+  }
+  return false;
 }
 
 function byMostRecentPush(a: UserRepo, b: UserRepo): number {

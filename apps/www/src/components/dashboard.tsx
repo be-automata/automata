@@ -46,10 +46,12 @@ export function Dashboard({
       disableGitCheckpointing,
       skipSetup,
       createNewBranch,
+      expectedOrganizationId,
     }) => {
       try {
         unwrapResult(
           await newThread({
+            expectedOrganizationId,
             message: userMessage,
             githubRepoFullName: repoFullName,
             branchName,

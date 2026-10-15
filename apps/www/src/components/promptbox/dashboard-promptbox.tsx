@@ -27,6 +27,7 @@ import {
   usePromptBoxToolBeltOptions,
 } from "./prompt-box-tool-belt";
 import { useAccessInfo } from "@/queries/subscription";
+import { useActiveOrganization } from "@/queries/organization-queries";
 import { modelToAgent } from "@terragon/agent/utils";
 
 export type DashboardPromptBoxHandleSubmit = (
@@ -34,6 +35,8 @@ export type DashboardPromptBoxHandleSubmit = (
     disableGitCheckpointing: boolean;
     skipSetup: boolean;
     createNewBranch: boolean;
+    /** The org the page showed; the server refuses the task if it moved. */
+    expectedOrganizationId: string | null | undefined;
   },
 ) => Promise<void>;
 
@@ -89,6 +92,7 @@ export function DashboardPromptBox(props: DashboardPromptBoxProps) {
     shouldUseCookieValues: true,
   });
   const { isActive } = useAccessInfo();
+  const { expectedOrganizationId } = useActiveOrganization();
 
   const placeholderText = useMemo(() => {
     if (props.placeholder != null) return props.placeholder;
@@ -117,9 +121,16 @@ export function DashboardPromptBox(props: DashboardPromptBoxProps) {
         disableGitCheckpointing,
         skipSetup,
         createNewBranch,
+        expectedOrganizationId,
       });
     },
-    [props, disableGitCheckpointing, skipSetup, createNewBranch],
+    [
+      props,
+      disableGitCheckpointing,
+      skipSetup,
+      createNewBranch,
+      expectedOrganizationId,
+    ],
   );
 
   const {

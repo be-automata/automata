@@ -1,6 +1,9 @@
 "use server";
 
-import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
+import {
+  requireExpectedActiveMembership,
+  userOnlyAction,
+} from "@/lib/auth-server";
 import { SelectedAIModels } from "@terragon/agent/types";
 import { DBUserMessage, ThreadSource } from "@terragon/shared";
 import { createNewThread } from "../server-lib/new-thread-shared";
@@ -8,6 +11,7 @@ import { getAccessInfoForUser } from "@/lib/subscription";
 import { SUBSCRIPTION_MESSAGES } from "@/lib/subscription-msgs";
 import { newThreadsMultiModel } from "@/server-lib/new-threads-multi-model";
 import { UserFacingError } from "@/lib/server-actions";
+import { isRepoInOrganizationScope } from "@/server-lib/user-repos";
 
 export type NewThreadArgs = {
   message: DBUserMessage;
@@ -22,6 +26,11 @@ export type NewThreadArgs = {
   scheduleAt?: number | null;
   selectedModels?: SelectedAIModels;
   sourceType?: ThreadSource;
+  /**
+   * The org the page showed (useActiveOrganization's expectedOrganizationId):
+   * an id, null for "no org", or undefined to skip the check.
+   */
+  expectedOrganizationId?: string | null;
 };
 
 export const newThread = userOnlyAction(
@@ -40,19 +49,34 @@ export const newThread = userOnlyAction(
       createNewBranch = true,
       scheduleAt,
       sourceType = "www",
+      expectedOrganizationId,
     }: NewThreadArgs,
   ): Promise<{ threadId: string; threadChatId: string }> {
     console.log("newThread", { userId, githubRepoFullName });
+    // The creator's active org is stamped onto the thread (WI-5). Nullable
+    // during the backfill phase — null = thread created without an org
+    // (today's behavior). Refused when another tab switched org after the
+    // page rendered, so a task never lands in an org the user was not shown.
+    const [{ tier }, membership] = await Promise.all([
+      getAccessInfoForUser(userId),
+      requireExpectedActiveMembership(userId, { expectedOrganizationId }),
+    ]);
     // Gate task creation behind active access
-    const { tier } = await getAccessInfoForUser(userId);
     if (tier === "none") {
       throw new UserFacingError(SUBSCRIPTION_MESSAGES.CREATE_TASK);
     }
-
-    // Stamp the creator's active org onto the thread (WI-5). Nullable during the
-    // backfill phase — null = thread created without an org (today's behavior).
-    const tenant = await getTenantContextOrNull();
-    const organizationId = tenant?.organizationId ?? null;
+    const organizationId = membership?.organizationId ?? null;
+    if (
+      organizationId &&
+      !(await isRepoInOrganizationScope({
+        organizationId,
+        repoFullName: githubRepoFullName,
+      }))
+    ) {
+      throw new UserFacingError(
+        `${githubRepoFullName} is not in this organization's repositories. Bind its GitHub installation to the organization in Settings → Integrations, or switch organization.`,
+      );
+    }
 
     const baseBranchName = createNewBranch ? branchName : null;
     const headBranchName = createNewBranch ? null : branchName;
