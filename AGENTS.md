@@ -132,6 +132,15 @@ DATABASE_URL=... pnpm exec tsx deploy/migrate.ts --mark-applied <id>...  # recor
 - **Direct connection only.** A Neon `-pooler.` host is refused: a pooler cannot hold the
   session advisory lock that serializes concurrent runners.
 - `applied_by` is `${GITHUB_ACTOR:-$USER}@${GITHUB_SHA:-git HEAD}`.
+- **Schema drift is a CI gate.** The `schema-drift` job builds one Postgres 18 database from
+  the migration files and one from `schema.ts` (`drizzle-kit push`) and compares their
+  `pg_catalog` (`deploy/schema-drift.ts --a <url> --b <url>`). Changing `schema.ts` without a
+  migration fails it. A known, accepted difference goes in
+  `deploy/migrations/drift-allowlist.json` (`{kind, table, name, reason}`); an entry that no
+  longer matches anything also fails, so delete it once the drift is gone.
+- **Never `drizzle-kit push` a migrated database.** Push does not know the ledger and drops
+  `schema_migrations`; it also drops and recreates the `lower()` expression index, the
+  `NULLS NOT DISTINCT` constraint and the 63-char-truncated FK, and re-sets unchanged defaults.
 
 ### CLI Tool
 
