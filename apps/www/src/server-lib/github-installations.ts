@@ -1,7 +1,5 @@
 import type { Octokit } from "octokit";
 
-import { getOctokitForUser } from "@/lib/github";
-
 /**
  * A GitHub App installation as the signed-in user's OAuth token sees it. This
  * is the visibility check for every org-binding decision: a user can only
@@ -56,16 +54,79 @@ export async function listInstallationsForOctokit(
 }
 
 /**
- * The installations visible to `userId`'s GitHub token, or null when the user
- * has no usable token (never signed in with GitHub, or the token expired and
- * could not be renewed).
+ * What the caller's GitHub account may do with an installation's account,
+ * read LIVE from GitHub with the caller's own OAuth token:
+ * - "authorized": an active admin of the organization, or the user account
+ *   itself.
+ * - "not-org-admin": not an active admin of the organization (a plain or
+ *   pending member, an outside collaborator, or GitHub refused the lookup).
+ * - "not-account-owner": a user account that is not the caller's.
+ * - "enterprise-account": an enterprise installation, which has no single
+ *   org or user to hold authority over.
+ * - "unknown-account": GitHub described the account without a login or a
+ *   known type.
  */
-export async function listVisibleGithubInstallations(
-  userId: string,
-): Promise<VisibleGithubInstallation[] | null> {
-  const octokit = await getOctokitForUser({ userId });
-  if (!octokit) {
-    return null;
+export type GithubAccountAuthority =
+  | "authorized"
+  | "not-org-admin"
+  | "not-account-owner"
+  | "enterprise-account"
+  | "unknown-account";
+
+function errorStatus(error: unknown): unknown {
+  return typeof error === "object" && error !== null
+    ? (error as { status?: unknown }).status
+    : undefined;
+}
+
+/**
+ * GitHub lists an installation for ANY user with read access to one of its
+ * repos, so visibility is not authority over the account. This is the
+ * authority check. Never answer it from the listing cache: a role change on
+ * GitHub must take effect on the next attempt.
+ *
+ * A 403/404 on the membership lookup (not a member, SSO not authorized for
+ * the token, the org hidden from the user) resolves to "not-org-admin", so
+ * the check fails closed. Any other GitHub failure propagates.
+ */
+export async function getGithubAccountAuthority({
+  octokit,
+  accountLogin,
+  accountType,
+}: {
+  octokit: Octokit;
+  accountLogin: string | null;
+  accountType: string | null;
+}): Promise<GithubAccountAuthority> {
+  if (accountType === "Enterprise") {
+    return "enterprise-account";
   }
-  return await listInstallationsForOctokit(octokit);
+  if (!accountLogin) {
+    return "unknown-account";
+  }
+  if (accountType === "Organization") {
+    try {
+      const { data } =
+        await octokit.rest.orgs.getMembershipForAuthenticatedUser({
+          org: accountLogin,
+        });
+      return data.state === "active" && data.role === "admin"
+        ? "authorized"
+        : "not-org-admin";
+    } catch (error) {
+      const status = errorStatus(error);
+      if (status === 403 || status === 404) {
+        return "not-org-admin";
+      }
+      throw error;
+    }
+  }
+  if (accountType === "User") {
+    const { data } = await octokit.rest.users.getAuthenticated();
+    // GitHub logins are case-insensitive.
+    return data.login.toLowerCase() === accountLogin.toLowerCase()
+      ? "authorized"
+      : "not-account-owner";
+  }
+  return "unknown-account";
 }

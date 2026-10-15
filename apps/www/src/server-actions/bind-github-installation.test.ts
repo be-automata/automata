@@ -21,8 +21,20 @@ import {
   getGithubInstallations,
 } from "./bind-github-installation";
 
+function githubError(status: number) {
+  return Object.assign(new Error(`HTTP ${status}`), { status });
+}
+
 function makeOctokit(
   installations: Array<{ id: number; login: string; type: string }>,
+  {
+    orgMembership = { state: "active", role: "admin" },
+    viewerLogin = "acme-owner",
+  }: {
+    // An Error makes the membership lookup reject with it.
+    orgMembership?: { state: string; role: string } | Error;
+    viewerLogin?: string;
+  } = {},
 ) {
   const listed = installations.map(({ id, login, type }) => ({
     id,
@@ -32,6 +44,19 @@ function makeOctokit(
     rest: {
       apps: {
         listInstallationsForAuthenticatedUser: vi.fn(),
+      },
+      orgs: {
+        getMembershipForAuthenticatedUser: vi.fn(async () => {
+          if (orgMembership instanceof Error) {
+            throw orgMembership;
+          }
+          return { data: orgMembership };
+        }),
+      },
+      users: {
+        getAuthenticated: vi.fn(async () => ({
+          data: { login: viewerLogin },
+        })),
       },
     },
     paginate: vi.fn().mockResolvedValue(listed),
@@ -152,6 +177,130 @@ describe("bindGithubInstallation", () => {
     });
     expect(result.success).toBe(false);
     expect(result.errorMessage).toMatch(/not visible to your GitHub account/);
+  });
+
+  describe("GitHub authority over the installation's account", () => {
+    function mockGithub(
+      installation: { login: string; type: string },
+      options: Parameters<typeof makeOctokit>[1],
+    ) {
+      const octokit = makeOctokit(
+        [{ id: Number(installationId), ...installation }],
+        options,
+      );
+      vi.mocked(getOctokitForUser).mockResolvedValue(octokit as any);
+      return octokit;
+    }
+
+    async function bind() {
+      return await bindGithubInstallation({
+        installationId,
+        expectedOrganizationId: orgA,
+      });
+    }
+
+    it("lets an active admin of the GitHub organization bind it, checking live", async () => {
+      const octokit = mockGithub(
+        { login: "acme", type: "Organization" },
+        { orgMembership: { state: "active", role: "admin" } },
+      );
+      const result = unwrapResult(await bind());
+      expect(result.organizationId).toBe(orgA);
+      expect(
+        octokit.rest.orgs.getMembershipForAuthenticatedUser,
+      ).toHaveBeenCalledWith({ org: "acme" });
+    });
+
+    it("refuses a read-only collaborator (an active plain member)", async () => {
+      mockGithub(
+        { login: "acme", type: "Organization" },
+        { orgMembership: { state: "active", role: "member" } },
+      );
+      const result = await bind();
+      expect(result.success).toBe(false);
+      expect(result.errorMessage).toMatch(
+        /Only an admin of the acme GitHub organization/,
+      );
+      expect(
+        await getGithubInstallation({ db, installationId }),
+      ).toBeUndefined();
+    });
+
+    it("refuses an admin whose membership is still pending", async () => {
+      mockGithub(
+        { login: "acme", type: "Organization" },
+        { orgMembership: { state: "pending", role: "admin" } },
+      );
+      const result = await bind();
+      expect(result.success).toBe(false);
+      expect(result.errorMessage).toMatch(/Only an admin of the acme/);
+      expect(
+        await getGithubInstallation({ db, installationId }),
+      ).toBeUndefined();
+    });
+
+    it.each([403, 404])(
+      "fails closed when GitHub answers the membership lookup with %i",
+      async (status) => {
+        mockGithub(
+          { login: "acme", type: "Organization" },
+          { orgMembership: githubError(status) },
+        );
+        const result = await bind();
+        expect(result.success).toBe(false);
+        expect(result.errorMessage).toMatch(/Only an admin of the acme/);
+        expect(
+          await getGithubInstallation({ db, installationId }),
+        ).toBeUndefined();
+      },
+    );
+
+    it("fails closed when GitHub errors on the membership lookup", async () => {
+      mockGithub(
+        { login: "acme", type: "Organization" },
+        { orgMembership: githubError(502) },
+      );
+      const result = await bind();
+      expect(result.success).toBe(false);
+      expect(
+        await getGithubInstallation({ db, installationId }),
+      ).toBeUndefined();
+    });
+
+    it("lets a user bind their own account's installation (login case-insensitive)", async () => {
+      const octokit = mockGithub(
+        { login: "Octo-Cat", type: "User" },
+        { viewerLogin: "octo-cat" },
+      );
+      const result = unwrapResult(await bind());
+      expect(result.organizationId).toBe(orgA);
+      expect(octokit.rest.users.getAuthenticated).toHaveBeenCalled();
+      expect(
+        octokit.rest.orgs.getMembershipForAuthenticatedUser,
+      ).not.toHaveBeenCalled();
+    });
+
+    it("refuses another user's personal installation", async () => {
+      mockGithub(
+        { login: "someone-else", type: "User" },
+        { viewerLogin: "octo-cat" },
+      );
+      const result = await bind();
+      expect(result.success).toBe(false);
+      expect(result.errorMessage).toMatch(
+        /belongs to the GitHub user someone-else/,
+      );
+      expect(
+        await getGithubInstallation({ db, installationId }),
+      ).toBeUndefined();
+    });
+
+    it("refuses an enterprise installation", async () => {
+      mockGithub({ login: "big-enterprise", type: "Enterprise" }, {});
+      const result = await bind();
+      expect(result.success).toBe(false);
+      expect(result.errorMessage).toMatch(/enterprise-level/);
+    });
   });
 
   it("refuses to move a binding from an org the caller is not a member of", async () => {

@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { db } from "@/lib/db";
 import * as schema from "@terragon/shared/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import {
   adminOnly,
+  getActiveOrganizationMembershipOrNull,
+  getTenantContextOrNull,
   userOnlyAction,
   adminOnlyAction,
   getAdminUserOrThrow,
@@ -253,6 +255,74 @@ describe("auth-server", () => {
         "X-Terragon-Secret": env.INTERNAL_SHARED_SECRET,
       });
       await validInternalRequestOrThrow();
+    });
+  });
+
+  describe("getTenantContextOrNull / getActiveOrganizationMembershipOrNull", () => {
+    async function signedInMemberOfActiveOrg() {
+      const { user, session } = await createTestUser({ db });
+      const { organization } = await createTestOrganization({
+        db,
+        userId: user.id,
+        role: "admin",
+      });
+      await db
+        .update(schema.session)
+        .set({ activeOrganizationId: organization.id })
+        .where(eq(schema.session.id, session.id));
+      await mockLoggedInUser(session);
+      return { userId: user.id, organizationId: organization.id };
+    }
+
+    it("returns null when no user is logged in", async () => {
+      await mockLoggedOutUser();
+      await expect(getTenantContextOrNull()).resolves.toBeNull();
+    });
+
+    it("returns the active org while the user is a member of it", async () => {
+      const { userId, organizationId } = await signedInMemberOfActiveOrg();
+      await expect(getTenantContextOrNull()).resolves.toEqual({
+        userId,
+        organizationId,
+      });
+      await expect(
+        getActiveOrganizationMembershipOrNull(userId),
+      ).resolves.toEqual({ organizationId, role: "admin" });
+    });
+
+    it("drops the session's org once the user is removed from it", async () => {
+      const { userId, organizationId } = await signedInMemberOfActiveOrg();
+      await db
+        .delete(schema.member)
+        .where(
+          and(
+            eq(schema.member.organizationId, organizationId),
+            eq(schema.member.userId, userId),
+          ),
+        );
+      await expect(getTenantContextOrNull()).resolves.toEqual({
+        userId,
+        organizationId: null,
+      });
+      await expect(
+        getActiveOrganizationMembershipOrNull(userId),
+      ).resolves.toBeNull();
+    });
+
+    it("returns a null org without an active org", async () => {
+      const { user, session } = await createTestUser({ db });
+      await mockLoggedInUser(session);
+      await expect(getTenantContextOrNull()).resolves.toEqual({
+        userId: user.id,
+        organizationId: null,
+      });
+    });
+
+    it("never reports the session's membership for a different user", async () => {
+      await signedInMemberOfActiveOrg();
+      await expect(
+        getActiveOrganizationMembershipOrNull("some-other-user"),
+      ).resolves.toBeNull();
     });
   });
 

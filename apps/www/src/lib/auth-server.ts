@@ -53,7 +53,8 @@ export async function getUserIdOrNull(): Promise<User["id"] | null> {
  *
  * This is the guard-layer seam that threads `organizationId` alongside `userId`
  * down to the tenant-scoped model layer (WI-5 / ADR-001). `organizationId` is
- * nullable during the backfill phase — a session may not have an active org yet.
+ * nullable during the backfill phase — a session may not have an active org yet
+ * — and is null when the user is no longer a member of the session's org.
  * The threads path passes both to `forTenant` (@terragon/shared) once an active
  * org is present.
  */
@@ -62,14 +63,52 @@ export type TenantContext = {
   organizationId: string | null;
 };
 
+/** An active org the user is still a member of, with that membership's role. */
+export interface ActiveMembership {
+  organizationId: string;
+  role: string;
+}
+
+/**
+ * The session user and their active membership, read once per request. A
+ * session keeps `activeOrganizationId` after the user is removed from that
+ * org, so the id only counts while a membership row backs it.
+ */
+const getSessionTenantOrNull = cache(
+  async (): Promise<{
+    userId: string;
+    membership: ActiveMembership | null;
+  } | null> => {
+    const session = await getSessionOrNull();
+    if (!session) {
+      return null;
+    }
+    const userId = session.user.id;
+    const organizationId = session.session.activeOrganizationId;
+    if (!organizationId) {
+      return { userId, membership: null };
+    }
+    const membership = await getMembership({ db, organizationId, userId });
+    return {
+      userId,
+      membership: membership ? { organizationId, role: membership.role } : null,
+    };
+  },
+);
+
+/**
+ * `organizationId` is the session's active org only while the user is still a
+ * member of it; null without an active org or once the membership is gone, so
+ * a removed member never stamps (or reads) the old org.
+ */
 export async function getTenantContextOrNull(): Promise<TenantContext | null> {
-  const session = await getSessionOrNull();
-  if (!session) {
+  const tenant = await getSessionTenantOrNull();
+  if (!tenant) {
     return null;
   }
   return {
-    userId: session.user.id,
-    organizationId: session.session.activeOrganizationId ?? null,
+    userId: tenant.userId,
+    organizationId: tenant.membership?.organizationId ?? null,
   };
 }
 
@@ -80,14 +119,12 @@ export async function getTenantContextOrNull(): Promise<TenantContext | null> {
  */
 export async function getActiveOrganizationMembershipOrNull(
   userId: string,
-): Promise<{ organizationId: string; role: string } | null> {
-  const tenant = await getTenantContextOrNull();
-  const organizationId = tenant?.organizationId;
-  if (!organizationId) {
+): Promise<ActiveMembership | null> {
+  const tenant = await getSessionTenantOrNull();
+  if (!tenant || tenant.userId !== userId) {
     return null;
   }
-  const membership = await getMembership({ db, organizationId, userId });
-  return membership ? { organizationId, role: membership.role } : null;
+  return tenant.membership;
 }
 
 /** The org-switch race a page-scoped org action refuses. */
@@ -120,6 +157,16 @@ export interface ExpectedActiveMembershipOptions {
  * enough. Throws UserFacingError; returns null only without an active org and
  * without `requireOrganization`.
  */
+export function requireExpectedActiveMembership(
+  userId: string,
+  options: ExpectedActiveMembershipOptions & {
+    requireOrganization: { action: string };
+  },
+): Promise<ActiveMembership>;
+export function requireExpectedActiveMembership(
+  userId: string,
+  options: ExpectedActiveMembershipOptions,
+): Promise<ActiveMembership | null>;
 export async function requireExpectedActiveMembership(
   userId: string,
   {
@@ -127,7 +174,7 @@ export async function requireExpectedActiveMembership(
     requireAdmin,
     requireOrganization,
   }: ExpectedActiveMembershipOptions,
-): Promise<{ organizationId: string; role: string } | null> {
+): Promise<ActiveMembership | null> {
   const membership = await getActiveOrganizationMembershipOrNull(userId);
   if (
     expectedOrganizationId !== undefined &&

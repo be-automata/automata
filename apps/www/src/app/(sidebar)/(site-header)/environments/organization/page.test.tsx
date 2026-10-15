@@ -80,9 +80,13 @@ describe("organization environment page", () => {
     expect(JSON.stringify(element.props)).not.toContain(SECRET);
   });
 
-  it("is not found for a non-member", async () => {
+  it("treats a non-member's session org as no org — no keys or values", async () => {
     const outsider = await createTestUser({ db });
     await signIn(outsider.session, orgId);
-    expect(await OrganizationEnvironmentPage()).toBe("NOT_FOUND");
+    const element = await OrganizationEnvironmentPage();
+    const rendered = JSON.stringify(element);
+    expect(rendered).toContain("Pick an organization");
+    expect(rendered).not.toContain("YOUTRACK_TOKEN");
+    expect(rendered).not.toContain(SECRET);
   });
 });
