@@ -11,15 +11,27 @@ export interface SlackOAuthState {
   userId: string;
   organizationId: string | null;
   type: "app_install" | "openid";
+  /**
+   * The workspace the user asked for, or null for "whichever Slack picks".
+   * Slack treats `team` as a hint and can sign the user in elsewhere (a
+   * non-distributed app always lands in its home workspace), so the callback
+   * refuses a token for any other team.
+   */
+  teamId: string | null;
   timestamp: number;
 }
 
 export function encodeSlackOAuthState(
-  state: Omit<SlackOAuthState, "timestamp">,
+  state: Omit<SlackOAuthState, "timestamp" | "teamId"> & {
+    teamId?: string | null;
+  },
   masterKey: string,
   now: number = Date.now(),
 ): string {
-  return encryptValue(JSON.stringify({ ...state, timestamp: now }), masterKey)
+  return encryptValue(
+    JSON.stringify({ ...state, teamId: state.teamId ?? null, timestamp: now }),
+    masterKey,
+  )
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/, "");
@@ -48,9 +60,22 @@ export function decodeSlackOAuthState(
       // States minted before org-scoped Slack apps carry no org.
       organizationId: state.organizationId ?? null,
       type: state.type,
+      // States minted before the workspace check carry no team.
+      teamId: typeof state.teamId === "string" ? state.teamId : null,
       timestamp: state.timestamp,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether Slack returned the workspace the flow asked for. A flow that named
+ * no workspace accepts any.
+ */
+export function isRequestedSlackTeam(
+  state: Pick<SlackOAuthState, "teamId">,
+  returnedTeamId: string | null | undefined,
+): boolean {
+  return state.teamId === null || state.teamId === returnedTeamId;
 }

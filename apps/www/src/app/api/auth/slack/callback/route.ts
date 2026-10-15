@@ -1,7 +1,10 @@
 import { NextRequest } from "next/server";
 import { getUserIdOrNull } from "@/lib/auth-server";
 import { encryptValue } from "@terragon/utils/encryption";
-import { decodeSlackOAuthState } from "@/lib/slack-oauth-state";
+import {
+  decodeSlackOAuthState,
+  isRequestedSlackTeam,
+} from "@/lib/slack-oauth-state";
 import { env } from "@terragon/env/apps-www";
 import { redirect, notFound } from "next/navigation";
 import { db } from "@/lib/db";
@@ -28,7 +31,8 @@ type SlackAuthErrorCode =
   | "auth_error"
   | "not_org_admin"
   | "not_configured"
-  | "workspace_bound_elsewhere";
+  | "workspace_bound_elsewhere"
+  | "wrong_workspace";
 
 function fail(code: SlackAuthErrorCode): never {
   redirect(
@@ -116,6 +120,9 @@ export async function GET(request: NextRequest) {
   }
 
   if (type === "app_install") {
+    if (!isRequestedSlackTeam(decodedState, tokenData.team?.id)) {
+      return fail("wrong_workspace");
+    }
     // Create new connection
     try {
       await upsertSlackInstallation({
@@ -193,6 +200,12 @@ export async function GET(request: NextRequest) {
     const slackTeamDomain = verifiedPayload[
       "https://slack.com/team_domain"
     ] as string;
+    // Slack can sign the user in to another workspace than the one they
+    // asked for and still report success; saving it would show the wrong
+    // workspace as connected.
+    if (!isRequestedSlackTeam(decodedState, teamId)) {
+      return fail("wrong_workspace");
+    }
 
     // Store user's Slack account information
     await upsertSlackAccount({

@@ -59,6 +59,7 @@ function encryptSlackOAuthState(state: {
   userId: string;
   organizationId: string | null;
   type: "app_install" | "openid";
+  teamId: string | null;
 }): string {
   return encodeSlackOAuthState(state, env.ENCRYPTION_MASTER_KEY);
 }
@@ -66,17 +67,17 @@ function encryptSlackOAuthState(state: {
 /**
  * Slack's `team` parameter picks the workspace the user signs in to. Without
  * it Slack uses the browser's default workspace, and there is no picker on
- * the "Sign in with Slack" screen. It is a hint, not a binding: the callback
- * still trusts only the team Slack returns.
+ * the "Sign in with Slack" screen. It is only a hint, so the requested team
+ * goes into the state and the callback refuses a token for any other one.
  */
-function setSlackTeamHint(url: URL, teamId: unknown): void {
+function setSlackTeamHint(url: URL, teamId: unknown): string | null {
   if (teamId === undefined || teamId === null) {
-    return;
+    return null;
   }
   // A blank string is "no hint"; anything else that is not a team id is refused.
   const trimmed = typeof teamId === "string" ? teamId.trim() : null;
   if (trimmed === "") {
-    return;
+    return null;
   }
   if (trimmed === null || !isSlackTeamId(trimmed)) {
     throw new UserFacingError(
@@ -84,6 +85,7 @@ function setSlackTeamHint(url: URL, teamId: unknown): void {
     );
   }
   url.searchParams.set("team", trimmed);
+  return trimmed;
 }
 
 // Used to install the Slack app
@@ -105,10 +107,15 @@ export const getSlackAppInstallUrl = userOnlyAction(
     slackAuthUrl.searchParams.set("client_id", clientId);
     slackAuthUrl.searchParams.set("scope", scopes);
     slackAuthUrl.searchParams.set("redirect_uri", redirectUri);
-    setSlackTeamHint(slackAuthUrl, teamId);
+    const requestedTeamId = setSlackTeamHint(slackAuthUrl, teamId);
     slackAuthUrl.searchParams.set(
       "state",
-      encryptSlackOAuthState({ userId, organizationId, type: "app_install" }),
+      encryptSlackOAuthState({
+        userId,
+        organizationId,
+        type: "app_install",
+        teamId: requestedTeamId,
+      }),
     );
     return slackAuthUrl.toString();
   },
@@ -152,10 +159,15 @@ export const getSlackOAuthUrl = userOnlyAction(
     }
     slackAuthUrl.searchParams.set("redirect_uri", redirectUri);
     slackAuthUrl.searchParams.set("response_type", "code");
-    setSlackTeamHint(slackAuthUrl, teamId);
+    const requestedTeamId = setSlackTeamHint(slackAuthUrl, teamId);
     slackAuthUrl.searchParams.set(
       "state",
-      encryptSlackOAuthState({ userId, organizationId, type: "openid" }),
+      encryptSlackOAuthState({
+        userId,
+        organizationId,
+        type: "openid",
+        teamId: requestedTeamId,
+      }),
     );
     return slackAuthUrl.toString();
   },
