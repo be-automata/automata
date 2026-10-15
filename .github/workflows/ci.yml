@@ -73,6 +73,12 @@ jobs:
         run: pnpm turbo lint
       - name: Format check
         run: pnpm turbo format-check
+      # deploy/ has no package.json: its scripts run on Node's own type
+      # stripping. node --test takes a glob, not a directory, so quote it.
+      - name: Deploy script tests (node --test)
+        run: node --test 'deploy/*.test.ts'
+      - name: Migration lint
+        run: node deploy/lint-migrations.ts deploy/migrations
 
   # ── Tests: serialized `vitest run` per package + review (node --test) ─────────
   # Bare `turbo test` runs the packages' watch-mode `vitest` scripts, which in CI
