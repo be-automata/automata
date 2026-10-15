@@ -1,0 +1,10 @@
+{
+  "reason": "These migrations predate deploy/lint-migrations.ts and were applied to production by hand (0000-baseline is generated from schema.ts). They are exempt as written; every NEW file is linted.",
+  "ids": [
+    "0000-baseline",
+    "2026-08-04-better-auth-1.6-apikey-rename",
+    "2026-09-02-165-retire-app-side-rows",
+    "2026-10-08-organization-environment",
+    "2026-10-14-environment-org-unique"
+  ]
+}

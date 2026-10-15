@@ -91,8 +91,9 @@ Test environments push the schema automatically.
 > DATABASE_URL=... pnpm exec tsx deploy/assert-schema-ready.ts
 > ```
 >
-> When you add a column to `packages/shared/src/db/schema.ts`, add it to that
-> script's `REQUIRED` list in the SAME change.
+> The gate requires every column and unique index `packages/shared/src/db/schema.ts`
+> declares (derived via `db/schema-columns.ts`; there is no list to update). New
+> files under `deploy/migrations/` must pass `node deploy/lint-migrations.ts`.
 
 ```bash
 # Push schema to dev database
