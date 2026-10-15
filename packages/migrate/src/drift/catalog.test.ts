@@ -125,10 +125,34 @@ describe("diffCatalogs against real databases", () => {
   });
 
   it("treats identical schemas as clean, whatever the column order", async () => {
-    const [a, b] = await Promise.all([
-      catalogOf(`ALTER TABLE "message" ADD COLUMN "z" text;`),
-      catalogOf(`ALTER TABLE "message" ADD COLUMN "z" text;`),
-    ]);
+    // a declares "z" first inside CREATE TABLE; b appends it with ADD COLUMN,
+    // the way a migration does. Same columns, different physical order.
+    const sides = {
+      a: `CREATE TABLE "ordered" ("z" text, "id" integer NOT NULL);`,
+      b: `CREATE TABLE "ordered" ("id" integer NOT NULL);
+          ALTER TABLE "ordered" ADD COLUMN "z" text;`,
+    };
+    const [left, right] = await Promise.all(
+      [sides.a, sides.b].map(async (sql) => {
+        const db = await createFreshDb();
+        dbs.push(db);
+        const client = await db.connect();
+        await client.query(BASE + sql);
+        const attnum = await client.query<{ attnum: number }>(
+          `SELECT attnum FROM pg_attribute
+            WHERE attrelid = 'public.ordered'::regclass AND attname = 'z'`,
+        );
+        return {
+          catalog: await snapshotCatalog(client),
+          attnum: attnum.rows[0]?.attnum,
+        };
+      }),
+    );
+    // Guard: the two sides really do differ in physical order.
+    expect([left?.attnum, right?.attnum]).toEqual([1, 2]);
+    const a = left?.catalog ?? { entries: [] };
+    const b = right?.catalog ?? { entries: [] };
+    expect(a.entries.some((e) => e.table === "ordered")).toBe(true);
     expect(diffCatalogs(a, b, [])).toEqual({
       diffs: [],
       allowed: [],
