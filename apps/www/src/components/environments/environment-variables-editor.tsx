@@ -258,7 +258,7 @@ export function EnvironmentVariablesEditor({
                       placeholder="KEY"
                       value={key}
                       disabled={true}
-                      className="font-[var(--font-geist-mono)] text-sm flex-1"
+                      className="font-mono text-sm flex-1"
                     />
                     {localKeys.has(key) && (
                       <span className="text-xs text-muted-foreground whitespace-nowrap">
@@ -299,7 +299,7 @@ export function EnvironmentVariablesEditor({
                     onChange={(e) => handleKeyChange(index, e.target.value)}
                     disabled={disabled}
                     className={cn(
-                      "font-[var(--font-geist-mono)] text-sm",
+                      "font-mono text-sm",
                       errors[index] && "border-destructive",
                     )}
                   />
@@ -332,7 +332,7 @@ export function EnvironmentVariablesEditor({
                     value={variable.value}
                     onChange={(e) => handleValueChange(index, e.target.value)}
                     disabled={disabled}
-                    className="font-[var(--font-geist-mono)] text-sm pr-10"
+                    className="font-mono text-sm pr-10"
                   />
                   <Button
                     type="button"

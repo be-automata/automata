@@ -497,7 +497,7 @@ export function OrganizationEnvironmentUI(
               {props.keys.map((key) => (
                 <li
                   key={key}
-                  className="font-[var(--font-geist-mono)] text-sm p-2 rounded-md border"
+                  className="font-mono text-sm p-2 rounded-md border"
                 >
                   {key}
                 </li>

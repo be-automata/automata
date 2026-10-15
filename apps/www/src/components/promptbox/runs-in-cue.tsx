@@ -54,9 +54,7 @@ export function RunsInCueView({
       <span className="shrink-0" aria-hidden="true">
         ·
       </span>
-      <span className="min-w-0 truncate font-[var(--font-geist-mono)]">
-        {repoFullName}
-      </span>
+      <span className="min-w-0 truncate font-mono">{repoFullName}</span>
     </div>
   );
 }

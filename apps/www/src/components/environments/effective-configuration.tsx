@@ -128,13 +128,8 @@ export function EffectiveConfiguration({
                     entry.audience === "server" && "text-muted-foreground",
                   )}
                 >
-                  <td className="px-3 py-2 font-[var(--font-geist-mono)] break-all">
-                    {entry.key}
-                  </td>
-                  <td
-                    className="px-3 py-2 font-[var(--font-geist-mono)]"
-                    aria-label="Hidden value"
-                  >
+                  <td className="px-3 py-2 font-mono break-all">{entry.key}</td>
+                  <td className="px-3 py-2 font-mono" aria-label="Hidden value">
                     ••••
                   </td>
                   <td className="px-3 py-2">
