@@ -154,3 +154,54 @@ jobs:
       - name: Tear down (always)
         if: always()
         run: docker compose -p automata-hatchet-it down -v --remove-orphans || true
+
+  # ── Browser E2E: two-org Playwright suite against `next start` ──────────────
+  # apps/www/e2e/run.ts provisions a throwaway Postgres (docker compose via
+  # @terragon/dev-env), pushes the schema, seeds two orgs and signed sessions,
+  # then runs Playwright. The server's outbound calls go through an egress
+  # guard: GitHub is answered from fixtures and any other host fails the run.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Egress-guard host parsing (node --test)
+        run: node --test apps/www/e2e/support/egress-host.node-test.mjs
+      - name: Install Chromium
+        run: pnpm --filter @terragon/www exec playwright install --with-deps chromium
+      - name: Build workspace dependencies of www
+        run: pnpm turbo build --filter='@terragon/www^...'
+      # `e2e:build` is `next build` with the e2e env (e2e/e2e-env.ts): the
+      # NEXT_PUBLIC_* values are inlined, so the build must name the URL the
+      # suite serves on.
+      - name: Build www
+        run: pnpm --filter @terragon/www e2e:build
+      - name: Playwright
+        env:
+          CI: "true"
+        run: |
+          unset DATABASE_URL DB_DRIVER SANDBOX_PROVIDER NODE_ENV NEXT_PUBLIC_APP_URL
+          pnpm --filter @terragon/www e2e
+      - name: Upload Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright
+          path: |
+            apps/www/test-results
+            apps/www/playwright-report
+          retention-days: 7

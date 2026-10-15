@@ -12,7 +12,9 @@
     "storybook": "ladle serve",
     "tsc-watch": "tsc --noEmit --watch --preserveWatchOutput",
     "tsc-check": "tsc --noEmit",
-    "lint": "next lint"
+    "lint": "next lint",
+    "e2e": "tsx e2e/run.ts",
+    "e2e:build": "tsx e2e/run.ts build"
   },
   "dependencies": {
     "@ai-sdk/openai": "^2.0.42",
@@ -130,6 +132,7 @@
   "devDependencies": {
     "@ladle/react": "^5.0.3",
     "@opennextjs/cloudflare": "^1.20.1",
+    "@playwright/test": "1.63.0",
     "@slack/web-api": "^7.10.0",
     "@tailwindcss/postcss": "^4.1.10",
     "@terragon/dev-env": "workspace:*",

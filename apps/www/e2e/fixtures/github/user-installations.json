@@ -1,0 +1,33 @@
+{
+  "method": "GET",
+  "path": "/user/installations",
+  "body": {
+    "total_count": 2,
+    "installations": [
+      {
+        "id": 9001,
+        "account": {
+          "login": "e2e-alpha-gh",
+          "id": 90010,
+          "type": "Organization"
+        },
+        "app_id": 1,
+        "target_type": "Organization",
+        "permissions": {},
+        "events": []
+      },
+      {
+        "id": 9002,
+        "account": {
+          "login": "e2e-beta-gh",
+          "id": 90020,
+          "type": "Organization"
+        },
+        "app_id": 1,
+        "target_type": "Organization",
+        "permissions": {},
+        "events": []
+      }
+    ]
+  }
+}

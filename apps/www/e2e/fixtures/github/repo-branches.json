@@ -1,0 +1,14 @@
+{
+  "method": "GET",
+  "path": "/repos/:owner/:repo/branches",
+  "body": [
+    {
+      "name": "main",
+      "commit": {
+        "sha": "0000000000000000000000000000000000000e2e",
+        "url": "https://api.github.com/repos/e2e/repo/commits/0e2e"
+      },
+      "protected": false
+    }
+  ]
+}
