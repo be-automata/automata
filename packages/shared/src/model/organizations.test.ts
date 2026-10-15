@@ -8,6 +8,7 @@ import {
   addOrganizationMember,
   createOrganization,
   getMembership,
+  getMembershipByOrganizationSlug,
   getOrganizationById,
   getOrganizationBySlug,
   getOrganizationMembers,
@@ -230,5 +231,37 @@ describe("organizations", () => {
       userId: owner.id,
     });
     expect(gone).toBeUndefined();
+  });
+
+  it("reads a membership by org slug in one read; undefined for a non-member or unknown slug", async () => {
+    const slug = uniqueSlug();
+    const org = await createOrganization({ db, name: "Acme", slug });
+    await addOrganizationMember({
+      db,
+      organizationId: org.id,
+      userId: owner.id,
+      role: "admin",
+    });
+    const { user: stranger } = await createTestUser({ db });
+
+    const membership = await getMembershipByOrganizationSlug({
+      db,
+      slug,
+      userId: owner.id,
+    });
+    expect(membership?.organizationId).toBe(org.id);
+    expect(membership?.userId).toBe(owner.id);
+    expect(membership?.role).toBe("admin");
+
+    expect(
+      await getMembershipByOrganizationSlug({ db, slug, userId: stranger.id }),
+    ).toBeUndefined();
+    expect(
+      await getMembershipByOrganizationSlug({
+        db,
+        slug: uniqueSlug("missing"),
+        userId: owner.id,
+      }),
+    ).toBeUndefined();
   });
 });

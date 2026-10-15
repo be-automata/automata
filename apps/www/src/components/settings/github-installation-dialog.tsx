@@ -1,8 +1,7 @@
 "use client";
 
-import { ArrowRight, Github } from "lucide-react";
+import { Github } from "lucide-react";
 
-import { OrgAvatar } from "@/components/org-avatar";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { MyOrganization } from "@/server-actions/organizations";
+import { TargetLine } from "./slack-target-dialogs";
 
 /**
  * Receipt before a GitHub account is bound to an org: the account, the org it
@@ -50,19 +50,12 @@ export function GithubInstallationBindDialog({
             in this organization.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm">
-          <Github className="size-4 shrink-0" />
-          <span className="truncate font-medium font-mono">{accountLogin}</span>
-          <ArrowRight className="size-4 shrink-0 text-muted-foreground" />
-          {organization ? (
-            <>
-              <OrgAvatar organization={organization} className="size-5" />
-              <span className="truncate font-medium">{organization.name}</span>
-            </>
-          ) : (
-            <span className="text-muted-foreground">No organization</span>
-          )}
-        </div>
+        <TargetLine
+          icon={Github}
+          subject={accountLogin}
+          subjectClassName="font-mono"
+          organization={organization}
+        />
         <p className="text-xs text-muted-foreground">
           {currentlyBoundElsewhere
             ? "This account is bound to another organization today. Moving it re-routes future work only: runs, reviews and threads that already exist stay where they are."

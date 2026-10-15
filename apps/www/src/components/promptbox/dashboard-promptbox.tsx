@@ -203,7 +203,7 @@ export function DashboardPromptBox(props: DashboardPromptBoxProps) {
         supportSchedule={true}
         permissionMode={permissionMode}
         onPermissionModeChange={setPermissionMode}
-        submitCue={<RunsInCue repoFullName={repoFullName || null} />}
+        submitCue={<RunsInCue repoFullName={repoFullName} />}
       />
       <CredentialsWarning selectedModel={selectedModel} />
       <div className="flex items-center justify-between w-full">

@@ -3,7 +3,7 @@
 import { Github } from "lucide-react";
 import { useState } from "react";
 
-import { OrgAvatar } from "@/components/org-avatar";
+import { OrgName } from "@/components/org-avatar";
 import { Button } from "@/components/ui/button";
 import { getGHAppInstallUrl } from "@/lib/gh-app-url";
 import {
@@ -19,13 +19,11 @@ function BindingLabel({ row }: { row: GithubInstallationRow }) {
   if (row.binding.kind === "organization") {
     return (
       <span className="flex min-w-0 items-center gap-1.5">
-        <OrgAvatar
+        <OrgName
           organization={row.binding.organization}
-          className="size-4 text-[8px]"
+          size="xs"
+          nameClassName="font-medium text-foreground"
         />
-        <span className="truncate font-medium text-foreground">
-          {row.binding.organization.name}
-        </span>
       </span>
     );
   }
@@ -121,7 +119,8 @@ export function GithubInstallationsCard({
 }: {
   canBindToOrganization: boolean;
 }) {
-  const { data, isLoading } = useGithubInstallationsQuery();
+  const { data, isLoading, isError, isFetching, refetch } =
+    useGithubInstallationsQuery();
   const { activeOrganization, expectedOrganizationId } =
     useActiveOrganization();
   const bindMutation = useBindGithubInstallation();
@@ -130,6 +129,24 @@ export function GithubInstallationsCard({
   if (isLoading) {
     return (
       <p className="text-sm text-muted-foreground">Loading GitHub accounts…</p>
+    );
+  }
+  if (isError && !data) {
+    // A failed load is not "nothing installed": say so and offer a retry.
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm text-muted-foreground">
+          Could not load your GitHub accounts. GitHub did not answer.
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={isFetching}
+          onClick={() => void refetch()}
+        >
+          Try again
+        </Button>
+      </div>
     );
   }
   if (data?.githubTokenMissing) {

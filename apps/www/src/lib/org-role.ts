@@ -1,6 +1,8 @@
 import { DB } from "@terragon/shared/db";
 import { getMembership } from "@terragon/shared/model/organizations";
 
+import { ORG_ADMIN_ROLES } from "./org-admin-roles";
+
 /**
  * Org-admin role gate for org-governance routes (ADR-005 §4 — the org floor
  * is an org-level control, not a per-member one).
@@ -16,7 +18,7 @@ import { getMembership } from "@terragon/shared/model/organizations";
  * the default role set applies: owner | admin | member, with `member.role`
  * defaulting to `"member"` at the schema level (schema.ts:138).
  */
-export const ORG_ADMIN_ROLES = new Set(["owner", "admin"]);
+export { ORG_ADMIN_ROLES };
 
 /**
  * True when `userId` holds an admin-or-owner role in `organizationId`. No

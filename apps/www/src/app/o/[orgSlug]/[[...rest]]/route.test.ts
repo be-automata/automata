@@ -90,12 +90,14 @@ describe("GET /o/[orgSlug]/[[...rest]]", () => {
   });
 
   it("404s for an unknown slug, the same as for a non-member", async () => {
+    const setActive = vi.spyOn(auth.api, "setActiveOrganization");
     const res = await GET(
       request("/o/no-such-org-anywhere/settings"),
       params("no-such-org-anywhere", ["settings"]),
     );
     expect(res.status).toBe(404);
     expect(await res.text()).toBe("Not found");
+    expect(setActive).not.toHaveBeenCalled();
   });
 
   it("404s an unsafe target before switching the session", async () => {

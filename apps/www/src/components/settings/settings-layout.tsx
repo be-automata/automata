@@ -15,7 +15,7 @@ import {
 import { useFeatureFlag } from "@/hooks/use-feature-flag";
 import { useRealtimeUser } from "@/hooks/useRealtime";
 import { useActiveOrganization } from "@/queries/organization-queries";
-import { OrgAvatar } from "../org-avatar";
+import { OrgName } from "../org-avatar";
 
 interface NavItem {
   href: string;
@@ -92,11 +92,7 @@ export function SettingsLayout({ children }: { children: React.ReactNode }) {
       scope: "organization",
       heading: activeOrganization ? (
         <span className="flex items-center gap-1.5 normal-case">
-          <OrgAvatar
-            organization={activeOrganization}
-            className="size-4 text-[8px]"
-          />
-          <span className="truncate">{activeOrganization.name}</span>
+          <OrgName organization={activeOrganization} size="xs" />
         </span>
       ) : (
         "Organization"

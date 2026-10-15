@@ -1,3 +1,5 @@
+import React from "react";
+
 import { orgHue, orgInitials } from "@/lib/org-identity";
 import { cn } from "@/lib/utils";
 
@@ -41,5 +43,38 @@ export function OrgAvatar({
     >
       {orgInitials(organization.name)}
     </span>
+  );
+}
+
+const ORG_NAME_AVATAR_SIZES = {
+  /** Inline with 12px text (settings rows, the promptbox cue). */
+  xs: "size-4 text-[8px]",
+  /** Inline with 14px text (receipts, the switcher list). */
+  sm: "size-5",
+} as const;
+
+/**
+ * An org's avatar followed by its truncated name. A fragment, so the parent's
+ * flex row sets the gap and alignment.
+ */
+export function OrgName({
+  organization,
+  size,
+  nameClassName,
+}: {
+  organization: { id: string; name: string; logo?: string | null };
+  size: keyof typeof ORG_NAME_AVATAR_SIZES;
+  nameClassName?: string;
+}) {
+  return (
+    <>
+      <OrgAvatar
+        organization={organization}
+        className={ORG_NAME_AVATAR_SIZES[size]}
+      />
+      <span className={cn("min-w-0 truncate", nameClassName)}>
+        {organization.name}
+      </span>
+    </>
   );
 }

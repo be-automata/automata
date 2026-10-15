@@ -3,11 +3,10 @@
 import { env } from "@terragon/env/apps-www";
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
 import {
-  getActiveOrganizationMembershipOrNull,
+  requireExpectedActiveMembership,
   userOnlyAction,
 } from "@/lib/auth-server";
 import { db } from "@/lib/db";
-import { ORG_ADMIN_ROLES } from "@/lib/org-role";
 import { UserFacingError } from "@/lib/server-actions";
 import {
   deleteSlackAccount,
@@ -35,23 +34,15 @@ async function getSessionSlackApp(
     expectedOrganizationId,
   }: { requireAdmin: boolean; expectedOrganizationId?: string | null },
 ): Promise<{ organizationId: string | null; clientId: string }> {
-  const membership = await getActiveOrganizationMembershipOrNull(userId);
   // The page named an org before the user clicked; the session may have
   // moved since (another tab switched org). Never bind to an org the user
   // was not shown.
-  if (
-    expectedOrganizationId !== undefined &&
-    (membership?.organizationId ?? null) !== expectedOrganizationId
-  ) {
-    throw new UserFacingError(
-      "Your active organization changed in another tab. Reload the page and try again.",
-    );
-  }
-  if (requireAdmin && membership && !ORG_ADMIN_ROLES.has(membership.role)) {
-    throw new UserFacingError(
-      "Only organization owners and admins can install the Slack app",
-    );
-  }
+  const membership = await requireExpectedActiveMembership(userId, {
+    expectedOrganizationId,
+    requireAdmin: requireAdmin
+      ? { action: "install the Slack app" }
+      : undefined,
+  });
   const organizationId = membership?.organizationId ?? null;
   const config = await resolveSlackAppConfig({ db, organizationId });
   if (!config.clientId) {
@@ -82,11 +73,12 @@ function setSlackTeamHint(url: URL, teamId: unknown): void {
   if (teamId === undefined || teamId === null) {
     return;
   }
-  const trimmed = typeof teamId === "string" ? teamId.trim() : "";
-  if (typeof teamId === "string" && !trimmed) {
+  // A blank string is "no hint"; anything else that is not a team id is refused.
+  const trimmed = typeof teamId === "string" ? teamId.trim() : null;
+  if (trimmed === "") {
     return;
   }
-  if (!isSlackTeamId(trimmed)) {
+  if (trimmed === null || !isSlackTeamId(trimmed)) {
     throw new UserFacingError(
       "That is not a Slack workspace ID. It starts with T, e.g. T01ABCDEF.",
     );

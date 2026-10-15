@@ -62,6 +62,14 @@ export { sql } from "drizzle-orm";
 export type DB = ReturnType<typeof createNodePgDb>;
 
 /**
+ * The rows of a raw `db.execute(...)` result. The node-postgres and
+ * neon-serverless results both carry `rows`; anything else reads as no rows.
+ */
+export function rowsOf<T>(result: unknown): T[] {
+  return (result as { rows?: T[] }).rows ?? [];
+}
+
+/**
  * A pg-style Pool re-emits an IDLE client's socket error as its own "error"
  * event, and an EventEmitter with no "error" listener throws. On Workers a
  * Neon WebSocket dropping (request teardown, Neon closing an idle socket)

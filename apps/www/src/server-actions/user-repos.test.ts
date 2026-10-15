@@ -41,16 +41,24 @@ function makeOctokit({
   installations: Array<{ id: number }>;
   repos: unknown[];
 }) {
+  const listInstallationsForAuthenticatedUser = vi
+    .fn()
+    .mockResolvedValue({ data: { installations } });
   return {
     rest: {
       apps: {
-        listInstallationsForAuthenticatedUser: vi
-          .fn()
-          .mockResolvedValue({ data: { installations } }),
+        listInstallationsForAuthenticatedUser,
         listInstallationReposForAuthenticatedUser: vi.fn(),
       },
     },
-    paginate: vi.fn().mockResolvedValue(repos),
+    // Installations are paginated too: call through so a rejection surfaces.
+    paginate: vi.fn(async (fn: unknown) => {
+      if (fn === listInstallationsForAuthenticatedUser) {
+        const { data } = await listInstallationsForAuthenticatedUser();
+        return data.installations;
+      }
+      return repos;
+    }),
   };
 }
 
@@ -70,8 +78,10 @@ function makeScopedOctokit(reposByInstallation: Record<number, unknown[]>) {
       },
     },
     paginate: vi.fn(
-      async (_fn: unknown, params: { installation_id: number }) =>
-        reposByInstallation[params.installation_id] ?? [],
+      async (_fn: unknown, params: { installation_id?: number }) =>
+        params.installation_id === undefined
+          ? Object.keys(reposByInstallation).map((id) => ({ id: Number(id) }))
+          : (reposByInstallation[params.installation_id] ?? []),
     ),
   };
 }
@@ -160,6 +170,24 @@ describe("getUserRepos", () => {
         "customer-org/app",
         "acme/api",
       ]);
+    });
+
+    it("leaves out installations bound to another org when the org has nothing bound", async () => {
+      const otherOrg = await createOrganization({
+        db,
+        name: "Customer",
+        slug: `customer-${nanoid(8).toLowerCase()}`,
+      });
+      await bindGithubInstallationToOrg({
+        db,
+        installationId: otherInstallation,
+        organizationId: otherOrg.id,
+      });
+
+      const result = unwrapResult(await getUserRepos());
+
+      expect(result.scope).toBe("unassigned");
+      expect(result.repos.map((r) => r.full_name)).toEqual(["acme/api"]);
     });
 
     it("lists nothing when the org's bound installations are not the user's", async () => {
