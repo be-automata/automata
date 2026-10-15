@@ -17,6 +17,7 @@ import {
 } from "@/hooks/useSelectedRepoAndBranch";
 import { RepoBranchSelector } from "../repo-branch-selector";
 import { CredentialsWarning } from "./credentials-warning";
+import { RunsInCue } from "./runs-in-cue";
 import { useCredentialInfoForAgent } from "@/atoms/user-credentials";
 import {
   PromptBoxToolBelt,
@@ -183,6 +184,7 @@ export function DashboardPromptBox(props: DashboardPromptBoxProps) {
         supportSchedule={true}
         permissionMode={permissionMode}
         onPermissionModeChange={setPermissionMode}
+        submitCue={<RunsInCue repoFullName={repoFullName || null} />}
       />
       <CredentialsWarning selectedModel={selectedModel} />
       <div className="flex items-center justify-between w-full">

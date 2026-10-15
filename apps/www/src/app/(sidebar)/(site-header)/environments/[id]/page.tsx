@@ -12,7 +12,10 @@ import { notFound } from "next/navigation";
 import { getOrganizationEnvironmentKeys } from "@terragon/shared/model/organization-environment";
 import { getMembership } from "@terragon/shared/model/organizations";
 import { db } from "@/lib/db";
-import { getControlPlaneEnvironmentVariables } from "@/server-lib/env-audience";
+import {
+  describeEffectiveEnvironment,
+  getControlPlaneEnvironmentVariables,
+} from "@/server-lib/env-audience";
 import { EnvironmentUI } from "@/components/environments/main";
 import type { Metadata } from "next";
 import { env } from "@terragon/env/apps-www";
@@ -99,11 +102,21 @@ export default async function EnvironmentPage({
         : [];
     })(),
   ]);
+  // Key names only: the effective view never sends a value to the client.
+  const effectiveEnvironment = describeEffectiveEnvironment([
+    { source: "global", keys: globalEnvironmentVariableKeys },
+    { source: "organization", keys: organizationEnvironmentVariableKeys },
+    {
+      source: "repository",
+      keys: environmentVariables.map((variable) => variable.key),
+    },
+  ]);
   return (
     <EnvironmentUI
       environmentId={id}
       environment={environment}
       environmentVariables={environmentVariables}
+      effectiveEnvironment={effectiveEnvironment}
       inheritedKeys={[
         ...organizationEnvironmentVariableKeys.map((key) => ({
           key,
