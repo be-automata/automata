@@ -30,6 +30,8 @@ export function SlackAuthToasts() {
         "Only organization owners and admins can install the Slack app.",
       workspace_bound_elsewhere:
         "This Slack workspace is already installed for another organization.",
+      wrong_workspace:
+        "Slack opened a different workspace than the one you asked for, so nothing was saved. If the Slack app is not publicly distributed, Slack only allows its own workspace: turn on Public Distribution in the app's settings, then try again.",
       // Success codes
       app_installed: "Successfully installed to your workspace",
       account_connected: "Successfully connected to Slack workspace",

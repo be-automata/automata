@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   decodeSlackOAuthState,
   encodeSlackOAuthState,
+  isRequestedSlackTeam,
 } from "./slack-oauth-state";
 
 const KEY = "a".repeat(64);
@@ -20,6 +21,7 @@ describe("slack oauth state", () => {
       expect(encoded).toMatch(/^[A-Za-z0-9_-]+$/);
       expect(decodeSlackOAuthState(encoded, KEY)).toEqual({
         ...STATE,
+        teamId: null,
         timestamp: 1000,
       });
     }
@@ -50,5 +52,41 @@ describe("slack oauth state", () => {
     expect(decodeSlackOAuthState(encoded, "b".repeat(64))).toBeNull();
     expect(decodeSlackOAuthState("not-a-state", KEY)).toBeNull();
     expect(decodeSlackOAuthState("", KEY)).toBeNull();
+  });
+
+  it("carries the requested workspace", () => {
+    const encoded = encodeSlackOAuthState(
+      { ...STATE, teamId: "T09BANGR01" },
+      KEY,
+    );
+    expect(decodeSlackOAuthState(encoded, KEY)?.teamId).toBe("T09BANGR01");
+  });
+
+  it("reads a state minted before the workspace check as any workspace", () => {
+    const legacy = encryptValue(
+      JSON.stringify({ ...STATE, timestamp: 1 }),
+      KEY,
+    );
+    expect(decodeSlackOAuthState(legacy, KEY)?.teamId).toBeNull();
+  });
+});
+
+describe("isRequestedSlackTeam", () => {
+  it("refuses a token for a workspace other than the one asked for", () => {
+    // Slack swaps the hint for the app's home workspace when the app is not
+    // distributed; that token must not be saved as the requested workspace.
+    expect(isRequestedSlackTeam({ teamId: "T09BANGR01" }, "T0AUTOMATA1")).toBe(
+      false,
+    );
+    expect(isRequestedSlackTeam({ teamId: "T09BANGR01" }, undefined)).toBe(
+      false,
+    );
+  });
+
+  it("accepts the requested workspace, or any when none was named", () => {
+    expect(isRequestedSlackTeam({ teamId: "T09BANGR01" }, "T09BANGR01")).toBe(
+      true,
+    );
+    expect(isRequestedSlackTeam({ teamId: null }, "T0AUTOMATA1")).toBe(true);
   });
 });
