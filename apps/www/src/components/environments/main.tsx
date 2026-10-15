@@ -10,6 +10,8 @@ import {
   type InheritedEnvironmentKey,
 } from "@/components/environments/environment-variables-editor";
 import { McpConfigEditor } from "@/components/environments/mcp-config-editor";
+import { EffectiveConfiguration } from "@/components/environments/effective-configuration";
+import type { EffectiveEnvironmentEntry } from "@/server-lib/env-audience";
 import { updateEnvironmentVariables } from "@/server-actions/environment-variables";
 import { updateOrganizationEnvironmentVariables } from "@/server-actions/organization-environment-variables";
 import { updateMcpConfig } from "@/server-actions/mcp-config";
@@ -218,12 +220,14 @@ export function EnvironmentUI({
   environmentId,
   environment,
   environmentVariables,
+  effectiveEnvironment,
   inheritedKeys,
   mcpConfig,
 }: {
   environmentId: string;
   environment: Pick<Environment, "repoFullName">;
   environmentVariables: Array<{ key: string; value: string }>;
+  effectiveEnvironment: EffectiveEnvironmentEntry[];
   inheritedKeys: InheritedEnvironmentKey[];
   mcpConfig?: McpConfig;
 }) {
@@ -277,6 +281,7 @@ export function EnvironmentUI({
       </Portal>
       <EnvironmentBreadcrumb label={environment.repoFullName} />
       <div className="flex flex-col gap-4 w-full pb-4">
+        <EffectiveConfiguration entries={effectiveEnvironment} />
         <EnvironmentVariablesSection
           target={{ scope: "repository", environmentId }}
           environmentVariables={environmentVariables}
