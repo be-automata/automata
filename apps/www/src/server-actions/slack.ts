@@ -129,9 +129,27 @@ export const getSlackOAuthUrl = userOnlyAction(
       expectedOrganizationId,
     });
     const redirectUri = `${nonLocalhostPublicAppUrl()}/api/auth/slack/callback`;
-    const slackAuthUrl = new URL("https://slack.com/openid/connect/authorize");
+    // Slack's /openid/connect/authorize redirects to /oauth/v2/authorize and
+    // DROPS the `team` parameter on the way (observed in production: the user
+    // landed in their default workspace, not the one they asked for). With a
+    // workspace hint, go straight to the redirect's target: the same OpenID
+    // request (user_scope + openid_connect=1), but `team` survives, so Slack
+    // signs the user in to that workspace. The callback's token exchange
+    // (openid.connect.token) is the same either way.
+    const hasTeamHint = typeof teamId === "string" && teamId.trim() !== "";
+    const slackAuthUrl = hasTeamHint
+      ? new URL("https://slack.com/oauth/v2/authorize")
+      : new URL("https://slack.com/openid/connect/authorize");
     slackAuthUrl.searchParams.set("client_id", clientId);
-    slackAuthUrl.searchParams.set("scope", SLACK_OPENID_SCOPES.join(","));
+    if (hasTeamHint) {
+      slackAuthUrl.searchParams.set(
+        "user_scope",
+        SLACK_OPENID_SCOPES.join(","),
+      );
+      slackAuthUrl.searchParams.set("openid_connect", "1");
+    } else {
+      slackAuthUrl.searchParams.set("scope", SLACK_OPENID_SCOPES.join(","));
+    }
     slackAuthUrl.searchParams.set("redirect_uri", redirectUri);
     slackAuthUrl.searchParams.set("response_type", "code");
     setSlackTeamHint(slackAuthUrl, teamId);
