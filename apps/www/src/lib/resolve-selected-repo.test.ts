@@ -15,7 +15,11 @@ describe("resolveSelectedRepo", () => {
         selectedBranch: "feature",
         repos,
       }),
-    ).toEqual({ repoFullName: "acme/web", branchName: "feature" });
+    ).toEqual({
+      repoFullName: "acme/web",
+      branchName: "feature",
+      pending: false,
+    });
   });
 
   it("ignores a selection from another org and falls back to the first repo", () => {
@@ -25,7 +29,7 @@ describe("resolveSelectedRepo", () => {
         selectedBranch: "feature",
         repos,
       }),
-    ).toEqual({ repoFullName: "acme/api", branchName: "main" });
+    ).toEqual({ repoFullName: "acme/api", branchName: "main", pending: false });
   });
 
   it("falls back to none when the org lists no repos", () => {
@@ -35,17 +39,29 @@ describe("resolveSelectedRepo", () => {
         selectedBranch: "main",
         repos: [],
       }),
-    ).toEqual({ repoFullName: null, branchName: null });
+    ).toEqual({ repoFullName: null, branchName: null, pending: false });
   });
 
-  it("keeps the stored selection while the list is unknown", () => {
+  it("keeps the stored selection when the list failed to load", () => {
     expect(
       resolveSelectedRepo({
         selectedRepoFullName: "acme/web",
         selectedBranch: "main",
         repos: undefined,
       }),
-    ).toEqual({ repoFullName: "acme/web", branchName: "main" });
+    ).toEqual({ repoFullName: "acme/web", branchName: "main", pending: false });
+  });
+
+  it("names no repo and holds submission while the org's list is loading", () => {
+    // The stored repo may belong to the org the user just switched away from.
+    expect(
+      resolveSelectedRepo({
+        selectedRepoFullName: "customer-org/app",
+        selectedBranch: "main",
+        repos: undefined,
+        isLoading: true,
+      }),
+    ).toEqual({ repoFullName: null, branchName: null, pending: true });
   });
 
   it("uses main when the fallback repo has no default branch", () => {
@@ -55,6 +71,6 @@ describe("resolveSelectedRepo", () => {
         selectedBranch: null,
         repos: [{ full_name: "acme/api" }],
       }),
-    ).toEqual({ repoFullName: "acme/api", branchName: "main" });
+    ).toEqual({ repoFullName: "acme/api", branchName: "main", pending: false });
   });
 });

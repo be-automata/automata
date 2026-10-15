@@ -52,11 +52,16 @@ export function DashboardPromptBox(props: DashboardPromptBoxProps) {
   const [storedBranchName, setBranchName] = useSelectedBranch();
   // The stored selection is per user; ignore it when the active org's repo
   // list does not hold it (see resolveSelectedRepo).
-  const { data: repoData } = useUserReposQuery();
-  const { repoFullName, branchName } = resolveSelectedRepo({
+  const { data: repoData, isLoading: isRepoListLoading } = useUserReposQuery();
+  const {
+    repoFullName,
+    branchName,
+    pending: isRepoPending,
+  } = resolveSelectedRepo({
     selectedRepoFullName: storedRepoFullName || null,
     selectedBranch: storedBranchName || null,
     repos: repoData?.repos,
+    isLoading: isRepoListLoading,
   });
   const [isRecording, setIsRecording] = useState(false);
   const onRepoBranchChange = useCallback(
@@ -157,7 +162,10 @@ export function DashboardPromptBox(props: DashboardPromptBoxProps) {
   const isSubmitDisabled =
     baseIsSubmitDisabled ||
     (credentialInfo && !credentialInfo.canInvokeAgent) ||
-    !isActive;
+    !isActive ||
+    // Until the active org's repo list arrives, the stored repo may belong to
+    // the org the user just switched away from.
+    isRepoPending;
 
   // Set content when promptText changes
   React.useEffect(() => {
