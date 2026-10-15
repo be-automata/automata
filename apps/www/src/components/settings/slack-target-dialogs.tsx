@@ -1,10 +1,11 @@
 "use client";
 
 import { ArrowRight, Slack, type LucideIcon } from "lucide-react";
-import { useState } from "react";
+import React, { useEffect, useState } from "react";
 
 import { OrgName } from "@/components/org-avatar";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -56,10 +57,60 @@ export function TargetLine({
   );
 }
 
+/**
+ * Install binds the workspace to the org for good, and the card the button
+ * sits on names whichever workspace the user's Slack account is linked to —
+ * which need not be the org's own (a user in two orgs linked one workspace,
+ * then switched org). So the user must say, in so many words, that this
+ * workspace belongs to this org before Slack is opened.
+ */
+export function SlackInstallConfirmation({
+  workspaceName,
+  workspaceId,
+  organization,
+  confirmed,
+  onConfirmedChange,
+}: {
+  workspaceName: string;
+  workspaceId: string;
+  organization: MyOrganization | null;
+  confirmed: boolean;
+  onConfirmedChange: (confirmed: boolean) => void;
+}) {
+  const orgName = organization?.name ?? "this organization";
+  return (
+    <div className="space-y-3">
+      <TargetLine
+        icon={Slack}
+        subject={workspaceName}
+        organization={organization}
+      />
+      <div className="flex items-start gap-2">
+        <Checkbox
+          id="slack-install-confirm"
+          checked={confirmed}
+          onCheckedChange={(value) => onConfirmedChange(value === true)}
+          className="mt-0.5"
+        />
+        <Label htmlFor="slack-install-confirm" className="text-sm leading-snug">
+          {workspaceName} (<span className="font-mono">{workspaceId}</span>) is{" "}
+          {orgName}&apos;s Slack workspace
+        </Label>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        The workspace stays bound to {orgName}. Not the right workspace? Cancel,
+        then use &ldquo;Connect another workspace&rdquo; with the ID of the
+        workspace you want (it starts with T).
+      </p>
+    </div>
+  );
+}
+
 export function SlackInstallDialog({
   open,
   onOpenChange,
   workspaceName,
+  workspaceId,
   organization,
   isPending,
   onContinue,
@@ -67,10 +118,18 @@ export function SlackInstallDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   workspaceName: string;
+  workspaceId: string;
   organization: MyOrganization | null;
   isPending: boolean;
   onContinue: () => void;
 }) {
+  const [confirmed, setConfirmed] = useState(false);
+  // Every opening asks again.
+  useEffect(() => {
+    if (!open) {
+      setConfirmed(false);
+    }
+  }, [open]);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
@@ -83,21 +142,21 @@ export function SlackInstallDialog({
             organization, with its environment and credentials.
           </DialogDescription>
         </DialogHeader>
-        <TargetLine
-          icon={Slack}
-          subject={workspaceName}
+        <SlackInstallConfirmation
+          workspaceName={workspaceName}
+          workspaceId={workspaceId}
           organization={organization}
+          confirmed={confirmed}
+          onConfirmedChange={setConfirmed}
         />
-        <p className="text-xs text-muted-foreground">
-          The workspace stays bound to this organization. To use it with a
-          different one, switch organization first (top of the sidebar) and
-          install from there.
-        </p>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button onClick={onContinue} disabled={isPending || !organization}>
+          <Button
+            onClick={onContinue}
+            disabled={isPending || !organization || !confirmed}
+          >
             <Slack className="size-4" />
             {isPending ? "Opening Slack…" : "Continue to Slack"}
           </Button>
