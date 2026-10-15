@@ -30,6 +30,7 @@ import {
   selectedBranchAtom,
 } from "@/atoms/user-flags";
 import { publicDocsUrl } from "@terragon/env/next-public";
+import { automationLimitMessage } from "./limit-message";
 
 export function Automations() {
   const { headerActionContainer } = usePageHeader();
@@ -109,7 +110,7 @@ function AutomationsList({
     error,
     refetch,
   } = useQuery(automationQueryOptions());
-  const { data: hasReachedLimit, refetch: refetchHasReachedLimit } = useQuery(
+  const { data: automationLimit, refetch: refetchHasReachedLimit } = useQuery(
     hasReachedLimitOfAutomationsQueryOptions(),
   );
   useRealtimeUser({
@@ -140,13 +141,11 @@ function AutomationsList({
   }
   return (
     <>
-      {hasReachedLimit && (
+      {automationLimit?.reached && (
         <Alert className="mb-4 bg-muted border-none">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            You have reached the maximum number of active automations for your
-            plan. To create another, disable or delete an existing active
-            automation.
+            {automationLimitMessage(automationLimit)}
           </AlertDescription>
         </Alert>
       )}

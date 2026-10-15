@@ -216,6 +216,13 @@ an org.
 - Connected workspaces show "Mentions run in <org>", and a warning when that
   org is not the one the user is acting in.
 
+**GitHub installations card** (Settings → Integrations): one row per GitHub
+account the user's token sees, with its mode and "Runs in" the bound org,
+"Unbound" or "Another organization". "Bind to <org>" opens the install-target
+receipt (account → org; moving re-routes future work only); admins of both
+orgs only. The repo picker lists only the active org's accounts, with a hint
+when none is bound.
+
 **Workspace hint** (Slack connect): an optional field that takes a workspace
 ID or an `app.slack.com/client/<ID>/…` URL and sends Slack's `team` parameter,
 because "Sign in with Slack" has no workspace picker of its own.

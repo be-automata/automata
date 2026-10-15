@@ -1,7 +1,7 @@
 import {
   getAutomations,
   getAutomation,
-  getHasReachedLimitOfAutomations,
+  getAutomationLimit,
 } from "@/server-actions/automations";
 import { getServerActionQueryOptions } from "./server-action-helpers";
 
@@ -35,8 +35,7 @@ export function hasReachedLimitOfAutomationsQueryOptions() {
   return getServerActionQueryOptions({
     queryKey: automationQueryKeys.hasReachedLimit(),
     queryFn: async () => {
-      const hasReachedLimit = await getHasReachedLimitOfAutomations();
-      return hasReachedLimit;
+      return await getAutomationLimit();
     },
   });
 }

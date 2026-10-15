@@ -33,16 +33,18 @@ export default async function IntegrationsSettingsPage() {
       : Promise.resolve(undefined),
   ]);
   const appUrl = nonLocalhostPublicAppUrl();
+  const isOrganizationAdmin =
+    !!membership && ORG_ADMIN_ROLES.has(membership.role);
 
   return (
     <IntegrationsSettings
       slackAccounts={slackAccounts}
+      canBindGithubInstallations={isOrganizationAdmin}
       slackAppSetup={{
         // Key names and presence only: no value leaves the server.
         status: describeSlackAppConfig(slackApp),
         organizationName: organization?.name ?? null,
-        canEditOrganization:
-          !!membership && ORG_ADMIN_ROLES.has(membership.role),
+        canEditOrganization: isOrganizationAdmin,
         requestUrl: `${appUrl}${slackRequestUrlPath(slackApp)}`,
         redirectUrl: `${appUrl}/api/auth/slack/callback`,
       }}

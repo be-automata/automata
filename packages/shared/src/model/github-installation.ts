@@ -1,7 +1,7 @@
 import { DB } from "../db";
 import { githubInstallation } from "../db/schema";
 import { GithubInstallation } from "../db/types";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 /**
  * GitHub App installation → org mapping (WI-5, ADR-001). This is the tenant seam
@@ -23,6 +23,45 @@ export async function getGithubInstallation({
     .where(eq(githubInstallation.installationId, String(installationId)))
     .limit(1);
   return row;
+}
+
+/**
+ * The binding rows for a set of installations (any org). Installations with no
+ * row are simply absent from the result.
+ */
+export async function getGithubInstallationsByInstallationIds({
+  db,
+  installationIds,
+}: {
+  db: DB;
+  installationIds: Array<string | number>;
+}): Promise<GithubInstallation[]> {
+  if (installationIds.length === 0) {
+    return [];
+  }
+  return await db
+    .select()
+    .from(githubInstallation)
+    .where(
+      inArray(
+        githubInstallation.installationId,
+        installationIds.map((id) => String(id)),
+      ),
+    );
+}
+
+/** Every installation bound to an org. */
+export async function getGithubInstallationsForOrganization({
+  db,
+  organizationId,
+}: {
+  db: DB;
+  organizationId: string;
+}): Promise<GithubInstallation[]> {
+  return await db
+    .select()
+    .from(githubInstallation)
+    .where(eq(githubInstallation.organizationId, organizationId));
 }
 
 /**

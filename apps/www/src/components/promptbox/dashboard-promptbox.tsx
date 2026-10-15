@@ -18,6 +18,9 @@ import {
 import { RepoBranchSelector } from "../repo-branch-selector";
 import { CredentialsWarning } from "./credentials-warning";
 import { RunsInCue } from "./runs-in-cue";
+import { RepoScopeHint } from "./repo-scope-hint";
+import { useUserReposQuery } from "@/queries/user-repo-queries";
+import { resolveSelectedRepo } from "@/lib/resolve-selected-repo";
 import { useCredentialInfoForAgent } from "@/atoms/user-credentials";
 import {
   PromptBoxToolBelt,
@@ -45,8 +48,16 @@ interface DashboardPromptBoxProps {
 }
 
 export function DashboardPromptBox(props: DashboardPromptBoxProps) {
-  const [repoFullName, setRepoFullName] = useSelectedRepo();
-  const [branchName, setBranchName] = useSelectedBranch();
+  const [storedRepoFullName, setRepoFullName] = useSelectedRepo();
+  const [storedBranchName, setBranchName] = useSelectedBranch();
+  // The stored selection is per user; ignore it when the active org's repo
+  // list does not hold it (see resolveSelectedRepo).
+  const { data: repoData } = useUserReposQuery();
+  const { repoFullName, branchName } = resolveSelectedRepo({
+    selectedRepoFullName: storedRepoFullName || null,
+    selectedBranch: storedBranchName || null,
+    repos: repoData?.repos,
+  });
   const [isRecording, setIsRecording] = useState(false);
   const onRepoBranchChange = useCallback(
     (repo: string | null, branch: string | null) => {
@@ -209,6 +220,7 @@ export function DashboardPromptBox(props: DashboardPromptBoxProps) {
           createNewBranchDisabled={!repoFullName}
         />
       </div>
+      <RepoScopeHint className="px-2 sm:px-4" />
     </div>
   );
 }
