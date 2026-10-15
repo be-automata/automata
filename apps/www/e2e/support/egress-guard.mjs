@@ -21,11 +21,12 @@ import https from "node:https";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 
+import { isLocalHost, normalizeHost } from "./egress-host.mjs";
+
 const EGRESS_LOG = process.env.E2E_EGRESS_LOG;
 const CONTROL_FILE = process.env.E2E_CONTROL_FILE;
 const FIXTURES_DIR = process.env.E2E_GITHUB_FIXTURES;
 
-const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const GITHUB_API_HOST = "api.github.com";
 
 function record(entry) {
@@ -100,7 +101,7 @@ const realFetch = globalThis.fetch;
 
 async function guardedFetch(input, init) {
   const { url, method } = describeRequest(input, init);
-  if (LOCAL_HOSTS.has(url.hostname)) {
+  if (isLocalHost(url.hostname)) {
     return realFetch(input, init);
   }
   const where = `${url.origin}${url.pathname}`;
@@ -141,10 +142,7 @@ function requestHost(args) {
     return new URL(String(first)).hostname;
   }
   const options = first ?? second ?? {};
-  return String(options.hostname ?? options.host ?? "localhost").replace(
-    /:\d+$/,
-    "",
-  );
+  return normalizeHost(options.hostname ?? options.host ?? "localhost");
 }
 
 for (const [scheme, module] of [
@@ -155,7 +153,7 @@ for (const [scheme, module] of [
     const original = module[name];
     module[name] = function guardedRequest(...args) {
       const host = requestHost(args);
-      if (!LOCAL_HOSTS.has(host)) {
+      if (!isLocalHost(host)) {
         const where = `${scheme}://${host}`;
         record({ kind: "blocked", via: `${scheme}.${name}`, url: where });
         throw new Error(`e2e egress guard: refused ${where}`);

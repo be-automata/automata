@@ -179,6 +179,8 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Egress-guard host parsing (node --test)
+        run: node --test apps/www/e2e/support/egress-host.node-test.mjs
       - name: Install Chromium
         run: pnpm --filter @terragon/www exec playwright install --with-deps chromium
       - name: Build workspace dependencies of www
