@@ -3,18 +3,30 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  listSchemaColumns,
+  listSchemaUniqueIndexes,
+} from "../db/schema-columns";
+
 /**
- * Static sync test (SCHEMA-01): deploy/assert-schema-ready.ts REQUIRED must
- * cover every self_heal_* column and every column of any table added after the
- * frozen baseline. Both files are read as text and the expectations are
- * DERIVED from schema.ts, never hard-coded, so a new column cannot ship
- * without its deploy-gate entry.
+ * Sync test (SCHEMA-01): deploy/assert-schema-ready.ts must require every
+ * self_heal_* column and every column of every table in schema.ts.
+ *
+ * The gate's REQUIRED list is now DERIVED from schema.ts through
+ * listSchemaColumns() (db/schema-columns.ts), so "REQUIRED" here is that
+ * derived set. Two independent checks keep it honest:
+ *   1. schema.ts is still parsed as TEXT, and every column the text parser
+ *      finds must be in the derived set (guards a broken derivation);
+ *   2. the gate's source must build REQUIRED / REQUIRED_INDEXES from the
+ *      derived lists and carry no hand-kept `table:, column:` literals (guards
+ *      the gate silently going back to a list someone has to remember).
  */
 
 /**
  * Every pgTable name in packages/shared/src/db/schema.ts at origin/main
- * 5481fd3, sorted. A table not in this list is new in this revision and must
- * have every column in REQUIRED.
+ * 5481fd3, sorted. Historically a table not in this list had to have every
+ * column in the hand-kept REQUIRED; the derived gate now requires every column
+ * of EVERY table, so this list only anchors the parser sanity check and RES-23.
  */
 const BASELINE_TABLES: readonly string[] = [
   "access_codes",
@@ -90,9 +102,14 @@ function parseSchemaTables(source: string): TableColumns[] {
   for (const part of parts) {
     const nameMatch = /^"([a-z_0-9]+)"/.exec(part);
     if (nameMatch?.[1] === undefined) continue;
-    // A part runs to the next pgTable( call, so it holds exactly one table's
-    // column builders (plus its index builders, which match no column type).
-    const columns = [...part.matchAll(COLUMN_PATTERN)].flatMap((m) =>
+    // Cut the part at the end of this pgTable( call (a `);` at column 0), so it
+    // holds exactly one table's column builders (plus its index builders,
+    // which match no column type). Without the cut, a shared column object
+    // declared between two tables (threadChatShared) is attributed to the
+    // table before it. Spread columns are invisible to this parser; the
+    // derived list covers them.
+    const body = part.split(/\n\);/)[0] ?? part;
+    const columns = [...body.matchAll(COLUMN_PATTERN)].flatMap((m) =>
       m[1] === undefined ? [] : [m[1]],
     );
     tables.push({ table: nameMatch[1], columns });
@@ -100,18 +117,11 @@ function parseSchemaTables(source: string): TableColumns[] {
   return tables;
 }
 
-function parseRequired(source: string): Set<string> {
-  const keys = new Set<string>();
-  for (const m of source.matchAll(
-    /table:\s*"([^"]+)",\s*column:\s*"([^"]+)"/g,
-  )) {
-    keys.add(`${m[1]}.${m[2]}`);
-  }
-  return keys;
-}
-
 const tables = parseSchemaTables(readFileSync(SCHEMA_PATH, "utf8"));
-const required = parseRequired(readFileSync(GATE_PATH, "utf8"));
+const gateSource = readFileSync(GATE_PATH, "utf8");
+const required = new Set(
+  listSchemaColumns().map((c) => `${c.table}.${c.column}`),
+);
 
 describe("assert-schema-ready REQUIRED stays in sync with schema.ts", () => {
   it("parses the schema (guards a silently broken parser)", () => {
@@ -123,6 +133,18 @@ describe("assert-schema-ready REQUIRED stays in sync with schema.ts", () => {
     expect(selfHeal.length).toBeGreaterThanOrEqual(11);
     expect(tables.length).toBeGreaterThanOrEqual(BASELINE_TABLES.length);
     expect(required.size).toBeGreaterThan(0);
+    expect(listSchemaUniqueIndexes().length).toBeGreaterThan(0);
+  });
+
+  it("builds the gate's REQUIRED lists from the derived schema lists", () => {
+    expect(gateSource).toMatch(
+      /const REQUIRED\b[^=]*=\s*listSchemaColumns\(\)/,
+    );
+    expect(gateSource).toMatch(
+      /const REQUIRED_INDEXES\b[^=]*=\s*listSchemaUniqueIndexes\(\)/,
+    );
+    // No hand-kept entries left to forget.
+    expect(gateSource).not.toMatch(/table:\s*"[^"]+",\s*column:\s*"/);
   });
 
   it("lists every self_heal_* column of repo_review_settings in REQUIRED", () => {
@@ -140,11 +162,9 @@ describe("assert-schema-ready REQUIRED stays in sync with schema.ts", () => {
     expect([...required].join("\n")).not.toContain("gate_commands");
   });
 
-  it("requires every column of every table absent from the baseline", () => {
-    const baseline = new Set(BASELINE_TABLES);
+  it("requires every column of every table (baseline or not)", () => {
     const missing: string[] = [];
     for (const t of tables) {
-      if (baseline.has(t.table)) continue;
       for (const column of t.columns) {
         if (!required.has(`${t.table}.${column}`)) {
           missing.push(`${t.table}.${column}`);
