@@ -19,6 +19,12 @@ import { useRealtimeUser } from "@/hooks/useRealtime";
 import { SlackAccountWithMetadata } from "@terragon/shared/db/types";
 import { AIModel } from "@terragon/agent/types";
 import { useServerActionMutation } from "@/queries/server-action-helpers";
+import {
+  useActiveOrganization,
+  useMyOrganizations,
+} from "@/queries/organization-queries";
+import { OrgAvatar } from "../org-avatar";
+import { SlackConnectDialog, SlackInstallDialog } from "./slack-target-dialogs";
 
 function SlackAccountItem({
   account,
@@ -39,6 +45,10 @@ function SlackAccountItem({
   const getSlackAppInstallUrlMutation = useServerActionMutation({
     mutationFn: getSlackAppInstallUrl,
   });
+  const { activeOrganization, expectedOrganizationId } =
+    useActiveOrganization();
+  const { data: myOrganizations } = useMyOrganizations();
+  const [installOpen, setInstallOpen] = useState(false);
 
   const handleDisconnect = async () => {
     try {
@@ -55,11 +65,25 @@ function SlackAccountItem({
   };
 
   const handleInstallApp = async () => {
-    const appInstallUrl = await getSlackAppInstallUrlMutation.mutateAsync();
+    // The team hint opens Slack on this card's workspace, not the browser's
+    // default one.
+    const appInstallUrl = await getSlackAppInstallUrlMutation.mutateAsync({
+      teamId: account.teamId,
+      expectedOrganizationId,
+    });
     window.location.href = appInstallUrl;
   };
 
   const isConnected = !!account.installation;
+  const boundOrganizationId = account.installation?.organizationId ?? null;
+  const boundOrganization =
+    myOrganizations?.organizations.find(
+      (org) => org.id === boundOrganizationId,
+    ) ?? null;
+  const boundElsewhere =
+    isConnected &&
+    !!boundOrganizationId &&
+    boundOrganizationId !== activeOrganization?.id;
 
   return (
     <div className="space-y-4 rounded-lg border p-4">
@@ -71,8 +95,38 @@ function SlackAccountItem({
             <ConnectionStatusPill connected={isConnected} />
           </div>
           <p className="text-xs text-muted-foreground">
-            Workspace ID: {account.teamId}
+            Workspace ID: <span className="font-mono">{account.teamId}</span>
           </p>
+          {isConnected && (
+            <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              Mentions run in
+              {boundOrganization ? (
+                <>
+                  <OrgAvatar
+                    organization={boundOrganization}
+                    className="size-4 text-[8px]"
+                  />
+                  <span className="font-medium text-foreground">
+                    {boundOrganization.name}
+                  </span>
+                </>
+              ) : boundOrganizationId ? (
+                <span className="font-medium text-foreground">
+                  an organization you are not a member of
+                </span>
+              ) : (
+                <span className="font-medium text-foreground">
+                  no organization (personal)
+                </span>
+              )}
+            </p>
+          )}
+          {boundElsewhere && (
+            <p className="text-xs text-amber-700 dark:text-amber-400">
+              This workspace is bound to a different organization than the one
+              you are acting in. Settings below apply to your account only.
+            </p>
+          )}
         </div>
       </div>
 
@@ -84,12 +138,26 @@ function SlackAccountItem({
           </p>
           <Button
             size="sm"
-            onClick={handleInstallApp}
-            disabled={!slackAppReady || getSlackAppInstallUrlMutation.isPending}
+            onClick={() => setInstallOpen(true)}
+            disabled={
+              !slackAppReady ||
+              !activeOrganization ||
+              getSlackAppInstallUrlMutation.isPending
+            }
           >
             <Slack className="h-4 w-4" />
-            Install Slack App
+            {activeOrganization
+              ? `Install into ${activeOrganization.name}`
+              : "Choose an organization to install"}
           </Button>
+          <SlackInstallDialog
+            open={installOpen}
+            onOpenChange={setInstallOpen}
+            workspaceName={account.slackTeamName}
+            organization={activeOrganization}
+            isPending={getSlackAppInstallUrlMutation.isPending}
+            onContinue={handleInstallApp}
+          />
         </div>
       ) : (
         <>
@@ -168,11 +236,28 @@ export function SlackAccountSettings({
   const getSlackOAuthUrlMutation = useServerActionMutation({
     mutationFn: getSlackOAuthUrl,
   });
-  const canConnect = slackAppReady && !getSlackOAuthUrlMutation.isPending;
-  const handleConnect = async () => {
-    const authUrl = await getSlackOAuthUrlMutation.mutateAsync();
+  const { activeOrganization, expectedOrganizationId, isLoading } =
+    useActiveOrganization();
+  // Wait for the org list so the request names the org the page shows.
+  const canConnect =
+    slackAppReady && !isLoading && !getSlackOAuthUrlMutation.isPending;
+  const [connectOpen, setConnectOpen] = useState(false);
+  const handleConnect = async (teamId: string | undefined) => {
+    const authUrl = await getSlackOAuthUrlMutation.mutateAsync({
+      teamId,
+      expectedOrganizationId,
+    });
     window.location.href = authUrl;
   };
+  const connectDialog = (
+    <SlackConnectDialog
+      open={connectOpen}
+      onOpenChange={setConnectOpen}
+      organization={activeOrganization}
+      isPending={getSlackOAuthUrlMutation.isPending}
+      onContinue={handleConnect}
+    />
+  );
 
   // No connections - show connect prompt
   if (accounts.length === 0) {
@@ -182,13 +267,18 @@ export function SlackAccountSettings({
           Connect your Slack workspace to interact with Terragon through Slack
         </p>
         <div className="flex">
-          <Button size="sm" onClick={handleConnect} disabled={!canConnect}>
+          <Button
+            size="sm"
+            onClick={() => setConnectOpen(true)}
+            disabled={!canConnect}
+          >
             <Slack className="h-4 w-4" />
             {getSlackOAuthUrlMutation.isPending
               ? "Connecting..."
               : "Connect Slack Workspace"}
           </Button>
         </div>
+        {connectDialog}
       </div>
     );
   }
@@ -207,7 +297,7 @@ export function SlackAccountSettings({
       <div className="flex">
         <Button
           variant="link"
-          onClick={handleConnect}
+          onClick={() => setConnectOpen(true)}
           disabled={!canConnect}
           className="underline cursor-pointer"
         >
@@ -216,6 +306,7 @@ export function SlackAccountSettings({
             : "Connect another workspace"}
         </Button>
       </div>
+      {connectDialog}
     </div>
   );
 }

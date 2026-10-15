@@ -54,6 +54,7 @@ import React from "react";
 import { useTheme } from "next-themes";
 import { headerClassName } from "./shared/header";
 import { cn } from "@/lib/utils";
+import { OrgSwitcher } from "./org-switcher";
 
 function SidebarHeaderContent() {
   const { open, isMobile, toggleSidebar } = useSidebar();
@@ -116,6 +117,11 @@ export function AppSidebar() {
           <SidebarHeaderContent />
         </SidebarHeader>
         <SidebarContent>
+          <SidebarGroup className="pb-0">
+            <SidebarGroupContent>
+              <OrgSwitcher />
+            </SidebarGroupContent>
+          </SidebarGroup>
           <SidebarGroup>
             <SidebarGroupContent>
               <SidebarMenu>
