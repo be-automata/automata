@@ -155,6 +155,15 @@ is no display voice in the app.
   `/o/<orgSlug>/repos/<owner>/<repo>`; the slug in the URL is authoritative
   and the session follows it after a membership check. Account pages stay at
   `/account` and `/settings` until then.
+- **Org links (shipped, first step):** `/o/<orgSlug>/<path>` already works as
+  a shareable link. It checks membership, makes that org the session's active
+  org and redirects to `/<path>` with its query (`/dashboard` when there is no
+  path). An unknown slug and a non-member both get a 404, and signed-out
+  visitors go through `/login?returnUrl=…`. The target is rebuilt from path
+  segments only (no `//`, backslashes, schemes, dot segments or nested
+  `/o/…`). The org switcher's "Copy link to this org" builds these links from
+  the current page. Moving the routes themselves under `/o/<slug>` is still
+  planned.
 - Tables are compact (32px rows), left-aligned, with mono key columns.
 
 ## Elevation & Depth

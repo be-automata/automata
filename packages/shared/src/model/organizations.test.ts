@@ -46,6 +46,18 @@ describe("organizations", () => {
     expect(bySlug?.id).toBe(org.id);
   });
 
+  it("returns undefined for an unknown slug and matches the slug exactly", async () => {
+    const slug = uniqueSlug();
+    await createOrganization({ db, name: "Acme", slug });
+
+    expect(
+      await getOrganizationBySlug({ db, slug: `${slug}-missing` }),
+    ).toBeUndefined();
+    expect(
+      await getOrganizationBySlug({ db, slug: slug.slice(0, -1) }),
+    ).toBeUndefined();
+  });
+
   it("enforces slug uniqueness", async () => {
     const slug = uniqueSlug();
     await createOrganization({ db, name: "First", slug });
