@@ -66,6 +66,7 @@ describe("withDefaultActiveOrganization (session.create.before hook body)", () =
     });
     expect(result?.data.activeOrganizationId).toBe(first.id);
   });
+
   // createdAt has ms precision — space orgs so "oldest" is strict.
   const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
