@@ -24,19 +24,17 @@ import {
 function makeOctokit(
   installations: Array<{ id: number; login: string; type: string }>,
 ) {
+  const listed = installations.map(({ id, login, type }) => ({
+    id,
+    account: { login, type },
+  }));
   return {
     rest: {
       apps: {
-        listInstallationsForAuthenticatedUser: vi.fn().mockResolvedValue({
-          data: {
-            installations: installations.map(({ id, login, type }) => ({
-              id,
-              account: { login, type },
-            })),
-          },
-        }),
+        listInstallationsForAuthenticatedUser: vi.fn(),
       },
     },
+    paginate: vi.fn().mockResolvedValue(listed),
   };
 }
 
