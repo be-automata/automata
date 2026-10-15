@@ -360,6 +360,40 @@ export async function validateCanRunAutomation({
   return { automation, tier, canRun: true };
 }
 
+export interface AutomationLimitStatus {
+  reached: boolean;
+  /** Active, non-manual automations across ALL the user's orgs. */
+  count: number;
+  /** The plan's cap, or null when the plan has none. */
+  max: number | null;
+}
+
+/**
+ * The plan's active-automation cap is account-wide (a billing decision), so
+ * the count is NOT fenced by the active org — unlike the automations list.
+ * The UI must say "across all your organizations" for that reason.
+ */
+export async function getAutomationLimitStatus({
+  userId,
+  tier,
+}: {
+  userId: string;
+  tier: AccessTier;
+}): Promise<AutomationLimitStatus> {
+  if (tier === "pro" || tier === "none") {
+    return { reached: false, count: 0, max: null };
+  }
+  const [count, max] = await Promise.all([
+    getAutomationCount({ db, userId }),
+    getMaxAutomationsForUser(userId),
+  ]);
+  return {
+    reached: max !== null && Number(count) >= max,
+    count: Number(count),
+    max,
+  };
+}
+
 export async function hasReachedLimitOfAutomations({
   userId,
   tier,
@@ -367,17 +401,8 @@ export async function hasReachedLimitOfAutomations({
   userId: string;
   tier: AccessTier;
 }) {
-  if (tier === "pro" || tier === "none") {
-    return false;
-  }
-  const [currentCount, maxAutomations] = await Promise.all([
-    getAutomationCount({ db, userId }),
-    getMaxAutomationsForUser(userId),
-  ]);
-  if (maxAutomations === null) {
-    return false;
-  }
-  return currentCount >= maxAutomations;
+  const { reached } = await getAutomationLimitStatus({ userId, tier });
+  return reached;
 }
 
 /**
@@ -454,11 +479,11 @@ export async function validateAutomationCreationOrUpdate({
       if (hasReachedLimit) {
         if (automationId === null) {
           throw new UserFacingError(
-            "You have reached the limit of active automations. Disable or delete an existing active automation to create a new one.",
+            "You have reached the limit of active automations for your plan across all your organizations. Disable or delete an existing active automation to create a new one.",
           );
         }
         throw new UserFacingError(
-          "You have reached the limit of active automations. Disable or delete an existing active automation to continue.",
+          "You have reached the limit of active automations for your plan across all your organizations. Disable or delete an existing active automation to continue.",
         );
       }
     }

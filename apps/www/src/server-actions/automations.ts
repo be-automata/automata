@@ -16,14 +16,15 @@ import {
   runIssueAutomation as runIssueAutomationInternal,
   validateAutomationCreationOrUpdate,
   validateCanRunAutomation,
-  hasReachedLimitOfAutomations,
+  getAutomationLimitStatus,
 } from "@/server-lib/automations";
 import { getAccessInfoForUser } from "@/lib/subscription";
 
-export const getHasReachedLimitOfAutomations = userOnlyAction(
-  async function getHasReachedLimitOfAutomations(userId: string) {
+/** Account-wide (all orgs), with the counts the limit notice prints. */
+export const getAutomationLimit = userOnlyAction(
+  async function getAutomationLimit(userId: string) {
     const { tier } = await getAccessInfoForUser(userId);
-    return await hasReachedLimitOfAutomations({ userId, tier });
+    return await getAutomationLimitStatus({ userId, tier });
   },
   { defaultErrorMessage: "An unexpected error occurred" },
 );

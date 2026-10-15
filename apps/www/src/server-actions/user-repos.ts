@@ -1,15 +1,31 @@
 "use server";
 
-import { userOnlyAction } from "@/lib/auth-server";
+import {
+  getActiveOrganizationMembershipOrNull,
+  userOnlyAction,
+} from "@/lib/auth-server";
+import { db } from "@/lib/db";
 import {
   getOctokitForApp,
   getOctokitForUser,
   parseRepoFullName,
 } from "@/lib/github";
+import { listInstallationsForOctokit } from "@/server-lib/github-installations";
+import { getGithubInstallationsForOrganization } from "@terragon/shared/model/github-installation";
 import { Endpoints } from "@octokit/types";
 
 export type UserRepo =
   Endpoints["GET /installation/repositories"]["response"]["data"]["repositories"][number];
+
+/**
+ * Which repos the list holds for the active org:
+ * - "organization": only repos of GitHub installations bound to that org.
+ * - "unassigned": the org has no bound installation yet, so the list falls
+ *   back to every installation the user's token can see (the picker says so
+ *   and points at Settings → Integrations).
+ * Absent when there is no active org.
+ */
+export type UserReposScope = "organization" | "unassigned";
 
 export type UserReposResult = {
   repos: UserRepo[];
@@ -19,7 +35,33 @@ export type UserReposResult = {
   // App has no repositories": the first is fixed by signing in with GitHub,
   // the second by installing the App.
   githubTokenMissing?: boolean;
+  scope?: UserReposScope;
 };
+
+/**
+ * The installation ids the active org may list repos from, or null for "no
+ * restriction" (no active org, or an org with nothing bound yet).
+ */
+async function resolveRepoScope(userId: string): Promise<{
+  scope: UserReposScope | undefined;
+  allowedInstallationIds: Set<string> | null;
+}> {
+  const membership = await getActiveOrganizationMembershipOrNull(userId);
+  if (!membership) {
+    return { scope: undefined, allowedInstallationIds: null };
+  }
+  const bound = await getGithubInstallationsForOrganization({
+    db,
+    organizationId: membership.organizationId,
+  });
+  if (bound.length === 0) {
+    return { scope: "unassigned", allowedInstallationIds: null };
+  }
+  return {
+    scope: "organization",
+    allowedInstallationIds: new Set(bound.map((row) => row.installationId)),
+  };
+}
 
 export const getUserRepos = userOnlyAction(
   async function getUserRepos(userId: string): Promise<UserReposResult> {
@@ -27,20 +69,23 @@ export const getUserRepos = userOnlyAction(
     if (!octokit) {
       return { repos: [], githubTokenMissing: true };
     }
+    const { scope, allowedInstallationIds } = await resolveRepoScope(userId);
     try {
-      // Try to get installations if GitHub App is configured
-      const { data } =
-        await octokit.rest.apps.listInstallationsForAuthenticatedUser();
+      const installations = (await listInstallationsForOctokit(octokit)).filter(
+        (installation) =>
+          !allowedInstallationIds ||
+          allowedInstallationIds.has(installation.installationId),
+      );
 
-      if (data.installations.length > 0) {
-        // If user has app installations, get repositories from those installations in parallel
-        const repoPromises = data.installations.map(async (installation) => {
+      if (installations.length > 0) {
+        // Get repositories from those installations in parallel
+        const repoPromises = installations.map(async (installation) => {
           try {
             // Get all repositories accessible to the user in this installation using pagination
             const repositories = await octokit.paginate(
               octokit.rest.apps.listInstallationReposForAuthenticatedUser,
               {
-                installation_id: installation.id,
+                installation_id: Number(installation.installationId),
                 per_page: 100,
               },
             );
@@ -48,7 +93,7 @@ export const getUserRepos = userOnlyAction(
             return repositories;
           } catch (installationError) {
             console.warn(
-              `Failed to get repos for installation ${installation.id}:`,
+              `Failed to get repos for installation ${installation.installationId}:`,
               installationError,
             );
             return [];
@@ -72,13 +117,13 @@ export const getUserRepos = userOnlyAction(
               return bPushedAt - aPushedAt;
             });
 
-          return { repos: filteredRepos };
+          return { repos: filteredRepos, scope };
         }
       }
     } catch (appError) {
       console.warn("Failed to get app installations or user info:", appError);
     }
-    return { repos: [] };
+    return { repos: [], scope };
   },
   { defaultErrorMessage: "An unexpected error occurred" },
 );
