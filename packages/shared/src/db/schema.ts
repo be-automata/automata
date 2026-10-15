@@ -7,6 +7,7 @@ import {
   integer,
   index,
   uniqueIndex,
+  unique,
   AnyPgColumn,
   numeric,
   bigint,
@@ -125,6 +126,10 @@ export const organization = pgTable("organization", {
   logo: text("logo"),
   createdAt: timestamp("created_at").notNull(),
   metadata: text("metadata"),
+  // A single-user workspace (backfilled or auto-created), as opposed to a
+  // team org. Declared to the Better Auth plugin as an additionalField with
+  // input: false (apps/www/src/lib/auth.ts), so the API cannot set it.
+  isPersonal: boolean("is_personal").notNull().default(false),
 });
 
 export const member = pgTable(
@@ -743,8 +748,10 @@ export const environment = pgTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
-    // Tenant fence (WI-5 step 2). Nullable; the user_id_repo_full_name unique
-    // index becomes (organization_id, repo) when tightened (ADR-001 step 5).
+    // Tenant fence (WI-5 step 2). Nullable; uniqueness is per
+    // (organization_id, user_id, repo_full_name) with NULLS NOT DISTINCT, so
+    // the same user can hold one row per org for the same repo and the
+    // no-org (NULL) case still dedupes per user + repo.
     organizationId: text("organization_id").references(() => organization.id, {
       onDelete: "cascade",
     }),
@@ -765,10 +772,19 @@ export const environment = pgTable(
       .$onUpdate(() => new Date()),
   },
   (table) => [
-    uniqueIndex("user_id_repo_full_name_branch_name_unique").on(
-      table.userId,
-      table.repoFullName,
-    ),
+    // Replaces the old (user_id, repo_full_name) unique index, which made a
+    // second org's row for the same repo impossible: the org-fenced lookup
+    // missed the other org's row, the insert hit ON CONFLICT DO NOTHING on
+    // it, and getOrCreateEnvironment threw. Postgres 15+ (NULLS NOT DISTINCT).
+    // Prod: deploy/migrations/2026-10-14-environment-org-unique.sql.
+    unique("environment_org_user_repo_unique")
+      .on(table.organizationId, table.userId, table.repoFullName)
+      .nullsNotDistinct(),
+    // The global environment stays one row per USER across orgs (the old
+    // index guaranteed that via repo ""); the fence exempts it from org.
+    uniqueIndex("environment_user_global_unique")
+      .on(table.userId)
+      .where(sql`${table.isGlobal} = true`),
     index("environment_org_id_index").on(table.organizationId),
     // Serves getEnvironments' org-fenced list read (WHERE user_id AND org).
     index("environment_user_id_org_id_index").on(

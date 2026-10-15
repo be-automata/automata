@@ -313,7 +313,23 @@ export const auth = betterAuth({
     // Tenant boundary. Each org maps to a Hatchet tenant + org-scoped rows.
     // Adds organization/member/invitation tables + session.activeOrganizationId
     // (Drizzle mapping in @terragon/shared/db/schema). See ADR-001.
-    organization(),
+    organization({
+      schema: {
+        organization: {
+          additionalFields: {
+            // organization.is_personal. input: false — only server code
+            // (backfill, future sign-up provisioning) marks an org personal;
+            // the create/update endpoints cannot set it.
+            isPersonal: {
+              type: "boolean",
+              required: false,
+              defaultValue: false,
+              input: false,
+            },
+          },
+        },
+      },
+    }),
     magicLink({
       expiresIn: 15 * 60, // 15 minutes
       sendMagicLink: async ({ email, url: rawUrl }) => {
