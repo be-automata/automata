@@ -13,7 +13,8 @@ test.describe("runs-in cue", () => {
     signIn,
     setGithubDelay,
   }) => {
-    await signIn(WORLD.users.owner, beta.id);
+    // A user whose GitHub listing cache no earlier spec has warmed.
+    await signIn(WORLD.users.cueWatcher, beta.id);
     setGithubDelay(3000);
     await page.goto("/dashboard");
 

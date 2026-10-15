@@ -5,7 +5,8 @@ import path from "node:path";
  * The seeded two-org world. Fixed ids so specs and GitHub fixtures agree;
  * e2e/.state/world.json carries the run-specific parts (database URL, files).
  *
- * - U owns E2E Alpha and E2E Beta (team orgs) plus a personal org.
+ * - U owns E2E Alpha and E2E Beta (team orgs) plus a personal org; the cue
+ *   watcher is a second owner of Alpha and Beta.
  * - N is not a member of any of U's orgs and owns E2E Gamma.
  * - GitHub: installation 9001 (account e2e-alpha-gh) is bound to Alpha and
  *   9002 (account e2e-beta-gh) to Beta; U's token sees both.
@@ -16,6 +17,17 @@ export const WORLD = {
       id: "e2e-user-owner",
       name: "E2E Owner",
       email: "owner@e2e.invalid",
+    },
+    /**
+     * Same memberships and GitHub view as the owner, used only by the
+     * runs-in-cue spec: the server caches GitHub listings per user (Redis,
+     * 120 s), so a user no earlier spec touched is the only way to observe
+     * the loading window.
+     */
+    cueWatcher: {
+      id: "e2e-user-cue",
+      name: "E2E Cue Watcher",
+      email: "cue@e2e.invalid",
     },
     outsider: {
       id: "e2e-user-outsider",

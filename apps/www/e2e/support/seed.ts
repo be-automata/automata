@@ -6,7 +6,7 @@ import { encryptToken, encryptValue } from "@terragon/utils/encryption";
 import { E2E_ENCRYPTION_MASTER_KEY } from "../e2e-env";
 import { WORLD, type WorldState } from "./world";
 
-/** The fixture token U's GitHub account row holds (encrypted at rest). */
+/** The fixture token the GitHub account rows hold (encrypted at rest). */
 export const OWNER_GITHUB_TOKEN = "gho_e2e_owner_placeholder_token";
 
 const SECRETS = {
@@ -48,11 +48,11 @@ export async function seedTwoOrgWorld(db: DB): Promise<SeededWorld> {
 
   const base = Date.now() - 60 * 60 * 1000;
   const at = (offsetSeconds: number) => new Date(base + offsetSeconds * 1000);
-  const { owner, outsider } = WORLD.users;
+  const { owner, cueWatcher, outsider } = WORLD.users;
   const { personal, alpha, beta, gamma } = WORLD.orgs;
 
   await db.insert(schema.user).values(
-    [owner, outsider].map((user) => ({
+    [owner, cueWatcher, outsider].map((user) => ({
       id: user.id,
       name: user.name,
       email: user.email,
@@ -81,6 +81,13 @@ export async function seedTwoOrgWorld(db: DB): Promise<SeededWorld> {
       role: "owner",
       createdAt: at(10 + index),
     })),
+    ...[alpha, beta].map((org, index) => ({
+      id: `e2e-member-cue-${org.slug}`,
+      organizationId: org.id,
+      userId: cueWatcher.id,
+      role: "owner",
+      createdAt: at(15 + index),
+    })),
     {
       id: "e2e-member-outsider-gamma",
       organizationId: gamma.id,
@@ -99,21 +106,32 @@ export async function seedTwoOrgWorld(db: DB): Promise<SeededWorld> {
       selectedRepo: WORLD.github.alphaRepo,
       selectedBranch: "main",
     },
+    {
+      userId: cueWatcher.id,
+      hasSeenOnboarding: true,
+      selectedRepo: WORLD.github.alphaRepo,
+      selectedBranch: "main",
+    },
     { userId: outsider.id, hasSeenOnboarding: true },
   ]);
 
   // U signed in with GitHub: the token is encrypted the way auth.ts's
   // account.create hook stores it. No expiry, so no refresh is attempted.
-  await db.insert(schema.account).values({
-    id: "e2e-account-owner-github",
-    accountId: "424242",
-    providerId: "github",
-    userId: owner.id,
-    accessToken: encryptToken(OWNER_GITHUB_TOKEN, E2E_ENCRYPTION_MASTER_KEY),
-    scope: "read:user,user:email",
-    createdAt: at(0),
-    updatedAt: at(0),
-  });
+  await db.insert(schema.account).values(
+    [
+      { user: owner, githubId: "424242" },
+      { user: cueWatcher, githubId: "424243" },
+    ].map(({ user, githubId }) => ({
+      id: `e2e-account-${user.id}-github`,
+      accountId: githubId,
+      providerId: "github",
+      userId: user.id,
+      accessToken: encryptToken(OWNER_GITHUB_TOKEN, E2E_ENCRYPTION_MASTER_KEY),
+      scope: "read:user,user:email",
+      createdAt: at(0),
+      updatedAt: at(0),
+    })),
+  );
 
   await db.insert(schema.githubInstallation).values([
     {
