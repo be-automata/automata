@@ -15,8 +15,6 @@
 --
 -- Idempotent: safe to re-run, and safe on a database already migrated.
 
-BEGIN;
-
 -- 1. Rename the owner column (better-auth 1.5 renamed apiKey.userId ->
 --    referenceId). Guarded so a re-run is a no-op.
 DO $$
@@ -36,8 +34,6 @@ END $$;
 --    Additive and safe; the DEFAULT backfills existing rows in place.
 ALTER TABLE "apikey"
   ADD COLUMN IF NOT EXISTS "config_id" text NOT NULL DEFAULT 'default';
-
-COMMIT;
 
 -- Verify (expect: reference_id present, config_id present, user_id absent,
 -- and zero rows with a null owner):

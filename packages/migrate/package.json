@@ -1,0 +1,30 @@
+{
+  "name": "@terragon/migrate",
+  "version": "1.0.0",
+  "description": "Forward-only SQL migration runner with a schema_migrations ledger (deploy/migrations).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run --no-file-parallelism",
+    "generate-baseline": "tsx scripts/generate-baseline.ts",
+    "tsc-check": "tsc --noEmit",
+    "format": "prettier --write . --ignore-path ../../.prettierignore --config ../../.prettierrc",
+    "format-check": "prettier --check . --ignore-path ../../.prettierignore --config ../../.prettierrc"
+  },
+  "packageManager": "pnpm@10.14.0",
+  "dependencies": {
+    "@types/pg": "^8.15.2",
+    "drizzle-kit": "^0.31.4",
+    "pg": "^8.16.0"
+  },
+  "devDependencies": {
+    "@terragon/dev-env": "workspace:*",
+    "@terragon/tsconfig": "workspace:*",
+    "@types/node": "^22.15.29",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  }
+}
