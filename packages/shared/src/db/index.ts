@@ -61,15 +61,34 @@ export { sql } from "drizzle-orm";
 
 export type DB = ReturnType<typeof createNodePgDb>;
 
+/**
+ * A pg-style Pool re-emits an IDLE client's socket error as its own "error"
+ * event, and an EventEmitter with no "error" listener throws. On Workers a
+ * Neon WebSocket dropping (request teardown, Neon closing an idle socket)
+ * surfaced as `Unhandled error. (Uncaught Error: Network connection lost.)`
+ * after page loads, and could fail a render still in flight. The pool has
+ * already removed the broken client when it emits, so the only job here is to
+ * keep the event from throwing; queries in progress still get their own error.
+ */
+function onIdleConnectionError(error: unknown): void {
+  console.warn(
+    "[db] idle connection error (connection discarded):",
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
 export function createDb(databaseUrl: string): DB {
   if (selectDriver(databaseUrl) === "neon-serverless") {
     const pool = new NeonPool({
       connectionString: databaseUrl,
       connectionTimeoutMillis: DB_CONNECT_TIMEOUT_MS,
     });
+    pool.on("error", onIdleConnectionError);
     return drizzleNeon(pool, { schema }) as unknown as DB;
   }
-  return createNodePgDb(databaseUrl);
+  const db = createNodePgDb(databaseUrl);
+  db.$client.on("error", onIdleConnectionError);
+  return db;
 }
 
 /**
