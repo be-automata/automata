@@ -119,7 +119,8 @@ export function GithubInstallationsCard({
 }: {
   canBindToOrganization: boolean;
 }) {
-  const { data, isLoading } = useGithubInstallationsQuery();
+  const { data, isLoading, isError, isFetching, refetch } =
+    useGithubInstallationsQuery();
   const { activeOrganization, expectedOrganizationId } =
     useActiveOrganization();
   const bindMutation = useBindGithubInstallation();
@@ -128,6 +129,24 @@ export function GithubInstallationsCard({
   if (isLoading) {
     return (
       <p className="text-sm text-muted-foreground">Loading GitHub accounts…</p>
+    );
+  }
+  if (isError && !data) {
+    // A failed load is not "nothing installed": say so and offer a retry.
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm text-muted-foreground">
+          Could not load your GitHub accounts. GitHub did not answer.
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={isFetching}
+          onClick={() => void refetch()}
+        >
+          Try again
+        </Button>
+      </div>
     );
   }
   if (data?.githubTokenMissing) {
