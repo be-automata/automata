@@ -1,6 +1,6 @@
 import { and, eq, sql, type SQL } from "drizzle-orm";
 
-import type { DB } from "../db";
+import { rowsOf, type DB } from "../db";
 import { hatchetRun, thread } from "../db/schema";
 import { getOrganizationBySlug } from "./organizations";
 import { threadIsTerminal } from "./thread-effective-status";
@@ -236,10 +236,6 @@ class RehomeRollback extends Error {
 }
 
 type Tx = Parameters<Parameters<DB["transaction"]>[0]>[0];
-
-function rowsOf<T>(result: unknown): T[] {
-  return (result as { rows?: T[] }).rows ?? [];
-}
 
 const ident = (name: string): SQL => sql`${sql.identifier(name)}`;
 

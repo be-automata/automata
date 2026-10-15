@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getOrganizationBySlug } from "@terragon/shared/model/organizations";
 
 import { getUserIdOrNull } from "@/lib/auth-server";
-import { db } from "@/lib/db";
 import { buildOrgLinkTarget } from "@/lib/org-link";
-import { activateOrganizationForUser } from "@/server-lib/active-organization";
+import { activateOrganizationBySlugForUser } from "@/server-lib/active-organization";
 
 /**
  * GET /o/<orgSlug>/<path...>
@@ -41,13 +39,9 @@ export async function GET(
     return redirectTo(login);
   }
 
-  const organization = await getOrganizationBySlug({ db, slug: orgSlug });
-  if (!organization) {
-    return notFound();
-  }
-  const activated = await activateOrganizationForUser({
+  const activated = await activateOrganizationBySlugForUser({
     userId,
-    organizationId: organization.id,
+    slug: orgSlug,
   });
   if (!activated) {
     return notFound();

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { authClient } from "@/lib/auth-client";
+import { DEFAULT_RETURN_PATH, safeReturnPath } from "@/lib/safe-return-path";
 import { toast } from "sonner";
 
 /**
@@ -29,7 +30,9 @@ export function EmailPasswordAuth({ returnUrl }: { returnUrl: string }) {
     setLoading(true);
     try {
       const onSuccess = () => {
-        window.location.href = returnUrl;
+        // The login page already sanitized it; re-checked at the navigation
+        // so this form is never an open redirect on its own.
+        window.location.href = safeReturnPath(returnUrl) ?? DEFAULT_RETURN_PATH;
       };
       if (isSignUp) {
         const { error } = await authClient.signUp.email({

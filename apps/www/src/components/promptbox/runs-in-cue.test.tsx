@@ -1,14 +1,8 @@
 import React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
-// The avatar is rendered by its own module; only its presence matters here.
-vi.mock("@/components/org-avatar", () => ({
-  OrgAvatar: ({ organization }: { organization: { name: string } }) =>
-    React.createElement("span", { "data-org-avatar": organization.name }),
-}));
-
-const { RunsInCueView } = await import("./runs-in-cue");
+import { RunsInCueView } from "./runs-in-cue";
 
 const acme = { id: "org_acme", name: "Acme", logo: null };
 
@@ -18,7 +12,8 @@ describe("RunsInCueView", () => {
       <RunsInCueView organization={acme} repoFullName="acme/api" />,
     );
     expect(html).toContain("Runs in");
-    expect(html).toContain('data-org-avatar="Acme"');
+    // The org's avatar (its initials), then its name.
+    expect(html).toContain(">AC</span>");
     expect(html).toContain("Acme");
     expect(html).toContain("acme/api");
     expect(html).toContain('title="Runs in Acme · acme/api"');

@@ -171,10 +171,6 @@ function isServerOnlyInLayer(source: EnvSource, key: string): boolean {
   );
 }
 
-function keysAsVariables(keys: Iterable<string>): EnvironmentVariable[] {
-  return Array.from(keys, (key) => ({ key, value: "" }));
-}
-
 /**
  * Per-key provenance of what an agent receives, for display: the same
  * overlay `mergeEnvironmentLayers` performs for the sandbox, applied after
@@ -186,46 +182,41 @@ function keysAsVariables(keys: Iterable<string>): EnvironmentVariable[] {
 export function describeEffectiveEnvironment(
   layers: readonly EnvironmentKeyLayer[],
 ): EffectiveEnvironmentEntry[] {
-  const uniqueLayers = layers.map(({ source, keys }) => ({
-    source,
-    keys: new Set(keys),
-  }));
-  const agentMerged = mergeEnvironmentLayers(
-    uniqueLayers.map(({ source, keys }) => ({
-      source,
-      variables: keysAsVariables(
-        Array.from(keys).filter((key) => !isServerOnlyInLayer(source, key)),
-      ),
-    })),
-  );
-  const allMerged = mergeEnvironmentLayers(
-    uniqueLayers.map(({ source, keys }) => ({
-      source,
-      variables: keysAsVariables(keys),
-    })),
-  );
-  const entries = Object.entries(allMerged).map(
-    ([key, { source: lastSource }]): EffectiveEnvironmentEntry => {
-      const definers = uniqueLayers
-        .filter((layer) => layer.keys.has(key))
-        .map((layer) => layer.source);
+  // Each key's defining layers, in layer order (a key counted once per layer).
+  const definersByKey = new Map<string, EnvSource[]>();
+  for (const { source, keys } of layers) {
+    for (const key of new Set(keys)) {
+      const definers = definersByKey.get(key);
+      if (definers) {
+        definers.push(source);
+      } else {
+        definersByKey.set(key, [source]);
+      }
+    }
+  }
+  const entries = Array.from(
+    definersByKey,
+    ([key, definers]): EffectiveEnvironmentEntry => {
       const serverOnlySources = definers.filter((source) =>
         isServerOnlyInLayer(source, key),
       );
-      const agentWinner = agentMerged[key];
+      const agentDefiners = definers.filter(
+        (source) => !isServerOnlyInLayer(source, key),
+      );
+      const agentWinner = agentDefiners.at(-1);
       if (agentWinner) {
         return {
           key,
           audience: "agent",
-          winningSource: agentWinner.source,
-          shadowedSources: definers.filter(
-            (source) =>
-              source !== agentWinner.source &&
-              !isServerOnlyInLayer(source, key),
+          winningSource: agentWinner,
+          shadowedSources: agentDefiners.filter(
+            (source) => source !== agentWinner,
           ),
           serverOnlySources,
         };
       }
+      // Every key in the map has at least one definer.
+      const lastSource = definers[definers.length - 1] as EnvSource;
       return {
         key,
         audience: "server",

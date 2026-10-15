@@ -3,8 +3,11 @@
  * that org (after a membership check) and redirects to `/<path>`.
  *
  * The redirect target is built only from path segments, so it can never leave
- * the app's origin: this module is the open-redirect fence for that route.
+ * the app's origin; safeReturnPath (the shared open-redirect fence) checks it
+ * once more before it is returned.
  */
+
+import { safeReturnPath } from "./safe-return-path";
 
 /** Where an `/o/<slug>` link with no path lands. */
 export const ORG_LINK_DEFAULT_TARGET = "/dashboard";
@@ -44,7 +47,7 @@ export function buildOrgLinkTarget(
     }
   }
   const path = `/${parts.map(encodeURIComponent).join("/")}`;
-  if (path.startsWith("//") || !isSameOriginPath(path)) {
+  if (safeReturnPath(path) === null) {
     return null;
   }
   return `${path}${normalizeSearch(search)}`;
@@ -65,7 +68,9 @@ export function buildOrgLink({
   pathname: string;
 }): string {
   const path =
-    pathname === "/" || pathname === "" || pathname.startsWith("/o/")
+    pathname === "/" ||
+    pathname === "" ||
+    pathname.startsWith(`/${ORG_LINK_PREFIX}/`)
       ? ""
       : pathname;
   return `${origin}/${ORG_LINK_PREFIX}/${encodeURIComponent(slug)}${path}`;
@@ -76,14 +81,4 @@ function normalizeSearch(search: string): string {
     return "";
   }
   return search.startsWith("?") ? search : `?${search}`;
-}
-
-function isSameOriginPath(path: string): boolean {
-  const base = "https://org-link.invalid";
-  try {
-    return new URL(path, base).origin === base;
-  } catch {
-    // An unparseable path is not a safe redirect target; the caller 404s.
-    return false;
-  }
 }

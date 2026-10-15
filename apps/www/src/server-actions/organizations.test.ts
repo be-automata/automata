@@ -45,6 +45,10 @@ describe("organization server actions", () => {
     // the personal one.
     const team = await createOrg("Team", `team-${suffix}`);
     const personal = await createOrg("Me", `personal-${suffix}`);
+    await db
+      .update(organizationTable)
+      .set({ isPersonal: true })
+      .where(eq(organizationTable.id, personal.id));
     const stranger = await createOrg("Stranger", `stranger-${suffix}`);
     await addOrganizationMember({
       db,

@@ -6,7 +6,7 @@ import Link from "next/link";
 
 import {
   automationQueryOptions,
-  hasReachedLimitOfAutomationsQueryOptions,
+  automationLimitQueryOptions,
 } from "@/queries/automation-queries";
 import { Automation } from "@terragon/shared";
 import { useState } from "react";
@@ -30,7 +30,7 @@ import {
   selectedBranchAtom,
 } from "@/atoms/user-flags";
 import { publicDocsUrl } from "@terragon/env/next-public";
-import { automationLimitMessage } from "./limit-message";
+import { automationLimitMessage } from "@/lib/automation-limit";
 
 export function Automations() {
   const { headerActionContainer } = usePageHeader();
@@ -110,14 +110,14 @@ function AutomationsList({
     error,
     refetch,
   } = useQuery(automationQueryOptions());
-  const { data: automationLimit, refetch: refetchHasReachedLimit } = useQuery(
-    hasReachedLimitOfAutomationsQueryOptions(),
+  const { data: automationLimit, refetch: refetchAutomationLimit } = useQuery(
+    automationLimitQueryOptions(),
   );
   useRealtimeUser({
     matches: (message) => !!message.data.automationId,
     onMessage: () => {
       refetch();
-      refetchHasReachedLimit();
+      refetchAutomationLimit();
     },
   });
   const [automationToEdit, setAutomationToEdit] = useState<Automation | null>(

@@ -2,7 +2,7 @@
 
 import React from "react";
 
-import { OrgAvatar } from "@/components/org-avatar";
+import { OrgName } from "@/components/org-avatar";
 import { useActiveOrganization } from "@/queries/organization-queries";
 import { cn } from "@/lib/utils";
 
@@ -49,8 +49,11 @@ export function RunsInCueView({
       title={label}
     >
       <span className="shrink-0">Runs in</span>
-      <OrgAvatar organization={organization} className="size-4 text-[8px]" />
-      <span className="min-w-0 truncate font-medium">{organization.name}</span>
+      <OrgName
+        organization={organization}
+        size="xs"
+        nameClassName="font-medium"
+      />
       <span className="shrink-0" aria-hidden="true">
         ·
       </span>

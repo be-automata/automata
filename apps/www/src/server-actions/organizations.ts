@@ -35,10 +35,7 @@ export const getMyOrganizations = userOnlyAction(
         name: row.name,
         slug: row.slug ?? null,
         logo: row.logo ?? null,
-        isPersonal: isPersonalOrganization({
-          isPersonal: row.isPersonal,
-          slug: row.slug ?? null,
-        }),
+        isPersonal: isPersonalOrganization(row),
       }))
       .sort((a, b) => Number(b.isPersonal) - Number(a.isPersonal));
     const activeId = tenant?.organizationId ?? null;

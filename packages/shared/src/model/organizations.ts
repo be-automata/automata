@@ -156,6 +156,29 @@ export async function getMembership({
 }
 
 /**
+ * `userId`'s membership of the org with `slug`, in one member⋈organization
+ * read — undefined when the slug is unknown OR the user is not a member, so a
+ * caller cannot tell the two apart (and neither can whoever it answers).
+ */
+export async function getMembershipByOrganizationSlug({
+  db,
+  slug,
+  userId,
+}: {
+  db: DB;
+  slug: string;
+  userId: string;
+}): Promise<Member | undefined> {
+  const [row] = await db
+    .select({ member })
+    .from(member)
+    .innerJoin(organization, eq(organization.id, member.organizationId))
+    .where(and(eq(organization.slug, slug), eq(member.userId, userId)))
+    .limit(1);
+  return row?.member;
+}
+
+/**
  * Orgs a user belongs to, resolved through the `member` join. This is the read
  * the guard layer will use to populate `session.activeOrganizationId`.
  */

@@ -10,8 +10,12 @@ import {
   getUserIdOrNull,
   getUserInfoOrNull,
   validInternalRequestOrThrow,
+  requireExpectedActiveMembership,
 } from "@/lib/auth-server";
-import { createTestUser } from "@terragon/shared/model/test-helpers";
+import {
+  createTestOrganization,
+  createTestUser,
+} from "@terragon/shared/model/test-helpers";
 import {
   mockLoggedInUser,
   mockLoggedOutUser,
@@ -249,6 +253,112 @@ describe("auth-server", () => {
         "X-Terragon-Secret": env.INTERNAL_SHARED_SECRET,
       });
       await validInternalRequestOrThrow();
+    });
+  });
+
+  describe("requireExpectedActiveMembership", () => {
+    async function signedInWithActiveOrg(
+      role: "owner" | "admin" | "member" | null,
+    ) {
+      const { user, session } = await createTestUser({ db });
+      let organizationId: string | null = null;
+      if (role) {
+        const { organization } = await createTestOrganization({
+          db,
+          userId: user.id,
+          role,
+        });
+        organizationId = organization.id;
+        await db
+          .update(schema.session)
+          .set({ activeOrganizationId: organizationId })
+          .where(eq(schema.session.id, session.id));
+      }
+      await mockLoggedInUser(session);
+      return { userId: user.id, organizationId };
+    }
+
+    it("returns the active membership when it is the org the page showed", async () => {
+      const { userId, organizationId } = await signedInWithActiveOrg("owner");
+      await expect(
+        requireExpectedActiveMembership(userId, {
+          expectedOrganizationId: organizationId,
+          requireAdmin: { action: "do it" },
+        }),
+      ).resolves.toEqual({ organizationId, role: "owner" });
+    });
+
+    it("refuses when the session moved off the org the page showed", async () => {
+      const { userId } = await signedInWithActiveOrg("owner");
+      await expect(
+        requireExpectedActiveMembership(userId, {
+          expectedOrganizationId: "org_the_page_showed",
+        }),
+      ).rejects.toThrow(
+        "Your active organization changed in another tab. Reload the page and try again.",
+      );
+    });
+
+    it("refuses an expected 'no org' while the session has one", async () => {
+      const { userId } = await signedInWithActiveOrg("member");
+      await expect(
+        requireExpectedActiveMembership(userId, {
+          expectedOrganizationId: null,
+        }),
+      ).rejects.toThrow(/active organization changed/);
+    });
+
+    it("skips the comparison when the page did not know the org yet", async () => {
+      const { userId, organizationId } = await signedInWithActiveOrg("member");
+      await expect(
+        requireExpectedActiveMembership(userId, {
+          expectedOrganizationId: undefined,
+        }),
+      ).resolves.toEqual({ organizationId, role: "member" });
+    });
+
+    it("refuses a plain member when an admin is required", async () => {
+      const { userId, organizationId } = await signedInWithActiveOrg("member");
+      const promise = requireExpectedActiveMembership(userId, {
+        expectedOrganizationId: organizationId,
+        requireAdmin: { action: "install the Slack app" },
+      });
+      await expect(promise).rejects.toBeInstanceOf(UserFacingError);
+      await expect(promise).rejects.toThrow(
+        "Only organization owners and admins can install the Slack app",
+      );
+    });
+
+    it("lets an admin through when an admin is required", async () => {
+      const { userId, organizationId } = await signedInWithActiveOrg("admin");
+      await expect(
+        requireExpectedActiveMembership(userId, {
+          expectedOrganizationId: organizationId,
+          requireAdmin: { action: "install the Slack app" },
+        }),
+      ).resolves.toEqual({ organizationId, role: "admin" });
+    });
+
+    it("returns null without an active org, even when an admin is required", async () => {
+      const { userId } = await signedInWithActiveOrg(null);
+      await expect(
+        requireExpectedActiveMembership(userId, {
+          expectedOrganizationId: null,
+          requireAdmin: { action: "install the Slack app" },
+        }),
+      ).resolves.toBeNull();
+    });
+
+    it("refuses a missing org when one is required", async () => {
+      const { userId } = await signedInWithActiveOrg(null);
+      await expect(
+        requireExpectedActiveMembership(userId, {
+          expectedOrganizationId: null,
+          requireOrganization: { action: "binding a GitHub installation" },
+        }),
+      ).rejects.toThrow(
+        "Select an organization before binding a GitHub installation",
+      );
     });
   });
 });

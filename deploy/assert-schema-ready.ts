@@ -34,7 +34,7 @@
 // why it is worth changing — a gate whose own imports work by accident is not a
 // gate.) Everything comes through the shared helper, whose resolution is rooted
 // in packages/shared, which really does depend on drizzle-orm. (#173 review.)
-import { createDb, sql } from "../packages/shared/src/db";
+import { createDb, rowsOf, sql } from "../packages/shared/src/db";
 
 const REVIEW_AGENT_SINCE =
   "phase 4 (review-agent settings) — the dispatch resolver selects this " +
@@ -1039,35 +1039,63 @@ const RECOMMENDED_INDEXES: ReadonlyArray<{ name: string; create: string }> = [
   },
 ];
 
+/**
+ * Validity of each named index in the public schema, in one query: true =
+ * present and valid, false = present but INVALID (a failed CONCURRENTLY
+ * build), absent from the map = missing. `uniqueOnly` ignores a non-unique
+ * index of the same name. Throws when the database cannot be queried.
+ */
+async function readIndexValidity(
+  db: ReturnType<typeof createDb>,
+  names: readonly string[],
+  { uniqueOnly }: { uniqueOnly: boolean },
+): Promise<Map<string, boolean>> {
+  const unique = uniqueOnly ? sql` AND i.indisunique` : sql``;
+  const result = await db.execute(sql`
+    SELECT c.relname AS name, i.indisvalid AS valid
+      FROM pg_index i
+      JOIN pg_class c ON c.oid = i.indexrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public'
+       AND c.relname = ANY(${sql.param(names)}::text[])${unique}
+  `);
+  return new Map(
+    rowsOf<{ name: string; valid: boolean }>(result).map((row) => [
+      row.name,
+      row.valid === true,
+    ]),
+  );
+}
+
 async function warnOnMissingIndexes(
   db: ReturnType<typeof createDb>,
 ): Promise<void> {
-  for (const index of RECOMMENDED_INDEXES) {
-    try {
-      const result = await db.execute(sql`
-        SELECT i.indisvalid AS valid
-          FROM pg_index i
-          JOIN pg_class c ON c.oid = i.indexrelid
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = 'public' AND c.relname = ${index.name}
-         LIMIT 1
-      `);
-      const rows =
-        (result as unknown as { rows?: Array<{ valid: boolean }> }).rows ?? [];
-      const row = rows[0];
-      if (row?.valid === true) {
-        console.log(`assert-schema-ready: ok index ${index.name}`);
-      } else {
-        console.warn(
-          `assert-schema-ready: WARN index ${index.name} is ${row ? "INVALID" : "missing"} (performance only, not a failure). Create it:\n  ${index.create}` +
-            (row
-              ? `\n  (drop the invalid one first: DROP INDEX CONCURRENTLY ${index.name};)`
-              : ""),
-        );
-      }
-    } catch (error) {
+  let validity: Map<string, boolean>;
+  try {
+    validity = await readIndexValidity(
+      db,
+      RECOMMENDED_INDEXES.map((index) => index.name),
+      { uniqueOnly: false },
+    );
+  } catch (error) {
+    for (const index of RECOMMENDED_INDEXES) {
       console.warn(
         `assert-schema-ready: WARN cannot check index ${index.name}: ${(error as Error).message}`,
+      );
+    }
+    return;
+  }
+  for (const index of RECOMMENDED_INDEXES) {
+    const valid = validity.get(index.name);
+    if (valid === true) {
+      console.log(`assert-schema-ready: ok index ${index.name}`);
+    } else {
+      const present = valid === false;
+      console.warn(
+        `assert-schema-ready: WARN index ${index.name} is ${present ? "INVALID" : "missing"} (performance only, not a failure). Create it:\n  ${index.create}` +
+          (present
+            ? `\n  (drop the invalid one first: DROP INDEX CONCURRENTLY ${index.name};)`
+            : ""),
       );
     }
   }
@@ -1099,8 +1127,7 @@ async function main(): Promise<void> {
            AND column_name = ${req.column}
          LIMIT 1
       `);
-      const rows = (result as unknown as { rows?: unknown[] }).rows ?? [];
-      present = rows.length > 0;
+      present = rowsOf(result).length > 0;
     } catch (error) {
       console.error(
         `assert-schema-ready: FAIL: cannot query the database (fail-closed): ${
@@ -1116,30 +1143,23 @@ async function main(): Promise<void> {
     }
   }
 
+  let uniqueIndexValidity: Map<string, boolean>;
+  try {
+    uniqueIndexValidity = await readIndexValidity(
+      db,
+      REQUIRED_INDEXES.map((index) => index.name),
+      { uniqueOnly: true },
+    );
+  } catch (error) {
+    console.error(
+      `assert-schema-ready: FAIL: cannot query the database (fail-closed): ${
+        (error as Error).message
+      }`,
+    );
+    process.exit(1);
+  }
   for (const index of REQUIRED_INDEXES) {
-    let valid: boolean;
-    try {
-      const result = await db.execute(sql`
-        SELECT i.indisvalid AS valid
-          FROM pg_index i
-          JOIN pg_class c ON c.oid = i.indexrelid
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = 'public' AND c.relname = ${index.name}
-           AND i.indisunique
-         LIMIT 1
-      `);
-      const rows =
-        (result as unknown as { rows?: Array<{ valid: boolean }> }).rows ?? [];
-      valid = rows[0]?.valid === true;
-    } catch (error) {
-      console.error(
-        `assert-schema-ready: FAIL: cannot query the database (fail-closed): ${
-          (error as Error).message
-        }`,
-      );
-      process.exit(1);
-    }
-    if (valid) {
+    if (uniqueIndexValidity.get(index.name) === true) {
       console.log(`assert-schema-ready: ok unique index ${index.name}`);
     } else {
       missing.push(`  unique index ${index.name} — ${index.since}`);

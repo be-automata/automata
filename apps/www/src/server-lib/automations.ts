@@ -28,6 +28,7 @@ import {
 } from "@terragon/shared";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
 import { effectiveShadow } from "@/lib/github-side-effects";
+import { automationLimitMessage } from "@/lib/automation-limit";
 import {
   PullRequestEvent,
   IssueEvent,
@@ -383,26 +384,12 @@ export async function getAutomationLimitStatus({
   if (tier === "pro" || tier === "none") {
     return { reached: false, count: 0, max: null };
   }
-  const [count, max] = await Promise.all([
+  const [rawCount, max] = await Promise.all([
     getAutomationCount({ db, userId }),
     getMaxAutomationsForUser(userId),
   ]);
-  return {
-    reached: max !== null && Number(count) >= max,
-    count: Number(count),
-    max,
-  };
-}
-
-export async function hasReachedLimitOfAutomations({
-  userId,
-  tier,
-}: {
-  userId: string;
-  tier: AccessTier;
-}) {
-  const { reached } = await getAutomationLimitStatus({ userId, tier });
-  return reached;
+  const count = Number(rawCount);
+  return { reached: max !== null && count >= max, count, max };
 }
 
 /**
@@ -472,18 +459,13 @@ export async function validateAutomationCreationOrUpdate({
     (automationOrNull && !automationOrNull.enabled && updates.enabled)
   ) {
     if (triggerType !== "manual") {
-      const hasReachedLimit = await hasReachedLimitOfAutomations({
-        userId,
-        tier,
-      });
-      if (hasReachedLimit) {
-        if (automationId === null) {
-          throw new UserFacingError(
-            "You have reached the limit of active automations for your plan across all your organizations. Disable or delete an existing active automation to create a new one.",
-          );
-        }
+      const limit = await getAutomationLimitStatus({ userId, tier });
+      if (limit.reached) {
         throw new UserFacingError(
-          "You have reached the limit of active automations for your plan across all your organizations. Disable or delete an existing active automation to continue.",
+          automationLimitMessage({
+            ...limit,
+            next: automationId === null ? "create" : "enable",
+          }),
         );
       }
     }
