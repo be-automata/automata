@@ -30,7 +30,17 @@ export function useActiveOrganization() {
   const active =
     data?.organizations.find((org) => org.id === data.activeOrganizationId) ??
     null;
-  return { activeOrganization: active, isLoading };
+  return {
+    activeOrganization: active,
+    isLoading,
+    /**
+     * The org the page shows, for a server action to check against the
+     * session: an id, null for "no org", or undefined while it is not known
+     * yet (loading or failed) — undefined skips the check rather than
+     * reporting a change the user never made.
+     */
+    expectedOrganizationId: data ? (active?.id ?? null) : undefined,
+  };
 }
 
 export function useSwitchActiveOrganization() {

@@ -45,7 +45,8 @@ function SlackAccountItem({
   const getSlackAppInstallUrlMutation = useServerActionMutation({
     mutationFn: getSlackAppInstallUrl,
   });
-  const { activeOrganization } = useActiveOrganization();
+  const { activeOrganization, expectedOrganizationId } =
+    useActiveOrganization();
   const { data: myOrganizations } = useMyOrganizations();
   const [installOpen, setInstallOpen] = useState(false);
 
@@ -68,7 +69,7 @@ function SlackAccountItem({
     // default one.
     const appInstallUrl = await getSlackAppInstallUrlMutation.mutateAsync({
       teamId: account.teamId,
-      expectedOrganizationId: activeOrganization?.id ?? null,
+      expectedOrganizationId,
     });
     window.location.href = appInstallUrl;
   };
@@ -235,13 +236,16 @@ export function SlackAccountSettings({
   const getSlackOAuthUrlMutation = useServerActionMutation({
     mutationFn: getSlackOAuthUrl,
   });
-  const canConnect = slackAppReady && !getSlackOAuthUrlMutation.isPending;
-  const { activeOrganization } = useActiveOrganization();
+  const { activeOrganization, expectedOrganizationId, isLoading } =
+    useActiveOrganization();
+  // Wait for the org list so the request names the org the page shows.
+  const canConnect =
+    slackAppReady && !isLoading && !getSlackOAuthUrlMutation.isPending;
   const [connectOpen, setConnectOpen] = useState(false);
   const handleConnect = async (teamId: string | undefined) => {
     const authUrl = await getSlackOAuthUrlMutation.mutateAsync({
       teamId,
-      expectedOrganizationId: activeOrganization?.id ?? null,
+      expectedOrganizationId,
     });
     window.location.href = authUrl;
   };
