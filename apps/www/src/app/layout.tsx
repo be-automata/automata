@@ -83,7 +83,13 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    // The next/font variables live on <html>: globals.css defines --font-ui and
+    // --font-sans on :root, and var() there cannot see variables set lower down.
+    <html
+      lang="en"
+      suppressHydrationWarning
+      className={`${plex.variable} ${geistMono.variable} ${commitMono.variable}`}
+    >
       <head>
         {process.env.NODE_ENV === "development" ? (
           <link rel="icon" href="/favicon-dev.png" />
@@ -104,9 +110,7 @@ export default function RootLayout({
           media="(prefers-color-scheme: dark)"
         />
       </head>
-      <body
-        className={`${plex.variable} ${geistMono.variable} ${commitMono.variable} font-ui text-[13px] leading-[18px] antialiased`}
-      >
+      <body className="font-ui text-[13px] leading-[18px] antialiased">
         <ServerProviders>
           <UserAtomsHydratorServer>
             <>{children}</>
