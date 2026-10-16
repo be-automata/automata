@@ -22,11 +22,18 @@ export function agentActivityQueryOptions({
   });
 }
 
-/** The viewer's own runs update at once through their realtime channel. */
 export function useAgentActivity(filters: {
   mineOnly: boolean;
   peopleOnly: boolean;
 }) {
+  return useQuery(agentActivityQueryOptions(filters));
+}
+
+/**
+ * The viewer's own runs update at once through their realtime channel. Mount
+ * once (the sidebar badge, present on every page), not per query consumer.
+ */
+export function useAgentActivityRealtime() {
   const queryClient = useQueryClient();
   useRealtimeUser({
     matches: (message) =>
@@ -38,5 +45,4 @@ export function useAgentActivity(filters: {
       queryClient.invalidateQueries({ queryKey: ["agent-activity"] });
     },
   });
-  return useQuery(agentActivityQueryOptions(filters));
 }

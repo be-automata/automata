@@ -125,7 +125,7 @@ export function AutomationsRegister({
               aria-pressed={filter === option.value}
               onClick={() => setFilter(option.value)}
               className={cn(
-                "min-h-7 rounded-md border border-border px-2.5 text-xs transition-colors duration-150",
+                "min-h-7 rounded-md border border-border px-2.5 text-xs transition-colors duration-150 max-md:min-h-11",
                 filter === option.value
                   ? "border-primary bg-primary text-primary-foreground"
                   : "bg-card hover:bg-accent",

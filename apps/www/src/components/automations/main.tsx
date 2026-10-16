@@ -10,8 +10,7 @@ import {
   automationHealthQueryOptions,
   automationQueryKeys,
 } from "@/queries/automation-queries";
-import { useActiveOrganization } from "@/queries/organization-queries";
-import { OrgName } from "@/components/org-avatar";
+import { PageTitle } from "@/components/page-title";
 import { AutomationsRegister } from "./register";
 import { Automation } from "@terragon/shared";
 import { useMemo, useState } from "react";
@@ -128,7 +127,6 @@ function AutomationsList({
   const [automationToEdit, setAutomationToEdit] = useState<Automation | null>(
     null,
   );
-  const { activeOrganization } = useActiveOrganization();
   const { data: health } = useQuery(automationHealthQueryOptions());
   const healthById = useMemo(
     () => new Map((health ?? []).map((h) => [h.automationId, h])),
@@ -152,13 +150,8 @@ function AutomationsList({
   }
   return (
     <>
-      <div className="mb-4 flex items-baseline gap-2.5">
-        <h1 className="text-xl font-bold leading-6">Automations</h1>
-        {activeOrganization ? (
-          <span className="inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-            in <OrgName organization={activeOrganization} size="xs" />
-          </span>
-        ) : null}
+      <div className="mb-4">
+        <PageTitle title="Automations" />
       </div>
       {automationLimit?.reached && (
         <p className="mb-4 flex items-start gap-2 border-y border-border py-2 font-sans text-[13px]">

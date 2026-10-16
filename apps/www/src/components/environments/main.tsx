@@ -21,7 +21,7 @@ import { McpConfig } from "@terragon/sandbox/mcp-config";
 import { Button } from "@/components/ui/button";
 import { ChevronRight, FileCog } from "lucide-react";
 import { ScopeBadge, type ConfigScope } from "@/components/ui/scope-badge";
-import { OrgName } from "@/components/org-avatar";
+import { PageTitleView } from "@/components/ui/register";
 import { RunsInCue } from "@/components/promptbox/runs-in-cue";
 import { useActiveOrganization } from "@/queries/organization-queries";
 import { CreateEnvironmentButton } from "@/components/environments/create-environment-button";
@@ -95,14 +95,10 @@ export function Environments({
       </Portal>
       <div className="flex h-full w-full max-w-4xl flex-col justify-start gap-6">
         <div>
-          <div className="flex items-baseline gap-2.5">
-            <h1 className="text-xl font-bold leading-6">Environments</h1>
-            {activeOrganization && organizationName !== null ? (
-              <span className="inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-                in <OrgName organization={activeOrganization} size="xs" />
-              </span>
-            ) : null}
-          </div>
+          <PageTitleView
+            title="Environments"
+            organization={organizationName !== null ? activeOrganization : null}
+          />
           <p className="mt-2 font-sans text-[13px] text-muted-foreground">
             A task reads Global, then Organization, then Repository; the later
             layer wins.{" "}
@@ -150,7 +146,7 @@ export function Environments({
                   <li key={environment.id}>
                     <Link
                       href={`/environments/${environment.id}`}
-                      className="flex h-8 items-center justify-between gap-3 border-b border-line-soft text-xs last:border-b-0 hover:bg-accent/60"
+                      className="flex h-8 items-center justify-between gap-3 border-b border-line-soft text-xs last:border-b-0 hover:bg-accent/60 max-md:h-11"
                     >
                       <span className="min-w-0 truncate">
                         {environment.repoFullName}

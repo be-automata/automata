@@ -10,7 +10,7 @@ export function ThemeColorMeta() {
   useEffect(() => {
     const meta = document.querySelector("meta[name='theme-color']");
     if (meta) {
-      meta.setAttribute("content", isDark ? "#1a1a1a" : "#f8f5f0");
+      meta.setAttribute("content", isDark ? "#121715" : "#f2f4f1");
     }
   }, [isDark]);
   return null;

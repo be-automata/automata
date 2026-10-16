@@ -58,13 +58,17 @@ function row(overrides: Partial<AgentActivityRow>): AgentActivityRow {
   };
 }
 
-function render(data: OrgAgentActivity | undefined, isLoading = false) {
+function render(
+  data: OrgAgentActivity | undefined,
+  isLoading = false,
+  isError = false,
+) {
   return renderToStaticMarkup(
     <AgentActivityBoardView
       organization={org}
       data={data}
       isLoading={isLoading}
-      isError={false}
+      isError={isError}
       onRetry={() => {}}
       onDismiss={async () => true}
       now={now}
@@ -155,5 +159,42 @@ describe("AgentActivityBoardView", () => {
     expect(html).toContain("Agent credential rejected");
     expect(html).toContain('href="/settings/agent"');
     expect(html).toContain("Dismiss");
+  });
+
+  it("offers a retry when activity fails to load", () => {
+    const html = render(undefined, false, true);
+    expect(html).toContain("Agent activity could not be loaded.");
+    expect(html).toContain("Retry");
+  });
+
+  it("prints the PR status word next to its number", () => {
+    const html = render({
+      ...empty,
+      active: [row({ prNumber: 363, prStatus: "open" })],
+      counts: { running: 1, waiting: 0, needsYou: 0 },
+    });
+    expect(html).toContain("#363");
+    expect(html).toContain(" open");
+  });
+
+  it("offers Dismiss only on the viewer's own failures", () => {
+    const failing = (kind: "you" | "member") =>
+      row({
+        threadId: kind,
+        state: { kind: "needs-you", word: "error", reason: null },
+        starter: { kind, name: "Grace" },
+        needsYou: {
+          title: "Agent error",
+          reason: "The agent stopped with an error.",
+          action: "open-task",
+        },
+      });
+    const html = render({
+      ...empty,
+      needsYou: [failing("member")],
+      counts: { running: 0, waiting: 0, needsYou: 1 },
+    });
+    expect(html).toContain('href="/task/member"');
+    expect(html).not.toContain("Dismiss");
   });
 });

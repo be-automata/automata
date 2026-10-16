@@ -133,7 +133,7 @@ components:
 **UI face** sets everything an operator scans: nav, headings, buttons, table rows, states, identifiers, numbers.
 
 - **Commit Mono** (OFL 1.1, bundled from `apps/www/src/fonts/commit-mono` through `next/font/local`) is what every viewer gets.
-- **TX-02** (U.S. Graphics) comes first in the stack and takes over when it is installed locally. The licensed web files are not in this public repo. Once they are uploaded to the private R2 bucket, add their `url()` to the `@font-face` rules, and `app/fonts/tx-02/[file]` serves them same-origin. TX-02 is never used in the in-app terminal (licence).
+- **TX-02** (U.S. Graphics) comes first in the stack, through `local()` only: it takes over when installed. The licensed web files are not in this public repo; with a web licence, serve them same-origin (no CORS header) and add their `url()`. Never in the in-app terminal (licence).
 - Geist Mono is the last fallback and the terminal face.
 
 **IBM Plex Sans** (OFL) sets sentences: chat, help text, dialog descriptions, the prompt editor. Measure is capped at 68ch.

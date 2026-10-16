@@ -7,7 +7,7 @@ import {
 
 import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { db } from "@/lib/db";
-import { userHasRepoAccess } from "@/server-lib/repo-access";
+import { createRepoAccessChecker } from "@/server-lib/repo-access";
 
 const NO_ACTIVITY: OrgAgentActivity = {
   needsYou: [],
@@ -36,8 +36,7 @@ export const getAgentActivity = userOnlyAction(
       viewerUserId: userId,
       mineOnly,
       peopleOnly,
-      hasRepoAccess: (repoFullName) =>
-        userHasRepoAccess({ userId, repoFullName }),
+      hasRepoAccess: createRepoAccessChecker(userId, { cache: true }),
     });
   },
   { defaultErrorMessage: "Failed to load agent activity" },

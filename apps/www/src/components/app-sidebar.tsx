@@ -1,7 +1,10 @@
 "use client";
 
 import { RunStateGlyph } from "@/components/ui/run-state";
-import { useAgentActivity } from "@/queries/agent-activity-queries";
+import {
+  useAgentActivity,
+  useAgentActivityRealtime,
+} from "@/queries/agent-activity-queries";
 import {
   Home,
   Settings,
@@ -304,6 +307,7 @@ function Item({
 
 /** Runs that need someone (■) or, when none do, runs in flight (●). */
 function HomeActivityBadge() {
+  useAgentActivityRealtime();
   const { data } = useAgentActivity({ mineOnly: false, peopleOnly: false });
   if (!data) {
     return null;

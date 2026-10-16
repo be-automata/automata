@@ -14,8 +14,12 @@ import { TRIGGER_LABELS } from "@terragon/shared/model/run-state";
 import { Button } from "@/components/ui/button";
 import { RunStateGlyph, RunStateLabel } from "@/components/ui/run-state";
 import { Segmented } from "@/components/ui/segmented";
+import {
+  LoadError,
+  PageTitleView,
+  SectionHeader,
+} from "@/components/ui/register";
 import { Skeleton } from "@/components/ui/skeleton";
-import { OrgName } from "@/components/org-avatar";
 import { useAgentActivity } from "@/queries/agent-activity-queries";
 import { useActiveOrganization } from "@/queries/organization-queries";
 import { readThread } from "@/server-actions/read-thread";
@@ -35,13 +39,22 @@ const WHO_OPTIONS = [
   { value: "all", label: "All" },
 ] as const;
 
-function useNow(intervalMs: number) {
+function useNow(intervalMs: number, enabled: boolean) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const id = setInterval(() => setNow(Date.now()), intervalMs);
     return () => clearInterval(id);
-  }, [intervalMs]);
+  }, [intervalMs, enabled]);
   return now;
+}
+
+/** Ticks on its own, so only the timer re-renders each second. */
+function Elapsed({ from, now }: { from: Date | string; now?: number }) {
+  const tick = useNow(1000, now === undefined);
+  return <>{formatElapsed(new Date(from).getTime(), now ?? tick)}</>;
 }
 
 function formatElapsed(fromMs: number, nowMs: number) {
@@ -88,28 +101,6 @@ function RunTitle({
     >
       {row.title}
     </Link>
-  );
-}
-
-function SectionHeader({
-  title,
-  meta,
-  children,
-}: {
-  title: string;
-  meta?: React.ReactNode;
-  children?: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-2 border-b border-border pb-1.5">
-      <h2 className="text-[15px] leading-5 font-bold">{title}</h2>
-      {meta ? (
-        <span className="text-xs text-muted-foreground">{meta}</span>
-      ) : null}
-      {children ? (
-        <div className="ml-auto flex items-center gap-2">{children}</div>
-      ) : null}
-    </div>
   );
 }
 
@@ -184,7 +175,7 @@ function NeedsYouRow({
   );
 }
 
-function ActiveRow({ row, now }: { row: AgentActivityRow; now: number }) {
+function ActiveRow({ row, now }: { row: AgentActivityRow; now?: number }) {
   return (
     <li className="grid grid-cols-[minmax(0,auto)_1fr] items-center gap-x-3 gap-y-0.5 border-b border-line-soft py-2 text-xs md:h-8 md:grid-cols-[140px_minmax(0,1fr)_160px_180px_72px_56px] md:py-0">
       <RunStateLabel state={row.state} showReason={false} />
@@ -204,12 +195,13 @@ function ActiveRow({ row, now }: { row: AgentActivityRow; now: number }) {
         {starterLabel(row)}
       </span>
       <span className="hidden text-right text-muted-foreground md:block">
-        {formatElapsed(new Date(row.startedAt).getTime(), now)}
+        <Elapsed from={row.startedAt} now={now} />
       </span>
       <span className="hidden justify-self-end md:block">
         {row.prNumber ? (
           <span className="rounded-sm border border-border px-1 text-muted-foreground">
             #{row.prNumber}
+            {row.prStatus ? ` ${row.prStatus}` : null}
           </span>
         ) : null}
       </span>
@@ -265,7 +257,6 @@ export function AgentActivityBoard() {
     peopleOnly: who === "people",
   });
   const queryClient = useQueryClient();
-  const now = useNow(1000);
   const onDismiss = async (threadId: string) => {
     try {
       unwrapResult(await readThread({ threadId, threadChatIdOrNull: null }));
@@ -284,7 +275,6 @@ export function AgentActivityBoard() {
       isError={isError}
       onRetry={() => refetch()}
       onDismiss={onDismiss}
-      now={now}
       scope={scope}
       onScopeChange={setScope}
       who={who}
@@ -313,7 +303,8 @@ export function AgentActivityBoardView({
   isError: boolean;
   onRetry: () => void;
   onDismiss: (threadId: string) => Promise<boolean>;
-  now: number;
+  /** Fixed clock for tests; omitted, each timer ticks on its own. */
+  now?: number;
   scope: Scope;
   onScopeChange: (scope: Scope) => void;
   who: Who;
@@ -330,31 +321,15 @@ export function AgentActivityBoardView({
     return [...groups];
   }, [data?.active]);
 
-  const orgLabel = activeOrganization ? (
-    <span className="inline-flex items-center gap-1.5 align-middle">
-      in <OrgName organization={activeOrganization} size="xs" />
-    </span>
-  ) : null;
-
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-baseline gap-2.5">
-        <h1 className="text-xl font-bold leading-6">Home</h1>
-        <span className="min-w-0 text-xs text-muted-foreground">
-          {orgLabel}
-        </span>
-      </div>
+      <PageTitleView title="Home" organization={activeOrganization} />
 
       {isError ? (
-        <div className="flex items-center gap-3 border-y border-border py-3 text-xs">
-          <RunStateGlyph kind="needs-you" />
-          <span className="font-sans text-[13px]">
-            Agent activity could not be loaded.
-          </span>
-          <Button size="sm" variant="outline" onClick={onRetry}>
-            Retry
-          </Button>
-        </div>
+        <LoadError
+          message="Agent activity could not be loaded."
+          onRetry={onRetry}
+        />
       ) : null}
 
       {data && data.needsYou.length > 0 ? (

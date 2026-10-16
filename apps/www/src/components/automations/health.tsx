@@ -6,13 +6,9 @@ import type {
 } from "@terragon/shared/model/automation-health";
 import type { RunStateKind } from "@terragon/shared/model/run-state";
 
-import {
-  RUN_STATE_TEXT_CLASS,
-  RunStateGlyph,
-  RunStateLabel,
-} from "@/components/ui/run-state";
+import { RunStateGlyph, RunStateLabel } from "@/components/ui/run-state";
+import { formatPercent, SectionHeader } from "@/components/ui/register";
 import { formatRelativeTime } from "@/lib/format-relative-time";
-import { cn } from "@/lib/utils";
 
 const HEALTH: Record<
   AutomationHealthKind,
@@ -32,21 +28,15 @@ export function AutomationHealthLabel({
   health: AutomationHealthKind;
   className?: string;
 }) {
-  const { kind, word } = HEALTH[health];
   return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 whitespace-nowrap",
-        className,
-      )}
-    >
-      <RunStateGlyph kind={kind} />
-      <span className={RUN_STATE_TEXT_CLASS[kind]}>{word}</span>
-    </span>
+    <RunStateLabel
+      state={{ ...HEALTH[health], reason: null }}
+      className={className}
+    />
   );
 }
 
-/** The last runs as glyphs, oldest first: flakiness reads at a glance. */
+/** The last runs as glyphs, oldest on the left: flakiness reads at a glance. */
 export function AutomationHistoryStrip({
   health,
 }: {
@@ -60,9 +50,10 @@ export function AutomationHistoryStrip({
       className="inline-flex items-center gap-[3px]"
       aria-label={`Last ${health.history.length} runs`}
     >
-      {health.history.map((run) => (
+      {[...health.history].reverse().map((run) => (
         <span key={run.threadId} title={`${run.state.word} · ${run.title}`}>
           <RunStateGlyph kind={run.state.kind} />
+          <span className="sr-only">{run.state.word}</span>
         </span>
       ))}
     </span>
@@ -70,7 +61,7 @@ export function AutomationHistoryStrip({
 }
 
 export function formatSuccessRate(rate: number | null) {
-  return rate === null ? "—" : `${Math.round(rate * 100)}%`;
+  return rate === null ? "—" : formatPercent(rate, 1);
 }
 
 /** Health, the last-14 strip and the runs with their result, newest first. */
@@ -82,7 +73,7 @@ export function AutomationHealthPanel({
   if (!health) {
     return null;
   }
-  const runs = [...health.history].reverse();
+  const runs = health.history;
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
@@ -100,12 +91,11 @@ export function AutomationHealthPanel({
         <AutomationHistoryStrip health={health} />
       </div>
       <section aria-label="Runs">
-        <div className="flex items-baseline gap-2.5 border-b border-border pb-1.5">
-          <h3 className="text-[15px] font-bold leading-5">Runs</h3>
-          <span className="text-xs text-muted-foreground">
-            {health.history.length} recent
-          </span>
-        </div>
+        <SectionHeader
+          title="Runs"
+          meta={`${health.history.length} recent`}
+          level={3}
+        />
         {runs.length === 0 ? (
           <p className="py-3 font-sans text-[13px] text-muted-foreground">
             This automation has not run yet. Use Run now to try it.

@@ -74,7 +74,7 @@ export function Dashboard({
             queryKey: threadQueryKeys.list({ archived: showArchived }),
           });
         }
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error("Failed to create thread:", error);
         toast.error(unwrapError(error), { duration: 5000 });
         throw error; // Re-throw to trigger onSubmitError in usePromptBox
@@ -124,7 +124,7 @@ export function Dashboard({
               type="button"
               aria-expanded={showAllTasks}
               onClick={() => setShowAllTasks((open) => !open)}
-              className="flex w-full items-center gap-2 border-b border-border pb-1.5 text-left"
+              className="flex min-h-8 w-full items-center gap-2 border-b border-border pb-1.5 text-left max-md:min-h-11"
             >
               <span className="text-[15px] font-bold leading-5">All tasks</span>
               <span className="text-xs text-muted-foreground">

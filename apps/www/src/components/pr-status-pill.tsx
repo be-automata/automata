@@ -38,23 +38,23 @@ export const PRStatusPill = ({
       case "open":
         return (
           <GitPullRequestArrow
-            className={cn(iconClassName, "shrink-0 text-[#238636]")}
+            className={cn(iconClassName, "shrink-0 text-state-running")}
           />
         );
       case "closed":
         return (
           <GitPullRequestClosed
-            className={cn(iconClassName, "shrink-0 text-[#da3633]")}
+            className={cn(iconClassName, "shrink-0 text-state-unverified")}
           />
         );
       case "merged":
         return (
-          <GitMerge className={cn(iconClassName, "shrink-0 text-[#8957e5]")} />
+          <GitMerge className={cn(iconClassName, "shrink-0 text-state-done")} />
         );
       case "draft":
         return (
           <GitPullRequestDraft
-            className={cn(iconClassName, "shrink-0 text-[#656c76]")}
+            className={cn(iconClassName, "shrink-0 text-state-unverified")}
           />
         );
     }

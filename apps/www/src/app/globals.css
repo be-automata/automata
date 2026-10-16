@@ -5,9 +5,9 @@
 
 /*
  * TX-02 (U.S. Graphics) is used when it is installed on the viewer's machine.
- * The licensed web files are not in the repo; once they are in the private R2
- * bucket, add `url("/fonts/tx-02/<file>") format("woff2")` after local() and
- * app/fonts/tx-02/[file]/route.ts serves them. Everyone else gets Commit Mono.
+ * The licensed web files are not in this public repo; with a web licence, serve
+ * them same-origin (no CORS header) and add their url() after local().
+ * Everyone else gets Commit Mono.
  */
 @font-face {
   font-family: "TX-02";
@@ -324,9 +324,14 @@
 }
 
 /* Tiptap editor styles */
+/* Sentences read in the prose face; the UI chrome is mono (DESIGN.md). */
+.ProseMirror,
+.prose {
+  font-family: var(--font-sans);
+}
+
 .ProseMirror {
   outline: none;
-  font-family: var(--font-sans);
 }
 
 .ProseMirror p {

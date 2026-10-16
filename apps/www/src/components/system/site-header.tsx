@@ -41,7 +41,9 @@ export const SiteHeader = memo(function SiteHeader() {
   const user = useAtomValue(userAtom);
   const { open: isSidebarOpen, isMobile } = useSidebar();
   const isAutomationsPage =
-    pathname === "/automations" || pathname.startsWith("/automations/");
+    pathname === "/automations" ||
+    pathname.startsWith("/automations/") ||
+    pathname === "/stats";
   const isEnvironmentsPage =
     pathname === "/environments" || pathname.startsWith("/environments/");
 
