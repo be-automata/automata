@@ -1,10 +1,8 @@
+import { displayRunTitle } from "@terragon/shared/model/run-state";
 import { ThreadInfo } from "@terragon/shared";
 
 export function getThreadTitle(thread: Pick<ThreadInfo, "name">) {
-  if (thread.name) {
-    return thread.name;
-  }
-  return "Untitled";
+  return displayRunTitle(thread.name, "Untitled");
 }
 
 export function getThreadDocumentTitle(

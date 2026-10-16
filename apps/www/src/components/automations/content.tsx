@@ -3,7 +3,11 @@
 import { usePageBreadcrumbs } from "@/hooks/usePageBreadcrumbs";
 import { useQuery } from "@tanstack/react-query";
 import { BreadcrumbItem } from "@/contexts/page-header";
-import { automationDetailQueryOptions } from "@/queries/automation-queries";
+import {
+  automationDetailQueryOptions,
+  automationHealthQueryOptions,
+} from "@/queries/automation-queries";
+import { AutomationHealthPanel } from "./health";
 import { Loader2 } from "lucide-react";
 import { AutomationItem } from "./item";
 import { useState } from "react";
@@ -19,6 +23,7 @@ export function AutomationContent({ automationId }: { automationId: string }) {
     error,
     refetch,
   } = useQuery(automationDetailQueryOptions(automationId));
+  const { data: health } = useQuery(automationHealthQueryOptions());
   usePageBreadcrumbs(
     [
       { label: "Automations", href: "/automations" },
@@ -57,6 +62,10 @@ export function AutomationContent({ automationId }: { automationId: string }) {
           automation={automation}
           onEdit={() => setIsEditDialogOpen(true)}
         />
+        <AutomationHealthPanel
+          health={health?.find((h) => h.automationId === automationId)}
+        />
+        <h3 className="text-[15px] font-bold leading-5">All runs</h3>
         <ThreadListMain
           viewFilter="all"
           allowGroupBy={false}

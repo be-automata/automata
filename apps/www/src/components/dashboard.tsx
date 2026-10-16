@@ -16,8 +16,8 @@ import {
 } from "@/queries/thread-queries";
 import { convertToPlainText } from "@/lib/db-message-helpers";
 import { HandleUpdate } from "./promptbox/use-promptbox";
-import { cn } from "@/lib/utils";
 import { RecommendedTasks } from "./recommended-tasks";
+import { AgentActivityBoard } from "./activity/agent-activity-board";
 import { useAtomValue } from "jotai";
 import { selectedModelAtom } from "@/atoms/user-flags";
 import { FeatureUpsellToast } from "@/components/feature-upsell-toast";
@@ -74,7 +74,7 @@ export function Dashboard({
             queryKey: threadQueryKeys.list({ archived: showArchived }),
           });
         }
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error("Failed to create thread:", error);
         toast.error(unwrapError(error), { duration: 5000 });
         throw error; // Re-throw to trigger onSubmitError in usePromptBox
@@ -96,6 +96,7 @@ export function Dashboard({
   }, []);
 
   const [promptText, setPromptText] = useState<string | null>(null);
+  const [showAllTasks, setShowAllTasks] = useState(showArchived);
   const selectedModel = useAtomValue(selectedModelAtom);
 
   // Determine if there are any active tasks; used for Sawyer UI empty state
@@ -104,43 +105,56 @@ export function Dashboard({
     (data?.pages.flatMap((page) => page) ?? []).length < 3;
 
   return (
-    <div
-      className={cn(
-        "flex flex-col h-full max-w-2xl w-full mx-auto gap-8 justify-start pt-2.5",
-      )}
-    >
+    <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col">
       <FeatureUpsellToast />
-      <DashboardPromptBox
-        placeholder={placeholder}
-        status={null}
-        threadId={null}
-        onUpdate={onUpdate}
-        handleStop={handleStop}
-        handleSubmit={handleSubmit}
-        promptText={promptText ?? undefined}
-      />
-      {showRecommendedTasks && (
-        <div className="space-y-2 hidden lg:block">
-          <h3 className="text-sm font-medium text-muted-foreground/70">
-            Suggested tasks
-          </h3>
-          <RecommendedTasks
-            onTaskSelect={(p) => setPromptText(p)}
-            selectedModel={selectedModel}
-          />
-        </div>
-      )}
-      {mounted && (
-        <div className="lg:hidden">
-          <ThreadListMain
-            queryFilters={{ archived: showArchived }}
-            viewFilter={showArchived ? "archived" : "active"}
-            allowGroupBy={true}
-            showSuggestedTasks={showRecommendedTasks}
-            setPromptText={setPromptText}
-          />
-        </div>
-      )}
+      <div className="flex flex-1 flex-col gap-8 pb-8 pt-4">
+        <AgentActivityBoard />
+        {showRecommendedTasks && (
+          <div className="hidden space-y-2 lg:block">
+            <h2 className="text-[15px] font-bold leading-5">Suggested tasks</h2>
+            <RecommendedTasks
+              onTaskSelect={(p) => setPromptText(p)}
+              selectedModel={selectedModel}
+            />
+          </div>
+        )}
+        {mounted && (
+          <section aria-label="All tasks">
+            <button
+              type="button"
+              aria-expanded={showAllTasks}
+              onClick={() => setShowAllTasks((open) => !open)}
+              className="flex min-h-8 w-full items-center gap-2 border-b border-border pb-1.5 text-left max-md:min-h-11"
+            >
+              <span className="text-[15px] font-bold leading-5">All tasks</span>
+              <span className="text-xs text-muted-foreground">
+                {showAllTasks ? "hide" : "show"}
+              </span>
+            </button>
+            {showAllTasks ? (
+              <ThreadListMain
+                queryFilters={{ archived: showArchived }}
+                viewFilter={showArchived ? "archived" : "active"}
+                allowGroupBy={true}
+                showSuggestedTasks={false}
+                setPromptText={setPromptText}
+              />
+            ) : null}
+          </section>
+        )}
+      </div>
+      {/* Docked like a terminal prompt: activity owns the top of the page. */}
+      <div className="sticky bottom-0 z-10 border-t border-border bg-background pb-[max(1rem,env(safe-area-inset-bottom))] pt-3">
+        <DashboardPromptBox
+          placeholder={placeholder}
+          status={null}
+          threadId={null}
+          onUpdate={onUpdate}
+          handleStop={handleStop}
+          handleSubmit={handleSubmit}
+          promptText={promptText ?? undefined}
+        />
+      </div>
     </div>
   );
 }

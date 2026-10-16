@@ -1,23 +1,25 @@
 "use client";
 
 import { Loader2, AlertCircle } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 
 import {
   automationQueryOptions,
   automationLimitQueryOptions,
+  automationHealthQueryOptions,
+  automationQueryKeys,
 } from "@/queries/automation-queries";
+import { PageTitle } from "@/components/page-title";
+import { AutomationsRegister } from "./register";
 import { Automation } from "@terragon/shared";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   CreateAutomationButton,
   CreateAutomationInitialValues,
 } from "./create-button";
 import { useRealtimeUser } from "@/hooks/useRealtime";
-import { AutomationItem } from "./item";
 import { EditAutomationDialog } from "./edit-dialog";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { usePageHeader } from "@/contexts/page-header";
 import { Portal } from "@radix-ui/react-portal";
 import { RecommendedAutomations } from "./recommended-automations";
@@ -113,15 +115,22 @@ function AutomationsList({
   const { data: automationLimit, refetch: refetchAutomationLimit } = useQuery(
     automationLimitQueryOptions(),
   );
+  const queryClient = useQueryClient();
   useRealtimeUser({
     matches: (message) => !!message.data.automationId,
     onMessage: () => {
       refetch();
       refetchAutomationLimit();
+      queryClient.invalidateQueries({ queryKey: automationQueryKeys.health() });
     },
   });
   const [automationToEdit, setAutomationToEdit] = useState<Automation | null>(
     null,
+  );
+  const { data: health } = useQuery(automationHealthQueryOptions());
+  const healthById = useMemo(
+    () => new Map((health ?? []).map((h) => [h.automationId, h])),
+    [health],
   );
   if (isLoading) {
     return (
@@ -141,13 +150,14 @@ function AutomationsList({
   }
   return (
     <>
+      <div className="mb-4">
+        <PageTitle title="Automations" />
+      </div>
       {automationLimit?.reached && (
-        <Alert className="mb-4 bg-muted border-none">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>
-            {automationLimitMessage(automationLimit)}
-          </AlertDescription>
-        </Alert>
+        <p className="mb-4 flex items-start gap-2 border-y border-border py-2 font-sans text-[13px]">
+          <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-state-waiting" />
+          {automationLimitMessage(automationLimit)}
+        </p>
       )}
       {automations?.length === 0 && (
         <div className="flex flex-col gap-4">
@@ -181,17 +191,14 @@ function AutomationsList({
           </div>
         </div>
       )}
-      <div className="flex flex-col gap-2">
-        {automations?.map((automation) => (
-          <AutomationItem
-            key={automation.id}
-            automation={automation}
-            onEdit={() => setAutomationToEdit(automation)}
-            onDuplicate={onDuplicate}
-            verbose={false}
-          />
-        ))}
-      </div>
+      {automations && automations.length > 0 ? (
+        <AutomationsRegister
+          automations={automations}
+          healthById={healthById}
+          onEdit={setAutomationToEdit}
+          onDuplicate={onDuplicate}
+        />
+      ) : null}
       <EditAutomationDialog
         automation={automationToEdit}
         onClose={() => setAutomationToEdit(null)}

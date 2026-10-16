@@ -66,7 +66,12 @@ export const XtermTerminal = forwardRef<
       const terminal = new Terminal({
         cursorBlink: true,
         fontSize: 14,
-        fontFamily: '"Courier New", monospace',
+        // Not TX-02: its licence excludes terminals. Canvas needs a resolved
+        // family name, so read next/font's Geist Mono variable.
+        fontFamily:
+          getComputedStyle(document.body)
+            .getPropertyValue("--font-geist-mono")
+            .trim() || "monospace",
         cols: 80, // Default columns
         rows: 24, // Default rows
         theme:

@@ -5,27 +5,16 @@ import type {
   EnvSource,
 } from "@/server-lib/env-audience";
 import { cn } from "@/lib/utils";
+import {
+  ScopeBadge as UiScopeBadge,
+  type ConfigScope,
+} from "@/components/ui/scope-badge";
 
-/**
- * Scope inks (DESIGN.md): the ink colors the text, the tint fills the badge.
- * Dark pairs reuse the org-hue dark values, so they read on #1a1a1a.
- */
-const SCOPE_BADGES: Record<EnvSource, { label: string; className: string }> = {
-  global: {
-    label: "Global",
-    className:
-      "bg-[#e4e9ee] text-[#56687a] dark:bg-[#a3b4c4]/15 dark:text-[#a3b4c4]",
-  },
-  organization: {
-    label: "Organization",
-    className:
-      "bg-[#f2e2c2] text-[#9a6410] dark:bg-[#e2aa4e]/15 dark:text-[#e2aa4e]",
-  },
-  repository: {
-    label: "Repo",
-    className:
-      "bg-[#c8e6c9] text-[#2e7d32] dark:bg-[#4caf50]/15 dark:text-[#4caf50]",
-  },
+/** Scope ink and line per layer (components/ui/scope-badge.tsx, DESIGN.md). */
+const SCOPE_BADGES: Record<EnvSource, { label: string; scope: ConfigScope }> = {
+  global: { label: "Global", scope: "account" },
+  organization: { label: "Organization", scope: "org" },
+  repository: { label: "Repo", scope: "repo" },
 };
 
 function ScopeBadge({
@@ -37,15 +26,12 @@ function ScopeBadge({
 }) {
   const badge = SCOPE_BADGES[source];
   return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-sm px-1.5 py-0.5 text-[11px] font-medium leading-none whitespace-nowrap",
-        badge.className,
-        struck && "line-through opacity-60",
-      )}
+    <UiScopeBadge
+      scope={badge.scope}
+      className={cn(struck && "line-through opacity-60")}
     >
       {badge.label}
-    </span>
+    </UiScopeBadge>
   );
 }
 

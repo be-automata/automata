@@ -20,16 +20,32 @@ import { FlaskConical } from "lucide-react";
 import Link from "next/link";
 import { useBillingInfoQuery } from "@/queries/billing-queries";
 import { headerClassName } from "../shared/header";
+import { OrgName } from "../org-avatar";
+import { useActiveOrganization } from "@/queries/organization-queries";
+
+/** On mobile the switcher lives in the closed sheet, so the header names the org. */
+function MobileActiveOrg() {
+  const { activeOrganization } = useActiveOrganization();
+  if (!activeOrganization) {
+    return null;
+  }
+  return (
+    <span className="flex min-w-0 max-w-40 items-center gap-1.5 text-xs">
+      <OrgName organization={activeOrganization} size="xs" />
+    </span>
+  );
+}
 
 export const SiteHeader = memo(function SiteHeader() {
   const pathname = usePathname();
   const user = useAtomValue(userAtom);
   const { open: isSidebarOpen, isMobile } = useSidebar();
-  const isConstrainedPage =
+  const isAutomationsPage =
     pathname === "/automations" ||
     pathname.startsWith("/automations/") ||
-    pathname === "/environments" ||
-    pathname.startsWith("/environments/");
+    pathname === "/stats";
+  const isEnvironmentsPage =
+    pathname === "/environments" || pathname.startsWith("/environments/");
 
   if (!user) {
     return null;
@@ -39,11 +55,13 @@ export const SiteHeader = memo(function SiteHeader() {
       <div
         className={cn(
           "flex w-full items-center justify-between h-full",
-          isConstrainedPage && "max-w-4xl",
+          isAutomationsPage && "max-w-6xl",
+          isEnvironmentsPage && "max-w-4xl",
         )}
       >
         <div className="flex gap-2 items-center min-w-0">
           {isMobile && <SidebarTrigger className="px-0 size-auto w-fit" />}
+          {isMobile && <MobileActiveOrg />}
           {(pathname === "/dashboard" || pathname === "/welcome") && (
             <div
               className={cn(

@@ -2,7 +2,8 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { UserAtomsHydratorServer } from "@/components/system/user-atoms-server";
-import { Cabin, Geist, Geist_Mono } from "next/font/google";
+import { Geist_Mono, IBM_Plex_Sans } from "next/font/google";
+import localFont from "next/font/local";
 import { ServerProviders } from "@/components/system/server-providers";
 import { KonamiVideo } from "@/components/konami-video";
 
@@ -39,19 +40,41 @@ export const viewport: Viewport = {
   interactiveWidget: "resizes-content",
 };
 
-const cabin = Cabin({
+// Prose face (chat, help text, prompt editor). UI chrome is TX-02, loaded in
+// globals.css; Geist Mono is only its fallback and the terminal face.
+const plex = IBM_Plex_Sans({
   subsets: ["latin"],
-  variable: "--font-cabin",
-});
-
-const geist = Geist({
-  subsets: ["latin"],
-  variable: "--font-geist",
+  weight: ["400", "500", "600"],
+  variable: "--font-plex",
 });
 
 const geistMono = Geist_Mono({
   subsets: ["latin"],
   variable: "--font-geist-mono",
+});
+
+// UI chrome face (OFL 1.1, fonts/commit-mono/OFL.txt). TX-02 takes over when
+// it is installed locally; see globals.css.
+const commitMono = localFont({
+  src: [
+    {
+      path: "../fonts/commit-mono/CommitMono-400-Regular.woff2",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "../fonts/commit-mono/CommitMono-400-Italic.woff2",
+      weight: "400",
+      style: "italic",
+    },
+    {
+      path: "../fonts/commit-mono/CommitMono-700-Regular.woff2",
+      weight: "700",
+      style: "normal",
+    },
+  ],
+  variable: "--font-commit-mono",
+  display: "swap",
 });
 
 export default function RootLayout({
@@ -69,30 +92,20 @@ export default function RootLayout({
         )}
         <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
         <meta name="mobile-web-app-capable" content="yes" />
-        <link
-          rel="preconnect"
-          href="https://fonts.googleapis.com"
-          crossOrigin="anonymous"
-        />
-        <link
-          rel="preconnect"
-          href="https://fonts.gstatic.com"
-          crossOrigin="anonymous"
-        />
-        <meta name="theme-color" content="#f8f5f0" />
+        <meta name="theme-color" content="#f2f4f1" />
         <meta
           name="theme-color"
-          content="#f8f5f0"
+          content="#f2f4f1"
           media="(prefers-color-scheme: light)"
         />
         <meta
           name="theme-color"
-          content="#1a1a1a"
+          content="#121715"
           media="(prefers-color-scheme: dark)"
         />
       </head>
       <body
-        className={`${cabin.variable} ${geist.variable} ${geistMono.variable} font-sans antialiased`}
+        className={`${plex.variable} ${geistMono.variable} ${commitMono.variable} font-ui text-[13px] leading-[18px] antialiased`}
       >
         <ServerProviders>
           <UserAtomsHydratorServer>

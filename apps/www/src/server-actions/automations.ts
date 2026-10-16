@@ -19,6 +19,10 @@ import {
   getAutomationLimitStatus,
 } from "@/server-lib/automations";
 import { getAccessInfoForUser } from "@/lib/subscription";
+import {
+  getAutomationHealth as getAutomationHealthModel,
+  type AutomationHealth,
+} from "@terragon/shared/model/automation-health";
 
 /** Account-wide (all orgs), with the counts the limit notice prints. */
 export const getAutomationLimit = userOnlyAction(
@@ -41,6 +45,23 @@ export const getAutomations = userOnlyAction(
     });
   },
   { defaultErrorMessage: "Failed to get automations" },
+);
+
+/** Health per automation in the same fenced list the page shows. */
+export const getAutomationsHealth = userOnlyAction(
+  async function getAutomationsHealth(
+    userId: string,
+  ): Promise<AutomationHealth[]> {
+    const tenant = await getTenantContextOrNull();
+    const automations = await getAutomationsModel({
+      db,
+      userId,
+      organizationId: tenant?.organizationId ?? null,
+    });
+    const health = await getAutomationHealthModel({ db, automations });
+    return [...health.values()];
+  },
+  { defaultErrorMessage: "Failed to get automation health" },
 );
 
 export const getAutomation = userOnlyAction(

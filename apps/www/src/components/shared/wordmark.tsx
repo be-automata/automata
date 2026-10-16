@@ -25,7 +25,7 @@ export function Wordmark({
       {showText && (
         <span
           className={cn(
-            "text-xl font-extrabold font-[Cabin]",
+            "text-xl font-extrabold font-ui",
             size === "sm" ? "text-lg" : size === "md" ? "text-xl" : "text-2xl",
           )}
         >

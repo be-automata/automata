@@ -1,118 +1,137 @@
-@import url("https://fonts.googleapis.com/css2?family=Geist:wght@100..900&display=swap");
-@import url("https://fonts.googleapis.com/css2?family=Geist+Mono:wght@100..900&display=swap");
-
 @import "tailwindcss";
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * TX-02 (U.S. Graphics) is used when it is installed on the viewer's machine.
+ * The licensed web files are not in this public repo; with a web licence, serve
+ * them same-origin (no CORS header) and add their url() after local().
+ * Everyone else gets Commit Mono.
+ */
+@font-face {
+  font-family: "TX-02";
+  src: local("TX-02"), local("TX-02 Regular"), local("Berkeley Mono");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "TX-02";
+  src: local("TX-02 Bold"), local("Berkeley Mono Bold");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Ops Desk tokens (DESIGN.md). Color means a run state or a scope, nothing else. */
 :root {
-  --background: #f8f5f0;
-  --foreground: #3e2723;
-  --card: #f8f5f0;
-  --card-foreground: #3e2723;
-  --popover: #f8f5f0;
-  --popover-foreground: #3e2723;
-  --primary: #2e7d32;
+  --background: #f2f4f1;
+  --foreground: #172019;
+  --card: #fafbf9;
+  --card-foreground: #172019;
+  --popover: #fafbf9;
+  --popover-foreground: #172019;
+  --primary: #172019;
   --primary-foreground: #ffffff;
-  --secondary: #e8f5e9;
-  --secondary-foreground: #1b5e20;
-  --muted: #f0e9e0;
-  --disabled: #d4cec4;
-  --muted-foreground: #6d4c41;
-  --accent: #c8e6c9;
-  --accent-foreground: #1b5e20;
-  --destructive: #c62828;
+  --secondary: #e3e8e4;
+  --secondary-foreground: #172019;
+  --muted: #e9ede9;
+  --disabled: #cfd6d1;
+  --muted-foreground: #5a6660;
+  --accent: #e3e8e4;
+  --accent-foreground: #172019;
+  --destructive: #b42318;
   --destructive-foreground: #ffffff;
-  --border: #e0d6c9;
-  --input: #e0d6c9;
-  --ring: #2e7d32;
-  --chart-1: #4caf50;
-  --chart-2: #388e3c;
-  --chart-3: #2e7d32;
-  --chart-4: #1b5e20;
-  --chart-5: #0a1f0c;
-  --sidebar: #fcfaf8;
-  --sidebar-foreground: #3e2723;
-  --sidebar-primary: #2e7d32;
+  --border: #cfd6d1;
+  --line-soft: #e3e8e4;
+  --input: #cfd6d1;
+  --ring: #172019;
+  --chart-1: #172019;
+  --chart-2: #5a6660;
+  --chart-3: #0e7490;
+  --chart-4: #15803d;
+  --chart-5: #b42318;
+  --sidebar: #f2f4f1;
+  --sidebar-foreground: #172019;
+  --sidebar-primary: #172019;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #f5f2ed;
-  --sidebar-accent-foreground: #3e2723;
-  --sidebar-border: #e8e0d6;
-  --sidebar-ring: #2e7d32;
-  --font-geist-sans: "Geist", sans-serif;
-  --font-geist-mono: "Geist Mono", monospace;
-  --font-sans: var(--font-geist-sans);
-  --font-serif: Merriweather, serif;
-  --font-mono: var(--font-geist-mono);
-  --radius: 0.5rem;
-  --shadow-2xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
-  --shadow-xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
-  --shadow-sm:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 1px 2px -1px hsl(0 0% 0% / 0.1);
-  --shadow: 0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 1px 2px -1px hsl(0 0% 0% / 0.1);
-  --shadow-md:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 2px 4px -1px hsl(0 0% 0% / 0.1);
-  --shadow-lg:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 4px 6px -1px hsl(0 0% 0% / 0.1);
-  --shadow-xl:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 8px 10px -1px hsl(0 0% 0% / 0.1);
-  --shadow-2xl: 0 1px 3px 0px hsl(0 0% 0% / 0.25);
+  --sidebar-accent: #e3e8e4;
+  --sidebar-accent-foreground: #172019;
+  --sidebar-border: #cfd6d1;
+  --sidebar-ring: #172019;
+  --state-needs-you: #b42318;
+  --state-waiting: #a16207;
+  --state-running: #0e7490;
+  --state-done: #15803d;
+  --state-unverified: #5a6660;
+  --scope-account: #44505a;
+  --scope-org: #2f4db0;
+  --scope-repo: #8a3d7c;
+  --font-ui:
+    "TX-02", var(--font-commit-mono), var(--font-geist-mono), ui-monospace,
+    monospace;
+  --font-sans: var(--font-plex), ui-sans-serif, sans-serif;
+  --font-mono: var(--font-ui);
+  --font-terminal: var(--font-geist-mono), ui-monospace, monospace;
+  --radius: 0.375rem;
+  --shadow-2xs: none;
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow: none;
+  --shadow-md: 0 4px 16px 0 rgb(23 32 25 / 0.12);
+  --shadow-lg: 0 4px 16px 0 rgb(23 32 25 / 0.12);
+  --shadow-xl: 0 8px 24px 0 rgb(23 32 25 / 0.14);
+  --shadow-2xl: 0 12px 32px 0 rgb(23 32 25 / 0.16);
 }
 
 .dark {
-  --background: #1a1a1a;
-  --foreground: #f0ebe5;
-  --card: #242424;
-  --card-foreground: #f0ebe5;
-  --popover: #242424;
-  --popover-foreground: #f0ebe5;
-  --primary: #4caf50;
-  --primary-foreground: #0a1f0c;
-  --secondary: #333333;
-  --secondary-foreground: #d7e0d6;
-  --muted: #2a2a2a;
-  --disabled: #3a3a3a;
-  --muted-foreground: #d7cfc4;
-  --accent: #2e7d32;
-  --accent-foreground: #ffffff;
-  --destructive: #dc2626;
-  --destructive-foreground: #ffffff;
-  --border: #4a4a4a;
-  --input: #4a4a4a;
-  --ring: #4caf50;
-  --chart-1: #81c784;
-  --chart-2: #66bb6a;
-  --chart-3: #4caf50;
-  --chart-4: #43a047;
-  --chart-5: #388e3c;
-  --sidebar: #161616;
-  --sidebar-foreground: #f0ebe5;
-  --sidebar-primary: #4caf50;
-  --sidebar-primary-foreground: #0a1f0c;
-  --sidebar-accent: #202020;
-  --sidebar-accent-foreground: #ffffff;
-  --sidebar-border: #4a4a4a;
-  --sidebar-ring: #4caf50;
-  --font-geist-sans: "Geist", sans-serif;
-  --font-geist-mono: "Geist Mono", monospace;
-  --font-cabin: "Cabin", sans-serif;
-  --font-sans: var(--font-geist-sans);
-  --font-serif: Merriweather, serif;
-  --font-mono: var(--font-geist-mono);
-  --radius: 0.5rem;
-  --shadow-2xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
-  --shadow-xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
-  --shadow-sm:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 1px 2px -1px hsl(0 0% 0% / 0.1);
-  --shadow: 0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 1px 2px -1px hsl(0 0% 0% / 0.1);
-  --shadow-md:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 2px 4px -1px hsl(0 0% 0% / 0.1);
-  --shadow-lg:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 4px 6px -1px hsl(0 0% 0% / 0.1);
-  --shadow-xl:
-    0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 8px 10px -1px hsl(0 0% 0% / 0.1);
-  --shadow-2xl: 0 1px 3px 0px hsl(0 0% 0% / 0.25);
+  --background: #121715;
+  --foreground: #dde4de;
+  --card: #1a201e;
+  --card-foreground: #dde4de;
+  --popover: #1a201e;
+  --popover-foreground: #dde4de;
+  --primary: #dde4de;
+  --primary-foreground: #121715;
+  --secondary: #252e2a;
+  --secondary-foreground: #dde4de;
+  --muted: #1f2623;
+  --disabled: #33403a;
+  --muted-foreground: #8e9a94;
+  --accent: #252e2a;
+  --accent-foreground: #dde4de;
+  --destructive: #ff6b6b;
+  --destructive-foreground: #121715;
+  --border: #33403a;
+  --line-soft: #252e2a;
+  --input: #33403a;
+  --ring: #dde4de;
+  --chart-1: #dde4de;
+  --chart-2: #8e9a94;
+  --chart-3: #4cc3d9;
+  --chart-4: #5bc68a;
+  --chart-5: #ff6b6b;
+  --sidebar: #121715;
+  --sidebar-foreground: #dde4de;
+  --sidebar-primary: #dde4de;
+  --sidebar-primary-foreground: #121715;
+  --sidebar-accent: #252e2a;
+  --sidebar-accent-foreground: #dde4de;
+  --sidebar-border: #33403a;
+  --sidebar-ring: #dde4de;
+  --state-needs-you: #ff6b6b;
+  --state-waiting: #e6a93a;
+  --state-running: #4cc3d9;
+  --state-done: #5bc68a;
+  --state-unverified: #8e9a94;
+  --scope-account: #b6c2ca;
+  --scope-org: #8ea6ff;
+  --scope-repo: #d891c9;
+  --shadow-md: 0 4px 16px 0 rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 4px 16px 0 rgb(0 0 0 / 0.4);
+  --shadow-xl: 0 8px 24px 0 rgb(0 0 0 / 0.45);
+  --shadow-2xl: 0 12px 32px 0 rgb(0 0 0 / 0.5);
 }
 
 @theme inline {
@@ -150,14 +169,25 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
+  --color-line-soft: var(--line-soft);
+  --color-state-needs-you: var(--state-needs-you);
+  --color-state-waiting: var(--state-waiting);
+  --color-state-running: var(--state-running);
+  --color-state-done: var(--state-done);
+  --color-state-unverified: var(--state-unverified);
+  --color-scope-account: var(--scope-account);
+  --color-scope-org: var(--scope-org);
+  --color-scope-repo: var(--scope-repo);
+
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
-  --font-serif: var(--font-serif);
+  --font-ui: var(--font-ui);
+  --font-terminal: var(--font-terminal);
 
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --radius-xl: 8px;
 
   --shadow-2xs: var(--shadow-2xs);
   --shadow-xs: var(--shadow-xs);
@@ -179,6 +209,7 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-variant-numeric: tabular-nums;
     /* Handle safe areas for PWA */
     padding-top: env(safe-area-inset-top);
     padding-left: env(safe-area-inset-left);
@@ -293,6 +324,12 @@
 }
 
 /* Tiptap editor styles */
+/* Sentences read in the prose face; the UI chrome is mono (DESIGN.md). */
+.ProseMirror,
+.prose {
+  font-family: var(--font-sans);
+}
+
 .ProseMirror {
   outline: none;
 }

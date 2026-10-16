@@ -41,3 +41,18 @@ export const TERMINAL_THREAD_STATUSES: ThreadStatus[] = [
 export function threadIsTerminal(): SQL {
   return sql`(${isNotNull(thread.terminalCause)} or ${threadEffectiveStatusIn(TERMINAL_THREAD_STATUSES)})`;
 }
+
+/**
+ * The thread's effective status as a column: its newest thread chat's status,
+ * else the thread row's (chat-mode threads keep status on threadChat).
+ */
+export function threadEffectiveStatusSql(): SQL<ThreadStatus> {
+  return sql<ThreadStatus>`COALESCE((select ${threadChat.status} from ${threadChat} where ${threadChat.threadId} = ${thread.id} order by ${threadChat.updatedAt} desc limit 1), ${thread.status})`;
+}
+
+/** The error message that goes with threadEffectiveStatusSql(). */
+export function threadEffectiveErrorSql(): SQL<string | null> {
+  return sql<
+    string | null
+  >`COALESCE((select ${threadChat.errorMessage} from ${threadChat} where ${threadChat.threadId} = ${thread.id} order by ${threadChat.updatedAt} desc limit 1), ${thread.errorMessage})`;
+}

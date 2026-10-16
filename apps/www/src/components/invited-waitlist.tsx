@@ -47,7 +47,7 @@ export function InvitedWaitlist() {
               className="opacity-90"
               priority
             />
-            <h1 className="text-4xl font-bold tracking-tight font-[Cabin]">
+            <h1 className="text-4xl font-bold tracking-tight font-ui">
               Terragon
             </h1>
           </div>

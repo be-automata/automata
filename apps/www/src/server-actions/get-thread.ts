@@ -4,7 +4,7 @@ import { cache } from "react";
 import { getThreadWithPermissions } from "@terragon/shared/model/threads";
 import { getTenantContextOrNull, userOnlyAction } from "@/lib/auth-server";
 import { db } from "@/lib/db";
-import { getOctokitForUser, parseRepoFullName } from "@/lib/github";
+import { userHasRepoAccess } from "@/server-lib/repo-access";
 import { ThreadInfoFull } from "@terragon/shared/db/types";
 import { UserFacingError } from "@/lib/server-actions";
 
@@ -23,25 +23,8 @@ export const getThreadAction = cache(
         userId,
         organizationId: tenant?.organizationId ?? null,
         allowAdmin: false,
-        getHasRepoPermissions: async (repoFullName) => {
-          const octokit = await getOctokitForUser({ userId });
-          if (!octokit) {
-            return false;
-          }
-          try {
-            const [owner, repo] = parseRepoFullName(repoFullName);
-            const repoInfo = await octokit.rest.repos.get({
-              owner,
-              repo,
-            });
-            if (!repoInfo.data.permissions) {
-              return false;
-            }
-            return true;
-          } catch (error) {
-            return false;
-          }
-        },
+        getHasRepoPermissions: (repoFullName) =>
+          userHasRepoAccess({ userId, repoFullName }),
       });
       if (!threadInfoFull) {
         throw new UserFacingError("Unauthorized");

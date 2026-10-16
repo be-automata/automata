@@ -1,16 +1,42 @@
 "use server";
 
 import { getThreadsAndPRsStats } from "@terragon/shared/model/threads";
+import {
+  getOrgUsageStats,
+  type OrgUsageStats,
+  type RepoUsage,
+} from "@terragon/shared/model/org-usage-stats";
 import { validateTimezone } from "@terragon/shared/utils/timezone";
-import { getUserInfoOrNull, userOnlyAction } from "@/lib/auth-server";
+import {
+  getTenantContextOrNull,
+  getUserInfoOrNull,
+  userOnlyAction,
+} from "@/lib/auth-server";
 import { addDays, format, subDays, set as setDateValues } from "date-fns";
 import { db } from "@/lib/db";
 import { tz } from "@date-fns/tz";
+import { createRepoAccessChecker } from "@/server-lib/repo-access";
+import { maskReposWithoutAccess } from "@/server-lib/usage-repo-masking";
 
 export interface UsageStatsSummary {
   totalThreadsCreated: number;
   totalPRsMerged: number;
 }
+
+export type RepoUsageRow = Omit<RepoUsage, "daily"> & {
+  /** Tasks per day, oldest first, aligned with the range. */
+  daily: number[];
+  /** Repos the viewer cannot see on GitHub, folded into one unnamed row. */
+  hidden?: true;
+};
+
+/** Org-wide breakdowns; null without an active org (own totals only). */
+export type UsageBreakdowns = Omit<
+  OrgUsageStats,
+  "byRepo" | "threadsCreated" | "prsMerged"
+> & {
+  byRepo: RepoUsageRow[];
+};
 
 export interface DailyUsageStats {
   date: string;
@@ -29,12 +55,14 @@ export const getUsageStats = userOnlyAction(
     {
       numDays,
       timezone,
+      mineOnly = false,
     }: {
       numDays: number;
       timezone: string;
+      mineOnly?: boolean;
     },
   ) {
-    console.log("getUsageStats", { numDays, timezone });
+    console.log("getUsageStats", { numDays, timezone, mineOnly });
     const userInfo = await getUserInfoOrNull();
     if (!userInfo) {
       throw new Error("Unauthorized");
@@ -49,13 +77,28 @@ export const getUsageStats = userOnlyAction(
       }),
       { hours: 0, minutes: 0, seconds: 0, milliseconds: 0 },
     );
-    const threadsAndPRsData = await getThreadsAndPRsStats({
-      db,
-      userId,
-      startDate: start,
-      endDate: end,
-      timezone: validatedTimezone,
-    });
+    // Org-wide when the session has an active org (membership-checked);
+    // otherwise only the viewer's own threads, as before.
+    const tenant = await getTenantContextOrNull();
+    const orgStats = tenant?.organizationId
+      ? await getOrgUsageStats({
+          db,
+          organizationId: tenant.organizationId,
+          userId: mineOnly ? userId : undefined,
+          startDate: start,
+          endDate: end,
+          timezone: validatedTimezone,
+        })
+      : null;
+    const threadsAndPRsData =
+      orgStats ??
+      (await getThreadsAndPRsStats({
+        db,
+        userId,
+        startDate: start,
+        endDate: end,
+        timezone: validatedTimezone,
+      }));
 
     // Transform threads and PRs data into daily stats
     const dailyStatsMap = new Map<string, DailyUsageStats>();
@@ -94,12 +137,29 @@ export const getUsageStats = userOnlyAction(
     const dailyStats: DailyUsageStats[] = Array.from(
       dailyStatsMap.values(),
     ).sort((a, b) => b.date.localeCompare(a.date));
+    const datesOldestFirst = [...dailyStats].reverse().map((d) => d.date);
+    const breakdowns: UsageBreakdowns | null = orgStats
+      ? {
+          bySource: orgStats.bySource,
+          funnel: orgStats.funnel,
+          errored: orgStats.errored,
+          notFinished: orgStats.notFinished,
+          byRepo: await maskReposWithoutAccess(
+            orgStats.byRepo.map((repo) => ({
+              ...repo,
+              daily: datesOldestFirst.map((date) => repo.daily[date] ?? 0),
+            })),
+            createRepoAccessChecker(userId, { cache: true }),
+          ),
+          // Counts only, never titles: members of the org already see each
+          // other in the org, and aggregate counts are org-level analytics.
+          byMember: mineOnly ? [] : orgStats.byMember,
+        }
+      : null;
     return {
       dailyStats,
-      summary: {
-        totalThreadsCreated,
-        totalPRsMerged,
-      },
+      summary: { totalThreadsCreated, totalPRsMerged },
+      breakdowns,
     };
   },
   { defaultErrorMessage: "Failed to get usage stats" },
