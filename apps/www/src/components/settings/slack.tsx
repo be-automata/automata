@@ -419,7 +419,12 @@ export function SlackAccountSettings({
         />
       ))}
       {others.length > 0 && (
-        <details className="rounded-lg border px-4 py-2">
+        // Open while the org has none of its own, so installing one is not
+        // hidden behind a click.
+        <details
+          className="rounded-lg border px-4 py-2"
+          open={groups.inOrganization.length === 0}
+        >
           <summary className="cursor-pointer text-sm text-muted-foreground">
             Other Slack workspaces you are signed in to ({others.length})
           </summary>
