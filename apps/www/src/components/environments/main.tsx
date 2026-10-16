@@ -19,7 +19,11 @@ import { toast } from "sonner";
 import { usePageBreadcrumbs } from "@/hooks/usePageBreadcrumbs";
 import { McpConfig } from "@terragon/sandbox/mcp-config";
 import { Button } from "@/components/ui/button";
-import { FileCog } from "lucide-react";
+import { ChevronRight, FileCog } from "lucide-react";
+import { ScopeBadge, type ConfigScope } from "@/components/ui/scope-badge";
+import { OrgName } from "@/components/org-avatar";
+import { RunsInCue } from "@/components/promptbox/runs-in-cue";
+import { useActiveOrganization } from "@/queries/organization-queries";
 import { CreateEnvironmentButton } from "@/components/environments/create-environment-button";
 import { DeleteEnvironmentButton } from "@/components/environments/delete-environment-button";
 import { useUnsavedChangesWarning } from "@/hooks/useUnsavedChangesWarning";
@@ -27,6 +31,37 @@ import { publicDocsUrl } from "@terragon/env/next-public";
 import { usePageHeader } from "@/contexts/page-header";
 import { Portal } from "@radix-ui/react-portal";
 import { useServerActionMutation } from "@/queries/server-action-helpers";
+
+/** One layer of the resolution ladder, in its scope ink and line. */
+function LayerRow({
+  href,
+  scope,
+  title,
+  description,
+}: {
+  href: string;
+  scope: ConfigScope;
+  title: string;
+  description: string;
+}) {
+  return (
+    <li className="border-b border-line-soft">
+      <Link
+        href={href}
+        className="flex items-center gap-2.5 py-3 hover:bg-accent/60"
+      >
+        <ScopeBadge scope={scope} />
+        <span className="min-w-0 flex-1">
+          <span className="block font-bold">{title}</span>
+          <span className="block font-sans text-[13px] text-muted-foreground">
+            {description}
+          </span>
+        </span>
+        <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+      </Link>
+    </li>
+  );
+}
 
 function EnvironmentBreadcrumb({ label }: { label: string | null }) {
   usePageBreadcrumbs([
@@ -47,6 +82,7 @@ export function Environments({
   const router = useRouter();
   const { headerActionContainer } = usePageHeader();
   usePageBreadcrumbs([{ label: "Environments" }]);
+  const { activeOrganization } = useActiveOrganization();
   useRealtimeUser({
     matches: (message) => !!message.data.environmentId,
     onMessage: () => router.refresh(),
@@ -57,82 +93,76 @@ export function Environments({
       <Portal container={headerActionContainer}>
         <CreateEnvironmentButton />
       </Portal>
-      <div className="flex flex-col justify-start h-full w-full max-w-4xl">
-        <div className="mb-6 p-4 bg-muted/50 rounded-lg border">
-          <h3 className="text-sm font-medium text-muted-foreground mb-2">
-            About Sandbox Environments
-          </h3>
-          <p className="text-sm text-muted-foreground">
-            Terragon runs in an isolated Linux environment with full development
-            capabilities. Each sandbox includes Node.js, Python, Git, and common
-            development tools.
-            <br />
-            <br />
+      <div className="flex h-full w-full max-w-4xl flex-col justify-start gap-6">
+        <div>
+          <div className="flex items-baseline gap-2.5">
+            <h1 className="text-xl font-bold leading-6">Environments</h1>
+            {activeOrganization && organizationName !== null ? (
+              <span className="inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                in <OrgName organization={activeOrganization} size="xs" />
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-2 font-sans text-[13px] text-muted-foreground">
+            A task reads Global, then Organization, then Repository; the later
+            layer wins.{" "}
             <Link
               href={`${publicDocsUrl()}/docs/configuration/environment-setup/sandbox`}
               target="_blank"
               rel="noopener noreferrer"
-              className="underline hover:no-underline"
+              className="underline underline-offset-2"
             >
-              Learn more about the sandbox environment
+              About sandboxes
             </Link>
           </p>
         </div>
-        {organizationName !== null && (
-          <div className="space-y-2 pb-6 mb-4">
-            <div className="border-b pb-2">
-              <h2 className="text-lg font-semibold">
-                Organization ({organizationName})
-              </h2>
-              <p className="text-sm text-muted-foreground">
-                Variables shared by every repository and member of this
-                organization, such as tracker settings for the post-merge audit.
-                Owners and admins can edit them.
-              </p>
+        <ol className="border-t border-border">
+          <LayerRow
+            href="/environments/global"
+            scope="account"
+            title="Global · you"
+            description="Your own tasks in every organization. Organization automations such as the post-merge audit do not read it."
+          />
+          {organizationName !== null ? (
+            <LayerRow
+              href="/environments/organization"
+              scope="org"
+              title={`Organization · ${organizationName}`}
+              description="Shared by every repository and member of this organization. Owners and admins edit it."
+            />
+          ) : null}
+          <li className="border-b border-line-soft py-3">
+            <div className="flex items-center gap-2.5">
+              <ScopeBadge scope="repo" />
+              <span className="font-bold">Repositories</span>
+              <span className="text-xs text-muted-foreground">
+                {environments?.length ?? 0}
+              </span>
             </div>
-            <Link className="underline" href="/environments/organization">
-              Manage
-            </Link>
-          </div>
-        )}
-        <div className="space-y-2 pb-6 mb-4">
-          <div className="border-b pb-2">
-            <h2 className="text-lg font-semibold">Global (personal)</h2>
-            <p className="text-sm text-muted-foreground">
-              Variables for your own tasks in every organization. Not read by
-              organization automations such as the post-merge audit.
-            </p>
-          </div>
-          <Link className="underline" href="/environments/global">
-            Manage
-          </Link>
-        </div>
-        <div className="space-y-2 pb-6">
-          <div className="border-b pb-2">
-            <h2 className="text-lg font-semibold">Repository Specific</h2>
             {environments?.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                Click "Create Environment" to get started
+              <p className="ml-[52px] mt-1 font-sans text-[13px] text-muted-foreground">
+                No repository environments yet. Use Create Environment to add
+                one.
               </p>
             ) : (
-              <p className="text-sm text-muted-foreground">
-                Manage environment variables and MCP servers for specific
-                repositories.
-              </p>
+              <ul className="ml-[52px] mt-1">
+                {environments?.map((environment) => (
+                  <li key={environment.id}>
+                    <Link
+                      href={`/environments/${environment.id}`}
+                      className="flex h-8 items-center justify-between gap-3 border-b border-line-soft text-xs last:border-b-0 hover:bg-accent/60"
+                    >
+                      <span className="min-w-0 truncate">
+                        {environment.repoFullName}
+                      </span>
+                      <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+                    </Link>
+                  </li>
+                ))}
+              </ul>
             )}
-          </div>
-          <div className="flex flex-col gap-4 w-full">
-            {environments?.map((environment) => (
-              <Link
-                className="underline"
-                href={`/environments/${environment.id}`}
-                key={environment.id}
-              >
-                {environment.repoFullName}
-              </Link>
-            ))}
-          </div>
-        </div>
+          </li>
+        </ol>
       </div>
     </>
   );
@@ -281,6 +311,12 @@ export function EnvironmentUI({
       </Portal>
       <EnvironmentBreadcrumb label={environment.repoFullName} />
       <div className="flex flex-col gap-4 w-full pb-4">
+        <div className="flex flex-col gap-1">
+          <h1 className="min-w-0 truncate text-xl font-bold leading-6">
+            {environment.repoFullName}
+          </h1>
+          <RunsInCue repoFullName={environment.repoFullName} />
+        </div>
         <EffectiveConfiguration entries={effectiveEnvironment} />
         <EnvironmentVariablesSection
           target={{ scope: "repository", environmentId }}

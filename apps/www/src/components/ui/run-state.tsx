@@ -1,3 +1,4 @@
+import React from "react";
 import type { RunState, RunStateKind } from "@terragon/shared/model/run-state";
 
 import { cn } from "@/lib/utils";

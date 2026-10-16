@@ -4,7 +4,7 @@ import React from "react";
 import { AlertCircle } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
+import { ScopeBadge } from "@/components/ui/scope-badge";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -23,12 +23,9 @@ import {
 /** The "Repo override" pill on an override row. */
 export function RepoOverrideBadge() {
   return (
-    <Badge
-      variant="outline"
-      className="w-fit px-1.5 py-0.5 text-[10px] font-normal uppercase tracking-wide text-muted-foreground"
-    >
+    <ScopeBadge scope="repo" className="w-fit">
       Repo override
-    </Badge>
+    </ScopeBadge>
   );
 }
 

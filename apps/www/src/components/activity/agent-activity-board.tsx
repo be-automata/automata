@@ -1,10 +1,14 @@
 "use client";
 
+import React from "react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import type { AgentActivityRow } from "@terragon/shared/model/agent-activity";
+import type {
+  AgentActivityRow,
+  OrgAgentActivity,
+} from "@terragon/shared/model/agent-activity";
 import { TRIGGER_LABELS } from "@terragon/shared/model/run-state";
 
 import { Button } from "@/components/ui/button";
@@ -109,19 +113,18 @@ function SectionHeader({
   );
 }
 
-function NeedsYouRow({ row }: { row: AgentActivityRow }) {
-  const queryClient = useQueryClient();
+function NeedsYouRow({
+  row,
+  onDismiss,
+}: {
+  row: AgentActivityRow;
+  onDismiss: (threadId: string) => Promise<boolean>;
+}) {
   const [dismissing, setDismissing] = useState(false);
   const explanation = row.needsYou;
   const dismiss = async () => {
     setDismissing(true);
-    try {
-      unwrapResult(
-        await readThread({ threadId: row.threadId, threadChatIdOrNull: null }),
-      );
-      await queryClient.invalidateQueries({ queryKey: ["agent-activity"] });
-    } catch (error) {
-      toast.error(unwrapError(error));
+    if (!(await onDismiss(row.threadId))) {
       setDismissing(false);
     }
   };
@@ -261,8 +264,61 @@ export function AgentActivityBoard() {
     mineOnly: scope === "mine",
     peopleOnly: who === "people",
   });
+  const queryClient = useQueryClient();
   const now = useNow(1000);
+  const onDismiss = async (threadId: string) => {
+    try {
+      unwrapResult(await readThread({ threadId, threadChatIdOrNull: null }));
+      await queryClient.invalidateQueries({ queryKey: ["agent-activity"] });
+      return true;
+    } catch (error) {
+      toast.error(unwrapError(error));
+      return false;
+    }
+  };
+  return (
+    <AgentActivityBoardView
+      organization={activeOrganization}
+      data={data}
+      isLoading={isLoading}
+      isError={isError}
+      onRetry={() => refetch()}
+      onDismiss={onDismiss}
+      now={now}
+      scope={scope}
+      onScopeChange={setScope}
+      who={who}
+      onWhoChange={setWho}
+    />
+  );
+}
 
+/** The board without data fetching, so its states can be rendered in tests. */
+export function AgentActivityBoardView({
+  organization: activeOrganization,
+  data,
+  isLoading,
+  isError,
+  onRetry,
+  onDismiss,
+  now,
+  scope,
+  onScopeChange: setScope,
+  who,
+  onWhoChange: setWho,
+}: {
+  organization: { id: string; name: string; logo?: string | null } | null;
+  data: OrgAgentActivity | undefined;
+  isLoading: boolean;
+  isError: boolean;
+  onRetry: () => void;
+  onDismiss: (threadId: string) => Promise<boolean>;
+  now: number;
+  scope: Scope;
+  onScopeChange: (scope: Scope) => void;
+  who: Who;
+  onWhoChange: (who: Who) => void;
+}) {
   const byRepo = useMemo(() => {
     const groups = new Map<string, AgentActivityRow[]>();
     for (const row of data?.active ?? []) {
@@ -295,7 +351,7 @@ export function AgentActivityBoard() {
           <span className="font-sans text-[13px]">
             Agent activity could not be loaded.
           </span>
-          <Button size="sm" variant="outline" onClick={() => refetch()}>
+          <Button size="sm" variant="outline" onClick={onRetry}>
             Retry
           </Button>
         </div>
@@ -306,7 +362,7 @@ export function AgentActivityBoard() {
           <SectionHeader title="Needs you" meta={data.needsYou.length} />
           <ul>
             {data.needsYou.map((row) => (
-              <NeedsYouRow key={row.threadId} row={row} />
+              <NeedsYouRow key={row.threadId} row={row} onDismiss={onDismiss} />
             ))}
           </ul>
         </section>

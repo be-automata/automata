@@ -3,6 +3,7 @@
 import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
+import { ScopeBadge } from "@/components/ui/scope-badge";
 import {
   Settings,
   GitBranch,
@@ -87,15 +88,31 @@ export function SettingsLayout({ children }: { children: React.ReactNode }) {
   }
 
   const groups: { scope: NavItem["scope"]; heading: React.ReactNode }[] = [
-    { scope: "account", heading: "Account" },
+    {
+      scope: "account",
+      heading: (
+        <span className="flex items-center gap-1.5">
+          <ScopeBadge scope="account" />
+          <span className="text-foreground">Account</span>
+          <span>· you, in every org</span>
+        </span>
+      ),
+    },
     {
       scope: "organization",
-      heading: activeOrganization ? (
-        <span className="flex items-center gap-1.5 normal-case">
-          <OrgName organization={activeOrganization} size="xs" />
+      heading: (
+        <span className="flex min-w-0 items-center gap-1.5 normal-case">
+          <ScopeBadge scope="org" />
+          {activeOrganization ? (
+            <OrgName
+              organization={activeOrganization}
+              size="xs"
+              nameClassName="text-foreground"
+            />
+          ) : (
+            <span className="text-foreground">Organization</span>
+          )}
         </span>
-      ) : (
-        "Organization"
       ),
     },
   ];
@@ -106,7 +123,7 @@ export function SettingsLayout({ children }: { children: React.ReactNode }) {
         <div className="lg:sticky lg:top-0 flex flex-col gap-3 pt-2">
           {groups.map((group) => (
             <div key={group.scope} className="flex flex-col gap-1">
-              <div className="px-3 text-[11px] font-medium text-muted-foreground">
+              <div className="px-3 text-xs text-muted-foreground">
                 {group.heading}
               </div>
               <div className="flex flex-wrap lg:flex-col gap-1 pb-2 lg:pb-0">
