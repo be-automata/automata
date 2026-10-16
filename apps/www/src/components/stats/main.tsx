@@ -343,8 +343,12 @@ function WhereTables({ breakdowns }: { breakdowns: UsageBreakdowns }) {
             {breakdowns.byRepo.map((repo) => (
               <tr key={repo.repoFullName}>
                 <td
-                  className={`${td} max-w-[320px] truncate`}
-                  title={repo.repoFullName}
+                  className={`${td} max-w-[320px] truncate ${repo.hidden ? "text-muted-foreground" : ""}`}
+                  title={
+                    repo.hidden
+                      ? "Repositories you cannot see on GitHub"
+                      : repo.repoFullName
+                  }
                 >
                   {repo.repoFullName}
                 </td>

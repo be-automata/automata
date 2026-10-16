@@ -15,6 +15,8 @@ import {
 import { addDays, format, subDays, set as setDateValues } from "date-fns";
 import { db } from "@/lib/db";
 import { tz } from "@date-fns/tz";
+import { createRepoAccessChecker } from "@/server-lib/repo-access";
+import { maskReposWithoutAccess } from "@/server-lib/usage-repo-masking";
 
 export interface UsageStatsSummary {
   totalThreadsCreated: number;
@@ -24,6 +26,8 @@ export interface UsageStatsSummary {
 export type RepoUsageRow = Omit<RepoUsage, "daily"> & {
   /** Tasks per day, oldest first, aligned with the range. */
   daily: number[];
+  /** Repos the viewer cannot see on GitHub, folded into one unnamed row. */
+  hidden?: true;
 };
 
 /** Org-wide breakdowns; null without an active org (own totals only). */
@@ -140,10 +144,15 @@ export const getUsageStats = userOnlyAction(
           funnel: orgStats.funnel,
           errored: orgStats.errored,
           notFinished: orgStats.notFinished,
-          byRepo: orgStats.byRepo.map((repo) => ({
-            ...repo,
-            daily: datesOldestFirst.map((date) => repo.daily[date] ?? 0),
-          })),
+          byRepo: await maskReposWithoutAccess(
+            orgStats.byRepo.map((repo) => ({
+              ...repo,
+              daily: datesOldestFirst.map((date) => repo.daily[date] ?? 0),
+            })),
+            createRepoAccessChecker(userId, { cache: true }),
+          ),
+          // Counts only, never titles: members of the org already see each
+          // other in the org, and aggregate counts are org-level analytics.
           byMember: mineOnly ? [] : orgStats.byMember,
         }
       : null;
