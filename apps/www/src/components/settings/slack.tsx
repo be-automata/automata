@@ -25,6 +25,7 @@ import {
 } from "@/queries/organization-queries";
 import { OrgName } from "../org-avatar";
 import { SlackConnectDialog, SlackInstallDialog } from "./slack-target-dialogs";
+import { groupSlackAccounts } from "@/lib/slack-account-groups";
 
 function SlackAccountItem({
   account,
@@ -216,6 +217,126 @@ function SlackAccountItem({
   );
 }
 
+/**
+ * One of the user's other Slack sign-ins, shown under the active org's own
+ * workspaces: installable into this org when no org has it yet, otherwise
+ * named with the org that uses it.
+ */
+function OtherSlackAccountRow({
+  account,
+  slackAppReady,
+}: {
+  account: SlackAccountWithMetadata;
+  slackAppReady: boolean;
+}) {
+  const router = useRouter();
+  const [isRemoving, setIsRemoving] = useState(false);
+  const [installOpen, setInstallOpen] = useState(false);
+  const getSlackAppInstallUrlMutation = useServerActionMutation({
+    mutationFn: getSlackAppInstallUrl,
+  });
+  const { activeOrganization, expectedOrganizationId } =
+    useActiveOrganization();
+  const { data: myOrganizations } = useMyOrganizations();
+  const boundOrganizationId = account.installation?.organizationId ?? null;
+  const boundOrganization =
+    myOrganizations?.organizations.find(
+      (org) => org.id === boundOrganizationId,
+    ) ?? null;
+
+  const handleRemove = async () => {
+    try {
+      setIsRemoving(true);
+      await disconnectSlackAccount({ teamId: account.teamId });
+      toast.success(`Removed your ${account.slackTeamName} sign-in`);
+      router.refresh();
+    } catch (error) {
+      console.error("Failed to remove Slack sign-in:", error);
+      toast.error("Failed to remove the Slack sign-in");
+    } finally {
+      setIsRemoving(false);
+    }
+  };
+
+  const handleInstallApp = async () => {
+    const appInstallUrl = await getSlackAppInstallUrlMutation.mutateAsync({
+      teamId: account.teamId,
+      expectedOrganizationId,
+    });
+    window.location.href = appInstallUrl;
+  };
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 py-2">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <span className="flex items-center gap-2 text-sm font-medium">
+          <Slack className="h-4 w-4 shrink-0" />
+          {account.slackTeamName}
+          <span className="font-mono text-xs font-normal text-muted-foreground">
+            {account.teamId}
+          </span>
+        </span>
+        <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          {account.installation ? (
+            <>
+              Used by
+              {boundOrganization ? (
+                <OrgName
+                  organization={boundOrganization}
+                  size="xs"
+                  nameClassName="font-medium text-foreground"
+                />
+              ) : (
+                <span className="font-medium text-foreground">
+                  {boundOrganizationId
+                    ? "an organization you are not a member of"
+                    : "no organization (personal)"}
+                </span>
+              )}
+            </>
+          ) : (
+            "Not installed in any organization"
+          )}
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        {!account.installation && activeOrganization && (
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setInstallOpen(true)}
+              disabled={
+                !slackAppReady || getSlackAppInstallUrlMutation.isPending
+              }
+            >
+              Install into {activeOrganization.name}
+            </Button>
+            <SlackInstallDialog
+              open={installOpen}
+              onOpenChange={setInstallOpen}
+              workspaceName={account.slackTeamName}
+              workspaceId={account.teamId}
+              organization={activeOrganization}
+              isPending={getSlackAppInstallUrlMutation.isPending}
+              onContinue={handleInstallApp}
+            />
+          </>
+        )}
+        <Button
+          size="sm"
+          variant="link"
+          onClick={handleRemove}
+          disabled={isRemoving}
+          className="px-0 text-muted-foreground underline"
+        >
+          {isRemoving ? "Removing..." : "Remove"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function SlackAccountSettings({
   accounts,
   slackAppReady,
@@ -278,18 +399,41 @@ export function SlackAccountSettings({
       </div>
     );
   }
-  // Has connections - show workspaces and settings
+  // The active org's workspaces get full cards; the user's other sign-ins
+  // are listed apart, so another org's workspace is never offered as this
+  // org's.
+  const groups = groupSlackAccounts(accounts, activeOrganization?.id ?? null);
+  const others = [...groups.notInstalled, ...groups.otherOrganization];
   return (
     <div className="flex flex-col w-full gap-2">
-      {accounts.map((account) => {
-        return (
-          <SlackAccountItem
-            key={account.id}
-            account={account}
-            slackAppReady={slackAppReady}
-          />
-        );
-      })}
+      {groups.inOrganization.length === 0 && activeOrganization && (
+        <p className="text-sm text-muted-foreground">
+          No Slack workspace is installed in {activeOrganization.name} yet.
+        </p>
+      )}
+      {groups.inOrganization.map((account) => (
+        <SlackAccountItem
+          key={account.id}
+          account={account}
+          slackAppReady={slackAppReady}
+        />
+      ))}
+      {others.length > 0 && (
+        <details className="rounded-lg border px-4 py-2">
+          <summary className="cursor-pointer text-sm text-muted-foreground">
+            Other Slack workspaces you are signed in to ({others.length})
+          </summary>
+          <div className="divide-y">
+            {others.map((account) => (
+              <OtherSlackAccountRow
+                key={account.id}
+                account={account}
+                slackAppReady={slackAppReady}
+              />
+            ))}
+          </div>
+        </details>
+      )}
       <div className="flex">
         <Button
           variant="link"
