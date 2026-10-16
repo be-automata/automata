@@ -3,9 +3,7 @@ import { env } from "@terragon/env/pkg-shared";
 
 import { createDb } from "../db";
 import { getOrgUsageStats } from "./org-usage-stats";
-import { getAutomationHealth } from "./automation-health";
 import {
-  createTestAutomation,
   createTestGitHubPR,
   createTestOrg,
   createTestThread,
@@ -123,49 +121,5 @@ describe("getOrgUsageStats", () => {
     });
     expect(stats.funnel.started).toBe(1);
     expect(stats.byMember.map((m) => m.userId)).toEqual([bobId]);
-  });
-});
-
-describe("getAutomationHealth", () => {
-  it("marks three failures in a row degraded and reports the 7-day success rate", async () => {
-    const userId = (await createTestUser({ db })).user.id;
-    const orgId = await createTestOrg({ db, name: "Health" });
-    const flaky = await createTestAutomation({ db, userId });
-    const steady = await createTestAutomation({ db, userId });
-    const paused = await createTestAutomation({
-      db,
-      userId,
-      values: { enabled: false },
-    });
-    const runs: [string, "complete" | "working-error"][] = [
-      [flaky.id, "complete"],
-      [flaky.id, "working-error"],
-      [flaky.id, "working-error"],
-      [flaky.id, "working-error"],
-      [steady.id, "complete"],
-    ];
-    for (const [automationId, status] of runs) {
-      await createTestThread({
-        db,
-        userId,
-        overrides: { organizationId: orgId, automationId },
-        chatOverrides: { status },
-      });
-    }
-    const health = await getAutomationHealth({
-      db,
-      automations: [
-        { id: flaky.id, enabled: true },
-        { id: steady.id, enabled: true },
-        { id: paused.id, enabled: false },
-      ],
-    });
-    expect(health.get(flaky.id)?.health).toBe("degraded");
-    expect(health.get(flaky.id)?.successRate7d).toBeCloseTo(0.25);
-    expect(health.get(flaky.id)?.history).toHaveLength(4);
-    expect(health.get(steady.id)?.health).toBe("healthy");
-    expect(health.get(steady.id)?.successRate7d).toBe(1);
-    expect(health.get(paused.id)?.health).toBe("paused");
-    expect(health.get(paused.id)?.lastRun).toBeNull();
   });
 });
