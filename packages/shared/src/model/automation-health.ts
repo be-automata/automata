@@ -3,7 +3,7 @@ import { and, desc, gte, inArray, sql } from "drizzle-orm";
 import type { DB } from "../db";
 import * as schema from "../db/schema";
 import type { ThreadStatus } from "../db/types";
-import { runStateFor, type RunState } from "./run-state";
+import { displayRunTitle, runStateFor, type RunState } from "./run-state";
 
 const HISTORY_LENGTH = 14;
 const LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
@@ -21,6 +21,7 @@ export type AutomationHealthKind =
 
 export interface AutomationRun {
   threadId: string;
+  title: string;
   state: RunState;
   createdAt: Date;
 }
@@ -56,6 +57,7 @@ export async function getAutomationHealth({
       : await db
           .select({
             threadId: schema.thread.id,
+            name: schema.thread.name,
             automationId: schema.thread.automationId,
             createdAt: schema.thread.createdAt,
             terminalCause: schema.thread.terminalCause,
@@ -93,6 +95,7 @@ export async function getAutomationHealth({
     }
     list.push({
       threadId: run.threadId,
+      title: displayRunTitle(run.name),
       createdAt: run.createdAt,
       state: runStateFor({
         status: run.status,

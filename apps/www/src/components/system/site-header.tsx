@@ -40,11 +40,10 @@ export const SiteHeader = memo(function SiteHeader() {
   const pathname = usePathname();
   const user = useAtomValue(userAtom);
   const { open: isSidebarOpen, isMobile } = useSidebar();
-  const isConstrainedPage =
-    pathname === "/automations" ||
-    pathname.startsWith("/automations/") ||
-    pathname === "/environments" ||
-    pathname.startsWith("/environments/");
+  const isAutomationsPage =
+    pathname === "/automations" || pathname.startsWith("/automations/");
+  const isEnvironmentsPage =
+    pathname === "/environments" || pathname.startsWith("/environments/");
 
   if (!user) {
     return null;
@@ -54,7 +53,8 @@ export const SiteHeader = memo(function SiteHeader() {
       <div
         className={cn(
           "flex w-full items-center justify-between h-full",
-          isConstrainedPage && "max-w-4xl",
+          isAutomationsPage && "max-w-6xl",
+          isEnvironmentsPage && "max-w-4xl",
         )}
       >
         <div className="flex gap-2 items-center min-w-0">

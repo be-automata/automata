@@ -99,11 +99,16 @@ export function AutomationItem({
           }
         }}
         className={cn(
-          "group flex flex-col border rounded-lg transition-all py-2",
-          verbose && "!cursor-default",
+          "group flex flex-col transition-all",
+          verbose ? "!cursor-default" : "border rounded-lg py-2",
         )}
       >
-        <div className="grid grid-cols-[auto_1fr] px-2.5 items-center justify-between gap-x-2">
+        <div
+          className={cn(
+            "grid grid-cols-[auto_1fr] items-center justify-between gap-x-2",
+            !verbose && "px-2.5",
+          )}
+        >
           <div className="contents">
             {getIconForTriggerType(automation.triggerType)}
             <div className="flex items-center justify-between gap-2 min-w-0">

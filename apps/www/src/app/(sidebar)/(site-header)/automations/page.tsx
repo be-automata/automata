@@ -24,7 +24,7 @@ export default async function AutomationsPage() {
   ]);
   return (
     <HydrationBoundary state={dehydrate(queryClient)}>
-      <div className="flex flex-col justify-start h-full w-full max-w-4xl">
+      <div className="flex flex-col justify-start h-full w-full max-w-6xl">
         <Automations />
       </div>
     </HydrationBoundary>
