@@ -2,9 +2,13 @@ import { and, eq, gte, lte, sql } from "drizzle-orm";
 
 import type { DB } from "../db";
 import * as schema from "../db/schema";
-import type { ThreadSource, ThreadStatus } from "../db/types";
+import type { ThreadSource } from "../db/types";
 import { toUTC, validateTimezone } from "../utils/timezone";
-import { ERROR_STATUSES, triggerKindFor, type TriggerKind } from "./run-state";
+import { runStateFor, triggerKindFor, type TriggerKind } from "./run-state";
+import {
+  threadEffectiveErrorSql,
+  threadEffectiveStatusSql,
+} from "./thread-effective-status";
 import { describeTerminalCause, isTerminalCause } from "./terminal-cause";
 
 export interface RepoUsage {
@@ -41,7 +45,7 @@ export interface OrgUsageStats {
   notFinished: { label: string; count: number }[];
 }
 
-const EMPTY_SOURCES = (): Record<TriggerKind, number> => ({
+export const EMPTY_SOURCES = (): Record<TriggerKind, number> => ({
   web: 0,
   automation: 0,
   slack: 0,
@@ -75,6 +79,7 @@ export async function getOrgUsageStats({
   const mergedDay = sql<string>`to_char(DATE((${schema.githubPR.updatedAt} AT TIME ZONE 'UTC') AT TIME ZONE '${sql.raw(zone)}'), 'YYYY-MM-DD')`;
   const threadFence = and(
     eq(schema.thread.organizationId, organizationId),
+    eq(schema.thread.shadow, false),
     userId ? eq(schema.thread.userId, userId) : undefined,
   );
 
@@ -91,10 +96,8 @@ export async function getOrgUsageStats({
         prNumber: schema.thread.githubPRNumber,
         prStatus: schema.githubPR.status,
         terminalCause: schema.thread.terminalCause,
-        status: sql<ThreadStatus>`COALESCE((select ${schema.threadChat.status} from ${schema.threadChat} where ${schema.threadChat.threadId} = ${schema.thread.id} order by ${schema.threadChat.updatedAt} desc limit 1), ${schema.thread.status})`,
-        errorMessage: sql<
-          string | null
-        >`COALESCE((select ${schema.threadChat.errorMessage} from ${schema.threadChat} where ${schema.threadChat.threadId} = ${schema.thread.id} order by ${schema.threadChat.updatedAt} desc limit 1), ${schema.thread.errorMessage})`,
+        status: threadEffectiveStatusSql(),
+        errorMessage: threadEffectiveErrorSql(),
       })
       .from(schema.thread)
       .leftJoin(schema.user, eq(schema.user.id, schema.thread.userId))
@@ -112,12 +115,17 @@ export async function getOrgUsageStats({
           lte(schema.thread.createdAt, toUTC(endDate)),
         ),
       ),
+    // One row per merged PR: review and mention threads share a PR, so a plain
+    // join would count it once per thread. The earliest thread owns it.
     db
-      .select({
-        day: mergedDay,
-        repoFullName: schema.githubPR.repoFullName,
-        userId: schema.thread.userId,
-      })
+      .selectDistinctOn(
+        [schema.githubPR.repoFullName, schema.githubPR.number],
+        {
+          day: mergedDay,
+          repoFullName: schema.githubPR.repoFullName,
+          userId: schema.thread.userId,
+        },
+      )
       .from(schema.githubPR)
       .innerJoin(
         schema.thread,
@@ -133,6 +141,11 @@ export async function getOrgUsageStats({
           gte(schema.githubPR.updatedAt, toUTC(startDate)),
           lte(schema.githubPR.updatedAt, toUTC(endDate)),
         ),
+      )
+      .orderBy(
+        schema.githubPR.repoFullName,
+        schema.githubPR.number,
+        schema.thread.createdAt,
       ),
   ]);
 
@@ -147,6 +160,7 @@ export async function getOrgUsageStats({
   let completed = 0;
   let openedPR = 0;
   let errored = 0;
+  const mergedPRs = new Set<string>();
 
   for (const row of threads) {
     createdByDay.set(row.day, (createdByDay.get(row.day) ?? 0) + 1);
@@ -186,22 +200,30 @@ export async function getOrgUsageStats({
     if (row.prNumber !== null) {
       openedPR++;
     }
-    const isError =
-      ERROR_STATUSES.includes(row.status) ||
-      (row.errorMessage !== null && row.status !== "working");
-    if (row.terminalCause && isTerminalCause(row.terminalCause)) {
-      const label = describeTerminalCause(row.terminalCause).label;
-      causes.set(label, (causes.get(label) ?? 0) + 1);
-      if (isError) {
+    if (row.prNumber !== null && row.prStatus === "merged") {
+      mergedPRs.add(`${row.repoFullName}#${row.prNumber}`);
+    }
+    const state = runStateFor({
+      status: row.status,
+      hasError: row.errorMessage !== null,
+      terminalCause: row.terminalCause,
+    });
+    if (state.kind === "done") {
+      completed++;
+    } else if (state.kind === "needs-you" || state.kind === "unverified") {
+      if (state.kind === "needs-you") {
         errored++;
         repo.errored++;
       }
-    } else if (isError) {
-      errored++;
-      repo.errored++;
-      causes.set("Agent error", (causes.get("Agent error") ?? 0) + 1);
-    } else if (row.status === "complete") {
-      completed++;
+      const label =
+        row.terminalCause && isTerminalCause(row.terminalCause)
+          ? describeTerminalCause(row.terminalCause).label
+          : state.kind === "needs-you"
+            ? "Agent error"
+            : null;
+      if (label) {
+        causes.set(label, (causes.get(label) ?? 0) + 1);
+      }
     }
   }
 
@@ -241,7 +263,8 @@ export async function getOrgUsageStats({
       started: threads.length,
       completed,
       openedPR,
-      merged: merges.length,
+      // Merged PRs of the threads started in range, so it never exceeds started.
+      merged: mergedPRs.size,
     },
     errored,
     notFinished: [...causes]

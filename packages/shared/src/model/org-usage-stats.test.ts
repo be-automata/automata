@@ -122,4 +122,38 @@ describe("getOrgUsageStats", () => {
     expect(stats.funnel.started).toBe(1);
     expect(stats.byMember.map((m) => m.userId)).toEqual([bobId]);
   });
+
+  it("counts a PR shared by several threads once, and skips shadow threads", async () => {
+    const pr = await createTestGitHubPR({
+      db,
+      overrides: { repoFullName: "acme/one", status: "merged" },
+    });
+    for (const sourceType of ["www", "github-mention"] as const) {
+      await createTestThread({
+        db,
+        userId: aliceId,
+        overrides: {
+          organizationId: orgId,
+          githubRepoFullName: "acme/one",
+          githubPRNumber: pr.number,
+          sourceType,
+        },
+        chatOverrides: { status: "complete" },
+      });
+    }
+    await createTestThread({
+      db,
+      userId: aliceId,
+      overrides: { organizationId: orgId, shadow: true },
+    });
+    const stats = await getOrgUsageStats({
+      db,
+      organizationId: orgId,
+      ...range(),
+    });
+    expect(stats.funnel.started).toBe(2);
+    expect(stats.funnel.merged).toBe(1);
+    expect(stats.prsMerged.reduce((n, d) => n + d.prsMerged, 0)).toBe(1);
+    expect(stats.byRepo[0]!.merged).toBe(1);
+  });
 });

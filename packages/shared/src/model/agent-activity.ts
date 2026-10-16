@@ -1,11 +1,10 @@
-import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, sql } from "drizzle-orm";
 
 import type { DB } from "../db";
 import * as schema from "../db/schema";
 import type {
   GithubPRStatus,
   ThreadSource,
-  ThreadStatus,
   ThreadVisibility,
 } from "../db/types";
 import {
@@ -19,11 +18,16 @@ import {
   type RunState,
   type TriggerKind,
 } from "./run-state";
-import { threadEffectiveStatusIn } from "./thread-effective-status";
+import {
+  threadEffectiveErrorSql,
+  threadEffectiveStatusIn,
+  threadEffectiveStatusSql,
+} from "./thread-effective-status";
 
 /** How far back finished and failed runs count for "Needs you" and "Recent". */
 export const ACTIVITY_WINDOW_MS = 24 * 60 * 60 * 1000;
-const CANDIDATE_LIMIT = 300;
+const LIVE_LIMIT = 200;
+const WINDOW_LIMIT = 300;
 const RECENT_LIMIT = 10;
 
 export type ActivityStarterKind = "you" | "member" | "automation";
@@ -56,36 +60,6 @@ export interface OrgAgentActivity {
   counts: { running: number; waiting: number; needsYou: number };
 }
 
-interface ChatSnapshot {
-  threadId: string;
-  status: ThreadStatus;
-  errorMessage: string | null;
-  terminalCause: string | null;
-  updatedAt: Date;
-}
-
-/**
- * The effective status of a thread from its chat rows (chat-mode threads keep
- * status on threadChat, see thread-effective-status.ts): any live chat wins,
- * otherwise the most recently updated chat.
- */
-function effectiveChat(chats: ChatSnapshot[]): ChatSnapshot | null {
-  if (chats.length === 0) {
-    return null;
-  }
-  const live = chats.find((chat) => RUNNING_STATUSES.includes(chat.status));
-  if (live) {
-    return live;
-  }
-  const waiting = chats.find((chat) => WAITING_STATUSES.includes(chat.status));
-  if (waiting) {
-    return waiting;
-  }
-  return [...chats].sort(
-    (a, b) => b.updatedAt.getTime() - a.updatedAt.getTime(),
-  )[0]!;
-}
-
 /**
  * What every agent in an organization is doing: runs that need someone, runs
  * in flight, and the last finished runs. Fenced on `organizationId`; titles of
@@ -112,139 +86,121 @@ export async function getOrgAgentActivity({
   now?: Date;
 }): Promise<OrgAgentActivity> {
   const since = new Date(now.getTime() - ACTIVITY_WINDOW_MS);
-  const candidates = await db
-    .select({
-      id: schema.thread.id,
-      userId: schema.thread.userId,
-      name: schema.thread.name,
-      repoFullName: schema.thread.githubRepoFullName,
-      branchName: schema.thread.branchName,
-      prNumber: schema.thread.githubPRNumber,
-      automationId: schema.thread.automationId,
-      sourceType: schema.thread.sourceType,
-      status: schema.thread.status,
-      errorMessage: schema.thread.errorMessage,
-      terminalCause: schema.thread.terminalCause,
-      bootingSubstatus: schema.thread.bootingSubstatus,
-      createdAt: schema.thread.createdAt,
-      updatedAt: schema.thread.updatedAt,
-      starterName: schema.user.name,
-      automationName: schema.automations.name,
-      prStatus: schema.githubPR.status,
-      visibility: sql<ThreadVisibility>`COALESCE(${schema.threadVisibility.visibility}, ${schema.userSettings.defaultThreadVisibility}, 'private')`,
-      dismissed: sql<boolean>`EXISTS (select 1 from ${schema.threadReadStatus} where ${schema.threadReadStatus.threadId} = ${schema.thread.id} and ${schema.threadReadStatus.userId} = ${schema.thread.userId} and ${schema.threadReadStatus.isRead} and ${schema.threadReadStatus.lastReadAt} >= ${schema.thread.updatedAt})`,
-    })
-    .from(schema.thread)
-    .leftJoin(schema.user, eq(schema.user.id, schema.thread.userId))
-    .leftJoin(
-      schema.automations,
-      eq(schema.automations.id, schema.thread.automationId),
-    )
-    .leftJoin(
-      schema.threadVisibility,
-      eq(schema.threadVisibility.threadId, schema.thread.id),
-    )
-    .leftJoin(
-      schema.userSettings,
-      eq(schema.userSettings.userId, schema.thread.userId),
-    )
-    .leftJoin(
-      schema.githubPR,
-      and(
-        eq(schema.githubPR.number, schema.thread.githubPRNumber),
-        eq(schema.githubPR.repoFullName, schema.thread.githubRepoFullName),
-      ),
-    )
-    .where(
-      and(
-        eq(schema.thread.organizationId, organizationId),
-        eq(schema.thread.archived, false),
-        eq(schema.thread.shadow, false),
-        mineOnly ? eq(schema.thread.userId, viewerUserId) : undefined,
-        peopleOnly ? isNull(schema.thread.automationId) : undefined,
-        or(
-          threadEffectiveStatusIn([...RUNNING_STATUSES, ...WAITING_STATUSES]),
-          gte(schema.thread.updatedAt, since),
+  // Chat-mode threads only touch threadChat, so the latest activity is the
+  // newer of the thread row and its chats.
+  const lastActivityAt = sql<Date>`GREATEST(${schema.thread.updatedAt}, COALESCE((select max(${schema.threadChat.updatedAt}) from ${schema.threadChat} where ${schema.threadChat.threadId} = ${schema.thread.id}), ${schema.thread.updatedAt}))`;
+  const fence = and(
+    eq(schema.thread.organizationId, organizationId),
+    eq(schema.thread.archived, false),
+    eq(schema.thread.shadow, false),
+    mineOnly ? eq(schema.thread.userId, viewerUserId) : undefined,
+    peopleOnly ? isNull(schema.thread.automationId) : undefined,
+  );
+  const select = () =>
+    db
+      .select({
+        id: schema.thread.id,
+        userId: schema.thread.userId,
+        name: schema.thread.name,
+        repoFullName: schema.thread.githubRepoFullName,
+        branchName: schema.thread.branchName,
+        prNumber: schema.thread.githubPRNumber,
+        automationId: schema.thread.automationId,
+        sourceType: schema.thread.sourceType,
+        status: threadEffectiveStatusSql(),
+        errorMessage: threadEffectiveErrorSql(),
+        terminalCause: schema.thread.terminalCause,
+        bootingSubstatus: schema.thread.bootingSubstatus,
+        createdAt: schema.thread.createdAt,
+        lastActivityAt: lastActivityAt.mapWith(schema.thread.updatedAt),
+        starterName: schema.user.name,
+        automationName: schema.automations.name,
+        prStatus: schema.githubPR.status,
+        visibility: sql<ThreadVisibility>`COALESCE(${schema.threadVisibility.visibility}, ${schema.userSettings.defaultThreadVisibility}, 'private')`,
+        dismissed: sql<boolean>`EXISTS (select 1 from ${schema.threadReadStatus} where ${schema.threadReadStatus.threadId} = ${schema.thread.id} and ${schema.threadReadStatus.userId} = ${schema.thread.userId} and ${schema.threadReadStatus.isRead} and ${schema.threadReadStatus.lastReadAt} >= ${lastActivityAt})`,
+      })
+      .from(schema.thread)
+      .leftJoin(schema.user, eq(schema.user.id, schema.thread.userId))
+      .leftJoin(
+        schema.automations,
+        eq(schema.automations.id, schema.thread.automationId),
+      )
+      .leftJoin(
+        schema.threadVisibility,
+        eq(schema.threadVisibility.threadId, schema.thread.id),
+      )
+      .leftJoin(
+        schema.userSettings,
+        eq(schema.userSettings.userId, schema.thread.userId),
+      )
+      .leftJoin(
+        schema.githubPR,
+        and(
+          eq(schema.githubPR.number, schema.thread.githubPRNumber),
+          eq(schema.githubPR.repoFullName, schema.thread.githubRepoFullName),
         ),
-      ),
-    )
-    .orderBy(desc(schema.thread.updatedAt))
-    .limit(CANDIDATE_LIMIT);
+      );
 
-  const chats: ChatSnapshot[] =
-    candidates.length === 0
-      ? []
-      : await db
-          .select({
-            threadId: schema.threadChat.threadId,
-            status: schema.threadChat.status,
-            errorMessage: schema.threadChat.errorMessage,
-            terminalCause: schema.threadChat.terminalCause,
-            updatedAt: schema.threadChat.updatedAt,
-          })
-          .from(schema.threadChat)
-          .where(
-            inArray(
-              schema.threadChat.threadId,
-              candidates.map((c) => c.id),
-            ),
-          );
-  const chatsByThread = new Map<string, ChatSnapshot[]>();
-  for (const chat of chats) {
-    const list = chatsByThread.get(chat.threadId) ?? [];
-    list.push(chat);
-    chatsByThread.set(chat.threadId, list);
-  }
-
-  const repoAccess = new Map<string, Promise<boolean>>();
-  const canViewerOpen = async (row: (typeof candidates)[number]) => {
-    if (row.userId === viewerUserId || row.visibility === "link") {
-      return true;
-    }
-    if (row.visibility !== "repo") {
+  // Live runs are never cut by the window limit; the window feeds Needs you
+  // and Recent.
+  const [live, windowed] = await Promise.all([
+    select()
+      .where(
+        and(
+          fence,
+          threadEffectiveStatusIn([...RUNNING_STATUSES, ...WAITING_STATUSES]),
+        ),
+      )
+      .orderBy(desc(schema.thread.createdAt))
+      .limit(LIVE_LIMIT),
+    select()
+      .where(and(fence, gte(lastActivityAt, since)))
+      .orderBy(desc(lastActivityAt))
+      .limit(WINDOW_LIMIT),
+  ]);
+  const seen = new Set<string>();
+  const candidates = [...live, ...windowed].filter((row) => {
+    if (seen.has(row.id)) {
       return false;
     }
-    let access = repoAccess.get(row.repoFullName);
-    if (!access) {
-      access = hasRepoAccess(row.repoFullName).catch(() => false);
-      repoAccess.set(row.repoFullName, access);
-    }
-    return access;
-  };
+    seen.add(row.id);
+    return true;
+  });
+
+  const reposToCheck = [
+    ...new Set(
+      candidates
+        .filter((r) => r.userId !== viewerUserId && r.visibility === "repo")
+        .map((r) => r.repoFullName),
+    ),
+  ];
+  const repoAccess = new Map(
+    await Promise.all(
+      reposToCheck.map(
+        async (repo) =>
+          [repo, await hasRepoAccess(repo).catch(() => false)] as const,
+      ),
+    ),
+  );
+  const canViewerOpen = (row: (typeof candidates)[number]) =>
+    row.userId === viewerUserId ||
+    row.visibility === "link" ||
+    (row.visibility === "repo" && repoAccess.get(row.repoFullName) === true);
 
   const needsYou: AgentActivityRow[] = [];
   const active: AgentActivityRow[] = [];
   const recent: AgentActivityRow[] = [];
-  let running = 0;
-  let waiting = 0;
 
   for (const row of candidates) {
-    const chat = effectiveChat(chatsByThread.get(row.id) ?? []);
-    const status = chat?.status ?? row.status;
-    const errorMessage = chat?.errorMessage ?? row.errorMessage ?? null;
-    const terminalCause = row.terminalCause ?? chat?.terminalCause ?? null;
     const state = runStateFor({
-      status,
-      hasError: errorMessage !== null && !RUNNING_STATUSES.includes(status),
-      terminalCause,
+      status: row.status,
+      hasError: row.errorMessage !== null,
+      terminalCause: row.terminalCause,
       bootingSubstatus: row.bootingSubstatus ?? null,
     });
-    const isRecent = row.updatedAt >= since;
-    const bucket =
-      state.kind === "running" || state.kind === "waiting"
-        ? "active"
-        : state.kind === "needs-you"
-          ? isRecent && !row.dismissed
-            ? "needs-you"
-            : null
-          : isRecent && recent.length < RECENT_LIMIT
-            ? "recent"
-            : null;
-    if (bucket === null) {
-      continue;
-    }
-    const canOpen = await canViewerOpen(row);
-    const activityRow: AgentActivityRow = {
+    const canOpen = canViewerOpen(row);
+    const isRecent = row.lastActivityAt >= since;
+    const toRow = (withExplanation: boolean): AgentActivityRow => ({
       threadId: row.id,
       canOpen,
       title: canOpen ? displayRunTitle(row.name) : null,
@@ -268,23 +224,25 @@ export async function getOrgAgentActivity({
         name: row.starterName ?? null,
       },
       startedAt: row.createdAt,
-      updatedAt: row.updatedAt,
-      needsYou:
-        bucket === "needs-you"
-          ? explainNeedsYou({ errorMessage, terminalCause })
-          : null,
-    };
-    if (bucket === "active") {
-      active.push(activityRow);
-      if (state.kind === "running") {
-        running++;
-      } else {
-        waiting++;
-      }
-    } else if (bucket === "needs-you") {
-      needsYou.push(activityRow);
-    } else {
-      recent.push(activityRow);
+      updatedAt: row.lastActivityAt,
+      needsYou: withExplanation
+        ? explainNeedsYou({
+            errorMessage: row.errorMessage,
+            terminalCause: row.terminalCause,
+          })
+        : null,
+    });
+
+    if (state.kind === "running" || state.kind === "waiting") {
+      active.push(toRow(false));
+    } else if (!isRecent) {
+      continue;
+    } else if (state.kind === "needs-you" && !row.dismissed && canOpen) {
+      // Only failures the viewer can act on; a masked teammate failure is
+      // still listed under Recent with its error word.
+      needsYou.push(toRow(true));
+    } else if (recent.length < RECENT_LIMIT) {
+      recent.push(toRow(false));
     }
   }
 
@@ -292,6 +250,10 @@ export async function getOrgAgentActivity({
     needsYou,
     active,
     recent,
-    counts: { running, waiting, needsYou: needsYou.length },
+    counts: {
+      running: active.filter((r) => r.state.kind === "running").length,
+      waiting: active.filter((r) => r.state.kind === "waiting").length,
+      needsYou: needsYou.length,
+    },
   };
 }

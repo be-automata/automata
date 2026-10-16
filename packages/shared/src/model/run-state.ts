@@ -125,8 +125,9 @@ function bootingReason(substatus: BootingSubstatus | null): string | null {
 }
 
 /**
- * The run state for a thread's effective status. `hasError` covers an error
- * message on a run that otherwise reads as finished.
+ * The run state for a thread's effective status. Pass `hasError` whenever the
+ * thread carries an error message: running and waiting states still win, so a
+ * live run with a stale message keeps reading as running.
  */
 export function runStateFor({
   status,
@@ -264,29 +265,30 @@ function explainErrorType(error: ThreadErrorType): NeedsYouExplanation {
   }
 }
 
-const THREAD_ERROR_TYPES = new Set<string>([
-  "request-timeout",
-  "no-user-message",
-  "unknown-error",
-  "sandbox-not-found",
-  "sandbox-creation-failed",
-  "sandbox-resume-failed",
-  "missing-gemini-credentials",
-  "missing-amp-credentials",
-  "chatgpt-sub-required",
-  "invalid-codex-credentials",
-  "invalid-claude-credentials",
-  "agent-not-responding",
-  "agent-generic-error",
-  "git-checkpoint-diff-failed",
-  "git-checkpoint-push-failed",
-  "setup-script-failed",
-  "prompt-too-long",
-  "queue-limit-exceeded",
-] satisfies ThreadErrorType[]);
+// A Record, so adding a ThreadErrorType without listing it fails to compile.
+const THREAD_ERROR_TYPES: Record<ThreadErrorType, true> = {
+  "request-timeout": true,
+  "no-user-message": true,
+  "unknown-error": true,
+  "sandbox-not-found": true,
+  "sandbox-creation-failed": true,
+  "sandbox-resume-failed": true,
+  "missing-gemini-credentials": true,
+  "missing-amp-credentials": true,
+  "chatgpt-sub-required": true,
+  "invalid-codex-credentials": true,
+  "invalid-claude-credentials": true,
+  "agent-not-responding": true,
+  "agent-generic-error": true,
+  "git-checkpoint-diff-failed": true,
+  "git-checkpoint-push-failed": true,
+  "setup-script-failed": true,
+  "prompt-too-long": true,
+  "queue-limit-exceeded": true,
+};
 
 function isThreadErrorType(value: string): value is ThreadErrorType {
-  return THREAD_ERROR_TYPES.has(value);
+  return Object.hasOwn(THREAD_ERROR_TYPES, value);
 }
 
 /** Plain title, reason and next step for a run that needs someone. */
@@ -355,7 +357,10 @@ export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 };
 
 /** Display title without a leading markdown heading marker ("# Audit" → "Audit"). */
-export function displayRunTitle(name: string | null): string {
+export function displayRunTitle(
+  name: string | null | undefined,
+  fallback = "Untitled task",
+): string {
   const trimmed = (name ?? "").replace(/^\s*#{1,6}\s+/, "").trim();
-  return trimmed.length > 0 ? trimmed : "Untitled task";
+  return trimmed.length > 0 ? trimmed : fallback;
 }

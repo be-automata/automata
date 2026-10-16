@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "@terragon/env/pkg-shared";
+import { eq } from "drizzle-orm";
 
 import { createDb } from "../db";
 import * as schema from "../db/schema";
@@ -215,5 +216,81 @@ describe("getOrgAgentActivity", () => {
     });
     expect(activity.recent.map((r) => r.threadId)).toEqual([threadId]);
     expect(activity.recent[0]!.state.kind).toBe("done");
+  });
+
+  it("sees a chat-mode failure by its chat's activity, not the thread row's", async () => {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: viewerId,
+      enableThreadChatCreation: true,
+      overrides: { organizationId: orgId },
+    });
+    const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    await db
+      .update(schema.thread)
+      .set({ updatedAt: old, createdAt: old })
+      .where(eq(schema.thread.id, threadId));
+    await db
+      .update(schema.threadChat)
+      .set({
+        status: "working-error",
+        errorMessage: "agent-generic-error",
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.threadChat.id, threadChatId));
+    const activity = await getOrgAgentActivity({
+      db,
+      organizationId: orgId,
+      viewerUserId: viewerId,
+      hasRepoAccess: noRepoAccess,
+    });
+    expect(activity.needsYou.map((r) => r.threadId)).toEqual([threadId]);
+  });
+
+  it("keeps a long-running run outside the window in Running now", async () => {
+    const { threadId } = await createTestThread({
+      db,
+      userId: viewerId,
+      overrides: { organizationId: orgId },
+      chatOverrides: { status: "working" },
+    });
+    const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    await db
+      .update(schema.thread)
+      .set({ updatedAt: old, createdAt: old })
+      .where(eq(schema.thread.id, threadId));
+    const activity = await getOrgAgentActivity({
+      db,
+      organizationId: orgId,
+      viewerUserId: viewerId,
+      hasRepoAccess: noRepoAccess,
+    });
+    expect(activity.active.map((r) => r.threadId)).toEqual([threadId]);
+  });
+
+  it("lists a teammate's private failure under Recent, not Needs you", async () => {
+    const { threadId } = await createTestThread({
+      db,
+      userId: teammateId,
+      overrides: { organizationId: orgId },
+      chatOverrides: {
+        status: "working-error",
+        errorMessage: "agent-generic-error",
+      },
+    });
+    await db.insert(schema.threadVisibility).values({
+      threadId,
+      visibility: "private",
+      organizationId: orgId,
+    });
+    const activity = await getOrgAgentActivity({
+      db,
+      organizationId: orgId,
+      viewerUserId: viewerId,
+      hasRepoAccess: noRepoAccess,
+    });
+    expect(activity.needsYou).toEqual([]);
+    expect(activity.recent.map((r) => r.threadId)).toEqual([threadId]);
+    expect(activity.recent[0]!.title).toBeNull();
   });
 });

@@ -2,8 +2,11 @@ import { and, desc, gte, inArray, lte, sql } from "drizzle-orm";
 
 import type { DB } from "../db";
 import * as schema from "../db/schema";
-import type { ThreadStatus } from "../db/types";
 import { displayRunTitle, runStateFor, type RunState } from "./run-state";
+import {
+  threadEffectiveErrorSql,
+  threadEffectiveStatusSql,
+} from "./thread-effective-status";
 
 const HISTORY_LENGTH = 14;
 const LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
@@ -28,7 +31,7 @@ export interface AutomationRun {
 export interface AutomationHealth {
   automationId: string;
   health: AutomationHealthKind;
-  /** Newest last, up to 14 runs. */
+  /** Newest first, up to 14 runs. */
   history: AutomationRun[];
   lastRun: AutomationRun | null;
   /**
@@ -68,15 +71,8 @@ export async function getAutomationHealth({
       terminalCause: sql<string | null>`${schema.thread.terminalCause}`.as(
         "terminal_cause",
       ),
-      status:
-        sql<ThreadStatus>`COALESCE((select ${schema.threadChat.status} from ${schema.threadChat} where ${schema.threadChat.threadId} = ${schema.thread.id} order by ${schema.threadChat.updatedAt} desc limit 1), ${schema.thread.status})`.as(
-          "effective_status",
-        ),
-      errorMessage: sql<
-        string | null
-      >`COALESCE((select ${schema.threadChat.errorMessage} from ${schema.threadChat} where ${schema.threadChat.threadId} = ${schema.thread.id} order by ${schema.threadChat.updatedAt} desc limit 1), ${schema.thread.errorMessage})`.as(
-        "effective_error",
-      ),
+      status: threadEffectiveStatusSql().as("effective_status"),
+      errorMessage: threadEffectiveErrorSql().as("effective_error"),
       rank: sql<number>`row_number() over (partition by ${schema.thread.automationId} order by ${schema.thread.createdAt} desc)`.as(
         "run_rank",
       ),
@@ -101,67 +97,68 @@ export async function getAutomationHealth({
           .where(lte(ranked.rank, HISTORY_LENGTH))
           .orderBy(desc(ranked.createdAt));
 
-  const runsByAutomation = new Map<
-    string,
-    (AutomationRun & { createdAt: Date })[]
-  >();
+  // Newest first, already capped at HISTORY_LENGTH per automation by the rank.
+  const runsByAutomation = new Map<string, AutomationRun[]>();
   for (const run of runs) {
-    const automationId = run.automationId;
-    const list = runsByAutomation.get(automationId) ?? [];
-    if (list.length >= HISTORY_LENGTH) {
-      continue;
-    }
+    const list = runsByAutomation.get(run.automationId) ?? [];
     list.push({
       threadId: run.threadId,
       title: displayRunTitle(run.name),
       createdAt: run.createdAt,
       state: runStateFor({
         status: run.status,
-        hasError: run.errorMessage !== null && run.status !== "working",
+        hasError: run.errorMessage !== null,
         terminalCause: run.terminalCause,
       }),
     });
-    runsByAutomation.set(automationId, list);
+    runsByAutomation.set(run.automationId, list);
   }
 
   const since7d = now.getTime() - SUCCESS_WINDOW_MS;
   const result = new Map<string, AutomationHealth>();
   for (const automation of automations) {
-    const newestFirst = runsByAutomation.get(automation.id) ?? [];
-    const finished7d = newestFirst.filter(
+    const history = runsByAutomation.get(automation.id) ?? [];
+    const finished7d = history.filter(
       (run) =>
         run.createdAt.getTime() >= since7d &&
         (run.state.kind === "done" || run.state.kind === "needs-you"),
     );
     const done7d = finished7d.filter((run) => run.state.kind === "done");
-    const failuresInLast5 = newestFirst
-      .slice(0, 5)
-      .filter((run) => run.state.kind === "needs-you").length;
-    const leadingFailures = newestFirst.findIndex(
-      (run) => run.state.kind !== "needs-you",
-    );
-    const consecutiveFailures =
-      leadingFailures === -1 ? newestFirst.length : leadingFailures;
-    const lastRun = newestFirst[0] ?? null;
-    const health: AutomationHealthKind = !automation.enabled
-      ? "paused"
-      : lastRun &&
-          (lastRun.state.kind === "running" || lastRun.state.kind === "waiting")
-        ? "running"
-        : consecutiveFailures >= DEGRADED_AFTER_FAILURES
-          ? "degraded"
-          : lastRun
-            ? "healthy"
-            : "idle";
     result.set(automation.id, {
       automationId: automation.id,
-      health,
-      history: [...newestFirst].reverse(),
-      lastRun,
+      health: healthFor(automation.enabled, history),
+      history,
+      lastRun: history[0] ?? null,
       successRate7d:
         finished7d.length === 0 ? null : done7d.length / finished7d.length,
-      failuresInLast5,
+      failuresInLast5: history
+        .slice(0, 5)
+        .filter((run) => run.state.kind === "needs-you").length,
     });
   }
   return result;
+}
+
+function healthFor(
+  enabled: boolean,
+  newestFirst: AutomationRun[],
+): AutomationHealthKind {
+  if (!enabled) {
+    return "paused";
+  }
+  const lastRun = newestFirst[0];
+  if (!lastRun) {
+    return "idle";
+  }
+  if (lastRun.state.kind === "running" || lastRun.state.kind === "waiting") {
+    return "running";
+  }
+  const firstSuccess = newestFirst.findIndex(
+    (run) => run.state.kind !== "needs-you",
+  );
+  const consecutiveFailures =
+    firstSuccess === -1 ? newestFirst.length : firstSuccess;
+  return consecutiveFailures >= DEGRADED_AFTER_FAILURES
+    ? "degraded"
+    : "healthy";
 }
