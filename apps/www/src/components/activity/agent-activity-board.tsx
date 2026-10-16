@@ -197,7 +197,7 @@ function ActiveRow({ row, now }: { row: AgentActivityRow; now?: number }) {
       <span className="hidden truncate text-muted-foreground md:block">
         {starterLabel(row)}
       </span>
-      <span className="hidden text-right text-muted-foreground md:block">
+      <span className="hidden whitespace-nowrap text-right text-muted-foreground md:block">
         <Elapsed from={row.startedAt} now={now} />
       </span>
       <span className="hidden justify-self-end md:block">
@@ -223,7 +223,7 @@ function RecentRow({ row }: { row: AgentActivityRow }) {
       <span className="hidden truncate text-muted-foreground md:block">
         {starterLabel(row)}
       </span>
-      <span className="hidden text-right text-muted-foreground md:block">
+      <span className="hidden whitespace-nowrap text-right text-muted-foreground md:block">
         {formatRelativeTime(row.updatedAt)}
       </span>
     </li>
