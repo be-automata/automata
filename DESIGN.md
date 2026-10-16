@@ -35,28 +35,28 @@ colors:
   scope-repo-dark: "#D891C9"
 typography:
   title:
-    fontFamily: TX-02
+    fontFamily: Commit Mono
     fontWeight: 700
     fontSize: 1.25rem
     lineHeight: 1.2
   section:
-    fontFamily: TX-02
+    fontFamily: Commit Mono
     fontWeight: 700
     fontSize: 0.9375rem
     lineHeight: 1.333
   control:
-    fontFamily: TX-02
+    fontFamily: Commit Mono
     fontWeight: 500
     fontSize: 0.8125rem
     lineHeight: 1.385
   row:
-    fontFamily: TX-02
+    fontFamily: Commit Mono
     fontWeight: 400
     fontSize: 0.75rem
     lineHeight: 1.333
     fontFeature: tnum
   label:
-    fontFamily: TX-02
+    fontFamily: Commit Mono
     fontWeight: 400
     fontSize: 0.6875rem
     letterSpacing: 0em
@@ -111,6 +111,7 @@ components:
 **Memorable thing:** "One glance tells me what every agent is doing, in which org and repo, and what needs me." When two choices conflict, the one that makes state, place or "needs you" more visible wins.
 
 **Key characteristics:**
+
 - Needs you comes first, above everything else on Home.
 - Every run row names its state (as a shape and a word), trigger, org/repo and time.
 - Every config value shows its effective value, then the layer it came from.
@@ -129,10 +130,11 @@ components:
 
 ## Typography
 
-**TX-02** (U.S. Graphics; Indie license with the self-hosted webfont module) sets everything an operator scans: nav, headings, buttons, table rows, states, identifiers, numbers.
-- Loaded from the private R2 bucket via the same-origin `/fonts/tx-02/*` route.
-- Fallback is Geist Mono.
-- Never used in the in-app terminal (license).
+**UI face** sets everything an operator scans: nav, headings, buttons, table rows, states, identifiers, numbers.
+
+- **Commit Mono** (OFL 1.1, bundled from `apps/www/src/fonts/commit-mono` through `next/font/local`) is what every viewer gets.
+- **TX-02** (U.S. Graphics) comes first in the stack and takes over when it is installed locally. The licensed web files are not in this public repo. Once they are uploaded to the private R2 bucket, add their `url()` to the `@font-face` rules, and `app/fonts/tx-02/[file]` serves them same-origin. TX-02 is never used in the in-app terminal (licence).
+- Geist Mono is the last fallback and the terminal face.
 
 **IBM Plex Sans** (OFL) sets sentences: chat, help text, dialog descriptions, the prompt editor. Measure is capped at 68ch.
 
@@ -193,13 +195,15 @@ Radius sm 2px (avatars, badges), md 4px (buttons, inputs), lg 6px (outer contain
 - **The one authored moment:** a run that starts needing you slides into the Needs you group (200ms ease-out, none under reduced motion).
 
 ## Decisions Log
-| Date | Decision | Rationale |
-|------|----------|-----------|
-| 2026-10-16 | Design system restarted as "Ops Desk" | /design-consultation, start fresh. Memorable thing widened to live agent activity. Six-product benchmark plus Codex and Claude-subagent directions converged on registers, needs-you first, and inline provenance |
-| 2026-10-16 | TX-02 chrome + IBM Plex Sans prose | User asked for TX-02 for UI readability. Plex chosen independently by Codex and by me; OFL; condensed width axis for dense tables |
-| 2026-10-16 | Ink actions; color only for state and scope | Keeps the surface quiet so a needs-you ■ is the loudest thing on screen |
-| 2026-10-16 | Shape grammar for run states | Replaces the 6px blue dot; readable in greyscale and for color-blind users (from the Claude subagent) |
-| 2026-10-16 | Scope by line style (solid / double / dashed) | A second cue beyond hue for account / org / repo |
-| 2026-10-16 | Track-board Home and Marey-diagram Stats held | Ownable but costly; revisit after registers ship |
-| 2026-10-16 | Automations = table + detail (AU2); Stats = bands + funnel + causes | /design-shotgun round 3. Automations chosen over a single reliability table and trigger groups, because the runs feed with reasons makes "degraded" actionable. The Stats funnel and not-finished causes answer "is it working and why not" |
-| 2026-10-16 | Home = Register with docked composer (A1) | /design-shotgun, 2 rounds. Round 1 picked Register (A) over Split desk, Track board and Triage first; the user objected to the chat box at the top. Round 2 picked a bottom dock over a header command and a side column. Needs-you rows borrow Triage-first's reason + inline action |
+
+| Date       | Decision                                                            | Rationale                                                                                                                                                                                                                                                                             |
+| ---------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-10-16 | Design system restarted as "Ops Desk"                               | /design-consultation, start fresh. Memorable thing widened to live agent activity. Six-product benchmark plus Codex and Claude-subagent directions converged on registers, needs-you first, and inline provenance                                                                     |
+| 2026-10-16 | Commit Mono ships as the UI face; TX-02 when installed              | No TX-02 web licence or files are available; Commit Mono is an OFL neutral mono in the same spirit and can live in the public repo                                                                                                                                                    |
+| 2026-10-16 | TX-02 chrome + IBM Plex Sans prose                                  | User asked for TX-02 for UI readability. Plex chosen independently by Codex and by me; OFL; condensed width axis for dense tables                                                                                                                                                     |
+| 2026-10-16 | Ink actions; color only for state and scope                         | Keeps the surface quiet so a needs-you ■ is the loudest thing on screen                                                                                                                                                                                                               |
+| 2026-10-16 | Shape grammar for run states                                        | Replaces the 6px blue dot; readable in greyscale and for color-blind users (from the Claude subagent)                                                                                                                                                                                 |
+| 2026-10-16 | Scope by line style (solid / double / dashed)                       | A second cue beyond hue for account / org / repo                                                                                                                                                                                                                                      |
+| 2026-10-16 | Track-board Home and Marey-diagram Stats held                       | Ownable but costly; revisit after registers ship                                                                                                                                                                                                                                      |
+| 2026-10-16 | Automations = table + detail (AU2); Stats = bands + funnel + causes | /design-shotgun round 3. Automations chosen over a single reliability table and trigger groups, because the runs feed with reasons makes "degraded" actionable. The Stats funnel and not-finished causes answer "is it working and why not"                                           |
+| 2026-10-16 | Home = Register with docked composer (A1)                           | /design-shotgun, 2 rounds. Round 1 picked Register (A) over Split desk, Track board and Triage first; the user objected to the chat box at the top. Round 2 picked a bottom dock over a header command and a side column. Needs-you rows borrow Triage-first's reason + inline action |

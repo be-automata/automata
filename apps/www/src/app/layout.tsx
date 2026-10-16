@@ -3,6 +3,7 @@ import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { UserAtomsHydratorServer } from "@/components/system/user-atoms-server";
 import { Geist_Mono, IBM_Plex_Sans } from "next/font/google";
+import localFont from "next/font/local";
 import { ServerProviders } from "@/components/system/server-providers";
 import { KonamiVideo } from "@/components/konami-video";
 
@@ -52,6 +53,30 @@ const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
 });
 
+// UI chrome face (OFL 1.1, fonts/commit-mono/OFL.txt). TX-02 takes over when
+// it is installed locally; see globals.css.
+const commitMono = localFont({
+  src: [
+    {
+      path: "../fonts/commit-mono/CommitMono-400-Regular.woff2",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "../fonts/commit-mono/CommitMono-400-Italic.woff2",
+      weight: "400",
+      style: "italic",
+    },
+    {
+      path: "../fonts/commit-mono/CommitMono-700-Regular.woff2",
+      weight: "700",
+      style: "normal",
+    },
+  ],
+  variable: "--font-commit-mono",
+  display: "swap",
+});
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -67,13 +92,6 @@ export default function RootLayout({
         )}
         <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
         <meta name="mobile-web-app-capable" content="yes" />
-        <link
-          rel="preload"
-          href="/fonts/tx-02/TX-02-Regular.woff2"
-          as="font"
-          type="font/woff2"
-          crossOrigin="anonymous"
-        />
         <meta name="theme-color" content="#f2f4f1" />
         <meta
           name="theme-color"
@@ -87,7 +105,7 @@ export default function RootLayout({
         />
       </head>
       <body
-        className={`${plex.variable} ${geistMono.variable} font-ui text-[13px] leading-[18px] antialiased`}
+        className={`${plex.variable} ${geistMono.variable} ${commitMono.variable} font-ui text-[13px] leading-[18px] antialiased`}
       >
         <ServerProviders>
           <UserAtomsHydratorServer>

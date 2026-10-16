@@ -4,36 +4,23 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * TX-02 (U.S. Graphics, Indie + web-font licence) is served same-origin from
- * the private R2 bucket by app/fonts/tx-02/[file]/route.ts. The files are not
- * in the repo. When they are missing the stack falls back to Geist Mono.
+ * TX-02 (U.S. Graphics) is used when it is installed on the viewer's machine.
+ * The licensed web files are not in the repo; once they are in the private R2
+ * bucket, add `url("/fonts/tx-02/<file>") format("woff2")` after local() and
+ * app/fonts/tx-02/[file]/route.ts serves them. Everyone else gets Commit Mono.
  */
 @font-face {
   font-family: "TX-02";
-  src: url("/fonts/tx-02/TX-02-Regular.woff2") format("woff2");
+  src: local("TX-02"), local("TX-02 Regular"), local("Berkeley Mono");
   font-weight: 400;
   font-style: normal;
   font-display: swap;
 }
 @font-face {
   font-family: "TX-02";
-  src: url("/fonts/tx-02/TX-02-Medium.woff2") format("woff2");
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "TX-02";
-  src: url("/fonts/tx-02/TX-02-Bold.woff2") format("woff2");
+  src: local("TX-02 Bold"), local("Berkeley Mono Bold");
   font-weight: 700;
   font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "TX-02";
-  src: url("/fonts/tx-02/TX-02-Oblique.woff2") format("woff2");
-  font-weight: 400;
-  font-style: italic;
   font-display: swap;
 }
 
@@ -82,7 +69,8 @@
   --scope-org: #2f4db0;
   --scope-repo: #8a3d7c;
   --font-ui:
-    "TX-02", "Berkeley Mono", var(--font-geist-mono), ui-monospace, monospace;
+    "TX-02", var(--font-commit-mono), var(--font-geist-mono), ui-monospace,
+    monospace;
   --font-sans: var(--font-plex), ui-sans-serif, sans-serif;
   --font-mono: var(--font-ui);
   --font-terminal: var(--font-geist-mono), ui-monospace, monospace;
