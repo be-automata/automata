@@ -1,8 +1,18 @@
 "use server";
 
 import { getThreadsAndPRsStats } from "@terragon/shared/model/threads";
+import {
+  getOrgUsageStats,
+  type MemberUsage,
+  type OrgUsageStats,
+} from "@terragon/shared/model/org-usage-stats";
+import type { TriggerKind } from "@terragon/shared/model/run-state";
 import { validateTimezone } from "@terragon/shared/utils/timezone";
-import { getUserInfoOrNull, userOnlyAction } from "@/lib/auth-server";
+import {
+  getTenantContextOrNull,
+  getUserInfoOrNull,
+  userOnlyAction,
+} from "@/lib/auth-server";
 import { addDays, format, subDays, set as setDateValues } from "date-fns";
 import { db } from "@/lib/db";
 import { tz } from "@date-fns/tz";
@@ -10,6 +20,28 @@ import { tz } from "@date-fns/tz";
 export interface UsageStatsSummary {
   totalThreadsCreated: number;
   totalPRsMerged: number;
+  completed: number;
+  errored: number;
+}
+
+export interface RepoUsageRow {
+  repoFullName: string;
+  tasks: number;
+  merged: number;
+  errored: number;
+  lastActivityAt: Date;
+  /** Tasks per day, oldest first, aligned with the range. */
+  daily: number[];
+}
+
+export interface UsageBreakdowns {
+  /** False without an active org: only the viewer's own totals exist then. */
+  orgScoped: boolean;
+  byRepo: RepoUsageRow[];
+  bySource: Record<TriggerKind, number>;
+  byMember: MemberUsage[];
+  funnel: OrgUsageStats["funnel"];
+  notFinished: OrgUsageStats["notFinished"];
 }
 
 export interface DailyUsageStats {
@@ -29,12 +61,14 @@ export const getUsageStats = userOnlyAction(
     {
       numDays,
       timezone,
+      mineOnly = false,
     }: {
       numDays: number;
       timezone: string;
+      mineOnly?: boolean;
     },
   ) {
-    console.log("getUsageStats", { numDays, timezone });
+    console.log("getUsageStats", { numDays, timezone, mineOnly });
     const userInfo = await getUserInfoOrNull();
     if (!userInfo) {
       throw new Error("Unauthorized");
@@ -49,13 +83,28 @@ export const getUsageStats = userOnlyAction(
       }),
       { hours: 0, minutes: 0, seconds: 0, milliseconds: 0 },
     );
-    const threadsAndPRsData = await getThreadsAndPRsStats({
-      db,
-      userId,
-      startDate: start,
-      endDate: end,
-      timezone: validatedTimezone,
-    });
+    // Org-wide when the session has an active org (membership-checked);
+    // otherwise only the viewer's own threads, as before.
+    const tenant = await getTenantContextOrNull();
+    const orgStats = tenant?.organizationId
+      ? await getOrgUsageStats({
+          db,
+          organizationId: tenant.organizationId,
+          userId: mineOnly ? userId : undefined,
+          startDate: start,
+          endDate: end,
+          timezone: validatedTimezone,
+        })
+      : null;
+    const threadsAndPRsData =
+      orgStats ??
+      (await getThreadsAndPRsStats({
+        db,
+        userId,
+        startDate: start,
+        endDate: end,
+        timezone: validatedTimezone,
+      }));
 
     // Transform threads and PRs data into daily stats
     const dailyStatsMap = new Map<string, DailyUsageStats>();
@@ -94,12 +143,42 @@ export const getUsageStats = userOnlyAction(
     const dailyStats: DailyUsageStats[] = Array.from(
       dailyStatsMap.values(),
     ).sort((a, b) => b.date.localeCompare(a.date));
+    const datesOldestFirst = [...dailyStats].reverse().map((d) => d.date);
+    const breakdowns: UsageBreakdowns = {
+      orgScoped: orgStats !== null,
+      byRepo: (orgStats?.byRepo ?? []).map((repo) => ({
+        repoFullName: repo.repoFullName,
+        tasks: repo.tasks,
+        merged: repo.merged,
+        errored: repo.errored,
+        lastActivityAt: repo.lastActivityAt,
+        daily: datesOldestFirst.map((date) => repo.daily[date] ?? 0),
+      })),
+      bySource: orgStats?.bySource ?? {
+        web: 0,
+        automation: 0,
+        slack: 0,
+        github: 0,
+        cli: 0,
+      },
+      byMember: mineOnly ? [] : (orgStats?.byMember ?? []),
+      funnel: orgStats?.funnel ?? {
+        started: totalThreadsCreated,
+        completed: 0,
+        openedPR: 0,
+        merged: totalPRsMerged,
+      },
+      notFinished: orgStats?.notFinished ?? [],
+    };
     return {
       dailyStats,
       summary: {
         totalThreadsCreated,
         totalPRsMerged,
+        completed: orgStats?.funnel.completed ?? 0,
+        errored: orgStats?.errored ?? 0,
       },
+      breakdowns,
     };
   },
   { defaultErrorMessage: "Failed to get usage stats" },
