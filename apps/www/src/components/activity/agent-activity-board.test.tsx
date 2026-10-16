@@ -140,6 +140,23 @@ describe("AgentActivityBoardView", () => {
     expect(html).not.toContain("/task/t1");
   });
 
+  it("groups a masked repo under Other repositories without naming it", () => {
+    const html = render({
+      ...empty,
+      active: [
+        row({
+          canOpen: false,
+          title: null,
+          repoFullName: null,
+          branchName: null,
+        }),
+      ],
+      counts: { running: 1, waiting: 0, needsYou: 0 },
+    });
+    expect(html).toContain("Other repositories");
+    expect(html).not.toContain("acme/api");
+  });
+
   it("explains a run that needs you and links the fix", () => {
     const html = render({
       ...empty,

@@ -37,7 +37,11 @@ export interface AgentActivityRow {
   /** False when the viewer may not open this thread; title, branch and PR are then null. */
   canOpen: boolean;
   title: string | null;
-  repoFullName: string;
+  /**
+   * Null when the viewer can neither open the thread nor see its repository on
+   * GitHub: the same rule org usage applies to repo names.
+   */
+  repoFullName: string | null;
   branchName: string | null;
   prNumber: number | null;
   prStatus: GithubPRStatus | null;
@@ -170,7 +174,7 @@ export async function getOrgAgentActivity({
   const reposToCheck = [
     ...new Set(
       candidates
-        .filter((r) => r.userId !== viewerUserId && r.visibility === "repo")
+        .filter((r) => r.userId !== viewerUserId && r.visibility !== "link")
         .map((r) => r.repoFullName),
     ),
   ];
@@ -204,7 +208,10 @@ export async function getOrgAgentActivity({
       threadId: row.id,
       canOpen,
       title: canOpen ? displayRunTitle(row.name) : null,
-      repoFullName: row.repoFullName,
+      repoFullName:
+        canOpen || repoAccess.get(row.repoFullName) === true
+          ? row.repoFullName
+          : null,
       branchName: canOpen ? row.branchName : null,
       prNumber: canOpen ? row.prNumber : null,
       prStatus: canOpen ? (row.prStatus ?? null) : null,

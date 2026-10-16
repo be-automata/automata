@@ -28,6 +28,9 @@ import { unwrapError, unwrapResult } from "@/lib/server-actions";
 import { cn } from "@/lib/utils";
 
 type Scope = "mine" | "everyone";
+
+/** Shown for repos the viewer can neither open nor see on GitHub. */
+const HIDDEN_REPOS = "Other repositories";
 type Who = "people" | "all";
 
 const SCOPE_OPTIONS = [
@@ -141,7 +144,7 @@ function NeedsYouRow({
         ) : null}
         <p className="ml-[17px] mt-0.5 truncate text-xs text-muted-foreground">
           {[
-            row.repoFullName,
+            row.repoFullName ?? HIDDEN_REPOS,
             row.branchName,
             starterLabel(row),
             formatRelativeTime(row.updatedAt),
@@ -188,7 +191,7 @@ function ActiveRow({ row, now }: { row: AgentActivityRow; now?: number }) {
         ) : null}
       </span>
       <span className="col-span-2 truncate text-muted-foreground md:col-span-1">
-        <span className="md:hidden">{row.repoFullName} · </span>
+        <span className="md:hidden">{row.repoFullName ?? HIDDEN_REPOS} · </span>
         {row.branchName ?? "—"}
       </span>
       <span className="hidden truncate text-muted-foreground md:block">
@@ -215,7 +218,7 @@ function RecentRow({ row }: { row: AgentActivityRow }) {
       <RunStateLabel state={row.state} showReason={false} />
       <RunTitle row={row} />
       <span className="hidden truncate text-muted-foreground md:block">
-        {row.repoFullName}
+        {row.repoFullName ?? HIDDEN_REPOS}
       </span>
       <span className="hidden truncate text-muted-foreground md:block">
         {starterLabel(row)}
@@ -313,10 +316,8 @@ export function AgentActivityBoardView({
   const byRepo = useMemo(() => {
     const groups = new Map<string, AgentActivityRow[]>();
     for (const row of data?.active ?? []) {
-      groups.set(row.repoFullName, [
-        ...(groups.get(row.repoFullName) ?? []),
-        row,
-      ]);
+      const repo = row.repoFullName ?? HIDDEN_REPOS;
+      groups.set(repo, [...(groups.get(repo) ?? []), row]);
     }
     return [...groups];
   }, [data?.active]);

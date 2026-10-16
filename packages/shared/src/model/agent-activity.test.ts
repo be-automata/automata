@@ -113,11 +113,12 @@ describe("getOrgAgentActivity", () => {
     const repoRow = activity.active.find((r) => r.threadId === repoId)!;
     expect(privateRow.canOpen).toBe(false);
     expect(privateRow.title).toBeNull();
-    expect(privateRow.repoFullName).toBe("acme/private");
+    // No GitHub access to acme/private either: the repo is not named.
+    expect(privateRow.repoFullName).toBeNull();
     expect(privateRow.starter.kind).toBe("member");
     expect(repoRow.canOpen).toBe(true);
     expect(repoRow.title).toBe("Shared fix");
-    expect(checked).toEqual(["acme/shared"]);
+    expect(checked.sort()).toEqual(["acme/private", "acme/shared"]);
   });
 
   it("lists a recent failure under needs-you until the owner reads it", async () => {
@@ -292,5 +293,29 @@ describe("getOrgAgentActivity", () => {
     expect(activity.needsYou).toEqual([]);
     expect(activity.recent.map((r) => r.threadId)).toEqual([threadId]);
     expect(activity.recent[0]!.title).toBeNull();
+  });
+
+  it("names the repo of a masked task when the viewer can see the repo on GitHub", async () => {
+    const { threadId } = await createTestThread({
+      db,
+      userId: teammateId,
+      overrides: { organizationId: orgId, githubRepoFullName: "acme/visible" },
+      chatOverrides: { status: "working" },
+    });
+    await db.insert(schema.threadVisibility).values({
+      threadId,
+      visibility: "private",
+      organizationId: orgId,
+    });
+    const activity = await getOrgAgentActivity({
+      db,
+      organizationId: orgId,
+      viewerUserId: viewerId,
+      hasRepoAccess: async (repo) => repo === "acme/visible",
+    });
+    const row = activity.active.find((r) => r.threadId === threadId)!;
+    expect(row.canOpen).toBe(false);
+    expect(row.title).toBeNull();
+    expect(row.repoFullName).toBe("acme/visible");
   });
 });
