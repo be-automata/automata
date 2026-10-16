@@ -69,11 +69,10 @@ function getDefaultBreadcrumbs(pathname: string): BreadcrumbItem[] | null {
   if (pathname === "/tasks/unread") {
     return [{ label: "Unread", href: "/tasks/unread" }];
   }
-  if (pathname === "/automations") {
-    return [{ label: "Automations", href: "/automations" }];
-  }
-  if (pathname === "/stats") {
-    return [{ label: "Usage Statistics", href: "/stats" }];
+  // These pages print their own "<Page> in <org>" title (PageTitle), so a
+  // one-level breadcrumb would only repeat it.
+  if (pathname === "/automations" || pathname === "/stats") {
+    return [];
   }
   if (pathname.startsWith("/internal/admin")) {
     return [{ label: "Admin", href: "/internal/admin" }];

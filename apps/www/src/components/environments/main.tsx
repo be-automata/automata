@@ -81,7 +81,8 @@ export function Environments({
 }) {
   const router = useRouter();
   const { headerActionContainer } = usePageHeader();
-  usePageBreadcrumbs([{ label: "Environments" }]);
+  // The page prints its own "Environments in <org>" title.
+  usePageBreadcrumbs([]);
   const { activeOrganization } = useActiveOrganization();
   useRealtimeUser({
     matches: (message) => !!message.data.environmentId,
