@@ -39,7 +39,7 @@ const ThinkingPart = memo(function ThinkingPart({
   }
 
   return (
-    <div className="flex flex-col gap-2 text-sm italic text-muted-foreground">
+    <div className="flex flex-col gap-2 font-sans text-sm italic text-muted-foreground">
       <button
         onClick={() => setIsExpanded(false)}
         className="flex items-center gap-1 py-1 w-fit"

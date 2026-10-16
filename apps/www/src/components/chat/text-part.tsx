@@ -122,7 +122,7 @@ const TextPart = memo(function TextPart({
     hasCheckpoint,
   );
   return (
-    <div className="prose prose-sm max-w-none">
+    <div className="prose prose-sm max-w-none font-sans">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{

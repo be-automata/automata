@@ -1,6 +1,7 @@
 /**
- * How an organization is told apart at a glance: a stable hue (from a fixed
- * palette that reads on the warm paper ground in light and dark) and initials.
+ * How an organization is told apart at a glance: a stable hue and initials.
+ * The palette skips red and green so an avatar never reads as a run state
+ * (DESIGN.md: color means a state or a scope).
  * The org NAME stays the primary cue; the hue only makes a switch visible.
  */
 export interface OrgHue {
@@ -13,14 +14,14 @@ export interface OrgHue {
 }
 
 export const ORG_HUES: readonly OrgHue[] = [
-  { bg: "#2e7d32", fg: "#ffffff", darkBg: "#4caf50", darkFg: "#0a1f0c" },
-  { bg: "#9a6410", fg: "#ffffff", darkBg: "#e2aa4e", darkFg: "#2d2517" },
-  { bg: "#1f5f8b", fg: "#ffffff", darkBg: "#6fa8d6", darkFg: "#0d2333" },
-  { bg: "#8e3b46", fg: "#ffffff", darkBg: "#e08a96", darkFg: "#33141a" },
-  { bg: "#56687a", fg: "#ffffff", darkBg: "#a3b4c4", darkFg: "#1c242c" },
-  { bg: "#6b5b1e", fg: "#ffffff", darkBg: "#cdb85e", darkFg: "#262009" },
-  { bg: "#2f6f6a", fg: "#ffffff", darkBg: "#6cc0b8", darkFg: "#0e2725" },
-  { bg: "#7a4a2a", fg: "#ffffff", darkBg: "#d39a72", darkFg: "#2b190d" },
+  { bg: "#2f4db0", fg: "#ffffff", darkBg: "#8ea6ff", darkFg: "#121715" },
+  { bg: "#7a3e9d", fg: "#ffffff", darkBg: "#c79aee", darkFg: "#121715" },
+  { bg: "#3b5a7a", fg: "#ffffff", darkBg: "#9fb8d4", darkFg: "#121715" },
+  { bg: "#7a5a1e", fg: "#ffffff", darkBg: "#d6b56a", darkFg: "#121715" },
+  { bg: "#4f5d6b", fg: "#ffffff", darkBg: "#aab6c2", darkFg: "#121715" },
+  { bg: "#8a3d6c", fg: "#ffffff", darkBg: "#e09ac4", darkFg: "#121715" },
+  { bg: "#1f4f8b", fg: "#ffffff", darkBg: "#7fb0e6", darkFg: "#121715" },
+  { bg: "#6e4a33", fg: "#ffffff", darkBg: "#cf9e7c", darkFg: "#121715" },
 ];
 
 /** FNV-1a over the id: stable across renders, servers and deploys. */

@@ -28,7 +28,9 @@ export function SettingsCheckbox({
       <div className="flex flex-col gap-1 flex-1">
         <span className="text-sm font-semibold">{label}</span>
         {description && (
-          <span className="text-xs text-muted-foreground">{description}</span>
+          <span className="font-sans text-xs text-muted-foreground">
+            {description}
+          </span>
         )}
       </div>
     </Label>
@@ -59,7 +61,9 @@ export function SettingsWithCTA({
       <div className="flex flex-col gap-1 flex-1">
         <Label className="text-sm font-semibold">{label}</Label>
         {description && (
-          <span className="text-xs text-muted-foreground">{description}</span>
+          <span className="font-sans text-xs text-muted-foreground">
+            {description}
+          </span>
         )}
       </div>
       {children}
