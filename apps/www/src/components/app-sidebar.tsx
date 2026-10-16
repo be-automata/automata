@@ -1,5 +1,7 @@
 "use client";
 
+import { RunStateGlyph } from "@/components/ui/run-state";
+import { useAgentActivity } from "@/queries/agent-activity-queries";
 import {
   Home,
   Settings,
@@ -129,6 +131,7 @@ export function AppSidebar() {
                   title="Home"
                   href="/dashboard"
                   icon={<Home className="h-5 w-5" />}
+                  badge={<HomeActivityBadge />}
                 />
                 <Item
                   title="Automations"
@@ -265,11 +268,13 @@ function Item({
   href,
   icon,
   count,
+  badge,
 }: {
   title: string;
   href: string;
   icon: React.ReactNode;
   count?: number;
+  badge?: React.ReactNode;
 }) {
   const pathname = usePathname();
   const isActive = pathname === href;
@@ -292,7 +297,35 @@ function Item({
       {!!count && (
         <SidebarMenuBadge className="bg-muted">{count}</SidebarMenuBadge>
       )}
+      {badge}
     </AppMenuItem>
+  );
+}
+
+/** Runs that need someone (■) or, when none do, runs in flight (●). */
+function HomeActivityBadge() {
+  const { data } = useAgentActivity({ mineOnly: false, peopleOnly: false });
+  if (!data) {
+    return null;
+  }
+  const { needsYou, running } = data.counts;
+  if (needsYou === 0 && running === 0) {
+    return null;
+  }
+  return (
+    <SidebarMenuBadge
+      className="gap-1 text-xs"
+      aria-label={needsYou > 0 ? `${needsYou} need you` : `${running} running`}
+    >
+      <RunStateGlyph kind={needsYou > 0 ? "needs-you" : "running"} />
+      <span
+        className={
+          needsYou > 0 ? "text-state-needs-you" : "text-muted-foreground"
+        }
+      >
+        {needsYou > 0 ? needsYou : running}
+      </span>
+    </SidebarMenuBadge>
   );
 }
 

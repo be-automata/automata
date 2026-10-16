@@ -10,7 +10,9 @@ export function useCollapsibleThreadList() {
   const [isThreadListCollapsedCookie, setIsThreadListCollapsedCookie] = useAtom(
     threadListCollapsedAtom,
   );
-  const canCollapseThreadList = !isMobile && pathname !== "/dashboard";
+  // Home's agent-activity register replaces the task column on /dashboard.
+  const isDashboard = pathname === "/dashboard";
+  const canCollapseThreadList = !isMobile && !isDashboard;
   const setThreadListCollapsed = useCallback(
     (collapsed: boolean) => {
       if (canCollapseThreadList) {
@@ -21,7 +23,8 @@ export function useCollapsibleThreadList() {
   );
   return {
     canCollapseThreadList,
-    isThreadListCollapsed: canCollapseThreadList && isThreadListCollapsedCookie,
+    isThreadListCollapsed:
+      isDashboard || (canCollapseThreadList && isThreadListCollapsedCookie),
     setThreadListCollapsed,
   };
 }

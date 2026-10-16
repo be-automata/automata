@@ -1,7 +1,9 @@
 import { combineThreadStatuses } from "@/agent/thread-status";
 import { cn } from "@/lib/utils";
 import { ThreadInfo, ThreadStatus } from "@terragon/shared";
-import { Clock, Check, CircleDashed, X, File, Calendar } from "lucide-react";
+import { File, Calendar } from "lucide-react";
+import type React from "react";
+import { RunStateGlyph } from "@/components/ui/run-state";
 
 type MinimalThreadStatus =
   | "unread" // Thread is unread
@@ -112,54 +114,28 @@ function MinimalStatusIndicator({
     minimalStatus = "draft";
   }
 
-  const strokeWidth = 3;
-  const size = "size-3";
-  // Icon variant
-  const icons = {
-    draft: (
-      <File strokeWidth={2.5} className={cn("text-muted-foreground", size)} />
-    ),
+  // Ops Desk shape grammar (components/ui/run-state.tsx); draft and scheduled
+  // are not run states, so they keep a muted icon.
+  const icons: Record<MinimalThreadStatus, React.ReactNode> = {
+    draft: <File strokeWidth={2.5} className="size-3 text-muted-foreground" />,
     scheduled: (
-      <Calendar
-        strokeWidth={strokeWidth}
-        className={cn("text-muted-foreground", size)}
-      />
+      <Calendar strokeWidth={3} className="size-3 text-muted-foreground" />
     ),
-    pending: (
-      <Clock
-        strokeWidth={strokeWidth}
-        className={cn("text-yellow-600/90", size)}
-      />
+    pending: <RunStateGlyph kind="waiting" />,
+    active: <RunStateGlyph kind="running" />,
+    finishing: <RunStateGlyph kind="running" />,
+    complete: <RunStateGlyph kind="done" />,
+    error: <RunStateGlyph kind="needs-you" />,
+    unread: (
+      <span className="inline-block size-1.5 rounded-full bg-foreground" />
     ),
-    active: (
-      <CircleDashed
-        strokeWidth={2}
-        className={cn(
-          "text-muted-foreground animate-[spin_1.5s_linear_infinite]",
-          size,
-        )}
-      />
-    ),
-    finishing: (
-      <Check
-        strokeWidth={strokeWidth}
-        className={cn("text-green-600/90", size)}
-      />
-    ),
-    complete: (
-      <Check
-        strokeWidth={strokeWidth}
-        className={cn("text-green-600/90", size)}
-      />
-    ),
-    error: (
-      <X strokeWidth={strokeWidth} className={cn("text-red-600/90", size)} />
-    ),
-    unread: <div className="w-1 h-1 rounded-full bg-blue-500" />,
   };
   return (
     <div
-      className={cn("flex-shrink-0", className)}
+      className={cn(
+        "flex size-3 flex-shrink-0 items-center justify-center",
+        className,
+      )}
       title={getStatusLabel({ status, isError })}
     >
       {icons[minimalStatus]}
