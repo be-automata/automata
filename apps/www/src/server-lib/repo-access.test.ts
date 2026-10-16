@@ -43,4 +43,25 @@ describe("repo access", () => {
     await userHasRepoAccess({ userId: "u-cache", repoFullName: "acme/api" });
     expect(reposGet).toHaveBeenCalledTimes(2);
   });
+
+  it("caches a GitHub 404 but not a transient failure", async () => {
+    const transient = Object.assign(new Error("rate limited"), { status: 429 });
+    reposGet.mockRejectedValueOnce(transient);
+    reposGet.mockResolvedValueOnce({ data: { permissions: { pull: true } } });
+    const first = createRepoAccessChecker("u-blip", { cache: true });
+    expect(await first("acme/api")).toBe(false);
+    // Not cached: the next poll asks GitHub again and sees the recovery.
+    expect(
+      await createRepoAccessChecker("u-blip", { cache: true })("acme/api"),
+    ).toBe(true);
+
+    const notFound = Object.assign(new Error("Not Found"), { status: 404 });
+    reposGet.mockRejectedValueOnce(notFound);
+    const checker = createRepoAccessChecker("u-404c", { cache: true });
+    expect(await checker("acme/gone")).toBe(false);
+    expect(
+      await createRepoAccessChecker("u-404c", { cache: true })("acme/gone"),
+    ).toBe(false);
+    expect(reposGet).toHaveBeenCalledTimes(3);
+  });
 });

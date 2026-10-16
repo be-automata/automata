@@ -37,20 +37,30 @@ export function createRepoAccessChecker(
     }
     octokit ??= getOctokitForUser({ userId });
     const client = await octokit;
-    let value = false;
-    if (client) {
-      try {
-        const [owner, repo] = parseRepoFullName(repoFullName);
-        const repoInfo = await client.rest.repos.get({ owner, repo });
-        value = !!repoInfo.data.permissions;
-      } catch (error) {
-        console.warn("Repository access check failed", {
-          repoFullName,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+    if (!client) {
+      return false;
     }
-    if (cache) {
+    let value = false;
+    // Only a definite answer is cached: a success, or GitHub saying no (403,
+    // 404). A rate limit, 5xx or network error must not mask for the TTL.
+    let definite = true;
+    try {
+      const [owner, repo] = parseRepoFullName(repoFullName);
+      const repoInfo = await client.rest.repos.get({ owner, repo });
+      value = !!repoInfo.data.permissions;
+    } catch (error) {
+      const status =
+        typeof error === "object" && error !== null && "status" in error
+          ? (error as { status?: unknown }).status
+          : undefined;
+      definite = status === 403 || status === 404;
+      console.warn("Repository access check failed", {
+        repoFullName,
+        status,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (cache && definite) {
       accessCache.set(key, { value, expiresAt: Date.now() + ACCESS_TTL_MS });
     }
     return value;
