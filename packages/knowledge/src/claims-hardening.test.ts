@@ -1,7 +1,14 @@
 // Hardening cases from the refinement review: each one reproduces a way an approved or retargeted op,
 // an updater answer or a diff edge case could re-ground a claim without a located, approved proposal.
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,6 +30,7 @@ import {
   type Updater,
   type UpdateRequest,
 } from "./claims.ts";
+import { InvalidOpKeyPartError } from "./op-key.ts";
 import {
   BILLING_LINES as OLD,
   countingUpdater as counting,
@@ -498,6 +506,58 @@ describe("ticket JSON pointers", () => {
     expect(resolve(root, "ticket://SUP-13#/a~1b/c~0d")).toEqual({
       text: "escaped",
     });
+  });
+});
+
+describe("third roborev pass", () => {
+  it("an updater override naming a directory becomes a review, not a crash", () => {
+    const { root, sc } = corpus();
+    mkdirSync(join(root, "repo/src"));
+    edit(root, "tickets/SUP-12.json", (s) => s.replace('"2.4.1"', '"2.4.2"'));
+    const draft = reconcile(
+      root,
+      pageOf(root),
+      sc,
+      answering("Fixed in 2.4.2.", ["repo://src#L1-L1"]),
+      { sourceRev: SHA },
+    );
+    expect(draft.ops.find((o) => o.claimId === "sso-fixed-in")?.op).toBe(
+      "review",
+    );
+  });
+
+  it("an approved retract is refused once its evidence is back", () => {
+    const { root, sc } = corpus();
+    const ticket = join(root, "tickets/SUP-12.json");
+    const original = readFileSync(ticket, "utf8");
+    rmSync(ticket);
+    const md = pageOf(root);
+    const draft = reconcile(root, md, sc, stubUpdater(), { sourceRev: SHA });
+    expect(draft.ops.find((o) => o.claimId === "sso-fixed-in")?.op).toBe(
+      "retract",
+    );
+    writeFileSync(ticket, original);
+    expect(() =>
+      applyDraft(
+        root,
+        md,
+        sc,
+        draft,
+        draft.ops.map((o) => o.id),
+      ),
+    ).toThrow(/holds again/);
+  });
+
+  it.each([
+    ["claim id", "p", "seat/price"],
+    ["page", "billing faq", "seat-price"],
+  ])("a %s that cannot be keyed is refused at seed time", (_n, page, id) => {
+    const { root } = corpus();
+    expect(() =>
+      generateSidecar(root, page, "x", [
+        { id, statement: "x", evidence: ["repo://billing.ts#L1-L1"] },
+      ]),
+    ).toThrow(InvalidOpKeyPartError);
   });
 });
 

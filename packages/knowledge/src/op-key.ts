@@ -43,6 +43,11 @@ function normalizeRev(sourceRev: string | undefined): string {
   return rev.slice(0, REV_LENGTH);
 }
 
+/** Throws unless `value` can be the page or claim part of an op key. Check ids when they are minted. */
+export function assertOpKeyPart(part: "page" | "claimId", value: string): void {
+  if (!PART.test(value)) throw new InvalidOpKeyPartError(part, value);
+}
+
 export function opKey(
   op: string,
   page: string,
@@ -50,8 +55,8 @@ export function opKey(
   sourceRev?: string,
 ): string {
   if (!OP.test(op)) throw new InvalidOpKeyPartError("op", op);
-  if (!PART.test(page)) throw new InvalidOpKeyPartError("page", page);
-  if (!PART.test(claimId)) throw new InvalidOpKeyPartError("claimId", claimId);
+  assertOpKeyPart("page", page);
+  assertOpKeyPart("claimId", claimId);
   return `${op}:${page}/${claimId}@${normalizeRev(sourceRev)}`;
 }
 

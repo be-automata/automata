@@ -6,10 +6,10 @@
 // consistently go to the model, and every op that changes what a page says is a reviewable
 // proposal keyed by opKey (page, claim and source revision).
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 
-import { opKey, parseOpKey } from "./op-key.ts";
+import { assertOpKeyPart, opKey, parseOpKey } from "./op-key.ts";
 import { reanchorSpan, type Hunk, type LineSpan } from "./reanchor.ts";
 
 export interface EvidencePin {
@@ -123,7 +123,8 @@ function sourceFile(
       uri,
       "target resolves outside its source",
     );
-  return real;
+  // A directory (or socket, device) holds no evidence text.
+  return statSync(real).isFile() ? real : null;
 }
 
 function lineAnchor(uri: string, anchor: string): LineSpan {
@@ -788,10 +789,13 @@ export function generateSidecar(
   pageMd: string,
   seed: { id: string; statement: string; evidence: string[] }[],
 ): Sidecar {
+  // Ids end up in op keys: reject one that cannot be keyed now, not at the first reconcile.
+  assertOpKeyPart("page", page);
   return {
     page,
     pageVersion: sha(pageMd),
     claims: seed.map((c) => {
+      assertOpKeyPart("claimId", c.id);
       if (c.evidence.length === 0) throw new UngroundedClaimError(c.id);
       return { ...c, evidence: c.evidence.map((u) => pin(root, u)) };
     }),
@@ -907,9 +911,15 @@ export function applyDraft(
       claims.push(c);
       continue;
     }
-    if (c.evidence.some((e) => checkEvidence(root, e).kind === "ambiguous"))
-      throw new AmbiguousEvidenceError(c.id);
+    const now = c.evidence.map((e) => checkEvidence(root, e).kind);
+    if (now.includes("ambiguous")) throw new AmbiguousEvidenceError(c.id);
     if (op.op === "retract") {
+      // The evidence came back (a restored ticket, a re-added file): the reason to retract is gone.
+      if (now.some(holds))
+        throw new UnappliableOpError(
+          op.id,
+          "evidence for this fact holds again since the retract was proposed: reconcile again",
+        );
       md = replaceStatement(
         md,
         c.statement,
