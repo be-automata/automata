@@ -399,8 +399,10 @@ describe("D-2: re-anchoring is enforced inside reconcile", () => {
     ];
     const { draft, seen } = withDiff(now, "@@ -2 +2,2 @@");
     expect(seen).toContain("seat-price");
+    // The updater reads the re-anchored span (35 / 3), not the old L2-L3 (20 / 35).
     expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
       op: "update",
+      after: "Each seat costs $35 per month; workspaces get 3 free seats.",
       newEvidence: ["repo://billing.ts#L3-L4"],
     });
   });

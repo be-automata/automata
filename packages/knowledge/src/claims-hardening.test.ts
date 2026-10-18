@@ -1,14 +1,17 @@
 // Hardening cases from the refinement review: each one reproduces a way an approved or retargeted op,
 // an updater answer or a diff edge case could re-ground a claim without a located, approved proposal.
-import { writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 
 import {
   AmbiguousEvidenceError,
   applyDraft,
   checkPage,
+  HumanEditedPageError,
   InvalidEvidenceUriError,
   reconcile,
   resolve,
@@ -29,6 +32,11 @@ import {
   useCorpus as corpus,
   writeBilling,
 } from "./test-fixtures.ts";
+
+/** The sidecar's page version for `md` (sha256, 16 hex). */
+const sha256 = (md: string) =>
+  createHash("sha256").update(md).digest("hex").slice(0, 16);
+
 /** An updater that answers every claim with a fixed statement and (optionally) fixed evidence. */
 const answering = (statement: string, evidence?: string[]): Updater => ({
   calls: 0,
@@ -293,6 +301,126 @@ describe("updater answers are validated", () => {
     expect(draft.ops.find((o) => o.claimId === "sso-workaround")?.op).toBe(
       "review",
     );
+  });
+});
+
+describe("applyDraft never trusts the draft", () => {
+  const ticketDraft = () => {
+    const { root, sc } = corpus();
+    edit(root, "tickets/SUP-12.json", (s) => s.replace('"2.4.1"', '"2.4.2"'));
+    const md = pageOf(root);
+    const draft = reconcile(root, md, sc, stubUpdater(), { sourceRev: SHA });
+    return { root, sc, md, draft };
+  };
+
+  it("an update marked auto is still not applied without approval", () => {
+    const { root, sc, md, draft } = ticketDraft();
+    const ops = draft.ops.map((o) => ({ ...o, auto: true }));
+    const out = applyDraft(root, md, sc, { ...draft, ops });
+    expect(out.md).toBe(md);
+    expect(out.sc.claims).toEqual(sc.claims);
+  });
+
+  it("a human edit after reconcile is detected from the page, not from mode", () => {
+    const { root, sc, md, draft } = ticketDraft();
+    expect(draft.mode).toBe("apply");
+    const edited = `${md}\nA human added this line.\n`;
+    expect(() =>
+      applyDraft(
+        root,
+        edited,
+        sc,
+        draft,
+        draft.ops.map((o) => o.id),
+      ),
+    ).toThrow(HumanEditedPageError);
+  });
+
+  it("an approved op whose id names another claim is refused", () => {
+    const { root, sc, md, draft } = ticketDraft();
+    const ops = draft.ops.map((o) => ({ ...o, claimId: "seat-price" }));
+    expect(() =>
+      applyDraft(
+        root,
+        md,
+        sc,
+        { ...draft, ops },
+        ops.map((o) => o.id),
+      ),
+    ).toThrow(UnappliableOpError);
+  });
+
+  it("a statement that occurs twice on the page is never rewritten", () => {
+    const { root, sc, draft } = ticketDraft();
+    const md = `${pageOf(root)}\nThe SSO loop was fixed in version 2.4.1.\n`;
+    expect(() =>
+      applyDraft(
+        root,
+        md,
+        { ...sc, pageVersion: sha256(md) },
+        { ...draft, mode: "apply" },
+        draft.ops.map((o) => o.id),
+      ),
+    ).toThrow(/more than once/);
+  });
+});
+
+describe("evidence URIs stay inside the corpus", () => {
+  it.each([
+    "repo://../tickets/SUP-12.json#L1-L1",
+    "repo://a/../../x#L1-L1",
+    "repo:///etc/hosts#L1-L1",
+    "ticket://../wiki/billing-faq#/id",
+    "doc://..%2F/../pricing#trial",
+  ])("rejects %s", (uri) => {
+    const { root } = corpus();
+    expect(() => resolve(root, uri)).toThrow(InvalidEvidenceUriError);
+  });
+
+  it("rejects a symlink that points outside its source", () => {
+    const { root } = corpus();
+    const outside = mkdtempSync(join(tmpdir(), "knowledge-outside-"));
+    onTestFinished(() => rmSync(outside, { recursive: true, force: true }));
+    writeFileSync(join(outside, "secret.env"), "TOKEN=x\n");
+    symlinkSync(join(outside, "secret.env"), join(root, "repo/leak.ts"));
+    expect(() => resolve(root, "repo://leak.ts#L1-L1")).toThrow(
+      InvalidEvidenceUriError,
+    );
+  });
+
+  it("an updater override outside the corpus becomes a review, not a read", () => {
+    const { root, sc } = corpus();
+    edit(root, "tickets/SUP-12.json", (s) => s.replace('"2.4.1"', '"2.4.2"'));
+    const draft = reconcile(
+      root,
+      pageOf(root),
+      sc,
+      answering("Fixed in 2.4.2.", ["repo://../../etc/hosts#L1-L1"]),
+      { sourceRev: SHA },
+    );
+    expect(draft.ops.find((o) => o.claimId === "sso-fixed-in")?.op).toBe(
+      "review",
+    );
+  });
+});
+
+describe("ticket JSON pointers", () => {
+  it("never resolve inherited properties", () => {
+    const { root } = corpus();
+    expect(resolve(root, "ticket://SUP-12#/constructor")).toMatchObject({
+      code: "gone",
+    });
+  });
+
+  it("decode ~1 and ~0", () => {
+    const { root } = corpus();
+    writeFileSync(
+      join(root, "tickets/SUP-13.json"),
+      JSON.stringify({ "a/b": { "c~d": "escaped" } }),
+    );
+    expect(resolve(root, "ticket://SUP-13#/a~1b/c~0d")).toEqual({
+      text: "escaped",
+    });
   });
 });
 

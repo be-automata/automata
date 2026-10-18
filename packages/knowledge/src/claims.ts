@@ -6,8 +6,8 @@
 // consistently go to the model, and every op that changes what a page says is a reviewable
 // proposal keyed by opKey (page, claim and source revision).
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { join, sep } from "node:path";
 
 import { opKey, parseOpKey } from "./op-key.ts";
 import { reanchorSpan, type Hunk, type LineSpan } from "./reanchor.ts";
@@ -83,6 +83,8 @@ const slug = (s: string) =>
     .replace(/^-|-$/g, "");
 const LINE_ANCHOR = /^L(\d+)-L(\d+)$/;
 const HEADING = /^(#{1,6}) /;
+/** A `..` segment, an absolute path, a backslash or a NUL: anything that could name a file outside its source. */
+const UNSAFE_TARGET = /(^|\/)\.\.(\/|$)|^\/|\\|\0/;
 const repoUri = (target: string, [a, b]: LineSpan) =>
   `repo://${target}#L${a}-L${b}`;
 
@@ -94,7 +96,34 @@ export function parseUri(uri: string) {
       uri,
       "expected <scheme>://<target>#<anchor>",
     );
+  // URIs come from model output too: a target must never reach outside the corpus.
+  if (UNSAFE_TARGET.test(target))
+    throw new InvalidEvidenceUriError(
+      uri,
+      "target must stay inside its source",
+    );
   return { scheme: scheme as "repo" | "ticket" | "doc", target, anchor };
+}
+
+/**
+ * The file a URI names inside one source directory, or null when it does not exist. A symlink is followed
+ * only while it stays inside that source: a committed link to a host file is not evidence.
+ */
+function sourceFile(
+  root: string,
+  dir: string,
+  file: string,
+  uri: string,
+): string | null {
+  const p = join(root, dir, file);
+  if (!existsSync(p)) return null;
+  const real = realpathSync(p);
+  if (!real.startsWith(realpathSync(join(root, dir)) + sep))
+    throw new InvalidEvidenceUriError(
+      uri,
+      "target resolves outside its source",
+    );
+  return real;
 }
 
 function lineAnchor(uri: string, anchor: string): LineSpan {
@@ -130,11 +159,9 @@ function docSections(lines: string[]): DocSection[] {
   });
   return out;
 }
-const readSections = (root: string, target: string) => {
-  const p = join(root, "docs", `${target}.md`);
-  return existsSync(p)
-    ? docSections(readFileSync(p, "utf8").split("\n"))
-    : null;
+const readSections = (root: string, target: string, uri: string) => {
+  const p = sourceFile(root, "docs", `${target}.md`, uri);
+  return p ? docSections(readFileSync(p, "utf8").split("\n")) : null;
 };
 
 /**
@@ -144,26 +171,29 @@ const readSections = (root: string, target: string) => {
 export function resolve(root: string, uri: string): Resolved {
   const { scheme, target, anchor } = parseUri(uri);
   if (scheme === "repo") {
-    const p = join(root, "repo", target);
-    if (!existsSync(p)) return { missing: "file deleted", code: "gone" };
     const [a, b] = lineAnchor(uri, anchor);
+    const p = sourceFile(root, "repo", target, uri);
+    if (!p) return { missing: "file deleted", code: "gone" };
     const lines = readFileSync(p, "utf8").split("\n");
     if (b > lines.length)
       return { missing: "range past end of file", code: "past-eof" };
     return { text: lines.slice(a - 1, b).join("\n") };
   }
   if (scheme === "ticket") {
-    const p = join(root, "tickets", `${target}.json`);
-    if (!existsSync(p)) return { missing: "ticket deleted", code: "gone" };
+    const p = sourceFile(root, "tickets", `${target}.json`, uri);
+    if (!p) return { missing: "ticket deleted", code: "gone" };
     let v: unknown = JSON.parse(readFileSync(p, "utf8"));
-    for (const key of anchor.replace(/^\//, "").split("/")) {
-      if (v === null || typeof v !== "object" || !(key in v))
+    // RFC 6901: own properties only (never `constructor` off the prototype), with ~1 and ~0 decoded.
+    for (const raw of anchor.replace(/^\//, "").split("/")) {
+      const key = raw.replace(/~1/g, "/").replace(/~0/g, "~");
+      if (v === null || typeof v !== "object" || !Object.hasOwn(v, key))
         return { missing: `field ${anchor} gone`, code: "gone" };
       v = (v as Record<string, unknown>)[key];
     }
+    // Every value reached from JSON.parse serializes back to a string.
     return { text: typeof v === "string" ? v : JSON.stringify(v) };
   }
-  const sections = readSections(root, target);
+  const sections = readSections(root, target, uri);
   if (!sections) return { missing: "doc deleted", code: "gone" };
   const same = sections.filter((s) => s.slug === anchor);
   const [only] = same;
@@ -181,18 +211,18 @@ export function pin(root: string, uri: string): EvidencePin {
   return { uri, hash: fingerprint(r.text) };
 }
 
-// One index per (file, window width), rebuilt when the file's content changes: never grows past
-// one entry per file and width, however many versions a long-running worker sees.
-const WINDOW_INDEX = new Map<
-  string,
-  { content: string; idx: Map<string, number[]> }
->();
-function windowIndex(file: string, width: number): Map<string, number[]> {
-  const text = readFileSync(file, "utf8");
-  const key = `${file}\0${width}`;
-  const content = sha(text);
+// Window indexes keyed by (content, width), least recently used evicted past the cap. Keyed by content,
+// not path, so a worker that checks out every run into a fresh directory reuses them and stays bounded.
+const WINDOW_INDEX_CAP = 64;
+const WINDOW_INDEX = new Map<string, Map<string, number[]>>();
+function windowIndex(text: string, width: number): Map<string, number[]> {
+  const key = `${sha(text)}\0${width}`;
   const cached = WINDOW_INDEX.get(key);
-  if (cached?.content === content) return cached.idx;
+  if (cached) {
+    WINDOW_INDEX.delete(key);
+    WINDOW_INDEX.set(key, cached);
+    return cached;
+  }
   const lines = text.split("\n");
   const idx = new Map<string, number[]>();
   for (let i = 0; i + width <= lines.length; i++) {
@@ -201,7 +231,10 @@ function windowIndex(file: string, width: number): Map<string, number[]> {
     if (list) list.push(i + 1);
     else idx.set(h, [i + 1]);
   }
-  WINDOW_INDEX.set(key, { content, idx });
+  WINDOW_INDEX.set(key, idx);
+  const [oldest] = WINDOW_INDEX.keys();
+  if (WINDOW_INDEX.size > WINDOW_INDEX_CAP && oldest !== undefined)
+    WINDOW_INDEX.delete(oldest);
   return idx;
 }
 
@@ -213,7 +246,7 @@ function spansWithHash(
 ): string[] | null {
   const { scheme, target, anchor } = parseUri(uri);
   if (scheme === "doc") {
-    const sections = readSections(root, target);
+    const sections = readSections(root, target, uri);
     return sections
       ? sections
           .filter((s) => fingerprint(s.body) === hash)
@@ -223,9 +256,10 @@ function spansWithHash(
   if (scheme !== "repo") return null;
   const [a, b] = lineAnchor(uri, anchor);
   const width = b - a + 1;
-  const file = join(root, "repo", target);
-  if (!existsSync(file)) return null;
-  return (windowIndex(file, width).get(hash) ?? []).map((s) =>
+  const file = sourceFile(root, "repo", target, uri);
+  if (!file) return null;
+  const text = readFileSync(file, "utf8");
+  return (windowIndex(text, width).get(hash) ?? []).map((s) =>
     repoUri(target, [s, s + width - 1]),
   );
 }
@@ -371,7 +405,7 @@ export interface DraftOp {
 }
 export interface Draft {
   page: string;
-  /** propose = a human edited the page since the agent last verified it. */
+  /** propose = a human edited the page since the agent last verified it. Informational: applyDraft re-derives it. */
   mode: "apply" | "propose";
   ops: DraftOp[];
   llmCalls: number;
@@ -464,11 +498,31 @@ function acceptableEvidence(
 ): boolean {
   if (uris.length !== expected) return false;
   return uris.every((uri) => {
-    const r = resolve(root, uri);
-    if (!("text" in r)) return false;
-    const spans = spansWithHash(root, uri, fingerprint(r.text));
-    return spans === null || spans.length === 1;
+    try {
+      const r = resolve(root, uri);
+      if (!("text" in r)) return false;
+      const spans = spansWithHash(root, uri, fingerprint(r.text));
+      return spans === null || spans.length === 1;
+    } catch (e) {
+      // Malformed or out-of-corpus model output is a review, not a crash.
+      if (e instanceof InvalidEvidenceUriError) return false;
+      throw e;
+    }
   });
+}
+
+/**
+ * A stale pin as the updater must see it: the text at its re-anchored location, not at the old pin.
+ * Null when the located span does not resolve (the claim then goes to review).
+ */
+function atLocation(
+  root: string,
+  e: EvidenceStatus,
+  uri: string,
+): EvidenceStatus | null {
+  if (e.kind !== "stale") return e;
+  const r = resolve(root, uri);
+  return "text" in r ? { kind: "stale", uri: e.uri, now: norm(r.text) } : null;
 }
 
 const describe = (e: EvidenceStatus) => {
@@ -602,9 +656,16 @@ export function reconcile(
           review?.why ??
           "the merge deleted part of this fact's evidence: re-ground or retract",
       });
+    const evidence = ev.map((e, j) => atLocation(root, e, pins[j]?.uri ?? ""));
+    if (!evidence.every((e): e is EvidenceStatus => e !== null))
+      return add({
+        ...baseOf(claim, ev),
+        op: "review",
+        why: "a re-anchored span does not resolve: a human must locate this fact",
+      });
     needWork.push({
       claim,
-      evidence: ev,
+      evidence,
       newEvidence: pins.map((l) => l.uri),
       reanchorScore: Math.min(...pins.map((l) => l.score)),
     });
@@ -720,13 +781,20 @@ export class UnappliableOpError extends Error {
   }
 }
 
+/** Replace the claim's one occurrence on the page; a statement that occurs twice names no single place. */
 function replaceStatement(md: string, from: string, to: string, opId: string) {
-  if (!md.includes(from))
+  const at = md.indexOf(from);
+  if (at === -1)
     throw new UnappliableOpError(
       opId,
       "the claim's statement is not on the page",
     );
-  return md.replace(from, () => to);
+  if (md.indexOf(from, at + 1) !== -1)
+    throw new UnappliableOpError(
+      opId,
+      "the claim's statement occurs more than once on the page: a human must apply this edit",
+    );
+  return md.slice(0, at) + to + md.slice(at + from.length);
 }
 
 /** Re-pin without a proposal: only a pin that relocated or still holds may be kept; anything else is a guess. */
@@ -746,8 +814,9 @@ function keepOrRelocate(
 
 /**
  * Apply auto ops plus the ops a human approved. Content changes on a human-edited page are refused;
- * repins are still allowed there because they never touch the page text. The op kind is never trusted
- * alone: every claim-changing op is re-checked against the sources before it is applied.
+ * repins are still allowed there because they never touch the page text. Nothing on the draft is
+ * trusted: the op kind caps `auto`, the page is re-hashed rather than reading `mode`, every op id must
+ * name its own op, page and claim, and every claim-changing op is re-checked against the sources.
  */
 export function applyDraft(
   root: string,
@@ -756,9 +825,20 @@ export function applyDraft(
   d: Draft,
   approved: string[] = [],
 ): { md: string; sc: Sidecar } {
-  const take = d.ops.filter((o) => o.auto || approved.includes(o.id));
-  if (d.mode === "propose" && take.some((o) => !o.auto))
-    throw new HumanEditedPageError(d.page);
+  const auto = (o: DraftOp) => o.auto && OP_KINDS[o.op].auto;
+  const take = d.ops.filter((o) => auto(o) || approved.includes(o.id));
+  for (const o of take) {
+    const k = parseOpKey(o.id);
+    if (!k) throw new UnknownOpKeyError(o.id);
+    if (k.op !== o.op || k.page !== sc.page || k.claimId !== o.claimId)
+      throw new UnappliableOpError(
+        o.id,
+        `the op key does not name ${o.op} on ${sc.page}/${o.claimId}`,
+      );
+  }
+  const humanEdited = sha(pageMd) !== sc.pageVersion;
+  if (humanEdited && take.some((o) => !auto(o)))
+    throw new HumanEditedPageError(sc.page);
   let md = pageMd;
   const claims: Claim[] = [];
   for (const c of sc.claims) {
@@ -804,7 +884,7 @@ export function applyDraft(
     md,
     sc: {
       page: sc.page,
-      pageVersion: d.mode === "propose" ? sc.pageVersion : sha(md),
+      pageVersion: humanEdited ? sc.pageVersion : sha(md),
       claims,
     },
   };
