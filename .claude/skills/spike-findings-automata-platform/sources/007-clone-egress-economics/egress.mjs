@@ -10,7 +10,8 @@ import { fileURLToPath } from "node:url";
 const run = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORK = join(HERE, "work");
-const SRC = process.env.SRC_REPO ?? "/Users/senior/.superset/projects/automata-platform/.git";
+// Default: the git dir of the repo this script lives in. Override with SRC_REPO=<path to a .git dir>.
+const SRC = process.env.SRC_REPO ?? (await run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: HERE })).stdout.trim();
 const LABEL = process.env.LABEL ?? "automata";
 const SPARSE = process.env.SPARSE_DIR ?? "packages/shared";
 const BRANCH = process.env.SRC_BRANCH ?? "main";
