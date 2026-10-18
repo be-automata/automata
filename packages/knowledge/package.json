@@ -1,0 +1,25 @@
+{
+  "name": "@terragon/knowledge",
+  "version": "1.0.0",
+  "description": "Grounded knowledge claims: evidence pinning, drift detection, re-anchoring and reviewable ops",
+  "type": "module",
+  "exports": {
+    "./claims": "./src/claims.ts",
+    "./op-key": "./src/op-key.ts",
+    "./reanchor": "./src/reanchor.ts"
+  },
+  "scripts": {
+    "tsc-check": "tsc --noEmit",
+    "tsc-watch": "tsc --noEmit --watch --preserveWatchOutput",
+    "format": "prettier --write . --ignore-path ../../.prettierignore --config ../../.prettierrc",
+    "format-check": "prettier --check . --ignore-path ../../.prettierignore --config ../../.prettierrc",
+    "test": "vitest"
+  },
+  "packageManager": "pnpm@10.14.0",
+  "devDependencies": {
+    "@terragon/tsconfig": "workspace:*",
+    "@types/node": "^22.15.29",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  }
+}

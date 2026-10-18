@@ -1,0 +1,6 @@
+{
+  "extends": "@terragon/tsconfig/base.json",
+  "compilerOptions": {
+    "noEmit": true
+  }
+}

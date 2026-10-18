@@ -308,6 +308,7 @@ pnpm -C apps/cli uninstall:dev
 - **`@terragon/bundled`**: Bundled scripts for deployment (includes daemon, mcp-server)
 - **`@terragon/env`**: Environment configuration management
 - **`@terragon/r2`**: Cloudflare R2 storage integration
+- **`@terragon/knowledge`**: Grounded knowledge claims — evidence pinning, drift detection, diff-based re-anchoring and reviewable ops keyed by page, claim and source revision
 - **`@terragon/dev-env`**: Docker development environment
 - **`@terragon/tsconfig`**: Shared TypeScript configuration
 - **`@terragon/mcp-server`**: Model Context Protocol server for follow-up task suggestions
