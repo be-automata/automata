@@ -1,0 +1,20 @@
+# Owned by a customer org admin.
+name: org-example
+extends: platform-default
+apt: [postgresql-client, redis-tools]
+npm: [typescript@5.8.3]
+batteries: [somnio-skills]
+skills: [github-ops]
+mcp:
+  knowledge:
+    type: http
+    url: https://kb.example.internal/mcp
+    headers: { X-Scope: org }
+env:
+  NODE_ENV: test
+  ANTHROPIC_API_KEY: { secret: ANTHROPIC_API_KEY }
+  DATABASE_URL: { secret: ORG_STAGING_DATABASE_URL }
+policy:
+  egress: allowlist
+  allowHosts: [registry.npmjs.org, github.com, api.anthropic.com]
+  maxRunMinutes: 60

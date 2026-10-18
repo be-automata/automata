@@ -1,0 +1,9 @@
+# Owned by Automata. Everything an org template extends.
+name: platform-default
+provider: docker
+batteries: [gstack-review]
+resources: { cpu: 2, memoryGb: 4, diskGb: 20 }
+policy:
+  egress: allowlist
+  allowHosts: [registry.npmjs.org, github.com, api.anthropic.com, pypi.org]
+  maxRunMinutes: 90

@@ -1,0 +1,14 @@
+# A per-scope persistent agent box. Secrets are names only; the control plane injects values at boot.
+name: scope-agent
+provider: docker
+batteries: [gstack-review]
+init: true
+env:
+  AGENT_ROLE: support-digest
+  ANTHROPIC_API_KEY: { secret: ANTHROPIC_API_KEY }
+  DATABASE_URL: { secret: ORG_STAGING_DATABASE_URL }
+resources: { cpu: 1, memoryGb: 1 }
+policy:
+  egress: allowlist
+  allowHosts: [api.anthropic.com]
+  maxRunMinutes: 60

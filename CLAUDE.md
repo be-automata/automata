@@ -1,5 +1,7 @@
 @AGENTS.md
 
+- **Spike findings for automata-platform** (implementation patterns, constraints, gotchas for knowledge claims, box templates, persistent agents, Agent Forge) → `Skill("spike-findings-automata-platform")`
+
 ## Design System
 Read DESIGN.md before visual or UI work: it defines the fonts, colors, spacing, and
 aesthetic direction. Ask the user before departing from it. When reviewing or QA-ing
