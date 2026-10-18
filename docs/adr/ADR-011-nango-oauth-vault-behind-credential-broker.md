@@ -179,6 +179,29 @@ token injected. It cannot run on the control plane itself: the control plane is 
    from the control plane (e.g. behind a tunnel with service-token auth), never on an open port.
    Per secondary sources (pending NVD / GitHub advisory), CVE-2026-9317 is an unauthenticated RCE on the runner port: reachability
    alone is the threat, no key needed.
+10. **Tenancy: Nango is one shared store; Automata is the tenant boundary.** Nango organises
+    tenants but does not isolate them:
+
+    - A connection carries an id we choose and `tags`, `end_user` and `metadata` fields; the spike's responses carried `"end_user":null,"tags":{}`.
+    - Each org-owned OAuth app can be its own integration or a per-connection `config_override`.
+    - Environments separate dev from prod, not one customer from another.
+
+    No Nango key can be limited to one tenant. Keys are scoped by permission, never by connection
+    or integration, and the spike's environment key listed every connection on both self-hosted and
+    Cloud. Nango returns whatever connection it is asked for, and the proxy's `Base-Url-Override`
+    can send any tenant's token anywhere (spike tables below). So one wrong `connection_id` in the
+    control plane is a cross-tenant leak.
+
+    Isolation therefore stays where it is today:
+
+    - The org → connection mapping lives in our database, behind the ADR-001 org-scoped accessor.
+    - The connection id the control plane sends to Nango always comes from that accessor, for the org the run or request belongs to.
+    - It never comes from request input, a webhook payload, a Nango response or an agent (I6, I6a, I6g).
+    - Connection ids are org-prefixed and carry the org in `tags`. That is for audit and forensics only; it is never the authority.
+
+    Hard isolation inside Nango (one environment or account per customer, each with its own key)
+    is not adopted. Whether Cloud supports it, and at what cost, is unverified; revisit it only if a
+    customer contract requires vault-level separation.
 
 ## Deployment mode — decided: Nango Cloud (2026-10-18), exit proven by the Phase 1 spike
 
@@ -297,6 +320,14 @@ One integration per org-owned Slack app applies in either mode (see Consequences
   written to the engine in plaintext. _Guard:_ a payload test asserting the field is ciphertext
   and that unsealing with another box's key fails, plus a spawn test that no child argv contains
   it.
+- **I6g — The connection id always comes from the org-scoped accessor.** Every control-plane
+  call to Nango (`GET /connection`, proxy, import, delete) takes its `connection_id` and provider
+  config key from the ADR-001 org-scoped accessor, for the org of the run or request. Nothing
+  else may supply it. _Guard:_ the Nango client's call signature accepts only the accessor's
+  branded connection type, not a string (a compile-level test, as in ADR-006 #75). A
+  structural test asserts no call site builds a connection id from request, webhook or response
+  data. An endpoint test asserts that org A's run or request asking for org B's connection gets
+  403 and never reaches Nango.
 - **I7 — The GitHub App stays out of Nango.** Installation tokens are minted from the App key on
   the control plane. _Guard:_ review rule; I2's grep covers the planes.
 
