@@ -89,11 +89,14 @@ token injected. It cannot run on the control plane itself: the control plane is 
    integration or connection (Nango "API keys" docs), so any key that can read credentials reads
    every connection in its environment.
 
-   **There is one control-plane key, and every scope it holds reads credentials.** The Phase 1 spike showed:
+   **There is one control-plane key, and every scope it holds reads credentials.**
 
-   - `read_credentials` returns the token directly.
-   - `proxy` can send any token to any host through `Base-Url-Override`.
-   - `connections:create` gets the token back in the import response.
+   - `read_credentials` returns the token directly. That is its documented purpose (`GET /connection`).
+   - `proxy` can send any token to any host through `Base-Url-Override`. Proven in the spike, on self-hosted and Cloud.
+   - `connections:create` gets the token back in the import response. Proven in the spike, on Cloud.
+
+   Both proven rows were run with a full-access environment key. Whether a key holding only the
+   four scopes below is refused everything else is spike check 3, which is still open.
 
    Scoping therefore limits which operations the key can perform, never what it can read, so the
    key is treated as an environment-wide god key whatever its scopes. It holds exactly
@@ -237,7 +240,9 @@ and its encryption key cannot be rotated. Before this ADR is Accepted, the spike
    via `POST /connections` and work there (export out of Cloud is not documented).
 2. **Slack import dry-run:** one workspace's bot token imports and posts; whether the user token
    and event routing survive decides import vs re-consent per workspace (Decision §7).
-3. **Key scope:** a key with only `read_credentials` + `proxy` cannot list or create connections.
+3. **Key scope:** the exact key Decision §2 adopts (`connections:read_credentials`, `proxy`,
+   `connections:create`, `connections:delete`) is refused (403) on `GET /connections` (list) and
+   on every `list_credentials` route, and still succeeds on the four operations it holds.
 4. Latency of `GET /connection/{id}` from a Worker, and 424/timeout behaviour under a revoked
    grant (I4).
 5. The number of production Slack installations (operator query).
@@ -262,17 +267,17 @@ Ran against a throwaway self-hosted `nangohq/nango-server:hosted-0.71.13` (serve
 
 Ran against Nango Cloud (`api.nango.dev`) with a dev-environment key and a throwaway `slack` integration using fake credentials. Every object the spike created was deleted afterwards, and the environment returned to its starting state (1 integration, 1 connection, neither touched).
 
-| Check                                       | Result                                                                                                                                                                                                           |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Import a bot token with `team.id` (check 2) | 201. The import response **echoes the token**, so `environment:connections:create` also reads credentials back.                                                                                                  |
-| `raw.authed_user` import (check 2)          | 400 `unrecognized_keys: "raw"`, same as self-hosted.                                                                                                                                                             |
-| Exit, Cloud to self-hosted (check 1)        | **Proven.** `GET /connection` on Cloud, reshaped into the `POST /connections` body and imported into a self-hosted 0.71.13 instance, gave a byte-identical token (sha256 match) with `connection_config` intact. |
-| Refresh failure (check 4, I4)               | Same as self-hosted: `invalid_credentials` on refresh failure, then an immediate "Backing off" answer.                                                                                                           |
-| **Proxy `Base-Url-Override`**               | **Also leaks on Cloud.** httpbin received `Authorization: Bearer <the connection's token>`.                                                                                                                      |
-| `GET /connection` latency (check 4)         | From the operator's laptop: p50 525 ms, p95 740 ms, max 7.8 s. Not yet measured from a Worker. The broker caches tokens until `expiresAt`, so this is paid once per token lifetime, not per request.             |
-| Rate limit                                  | `x-ratelimit-limit: 200` per window on this plan. Caching keeps the broker far below that.                                                                                                                       |
-| Key scope (check 3)                         | **Still open.** Creating a custom-scope key needs the dashboard or an account key; the spike had an environment key with full access.                                                                            |
-| Real Slack workspace (check 2)              | **Still open.** Needs a test workspace.                                                                                                                                                                          |
+| Check                                       | Result                                                                                                                                                                                                                                                                 |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Import a bot token with `team.id` (check 2) | 201. The import response **echoes the token**, so `environment:connections:create` also reads credentials back.                                                                                                                                                        |
+| `raw.authed_user` import (check 2)          | 400 `unrecognized_keys: "raw"`, same as self-hosted.                                                                                                                                                                                                                   |
+| Exit, Cloud to self-hosted (check 1)        | **Proven.** `GET /connection` on Cloud, reshaped into the `POST /connections` body and imported into a self-hosted 0.71.13 instance, gave a byte-identical token (sha256 match) with `connection_config` intact.                                                       |
+| Refresh failure (check 4, I4)               | Same as self-hosted: `invalid_credentials` on refresh failure, then an immediate "Backing off" answer.                                                                                                                                                                 |
+| **Proxy `Base-Url-Override`**               | **Also leaks on Cloud.** httpbin received `Authorization: Bearer <the connection's token>`.                                                                                                                                                                            |
+| `GET /connection` latency (check 4)         | From the operator's laptop: p50 525 ms, p95 740 ms, max 7.8 s. Not yet measured from a Worker. The broker caches tokens until `expiresAt`, so this is paid once per token lifetime, not per request.                                                                   |
+| Rate limit                                  | `x-ratelimit-limit: 200` per window on this plan. Caching keeps the broker far below that.                                                                                                                                                                             |
+| Key scope (check 3)                         | **Still open.** It needs a custom key with exactly the four Decision §2 scopes, created in the dashboard or with an account key; the spike had only a full-access environment key. Pass: list and `list_credentials` return 403, and the four held operations succeed. |
+| Real Slack workspace (check 2)              | **Still open.** Needs a test workspace.                                                                                                                                                                                                                                |
 
 **Consequence of the proxy rows (binding on Decision §2):** a key with the `proxy` scope can send any connection's token to any host, so in practice `proxy` is as strong as `read_credentials`. When the control plane uses Nango's proxy, it builds every Nango header itself. It never forwards a header, path or base URL that came from an agent, a webhook or user input, and it never sends `Base-Url-Override`. _Guard:_ a unit test that the control-plane Nango client drops any `Base-Url-Override` it is handed, and that its proxy path is a constant per call site.
 
