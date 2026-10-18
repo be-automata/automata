@@ -182,7 +182,15 @@ export function resolve(root: string, uri: string): Resolved {
   if (scheme === "ticket") {
     const p = sourceFile(root, "tickets", `${target}.json`, uri);
     if (!p) return { missing: "ticket deleted", code: "gone" };
-    let v: unknown = JSON.parse(readFileSync(p, "utf8"));
+    let v: unknown;
+    try {
+      v = JSON.parse(readFileSync(p, "utf8"));
+    } catch (e) {
+      // One unreadable ticket loses that piece of evidence, not the whole page.
+      if (e instanceof SyntaxError)
+        return { missing: "ticket is not valid JSON", code: "gone" };
+      throw e;
+    }
     // RFC 6901: own properties only (never `constructor` off the prototype), with ~1 and ~0 decoded.
     for (const raw of anchor.replace(/^\//, "").split("/")) {
       const key = raw.replace(/~1/g, "/").replace(/~0/g, "~");
@@ -305,6 +313,8 @@ const holds = (k: EvidenceStatus["kind"]) => k === "fresh" || k === "relocated";
  * because no change can be trusted while the claim's own location is unknown.
  */
 function claimStatus(kinds: EvidenceStatus["kind"][]): ClaimStatus {
+  // A claim with no evidence (a hand-built sidecar) grounds nothing: review it, never retract it.
+  if (kinds.length === 0) return "degraded";
   if (kinds.every((k) => k === "missing")) return "missing";
   if (kinds.includes("missing")) return "degraded";
   if (kinds.includes("ambiguous")) return "ambiguous";
@@ -400,6 +410,8 @@ export interface DraftOp {
   evidence: string[];
   /** For update/reverify: the evidence URIs to pin when the op is applied. */
   newEvidence?: string[];
+  /** Fingerprint of each newEvidence span when proposed: applyDraft refuses the op once the source moves on. */
+  newEvidenceHash?: string[];
   /** Re-anchor similarity behind an update (1 = located by the diff alone). */
   score?: number;
 }
@@ -490,6 +502,9 @@ function inDiffContext(
   );
 }
 
+/** Widest line span an updater may choose: wider overrides would make the window scan quadratic. */
+const MAX_OVERRIDE_LINES = 200;
+
 /** An updater may tighten evidence, but only onto spans that exist and are unique in their source. */
 function acceptableEvidence(
   root: string,
@@ -499,6 +514,11 @@ function acceptableEvidence(
   if (uris.length !== expected) return false;
   return uris.every((uri) => {
     try {
+      const { scheme, anchor } = parseUri(uri);
+      if (scheme === "repo") {
+        const [a, b] = lineAnchor(uri, anchor);
+        if (b - a + 1 > MAX_OVERRIDE_LINES) return false;
+      }
       const r = resolve(root, uri);
       if (!("text" in r)) return false;
       const spans = spansWithHash(root, uri, fingerprint(r.text));
@@ -594,7 +614,12 @@ export function retargetOp(
     why,
     ...(OP_KINDS[kind].keepsProposal
       ? {}
-      : { after: undefined, newEvidence: undefined, score: undefined }),
+      : {
+          after: undefined,
+          newEvidence: undefined,
+          newEvidenceHash: undefined,
+          score: undefined,
+        }),
   };
 }
 
@@ -676,6 +701,14 @@ export function reconcile(
       const w = asked.get(u.id);
       if (!w) continue; // unknown or already-answered id: an updater answers each claim at most once
       asked.delete(u.id);
+      if (!isUsableAnswer(u)) {
+        add({
+          ...baseOf(w.claim, w.evidence),
+          op: "review",
+          why: "the updater returned an empty or malformed rewrite: a human must review this fact",
+        });
+        continue;
+      }
       if (
         u.evidence !== undefined &&
         !acceptableEvidence(root, u.evidence, w.newEvidence.length)
@@ -687,12 +720,14 @@ export function reconcile(
         });
         continue;
       }
+      const newEvidence = u.evidence ?? w.newEvidence;
       add({
         ...baseOf(w.claim, w.evidence),
         op: "update",
         after: u.statement,
         why: "all sources changed consistently",
-        newEvidence: u.evidence ?? w.newEvidence,
+        newEvidence,
+        newEvidenceHash: newEvidence.map((uri) => pin(root, uri).hash),
         score: w.reanchorScore,
       });
     }
@@ -709,6 +744,20 @@ export function reconcile(
     ops,
     llmCalls: llm.calls - before,
   };
+}
+
+/** Updater answers are model output: a usable one has a non-blank statement and, if any, string evidence. */
+function isUsableAnswer(u: UpdateResult): boolean {
+  const { statement, evidence } = u as {
+    statement: unknown;
+    evidence: unknown;
+  };
+  return (
+    typeof statement === "string" &&
+    statement.trim() !== "" &&
+    (evidence === undefined ||
+      (Array.isArray(evidence) && evidence.every((e) => typeof e === "string")))
+  );
 }
 
 /** Deterministic stand-in for the model: rewrites numbers in the statement from the new evidence. */
@@ -742,11 +791,22 @@ export function generateSidecar(
   return {
     page,
     pageVersion: sha(pageMd),
-    claims: seed.map((c) => ({
-      ...c,
-      evidence: c.evidence.map((u) => pin(root, u)),
-    })),
+    claims: seed.map((c) => {
+      if (c.evidence.length === 0) throw new UngroundedClaimError(c.id);
+      return { ...c, evidence: c.evidence.map((u) => pin(root, u)) };
+    }),
   };
+}
+
+export class UngroundedClaimError extends Error {
+  readonly claimId: string;
+  constructor(claimId: string) {
+    super(
+      `claim ${claimId} has no evidence: every claim must pin at least one source span`,
+    );
+    this.name = "UngroundedClaimError";
+    this.claimId = claimId;
+  }
 }
 
 export class HumanEditedPageError extends Error {
@@ -865,19 +925,26 @@ export function applyDraft(
       });
       continue;
     }
-    // update / reverify: a located proposal is required.
-    if (op.after === undefined || !op.newEvidence?.length)
+    // update / reverify: a located proposal is required, still grounded on the text it was built from.
+    const { after, newEvidence = [], newEvidenceHash = [] } = op;
+    if (
+      after === undefined ||
+      newEvidence.length !== c.evidence.length ||
+      newEvidenceHash.length !== newEvidence.length
+    )
       throw new UnappliableOpError(
         op.id,
-        "an update needs a proposed statement and located evidence",
+        "an update needs a proposed statement and one located, fingerprinted span per evidence pin",
       );
-    if (op.after !== c.statement)
-      md = replaceStatement(md, c.statement, op.after, op.id);
-    claims.push({
-      id: c.id,
-      statement: op.after,
-      evidence: op.newEvidence.map((uri) => pin(root, uri)),
-    });
+    const evidence = newEvidence.map((uri) => pin(root, uri));
+    if (evidence.some((e, j) => e.hash !== newEvidenceHash[j]))
+      throw new UnappliableOpError(
+        op.id,
+        "the proposed evidence changed since the proposal was made: reconcile again",
+      );
+    if (after !== c.statement)
+      md = replaceStatement(md, c.statement, after, op.id);
+    claims.push({ id: c.id, statement: after, evidence });
   }
   // A human-edited page keeps its human version marker: repins never "launder" the human edit.
   return {

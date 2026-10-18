@@ -11,6 +11,7 @@ import {
   AmbiguousEvidenceError,
   applyDraft,
   checkPage,
+  generateSidecar,
   HumanEditedPageError,
   InvalidEvidenceUriError,
   reconcile,
@@ -18,6 +19,7 @@ import {
   retargetOp,
   stubUpdater,
   UnappliableOpError,
+  UngroundedClaimError,
   type Updater,
   type UpdateRequest,
 } from "./claims.ts";
@@ -262,6 +264,45 @@ describe("updater answers are validated", () => {
     );
   });
 
+  it.each([
+    ["an empty statement", { statement: "  " }],
+    ["a non-string statement", { statement: 42 }],
+    ["string evidence", { statement: "Fixed in 2.4.2.", evidence: "repo://x" }],
+  ])("%s from the updater becomes a review", (_name, answer) => {
+    const { root, sc } = corpus();
+    edit(root, "tickets/SUP-12.json", (s) => s.replace('"2.4.1"', '"2.4.2"'));
+    // Model output is untyped at runtime: the cast stands in for a malformed JSON answer.
+    const llm = {
+      calls: 0,
+      rework: (items: UpdateRequest[]) =>
+        items.map((i) => ({ id: i.claim.id, ...answer })),
+    } as unknown as Updater;
+    const draft = reconcile(root, pageOf(root), sc, llm, { sourceRev: SHA });
+    expect(draft.ops.find((o) => o.claimId === "sso-fixed-in")?.op).toBe(
+      "review",
+    );
+  });
+
+  it("an evidence override wider than 200 lines becomes a review", () => {
+    const { root, sc } = corpus();
+    const big = Array.from(
+      { length: 250 },
+      (_, i) => `export const K${i} = ${i};`,
+    );
+    writeFileSync(join(root, "repo/big.ts"), `${big.join("\n")}\n`);
+    edit(root, "tickets/SUP-12.json", (s) => s.replace('"2.4.1"', '"2.4.2"'));
+    const at = (n: number) =>
+      reconcile(
+        root,
+        pageOf(root),
+        sc,
+        answering("Fixed in 2.4.2.", [`repo://big.ts#L1-L${n}`]),
+        { sourceRev: SHA },
+      ).ops.find((o) => o.claimId === "sso-fixed-in")?.op;
+    expect(at(200)).toBe("update");
+    expect(at(201)).toBe("review");
+  });
+
   it("an evidence override onto an ambiguous span becomes a review", () => {
     const { root, sc } = corpus();
     edit(root, "repo/billing.ts", (s) => `${s}export const TRIAL_DAYS = 14;\n`);
@@ -350,6 +391,34 @@ describe("applyDraft never trusts the draft", () => {
     ).toThrow(UnappliableOpError);
   });
 
+  it("an approved update whose evidence changed after reconcile is refused", () => {
+    const { root, sc, md, draft } = ticketDraft();
+    edit(root, "tickets/SUP-12.json", (s) => s.replace('"2.4.2"', '"2.4.3"'));
+    expect(() =>
+      applyDraft(
+        root,
+        md,
+        sc,
+        draft,
+        draft.ops.map((o) => o.id),
+      ),
+    ).toThrow(/changed since the proposal/);
+  });
+
+  it("an approved update with no fingerprints (hand-built) is refused", () => {
+    const { root, sc, md, draft } = ticketDraft();
+    const ops = draft.ops.map((o) => ({ ...o, newEvidenceHash: undefined }));
+    expect(() =>
+      applyDraft(
+        root,
+        md,
+        sc,
+        { ...draft, ops },
+        ops.map((o) => o.id),
+      ),
+    ).toThrow(UnappliableOpError);
+  });
+
   it("a statement that occurs twice on the page is never rewritten", () => {
     const { root, sc, draft } = ticketDraft();
     const md = `${pageOf(root)}\nThe SSO loop was fixed in version 2.4.1.\n`;
@@ -412,6 +481,14 @@ describe("ticket JSON pointers", () => {
     });
   });
 
+  it("a ticket that is not valid JSON is missing evidence, not a crash", () => {
+    const { root } = corpus();
+    writeFileSync(join(root, "tickets/SUP-12.json"), "{ not json");
+    expect(resolve(root, "ticket://SUP-12#/resolution/fixedIn")).toMatchObject({
+      code: "gone",
+    });
+  });
+
   it("decode ~1 and ~0", () => {
     const { root } = corpus();
     writeFileSync(
@@ -421,6 +498,33 @@ describe("ticket JSON pointers", () => {
     expect(resolve(root, "ticket://SUP-13#/a~1b/c~0d")).toEqual({
       text: "escaped",
     });
+  });
+});
+
+describe("claims without evidence", () => {
+  it("are refused at seed time", () => {
+    const { root } = corpus();
+    expect(() =>
+      generateSidecar(root, "p", "x", [
+        { id: "c", statement: "x", evidence: [] },
+      ]),
+    ).toThrow(UngroundedClaimError);
+  });
+
+  it("in a hand-built sidecar become a review, never a retract", () => {
+    const { root, sc } = corpus();
+    const bare = {
+      ...sc,
+      claims: sc.claims.map((c) =>
+        c.id === "seat-price" ? { ...c, evidence: [] } : c,
+      ),
+    };
+    const draft = reconcile(root, pageOf(root), bare, stubUpdater(), {
+      sourceRev: SHA,
+    });
+    expect(draft.ops.find((o) => o.claimId === "seat-price")?.op).toBe(
+      "review",
+    );
   });
 });
 
