@@ -6,7 +6,7 @@ import {
   reanchorSpan,
   similarity,
   type Hunk,
-} from "./reanchor.ts";
+} from "./reanchor";
 
 const hunk = (
   oldStart: number,

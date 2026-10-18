@@ -18,8 +18,8 @@ import {
   type ReconcileDiff,
   type Sidecar,
   type Updater,
-} from "./claims.ts";
-import { parseHunks } from "./reanchor.ts";
+} from "./claims";
+import { parseHunks } from "./reanchor";
 
 export const PAGE = "billing-faq";
 /** A full source commit for op keys in tests. */

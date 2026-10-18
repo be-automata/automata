@@ -6,7 +6,7 @@ import {
   opKeyMatchesCommit,
   parseOpKey,
   WORKING_REV,
-} from "./op-key.ts";
+} from "./op-key";
 
 const SHA_A = "007a8a0bbf458c93734580a569d9f56cd34ab8dd";
 const SHA_B = "460cdd27e59f8d965d85996ea1c27e498e069e9a";

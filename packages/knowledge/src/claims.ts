@@ -9,8 +9,8 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 
-import { assertOpKeyPart, opKey, parseOpKey } from "./op-key.ts";
-import { reanchorSpan, type Hunk, type LineSpan } from "./reanchor.ts";
+import { assertOpKeyPart, opKey, parseOpKey } from "./op-key";
+import { reanchorSpan, type Hunk, type LineSpan } from "./reanchor";
 
 export interface EvidencePin {
   uri: string;
@@ -368,8 +368,11 @@ export interface UpdateResult {
 }
 export interface Updater {
   calls: number;
-  /** One batched model call with ONLY the claims whose sources changed coherently. */
-  rework(claims: UpdateRequest[]): UpdateResult[];
+  /**
+   * One batched model call with ONLY the claims whose sources changed coherently. A real model client is
+   * async; a deterministic stand-in may answer synchronously.
+   */
+  rework(claims: UpdateRequest[]): Promise<UpdateResult[]> | UpdateResult[];
 }
 /** "add" and "reverify" are produced by callers (incremental seeding, unchanged-fact re-pins), not by reconcile. */
 export type DraftOpKind =
@@ -624,13 +627,13 @@ export function retargetOp(
   };
 }
 
-export function reconcile(
+export async function reconcile(
   root: string,
   pageMd: string,
   sc: Sidecar,
   llm: Updater,
   options: ReconcileOptions = {},
-): Draft {
+): Promise<Draft> {
   const report = checkPage(root, pageMd, sc);
   const before = llm.calls;
   const ops: DraftOp[] = [];
@@ -698,7 +701,7 @@ export function reconcile(
   });
   if (needWork.length > 0) {
     const asked = new Map(needWork.map((w) => [w.claim.id, w]));
-    for (const u of llm.rework(needWork)) {
+    for (const u of await llm.rework(needWork)) {
       const w = asked.get(u.id);
       if (!w) continue; // unknown or already-answered id: an updater answers each claim at most once
       asked.delete(u.id);
@@ -845,20 +848,31 @@ export class UnappliableOpError extends Error {
   }
 }
 
-/** Replace the claim's one occurrence on the page; a statement that occurs twice names no single place. */
+/**
+ * Replace the claim's one occurrence on the page. Matching is whitespace-tolerant, the same rule checkPage
+ * uses to decide the claim is still on the page (a re-wrapped sentence is the same sentence); a statement
+ * that occurs twice names no single place.
+ */
 function replaceStatement(md: string, from: string, to: string, opId: string) {
-  const at = md.indexOf(from);
-  if (at === -1)
+  const words = norm(from).split(" ").filter(Boolean);
+  const pattern = new RegExp(
+    words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+"),
+    "g",
+  );
+  const [first, second] = words.length ? md.matchAll(pattern) : [];
+  if (!first)
     throw new UnappliableOpError(
       opId,
       "the claim's statement is not on the page",
     );
-  if (md.indexOf(from, at + 1) !== -1)
+  if (second)
     throw new UnappliableOpError(
       opId,
       "the claim's statement occurs more than once on the page: a human must apply this edit",
     );
-  return md.slice(0, at) + to + md.slice(at + from.length);
+  return (
+    md.slice(0, first.index) + to + md.slice(first.index + first[0].length)
+  );
 }
 
 /** Re-pin without a proposal: only a pin that relocated or still holds may be kept; anything else is a guess. */

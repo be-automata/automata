@@ -15,8 +15,8 @@ import {
   type Draft,
   type Sidecar,
   type UpdateRequest,
-} from "./claims.ts";
-import { parseOpKey } from "./op-key.ts";
+} from "./claims";
+import { parseOpKey } from "./op-key";
 import {
   BILLING_LINES,
   countingUpdater,
@@ -28,7 +28,7 @@ import {
   SOURCE_SHA,
   useCorpus,
   writeBilling,
-} from "./test-fixtures.ts";
+} from "./test-fixtures";
 
 const statuses = (root: string, sc: Sidecar) =>
   Object.fromEntries(
@@ -221,58 +221,61 @@ const SCENARIOS: Scenario[] = [
 ];
 
 describe("regression scenarios", () => {
-  it.each(SCENARIOS.map((s) => [s.name, s] as const))("%s", (_name, s) => {
-    const { root, sc } = useCorpus();
-    s.mutate(root);
-    const md = pageOf(root);
-    expect(statuses(root, sc)).toEqual(s.expect);
-    const draft = reconcile(root, md, sc, stubUpdater(), {
-      sourceRev: SOURCE_SHA,
-    });
-    expect(draft.llmCalls).toBe(s.llmCalls);
-    if (s.mode) expect(draft.mode).toBe(s.mode);
-    for (const [id, want] of Object.entries(s.statement ?? {})) {
-      expect(
-        draft.ops.find((o) => o.claimId === id && o.op === "update")?.after,
-      ).toBe(want);
-    }
-    const approve = draft.ops
-      .filter((o) => o.op === "update" || o.op === "retract")
-      .map((o) => o.id);
-    if (draft.mode === "apply") {
-      // No approvals: only repins may change anything, and never the page text.
-      expect(applyDraft(root, md, sc, draft).md).toBe(md);
-      const out = applyDraft(root, md, sc, draft, approve);
-      // Idempotence: after applying, a re-check needs no repins/updates and zero model calls.
-      const again = reconcile(root, out.md, out.sc, stubUpdater(), {
+  it.each(SCENARIOS.map((s) => [s.name, s] as const))(
+    "%s",
+    async (_name, s) => {
+      const { root, sc } = useCorpus();
+      s.mutate(root);
+      const md = pageOf(root);
+      expect(statuses(root, sc)).toEqual(s.expect);
+      const draft = await reconcile(root, md, sc, stubUpdater(), {
         sourceRev: SOURCE_SHA,
       });
-      expect(
-        again.ops.filter((o) => o.op === "repin" || o.op === "update"),
-      ).toEqual([]);
-      expect(again.llmCalls).toBe(0);
-    } else {
-      // Human text must survive byte-for-byte: propose mode never rewrites the page.
-      if (draft.ops.some((o) => !o.auto)) {
-        expect(() =>
-          applyDraft(
-            root,
-            md,
-            sc,
-            draft,
-            draft.ops.filter((o) => !o.auto).map((o) => o.id),
-          ),
-        ).toThrow(HumanEditedPageError);
+      expect(draft.llmCalls).toBe(s.llmCalls);
+      if (s.mode) expect(draft.mode).toBe(s.mode);
+      for (const [id, want] of Object.entries(s.statement ?? {})) {
+        expect(
+          draft.ops.find((o) => o.claimId === id && o.op === "update")?.after,
+        ).toBe(want);
       }
-      const repinOnly = applyDraft(root, md, sc, draft);
-      expect(repinOnly.md).toBe(md);
-      expect(repinOnly.sc.pageVersion).toBe(sc.pageVersion);
-    }
-  });
+      const approve = draft.ops
+        .filter((o) => o.op === "update" || o.op === "retract")
+        .map((o) => o.id);
+      if (draft.mode === "apply") {
+        // No approvals: only repins may change anything, and never the page text.
+        expect(applyDraft(root, md, sc, draft).md).toBe(md);
+        const out = applyDraft(root, md, sc, draft, approve);
+        // Idempotence: after applying, a re-check needs no repins/updates and zero model calls.
+        const again = await reconcile(root, out.md, out.sc, stubUpdater(), {
+          sourceRev: SOURCE_SHA,
+        });
+        expect(
+          again.ops.filter((o) => o.op === "repin" || o.op === "update"),
+        ).toEqual([]);
+        expect(again.llmCalls).toBe(0);
+      } else {
+        // Human text must survive byte-for-byte: propose mode never rewrites the page.
+        if (draft.ops.some((o) => !o.auto)) {
+          expect(() =>
+            applyDraft(
+              root,
+              md,
+              sc,
+              draft,
+              draft.ops.filter((o) => !o.auto).map((o) => o.id),
+            ),
+          ).toThrow(HumanEditedPageError);
+        }
+        const repinOnly = applyDraft(root, md, sc, draft);
+        expect(repinOnly.md).toBe(md);
+        expect(repinOnly.sc.pageVersion).toBe(sc.pageVersion);
+      }
+    },
+  );
 });
 
 describe("D-1: ambiguous evidence", () => {
-  it("emits exactly one review op listing every candidate span, and never calls the updater", () => {
+  it("emits exactly one review op listing every candidate span, and never calls the updater", async () => {
     const { root, sc } = useCorpus();
     edit(root, "repo/billing.ts", duplicateTrial);
     const seen: UpdateRequest[][] = [];
@@ -280,7 +283,7 @@ describe("D-1: ambiguous evidence", () => {
       ...stubUpdater(),
       rework: (items: UpdateRequest[]) => (seen.push(items), []),
     };
-    const draft = reconcile(root, pageOf(root), sc, llm, {
+    const draft = await reconcile(root, pageOf(root), sc, llm, {
       sourceRev: SOURCE_SHA,
     });
     const ops = draft.ops.filter((o) => o.claimId === "trial-length");
@@ -292,11 +295,11 @@ describe("D-1: ambiguous evidence", () => {
     expect(seen.flat().map((i) => i.claim.id)).not.toContain("trial-length");
   });
 
-  it("leaves the claim byte-identical when every op is approved", () => {
+  it("leaves the claim byte-identical when every op is approved", async () => {
     const { root, sc } = useCorpus();
     edit(root, "repo/billing.ts", duplicateTrial);
     const md = pageOf(root);
-    const draft = reconcile(root, md, sc, stubUpdater(), {
+    const draft = await reconcile(root, md, sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
     });
     const out = applyDraft(
@@ -312,11 +315,11 @@ describe("D-1: ambiguous evidence", () => {
     );
   });
 
-  it("refuses an approved text change even when the op was retargeted to update", () => {
+  it("refuses an approved text change even when the op was retargeted to update", async () => {
     const { root, sc } = useCorpus();
     edit(root, "repo/billing.ts", duplicateTrial);
     const md = pageOf(root);
-    const draft = reconcile(root, md, sc, stubUpdater(), {
+    const draft = await reconcile(root, md, sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
     });
     const ops = draft.ops.map((o) =>
@@ -338,7 +341,7 @@ describe("D-1: ambiguous evidence", () => {
     ).toThrow(AmbiguousEvidenceError);
   });
 
-  it("keeps missing and degraded ahead of ambiguous", () => {
+  it("keeps missing and degraded ahead of ambiguous", async () => {
     const { root, sc } = useCorpus();
     edit(root, "repo/billing.ts", duplicateTrial);
     edit(root, "docs/pricing.md", (s) =>
@@ -350,7 +353,7 @@ describe("D-1: ambiguous evidence", () => {
     expect(statuses(root, sc)["trial-length"]).toBe("degraded");
   });
 
-  it("counts two doc sections with the same heading slug as ambiguous", () => {
+  it("counts two doc sections with the same heading slug as ambiguous", async () => {
     const { root, sc } = useCorpus();
     // The pinned "#trial" heading is renamed, and a second identical "Free trial" section is appended:
     // both sections hash like the pin and render as the same URI, but they are two places.
@@ -377,18 +380,18 @@ describe("D-1: ambiguous evidence", () => {
 describe("D-2: re-anchoring is enforced inside reconcile", () => {
   const TAIL = BILLING_LINES.slice(3);
 
-  function withDiff(now: string[], header: string) {
+  async function withDiff(now: string[], header: string) {
     const { root, sc } = useCorpus();
     writeBilling(root, now);
     const { llm, seen } = countingUpdater();
-    const draft = reconcile(root, pageOf(root), sc, llm, {
+    const draft = await reconcile(root, pageOf(root), sc, llm, {
       sourceRev: SOURCE_SHA,
       diff: diffOf(now, header),
     });
     return { draft, seen };
   }
 
-  it("re-anchors a fused insert+edit to the edited line and pins the new span on apply", () => {
+  it("re-anchors a fused insert+edit to the edited line and pins the new span on apply", async () => {
     // One hunk inserts a new constant and edits the seat price: -2 +2,2.
     const now = [
       "export const TRIAL_DAYS = 14;",
@@ -397,7 +400,7 @@ describe("D-2: re-anchoring is enforced inside reconcile", () => {
       "export const MAX_SEATS_FREE = 3;",
       ...TAIL,
     ];
-    const { draft, seen } = withDiff(now, "@@ -2 +2,2 @@");
+    const { draft, seen } = await withDiff(now, "@@ -2 +2,2 @@");
     expect(seen).toContain("seat-price");
     // The updater reads the re-anchored span (35 / 3), not the old L2-L3 (20 / 35).
     expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
@@ -407,23 +410,23 @@ describe("D-2: re-anchoring is enforced inside reconcile", () => {
     });
   });
 
-  it("turns a below-floor match into a review without calling the model", () => {
+  it("turns a below-floor match into a review without calling the model", async () => {
     const now = [
       "export const TRIAL_DAYS = 14;",
       "// pricing moved to the billing service",
       "export const MAX_SEATS_FREE = 3;",
       ...TAIL,
     ];
-    const { draft, seen } = withDiff(now, "@@ -2 +2 @@");
+    const { draft, seen } = await withDiff(now, "@@ -2 +2 @@");
     expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
       op: "review",
     });
     expect(seen).not.toContain("seat-price");
   });
 
-  it("turns a span the diff deleted into a retract", () => {
+  it("turns a span the diff deleted into a retract", async () => {
     const now = ["export const TRIAL_DAYS = 14;", ...TAIL];
-    const { draft } = withDiff(now, "@@ -2,2 +1,0 @@");
+    const { draft } = await withDiff(now, "@@ -2,2 +1,0 @@");
     expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
       op: "retract",
       why: "the merge deleted every span this fact was grounded on",
@@ -432,12 +435,12 @@ describe("D-2: re-anchoring is enforced inside reconcile", () => {
 });
 
 describe("D-4: op ids", () => {
-  it("binds every op id to page, claim and source revision", () => {
+  it("binds every op id to page, claim and source revision", async () => {
     const { root, sc } = useCorpus();
     edit(root, "repo/billing.ts", (s) =>
       s.replace("TRIAL_DAYS = 14", "TRIAL_DAYS = 30"),
     );
-    const draft = reconcile(root, pageOf(root), sc, stubUpdater(), {
+    const draft = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
     });
     for (const o of draft.ops)
@@ -449,15 +452,15 @@ describe("D-4: op ids", () => {
       });
   });
 
-  it("gives the same change different ids at different source revisions", () => {
+  it("gives the same change different ids at different source revisions", async () => {
     const { root, sc } = useCorpus();
     edit(root, "repo/billing.ts", (s) =>
       s.replace("TRIAL_DAYS = 14", "TRIAL_DAYS = 30"),
     );
-    const a = reconcile(root, pageOf(root), sc, stubUpdater(), {
+    const a = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
     });
-    const b = reconcile(root, pageOf(root), sc, stubUpdater(), {
+    const b = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: "460cdd27e59f8d965d85996ea1c27e498e069e9a",
     });
     expect(a.ops.map((o) => o.id)).not.toEqual(b.ops.map((o) => o.id));
@@ -472,7 +475,7 @@ describe("D-4: op ids", () => {
     ).toEqual(applyDraft(root, pageOf(root), sc, b).sc.claims);
   });
 
-  it("retargetOp keeps page, claim and revision and drops the proposed text for non-text ops", () => {
+  it("retargetOp keeps page, claim and revision and drops the proposed text for non-text ops", async () => {
     const { root, sc } = useCorpus();
     edit(root, "repo/billing.ts", (s) =>
       s.replace("TRIAL_DAYS = 14", "TRIAL_DAYS = 30"),
@@ -480,7 +483,7 @@ describe("D-4: op ids", () => {
     edit(root, "docs/pricing.md", (s) =>
       s.replace("14-day free trial", "30-day free trial"),
     );
-    const draft = reconcile(root, pageOf(root), sc, stubUpdater(), {
+    const draft = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
     });
     const update = draft.ops.find((o) => o.op === "update");
