@@ -1,0 +1,9 @@
+{
+  "id": "SUP-12",
+  "title": "SSO login loops back to the sign-in page",
+  "status": "resolved",
+  "resolution": {
+    "workaround": "Clear the ag_session cookie, then sign in again",
+    "fixedIn": "2.4.1"
+  }
+}

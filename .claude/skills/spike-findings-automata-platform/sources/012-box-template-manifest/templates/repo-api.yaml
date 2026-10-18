@@ -1,0 +1,7 @@
+# Owned by a repo team, inside the org's envelope.
+name: repo-api
+extends: org-example
+npm: [prisma@6.1.0]
+setup: pnpm install --frozen-lockfile
+resources: { memoryGb: 8 }
+policy: { maxRunMinutes: 45 }

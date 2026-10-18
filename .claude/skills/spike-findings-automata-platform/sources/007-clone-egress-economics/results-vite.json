@@ -1,0 +1,118 @@
+{
+  "label": "vite",
+  "sparseDir": "packages/vite",
+  "repo": {
+    "commits": 9793,
+    "files": 2868,
+    "packMB": 71.81,
+    "head": "df7503cc499e"
+  },
+  "sessionsPerDay": 200,
+  "rows": [
+    {
+      "name": "full clone",
+      "forgeMB": 72.28,
+      "cdnMB": 0,
+      "requests": 3,
+      "ms": 1455,
+      "filesInWorktree": 2868
+    },
+    {
+      "name": "shallow --depth=1",
+      "forgeMB": 12.96,
+      "cdnMB": 0,
+      "requests": 3,
+      "ms": 395,
+      "filesInWorktree": 2868
+    },
+    {
+      "name": "blobless (--filter=blob:none)",
+      "forgeMB": 24.37,
+      "cdnMB": 0,
+      "requests": 5,
+      "ms": 850,
+      "filesInWorktree": 2868
+    },
+    {
+      "name": "blobless + sparse (one package)",
+      "forgeMB": 12.49,
+      "cdnMB": 0,
+      "requests": 7,
+      "ms": 661,
+      "filesInWorktree": 601
+    },
+    {
+      "name": "bundle-uri (bundle 20 commits stale)",
+      "forgeMB": 0.4,
+      "cdnMB": 71.92,
+      "requests": 5,
+      "ms": 1502,
+      "filesInWorktree": 2868
+    },
+    {
+      "name": "warm box fetch (+20 commits)",
+      "forgeMB": 0.34,
+      "cdnMB": 0,
+      "requests": 3,
+      "ms": 232,
+      "filesInWorktree": 0,
+      "note": "persistent $HOME volume"
+    }
+  ],
+  "econ": [
+    {
+      "name": "full clone",
+      "gbPerMonth": 433.7,
+      "cost": {
+        "AWS egress ($0.09/GB)": 39.03,
+        "Hetzner overage (~$1.1/TB)": 0.48,
+        "co-located (same DC, $0)": 0
+      }
+    },
+    {
+      "name": "shallow --depth=1",
+      "gbPerMonth": 77.8,
+      "cost": {
+        "AWS egress ($0.09/GB)": 7,
+        "Hetzner overage (~$1.1/TB)": 0.09,
+        "co-located (same DC, $0)": 0
+      }
+    },
+    {
+      "name": "blobless (--filter=blob:none)",
+      "gbPerMonth": 146.2,
+      "cost": {
+        "AWS egress ($0.09/GB)": 13.16,
+        "Hetzner overage (~$1.1/TB)": 0.16,
+        "co-located (same DC, $0)": 0
+      }
+    },
+    {
+      "name": "blobless + sparse (one package)",
+      "gbPerMonth": 74.9,
+      "cost": {
+        "AWS egress ($0.09/GB)": 6.74,
+        "Hetzner overage (~$1.1/TB)": 0.08,
+        "co-located (same DC, $0)": 0
+      }
+    },
+    {
+      "name": "bundle-uri (bundle 20 commits stale)",
+      "gbPerMonth": 2.4,
+      "cost": {
+        "AWS egress ($0.09/GB)": 0.22,
+        "Hetzner overage (~$1.1/TB)": 0,
+        "co-located (same DC, $0)": 0
+      }
+    },
+    {
+      "name": "warm box fetch (+20 commits)",
+      "gbPerMonth": 2,
+      "cost": {
+        "AWS egress ($0.09/GB)": 0.18,
+        "Hetzner overage (~$1.1/TB)": 0,
+        "co-located (same DC, $0)": 0
+      }
+    }
+  ]
+}

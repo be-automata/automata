@@ -1,0 +1,117 @@
+{
+  "label": "hetzner",
+  "n": 10,
+  "sizes": {
+    "small": {
+      "sessionBytes": 180094,
+      "runningColdProcess": {
+        "n": 10,
+        "p50": 850,
+        "p90": 913,
+        "max": 913
+      },
+      "requestBytes": 65547,
+      "requestMessages": 32,
+      "stopStartToTurn": {
+        "n": 10,
+        "p50": 1322,
+        "p90": 1682,
+        "max": 1682
+      },
+      "stopStartToHealthy": {
+        "n": 10,
+        "p50": 380,
+        "p90": 547,
+        "max": 547
+      },
+      "pauseUnpauseLiveProcess": {
+        "n": 10,
+        "p50": 162,
+        "p90": 170,
+        "max": 170
+      },
+      "pausedMemUsage": "125.5MiB / 7.57GiB"
+    },
+    "large": {
+      "sessionBytes": 1013649,
+      "runningColdProcess": {
+        "n": 10,
+        "p50": 947,
+        "p90": 1007,
+        "max": 1007
+      },
+      "requestBytes": 475864,
+      "requestMessages": 185,
+      "stopStartToTurn": {
+        "n": 10,
+        "p50": 1449,
+        "p90": 1629,
+        "max": 1629
+      },
+      "stopStartToHealthy": {
+        "n": 10,
+        "p50": 407,
+        "p90": 557,
+        "max": 557
+      },
+      "pauseUnpauseLiveProcess": {
+        "n": 10,
+        "p50": 172,
+        "p90": 210,
+        "max": 210
+      },
+      "pausedMemUsage": "133MiB / 7.57GiB"
+    }
+  },
+  "checks": [
+    {
+      "name": "small: resumed request carries the turn-1 fact",
+      "ok": true,
+      "detail": {
+        "bytes": 65547,
+        "messages": 32
+      }
+    },
+    {
+      "name": "small: after stop/start the resumed request still carries the fact",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "small: live process keeps context across pause (fact in request)",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "large: resumed request carries the turn-1 fact",
+      "ok": true,
+      "detail": {
+        "bytes": 475864,
+        "messages": 185
+      }
+    },
+    {
+      "name": "large: after stop/start the resumed request still carries the fact",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "large: live process keeps context across pause (fact in request)",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "pause (live process) beats stop/start at both sizes",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "harness startup dominates the box lifecycle on stop/start",
+      "ok": true,
+      "detail": {
+        "turn": 1322,
+        "healthy": 380
+      }
+    }
+  ]
+}
