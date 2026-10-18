@@ -87,10 +87,23 @@ token injected. It cannot run on the control plane itself: the control plane is 
    execution-plane getter. **Treat that key as an environment-wide god key**: Nango scopes keys by
    permission (e.g. `environment:connections:read_credentials`, `environment:proxy`), never by
    integration or connection (Nango "API keys" docs), so any key that can read credentials reads
-   every connection in its environment. The control plane holds a key with `read_credentials` and
-   `proxy` only; `environment:connections:create` is used only on the connect path and
-   `environment:connections:list` is never granted. Calling Nango over HTTPS from a Worker is
-   fine; only hosting Nango there is ruled out.
+   every connection in its environment.
+
+   **There is one control-plane key, and every scope it holds reads credentials.** The Phase 1 spike showed:
+
+   - `read_credentials` returns the token directly.
+   - `proxy` can send any token to any host through `Base-Url-Override`.
+   - `connections:create` gets the token back in the import response.
+
+   Scoping therefore limits which operations the key can perform, never what it can read, so the
+   key is treated as an environment-wide god key whatever its scopes. It holds exactly
+   `connections:read_credentials`, `proxy`, `connections:create` (connect and import) and
+   `connections:delete` (revoke). It never holds `connections:list` or
+   `connections:list_credentials`, so a leaked key cannot enumerate connection ids, and connection
+   ids stay unguessable (Decision §10). A second key for the connect path is not adopted: it would
+   read credentials too, so it adds a secret without narrowing exposure. Calling Nango over HTTPS
+   from a Worker is fine; only hosting Nango there is ruled out.
+
 3. **Agents reach third-party APIs only through a generalized broker.** The gh-broker pattern
    becomes data-driven: `host + method/path allowlist + header injection`, the agent holding only
    the per-run bearer. The plane receives the resolved shape — host, allowlist, an opaque grant
@@ -124,20 +137,30 @@ token injected. It cannot run on the control plane itself: the control plane is 
    Nango. A new control-plane endpoint takes a **broker credential** plus the opaque grant handle
    and returns `{token, expiresAt}`. The broker credential is issued to the broker process alone
    (held in the worker heap, or in the Docker sidecar's `:ro` secrets file) and is never present in
-   the agent's or the daemon's environment. **Delivery (decided 2026-10-18):** one credential per
-   run, minted at dispatch and carried in the task payload **sealed to the receiving worker's
-   per-box key**, so the engine's payload store never holds a usable value — the engine keeps task
-   payloads in plaintext (`v1_payload`, 21 daily partitions on the live box; 1,500 of 3,697 inline
-   payloads carried an installation token on 2026-10-18). The worker unseals it into heap only;
-   it never appears in argv (the agent uid can read the worker's `/proc/<pid>/cmdline`, though not
-   its `environ` or `mem` — probed 2026-10-18). The endpoint refuses it once the run is terminal or
-   superseded. The endpoint rejects the daemon token and the per-run
-   agent bearer: on the sandbox planes the daemon runs inside the guest, so an endpoint that
-   accepted the daemon token would hand the raw third-party token to any agent that read it. The endpoint checks that the grant belongs to that run,
-   that the run is live (not superseded, ADR-007), and that the org owns the connection
-   (ADR-001), then calls Nango. The broker caches the token until `expiresAt` minus a skew.
-   This is what inject-at-boot cannot do. The endpoint is the only path from a plane to a
-   third-party token, and it fails closed.
+   the agent's or the daemon's environment. **Delivery (decided 2026-10-18), per plane:**
+   - **Docker plane.** No engine payload is involved. The control plane mints the per-run
+     credential when the Docker provider creates the sandbox. The provider writes it into the same
+     host secrets file the sidecar already reads (`installationToken` + `runBearer` today), at mode
+     `0o400`, bind-mounted `:ro` into the **sidecar container only**
+     (`packages/sandbox/src/providers/docker-cred-broker.ts:13-23,223-224`). The guest container
+     never mounts that file, and the credential is never on argv, in `-e`, in `docker inspect` or in
+     control-plane logs. The agent runs inside the guest container, so container isolation is the
+     boundary here, in place of the uid split. A brokered Docker sandbox stays non-resumable, as
+     today, so the credential is never re-delivered into a live guest.
+   - **Worker plane.** One credential per
+     run, minted at dispatch and carried in the task payload **sealed to the receiving worker's
+     per-box key**, so the engine's payload store never holds a usable value — the engine keeps task
+     payloads in plaintext (`v1_payload`, 21 daily partitions on the live box; 1,500 of 3,697 inline
+     payloads carried an installation token on 2026-10-18). The worker unseals it into heap only;
+     it never appears in argv (the agent uid can read the worker's `/proc/<pid>/cmdline`, though not
+     its `environ` or `mem` — probed 2026-10-18). The endpoint refuses it once the run is terminal or
+     superseded. The endpoint rejects the daemon token and the per-run
+     agent bearer: on the sandbox planes the daemon runs inside the guest, so an endpoint that
+     accepted the daemon token would hand the raw third-party token to any agent that read it. The endpoint checks that the grant belongs to that run,
+     that the run is live (not superseded, ADR-007), and that the org owns the connection
+     (ADR-001), then calls Nango. The broker caches the token until `expiresAt` minus a skew.
+     This is what inject-at-boot cannot do. The endpoint is the only path from a plane to a
+     third-party token, and it fails closed.
 5. **Fail closed.** If Nango returns 424 (refresh exhausted), times out, or errors, or the token
    endpoint refuses, the brokered request fails with a status to the agent (502/503) and the
    control-plane effect is reported as not applied. There is no fallback to a cached-but-expired
@@ -310,16 +333,14 @@ One integration per org-owned Slack app applies in either mode (see Consequences
   429 and that every request (allowed and denied) emits one audit record with method, path and
   status only.
 - **I6d — Nango-brokered grants only on fitting planes.** A run on E2B or Daytona with a
-  Nango-brokered grant is refused at dispatch, unless it routes through a control-plane-hosted
-  broker. _Guard:_ resolver test per provider.
+  Nango-brokered grant is refused at dispatch with a named reason (a control-plane-hosted broker
+  is deferred, Decision §3). _Guard:_ resolver test per provider.
 - **I6e — The agent uid cannot read the broker.** _Guard:_ the worker's existing agent-uid drills
   (`HOST_UID_IT`) extended to assert the agent uid cannot read the broker's process environment or
   memory (`/proc` on Linux) or any cache file, and cannot connect to the socket without the bearer.
-- **I6f — The broker credential is sealed in transit and never in argv.** The task payload
-  carries it only sealed to the receiving worker's key; it is never passed on a command line or
-  written to the engine in plaintext. _Guard:_ a payload test asserting the field is ciphertext
-  and that unsealing with another box's key fails, plus a spawn test that no child argv contains
-  it.
+- **I6f — The broker credential is sealed in transit and never in argv.**
+  - **Worker plane:** the task payload carries it only sealed to the receiving worker's key. It is never passed on a command line or written to the engine in plaintext. _Guard:_ a payload test asserting the field is ciphertext and that unsealing with another box's key fails, plus a spawn test that no child argv contains it.
+  - **Docker plane:** it is delivered only in the sidecar's `0o400` `:ro` secrets file. _Guard:_ extend the `docker-cred-broker.ts` builder tests to assert that the secrets JSON carries the broker credential, that the guest container's `docker run` args mount no secrets path, and that no argv or `-e` value of either container contains it.
 - **I6g — The connection id always comes from the org-scoped accessor.** Every control-plane
   call to Nango (`GET /connection`, proxy, import, delete) takes its `connection_id` and provider
   config key from the ADR-001 org-scoped accessor, for the org of the run or request. Nothing
