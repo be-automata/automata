@@ -315,6 +315,58 @@ result can depend on it. A new check kind that runs a suite must add it to
 that builder in the same change, or a fix passes its agent's tests and then
 fails the platform's check of the same tree.
 
+### Linux boxes: loopback fence (#367)
+
+`inet automata_loopback` denies the agent uid every host-local listener outside
+the worker's cgroup subtree, except DNS and the test Postgres (`127.0.0.1:25432`).
+Why it is loaded by the worker unit and not at boot is in the header of
+`packages/worker/deploy/linux/loopback-nft.conf`. Install the loader and the
+rendered file **before** the unit that references them; a unit whose
+`ExecStartPre` points at a missing loader does not start.
+
+```bash
+D=packages/worker/deploy/linux
+sudo install -m 0755 -o root -g root "$D/nft-loopback-load.sh" /usr/local/sbin/nft-loopback-load.sh
+sed -e "s/__AGENT_UID__/$(id -u automata-agent)/g" -e 's/__MARK__/0x10000000/g' \
+  "$D/loopback-nft.conf" | sudo install -m 0644 -o root -g root /dev/stdin /etc/automata/loopback-nft.conf
+# then render and install automata-worker.service (it carries the ExecStartPre),
+# `systemctl daemon-reload`, and restart the worker once no run is in flight
+# (check the journal for `run start`).
+sudo packages/worker/deploy/linux/nft-verify.sh --probe
+```
+
+The loader refuses an unrendered file, uid 0, the worker's uid, a missing worker
+cgroup, a mark another table uses, and a file `nft -c` rejects. Never run it or
+the probes under `ip netns exec` (it remounts `/sys`; the cgroup lookup fails).
+
+Checks after install, on the box:
+
+- `nft-verify.sh --probe`: as the agent uid inside
+  `<worker cgroup>/verify-probe`, the engine (`:7077`, `:8888`, the bridge IP),
+  cloudflared (`:20241`) and `<public IP>:22` are denied; a worker-uid listener,
+  the probe's own listener, `getent hosts github.com` and `:25432` are allowed.
+- `systemctl restart automata-worker` (no run in flight), then the probes
+  again: they still pass only if the `ExecStartPre` bound the new cgroup.
+- Fail-closed: render a copy with a bad cgroup path, point the unit at it, and
+  `systemctl restart automata-worker` must leave the unit failed, not `active`.
+- `nft list table inet automata_egress` is unchanged and `nft list ruleset`
+  differs only by the new table.
+
+**Observe, then enforce.** The template ships with every deny as
+`counter log prefix "automata-lo-deny " accept`. Leave it for 7 days or 30 agent
+runs, whichever is later (`journalctl -k | grep automata-lo-deny`). Every hit
+must be a destination the fence is meant to refuse; one that is not means the
+allow rules are wrong, and they are fixed first. To enforce, replace each
+observe line with the `# ENFORCE:` form above it, re-render, and restart the
+worker once no run is in flight (only `ct state new` is judged, so the restart
+ends every connection opened under observe).
+
+**Rollback.** Immediate: `sudo nft delete table inet automata_loopback`. Durable,
+in this order: remove the `ExecStartPre=+…nft-loopback-load.sh` line from the
+installed unit, `systemctl daemon-reload`, delete the table, restart the worker
+once no run is in flight; only then delete `/etc/automata/loopback-nft.conf` and
+the loader.
+
 ---
 
 ## PF honesty — required reading before this is cited as a control

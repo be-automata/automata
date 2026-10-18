@@ -141,3 +141,36 @@ With a repo policy `domain: ["github.com"]`:
 
 Opt-in automated check (needs a docker daemon):
 `SANDBOX_PROVIDER=docker pnpm -C packages/sandbox vitest run docker-egress.integration`.
+
+## Linux execution box — loopback fence (#367)
+
+The box's 80/443 fence (`inet automata_egress`) accepts all loopback, because
+the per-run egress proxy and the git broker listen there. That also left the
+agent uid able to reach the Hatchet engine (`127.0.0.1:7077`, insecure gRPC, and
+`:8888`), cloudflared's metrics, the engine container over the Docker bridge,
+and sshd via the box's public IP. A second table, `inet automata_loopback`
+(`packages/worker/deploy/linux/loopback-nft.conf`), denies those by **who owns
+the listening socket**, not by a port list:
+
+- the output hook marks every agent-uid packet on `lo` and denies the agent uid
+  on `docker0` and `br-*`;
+- the input hook sends new marked connections to a chain that accepts a
+  listener whose cgroup is under `system.slice/automata-worker.service` (the
+  proxy, the git broker, the agent's own test servers), DNS to
+  `127.0.0.53`/`127.0.0.54:53`, and the test Postgres on `127.0.0.1:25432`, and
+  denies the rest.
+
+`nft` binds the cgroup path to an inode id at load time, and systemd makes a new
+cgroup on every worker restart, so the worker unit reloads the table in an
+`ExecStartPre=+` (`nft-loopback-load.sh`). A failed load keeps the worker down.
+It ships in observe mode (deny = counted, logged accept with prefix
+`automata-lo-deny `); install, the enforce flip and rollback are in
+`packages/worker/deploy/AGENT-UID-PROVISIONING.md`, "Linux boxes: loopback
+fence". `nft-verify.sh --probe` runs the probe matrix on the box.
+
+**Limits.** No per-run isolation: concurrent runs share the worker subtree, so
+one run can reach another's loopback test servers (the follow-up is to match the
+run's own cgroup, level 4). AF_UNIX sockets (gh broker, daemon socket) never
+traverse netfilter. Non-web ports to the internet stay open (#108b). The unit
+tests prove the templates and the loader's guards only; only the live probes
+prove the fence.

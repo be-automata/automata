@@ -48,6 +48,19 @@ WorkingDirectory=__REPO__/packages/worker
 # `activating`.
 ExecStartPre=/bin/bash -c 'for _ in $(seq 1 30); do curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:8888/api/ready && exit 0; sleep 2; done; echo "engine not ready on 127.0.0.1:8888 after 60s" >&2; exit 1'
 
+# ── #367: fence the agent uid off host-local services ──────────────────────
+#
+# Reloads inet automata_loopback (loopback-nft.conf). It must be HERE: nft binds
+# the rule's `socket cgroupv2` path to this unit's cgroup id at load time, and
+# systemd recreates the cgroup (new id) on every restart, so a boot-time load is
+# stale and refuses the proxy and the git broker. systemd creates the cgroup
+# before any ExecStartPre runs. ExecStartPre, not ExecStartPost: with Type=exec a
+# Post would run with the worker already polling, unfenced. `+` runs it as root;
+# a non-zero exit stops the unit before ExecStart (fail-closed). Install the
+# loader and the rendered file BEFORE this unit, or the worker will not start
+# (AGENT-UID-PROVISIONING.md, "Linux boxes: loopback fence").
+ExecStartPre=+/usr/local/sbin/nft-loopback-load.sh /etc/automata/loopback-nft.conf
+
 ExecStart=/bin/bash __HOME__/.automata/run-worker.sh
 
 # ── Drain, not kill ────────────────────────────────────────────────────────
