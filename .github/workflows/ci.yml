@@ -112,6 +112,8 @@ jobs:
           run_pkg() { echo "::group::vitest $1"; pnpm --filter "$1" exec vitest run --no-file-parallelism; echo "::endgroup::"; }
 
           run_pkg @terragon/utils
+          # Grounded knowledge claims engine (#364).
+          run_pkg @terragon/knowledge
           run_pkg @terragon/agent
           run_pkg @terragon/shared
           run_pkg @terragon/www

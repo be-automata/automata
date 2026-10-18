@@ -944,6 +944,21 @@ importers:
         specifier: 5.8.3
         version: 5.8.3
 
+  packages/knowledge:
+    devDependencies:
+      '@terragon/tsconfig':
+        specifier: workspace:*
+        version: link:../tsconfig
+      '@types/node':
+        specifier: 24.0.1
+        version: 24.0.1
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+      vitest:
+        specifier: '>=3.2.6 <4'
+        version: 3.2.7(@edge-runtime/vm@3.2.0)(@types/debug@4.1.12)(@types/node@24.0.1)(jiti@2.4.2)(lightningcss@1.33.0)(msw@2.10.1(@types/node@24.0.1)(typescript@5.8.3))(terser@5.40.0)(tsx@4.20.3)(yaml@2.9.0)
+
   packages/mcp-server:
     dependencies:
       '@modelcontextprotocol/sdk':

@@ -1,0 +1,8 @@
+{
+  "extends": "@terragon/tsconfig/base.json",
+  "compilerOptions": {
+    // Package-internal imports carry .ts extensions so Node's type stripping can load the sources directly.
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  }
+}
