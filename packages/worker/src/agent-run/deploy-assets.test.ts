@@ -2624,6 +2624,28 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
   });
 
   describe("#205: one agent account per box slot", () => {
+    it("both nft scripts refuse a set that misses a slot account's uid (AGENT_USERS or WORKER_AGENT_USER + WORKER_BOX_SLOTS), and say so when they cannot check", () => {
+      for (const name of ["nft-preflight.sh", "nft-verify.sh"]) {
+        const sh = deployFile("linux", name);
+        expect(sh).toMatch(/expected_slot_users\(\)/);
+        expect(sh).toMatch(/WORKER_BOX_SLOTS:-1/);
+        expect(sh).toMatch(/\$WORKER_AGENT_USER-\$i/);
+        expect(sh).toMatch(/is not in the skuid set/);
+        expect(sh).toMatch(/slot-coverage check skipped/);
+      }
+      const pre = deployFile("linux", "nft-preflight.sh");
+      expect(pre).toMatch(/check_slot_coverage "\$UIDS_IN_CONF"/);
+      // Coverage is checked BEFORE the kernel is touched.
+      expect(pre.indexOf("check_slot_coverage")).toBeLessThan(
+        pre.indexOf("nft -c -f"),
+      );
+      const verify = deployFile("linux", "nft-verify.sh");
+      expect(verify).toMatch(/check_slot_coverage "\$FENCED"/);
+      // The unit feeds the preflight the slot accounts at boot.
+      const unit = deployFile("linux", "automata-egress.service");
+      expect(unit).toMatch(/^EnvironmentFile=-\/etc\/automata\/egress\.env$/m);
+    });
+
     it("the nft preflight parses a skuid SET and checks every uid in it", () => {
       const pre = deployFile("linux", "nft-preflight.sh");
       // Set-or-scalar extraction, then a per-uid loop — a set with the worker's

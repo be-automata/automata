@@ -7,6 +7,7 @@ import {
   releaseAll,
   settlesWithin,
   tryAcquireAllBoxSlots,
+  tryAcquireBoxLock,
   type BoxLock,
 } from "./box-lock";
 import { writeSnapshotAtomic } from "./scheduling-maintenance";
@@ -135,15 +136,21 @@ export interface BootUidScanOpts {
   slots?: number;
   /**
    * #205: slot accounts provisioned on this box ABOVE the current N (a box that
-   * ran N = 2 and went back to 1 keeps `automata-agent-1`). No slot lock guards
-   * them any more, so an escapee there would never be scanned again; they are
-   * reaped at boot as well, under the same all-slots hold. Found by
+   * ran N = 2 and went back to 1 keeps `automata-agent-1`). No live slot lock
+   * guards them any more, so an escapee there would never be scanned again;
+   * each is reaped at boot too — under a non-blocking take of ITS OWN slot
+   * file, because the crash-relaunch overlap after N was lowered can still
+   * have the old worker's helper on `box.lock.<i>` with a live run behind it.
+   * Their errors are reported apart from the live slots' result and never
+   * fail the scan (sudoers may have been re-rendered without them). Found by
    * `retiredSlotAccounts` (box-slots-boot.ts).
    */
-  retiredAccounts?: readonly string[];
+  retiredSlots?: ReadonlyArray<{ slot: number; account: string }>;
   log: (line: string) => void;
   /** Injected for tests; defaults to `tryAcquireAllBoxSlots` (at N = 1: the one try-lock). */
   tryAcquireAll?: typeof tryAcquireAllBoxSlots;
+  /** Injected for tests; the retired slots' own non-blocking take. */
+  tryAcquire?: typeof tryAcquireBoxLock;
   reap?: typeof reapAgentUidEscapees;
 }
 
@@ -151,6 +158,10 @@ export interface BootUidScanResult {
   outcome: BootUidScanOutcome;
   result?: ReapAgentUidResult;
   error?: string;
+  /** #205: the retired slots' scan, summed — apart from the live slots' result. */
+  retired?: ReapAgentUidResult;
+  /** #205: retired-slot failures; informational, never the scan's outcome. */
+  retiredErrors?: string[];
 }
 
 export const BOX_BUDGET_FILENAME = "box-budget.json";
@@ -676,9 +687,10 @@ export async function bootUidScan(
     root,
     agentUser,
     slots = 1,
-    retiredAccounts = [],
+    retiredSlots = [],
     log,
     tryAcquireAll = tryAcquireAllBoxSlots,
+    tryAcquire = tryAcquireBoxLock,
     reap = reapAgentUidEscapees,
   } = opts;
 
@@ -711,25 +723,14 @@ export async function bootUidScan(
   // surfaces as the error of the whole scan.
   let result: ReapAgentUidResult | null = null;
   try {
-    const accounts = [
-      ...Array.from({ length: slots }, (_, slot) =>
-        agentUserForSlot(agentUser, slot),
-      ),
-      ...retiredAccounts,
-    ];
-    for (const account of accounts) {
+    for (let slot = 0; slot < slots; slot++) {
       const slotResult = await reap({
-        agentUser: account,
+        agentUser: agentUserForSlot(agentUser, slot),
         phase: "boot",
         runNamespaceRoot: root,
         log,
       });
       result = result ? mergeReapResults(result, slotResult) : slotResult;
-    }
-    if (retiredAccounts.length > 0) {
-      log(
-        `boot uid scan: retired slot account(s) above WORKER_BOX_SLOTS scanned too: ${retiredAccounts.join(", ")}`,
-      );
     }
   } catch (e) {
     // `reap` never throws by contract; this wrapper's own contract is the
@@ -744,10 +745,89 @@ export async function bootUidScan(
   if (result === null) {
     return { outcome: "error", error: "no slot was scanned" };
   }
+  const retired = await scanRetiredSlots({
+    root,
+    retiredSlots,
+    log,
+    tryAcquire,
+    reap,
+  });
   if (result.error !== undefined) {
-    return { outcome: "error", result, error: result.error };
+    return { outcome: "error", result, error: result.error, ...retired };
   }
-  return { outcome: "scanned", result };
+  return { outcome: "scanned", result, ...retired };
+}
+
+/**
+ * #205: the retired slots' scan (see BootUidScanOpts.retiredSlots). Each slot
+ * under a non-blocking take of its own lock file; held ⇒ skipped (a run may
+ * be live behind it). Never throws; its failures are reported, not fatal.
+ */
+async function scanRetiredSlots(opts: {
+  root: string;
+  retiredSlots: ReadonlyArray<{ slot: number; account: string }>;
+  log: (line: string) => void;
+  tryAcquire: typeof tryAcquireBoxLock;
+  reap: typeof reapAgentUidEscapees;
+}): Promise<Pick<BootUidScanResult, "retired" | "retiredErrors">> {
+  const { root, retiredSlots, log, tryAcquire, reap } = opts;
+  if (retiredSlots.length === 0) return {};
+  let retired: ReapAgentUidResult | undefined;
+  const retiredErrors: string[] = [];
+  const scanned: string[] = [];
+  for (const { slot, account } of retiredSlots) {
+    let lock: BoxLock | null;
+    try {
+      lock = await tryAcquire({
+        root,
+        holder: "boot uid scan (retired slot)",
+        log,
+        slot,
+        slots: slot + 1,
+      });
+    } catch (e) {
+      retiredErrors.push(`${account}: ${errorMessage(e)}`);
+      continue;
+    }
+    if (lock === null) {
+      log(
+        `boot uid scan: retired slot ${slot} (${account}) is still held — skipped`,
+      );
+      continue;
+    }
+    try {
+      const r = await reap({
+        agentUser: account,
+        phase: "boot",
+        runNamespaceRoot: root,
+        log,
+      });
+      if (r.error !== undefined) {
+        retiredErrors.push(`${account}: ${r.error}`);
+      } else {
+        scanned.push(account);
+        retired = retired ? mergeReapResults(retired, r) : r;
+      }
+    } catch (e) {
+      retiredErrors.push(`${account}: ${errorMessage(e)}`);
+    } finally {
+      await lock.release();
+    }
+  }
+  if (scanned.length > 0) {
+    log(
+      `boot uid scan: retired slot account(s) above WORKER_BOX_SLOTS scanned too: ${scanned.join(", ")}`,
+    );
+  }
+  if (retiredErrors.length > 0) {
+    log(
+      `boot uid scan: retired slot account(s) NOT scanned (not fatal): ${retiredErrors.join("; ")}`,
+    );
+  }
+  return {
+    ...(retired ? { retired } : {}),
+    ...(retiredErrors.length > 0 ? { retiredErrors } : {}),
+  };
 }
 
 /** Sum two per-slot reap results into one (#205 boot scan over N slots). */

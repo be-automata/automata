@@ -30,6 +30,11 @@ Before=automata-worker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# #205: the preflight refuses a skuid set that misses a slot account's uid. It
+# learns the slot accounts from this file (WORKER_AGENT_USER=<base> and
+# WORKER_BOX_SLOTS=<N>, or AGENT_USERS="<a> <a>-1"); absent, the coverage check
+# is skipped and the boot log says so. AGENT-UID-PROVISIONING.md §6 writes it.
+EnvironmentFile=-/etc/automata/egress.env
 ExecStart=/usr/local/sbin/nft-preflight.sh /etc/automata/egress-nft.conf
 # Scoped teardown: drops OUR table and leaves Docker's chains untouched. Failing
 # open here is deliberate — the table may already be absent.

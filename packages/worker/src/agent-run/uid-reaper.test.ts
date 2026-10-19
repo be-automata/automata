@@ -1342,12 +1342,19 @@ describe("bootUidScan reaps retired slot accounts (#205)", () => {
     residual: 0,
     residualSample: [],
   } as unknown as Awaited<ReturnType<ReapFn>>;
+  type TryAcquireFn = NonNullable<BootUidScanOpts["tryAcquire"]>;
 
-  it("after the N slot accounts, every retired account is reaped as itself and the results are summed", async () => {
+  it("after the live slots, each retired slot is taken non-blocking on its OWN lock file and reaped as itself; a held one is skipped; results stay apart from the live result", async () => {
     const release = vi.fn(async () => {});
     const tryAcquireAll = vi.fn<TryAcquireAllFn>(async () => [
       { release, lost: false, slot: 0 } as BoxLock,
     ]);
+    const retiredRelease = vi.fn(async () => {});
+    const tryAcquire = vi.fn<TryAcquireFn>(async ({ slot }) =>
+      slot === 2
+        ? null
+        : ({ release: retiredRelease, lost: false, slot } as BoxLock),
+    );
     const seen: string[] = [];
     const reap = vi.fn(async (opts: { agentUser: string }) => {
       seen.push(opts.agentUser);
@@ -1358,17 +1365,69 @@ describe("bootUidScan reaps retired slot accounts (#205)", () => {
       root: "/nonexistent/never-used",
       agentUser: AGENT,
       slots: 1,
-      retiredAccounts: [`${AGENT}-1`, `${AGENT}-2`],
+      retiredSlots: [
+        { slot: 1, account: `${AGENT}-1` },
+        { slot: 2, account: `${AGENT}-2` },
+        { slot: 3, account: `${AGENT}-3` },
+      ],
       log: (l) => lines.push(l),
       tryAcquireAll,
+      tryAcquire,
       reap,
     });
-    expect(seen).toEqual([AGENT, `${AGENT}-1`, `${AGENT}-2`]);
+    // Live slot first and under the all-slots hold; retired ones after, each
+    // on its own lock — slot 2 is held by someone (a live run in the overlap)
+    // and is NOT reaped.
+    expect(seen).toEqual([AGENT, `${AGENT}-1`, `${AGENT}-3`]);
+    expect(tryAcquire.mock.calls.map((c) => c[0].slot)).toEqual([1, 2, 3]);
     expect(out.outcome).toBe("scanned");
-    expect(out.result).toMatchObject({ scanned: 3, killed: 3 });
+    expect(out.result).toMatchObject({ scanned: 1, killed: 1 });
+    expect(out.retired).toMatchObject({ scanned: 2, killed: 2 });
+    expect(out.retiredErrors).toBeUndefined();
     expect(release).toHaveBeenCalledTimes(1);
+    expect(retiredRelease).toHaveBeenCalledTimes(2);
     expect(lines).toContain(
-      `boot uid scan: retired slot account(s) above WORKER_BOX_SLOTS scanned too: ${AGENT}-1, ${AGENT}-2`,
+      `boot uid scan: retired slot 2 (${AGENT}-2) is still held — skipped`,
     );
+    expect(lines).toContain(
+      `boot uid scan: retired slot account(s) above WORKER_BOX_SLOTS scanned too: ${AGENT}-1, ${AGENT}-3`,
+    );
+  });
+
+  it("a retired slot's failure (sudoers without that account) is reported apart and never fails the live scan", async () => {
+    const tryAcquireAll = vi.fn<TryAcquireAllFn>(async () => [
+      { release: async () => {}, lost: false, slot: 0 } as BoxLock,
+    ]);
+    const tryAcquire = vi.fn<TryAcquireFn>(
+      async ({ slot }) =>
+        ({ release: async () => {}, lost: false, slot }) as BoxLock,
+    );
+    const reap = vi.fn(async (opts: { agentUser: string }) =>
+      opts.agentUser === AGENT
+        ? { ...zero, scanned: 1 }
+        : { ...zero, error: "sudo: a password is required" },
+    );
+    const lines: string[] = [];
+    const out = await bootUidScan({
+      root: "/nonexistent/never-used",
+      agentUser: AGENT,
+      slots: 1,
+      retiredSlots: [{ slot: 1, account: `${AGENT}-1` }],
+      log: (l) => lines.push(l),
+      tryAcquireAll,
+      tryAcquire,
+      reap,
+    });
+    expect(out.outcome).toBe("scanned");
+    expect(out.result).toMatchObject({ scanned: 1 });
+    expect(out.retired).toBeUndefined();
+    expect(out.retiredErrors).toEqual([
+      `${AGENT}-1: sudo: a password is required`,
+    ]);
+    expect(
+      lines.some((l) =>
+        l.startsWith("boot uid scan: retired slot account(s) NOT scanned"),
+      ),
+    ).toBe(true);
   });
 });

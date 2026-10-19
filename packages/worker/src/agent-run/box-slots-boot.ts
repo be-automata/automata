@@ -52,20 +52,26 @@ export async function retiredSlotAccounts(
   base: string,
   slots: number,
   resolveUid: (user: string) => Promise<number> = resolveUidViaId,
-): Promise<string[]> {
+): Promise<RetiredSlot[]> {
   if (!base) return [];
-  const candidates: string[] = [];
-  for (let i = slots; i < BOX_SLOTS_MAX; i++) {
+  const candidates: RetiredSlot[] = [];
+  for (let slot = slots; slot < BOX_SLOTS_MAX; slot++) {
     try {
-      candidates.push(agentUserForSlot(base, i));
+      candidates.push({ slot, account: agentUserForSlot(base, slot) });
     } catch {
       // over the login-name limit: cannot exist
     }
   }
   const results = await Promise.allSettled(
-    candidates.map((u) => resolveUid(u)),
+    candidates.map((c) => resolveUid(c.account)),
   );
-  return candidates.filter((_u, i) => results[i]?.status === "fulfilled");
+  return candidates.filter((_c, i) => results[i]?.status === "fulfilled");
+}
+
+/** A provisioned slot account above the current N, with the slot it belongs to. */
+export interface RetiredSlot {
+  slot: number;
+  account: string;
 }
 
 export function warnIfSlotsExceedMemory(

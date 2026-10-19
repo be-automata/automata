@@ -684,6 +684,41 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       expect(await tryLock(root, 1)).toBe(0);
     }, 15_000);
 
+    it("slots = 2: a release that lands WHILE the waiter's sweep is still in flight is not missed — the waiter lands on that slot", async () => {
+      const a = await acquireBoxSlot({ root, slots: 2, holder: "A" });
+      const b = await acquireBoxSlot({ root, slots: 2, holder: "B" });
+      locks.push(a, b);
+      const wanted = rotationStart("C", 2);
+      const other = wanted === a.slot ? b : a;
+      const mine = wanted === a.slot ? a : b;
+      // No sleep: the release races the sweep's helper spawns. Whether it
+      // lands before the try of that slot, between the tries, or after the
+      // sweep, C must end up on it — never parked beside a free slot.
+      const c = acquireBoxSlot({ root, slots: 2, holder: "C" });
+      await other.release();
+      const held = await c;
+      locks.push(held);
+      expect(held.slot).toBe(other.slot);
+      expect(await tryLock(root, other.slot)).toBe(HELD_EXIT);
+      await mine.release();
+      await held.release();
+    }, 15_000);
+
+    it("slots = 2: a signal already aborted when the budget is full ⇒ AbortError at once, no park, nothing held", async () => {
+      const a = await acquireBoxSlot({ root, slots: 2, holder: "A" });
+      const b = await acquireBoxSlot({ root, slots: 2, holder: "B" });
+      locks.push(a, b);
+      const ac = new AbortController();
+      ac.abort();
+      await expect(
+        acquireBoxSlot({ root, slots: 2, holder: "C", signal: ac.signal }),
+      ).rejects.toMatchObject({ name: "AbortError" });
+      await a.release();
+      await b.release();
+      expect(await tryLock(root, 0)).toBe(0);
+      expect(await tryLock(root, 1)).toBe(0);
+    }, 15_000);
+
     it("slots = 2: a parked waiter's own abort still wins (AbortError, nothing held) even with a release wake-up racing it", async () => {
       const a = await acquireBoxSlot({ root, slots: 2, holder: "A" });
       const b = await acquireBoxSlot({ root, slots: 2, holder: "B" });

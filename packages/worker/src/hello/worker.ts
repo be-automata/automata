@@ -216,16 +216,19 @@ async function main() {
   // Never throws: fail-open on the scan (the box is still single-flight
   // without it); the helper assert above stays fail-closed.
   const bootUidScanConfig = loadWorkerConfig();
+  // #205: slot accounts a higher N left behind. No live slot guards them, so
+  // the boot scan takes each one's own lock file and reaps it too, and the
+  // stale-dir sweep hands back their dirs.
+  const retiredSlots = await retiredSlotAccounts(
+    bootUidScanConfig.agentUser,
+    bootUidScanConfig.boxSlots,
+  );
   await bootUidScan({
     root: bootUidScanConfig.runNamespaceRoot,
     agentUser: bootUidScanConfig.agentUser,
     // #205: every slot held, every slot's account scanned — or skipped whole.
     slots: bootUidScanConfig.boxSlots,
-    // Accounts a higher N left behind: no lock guards them, so scan them too.
-    retiredAccounts: await retiredSlotAccounts(
-      bootUidScanConfig.agentUser,
-      bootUidScanConfig.boxSlots,
-    ),
+    retiredSlots,
     log: (m) => console.log(`[worker-boot] ${m}`),
   });
 
@@ -239,8 +242,12 @@ async function main() {
     await sweepStaleRunDirs({
       workdirRoot: bootUidScanConfig.workdirRoot,
       agentUser: bootUidScanConfig.agentUser,
-      // #205: a stale dir may belong to any slot's account; each hands back its own.
-      agentUsers: bootUidScanConfig.agentUsers,
+      // #205: a stale dir may belong to any slot's account — including a slot
+      // retired by a lower N; each hands back its own.
+      agentUsers: [
+        ...bootUidScanConfig.agentUsers,
+        ...retiredSlots.map((r) => r.account),
+      ],
       log: (m) => console.log(`[worker-boot] ${m}`),
     });
   } catch (err) {

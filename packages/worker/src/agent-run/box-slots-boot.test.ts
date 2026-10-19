@@ -49,7 +49,10 @@ describe("retiredSlotAccounts (#205 boot)", () => {
       return 2000;
     });
     const got = await retiredSlotAccounts("automata-agent", 2, resolveUid);
-    expect(got).toEqual(["automata-agent-2", "automata-agent-3"]);
+    expect(got).toEqual([
+      { slot: 2, account: "automata-agent-2" },
+      { slot: 3, account: "automata-agent-3" },
+    ]);
     // Nothing below N is a candidate; every name up to the slot cap is probed.
     const probed = resolveUid.mock.calls.map((c) => c[0]);
     expect(probed[0]).toBe("automata-agent-2");

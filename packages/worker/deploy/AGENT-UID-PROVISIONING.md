@@ -237,9 +237,13 @@ sudo chmod 750 /home/automata-agent-1
 sudo visudo -cf /etc/sudoers.d/automata
 
 # 3. nftables: render __AGENT_UID__ as the comma-separated uid set and re-load
-#    through the preflight, which now checks every uid in the set.
+#    through the preflight, which checks every uid in the set AND that every
+#    slot account's uid is in it (it reads the slot accounts from
+#    /etc/automata/egress.env, which the automata-egress unit also loads).
 #    meta skuid { 999, 2001 } tcp dport { 80, 443 } counter reject with tcp reset
-sudo ./linux/nft-preflight.sh /etc/automata/egress-nft.conf && sudo ./linux/nft-verify.sh
+printf 'WORKER_AGENT_USER=automata-agent\nWORKER_BOX_SLOTS=2\n' | sudo tee /etc/automata/egress.env
+sudo env WORKER_AGENT_USER=automata-agent WORKER_BOX_SLOTS=2 ./linux/nft-preflight.sh /etc/automata/egress-nft.conf \
+  && sudo env WORKER_AGENT_USER=automata-agent WORKER_BOX_SLOTS=2 ./linux/nft-verify.sh
 
 # 4. The runtime tree: traverse for every slot account on the workdir root (the
 #    per-run dir is granted to its own slot by the worker at clone time).
@@ -260,9 +264,17 @@ boot only once it holds every slot. The boot log shows
 
 Rollback: `WORKER_BOX_SLOTS=1` and restart. The extra accounts, sudoers entries
 and nft set may stay; they fence nothing while unused, and the boot uid scan
-still reaps every provisioned slot account above N (`retired slot account(s)
-... scanned too` in the boot log), so an escapee from the N = 2 period cannot
-outlive the rollback.
+still reaps every provisioned slot account above N — each under a non-blocking
+take of its own `box.lock.<i>` (`retired slot account(s) ... scanned too` in
+the boot log) — and the stale-dir sweep hands back their dirs, so an escapee
+from the N = 2 period cannot outlive the rollback. Keep those accounts in the
+sudoers Runas list; without them the boot log reports them as `NOT scanned (not
+fatal)`.
+
+Fence coverage: run `nft-preflight.sh` and `nft-verify.sh` with
+`WORKER_AGENT_USER=<base> WORKER_BOX_SLOTS=<N>` (or `AGENT_USERS="<a> <a>-1"`)
+in the environment; they refuse a skuid set that misses any slot account's uid,
+and say `slot-coverage check skipped` when given neither.
 
 ---
 

@@ -387,6 +387,12 @@ async function spawnHelperAndAwaitAck(
  * flock stays the cross-process authority.
  */
 const releaseWakers = new Map<string, Set<() => void>>();
+/** Per-root count of releases so far: lets a sweeper detect a release that landed mid-sweep. */
+const releaseGenerations = new Map<string, number>();
+
+function releaseGeneration(root: string): number {
+  return releaseGenerations.get(path.resolve(root)) ?? 0;
+}
 
 function onSlotReleased(root: string, fn: () => void): () => void {
   const key = path.resolve(root);
@@ -400,7 +406,9 @@ function onSlotReleased(root: string, fn: () => void): () => void {
 }
 
 function notifySlotReleased(root: string): void {
-  for (const fn of [...(releaseWakers.get(path.resolve(root)) ?? [])]) fn();
+  const key = path.resolve(root);
+  releaseGenerations.set(key, (releaseGenerations.get(key) ?? 0) + 1);
+  for (const fn of [...(releaseWakers.get(key) ?? [])]) fn();
 }
 
 function isAbortError(e: unknown): boolean {
@@ -537,6 +545,10 @@ export async function acquireBoxSlot({
   const start = rotationStart(holder, slots);
   let parked = false;
   for (;;) {
+    // Read BEFORE the sweep: each try is a helper spawn, so a release can land
+    // on a slot the sweep already passed. A changed generation afterwards means
+    // "sweep again", never "park beside a free slot".
+    const generation = releaseGeneration(root);
     for (let k = 0; k < slots; k++) {
       if (signal?.aborted) throw abortError();
       const slot = (start + k) % slots;
@@ -549,6 +561,7 @@ export async function acquireBoxSlot({
         return lock;
       }
     }
+    if (releaseGeneration(root) !== generation) continue;
     if (!parked) {
       parked = true;
       log?.(
@@ -563,7 +576,10 @@ export async function acquireBoxSlot({
     signal?.addEventListener("abort", onCallerAbort, { once: true });
     const unsubscribe = onSlotReleased(root, () => wake.abort());
     try {
-      return await acquireBoxLock({
+      // A cancel that landed during the last try: the listener above was
+      // added to an already-aborted signal and will never fire.
+      if (signal?.aborted) throw abortError();
+      const lock = await acquireBoxLock({
         root,
         holder,
         signal: wake.signal,
@@ -571,6 +587,12 @@ export async function acquireBoxSlot({
         slot: start,
         slots,
       });
+      // The wait saw only its own signal; a cancelled run never gets a slot.
+      if (signal?.aborted) {
+        await lock.release();
+        throw abortError();
+      }
+      return lock;
     } catch (e) {
       if (signal?.aborted || !isAbortError(e)) throw e;
       // Woken by a release: sweep again.
