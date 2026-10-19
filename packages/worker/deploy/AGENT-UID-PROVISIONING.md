@@ -244,6 +244,15 @@ sudo visudo -cf /etc/sudoers.d/automata
 printf 'WORKER_AGENT_USER=automata-agent\nWORKER_BOX_SLOTS=2\n' | sudo tee /etc/automata/egress.env
 sudo env WORKER_AGENT_USER=automata-agent WORKER_BOX_SLOTS=2 ./linux/nft-preflight.sh /etc/automata/egress-nft.conf \
   && sudo env WORKER_AGENT_USER=automata-agent WORKER_BOX_SLOTS=2 ./linux/nft-verify.sh
+#    3b. The #367 LOOPBACK table carries the SAME uid set and is rendered
+#    separately (§7 step 1). Re-render it with every slot uid, or the worker's
+#    ExecStartPre loader refuses the start — measured on the box when slot 2
+#    was added (2026-10-19 18:53 UTC): `[nft-loopback-load] FAIL: skuid set
+#    {999 2001} is not the set the egress fence covers {999 2001 2002}` until
+#    loopback-nft.conf was re-rendered with `999, 2001, 2002`.
+UIDS="$(id -u automata-agent), $(id -u automata-agent-1)"   # every slot account, in slot order
+sed "s/__AGENT_UID__/$UIDS/g; s/__MARK__/0x10000000/g" ./linux/loopback-nft.conf \
+  | sudo install -m 0644 -o root -g root /dev/stdin /etc/automata/loopback-nft.conf
 
 # 4. The runtime tree: traverse for every slot account on the workdir root (the
 #    per-run dir is granted to its own slot by the worker at clone time).
