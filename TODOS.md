@@ -55,6 +55,7 @@ Each item lists its re-entry trigger.
 - [ ] **Knowledge MCP in the review lane.**
   - **Why:** reviews could check claims against company knowledge.
   - **Context:** M2 attaches the knowledge MCP to task runs only (eng D8). The classic review policy is an ADR-004 byte-for-byte golden, and review comments are public on public repos, so this needs a disclosure rule (clearance by repo visibility, eng D9) plus an intentional golden change.
+  - **Re-entry:** the M2 knowledge MCP has run on task runs, and a reviewer or partner asks for claim checks in reviews.
   - **Effort:** M / S. **Priority:** P3. **Depends on:** the M2 knowledge MCP.
 - [ ] **Unforgeable approver identity for org-app Slack installs.**
   - **Why:** on an org's own Slack app, the org admin holds the signing secret and can forge the approving user (`apps/www/src/app/api/webhooks/slack/route-fence.ts:13-18`).
