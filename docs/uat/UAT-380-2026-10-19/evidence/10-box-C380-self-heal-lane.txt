@@ -1,0 +1,23 @@
+## self-heal lane after the cutover — one-shot audit on be-automata/self-heal-bench-1, captured 2026-10-19T22:33Z
+## The five scheduled audit automations were paused by the operator on 2026-10-16T08:43:21Z. With the operator's
+## go-ahead, ONLY the bench-1 audit (automation be85c4b0) was enabled at 22:01:39Z with next_run_at=now; it fired
+## at the 22:31:00Z automations tick and was set back to enabled=false at 22:31:05Z.
+
+## worker journal (agent-run 5f3db5dd-8d62-4782-827e-666b5d066b6f)
+2026-10-19T22:31:07+00:00 run secrets: sealed (kid=plane-2026-10)
+2026-10-19T22:31:07+00:00 run start: lane=self-heal-audit repo=be-automata/self-heal-bench-1 branch=main
+2026-10-19T22:31:07+00:00 clone complete: be-automata/self-heal-bench-1@main
+2026-10-19T22:31:12+00:00 self-heal checks: requested=7 pass=3 fail=4 error=0 report=recorded
+2026-10-19T22:31:49+00:00 thread-status: complete (terminal=true)
+2026-10-19T22:31:50+00:00 token.revoke {"kind":"installation","status":204}
+2026-10-19T22:31:50+00:00 token.revoke {"kind":"read","status":204}
+## `report=recorded`: www accepted the check report, which it authenticates with the self-heal check token —
+## that token travelled ONLY inside the sealed envelope (the worker re-attached it after unsealing).
+
+## engine v1_task row for this run: sealed | selfHeal.kind | plain checkToken in the plan | plain installationToken | kid | ct length | ghs_ anywhere
+t|audit|f|f|plane-2026-10|1312|f
+
+## all v1_task rows since the cutover holding ghs_ / installationToken / daemonToken / checkToken / gateToken: 0 of 90
+
+## agent outcome (prod thread 5f3db5dd, credential-source user-credential = the BeAutomata account reconnected at ~22:00Z):
+## result ok, 4 turns, cost 0.1248 USD — the audit completed.
