@@ -107,6 +107,19 @@ export class PayloadSealError extends Error {
   }
 }
 
+/**
+ * A plane PUBLIC key that cannot be parsed (`<kid>:<base64url>` text from
+ * HATCHET_PAYLOAD_SEAL_KEY). Typed so a dispatcher can tell a
+ * misconfigured key from an engine failure; the message names the rule that
+ * failed and never echoes the text.
+ */
+export class PlaneKeyParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PlaneKeyParseError";
+  }
+}
+
 // --- encoding ----------------------------------------------------------------
 
 const B64URL_RE = /^[A-Za-z0-9_-]*$/;
@@ -232,21 +245,27 @@ export function parsePlanePublicKey(rawText: string): PlanePublicKey {
   const text = rawText.trim();
   const idx = text.indexOf(":");
   if (idx <= 0) {
-    throw new Error("payload-seal: plane public key must be <kid>:<base64url>");
+    throw new PlaneKeyParseError(
+      "payload-seal: plane public key must be <kid>:<base64url>",
+    );
   }
   const kid = text.slice(0, idx);
   const publicKey = text.slice(idx + 1);
   if (!KID_RE.test(kid)) {
-    throw new Error("payload-seal: plane key id has an invalid character set");
+    throw new PlaneKeyParseError(
+      "payload-seal: plane key id has an invalid character set",
+    );
   }
   let raw: Uint8Array;
   try {
     raw = fromBase64Url(publicKey);
   } catch {
-    throw new Error("payload-seal: plane public key is not base64url");
+    throw new PlaneKeyParseError(
+      "payload-seal: plane public key is not base64url",
+    );
   }
   if (raw.length !== X25519_KEY_BYTES) {
-    throw new Error(
+    throw new PlaneKeyParseError(
       `payload-seal: plane public key must be ${X25519_KEY_BYTES} raw bytes`,
     );
   }

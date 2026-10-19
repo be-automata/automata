@@ -9,6 +9,8 @@ import { packsRequire } from "@terragon/shared/model/review-agent-settings";
 import { redactSecrets } from "@terragon/utils/redact";
 import {
   parsePlanePublicKey,
+  PayloadSealError,
+  type PlanePublicKey,
   sealBindingOf,
   sealRunSecrets,
   type RunSecrets,
@@ -698,17 +700,59 @@ export function reattachSelfHealToken(
     : { ...wire, gateToken: token };
 }
 
-/** A redactor that also blanks the exact values of one dispatch's secrets. */
+/**
+ * A redactor that also blanks the exact values of one dispatch's secrets.
+ * The minted tokens are long; an owner's repoEnv value can be short (a PIN,
+ * a short API key suffix) and is still blanked from 4 characters up — below
+ * that a value is too short to be a credential and too common to blank
+ * without mangling the message. Longest value first, so a value that
+ * contains another is never half-blanked.
+ */
 function scrubRunSecrets(secrets: RunSecrets): (text: string) => string {
+  const { repoEnv, ...tokens } = secrets;
   const values = [
-    ...Object.values(secrets),
-    ...Object.values(secrets.repoEnv ?? {}),
-  ].filter((v): v is string => typeof v === "string" && v.length >= 8);
+    ...Object.values(tokens).filter(
+      (v): v is string => typeof v === "string" && v.length >= 8,
+    ),
+    ...Object.values(repoEnv ?? {}).filter((v) => v.length >= 4),
+  ].sort((a, b) => b.length - a.length);
   return (text) => {
     let out = text;
     for (const v of values) out = out.split(v).join("<redacted>");
     return redactSecrets(out);
   };
+}
+
+/**
+ * The cause carried out of the dispatch catch: the ORIGINAL error's class
+ * name and, for a seal failure, its `reason`, over a SCRUBBED message — so
+ * `withThreadChat` and the logs can still tell a plane-key or seal failure
+ * (`PayloadSealError`/`key`) from an engine trigger failure without ever
+ * carrying the raw engine reply (which, in the legacy window, echoes the
+ * request body and its plain-text tokens).
+ */
+export class ScrubbedDispatchCause extends Error {
+  readonly reason?: string;
+  constructor(error: unknown, scrub: (text: string) => string) {
+    super(scrub(error instanceof Error ? error.message : String(error)));
+    // PlaneKeyParseError (a bad HATCHET_PAYLOAD_SEAL_KEY) and PayloadSealError
+    // (a seal failure, with its reason) stay distinguishable by name.
+    this.name = error instanceof Error ? error.name : "ScrubbedDispatchCause";
+    if (error instanceof PayloadSealError) this.reason = error.reason;
+  }
+}
+
+/**
+ * #380: the plane key is parsed FIRST — before the self-heal planner writes
+ * its rows (an audit run with its check-token hash, a fix attempt moved to
+ * `dispatched`) and before any token is minted — so a malformed or
+ * rotated-away HATCHET_PAYLOAD_SEAL_KEY fails the dispatch with nothing to
+ * refund: no attempt stranded in `dispatched`, no run to read back. `null`
+ * means the PR-1 legacy window (no key configured).
+ */
+function resolvePlaneKey(): PlanePublicKey | null {
+  const planeKeyText = env.HATCHET_PAYLOAD_SEAL_KEY.trim();
+  return planeKeyText === "" ? null : parsePlanePublicKey(planeKeyText);
 }
 
 /**
@@ -727,12 +771,14 @@ function scrubRunSecrets(secrets: RunSecrets): (text: string) => string {
 async function sealWireInput({
   input,
   secrets,
+  planeKey,
 }: {
   input: AgentRunInput;
   secrets: RunSecrets;
+  /** From resolvePlaneKey(), parsed before any row was written. */
+  planeKey: PlanePublicKey | null;
 }): Promise<AgentRunWireInput> {
-  const planeKeyText = env.HATCHET_PAYLOAD_SEAL_KEY.trim();
-  if (planeKeyText === "") {
+  if (planeKey === null) {
     const { repoEnv, selfHealToken, ...tokens } = secrets;
     const { selfHeal, ...rest } = input;
     const legacy: LegacyAgentRunInput = {
@@ -745,7 +791,6 @@ async function sealWireInput({
     };
     return legacy;
   }
-  const planeKey = parsePlanePublicKey(planeKeyText);
   // Bound to the whole input the worker will trust (callback URL, branches,
   // self-heal plan, task packs …): a copied envelope re-triggered with ANY
   // of them changed fails its tag.
@@ -831,6 +876,9 @@ export async function dispatchAgentRun({
   // Set once the secrets exist, so the catch below can scrub their values too.
   let scrubForCatch: (text: string) => string = redactSecrets;
   try {
+    // #380: a bad plane key fails here, before the mints and before the
+    // self-heal planner writes anything (see resolvePlaneKey).
+    const planeKey = resolvePlaneKey();
     // SETTLE all three before judging: Promise.all would reject on a sibling
     // while the mint's INSERT is still in flight, so the catch's revoke could
     // run BEFORE the token lands — a phantom token (seen as a flaky CI
@@ -1086,7 +1134,7 @@ export async function dispatchAgentRun({
     };
     // #380: seal inside the guarded region (see sealWireInput) — every lane,
     // one line, no plain-text path.
-    const wireInput = await sealWireInput({ input, secrets });
+    const wireInput = await sealWireInput({ input, secrets, planeKey });
     // The generic redactor knows GitHub token families, not the daemon
     // token's shape: in the legacy window an engine 4xx that echoes the
     // request body would carry it, so every log line below scrubs the exact
@@ -1198,9 +1246,7 @@ export async function dispatchAgentRun({
     throw new ThreadError(
       "sandbox-creation-failed",
       "Failed to dispatch the remote agent run.",
-      new Error(
-        scrubForCatch(error instanceof Error ? error.message : String(error)),
-      ),
+      new ScrubbedDispatchCause(error, scrubForCatch),
     );
   }
 }

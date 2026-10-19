@@ -1397,6 +1397,61 @@ describe("#183: finally order — box lock released last, after teardown and cle
     expect(skipped[0]).toContain('"reason":"lock lost"');
   });
 
+  /**
+   * #380 card: protects=a throw INSIDE the teardown sequence (here the
+   * uid-scan, which by contract never throws — injected to prove the wrap)
+   * still reaches the token revoke, the credential wipe, cleanupWorkdir and
+   * the box-lock release, in that order; fails_when=the nested finally is
+   * flattened back so the throw skips them (a live ghs_ token and a held
+   * slot would outlive the run); no_claim=the real reaper's own behaviour.
+   */
+  it("#380: a throw inside the teardown sequence still reaches token-revoke → credential wipe → cleanupWorkdir → release; the throw is not swallowed", async () => {
+    const credentialWipe = vi.fn(async () => {
+      finallyOrder.push("credential-wipe");
+    });
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: true,
+      env: {},
+      cleanup: credentialWipe,
+    });
+    // The admission scan is the first call (default impl); the second call
+    // is the teardown scan, which throws.
+    reapAgentUidEscapees
+      .mockImplementationOnce(async (opts) => {
+        finallyOrder.push(`uid-reap:${opts.phase}`);
+        return {
+          skipped: false,
+          scanned: 0,
+          groups: 0,
+          helpers: 0,
+          killed: 0,
+          residual: 0,
+          failed: 0,
+          durationMs: 0,
+        };
+      })
+      .mockImplementationOnce(async (opts) => {
+        finallyOrder.push(`uid-reap:${opts.phase}`);
+        throw new Error("reaper exploded");
+      });
+    pullNextMessage.mockResolvedValue(null);
+    await expect(runFn(INPUT, ctx())).rejects.toThrow("reaper exploded");
+    expect(
+      finallyOrder.filter((x) =>
+        [...TEARDOWN_TOKENS, "credential-wipe"].includes(x),
+      ),
+    ).toEqual([
+      "teardown",
+      "uid-reap:teardown",
+      "token-revoke",
+      "credential-wipe",
+      "cleanupWorkdir",
+      "release",
+    ]);
+    expect(credentialWipe).toHaveBeenCalledTimes(1);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+  });
+
   it("throw from inside the main try (pollUntilTerminal rejects): same order, release exactly once", async () => {
     pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
     pollUntilTerminal.mockRejectedValue(new Error("poll blew up"));
