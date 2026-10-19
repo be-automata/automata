@@ -348,6 +348,11 @@ async function spawnHelperAndAwaitAck(
   } catch {
     // the helper reports what it cannot open
   }
+  // The awaits above opened a window: an abort (the caller's cancel, or
+  // acquireBoxSlot's release wake-up) that landed in it would attach its
+  // listener below to an already-aborted signal and never fire, leaving the
+  // helper blocked in flock(2). Re-check before anything is spawned.
+  if (signal?.aborted) throw abortError();
   const child = spawnPiped(file, [
     ...args,
     lockFile,

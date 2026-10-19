@@ -8,8 +8,10 @@ import { loadWorkerConfig } from "./config";
 import { DaemonProcess } from "./daemon-process";
 import {
   AGENT_PATH_PREPEND_ENV,
+  appendGitConfig,
   buildDaemonEnv,
   buildRunProxyEnv,
+  gitProxyAuthConfig,
   isReservedRepoEnvKey,
   SAFE_ENV_KEYS,
 } from "./daemon-env";
@@ -907,6 +909,28 @@ describe("harness battery env (gstack, gsd, ruflo)", () => {
     });
     expect(plain.BROWSE_PROXY_USER).toBeUndefined();
     expect(plain.BROWSE_PROXY_PASS).toBeUndefined();
+  });
+
+  it("#205 gitProxyAuthConfig/appendGitConfig: the one rule the check runner and fix-check env share with the agent's git", () => {
+    expect(gitProxyAuthConfig("http://run:s3cret@127.0.0.1:9999")).toEqual([
+      ["http.proxyAuthMethod", "basic"],
+    ]);
+    expect(gitProxyAuthConfig("http://127.0.0.1:9999")).toEqual([]);
+    expect(gitProxyAuthConfig(null)).toEqual([]);
+    expect(gitProxyAuthConfig("not a url")).toEqual([]);
+    const env: NodeJS.ProcessEnv = {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "safe.directory",
+      GIT_CONFIG_VALUE_0: "/w",
+    };
+    appendGitConfig(env, gitProxyAuthConfig("http://run:x@127.0.0.1:1"));
+    expect(env.GIT_CONFIG_COUNT).toBe("2");
+    expect(env.GIT_CONFIG_KEY_1).toBe("http.proxyAuthMethod");
+    expect(env.GIT_CONFIG_VALUE_1).toBe("basic");
+    // Nothing to add ⇒ env untouched (no GIT_CONFIG_COUNT conjured).
+    const empty: NodeJS.ProcessEnv = {};
+    appendGitConfig(empty, []);
+    expect(empty).toEqual({});
   });
 
   it("#205 a credentialed run proxy makes git send Basic proxy auth up front (no 407 round-trip, no false deny); a plain proxy adds nothing", () => {

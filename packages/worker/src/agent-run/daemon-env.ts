@@ -254,6 +254,40 @@ export interface BuildDaemonEnvOpts {
  * proxy.username / proxy.password (its policy: creds in the URL OR the env,
  * never both). A credential-less proxy (N = 1) sets the URL alone, as before.
  */
+/**
+ * #205: the git config a CREDENTIALED run proxy (N > 1) needs, for every git
+ * that runs under it — the agent's (buildDaemonEnv), the self-heal check
+ * runner's and the fix-check's (workflow.ts). The proxy challenges with 407
+ * and audits it; libcurl's default proxy auth is "anyauth" — first request
+ * bare, then retry — so every git call over the proxy would log a false deny
+ * first. Basic up front: one request, no challenge. github.com itself goes to
+ * the loopback broker (NO_PROXY), so this covers other remotes. [] otherwise.
+ */
+export function gitProxyAuthConfig(
+  egressProxyUrl: string | null | undefined,
+): Array<[string, string]> {
+  return egressProxyUrl && proxyUrlHasCredential(egressProxyUrl)
+    ? [["http.proxyAuthMethod", "basic"]]
+    : [];
+}
+
+/** Append GIT_CONFIG_* entries to `env` after whatever GIT_CONFIG_COUNT it already carries. Returns `env`. */
+export function appendGitConfig(
+  env: NodeJS.ProcessEnv,
+  entries: ReadonlyArray<[string, string]>,
+): NodeJS.ProcessEnv {
+  if (entries.length === 0) return env;
+  const parsed = Number.parseInt(env.GIT_CONFIG_COUNT ?? "0", 10);
+  let count = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  for (const [key, value] of entries) {
+    env[`GIT_CONFIG_KEY_${count}`] = key;
+    env[`GIT_CONFIG_VALUE_${count}`] = value;
+    count += 1;
+  }
+  env.GIT_CONFIG_COUNT = String(count);
+  return env;
+}
+
 /** Whether a proxy URL carries a credential in its userinfo (#205, N > 1). */
 export function proxyUrlHasCredential(url: string): boolean {
   try {
@@ -564,14 +598,7 @@ export function buildDaemonEnv({
     ...(agentUser && workdir
       ? ([["safe.directory", workdir]] as Array<[string, string]>)
       : []),
-    // #205: a credentialed run proxy (N > 1) challenges with 407 and audits it.
-    // libcurl's default proxy auth is "anyauth" — first request bare, then
-    // retry — so every git call over the proxy would log a deny first. Basic
-    // up front: one request, no challenge, no false deny. github.com itself
-    // goes to the loopback broker (NO_PROXY), so this covers other remotes.
-    ...(egressProxyUrl && proxyUrlHasCredential(egressProxyUrl)
-      ? ([["http.proxyAuthMethod", "basic"]] as Array<[string, string]>)
-      : []),
+    ...gitProxyAuthConfig(egressProxyUrl),
   ];
   env.GIT_CONFIG_COUNT = String(gitConfig.length);
   gitConfig.forEach(([key, value], i) => {

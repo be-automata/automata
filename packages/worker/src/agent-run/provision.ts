@@ -483,24 +483,38 @@ async function handBackAgentFiles(
   if (!(await fs.lstat(workdir).catch(() => null))) return;
   // Each pass touches only its own account's inodes, so the passes are
   // independent and run concurrently: N slots cost one tree walk of wall time.
+  // A run dir is granted to ONE slot account, so with several accounts (#205:
+  // the boot sweep, live + retired slots) every non-owning pass is refused
+  // (EACCES on the tree) and that is expected: those exits are reported only
+  // when NO account's pass succeeded, so a real hand-back failure is not
+  // buried under N − 1 lines of noise. One account ⇒ every failure is logged.
+  const failures: string[] = [];
+  let succeeded = 0;
   await Promise.all(
     users.map(async (agentUser) => {
       try {
         const inv = buildHandBackInvocation({ agentUser, workdir });
         if (!inv) return;
         const exit = await (opts.runAsAgent ?? runAsAgentViaSudo)(inv);
-        if (exit.code !== 0) {
-          log(
-            `workdir hand-back incomplete: ${workdir} (exit ${String(exit.code)}${
+        if (exit.code === 0) {
+          succeeded += 1;
+        } else {
+          failures.push(
+            `workdir hand-back incomplete: ${workdir} (${agentUser}: exit ${String(exit.code)}${
               exit.signal ? ` ${exit.signal}` : ""
             }${exit.stderrTail ? `: ${exit.stderrTail}` : ""})`,
           );
         }
       } catch (e) {
-        log(`workdir hand-back failed: ${workdir} (${errorMessage(e)})`);
+        failures.push(
+          `workdir hand-back failed: ${workdir} (${agentUser}: ${errorMessage(e)})`,
+        );
       }
     }),
   );
+  if (users.length === 1 || succeeded === 0) {
+    for (const line of failures) log(line);
+  }
 }
 
 /**

@@ -684,6 +684,30 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       expect(await tryLock(root, 1)).toBe(0);
     }, 15_000);
 
+    it("an abort that lands during the lock-file preparation (before the helper spawns) still rejects with AbortError and leaves the slot free", async () => {
+      const a = await acquireBoxSlot({ root, slots: 2, holder: "A" });
+      const b = await acquireBoxSlot({ root, slots: 2, holder: "B" });
+      locks.push(a, b);
+      // Abort on the next tick: inside acquireBoxLock's open/chmod awaits (or
+      // right after). Either way: AbortError, no helper left blocked.
+      const ac = new AbortController();
+      const c = acquireBoxLock({
+        root,
+        holder: "C",
+        signal: ac.signal,
+        slot: 0,
+        slots: 2,
+      });
+      await new Promise<void>((r) => setImmediate(r));
+      ac.abort();
+      await expect(c).rejects.toMatchObject({ name: "AbortError" });
+      await a.release();
+      await b.release();
+      await sleep(100);
+      expect(await tryLock(root, 0)).toBe(0);
+      expect(await tryLock(root, 1)).toBe(0);
+    }, 15_000);
+
     it("every slot lock file is the worker's alone: mode 0600 (flock(2) on a read-only fd would otherwise let a sibling slot's agent take the slot)", async () => {
       const a = await acquireBoxSlot({ root, slots: 2, holder: "A" });
       const b = await acquireBoxSlot({ root, slots: 2, holder: "B" });

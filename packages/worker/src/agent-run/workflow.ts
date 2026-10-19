@@ -59,7 +59,12 @@ import {
 } from "./egress-proxy";
 import { startGitBroker, type GitBroker } from "./git-broker";
 import { startGhBroker, type GhBroker } from "./gh-broker";
-import { buildRunProxyEnv, type BrokerHandoff } from "./daemon-env";
+import {
+  appendGitConfig,
+  buildRunProxyEnv,
+  gitProxyAuthConfig,
+  type BrokerHandoff,
+} from "./daemon-env";
 import { runPathsForRepo } from "./run-owned-paths";
 import {
   ensureRunNamespace,
@@ -541,7 +546,10 @@ export async function runSelfHealAuditStep({
         env.GIT_CONFIG_KEY_0 = "safe.directory";
         env.GIT_CONFIG_VALUE_0 = workdir;
       }
-      if (egressProxyUrl) env = buildRunProxyEnv(egressProxyUrl, env);
+      if (egressProxyUrl) {
+        env = buildRunProxyEnv(egressProxyUrl, env);
+        appendGitConfig(env, gitProxyAuthConfig(egressProxyUrl));
+      }
       results = await deps.runChecks({
         checks: requested,
         run: runAsAgent,
@@ -778,6 +786,8 @@ export async function runSelfHealFixStep({
         env.GIT_CONFIG_KEY_0 = "safe.directory";
         env.GIT_CONFIG_VALUE_0 = workdir;
       }
+      // #205: same proxy-auth entry as the agent's git (one helper, one rule).
+      appendGitConfig(env, gitProxyAuthConfig(egressProxyUrl));
       report = await deps.runCheck({
         fix: selfHeal,
         pushedSha,
