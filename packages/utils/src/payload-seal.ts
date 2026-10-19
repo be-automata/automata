@@ -48,11 +48,13 @@ export type SealedRunSecrets = {
   ct: string;
 };
 
-export interface RunSecrets {
+// `type` for the same reason as SealedRunSecrets: both planes intersect it
+// with their Hatchet input types.
+export type RunSecrets = {
   installationToken: string;
   githubReadToken?: string;
   daemonToken: string;
-}
+};
 
 export interface PlanePublicKey {
   kid: string;
@@ -154,7 +156,10 @@ function subtle(): Subtle {
 // --- keys ----------------------------------------------------------------------
 
 /** Parse the www env form `<kid>:<base64url raw public key>`. */
-export function parsePlanePublicKey(text: string): PlanePublicKey {
+export function parsePlanePublicKey(rawText: string): PlanePublicKey {
+  // A `wrangler secret put` paste can carry a trailing newline; never let
+  // that fail every dispatch.
+  const text = rawText.trim();
   const idx = text.indexOf(":");
   if (idx <= 0) {
     throw new Error("payload-seal: plane public key must be <kid>:<base64url>");
@@ -315,7 +320,9 @@ export async function sealRunSecrets(
       // The static key takes no usages: X25519 import of a public key allows [].
     ],
   );
-  const eph = (await s.generateKey({ name: "X25519" }, true, [
+  // Non-extractable: only the public half is ever exported, and public keys
+  // export regardless of the flag.
+  const eph = (await s.generateKey({ name: "X25519" }, false, [
     "deriveBits",
   ])) as KeyPair;
   const ephRaw = new Uint8Array(await s.exportKey("raw", eph.publicKey));

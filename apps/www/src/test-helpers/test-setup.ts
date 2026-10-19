@@ -119,14 +119,19 @@ vi.mock("@/server-lib/generate-thread-name", () => ({
 vi.mock("@/server-lib/generate-session-summary", () => ({
   generateSessionSummary: vi.fn().mockResolvedValue("test-summary"),
 }));
+// Implementations are given to vi.fn() itself (not via mockResolvedValue) so
+// a describe's `vi.restoreAllMocks()` restores to THESE instead of stripping
+// them to `undefined` — which once made getInstallationToken resolve nothing
+// from a describe's second case on (#380 found it: the sealer refused the
+// empty token the legacy payload used to drop silently).
 vi.mock("@terragon/shared/github-app", () => ({
-  getInstallationToken: vi.fn().mockResolvedValue("mock-github-token"),
-  getSandboxGithubToken: vi.fn().mockResolvedValue("mock-github-token"),
-  lookupInstallationId: vi.fn().mockResolvedValue(424242),
-  getReadOnlyInstallationToken: vi.fn().mockResolvedValue({
+  getInstallationToken: vi.fn(async () => "mock-github-token"),
+  getSandboxGithubToken: vi.fn(async () => "mock-github-token"),
+  lookupInstallationId: vi.fn(async () => 424242),
+  getReadOnlyInstallationToken: vi.fn(async () => ({
     token: "mock-github-read-token",
     expiresAt: "2026-10-04T03:00:00Z",
-  }),
+  })),
 }));
 vi.mock("@terragon/sandbox", async (importOriginal) => {
   const actual = (await importOriginal()) as any;
@@ -167,14 +172,19 @@ index 1234567..89abcdef 100644
     }),
   };
 });
+// Implementations are given to vi.fn() itself (not via mockResolvedValue) so
+// a describe's `vi.restoreAllMocks()` restores to THESE instead of stripping
+// them to `undefined` — which once made getInstallationToken resolve nothing
+// from a describe's second case on (#380 found it: the sealer refused the
+// empty token the legacy payload used to drop silently).
 vi.mock("@terragon/shared/github-app", () => ({
-  getInstallationToken: vi.fn().mockResolvedValue("mock-github-token"),
-  getSandboxGithubToken: vi.fn().mockResolvedValue("mock-github-token"),
-  lookupInstallationId: vi.fn().mockResolvedValue(424242),
-  getReadOnlyInstallationToken: vi.fn().mockResolvedValue({
+  getInstallationToken: vi.fn(async () => "mock-github-token"),
+  getSandboxGithubToken: vi.fn(async () => "mock-github-token"),
+  lookupInstallationId: vi.fn(async () => 424242),
+  getReadOnlyInstallationToken: vi.fn(async () => ({
     token: "mock-github-read-token",
     expiresAt: "2026-10-04T03:00:00Z",
-  }),
+  })),
 }));
 vi.mock("@/server-lib/claude-session.ts", () => ({
   maybeSaveClaudeSessionToR2: vi.fn().mockResolvedValue(undefined),

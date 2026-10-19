@@ -2,20 +2,16 @@ import {
   describe,
   it,
   vi,
-  beforeAll,
-  afterAll,
   beforeEach,
   afterEach,
   expect,
   expectTypeOf,
 } from "vitest";
 import {
-  formatPlanePublicKey,
-  generatePlaneKeyPair,
   unsealRunSecrets,
-  type RunSecrets,
   type SealedRunSecrets,
 } from "@terragon/utils/payload-seal";
+import { installTestPlaneKey, setKey } from "./__fixtures__/plane-key";
 import { db } from "@/lib/db";
 import {
   createTestUser,
@@ -92,30 +88,12 @@ import {
 /**
  * #380: every dispatch under test is SEALED to a per-file plane key (the
  * public half goes into env.HATCHET_PAYLOAD_SEAL_KEY, the private half stays
- * here to open the envelopes and assert what travelled). The legacy
- * plain-text shape is exercised only by the explicit "key unset" case.
+ * in the fixture to open the envelopes and assert what travelled). The
+ * legacy plain-text shape is exercised only by the explicit "key unset" case.
  */
-let plane: Awaited<ReturnType<typeof generatePlaneKeyPair>>;
 const PLANE_KID = "plane-test";
-beforeAll(async () => {
-  plane = await generatePlaneKeyPair(PLANE_KID);
-  (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY =
-    formatPlanePublicKey(plane.publicKey);
-});
-afterAll(() => {
-  (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY = "";
-});
-/** Open the envelope on a captured input with the test plane key. */
-async function unsealInput(
-  input: Record<string, unknown>,
-): Promise<RunSecrets> {
-  expect(input.sealedSecrets).toBeDefined();
-  return unsealRunSecrets(
-    [plane.privateKey],
-    input.sealedSecrets as SealedRunSecrets,
-    input.threadChatId as string,
-  );
-}
+const plane = installTestPlaneKey(PLANE_KID);
+const unsealInput = (input: Record<string, unknown>) => plane.unseal(input);
 
 describe("AgentRunInput carries no secret field (#380 AC 1, www side)", () => {
   it("installationToken / githubReadToken / daemonToken are not properties of the control-plane input type", () => {
@@ -1264,23 +1242,26 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
    *    crypto itself (utils suite).
    */
   describe("#380: run secrets sealed to the plane key", () => {
-    afterEach(() => {
-      (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY =
-        formatPlanePublicKey(plane.publicKey);
-    });
+    afterEach(() => plane.reinstall());
 
     it("an unset key sends the PR-1 legacy shape (plain-text fields, no envelope)", async () => {
-      (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY =
-        "";
+      setKey("");
       const input = await dispatchAndRead(await orgTaskThread());
       expect(input.sealedSecrets).toBeUndefined();
       expect(input.installationToken).toBe("mock-github-token");
       expect(input.daemonToken).toMatch(/^[A-Za-z0-9_-]{64}$/);
     });
 
+    it("a key pasted with a trailing newline (wrangler secret put) still seals", async () => {
+      setKey(`${env.HATCHET_PAYLOAD_SEAL_KEY}\n`);
+      const input = await dispatchAndRead(await orgTaskThread());
+      await expect(unsealInput(input)).resolves.toMatchObject({
+        installationToken: "mock-github-token",
+      });
+    });
+
     it("a malformed key fails the dispatch closed: nothing triggered, the minted daemon token revoked, the thread failed", async () => {
-      (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY =
-        "plane-bad:not-a-key";
+      setKey("plane-bad:not-a-key");
       const t = await orgTaskThread();
       const f = routedHatchetFetch("run-agent");
       vi.stubGlobal("fetch", f.mock);
@@ -1315,7 +1296,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       });
       await expect(
         unsealRunSecrets(
-          [plane.privateKey],
+          [plane.pair!.privateKey], // installed in beforeAll
           inputA.sealedSecrets as SealedRunSecrets,
           "tc_other",
         ),
@@ -1612,14 +1593,6 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    // The afterEach above restores EVERY mock, which also strips the module
-    // mocks' resolved values (test-setup.ts): from the second case on,
-    // getInstallationToken resolved `undefined`. The legacy payload silently
-    // dropped the missing key; #380's sealer refuses an empty token (shape),
-    // so the mint is re-established here — the dispatch under test needs a
-    // real (mock) token exactly like production does.
-    vi.mocked(getInstallationToken).mockResolvedValue("mock-github-token");
-    vi.mocked(lookupInstallationId).mockResolvedValue(424242);
     // R4: the settle is real time; the order of calls is what is asserted.
     selfHealReadbackSettle.ms = 0;
     user = (await createTestUser({ db })).user;

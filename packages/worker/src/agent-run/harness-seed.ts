@@ -1,4 +1,5 @@
 import type { Stats } from "node:fs";
+import { errnoCode } from "./node-errors";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -126,12 +127,6 @@ class PackSkip extends Error {
     super(`harness pack skipped: ${reason}`);
     this.name = "PackSkip";
   }
-}
-
-function errnoCode(e: unknown): string | undefined {
-  return e instanceof Error && "code" in e
-    ? String((e as NodeJS.ErrnoException).code)
-    : undefined;
 }
 
 function ownershipReason(

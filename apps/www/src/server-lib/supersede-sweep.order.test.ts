@@ -116,4 +116,37 @@ describe("supersede sweep — terminal write ordering under a thread-write failu
       }),
     );
   });
+
+  // #380: the sweep's revoke rides ONLY on an applied terminal. A CAS that
+  // lost (the thread went terminal, or was resumed under a new run, between
+  // the read and the write) must leave the thread's tokens alone — the
+  // `<threadId>:` prefix would otherwise hit the new run's token.
+  // Card: protects=no token revoke without an applied terminal;
+  // fails_when=a lost CAS still deletes tokens; no_claim=the CAS itself
+  // (markThreadsTerminal's own tests).
+  it("#380: a thread terminal that did not apply revokes NO daemon token", async () => {
+    const { auth } = await import("@/lib/auth");
+    const { daemonRunKey, hasActiveDaemonToken } = await import(
+      "@/lib/daemon-token"
+    );
+    const { threadId, threadChatId } = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgId,
+      prNumber: 9,
+      externalId: "r-cas-lost",
+      ageMs: T + 60_000,
+    });
+    const name = daemonRunKey({ threadId, threadChatId });
+    await auth.api.createApiKey({
+      body: { name, userId, metadata: { tokenType: "daemon" } },
+    });
+    vi.mocked(markThreadTerminal).mockResolvedValueOnce(false);
+    await runSupersedeSweep({
+      cancelledAfterMs: T,
+      readStatus: async () => "FAILED",
+      listRuns: async () => [],
+    });
+    expect(await hasActiveDaemonToken({ userId, name })).toBe(true);
+  });
 });

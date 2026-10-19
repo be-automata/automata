@@ -27,7 +27,10 @@ import {
 } from "./self-heal-fix-check";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
 import { planeKeysForRun } from "./payload-seal-keys";
-import { createTokenRevoker } from "./revoke-installation-tokens";
+import {
+  createTokenRevoker,
+  type TokenRevoker,
+} from "./revoke-installation-tokens";
 import { resolveRunSecrets, type AgentRunWireInput } from "./run-secrets";
 import { formatRunStartLine, resolveRunLane } from "./run-lane";
 import { reviewAgentForRun, withReviewAgentWire } from "./review-agent-wire";
@@ -346,13 +349,17 @@ async function runAgent(
   // provisioning. A failure here throws a PayloadSealError naming only the
   // kid and the failure class; the task fails, nothing is posted (the daemon
   // token is inside the envelope), and www's sweep rule (iii) reconciles.
-  const { input, secrets, source } = await resolveRunSecrets({
-    wire,
-    keys: planeKeysForRun(config.payloadSealKeyFile),
-  });
+  const { input, secrets, source, legacyFieldsIgnored } =
+    await resolveRunSecrets({
+      wire,
+      keys: planeKeysForRun(config.payloadSealKeyFile),
+    });
   ctx.log(
     `[agent-run ${input.threadId}] run secrets: ${source}` +
-      (source === "sealed" ? ` (kid=${input.sealedSecrets?.kid})` : ""),
+      (source === "sealed" ? ` (kid=${input.sealedSecrets?.kid})` : "") +
+      (legacyFieldsIgnored
+        ? " — plain-text secret fields ALSO present and ignored (control-plane defect: the engine row holds them)"
+        : ""),
   );
   // #380: both ghs_ tokens die with the run. runAgentInner revokes them after
   // the fix check and before the box lock release; this outer finally is the
@@ -379,7 +386,7 @@ async function runAgent(
 async function runAgentResolved(
   input: AgentRunInput,
   secrets: RunSecrets,
-  revoker: ReturnType<typeof createTokenRevoker>,
+  revoker: TokenRevoker,
   ctx: RunCtx,
   config: ReturnType<typeof loadWorkerConfig>,
   runStartedAt: number,
@@ -873,7 +880,7 @@ export async function runSelfHealFixStep({
 async function runAgentInner(
   input: AgentRunInput,
   secrets: RunSecrets,
-  revoker: { revokeOnce: () => Promise<void> },
+  revoker: TokenRevoker,
   ctx: RunCtx,
   config: ReturnType<typeof loadWorkerConfig>,
   wwwOpts: WwwClientOpts,

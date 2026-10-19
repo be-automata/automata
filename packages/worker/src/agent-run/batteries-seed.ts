@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { errnoCode } from "./node-errors";
 import type { Stats } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -240,12 +241,6 @@ class BatteriesUnavailable extends Error {
     super(`batteries unavailable: ${reason}`);
     this.name = "BatteriesUnavailable";
   }
-}
-
-function errnoCode(e: unknown): string | undefined {
-  return e instanceof Error && "code" in e
-    ? String((e as NodeJS.ErrnoException).code)
-    : undefined;
 }
 
 async function pathExists(p: string): Promise<boolean> {

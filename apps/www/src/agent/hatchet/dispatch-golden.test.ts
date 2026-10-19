@@ -1,12 +1,4 @@
-import {
-  describe,
-  it,
-  vi,
-  beforeAll,
-  afterAll,
-  beforeEach,
-  expect,
-} from "vitest";
+import { describe, it, vi, beforeEach, expect } from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { db } from "@/lib/db";
@@ -18,13 +10,8 @@ import { createOrganization } from "@terragon/shared/model/organizations";
 import { nanoid } from "nanoid";
 import { User } from "@terragon/shared";
 import { dispatchAgentRun } from "./dispatch";
-import { env } from "@terragon/env/apps-www";
-import {
-  formatPlanePublicKey,
-  generatePlaneKeyPair,
-  unsealRunSecrets,
-  type SealedRunSecrets,
-} from "@terragon/utils/payload-seal";
+import type { SealedRunSecrets } from "@terragon/utils/payload-seal";
+import { installTestPlaneKey } from "./__fixtures__/plane-key";
 import {
   createReviewAutomation,
   createBootingPRThread,
@@ -87,16 +74,7 @@ describe("dispatch golden (payload contract)", () => {
   let orgId: string;
   // #380: the golden is the SEALED contract (the plane key is set for every
   // case; its kid is pinned literally in the fixture).
-  let plane: Awaited<ReturnType<typeof generatePlaneKeyPair>>;
-
-  beforeAll(async () => {
-    plane = await generatePlaneKeyPair("plane-golden");
-    (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY =
-      formatPlanePublicKey(plane.publicKey);
-  });
-  afterAll(() => {
-    (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY = "";
-  });
+  const plane = installTestPlaneKey("plane-golden");
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -148,11 +126,7 @@ describe("dispatch golden (payload contract)", () => {
     expect(sealed.epk).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(sealed.iv).toMatch(/^[A-Za-z0-9_-]{16}$/);
     expect(sealed.ct).toMatch(/^[A-Za-z0-9_-]{24,}$/);
-    const secrets = await unsealRunSecrets(
-      [plane.privateKey],
-      sealed,
-      t.threadChatId,
-    );
+    const secrets = await plane.unseal(input);
     expect(secrets.installationToken).toBe("mock-github-token");
     expect(secrets.daemonToken).toMatch(/^[A-Za-z0-9_-]{64}$/);
     expect(JSON.stringify(body)).not.toContain(secrets.daemonToken);

@@ -450,6 +450,50 @@ describe("runSupersedeSweep rule (iii) — failed-unreported runs (#380)", () =>
     expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(false);
   });
 
+  it("a thread whose only run row is RETIRED (a re-run of a thread that once had a review) is rule (iii)'s again", async () => {
+    const { retireHatchetRun } = await import(
+      "@terragon/shared/model/hatchet-run"
+    );
+    const old = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 51,
+      externalId: "r-retired",
+      ageMs: N + 120_000,
+      repoFullName: "be-automata/automata",
+      status: "booting",
+    });
+    await retireHatchetRun({
+      db,
+      key: { externalId: "r-retired" },
+      as: "terminal",
+    });
+    const stamp = new Date(Date.now() - N - 60_000);
+    await db
+      .update(threadTable)
+      .set({ updatedAt: stamp })
+      .where(eq(threadTable.id, old.threadId));
+    const name = daemonRunKey(old);
+    await auth.api.createApiKey({
+      body: { name, userId: user.id, metadata: { tokenType: "daemon" } },
+    });
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns: async (hint) =>
+        hint.threadId === old.threadId
+          ? [{ externalId: "r-rerun", status: "FAILED" as const }]
+          : [],
+    });
+    expect(report.unreported).toContain(old.threadId);
+    expect((await threadRow(old.threadId)).terminalCause).toBe(
+      "run-failed-unreported",
+    );
+    expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(false);
+  });
+
   it("a listing failure leaves the thread for the next tick (no terminal, token kept)", async () => {
     const t = await bootingTaskThread(N + 60_000);
     const report = await runSupersedeSweep({

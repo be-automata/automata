@@ -1,7 +1,5 @@
 import {
-  isSealedRunSecrets,
   unsealRunSecrets,
-  RUN_SECRET_FIELDS,
   type PlanePrivateKey,
   type RunSecrets,
 } from "@terragon/utils/payload-seal";
@@ -17,11 +15,7 @@ import type { AgentRunInput } from "./types";
  * `AgentRunInput` and a separate `RunSecrets` that is passed explicitly to
  * every consumer and never logged.
  */
-export type AgentRunWireInput = AgentRunInput & {
-  installationToken?: string;
-  githubReadToken?: string;
-  daemonToken?: string;
-};
+export type AgentRunWireInput = AgentRunInput & Partial<RunSecrets>;
 
 export type RunSecretsSource = "sealed" | "legacy";
 
@@ -44,21 +38,26 @@ export async function resolveRunSecrets({
   input: AgentRunInput;
   secrets: RunSecrets;
   source: RunSecretsSource;
+  /** Both shapes arrived: the plain-text fields were discarded (a www defect to report). */
+  legacyFieldsIgnored: boolean;
 }> {
   const { installationToken, githubReadToken, daemonToken, ...rest } = wire;
   const input: AgentRunInput = rest;
   if (input.sealedSecrets !== undefined) {
-    if (!isSealedRunSecrets(input.sealedSecrets)) {
-      throw new Error(
-        "payload-seal: input.sealedSecrets is not a v1 envelope (shape)",
-      );
-    }
+    // Shape, kid, tag and plaintext are all unsealRunSecrets' to judge —
+    // every failure is one PayloadSealError class.
     const secrets = await unsealRunSecrets(
       keys,
       input.sealedSecrets,
       input.threadChatId,
     );
-    return { input, secrets, source: "sealed" };
+    return {
+      input,
+      secrets,
+      source: "sealed",
+      legacyFieldsIgnored:
+        installationToken !== undefined || daemonToken !== undefined,
+    };
   }
   if (strict) {
     throw new Error(
@@ -82,16 +81,5 @@ export async function resolveRunSecrets({
       : {}),
     daemonToken,
   };
-  return { input, secrets, source: "legacy" };
-}
-
-/**
- * True when `text` contains any value of `secrets` — the predicate the
- * "no secret in argv / step log / output / failure reason" tests use.
- */
-export function containsRunSecret(text: string, secrets: RunSecrets): boolean {
-  return RUN_SECRET_FIELDS.some((field) => {
-    const value = secrets[field];
-    return typeof value === "string" && value !== "" && text.includes(value);
-  });
+  return { input, secrets, source: "legacy", legacyFieldsIgnored: false };
 }

@@ -1,13 +1,12 @@
-import { readFileSync } from "node:fs";
-
 import {
-  generatePlaneKeyPair,
   isPlanePrivateKey,
   publicKeyOf,
   sealRunSecrets,
   unsealRunSecrets,
   type PlanePrivateKey,
 } from "@terragon/utils/payload-seal";
+
+import { GuardedFileError, readGuardedFile } from "./guarded-file";
 
 /**
  * The execution plane's seal key ring (#380). `/etc/automata/payload-seal.key`
@@ -32,14 +31,6 @@ export class PlaneKeyFileMissingError extends Error {
   }
 }
 
-function isEnoent(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    (err as { code?: unknown }).code === "ENOENT"
-  );
-}
-
 /**
  * Read and validate the key file. Throws PlaneKeyFileMissingError on ENOENT,
  * and a plain Error (naming the path, never a key byte) on an unreadable
@@ -48,11 +39,16 @@ function isEnoent(err: unknown): boolean {
 export function readPlaneKeyFile(path: string): PlanePrivateKey[] {
   let text: string;
   try {
-    text = readFileSync(path, "utf8");
+    // Guarded like the box's other secret file: no symlink, regular file,
+    // size-capped, never world-accessible (a 0400 ring that became 0644
+    // is refused, not silently used).
+    text = readGuardedFile(path);
   } catch (err) {
-    if (isEnoent(err)) throw new PlaneKeyFileMissingError(path);
+    if (err instanceof GuardedFileError && err.code === "ENOENT") {
+      throw new PlaneKeyFileMissingError(path);
+    }
     throw new Error(
-      `payload-seal: key file unreadable: ${path} (${err instanceof Error ? err.message : String(err)})`,
+      `payload-seal: key file unreadable: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
   let parsed: unknown;
@@ -81,8 +77,10 @@ export function readPlaneKeyFile(path: string): PlanePrivateKey[] {
       );
     }
     seen.add(entry.kid);
-    // Only the two fields travel on: a stray property in the file never does.
-    out.push({ kid: entry.kid, privateKeyJwk: { ...entry.privateKeyJwk } });
+    // Only the four JWK members travel on: a hand-edited `key_ops`/`ext`/`alg`
+    // in the file would otherwise reach importKey.
+    const { kty, crv, x, d } = entry.privateKeyJwk;
+    out.push({ kid: entry.kid, privateKeyJwk: { kty, crv, x, d } });
   });
   return out;
 }
@@ -127,13 +125,6 @@ export async function assertPlaneKeysUsable(
     }
   }
   return keys.map((k) => k.kid);
-}
-
-/** A throwaway ring for tests and the dev launcher; never written to disk here. */
-export async function generateThrowawayRing(
-  kid = "plane-dev",
-): Promise<PlanePrivateKey[]> {
-  return [(await generatePlaneKeyPair(kid)).privateKey];
 }
 
 let ring: { path: string; keys: PlanePrivateKey[] } | null = null;

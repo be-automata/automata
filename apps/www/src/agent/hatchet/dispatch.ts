@@ -117,12 +117,16 @@ async function triggerWithRetry(
       return await triggerAgentRun(input, hatchetConfig(), opts);
     } catch (error) {
       lastError = error;
+      // An engine 4xx can echo the request body, which in the rollout window
+      // still holds plain-text tokens: never log it unredacted.
       console.error("[hatchet] trigger attempt failed", {
         threadId,
         threadChatId,
         attempt,
         maxAttempts: TRIGGER_MAX_ATTEMPTS,
-        error: error instanceof Error ? error.message : String(error),
+        error: redactSecrets(
+          error instanceof Error ? error.message : String(error),
+        ),
       });
       if (attempt < TRIGGER_MAX_ATTEMPTS) {
         await sleep(TRIGGER_BACKOFF_MS * attempt);
@@ -567,9 +571,11 @@ async function planReviewRun({
 type TaskRunExtension = Pick<
   AgentRunInput,
   "taskAgent" | "githubReadTokenExpiresAt"
-> & {
-  /** SECRET (#380): sealed with the other two, never spread into the input. */
-  githubReadToken?: string;
+>;
+/** The task plan: what goes into the input, and the one SECRET that goes into the envelope (#380). */
+type TaskRunPlan = {
+  extension: TaskRunExtension;
+  secrets: Pick<RunSecrets, "githubReadToken">;
 };
 
 /**
@@ -602,7 +608,7 @@ async function planTaskRun({
   owner: string;
   repo: string;
   installationId: number;
-}): Promise<TaskRunExtension> {
+}): Promise<TaskRunPlan> {
   const resolution = resolveTaskAgentFromRows({ organizationId, ...rows });
   if ("invalid" in resolution) {
     console.warn(
@@ -617,14 +623,14 @@ async function planTaskRun({
   }
   const { taskAgent } = resolution;
   if (taskAgent === undefined) {
-    return {};
+    return { extension: {}, secrets: {} };
   }
   console.log("[hatchet] task agent", {
     threadId,
     packs: taskAgent.batteries,
   });
   if (!packsRequire(taskAgent.batteries, "github-read-token")) {
-    return { taskAgent };
+    return { extension: { taskAgent }, secrets: {} };
   }
   try {
     const minted = await getReadOnlyInstallationToken(
@@ -637,9 +643,8 @@ async function planTaskRun({
       expiresAt: minted.expiresAt,
     });
     return {
-      taskAgent,
-      githubReadToken: minted.token,
-      githubReadTokenExpiresAt: minted.expiresAt,
+      extension: { taskAgent, githubReadTokenExpiresAt: minted.expiresAt },
+      secrets: { githubReadToken: minted.token },
     };
   } catch (error) {
     console.warn(
@@ -652,7 +657,7 @@ async function planTaskRun({
         ),
       },
     );
-    return { taskAgent };
+    return { extension: { taskAgent }, secrets: {} };
   }
 }
 
@@ -661,31 +666,33 @@ async function planTaskRun({
  * the three run secrets are sealed to it (AAD = threadChatId) and the input
  * gains `sealedSecrets`; the `kid` is logged so an operator can match it
  * against the kid list the worker logs at boot (rollout step 3). With no key
- * the PR-1 legacy shape is returned. Throws on a malformed key or a seal
- * failure — the caller's guarded region revokes the daemon token.
+ * (the PR-1 rollout window) the legacy plain-text shape is returned and the
+ * dual worker reads it; PR 2 fails closed here instead. Called INSIDE
+ * dispatch's guarded region: a malformed key or a seal failure throws into
+ * the catch that revokes the minted daemon token, exactly like every other
+ * pre-trigger failure.
  */
 async function sealWireInput({
   input,
   secrets,
-  threadChatId,
-  threadId,
-  planeKeyText = env.HATCHET_PAYLOAD_SEAL_KEY,
 }: {
   input: AgentRunInput;
   secrets: RunSecrets;
-  threadChatId: string;
-  threadId: string;
-  planeKeyText?: string;
 }): Promise<AgentRunWireInput> {
+  const planeKeyText = env.HATCHET_PAYLOAD_SEAL_KEY.trim();
   if (planeKeyText === "") {
     const legacy: LegacyAgentRunInput = { ...input, ...secrets };
     return legacy;
   }
   const planeKey = parsePlanePublicKey(planeKeyText);
-  const sealedSecrets = await sealRunSecrets(planeKey, secrets, threadChatId);
+  const sealedSecrets = await sealRunSecrets(
+    planeKey,
+    secrets,
+    input.threadChatId,
+  );
   console.log("[hatchet] run secrets sealed", {
-    threadId,
-    threadChatId,
+    threadId: input.threadId,
+    threadChatId: input.threadChatId,
     kid: planeKey.kid,
   });
   return { ...input, sealedSecrets };
@@ -985,34 +992,24 @@ export async function dispatchAgentRun({
       branch === thread?.repoBaseBranchName
         ? remoteTaskBranchName(threadId)
         : undefined;
-    // #380: the read-only token is a SECRET — it goes into the envelope with
-    // the other two, never into the reference-only input.
-    const { githubReadToken, ...taskPlanInput } = taskPlan ?? {};
     const input: AgentRunInput = {
       ...baseInput,
       ...plan?.inputExtension,
-      ...taskPlanInput,
+      ...taskPlan?.extension,
       ...selfHealPlan,
       ...(repoEnvKeys.length > 0 ? { repoEnv } : {}),
       ...(workBranch !== undefined ? { workBranch } : {}),
     };
+    // #380: the read-only task token is the third secret; it never enters
+    // the reference-only input (the plan split it out at the source).
     const secrets: RunSecrets = {
       installationToken,
-      ...(githubReadToken !== undefined ? { githubReadToken } : {}),
+      ...taskPlan?.secrets,
       daemonToken,
     };
-    // #380: seal INSIDE the guarded region — a seal failure (or a malformed
-    // plane key) lands in the catch below and revokes the minted daemon token
-    // exactly like every other pre-trigger failure. Every variant (task,
-    // review, self-heal) goes through this one line: no lane keeps a
-    // plain-text path. An EMPTY key is the PR-1 rollout window: the legacy
-    // shape is sent and the (dual) worker reads it; PR 2 fails closed here.
-    const wireInput = await sealWireInput({
-      input,
-      secrets,
-      threadChatId,
-      threadId,
-    });
+    // #380: seal inside the guarded region (see sealWireInput) — every lane,
+    // one line, no plain-text path.
+    const wireInput = await sealWireInput({ input, secrets });
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry
     // absorbs transients; only a FINAL failure lands in the catch below. A
@@ -1103,7 +1100,9 @@ export async function dispatchAgentRun({
       {
         threadId,
         threadChatId,
-        error: error instanceof Error ? error.message : String(error),
+        error: redactSecrets(
+          error instanceof Error ? error.message : String(error),
+        ),
       },
     );
     await revokeDaemonTokensForSandbox({ userId, sandboxId: runKey }).catch(

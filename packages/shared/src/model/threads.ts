@@ -1724,14 +1724,10 @@ export async function findOrphanRemoteThreads({
     )
     .where(
       and(
-        remoteProviderOnly
-          ? eq(schema.thread.sandboxProvider, "hatchet-remote")
-          : undefined,
-        threadEffectiveStatusIn(["booting"]),
+        remoteBootingWithoutRun({ remoteProviderOnly }),
         isNotNull(schema.thread.organizationId),
         isNotNull(schema.thread.githubPRNumber),
         eq(schema.automations.triggerType, "pull_request"),
-        isNull(schema.hatchetRun.id),
         lt(schema.thread.createdAt, new Date(now.getTime() - olderThanMs)),
       ),
     );
@@ -1739,26 +1735,32 @@ export async function findOrphanRemoteThreads({
 
 /**
  * #380 sweep rule (iii): remote threads of ANY lane still `booting` with NO
- * recorded run row (rule (i) owns the rows), whose last write is older than
+ * in-flight run row (rule (i) owns those), whose last write is older than
  * `olderThanMs`. The sweep then asks the engine for the thread's runs by
  * metadata: a run that FAILED before it could post back (an unsealable
  * payload, a clone failure, a worker death at admission) leaves the thread
  * booting and its daemon token live for a day, which also makes every retry
  * skip on the double-dispatch guard. Age is measured from `updatedAt`: a task
  * thread may be created long before it is sent (it enters `booting` at
- * dispatch), and that same write is the engine lookup window's centre.
+ * dispatch), and that same write is the engine lookup window's centre. The
+ * join is on IN-FLIGHT rows only: a thread that once had a (now retired)
+ * review row and is re-run without one must still be reconciled. Bounded
+ * like rule (i)'s batch so a queued backlog costs a bounded number of engine
+ * listings per tick.
  */
 export async function findUnreportedRemoteThreads({
   db,
   olderThanMs,
   now = new Date(),
   remoteProviderOnly = true,
+  limit = 50,
 }: {
   db: DB;
   olderThanMs: number;
   now?: Date;
   /** Same gate as findOrphanRemoteThreads. */
   remoteProviderOnly?: boolean;
+  limit?: number;
 }): Promise<{ id: string; userId: string; dispatchedAt: Date }[]> {
   return db
     .select({
@@ -1769,18 +1771,38 @@ export async function findUnreportedRemoteThreads({
     .from(schema.thread)
     .leftJoin(
       schema.hatchetRun,
-      eq(schema.hatchetRun.threadId, schema.thread.id),
+      and(
+        eq(schema.hatchetRun.threadId, schema.thread.id),
+        eq(schema.hatchetRun.status, "in_flight"),
+      ),
     )
     .where(
       and(
-        remoteProviderOnly
-          ? eq(schema.thread.sandboxProvider, "hatchet-remote")
-          : undefined,
-        threadEffectiveStatusIn(["booting"]),
-        isNull(schema.hatchetRun.id),
+        remoteBootingWithoutRun({ remoteProviderOnly }),
         lt(schema.thread.updatedAt, new Date(now.getTime() - olderThanMs)),
       ),
-    );
+    )
+    .orderBy(schema.thread.updatedAt)
+    .limit(limit);
+}
+
+/**
+ * The predicate rules (ii) and (iii) share: a remote thread (by provider, or
+ * every thread under HATCHET_ENABLED) still `booting` with no joined run row.
+ * Each finder adds its own join target, age column and lane filters.
+ */
+function remoteBootingWithoutRun({
+  remoteProviderOnly,
+}: {
+  remoteProviderOnly: boolean;
+}) {
+  return and(
+    remoteProviderOnly
+      ? eq(schema.thread.sandboxProvider, "hatchet-remote")
+      : undefined,
+    threadEffectiveStatusIn(["booting"]),
+    isNull(schema.hatchetRun.id),
+  );
 }
 
 export async function hasOtherUnarchivedThreadsWithSamePR({

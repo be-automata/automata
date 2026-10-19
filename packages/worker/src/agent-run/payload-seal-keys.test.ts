@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -48,6 +48,7 @@ describe("readPlaneKeyFile", () => {
       JSON.stringify({
         keys: [{ ...a.privateKey, extra: "x" }, b.privateKey],
       }),
+      { mode: 0o600 },
     );
     const ring = readPlaneKeyFile(f);
     expect(ring.map((k) => k.kid)).toEqual(["plane-a", "plane-b"]);
@@ -59,20 +60,23 @@ describe("readPlaneKeyFile", () => {
     const d = dir();
     expect(() => readPlaneKeyFile(fileIn(d))).toThrow(PlaneKeyFileMissingError);
     const notJson = path.join(d, "a.json");
-    writeFileSync(notJson, "{nope");
+    writeFileSync(notJson, "{nope", { mode: 0o600 });
     expect(() => readPlaneKeyFile(notJson)).toThrow("not JSON");
     const empty = path.join(d, "b.json");
-    writeFileSync(empty, JSON.stringify({ keys: [] }));
+    writeFileSync(empty, JSON.stringify({ keys: [] }), { mode: 0o600 });
     expect(() => readPlaneKeyFile(empty)).toThrow('non-empty "keys"');
     const shape = path.join(d, "c.json");
     writeFileSync(
       shape,
       JSON.stringify({ keys: [{ kid: "k", privateKeyJwk: { kty: "EC" } }] }),
+      { mode: 0o600 },
     );
     expect(() => readPlaneKeyFile(shape)).toThrow("entry 0 is not");
     const a = await generatePlaneKeyPair("plane-a");
     const dup = path.join(d, "d.json");
-    writeFileSync(dup, JSON.stringify({ keys: [a.privateKey, a.privateKey] }));
+    writeFileSync(dup, JSON.stringify({ keys: [a.privateKey, a.privateKey] }), {
+      mode: 0o600,
+    });
     const err = (() => {
       try {
         readPlaneKeyFile(dup);
@@ -85,11 +89,29 @@ describe("readPlaneKeyFile", () => {
     expect(err?.message).not.toContain(a.privateKey.privateKeyJwk.d);
   });
 
+  it("a world-readable ring or a symlink to one is refused (guarded read), never used", async () => {
+    const a = await generatePlaneKeyPair("plane-a");
+    const d = dir();
+    const loose = path.join(d, "loose.json");
+    writeFileSync(loose, JSON.stringify({ keys: [a.privateKey] }), {
+      mode: 0o644,
+    });
+    expect(() => readPlaneKeyFile(loose)).toThrow("world-accessible");
+    const tight = path.join(d, "tight.json");
+    writeFileSync(tight, JSON.stringify({ keys: [a.privateKey] }), {
+      mode: 0o600,
+    });
+    const link = path.join(d, "link.json");
+    symlinkSync(tight, link);
+    expect(() => readPlaneKeyFile(link)).toThrow("unreadable (ELOOP)");
+    expect(readPlaneKeyFile(tight)).toEqual([a.privateKey]);
+  });
+
   it("an unreadable file (mode 000) is reported as unreadable, not as missing", async () => {
     if (process.getuid?.() === 0) return; // root reads anything
     const a = await generatePlaneKeyPair("plane-a");
     const f = fileIn(dir());
-    writeFileSync(f, JSON.stringify({ keys: [a.privateKey] }));
+    writeFileSync(f, JSON.stringify({ keys: [a.privateKey] }), { mode: 0o600 });
     chmodSync(f, 0o000);
     expect(() => readPlaneKeyFile(f)).toThrow("unreadable");
     expect(() => readPlaneKeyFile(f)).not.toThrow(PlaneKeyFileMissingError);
@@ -132,7 +154,7 @@ describe("planeKeysForRun / loadPlaneKeysAtBoot", () => {
     const f = fileIn(d);
     expect(planeKeysForRun(f)).toEqual([]);
     const a = await generatePlaneKeyPair("plane-a");
-    writeFileSync(f, JSON.stringify({ keys: [a.privateKey] }));
+    writeFileSync(f, JSON.stringify({ keys: [a.privateKey] }), { mode: 0o600 });
     // Memoised: the empty read stands until the ring is reset (a rotation
     // restarts the worker by design).
     expect(planeKeysForRun(f)).toEqual([]);
@@ -142,7 +164,7 @@ describe("planeKeysForRun / loadPlaneKeysAtBoot", () => {
 
   it("a broken file throws from the per-run loader too (never silently 'absent')", () => {
     const f = fileIn(dir());
-    writeFileSync(f, "{nope");
+    writeFileSync(f, "{nope", { mode: 0o600 });
     expect(() => planeKeysForRun(f)).toThrow("not JSON");
   });
 
@@ -156,7 +178,7 @@ describe("planeKeysForRun / loadPlaneKeysAtBoot", () => {
       loadPlaneKeysAtBoot({ path: f, required: true }),
     ).rejects.toThrow(PlaneKeyFileMissingError);
     const a = await generatePlaneKeyPair("plane-2026-10");
-    writeFileSync(f, JSON.stringify({ keys: [a.privateKey] }));
+    writeFileSync(f, JSON.stringify({ keys: [a.privateKey] }), { mode: 0o600 });
     resetPlaneKeyRingForTests();
     await expect(
       loadPlaneKeysAtBoot({ path: f, required: false }),
@@ -182,6 +204,7 @@ describe("planeKeysForRun / loadPlaneKeysAtBoot", () => {
           },
         ],
       }),
+      { mode: 0o600 },
     );
     await expect(
       loadPlaneKeysAtBoot({ path: f, required: false }),

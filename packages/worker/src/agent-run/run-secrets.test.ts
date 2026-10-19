@@ -7,11 +7,7 @@ import {
   type RunSecrets,
 } from "@terragon/utils/payload-seal";
 
-import {
-  containsRunSecret,
-  resolveRunSecrets,
-  type AgentRunWireInput,
-} from "./run-secrets";
+import { resolveRunSecrets, type AgentRunWireInput } from "./run-secrets";
 import type { AgentRunInput } from "./types";
 
 /**
@@ -35,6 +31,12 @@ const SECRETS: RunSecrets = {
   githubReadToken: "ghs_wireRead0123456789abcdef",
   daemonToken: "daemon_wire_0123456789",
 };
+/** True when `text` carries any value of `secrets` (the no-leak predicate). */
+const containsRunSecret = (text: string, secrets: RunSecrets) =>
+  Object.values(secrets).some(
+    (v) => typeof v === "string" && v !== "" && text.includes(v),
+  );
+
 const BASE: AgentRunInput = {
   threadId: "thr_1",
   threadChatId: "tc_1",
@@ -62,6 +64,7 @@ describe("resolveRunSecrets", () => {
     };
     const out = await resolveRunSecrets({ wire, keys: [plane.privateKey] });
     expect(out.source).toBe("sealed");
+    expect(out.legacyFieldsIgnored).toBe(true);
     expect(out.secrets).toEqual(SECRETS);
     expect(out.input).toEqual({ ...BASE, sealedSecrets });
     expect(JSON.stringify(out.input)).not.toContain("SHOULD_BE_IGNORED");
@@ -98,7 +101,7 @@ describe("resolveRunSecrets", () => {
         },
         keys: [plane.privateKey],
       }),
-    ).rejects.toThrow("not a v1 envelope");
+    ).rejects.toThrow("reason=malformed");
   });
 
   it("legacy window: plain-text fields are lifted when no envelope is present; strict refuses them", async () => {

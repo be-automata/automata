@@ -220,7 +220,9 @@ describe("agentRunWorkflow onFailure (#2)", () => {
       mkdtempSync(path.join(tmpdir(), "seal-fail-")),
       "payload-seal.json",
     );
-    writeFileSync(keyFile, JSON.stringify({ keys: [plane.privateKey] }));
+    writeFileSync(keyFile, JSON.stringify({ keys: [plane.privateKey] }), {
+      mode: 0o600,
+    });
     process.env.WORKER_PAYLOAD_SEAL_KEY_FILE = keyFile;
     resetPlaneKeyRingForTests();
     try {

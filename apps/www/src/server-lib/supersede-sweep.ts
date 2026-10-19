@@ -239,15 +239,7 @@ export async function runSupersedeSweep(
   const readStatus =
     deps.readStatus ??
     ((externalId: string, hint: AgentRunLookupHint) =>
-      getAgentRunStatus(
-        externalId,
-        {
-          apiUrl: env.HATCHET_API_URL,
-          tenantId: env.HATCHET_TENANT_ID,
-          apiToken: env.HATCHET_API_TOKEN,
-        },
-        hint,
-      ));
+      getAgentRunStatus(externalId, hatchetConfig, hint));
 
   // Rule (i): claim the batch in ONE compare-and-set, then read the engine
   // with bounded concurrency; every terminal pair is idempotent.
@@ -334,13 +326,12 @@ export async function runSupersedeSweep(
           // once it has. If the thread write fails the row stays in_flight
           // and the next tick retries — retiring first would drop the row
           // from findSweepCandidates while the thread never terminated.
-          const applied = await markThreadTerminal({
-            db,
+          const applied = await sweepTerminal({
             threadId: run.threadId,
+            userId: run.threadUserId,
             cause: decision.cause,
             supersededByThreadId: decision.supersededByThreadId,
           });
-          await revokeRunTokens(run.threadUserId, run.threadId);
           await retireHatchetRun({
             db,
             key: { id: run.id },
@@ -387,22 +378,33 @@ export async function runSupersedeSweep(
     }
   });
 
-  // Rule (ii)
-  const orphans = await findOrphanRemoteThreads({
-    db,
-    olderThanMs: orphanAfterMs,
-    now,
-    // Same gate as hatchetDispatchEnabled(): with HATCHET_ENABLED every review
-    // thread is remote regardless of its (local-default) provider column.
-    remoteProviderOnly: !env.HATCHET_ENABLED,
-  });
-  for (const t of orphans) {
-    const applied = await markThreadTerminal({
+  // Rules (ii) and (iii): both reads are independent of rule (i)'s writes and
+  // of each other; only the WRITES are ordered ((ii) first, so a PR-review
+  // orphan keeps its `plane-offline` cause).
+  // Same gate as hatchetDispatchEnabled(): with HATCHET_ENABLED every review
+  // thread is remote regardless of its (local-default) provider column.
+  const remoteProviderOnly = !env.HATCHET_ENABLED;
+  const [orphans, unreported] = await Promise.all([
+    findOrphanRemoteThreads({
       db,
+      olderThanMs: orphanAfterMs,
+      now,
+      remoteProviderOnly,
+    }),
+    findUnreportedRemoteThreads({
+      db,
+      olderThanMs: orphanAfterMs,
+      now,
+      remoteProviderOnly,
+    }),
+  ]);
+  // Rule (ii)
+  for (const t of orphans) {
+    const applied = await sweepTerminal({
       threadId: t.id,
+      userId: t.userId,
       cause: "plane-offline",
     });
-    await revokeRunTokens(t.userId, t.id);
     if (applied) {
       report.orphans.push(t.id);
       console.log("[supersede-sweep] orphan → plane-offline", {
@@ -412,14 +414,8 @@ export async function runSupersedeSweep(
     }
   }
 
-  // Rule (iii) (#380): AFTER rule (ii), so a PR-review orphan keeps its
-  // `plane-offline` cause and this rule sees the lanes with no row at all.
-  const unreported = await findUnreportedRemoteThreads({
-    db,
-    olderThanMs: orphanAfterMs,
-    now,
-    remoteProviderOnly: !env.HATCHET_ENABLED,
-  });
+  // Rule (iii) (#380), written after rule (ii). A thread rule (ii) just
+  // terminalised is no longer booting, so its sweepTerminal CAS is a no-op.
   await mapLimit(unreported, ENGINE_READ_CONCURRENCY, async (t) => {
     let runs: Array<{ externalId: string; status: AgentRunStatus }>;
     try {
@@ -441,12 +437,11 @@ export async function runSupersedeSweep(
       return;
     }
     try {
-      const applied = await markThreadTerminal({
-        db,
+      const applied = await sweepTerminal({
         threadId: t.id,
+        userId: t.userId,
         cause: "run-failed-unreported",
       });
-      await revokeRunTokens(t.userId, t.id);
       if (applied) {
         report.unreported.push(t.id);
         console.log("[supersede-sweep] unreported failure → terminal", {
@@ -468,12 +463,34 @@ export async function runSupersedeSweep(
 }
 
 /**
- * #380: a terminal the sweep wrote means the run is dead; its daemon token
- * must die with it or the double-dispatch guard skips every retry for a day.
- * Best-effort — a revoke failure never undoes the terminal (the token still
- * expires), it is logged and the next dispatch attempt surfaces the skip.
+ * The ONE way the sweep writes a terminal (#380): the thread's typed
+ * terminal, and — ONLY when that compare-and-set applied — the thread's
+ * remote daemon tokens, because a terminal the sweep wrote means the run is
+ * dead and a live token would make the double-dispatch guard skip every
+ * retry for a day. A CAS that lost (the thread went terminal or was resumed
+ * under a NEW run between the read and this write) must not touch tokens: the
+ * `${threadId}:` prefix would hit the new run's token too (the S12 class of
+ * sibling kill). The revoke is best-effort — a failure never undoes the
+ * terminal (the token still expires); it is logged.
  */
-async function revokeRunTokens(userId: string, threadId: string) {
+async function sweepTerminal({
+  threadId,
+  userId,
+  cause,
+  supersededByThreadId,
+}: {
+  threadId: string;
+  userId: string;
+  cause: TerminalCause;
+  supersededByThreadId?: string;
+}): Promise<boolean> {
+  const applied = await markThreadTerminal({
+    db,
+    threadId,
+    cause,
+    supersededByThreadId,
+  });
+  if (!applied) return false;
   try {
     await revokeDaemonTokensForThread({ userId, threadId });
   } catch (error) {
@@ -482,4 +499,5 @@ async function revokeRunTokens(userId: string, threadId: string) {
       error: error instanceof Error ? error.message : String(error),
     });
   }
+  return true;
 }

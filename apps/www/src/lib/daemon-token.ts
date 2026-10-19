@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { apikey, thread as threadTable } from "@terragon/shared/db/schema";
-import { and, eq, like } from "drizzle-orm";
+import { and, eq, like, type SQL } from "drizzle-orm";
 
 /**
  * Mint the org-scoped, thread-bound, daemon-purpose token a daemon uses to talk
@@ -123,17 +123,12 @@ export async function revokeDaemonTokenById({
   userId: string;
   apiKeyId: string;
 }): Promise<number> {
-  const deleted = await db
-    .delete(apikey)
-    .where(and(eq(apikey.referenceId, userId), eq(apikey.id, apiKeyId)))
-    .returning({ id: apikey.id });
-  if (deleted.length > 0) {
-    console.log("[daemon-token] revoked run token on terminal (by id)", {
-      userId,
-      apiKeyId,
-    });
-  }
-  return deleted.length;
+  return deleteDaemonTokens(
+    eq(apikey.id, apiKeyId),
+    userId,
+    "revoked run token on terminal (by id)",
+    { apiKeyId },
+  );
 }
 
 /**
@@ -152,19 +147,32 @@ export async function revokeDaemonTokensForThread({
   userId: string;
   threadId: string;
 }): Promise<number> {
+  return deleteDaemonTokens(
+    like(apikey.name, `${escapeLikePattern(threadId)}:%`),
+    userId,
+    "revoked run token(s) for thread",
+    { threadId },
+  );
+}
+
+/**
+ * The one delete every revoke goes through: ALWAYS fenced by the owning
+ * user, returning the count, logging one line (ids only, never a key).
+ */
+async function deleteDaemonTokens(
+  predicate: SQL,
+  userId: string,
+  logLabel: string,
+  logFields: Record<string, string>,
+): Promise<number> {
   const deleted = await db
     .delete(apikey)
-    .where(
-      and(
-        eq(apikey.referenceId, userId),
-        like(apikey.name, `${escapeLikePattern(threadId)}:%`),
-      ),
-    )
+    .where(and(eq(apikey.referenceId, userId), predicate))
     .returning({ id: apikey.id });
   if (deleted.length > 0) {
-    console.log("[daemon-token] revoked run token(s) for thread", {
+    console.log(`[daemon-token] ${logLabel}`, {
       userId,
-      threadId,
+      ...logFields,
       count: deleted.length,
     });
   }
@@ -183,16 +191,10 @@ export async function revokeDaemonTokensForSandbox({
   userId: string;
   sandboxId: string;
 }): Promise<number> {
-  const deleted = await db
-    .delete(apikey)
-    .where(and(eq(apikey.referenceId, userId), eq(apikey.name, sandboxId)))
-    .returning({ id: apikey.id });
-  if (deleted.length > 0) {
-    console.log("[daemon-token] revoked on thread terminal", {
-      userId,
-      sandboxId,
-      count: deleted.length,
-    });
-  }
-  return deleted.length;
+  return deleteDaemonTokens(
+    eq(apikey.name, sandboxId),
+    userId,
+    "revoked on thread terminal",
+    { sandboxId },
+  );
 }

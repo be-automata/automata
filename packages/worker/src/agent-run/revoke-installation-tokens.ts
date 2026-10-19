@@ -42,28 +42,32 @@ export async function revokeInstallationTokens({
       ? [{ kind: "read" as const, token: tokens.githubReadToken }]
       : []),
   ];
-  for (const { kind, token } of entries) {
-    try {
-      const res = await fetchFn(GITHUB_INSTALLATION_TOKEN_URL, {
-        method: "DELETE",
-        headers: {
-          Authorization: `token ${token}`,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
-        },
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      log(`token.revoke ${JSON.stringify({ kind, status: res.status })}`);
-    } catch (err) {
-      const error =
-        err instanceof Error
-          ? err.name === "TimeoutError" || err.name === "AbortError"
-            ? "timeout"
-            : err.name
-          : "unknown";
-      log(`token.revoke ${JSON.stringify({ kind, error })}`);
-    }
-  }
+  // Both DELETEs in parallel: the box slot is still held, so a GitHub stall
+  // costs one timeout budget, not one per token.
+  await Promise.all(
+    entries.map(async ({ kind, token }) => {
+      try {
+        const res = await fetchFn(GITHUB_INSTALLATION_TOKEN_URL, {
+          method: "DELETE",
+          headers: {
+            Authorization: `token ${token}`,
+            Accept: "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+          },
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        log(`token.revoke ${JSON.stringify({ kind, status: res.status })}`);
+      } catch (err) {
+        const error =
+          err instanceof Error
+            ? err.name === "TimeoutError" || err.name === "AbortError"
+              ? "timeout"
+              : err.name
+            : "unknown";
+        log(`token.revoke ${JSON.stringify({ kind, error })}`);
+      }
+    }),
+  );
 }
 
 /**
@@ -74,16 +78,17 @@ export async function revokeInstallationTokens({
  * every exit that never reached that point (stale-skip, a clone failure, an
  * admission throw). The second call is a no-op.
  */
+export interface TokenRevoker {
+  revokeOnce: () => Promise<void>;
+}
+
 export function createTokenRevoker(
   tokens: RevokeTokens,
   log: (line: string) => void,
   deps: { fetchFn?: typeof fetch; timeoutMs?: number } = {},
-): { revokeOnce: () => Promise<void>; readonly done: boolean } {
+): TokenRevoker {
   let started: Promise<void> | null = null;
   return {
-    get done() {
-      return started !== null;
-    },
     revokeOnce: () => {
       if (started === null) {
         started = revokeInstallationTokens({ tokens, log, ...deps });

@@ -228,15 +228,15 @@ async function main() {
   // flips `required` to true. The kid list printed here is what rollout step
   // 3 compares against the kid www logs at dispatch.
   try {
-    const sealCfg = loadWorkerConfig();
+    const { payloadSealKeyFile } = loadWorkerConfig();
     const ring = await loadPlaneKeysAtBoot({
-      path: sealCfg.payloadSealKeyFile,
+      path: payloadSealKeyFile,
       required: false,
     });
     console.log(
       ring.present
-        ? `[worker-boot] payload seal: ${ring.kids.length} key(s) usable (${ring.kids.join(", ")}) from ${sealCfg.payloadSealKeyFile}`
-        : `[worker-boot] payload seal: no key file at ${sealCfg.payloadSealKeyFile} — legacy plain-text inputs only (rollout step 1)`,
+        ? `[worker-boot] payload seal: ${ring.kids.length} key(s) usable (${ring.kids.join(", ")}) from ${payloadSealKeyFile}`
+        : `[worker-boot] payload seal: no key file at ${payloadSealKeyFile} — legacy plain-text inputs only (rollout step 1)`,
     );
   } catch (err) {
     console.error(
