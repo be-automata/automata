@@ -157,8 +157,9 @@ does so on a resource other than the slot count. Under its slot and BEFORE the c
 reads `/proc/meminfo` and is admitted only if both arms hold — `MemAvailable − reserved ≥
 floor` and `Committed_AS + reserved + runCommit ≤ fraction × CommitLimit` (`headroom.ts`,
 knobs in `deploy/README.md`). Admissions are serialised by an in-process mutex and an
-admitted run **reserves** `runCommit` for its whole life, shrunk by what the kernel already
-charges its cgroup (`memory.current`) once it exists, so two concurrent admissions cannot both
+admitted run **reserves** `runCommit` for its whole life, shrunk by the anonymous memory the kernel
+already charges its cgroup (`memory.stat` anon + shmem — what `Committed_AS` counts; never
+`memory.current`, which includes page cache) once it exists, so two concurrent admissions cannot both
 pass on the same headroom and a live run's later growth stays counted. A refusal
 releases the slot (nothing of the run is on disk) and throws `AdmissionDeferredError` — the
 ONE plain error the run task lets escape: the engine re-queues the attempt (QUEUED, never

@@ -7,7 +7,7 @@ import {
   type PerPrStrategy,
 } from "./definition";
 import { configForSlot, loadWorkerConfig } from "./config";
-import { readMemoryCurrent } from "./run-cgroup";
+import { readMemoryAnon } from "./run-cgroup";
 import { acquireBoxSlot, type BoxLock } from "./box-lock";
 import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { reapAgentUidEscapees } from "./uid-reaper";
@@ -1041,7 +1041,7 @@ async function runAgentInner(
     // in the catch below; nothing of this run is on disk yet. The reservation
     // it returns lives as long as the run (released in the finally and in
     // every pre-daemon unwind); once the run's cgroup exists it shrinks by
-    // what the kernel already charges the run (daemon.start() below).
+    // the anonymous memory the kernel already charges the run (daemon.start() below).
     reservation =
       getAdmissionController(config)?.admit({
         threadId: input.threadId,
@@ -1416,13 +1416,12 @@ async function runAgentInner(
     // Run: bring up the daemon, then pull the message it should execute.
     await daemon.start();
     step(`daemon spawned: pid=${daemon.pid ?? "unknown"}`);
-    // #371: from here the run's own cgroup says what the kernel already
-    // charges it; the headroom reservation counts only the remainder.
+    // #371: from here the run's own cgroup says what anonymous memory the
+    // kernel already charges it (what Committed_AS counts); the headroom
+    // reservation counts only the remainder.
     const runCgroupDir = daemon.runCgroupDir();
     if (runCgroupDir) {
-      reservation?.observe(() =>
-        readMemoryCurrent({ cgroupDir: runCgroupDir }),
-      );
+      reservation?.observe(() => readMemoryAnon({ cgroupDir: runCgroupDir }));
     }
     // #6: a 4xx next-message (PR gone / permission / bad token) is terminal →
     // NonRetryableError; a 5xx/network stays retryable (classifyNextMessageError).

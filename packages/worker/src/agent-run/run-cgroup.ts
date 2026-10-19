@@ -502,25 +502,36 @@ export function readMemoryEvents(opts: {
 }
 
 /**
- * This run's `memory.current` in bytes (what the kernel already charges the
- * cgroup: anonymous + page cache), or null when the file is missing or
- * malformed. #371 reads it to shrink a live run's headroom reservation by what
- * the kernel already counts — RSS is at or below the run's committed virtual
- * memory, so the subtraction only ever under-shrinks (conservative).
+ * The anonymous memory the kernel charges this run's cgroup, in bytes: the
+ * `anon` + `shmem` lines of `memory.stat`. #371 shrinks a live run's headroom
+ * reservation by it — NOT by `memory.current`, which also counts file-backed
+ * page cache that `Committed_AS` (the commit arm's figure) never includes: a
+ * run writing node_modules could otherwise look fully charged while its
+ * committed memory was still small. Anonymous memory is at or below what the
+ * run has committed, so the subtraction only ever under-shrinks. null when the
+ * file is missing or carries no usable `anon` line (the cgroup may be gone).
  */
-export function readMemoryCurrent(opts: {
+export function readMemoryAnon(opts: {
   cgroupDir: string;
   fsi?: CgroupFs;
 }): number | null {
   const io = opts.fsi ?? defaultFs;
+  let raw: string;
   try {
-    const n = Number(
-      io.read(path.join(opts.cgroupDir, "memory.current")).trim(),
-    );
-    return Number.isFinite(n) && n >= 0 ? n : null;
+    raw = io.read(path.join(opts.cgroupDir, "memory.stat"));
   } catch {
     return null;
   }
+  let anon: number | null = null;
+  let shmem = 0;
+  for (const line of raw.split("\n")) {
+    const [key, value] = line.trim().split(/\s+/);
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) continue;
+    if (key === "anon") anon = n;
+    else if (key === "shmem") shmem = n;
+  }
+  return anon === null ? null : anon + shmem;
 }
 
 /**

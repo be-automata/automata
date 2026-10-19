@@ -28,7 +28,7 @@ import fs from "node:fs";
  * decision itself is one synchronous step (a sync read of /proc/meminfo, parse,
  * evaluate, reserve) on one event loop, so no two decisions can interleave; and
  * an admitted run RESERVES its expected commit for its WHOLE LIFE, minus what the
- * kernel already charges its cgroup (`memory.current`, attached once the daemon
+ * kernel already charges its cgroup (anonymous memory from `memory.stat`, attached once the daemon
  * exists) — the kernel's `Committed_AS` carries only what a run has committed so
  * far, and a run released at its first sign of life would leave its later growth
  * uncounted for the next admission. Keep `decide` synchronous — an `await`
@@ -182,10 +182,11 @@ export interface Reservation {
    */
   release(): void;
   /**
-   * Attach the run's own memory reading (its cgroup's `memory.current`) once it
-   * exists. From then on the reservation counts only `runCommit − current`
-   * (floored at 0): what the kernel already charges the run is in Committed_AS,
-   * the rest is still owed. Without a probe the whole runCommit stays reserved.
+   * Attach the run's own memory reading (its cgroup's anonymous memory,
+   * `memory.stat` anon + shmem — what Committed_AS actually counts; never
+   * `memory.current`, which includes page cache) once it exists. From then on
+   * the reservation counts only `runCommit − anon` (floored at 0); without a
+   * probe, or when it reads nothing, the whole runCommit stays reserved.
    */
   observe(current: () => number | null): void;
 }
@@ -199,7 +200,7 @@ const NO_RESERVATION: Reservation = { release: () => {}, observe: () => {} };
  * admission is byte-for-byte today's.
  */
 export class AdmissionController {
-  /** threadId → the live reservation: expected commit, its identity (a stale generation's release cannot drop a newer one), and the run's own usage probe once it has one. */
+  /** threadId → the live reservation: expected commit, its identity (a stale generation's release cannot drop a newer one), and the run's own anonymous-memory probe once it has one. */
   private reserved = new Map<
     string,
     { bytes: number; token: symbol; current?: () => number | null }
@@ -210,7 +211,7 @@ export class AdmissionController {
     private readonly readMeminfo: () => string = readProcMeminfo,
   ) {}
 
-  /** Sum over live runs of what each still owes: `runCommit − memory.current` (0 when fully charged), the whole runCommit before its probe exists. */
+  /** Sum over live runs of what each still owes: `runCommit − anon` (0 when fully charged), the whole runCommit before its probe exists or when it reads nothing. */
   reservedBytes(): number {
     let sum = 0;
     for (const v of this.reserved.values()) {

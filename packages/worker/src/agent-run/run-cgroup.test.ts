@@ -9,6 +9,7 @@ import {
   parseCgroupPath,
   parseControllers,
   prepareDelegatedRoot,
+  readMemoryAnon,
   readMemoryEvents,
   REQUIRED_CONTROLLERS,
   runCgroupPath,
@@ -368,6 +369,36 @@ describe("createRunCgroup", () => {
     expect(runCgroupPath(root, "a/b")).not.toBe(runCgroupPath(root, "a_b"));
     // Same id ⇒ same path, or teardown could not find what start created.
     expect(runCgroupPath(root, "a/b")).toBe(runCgroupPath(root, "a/b"));
+  });
+});
+
+describe("readMemoryAnon (#371: what Committed_AS counts, never page cache)", () => {
+  it("sums anon + shmem from memory.stat and ignores file cache", () => {
+    const f = fakeFs({
+      "/cg/memory.stat":
+        "anon 314572800\nfile 2147483648\nkernel 1048576\nshmem 1048576\nfile_mapped 10\n",
+    });
+    expect(readMemoryAnon({ cgroupDir: "/cg", fsi: f.fsi })).toBe(
+      314572800 + 1048576,
+    );
+  });
+
+  it("null when the file is missing, has no anon line, or anon is garbage — the caller then keeps the whole reservation", () => {
+    expect(
+      readMemoryAnon({ cgroupDir: "/cg", fsi: fakeFs({}).fsi }),
+    ).toBeNull();
+    expect(
+      readMemoryAnon({
+        cgroupDir: "/cg",
+        fsi: fakeFs({ "/cg/memory.stat": "file 123\nshmem 5\n" }).fsi,
+      }),
+    ).toBeNull();
+    expect(
+      readMemoryAnon({
+        cgroupDir: "/cg",
+        fsi: fakeFs({ "/cg/memory.stat": "anon lots\n" }).fsi,
+      }),
+    ).toBeNull();
   });
 });
 

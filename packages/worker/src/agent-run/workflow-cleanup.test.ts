@@ -230,6 +230,15 @@ vi.mock("./gh-broker", () => ({
   startGhBroker: (...args: unknown[]) => startGhBroker(...args),
 }));
 
+let fakeRunCgroupDir: string | null = null;
+const readMemoryAnon = vi.fn(
+  (_opts: { cgroupDir: string }): number | null => null,
+);
+vi.mock("./run-cgroup", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./run-cgroup")>()),
+  readMemoryAnon: (opts: { cgroupDir: string }) => readMemoryAnon(opts),
+}));
+
 vi.mock("./daemon-process", () => ({
   DaemonProcess: class {
     constructor(...args: unknown[]) {
@@ -247,8 +256,8 @@ vi.mock("./daemon-process", () => ({
     teardown = vi.fn(() => {
       finallyOrder.push("teardown");
     });
-    // #371: no run cgroup in the double (the ceiling is off here).
-    runCgroupDir = () => null;
+    // #371: a test sets fakeRunCgroupDir to stand in for the ceiling's cgroup.
+    runCgroupDir = () => fakeRunCgroupDir;
   },
 }));
 
@@ -2197,7 +2206,7 @@ Committed_AS:   12000000 kB
     ).toBe(true);
   });
 
-  it("with headroom the run is admitted (headroom_ok logged) and proceeds to the clone", async () => {
+  it("with headroom the run is admitted (headroom_ok logged) and proceeds to the clone; the reservation lives until the finally", async () => {
     const { _setAdmissionControllerForTests } = await import("./workflow");
     const { AdmissionController } = await import("./headroom");
     const controller = new AdmissionController(POLICY, () => ROOMY);
@@ -2208,8 +2217,41 @@ Committed_AS:   12000000 kB
     expect(
       ctx.log.mock.calls.some((c) => String(c[0]).includes("box.headroom_ok")),
     ).toBe(true);
-    // The reservation is gone once the daemon started (and again in finally).
+    // Released in the finally, not before.
     expect(controller.reservedBytes()).toBe(0);
+  });
+
+  it("once the daemon is up the reservation shrinks by the run cgroup's anonymous memory and is whole again when the probe reads nothing; teardown frees it", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    const controller = new AdmissionController(POLICY, () => ROOMY);
+    _setAdmissionControllerForTests(controller);
+    fakeRunCgroupDir =
+      "/sys/fs/cgroup/system.slice/automata-worker.service/run-x";
+    const anon = 300 * 1024 ** 2;
+    readMemoryAnon.mockImplementation(() => anon);
+    const seen: Array<number | null> = [];
+    pollUntilTerminal.mockReset().mockImplementation(async () => {
+      // Mid-run: the daemon started, the probe is attached.
+      seen.push(controller.reservedBytes());
+      readMemoryAnon.mockImplementation(() => null);
+      seen.push(controller.reservedBytes());
+      return { outcome: "completed", finalStatus: "complete" };
+    });
+    try {
+      await runFn(INPUT, { cancelled: false, log: vi.fn() });
+      expect(readMemoryAnon).toHaveBeenCalledWith({
+        cgroupDir: "/sys/fs/cgroup/system.slice/automata-worker.service/run-x",
+      });
+      expect(seen).toEqual([
+        POLICY.runCommitBytes - anon,
+        POLICY.runCommitBytes,
+      ]);
+      expect(controller.reservedBytes()).toBe(0);
+    } finally {
+      fakeRunCgroupDir = null;
+      readMemoryAnon.mockReset().mockImplementation(() => null);
+    }
   });
 
   it("a plain post-admission failure reaches the engine as NonRetryableError with its message intact", async () => {
