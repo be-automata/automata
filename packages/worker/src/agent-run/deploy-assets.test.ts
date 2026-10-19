@@ -2614,8 +2614,66 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
     // udp/443 is HTTP-3. A tcp-only rule leaves an https path that never meets
     // the cooperative proxy.
     const conf = deployFile("linux", "egress-nft.conf");
-    expect(conf).toMatch(/meta skuid __AGENT_UID__ tcp dport \{ 80, 443 \}/);
-    expect(conf).toMatch(/meta skuid __AGENT_UID__ udp dport \{ 80, 443 \}/);
+    // #205: an anonymous set, so one rule fences every slot account's uid.
+    expect(conf).toMatch(
+      /meta skuid \{ __AGENT_UID__ \} tcp dport \{ 80, 443 \}/,
+    );
+    expect(conf).toMatch(
+      /meta skuid \{ __AGENT_UID__ \} udp dport \{ 80, 443 \}/,
+    );
+  });
+
+  describe("#205: one agent account per box slot", () => {
+    it("the nft preflight parses a skuid SET and checks every uid in it", () => {
+      const pre = deployFile("linux", "nft-preflight.sh");
+      // Set-or-scalar extraction, then a per-uid loop — a set with the worker's
+      // uid hidden in second place must still be refused.
+      expect(pre).toMatch(/meta skuid \(\\\{\[0-9, \]\+\\\}\|\[0-9\]\+\)/);
+      expect(pre).toMatch(/for UID_IN_CONF in \$UIDS_IN_CONF/);
+      expect(pre).toMatch(/fencing uid\(s\)/);
+    });
+
+    it("the nft verify accepts the scalar nft prints for one uid AND the set it prints for several", () => {
+      const verify = deployFile("linux", "nft-verify.sh");
+      expect(verify).toMatch(
+        /SKUID='meta skuid \(\\\{ \?\[0-9, \]\+ \?\\\}\|\[0-9\]\+\)'/,
+      );
+      expect(verify).toMatch(/for u in \$FENCED/);
+    });
+
+    it("the Linux sudoers template documents the comma-separated Runas list at N > 1 and still never names root", () => {
+      const sudoers = deployFile("linux", "sudoers.d-automata");
+      expect(sudoers).toMatch(/WORKER_BOX_SLOTS=1/);
+      expect(sudoers).toMatch(/automata-agent, automata-agent-1/);
+      expect(sudoers).not.toMatch(/Runas_Alias AGENT = .*root/);
+    });
+
+    it("cloud-init creates one extra role account per slot with an EXPLICIT uid from 2000, never --system", () => {
+      const ci = deployFile("linux", "cloud-init.yaml");
+      expect(ci).toMatch(/AGENT_SLOTS="\$\{AGENT_SLOTS:-1\}"/);
+      expect(ci).toMatch(/AGENT_SLOT_UID_BASE=2000/);
+      const loop = ci.slice(
+        ci.indexOf("for i in $(seq 1 $((AGENT_SLOTS - 1))); do"),
+      );
+      expect(loop).toMatch(/useradd --uid "\$SLOT_UID" --create-home/);
+      expect(loop).not.toMatch(/useradd --system[^\n]*\$SLOT_USER/);
+      expect(loop).toMatch(/--shell \/usr\/sbin\/nologin "\$SLOT_USER"/);
+      // And the provisioned sentinel is withheld when a slot account is missing.
+      expect(ci).toMatch(
+        /FATAL: slot account \$\{AGENT_USER\}-\$\{i\} missing/,
+      );
+    });
+
+    it("the provisioning doc carries the live-box steps for several slots", () => {
+      const doc = deployFile("AGENT-UID-PROVISIONING.md");
+      expect(doc).toMatch(/## 6\. Several box slots \(#205\)/);
+      expect(doc).toMatch(/WORKER_BOX_SLOTS/);
+      expect(doc).toMatch(/useradd --uid 2001/);
+      expect(doc).toMatch(
+        /Runas_Alias AGENT = automata-agent, automata-agent-1/,
+      );
+      expect(doc).toMatch(/meta skuid \{ 999, 2001 \}/);
+    });
   });
 
   it("accepts loopback and never sets a drop policy on output", () => {

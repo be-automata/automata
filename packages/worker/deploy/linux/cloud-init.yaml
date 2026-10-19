@@ -66,6 +66,13 @@ write_files:
       export DEBIAN_FRONTEND=noninteractive
 
       AGENT_USER=automata-agent
+      # #205: how many agent runs the box admits at once (WORKER_BOX_SLOTS). Slot 0
+      # is $AGENT_USER; slot i > 0 is ${AGENT_USER}-i with an EXPLICIT uid from 2000
+      # up — never --system, whose range descends from 999 and collided with the
+      # engine's Postgres (#210). Render AGENT_SLOTS=N into this file for an N-slot
+      # box; 1 is today's single account.
+      AGENT_SLOTS="${AGENT_SLOTS:-1}"
+      AGENT_SLOT_UID_BASE=2000
       # Exact, not a floor: the harness batteries (ruflo's better-sqlite3 and
       # onnxruntime prebuilds) are built against one Node ABI, and a box that
       # drifted to another major would load them and crash at run time. The
@@ -194,6 +201,15 @@ write_files:
       id -u automata-agent >/dev/null 2>&1 || useradd --system --create-home \
         --home-dir /home/automata-agent --shell /usr/sbin/nologin automata-agent
       chmod 750 /home/automata-agent
+      # #205: one more role account per extra box slot, same shape, explicit uid.
+      # Idempotent: an existing account is kept (its uid is whatever it was).
+      for i in $(seq 1 $((AGENT_SLOTS - 1))); do
+        SLOT_USER="${AGENT_USER}-${i}"
+        SLOT_UID=$((AGENT_SLOT_UID_BASE + i))
+        id -u "$SLOT_USER" >/dev/null 2>&1 || useradd --uid "$SLOT_UID" --create-home \
+          --home-dir "/home/$SLOT_USER" --shell /usr/sbin/nologin "$SLOT_USER"
+        chmod 750 "/home/$SLOT_USER"
+      done
 
       # ── the harness build account ────────────────────────────────────────
       # nologin, no home on disk, its own group only: the installer passes a
@@ -243,6 +259,10 @@ write_files:
       command -v cloudflared >/dev/null
       id -u automata >/dev/null
       id -u automata-agent >/dev/null
+      for i in $(seq 1 $((AGENT_SLOTS - 1))); do
+        id -u "${AGENT_USER}-${i}" >/dev/null \
+          || { echo "FATAL: slot account ${AGENT_USER}-${i} missing" >&2; exit 1; }
+      done
       [ "$(id -u "$BUILD_USER")" = "$BUILD_UID" ] \
         || { echo "FATAL: $BUILD_USER is not uid $BUILD_UID" >&2; exit 1; }
       [ "$(id -G "$BUILD_USER")" = "$BUILD_UID" ] \

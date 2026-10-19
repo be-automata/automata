@@ -16,13 +16,19 @@ echo "$RULES" | grep -q 'hook output' \
   || fail "no output-hook chain — meta skuid is meaningless anywhere else"
 echo "$RULES" | grep -q 'oif "lo" accept' \
   || fail "loopback is not accepted first: the per-run proxy and brokers would be fenced too"
-echo "$RULES" | grep -qE 'meta skuid [0-9]+ tcp dport' \
+# One uid, or an anonymous set at N > 1 (#205). nft prints a single-element
+# set back as the bare scalar, so both shapes are legitimate here.
+SKUID='meta skuid (\{ ?[0-9, ]+ ?\}|[0-9]+)'
+echo "$RULES" | grep -qE "$SKUID tcp dport" \
   || fail "no tcp skuid rule"
-echo "$RULES" | grep -qE 'meta skuid [0-9]+ udp dport' \
+echo "$RULES" | grep -qE "$SKUID udp dport" \
   || fail "no udp skuid rule — QUIC/HTTP-3 would bypass the fence over udp/443"
 
-FENCED="$(echo "$RULES" | grep -oE 'meta skuid [0-9]+' | head -1 | awk '{print $3}')"
-[ "$FENCED" = "0" ] && fail "uid 0 is fenced"
+FENCED="$(echo "$RULES" | grep -oE "$SKUID" | head -1 \
+  | sed -E 's/meta skuid //; s/[{}]//g; s/,/ /g; s/^ +//; s/ +$//')"
+for u in $FENCED; do
+  [ "$u" = "0" ] && fail "uid 0 is fenced"
+done
 
 # The fence must not have cost the box its container networking.
 DOCKER_CHAINS="$(nft list ruleset 2>/dev/null | grep -cE 'DOCKER|docker' || true)"
@@ -33,4 +39,4 @@ DOCKER_CHAINS="$(nft list ruleset 2>/dev/null | grep -cE 'DOCKER|docker' || true
 # cooperative proxy, which is the one thing this backstop exists to catch.
 HITS="$(echo "$RULES" | grep -oE 'counter packets [0-9]+' | awk '{s+=$3} END {print s+0}')"
 
-echo "[nft-verify] OK — uid ${FENCED} fenced on tcp+udp 80/443, loopback open, ${DOCKER_CHAINS} docker rules intact, ${HITS} blocked packet(s) so far"
+echo "[nft-verify] OK — uid(s) ${FENCED} fenced on tcp+udp 80/443, loopback open, ${DOCKER_CHAINS} docker rules intact, ${HITS} blocked packet(s) so far"

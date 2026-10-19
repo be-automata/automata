@@ -11,10 +11,12 @@ One unit is provided:
 It is a **template**. Replace the `__HOME__` and `__REPO__` tokens for the box,
 then install to `~/Library/LaunchAgents/`.
 
-One agent-run executes at a time on the box: `slots: 1` on the single unit plus the
-kernel box lock (`src/agent-run/box-lock.ts`). The `GLOBAL_MAX_RUNS = 1` key in
-`src/agent-run/definition.ts` caps each workflow VARIANT separately and is not the box
-budget. Extra throughput (gap #3b) means raising both, gated on a memory-headroom check.
+`WORKER_BOX_SLOTS` (default 1) agent-runs execute at a time on the box: engine `slots`
+on the single unit plus N kernel slot locks (`src/agent-run/box-lock.ts`), one agent
+account per slot (#205; `AGENT-UID-PROVISIONING.md` §6). The `GLOBAL_MAX_RUNS = 1` key
+in `src/agent-run/definition.ts` caps each workflow VARIANT separately and is not the
+box budget. Extra throughput means raising the whole tuple (#372), gated on the
+memory-headroom check (#371); N > 1 is Linux-only and requires the #204 ceiling.
 
 ## `run-worker.sh` wiring
 

@@ -1,6 +1,6 @@
 # ADR-007 — Supersession authority and the one-agent box budget
 
-- **Status:** Supersession half: **Accepted** (PR #175 → `e3dcc1b`, live-proven 2026-09-02). Box-budget half: Stage A **Accepted** (PR #177 → `b11762f`, drill-proven); Stage B1 (#183 → PR #186 → `88e8e75`, kernel lock + one-unit topology) **Accepted** (live-proven 2026-09-06: U1 SIGKILL mid-run → 0 holders at once, redelivery admitted 32 s later with no staleness wait; U2 one `lockf` holder; U3 one unit); Stage B2 (#184 → PR #189 → `32a2ebe`, uid-scan reaper) **Accepted** (live-proven 2026-09-06: boot scan under a try-lock on every relaunch; U5 SIGKILL mid-run → the relaunched worker's boot scan reaped the orphaned agent subtree; U6 EPERM negative held); memory ceiling deferred 2026-09-05.
+- **Status:** Supersession half: **Accepted** (PR #175 → `e3dcc1b`, live-proven 2026-09-02). Box-budget half: Stage A **Accepted** (PR #177 → `b11762f`, drill-proven); Stage B1 (#183 → PR #186 → `88e8e75`, kernel lock + one-unit topology) **Accepted** (live-proven 2026-09-06: U1 SIGKILL mid-run → 0 holders at once, redelivery admitted 32 s later with no staleness wait; U2 one `lockf` holder; U3 one unit); Stage B2 (#184 → PR #189 → `32a2ebe`, uid-scan reaper) **Accepted** (live-proven 2026-09-06: boot scan under a try-lock on every relaunch; U5 SIGKILL mid-run → the relaunched worker's boot scan reaped the orphaned agent subtree; U6 EPERM negative held); memory ceiling **Accepted** (#204 → PR `457b10e`, 2026-09-30: a DELEGATED cgroup v2 subtree per run, not a transient scope — `run-cgroup.ts`, `10-ceiling.conf`); counting budget (#205, epic #193 ticket 2): N kernel slot locks, one agent account per slot — see the 2026-10-18 amendment below.
 - **Date:** 2026-09-02
 - **Issues:** #165 (supersession sole authority), #152 (concurrency budget consolidation), epic #125
 - **Supersedes / superseded by:** —
@@ -109,18 +109,44 @@ arrives. Two structural questions were left open at delivery:
 4. **Signal seam.** Process-plane reap results are emitted as run-scoped `box.*` log
    events and a host-plane `box-budget.json`; `scheduling-health.json` stays engine-DB
    only. (Stage B2, #184)
-5. **Memory ceiling.** Deferred (2026-09-05); arrives with a containerized topology.
+5. **Memory ceiling.** Shipped by #204 (2026-09-30) as a delegated cgroup v2 subtree
+   per run (`memory.max`, `memory.swap.max=0`, `memory.oom.group=1`, `cgroup.kill` at
+   teardown); the systemd transient scope the epic proposed is not creatable by the
+   worker's service account (polkit), and the delegated subtree needs no privilege.
+
+## Amendment (2026-10-18, #205 / epic #193 ticket 2) — the counting budget
+
+The exclusive lock is generalised to **N slots** (`WORKER_BOX_SLOTS`, default 1 = the
+shape above, byte-identical): slot i is an exclusive `flock(2)` on `box.lock.<i>` (slot 0
+keeps `box.lock`), a run holds exactly one, and **slot i runs as its own agent account**
+(`${WORKER_AGENT_USER}-${i}`; slot 0 keeps the base name). The account is the fence
+between concurrent runs — a run's credential HOME, broker sockets and `/proc/<pid>/environ`
+are readable by any process of the SAME uid, so one account at N > 1 would be a cross-run
+(under per-org 2, cross-org) credential exposure that no counting primitive closes. The
+uid-wide reap stays: `kill -9 -- -1` issued AS slot i's account under slot i's lock reaches
+only slot i's processes (kernel `kill(2)` permission check), so the "replace the uid-wide
+kill" item dissolves. Per-run artefacts (daemon socket, pidfile, gh-broker socket) live in
+`<root>/<workerId>/s<i>/`, granted to that slot's account and the worker alone — the daemon
+socket authenticates no caller, so a shared dir would have let slot i inject a message into
+slot j's run; the shared dir hands slot accounts traverse only. Each run's account is
+recorded beside its pidfile (`<threadId>.user`) so the Stage A reclaimers kill a dead group
+as the right account. The slot is acquired BEFORE the clone (the clone's grant needs the
+slot's account). N > 1 requires the #204 ceiling; the box refuses otherwise. The engine's
+`slots` equals N; its per-variant caps are #372's. `box-budget.json` and
+`escapeesSinceBoot` are box-wide aggregates across slots (last reap writes the snapshot).
 
 ## Anti-deviation invariants
 
 - **I1** Exactly one host-exclusion primitive, kernel-released; no `staleMs`/`heartbeat`
-  in `packages/worker/src`.
-- **I2** The lock is acquired at admission after both Stage A reaps and released last in
+  in `packages/worker/src`. (N slot files are N instances of that one primitive.)
+- **I2** The slot is acquired at admission after both Stage A reaps and released last in
   the run's finally, after `daemon.teardown()` and the teardown uid-scan.
-- **I3** One worker unit per box; `slots: 1`; the `definition.ts` global key is documented
-  as per-workflow, never as the box cap.
-- **I4** A uid-wide kill is issued only while holding the box lock; never when
-  `WORKER_AGENT_USER` is empty; that limitation is logged once at boot.
+- **I3** One worker unit per box; engine `slots` = `WORKER_BOX_SLOTS` = the number of kernel
+  slot locks; the `definition.ts` global key is documented as per-workflow, never as the
+  box cap.
+- **I4** A uid-wide kill is issued only AS a slot's own account while holding that slot's
+  lock (the boot scan holds every slot); never when `WORKER_AGENT_USER` is empty; that
+  limitation is logged once at boot. One agent account per slot, never shared.
 - **I5** The host budget never signals the lock-holding run's processes before its
   finally (Decision 5).
 - **I6** Tests that must stay green: `supersede.integration.test.ts` "different variants

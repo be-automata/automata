@@ -210,6 +210,56 @@ EOF
 default root is `os.tmpdir()`, which on macOS is a 0700 directory owned by the
 worker's own uid and untraversable by any other, so every run would die at clone.
 
+## 6. Several box slots (#205)
+
+`WORKER_BOX_SLOTS=N` lets the box admit N agent runs at once. **Each slot runs
+as its own account**: slot 0 is `WORKER_AGENT_USER`, slot i is
+`${WORKER_AGENT_USER}-i`. A uid is the only fence the kernel gives two
+concurrent runs (a run's credential HOME, broker sockets and `/proc/<pid>/environ`
+are all readable by any process of the same uid), and the uid-wide reap
+`kill -9 -- -1` issued AS slot i's account reaches only slot i's processes, so it
+stays legal at every N. The worker refuses to boot with N > 1 unless the per-run
+memory ceiling (`WORKER_RUN_MEMORY_MAX`, #204) is on and every slot account
+resolves (`id -u`).
+
+Linux only (the ceiling is a cgroup). On a box that already runs N = 1, in this
+order, with **no run in flight**:
+
+```bash
+# 1. One more role account per extra slot — explicit uid from 2000 up, never
+#    --system (its range descends from 999, the engine-Postgres collision, #210).
+sudo useradd --uid 2001 --create-home --home-dir /home/automata-agent-1   --shell /usr/sbin/nologin automata-agent-1
+sudo chmod 750 /home/automata-agent-1
+
+# 2. sudoers: the Runas list names every slot account (validate on a copy first).
+#    Runas_Alias AGENT = automata-agent, automata-agent-1
+sudo visudo -cf /etc/sudoers.d/automata
+
+# 3. nftables: render __AGENT_UID__ as the comma-separated uid set and re-load
+#    through the preflight, which now checks every uid in the set.
+#    meta skuid { 999, 2001 } tcp dport { 80, 443 } counter reject with tcp reset
+sudo ./linux/nft-preflight.sh /etc/automata/egress-nft.conf && sudo ./linux/nft-verify.sh
+
+# 4. The runtime tree: traverse for every slot account on the workdir root (the
+#    per-run dir is granted to its own slot by the worker at clone time).
+sudo setfacl -m u:automata-agent-1:--x /usr/local/automata/runs
+
+# 5. Worker env, then restart the unit.
+#    WORKER_BOX_SLOTS=2
+```
+
+What the worker then does on its own: takes slot locks `box.lock` and
+`box.lock.1` under the run-namespace root, grants every slot account traverse on
+the shared `<root>/<workerId>/` dir and an inheritable grant on that slot's own
+`<root>/<workerId>/s<i>/` subdir (so one slot's daemon socket is never
+connectable by another), records each run's account beside its pidfile so a
+reclaim kills a dead group as the right account, and scans each slot's uid at
+boot only once it holds every slot. The boot log shows
+`box slots: 2 (automata-agent, automata-agent-1)`.
+
+Rollback: `WORKER_BOX_SLOTS=1` and restart. The extra accounts, sudoers entries
+and nft set may stay; they fence nothing while unused.
+
 ---
 
 ## Verification gates
