@@ -250,7 +250,8 @@ sudo env WORKER_AGENT_USER=automata-agent WORKER_BOX_SLOTS=2 ./linux/nft-preflig
 sudo setfacl -m u:automata-agent-1:--x /usr/local/automata/runs
 
 # 5. Worker env, then restart the unit — the whole tuple (#372), never the
-#    slots alone: the worker refuses WORKER_GLOBAL_MAX_RUNS ≠ WORKER_BOX_SLOTS.
+#    slots alone: the worker refuses an explicit WORKER_GLOBAL_MAX_RUNS that
+#    differs from WORKER_BOX_SLOTS (unset follows the slots).
 #    WORKER_BOX_SLOTS=2
 #    WORKER_GLOBAL_MAX_RUNS=2
 #    WORKER_PER_ORG_MAX_RUNS=2

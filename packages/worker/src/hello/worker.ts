@@ -335,7 +335,9 @@ async function main() {
   // name — the reapers key on getProcessWorkerId(), a separate per-process uuid
   // — so changing it costs an extra stale row after the first restart and
   // nothing else.
-  const registrationConfig = loadWorkerConfig();
+  // The SAME config the "configuration is invalid" gate validated is what the
+  // engine registration below reads — never a second parse of the env.
+  const registrationConfig = bootCfg;
   const boxId = registrationConfig.boxId;
   console.log(`[worker-boot] box id: ${boxId}`);
 
