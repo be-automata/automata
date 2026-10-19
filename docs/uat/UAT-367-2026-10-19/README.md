@@ -35,6 +35,7 @@
 - info: 3 egress-proxy unit tests fail inside a task run because of NODE_USE_ENV_PROXY; not the fence.
 - low: shared policy validator accepts private-range allowlist entries the box proxy refuses (documented gap).
 - info: table counters reset on every (re)load.
+- info: slot change during the 7-day hold (evidence 33). At 18:53 UTC the box went to three agent slots (new uid 2002) and the egress fence was re-rendered first. The loader then refused four worker starts (18:53:35, 18:53:50, 18:54:05, 18:54:21) because the loopback table still listed `{999 2001}`; systemd never started the worker, so no run executed as 2002 unfenced. It loaded `999, 2001, 2002` at 18:54:27. Classified as the fail-closed guard working; the 7-day grade exempts exactly these four refusals. Verifier probes OK on all three uids at 21:53 UTC; structure-only OK at 21:54 UTC with a run in flight (21 deny hits).
 
 ## Manifest gaps
 
@@ -45,3 +46,4 @@ None: ssh key name and gh auth were the only requirements, both present.
 - 2026-10-19 15:33 UTC — first run (this record); page v1–v2.
 - 2026-10-19 16:51 UTC — C12 graded PASS on the 30-run hold; page v3.
 - 2026-10-19 — review rounds on PR #398: deviation wording (v4), run-count reconciliation (v5), per-run ledger (v6), corrected ledger as evidence 31 (v7), row 3's full journal as evidence 32 (v8).
+- 2026-10-19 21:55 UTC — slot change to three agent uids recorded and classified (evidence 33; #367 comment 6278230317); 7-day hold continues to 2026-10-26 13:55 UTC.
