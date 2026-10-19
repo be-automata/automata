@@ -89,11 +89,16 @@ vi.mock("./reclaim", () => ({
 }));
 // Same shared-root hazard as ./reclaim: the real acquireBoxLock spawns a
 // lockf/flock helper on the box's production namespace root during unit tests.
+// #205: the workflow acquires a SLOT (acquireBoxSlot); at N = 1 that is the
+// exclusive lock. One mock serves both names so a case that swaps the
+// implementation under either name swaps the one the workflow calls.
+const acquireBoxSlotMock = vi.fn(async () => {
+  admissionOrder.push("lock");
+  return { release: releaseMock, lost: false, slot: 0 };
+});
 vi.mock("./box-lock", () => ({
-  acquireBoxLock: vi.fn(async () => {
-    admissionOrder.push("lock");
-    return { release: releaseMock, lost: false, slot: 0 };
-  }),
+  acquireBoxSlot: (...args: unknown[]) => acquireBoxSlotMock(...(args as [])),
+  acquireBoxLock: (...args: unknown[]) => acquireBoxSlotMock(...(args as [])),
 }));
 // Same hazard once more: with WORKER_AGENT_USER set (the #108 cases below),
 // the real ensureRunNamespace applies REAL ACLs (macOS chmod +a / Linux
@@ -930,8 +935,9 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     expect(order).toEqual(["cleanup", "post"]);
   });
 
-  it("pre-daemon cancel (during provision): terminal posted; nothing to clean (AC4)", async () => {
+  it("pre-daemon cancel (during provision): terminal posted; nothing to clean; the slot held for the clone is given back (AC4, #205)", async () => {
     const { ctx, abortIn } = makeCtx("run-ext-provision");
+    releaseMock.mockClear();
     abortIn(provisionWorkdir);
     await expect(
       runFn({ ...PR_INPUT, supersedePolicy: "newest-wins" }, ctx),
@@ -943,6 +949,8 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
       policy: "newest-wins",
     });
     expect(cleanupWorkdir).not.toHaveBeenCalled();
+    // #205: the clone runs under the slot, so a failed clone releases it.
+    expect(releaseMock).toHaveBeenCalledTimes(1);
   });
 
   it("cancel after the clone (credential pull): workdir cleaned AND terminal posted", async () => {
@@ -993,15 +1001,14 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     ).toBe(true);
   });
 
-  it("#183 AC13: cancel while WAITING on the box lock: abort error propagates unwrapped, ONE superseded terminal, workdir cleaned, no failure post, no release", async () => {
+  it("#183 AC13 (#205 shape): cancel while WAITING on the box slot: abort error propagates unwrapped, ONE superseded terminal, NO clone yet so nothing to clean, no failure post, no release", async () => {
     const { ctx, abortIn } = makeCtx("run-ext-lockwait");
-    const { acquireBoxLock } = await import("./box-lock");
     const { postRunFailed } = await import("./www-client");
     vi.mocked(postRunFailed).mockClear();
     releaseMock.mockClear();
-    // The waiting helper is SIGKILLed on abort and acquireBoxLock rejects with
+    // The waiting helper is SIGKILLed on abort and acquireBoxSlot rejects with
     // the AbortError shape (box-lock.ts) — the workflow must not wrap it.
-    abortIn(vi.mocked(acquireBoxLock), "box lock wait aborted");
+    abortIn(acquireBoxSlotMock, "box lock wait aborted");
     try {
       await expect(
         runFn({ ...PR_INPUT, supersedePolicy: "newest-wins" }, ctx),
@@ -1013,14 +1020,16 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
           policy: "newest-wins",
         }),
       );
-      expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
-      expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR, expect.anything());
+      // #205: the slot is taken BEFORE the clone, so a cancel while waiting
+      // has no workdir to clean — and nothing to release.
+      expect(provisionWorkdir).not.toHaveBeenCalled();
+      expect(cleanupWorkdir).not.toHaveBeenCalled();
       expect(postRunFailed).not.toHaveBeenCalled();
       expect(releaseMock).not.toHaveBeenCalled();
     } finally {
       // abortIn() swapped the module-level mock's implementation; restore the
       // harness default so later cases acquire normally.
-      vi.mocked(acquireBoxLock).mockImplementation(async () => {
+      acquireBoxSlotMock.mockImplementation(async () => {
         admissionOrder.push("lock");
         return { release: releaseMock, lost: false, slot: 0 };
       });
@@ -1259,9 +1268,8 @@ describe("#183: finally order — box lock released last, after teardown and cle
   });
 
   it("#184: a LOST box lock skips the teardown uid-scan (another run may own the box) — logged, admission scan still ran, release still last", async () => {
-    const { acquireBoxLock } = await import("./box-lock");
     reapAgentUidEscapees.mockClear();
-    vi.mocked(acquireBoxLock).mockImplementationOnce(async () => {
+    acquireBoxSlotMock.mockImplementationOnce(async () => {
       admissionOrder.push("lock");
       return { release: releaseMock, lost: true, slot: 0 };
     });

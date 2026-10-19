@@ -15,8 +15,8 @@ import path from "node:path";
  * execute at once on a box budgeted for one (the ENOMEM wall the cap exists
  * for). This lock is the box-level belt to the engine's per-workflow
  * suspenders: every run acquires it before its credentials touch disk and
- * releases it last in its finally. Worker `slots: 1` bounds how many runs can
- * wait here.
+ * releases it last in its finally. The worker's engine `slots` (= WORKER_BOX_SLOTS,
+ * #205) bounds how many runs can wait here.
  *
  * Mechanism: a kernel flock(2), held by a tiny helper child. The worker spawns
  * `lockf(1)` (darwin) or util-linux `flock(1)` (linux) on `<root>/box.lock`

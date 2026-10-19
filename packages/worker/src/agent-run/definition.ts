@@ -29,6 +29,13 @@ export const PER_ORG_MAX_RUNS = 1;
  * `--socket-path` flag) removes the socket-collision blocker but NOT the memory one.
  */
 export const GLOBAL_MAX_RUNS = 1;
+// #205 NOTE: both caps above are PER WORKFLOW VARIANT on the engine (see the
+// global-key comment below) and stay compile-time 1 until #372 makes them
+// env-driven alongside WORKER_BOX_SLOTS. With N > 1 host slots and these caps
+// at 1, two runs overlap only across variants (e.g. a review on
+// `agent-run-newest` beside a task run on `agent-run`) or across orgs on the
+// same variant — the host slots are the budget; these are the engine's
+// per-variant fairness keys.
 
 /**
  * The per-PR concurrency strategy of a policy variant, or null for the legacy

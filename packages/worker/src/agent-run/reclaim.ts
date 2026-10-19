@@ -273,8 +273,11 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
  *  - www's per-thread token dedup bars concurrent double-dispatch, so a
  *    same-threadId pid can only be a prior attempt of THIS run — never
  *    someone else's live work.
- *  - `slots: 1` on the box's single worker unit makes the box single-flight;
- *    the kernel lock (box-lock.ts) covers the crash-relaunch overlap.
+ *  - the box's N slot locks (box-lock.ts, `slots: N` on the single worker
+ *    unit) bound the box's concurrency and cover the crash-relaunch overlap;
+ *    a threadId names one run whatever slot it holds, so the same-threadId
+ *    kill stays exact at every N (#205). The prior attempt's `.user` record
+ *    names the account the kill must run as.
  * Never throws; every op is best-effort (a stray file must not fail a run).
  */
 export function reapOwnThreadAttempts(

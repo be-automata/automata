@@ -7,7 +7,7 @@ import {
   type PerPrStrategy,
 } from "./definition";
 import { loadWorkerConfig } from "./config";
-import { acquireBoxLock, type BoxLock } from "./box-lock";
+import { acquireBoxSlot, type BoxLock } from "./box-lock";
 import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { reapAgentUidEscapees } from "./uid-reaper";
 import { runAsAgent } from "./agent-command";
@@ -63,9 +63,12 @@ import { buildRunProxyEnv, type BrokerHandoff } from "./daemon-env";
 import { runPathsForRepo } from "./run-owned-paths";
 import {
   ensureRunNamespace,
+  ensureSlotNamespace,
   getProcessWorkerId,
   runGhSocketPath,
+  slotFor,
 } from "./run-namespace";
+import { agentUserForSlot, slotAgentUsers } from "./spawn-as-user";
 import {
   materialiseAgentCredentials,
   type MaterialisedCredentials,
@@ -802,10 +805,15 @@ export async function runSelfHealFixStep({
 async function runAgentInner(
   input: AgentRunInput,
   ctx: RunCtx,
-  config: ReturnType<typeof loadWorkerConfig>,
+  bootConfig: ReturnType<typeof loadWorkerConfig>,
   wwwOpts: WwwClientOpts,
   runStartedAt: number,
 ): Promise<AgentRunOutput> {
+  // #205: `config` is REBOUND once the slot is held — same values, plus the
+  // slot's own agent account and index — so everything after the acquire
+  // (clone grants, credential HOME, brokers, daemon, reaps, cleanup) runs as
+  // THIS slot's account. Before the acquire it is the boot config.
+  let config = bootConfig;
   // Cancellation signal (Hatchet cancel: scheduleTimeout/executionTimeout). Used
   // to abort in-flight pulls/polls so the finally-block daemon teardown runs
   // promptly — no orphan daemon survives a cancelled run.
@@ -849,20 +857,105 @@ async function runAgentInner(
     );
   }
 
+  let boxLock: BoxLock | null = null;
+  // Hoisted above the try so the main finally (#184 teardown uid-scan) can
+  // log through the same prefix as the admission steps.
+  const admissionLog = (m: string) =>
+    ctx.log(`[agent-run ${input.threadId}] ${m}`);
+  try {
+    // #183 (#152 Stage B1) / #205: the box budget — N kernel flock(2) slot
+    // locks (box-lock.ts), each held by a helper child, so the kernel drops a
+    // slot the instant its holder dies (no staleness threshold, no liveness
+    // beat). The engine's "global" key is per workflow, so the budget is
+    // enforced here. Taken BEFORE the clone since #205: the clone's ACL grant
+    // needs the slot's account, which is known only once the slot is held.
+    // Credentials still touch disk only after the slot AND the admission
+    // scan, so the on-disk credential window is unchanged; a cancel while
+    // waiting throws into this catch with nothing on disk to clean.
+    // #152 Stage A admission reap, BEFORE the lock: (a) a dead sibling
+    // worker's orphans die now, not at the next boot; (b) any prior attempt
+    // of THIS run (engine redelivery after a worker death) is SIGKILLed by
+    // its recorded process-group pid — as the account its `.user` record
+    // names — so the zombie can never share the box with its own redelivery.
+    // Both are best-effort and never throw; the safety argument for the
+    // no-engine-read own-thread kill lives on reapOwnThreadAttempts.
+    // Re-assert the cross-uid namespace grant BEFORE anything writes into the
+    // dir or binds a socket in it. The boot-time claim is not enough: the
+    // default root lives under /tmp, macOS reaps /tmp entries untouched for
+    // three days, and a bare recreated dir kills the run at the daemon's
+    // pidfile write with "Permission denied" — which reaches the user as
+    // "Review intent could not be parsed". Idempotent; see run-namespace.ts.
+    await ensureRunNamespace({
+      root: config.runNamespaceRoot,
+      workerId: getProcessWorkerId(),
+      agentUser: config.agentUser,
+      agentUsers: slotAgentUsers(config.agentUser, config.boxSlots),
+    });
+    reclaimDeadWorkerRuns({
+      root: config.runNamespaceRoot,
+      selfWorkerId: getProcessWorkerId(),
+      agentUser: config.agentUser,
+      log: admissionLog,
+    });
+    reapOwnThreadAttempts({
+      root: config.runNamespaceRoot,
+      threadId: input.threadId,
+      agentUser: config.agentUser,
+      log: admissionLog,
+    });
+    boxLock = await acquireBoxSlot({
+      root: config.runNamespaceRoot,
+      slots: config.boxSlots,
+      holder: input.threadId,
+      signal,
+      log: admissionLog,
+    });
+    step("box lock acquired");
+    // #205: from here on this run IS slot `boxLock.slot`, running as that
+    // slot's account; its per-run artefacts live in the slot's own subdir.
+    config = {
+      ...config,
+      agentUser: agentUserForSlot(config.agentUser, boxLock.slot),
+      boxSlot: boxLock.slot,
+    };
+    if (config.boxSlots > 1) {
+      await ensureSlotNamespace({
+        root: config.runNamespaceRoot,
+        workerId: getProcessWorkerId(),
+        slot: boxLock.slot,
+        agentUser: config.agentUser,
+      });
+      step(
+        `box slot ${boxLock.slot}/${config.boxSlots} as ${config.agentUser}`,
+      );
+    }
+  } catch (err) {
+    await boxLock?.release();
+    throw err;
+  }
+
   // Provision: clone into a per-run workdir keyed on threadId. threadId is unique
   // per thread; threadChatId is the shared legacy sentinel when
   // enableThreadChatCreation is off, so it would collide every run onto one dir.
-  const run = await provisionWorkdir({
-    repoFullName: input.repoFullName,
-    branch: input.branch,
-    baseBranch: input.baseBranch,
-    workBranch: input.workBranch,
-    installationToken: input.installationToken,
-    workdirRoot: config.workdirRoot,
-    runId: input.threadId,
-    // #108: empty (the default) ⇒ no ACLs are touched at all.
-    agentUser: config.agentUser,
-  });
+  // Under the slot (#205): a clone failure gives the slot straight back.
+  let run: Awaited<ReturnType<typeof provisionWorkdir>>;
+  try {
+    run = await provisionWorkdir({
+      repoFullName: input.repoFullName,
+      branch: input.branch,
+      baseBranch: input.baseBranch,
+      workBranch: input.workBranch,
+      installationToken: input.installationToken,
+      workdirRoot: config.workdirRoot,
+      runId: input.threadId,
+      // #108: empty (the default) ⇒ no ACLs are touched at all. #205: the
+      // SLOT's account, so a sibling slot cannot read this run's HOME.
+      agentUser: config.agentUser,
+    });
+  } catch (err) {
+    await boxLock.release();
+    throw err;
+  }
   const workdir = run.repo;
   step(
     `clone complete: ${input.repoFullName}@${input.branch}` +
@@ -925,67 +1018,20 @@ async function runAgentInner(
   const batterySeed = batterySeedForRun(runReviewAgent, taskGate);
   const foregroundOnly = foregroundOnlyForRun(lane, batterySeed);
 
-  let boxLock: BoxLock | null = null;
   let materialised: MaterialisedCredentials;
-  // Hoisted above the try so the main finally (#184 teardown uid-scan) can
-  // log through the same prefix as the admission steps.
-  const admissionLog = (m: string) =>
-    ctx.log(`[agent-run ${input.threadId}] ${m}`);
   // Every cleanupWorkdir below: agent-uid mode hands the agent's files back
-  // before the rm, and a workdir that still survives is logged, not swallowed.
+  // before the rm (as the slot's account, #205), and a workdir that still
+  // survives is logged, not swallowed.
   const workdirCleanup = { agentUser: config.agentUser, log: admissionLog };
   try {
-    // #183 (#152 Stage B1): the box's ONE agent-run lock (box-lock.ts) — a
-    // kernel flock(2) held by a helper child, so the kernel drops it the
-    // instant the holder dies (no staleness threshold, no liveness beat). The
-    // engine's "global" key is per workflow, so the budget is enforced here.
-    // Taken AFTER the clone (network/disk, not memory) and BEFORE any
-    // credential touches disk, so a long wait never widens the on-disk
-    // credential window; a cancel while waiting throws into this catch and
-    // the clone is cleaned up. Released in the finally below, after teardown.
-    // #152 Stage A admission reap, BEFORE the lock: (a) a dead sibling
-    // worker's orphans die now, not at the next boot; (b) any prior attempt
-    // of THIS run (engine redelivery after a worker death) is SIGKILLed by
-    // its recorded process-group pid — the zombie can never share the box
-    // with its own redelivery. Both are best-effort and never throw; the
-    // safety argument for the no-engine-read own-thread kill lives on
-    // reapOwnThreadAttempts.
-    // Re-assert the cross-uid namespace grant BEFORE anything writes into the
-    // dir or binds a socket in it. The boot-time claim is not enough: the
-    // default root lives under /tmp, macOS reaps /tmp entries untouched for
-    // three days, and a bare recreated dir kills the run at the daemon's
-    // pidfile write with "Permission denied" — which reaches the user as
-    // "Review intent could not be parsed". Idempotent; see run-namespace.ts.
-    await ensureRunNamespace({
-      root: config.runNamespaceRoot,
-      workerId: getProcessWorkerId(),
-      agentUser: config.agentUser,
-    });
-    reclaimDeadWorkerRuns({
-      root: config.runNamespaceRoot,
-      selfWorkerId: getProcessWorkerId(),
-      agentUser: config.agentUser,
-      log: admissionLog,
-    });
-    reapOwnThreadAttempts({
-      root: config.runNamespaceRoot,
-      threadId: input.threadId,
-      agentUser: config.agentUser,
-      log: admissionLog,
-    });
-    boxLock = await acquireBoxLock({
-      root: config.runNamespaceRoot,
-      holder: input.threadId,
-      signal,
-      log: admissionLog,
-    });
-    step("box lock acquired");
-    // #184 (#152 Stage B2): uid-wide scan UNDER the lock, BEFORE any
+    // #184 (#152 Stage B2): uid-wide scan UNDER the slot lock, BEFORE any
     // credential touches disk and BEFORE this run spawns its daemon. ADR-007
-    // I2/I4: with the lock held no agent-uid process belongs to a live run, so
-    // everything the scan finds is an escapee (a detached `bash -lc | claude`
-    // subtree a worker-driven teardown could not reach by pgid) and is killed
-    // as one set. Never throws; on a disabled agent uid it is a no-op.
+    // I2/I4: with the slot held no process of THIS slot's account belongs to a
+    // live run, so everything the scan finds is an escapee (a detached
+    // `bash -lc | claude` subtree a worker-driven teardown could not reach by
+    // pgid) and is killed as one set — kill(2) bounds `-1` to the issuing
+    // account, so a sibling slot's live run is out of reach (#205). Never
+    // throws; on a disabled agent uid it is a no-op.
     await reapAgentUidEscapees({
       agentUser: config.agentUser,
       phase: "admission",
@@ -1138,6 +1184,8 @@ async function runAgentInner(
           config.runNamespaceRoot,
           getProcessWorkerId(),
           input.threadId,
+          // #205: in the slot's own subdir, reachable by this slot alone.
+          slotFor(config),
         ),
       });
       broker = {
