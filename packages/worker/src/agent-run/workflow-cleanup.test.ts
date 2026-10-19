@@ -2324,6 +2324,73 @@ Committed_AS:   12000000 kB
     expect(provisionWorkdir).not.toHaveBeenCalled();
   });
 
+  it("REAL sleep: the engine's abort signal reaches the deferral wait — a cancel 30 ms into a 2 s backoff ends the run promptly with an AbortError", async () => {
+    const { _setAdmissionControllerForTests, _setAdmissionSleepForTests } =
+      await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    _setAdmissionControllerForTests(
+      new AdmissionController(POLICY, () => STARVED),
+    );
+    _setAdmissionSleepForTests(undefined); // the real sleepAbortable
+    const ac = new AbortController();
+    const ctx = { cancelled: false, log: vi.fn(), abortController: ac };
+    const t0 = Date.now();
+    const timer = setTimeout(() => ac.abort(), 30);
+    try {
+      await expect(runFn(INPUT, ctx)).rejects.toMatchObject({
+        name: "AbortError",
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    // Far short of the 2 s first backoff: the signal was wired through.
+    expect(Date.now() - t0).toBeLessThan(1_500);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+  });
+
+  it("a slot re-acquire that blocks past the budget (an out-of-process holder) fails final on re-acquire: slot given back, no admission, nothing on disk", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController, AdmissionBudgetExhaustedError } = await import(
+      "./headroom"
+    );
+    const { ADMISSION_DEFERRAL_BUDGET_S } = await import("./admission-retry");
+    const controller = new AdmissionController(POLICY, () => STARVED);
+    _setAdmissionControllerForTests(controller);
+    // 1st acquire: immediate (default). 2nd acquire (after the first refusal):
+    // the lock was held for 20 minutes by someone outside this process.
+    acquireBoxSlotMock.mockImplementationOnce(async () => ({
+      release: releaseMock,
+      lost: false,
+      slot: 0,
+    }));
+    acquireBoxSlotMock.mockImplementationOnce(async () => {
+      vi.setSystemTime(Date.now() + 20 * 60 * 1000);
+      return { release: releaseMock, lost: false, slot: 0 };
+    });
+    const ctx = { cancelled: false, log: vi.fn() };
+    try {
+      let caught: unknown;
+      try {
+        await runFn(INPUT, ctx);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(AdmissionBudgetExhaustedError);
+      expect((caught as Error).message).toMatch(/after 1 deferral\(s\)/);
+      expect(
+        (caught as InstanceType<typeof AdmissionBudgetExhaustedError>).elapsedS,
+      ).toBeGreaterThan(ADMISSION_DEFERRAL_BUDGET_S);
+      expect(waits).toEqual([2_000]);
+      // Released after the refusal AND after the late re-acquire.
+      expect(releaseMock).toHaveBeenCalledTimes(2);
+      expect(provisionWorkdir).not.toHaveBeenCalled();
+      expect(controller.reservedBytes()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("with headroom the run is admitted (headroom_ok logged) and proceeds to the clone; the reservation lives until the finally", async () => {
     const { _setAdmissionControllerForTests } = await import("./workflow");
     const { AdmissionController } = await import("./headroom");

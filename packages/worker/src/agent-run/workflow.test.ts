@@ -860,3 +860,63 @@ describe("runSelfHealFixStep (GATE-01 / TMO-01 / OBS-01)", () => {
     expect(wf.RUN_EXECUTION_TIMEOUT_MS).toBe(30 * 60_000);
   });
 });
+
+describe("#371 sleepAbortable — the real deferral sleep", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("resolves after ms and removes its abort listener on resolve", async () => {
+    vi.useFakeTimers();
+    const { sleepAbortable } = await import("./workflow");
+    const ac = new AbortController();
+    const remove = vi.spyOn(ac.signal, "removeEventListener");
+    let settled = false;
+    const p = sleepAbortable(2_000, ac.signal).then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    expect(settled).toBe(true);
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+    // A late abort finds no listener and changes nothing.
+    ac.abort();
+  });
+
+  it("rejects with an AbortError at once when the signal is ALREADY aborted (no timer armed)", async () => {
+    vi.useFakeTimers();
+    const { sleepAbortable } = await import("./workflow");
+    const ac = new AbortController();
+    ac.abort();
+    await expect(sleepAbortable(60_000, ac.signal)).rejects.toMatchObject({
+      name: "AbortError",
+      message: expect.stringMatching(/aborted/),
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rejects with an AbortError when aborted mid-wait and clears the timer", async () => {
+    vi.useFakeTimers();
+    const { sleepAbortable } = await import("./workflow");
+    const ac = new AbortController();
+    const p = sleepAbortable(60_000, ac.signal);
+    const settled = p.then(
+      () => "resolved",
+      (e: Error) => e.name,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    ac.abort();
+    expect(await settled).toBe("AbortError");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("without a signal it is a plain sleep", async () => {
+    vi.useFakeTimers();
+    const { sleepAbortable } = await import("./workflow");
+    const p = sleepAbortable(50);
+    await vi.advanceTimersByTimeAsync(50);
+    await expect(p).resolves.toBeUndefined();
+  });
+});

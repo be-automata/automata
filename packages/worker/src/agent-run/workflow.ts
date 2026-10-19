@@ -362,8 +362,12 @@ export function sleepAbortable(
   signal?: AbortSignal,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    // Declared BEFORE abort(): an already-aborted signal calls abort() before
+    // any timer exists (a `const` here would be a temporal-dead-zone error, not
+    // an AbortError — caught by the sleepAbortable unit test).
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const abort = () => {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
       const err = new Error("admission wait aborted");
       err.name = "AbortError";
       reject(err);
@@ -372,7 +376,7 @@ export function sleepAbortable(
       abort();
       return;
     }
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       signal?.removeEventListener("abort", abort);
       resolve();
     }, ms);
@@ -1035,6 +1039,7 @@ async function runAgentInner(
     const baseConfig = config;
     const admission = getAdmissionController(config);
     let deferralStartedAt: number | null = null;
+    let lastRefusal: AdmissionDeferredError | null = null;
     for (let deferrals = 0; ; ) {
       boxLock = await acquireBoxSlot({
         root: baseConfig.runNamespaceRoot,
@@ -1044,6 +1049,22 @@ async function runAgentInner(
         log: admissionLog,
       });
       step("box lock acquired");
+      // The budget is wall clock from the FIRST refusal and the slot wait is
+      // part of it: a re-acquire that blocked behind an out-of-process holder
+      // (a self-heal run) past the budget must not spend the agent's execution
+      // window — fail final here, slot given back, nothing on disk.
+      if (deferralStartedAt !== null && lastRefusal) {
+        const elapsedS = Math.round((Date.now() - deferralStartedAt) / 1000);
+        if (elapsedS > ADMISSION_DEFERRAL_BUDGET_S) {
+          await boxLock.release();
+          boxLock = null;
+          throw new AdmissionBudgetExhaustedError(
+            deferrals,
+            lastRefusal,
+            elapsedS,
+          );
+        }
+      }
       // #205: from here on this run IS slot `boxLock.slot`, running as that
       // slot's account (configForSlot); its per-run artefacts live in the
       // slot's own subdir. Every later read of `config` — clone grants,
@@ -1063,6 +1084,7 @@ async function runAgentInner(
         await boxLock.release();
         boxLock = null;
         config = baseConfig;
+        lastRefusal = err;
         deferralStartedAt ??= Date.now();
         // Wall clock since the first refusal: the backoff sleeps AND the time
         // spent re-acquiring a box slot, which the boot-time budget check
