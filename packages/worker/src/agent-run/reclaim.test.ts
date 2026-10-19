@@ -445,6 +445,45 @@ describe("#205: the kill account is the slot the pidfile lives in", () => {
     expect(fs.existsSync(dir)).toBe(true);
   });
 
+  it("a dir the agent could have dropped in the shared worker dir (`s` + 200 digits, `s99`) is not a slot: never scanned, never a throw, at admission or at reclaim", () => {
+    const root = tmpRoot();
+    const live = makeWorkerDir(root, "w-live", {
+      lockPid: String(process.pid),
+    });
+    const dead = makeWorkerDir(root, "w-dead", { lockPid: "111" });
+    for (const dir of [live, dead]) {
+      // 200 digits: past MAX_SAFE_INTEGER (Number() → 1e200), within NAME_MAX.
+      for (const hostile of [`s${"9".repeat(200)}`, "s99", "s01"]) {
+        fs.mkdirSync(path.join(dir, hostile));
+        fs.writeFileSync(path.join(dir, hostile, "thr_h.pid"), "777");
+      }
+    }
+    const spawnKill = vi.fn();
+    expect(() =>
+      reapOwnThreadAttempts({
+        root,
+        threadId: "thr_h",
+        agentUser: "automata-agent",
+        spawnKill,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      reclaimDeadWorkerRuns({
+        root,
+        selfWorkerId: "w-live",
+        agentUser: "automata-agent",
+        kill: deadKill(111),
+        spawnKill,
+      }),
+    ).not.toThrow();
+    // Nothing in a non-slot dir was ever treated as a run.
+    expect(
+      spawnKill.mock.calls.map((c) => (c[0] as { args: string[] }).args.at(-1)),
+    ).not.toContain("-777");
+    // The dead worker's dir is still removed as a whole.
+    expect(fs.existsSync(dead)).toBe(false);
+  });
+
   it("agentUser empty (uid drop off): a slot subdir changes nothing — process.kill(-pgid) as before", () => {
     const root = tmpRoot();
     const dir = makeWorkerDir(root, "w-live", { lockPid: String(process.pid) });

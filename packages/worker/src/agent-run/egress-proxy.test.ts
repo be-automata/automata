@@ -714,16 +714,20 @@ describe("startEgressProxy (real loopback servers)", () => {
       expect(proxy.observedHosts().size).toBe(0);
     });
 
-    it("throws, naming the url, when nothing is listening", async () => {
+    it("throws, naming host:port and never the URL's userinfo (#205: that is the run's proxy credential), when nothing is listening", async () => {
       // Port 9 (discard) is closed on loopback here — a dead proxy.
       await expect(
         assertEgressProxyReachable({
-          url: "http://127.0.0.1:9",
+          url: "http://run:topsecret@127.0.0.1:9",
           timeoutMs: 500,
         }),
-      ).rejects.toThrow(
-        /egress proxy health check failed at http:\/\/127\.0\.0\.1:9/,
-      );
+      ).rejects.toSatisfy((e: Error) => {
+        expect(e.message).toMatch(
+          /egress proxy health check failed at 127\.0\.0\.1:9/,
+        );
+        expect(e.message).not.toContain("topsecret");
+        return true;
+      });
     });
 
     it("throws after close(), which is the state that would hang the run", async () => {

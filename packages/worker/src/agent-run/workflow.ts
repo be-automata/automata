@@ -870,8 +870,8 @@ async function runAgentInner(
     // #152 Stage A admission reap, BEFORE the lock: (a) a dead sibling
     // worker's orphans die now, not at the next boot; (b) any prior attempt
     // of THIS run (engine redelivery after a worker death) is SIGKILLed by
-    // its recorded process-group pid — as the account its `.user` record
-    // names — so the zombie can never share the box with its own redelivery.
+    // its recorded process-group pid — as the account its slot dir names
+    // (#205) — so the zombie can never share the box with its own redelivery.
     // Both are best-effort and never throw; the safety argument for the
     // no-engine-read own-thread kill lives on reapOwnThreadAttempts.
     // Re-assert the cross-uid namespace grant BEFORE anything writes into the

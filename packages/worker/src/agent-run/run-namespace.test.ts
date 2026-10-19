@@ -11,6 +11,7 @@ import {
   runPidPath,
   runSocketPath,
   accountForPidFile,
+  slotIndexOfDir,
   slotFor,
   slotRunDir,
   workerLockPath,
@@ -260,6 +261,30 @@ describe("#205: slot layout — one subdir per slot, granted to that slot alone"
     expect(accountForPidFile("/x/w-1/socks/thr_1.pid", "automata-agent")).toBe(
       "automata-agent",
     );
+  });
+
+  it("slotIndexOfDir trusts only names the worker would create: s<i> with i < BOX_SLOTS_MAX — never Infinity, never a throw", () => {
+    expect(slotIndexOfDir("s0")).toBe(0);
+    expect(slotIndexOfDir("s15")).toBe(15);
+    for (const hostile of [
+      "s16",
+      "s99",
+      "s00",
+      "s01",
+      "s-1",
+      "s1.5",
+      "s",
+      "S1",
+      "s1 ",
+      `s${"9".repeat(400)}`,
+      "socks",
+    ]) {
+      expect(slotIndexOfDir(hostile)).toBeNull();
+      // and the account derivation treats the file as flat-layout
+      expect(
+        accountForPidFile(`/x/w-1/${hostile}/thr_1.pid`, "automata-agent"),
+      ).toBe("automata-agent");
+    }
   });
 
   it("slotFor: undefined at N = 1; the run's boxSlot at N > 1; a missing override is an invariant violation", () => {

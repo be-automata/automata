@@ -253,8 +253,8 @@ What the worker then does on its own: takes slot locks `box.lock` and
 `box.lock.1` under the run-namespace root, grants every slot account traverse on
 the shared `<root>/<workerId>/` dir and an inheritable grant on that slot's own
 `<root>/<workerId>/s<i>/` subdir (so one slot's daemon socket is never
-connectable by another), records each run's account beside its pidfile so a
-reclaim kills a dead group as the right account, and scans each slot's uid at
+connectable by another), keeps each run's pidfile under its slot's subdir so a
+reclaim kills a dead group as that slot's account, and scans each slot's uid at
 boot only once it holds every slot. The boot log shows
 `box slots: 2 (automata-agent, automata-agent-1)`.
 

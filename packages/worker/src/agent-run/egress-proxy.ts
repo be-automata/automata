@@ -481,6 +481,9 @@ export async function assertEgressProxyReachable(opts: {
 }): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 2_000;
   const target = new URL(EGRESS_HEALTH_PATH, opts.url);
+  // #205: at N > 1 the URL's userinfo IS the run's proxy credential; an error
+  // message reaches the run log and the failure reason, so it names host:port only.
+  const where = target.host;
   const status = await new Promise<number>((resolve, reject) => {
     const req = httpRequest(
       {
@@ -503,14 +506,14 @@ export async function assertEgressProxyReachable(opts: {
     req.end();
   }).catch((err: Error) => {
     throw new Error(
-      `egress proxy health check failed at ${opts.url}: ${err.message} — ` +
+      `egress proxy health check failed at ${where}: ${err.message} — ` +
         `refusing to start the daemon (a proxy the agent cannot reach makes the ` +
         `run hang silently with no output)`,
     );
   });
   if (status !== 200) {
     throw new Error(
-      `egress proxy health check failed at ${opts.url}: status ${status} — ` +
+      `egress proxy health check failed at ${where}: status ${status} — ` +
         `refusing to start the daemon`,
     );
   }

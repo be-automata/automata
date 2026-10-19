@@ -2,10 +2,10 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  SLOT_DIR_RE,
   WORKER_LOCK_FILENAME,
   accountForPidFile,
   runPidPath,
+  slotIndexOfDir,
   workerRunDir,
 } from "./run-namespace";
 import { buildKillInvocation, type Invocation } from "./spawn-as-user";
@@ -82,13 +82,28 @@ function pidFilesIn(dir: string): string[] {
   }
 }
 
-/** The slot subdir names (`s<i>`) present under a worker dir (#205). */
-function listSlotDirs(dir: string): string[] {
+/**
+ * The slot subdirs (`s<i>`, #205) under a worker dir that the WORKER created:
+ * a valid slot name (slotIndexOfDir) AND owned by this uid. At N = 1 the agent
+ * account can create dirs in the shared worker dir; whatever it drops there is
+ * not a slot and is never scanned. [] when the dir cannot be read.
+ */
+function listSlotDirs(dir: string): Array<{ name: string; slot: number }> {
+  const self = process.getuid?.();
   try {
-    return fs
-      .readdirSync(dir, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && SLOT_DIR_RE.test(e.name))
-      .map((e) => e.name);
+    return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+      if (!e.isDirectory()) return [];
+      const slot = slotIndexOfDir(e.name);
+      if (slot === null) return [];
+      if (self !== undefined) {
+        try {
+          if (fs.lstatSync(path.join(dir, e.name)).uid !== self) return [];
+        } catch {
+          return [];
+        }
+      }
+      return [{ name: e.name, slot }];
+    });
   } catch {
     return [];
   }
@@ -96,7 +111,7 @@ function listSlotDirs(dir: string): string[] {
 
 /** Every `*.pid` under a worker dir: the flat layout's plus each slot subdir's (#205). */
 function listPidFiles(dir: string): string[] {
-  return [dir, ...listSlotDirs(dir).map((n) => path.join(dir, n))].flatMap(
+  return [dir, ...listSlotDirs(dir).map((d) => path.join(dir, d.name))].flatMap(
     pidFilesIn,
   );
 }
@@ -159,15 +174,20 @@ function readPid(file: string): number | null {
  * #205: the account to signal a recorded group as — the slot's, read off the
  * pidfile's own path (`accountForPidFile`), so a dead slot-1 run is never
  * killed as slot 0 (an EPERM no-op and a leaked agent). Agent-uid mode off ⇒
- * unchanged `process.kill(-pgid)`.
+ * unchanged `process.kill(-pgid)`. null when no account can be derived (a slot
+ * whose name would exceed the login limit): the caller skips that file — a
+ * reclaim never throws, and never kills as the wrong account.
  */
 function killOptsFor<T extends { agentUser?: string }>(
   pidFile: string,
   opts: T,
-): T {
-  return opts.agentUser
-    ? { ...opts, agentUser: accountForPidFile(pidFile, opts.agentUser) }
-    : opts;
+): T | null {
+  if (!opts.agentUser) return opts;
+  try {
+    return { ...opts, agentUser: accountForPidFile(pidFile, opts.agentUser) };
+  } catch {
+    return null;
+  }
 }
 
 export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
@@ -197,7 +217,9 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
       if (daemonPid === null) {
         continue; // malformed pid file — tolerate
       }
-      const how = killDaemonGroup(daemonPid, killOptsFor(pidFile, opts));
+      const killOpts = killOptsFor(pidFile, opts);
+      if (killOpts === null) continue;
+      const how = killDaemonGroup(daemonPid, killOpts);
       if (how !== "gone") {
         log(
           `reclaim: ${how === "sudo" ? "sudo-" : ""}SIGKILLed orphan daemon group ${daemonPid} (${entry.name})`,
@@ -259,15 +281,17 @@ export function reapOwnThreadAttempts(
     const dir = workerRunDir(root, entry.name);
     const candidates = [
       runPidPath(root, entry.name, threadId),
-      ...listSlotDirs(dir).map((name) =>
-        runPidPath(root, entry.name, threadId, Number(name.slice(1))),
+      ...listSlotDirs(dir).map((d) =>
+        runPidPath(root, entry.name, threadId, d.slot),
       ),
     ];
     for (const pidFile of candidates) {
       const daemonPid = readPid(pidFile);
       if (daemonPid === null) continue;
       // The prior attempt ran as the account its slot dir names.
-      const how = killDaemonGroup(daemonPid, killOptsFor(pidFile, opts));
+      const killOpts = killOptsFor(pidFile, opts);
+      if (killOpts === null) continue;
+      const how = killDaemonGroup(daemonPid, killOpts);
       if (how !== "gone") {
         log(
           `admission-reap: ${how === "sudo" ? "sudo-" : ""}SIGKILLed prior attempt group ${daemonPid} of ${threadId} (${entry.name})`,

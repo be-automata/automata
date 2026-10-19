@@ -250,6 +250,32 @@ export interface BuildDaemonEnvOpts {
  * self-heal check env so both route through the same per-run egress proxy.
  * Returns `base` plus the proxy keys (a copy; `base` is not mutated).
  */
+/**
+ * gstack's browse server hands BROWSE_PROXY_URL to chromium.launch({ proxy })
+ * — a `server` string Chromium takes NO credentials from, and which lands in
+ * Chromium's argv (readable by every account via `ps`). #205: at N > 1 the
+ * run proxy's URL carries the per-run credential in its userinfo, so the
+ * browse URL is the credential-less form and the credential travels as
+ * BROWSE_PROXY_USER / BROWSE_PROXY_PASS, which gstack maps to Playwright's
+ * proxy.username / proxy.password (its policy: creds in the URL OR the env,
+ * never both). A credential-less proxy (N = 1) sets the URL alone, as before.
+ */
+export function buildBrowseProxyEnv(egressProxyUrl: string): NodeJS.ProcessEnv {
+  const u = new URL(egressProxyUrl);
+  if (!u.username && !u.password) {
+    return { BROWSE_PROXY_URL: egressProxyUrl };
+  }
+  const user = decodeURIComponent(u.username);
+  const pass = decodeURIComponent(u.password);
+  u.username = "";
+  u.password = "";
+  return {
+    BROWSE_PROXY_URL: u.toString().replace(/\/$/, ""),
+    BROWSE_PROXY_USER: user,
+    BROWSE_PROXY_PASS: pass,
+  };
+}
+
 export function buildRunProxyEnv(
   egressProxyUrl: string,
   base: NodeJS.ProcessEnv,
@@ -435,7 +461,7 @@ export function buildDaemonEnv({
       env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY = "1";
     }
     if (browseProxy) {
-      env.BROWSE_PROXY_URL = egressProxyUrl;
+      Object.assign(env, buildBrowseProxyEnv(egressProxyUrl));
     }
   }
   // Credential env (Amp). After the whitelist so SECRET_KEY_PATTERN cannot drop it.

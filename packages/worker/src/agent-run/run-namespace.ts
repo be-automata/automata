@@ -8,7 +8,7 @@ import {
   applySlotLayoutAces,
   type AceExec,
 } from "./agent-uid-fs";
-import { assertSlotIndex } from "./box-lock";
+import { BOX_SLOTS_MAX, assertSlotIndex } from "./box-lock";
 import { agentUserForSlot } from "./spawn-as-user";
 
 /**
@@ -119,18 +119,35 @@ export function slotRunDir(
 }
 
 /** The slot-subdir name pattern reclaim scans for (`s0`, `s1`, …). */
-export const SLOT_DIR_RE = /^s\d+$/;
+const SLOT_DIR_RE = /^s(0|[1-9]\d?)$/;
+
+/**
+ * #205: the slot index a dir name denotes, or null when the name is not one
+ * the worker itself would have created: `s<i>` with i a plain integer below
+ * BOX_SLOTS_MAX. The ONE parser for slot dir names. At N = 1 the agent account
+ * holds an inheritable grant on the shared worker dir, so an agent CAN drop a
+ * dir there; a name like `s` + 400 digits or `s99` must read as "not a slot",
+ * never reach assertSlotIndex, and never fail an admission or a boot.
+ */
+export function slotIndexOfDir(name: string): number | null {
+  const m = SLOT_DIR_RE.exec(name);
+  if (!m) return null;
+  const slot = Number(m[1]);
+  return slot < BOX_SLOTS_MAX ? slot : null;
+}
 
 /**
  * #205: the agent account that owns a per-run pidfile, from WHERE it lives:
- * `<workerDir>/s<i>/x.pid` ⇒ slot i's account; the flat layout ⇒ the base
- * account. The layout IS the record — nothing else has to be written per run,
- * and a reclaim after a crash reads only the path it already found.
+ * `<workerDir>/s<i>/x.pid` ⇒ slot i's account; the flat layout (or any dir
+ * that is not a slot dir) ⇒ the base account. The layout IS the record —
+ * nothing else has to be written per run, and a reclaim after a crash reads
+ * only the path it already found. Throws only for a slot whose account name
+ * would exceed the login limit (assertAgentUser); reclaim treats that as
+ * "skip this file".
  */
 export function accountForPidFile(pidFile: string, baseUser: string): string {
-  const parent = path.basename(path.dirname(pidFile));
-  const m = SLOT_DIR_RE.exec(parent);
-  return m ? agentUserForSlot(baseUser, Number(parent.slice(1))) : baseUser;
+  const slot = slotIndexOfDir(path.basename(path.dirname(pidFile)));
+  return slot === null ? baseUser : agentUserForSlot(baseUser, slot);
 }
 
 export function runSocketPath(
@@ -222,9 +239,10 @@ export async function ensureRunNamespace(opts: {
   agentUser: string;
   /**
    * #205: every slot's account, when the box runs more than one slot. The
-   * namespace dir is SHARED by all slots (one socket, pidfile and gh-broker
-   * socket per run live in it), so each slot account needs the same traverse
-   * + inheritable grant. Omitted ⇒ `[agentUser]`, exactly as before.
+   * worker dir is then SHARED by all slots and hands each slot account
+   * TRAVERSE only; the inheritable grant goes on each slot's own `s<i>/`
+   * subdir (ensureSlotNamespace), where that slot's socket, pidfile and
+   * gh-broker socket live. Omitted ⇒ `[agentUser]`, exactly as before.
    */
   agentUsers?: string[];
   workerLogin?: string;

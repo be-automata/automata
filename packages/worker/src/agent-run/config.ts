@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { BOX_SLOTS_MAX } from "./box-lock";
 import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
 import {
   agentUserForSlot,
@@ -318,7 +319,7 @@ export function parseMemoryMax(raw: string | undefined): number {
 }
 
 /** Upper bound on `WORKER_BOX_SLOTS`; a typo like `30` must not mint 30 accounts' worth of lock files. */
-export const BOX_SLOTS_MAX = 16;
+export { BOX_SLOTS_MAX };
 
 /**
  * Parse `WORKER_BOX_SLOTS` (#205). Unset or empty = 1 = today's exclusive lock.

@@ -885,6 +885,30 @@ describe("harness battery env (gstack, gsd, ruflo)", () => {
     ).toBeUndefined();
   });
 
+  it("#205 browse proxy with a per-run credential: the URL never carries userinfo; the credential goes to BROWSE_PROXY_USER/PASS", () => {
+    const proxy = "http://run:s3cr%40t@127.0.0.1:9999";
+    const env = buildDaemonEnv({
+      ...base,
+      egressProxyUrl: proxy,
+      browseProxy: true,
+    });
+    expect(env.BROWSE_PROXY_URL).toBe("http://127.0.0.1:9999");
+    expect(env.BROWSE_PROXY_URL).not.toContain("@");
+    expect(env.BROWSE_PROXY_USER).toBe("run");
+    expect(env.BROWSE_PROXY_PASS).toBe("s3cr@t");
+    // The agent CLI's own proxy env keeps the credentialed URL (undici/curl/git
+    // read userinfo); only Chromium's path is split.
+    expect(env.HTTPS_PROXY).toBe(proxy);
+    // Credential-less (N = 1): no BROWSE_PROXY_USER/PASS at all — byte-identical.
+    const plain = buildDaemonEnv({
+      ...base,
+      egressProxyUrl: "http://127.0.0.1:9999",
+      browseProxy: true,
+    });
+    expect(plain.BROWSE_PROXY_USER).toBeUndefined();
+    expect(plain.BROWSE_PROXY_PASS).toBeUndefined();
+  });
+
   it("hands the seeded packs' PATH dirs to the daemon, never PATH itself", () => {
     const env = buildDaemonEnv({
       ...base,

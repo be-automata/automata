@@ -163,6 +163,12 @@ export function boxLockPath(root: string, slot = 0): string {
 }
 
 /** A slot index is a non-negative integer; shared by every slot-addressed builder. */
+/**
+ * The most slots one box may run (#205). Bounds WORKER_BOX_SLOTS and the slot
+ * dir names a reclaim will trust.
+ */
+export const BOX_SLOTS_MAX = 16;
+
 export function assertSlotIndex(slot: number, where: string): void {
   if (!Number.isInteger(slot) || slot < 0) {
     throw new Error(
