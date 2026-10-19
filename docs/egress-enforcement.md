@@ -150,13 +150,13 @@ loaded at boot is a load error (no cgroup yet) or a stale id (refuses the proxy
 and broker: every run dies in seconds). The 80/443 fence never depends on the
 worker, and a loopback load failure never weakens it.
 
-Rollout is two steps: **observe** (every deny is `counter log prefix
-"automata-lo-deny " accept`; `journalctl -k --grep automata-lo-deny` must show
-only the engine, cloudflared and sshd rows over 7 days / 30 runs) then
-**enforce** (the three deny lines become `reject`). `nft-verify.sh` proves the
-loaded table against the target matrix, as each slot uid, from a throwaway
-cgroup under the worker unit — a probe from an ssh session is in the session
-scope and tests the wrong thing.
+Rollout was two steps: **observe** (PR #383, every deny as `counter limit rate
+… log prefix "automata-lo-deny " accept`, in production from 2026-10-19 13:45
+UTC) then **enforce** (the deny lines become `reject`, with `with tcp reset` on
+the tcp ones; this is the shipped form). `nft-verify.sh` proves the loaded table against the target
+matrix, as each slot uid, from a throwaway cgroup under the worker unit — a
+probe from an ssh session is in the session scope and tests the wrong thing —
+and in enforce mode expects every deny row reset in under 1s.
 
 Limits, measured on the box 2026-10-19:
 

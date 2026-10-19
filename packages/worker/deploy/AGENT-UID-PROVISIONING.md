@@ -358,7 +358,7 @@ sudo install -m 0755 -o root -g root nft-verify.sh        /usr/local/sbin/nft-ve
 # 2. Dry-run the loader by hand — only its guards; the cgroup must exist, so the
 #    worker must be running. It replaces the table in place; nothing restarts.
 sudo /usr/bin/env WORKER_USER=automata /usr/local/sbin/nft-loopback-load.sh /etc/automata/loopback-nft.conf
-#    → [nft-loopback-load] OK — mode=observe; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 6 -> 7
+#    → [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 6 -> 7
 
 # 3. Re-render the unit (adds the ExecStartPre=+ line), diff, install, restart.
 sed 's#__USER__#automata#g; s#__HOME__#/home/automata#g; s#__REPO__#/opt/automata-platform#g' automata-worker.service \
@@ -377,44 +377,55 @@ sudo env WORKER_AGENT_USER=automata-agent WORKER_BOX_SLOTS=2 /usr/local/sbin/nft
 
 **Live status.** Observe step deployed to `automata-exec-1` on 2026-10-19 at
 13:44 UTC from `main` `5b57010` (PR #383), rendered for the box's two slot uids
-(`999, 2001`). Proven on the box that day, against the acceptance criteria of
-issue #367: the unit's own `ExecStartPre=+` load on restart (#367 criterion 5,
-"restart reload" — 24/24 probe rows after it); fail-closed on a bad cgroup
-path (#367 criterion 6 — `activating (auto-restart)`, `Result=exit-code`, the
-loader's FAIL line in the journal; the previous table stays loaded but no
-worker runs); `inet automata_egress` byte-identical (#367 criterion 7); and two
-real task runs under the table with the cgroup admit counter rising and zero
-deny hits. The observe window runs from 2026-10-19 13:45 UTC.
+(`999, 2001`); enforce loaded on the same box at 13:55 UTC (by hand, then by
+the unit from this revision). Proven on the box that day, against the
+acceptance criteria of issue #367: the unit's own `ExecStartPre=+` load on
+restart (#367 criterion 5, "restart reload" — 24/24 probe rows after it);
+fail-closed on a bad cgroup path (#367 criterion 6 — `activating
+(auto-restart)`, `Result=exit-code`, the loader's FAIL line in the journal;
+the previous table stays loaded but no worker runs); `inet automata_egress`
+byte-identical (#367 criterion 7); and three real runs under the observe table
+(two task-lane, one review-lane with a real verdict) with the cgroup admit
+counter rising and zero deny hits.
 
-**Observe, then enforce.** The template ships with every deny as
-`counter log prefix "automata-lo-deny " accept`: nothing is refused, every
-would-be deny is counted and logged. Run it for 7 days or 30 agent runs,
-whichever is later, then read the log:
+**Observe-window evidence and the shortened window.** The issue's gate was 7
+days or 30 agent runs, whichever is later. The enforce step shipped after
+hours and 3 runs, at the operator's direction, on this record:
+`journalctl -k --grep automata-lo-deny` from 13:45:10 UTC (window start) to
+13:55 UTC (enforce load) contained ONLY the verifier's own probe rows — 14
+lines at 13:47:22–23, every one a "refused" row of the target table
+(`127.0.0.1:7077/8888/20241`, `172.18.0.2:7077/8888`, `138.201.174.63:22`,
+`::1:22`) — and nothing from the runs; `ss -ltnp` cross-reference: no foreign
+listener was hit. Rule counters at the flip: admit 77 packets (6 of them
+probes), DNS 6, `:25432` 2, every deny rule at its probe count. The run proxy
+audited 0 `host-local` attempts. A run that depends on a host-local service
+the window never exercised would die within seconds with ECONNREFUSED in its
+own log; the rollback is `nft delete table inet automata_loopback` (seconds)
+and the three observe lines (one bridge, two default) for durability.
 
-```bash
-journalctl -k --grep 'automata-lo-deny' --no-pager | sed -E 's/.*DST=([^ ]+).*DPT=([0-9]+).*/\1:\2/' | sort | uniq -c
-```
+**Rollout state: ENFORCE.** The observe step (PR #383, every deny as
+`counter limit rate … log prefix "automata-lo-deny " accept`) ran in production
+from 2026-10-19 13:45 UTC; the enforce flip (this revision) turns the deny
+lines into four reject lines — bridge tcp `reject with tcp reset`, bridge
+non-tcp `reject`, default tcp `reject with tcp reset`, default non-tcp
+`reject` (no `limit`, no `log`). The bridge rule needs the tcp-reset form: a
+plain `reject` in the output hook left the agent's connect to time out at 1s
+instead of ECONNREFUSED (measured). Deploy = step 1 and the restart of
+step 3 with no run in flight, then step 4: in enforce mode the verifier expects
+every deny row reset in under 1s. The loader and the verifier both refuse a
+half-flipped table. Under enforce nothing is logged; the rule counters are the
+observability (`nft-verify.sh` prints them). To fall back to observe: replace the
+two bridge lines with the single observe bridge line and put the observe form
+on the two default lines (three observe lines in total, exactly the PR #383
+table), re-render, restart idle.
 
-Read each `DST:DPT` against the box's listeners (`ss -ltnp`): a destination with
-a listener that is NOT a worker/agent process is a finding and must be a
-"refused" row of #367's target table (engine `:7077`/`:8888` on `127.0.0.1` and
-the bridge, `:20241`, `:22`; IPv6 prints as `0000:…:0001:22`). A destination
-with NO listener is a closed port the agent polled (a `wait-on`/readiness loop
-before its own server came up): there is no socket, so no cgroup, so it lands
-on the default line — under enforce the agent gets the same reset the kernel
-would have sent, so it is noise, not a finding. Subtract the slices
-`nft-verify.sh` prints as its probe window. Counts are per packet, not per
-connection: the `in` rows see one SYN per connection, the bridge row (judged in
-the output hook, every packet) sees three to four — the first dry run logged 13
-bridge packets for 4 probe connections. The log is rate-limited (20/s, burst 100) so a run cannot flood the kernel log; the rule counters are exact. A hit outside those rows
-means the table is wrong and is fixed **before** enforcing. To enforce: flip the
-three deny lines in `loopback-nft.conf` — bridge set, tcp default, non-tcp
-default — from `counter limit rate … log prefix … accept` to the `reject` forms
-given beside each (`counter reject`, `meta l4proto tcp counter reject with tcp
-reset`, `meta l4proto != tcp counter reject`; no `limit`, no `log`), re-run
-step 1 and the restart of step 3 with no run in flight, then step 4 — in
-enforce mode the verifier expects every deny row reset in under 1s. The loader
-and the verifier both refuse a half-flipped table.
+Reading an observe-mode log, should one be re-enabled: cross-reference each
+`DST:DPT` against `ss -ltnp` — a destination with a listener that is NOT a
+worker/agent process is a finding and must be a "refused" row of #367's target
+table; a destination with NO listener is a closed port the agent polled (there
+is no socket, so no cgroup, so it lands on the default line — under enforce the
+agent gets the same reset the kernel would have sent). Counts are per packet:
+the `in` rows see one SYN per connection, the bridge row sees three to four.
 
 Known limits: a listener's socket carries the cgroup of the task that
 **created** it — a socket created outside the subtree and inherited into it

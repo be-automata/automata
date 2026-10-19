@@ -2938,24 +2938,24 @@ describe("#367: loopback fence — default-deny the agent uid toward host-local 
     );
   });
 
-  it("every deny verdict carries a counter, and THIS revision is the observe step (rate-limited log + accept, no reject)", () => {
-    // protects=the fence is observable (a never-fired and an always-firing
-    // fence look identical without counters), a run cannot flood the kernel
-    // log, and the rollout step is explicit; fails_when=a deny line lacks
-    // `counter` (before the limit, so counts stay exact), lacks the rate limit,
-    // or a `reject` appears before the enforce PR flips the three verdicts;
-    // no_claim=none beyond protects.
-    // ENFORCE PR: flip this assertion to expect the reject forms and no log line.
+  it("every deny verdict carries a counter, and THIS revision is the ENFORCE step (reject, no log line)", () => {
+    // protects=the fence refuses (reset for tcp, icmp unreachable otherwise)
+    // and stays observable through its counters; fails_when=a deny line lacks
+    // `counter`, is still the observe form (`log prefix … accept`), or a tcp
+    // deny (bridge or default) lacks `with tcp reset` (a silent drop makes the agent sit on its
+    // connect timeout — the forensics class #192 removed); no_claim=none
+    // beyond protects.
     const denyLines = rules
       .split("\n")
       .filter((l) => l.includes(DENY_LOG) || /reject/.test(l));
-    expect(denyLines.length).toBe(3);
-    for (const l of denyLines) {
-      expect(l, l).toMatch(
-        /counter limit rate 20\/second burst 100 packets log prefix "automata-lo-deny " accept$/,
-      );
-      expect(l, l).not.toMatch(/reject/);
-    }
+    expect(denyLines.map((l) => l.trim())).toEqual([
+      'meta skuid { __AGENT_UID__ } oifname { "docker0", "br-*" } meta l4proto tcp counter reject with tcp reset',
+      'meta skuid { __AGENT_UID__ } oifname { "docker0", "br-*" } counter reject',
+      "meta l4proto tcp counter reject with tcp reset",
+      "meta l4proto != tcp counter reject",
+    ]);
+    expect(rules).not.toContain(DENY_LOG);
+    expect(rules).not.toMatch(/limit rate/);
   });
 
   it("fences both Docker bridge names in the output hook, and admits ICMP before the default deny", () => {
@@ -2968,8 +2968,12 @@ describe("#367: loopback fence — default-deny the agent uid toward host-local 
       /meta skuid \{ __AGENT_UID__ \} oifname \{ "docker0", "br-\*" \} counter/,
     );
     expect(rules).toMatch(/meta l4proto \{ icmp, ipv6-icmp \} counter accept/);
+    const agentLo = rules.indexOf("chain agent_lo {");
     expect(rules.indexOf("meta l4proto { icmp, ipv6-icmp }")).toBeLessThan(
-      rules.indexOf("meta l4proto tcp counter"),
+      rules.indexOf("meta l4proto tcp counter", agentLo),
+    );
+    expect(rules.indexOf("meta l4proto { icmp, ipv6-icmp }")).toBeGreaterThan(
+      agentLo,
     );
   });
 
@@ -3103,8 +3107,8 @@ describe("#367: loopback fence — default-deny the agent uid toward host-local 
       if (opts.mixed) {
         const before = c;
         c = c.replace(
-          `meta l4proto tcp counter limit rate 20/second burst 100 packets ${DENY_LOG} accept`,
           "meta l4proto tcp counter reject with tcp reset",
+          `meta l4proto tcp counter limit rate 20/second burst 100 packets ${DENY_LOG} accept`,
         );
         expect(c).not.toBe(before);
       }
@@ -3143,7 +3147,7 @@ describe("#367: loopback fence — default-deny the agent uid toward host-local 
 
     const ok = run(render("999, 2001"));
     expect(ok.err).toContain(
-      "[nft-loopback-load] OK — mode=observe; uid(s) 999 2001; mark 0x10000000",
+      "[nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000",
     );
     expect(ok.status).toBe(0);
     expect(ok.loaded).toBe(true);
@@ -3185,7 +3189,7 @@ describe("#367: loopback fence — default-deny the agent uid toward host-local 
     );
     refuses(
       run(render("999, 2001", { mixed: true })),
-      /deny verdicts are mixed: 2 observe \(log\+accept\) and 1 enforce \(reject\)/,
+      /deny verdicts are mixed: 1 observe \(log\+accept\) and 3 enforce \(reject\)/,
     );
     // A foreign mark that OVERLAPS our bit, not only the same literal.
     refuses(
