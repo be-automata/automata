@@ -1,0 +1,23 @@
+window 2026-10-19 13:55:30 -> 2026-10-19 16:51:50 UTC (the C12 capture)
+run start lines: 34
+Task run starting: 34
+Task run completed: 31
+Task run failed: 0
+by lane (run start):
+      3 run start: lane=pr
+     21 run start: lane=review
+     10 run start: lane=task
+== starts without a completion inside the window (by agent-run id)
+== runs whose Task run completed line fell after T1
+4
+== worker restarts in window (each restart ends in-flight runs and reloads the table)
+Oct 19 14:19:09 Stopped automata-worker.service - Automata execution-plane worker.
+Oct 19 14:19:09 [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-
+Oct 19 14:19:10 Started automata-worker.service - Automata execution-plane worker.
+Oct 19 16:31:24 Stopped automata-worker.service - Automata execution-plane worker.
+Oct 19 16:31:24 [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-
+Oct 19 16:31:24 Started automata-worker.service - Automata execution-plane worker.
+Oct 19 16:37:22 Stopped automata-worker.service - Automata execution-plane worker.
+Oct 19 16:37:22 [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-
+Oct 19 16:37:22 Started automata-worker.service - Automata execution-plane worker.
+== note: the loopback counters in evidence 28 date from the 16:37:22 reload, not 14:19

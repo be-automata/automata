@@ -96,7 +96,7 @@
    "text": "REGRESSION: 30 real runs under enforce complete with no fence-caused failure (the issue's 30-run half of the gate)",
    "source": "#367 rollout gate (30-run half; the 7-day half is the operator's deviation)",
    "verdict": "PASS",
-   "evidence": "thirty-run-hold: 31 completed, 0 failed, 0 refused, 0 host-local (13:55\u219216:51 UTC)"
+   "evidence": "thirty-run-hold + run-count-reconciliation: 34 starts \u2192 31 completed inside the window; the remaining 3 of the 34 starts were in flight at the 16:51 capture and completed afterwards (4 completions fell after it; no run without a terminal status by then); 0 failed (13:55\u219216:51 UTC); counters in evidence 28 date from the 16:37 reload"
   }
  ],
  "deviations": [
@@ -180,6 +180,7 @@
   "26-api-C367-test-cards.txt",
   "27-api-C367-ci-pr-checks.txt",
   "28-api-C367-thirty-run-hold.txt",
+  "29-api-C367-run-count-reconciliation.txt",
   "manifest.json"
  ],
  "artifact_url": "https://app.superset.sh/page/367-loopback-fence-uat-k2r66b",
@@ -188,6 +189,7 @@
  "page_id": "fc56d656-53f8-4453-b201-49f8856a57f5",
  "page_slug": "367-loopback-fence-uat-k2r66b",
  "run_history": [
-  "2026-10-19 16:51 UTC \u2014 C12 graded PASS on the 30-run hold (31/0); page v3"
+  "2026-10-19 16:51 UTC \u2014 C12 graded PASS on the 30-run hold (31/0); page v3",
+  "2026-10-19 \u2014 review round 2: run-count reconciliation (evidence 29) and counter-date correction; page v5"
  ]
 }

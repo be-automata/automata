@@ -433,5 +433,20 @@
     "captured_at": "2026-10-19T16:52:38Z",
     "env": "",
     "build": ""
+  },
+  {
+    "seq": 29,
+    "file": "29-api-C367-run-count-reconciliation.txt",
+    "lane": "api",
+    "case": "C-367",
+    "slug": "run-count-reconciliation",
+    "kind": "text",
+    "sha256": "3403dbacde46fb4c684dde90b5470564cb6476888d739d43588dc79f0dbacb71",
+    "bytes": 1419,
+    "redactions": {},
+    "source": "/private/tmp/claude-501/uat367/uat367/run-count-reconciliation.txt",
+    "captured_at": "2026-10-19T16:57:21Z",
+    "env": "",
+    "build": ""
   }
 ]

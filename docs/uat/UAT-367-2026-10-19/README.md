@@ -20,7 +20,7 @@
 | C9 | observe log holds only refused rows | PASS | `15-…-observe-window-log.txt` (verifier probes only) |
 | C10 | test cards present | PASS | `26-…-test-cards.txt` (9/9; proxy 6) |
 | C11 | CI green, egress assertions unchanged | PASS | `27-…-ci-pr-checks.txt` |
-| C12 | 30 runs under enforce, none fence-failed (regression, issue gate) | PASS | `28-…-thirty-run-hold.txt`: 31 completed (21 review, 10 task, 3 pr), 0 failed, 0 refused, 0 host-local; unplanned restart 16:37 reloaded cleanly |
+| C12 | 30 runs under enforce, none fence-failed (regression, issue gate) | PASS | `28-…-thirty-run-hold.txt` + `29-…-run-count-reconciliation.txt`: 34 starts (21 review, 10 task, 3 pr) → 31 completed inside the window; the remaining 3 of the 34 starts were in flight at the 16:51 capture and completed afterwards (4 completions fell after it; no run without a terminal status by then); 0 failed; 0 refused strings, 0 host-local; three worker restarts in the window (14:19, 16:31, 16:37) each reloaded the table via ExecStartPre. The counters shown in file 28 date from the 16:37 reload (its header's "14:19" is wrong; file 29 states the correction) |
 
 ## Deviations
 
