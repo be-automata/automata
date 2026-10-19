@@ -1049,12 +1049,31 @@ The order matters because each step checks the one before it.
    (`FATAL: worker configuration is invalid` / `the box slots do not fit this
 box's CommitLimit`). The production tuple and its derivation from the memory
    sampler live in `deploy/uat/phase2-4.md`.
-   **Upgrading a box already above N = 1:** an unset `WORKER_GLOBAL_MAX_RUNS`
-   follows `WORKER_BOX_SLOTS` (so a box at `WORKER_BOX_SLOTS=2` keeps booting
-   across this change); only an EXPLICIT disagreeing value is refused. Set the
-   cap knobs explicitly when you next touch `worker-box.env`:
+   **Upgrading a box already above N = 1 — check BEFORE deploying.** The cap
+   knobs are safe (an unset `WORKER_GLOBAL_MAX_RUNS` follows `WORKER_BOX_SLOTS`;
+   only an explicit disagreeing value is refused), but the NEW commit-budget
+   check is fatal on every Linux box with N > 1, the ceiling on and
+   `WORKER_HEADROOM_COMMIT_FRACTION < 1`: it refuses when
+   `N × WORKER_HEADROOM_RUN_COMMIT + 2 GiB > fraction × CommitLimit`. A cx33 at
+   `WORKER_BOX_SLOTS=2 WORKER_RUN_MEMORY_MAX=5000M` FAILS it (2 × 5.24 + 2.15 =
+   12.6 GB > 0.9 × 12.65 = 11.4 GB) and would crash-loop under `Restart=always`
+   after the upgrade. Run this on the box first and only deploy when it prints
+   `fits`:
+
+   ```bash
+   source /home/automata/.automata/worker-box.env
+   awk -v n="${WORKER_BOX_SLOTS:-1}" -v rc="${WORKER_HEADROOM_RUN_COMMIT:-$WORKER_RUN_MEMORY_MAX}" \
+       -v f="${WORKER_HEADROOM_COMMIT_FRACTION:-0.9}" '
+     /^CommitLimit/ { cl=$2*1024 }
+     END { m=rc; sub(/M$/,"",m); if (m!=rc) rc=m*1048576; sub(/G$/,"",rc); if (rc<1e6) rc=rc*1073741824;
+           need=n*rc+2147483648; budget=f*cl;
+           printf "need=%.2f GB budget=%.2f GB -> %s\n", need/1e9, budget/1e9, (n<=1||f>=1||need<=budget)?"fits":"REFUSED: lower N or the ceiling, raise vm.overcommit_ratio, or add swap" }' /proc/meminfo
+   ```
+
+   Set the cap knobs explicitly when you next touch `worker-box.env`:
    `grep -E '^WORKER_(BOX_SLOTS|GLOBAL_MAX_RUNS|PER_ORG_MAX_RUNS)=' worker-box.env`
    must show an agreeing tuple, or nothing at all (= 1/1/1).
+
 8. **Drill**: the drill automation above, then
    `harness-batteries-acceptance.sh box …` → `ACCEPTANCE: PASS`.
 

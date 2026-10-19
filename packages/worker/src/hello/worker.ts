@@ -369,7 +369,14 @@ async function main() {
   // /proc/meminfo cannot be read at boot refuses to start instead of running
   // every job unguarded while the log says "OFF".
   try {
+    const env = process.env;
     console.log(`[worker-boot] ${headroomBootLine(registrationConfig)}`);
+    // #372: the caps the engine is about to be told, explicit or defaulted —
+    // an unset WORKER_GLOBAL_MAX_RUNS follows the slots, so an N = 2 box's
+    // per-variant global cap moves 1 → 2 on upgrade; the journal says so.
+    console.log(
+      `[worker-boot] engine caps: global=${registrationConfig.globalMaxRuns}${env.WORKER_GLOBAL_MAX_RUNS?.trim() ? "" : " (default = WORKER_BOX_SLOTS)"} per-org=${registrationConfig.perOrgMaxRuns}${env.WORKER_PER_ORG_MAX_RUNS?.trim() ? "" : " (default)"} slots=${registrationConfig.boxSlots} — one tuple, validated by loadWorkerConfig`,
+    );
     const loadWarning = headroomBootWarning(registrationConfig);
     if (loadWarning) console.warn(`[worker-boot] WARNING: ${loadWarning}`);
   } catch (err) {

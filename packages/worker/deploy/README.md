@@ -23,10 +23,12 @@ not the box budget; every run has `slotCost: 1`). The config loader refuses — 
 without the uid drop or the #204 ceiling. ONCE at boot (Linux, N > 1, ceiling on,
 commit arm not inert: `WORKER_HEADROOM_COMMIT_FRACTION < 1`) the worker also
 refuses `WORKER_BOX_SLOTS × WORKER_HEADROOM_RUN_COMMIT + 2 GiB base >
-WORKER_HEADROOM_COMMIT_FRACTION × CommitLimit` — the same inequality the #371
-admission uses, so a tuple that boots is admissible (run commit =
-`WORKER_RUN_MEMORY_MAX` by default, fraction 0.9; CommitLimit = swap +
-overcommit_ratio × RAM). Raise all of `WORKER_BOX_SLOTS`,
+WORKER_HEADROOM_COMMIT_FRACTION × CommitLimit` — the #371 admission inequality with a fixed 2 GiB base, so it is a LOWER bound: a
+tuple that fails to boot could never be admitted, while a tuple that boots can
+still see its Nth run deferred when the live `Committed_AS` base is above 2 GiB
+(2.6–3.5 GB idle on the pilot; the sizing in `deploy/uat/phase2-4.md` works the
+runtime margin out). Run commit = `WORKER_RUN_MEMORY_MAX` by default, fraction
+0.9; CommitLimit = swap + overcommit_ratio × RAM. Raise all of `WORKER_BOX_SLOTS`,
 `WORKER_GLOBAL_MAX_RUNS`, `WORKER_PER_ORG_MAX_RUNS` together, with
 `WORKER_RUN_MEMORY_MAX` and the swap sized for N runs; the memory-headroom check
 (#371) is the runtime guard behind this boot guard. N > 1 is Linux-only.
