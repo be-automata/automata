@@ -153,7 +153,7 @@ worker, and a loopback load failure never weakens it.
 Rollout is two steps: **observe** (every deny is `counter log prefix
 "automata-lo-deny " accept`; `journalctl -k --grep automata-lo-deny` must show
 only the engine, cloudflared and sshd rows over 7 days / 30 runs) then
-**enforce** (the three verdicts become `reject`). `nft-verify.sh` proves the
+**enforce** (the three deny lines become `reject`). `nft-verify.sh` proves the
 loaded table against the target matrix, as each slot uid, from a throwaway
 cgroup under the worker unit — a probe from an ssh session is in the session
 scope and tests the wrong thing.
@@ -163,8 +163,14 @@ Limits, measured on the box 2026-10-19:
 - A socket carries the cgroup of the task that **created** it. A listener
   created outside the subtree and then moved in is refused; one created inside
   (how the worker, its brokers and every agent child come to exist) is admitted.
-- nft 1.0.9 rejects an interface wildcard inside an anonymous set; the bridge
-  deny is two rules (`oifname "docker0"`, `oifname "br-*"`).
+- The run's own egress proxy is NOT a way around the table: it refuses
+  host-local targets (loopback, link-local, RFC 1918, IPv4-mapped forms, and
+  names that resolve to them) in every mode, including observe, and audits them
+  with `reason: "host-local"`. Proxy-honouring clients never send loopback
+  through it anyway (`NO_PROXY`).
+- A closed loopback port has no socket, so it lands on the default deny: under
+  observe it is logged (rate-limited, 20/s), under enforce the agent gets the
+  reset the kernel would have sent. ICMP to local addresses is admitted.
 - `ip netns exec` remounts `/sys`, which breaks the cgroup path lookup; the
   loader refuses to run in a named namespace.
 - At `WORKER_BOX_SLOTS > 1` the slots are not fenced from each other's loopback

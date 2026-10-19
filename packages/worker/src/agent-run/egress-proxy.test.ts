@@ -4,6 +4,7 @@ import {
 } from "node:http";
 import { createServer as createTcpServer, type AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertEgressProxyReachable,
@@ -15,6 +16,8 @@ import {
   EGRESS_HEALTH_PATH,
   PROXY_AUTH_AUDIT_CAP,
   PROXY_AUTH_HOST,
+  isHostLocalAddress,
+  makeGuardedLookup,
 } from "./egress-proxy";
 
 const domainPolicy = (allowlist: string[]): EgressPolicyShape => ({
@@ -177,19 +180,27 @@ describe("matchEgress (pure decision table)", () => {
       443,
       false,
     ],
-    // implicit loopback allow at every level (broker + proxy live there)
+    // #367: NO implicit loopback allow — the proxy dials as the worker uid from
+    // inside the worker cgroup, the one socket the box's loopback fence admits.
     [
-      "loopback ip implicit at none",
+      "loopback ip is NOT implicit at none",
       { level: "none", allowlist: [] },
       "127.0.0.1",
       5432,
-      true,
+      false,
     ],
     [
-      "localhost implicit at ip_port",
+      "localhost is NOT implicit at ip_port",
       { level: "ip_port", allowlist: [] },
       "localhost",
       80,
+      false,
+    ],
+    [
+      "an explicit loopback entry still matches the pure matcher (decide() refuses it before this is asked)",
+      { level: "ip_port", allowlist: ["127.0.0.1:5432"] },
+      "127.0.0.1",
+      5432,
       true,
     ],
     // fail-closed shapes
@@ -246,7 +257,11 @@ describe("startEgressProxy (real loopback servers)", () => {
 
   async function boot(policy: EgressPolicyShape) {
     const events: EgressDecisionEvent[] = [];
-    proxy = await startEgressProxy({ policy, onEvent: (e) => events.push(e) });
+    proxy = await startEgressProxy({
+      allowHostLocalUpstreams: true,
+      policy,
+      onEvent: (e) => events.push(e),
+    });
     return { p: proxy, events };
   }
 
@@ -356,6 +371,7 @@ describe("startEgressProxy (real loopback servers)", () => {
     async function bootWithCredential(policy: EgressPolicyShape) {
       const events: EgressDecisionEvent[] = [];
       proxy = await startEgressProxy({
+        allowHostLocalUpstreams: true,
         policy,
         credential,
         onEvent: (e) => events.push(e),
@@ -668,6 +684,7 @@ describe("startEgressProxy (real loopback servers)", () => {
   it("refuses to start with an invalid policy or missing onEvent (fail-closed constructor)", async () => {
     await expect(
       startEgressProxy({
+        allowHostLocalUpstreams: true,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         policy: { level: "everything" as any, allowlist: [] },
         onEvent: () => {},
@@ -675,6 +692,7 @@ describe("startEgressProxy (real loopback servers)", () => {
     ).rejects.toThrow(/policy must be/);
     await expect(
       startEgressProxy({
+        allowHostLocalUpstreams: true,
         policy: domainPolicy([]),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         onEvent: undefined as any,
@@ -695,6 +713,7 @@ describe("startEgressProxy (real loopback servers)", () => {
       const upstreamPort = await startUpstreamHttp();
       const events: EgressDecisionEvent[] = [];
       proxy = await startEgressProxy({
+        allowHostLocalUpstreams: true,
         policy: domainPolicy(["api.github.com"]), // would deny 127.0.0.1:port
         mode: "observe",
         onEvent: (e) => events.push(e),
@@ -710,6 +729,7 @@ describe("startEgressProxy (real loopback servers)", () => {
     it("observe still fires onEvent for EVERY decision, marked mode:observe", async () => {
       const events: EgressDecisionEvent[] = [];
       proxy = await startEgressProxy({
+        allowHostLocalUpstreams: true,
         policy: { level: "none", allowlist: [] },
         mode: "observe",
         onEvent: (e) => events.push(e),
@@ -727,6 +747,7 @@ describe("startEgressProxy (real loopback servers)", () => {
 
     it("observe counts distinct hosts for the step log", async () => {
       proxy = await startEgressProxy({
+        allowHostLocalUpstreams: true,
         policy: { level: "none", allowlist: [] },
         mode: "observe",
         onEvent: () => {},
@@ -741,6 +762,7 @@ describe("startEgressProxy (real loopback servers)", () => {
     it("observe still fails closed on an unparseable target", async () => {
       const events: EgressDecisionEvent[] = [];
       proxy = await startEgressProxy({
+        allowHostLocalUpstreams: true,
         policy: { level: "none", allowlist: [] },
         mode: "observe",
         onEvent: (e) => events.push(e),
@@ -761,6 +783,7 @@ describe("startEgressProxy (real loopback servers)", () => {
     it("resolves against a live proxy without producing an audit event", async () => {
       const events: EgressDecisionEvent[] = [];
       proxy = await startEgressProxy({
+        allowHostLocalUpstreams: true,
         policy: domainPolicy([]),
         onEvent: (e) => events.push(e),
       });
@@ -789,6 +812,7 @@ describe("startEgressProxy (real loopback servers)", () => {
 
     it("throws after close(), which is the state that would hang the run", async () => {
       const p = await startEgressProxy({
+        allowHostLocalUpstreams: true,
         policy: domainPolicy([]),
         onEvent: () => {},
       });
@@ -803,6 +827,7 @@ describe("startEgressProxy (real loopback servers)", () => {
   it("a throwing onEvent never breaks enforcement (allow still proxies)", async () => {
     const upstreamPort = await startUpstreamHttp();
     proxy = await startEgressProxy({
+      allowHostLocalUpstreams: true,
       policy: { level: "ip_port", allowlist: [`127.0.0.1:${upstreamPort}`] },
       onEvent: () => {
         throw new Error("audit plumbing exploded");
@@ -814,5 +839,179 @@ describe("startEgressProxy (real loopback servers)", () => {
     );
     expect(res.status).toBe(200);
     expect(res.body).toBe("UPSTREAM:GET:/ok");
+  });
+});
+
+describe("#367: the run's proxy is not a tunnel through the box's loopback fence", () => {
+  // protects=an agent cannot reach the engine, cloudflared, sshd or the Docker
+  // bridge by asking its own proxy (which dials as the worker uid, inside the
+  // worker cgroup) to connect there; fails_when=a host-local literal or a name
+  // resolving to one is allowed in any mode, or the worker's call site opts into
+  // the test seam; no_claim=the nft table itself (live only).
+  it.each([
+    ["127.0.0.1", true],
+    ["127.1.2.3", true],
+    ["localhost", true],
+    ["api.localhost", true],
+    ["LOCALHOST.", true],
+    ["0.0.0.0", true],
+    ["10.0.0.5", true],
+    ["100.64.1.1", true],
+    ["169.254.169.254", true],
+    ["172.18.0.2", true],
+    ["172.31.255.255", true],
+    ["172.32.0.1", false],
+    ["192.168.1.1", true],
+    ["224.0.0.1", true],
+    ["::1", true],
+    ["[::1]", true],
+    ["::", true],
+    ["::ffff:127.0.0.1", true],
+    ["::ffff:7f00:1", true],
+    ["::ffff:172.18.0.2", true],
+    ["::ffff:93.184.216.34", false],
+    ["fe80::1", true],
+    ["fd00::1", true],
+    ["ff02::1", true],
+    ["64:ff9b::7f00:1", true],
+    ["2606:4700::6810:84e5", false],
+    ["93.184.216.34", false],
+    ["github.com", false],
+    ["not an ip or name but weird", false],
+  ])("isHostLocalAddress(%s) = %s", (host, expected) => {
+    expect(isHostLocalAddress(host)).toBe(expected);
+  });
+
+  it("the guarded lookup refuses a name that resolves to a host-local address (any of its answers), passes a public one through", async () => {
+    const fake = (answers: Array<{ address: string; family: number }>) =>
+      ((_h: string, _o: unknown, cb: (e: null, a: unknown) => void) =>
+        cb(null, answers)) as unknown as Parameters<
+        typeof makeGuardedLookup
+      >[0];
+    const run = (
+      answers: Array<{ address: string; family: number }>,
+      all = false,
+    ) =>
+      new Promise<{
+        err: NodeJS.ErrnoException | null;
+        address: unknown;
+        family?: number;
+      }>((resolve) => {
+        makeGuardedLookup(fake(answers))(
+          "evil.example",
+          { all },
+          (err, address, family) => resolve({ err, address, family }),
+        );
+      });
+    const rebinding = await run([
+      { address: "93.184.216.34", family: 4 },
+      { address: "127.0.0.1", family: 4 },
+    ]);
+    expect(rebinding.err?.code).toBe("EHOSTLOCAL");
+    expect(rebinding.err?.message).toContain(
+      "resolves to host-local 127.0.0.1",
+    );
+    const bridge = await run([{ address: "::ffff:172.18.0.2", family: 6 }]);
+    expect(bridge.err?.code).toBe("EHOSTLOCAL");
+    const empty = await run([]);
+    expect(empty.err?.code).toBe("EHOSTLOCAL");
+    const fine = await run([{ address: "93.184.216.34", family: 4 }]);
+    expect(fine.err).toBeNull();
+    expect(fine.address).toBe("93.184.216.34");
+    expect(fine.family).toBe(4);
+    const fineAll = await run([{ address: "93.184.216.34", family: 4 }], true);
+    expect(fineAll.address).toEqual([{ address: "93.184.216.34", family: 4 }]);
+  });
+
+  describe("without the test seam, a real proxy refuses host-local targets in every mode", () => {
+    let proxy: EgressProxy | null = null;
+    const closers: Array<() => void> = [];
+    afterEach(async () => {
+      await proxy?.close();
+      proxy = null;
+      for (const close of closers.splice(0)) close();
+    });
+    function upstream(): Promise<number> {
+      return new Promise((resolve) => {
+        const server = createTcpServer((socket) => socket.end("leaked"));
+        closers.push(() => server.close());
+        server.listen(0, "127.0.0.1", () =>
+          resolve((server.address() as AddressInfo).port),
+        );
+      });
+    }
+    function connectVia(proxyPort: number, target: string): Promise<string> {
+      return new Promise((resolve, reject) => {
+        const req = httpRequest({
+          host: "127.0.0.1",
+          port: proxyPort,
+          method: "CONNECT",
+          path: target,
+        });
+        req.on("connect", (res, socket) => {
+          socket.destroy();
+          resolve(`${res.statusCode}`);
+        });
+        req.on("response", (res) => {
+          res.resume();
+          resolve(`${res.statusCode}`);
+        });
+        req.on("error", reject);
+        req.end();
+      });
+    }
+    function getVia(proxyPort: number, url: string): Promise<number> {
+      return new Promise((resolve, reject) => {
+        const req = httpRequest(
+          { host: "127.0.0.1", port: proxyPort, method: "GET", path: url },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+    }
+
+    it.each(["observe", "enforce"] as const)(
+      "%s mode: CONNECT and GET to loopback, a bridge ip, an IPv4-mapped literal and localhost are 403 with reason host-local",
+      async (mode) => {
+        const port = await upstream();
+        const events: EgressDecisionEvent[] = [];
+        proxy = await startEgressProxy({
+          mode,
+          policy: {
+            level: "ip_port",
+            allowlist: [`127.0.0.1:${port}`, "172.18.0.2:7077", "localhost"],
+          },
+          onEvent: (e) => events.push(e),
+        });
+        expect(await connectVia(proxy.port, `127.0.0.1:${port}`)).toBe("403");
+        expect(await connectVia(proxy.port, "172.18.0.2:7077")).toBe("403");
+        expect(await connectVia(proxy.port, `[::ffff:127.0.0.1]:${port}`)).toBe(
+          "403",
+        );
+        expect(await connectVia(proxy.port, "[::1]:22")).toBe("403");
+        expect(await getVia(proxy.port, `http://localhost:${port}/`)).toBe(403);
+        expect(
+          await getVia(proxy.port, `http://169.254.169.254/latest/meta-data/`),
+        ).toBe(403);
+        expect(events).toHaveLength(6);
+        for (const e of events) {
+          expect(e.action).toBe("deny");
+          expect(e.reason).toBe("host-local");
+          expect(e.mode).toBe(mode);
+        }
+      },
+    );
+  });
+
+  it("the worker's call site never opts into the test seam", () => {
+    const workflow = readFileSync(
+      new URL("./workflow.ts", import.meta.url),
+      "utf8",
+    );
+    expect(workflow).not.toContain("allowHostLocalUpstreams");
   });
 });

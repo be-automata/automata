@@ -377,24 +377,37 @@ whichever is later, then read the log:
 journalctl -k --grep 'automata-lo-deny' --no-pager | sed -E 's/.*DST=([^ ]+).*DPT=([0-9]+).*/\1:\2/' | sort | uniq -c
 ```
 
-Every destination must be a "refused" row of #367's target table (engine
-`:7077`/`:8888` on `127.0.0.1` and the bridge, `:20241`, `:22`; IPv6 prints as
-`0000:…:0001:22`). Subtract the slices `nft-verify.sh` prints as its probe
-window. Counts are per packet, not per connection: the `in` rows see one SYN
-per connection, the bridge rows (judged in the output hook, every packet) see
-three to four per connection — the first dry run logged 13 bridge packets for 4
-probe connections. A hit outside those rows
+Read each `DST:DPT` against the box's listeners (`ss -ltnp`): a destination with
+a listener that is NOT a worker/agent process is a finding and must be a
+"refused" row of #367's target table (engine `:7077`/`:8888` on `127.0.0.1` and
+the bridge, `:20241`, `:22`; IPv6 prints as `0000:…:0001:22`). A destination
+with NO listener is a closed port the agent polled (a `wait-on`/readiness loop
+before its own server came up): there is no socket, so no cgroup, so it lands
+on the default line — under enforce the agent gets the same reset the kernel
+would have sent, so it is noise, not a finding. Subtract the slices
+`nft-verify.sh` prints as its probe window. Counts are per packet, not per
+connection: the `in` rows see one SYN per connection, the bridge row (judged in
+the output hook, every packet) sees three to four — the first dry run logged 13
+bridge packets for 4 probe connections. The log is rate-limited (20/s, burst 100) so a run cannot flood the kernel log; the rule counters are exact. A hit outside those rows
 means the table is wrong and is fixed **before** enforcing. To enforce: flip the
-three `log prefix … accept` verdicts in `loopback-nft.conf` to the `reject`
-forms given beside each (`counter reject` for the bridge rules, `meta l4proto
-tcp counter reject with tcp reset` and `counter reject` for the default), re-run
+three deny lines in `loopback-nft.conf` — bridge set, tcp default, non-tcp
+default — from `counter limit rate … log prefix … accept` to the `reject` forms
+given beside each (`counter reject`, `meta l4proto tcp counter reject with tcp
+reset`, `meta l4proto != tcp counter reject`; no `limit`, no `log`), re-run
 step 1 and the restart of step 3 with no run in flight, then step 4 — in
-enforce mode the verifier expects every deny row reset in under 1s.
+enforce mode the verifier expects every deny row reset in under 1s. The loader
+and the verifier both refuse a half-flipped table.
 
 Known limits: a listener's socket carries the cgroup of the task that
 **created** it — a socket created outside the subtree and inherited into it
 stays refused (measured; this is why the verifier starts its listeners after
-the move). With `WORKER_BOX_SLOTS > 1` every slot is admitted to every other
+the move). The agent stays in the worker's cgroup because `sudoers.d-automata`
+sets `!pam_session` on the daemon command; a PAM session there would move every
+agent child into a `session-*.scope` and the fence would refuse every listener
+the agent creates. The verifier refuses to probe while a run is in flight (the
+uid reaper would kill its listeners and log false escapees). The run's own
+egress proxy refuses host-local targets in every mode (`egress-proxy.ts`,
+`reason: "host-local"`), so the fence cannot be tunnelled through it. With `WORKER_BOX_SLOTS > 1` every slot is admitted to every other
 slot's loopback servers, because both sit under the worker unit; per-run
 isolation (`level 4`, the run's own cgroup) is the #193 follow-up. Never run
 the loader under `ip netns exec` (it remounts `/sys`; the loader refuses a

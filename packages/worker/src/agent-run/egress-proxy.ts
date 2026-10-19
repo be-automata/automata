@@ -4,7 +4,18 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { connect as netConnect, type AddressInfo, type Socket } from "node:net";
+import {
+  lookup as dnsLookup,
+  type LookupAddress,
+  type LookupOptions,
+} from "node:dns";
+import {
+  connect as netConnect,
+  isIP,
+  type AddressInfo,
+  type LookupFunction,
+  type Socket,
+} from "node:net";
 import type { Duplex } from "node:stream";
 
 /**
@@ -83,7 +94,7 @@ export type EgressDecisionEvent = {
    * one audited event — a per-run baseline, not a probe; the teardown line
    * says so.
    */
-  reason?: "proxy-auth";
+  reason?: "proxy-auth" | "host-local";
 };
 
 /**
@@ -152,6 +163,13 @@ export type StartEgressProxyOptions = {
   onEvent: (event: EgressDecisionEvent) => void;
   /** See {@link EgressProxyMode}. Defaults to "enforce" — today's behaviour. */
   mode?: EgressProxyMode;
+  /**
+   * TEST SEAM ONLY (#367). The proxy refuses host-local targets in every mode
+   * (see {@link isHostLocalAddress}); the unit tests have no non-local origin
+   * to proxy to, so they stand one up on 127.0.0.1 and set this. The worker's
+   * call site never does — a test pins that.
+   */
+  allowHostLocalUpstreams?: boolean;
 };
 
 const LEVELS = new Set(["none", "ip_port", "domain"]);
@@ -249,9 +267,13 @@ export function matchEgress(
   if (h.length === 0) {
     return false;
   }
-  if (h === "127.0.0.1" || h === "localhost" || h === "::1") {
-    return true; // implicit loopback allow — never part of the shape
-  }
+  // #367: no implicit loopback allow. The run's proxy dials as the WORKER uid
+  // from inside the worker cgroup, so the box's loopback fence (inet
+  // automata_loopback) cannot see who asked — a CONNECT to 127.0.0.1:7077
+  // through this proxy would reach the engine with the fence fully enforced.
+  // Proxy-honouring clients never send loopback here anyway (NO_PROXY carves
+  // it out, daemon-env.ts). decide() refuses host-local targets before this
+  // matcher is consulted; the matcher stays a pure function of the shape.
   const ports = compiled.exactHosts.get(h);
   if (ports !== undefined) {
     if (ports === null || (port !== null && ports.has(port))) {
@@ -268,6 +290,138 @@ export function matchEgress(
     }
   }
   return false;
+}
+
+/** Dotted-quad → true when the address is not globally routable. */
+function isPrivateV4(ip: string): boolean {
+  const o = ip.split(".").map(Number);
+  if (
+    o.length !== 4 ||
+    o.some((n) => !Number.isInteger(n) || n < 0 || n > 255)
+  ) {
+    return true; // malformed: fail closed
+  }
+  const [a, b] = o as [number, number, number, number];
+  return (
+    a === 0 || // 0.0.0.0/8 ("this host")
+    a === 10 || // 10/8
+    a === 127 || // loopback
+    (a === 100 && b >= 64 && b <= 127) || // 100.64/10 CGNAT
+    (a === 169 && b === 254) || // link-local, cloud metadata
+    (a === 172 && b >= 16 && b <= 31) || // 172.16/12 — Docker bridges live here
+    (a === 192 && b === 168) || // 192.168/16
+    a >= 224 // multicast + reserved
+  );
+}
+
+/** Expand an IPv6 literal to its 8 16-bit groups (null when malformed). */
+function expandV6(ip: string): number[] | null {
+  let s = ip;
+  // Trailing dotted-quad (::ffff:127.0.0.1) → two hex groups.
+  const v4 = /^(.*:)(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+  if (v4) {
+    const o = v4[2]!.split(".").map(Number);
+    s = `${v4[1]}${((o[0]! << 8) | o[1]!).toString(16)}:${((o[2]! << 8) | o[3]!).toString(16)}`;
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0 || head.length + tail.length + fill !== 8) return null;
+  const groups = [...head, ...Array<string>(fill).fill("0"), ...tail].map((g) =>
+    parseInt(g, 16),
+  );
+  return groups.some((g) => Number.isNaN(g) || g < 0 || g > 0xffff)
+    ? null
+    : groups;
+}
+
+/**
+ * Is `host` a host-local or otherwise non-public destination (#367)?
+ * `localhost`, loopback, unspecified, link-local, RFC 1918 and CGNAT, Docker's
+ * bridge ranges, multicast, IPv6 ULA, and IPv4-mapped forms of any of them.
+ * A literal only: names are judged after resolution by {@link makeGuardedLookup}.
+ */
+export function isHostLocalAddress(host: string): boolean {
+  const h = host
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, "")
+    .replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  const family = isIP(h);
+  if (family === 4) return isPrivateV4(h);
+  if (family === 6) {
+    const g = expandV6(h);
+    if (g === null) return true; // fail closed
+    const [g0, g1, g2, g3, g4, g5, g6, g7] = g as [
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+    ];
+    if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0) {
+      if (g5 === 0xffff) {
+        // ::ffff:a.b.c.d — IPv4-mapped: judge the embedded v4.
+        return isPrivateV4(`${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`);
+      }
+      if (g5 === 0) return true; // :: and ::1 (unspecified, loopback) and IPv4-compatible
+    }
+    if ((g0 & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+    if ((g0 & 0xfe00) === 0xfc00) return true; // fc00::/7 ULA
+    if ((g0 & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+    if (g0 === 0x0064 && g1 === 0xff9b) return true; // 64:ff9b::/96 NAT64 — fail closed
+    return false;
+  }
+  return false; // a name: resolved and judged by the guarded lookup
+}
+
+/**
+ * A `net.connect`/`http.request` lookup that refuses names resolving to a
+ * host-local address (#367): an allowlisted name pointed at 127.0.0.1 or the
+ * Docker bridge (DNS rebinding) must not become a worker-uid dial into the
+ * engine. Every resolved address is judged, not just the first.
+ */
+export function makeGuardedLookup(
+  base: typeof dnsLookup = dnsLookup,
+): LookupFunction {
+  const guarded = (
+    hostname: string,
+    options: LookupOptions,
+    callback: (
+      err: NodeJS.ErrnoException | null,
+      address: string | LookupAddress[],
+      family?: number,
+    ) => void,
+  ): void => {
+    base(hostname, { ...options, all: true }, (err, addresses) => {
+      if (err) {
+        callback(err, "", undefined);
+        return;
+      }
+      const list = addresses as LookupAddress[];
+      const local = list.find((a) => isHostLocalAddress(a.address));
+      if (local !== undefined || list.length === 0) {
+        const e: NodeJS.ErrnoException = new Error(
+          `egress: ${hostname} resolves to host-local ${local?.address ?? "nothing"}`,
+        );
+        e.code = "EHOSTLOCAL";
+        callback(e, "", undefined);
+        return;
+      }
+      if (options.all) {
+        callback(null, list, undefined);
+      } else {
+        callback(null, list[0]!.address, list[0]!.family);
+      }
+    });
+  };
+  return guarded as LookupFunction;
 }
 
 export async function startEgressProxy(
@@ -306,8 +460,16 @@ export async function startEgressProxy(
     // Fail closed on an unparseable target in EVERY mode. Observe must never
     // synthesise a connection to a destination it could not parse, and the
     // audit row must say what actually happened: denied.
+    // #367: a host-local target is refused in EVERY mode, observe included —
+    // the proxy dials as the worker uid from inside the worker cgroup, which
+    // is exactly the socket the box's loopback fence admits. Audited with its
+    // own reason so the observe window shows any attempt.
+    const hostLocal =
+      host !== UNPARSEABLE &&
+      !opts.allowHostLocalUpstreams &&
+      isHostLocalAddress(host);
     const allowed =
-      host === UNPARSEABLE
+      host === UNPARSEABLE || hostLocal
         ? false
         : mode === "observe"
           ? true
@@ -320,6 +482,7 @@ export async function startEgressProxy(
         action: allowed ? "allow" : "deny",
         policyLevel: policy.level,
         mode,
+        ...(hostLocal ? { reason: "host-local" as const } : {}),
       });
     } catch {
       // Audit plumbing must never break (or leak into) enforcement.
@@ -336,6 +499,10 @@ export async function startEgressProxy(
         ).toString("base64")}`,
       )
     : null;
+  // #367: names are judged after resolution, in every mode (see the seam).
+  const lookup: LookupFunction | undefined = opts.allowHostLocalUpstreams
+    ? undefined
+    : makeGuardedLookup();
   function authorized(req: IncomingMessage): boolean {
     if (expectedAuth === null) return true;
     const got = req.headers["proxy-authorization"];
@@ -415,6 +582,7 @@ export async function startEgressProxy(
         method: req.method,
         path: `${target.pathname}${target.search}`,
         headers: fwdHeaders,
+        lookup,
       },
       (upRes) => {
         res.writeHead(upRes.statusCode ?? 502, upRes.headers);
@@ -459,7 +627,7 @@ export async function startEgressProxy(
       clientSocket.end();
       return;
     }
-    const upstream = netConnect(port, host, () => {
+    const upstream = netConnect({ port, host, lookup }, () => {
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length > 0) {
         upstream.write(head);
