@@ -17,6 +17,7 @@ seam — the **Anti-deviation invariants** section of each ADR states what must 
 | [ADR-009](ADR-009-non-verdict-is-never-a-review.md)              | A non-verdict is never a review; the bot's silence is a conversation notice              | Accepted                                                                                |
 | [ADR-010](ADR-010-audit-self-heal-single-writer.md)              | Audit self-healing: the agent emits findings, the control plane is the only issue writer | Accepted (part 1: audit to issues)                                                      |
 | [ADR-011](ADR-011-nango-oauth-vault-behind-credential-broker.md) | Nango is the OAuth vault behind the credential broker; only the control plane calls it   | Proposed                                                                                |
+| [ADR-012](ADR-012-slack-decision-trusted-approver.md)            | Which source is trusted to say who approved a knowledge decision made in Slack           | Proposed                                                                                |
 
 **Note:** [`../uat/adr-036-effect-intent.md`](../uat/adr-036-effect-intent.md) documents the
 effect-intent / emit-only wire format under `docs/uat/` (separate numbering); ADR-004 references it
