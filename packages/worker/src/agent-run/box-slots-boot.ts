@@ -132,7 +132,7 @@ export function assertProcHidepid(
     /** The worker's gid and supplementary gids; one of them must be the mount's `gid=` exemption. */
     workerGids?: readonly number[];
   } = {},
-): void {
+): number | null {
   const {
     platform = process.platform,
     readMountinfo = () => readFileSync("/proc/self/mountinfo", "utf8"),
@@ -141,7 +141,7 @@ export function assertProcHidepid(
       ...(process.getgroups ? process.getgroups() : []),
     ],
   } = opts;
-  if (platform !== "linux") return;
+  if (platform !== "linux") return null;
   let text: string;
   try {
     text = readMountinfo();
@@ -150,10 +150,12 @@ export function assertProcHidepid(
       `cannot read /proc/self/mountinfo (${e instanceof Error ? e.message : String(e)}); at WORKER_BOX_SLOTS > 1 the /proc hidepid mount is a precondition (deploy/AGENT-UID-PROVISIONING.md §6)`,
     );
   }
+  // The LAST /proc entry: a later overmount is the one in effect.
   const procLine = text
     .split("\n")
     .map((l) => l.split(" "))
-    .find((f) => f[4] === "/proc");
+    .filter((f) => f[4] === "/proc")
+    .at(-1);
   if (!procLine) {
     throw new Error(
       "no /proc mount in /proc/self/mountinfo; at WORKER_BOX_SLOTS > 1 the /proc hidepid mount is a precondition (deploy/AGENT-UID-PROVISIONING.md §6)",
@@ -189,6 +191,44 @@ export function assertProcHidepid(
       `/proc hidepid=${hidepid} ${gidOpt === undefined ? "has no gid= exemption" : `exempts gid ${gidOpt}, which the worker (gids ${workerGids.join(", ")}) is not in`}; the worker would see none of the slot accounts' processes and the escapee reaper would silently scan nothing — remount with gid=<a group of the worker> (deploy/AGENT-UID-PROVISIONING.md §6)`,
     );
   }
+  return gid;
+}
+
+/**
+ * #205: the hidepid exemption must not also cover the slot accounts — a shared
+ * group (`users`, or any supplementary group of the worker the slots are in)
+ * would make hidepid isolate nothing between slots while the boot reported the
+ * precondition met. Each slot account's groups come from the bounded
+ * `id -G <slot>`; one in the exempt group refuses the boot.
+ */
+export async function assertSlotAccountsOutsideGroup(
+  users: readonly string[],
+  exemptGid: number | null,
+  resolveGids: (user: string) => Promise<number[]> = resolveGidsViaId,
+): Promise<void> {
+  if (exemptGid === null || users.length === 0) return;
+  const results = await Promise.allSettled(users.map((u) => resolveGids(u)));
+  const inside = results.flatMap((r, i) =>
+    r.status === "fulfilled" && r.value.includes(exemptGid)
+      ? [JSON.stringify(users[i])]
+      : [],
+  );
+  const unknown = results.flatMap((r, i) =>
+    r.status === "rejected" ? [JSON.stringify(users[i])] : [],
+  );
+  if (inside.length > 0 || unknown.length > 0) {
+    throw new Error(
+      `${inside.length > 0 ? `slot account(s) ${inside.join(", ")} are in the hidepid-exempt group ${exemptGid}, so /proc hides nothing between slots` : ""}${inside.length > 0 && unknown.length > 0 ? "; " : ""}${unknown.length > 0 ? `groups of ${unknown.join(", ")} could not be read` : ""} — the exempt group must hold the worker alone (deploy/AGENT-UID-PROVISIONING.md §6)`,
+    );
+  }
+}
+
+async function resolveGidsViaId(user: string): Promise<number[]> {
+  const { stdout } = await execFileAsync("/usr/bin/id", ["-G", user], {
+    timeout: SUDO_PROBE_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+  });
+  return stdout.trim().split(/\s+/).filter(Boolean).map(Number);
 }
 
 /**

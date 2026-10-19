@@ -24,6 +24,7 @@ import {
   assertFenceCoversSlotUids,
   assertProcHidepid,
   assertSlotAccountsExist,
+  assertSlotAccountsOutsideGroup,
   assertSlotSudoGrants,
   assertSlotWorkdirTraverse,
   retiredSlotAccounts,
@@ -182,7 +183,8 @@ async function main() {
         await assertSlotSudoGrants(cfg.agentUsers);
         await assertSlotWorkdirTraverse(cfg.agentUsers, cfg.workdirRoot);
         assertFenceCoversSlotUids({ uids: slotUids });
-        assertProcHidepid();
+        const exemptGid = assertProcHidepid();
+        await assertSlotAccountsOutsideGroup(cfg.agentUsers, exemptGid);
         console.log(
           `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")}; uids ${slotUids.join(", ")}); egress fence covers every slot uid (${EGRESS_FENCE_UIDS_FILE})`,
         );

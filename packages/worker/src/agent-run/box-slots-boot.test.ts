@@ -4,6 +4,7 @@ import {
   assertFenceCoversSlotUids,
   assertProcHidepid,
   assertSlotAccountsExist,
+  assertSlotAccountsOutsideGroup,
   assertSlotSudoGrants,
   assertSlotWorkdirTraverse,
   retiredSlotAccounts,
@@ -158,6 +159,19 @@ describe("assertProcHidepid (#205 boot, Linux N > 1)", () => {
     ).toThrow(/hidepid=1/);
   });
 
+  it("returns the exempt gid; reads the LAST /proc entry (a later overmount is the one in effect)", () => {
+    const two =
+      line("rw", "rw") +
+      "40 30 0:23 / /proc rw,nosuid shared:14 - proc proc rw,hidepid=invisible,gid=990\n";
+    expect(
+      assertProcHidepid({
+        platform: "linux",
+        workerGids: [990],
+        readMountinfo: () => two,
+      }),
+    ).toBe(990);
+  });
+
   it("refuses when mountinfo is unreadable or has no /proc; is a no-op off Linux", () => {
     expect(() =>
       assertProcHidepid({
@@ -173,6 +187,37 @@ describe("assertProcHidepid (#205 boot, Linux N > 1)", () => {
     const readMountinfo = vi.fn(() => "");
     assertProcHidepid({ platform: "darwin", readMountinfo });
     expect(readMountinfo).not.toHaveBeenCalled();
+  });
+});
+
+describe("assertSlotAccountsOutsideGroup (#205 boot, Linux N > 1)", () => {
+  it("passes when no slot account is in the exempt group; no-op without an exempt gid", async () => {
+    const resolveGids = vi.fn(async () => [2001, 100]);
+    await assertSlotAccountsOutsideGroup(
+      ["automata-agent", "automata-agent-1"],
+      990,
+      resolveGids,
+    );
+    expect(resolveGids).toHaveBeenCalledTimes(2);
+    await assertSlotAccountsOutsideGroup(["automata-agent"], null, resolveGids);
+    expect(resolveGids).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses a slot account inside the exempt group (hidepid would hide nothing between slots), and one whose groups cannot be read", async () => {
+    await expect(
+      assertSlotAccountsOutsideGroup(
+        ["automata-agent", "automata-agent-1"],
+        100,
+        async (u) => (u === "automata-agent-1" ? [2001, 100] : [999]),
+      ),
+    ).rejects.toThrow(
+      /slot account\(s\) "automata-agent-1" are in the hidepid-exempt group 100/,
+    );
+    await expect(
+      assertSlotAccountsOutsideGroup(["automata-agent"], 100, async () => {
+        throw new Error("id: no such user");
+      }),
+    ).rejects.toThrow(/groups of "automata-agent" could not be read/);
   });
 });
 
