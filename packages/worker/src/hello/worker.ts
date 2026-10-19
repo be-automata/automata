@@ -28,6 +28,7 @@ import {
   assertSlotAccountsOutsideGroup,
   assertSlotSudoGrants,
   assertSlotWorkdirTraverse,
+  assertSlotsFitCommitLimit,
   hidepidDropinLeftAtOneSlot,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
@@ -380,7 +381,21 @@ async function main() {
   // here could drift from it and leave the box silently unguarded.
   const workerName = `automata-worker-${boxId}`;
   const boxSlots = registrationConfig.boxSlots;
-  warnIfSlotsExceedMemory(registrationConfig);
+  // #372: the memory side of the tuple against THIS box. The config loader
+  // checked the knobs against each other; this checks N × ceiling + base
+  // against the kernel's commit budget (fail-closed, with the RAM warning
+  // beside it), so an oversized tuple refuses to start instead of deferring
+  // every run past the first until it fails (#371).
+  try {
+    assertSlotsFitCommitLimit(registrationConfig);
+    warnIfSlotsExceedMemory(registrationConfig);
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: the box slots do not fit this box's CommitLimit — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
   const worker = await hatchet.worker(workerName, {
     // #372: the engine caps registered on every variant come from the SAME
     // validated config as `slots` below — loadWorkerConfig refused any tuple

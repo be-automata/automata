@@ -11,12 +11,22 @@ One unit is provided:
 It is a **template**. Replace the `__HOME__` and `__REPO__` tokens for the box,
 then install to `~/Library/LaunchAgents/`.
 
-`WORKER_BOX_SLOTS` (default 1) agent-runs execute at a time on the box: engine `slots`
-on the single unit plus N kernel slot locks (`src/agent-run/box-lock.ts`), one agent
-account per slot (#205; `AGENT-UID-PROVISIONING.md` §6). The `GLOBAL_MAX_RUNS = 1` key
-in `src/agent-run/definition.ts` caps each workflow VARIANT separately and is not the
-box budget. Extra throughput means raising the whole tuple (#372), gated on the
-memory-headroom check (#371); N > 1 is Linux-only and requires the #204 ceiling.
+**The concurrency tuple is ONE setting (#372).** `WORKER_BOX_SLOTS` (default 1)
+agent-runs execute at a time on the box: engine `slots` on the single unit plus N
+kernel slot locks (`src/agent-run/box-lock.ts`), one agent account per slot (#205;
+`AGENT-UID-PROVISIONING.md` §6). `WORKER_GLOBAL_MAX_RUNS` (default 1) is the
+engine's `'agent-run-global-memory-budget'` cap and `WORKER_PER_ORG_MAX_RUNS`
+(default 1) the per-org fairness cap, both registered on every workflow VARIANT by
+`src/agent-run/definition.ts` (the global key caps each variant separately and is
+not the box budget; every run has `slotCost: 1`). Boot refuses — at boot and at
+every run — `WORKER_GLOBAL_MAX_RUNS ≠ WORKER_BOX_SLOTS`, `WORKER_PER_ORG_MAX_RUNS >
+WORKER_GLOBAL_MAX_RUNS`, N > 1 without the uid drop or the #204 ceiling, and (on
+Linux, ceiling on) `WORKER_BOX_SLOTS × WORKER_RUN_MEMORY_MAX + 2 GiB base >
+CommitLimit` (swap + overcommit_ratio × RAM). Raise all of `WORKER_BOX_SLOTS`,
+`WORKER_GLOBAL_MAX_RUNS`, `WORKER_PER_ORG_MAX_RUNS` together, with
+`WORKER_RUN_MEMORY_MAX` and the swap sized for N runs; the memory-headroom check
+(#371) is the runtime guard behind this boot guard. N > 1 is Linux-only.
+Production tuple and derivation: `deploy/uat/phase2-4.md`.
 
 ## `run-worker.sh` wiring
 

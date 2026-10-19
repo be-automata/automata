@@ -7,6 +7,8 @@ import {
   assertSlotAccountsOutsideGroup,
   assertSlotSudoGrants,
   assertSlotWorkdirTraverse,
+  assertSlotsFitCommitLimit,
+  BOX_BASE_COMMIT_BYTES,
   hidepidDropinLeftAtOneSlot,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
@@ -501,5 +503,78 @@ describe("warnIfSlotsExceedMemory (#205 boot)", () => {
       log,
     );
     expect(log).not.toHaveBeenCalled();
+  });
+});
+
+describe("assertSlotsFitCommitLimit (#372 boot, Linux, ceiling on)", () => {
+  // The pilot box: CommitLimit 12 357 216 kB (8 GB swap + 50 % of 7.6 GB RAM).
+  const meminfo = `MemTotal:        7937228 kB
+MemAvailable:    6000000 kB
+SwapTotal:       8388604 kB
+CommitLimit:    12357216 kB
+Committed_AS:    2600000 kB
+`;
+  const commitLimit = 12357216 * 1024;
+  const fiveG = 5000 * 1024 ** 2;
+
+  it("N = 2 at 5000M + the 2 GiB base fits the pilot's CommitLimit; N = 3 does not — refused naming BOTH knobs", () => {
+    expect(() =>
+      assertSlotsFitCommitLimit(
+        { boxSlots: 2, memoryMaxBytes: fiveG },
+        { platform: "linux", readMeminfo: () => meminfo },
+      ),
+    ).not.toThrow();
+    expect(2 * fiveG + BOX_BASE_COMMIT_BYTES).toBeLessThanOrEqual(commitLimit);
+    expect(() =>
+      assertSlotsFitCommitLimit(
+        { boxSlots: 3, memoryMaxBytes: fiveG },
+        { platform: "linux", readMeminfo: () => meminfo },
+      ),
+    ).toThrow(
+      /WORKER_BOX_SLOTS=3 × WORKER_RUN_MEMORY_MAX=5242880000 .* exceeds the kernel CommitLimit 12653789184/,
+    );
+  });
+
+  it("is exact at the boundary: need == CommitLimit passes, one byte more refuses", () => {
+    const base = 0;
+    const exact = Math.floor(commitLimit / 2);
+    expect(() =>
+      assertSlotsFitCommitLimit(
+        { boxSlots: 2, memoryMaxBytes: exact },
+        { platform: "linux", readMeminfo: () => meminfo, baseBytes: base },
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertSlotsFitCommitLimit(
+        { boxSlots: 2, memoryMaxBytes: exact + 1 },
+        { platform: "linux", readMeminfo: () => meminfo, baseBytes: base },
+      ),
+    ).toThrow(/exceeds the kernel CommitLimit/);
+  });
+
+  it("is not its business without the ceiling or off Linux; an unreadable meminfo with the ceiling on refuses (never a silent pass)", () => {
+    expect(() =>
+      assertSlotsFitCommitLimit(
+        { boxSlots: 4, memoryMaxBytes: 0 },
+        { platform: "linux", readMeminfo: () => "garbage" },
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertSlotsFitCommitLimit(
+        { boxSlots: 4, memoryMaxBytes: fiveG },
+        {
+          platform: "darwin",
+          readMeminfo: () => {
+            throw new Error("must not be called");
+          },
+        },
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertSlotsFitCommitLimit(
+        { boxSlots: 1, memoryMaxBytes: fiveG },
+        { platform: "linux", readMeminfo: () => "garbage" },
+      ),
+    ).toThrow(/cannot read CommitLimit/);
   });
 });
