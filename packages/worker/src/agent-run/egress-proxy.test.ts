@@ -401,7 +401,7 @@ describe("startEgressProxy (real loopback servers)", () => {
       expect(status).toBe(200);
     });
 
-    it("an absolute-form request without the credential is refused with 407 and never decided or forwarded", async () => {
+    it("an absolute-form request without the credential is refused with 407, never forwarded, and audited as a proxy-auth deny", async () => {
       const upstreamPort = await startUpstreamHttp();
       const { p, events } = await bootWithCredential({
         level: "ip_port",
@@ -421,7 +421,18 @@ describe("startEgressProxy (real loopback servers)", () => {
         },
       );
       expect(wrong.status).toBe(407);
-      expect(events).toEqual([]);
+      // The stranger's probe is on the record — host and port it asked for,
+      // reason proxy-auth, never the header it presented.
+      expect(events).toEqual([
+        expect.objectContaining({
+          action: "deny",
+          reason: "proxy-auth",
+          destinationHost: "127.0.0.1",
+          destinationPort: upstreamPort,
+        }),
+        expect.objectContaining({ action: "deny", reason: "proxy-auth" }),
+      ]);
+      expect(JSON.stringify(events)).not.toContain("nope");
     });
 
     it("with the credential the request is proxied and the credential is STRIPPED before the origin", async () => {
@@ -481,9 +492,18 @@ describe("startEgressProxy (real loopback servers)", () => {
           req.end();
         });
       expect(await connectStatus({})).toBe(407);
-      expect(events).toEqual([]);
+      expect(events).toEqual([
+        expect.objectContaining({
+          action: "deny",
+          reason: "proxy-auth",
+          destinationHost: "127.0.0.1",
+          destinationPort: tcpPort,
+        }),
+      ]);
       expect(await connectStatus({ "proxy-authorization": basic })).toBe(200);
-      expect(events).toHaveLength(1);
+      expect(events).toHaveLength(2);
+      expect(events[1]).toMatchObject({ action: "allow" });
+      expect(events[1]?.reason).toBeUndefined();
     });
   });
 

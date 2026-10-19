@@ -1332,3 +1332,43 @@ describe("bootUidScan over N slots (#205)", () => {
     expect(order).toEqual(["release:0", "release:1"]);
   });
 });
+
+describe("bootUidScan reaps retired slot accounts (#205)", () => {
+  const AGENT = "automata-agent";
+  const zero = {
+    skipped: false,
+    scanned: 0,
+    killed: 0,
+    residual: 0,
+    residualSample: [],
+  } as unknown as Awaited<ReturnType<ReapFn>>;
+
+  it("after the N slot accounts, every retired account is reaped as itself and the results are summed", async () => {
+    const release = vi.fn(async () => {});
+    const tryAcquireAll = vi.fn<TryAcquireAllFn>(async () => [
+      { release, lost: false, slot: 0 } as BoxLock,
+    ]);
+    const seen: string[] = [];
+    const reap = vi.fn(async (opts: { agentUser: string }) => {
+      seen.push(opts.agentUser);
+      return { ...zero, scanned: 1, killed: 1 };
+    });
+    const lines: string[] = [];
+    const out = await bootUidScan({
+      root: "/nonexistent/never-used",
+      agentUser: AGENT,
+      slots: 1,
+      retiredAccounts: [`${AGENT}-1`, `${AGENT}-2`],
+      log: (l) => lines.push(l),
+      tryAcquireAll,
+      reap,
+    });
+    expect(seen).toEqual([AGENT, `${AGENT}-1`, `${AGENT}-2`]);
+    expect(out.outcome).toBe("scanned");
+    expect(out.result).toMatchObject({ scanned: 3, killed: 3 });
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(lines).toContain(
+      `boot uid scan: retired slot account(s) above WORKER_BOX_SLOTS scanned too: ${AGENT}-1, ${AGENT}-2`,
+    );
+  });
+});

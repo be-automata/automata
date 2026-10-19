@@ -21,6 +21,7 @@ import { harnessDoctorLine } from "../agent-run/batteries-seed";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import {
   assertSlotAccountsExist,
+  retiredSlotAccounts,
   warnIfSlotsExceedMemory,
 } from "../agent-run/box-slots-boot";
 import { sweepStaleRunDirs } from "../agent-run/provision";
@@ -220,6 +221,11 @@ async function main() {
     agentUser: bootUidScanConfig.agentUser,
     // #205: every slot held, every slot's account scanned — or skipped whole.
     slots: bootUidScanConfig.boxSlots,
+    // Accounts a higher N left behind: no lock guards them, so scan them too.
+    retiredAccounts: await retiredSlotAccounts(
+      bootUidScanConfig.agentUser,
+      bootUidScanConfig.boxSlots,
+    ),
     log: (m) => console.log(`[worker-boot] ${m}`),
   });
 

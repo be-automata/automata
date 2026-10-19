@@ -162,13 +162,13 @@ export function boxLockPath(root: string, slot = 0): string {
   return path.join(root, slot === 0 ? "box.lock" : `box.lock.${slot}`);
 }
 
-/** A slot index is a non-negative integer; shared by every slot-addressed builder. */
 /**
  * The most slots one box may run (#205). Bounds WORKER_BOX_SLOTS and the slot
  * dir names a reclaim will trust.
  */
 export const BOX_SLOTS_MAX = 16;
 
+/** A slot index is a non-negative integer; shared by every slot-addressed builder. */
 export function assertSlotIndex(slot: number, where: string): void {
   if (!Number.isInteger(slot) || slot < 0) {
     throw new Error(
@@ -379,12 +379,41 @@ async function spawnHelperAndAwaitAck(
  * silent) and the memoised release closure (EOF on stdin ends `read`, with a
  * SIGKILL fallback after RELEASE_EXIT_BOUND_MS).
  */
+/**
+ * #205: in-process "a slot was released" wake-ups, per lock root. One worker
+ * process runs a box, so every holder of a root is in-process and a parked
+ * `acquireBoxSlot` can re-sweep the moment ANY slot frees instead of idling on
+ * its rotated slot. Event-driven — not the polling loop I1 forbids; the kernel
+ * flock stays the cross-process authority.
+ */
+const releaseWakers = new Map<string, Set<() => void>>();
+
+function onSlotReleased(root: string, fn: () => void): () => void {
+  const key = path.resolve(root);
+  const set = releaseWakers.get(key) ?? new Set<() => void>();
+  releaseWakers.set(key, set);
+  set.add(fn);
+  return () => {
+    set.delete(fn);
+    if (set.size === 0) releaseWakers.delete(key);
+  };
+}
+
+function notifySlotReleased(root: string): void {
+  for (const fn of [...(releaseWakers.get(path.resolve(root)) ?? [])]) fn();
+}
+
+function isAbortError(e: unknown): boolean {
+  return e instanceof Error && e.name === "AbortError";
+}
+
 function heldLock(
   session: HelperSession,
   holder: string,
   log?: (line: string) => void,
   slot = 0,
   slots = 1,
+  root?: string,
 ): BoxLock {
   const { child, exited, stderr } = session;
   const tag = slotTag(slot, slots);
@@ -414,6 +443,9 @@ function heldLock(
         exitedInTime ? "" : `, SIGKILLed after ${RELEASE_EXIT_BOUND_MS}ms`
       }${tag})`,
     );
+    // The helper has exited, so the kernel has freed the slot: wake parked
+    // in-process waiters (#205).
+    if (root !== undefined) notifySlotReleased(root);
   };
   const release = (): Promise<void> => {
     releasing ??= doRelease();
@@ -463,7 +495,7 @@ export async function acquireBoxLock({
   }
 
   log?.(`box lock acquired by ${holder} (helper pid ${child.pid}${tag})`);
-  const lock = heldLock(session, holder, log, slot, slots);
+  const lock = heldLock(session, holder, log, slot, slots, root);
 
   if (signal?.aborted) {
     // A cancel can land in the instant the previous holder released: never
@@ -483,12 +515,13 @@ export async function acquireBoxLock({
  * therefore DELAYS admission; it never fails a run and never cancels one
  * (ADR-007 Decision 5).
  *
- * KNOWN TRADE-OFF: a parked waiter waits on its rotated slot ONLY. If another
- * slot frees first it keeps waiting while that slot idles, and a later arrival
- * whose rotation names the free slot takes it. Polling every slot would fix
- * that and would be the polling loop I1 forbids; in practice the engine's
- * `slots = N` keeps in-process concurrency at N, so the park only ever happens
- * in the crash-relaunch overlap window, where a short idle beats a poll.
+ * A parked waiter is woken by ANY in-process release (notifySlotReleased) and
+ * re-sweeps every slot, so a slot freed by a cancelled or superseded run's
+ * teardown is taken at once even when the waiter's rotation named another
+ * slot. The one window where a waiter idles on its rotated slot while another
+ * is free is a release by a DIFFERENT process (the crash-relaunch overlap, the
+ * old worker's helper exiting): the kernel wait covers it, bounded by that
+ * run's cap. No polling (I1).
  */
 export async function acquireBoxSlot({
   root,
@@ -502,22 +535,50 @@ export async function acquireBoxSlot({
     return acquireBoxLock({ root, holder, signal, log });
   }
   const start = rotationStart(holder, slots);
-  for (let k = 0; k < slots; k++) {
-    if (signal?.aborted) throw abortError();
-    const slot = (start + k) % slots;
-    const lock = await tryAcquireBoxLock({ root, holder, log, slot, slots });
-    if (lock) {
-      if (signal?.aborted) {
-        await lock.release();
-        throw abortError();
+  let parked = false;
+  for (;;) {
+    for (let k = 0; k < slots; k++) {
+      if (signal?.aborted) throw abortError();
+      const slot = (start + k) % slots;
+      const lock = await tryAcquireBoxLock({ root, holder, log, slot, slots });
+      if (lock) {
+        if (signal?.aborted) {
+          await lock.release();
+          throw abortError();
+        }
+        return lock;
       }
-      return lock;
+    }
+    if (!parked) {
+      parked = true;
+      log?.(
+        `box budget full (${slots} slots held) — ${holder} waits on slot ${start}`,
+      );
+    }
+    // Park on the rotated slot, but let an in-process release of ANY slot (or
+    // the caller's abort) end the wait: the wait's own signal is a child of
+    // both. A wake-up re-sweeps; the caller's abort wins and throws.
+    const wake = new AbortController();
+    const onCallerAbort = () => wake.abort();
+    signal?.addEventListener("abort", onCallerAbort, { once: true });
+    const unsubscribe = onSlotReleased(root, () => wake.abort());
+    try {
+      return await acquireBoxLock({
+        root,
+        holder,
+        signal: wake.signal,
+        log,
+        slot: start,
+        slots,
+      });
+    } catch (e) {
+      if (signal?.aborted || !isAbortError(e)) throw e;
+      // Woken by a release: sweep again.
+    } finally {
+      unsubscribe();
+      signal?.removeEventListener("abort", onCallerAbort);
     }
   }
-  log?.(
-    `box budget full (${slots} slots held) — ${holder} waits on slot ${start}`,
-  );
-  return acquireBoxLock({ root, holder, signal, log, slot: start, slots });
 }
 
 /**
@@ -615,7 +676,7 @@ export async function tryAcquireBoxLock({
   }
 
   log?.(`box lock acquired by ${holder} (helper pid ${child.pid}${tag})`);
-  return heldLock(session, holder, log, slot, slots);
+  return heldLock(session, holder, log, slot, slots, root);
 }
 
 /** Run `fn` holding the box lock; releases on return, throw, or abort. */

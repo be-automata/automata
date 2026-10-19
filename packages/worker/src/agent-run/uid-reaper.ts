@@ -133,6 +133,14 @@ export interface BootUidScanOpts {
    * because `kill -9 -- -1` as slot i's account reaches only slot i's processes.
    */
   slots?: number;
+  /**
+   * #205: slot accounts provisioned on this box ABOVE the current N (a box that
+   * ran N = 2 and went back to 1 keeps `automata-agent-1`). No slot lock guards
+   * them any more, so an escapee there would never be scanned again; they are
+   * reaped at boot as well, under the same all-slots hold. Found by
+   * `retiredSlotAccounts` (box-slots-boot.ts).
+   */
+  retiredAccounts?: readonly string[];
   log: (line: string) => void;
   /** Injected for tests; defaults to `tryAcquireAllBoxSlots` (at N = 1: the one try-lock). */
   tryAcquireAll?: typeof tryAcquireAllBoxSlots;
@@ -668,6 +676,7 @@ export async function bootUidScan(
     root,
     agentUser,
     slots = 1,
+    retiredAccounts = [],
     log,
     tryAcquireAll = tryAcquireAllBoxSlots,
     reap = reapAgentUidEscapees,
@@ -702,14 +711,25 @@ export async function bootUidScan(
   // surfaces as the error of the whole scan.
   let result: ReapAgentUidResult | null = null;
   try {
-    for (let slot = 0; slot < slots; slot++) {
+    const accounts = [
+      ...Array.from({ length: slots }, (_, slot) =>
+        agentUserForSlot(agentUser, slot),
+      ),
+      ...retiredAccounts,
+    ];
+    for (const account of accounts) {
       const slotResult = await reap({
-        agentUser: agentUserForSlot(agentUser, slot),
+        agentUser: account,
         phase: "boot",
         runNamespaceRoot: root,
         log,
       });
       result = result ? mergeReapResults(result, slotResult) : slotResult;
+    }
+    if (retiredAccounts.length > 0) {
+      log(
+        `boot uid scan: retired slot account(s) above WORKER_BOX_SLOTS scanned too: ${retiredAccounts.join(", ")}`,
+      );
     }
   } catch (e) {
     // `reap` never throws by contract; this wrapper's own contract is the

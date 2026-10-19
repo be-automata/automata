@@ -245,12 +245,6 @@ export interface BuildDaemonEnvOpts {
 }
 
 /**
- * The proxy subset of the run env: HTTP(S)_PROXY (both cases), a loopback
- * NO_PROXY and node's env-proxy switch. Shared by the daemon env and the
- * self-heal check env so both route through the same per-run egress proxy.
- * Returns `base` plus the proxy keys (a copy; `base` is not mutated).
- */
-/**
  * gstack's browse server hands BROWSE_PROXY_URL to chromium.launch({ proxy })
  * — a `server` string Chromium takes NO credentials from, and which lands in
  * Chromium's argv (readable by every account via `ps`). #205: at N > 1 the
@@ -276,6 +270,12 @@ export function buildBrowseProxyEnv(egressProxyUrl: string): NodeJS.ProcessEnv {
   };
 }
 
+/**
+ * The proxy subset of the run env: HTTP(S)_PROXY (both cases), a loopback
+ * NO_PROXY and node's env-proxy switch. Shared by the daemon env and the
+ * self-heal check env so both route through the same per-run egress proxy.
+ * Returns `base` plus the proxy keys (a copy; `base` is not mutated).
+ */
 export function buildRunProxyEnv(
   egressProxyUrl: string,
   base: NodeJS.ProcessEnv,

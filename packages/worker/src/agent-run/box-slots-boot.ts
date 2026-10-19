@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 
+import { BOX_SLOTS_MAX } from "./box-lock";
+import { agentUserForSlot } from "./spawn-as-user";
 import { resolveUidViaId } from "./uid-reaper";
 
 /**
@@ -39,6 +41,33 @@ export async function assertSlotAccountsExist(
  * validation decides what to refuse — but an operator who set N = 3 with a
  * 5000M ceiling on a 7.6 GB box should read it at boot, not after the ENOMEM.
  */
+/**
+ * #205: slot accounts that exist on this box ABOVE the current N — left behind
+ * by a higher WORKER_BOX_SLOTS (the §6 rollback keeps them). Probed with the
+ * bounded `id -u`, in parallel; a name that does not resolve (or would exceed
+ * the login limit) is simply not one. Never throws; [] with agent-uid mode off.
+ * The boot scan reaps these too, since no slot lock guards them any more.
+ */
+export async function retiredSlotAccounts(
+  base: string,
+  slots: number,
+  resolveUid: (user: string) => Promise<number> = resolveUidViaId,
+): Promise<string[]> {
+  if (!base) return [];
+  const candidates: string[] = [];
+  for (let i = slots; i < BOX_SLOTS_MAX; i++) {
+    try {
+      candidates.push(agentUserForSlot(base, i));
+    } catch {
+      // over the login-name limit: cannot exist
+    }
+  }
+  const results = await Promise.allSettled(
+    candidates.map((u) => resolveUid(u)),
+  );
+  return candidates.filter((_u, i) => results[i]?.status === "fulfilled");
+}
+
 export function warnIfSlotsExceedMemory(
   cfg: { boxSlots: number; memoryMaxBytes: number },
   readMeminfo: () => string = () => readFileSync("/proc/meminfo", "utf8"),

@@ -63,6 +63,15 @@ export type EgressDecisionEvent = {
    * egress_events as evidence of enforcement must filter on `mode:"enforce"`.
    */
   mode: EgressProxyMode;
+  /**
+   * #205: set on the deny a CREDENTIALED proxy issues to a client without the
+   * run's `Proxy-Authorization` (407). That client is, by construction, not
+   * this run — a sibling slot probing another run's loopback proxy is the exact
+   * threat the credential exists for, so it must leave an audit event. The
+   * presented header is never recorded. In-process only: the wire row to
+   * /api/daemon/egress-event is a plain deny.
+   */
+  reason?: "proxy-auth";
 };
 
 /**
@@ -315,6 +324,31 @@ export async function startEgressProxy(
     const got = req.headers["proxy-authorization"];
     return typeof got === "string" && timingSafeEqualStr(got, expectedAuth);
   }
+  /** The 407's audit trace (#205): a deny naming what the stranger asked for. */
+  function denyUnauthenticated(host: string, port: number | null): void {
+    try {
+      onEvent({
+        destinationHost: host,
+        destinationPort: port,
+        action: "deny",
+        policyLevel: policy.level,
+        mode,
+        reason: "proxy-auth",
+      });
+    } catch {
+      // Audit plumbing must never break (or leak into) enforcement.
+    }
+  }
+  /** host/port of an absolute-form target, or the unparseable sentinel. */
+  function requestedTarget(url: string | undefined): [string, number | null] {
+    try {
+      const u = new URL(url ?? "");
+      const port = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
+      return [u.hostname, port];
+    } catch {
+      return [UNPARSEABLE, null];
+    }
+  }
 
   function handleRequest(req: IncomingMessage, res: ServerResponse): void {
     // #108 A2: the worker's own liveness probe. Answered before any decision, so
@@ -328,6 +362,7 @@ export async function startEgressProxy(
       return;
     }
     if (!authorized(req)) {
+      denyUnauthenticated(...requestedTarget(req.url));
       req.resume();
       res.writeHead(407, { "proxy-authenticate": PROXY_AUTHENTICATE }).end();
       return;
@@ -387,6 +422,11 @@ export async function startEgressProxy(
     head: Buffer,
   ): void {
     if (!authorized(req)) {
+      const m = HOST_PORT_RE.exec(req.url ?? "");
+      denyUnauthenticated(
+        m ? m[1]!.replace(/^\[/, "").replace(/\]$/, "") : UNPARSEABLE,
+        m ? Number(m[2]) : null,
+      );
       clientSocket.write(
         `HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: ${PROXY_AUTHENTICATE}\r\n\r\n`,
       );

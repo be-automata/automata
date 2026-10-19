@@ -259,7 +259,10 @@ boot only once it holds every slot. The boot log shows
 `box slots: 2 (automata-agent, automata-agent-1)`.
 
 Rollback: `WORKER_BOX_SLOTS=1` and restart. The extra accounts, sudoers entries
-and nft set may stay; they fence nothing while unused.
+and nft set may stay; they fence nothing while unused, and the boot uid scan
+still reaps every provisioned slot account above N (`retired slot account(s)
+... scanned too` in the boot log), so an escapee from the N = 2 period cannot
+outlive the rollback.
 
 ---
 

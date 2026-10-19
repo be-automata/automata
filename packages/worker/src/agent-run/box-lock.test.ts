@@ -634,7 +634,7 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       expect(await tryLock(root)).toBe(0);
     }, 10_000);
 
-    it("slots = 2: two holders take DISTINCT slots at once; the third waits and gets the slot its rotation names when it frees", async () => {
+    it("slots = 2: two holders take DISTINCT slots at once; the third parks and is admitted on WHICHEVER slot frees first (in-process wake-up)", async () => {
       const lines: string[] = [];
       const log = (l: string) => lines.push(l);
       const a = await acquireBoxSlot({ root, slots: 2, holder: "A", log });
@@ -666,17 +666,41 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       expect(lines).toContain(
         `box budget full (2 slots held) — C waits on slot ${wanted}`,
       );
-      // Freeing the OTHER slot does not admit C: it parks on its rotated slot.
+      // Freeing the OTHER slot admits C THERE: the release wakes the parked
+      // waiter, which re-sweeps instead of idling on its rotated slot while a
+      // slot sits free (the supersede/cancel teardown case).
       const other = wanted === a.slot ? b : a;
       const mine = wanted === a.slot ? a : b;
       await other.release();
-      await sleep(200);
-      expect(cHeld).toBeNull();
-      await mine.release();
       const held = await c;
-      expect(held.slot).toBe(wanted);
-      expect(await tryLock(root, wanted)).toBe(HELD_EXIT);
+      expect(held.slot).toBe(other.slot);
+      expect(await tryLock(root, other.slot)).toBe(HELD_EXIT);
+      expect(await tryLock(root, mine.slot)).toBe(HELD_EXIT);
+      // The wait on the rotated slot was torn down: freeing it leaves it free.
+      await mine.release();
+      expect(await tryLock(root, mine.slot)).toBe(0);
       await held.release();
+      expect(await tryLock(root, 0)).toBe(0);
+      expect(await tryLock(root, 1)).toBe(0);
+    }, 15_000);
+
+    it("slots = 2: a parked waiter's own abort still wins (AbortError, nothing held) even with a release wake-up racing it", async () => {
+      const a = await acquireBoxSlot({ root, slots: 2, holder: "A" });
+      const b = await acquireBoxSlot({ root, slots: 2, holder: "B" });
+      locks.push(a, b);
+      const ac = new AbortController();
+      const c = acquireBoxSlot({
+        root,
+        slots: 2,
+        holder: "C",
+        signal: ac.signal,
+      });
+      await sleep(300);
+      ac.abort();
+      await expect(c).rejects.toMatchObject({ name: "AbortError" });
+      await a.release();
+      await b.release();
+      await sleep(100);
       expect(await tryLock(root, 0)).toBe(0);
       expect(await tryLock(root, 1)).toBe(0);
     }, 15_000);

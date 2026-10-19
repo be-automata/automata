@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   assertSlotAccountsExist,
+  retiredSlotAccounts,
   warnIfSlotsExceedMemory,
 } from "./box-slots-boot";
 
@@ -37,6 +38,34 @@ describe("assertSlotAccountsExist (#205 boot)", () => {
     const resolveUid = vi.fn(async () => 0);
     await assertSlotAccountsExist([], resolveUid);
     expect(resolveUid).not.toHaveBeenCalled();
+  });
+});
+
+describe("retiredSlotAccounts (#205 boot)", () => {
+  it("returns the slot accounts at or above N that resolve on the box, probing all candidates in parallel", async () => {
+    const existing = new Set(["automata-agent-2", "automata-agent-3"]);
+    const resolveUid = vi.fn(async (user: string) => {
+      if (!existing.has(user)) throw new Error("no such user");
+      return 2000;
+    });
+    const got = await retiredSlotAccounts("automata-agent", 2, resolveUid);
+    expect(got).toEqual(["automata-agent-2", "automata-agent-3"]);
+    // Nothing below N is a candidate; every name up to the slot cap is probed.
+    const probed = resolveUid.mock.calls.map((c) => c[0]);
+    expect(probed[0]).toBe("automata-agent-2");
+    expect(probed).toHaveLength(14);
+    expect(probed).not.toContain("automata-agent-1");
+  });
+
+  it("[] when agent-uid mode is off, and never throws when nothing resolves", async () => {
+    const resolveUid = vi.fn(async () => {
+      throw new Error("no such user");
+    });
+    expect(await retiredSlotAccounts("", 1, resolveUid)).toEqual([]);
+    expect(resolveUid).not.toHaveBeenCalled();
+    expect(await retiredSlotAccounts("automata-agent", 1, resolveUid)).toEqual(
+      [],
+    );
   });
 });
 
