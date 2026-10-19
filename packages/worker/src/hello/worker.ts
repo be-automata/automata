@@ -47,7 +47,7 @@ import {
   assessCgroupSupport,
   prepareDelegatedRoot,
 } from "../agent-run/run-cgroup";
-import { workflows } from "../registry";
+import { buildWorkflows } from "../registry";
 import { headroomBootLine, headroomBootWarning } from "../agent-run/workflow";
 
 const execFileAsync = promisify(execFile);
@@ -154,6 +154,21 @@ async function main() {
   } catch (err) {
     console.error(
       "[worker-boot] FATAL: auth-enabled probe failed — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
+
+  // #372: the FIRST config load has its own label. loadWorkerConfig validates
+  // the whole concurrency tuple (WORKER_GLOBAL_MAX_RUNS = WORKER_BOX_SLOTS ≥
+  // WORKER_PER_ORG_MAX_RUNS, the #204/#205 pairings, the #371 knobs) and
+  // throws naming the knobs; a box with an inconsistent tuple must refuse to
+  // start with THAT message, not one borrowed from the next probe's try block.
+  try {
+    loadWorkerConfig();
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: worker configuration is invalid — refusing to start",
       err,
     );
     process.exit(1);
@@ -367,14 +382,21 @@ async function main() {
   const boxSlots = registrationConfig.boxSlots;
   warnIfSlotsExceedMemory(registrationConfig);
   const worker = await hatchet.worker(workerName, {
-    workflows,
+    // #372: the engine caps registered on every variant come from the SAME
+    // validated config as `slots` below — loadWorkerConfig refused any tuple
+    // where WORKER_GLOBAL_MAX_RUNS ≠ WORKER_BOX_SLOTS or the per-org cap exceeds
+    // it, so what the engine admits per variant, what this worker accepts and
+    // what the kernel box lock grants are one number.
+    workflows: buildWorkflows({
+      globalMaxRuns: registrationConfig.globalMaxRuns,
+      perOrgMaxRuns: registrationConfig.perOrgMaxRuns,
+    }),
     // #125 C4 / #183 / #205: ONE unit per box and `slots` = WORKER_BOX_SLOTS,
     // the engine-native cross-workflow cap (the engine's global concurrency key
     // is per workflow — docs/uat/hatchet-lite-v0.94.10-observed.md §5), equal to
     // the number of kernel slot locks the box holds (box-lock.ts), which cover
     // the crash-relaunch overlap. Everything else stays QUEUED on the engine,
-    // where a cancel/supersede is free and no timeout clock is running. The
-    // engine caps in definition.ts must agree with this value (#372).
+    // where a cancel/supersede is free and no timeout clock is running.
     slots: boxSlots,
   });
 

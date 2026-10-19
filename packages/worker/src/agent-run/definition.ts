@@ -13,30 +13,39 @@ import {
  */
 
 /**
- * Per-org concurrency cap. GROUP_ROUND_ROBIN on `input.orgId` gives fair ORDERING
- * across orgs; the cap itself is 1 and MUST stay ≤ the global cap so no single org
- * can ever hold every slot. Raising this is gated on #3b (real per-org parallelism).
+ * The engine caps of one registration (#372). BOTH keys are PER WORKFLOW VARIANT
+ * on the engine (the "global" key rides a constant expression, and Hatchet
+ * scopes a concurrency group to its workflow — observed,
+ * docs/uat/hatchet-lite-v0.94.10-observed.md §5), so with four variants the
+ * engine admits up to 4 × globalMaxRuns in total; the BOX budget is the
+ * worker's `slots` (= WORKER_BOX_SLOTS) plus the kernel box lock (box-lock.ts)
+ * and the memory-headroom check (#371). `globalMaxRuns` must equal
+ * WORKER_BOX_SLOTS and `perOrgMaxRuns` must not exceed it — loadWorkerConfig
+ * refuses the tuple at boot and at every run (config.ts), and this module's
+ * pure guard refuses a per-org cap above the global one so no registration can
+ * carry a cap no run could reach.
  */
-export const PER_ORG_MAX_RUNS = 1;
+export interface EngineCaps {
+  /** `'agent-run-global-memory-budget'` GROUP_ROUND_ROBIN key, per variant. */
+  globalMaxRuns: number;
+  /** `input.orgId` GROUP_ROUND_ROBIN key: fair ORDERING across orgs, and the most one org may hold of the global cap (equal is allowed — a single-org box must be able to use every slot). */
+  perOrgMaxRuns: number;
+}
 
 /**
- * Global concurrency cap = the single-box daemon memory budget. Held at 1: N
- * concurrent agents each spawn a full `claude` process, and the orch-agents ENOMEM
- * wall (4+ SDK sessions tripped fork/posix_spawn on a 7.6GB box, safe only after an
- * 8GiB swap file) is the precedent. Raise ONLY after per-agent RSS × N + headroom is
- * validated on the pilot box (plan's "Concurrency > 1 is gated on memory"), and set
- * `slotCost` to reflect the weight at the same time. Per-run daemon isolation (the
- * `--socket-path` flag) removes the socket-collision blocker but NOT the memory one.
+ * Today's compile-time caps, kept as the DEFAULT so every two-argument caller
+ * (the E2E suites bind the shipped shape with a stub fn) registers exactly the
+ * pre-#372 concurrency stack. Held at 1 since the orch-agents ENOMEM wall (4+
+ * SDK sessions tripped fork/posix_spawn on a 7.6 GB box); raising them is the
+ * whole-tuple move (#372): WORKER_GLOBAL_MAX_RUNS = WORKER_BOX_SLOTS ≥
+ * WORKER_PER_ORG_MAX_RUNS, with WORKER_RUN_MEMORY_MAX and the swap sized for it.
  */
-export const GLOBAL_MAX_RUNS = 1;
-// #205 NOTE: both caps above are PER WORKFLOW VARIANT on the engine (see the
-// global-key comment below) and stay compile-time 1 until #372 makes them
-// env-driven alongside WORKER_BOX_SLOTS. With N > 1 host slots and these caps
-// at 1, two runs overlap ONLY across variants (e.g. a review on
-// `agent-run-newest` beside a task run on `agent-run`): GLOBAL_MAX_RUNS = 1
-// rides a constant key per variant, so one variant admits one run at a time
-// whatever the org. The host slots are the budget; these are the engine's
-// per-variant fairness keys.
+export const DEFAULT_GLOBAL_MAX_RUNS = 1;
+export const DEFAULT_PER_ORG_MAX_RUNS = 1;
+export const DEFAULT_ENGINE_CAPS: EngineCaps = {
+  globalMaxRuns: DEFAULT_GLOBAL_MAX_RUNS,
+  perOrgMaxRuns: DEFAULT_PER_ORG_MAX_RUNS,
+};
 
 /**
  * The per-PR concurrency strategy of a policy variant, or null for the legacy
@@ -87,6 +96,7 @@ const DELIVERY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 export function buildAgentRunDefinition(
   name: string,
   perPrStrategy: PerPrStrategy,
+  caps: EngineCaps = DEFAULT_ENGINE_CAPS,
 ): {
   workflow: {
     name: string;
@@ -110,6 +120,7 @@ export function buildAgentRunDefinition(
     scheduleTimeout: Duration;
     executionTimeout: Duration;
     retries: number;
+    slotCost: number;
   };
 } {
   if (
@@ -118,6 +129,17 @@ export function buildAgentRunDefinition(
   ) {
     throw new Error(
       `buildAgentRunDefinition(${name}): unsupported per-PR concurrency strategy ${String(perPrStrategy)}`,
+    );
+  }
+  if (
+    !Number.isInteger(caps.globalMaxRuns) ||
+    !Number.isInteger(caps.perOrgMaxRuns) ||
+    caps.globalMaxRuns < 1 ||
+    caps.perOrgMaxRuns < 1 ||
+    caps.perOrgMaxRuns > caps.globalMaxRuns
+  ) {
+    throw new Error(
+      `buildAgentRunDefinition(${name}): engine caps must be integers ≥ 1 with perOrgMaxRuns ≤ globalMaxRuns, got ${JSON.stringify(caps)}`,
     );
   }
   return {
@@ -137,7 +159,7 @@ export function buildAgentRunDefinition(
           : []),
         {
           expression: "input.orgId",
-          maxRuns: PER_ORG_MAX_RUNS,
+          maxRuns: caps.perOrgMaxRuns,
           limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
         },
         {
@@ -160,7 +182,7 @@ export function buildAgentRunDefinition(
           // docs/uat/hatchet-lite-v0.94.10-observed.md §5). The box-wide
           // budget is enforced by the worker's kernel box lock (box-lock.ts).
           expression: "'agent-run-global-memory-budget'",
-          maxRuns: GLOBAL_MAX_RUNS,
+          maxRuns: caps.globalMaxRuns,
           limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
         },
       ],
@@ -189,10 +211,12 @@ export function buildAgentRunDefinition(
       // retry. Engine redelivery after a worker death is a separate mechanism,
       // absorbed by the www single-writer.
       retries: 0,
-      // slotCost DEFERRED (#8): meaningless at GLOBAL_MAX_RUNS=1 (one run at a time), so
-      // it stays unset until #3b raises the global cap — at which point set slotCost to
-      // model each agent-run's memory weight so a worker's physical slots reflect real
-      // capacity. Wiring it now would have no effect. See workflow-level concurrency doc.
+      // #372: EXPLICIT — every agent run weighs exactly one of the worker's
+      // `slots` (= WORKER_BOX_SLOTS, the budget). A heavier lane (a task run
+      // that needs two slots' worth of memory) would be a per-lane cost knob,
+      // not this ticket; until then the per-run ceiling (#204) and the
+      // headroom check (#371) are what bound a run's weight on the box.
+      slotCost: 1,
     },
   };
 }

@@ -6,6 +6,8 @@ import {
   buildAgentRunDefinition,
   type AgentRunVariantName,
   type PerPrStrategy,
+  DEFAULT_ENGINE_CAPS,
+  type EngineCaps,
 } from "./definition";
 import { configForSlot, loadWorkerConfig } from "./config";
 import { readMemoryAnon } from "./run-cgroup";
@@ -305,8 +307,9 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
 export function makeAgentRunWorkflow(
   name: string,
   perPrStrategy: PerPrStrategy,
+  caps: EngineCaps = DEFAULT_ENGINE_CAPS,
 ) {
-  const def = buildAgentRunDefinition(name, perPrStrategy);
+  const def = buildAgentRunDefinition(name, perPrStrategy, caps);
   const wf = hatchet.workflow<AgentRunWireInput>(def.workflow);
   wf.task({ ...def.task, fn: runAgent });
   wf.onFailure({ fn: onAgentRunFailure });
@@ -557,7 +560,7 @@ async function runAgentResolved(
     return output;
   } finally {
     if (ctx.cancelled || ctx.abortController?.signal.aborted) {
-      await postSuperseded(input, ctx, wwwOpts);
+      await postSuperseded(input, ctx, wwwOpts, runStartedAt);
     }
   }
 }
@@ -577,6 +580,8 @@ async function postSuperseded(
   input: AgentRunInput,
   ctx: RunCtx,
   wwwOpts: WwwClientOpts,
+  /** When this run's task fn began (TMO-01 clock) — the waste figure's start. */
+  runStartedAt: number,
 ) {
   const policy = input.supersedePolicy;
   // POSITIVE allowlist (#165): only an engine-owned snapshot posts the
@@ -603,15 +608,38 @@ async function postSuperseded(
   ctx.log(
     `[agent-run ${input.threadId}] cancelled under ${policy} → superseded terminal: ${result}`,
   );
+  // #372 supersede-waste decision: ACCEPT the waste of cancelling a running run
+  // (newest-wins keeps the verdict current with the latest push) and MEASURE
+  // it. This is the per-run figure; the 7-day fraction (Σ duration of
+  // CANCELLED run tasks / Σ all, from the engine's collection route) is #373's
+  // trigger, revisited above ~20 %.
+  ctx.log(
+    `box.supersede_waste ${JSON.stringify({
+      runId: runExternalId,
+      threadId: input.threadId,
+      lane: resolveRunLane(input),
+      policy,
+      executionMs: Date.now() - runStartedAt,
+    })}`,
+  );
 }
 
 /**
- * Registered variants, in the table's order. `agent-run` (legacy, no per-PR
- * entry) keeps the pre-#125 REST trigger contract byte-identical.
+ * The registered variants, in the table's order, at the given engine caps
+ * (#372). `agent-run` (legacy, no per-PR entry) keeps the pre-#125 REST trigger
+ * contract byte-identical. `hatchet.workflow()` only stores the declaration —
+ * nothing reaches the engine until `hatchet.worker({ workflows })` — so the
+ * default-caps set below and the config-caps set the worker registers can
+ * coexist; only the set passed to the worker is ever registered.
  */
-export const agentRunWorkflows = (
-  Object.keys(AGENT_RUN_VARIANTS) as AgentRunVariantName[]
-).map((name) => makeAgentRunWorkflow(name, AGENT_RUN_VARIANTS[name]));
+export function buildAgentRunWorkflows(caps: EngineCaps = DEFAULT_ENGINE_CAPS) {
+  return (Object.keys(AGENT_RUN_VARIANTS) as AgentRunVariantName[]).map(
+    (name) => makeAgentRunWorkflow(name, AGENT_RUN_VARIANTS[name], caps),
+  );
+}
+
+/** The default-caps (1/1) registry — the shipped shape for tests and legacy callers. */
+export const agentRunWorkflows = buildAgentRunWorkflows();
 
 /** The legacy workflow, exported by name for existing callers/tests. */
 export const agentRunWorkflow = agentRunWorkflows.find(

@@ -667,6 +667,9 @@ describe("#372: WORKER_GLOBAL_MAX_RUNS / WORKER_PER_ORG_MAX_RUNS — the engine 
   });
 
   it("accepts an integer in [1, ENGINE_CAP_MAX] and refuses everything else, naming the knob", () => {
+    // The cap bound is a literal (suites that mock ./box-lock import config.ts);
+    // it must stay equal to the slot bound, or a tuple could pass one and fail the other.
+    expect(ENGINE_CAP_MAX).toBe(BOX_SLOTS_MAX);
     expect(parseEngineCap("WORKER_PER_ORG_MAX_RUNS", "3")).toBe(3);
     for (const bad of [
       "0",

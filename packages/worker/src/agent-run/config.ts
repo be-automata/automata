@@ -349,8 +349,13 @@ export function parseMemoryMax(raw: string | undefined): number {
 /** Upper bound on `WORKER_BOX_SLOTS`; a typo like `30` must not mint 30 accounts' worth of lock files. */
 export { BOX_SLOTS_MAX };
 
-/** Upper bound on either engine cap: a typo like `30` must not register 30 engine slots. */
-export const ENGINE_CAP_MAX = BOX_SLOTS_MAX;
+/**
+ * Upper bound on either engine cap: a typo like `30` must not register 30 engine
+ * slots. A LITERAL equal to box-lock's BOX_SLOTS_MAX (pinned by config.test)
+ * rather than a read of it: test suites that mock ./box-lock import this module
+ * too, and a module-load read of a mocked export is undefined.
+ */
+export const ENGINE_CAP_MAX = 16;
 
 /**
  * Parse `WORKER_GLOBAL_MAX_RUNS` / `WORKER_PER_ORG_MAX_RUNS` (#372). Unset or
