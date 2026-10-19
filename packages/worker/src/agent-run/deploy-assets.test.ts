@@ -2867,6 +2867,348 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
   });
 });
 
+describe("#367: loopback fence — default-deny the agent uid toward host-local services by listener ownership", () => {
+  // Cards (protects / fails_when / no_claim) are on each `it`. no_claim for the
+  // whole block: these prove the TEMPLATES and the LOADER'S GUARDS, never
+  // kernel behaviour — only nft-verify.sh's live probe matrix proves the fence.
+  const conf = deployFile("linux", "loopback-nft.conf");
+  const rules = code(conf);
+  const unit = deployFile("linux", "automata-worker.service");
+
+  it("owns ONE table, uses the replace idiom, never flushes, and never touches inet automata_egress", () => {
+    // protects=Docker's chains and the boot-time 80/443 fence survive a loopback
+    // load; fails_when=a `flush ruleset` or a `table inet automata_egress`
+    // statement appears; no_claim=none beyond protects.
+    expect(rules).not.toMatch(/^\s*flush ruleset/m);
+    expect(rules).toMatch(/^table inet automata_loopback$/m);
+    expect(rules).toMatch(/^delete table inet automata_loopback$/m);
+    expect(rules).not.toMatch(/automata_egress/);
+    expect(conf).toMatch(/__AGENT_UID__/);
+    expect(conf).toMatch(/__MARK__/);
+    // The same anonymous-set form as egress-nft.conf, so one render covers
+    // every slot account (#205).
+    expect(rules).toMatch(
+      /meta skuid \{ __AGENT_UID__ \} oif "lo" meta mark set meta mark \| __MARK__/,
+    );
+  });
+
+  it("marks in the OUTPUT hook, judges NEW marked connections in the INPUT hook by the receiving socket's cgroup, admits DNS and :25432, and denies last", () => {
+    // protects=the decision is by listener ownership (D1), with the two
+    // explicit exceptions (D2); fails_when=the mark test, the cgroup admit rule
+    // (level 2, the worker unit), the DNS or the 25432 accept is missing, or the
+    // admit rule does not precede the deny; no_claim=that the kernel resolves
+    // the cgroup path or that the mark survives lo — measured on the box.
+    expect(rules).toMatch(
+      /type filter hook output priority filter; policy accept;/,
+    );
+    expect(rules).toMatch(
+      /type filter hook input priority filter; policy accept;/,
+    );
+    expect(rules).not.toMatch(/policy drop;/);
+    expect(rules).toMatch(
+      /iif "lo" meta mark & __MARK__ == __MARK__ ct state new jump agent_lo/,
+    );
+    const agentLo = rules.slice(rules.indexOf("chain agent_lo {"));
+    const admit =
+      'socket cgroupv2 level 2 "system.slice/automata-worker.service" counter accept';
+    expect(agentLo).toContain(admit);
+    expect(agentLo).toMatch(
+      /ip daddr \{ 127\.0\.0\.53, 127\.0\.0\.54 \} meta l4proto \{ tcp, udp \} th dport 53 counter accept/,
+    );
+    expect(agentLo).toMatch(
+      /ip daddr 127\.0\.0\.1 tcp dport 25432 counter accept/,
+    );
+    // Admit first; the deny is the LAST rule of the chain.
+    const lines = agentLo
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && l !== "}");
+    expect(lines[1]).toBe(admit);
+    expect(lines[lines.length - 1]).toMatch(
+      /counter (log prefix "automata-lo-deny " accept|reject)$/,
+    );
+  });
+
+  it("every deny verdict carries a counter, and THIS revision is the observe step (log + accept, no reject)", () => {
+    // protects=the fence is observable (a never-fired and an always-firing
+    // fence look identical without counters) and the rollout step is explicit;
+    // fails_when=a deny line lacks `counter`, or a `reject` appears before the
+    // enforce PR flips the three verdicts; no_claim=none beyond protects.
+    // ENFORCE PR: flip this assertion to expect the reject forms and no log line.
+    const denyLines = rules
+      .split("\n")
+      .filter((l) => /log prefix "automata-lo-deny "|reject/.test(l));
+    expect(denyLines.length).toBe(4);
+    for (const l of denyLines) {
+      expect(l, l).toMatch(/counter log prefix "automata-lo-deny " accept$/);
+      expect(l, l).not.toMatch(/reject/);
+    }
+  });
+
+  it("fences the Docker bridges with two rules, not a wildcard inside a set", () => {
+    // protects=the bridge rule loads on nft 1.0.9; fails_when=the template uses
+    // `oifname { "docker0", "br-*" }` (rejected by the parser on the box) or
+    // drops either bridge; no_claim=none beyond protects.
+    expect(rules).toMatch(
+      /meta skuid \{ __AGENT_UID__ \} oifname "docker0" counter/,
+    );
+    expect(rules).toMatch(
+      /meta skuid \{ __AGENT_UID__ \} oifname "br-\*" counter/,
+    );
+    expect(rules).not.toMatch(/oifname \{/);
+  });
+
+  it("the worker unit (re)loads the table from ExecStartPre=+ after the engine wait and before ExecStart — never ExecStartPost", () => {
+    // protects=the cgroup id the rule binds is the one THIS start's worker
+    // creates sockets under, with no unfenced window; fails_when=the loader
+    // line is missing, lacks `+` (no CAP_NET_ADMIN, sandboxed /sys), runs
+    // before the readiness wait, after ExecStart, or as ExecStartPost;
+    // no_claim=that systemd creates the cgroup before ExecStartPre (systemd
+    // contract, exercised live by criterion 5).
+    const loader =
+      unit.match(/^ExecStartPre=\+.*nft-loopback-load\.sh .*$/m)?.[0] ?? "";
+    expect(loader).toBe(
+      "ExecStartPre=+/usr/bin/env WORKER_USER=__USER__ /usr/local/sbin/nft-loopback-load.sh /etc/automata/loopback-nft.conf",
+    );
+    expect(unit).not.toMatch(/^ExecStartPost=/m);
+    const ready = unit.indexOf(
+      "ExecStartPre=/bin/bash -c 'for _ in $(seq 1 30)",
+    );
+    expect(ready).toBeGreaterThan(-1);
+    expect(ready).toBeLessThan(unit.indexOf(loader));
+    expect(unit.indexOf(loader)).toBeLessThan(
+      unit.indexOf("ExecStart=/bin/bash"),
+    );
+  });
+
+  it("egress-nft.conf's RULES are byte-for-byte unchanged (the #367 edit is comment-only)", () => {
+    // protects=criterion 7 — the live inet automata_egress is identical before
+    // and after; fails_when=any non-comment line of the egress template
+    // changed; no_claim=none beyond protects.
+    const egress = code(deployFile("linux", "egress-nft.conf"))
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    expect(egress).toEqual([
+      "table inet automata_egress",
+      "delete table inet automata_egress",
+      "table inet automata_egress {",
+      "chain egress {",
+      "type filter hook output priority filter; policy accept;",
+      'oif "lo" accept',
+      "meta skuid { __AGENT_UID__ } tcp dport { 80, 443 } counter reject with tcp reset",
+      "meta skuid { __AGENT_UID__ } udp dport { 80, 443 } counter reject",
+      "}",
+      "}",
+    ]);
+  });
+
+  it("nft-loopback-load.sh RUNS: loads a rendered conf, and refuses an unrendered template, uid 0, the worker uid, a missing cgroup dir, a wrong cgroup path, and a mark already in the ruleset", () => {
+    // protects=the fail-closed guards the unit relies on (criterion 6);
+    // fails_when=any of those inputs exits 0 or reaches `nft -f`, or a good
+    // conf does not; no_claim=kernel behaviour — `nft` is a stub that records
+    // its calls; `id` answers fixed uids; the cgroup dir is a temp directory.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "nft-loopback-"));
+    const bin = path.join(tmp, "bin");
+    fs.mkdirSync(bin);
+    const calls = path.join(tmp, "nft.calls");
+    fs.writeFileSync(
+      path.join(bin, "id"),
+      [
+        "#!/bin/sh",
+        'case "$*" in',
+        '  "-u") echo 0 ;;',
+        '  "-u automata") echo 1000 ;;',
+        '  "-u automata-agent") echo 999 ;;',
+        '  "-u automata-agent-1") echo 2001 ;;',
+        '  *) echo "id: no such user" >&2; exit 1 ;;',
+        "esac",
+      ].join("\n") + "\n",
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(
+      path.join(bin, "nft"),
+      [
+        "#!/bin/sh",
+        `echo "$*" >> "${calls}"`,
+        'case "$1 $2" in',
+        '  "list ruleset") printf "%s\\n" "${NFT_RULESET:-}" ;;',
+        '  "list tables") printf "a\\nb\\nc\\n" ;;',
+        "  -c*) exit 0 ;;",
+        "  -f*) exit 0 ;;",
+        "esac",
+      ].join("\n") + "\n",
+      { mode: 0o755 },
+    );
+    // `ip netns identify` must say "not in a netns".
+    fs.writeFileSync(path.join(bin, "ip"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
+    const cgroupRoot = path.join(tmp, "cgroup");
+    fs.mkdirSync(
+      path.join(cgroupRoot, "system.slice", "automata-worker.service"),
+      { recursive: true },
+    );
+    const egressEnv = path.join(tmp, "egress.env");
+    fs.writeFileSync(
+      egressEnv,
+      "WORKER_AGENT_USER=automata-agent\nWORKER_BOX_SLOTS=2\n",
+    );
+    const template = deployFile("linux", "loopback-nft.conf");
+    const render = (uids: string, mark = "0x10000000", cgPath?: string) => {
+      let c = template
+        .replaceAll("__AGENT_UID__", uids)
+        .replaceAll("__MARK__", mark);
+      if (cgPath)
+        c = c.replace('"system.slice/automata-worker.service"', `"${cgPath}"`);
+      return c;
+    };
+    const run = (conf: string, env: Record<string, string> = {}) => {
+      fs.rmSync(calls, { force: true });
+      const confPath = path.join(tmp, "loopback-nft.conf");
+      fs.writeFileSync(confPath, conf);
+      const r = spawnSync(
+        "bash",
+        [
+          path.join(workerRoot, "deploy", "linux", "nft-loopback-load.sh"),
+          confPath,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            PATH: `${bin}:${process.env.PATH ?? ""}`,
+            WORKER_USER: "automata",
+            CGROUP_ROOT: cgroupRoot,
+            EGRESS_ENV: egressEnv,
+            ...env,
+          },
+        },
+      );
+      const loaded =
+        fs.existsSync(calls) && fs.readFileSync(calls, "utf8").includes("-f ");
+      return { status: r.status, err: r.stderr + r.stdout, loaded };
+    };
+
+    const ok = run(render("999, 2001"));
+    expect(ok.err).toContain(
+      "[nft-loopback-load] OK — mode=observe; uid(s) 999 2001; mark 0x10000000",
+    );
+    expect(ok.status).toBe(0);
+    expect(ok.loaded).toBe(true);
+    // Parse-check precedes the load.
+    const seq = fs.readFileSync(calls, "utf8");
+    expect(seq.indexOf("-c -f")).toBeLessThan(seq.indexOf("\n-f "));
+
+    const unrendered = run(template);
+    expect(unrendered.status).toBe(1);
+    expect(unrendered.err).toMatch(/__AGENT_UID__ is unrendered/);
+    expect(unrendered.loaded).toBe(false);
+
+    const noMark = run(template.replaceAll("__AGENT_UID__", "999"));
+    expect(noMark.status).toBe(1);
+    expect(noMark.err).toMatch(/__MARK__ is unrendered/);
+
+    const root = run(render("0"));
+    expect(root.status).toBe(1);
+    expect(root.err).toMatch(/refusing to fence uid 0/);
+    expect(root.loaded).toBe(false);
+
+    const worker = run(render("1000"));
+    expect(worker.status).toBe(1);
+    expect(worker.err).toMatch(
+      /refusing to fence the worker's own uid \(1000, automata\)/,
+    );
+
+    const uncovered = run(render("999"));
+    expect(uncovered.status).toBe(1);
+    expect(uncovered.err).toMatch(
+      /slot account automata-agent-1 \(uid 2001\) is not in the skuid set/,
+    );
+
+    const noCgroup = run(render("999, 2001"), {
+      CGROUP_ROOT: path.join(tmp, "nowhere"),
+    });
+    expect(noCgroup.status).toBe(1);
+    expect(noCgroup.err).toMatch(
+      /does not exist — run from the worker unit's ExecStartPre=\+/,
+    );
+    expect(noCgroup.loaded).toBe(false);
+
+    const wrongPath = run(render("999, 2001", "0x10000000", "system.slice"));
+    expect(wrongPath.status).toBe(1);
+    expect(wrongPath.err).toMatch(
+      /socket cgroupv2 path is 'system.slice', expected the worker unit's/,
+    );
+
+    const collision = run(render("999, 2001"), {
+      NFT_RULESET:
+        "table inet other {\n\tchain c {\n\t\tmeta mark & 0x10000000 == 0x10000000 accept\n\t}\n}\n",
+    });
+    expect(collision.status).toBe(1);
+    expect(collision.err).toMatch(
+      /mark 0x10000000 already appears outside inet automata_loopback/,
+    );
+    expect(collision.loaded).toBe(false);
+
+    // Our OWN earlier load is not a collision: the loader is a re-loader.
+    const reload = run(render("999, 2001"), {
+      NFT_RULESET:
+        "table inet automata_loopback {\n\tchain out {\n\t\tmeta mark set meta mark | 0x10000000\n\t}\n}\n",
+    });
+    expect(reload.status).toBe(0);
+    expect(reload.loaded).toBe(true);
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("nft-verify.sh probes from INSIDE the worker subtree, starts its listeners after the move, and expects the Target table per mode", () => {
+    // protects=the live verifier tests the right cgroup and the right rows;
+    // fails_when=the probe cgroup is not under the worker unit, a listener is
+    // created before the move, or a deny/allow row is missing; no_claim=the
+    // probe results themselves (live only).
+    const verify = deployFile("linux", "nft-verify.sh");
+    expect(verify).toMatch(/PROBE_CG="\$SVC_CG\/verify-probe"/);
+    expect(verify).toMatch(/system\.slice\/automata-worker\.service"$/m);
+    // Every probe shell moves itself in FIRST, then drops uid / execs.
+    expect(verify).toMatch(
+      /echo \\\$\\\$ > '\$PROBE_CG\/cgroup\.procs' && exec runuser -u '\$1' -- timeout 1 bash -c 'exec 3<>\/dev\/tcp/,
+    );
+    expect(verify).toMatch(
+      /echo \\\$\\\$ > '\$PROBE_CG\/cgroup\.procs' && exec runuser -u '\$1' -- python3/,
+    );
+    expect(verify).toMatch(/cgroup\.kill/);
+    for (const row of [
+      'lo_row deny  "engine gRPC (docker-proxy)"        "$u" 127.0.0.1 7077',
+      'lo_row deny  "engine API (docker-proxy)"         "$u" 127.0.0.1 8888',
+      'lo_row deny  "cloudflared metrics"               "$u" 127.0.0.1 20241',
+      'lo_row deny "engine gRPC (bridge)"             "$u" "$BRIDGE_IP" 7077',
+      'lo_row deny "sshd via the box\'s public ip"     "$u" "$PUBLIC_IP" 22',
+      'lo_row deny  "sshd via ::1"                      "$u" ::1 22',
+      'lo_row allow "worker-uid listener (proxy/broker)" "$u" 127.0.0.1 "$LO_PROBE_PORT_WORKER"',
+      'lo_row allow "the slot\'s own listener"           "$u" 127.0.0.1 "$AGENT_PORT"',
+      'lo_row allow "test Postgres"                     "$u" 127.0.0.1 25432',
+    ]) {
+      expect(verify, row).toContain(row);
+    }
+    expect(verify).toMatch(/getent hosts github\.com/);
+    // Mode-aware expectations: enforce = reset under 1s; observe = counter moves.
+    expect(verify).toMatch(/deny:enforce\)/);
+    expect(verify).toMatch(
+      /\[ "\$LO_RESULT" = REFUSED \] && \[ "\$LO_MS" -lt 1000 \]/,
+    );
+    expect(verify).toMatch(/deny:observe\)/);
+    expect(verify).toMatch(/\[ "\$delta" -ge 1 \]/);
+    // A worker that is active without the table is a finding, not a skip.
+    expect(verify).toMatch(
+      /automata-worker is active but table inet automata_loopback is not loaded/,
+    );
+    // Both tables must cover the same slot uids.
+    expect(verify).toMatch(/\[ "\$LO_SETS" = "\$FENCED" \]/);
+  });
+});
+
+describeBashScriptHygiene("packages/worker/deploy/linux/nft-loopback-load.sh");
+
 describe("packages/worker/deploy/linux — engine backup (#192)", () => {
   const script = deployFile("linux", "automata-engine-backup.sh");
 

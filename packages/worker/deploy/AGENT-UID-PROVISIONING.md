@@ -314,6 +314,96 @@ re-rendered fails the boot (`sudo does not permit the worker to run as slot
 account(s) ...`) instead of the first run on that slot. Both nft scripts read
 every `meta skuid` rule (tcp and udp) and refuse a conf whose sets differ.
 
+## 7. The loopback layer — agent uid vs host-local services (#367, Linux)
+
+`egress-nft.conf` accepts ALL loopback for the agent uid on purpose (the per-run
+proxy and the git broker listen there) — and so do the Hatchet engine (`:7077`
+insecure gRPC, `:8888`), cloudflared's metrics (`:20241`), sshd via the box's
+own public IP, and the engine container on the Docker bridge. `loopback-nft.conf`
+(`inet automata_loopback`) closes that by **listener ownership**: a NEW
+connection the agent uid opens over `lo` is admitted only when the receiving
+socket's cgroup is under `system.slice/automata-worker.service` (the worker's
+proxy/broker, or the agent's own servers in its run cgroup), plus two explicit
+exceptions — systemd-resolved on `127.0.0.53/54:53` and the test Postgres on
+`127.0.0.1:25432` (§"Linux boxes: test Postgres"). Everything else, and every
+Docker bridge, is a deny.
+
+**It is loaded by the worker unit, not at boot.** nft binds `socket cgroupv2
+"<path>"` to a cgroup inode id at load time; the unit's cgroup does not exist
+when `automata-egress.service` runs and is recreated on every restart. So
+`automata-worker.service` carries `ExecStartPre=+… nft-loopback-load.sh`,
+which runs as root after systemd created the cgroup and before the worker can
+poll. A failed load fails the unit (fail-closed, visible on the 15s restart
+cycle) and never touches `inet automata_egress`.
+
+Install, on a box that already runs §4/§5/§6 (**no run in flight** for the restart):
+
+```bash
+cd /opt/automata-platform/packages/worker/deploy/linux   # a checkout at the revision being deployed
+# 1. Render the SAME uid set as egress-nft.conf (one slot: `999`; two: `999, 2001`)
+#    and the mark bit, then install the template and the loader.
+UIDS="$(id -u automata-agent)"                       # N = 2: UIDS="$(id -u automata-agent), $(id -u automata-agent-1)"
+sed "s/__AGENT_UID__/$UIDS/g; s/__MARK__/0x10000000/g" loopback-nft.conf \
+  | sudo install -m 0644 -o root -g root /dev/stdin /etc/automata/loopback-nft.conf
+sudo install -m 0755 -o root -g root nft-loopback-load.sh /usr/local/sbin/nft-loopback-load.sh
+sudo install -m 0755 -o root -g root nft-verify.sh        /usr/local/sbin/nft-verify.sh
+
+# 2. Dry-run the loader by hand — only its guards; the cgroup must exist, so the
+#    worker must be running. It replaces the table in place; nothing restarts.
+sudo /usr/bin/env WORKER_USER=automata /usr/local/sbin/nft-loopback-load.sh /etc/automata/loopback-nft.conf
+#    → [nft-loopback-load] OK — mode=observe; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 6 -> 7
+
+# 3. Re-render the unit (adds the ExecStartPre=+ line), diff, install, restart.
+sed 's#__USER__#automata#g; s#__HOME__#/home/automata#g; s#__REPO__#/opt/automata-platform#g' automata-worker.service \
+  | diff - /etc/systemd/system/automata-worker.service          # expect only the #367 block
+sed 's#__USER__#automata#g; s#__HOME__#/home/automata#g; s#__REPO__#/opt/automata-platform#g' automata-worker.service \
+  | sudo install -m 0644 /dev/stdin /etc/systemd/system/automata-worker.service
+sudo systemctl daemon-reload
+ls /sys/fs/cgroup/system.slice/automata-worker.service/run-* 2>/dev/null   # nothing in flight?
+sudo systemctl restart automata-worker.service
+journalctl -u automata-worker -n 30 --no-pager | grep nft-loopback-load     # the OK line, once per start
+
+# 4. Prove it: structure + the live probe matrix, as every slot uid, from inside
+#    the worker subtree (a probe from this ssh session tests the wrong cgroup).
+sudo env WORKER_AGENT_USER=automata-agent WORKER_BOX_SLOTS=2 /usr/local/sbin/nft-verify.sh
+```
+
+**Observe, then enforce.** The template ships with every deny as
+`counter log prefix "automata-lo-deny " accept`: nothing is refused, every
+would-be deny is counted and logged. Run it for 7 days or 30 agent runs,
+whichever is later, then read the log:
+
+```bash
+journalctl -k --grep 'automata-lo-deny' --no-pager | sed -E 's/.*DST=([^ ]+).*DPT=([0-9]+).*/\1:\2/' | sort | uniq -c
+```
+
+Every destination must be a "refused" row of #367's target table (engine
+`:7077`/`:8888` on `127.0.0.1` and the bridge, `:20241`, `:22`). Subtract the
+slices `nft-verify.sh` prints as its probe window. A hit outside those rows
+means the table is wrong and is fixed **before** enforcing. To enforce: flip the
+three `log prefix … accept` verdicts in `loopback-nft.conf` to the `reject`
+forms given beside each (`counter reject` for the bridge rules, `meta l4proto
+tcp counter reject with tcp reset` and `counter reject` for the default), re-run
+step 1 and the restart of step 3 with no run in flight, then step 4 — in
+enforce mode the verifier expects every deny row reset in under 1s.
+
+Known limits: a listener's socket carries the cgroup of the task that
+**created** it — a socket created outside the subtree and inherited into it
+stays refused (measured; this is why the verifier starts its listeners after
+the move). With `WORKER_BOX_SLOTS > 1` every slot is admitted to every other
+slot's loopback servers, because both sit under the worker unit; per-run
+isolation (`level 4`, the run's own cgroup) is the #193 follow-up. Never run
+the loader under `ip netns exec` (it remounts `/sys`; the loader refuses a
+named namespace).
+
+Rollback: `sudo nft delete table inet automata_loopback` restores today's
+behaviour at once and leaves `automata_egress` and Docker untouched. Durably,
+**in this order**: drop the `ExecStartPre=+… nft-loopback-load.sh` line from
+the installed unit, `systemctl daemon-reload`, delete the table, restart with
+no run in flight; only then remove `/etc/automata/loopback-nft.conf` and the
+loader. The other order leaves the unit pointing at a missing loader and the
+worker refusing to start.
+
 ---
 
 ## Verification gates
