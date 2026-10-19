@@ -1,0 +1,189 @@
+{
+ "scope": "#367",
+ "prs": [
+  383,
+  388
+ ],
+ "issue": 367,
+ "env": {
+  "name": "production execution box automata-exec-1",
+  "kind": "linux host, nftables fence",
+  "note": "only environment where the change exists"
+ },
+ "build": "3e344b765e60df6fa4620625fd9639f59c910e5d",
+ "captured_at": "2026-10-19T15:33:44Z",
+ "verdict": "PASS (11/12; C12 BLOCKED on run count)",
+ "criteria": [
+  {
+   "id": "C1",
+   "text": "Mechanism pre-proven on the real worker subtree: output mark survives lo; cgroupv2 level-2 admits a listener created in the subtree, refuses one outside; restart leaves a stale id unless reloaded",
+   "source": "#367 AC 1",
+   "verdict": "PASS",
+   "evidence": "Spike 2026-10-19 (nobody client, real subtree); (c) proven by C5 \u2014 see journal-loader-lines + nft-verify-enforce"
+  },
+  {
+   "id": "C2",
+   "text": "As uid 999 (and 2001) inside the worker subtree: 127.0.0.1:7077, :8888, :20241, 172.18.0.2:7077, :8888, <public ip>:22 refused in under 1 s by reset",
+   "source": "#367 AC 2",
+   "verdict": "PASS",
+   "evidence": "nft-verify-enforce: 7 deny rows x 2 uids REFUSED in 24\u201334 ms"
+  },
+  {
+   "id": "C3",
+   "text": "Worker-uid listener accepts; the probe's own listener accepts; getent hosts github.com resolves; 127.0.0.1:25432 accepts",
+   "source": "#367 AC 3",
+   "verdict": "PASS",
+   "evidence": "nft-verify-enforce: allow rows CONNECTED/RESOLVED, deny counters unchanged"
+  },
+  {
+   "id": "C4",
+   "text": "::1 gives the same result as 127.0.0.1 where the service listens on IPv6 (sshd); own listener on ::1 admitted",
+   "source": "#367 AC 4",
+   "verdict": "PASS",
+   "evidence": "nft-verify-enforce: ::1:22 REFUSED; ::1:61015/61016 CONNECTED"
+  },
+  {
+   "id": "C5",
+   "text": "After systemctl restart automata-worker, C2 and C3 still hold (ExecStartPre reload bound the new cgroup)",
+   "source": "#367 AC 5",
+   "verdict": "PASS",
+   "evidence": "journal-loader-lines 14:19:09 (unit load, mode=enforce) + unit-state (ExecMainStart 14:19:10, NRestarts 0) + nft-verify-enforce 15:33 on that process"
+  },
+  {
+   "id": "C6",
+   "text": "If nft-loopback-load.sh exits non-zero the unit does not reach active (bad cgroup path render)",
+   "source": "#367 AC 6",
+   "verdict": "PASS",
+   "evidence": "journal-loader-lines 13:47:09: FAIL line, 'Control process exited, status=1', 'Failed with result exit-code'; restored 13:47:12"
+  },
+  {
+   "id": "C7",
+   "text": "inet automata_egress identical before/after; Docker chains untouched; only the new table added",
+   "source": "#367 AC 7",
+   "verdict": "PASS",
+   "evidence": "egress-conf-vs-checkout diff exit 0; egress-table; tables (7, incl. both automata tables); docker-rules-count 36"
+  },
+  {
+   "id": "C8",
+   "text": "Real review run + a DB-suite task run + a loopback-server task run under enforce",
+   "source": "#367 AC 8",
+   "verdict": "PASS",
+   "evidence": "runs-under-enforce: review pr=388 14:17:17\u219214:17:47 (approved); task runs 14:20:35 and 14:28:10 = issues #387/#390 \u2192 PR #392: DB suite exit 0 (:25432), getent exit 0, loopback suites 111/114 (3 failures traced to NODE_USE_ENV_PROXY in the run env, 114/114 with it unset \u2014 not the fence)"
+  },
+  {
+   "id": "C9",
+   "text": "Observe window log contains only refused-row destinations; counts reported",
+   "source": "#367 AC 9 (window shortened \u2014 see Deviations)",
+   "verdict": "PASS",
+   "evidence": "observe-window-log: 14 lines, all verifier probe rows (13:47:22\u201323); 0 hits from the 3 real runs"
+  },
+  {
+   "id": "C10",
+   "text": "Every test states protects / fails_when / no_claim",
+   "source": "#367 AC 10",
+   "verdict": "PASS",
+   "evidence": "test-cards: 9 it() / 9 cards in the #367 block; 6 proxy cases"
+  },
+  {
+   "id": "C11",
+   "text": "Existing egress-nft assertions and CI pass unchanged",
+   "source": "#367 AC 11",
+   "verdict": "PASS",
+   "evidence": "ci-pr-checks: 6/6 jobs pass on both PR heads; Automata APPROVED e31e167 and ee54e39"
+  },
+  {
+   "id": "C12",
+   "text": "REGRESSION: 30 real runs under enforce complete with no fence-caused failure (the issue's 30-run half of the gate)",
+   "source": "#367 rollout gate (observed, not yet complete)",
+   "verdict": "BLOCKED",
+   "evidence": "runs-under-enforce: 18 completed, 0 failed, 0 ECONNREFUSED in run logs, 0 proxy host-local \u2014 30 not yet reached at capture time (no evidence of failure; count still accruing)"
+  }
+ ],
+ "deviations": [
+  {
+   "spec": "Observe for 7 days or 30 runs, whichever is later, before enforcing",
+   "delivered": "Enforce loaded 13:55 UTC after ~10 min / 3 runs at the operator's direction; the observe log held only verifier probe rows",
+   "consequence": "C9 graded on the shortened window; C12 added as a regression criterion to hold the enforced fence to the 30-run count (BLOCKED until reached)"
+  },
+  {
+   "spec": "Three deny lines flipped to reject",
+   "delivered": "Four reject lines: the bridge deny split into `reject with tcp reset` (tcp) and `reject`",
+   "consequence": "Measured: a plain reject in the OUTPUT hook left the connect to time out at 1 s; fixed before merge; C2 bridge rows reset in 24\u201328 ms"
+  },
+  {
+   "spec": "Fence only (nftables)",
+   "delivered": "The run's egress proxy also refuses host-local targets in every mode; NO_PROXY gains ::1",
+   "consequence": "Without it the proxy was a tunnel through the fence (dials as the worker uid inside the admitted cgroup); covered by proxy unit tests, 0 host-local audits live"
+  },
+  {
+   "spec": "UAT on develop/staging",
+   "delivered": "Environment under test is the production execution box (the only place the fence exists)",
+   "consequence": "All evidence is from production; the verifier creates only a throwaway cgroup and connections"
+  },
+  {
+   "spec": "Criterion 8 task runs post results",
+   "delivered": "The delivery agent wrote its results to a PR (#392) rather than an issue comment; the first run's duplicate (#391) closed",
+   "consequence": "Exit codes are in the PR file; graded from it"
+  }
+ ],
+ "findings": [
+  {
+   "severity": "info",
+   "title": "Agent runs poll localhost:8888 (the engine API) and are refused",
+   "detail": "A task run under enforce polled 127.0.0.1:8888 and [::1]:8888 every ~10 s (temporary diag log, enforce-diag-sample). This is a refused row of the target table; the run kept working. Likely a repo test harness readiness loop aimed at a hatchet-lite that is not there."
+  },
+  {
+   "severity": "info",
+   "title": "Three egress-proxy unit tests fail inside a task run",
+   "detail": "Under the run's NODE_USE_ENV_PROXY the proxy test client goes through the run proxy; the agent re-ran with it unset: 114/114. Not a fence effect (PR #392)."
+  },
+  {
+   "severity": "low",
+   "title": "Shared policy validator accepts private-range allowlist entries the box proxy always refuses",
+   "detail": "Documented gap in docs/egress-enforcement.md (roborev round 3)."
+  },
+  {
+   "severity": "info",
+   "title": "Counters reset on every table (re)load",
+   "detail": "The loopback-table counters are since the last load; a by-hand loader run resets them. Read deny counts with that in mind; the verifier prints its own probe windows."
+  }
+ ],
+ "evidence_index": [
+  ".claude",
+  ".claude-flow",
+  "00-api-C367-loopback-table.txt",
+  "01-api-C367-egress-table.txt",
+  "02-api-C367-tables.txt",
+  "03-api-C367-docker-rules-count.txt",
+  "04-api-C367-loopback-conf-vs-checkout.diff",
+  "05-api-C367-egress-conf-vs-checkout.diff",
+  "06-api-C367-unit-execstart-lines.txt",
+  "07-api-C367-unit-state.txt",
+  "08-api-C367-worker-cgroup.txt",
+  "09-api-C367-journal-loader-lines.txt",
+  "10-api-C367-runs-under-enforce.txt",
+  "11-api-C367-runs-completed-count.txt",
+  "12-api-C367-runs-failed-count.txt",
+  "13-api-C367-run-log-refused-count.txt",
+  "14-api-C367-proxy-host-local-count.txt",
+  "15-api-C367-observe-window-log.txt",
+  "16-api-C367-enforce-diag-sample.txt",
+  "17-api-C367-listeners.txt",
+  "18-api-C367-nsswitch.txt",
+  "19-api-C367-egress-fence-uids.txt",
+  "20-api-C367-accounts.txt",
+  "21-api-C367-egress-env.txt",
+  "22-api-C367-nft-verify-enforce.txt",
+  "23-api-C367-kernel.txt",
+  "24-api-C367-captured-at.txt",
+  "25-api-C367-ci-merge-commits.txt",
+  "26-api-C367-test-cards.txt",
+  "27-api-C367-ci-pr-checks.txt",
+  "manifest.json"
+ ],
+ "artifact_url": "https://app.superset.sh/page/367-loopback-fence-uat-k2r66b",
+ "validator": "PASS (code lens; no markers; seams unset at call site; ExecStartPre paths consistent with \u00a77)",
+ "terraform": "not applicable",
+ "page_id": "fc56d656-53f8-4453-b201-49f8856a57f5",
+ "page_slug": "367-loopback-fence-uat-k2r66b"
+}

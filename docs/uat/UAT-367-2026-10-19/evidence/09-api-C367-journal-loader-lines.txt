@@ -1,0 +1,6 @@
+Oct 19 13:44:57 [nft-loopback-load] OK — mode=observe; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 7 -> 7
+Oct 19 13:47:09 [nft-loopback-load] FAIL: socket cgroupv2 path is 'system.slice/no-such-unit.service', expected the worker unit's 'system.slice/automata-worker.service'
+Oct 19 13:47:09 automata-exec-1 systemd[1]: automata-worker.service: Control process exited, code=exited, status=1/FAILURE
+Oct 19 13:47:09 automata-exec-1 systemd[1]: automata-worker.service: Failed with result 'exit-code'.
+Oct 19 13:47:12 [nft-loopback-load] OK — mode=observe; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 7 -> 7
+Oct 19 14:19:09 [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 7 -> 7

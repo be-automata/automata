@@ -1,0 +1,6 @@
+49:ExecStartPre=/bin/bash -c 'for _ in $(seq 1 30); do curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:8888/api/ready && exit 0; sleep 2; done; echo "engine not ready on 127.0.0.1:8888 after 60s" >&2; exit 1'
+56:# this unit's cgroup before any ExecStartPre= runs and recreates it on every
+62:# ExecStartPre=, NOT ExecStartPost=: Type=exec means an ExecStartPost= would
+67:# before ExecStart= (fail-closed), and the 15s Restart= cycle keeps the reason
+72:ExecStartPre=+/usr/bin/env WORKER_USER=automata /usr/local/sbin/nft-loopback-load.sh /etc/automata/loopback-nft.conf
+74:ExecStart=/bin/bash /home/automata/.automata/run-worker.sh

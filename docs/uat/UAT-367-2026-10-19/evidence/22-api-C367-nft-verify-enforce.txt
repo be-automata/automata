@@ -1,0 +1,28 @@
+[nft-verify] loopback probes (mode=enforce) start 2026-10-19T15:33:45Z from /sys/fs/cgroup/system.slice/automata-worker.service/verify-probe
+[nft-verify]   deny  engine gRPC (docker-proxy)         uid 999   -> 127.0.0.1:7077         REFUSED      26ms deny+1 ok
+[nft-verify]   deny  engine API (docker-proxy)          uid 999   -> 127.0.0.1:8888         REFUSED      33ms deny+1 ok
+[nft-verify]   deny  cloudflared metrics                uid 999   -> 127.0.0.1:20241        REFUSED      34ms deny+1 ok
+[nft-verify]   deny  engine gRPC (bridge)               uid 999   -> 172.18.0.2:7077        REFUSED      28ms deny+1 ok
+[nft-verify]   deny  engine API (bridge)                uid 999   -> 172.18.0.2:8888        REFUSED      24ms deny+1 ok
+[nft-verify]   deny  sshd via the box's public ip       uid 999   -> 138.201.174.63:22      REFUSED      33ms deny+1 ok
+[nft-verify]   deny  sshd via ::1                       uid 999   -> ::1:22                 REFUSED      27ms deny+1 ok
+[nft-verify]   allow worker-uid listener (proxy/broker) uid 999   -> 127.0.0.1:61001        CONNECTED    25ms deny+0 ok
+[nft-verify]   allow the slot's own listener            uid 999   -> 127.0.0.1:61010        CONNECTED    25ms deny+0 ok
+[nft-verify]   allow the slot's own listener (::1)      uid 999   -> ::1:61015              CONNECTED    26ms deny+0 ok
+[nft-verify]   allow test Postgres                      uid 999   -> 127.0.0.1:25432        CONNECTED    31ms deny+0 ok
+[nft-verify]   allow DNS (getent hosts github.com)      uid 999   -> 127.0.0.53:53          RESOLVED      -ms deny+- ok
+[nft-verify]   deny  engine gRPC (docker-proxy)         uid 2001  -> 127.0.0.1:7077         REFUSED      29ms deny+1 ok
+[nft-verify]   deny  engine API (docker-proxy)          uid 2001  -> 127.0.0.1:8888         REFUSED      30ms deny+1 ok
+[nft-verify]   deny  cloudflared metrics                uid 2001  -> 127.0.0.1:20241        REFUSED      30ms deny+1 ok
+[nft-verify]   deny  engine gRPC (bridge)               uid 2001  -> 172.18.0.2:7077        REFUSED      25ms deny+1 ok
+[nft-verify]   deny  engine API (bridge)                uid 2001  -> 172.18.0.2:8888        REFUSED      26ms deny+1 ok
+[nft-verify]   deny  sshd via the box's public ip       uid 2001  -> 138.201.174.63:22      REFUSED      24ms deny+1 ok
+[nft-verify]   deny  sshd via ::1                       uid 2001  -> ::1:22                 REFUSED      29ms deny+1 ok
+[nft-verify]   allow worker-uid listener (proxy/broker) uid 2001  -> 127.0.0.1:61001        CONNECTED    25ms deny+0 ok
+[nft-verify]   allow the slot's own listener            uid 2001  -> 127.0.0.1:61011        CONNECTED    30ms deny+0 ok
+[nft-verify]   allow the slot's own listener (::1)      uid 2001  -> ::1:61016              CONNECTED    30ms deny+0 ok
+[nft-verify]   allow test Postgres                      uid 2001  -> 127.0.0.1:25432        CONNECTED    28ms deny+0 ok
+[nft-verify]   allow DNS (getent hosts github.com)      uid 2001  -> 127.0.0.53:53          RESOLVED      -ms deny+- ok
+[nft-verify] loopback probes end 2026-10-19T15:33:48Z
+[nft-verify] OK — uid(s) 999 2001 fenced on tcp+udp 80/443, loopback open, 36 docker rules intact, 0 blocked packet(s) so far; loopback layer: loaded, mode=enforce, 4 deny hit(s) so far, probes ok
+exit=0
