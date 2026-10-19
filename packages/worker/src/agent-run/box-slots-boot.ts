@@ -115,17 +115,6 @@ async function sudoListProbe(user: string): Promise<void> {
 const HIDEPID_OK = new Set(["invisible", "2", "ptraceable", "4"]);
 
 /**
- * #205: at N > 1 on Linux, /proc must be mounted with `hidepid` (invisible or
- * ptraceable) — the run's proxy credential rides in the agent children's
- * HTTPS_PROXY, the worker keeps it out of every argv it writes, but a tool the
- * agent runs may copy it into one, and `/proc/<pid>/cmdline` is otherwise
- * world-readable to a sibling slot. The same fail-closed shape as the other
- * N > 1 preconditions (accounts, sudo, fence): a box raised to N = 2 without
- * the remount must not boot clean. Reads /proc/self/mountinfo — the /proc
- * mount's per-mount AND superblock options (hidepid is a superblock option).
- * Not Linux ⇒ nothing.
- */
-/**
  * The mount options of the /proc mount in effect for this process, from a
  * `/proc/self/mountinfo` text: per-mount AND superblock options (hidepid is a
  * superblock option). The LAST /proc entry wins — a later overmount is the one
@@ -199,6 +188,17 @@ export function hidepidDropinLeftAtOneSlot(
   return `the N > 1 drop-in automata-worker.service.d/20-hidepid.conf (ProtectSystem=no, ProtectKernelTunables=no) is still in effect at WORKER_BOX_SLOTS=1 (${triggers.join("; ")}) — remove it and \`systemctl daemon-reload && systemctl restart automata-worker\` when nothing is in flight (deploy/AGENT-UID-PROVISIONING.md §6)`;
 }
 
+/**
+ * #205: at N > 1 on Linux, /proc must be mounted with `hidepid` (invisible or
+ * ptraceable) — the run's proxy credential rides in the agent children's
+ * HTTPS_PROXY, the worker keeps it out of every argv it writes, but a tool the
+ * agent runs may copy it into one, and `/proc/<pid>/cmdline` is otherwise
+ * world-readable to a sibling slot. The same fail-closed shape as the other
+ * N > 1 preconditions (accounts, sudo, fence): a box raised to N = 2 without
+ * the remount must not boot clean. Reads /proc/self/mountinfo — the /proc
+ * mount's per-mount AND superblock options (hidepid is a superblock option).
+ * Not Linux ⇒ nothing.
+ */
 export function assertProcHidepid(
   opts: {
     platform?: NodeJS.Platform;

@@ -1100,6 +1100,7 @@ async function runAgentInner(
         deferrals += 1;
         admissionLog(
           `box.headroom_deferred_wait ${JSON.stringify({
+            runId: runKey,
             threadId: input.threadId,
             deferral: deferrals,
             of: baseConfig.admissionMaxDeferrals,
