@@ -523,6 +523,8 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
       ];
       expect(opts.mode).toBe("observe");
       expect(opts.policy).toEqual({ level: "none", allowlist: [] });
+      // #205: N = 1 stays credential-less (byte-identical proxy env).
+      expect(opts.credential).toBeUndefined();
       // A1: allow-all is only defensible BECAUSE it is audited. onEvent must be
       // the real batcher, never a no-op.
       expect(typeof opts.onEvent).toBe("function");
@@ -2054,6 +2056,15 @@ describe("#205: a run on slot 1 executes as the slot-1 account end to end", () =
     expect(provisionWorkdir).toHaveBeenCalledWith(
       expect.objectContaining({ agentUser: "_automata-agent-1" }),
     );
+    // The cross-slot proxy fence: at N > 1 the run's proxy REQUIRES a per-run
+    // credential (a sibling slot can reach the loopback port).
+    const [proxyOpts] = startEgressProxy.mock.calls[0] as [
+      { credential?: { user: string; secret: string } },
+    ];
+    expect(proxyOpts.credential).toEqual({
+      user: "run",
+      secret: expect.stringMatching(/^[0-9a-f]{48}$/),
+    });
     const daemonConfig = daemonCtorArgs[0]?.[0] as {
       agentUser: string;
       boxSlot?: number;

@@ -271,6 +271,26 @@ from the N = 2 period cannot outlive the rollback. Keep those accounts in the
 sudoers Runas list; without them the boot log reports them as `NOT scanned (not
 fatal)`.
 
+`/proc` visibility (N > 1): the run's proxy credential rides in the agent
+children's `HTTPS_PROXY`; the worker keeps it out of every argv it writes, but a
+tool the agent runs may copy it into one (`--proxy-server=$HTTPS_PROXY`), and
+`/proc/<pid>/cmdline` is world-readable. Before raising N, mount `/proc` with
+`hidepid=invisible` and exempt the worker's group (the reaper and the ceiling
+read their runs' `/proc`):
+
+```
+WORKER_GID="$(id -g automata)"
+sudo mount -o remount,hidepid=invisible,gid="$WORKER_GID" /proc
+grep -q hidepid= /etc/fstab || printf 'proc /proc proc defaults,hidepid=invisible,gid=%s 0 0\n' "$WORKER_GID" | sudo tee -a /etc/fstab
+sudo -u automata-agent-1 ps -eo user | sort -u   # must list only automata-agent-1
+```
+
+Caveat, checked before trusting it: `hidepid` also hides processes from
+`systemd-logind`/polkit sessions of unprivileged logins; on a box with an
+interactive operator login, add that login to the exempt group or use
+`hidepid=ptraceable`. Not applied by cloud-init — a live box is remounted by hand
+at the N > 1 step and the UAT drill records it.
+
 Fence coverage, two layers. (1) `nft-preflight.sh` and `nft-verify.sh` read
 `WORKER_AGENT_USER=<base> WORKER_BOX_SLOTS=<N>` (or `AGENT_USERS="<a> <a>-1"`)
 from the environment — the unit loads `/etc/automata/egress.env` — and refuse a

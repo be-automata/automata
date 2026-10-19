@@ -280,6 +280,10 @@ write_files:
       done
       swapon --show | grep -q /swapfile
 
+      # #205: /proc hidepid is NOT applied here. It is an N > 1 precondition
+      # done by hand on a live box (AGENT-UID-PROVISIONING.md §6) because it
+      # interacts with systemd-logind/polkit for interactive logins.
+
       # The sentinel is the contract. cloud-init reports `status: done` even
       # when runcmd entries failed, so nothing downstream should trust that —
       # it should test for this file, which only the line below creates.

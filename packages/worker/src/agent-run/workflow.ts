@@ -1400,7 +1400,7 @@ async function runAgentInner(
     const refused = egressProxy?.unauthenticatedRequests() ?? 0;
     if (refused > 0) {
       step(
-        `egress proxy: ${refused} unauthenticated request(s) refused with 407 (proxy-auth; a sibling slot or a client without the run credential)`,
+        `egress proxy: ${refused} request(s) answered 407 (proxy-auth) — a client authenticating after the challenge (Chromium via gstack browse does), or a caller without the run credential`,
       );
     }
     await closeQuietly(egressProxy);

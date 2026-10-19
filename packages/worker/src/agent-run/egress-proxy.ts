@@ -75,10 +75,13 @@ export type EgressDecisionEvent = {
    * recorded, and at most PROXY_AUTH_AUDIT_CAP such events are emitted per
    * proxy; the total is on `EgressProxy.unauthenticatedRequests()` for the
    * teardown log. In-process only: the wire row to /api/daemon/egress-event is
-   * a plain deny. The run's own clients never trip it: undici/Node, curl, Go
+   * a plain deny. The run's own clients rarely trip it: undici/Node, curl, Go
    * and gh send the URL's credential up front, and git is told
    * `http.proxyAuthMethod=basic` (daemon-env.ts) so libcurl's anyauth probe
-   * never happens.
+   * never happens. Chromium (gstack browse, Playwright proxy credentials)
+   * authenticates only AFTER a 407 challenge, so a browse session can consume
+   * one audited event — a per-run baseline, not a probe; the teardown line
+   * says so.
    */
   reason?: "proxy-auth";
 };

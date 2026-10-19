@@ -15,8 +15,10 @@ N = 2 is proven as a bounded drill below and the box returns to N = 1 afterwards
 ## Drill — N = 2 (#205 UAT 1–4; epic gate before ticket 3)
 
 Preconditions: slot account `automata-agent-1` (uid 2001), sudoers Runas list, nft set
-`{ 999, 2001 }` loaded via `nft-preflight.sh`, traverse ACL on the workdir root,
-`WORKER_BOX_SLOTS=2`, no run in flight before the restart.
+`{ 999, 2001 }` loaded via `nft-preflight.sh` (marker `/run/automata/egress-fence.uids`
+present), `/proc` remounted `hidepid=invisible,gid=<worker gid>` (§6; `ps` as slot 1 lists
+only slot 1), traverse ACL on the workdir root, `WORKER_BOX_SLOTS=2`, no run in flight before
+the restart.
 
 | #   | Check                                                                                                                                                                                             | Evidence  |
 | :-- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :-------- |

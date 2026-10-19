@@ -167,22 +167,20 @@ async function main() {
       console.log(
         `[worker-boot] agent-uid mode: ${cfg.agentUser}; node env-proxy floor OK`,
       );
-      // #205: every slot's account must exist NOW. A missing slot account would
-      // otherwise surface as the first run on that slot dying in sudo, while the
-      // box reports N slots of capacity it does not have.
-      const slotUids = await assertSlotAccountsExist(cfg.agentUsers);
-      // ...and at N > 1 sudo must let the worker run as each of them (a Runas
-      // list not re-rendered for the new slots). N = 1 boots as it always has.
-      if (cfg.boxSlots > 1) await assertSlotSudoGrants(cfg.agentUsers);
-      console.log(
-        `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")}; uids ${slotUids.join(", ")})`,
-      );
-      // #205: at N > 1 the kernel fence must provably cover every slot uid —
-      // the preflight's marker, written only after a successful `nft -f`.
+      // #205, N > 1 only — N = 1 boots exactly as it always has (no new fatal
+      // check, no new line; a missing account still surfaces at the first run,
+      // as before). Above 1: every slot account must exist with its own
+      // non-root, non-worker uid; sudo must let the worker run as each (a
+      // Runas list not re-rendered for the new slots); and the kernel fence
+      // must provably cover every slot uid (the preflight's marker, written
+      // only after a successful `nft -f`). A box that fails any of these would
+      // otherwise register N slots of capacity it does not have.
       if (cfg.boxSlots > 1) {
+        const slotUids = await assertSlotAccountsExist(cfg.agentUsers);
+        await assertSlotSudoGrants(cfg.agentUsers);
         assertFenceCoversSlotUids({ uids: slotUids });
         console.log(
-          `[worker-boot] egress fence covers every slot uid (${EGRESS_FENCE_UIDS_FILE})`,
+          `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")}; uids ${slotUids.join(", ")}); egress fence covers every slot uid (${EGRESS_FENCE_UIDS_FILE})`,
         );
       }
     }
