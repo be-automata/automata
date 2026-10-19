@@ -1,4 +1,5 @@
 import {
+  Agent as HttpAgent,
   createServer,
   request as httpRequest,
   type IncomingMessage,
@@ -594,6 +595,12 @@ export async function startEgressProxy(
           // Audit plumbing must never break (or leak into) enforcement.
         }
       });
+  // The proxy IS the egress boundary, so it never chains through another one.
+  // The global agent does whenever the process has NODE_USE_ENV_PROXY=1 (every
+  // agent run sets it, so a suite run from a task inherits it): the target then
+  // skips `lookup` (the host-local guard) and node 24 throws on the forwarded
+  // Host header. A plain Agent reads no proxy env.
+  const upstreamAgent = new HttpAgent({ keepAlive: true });
   function authorized(req: IncomingMessage): boolean {
     if (expectedAuth === null) return true;
     const got = req.headers["proxy-authorization"];
@@ -674,6 +681,7 @@ export async function startEgressProxy(
         path: `${target.pathname}${target.search}`,
         headers: fwdHeaders,
         lookup,
+        agent: upstreamAgent,
       },
       (upRes) => {
         res.writeHead(upRes.statusCode ?? 502, upRes.headers);
@@ -772,6 +780,7 @@ export async function startEgressProxy(
         for (const socket of sockets) {
           socket.destroy();
         }
+        upstreamAgent.destroy();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };

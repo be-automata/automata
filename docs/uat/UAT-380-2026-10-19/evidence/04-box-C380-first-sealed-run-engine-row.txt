@@ -1,0 +1,13 @@
+## first sealed dispatch after cutover — review run for PR #397, engine run e26fbb01-4561-4cac-867e-e2c99dfd89ae, agent-run 6c7f6bed…
+## worker journal (journalctl -u automata-worker -o short-iso), captured 2026-10-19T16:50:39Z
+2026-10-19T16:45:28+00:00 automata-exec-1 automata-worker[149604]: [INFO/Worker/automata-worker-automata-exec-1] Task run starting... run/e26fbb01-4561-4cac-867e-e2c99dfd89ae
+2026-10-19T16:45:28+00:00 automata-exec-1 automata-worker[149604]: [INFO/ctx] [agent-run 6c7f6bed-936d-461c-8898-a6cc56482ab7] run secrets: sealed (kid=plane-2026-10)
+2026-10-19T16:46:19+00:00 automata-exec-1 automata-worker[149604]: [INFO/ctx] [agent-run 6c7f6bed-936d-461c-8898-a6cc56482ab7] token.revoke {"kind":"installation","status":204}
+2026-10-19T16:46:19+00:00 automata-exec-1 automata-worker[149604]: [INFO/Worker/automata-worker-automata-exec-1] Task run completed run/e26fbb01-4561-4cac-867e-e2c99dfd89ae
+
+## engine v1_task row (external_id e26fbb01…), queried 2026-10-19T16:46:18Z
+## columns: sealed (input ? 'sealedSecrets') | plain installationToken present | plain daemonToken present | kid | ct length | row text contains ghs_ | inserted_at
+t|f|f|plane-2026-10|682|f|2026-10-19 16:45:28.176037+00
+
+## v1_payload rows inserted after 2026-10-19T16:41:12Z at that moment: total | with a secret marker | with sealedSecrets
+2|0|2

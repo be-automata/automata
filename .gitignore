@@ -117,3 +117,6 @@ reports/security_audit.*
 reports/harness_audit.*
 reports/.artifacts/
 reports/.history/
+
+# #380: per-developer payload seal ring (gen-payload-seal-key.ts --dev); never shared
+packages/worker/.automata/

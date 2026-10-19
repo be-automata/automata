@@ -1,0 +1,24 @@
+since enforce load (2026-10-19 13:55:30 UTC): completed=31 failed=0 captured=2026-10-19T16:51:50Z
+== failures
+== refused strings in run logs
+0
+== proxy host-local audits
+0
+== runs by lane
+      3 run start: lane=pr
+     21 run start: lane=review
+     10 run start: lane=task
+== loopback counters (since the 14:19 unit load; a by-hand reload resets them)
+meta skuid { 999, 2001 } oifname { "br-*", "docker0" } meta l4proto tcp counter packets 0 bytes 0 reject with tcp reset
+meta skuid { 999, 2001 } oifname { "br-*", "docker0" } counter packets 0 bytes 0 reject
+socket cgroupv2 level 2 "system.slice/automata-worker.service" counter packets 72 bytes 4320 accept
+ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport 53 counter packets 0 bytes 0 accept
+ip daddr 127.0.0.1 tcp dport 25432 counter packets 0 bytes 0 accept
+meta l4proto { icmp, ipv6-icmp } counter packets 0 bytes 0 accept
+meta l4proto tcp counter packets 0 bytes 0 reject with tcp reset
+meta l4proto != tcp counter packets 0 bytes 0 reject
+== unit
+NRestarts=0 ExecMainStartTimestamp=Mon 2026-10-19 16:37:22 UTC ActiveState=active 
+Oct 19 16:37:22 Stopped automata-worker.service - Automata execution-plane worker.
+Oct 19 16:37:22 [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 7 -> 7
+Oct 19 16:37:22 Started automata-worker.service - Automata execution-plane worker.

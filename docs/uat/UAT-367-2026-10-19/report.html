@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>#367 Loopback Fence UAT</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* layout: one reading column; evidence in collapsible monospace panels; verdict strip first */
+:root{--bg:#f6f5f1;--fg:#1d1f24;--muted:#5d6370;--line:#d8d4c8;--panel:#fffdf8;--accent:#1f5f8b;--ok:#1d6b3a;--okbg:#dff2e4;--warn:#8a5a00;--warnbg:#fbeccc;--bad:#9b1c1c;--badbg:#f9dcdc;--info:#2a4b7c;--infobg:#dde8f7;--font:"IBM Plex Sans",system-ui,sans-serif;--mono:"IBM Plex Mono",ui-monospace,Menlo,monospace}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#15171b;--fg:#e8e6df;--muted:#a3a79f;--line:#33373f;--panel:#1d2026;--accent:#7fb3d9;--ok:#8fd4a3;--okbg:#1f3b29;--warn:#f0c674;--warnbg:#3e2f12;--bad:#f09a9a;--badbg:#4a1f1f;--info:#9fc0ea;--infobg:#1f2d44;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#15171b;--fg:#e8e6df;--muted:#a3a79f;--line:#33373f;--panel:#1d2026;--accent:#7fb3d9;--ok:#8fd4a3;--okbg:#1f3b29;--warn:#f0c674;--warnbg:#3e2f12;--bad:#f09a9a;--badbg:#4a1f1f;--info:#9fc0ea;--infobg:#1f2d44;color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--font);line-height:1.5;padding-block:24px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+main{max-width:980px;margin:0 auto;display:grid;gap:28px}
+h1{font-size:1.6rem;margin:0;text-wrap:balance} h2{font-size:1.15rem;margin:0 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px}
+.verdict{display:grid;gap:10px;background:var(--panel);border:1px solid var(--line);padding:18px;border-radius:6px}
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:.92rem} .kv dt{color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-size:.72rem;align-self:center} .kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.mono{font-family:var(--mono)} .small{font-size:.84rem;color:var(--muted)}
+.pill{display:inline-block;font-family:var(--mono);font-size:.72rem;padding:2px 8px;border-radius:999px;letter-spacing:.04em;text-transform:uppercase}
+.pill.pass{background:var(--okbg);color:var(--ok)} .pill.blocked,.pill.low{background:var(--warnbg);color:var(--warn)} .pill.fail{background:var(--badbg);color:var(--bad)} .pill.info{background:var(--infobg);color:var(--info)}
+.big{font-size:2rem;font-weight:600;color:var(--ok)}
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:6px} table{border-collapse:collapse;width:100%;font-size:.88rem;min-width:720px} th,td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--line)} th{font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:var(--panel)}
+details{border:1px solid var(--line);border-radius:6px;background:var(--panel);margin-bottom:10px} summary{cursor:pointer;padding:8px 12px;font-size:.9rem} pre{margin:0;padding:12px;overflow-x:auto;font-family:var(--mono);font-size:.78rem;line-height:1.45;border-top:1px solid var(--line);font-variant-numeric:tabular-nums}
+ul{padding-left:18px} li{margin-bottom:8px} a{color:var(--accent)} p{max-width:70ch}
+</style>
+</head>
+<body class="auto">
+
+<main>
+<header class="verdict">
+<h1>#367 Loopback Fence UAT</h1>
+<div class="big">PASS <span class="small">(12 of 12 criteria)</span></div>
+<dl class="kv">
+<dt>Change</dt><dd>be-automata/automata PR #383 (observe, merge <span class="mono">5b57010</span>) + PR #388 (enforce, merge <span class="mono">3e344b7</span>); issue #367</dd>
+<dt>Environment</dt><dd>production execution box <span class="mono">automata-exec-1</span> (Hetzner, Ubuntu 24.04, kernel 6.8.0-142, nftables 1.0.9) — the fence exists only there</dd>
+<dt>Build</dt><dd>deployed checkout HEAD <span class="mono">3e344b765</span> contains both merge commits; unit active since 14:19:10 UTC, NRestarts 0</dd>
+<dt>Lanes</dt><dd>api/CLI lane: recorded commands and outputs on the box (ssh as root; probes as uid 999 and 2001 from a throwaway cgroup under the worker unit)</dd>
+<dt>Captured</dt><dd>2026-10-19T15:33:44Z</dd>
+<dt>Run record</dt><dd class="mono">docs/uat/UAT-367-2026-10-19/</dd>
+</dl>
+</header>
+<section><h2>Context frame</h2>
+<p><strong>Use case.</strong> An agent run on the execution box (uid 999 or 2001, inside the worker's cgroup) must be unable to open TCP connections to host-local services it does not own (Hatchet engine gRPC :7077 and API :8888 via docker-proxy and on the Docker bridge, cloudflared :20241, sshd via the box's own public IP or ::1), while its own loopback traffic (the run's egress proxy and git broker, its own test servers, DNS to systemd-resolved, the test Postgres on :25432) keeps working. Decided by <em>who owns the listening socket</em> (cgroup), not by a port list.</p>
+<p><strong>Reproduction path.</strong> <span class="mono">nft-verify.sh</span> creates <span class="mono">system.slice/automata-worker.service/verify-probe</span>, moves a shell into it, drops to each slot account, starts listeners after the move, and connects to every row of the target table with a 1 s timeout, reading the rule counters before and after each row. Sources: issue #367 target table and acceptance criteria 1–11; PR #383 and #388 bodies; AGENT-UID-PROVISIONING.md §7.</p>
+<p><strong>Prior UAT.</strong> none in docs/uat for this area (first run).</p>
+</section>
+<section><h2>Access manifest (redacted)</h2>
+<ul class="small"><li>ssh as root to the box with the operator's key (name only: <span class="mono">~/.ssh/automata_box_ed25519</span>); no credential value entered the run.</li><li>gh CLI authenticated as the PR author (reads PRs, checks, reviews).</li><li>Slot accounts automata-agent (999), automata-agent-1 (2001); worker account automata (996). Test Postgres password never read.</li><li>No cloud CLI required (Hetzner is reached only by ssh; no Terraform in the repo).</li></ul>
+</section>
+<section><h2>Criteria</h2><div class="tbl"><table><thead><tr><th>Id</th><th>Criterion</th><th>Source</th><th>Verdict</th><th>Evidence</th></tr></thead><tbody><tr><td class="mono">C1</td><td>Mechanism pre-proven on the real worker subtree: output mark survives lo; cgroupv2 level-2 admits a listener created in the subtree, refuses one outside; restart leaves a stale id unless reloaded</td><td class="mono small">#367 AC 1</td><td><span class="pill pass">PASS</span></td><td class="small">Spike 2026-10-19 (nobody client, real subtree); (c) proven by C5 — see journal-loader-lines + nft-verify-enforce</td></tr><tr><td class="mono">C2</td><td>As uid 999 (and 2001) inside the worker subtree: 127.0.0.1:7077, :8888, :20241, 172.18.0.2:7077, :8888, &lt;public ip&gt;:22 refused in under 1 s by reset</td><td class="mono small">#367 AC 2</td><td><span class="pill pass">PASS</span></td><td class="small">nft-verify-enforce: 7 deny rows x 2 uids REFUSED in 24–34 ms</td></tr><tr><td class="mono">C3</td><td>Worker-uid listener accepts; the probe&#x27;s own listener accepts; getent hosts github.com resolves; 127.0.0.1:25432 accepts</td><td class="mono small">#367 AC 3</td><td><span class="pill pass">PASS</span></td><td class="small">nft-verify-enforce: allow rows CONNECTED/RESOLVED, deny counters unchanged</td></tr><tr><td class="mono">C4</td><td>::1 gives the same result as 127.0.0.1 where the service listens on IPv6 (sshd); own listener on ::1 admitted</td><td class="mono small">#367 AC 4</td><td><span class="pill pass">PASS</span></td><td class="small">nft-verify-enforce: ::1:22 REFUSED; ::1:61015/61016 CONNECTED</td></tr><tr><td class="mono">C5</td><td>After systemctl restart automata-worker, C2 and C3 still hold (ExecStartPre reload bound the new cgroup)</td><td class="mono small">#367 AC 5</td><td><span class="pill pass">PASS</span></td><td class="small">journal-loader-lines 14:19:09 (unit load, mode=enforce) + unit-state (ExecMainStart 14:19:10, NRestarts 0) + nft-verify-enforce 15:33 on that process</td></tr><tr><td class="mono">C6</td><td>If nft-loopback-load.sh exits non-zero the unit does not reach active (bad cgroup path render)</td><td class="mono small">#367 AC 6</td><td><span class="pill pass">PASS</span></td><td class="small">journal-loader-lines 13:47:09: FAIL line, &#x27;Control process exited, status=1&#x27;, &#x27;Failed with result exit-code&#x27;; restored 13:47:12</td></tr><tr><td class="mono">C7</td><td>inet automata_egress identical before/after; Docker chains untouched; only the new table added</td><td class="mono small">#367 AC 7</td><td><span class="pill pass">PASS</span></td><td class="small">egress-conf-vs-checkout diff exit 0; egress-table; tables (7, incl. both automata tables); docker-rules-count 36</td></tr><tr><td class="mono">C8</td><td>Real review run + a DB-suite task run + a loopback-server task run under enforce</td><td class="mono small">#367 AC 8</td><td><span class="pill pass">PASS</span></td><td class="small">runs-under-enforce: review pr=388 14:17:17→14:17:47 (approved); task runs 14:20:35 and 14:28:10 = issues #387/#390 → PR #392: DB suite exit 0 (:25432), getent exit 0, loopback suites 111/114 (3 failures traced to NODE_USE_ENV_PROXY in the run env, 114/114 with it unset — not the fence)</td></tr><tr><td class="mono">C9</td><td>Observe window log contains only refused-row destinations; counts reported</td><td class="mono small">#367 AC 9 (window shortened — see Deviations)</td><td><span class="pill pass">PASS</span></td><td class="small">observe-window-log: 14 lines, all verifier probe rows (13:47:22–23); 0 hits from the 3 real runs</td></tr><tr><td class="mono">C10</td><td>Every test states protects / fails_when / no_claim</td><td class="mono small">#367 AC 10</td><td><span class="pill pass">PASS</span></td><td class="small">test-cards: 9 it() / 9 cards in the #367 block; 6 proxy cases</td></tr><tr><td class="mono">C11</td><td>Existing egress-nft assertions and CI pass unchanged</td><td class="mono small">#367 AC 11</td><td><span class="pill pass">PASS</span></td><td class="small">ci-pr-checks: 6/6 jobs pass on both PR heads; Automata APPROVED e31e167 and ee54e39</td></tr><tr><td class="mono">C12</td><td>REGRESSION: 30 real runs under enforce complete with no fence-caused failure (the issue&#x27;s 30-run half of the gate)</td><td class="mono small">#367 rollout gate (30-run half; the 7-day half is the operator&#x27;s deviation)</td><td><span class="pill pass">PASS</span></td><td class="small">per-run ledger, corrected (evidence 31, which supersedes 29 and 30): 34 runs started under enforce in the window; 31 started AND completed inside it (rows 1, 2, 4–14, 16–33); 1 completed 27 s after the capture (row 34); 0 failed; 2 ended without a completion line and neither is a fence effect: row 15 (review pr=394) is logged &quot;cancelled under newest-wins → superseded&quot;, row 3 (task, agent-run d87f2086 = engine run a611397c) was cancelled by the engine: the worker logged &quot;Task run cancelling… run/a611397c&quot; at 14:08:56, killed the run&#x27;s daemon and started the next task run the same second, and released the box lock at 14:08:58, 11 s after the start (evidence 32, the run&#x27;s full journal; 0 ECONNREFUSED/Connection refused/EPERM strings in it, no line attributes the cancel to the fence). Restart overlap is computed from each run&#x27;s own last log line: none of the 34 runs overlaps a restart (14:19:09, 16:31:24, 16:37:22). Evidence 29&#x27;s &quot;4 completed after T1&quot; counted runs that also started after T1, and evidence 30&#x27;s restart column treated a missing completion as open-ended; evidence 31 states both corrections. Counters in evidence 28 date from the 16:37 reload (its header says 14:19).</td></tr></tbody></table></div></section>
+<section><h2>Deviations</h2><div class="tbl"><table><thead><tr><th>Spec said</th><th>Delivered</th><th>Consequence for UAT</th></tr></thead><tbody><tr><td>Observe for 7 days or 30 runs, whichever is later, before enforcing</td><td>Enforce loaded 13:55 UTC after ~10 min / 3 runs at the operator&#x27;s direction; the observe log held only verifier probe rows</td><td>C9 graded on the shortened window; C12 added as a regression criterion and graded PASS once the fence had been held to 30 completed runs under enforce (31 completed, 0 failed, 13:55→16:51 UTC); the 7-day half cannot elapse in-session</td></tr><tr><td>Three deny lines flipped to reject</td><td>Four reject lines: the bridge deny split into `reject with tcp reset` (tcp) and `reject`</td><td>Measured: a plain reject in the OUTPUT hook left the connect to time out at 1 s; fixed before merge; C2 bridge rows reset in 24–28 ms</td></tr><tr><td>Fence only (nftables)</td><td>The run&#x27;s egress proxy also refuses host-local targets in every mode; NO_PROXY gains ::1</td><td>Without it the proxy was a tunnel through the fence (dials as the worker uid inside the admitted cgroup); covered by proxy unit tests, 0 host-local audits live</td></tr><tr><td>UAT on develop/staging</td><td>Environment under test is the production execution box (the only place the fence exists)</td><td>All evidence is from production; the verifier creates only a throwaway cgroup and connections</td></tr><tr><td>Criterion 8 task runs post results</td><td>The delivery agent wrote its results to a PR (#392) rather than an issue comment; the first run&#x27;s duplicate (#391) closed</td><td>Exit codes are in the PR file; graded from it</td></tr></tbody></table></div></section>
+<section><h2>Findings</h2><ul><li><span class="pill info">info</span> <strong>Agent runs poll localhost:8888 (the engine API) and are refused</strong><br><span class="small">A task run under enforce polled 127.0.0.1:8888 and [::1]:8888 every ~10 s (temporary diag log, enforce-diag-sample). This is a refused row of the target table; the run kept working. Likely a repo test harness readiness loop aimed at a hatchet-lite that is not there.</span></li><li><span class="pill info">info</span> <strong>Three egress-proxy unit tests fail inside a task run</strong><br><span class="small">Under the run&#x27;s NODE_USE_ENV_PROXY the proxy test client goes through the run proxy; the agent re-ran with it unset: 114/114. Not a fence effect (PR #392).</span></li><li><span class="pill low">low</span> <strong>Shared policy validator accepts private-range allowlist entries the box proxy always refuses</strong><br><span class="small">Documented gap in docs/egress-enforcement.md (roborev round 3).</span></li><li><span class="pill info">info</span> <strong>Counters reset on every table (re)load</strong><br><span class="small">The loopback-table counters are since the last load; a by-hand loader run resets them. Read deny counts with that in mind; the verifier prints its own probe windows.</span></li></ul></section>
+<section><h2>Production-readiness validation</h2><div id="validator"><p><span class="pill pass">PASS</span> code-completeness lens, graded from the repo at <span class="mono">3e344b765</span> (production-validator agent). The ten production files of #383/#388 carry no mock, fake, stub, TODO/FIXME/XXX, "not implemented" or placeholder markers beyond the intended <span class="mono">__AGENT_UID__</span>/<span class="mono">__MARK__</span> render guards; the scanner was proven against a planted <span class="mono">mockService // TODO</span> in a temp file (hit, then deleted). The two documented test-only proxy seams (<span class="mono">allowHostLocalUpstreams</span>, <span class="mono">localAddresses</span>) are unset at the worker's call site (<span class="mono">workflow.ts:1412–1422</span> passes policy, mode, onEvent, credential only). The unit's <span class="mono">ExecStartPre=+</span> paths match the §7 install steps exactly. Not verified by the validator: anything on the box (covered by the evidence above) and the under-1 s refusal time (measured by the verifier). One pre-existing low: the sandbox sidecar logs its JSON events with console.log by design.</p></div></section>
+<section><h2>Terraform drift</h2><p class="small">Not applicable (no <span class="mono">*.tf</span> in the repo).</p></section>
+<section><h2>Evidence</h2><details><summary><span class="mono">32-api-C367-run-d87f2086-log.txt</span> — full worker journal for ledger row 3 (d87f2086): engine-issued cancellation, no refused strings</summary><pre>== every automata-worker journal line mentioning d87f2086 (untruncated), 14:08:00-14:10:00 UTC
+2026-10-19T14:08:47+00:00 🪓 49482 | 10/19/26, 02:08:47 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] run start: lane=task repo=be-automata/automata branch=main
+2026-10-19T14:08:47+00:00 🪓 49482 | 10/19/26, 02:08:47 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box lock acquired by d87f2086-3478-40a5-8067-e39d1f053991 (helper pid 73697)
+2026-10-19T14:08:47+00:00 🪓 49482 | 10/19/26, 02:08:47 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] box lock acquired
+2026-10-19T14:08:47+00:00 🪓 49482 | 10/19/26, 02:08:47 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box.headroom_ok {&quot;runId&quot;:&quot;1895dc51-b449-4e20-891c-c76b9b190b8f&quot;,&quot;threadId&quot;:&quot;d87f2086-3478-40a5-8067-e39d1f053991&quot;,&quot;attempt&quot;:0,&quot;memAvailable&quot;:6091030528,&quot;committedAs&quot;:2937184256,&quot;commitLimit&quot;:12653789184,&quot;floor&quot;:1073741824,&quot;fraction&quot;:0.9,&quot;runCommit&quot;:5242880000,&quot;reserved&quot;:0}
+2026-10-19T14:08:49+00:00 🪓 49482 | 10/19/26, 02:08:49 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] clone complete: be-automata/automata@main (work branch automata/task-d87f2086)
+2026-10-19T14:08:49+00:00 🪓 49482 | 10/19/26, 02:08:49 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box.escapees_all_out_of_scope {&quot;phase&quot;:&quot;admission&quot;,&quot;threadId&quot;:&quot;d87f2086-3478-40a5-8067-e39d1f053991&quot;,&quot;scope&quot;:&quot;/system.slice/automata-worker.service&quot;,&quot;spared&quot;:27,&quot;reason&quot;:&quot;every same-uid process was unplaceable — /proc hidepid, a pid namespace, or a scope that cannot match; NOTHING was reaped&quot;}
+2026-10-19T14:08:49+00:00 🪓 49482 | 10/19/26, 02:08:49 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box.escapees_reaped {&quot;phase&quot;:&quot;admission&quot;,&quot;threadId&quot;:&quot;d87f2086-3478-40a5-8067-e39d1f053991&quot;,&quot;uid&quot;:999,&quot;scanned&quot;:0,&quot;groups&quot;:0,&quot;helpers&quot;:0,&quot;killed&quot;:0,&quot;residual&quot;:0,&quot;failed&quot;:0,&quot;durationMs&quot;:67}
+2026-10-19T14:08:51+00:00 🪓 49482 | 10/19/26, 02:08:51 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] agent credential: &lt;redacted&gt; user credential (run HOME) (box trust: owner)
+2026-10-19T14:08:51+00:00 🪓 49482 | 10/19/26, 02:08:51 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] batteries: lane=task packs=somnio-skills manifest=53088ad4f33d harness=ea79fbbc1927 harness-packs=gstack,gsd,ruflo
+2026-10-19T14:08:51+00:00 🪓 49482 | 10/19/26, 02:08:51 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] task agent: foreground-only hook installed
+2026-10-19T14:08:51+00:00 🪓 49482 | 10/19/26, 02:08:51 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] egress proxy up (observe): 127.0.0.1:36569 (no repo policy — allow-all, every decision audited)
+2026-10-19T14:08:51+00:00 🪓 49482 | 10/19/26, 02:08:51 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] credential brokers up: git=127.0.0.1:37733, gh=/tmp/automata-agent-run/w-49482-1d5d0637/d87f2086-3478-40a5-8067-e39d1f053991-gh.sock
+2026-10-19T14:08:51+00:00 🪓 49482 | 10/19/26, 02:08:51 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] task agent: read-token=&lt;redacted&gt;
+2026-10-19T14:08:52+00:00 🪓 49482 | 10/19/26, 02:08:52 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] gh auth precondition ok (bot identity)
+2026-10-19T14:08:52+00:00 [agent-run] run cgroup /sys/fs/cgroup/system.slice/automata-worker.service/run-d87f2086-3478-40a5-8067-e39d1f053991-fb308635: memory.max=5242880000 memory.swap.max=0 pids.max=4096
+2026-10-19T14:08:52+00:00 automata : PWD=&lt;redacted&gt; ; USER=automata-agent ; COMMAND=/usr/bin/sh -c &#x27;printf %s &quot;$$&quot; &gt; &quot;$AUTOMATA_PIDFILE&quot; || exit 97; i=0; while [ ! -e &quot;$AUTOMATA_CGROUP_READY&quot; ]; do i=$((i+1)); [ &quot;$i&quot; -gt 200 ] &amp;&amp; exit 96; sleep 0.05; done; exec &quot;$AUTOMATA_NODE&quot; &quot;$@&quot;&#x27; automata-daemon /usr/local/automata/daemon/index.js --url https://automata-www.dark-water-9247.workers.dev --socket-path /tmp/automata-agent-run/w-49482-1d5d0637/d87f2086-3478-40a5-8067-e39d1f053991.sock
+2026-10-19T14:08:52+00:00 🪓 49482 | 10/19/26, 02:08:52 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] daemon spawned: pid=73769
+2026-10-19T14:08:54+00:00 🪓 49482 | 10/19/26, 02:08:54 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] next-message: got message (agent=claudeCode, model=sonnet)
+2026-10-19T14:08:55+00:00 🪓 49482 | 10/19/26, 02:08:55 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] socket write ok: 1138 bytes → daemon ACKed
+2026-10-19T14:08:56+00:00 🪓 49482 | 10/19/26, 02:08:56 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] thread-status: booting (terminal=false)
+2026-10-19T14:08:56+00:00 [agent-run] run cgroup: oom_kill=0 oom=0 thread=d87f2086-3478-40a5-8067-e39d1f053991 memory.max=5000M
+2026-10-19T14:08:57+00:00 🪓 49482 | 10/19/26, 02:08:57 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box.escapees_all_out_of_scope {&quot;phase&quot;:&quot;teardown&quot;,&quot;threadId&quot;:&quot;d87f2086-3478-40a5-8067-e39d1f053991&quot;,&quot;scope&quot;:&quot;/system.slice/automata-worker.service&quot;,&quot;spared&quot;:27,&quot;reason&quot;:&quot;every same-uid process was unplaceable — /proc hidepid, a pid namespace, or a scope that cannot match; NOTHING was reaped&quot;}
+2026-10-19T14:08:57+00:00 🪓 49482 | 10/19/26, 02:08:57 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box.escapees_reaped {&quot;phase&quot;:&quot;teardown&quot;,&quot;threadId&quot;:&quot;d87f2086-3478-40a5-8067-e39d1f053991&quot;,&quot;uid&quot;:999,&quot;scanned&quot;:0,&quot;groups&quot;:0,&quot;helpers&quot;:0,&quot;killed&quot;:0,&quot;residual&quot;:0,&quot;failed&quot;:0,&quot;durationMs&quot;:307}
+2026-10-19T14:08:57+00:00 automata : PWD=&lt;redacted&gt; ; USER=automata-agent ; COMMAND=/usr/bin/sh -c &#x27;cd / &amp;&amp; find &quot;$1&quot; -xdev -user &quot;$(id -un)&quot; ! -type l -exec chmod g+rwX {} +&#x27; sh /usr/local/automata/runs/d87f2086-3478-40a5-8067-e39d1f053991
+2026-10-19T14:08:58+00:00 🪓 49482 | 10/19/26, 02:08:58 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box lock released by d87f2086-3478-40a5-8067-e39d1f053991 (helper pid 73697)
+
+== worker lines between 14:08:46 and 14:09:00 that do NOT name a run id (scheduler/supersede lines are often unattributed)
+2026-10-19T14:08:46+00:00 🪓 49482 | 10/19/26, 02:08:46 PM  [INFO/Worker/automata-worker-automata-exec-1] Task run completed          run/3edb4aad-3ad7-4fbb-a43f-5b53a268625b 
+2026-10-19T14:08:47+00:00 🪓 49482 | 10/19/26, 02:08:47 PM  [INFO/Worker/automata-worker-automata-exec-1] Task run starting...          run/a611397c-7e7f-4c44-a969-5ec10e3ef26a 
+2026-10-19T14:08:52+00:00 [agent-run] run cgroup /sys/fs/cgroup/system.slice/automata-worker.service/run-d87f2086-3478-40a5-8067-e39d1f053991-fb308635: memory.max=5242880000 memory.swap.max=0 pids.max=4096
+2026-10-19T14:08:52+00:00 automata : PWD=&lt;redacted&gt; ; USER=automata-agent ; COMMAND=/usr/bin/sh -c &#x27;printf %s &quot;$$&quot; &gt; &quot;$AUTOMATA_PIDFILE&quot; || exit 97; i=0; while [ ! -e &quot;$AUTOMATA_CGROUP_READY&quot; ]; do i=$((i+1)); [ &quot;$i&quot; -gt 200 ] &amp;&amp; exit 96; sleep 0.05; done; exec &quot;$AUTOMATA_NODE&quot; &quot;$@&quot;&#x27; automata-daemon /usr/local/automata/daemon/index.js --url https://automata-www.dark-water-9247.workers.dev --socket-path /tmp/automata-agent-run/w-49482-1d5d0637/d87f2086-3478-40a5-8067-e39d1f053991.sock
+2026-10-19T14:08:56+00:00 🪓 49482 | 10/19/26, 02:08:56 PM  [INFO/Worker/automata-worker-automata-exec-1] Task run cancelling...          run/a611397c-7e7f-4c44-a969-5ec10e3ef26a 
+2026-10-19T14:08:56+00:00 🪓 49482 | 10/19/26, 02:08:56 PM  [INFO/Worker/automata-worker-automata-exec-1] Task run starting...          run/58f2ca81-7011-484a-bea8-05a204bd33d6 
+2026-10-19T14:08:56+00:00 [agent-run] run cgroup: oom_kill=0 oom=0 thread=d87f2086-3478-40a5-8067-e39d1f053991 memory.max=5000M
+2026-10-19T14:08:56+00:00 automata : PWD=&lt;redacted&gt; ; USER=automata-agent ; COMMAND=/usr/bin/kill -9 -- -73769
+2026-10-19T14:08:56+00:00 pam_unix(sudo:session): session opened for user automata-agent(uid=999) by (uid=996)
+2026-10-19T14:08:56+00:00 pam_unix(sudo:session): session closed for user automata-agent
+2026-10-19T14:08:56+00:00 🪓 49482 | 10/19/26, 02:08:56 PM  [WARN/Worker/automata-worker-automata-exec-1] Cancellation: task run a611397c-7e7f-4c44-a969-5ec10e3ef26a has not cancelled after 314ms. Consider checking for blocking operations. See https://docs.hatchet.run/home/cancellation
+2026-10-19T14:08:57+00:00 🪓 49482 | 10/19/26, 02:08:57 PM  [ERROR/Worker/automata-worker-automata-exec-1] Cancellation: task run a611397c-7e7f-4c44-a969-5ec10e3ef26a still running after cancellation grace period 1000ms.
+2026-10-19T14:08:57+00:00 JavaScript cannot force-kill user code; see: https://docs.hatchet.run/home/cancellation
+2026-10-19T14:08:57+00:00 automata : PWD=&lt;redacted&gt; ; USER=automata-agent ; COMMAND=/usr/bin/sh -c &#x27;cd / &amp;&amp; find &quot;$1&quot; -xdev -user &quot;$(id -un)&quot; ! -type l -exec chmod g+rwX {} +&#x27; sh /usr/local/automata/runs/d87f2086-3478-40a5-8067-e39d1f053991
+2026-10-19T14:08:58+00:00 🪓 49482 | 10/19/26, 02:08:58 PM  [WARN/Worker/automata-worker-automata-exec-1] Cancellation: task run a611397c-7e7f-4c44-a969-5ec10e3ef26a returned after cancellation was signaled. This usually means an AbortError was caught and not propagated. See https://docs.hatchet.run/home/cancellation
+
+== refused strings in those lines
+0
+== cancel/supersede strings naming d87f2086
+0</pre></details><details open><summary><span class="mono">31-api-C367-run-ledger-v2.txt</span> — corrected per-run ledger for the C12 window (authoritative; supersedes evidence 29 and 30)</summary><pre>C12 window 2026-10-19 13:55:30 -&gt; 2026-10-19 16:51:50 UTC. Worker restarts (Stopped) in the window: [&#x27;2026-10-19 14:19:09&#x27;, &#x27;2026-10-19 16:31:24&#x27;, &#x27;2026-10-19 16:37:22&#x27;]
+A run &#x27;overlaps&#x27; a restart only if the restart falls between its start and its last own log line (completion, or box-lock release for a run with no completion line).
+ # start               lane   pr   end       end/last-own-line   last status restart? superseded  agent-run repo
+ 1 2026-10-19 13:56:44 review 385  completed 2026-10-19 13:57:31 complete   no       -           9c372e5c be-automata/automata
+ 2 2026-10-19 13:57:38 task        completed 2026-10-19 14:08:46 complete   no       -           a26fa39e be-automata/automata
+ 3 2026-10-19 14:08:47 task        NONE      2026-10-19 14:08:58 booting    no       -           d87f2086 be-automata/automata
+ 4 2026-10-19 14:08:56 task        completed 2026-10-19 14:11:55 complete   no       -           14943c6c be-automata/automata
+ 5 2026-10-19 14:11:56 task        completed 2026-10-19 14:15:27 complete   no       -           7e614963 be-automata/automata
+ 6 2026-10-19 14:15:28 task        completed 2026-10-19 14:16:23 complete   no       -           9acb5a3a bangr-inc/Bangr-Admin-Panel
+ 7 2026-10-19 14:16:24 review 385  completed 2026-10-19 14:17:16 complete   no       -           0e9366da be-automata/automata
+ 8 2026-10-19 14:17:16 review 388  completed 2026-10-19 14:17:47 complete   no       -           a9c7f859 be-automata/automata
+ 9 2026-10-19 14:18:15 review 385  completed 2026-10-19 14:18:53 complete   no       -           06897d4c be-automata/automata
+10 2026-10-19 14:20:35 task        completed 2026-10-19 14:24:21 complete   no       -           7da35690 be-automata/automata
+11 2026-10-19 14:28:10 task        completed 2026-10-19 14:31:45 complete   no       -           c07e484c be-automata/automata
+12 2026-10-19 14:31:45 task        completed 2026-10-19 14:36:02 complete   no       -           624cde02 be-automata/automata
+13 2026-10-19 15:01:01 task        completed 2026-10-19 15:01:53 complete   no       -           db1db653 bangr-inc/bangr-core
+14 2026-10-19 15:05:16 review 393  completed 2026-10-19 15:05:46 complete   no       -           8db91aa3 be-automata/automata
+15 2026-10-19 15:10:59 review 394  NONE      2026-10-19 15:11:13            no       newest-wins 39e898e9 be-automata/automata
+16 2026-10-19 15:11:12 review 394  completed 2026-10-19 15:11:45 complete   no       -           645c7fed be-automata/automata
+17 2026-10-19 15:12:50 task        completed 2026-10-19 15:13:17 complete   no       -           3c3b09fb be-automata/automata
+18 2026-10-19 15:14:02 review 394  completed 2026-10-19 15:14:24 complete   no       -           910f4fdf be-automata/automata
+19 2026-10-19 15:18:26 review 394  completed 2026-10-19 15:19:04 complete   no       -           55c5ef1b be-automata/automata
+20 2026-10-19 15:24:24 review 393  completed 2026-10-19 15:24:58 complete   no       -           9a2d932e be-automata/automata
+21 2026-10-19 15:36:31 review 392  completed 2026-10-19 15:37:03 complete   no       -           74057d70 be-automata/automata
+22 2026-10-19 15:43:26 review 396  completed 2026-10-19 15:43:59 complete   no       -           6c458d46 be-automata/automata
+23 2026-10-19 15:51:54 review 393  completed 2026-10-19 15:52:54 complete   no       -           9785ae68 be-automata/automata
+24 2026-10-19 15:54:56 pr     731  completed 2026-10-19 15:55:22 complete   no       -           2fa55f48 bangr-inc/bangr-core
+25 2026-10-19 15:55:47 pr     733  completed 2026-10-19 15:56:20 complete   no       -           b521ae08 bangr-inc/bangr-core
+26 2026-10-19 16:16:08 review 394  completed 2026-10-19 16:17:00 complete   no       -           4c778c89 be-automata/automata
+27 2026-10-19 16:23:07 review 394  completed 2026-10-19 16:24:02 complete   no       -           6187e4ac be-automata/automata
+28 2026-10-19 16:26:34 pr     737  completed 2026-10-19 16:26:56 complete   no       -           49deeb6b bangr-inc/bangr-core
+29 2026-10-19 16:29:09 review 394  completed 2026-10-19 16:30:09 complete   no       -           0499e978 be-automata/automata
+30 2026-10-19 16:33:46 review 394  completed 2026-10-19 16:35:02 complete   no       -           5a3f5d9e be-automata/automata
+31 2026-10-19 16:45:28 review 397  completed 2026-10-19 16:46:19 complete   no       -           6c7f6bed be-automata/automata
+32 2026-10-19 16:48:35 review 397  completed 2026-10-19 16:49:26 complete   no       -           e98f31d1 be-automata/automata
+33 2026-10-19 16:49:26 review 394  completed 2026-10-19 16:50:12 complete   no       -           844e34e8 be-automata/automata
+34 2026-10-19 16:51:29 review 397  completed 2026-10-19 16:52:17 complete   no       -           93f2973c be-automata/automata
+
+started in window: 34; started AND completed inside the window: 31; completed after T1: 1; failed: 0; no completion line: 2
+restart-overlapped runs (by the definition above): none
+Evidence 29 and 30, superseded by this file: 29&#x27;s &#x27;completed after T1: 4&#x27; counted every completion between T1 and 17:30 including runs that also STARTED after T1 (only 1 belongs to a window start, row 34), and its &#x27;starts without a completion&#x27; section was empty because its grep looked for thread-status terminal lines that this worker does not emit. 30&#x27;s &#x27;overlaps restart&#x27; column treated a missing completion time as open-ended, which flagged rows 3 and 15; neither coincides with a restart (14:19:09, 16:31:24, 16:37:22).</pre></details><details open><summary><span class="mono">30-api-C367-run-ledger.txt</span> — per-run ledger for the C12 window: start, lane, end, last status, restart overlap; the two runs without a completion line</summary><pre>window 2026-10-19 13:55:30 -&gt; 2026-10-19 16:51:50 UTC; restarts (Stopped) in/after window: [&#x27;2026-10-19 14:19:09&#x27;, &#x27;2026-10-19 16:31:24&#x27;, &#x27;2026-10-19 16:37:22&#x27;]
+ # start               lane   pr   end       end_ts              last thread-status overlaps restart agent-run
+ 1 2026-10-19 13:56:44 review 385  completed 2026-10-19 13:57:31 complete           no               9c372e5c repo=be-automata/automata
+ 2 2026-10-19 13:57:38 task        completed 2026-10-19 14:08:46 complete           no               a26fa39e repo=be-automata/automata
+ 3 2026-10-19 14:08:47 task        NONE                          booting            YES              d87f2086 repo=be-automata/automata
+ 4 2026-10-19 14:08:56 task        completed 2026-10-19 14:11:55 complete           no               14943c6c repo=be-automata/automata
+ 5 2026-10-19 14:11:56 task        completed 2026-10-19 14:15:27 complete           no               7e614963 repo=be-automata/automata
+ 6 2026-10-19 14:15:28 task        completed 2026-10-19 14:16:23 complete           no               9acb5a3a repo=bangr-inc/Bangr-Admin-Panel
+ 7 2026-10-19 14:16:24 review 385  completed 2026-10-19 14:17:16 complete           no               0e9366da repo=be-automata/automata
+ 8 2026-10-19 14:17:16 review 388  completed 2026-10-19 14:17:47 complete           no               a9c7f859 repo=be-automata/automata
+ 9 2026-10-19 14:18:15 review 385  completed 2026-10-19 14:18:53 complete           no               06897d4c repo=be-automata/automata
+10 2026-10-19 14:20:35 task        completed 2026-10-19 14:24:21 complete           no               7da35690 repo=be-automata/automata
+11 2026-10-19 14:28:10 task        completed 2026-10-19 14:31:45 complete           no               c07e484c repo=be-automata/automata
+12 2026-10-19 14:31:45 task        completed 2026-10-19 14:36:02 complete           no               624cde02 repo=be-automata/automata
+13 2026-10-19 15:01:01 task        completed 2026-10-19 15:01:53 complete           no               db1db653 repo=bangr-inc/bangr-core
+14 2026-10-19 15:05:16 review 393  completed 2026-10-19 15:05:46 complete           no               8db91aa3 repo=be-automata/automata
+15 2026-10-19 15:10:59 review 394  NONE                                             YES              39e898e9 repo=be-automata/automata
+16 2026-10-19 15:11:12 review 394  completed 2026-10-19 15:11:45 complete           no               645c7fed repo=be-automata/automata
+17 2026-10-19 15:12:50 task        completed 2026-10-19 15:13:17 complete           no               3c3b09fb repo=be-automata/automata
+18 2026-10-19 15:14:02 review 394  completed 2026-10-19 15:14:24 complete           no               910f4fdf repo=be-automata/automata
+19 2026-10-19 15:18:26 review 394  completed 2026-10-19 15:19:04 complete           no               55c5ef1b repo=be-automata/automata
+20 2026-10-19 15:24:24 review 393  completed 2026-10-19 15:24:58 complete           no               9a2d932e repo=be-automata/automata
+21 2026-10-19 15:36:31 review 392  completed 2026-10-19 15:37:03 complete           no               74057d70 repo=be-automata/automata
+22 2026-10-19 15:43:26 review 396  completed 2026-10-19 15:43:59 complete           no               6c458d46 repo=be-automata/automata
+23 2026-10-19 15:51:54 review 393  completed 2026-10-19 15:52:54 complete           no               9785ae68 repo=be-automata/automata
+24 2026-10-19 15:54:56 pr     731  completed 2026-10-19 15:55:22 complete           no               2fa55f48 repo=bangr-inc/bangr-core
+25 2026-10-19 15:55:47 pr     733  completed 2026-10-19 15:56:20 complete           no               b521ae08 repo=bangr-inc/bangr-core
+26 2026-10-19 16:16:08 review 394  completed 2026-10-19 16:17:00 complete           no               4c778c89 repo=be-automata/automata
+27 2026-10-19 16:23:07 review 394  completed 2026-10-19 16:24:02 complete           no               6187e4ac repo=be-automata/automata
+28 2026-10-19 16:26:34 pr     737  completed 2026-10-19 16:26:56 complete           no               49deeb6b repo=bangr-inc/bangr-core
+29 2026-10-19 16:29:09 review 394  completed 2026-10-19 16:30:09 complete           no               0499e978 repo=be-automata/automata
+30 2026-10-19 16:33:46 review 394  completed 2026-10-19 16:35:02 complete           no               5a3f5d9e repo=be-automata/automata
+31 2026-10-19 16:45:28 review 397  completed 2026-10-19 16:46:19 complete           no               6c7f6bed repo=be-automata/automata
+32 2026-10-19 16:48:35 review 397  completed 2026-10-19 16:49:26 complete           no               e98f31d1 repo=be-automata/automata
+33 2026-10-19 16:49:26 review 394  completed 2026-10-19 16:50:12 complete           no               844e34e8 repo=be-automata/automata
+34 2026-10-19 16:51:29 review 397  completed 2026-10-19 16:52:17 complete           no               93f2973c repo=be-automata/automata
+
+started in window: 34; completed inside window: 31; completed after T1: 1; failed: 0; no end line: 2
+restart-overlapped runs: [&#x27;d87f2086&#x27;, &#x27;39e898e9&#x27;]
+== d87f2086
+2026-10-19T14:08:47+00:00 🪓 49482 | 10/19/26, 02:08:47 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] run start: lane=task repo=be-automata/automata
+2026-10-19T14:08:49+00:00 🪓 49482 | 10/19/26, 02:08:49 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box.escapees_reaped {&quot;phase&quot;:&quot;admission&quot;,&quot;threadId&quot;:&quot;d87f2086-3478-40a5-8067-e39d1f053991&quot;,&quot;uid&quot;:999,&quot;scanne
+2026-10-19T14:08:51+00:00 🪓 49482 | 10/19/26, 02:08:51 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] batteries: lane=task packs=somnio-skills manif
+2026-10-19T14:08:56+00:00 🪓 49482 | 10/19/26, 02:08:56 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] thread-status: booting (terminal=false)
+2026-10-19T14:08:56+00:00 [agent-run] run cgroup: oom_kill=0 oom=0 thread=d87f2086-3478-40a5-8067-e39d1f053991 memory.max=5000M
+2026-10-19T14:08:57+00:00 🪓 49482 | 10/19/26, 02:08:57 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box.escapees_all_out_of_scope {&quot;phase&quot;:&quot;teardown&quot;,&quot;threadId&quot;:&quot;d87f2086-3478-40a5-8067-e39d1f053991&quot;,&quot;scope&quot;:
+2026-10-19T14:08:57+00:00 🪓 49482 | 10/19/26, 02:08:57 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box.escapees_reaped {&quot;phase&quot;:&quot;teardown&quot;,&quot;threadId&quot;:&quot;d87f2086-3478-40a5-8067-e39d1f053991&quot;,&quot;uid&quot;:999,&quot;scanned
+2026-10-19T14:08:58+00:00 🪓 49482 | 10/19/26, 02:08:58 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box lock released by d87f2086-3478-40a5-8067-e39d1f053991 (helper pid 73697)
+== 39e898e9
+2026-10-19T15:10:59+00:00 🪓 83052 | 10/19/26, 03:10:59 PM  [INFO/ctx] [agent-run 39e898e9-9e52-4b69-b5a0-660d18a70d3a trace=00-fdb92611b5978de9084d5cac980ccb68-235ed6f3e80aa01f-01] run start: lane=review pr=394 repo=be-automata
+2026-10-19T15:11:04+00:00 🪓 83052 | 10/19/26, 03:11:04 PM  [INFO/ctx] [agent-run 39e898e9-9e52-4b69-b5a0-660d18a70d3a] box.escapees_reaped {&quot;phase&quot;:&quot;admission&quot;,&quot;threadId&quot;:&quot;39e898e9-9e52-4b69-b5a0-660d18a70d3a&quot;,&quot;uid&quot;:999,&quot;scanne
+2026-10-19T15:11:12+00:00 [agent-run] run cgroup: oom_kill=0 oom=0 thread=39e898e9-9e52-4b69-b5a0-660d18a70d3a memory.max=5000M
+2026-10-19T15:11:12+00:00 🪓 83052 | 10/19/26, 03:11:12 PM  [INFO/ctx] [agent-run 39e898e9-9e52-4b69-b5a0-660d18a70d3a] box.escapees_all_out_of_scope {&quot;phase&quot;:&quot;teardown&quot;,&quot;threadId&quot;:&quot;39e898e9-9e52-4b69-b5a0-660d18a70d3a&quot;,&quot;scope&quot;:
+2026-10-19T15:11:12+00:00 🪓 83052 | 10/19/26, 03:11:12 PM  [INFO/ctx] [agent-run 39e898e9-9e52-4b69-b5a0-660d18a70d3a] box.escapees_reaped {&quot;phase&quot;:&quot;teardown&quot;,&quot;threadId&quot;:&quot;39e898e9-9e52-4b69-b5a0-660d18a70d3a&quot;,&quot;uid&quot;:999,&quot;scanned
+2026-10-19T15:11:13+00:00 🪓 83052 | 10/19/26, 03:11:13 PM  [INFO/ctx] [agent-run 39e898e9-9e52-4b69-b5a0-660d18a70d3a] box lock released by 39e898e9-9e52-4b69-b5a0-660d18a70d3a (helper pid 110477)
+2026-10-19T15:11:14+00:00 🪓 83052 | 10/19/26, 03:11:14 PM  [INFO/ctx] [agent-run 39e898e9-9e52-4b69-b5a0-660d18a70d3a] cancelled under newest-wins → superseded terminal: applied
+
+== note on evidence 28: its loopback counters date from the 16:37:22 reload (the header says 14:19; a loader run resets the counters). They show the state since that reload only; the fence hits earlier in the window are recorded in the issue comments and evidence 16 (enforce-diag-sample).</pre></details><details open><summary><span class="mono">29-api-C367-run-count-reconciliation.txt</span> — run starts vs completions in the C12 window, and the counter-date correction for evidence 28</summary><pre>window 2026-10-19 13:55:30 -&gt; 2026-10-19 16:51:50 UTC (the C12 capture)
+run start lines: 34
+Task run starting: 34
+Task run completed: 31
+Task run failed: 0
+by lane (run start):
+      3 run start: lane=pr
+     21 run start: lane=review
+     10 run start: lane=task
+== starts without a completion inside the window (by agent-run id)
+== runs whose Task run completed line fell after T1
+4
+== worker restarts in window (each restart ends in-flight runs and reloads the table)
+Oct 19 14:19:09 Stopped automata-worker.service - Automata execution-plane worker.
+Oct 19 14:19:09 [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-
+Oct 19 14:19:10 Started automata-worker.service - Automata execution-plane worker.
+Oct 19 16:31:24 Stopped automata-worker.service - Automata execution-plane worker.
+Oct 19 16:31:24 [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-
+Oct 19 16:31:24 Started automata-worker.service - Automata execution-plane worker.
+Oct 19 16:37:22 Stopped automata-worker.service - Automata execution-plane worker.
+Oct 19 16:37:22 [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-
+Oct 19 16:37:22 Started automata-worker.service - Automata execution-plane worker.
+== note: the loopback counters in evidence 28 date from the 16:37:22 reload, not 14:19</pre></details><details open><summary><span class="mono">28-api-C367-thirty-run-hold.txt</span> — the 30-run hold under enforce (C12), captured 16:51 UTC</summary><pre>since enforce load (2026-10-19 13:55:30 UTC): completed=31 failed=0 captured=2026-10-19T16:51:50Z
+== failures
+== refused strings in run logs
+0
+== proxy host-local audits
+0
+== runs by lane
+      3 run start: lane=pr
+     21 run start: lane=review
+     10 run start: lane=task
+== loopback counters (since the 14:19 unit load; a by-hand reload resets them)
+meta skuid { 999, 2001 } oifname { &quot;br-*&quot;, &quot;docker0&quot; } meta l4proto tcp counter packets 0 bytes 0 reject with tcp reset
+meta skuid { 999, 2001 } oifname { &quot;br-*&quot;, &quot;docker0&quot; } counter packets 0 bytes 0 reject
+socket cgroupv2 level 2 &quot;system.slice/automata-worker.service&quot; counter packets 72 bytes 4320 accept
+ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport 53 counter packets 0 bytes 0 accept
+ip daddr 127.0.0.1 tcp dport 25432 counter packets 0 bytes 0 accept
+meta l4proto { icmp, ipv6-icmp } counter packets 0 bytes 0 accept
+meta l4proto tcp counter packets 0 bytes 0 reject with tcp reset
+meta l4proto != tcp counter packets 0 bytes 0 reject
+== unit
+NRestarts=0 ExecMainStartTimestamp=Mon 2026-10-19 16:37:22 UTC ActiveState=active 
+Oct 19 16:37:22 Stopped automata-worker.service - Automata execution-plane worker.
+Oct 19 16:37:22 [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 7 -&gt; 7
+Oct 19 16:37:22 Started automata-worker.service - Automata execution-plane worker.</pre></details><details open><summary><span class="mono">22-api-C367-nft-verify-enforce.txt</span> — enforce-mode probe matrix, both slot uids, from inside the worker subtree (C2–C5)</summary><pre>[nft-verify] loopback probes (mode=enforce) start 2026-10-19T15:33:45Z from /sys/fs/cgroup/system.slice/automata-worker.service/verify-probe
+[nft-verify]   deny  engine gRPC (docker-proxy)         uid 999   -&gt; 127.0.0.1:7077         REFUSED      26ms deny+1 ok
+[nft-verify]   deny  engine API (docker-proxy)          uid 999   -&gt; 127.0.0.1:8888         REFUSED      33ms deny+1 ok
+[nft-verify]   deny  cloudflared metrics                uid 999   -&gt; 127.0.0.1:20241        REFUSED      34ms deny+1 ok
+[nft-verify]   deny  engine gRPC (bridge)               uid 999   -&gt; 172.18.0.2:7077        REFUSED      28ms deny+1 ok
+[nft-verify]   deny  engine API (bridge)                uid 999   -&gt; 172.18.0.2:8888        REFUSED      24ms deny+1 ok
+[nft-verify]   deny  sshd via the box&#x27;s public ip       uid 999   -&gt; 138.201.174.63:22      REFUSED      33ms deny+1 ok
+[nft-verify]   deny  sshd via ::1                       uid 999   -&gt; ::1:22                 REFUSED      27ms deny+1 ok
+[nft-verify]   allow worker-uid listener (proxy/broker) uid 999   -&gt; 127.0.0.1:61001        CONNECTED    25ms deny+0 ok
+[nft-verify]   allow the slot&#x27;s own listener            uid 999   -&gt; 127.0.0.1:61010        CONNECTED    25ms deny+0 ok
+[nft-verify]   allow the slot&#x27;s own listener (::1)      uid 999   -&gt; ::1:61015              CONNECTED    26ms deny+0 ok
+[nft-verify]   allow test Postgres                      uid 999   -&gt; 127.0.0.1:25432        CONNECTED    31ms deny+0 ok
+[nft-verify]   allow DNS (getent hosts github.com)      uid 999   -&gt; 127.0.0.53:53          RESOLVED      -ms deny+- ok
+[nft-verify]   deny  engine gRPC (docker-proxy)         uid 2001  -&gt; 127.0.0.1:7077         REFUSED      29ms deny+1 ok
+[nft-verify]   deny  engine API (docker-proxy)          uid 2001  -&gt; 127.0.0.1:8888         REFUSED      30ms deny+1 ok
+[nft-verify]   deny  cloudflared metrics                uid 2001  -&gt; 127.0.0.1:20241        REFUSED      30ms deny+1 ok
+[nft-verify]   deny  engine gRPC (bridge)               uid 2001  -&gt; 172.18.0.2:7077        REFUSED      25ms deny+1 ok
+[nft-verify]   deny  engine API (bridge)                uid 2001  -&gt; 172.18.0.2:8888        REFUSED      26ms deny+1 ok
+[nft-verify]   deny  sshd via the box&#x27;s public ip       uid 2001  -&gt; 138.201.174.63:22      REFUSED      24ms deny+1 ok
+[nft-verify]   deny  sshd via ::1                       uid 2001  -&gt; ::1:22                 REFUSED      29ms deny+1 ok
+[nft-verify]   allow worker-uid listener (proxy/broker) uid 2001  -&gt; 127.0.0.1:61001        CONNECTED    25ms deny+0 ok
+[nft-verify]   allow the slot&#x27;s own listener            uid 2001  -&gt; 127.0.0.1:61011        CONNECTED    30ms deny+0 ok
+[nft-verify]   allow the slot&#x27;s own listener (::1)      uid 2001  -&gt; ::1:61016              CONNECTED    30ms deny+0 ok
+[nft-verify]   allow test Postgres                      uid 2001  -&gt; 127.0.0.1:25432        CONNECTED    28ms deny+0 ok
+[nft-verify]   allow DNS (getent hosts github.com)      uid 2001  -&gt; 127.0.0.53:53          RESOLVED      -ms deny+- ok
+[nft-verify] loopback probes end 2026-10-19T15:33:48Z
+[nft-verify] OK — uid(s) 999 2001 fenced on tcp+udp 80/443, loopback open, 36 docker rules intact, 0 blocked packet(s) so far; loopback layer: loaded, mode=enforce, 4 deny hit(s) so far, probes ok
+exit=0</pre></details><details open><summary><span class="mono">09-api-C367-journal-loader-lines.txt</span> — unit loader lines: observe load, fail-closed drill, enforce load (C5, C6)</summary><pre>Oct 19 13:44:57 [nft-loopback-load] OK — mode=observe; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 7 -&gt; 7
+Oct 19 13:47:09 [nft-loopback-load] FAIL: socket cgroupv2 path is &#x27;system.slice/no-such-unit.service&#x27;, expected the worker unit&#x27;s &#x27;system.slice/automata-worker.service&#x27;
+Oct 19 13:47:09 automata-exec-1 systemd[1]: automata-worker.service: Control process exited, code=exited, status=1/FAILURE
+Oct 19 13:47:09 automata-exec-1 systemd[1]: automata-worker.service: Failed with result &#x27;exit-code&#x27;.
+Oct 19 13:47:12 [nft-loopback-load] OK — mode=observe; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 7 -&gt; 7
+Oct 19 14:19:09 [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 7 -&gt; 7</pre></details><details open><summary><span class="mono">00-api-C367-loopback-table.txt</span> — the loaded table with counters (C7)</summary><pre>table inet automata_loopback {
+	chain out {
+		type filter hook output priority filter; policy accept;
+		meta skuid { 999, 2001 } oif &quot;lo&quot; meta mark set meta mark | 0x10000000
+		meta skuid { 999, 2001 } oifname { &quot;br-*&quot;, &quot;docker0&quot; } meta l4proto tcp counter packets 4 bytes 240 reject with tcp reset
+		meta skuid { 999, 2001 } oifname { &quot;br-*&quot;, &quot;docker0&quot; } counter packets 0 bytes 0 reject
+	}
+
+	chain in {
+		type filter hook input priority filter; policy accept;
+		iif &quot;lo&quot; meta mark &amp; 0x10000000 == 0x10000000 ct state new jump agent_lo
+	}
+
+	chain agent_lo {
+		socket cgroupv2 level 2 &quot;system.slice/automata-worker.service&quot; counter packets 7054 bytes 423280 accept
+		ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport 53 counter packets 50 bytes 3486 accept
+		ip daddr 127.0.0.1 tcp dport 25432 counter packets 17 bytes 1020 accept
+		meta l4proto { icmp, ipv6-icmp } counter packets 0 bytes 0 accept
+		meta l4proto tcp counter packets 0 bytes 0 reject with tcp reset
+		meta l4proto != tcp counter packets 0 bytes 0 reject
+	}
+}</pre></details><details open><summary><span class="mono">01-api-C367-egress-table.txt</span> — inet automata_egress, unchanged (C7)</summary><pre>table inet automata_egress {
+	chain egress {
+		type filter hook output priority filter; policy accept;
+		oif &quot;lo&quot; accept
+		meta skuid { 999, 2001 } tcp dport { 80, 443 } counter packets 0 bytes 0 reject with tcp reset
+		meta skuid { 999, 2001 } udp dport { 80, 443 } counter packets 0 bytes 0 reject
+	}
+}</pre></details><details open><summary><span class="mono">05-api-C367-egress-conf-vs-checkout.diff</span> — installed egress conf vs the checkout render, rules only (C7)</summary><pre>diff exit=0</pre></details><details open><summary><span class="mono">04-api-C367-loopback-conf-vs-checkout.diff</span> — installed loopback conf vs the checkout render at the deployed sha</summary><pre>diff exit=0</pre></details><details open><summary><span class="mono">02-api-C367-tables.txt</span> — all nft tables (Docker&#x27;s plus the two automata tables)</summary><pre>table ip nat
+table ip filter
+table ip6 nat
+table ip6 filter
+table ip raw
+table inet automata_egress
+table inet automata_loopback</pre></details><details open><summary><span class="mono">03-api-C367-docker-rules-count.txt</span> — docker rule lines in the ruleset</summary><pre>36</pre></details><details open><summary><span class="mono">10-api-C367-runs-under-enforce.txt</span> — every run since the enforce load (C8, C12)</summary><pre>Oct 19 13:56:44 Task run starting
+Oct 19 13:56:44 run start: lane=review pr=385 repo=be-automata/automata
+Oct 19 13:57:31 Task run completed
+Oct 19 13:57:38 Task run starting
+Oct 19 13:57:38 run start: lane=task repo=be-automata/automata
+Oct 19 14:08:46 Task run completed
+Oct 19 14:08:47 Task run starting
+Oct 19 14:08:47 run start: lane=task repo=be-automata/automata
+Oct 19 14:08:56 Task run starting
+Oct 19 14:08:56 run start: lane=task repo=be-automata/automata
+Oct 19 14:11:55 Task run completed
+Oct 19 14:11:56 Task run starting
+Oct 19 14:11:56 run start: lane=task repo=be-automata/automata
+Oct 19 14:15:27 Task run completed
+Oct 19 14:15:28 Task run starting
+Oct 19 14:15:28 run start: lane=task repo=bangr-inc/Bangr-Admin-Panel
+Oct 19 14:16:23 Task run completed
+Oct 19 14:16:24 Task run starting
+Oct 19 14:16:24 run start: lane=review pr=385 repo=be-automata/automata
+Oct 19 14:17:16 Task run completed
+Oct 19 14:17:16 Task run starting
+Oct 19 14:17:17 run start: lane=review pr=388 repo=be-automata/automata
+Oct 19 14:17:47 Task run completed
+Oct 19 14:18:15 Task run starting
+Oct 19 14:18:15 run start: lane=review pr=385 repo=be-automata/automata
+Oct 19 14:18:53 Task run completed
+Oct 19 14:20:35 Task run starting
+Oct 19 14:20:35 run start: lane=task repo=be-automata/automata
+Oct 19 14:24:21 Task run completed
+Oct 19 14:28:10 Task run starting
+Oct 19 14:28:10 run start: lane=task repo=be-automata/automata
+Oct 19 14:31:45 Task run completed
+Oct 19 14:31:45 Task run starting
+Oct 19 14:31:45 run start: lane=task repo=be-automata/automata
+Oct 19 14:36:02 Task run completed
+Oct 19 15:01:01 Task run starting
+Oct 19 15:01:01 run start: lane=task repo=bangr-inc/bangr-core
+Oct 19 15:01:53 Task run completed
+Oct 19 15:05:16 Task run starting
+Oct 19 15:05:16 run start: lane=review pr=393 repo=be-automata/automata
+Oct 19 15:05:46 Task run completed
+Oct 19 15:10:59 Task run starting
+Oct 19 15:10:59 run start: lane=review pr=394 repo=be-automata/automata
+Oct 19 15:11:12 Task run starting
+Oct 19 15:11:12 run start: lane=review pr=394 repo=be-automata/automata
+Oct 19 15:11:45 Task run completed
+Oct 19 15:12:50 Task run starting
+Oct 19 15:12:50 run start: lane=task repo=be-automata/automata
+Oct 19 15:13:17 Task run completed
+Oct 19 15:14:02 Task run starting
+Oct 19 15:14:02 run start: lane=review pr=394 repo=be-automata/automata
+Oct 19 15:14:24 Task run completed
+Oct 19 15:18:26 Task run starting
+Oct 19 15:18:26 run start: lane=review pr=394 repo=be-automata/automata
+Oct 19 15:19:04 Task run completed
+Oct 19 15:24:24 Task run starting
+Oct 19 15:24:24 run start: lane=review pr=393 repo=be-automata/automata
+Oct 19 15:24:58 Task run completed</pre></details><details open><summary><span class="mono">15-api-C367-observe-window-log.txt</span> — observe-window deny log, grouped (C9)</summary><pre>1 Oct 19 13:47:22 0000:0000:0000:0000:0000:0000:0000:0001:22
+      1 Oct 19 13:47:22 127.0.0.1:20241
+      1 Oct 19 13:47:22 127.0.0.1:7077
+      1 Oct 19 13:47:22 127.0.0.1:8888
+      1 Oct 19 13:47:22 138.201.174.63:22
+      4 Oct 19 13:47:22 172.18.0.2:7077
+      3 Oct 19 13:47:22 172.18.0.2:8888
+      1 Oct 19 13:47:23 0000:0000:0000:0000:0000:0000:0000:0001:22
+      1 Oct 19 13:47:23 127.0.0.1:20241
+      1 Oct 19 13:47:23 127.0.0.1:7077
+      1 Oct 19 13:47:23 127.0.0.1:8888
+      1 Oct 19 13:47:23 138.201.174.63:22
+      4 Oct 19 13:47:23 172.18.0.2:7077
+      3 Oct 19 13:47:23 172.18.0.2:8888</pre></details><details open><summary><span class="mono">16-api-C367-enforce-diag-sample.txt</span> — temporary diagnostic log of the first enforce refusals</summary><pre>Oct 19 14:06:37 0000:0000:0000:0000:0000:0000:0000:0001:8888
+Oct 19 14:06:37 127.0.0.1:8888
+Oct 19 14:06:38 0000:0000:0000:0000:0000:0000:0000:0001:8888
+Oct 19 14:06:39 127.0.0.1:8888
+Oct 19 14:06:48 0000:0000:0000:0000:0000:0000:0000:0001:8888
+Oct 19 14:06:48 127.0.0.1:8888</pre></details><details open><summary><span class="mono">06-api-C367-unit-execstart-lines.txt</span> — installed unit: the Exec lines</summary><pre>49:ExecStartPre=/bin/bash -c &#x27;for _ in $(seq 1 30); do curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:8888/api/ready &amp;&amp; exit 0; sleep 2; done; echo &quot;engine not ready on 127.0.0.1:8888 after 60s&quot; &gt;&amp;2; exit 1&#x27;
+56:# this unit&#x27;s cgroup before any ExecStartPre= runs and recreates it on every
+62:# ExecStartPre=, NOT ExecStartPost=: Type=exec means an ExecStartPost= would
+67:# before ExecStart= (fail-closed), and the 15s Restart= cycle keeps the reason
+72:ExecStartPre=+/usr/bin/env WORKER_USER=automata /usr/local/sbin/nft-loopback-load.sh /etc/automata/loopback-nft.conf
+74:ExecStart=/bin/bash /home/automata/.automata/run-worker.sh</pre></details><details open><summary><span class="mono">07-api-C367-unit-state.txt</span> — unit state at capture</summary><pre>MainPID=83052
+NRestarts=0
+ExecMainStartTimestamp=Mon 2026-10-19 14:19:10 UTC
+ActiveState=active
+SubState=running</pre></details><details open><summary><span class="mono">08-api-C367-worker-cgroup.txt</span> — the worker process&#x27;s cgroup</summary><pre>0::/system.slice/automata-worker.service/supervisor</pre></details><details open><summary><span class="mono">19-api-C367-egress-fence-uids.txt</span> — egress fence marker the loader keys on</summary><pre>999 2001</pre></details><details open><summary><span class="mono">21-api-C367-egress-env.txt</span> — slot accounts the fence must cover</summary><pre>WORKER_AGENT_USER=automata-agent
+WORKER_BOX_SLOTS=1</pre></details><details open><summary><span class="mono">20-api-C367-accounts.txt</span> — the three accounts</summary><pre>uid=999(automata-agent) gid=987(automata-agent) groups=987(automata-agent)
+uid=2001(automata-agent-1) gid=2001(automata-agent-1) groups=2001(automata-agent-1)
+uid=996(automata) gid=986(automata) groups=986(automata),988(docker)</pre></details><details open><summary><span class="mono">17-api-C367-listeners.txt</span> — host listeners at capture (ports only)</summary><pre>0.0.0.0:22 users:((&quot;sshd&quot;,),(&quot;systemd&quot;,))
+127.0.0.1:20241 users:((&quot;cloudflared&quot;,))
+127.0.0.1:25432 users:((&quot;postgres&quot;,))
+127.0.0.1:7077 users:((&quot;docker-proxy&quot;,))
+127.0.0.1:8888 users:((&quot;docker-proxy&quot;,))
+127.0.0.53%lo:53 users:((&quot;systemd-resolve&quot;,))
+127.0.0.54:53 users:((&quot;systemd-resolve&quot;,))
+[::]:22 users:((&quot;sshd&quot;,),(&quot;systemd&quot;,))</pre></details><details open><summary><span class="mono">18-api-C367-nsswitch.txt</span> — hosts resolution order (DNS row really uses udp/53)</summary><pre>hosts:          files dns</pre></details><details open><summary><span class="mono">23-api-C367-kernel.txt</span> — kernel and nft versions</summary><pre>6.8.0-142-generic
+nftables v1.0.9 (Old Doc Yak #3)</pre></details><details open><summary><span class="mono">27-api-C367-ci-pr-checks.txt</span> — CI jobs and Automata reviews on both PR heads (C11)</summary><pre>PR 383 head checks:
+  audit pass https://github.com/be-automata/automata/actions/runs/39260026111/job/118085212382
+  check pass https://github.com/be-automata/automata/actions/runs/39260026111/job/118085211568
+  e2e pass https://github.com/be-automata/automata/actions/runs/39260026111/job/118085212219
+  schema-drift pass https://github.com/be-automata/automata/actions/runs/39260026111/job/118085212306
+  test pass https://github.com/be-automata/automata/actions/runs/39260026111/job/118085212373
+  worker-e2e pass https://github.com/be-automata/automata/actions/runs/39260026111/job/118085212380
+  review DISMISSED at e5da4639e 2026-10-19T13:24:07Z
+  review APPROVED at e31e1674d 2026-10-19T13:26:13Z
+PR 388 head checks:
+  audit pass https://github.com/be-automata/automata/actions/runs/39265148648/job/118102668007
+  check pass https://github.com/be-automata/automata/actions/runs/39265148648/job/118102667352
+  e2e pass https://github.com/be-automata/automata/actions/runs/39265148648/job/118102667787
+  schema-drift pass https://github.com/be-automata/automata/actions/runs/39265148648/job/118102668045
+  test pass https://github.com/be-automata/automata/actions/runs/39265148648/job/118102667537
+  worker-e2e pass https://github.com/be-automata/automata/actions/runs/39265148648/job/118102667591
+  review APPROVED at ee54e398e 2026-10-19T14:17:50Z</pre></details><details open><summary><span class="mono">26-api-C367-test-cards.txt</span> — test-card counts (C10)</summary><pre>deploy-assets.test.ts #367 block: it() with protects/fails_when/no_claim cards
+9
+9
+egress-proxy.test.ts #367 block its:
+6</pre></details><details open><summary><span class="mono">24-api-C367-captured-at.txt</span> — capture time</summary><pre>2026-10-19T15:33:44Z</pre></details></section>
+</main>
+</body>
+</html>

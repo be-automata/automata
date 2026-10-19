@@ -1,0 +1,22 @@
+table inet automata_loopback {
+	chain out {
+		type filter hook output priority filter; policy accept;
+		meta skuid { 999, 2001 } oif "lo" meta mark set meta mark | 0x10000000
+		meta skuid { 999, 2001 } oifname { "br-*", "docker0" } meta l4proto tcp counter packets 4 bytes 240 reject with tcp reset
+		meta skuid { 999, 2001 } oifname { "br-*", "docker0" } counter packets 0 bytes 0 reject
+	}
+
+	chain in {
+		type filter hook input priority filter; policy accept;
+		iif "lo" meta mark & 0x10000000 == 0x10000000 ct state new jump agent_lo
+	}
+
+	chain agent_lo {
+		socket cgroupv2 level 2 "system.slice/automata-worker.service" counter packets 7054 bytes 423280 accept
+		ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport 53 counter packets 50 bytes 3486 accept
+		ip daddr 127.0.0.1 tcp dport 25432 counter packets 17 bytes 1020 accept
+		meta l4proto { icmp, ipv6-icmp } counter packets 0 bytes 0 accept
+		meta l4proto tcp counter packets 0 bytes 0 reject with tcp reset
+		meta l4proto != tcp counter packets 0 bytes 0 reject
+	}
+}

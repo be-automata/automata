@@ -7,11 +7,16 @@
       "repoFullName": "be-automata/automata",
       "branch": "main",
       "daemonCallbackUrl": "http://localhost:3000",
-      "installationToken": "mock-github-token",
-      "daemonToken": "__DAEMON_TOKEN__",
       "orgId": "__ORG_ID__",
       "traceparent": "__TRACEPARENT__",
-      "workBranch": "__WORK_BRANCH__"
+      "workBranch": "__WORK_BRANCH__",
+      "sealedSecrets": {
+        "v": 1,
+        "kid": "plane-golden",
+        "epk": "__SEALED_EPK__",
+        "iv": "__SEALED_IV__",
+        "ct": "__SEALED_CT__"
+      }
     },
     "additionalMetadata": {
       "threadId": "__THREAD_ID__",
@@ -26,8 +31,6 @@
       "repoFullName": "be-automata/automata",
       "branch": "feature-golden",
       "daemonCallbackUrl": "http://localhost:3000",
-      "installationToken": "mock-github-token",
-      "daemonToken": "__DAEMON_TOKEN__",
       "orgId": "__ORG_ID__",
       "prNumber": 4242,
       "traceparent": "__TRACEPARENT__",
@@ -40,6 +43,13 @@
         "batteries": ["gstack-review", "somnio-review", "gsd-reviewers"],
         "runTests": false,
         "commandTimeoutMs": 60000
+      },
+      "sealedSecrets": {
+        "v": 1,
+        "kid": "plane-golden",
+        "epk": "__SEALED_EPK__",
+        "iv": "__SEALED_IV__",
+        "ct": "__SEALED_CT__"
       }
     },
     "additionalMetadata": {

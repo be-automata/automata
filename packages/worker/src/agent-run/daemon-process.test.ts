@@ -15,6 +15,9 @@ import { configForSlot, loadWorkerConfig } from "./config";
 import { getProcessWorkerId, runPidPath, runSocketPath } from "./run-namespace";
 import type { AgentRunInput } from "./types";
 
+/** #380: the unsealed run secrets DaemonProcess now receives explicitly. */
+const TEST_SECRETS = { installationToken: "inst", daemonToken: "daemon" };
+
 /**
  * Verifies the worker speaks the daemon's real unix-socket protocol: a wrapped
  * `{ id, data }` envelope (data = stringified DaemonMessage) answered by an ACK
@@ -219,8 +222,6 @@ setInterval(() => {}, 1000);
       repoFullName: "o/r",
       branch: "main",
       daemonCallbackUrl: "http://localhost:3999",
-      installationToken: "inst",
-      daemonToken: "daemon",
       orgId: "org-1",
     };
 
@@ -228,7 +229,9 @@ setInterval(() => {}, 1000);
     const expectedSocket = runSocketPath(root, workerId, threadId);
     assertUnderSunPathCap(expectedSocket);
 
-    const daemon = new DaemonProcess(config, input, workdir);
+    const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      secrets: TEST_SECRETS,
+    });
     daemons.push(daemon);
     await daemon.start();
 
@@ -320,6 +323,7 @@ setInterval(() => {}, 1000);
     let spawnedEnv: Record<string, string> = {};
     const inner = fakeSpawn({ recorded, wrapperPgid: process.pid });
     const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      secrets: TEST_SECRETS,
       aceExec: async () => {},
       spawnFn: ((f: string, a: string[], o: SpawnOptions) => {
         spawnedEnv = (o?.env ?? {}) as Record<string, string>;
@@ -356,6 +360,7 @@ setInterval(() => {}, 1000);
     const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
     fs.mkdirSync(path.dirname(socket), { recursive: true });
     const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      secrets: TEST_SECRETS,
       aceExec: async (_f, a) => void aceCalls.push(a),
       spawnFn: fakeSpawn({ recorded }),
     });
@@ -395,6 +400,8 @@ setInterval(() => {}, 1000);
 
     async function spawnedEnvFor(
       inputPatch: Partial<AgentRunInput>,
+      // #380: the owner's env arrives inside the sealed secrets, not the input.
+      repoEnv?: Record<string, string>,
     ): Promise<Record<string, string>> {
       const { root, workdir, input } = fixture();
       const envFile = path.join(root, "agent-test-services.env");
@@ -420,6 +427,7 @@ setInterval(() => {}, 1000);
         null,
         null,
         {
+          secrets: { ...TEST_SECRETS, ...(repoEnv ? { repoEnv } : {}) },
           aceExec: async () => {},
           lane: "task",
           boxTestServicesEnvPath: envFile,
@@ -441,9 +449,10 @@ setInterval(() => {}, 1000);
     });
 
     it("the owner's repoEnv wins over the box value for the same key", async () => {
-      const env = await spawnedEnvFor({
-        repoEnv: { TEST_DATABASE_ADMIN_URL: "postgresql://owner@db/postgres" },
-      });
+      const env = await spawnedEnvFor(
+        {},
+        { TEST_DATABASE_ADMIN_URL: "postgresql://owner@db/postgres" },
+      );
       expect(env.TEST_DATABASE_ADMIN_URL).toBe(
         "postgresql://owner@db/postgres",
       );
@@ -503,6 +512,7 @@ setInterval(() => {}, 1000);
     const pidFile = runPidPath(root, getProcessWorkerId(), input.threadId);
     fs.mkdirSync(path.dirname(pidFile), { recursive: true });
     const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      secrets: TEST_SECRETS,
       aceExec: async () => {},
       // No wrapperPgid: the wrapper "has not written it yet".
       spawnFn: fakeSpawn({ recorded }),
@@ -559,6 +569,7 @@ setInterval(() => {}, 1000);
         null,
         null,
         {
+          secrets: TEST_SECRETS,
           aceExec: async () => {},
           spawnFn: fakeSpawn({ recorded }),
           platform: "darwin",
@@ -597,6 +608,7 @@ setInterval(() => {}, 1000);
     const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
     fs.mkdirSync(path.dirname(socket), { recursive: true });
     const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      secrets: TEST_SECRETS,
       aceExec: async (_f, a) => void aceCalls.push(a),
       spawnFn: fakeSpawn({ recorded: [], wrapperPgid: 4242 }),
       platform: "darwin",
@@ -620,6 +632,7 @@ setInterval(() => {}, 1000);
     const socket = runSocketPath(root, getProcessWorkerId(), input.threadId);
     fs.mkdirSync(path.dirname(socket), { recursive: true });
     const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      secrets: TEST_SECRETS,
       aceExec: async () => {},
       spawnFn: fakeSpawn({ recorded, wrapperPgid: 4242 }),
       platform: "darwin",
@@ -656,11 +669,15 @@ setInterval(() => {}, 1000);
         WORKER_AGENT_USER: "_automata-agent",
         WORKER_WORKDIR_ROOT: workdir,
         WORKER_BOX_SLOTS: "2",
+        WORKER_GLOBAL_MAX_RUNS: "2", // #372: the tuple moves together
         WORKER_RUN_MEMORY_MAX: "1500M",
       });
-      expect(() => new DaemonProcess(config, input, workdir)).toThrow(
-        /invariant.*boxSlot/,
-      );
+      expect(
+        () =>
+          new DaemonProcess(config, input, workdir, null, null, null, {
+            secrets: TEST_SECRETS,
+          }),
+      ).toThrow(/invariant.*boxSlot/);
     });
 
     it("N > 1 with the slot override puts the run's artefacts under s<i>/ and runs as the slot's account", async () => {
@@ -671,6 +688,7 @@ setInterval(() => {}, 1000);
         WORKER_AGENT_USER: "_automata-agent",
         WORKER_WORKDIR_ROOT: workdir,
         WORKER_BOX_SLOTS: "2",
+        WORKER_GLOBAL_MAX_RUNS: "2", // #372: the tuple moves together
         WORKER_RUN_MEMORY_MAX: "1500M",
       });
       const config = configForSlot(base, 1);
@@ -684,6 +702,7 @@ setInterval(() => {}, 1000);
         null,
         null,
         {
+          secrets: TEST_SECRETS,
           aceExec: async () => {},
           spawnFn: fakeSpawn({ recorded, wrapperPgid: 4242 }),
           platform: "darwin",
@@ -716,6 +735,7 @@ setInterval(() => {}, 1000);
     const pidFile = runPidPath(root, getProcessWorkerId(), input.threadId);
     fs.mkdirSync(path.dirname(socket), { recursive: true });
     const daemon = new DaemonProcess(config, input, workdir, null, null, null, {
+      secrets: TEST_SECRETS,
       aceExec: async () => {},
       spawnFn: fakeSpawn({ recorded, wrapperPgid: 4242 }),
       platform: "darwin",
@@ -789,6 +809,7 @@ setInterval(() => {}, 1000);
         null,
         BROKER,
         {
+          secrets: TEST_SECRETS,
           aceExec: async (file, args) => void aclCalls.push({ file, args }),
           spawnFn: spawnCapturingEnv(recorded, sink),
           // Linux is where the 0700 creation mode zeroes the ACL mask.
@@ -848,6 +869,7 @@ setInterval(() => {}, 1000);
         null,
         BROKER,
         {
+          secrets: TEST_SECRETS,
           aceExec: async () => {},
           spawnFn: fakeSpawn({ recorded: [], wrapperPgid: process.pid }),
           platform: "linux",
@@ -881,6 +903,7 @@ setInterval(() => {}, 1000);
         null,
         BROKER,
         {
+          secrets: TEST_SECRETS,
           aceExec: async (file, args) => void aclCalls.push({ file, args }),
           spawnFn: spawnCapturingEnv(recorded, sink),
           platform: "linux",
@@ -924,8 +947,6 @@ setInterval(() => {}, 1000);
       repoFullName: "o/r",
       branch: "main",
       daemonCallbackUrl: "http://localhost:3999",
-      installationToken: "inst",
-      daemonToken: "daemon",
       orgId: "org-1",
     };
     assertUnderSunPathCap(
@@ -974,7 +995,7 @@ setInterval(() => {}, 1000);
         null,
         null,
         null,
-        { spawnFn: fakeSpawn({ recorded: [] }) },
+        { secrets: TEST_SECRETS, spawnFn: fakeSpawn({ recorded: [] }) },
       );
       daemons.push(daemon);
       expect(daemon.oomKills()).toBe(0);
@@ -1001,6 +1022,7 @@ setInterval(() => {}, 1000);
         null,
         null,
         {
+          secrets: TEST_SECRETS,
           spawnFn: (() => {
             throw new Error("spawn blew up before the handshake");
           }) as unknown as typeof spawn,
@@ -1039,7 +1061,7 @@ setInterval(() => {}, 1000);
         null,
         null,
         null,
-        { spawnFn: fakeSpawn({ recorded }) },
+        { secrets: TEST_SECRETS, spawnFn: fakeSpawn({ recorded }) },
       );
       daemons.push(daemon);
       await daemon.start();
@@ -1074,6 +1096,7 @@ setInterval(() => {}, 1000);
         null,
         null,
         {
+          secrets: TEST_SECRETS,
           spawnFn: fakeSpawn({ recorded: [] }),
           // Linux semantics on every host, and an ACL runner that fails the way
           // a real `setfacl` does on a box without the agent account (CI).
@@ -1113,7 +1136,17 @@ setInterval(() => {}, 1000);
         WORKER_AGENT_USER: "automata-agent",
         WORKER_WORKDIR_ROOT: root,
       });
-      const daemon = new DaemonProcess(config, input, workdir);
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        {
+          secrets: TEST_SECRETS,
+        },
+      );
       daemons.push(daemon);
       const planted = {
         exitCode: 0 as number | null,
@@ -1163,6 +1196,7 @@ setInterval(() => {}, 1000);
         null,
         null,
         {
+          secrets: TEST_SECRETS,
           spawnFn: ((file: string, args: string[], o: SpawnOptions) => {
             spawned = inner(file, args, o);
             return spawned;
@@ -1199,7 +1233,17 @@ setInterval(() => {}, 1000);
       const cgroupDir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-cg-"));
       tmpDirs.push(cgroupDir);
       fs.writeFileSync(path.join(cgroupDir, "memory.events"), memoryEvents);
-      const daemon = new DaemonProcess(config, input, workdir);
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        {
+          secrets: TEST_SECRETS,
+        },
+      );
       daemons.push(daemon);
       (daemon as unknown as { cgroupDir: string | null }).cgroupDir = cgroupDir;
       return { daemon, cgroupDir, input };
@@ -1274,7 +1318,17 @@ setInterval(() => {}, 1000);
         WORKER_DAEMON_DIST: "/opt/daemon/index.js",
         WORKER_NODE_BIN: "/usr/bin/node",
       });
-      const daemon = new DaemonProcess(config, input, workdir);
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        {
+          secrets: TEST_SECRETS,
+        },
+      );
       daemons.push(daemon);
       expect(daemon.memoryStarvation()).toBeNull();
     });

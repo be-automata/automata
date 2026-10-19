@@ -8,7 +8,8 @@ import {
   applySlotLayoutAces,
   type AceExec,
 } from "./agent-uid-fs";
-import { BOX_SLOTS_MAX, assertSlotIndex } from "./box-lock";
+import { assertSlotIndex } from "./box-lock";
+import { BOX_SLOTS_MAX } from "./slot-limits";
 import { agentUserForSlot } from "./spawn-as-user";
 
 /**

@@ -12,6 +12,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import {
+  generatePlaneKeyPair,
+  sealBindingOf,
+  sealRunSecrets,
+  type RunSecrets,
+} from "@terragon/utils/payload-seal";
+
 // The runs this suite drives create per-run namespace dirs (and the box lock
 // files) under WORKER_RUN_NAMESPACE_ROOT. It must never touch the host's real
 // root (/tmp/automata-agent-run — a live worker's), so it gets its own, set
@@ -23,6 +30,7 @@ process.env.WORKER_RUN_NAMESPACE_ROOT = TEST_NAMESPACE_ROOT;
 
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { runPaths } from "./run-owned-paths";
+import { resetPlaneKeyRingForTests } from "./payload-seal-keys";
 
 /**
  * Workdir-lifetime proof for the run task.
@@ -242,6 +250,30 @@ vi.mock("./git-broker", () => ({
 
 vi.mock("./gh-broker", () => ({
   startGhBroker: (...args: unknown[]) => startGhBroker(...args),
+}));
+
+// #380: the end-of-run token revoke is a real DELETE to api.github.com with
+// a 5 s budget per token — mocked here (every runFn case would otherwise hit
+// the network with a fake token) and RECORDED in finallyOrder, so "after the
+// fix check, before the lock release" is asserted, not assumed. The tokens
+// each revoker was built with are kept for the sealed-path assertions.
+const revokerTokens: unknown[] = [];
+const revokeOnce = vi.fn(async () => {
+  finallyOrder.push("token-revoke");
+});
+vi.mock("./revoke-installation-tokens", () => ({
+  createTokenRevoker: (tokens: unknown) => {
+    revokerTokens.push(tokens);
+    // Once-only, exactly like the real one: the outer safety net must not
+    // produce a second revoke after the inner finally already did.
+    let started: Promise<void> | null = null;
+    return {
+      revokeOnce: () => {
+        if (started === null) started = revokeOnce();
+        return started;
+      },
+    };
+  },
 }));
 
 let fakeRunCgroupDir: string | null = null;
@@ -1333,6 +1365,7 @@ describe("#183: finally order — box lock released last, after teardown and cle
   const TEARDOWN_TOKENS = [
     "teardown",
     "uid-reap:teardown",
+    "token-revoke",
     "cleanupWorkdir",
     "release",
   ];
@@ -1367,6 +1400,7 @@ describe("#183: finally order — box lock released last, after teardown and cle
     expect(finallyOrder.filter((x) => TEARDOWN_TOKENS.includes(x))).toEqual([
       "teardown",
       "uid-reap:teardown",
+      "token-revoke",
       "cleanupWorkdir",
       "release",
     ]);
@@ -1389,6 +1423,7 @@ describe("#183: finally order — box lock released last, after teardown and cle
     );
     expect(finallyOrder.filter((x) => TEARDOWN_TOKENS.includes(x))).toEqual([
       "teardown",
+      "token-revoke",
       "cleanupWorkdir",
       "release",
     ]);
@@ -1401,6 +1436,61 @@ describe("#183: finally order — box lock released last, after teardown and cle
     expect(skipped[0]).toContain('"reason":"lock lost"');
   });
 
+  /**
+   * #380 card: protects=a throw INSIDE the teardown sequence (here the
+   * uid-scan, which by contract never throws — injected to prove the wrap)
+   * still reaches the token revoke, the credential wipe, cleanupWorkdir and
+   * the box-lock release, in that order; fails_when=the nested finally is
+   * flattened back so the throw skips them (a live ghs_ token and a held
+   * slot would outlive the run); no_claim=the real reaper's own behaviour.
+   */
+  it("#380: a throw inside the teardown sequence still reaches token-revoke → credential wipe → cleanupWorkdir → release; the throw is not swallowed", async () => {
+    const credentialWipe = vi.fn(async () => {
+      finallyOrder.push("credential-wipe");
+    });
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: true,
+      env: {},
+      cleanup: credentialWipe,
+    });
+    // The admission scan is the first call (default impl); the second call
+    // is the teardown scan, which throws.
+    reapAgentUidEscapees
+      .mockImplementationOnce(async (opts) => {
+        finallyOrder.push(`uid-reap:${opts.phase}`);
+        return {
+          skipped: false,
+          scanned: 0,
+          groups: 0,
+          helpers: 0,
+          killed: 0,
+          residual: 0,
+          failed: 0,
+          durationMs: 0,
+        };
+      })
+      .mockImplementationOnce(async (opts) => {
+        finallyOrder.push(`uid-reap:${opts.phase}`);
+        throw new Error("reaper exploded");
+      });
+    pullNextMessage.mockResolvedValue(null);
+    await expect(runFn(INPUT, ctx())).rejects.toThrow("reaper exploded");
+    expect(
+      finallyOrder.filter((x) =>
+        [...TEARDOWN_TOKENS, "credential-wipe"].includes(x),
+      ),
+    ).toEqual([
+      "teardown",
+      "uid-reap:teardown",
+      "token-revoke",
+      "credential-wipe",
+      "cleanupWorkdir",
+      "release",
+    ]);
+    expect(credentialWipe).toHaveBeenCalledTimes(1);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+  });
+
   it("throw from inside the main try (pollUntilTerminal rejects): same order, release exactly once", async () => {
     pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
     pollUntilTerminal.mockRejectedValue(new Error("poll blew up"));
@@ -1408,6 +1498,7 @@ describe("#183: finally order — box lock released last, after teardown and cle
     expect(finallyOrder.filter((x) => TEARDOWN_TOKENS.includes(x))).toEqual([
       "teardown",
       "uid-reap:teardown",
+      "token-revoke",
       "cleanupWorkdir",
       "release",
     ]);
@@ -1810,7 +1901,11 @@ describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
       },
       SEEDED_REQUIRING,
     );
-    expect(options).toEqual({ lane: "task", githubReadToken: READ });
+    expect(options).toEqual({
+      secrets: { installationToken: "inst-secret", daemonToken: "daemon-tok" },
+      lane: "task",
+      githubReadToken: READ,
+    });
     expect(tokenLine(lines)).toBe("task agent: read-token=applied");
     const brokersIdx = lines.findIndex((l) =>
       l.includes("credential brokers up"),
@@ -1849,7 +1944,8 @@ describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
         { taskAgent: { batteries: ["somnio-skills"] }, ...extra },
         seeded,
       );
-      expect(options).toEqual({ lane: "task" });
+      expect(options).toMatchObject({ lane: "task" });
+      expect(options).not.toHaveProperty("githubReadToken");
       expect(tokenLine(lines)).toBe(`task agent: read-token=skip=${reason}`);
     },
   );
@@ -1864,7 +1960,8 @@ describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
       },
       SEEDED_REQUIRING,
     );
-    expect(options).toEqual({ lane: "task" });
+    expect(options).toMatchObject({ lane: "task" });
+    expect(options).not.toHaveProperty("githubReadToken");
     expect(tokenLine(lines)).toBe("task agent: read-token=skip=no-broker");
   });
 
@@ -1884,7 +1981,8 @@ describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
       },
       SEEDED_REQUIRING,
     );
-    expect(options).toEqual({ lane: "review" });
+    expect(options).toMatchObject({ lane: "review" });
+    expect(options).not.toHaveProperty("githubReadToken");
     expect(tokenLines(lines)).toEqual([]);
   });
 
@@ -1893,7 +1991,8 @@ describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
       { githubReadToken: READ, githubReadTokenExpiresAt: future() },
       undefined,
     );
-    expect(options).toEqual({ lane: "task" });
+    expect(options).toMatchObject({ lane: "task" });
+    expect(options).not.toHaveProperty("githubReadToken");
     expect(tokenLines(lines)).toEqual([]);
   });
 });
@@ -1996,6 +2095,9 @@ describe("GATE-01: the fix check runs after the agent is dead, then reports (09-
       "uid-reap:teardown",
       "git-close",
       "gh-close",
+      // #380: both ghs_ tokens die AFTER the fix check reported (it needed
+      // the token) and BEFORE the lock goes.
+      "token-revoke",
       "cleanupWorkdir",
       "release",
     ]);
@@ -2087,6 +2189,245 @@ describe("GATE-01: the fix check runs after the agent is dead, then reports (09-
 });
 
 /**
+ * #380: sealed run secrets end to end through the run fn.
+ *
+ * Cards (protects / fails_when / no_claim):
+ *  - sealed input: protects=the worker unseals BEFORE any www call and every
+ *    consumer gets the unsealed value; fails_when=a consumer still reads a
+ *    plain-text field, or a www call precedes the unseal; no_claim=nothing
+ *    about the engine (hatchet-lite IT covers the wire).
+ *  - revoke on early exits: protects=both ghs_ tokens die on stale-skip and
+ *    on a clone failure; fails_when=a path returns/throws without the revoke
+ *    or revokes twice; no_claim=the GitHub DELETE itself (mocked).
+ *  - no secret in logs/output: protects=H2 for the three secrets;
+ *    fails_when=any step line, the returned output or a ctor arg list other
+ *    than deps.secrets carries a value; no_claim=the daemon's own stdout.
+ *  - unseal failure: protects=fail-closed with a kid+reason error and NO
+ *    www call; fails_when=the run proceeds, posts, or leaks a byte of the
+ *    envelope key; no_claim=the sweep (www tests cover rule (iii)).
+ */
+describe("#380: sealed run secrets through the run fn", () => {
+  const SECRETS: RunSecrets = {
+    installationToken: "ghs_sealedInstallationTokenValue01",
+    githubReadToken: "ghs_sealedReadTokenValue0123456789",
+    daemonToken: "daemon_sealed_token_value_0123456789",
+  };
+  let keyFile = "";
+  let plane: Awaited<ReturnType<typeof generatePlaneKeyPair>>;
+  let sealedInput: Record<string, unknown>;
+
+  beforeAll(async () => {
+    plane = await generatePlaneKeyPair("plane-test");
+    // `.json`, never `.key`: a sandboxed test runner denies reads of *.key.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "seal-ring-"));
+    keyFile = path.join(dir, "payload-seal.json");
+    fs.writeFileSync(keyFile, JSON.stringify({ keys: [plane.privateKey] }), {
+      mode: 0o600,
+    });
+    const { installationToken, daemonToken, ...rest } = INPUT;
+    void installationToken;
+    void daemonToken;
+    sealedInput = {
+      ...rest,
+      sealedSecrets: await sealRunSecrets(
+        plane.publicKey,
+        SECRETS,
+        sealBindingOf(INPUT),
+      ),
+    };
+  });
+
+  const sealedCtx = () => ({
+    abortController: new AbortController(),
+    cancelled: false,
+    log: vi.fn(),
+    workflowRunId: () => "run-ext-sealed",
+  });
+
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_PAYLOAD_SEAL_KEY_FILE = keyFile;
+    resetPlaneKeyRingForTests();
+    finallyOrder.length = 0;
+    revokerTokens.length = 0;
+    revokeOnce.mockClear();
+    releaseMock.mockClear();
+    provisionWorkdir.mockReset().mockResolvedValue(RUN);
+    cleanupWorkdir.mockReset().mockResolvedValue(undefined);
+    postRunTerminal.mockReset().mockResolvedValue("applied");
+    checkRunStaleness.mockReset().mockResolvedValue(false);
+    startGitBroker.mockClear();
+    startGhBroker.mockClear();
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      cleanup: vi.fn(async () => {}),
+    });
+    pullNextMessage.mockReset();
+    pollUntilTerminal.mockReset();
+  });
+
+  afterEach(() => {
+    delete process.env.WORKER_PAYLOAD_SEAL_KEY_FILE;
+    resetPlaneKeyRingForTests();
+  });
+
+  it("a sealed input is unsealed first; the clone, both brokers and the daemon get the unsealed values; the input they see has no secret field", async () => {
+    pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
+    pollUntilTerminal.mockResolvedValue({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+    const c = sealedCtx();
+    const output = await runFn(sealedInput, c);
+    expect(output).toMatchObject({ outcome: "completed" });
+    const lines = c.log.mock.calls.map((call) => String(call[0]));
+    expect(
+      lines.some((l) => l.includes("run secrets: sealed (kid=plane-test)")),
+    ).toBe(true);
+    // The clone used the unsealed installation token.
+    expect(provisionWorkdir.mock.calls[0]![0]).toMatchObject({
+      installationToken: SECRETS.installationToken,
+    });
+    // Both brokers too.
+    expect(startGitBroker.mock.calls[0]![0]).toMatchObject({
+      installationToken: SECRETS.installationToken,
+    });
+    expect(startGhBroker.mock.calls[0]![0]).toMatchObject({
+      installationToken: SECRETS.installationToken,
+    });
+    // The daemon's deps carry the two it needs; the input it sees carries none.
+    const [, daemonInput, , , , , deps] = daemonCtorArgs[0]!;
+    expect(deps).toMatchObject({
+      secrets: {
+        installationToken: SECRETS.installationToken,
+        daemonToken: SECRETS.daemonToken,
+      },
+    });
+    for (const field of [
+      "installationToken",
+      "githubReadToken",
+      "daemonToken",
+    ]) {
+      expect(daemonInput).not.toHaveProperty(field);
+    }
+    expect(daemonInput).toHaveProperty("sealedSecrets");
+    // The revoker was built with both ghs_ tokens, exactly once, and fired once.
+    expect(revokerTokens).toEqual([SECRETS]);
+    expect(revokeOnce).toHaveBeenCalledTimes(1);
+    expect(finallyOrder.indexOf("token-revoke")).toBeLessThan(
+      finallyOrder.indexOf("release"),
+    );
+    // H2: no secret value in any step line, the output, or the ctor args
+    // beyond deps.secrets.
+    const transcript = lines.join("\n") + JSON.stringify(output);
+    for (const value of Object.values(SECRETS)) {
+      expect(transcript).not.toContain(value);
+    }
+    const ctorArgsMinusSecrets = daemonCtorArgs[0]!.map((a, i) =>
+      i === 6 ? { ...(a as object), secrets: undefined } : a,
+    );
+    expect(JSON.stringify(ctorArgsMinusSecrets)).not.toContain(
+      SECRETS.installationToken,
+    );
+    expect(JSON.stringify(ctorArgsMinusSecrets)).not.toContain(
+      SECRETS.daemonToken,
+    );
+  });
+
+  it("the www client is built from the unsealed daemon token (next-message carries it), never from the input", async () => {
+    pullNextMessage.mockResolvedValue(null);
+    await runFn(sealedInput, sealedCtx());
+    const [opts] = pullNextMessage.mock.calls[0]!;
+    expect(opts).toMatchObject({ daemonToken: SECRETS.daemonToken });
+  });
+
+  it("stale-skip (an early return before the clone) still revokes, exactly once", async () => {
+    checkRunStaleness.mockResolvedValue(true);
+    // The AAD binds the WHOLE input: a queued-policy input is sealed as such.
+    const { installationToken, daemonToken, ...rest } = INPUT;
+    void installationToken;
+    void daemonToken;
+    const queuedInput = {
+      ...rest,
+      supersedePolicy: "complete-run-queue",
+      prKey: "org-1/o/r/7",
+    };
+    await expect(
+      runFn(
+        {
+          ...queuedInput,
+          sealedSecrets: await sealRunSecrets(
+            plane.publicKey,
+            SECRETS,
+            sealBindingOf(queuedInput),
+          ),
+        },
+        sealedCtx(),
+      ),
+    ).resolves.toMatchObject({ outcome: "stale-skipped" });
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+    expect(revokeOnce).toHaveBeenCalledTimes(1);
+  });
+
+  it("a clone failure (a throw before the main try) still revokes, exactly once", async () => {
+    provisionWorkdir.mockRejectedValueOnce(new Error("clone failed"));
+    await expect(runFn(sealedInput, sealedCtx())).rejects.toThrow(
+      "clone failed",
+    );
+    expect(revokeOnce).toHaveBeenCalledTimes(1);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("an envelope the ring cannot open fails the run with kid + reason only, before any www call", async () => {
+    const other = await generatePlaneKeyPair("plane-test");
+    const foreign = {
+      ...sealedInput,
+      sealedSecrets: await sealRunSecrets(
+        other.publicKey,
+        SECRETS,
+        sealBindingOf(INPUT),
+      ),
+    };
+    const c = sealedCtx();
+    await expect(runFn(foreign, c)).rejects.toThrow(
+      "payload-seal: unseal failed (kid=plane-test, reason=tag)",
+    );
+    expect(checkRunStaleness).not.toHaveBeenCalled();
+    expect(pullNextMessage).not.toHaveBeenCalled();
+    expect(postRunTerminal).not.toHaveBeenCalled();
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+    // No secrets were ever resolved, so there is nothing to revoke.
+    expect(revokeOnce).not.toHaveBeenCalled();
+    const transcript = c.log.mock.calls.map((x) => String(x[0])).join("\n");
+    for (const value of Object.values(SECRETS)) {
+      expect(transcript).not.toContain(value);
+    }
+    expect(transcript).not.toContain(plane.privateKey.privateKeyJwk.d);
+  });
+
+  it("a wrong threadChatId in the input (an envelope lifted from another run) is refused the same way", async () => {
+    const c = sealedCtx();
+    await expect(
+      runFn({ ...sealedInput, threadChatId: "tc_other" }, c),
+    ).rejects.toThrow("reason=tag");
+    expect(pullNextMessage).not.toHaveBeenCalled();
+  });
+
+  it("the legacy plain-text input is still accepted in the rollout window and journaled as legacy", async () => {
+    pullNextMessage.mockResolvedValue(null);
+    const c = sealedCtx();
+    await expect(runFn(INPUT, c)).resolves.toMatchObject({
+      outcome: "nothing-to-run",
+    });
+    const lines = c.log.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((l) => l.endsWith("run secrets: legacy"))).toBe(true);
+    expect(revokerTokens).toEqual([
+      { installationToken: "inst-secret", daemonToken: "daemon-tok" },
+    ]);
+  });
+});
+
+/**
  * #205 (AC5 at the workflow level): once a slot is held, EVERYTHING per run —
  * the clone grant, the daemon, the admission and teardown reaps, the cleanup —
  * runs as that slot's own account, so a kill issued by this run reaches only
@@ -2100,6 +2441,7 @@ describe("#205: a run on slot 1 executes as the slot-1 account end to end", () =
     process.env.WORKER_AGENT_USER = "_automata-agent";
     process.env.WORKER_WORKDIR_ROOT = "/usr/local/automata/runs";
     process.env.WORKER_BOX_SLOTS = "2";
+    process.env.WORKER_GLOBAL_MAX_RUNS = "2"; // #372: the tuple moves together
     process.env.WORKER_RUN_MEMORY_MAX = "1500M";
     admissionOrder.length = 0;
     daemonCtorArgs.length = 0;
@@ -2514,6 +2856,14 @@ Committed_AS:   12000000 kB
     const anon = 300 * 1024 ** 2;
     readMemoryAnon.mockImplementation(() => anon);
     const seen: Array<number | null> = [];
+    // The probe is attached after the daemon is up and read while the run
+    // polls, so the run must have a message to execute: a 204 would end it
+    // at next-message, before any poll. Set here, not inherited from
+    // whichever describe ran before (the #380 group resets it).
+    pullNextMessage.mockReset().mockResolvedValue({
+      agent: "claudeCode",
+      model: "m",
+    });
     pollUntilTerminal.mockReset().mockImplementation(async () => {
       seen.push(controller.reservedBytes());
       readMemoryAnon.mockImplementation(() => null);

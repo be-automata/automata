@@ -18,6 +18,7 @@ import {
   startEngineLivenessWatchdog,
 } from "../agent-run/engine-liveness";
 import { harnessDoctorLine } from "../agent-run/batteries-seed";
+import { loadPlaneKeysAtBoot } from "../agent-run/payload-seal-keys";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import {
   EGRESS_FENCE_UIDS_FILE,
@@ -27,6 +28,7 @@ import {
   assertSlotAccountsOutsideGroup,
   assertSlotSudoGrants,
   assertSlotWorkdirTraverse,
+  assertSlotsFitCommitLimit,
   hidepidDropinLeftAtOneSlot,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
@@ -46,7 +48,7 @@ import {
   assessCgroupSupport,
   prepareDelegatedRoot,
 } from "../agent-run/run-cgroup";
-import { workflows } from "../registry";
+import { buildWorkflows } from "../registry";
 import { headroomBootLine, headroomBootWarning } from "../agent-run/workflow";
 
 const execFileAsync = promisify(execFile);
@@ -158,12 +160,47 @@ async function main() {
     process.exit(1);
   }
 
+  // #372: the FIRST config load has its own label. loadWorkerConfig validates
+  // the whole concurrency tuple (WORKER_GLOBAL_MAX_RUNS = WORKER_BOX_SLOTS ≥
+  // WORKER_PER_ORG_MAX_RUNS, the #204/#205 pairings, the #371 knobs) and
+  // throws naming the knobs; a box with an inconsistent tuple must refuse to
+  // start with THAT message, not one borrowed from the next probe's try block.
+  let bootCfg: ReturnType<typeof loadWorkerConfig>;
+  try {
+    bootCfg = loadWorkerConfig();
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: worker configuration is invalid — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
+
+  // #372: the memory side of the tuple against THIS box, decided BEFORE any
+  // boot side effect (namespace claim, reclaim, uid scan, engine-DB repair): a
+  // refused tuple under Restart=always must crash-loop on nothing but this
+  // message. The config loader
+  // checked the knobs against each other; this checks N × ceiling + base
+  // against the kernel's commit budget (fail-closed, with the RAM warning
+  // beside it), so an oversized tuple refuses to start instead of deferring
+  // every run past the first until it fails (#371).
+  try {
+    assertSlotsFitCommitLimit(bootCfg);
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: the box slots do not fit this box's CommitLimit — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
+  warnIfSlotsExceedMemory(bootCfg);
+
   // #108 A5: agent-uid mode leans on node's built-in env-proxy support for the
   // agent CLI child. Node 20 has none, and a box on it would turn every fenced
   // run into a silent 90s stall with zero output rather than an error. Probe the
   // configured node ONCE at boot and refuse to start below the floor.
   try {
-    const cfg = loadWorkerConfig();
+    const cfg = bootCfg;
     if (cfg.agentUser) {
       await assertNodeBinSupportsEnvProxy({
         nodeBin: cfg.nodeBin,
@@ -221,6 +258,32 @@ async function main() {
   } catch (err) {
     console.error(
       "[worker-boot] FATAL: box lock helper unavailable — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
+
+  // #380: the plane's seal key ring. Rollout step 1: an absent file is
+  // logged and tolerated (legacy plain-text inputs only); a file that is
+  // present but unparseable, or holds a key that fails its own seal→unseal
+  // probe, refuses boot BEFORE registration — a worker that registered with a
+  // broken ring would fail every sealed run at its first step. Step 4 (PR 2)
+  // flips `required` to true. The kid list printed here is what rollout step
+  // 3 compares against the kid www logs at dispatch.
+  try {
+    const { payloadSealKeyFile } = loadWorkerConfig();
+    const ring = await loadPlaneKeysAtBoot({
+      path: payloadSealKeyFile,
+      required: false,
+    });
+    console.log(
+      ring.present
+        ? `[worker-boot] payload seal: ${ring.kids.length} key(s) usable (${ring.kids.join(", ")}) from ${payloadSealKeyFile}`
+        : `[worker-boot] payload seal: no key file at ${payloadSealKeyFile} — legacy plain-text inputs only (rollout step 1)`,
+    );
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: payload seal key file is unusable — refusing to start",
       err,
     );
     process.exit(1);
@@ -291,7 +354,9 @@ async function main() {
   // name — the reapers key on getProcessWorkerId(), a separate per-process uuid
   // — so changing it costs an extra stale row after the first restart and
   // nothing else.
-  const registrationConfig = loadWorkerConfig();
+  // The SAME config the "configuration is invalid" gate validated is what the
+  // engine registration below reads — never a second parse of the env.
+  const registrationConfig = bootCfg;
   const boxId = registrationConfig.boxId;
   console.log(`[worker-boot] box id: ${boxId}`);
 
@@ -323,7 +388,14 @@ async function main() {
   // /proc/meminfo cannot be read at boot refuses to start instead of running
   // every job unguarded while the log says "OFF".
   try {
+    const env = process.env;
     console.log(`[worker-boot] ${headroomBootLine(registrationConfig)}`);
+    // #372: the caps the engine is about to be told, explicit or defaulted —
+    // an unset WORKER_GLOBAL_MAX_RUNS follows the slots, so an N = 2 box's
+    // per-variant global cap moves 1 → 2 on upgrade; the journal says so.
+    console.log(
+      `[worker-boot] engine caps: global=${registrationConfig.globalMaxRuns}${env.WORKER_GLOBAL_MAX_RUNS?.trim() ? "" : " (default = WORKER_BOX_SLOTS)"} per-org=${registrationConfig.perOrgMaxRuns}${env.WORKER_PER_ORG_MAX_RUNS?.trim() ? "" : " (default)"} slots=${registrationConfig.boxSlots} — one tuple, validated by loadWorkerConfig`,
+    );
     const loadWarning = headroomBootWarning(registrationConfig);
     if (loadWarning) console.warn(`[worker-boot] WARNING: ${loadWarning}`);
   } catch (err) {
@@ -338,16 +410,22 @@ async function main() {
   // here could drift from it and leave the box silently unguarded.
   const workerName = `automata-worker-${boxId}`;
   const boxSlots = registrationConfig.boxSlots;
-  warnIfSlotsExceedMemory(registrationConfig);
   const worker = await hatchet.worker(workerName, {
-    workflows,
+    // #372: the engine caps registered on every variant come from the SAME
+    // validated config as `slots` below — loadWorkerConfig refused any tuple
+    // where WORKER_GLOBAL_MAX_RUNS ≠ WORKER_BOX_SLOTS or the per-org cap exceeds
+    // it, so what the engine admits per variant, what this worker accepts and
+    // what the kernel box lock grants are one number.
+    workflows: buildWorkflows({
+      globalMaxRuns: registrationConfig.globalMaxRuns,
+      perOrgMaxRuns: registrationConfig.perOrgMaxRuns,
+    }),
     // #125 C4 / #183 / #205: ONE unit per box and `slots` = WORKER_BOX_SLOTS,
     // the engine-native cross-workflow cap (the engine's global concurrency key
     // is per workflow — docs/uat/hatchet-lite-v0.94.10-observed.md §5), equal to
     // the number of kernel slot locks the box holds (box-lock.ts), which cover
     // the crash-relaunch overlap. Everything else stays QUEUED on the engine,
-    // where a cancel/supersede is free and no timeout clock is running. The
-    // engine caps in definition.ts must agree with this value (#372).
+    // where a cancel/supersede is free and no timeout clock is running.
     slots: boxSlots,
   });
 

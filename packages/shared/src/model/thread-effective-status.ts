@@ -24,6 +24,33 @@ function selectChatStatus(statuses: ThreadStatus[]) {
   )}))`;
 }
 
+/**
+ * SQL expression: the thread's EFFECTIVE last write — the later of the thread
+ * row's `updatedAt` and its threadChat rows' (a chat-mode thread moves to
+ * `booting` on a retry/follow-up through the chat row only; the thread row
+ * is touched later, best effort). Every sweep age anchor and compare-and-set
+ * fence on "when was this thread last written" must use this, or a chat-mode
+ * thread re-dispatched moments ago looks as old as its previous attempt
+ * (#380 rule (iii), the rule (i) generation guard, markThreadsTerminal).
+ * Decoded as a Date like `thread.updatedAt`.
+ */
+export function threadLastWriteAt() {
+  return sql<Date>`greatest(${thread.updatedAt}, coalesce((select max(${threadChat.updatedAt}) from ${threadChat} where ${threadChat.threadId} = ${thread.id}), ${thread.updatedAt}))`.mapWith(
+    thread.updatedAt,
+  );
+}
+
+/**
+ * A Date bound for comparing against `threadLastWriteAt()`. With an SQL
+ * expression on the left, drizzle does not run the right-hand Date through a
+ * column's encoder, so the driver would send LOCAL wall-clock time against a
+ * `timestamp without time zone` column — hours off on any non-UTC host.
+ * Encoded exactly as a `thread.updatedAt` parameter is.
+ */
+export function threadTimestampParam(at: Date) {
+  return sql.param(at, thread.updatedAt);
+}
+
 /** Effective statuses after which a self-heal thread can no longer use the box or report. */
 export const TERMINAL_THREAD_STATUSES: ThreadStatus[] = [
   "complete",

@@ -304,6 +304,122 @@ describe("handleDaemonEvent — #125 C1 generation fence (no extra read)", () =>
     expect(r).toMatchObject({ success: false, status: 409 });
   });
 
+  // #380: a finish through this path (normal, or the worker's run-failed
+  // post) retires the writer's review-run row, so the sweep's rule (i) can
+  // never re-read a stale in_flight row against a later resume of the thread.
+  // Card: protects=the row leaves the sweep's candidate set at finish;
+  // fails_when=the row stays in_flight after a daemon-event finish;
+  // no_claim=the sweep (its own suite).
+  it("#380: a terminal daemon-event retires the writer's review-run row (keyed by its generation)", async () => {
+    const { createTestRemoteRun } = await import(
+      "@terragon/shared/model/test-helpers"
+    );
+    const { createTestOrg } = await import(
+      "@terragon/shared/model/test-helpers"
+    );
+    const orgId = await createTestOrg({ db });
+    const run = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 77,
+      externalId: "run-finishing",
+    });
+    await setThreadActiveRun({
+      db,
+      threadId: run.threadId,
+      externalId: "run-finishing",
+    });
+    const r = await handleDaemonEvent({
+      threadId: run.threadId,
+      threadChatId: run.threadChatId,
+      userId: user.id,
+      timezone: "UTC",
+      contextUsage: null,
+      messages: [getClaudeResultMessage()],
+      runExternalId: "run-finishing",
+    });
+    expect(r.success).toBe(true);
+    await waitUntilResolved();
+    const [row] = await db
+      .select({ status: schema.hatchetRun.status })
+      .from(schema.hatchetRun)
+      .where(eq(schema.hatchetRun.externalId, "run-finishing"));
+    expect(row?.status).toBe("terminal");
+  });
+
+  it("#380: a row already `superseded` stays superseded after a finish, and a header cannot retire another thread's row", async () => {
+    const { createTestRemoteRun, createTestOrg } = await import(
+      "@terragon/shared/model/test-helpers"
+    );
+    const { retireHatchetRun } = await import(
+      "@terragon/shared/model/hatchet-run"
+    );
+    const orgId = await createTestOrg({ db });
+    const victim = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 78,
+      externalId: "run-superseded",
+    });
+    await retireHatchetRun({
+      db,
+      key: { externalId: "run-superseded" },
+      as: "superseded",
+    });
+    // Another, unstamped thread finishing with THAT run id in its header.
+    const other = await remoteThread();
+    const r = await handleDaemonEvent({
+      threadId: other.threadId,
+      threadChatId: other.threadChatId,
+      userId: user.id,
+      timezone: "UTC",
+      contextUsage: null,
+      messages: [getClaudeResultMessage()],
+      runExternalId: "run-superseded",
+    });
+    expect(r.success).toBe(true);
+    await waitUntilResolved();
+    const [row] = await db
+      .select({ status: schema.hatchetRun.status })
+      .from(schema.hatchetRun)
+      .where(eq(schema.hatchetRun.externalId, "run-superseded"));
+    expect(row?.status).toBe("superseded");
+    void victim;
+  });
+
+  it("#380: a finish on an UNSTAMPED thread whose header names another thread's in_flight run leaves that row in_flight (the retire is fenced to the writer's thread)", async () => {
+    const { createTestRemoteRun, createTestOrg } = await import(
+      "@terragon/shared/model/test-helpers"
+    );
+    const orgId = await createTestOrg({ db });
+    await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 79,
+      externalId: "run-someone-elses",
+    });
+    const other = await remoteThread();
+    const r = await handleDaemonEvent({
+      threadId: other.threadId,
+      threadChatId: other.threadChatId,
+      userId: user.id,
+      timezone: "UTC",
+      contextUsage: null,
+      messages: [getClaudeResultMessage()],
+      runExternalId: "run-someone-elses",
+    });
+    expect(r.success).toBe(true);
+    await waitUntilResolved();
+    const [row] = await db
+      .select({ status: schema.hatchetRun.status })
+      .from(schema.hatchetRun)
+      .where(eq(schema.hatchetRun.externalId, "run-someone-elses"));
+    expect(row?.status).toBe("in_flight");
+  });
+
   it("409 when the writer names an older generation; the active one lands", async () => {
     const { threadId, threadChatId } = await remoteThread();
     await setThreadActiveRun({ db, threadId, externalId: "run-new" });

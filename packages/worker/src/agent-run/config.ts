@@ -1,7 +1,8 @@
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { BOX_SLOTS_MAX } from "./box-lock";
+import { DEFAULT_PAYLOAD_SEAL_KEY_FILE } from "./payload-seal-keys";
+import { BOX_SLOTS_MAX } from "./slot-limits";
 import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
 import {
   ADMISSION_BACKOFF,
@@ -93,6 +94,20 @@ export interface WorkerConfig {
    */
   boxSlots: number;
   /**
+   * #372: the engine's "global" concurrency cap (`'agent-run-global-memory-budget'`
+   * key, PER WORKFLOW VARIANT) as registered by this worker. Must EQUAL
+   * `boxSlots`: the engine's cross-workflow cap is the worker's `slots`
+   * (= boxSlots) and the host cap is the counting box lock, so the three
+   * numbers are one setting — `WORKER_GLOBAL_MAX_RUNS`. Default 1.
+   */
+  globalMaxRuns: number;
+  /**
+   * #372: the per-org fairness cap (`input.orgId` GROUP_ROUND_ROBIN key). Must
+   * stay ≤ `globalMaxRuns`; equal is allowed (a single-org box must be able to
+   * use every slot). `WORKER_PER_ORG_MAX_RUNS`, default 1.
+   */
+  perOrgMaxRuns: number;
+  /**
    * #205: every slot's agent account, slot 0 first — `[agentUser]` at N = 1,
    * `[]` with agent-uid mode off. The one list every box-wide operation (the
    * shared namespace grants, the boot scan, the stale-dir sweep) iterates.
@@ -179,6 +194,14 @@ export interface WorkerConfig {
    * to a raw-token env.
    */
   credentialBroker: "on" | "legacy-direct";
+  /**
+   * #380: the plane's seal key ring (`{"keys":[…]}`, see
+   * payload-seal-keys.ts). Every run unseals its `sealedSecrets` with it.
+   * Default /etc/automata/payload-seal.key. Rollout step 1: an absent file is
+   * tolerated (legacy plain-text inputs only); a present-but-unusable file
+   * refuses boot. Step 4 (PR 2) makes it mandatory.
+   */
+  payloadSealKeyFile: string;
 
   // --- Scheduling deadlock recovery (#69, §3.5) -----------------------------
   // Everything below is inert unless engineDatabaseUrl is set — the box's
@@ -327,11 +350,14 @@ export function parseMemoryMax(raw: string | undefined): number {
 export { BOX_SLOTS_MAX };
 
 /**
- * Parse `WORKER_BOX_SLOTS` (#205). Unset or empty = 1 = today's exclusive lock.
- * Anything present but not an integer in [1, BOX_SLOTS_MAX] THROWS: a box told
- * to run N slots must never quietly run a different N.
+ * Parse a slot-count knob — `WORKER_BOX_SLOTS` (#205), `WORKER_GLOBAL_MAX_RUNS`
+ * and `WORKER_PER_ORG_MAX_RUNS` (#372). Unset or empty = 1 = today's exclusive
+ * lock and compile-time caps. Anything present but not an integer in
+ * [1, BOX_SLOTS_MAX] THROWS, naming the knob: a box told to run N must never
+ * quietly run a different N (the engine caps are bounded by the slot bound
+ * because the tuple must agree).
  */
-export function parseBoxSlots(raw: string | undefined): number {
+export function parseSlotCount(name: string, raw: string | undefined): number {
   const v = (raw ?? "").trim();
   if (!v) {
     return 1;
@@ -339,10 +365,15 @@ export function parseBoxSlots(raw: string | undefined): number {
   const n = Number(v);
   if (!/^\d+$/.test(v) || !Number.isInteger(n) || n < 1 || n > BOX_SLOTS_MAX) {
     throw new Error(
-      `WORKER_BOX_SLOTS must be an integer between 1 and ${BOX_SLOTS_MAX}, got ${JSON.stringify(v)}`,
+      `${name} must be an integer between 1 and ${BOX_SLOTS_MAX}, got ${JSON.stringify(v)}`,
     );
   }
   return n;
+}
+
+/** `WORKER_BOX_SLOTS` (#205); see parseSlotCount. */
+export function parseBoxSlots(raw: string | undefined): number {
+  return parseSlotCount("WORKER_BOX_SLOTS", raw);
 }
 
 /** Parse `WORKER_RUN_TASKS_MAX`; unset ⇒ a generous default, since it is a runaway guard, not a budget. */
@@ -584,6 +615,40 @@ export function loadWorkerConfig(
         "Set WORKER_RUN_MEMORY_MAX, or set WORKER_BOX_SLOTS=1.",
     );
   }
+  // #372. THE TUPLE MOVES TOGETHER. The engine's "global" key is per workflow
+  // variant, the worker's `slots` is the engine-native cross-workflow cap and the
+  // counting box lock is the host cap: `WORKER_GLOBAL_MAX_RUNS` must EQUAL
+  // `WORKER_BOX_SLOTS` (worker.ts registers `slots: boxSlots`), or the engine
+  // would either dispatch runs the box cannot admit (global > slots: they park
+  // on the box lock with their 30-minute clocks running) or starve slots the
+  // box paid for (global < slots). The per-org fairness cap must not exceed the
+  // global cap (a cap no run can reach is a lie in the registration). Refused
+  // here, at boot AND at every run, like the #205 pairings above.
+  // Unset = the slots (the only consistent value — a box already running
+  // WORKER_BOX_SLOTS=2 keeps booting across this change); an EXPLICIT value
+  // that disagrees is still refused below.
+  const globalMaxRuns = env.WORKER_GLOBAL_MAX_RUNS?.trim()
+    ? parseSlotCount("WORKER_GLOBAL_MAX_RUNS", env.WORKER_GLOBAL_MAX_RUNS)
+    : boxSlots;
+  const perOrgMaxRuns = parseSlotCount(
+    "WORKER_PER_ORG_MAX_RUNS",
+    env.WORKER_PER_ORG_MAX_RUNS,
+  );
+  if (globalMaxRuns !== boxSlots) {
+    throw new Error(
+      `WORKER_GLOBAL_MAX_RUNS=${globalMaxRuns} but WORKER_BOX_SLOTS=${boxSlots}: the engine ` +
+        "global cap, the worker's engine slots and the kernel box slots are ONE setting " +
+        "and must agree — set both knobs to the same value (the tuple also needs " +
+        "WORKER_RUN_MEMORY_MAX and the swap sized for it; deploy/README.md).",
+    );
+  }
+  if (perOrgMaxRuns > globalMaxRuns) {
+    throw new Error(
+      `WORKER_PER_ORG_MAX_RUNS=${perOrgMaxRuns} exceeds WORKER_GLOBAL_MAX_RUNS=${globalMaxRuns}: ` +
+        "no org can be admitted past the global cap, so a larger per-org cap is a " +
+        "misconfiguration — set WORKER_PER_ORG_MAX_RUNS at or below the global cap.",
+    );
+  }
   // Every slot's account name must be a valid login NOW, not at the first run
   // of that slot: a base near the 31-character limit plus `-<i>` is refused by
   // assertAgentUser, and that refusal belongs at boot.
@@ -625,6 +690,8 @@ export function loadWorkerConfig(
   return {
     agentUser,
     boxSlots,
+    globalMaxRuns,
+    perOrgMaxRuns,
     agentUsers,
     headroomFloorBytes,
     headroomCommitFraction,
@@ -665,6 +732,8 @@ export function loadWorkerConfig(
       env.WORKER_CREDENTIAL_BROKER?.trim() === "legacy-direct"
         ? "legacy-direct"
         : "on",
+    payloadSealKeyFile:
+      env.WORKER_PAYLOAD_SEAL_KEY_FILE?.trim() || DEFAULT_PAYLOAD_SEAL_KEY_FILE,
 
     // --- #69 scheduling deadlock recovery ---------------------------------
     engineDatabaseUrl: env.HATCHET_ENGINE_DATABASE_URL?.trim() || "",

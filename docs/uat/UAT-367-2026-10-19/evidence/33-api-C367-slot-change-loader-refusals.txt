@@ -1,0 +1,32 @@
+# journalctl -u automata-worker 2026-10-19 18:50-18:56 UTC (loader + systemd lines)
+Oct 19 18:51:36 automata-exec-1 automata-worker[1609]: [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 6 -> 7
+Oct 19 18:51:36 automata-exec-1 systemd[1]: Started automata-worker.service - Automata execution-plane worker.
+Oct 19 18:53:35 automata-exec-1 systemd[1]: Stopped automata-worker.service - Automata execution-plane worker.
+Oct 19 18:53:35 automata-exec-1 automata-worker[3071]: [nft-loopback-load] FAIL: skuid set {999 2001} is not the set the egress fence covers {999 2001 2002} — re-render loopback-nft.conf with the same __AGENT_UID__ as egress-nft.conf (AGENT-UID-PROVISIONING.md §7)
+Oct 19 18:53:35 automata-exec-1 systemd[1]: Failed to start automata-worker.service - Automata execution-plane worker.
+Oct 19 18:53:50 automata-exec-1 automata-worker[3228]: [nft-loopback-load] FAIL: skuid set {999 2001} is not the set the egress fence covers {999 2001 2002} — re-render loopback-nft.conf with the same __AGENT_UID__ as egress-nft.conf (AGENT-UID-PROVISIONING.md §7)
+Oct 19 18:53:50 automata-exec-1 systemd[1]: Failed to start automata-worker.service - Automata execution-plane worker.
+Oct 19 18:54:05 automata-exec-1 automata-worker[3390]: [nft-loopback-load] FAIL: skuid set {999 2001} is not the set the egress fence covers {999 2001 2002} — re-render loopback-nft.conf with the same __AGENT_UID__ as egress-nft.conf (AGENT-UID-PROVISIONING.md §7)
+Oct 19 18:54:05 automata-exec-1 systemd[1]: Failed to start automata-worker.service - Automata execution-plane worker.
+Oct 19 18:54:21 automata-exec-1 automata-worker[3494]: [nft-loopback-load] FAIL: skuid set {999 2001} is not the set the egress fence covers {999 2001 2002} — re-render loopback-nft.conf with the same __AGENT_UID__ as egress-nft.conf (AGENT-UID-PROVISIONING.md §7)
+Oct 19 18:54:21 automata-exec-1 systemd[1]: Failed to start automata-worker.service - Automata execution-plane worker.
+Oct 19 18:54:26 automata-exec-1 systemd[1]: Stopped automata-worker.service - Automata execution-plane worker.
+Oct 19 18:54:27 automata-exec-1 automata-worker[3622]: [nft-loopback-load] OK — mode=enforce; uid(s) 999 2001 2002; mark 0x10000000; cgroup system.slice/automata-worker.service (level 2); tables 7 -> 7
+Oct 19 18:54:27 automata-exec-1 systemd[1]: Started automata-worker.service - Automata execution-plane worker.
+
+# file mtimes
+2026-10-19 18:53:26.907206567 +0000 /etc/automata/egress-nft.conf
+2026-10-19 18:53:27.349201943 +0000 /run/automata/egress-fence.uids
+2026-10-19 18:54:26.879862484 +0000 /etc/automata/loopback-nft.conf
+
+# fence uids now
+999 2001 2002
+
+# nft-verify.sh 2026-10-19T21:54:39Z
+[nft-verify] FAIL: loopback probes: a run is in flight (run-a10364ed-6ac4-4841-8768-54419e415e3d-ab055a9d) — the reaper would kill the probe listeners and log false escapees; retry when idle, or LOOPBACK_PROBES=0
+# the FAIL above is the verifier refusing to probe while a run is in flight (by design); structure-only rerun 2026-10-19T21:54:56Z:
+[nft-verify] OK — uid(s) 999 2001 2002 fenced on tcp+udp 80/443, loopback open, 36 docker rules intact, 0 blocked packet(s) so far; loopback layer: loaded, mode=enforce, 21 deny hit(s) so far
+
+# full probe pass taken earlier the same evening, with no run in flight (operator session transcript)
+# nft-verify.sh 2026-10-19T21:53:04Z
+[nft-verify] OK — uid(s) 999 2001 2002 fenced on tcp+udp 80/443, loopback open, 36 docker rules intact, 0 blocked packet(s) so far; loopback layer: loaded, mode=enforce, 0 deny hit(s) so far, probes ok

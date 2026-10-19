@@ -11,12 +11,28 @@ One unit is provided:
 It is a **template**. Replace the `__HOME__` and `__REPO__` tokens for the box,
 then install to `~/Library/LaunchAgents/`.
 
-`WORKER_BOX_SLOTS` (default 1) agent-runs execute at a time on the box: engine `slots`
-on the single unit plus N kernel slot locks (`src/agent-run/box-lock.ts`), one agent
-account per slot (#205; `AGENT-UID-PROVISIONING.md` §6). The `GLOBAL_MAX_RUNS = 1` key
-in `src/agent-run/definition.ts` caps each workflow VARIANT separately and is not the
-box budget. Extra throughput means raising the whole tuple (#372), gated on the
-memory-headroom check (#371); N > 1 is Linux-only and requires the #204 ceiling.
+**The concurrency tuple is ONE setting (#372).** `WORKER_BOX_SLOTS` (default 1)
+agent-runs execute at a time on the box: engine `slots` on the single unit plus N
+kernel slot locks (`src/agent-run/box-lock.ts`), one agent account per slot (#205;
+`AGENT-UID-PROVISIONING.md` §6). `WORKER_GLOBAL_MAX_RUNS` (default 1) is the
+engine's `'agent-run-global-memory-budget'` cap and `WORKER_PER_ORG_MAX_RUNS`
+(default 1) the per-org fairness cap, both registered on every workflow VARIANT by
+`src/agent-run/definition.ts` (the global key caps each variant separately and is
+not the box budget; every run has `slotCost: 1`). The config loader refuses — at boot AND at every run — an explicit
+`WORKER_GLOBAL_MAX_RUNS ≠ WORKER_BOX_SLOTS` (unset follows the slots), `WORKER_PER_ORG_MAX_RUNS > WORKER_GLOBAL_MAX_RUNS`, and N > 1
+without the uid drop or the #204 ceiling. ONCE at boot (Linux, N > 1, ceiling on,
+commit arm not inert: `WORKER_HEADROOM_COMMIT_FRACTION < 1`) the worker also
+refuses `WORKER_BOX_SLOTS × WORKER_HEADROOM_RUN_COMMIT + 2 GiB base >
+WORKER_HEADROOM_COMMIT_FRACTION × CommitLimit` — the #371 admission inequality with a fixed 2 GiB base, so it is a LOWER bound: a
+tuple that fails to boot could never be admitted, while a tuple that boots can
+still see its Nth run deferred when the live `Committed_AS` base is above 2 GiB
+(2.6–3.5 GB idle on the pilot; the sizing in `deploy/uat/phase2-4.md` works the
+runtime margin out). Run commit = `WORKER_RUN_MEMORY_MAX` by default, fraction
+0.9; CommitLimit = swap + overcommit_ratio × RAM. Raise all of `WORKER_BOX_SLOTS`,
+`WORKER_GLOBAL_MAX_RUNS`, `WORKER_PER_ORG_MAX_RUNS` together, with
+`WORKER_RUN_MEMORY_MAX` and the swap sized for N runs; the memory-headroom check
+(#371) is the runtime guard behind this boot guard. N > 1 is Linux-only.
+Production tuple and derivation: `deploy/uat/phase2-4.md`.
 
 ## `run-worker.sh` wiring
 
@@ -100,6 +116,15 @@ CommitLimit` (fraction default `0.9`; `1.0` = inert on that arm; run commit
   refusal (slot re-acquire waits included). Journal lines `box.headroom_rejected` /
   `box.headroom_deferred_wait` / `box.headroom_ok` carry the decision and the
   three memory values.
+  **Restart etiquette:** a deferred run holds NO run cgroup, box lock or run
+  dir, so a cgroup-based "nothing in flight" check misses it; a restart issued
+  during a deferral pauses the worker and BLOCKS in the SDK drain until that run
+  is admitted-and-finished or fails final (up to the 12-minute budget), and a
+  failure that ends the drain is redelivered to the next worker and re-executed.
+  Before restarting: `systemctl list-jobs` (a pending stop = a drain in
+  progress), the engine worker row (paused), and the journal for a `Task run
+  starting` without a `completed`/`failed` in the last 30 minutes or a
+  `box.headroom_deferred_wait` in the last 12.
   Rollback without a deploy: `WORKER_HEADROOM_FLOOR=0` and
   `WORKER_HEADROOM_COMMIT_FRACTION=1.0`.
 
@@ -138,6 +163,46 @@ corpse, declare itself wedged and exit, and `Restart=always` would relaunch it
 into the same verdict every `RestartSec` until the engine expired the row. The
 grace is bounded by one threshold window: a process older than that which is
 still reading a stale heartbeat does exit.
+
+## Payload seal key (#380)
+
+Every run's secrets — the GitHub installation token, the optional read-only
+token, the daemon token, the owner's repo environment variables (`repoEnv`)
+and the self-heal check/gate token — arrive in the Hatchet input **sealed** to
+this plane's X25519 public key (AAD = a SHA-256 of the whole persisted input,
+so a copied envelope cannot be re-triggered with any field changed), so the
+engine's Postgres, its backups and the run API hold ciphertext only (ADR-003
+F4, resolved). A key mismatch or a lost ring therefore blocks ALL of them: a
+task run without its repo env is not a degraded run, it does not start. The private half is the ring in
+`WORKER_PAYLOAD_SEAL_KEY_FILE` (default `/etc/automata/payload-seal.key`,
+`{"keys":[…]}`, mode 0400, owned by the service user).
+
+```bash
+# On the box, as root (the worker must be idle — no run in flight):
+cd /opt/automata-platform/packages/worker   # the checkout run-worker.sh uses
+pnpm exec tsx scripts/gen-payload-seal-key.ts          # prints <kid>:<base64url>
+systemctl restart automata-worker                      # boot log: "payload seal: 1 key(s) usable (<kid>)"
+# Then on www:
+wrangler secret put HATCHET_PAYLOAD_SEAL_KEY          # paste the printed line
+```
+
+The worker refuses to boot when the file is present but unparseable or any key
+fails its own seal→unseal probe. During rollout step 1 an **absent** file is
+tolerated (the worker then reads only the legacy plain-text input); strict mode
+(PR 2) makes it mandatory and refuses plain-text inputs.
+
+**Rotation, in this order:** (1) `gen-payload-seal-key.ts --rotate` adds a new
+key at the FRONT of the ring and keeps the old one; (2) restart the worker with
+no run in flight — the ring is read ONCE per process — and confirm the boot
+line lists the new kid; (3) only then switch www's `HATCHET_PAYLOAD_SEAL_KEY`
+to the printed line (a dispatch sealed to a kid the running worker has not
+loaded fails `unknown-kid`); (4) retire the old entry only when ≥24h have
+passed since the switch and no `hatchetRun` row dispatched before it belongs
+to a non-terminal thread — edit the file and restart again. Compare the `kid`
+www logs at dispatch (`run secrets sealed`) with the kid list in the boot line:
+a mismatch shows up as `unseal failed (reason=unknown-kid|tag)` on the first
+run and is reconciled by the sweep (`run-failed-unreported`). Every run also
+journals `token.revoke {"kind":"installation"|"read","status":204}` at its end.
 
 ## Install
 

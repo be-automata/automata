@@ -1,0 +1,22 @@
+## engine secret scan, bound 2026-10-19T16:41:12Z (the cutover) — run 2026-10-19T22:36:33Z with evidence/scan.sql, after the self-heal one-shot
+## markers: ghs_ anywhere, and the EXACT JSON keys "installationToken" "daemonToken" "githubReadToken" "checkToken" "gateToken"
+## columns: table | column | rows after bound | rows with a secret; zero/zero rows omitted; a parent and its day partition both report
+table | column | rows after cutover | rows with a secret
+v1_dags_olap | input | 48 | 0
+v1_dags_olap_20261019 | input | 48 | 0
+v1_payload | inline_content | 240 | 0
+v1_payload_20261019 | inline_content | 240 | 0
+v1_payloads_olap | inline_content | 432 | 0
+v1_payloads_olap_20261019 | inline_content | 432 | 0
+v1_task | input | 96 | 0
+v1_task_20261019 | input | 96 | 0
+v1_tasks_olap | input | 96 | 0
+v1_tasks_olap_20261019 | input | 96 | 0
+
+## post-cutover v1_task rows carrying sealedSecrets: 48
+## why the key match is exact: post-cutover v1_task rows that contain the substring githubReadToken only as the plain non-secret githubReadTokenExpiresAt: 5 — all sealed, none with ghs_ (task runs whose packs need the read token; its EXPIRY stays plain by design, the token is in the envelope)
+
+## sanity, same script with the day bound 2026-10-19T00:00:00Z (includes the pre-cutover rows) — run 2026-10-19T22:37:01Z; the method still finds secrets where they exist:
+v1_dags_olap | input | 112 | 64
+v1_payload | inline_content | 561 | 128
+v1_task | input | 224 | 64

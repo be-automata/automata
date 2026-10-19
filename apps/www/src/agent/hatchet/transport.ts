@@ -257,6 +257,13 @@ export type AgentRunLookupHint = {
   createdAt: Date;
   /** Dispatch stamps `additional_metadata.threadId`; the list is filtered on it. */
   threadId: string;
+  /**
+   * Half-width of the `since`/`until` window around `createdAt`. Default
+   * RUN_LOOKUP_WINDOW_MS (a run row's own timestamp is exact); a caller whose
+   * anchor is only approximate (#380 sweep rule (iii): the thread's last
+   * write) passes a wider one.
+   */
+  windowMs?: number;
 };
 
 /** Half-width of the `since`/`until` window around `createdAt`. */
@@ -345,10 +352,10 @@ async function fetchRunsPage({
   const query = new URLSearchParams({
     only_tasks: "false",
     since: new Date(
-      hint.createdAt.getTime() - RUN_LOOKUP_WINDOW_MS,
+      hint.createdAt.getTime() - (hint.windowMs ?? RUN_LOOKUP_WINDOW_MS),
     ).toISOString(),
     until: new Date(
-      hint.createdAt.getTime() + RUN_LOOKUP_WINDOW_MS,
+      hint.createdAt.getTime() + (hint.windowMs ?? RUN_LOOKUP_WINDOW_MS),
     ).toISOString(),
     additional_metadata: `threadId:${hint.threadId}`,
     limit: String(RUN_LOOKUP_PAGE),

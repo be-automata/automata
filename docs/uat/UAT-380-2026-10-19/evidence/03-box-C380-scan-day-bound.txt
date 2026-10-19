@@ -1,0 +1,16 @@
+## engine secret scan, bound 2026-10-19T00:00:00Z — run 2026-10-19T16:50:39Z with the final scan.sql (position('ghs_' …), key-name markers)
+## NOTE: the bound is the day start, so this window ALSO contains the first ~9 minutes after the 16:41:12Z cutover
+## (6 sealed task rows at that point, see 05-…). It is the day's "before" picture, not a pure pre-cutover cut.
+## sanity (same run): v1_task rows today containing ghs_ but NOT installationToken = 0 — every ghs_ sits in the plain installationToken field
+## columns: table | column | rows after bound | rows with a secret (ghs_ / installationToken / daemonToken / githubReadToken)
+## a parent partition and its day partition both report (the parent repeats the child); zero/zero rows omitted
+v1_dags_olap | input | 67 | 64
+v1_dags_olap_20261019 | input | 67 | 64
+v1_payload | inline_content | 336 | 128
+v1_payload_20261019 | inline_content | 336 | 128
+v1_payloads_olap | inline_content | 615 | 128
+v1_payloads_olap_20261019 | inline_content | 615 | 128
+v1_task | input | 134 | 64
+v1_task_20261019 | input | 134 | 64
+v1_tasks_olap | input | 134 | 64
+v1_tasks_olap_20261019 | input | 134 | 64

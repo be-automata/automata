@@ -1,6 +1,7 @@
 import { toDBMessage } from "@/agent/msg/toDBMessage";
 import { getPendingToolCallErrorMessages } from "@/lib/db-message-helpers";
 import { db } from "@/lib/db";
+import { retireHatchetRun } from "@terragon/shared/model/hatchet-run";
 import { ClaudeMessage } from "@terragon/daemon/shared";
 import {
   DBMessage,
@@ -576,6 +577,33 @@ export async function handleDaemonEvent({
     rateLimitResetTime,
   });
   if (isThreadFinished && didUpdateStatus) {
+    // #380: a run that ends through THIS path (a normal finish, or the
+    // worker's `run-failed` post) leaves its review-run row `in_flight`
+    // otherwise, and the sweep's rule (i) later re-reads it: on a thread that
+    // was RESUMED in the meantime that stale row would terminalise the new
+    // attempt and revoke its daemon token. Retire it here, keyed by the
+    // writer's own generation (the fence header); a non-review run has no
+    // row and the UPDATE matches nothing. Best effort, off the response path.
+    if (runExternalId) {
+      const externalId = runExternalId;
+      waitUntil(
+        retireHatchetRun({
+          db,
+          // Fenced to THIS thread's rows: an unstamped thread passes the
+          // generation fence with any header value, so the header alone
+          // must never reach another thread's row.
+          key: { externalId, threadId },
+          as: "terminal",
+          onlyInFlight: true,
+        }).catch((error: unknown) => {
+          console.error("[daemon-event] run row retire failed (non-fatal)", {
+            threadId,
+            runExternalId: externalId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }),
+      );
+    }
     // TODO this should block queueing up new threads.
     waitUntil(
       handleThreadFinish({

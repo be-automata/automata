@@ -1,0 +1,7 @@
+table ip nat
+table ip filter
+table ip6 nat
+table ip6 filter
+table ip raw
+table inet automata_egress
+table inet automata_loopback

@@ -74,6 +74,9 @@ write_files:
       # the workdir-root traverse ACL and the /proc hidepid remount are
       # AGENT-UID-PROVISIONING.md §6 steps 2–4, done by hand — the worker's
       # N > 1 boot checks refuse a box that skipped them. 1 is today's account.
+      # #372: the worker's WORKER_BOX_SLOTS, WORKER_GLOBAL_MAX_RUNS and
+      # WORKER_PER_ORG_MAX_RUNS (worker-box.env) move WITH this number — the
+      # worker refuses an inconsistent tuple at boot.
       AGENT_SLOTS="${AGENT_SLOTS:-1}"
       AGENT_SLOT_UID_BASE=2000
       # Exact, not a floor: the harness batteries (ruflo's better-sqlite3 and

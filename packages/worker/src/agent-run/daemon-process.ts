@@ -1,3 +1,4 @@
+import type { RunSecrets } from "@terragon/utils/payload-seal";
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -123,6 +124,15 @@ export class DaemonProcess {
      */
     private readonly deps: {
       /**
+       * #380: the run's unsealed secrets. The installation token feeds the
+       * child env builder (07-07 gate / legacy-direct) and the daemon token
+       * rides the socket message. Never read from the input, never logged.
+       */
+      secrets: Pick<
+        RunSecrets,
+        "installationToken" | "daemonToken" | "repoEnv"
+      >;
+      /**
        * Phase 7: set ONLY when readTokenForRun returned a token (brokered
        * non-review run, seeded requiring pack, unexpired token); never read
        * from the input here. Secret: never logged.
@@ -140,7 +150,7 @@ export class DaemonProcess {
       lane?: RunLane;
       /** Injectable so the suite never reads the real /etc file. */
       boxTestServicesEnvPath?: string;
-    } = {},
+    },
   ) {
     const workerId = getProcessWorkerId();
     // #205: at N > 1 every per-run artefact lives in the slot's own subdir
@@ -222,7 +232,7 @@ export class DaemonProcess {
       baseEnv: process.env,
       anthropicApiKey: this.config.anthropicApiKey,
       claudeBinDir: this.config.claudeBinDir,
-      installationToken: this.input.installationToken,
+      installationToken: this.deps.secrets.installationToken,
       ghConfigDir: this.ghConfigDir,
       botLogin: this.config.botLogin,
       runHome: this.credentials?.home ?? null,
@@ -231,7 +241,7 @@ export class DaemonProcess {
       egressProxyUrl: this.egressProxyUrl,
       broker: this.broker,
       githubReadToken: this.deps.githubReadToken ?? null,
-      repoEnv: { ...boxTestEnv, ...this.input.repoEnv },
+      repoEnv: { ...boxTestEnv, ...this.deps.secrets.repoEnv },
       batteryEnv: harness.env,
       batteryPathDirs: harness.pathDirs,
       browseProxy: harness.browseProxy,
@@ -498,7 +508,7 @@ export class DaemonProcess {
   async sendMessage(pulled: PulledDaemonMessage): Promise<number> {
     const message = {
       ...pulled,
-      token: this.input.daemonToken,
+      token: this.deps.secrets.daemonToken,
       threadId: this.input.threadId,
       threadChatId: this.input.threadChatId,
     };
