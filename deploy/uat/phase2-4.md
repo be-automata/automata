@@ -90,13 +90,16 @@ prod `thread.messages` (read by the peer session) show the agent's only turn as 
 disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin
 to enable access"_ (`is_error: true`, 394 ms, cost 0) — the Anthropic organisation that owns the delivered
 owner credential has turned subscription use off. Every review run that delivers that credential fails
-the same way until an admin re-enables it or the platform stops delivering it. **Applied 19:05:15 UTC
-(peer session, reversible):** the August fallback — the vendor org's `claudeCode` setup-token row in
-`agent_provider_credentials` (id `f148720d…`) set `is_active = false`, so vendor-org review runs now
-bill the built-in key like the task lane; the other org's OAuth row is untouched; revert is
-`is_active = true` on that id. The concurrency evidence in rows 2–3 is
+the same way until an admin re-enables it or the platform stops delivering it. **Fallback tried and reverted (peer session):** at 19:05:15 UTC the vendor org's `claudeCode`
+setup-token row in `agent_provider_credentials` (id `f148720d…`) was set `is_active = false` so reviews
+would bill the built-in key. That path failed too ("Credit balance is too low", credential source
+built-in credits, thread `9f481987`), so the row was restored to `is_active = true` at 19:07:21 UTC.
+Both credential paths are dead as of this record. A review run at about 21:45 UTC (PR #401) again
+logged `delivered user credential` and posted a no-verdict notice. The fix is the operator's:
+re-enable Claude Code subscription access on that Anthropic organisation, or top up the built-in API
+key. The concurrency evidence in rows 2–3 is
 unaffected: it is the worker/engine/box path up to and including the daemon hand-off and teardown.
 
 **Firewall.** The operator laptop's egress IP moved during the rollout; the `automata-execution-plane`
 firewall admits ssh from /32s only, so ssh/ping timed out while Hetzner reported the server `running`.
-A second /32 was added. Check `curl api.ipify.org` against the rule before suspecting the box.
+It moved twice; the operator's /32 is replaced each time, never stacked. Check `curl api.ipify.org` against the rule before suspecting the box.
