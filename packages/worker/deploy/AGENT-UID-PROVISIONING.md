@@ -255,6 +255,14 @@ sudo setfacl -m u:automata-agent-1:--x /usr/local/automata/runs
 #    WORKER_BOX_SLOTS=2
 #    WORKER_GLOBAL_MAX_RUNS=2
 #    WORKER_PER_ORG_MAX_RUNS=2
+#    Then, BEFORE the restart, run the worker's own boot gates with that env
+#    loaded (#372) and restart only on `fits`: the commit-budget check refuses
+#    N × WORKER_HEADROOM_RUN_COMMIT + 2 GiB > WORKER_HEADROOM_COMMIT_FRACTION ×
+#    CommitLimit, and a refused tuple crash-loops under Restart=always. The
+#    pilot cx33 at 5000M FAILS it for N = 2 (12.6 GB > 11.4 GB): size the run
+#    commit, swap and vm.overcommit_ratio per deploy/uat/phase2-4.md first.
+set -a; source /home/automata/.automata/worker-box.env; set +a
+( cd /opt/automata-platform/packages/worker && pnpm exec tsx deploy/check-slots-fit.ts )
 ```
 
 What the worker then does on its own: takes slot locks `box.lock` and
