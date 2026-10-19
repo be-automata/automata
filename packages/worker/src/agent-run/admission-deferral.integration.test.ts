@@ -192,12 +192,15 @@ describe.skipIf(!itEnabled)(
         label: "wait",
         mode: "wait-then-complete",
       });
-      const seen = new Set<Status>();
+      // The OLAP status can lag the dispatch (QUEUED, or a 404 read as QUEUED,
+      // for a moment after the stub has started), so sample from the first
+      // RUNNING read onwards.
+      const seen: Status[] = [];
       const final = await pollUntil(
         `${label} terminal`,
         async () => {
           const s = await statusOf(id);
-          if ((attempts.get(label)?.length ?? 0) > 0) seen.add(s);
+          if (seen.length > 0 || s === Status.RUNNING) seen.push(s);
           return s;
         },
         (s) => TERMINAL.includes(s),
@@ -206,11 +209,11 @@ describe.skipIf(!itEnabled)(
       );
       expect(final).toBe(Status.COMPLETED);
       expect(attempts.get(label)).toEqual([0]);
-      // After the attempt started, the engine never saw it leave RUNNING until
-      // it completed — no QUEUED, no FAILED.
-      expect([...seen].filter((s) => s !== Status.RUNNING)).toEqual([
-        Status.COMPLETED,
-      ]);
+      // From the first RUNNING to the terminal read nothing but RUNNING was
+      // observed — no QUEUED (an engine retry), no FAILED.
+      expect(seen.length).toBeGreaterThan(1);
+      expect(new Set(seen.slice(0, -1))).toEqual(new Set([Status.RUNNING]));
+      expect(seen.at(-1)).toBe(Status.COMPLETED);
     });
 
     it("retries 0 on the shipped shape: an executionTimeout is NOT re-executed — one attempt, FAILED final", async () => {

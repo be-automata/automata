@@ -33,9 +33,17 @@ export function backoffSeconds(n: number): number {
   return Math.min(ADMISSION_BACKOFF.factor ** n, ADMISSION_BACKOFF.maxSeconds);
 }
 
-/** Σ backoffSeconds(n) for n in 1..deferrals — the worst-case total wait. */
+/**
+ * Σ backoffSeconds(n) for n in 1..deferrals — the worst-case total wait. Closed
+ * form (geometric part + capped tail), so a misconfigured count of any size is
+ * refused by the boot budget check in O(1) instead of being summed.
+ */
 export function sumBackoffSeconds(deferrals: number): number {
-  let total = 0;
-  for (let n = 1; n <= deferrals; n++) total += backoffSeconds(n);
-  return total;
+  if (!(deferrals > 0)) return 0;
+  const { factor, maxSeconds } = ADMISSION_BACKOFF;
+  // The last n with factor^n < maxSeconds: 2^6 = 64 < 120 ≤ 2^7.
+  const uncapped = Math.floor(Math.log(maxSeconds) / Math.log(factor));
+  const geometric = (n: number) => (factor ** (n + 1) - factor) / (factor - 1);
+  if (deferrals <= uncapped) return geometric(deferrals);
+  return geometric(uncapped) + (deferrals - uncapped) * maxSeconds;
 }

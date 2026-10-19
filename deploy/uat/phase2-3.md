@@ -18,8 +18,7 @@ run commit = `WORKER_RUN_MEMORY_MAX`, `WORKER_ADMISSION_MAX_DEFERRALS=8`). Boot 
 | 3   | Hog stopped: the SAME run (same `workflowRunExternalId`, one attempt) logs `box.headroom_ok`, completes and posts its verdict                                                                                                                                                                                                    | _pending_ |
 | 4   | `Committed_AS` never exceeded `fraction × CommitLimit` during the drill (sampler TSV)                                                                                                                                                                                                                                            | _pending_ |
 | 5   | Budget exhausted (hog held past `budgetS`): the run FAILS once with `AdmissionBudgetExhaustedError` ("no memory headroom after N deferral(s)"), is never re-executed, nothing on disk                                                                                                                                            | _pending_ |
-
-| 6 | Queued-behind-a-deferral (N = 1): a second review dispatched while the first is deferred stays QUEUED at the engine (the deferred run holds the engine slot); it starts when the first ends — recorded, never failed by the worker | _pending_ |
+| 6   | Queued-behind-a-deferral (N = 1): a second review dispatched while the first is deferred stays QUEUED at the engine (the deferred run holds the engine slot); it starts when the first ends — recorded, never failed by the worker                                                                                               | _pending_ |
 
 ## Notes
 
