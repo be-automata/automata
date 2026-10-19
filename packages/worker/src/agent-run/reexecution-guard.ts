@@ -48,6 +48,8 @@ export interface LedgerOpts {
   /** The run-namespace root; the durable copy is `<root>/deferrals/<key>.json`. Omitted ⇒ in-process only (tests). */
   root?: string;
   now?: number;
+  /** Where a failed durable write/remove is reported (it decides whether a retry after a restart is admitted). */
+  log?: (line: string) => void;
 }
 
 function fileFor(root: string, runKey: string): string {
@@ -78,6 +80,7 @@ function writeDurable(
   root: string,
   runKey: string,
   entry: { count: number; at: number },
+  log?: (line: string) => void,
 ): void {
   try {
     fs.mkdirSync(path.join(root, LEDGER_DIRNAME), {
@@ -87,16 +90,33 @@ function writeDurable(
     const file = fileFor(root, runKey);
     fs.writeFileSync(`${file}.tmp`, JSON.stringify(entry), { mode: 0o600 });
     fs.renameSync(`${file}.tmp`, file);
-  } catch {
-    // Best-effort: the in-process copy still governs this process's retries.
+  } catch (e) {
+    // The in-process copy still governs this process's retries; what is lost
+    // is the retry after a RESTART, which the guard would then refuse — so the
+    // operator must be able to trace that refusal back to this line.
+    log?.(
+      `box.deferral_ledger_write_failed ${JSON.stringify({
+        runKey,
+        error: e instanceof Error ? e.message : String(e),
+      })}`,
+    );
   }
 }
 
-function removeDurable(root: string, runKey: string): void {
+function removeDurable(
+  root: string,
+  runKey: string,
+  log?: (line: string) => void,
+): void {
   try {
     fs.rmSync(fileFor(root, runKey), { force: true });
-  } catch {
-    // best-effort
+  } catch (e) {
+    log?.(
+      `box.deferral_ledger_remove_failed ${JSON.stringify({
+        runKey,
+        error: e instanceof Error ? e.message : String(e),
+      })}`,
+    );
   }
 }
 
@@ -118,7 +138,7 @@ export function recordDeferral(runKey: string, opts: LedgerOpts = {}): void {
   };
   deferrals.set(runKey, entry);
   if (opts.root) {
-    writeDurable(opts.root, runKey, entry);
+    writeDurable(opts.root, runKey, entry, opts.log);
     sweepDeferralLedger(opts.root, now);
   }
 }
@@ -203,7 +223,7 @@ export function assertNotReexecuting(
 /** The run ended on this box (completed, failed final, cancelled, or its last deferral): drop its ledger entry. */
 export function forgetRun(runKey: string, opts: LedgerOpts = {}): void {
   deferrals.delete(runKey);
-  if (opts.root) removeDurable(opts.root, runKey);
+  if (opts.root) removeDurable(opts.root, runKey, opts.log);
 }
 
 /** Tests: clear the in-process ledger and, given a root, its durable copy. */

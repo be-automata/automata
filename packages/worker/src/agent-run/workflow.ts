@@ -6,6 +6,7 @@ import {
   type AgentRunVariantName,
   type PerPrStrategy,
 } from "./definition";
+import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { configForSlot, loadWorkerConfig } from "./config";
 import { readMemoryAnon } from "./run-cgroup";
 import { acquireBoxSlot, type BoxLock } from "./box-lock";
@@ -418,16 +419,27 @@ async function runAgent(
   // RUN, which is stable across its retries and distinct for every run of the
   // same thread (supersede siblings, re-reviews) — a thread key would let one
   // run's leftover deferral count admit a sibling's engine-retried timeout.
-  const runKey = ctx.workflowRunId?.() || input.threadId;
-  let ledger: { root: string } | undefined;
+  const workflowRunId = ctx.workflowRunId?.() || null;
+  const runKey = workflowRunId ?? input.threadId;
+  const attempt = ctx.retryCount?.() ?? 0;
+  let ledger: { root: string; log: (line: string) => void } | undefined;
   try {
     config = loadWorkerConfig();
-    ledger = { root: config.runNamespaceRoot };
+    ledger = {
+      root: config.runNamespaceRoot,
+      log: (m) => ctx.log(`[agent-run ${input.threadId}] ${m}`),
+    };
     // #371 RE-EXECUTION GUARD, before anything with a side effect: an attempt
     // the box's deferral ledger does not account for came from an engine-side
     // failure (an execution timeout is retried by the engine) — never re-run
-    // the agent.
-    assertNotReexecuting(runKey, ctx.retryCount?.() ?? 0, ledger);
+    // the agent. Without a workflow run id nothing can prove a retry is a
+    // deferral's (a thread-keyed count could be another run's): fail closed.
+    if (!workflowRunId && attempt > 0) {
+      throw new NonRetryableError(
+        `attempt ${attempt + 1} of this run cannot be proven to be an admission-deferral retry (no workflow run id in the task context); an agent run never re-executes`,
+      );
+    }
+    assertNotReexecuting(runKey, attempt, ledger);
     wwwOpts = wwwOptsFor(input, ctx);
   } catch (err) {
     forgetRun(runKey, ledger);
@@ -506,8 +518,8 @@ async function runAgent(
       // The engine retries this one — unless it was the last attempt allowed,
       // or the run was cancelled meanwhile (then no retry returns here, and the
       // entry would only age out). Keep the ledger exact in both cases.
-      const attempt = ctx.retryCount?.() ?? 0;
       const retryWillCome =
+        workflowRunId !== null &&
         attempt < config.admissionMaxDeferrals &&
         !(ctx.cancelled || ctx.abortController?.signal.aborted);
       if (retryWillCome) {

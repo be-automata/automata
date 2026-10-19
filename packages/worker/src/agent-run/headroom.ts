@@ -191,8 +191,6 @@ export interface Reservation {
   observe(current: () => number | null): void;
 }
 
-const NO_RESERVATION: Reservation = { release: () => {}, observe: () => {} };
-
 /**
  * The per-worker admission gate: one reservation table, one reader. Built only
  * where the check can run (assessHeadroomSupport); where it cannot — no
@@ -254,7 +252,9 @@ export class AdmissionController {
           error: e instanceof Error ? e.message : String(e),
         })}`,
       );
-      return NO_RESERVATION;
+      // Fail-open on the DECISION only: the admitted run still reserves its
+      // expected commit, or the next admission would see it as free headroom.
+      return this.reserve(runId);
     }
     // A retried attempt of the same RUN must not count its own earlier
     // reservation; a sibling run of the same thread (a supersede whose old
@@ -280,6 +280,11 @@ export class AdmissionController {
       );
     }
     opts.log?.(`box.headroom_ok ${fields}`);
+    return this.reserve(runId);
+  }
+
+  /** Reserve `runCommitBytes` under `runId` and hand back its handle (token-scoped release/observe). */
+  private reserve(runId: string): Reservation {
     const token = Symbol(runId);
     const entry = { bytes: this.policy.runCommitBytes, token };
     this.reserved.set(runId, entry);

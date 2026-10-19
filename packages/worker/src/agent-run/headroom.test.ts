@@ -133,7 +133,7 @@ describe("evaluateHeadroom (both arms, boundary-inclusive)", () => {
 });
 
 describe("AdmissionController (mutex + reservations)", () => {
-  it("the controller only exists where the check can run: assessHeadroomSupport decides, and an unreadable meminfo at admission fails OPEN with a no-op reservation", () => {
+  it("the controller only exists where the check can run: assessHeadroomSupport decides, and an unreadable meminfo at admission fails OPEN but still reserves the run", () => {
     let reads = 0;
     const c = new AdmissionController(POLICY, () => {
       reads += 1;
@@ -149,9 +149,11 @@ describe("AdmissionController (mutex + reservations)", () => {
     expect(lines.some((l) => l.startsWith("box.headroom_unreadable"))).toBe(
       true,
     );
+    // Fail-open on the decision only: the run is still counted.
+    expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
+    r.release();
+    r.release();
     expect(c.reservedBytes()).toBe(0);
-    r.release();
-    r.release();
   });
 
   it("two back-to-back admissions with headroom for exactly one admit exactly one; the loser is deferred with the winner's reservation in its observed fields (the decision is one synchronous step, so no two can interleave)", () => {

@@ -2199,7 +2199,12 @@ Committed_AS:   12000000 kB
     _resetReexecutionGuardForTests(
       (await import("./config")).loadWorkerConfig().runNamespaceRoot,
     );
-    const ctx = { cancelled: false, log: vi.fn(), retryCount: () => 1 };
+    const ctx = {
+      cancelled: false,
+      log: vi.fn(),
+      retryCount: () => 1,
+      workflowRunId: () => "wfr-timeout",
+    };
     let caught: unknown;
     try {
       await runFn(INPUT, ctx);
@@ -2208,6 +2213,13 @@ Committed_AS:   12000000 kB
     }
     expect(caught).toBeInstanceOf(NonRetryableError);
     expect((caught as Error).message).toMatch(/never re-executes/);
+    // And without a workflow run id a retry cannot be proven legitimate: refused.
+    await expect(
+      runFn(INPUT, { cancelled: false, log: vi.fn(), retryCount: () => 1 }),
+    ).rejects.toSatisfy(
+      (e: Error) =>
+        e instanceof NonRetryableError && /no workflow run id/.test(e.message),
+    );
     expect(ensureRunNamespace).not.toHaveBeenCalled();
     expect(releaseMock).not.toHaveBeenCalled();
     expect(provisionWorkdir).not.toHaveBeenCalled();
@@ -2292,14 +2304,25 @@ Committed_AS:   12000000 kB
     _setAdmissionControllerForTests(
       new AdmissionController(POLICY, () => meminfo),
     );
+    const wfr = () => "wfr-retry";
     await expect(
-      runFn(INPUT, { cancelled: false, log: vi.fn(), retryCount: () => 0 }),
+      runFn(INPUT, {
+        cancelled: false,
+        log: vi.fn(),
+        retryCount: () => 0,
+        workflowRunId: wfr,
+      }),
     ).rejects.toSatisfy((e: Error) => e.name === "AdmissionDeferredError");
-    expect(deferralsRecorded(INPUT.threadId)).toBe(1);
+    expect(deferralsRecorded("wfr-retry")).toBe(1);
     meminfo = ROOMY;
-    await runFn(INPUT, { cancelled: false, log: vi.fn(), retryCount: () => 1 });
+    await runFn(INPUT, {
+      cancelled: false,
+      log: vi.fn(),
+      retryCount: () => 1,
+      workflowRunId: wfr,
+    });
     expect(provisionWorkdir).toHaveBeenCalledTimes(1);
-    expect(deferralsRecorded(INPUT.threadId)).toBe(0);
+    expect(deferralsRecorded("wfr-retry")).toBe(0);
   });
 
   it("a deferral releases the slot, clones nothing, and escapes as AdmissionDeferredError (plain, retryable)", async () => {
@@ -2317,8 +2340,13 @@ Committed_AS:   12000000 kB
     _resetReexecutionGuardForTests(
       (await import("./config")).loadWorkerConfig().runNamespaceRoot,
     );
-    for (let i = 0; i < 3; i++) recordDeferral(INPUT.threadId);
-    const ctx = { cancelled: false, log: vi.fn(), retryCount: () => 3 };
+    for (let i = 0; i < 3; i++) recordDeferral("wfr-d3");
+    const ctx = {
+      cancelled: false,
+      log: vi.fn(),
+      retryCount: () => 3,
+      workflowRunId: () => "wfr-d3",
+    };
     let caught: unknown;
     try {
       await runFn(INPUT, ctx);
