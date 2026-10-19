@@ -48,8 +48,7 @@ MEASURED budget leaves no margin at the observed base, the plan (not a contingen
 grew and the same move applies. 3 × 5.24 = 15.7 GB stays under the 16.6 GB of RAM so the
 `warnIfSlotsExceedMemory` warning stays quiet (swap absorbs a peak). `vm.overcommit_memory` stays 0
 (heuristic): `CommitLimit` is the headroom check's budget signal, not a kernel-enforced cap.
-Code defaults stay 1/1/1 so an unprovisioned box still boots. Per-org 2 < global 3 so no single
-org can hold every slot; fairness across orgs is GROUP_ROUND_ROBIN's ordering. The sysctl lands
+Code defaults stay 1/1/1 so an unprovisioned box still boots. Per-org 2 < global 3 bounds one org to 2 of the 3 slots PER WORKFLOW VARIANT (both keys are per variant — definition.ts); one org with a review on `agent-run-newest` and task runs on `agent-run` can still hold all 3 worker slots, so cross-variant per-org fairness is NOT guaranteed by these caps — only GROUP_ROUND_ROBIN's ordering within a variant is. A worker-side per-org count at admission would close that; tracked as a follow-up under #373's per-client share trigger, not this ticket. The sysctl lands
 with the resize (`/etc/sysctl.d/90-automata-overcommit.conf`) and is recorded in row 2.
 
 **Supersede waste — accept and measure.** `newest-wins` keeps a verdict current with the

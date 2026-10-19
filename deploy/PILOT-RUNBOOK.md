@@ -1057,17 +1057,13 @@ box's CommitLimit`). The production tuple and its derivation from the memory
    `N × WORKER_HEADROOM_RUN_COMMIT + 2 GiB > fraction × CommitLimit`. A cx33 at
    `WORKER_BOX_SLOTS=2 WORKER_RUN_MEMORY_MAX=5000M` FAILS it (2 × 5.24 + 2.15 =
    12.6 GB > 0.9 × 12.65 = 11.4 GB) and would crash-loop under `Restart=always`
-   after the upgrade. Run this on the box first and only deploy when it prints
-   `fits`:
+   after the upgrade. Run the worker's own gates on the box first, from the
+   NEW checkout (it imports the boot code, so the check cannot drift from the
+   guard), and deploy only on `fits`:
 
    ```bash
-   source /home/automata/.automata/worker-box.env
-   awk -v n="${WORKER_BOX_SLOTS:-1}" -v rc="${WORKER_HEADROOM_RUN_COMMIT:-$WORKER_RUN_MEMORY_MAX}" \
-       -v f="${WORKER_HEADROOM_COMMIT_FRACTION:-0.9}" '
-     /^CommitLimit/ { cl=$2*1024 }
-     END { m=rc; sub(/M$/,"",m); if (m!=rc) rc=m*1048576; sub(/G$/,"",rc); if (rc<1e6) rc=rc*1073741824;
-           need=n*rc+2147483648; budget=f*cl;
-           printf "need=%.2f GB budget=%.2f GB -> %s\n", need/1e9, budget/1e9, (n<=1||f>=1||need<=budget)?"fits":"REFUSED: lower N or the ceiling, raise vm.overcommit_ratio, or add swap" }' /proc/meminfo
+   set -a; source /home/automata/.automata/worker-box.env; set +a
+   cd /opt/automata-platform/packages/worker && pnpm exec tsx deploy/check-slots-fit.ts
    ```
 
    Set the cap knobs explicitly when you next touch `worker-box.env`:
