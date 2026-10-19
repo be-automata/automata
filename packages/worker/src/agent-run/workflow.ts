@@ -444,28 +444,9 @@ async function runAgent(
   // Under complete-run·queue a run may have waited behind an older one while
   // newer commits landed. Ask www FIRST; if a newer run is already recorded,
   // skip with a typed terminal — no clone, no daemon, no credits. Fails open.
-  if (input.supersedePolicy === "complete-run-queue" && runExternalId) {
-    const stale = await checkRunStaleness(
-      wwwOpts,
-      { runExternalId },
-      ctx.abortController?.signal,
-    );
-    if (stale) {
-      const result = await postRunTerminal(wwwOpts, {
-        runExternalId,
-        cause: "stale-skipped",
-        policy: input.supersedePolicy,
-      });
-      ctx.log(
-        `[agent-run ${input.threadId}] stale-skipped (newer run queued for this PR) → terminal: ${result}`,
-      );
-      return {
-        threadId: input.threadId,
-        threadChatId: input.threadChatId,
-        outcome: "stale-skipped",
-      };
-    }
-  }
+  // (Asked AGAIN after a #371 deferral wait, inside runAgentInner.)
+  const skipped = await staleSkip(input, ctx, wwwOpts);
+  if (skipped) return skipped;
   try {
     const output = await runAgentInner(
       input,
@@ -921,6 +902,45 @@ export async function runSelfHealFixStep({
   await reportSelfHealFix({ input, report, startedAt, step, now, deps });
 }
 
+/**
+ * #125 C4: under complete-run·queue, the run asks www whether a newer run of
+ * its PR is already recorded and, if so, ends itself with the typed
+ * `stale-skipped` terminal — no clone, no daemon, no credits. null = proceed.
+ * Other policies and legacy runs (no run id) never ask; a transport failure
+ * fails open (checkRunStaleness). Called before admission and, because a #371
+ * deferral can hold a run for the whole 12-minute budget while commits land,
+ * once more after a wait that ends in admission.
+ */
+async function staleSkip(
+  input: AgentRunInput,
+  ctx: RunCtx,
+  wwwOpts: WwwClientOpts,
+): Promise<AgentRunOutput | null> {
+  const runExternalId = wwwOpts.runExternalId ?? "";
+  if (input.supersedePolicy !== "complete-run-queue" || !runExternalId) {
+    return null;
+  }
+  const stale = await checkRunStaleness(
+    wwwOpts,
+    { runExternalId },
+    ctx.abortController?.signal,
+  );
+  if (!stale) return null;
+  const result = await postRunTerminal(wwwOpts, {
+    runExternalId,
+    cause: "stale-skipped",
+    policy: input.supersedePolicy,
+  });
+  ctx.log(
+    `[agent-run ${input.threadId}] stale-skipped (newer run queued for this PR) → terminal: ${result}`,
+  );
+  return {
+    threadId: input.threadId,
+    threadChatId: input.threadChatId,
+    outcome: "stale-skipped",
+  };
+}
+
 async function runAgentInner(
   input: AgentRunInput,
   ctx: RunCtx,
@@ -1040,7 +1060,8 @@ async function runAgentInner(
     const admission = getAdmissionController(config);
     let deferralStartedAt: number | null = null;
     let lastRefusal: AdmissionDeferredError | null = null;
-    for (let deferrals = 0; ; ) {
+    let deferrals = 0;
+    for (;;) {
       boxLock = await acquireBoxSlot({
         root: baseConfig.runNamespaceRoot,
         slots: baseConfig.boxSlots,
@@ -1113,6 +1134,21 @@ async function runAgentInner(
           `admission deferred (${deferrals}/${baseConfig.admissionMaxDeferrals}): no memory headroom — waiting ${waitS}s`,
         );
         await admissionSleep(waitS * 1000, signal);
+      }
+    }
+    // A deferral wait can span minutes while newer commits land on the PR:
+    // under complete-run·queue ask www once more before spending the clone.
+    // This is a pre-daemon exit (the daemon-phase finally is not reached), so
+    // the reservation and the slot are given back here, nothing on disk.
+    if (deferrals > 0) {
+      const skipped = await staleSkip(input, ctx, wwwOpts);
+      if (skipped) {
+        step("stale after the deferral wait — skipped before the clone");
+        reservation?.release();
+        reservation = null;
+        await boxLock.release();
+        boxLock = null;
+        return skipped;
       }
     }
     if (config.boxSlots > 1) {

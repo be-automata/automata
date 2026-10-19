@@ -2391,6 +2391,54 @@ Committed_AS:   12000000 kB
     }
   });
 
+  it("complete-run·queue: staleness is asked AGAIN after a deferral wait — a newer run recorded during the wait ends this one as stale-skipped before the clone, reservation and slot given back", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    let meminfo = STARVED;
+    const controller = new AdmissionController(POLICY, () => meminfo);
+    _setAdmissionControllerForTests(controller);
+    // Not stale before admission; stale once the (fake) wait has passed.
+    checkRunStaleness
+      .mockReset()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    postRunTerminal.mockReset().mockResolvedValue("applied");
+    const { _setAdmissionSleepForTests } = await import("./workflow");
+    _setAdmissionSleepForTests(async (ms) => {
+      waits.push(ms);
+      meminfo = ROOMY; // headroom returns while a newer commit landed
+    });
+    const ctx = {
+      abortController: new AbortController(),
+      cancelled: false,
+      log: vi.fn(),
+      workflowRunId: () => "run-ext-defer-q",
+    };
+    const out = await runFn(
+      {
+        ...INPUT,
+        prKey: "org-1/o/r/9",
+        deliveryId: "gh-9",
+        supersedePolicy: "complete-run-queue" as const,
+      },
+      ctx,
+    );
+    expect(out.outcome).toBe("stale-skipped");
+    expect(waits).toEqual([2_000]);
+    expect(checkRunStaleness).toHaveBeenCalledTimes(2);
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
+    expect(postRunTerminal.mock.calls[0]![1]).toEqual({
+      runExternalId: "run-ext-defer-q",
+      cause: "stale-skipped",
+      policy: "complete-run-queue",
+    });
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+    // Released after the refusal and again by the finally after the skip.
+    expect(releaseMock).toHaveBeenCalledTimes(2);
+    expect(controller.reservedBytes()).toBe(0);
+    checkRunStaleness.mockReset().mockResolvedValue(false);
+  });
+
   it("with headroom the run is admitted (headroom_ok logged) and proceeds to the clone; the reservation lives until the finally", async () => {
     const { _setAdmissionControllerForTests } = await import("./workflow");
     const { AdmissionController } = await import("./headroom");
