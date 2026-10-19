@@ -123,12 +123,21 @@ lo_deny_hits() {
     | grep -oE 'counter packets [0-9]+' | awk '{s+=$3} END {print s+0}'
 }
 
-# lo_connect <user> <host> <port>: TCP connect as <user> from inside the probe
-# cgroup. Sets LO_RESULT to CONNECTED / REFUSED / TIMEOUT and LO_MS.
+# lo_account <uid-or-name>: the account name runuser wants (`runuser -u 999`
+# fails with "user does not exist", which read as REFUSED on the first dry run).
+lo_account() {
+  getent passwd "$1" | cut -d: -f1
+}
+
+# lo_connect <uid-or-name> <host> <port>: TCP connect as that account from
+# inside the probe cgroup. Sets LO_RESULT to CONNECTED / REFUSED / TIMEOUT,
+# LO_MS, and LO_ERR (the probe's stderr, printed on a FAIL row).
 lo_connect() {
-  local t0 t1 rc
+  local t0 t1 rc account
+  account="$(lo_account "$1")"
+  [ -n "$account" ] || fail "loopback probes: no account for '$1'"
   t0="$(date +%s%N)"
-  bash -c "echo \$\$ > '$PROBE_CG/cgroup.procs' && exec runuser -u '$1' -- timeout 1 bash -c 'exec 3<>/dev/tcp/$2/$3'" >/dev/null 2>&1
+  LO_ERR="$(bash -c "echo \$\$ > '$PROBE_CG/cgroup.procs' && exec runuser -u '$account' -- timeout 1 bash -c 'exec 3<>/dev/tcp/$2/$3'" 2>&1 >/dev/null)"
   rc=$?
   t1="$(date +%s%N)"
   LO_MS=$(( (t1 - t0) / 1000000 ))
@@ -142,8 +151,12 @@ lo_connect() {
 # lo_listen <user> <port>: a TCP listener on 127.0.0.1:<port>, created INSIDE
 # the probe cgroup as <user>. Killed by cgroup.kill in lo_probe_cleanup.
 lo_listen() {
-  bash -c "echo \$\$ > '$PROBE_CG/cgroup.procs' && exec runuser -u '$1' -- python3 -c 'import socket,time
+  local account
+  account="$(lo_account "$1")"
+  [ -n "$account" ] || fail "loopback probes: no account for '$1'"
+  bash -c "echo \$\$ > '$PROBE_CG/cgroup.procs' && exec runuser -u '$account' -- python3 -c 'import socket,time
 s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind((\"127.0.0.1\",$2)); s.listen(5); time.sleep(300)'" >/dev/null 2>&1 &
+  disown  # reaped by cgroup.kill; no "Killed" job notices
   local i=0
   while [ "$i" -lt 20 ]; do
     ss -ltnH "sport = :$2" 2>/dev/null | grep -q . && return 0
@@ -155,8 +168,10 @@ s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind
 lo_probe_cleanup() {
   [ -d "$PROBE_CG" ] || return 0
   echo 1 > "$PROBE_CG/cgroup.kill" 2>/dev/null || true
+  # cgroupfs files report size 0, so `-s cgroup.procs` never waits; the
+  # authoritative "empty" is `populated 0` in cgroup.events.
   local i=0
-  while [ "$i" -lt 50 ] && [ -s "$PROBE_CG/cgroup.procs" ]; do sleep 0.1; i=$((i + 1)); done
+  while [ "$i" -lt 50 ] && ! grep -q '^populated 0' "$PROBE_CG/cgroup.events" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
   rmdir "$PROBE_CG" 2>/dev/null || echo "[nft-verify] note: could not remove $PROBE_CG" >&2
 }
 
@@ -177,6 +192,7 @@ lo_row() { # <expect: deny|allow> <label> <user> <host> <port>
   esac
   [ "$verdict" = ok ] || LO_FAILS=$((LO_FAILS + 1))
   printf '[nft-verify]   %-5s %-34s uid %-5s -> %-22s %-9s %5dms deny+%d %s\n' "$1" "$2" "$3" "$4:$5" "$LO_RESULT" "$LO_MS" "$delta" "$verdict"
+  [ "$verdict" = ok ] || [ -z "$LO_ERR" ] || echo "[nft-verify]         stderr: $(printf '%s' "$LO_ERR" | tail -1)"
 }
 
 if ! nft list table inet automata_loopback >/dev/null 2>&1; then

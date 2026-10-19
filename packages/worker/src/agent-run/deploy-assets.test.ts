@@ -3171,10 +3171,10 @@ describe("#367: loopback fence — default-deny the agent uid toward host-local 
     expect(verify).toMatch(/system\.slice\/automata-worker\.service"$/m);
     // Every probe shell moves itself in FIRST, then drops uid / execs.
     expect(verify).toMatch(
-      /echo \\\$\\\$ > '\$PROBE_CG\/cgroup\.procs' && exec runuser -u '\$1' -- timeout 1 bash -c 'exec 3<>\/dev\/tcp/,
+      /echo \\\$\\\$ > '\$PROBE_CG\/cgroup\.procs' && exec runuser -u '\$account' -- timeout 1 bash -c 'exec 3<>\/dev\/tcp/,
     );
     expect(verify).toMatch(
-      /echo \\\$\\\$ > '\$PROBE_CG\/cgroup\.procs' && exec runuser -u '\$1' -- python3/,
+      /echo \\\$\\\$ > '\$PROBE_CG\/cgroup\.procs' && exec runuser -u '\$account' -- python3/,
     );
     expect(verify).toMatch(/cgroup\.kill/);
     for (const row of [

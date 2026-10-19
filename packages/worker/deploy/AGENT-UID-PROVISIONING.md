@@ -378,8 +378,12 @@ journalctl -k --grep 'automata-lo-deny' --no-pager | sed -E 's/.*DST=([^ ]+).*DP
 ```
 
 Every destination must be a "refused" row of #367's target table (engine
-`:7077`/`:8888` on `127.0.0.1` and the bridge, `:20241`, `:22`). Subtract the
-slices `nft-verify.sh` prints as its probe window. A hit outside those rows
+`:7077`/`:8888` on `127.0.0.1` and the bridge, `:20241`, `:22`; IPv6 prints as
+`0000:…:0001:22`). Subtract the slices `nft-verify.sh` prints as its probe
+window. Counts are per packet, not per connection: the `in` rows see one SYN
+per connection, the bridge rows (judged in the output hook, every packet) see
+three to four per connection — the first dry run logged 13 bridge packets for 4
+probe connections. A hit outside those rows
 means the table is wrong and is fixed **before** enforcing. To enforce: flip the
 three `log prefix … accept` verdicts in `loopback-nft.conf` to the `reject`
 forms given beside each (`counter reject` for the bridge rules, `meta l4proto
