@@ -457,6 +457,44 @@ describe("runSupersedeSweep rule (iii) — failed-unreported runs (#380)", () =>
     expect(row?.status).toBe("terminal");
   });
 
+  it("rule (i) generation guard: a FAILED row whose thread is stamped with a DIFFERENT active run (already working) is retired as stale — no terminal, token kept", async () => {
+    const { setThreadActiveRun } = await import(
+      "@terragon/shared/model/threads"
+    );
+    const older = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 44,
+      externalId: "r-older-attempt",
+      ageMs: T + 60_000,
+      repoFullName: "be-automata/automata",
+    });
+    await setThreadActiveRun({
+      db,
+      threadId: older.threadId,
+      externalId: "r-newer-attempt",
+    });
+    const name = daemonRunKey(older);
+    await auth.api.createApiKey({
+      body: { name, userId: user.id, metadata: { tokenType: "daemon" } },
+    });
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({ "r-older-attempt": "FAILED" }),
+      listRuns: async () => [],
+    });
+    expect(report.terminals).toEqual([]);
+    expect((await threadRow(older.threadId)).status).toBe("working");
+    expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(true);
+    const [row] = await db
+      .select({ status: hatchetRunTable.status })
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.externalId, "r-older-attempt"));
+    expect(row?.status).toBe("terminal");
+  });
+
   it("a thread WITH a run row is rule (i)'s: never listed by rule (iii), and rule (i)'s FAILED terminal revokes its daemon token too", async () => {
     const { threadId, threadChatId } = await createTestRemoteRun({
       db,

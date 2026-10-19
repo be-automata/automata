@@ -46,18 +46,17 @@ configured, the same booting thread dispatches to Hatchet instead of the in-proc
 
 When `env.HATCHET_ENABLED` is true (or the thread's `sandboxProvider === 'hatchet-remote'`), the
 `withSandboxResource` branch that today calls `createSandboxForThread` / `getSandboxForThreadOrNull`
+and `sendDaemonMessage` is replaced by a **dispatch to Hatchet**. Specifically www:
 
-- `sendDaemonMessage` is replaced by a **dispatch to Hatchet**. Specifically www:
-
-* **(a)** mints a **short-lived, installation-scoped GitHub token** for the thread's repo
+- **(a)** mints a **short-lived, installation-scoped GitHub token** for the thread's repo
   (`getInstallationToken(owner, repo)` — the existing seam; ADR-002 §3: the App private key
   **never** leaves the control plane);
-* **(b)** mints the **per-thread daemon token** — the existing `auth.api.createApiKey` path in
+- **(b)** mints the **per-thread daemon token** — the existing `auth.api.createApiKey` path in
   `sendDaemonMessage`, org-scoped via `metadata.organizationId`, short expiry;
-* **(c)** triggers the Hatchet **`agent-run`** workflow (ADR-003 §2) with **reference-only input**
+- **(c)** triggers the Hatchet **`agent-run`** workflow (ADR-003 §2) with **reference-only input**
   `{ threadId, threadChatId, repoFullName, branch, daemonCallbackUrl }` plus the two short-lived
   tokens as step input. **No long-lived secret, no App key, no master key** is ever in the input;
-* **(d)** leaves **thread status semantics unchanged** — the thread is already transitioned to
+- **(d)** leaves **thread status semantics unchanged** — the thread is already transitioned to
   `booting` before this point, and from here the daemon events drive the rest **exactly like a
   sandbox boot**. `system.boot` has already fired; the daemon's events (`running`, tool calls,
   `complete`/`error`) arrive at `/api/daemon-event` and move the state machine as they do today.
@@ -135,13 +134,15 @@ Corrected here:
   Originally ACCEPTED RISK for the single-org pilot: the short-lived installation + daemon tokens
   were passed as workflow step input in plain text, which Hatchet persists in its Postgres (and
   the box's engine backup copies). The revisit trigger ("before any non-single-org deployment")
-  fired when the two proof orgs dispatched to the plane. **Mechanism:** dispatch puts the three
-  per-run secrets (installation token, optional read-only token, daemon token) into ONE envelope
-  sealed with `@terragon/utils/payload-seal` — X25519 ephemeral ECDH + HKDF-SHA256 + AES-256-GCM
-  with `threadChatId` in the AAD — to the execution plane's public key
+  fired when the two proof orgs dispatched to the plane. **Mechanism:** dispatch puts every
+  per-run secret (installation token, optional read-only token, daemon token, the owner's repo
+  environment variables, the self-heal check/gate token) into ONE envelope sealed with
+  `@terragon/utils/payload-seal` — X25519 ephemeral ECDH + HKDF-SHA256 + AES-256-GCM, AAD = the
+  input's routing fields (threadId, threadChatId, daemonCallbackUrl, repoFullName, orgId), so a
+  copied envelope cannot be re-pointed at another callback — to the execution plane's public key
   (`HATCHET_PAYLOAD_SEAL_KEY` on www), and the input carries `sealedSecrets` instead of the plain
-  fields (`AgentRunInput` has no `installationToken`/`githubReadToken`/`daemonToken`; a type test
-  pins that on both planes). The worker unseals in memory at run start with the ring in
+  fields (`AgentRunInput` has no `installationToken`/`githubReadToken`/`daemonToken`/`repoEnv` and
+  its `selfHeal` carries no token; a type test pins that on both planes). The worker unseals in memory at run start with the ring in
   `/etc/automata/payload-seal.key` (`WORKER_PAYLOAD_SEAL_KEY_FILE`; boot self-check; generated and
   rotated by `packages/worker/scripts/gen-payload-seal-key.ts`), passes the secrets explicitly to
   every consumer, and **revokes both `ghs_` tokens at the end of every run**

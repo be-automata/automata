@@ -54,7 +54,11 @@ import {
   clearThreadTerminalForResume,
 } from "@terragon/shared/model/threads";
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
-import type { SelfHealRunInput } from "@/server-lib/audit/plan-self-heal-run";
+import type {
+  SelfHealAuditRunInput,
+  SelfHealFixRunInput,
+  SelfHealRunInput,
+} from "@/server-lib/audit/plan-self-heal-run";
 import { recordBreakerEvent } from "@terragon/shared/model/self-heal-breaker";
 import {
   triggerAgentRun,
@@ -181,11 +185,14 @@ async function triggerSelfHealBounded({
   threadId,
   threadChatId,
   organizationId,
+  scrub = redactSecrets,
 }: {
   input: AgentRunWireInput;
   threadId: string;
   threadChatId: string;
   organizationId: string;
+  /** #380: blanks this dispatch's own secret values in every log line here. */
+  scrub?: (text: string) => string;
 }): Promise<{ externalId: string | undefined }> {
   const config = hatchetConfig();
   const dispatchedAt = new Date();
@@ -206,7 +213,7 @@ async function triggerSelfHealBounded({
       console.error("[hatchet] self-heal: breaker event write failed", {
         threadId,
         outcome,
-        error: error instanceof Error ? error.message : String(error),
+        error: scrub(error instanceof Error ? error.message : String(error)),
       });
     }
   };
@@ -228,7 +235,7 @@ async function triggerSelfHealBounded({
         attempt,
         maxAttempts: SELF_HEAL_TRIGGER_MAX_ATTEMPTS,
         ambiguous,
-        error: error instanceof Error ? error.message : String(error),
+        error: scrub(error instanceof Error ? error.message : String(error)),
       });
       if (!ambiguous) break;
       const readBack = async () =>
@@ -296,8 +303,8 @@ async function triggerSelfHealBounded({
  * prompt is NOT here either — the worker pulls it from
  * /api/daemon/next-message with the daemon token (ADR-003 fork 3).
  *
- * `AgentRunInput` never carries `installationToken`, `githubReadToken` or
- * `daemonToken` (a type test pins that). The PR-1 rollout shape with those
+ * `AgentRunInput` never carries `installationToken`, `githubReadToken`,
+ * `daemonToken`, `repoEnv` or a self-heal token (a type test pins that). The PR-1 rollout shape with those
  * three in plain text is `LegacyAgentRunInput`, sent only while the plane key
  * is unset; PR 2 removes it.
  */
@@ -320,7 +327,9 @@ export interface AgentRunInput {
    * (Phase 7: a READ-ONLY, single-repo, ≤1h GitHub App token minted ONLY for a
    * non-review org dispatch whose taskAgent packs require `github-read-token`;
    * the worker puts it in the agent's GITHUB_TOKEN, 07-07 gate) and the daemon
-   * token — sealed to the plane key, bound to `threadChatId` by the AAD.
+   * token, the owner's `repoEnv` and the self-heal token — sealed to the
+   * plane key, AAD-bound to the input's routing fields (threadId,
+   * threadChatId, daemonCallbackUrl, repoFullName, orgId).
    * Optional only during the PR-1 rollout (absent ⇒ the legacy shape carries
    * them in plain text); PR 2 makes it required.
    */
@@ -404,17 +413,11 @@ export interface AgentRunInput {
    * is never logged and never reaches the daemon or agent environment. Absent
    * for every other dispatch (byte-identical payload); old workers ignore it.
    */
-  selfHeal?: SelfHealRunInput;
   /**
-   * NON-review, non-self-heal org task runs only (manual, scheduled, mention):
-   * the owner's environment variables for this repo (personal global →
-   * organization → repository, control-plane-only keys removed; an org's
-   * tracker token never reaches the agent — env-audience.ts), so a
-   * prompt-defined automation can call the services its prompt names. SECRET
-   * values: never logged. Absent when empty (byte-identical payload) and on
-   * every review and self-heal run. The worker drops keys it reserves.
+   * #380: the plan WITHOUT its single-use token — the token is sealed
+   * (`RunSecrets.selfHealToken`) and the worker re-attaches it after unseal.
    */
-  repoEnv?: Record<string, string>;
+  selfHeal?: SelfHealRunWire;
   /**
    * NON-review, non-self-heal org task runs that start on the base branch
    * only: the branch the worker checks out right after the clone, so the
@@ -425,12 +428,22 @@ export interface AgentRunInput {
   workBranch?: string;
 }
 
+/** A self-heal plan on the wire: the audit/fix shape minus its secret token. */
+export type SelfHealRunWire =
+  | Omit<SelfHealAuditRunInput, "checkToken">
+  | Omit<SelfHealFixRunInput, "gateToken">;
+
 /**
- * PR-1 rollout shape (#380 step 1): the three secrets in plain text, sent
- * ONLY while HATCHET_PAYLOAD_SEAL_KEY is empty. The worker accepts both
- * shapes in this window. Deleted by PR 2 (strict mode).
+ * PR-1 rollout shape (#380 step 1): the secrets in plain text, exactly as the
+ * pre-#380 worker reads them (tokens at the top level, `repoEnv` at the top
+ * level, the self-heal token INSIDE `selfHeal`), sent ONLY while
+ * HATCHET_PAYLOAD_SEAL_KEY is empty. Deleted by PR 2 (strict mode).
  */
-export type LegacyAgentRunInput = AgentRunInput & RunSecrets;
+export type LegacyAgentRunInput = Omit<AgentRunInput, "selfHeal"> &
+  Pick<RunSecrets, "installationToken" | "githubReadToken" | "daemonToken"> & {
+    repoEnv?: Record<string, string>;
+    selfHeal?: SelfHealRunInput;
+  };
 /** What the trigger POSTs: the sealed shape, or the legacy one. */
 export type AgentRunWireInput = AgentRunInput | LegacyAgentRunInput;
 
@@ -661,11 +674,38 @@ async function planTaskRun({
   }
 }
 
+/** The plan's token out, the wire shape back (#380). */
+function splitSelfHealToken(selfHeal: SelfHealRunInput): {
+  wire: SelfHealRunWire;
+  token: string;
+} {
+  if (selfHeal.kind === "audit") {
+    const { checkToken, ...wire } = selfHeal;
+    return { wire, token: checkToken };
+  }
+  const { gateToken, ...wire } = selfHeal;
+  return { wire, token: gateToken };
+}
+
+/** The pre-#380 shape, for the legacy window only: the token back inside the plan. */
+export function reattachSelfHealToken(
+  wire: SelfHealRunWire,
+  token: string | undefined,
+): SelfHealRunInput {
+  if (token === undefined || token === "") {
+    throw new Error("payload-seal: self-heal plan without its token");
+  }
+  return wire.kind === "audit"
+    ? { ...wire, checkToken: token }
+    : { ...wire, gateToken: token };
+}
+
 /** A redactor that also blanks the exact values of one dispatch's secrets. */
 function scrubRunSecrets(secrets: RunSecrets): (text: string) => string {
-  const values = Object.values(secrets).filter(
-    (v): v is string => typeof v === "string" && v.length >= 8,
-  );
+  const values = [
+    ...Object.values(secrets),
+    ...Object.values(secrets.repoEnv ?? {}),
+  ].filter((v): v is string => typeof v === "string" && v.length >= 8);
   return (text) => {
     let out = text;
     for (const v of values) out = out.split(v).join("<redacted>");
@@ -693,7 +733,16 @@ async function sealWireInput({
 }): Promise<AgentRunWireInput> {
   const planeKeyText = env.HATCHET_PAYLOAD_SEAL_KEY.trim();
   if (planeKeyText === "") {
-    const legacy: LegacyAgentRunInput = { ...input, ...secrets };
+    const { repoEnv, selfHealToken, ...tokens } = secrets;
+    const { selfHeal, ...rest } = input;
+    const legacy: LegacyAgentRunInput = {
+      ...rest,
+      ...tokens,
+      ...(repoEnv !== undefined ? { repoEnv } : {}),
+      ...(selfHeal !== undefined
+        ? { selfHeal: reattachSelfHealToken(selfHeal, selfHealToken) }
+        : {}),
+    };
     return legacy;
   }
   const planeKey = parsePlanePublicKey(planeKeyText);
@@ -1008,20 +1057,31 @@ export async function dispatchAgentRun({
       branch === thread?.repoBaseBranchName
         ? remoteTaskBranchName(threadId)
         : undefined;
+    // #380: the self-heal plan's single-use token is split off here — the
+    // wire shape carries the plan, the envelope carries the token.
+    const selfHealSplit =
+      selfHealPlan.selfHeal !== undefined
+        ? splitSelfHealToken(selfHealPlan.selfHeal)
+        : undefined;
     const input: AgentRunInput = {
       ...baseInput,
       ...plan?.inputExtension,
       ...taskPlan?.extension,
-      ...selfHealPlan,
-      ...(repoEnvKeys.length > 0 ? { repoEnv } : {}),
+      ...(selfHealSplit !== undefined ? { selfHeal: selfHealSplit.wire } : {}),
       ...(workBranch !== undefined ? { workBranch } : {}),
     };
-    // #380: the read-only task token is the third secret; it never enters
-    // the reference-only input (the plan split it out at the source).
+    // #380: everything secret goes into the envelope and never into the
+    // reference-only input: the read-only task token (the plan split it out
+    // at the source), the owner's repo environment (long-lived API keys) and
+    // the self-heal token.
     const secrets: RunSecrets = {
       installationToken,
       ...taskPlan?.secrets,
       daemonToken,
+      ...(repoEnvKeys.length > 0 ? { repoEnv } : {}),
+      ...(selfHealSplit !== undefined
+        ? { selfHealToken: selfHealSplit.token }
+        : {}),
     };
     // #380: seal inside the guarded region (see sealWireInput) — every lane,
     // one line, no plain-text path.
@@ -1045,6 +1105,7 @@ export async function dispatchAgentRun({
             threadId,
             threadChatId,
             organizationId: selfHealOrgId,
+            scrub,
           })
         : await triggerWithRetry(
             wireInput,

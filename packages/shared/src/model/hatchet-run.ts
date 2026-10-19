@@ -138,7 +138,8 @@ export async function retireHatchetRun({
   onlyInFlight = false,
 }: {
   db: DB;
-  key: { id: string } | { externalId: string };
+  /** By row id, or by the engine's external id — optionally fenced to one thread's rows. */
+  key: { id: string } | { externalId: string; threadId?: string };
   as: "superseded" | "terminal";
   /** #380: never rewrite a row already `superseded` (the daemon-event path). */
   onlyInFlight?: boolean;
@@ -150,7 +151,12 @@ export async function retireHatchetRun({
       and(
         "id" in key
           ? eq(hatchetRun.id, key.id)
-          : eq(hatchetRun.externalId, key.externalId),
+          : and(
+              eq(hatchetRun.externalId, key.externalId),
+              key.threadId !== undefined
+                ? eq(hatchetRun.threadId, key.threadId)
+                : undefined,
+            ),
         onlyInFlight ? eq(hatchetRun.status, "in_flight") : undefined,
       ),
     );

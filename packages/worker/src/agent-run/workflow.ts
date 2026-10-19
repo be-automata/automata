@@ -1325,6 +1325,7 @@ async function runAgentInner(
       secrets: {
         installationToken: secrets.installationToken,
         daemonToken: secrets.daemonToken,
+        ...(secrets.repoEnv !== undefined ? { repoEnv: secrets.repoEnv } : {}),
       },
       lane,
       ...(taskOutcome.githubReadToken !== undefined

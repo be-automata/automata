@@ -56,6 +56,14 @@ export type RunSecrets = {
   installationToken: string;
   githubReadToken?: string;
   daemonToken: string;
+  /**
+   * The owner's repo/org/personal environment variables for a task run —
+   * typically long-lived API keys. Sealed with the tokens, never in the
+   * persisted input.
+   */
+  repoEnv?: Record<string, string>;
+  /** The self-heal run's single-use check/gate token (audit or fix kind). */
+  selfHealToken?: string;
 };
 
 export interface PlanePublicKey {
@@ -329,6 +337,37 @@ function assertRunSecrets(value: unknown): asserts value is RunSecrets {
   ) {
     throw new Error("shape");
   }
+  if (
+    v.selfHealToken !== undefined &&
+    (typeof v.selfHealToken !== "string" || v.selfHealToken === "")
+  ) {
+    throw new Error("shape");
+  }
+  if (v.repoEnv !== undefined) {
+    if (typeof v.repoEnv !== "object" || v.repoEnv === null) {
+      throw new Error("shape");
+    }
+    for (const [k, val] of Object.entries(v.repoEnv)) {
+      if (typeof k !== "string" || typeof val !== "string") {
+        throw new Error("shape");
+      }
+    }
+  }
+}
+
+/** Exactly the RunSecrets fields of `value`, in a fixed order — never a spread. */
+function pickRunSecrets(value: RunSecrets): RunSecrets {
+  return {
+    installationToken: value.installationToken,
+    ...(value.githubReadToken !== undefined
+      ? { githubReadToken: value.githubReadToken }
+      : {}),
+    daemonToken: value.daemonToken,
+    ...(value.repoEnv !== undefined ? { repoEnv: { ...value.repoEnv } } : {}),
+    ...(value.selfHealToken !== undefined
+      ? { selfHealToken: value.selfHealToken }
+      : {}),
+  };
 }
 
 /**
@@ -372,15 +411,9 @@ export async function sealRunSecrets(
   const key = await deriveAesKey(shared, concat(ephRaw, planeRaw), "encrypt");
   const iv = new Uint8Array(IV_BYTES);
   globalThis.crypto.getRandomValues(iv);
-  // Only the three fields, never a spread of the caller's object: a stray
-  // property on `secrets` must not travel in the envelope.
-  const plaintext: RunSecrets = {
-    installationToken: secrets.installationToken,
-    ...(secrets.githubReadToken !== undefined
-      ? { githubReadToken: secrets.githubReadToken }
-      : {}),
-    daemonToken: secrets.daemonToken,
-  };
+  // Only the RunSecrets fields, never a spread of the caller's object: a
+  // stray property on `secrets` must not travel in the envelope.
+  const plaintext = pickRunSecrets(secrets);
   assertRunSecrets(plaintext);
   const ct = await s.encrypt(
     {
@@ -494,18 +527,13 @@ export async function unsealRunSecrets(
   } catch {
     throw new PayloadSealError("malformed", kid);
   }
-  return {
-    installationToken: parsed.installationToken,
-    ...(parsed.githubReadToken !== undefined
-      ? { githubReadToken: parsed.githubReadToken }
-      : {}),
-    daemonToken: parsed.daemonToken,
-  };
+  return pickRunSecrets(parsed);
 }
 
-/** The three secret field names — the one list every "no plain-text" check reads. */
+/** The string-valued secret field names — the one list every "no plain-text" check reads. */
 export const RUN_SECRET_FIELDS = [
   "installationToken",
   "githubReadToken",
   "daemonToken",
+  "selfHealToken",
 ] as const;

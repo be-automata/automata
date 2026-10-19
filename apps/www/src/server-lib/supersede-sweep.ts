@@ -130,6 +130,8 @@ type Decision =
   | { kind: "stale-row" }
   | { kind: "live" };
 
+/** Rule (iii)'s engine listing half-width: covers any dispatch of a thread still inside the watchdog's reach. */
+export const RULE_III_LOOKUP_WINDOW_MS = 2 * 60 * 60 * 1000;
 /** A thread written this long after a run's dispatch, and booting again, is a later attempt. */
 export const STALE_ROW_RESUME_MARGIN_MS = 60 * 1000;
 
@@ -452,7 +454,15 @@ export async function runSupersedeSweep(
   await mapLimit(unreported, ENGINE_READ_CONCURRENCY, async (t) => {
     let runs: Array<{ externalId: string; status: AgentRunStatus }>;
     try {
-      runs = await listRuns({ createdAt: t.dispatchedAt, threadId: t.id });
+      // The anchor is the thread's LAST write, not the trigger itself: a
+      // later bookkeeping write would move a ±10 min window off the real
+      // dispatch, so the window is as wide as a thread can stay booting
+      // before the stalled watchdog owns it.
+      runs = await listRuns({
+        createdAt: t.dispatchedAt,
+        threadId: t.id,
+        windowMs: RULE_III_LOOKUP_WINDOW_MS,
+      });
     } catch (error) {
       console.error(
         "[supersede-sweep] rule (iii) engine list failed (retry next tick)",

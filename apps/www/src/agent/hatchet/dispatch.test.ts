@@ -1175,7 +1175,10 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
         YOUTRACK_TOKEN: "perm:platform",
       });
       const input = await dispatchAndRead(await orgTaskThread());
-      expect(input.repoEnv).toEqual({
+      // #380: the owner's env is SEALED — never a plain field of the input.
+      expect("repoEnv" in input).toBe(false);
+      expect(JSON.stringify(input)).not.toContain("perm:agent");
+      expect((await unsealInput(input)).repoEnv).toEqual({
         YOUTRACK_URL: "https://tracker.example",
         YOUTRACK_AGENT_TOKEN: "perm:agent",
       });
@@ -1187,7 +1190,8 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
         YOUTRACK_TOKEN: "perm:owner",
       });
       const input = await dispatchAndRead(await orgTaskThread());
-      expect(input.repoEnv).toEqual({
+      expect("repoEnv" in input).toBe(false);
+      expect((await unsealInput(input)).repoEnv).toEqual({
         YOUTRACK_URL: "https://tracker.example",
         YOUTRACK_AGENT_TOKEN: "perm:owner",
       });
@@ -1197,6 +1201,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       await setRepoEnv({ YOUTRACK_TOKEN: "perm:owner" });
       const input = await dispatchAndRead(await reviewThread(912));
       expect("repoEnv" in input).toBe(false);
+      expect((await unsealInput(input)).repoEnv).toBeUndefined();
     });
 
     it("a task run with no variables sends no repoEnv key", async () => {
@@ -1208,6 +1213,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       await setRepoEnv({ YOUTRACK_AGENT_TOKEN: "perm:agent" });
       const input = await dispatchAndRead(await reviewThread(912));
       expect("repoEnv" in input).toBe(false);
+      expect((await unsealInput(input)).repoEnv).toBeUndefined();
     });
   });
 
@@ -1521,8 +1527,11 @@ describe("dispatchAgentRun — phase 8 selfHeal payload", () => {
         subject: "pnpm-lock.yaml",
       },
     ]);
-    const token = selfHeal.checkToken;
+    // #380: the check token is SEALED, never inside the persisted plan.
+    expect("checkToken" in selfHeal).toBe(false);
+    const token = (await unsealInput(input)).selfHealToken as string;
     expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(JSON.stringify(input)).not.toContain(token);
     const [run] = await db
       .select()
       .from(auditRuns)
@@ -1774,10 +1783,14 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
     expect(selfHeal.denyExceptions).toEqual([]);
     const row = await readAttempt(attempt.id);
     expect(row?.threadId).toBe(t.threadId);
-    expect(row?.gateTokenHash).toBe(hashSelfHealToken(selfHeal.gateToken));
+    // #380: the gate token is SEALED, never inside the persisted plan.
+    expect("gateToken" in selfHeal).toBe(false);
+    const gateToken = (await unsealInput(input)).selfHealToken as string;
+    expect(row?.gateTokenHash).toBe(hashSelfHealToken(gateToken));
+    expect(JSON.stringify(input)).not.toContain(gateToken);
     for (const spy of spies) {
       for (const call of spy.mock.calls) {
-        expect(JSON.stringify(call)).not.toContain(selfHeal.gateToken);
+        expect(JSON.stringify(call)).not.toContain(gateToken);
       }
       spy.mockRestore();
     }

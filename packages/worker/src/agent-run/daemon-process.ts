@@ -128,7 +128,10 @@ export class DaemonProcess {
        * child env builder (07-07 gate / legacy-direct) and the daemon token
        * rides the socket message. Never read from the input, never logged.
        */
-      secrets: Pick<RunSecrets, "installationToken" | "daemonToken">;
+      secrets: Pick<
+        RunSecrets,
+        "installationToken" | "daemonToken" | "repoEnv"
+      >;
       /**
        * Phase 7: set ONLY when readTokenForRun returned a token (brokered
        * non-review run, seeded requiring pack, unexpired token); never read
@@ -233,7 +236,7 @@ export class DaemonProcess {
       egressProxyUrl: this.egressProxyUrl,
       broker: this.broker,
       githubReadToken: this.deps.githubReadToken ?? null,
-      repoEnv: { ...boxTestEnv, ...this.input.repoEnv },
+      repoEnv: { ...boxTestEnv, ...this.deps.secrets.repoEnv },
       batteryEnv: harness.env,
       batteryPathDirs: harness.pathDirs,
       browseProxy: harness.browseProxy,

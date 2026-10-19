@@ -589,7 +589,10 @@ export async function handleDaemonEvent({
       waitUntil(
         retireHatchetRun({
           db,
-          key: { externalId },
+          // Fenced to THIS thread's rows: an unstamped thread passes the
+          // generation fence with any header value, so the header alone
+          // must never reach another thread's row.
+          key: { externalId, threadId },
           as: "terminal",
           onlyInFlight: true,
         }).catch((error: unknown) => {

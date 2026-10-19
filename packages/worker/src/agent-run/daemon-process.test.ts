@@ -400,6 +400,8 @@ setInterval(() => {}, 1000);
 
     async function spawnedEnvFor(
       inputPatch: Partial<AgentRunInput>,
+      // #380: the owner's env arrives inside the sealed secrets, not the input.
+      repoEnv?: Record<string, string>,
     ): Promise<Record<string, string>> {
       const { root, workdir, input } = fixture();
       const envFile = path.join(root, "agent-test-services.env");
@@ -425,7 +427,7 @@ setInterval(() => {}, 1000);
         null,
         null,
         {
-          secrets: TEST_SECRETS,
+          secrets: { ...TEST_SECRETS, ...(repoEnv ? { repoEnv } : {}) },
           aceExec: async () => {},
           lane: "task",
           boxTestServicesEnvPath: envFile,
@@ -447,9 +449,10 @@ setInterval(() => {}, 1000);
     });
 
     it("the owner's repoEnv wins over the box value for the same key", async () => {
-      const env = await spawnedEnvFor({
-        repoEnv: { TEST_DATABASE_ADMIN_URL: "postgresql://owner@db/postgres" },
-      });
+      const env = await spawnedEnvFor(
+        {},
+        { TEST_DATABASE_ADMIN_URL: "postgresql://owner@db/postgres" },
+      );
       expect(env.TEST_DATABASE_ADMIN_URL).toBe(
         "postgresql://owner@db/postgres",
       );

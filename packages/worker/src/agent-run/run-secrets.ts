@@ -5,7 +5,7 @@ import {
   type RunSecrets,
 } from "@terragon/utils/payload-seal";
 
-import type { AgentRunInput } from "./types";
+import type { AgentRunInput, SelfHealRunShape } from "./types";
 
 /**
  * What the engine hands the run fn (#380). The sealed shape is
@@ -16,7 +16,22 @@ import type { AgentRunInput } from "./types";
  * `AgentRunInput` and a separate `RunSecrets` that is passed explicitly to
  * every consumer and never logged.
  */
-export type AgentRunWireInput = AgentRunInput & Partial<RunSecrets>;
+/** The self-heal plan as it arrives: the token is sealed, or (legacy) inside. */
+export type SelfHealWireShape =
+  | (Omit<Extract<SelfHealRunShape, { kind: "audit" }>, "checkToken"> & {
+      checkToken?: string;
+    })
+  | (Omit<Extract<SelfHealRunShape, { kind: "fix" }>, "gateToken"> & {
+      gateToken?: string;
+    });
+
+export type AgentRunWireInput = Omit<AgentRunInput, "selfHeal"> & {
+  selfHeal?: SelfHealWireShape;
+  /** Legacy window only: the owner's env in plain text at the top level. */
+  repoEnv?: Record<string, string>;
+} & Partial<
+    Pick<RunSecrets, "installationToken" | "githubReadToken" | "daemonToken">
+  >;
 
 export type RunSecretsSource = "sealed" | "legacy";
 
@@ -42,17 +57,35 @@ export async function resolveRunSecrets({
   /** Both shapes arrived: the plain-text fields were discarded (a www defect to report). */
   legacyFieldsIgnored: boolean;
 }> {
-  const { installationToken, githubReadToken, daemonToken, ...rest } = wire;
-  const input: AgentRunInput = rest;
-  if (input.sealedSecrets !== undefined) {
+  const {
+    installationToken,
+    githubReadToken,
+    daemonToken,
+    repoEnv,
+    selfHeal,
+    ...rest
+  } = wire;
+  const legacySelfHealToken =
+    selfHeal === undefined
+      ? undefined
+      : selfHeal.kind === "audit"
+        ? selfHeal.checkToken
+        : selfHeal.gateToken;
+  if (rest.sealedSecrets !== undefined) {
     // Shape, kid, tag and plaintext are all unsealRunSecrets' to judge —
     // every failure is one PayloadSealError class.
     const secrets = await unsealRunSecrets(
       keys,
-      input.sealedSecrets,
+      rest.sealedSecrets,
       // The AAD covers the routing fields the worker is about to trust.
-      sealBindingOf(input),
+      sealBindingOf(rest),
     );
+    const input: AgentRunInput = {
+      ...rest,
+      ...(selfHeal !== undefined
+        ? { selfHeal: withSelfHealToken(selfHeal, secrets.selfHealToken) }
+        : {}),
+    };
     return {
       input,
       secrets,
@@ -60,7 +93,9 @@ export async function resolveRunSecrets({
       legacyFieldsIgnored:
         installationToken !== undefined ||
         githubReadToken !== undefined ||
-        daemonToken !== undefined,
+        daemonToken !== undefined ||
+        repoEnv !== undefined ||
+        legacySelfHealToken !== undefined,
     };
   }
   if (strict) {
@@ -84,6 +119,32 @@ export async function resolveRunSecrets({
       ? { githubReadToken }
       : {}),
     daemonToken,
+    ...(repoEnv !== undefined ? { repoEnv } : {}),
+    ...(legacySelfHealToken !== undefined
+      ? { selfHealToken: legacySelfHealToken }
+      : {}),
+  };
+  const input: AgentRunInput = {
+    ...rest,
+    ...(selfHeal !== undefined
+      ? { selfHeal: withSelfHealToken(selfHeal, legacySelfHealToken) }
+      : {}),
   };
   return { input, secrets, source: "legacy", legacyFieldsIgnored: false };
+}
+
+/** The in-memory plan: the wire shape with its (unsealed) token back in place. */
+function withSelfHealToken(
+  wire: SelfHealWireShape,
+  token: string | undefined,
+): SelfHealRunShape {
+  if (token === undefined || token === "") {
+    throw new Error("payload-seal: self-heal plan arrived without its token");
+  }
+  if (wire.kind === "audit") {
+    const { checkToken: _ignored, ...plan } = wire;
+    return { ...plan, checkToken: token };
+  }
+  const { gateToken: _ignored, ...plan } = wire;
+  return { ...plan, gateToken: token };
 }

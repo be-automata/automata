@@ -1023,6 +1023,10 @@ describe("harness battery env: the DaemonProcess call site wires it", () => {
       branch: "main",
       daemonCallbackUrl: "http://localhost:3999",
       orgId: "org-1",
+    };
+    // #380: the owner's env now arrives inside the sealed secrets.
+    const harnessSecrets = {
+      ...TEST_SECRETS,
       repoEnv: { PLAYWRIGHT_BROWSERS_PATH: "/evil" },
     };
     const packDir = "/usr/local/lib/automata-batteries/gstack@x";
@@ -1056,7 +1060,7 @@ describe("harness battery env: the DaemonProcess call site wires it", () => {
       },
       "http://127.0.0.1:4242",
       null,
-      { secrets: TEST_SECRETS },
+      { secrets: harnessSecrets },
     );
     const internals = daemon as unknown as {
       ensureEnv(): Promise<NodeJS.ProcessEnv>;

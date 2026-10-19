@@ -348,6 +348,47 @@ describe("handleDaemonEvent — #125 C1 generation fence (no extra read)", () =>
     expect(row?.status).toBe("terminal");
   });
 
+  it("#380: a row already `superseded` stays superseded after a finish, and a header cannot retire another thread's row", async () => {
+    const { createTestRemoteRun, createTestOrg } = await import(
+      "@terragon/shared/model/test-helpers"
+    );
+    const { retireHatchetRun } = await import(
+      "@terragon/shared/model/hatchet-run"
+    );
+    const orgId = await createTestOrg({ db });
+    const victim = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 78,
+      externalId: "run-superseded",
+    });
+    await retireHatchetRun({
+      db,
+      key: { externalId: "run-superseded" },
+      as: "superseded",
+    });
+    // Another, unstamped thread finishing with THAT run id in its header.
+    const other = await remoteThread();
+    const r = await handleDaemonEvent({
+      threadId: other.threadId,
+      threadChatId: other.threadChatId,
+      userId: user.id,
+      timezone: "UTC",
+      contextUsage: null,
+      messages: [getClaudeResultMessage()],
+      runExternalId: "run-superseded",
+    });
+    expect(r.success).toBe(true);
+    await waitUntilResolved();
+    const [row] = await db
+      .select({ status: schema.hatchetRun.status })
+      .from(schema.hatchetRun)
+      .where(eq(schema.hatchetRun.externalId, "run-superseded"));
+    expect(row?.status).toBe("superseded");
+    void victim;
+  });
+
   it("409 when the writer names an older generation; the active one lands", async () => {
     const { threadId, threadChatId } = await remoteThread();
     await setThreadActiveRun({ db, threadId, externalId: "run-new" });
