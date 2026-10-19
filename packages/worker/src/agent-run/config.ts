@@ -624,10 +624,12 @@ export function loadWorkerConfig(
   // box paid for (global < slots). The per-org fairness cap must not exceed the
   // global cap (a cap no run can reach is a lie in the registration). Refused
   // here, at boot AND at every run, like the #205 pairings above.
-  const globalMaxRuns = parseSlotCount(
-    "WORKER_GLOBAL_MAX_RUNS",
-    env.WORKER_GLOBAL_MAX_RUNS,
-  );
+  // Unset = the slots (the only consistent value — a box already running
+  // WORKER_BOX_SLOTS=2 keeps booting across this change); an EXPLICIT value
+  // that disagrees is still refused below.
+  const globalMaxRuns = env.WORKER_GLOBAL_MAX_RUNS?.trim()
+    ? parseSlotCount("WORKER_GLOBAL_MAX_RUNS", env.WORKER_GLOBAL_MAX_RUNS)
+    : boxSlots;
   const perOrgMaxRuns = parseSlotCount(
     "WORKER_PER_ORG_MAX_RUNS",
     env.WORKER_PER_ORG_MAX_RUNS,

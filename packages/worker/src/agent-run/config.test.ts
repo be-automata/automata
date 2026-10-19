@@ -681,13 +681,19 @@ describe("#372: WORKER_GLOBAL_MAX_RUNS / WORKER_PER_ORG_MAX_RUNS — the engine 
     }
   });
 
-  it("GLOBAL ≠ SLOTS is refused at boot, naming BOTH knobs (epic AC 8) — in either direction", () => {
+  it("an EXPLICIT GLOBAL ≠ SLOTS is refused at boot, naming BOTH knobs (epic AC 8) — in either direction", () => {
     expect(() => loadWorkerConfig({ WORKER_GLOBAL_MAX_RUNS: "3" })).toThrow(
       /WORKER_GLOBAL_MAX_RUNS=3.*WORKER_BOX_SLOTS=1/s,
     );
-    expect(() => loadWorkerConfig({ ...twoSlots })).toThrow(
-      /WORKER_GLOBAL_MAX_RUNS=1.*WORKER_BOX_SLOTS=2/s,
-    );
+    expect(() =>
+      loadWorkerConfig({ ...twoSlots, WORKER_GLOBAL_MAX_RUNS: "1" }),
+    ).toThrow(/WORKER_GLOBAL_MAX_RUNS=1.*WORKER_BOX_SLOTS=2/s);
+  });
+
+  it("an UNSET global cap follows the slots (a box already at N = 2 keeps booting across this change); the per-org cap still defaults to 1", () => {
+    const cfg = loadWorkerConfig({ ...twoSlots });
+    expect(cfg.globalMaxRuns).toBe(2);
+    expect(cfg.perOrgMaxRuns).toBe(1);
   });
 
   it("PER_ORG > GLOBAL is refused, naming both knobs", () => {

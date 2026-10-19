@@ -18,8 +18,8 @@ kernel slot locks (`src/agent-run/box-lock.ts`), one agent account per slot (#20
 engine's `'agent-run-global-memory-budget'` cap and `WORKER_PER_ORG_MAX_RUNS`
 (default 1) the per-org fairness cap, both registered on every workflow VARIANT by
 `src/agent-run/definition.ts` (the global key caps each variant separately and is
-not the box budget; every run has `slotCost: 1`). The config loader refuses — at boot AND at every run — `WORKER_GLOBAL_MAX_RUNS ≠
-WORKER_BOX_SLOTS`, `WORKER_PER_ORG_MAX_RUNS > WORKER_GLOBAL_MAX_RUNS`, and N > 1
+not the box budget; every run has `slotCost: 1`). The config loader refuses — at boot AND at every run — an explicit
+`WORKER_GLOBAL_MAX_RUNS ≠ WORKER_BOX_SLOTS` (unset follows the slots), `WORKER_PER_ORG_MAX_RUNS > WORKER_GLOBAL_MAX_RUNS`, and N > 1
 without the uid drop or the #204 ceiling. ONCE at boot (Linux, N > 1, ceiling on,
 commit arm not inert: `WORKER_HEADROOM_COMMIT_FRACTION < 1`) the worker also
 refuses `WORKER_BOX_SLOTS × WORKER_HEADROOM_RUN_COMMIT + 2 GiB base >

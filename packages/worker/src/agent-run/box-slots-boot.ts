@@ -2,7 +2,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
-import { BOX_SLOTS_MAX } from "./box-lock";
+import { BOX_SLOTS_MAX } from "./slot-limits";
 import { parseMeminfo, readProcMeminfo } from "./headroom";
 import { KILL_BIN, SH_BIN, SUDO_BIN, agentUserForSlot } from "./spawn-as-user";
 import { resolveUidViaId } from "./uid-reaper";
