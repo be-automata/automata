@@ -140,7 +140,12 @@ describe("AdmissionController (mutex + reservations)", () => {
       try {
         return {
           status: "fulfilled" as const,
-          value: c.admit({ threadId, attempt: 0, log: (l) => lines.push(l) }),
+          value: c.admit({
+            runId: threadId,
+            threadId,
+            attempt: 0,
+            log: (l) => lines.push(l),
+          }),
         };
       } catch (reason) {
         return { status: "rejected" as const, reason };
@@ -169,22 +174,22 @@ describe("AdmissionController (mutex + reservations)", () => {
 
   it("releasing the reservation lets the next admission through; release is idempotent", () => {
     const c = new AdmissionController(POLICY, () => MEMINFO);
-    const a = c.admit({ threadId: "a", attempt: 0 });
-    expect(() => c.admit({ threadId: "b", attempt: 0 })).toThrow(
-      AdmissionDeferredError,
-    );
+    const a = c.admit({ runId: "run-a", threadId: "a", attempt: 0 });
+    expect(() =>
+      c.admit({ runId: "run-b", threadId: "b", attempt: 0 }),
+    ).toThrow(AdmissionDeferredError);
     a.release();
     a.release();
     expect(c.reservedBytes()).toBe(0);
-    const b = c.admit({ threadId: "b", attempt: 1 });
+    const b = c.admit({ runId: "run-b", threadId: "b", attempt: 1 });
     expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
     b.release();
   });
 
   it("a redelivered attempt of the same thread never counts its own stale reservation", () => {
     const c = new AdmissionController(POLICY, () => MEMINFO);
-    c.admit({ threadId: "a", attempt: 0 }); // never released (crashed attempt)
-    const again = c.admit({ threadId: "a", attempt: 1 });
+    c.admit({ runId: "run-a", threadId: "a", attempt: 0 }); // never released (crashed attempt)
+    const again = c.admit({ runId: "run-a", threadId: "a", attempt: 1 });
     expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
     again.release();
     expect(c.reservedBytes()).toBe(0);
@@ -198,6 +203,7 @@ describe("AdmissionController (mutex + reservations)", () => {
       return MEMINFO;
     });
     const r = c.admit({
+      runId: "run-a",
       threadId: "a",
       attempt: 2,
       log: (l) => lines.push(l),
@@ -209,7 +215,7 @@ describe("AdmissionController (mutex + reservations)", () => {
     ]);
     expect(c.reservedBytes()).toBe(0);
     fail = false;
-    const b = c.admit({ threadId: "b", attempt: 0 });
+    const b = c.admit({ runId: "run-b", threadId: "b", attempt: 0 });
     expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
     b.release();
   });
@@ -278,7 +284,7 @@ describe("reservations are keyed by the workflow run, not the thread (#371)", ()
 describe("Reservation.observe (#371: lifetime reservation, minus what the kernel already charges)", () => {
   it("counts the whole runCommit until a probe is attached, then runCommit − anonymous memory (anon + shmem) floored at 0; release still drops it", () => {
     const c = new AdmissionController(POLICY, () => MEMINFO);
-    const r = c.admit({ threadId: "a", attempt: 0 });
+    const r = c.admit({ runId: "run-a", threadId: "a", attempt: 0 });
     expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
     let current: number | null = Math.round(POLICY.runCommitBytes / 4);
     r.observe(() => current);

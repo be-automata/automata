@@ -125,6 +125,61 @@ const HIDEPID_OK = new Set(["invisible", "2", "ptraceable", "4"]);
  * mount's per-mount AND superblock options (hidepid is a superblock option).
  * Not Linux ⇒ nothing.
  */
+/**
+ * The mount options of the /proc mount in effect for this process, from a
+ * `/proc/self/mountinfo` text: per-mount AND superblock options (hidepid is a
+ * superblock option). The LAST /proc entry wins — a later overmount is the one
+ * in effect. null when there is no /proc mount.
+ */
+export function procMountOptions(mountinfo: string): string[] | null {
+  const procLine = mountinfo
+    .split("\n")
+    .map((l) => l.split(" "))
+    .filter((f) => f[4] === "/proc")
+    .at(-1);
+  if (!procLine) return null;
+  const sep = procLine.indexOf("-");
+  return [procLine[5] ?? "", procLine[sep + 3] ?? ""].join(",").split(",");
+}
+
+function hidepidOf(options: readonly string[]): string | undefined {
+  return options
+    .find((o) => o.startsWith("hidepid="))
+    ?.slice("hidepid=".length);
+}
+
+/**
+ * #205, the OTHER direction of the hidepid check: at N = 1 the unit should run
+ * under the base unit's `ProtectSystem=full` / `ProtectKernelTunables=yes`,
+ * which give it a private /proc WITHOUT the host's hidepid. Seeing a hidepid
+ * /proc at N = 1 therefore means the N > 1 drop-in (`20-hidepid.conf`) is still
+ * installed and the box is running with hardening it no longer needs to give
+ * up. A warning, never a refusal: the fence is intact either way. Returns the
+ * warning text, or null (not Linux, no hidepid seen, or mountinfo unreadable —
+ * a one-slot box never fails its boot on this).
+ */
+export function hidepidDropinLeftAtOneSlot(
+  opts: {
+    platform?: NodeJS.Platform;
+    readMountinfo?: () => string;
+  } = {},
+): string | null {
+  const {
+    platform = process.platform,
+    readMountinfo = () => readFileSync("/proc/self/mountinfo", "utf8"),
+  } = opts;
+  if (platform !== "linux") return null;
+  let options: string[] | null;
+  try {
+    options = procMountOptions(readMountinfo());
+  } catch {
+    return null;
+  }
+  const hidepid = options ? hidepidOf(options) : undefined;
+  if (hidepid === undefined || !HIDEPID_OK.has(hidepid)) return null;
+  return `/proc is mounted with hidepid=${hidepid} inside the worker unit at WORKER_BOX_SLOTS=1: the N > 1 drop-in automata-worker.service.d/20-hidepid.conf (ProtectSystem=no, ProtectKernelTunables=no) is still installed — remove it and \`systemctl daemon-reload && systemctl restart automata-worker\` when nothing is in flight (deploy/AGENT-UID-PROVISIONING.md §6)`;
+}
+
 export function assertProcHidepid(
   opts: {
     platform?: NodeJS.Platform;
@@ -150,24 +205,13 @@ export function assertProcHidepid(
       `cannot read /proc/self/mountinfo (${e instanceof Error ? e.message : String(e)}); at WORKER_BOX_SLOTS > 1 the /proc hidepid mount is a precondition (deploy/AGENT-UID-PROVISIONING.md §6)`,
     );
   }
-  // The LAST /proc entry: a later overmount is the one in effect.
-  const procLine = text
-    .split("\n")
-    .map((l) => l.split(" "))
-    .filter((f) => f[4] === "/proc")
-    .at(-1);
-  if (!procLine) {
+  const options = procMountOptions(text);
+  if (!options) {
     throw new Error(
       "no /proc mount in /proc/self/mountinfo; at WORKER_BOX_SLOTS > 1 the /proc hidepid mount is a precondition (deploy/AGENT-UID-PROVISIONING.md §6)",
     );
   }
-  const sep = procLine.indexOf("-");
-  const options = [procLine[5] ?? "", procLine[sep + 3] ?? ""]
-    .join(",")
-    .split(",");
-  const hidepid = options
-    .find((o) => o.startsWith("hidepid="))
-    ?.slice("hidepid=".length);
+  const hidepid = hidepidOf(options);
   if (hidepid === undefined || !HIDEPID_OK.has(hidepid)) {
     throw new Error(
       `/proc is mounted ${hidepid === undefined ? "without hidepid" : `with hidepid=${hidepid}`}; at WORKER_BOX_SLOTS > 1 another slot's account could read a run's argv (and a copied proxy credential) — remount with hidepid=invisible and the worker group exempt (deploy/AGENT-UID-PROVISIONING.md §6)`,

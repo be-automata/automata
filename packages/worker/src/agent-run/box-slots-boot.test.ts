@@ -7,6 +7,7 @@ import {
   assertSlotAccountsOutsideGroup,
   assertSlotSudoGrants,
   assertSlotWorkdirTraverse,
+  hidepidDropinLeftAtOneSlot,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
 } from "./box-slots-boot";
@@ -187,6 +188,64 @@ describe("assertProcHidepid (#205 boot, Linux N > 1)", () => {
     const readMountinfo = vi.fn(() => "");
     assertProcHidepid({ platform: "darwin", readMountinfo });
     expect(readMountinfo).not.toHaveBeenCalled();
+  });
+});
+
+describe("hidepidDropinLeftAtOneSlot (#205 boot, Linux N = 1)", () => {
+  const line = (opts: string, superOpts: string) =>
+    `25 30 0:23 / /proc ${opts} shared:14 - proc proc ${superOpts}\n` +
+    "30 1 252:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw\n";
+
+  it("a hidepid /proc seen at N = 1 means the N > 1 drop-in is still installed: warns, naming the drop-in and the removal recipe", () => {
+    const w = hidepidDropinLeftAtOneSlot({
+      platform: "linux",
+      readMountinfo: () => line("rw,nosuid", "rw,hidepid=invisible,gid=986"),
+    });
+    expect(w).toMatch(/hidepid=invisible/);
+    expect(w).toMatch(/20-hidepid\.conf/);
+    expect(w).toMatch(/daemon-reload/);
+  });
+
+  it("the base unit's own /proc (no hidepid) is the expected N = 1 state: silent", () => {
+    expect(
+      hidepidDropinLeftAtOneSlot({
+        platform: "linux",
+        readMountinfo: () => line("rw,nosuid,nodev,noexec,relatime", "rw"),
+      }),
+    ).toBeNull();
+    // hidepid=0/1 hide nothing and are not the drop-in's signature either.
+    expect(
+      hidepidDropinLeftAtOneSlot({
+        platform: "linux",
+        readMountinfo: () => line("rw", "rw,hidepid=0"),
+      }),
+    ).toBeNull();
+  });
+
+  it("never fails a one-slot boot: not Linux, no /proc line or an unreadable mountinfo ⇒ null", () => {
+    expect(
+      hidepidDropinLeftAtOneSlot({
+        platform: "darwin",
+        readMountinfo: () => {
+          throw new Error("must not be called");
+        },
+      }),
+    ).toBeNull();
+    expect(
+      hidepidDropinLeftAtOneSlot({
+        platform: "linux",
+        readMountinfo: () =>
+          "30 1 252:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw\n",
+      }),
+    ).toBeNull();
+    expect(
+      hidepidDropinLeftAtOneSlot({
+        platform: "linux",
+        readMountinfo: () => {
+          throw new Error("EACCES");
+        },
+      }),
+    ).toBeNull();
   });
 });
 

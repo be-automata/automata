@@ -254,13 +254,18 @@ export class AdmissionController {
    * returned reservation is released.
    */
   admit(opts: {
-    /** The reservation key: the WORKFLOW RUN (distinct per run of a thread — a supersede sibling is another run). Defaults to threadId. */
-    runId?: string;
+    /**
+     * The reservation key: the WORKFLOW RUN — distinct per run of a thread (a
+     * supersede sibling is another run). REQUIRED: a thread-keyed reservation
+     * would let two runs of one thread overwrite each other's entry and skip a
+     * live sibling in `reservedBytesExcept`.
+     */
+    runId: string;
     threadId: string;
     attempt: number;
     log?: (line: string) => void;
   }): Reservation {
-    const runId = opts.runId ?? opts.threadId;
+    const runId = opts.runId;
     // FAIL-OPEN on an unreadable kernel: a check that cannot read
     // /proc/meminfo at this instant admits with one loud line rather than
     // failing the run (the task registers retries: 0, so a throw here would end

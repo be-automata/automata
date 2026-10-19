@@ -27,6 +27,7 @@ import {
   assertSlotAccountsOutsideGroup,
   assertSlotSudoGrants,
   assertSlotWorkdirTraverse,
+  hidepidDropinLeftAtOneSlot,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
 } from "../agent-run/box-slots-boot";
@@ -189,6 +190,11 @@ async function main() {
         console.log(
           `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")}; uids ${slotUids.join(", ")}); egress fence covers every slot uid (${EGRESS_FENCE_UIDS_FILE})`,
         );
+      } else {
+        // The drop-in that N > 1 needs relaxes hardening N = 1 does not have
+        // to give up; nothing else notices it left behind after a rollback.
+        const leftBehind = hidepidDropinLeftAtOneSlot();
+        if (leftBehind) console.warn(`[worker-boot] WARNING: ${leftBehind}`);
       }
     }
   } catch (err) {

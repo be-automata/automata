@@ -294,7 +294,9 @@ that has no `hidepid=`, and an `ExecStartPre` remount does not persist into
 without hidepid", with the host remounted correctly). Install the opt-in drop-in
 `deploy/linux/automata-worker.service.d/20-hidepid.conf` (`ProtectSystem=no`,
 `ProtectKernelTunables=no` — the unit shares the host namespace) with
-`systemctl daemon-reload`, and remove it again when the box returns to N = 1.
+`systemctl daemon-reload`, and remove it again when the box returns to N = 1 — a
+one-slot boot that still sees a hidepid `/proc` inside the unit logs
+`[worker-boot] WARNING: … 20-hidepid.conf … is still installed` until it is gone.
 
 The worker checks this at boot (N > 1, Linux) and refuses to start without it —
 and without a `gid=` naming one of its own groups: a hidepid that also hides the
