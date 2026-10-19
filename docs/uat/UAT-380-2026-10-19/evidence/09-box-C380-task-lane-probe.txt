@@ -1,0 +1,19 @@
+## task-lane probe (issue #400, label automata:deliver) — worker journal, captured 2026-10-19T19:07:39Z
+2026-10-19T19:06:35+00:00[agent-run b64152bf-092e-4b16-8d1b-6c478712eee3] run secrets: sealed (kid=plane-2026-10)
+2026-10-19T19:06:35+00:00[agent-run b64152bf-092e-4b16-8d1b-6c478712eee3 trace=00-6217243e148ca337732982ee1975bd07-4e96335e49d5b58c-01] run start: lane=task repo=be-automata/automata branch=main
+2026-10-19T19:06:37+00:00[agent-run e206992d-43d6-4983-89b0-5498bcba758e] run secrets: sealed (kid=plane-2026-10)
+2026-10-19T19:06:37+00:00[agent-run e206992d-43d6-4983-89b0-5498bcba758e trace=00-618f31bd0854cffa546785e9fc4ad268-06669ca2c9602eef-01] run start: lane=task repo=be-automata/automata branch=main
+2026-10-19T19:06:45+00:00[agent-run e206992d-43d6-4983-89b0-5498bcba758e trace=00-618f31bd0854cffa546785e9fc4ad268-06669ca2c9602eef-01] thread-status: booting (terminal=false)
+2026-10-19T19:06:47+00:00[agent-run b64152bf-092e-4b16-8d1b-6c478712eee3 trace=00-6217243e148ca337732982ee1975bd07-4e96335e49d5b58c-01] thread-status: booting (terminal=false)
+2026-10-19T19:06:53+00:00[agent-run e206992d-43d6-4983-89b0-5498bcba758e trace=00-618f31bd0854cffa546785e9fc4ad268-06669ca2c9602eef-01] thread-status: working (terminal=false)
+2026-10-19T19:06:55+00:00[agent-run b64152bf-092e-4b16-8d1b-6c478712eee3 trace=00-6217243e148ca337732982ee1975bd07-4e96335e49d5b58c-01] thread-status: working (terminal=false)
+2026-10-19T19:07:01+00:00[agent-run e206992d-43d6-4983-89b0-5498bcba758e trace=00-618f31bd0854cffa546785e9fc4ad268-06669ca2c9602eef-01] thread-status: complete (terminal=true)
+2026-10-19T19:07:02+00:00[agent-run e206992d-43d6-4983-89b0-5498bcba758e] token.revoke {"kind":"installation","status":204}
+2026-10-19T19:07:02+00:00[agent-run e206992d-43d6-4983-89b0-5498bcba758e] token.revoke {"kind":"read","status":204}
+2026-10-19T19:07:03+00:00[agent-run b64152bf-092e-4b16-8d1b-6c478712eee3 trace=00-6217243e148ca337732982ee1975bd07-4e96335e49d5b58c-01] thread-status: complete (terminal=true)
+2026-10-19T19:07:03+00:00[agent-run b64152bf-092e-4b16-8d1b-6c478712eee3] token.revoke {"kind":"installation","status":204}
+2026-10-19T19:07:04+00:00[agent-run b64152bf-092e-4b16-8d1b-6c478712eee3] token.revoke {"kind":"read","status":204}
+
+## engine rows for the two task-lane runs (v1_task.input.input): sealed | plain installationToken | plain daemonToken | kid | ct length | row text contains ghs_
+t|f|f|plane-2026-10|1496|f
+t|f|f|plane-2026-10|1496|f
