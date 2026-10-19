@@ -176,6 +176,25 @@ async function main() {
     process.exit(1);
   }
 
+  // #372: the memory side of the tuple against THIS box, decided BEFORE any
+  // boot side effect (namespace claim, reclaim, uid scan, engine-DB repair): a
+  // refused tuple under Restart=always must crash-loop on nothing but this
+  // message. The config loader
+  // checked the knobs against each other; this checks N × ceiling + base
+  // against the kernel's commit budget (fail-closed, with the RAM warning
+  // beside it), so an oversized tuple refuses to start instead of deferring
+  // every run past the first until it fails (#371).
+  try {
+    assertSlotsFitCommitLimit(bootCfg);
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: the box slots do not fit this box's CommitLimit — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
+  warnIfSlotsExceedMemory(bootCfg);
+
   // #108 A5: agent-uid mode leans on node's built-in env-proxy support for the
   // agent CLI child. Node 20 has none, and a box on it would turn every fenced
   // run into a silent 90s stall with zero output rather than an error. Probe the
@@ -391,21 +410,6 @@ async function main() {
   // here could drift from it and leave the box silently unguarded.
   const workerName = `automata-worker-${boxId}`;
   const boxSlots = registrationConfig.boxSlots;
-  // #372: the memory side of the tuple against THIS box. The config loader
-  // checked the knobs against each other; this checks N × ceiling + base
-  // against the kernel's commit budget (fail-closed, with the RAM warning
-  // beside it), so an oversized tuple refuses to start instead of deferring
-  // every run past the first until it fails (#371).
-  try {
-    assertSlotsFitCommitLimit(registrationConfig);
-  } catch (err) {
-    console.error(
-      "[worker-boot] FATAL: the box slots do not fit this box's CommitLimit — refusing to start",
-      err,
-    );
-    process.exit(1);
-  }
-  warnIfSlotsExceedMemory(registrationConfig);
   const worker = await hatchet.worker(workerName, {
     // #372: the engine caps registered on every variant come from the SAME
     // validated config as `slots` below — loadWorkerConfig refused any tuple
