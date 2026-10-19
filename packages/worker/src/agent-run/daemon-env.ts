@@ -331,8 +331,11 @@ export function buildRunProxyEnv(
     HTTP_PROXY: egressProxyUrl,
     https_proxy: egressProxyUrl,
     http_proxy: egressProxyUrl,
-    NO_PROXY: "127.0.0.1,localhost",
-    no_proxy: "127.0.0.1,localhost",
+    // #367: the proxy refuses every loopback target, so IPv6 loopback must
+    // stay direct too (node's env-proxy switch, curl and friends match both
+    // the bare and the bracketed spelling).
+    NO_PROXY: "127.0.0.1,localhost,::1,[::1]",
+    no_proxy: "127.0.0.1,localhost,::1,[::1]",
     // Belt-and-braces for the AGENT CLI child (a separate node process whose
     // HTTP client we do not own): node's built-in env proxy support, which
     // exists only on node >=22.21.0 / >=24.0.0. The DAEMON does not depend on

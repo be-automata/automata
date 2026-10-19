@@ -96,14 +96,14 @@ check_slot_coverage() { # $1 = space-separated uids in the fence, $2 = tag
 check_slot_coverage "$UIDS_IN_CONF" nft-preflight
 
 # Snapshot what Docker owns, so the load can be proven non-destructive.
-BEFORE="$(nft list tables 2>/dev/null | grep -c . || echo 0)"
+BEFORE="$(nft list tables 2>/dev/null | grep -c . || true)"
 
 # Parse-only first. A bad ruleset must never reach the kernel.
 nft -c -f "$CONF" || fail "ruleset does not parse"
 
 nft -f "$CONF" || fail "load failed"
 
-AFTER="$(nft list tables 2>/dev/null | grep -c . || echo 0)"
+AFTER="$(nft list tables 2>/dev/null | grep -c . || true)"
 if [ "$AFTER" -lt "$BEFORE" ]; then
   fail "table count dropped ${BEFORE} -> ${AFTER}: something flushed the ruleset. Docker's chains may be gone; restart docker and investigate before running anything."
 fi

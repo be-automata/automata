@@ -208,8 +208,8 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       expect(env.https_proxy).toBe(PROXY_URL);
       expect(env.http_proxy).toBe(PROXY_URL);
       // Loopback carve-out: daemon socket, git broker, and the proxy itself.
-      expect(env.NO_PROXY).toBe("127.0.0.1,localhost");
-      expect(env.no_proxy).toBe("127.0.0.1,localhost");
+      expect(env.NO_PROXY).toBe("127.0.0.1,localhost,::1,[::1]");
+      expect(env.no_proxy).toBe("127.0.0.1,localhost,::1,[::1]");
       expect(JSON.stringify(env)).not.toContain("corp-proxy.internal");
       // #108 D1: belt-and-braces for the agent CLI child (node >=22.21/>=24).
       expect(env.NODE_USE_ENV_PROXY).toBe("1");
@@ -602,8 +602,8 @@ describe("buildRunProxyEnv (phase 8 shared proxy subset)", () => {
       HTTP_PROXY: "http://127.0.0.1:9999",
       https_proxy: "http://127.0.0.1:9999",
       http_proxy: "http://127.0.0.1:9999",
-      NO_PROXY: "127.0.0.1,localhost",
-      no_proxy: "127.0.0.1,localhost",
+      NO_PROXY: "127.0.0.1,localhost,::1,[::1]",
+      no_proxy: "127.0.0.1,localhost,::1,[::1]",
       NODE_USE_ENV_PROXY: "1",
     });
   });
