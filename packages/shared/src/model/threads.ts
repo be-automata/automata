@@ -1788,7 +1788,7 @@ export async function findUnreportedRemoteThreads({
   olderThanMs,
   now = new Date(),
   remoteProviderOnly = true,
-  limit = 50,
+  sampleSize = 50,
   maxAgeMs,
 }: {
   db: DB;
@@ -1796,7 +1796,8 @@ export async function findUnreportedRemoteThreads({
   now?: Date;
   /** Same gate as findOrphanRemoteThreads. */
   remoteProviderOnly?: boolean;
-  limit?: number;
+  /** Random-sample size per call (see the SAMPLED note above). */
+  sampleSize?: number;
   /**
    * Upper age bound: a thread last written before `now - maxAgeMs` is the
    * stalled watchdog's, not this rule's — without it a thread whose engine
@@ -1829,7 +1830,7 @@ export async function findUnreportedRemoteThreads({
       ),
     )
     .orderBy(sql`random()`)
-    .limit(limit);
+    .limit(sampleSize);
 }
 
 /**

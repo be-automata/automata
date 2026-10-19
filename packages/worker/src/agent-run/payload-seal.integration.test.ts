@@ -57,8 +57,11 @@ const itEnabled = process.env.HATCHET_IT === "1";
 vi.setConfig({ testTimeout: 90_000 });
 
 const SECRETS: RunSecrets = {
-  installationToken: "ghs_itInstallationTokenValue0123456789abc",
-  githubReadToken: "ghs_itReadTokenValue0123456789abcdefghij",
+  // Synthetic: the ghs_ prefix is what the engine-row scan below greps for;
+  // the underscores keep the value outside the real token shape so no secret
+  // scanner (and no reader) mistakes it for a live credential.
+  installationToken: "ghs_it_installation_token_value_0123",
+  githubReadToken: "ghs_it_read_token_value_0123",
   daemonToken: "daemon_it_token_value_0123456789abcdefghijklmnopqrstuvwxyz",
 };
 const SECRET_NEEDLES = [

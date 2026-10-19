@@ -571,6 +571,9 @@ describe("runSupersedeSweep rule (iii) — failed-unreported runs (#380)", () =>
       .from(hatchetRunTable)
       .where(eq(hatchetRunTable.externalId, "r-queued-current"));
     expect(row?.status).toBe("in_flight");
+    // The lease is a wall-clock contract: the sweep must push it more than
+    // ten minutes ahead of now, so the bound IS the claim.
+    // gstack-timing-ok: the lease bound is the contract under test
     expect(row?.lease?.getTime()).toBeGreaterThan(Date.now() + 10 * 60 * 1000);
   });
 
