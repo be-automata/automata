@@ -448,5 +448,20 @@
     "captured_at": "2026-10-19T16:57:21Z",
     "env": "",
     "build": ""
+  },
+  {
+    "seq": 30,
+    "file": "30-api-C367-run-ledger.txt",
+    "lane": "api",
+    "case": "C-367",
+    "slug": "run-ledger",
+    "kind": "text",
+    "sha256": "6aebabe94fad9551950ce142284a441298e604794bbf32fa941163b6cca7b6bb",
+    "bytes": 8511,
+    "redactions": {},
+    "source": "/private/tmp/claude-501/uat367/uat367/run-ledger.txt",
+    "captured_at": "2026-10-19T17:00:31Z",
+    "env": "",
+    "build": ""
   }
 ]

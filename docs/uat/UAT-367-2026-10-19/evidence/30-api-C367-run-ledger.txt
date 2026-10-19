@@ -1,0 +1,58 @@
+window 2026-10-19 13:55:30 -> 2026-10-19 16:51:50 UTC; restarts (Stopped) in/after window: ['2026-10-19 14:19:09', '2026-10-19 16:31:24', '2026-10-19 16:37:22']
+ # start               lane   pr   end       end_ts              last thread-status overlaps restart agent-run
+ 1 2026-10-19 13:56:44 review 385  completed 2026-10-19 13:57:31 complete           no               9c372e5c repo=be-automata/automata
+ 2 2026-10-19 13:57:38 task        completed 2026-10-19 14:08:46 complete           no               a26fa39e repo=be-automata/automata
+ 3 2026-10-19 14:08:47 task        NONE                          booting            YES              d87f2086 repo=be-automata/automata
+ 4 2026-10-19 14:08:56 task        completed 2026-10-19 14:11:55 complete           no               14943c6c repo=be-automata/automata
+ 5 2026-10-19 14:11:56 task        completed 2026-10-19 14:15:27 complete           no               7e614963 repo=be-automata/automata
+ 6 2026-10-19 14:15:28 task        completed 2026-10-19 14:16:23 complete           no               9acb5a3a repo=bangr-inc/Bangr-Admin-Panel
+ 7 2026-10-19 14:16:24 review 385  completed 2026-10-19 14:17:16 complete           no               0e9366da repo=be-automata/automata
+ 8 2026-10-19 14:17:16 review 388  completed 2026-10-19 14:17:47 complete           no               a9c7f859 repo=be-automata/automata
+ 9 2026-10-19 14:18:15 review 385  completed 2026-10-19 14:18:53 complete           no               06897d4c repo=be-automata/automata
+10 2026-10-19 14:20:35 task        completed 2026-10-19 14:24:21 complete           no               7da35690 repo=be-automata/automata
+11 2026-10-19 14:28:10 task        completed 2026-10-19 14:31:45 complete           no               c07e484c repo=be-automata/automata
+12 2026-10-19 14:31:45 task        completed 2026-10-19 14:36:02 complete           no               624cde02 repo=be-automata/automata
+13 2026-10-19 15:01:01 task        completed 2026-10-19 15:01:53 complete           no               db1db653 repo=bangr-inc/bangr-core
+14 2026-10-19 15:05:16 review 393  completed 2026-10-19 15:05:46 complete           no               8db91aa3 repo=be-automata/automata
+15 2026-10-19 15:10:59 review 394  NONE                                             YES              39e898e9 repo=be-automata/automata
+16 2026-10-19 15:11:12 review 394  completed 2026-10-19 15:11:45 complete           no               645c7fed repo=be-automata/automata
+17 2026-10-19 15:12:50 task        completed 2026-10-19 15:13:17 complete           no               3c3b09fb repo=be-automata/automata
+18 2026-10-19 15:14:02 review 394  completed 2026-10-19 15:14:24 complete           no               910f4fdf repo=be-automata/automata
+19 2026-10-19 15:18:26 review 394  completed 2026-10-19 15:19:04 complete           no               55c5ef1b repo=be-automata/automata
+20 2026-10-19 15:24:24 review 393  completed 2026-10-19 15:24:58 complete           no               9a2d932e repo=be-automata/automata
+21 2026-10-19 15:36:31 review 392  completed 2026-10-19 15:37:03 complete           no               74057d70 repo=be-automata/automata
+22 2026-10-19 15:43:26 review 396  completed 2026-10-19 15:43:59 complete           no               6c458d46 repo=be-automata/automata
+23 2026-10-19 15:51:54 review 393  completed 2026-10-19 15:52:54 complete           no               9785ae68 repo=be-automata/automata
+24 2026-10-19 15:54:56 pr     731  completed 2026-10-19 15:55:22 complete           no               2fa55f48 repo=bangr-inc/bangr-core
+25 2026-10-19 15:55:47 pr     733  completed 2026-10-19 15:56:20 complete           no               b521ae08 repo=bangr-inc/bangr-core
+26 2026-10-19 16:16:08 review 394  completed 2026-10-19 16:17:00 complete           no               4c778c89 repo=be-automata/automata
+27 2026-10-19 16:23:07 review 394  completed 2026-10-19 16:24:02 complete           no               6187e4ac repo=be-automata/automata
+28 2026-10-19 16:26:34 pr     737  completed 2026-10-19 16:26:56 complete           no               49deeb6b repo=bangr-inc/bangr-core
+29 2026-10-19 16:29:09 review 394  completed 2026-10-19 16:30:09 complete           no               0499e978 repo=be-automata/automata
+30 2026-10-19 16:33:46 review 394  completed 2026-10-19 16:35:02 complete           no               5a3f5d9e repo=be-automata/automata
+31 2026-10-19 16:45:28 review 397  completed 2026-10-19 16:46:19 complete           no               6c7f6bed repo=be-automata/automata
+32 2026-10-19 16:48:35 review 397  completed 2026-10-19 16:49:26 complete           no               e98f31d1 repo=be-automata/automata
+33 2026-10-19 16:49:26 review 394  completed 2026-10-19 16:50:12 complete           no               844e34e8 repo=be-automata/automata
+34 2026-10-19 16:51:29 review 397  completed 2026-10-19 16:52:17 complete           no               93f2973c repo=be-automata/automata
+
+started in window: 34; completed inside window: 31; completed after T1: 1; failed: 0; no end line: 2
+restart-overlapped runs: ['d87f2086', '39e898e9']
+== d87f2086
+2026-10-19T14:08:47+00:00 🪓 49482 | 10/19/26, 02:08:47 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] run start: lane=task repo=be-automata/automata
+2026-10-19T14:08:49+00:00 🪓 49482 | 10/19/26, 02:08:49 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box.escapees_reaped {"phase":"admission","threadId":"d87f2086-3478-40a5-8067-e39d1f053991","uid":999,"scanne
+2026-10-19T14:08:51+00:00 🪓 49482 | 10/19/26, 02:08:51 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] batteries: lane=task packs=somnio-skills manif
+2026-10-19T14:08:56+00:00 🪓 49482 | 10/19/26, 02:08:56 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991 trace=00-26c01283e2631b5078548635149927fb-a32c0c02728b4eec-01] thread-status: booting (terminal=false)
+2026-10-19T14:08:56+00:00 [agent-run] run cgroup: oom_kill=0 oom=0 thread=d87f2086-3478-40a5-8067-e39d1f053991 memory.max=5000M
+2026-10-19T14:08:57+00:00 🪓 49482 | 10/19/26, 02:08:57 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box.escapees_all_out_of_scope {"phase":"teardown","threadId":"d87f2086-3478-40a5-8067-e39d1f053991","scope":
+2026-10-19T14:08:57+00:00 🪓 49482 | 10/19/26, 02:08:57 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box.escapees_reaped {"phase":"teardown","threadId":"d87f2086-3478-40a5-8067-e39d1f053991","uid":999,"scanned
+2026-10-19T14:08:58+00:00 🪓 49482 | 10/19/26, 02:08:58 PM  [INFO/ctx] [agent-run d87f2086-3478-40a5-8067-e39d1f053991] box lock released by d87f2086-3478-40a5-8067-e39d1f053991 (helper pid 73697)
+== 39e898e9
+2026-10-19T15:10:59+00:00 🪓 83052 | 10/19/26, 03:10:59 PM  [INFO/ctx] [agent-run 39e898e9-9e52-4b69-b5a0-660d18a70d3a trace=00-fdb92611b5978de9084d5cac980ccb68-235ed6f3e80aa01f-01] run start: lane=review pr=394 repo=be-automata
+2026-10-19T15:11:04+00:00 🪓 83052 | 10/19/26, 03:11:04 PM  [INFO/ctx] [agent-run 39e898e9-9e52-4b69-b5a0-660d18a70d3a] box.escapees_reaped {"phase":"admission","threadId":"39e898e9-9e52-4b69-b5a0-660d18a70d3a","uid":999,"scanne
+2026-10-19T15:11:12+00:00 [agent-run] run cgroup: oom_kill=0 oom=0 thread=39e898e9-9e52-4b69-b5a0-660d18a70d3a memory.max=5000M
+2026-10-19T15:11:12+00:00 🪓 83052 | 10/19/26, 03:11:12 PM  [INFO/ctx] [agent-run 39e898e9-9e52-4b69-b5a0-660d18a70d3a] box.escapees_all_out_of_scope {"phase":"teardown","threadId":"39e898e9-9e52-4b69-b5a0-660d18a70d3a","scope":
+2026-10-19T15:11:12+00:00 🪓 83052 | 10/19/26, 03:11:12 PM  [INFO/ctx] [agent-run 39e898e9-9e52-4b69-b5a0-660d18a70d3a] box.escapees_reaped {"phase":"teardown","threadId":"39e898e9-9e52-4b69-b5a0-660d18a70d3a","uid":999,"scanned
+2026-10-19T15:11:13+00:00 🪓 83052 | 10/19/26, 03:11:13 PM  [INFO/ctx] [agent-run 39e898e9-9e52-4b69-b5a0-660d18a70d3a] box lock released by 39e898e9-9e52-4b69-b5a0-660d18a70d3a (helper pid 110477)
+2026-10-19T15:11:14+00:00 🪓 83052 | 10/19/26, 03:11:14 PM  [INFO/ctx] [agent-run 39e898e9-9e52-4b69-b5a0-660d18a70d3a] cancelled under newest-wins → superseded terminal: applied
+
+== note on evidence 28: its loopback counters date from the 16:37:22 reload (the header says 14:19; a loader run resets the counters). They show the state since that reload only; the fence hits earlier in the window are recorded in the issue comments and evidence 16 (enforce-diag-sample).
