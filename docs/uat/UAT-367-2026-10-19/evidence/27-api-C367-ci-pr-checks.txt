@@ -1,0 +1,17 @@
+PR 383 head checks:
+  audit pass https://github.com/be-automata/automata/actions/runs/39260026111/job/118085212382
+  check pass https://github.com/be-automata/automata/actions/runs/39260026111/job/118085211568
+  e2e pass https://github.com/be-automata/automata/actions/runs/39260026111/job/118085212219
+  schema-drift pass https://github.com/be-automata/automata/actions/runs/39260026111/job/118085212306
+  test pass https://github.com/be-automata/automata/actions/runs/39260026111/job/118085212373
+  worker-e2e pass https://github.com/be-automata/automata/actions/runs/39260026111/job/118085212380
+  review DISMISSED at e5da4639e 2026-10-19T13:24:07Z
+  review APPROVED at e31e1674d 2026-10-19T13:26:13Z
+PR 388 head checks:
+  audit pass https://github.com/be-automata/automata/actions/runs/39265148648/job/118102668007
+  check pass https://github.com/be-automata/automata/actions/runs/39265148648/job/118102667352
+  e2e pass https://github.com/be-automata/automata/actions/runs/39265148648/job/118102667787
+  schema-drift pass https://github.com/be-automata/automata/actions/runs/39265148648/job/118102668045
+  test pass https://github.com/be-automata/automata/actions/runs/39265148648/job/118102667537
+  worker-e2e pass https://github.com/be-automata/automata/actions/runs/39265148648/job/118102667591
+  review APPROVED at ee54e398e 2026-10-19T14:17:50Z

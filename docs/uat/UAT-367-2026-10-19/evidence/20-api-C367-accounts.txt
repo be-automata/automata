@@ -1,0 +1,3 @@
+uid=999(automata-agent) gid=987(automata-agent) groups=987(automata-agent)
+uid=2001(automata-agent-1) gid=2001(automata-agent-1) groups=2001(automata-agent-1)
+uid=996(automata) gid=986(automata) groups=986(automata),988(docker)

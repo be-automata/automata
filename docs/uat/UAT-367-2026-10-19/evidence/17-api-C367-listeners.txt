@@ -1,0 +1,8 @@
+0.0.0.0:22 users:(("sshd",),("systemd",))
+127.0.0.1:20241 users:(("cloudflared",))
+127.0.0.1:25432 users:(("postgres",))
+127.0.0.1:7077 users:(("docker-proxy",))
+127.0.0.1:8888 users:(("docker-proxy",))
+127.0.0.53%lo:53 users:(("systemd-resolve",))
+127.0.0.54:53 users:(("systemd-resolve",))
+[::]:22 users:(("sshd",),("systemd",))

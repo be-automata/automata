@@ -1,0 +1,8 @@
+table inet automata_egress {
+	chain egress {
+		type filter hook output priority filter; policy accept;
+		oif "lo" accept
+		meta skuid { 999, 2001 } tcp dport { 80, 443 } counter packets 0 bytes 0 reject with tcp reset
+		meta skuid { 999, 2001 } udp dport { 80, 443 } counter packets 0 bytes 0 reject
+	}
+}
