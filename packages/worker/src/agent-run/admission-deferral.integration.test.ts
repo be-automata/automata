@@ -79,8 +79,11 @@ describe.skipIf(!itEnabled)(
       };
       if (input.mode === "wait-then-complete") {
         // The worker's deferral wait, as the engine sees it: a running task
-        // that does nothing for a while, then proceeds.
-        await sleepTicks(15);
+        // that does nothing for a while, then proceeds. 10 s — clearly longer
+        // than hatchet-lite's OLAP status lag, so the RUNNING window is
+        // observable by a 100 ms poll (a shorter stub could go QUEUED →
+        // COMPLETED between two reads and fail this IT without a regression).
+        await sleepTicks(50);
       } else if (input.mode === "sleep") {
         await sleepTicks(40);
       } else {
