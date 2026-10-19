@@ -90,9 +90,11 @@ prod `thread.messages` (read by the peer session) show the agent's only turn as 
 disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin
 to enable access"_ (`is_error: true`, 394 ms, cost 0) — the Anthropic organisation that owns the delivered
 owner credential has turned subscription use off. Every review run that delivers that credential fails
-the same way until an admin re-enables it or the platform stops delivering it (the August fallback:
-deactivate the `claudeCode` rows in `agent_provider_credentials` so dispatch bills the built-in key — a
-billing/policy call for the operator, not made here). The concurrency evidence in rows 2–3 is
+the same way until an admin re-enables it or the platform stops delivering it. **Applied 19:05:15 UTC
+(peer session, reversible):** the August fallback — the vendor org's `claudeCode` setup-token row in
+`agent_provider_credentials` (id `f148720d…`) set `is_active = false`, so vendor-org review runs now
+bill the built-in key like the task lane; the other org's OAuth row is untouched; revert is
+`is_active = true` on that id. The concurrency evidence in rows 2–3 is
 unaffected: it is the worker/engine/box path up to and including the daemon hand-off and teardown.
 
 **Firewall.** The operator laptop's egress IP moved during the rollout; the `automata-execution-plane`
