@@ -94,7 +94,7 @@
   {
    "id": "C12",
    "text": "REGRESSION: 30 real runs under enforce complete with no fence-caused failure (the issue's 30-run half of the gate)",
-   "source": "#367 rollout gate (observed, not yet complete)",
+   "source": "#367 rollout gate (30-run half; the 7-day half is the operator's deviation)",
    "verdict": "PASS",
    "evidence": "thirty-run-hold: 31 completed, 0 failed, 0 refused, 0 host-local (13:55\u219216:51 UTC)"
   }
@@ -103,7 +103,7 @@
   {
    "spec": "Observe for 7 days or 30 runs, whichever is later, before enforcing",
    "delivered": "Enforce loaded 13:55 UTC after ~10 min / 3 runs at the operator's direction; the observe log held only verifier probe rows",
-   "consequence": "C9 graded on the shortened window; C12 added as a regression criterion to hold the enforced fence to the 30-run count (BLOCKED until reached)"
+   "consequence": "C9 graded on the shortened window; C12 added as a regression criterion and graded PASS once the fence had been held to 30 completed runs under enforce (31 completed, 0 failed, 13:55\u219216:51 UTC); the 7-day half cannot elapse in-session"
   },
   {
    "spec": "Three deny lines flipped to reject",
