@@ -1,0 +1,45 @@
+## engine secret scan, bound 2026-10-19T16:41:12Z (the cutover) — FINAL, run 2026-10-19T19:00:06Z with evidence/scan.sql
+## columns: table | column | rows after bound | rows with a secret (position of ghs_ / installationToken / daemonToken / githubReadToken); zero/zero rows omitted
+table | column | rows after cutover | rows with a secret
+v1_dags_olap | input | 21 | 0
+v1_dags_olap_20261019 | input | 21 | 0
+v1_payload | inline_content | 105 | 0
+v1_payload_20261019 | inline_content | 105 | 0
+v1_payloads_olap | inline_content | 189 | 0
+v1_payloads_olap_20261019 | inline_content | 189 | 0
+v1_task | input | 42 | 0
+v1_task_20261019 | input | 42 | 0
+v1_tasks_olap | input | 42 | 0
+v1_tasks_olap_20261019 | input | 42 | 0
+
+## workflow runs since cutover (v1_dags_olap): 21
+## sealed envelopes in v1_task since cutover: 21 of 42 task rows; kids: plane-2026-10
+
+## lanes since cutover (worker journal, run start lines)
+     21 run secrets: sealed
+      2 run start: lane=pr
+     19 run start: lane=review
+     21 token.revoke {"kind":"installation","status":204}
+
+## run list since cutover (UTC, lane, repo)
+2026-10-19T16:45:28+00:00 lane=review pr=397 repo=be-automata/automata branch=docs/380-uat-2026-10-19
+2026-10-19T16:48:35+00:00 lane=review pr=397 repo=be-automata/automata branch=docs/380-uat-2026-10-19
+2026-10-19T16:49:26+00:00 lane=review pr=394 repo=be-automata/automata branch=feat/372-env-caps
+2026-10-19T16:51:29+00:00 lane=review pr=397 repo=be-automata/automata branch=docs/380-uat-2026-10-19
+2026-10-19T16:53:14+00:00 lane=review pr=398 repo=be-automata/automata branch=docs/uat-367-record-2
+2026-10-19T16:55:05+00:00 lane=review pr=398 repo=be-automata/automata branch=docs/uat-367-record-2
+2026-10-19T16:55:46+00:00 lane=review pr=394 repo=be-automata/automata branch=feat/372-env-caps
+2026-10-19T16:57:36+00:00 lane=review pr=398 repo=be-automata/automata branch=docs/uat-367-record-2
+2026-10-19T16:58:53+00:00 lane=review pr=394 repo=be-automata/automata branch=feat/372-env-caps
+2026-10-19T17:00:49+00:00 lane=review pr=398 repo=be-automata/automata branch=docs/uat-367-record-2
+2026-10-19T17:02:09+00:00 lane=review pr=394 repo=be-automata/automata branch=feat/372-env-caps
+2026-10-19T17:04:29+00:00 lane=review pr=398 repo=be-automata/automata branch=docs/uat-367-record-2
+2026-10-19T17:05:19+00:00 lane=review pr=133 repo=<customer-org>/<repo-a> branch=<branch>
+2026-10-19T17:07:24+00:00 lane=review pr=398 repo=be-automata/automata branch=docs/uat-367-record-2
+2026-10-19T17:08:21+00:00 lane=review pr=394 repo=be-automata/automata branch=feat/372-env-caps
+2026-10-19T17:09:20+00:00 lane=review pr=133 repo=<customer-org>/<repo-a> branch=<branch>
+2026-10-19T17:14:42+00:00 lane=pr pr=739 repo=<customer-org>/<repo-b> branch=develop
+2026-10-19T18:43:59+00:00 lane=pr pr=738 repo=<customer-org>/<repo-b> branch=develop
+2026-10-19T18:59:06+00:00 lane=review pr=19 repo=be-automata/self-heal-bench-1 branch=automata/fix-7-b6636c0f-
+2026-10-19T18:59:12+00:00 lane=review pr=20 repo=be-automata/self-heal-bench-1 branch=automata/fix-10-51033822
+2026-10-19T18:59:26+00:00 lane=review pr=32 repo=be-automata/self-heal-bench-3 branch=automata/fix-4-33a50020-

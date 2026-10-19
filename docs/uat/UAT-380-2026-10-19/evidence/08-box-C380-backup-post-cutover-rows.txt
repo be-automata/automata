@@ -1,0 +1,5 @@
+## C3 backup check — 2026-10-19T19:01:26Z; dump: /var/backups/automata/hatchet-20261019T190040Z.dump (6871879 bytes, custom format, taken 19:00:40Z after 21 sealed runs)
+## method: pg_restore --data-only -t <day partition> to text, split COPY rows on inserted_at vs the cutover 2026-10-19 16:41:12Z, count marker substrings
+v1_task_20261019: rows in dump=170 post-cutover=42 post-cutover-with-ghs_=0 post-cutover-with-any-secret-marker=0 post-cutover-with-sealedSecrets=21 | pre-cutover-with-ghs_=64 pre-cutover rows=128
+v1_payload_20261019: rows in dump=426 post-cutover=105 post-cutover-with-ghs_=0 post-cutover-with-any-secret-marker=0 post-cutover-with-sealedSecrets=42 | pre-cutover-with-ghs_=128 pre-cutover rows=321
+v1_dags_olap_20261019: rows in dump=85 post-cutover=21 post-cutover-with-ghs_=0 post-cutover-with-any-secret-marker=0 post-cutover-with-sealedSecrets=21 | pre-cutover-with-ghs_=64 pre-cutover rows=64
