@@ -292,9 +292,7 @@ The remount alone is not enough for the worker unit: `ProtectSystem=full` and
 that has no `hidepid=`, and an `ExecStartPre` remount does not persist into
 `ExecStart` (the worker then crash-loops on its own check, "/proc is mounted
 without hidepid", with the host remounted correctly). Install the opt-in drop-in `deploy/linux/automata-worker.service.d/20-hidepid.conf` (`ProtectSystem=no`, `ProtectKernelTunables=no`: the unit's mount namespace — `ReadWritePaths=` still creates one — then inherits the host's `/proc`, hidepid included, instead of a fresh one; `ProtectProc=`/`ProcSubset=` would break the fence the same way) with
-`systemctl daemon-reload`, and remove it again when the box returns to N = 1 — a
-one-slot boot that still sees a hidepid `/proc` inside the unit logs
-`[worker-boot] WARNING: … 20-hidepid.conf … is still installed` until it is gone.
+`systemctl daemon-reload`, and remove it again when the box returns to N = 1 — a one-slot boot logs `[worker-boot] WARNING: the N > 1 drop-in automata-worker.service.d/20-hidepid.conf (…) is still in effect at WORKER_BOX_SLOTS=1 (…)` while the file exists at `/etc/systemd/system/automata-worker.service.d/20-hidepid.conf` or `/proc` inside the unit still has `hidepid=`.
 
 The worker checks this at boot (N > 1, Linux) and refuses to start without it —
 and without a `gid=` naming one of its own groups: a hidepid that also hides the

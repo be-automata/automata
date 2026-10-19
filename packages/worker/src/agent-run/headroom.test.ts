@@ -36,7 +36,7 @@ const POLICY: HeadroomPolicy = {
 };
 
 describe("parseMeminfo", () => {
-  it("reads the six fields and converts kB to bytes", () => {
+  it("reads the three fields and converts kB to bytes", () => {
     const r = parseMeminfo(MEMINFO);
     expect(r.memAvailable).toBe(6249396 * 1024);
     expect(r.committedAs).toBe(2622544 * 1024);
@@ -186,7 +186,7 @@ describe("AdmissionController (mutex + reservations)", () => {
     b.release();
   });
 
-  it("a redelivered attempt of the same thread never counts its own stale reservation", () => {
+  it("a re-admitted attempt of the same RUN never counts its own stale reservation", () => {
     const c = new AdmissionController(POLICY, () => MEMINFO);
     c.admit({ runId: "run-a", threadId: "a", attempt: 0 }); // never released (crashed attempt)
     const again = c.admit({ runId: "run-a", threadId: "a", attempt: 1 });
