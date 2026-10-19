@@ -163,7 +163,7 @@ task run without its repo env is not a degraded run, it does not start. The priv
 
 ```bash
 # On the box, as root (the worker must be idle — no run in flight):
-cd /opt/automata/packages/worker   # the checkout run-worker.sh uses
+cd /opt/automata-platform/packages/worker   # the checkout run-worker.sh uses
 pnpm exec tsx scripts/gen-payload-seal-key.ts          # prints <kid>:<base64url>
 systemctl restart automata-worker                      # boot log: "payload seal: 1 key(s) usable (<kid>)"
 # Then on www:
