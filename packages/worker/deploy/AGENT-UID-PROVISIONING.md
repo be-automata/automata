@@ -377,13 +377,14 @@ sudo env WORKER_AGENT_USER=automata-agent WORKER_BOX_SLOTS=2 /usr/local/sbin/nft
 
 **Live status.** Observe step deployed to `automata-exec-1` on 2026-10-19 at
 13:44 UTC from `main` `5b57010` (PR #383), rendered for the box's two slot uids
-(`999, 2001`). Proven on the box that day: the unit's own `ExecStartPre=+` load
-on restart (criterion 5, 24/24 probe rows after it), fail-closed on a bad
-cgroup path (criterion 6: `activating (auto-restart)`, `Result=exit-code`, the
+(`999, 2001`). Proven on the box that day, against the acceptance criteria of
+issue #367: the unit's own `ExecStartPre=+` load on restart (#367 criterion 5,
+"restart reload" — 24/24 probe rows after it); fail-closed on a bad cgroup
+path (#367 criterion 6 — `activating (auto-restart)`, `Result=exit-code`, the
 loader's FAIL line in the journal; the previous table stays loaded but no
-worker runs), `inet automata_egress` byte-identical, and two real task runs
-under the table with the cgroup admit counter rising and zero deny hits. The
-observe window runs from 2026-10-19 13:45 UTC.
+worker runs); `inet automata_egress` byte-identical (#367 criterion 7); and two
+real task runs under the table with the cgroup admit counter rising and zero
+deny hits. The observe window runs from 2026-10-19 13:45 UTC.
 
 **Observe, then enforce.** The template ships with every deny as
 `counter log prefix "automata-lo-deny " accept`: nothing is refused, every
