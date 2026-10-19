@@ -1,4 +1,5 @@
-import {
+import http, {
+  Agent as HttpAgent,
   createServer as createHttpServer,
   request as httpRequest,
 } from "node:http";
@@ -781,6 +782,62 @@ describe("startEgressProxy (real loopback servers)", () => {
         mode: "observe",
       });
     });
+  });
+
+  it("forwards past an env-proxied global agent (NODE_USE_ENV_PROXY=1, as every agent run sets) — the decoy never sees a connection and a mismatched Host does not throw", async () => {
+    let decoyConnections = 0;
+    const decoyPort = await new Promise<number>((resolve) => {
+      const server = createTcpServer((socket) => {
+        decoyConnections += 1;
+        socket.destroy();
+      });
+      closers.push(() => server.close());
+      server.listen(0, "127.0.0.1", () =>
+        resolve((server.address() as AddressInfo).port),
+      );
+    });
+    const upstreamPort = await startUpstreamHttp();
+    proxy = await startEgressProxy({
+      allowHostLocalUpstreams: true,
+      policy: { level: "none", allowlist: [] },
+      mode: "observe",
+      onEvent: () => {},
+    });
+    // The state NODE_USE_ENV_PROXY=1 + HTTP_PROXY puts the process in: the
+    // global agent proxies every target. `proxyEnv` is node >=24 and not in
+    // @types/node yet; older runtimes ignore it.
+    const savedAgent = http.globalAgent;
+    http.globalAgent = new HttpAgent({
+      proxyEnv: { HTTP_PROXY: `http://127.0.0.1:${decoyPort}` },
+    } as ConstructorParameters<typeof HttpAgent>[0]);
+    try {
+      // The client's Host header names the proxy, not the target — exactly
+      // what node's own client sends for a hand-built absolute-form request.
+      const res = await new Promise<{ status: number; body: string }>(
+        (resolve, reject) => {
+          const req = httpRequest(
+            {
+              host: "127.0.0.1",
+              port: proxy!.port,
+              method: "GET",
+              path: `http://127.0.0.1:${upstreamPort}/ok`,
+              agent: false,
+            },
+            (r) => {
+              let body = "";
+              r.on("data", (d) => (body += d));
+              r.on("end", () => resolve({ status: r.statusCode ?? 0, body }));
+            },
+          );
+          req.on("error", reject);
+          req.end();
+        },
+      );
+      expect(res).toEqual({ status: 200, body: "UPSTREAM:GET:/ok" });
+      expect(decoyConnections).toBe(0);
+    } finally {
+      http.globalAgent = savedAgent;
+    }
   });
 
   describe("#108 A2 — proxy health check", () => {

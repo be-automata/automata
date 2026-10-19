@@ -88,12 +88,20 @@ command (full output saved, 3 failed again) showed what the failures are:
   `The property 'Host in options.headers' must match the request authority (denied.example.com). Received '127.0.0.1:34423'`
   with `code: 'ERR_INVALID_ARG_VALUE'`.
 
-Interpretation (not verified further): the test client sends a request to the
-loopback proxy with a `Host` header that differs from the request authority, and
-Node v24.21.0 rejects that before the request leaves the process. The proxy was
-reachable (111 tests, including all the connect-and-proxy ones, passed), so this
-looks like a test-client incompatibility with this Node version and not the
-loopback fence. I have not confirmed that on another Node version.
+Root cause (reproduced afterwards; not the loopback fence). The suite ran inside
+a task run, so it inherited the run's proxy env (`HTTP_PROXY` and
+`NODE_USE_ENV_PROXY=1`, set by `buildRunProxyEnv` in `daemon-env.ts`). With that
+switch on, node's global HTTP agent proxies every target outside `NO_PROXY`, and
+the egress proxy forwarded its plain-HTTP upstream requests on the global agent.
+On node 24 the env-proxy path validates the forwarded `Host` header against the
+target and throws `ERR_INVALID_ARG_VALUE` inside the request handler, so the
+client hangs until the 5 s timeout. On node 22 nothing throws, but the upstream
+goes to the env proxy and the proxy's own `lookup` (the #367 host-local guard)
+is never consulted. Reproduced on node 24.21.0 and 22.22.1 by running the suite
+with the same env. Fixed by giving the forwarding path its own `http.Agent`,
+which reads no proxy env. A regression test simulates the env-proxied global
+agent, and the suite now passes with and without the run's proxy env on both
+node versions.
 
 ## 3. DNS from the run
 
