@@ -133,29 +133,6 @@ describe("evaluateHeadroom (both arms, boundary-inclusive)", () => {
 });
 
 describe("AdmissionController (mutex + reservations)", () => {
-  it("the controller only exists where the check can run: assessHeadroomSupport decides, and an unreadable meminfo at admission fails OPEN but still reserves the run", () => {
-    let reads = 0;
-    const c = new AdmissionController(POLICY, () => {
-      reads += 1;
-      throw new Error("EACCES");
-    });
-    const lines: string[] = [];
-    const r = c.admit({
-      threadId: "t1",
-      attempt: 0,
-      log: (l) => lines.push(l),
-    });
-    expect(reads).toBe(1);
-    expect(lines.some((l) => l.startsWith("box.headroom_unreadable"))).toBe(
-      true,
-    );
-    // Fail-open on the decision only: the run is still counted.
-    expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
-    r.release();
-    r.release();
-    expect(c.reservedBytes()).toBe(0);
-  });
-
   it("two back-to-back admissions with headroom for exactly one admit exactly one; the loser is deferred with the winner's reservation in its observed fields (the decision is one synchronous step, so no two can interleave)", () => {
     const lines: string[] = [];
     const c = new AdmissionController(POLICY, () => MEMINFO);
@@ -190,37 +167,37 @@ describe("AdmissionController (mutex + reservations)", () => {
     );
   });
 
-  it("releasing the reservation lets the next admission through; release is idempotent", async () => {
+  it("releasing the reservation lets the next admission through; release is idempotent", () => {
     const c = new AdmissionController(POLICY, () => MEMINFO);
-    const a = await c.admit({ threadId: "a", attempt: 0 });
+    const a = c.admit({ threadId: "a", attempt: 0 });
     expect(() => c.admit({ threadId: "b", attempt: 0 })).toThrow(
       AdmissionDeferredError,
     );
     a.release();
     a.release();
     expect(c.reservedBytes()).toBe(0);
-    const b = await c.admit({ threadId: "b", attempt: 1 });
+    const b = c.admit({ threadId: "b", attempt: 1 });
     expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
     b.release();
   });
 
-  it("a redelivered attempt of the same thread never counts its own stale reservation", async () => {
+  it("a redelivered attempt of the same thread never counts its own stale reservation", () => {
     const c = new AdmissionController(POLICY, () => MEMINFO);
-    await c.admit({ threadId: "a", attempt: 0 }); // never released (crashed attempt)
-    const again = await c.admit({ threadId: "a", attempt: 1 });
+    c.admit({ threadId: "a", attempt: 0 }); // never released (crashed attempt)
+    const again = c.admit({ threadId: "a", attempt: 1 });
     expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
     again.release();
     expect(c.reservedBytes()).toBe(0);
   });
 
-  it("an unreadable meminfo at admission FAILS OPEN on the decision — one box.headroom_unreadable line, no throw — but the admitted run is still reserved", async () => {
+  it("an unreadable meminfo at admission FAILS OPEN on the decision — one box.headroom_unreadable line, no throw — but the admitted run is still reserved", () => {
     let fail = true;
     const lines: string[] = [];
     const c = new AdmissionController(POLICY, () => {
       if (fail) throw new Error("EIO");
       return MEMINFO;
     });
-    const r = await c.admit({
+    const r = c.admit({
       threadId: "a",
       attempt: 2,
       log: (l) => lines.push(l),
@@ -232,7 +209,7 @@ describe("AdmissionController (mutex + reservations)", () => {
     ]);
     expect(c.reservedBytes()).toBe(0);
     fail = false;
-    const b = await c.admit({ threadId: "b", attempt: 0 });
+    const b = c.admit({ threadId: "b", attempt: 0 });
     expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
     b.release();
   });
@@ -260,20 +237,22 @@ describe("AdmissionController (mutex + reservations)", () => {
 
 describe("the deferral budget vs the run's executionTimeout and the control plane's 75-minute stalled cutoff", () => {
   it("Σbackoff is 2^n capped at 120 s and the default 8 deferrals stay well inside the budget", () => {
-    expect(ADMISSION_BACKOFF).toEqual({ factor: 2, maxSeconds: 120 });
     expect(sumBackoffSeconds(0)).toBe(0);
     expect(sumBackoffSeconds(3)).toBe(2 + 4 + 8);
+    // The cap is reached at the 7th wait and holds from there.
+    expect(sumBackoffSeconds(7) - sumBackoffSeconds(6)).toBe(
+      ADMISSION_BACKOFF.maxSeconds,
+    );
     expect(sumBackoffSeconds(8)).toBe(2 + 4 + 8 + 16 + 32 + 64 + 120 + 120);
+    // The default 8 deferrals fit the budget; 11 do not (loadWorkerConfig
+    // refuses them — see config.test).
     expect(sumBackoffSeconds(8)).toBeLessThanOrEqual(
       ADMISSION_DEFERRAL_BUDGET_S,
     );
-    expect(ADMISSION_DEFERRAL_BUDGET_S).toBe(12 * 60);
+    expect(sumBackoffSeconds(11)).toBeGreaterThan(ADMISSION_DEFERRAL_BUDGET_S);
     // The wait is spent INSIDE the 30 m executionTimeout (the task is RUNNING
-    // while it waits), so the budget must leave the agent a usable window…
+    // while it waits), so the budget must leave the agent a usable window.
     expect(ADMISSION_DEFERRAL_BUDGET_S).toBeLessThanOrEqual(30 * 60 - 15 * 60);
-    // …and the whole run (30 m schedule window + 30 m execution, wait included)
-    // stays under the control plane's 75 m stalled cutoff with margin.
-    expect(30 * 60 + 30 * 60).toBeLessThan(75 * 60);
   });
 });
 

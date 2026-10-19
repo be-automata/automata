@@ -92,7 +92,12 @@ CommitLimit` (fraction default `0.9`; `1.0` = inert on that arm; run commit
   boot refuses otherwise); past the budget the run fails final. The task keeps
   `retries: 0`: the engine sees RUNNING throughout, never a retry (an engine
   retry would re-enter the per-PR supersede group as the newest item and cancel
-  the genuinely newer run — measured). Journal lines `box.headroom_rejected` /
+  the genuinely newer run — measured). A waiting run keeps its engine slot
+  (engine slots = `WORKER_BOX_SLOTS`), so during a shortage the box runs at
+  most N − (deferred runs) agents and the engine's queue waits its 30 m
+  scheduleTimeout; a sustained hog fails each dispatched run after the budget
+  with the reason in its banner. The budget counts wall clock from the first
+  refusal (slot re-acquire waits included). Journal lines `box.headroom_rejected` /
   `box.headroom_deferred_wait` / `box.headroom_ok` carry the decision and the
   three memory values.
   Rollback without a deploy: `WORKER_HEADROOM_FLOOR=0` and

@@ -179,8 +179,7 @@ cancels the older one that is still waiting in process. A cancel during the wait
 sleep (`AbortError`), ending the run like any other cancel. The check is inert (`floor 0` and
 `fraction 1.0`, or no `/proc/meminfo`) without a deploy. An unreadable `/proc/meminfo` at
 admission (boot proved it readable) fails OPEN with one `box.headroom_unreadable` line — a
-transient kernel read must not idle the box. Decision 5 stands: a waiting run holds NO slot and
-nothing here signals a lock-holding run.
+transient kernel read must not idle the box. A waiting run holds its ENGINE slot (I3: engine slots = box slots), so no engine-dispatched sibling can take the box slot it released — while it waits the box runs at most N − (deferred runs) agents and the engine's queue waits its scheduleTimeout; the release matters for the lock's out-of-process tenants (a self-heal fix run, the boot uid scan) and for Decision 5: a waiting run is never a lock holder. The budget is wall clock from the first refusal (slot re-acquire waits included), not only the backoff sum. Nothing here signals a lock-holding run.
 
 ## Anti-deviation invariants
 

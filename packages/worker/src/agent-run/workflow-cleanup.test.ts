@@ -2259,6 +2259,49 @@ Committed_AS:   12000000 kB
     expect(daemonCtorArgs).toHaveLength(0);
   });
 
+  it("slot re-acquire waits count against the budget: when the wall clock since the first refusal would pass ADMISSION_DEFERRAL_BUDGET_S the run fails final after FEWER than the max deferrals", async () => {
+    const { _setAdmissionControllerForTests, _setAdmissionSleepForTests } =
+      await import("./workflow");
+    const { AdmissionController, AdmissionBudgetExhaustedError } = await import(
+      "./headroom"
+    );
+    const { ADMISSION_DEFERRAL_BUDGET_S } = await import("./admission-retry");
+    _setAdmissionControllerForTests(
+      new AdmissionController(POLICY, () => STARVED),
+    );
+    // Each "sleep" also stands for a long wait on the box lock: the clock
+    // advances by 10 minutes per deferral while the backoff sum stays tiny.
+    _setAdmissionSleepForTests(async (ms) => {
+      waits.push(ms);
+      vi.setSystemTime(Date.now() + ms + 10 * 60 * 1000);
+    });
+    const ctx = { cancelled: false, log: vi.fn() };
+    try {
+      let caught: unknown;
+      try {
+        await runFn(INPUT, ctx);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(AdmissionBudgetExhaustedError);
+      // Refusal 1 (0 s elapsed) and 2 (≈ 600 s) are waited; refusal 3 at
+      // ≈ 1200 s elapsed is past the 720 s budget → final after 2 deferrals.
+      expect(waits).toEqual([2_000, 4_000]);
+      expect((caught as Error).message).toMatch(/after 2 deferral\(s\)/);
+      expect(
+        (caught as InstanceType<typeof AdmissionBudgetExhaustedError>).elapsedS,
+      ).toBeGreaterThan(ADMISSION_DEFERRAL_BUDGET_S);
+      const logs = ctx.log.mock.calls.map((c) => String(c[0]));
+      expect(
+        logs.filter((l) => l.includes("box.headroom_deferred_wait")),
+      ).toHaveLength(2);
+      expect(provisionWorkdir).not.toHaveBeenCalled();
+      expect(releaseMock).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a cancel during the deferral wait ends the run like any other cancel (AbortError through, slot already released)", async () => {
     const { _setAdmissionControllerForTests, _setAdmissionSleepForTests } =
       await import("./workflow");
@@ -2285,15 +2328,26 @@ Committed_AS:   12000000 kB
     const { _setAdmissionControllerForTests } = await import("./workflow");
     const { AdmissionController } = await import("./headroom");
     const controller = new AdmissionController(POLICY, () => ROOMY);
+    const admitSpy = vi.spyOn(controller, "admit");
     _setAdmissionControllerForTests(controller);
     const ctx = { cancelled: false, log: vi.fn() };
     await runFn(INPUT, ctx);
+    await runFn(INPUT, { cancelled: false, log: vi.fn() });
     expect(waits).toEqual([]);
-    expect(provisionWorkdir).toHaveBeenCalledTimes(1);
+    expect(provisionWorkdir).toHaveBeenCalledTimes(2);
+    // No workflowRunId on this ctx: the reservation key is still unique per
+    // invocation (never the bare threadId, which two runs of one thread share).
+    const keys = admitSpy.mock.calls.map((c) => c[0].runId);
+    expect(keys).toHaveLength(2);
+    for (const k of keys) {
+      expect(k).toMatch(new RegExp(`^${INPUT.threadId}:[0-9a-f-]{36}$`));
+    }
+    expect(new Set(keys).size).toBe(2);
     expect(
       ctx.log.mock.calls.some((c) => String(c[0]).includes("box.headroom_ok")),
     ).toBe(true);
     expect(controller.reservedBytes()).toBe(0);
+    admitSpy.mockRestore();
   });
 
   it("once the daemon is up the reservation shrinks by the run cgroup's anonymous memory and is whole again when the probe reads nothing; teardown frees it", async () => {

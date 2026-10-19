@@ -19,6 +19,20 @@ run commit = `WORKER_RUN_MEMORY_MAX`, `WORKER_ADMISSION_MAX_DEFERRALS=8`). Boot 
 | 4   | `Committed_AS` never exceeded `fraction × CommitLimit` during the drill (sampler TSV)                                                                                                                                                                                                                                            | _pending_ |
 | 5   | Budget exhausted (hog held past `budgetS`): the run FAILS once with `AdmissionBudgetExhaustedError` ("no memory headroom after N deferral(s)"), is never re-executed, nothing on disk                                                                                                                                            | _pending_ |
 
+| 6 | Queued-behind-a-deferral (N = 1): a second review dispatched while the first is deferred stays QUEUED at the engine (the deferred run holds the engine slot); it starts when the first ends — recorded, never failed by the worker | _pending_ |
+
 ## Notes
 
-_(filled during the drill)_
+**Why N = 2 is not the steady state on this box (and #371 says so).** With the box's own
+numbers — run commit = `WORKER_RUN_MEMORY_MAX` = 5000M ≈ 4.9 GiB, idle `Committed_AS` ≈ 2.4 GiB,
+`CommitLimit` ≈ 11.8 GiB × 0.9 ≈ 10.6 GiB — one admitted run plus a second arriving is
+2.4 + 4.9 + 4.9 ≈ 12.2 GiB > 10.6 GiB: the commit arm defers every second concurrent run, and if
+the first outlasts the 366 s budget the second fails final. Shrinking the reservation by the
+run's anonymous memory does not change the sum (it moves bytes from `reserved` into
+`Committed_AS`). So #371 at N = 2 on a CX33 turns "waits at the engine" into "dispatched,
+deferred, fails after ≈ 6 min" — the check working as specified, not failing. The #205 N = 2
+drill (`phase2-2.md`) was therefore captured on the pre-#371 code, and the box returns to
+`WORKER_BOX_SLOTS=1` BEFORE the restart that brings #371 up. Raising N here needs a lower
+`WORKER_RUN_MEMORY_MAX` or more memory, and the arithmetic above is the sizing rule.
+
+_(drill evidence filled below)_

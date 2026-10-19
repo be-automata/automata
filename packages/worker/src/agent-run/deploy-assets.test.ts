@@ -3017,6 +3017,31 @@ describe("#204: the unit delegates a cgroup subtree, narrowly", () => {
   });
 });
 
+describe("#205: the hidepid fence needs the host mount namespace — an opt-in drop-in, never the base unit", () => {
+  it("20-hidepid.conf relaxes exactly ProtectSystem and ProtectKernelTunables; the base unit keeps both", () => {
+    // ProtectSystem/ProtectKernelTunables give the unit a FRESH /proc without the
+    // host's hidepid, and an ExecStartPre remount does not survive into
+    // ExecStart — measured as a crash loop on the N > 1 boot check. A one-slot
+    // box never pays for N > 1: the relaxation lives in a drop-in it does not install.
+    const dropin = deployFile(
+      "linux",
+      "automata-worker.service.d/20-hidepid.conf",
+    );
+    expect(dropin).toMatch(/^ProtectSystem=no$/m);
+    expect(dropin).toMatch(/^ProtectKernelTunables=no$/m);
+    expect(dropin).not.toMatch(/^ProtectControlGroups=/m);
+    expect(dropin).not.toMatch(/^Delegate=/m);
+    expect(dropin).toMatch(/REMOVE it when the box returns to N = 1/);
+    const unit = deployFile("linux", "automata-worker.service");
+    expect(unit).toMatch(/^ProtectSystem=full$/m);
+    expect(unit).toMatch(/^ProtectKernelTunables=yes$/m);
+    // The provisioning runbook names it next to the remount it completes.
+    expect(
+      read(path.join(workerRoot, "deploy", "AGENT-UID-PROVISIONING.md")),
+    ).toMatch(/20-hidepid\.conf/);
+  });
+});
+
 describe("#204: hardening must not fence out the delegated subtree", () => {
   const unitFile = () => deployFile("linux", "automata-worker.service");
 

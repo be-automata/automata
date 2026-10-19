@@ -287,6 +287,15 @@ grep -q hidepid= /etc/fstab || printf 'proc /proc proc defaults,hidepid=invisibl
 sudo -u automata-agent-1 ps -eo user | sort -u   # must list only automata-agent-1
 ```
 
+The remount alone is not enough for the worker unit: `ProtectSystem=full` and
+`ProtectKernelTunables=yes` give it a private mount namespace with a fresh `/proc`
+that has no `hidepid=`, and an `ExecStartPre` remount does not persist into
+`ExecStart` (the worker then crash-loops on its own check, "/proc is mounted
+without hidepid", with the host remounted correctly). Install the opt-in drop-in
+`deploy/linux/automata-worker.service.d/20-hidepid.conf` (`ProtectSystem=no`,
+`ProtectKernelTunables=no` — the unit shares the host namespace) with
+`systemctl daemon-reload`, and remove it again when the box returns to N = 1.
+
 The worker checks this at boot (N > 1, Linux) and refuses to start without it —
 and without a `gid=` naming one of its own groups: a hidepid that also hides the
 slot accounts from the worker would silently blind the escapee reaper. The boot

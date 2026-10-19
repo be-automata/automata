@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { hatchet } from "../hatchet-client";
 import {
   AGENT_RUN_VARIANTS,
@@ -431,8 +431,10 @@ async function runAgent(
   const wwwOpts = wwwOptsFor(input, ctx);
   const runExternalId = wwwOpts.runExternalId ?? "";
   // #371: the headroom reservation is keyed by the WORKFLOW RUN — distinct for
-  // every run of a thread (supersede siblings, re-reviews).
-  const runKey = ctx.workflowRunId?.() || input.threadId;
+  // every run of a thread (supersede siblings, re-reviews). Without an id the
+  // key is still unique per invocation: two runs of one thread must never share
+  // (and silently overwrite) one reservation.
+  const runKey = ctx.workflowRunId?.() || `${input.threadId}:${randomUUID()}`;
   // Under complete-run·queue a run may have waited behind an older one while
   // newer commits landed. Ask www FIRST; if a newer run is already recorded,
   // skip with a typed terminal — no clone, no daemon, no credits. Fails open.
@@ -1015,15 +1017,22 @@ async function runAgentInner(
       log: admissionLog,
     });
     // #371: admission under the slot and BEFORE the clone, with the deferral
-    // waited out IN PROCESS: a refusal gives the slot back (a parked sibling
-    // takes it at once), sleeps the backoff — abortable by the engine's cancel
-    // — and tries again, up to WORKER_ADMISSION_MAX_DEFERRALS; then the run
-    // fails final. Nothing of the run is on disk while it waits. The
+    // waited out IN PROCESS: a refusal gives the box slot back, sleeps the
+    // backoff — abortable by the engine's cancel — and tries again, up to
+    // WORKER_ADMISSION_MAX_DEFERRALS or until the deferral budget (wall clock,
+    // slot re-acquire waits included) is spent; then the run fails final. The
+    // run keeps its ENGINE slot while it waits (I3: engine slots = box slots),
+    // so no engine-dispatched sibling can take the freed box slot — the box
+    // runs at most N − (deferred runs) agents and the engine's queue waits its
+    // scheduleTimeout. The release matters for the lock's out-of-process
+    // tenants (a self-heal run, the boot uid scan) and for Decision 5: a
+    // waiting run is never a lock holder. Nothing of the run is on disk while it waits. The
     // reservation lives as long as the run (released in the finally and in
     // every pre-daemon unwind); once the run's cgroup exists it shrinks by the
     // anonymous memory the kernel already charges the run (daemon.start()).
     const baseConfig = config;
     const admission = getAdmissionController(config);
+    let deferralStartedAt: number | null = null;
     for (let deferrals = 0; ; ) {
       boxLock = await acquireBoxSlot({
         root: baseConfig.runNamespaceRoot,
@@ -1052,17 +1061,27 @@ async function runAgentInner(
         await boxLock.release();
         boxLock = null;
         config = baseConfig;
-        if (deferrals >= baseConfig.admissionMaxDeferrals) {
-          throw new AdmissionBudgetExhaustedError(deferrals, err);
+        deferralStartedAt ??= Date.now();
+        // Wall clock since the first refusal: the backoff sleeps AND the time
+        // spent re-acquiring a box slot, which the boot-time budget check
+        // (Σbackoff ≤ budget) cannot see.
+        const elapsedS = Math.round((Date.now() - deferralStartedAt) / 1000);
+        const waitS = backoffSeconds(deferrals + 1);
+        if (
+          deferrals >= baseConfig.admissionMaxDeferrals ||
+          elapsedS + waitS > ADMISSION_DEFERRAL_BUDGET_S
+        ) {
+          throw new AdmissionBudgetExhaustedError(deferrals, err, elapsedS);
         }
         deferrals += 1;
-        const waitS = backoffSeconds(deferrals);
         admissionLog(
           `box.headroom_deferred_wait ${JSON.stringify({
             threadId: input.threadId,
             deferral: deferrals,
             of: baseConfig.admissionMaxDeferrals,
             waitS,
+            elapsedS,
+            budgetS: ADMISSION_DEFERRAL_BUDGET_S,
           })}`,
         );
         step(

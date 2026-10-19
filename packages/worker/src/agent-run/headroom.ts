@@ -180,10 +180,12 @@ export class AdmissionBudgetExhaustedError extends NonRetryableError {
   constructor(
     readonly deferrals: number,
     readonly last: AdmissionDeferredError,
+    /** Wall clock deferred (backoff + slot re-acquire waits); defaults to Σbackoff. */
+    readonly elapsedS: number = sumBackoffSeconds(deferrals),
   ) {
     super(
       `The box had no memory headroom for this run after ${deferrals} deferral(s) ` +
-        `(${sumBackoffSeconds(deferrals)}s of waiting); last check: ${last.message}`,
+        `(${elapsedS}s deferred); last check: ${last.message}`,
     );
     this.name = "AdmissionBudgetExhaustedError";
   }
