@@ -25,8 +25,8 @@ import {
   type ReapAgentUidOpts,
 } from "./uid-reaper";
 
-type TryAcquireFn = NonNullable<BootUidScanOpts["tryAcquire"]>;
 type ReapFn = NonNullable<BootUidScanOpts["reap"]>;
+type TryAcquireAllFn = NonNullable<BootUidScanOpts["tryAcquireAll"]>;
 
 /**
  * SAFETY: this box runs a production worker under the agent uid. No case here
@@ -1086,14 +1086,14 @@ describe("bootUidScan (AC14, unit level)", () => {
   };
 
   it("empty agentUser ⇒ disabled; the lock is never tried", async () => {
-    const tryAcquire = vi.fn(async () => null);
+    const tryAcquire = vi.fn<TryAcquireAllFn>(async () => null);
     const reap = vi.fn(async () => zero);
     const lines: string[] = [];
     const out = await bootUidScan({
       root: "/nonexistent/never-used",
       agentUser: "",
       log: (l) => lines.push(l),
-      tryAcquire,
+      tryAcquireAll: tryAcquire,
       reap,
     });
     expect(out).toEqual({ outcome: "disabled" });
@@ -1104,14 +1104,14 @@ describe("bootUidScan (AC14, unit level)", () => {
   });
 
   it("lock busy ⇒ skipped-busy; reap not called", async () => {
-    const tryAcquire = vi.fn<TryAcquireFn>(async () => null);
+    const tryAcquire = vi.fn<TryAcquireAllFn>(async () => null);
     const reap = vi.fn(async () => zero);
     const lines: string[] = [];
     const out = await bootUidScan({
       root: "/nonexistent/never-used",
       agentUser: AGENT,
       log: (l) => lines.push(l),
-      tryAcquire,
+      tryAcquireAll: tryAcquire,
       reap,
     });
     expect(out).toEqual({ outcome: "skipped-busy" });
@@ -1133,7 +1133,7 @@ describe("bootUidScan (AC14, unit level)", () => {
       lost: false,
       slot: 0,
     };
-    const tryAcquire = vi.fn<TryAcquireFn>(async () => lock);
+    const tryAcquire = vi.fn<TryAcquireAllFn>(async () => [lock]);
     const reap = vi.fn<ReapFn>(async () => {
       order.push("reap");
       return { ...zero, scanned: 2, killed: 2 };
@@ -1142,7 +1142,7 @@ describe("bootUidScan (AC14, unit level)", () => {
       root: "/root/x",
       agentUser: AGENT,
       log: () => {},
-      tryAcquire,
+      tryAcquireAll: tryAcquire,
       reap,
     });
     expect(out.outcome).toBe("scanned");
@@ -1159,9 +1159,9 @@ describe("bootUidScan (AC14, unit level)", () => {
 
   it("a reap that rejects ⇒ outcome error (never thrown into boot), logged, lock released once", async () => {
     const release = vi.fn(async () => {});
-    const tryAcquire = vi.fn(
-      async () => ({ release, lost: false, slot: 0 }) as BoxLock,
-    );
+    const tryAcquire = vi.fn<TryAcquireAllFn>(async () => [
+      { release, lost: false, slot: 0 } as BoxLock,
+    ]);
     const reap = vi.fn(async () => {
       throw new Error("contract broken");
     });
@@ -1170,7 +1170,7 @@ describe("bootUidScan (AC14, unit level)", () => {
       root: "/root/x",
       agentUser: AGENT,
       log: (l) => lines.push(l),
-      tryAcquire,
+      tryAcquireAll: tryAcquire,
       reap,
     });
     expect(out).toEqual({ outcome: "error", error: "contract broken" });
@@ -1187,23 +1187,23 @@ describe("bootUidScan (AC14, unit level)", () => {
       root: "/root/x",
       agentUser: AGENT,
       log: () => {},
-      tryAcquire: vi.fn(
-        async () => ({ release, lost: false, slot: 0 }) as BoxLock,
-      ),
+      tryAcquireAll: vi.fn<TryAcquireAllFn>(async () => [
+        { release, lost: false, slot: 0 } as BoxLock,
+      ]),
       reap: vi.fn(async () => ({ ...zero, error: "ps exploded" })),
     });
     expect(out).toMatchObject({ outcome: "error", error: "ps exploded" });
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it("tryAcquire throwing BoxLockUnavailableError ⇒ outcome error, no throw, logged", async () => {
+  it("tryAcquireAll throwing BoxLockUnavailableError ⇒ outcome error, no throw, logged", async () => {
     const reap = vi.fn(async () => zero);
     const lines: string[] = [];
     const out = await bootUidScan({
       root: "/root/x",
       agentUser: AGENT,
       log: (l) => lines.push(l),
-      tryAcquire: vi.fn(async () => {
+      tryAcquireAll: vi.fn<TryAcquireAllFn>(async () => {
         throw new BoxLockUnavailableError(
           "/usr/bin/lockf",
           "spawn failed: ENOENT",
@@ -1217,8 +1217,6 @@ describe("bootUidScan (AC14, unit level)", () => {
     expect(lines.some((l) => l.startsWith("boot uid scan failed:"))).toBe(true);
   });
 });
-
-type TryAcquireAllFn = NonNullable<BootUidScanOpts["tryAcquireAll"]>;
 
 describe("bootUidScan over N slots (#205)", () => {
   const zero = {
@@ -1239,23 +1237,23 @@ describe("bootUidScan over N slots (#205)", () => {
     slot,
   });
 
-  it("slots = 1 takes the single exclusive lock and never calls the all-slots take (byte-identical path)", async () => {
+  it("slots = 1 takes exactly one slot through the all-slots take (the old single try-lock, byte-identical)", async () => {
     const order: string[] = [];
-    const tryAcquire = vi.fn<TryAcquireFn>(async () => lockFor(0, order));
-    const tryAcquireAll = vi.fn<TryAcquireAllFn>(async () => null);
+    const tryAcquireAll = vi.fn<TryAcquireAllFn>(async () => [
+      lockFor(0, order),
+    ]);
     const reap = vi.fn<ReapFn>(async () => zero);
     const out = await bootUidScan({
       root: "/nonexistent/never-used",
       agentUser: AGENT,
       slots: 1,
       log: () => {},
-      tryAcquire,
       tryAcquireAll,
       reap,
     });
     expect(out.outcome).toBe("scanned");
-    expect(tryAcquire).toHaveBeenCalledTimes(1);
-    expect(tryAcquireAll).not.toHaveBeenCalled();
+    expect(tryAcquireAll).toHaveBeenCalledTimes(1);
+    expect(tryAcquireAll.mock.calls[0]?.[0]).toMatchObject({ slots: 1 });
     expect(reap).toHaveBeenCalledTimes(1);
     expect(reap.mock.calls[0]?.[0]).toMatchObject({
       agentUser: AGENT,
@@ -1265,7 +1263,6 @@ describe("bootUidScan over N slots (#205)", () => {
 
   it("slots = 3: every slot is taken, each slot's OWN account is reaped in order, results are summed, every lock is released", async () => {
     const order: string[] = [];
-    const tryAcquire = vi.fn<TryAcquireFn>(async () => null);
     const tryAcquireAll = vi.fn<TryAcquireAllFn>(async () =>
       [0, 1, 2].map((s) => lockFor(s, order)),
     );
@@ -1278,11 +1275,9 @@ describe("bootUidScan over N slots (#205)", () => {
       agentUser: AGENT,
       slots: 3,
       log: () => {},
-      tryAcquire,
       tryAcquireAll,
       reap,
     });
-    expect(tryAcquire).not.toHaveBeenCalled();
     expect(tryAcquireAll.mock.calls[0]?.[0]).toMatchObject({
       slots: 3,
       holder: expect.stringContaining("boot"),
@@ -1308,7 +1303,6 @@ describe("bootUidScan over N slots (#205)", () => {
       agentUser: AGENT,
       slots: 3,
       log: (l) => lines.push(l),
-      tryAcquire: vi.fn<TryAcquireFn>(async () => null),
       tryAcquireAll,
       reap,
     });
@@ -1330,7 +1324,6 @@ describe("bootUidScan over N slots (#205)", () => {
       agentUser: AGENT,
       slots: 2,
       log: () => {},
-      tryAcquire: vi.fn<TryAcquireFn>(async () => null),
       tryAcquireAll,
       reap,
     });

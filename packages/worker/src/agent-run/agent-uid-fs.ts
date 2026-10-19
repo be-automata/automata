@@ -159,20 +159,24 @@ const defaultExec: AceExec = async (file, args) => {
  * (the namespace root, the worker dir, the workdir root) concurrently from one
  * process — so one slot's entry could be dropped and that run would die at
  * clone or at its pidfile write. Every ACL exec in this module therefore runs
- * under one process-wide mutex; the cost is a few milliseconds per admission.
+ * under a per-path mutex; the cost is a few milliseconds per admission.
  */
-let aclLock: Promise<void> = Promise.resolve();
-async function withAclLock<T>(fn: () => Promise<T>): Promise<T> {
-  const previous = aclLock;
+const aclLocks = new Map<string, Promise<void>>();
+async function withAclLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  // Keyed by the target path: only edits to the SAME inode can race, so two
+  // slots granting their own subdirs never wait on each other.
+  const previous = aclLocks.get(dir) ?? Promise.resolve();
   let unlock: () => void = () => {};
-  aclLock = new Promise<void>((resolve) => {
+  const mine = new Promise<void>((resolve) => {
     unlock = resolve;
   });
+  aclLocks.set(dir, mine);
   try {
     await previous;
     return await fn();
   } finally {
     unlock();
+    if (aclLocks.get(dir) === mine) aclLocks.delete(dir);
   }
 }
 
@@ -215,7 +219,7 @@ async function applyAces(opts: {
       // without ACL support, and a silently-missing grant surfaces later as a
       // 15s "daemon socket not ready", or as a run that dies on an unwritable
       // pidfile, with nothing pointing at the cause. Fail loud, here.
-      await withAclLock(() => exec(inv.file, inv.args));
+      await withAclLock(dir, () => exec(inv.file, inv.args));
     }
   }
 }
@@ -346,7 +350,7 @@ export async function applySlotDirAces(opts: {
   }
   const exec = opts.exec ?? defaultExec;
   if ((platform ?? process.platform) === "linux") {
-    await withAclLock(() => exec("/usr/bin/setfacl", ["-b", dir]));
+    await withAclLock(dir, () => exec("/usr/bin/setfacl", ["-b", dir]));
   }
   await applyInheritableAces({
     dir,

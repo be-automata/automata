@@ -19,7 +19,6 @@ import {
 } from "../agent-run/engine-liveness";
 import { harnessDoctorLine } from "../agent-run/batteries-seed";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
-import { slotAgentUsers } from "../agent-run/spawn-as-user";
 import {
   assertSlotAccountsExist,
   warnIfSlotsExceedMemory,
@@ -65,7 +64,7 @@ async function claimNamespaceAndReclaim(): Promise<void> {
       root,
       workerId,
       agentUser: cfg.agentUser,
-      agentUsers: slotAgentUsers(cfg.agentUser, cfg.boxSlots),
+      agentUsers: cfg.agentUsers,
     });
   } catch (err) {
     // A worker that can't claim its dir would leak every run's resources — fail loud.
@@ -167,12 +166,9 @@ async function main() {
       // #205: every slot's account must exist NOW. A missing slot account would
       // otherwise surface as the first run on that slot dying in sudo, while the
       // box reports N slots of capacity it does not have.
-      const users = slotAgentUsers(cfg.agentUser, cfg.boxSlots);
-      await assertSlotAccountsExist(users, (file, args) =>
-        execFileAsync(file, args),
-      );
+      await assertSlotAccountsExist(cfg.agentUsers);
       console.log(
-        `[worker-boot] box slots: ${cfg.boxSlots} (${users.join(", ")})`,
+        `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")})`,
       );
     }
   } catch (err) {
@@ -238,10 +234,7 @@ async function main() {
       workdirRoot: bootUidScanConfig.workdirRoot,
       agentUser: bootUidScanConfig.agentUser,
       // #205: a stale dir may belong to any slot's account; each hands back its own.
-      agentUsers: slotAgentUsers(
-        bootUidScanConfig.agentUser,
-        bootUidScanConfig.boxSlots,
-      ),
+      agentUsers: bootUidScanConfig.agentUsers,
       log: (m) => console.log(`[worker-boot] ${m}`),
     });
   } catch (err) {
@@ -260,7 +253,8 @@ async function main() {
   // name — the reapers key on getProcessWorkerId(), a separate per-process uuid
   // — so changing it costs an extra stale row after the first restart and
   // nothing else.
-  const boxId = loadWorkerConfig().boxId;
+  const registrationConfig = loadWorkerConfig();
+  const boxId = registrationConfig.boxId;
   console.log(`[worker-boot] box id: ${boxId}`);
 
   // #204: prepare the delegated cgroup subtree once, at boot, before any run.
@@ -289,8 +283,8 @@ async function main() {
   // probes for a row with exactly this name (namespaced), so a second literal
   // here could drift from it and leave the box silently unguarded.
   const workerName = `automata-worker-${boxId}`;
-  const boxSlots = loadWorkerConfig().boxSlots;
-  warnIfSlotsExceedMemory(loadWorkerConfig());
+  const boxSlots = registrationConfig.boxSlots;
+  warnIfSlotsExceedMemory(registrationConfig);
   const worker = await hatchet.worker(workerName, {
     workflows,
     // #125 C4 / #183 / #205: ONE unit per box and `slots` = WORKER_BOX_SLOTS,

@@ -481,22 +481,26 @@ async function handBackAgentFiles(
   ).filter(Boolean);
   if (users.length === 0 || platform !== "linux") return;
   if (!(await fs.lstat(workdir).catch(() => null))) return;
-  for (const agentUser of users) {
-    try {
-      const inv = buildHandBackInvocation({ agentUser, workdir });
-      if (!inv) continue;
-      const exit = await (opts.runAsAgent ?? runAsAgentViaSudo)(inv);
-      if (exit.code !== 0) {
-        log(
-          `workdir hand-back incomplete: ${workdir} (exit ${String(exit.code)}${
-            exit.signal ? ` ${exit.signal}` : ""
-          }${exit.stderrTail ? `: ${exit.stderrTail}` : ""})`,
-        );
+  // Each pass touches only its own account's inodes, so the passes are
+  // independent and run concurrently: N slots cost one tree walk of wall time.
+  await Promise.all(
+    users.map(async (agentUser) => {
+      try {
+        const inv = buildHandBackInvocation({ agentUser, workdir });
+        if (!inv) return;
+        const exit = await (opts.runAsAgent ?? runAsAgentViaSudo)(inv);
+        if (exit.code !== 0) {
+          log(
+            `workdir hand-back incomplete: ${workdir} (exit ${String(exit.code)}${
+              exit.signal ? ` ${exit.signal}` : ""
+            }${exit.stderrTail ? `: ${exit.stderrTail}` : ""})`,
+          );
+        }
+      } catch (e) {
+        log(`workdir hand-back failed: ${workdir} (${errorMessage(e)})`);
       }
-    } catch (e) {
-      log(`workdir hand-back failed: ${workdir} (${errorMessage(e)})`);
-    }
-  }
+    }),
+  );
 }
 
 /**

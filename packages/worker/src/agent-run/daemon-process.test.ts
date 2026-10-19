@@ -11,13 +11,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { DaemonProcess, writeDaemonMessage } from "./daemon-process";
-import { loadWorkerConfig } from "./config";
-import {
-  getProcessWorkerId,
-  runPidPath,
-  runSocketPath,
-  runUserPath,
-} from "./run-namespace";
+import { configForSlot, loadWorkerConfig } from "./config";
+import { getProcessWorkerId, runPidPath, runSocketPath } from "./run-namespace";
 import type { AgentRunInput } from "./types";
 
 /**
@@ -652,72 +647,7 @@ setInterval(() => {}, 1000);
     expect(daemon.pid).toBe(4242);
   });
 
-  describe("#205: the per-run `.user` record and the slot layout", () => {
-    it("agent-uid mode records the run's account beside the pidfile before the spawn, and teardown removes it", async () => {
-      const { root, workdir, input } = fixture();
-      const recorded: Recorded[] = [];
-      const config = loadWorkerConfig({
-        WORKER_RUN_NAMESPACE_ROOT: root,
-        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
-        WORKER_AGENT_USER: "_automata-agent",
-        WORKER_WORKDIR_ROOT: workdir,
-      });
-      const userFile = runUserPath(
-        runPidPath(root, getProcessWorkerId(), input.threadId),
-      );
-      let recordAtSpawn: string | null = null;
-      const inner = fakeSpawn({ recorded, wrapperPgid: 4242 });
-      const daemon = new DaemonProcess(
-        config,
-        input,
-        workdir,
-        null,
-        null,
-        null,
-        {
-          aceExec: async () => {},
-          spawnFn: ((file: string, args: string[], opts: unknown) => {
-            recordAtSpawn = fs.existsSync(userFile)
-              ? fs.readFileSync(userFile, "utf8")
-              : null;
-            return inner(file, args, opts as never);
-          }) as unknown as typeof spawn,
-          platform: "darwin",
-        },
-      );
-      daemons.push(daemon);
-      await daemon.start();
-      expect(recordAtSpawn).toBe("_automata-agent");
-      daemon.teardown();
-      expect(fs.existsSync(userFile)).toBe(false);
-    });
-
-    it("no uid drop ⇒ no record (byte-identical default)", async () => {
-      const { root, workdir, input } = fixture();
-      const config = loadWorkerConfig({
-        WORKER_RUN_NAMESPACE_ROOT: root,
-        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
-      });
-      const daemon = new DaemonProcess(
-        config,
-        input,
-        workdir,
-        null,
-        null,
-        null,
-        {
-          spawnFn: fakeSpawn({ recorded: [] }),
-        },
-      );
-      daemons.push(daemon);
-      await daemon.start();
-      expect(
-        fs.existsSync(
-          runUserPath(runPidPath(root, getProcessWorkerId(), input.threadId)),
-        ),
-      ).toBe(false);
-    });
-
+  describe("#205: the slot layout", () => {
     it("N > 1 without the per-run boxSlot override is refused at construction (never writes into the shared dir)", () => {
       const { root, workdir, input } = fixture();
       const config = loadWorkerConfig({
@@ -733,7 +663,7 @@ setInterval(() => {}, 1000);
       );
     });
 
-    it("N > 1 with the slot override puts the run's record under s<i>/ as the slot's account", async () => {
+    it("N > 1 with the slot override puts the run's artefacts under s<i>/ and runs as the slot's account", async () => {
       const { root, workdir, input } = fixture();
       const base = loadWorkerConfig({
         WORKER_RUN_NAMESPACE_ROOT: root,
@@ -743,7 +673,9 @@ setInterval(() => {}, 1000);
         WORKER_BOX_SLOTS: "2",
         WORKER_RUN_MEMORY_MAX: "1500M",
       });
-      const config = { ...base, boxSlot: 1, agentUser: "_automata-agent-1" };
+      const config = configForSlot(base, 1);
+      expect(config.agentUser).toBe("_automata-agent-1");
+      const recorded: Recorded[] = [];
       const daemon = new DaemonProcess(
         config,
         input,
@@ -753,21 +685,21 @@ setInterval(() => {}, 1000);
         null,
         {
           aceExec: async () => {},
-          spawnFn: fakeSpawn({ recorded: [], wrapperPgid: 4242 }),
+          spawnFn: fakeSpawn({ recorded, wrapperPgid: 4242 }),
           platform: "darwin",
         },
       );
       daemons.push(daemon);
       // The ceiling is on, so start() dies at the cgroup step on this platform —
-      // AFTER the record is written, which is the ordering under test.
+      // AFTER the slot dir was prepared, which is the layout under test.
       await expect(daemon.start()).rejects.toThrow(/memory ceiling/);
-      const userFile = runUserPath(
+      const slotDir = path.dirname(
         runPidPath(root, getProcessWorkerId(), input.threadId, 1),
       );
-      expect(path.dirname(userFile)).toMatch(/\/s1$/);
-      expect(fs.readFileSync(userFile, "utf8")).toBe("_automata-agent-1");
+      expect(slotDir).toMatch(/\/s1$/);
+      expect(fs.existsSync(slotDir)).toBe(true);
+      expect(recorded).toEqual([]);
       daemon.teardown();
-      expect(fs.existsSync(userFile)).toBe(false);
     });
   });
 

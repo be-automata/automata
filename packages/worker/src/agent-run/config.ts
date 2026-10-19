@@ -2,7 +2,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
-import { assertAgentUser, slotAgentUsers } from "./spawn-as-user";
+import {
+  agentUserForSlot,
+  assertAgentUser,
+  slotAgentUsers,
+} from "./spawn-as-user";
 
 /**
  * Execution-plane worker box configuration (ADR-003). Unlike the control plane
@@ -82,6 +86,12 @@ export interface WorkerConfig {
    * Must equal the worker's engine `slots` and the engine global cap (#372).
    */
   boxSlots: number;
+  /**
+   * #205: every slot's agent account, slot 0 first — `[agentUser]` at N = 1,
+   * `[]` with agent-uid mode off. The one list every box-wide operation (the
+   * shared namespace grants, the boot scan, the stale-dir sweep) iterates.
+   */
+  agentUsers: string[];
   /**
    * #205: WHICH slot the current run holds — a per-run override the workflow
    * sets on its copy of the config after the slot acquire, together with the
@@ -499,10 +509,11 @@ export function loadWorkerConfig(
   // Every slot's account name must be a valid login NOW, not at the first run
   // of that slot: a base near the 31-character limit plus `-<i>` is refused by
   // assertAgentUser, and that refusal belongs at boot.
-  slotAgentUsers(agentUser, boxSlots);
+  const agentUsers = slotAgentUsers(agentUser, boxSlots);
   return {
     agentUser,
     boxSlots,
+    agentUsers,
     boxId: resolveBoxId(env.WORKER_BOX_ID),
     memoryMaxBytes,
     tasksMax,
@@ -563,6 +574,19 @@ export function loadWorkerConfig(
         ? n
         : null;
     })(),
+  };
+}
+
+/**
+ * #205: the config one run uses once it holds slot `slot` — the same box config
+ * with the slot's own agent account and index. At slot 0 the account is the
+ * base name, so N = 1 is unchanged.
+ */
+export function configForSlot(cfg: WorkerConfig, slot: number): WorkerConfig {
+  return {
+    ...cfg,
+    agentUser: agentUserForSlot(cfg.agentUser, slot),
+    boxSlot: slot,
   };
 }
 

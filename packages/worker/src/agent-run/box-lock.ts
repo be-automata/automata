@@ -94,8 +94,8 @@ export interface AcquireBoxLockOptions {
   log?: (line: string) => void;
   /** #205: the slot file to lock. Default 0 = `box.lock`, exactly as before. */
   slot?: number;
-  /** #205: appended to the log lines (`slot 1/3`); absent at N = 1 so those lines stay byte-identical. */
-  slotLabel?: string;
+  /** #205: how many slots the box has; > 1 tags the log lines with `slot i/N`. Default 1. */
+  slots?: number;
 }
 
 export interface AcquireBoxSlotOptions {
@@ -125,7 +125,8 @@ export interface TryAcquireBoxLockOptions {
   helper?: BoxLockHelper;
   /** #205: the slot file to try. Default 0 = `box.lock`. */
   slot?: number;
-  slotLabel?: string;
+  /** #205: how many slots the box has; > 1 tags the log lines. Default 1. */
+  slots?: number;
 }
 
 interface HelperExit {
@@ -157,12 +158,32 @@ const TRY_LOCK_BUSY_EXIT = 75;
  * i > 0 is `box.lock.<i>` (#205).
  */
 export function boxLockPath(root: string, slot = 0): string {
+  assertSlotIndex(slot, "boxLockPath");
+  return path.join(root, slot === 0 ? "box.lock" : `box.lock.${slot}`);
+}
+
+/** A slot index is a non-negative integer; shared by every slot-addressed builder. */
+export function assertSlotIndex(slot: number, where: string): void {
   if (!Number.isInteger(slot) || slot < 0) {
     throw new Error(
-      `boxLockPath: slot must be a non-negative integer, got ${slot}`,
+      `${where}: slot must be a non-negative integer, got ${slot}`,
     );
   }
-  return path.join(root, slot === 0 ? "box.lock" : `box.lock.${slot}`);
+}
+
+/** A slot count is a positive integer. */
+export function assertSlotCount(slots: number, where: string): void {
+  if (!Number.isInteger(slots) || slots < 1) {
+    throw new Error(`${where}: slots must be a positive integer, got ${slots}`);
+  }
+}
+
+/**
+ * Log-line suffix for a slot: empty at N = 1 (those lines stay byte-identical),
+ * `, slot i/N` above.
+ */
+export function slotTag(slot: number, slots: number): string {
+  return slots > 1 ? `, slot ${slot}/${slots}` : "";
 }
 
 /**
@@ -171,21 +192,12 @@ export function boxLockPath(root: string, slot = 0): string {
  * colliding on slot 0 and serialising through the waiting acquire. Pure.
  */
 export function rotationStart(holder: string, slots: number): number {
-  if (!Number.isInteger(slots) || slots < 1) {
-    throw new Error(
-      `rotationStart: slots must be a positive integer, got ${slots}`,
-    );
-  }
+  assertSlotCount(slots, "rotationStart");
   let h = 0;
   for (let i = 0; i < holder.length; i++) {
     h = (h * 31 + holder.charCodeAt(i)) >>> 0;
   }
   return h % slots;
-}
-
-/** `slot i/N` for log lines at N > 1; undefined at N = 1 so those lines do not change. */
-function slotLabelFor(slot: number, slots: number): string | undefined {
-  return slots > 1 ? `slot ${slot}/${slots}` : undefined;
 }
 
 /**
@@ -366,11 +378,10 @@ function heldLock(
   holder: string,
   log?: (line: string) => void,
   slot = 0,
-  slotLabel?: string,
+  slots = 1,
 ): BoxLock {
   const { child, exited, stderr } = session;
-  // Log-line suffix: empty at N = 1 (byte-identical lines), `, slot i/N` above.
-  const tag = slotLabel ? `, ${slotLabel}` : "";
+  const tag = slotTag(slot, slots);
   let released = false;
   let lost = false;
   void (async () => {
@@ -417,9 +428,9 @@ export async function acquireBoxLock({
   signal,
   log,
   slot = 0,
-  slotLabel,
+  slots = 1,
 }: AcquireBoxLockOptions): Promise<BoxLock> {
-  const tag = slotLabel ? `, ${slotLabel}` : "";
+  const tag = slotTag(slot, slots);
   const session = await spawnHelperAndAwaitAck(
     root,
     boxLockHelper(),
@@ -446,7 +457,7 @@ export async function acquireBoxLock({
   }
 
   log?.(`box lock acquired by ${holder} (helper pid ${child.pid}${tag})`);
-  const lock = heldLock(session, holder, log, slot, slotLabel);
+  const lock = heldLock(session, holder, log, slot, slots);
 
   if (signal?.aborted) {
     // A cancel can land in the instant the previous holder released: never
@@ -480,11 +491,7 @@ export async function acquireBoxSlot({
   signal,
   log,
 }: AcquireBoxSlotOptions): Promise<BoxLock> {
-  if (!Number.isInteger(slots) || slots < 1) {
-    throw new Error(
-      `acquireBoxSlot: slots must be a positive integer, got ${slots}`,
-    );
-  }
+  assertSlotCount(slots, "acquireBoxSlot");
   if (slots === 1) {
     return acquireBoxLock({ root, holder, signal, log });
   }
@@ -492,13 +499,7 @@ export async function acquireBoxSlot({
   for (let k = 0; k < slots; k++) {
     if (signal?.aborted) throw abortError();
     const slot = (start + k) % slots;
-    const lock = await tryAcquireBoxLock({
-      root,
-      holder,
-      log,
-      slot,
-      slotLabel: slotLabelFor(slot, slots),
-    });
+    const lock = await tryAcquireBoxLock({ root, holder, log, slot, slots });
     if (lock) {
       if (signal?.aborted) {
         await lock.release();
@@ -510,14 +511,7 @@ export async function acquireBoxSlot({
   log?.(
     `box budget full (${slots} slots held) — ${holder} waits on slot ${start}`,
   );
-  return acquireBoxLock({
-    root,
-    holder,
-    signal,
-    log,
-    slot: start,
-    slotLabel: slotLabelFor(start, slots),
-  });
+  return acquireBoxLock({ root, holder, signal, log, slot: start, slots });
 }
 
 /**
@@ -533,21 +527,11 @@ export async function tryAcquireAllBoxSlots({
   holder,
   log,
 }: Omit<AcquireBoxSlotOptions, "signal">): Promise<BoxLock[] | null> {
-  if (!Number.isInteger(slots) || slots < 1) {
-    throw new Error(
-      `tryAcquireAllBoxSlots: slots must be a positive integer, got ${slots}`,
-    );
-  }
+  assertSlotCount(slots, "tryAcquireAllBoxSlots");
   const held: BoxLock[] = [];
   try {
     for (let slot = 0; slot < slots; slot++) {
-      const lock = await tryAcquireBoxLock({
-        root,
-        holder,
-        log,
-        slot,
-        slotLabel: slotLabelFor(slot, slots),
-      });
+      const lock = await tryAcquireBoxLock({ root, holder, log, slot, slots });
       if (!lock) {
         await releaseAll(held, log);
         return null;
@@ -561,20 +545,24 @@ export async function tryAcquireAllBoxSlots({
   }
 }
 
-/** Release every lock, each in its own try: one failed release never skips the rest or masks the caller's error. */
-async function releaseAll(
+/**
+ * Release every lock concurrently; a failed release is logged (naming the
+ * slot) and never masks the caller's error or skips the others. Each release
+ * is bounded by RELEASE_EXIT_BOUND_MS, so N releases cost one bound, not N.
+ */
+export async function releaseAll(
   held: BoxLock[],
   log?: (line: string) => void,
 ): Promise<void> {
-  for (const h of held) {
-    try {
-      await h.release();
-    } catch (e) {
+  const results = await Promise.allSettled(held.map((h) => h.release()));
+  results.forEach((r, i) => {
+    if (r.status === "rejected") {
+      const e: unknown = r.reason;
       log?.(
-        `box lock release failed for slot ${h.slot}: ${e instanceof Error ? e.message : String(e)}`,
+        `box lock release failed for slot ${held[i]?.slot ?? i}: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
-  }
+  });
 }
 
 /**
@@ -591,9 +579,9 @@ export async function tryAcquireBoxLock({
   log,
   helper,
   slot = 0,
-  slotLabel,
+  slots = 1,
 }: TryAcquireBoxLockOptions): Promise<BoxLock | null> {
-  const tag = slotLabel ? `, ${slotLabel}` : "";
+  const tag = slotTag(slot, slots);
   const session = await spawnHelperAndAwaitAck(
     root,
     helper ?? boxLockTryHelper(),
@@ -621,7 +609,7 @@ export async function tryAcquireBoxLock({
   }
 
   log?.(`box lock acquired by ${holder} (helper pid ${child.pid}${tag})`);
-  return heldLock(session, holder, log, slot, slotLabel);
+  return heldLock(session, holder, log, slot, slots);
 }
 
 /** Run `fn` holding the box lock; releases on return, throw, or abort. */

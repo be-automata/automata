@@ -4,15 +4,11 @@ import path from "node:path";
 import {
   SLOT_DIR_RE,
   WORKER_LOCK_FILENAME,
+  accountForPidFile,
   runPidPath,
-  runUserPath,
   workerRunDir,
 } from "./run-namespace";
-import {
-  assertAgentUser,
-  buildKillInvocation,
-  type Invocation,
-} from "./spawn-as-user";
+import { buildKillInvocation, type Invocation } from "./spawn-as-user";
 
 /**
  * Boot-time reclaim of orphaned daemons (enterprise-hardening Phase 0.2b, BINDING
@@ -74,44 +70,35 @@ function isPidDead(
   }
 }
 
-/**
- * Every `*.pid` under a worker dir: the flat layout's own files plus those in
- * its slot subdirs (`s<i>/`, #205). *.pid = per-run daemon group pids.
- */
-function listPidFiles(dir: string): string[] {
-  const out: string[] = [];
-  let entries: fs.Dirent[];
+/** `*.pid` files directly in `dir`, [] when it cannot be read. */
+function pidFilesIn(dir: string): string[] {
   try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith(".pid"))
+      .map((f) => path.join(dir, f));
   } catch {
-    return out;
+    return [];
   }
-  for (const entry of entries) {
-    if (entry.isFile() && entry.name.endsWith(".pid")) {
-      out.push(path.join(dir, entry.name));
-    } else if (entry.isDirectory() && SLOT_DIR_RE.test(entry.name)) {
-      try {
-        for (const f of fs.readdirSync(path.join(dir, entry.name))) {
-          if (f.endsWith(".pid")) out.push(path.join(dir, entry.name, f));
-        }
-      } catch {
-        // a vanished subdir is nothing to reap
-      }
-    }
-  }
-  return out;
 }
 
-/** The slot subdirs present under a worker dir, as slot indexes (#205). */
-function listSlotDirs(dir: string): number[] {
+/** The slot subdir names (`s<i>`) present under a worker dir (#205). */
+function listSlotDirs(dir: string): string[] {
   try {
     return fs
       .readdirSync(dir, { withFileTypes: true })
       .filter((e) => e.isDirectory() && SLOT_DIR_RE.test(e.name))
-      .map((e) => Number(e.name.slice(1)));
+      .map((e) => e.name);
   } catch {
     return [];
   }
+}
+
+/** Every `*.pid` under a worker dir: the flat layout's plus each slot subdir's (#205). */
+function listPidFiles(dir: string): string[] {
+  return [dir, ...listSlotDirs(dir).map((n) => path.join(dir, n))].flatMap(
+    pidFilesIn,
+  );
 }
 
 /** readdir the namespace root, [] when it does not exist — shared by both reapers. */
@@ -169,40 +156,18 @@ function readPid(file: string): number | null {
 }
 
 /**
- * #205: the agent account a pidfile's run executed as, from its `.user`
- * sibling. Null when absent or not a plain login name — then the caller's
- * configured account is used, which is exactly today's behaviour for every
- * pre-#205 pidfile and for agent-uid mode off. A malformed record is never
- * passed to sudo.
+ * #205: the account to signal a recorded group as — the slot's, read off the
+ * pidfile's own path (`accountForPidFile`), so a dead slot-1 run is never
+ * killed as slot 0 (an EPERM no-op and a leaked agent). Agent-uid mode off ⇒
+ * unchanged `process.kill(-pgid)`.
  */
-function readRunUser(pidFile: string): string | null {
-  try {
-    const raw = fs.readFileSync(runUserPath(pidFile), "utf8").trim();
-    if (!raw) return null;
-    assertAgentUser(raw);
-    return raw;
-  } catch {
-    return null;
-  }
-}
-
-/** The account to kill a recorded group as: the run's own record, else the configured one. */
-function killOptsFor(
+function killOptsFor<T extends { agentUser?: string }>(
   pidFile: string,
-  opts: ReclaimOpts | Omit<ReclaimOpts, "selfWorkerId">,
-) {
-  const recorded = opts.agentUser ? readRunUser(pidFile) : null;
-  return recorded ? { ...opts, agentUser: recorded } : opts;
-}
-
-function removeRunRecord(pidFile: string): void {
-  for (const f of [pidFile, runUserPath(pidFile)]) {
-    try {
-      fs.rmSync(f, { force: true });
-    } catch {
-      // best-effort
-    }
-  }
+  opts: T,
+): T {
+  return opts.agentUser
+    ? { ...opts, agentUser: accountForPidFile(pidFile, opts.agentUser) }
+    : opts;
 }
 
 export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
@@ -232,7 +197,6 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
       if (daemonPid === null) {
         continue; // malformed pid file — tolerate
       }
-      // #205: a dead slot-1 run must be signalled as slot 1's account.
       const how = killDaemonGroup(daemonPid, killOptsFor(pidFile, opts));
       if (how !== "gone") {
         log(
@@ -276,8 +240,8 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
  *  - the box's N slot locks (box-lock.ts, `slots: N` on the single worker
  *    unit) bound the box's concurrency and cover the crash-relaunch overlap;
  *    a threadId names one run whatever slot it holds, so the same-threadId
- *    kill stays exact at every N (#205). The prior attempt's `.user` record
- *    names the account the kill must run as.
+ *    kill stays exact at every N (#205). The prior attempt's slot dir names
+ *    the account the kill must run as.
  * Never throws; every op is best-effort (a stray file must not fail a run).
  */
 export function reapOwnThreadAttempts(
@@ -295,21 +259,25 @@ export function reapOwnThreadAttempts(
     const dir = workerRunDir(root, entry.name);
     const candidates = [
       runPidPath(root, entry.name, threadId),
-      ...listSlotDirs(dir).map((slot) =>
-        runPidPath(root, entry.name, threadId, slot),
+      ...listSlotDirs(dir).map((name) =>
+        runPidPath(root, entry.name, threadId, Number(name.slice(1))),
       ),
     ];
     for (const pidFile of candidates) {
       const daemonPid = readPid(pidFile);
       if (daemonPid === null) continue;
-      // The prior attempt's record names the account it ran as.
+      // The prior attempt ran as the account its slot dir names.
       const how = killDaemonGroup(daemonPid, killOptsFor(pidFile, opts));
       if (how !== "gone") {
         log(
           `admission-reap: ${how === "sudo" ? "sudo-" : ""}SIGKILLed prior attempt group ${daemonPid} of ${threadId} (${entry.name})`,
         );
       }
-      removeRunRecord(pidFile);
+      try {
+        fs.rmSync(pidFile, { force: true });
+      } catch {
+        // best-effort
+      }
       reaped += 1;
     }
   }

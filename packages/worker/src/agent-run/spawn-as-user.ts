@@ -35,6 +35,8 @@
  * ever interpolated into the `sh -c` string.
  */
 
+import { assertSlotIndex } from "./box-lock";
+
 export const SUDO_BIN = "/usr/bin/sudo";
 export const KILL_BIN = "/bin/kill";
 export const SH_BIN = "/bin/sh";
@@ -141,11 +143,7 @@ export function agentUserForSlot(base: string, slot: number): string {
   if (!base) {
     return "";
   }
-  if (!Number.isInteger(slot) || slot < 0) {
-    throw new Error(
-      `agentUserForSlot: slot must be a non-negative integer, got ${slot}`,
-    );
-  }
+  assertSlotIndex(slot, "agentUserForSlot");
   const user = slot === 0 ? base : `${base}-${slot}`;
   assertAgentUser(user);
   return user;

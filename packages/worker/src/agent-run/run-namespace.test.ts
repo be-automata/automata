@@ -10,7 +10,7 @@ import {
   runGhSocketPath,
   runPidPath,
   runSocketPath,
-  runUserPath,
+  accountForPidFile,
   slotFor,
   slotRunDir,
   workerLockPath,
@@ -246,9 +246,20 @@ describe("#205: slot layout — one subdir per slot, granted to that slot alone"
     expect(() => slotRunDir(root, "w-1", -1)).toThrow(/slot/);
   });
 
-  it("runUserPath is the pidfile's `.user` sibling", () => {
-    expect(runUserPath("/x/w-1/thr_1.pid")).toBe("/x/w-1/thr_1.user");
-    expect(runUserPath("/x/w-1/s1/thr_1.pid")).toBe("/x/w-1/s1/thr_1.user");
+  it("accountForPidFile: the slot dir names the account; the flat layout is the base account", () => {
+    expect(accountForPidFile("/x/w-1/thr_1.pid", "automata-agent")).toBe(
+      "automata-agent",
+    );
+    expect(accountForPidFile("/x/w-1/s0/thr_1.pid", "automata-agent")).toBe(
+      "automata-agent",
+    );
+    expect(accountForPidFile("/x/w-1/s2/thr_1.pid", "automata-agent")).toBe(
+      "automata-agent-2",
+    );
+    // A dir that merely starts with `s` is not a slot dir.
+    expect(accountForPidFile("/x/w-1/socks/thr_1.pid", "automata-agent")).toBe(
+      "automata-agent",
+    );
   });
 
   it("slotFor: undefined at N = 1; the run's boxSlot at N > 1; a missing override is an invariant violation", () => {

@@ -8,6 +8,8 @@ import {
   applySlotLayoutAces,
   type AceExec,
 } from "./agent-uid-fs";
+import { assertSlotIndex } from "./box-lock";
+import { agentUserForSlot } from "./spawn-as-user";
 
 /**
  * Per-run resource namespacing for the execution-plane worker (enterprise-hardening
@@ -112,16 +114,24 @@ export function slotRunDir(
   if (slot === undefined) {
     return dir;
   }
-  if (!Number.isInteger(slot) || slot < 0) {
-    throw new Error(
-      `slotRunDir: slot must be a non-negative integer, got ${slot}`,
-    );
-  }
+  assertSlotIndex(slot, "slotRunDir");
   return path.join(dir, `s${slot}`);
 }
 
 /** The slot-subdir name pattern reclaim scans for (`s0`, `s1`, …). */
 export const SLOT_DIR_RE = /^s\d+$/;
+
+/**
+ * #205: the agent account that owns a per-run pidfile, from WHERE it lives:
+ * `<workerDir>/s<i>/x.pid` ⇒ slot i's account; the flat layout ⇒ the base
+ * account. The layout IS the record — nothing else has to be written per run,
+ * and a reclaim after a crash reads only the path it already found.
+ */
+export function accountForPidFile(pidFile: string, baseUser: string): string {
+  const parent = path.basename(path.dirname(pidFile));
+  const m = SLOT_DIR_RE.exec(parent);
+  return m ? agentUserForSlot(baseUser, Number(parent.slice(1))) : baseUser;
+}
 
 export function runSocketPath(
   root: string,
@@ -187,19 +197,6 @@ export function slotFor(config: {
     );
   }
   return config.boxSlot;
-}
-
-/**
- * #205: the sibling of a run's pidfile that records WHICH agent account the run
- * executes as (`<threadId>.user`). With one account per box slot a recorded
- * process group can only be signalled as the account that owns it — a slot-1
- * run reclaimed as the slot-0 account is an EPERM no-op and a leaked agent — so
- * the reclaim paths read this file and the worker writes it before the spawn.
- * Absent (a pre-#205 pidfile, or agent-uid mode off) ⇒ the caller's configured
- * account, exactly as before.
- */
-export function runUserPath(pidFile: string): string {
-  return pidFile.replace(/\.pid$/, ".user");
 }
 
 /**

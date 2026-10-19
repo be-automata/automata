@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import {
   createServer,
   request as httpRequest,
@@ -45,6 +44,7 @@ import type { Duplex } from "node:stream";
  *     "unparseable" so onEvent always gets a string.
  */
 
+import { timingSafeEqualStr } from "./broker-common";
 import type { EgressPolicyShape } from "./types";
 
 export type { EgressPolicyShape } from "./types";
@@ -132,6 +132,9 @@ export type StartEgressProxyOptions = {
 };
 
 const LEVELS = new Set(["none", "ip_port", "domain"]);
+
+/** The challenge a credentialed proxy answers an unauthenticated client with (#205). */
+const PROXY_AUTHENTICATE = 'Basic realm="automata-run"';
 
 /** Sentinel host for fail-closed denies where no host string could be parsed. */
 const UNPARSEABLE = "unparseable";
@@ -301,17 +304,16 @@ export async function startEgressProxy(
   // #205: the expected `Proxy-Authorization` value, or null when no credential
   // was configured (N = 1). Compared timing-safe; never logged.
   const expectedAuth = opts.credential
-    ? `Basic ${Buffer.from(
-        `${opts.credential.user}:${opts.credential.secret}`,
-      ).toString("base64")}`
+    ? Buffer.from(
+        `Basic ${Buffer.from(
+          `${opts.credential.user}:${opts.credential.secret}`,
+        ).toString("base64")}`,
+      )
     : null;
   function authorized(req: IncomingMessage): boolean {
     if (expectedAuth === null) return true;
     const got = req.headers["proxy-authorization"];
-    if (typeof got !== "string") return false;
-    const a = Buffer.from(got);
-    const b = Buffer.from(expectedAuth);
-    return a.length === b.length && timingSafeEqual(a, b);
+    return typeof got === "string" && timingSafeEqualStr(got, expectedAuth);
   }
 
   function handleRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -327,9 +329,7 @@ export async function startEgressProxy(
     }
     if (!authorized(req)) {
       req.resume();
-      res
-        .writeHead(407, { "proxy-authenticate": 'Basic realm="automata-run"' })
-        .end();
+      res.writeHead(407, { "proxy-authenticate": PROXY_AUTHENTICATE }).end();
       return;
     }
     let target: URL;
@@ -388,8 +388,7 @@ export async function startEgressProxy(
   ): void {
     if (!authorized(req)) {
       clientSocket.write(
-        "HTTP/1.1 407 Proxy Authentication Required\r\n" +
-          'Proxy-Authenticate: Basic realm="automata-run"\r\n\r\n',
+        `HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: ${PROXY_AUTHENTICATE}\r\n\r\n`,
       );
       clientSocket.end();
       return;

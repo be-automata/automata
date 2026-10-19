@@ -18,7 +18,6 @@ import {
   getProcessWorkerId,
   runPidPath,
   runSocketPath,
-  runUserPath,
   slotFor,
   slotRunDir,
 } from "./run-namespace";
@@ -344,15 +343,6 @@ export class DaemonProcess {
     // ensureRunNamespace — so this mkdir is a backstop, not the grant.
     fs.mkdirSync(this.runDir, { recursive: true });
     this.cleanOwnStaleFiles();
-    // #205: record which agent account this run executes as, BEFORE the spawn,
-    // beside the pidfile. A recorded process group can only be signalled as
-    // the account that owns it, so the reclaim paths (reclaim.ts) read this
-    // when they find the pidfile; writing it first means a crash between here
-    // and the pidfile write leaves a record without a pid (ignored), never a
-    // pid without an account. Agent-uid mode off ⇒ no record, as before.
-    if (this.config.agentUser) {
-      fs.writeFileSync(runUserPath(this.pidFilePath), this.config.agentUser);
-    }
 
     // #108 F2: the cross-uid ACEs are NOT applied here. macOS applies ACE
     // inheritance at CREATE time, and workflow.ts binds the gh-broker socket in
@@ -590,11 +580,6 @@ export class DaemonProcess {
       // ignore
     }
     try {
-      fs.rmSync(runUserPath(this.pidFilePath), { force: true });
-    } catch {
-      // ignore
-    }
-    try {
       fs.rmSync(this.cgroupReadyPath(), { force: true });
     } catch {
       // ignore
@@ -668,12 +653,6 @@ export class DaemonProcess {
   private cleanOwnStaleFiles(): void {
     try {
       fs.rmSync(this.pidFilePath, { force: true });
-    } catch {
-      // ignore
-    }
-    try {
-      // #205: the account record travels with the pidfile, both ways.
-      fs.rmSync(runUserPath(this.pidFilePath), { force: true });
     } catch {
       // ignore
     }

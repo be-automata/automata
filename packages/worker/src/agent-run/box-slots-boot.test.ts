@@ -6,34 +6,37 @@ import {
 } from "./box-slots-boot";
 
 describe("assertSlotAccountsExist (#205 boot)", () => {
-  it("runs `id -u` once per slot account and resolves when every one exists", async () => {
-    const exec = vi.fn(async () => "999\n");
-    await assertSlotAccountsExist(["automata-agent", "automata-agent-1"], exec);
-    expect(exec.mock.calls).toEqual([
-      ["/usr/bin/id", ["-u", "automata-agent"]],
-      ["/usr/bin/id", ["-u", "automata-agent-1"]],
+  it("resolves every slot account (in parallel) and returns when each one exists", async () => {
+    const resolveUid = vi.fn(async () => 999);
+    await assertSlotAccountsExist(
+      ["automata-agent", "automata-agent-1"],
+      resolveUid,
+    );
+    expect(resolveUid.mock.calls).toEqual([
+      ["automata-agent"],
+      ["automata-agent-1"],
     ]);
   });
 
-  it("names the missing account and the provisioning doc when `id -u` fails", async () => {
-    const exec = vi.fn(async (_f: string, args: string[]) => {
-      if (args[1] === "automata-agent-2") throw new Error("no such user");
-      return "999\n";
+  it("names every missing account (with the resolver's reason) and the provisioning doc", async () => {
+    const resolveUid = vi.fn(async (user: string) => {
+      if (user === "automata-agent-2") throw new Error("no such user");
+      return 999;
     });
     await expect(
       assertSlotAccountsExist(
         ["automata-agent", "automata-agent-1", "automata-agent-2"],
-        exec,
+        resolveUid,
       ),
     ).rejects.toThrow(
-      /slot account "automata-agent-2" does not exist.*AGENT-UID-PROVISIONING\.md.*WORKER_BOX_SLOTS/s,
+      /slot account\(s\) "automata-agent-2" \(no such user\) do not exist.*AGENT-UID-PROVISIONING\.md.*WORKER_BOX_SLOTS/s,
     );
   });
 
-  it("no accounts (agent-uid mode off) ⇒ no exec at all", async () => {
-    const exec = vi.fn(async () => "");
-    await assertSlotAccountsExist([], exec);
-    expect(exec).not.toHaveBeenCalled();
+  it("no accounts (agent-uid mode off) ⇒ nothing is resolved", async () => {
+    const resolveUid = vi.fn(async () => 0);
+    await assertSlotAccountsExist([], resolveUid);
+    expect(resolveUid).not.toHaveBeenCalled();
   });
 });
 

@@ -6,7 +6,7 @@ import {
   type AgentRunVariantName,
   type PerPrStrategy,
 } from "./definition";
-import { loadWorkerConfig } from "./config";
+import { configForSlot, loadWorkerConfig } from "./config";
 import { acquireBoxSlot, type BoxLock } from "./box-lock";
 import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { reapAgentUidEscapees } from "./uid-reaper";
@@ -68,7 +68,6 @@ import {
   runGhSocketPath,
   slotFor,
 } from "./run-namespace";
-import { agentUserForSlot, slotAgentUsers } from "./spawn-as-user";
 import {
   materialiseAgentCredentials,
   type MaterialisedCredentials,
@@ -805,15 +804,10 @@ export async function runSelfHealFixStep({
 async function runAgentInner(
   input: AgentRunInput,
   ctx: RunCtx,
-  bootConfig: ReturnType<typeof loadWorkerConfig>,
+  config: ReturnType<typeof loadWorkerConfig>,
   wwwOpts: WwwClientOpts,
   runStartedAt: number,
 ): Promise<AgentRunOutput> {
-  // #205: `config` is REBOUND once the slot is held — same values, plus the
-  // slot's own agent account and index — so everything after the acquire
-  // (clone grants, credential HOME, brokers, daemon, reaps, cleanup) runs as
-  // THIS slot's account. Before the acquire it is the boot config.
-  let config = bootConfig;
   // Cancellation signal (Hatchet cancel: scheduleTimeout/executionTimeout). Used
   // to abort in-flight pulls/polls so the finally-block daemon teardown runs
   // promptly — no orphan daemon survives a cancelled run.
@@ -858,6 +852,7 @@ async function runAgentInner(
   }
 
   let boxLock: BoxLock | null = null;
+  let run: Awaited<ReturnType<typeof provisionWorkdir>>;
   // Hoisted above the try so the main finally (#184 teardown uid-scan) can
   // log through the same prefix as the admission steps.
   const admissionLog = (m: string) =>
@@ -889,7 +884,7 @@ async function runAgentInner(
       root: config.runNamespaceRoot,
       workerId: getProcessWorkerId(),
       agentUser: config.agentUser,
-      agentUsers: slotAgentUsers(config.agentUser, config.boxSlots),
+      agentUsers: config.agentUsers,
     });
     reclaimDeadWorkerRuns({
       root: config.runNamespaceRoot,
@@ -912,12 +907,11 @@ async function runAgentInner(
     });
     step("box lock acquired");
     // #205: from here on this run IS slot `boxLock.slot`, running as that
-    // slot's account; its per-run artefacts live in the slot's own subdir.
-    config = {
-      ...config,
-      agentUser: agentUserForSlot(config.agentUser, boxLock.slot),
-      boxSlot: boxLock.slot,
-    };
+    // slot's account (configForSlot); its per-run artefacts live in the slot's
+    // own subdir. Parameters are rebindable, and every later read of `config`
+    // — clone grants, credential HOME, brokers, daemon, reaps, cleanup — means
+    // the slot's config.
+    config = configForSlot(config, boxLock.slot);
     if (config.boxSlots > 1) {
       await ensureSlotNamespace({
         root: config.runNamespaceRoot,
@@ -929,17 +923,11 @@ async function runAgentInner(
         `box slot ${boxLock.slot}/${config.boxSlots} as ${config.agentUser}`,
       );
     }
-  } catch (err) {
-    await boxLock?.release();
-    throw err;
-  }
-
-  // Provision: clone into a per-run workdir keyed on threadId. threadId is unique
-  // per thread; threadChatId is the shared legacy sentinel when
-  // enableThreadChatCreation is off, so it would collide every run onto one dir.
-  // Under the slot (#205): a clone failure gives the slot straight back.
-  let run: Awaited<ReturnType<typeof provisionWorkdir>>;
-  try {
+    // Provision: clone into a per-run workdir keyed on threadId. threadId is
+    // unique per thread; threadChatId is the shared legacy sentinel when
+    // enableThreadChatCreation is off, so it would collide every run onto one
+    // dir. Under the slot (#205): a failed clone cleans itself up
+    // (provisionWorkdir) and the catch below gives the slot straight back.
     run = await provisionWorkdir({
       repoFullName: input.repoFullName,
       branch: input.branch,
@@ -953,7 +941,7 @@ async function runAgentInner(
       agentUser: config.agentUser,
     });
   } catch (err) {
-    await boxLock.release();
+    await boxLock?.release();
     throw err;
   }
   const workdir = run.repo;
@@ -1023,6 +1011,19 @@ async function runAgentInner(
   // before the rm (as the slot's account, #205), and a workdir that still
   // survives is logged, not swallowed.
   const workdirCleanup = { agentUser: config.agentUser, log: admissionLog };
+  // The one unwind for every pre-daemon failure: close what was opened, wipe
+  // the credential, remove the workdir, and ONLY THEN give the slot back
+  // (ADR-007 I2, the same order as the finally) — at N > 1 a parked waiter
+  // takes a freed slot immediately, and its admission reap as this slot's
+  // account would kill a hand-back still in flight.
+  const abandon = async (
+    ...closers: Array<{ close(): Promise<void> } | null>
+  ) => {
+    for (const c of closers) await closeQuietly(c);
+    await materialised?.cleanup();
+    await cleanupWorkdir(run.runDir, workdirCleanup);
+    await boxLock?.release();
+  };
   try {
     // #184 (#152 Stage B2): uid-wide scan UNDER the slot lock, BEFORE any
     // credential touches disk and BEFORE this run spawns its daemon. ADR-007
@@ -1064,12 +1065,7 @@ async function runAgentInner(
       batteries: { log: admissionLog },
     });
   } catch (err) {
-    // Cleanup BEFORE the slot release (ADR-007 I2, same order as the finally):
-    // at N > 1 a parked waiter takes the slot the instant it frees, and its
-    // admission reap as this slot's account would kill a hand-back still in
-    // flight here.
-    await cleanupWorkdir(run.runDir, workdirCleanup);
-    await boxLock?.release();
+    await abandon();
     throw err;
   }
   // #209 item 1: capture WHICH credential path this run took, once, here —
@@ -1139,26 +1135,17 @@ async function runAgentInner(
         onEvent: (e) => batcher.add(e),
         // #205: at N > 1 a sibling slot could otherwise use this run's loopback
         // proxy (its allowlist, its audit trail). N = 1 stays credential-less.
-        ...(config.boxSlots > 1
-          ? {
-              credential: {
-                user: "run",
-                secret: randomBytes(24).toString("hex"),
-              },
-            }
-          : {}),
+        credential:
+          config.boxSlots > 1
+            ? { user: "run", secret: randomBytes(24).toString("hex") }
+            : undefined,
       });
       // A2, BLOCKING: a proxy that does not answer turns the run into a silent
       // 90s hang with no output that the agent cannot report. Prove the
       // listener before anything is pointed at it.
       await assertEgressProxyReachable({ url: egressProxy.url });
     } catch (err) {
-      await closeQuietly(egressProxy);
-      await closeQuietly(egressEvents);
-      await materialised.cleanup();
-      // Cleanup before the slot release (ADR-007 I2) — see the admission catch.
-      await cleanupWorkdir(run.runDir, workdirCleanup);
-      await boxLock?.release();
+      await abandon(egressProxy, egressEvents);
       throw err;
     }
     step(
@@ -1210,14 +1197,7 @@ async function runAgentInner(
         repoFullName: input.repoFullName,
       };
     } catch (err) {
-      await closeQuietly(gitBroker);
-      await closeQuietly(ghBroker);
-      await closeQuietly(egressProxy);
-      await closeQuietly(egressEvents);
-      await materialised.cleanup();
-      // Cleanup before the slot release (ADR-007 I2) — see the admission catch.
-      await cleanupWorkdir(run.runDir, workdirCleanup);
-      await boxLock?.release();
+      await abandon(gitBroker, ghBroker, egressProxy, egressEvents);
       throw err;
     }
     step(

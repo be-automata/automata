@@ -4,9 +4,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import {
+  releaseAll,
   settlesWithin,
   tryAcquireAllBoxSlots,
-  tryAcquireBoxLock,
   type BoxLock,
 } from "./box-lock";
 import { writeSnapshotAtomic } from "./scheduling-maintenance";
@@ -134,8 +134,7 @@ export interface BootUidScanOpts {
    */
   slots?: number;
   log: (line: string) => void;
-  tryAcquire?: typeof tryAcquireBoxLock;
-  /** #205: injected for tests; defaults to `tryAcquireAllBoxSlots`. */
+  /** Injected for tests; defaults to `tryAcquireAllBoxSlots` (at N = 1: the one try-lock). */
   tryAcquireAll?: typeof tryAcquireAllBoxSlots;
   reap?: typeof reapAgentUidEscapees;
 }
@@ -344,7 +343,8 @@ export async function listProcessesViaPs(): Promise<ProcRow[]> {
   return parsePsOutput(stdout);
 }
 
-async function resolveUidViaId(agentUser: string): Promise<number> {
+/** `id -u <account>` with the 2 s bound; exported for the boot slot-account check (#205). */
+export async function resolveUidViaId(agentUser: string): Promise<number> {
   const { stdout } = await execFileAsync(ID_BIN, ["-u", agentUser], {
     timeout: ENUMERATE_TIMEOUT_MS,
     killSignal: "SIGKILL",
@@ -669,7 +669,6 @@ export async function bootUidScan(
     agentUser,
     slots = 1,
     log,
-    tryAcquire = tryAcquireBoxLock,
     tryAcquireAll = tryAcquireAllBoxSlots,
     reap = reapAgentUidEscapees,
   } = opts;
@@ -679,23 +678,13 @@ export async function bootUidScan(
     return { outcome: "disabled" };
   }
 
-  // One lock at N = 1 (today's path, byte-identical); every slot at N > 1 —
-  // any busy slot means a live run owns part of the box and its own teardown
-  // scan reclaims, so the whole boot scan is skipped rather than reaping a
-  // sibling slot's account while another is live.
+  // Every slot or none: with all N held no run can be live, so every slot's
+  // account is scanned; any busy slot means a live run owns part of the box and
+  // its own teardown scan reclaims. At N = 1 this is exactly the old single
+  // try-lock (same helper spawn, same log lines).
   let locks: BoxLock[] | null;
   try {
-    if (slots === 1) {
-      const lock = await tryAcquire({ root, holder: "boot uid scan", log });
-      locks = lock === null ? null : [lock];
-    } else {
-      locks = await tryAcquireAll({
-        root,
-        slots,
-        holder: "boot uid scan",
-        log,
-      });
-    }
+    locks = await tryAcquireAll({ root, slots, holder: "boot uid scan", log });
   } catch (e) {
     // Typically a BoxLockUnavailableError: a helper that vanished after the
     // boot assert, or a spawn failure. Hygiene, not admission — continue.
@@ -708,25 +697,19 @@ export async function bootUidScan(
     return { outcome: "skipped-busy" };
   }
 
-  let result: ReapAgentUidResult;
+  // Slot by slot, as that slot's own account: the uid-wide kill is bounded by
+  // kill(2) to the account issuing it. Results are summed; a per-slot error
+  // surfaces as the error of the whole scan.
+  let result: ReapAgentUidResult | null = null;
   try {
-    // Slot by slot, as that slot's own account: the uid-wide kill is bounded by
-    // kill(2) to the account issuing it. The summed result is what the caller
-    // sees; a per-slot error surfaces as the error of the whole scan.
-    result = await reap({
-      agentUser,
-      phase: "boot",
-      runNamespaceRoot: root,
-      log,
-    });
-    for (let slot = 1; slot < slots; slot++) {
+    for (let slot = 0; slot < slots; slot++) {
       const slotResult = await reap({
         agentUser: agentUserForSlot(agentUser, slot),
         phase: "boot",
         runNamespaceRoot: root,
         log,
       });
-      result = mergeReapResults(result, slotResult);
+      result = result ? mergeReapResults(result, slotResult) : slotResult;
     }
   } catch (e) {
     // `reap` never throws by contract; this wrapper's own contract is the
@@ -736,13 +719,10 @@ export async function bootUidScan(
     log(`boot uid scan failed: ${error}`);
     return { outcome: "error", error };
   } finally {
-    for (const lock of locks) {
-      try {
-        await lock.release();
-      } catch (e) {
-        log(`boot uid scan: lock release failed: ${errorMessage(e)}`);
-      }
-    }
+    await releaseAll(locks, (l) => log(`boot uid scan: ${l}`));
+  }
+  if (result === null) {
+    return { outcome: "error", error: "no slot was scanned" };
   }
   if (result.error !== undefined) {
     return { outcome: "error", result, error: result.error };

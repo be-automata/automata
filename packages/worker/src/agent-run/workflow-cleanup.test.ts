@@ -96,7 +96,10 @@ const acquireBoxSlotMock = vi.fn(async () => {
   admissionOrder.push("lock");
   return { release: releaseMock, lost: false, slot: 0 };
 });
-vi.mock("./box-lock", () => ({
+vi.mock("./box-lock", async (importOriginal) => ({
+  // The slot guards (assertSlotIndex & co) stay real: spawn-as-user and config
+  // call them at load time. Only the acquire is stubbed.
+  ...(await importOriginal<typeof import("./box-lock")>()),
   acquireBoxSlot: (...args: unknown[]) => acquireBoxSlotMock(...(args as [])),
   acquireBoxLock: (...args: unknown[]) => acquireBoxSlotMock(...(args as [])),
 }));
