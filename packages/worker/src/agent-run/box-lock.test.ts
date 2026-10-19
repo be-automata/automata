@@ -809,6 +809,75 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       }
     }, 20_000);
 
+    it("acquireBoxSlot with a LOST in-process slot and a cross-process holder on the other: the parked waiter stays pending (Decision 5 — delayed, never failed), lands on the slot that frees, and the LOST slot is grantable only after its run releases", async () => {
+      const lines: string[] = [];
+      const log = (l: string) => lines.push(l);
+      // A occupies slot 0 in-process; a fixture process holds slot 1 in the
+      // kernel only (no in-process occupancy).
+      const a = await acquireBoxLock({
+        root,
+        holder: "A",
+        log,
+        slot: 0,
+        slots: 2,
+      });
+      locks.push(a);
+      const holder = startHolder(root, ["--slot=1"]);
+      expect(await holder.out.waitFor("held")).toBe("held 1");
+      // C: slot 0 is occupied (skipped), slot 1 busy → parks in the kernel on
+      // slot 1, the only slot no in-process run occupies.
+      let settled: "held" | "rejected" | null = null;
+      let cHeld: BoxLock | null = null;
+      const c = acquireBoxSlot({ root, slots: 2, holder: "C", log }).then(
+        (l) => {
+          settled = "held";
+          cHeld = l;
+          locks.push(l);
+          return l;
+        },
+        (e: unknown) => {
+          settled = "rejected";
+          throw e;
+        },
+      );
+      await waitFor(
+        () => lines.some((l) => l.startsWith("box budget full")),
+        3_000,
+      );
+      expect(lines).toContain(
+        "box budget full (2 slots held) — C waits on slot 1",
+      );
+      // A's helper dies: slot 0 is LOST (kernel-free, run live). C must not
+      // take it, and must not fail either.
+      const pid = Number(
+        lines
+          .find((l) => l.startsWith("box lock acquired by A "))
+          ?.match(/helper pid (\d+)/)?.[1],
+      );
+      process.kill(pid, "SIGKILL");
+      await waitFor(() => a.lost, 3_000);
+      await sleep(300);
+      expect(settled).toBeNull();
+      expect(await tryLock(root, 0)).toBe(0);
+      // The cross-process holder goes away: C is granted slot 1.
+      const exit = holder.exit;
+      holder.child.kill("SIGKILL");
+      await exit;
+      const held = await c;
+      expect(held.slot).toBe(1);
+      expect(cHeld).toBe(held);
+      // Slot 0 stays reserved for A's live run until A releases.
+      expect(
+        await tryAcquireBoxLock({ root, holder: "T", log, slot: 0, slots: 2 }),
+      ).toBeNull();
+      await a.release();
+      const d = await acquireBoxSlot({ root, slots: 2, holder: "D", log });
+      locks.push(d);
+      expect(d.slot).toBe(0);
+      await held.release();
+      await d.release();
+    }, 20_000);
+
     it("every slot lock file is the worker's alone: mode 0600 (flock(2) on a read-only fd would otherwise let a sibling slot's agent take the slot)", async () => {
       const a = await acquireBoxSlot({ root, slots: 2, holder: "A" });
       const b = await acquireBoxSlot({ root, slots: 2, holder: "B" });
