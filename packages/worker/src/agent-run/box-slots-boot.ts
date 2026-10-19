@@ -1,8 +1,14 @@
 import { readFileSync } from "node:fs";
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 import { BOX_SLOTS_MAX } from "./box-lock";
-import { agentUserForSlot } from "./spawn-as-user";
+import { KILL_BIN, SUDO_BIN, agentUserForSlot } from "./spawn-as-user";
 import { resolveUidViaId } from "./uid-reaper";
+
+const execFileAsync = promisify(execFile);
+const SUDO_PROBE_TIMEOUT_MS = 5_000;
 
 /**
  * #205 boot-time helpers for the counting box budget, kept out of
@@ -61,6 +67,44 @@ export async function assertSlotAccountsExist(
     seen.set(uid, user);
   });
   return uids;
+}
+
+/**
+ * #205: every slot account must be a permitted Runas target for the worker's
+ * sudo grant — probed with `sudo -n -l -u <slot> <kill>`, which asks sudoers
+ * whether that exact command would be allowed (exit 0) WITHOUT running it, and
+ * never prompts (-n). A box whose sudoers Runas list was not re-rendered for a
+ * new slot otherwise boots clean, registers N engine slots, and every run that
+ * lands on the new slot dies at `sudo -u <slot>` with "a password is required"
+ * — the failure the account check exists to move to boot. Probes run in
+ * parallel; every refused account is named.
+ */
+export async function assertSlotSudoGrants(
+  users: readonly string[],
+  probe: (user: string) => Promise<void> = sudoListProbe,
+): Promise<void> {
+  const results = await Promise.allSettled(users.map((u) => probe(u)));
+  const refused = results.flatMap((r, i) =>
+    r.status === "rejected"
+      ? [
+          `${JSON.stringify(users[i])} (${
+            r.reason instanceof Error ? r.reason.message : String(r.reason)
+          })`,
+        ]
+      : [],
+  );
+  if (refused.length > 0) {
+    throw new Error(
+      `sudo does not permit the worker to run as slot account(s) ${refused.join(", ")}; re-render the sudoers Runas list for every slot account (deploy/AGENT-UID-PROVISIONING.md §6) or lower WORKER_BOX_SLOTS`,
+    );
+  }
+}
+
+async function sudoListProbe(user: string): Promise<void> {
+  await execFileAsync(SUDO_BIN, ["-n", "-l", "-u", user, "--", KILL_BIN], {
+    timeout: SUDO_PROBE_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+  });
 }
 
 /** Where nft-preflight.sh records the uids the loaded fence covers (tmpfs: gone at reboot, rewritten by the automata-egress unit). */

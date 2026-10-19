@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertFenceCoversSlotUids,
   assertSlotAccountsExist,
+  assertSlotSudoGrants,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
 } from "./box-slots-boot";
@@ -59,6 +60,39 @@ describe("assertSlotAccountsExist (#205 boot)", () => {
     const resolveUid = vi.fn(async () => 0);
     expect(await assertSlotAccountsExist([], resolveUid, 1000)).toEqual([]);
     expect(resolveUid).not.toHaveBeenCalled();
+  });
+});
+
+describe("assertSlotSudoGrants (#205 boot)", () => {
+  it("probes every slot account in parallel and resolves when sudo permits each", async () => {
+    const probe = vi.fn(async () => {});
+    await assertSlotSudoGrants(["automata-agent", "automata-agent-1"], probe);
+    expect(probe.mock.calls).toEqual([
+      ["automata-agent"],
+      ["automata-agent-1"],
+    ]);
+  });
+
+  it("names every refused account and the provisioning doc", async () => {
+    const probe = vi.fn(async (user: string) => {
+      if (user !== "automata-agent") {
+        throw new Error("sudo: a password is required");
+      }
+    });
+    await expect(
+      assertSlotSudoGrants(
+        ["automata-agent", "automata-agent-1", "automata-agent-2"],
+        probe,
+      ),
+    ).rejects.toThrow(
+      /slot account\(s\) "automata-agent-1" \(sudo: a password is required\), "automata-agent-2".*Runas.*AGENT-UID-PROVISIONING\.md.*WORKER_BOX_SLOTS/s,
+    );
+  });
+
+  it("no accounts ⇒ no probe", async () => {
+    const probe = vi.fn(async () => {});
+    await assertSlotSudoGrants([], probe);
+    expect(probe).not.toHaveBeenCalled();
   });
 });
 

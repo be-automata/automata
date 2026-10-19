@@ -13,6 +13,8 @@ import {
   type EgressPolicyShape,
   type EgressProxy,
   EGRESS_HEALTH_PATH,
+  PROXY_AUTH_AUDIT_CAP,
+  PROXY_AUTH_HOST,
 } from "./egress-proxy";
 
 const domainPolicy = (allowlist: string[]): EgressPolicyShape => ({
@@ -421,18 +423,52 @@ describe("startEgressProxy (real loopback servers)", () => {
         },
       );
       expect(wrong.status).toBe(407);
-      // The stranger's probe is on the record — host and port it asked for,
-      // reason proxy-auth, never the header it presented.
+      // The stranger's probe is on the record — reason proxy-auth, the sentinel
+      // host, NEVER what it asked for or the header it presented: a sibling
+      // slot must not be able to write hosts of its choosing into this run's
+      // audit trail.
       expect(events).toEqual([
         expect.objectContaining({
           action: "deny",
           reason: "proxy-auth",
-          destinationHost: "127.0.0.1",
-          destinationPort: upstreamPort,
+          destinationHost: PROXY_AUTH_HOST,
+          destinationPort: null,
         }),
-        expect.objectContaining({ action: "deny", reason: "proxy-auth" }),
+        expect.objectContaining({
+          action: "deny",
+          reason: "proxy-auth",
+          destinationHost: PROXY_AUTH_HOST,
+        }),
       ]);
-      expect(JSON.stringify(events)).not.toContain("nope");
+      const dumped = JSON.stringify(events);
+      expect(dumped).not.toContain("nope");
+      expect(dumped).not.toContain(String(upstreamPort));
+      expect(p.unauthenticatedRequests()).toBe(2);
+    });
+
+    it("the proxy-auth audit is BOUNDED: a flood of unauthenticated requests yields PROXY_AUTH_AUDIT_CAP events and a count, never an unbounded trail", async () => {
+      const { p, events } = await bootWithCredential({
+        level: "ip_port",
+        allowlist: [],
+      });
+      const flood = 25;
+      for (let i = 0; i < flood; i++) {
+        const { status } = await viaProxyWithHeaders(
+          p.port,
+          `http://attacker-chosen-${i}.example/x`,
+          {},
+        );
+        expect(status).toBe(407);
+      }
+      expect(events).toHaveLength(PROXY_AUTH_AUDIT_CAP);
+      expect(
+        events.every(
+          (e) =>
+            e.reason === "proxy-auth" && e.destinationHost === PROXY_AUTH_HOST,
+        ),
+      ).toBe(true);
+      expect(JSON.stringify(events)).not.toContain("attacker-chosen");
+      expect(p.unauthenticatedRequests()).toBe(flood);
     });
 
     it("with the credential the request is proxied and the credential is STRIPPED before the origin", async () => {
@@ -496,10 +532,11 @@ describe("startEgressProxy (real loopback servers)", () => {
         expect.objectContaining({
           action: "deny",
           reason: "proxy-auth",
-          destinationHost: "127.0.0.1",
-          destinationPort: tcpPort,
+          destinationHost: PROXY_AUTH_HOST,
+          destinationPort: null,
         }),
       ]);
+      expect(JSON.stringify(events)).not.toContain(String(tcpPort));
       expect(await connectStatus({ "proxy-authorization": basic })).toBe(200);
       expect(events).toHaveLength(2);
       expect(events[1]).toMatchObject({ action: "allow" });

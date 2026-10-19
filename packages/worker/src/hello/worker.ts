@@ -23,6 +23,7 @@ import {
   EGRESS_FENCE_UIDS_FILE,
   assertFenceCoversSlotUids,
   assertSlotAccountsExist,
+  assertSlotSudoGrants,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
 } from "../agent-run/box-slots-boot";
@@ -170,6 +171,8 @@ async function main() {
       // otherwise surface as the first run on that slot dying in sudo, while the
       // box reports N slots of capacity it does not have.
       const slotUids = await assertSlotAccountsExist(cfg.agentUsers);
+      // ...and sudo must let the worker run as each of them (the Runas list).
+      await assertSlotSudoGrants(cfg.agentUsers);
       console.log(
         `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")}; uids ${slotUids.join(", ")})`,
       );

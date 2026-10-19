@@ -280,7 +280,10 @@ preflight records the fenced uids in `/run/automata/egress-fence.uids`, and at
 `WORKER_BOX_SLOTS > 1` the worker refuses to boot unless that file exists and
 lists every slot uid (`egress fence coverage unproven` / `does not cover slot
 uid(s)` in the boot log). The boot also refuses two slot logins that alias one
-uid, a slot at uid 0, or a slot at the worker's own uid.
+uid, a slot at uid 0, or a slot at the worker's own uid, and probes
+`sudo -n -l -u <slot> kill` for every slot account — a Runas list that was not
+re-rendered fails the boot (`sudo does not permit the worker to run as slot
+account(s) ...`) instead of the first run on that slot.
 
 ---
 

@@ -1396,6 +1396,13 @@ async function runAgentInner(
     // #66: close the egress proxy after the daemon is dead (no more child
     // traffic), then flush the last audit batch. Both are best-effort — an
     // audit/proxy teardown hiccup must never mask the run's real outcome.
+    // #205: the proxy-auth audit is capped; the total lands in the step log.
+    const refused = egressProxy?.unauthenticatedRequests() ?? 0;
+    if (refused > 0) {
+      step(
+        `egress proxy: ${refused} unauthenticated request(s) refused with 407 (proxy-auth; a sibling slot or a client without the run credential)`,
+      );
+    }
     await closeQuietly(egressProxy);
     // #81: close both credential brokers after the daemon is dead (no more
     // child git/gh traffic). Best-effort, like the egress proxy — the token

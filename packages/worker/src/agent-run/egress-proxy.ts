@@ -67,12 +67,18 @@ export type EgressDecisionEvent = {
    * #205: set on the deny a CREDENTIALED proxy issues to a client without the
    * run's `Proxy-Authorization` (407). That client is, by construction, not
    * this run — a sibling slot probing another run's loopback proxy is the exact
-   * threat the credential exists for, so it must leave an audit event. The
-   * presented header is never recorded. In-process only: the wire row to
-   * /api/daemon/egress-event is a plain deny. The run's own clients never
-   * trip it: undici/Node, curl, Go and gh send the URL's credential up front,
-   * and git is told `http.proxyAuthMethod=basic` (daemon-env.ts) so libcurl's
-   * anyauth probe never happens.
+   * threat the credential exists for, so it must leave an audit event — and,
+   * by construction, an ADVERSARY: nothing it sent is trusted into the audit.
+   * `destinationHost` is the PROXY_AUTH_HOST sentinel, never the stranger's
+   * request line (a sibling could otherwise write arbitrary fake hosts into
+   * this org's trail), the port is null, the presented header is never
+   * recorded, and at most PROXY_AUTH_AUDIT_CAP such events are emitted per
+   * proxy; the total is on `EgressProxy.unauthenticatedRequests()` for the
+   * teardown log. In-process only: the wire row to /api/daemon/egress-event is
+   * a plain deny. The run's own clients never trip it: undici/Node, curl, Go
+   * and gh send the URL's credential up front, and git is told
+   * `http.proxyAuthMethod=basic` (daemon-env.ts) so libcurl's anyauth probe
+   * never happens.
    */
   reason?: "proxy-auth";
 };
@@ -106,6 +112,8 @@ export type EgressProxy = {
   mode: EgressProxyMode;
   /** Distinct destination hosts seen, with a decision count each (step logging). */
   observedHosts: () => Map<string, number>;
+  /** #205: requests and CONNECTs refused with 407 so far (a credentialed proxy only). */
+  unauthenticatedRequests: () => number;
   /** Stop listening and sever live tunnels; resolves when closed. */
   close: () => Promise<void>;
 };
@@ -147,6 +155,10 @@ const LEVELS = new Set(["none", "ip_port", "domain"]);
 
 /** The challenge a credentialed proxy answers an unauthenticated client with (#205). */
 const PROXY_AUTHENTICATE = 'Basic realm="automata-run"';
+/** Sentinel `destinationHost` of a proxy-auth deny: the stranger's request line is never recorded. */
+export const PROXY_AUTH_HOST = "proxy-auth";
+/** How many proxy-auth denies one proxy audits; the rest are counted only (#205). */
+export const PROXY_AUTH_AUDIT_CAP = 3;
 
 /** Sentinel host for fail-closed denies where no host string could be parsed. */
 const UNPARSEABLE = "unparseable";
@@ -326,12 +338,19 @@ export async function startEgressProxy(
     const got = req.headers["proxy-authorization"];
     return typeof got === "string" && timingSafeEqualStr(got, expectedAuth);
   }
-  /** The 407's audit trace (#205): a deny naming what the stranger asked for. */
-  function denyUnauthenticated(host: string, port: number | null): void {
+  /**
+   * The 407's audit trace (#205): bounded and de-identified — see
+   * EgressDecisionEvent.reason. Counted always; audited for the first
+   * PROXY_AUTH_AUDIT_CAP only.
+   */
+  let unauthenticated = 0;
+  function denyUnauthenticated(): void {
+    unauthenticated += 1;
+    if (unauthenticated > PROXY_AUTH_AUDIT_CAP) return;
     try {
       onEvent({
-        destinationHost: host,
-        destinationPort: port,
+        destinationHost: PROXY_AUTH_HOST,
+        destinationPort: null,
         action: "deny",
         policyLevel: policy.level,
         mode,
@@ -339,16 +358,6 @@ export async function startEgressProxy(
       });
     } catch {
       // Audit plumbing must never break (or leak into) enforcement.
-    }
-  }
-  /** host/port of an absolute-form target, or the unparseable sentinel. */
-  function requestedTarget(url: string | undefined): [string, number | null] {
-    try {
-      const u = new URL(url ?? "");
-      const port = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
-      return [u.hostname, port];
-    } catch {
-      return [UNPARSEABLE, null];
     }
   }
 
@@ -365,7 +374,7 @@ export async function startEgressProxy(
       return;
     }
     if (!authorized(req)) {
-      denyUnauthenticated(...requestedTarget(req.url));
+      denyUnauthenticated();
       req.resume();
       res.writeHead(407, { "proxy-authenticate": PROXY_AUTHENTICATE }).end();
       return;
@@ -425,11 +434,7 @@ export async function startEgressProxy(
     head: Buffer,
   ): void {
     if (!authorized(req)) {
-      const m = HOST_PORT_RE.exec(req.url ?? "");
-      denyUnauthenticated(
-        m ? m[1]!.replace(/^\[/, "").replace(/\]$/, "") : UNPARSEABLE,
-        m ? Number(m[2]) : null,
-      );
+      denyUnauthenticated();
       clientSocket.write(
         `HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: ${PROXY_AUTHENTICATE}\r\n\r\n`,
       );
@@ -499,6 +504,7 @@ export async function startEgressProxy(
     port,
     mode,
     observedHosts: () => new Map(observed),
+    unauthenticatedRequests: () => unauthenticated,
     close: () =>
       new Promise<void>((resolve, reject) => {
         for (const socket of sockets) {

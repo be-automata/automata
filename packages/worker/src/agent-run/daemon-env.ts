@@ -245,16 +245,6 @@ export interface BuildDaemonEnvOpts {
 }
 
 /**
- * gstack's browse server hands BROWSE_PROXY_URL to chromium.launch({ proxy })
- * — a `server` string Chromium takes NO credentials from, and which lands in
- * Chromium's argv (readable by every account via `ps`). #205: at N > 1 the
- * run proxy's URL carries the per-run credential in its userinfo, so the
- * browse URL is the credential-less form and the credential travels as
- * BROWSE_PROXY_USER / BROWSE_PROXY_PASS, which gstack maps to Playwright's
- * proxy.username / proxy.password (its policy: creds in the URL OR the env,
- * never both). A credential-less proxy (N = 1) sets the URL alone, as before.
- */
-/**
  * #205: the git config a CREDENTIALED run proxy (N > 1) needs, for every git
  * that runs under it — the agent's (buildDaemonEnv), the self-heal check
  * runner's and the fix-check's (workflow.ts). The proxy challenges with 407
@@ -298,6 +288,16 @@ export function proxyUrlHasCredential(url: string): boolean {
   }
 }
 
+/**
+ * gstack's browse server hands BROWSE_PROXY_URL to chromium.launch({ proxy })
+ * — a `server` string Chromium takes NO credentials from, and which lands in
+ * Chromium's argv (readable by every account via `ps`). #205: at N > 1 the
+ * run proxy's URL carries the per-run credential in its userinfo, so the
+ * browse URL is the credential-less form and the credential travels as
+ * BROWSE_PROXY_USER / BROWSE_PROXY_PASS, which gstack maps to Playwright's
+ * proxy.username / proxy.password (its policy: creds in the URL OR the env,
+ * never both). A credential-less proxy (N = 1) sets the URL alone, as before.
+ */
 export function buildBrowseProxyEnv(egressProxyUrl: string): NodeJS.ProcessEnv {
   const u = new URL(egressProxyUrl);
   if (!u.username && !u.password) {

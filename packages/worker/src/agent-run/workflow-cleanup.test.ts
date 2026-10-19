@@ -436,6 +436,7 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
     startEgressProxy.mockResolvedValue({
       url: "http://127.0.0.1:41234",
       port: 41234,
+      unauthenticatedRequests: () => 0,
       close,
     });
 
@@ -462,6 +463,7 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
       port: 41234,
       mode: "enforce",
       observedHosts: () => new Map(),
+      unauthenticatedRequests: () => 0,
       close,
     });
     const dead = new Error("egress proxy health check failed");
@@ -508,6 +510,7 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
       port: 41234,
       mode: "observe",
       observedHosts: () => new Map(),
+      unauthenticatedRequests: () => 0,
       close,
     });
 
@@ -556,6 +559,7 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
       port: 41234,
       mode: "enforce",
       observedHosts: () => new Map(),
+      unauthenticatedRequests: () => 0,
       close: vi.fn(async () => {}),
     });
     try {
@@ -662,6 +666,7 @@ describe("agent-run run task — credential brokers (#81)", () => {
     startEgressProxy.mockResolvedValue({
       url: "http://127.0.0.1:41234",
       port: 41234,
+      unauthenticatedRequests: () => 0,
       close: egressClose,
     });
     const original = new Error("sun_path limit");
@@ -2018,6 +2023,7 @@ describe("#205: a run on slot 1 executes as the slot-1 account end to end", () =
     startEgressProxy.mockResolvedValue({
       url: "http://127.0.0.1:41998",
       port: 41998,
+      unauthenticatedRequests: () => 0,
       close: vi.fn(async () => {}),
     });
   });
