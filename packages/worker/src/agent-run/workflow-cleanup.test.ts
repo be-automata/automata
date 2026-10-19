@@ -2402,6 +2402,7 @@ describe("#205: a run on slot 1 executes as the slot-1 account end to end", () =
     process.env.WORKER_AGENT_USER = "_automata-agent";
     process.env.WORKER_WORKDIR_ROOT = "/usr/local/automata/runs";
     process.env.WORKER_BOX_SLOTS = "2";
+    process.env.WORKER_GLOBAL_MAX_RUNS = "2"; // #372: the tuple moves together
     process.env.WORKER_RUN_MEMORY_MAX = "1500M";
     admissionOrder.length = 0;
     daemonCtorArgs.length = 0;

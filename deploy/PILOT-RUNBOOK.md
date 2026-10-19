@@ -1040,6 +1040,36 @@ The order matters because each step checks the one before it.
 7. **Worker**: install the unit, start it, and check that the boot journal
    shows `memory ceiling armed`, `harness: hash=… ok=gstack,gsd,ruflo` and
    `listening for actions`.
+   The concurrency tuple in `worker-box.env` is ONE setting (#372, detail in
+   `packages/worker/deploy/README.md`): `WORKER_BOX_SLOTS` = `WORKER_GLOBAL_MAX_RUNS`
+   ≥ `WORKER_PER_ORG_MAX_RUNS`, with `WORKER_RUN_MEMORY_MAX` and the swap sized so `slots × run commit + 2 GiB`
+   fits `WORKER_HEADROOM_COMMIT_FRACTION` (0.9) × the box's `CommitLimit` — the
+   headroom check's own budget. Move them together; the
+   worker refuses to boot on any inconsistent pairing, naming the knobs
+   (`FATAL: worker configuration is invalid` / `the box slots do not fit this
+box's CommitLimit`). The production tuple and its derivation from the memory
+   sampler live in `deploy/uat/phase2-4.md`.
+   **Upgrading a box already above N = 1 — check BEFORE deploying.** The cap
+   knobs are safe (an unset `WORKER_GLOBAL_MAX_RUNS` follows `WORKER_BOX_SLOTS`;
+   only an explicit disagreeing value is refused), but the NEW commit-budget
+   check is fatal on every Linux box with N > 1, the ceiling on and
+   `WORKER_HEADROOM_COMMIT_FRACTION < 1`: it refuses when
+   `N × WORKER_HEADROOM_RUN_COMMIT + 2 GiB > fraction × CommitLimit`. A cx33 at
+   `WORKER_BOX_SLOTS=2 WORKER_RUN_MEMORY_MAX=5000M` FAILS it (2 × 5.24 + 2.15 =
+   12.6 GB > 0.9 × 12.65 = 11.4 GB) and would crash-loop under `Restart=always`
+   after the upgrade. Run the worker's own gates on the box first, from the
+   NEW checkout (it imports the boot code, so the check cannot drift from the
+   guard), and deploy only on `fits`:
+
+   ```bash
+   set -a; source /home/automata/.automata/worker-box.env; set +a
+   cd /opt/automata-platform/packages/worker && pnpm exec tsx deploy/check-slots-fit.ts
+   ```
+
+   Set the cap knobs explicitly when you next touch `worker-box.env`:
+   `grep -E '^WORKER_(BOX_SLOTS|GLOBAL_MAX_RUNS|PER_ORG_MAX_RUNS)=' worker-box.env`
+   must show an agreeing tuple, or nothing at all (= 1/1/1).
+
 8. **Drill**: the drill automation above, then
    `harness-batteries-acceptance.sh box …` → `ACCEPTANCE: PASS`.
 

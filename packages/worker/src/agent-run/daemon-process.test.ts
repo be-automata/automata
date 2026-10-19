@@ -669,6 +669,7 @@ setInterval(() => {}, 1000);
         WORKER_AGENT_USER: "_automata-agent",
         WORKER_WORKDIR_ROOT: workdir,
         WORKER_BOX_SLOTS: "2",
+        WORKER_GLOBAL_MAX_RUNS: "2", // #372: the tuple moves together
         WORKER_RUN_MEMORY_MAX: "1500M",
       });
       expect(
@@ -687,6 +688,7 @@ setInterval(() => {}, 1000);
         WORKER_AGENT_USER: "_automata-agent",
         WORKER_WORKDIR_ROOT: workdir,
         WORKER_BOX_SLOTS: "2",
+        WORKER_GLOBAL_MAX_RUNS: "2", // #372: the tuple moves together
         WORKER_RUN_MEMORY_MAX: "1500M",
       });
       const config = configForSlot(base, 1);

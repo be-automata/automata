@@ -123,9 +123,51 @@ describe("agentRunWorkflow registration shape", () => {
       ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
     );
 
-    // Invariant: per-org cap must never exceed the global cap (no org can hold
-    // every slot).
+    // Invariant (#372): the per-org cap never EXCEEDS the global cap; equal is
+    // allowed (a single-org box must be able to use every slot — fairness
+    // across orgs is GROUP_ROUND_ROBIN's ordering, not a reservation).
     expect(keys[0].maxRuns).toBeLessThanOrEqual(keys[1].maxRuns);
+  });
+
+  it("#372: the default-caps registry is the shipped 1/1 shape with ONE named delta — an explicit slotCost: 1 on the run task", () => {
+    const tasks = workflowDef._tasks as Array<{
+      name: string;
+      slotCost?: number;
+    }>;
+    expect(tasks[0]!.slotCost).toBe(1);
+  });
+
+  it("#372: buildAgentRunWorkflows({3, 2}) registers per-org 2 and global 3 on EVERY variant, slotCost stays 1; a per-org cap above the global one is refused by the pure guard", () => {
+    const list = wf.buildAgentRunWorkflows({
+      globalMaxRuns: 3,
+      perOrgMaxRuns: 2,
+    });
+    expect(list.map((w) => w.definition.name)).toEqual([
+      "agent-run",
+      "agent-run-newest",
+      "agent-run-strict",
+      "agent-run-discard",
+    ]);
+    for (const w of list) {
+      const def = w.definition as unknown as {
+        concurrency: Array<{ expression: string; maxRuns: number }>;
+        _tasks: Array<{ slotCost?: number; retries?: number }>;
+      };
+      const org = def.concurrency.find((k) => k.expression === "input.orgId")!;
+      const global = def.concurrency.find(
+        (k) => k.expression === "'agent-run-global-memory-budget'",
+      )!;
+      expect(org.maxRuns).toBe(2);
+      expect(global.maxRuns).toBe(3);
+      expect(def._tasks[0]!.slotCost).toBe(1);
+      expect(def._tasks[0]!.retries).toBe(0);
+    }
+    expect(() =>
+      wf.buildAgentRunWorkflows({ globalMaxRuns: 2, perOrgMaxRuns: 3 }),
+    ).toThrow(/perOrgMaxRuns ≤ globalMaxRuns/);
+    expect(() =>
+      wf.buildAgentRunWorkflows({ globalMaxRuns: 0, perOrgMaxRuns: 0 }),
+    ).toThrow(/integers ≥ 1/);
   });
 
   it("registers exactly one run task with EXPLICIT retries: 0, no backoff, and the 30m timeouts — and #371 keeps it so", () => {

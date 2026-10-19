@@ -249,8 +249,20 @@ sudo env WORKER_AGENT_USER=automata-agent WORKER_BOX_SLOTS=2 ./linux/nft-preflig
 #    per-run dir is granted to its own slot by the worker at clone time).
 sudo setfacl -m u:automata-agent-1:--x /usr/local/automata/runs
 
-# 5. Worker env, then restart the unit.
+# 5. Worker env, then restart the unit — the whole tuple (#372), never the
+#    slots alone: the worker refuses an explicit WORKER_GLOBAL_MAX_RUNS that
+#    differs from WORKER_BOX_SLOTS (unset follows the slots).
 #    WORKER_BOX_SLOTS=2
+#    WORKER_GLOBAL_MAX_RUNS=2
+#    WORKER_PER_ORG_MAX_RUNS=2
+#    Then, BEFORE the restart, run the worker's own boot gates with that env
+#    loaded (#372) and restart only on `fits`: the commit-budget check refuses
+#    N × WORKER_HEADROOM_RUN_COMMIT + 2 GiB > WORKER_HEADROOM_COMMIT_FRACTION ×
+#    CommitLimit, and a refused tuple crash-loops under Restart=always. The
+#    pilot cx33 at 5000M FAILS it for N = 2 (12.6 GB > 11.4 GB): size the run
+#    commit, swap and vm.overcommit_ratio per deploy/uat/phase2-4.md first.
+set -a; source /home/automata/.automata/worker-box.env; set +a
+( cd /opt/automata-platform/packages/worker && pnpm exec tsx deploy/check-slots-fit.ts )
 ```
 
 What the worker then does on its own: takes slot locks `box.lock` and
@@ -264,7 +276,8 @@ boot only once it holds every slot. The boot log shows
 covers every slot uid (/run/automata/egress-fence.uids)` — grep for the
 `box slots: 2 (` prefix.
 
-Rollback: `WORKER_BOX_SLOTS=1` and restart. The extra accounts, sudoers entries
+Rollback: `WORKER_BOX_SLOTS=1` with `WORKER_GLOBAL_MAX_RUNS=1` and
+`WORKER_PER_ORG_MAX_RUNS=1` (or all three unset), then restart. The extra accounts, sudoers entries
 and nft set may stay; they fence nothing while unused, and the boot uid scan
 still reaps every provisioned slot account above N — each under a non-blocking
 take of its own `box.lock.<i>` (`retired slot account(s) ... scanned too` in

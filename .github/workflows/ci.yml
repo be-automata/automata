@@ -190,7 +190,7 @@ jobs:
   # torn down in `if: always()` as the backstop for a killed vitest process.
   worker-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -216,7 +216,8 @@ jobs:
             src/agent-run/uid-reaper.integration.test.ts \
             src/agent-run/self-heal-box-lock.integration.test.ts \
             src/agent-run/admission-deferral.integration.test.ts \
-            src/agent-run/payload-seal.integration.test.ts
+            src/agent-run/payload-seal.integration.test.ts \
+            src/agent-run/burst.integration.test.ts
       - name: Tear down (always)
         if: always()
         run: docker compose -p automata-hatchet-it down -v --remove-orphans || true
