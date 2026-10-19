@@ -1,0 +1,13 @@
+## engine secret scan, rows inserted since 2026-10-19T00:00:00Z (BEFORE cutover 16:41:12Z) — run 2026-10-19T16:43:31Z
+## columns: table | column | rows after bound | rows with a secret (ghs_/installationToken/daemonToken/githubReadToken)
+table | column | rows after cutover | rows with a secret
+v1_dags_olap | input | 64 | 64
+v1_dags_olap_20261019 | input | 64 | 64
+v1_payload | inline_content | 321 | 128
+v1_payload_20261019 | inline_content | 321 | 128
+v1_payloads_olap | inline_content | 588 | 128
+v1_payloads_olap_20261019 | inline_content | 588 | 128
+v1_task | input | 128 | 64
+v1_task_20261019 | input | 128 | 64
+v1_tasks_olap | input | 128 | 64
+v1_tasks_olap_20261019 | input | 128 | 64
