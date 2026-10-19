@@ -178,7 +178,16 @@ export async function provisionWorkdir({
   }
   await sweepTombstones(workdirRoot);
 
-  await fs.mkdir(runDir, { recursive: true });
+  // #205: the run dir is PRIVATE (0700) before any grant. With `other::r-x`
+  // left from the default 0755 (the unit sets no UMask), every slot account —
+  // which at N > 1 holds traverse on the workdir root — could read a sibling
+  // run's clone, and a threadId is easy to learn (the per-run cgroup names).
+  // chmod as well, for a dir that already existed. The named ACL entries below
+  // then carry the agent and the worker (setfacl -m recomputes the mask), and
+  // the default ACL copies `other::---` into everything created beneath.
+  // Ordered BEFORE the grants: a chmod after them would zero the ACL mask.
+  await fs.mkdir(runDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(runDir, 0o700);
 
   // #108: open THIS run's dir to the agent uid, and the shared root by traverse
   // ONLY (namei needs search on every component; an inheritable ACE on the root

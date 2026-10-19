@@ -194,6 +194,30 @@ describe("provisionWorkdir — agent-uid ACEs", () => {
     await expect(fs.stat(path.join(root, "thr_1", "tmp"))).rejects.toThrow();
   });
 
+  it("#205: the run dir is private (no group/other bits) with and without an agent account — a sibling slot with traverse on the root must not read another run's clone", async () => {
+    for (const [runId, agentUser] of [
+      ["thr_plain", ""],
+      ["thr_agent", "_automata-agent"],
+    ] as const) {
+      const r = recorder();
+      // A pre-existing, world-readable dir from an earlier layout is fixed too.
+      await fs.mkdir(path.join(root, runId), { recursive: true, mode: 0o755 });
+      await provisionWorkdir({
+        repoFullName: "o/r",
+        branch: "main",
+        installationToken: "ghs_x",
+        workdirRoot: root,
+        runId,
+        agentUser,
+        workerLogin: "the-operator",
+        aceExec: r.aceExec,
+        runGit: r.runGit,
+      });
+      const mode = (await fs.stat(path.join(root, runId))).mode & 0o777;
+      expect(mode, `${runId}: ${mode.toString(8)}`).toBe(0o700);
+    }
+  });
+
   it.skipIf(process.platform !== "darwin")(
     "applies the shared-root traverse ACE and the per-run ACE BEFORE the clone",
     async () => {

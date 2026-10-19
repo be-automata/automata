@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
@@ -269,6 +269,21 @@ async function sudoTraverseProbe(user: string, root: string): Promise<void> {
   );
 }
 
+/** The systemd unit that loads the fence (nft-preflight.sh) and drops it with its marker. */
+export const EGRESS_UNIT = "automata-egress.service";
+
+function egressUnitActive(): boolean {
+  try {
+    execFileSync("/usr/bin/systemctl", ["is-active", "--quiet", EGRESS_UNIT], {
+      timeout: SUDO_PROBE_TIMEOUT_MS,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Where nft-preflight.sh records the uids the loaded fence covers (tmpfs: gone at reboot, rewritten by the automata-egress unit). */
 export const EGRESS_FENCE_UIDS_FILE = "/run/automata/egress-fence.uids";
 
@@ -286,14 +301,27 @@ export function assertFenceCoversSlotUids(opts: {
   markerPath?: string;
   platform?: NodeJS.Platform;
   readMarker?: (path: string) => string;
+  /** Whether the fence unit is active now — the marker is only trusted alongside it. */
+  unitActive?: () => boolean;
 }): void {
   const {
     uids,
     markerPath = EGRESS_FENCE_UIDS_FILE,
     platform = process.platform,
     readMarker = (p) => readFileSync(p, "utf8"),
+    unitActive = egressUnitActive,
   } = opts;
   if (platform !== "linux" || uids.length === 0) return;
+  // The marker says what the preflight loaded; the unit says whether that load
+  // is still the one in force. A table dropped by hand (`nft delete table`,
+  // `nft flush ruleset`, another tool reloading nftables) leaves the marker
+  // behind, so the marker alone is not proof. Residual: a hand delete while
+  // the unit stays active — §6 documents the rollback that removes both.
+  if (!unitActive()) {
+    throw new Error(
+      `egress fence coverage unproven: ${EGRESS_UNIT} is not active, so ${markerPath} describes a fence that is not loaded; at WORKER_BOX_SLOTS > 1 the box refuses to run unfenced slots (deploy/AGENT-UID-PROVISIONING.md §6)`,
+    );
+  }
   let fenced: Set<number>;
   try {
     fenced = new Set(

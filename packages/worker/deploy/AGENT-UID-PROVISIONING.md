@@ -305,8 +305,8 @@ from the environment — the unit loads `/etc/automata/egress.env` — and refus
 skuid set that misses any slot account's uid, saying `slot-coverage check
 skipped` when given neither. (2) Fail-closed regardless of (1): a successful
 preflight records the fenced uids in `/run/automata/egress-fence.uids`, and at
-`WORKER_BOX_SLOTS > 1` the worker refuses to boot unless that file exists and
-lists every slot uid (`egress fence coverage unproven` / `does not cover slot
+`WORKER_BOX_SLOTS > 1` the worker refuses to boot unless `automata-egress.service`
+is active AND that file exists and lists every slot uid (`egress fence coverage unproven` / `does not cover slot
 uid(s)` in the boot log). The boot also refuses two slot logins that alias one
 uid, a slot at uid 0, or a slot at the worker's own uid, and at N > 1 probes
 `sudo -n -u <slot> kill -l` for every slot account — a Runas list that was not

@@ -267,6 +267,7 @@ describe("assertFenceCoversSlotUids (#205 boot, Linux N > 1)", () => {
         uids: [999, 2001],
         platform: "linux",
         readMarker: () => "999, 2001\n",
+        unitActive: () => true,
       }),
     ).not.toThrow();
     expect(() =>
@@ -274,6 +275,7 @@ describe("assertFenceCoversSlotUids (#205 boot, Linux N > 1)", () => {
         uids: [999],
         platform: "linux",
         readMarker: () => "2001 999",
+        unitActive: () => true,
       }),
     ).not.toThrow();
   });
@@ -287,6 +289,7 @@ describe("assertFenceCoversSlotUids (#205 boot, Linux N > 1)", () => {
         readMarker: () => {
           throw new Error("ENOENT");
         },
+        unitActive: () => true,
       }),
     ).toThrow(
       /coverage unproven.*\/run\/automata\/egress-fence\.uids.*ENOENT.*automata-egress/,
@@ -299,15 +302,41 @@ describe("assertFenceCoversSlotUids (#205 boot, Linux N > 1)", () => {
         uids: [999, 2001],
         platform: "linux",
         readMarker: () => "999",
+        unitActive: () => true,
       }),
     ).toThrow(/does not cover slot uid\(s\) 2001 \(fenced: 999\)/);
   });
 
+  it("refuses when the fence unit is not active, whatever the marker says (a table dropped by hand leaves the marker behind)", () => {
+    const readMarker = vi.fn(() => "999, 2001");
+    expect(() =>
+      assertFenceCoversSlotUids({
+        uids: [999, 2001],
+        platform: "linux",
+        readMarker,
+        unitActive: () => false,
+      }),
+    ).toThrow(/automata-egress\.service is not active.*not loaded/);
+    expect(readMarker).not.toHaveBeenCalled();
+  });
+
   it("is a no-op off Linux (PF fences the pilot) and with no slot accounts", () => {
     const readMarker = vi.fn(() => "");
-    assertFenceCoversSlotUids({ uids: [999], platform: "darwin", readMarker });
-    assertFenceCoversSlotUids({ uids: [], platform: "linux", readMarker });
+    const unitActive = vi.fn(() => true);
+    assertFenceCoversSlotUids({
+      uids: [999],
+      platform: "darwin",
+      readMarker,
+      unitActive,
+    });
+    assertFenceCoversSlotUids({
+      uids: [],
+      platform: "linux",
+      readMarker,
+      unitActive,
+    });
     expect(readMarker).not.toHaveBeenCalled();
+    expect(unitActive).not.toHaveBeenCalled();
   });
 });
 
