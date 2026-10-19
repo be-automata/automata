@@ -7,6 +7,12 @@ import {
 } from "@terragon/shared/github-app";
 import { packsRequire } from "@terragon/shared/model/review-agent-settings";
 import { redactSecrets } from "@terragon/utils/redact";
+import {
+  parsePlanePublicKey,
+  sealRunSecrets,
+  type RunSecrets,
+  type SealedRunSecrets,
+} from "@terragon/utils/payload-seal";
 import { getThreadMinimal } from "@terragon/shared/model/threads";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import {
@@ -100,7 +106,7 @@ export function generateTraceparent(): string {
  * blip) is absorbed silently.
  */
 async function triggerWithRetry(
-  input: AgentRunInput,
+  input: AgentRunWireInput,
   threadId: string,
   threadChatId: string,
   opts?: TriggerOpts,
@@ -172,7 +178,7 @@ async function triggerSelfHealBounded({
   threadChatId,
   organizationId,
 }: {
-  input: AgentRunInput;
+  input: AgentRunWireInput;
   threadId: string;
   threadChatId: string;
   organizationId: string;
@@ -278,10 +284,18 @@ async function triggerSelfHealBounded({
  */
 
 /**
- * Reference-only workflow input. NO long-lived secret (App private key, master
- * key) — only the two SHORT-LIVED, org-scoped tokens (ADR-002 §3; F4 accepted-
- * risk for single-org pilot). The prompt is NOT here — the worker pulls it from
+ * Reference-only workflow input. NO secret in plain text (#380, closes
+ * ADR-003 F4): the per-run GitHub installation token, the optional read-only
+ * token and the daemon token travel ONLY inside `sealedSecrets`, an envelope
+ * sealed to the execution plane's public key (HATCHET_PAYLOAD_SEAL_KEY), so
+ * the engine's Postgres, its backups and the run API hold ciphertext. The
+ * prompt is NOT here either — the worker pulls it from
  * /api/daemon/next-message with the daemon token (ADR-003 fork 3).
+ *
+ * `AgentRunInput` never carries `installationToken`, `githubReadToken` or
+ * `daemonToken` (a type test pins that). The PR-1 rollout shape with those
+ * three in plain text is `LegacyAgentRunInput`, sent only while the plane key
+ * is unset; PR 2 removes it.
  */
 export interface AgentRunInput {
   threadId: string;
@@ -297,22 +311,18 @@ export interface AgentRunInput {
   baseBranch?: string;
   /** www's public base URL the daemon calls back to (events + next-message). */
   daemonCallbackUrl: string;
-  /** Short-lived, installation-scoped GitHub token for the clone (x-access-token). */
-  installationToken: string;
   /**
-   * Phase 7, SECRET — handled exactly like installationToken: never logged,
-   * only ever in the Hatchet input. A READ-ONLY (contents/metadata/
-   * pull_requests/issues: read), single-repo, ≤1h GitHub App token, minted
-   * ONLY for a non-review org dispatch whose resolved taskAgent includes a
-   * pack that requires `github-read-token` (BATTERY_PACK_REQUIRES). Never on
-   * review runs. Absent otherwise ⇒ byte-identical payload. The worker puts it
-   * in the agent's GITHUB_TOKEN (07-07 gate); GH_TOKEN stays the broker bearer.
+   * #380: the run's secrets — installation token, optional read-only token
+   * (Phase 7: a READ-ONLY, single-repo, ≤1h GitHub App token minted ONLY for a
+   * non-review org dispatch whose taskAgent packs require `github-read-token`;
+   * the worker puts it in the agent's GITHUB_TOKEN, 07-07 gate) and the daemon
+   * token — sealed to the plane key, bound to `threadChatId` by the AAD.
+   * Optional only during the PR-1 rollout (absent ⇒ the legacy shape carries
+   * them in plain text); PR 2 makes it required.
    */
-  githubReadToken?: string;
+  sealedSecrets?: SealedRunSecrets;
   /** Not secret: the read token's ISO-8601 expiry, so the worker refuses an expired one. */
   githubReadTokenExpiresAt?: string;
-  /** Short-lived, org+thread-scoped daemon token (events + next-message auth). */
-  daemonToken: string;
   /**
    * The run's org identity, NEVER null: `thread.organizationId ?? \`u:${userId}\``.
    * A concurrency CEL key on `input.orgId` (Phase 2 per-org fairness) must resolve
@@ -410,6 +420,15 @@ export interface AgentRunInput {
    */
   workBranch?: string;
 }
+
+/**
+ * PR-1 rollout shape (#380 step 1): the three secrets in plain text, sent
+ * ONLY while HATCHET_PAYLOAD_SEAL_KEY is empty. The worker accepts both
+ * shapes in this window. Deleted by PR 2 (strict mode).
+ */
+export type LegacyAgentRunInput = AgentRunInput & RunSecrets;
+/** What the trigger POSTs: the sealed shape, or the legacy one. */
+export type AgentRunWireInput = AgentRunInput | LegacyAgentRunInput;
 
 /** True when a thread should dispatch to the remote execution plane. */
 export function hatchetDispatchEnabled(thread: {
@@ -547,8 +566,11 @@ async function planReviewRun({
 /** The task-run fields of the input; spread like a review plan's extension. */
 type TaskRunExtension = Pick<
   AgentRunInput,
-  "taskAgent" | "githubReadToken" | "githubReadTokenExpiresAt"
->;
+  "taskAgent" | "githubReadTokenExpiresAt"
+> & {
+  /** SECRET (#380): sealed with the other two, never spread into the input. */
+  githubReadToken?: string;
+};
 
 /**
  * Phase 7: the task-run plan for a NON-review org dispatch (the caller only
@@ -632,6 +654,41 @@ async function planTaskRun({
     );
     return { taskAgent };
   }
+}
+
+/**
+ * #380: the one place a secret meets the wire. With a plane key configured
+ * the three run secrets are sealed to it (AAD = threadChatId) and the input
+ * gains `sealedSecrets`; the `kid` is logged so an operator can match it
+ * against the kid list the worker logs at boot (rollout step 3). With no key
+ * the PR-1 legacy shape is returned. Throws on a malformed key or a seal
+ * failure — the caller's guarded region revokes the daemon token.
+ */
+async function sealWireInput({
+  input,
+  secrets,
+  threadChatId,
+  threadId,
+  planeKeyText = env.HATCHET_PAYLOAD_SEAL_KEY,
+}: {
+  input: AgentRunInput;
+  secrets: RunSecrets;
+  threadChatId: string;
+  threadId: string;
+  planeKeyText?: string;
+}): Promise<AgentRunWireInput> {
+  if (planeKeyText === "") {
+    const legacy: LegacyAgentRunInput = { ...input, ...secrets };
+    return legacy;
+  }
+  const planeKey = parsePlanePublicKey(planeKeyText);
+  const sealedSecrets = await sealRunSecrets(planeKey, secrets, threadChatId);
+  console.log("[hatchet] run secrets sealed", {
+    threadId,
+    threadChatId,
+    kid: planeKey.kid,
+  });
+  return { ...input, sealedSecrets };
 }
 
 /**
@@ -812,8 +869,6 @@ export async function dispatchAgentRun({
       branch,
       baseBranch,
       daemonCallbackUrl: nonLocalhostPublicAppUrl(),
-      installationToken,
-      daemonToken,
       orgId,
       prNumber,
       traceparent,
@@ -930,14 +985,34 @@ export async function dispatchAgentRun({
       branch === thread?.repoBaseBranchName
         ? remoteTaskBranchName(threadId)
         : undefined;
+    // #380: the read-only token is a SECRET — it goes into the envelope with
+    // the other two, never into the reference-only input.
+    const { githubReadToken, ...taskPlanInput } = taskPlan ?? {};
     const input: AgentRunInput = {
       ...baseInput,
       ...plan?.inputExtension,
-      ...taskPlan,
+      ...taskPlanInput,
       ...selfHealPlan,
       ...(repoEnvKeys.length > 0 ? { repoEnv } : {}),
       ...(workBranch !== undefined ? { workBranch } : {}),
     };
+    const secrets: RunSecrets = {
+      installationToken,
+      ...(githubReadToken !== undefined ? { githubReadToken } : {}),
+      daemonToken,
+    };
+    // #380: seal INSIDE the guarded region — a seal failure (or a malformed
+    // plane key) lands in the catch below and revokes the minted daemon token
+    // exactly like every other pre-trigger failure. Every variant (task,
+    // review, self-heal) goes through this one line: no lane keeps a
+    // plain-text path. An EMPTY key is the PR-1 rollout window: the legacy
+    // shape is sent and the (dual) worker reads it; PR 2 fails closed here.
+    const wireInput = await sealWireInput({
+      input,
+      secrets,
+      threadChatId,
+      threadId,
+    });
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry
     // absorbs transients; only a FINAL failure lands in the catch below. A
@@ -947,13 +1022,13 @@ export async function dispatchAgentRun({
     const { externalId } =
       selfHealPlan.selfHeal !== undefined && selfHealOrgId !== null
         ? await triggerSelfHealBounded({
-            input,
+            input: wireInput,
             threadId,
             threadChatId,
             organizationId: selfHealOrgId,
           })
         : await triggerWithRetry(
-            input,
+            wireInput,
             threadId,
             threadChatId,
             plan?.triggerOpts,

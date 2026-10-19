@@ -14,7 +14,7 @@ describe("terminal causes (#125 C4)", () => {
       expect(d.label.length).toBeGreaterThan(0);
       expect(d.detail.length).toBeGreaterThan(0);
     }
-    expect(TERMINAL_CAUSES).toHaveLength(8);
+    expect(TERMINAL_CAUSES).toHaveLength(9);
   });
 
   it("isTerminalCause narrows strings; an unknown value is refused", () => {
@@ -39,9 +39,13 @@ describe("terminal causes (#125 C4)", () => {
       "superseded",
       "user-cancelled",
     ]);
+    // #380: `run-failed-unreported` is the sweep's name for a run that died
+    // before posting back — it owned the PR like `daemon-failed`, so it is
+    // sweepable (the no-verdict notice path), never abandoned.
     expect(sweepable.sort()).toEqual([
       "daemon-failed",
       "publish-failed",
+      "run-failed-unreported",
       "timeout",
     ]);
   });

@@ -12,6 +12,7 @@ import {
   lt,
   ne,
   or,
+  sql,
 } from "drizzle-orm";
 import { thread as threadTable } from "../db/schema";
 import { reapableThreadStatuses, threadEffectiveStatusIn } from "./threads";
@@ -189,6 +190,11 @@ export async function findSweepCandidates({
       threadGithubPRNumber: threadTable.githubPRNumber,
       threadRepoFullName: threadTable.githubRepoFullName,
       threadOrganizationId: threadTable.organizationId,
+      // #380: a run the engine reports FAILED while its thread never left
+      // `booting` died before it could post back (an unsealable payload, a
+      // clone failure) — the sweep names that `run-failed-unreported`, not
+      // `daemon-failed`. Read in the same join: zero extra reads.
+      threadBooting: sql<boolean>`coalesce((${threadEffectiveStatusIn(["booting"])}), false)`,
     })
     .from(hatchetRun)
     .innerJoin(threadTable, eq(threadTable.id, hatchetRun.threadId))

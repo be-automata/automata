@@ -8,6 +8,7 @@ import { User } from "@terragon/shared";
 import { nanoid } from "nanoid";
 import {
   revokeDaemonTokensForSandbox,
+  revokeDaemonTokensForThread,
   revokeDaemonTokenById,
   hasActiveDaemonToken,
 } from "./daemon-token";
@@ -16,7 +17,9 @@ async function keysNamed(userId: string, name: string) {
   return db
     .select({ id: apikeyTable.id })
     .from(apikeyTable)
-    .where(and(eq(apikeyTable.referenceId, userId), eq(apikeyTable.name, name)));
+    .where(
+      and(eq(apikeyTable.referenceId, userId), eq(apikeyTable.name, name)),
+    );
 }
 
 describe("revokeDaemonTokensForSandbox (ADR-003 F3)", () => {
@@ -32,10 +35,18 @@ describe("revokeDaemonTokensForSandbox (ADR-003 F3)", () => {
     const otherSandbox = `sbx-${nanoid(8)}`;
     // Two tokens for this run (as multiple messages would mint) + one unrelated.
     await auth.api.createApiKey({
-      body: { name: sandboxId, userId: user.id, metadata: { tokenType: "daemon" } },
+      body: {
+        name: sandboxId,
+        userId: user.id,
+        metadata: { tokenType: "daemon" },
+      },
     });
     await auth.api.createApiKey({
-      body: { name: sandboxId, userId: user.id, metadata: { tokenType: "daemon" } },
+      body: {
+        name: sandboxId,
+        userId: user.id,
+        metadata: { tokenType: "daemon" },
+      },
     });
     await auth.api.createApiKey({
       body: { name: otherSandbox, userId: user.id },
@@ -72,8 +83,12 @@ describe("revokeDaemonTokensForSandbox (ADR-003 F3)", () => {
     });
 
     // B's token (a DIFFERENT run) must still be live.
-    expect(await hasActiveDaemonToken({ userId: user.id, name: runB })).toBe(true);
-    expect(await hasActiveDaemonToken({ userId: user.id, name: runA })).toBe(true);
+    expect(await hasActiveDaemonToken({ userId: user.id, name: runB })).toBe(
+      true,
+    );
+    expect(await hasActiveDaemonToken({ userId: user.id, name: runA })).toBe(
+      true,
+    );
   });
 
   it("BURST SAFETY (S12): revokeDaemonTokenById revokes ONLY that run's token, never a sibling's", async () => {
@@ -84,10 +99,18 @@ describe("revokeDaemonTokensForSandbox (ADR-003 F3)", () => {
     // A's (possibly delayed) finish delete B's same-keyed token.
     const runName = `${nanoid(8)}:legacy-thread-chat-id`; // even a SHARED name…
     const a = await auth.api.createApiKey({
-      body: { name: runName, userId: user.id, metadata: { tokenType: "daemon" } },
+      body: {
+        name: runName,
+        userId: user.id,
+        metadata: { tokenType: "daemon" },
+      },
     });
     const b = await auth.api.createApiKey({
-      body: { name: runName, userId: user.id, metadata: { tokenType: "daemon" } },
+      body: {
+        name: runName,
+        userId: user.id,
+        metadata: { tokenType: "daemon" },
+      },
     });
 
     const count = await revokeDaemonTokenById({
@@ -101,7 +124,9 @@ describe("revokeDaemonTokensForSandbox (ADR-003 F3)", () => {
     const survivors = await db
       .select({ id: apikeyTable.id })
       .from(apikeyTable)
-      .where(and(eq(apikeyTable.referenceId, user.id), eq(apikeyTable.id, b.id)));
+      .where(
+        and(eq(apikeyTable.referenceId, user.id), eq(apikeyTable.id, b.id)),
+      );
     expect(survivors).toHaveLength(1);
   });
 
@@ -129,5 +154,39 @@ describe("revokeDaemonTokensForSandbox (ADR-003 F3)", () => {
     expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(true);
     await revokeDaemonTokensForSandbox({ userId: user.id, sandboxId: name });
     expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(false);
+  });
+});
+
+describe("revokeDaemonTokensForThread (#380 sweep rule iii)", () => {
+  let user: User;
+
+  beforeEach(async () => {
+    user = (await createTestUser({ db })).user;
+  });
+
+  it("revokes every `<threadId>:<chat>` token of the thread and nothing else (other threads, sandbox-named, other users)", async () => {
+    const threadId = `thr_${nanoid(8)}`;
+    const other = (await createTestUser({ db })).user;
+    const mint = async (userId: string, name: string) =>
+      auth.api.createApiKey({
+        body: { name, userId, metadata: { tokenType: "daemon" } },
+      });
+    await mint(user.id, `${threadId}:legacy-thread-chat-id`);
+    await mint(user.id, `${threadId}:tc_2`);
+    await mint(user.id, `${threadId}x:tc_1`); // a longer id sharing the prefix
+    await mint(user.id, `sbx-${nanoid(6)}`); // an in-process sandbox token
+    await mint(other.id, `${threadId}:tc_1`); // same name, another user
+    expect(
+      await revokeDaemonTokensForThread({ userId: user.id, threadId }),
+    ).toBe(2);
+    expect(
+      await keysNamed(user.id, `${threadId}:legacy-thread-chat-id`),
+    ).toHaveLength(0);
+    expect(await keysNamed(user.id, `${threadId}:tc_2`)).toHaveLength(0);
+    expect(await keysNamed(user.id, `${threadId}x:tc_1`)).toHaveLength(1);
+    expect(await keysNamed(other.id, `${threadId}:tc_1`)).toHaveLength(1);
+    expect(
+      await revokeDaemonTokensForThread({ userId: user.id, threadId }),
+    ).toBe(0);
   });
 });

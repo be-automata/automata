@@ -8,8 +8,8 @@
   (`apps/www/src/agent/msg/startAgentMessage.ts`), the live C8 boundary from the 2026-07-17 E2E
   (boot reached `queued→booting` then stopped at "no execution plane on Workers").
 - **Deciders:** operator + platform-convergence program
-- **Relates to:** ADR-002 (the execution *topology* + credential-placement rules — this ADR is
-  the *dispatch seam* that hands work to it), ADR-001 (tenant scoping — the daemon token is
+- **Relates to:** ADR-002 (the execution _topology_ + credential-placement rules — this ADR is
+  the _dispatch seam_ that hands work to it), ADR-001 (tenant scoping — the daemon token is
   org-scoped by that work).
 - **Supersedes / superseded by:** —
 
@@ -17,7 +17,7 @@
 
 ADR-002 established a shared control plane (`apps/www`, on Cloudflare Workers for the pilot) and a
 per-org execution plane on customer-supplied infrastructure, coordinated by Hatchet. What it did
-**not** specify is the *seam*: how a booting thread in www actually starts an agent on a remote
+**not** specify is the _seam_: how a booting thread in www actually starts an agent on a remote
 worker instead of the in-process sandbox provider — and how it does so without shipping any
 long-lived secret off the control plane.
 
@@ -31,10 +31,10 @@ work). A Hatchet worker on the customer box that clones the repo and runs `packa
 pointed at www is therefore **mostly chassis-native plumbing, not new invention** — the
 daemon-event ingestion does not care where the daemon runs.
 
-One thing genuinely changes. Today www *pushes* the message to the daemon over the sandbox
+One thing genuinely changes. Today www _pushes_ the message to the daemon over the sandbox
 session. **www cannot push to a daemon on a customer box** (no session transport; the box is not
 addressable from www — for the pilot www-on-Workers reaches the engine through a cloudflared
-tunnel, one-way). So the message must be *pulled*.
+tunnel, one-way). So the message must be _pulled_.
 
 ## Decision
 
@@ -46,17 +46,18 @@ configured, the same booting thread dispatches to Hatchet instead of the in-proc
 
 When `env.HATCHET_ENABLED` is true (or the thread's `sandboxProvider === 'hatchet-remote'`), the
 `withSandboxResource` branch that today calls `createSandboxForThread` / `getSandboxForThreadOrNull`
-+ `sendDaemonMessage` is replaced by a **dispatch to Hatchet**. Specifically www:
 
-- **(a)** mints a **short-lived, installation-scoped GitHub token** for the thread's repo
+- `sendDaemonMessage` is replaced by a **dispatch to Hatchet**. Specifically www:
+
+* **(a)** mints a **short-lived, installation-scoped GitHub token** for the thread's repo
   (`getInstallationToken(owner, repo)` — the existing seam; ADR-002 §3: the App private key
   **never** leaves the control plane);
-- **(b)** mints the **per-thread daemon token** — the existing `auth.api.createApiKey` path in
+* **(b)** mints the **per-thread daemon token** — the existing `auth.api.createApiKey` path in
   `sendDaemonMessage`, org-scoped via `metadata.organizationId`, short expiry;
-- **(c)** triggers the Hatchet **`agent-run`** workflow (ADR-003 §2) with **reference-only input**
+* **(c)** triggers the Hatchet **`agent-run`** workflow (ADR-003 §2) with **reference-only input**
   `{ threadId, threadChatId, repoFullName, branch, daemonCallbackUrl }` plus the two short-lived
   tokens as step input. **No long-lived secret, no App key, no master key** is ever in the input;
-- **(d)** leaves **thread status semantics unchanged** — the thread is already transitioned to
+* **(d)** leaves **thread status semantics unchanged** — the thread is already transitioned to
   `booting` before this point, and from here the daemon events drive the rest **exactly like a
   sandbox boot**. `system.boot` has already fired; the daemon's events (`running`, tool calls,
   `complete`/`error`) arrive at `/api/daemon-event` and move the state machine as they do today.
@@ -81,7 +82,7 @@ threadChat. www builds it with the **same** logic `startAgentMessage` uses today
 - **(H1) Assert the token↔thread binding, not just token validity.** The daemon token resolves to
   `{ userId, organizationId }` (its API-key metadata). The endpoint MUST load the requested
   `threadChatId`'s thread and assert **both** that thread's `userId` matches the token's user
-  **and** its `organizationId` matches the token's org — a *valid* daemon token for a *different*
+  **and** its `organizationId` matches the token's org — a _valid_ daemon token for a _different_
   thread/org must be rejected (403), not served. Tested explicitly.
 - **(H2) The response body is sensitive.** It carries the prompt (repo content + user text).
   **Never log the body.** Structure the handler so a future access log can record
@@ -93,7 +94,7 @@ threadChat. www builds it with the **same** logic `startAgentMessage` uses today
 - **Input hygiene:** Hatchet persists workflow input; keeping the (large, mutable) prompt out of
   it and behind an authenticated pull is cleaner than embedding it.
 - **Pilot-scope limitation (documented, not blocking):** `preparePromptForModel` today writes
-  image attachments to the sandbox *session* (`session.writeFile`). www has no session in the
+  image attachments to the sandbox _session_ (`session.writeFile`). www has no session in the
   remote path, so **pilot v1 serves text-only prompts** (the mirror-intake / PR-review tasks are
   text). Image-attachment support = follow-up: the worker fetches attachments from R2 by key
   (the keys are already in the message) and writes them into its workdir. Called out so it
@@ -111,7 +112,7 @@ threadChat. www builds it with the **same** logic `startAgentMessage` uses today
   `ANTHROPIC_API_KEY`.
 
 **Validator findings folded into slice 1 (adversarial §3 read, 2026-07-17).** The daemon token as
-originally built was **weaker than §3 above claimed** — it was a *general* better-auth API key
+originally built was **weaker than §3 above claimed** — it was a _general_ better-auth API key
 that the CLI router (`cli-router.ts`) also accepted, so a compromised box could call
 `threads.list/detail/CREATE` (full CLI + agent-spawn), not just "post its own thread's events".
 Corrected here:
@@ -121,7 +122,7 @@ Corrected here:
   daemon token is now bounded to one thread's daemon protocol, matching the §3 claim.
 - **F2 (thread binding, mandatory).** The mint stamps `metadata.threadChatId`. **Both**
   `/api/daemon-event` **and** `/api/daemon/next-message` assert the token's `threadChatId` matches
-  the request — an org-scoped token can no longer pull or inject for *any* thread in the org, only
+  the request — an org-scoped token can no longer pull or inject for _any_ thread in the org, only
   its own. (Legacy tokens minted without a `threadChatId` are allowed through `/api/daemon-event`
   during the rollout window; new tokens always bind.)
 - **F3 (task-scoped lifetime).** The token is **revoked on thread-terminal** — `handleThreadFinish`
@@ -130,12 +131,25 @@ Corrected here:
   better-auth apiKey plugin's **1-day minimum** as a backstop for a run that never reaches terminal
   (the plugin rejects an `expiresIn` below its minimum; lowering the backstop needs a plugin
   `keyExpiration` config change — deferred, not load-bearing since revocation is primary).
-- **F4 (tokens in Hatchet step input) — ACCEPTED RISK for single-org pilot v1.** The short-lived
-  installation + daemon tokens are passed as workflow step input, which Hatchet persists in its
-  Postgres. Accepted because both are short-lived and org-scoped and the pilot is single-org.
-  **Trigger to revisit:** before **any non-single-org deployment**, move token delivery to
-  Hatchet secret-injection (out of persisted input). The *prompt* is never in the input regardless
-  (fork 3) — only these expiring tokens are.
+- **F4 (tokens in Hatchet step input) — RESOLVED by #380: secrets sealed to the plane key.**
+  Originally ACCEPTED RISK for the single-org pilot: the short-lived installation + daemon tokens
+  were passed as workflow step input in plain text, which Hatchet persists in its Postgres (and
+  the box's engine backup copies). The revisit trigger ("before any non-single-org deployment")
+  fired when the two proof orgs dispatched to the plane. **Mechanism:** dispatch puts the three
+  per-run secrets (installation token, optional read-only token, daemon token) into ONE envelope
+  sealed with `@terragon/utils/payload-seal` — X25519 ephemeral ECDH + HKDF-SHA256 + AES-256-GCM
+  with `threadChatId` in the AAD — to the execution plane's public key
+  (`HATCHET_PAYLOAD_SEAL_KEY` on www), and the input carries `sealedSecrets` instead of the plain
+  fields (`AgentRunInput` has no `installationToken`/`githubReadToken`/`daemonToken`; a type test
+  pins that on both planes). The worker unseals in memory at run start with the ring in
+  `/etc/automata/payload-seal.key` (`WORKER_PAYLOAD_SEAL_KEY_FILE`; boot self-check; generated and
+  rotated by `packages/worker/scripts/gen-payload-seal-key.ts`), passes the secrets explicitly to
+  every consumer, and **revokes both `ghs_` tokens at the end of every run**
+  (`DELETE /installation/token`, best effort). A run that fails before posting back (an
+  unsealable payload) is reconciled by the supersede sweep's rule (iii)
+  (`run-failed-unreported`, daemon token revoked so a retry is not skipped). Rollout: PR 1 dual
+  (worker reads both shapes; www seals when the key is set), then PR 2 strict. The _prompt_ is
+  never in the input regardless (fork 3).
 - **F5 (enumeration key off the wire).** `/api/daemon/next-message` is **POST with `threadChatId`
   in the body**, not a query param, so the enumeration key stays out of URLs and access logs. The
   worker side must likewise not log the pulled body (H2).
@@ -158,7 +172,7 @@ and `packages/sandbox` code where importable.
 
 1. **Daemon sandboxing on the box — bare workdir vs Docker. → BARE workdir for pilot v1**
    confirmed; Docker provider next. Reason: fastest path to a real run; the box is single-tenant
-   per ADR-002, so the isolation ADR-002 buys is at the *box* boundary, not per-task. Revisit
+   per ADR-002, so the isolation ADR-002 buys is at the _box_ boundary, not per-task. Revisit
    before multi-repo / untrusted-PR execution hardening.
 2. **How the worker learns www's base URL. → per-task `daemonCallbackUrl` reference field**
    confirmed; **no worker-pinned URLs.** Reason: the control plane tells the worker where to call

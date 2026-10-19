@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { apikey, thread as threadTable } from "@terragon/shared/db/schema";
-import { and, eq } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 
 /**
  * Mint the org-scoped, thread-bound, daemon-purpose token a daemon uses to talk
@@ -134,6 +134,46 @@ export async function revokeDaemonTokenById({
     });
   }
   return deleted.length;
+}
+
+/**
+ * #380 sweep rule (iii): revoke every REMOTE-path daemon token of a thread
+ * by the per-run key prefix `${threadId}:` (daemonRunKey). The sweep knows
+ * the thread but not which threadChatId the run was minted under, and a
+ * token left live after the thread is terminal blocks the double-dispatch
+ * guard for its 1-day backstop TTL. In-process sandbox tokens are named by
+ * sandboxId (never a thread id), so the prefix can only match remote runs
+ * of THIS thread. Returns how many were deleted.
+ */
+export async function revokeDaemonTokensForThread({
+  userId,
+  threadId,
+}: {
+  userId: string;
+  threadId: string;
+}): Promise<number> {
+  const deleted = await db
+    .delete(apikey)
+    .where(
+      and(
+        eq(apikey.referenceId, userId),
+        like(apikey.name, `${escapeLikePattern(threadId)}:%`),
+      ),
+    )
+    .returning({ id: apikey.id });
+  if (deleted.length > 0) {
+    console.log("[daemon-token] revoked run token(s) for thread", {
+      userId,
+      threadId,
+      count: deleted.length,
+    });
+  }
+  return deleted.length;
+}
+
+/** `%`, `_` and `\` are LIKE metacharacters; a thread id never holds them, but escape anyway. */
+function escapeLikePattern(text: string): string {
+  return text.replace(/[\\%_]/g, (c) => `\\${c}`);
 }
 
 export async function revokeDaemonTokensForSandbox({

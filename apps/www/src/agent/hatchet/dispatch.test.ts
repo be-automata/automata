@@ -1,4 +1,21 @@
-import { describe, it, vi, beforeEach, afterEach, expect } from "vitest";
+import {
+  describe,
+  it,
+  vi,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+  expect,
+  expectTypeOf,
+} from "vitest";
+import {
+  formatPlanePublicKey,
+  generatePlaneKeyPair,
+  unsealRunSecrets,
+  type RunSecrets,
+  type SealedRunSecrets,
+} from "@terragon/utils/payload-seal";
 import { db } from "@/lib/db";
 import {
   createTestUser,
@@ -49,6 +66,8 @@ import {
   hatchetDispatchEnabled,
   dispatchAgentRun,
   selfHealReadbackSettle,
+  type AgentRunInput,
+  type LegacyAgentRunInput,
 } from "./dispatch";
 
 // Pass-through spy: the real resolver runs on the rows the dispatch read from
@@ -69,6 +88,45 @@ import {
   routedHatchetFetch,
   triggerBody,
 } from "./__fixtures__/review-thread";
+
+/**
+ * #380: every dispatch under test is SEALED to a per-file plane key (the
+ * public half goes into env.HATCHET_PAYLOAD_SEAL_KEY, the private half stays
+ * here to open the envelopes and assert what travelled). The legacy
+ * plain-text shape is exercised only by the explicit "key unset" case.
+ */
+let plane: Awaited<ReturnType<typeof generatePlaneKeyPair>>;
+const PLANE_KID = "plane-test";
+beforeAll(async () => {
+  plane = await generatePlaneKeyPair(PLANE_KID);
+  (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY =
+    formatPlanePublicKey(plane.publicKey);
+});
+afterAll(() => {
+  (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY = "";
+});
+/** Open the envelope on a captured input with the test plane key. */
+async function unsealInput(
+  input: Record<string, unknown>,
+): Promise<RunSecrets> {
+  expect(input.sealedSecrets).toBeDefined();
+  return unsealRunSecrets(
+    [plane.privateKey],
+    input.sealedSecrets as SealedRunSecrets,
+    input.threadChatId as string,
+  );
+}
+
+describe("AgentRunInput carries no secret field (#380 AC 1, www side)", () => {
+  it("installationToken / githubReadToken / daemonToken are not properties of the control-plane input type", () => {
+    expectTypeOf<AgentRunInput>().not.toHaveProperty("installationToken");
+    expectTypeOf<AgentRunInput>().not.toHaveProperty("githubReadToken");
+    expectTypeOf<AgentRunInput>().not.toHaveProperty("daemonToken");
+    expectTypeOf<AgentRunInput>().toHaveProperty("sealedSecrets");
+    // The PR-1 legacy wire shape is the ONLY type that may carry them.
+    expectTypeOf<LegacyAgentRunInput>().toHaveProperty("installationToken");
+  });
+});
 
 describe("hatchetDispatchEnabled", () => {
   it("false by default (no HATCHET_* env in tests) → in-process path", () => {
@@ -139,8 +197,7 @@ describe("dispatchAgentRun", () => {
       [
         "branch",
         "daemonCallbackUrl",
-        "daemonToken",
-        "installationToken",
+        "sealedSecrets",
         "orgId",
         "repoFullName",
         "threadChatId",
@@ -159,14 +216,20 @@ describe("dispatchAgentRun", () => {
     expect(typeof input.orgId).toBe("string");
     expect(input.orgId.length).toBeGreaterThan(0);
     expect(input.orgId.startsWith("u:")).toBe(false);
-    // The short-lived tokens are present…
-    expect(typeof input.installationToken).toBe("string");
-    expect(input.installationToken.length).toBeGreaterThan(0);
-    expect(typeof input.daemonToken).toBe("string");
-    expect(input.daemonToken.length).toBeGreaterThan(0);
-
-    // …but NO App private key / encryption master key anywhere in the payload.
+    // #380: the short-lived tokens travel ONLY inside the sealed envelope…
+    expect(input.sealedSecrets).toMatchObject({ v: 1, kid: PLANE_KID });
+    const secrets = await unsealInput(input);
+    expect(secrets.installationToken).toBe("mock-github-token");
+    expect(secrets.daemonToken).toMatch(/^[A-Za-z0-9_-]{64}$/);
+    expect(secrets.githubReadToken).toBeUndefined();
+    // …and never in plain text anywhere on the wire.
     const serialized = JSON.stringify(input);
+    expect(serialized).not.toContain("mock-github-token");
+    expect(serialized).not.toContain(secrets.daemonToken);
+    expect(serialized).not.toContain("installationToken");
+    expect(serialized).not.toContain("daemonToken");
+
+    // …and NO App private key / encryption master key anywhere in the payload.
     expect(serialized).not.toContain("GITHUB_APP_PRIVATE_KEY_TEST");
     expect(serialized).not.toContain("BEGIN RSA PRIVATE KEY");
     expect(serialized.toLowerCase()).not.toContain("privatekey");
@@ -1186,6 +1249,86 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
     });
   });
 
+  /**
+   * #380 sealing at the dispatch boundary.
+   * Cards:
+   *  - legacy when unset: protects=rollout step 1 (an empty key sends the
+   *    plain-text shape the dual worker still reads); fails_when=an empty
+   *    key seals, or throws; no_claim=PR 2's fail-closed (not yet shipped).
+   *  - malformed key fails closed: protects=a bad HATCHET_PAYLOAD_SEAL_KEY
+   *    never dispatches and never strands the thread; fails_when=the
+   *    trigger fires, or the minted daemon token survives (retry would be
+   *    skipped); no_claim=none.
+   *  - AAD binding: protects=an envelope opens only under its own
+   *    threadChatId; fails_when=it opens under another; no_claim=the
+   *    crypto itself (utils suite).
+   */
+  describe("#380: run secrets sealed to the plane key", () => {
+    afterEach(() => {
+      (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY =
+        formatPlanePublicKey(plane.publicKey);
+    });
+
+    it("an unset key sends the PR-1 legacy shape (plain-text fields, no envelope)", async () => {
+      (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY =
+        "";
+      const input = await dispatchAndRead(await orgTaskThread());
+      expect(input.sealedSecrets).toBeUndefined();
+      expect(input.installationToken).toBe("mock-github-token");
+      expect(input.daemonToken).toMatch(/^[A-Za-z0-9_-]{64}$/);
+    });
+
+    it("a malformed key fails the dispatch closed: nothing triggered, the minted daemon token revoked, the thread failed", async () => {
+      (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY =
+        "plane-bad:not-a-key";
+      const t = await orgTaskThread();
+      const f = routedHatchetFetch("run-agent");
+      vi.stubGlobal("fetch", f.mock);
+      try {
+        await expect(
+          dispatchAgentRun({
+            userId: user.id,
+            threadId: t.threadId,
+            threadChatId: t.threadChatId,
+            repoFullName: REPO,
+            branch: "feature",
+          }),
+        ).rejects.toThrow("Failed to dispatch the remote agent run.");
+      } finally {
+        vi.unstubAllGlobals();
+      }
+      expect(f.mock).not.toHaveBeenCalled();
+      // The guard would otherwise skip every retry for a day.
+      expect(
+        await hasActiveDaemonToken({
+          userId: user.id,
+          name: daemonRunKey(t),
+        }),
+      ).toBe(false);
+    });
+
+    it("the envelope is bound to its threadChatId: it opens there and nowhere else, and two dispatches never share a byte", async () => {
+      const a = await orgTaskThread();
+      const inputA = await dispatchAndRead(a);
+      await expect(unsealInput(inputA)).resolves.toMatchObject({
+        installationToken: "mock-github-token",
+      });
+      await expect(
+        unsealRunSecrets(
+          [plane.privateKey],
+          inputA.sealedSecrets as SealedRunSecrets,
+          "tc_other",
+        ),
+      ).rejects.toThrow("reason=tag");
+      const inputB = await dispatchAndRead(await orgTaskThread());
+      const envA = inputA.sealedSecrets as SealedRunSecrets;
+      const envB = inputB.sealedSecrets as SealedRunSecrets;
+      for (const f of ["epk", "iv", "ct"] as const) {
+        expect(envB[f]).not.toBe(envA[f]);
+      }
+    });
+  });
+
   describe("read-only GitHub token (phase 7, DORA auth = Option 3)", () => {
     const READ_TOKEN = "mock-github-read-token";
     const MINT_FAILED_LOG =
@@ -1202,8 +1345,12 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
         424242,
       );
       expect(vi.mocked(lookupInstallationId)).toHaveBeenCalledTimes(1);
-      expect(input.githubReadToken).toBe(READ_TOKEN);
-      expect(input.githubReadToken).not.toBe(input.installationToken);
+      // #380: the read token is sealed with the other two, never plain text.
+      expect("githubReadToken" in input).toBe(false);
+      expect(JSON.stringify(input)).not.toContain(READ_TOKEN);
+      const secrets = await unsealInput(input);
+      expect(secrets.githubReadToken).toBe(READ_TOKEN);
+      expect(secrets.githubReadToken).not.toBe(secrets.installationToken);
       expect(input.githubReadTokenExpiresAt).toBe("2026-10-04T03:00:00Z");
       expect(input.taskAgent).toEqual({ batteries: ["somnio-skills"] });
     });
@@ -1280,7 +1427,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
         (level) => vi.spyOn(console, level),
       );
       const input = await dispatchAndRead(await orgTaskThread());
-      expect(input.githubReadToken).toBe(READ_TOKEN);
+      expect((await unsealInput(input)).githubReadToken).toBe(READ_TOKEN);
       for (const spy of spies) {
         for (const call of spy.mock.calls) {
           expect(JSON.stringify(call)).not.toContain(READ_TOKEN);
@@ -1465,6 +1612,14 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    // The afterEach above restores EVERY mock, which also strips the module
+    // mocks' resolved values (test-setup.ts): from the second case on,
+    // getInstallationToken resolved `undefined`. The legacy payload silently
+    // dropped the missing key; #380's sealer refuses an empty token (shape),
+    // so the mint is re-established here — the dispatch under test needs a
+    // real (mock) token exactly like production does.
+    vi.mocked(getInstallationToken).mockResolvedValue("mock-github-token");
+    vi.mocked(lookupInstallationId).mockResolvedValue(424242);
     // R4: the settle is real time; the order of calls is what is asserted.
     selfHealReadbackSettle.ms = 0;
     user = (await createTestUser({ db })).user;

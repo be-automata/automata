@@ -81,6 +81,7 @@ export function runStatusChipModel({
     case "daemon-failed":
     case "publish-failed":
     case "plane-offline":
+    case "run-failed-unreported":
       return { label, detail, tone: "danger", cause };
     default:
       return assertNever(cause);
@@ -96,6 +97,7 @@ const ICONS: Record<TerminalCause, typeof Ban> = {
   "daemon-failed": XCircle,
   "publish-failed": Send,
   "plane-offline": CloudOff,
+  "run-failed-unreported": XCircle,
 };
 
 const TONE_CLASSES: Record<RunStatusChipModel["tone"], string> = {

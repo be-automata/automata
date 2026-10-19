@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BOX_SLOTS_MAX } from "./box-lock";
+import { DEFAULT_PAYLOAD_SEAL_KEY_FILE } from "./payload-seal-keys";
 import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
 import {
   agentUserForSlot,
@@ -153,6 +154,14 @@ export interface WorkerConfig {
    * to a raw-token env.
    */
   credentialBroker: "on" | "legacy-direct";
+  /**
+   * #380: the plane's seal key ring (`{"keys":[…]}`, see
+   * payload-seal-keys.ts). Every run unseals its `sealedSecrets` with it.
+   * Default /etc/automata/payload-seal.key. Rollout step 1: an absent file is
+   * tolerated (legacy plain-text inputs only); a present-but-unusable file
+   * refuses boot. Step 4 (PR 2) makes it mandatory.
+   */
+  payloadSealKeyFile: string;
 
   // --- Scheduling deadlock recovery (#69, §3.5) -----------------------------
   // Everything below is inert unless engineDatabaseUrl is set — the box's
@@ -550,6 +559,8 @@ export function loadWorkerConfig(
       env.WORKER_CREDENTIAL_BROKER?.trim() === "legacy-direct"
         ? "legacy-direct"
         : "on",
+    payloadSealKeyFile:
+      env.WORKER_PAYLOAD_SEAL_KEY_FILE?.trim() || DEFAULT_PAYLOAD_SEAL_KEY_FILE,
 
     // --- #69 scheduling deadlock recovery ---------------------------------
     engineDatabaseUrl: env.HATCHET_ENGINE_DATABASE_URL?.trim() || "",

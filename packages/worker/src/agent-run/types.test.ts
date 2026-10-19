@@ -13,7 +13,7 @@ describe("worker terminal causes mirror (#125 C4)", () => {
     for (const c of TERMINAL_CAUSES) {
       expect(describeTerminalCause(c).length).toBeGreaterThan(0);
     }
-    expect(TERMINAL_CAUSES).toHaveLength(8);
+    expect(TERMINAL_CAUSES).toHaveLength(9);
     expect(() => describeTerminalCause("nope" as TerminalCause)).toThrow();
   });
 });

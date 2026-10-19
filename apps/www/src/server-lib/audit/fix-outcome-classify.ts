@@ -88,6 +88,14 @@ export const TERMINAL_CAUSE_RULES = {
     reason: "plane_offline",
     execPlaneSignal: true,
   },
+  // #380 sweep rule (iii): the run failed on the plane before it could post
+  // back (e.g. the payload could not be unsealed) — the same signal class as
+  // daemon-failed, reached through the sweep instead of onFailure.
+  "run-failed-unreported": {
+    class: "infra",
+    reason: "run_failed_unreported",
+    execPlaneSignal: true,
+  },
 } as const satisfies Record<TerminalCause, CauseRule>;
 
 const CREDENTIAL: CauseRule = {

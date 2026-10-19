@@ -199,6 +199,83 @@ describe("agentRunWorkflow onFailure (#2)", () => {
     const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
     expect(body.messages[0].error_info).toMatch(/agent-run failed/);
   });
+
+  // #380: the daemon token now arrives sealed. onFailure unseals with the
+  // box's ring (WORKER_PAYLOAD_SEAL_KEY_FILE) and posts with it; when the
+  // envelope cannot be opened it posts NOTHING and says why by class —
+  // www's sweep rule (iii) is the reconcile. Card: protects=the failure
+  // post still authenticates with the unsealed token / fail-closed on a
+  // foreign envelope; fails_when=onFailure reads a plain-text field, posts
+  // with a wrong token, or logs a secret byte; no_claim=the sweep itself.
+  it("#380: unseals the daemon token from the envelope before posting", async () => {
+    const { generatePlaneKeyPair, sealRunSecrets } = await import(
+      "@terragon/utils/payload-seal"
+    );
+    const { resetPlaneKeyRingForTests } = await import("./payload-seal-keys");
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const plane = await generatePlaneKeyPair("plane-fail");
+    const keyFile = path.join(
+      mkdtempSync(path.join(tmpdir(), "seal-fail-")),
+      "payload-seal.json",
+    );
+    writeFileSync(keyFile, JSON.stringify({ keys: [plane.privateKey] }));
+    process.env.WORKER_PAYLOAD_SEAL_KEY_FILE = keyFile;
+    resetPlaneKeyRingForTests();
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(new Response("OK", { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const { installationToken, daemonToken, ...rest } = INPUT;
+      void installationToken;
+      const sealed = {
+        ...rest,
+        sealedSecrets: await sealRunSecrets(
+          plane.publicKey,
+          {
+            installationToken: "ghs_sealed_inst",
+            daemonToken: "sealed-daemon",
+          },
+          INPUT.threadChatId,
+        ),
+      };
+      await workflowDef.onFailure.fn(sealed, {
+        errors: () => ({ run: "boom" }),
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, init] = fetchMock.mock.calls[0]!;
+      expect(init.headers["x-daemon-token"]).toBe("sealed-daemon");
+      expect(init.headers["x-daemon-token"]).not.toBe(daemonToken);
+
+      // A foreign envelope: nothing posted, the log names kid + reason only.
+      fetchMock.mockClear();
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const other = await generatePlaneKeyPair("plane-fail");
+      await workflowDef.onFailure.fn(
+        {
+          ...rest,
+          sealedSecrets: await sealRunSecrets(
+            other.publicKey,
+            { installationToken: "ghs_x", daemonToken: "y" },
+            INPUT.threadChatId,
+          ),
+        },
+        { errors: () => ({ run: "boom" }) },
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+      const logged = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logged).toContain(
+        "run secrets unavailable (payload-seal: unseal failed (kid=plane-fail, reason=tag))",
+      );
+      expect(logged).not.toContain(plane.privateKey.privateKeyJwk.d);
+      errorSpy.mockRestore();
+    } finally {
+      delete process.env.WORKER_PAYLOAD_SEAL_KEY_FILE;
+      resetPlaneKeyRingForTests();
+    }
+  });
 });
 
 describe("resolveUseCredits — the worker's final say", () => {
@@ -631,8 +708,9 @@ describe("runSelfHealFixStep (GATE-01 / TMO-01 / OBS-01)", () => {
     selfHeal: FIX_SELF_HEAL,
     daemonCallbackUrl: "https://www.example.com",
     repoFullName: "o/r",
-    installationToken: "INSTALL_SENTINEL",
   };
+  /** #380: the token now arrives from the unsealed RunSecrets, beside the input. */
+  const INSTALLATION_TOKEN = "INSTALL_SENTINEL";
   const COMPLETED = {
     workerStatus: "completed" as const,
     headSha: PUSHED,
@@ -667,6 +745,7 @@ describe("runSelfHealFixStep (GATE-01 / TMO-01 / OBS-01)", () => {
     const run = () =>
       wf.runSelfHealFixStep({
         input: INPUT,
+        installationToken: INSTALLATION_TOKEN,
         workdir: "/w",
         agentUser: "",
         egressProxyUrl: null,
@@ -803,6 +882,7 @@ describe("runSelfHealFixStep (GATE-01 / TMO-01 / OBS-01)", () => {
     const { order, deps } = setup();
     await wf.runSelfHealFixStep({
       input: { ...INPUT, selfHeal: undefined },
+      installationToken: INSTALLATION_TOKEN,
       workdir: "/w",
       agentUser: "",
       egressProxyUrl: null,

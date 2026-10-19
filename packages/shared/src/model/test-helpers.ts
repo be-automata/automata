@@ -317,7 +317,7 @@ export async function createTestRemoteRun({
   repoFullName?: string;
   /** Chat-mode thread: the live status sits on the threadChat row. */
   enableThreadChatCreation?: boolean;
-  status?: "working" | "complete";
+  status?: "working" | "complete" | "booting";
   reviewedSha?: string;
   automationId?: string;
   snapshot?: SupersedeSnapshot;

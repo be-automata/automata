@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import type { RunSecrets } from "@terragon/utils/payload-seal";
 import { hatchet } from "../hatchet-client";
 import {
   AGENT_RUN_VARIANTS,
@@ -25,6 +26,9 @@ import {
   type FixCheckReport,
 } from "./self-heal-fix-check";
 import { cleanupWorkdir, provisionWorkdir } from "./provision";
+import { planeKeysForRun } from "./payload-seal-keys";
+import { createTokenRevoker } from "./revoke-installation-tokens";
+import { resolveRunSecrets, type AgentRunWireInput } from "./run-secrets";
 import { formatRunStartLine, resolveRunLane } from "./run-lane";
 import { reviewAgentForRun, withReviewAgentWire } from "./review-agent-wire";
 import {
@@ -287,7 +291,7 @@ export function makeAgentRunWorkflow(
   perPrStrategy: PerPrStrategy,
 ) {
   const def = buildAgentRunDefinition(name, perPrStrategy);
-  const wf = hatchet.workflow<AgentRunInput>(def.workflow);
+  const wf = hatchet.workflow<AgentRunWireInput>(def.workflow);
   wf.task({ ...def.task, fn: runAgent });
   wf.onFailure({ fn: onAgentRunFailure });
   return wf;
@@ -306,10 +310,14 @@ type RunCtx = {
  * every call, and (#125 C1) this run's generation as `x-run-external-id` so
  * the control plane's fence can refuse a write from a superseded run.
  */
-function wwwOptsFor(input: AgentRunInput, ctx: RunCtx): WwwClientOpts {
+function wwwOptsFor(
+  input: AgentRunInput,
+  daemonToken: string,
+  ctx: RunCtx,
+): WwwClientOpts {
   return {
     baseUrl: input.daemonCallbackUrl,
-    daemonToken: input.daemonToken,
+    daemonToken,
     threadId: input.threadId,
     threadChatId: input.threadChatId,
     traceparent: input.traceparent,
@@ -327,14 +335,56 @@ function wwwOptsFor(input: AgentRunInput, ctx: RunCtx): WwwClientOpts {
  * control plane owns that terminal.
  */
 async function runAgent(
-  input: AgentRunInput,
+  wire: AgentRunWireInput,
   ctx: RunCtx,
 ): Promise<AgentRunOutput> {
   // TMO-01: the 30-minute execution timeout counts from here; the post-agent
   // fix check must finish inside it.
   const runStartedAt = Date.now();
   const config = loadWorkerConfig();
-  const wwwOpts = wwwOptsFor(input, ctx);
+  // #380: unseal FIRST — before any www call, the staleness check or
+  // provisioning. A failure here throws a PayloadSealError naming only the
+  // kid and the failure class; the task fails, nothing is posted (the daemon
+  // token is inside the envelope), and www's sweep rule (iii) reconciles.
+  const { input, secrets, source } = await resolveRunSecrets({
+    wire,
+    keys: planeKeysForRun(config.payloadSealKeyFile),
+  });
+  ctx.log(
+    `[agent-run ${input.threadId}] run secrets: ${source}` +
+      (source === "sealed" ? ` (kid=${input.sealedSecrets?.kid})` : ""),
+  );
+  // #380: both ghs_ tokens die with the run. runAgentInner revokes them after
+  // the fix check and before the box lock release; this outer finally is the
+  // safety net for every exit that never gets there (stale-skip, a clone
+  // failure, an admission throw). Once-only, never throws.
+  const revoker = createTokenRevoker(secrets, (line) =>
+    ctx.log(`[agent-run ${input.threadId}] ${line}`),
+  );
+  try {
+    return await runAgentResolved(
+      input,
+      secrets,
+      revoker,
+      ctx,
+      config,
+      runStartedAt,
+    );
+  } finally {
+    await revoker.revokeOnce();
+  }
+}
+
+/** `runAgent` after the secrets are resolved: the staleness self-check + cancel hook. */
+async function runAgentResolved(
+  input: AgentRunInput,
+  secrets: RunSecrets,
+  revoker: ReturnType<typeof createTokenRevoker>,
+  ctx: RunCtx,
+  config: ReturnType<typeof loadWorkerConfig>,
+  runStartedAt: number,
+): Promise<AgentRunOutput> {
+  const wwwOpts = wwwOptsFor(input, secrets.daemonToken, ctx);
   const runExternalId = wwwOpts.runExternalId ?? "";
   // Under complete-run·queue a run may have waited behind an older one while
   // newer commits landed. Ask www FIRST; if a newer run is already recorded,
@@ -364,6 +414,8 @@ async function runAgent(
   try {
     const output = await runAgentInner(
       input,
+      secrets,
+      revoker,
       ctx,
       config,
       wwwOpts,
@@ -618,7 +670,7 @@ const DEFAULT_SELF_HEAL_FIX_DEPS: SelfHealFixStepDeps = {
 
 type FixStepInput = Pick<
   AgentRunInput,
-  "selfHeal" | "daemonCallbackUrl" | "repoFullName" | "installationToken"
+  "selfHeal" | "daemonCallbackUrl" | "repoFullName"
 >;
 
 /** `head=` in the step line: the first 8 hex of a full sha, or none. */
@@ -709,8 +761,11 @@ export async function runSelfHealFixStep({
   signal,
   now = Date.now,
   deps = DEFAULT_SELF_HEAL_FIX_DEPS,
+  installationToken,
 }: {
   input: FixStepInput;
+  /** #380: from the unsealed RunSecrets, never from the input. */
+  installationToken: string;
   workdir: string;
   agentUser: string;
   egressProxyUrl: string | null;
@@ -759,7 +814,7 @@ export async function runSelfHealFixStep({
         const head = await deps.remoteHead({
           repoFullName: input.repoFullName,
           branch: selfHeal.branch,
-          installationToken: input.installationToken,
+          installationToken,
         });
         if (head !== null && head !== lastPushed) {
           refused = failed("branch head on GitHub differs from the push");
@@ -817,6 +872,8 @@ export async function runSelfHealFixStep({
 
 async function runAgentInner(
   input: AgentRunInput,
+  secrets: RunSecrets,
+  revoker: { revokeOnce: () => Promise<void> },
   ctx: RunCtx,
   config: ReturnType<typeof loadWorkerConfig>,
   wwwOpts: WwwClientOpts,
@@ -947,7 +1004,7 @@ async function runAgentInner(
       branch: input.branch,
       baseBranch: input.baseBranch,
       workBranch: input.workBranch,
-      installationToken: input.installationToken,
+      installationToken: secrets.installationToken,
       workdirRoot: config.workdirRoot,
       runId: input.threadId,
       // #108: empty (the default) ⇒ no ACLs are touched at all. #205: the
@@ -1132,7 +1189,10 @@ async function runAgentInner(
     lane,
     taskGate,
     seeded: materialised.batteries,
-    input,
+    input: {
+      githubReadToken: secrets.githubReadToken,
+      githubReadTokenExpiresAt: input.githubReadTokenExpiresAt,
+    },
     brokered: config.credentialBroker === "on",
     now: Date.now(),
   });
@@ -1209,14 +1269,14 @@ async function runAgentInner(
       // Minted once per run, shared by both brokers; never logged.
       const runBearer = randomBytes(32).toString("hex");
       gitBroker = await startGitBroker({
-        installationToken: input.installationToken,
+        installationToken: secrets.installationToken,
         repoFullName: input.repoFullName,
         runBearer,
         // Only fix runs carry the key at all; every other run is unchanged.
         ...(refFence ? { refFence } : {}),
       });
       ghBroker = await startGhBroker({
-        installationToken: input.installationToken,
+        installationToken: secrets.installationToken,
         runBearer,
         socketPath: runGhSocketPath(
           config.runNamespaceRoot,
@@ -1255,6 +1315,10 @@ async function runAgentInner(
     egressProxy?.url ?? null,
     broker,
     {
+      secrets: {
+        installationToken: secrets.installationToken,
+        daemonToken: secrets.daemonToken,
+      },
       lane,
       ...(taskOutcome.githubReadToken !== undefined
         ? { githubReadToken: taskOutcome.githubReadToken }
@@ -1365,6 +1429,7 @@ async function runAgentInner(
       fixReported = true;
       await runSelfHealFixStep({
         input,
+        installationToken: secrets.installationToken,
         workdir,
         agentUser: config.agentUser,
         egressProxyUrl: egressProxy?.url ?? null,
@@ -1393,64 +1458,74 @@ async function runAgentInner(
       finalStatus: result.finalStatus,
     };
   } finally {
-    // Terminal OR cancel (incl. scheduleTimeout): SIGKILL the daemon's process
-    // group so no orphan survives, then remove the workdir. Runs on normal return,
-    // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
-    daemon.teardown();
-    // #184 (#152 Stage B2): the teardown uid-scan runs right after the
-    // daemon's group is SIGKILLed and BEFORE the proxy/brokers close —
-    // escapees are child traffic, so they must be dead before those closes
-    // and before the credential wipe below (ADR-007 I2/I4). The 250 ms settle
-    // lives inside the reaper; it never throws, so it cannot mask the run's
-    // real outcome. The box lock still goes last. A LOST lock (the helper
-    // died mid-run, so the kernel already freed it) means another run may
-    // legitimately own the box now — its live agent would be collateral of
-    // a uid-wide kill, so the scan is skipped and logged instead.
-    if (boxLock?.lost) {
-      admissionLog(
-        `box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
-      );
-    } else {
-      await reapAgentUidEscapees({
-        agentUser: config.agentUser,
-        phase: "teardown",
-        threadId: input.threadId,
-        runNamespaceRoot: config.runNamespaceRoot,
-        log: admissionLog,
-      });
-    }
-    // #66: close the egress proxy after the daemon is dead (no more child
-    // traffic), then flush the last audit batch. Both are best-effort — an
-    // audit/proxy teardown hiccup must never mask the run's real outcome.
-    // #205: the proxy-auth audit is capped; the total lands in the step log.
-    const refused = egressProxy?.unauthenticatedRequests() ?? 0;
-    if (refused > 0) {
-      step(
-        `egress proxy: ${refused} request(s) answered 407 (proxy-auth) — a client authenticating after the challenge (Chromium via gstack browse does), or a caller without the run credential`,
-      );
-    }
-    await closeQuietly(egressProxy);
-    // #81: close both credential brokers after the daemon is dead (no more
-    // child git/gh traffic). Best-effort, like the egress proxy — the token
-    // dies with this process either way.
-    await closeQuietly(gitBroker);
-    await closeQuietly(ghBroker);
-    // GATE-01: a fix run that did not reach its check still reports, once.
-    if (input.selfHeal?.kind === "fix" && !fixReported) {
-      fixReported = true;
-      await reportSelfHealFixAborted({ input, step });
-    }
-    await closeQuietly(egressEvents);
+    // #380: the teardown sequence below is wrapped so a throw in any step can
+    // never skip the token revoke, the credential wipe or the lock release.
     try {
-      // Wipe the delivered credential before the workdir goes, so a cleanup
-      // failure on the workdir can never leave a live token behind.
-      await materialised.cleanup();
-      await cleanupWorkdir(run.runDir, workdirCleanup);
+      // Terminal OR cancel (incl. scheduleTimeout): SIGKILL the daemon's process
+      // group so no orphan survives, then remove the workdir. Runs on normal return,
+      // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
+      daemon.teardown();
+      // #184 (#152 Stage B2): the teardown uid-scan runs right after the
+      // daemon's group is SIGKILLed and BEFORE the proxy/brokers close —
+      // escapees are child traffic, so they must be dead before those closes
+      // and before the credential wipe below (ADR-007 I2/I4). The 250 ms settle
+      // lives inside the reaper; it never throws, so it cannot mask the run's
+      // real outcome. The box lock still goes last. A LOST lock (the helper
+      // died mid-run, so the kernel already freed it) means another run may
+      // legitimately own the box now — its live agent would be collateral of
+      // a uid-wide kill, so the scan is skipped and logged instead.
+      if (boxLock?.lost) {
+        admissionLog(
+          `box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
+        );
+      } else {
+        await reapAgentUidEscapees({
+          agentUser: config.agentUser,
+          phase: "teardown",
+          threadId: input.threadId,
+          runNamespaceRoot: config.runNamespaceRoot,
+          log: admissionLog,
+        });
+      }
+      // #66: close the egress proxy after the daemon is dead (no more child
+      // traffic), then flush the last audit batch. Both are best-effort — an
+      // audit/proxy teardown hiccup must never mask the run's real outcome.
+      // #205: the proxy-auth audit is capped; the total lands in the step log.
+      const refused = egressProxy?.unauthenticatedRequests() ?? 0;
+      if (refused > 0) {
+        step(
+          `egress proxy: ${refused} request(s) answered 407 (proxy-auth) — a client authenticating after the challenge (Chromium via gstack browse does), or a caller without the run credential`,
+        );
+      }
+      await closeQuietly(egressProxy);
+      // #81: close both credential brokers after the daemon is dead (no more
+      // child git/gh traffic). Best-effort, like the egress proxy — the token
+      // dies with this process either way.
+      await closeQuietly(gitBroker);
+      await closeQuietly(ghBroker);
+      // GATE-01: a fix run that did not reach its check still reports, once.
+      if (input.selfHeal?.kind === "fix" && !fixReported) {
+        fixReported = true;
+        await reportSelfHealFixAborted({ input, step });
+      }
     } finally {
-      // The box lock goes last (ADR-007 I2): the next run may start only once
-      // this one's daemon is dead and its disk footprint is gone — and it
-      // goes whatever the cleanup did, or the slot stays held until a restart.
-      await boxLock?.release();
+      // #380: both ghs_ tokens are revoked HERE — after the daemon is dead,
+      // the escapees reaped, the brokers/proxy closed and the fix check
+      // reported (it still needed the token), and BEFORE the box lock goes.
+      // Best effort, never throws, one `token.revoke` line per token.
+      await revoker.revokeOnce();
+      await closeQuietly(egressEvents);
+      try {
+        // Wipe the delivered credential before the workdir goes, so a cleanup
+        // failure on the workdir can never leave a live token behind.
+        await materialised.cleanup();
+        await cleanupWorkdir(run.runDir, workdirCleanup);
+      } finally {
+        // The box lock goes last (ADR-007 I2): the next run may start only once
+        // this one's daemon is dead and its disk footprint is gone — and it
+        // goes whatever the cleanup did, or the slot stays held until a restart.
+        await boxLock?.release();
+      }
     }
   }
 }
@@ -1464,23 +1539,45 @@ async function runAgentInner(
  * terminal event is absorbed (CAS no-op). No `name` option — CreateOnFailureTaskOpts
  * omits it (SDK amendment 3).
  *
- * BACKSTOP CAVEAT (amendment 4): this auths with `input.daemonToken`. For the
+ * BACKSTOP CAVEAT (amendment 4): this auths with the run's daemon token. For the
  * revoked-token failure class (S12 family) that token is ALREADY dead, so the POST
  * 401s and this cannot mark the thread failed — the www-side stalled-thread watchdog
  * (raised to 75m in cron.ts) is the ONLY backstop there.
+ *
+ * #380: the token is INSIDE the sealed envelope, so this handler unseals too.
+ * When the run failed BECAUSE the envelope could not be unsealed (unknown kid,
+ * bad tag), nothing can be posted: the failure is logged by class only and
+ * www's sweep rule (iii) marks the thread `run-failed-unreported` and revokes
+ * its daemon token. No revoke of the ghs_ tokens here — the run fn's finally
+ * already did that.
  *
  * H2: the reason is built ONLY from Hatchet's own error summary (ctx.errors()),
  * never agent output or the prompt. Wrapped so onFailure never throws uncaught.
  */
 async function onAgentRunFailure(
-  input: AgentRunInput,
+  wire: AgentRunWireInput,
   ctx: { errors?: () => Record<string, string>; workflowRunId?: () => string },
 ): Promise<void> {
+  let input: AgentRunInput;
+  let secrets: RunSecrets;
+  try {
+    ({ input, secrets } = await resolveRunSecrets({
+      wire,
+      keys: planeKeysForRun(loadWorkerConfig().payloadSealKeyFile),
+    }));
+  } catch (err) {
+    // The message is a PayloadSealError's (kid + reason) or a shape error —
+    // never a secret byte.
+    console.error(
+      `[agent-run ${wire.threadId}] onFailure: run secrets unavailable (${err instanceof Error ? err.message : String(err)}) — run-failed not posted; the control plane's sweep rule (iii) reconciles`,
+    );
+    return;
+  }
   try {
     await postRunFailed(
       {
         baseUrl: input.daemonCallbackUrl,
-        daemonToken: input.daemonToken,
+        daemonToken: secrets.daemonToken,
         threadId: input.threadId,
         threadChatId: input.threadChatId,
         runExternalId: ctx.workflowRunId?.() || undefined,

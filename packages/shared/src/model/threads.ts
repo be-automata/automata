@@ -1706,9 +1706,13 @@ export async function findOrphanRemoteThreads({
    * provider filter would make the rule silently match nothing.
    */
   remoteProviderOnly?: boolean;
-}): Promise<{ id: string; createdAt: Date }[]> {
+}): Promise<{ id: string; userId: string; createdAt: Date }[]> {
   return db
-    .select({ id: schema.thread.id, createdAt: schema.thread.createdAt })
+    .select({
+      id: schema.thread.id,
+      userId: schema.thread.userId,
+      createdAt: schema.thread.createdAt,
+    })
     .from(schema.thread)
     .innerJoin(
       schema.automations,
@@ -1729,6 +1733,52 @@ export async function findOrphanRemoteThreads({
         eq(schema.automations.triggerType, "pull_request"),
         isNull(schema.hatchetRun.id),
         lt(schema.thread.createdAt, new Date(now.getTime() - olderThanMs)),
+      ),
+    );
+}
+
+/**
+ * #380 sweep rule (iii): remote threads of ANY lane still `booting` with NO
+ * recorded run row (rule (i) owns the rows), whose last write is older than
+ * `olderThanMs`. The sweep then asks the engine for the thread's runs by
+ * metadata: a run that FAILED before it could post back (an unsealable
+ * payload, a clone failure, a worker death at admission) leaves the thread
+ * booting and its daemon token live for a day, which also makes every retry
+ * skip on the double-dispatch guard. Age is measured from `updatedAt`: a task
+ * thread may be created long before it is sent (it enters `booting` at
+ * dispatch), and that same write is the engine lookup window's centre.
+ */
+export async function findUnreportedRemoteThreads({
+  db,
+  olderThanMs,
+  now = new Date(),
+  remoteProviderOnly = true,
+}: {
+  db: DB;
+  olderThanMs: number;
+  now?: Date;
+  /** Same gate as findOrphanRemoteThreads. */
+  remoteProviderOnly?: boolean;
+}): Promise<{ id: string; userId: string; dispatchedAt: Date }[]> {
+  return db
+    .select({
+      id: schema.thread.id,
+      userId: schema.thread.userId,
+      dispatchedAt: schema.thread.updatedAt,
+    })
+    .from(schema.thread)
+    .leftJoin(
+      schema.hatchetRun,
+      eq(schema.hatchetRun.threadId, schema.thread.id),
+    )
+    .where(
+      and(
+        remoteProviderOnly
+          ? eq(schema.thread.sandboxProvider, "hatchet-remote")
+          : undefined,
+        threadEffectiveStatusIn(["booting"]),
+        isNull(schema.hatchetRun.id),
+        lt(schema.thread.updatedAt, new Date(now.getTime() - olderThanMs)),
       ),
     );
 }

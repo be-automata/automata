@@ -1,3 +1,4 @@
+import type { SealedRunSecrets } from "@terragon/utils/payload-seal";
 import type { DaemonReviewAgent } from "@terragon/daemon/shared";
 
 /**
@@ -117,20 +118,21 @@ export type AgentRunInput = {
   baseBranch?: string;
   /** www's public base URL the daemon calls back to (events + next-message). */
   daemonCallbackUrl: string;
-  /** Short-lived, installation-scoped GitHub token for the clone (x-access-token). */
-  installationToken: string;
   /**
-   * Phase 7, SECRET (never logged): a READ-ONLY, single-repo, ≤1h GitHub App
-   * token, present only on task runs whose selected packs require
-   * `github-read-token`. Mirror of www AgentRunInput.githubReadToken. Consumed
-   * only by the 07-07 env gate (GITHUB_TOKEN for brokered non-review runs with
-   * a seeded requiring pack); ignored everywhere else.
+   * #380: the run's secrets — the installation token (clone/push, brokers,
+   * fix check), the optional Phase-7 READ-ONLY task token (07-07 env gate:
+   * GITHUB_TOKEN for brokered non-review runs with a seeded requiring pack)
+   * and the daemon token (events + next-message auth) — sealed to the plane
+   * key, AAD-bound to `threadChatId`. Unsealed ONCE at run start
+   * (run-secrets.ts) into a `RunSecrets` passed explicitly to every consumer;
+   * never read from the input anywhere else, never logged. The envelope type
+   * is the one shared crypto contract (`@terragon/utils/payload-seal`).
+   * Optional on the wire only during the PR-1 rollout window, where the
+   * legacy plain-text fields may arrive instead (AgentRunWireInput).
    */
-  githubReadToken?: string;
+  sealedSecrets?: SealedRunSecrets;
   /** Not secret: the read token's ISO-8601 expiry (the worker refuses an expired token). */
   githubReadTokenExpiresAt?: string;
-  /** Short-lived, org+thread-scoped daemon token (events + next-message auth). */
-  daemonToken: string;
   /**
    * The run's org identity — NON-EMPTY for every run (dispatch computes
    * `thread.organizationId ?? \`u:${userId}\`` so a personal/no-org thread still
@@ -225,6 +227,7 @@ export const TERMINAL_CAUSES = [
   "daemon-failed",
   "publish-failed",
   "plane-offline",
+  "run-failed-unreported",
 ] as const;
 export type TerminalCause = (typeof TERMINAL_CAUSES)[number];
 
@@ -251,6 +254,8 @@ export function describeTerminalCause(cause: TerminalCause): string {
       return "verdict could not be published";
     case "plane-offline":
       return "never became visible on the execution plane";
+    case "run-failed-unreported":
+      return "failed on the execution plane before reporting back";
     default:
       return assertNever(cause);
   }

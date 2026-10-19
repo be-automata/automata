@@ -1,4 +1,12 @@
-import { describe, it, vi, beforeEach, expect } from "vitest";
+import {
+  describe,
+  it,
+  vi,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  expect,
+} from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { db } from "@/lib/db";
@@ -10,6 +18,13 @@ import { createOrganization } from "@terragon/shared/model/organizations";
 import { nanoid } from "nanoid";
 import { User } from "@terragon/shared";
 import { dispatchAgentRun } from "./dispatch";
+import { env } from "@terragon/env/apps-www";
+import {
+  formatPlanePublicKey,
+  generatePlaneKeyPair,
+  unsealRunSecrets,
+  type SealedRunSecrets,
+} from "@terragon/utils/payload-seal";
 import {
   createReviewAutomation,
   createBootingPRThread,
@@ -26,10 +41,12 @@ import {
  * byte-identical for non-review lanes.
  *
  * The fixture was captured from the pre-change dispatch path. Run-specific
- * values (ids, the minted daemon token, the traceparent) are stored as
- * __PLACEHOLDER__ strings and substituted with the live values before
- * comparison — every key is still compared, nothing is skipped; the two
- * random fields are additionally shape-asserted.
+ * values (ids, the traceparent, and since #380 the three random envelope
+ * fields epk/iv/ct) are stored as __PLACEHOLDER__ strings and substituted
+ * with the live values before comparison — every key is still compared,
+ * nothing is skipped; every random field is additionally shape-asserted,
+ * and the envelope is OPENED with the test plane key so the golden proves
+ * the sealed tokens are the minted ones (never pin the RNG by call count).
  *
  * To regenerate (ONLY for a deliberate, reviewed contract change):
  *   UPDATE_DISPATCH_GOLDEN=1 pnpm -C apps/www exec vitest run src/agent/hatchet/dispatch-golden.test.ts
@@ -68,6 +85,18 @@ function abstract(node: unknown, values: Placeholders): unknown {
 describe("dispatch golden (payload contract)", () => {
   let user: User;
   let orgId: string;
+  // #380: the golden is the SEALED contract (the plane key is set for every
+  // case; its kid is pinned literally in the fixture).
+  let plane: Awaited<ReturnType<typeof generatePlaneKeyPair>>;
+
+  beforeAll(async () => {
+    plane = await generatePlaneKeyPair("plane-golden");
+    (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY =
+      formatPlanePublicKey(plane.publicKey);
+  });
+  afterAll(() => {
+    (env as { HATCHET_PAYLOAD_SEAL_KEY: string }).HATCHET_PAYLOAD_SEAL_KEY = "";
+  });
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -102,22 +131,40 @@ describe("dispatch golden (payload contract)", () => {
   }
 
   /** Compare against the fixture, or (UPDATE_DISPATCH_GOLDEN=1) record it. */
-  function assertOrRecordGolden(
+  async function assertOrRecordGolden(
     key: "plain" | "review",
     body: unknown,
     t: { threadId: string; threadChatId: string },
   ) {
-    // The two per-dispatch random fields are pinned as placeholders AFTER a
+    // The per-dispatch random fields are pinned as placeholders AFTER a
     // shape assertion — they are still compared, never excluded.
     const input = (body as { input: Record<string, unknown> }).input;
     expect(input.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
-    expect(input.daemonToken).toMatch(/^[A-Za-z0-9_-]{64}$/);
+    // #380: the three secrets travel only inside the envelope. Shape first,
+    // then OPEN it: the installation token is the mocked mint and the daemon
+    // token is a fresh 64-char key — proof the sealed values are the real ones.
+    const sealed = input.sealedSecrets as SealedRunSecrets;
+    expect(sealed).toMatchObject({ v: 1, kid: "plane-golden" });
+    expect(sealed.epk).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(sealed.iv).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    expect(sealed.ct).toMatch(/^[A-Za-z0-9_-]{24,}$/);
+    const secrets = await unsealRunSecrets(
+      [plane.privateKey],
+      sealed,
+      t.threadChatId,
+    );
+    expect(secrets.installationToken).toBe("mock-github-token");
+    expect(secrets.daemonToken).toMatch(/^[A-Za-z0-9_-]{64}$/);
+    expect(JSON.stringify(body)).not.toContain(secrets.daemonToken);
+    expect(JSON.stringify(body)).not.toContain("mock-github-token");
     const values: Placeholders = {
       __THREAD_ID__: t.threadId,
       __THREAD_CHAT_ID__: t.threadChatId,
       __ORG_ID__: orgId,
       __TRACEPARENT__: input.traceparent as string,
-      __DAEMON_TOKEN__: input.daemonToken as string,
+      __SEALED_EPK__: sealed.epk,
+      __SEALED_IV__: sealed.iv,
+      __SEALED_CT__: sealed.ct,
     };
     if (key === "plain") {
       // A task run on its base branch works on its own branch, named from the
@@ -164,7 +211,7 @@ describe("dispatch golden (payload contract)", () => {
       threadChatId: t.threadChatId,
       branch: "main",
     });
-    assertOrRecordGolden("plain", body, t);
+    await assertOrRecordGolden("plain", body, t);
   });
 
   it("PR-review thread: payload matches the golden literally", async () => {
@@ -180,6 +227,6 @@ describe("dispatch golden (payload contract)", () => {
       threadChatId: t.threadChatId,
       branch: "feature-golden",
     });
-    assertOrRecordGolden("review", body, t);
+    await assertOrRecordGolden("review", body, t);
   });
 });

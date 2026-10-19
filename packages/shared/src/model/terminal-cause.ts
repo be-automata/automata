@@ -16,6 +16,7 @@ export const TERMINAL_CAUSES = [
   "daemon-failed",
   "publish-failed",
   "plane-offline",
+  "run-failed-unreported",
 ] as const;
 export type TerminalCause = (typeof TERMINAL_CAUSES)[number];
 
@@ -72,6 +73,12 @@ export function describeTerminalCause(cause: TerminalCause): {
         detail:
           "The run was dispatched but never became visible on the execution plane.",
       };
+    case "run-failed-unreported":
+      return {
+        label: "Failed before reporting",
+        detail:
+          "The run failed on the execution plane before it could report back (#380 sweep rule iii).",
+      };
     default:
       return assertNever(cause);
   }
@@ -86,8 +93,8 @@ export function describeTerminalCause(cause: TerminalCause): {
  * HEAD happens to be — a false "a human should review this PR" alarm on a
  * commit the abandoned run never saw (observed on #140, 2026-08-25).
  *
- * The complement (`timeout`, `daemon-failed`, `publish-failed`, and a NULL
- * cause — a dropped finish event) IS sweepable: that run owned the PR and
+ * The complement (`timeout`, `daemon-failed`, `publish-failed`,
+ * `run-failed-unreported`, and a NULL cause — a dropped finish event) IS sweepable: that run owned the PR and
  * either has a persisted verdict to republish or genuinely failed to reach one.
  */
 export const ABANDONED_TERMINAL_CAUSES = [
