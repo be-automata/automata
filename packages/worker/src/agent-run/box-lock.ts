@@ -329,6 +329,10 @@ async function spawnHelperAndAwaitAck(
   helper: BoxLockHelper,
   signal?: AbortSignal,
   slot = 0,
+  // #205: only at N > 1 can another slot account reach the file, and only
+  // there is a foreign or readable lock file refused; N = 1 locks whatever
+  // `box.lock` it finds, as it always has (the 0600 pre-create still applies).
+  enforcePrivate = false,
 ): Promise<HelperSession> {
   await mkdir(root, { recursive: true });
   if (signal?.aborted) throw abortError();
@@ -390,7 +394,7 @@ async function spawnHelperAndAwaitAck(
   });
   if (onAbort) signal?.removeEventListener("abort", onAbort);
 
-  if (outcome.kind === "acquired") {
+  if (outcome.kind === "acquired" && enforcePrivate) {
     // Holding a lock on a file another account can also lock is holding
     // nothing: refuse it (#205).
     const problem = await lockFilePrivacyProblem(lockFile);
@@ -398,6 +402,8 @@ async function spawnHelperAndAwaitAck(
       child.kill("SIGKILL");
       child.stdin.destroy();
       await exited;
+      // The helper DID hold the slot; parked siblings must not idle beside it.
+      notifySlotReleased(root);
       throw new BoxLockUnavailableError(file, problem);
     }
   }
@@ -548,6 +554,7 @@ export async function acquireBoxLock({
     boxLockHelper(),
     signal,
     slot,
+    slots > 1,
   );
   const { child, exited, outcome, stderr, file } = session;
 
@@ -621,10 +628,25 @@ export async function acquireBoxSlot({
     // on a slot the sweep already passed. A changed generation afterwards means
     // "sweep again", never "park beside a free slot".
     const generation = releaseGeneration(root);
+    // After the first full sweep the per-slot "busy — did not wait" lines say
+    // nothing the "budget full" line has not; every wake-up would add N of
+    // them per parked waiter. Later sweeps keep every other line (acquired,
+    // released, LOST) and drop only those.
+    const sweepLog = parked
+      ? (line: string) => {
+          if (!line.startsWith("box lock busy")) log?.(line);
+        }
+      : log;
     for (let k = 0; k < slots; k++) {
       if (signal?.aborted) throw abortError();
       const slot = (start + k) % slots;
-      const lock = await tryAcquireBoxLock({ root, holder, log, slot, slots });
+      const lock = await tryAcquireBoxLock({
+        root,
+        holder,
+        log: sweepLog,
+        slot,
+        slots,
+      });
       if (lock) {
         if (signal?.aborted) {
           await lock.release();
@@ -748,6 +770,7 @@ export async function tryAcquireBoxLock({
     helper ?? boxLockTryHelper(),
     undefined,
     slot,
+    slots > 1,
   );
   const { child, outcome, stderr, file } = session;
 
