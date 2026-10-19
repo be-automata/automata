@@ -10,7 +10,6 @@ import { NextMessageHttpError } from "./www-client";
  *
  * TRANSIENT (5xx / network) stays a plain Error here; a 4xx from next-message
  * (PR gone / permission revoked / bad token) is terminal → NonRetryableError.
- *
  */
 export function classifyNextMessageError(err: unknown): unknown {
   if (
