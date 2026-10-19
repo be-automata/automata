@@ -502,6 +502,28 @@ export function readMemoryEvents(opts: {
 }
 
 /**
+ * This run's `memory.current` in bytes (what the kernel already charges the
+ * cgroup: anonymous + page cache), or null when the file is missing or
+ * malformed. #371 reads it to shrink a live run's headroom reservation by what
+ * the kernel already counts — RSS is at or below the run's committed virtual
+ * memory, so the subtraction only ever under-shrinks (conservative).
+ */
+export function readMemoryCurrent(opts: {
+  cgroupDir: string;
+  fsi?: CgroupFs;
+}): number | null {
+  const io = opts.fsi ?? defaultFs;
+  try {
+    const n = Number(
+      io.read(path.join(opts.cgroupDir, "memory.current")).trim(),
+    );
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Kill everything in this run's cgroup, then remove it.
  *
  * `cgroup.kill` is a single kernel-side write that kills every member with no

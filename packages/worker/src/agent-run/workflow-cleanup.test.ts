@@ -247,6 +247,8 @@ vi.mock("./daemon-process", () => ({
     teardown = vi.fn(() => {
       finallyOrder.push("teardown");
     });
+    // #371: no run cgroup in the double (the ceiling is off here).
+    runCgroupDir = () => null;
   },
 }));
 

@@ -272,6 +272,26 @@ describe("the deferral budget vs the control plane's 75-minute stalled cutoff", 
   });
 });
 
+describe("Reservation.observe (#371: lifetime reservation, minus what the kernel already charges)", () => {
+  it("counts the whole runCommit until a probe is attached, then runCommit − memory.current floored at 0; release still drops it", () => {
+    const c = new AdmissionController(POLICY, () => MEMINFO);
+    const r = c.admit({ threadId: "a", attempt: 0 });
+    expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
+    let current: number | null = Math.round(POLICY.runCommitBytes / 4);
+    r.observe(() => current);
+    expect(c.reservedBytes()).toBe(POLICY.runCommitBytes - current);
+    current = POLICY.runCommitBytes * 3; // grown past its expectation
+    expect(c.reservedBytes()).toBe(0);
+    current = null; // probe lost (cgroup gone) ⇒ whole runCommit again
+    expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
+    r.release();
+    expect(c.reservedBytes()).toBe(0);
+    // observe after release is a no-op (stale generation).
+    r.observe(() => 1);
+    expect(c.reservedBytes()).toBe(0);
+  });
+});
+
 describe("assessHeadroomSupport (boot)", () => {
   it("inert policy ⇒ off, with the reason", () => {
     expect(

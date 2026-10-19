@@ -7,6 +7,7 @@ import {
   type PerPrStrategy,
 } from "./definition";
 import { configForSlot, loadWorkerConfig } from "./config";
+import { readMemoryCurrent } from "./run-cgroup";
 import { acquireBoxSlot, type BoxLock } from "./box-lock";
 import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { reapAgentUidEscapees } from "./uid-reaper";
@@ -954,9 +955,6 @@ async function runAgentInner(
     // Any OOM kill in the run's cgroup fails the run, even when only a child
     // died and the agent finished its turn (prod 2026-10-04, e335c83d).
     memoryStarvation: () => daemonForPoll?.memoryStarvation() ?? null,
-    // #371: the agent child is alive and counted by the kernel — drop this
-    // run's headroom reservation (idempotent; the finally drops it too).
-    onFirstProgress: () => reservation?.release(),
   };
   let daemonForPoll: DaemonProcess | null = null;
   // #371: this run's headroom reservation (set under the slot, below).
@@ -1041,9 +1039,9 @@ async function runAgentInner(
     // a deferral costs no clone. Refusal throws AdmissionDeferredError — the one
     // error the engine retries (definition.ts) — after the slot is given back
     // in the catch below; nothing of this run is on disk yet. The reservation
-    // it returns is released at the first thread-status past `booting` (the
-    // agent child is alive and in the kernel's Committed_AS by then — the
-    // daemon alone is small), and in the finally.
+    // it returns lives as long as the run (released in the finally and in
+    // every pre-daemon unwind); once the run's cgroup exists it shrinks by
+    // what the kernel already charges the run (daemon.start() below).
     reservation =
       getAdmissionController(config)?.admit({
         threadId: input.threadId,
@@ -1418,6 +1416,14 @@ async function runAgentInner(
     // Run: bring up the daemon, then pull the message it should execute.
     await daemon.start();
     step(`daemon spawned: pid=${daemon.pid ?? "unknown"}`);
+    // #371: from here the run's own cgroup says what the kernel already
+    // charges it; the headroom reservation counts only the remainder.
+    const runCgroupDir = daemon.runCgroupDir();
+    if (runCgroupDir) {
+      reservation?.observe(() =>
+        readMemoryCurrent({ cgroupDir: runCgroupDir }),
+      );
+    }
     // #6: a 4xx next-message (PR gone / permission / bad token) is terminal →
     // NonRetryableError; a 5xx/network stays retryable (classifyNextMessageError).
     let message: Awaited<ReturnType<typeof pullNextMessage>>;

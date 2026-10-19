@@ -154,9 +154,8 @@ describe("fenceNonRetryable (#371 exactly-once fence)", () => {
   it("wraps every other throwable as NonRetryableError, keeping the cause's name and message", () => {
     const wrapped = fenceNonRetryable(new TypeError("boom"));
     expect(wrapped).toBeInstanceOf(NonRetryableError);
-    expect((wrapped as Error).message).toMatch(
-      /post-admission failure.*TypeError: boom/,
-    );
+    // The user-facing text is the original error, no prefix.
+    expect((wrapped as Error).message).toBe("TypeError: boom");
     const abort = new Error("box lock wait aborted");
     abort.name = "AbortError";
     expect(fenceNonRetryable(abort)).toBeInstanceOf(NonRetryableError);

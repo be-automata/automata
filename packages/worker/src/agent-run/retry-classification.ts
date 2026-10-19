@@ -127,10 +127,12 @@ export function fenceNonRetryable(err: unknown): unknown {
   ) {
     return err;
   }
-  const message =
-    err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  // The user sees this text as the thread's failure reason (onFailure →
+  // summarizeHatchetErrors), so it stays the original error, name and all; the
+  // non-retryable-ness is the TYPE, not a prefix (which would also be wrong for
+  // the pre-admission errors the same fence wraps).
   const wrapped = new NonRetryableError(
-    `post-admission failure — non-retryable (an agent run never re-executes): ${message}`,
+    err instanceof Error ? `${err.name}: ${err.message}` : String(err),
   );
   // The original stays reachable as `cause` (ES2022) for every caller that
   // classifies or asserts on it; Node prints it under `[cause]` with its stack.

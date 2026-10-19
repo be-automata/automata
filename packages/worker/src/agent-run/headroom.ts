@@ -27,9 +27,12 @@ import fs from "node:fs";
  * both would pass — the exact over-commit the check exists to prevent. The
  * decision itself is one synchronous step (a sync read of /proc/meminfo, parse,
  * evaluate, reserve) on one event loop, so no two decisions can interleave; and
- * an admitted run RESERVES its expected commit until its agent is alive (by then
- * the kernel's own `Committed_AS` carries it). Keep `decide` synchronous — an
- * `await` inside it would need a mutex.
+ * an admitted run RESERVES its expected commit for its WHOLE LIFE, minus what the
+ * kernel already charges its cgroup (`memory.current`, attached once the daemon
+ * exists) — the kernel's `Committed_AS` carries only what a run has committed so
+ * far, and a run released at its first sign of life would leave its later growth
+ * uncounted for the next admission. Keep `decide` synchronous — an `await`
+ * inside it would need a mutex.
  *
  * Every function here is pure or injectable; the only I/O is reading
  * `/proc/meminfo`, which does not exist on macOS — there the check is inert by
@@ -171,11 +174,23 @@ function mib(bytes: number): string {
 }
 
 export interface Reservation {
-  /** Drop the reservation: idempotent. Called once the daemon has started. */
+  /**
+   * Drop the reservation: idempotent. Called when the RUN ends (its finally or
+   * its pre-daemon unwind) — never earlier: a reservation released at the
+   * agent's first sign of life would leave the run's later growth uncounted,
+   * and a second admission would see an idle Committed_AS.
+   */
   release(): void;
+  /**
+   * Attach the run's own memory reading (its cgroup's `memory.current`) once it
+   * exists. From then on the reservation counts only `runCommit − current`
+   * (floored at 0): what the kernel already charges the run is in Committed_AS,
+   * the rest is still owed. Without a probe the whole runCommit stays reserved.
+   */
+  observe(current: () => number | null): void;
 }
 
-const NO_RESERVATION: Reservation = { release: () => {} };
+const NO_RESERVATION: Reservation = { release: () => {}, observe: () => {} };
 
 /**
  * The per-worker admission gate: one reservation table, one reader. Built only
@@ -184,18 +199,23 @@ const NO_RESERVATION: Reservation = { release: () => {} };
  * admission is byte-for-byte today's.
  */
 export class AdmissionController {
-  /** threadId → the live reservation (bytes + its identity, so a stale generation's release cannot drop a newer one). */
-  private reserved = new Map<string, { bytes: number; token: symbol }>();
+  /** threadId → the live reservation: expected commit, its identity (a stale generation's release cannot drop a newer one), and the run's own usage probe once it has one. */
+  private reserved = new Map<
+    string,
+    { bytes: number; token: symbol; current?: () => number | null }
+  >();
 
   constructor(
     readonly policy: HeadroomPolicy,
     private readonly readMeminfo: () => string = readProcMeminfo,
   ) {}
 
-  /** Sum of every live reservation, in bytes. */
+  /** Sum over live runs of what each still owes: `runCommit − memory.current` (0 when fully charged), the whole runCommit before its probe exists. */
   reservedBytes(): number {
     let sum = 0;
-    for (const v of this.reserved.values()) sum += v.bytes;
+    for (const v of this.reserved.values()) {
+      sum += Math.max(0, v.bytes - (v.current?.() ?? 0));
+    }
     return sum;
   }
 
@@ -252,17 +272,17 @@ export class AdmissionController {
     }
     opts.log?.(`box.headroom_ok ${fields}`);
     const token = Symbol(opts.threadId);
-    this.reserved.set(opts.threadId, {
-      bytes: this.policy.runCommitBytes,
-      token,
-    });
+    const entry = { bytes: this.policy.runCommitBytes, token };
+    this.reserved.set(opts.threadId, entry);
+    const mine = () => this.reserved.get(opts.threadId)?.token === token;
     return {
       release: () => {
         // Only this generation's entry: an older attempt's late release must
         // not drop a re-admitted attempt's reservation.
-        if (this.reserved.get(opts.threadId)?.token === token) {
-          this.reserved.delete(opts.threadId);
-        }
+        if (mine()) this.reserved.delete(opts.threadId);
+      },
+      observe: (current) => {
+        if (mine()) this.reserved.set(opts.threadId, { ...entry, current });
       },
     };
   }

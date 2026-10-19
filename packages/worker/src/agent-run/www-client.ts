@@ -530,12 +530,6 @@ export interface PollContext {
    * Optional: omitted ⇒ this loop behaves exactly as it did before.
    */
   memoryStarvation?: () => unknown | null;
-  /**
-   * #371: fired ONCE, on the first poll whose status is past `booting` — the
-   * agent child is alive and its memory is now in the kernel's Committed_AS, so
-   * the run's headroom reservation can be dropped. Optional: omitted ⇒ nothing.
-   */
-  onFirstProgress?: () => void;
 }
 
 export interface PollResult {
@@ -592,7 +586,6 @@ export async function pollUntilTerminal(
   let hadSuccessfulPoll = false;
   let lastStatus: string | undefined;
   let agentSeenDead = false;
-  let progressed = false;
 
   for (;;) {
     if (ctx.cancelled || ctx.signal?.aborted) {
@@ -646,10 +639,6 @@ export async function pollUntilTerminal(
     hadSuccessfulPoll = true;
     lastStatus = poll.status;
     ctx.log(`thread-status: ${poll.status} (terminal=${poll.terminal})`);
-    if (!progressed && poll.status !== "booting") {
-      progressed = true;
-      ctx.onFirstProgress?.();
-    }
     if (poll.terminal) {
       // The residual window: clean at the check above, starved by the time
       // terminal came back. The token is already being revoked, so the thread
