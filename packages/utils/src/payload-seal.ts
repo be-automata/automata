@@ -1,10 +1,12 @@
 /**
  * Sealed run secrets (#380, closes ADR-003 F4).
  *
- * www seals the per-run credentials (GitHub installation token, optional
- * read-only token, daemon token) to the execution plane's public key before
- * they enter the Hatchet trigger input, so the engine's Postgres, its backups
- * and the run API only ever hold ciphertext. The worker unseals in memory at
+ * www seals every per-run secret — the GitHub installation token, the
+ * optional read-only token, the daemon token, the owner's repo environment
+ * variables (`repoEnv`) and the self-heal check/gate token (`selfHealToken`)
+ * — to the execution plane's public key before they enter the Hatchet
+ * trigger input, so the engine's Postgres, its backups and the run API only
+ * ever hold ciphertext. The worker unseals in memory at
  * run start with the plane's private half (`/etc/automata/payload-seal.key`).
  *
  * WebCrypto ONLY (`globalThis.crypto.subtle`): the same file runs under
@@ -393,7 +395,9 @@ function pickRunSecrets(value: RunSecrets): RunSecrets {
 }
 
 /**
- * Seal `secrets` to the plane key, bound to the input's routing fields. Every call makes a
+ * Seal `secrets` to the plane key, bound to the WHOLE persisted input (AAD =
+ * INFO|kid|SHA-256 of its canonical JSON minus the envelope and the plain-text
+ * secret fields). Every call makes a
  * fresh ephemeral key and IV, so two seals of the same secrets never share a
  * byte of envelope.
  */

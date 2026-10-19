@@ -119,10 +119,14 @@ still reading a stale heartbeat does exit.
 
 ## Payload seal key (#380)
 
-Every run's secrets (the GitHub installation token, the optional read-only
-token, the daemon token) arrive in the Hatchet input **sealed** to this plane's
-X25519 public key, so the engine's Postgres, its backups and the run API hold
-ciphertext only (ADR-003 F4, resolved). The private half is the ring in
+Every run's secrets — the GitHub installation token, the optional read-only
+token, the daemon token, the owner's repo environment variables (`repoEnv`)
+and the self-heal check/gate token — arrive in the Hatchet input **sealed** to
+this plane's X25519 public key (AAD = a SHA-256 of the whole persisted input,
+so a copied envelope cannot be re-triggered with any field changed), so the
+engine's Postgres, its backups and the run API hold ciphertext only (ADR-003
+F4, resolved). A key mismatch or a lost ring therefore blocks ALL of them: a
+task run without its repo env is not a degraded run, it does not start. The private half is the ring in
 `WORKER_PAYLOAD_SEAL_KEY_FILE` (default `/etc/automata/payload-seal.key`,
 `{"keys":[…]}`, mode 0400, owned by the service user).
 

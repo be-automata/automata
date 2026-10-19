@@ -495,7 +495,7 @@ describe("runSupersedeSweep rule (iii) — failed-unreported runs (#380)", () =>
     expect(row?.status).toBe("terminal");
   });
 
-  it("rule (i) generation guard applies to EVERY status: a CANCELLED (user-stopped) stale row on a resumed, booting thread is retired; the thread and the new run's token are untouched", async () => {
+  it("the generation guard covers every TERMINAL branch: a CANCELLED (user-stopped) stale row on a resumed, booting thread is retired; the thread and the new run's token are untouched", async () => {
     const resumed = await createTestRemoteRun({
       db,
       userId: user.id,

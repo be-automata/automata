@@ -137,9 +137,9 @@ Corrected here:
   fired when the two proof orgs dispatched to the plane. **Mechanism:** dispatch puts every
   per-run secret (installation token, optional read-only token, daemon token, the owner's repo
   environment variables, the self-heal check/gate token) into ONE envelope sealed with
-  `@terragon/utils/payload-seal` — X25519 ephemeral ECDH + HKDF-SHA256 + AES-256-GCM, AAD = the
-  input's routing fields (threadId, threadChatId, daemonCallbackUrl, repoFullName, orgId), so a
-  copied envelope cannot be re-pointed at another callback — to the execution plane's public key
+  `@terragon/utils/payload-seal` — X25519 ephemeral ECDH + HKDF-SHA256 + AES-256-GCM,
+  AAD = `INFO|kid|SHA-256(canonical JSON of the input minus sealedSecrets and the plain-text secret fields)`, so the self-heal plan, branches, task packs, callback and every other persisted field are bound too — so a copied envelope cannot be re-triggered with ANY field changed — to the
+  execution plane's public key
   (`HATCHET_PAYLOAD_SEAL_KEY` on www), and the input carries `sealedSecrets` instead of the plain
   fields (`AgentRunInput` has no `installationToken`/`githubReadToken`/`daemonToken`/`repoEnv` and
   its `selfHeal` carries no token; a type test pins that on both planes). The worker unseals in memory at run start with the ring in

@@ -713,7 +713,9 @@ function scrubRunSecrets(secrets: RunSecrets): (text: string) => string {
 
 /**
  * #380: the one place a secret meets the wire. With a plane key configured
- * the three run secrets are sealed to it (AAD = the whole input) and the input
+ * every run secret — installationToken, githubReadToken, daemonToken, the
+ * owner's repoEnv and the self-heal token — is sealed to it (AAD = SHA-256 of
+ * the whole persisted input) and the input
  * gains `sealedSecrets`; the `kid` is logged so an operator can match it
  * against the kid list the worker logs at boot (rollout step 3). With no key
  * (the PR-1 rollout window) the legacy plain-text shape is returned and the

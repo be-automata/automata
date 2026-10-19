@@ -20,7 +20,7 @@ export type TestPlaneKey = {
   readonly kid: string;
   /** The key pair; `undefined` until beforeAll ran. */
   pair: Awaited<ReturnType<typeof generatePlaneKeyPair>> | undefined;
-  /** Open a captured input's envelope under the input's own routing fields. */
+  /** Open a captured input's envelope under the whole captured input (its AAD). */
   unseal(input: Record<string, unknown>): Promise<RunSecrets>;
   /** Set env to this key again (after a case changed it). */
   reinstall(): void;
