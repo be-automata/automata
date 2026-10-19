@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS "knowledge_pin" (
   "id" text PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "organization_id" text NOT NULL,
   "claim_id" text NOT NULL,
+  "repo_full_name" text NOT NULL,
   "uri" text NOT NULL,
   "hash" text NOT NULL,
   "observed_rev" text NOT NULL
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS "knowledge_op" (
   "id" text PRIMARY KEY NOT NULL,
   "organization_id" text NOT NULL,
   "claim_id" text NOT NULL,
+  "repo_full_name" text NOT NULL,
   "kind" text NOT NULL,
   "base_version" integer NOT NULL,
   "state" text DEFAULT 'proposed' NOT NULL,
@@ -46,6 +48,7 @@ CREATE TABLE IF NOT EXISTS "knowledge_decision" (
   "id" text PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "organization_id" text NOT NULL,
   "op_id" text NOT NULL,
+  "repo_full_name" text NOT NULL,
   "actor_user_id" text,
   "slack_user_id" text,
   "route" text NOT NULL,
@@ -54,13 +57,13 @@ CREATE TABLE IF NOT EXISTS "knowledge_decision" (
 );
 
 CREATE TABLE IF NOT EXISTS "knowledge_cursor" (
+  "id" text PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "organization_id" text NOT NULL,
   "repo_full_name" text NOT NULL,
   "default_branch" text NOT NULL,
   "last_sha" text,
   "observed_head_sha" text,
-  "updated_at" timestamp DEFAULT now() NOT NULL,
-  CONSTRAINT "knowledge_cursor_pk" PRIMARY KEY("organization_id","repo_full_name")
+  "updated_at" timestamp DEFAULT now() NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS "knowledge_usage_window" (
@@ -165,11 +168,13 @@ CREATE INDEX IF NOT EXISTS "knowledge_op_org_state_created_index"
   ON "knowledge_op" USING btree ("organization_id","state","created_at");
 CREATE INDEX IF NOT EXISTS "knowledge_op_claim_index"
   ON "knowledge_op" USING btree ("claim_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "knowledge_cursor_org_repo_unique"
+  ON "knowledge_cursor" USING btree ("organization_id","repo_full_name");
 CREATE INDEX IF NOT EXISTS "knowledge_decision_op_index"
   ON "knowledge_decision" USING btree ("op_id");
 
 -- Post-migration verification:
 --   \d knowledge_claim
 --   SELECT count(*) FROM pg_constraint WHERE conrelid::regclass::text LIKE 'knowledge_%';
---   -- expect 6 PKs + 12 FKs
+--   -- expect 6 PKs + 12 FKs (+ unique indexes on pin (claim, uri) and cursor (org, repo))
 --   DATABASE_URL=... pnpm exec tsx deploy/assert-schema-ready.ts   -- exit 0

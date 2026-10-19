@@ -54,6 +54,7 @@ describe("knowledge plane persistence", () => {
       id,
       organizationId,
       claimId,
+      repoFullName: "acme/docs",
       kind: "update",
       baseVersion,
       proposal: { statement: "Trials last 30 days." },

@@ -2529,6 +2529,8 @@ export const knowledgePin = pgTable(
     claimId: text("claim_id")
       .notNull()
       .references(() => knowledgeClaim.id, { onDelete: "cascade" }),
+    /** Denormalized from the claim so a repo re-home moves the pin with it. */
+    repoFullName: text("repo_full_name").notNull(),
     uri: text("uri").notNull(),
     hash: text("hash").notNull(),
     observedRev: text("observed_rev").notNull(),
@@ -2561,6 +2563,8 @@ export const knowledgeOp = pgTable(
     claimId: text("claim_id")
       .notNull()
       .references(() => knowledgeClaim.id, { onDelete: "cascade" }),
+    /** Denormalized from the claim so a repo re-home moves the op with it. */
+    repoFullName: text("repo_full_name").notNull(),
     kind: text("kind").notNull(),
     baseVersion: integer("base_version").notNull(),
     state: text("state")
@@ -2611,6 +2615,8 @@ export const knowledgeDecision = pgTable(
     opId: text("op_id")
       .notNull()
       .references(() => knowledgeOp.id, { onDelete: "cascade" }),
+    /** Denormalized from the op so a repo re-home moves the decision with it. */
+    repoFullName: text("repo_full_name").notNull(),
     actorUserId: text("actor_user_id").references(() => user.id, {
       onDelete: "set null",
     }),
@@ -2630,6 +2636,9 @@ export const knowledgeDecision = pgTable(
 export const knowledgeCursor = pgTable(
   "knowledge_cursor",
   {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
     organizationId: text("organization_id")
       .notNull()
       .references(() => organization.id, { onDelete: "cascade" }),
@@ -2643,10 +2652,10 @@ export const knowledgeCursor = pgTable(
       .$onUpdate(() => new Date()),
   },
   (table) => [
-    primaryKey({
-      name: "knowledge_cursor_pk",
-      columns: [table.organizationId, table.repoFullName],
-    }),
+    uniqueIndex("knowledge_cursor_org_repo_unique").on(
+      table.organizationId,
+      table.repoFullName,
+    ),
   ],
 );
 

@@ -180,6 +180,7 @@ export async function decideKnowledgeOp({
     await tx.insert(knowledgeDecision).values({
       organizationId,
       opId,
+      repoFullName: op.repoFullName,
       actorUserId,
       slackUserId,
       route,
