@@ -251,7 +251,7 @@ export class AdmissionController {
    * returned reservation is released.
    */
   admit(opts: {
-    /** The reservation key: the WORKFLOW RUN (stable across its retries, distinct per run of a thread). Defaults to threadId. */
+    /** The reservation key: the WORKFLOW RUN (distinct per run of a thread — a supersede sibling is another run). Defaults to threadId. */
     runId?: string;
     threadId: string;
     attempt: number;
@@ -260,8 +260,9 @@ export class AdmissionController {
     const runId = opts.runId ?? opts.threadId;
     // FAIL-OPEN on an unreadable kernel: a check that cannot read
     // /proc/meminfo at this instant admits with one loud line rather than
-    // failing the run (the fence would make that failure final). Boot already
-    // proved the file readable; this covers a transient error only.
+    // failing the run (the task registers retries: 0, so a throw here would end
+    // the run final). Boot already proved the file readable; this covers a
+    // transient error only.
     let reading: MeminfoReading;
     try {
       reading = parseMeminfo(this.readMeminfo());

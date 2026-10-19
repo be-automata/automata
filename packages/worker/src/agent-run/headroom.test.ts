@@ -258,7 +258,7 @@ describe("AdmissionController (mutex + reservations)", () => {
   });
 });
 
-describe("the deferral budget vs the control plane's 75-minute stalled cutoff", () => {
+describe("the deferral budget vs the run's executionTimeout and the control plane's 75-minute stalled cutoff", () => {
   it("Σbackoff is 2^n capped at 120 s and the default 8 deferrals stay well inside the budget", () => {
     expect(ADMISSION_BACKOFF).toEqual({ factor: 2, maxSeconds: 120 });
     expect(sumBackoffSeconds(0)).toBe(0);
@@ -268,10 +268,12 @@ describe("the deferral budget vs the control plane's 75-minute stalled cutoff", 
       ADMISSION_DEFERRAL_BUDGET_S,
     );
     expect(ADMISSION_DEFERRAL_BUDGET_S).toBe(12 * 60);
-    // 30 m initial schedule window + budget + 30 m execution leaves margin under 75 m.
-    expect(30 * 60 + ADMISSION_DEFERRAL_BUDGET_S + 30 * 60).toBeLessThan(
-      75 * 60,
-    );
+    // The wait is spent INSIDE the 30 m executionTimeout (the task is RUNNING
+    // while it waits), so the budget must leave the agent a usable window…
+    expect(ADMISSION_DEFERRAL_BUDGET_S).toBeLessThanOrEqual(30 * 60 - 15 * 60);
+    // …and the whole run (30 m schedule window + 30 m execution, wait included)
+    // stays under the control plane's 75 m stalled cutoff with margin.
+    expect(30 * 60 + 30 * 60).toBeLessThan(75 * 60);
   });
 });
 

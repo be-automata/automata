@@ -12,10 +12,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// #371: the deferral ledger is durable under WORKER_RUN_NAMESPACE_ROOT. This
-// suite must never touch the host's real root (/tmp/automata-agent-run — a
-// live worker's ledger), so it gets its own, set BEFORE workflow.ts is imported
-// (that module reads the config at import).
+// The runs this suite drives create per-run namespace dirs (and the box lock
+// files) under WORKER_RUN_NAMESPACE_ROOT. It must never touch the host's real
+// root (/tmp/automata-agent-run — a live worker's), so it gets its own, set
+// before anything reads the config.
 const TEST_NAMESPACE_ROOT = fs.mkdtempSync(
   path.join(os.tmpdir(), "workflow-cleanup-ns-"),
 );
@@ -1058,7 +1058,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     ).toBe(true);
   });
 
-  it("#183 AC13 (#205 shape): cancel while WAITING on the box slot: the abort propagates untouched (a cancel is the engine's own act, never fenced — #371), ONE superseded terminal, NO clone yet so nothing to clean, no failure post, no release", async () => {
+  it("#183 AC13 (#205 shape): cancel while WAITING on the box slot: the abort propagates untouched, ONE superseded terminal, NO clone yet so nothing to clean, no failure post, no release", async () => {
     const { ctx, abortIn } = makeCtx("run-ext-lockwait");
     const { postRunFailed } = await import("./www-client");
     vi.mocked(postRunFailed).mockClear();
@@ -1067,8 +1067,9 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     // the AbortError shape (box-lock.ts) — the workflow must not wrap it.
     abortIn(acquireBoxSlotMock, "box lock wait aborted");
     try {
-      // A cancel is the engine's own act: it passes the fence UNWRAPPED (a
-      // non-cancel AbortError IS fenced — see retry-classification.test).
+      // A cancel is the engine's own act and must reach it as the SDK's own
+      // error shape: the workflow never wraps it (the NonRetryableError check
+      // forbids a future wrapper).
       const abortErr: unknown = await runFn(
         { ...PR_INPUT, supersedePolicy: "newest-wins" },
         ctx,
