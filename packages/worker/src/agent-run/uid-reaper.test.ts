@@ -1131,6 +1131,7 @@ describe("bootUidScan (AC14, unit level)", () => {
         order.push("release");
       }),
       lost: false,
+      slot: 0,
     };
     const tryAcquire = vi.fn<TryAcquireFn>(async () => lock);
     const reap = vi.fn<ReapFn>(async () => {
@@ -1158,7 +1159,9 @@ describe("bootUidScan (AC14, unit level)", () => {
 
   it("a reap that rejects ⇒ outcome error (never thrown into boot), logged, lock released once", async () => {
     const release = vi.fn(async () => {});
-    const tryAcquire = vi.fn(async () => ({ release, lost: false }) as BoxLock);
+    const tryAcquire = vi.fn(
+      async () => ({ release, lost: false, slot: 0 }) as BoxLock,
+    );
     const reap = vi.fn(async () => {
       throw new Error("contract broken");
     });
@@ -1184,7 +1187,9 @@ describe("bootUidScan (AC14, unit level)", () => {
       root: "/root/x",
       agentUser: AGENT,
       log: () => {},
-      tryAcquire: vi.fn(async () => ({ release, lost: false }) as BoxLock),
+      tryAcquire: vi.fn(
+        async () => ({ release, lost: false, slot: 0 }) as BoxLock,
+      ),
       reap: vi.fn(async () => ({ ...zero, error: "ps exploded" })),
     });
     expect(out).toMatchObject({ outcome: "error", error: "ps exploded" });

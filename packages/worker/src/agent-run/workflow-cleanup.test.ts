@@ -92,7 +92,7 @@ vi.mock("./reclaim", () => ({
 vi.mock("./box-lock", () => ({
   acquireBoxLock: vi.fn(async () => {
     admissionOrder.push("lock");
-    return { release: releaseMock, lost: false };
+    return { release: releaseMock, lost: false, slot: 0 };
   }),
 }));
 // Same hazard once more: with WORKER_AGENT_USER set (the #108 cases below),
@@ -1022,7 +1022,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
       // harness default so later cases acquire normally.
       vi.mocked(acquireBoxLock).mockImplementation(async () => {
         admissionOrder.push("lock");
-        return { release: releaseMock, lost: false };
+        return { release: releaseMock, lost: false, slot: 0 };
       });
     }
   });
@@ -1263,7 +1263,7 @@ describe("#183: finally order — box lock released last, after teardown and cle
     reapAgentUidEscapees.mockClear();
     vi.mocked(acquireBoxLock).mockImplementationOnce(async () => {
       admissionOrder.push("lock");
-      return { release: releaseMock, lost: true };
+      return { release: releaseMock, lost: true, slot: 0 };
     });
     pullNextMessage.mockResolvedValue(null);
     const c = ctx();

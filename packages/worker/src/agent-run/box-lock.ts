@@ -50,6 +50,17 @@ import path from "node:path";
  * conflict exit code is normalised to 75 on both platforms (lockf's
  * EX_TEMPFAIL; flock's default is 1 unless `-E 75`). Both entry points share
  * `spawnHelperAndAwaitAck`, so the spawn shape and the ack race never drift.
+ *
+ * #205 generalised the exclusive lock into a COUNTING budget of N slots without
+ * changing the primitive: slot i is an exclusive flock(2) on `<root>/box.lock.<i>`
+ * (slot 0 keeps `box.lock`, so N = 1 is byte-identical to the above), and a run
+ * holds exactly one slot. `acquireBoxSlot` tries every slot non-blocking from a
+ * holder-rotated start — so a burst does not stampede slot 0 — and only then
+ * parks on a waiting acquire. Liveness is still the kernel's: no staleness
+ * threshold, no liveness beat, no mtime read, no reclaim, no polling loop
+ * (ADR-007 I1).
+ * The slot index is what names the run's agent account (`agentUserForSlot`),
+ * which is the fence between concurrent runs.
  */
 
 export class BoxLockUnavailableError extends Error {
@@ -70,12 +81,27 @@ export interface BoxLock {
    * issue the uid-wide kill in that state (#184).
    */
   readonly lost: boolean;
+  /** Which slot file this lock holds (#205). Always 0 for the exclusive lock. */
+  readonly slot: number;
 }
 
 export interface AcquireBoxLockOptions {
-  /** The run-namespace root; the lock file is `<root>/box.lock`. */
+  /** The run-namespace root; the lock file is `<root>/box.lock` (slot 0) or `<root>/box.lock.<slot>`. */
   root: string;
   /** Who is taking the lock — appears in the log line only. */
+  holder: string;
+  signal?: AbortSignal;
+  log?: (line: string) => void;
+  /** #205: the slot file to lock. Default 0 = `box.lock`, exactly as before. */
+  slot?: number;
+  /** #205: appended to the log lines (`slot 1/3`); absent at N = 1 so those lines stay byte-identical. */
+  slotLabel?: string;
+}
+
+export interface AcquireBoxSlotOptions {
+  root: string;
+  /** How many slot files exist: `WORKER_BOX_SLOTS`. */
+  slots: number;
   holder: string;
   signal?: AbortSignal;
   log?: (line: string) => void;
@@ -87,7 +113,7 @@ export interface BoxLockHelper {
 }
 
 export interface TryAcquireBoxLockOptions {
-  /** The run-namespace root; the lock file is `<root>/box.lock`. */
+  /** The run-namespace root; the lock file is `<root>/box.lock` (slot 0) or `<root>/box.lock.<slot>`. */
   root: string;
   /** Who is trying — appears in the log lines only. */
   holder: string;
@@ -97,6 +123,9 @@ export interface TryAcquireBoxLockOptions {
    * test drive the spawn-failure branch with a bogus binary path.
    */
   helper?: BoxLockHelper;
+  /** #205: the slot file to try. Default 0 = `box.lock`. */
+  slot?: number;
+  slotLabel?: string;
 }
 
 interface HelperExit {
@@ -122,9 +151,41 @@ const RELEASE_EXIT_BOUND_MS = 2000;
  */
 const TRY_LOCK_BUSY_EXIT = 75;
 
-/** The single builder of the lock-file path. */
-export function boxLockPath(root: string): string {
-  return path.join(root, "box.lock");
+/**
+ * The single builder of the lock-file path. Slot 0 is `box.lock` — the name the
+ * exclusive lock has always had, so an N = 1 box is byte-identical — and slot
+ * i > 0 is `box.lock.<i>` (#205).
+ */
+export function boxLockPath(root: string, slot = 0): string {
+  if (!Number.isInteger(slot) || slot < 0) {
+    throw new Error(
+      `boxLockPath: slot must be a non-negative integer, got ${slot}`,
+    );
+  }
+  return path.join(root, slot === 0 ? "box.lock" : `box.lock.${slot}`);
+}
+
+/**
+ * Where a holder starts trying slots (#205): a stable hash of the holder id
+ * modulo N, so concurrent admissions spread over the slot files instead of all
+ * colliding on slot 0 and serialising through the waiting acquire. Pure.
+ */
+export function rotationStart(holder: string, slots: number): number {
+  if (!Number.isInteger(slots) || slots < 1) {
+    throw new Error(
+      `rotationStart: slots must be a positive integer, got ${slots}`,
+    );
+  }
+  let h = 0;
+  for (let i = 0; i < holder.length; i++) {
+    h = (h * 31 + holder.charCodeAt(i)) >>> 0;
+  }
+  return h % slots;
+}
+
+/** `slot i/N` for log lines at N > 1; undefined at N = 1 so those lines do not change. */
+function slotLabelFor(slot: number, slots: number): string | undefined {
+  return slots > 1 ? `slot ${slot}/${slots}` : undefined;
 }
 
 /**
@@ -247,11 +308,12 @@ async function spawnHelperAndAwaitAck(
   root: string,
   helper: BoxLockHelper,
   signal?: AbortSignal,
+  slot = 0,
 ): Promise<HelperSession> {
   await mkdir(root, { recursive: true });
   if (signal?.aborted) throw abortError();
   const { file, args } = helper;
-  const lockFile = boxLockPath(root);
+  const lockFile = boxLockPath(root, slot);
   const child = spawnPiped(file, [
     ...args,
     lockFile,
@@ -303,8 +365,12 @@ function heldLock(
   session: HelperSession,
   holder: string,
   log?: (line: string) => void,
+  slot = 0,
+  slotLabel?: string,
 ): BoxLock {
   const { child, exited, stderr } = session;
+  // Log-line suffix: empty at N = 1 (byte-identical lines), `, slot i/N` above.
+  const tag = slotLabel ? `, ${slotLabel}` : "";
   let released = false;
   let lost = false;
   void (async () => {
@@ -312,7 +378,7 @@ function heldLock(
     if (!released) {
       lost = true;
       log?.(
-        `box lock LOST by ${holder}: helper ${describeExit(exit, stderr())} — the box budget is unguarded until this run ends`,
+        `box lock LOST by ${holder}: helper ${describeExit(exit, stderr())} — the box budget is unguarded until this run ends${tag}`,
       );
     }
   })();
@@ -329,7 +395,7 @@ function heldLock(
     log?.(
       `box lock released by ${holder} (helper pid ${child.pid}${
         exitedInTime ? "" : `, SIGKILLed after ${RELEASE_EXIT_BOUND_MS}ms`
-      })`,
+      }${tag})`,
     );
   };
   const release = (): Promise<void> => {
@@ -341,6 +407,7 @@ function heldLock(
     get lost() {
       return lost;
     },
+    slot,
   };
 }
 
@@ -349,8 +416,16 @@ export async function acquireBoxLock({
   holder,
   signal,
   log,
+  slot = 0,
+  slotLabel,
 }: AcquireBoxLockOptions): Promise<BoxLock> {
-  const session = await spawnHelperAndAwaitAck(root, boxLockHelper(), signal);
+  const tag = slotLabel ? `, ${slotLabel}` : "";
+  const session = await spawnHelperAndAwaitAck(
+    root,
+    boxLockHelper(),
+    signal,
+    slot,
+  );
   const { child, exited, outcome, stderr, file } = session;
 
   if (outcome.kind === "helper-gone") {
@@ -370,8 +445,8 @@ export async function acquireBoxLock({
     throw abortError();
   }
 
-  log?.(`box lock acquired by ${holder} (helper pid ${child.pid})`);
-  const lock = heldLock(session, holder, log);
+  log?.(`box lock acquired by ${holder} (helper pid ${child.pid}${tag})`);
+  const lock = heldLock(session, holder, log, slot, slotLabel);
 
   if (signal?.aborted) {
     // A cancel can land in the instant the previous holder released: never
@@ -380,6 +455,103 @@ export async function acquireBoxLock({
     throw abortError();
   }
   return lock;
+}
+
+/**
+ * Acquire ONE of `slots` box slots (#205). At `slots === 1` this is exactly
+ * `acquireBoxLock` on `box.lock`. Above that: try every slot without waiting,
+ * starting at the holder-rotated index, and only when all are held park on a
+ * waiting acquire of the rotated slot — honouring the run's AbortSignal between
+ * tries and inside the wait, exactly as the exclusive path does. A full budget
+ * therefore DELAYS admission; it never fails a run and never cancels one
+ * (ADR-007 Decision 5).
+ */
+export async function acquireBoxSlot({
+  root,
+  slots,
+  holder,
+  signal,
+  log,
+}: AcquireBoxSlotOptions): Promise<BoxLock> {
+  if (!Number.isInteger(slots) || slots < 1) {
+    throw new Error(
+      `acquireBoxSlot: slots must be a positive integer, got ${slots}`,
+    );
+  }
+  if (slots === 1) {
+    return acquireBoxLock({ root, holder, signal, log });
+  }
+  const start = rotationStart(holder, slots);
+  for (let k = 0; k < slots; k++) {
+    if (signal?.aborted) throw abortError();
+    const slot = (start + k) % slots;
+    const lock = await tryAcquireBoxLock({
+      root,
+      holder,
+      log,
+      slot,
+      slotLabel: slotLabelFor(slot, slots),
+    });
+    if (lock) {
+      if (signal?.aborted) {
+        await lock.release();
+        throw abortError();
+      }
+      return lock;
+    }
+  }
+  log?.(
+    `box budget full (${slots} slots held) — ${holder} waits on slot ${start}`,
+  );
+  return acquireBoxLock({
+    root,
+    holder,
+    signal,
+    log,
+    slot: start,
+    slotLabel: slotLabelFor(start, slots),
+  });
+}
+
+/**
+ * Non-blocking take of EVERY slot (#205), for the boot uid scan: with all N
+ * held, no run can be live on this box, so a scan of every slot's uid is safe.
+ * Any slot busy ⇒ release whatever was taken and return null — a live run owns
+ * part of the box and its own teardown scan reclaims. Never partially held on
+ * return.
+ */
+export async function tryAcquireAllBoxSlots({
+  root,
+  slots,
+  holder,
+  log,
+}: Omit<AcquireBoxSlotOptions, "signal">): Promise<BoxLock[] | null> {
+  if (!Number.isInteger(slots) || slots < 1) {
+    throw new Error(
+      `tryAcquireAllBoxSlots: slots must be a positive integer, got ${slots}`,
+    );
+  }
+  const held: BoxLock[] = [];
+  try {
+    for (let slot = 0; slot < slots; slot++) {
+      const lock = await tryAcquireBoxLock({
+        root,
+        holder,
+        log,
+        slot,
+        slotLabel: slotLabelFor(slot, slots),
+      });
+      if (!lock) {
+        for (const h of held) await h.release();
+        return null;
+      }
+      held.push(lock);
+    }
+    return held;
+  } catch (e) {
+    for (const h of held) await h.release();
+    throw e;
+  }
 }
 
 /**
@@ -395,10 +567,15 @@ export async function tryAcquireBoxLock({
   holder,
   log,
   helper,
+  slot = 0,
+  slotLabel,
 }: TryAcquireBoxLockOptions): Promise<BoxLock | null> {
+  const tag = slotLabel ? `, ${slotLabel}` : "";
   const session = await spawnHelperAndAwaitAck(
     root,
     helper ?? boxLockTryHelper(),
+    undefined,
+    slot,
   );
   const { child, outcome, stderr, file } = session;
 
@@ -406,7 +583,7 @@ export async function tryAcquireBoxLock({
     child.stdin.destroy();
     const { exit } = outcome;
     if (exit.code === TRY_LOCK_BUSY_EXIT && !exit.spawnError) {
-      log?.(`box lock busy — ${holder} did not wait`);
+      log?.(`box lock busy — ${holder} did not wait${tag}`);
       return null;
     }
     throw new BoxLockUnavailableError(file, describeExit(exit, stderr()));
@@ -420,8 +597,8 @@ export async function tryAcquireBoxLock({
     throw abortError();
   }
 
-  log?.(`box lock acquired by ${holder} (helper pid ${child.pid})`);
-  return heldLock(session, holder, log);
+  log?.(`box lock acquired by ${holder} (helper pid ${child.pid}${tag})`);
+  return heldLock(session, holder, log, slot, slotLabel);
 }
 
 /** Run `fn` holding the box lock; releases on return, throw, or abort. */

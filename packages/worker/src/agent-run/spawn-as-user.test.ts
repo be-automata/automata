@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentUserForSlot,
   assertAgentUser,
   buildKillAllAsAgentInvocation,
   buildKillInvocation,
@@ -8,6 +9,7 @@ import {
   PGID_WRAPPER_SCRIPT,
   SH_BIN,
   PGID_CGROUP_WRAPPER_SCRIPT,
+  slotAgentUsers,
   SUDO_BIN,
 } from "./spawn-as-user";
 
@@ -286,5 +288,38 @@ describe("#204: the memory-ceiling wrapper", () => {
       cgroupReadyPath: "/tmp/run-1.ready",
     });
     expect(inv).toEqual({ file: base.file, args: base.args, env: {} });
+  });
+});
+
+describe("agentUserForSlot / slotAgentUsers (#205 — one uid per box slot)", () => {
+  it("slot 0 is the configured base name, byte-identical (N = 1 unchanged)", () => {
+    expect(agentUserForSlot("automata-agent", 0)).toBe("automata-agent");
+    expect(slotAgentUsers("automata-agent", 1)).toEqual(["automata-agent"]);
+  });
+
+  it("slot i > 0 is `${base}-${i}`, slot 0 first in the list", () => {
+    expect(agentUserForSlot("automata-agent", 2)).toBe("automata-agent-2");
+    expect(slotAgentUsers("automata-agent", 3)).toEqual([
+      "automata-agent",
+      "automata-agent-1",
+      "automata-agent-2",
+    ]);
+  });
+
+  it("agent-uid mode off (empty base) ⇒ empty, whatever the slot count", () => {
+    expect(agentUserForSlot("", 1)).toBe("");
+    expect(slotAgentUsers("", 3)).toEqual([]);
+  });
+
+  it("refuses a negative or fractional slot", () => {
+    expect(() => agentUserForSlot("automata-agent", -1)).toThrow(/slot/);
+    expect(() => agentUserForSlot("automata-agent", 1.5)).toThrow(/slot/);
+  });
+
+  it("the suffixed name is validated as a login name at derivation time, not at the first run of that slot", () => {
+    // 31 chars is the longest base assertAgentUser accepts; `-1` pushes it over.
+    const longest = `a${"b".repeat(30)}`;
+    expect(agentUserForSlot(longest, 0)).toBe(longest);
+    expect(() => agentUserForSlot(longest, 1)).toThrow(/WORKER_AGENT_USER/);
   });
 });

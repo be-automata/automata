@@ -2,13 +2,16 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  BOX_SLOTS_MAX,
   loadWorkerConfig,
+  parseBoxSlots,
   parseLivenessPollS,
   parseLivenessStaleAfterS,
   parseMemoryMax,
   parseTasksMax,
   resolveBoxId,
 } from "./config";
+import { slotAgentUsers } from "./spawn-as-user";
 
 describe("loadWorkerConfig", () => {
   it("falls back to sensible defaults when nothing is set", () => {
@@ -485,5 +488,76 @@ describe("#215: engine-liveness watchdog knobs are validated at boot", () => {
         /WORKER_LIVENESS_POLL_S must be an integer >= 5/,
       );
     }
+  });
+});
+
+describe("#205: WORKER_BOX_SLOTS — the counting box budget is validated at boot", () => {
+  const agentUid = {
+    WORKER_AGENT_USER: "automata-agent",
+    WORKER_WORKDIR_ROOT: "/usr/local/automata/runs",
+  };
+
+  it("defaults to 1 — the exclusive lock, byte-for-byte today's box", () => {
+    expect(parseBoxSlots(undefined)).toBe(1);
+    expect(parseBoxSlots("")).toBe(1);
+    expect(parseBoxSlots("  ")).toBe(1);
+    expect(loadWorkerConfig({}).boxSlots).toBe(1);
+    expect(loadWorkerConfig(agentUid).boxSlots).toBe(1);
+  });
+
+  it("accepts an integer in [1, BOX_SLOTS_MAX] and refuses everything else, naming the knob", () => {
+    expect(parseBoxSlots("3")).toBe(3);
+    expect(parseBoxSlots(String(BOX_SLOTS_MAX))).toBe(BOX_SLOTS_MAX);
+    for (const bad of [
+      "0",
+      "-1",
+      "1.5",
+      "two",
+      "1e1",
+      String(BOX_SLOTS_MAX + 1),
+    ]) {
+      expect(() => parseBoxSlots(bad), bad).toThrow(/WORKER_BOX_SLOTS/);
+    }
+  });
+
+  it("N > 1 without the uid drop is refused: the slot accounts are the fence between runs", () => {
+    expect(() => loadWorkerConfig({ WORKER_BOX_SLOTS: "2" })).toThrow(
+      /WORKER_BOX_SLOTS=2.*WORKER_AGENT_USER/s,
+    );
+  });
+
+  it("N > 1 without the per-run ceiling is refused: a sibling needs a bounded blast radius and cgroup.kill", () => {
+    expect(() =>
+      loadWorkerConfig({ ...agentUid, WORKER_BOX_SLOTS: "2" }),
+    ).toThrow(/WORKER_BOX_SLOTS=2.*WORKER_RUN_MEMORY_MAX/s);
+  });
+
+  it("N > 1 with the uid drop AND the ceiling loads, and every slot's account name is derivable", () => {
+    const cfg = loadWorkerConfig({
+      ...agentUid,
+      WORKER_BOX_SLOTS: "3",
+      WORKER_RUN_MEMORY_MAX: "1500M",
+    });
+    expect(cfg.boxSlots).toBe(3);
+    expect(slotAgentUsers(cfg.agentUser, cfg.boxSlots)).toEqual([
+      "automata-agent",
+      "automata-agent-1",
+      "automata-agent-2",
+    ]);
+  });
+
+  it("a base name whose slot suffix would exceed the login-name limit is refused at boot, not at the first run of that slot", () => {
+    expect(() =>
+      loadWorkerConfig({
+        WORKER_AGENT_USER: `a${"b".repeat(30)}`,
+        WORKER_WORKDIR_ROOT: "/usr/local/automata/runs",
+        WORKER_BOX_SLOTS: "2",
+        WORKER_RUN_MEMORY_MAX: "1500M",
+      }),
+    ).toThrow(/WORKER_AGENT_USER/);
+  });
+
+  it("a stray WORKER_BOX_SLOTS=1 never trips the N > 1 requirements (default-off promise)", () => {
+    expect(loadWorkerConfig({ WORKER_BOX_SLOTS: "1" }).boxSlots).toBe(1);
   });
 });

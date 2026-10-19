@@ -18,10 +18,14 @@ import { acquireBoxLock } from "../box-lock";
 const [root, ...flags] = process.argv.slice(2);
 if (!root) {
   console.error(
-    "usage: box-lock-holder <root> [--spawn-grandchild] [--hold-ms=<n>]",
+    "usage: box-lock-holder <root> [--spawn-grandchild] [--hold-ms=<n>] [--slot=<i>]",
   );
   process.exit(2);
 }
+
+/** #205: which slot file to hold (default 0 = `box.lock`, the exclusive lock). */
+const slotFlag = flags.find((f) => f.startsWith("--slot="));
+const slot = slotFlag ? Number(slotFlag.slice("--slot=".length)) : 0;
 
 /** stdout is a pipe: asynchronous on macOS, so flush before exiting. */
 async function writeLine(line: string): Promise<void> {
@@ -30,8 +34,8 @@ async function writeLine(line: string): Promise<void> {
   });
 }
 
-const lock = await acquireBoxLock({ root, holder: "fixture" });
-await writeLine("held");
+const lock = await acquireBoxLock({ root, holder: "fixture", slot });
+await writeLine(`held ${lock.slot}`);
 
 if (flags.includes("--spawn-grandchild")) {
   const grandchild = spawn("/bin/sleep", ["3600"], {

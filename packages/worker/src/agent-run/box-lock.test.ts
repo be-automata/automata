@@ -9,11 +9,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   acquireBoxLock,
+  acquireBoxSlot,
   assertBoxLockHelperAvailable,
   BoxLockUnavailableError,
   boxLockHelper,
   boxLockPath,
   boxLockTryHelper,
+  rotationStart,
+  tryAcquireAllBoxSlots,
   tryAcquireBoxLock,
   withBoxLock,
   type BoxLock,
@@ -125,11 +128,11 @@ function startHolder(root: string, flags: string[] = []): Holder {
 }
 
 /** Non-blocking try-lock probe: 0 when free, HELD_EXIT when held (F10). */
-async function tryLock(root: string): Promise<number | null> {
+async function tryLock(root: string, slot = 0): Promise<number | null> {
   const { file, args } = boxLockHelper();
   const probe = spawn(
     file,
-    [...args, ...TRY_FLAGS, boxLockPath(root), "/usr/bin/true"],
+    [...args, ...TRY_FLAGS, boxLockPath(root, slot), "/usr/bin/true"],
     { stdio: "ignore" },
   );
   return (await exitOf(probe)).code;
@@ -587,6 +590,167 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       expect(await tryLock(root)).toBe(HELD_EXIT);
       await b.release();
       expect(await tryLock(root)).toBe(0);
+    }, 10_000);
+  });
+
+  describe("counting slots (#205 — N slot files, one uid per slot)", () => {
+    it("slot 0 is `box.lock` (byte-identical to the exclusive lock); slot i is `box.lock.<i>`", () => {
+      expect(boxLockPath(root)).toBe(path.join(root, "box.lock"));
+      expect(boxLockPath(root, 0)).toBe(boxLockPath(root));
+      expect(boxLockPath(root, 2)).toBe(path.join(root, "box.lock.2"));
+      expect(() => boxLockPath(root, -1)).toThrow(/slot/);
+      expect(() => boxLockPath(root, 1.5)).toThrow(/slot/);
+    });
+
+    it("rotationStart is deterministic, in range, and not always slot 0", () => {
+      const starts = new Set<number>();
+      for (let i = 0; i < 64; i++) {
+        const s = rotationStart(`thread-${i}-${i * 7919}`, 3);
+        expect(s).toBeGreaterThanOrEqual(0);
+        expect(s).toBeLessThan(3);
+        expect(rotationStart(`thread-${i}-${i * 7919}`, 3)).toBe(s);
+        starts.add(s);
+      }
+      expect(starts.size).toBeGreaterThan(1);
+      expect(rotationStart("anything", 1)).toBe(0);
+      expect(() => rotationStart("x", 0)).toThrow(/slots/);
+    });
+
+    it("slots = 1 is exactly the exclusive lock: box.lock held, no slot suffix in the log", async () => {
+      const lines: string[] = [];
+      const lock = await acquireBoxSlot({
+        root,
+        slots: 1,
+        holder: "one",
+        log: (l) => lines.push(l),
+      });
+      locks.push(lock);
+      expect(lock.slot).toBe(0);
+      expect(await tryLock(root)).toBe(HELD_EXIT);
+      expect(lines).toEqual([
+        expect.stringMatching(/^box lock acquired by one \(helper pid \d+\)$/),
+      ]);
+      await lock.release();
+      expect(await tryLock(root)).toBe(0);
+    }, 10_000);
+
+    it("slots = 2: two holders take DISTINCT slots at once; the third waits and gets the slot its rotation names when it frees", async () => {
+      const lines: string[] = [];
+      const log = (l: string) => lines.push(l);
+      const a = await acquireBoxSlot({ root, slots: 2, holder: "A", log });
+      const b = await acquireBoxSlot({ root, slots: 2, holder: "B", log });
+      locks.push(a, b);
+      expect(new Set([a.slot, b.slot])).toEqual(new Set([0, 1]));
+      expect(await tryLock(root, 0)).toBe(HELD_EXIT);
+      expect(await tryLock(root, 1)).toBe(HELD_EXIT);
+      expect(lines.filter((l) => l.startsWith("box lock acquired"))).toEqual([
+        expect.stringMatching(
+          /^box lock acquired by A \(helper pid \d+, slot [01]\/2\)$/,
+        ),
+        expect.stringMatching(
+          /^box lock acquired by B \(helper pid \d+, slot [01]\/2\)$/,
+        ),
+      ]);
+
+      const wanted = rotationStart("C", 2);
+      let cHeld: BoxLock | null = null;
+      const c = acquireBoxSlot({ root, slots: 2, holder: "C", log }).then(
+        (l) => {
+          cHeld = l;
+          locks.push(l);
+          return l;
+        },
+      );
+      await sleep(300);
+      expect(cHeld).toBeNull();
+      expect(lines).toContain(
+        `box budget full (2 slots held) — C waits on slot ${wanted}`,
+      );
+      // Freeing the OTHER slot does not admit C: it parks on its rotated slot.
+      const other = wanted === a.slot ? b : a;
+      const mine = wanted === a.slot ? a : b;
+      await other.release();
+      await sleep(200);
+      expect(cHeld).toBeNull();
+      await mine.release();
+      const held = await c;
+      expect(held.slot).toBe(wanted);
+      expect(await tryLock(root, wanted)).toBe(HELD_EXIT);
+      await held.release();
+      expect(await tryLock(root, 0)).toBe(0);
+      expect(await tryLock(root, 1)).toBe(0);
+    }, 15_000);
+
+    it("a waiting acquireBoxSlot honours the AbortSignal (AC2 at N > 1)", async () => {
+      const a = await acquireBoxSlot({ root, slots: 2, holder: "A" });
+      const b = await acquireBoxSlot({ root, slots: 2, holder: "B" });
+      locks.push(a, b);
+      const ac = new AbortController();
+      setTimeout(() => ac.abort(), 100);
+      const err = await rejection(
+        acquireBoxSlot({ root, slots: 2, holder: "C", signal: ac.signal }),
+      );
+      expect(err.name).toBe("AbortError");
+      expect(await tryLock(root, 0)).toBe(HELD_EXIT);
+      expect(await tryLock(root, 1)).toBe(HELD_EXIT);
+    }, 10_000);
+
+    it("a cross-process holder on slot 1 leaves slot 0 free; the try path sees exactly that", async () => {
+      const holder = startHolder(root, ["--slot=1"]);
+      expect(await holder.out.waitFor("held")).toBe("held 1");
+      expect(await tryLock(root, 1)).toBe(HELD_EXIT);
+      expect(await tryLock(root, 0)).toBe(0);
+      const got = await acquireBoxSlot({ root, slots: 2, holder: "me" });
+      locks.push(got);
+      expect(got.slot).toBe(0);
+      await got.release();
+      const exit = holder.exit;
+      holder.child.kill("SIGKILL");
+      await exit;
+      // Kernel-released on the holder's death: no staleness, no reclaim.
+      expect(await tryLock(root, 1)).toBe(0);
+    }, 10_000);
+
+    it("tryAcquireAllBoxSlots: every slot or nothing — a busy slot releases the partial set", async () => {
+      const holder = startHolder(root, ["--slot=1"]);
+      await holder.out.waitFor("held");
+      const lines: string[] = [];
+      const none = await tryAcquireAllBoxSlots({
+        root,
+        slots: 2,
+        holder: "boot",
+        log: (l) => lines.push(l),
+      });
+      expect(none).toBeNull();
+      // Slot 0 was taken and then given back: nothing is left held by us.
+      expect(await tryLock(root, 0)).toBe(0);
+      expect(lines).toEqual([
+        expect.stringMatching(
+          /^box lock acquired by boot \(helper pid \d+, slot 0\/2\)$/,
+        ),
+        "box lock busy — boot did not wait, slot 1/2",
+        expect.stringMatching(
+          /^box lock released by boot \(helper pid \d+, slot 0\/2\)$/,
+        ),
+      ]);
+      const exit = holder.exit;
+      holder.child.kill("SIGKILL");
+      await exit;
+
+      const all = await tryAcquireAllBoxSlots({
+        root,
+        slots: 2,
+        holder: "boot",
+      });
+      expect(all).not.toBeNull();
+      if (!all) return;
+      locks.push(...all);
+      expect(all.map((l) => l.slot)).toEqual([0, 1]);
+      expect(await tryLock(root, 0)).toBe(HELD_EXIT);
+      expect(await tryLock(root, 1)).toBe(HELD_EXIT);
+      for (const l of all) await l.release();
+      expect(await tryLock(root, 0)).toBe(0);
+      expect(await tryLock(root, 1)).toBe(0);
     }, 10_000);
   });
 });
