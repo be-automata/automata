@@ -32,6 +32,7 @@ import {
 } from "../agent-run/box-slots-boot";
 import { sweepStaleRunDirs } from "../agent-run/provision";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
+import { sweepDeferralLedger } from "../agent-run/reexecution-guard";
 import { bootUidScan } from "../agent-run/uid-reaper";
 import {
   bootTimeSlotReclaim,
@@ -250,6 +251,14 @@ async function main() {
     retiredSlots,
     log: (m) => console.log(`[worker-boot] ${m}`),
   });
+
+  // #371: drop deferral-ledger files no retry will claim (older than the TTL).
+  {
+    const removed = sweepDeferralLedger(bootUidScanConfig.runNamespaceRoot);
+    if (removed > 0) {
+      console.log(`[worker-boot] deferral ledger swept: removed=${removed}`);
+    }
+  }
 
   // Remove run dirs older than 24h that earlier teardowns could not (every run
   // is hard-capped at 30 min, so a dir that old cannot belong to a live run on

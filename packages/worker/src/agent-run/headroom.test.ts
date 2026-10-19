@@ -292,7 +292,7 @@ describe("reservations are keyed by the workflow run, not the thread (#371)", ()
 });
 
 describe("Reservation.observe (#371: lifetime reservation, minus what the kernel already charges)", () => {
-  it("counts the whole runCommit until a probe is attached, then runCommit − memory.current floored at 0; release still drops it", () => {
+  it("counts the whole runCommit until a probe is attached, then runCommit − anonymous memory (anon + shmem) floored at 0; release still drops it", () => {
     const c = new AdmissionController(POLICY, () => MEMINFO);
     const r = c.admit({ threadId: "a", attempt: 0 });
     expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);

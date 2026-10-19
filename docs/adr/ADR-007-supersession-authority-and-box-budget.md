@@ -156,7 +156,9 @@ Decision 5 permits the host budget to **delay** admission; this is the first mec
 does so on a resource other than the slot count. Under its slot and BEFORE the clone, a run
 reads `/proc/meminfo` and is admitted only if both arms hold — `MemAvailable − reserved ≥
 floor` and `Committed_AS + reserved + runCommit ≤ fraction × CommitLimit` (`headroom.ts`,
-knobs in `deploy/README.md`). Admissions are serialised by an in-process mutex and an
+knobs in `deploy/README.md`). Admissions are
+serialised by being ONE synchronous decision on the worker's event loop (no await between the
+read and the reservation) and an
 admitted run **reserves** `runCommit` for its whole life, shrunk by the anonymous memory the kernel
 already charges its cgroup (`memory.stat` anon + shmem — what `Committed_AS` counts; never
 `memory.current`, which includes page cache) once it exists, so two concurrent admissions cannot both
@@ -171,8 +173,11 @@ engine ALSO retries failures it decides itself (measured on hatchet-lite v0.94.1
 `executionTimeout` is retried under the task's policy) — a **re-execution guard** runs first
 in every attempt: the worker counts the deferrals it threw per run, and an attempt number
 above that count is refused as `NonRetryableError` before any side effect. A retry can only
-ever re-run the admission, never the agent; a worker restart between attempts forgets the
-ledger and refuses the next attempt (fail-closed). A cancel during backoff is the engine's
+ever re-run the admission, never the agent; the ledger is durable under the run-namespace root, so a
+restart or deploy during a deferral's backoff still admits its retry; a retry that lands on a
+DIFFERENT worker process (not this box's one worker, I3) is refused (fail-closed). An
+engine-retried timeout reaches FAILED seconds after the timeout (2 s backoff, priority-4
+re-queue), with the guard's message as the thread's failure reason. A cancel during backoff is the engine's
 cancel of a QUEUED attempt — no worker code runs. The check is inert (`floor 0` and
 `fraction 1.0`, or no `/proc/meminfo`) without a deploy; the retries stay registered on every
 host, and with the check inert nothing ever throws the deferral, so they are never used. An

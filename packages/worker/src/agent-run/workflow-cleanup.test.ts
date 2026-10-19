@@ -2178,7 +2178,9 @@ Committed_AS:   12000000 kB
     const { _resetReexecutionGuardForTests } = await import(
       "./reexecution-guard"
     );
-    _resetReexecutionGuardForTests();
+    _resetReexecutionGuardForTests(
+      (await import("./config")).loadWorkerConfig().runNamespaceRoot,
+    );
     const ctx = { cancelled: false, log: vi.fn(), retryCount: () => 1 };
     let caught: unknown;
     try {
@@ -2202,7 +2204,9 @@ Committed_AS:   12000000 kB
       deferralsRecorded,
       recordDeferral,
     } = await import("./reexecution-guard");
-    _resetReexecutionGuardForTests();
+    _resetReexecutionGuardForTests(
+      (await import("./config")).loadWorkerConfig().runNamespaceRoot,
+    );
     _setAdmissionControllerForTests(
       new AdmissionController(POLICY, () => STARVED),
     );
@@ -2227,7 +2231,9 @@ Committed_AS:   12000000 kB
     const { _resetReexecutionGuardForTests, deferralsRecorded } = await import(
       "./reexecution-guard"
     );
-    _resetReexecutionGuardForTests();
+    _resetReexecutionGuardForTests(
+      (await import("./config")).loadWorkerConfig().runNamespaceRoot,
+    );
     _setAdmissionControllerForTests(
       new AdmissionController(POLICY, () => STARVED),
     );
@@ -2261,7 +2267,9 @@ Committed_AS:   12000000 kB
     const { _resetReexecutionGuardForTests, deferralsRecorded } = await import(
       "./reexecution-guard"
     );
-    _resetReexecutionGuardForTests();
+    _resetReexecutionGuardForTests(
+      (await import("./config")).loadWorkerConfig().runNamespaceRoot,
+    );
     let meminfo = STARVED;
     _setAdmissionControllerForTests(
       new AdmissionController(POLICY, () => meminfo),
@@ -2288,7 +2296,9 @@ Committed_AS:   12000000 kB
     const { _resetReexecutionGuardForTests, recordDeferral } = await import(
       "./reexecution-guard"
     );
-    _resetReexecutionGuardForTests();
+    _resetReexecutionGuardForTests(
+      (await import("./config")).loadWorkerConfig().runNamespaceRoot,
+    );
     for (let i = 0; i < 3; i++) recordDeferral(INPUT.threadId);
     const ctx = { cancelled: false, log: vi.fn(), retryCount: () => 3 };
     let caught: unknown;

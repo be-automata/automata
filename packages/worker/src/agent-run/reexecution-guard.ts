@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 
 /**
@@ -11,25 +14,91 @@ import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
  * hit its 30-minute timeout would be re-cloned and re-run — a second review
  * post or push. An agent run never re-executes.
  *
- * The rule: this worker counts the deferrals it threw per WORKFLOW RUN (the
+ * The rule: the box counts the deferrals it threw per WORKFLOW RUN (the
  * engine's run id — stable across that run's retries, distinct for every run
  * of a thread: supersede siblings, re-reviews; never the threadId). An attempt
  * number above that count did not come from a deferral, so it is refused up
  * front with a NonRetryableError, before any side effect (no namespace, no
- * slot, no clone). In-process state is enough: one worker runs a box and the
- * engine retries on it. A worker restart between attempts forgets the ledger
- * and refuses the next attempt too — fail-closed; a redelivery after a worker
- * death was never a retry the run could honour either.
+ * slot, no clone). The refusal is short: the engine's first retry backs off
+ * 2 s and is re-queued at priority 4, so the run reaches FAILED (and www's
+ * failure banner) seconds after the timeout, not after another queue wait.
  *
- * Bounded: an entry whose retry never comes back to this worker (the budget
- * ran out, a cancel while QUEUED in backoff) is pruned once it is older than
- * the longest a retry can legitimately take to return — the whole deferral
- * budget plus one scheduleTimeout.
+ * The ledger is DURABLE across a worker restart or deploy: one tiny file per
+ * run under `<runNamespaceRoot>/deferrals/`, written on each deferral, removed
+ * when the run ends on this box, read whenever the in-process map has no
+ * entry. So a run deferred before a deploy is still admitted by its retry on
+ * the new process. What it does not cover — stated, not hidden — is a second
+ * worker process on the same engine tenant: the box is one worker
+ * (ADR-007 I3), and a retry that lands elsewhere is refused (fail-closed).
+ *
+ * Bounded: an entry whose retry never comes back (the budget ran out, a cancel
+ * while QUEUED in backoff) is pruned once older than the longest a retry can
+ * legitimately take to return — the whole deferral budget plus one
+ * scheduleTimeout.
  */
 const deferrals = new Map<string, { count: number; at: number }>();
 
 /** Σbackoff budget (12 min) + one scheduleTimeout (30 m), with margin. */
 export const LEDGER_TTL_MS = 45 * 60 * 1000;
+
+/** Where the durable copy lives under the run-namespace root. */
+export const LEDGER_DIRNAME = "deferrals";
+
+export interface LedgerOpts {
+  /** The run-namespace root; the durable copy is `<root>/deferrals/<key>.json`. Omitted ⇒ in-process only (tests). */
+  root?: string;
+  now?: number;
+}
+
+function fileFor(root: string, runKey: string): string {
+  // The key is an engine uuid or a threadId; keep the filename inert anyway.
+  return path.join(
+    root,
+    LEDGER_DIRNAME,
+    `${runKey.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`,
+  );
+}
+
+function readDurable(root: string, runKey: string, now: number): number {
+  try {
+    const raw = JSON.parse(fs.readFileSync(fileFor(root, runKey), "utf8")) as {
+      count?: unknown;
+      at?: unknown;
+    };
+    const count = typeof raw.count === "number" ? raw.count : 0;
+    const at = typeof raw.at === "number" ? raw.at : 0;
+    if (now - at > LEDGER_TTL_MS) return 0;
+    return Number.isInteger(count) && count > 0 ? count : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeDurable(
+  root: string,
+  runKey: string,
+  entry: { count: number; at: number },
+): void {
+  try {
+    fs.mkdirSync(path.join(root, LEDGER_DIRNAME), {
+      recursive: true,
+      mode: 0o700,
+    });
+    const file = fileFor(root, runKey);
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify(entry), { mode: 0o600 });
+    fs.renameSync(`${file}.tmp`, file);
+  } catch {
+    // Best-effort: the in-process copy still governs this process's retries.
+  }
+}
+
+function removeDurable(root: string, runKey: string): void {
+  try {
+    fs.rmSync(fileFor(root, runKey), { force: true });
+  } catch {
+    // best-effort
+  }
+}
 
 function prune(now: number): void {
   for (const [key, entry] of deferrals) {
@@ -38,43 +107,112 @@ function prune(now: number): void {
 }
 
 /** The headroom check deferred this run once more (the only retryable throw). */
-export function recordDeferral(runKey: string, now = Date.now()): void {
+export function recordDeferral(runKey: string, opts: LedgerOpts = {}): void {
+  const now = opts.now ?? Date.now();
   prune(now);
-  deferrals.set(runKey, {
-    count: (deferrals.get(runKey)?.count ?? 0) + 1,
+  const entry = {
+    count:
+      (deferrals.get(runKey)?.count ??
+        (opts.root ? readDurable(opts.root, runKey, now) : 0)) + 1,
     at: now,
-  });
+  };
+  deferrals.set(runKey, entry);
+  if (opts.root) {
+    writeDurable(opts.root, runKey, entry);
+    sweepDeferralLedger(opts.root, now);
+  }
 }
 
-export function deferralsRecorded(runKey: string): number {
-  return deferrals.get(runKey)?.count ?? 0;
+export function deferralsRecorded(
+  runKey: string,
+  opts: LedgerOpts = {},
+): number {
+  const now = opts.now ?? Date.now();
+  // The TTL applies to the in-memory copy on every read too, so a stale count
+  // admits nothing whether or not the process restarted meanwhile.
+  prune(now);
+  return (
+    deferrals.get(runKey)?.count ??
+    (opts.root ? readDurable(opts.root, runKey, now) : 0)
+  );
 }
 
-/** How many runs the ledger currently tracks (tests, boot line). */
+/**
+ * Remove durable entries older than the TTL — the ones no retry will ever
+ * claim (a cancel while QUEUED in backoff, a retry that landed elsewhere).
+ * Run at boot and on every recorded deferral; returns how many were removed.
+ */
+export function sweepDeferralLedger(root: string, now = Date.now()): number {
+  const dir = path.join(root, LEDGER_DIRNAME);
+  let removed = 0;
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    const file = path.join(dir, name);
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, "utf8")) as { at?: unknown };
+      const at = typeof raw.at === "number" ? raw.at : 0;
+      if (now - at > LEDGER_TTL_MS) {
+        fs.rmSync(file, { force: true });
+        removed += 1;
+      }
+    } catch {
+      // unreadable ⇒ worthless; remove it too
+      try {
+        fs.rmSync(file, { force: true });
+        removed += 1;
+      } catch {
+        // best-effort
+      }
+    }
+  }
+  return removed;
+}
+
+/** How many runs the in-process ledger currently tracks (tests, boot line). */
 export function ledgerSize(): number {
   return deferrals.size;
 }
 
 /**
  * Refuse an attempt the deferral ledger does not account for. Call FIRST in
- * the run, before any side effect. Throws NonRetryableError (final).
+ * the run, before any side effect. Throws NonRetryableError (final) — and that
+ * message is what the thread's failure banner shows, so it names the cause
+ * the engine's retry hid.
  */
-export function assertNotReexecuting(runKey: string, attempt: number): void {
-  const deferred = deferralsRecorded(runKey);
+export function assertNotReexecuting(
+  runKey: string,
+  attempt: number,
+  opts: LedgerOpts = {},
+): void {
+  const deferred = deferralsRecorded(runKey, opts);
   if (attempt > deferred) {
     throw new NonRetryableError(
-      `attempt ${attempt + 1} of this run follows a failure that was not an admission deferral ` +
-        `(${deferred} deferral(s) recorded on this worker — an execution timeout, or a worker restart ` +
-        `between attempts); an agent run never re-executes`,
+      `The previous attempt of this run ended in an engine-side failure — most likely its execution timeout ` +
+        `(30 minutes), otherwise a worker restart or a redelivery — and the engine re-dispatched it ` +
+        `(attempt ${attempt + 1}, ${deferred} admission deferral(s) on record). An agent run never ` +
+        `re-executes, so it stops here with the first attempt's result.`,
     );
   }
 }
 
-/** The run ended on this worker (completed, failed final, cancelled, or its last deferral): drop its ledger entry. */
-export function forgetRun(runKey: string): void {
+/** The run ended on this box (completed, failed final, cancelled, or its last deferral): drop its ledger entry. */
+export function forgetRun(runKey: string, opts: LedgerOpts = {}): void {
   deferrals.delete(runKey);
+  if (opts.root) removeDurable(opts.root, runKey);
 }
 
-export function _resetReexecutionGuardForTests(): void {
+/** Tests: clear the in-process ledger and, given a root, its durable copy. */
+export function _resetReexecutionGuardForTests(root?: string): void {
   deferrals.clear();
+  if (root) {
+    fs.rmSync(path.join(root, LEDGER_DIRNAME), {
+      recursive: true,
+      force: true,
+    });
+  }
 }

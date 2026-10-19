@@ -228,7 +228,7 @@ export class AdmissionController {
   /**
    * Admit one run or throw `AdmissionDeferredError`. One synchronous decision
    * (see the module comment: no await, so no interleaving); a successful
-   * admission reserves `policy.runCommitBytes` under `threadId` until the
+   * admission reserves `policy.runCommitBytes` under the run's id (the workflow run, never the thread) until the
    * returned reservation is released.
    */
   admit(opts: {

@@ -418,16 +418,19 @@ async function runAgent(
   // RUN, which is stable across its retries and distinct for every run of the
   // same thread (supersede siblings, re-reviews) — a thread key would let one
   // run's leftover deferral count admit a sibling's engine-retried timeout.
-  const runKey = ctx.workflowRunId?.() ?? input.threadId;
+  const runKey = ctx.workflowRunId?.() || input.threadId;
+  let ledger: { root: string } | undefined;
   try {
-    // #371 RE-EXECUTION GUARD, before anything else: an attempt this worker's
-    // deferral ledger does not account for came from an engine-side failure
-    // (an execution timeout is retried by the engine) — never re-run the agent.
-    assertNotReexecuting(runKey, ctx.retryCount?.() ?? 0);
     config = loadWorkerConfig();
+    ledger = { root: config.runNamespaceRoot };
+    // #371 RE-EXECUTION GUARD, before anything with a side effect: an attempt
+    // the box's deferral ledger does not account for came from an engine-side
+    // failure (an execution timeout is retried by the engine) — never re-run
+    // the agent.
+    assertNotReexecuting(runKey, ctx.retryCount?.() ?? 0, ledger);
     wwwOpts = wwwOptsFor(input, ctx);
   } catch (err) {
-    forgetRun(runKey);
+    forgetRun(runKey, ledger);
     throw fenceNonRetryable(err);
   }
   const runExternalId = wwwOpts.runExternalId ?? "";
@@ -509,7 +512,7 @@ async function runAgent(
         !(ctx.cancelled || ctx.abortController?.signal.aborted);
       if (retryWillCome) {
         deferred = true;
-        recordDeferral(runKey);
+        recordDeferral(runKey, ledger);
       }
       throw err;
     }
@@ -521,7 +524,7 @@ async function runAgent(
     throw fenceNonRetryable(err);
   } finally {
     // Any end but a deferral is the run's last word on this worker.
-    if (!deferred) forgetRun(runKey);
+    if (!deferred) forgetRun(runKey, ledger);
     if (ctx.cancelled || ctx.abortController?.signal.aborted) {
       await postSuperseded(input, ctx, wwwOpts);
     }
