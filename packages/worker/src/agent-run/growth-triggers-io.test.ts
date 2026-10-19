@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -19,6 +23,7 @@ import {
   type GrowthSnapshot,
   type GrowthWebhookBody,
 } from "./growth-triggers";
+import { writeSnapshotAtomic } from "./scheduling-maintenance";
 
 const NOW = Date.parse("2026-10-19T12:00:00.000Z");
 const API_URL = "http://engine.test:8888";
@@ -61,6 +66,8 @@ interface RowOpts {
   status?: string;
   orgId?: string;
   actionId?: string;
+  /** Engine run id (`metadata.id`); absent → the row has no id. */
+  id?: string;
 }
 
 /** A raw engine row inside the 7-complete-day window of NOW. */
@@ -76,6 +83,7 @@ function rawRow(opts: RowOpts = {}): Record<string, unknown> {
     startedAt: new Date(started).toISOString(),
     finishedAt: new Date(finished).toISOString(),
     additionalMetadata: opts.orgId ? { orgId: opts.orgId } : {},
+    ...(opts.id !== undefined ? { metadata: { id: opts.id } } : {}),
   };
 }
 
@@ -224,6 +232,48 @@ describe("readRunWindow", () => {
     expect(JSON.stringify(r)).not.toContain(TOKEN);
   });
 
+  it("dedupes rows by id across pages; rows without an id are all kept", async () => {
+    const full = Array.from({ length: GROWTH_RUNS_PAGE_LIMIT }, (_, i) =>
+      rawRow({ id: `run-${i}` }),
+    );
+    // The collection grew between requests: run-199 shifted onto page 2.
+    const second = [rawRow({ id: "run-199" }), rawRow(), rawRow()];
+    const fetchImpl = engineFetch((offset) =>
+      offset === 0
+        ? jsonResponse(page(full, 1, 2))
+        : jsonResponse(page(second, 2, null)),
+    );
+    const r = await readRunWindow({
+      ...base,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(r.kind).toBe("rows");
+    if (r.kind !== "rows") return;
+    expect(r.rows).toHaveLength(GROWTH_RUNS_PAGE_LIMIT + 2);
+    expect(r.rows.filter((row) => row.id === "run-199")).toHaveLength(1);
+    expect(r.rows.filter((row) => row.id === null)).toHaveLength(2);
+  });
+
+  it("an engine that never answers is abandoned at the deadline", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      // Ignores the abort signal entirely.
+      const fetchImpl = engineFetch(() => new Promise<Response>(() => {}));
+      const pending = readRunWindow({
+        ...base,
+        deadlineMs: NOW + 5_000,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await pending).toEqual({
+        kind: "unreadable",
+        reason: "engine read: tick deadline exceeded",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("past the deadline → unreadable without a request", async () => {
     const fetchImpl = engineFetch(() => jsonResponse(page([], 1, null)));
     const r = await readRunWindow({
@@ -344,6 +394,41 @@ describe("postWebhook", () => {
     for (const r of [r1, r2, r3]) {
       expect(JSON.stringify(r)).not.toContain("SECRETPATH");
     }
+  });
+
+  it("does not follow redirects: a 3xx or an opaque redirect is not delivered", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { Location: "https://elsewhere.test/" },
+        }),
+    );
+    const r = await postWebhook(
+      WEBHOOK_URL,
+      body,
+      5000,
+      fetchImpl as unknown as typeof fetch,
+    );
+    expect(r).toEqual({
+      delivered: false,
+      status: 302,
+      reason: "redirect not followed",
+    });
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(init.redirect).toBe("manual");
+
+    const opaque = { type: "opaqueredirect", status: 0, ok: false };
+    const r2 = await postWebhook(
+      WEBHOOK_URL,
+      body,
+      5000,
+      (async () => opaque as unknown as Response) as typeof fetch,
+    );
+    expect(r2).toEqual({ delivered: false, reason: "redirect not followed" });
   });
 });
 
@@ -620,13 +705,105 @@ describe("armGrowthTriggers", () => {
         expect(t?.[id].verdict).toBe("unknown");
         expect(t?.[id].reason).toMatch(/^engine read: /);
       }
-      expect(t?.ram_swap.verdict).toBe("under");
+      // One sample is not a sustained window yet (R1 a).
+      expect(t?.ram_swap).toMatchObject({
+        verdict: "unknown",
+        reason: "warming up",
+      });
       expect(
-        h.logs.filter((l) => l.startsWith("growth.trigger_unknown ")),
+        h.logs.filter(
+          (l) =>
+            l.startsWith("growth.trigger_unknown ") &&
+            l.includes("engine read: "),
+        ),
       ).toHaveLength(4);
       handle?.stop();
     },
   );
+
+  it("logs trigger_unknown once per (trigger, reason) streak and trigger_known on recovery", async () => {
+    const h = harness();
+    h.setEngine(() => new Response("no", { status: 403 }));
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    for (const k of [1, 2]) {
+      h.clock.ms = NOW + k * 300_000;
+      await handle?.tick();
+    }
+    const lines = (event: string, trigger: string) =>
+      h.logs.filter(
+        (l) => l.startsWith(`${event} `) && l.includes(`"${trigger}"`),
+      );
+    expect(lines("growth.trigger_unknown", "supersede_waste")).toEqual([
+      'growth.trigger_unknown {"trigger":"supersede_waste","reason":"engine read: http 403"}',
+    ]);
+    // 4 engine-backed triggers + ram_swap warming up, once each over 3 ticks.
+    expect(
+      h.logs.filter((l) => l.startsWith("growth.trigger_unknown ")),
+    ).toHaveLength(5);
+    expect(lines("growth.trigger_known", "supersede_waste")).toHaveLength(0);
+
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, null)));
+    h.clock.ms = NOW + 900_000;
+    await handle?.tick();
+    h.clock.ms = NOW + 1_200_000;
+    await handle?.tick();
+    expect(lines("growth.trigger_known", "supersede_waste")).toEqual([
+      'growth.trigger_known {"trigger":"supersede_waste"}',
+    ]);
+    expect(lines("growth.trigger_unknown", "supersede_waste")).toHaveLength(1);
+
+    // A new reason starts a new streak.
+    h.setEngine(() => new Response("no", { status: 500 }));
+    h.clock.ms = NOW + 1_500_000;
+    await handle?.tick();
+    expect(lines("growth.trigger_unknown", "supersede_waste")).toHaveLength(2);
+    handle?.stop();
+  });
+
+  it("a never-answering engine still lets a ram_swap fire POST through in the same tick", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const h = harness();
+      // 15/16 of RAM in use on every sample.
+      h.deps.readText = vi.fn(async (p: string) =>
+        p === "/proc/meminfo"
+          ? "MemTotal:       16000000 kB\nMemAvailable:    1000000 kB\n"
+          : VMSTAT,
+      );
+      h.setEngine(() => jsonResponse(page(CLEAN, 1, null)));
+      const handle = armGrowthTriggers(ENV_ON, h.deps);
+      await handle?.firstTick;
+      for (const k of [1, 2]) {
+        h.clock.ms = NOW + k * 300_000;
+        await handle?.tick();
+      }
+      expect(h.posts).toHaveLength(0); // still warming up (sustain 900 s)
+
+      // Tick 4 spans the sustain window; the engine accepts and never answers.
+      h.setEngine(() => new Promise<Response>(() => {}));
+      h.clock.ms = NOW + 900_000;
+      const pending = handle?.tick();
+      // The engine read is abandoned at 0.5 × the 300 s interval.
+      await vi.advanceTimersByTimeAsync(150_000);
+      const r = await pending;
+
+      expect(h.posts.map((p) => [p.trigger, p.state])).toEqual([
+        ["ram_swap", "fired"],
+      ]);
+      expect(r?.snapshot?.triggers.ram_swap).toMatchObject({
+        verdict: "over",
+        firing: true,
+      });
+      expect(r?.snapshot?.triggers.supersede_waste).toMatchObject({
+        verdict: "unknown",
+        reason: "engine read: tick deadline exceeded",
+      });
+      handle?.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("an unknown tick leaves a firing trigger firing (no clear)", async () => {
     const h = harness();
@@ -715,4 +892,50 @@ describe("armGrowthTriggers", () => {
     expect(h.posts).toHaveLength(1);
     handle?.stop();
   });
+});
+
+// ---------------------------------------------------------------------------
+// writeSnapshotAtomic (the writer the driver uses by default)
+// ---------------------------------------------------------------------------
+
+describe("writeSnapshotAtomic", () => {
+  function tmpRoot(): string {
+    return fs.mkdtempSync(path.join(os.tmpdir(), "growth-snap-"));
+  }
+
+  it("writes the file and leaves no temp file behind (default behaviour)", () => {
+    const root = tmpRoot();
+    try {
+      writeSnapshotAtomic(root, { a: 1 }, "s.json");
+      expect(
+        JSON.parse(fs.readFileSync(path.join(root, "s.json"), "utf8")),
+      ).toEqual({ a: 1 });
+      writeSnapshotAtomic(root, { a: 2 }, "m.json", 0o640);
+      expect(fs.statSync(path.join(root, "m.json")).mode & 0o777).toBe(0o640);
+      expect(fs.readdirSync(root).sort()).toEqual(["m.json", "s.json"]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["default mode", undefined],
+    ["explicit mode", 0o640],
+  ])(
+    "a failed rename (%s) unlinks the temp file and rethrows",
+    (_name, mode) => {
+      const root = tmpRoot();
+      try {
+        // The target is a non-empty directory: rename(2) of a file onto it fails.
+        fs.mkdirSync(path.join(root, "busy.json"));
+        fs.writeFileSync(path.join(root, "busy.json", "x"), "x");
+        expect(() =>
+          writeSnapshotAtomic(root, { a: 1 }, "busy.json", mode),
+        ).toThrow();
+        expect(fs.readdirSync(root)).toEqual(["busy.json"]);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

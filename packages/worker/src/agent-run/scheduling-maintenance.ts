@@ -82,6 +82,11 @@ function emptySnapshot(engineReachable: boolean): SchedulingHealthSnapshot {
  * with an explicit chmod before the rename — `writeFileSync`'s own `mode` only takes
  * effect on creation and is filtered by the umask, so it alone would not guarantee
  * the bits the caller asked for.
+ *
+ * A failed write, chmod or rename unlinks the temp file before rethrowing (#373), so a
+ * full disk or a bad target does not leave `<file>.tmp-<pid>` behind in the namespace
+ * root. The ORIGINAL error is what propagates: a cleanup failure other than ENOENT is
+ * not allowed to mask it (the next write reuses the same pid-suffixed name anyway).
  */
 export function writeSnapshotAtomic<T extends object>(
   runNamespaceRoot: string,
@@ -96,13 +101,30 @@ export function writeSnapshotAtomic<T extends object>(
   }
   const target = path.join(runNamespaceRoot, filename);
   const tmp = `${target}.tmp-${process.pid}`;
-  if (mode === undefined) {
-    fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2));
-  } else {
-    fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2), { mode });
-    fs.chmodSync(tmp, mode);
+  try {
+    if (mode === undefined) {
+      fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2));
+    } else {
+      fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2), { mode });
+      fs.chmodSync(tmp, mode);
+    }
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch (unlinkErr) {
+      // ENOENT: the write never created it. Anything else: the original error wins.
+      const code = (unlinkErr as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        defaultLogger({
+          event: "snapshot.tmp_cleanup_failed",
+          file: tmp,
+          code: code ?? "unknown",
+        });
+      }
+    }
+    throw err;
   }
-  fs.renameSync(tmp, target);
 }
 
 export interface RunMaintenanceTickOpts {

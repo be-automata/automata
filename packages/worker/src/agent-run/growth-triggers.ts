@@ -88,6 +88,12 @@ export interface TriggerEvaluation {
 
 /** One run task from the engine's collection route, reduced to what the signals read. */
 export interface RunRow {
+  /**
+   * The engine's run id (`metadata.id`, else `taskExternalId`): the key the reader dedupes
+   * pages by, since offset paging over a live collection can return a row twice. Null when
+   * the engine row carries neither.
+   */
+  id: string | null;
   actionId: string;
   status: string;
   createdAtMs: number;
@@ -143,7 +149,15 @@ export function parseRunRow(raw: unknown): RunRow | null {
     typeof metaRaw === "object" && metaRaw !== null && !Array.isArray(metaRaw)
       ? (metaRaw as Record<string, unknown>)
       : {};
+  const engineMetaRaw = r.metadata;
+  const engineMeta =
+    typeof engineMetaRaw === "object" &&
+    engineMetaRaw !== null &&
+    !Array.isArray(engineMetaRaw)
+      ? (engineMetaRaw as Record<string, unknown>)
+      : {};
   return {
+    id: nonEmptyString(engineMeta.id) ?? nonEmptyString(r.taskExternalId),
     actionId,
     status: typeof r.status === "string" ? r.status : "",
     createdAtMs,
@@ -354,11 +368,14 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
   const queueWaitDailyP90S = dailyP90Ms.map((v) =>
     v === null ? null : round(v / 1000),
   );
-  const weakestDayS = Math.min(...queueWaitDailyP90S.map((v) => v ?? 0));
+  // Thresholds compare the UNROUNDED value; only the reported value is rounded, so a
+  // reading just past a threshold cannot be rounded back onto it.
+  const weakestDayRawS = Math.min(...dailyP90Ms.map((v) => (v ?? 0) / 1000));
+  const weakestDayS = round(weakestDayRawS);
   const emptyDays = queueWaitDailyP90S.filter((v) => v === null).length;
   const queueWait: TriggerEvaluation = {
     trigger: "queue_wait_p90",
-    verdict: weakestDayS > QUEUE_WAIT_P90_THRESHOLD_S ? "over" : "under",
+    verdict: weakestDayRawS > QUEUE_WAIT_P90_THRESHOLD_S ? "over" : "under",
     value: weakestDayS,
     threshold: QUEUE_WAIT_P90_THRESHOLD_S,
     summary:
@@ -369,18 +386,21 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
   };
 
   // Client share.
-  let topClient: RunWindowStats["topClient"] = null;
+  let topOrg: { orgId: string; share: number } | null = null;
   if (attributedMs > 0) {
     for (const [orgId, ms] of orgTimeMs) {
       const share = ms / attributedMs;
-      if (topClient === null || share > topClient.share) {
-        topClient = { orgId, share: round(share) };
-      }
+      if (topOrg === null || share > topOrg.share) topOrg = { orgId, share };
     }
   }
-  const maxShare = topClient?.share ?? 0;
+  const topClient: RunWindowStats["topClient"] =
+    topOrg === null
+      ? null
+      : { orgId: topOrg.orgId, share: round(topOrg.share) };
+  const maxShareRaw = topOrg?.share ?? 0;
+  const maxShare = round(maxShareRaw);
   const shareOver =
-    orgs.size >= CLIENT_SHARE_MIN_ORGS && maxShare > CLIENT_SHARE_THRESHOLD;
+    orgs.size >= CLIENT_SHARE_MIN_ORGS && maxShareRaw > CLIENT_SHARE_THRESHOLD;
   const clientShare: TriggerEvaluation = {
     trigger: "client_share",
     verdict: shareOver ? "over" : "under",
@@ -395,9 +415,8 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
 
   // Scale composite.
   const prCounts = prsByDay.map((s) => s.size);
-  const prsPerDay = round(
-    prCounts.reduce((a, b) => a + b, 0) / GROWTH_WINDOW_DAYS,
-  );
+  const prsPerDayRaw = prCounts.reduce((a, b) => a + b, 0) / GROWTH_WINDOW_DAYS;
+  const prsPerDay = round(prsPerDayRaw);
   let busiestDay: RunWindowStats["busiestDay"] = null;
   let busiestPrs = 0;
   for (const [i, prs] of prCounts.entries()) {
@@ -409,7 +428,7 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
   }
   const arms = {
     clients: orgs.size > SCALE_CLIENTS_THRESHOLD,
-    prsPerDay: prsPerDay > SCALE_PRS_PER_DAY_THRESHOLD,
+    prsPerDay: prsPerDayRaw > SCALE_PRS_PER_DAY_THRESHOLD,
     questionnaire: input.questionnaire,
   };
   const armsHeld = Object.values(arms).filter(Boolean).length;
@@ -426,10 +445,11 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
 
   // Supersede waste.
   const totalMs = attributedMs + unattributedMs;
-  const waste = totalMs > 0 ? round(cancelledMs / totalMs) : 0;
+  const wasteRaw = totalMs > 0 ? cancelledMs / totalMs : 0;
+  const waste = round(wasteRaw);
   const supersedeWaste: TriggerEvaluation = {
     trigger: "supersede_waste",
-    verdict: waste > SUPERSEDE_WASTE_THRESHOLD ? "over" : "under",
+    verdict: wasteRaw > SUPERSEDE_WASTE_THRESHOLD ? "over" : "under",
     value: waste,
     threshold: SUPERSEDE_WASTE_THRESHOLD,
     summary:
@@ -543,6 +563,11 @@ export interface RamSwapInput {
  *    one-off swap-out of cold pages never does.
  * Samples are contiguous in the list; a tick with no sample (a failed read) does not
  * break a streak, it only makes that tick `unknown`.
+ *
+ * WARMING UP. Until some retained sample is at least `sustainMs` old the samples cannot
+ * span the window, so neither "sustained over" nor "not sustained" is knowable: the
+ * verdict is `unknown` ("warming up"). Calling it `under` would clear a `ram_swap` that a
+ * restart restored as firing from the snapshot on the first fresh sample.
  */
 export function evaluateRamSwap(input: RamSwapInput): TriggerEvaluation {
   if (input.unreadableReason !== undefined) {
@@ -558,6 +583,10 @@ export function evaluateRamSwap(input: RamSwapInput): TriggerEvaluation {
     return unknownEvaluation("ram_swap", input.ramFraction, "no samples");
   }
   const cutoff = input.nowMs - input.sustainMs;
+  const first = sorted[0];
+  if (first === undefined || first.atMs > cutoff) {
+    return unknownEvaluation("ram_swap", input.ramFraction, "warming up");
+  }
 
   let ramStreakStart: MemSample | null = null;
   for (let i = sorted.length - 1; i >= 0; i--) {
@@ -614,9 +643,11 @@ export interface DedupeTransition {
 }
 
 /**
- * Pure transition. `fire` when over and either not firing or the last fire is ≥ refireMs
- * old (a condition that stays over is re-announced once a day, not every tick); `clear`
- * once when it drops under while firing; `unknown` is always a no-op.
+ * Pure transition. `fire` when over and the last fire is ≥ refireMs old or there was none
+ * — whether or not the trigger is still `firing`, so a condition that flaps (fire → clear
+ * → over again) is announced at most once per window (AC 4), and one that stays over is
+ * re-announced once a day, not every tick. `clear` once when it drops under while firing,
+ * never held by the window; `unknown` is always a no-op.
  *
  * The transition is a PROPOSAL. A failed webhook must not be recorded as delivered (V2) —
  * otherwise a sink outage at the moment of the fire would silence the trigger for 24 h —
@@ -630,9 +661,7 @@ export function decideTransition(
 ): DedupeTransition {
   if (verdict === "over") {
     const due =
-      !state.firing ||
-      state.lastFiredAtMs === null ||
-      nowMs - state.lastFiredAtMs >= refireMs;
+      state.lastFiredAtMs === null || nowMs - state.lastFiredAtMs >= refireMs;
     return due
       ? { action: "fire", next: { firing: true, lastFiredAtMs: nowMs } }
       : { action: "none", next: state };

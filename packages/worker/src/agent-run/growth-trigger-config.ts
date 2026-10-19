@@ -17,6 +17,8 @@
 
 export const GROWTH_TRIGGER_INTERVAL_DEFAULT_S = 300;
 export const GROWTH_TRIGGER_INTERVAL_FLOOR_S = 30;
+/** One day: a slower tick could not hold the 24 h dedupe window it serves. */
+export const GROWTH_TRIGGER_INTERVAL_CEILING_S = 86_400;
 export const GROWTH_TRIGGER_SUSTAIN_DEFAULT_S = 900;
 export const GROWTH_TRIGGER_SUSTAIN_FLOOR_S = 60;
 export const GROWTH_TRIGGER_RAM_FRACTION_DEFAULT = 0.7;
@@ -32,18 +34,35 @@ export interface GrowthTriggerConfig {
   questionnaire: boolean;
 }
 
-function parseIntegerKnob(
-  name: string,
-  raw: string | undefined,
-  defaultValue: number,
-  floor: number,
-): number {
-  const v = (raw ?? "").trim();
-  if (!v) return defaultValue;
+/**
+ * Both cadence knobs are bound to each other by the 2 × rule, so a floor refusal names
+ * both: an operator lowering one must see the other in the same message (AC 7).
+ */
+function parseCadenceKnob(spec: {
+  name: string;
+  raw: string | undefined;
+  defaultValue: number;
+  floor: number;
+  /** Inclusive; absent = unbounded. */
+  ceiling?: number;
+  floorHint: string;
+}): number {
+  const v = (spec.raw ?? "").trim();
+  if (!v) return spec.defaultValue;
   const n = Number(v);
-  if (!Number.isInteger(n) || n < floor) {
+  if (!Number.isInteger(n)) {
     throw new Error(
-      `${name} must be an integer >= ${floor}, got ${JSON.stringify(v)}`,
+      `${spec.name} must be an integer >= ${spec.floor}, got ${JSON.stringify(v)}`,
+    );
+  }
+  if (n < spec.floor) {
+    throw new Error(
+      `${spec.name}=${n} is below the floor of ${spec.floor} s (${spec.floorHint})`,
+    );
+  }
+  if (spec.ceiling !== undefined && n > spec.ceiling) {
+    throw new Error(
+      `${spec.name}=${n} is above the ceiling of ${spec.ceiling} s (one day)`,
     );
   }
   return n;
@@ -90,18 +109,22 @@ export function loadGrowthTriggerConfig(
   if (!rawUrl) return null;
   const webhookUrl = parseWebhookUrl(rawUrl);
 
-  const intervalS = parseIntegerKnob(
-    "WORKER_GROWTH_TRIGGER_INTERVAL_S",
-    env.WORKER_GROWTH_TRIGGER_INTERVAL_S,
-    GROWTH_TRIGGER_INTERVAL_DEFAULT_S,
-    GROWTH_TRIGGER_INTERVAL_FLOOR_S,
-  );
-  const sustainS = parseIntegerKnob(
-    "WORKER_GROWTH_TRIGGER_SUSTAIN_S",
-    env.WORKER_GROWTH_TRIGGER_SUSTAIN_S,
-    GROWTH_TRIGGER_SUSTAIN_DEFAULT_S,
-    GROWTH_TRIGGER_SUSTAIN_FLOOR_S,
-  );
+  const intervalS = parseCadenceKnob({
+    name: "WORKER_GROWTH_TRIGGER_INTERVAL_S",
+    raw: env.WORKER_GROWTH_TRIGGER_INTERVAL_S,
+    defaultValue: GROWTH_TRIGGER_INTERVAL_DEFAULT_S,
+    floor: GROWTH_TRIGGER_INTERVAL_FLOOR_S,
+    ceiling: GROWTH_TRIGGER_INTERVAL_CEILING_S,
+    floorHint:
+      "WORKER_GROWTH_TRIGGER_SUSTAIN_S must also be ≥ 2 × the interval",
+  });
+  const sustainS = parseCadenceKnob({
+    name: "WORKER_GROWTH_TRIGGER_SUSTAIN_S",
+    raw: env.WORKER_GROWTH_TRIGGER_SUSTAIN_S,
+    defaultValue: GROWTH_TRIGGER_SUSTAIN_DEFAULT_S,
+    floor: GROWTH_TRIGGER_SUSTAIN_FLOOR_S,
+    floorHint: "it must also be ≥ 2 × WORKER_GROWTH_TRIGGER_INTERVAL_S",
+  });
   // A sustained window shorter than two ticks is "sustained" over a single sample: one
   // spike would fire the RAM trigger. Refuse, naming both knobs (AC 7, Q-3).
   if (sustainS < 2 * intervalS) {

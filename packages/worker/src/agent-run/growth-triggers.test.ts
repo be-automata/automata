@@ -41,7 +41,10 @@ interface RowSpec {
   repo?: string | null;
   pr?: number | null;
   status?: string;
+  id?: string | null;
 }
+
+let rowSeq = 0;
 
 function row(spec: RowSpec): RunRow {
   const createdAtMs = DAY0 + spec.day * DAY_MS + (spec.at ?? 3_600_000);
@@ -50,7 +53,9 @@ function row(spec: RowSpec): RunRow {
   const runS = spec.runS === undefined ? 60 : spec.runS;
   const finishedAtMs =
     startedAtMs === null || runS === null ? null : startedAtMs + runS * 1000;
+  rowSeq += 1;
   return {
+    id: spec.id === undefined ? `run-${rowSeq}` : spec.id,
     actionId: "agent-run:run",
     status: spec.status ?? "COMPLETED",
     createdAtMs,
@@ -80,6 +85,8 @@ describe("parseRunRow", () => {
     createdAt: "2026-10-15T10:00:00Z",
     startedAt: "2026-10-15T10:05:00Z",
     finishedAt: "2026-10-15T10:15:00Z",
+    metadata: { id: "run-uuid-1" },
+    taskExternalId: "task-uuid-1",
     additionalMetadata: {
       orgId: "org-1",
       lane: "pr",
@@ -90,6 +97,7 @@ describe("parseRunRow", () => {
 
   it("parses a full row; metadata values are strings", () => {
     expect(parseRunRow(base)).toEqual({
+      id: "run-uuid-1",
       actionId: "agent-run-newest:run",
       status: "COMPLETED",
       createdAtMs: Date.parse("2026-10-15T10:00:00Z"),
@@ -99,6 +107,18 @@ describe("parseRunRow", () => {
       repoFullName: "acme/app",
       prNumber: 42,
     });
+  });
+
+  it("takes the id from metadata.id, falling back to taskExternalId, else null", () => {
+    expect(parseRunRow({ ...base, metadata: {} })?.id).toBe("task-uuid-1");
+    expect(parseRunRow({ ...base, metadata: "nope" })?.id).toBe("task-uuid-1");
+    expect(parseRunRow({ ...base, metadata: { id: 7 } })?.id).toBe(
+      "task-uuid-1",
+    );
+    expect(
+      parseRunRow({ ...base, metadata: undefined, taskExternalId: undefined })
+        ?.id,
+    ).toBeNull();
   });
 
   it("ignores non-run action ids and non-objects", () => {
@@ -232,6 +252,16 @@ describe("client share", () => {
     expect(r.stats?.topClient).toEqual({ orgId: "org-a", share: 0.5 });
   });
 
+  it("compares the unrounded share: 0.4004 fires though it reports 0.4", () => {
+    const near = evalRows([
+      row({ day: 0, org: "org-a", runS: 4004 }),
+      row({ day: 1, org: "org-b", runS: 3000 }),
+      row({ day: 2, org: "org-c", runS: 2996 }),
+    ]).clientShare;
+    expect(near.value).toBe(0.4);
+    expect(near.verdict).toBe("over");
+  });
+
   it("at exactly 40% it stays under", () => {
     const rows = [
       row({ day: 0, org: "org-a", runS: 400 }),
@@ -352,6 +382,15 @@ describe("supersede waste", () => {
     expect(r.verdict).toBe("over");
   });
 
+  it("compares the unrounded ratio: 0.2004 fires though it reports 0.2", () => {
+    const r = evalRows([
+      row({ day: 0, runS: 7996 }),
+      row({ day: 1, runS: 2004, status: "CANCELLED" }),
+    ]).supersedeWaste;
+    expect(r.value).toBe(0.2);
+    expect(r.verdict).toBe("over");
+  });
+
   it("at exactly 20% or with no run time it stays under", () => {
     expect(
       evalRows([
@@ -425,8 +464,52 @@ describe("RAM / swap", () => {
 
   it("does not fire when the streak is younger than sustain", () => {
     expect(
-      evalRam([sample(14, 0.8), sample(10, 0.8), sample(0, 0.8)]).verdict,
+      evalRam([
+        sample(20, 0.5),
+        sample(14, 0.8),
+        sample(10, 0.8),
+        sample(0, 0.8),
+      ]).verdict,
     ).toBe("under");
+  });
+
+  it("is unknown (warming up) until the samples span the sustain window", () => {
+    expect(
+      evalRam([sample(14, 0.8), sample(10, 0.8), sample(0, 0.8)]),
+    ).toMatchObject({ verdict: "unknown", value: null, reason: "warming up" });
+    expect(evalRam([sample(0, 0.1)]).reason).toBe("warming up");
+    expect(evalRam([sample(15, 0.1), sample(0, 0.1)]).verdict).toBe("under");
+  });
+
+  it("a restored firing ram_swap is not cleared before a full window, then clears once", () => {
+    const seeded = dedupeStatesFromSnapshot({
+      triggers: {
+        ram_swap: { firing: true, lastFiredAt: new Date(NOW).toISOString() },
+      },
+    }).ram_swap;
+    expect(seeded.firing).toBe(true);
+    // The restarted worker samples every 5 min, all well under the fraction.
+    const bootMs = NOW + MIN;
+    let state = seeded;
+    let clears = 0;
+    const samples: MemSample[] = [];
+    for (let tick = 0; tick <= 6; tick++) {
+      const nowMs = bootMs + tick * 5 * MIN;
+      samples.push({ ...sample(0, 0.1), atMs: nowMs });
+      const e = evaluateRamSwap({
+        samples,
+        nowMs,
+        ramFraction: 0.7,
+        sustainMs: SUSTAIN,
+      });
+      if (tick < 3) expect(e.verdict).toBe("unknown");
+      const t = decideTransition(state, e.verdict, nowMs);
+      if (t.action === "clear") clears += 1;
+      if (tick === 0) expect(t.action).toBe("none");
+      state = commitTransition(state, t, true);
+    }
+    expect(clears).toBe(1);
+    expect(state.firing).toBe(false);
   });
 
   it("a dip below the fraction restarts the streak", () => {
@@ -461,8 +544,12 @@ describe("RAM / swap", () => {
         .verdict,
     ).toBe("under");
     expect(
-      evalRam([sample(10, 0.2, 100), sample(5, 0.2, 110), sample(0, 0.2, 120)])
-        .verdict,
+      evalRam([
+        sample(15, 0.2, 100),
+        sample(10, 0.2, 100),
+        sample(5, 0.2, 110),
+        sample(0, 0.2, 120),
+      ]).verdict,
     ).toBe("under");
     expect(
       evalRam([
@@ -562,9 +649,23 @@ describe("dedupe state machine", () => {
     expect(decideTransition(s2, "under", T0 + 2 * MIN).action).toBe("none");
   });
 
-  it("a re-fire after a clear is immediate (not held by the 24 h window)", () => {
-    const s: TriggerDedupeState = { firing: false, lastFiredAtMs: T0 };
-    expect(decideTransition(s, "over", T0 + MIN).action).toBe("fire");
+  it("fire → clear → over again within 24 h does not re-fire (AC 4); the clear is unaffected", () => {
+    const fire = decideTransition(INITIAL_DEDUPE_STATE, "over", T0);
+    expect(fire.action).toBe("fire");
+    const s1 = commitTransition(INITIAL_DEDUPE_STATE, fire, true);
+    const clear = decideTransition(s1, "under", T0 + MIN);
+    expect(clear.action).toBe("clear");
+    const s2 = commitTransition(s1, clear, true);
+    expect(s2).toEqual({ firing: false, lastFiredAtMs: T0 });
+    const again = decideTransition(s2, "over", T0 + 2 * MIN);
+    expect(again).toEqual({ action: "none", next: s2 });
+    expect(decideTransition(s2, "over", T0 + GROWTH_REFIRE_MS - 1).action).toBe(
+      "none",
+    );
+    expect(decideTransition(s2, "over", T0 + GROWTH_REFIRE_MS)).toEqual({
+      action: "fire",
+      next: { firing: true, lastFiredAtMs: T0 + GROWTH_REFIRE_MS },
+    });
   });
 
   it("unknown never fires nor clears", () => {

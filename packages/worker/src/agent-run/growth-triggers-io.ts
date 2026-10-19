@@ -54,8 +54,14 @@ export const GROWTH_WEBHOOK_TIMEOUT_CAP_MS = 10_000;
 export const GROWTH_SNAPSHOT_FILENAME = "growth-triggers.json";
 /** Snapshot permissions (V9): owner rw, group r, other none. */
 export const GROWTH_SNAPSHOT_MODE = 0o640;
-/** A tick must finish within this fraction of the interval, so ticks cannot stack. */
-export const GROWTH_TICK_BUDGET_FRACTION = 0.8;
+/**
+ * The engine read must finish within this fraction of the interval. Half, not the whole
+ * tick budget: a hung engine must still leave the tick time to POST a /proc-backed fire
+ * (ram_swap does not depend on the engine).
+ */
+export const GROWTH_ENGINE_READ_BUDGET_FRACTION = 0.5;
+/** Every POST must finish within this fraction of the interval, so ticks cannot stack. */
+export const GROWTH_TICK_BUDGET_FRACTION = 0.95;
 
 const PROC_MEMINFO = "/proc/meminfo";
 const PROC_VMSTAT = "/proc/vmstat";
@@ -63,6 +69,43 @@ const PROC_VMSTAT = "/proc/vmstat";
 /** The error's class name only (`TimeoutError`, `AbortError`, `TypeError`) — never its message. */
 function errorName(err: unknown): string {
   return err instanceof Error && err.name ? err.name : "unknown error";
+}
+
+type Bounded<T> = { timedOut: false; value: T } | { timedOut: true };
+
+/**
+ * Run `work` with an abort signal that fires after `ms`, and stop WAITING at `ms` even if
+ * `work` ignores the signal (a peer that accepts the connection and never answers, or a
+ * body that never ends). `AbortSignal.timeout` alone only helps when the fetch honours
+ * it; the deadline is what keeps ticks from stacking. Rejections of `work` propagate.
+ */
+async function withDeadline<T>(
+  ms: number,
+  work: (signal: AbortSignal) => Promise<T>,
+): Promise<Bounded<T>> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<Bounded<T>>((resolve) => {
+    timer = setTimeout(
+      () => {
+        controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
+        resolve({ timedOut: true });
+      },
+      Math.max(1, ms),
+    );
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([
+      (async (): Promise<Bounded<T>> => ({
+        timedOut: false,
+        value: await work(controller.signal),
+      }))(),
+      expired,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -123,19 +166,71 @@ export function buildRunWindowUrl(input: {
   );
 }
 
+type PageFetch =
+  | { kind: "page"; page: RunsPage }
+  | { kind: "unreadable"; reason: string };
+
+async function fetchRunsPage(
+  url: string,
+  token: string,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch,
+): Promise<PageFetch> {
+  let res: Response;
+  try {
+    res = await fetchImpl(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+      signal,
+    });
+  } catch (err) {
+    return {
+      kind: "unreadable",
+      reason: `engine read: request failed (${errorName(err)})`,
+    };
+  }
+  if (!res.ok) {
+    return { kind: "unreadable", reason: `engine read: http ${res.status}` };
+  }
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return { kind: "unreadable", reason: "engine read: body is not JSON" };
+  }
+  const parsed = parseRunsPage(body);
+  if (parsed === null) {
+    return {
+      kind: "unreadable",
+      reason: "engine read: body does not match the workflow-runs list",
+    };
+  }
+  return { kind: "page", page: parsed };
+}
+
 /**
  * Offset-paginated read of every run task created since `sinceMs` (V7). Stops on a
  * short page, or when `pagination.next_page` is missing or not past `current_page`.
  * More than GROWTH_RUNS_MAX_PAGES pages → `unreadable` "page cap": a partial window
- * would silently understate every run signal. Each request's abort budget is the time
- * left until `deadlineMs`, so a slow engine cannot push the tick past its interval.
+ * would silently understate every run signal. Each request (headers AND body) is bounded
+ * by the time left until `deadlineMs`, whether or not the engine honours the abort, so a
+ * hung engine cannot push the tick past its interval.
+ *
+ * Rows are deduped by engine id across pages: offset paging over a collection that
+ * grows while it is read can shift a row onto the next page, and counting it twice
+ * would inflate every time sum. Rows with no id are kept as they are.
  */
 export async function readRunWindow(
   input: ReadRunWindowInput,
 ): Promise<RunsReading> {
   const fetchImpl = input.fetchImpl ?? fetch;
   const now = input.now ?? Date.now;
-  const rows: RunRow[] = [];
+  const rowsById = new Map<string, RunRow>();
+  const anonymousRows: RunRow[] = [];
+  const collected = (): RunsReading => ({
+    kind: "rows",
+    rows: [...rowsById.values(), ...anonymousRows],
+  });
   let offset = 0;
 
   for (let page = 0; page < GROWTH_RUNS_MAX_PAGES; page++) {
@@ -153,46 +248,30 @@ export async function readRunWindow(
       offset,
     });
 
-    let res: Response;
-    try {
-      res = await fetchImpl(url, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${input.token}` },
-        signal: AbortSignal.timeout(remainingMs),
-      });
-    } catch (err) {
+    const bounded = await withDeadline(remainingMs, (signal) =>
+      fetchRunsPage(url, input.token, signal, fetchImpl),
+    );
+    if (bounded.timedOut) {
       return {
         kind: "unreadable",
-        reason: `engine read: request failed (${errorName(err)})`,
+        reason: "engine read: tick deadline exceeded",
       };
     }
-    if (!res.ok) {
-      return { kind: "unreadable", reason: `engine read: http ${res.status}` };
-    }
-    let body: unknown;
-    try {
-      body = await res.json();
-    } catch {
-      return { kind: "unreadable", reason: "engine read: body is not JSON" };
-    }
-    const parsed = parseRunsPage(body);
-    if (parsed === null) {
-      return {
-        kind: "unreadable",
-        reason: "engine read: body does not match the workflow-runs list",
-      };
-    }
+    if (bounded.value.kind === "unreadable") return bounded.value;
+    const parsed = bounded.value.page;
 
     for (const raw of parsed.rows) {
       const row = parseRunRow(raw);
-      if (row !== null) rows.push(row);
+      if (row === null) continue;
+      if (row.id === null) anonymousRows.push(row);
+      else rowsById.set(row.id, row);
     }
 
     const shortPage = parsed.rows.length < GROWTH_RUNS_PAGE_LIMIT;
     const noNext =
       parsed.nextPage === null ||
       (parsed.currentPage !== null && parsed.nextPage <= parsed.currentPage);
-    if (shortPage || noNext) return { kind: "rows", rows };
+    if (shortPage || noNext) return collected();
     offset += parsed.rows.length;
   }
   return { kind: "unreadable", reason: "engine read: page cap" };
@@ -254,6 +333,11 @@ export type WebhookResult =
 /**
  * One JSON POST. Any 2xx is delivered; non-2xx, network error and timeout are not.
  * The URL is a secret: it never appears in the returned reason (fixed phrases only).
+ *
+ * Redirects are NOT followed (`redirect: "manual"`): following one would re-send the
+ * alert body to a host the operator never configured. A 3xx — or the opaque-redirect
+ * response a manual-mode fetch may return instead — is "redirect not followed", not
+ * delivered, and retried next tick like any other failure.
  */
 export async function postWebhook(
   url: string,
@@ -263,12 +347,17 @@ export async function postWebhook(
 ): Promise<WebhookResult> {
   let res: Response;
   try {
-    res = await fetchImpl(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(Math.max(1, timeoutMs)),
-    });
+    const bounded = await withDeadline(timeoutMs, (signal) =>
+      fetchImpl(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        redirect: "manual",
+        signal,
+      }),
+    );
+    if (bounded.timedOut) return { delivered: false, reason: "timeout" };
+    res = bounded.value;
   } catch (err) {
     const name = errorName(err);
     return {
@@ -277,6 +366,16 @@ export async function postWebhook(
         name === "TimeoutError" || name === "AbortError"
           ? "timeout"
           : `request failed (${name})`,
+    };
+  }
+  if (
+    res.type === "opaqueredirect" ||
+    (res.status >= 300 && res.status < 400)
+  ) {
+    return {
+      delivered: false,
+      ...(res.status > 0 ? { status: res.status } : {}),
+      reason: "redirect not followed",
     };
   }
   if (!res.ok) {
@@ -364,10 +463,12 @@ function defaultReadSnapshot(filePath: string): string | null {
  *
  * Otherwise seeds the dedupe states from the existing snapshot (a restart does not
  * re-fire), arms an unref'd interval and fires one immediate tick. A tick:
- *   1. reads the run window and a /proc sample (bounded by a deadline < interval);
- *   2. evaluates every trigger (unreadable → `unknown`, logged; state unchanged);
+ *   1. reads the run window (bounded by half the interval) and a /proc sample;
+ *   2. evaluates every trigger (unreadable → `unknown`, logged once per streak; state
+ *      unchanged);
  *   3. for each fire/clear transition POSTs the webhook and commits the transition only
- *      when delivered (V2: a failed POST retries next tick);
+ *      when delivered (V2: a failed POST retries next tick); each POST is bounded by
+ *      min(10 s, interval / 2, time left before 0.95 × interval);
  *   4. ALWAYS writes the snapshot atomically with mode 0640 (AC 5, V9).
  * Ticks never overlap and a tick never throws.
  */
@@ -405,6 +506,9 @@ export function armGrowthTriggers(
     GROWTH_WEBHOOK_TIMEOUT_CAP_MS,
     Math.floor(intervalMs / 2),
   );
+  const engineReadBudgetMs = Math.floor(
+    intervalMs * GROWTH_ENGINE_READ_BUDGET_FRACTION,
+  );
   const tickBudgetMs = Math.floor(intervalMs * GROWTH_TICK_BUDGET_FRACTION);
   const snapshotPath = path.join(deps.snapshotDir, GROWTH_SNAPSHOT_FILENAME);
 
@@ -422,9 +526,15 @@ export function armGrowthTriggers(
   let memSamples: MemSample[] = [];
   let inFlight = false;
   let skipLogged = false;
+  // One `growth.trigger_unknown` per contiguous (trigger, reason) streak and one
+  // `growth.trigger_known` when it reads again — not a line per trigger per tick for
+  // as long as the engine is down (the engine-liveness `unreadableLogged` pattern).
+  const unknownReasonLogged = new Map<GrowthTriggerId, string>();
 
   const runTick = async (): Promise<GrowthSnapshot> => {
     const startMs = now();
+    // The engine read gets half the interval; POSTs may run until 0.95 of it.
+    const engineDeadlineMs = startMs + engineReadBudgetMs;
     const deadlineMs = startMs + tickBudgetMs;
 
     const [runs, mem] = await Promise.all([
@@ -433,7 +543,7 @@ export function armGrowthTriggers(
         tenantId: engine.tenantId,
         token: engine.token,
         sinceMs: growthWindow(startMs).startMs,
-        deadlineMs,
+        deadlineMs: engineDeadlineMs,
         fetchImpl,
         now,
       }),
@@ -471,10 +581,14 @@ export function armGrowthTriggers(
     for (const evaluation of evaluations) {
       const id = evaluation.trigger;
       if (evaluation.verdict === "unknown") {
-        logLine(log, "growth.trigger_unknown", {
-          trigger: id,
-          reason: evaluation.reason ?? "unknown",
-        });
+        const reason = evaluation.reason ?? "unknown";
+        if (unknownReasonLogged.get(id) !== reason) {
+          unknownReasonLogged.set(id, reason);
+          logLine(log, "growth.trigger_unknown", { trigger: id, reason });
+        }
+      } else if (unknownReasonLogged.has(id)) {
+        unknownReasonLogged.delete(id);
+        logLine(log, "growth.trigger_known", { trigger: id });
       }
       const current = states[id];
       const transition = decideTransition(current, evaluation.verdict, nowMs);

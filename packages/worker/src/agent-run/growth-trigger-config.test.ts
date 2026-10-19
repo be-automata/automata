@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  GROWTH_TRIGGER_INTERVAL_CEILING_S,
   GROWTH_TRIGGER_INTERVAL_DEFAULT_S,
   GROWTH_TRIGGER_RAM_FRACTION_DEFAULT,
   GROWTH_TRIGGER_SUSTAIN_DEFAULT_S,
@@ -76,14 +77,37 @@ describe("loadGrowthTriggerConfig", () => {
         WORKER_GROWTH_TRIGGER_SUSTAIN_S: "60",
       })?.intervalS,
     ).toBe(30);
+    // AC 7 verbatim: the floor refusal names the knob, the bound and the other knob.
+    expect(() => load({ WORKER_GROWTH_TRIGGER_INTERVAL_S: "10" })).toThrow(
+      "WORKER_GROWTH_TRIGGER_INTERVAL_S=10 is below the floor of 30 s " +
+        "(WORKER_GROWTH_TRIGGER_SUSTAIN_S must also be ≥ 2 × the interval)",
+    );
     expect(() => load({ WORKER_GROWTH_TRIGGER_INTERVAL_S: "29" })).toThrow(
-      /WORKER_GROWTH_TRIGGER_INTERVAL_S must be an integer >= 30/,
+      /WORKER_GROWTH_TRIGGER_INTERVAL_S=29 is below the floor of 30 s/,
     );
     expect(() => load({ WORKER_GROWTH_TRIGGER_INTERVAL_S: "30.5" })).toThrow(
       /WORKER_GROWTH_TRIGGER_INTERVAL_S/,
     );
     expect(() => load({ WORKER_GROWTH_TRIGGER_INTERVAL_S: "abc" })).toThrow(
       /WORKER_GROWTH_TRIGGER_INTERVAL_S/,
+    );
+  });
+
+  it("caps the interval at one day, naming the knob and the bound", () => {
+    expect(GROWTH_TRIGGER_INTERVAL_CEILING_S).toBe(86_400);
+    expect(
+      load({
+        WORKER_GROWTH_TRIGGER_INTERVAL_S: "86400",
+        WORKER_GROWTH_TRIGGER_SUSTAIN_S: "172800",
+      })?.intervalS,
+    ).toBe(86_400);
+    expect(() =>
+      load({
+        WORKER_GROWTH_TRIGGER_INTERVAL_S: "86401",
+        WORKER_GROWTH_TRIGGER_SUSTAIN_S: "172802",
+      }),
+    ).toThrow(
+      /WORKER_GROWTH_TRIGGER_INTERVAL_S=86401 is above the ceiling of 86400 s/,
     );
   });
 
@@ -99,7 +123,10 @@ describe("loadGrowthTriggerConfig", () => {
         WORKER_GROWTH_TRIGGER_INTERVAL_S: "30",
         WORKER_GROWTH_TRIGGER_SUSTAIN_S: "59",
       }),
-    ).toThrow(/WORKER_GROWTH_TRIGGER_SUSTAIN_S must be an integer >= 60/);
+    ).toThrow(
+      "WORKER_GROWTH_TRIGGER_SUSTAIN_S=59 is below the floor of 60 s " +
+        "(it must also be ≥ 2 × WORKER_GROWTH_TRIGGER_INTERVAL_S)",
+    );
   });
 
   it("refuses a sustain window below 2 × the interval, naming both knobs", () => {
