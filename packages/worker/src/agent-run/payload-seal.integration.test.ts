@@ -9,6 +9,7 @@ import {
 import {
   PayloadSealError,
   generatePlaneKeyPair,
+  sealBindingOf,
   sealRunSecrets,
   type RunSecrets,
 } from "@terragon/utils/payload-seal";
@@ -215,17 +216,20 @@ describe.skipIf(!itEnabled)(
     it("a sealed dispatch completes with the worker holding the unsealed secrets, and the engine's payload rows hold ciphertext only", async () => {
       const threadId = uid("thr-sealed");
       const threadChatId = "tc_it";
-      const input: AgentRunWireInput = {
+      const base = {
         threadId,
         threadChatId,
         repoFullName: "o/r",
         branch: "main",
         daemonCallbackUrl: "https://www.example.com",
         orgId: "org-it",
+      };
+      const input: AgentRunWireInput = {
+        ...base,
         sealedSecrets: await sealRunSecrets(
           plane.publicKey,
           SECRETS,
-          threadChatId,
+          sealBindingOf(base),
         ),
       };
       const run = await dispatch(input);
@@ -285,17 +289,20 @@ describe.skipIf(!itEnabled)(
     it("an envelope sealed to a key the ring does not hold FAILS the run with kid + reason, and the engine's stored error holds no secret", async () => {
       const foreign = await generatePlaneKeyPair("plane-foreign");
       const threadId = uid("thr-foreign");
-      const input: AgentRunWireInput = {
+      const base = {
         threadId,
         threadChatId: "tc_it",
         repoFullName: "o/r",
         branch: "main",
         daemonCallbackUrl: "https://www.example.com",
         orgId: "org-it",
+      };
+      const input: AgentRunWireInput = {
+        ...base,
         sealedSecrets: await sealRunSecrets(
           foreign.publicKey,
           SECRETS,
-          "tc_it",
+          sealBindingOf(base),
         ),
       };
       const run = await dispatch(input);

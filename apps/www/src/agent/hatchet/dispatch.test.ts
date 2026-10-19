@@ -8,7 +8,9 @@ import {
   expectTypeOf,
 } from "vitest";
 import {
+  sealBindingOf,
   unsealRunSecrets,
+  type SealBinding,
   type SealedRunSecrets,
 } from "@terragon/utils/payload-seal";
 import { installTestPlaneKey, setKey } from "./__fixtures__/plane-key";
@@ -1288,7 +1290,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       ).toBe(false);
     });
 
-    it("the envelope is bound to its threadChatId: it opens there and nowhere else, and two dispatches never share a byte", async () => {
+    it("the envelope is bound to its routing fields: it opens under its own input and not under a re-pointed callback, and two dispatches never share a byte", async () => {
       const a = await orgTaskThread();
       const inputA = await dispatchAndRead(a);
       await expect(unsealInput(inputA)).resolves.toMatchObject({
@@ -1298,7 +1300,10 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
         unsealRunSecrets(
           [plane.pair!.privateKey], // installed in beforeAll
           inputA.sealedSecrets as SealedRunSecrets,
-          "tc_other",
+          {
+            ...sealBindingOf(inputA as unknown as SealBinding),
+            daemonCallbackUrl: "https://attacker.example",
+          },
         ),
       ).rejects.toThrow("reason=tag");
       const inputB = await dispatchAndRead(await orgTaskThread());

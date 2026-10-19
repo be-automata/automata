@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   generatePlaneKeyPair,
+  sealBindingOf,
   sealRunSecrets,
   type RunSecrets,
 } from "@terragon/utils/payload-seal";
@@ -2097,7 +2098,7 @@ describe("#380: sealed run secrets through the run fn", () => {
       sealedSecrets: await sealRunSecrets(
         plane.publicKey,
         SECRETS,
-        INPUT.threadChatId,
+        sealBindingOf(INPUT),
       ),
     };
   });
@@ -2238,7 +2239,7 @@ describe("#380: sealed run secrets through the run fn", () => {
       sealedSecrets: await sealRunSecrets(
         other.publicKey,
         SECRETS,
-        INPUT.threadChatId,
+        sealBindingOf(INPUT),
       ),
     };
     const c = sealedCtx();

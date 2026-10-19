@@ -40,7 +40,13 @@ const SECRETS: RunSecrets = {
   githubReadToken: "ghs_workerdReadToken0123456789abcdef",
   daemonToken: "daemon_workerd_token_0123456789abcdefghijklmnopqrstuvwxyz",
 };
-const THREAD_CHAT_ID = "tc_workerd";
+const BINDING = {
+  threadId: "thr_workerd",
+  threadChatId: "tc_workerd",
+  daemonCallbackUrl: "https://www.example.com",
+  repoFullName: "o/r",
+  orgId: "org-1",
+};
 
 describe("payload-seal under workerd (#380 AC 5)", () => {
   let worker: Unstable_DevWorker;
@@ -85,55 +91,51 @@ describe("payload-seal under workerd (#380 AC 5)", () => {
       op: "seal",
       pk: plane.publicKey,
       secrets: SECRETS,
-      threadChatId: THREAD_CHAT_ID,
+      binding: BINDING,
     });
     expect(fromWorkerd.ok).toBe(true);
     const sealed = (fromWorkerd as { sealed: SealedRunSecrets }).sealed;
     expect(sealed.v).toBe(1);
     expect(JSON.stringify(sealed)).not.toContain("ghs_");
-    expect(
-      await unsealRunSecrets([plane.privateKey], sealed, THREAD_CHAT_ID),
-    ).toEqual(SECRETS);
-
-    const fromNode = await sealRunSecrets(
-      plane.publicKey,
+    expect(await unsealRunSecrets([plane.privateKey], sealed, BINDING)).toEqual(
       SECRETS,
-      THREAD_CHAT_ID,
     );
+
+    const fromNode = await sealRunSecrets(plane.publicKey, SECRETS, BINDING);
     const back = await call({
       op: "unseal",
       keys: [plane.privateKey],
       sealed: fromNode,
-      threadChatId: THREAD_CHAT_ID,
+      binding: BINDING,
     });
     expect(back).toEqual({ ok: true, secrets: SECRETS });
   });
 
   it("the negative vectors hold under workerd: wrong key, wrong threadChatId, unknown kid, flipped ct", async () => {
     const other = await generatePlaneKeyPair("plane-workerd");
-    const sealed = await sealRunSecrets(
-      plane.publicKey,
-      SECRETS,
-      THREAD_CHAT_ID,
-    );
-    const unseal = (keys: PlanePrivateKey[], s: SealedRunSecrets, tc: string) =>
-      call({ op: "unseal", keys, sealed: s, threadChatId: tc });
+    const sealed = await sealRunSecrets(plane.publicKey, SECRETS, BINDING);
+    const unseal = (
+      keys: PlanePrivateKey[],
+      s: SealedRunSecrets,
+      binding: typeof BINDING,
+    ) => call({ op: "unseal", keys, sealed: s, binding });
 
-    expect(await unseal([other.privateKey], sealed, THREAD_CHAT_ID)).toEqual({
+    expect(await unseal([other.privateKey], sealed, BINDING)).toEqual({
       ok: false,
       reason: "tag",
       message: "payload-seal: unseal failed (kid=plane-workerd, reason=tag)",
     });
-    expect(await unseal([plane.privateKey], sealed, "tc_other")).toMatchObject({
+    expect(
+      await unseal([plane.privateKey], sealed, {
+        ...BINDING,
+        threadChatId: "tc_other",
+      }),
+    ).toMatchObject({
       ok: false,
       reason: "tag",
     });
     expect(
-      await unseal(
-        [plane.privateKey],
-        { ...sealed, kid: "plane-x" },
-        THREAD_CHAT_ID,
-      ),
+      await unseal([plane.privateKey], { ...sealed, kid: "plane-x" }, BINDING),
     ).toMatchObject({ ok: false, reason: "unknown-kid" });
     // Flip the first base64url character of ct to a different valid one.
     const first = sealed.ct[0] === "A" ? "B" : "A";
@@ -141,7 +143,7 @@ describe("payload-seal under workerd (#380 AC 5)", () => {
       await unseal(
         [plane.privateKey],
         { ...sealed, ct: first + sealed.ct.slice(1) },
-        THREAD_CHAT_ID,
+        BINDING,
       ),
     ).toMatchObject({ ok: false, reason: "tag" });
   });

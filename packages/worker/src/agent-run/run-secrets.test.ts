@@ -3,6 +3,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   PayloadSealError,
   generatePlaneKeyPair,
+  sealBindingOf,
   sealRunSecrets,
   type RunSecrets,
 } from "@terragon/utils/payload-seal";
@@ -52,7 +53,7 @@ describe("resolveRunSecrets", () => {
     const sealedSecrets = await sealRunSecrets(
       plane.publicKey,
       SECRETS,
-      BASE.threadChatId,
+      sealBindingOf(BASE),
     );
     // A hostile/legacy sender that puts BOTH on the wire: the plain-text
     // fields are discarded, the envelope wins.
@@ -88,7 +89,7 @@ describe("resolveRunSecrets", () => {
     const sealedSecrets = await sealRunSecrets(
       plane.publicKey,
       SECRETS,
-      BASE.threadChatId,
+      sealBindingOf(BASE),
     );
     await expect(
       resolveRunSecrets({

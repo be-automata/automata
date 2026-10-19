@@ -9,6 +9,7 @@ import { packsRequire } from "@terragon/shared/model/review-agent-settings";
 import { redactSecrets } from "@terragon/utils/redact";
 import {
   parsePlanePublicKey,
+  sealBindingOf,
   sealRunSecrets,
   type RunSecrets,
   type SealedRunSecrets,
@@ -110,6 +111,7 @@ async function triggerWithRetry(
   threadId: string,
   threadChatId: string,
   opts?: TriggerOpts,
+  scrub: (text: string) => string = redactSecrets,
 ): Promise<{ externalId: string | undefined }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= TRIGGER_MAX_ATTEMPTS; attempt++) {
@@ -124,9 +126,7 @@ async function triggerWithRetry(
         threadChatId,
         attempt,
         maxAttempts: TRIGGER_MAX_ATTEMPTS,
-        error: redactSecrets(
-          error instanceof Error ? error.message : String(error),
-        ),
+        error: scrub(error instanceof Error ? error.message : String(error)),
       });
       if (attempt < TRIGGER_MAX_ATTEMPTS) {
         await sleep(TRIGGER_BACKOFF_MS * attempt);
@@ -661,9 +661,21 @@ async function planTaskRun({
   }
 }
 
+/** A redactor that also blanks the exact values of one dispatch's secrets. */
+function scrubRunSecrets(secrets: RunSecrets): (text: string) => string {
+  const values = Object.values(secrets).filter(
+    (v): v is string => typeof v === "string" && v.length >= 8,
+  );
+  return (text) => {
+    let out = text;
+    for (const v of values) out = out.split(v).join("<redacted>");
+    return redactSecrets(out);
+  };
+}
+
 /**
  * #380: the one place a secret meets the wire. With a plane key configured
- * the three run secrets are sealed to it (AAD = threadChatId) and the input
+ * the three run secrets are sealed to it (AAD = the input's routing fields) and the input
  * gains `sealedSecrets`; the `kid` is logged so an operator can match it
  * against the kid list the worker logs at boot (rollout step 3). With no key
  * (the PR-1 rollout window) the legacy plain-text shape is returned and the
@@ -685,10 +697,12 @@ async function sealWireInput({
     return legacy;
   }
   const planeKey = parsePlanePublicKey(planeKeyText);
+  // Bound to the routing fields the worker will trust (callback URL above
+  // all): a copied envelope re-triggered with another callback fails its tag.
   const sealedSecrets = await sealRunSecrets(
     planeKey,
     secrets,
-    input.threadChatId,
+    sealBindingOf(input),
   );
   console.log("[hatchet] run secrets sealed", {
     threadId: input.threadId,
@@ -764,6 +778,8 @@ export async function dispatchAgentRun({
   // silently no-op every retry for the token's TTL (reviews on #135). The
   // revoke is keyed by runKey, so it is a harmless no-op when the mint itself
   // was the failure.
+  // Set once the secrets exist, so the catch below can scrub their values too.
+  let scrubForCatch: (text: string) => string = redactSecrets;
   try {
     // SETTLE all three before judging: Promise.all would reject on a sibling
     // while the mint's INSERT is still in flight, so the catch's revoke could
@@ -1010,6 +1026,12 @@ export async function dispatchAgentRun({
     // #380: seal inside the guarded region (see sealWireInput) — every lane,
     // one line, no plain-text path.
     const wireInput = await sealWireInput({ input, secrets });
+    // The generic redactor knows GitHub token families, not the daemon
+    // token's shape: in the legacy window an engine 4xx that echoes the
+    // request body would carry it, so every log line below scrubs the exact
+    // values of THIS dispatch's secrets as well.
+    const scrub = scrubRunSecrets(secrets);
+    scrubForCatch = scrub;
 
     // The token is minted BEFORE the trigger (the input carries its value). Retry
     // absorbs transients; only a FINAL failure lands in the catch below. A
@@ -1029,6 +1051,7 @@ export async function dispatchAgentRun({
             threadId,
             threadChatId,
             plan?.triggerOpts,
+            scrub,
           );
 
     // Best-effort bookkeeping after a successful trigger, run concurrently —
@@ -1100,7 +1123,7 @@ export async function dispatchAgentRun({
       {
         threadId,
         threadChatId,
-        error: redactSecrets(
+        error: scrubForCatch(
           error instanceof Error ? error.message : String(error),
         ),
       },

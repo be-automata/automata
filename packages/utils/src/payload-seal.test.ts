@@ -27,7 +27,13 @@ const SECRETS: RunSecrets = {
   githubReadToken: "ghs_readonlyTOKENvalue0123456789abc",
   daemonToken: "daemon_TOKEN_value_0123456789abcdefghijklmnopqrstuvwxyz",
 };
-const THREAD_CHAT_ID = "tc_01HZX";
+const BINDING = {
+  threadId: "thr_01HZX",
+  threadChatId: "tc_01HZX",
+  daemonCallbackUrl: "https://www.example.com",
+  repoFullName: "o/r",
+  orgId: "org-1",
+};
 
 function flipByteOf(field: string, at = 0): string {
   // Decode base64url → flip one byte → re-encode, so the field stays
@@ -68,7 +74,7 @@ async function expectSealError(
 describe("payload-seal (#380)", () => {
   it("round-trips the three secrets through a fresh envelope each time (protects=secrets survive seal→unseal; fails_when=any field is lost or altered; no_claim=nothing about the wire shape under workerd)", async () => {
     const { publicKey, privateKey } = await generatePlaneKeyPair("plane-a");
-    const sealed = await sealRunSecrets(publicKey, SECRETS, THREAD_CHAT_ID);
+    const sealed = await sealRunSecrets(publicKey, SECRETS, BINDING);
     expect(isSealedRunSecrets(sealed)).toBe(true);
     expect(sealed.v).toBe(1);
     expect(sealed.kid).toBe("plane-a");
@@ -82,10 +88,10 @@ describe("payload-seal (#380)", () => {
       expect(wire).not.toContain(f);
     }
     expect(wire).not.toContain("ghs_");
-    const out = await unsealRunSecrets([privateKey], sealed, THREAD_CHAT_ID);
+    const out = await unsealRunSecrets([privateKey], sealed, BINDING);
     expect(out).toEqual(SECRETS);
     // Fresh ephemeral + IV per seal: a second envelope shares no field.
-    const again = await sealRunSecrets(publicKey, SECRETS, THREAD_CHAT_ID);
+    const again = await sealRunSecrets(publicKey, SECRETS, BINDING);
     expect(again.epk).not.toBe(sealed.epk);
     expect(again.iv).not.toBe(sealed.iv);
     expect(again.ct).not.toBe(sealed.ct);
@@ -98,8 +104,8 @@ describe("payload-seal (#380)", () => {
       daemonToken: SECRETS.daemonToken,
       prompt: "SHOULD-NOT-TRAVEL",
     } as RunSecrets;
-    const sealed = await sealRunSecrets(publicKey, withExtra, THREAD_CHAT_ID);
-    const out = await unsealRunSecrets([privateKey], sealed, THREAD_CHAT_ID);
+    const sealed = await sealRunSecrets(publicKey, withExtra, BINDING);
+    const out = await unsealRunSecrets([privateKey], sealed, BINDING);
     expect(out).toEqual({
       installationToken: SECRETS.installationToken,
       daemonToken: SECRETS.daemonToken,
@@ -111,32 +117,47 @@ describe("payload-seal (#380)", () => {
   it("another key pair under the same kid cannot unseal (protects=confidentiality against a wrong plane key; fails_when=unseal succeeds or leaks a different class; no_claim=none beyond protects)", async () => {
     const a = await generatePlaneKeyPair("plane-a");
     const b = await generatePlaneKeyPair("plane-a");
-    const sealed = await sealRunSecrets(a.publicKey, SECRETS, THREAD_CHAT_ID);
+    const sealed = await sealRunSecrets(a.publicKey, SECRETS, BINDING);
     await expectSealError(
-      unsealRunSecrets([b.privateKey], sealed, THREAD_CHAT_ID),
+      unsealRunSecrets([b.privateKey], sealed, BINDING),
       "tag",
       "plane-a",
     );
   });
 
-  it("a different threadChatId fails the AAD (protects=an envelope is bound to its thread chat; fails_when=a lifted envelope unseals under another thread; no_claim=none beyond protects)", async () => {
+  it("any changed binding field fails the AAD — above all the callback URL (protects=an envelope is bound to its thread, chat, callback, repo and org; fails_when=a lifted envelope unseals under another input or a re-pointed callback; no_claim=none beyond protects)", async () => {
     const a = await generatePlaneKeyPair("plane-a");
-    const sealed = await sealRunSecrets(a.publicKey, SECRETS, THREAD_CHAT_ID);
-    await expectSealError(
-      unsealRunSecrets([a.privateKey], sealed, "tc_other"),
-      "tag",
-      "plane-a",
-    );
+    const sealed = await sealRunSecrets(a.publicKey, SECRETS, BINDING);
+    for (const changed of [
+      { threadChatId: "tc_other" },
+      { threadId: "thr_other" },
+      { daemonCallbackUrl: "https://attacker.example" },
+      { repoFullName: "o/other" },
+      { orgId: "org-2" },
+    ]) {
+      await expectSealError(
+        unsealRunSecrets([a.privateKey], sealed, { ...BINDING, ...changed }),
+        "tag",
+        "plane-a",
+      );
+    }
+    // Extra properties on the binding object never change the AAD.
+    expect(
+      await unsealRunSecrets([a.privateKey], sealed, {
+        ...BINDING,
+        extra: "ignored",
+      } as typeof BINDING),
+    ).toEqual(SECRETS);
   });
 
   it("flipping one byte of ct fails (protects=integrity of the ciphertext; fails_when=a tampered ct decrypts; no_claim=none beyond protects)", async () => {
     const a = await generatePlaneKeyPair("plane-a");
-    const sealed = await sealRunSecrets(a.publicKey, SECRETS, THREAD_CHAT_ID);
+    const sealed = await sealRunSecrets(a.publicKey, SECRETS, BINDING);
     await expectSealError(
       unsealRunSecrets(
         [a.privateKey],
         { ...sealed, ct: flipByteOf(sealed.ct, 3) },
-        THREAD_CHAT_ID,
+        BINDING,
       ),
       "tag",
       "plane-a",
@@ -145,12 +166,12 @@ describe("payload-seal (#380)", () => {
 
   it("flipping one byte of iv fails (protects=integrity of the nonce; fails_when=a tampered iv decrypts; no_claim=none beyond protects)", async () => {
     const a = await generatePlaneKeyPair("plane-a");
-    const sealed = await sealRunSecrets(a.publicKey, SECRETS, THREAD_CHAT_ID);
+    const sealed = await sealRunSecrets(a.publicKey, SECRETS, BINDING);
     await expectSealError(
       unsealRunSecrets(
         [a.privateKey],
         { ...sealed, iv: flipByteOf(sealed.iv, 5) },
-        THREAD_CHAT_ID,
+        BINDING,
       ),
       "tag",
       "plane-a",
@@ -159,11 +180,11 @@ describe("payload-seal (#380)", () => {
 
   it("flipping one byte of epk fails (protects=integrity of the ephemeral key; fails_when=a tampered epk still derives the AES key; no_claim=none beyond protects)", async () => {
     const a = await generatePlaneKeyPair("plane-a");
-    const sealed = await sealRunSecrets(a.publicKey, SECRETS, THREAD_CHAT_ID);
+    const sealed = await sealRunSecrets(a.publicKey, SECRETS, BINDING);
     const err = await unsealRunSecrets(
       [a.privateKey],
       { ...sealed, epk: flipByteOf(sealed.epk, 7) },
-      THREAD_CHAT_ID,
+      BINDING,
     ).then(
       () => null,
       (e: unknown) => e,
@@ -178,20 +199,16 @@ describe("payload-seal (#380)", () => {
 
   it("an unknown kid is refused before any key is touched (protects=key selection by kid; fails_when=a foreign kid is tried against some key; no_claim=none beyond protects)", async () => {
     const a = await generatePlaneKeyPair("plane-a");
-    const sealed = await sealRunSecrets(a.publicKey, SECRETS, THREAD_CHAT_ID);
+    const sealed = await sealRunSecrets(a.publicKey, SECRETS, BINDING);
     await expectSealError(
-      unsealRunSecrets(
-        [a.privateKey],
-        { ...sealed, kid: "plane-z" },
-        THREAD_CHAT_ID,
-      ),
+      unsealRunSecrets([a.privateKey], { ...sealed, kid: "plane-z" }, BINDING),
       "unknown-kid",
       "plane-z",
     );
     const e = await unsealRunSecrets(
       [a.privateKey],
       { ...sealed, kid: "evil kid with spaces" },
-      THREAD_CHAT_ID,
+      BINDING,
     ).then(
       () => null,
       (x: unknown) => x,
@@ -204,25 +221,13 @@ describe("payload-seal (#380)", () => {
   it("rotation overlap: the key is found at either position in keys[] (protects=rotation keeps old runs unsealable; fails_when=only the first key is consulted; no_claim=none beyond protects)", async () => {
     const old = await generatePlaneKeyPair("plane-2026-09");
     const next = await generatePlaneKeyPair("plane-2026-10");
-    const sealedOld = await sealRunSecrets(
-      old.publicKey,
-      SECRETS,
-      THREAD_CHAT_ID,
-    );
-    const sealedNew = await sealRunSecrets(
-      next.publicKey,
-      SECRETS,
-      THREAD_CHAT_ID,
-    );
+    const sealedOld = await sealRunSecrets(old.publicKey, SECRETS, BINDING);
+    const sealedNew = await sealRunSecrets(next.publicKey, SECRETS, BINDING);
     const ring = [next.privateKey, old.privateKey];
-    expect(await unsealRunSecrets(ring, sealedOld, THREAD_CHAT_ID)).toEqual(
-      SECRETS,
-    );
-    expect(await unsealRunSecrets(ring, sealedNew, THREAD_CHAT_ID)).toEqual(
-      SECRETS,
-    );
+    expect(await unsealRunSecrets(ring, sealedOld, BINDING)).toEqual(SECRETS);
+    expect(await unsealRunSecrets(ring, sealedNew, BINDING)).toEqual(SECRETS);
     expect(
-      await unsealRunSecrets([...ring].reverse(), sealedNew, THREAD_CHAT_ID),
+      await unsealRunSecrets([...ring].reverse(), sealedNew, BINDING),
     ).toEqual(SECRETS);
   });
 
@@ -234,15 +239,15 @@ describe("payload-seal (#380)", () => {
       sealRunSecrets(
         a.publicKey,
         { installationToken: 42, daemonToken: "d" } as unknown as RunSecrets,
-        THREAD_CHAT_ID,
+        BINDING,
       ),
     ).rejects.toThrow("shape");
-    const sealed = await sealRunSecrets(a.publicKey, SECRETS, THREAD_CHAT_ID);
+    const sealed = await sealRunSecrets(a.publicKey, SECRETS, BINDING);
     await expectSealError(
       unsealRunSecrets(
         [a.privateKey],
         { ...sealed, v: 2 } as unknown as SealedRunSecrets,
-        THREAD_CHAT_ID,
+        BINDING,
       ),
       "version",
       "plane-a",
@@ -251,7 +256,7 @@ describe("payload-seal (#380)", () => {
       unsealRunSecrets(
         [a.privateKey],
         { ...sealed, ct: "not*base64url" },
-        THREAD_CHAT_ID,
+        BINDING,
       ),
       "malformed",
       "plane-a",
@@ -260,7 +265,7 @@ describe("payload-seal (#380)", () => {
       unsealRunSecrets(
         [a.privateKey],
         { ...sealed, epk: sealed.epk.slice(0, 10) },
-        THREAD_CHAT_ID,
+        BINDING,
       ),
       "malformed",
       "plane-a",
@@ -269,7 +274,7 @@ describe("payload-seal (#380)", () => {
       unsealRunSecrets(
         [a.privateKey],
         null as unknown as SealedRunSecrets,
-        THREAD_CHAT_ID,
+        BINDING,
       ),
       "malformed",
       "<invalid>",
@@ -294,10 +299,10 @@ describe("payload-seal (#380)", () => {
     const sealed = await sealRunSecrets(
       parsePlanePublicKey(text),
       SECRETS,
-      THREAD_CHAT_ID,
+      BINDING,
     );
-    expect(
-      await unsealRunSecrets([a.privateKey], sealed, THREAD_CHAT_ID),
-    ).toEqual(SECRETS);
+    expect(await unsealRunSecrets([a.privateKey], sealed, BINDING)).toEqual(
+      SECRETS,
+    );
   });
 });

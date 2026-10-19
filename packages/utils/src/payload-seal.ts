@@ -15,9 +15,11 @@
  *   eph        = X25519 ephemeral key pair, fresh per envelope
  *   shared     = X25519(eph.sk, plane.pk)
  *   key        = HKDF-SHA256(ikm=shared, salt=eph.pk || plane.pk, info=INFO), 256 bit
- *   ct         = AES-256-GCM(key, iv=random 12 B, aad=INFO|kid|threadChatId, pt=JSON)
- * The AAD binds the envelope to its thread chat and key id: an envelope lifted
- * from one run cannot be replayed into another thread's input.
+ *   ct         = AES-256-GCM(key, iv=random 12 B, aad=INFO|kid|binding, pt=JSON)
+ * The AAD binds the envelope to its key id and to the input's routing fields
+ * (thread, thread chat, callback URL, repo, org): an envelope lifted from one
+ * run cannot be replayed into another input, nor re-pointed at another
+ * callback.
  *
  * `PayloadSealError.message` never carries key or plaintext bytes — only the
  * (charset-restricted, truncated) `kid` and a failure class — so it is safe
@@ -128,8 +130,44 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
   return out;
 }
 
-function aadFor(kid: string, threadChatId: string): Uint8Array {
-  return utf8.encode(`${INFO}|${kid}|${threadChatId}`);
+/**
+ * The routing fields an envelope is bound to (the AAD). The worker trusts
+ * the plain-text input around the envelope — above all `daemonCallbackUrl`,
+ * where the unsealed daemon token is sent — so a sealed input copied into a
+ * NEW trigger with a different callback (anyone holding the engine API token
+ * can do that) must fail the tag, not hand the tokens to that callback.
+ * Canonical JSON array encoding, so no field can smuggle a separator.
+ */
+export type SealBinding = {
+  threadId: string;
+  threadChatId: string;
+  daemonCallbackUrl: string;
+  repoFullName: string;
+  orgId: string;
+};
+
+/** Exactly the five binding fields of an input (never a spread of the rest). */
+export function sealBindingOf(input: SealBinding): SealBinding {
+  return {
+    threadId: input.threadId,
+    threadChatId: input.threadChatId,
+    daemonCallbackUrl: input.daemonCallbackUrl,
+    repoFullName: input.repoFullName,
+    orgId: input.orgId,
+  };
+}
+
+function aadFor(kid: string, binding: SealBinding): Uint8Array {
+  const b = sealBindingOf(binding);
+  return utf8.encode(
+    `${INFO}|${kid}|${JSON.stringify([
+      b.threadId,
+      b.threadChatId,
+      b.daemonCallbackUrl,
+      b.repoFullName,
+      b.orgId,
+    ])}`,
+  );
 }
 
 /**
@@ -294,14 +332,14 @@ function assertRunSecrets(value: unknown): asserts value is RunSecrets {
 }
 
 /**
- * Seal `secrets` to the plane key, bound to `threadChatId`. Every call makes a
+ * Seal `secrets` to the plane key, bound to the input's routing fields. Every call makes a
  * fresh ephemeral key and IV, so two seals of the same secrets never share a
  * byte of envelope.
  */
 export async function sealRunSecrets(
   pk: PlanePublicKey,
   secrets: RunSecrets,
-  threadChatId: string,
+  binding: SealBinding,
 ): Promise<SealedRunSecrets> {
   if (!KID_RE.test(pk.kid)) {
     throw new Error("payload-seal: plane key id has an invalid character set");
@@ -348,7 +386,7 @@ export async function sealRunSecrets(
     {
       name: "AES-GCM",
       iv,
-      additionalData: aadFor(pk.kid, threadChatId),
+      additionalData: aadFor(pk.kid, binding),
       tagLength: GCM_TAG_BYTES * 8,
     },
     key,
@@ -367,13 +405,13 @@ export async function sealRunSecrets(
  * Unseal with the key whose `kid` matches. Every failure is a PayloadSealError
  * naming only the kid and a failure class: unknown kid, a version other than
  * 1, an undecodable field, a key that cannot be imported, a derive failure
- * (e.g. a low-order ephemeral point), a bad tag (wrong key, wrong
- * threadChatId, any flipped byte), or a plaintext that is not RunSecrets.
+ * (e.g. a low-order ephemeral point), a bad tag (wrong key, any binding
+ * field changed, any flipped byte), or a plaintext that is not RunSecrets.
  */
 export async function unsealRunSecrets(
   keys: readonly PlanePrivateKey[],
   sealed: SealedRunSecrets,
-  threadChatId: string,
+  binding: SealBinding,
 ): Promise<RunSecrets> {
   const kid = typeof sealed?.kid === "string" ? sealed.kid : "";
   if (!isSealedRunSecrets(sealed)) {
@@ -440,7 +478,7 @@ export async function unsealRunSecrets(
       {
         name: "AES-GCM",
         iv,
-        additionalData: aadFor(sealed.kid, threadChatId),
+        additionalData: aadFor(sealed.kid, binding),
         tagLength: GCM_TAG_BYTES * 8,
       },
       aesKey,

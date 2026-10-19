@@ -1,4 +1,5 @@
 import {
+  sealBindingOf,
   unsealRunSecrets,
   type PlanePrivateKey,
   type RunSecrets,
@@ -49,7 +50,8 @@ export async function resolveRunSecrets({
     const secrets = await unsealRunSecrets(
       keys,
       input.sealedSecrets,
-      input.threadChatId,
+      // The AAD covers the routing fields the worker is about to trust.
+      sealBindingOf(input),
     );
     return {
       input,

@@ -208,9 +208,8 @@ describe("agentRunWorkflow onFailure (#2)", () => {
   // foreign envelope; fails_when=onFailure reads a plain-text field, posts
   // with a wrong token, or logs a secret byte; no_claim=the sweep itself.
   it("#380: unseals the daemon token from the envelope before posting", async () => {
-    const { generatePlaneKeyPair, sealRunSecrets } = await import(
-      "@terragon/utils/payload-seal"
-    );
+    const { generatePlaneKeyPair, sealBindingOf, sealRunSecrets } =
+      await import("@terragon/utils/payload-seal");
     const { resetPlaneKeyRingForTests } = await import("./payload-seal-keys");
     const { mkdtempSync, writeFileSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
@@ -240,7 +239,7 @@ describe("agentRunWorkflow onFailure (#2)", () => {
             installationToken: "ghs_sealed_inst",
             daemonToken: "sealed-daemon",
           },
-          INPUT.threadChatId,
+          sealBindingOf(INPUT),
         ),
       };
       await workflowDef.onFailure.fn(sealed, {
@@ -261,7 +260,7 @@ describe("agentRunWorkflow onFailure (#2)", () => {
           sealedSecrets: await sealRunSecrets(
             other.publicKey,
             { installationToken: "ghs_x", daemonToken: "y" },
-            INPUT.threadChatId,
+            sealBindingOf(INPUT),
           ),
         },
         { errors: () => ({ run: "boom" }) },

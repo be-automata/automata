@@ -188,10 +188,17 @@ async function decide(
       // attempt (dispatch and its bookkeeping writes land within seconds of
       // the row's createdAt); this row is stale evidence, so it is retired
       // without a terminal and the live attempt is left to its own run.
+      // Two signals, either suffices: the thread's stamped active run is a
+      // DIFFERENT run (a newer review dispatch restamped it — whatever the
+      // thread's status now), or the thread is booting again after a write
+      // well past this row's dispatch (a non-review resume, which does not
+      // restamp).
       if (
-        run.threadBooting &&
-        run.threadUpdatedAt.getTime() >
-          run.createdAt.getTime() + STALE_ROW_RESUME_MARGIN_MS
+        (run.threadActiveRunExternalId !== null &&
+          run.threadActiveRunExternalId !== run.externalId) ||
+        (run.threadBooting &&
+          run.threadUpdatedAt.getTime() >
+            run.createdAt.getTime() + STALE_ROW_RESUME_MARGIN_MS)
       ) {
         return { kind: "stale-row" };
       }
@@ -459,7 +466,10 @@ export async function runSupersedeSweep(
     // Fail toward "leave it": a live run, a finished one www missed (the
     // stalled watchdog owns it) or an empty listing (the trigger never
     // landed, or the window missed it) is not this rule's to terminate.
-    if (runs.length === 0 || !runs.every((r) => r.status === "FAILED")) {
+    // CANCELLED predecessors (a superseded earlier attempt) do not count;
+    // every remaining run must have FAILED.
+    const live = runs.filter((r) => r.status !== "CANCELLED");
+    if (live.length === 0 || !live.every((r) => r.status === "FAILED")) {
       return;
     }
     try {

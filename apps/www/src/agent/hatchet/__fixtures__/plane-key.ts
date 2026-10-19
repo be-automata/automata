@@ -3,8 +3,10 @@ import { env } from "@terragon/env/apps-www";
 import {
   formatPlanePublicKey,
   generatePlaneKeyPair,
+  sealBindingOf,
   unsealRunSecrets,
   type RunSecrets,
+  type SealBinding,
   type SealedRunSecrets,
 } from "@terragon/utils/payload-seal";
 
@@ -18,7 +20,7 @@ export type TestPlaneKey = {
   readonly kid: string;
   /** The key pair; `undefined` until beforeAll ran. */
   pair: Awaited<ReturnType<typeof generatePlaneKeyPair>> | undefined;
-  /** Open a captured input's envelope under the input's own threadChatId. */
+  /** Open a captured input's envelope under the input's own routing fields. */
   unseal(input: Record<string, unknown>): Promise<RunSecrets>;
   /** Set env to this key again (after a case changed it). */
   reinstall(): void;
@@ -34,7 +36,7 @@ export function installTestPlaneKey(kid: string): TestPlaneKey {
       return unsealRunSecrets(
         [key.pair.privateKey],
         input.sealedSecrets as SealedRunSecrets,
-        input.threadChatId as string,
+        sealBindingOf(input as unknown as SealBinding),
       );
     },
     reinstall() {

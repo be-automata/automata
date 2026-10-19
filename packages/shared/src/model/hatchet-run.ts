@@ -205,6 +205,9 @@ export async function findSweepCandidates({
       // run was created, and booting again, belongs to a LATER attempt
       // (a resume) — this row is stale, not evidence about that attempt.
       threadUpdatedAt: threadTable.updatedAt,
+      // #380: the thread's stamped active run (review dispatches restamp it).
+      // A row whose externalId is not the stamp belongs to an OLDER attempt.
+      threadActiveRunExternalId: threadTable.activeRunExternalId,
     })
     .from(hatchetRun)
     .innerJoin(threadTable, eq(threadTable.id, hatchetRun.threadId))

@@ -5,6 +5,7 @@ import {
   type PlanePrivateKey,
   type PlanePublicKey,
   type RunSecrets,
+  type SealBinding,
   type SealedRunSecrets,
 } from "@terragon/utils/payload-seal";
 
@@ -20,13 +21,13 @@ type Body =
       op: "seal";
       pk: PlanePublicKey;
       secrets: RunSecrets;
-      threadChatId: string;
+      binding: SealBinding;
     }
   | {
       op: "unseal";
       keys: PlanePrivateKey[];
       sealed: SealedRunSecrets;
-      threadChatId: string;
+      binding: SealBinding;
     }
   | { op: "probe" };
 
@@ -58,14 +59,14 @@ export default {
         const sealed = await sealRunSecrets(
           body.pk,
           body.secrets,
-          body.threadChatId,
+          body.binding,
         );
         return Response.json({ ok: true, sealed });
       }
       const secrets = await unsealRunSecrets(
         body.keys,
         body.sealed,
-        body.threadChatId,
+        body.binding,
       );
       return Response.json({ ok: true, secrets });
     } catch (e) {

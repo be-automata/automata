@@ -23,6 +23,15 @@ import { GuardedFileError, readGuardedFile } from "./guarded-file";
 
 export const DEFAULT_PAYLOAD_SEAL_KEY_FILE = "/etc/automata/payload-seal.key";
 
+/** A fixed binding for the boot probe — never a real run's. */
+const BOOT_PROBE_BINDING = {
+  threadId: "boot-probe",
+  threadChatId: "boot-probe",
+  daemonCallbackUrl: "https://boot.probe.invalid",
+  repoFullName: "boot/probe",
+  orgId: "boot-probe",
+};
+
 /** Thrown when the configured file does not exist (ENOENT) — the one tolerated case. */
 export class PlaneKeyFileMissingError extends Error {
   constructor(readonly path: string) {
@@ -108,9 +117,9 @@ export async function assertPlaneKeysUsable(
       const sealed = await sealRunSecrets(
         publicKeyOf(key),
         probe,
-        "boot-probe",
+        BOOT_PROBE_BINDING,
       );
-      roundTrip = await unsealRunSecrets(keys, sealed, "boot-probe");
+      roundTrip = await unsealRunSecrets(keys, sealed, BOOT_PROBE_BINDING);
     } catch (err) {
       throw new Error(
         `payload-seal: boot probe failed for kid "${key.kid}" (${err instanceof Error ? err.message : String(err)})`,
