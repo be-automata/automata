@@ -88,4 +88,13 @@ if [ "$AFTER" -lt "$BEFORE" ]; then
   fail "table count dropped ${BEFORE} -> ${AFTER}: something flushed the ruleset. Docker's chains may be gone; restart docker and investigate before running anything."
 fi
 
-echo "[nft-preflight] OK — fencing uid(s) ${UIDS_IN_CONF}; tables ${BEFORE} -> ${AFTER}"
+# #205: record what the loaded fence covers, for the worker's boot check. At
+# WORKER_BOX_SLOTS > 1 the worker refuses to boot unless every slot uid is in
+# this file — written ONLY after a successful load, on tmpfs so a boot where
+# this unit never ran has no file to show.
+FENCE_UIDS_FILE="${FENCE_UIDS_FILE:-/run/automata/egress-fence.uids}"
+install -d -m 755 "$(dirname "$FENCE_UIDS_FILE")" || fail "cannot create $(dirname "$FENCE_UIDS_FILE")"
+printf '%s\n' "$UIDS_IN_CONF" > "$FENCE_UIDS_FILE" || fail "cannot write $FENCE_UIDS_FILE"
+chmod 644 "$FENCE_UIDS_FILE"
+
+echo "[nft-preflight] OK — fencing uid(s) ${UIDS_IN_CONF}; tables ${BEFORE} -> ${AFTER}; recorded in ${FENCE_UIDS_FILE}"

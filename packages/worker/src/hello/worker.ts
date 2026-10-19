@@ -20,6 +20,8 @@ import {
 import { harnessDoctorLine } from "../agent-run/batteries-seed";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import {
+  EGRESS_FENCE_UIDS_FILE,
+  assertFenceCoversSlotUids,
   assertSlotAccountsExist,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
@@ -167,10 +169,18 @@ async function main() {
       // #205: every slot's account must exist NOW. A missing slot account would
       // otherwise surface as the first run on that slot dying in sudo, while the
       // box reports N slots of capacity it does not have.
-      await assertSlotAccountsExist(cfg.agentUsers);
+      const slotUids = await assertSlotAccountsExist(cfg.agentUsers);
       console.log(
-        `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")})`,
+        `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")}; uids ${slotUids.join(", ")})`,
       );
+      // #205: at N > 1 the kernel fence must provably cover every slot uid —
+      // the preflight's marker, written only after a successful `nft -f`.
+      if (cfg.boxSlots > 1) {
+        assertFenceCoversSlotUids({ uids: slotUids });
+        console.log(
+          `[worker-boot] egress fence covers every slot uid (${EGRESS_FENCE_UIDS_FILE})`,
+        );
+      }
     }
   } catch (err) {
     console.error(

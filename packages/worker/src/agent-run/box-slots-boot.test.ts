@@ -1,22 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  assertFenceCoversSlotUids,
   assertSlotAccountsExist,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
 } from "./box-slots-boot";
 
 describe("assertSlotAccountsExist (#205 boot)", () => {
-  it("resolves every slot account (in parallel) and returns when each one exists", async () => {
-    const resolveUid = vi.fn(async () => 999);
-    await assertSlotAccountsExist(
+  it("resolves every slot account (in parallel) and returns their uids in slot order", async () => {
+    const resolveUid = vi.fn(async (u: string) =>
+      u === "automata-agent" ? 999 : 2001,
+    );
+    const uids = await assertSlotAccountsExist(
       ["automata-agent", "automata-agent-1"],
       resolveUid,
+      1000,
     );
+    expect(uids).toEqual([999, 2001]);
     expect(resolveUid.mock.calls).toEqual([
       ["automata-agent"],
       ["automata-agent-1"],
     ]);
+  });
+
+  it("refuses two slot logins that alias one uid, a slot account at uid 0, and one at the worker's own uid (ADR-007 I4)", async () => {
+    await expect(
+      assertSlotAccountsExist(
+        ["automata-agent", "automata-agent-1"],
+        async () => 999,
+        1000,
+      ),
+    ).rejects.toThrow(/share uid 999.*one uid per slot/);
+    await expect(
+      assertSlotAccountsExist(["automata-agent"], async () => 0, 1000),
+    ).rejects.toThrow(/uid 0/);
+    await expect(
+      assertSlotAccountsExist(["automata-agent"], async () => 1000, 1000),
+    ).rejects.toThrow(/worker's own uid 1000/);
   });
 
   it("names every missing account (with the resolver's reason) and the provisioning doc", async () => {
@@ -36,8 +57,59 @@ describe("assertSlotAccountsExist (#205 boot)", () => {
 
   it("no accounts (agent-uid mode off) ⇒ nothing is resolved", async () => {
     const resolveUid = vi.fn(async () => 0);
-    await assertSlotAccountsExist([], resolveUid);
+    expect(await assertSlotAccountsExist([], resolveUid, 1000)).toEqual([]);
     expect(resolveUid).not.toHaveBeenCalled();
+  });
+});
+
+describe("assertFenceCoversSlotUids (#205 boot, Linux N > 1)", () => {
+  it("passes when every slot uid is in the preflight's marker (any separator)", () => {
+    expect(() =>
+      assertFenceCoversSlotUids({
+        uids: [999, 2001],
+        platform: "linux",
+        readMarker: () => "999, 2001\n",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertFenceCoversSlotUids({
+        uids: [999],
+        platform: "linux",
+        readMarker: () => "2001 999",
+      }),
+    ).not.toThrow();
+  });
+
+  it("refuses when the marker is missing (fence never loaded this boot), naming the unit and the file", () => {
+    expect(() =>
+      assertFenceCoversSlotUids({
+        uids: [999, 2001],
+        platform: "linux",
+        markerPath: "/run/automata/egress-fence.uids",
+        readMarker: () => {
+          throw new Error("ENOENT");
+        },
+      }),
+    ).toThrow(
+      /coverage unproven.*\/run\/automata\/egress-fence\.uids.*ENOENT.*automata-egress/,
+    );
+  });
+
+  it("refuses when a slot uid is not fenced, naming it and the fenced set", () => {
+    expect(() =>
+      assertFenceCoversSlotUids({
+        uids: [999, 2001],
+        platform: "linux",
+        readMarker: () => "999",
+      }),
+    ).toThrow(/does not cover slot uid\(s\) 2001 \(fenced: 999\)/);
+  });
+
+  it("is a no-op off Linux (PF fences the pilot) and with no slot accounts", () => {
+    const readMarker = vi.fn(() => "");
+    assertFenceCoversSlotUids({ uids: [999], platform: "darwin", readMarker });
+    assertFenceCoversSlotUids({ uids: [], platform: "linux", readMarker });
+    expect(readMarker).not.toHaveBeenCalled();
   });
 });
 

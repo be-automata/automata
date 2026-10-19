@@ -69,7 +69,10 @@ export type EgressDecisionEvent = {
    * this run — a sibling slot probing another run's loopback proxy is the exact
    * threat the credential exists for, so it must leave an audit event. The
    * presented header is never recorded. In-process only: the wire row to
-   * /api/daemon/egress-event is a plain deny.
+   * /api/daemon/egress-event is a plain deny. The run's own clients never
+   * trip it: undici/Node, curl, Go and gh send the URL's credential up front,
+   * and git is told `http.proxyAuthMethod=basic` (daemon-env.ts) so libcurl's
+   * anyauth probe never happens.
    */
   reason?: "proxy-auth";
 };

@@ -2644,6 +2644,12 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
       // The unit feeds the preflight the slot accounts at boot.
       const unit = deployFile("linux", "automata-egress.service");
       expect(unit).toMatch(/^EnvironmentFile=-\/etc\/automata\/egress\.env$/m);
+      // The worker's fail-closed proof: the covered uids are recorded only
+      // AFTER a successful load, where the worker's boot check reads them.
+      expect(pre).toMatch(/\/run\/automata\/egress-fence\.uids/);
+      expect(pre.indexOf("nft -f ")).toBeLessThan(
+        pre.indexOf('> "$FENCE_UIDS_FILE"'),
+      );
     });
 
     it("the nft preflight parses a skuid SET and checks every uid in it", () => {

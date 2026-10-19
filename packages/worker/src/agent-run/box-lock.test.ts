@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -682,6 +682,17 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       await held.release();
       expect(await tryLock(root, 0)).toBe(0);
       expect(await tryLock(root, 1)).toBe(0);
+    }, 15_000);
+
+    it("every slot lock file is the worker's alone: mode 0600 (flock(2) on a read-only fd would otherwise let a sibling slot's agent take the slot)", async () => {
+      const a = await acquireBoxSlot({ root, slots: 2, holder: "A" });
+      const b = await acquireBoxSlot({ root, slots: 2, holder: "B" });
+      locks.push(a, b);
+      for (const slot of [0, 1]) {
+        expect(statSync(boxLockPath(root, slot)).mode & 0o777).toBe(0o600);
+      }
+      await a.release();
+      await b.release();
     }, 15_000);
 
     it("slots = 2: a release that lands WHILE the waiter's sweep is still in flight is not missed — the waiter lands on that slot", async () => {

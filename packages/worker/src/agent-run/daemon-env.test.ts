@@ -909,6 +909,29 @@ describe("harness battery env (gstack, gsd, ruflo)", () => {
     expect(plain.BROWSE_PROXY_PASS).toBeUndefined();
   });
 
+  it("#205 a credentialed run proxy makes git send Basic proxy auth up front (no 407 round-trip, no false deny); a plain proxy adds nothing", () => {
+    const gitEntries = (env: NodeJS.ProcessEnv) => {
+      const out = new Map<string, string>();
+      for (let i = 0; i < Number(env.GIT_CONFIG_COUNT); i++) {
+        out.set(env[`GIT_CONFIG_KEY_${i}`]!, env[`GIT_CONFIG_VALUE_${i}`]!);
+      }
+      return out;
+    };
+    const withCred = buildDaemonEnv({
+      ...base,
+      egressProxyUrl: "http://run:s3cret@127.0.0.1:9999",
+    });
+    expect(gitEntries(withCred).get("http.proxyAuthMethod")).toBe("basic");
+    const plain = buildDaemonEnv({
+      ...base,
+      egressProxyUrl: "http://127.0.0.1:9999",
+    });
+    expect(gitEntries(plain).has("http.proxyAuthMethod")).toBe(false);
+    expect(gitEntries(buildDaemonEnv(base)).has("http.proxyAuthMethod")).toBe(
+      false,
+    );
+  });
+
   it("hands the seeded packs' PATH dirs to the daemon, never PATH itself", () => {
     const env = buildDaemonEnv({
       ...base,

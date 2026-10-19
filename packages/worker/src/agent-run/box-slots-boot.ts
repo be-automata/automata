@@ -12,12 +12,17 @@ import { resolveUidViaId } from "./uid-reaper";
 /**
  * #205: every slot account must resolve to a uid — checked in parallel through
  * the reaper's bounded `id -u` (2 s, SIGKILL), so a hung NSS lookup cannot wedge
- * boot. The names were validated as plain logins by loadWorkerConfig.
+ * boot. The names were validated as plain logins by loadWorkerConfig. Returns
+ * the uids, in slot order, and refuses the box when the uids are not what the
+ * fence assumes (ADR-007 I4, one uid per slot and never the worker's): two
+ * logins aliasing one uid (`useradd -o`), uid 0, or the worker's own uid would
+ * all pass a name check and share HOME, sockets, /proc and the uid-wide kill.
  */
 export async function assertSlotAccountsExist(
   users: string[],
   resolveUid: (user: string) => Promise<number> = resolveUidViaId,
-): Promise<void> {
+  selfUid: number | undefined = process.getuid?.(),
+): Promise<number[]> {
   const results = await Promise.allSettled(users.map((u) => resolveUid(u)));
   const missing = results.flatMap((r, i) =>
     r.status === "rejected"
@@ -33,14 +38,79 @@ export async function assertSlotAccountsExist(
       `slot account(s) ${missing.join(", ")} do not exist on this box; provision them (deploy/AGENT-UID-PROVISIONING.md §6) or lower WORKER_BOX_SLOTS`,
     );
   }
+  const uids = results.map((r) => (r.status === "fulfilled" ? r.value : -1));
+  const seen = new Map<number, string>();
+  uids.forEach((uid, i) => {
+    const user = users[i]!;
+    if (uid === 0) {
+      throw new Error(
+        `slot account ${JSON.stringify(user)} is uid 0; refusing`,
+      );
+    }
+    if (selfUid !== undefined && uid === selfUid) {
+      throw new Error(
+        `slot account ${JSON.stringify(user)} is the worker's own uid ${uid}; a run would share the worker's files, sockets and processes — refusing`,
+      );
+    }
+    const other = seen.get(uid);
+    if (other !== undefined) {
+      throw new Error(
+        `slot accounts ${JSON.stringify(other)} and ${JSON.stringify(user)} share uid ${uid}; one uid per slot is the fence between concurrent runs (ADR-007 I4) — refusing`,
+      );
+    }
+    seen.set(uid, user);
+  });
+  return uids;
 }
 
+/** Where nft-preflight.sh records the uids the loaded fence covers (tmpfs: gone at reboot, rewritten by the automata-egress unit). */
+export const EGRESS_FENCE_UIDS_FILE = "/run/automata/egress-fence.uids";
+
 /**
- * #205: a loud line when N × per-run ceiling exceeds the box's RAM. Not a
- * refusal — #371's headroom check bounds the SUM at admission and #372's tuple
- * validation decides what to refuse — but an operator who set N = 3 with a
- * 5000M ceiling on a 7.6 GB box should read it at boot, not after the ENOMEM.
+ * #205: at N > 1 on Linux the box refuses to boot unless the kernel egress
+ * fence provably covers EVERY slot uid. The proof is the uid list the preflight
+ * wrote after `nft -f` succeeded; a missing file means the fence never loaded
+ * this boot, a missing uid means egress-nft.conf was not re-rendered for the
+ * new slot — either way that slot's agent would egress around the cooperative
+ * proxy with no backstop while the box looked healthy. Not Linux ⇒ nothing (the
+ * macOS pilot is fenced by PF and runs N = 1 by construction).
  */
+export function assertFenceCoversSlotUids(opts: {
+  uids: readonly number[];
+  markerPath?: string;
+  platform?: NodeJS.Platform;
+  readMarker?: (path: string) => string;
+}): void {
+  const {
+    uids,
+    markerPath = EGRESS_FENCE_UIDS_FILE,
+    platform = process.platform,
+    readMarker = (p) => readFileSync(p, "utf8"),
+  } = opts;
+  if (platform !== "linux" || uids.length === 0) return;
+  let fenced: Set<number>;
+  try {
+    fenced = new Set(
+      readMarker(markerPath)
+        .split(/[\s,]+/)
+        .filter(Boolean)
+        .map(Number),
+    );
+  } catch (e) {
+    throw new Error(
+      `egress fence coverage unproven: cannot read ${markerPath} (${
+        e instanceof Error ? e.message : String(e)
+      }) — the automata-egress unit (nft-preflight.sh) did not load the fence this boot; at WORKER_BOX_SLOTS > 1 the box refuses to run unfenced slots`,
+    );
+  }
+  const uncovered = uids.filter((u) => !fenced.has(u));
+  if (uncovered.length > 0) {
+    throw new Error(
+      `egress fence does not cover slot uid(s) ${uncovered.join(", ")} (fenced: ${[...fenced].join(", ")}); re-render egress-nft.conf for every slot account and re-run nft-preflight.sh (deploy/AGENT-UID-PROVISIONING.md §6)`,
+    );
+  }
+}
+
 /**
  * #205: slot accounts that exist on this box ABOVE the current N — left behind
  * by a higher WORKER_BOX_SLOTS (the §6 rollback keeps them). Probed with the
@@ -74,6 +144,12 @@ export interface RetiredSlot {
   account: string;
 }
 
+/**
+ * #205: a loud line when N × per-run ceiling exceeds the box's RAM. Not a
+ * refusal — #371's headroom check bounds the SUM at admission and #372's tuple
+ * validation decides what to refuse — but an operator who set N = 3 with a
+ * 5000M ceiling on a 7.6 GB box should read it at boot, not after the ENOMEM.
+ */
 export function warnIfSlotsExceedMemory(
   cfg: { boxSlots: number; memoryMaxBytes: number },
   readMeminfo: () => string = () => readFileSync("/proc/meminfo", "utf8"),

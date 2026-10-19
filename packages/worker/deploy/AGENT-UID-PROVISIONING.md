@@ -271,10 +271,16 @@ from the N = 2 period cannot outlive the rollback. Keep those accounts in the
 sudoers Runas list; without them the boot log reports them as `NOT scanned (not
 fatal)`.
 
-Fence coverage: run `nft-preflight.sh` and `nft-verify.sh` with
+Fence coverage, two layers. (1) `nft-preflight.sh` and `nft-verify.sh` read
 `WORKER_AGENT_USER=<base> WORKER_BOX_SLOTS=<N>` (or `AGENT_USERS="<a> <a>-1"`)
-in the environment; they refuse a skuid set that misses any slot account's uid,
-and say `slot-coverage check skipped` when given neither.
+from the environment — the unit loads `/etc/automata/egress.env` — and refuse a
+skuid set that misses any slot account's uid, saying `slot-coverage check
+skipped` when given neither. (2) Fail-closed regardless of (1): a successful
+preflight records the fenced uids in `/run/automata/egress-fence.uids`, and at
+`WORKER_BOX_SLOTS > 1` the worker refuses to boot unless that file exists and
+lists every slot uid (`egress fence coverage unproven` / `does not cover slot
+uid(s)` in the boot log). The boot also refuses two slot logins that alias one
+uid, a slot at uid 0, or a slot at the worker's own uid.
 
 ---
 

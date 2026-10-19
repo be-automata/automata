@@ -254,6 +254,16 @@ export interface BuildDaemonEnvOpts {
  * proxy.username / proxy.password (its policy: creds in the URL OR the env,
  * never both). A credential-less proxy (N = 1) sets the URL alone, as before.
  */
+/** Whether a proxy URL carries a credential in its userinfo (#205, N > 1). */
+export function proxyUrlHasCredential(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return Boolean(u.username || u.password);
+  } catch {
+    return false;
+  }
+}
+
 export function buildBrowseProxyEnv(egressProxyUrl: string): NodeJS.ProcessEnv {
   const u = new URL(egressProxyUrl);
   if (!u.username && !u.password) {
@@ -553,6 +563,14 @@ export function buildDaemonEnv({
     // still omitted there, so the default-mode env stays byte-for-byte.
     ...(agentUser && workdir
       ? ([["safe.directory", workdir]] as Array<[string, string]>)
+      : []),
+    // #205: a credentialed run proxy (N > 1) challenges with 407 and audits it.
+    // libcurl's default proxy auth is "anyauth" — first request bare, then
+    // retry — so every git call over the proxy would log a deny first. Basic
+    // up front: one request, no challenge, no false deny. github.com itself
+    // goes to the loopback broker (NO_PROXY), so this covers other remotes.
+    ...(egressProxyUrl && proxyUrlHasCredential(egressProxyUrl)
+      ? ([["http.proxyAuthMethod", "basic"]] as Array<[string, string]>)
       : []),
   ];
   env.GIT_CONFIG_COUNT = String(gitConfig.length);

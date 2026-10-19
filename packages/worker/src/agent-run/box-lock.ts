@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir } from "node:fs/promises";
+import { access, chmod, mkdir, open, stat } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -332,6 +332,20 @@ async function spawnHelperAndAwaitAck(
   if (signal?.aborted) throw abortError();
   const { file, args } = helper;
   const lockFile = boxLockPath(root, slot);
+  // #205: the lock file is the worker's alone (0600), created here before the
+  // helper's O_CREAT (util-linux flock / lockf would make it 0644 under the
+  // unit's umask). flock(2) works on a READ-ONLY fd and every slot account has
+  // traverse on the root, so a readable `box.lock.<j>` would let slot i's agent
+  // take LOCK_EX on a sibling's slot — a cross-slot denial the N = 1 box never
+  // had. Best-effort here (a file the worker cannot open is the helper's to
+  // report, with its exit and stderr); enforced after the ack below.
+  try {
+    const fh = await open(lockFile, "a", 0o600);
+    await fh.close();
+    await chmod(lockFile, 0o600);
+  } catch {
+    // the helper reports what it cannot open
+  }
   const child = spawnPiped(file, [
     ...args,
     lockFile,
@@ -369,7 +383,45 @@ async function spawnHelperAndAwaitAck(
   });
   if (onAbort) signal?.removeEventListener("abort", onAbort);
 
+  if (outcome.kind === "acquired") {
+    // Holding a lock on a file another account can also lock is holding
+    // nothing: refuse it (#205).
+    const problem = await lockFilePrivacyProblem(lockFile);
+    if (problem !== null) {
+      child.kill("SIGKILL");
+      child.stdin.destroy();
+      await exited;
+      throw new BoxLockUnavailableError(file, problem);
+    }
+  }
+
   return { child, exited, outcome, stderr: () => stderr, file };
+}
+
+/**
+ * null when `lockFile` is the worker's own and private (mode 0600 after a
+ * repair chmod if needed); otherwise the reason it is not.
+ */
+async function lockFilePrivacyProblem(
+  lockFile: string,
+): Promise<string | null> {
+  const self = process.getuid?.();
+  try {
+    let st = await stat(lockFile);
+    if (self !== undefined && st.uid !== self) {
+      return `lock file ${lockFile} is owned by uid ${st.uid}, not the worker (uid ${self}) — another account could lock it`;
+    }
+    if ((st.mode & 0o077) !== 0) {
+      await chmod(lockFile, 0o600);
+      st = await stat(lockFile);
+      if ((st.mode & 0o077) !== 0) {
+        return `lock file ${lockFile} mode ${(st.mode & 0o777).toString(8)} is not private`;
+      }
+    }
+    return null;
+  } catch (e) {
+    return `lock file ${lockFile} cannot be inspected: ${e instanceof Error ? e.message : String(e)}`;
+  }
 }
 
 /**
@@ -499,6 +551,10 @@ export async function acquireBoxLock({
     child.kill("SIGKILL");
     child.stdin.destroy();
     await exited;
+    // The helper may have been granted the lock in the instant before the
+    // kill; a parked sibling must not idle beside that freed slot. A spurious
+    // wake-up costs one sweep (#205).
+    notifySlotReleased(root);
     throw abortError();
   }
 
