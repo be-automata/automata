@@ -18,13 +18,15 @@ kernel slot locks (`src/agent-run/box-lock.ts`), one agent account per slot (#20
 engine's `'agent-run-global-memory-budget'` cap and `WORKER_PER_ORG_MAX_RUNS`
 (default 1) the per-org fairness cap, both registered on every workflow VARIANT by
 `src/agent-run/definition.ts` (the global key caps each variant separately and is
-not the box budget; every run has `slotCost: 1`). Boot refuses — at boot and at
-every run — `WORKER_GLOBAL_MAX_RUNS ≠ WORKER_BOX_SLOTS`, `WORKER_PER_ORG_MAX_RUNS >
-WORKER_GLOBAL_MAX_RUNS`, N > 1 without the uid drop or the #204 ceiling, and (on Linux, ceiling on, headroom check not inert) `WORKER_BOX_SLOTS ×
-WORKER_HEADROOM_RUN_COMMIT + 2 GiB base > WORKER_HEADROOM_COMMIT_FRACTION ×
-CommitLimit` — the same inequality the #371 admission uses, so a tuple that boots
-is admissible (run commit = `WORKER_RUN_MEMORY_MAX` by default, fraction 0.9;
-CommitLimit = swap + overcommit_ratio × RAM). Raise all of `WORKER_BOX_SLOTS`,
+not the box budget; every run has `slotCost: 1`). The config loader refuses — at boot AND at every run — `WORKER_GLOBAL_MAX_RUNS ≠
+WORKER_BOX_SLOTS`, `WORKER_PER_ORG_MAX_RUNS > WORKER_GLOBAL_MAX_RUNS`, and N > 1
+without the uid drop or the #204 ceiling. ONCE at boot (Linux, N > 1, ceiling on,
+commit arm not inert: `WORKER_HEADROOM_COMMIT_FRACTION < 1`) the worker also
+refuses `WORKER_BOX_SLOTS × WORKER_HEADROOM_RUN_COMMIT + 2 GiB base >
+WORKER_HEADROOM_COMMIT_FRACTION × CommitLimit` — the same inequality the #371
+admission uses, so a tuple that boots is admissible (run commit =
+`WORKER_RUN_MEMORY_MAX` by default, fraction 0.9; CommitLimit = swap +
+overcommit_ratio × RAM). Raise all of `WORKER_BOX_SLOTS`,
 `WORKER_GLOBAL_MAX_RUNS`, `WORKER_PER_ORG_MAX_RUNS` together, with
 `WORKER_RUN_MEMORY_MAX` and the swap sized for N runs; the memory-headroom check
 (#371) is the runtime guard behind this boot guard. N > 1 is Linux-only.

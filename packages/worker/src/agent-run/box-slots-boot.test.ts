@@ -515,8 +515,11 @@ Committed_AS:    2600000 kB
 `;
   // The pilot cx33: CommitLimit 12 357 216 kB (8 GB swap + 50 % of 7.6 GB RAM).
   const CX33 = meminfo(12357216);
-  // cx43 at vm.overcommit_ratio=80: 8 GB swap + 80 % of 16 GB ≈ 20.8 GB.
-  const CX43_R80 = meminfo(20311244);
+  // cx43 at vm.overcommit_ratio=80 — the ESTIMATE deploy/uat/phase2-4.md
+  // sizes with (MemTotal scaled from the cx33's 7 937 228 kB ⇒ 16 258 000 kB;
+  // 8 388 604 kB swap + 0.8 × MemTotal = 21 395 004 kB ≈ 21.9 GB; the UAT
+  // replaces it with the measured value after the resize).
+  const CX43_R80 = meminfo(21395004);
   const fiveG = 5000 * 1024 ** 2;
   const tuple = (boxSlots: number, fraction = 0.9) => ({
     boxSlots,

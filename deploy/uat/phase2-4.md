@@ -35,15 +35,17 @@ with `vm.overcommit_ratio=80`.** The arithmetic that makes three 5000M runs admi
 kernel default `overcommit_ratio` 50, cx43's `CommitLimit` = 8 GB swap + 0.5 × 16 GB = 16 GB, and
 the #371 commit arm (0.9 × 16 = 14.4 GiB) admits two runs beside the ≈ 2.6 GiB base (12.4 GiB) but
 defers the third; the #372 boot check uses the SAME budget and refuses the tuple outright. In
-real units (5000M = 5.24 GB; swap 8 388 604 kB = 8.59 GB; cx43 `MemTotal` ≈ 15.9 GB): at
-`overcommit_ratio` 80, `CommitLimit` ≈ 8.59 + 12.7 = 21.3 GB and the budget is 0.9 × 21.3 =
-19.2 GB. The boot check passes (3 × 5.24 + 2.15 base = 17.9 GB < 19.2 GB, a 1.3 GB margin — a run
-commit above ≈ 5.4 GB would refuse). At run time the commit arm admits the third run while
-`Committed_AS` + 3 × 5.24 ≤ 19.2 GB, i.e. while the live base is ≤ 3.5 GB: at the idle LOW end
-(2.7 GB) the margin is 0.8 GB, at the observed high end (3.5 GB) it is ~0 — so a third run deferred
-for a few seconds after the resize is the check working, not a regression; a sustained deferral
-means the base grew and the move is `overcommit_ratio` 90 or a 4500M ceiling. 3 × 5.24 = 15.7 GB
-stays under the 15.9 GB of RAM so the
+real units (5000M = 5.24 GB; swap 8 388 604 kB = 8.59 GB; cx43 `MemTotal` ESTIMATED at
+16 258 000 kB = 16.6 GB by scaling the cx33's 7 937 228 kB — the same figure the unit fixture
+`CX43_R80` models; row 2 replaces every number here with the measured `/proc/meminfo` after the
+resize and the sysctl): at `overcommit_ratio` 80, `CommitLimit` ≈ 8.59 + 13.3 = 21.9 GB and the
+budget is 0.9 × 21.9 = 19.7 GB. The boot check passes (3 × 5.24 + 2.15 base = 17.9 GB < 19.7 GB,
+a 1.8 GB margin — a run commit above ≈ 5.8 GB would refuse). At run time the commit arm admits
+the third run while `Committed_AS` + 3 × 5.24 ≤ 19.7 GB, i.e. while the live base is ≤ 4.0 GB:
+0.5 GB of margin at the observed idle high end (3.5 GB), 1.3 GB at the low end (2.7 GB). If the
+MEASURED budget leaves no margin at the observed base, the plan (not a contingency) is
+`overcommit_ratio` 90 before the tuple is applied; a deferral that appears later means the base
+grew and the same move applies. 3 × 5.24 = 15.7 GB stays under the 16.6 GB of RAM so the
 `warnIfSlotsExceedMemory` warning stays quiet (swap absorbs a peak). `vm.overcommit_memory` stays 0
 (heuristic): `CommitLimit` is the headroom check's budget signal, not a kernel-enforced cap.
 Code defaults stay 1/1/1 so an unprovisioned box still boots. Per-org 2 < global 3 so no single
