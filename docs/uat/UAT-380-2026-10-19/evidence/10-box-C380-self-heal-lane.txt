@@ -17,7 +17,9 @@
 ## engine v1_task row for this run: sealed | selfHeal.kind | plain checkToken in the plan | plain installationToken | kid | ct length | ghs_ anywhere
 t|audit|f|f|plane-2026-10|1312|f
 
-## all v1_task rows since the cutover holding ghs_ / installationToken / daemonToken / checkToken / gateToken: 0 of 90
+## post-cutover engine scan after this run: see 11-box-C380-scan-post-cutover-late.txt (evidence/scan.sql, cutover bound,
+## run 2026-10-19T22:36:33Z): v1_task 96 / 0, v1_payload 240 / 0, v1_payloads_olap 432 / 0, v1_dags_olap 48 / 0 rows with a secret.
+## (An ad-hoc count at 22:33Z read 0 of 90 task rows; the scan output above supersedes it.)
 
 ## agent outcome (prod thread 5f3db5dd, credential-source user-credential = the BeAutomata account reconnected at ~22:00Z):
 ## result ok, 4 turns, cost 0.1248 USD — the audit completed.

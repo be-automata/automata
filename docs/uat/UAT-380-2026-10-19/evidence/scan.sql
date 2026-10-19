@@ -41,8 +41,11 @@ BEGIN
     END IF;
     -- position(), not LIKE: in LIKE the '_' of 'ghs_' is a wildcard and the
     -- escaping differs between literal forms; position() matches the bytes.
-    q := format('SELECT count(*), count(*) FILTER (WHERE position(''ghs_'' in %I::text) > 0 OR position(''installationToken'' in %I::text) > 0 OR position(''daemonToken'' in %I::text) > 0 OR position(''githubReadToken'' in %I::text) > 0) FROM %I WHERE %I > %L::timestamptz',
-                r.column_name, r.column_name, r.column_name, r.column_name,
+    -- Field names are matched as EXACT JSON keys ("name"), because the input
+    -- legitimately carries the non-secret "githubReadTokenExpiresAt", which a
+    -- bare 'githubReadToken' substring would count as a secret.
+    q := format('SELECT count(*), count(*) FILTER (WHERE position(''ghs_'' in %I::text) > 0 OR position(''"installationToken"'' in %I::text) > 0 OR position(''"daemonToken"'' in %I::text) > 0 OR position(''"githubReadToken"'' in %I::text) > 0 OR position(''"checkToken"'' in %I::text) > 0 OR position(''"gateToken"'' in %I::text) > 0) FROM %I WHERE %I > %L::timestamptz',
+                r.column_name, r.column_name, r.column_name, r.column_name, r.column_name, r.column_name,
                 r.table_name, tcol, '__CUTOVER__');
     EXECUTE q INTO n_total, n_secret;
     RAISE NOTICE '% | % | % | %', r.table_name, r.column_name, n_total, n_secret;
