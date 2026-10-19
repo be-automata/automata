@@ -53,7 +53,7 @@ type Execution = {
 };
 
 const itEnabled = process.env.HATCHET_IT === "1";
-// 42 runs at 3 wide × ~1 s each is ~15 s of execution plus scheduling; the
+// 42 runs at 3 wide × 3 s each is ~45 s of execution plus scheduling; the
 // budget below is a ceiling for a slow docker host, not an expectation.
 vi.setConfig({ testTimeout: 240_000 });
 
@@ -184,9 +184,11 @@ describe.skipIf(!itEnabled)(
         [];
       for (let i = 0; i < BURST; i++) {
         const orgId = orgFor(i);
-        // org-a runs are short so its backlog churns through its 2-run cap;
-        // the other orgs' runs are long so the third slot is visibly theirs.
-        const sleepMs = orgId === ORGS[0] ? 1_000 : 3_000;
+        // Every run outlives the whole sequential trigger loop (42 POSTs take
+        // well under 3 s even on a slow docker host), so consecutive org-a
+        // triggers ALWAYS overlap and the exact-peak assertions below do not
+        // depend on POST latency.
+        const sleepMs = 3_000;
         const d = await dispatch(
           { orgId, prKey: `${orgId}/repo/${i}`, sleepMs },
           `${burstId}-${i}`,
