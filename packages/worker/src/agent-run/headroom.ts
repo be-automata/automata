@@ -277,6 +277,7 @@ export class AdmissionController {
     } catch (e) {
       opts.log?.(
         `box.headroom_unreadable ${JSON.stringify({
+          runId,
           threadId: opts.threadId,
           attempt: opts.attempt,
           error: e instanceof Error ? e.message : String(e),
@@ -295,7 +296,10 @@ export class AdmissionController {
       this.policy,
       this.reservedBytesExcept(runId),
     );
+    // runId is the reservation key: two runs of one thread (a supersede
+    // sibling) are told apart in the journal by it, never by threadId.
     const fields = JSON.stringify({
+      runId,
       threadId: opts.threadId,
       attempt: opts.attempt,
       ...verdict.observed,

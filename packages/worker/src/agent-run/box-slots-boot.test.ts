@@ -195,40 +195,61 @@ describe("hidepidDropinLeftAtOneSlot (#205 boot, Linux N = 1)", () => {
   const line = (opts: string, superOpts: string) =>
     `25 30 0:23 / /proc ${opts} shared:14 - proc proc ${superOpts}\n` +
     "30 1 252:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw\n";
+  const PLAIN = () => line("rw,nosuid,nodev,noexec,relatime", "rw");
 
-  it("a hidepid /proc seen at N = 1 means the N > 1 drop-in is still installed: warns, naming the drop-in and the removal recipe", () => {
+  it("the drop-in file at its installed path is the DIRECT trigger — even when the host remount was reverted and /proc shows no hidepid", () => {
     const w = hidepidDropinLeftAtOneSlot({
       platform: "linux",
-      readMountinfo: () => line("rw,nosuid", "rw,hidepid=invisible,gid=986"),
+      readMountinfo: PLAIN,
+      dropinExists: () => true,
     });
-    expect(w).toMatch(/hidepid=invisible/);
     expect(w).toMatch(/20-hidepid\.conf/);
+    expect(w).toMatch(/20-hidepid\.conf exists/);
     expect(w).toMatch(/daemon-reload/);
+    expect(w).not.toMatch(/inside the worker unit/);
   });
 
-  it("the base unit's own /proc (no hidepid) is the expected N = 1 state: silent", () => {
+  it("a hidepid /proc seen inside the unit is the second trigger (the base unit's private /proc has none); both are named when both hold", () => {
+    const only = hidepidDropinLeftAtOneSlot({
+      platform: "linux",
+      readMountinfo: () => line("rw,nosuid", "rw,hidepid=invisible,gid=986"),
+      dropinExists: () => false,
+    });
+    expect(only).toMatch(/hidepid=invisible inside the worker unit/);
+    const both = hidepidDropinLeftAtOneSlot({
+      platform: "linux",
+      readMountinfo: () => line("rw", "rw,hidepid=2,gid=986"),
+      dropinExists: () => true,
+    });
+    expect(both).toMatch(/exists; \/proc is mounted with hidepid=2/);
+  });
+
+  it("the expected N = 1 state is silent: no drop-in and no hidepid (hidepid=0/1 hide nothing and do not count)", () => {
     expect(
       hidepidDropinLeftAtOneSlot({
         platform: "linux",
-        readMountinfo: () => line("rw,nosuid,nodev,noexec,relatime", "rw"),
+        readMountinfo: PLAIN,
+        dropinExists: () => false,
       }),
     ).toBeNull();
-    // hidepid=0/1 hide nothing and are not the drop-in's signature either.
     expect(
       hidepidDropinLeftAtOneSlot({
         platform: "linux",
         readMountinfo: () => line("rw", "rw,hidepid=0"),
+        dropinExists: () => false,
       }),
     ).toBeNull();
   });
 
-  it("never fails a one-slot boot: not Linux, no /proc line or an unreadable mountinfo ⇒ null", () => {
+  it("never fails a one-slot boot: not Linux ⇒ null without probing; no /proc line, an unreadable mountinfo or a throwing stat ⇒ null", () => {
+    const boom = () => {
+      throw new Error("must not be called");
+    };
     expect(
       hidepidDropinLeftAtOneSlot({
         platform: "darwin",
-        readMountinfo: () => {
-          throw new Error("must not be called");
-        },
+        readMountinfo: boom,
+        dropinExists: boom,
       }),
     ).toBeNull();
     expect(
@@ -236,12 +257,16 @@ describe("hidepidDropinLeftAtOneSlot (#205 boot, Linux N = 1)", () => {
         platform: "linux",
         readMountinfo: () =>
           "30 1 252:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw\n",
+        dropinExists: () => false,
       }),
     ).toBeNull();
     expect(
       hidepidDropinLeftAtOneSlot({
         platform: "linux",
         readMountinfo: () => {
+          throw new Error("EACCES");
+        },
+        dropinExists: () => {
           throw new Error("EACCES");
         },
       }),

@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
 import { BOX_SLOTS_MAX } from "./box-lock";
@@ -148,36 +148,55 @@ function hidepidOf(options: readonly string[]): string | undefined {
     ?.slice("hidepid=".length);
 }
 
+/** Where the N > 1 drop-in lives on a box (the unit is installed system-wide). */
+export const HIDEPID_DROPIN_PATH =
+  "/etc/systemd/system/automata-worker.service.d/20-hidepid.conf";
+
 /**
  * #205, the OTHER direction of the hidepid check: at N = 1 the unit should run
- * under the base unit's `ProtectSystem=full` / `ProtectKernelTunables=yes`,
- * which give it a private /proc WITHOUT the host's hidepid. Seeing a hidepid
- * /proc at N = 1 therefore means the N > 1 drop-in (`20-hidepid.conf`) is still
- * installed and the box is running with hardening it no longer needs to give
- * up. A warning, never a refusal: the fence is intact either way. Returns the
- * warning text, or null (not Linux, no hidepid seen, or mountinfo unreadable —
+ * under the base unit's `ProtectSystem=full` / `ProtectKernelTunables=yes`. The
+ * N > 1 drop-in (`20-hidepid.conf`) relaxes both, and nothing else notices it
+ * left behind after a rollback. Two triggers: the drop-in file itself at its
+ * installed path (direct — catches a rollback that also reverted the host
+ * remount), and a hidepid /proc seen INSIDE the unit (the base unit's private
+ * /proc has none, so seeing the host's means the relaxation is in effect).
+ * A warning, never a refusal: the fence is intact either way. Returns the
+ * warning text, or null (not Linux, neither trigger, or an unreadable probe —
  * a one-slot box never fails its boot on this).
  */
 export function hidepidDropinLeftAtOneSlot(
   opts: {
     platform?: NodeJS.Platform;
     readMountinfo?: () => string;
+    /** stat of the installed drop-in; injectable for tests. */
+    dropinExists?: () => boolean;
   } = {},
 ): string | null {
   const {
     platform = process.platform,
     readMountinfo = () => readFileSync("/proc/self/mountinfo", "utf8"),
+    dropinExists = () => existsSync(HIDEPID_DROPIN_PATH),
   } = opts;
   if (platform !== "linux") return null;
-  let options: string[] | null;
+  const triggers: string[] = [];
   try {
-    options = procMountOptions(readMountinfo());
+    if (dropinExists()) triggers.push(`${HIDEPID_DROPIN_PATH} exists`);
   } catch {
-    return null;
+    // unreadable path: fall through to the mount probe
   }
-  const hidepid = options ? hidepidOf(options) : undefined;
-  if (hidepid === undefined || !HIDEPID_OK.has(hidepid)) return null;
-  return `/proc is mounted with hidepid=${hidepid} inside the worker unit at WORKER_BOX_SLOTS=1: the N > 1 drop-in automata-worker.service.d/20-hidepid.conf (ProtectSystem=no, ProtectKernelTunables=no) is still installed — remove it and \`systemctl daemon-reload && systemctl restart automata-worker\` when nothing is in flight (deploy/AGENT-UID-PROVISIONING.md §6)`;
+  try {
+    const options = procMountOptions(readMountinfo());
+    const hidepid = options ? hidepidOf(options) : undefined;
+    if (hidepid !== undefined && HIDEPID_OK.has(hidepid)) {
+      triggers.push(
+        `/proc is mounted with hidepid=${hidepid} inside the worker unit`,
+      );
+    }
+  } catch {
+    // unreadable mountinfo: the file probe above is the only signal
+  }
+  if (triggers.length === 0) return null;
+  return `the N > 1 drop-in automata-worker.service.d/20-hidepid.conf (ProtectSystem=no, ProtectKernelTunables=no) is still in effect at WORKER_BOX_SLOTS=1 (${triggers.join("; ")}) — remove it and \`systemctl daemon-reload && systemctl restart automata-worker\` when nothing is in flight (deploy/AGENT-UID-PROVISIONING.md §6)`;
 }
 
 export function assertProcHidepid(
