@@ -4,9 +4,10 @@
  * cloudflared tunnel. This is the ONE place the transport lives.
  */
 
-import type {
-  SupersedePolicy,
-  SupersedeSnapshot,
+import {
+  normalizeRepo,
+  type SupersedePolicy,
+  type SupersedeSnapshot,
 } from "@terragon/shared/model/repo-review-settings";
 
 /**
@@ -109,6 +110,68 @@ export function buildReviewRunMetadata({
     supersedePolicy: snapshot.policy,
     recheckOnComplete: String(snapshot.recheckOnComplete),
     ...(skillVersion ? { skillVersion } : {}),
+  });
+}
+
+/**
+ * The lane a NON-review run belongs to (#373 OD-0). The values are the worker's
+ * display taxonomy (packages/worker/src/agent-run/run-lane.ts
+ * formatRunStartLine) — structurally duplicated, not imported (the planes share
+ * no imports). Review runs are `review`, stamped by buildReviewRunMetadata.
+ */
+export type NonReviewRunLane =
+  | "self-heal-audit"
+  | "self-heal-fix"
+  | "pr"
+  | "task";
+
+/**
+ * Resolve the non-review lane from the wire input: a self-heal plan wins
+ * (`self-heal-<kind>`), then a PR number (`pr`, e.g. an @-mention on a PR),
+ * else `task`. Derived from the input itself so every trigger path — the
+ * bounded self-heal one and the plain retry one — stamps the same lane.
+ */
+export function resolveNonReviewRunLane(input: {
+  selfHeal?: { kind: "audit" | "fix" };
+  prNumber?: number;
+}): NonReviewRunLane {
+  if (input.selfHeal !== undefined) return `self-heal-${input.selfHeal.kind}`;
+  if (input.prNumber !== undefined) return "pr";
+  return "task";
+}
+
+/**
+ * Build the metadata for a NON-review dispatch (#373 OD-0): the run's ids plus
+ * `orgId` and `lane`, and `repoFullName` / `prNumber` when known, so the
+ * worker's growth-trigger evaluator can attribute run time to a client. The
+ * repo is normalized exactly as the review path does; a value that is not
+ * known is omitted, never sent as an empty string. Validated against the same
+ * limits as the review metadata.
+ */
+export function buildRunMetadata({
+  threadId,
+  threadChatId,
+  orgId,
+  lane,
+  repoFullName,
+  prNumber,
+}: {
+  threadId: string;
+  threadChatId: string;
+  orgId: string;
+  lane: NonReviewRunLane;
+  repoFullName?: string;
+  prNumber?: number;
+}): Record<string, string> {
+  const repo =
+    repoFullName !== undefined ? normalizeRepo(repoFullName) : undefined;
+  return validateRunMetadata({
+    threadId,
+    threadChatId,
+    ...(orgId ? { orgId } : {}),
+    lane,
+    ...(repo ? { repoFullName: repo } : {}),
+    ...(prNumber !== undefined ? { prNumber: String(prNumber) } : {}),
   });
 }
 

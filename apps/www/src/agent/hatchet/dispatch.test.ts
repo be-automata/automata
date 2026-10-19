@@ -283,8 +283,16 @@ describe("dispatchAgentRun", () => {
       branch: "main",
     });
 
-    const input = JSON.parse(fetchMock.mock.calls[0]![1].body).input;
-    expect(input.orgId).toBe(`u:${user.id}`);
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
+    expect(body.input.orgId).toBe(`u:${user.id}`);
+    // #373 OD-0: the personal scope is attributed by the same fallback id.
+    expect(body.additionalMetadata).toEqual({
+      threadId: personal.threadId,
+      threadChatId: personal.threadChatId,
+      orgId: `u:${user.id}`,
+      lane: "task",
+      repoFullName: "be-automata/automata",
+    });
     vi.unstubAllGlobals();
   });
 
@@ -493,6 +501,18 @@ describe("dispatchAgentRun — #165 engine-only supersession (www never cancels)
     });
 
     expect(mentionFetch.cancelBodies).toHaveLength(0);
+    // #373 OD-0: a mention on a PR is the `pr` lane, on the legacy workflow.
+    const mentionBody = triggerBody(mentionFetch.mock);
+    expect(mentionBody.workflowName).toBe("agent-run");
+    expect(mentionBody.additionalMetadata).toEqual({
+      threadId: mention.threadId,
+      threadChatId: mention.threadChatId,
+      orgId: expect.any(String),
+      lane: "pr",
+      repoFullName: "be-automata/automata",
+      prNumber: "200",
+    });
+    expect(mentionBody.additionalMetadata.orgId).toBe(mentionBody.input.orgId);
     // The prior review thread is untouched (still active).
     const [reviewRow] = await db.query.thread.findMany({
       where: (t, { eq }) => eq(t.id, priorReview.threadId),
@@ -660,7 +680,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
     vi.unstubAllGlobals();
   });
 
-  it("non-review thread: legacy payload (no prKey, no variant)", async () => {
+  it("non-review thread: legacy payload (no prKey, no variant), #373 OD-0 task metadata", async () => {
     const t = await createTestThread({
       db,
       userId: user.id,
@@ -672,15 +692,21 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
       userId: user.id,
       threadId: t.threadId,
       threadChatId: t.threadChatId,
-      repoFullName: "be-automata/automata",
+      repoFullName: "Be-Automata/Automata",
       branch: "main",
     });
     const body = triggerBody(f.mock);
     expect(body.workflowName).toBe("agent-run");
     expect(body.input.prKey).toBeUndefined();
+    // The input keeps the repo as given; only the metadata is normalized,
+    // exactly as the review metadata is.
+    expect(body.input.repoFullName).toBe("Be-Automata/Automata");
     expect(body.additionalMetadata).toEqual({
       threadId: t.threadId,
       threadChatId: t.threadChatId,
+      orgId,
+      lane: "task",
+      repoFullName: "be-automata/automata",
     });
     // No fence stamp for a non-review run: activeRunExternalId is a REVIEW
     // generation marker and must never carry an out-of-scope value.
@@ -1692,6 +1718,30 @@ describe("dispatchAgentRun — phase 8 selfHeal payload", () => {
     }
   });
 
+  it("#373 OD-0: an audit dispatch stamps lane self-heal-audit with its org and repo", async () => {
+    await seedFinding();
+    const t = await auditThread();
+    const f = routedHatchetFetch("run-agent");
+    vi.stubGlobal("fetch", f.mock);
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      repoFullName: REPO,
+      branch: "feature",
+    });
+    const body = triggerBody(f.mock);
+    vi.unstubAllGlobals();
+    expect(body.workflowName).toBe("agent-run");
+    expect(body.additionalMetadata).toEqual({
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      orgId,
+      lane: "self-heal-audit",
+      repoFullName: REPO,
+    });
+  });
+
   /**
    * Card: protects=rollout step 1 for self-heal — with no plane key the
    * check token travels INSIDE the plan (`selfHeal.checkToken`), exactly
@@ -1946,7 +1996,18 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
     const calls = triggerCalls(f);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
-    const input = JSON.parse(String(calls[0]?.[1]?.body)).input;
+    const triggered = JSON.parse(String(calls[0]?.[1]?.body));
+    const input = triggered.input;
+    // #373 OD-0: the bounded self-heal path carries the metadata too.
+    expect(triggered.workflowName).toBe("agent-run");
+    expect(triggered.additionalMetadata).toEqual({
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+      orgId: input.orgId,
+      lane: "self-heal-fix",
+      repoFullName: input.repoFullName,
+    });
+    expect(input.orgId).not.toMatch(/^u:/);
     expect(input.branch).toBe("main");
     const selfHeal = input.selfHeal as SelfHealRunInput;
     if (selfHeal.kind !== "fix") throw new Error("expected a fix payload");

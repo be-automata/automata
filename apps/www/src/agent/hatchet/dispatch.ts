@@ -67,6 +67,8 @@ import {
   listAgentRunsForThread,
   workflowNameForPolicy,
   buildReviewRunMetadata,
+  buildRunMetadata,
+  resolveNonReviewRunLane,
   type TriggerOpts,
 } from "./transport";
 
@@ -187,12 +189,15 @@ async function triggerSelfHealBounded({
   threadId,
   threadChatId,
   organizationId,
+  additionalMetadata,
   scrub = redactSecrets,
 }: {
   input: AgentRunWireInput;
   threadId: string;
   threadChatId: string;
   organizationId: string;
+  /** #373 OD-0: the non-review run metadata (orgId, lane, repo, PR). */
+  additionalMetadata: Record<string, string>;
   /** #380: blanks this dispatch's own secret values in every log line here. */
   scrub?: (text: string) => string;
 }): Promise<{ externalId: string | undefined }> {
@@ -224,6 +229,7 @@ async function triggerSelfHealBounded({
   for (let attempt = 1; attempt <= SELF_HEAL_TRIGGER_MAX_ATTEMPTS; attempt++) {
     try {
       const result = await triggerAgentRun(input, config, {
+        additionalMetadata,
         signal: AbortSignal.timeout(SELF_HEAL_TRIGGER_TIMEOUT_MS),
       });
       await record("success", "dispatch_visible");
@@ -1030,8 +1036,9 @@ export async function dispatchAgentRun({
         : null;
 
     // #125/#127/#165: ONE plan for the dispatch mode. Non-review runs keep the
-    // legacy plan (no extension, no opts, byte-identical payload — IRON
-    // golden). A REVIEW run always resolves the (org, repo) policy: it picks
+    // legacy plan (no extension, the `agent-run` workflow — IRON golden); by
+    // decision OD-0 of #373 their metadata now carries orgId + lane (+ repo
+    // and PR when known), built below at the trigger. A REVIEW run always resolves the (org, repo) policy: it picks
     // the workflow variant, the input gains prKey/deliveryId + the policy
     // SNAPSHOT, and the metadata is enriched. Supersession of prior runs is
     // ENGINE-ONLY (#165, ADR-007): www owns no cancel path — the variant's
@@ -1153,6 +1160,18 @@ export async function dispatchAgentRun({
     // self-heal run uses the bounded policy (TMO-01): 5 s per POST and a
     // read-back before its one retry, so an ambiguous engine answer never
     // starts a second agent.
+    // #373 OD-0: every non-review lane names its org and lane in the run
+    // metadata (the worker's growth triggers attribute run time by it). The
+    // lane comes from the input, so a self-heal run stamps self-heal-* on
+    // either trigger path. Review runs keep their plan's metadata.
+    const runMetadata = buildRunMetadata({
+      threadId,
+      threadChatId,
+      orgId,
+      lane: resolveNonReviewRunLane(input),
+      repoFullName,
+      prNumber,
+    });
     const { externalId } =
       selfHealPlan.selfHeal !== undefined && selfHealOrgId !== null
         ? await triggerSelfHealBounded({
@@ -1160,13 +1179,14 @@ export async function dispatchAgentRun({
             threadId,
             threadChatId,
             organizationId: selfHealOrgId,
+            additionalMetadata: runMetadata,
             scrub,
           })
         : await triggerWithRetry(
             wireInput,
             threadId,
             threadChatId,
-            plan?.triggerOpts,
+            plan?.triggerOpts ?? { additionalMetadata: runMetadata },
             scrub,
           );
 

@@ -7,6 +7,9 @@ import {
   POLICY_TO_WORKFLOW,
   workflowNameForPolicy,
   validateRunMetadata,
+  buildRunMetadata,
+  buildReviewRunMetadata,
+  resolveNonReviewRunLane,
 } from "./transport";
 import {
   SUPERSEDE_POLICIES,
@@ -223,6 +226,118 @@ describe("POLICY_TO_WORKFLOW / workflowNameForPolicy (#125/#127)", () => {
       threadId: "thr_1",
     });
     vi.unstubAllGlobals();
+  });
+});
+
+describe("non-review run metadata (#373 OD-0)", () => {
+  const IDS = { threadId: "thr_1", threadChatId: "tc_1" };
+
+  it("resolves the worker's display lanes from the input", () => {
+    expect(resolveNonReviewRunLane({})).toBe("task");
+    expect(resolveNonReviewRunLane({ prNumber: 12 })).toBe("pr");
+    expect(resolveNonReviewRunLane({ selfHeal: { kind: "audit" } })).toBe(
+      "self-heal-audit",
+    );
+    // A self-heal plan wins over a PR number.
+    expect(
+      resolveNonReviewRunLane({ selfHeal: { kind: "fix" }, prNumber: 3 }),
+    ).toBe("self-heal-fix");
+  });
+
+  it("task: org, lane and the normalized repo; no PR key", () => {
+    expect(
+      buildRunMetadata({
+        ...IDS,
+        orgId: "org_1",
+        lane: "task",
+        repoFullName: " Be-Automata/Automata ",
+      }),
+    ).toEqual({
+      ...IDS,
+      orgId: "org_1",
+      lane: "task",
+      repoFullName: "be-automata/automata",
+    });
+  });
+
+  it("mention on a PR: lane pr, prNumber as a string", () => {
+    expect(
+      buildRunMetadata({
+        ...IDS,
+        orgId: "org_1",
+        lane: resolveNonReviewRunLane({ prNumber: 200 }),
+        repoFullName: "be-automata/automata",
+        prNumber: 200,
+      }),
+    ).toEqual({
+      ...IDS,
+      orgId: "org_1",
+      lane: "pr",
+      repoFullName: "be-automata/automata",
+      prNumber: "200",
+    });
+  });
+
+  it("self-heal audit and fix, including a personal-scope (null org) id", () => {
+    for (const kind of ["audit", "fix"] as const) {
+      for (const orgId of ["org_1", "u:user_1"]) {
+        expect(
+          buildRunMetadata({
+            ...IDS,
+            orgId,
+            lane: resolveNonReviewRunLane({ selfHeal: { kind } }),
+            repoFullName: "be-automata/automata",
+          }),
+        ).toEqual({
+          ...IDS,
+          orgId,
+          lane: `self-heal-${kind}`,
+          repoFullName: "be-automata/automata",
+        });
+      }
+    }
+  });
+
+  it("omits unknown values instead of sending empty strings", () => {
+    const meta = buildRunMetadata({
+      ...IDS,
+      orgId: "",
+      lane: "task",
+      repoFullName: "  ",
+    });
+    expect(meta).toEqual({ ...IDS, lane: "task" });
+    expect(Object.values(meta)).not.toContain("");
+  });
+
+  it("rejects an over-limit value through validateRunMetadata", () => {
+    expect(() =>
+      buildRunMetadata({
+        ...IDS,
+        orgId: "x".repeat(257),
+        lane: "task",
+      }),
+    ).toThrow(/exceeds 256 chars/);
+  });
+
+  it("review metadata is unchanged (lane review, versioned)", () => {
+    expect(
+      buildReviewRunMetadata({
+        ...IDS,
+        orgId: "org_1",
+        repoFullName: "be-automata/automata",
+        prNumber: 77,
+        snapshot: { policy: "newest-wins", recheckOnComplete: false },
+      }),
+    ).toEqual({
+      metaVersion: "1",
+      ...IDS,
+      orgId: "org_1",
+      repoFullName: "be-automata/automata",
+      prNumber: "77",
+      lane: "review",
+      supersedePolicy: "newest-wins",
+      recheckOnComplete: "false",
+    });
   });
 });
 
