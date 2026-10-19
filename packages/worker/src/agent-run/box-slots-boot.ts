@@ -522,7 +522,16 @@ export function assertSlotsFitCommitLimit(
   // kernel does not enforce CommitLimit either (vm.overcommit_memory 0): this
   // guard has nothing to guard. Same condition as the runtime arm, exactly.
   if (cfg.headroomCommitFraction >= 1) return;
-  const { commitLimit } = parseMeminfo(readMeminfo());
+  let commitLimit: number;
+  try {
+    ({ commitLimit } = parseMeminfo(readMeminfo()));
+  } catch (e) {
+    // The boot label for this guard says "slots do not fit"; an unreadable
+    // kernel file is a different problem and must read as one.
+    throw new Error(
+      `/proc/meminfo could not be read, so the WORKER_BOX_SLOTS × run-commit tuple cannot be checked against this box (${e instanceof Error ? e.message : String(e)}) — this is NOT a sizing problem: fix the /proc mount or the file read first`,
+    );
+  }
   const fraction = cfg.headroomCommitFraction;
   const budget = fraction * commitLimit;
   const need = cfg.boxSlots * cfg.headroomRunCommitBytes + baseBytes;
