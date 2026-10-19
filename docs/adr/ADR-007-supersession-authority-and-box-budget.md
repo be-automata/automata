@@ -150,12 +150,45 @@ N > 1 requires the #204 ceiling; the box refuses otherwise. The engine's
 `slots` equals N; its per-variant caps are #372's. `box-budget.json` and
 `escapeesSinceBoot` are box-wide aggregates across slots (last reap writes the snapshot).
 
+## Amendment (2026-10-19, #371 / epic #193 ticket 3) — the headroom check
+
+Decision 5 permits the host budget to **delay** admission; this is the first mechanism that
+does so on a resource other than the slot count. Under its slot and BEFORE the clone, a run
+reads `/proc/meminfo` and is admitted only if both arms hold — `MemAvailable − reserved ≥
+floor` and `Committed_AS + reserved + runCommit ≤ fraction × CommitLimit` (`headroom.ts`,
+knobs in `deploy/README.md`). Admissions are
+serialised by being ONE synchronous decision on the worker's event loop (no await between the
+read and the reservation) and an
+admitted run **reserves** `runCommit` for its whole life, shrunk by the anonymous memory the kernel
+already charges its cgroup (`memory.stat` anon + shmem — what `Committed_AS` counts; never
+`memory.current`, which includes page cache) once it exists, so two concurrent admissions cannot both
+pass on the same headroom and a live run's later growth stays counted. A refusal
+releases the slot (nothing of the run is on disk) and the run **waits IN PROCESS** — an
+abortable exponential backoff (2 s, 4 s, … capped at 120 s) — then re-acquires a slot and asks
+again, up to `WORKER_ADMISSION_MAX_DEFERRALS` times; the whole deferral budget must fit the
+www stalled cutoff (boot refuses a budget that does not), and after the last allowed deferral
+the run fails FINAL (`AdmissionBudgetExhaustedError`, non-retryable). The task keeps
+`retries: 0`, so the engine sees a RUNNING task throughout and never re-executes anything —
+exactly-once holds by registration, with no fence and no ledger. Deferrals are deliberately
+NOT engine retries, on two facts measured against hatchet-lite v0.94.10
+(`admission-deferral.integration.test.ts`): a retried attempt re-enters a CANCEL_IN_PROGRESS
+group as the NEWEST item and cancels the genuinely newer run of the same PR (inverting
+newest-wins), and an `executionTimeout` is retried under the task's policy (re-running a
+non-idempotent agent). With retries 0 the same test shows a timeout fails once, and a newer run
+cancels the older one that is still waiting in process. A cancel during the wait aborts the
+sleep (`AbortError`), ending the run like any other cancel. The check is inert (`floor 0` and
+`fraction 1.0`, or no `/proc/meminfo`) without a deploy. An unreadable `/proc/meminfo` at
+admission (boot proved it readable) fails OPEN with one `box.headroom_unreadable` line — a
+transient kernel read must not idle the box. A waiting run holds its ENGINE slot (I3: engine slots = box slots), so no engine-dispatched sibling can take the box slot it released — while it waits the box runs at most N − (deferred runs) agents and the engine's queue waits its scheduleTimeout; the release matters for the lock's out-of-process tenants (a self-heal fix run, the boot uid scan) and for Decision 5: a waiting run is never a lock holder. The budget is wall clock from the first refusal (slot re-acquire waits included), not only the backoff sum. Nothing here signals a lock-holding run.
+
 ## Anti-deviation invariants
 
 - **I1** Exactly one host-exclusion primitive, kernel-released; no `staleMs`/`heartbeat`
   in `packages/worker/src`. (N slot files are N instances of that one primitive.)
 - **I2** The slot is acquired at admission after both Stage A reaps and released last in
-  the run's finally, after `daemon.teardown()` and the teardown uid-scan.
+  the run's finally, after `daemon.teardown()` and the teardown uid-scan. The headroom
+  check (#371) runs under the slot and before the clone; its refusal releases the slot and
+  is waited out in process — the run task registers `retries: 0` and throws nothing retryable.
 - **I3** One worker unit per box; engine `slots` = `WORKER_BOX_SLOTS` = the number of kernel
   slot locks; the `definition.ts` global key is documented as per-workflow, never as the
   box cap.

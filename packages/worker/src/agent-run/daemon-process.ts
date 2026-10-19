@@ -178,6 +178,11 @@ export class DaemonProcess {
    */
   private cgroupDir: string | null = null;
 
+  /** #371: this run's cgroup dir once start() created it (null before, and whenever the ceiling is off). */
+  runCgroupDir(): string | null {
+    return this.cgroupDir;
+  }
+
   /**
    * #204: the `memory.events` counters observed at teardown.
    *

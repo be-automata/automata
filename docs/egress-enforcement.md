@@ -128,6 +128,67 @@ Caveats:
 - **Audit limitation:** same as E2B — provider-side enforcement, no
   per-connection event feed; no `egress_events` rows from this plane.
 
+## Linux execution box — the loopback layer (#367)
+
+The box's host-level backstop is two nftables tables, deliberately separate:
+
+| table                                          | loaded by                                                                            | decides                                                                                                                                                                                                                                                                                                                                                                      | fails                                                   |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `inet automata_egress` (`egress-nft.conf`)     | `automata-egress.service` at boot                                                    | the agent uid gets no direct 80/443 to the internet; loopback is accepted unconditionally                                                                                                                                                                                                                                                                                    | closed at boot, independent of the worker               |
+| `inet automata_loopback` (`loopback-nft.conf`) | `automata-worker.service`, `ExecStartPre=+ nft-loopback-load.sh`, on **every** start | which host-local listeners the agent uid may reach: a NEW connection over `lo` is admitted iff the **receiving socket's cgroup** is under `system.slice/automata-worker.service` (the run's proxy and git broker, the agent's own test servers), or it is systemd-resolved (`127.0.0.53/54:53`) or the test Postgres (`127.0.0.1:25432`); Docker bridges are a deny outright | closed: a failed load stops the unit before `ExecStart` |
+
+Mechanism: the output hook marks the agent uid's `lo` packets (`meta skuid { … }
+oif "lo" meta mark set …`); the input hook routes marked `ct state new` packets
+to `agent_lo`, where `socket cgroupv2 level 2 "system.slice/automata-worker.service"`
+admits by listener ownership. The decision is by **who owns the socket**, not a
+port list, so a new host service is denied by default and a new per-run helper
+the worker spawns is admitted by default.
+
+Why the worker unit loads it: nft resolves the cgroup path to an inode id at
+load time, and systemd recreates the unit's cgroup on every restart. A table
+loaded at boot is a load error (no cgroup yet) or a stale id (refuses the proxy
+and broker: every run dies in seconds). The 80/443 fence never depends on the
+worker, and a loopback load failure never weakens it.
+
+Rollout was two steps: **observe** (PR #383, every deny as `counter limit rate
+… log prefix "automata-lo-deny " accept`, in production from 2026-10-19 13:45
+UTC) then **enforce** (the deny lines become `reject`, with `with tcp reset` on
+the tcp ones; this is the shipped form). `nft-verify.sh` proves the loaded table against the target
+matrix, as each slot uid, from a throwaway cgroup under the worker unit — a
+probe from an ssh session is in the session scope and tests the wrong thing —
+and in enforce mode expects every deny row reset in under 1s.
+
+Limits, measured on the box 2026-10-19:
+
+- A socket carries the cgroup of the task that **created** it. A listener
+  created outside the subtree and then moved in is refused; one created inside
+  (how the worker, its brokers and every agent child come to exist) is admitted.
+- The run's own egress proxy is NOT a way around the table: it refuses
+  host-local targets (loopback, link-local, RFC 1918, IPv4-mapped forms, and
+  names that resolve to them) in every mode, including observe, and audits them
+  with `reason: "host-local"`. Proxy-honouring clients never send loopback
+  through it anyway (`NO_PROXY`).
+- A closed loopback port has no socket, so it lands on the default deny: under
+  observe it is logged (rate-limited, 20/s), under enforce the agent gets the
+  reset the kernel would have sent. ICMP to local addresses is admitted.
+- Known gap (roborev #367 round 3): the shared policy validator still accepts
+  `ip_port` entries in private, CGNAT and link-local ranges and domains that
+  resolve there. On the execution box such an entry can never match — every
+  attempt is audited as a deny with `reason: "host-local"` — while the sandbox
+  sidecar still honours it. Private-network egress from the box is not a
+  supported use case today; if it becomes one it needs an explicit, audited
+  per-policy opt-in, not a silent always-deny. Validator-side rejection is the
+  follow-up.
+- `ip netns exec` remounts `/sys`, which breaks the cgroup path lookup; the
+  loader refuses to run in a named namespace.
+- At `WORKER_BOX_SLOTS > 1` the slots are not fenced from each other's loopback
+  servers (both are under the worker unit). Per-run `level 4` matching is the
+  #193 follow-up.
+- AF_UNIX never traverses netfilter: the gh broker and the daemon socket are
+  governed by filesystem permissions, not by this table.
+
+Install, verify and rollback: `packages/worker/deploy/AGENT-UID-PROVISIONING.md` §7.
+
 ## Verification matrix (manual, per provider)
 
 With a repo policy `domain: ["github.com"]`:

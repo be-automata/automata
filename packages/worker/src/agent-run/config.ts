@@ -5,6 +5,11 @@ import { BOX_SLOTS_MAX } from "./box-lock";
 import { DEFAULT_PAYLOAD_SEAL_KEY_FILE } from "./payload-seal-keys";
 import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
 import {
+  ADMISSION_BACKOFF,
+  ADMISSION_DEFERRAL_BUDGET_S,
+  sumBackoffSeconds,
+} from "./admission-retry";
+import {
   agentUserForSlot,
   assertAgentUser,
   slotAgentUsers,
@@ -111,6 +116,27 @@ export interface WorkerConfig {
   memoryMaxBytes: number;
   /** #204: per-run `pids.max`. Only read when the ceiling is on. */
   tasksMax: number;
+  /**
+   * #371: memory-headroom admission check (ADR-007 Decision 5). `MemAvailable`
+   * must stay at or above `headroomFloorBytes` and `Committed_AS` plus the
+   * expected commit of every admitted run must stay at or below
+   * `headroomCommitFraction × CommitLimit`, or admission is DEFERRED (the run
+   * gives its slot back and waits IN PROCESS with backoff). Defaults 1G / 0.9 —
+   * ON wherever `/proc/meminfo` exists; `0` and `1.0` are the documented
+   * rollback that makes the check inert without a deploy. One run's expected
+   * commit is its own ceiling when the ceiling is on, else `1300M`.
+   */
+  headroomFloorBytes: number;
+  headroomCommitFraction: number;
+  headroomRunCommitBytes: number;
+  /**
+   * #371: how many times one run may be deferred (waited out in process) before
+   * it fails final. Backoff is 2^n s capped at 120 s, so the
+   * default 8 bounds total deferral at 366 s (≈ 6 minutes) — deliberately under
+   * the control plane's 75-minute stalled-thread cutoff once the 30 m schedule
+   * and 30 m execution windows are added (`apps/www/src/server-lib/cron.ts`).
+   */
+  admissionMaxDeferrals: number;
   /**
    * #215: engine-liveness watchdog. Seconds of observed staleness in THIS
    * worker's engine `Worker.lastHeartbeatAt` after which the process exits
@@ -292,31 +318,10 @@ export function resolveBoxId(raw: string | undefined): string {
  * was about.
  */
 export function parseMemoryMax(raw: string | undefined): number {
+  // The byte grammar (and the "a typo must not become a nonsense ceiling"
+  // safe-integer refusal) is parseBytesEnv's; this knob adds only its floor.
+  const bytes = parseBytesEnv("WORKER_RUN_MEMORY_MAX", raw, 0);
   const v = (raw ?? "").trim();
-  if (!v) {
-    return 0;
-  }
-  const m = /^(\d+)([KMG]?)$/i.exec(v);
-  if (!m?.[1]) {
-    throw new Error(
-      `WORKER_RUN_MEMORY_MAX must be bytes with an optional K/M/G suffix, got ${JSON.stringify(v)}`,
-    );
-  }
-  const suffix = (m[2] ?? "").toUpperCase();
-  const scale = { "": 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3 }[suffix] ?? 1;
-  const bytes = Number(m[1]) * scale;
-  // A TYPO MUST NOT BECOME A NONSENSE CEILING. The regex accepts any run of
-  // digits, so `99999999999999999999G` parses — and `Number(...) * scale` then
-  // exceeds 2^53 or overflows to Infinity, which is written verbatim into
-  // `memory.max`. The kernel's answer to that is not something to find out in
-  // production, and this file's whole posture is to refuse a typo at boot rather
-  // than carry it into a run.
-  if (!Number.isSafeInteger(bytes)) {
-    throw new Error(
-      `WORKER_RUN_MEMORY_MAX=${v} does not fit an exact integer number of bytes ` +
-        `(got ${bytes}); use a realistic value such as 1500M`,
-    );
-  }
   // A ceiling below one session's measured ~1.1 GB would OOM-kill every run.
   // Refusing is kinder than a box where nothing completes.
   if (bytes > 0 && bytes < 256 * 1024 ** 2) {
@@ -362,6 +367,78 @@ export function parseTasksMax(raw: string | undefined): number {
     );
   }
   return n;
+}
+
+/**
+ * Parse a byte size with an optional K/M/G suffix for `name` (#371). Unset ⇒
+ * `fallback`. `0` is allowed (it is how an arm is made inert). Anything else
+ * unparseable THROWS — a typo that silently disabled a guard would leave the
+ * box looking guarded.
+ */
+export function parseBytesEnv(
+  name: string,
+  raw: string | undefined,
+  fallback: number,
+): number {
+  const v = (raw ?? "").trim();
+  if (!v) {
+    return fallback;
+  }
+  const m = /^(\d+)([KMG]?)$/i.exec(v);
+  if (!m?.[1]) {
+    throw new Error(
+      `${name} must be bytes with an optional K/M/G suffix, got ${JSON.stringify(v)}`,
+    );
+  }
+  const suffix = (m[2] ?? "").toUpperCase();
+  const scale = { "": 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3 }[suffix] ?? 1;
+  const bytes = Number(m[1]) * scale;
+  // A TYPO MUST NOT BECOME A NONSENSE VALUE. The regex accepts any run of
+  // digits, so `99999999999999999999G` parses — and `Number(...) * scale` then
+  // exceeds 2^53 or overflows to Infinity, which would be written verbatim into
+  // `memory.max` or compared against the kernel's numbers. Refuse at boot.
+  if (!Number.isSafeInteger(bytes)) {
+    throw new Error(
+      `${name}=${v} does not fit an exact integer number of bytes (got ${bytes}); use a realistic value such as 1500M`,
+    );
+  }
+  return bytes;
+}
+
+/** Parse `WORKER_HEADROOM_COMMIT_FRACTION` (#371): unset ⇒ 0.9; must be in (0, 1]. */
+export function parseCommitFraction(raw: string | undefined): number {
+  const v = (raw ?? "").trim();
+  if (!v) {
+    return 0.9;
+  }
+  // Plain decimal only: `Number()` would also take "0x1" (→ 1, silently inert)
+  // or "1e-1", and a typo must not quietly change the guard.
+  const n = /^\d*\.?\d+$/.test(v) ? Number(v) : NaN;
+  if (!Number.isFinite(n) || n <= 0 || n > 1) {
+    throw new Error(
+      `WORKER_HEADROOM_COMMIT_FRACTION must be a decimal in (0, 1], got ${JSON.stringify(v)} (1.0 makes that arm inert)`,
+    );
+  }
+  return n;
+}
+
+/**
+ * Parse `WORKER_ADMISSION_MAX_DEFERRALS` (#371): unset ⇒ 8 (366 s of backoff;
+ * the budget check in loadWorkerConfig accepts up to 10 = 606 s under the 720 s
+ * budget); a non-negative integer. That budget check is the ONE upper bound — a
+ * second numeric cap here could only disagree with it.
+ */
+export function parseMaxDeferrals(raw: string | undefined): number {
+  const v = (raw ?? "").trim();
+  if (!v) {
+    return 8;
+  }
+  if (!/^\d+$/.test(v)) {
+    throw new Error(
+      `WORKER_ADMISSION_MAX_DEFERRALS must be a non-negative integer, got ${JSON.stringify(v)}`,
+    );
+  }
+  return Number(v);
 }
 
 /** Minimum accepted WORKER_LIVENESS_STALE_S. See parseLivenessStaleAfterS. */
@@ -520,10 +597,48 @@ export function loadWorkerConfig(
   // of that slot: a base near the 31-character limit plus `-<i>` is refused by
   // assertAgentUser, and that refusal belongs at boot.
   const agentUsers = slotAgentUsers(agentUser, boxSlots);
+  // #371. Parsed here so a typo is refused at boot, not at the first admission.
+  const headroomFloorBytes = parseBytesEnv(
+    "WORKER_HEADROOM_FLOOR",
+    env.WORKER_HEADROOM_FLOOR,
+    1024 ** 3,
+  );
+  const headroomCommitFraction = parseCommitFraction(
+    env.WORKER_HEADROOM_COMMIT_FRACTION,
+  );
+  const headroomRunCommitBytes = parseBytesEnv(
+    "WORKER_HEADROOM_RUN_COMMIT",
+    env.WORKER_HEADROOM_RUN_COMMIT,
+    memoryMaxBytes > 0 ? memoryMaxBytes : 1300 * 1024 ** 2,
+  );
+  if (headroomRunCommitBytes <= 0) {
+    throw new Error(
+      "WORKER_HEADROOM_RUN_COMMIT must be positive: it is what one admitted run is expected to commit",
+    );
+  }
+  const admissionMaxDeferrals = parseMaxDeferrals(
+    env.WORKER_ADMISSION_MAX_DEFERRALS,
+  );
+  // #371: the deferral wait is spent IN PROCESS inside the run's 30-minute
+  // executionTimeout, so the worst case must leave the agent a usable window
+  // and keep the run inside www's 75-minute stalled cutoff — the inequality
+  // documented on ADMISSION_DEFERRAL_BUDGET_S.
+  const worstCaseS = sumBackoffSeconds(admissionMaxDeferrals);
+  if (worstCaseS > ADMISSION_DEFERRAL_BUDGET_S) {
+    throw new Error(
+      `WORKER_ADMISSION_MAX_DEFERRALS=${admissionMaxDeferrals} waits up to ${worstCaseS}s ` +
+        `(2^n s capped at ${ADMISSION_BACKOFF.maxSeconds}s), over the ${ADMISSION_DEFERRAL_BUDGET_S}s budget ` +
+        `that leaves a deferred run its execution window (and www's 75-minute stalled cutoff)`,
+    );
+  }
   return {
     agentUser,
     boxSlots,
     agentUsers,
+    headroomFloorBytes,
+    headroomCommitFraction,
+    headroomRunCommitBytes,
+    admissionMaxDeferrals,
     boxId: resolveBoxId(env.WORKER_BOX_ID),
     memoryMaxBytes,
     tasksMax,

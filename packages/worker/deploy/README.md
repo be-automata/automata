@@ -80,6 +80,37 @@ are in `AGENT-UID-PROVISIONING.md`. Two things that will otherwise bite:
 - `WORKER_RUN_MEMORY_MAX` (#204) is the per-run memory ceiling and **requires**
   `WORKER_AGENT_USER` plus the `automata-worker.service.d/10-ceiling.conf`
   drop-in; set without either, the worker refuses to boot.
+- Memory-headroom admission (#371, Linux only; inert where `/proc/meminfo` is
+  absent): a run is admitted under its slot only if `MemAvailable − reserved ≥
+WORKER_HEADROOM_FLOOR` (default `1G`; `0` = inert) AND `Committed_AS +
+reserved + WORKER_HEADROOM_RUN_COMMIT ≤ WORKER_HEADROOM_COMMIT_FRACTION ×
+CommitLimit` (fraction default `0.9`; `1.0` = inert on that arm; run commit
+  defaults to `WORKER_RUN_MEMORY_MAX`, else `1300M`; boot refuses a run commit above fraction × the box's `CommitLimit`, which no idle box could admit). A refusal gives the slot
+  back and the run WAITS IN PROCESS (backoff ×2 from 2 s, capped at 120 s), then
+  takes a slot and asks again, up to `WORKER_ADMISSION_MAX_DEFERRALS` times
+  (default 8 = 366 s; the whole budget must fit the 12-minute deferral window —
+  boot refuses otherwise); past the budget the run fails final. The task keeps
+  `retries: 0`: the engine sees RUNNING throughout, never a retry (an engine
+  retry would re-enter the per-PR supersede group as the newest item and cancel
+  the genuinely newer run — measured). A waiting run keeps its engine slot
+  (engine slots = `WORKER_BOX_SLOTS`), so during a shortage the box runs at
+  most N − (deferred runs) agents and the engine's queue waits its 30 m
+  scheduleTimeout; a sustained hog fails each dispatched run after the budget
+  with the reason in its banner. The budget counts wall clock from the first
+  refusal (slot re-acquire waits included). Journal lines `box.headroom_rejected` /
+  `box.headroom_deferred_wait` / `box.headroom_ok` carry the decision and the
+  three memory values.
+  **Restart etiquette:** a deferred run holds NO run cgroup, box lock or run
+  dir, so a cgroup-based "nothing in flight" check misses it; a restart issued
+  during a deferral pauses the worker and BLOCKS in the SDK drain until that run
+  is admitted-and-finished or fails final (up to the 12-minute budget), and a
+  failure that ends the drain is redelivered to the next worker and re-executed.
+  Before restarting: `systemctl list-jobs` (a pending stop = a drain in
+  progress), the engine worker row (paused), and the journal for a `Task run
+  starting` without a `completed`/`failed` in the last 30 minutes or a
+  `box.headroom_deferred_wait` in the last 12.
+  Rollback without a deploy: `WORKER_HEADROOM_FLOOR=0` and
+  `WORKER_HEADROOM_COMMIT_FRACTION=1.0`.
 
 ## Engine-liveness watchdog (#215)
 

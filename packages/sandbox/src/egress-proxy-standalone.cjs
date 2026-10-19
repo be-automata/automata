@@ -98,7 +98,12 @@ function compileEgressPolicy(policy) {
  * - level "ip_port": exact IPv4 entry (any port) or IPv4:port (pinned).
  * - level "none": allowlist entries only (the shape already carries the
  *   control-plane-resolved system hosts), matched with the domain rules.
- * - loopback (127.0.0.1 / localhost / ::1) is implicitly allowed.
+ * - loopback (127.0.0.1 / localhost / ::1) is implicitly allowed. THIS IS A
+ *   DELIBERATE PER-PLANE DIFFERENCE, not drift (#367): the sidecar's loopback
+ *   is the sidecar container's own, while the worker proxy's loopback is the
+ *   execution box's — where the engine, cloudflared and sshd live — so the
+ *   worker proxy refuses every host-local target before its matcher runs.
+ *   Do not "sync" that refusal here, and do not sync this allow back there.
  * - fail closed: empty/garbage host is a deny.
  */
 function matchEgress(policy, host, port) {

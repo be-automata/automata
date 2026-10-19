@@ -128,18 +128,24 @@ describe("agentRunWorkflow registration shape", () => {
     expect(keys[0].maxRuns).toBeLessThanOrEqual(keys[1].maxRuns);
   });
 
-  it("registers exactly one run task with EXPLICIT retries:0 and the 30m timeouts", () => {
+  it("registers exactly one run task with EXPLICIT retries: 0, no backoff, and the 30m timeouts — and #371 keeps it so", () => {
     const tasks = workflowDef._tasks as Array<{
       name: string;
       retries?: number;
+      backoff?: unknown;
       scheduleTimeout?: string;
       executionTimeout?: string;
     }>;
     expect(tasks).toHaveLength(1);
     const run = tasks[0]!;
     expect(run.name).toBe("run");
-    // Explicit 0 — never undefined (a future edit that drops it must fail here).
+    // Explicit, never undefined: an agent run is NON-idempotent and the engine
+    // retries its own failures (an executionTimeout) under this policy — and a
+    // retried attempt re-enters CANCEL_IN_PROGRESS as the newest item. The
+    // memory-headroom deferral (#371) waits IN PROCESS instead, so nothing
+    // ever needs an engine retry.
     expect(run.retries).toBe(0);
+    expect("backoff" in run).toBe(false);
     expect(run.scheduleTimeout).toBe("30m");
     expect(run.executionTimeout).toBe("30m");
   });
@@ -933,5 +939,65 @@ describe("runSelfHealFixStep (GATE-01 / TMO-01 / OBS-01)", () => {
   it("RUN_EXECUTION_TIMEOUT_MS mirrors the task's executionTimeout", () => {
     expect(workflowDef._tasks[0].executionTimeout).toBe("30m");
     expect(wf.RUN_EXECUTION_TIMEOUT_MS).toBe(30 * 60_000);
+  });
+});
+
+describe("#371 sleepAbortable — the real deferral sleep", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("resolves after ms and removes its abort listener on resolve", async () => {
+    vi.useFakeTimers();
+    const { sleepAbortable } = await import("./workflow");
+    const ac = new AbortController();
+    const remove = vi.spyOn(ac.signal, "removeEventListener");
+    let settled = false;
+    const p = sleepAbortable(2_000, ac.signal).then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    expect(settled).toBe(true);
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+    // A late abort finds no listener and changes nothing.
+    ac.abort();
+  });
+
+  it("rejects with an AbortError at once when the signal is ALREADY aborted (no timer armed)", async () => {
+    vi.useFakeTimers();
+    const { sleepAbortable } = await import("./workflow");
+    const ac = new AbortController();
+    ac.abort();
+    await expect(sleepAbortable(60_000, ac.signal)).rejects.toMatchObject({
+      name: "AbortError",
+      message: expect.stringMatching(/aborted/),
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rejects with an AbortError when aborted mid-wait and clears the timer", async () => {
+    vi.useFakeTimers();
+    const { sleepAbortable } = await import("./workflow");
+    const ac = new AbortController();
+    const p = sleepAbortable(60_000, ac.signal);
+    const settled = p.then(
+      () => "resolved",
+      (e: Error) => e.name,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    ac.abort();
+    expect(await settled).toBe("AbortError");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("without a signal it is a plain sleep", async () => {
+    vi.useFakeTimers();
+    const { sleepAbortable } = await import("./workflow");
+    const p = sleepAbortable(50);
+    await vi.advanceTimersByTimeAsync(50);
+    await expect(p).resolves.toBeUndefined();
   });
 });

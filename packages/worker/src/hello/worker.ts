@@ -28,6 +28,7 @@ import {
   assertSlotAccountsOutsideGroup,
   assertSlotSudoGrants,
   assertSlotWorkdirTraverse,
+  hidepidDropinLeftAtOneSlot,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
 } from "../agent-run/box-slots-boot";
@@ -47,6 +48,7 @@ import {
   prepareDelegatedRoot,
 } from "../agent-run/run-cgroup";
 import { workflows } from "../registry";
+import { headroomBootLine, headroomBootWarning } from "../agent-run/workflow";
 
 const execFileAsync = promisify(execFile);
 
@@ -189,6 +191,11 @@ async function main() {
         console.log(
           `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")}; uids ${slotUids.join(", ")}); egress fence covers every slot uid (${EGRESS_FENCE_UIDS_FILE})`,
         );
+      } else {
+        // The drop-in that N > 1 needs relaxes hardening N = 1 does not have
+        // to give up; nothing else notices it left behind after a rollback.
+        const leftBehind = hidepidDropinLeftAtOneSlot();
+        if (leftBehind) console.warn(`[worker-boot] WARNING: ${leftBehind}`);
       }
     }
   } catch (err) {
@@ -333,6 +340,22 @@ async function main() {
   } catch (err) {
     console.error(
       "[worker-boot] FATAL: the per-run memory ceiling is configured but cannot be armed — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
+  // #371: decide the memory-headroom gate once and say so — armed with its
+  // thresholds, or OFF and why (inert rollback values, a platform without
+  // /proc/meminfo). FAIL-CLOSED like the ceiling: a configured check whose
+  // /proc/meminfo cannot be read at boot refuses to start instead of running
+  // every job unguarded while the log says "OFF".
+  try {
+    console.log(`[worker-boot] ${headroomBootLine(registrationConfig)}`);
+    const loadWarning = headroomBootWarning(registrationConfig);
+    if (loadWarning) console.warn(`[worker-boot] WARNING: ${loadWarning}`);
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: the memory headroom check is configured but cannot be armed — refusing to start",
       err,
     );
     process.exit(1);

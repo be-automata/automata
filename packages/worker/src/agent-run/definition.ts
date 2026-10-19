@@ -178,13 +178,16 @@ export function buildAgentRunDefinition(
       name: "run",
       scheduleTimeout: "30m",
       executionTimeout: "30m",
-      // EXPLICIT retries: 0 (the SDK default is already 0). A single agent-run is a
-      // minutes-long, NON-idempotent side-effecting operation (it clones, runs the
-      // agent, and posts a GitHub review) — auto-retrying it would re-execute the
-      // agent and risk a double side-effect. Keep this explicit so a future edit
-      // can't silently enable retries. This is Phase 1.4 mechanism #1 (exactly-once):
-      // at retries:0 + workflow maxRuns:1 the only at-least-once window is engine
-      // redelivery, which the www single-writer (HEAD+verdict idempotency) absorbs.
+      // EXPLICIT retries: 0 — and it stays 0 (#371 measured why). A single
+      // agent-run is a minutes-long, NON-idempotent side-effecting operation (it
+      // clones, runs the agent, posts a GitHub review); the engine retries its
+      // OWN failures too (an executionTimeout re-executes the task under the
+      // retry policy — hatchet-lite v0.94.10, admission-deferral IT), and a
+      // retried attempt re-enters a CANCEL_IN_PROGRESS group as the newest item,
+      // cancelling the genuinely newer run. So the memory-headroom deferral
+      // (#371) is waited out IN PROCESS (workflow.ts), never as an engine
+      // retry. Engine redelivery after a worker death is a separate mechanism,
+      // absorbed by the www single-writer.
       retries: 0,
       // slotCost DEFERRED (#8): meaningless at GLOBAL_MAX_RUNS=1 (one run at a time), so
       // it stays unset until #3b raises the global cap — at which point set slotCost to
