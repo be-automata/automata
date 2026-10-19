@@ -1049,6 +1049,13 @@ The order matters because each step checks the one before it.
    (`FATAL: worker configuration is invalid` / `the box slots do not fit this
 box's CommitLimit`). The production tuple and its derivation from the memory
    sampler live in `deploy/uat/phase2-4.md`.
+   **Deploy order on a box already above N = 1:** this revision refuses
+   `WORKER_GLOBAL_MAX_RUNS ≠ WORKER_BOX_SLOTS`, and the cap defaults to 1 — so a
+   box running `WORKER_BOX_SLOTS=2` with no cap knobs will FATAL at its first
+   boot on the new code. Before deploying, add `WORKER_GLOBAL_MAX_RUNS=<N>` and
+   `WORKER_PER_ORG_MAX_RUNS=<≤ N>` to `worker-box.env` (or drop to N = 1);
+   `grep -E '^WORKER_(BOX_SLOTS|GLOBAL_MAX_RUNS|PER_ORG_MAX_RUNS)=' worker-box.env`
+   must show an agreeing tuple, or nothing at all (= 1/1/1).
 8. **Drill**: the drill automation above, then
    `harness-batteries-acceptance.sh box …` → `ACCEPTANCE: PASS`.
 
