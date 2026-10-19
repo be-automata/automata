@@ -111,6 +111,27 @@ export interface WorkerConfig {
   /** #204: per-run `pids.max`. Only read when the ceiling is on. */
   tasksMax: number;
   /**
+   * #371: memory-headroom admission check (ADR-007 Decision 5). `MemAvailable`
+   * must stay at or above `headroomFloorBytes` and `Committed_AS` plus the
+   * expected commit of every admitted run must stay at or below
+   * `headroomCommitFraction × CommitLimit`, or admission is DEFERRED (a
+   * retryable error the engine re-queues with backoff). Defaults 1G / 0.9 —
+   * ON wherever `/proc/meminfo` exists; `0` and `1.0` are the documented
+   * rollback that makes the check inert without a deploy. One run's expected
+   * commit is its own ceiling when the ceiling is on, else `1300M`.
+   */
+  headroomFloorBytes: number;
+  headroomCommitFraction: number;
+  headroomRunCommitBytes: number;
+  /**
+   * #371: how many times one run may be deferred before the engine fails it
+   * (= the run task's `retries`). Backoff is 2^n s capped at 120 s, so the
+   * default 8 bounds total deferral at roughly 7 minutes — deliberately under
+   * the control plane's 75-minute stalled-thread cutoff once the 30 m schedule
+   * and 30 m execution windows are added (`apps/www/src/server-lib/cron.ts`).
+   */
+  admissionMaxDeferrals: number;
+  /**
    * #215: engine-liveness watchdog. Seconds of observed staleness in THIS
    * worker's engine `Worker.lastHeartbeatAt` after which the process exits
    * non-zero so systemd's Restart=always relaunches it.
@@ -355,6 +376,71 @@ export function parseTasksMax(raw: string | undefined): number {
   return n;
 }
 
+/**
+ * Parse a byte size with an optional K/M/G suffix for `name` (#371). Unset ⇒
+ * `fallback`. `0` is allowed (it is how an arm is made inert). Anything else
+ * unparseable THROWS — a typo that silently disabled a guard would leave the
+ * box looking guarded.
+ */
+export function parseBytesEnv(
+  name: string,
+  raw: string | undefined,
+  fallback: number,
+): number {
+  const v = (raw ?? "").trim();
+  if (!v) {
+    return fallback;
+  }
+  const m = /^(\d+)([KMG]?)$/i.exec(v);
+  if (!m?.[1]) {
+    throw new Error(
+      `${name} must be bytes with an optional K/M/G suffix, got ${JSON.stringify(v)}`,
+    );
+  }
+  const suffix = (m[2] ?? "").toUpperCase();
+  const scale = { "": 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3 }[suffix] ?? 1;
+  const bytes = Number(m[1]) * scale;
+  if (!Number.isSafeInteger(bytes)) {
+    throw new Error(
+      `${name}=${v} does not fit an exact integer number of bytes`,
+    );
+  }
+  return bytes;
+}
+
+/** Parse `WORKER_HEADROOM_COMMIT_FRACTION` (#371): unset ⇒ 0.9; must be in (0, 1]. */
+export function parseCommitFraction(raw: string | undefined): number {
+  const v = (raw ?? "").trim();
+  if (!v) {
+    return 0.9;
+  }
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0 || n > 1) {
+    throw new Error(
+      `WORKER_HEADROOM_COMMIT_FRACTION must be a number in (0, 1], got ${JSON.stringify(v)} (1.0 makes that arm inert)`,
+    );
+  }
+  return n;
+}
+
+/** Upper bound on deferrals; see admissionMaxDeferrals for why the default is 8. */
+export const ADMISSION_MAX_DEFERRALS_CAP = 20;
+
+/** Parse `WORKER_ADMISSION_MAX_DEFERRALS` (#371): unset ⇒ 8; integer in [0, cap]. */
+export function parseMaxDeferrals(raw: string | undefined): number {
+  const v = (raw ?? "").trim();
+  if (!v) {
+    return 8;
+  }
+  const n = Number(v);
+  if (!/^\d+$/.test(v) || n > ADMISSION_MAX_DEFERRALS_CAP) {
+    throw new Error(
+      `WORKER_ADMISSION_MAX_DEFERRALS must be an integer between 0 and ${ADMISSION_MAX_DEFERRALS_CAP}, got ${JSON.stringify(v)}`,
+    );
+  }
+  return n;
+}
+
 /** Minimum accepted WORKER_LIVENESS_STALE_S. See parseLivenessStaleAfterS. */
 const LIVENESS_STALE_FLOOR_S = 300;
 /** Default tick period when the watchdog is on. */
@@ -511,10 +597,36 @@ export function loadWorkerConfig(
   // of that slot: a base near the 31-character limit plus `-<i>` is refused by
   // assertAgentUser, and that refusal belongs at boot.
   const agentUsers = slotAgentUsers(agentUser, boxSlots);
+  // #371. Parsed here so a typo is refused at boot, not at the first admission.
+  const headroomFloorBytes = parseBytesEnv(
+    "WORKER_HEADROOM_FLOOR",
+    env.WORKER_HEADROOM_FLOOR,
+    1024 ** 3,
+  );
+  const headroomCommitFraction = parseCommitFraction(
+    env.WORKER_HEADROOM_COMMIT_FRACTION,
+  );
+  const headroomRunCommitBytes = parseBytesEnv(
+    "WORKER_HEADROOM_RUN_COMMIT",
+    env.WORKER_HEADROOM_RUN_COMMIT,
+    memoryMaxBytes > 0 ? memoryMaxBytes : 1300 * 1024 ** 2,
+  );
+  if (headroomRunCommitBytes <= 0) {
+    throw new Error(
+      "WORKER_HEADROOM_RUN_COMMIT must be positive: it is what one admitted run is expected to commit",
+    );
+  }
+  const admissionMaxDeferrals = parseMaxDeferrals(
+    env.WORKER_ADMISSION_MAX_DEFERRALS,
+  );
   return {
     agentUser,
     boxSlots,
     agentUsers,
+    headroomFloorBytes,
+    headroomCommitFraction,
+    headroomRunCommitBytes,
+    admissionMaxDeferrals,
     boxId: resolveBoxId(env.WORKER_BOX_ID),
     memoryMaxBytes,
     tasksMax,
