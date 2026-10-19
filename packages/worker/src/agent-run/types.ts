@@ -129,8 +129,10 @@ export type AgentRunInput = {
    * (run-secrets.ts) into a `RunSecrets` passed explicitly to every consumer;
    * never read from the input anywhere else, never logged. The envelope type
    * is the one shared crypto contract (`@terragon/utils/payload-seal`).
-   * Optional on the wire only during the PR-1 rollout window, where the
-   * legacy plain-text fields may arrive instead (AgentRunWireInput).
+   * Strict (rollout step 4): REQUIRED on the wire — `resolveRunSecrets`
+   * refuses an input without it, and one carrying any plain-text secret
+   * field. Typed optional here only because the engine payload is untrusted
+   * input that resolveRunSecrets validates (AgentRunWireInput).
    */
   sealedSecrets?: SealedRunSecrets;
   /** Not secret: the read token's ISO-8601 expiry (the worker refuses an expired token). */

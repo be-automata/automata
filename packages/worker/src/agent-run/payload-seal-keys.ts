@@ -140,10 +140,10 @@ let ring: { path: string; keys: PlanePrivateKey[] } | null = null;
 
 /**
  * The ring every run unseals with: read ONCE per process from the configured
- * path (rotation restarts the worker by design — see the key script), `[]`
- * when the file is absent (rollout step 1). An unreadable or malformed file
- * throws here too, so a run never silently proceeds past a broken ring the
- * boot check somehow did not see.
+ * path (rotation restarts the worker by design — see the key script). A
+ * missing, unreadable or malformed file throws here too (strict, rollout
+ * step 4), so a run never silently proceeds past a ring the boot check
+ * somehow did not see.
  */
 export function planeKeysForRun(path: string): PlanePrivateKey[] {
   if (ring && ring.path === path) return ring.keys;

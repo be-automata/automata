@@ -93,8 +93,8 @@ import {
 /**
  * #380: every dispatch under test is SEALED to a per-file plane key (the
  * public half goes into env.HATCHET_PAYLOAD_SEAL_KEY, the private half stays
- * in the fixture to open the envelopes and assert what travelled). The
- * legacy plain-text shape is exercised only by the explicit "key unset" case.
+ * in the fixture to open the envelopes and assert what travelled). There is
+ * no plain-text shape (strict); the "key unset" cases assert fail-closed.
  */
 const PLANE_KID = "plane-test";
 const plane = installTestPlaneKey(PLANE_KID);
