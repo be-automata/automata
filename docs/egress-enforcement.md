@@ -171,6 +171,14 @@ Limits, measured on the box 2026-10-19:
 - A closed loopback port has no socket, so it lands on the default deny: under
   observe it is logged (rate-limited, 20/s), under enforce the agent gets the
   reset the kernel would have sent. ICMP to local addresses is admitted.
+- Known gap (roborev #367 round 3): the shared policy validator still accepts
+  `ip_port` entries in private, CGNAT and link-local ranges and domains that
+  resolve there. On the execution box such an entry can never match — every
+  attempt is audited as a deny with `reason: "host-local"` — while the sandbox
+  sidecar still honours it. Private-network egress from the box is not a
+  supported use case today; if it becomes one it needs an explicit, audited
+  per-policy opt-in, not a silent always-deny. Validator-side rejection is the
+  follow-up.
 - `ip netns exec` remounts `/sys`, which breaks the cgroup path lookup; the
   loader refuses to run in a named namespace.
 - At `WORKER_BOX_SLOTS > 1` the slots are not fenced from each other's loopback
