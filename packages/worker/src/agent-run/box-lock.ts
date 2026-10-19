@@ -138,7 +138,17 @@ interface HelperExit {
 type AcquireOutcome =
   | { kind: "acquired" }
   | { kind: "aborted" }
-  | { kind: "helper-gone"; exit: HelperExit };
+  | { kind: "helper-gone"; exit: HelperExit }
+  /** The kernel granted the slot, but an in-process run still occupies it (its helper died — LOST). Helper killed; nothing held (#205). */
+  | { kind: "occupied" };
+
+/** A slot the kernel would grant that a live in-process run still occupies (#205). */
+export class SlotOccupiedError extends Error {
+  constructor(public readonly slot: number) {
+    super(`box slot ${slot} is occupied by a live run (its lock was LOST)`);
+    this.name = "SlotOccupiedError";
+  }
+}
 
 const SH_BIN = "/bin/sh";
 /** Ack once the lock is held, then park on stdin until EOF. */
@@ -310,6 +320,8 @@ interface HelperSession {
   child: PipedChild;
   exited: Promise<HelperExit>;
   outcome: AcquireOutcome;
+  /** The in-process reservation taken at the ack (slots > 1 only); released by heldLock's release(). */
+  token?: symbol;
   /** Stderr accumulated so far; keeps filling until the helper exits. */
   stderr: () => string;
   file: string;
@@ -400,11 +412,33 @@ async function spawnHelperAndAwaitAck(
   });
   if (onAbort) signal?.removeEventListener("abort", onAbort);
 
+  let token: symbol | undefined;
   if (outcome.kind === "acquired" && enforcePrivate) {
+    // The reservation is taken HERE, synchronously after the ack and before any
+    // await: a slot the kernel just granted may still be occupied by a live
+    // in-process run whose helper died (LOST). Handing it out would put two
+    // runs on one uid — and the newcomer's admission reap would kill the
+    // first. Refuse it instead; the caller treats the slot as busy (#205).
+    const reserved = tryReserve(root, slot);
+    if (reserved === null) {
+      child.kill("SIGKILL");
+      child.stdin.destroy();
+      await exited;
+      return {
+        child,
+        exited,
+        outcome: { kind: "occupied" },
+        stderr: () => stderr,
+        acked: async () => true,
+        file,
+      };
+    }
+    token = reserved;
     // Holding a lock on a file another account can also lock is holding
     // nothing: refuse it (#205).
     const problem = await lockFilePrivacyProblem(lockFile);
     if (problem !== null) {
+      unreserve(root, slot, token);
       child.kill("SIGKILL");
       child.stdin.destroy();
       await exited;
@@ -415,6 +449,7 @@ async function spawnHelperAndAwaitAck(
   }
 
   return {
+    token,
     child,
     exited,
     outcome,
@@ -473,13 +508,32 @@ const releaseGenerations = new Map<string, number>();
  * sweep and the park skip occupied slots; one worker process runs a box, so
  * this set sees every holder.
  */
-const occupiedSlots = new Map<string, Set<number>>();
+const occupiedSlots = new Map<string, Map<number, symbol>>();
 
-function occupied(root: string): Set<number> {
+function occupancy(root: string): Map<number, symbol> {
   const key = path.resolve(root);
-  const set = occupiedSlots.get(key) ?? new Set<number>();
-  occupiedSlots.set(key, set);
-  return set;
+  const map = occupiedSlots.get(key) ?? new Map<number, symbol>();
+  occupiedSlots.set(key, map);
+  return map;
+}
+
+function isOccupied(root: string, slot: number): boolean {
+  return occupancy(root).has(slot);
+}
+
+/** Reserve `slot` for a new holder; null when a live holder already has it. Synchronous: no await between the kernel grant and this. */
+function tryReserve(root: string, slot: number): symbol | null {
+  const map = occupancy(root);
+  if (map.has(slot)) return null;
+  const token = Symbol(`slot ${slot}`);
+  map.set(slot, token);
+  return token;
+}
+
+/** Clear a reservation — only the holder's own (a stale release never frees a newer holder's slot). */
+function unreserve(root: string, slot: number, token: symbol): void {
+  const map = occupancy(root);
+  if (map.get(slot) === token) map.delete(slot);
 }
 
 function releaseGeneration(root: string): number {
@@ -524,7 +578,6 @@ function heldLock(
 ): BoxLock {
   const { child, exited, stderr } = session;
   const tag = slotTag(slot, slots);
-  if (root !== undefined) occupied(root).add(slot);
   let released = false;
   let lost = false;
   void (async () => {
@@ -540,6 +593,11 @@ function heldLock(
   let releasing: Promise<void> | undefined;
   const doRelease = async (): Promise<void> => {
     released = true;
+    // The reservation goes BEFORE the kernel lock: a parked helper granted the
+    // slot the instant ours exits must find no stale reservation (#205).
+    if (root !== undefined && session.token !== undefined) {
+      unreserve(root, slot, session.token);
+    }
     child.stdin.end();
     const exitedInTime = await settlesWithin(exited, RELEASE_EXIT_BOUND_MS);
     if (!exitedInTime) {
@@ -551,12 +609,9 @@ function heldLock(
         exitedInTime ? "" : `, SIGKILLed after ${RELEASE_EXIT_BOUND_MS}ms`
       }${tag})`,
     );
-    // The run is done with the slot (not merely the helper): free it in the
-    // occupancy set, then wake parked in-process waiters (#205).
-    if (root !== undefined) {
-      occupied(root).delete(slot);
-      notifySlotReleased(root);
-    }
+    // The run is done with the slot (not merely the helper): wake parked
+    // in-process waiters (#205).
+    if (root !== undefined) notifySlotReleased(root);
   };
   const release = (): Promise<void> => {
     releasing ??= doRelease();
@@ -610,6 +665,12 @@ export async function acquireBoxLock({
     // sweep against a still-full budget, each wake-up re-notifying (#205).
     if (await session.acked()) notifySlotReleased(root);
     throw abortError();
+  }
+  if (outcome.kind === "occupied") {
+    log?.(
+      `box slot ${slot} is occupied by a live run whose lock was LOST — ${holder} did not take it${tag}`,
+    );
+    throw new SlotOccupiedError(slot);
   }
 
   log?.(`box lock acquired by ${holder} (helper pid ${child.pid}${tag})`);
@@ -673,7 +734,7 @@ export async function acquireBoxSlot({
       const slot = (start + k) % slots;
       // A slot an in-process run still occupies is never tried: its kernel
       // lock may already be free (LOST helper) while the run is live.
-      if (occupied(root).has(slot)) continue;
+      if (isOccupied(root, slot)) continue;
       const lock = await tryAcquireBoxLock({
         root,
         holder,
@@ -698,7 +759,7 @@ export async function acquireBoxSlot({
     const parkOn = Array.from(
       { length: slots },
       (_, k) => (start + k) % slots,
-    ).find((slot) => !occupied(root).has(slot));
+    ).find((slot) => !isOccupied(root, slot));
     if (!parked) {
       parked = true;
       log?.(
@@ -739,8 +800,10 @@ export async function acquireBoxSlot({
       }
       return lock;
     } catch (e) {
-      if (signal?.aborted || !isAbortError(e)) throw e;
-      // Woken by a release: sweep again.
+      if (signal?.aborted) throw e;
+      if (!isAbortError(e) && !(e instanceof SlotOccupiedError)) throw e;
+      // Woken by a release, or granted a slot a live run still occupies
+      // (refused at the ack): sweep again.
     } finally {
       unsubscribe();
       signal?.removeEventListener("abort", onCallerAbort);
@@ -841,6 +904,12 @@ export async function tryAcquireBoxLock({
     child.stdin.destroy();
     await session.exited;
     throw abortError();
+  }
+  if (outcome.kind === "occupied") {
+    log?.(
+      `box slot ${slot} is occupied by a live run whose lock was LOST — ${holder} did not take it${tag}`,
+    );
+    return null;
   }
 
   log?.(`box lock acquired by ${holder} (helper pid ${child.pid}${tag})`);

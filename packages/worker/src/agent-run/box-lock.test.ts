@@ -758,6 +758,57 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       await d.release();
     }, 20_000);
 
+    it("a kernel grant on a LOST slot is refused at the ack: the try-path returns null and the waiting path re-sweeps — until the live run releases", async () => {
+      const lines: string[] = [];
+      const log = (l: string) => lines.push(l);
+      const a = await acquireBoxSlot({ root, slots: 2, holder: "A", log });
+      locks.push(a);
+      const pid = Number(
+        lines
+          .find((l) => l.startsWith("box lock acquired by A "))
+          ?.match(/helper pid (\d+)/)?.[1],
+      );
+      process.kill(pid, "SIGKILL");
+      await waitFor(() => a.lost, 3_000);
+      expect(await tryLock(root, a.slot)).toBe(0); // the kernel would grant it
+      // Direct try on A's slot (as a parked waiter's kernel wait would be
+      // granted): refused, nothing held, the kernel lock is free again.
+      expect(
+        await tryAcquireBoxLock({
+          root,
+          holder: "T",
+          log,
+          slot: a.slot,
+          slots: 2,
+        }),
+      ).toBeNull();
+      expect(lines).toContainEqual(
+        expect.stringContaining(
+          `box slot ${a.slot} is occupied by a live run whose lock was LOST — T did not take it`,
+        ),
+      );
+      expect(await tryLock(root, a.slot)).toBe(0);
+      // The waiting acquire on that slot throws SlotOccupiedError instead of
+      // returning a lock shared with A's live run.
+      await expect(
+        acquireBoxLock({ root, holder: "W", log, slot: a.slot, slots: 2 }),
+      ).rejects.toMatchObject({ name: "SlotOccupiedError", slot: a.slot });
+      // A's own release clears the reservation; now the slot is grantable.
+      await a.release();
+      const t = await tryAcquireBoxLock({
+        root,
+        holder: "T2",
+        log,
+        slot: a.slot,
+        slots: 2,
+      });
+      expect(t).not.toBeNull();
+      if (t) {
+        locks.push(t);
+        await t.release();
+      }
+    }, 20_000);
+
     it("every slot lock file is the worker's alone: mode 0600 (flock(2) on a read-only fd would otherwise let a sibling slot's agent take the slot)", async () => {
       const a = await acquireBoxSlot({ root, slots: 2, holder: "A" });
       const b = await acquireBoxSlot({ root, slots: 2, holder: "B" });
