@@ -209,7 +209,12 @@ export async function decideKnowledgeOp({
       await tx
         .update(knowledgeOp)
         .set({ state: "superseded" })
-        .where(eq(knowledgeOp.id, opId));
+        .where(
+          and(
+            eq(knowledgeOp.id, opId),
+            eq(knowledgeOp.organizationId, organizationId),
+          ),
+        );
       return { result: "superseded" } as const;
     }
     const terminal: KnowledgeOpState =
@@ -220,6 +225,7 @@ export async function decideKnowledgeOp({
       .where(
         and(
           eq(knowledgeOp.id, opId),
+          eq(knowledgeOp.organizationId, organizationId),
           inArray(knowledgeOp.state, OPEN_OP_STATES),
         ),
       );
