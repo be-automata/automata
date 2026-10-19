@@ -100,6 +100,11 @@ CommitLimit` (fraction default `0.9`; `1.0` = inert on that arm; run commit
   refusal (slot re-acquire waits included). Journal lines `box.headroom_rejected` /
   `box.headroom_deferred_wait` / `box.headroom_ok` carry the decision and the
   three memory values.
+  **Restart etiquette:** a deferred run holds NO run cgroup, box lock or run
+  dir, so a cgroup-based "nothing in flight" check misses it and a restart
+  makes the engine redeliver the task to the new worker. Before restarting,
+  also look for a `Task run starting` without a `completed`/`failed` in the
+  last 30 minutes, or a `box.headroom_deferred_wait` in the last 12.
   Rollback without a deploy: `WORKER_HEADROOM_FLOOR=0` and
   `WORKER_HEADROOM_COMMIT_FRACTION=1.0`.
 
