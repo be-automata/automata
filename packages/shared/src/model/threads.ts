@@ -42,7 +42,11 @@ import { BroadcastMessageThreadData } from "@terragon/types/broadcast";
 import type { SandboxProvider } from "@terragon/types/sandbox";
 import { sanitizeForJson } from "../utils/sanitize-json";
 import { toUTC, validateTimezone } from "../utils/timezone";
-import { threadEffectiveStatusIn } from "./thread-effective-status";
+import {
+  threadEffectiveStatusIn,
+  threadLastWriteAt,
+  threadTimestampParam,
+} from "./thread-effective-status";
 import { getUser } from "./user";
 import { AIAgent } from "@terragon/agent/types";
 
@@ -1594,9 +1598,14 @@ export async function markThreadsTerminal({
   //
   // Broadcasts stay OUTSIDE the transaction: network I/O must never hold it
   // open, and a failed publish must not roll back a committed terminal.
+  // The fence reads the EFFECTIVE last write (thread row or its chat rows):
+  // a chat-mode resume touches the chat row first.
   const unchanged =
     unchangedSince !== undefined
-      ? lt(schema.thread.updatedAt, new Date(unchangedSince.getTime() + 2))
+      ? lt(
+          threadLastWriteAt(),
+          threadTimestampParam(new Date(unchangedSince.getTime() + 2)),
+        )
       : undefined;
   const { threadRows, chatRows } = await db.transaction(async (tx) => {
     const [threadRows, chatRows] = await Promise.all([
@@ -1806,11 +1815,14 @@ export async function findUnreportedRemoteThreads({
    */
   maxAgeMs?: number;
 }): Promise<{ id: string; userId: string; dispatchedAt: Date }[]> {
+  // Anchored on the EFFECTIVE last write (thread row or chat rows): the
+  // dispatch that moved a chat-mode thread to `booting` is a chat-row write.
+  const lastWrite = threadLastWriteAt();
   return db
     .select({
       id: schema.thread.id,
       userId: schema.thread.userId,
-      dispatchedAt: schema.thread.updatedAt,
+      dispatchedAt: lastWrite,
     })
     .from(schema.thread)
     .leftJoin(
@@ -1823,9 +1835,15 @@ export async function findUnreportedRemoteThreads({
     .where(
       and(
         remoteBootingWithoutRun({ remoteProviderOnly }),
-        lt(schema.thread.updatedAt, new Date(now.getTime() - olderThanMs)),
+        lt(
+          lastWrite,
+          threadTimestampParam(new Date(now.getTime() - olderThanMs)),
+        ),
         maxAgeMs !== undefined
-          ? gt(schema.thread.updatedAt, new Date(now.getTime() - maxAgeMs))
+          ? gt(
+              lastWrite,
+              threadTimestampParam(new Date(now.getTime() - maxAgeMs)),
+            )
           : undefined,
       ),
     )

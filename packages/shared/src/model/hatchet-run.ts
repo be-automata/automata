@@ -16,6 +16,7 @@ import {
 } from "drizzle-orm";
 import { thread as threadTable } from "../db/schema";
 import { reapableThreadStatuses, threadEffectiveStatusIn } from "./threads";
+import { threadLastWriteAt } from "./thread-effective-status";
 import { normalizeRepo, type SupersedeSnapshot } from "./repo-review-settings";
 
 /**
@@ -210,7 +211,8 @@ export async function findSweepCandidates({
       // #380: the thread's last write. A thread written well after this
       // run was created, and booting again, belongs to a LATER attempt
       // (a resume) — this row is stale, not evidence about that attempt.
-      threadUpdatedAt: threadTable.updatedAt,
+      // The EFFECTIVE last write (chat-mode resumes touch the chat row first).
+      threadUpdatedAt: threadLastWriteAt(),
       // #380: the thread's stamped active run (review dispatches restamp it).
       // A row whose externalId is not the stamp belongs to an OLDER attempt.
       threadActiveRunExternalId: threadTable.activeRunExternalId,

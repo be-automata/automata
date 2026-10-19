@@ -710,11 +710,17 @@ export function reattachSelfHealToken(
  */
 function scrubRunSecrets(secrets: RunSecrets): (text: string) => string {
   const { repoEnv, ...tokens } = secrets;
-  const values = [
+  const plain = [
     ...Object.values(tokens).filter(
       (v): v is string => typeof v === "string" && v.length >= 8,
     ),
     ...Object.values(repoEnv ?? {}).filter((v) => v.length >= 4),
+  ];
+  // An echoed request body carries each value JSON-ENCODED: a quote, a
+  // backslash, a newline (a PEM key, a connection string) or a non-ASCII
+  // character appears escaped there and would never match the raw value.
+  const values = [
+    ...new Set(plain.flatMap((v) => [v, JSON.stringify(v).slice(1, -1)])),
   ].sort((a, b) => b.length - a.length);
   return (text) => {
     let out = text;

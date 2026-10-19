@@ -371,6 +371,13 @@ export async function createTestRemoteRun({
       .update(schema.thread)
       .set({ updatedAt: dispatchedAt })
       .where(eq(schema.thread.id, threadId));
+    // The chat row too: the sweep reads the thread's EFFECTIVE last write
+    // (the later of both rows), and nothing writes the chat row after the
+    // dispatch in production either.
+    await db
+      .update(schema.threadChat)
+      .set({ updatedAt: dispatchedAt })
+      .where(eq(schema.threadChat.threadId, threadId));
   }
   return { threadId, threadChatId, runId: run.id };
 }

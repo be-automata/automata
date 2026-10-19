@@ -9,6 +9,7 @@ import {
 } from "@terragon/shared/model/test-helpers";
 import {
   thread as threadTable,
+  threadChat as threadChatTable,
   hatchetRun as hatchetRunTable,
 } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
@@ -318,6 +319,12 @@ describe("runSupersedeSweep rule (iii) — failed-unreported runs (#380)", () =>
       .update(threadTable)
       .set({ status: "booting", createdAt: stamp, updatedAt: stamp })
       .where(eq(threadTable.id, t.threadId));
+    // As in production: nothing writes the chat row after the dispatch
+    // either, so the thread's EFFECTIVE last write is the dispatch.
+    await db
+      .update(threadChatTable)
+      .set({ updatedAt: stamp })
+      .where(eq(threadChatTable.threadId, t.threadId));
     const name = daemonRunKey(t);
     await auth.api.createApiKey({
       body: { name, userId: user.id, metadata: { tokenType: "daemon" } },
@@ -673,6 +680,104 @@ describe("runSupersedeSweep rule (iii) — failed-unreported runs (#380)", () =>
     expect(await hasActiveDaemonToken({ userId: user.id, name: t.name })).toBe(
       true,
     );
+  });
+
+  /**
+   * Chat-mode threads (enableThreadChatCreation) move to `booting` through
+   * the threadChat row; the thread row keeps its creation status and its
+   * old updatedAt. Cards:
+   *  - anchor: protects=rule (iii) ages a chat-mode thread by its chat row's
+   *    write (the dispatch), never by the stale thread row; fails_when=the
+   *    age anchor reads thread.updatedAt only (a thread re-dispatched moments
+   *    ago, whose previous run FAILED, is terminalised and its new token
+   *    revoked); no_claim=none.
+   *  - fence: protects=a chat-row write between the listing and the terminal
+   *    refuses the write; fails_when=the fence reads the thread row only;
+   *    no_claim=none.
+   *  - both rows: protects=a terminal applied to a chat-mode thread lands on
+   *    the chat row (live status) AND the thread row (typed cause);
+   *    fails_when=either is skipped; no_claim=none.
+   */
+  it("chat-mode: rule (iii) ages the thread by its chat row's write — a thread re-dispatched moments ago (old thread row) is untouched; one booting since N is terminal on both rows; a chat-row write mid-tick is fenced", async () => {
+    const chatThread = async (chatAgeMs: number, threadAgeMs: number) => {
+      const t = await createTestThread({
+        db,
+        userId: user.id,
+        overrides: {
+          organizationId: orgId,
+          sandboxProvider: "hatchet-remote",
+          githubRepoFullName: "be-automata/automata",
+        },
+        chatOverrides: { status: "booting" },
+        enableThreadChatCreation: true,
+      });
+      await db
+        .update(threadTable)
+        .set({
+          createdAt: new Date(Date.now() - threadAgeMs),
+          updatedAt: new Date(Date.now() - threadAgeMs),
+        })
+        .where(eq(threadTable.id, t.threadId));
+      await db
+        .update(threadChatTable)
+        .set({ updatedAt: new Date(Date.now() - chatAgeMs) })
+        .where(eq(threadChatTable.threadId, t.threadId));
+      // No daemon token here: a chat-mode run key exceeds the auth key-name
+      // cap (the known v1 dispatch blocker), so the revoke leg is proven by
+      // the legacy cases above; this case proves the anchor and the fence.
+      return t;
+    };
+    const chatRow = async (threadId: string) =>
+      (
+        await db
+          .select()
+          .from(threadChatTable)
+          .where(eq(threadChatTable.threadId, threadId))
+      )[0]!;
+    // Re-dispatched 1 min ago through the chat row; thread row untouched
+    // since the FAILED attempt 20 min ago.
+    const resumed = await chatThread(60_000, N + 5 * 60_000);
+    // Booting since N + 1 min on both rows.
+    const stale = await chatThread(N + 60_000, N + 60_000);
+    // Other tests' booting threads share the database: answer only for ours.
+    const mine = new Set([resumed.threadId, stale.threadId]);
+    const listRuns = async (hint: { threadId: string }) =>
+      mine.has(hint.threadId)
+        ? [{ externalId: "r-failed", status: "FAILED" as const }]
+        : [];
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns,
+    });
+    expect(report.unreported).toEqual([stale.threadId]);
+    expect((await chatRow(resumed.threadId)).status).toBe("booting");
+    expect((await threadRow(resumed.threadId)).terminalCause).toBeNull();
+    const staleChat = await chatRow(stale.threadId);
+    expect(staleChat.status).toBe("complete");
+    expect(staleChat.terminalCause).toBe("run-failed-unreported");
+    expect((await threadRow(stale.threadId)).terminalCause).toBe(
+      "run-failed-unreported",
+    );
+
+    // The fence: a chat-row write between the listing and the terminal.
+    const racing = await chatThread(N + 60_000, N + 60_000);
+    const raced = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns: async (hint) => {
+        if (hint.threadId !== racing.threadId) return [];
+        await db
+          .update(threadChatTable)
+          .set({ updatedAt: new Date() })
+          .where(eq(threadChatTable.threadId, racing.threadId));
+        return [{ externalId: "r-failed", status: "FAILED" as const }];
+      },
+    });
+    expect(raced.unreported).not.toContain(racing.threadId);
+    expect((await chatRow(racing.threadId)).status).toBe("booting");
   });
 
   it("a listing failure leaves the thread for the next tick (no terminal, token kept)", async () => {

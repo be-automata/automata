@@ -1206,6 +1206,59 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       expect((await unsealInput(input)).repoEnv).toBeUndefined();
     });
 
+    /**
+     * Card: protects=in the legacy window an engine 4xx that echoes the
+     * request body carries repoEnv values JSON-ESCAPED; neither the raw nor
+     * the escaped form reaches the attempt log or the thrown cause;
+     * fails_when=only the raw value is scrubbed (a quote, backslash or
+     * newline in the value defeats it); no_claim=redactSecrets' own patterns.
+     */
+    it("legacy window: a repoEnv value with a quote and a newline is scrubbed in its JSON-escaped form from an echoing 400", async () => {
+      setKey("");
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const secret = 'pw"with\\slash\nand-newline-0123';
+        await setRepoEnv({ DB_PASSWORD: secret });
+        const t = await orgTaskThread();
+        const f = vi.fn(async (_url: string, init?: RequestInit) => {
+          return new Response(
+            `{"error":"bad input","echo":${String(init?.body)}}`,
+            {
+              status: 400,
+            },
+          );
+        });
+        vi.stubGlobal("fetch", f);
+        let thrown: unknown;
+        try {
+          await dispatchAgentRun({
+            userId: user.id,
+            threadId: t.threadId,
+            threadChatId: t.threadChatId,
+            repoFullName: REPO,
+            branch: "feature",
+          });
+        } catch (e) {
+          thrown = e;
+        } finally {
+          vi.unstubAllGlobals();
+        }
+        const escaped = JSON.stringify(secret).slice(1, -1);
+        expect(escaped).not.toBe(secret);
+        const cause = (thrown as ThreadError).cause as Error;
+        expect(cause.message).toContain("Hatchet trigger failed: 400");
+        expect(cause.message).not.toContain(secret);
+        expect(cause.message).not.toContain(escaped);
+        for (const line of errorSpy.mock.calls.map((c) => JSON.stringify(c))) {
+          expect(line).not.toContain(escaped);
+          expect(line).not.toContain(JSON.stringify(escaped).slice(1, -1));
+        }
+      } finally {
+        errorSpy.mockRestore();
+        plane.reinstall();
+      }
+    });
+
     it("a task run with no variables sends no repoEnv key", async () => {
       const input = await dispatchAndRead(await orgTaskThread());
       expect("repoEnv" in input).toBe(false);
