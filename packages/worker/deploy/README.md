@@ -462,3 +462,49 @@ To roll back a repair that already happened: the repair only NULLs a dangling pa
 pointer / strips dangling child ids — it never deletes a row or flips `is_active`.
 Restarting the worker re-registers the workflow and mints a fresh chain; there is no
 state to manually restore.
+
+## Engine dashboard hygiene (Linux box, hatchet-lite)
+
+hatchet-lite seeds `admin@example.com` / `Admin123!!` and allows open self-registration.
+Behind the `automata-hatchet` tunnel that is a public login to the production engine as
+tenant OWNER — run inputs carry daemon and installation tokens, and an owner mints API
+tokens. Found and closed on 2026-10-18; every new engine (a second tenant's stack, a box
+rebuilt from cloud-init, an IT stack promoted) repeats these steps BEFORE its REST port is
+tunnelled.
+
+1. **Rotate the seed password.** The `/api/v1/users/password` route answers 403 for the
+   seed user, so set the bcrypt hash directly (pgcrypto on the engine DB; `$2a$` is what
+   Go's bcrypt expects), then invalidate every session:
+
+   ```bash
+   NEW="$(openssl rand -base64 30 | tr -d '/+=' | cut -c1-32)"
+   PG="docker exec -i automata-hatchet-postgres-1 psql -U hatchet -d hatchet -Atq"
+   $PG -c "CREATE EXTENSION IF NOT EXISTS pgcrypto"
+   HASH="$($PG -c "select crypt('$NEW', gen_salt('bf', 10))")"
+   $PG -c "update \"UserPassword\" set hash='$HASH' where \"userId\"=(select id from \"User\" where email='admin@example.com')"
+   $PG -c "delete from \"UserSession\""
+   umask 077; printf '%s' "$NEW" > /root/.automata/hatchet-admin.pass
+   ```
+
+2. **Rename the seed admin into the operator's domain** — the restriction below refuses
+   an out-of-domain LOGIN too (verified on a throwaway stack), so this comes first:
+
+   ```bash
+   $PG -c "update \"User\" set email='ops@beautomata.com' where email='admin@example.com'"
+   ```
+
+3. **Restrict sign-up and login to the domain.** `docker-compose.hatchet.prod.yml` sets
+   `SERVER_AUTH_RESTRICTED_EMAIL_DOMAINS: beautomata.com`; apply it with the engine idle
+   (no run cgroup with processes, see "Restart etiquette"):
+
+   ```bash
+   cd /opt/automata-platform/packages/worker
+   docker compose -f docker-compose.hatchet.yml -f docker-compose.hatchet.prod.yml up -d hatchet-lite
+   curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8888/api/v1/users/register \
+     -H 'Content-Type: application/json' -d '{"email":"x@invalid.test","password":"Probe123!!probe","name":"p"}'   # not 200
+   ```
+
+   API tokens (www's `HATCHET_API_TOKEN`, the worker's `HATCHET_CLIENT_TOKEN`) are not
+   email logins and keep working. The worker's gRPC session survives an engine restart
+   only sometimes (see the liveness watchdog, #215); restart the worker afterwards if
+   `box lock acquired` lines stop.
