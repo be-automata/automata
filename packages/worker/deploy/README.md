@@ -101,10 +101,14 @@ CommitLimit` (fraction default `0.9`; `1.0` = inert on that arm; run commit
   `box.headroom_deferred_wait` / `box.headroom_ok` carry the decision and the
   three memory values.
   **Restart etiquette:** a deferred run holds NO run cgroup, box lock or run
-  dir, so a cgroup-based "nothing in flight" check misses it and a restart
-  makes the engine redeliver the task to the new worker. Before restarting,
-  also look for a `Task run starting` without a `completed`/`failed` in the
-  last 30 minutes, or a `box.headroom_deferred_wait` in the last 12.
+  dir, so a cgroup-based "nothing in flight" check misses it; a restart issued
+  during a deferral pauses the worker and BLOCKS in the SDK drain until that run
+  is admitted-and-finished or fails final (up to the 12-minute budget), and a
+  failure that ends the drain is redelivered to the next worker and re-executed.
+  Before restarting: `systemctl list-jobs` (a pending stop = a drain in
+  progress), the engine worker row (paused), and the journal for a `Task run
+  starting` without a `completed`/`failed` in the last 30 minutes or a
+  `box.headroom_deferred_wait` in the last 12.
   Rollback without a deploy: `WORKER_HEADROOM_FLOOR=0` and
   `WORKER_HEADROOM_COMMIT_FRACTION=1.0`.
 
