@@ -958,68 +958,6 @@ async function runAgentInner(
     await boxLock?.release();
     throw err;
   }
-  const workdir = run.repo;
-  step(
-    `clone complete: ${input.repoFullName}@${input.branch}` +
-      (input.baseBranch ? ` (base ${input.baseBranch} fetched)` : "") +
-      (input.workBranch ? ` (work branch ${input.workBranch})` : ""),
-  );
-  // GATE-01: the fix check diffs the pushed commit against the base as it was
-  // cloned. Pinned now, by the worker, because the agent can rewrite its own
-  // remote-tracking refs. Never throws; null makes the check report error.
-  const fixBaseSha =
-    input.selfHeal?.kind === "fix"
-      ? await pinFixBaseSha({
-          workdir,
-          baseBranch: input.selfHeal.baseBranch,
-        })
-      : null;
-  if (input.selfHeal?.kind === "fix" && fixBaseSha === null) {
-    step("self-heal fix-check: base branch not pinned (check will error)");
-  }
-
-  // D1: resolve HOW this run authenticates to the model provider, BEFORE the
-  // child env is built (the credential fixes HOME, and the env is built once).
-  //
-  // "shared" box: never pull, never write a provider credential to this disk.
-  // "owner" box: pull the run's own credential and materialise it under a
-  // per-run HOME, so the run spends the USER's subscription / API key exactly
-  // like an in-sandbox run does.
-  // A "shared" box never asks for a credential; it still gets a fresh HOME,
-  // because an inherited one lets the agent CLI authenticate as the BOX OWNER
-  // out of the macOS Keychain — no file, no env var, no trace.
-  //
-  // These two steps sit BETWEEN the clone and the try/finally that owns
-  // cleanupWorkdir, and both can throw: the pull is a fetch (network error, or
-  // the run's AbortSignal firing on cancel/scheduleTimeout) and materialise
-  // does fs mkdir/writeFile. Without this guard such a throw escapes before
-  // the try is ever entered, and the cloned workdir is stranded on the box's
-  // disk for good. Cleaning the workdir also removes the per-run HOME beneath
-  // it, so a half-written credential cannot survive either.
-  // Phase 5: bounds-check the review shape BEFORE seeding, so a rejected
-  // orchestrated run seeds AND runs classic, and its `batteries:` line says
-  // what actually runs. Numbers/field names only (H2).
-  const reviewAgentGate = reviewAgentForRun(input.reviewAgent);
-  const runReviewAgent = reviewAgentGate.reviewAgent;
-  if (reviewAgentGate.rejected) {
-    step(
-      `review agent: bounds-rejected (${reviewAgentGate.rejected}) → classic`,
-    );
-  }
-  // Phase 7: task-run packs, shape-gated BEFORE seeding (reason only, H2).
-  // The review lane never takes task packs, whatever the input carries.
-  const lane = resolveRunLane(input);
-  const taskGate = taskAgentForRun(input.taskAgent, lane);
-  if (taskGate.kind === "rejected") {
-    step(
-      taskGate.reason === "review-lane"
-        ? "task agent: ignored (review-lane)"
-        : `task agent: rejected (${taskGate.reason})`,
-    );
-  }
-  const batterySeed = batterySeedForRun(runReviewAgent, taskGate);
-  const foregroundOnly = foregroundOnlyForRun(lane, batterySeed);
-
   let materialised: MaterialisedCredentials;
   // Every cleanupWorkdir below: agent-uid mode hands the agent's files back
   // before the rm (as the slot's account, #205), and a workdir that still
@@ -1044,6 +982,84 @@ async function runAgentInner(
       await boxLock?.release();
     }
   };
+  // From here to the daemon's own try/finally the slot is HELD: every exit
+  // goes through abandon(), or a throw would leak the slot's helper (and its
+  // reservation) for the life of the worker — a wedged box at N = 1, a box
+  // quietly running N − 1 slots above. The calls in this stretch do not throw
+  // today; the guard is what keeps that from mattering.
+  const workdir = run.repo;
+  let fixBaseSha: string | null;
+  let runReviewAgent: ReturnType<typeof reviewAgentForRun>["reviewAgent"];
+  let lane: ReturnType<typeof resolveRunLane>;
+  let taskGate: ReturnType<typeof taskAgentForRun>;
+  let batterySeed: ReturnType<typeof batterySeedForRun>;
+  let foregroundOnly: ReturnType<typeof foregroundOnlyForRun>;
+  try {
+    step(
+      `clone complete: ${input.repoFullName}@${input.branch}` +
+        (input.baseBranch ? ` (base ${input.baseBranch} fetched)` : "") +
+        (input.workBranch ? ` (work branch ${input.workBranch})` : ""),
+    );
+    // GATE-01: the fix check diffs the pushed commit against the base as it was
+    // cloned. Pinned now, by the worker, because the agent can rewrite its own
+    // remote-tracking refs. Never throws; null makes the check report error.
+    fixBaseSha =
+      input.selfHeal?.kind === "fix"
+        ? await pinFixBaseSha({
+            workdir,
+            baseBranch: input.selfHeal.baseBranch,
+          })
+        : null;
+    if (input.selfHeal?.kind === "fix" && fixBaseSha === null) {
+      step("self-heal fix-check: base branch not pinned (check will error)");
+    }
+
+    // D1: resolve HOW this run authenticates to the model provider, BEFORE the
+    // child env is built (the credential fixes HOME, and the env is built once).
+    //
+    // "shared" box: never pull, never write a provider credential to this disk.
+    // "owner" box: pull the run's own credential and materialise it under a
+    // per-run HOME, so the run spends the USER's subscription / API key exactly
+    // like an in-sandbox run does.
+    // A "shared" box never asks for a credential; it still gets a fresh HOME,
+    // because an inherited one lets the agent CLI authenticate as the BOX OWNER
+    // out of the macOS Keychain — no file, no env var, no trace.
+    //
+    // These two steps sit BETWEEN the clone and the try/finally that owns
+    // cleanupWorkdir, and both can throw: the pull is a fetch (network error, or
+    // the run's AbortSignal firing on cancel/scheduleTimeout) and materialise
+    // does fs mkdir/writeFile. Without this guard such a throw escapes before
+    // the try is ever entered, and the cloned workdir is stranded on the box's
+    // disk for good. Cleaning the workdir also removes the per-run HOME beneath
+    // it, so a half-written credential cannot survive either.
+    // Phase 5: bounds-check the review shape BEFORE seeding, so a rejected
+    // orchestrated run seeds AND runs classic, and its `batteries:` line says
+    // what actually runs. Numbers/field names only (H2).
+    const reviewAgentGate = reviewAgentForRun(input.reviewAgent);
+    runReviewAgent = reviewAgentGate.reviewAgent;
+    if (reviewAgentGate.rejected) {
+      step(
+        `review agent: bounds-rejected (${reviewAgentGate.rejected}) → classic`,
+      );
+    }
+    // Phase 7: task-run packs, shape-gated BEFORE seeding (reason only, H2).
+    // The review lane never takes task packs, whatever the input carries.
+    lane = resolveRunLane(input);
+    taskGate = taskAgentForRun(input.taskAgent, lane);
+    if (taskGate.kind === "rejected") {
+      step(
+        taskGate.reason === "review-lane"
+          ? "task agent: ignored (review-lane)"
+          : `task agent: rejected (${taskGate.reason})`,
+      );
+    }
+    batterySeed = batterySeedForRun(runReviewAgent, taskGate);
+    foregroundOnly = foregroundOnlyForRun(lane, batterySeed);
+  } catch (err) {
+    await abandon();
+    throw err;
+  }
+
   try {
     // #184 (#152 Stage B2): uid-wide scan UNDER the slot lock, BEFORE any
     // credential touches disk and BEFORE this run spawns its daemon. ADR-007

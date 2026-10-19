@@ -1879,6 +1879,19 @@ describe("GATE-01: the fix check runs after the agent is dead, then reports (09-
     pollUntilTerminal.mockReset();
   });
 
+  it("#205: a throw between the clone and the credential pull (pinFixBaseSha) still removes the workdir and releases the slot — nothing is held for the life of the worker", async () => {
+    pinFixBaseSha.mockRejectedValueOnce(new Error("git exploded"));
+    releaseMock.mockClear();
+    cleanupWorkdir.mockClear();
+    await expect(runFn(FIX_RUN, fixCtx())).rejects.toThrow("git exploded");
+    expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+    // and the cleanup came BEFORE the release (I2)
+    expect(cleanupWorkdir.mock.invocationCallOrder[0]).toBeLessThan(
+      releaseMock.mock.invocationCallOrder[0]!,
+    );
+  });
+
   it("completed: teardown → reap → lastPushedSha → git close → gh close → check → report; then the finally sequence, lock last", async () => {
     pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
     pollUntilTerminal.mockResolvedValue({
