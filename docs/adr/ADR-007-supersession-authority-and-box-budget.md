@@ -141,7 +141,9 @@ in a URL that reaches an argv or a log line; the git and gh brokers already fenc
 catches clean the workdir BEFORE releasing the slot, same as the finally (I2), because a
 parked waiter takes a freed slot immediately — any in-process release wakes every parked
 waiter to re-sweep all slots (event-driven, not the polling I1 forbids; the kernel wait on
-the rotated slot remains the cross-process authority). A 407 from a credentialed proxy is
+the rotated slot remains the cross-process authority). A slot whose helper died (LOST) stays
+reserved in-process until its run's own release — the kernel alone would re-admit it to a
+second run on the same uid. A 407 from a credentialed proxy is
 audited as a `proxy-auth` deny. The boot scan also reaps slot accounts above the current N.
 N > 1 requires the #204 ceiling; the box refuses otherwise. The engine's
 `slots` equals N; its per-variant caps are #372's. `box-budget.json` and

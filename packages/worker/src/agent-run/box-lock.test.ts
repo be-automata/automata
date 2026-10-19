@@ -127,6 +127,15 @@ function startHolder(root: string, flags: string[] = []): Holder {
   return { child, out: lineReader(child.stdout), exit };
 }
 
+/** Poll `cond` every 20ms until true or `ms` elapsed. */
+async function waitFor(cond: () => boolean, ms: number): Promise<void> {
+  const until = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > until) throw new Error("waitFor: timed out");
+    await sleep(20);
+  }
+}
+
 /** Non-blocking try-lock probe: 0 when free, HELD_EXIT when held (F10). */
 async function tryLock(root: string, slot = 0): Promise<number | null> {
   const { file, args } = boxLockHelper();
@@ -663,8 +672,10 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       );
       await sleep(300);
       expect(cHeld).toBeNull();
+      // Both slots are occupied by in-process runs, so there is no kernel lock
+      // worth waiting on: C waits for a release wake-up.
       expect(lines).toContain(
-        `box budget full (2 slots held) — C waits on slot ${wanted}`,
+        "box budget full (2 slots held) — C waits on a release",
       );
       // Freeing the OTHER slot admits C THERE: the release wakes the parked
       // waiter, which re-sweeps instead of idling on its rotated slot while a
@@ -707,6 +718,45 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       expect(await tryLock(root, 0)).toBe(0);
       expect(await tryLock(root, 1)).toBe(0);
     }, 15_000);
+
+    it("a LOST slot (helper killed, kernel lock gone, run still live) is never re-admitted: the next acquire takes another slot or waits until the run releases", async () => {
+      const lines: string[] = [];
+      const log = (l: string) => lines.push(l);
+      const a = await acquireBoxSlot({ root, slots: 2, holder: "A", log });
+      const b = await acquireBoxSlot({ root, slots: 2, holder: "B", log });
+      locks.push(a, b);
+      const pidOf = (holder: string) =>
+        Number(
+          lines
+            .find((l) => l.startsWith(`box lock acquired by ${holder} `))
+            ?.match(/helper pid (\d+)/)?.[1],
+        );
+      process.kill(pidOf("A"), "SIGKILL");
+      await waitFor(() => a.lost, 3_000);
+      // The kernel has freed A's slot file...
+      expect(await tryLock(root, a.slot)).toBe(0);
+      // ...but C must not take it: B still holds the other, so C waits.
+      let cHeld: BoxLock | null = null;
+      const c = acquireBoxSlot({ root, slots: 2, holder: "C", log }).then(
+        (l) => {
+          cHeld = l;
+          locks.push(l);
+          return l;
+        },
+      );
+      await sleep(400);
+      expect(cHeld).toBeNull();
+      await b.release();
+      const held = await c;
+      expect(held.slot).toBe(b.slot);
+      // A's run ends: its release frees the occupancy; the slot is usable again.
+      await a.release();
+      const d = await acquireBoxSlot({ root, slots: 2, holder: "D", log });
+      locks.push(d);
+      expect(d.slot).toBe(a.slot);
+      await held.release();
+      await d.release();
+    }, 20_000);
 
     it("every slot lock file is the worker's alone: mode 0600 (flock(2) on a read-only fd would otherwise let a sibling slot's agent take the slot)", async () => {
       const a = await acquireBoxSlot({ root, slots: 2, holder: "A" });

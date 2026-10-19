@@ -313,8 +313,8 @@ interface HelperSession {
   /** Stderr accumulated so far; keeps filling until the helper exits. */
   stderr: () => string;
   file: string;
-  /** Whether the helper ever printed its ack (the lock WAS granted), even if an abort won the race. */
-  acked: () => boolean;
+  /** Whether the helper ever printed its ack (the lock WAS granted), even if an abort won the race; waits for stdout to drain first. */
+  acked: () => Promise<boolean>;
 }
 
 /**
@@ -381,6 +381,12 @@ async function spawnHelperAndAwaitAck(
     );
     child.on("exit", (code, signal) => resolve({ code, signal }));
   });
+  // 'exit' can fire before the stdout pipe is drained; an ack written just
+  // before a SIGKILL is only certain to have been read once stdout closed.
+  const stdoutClosed = new Promise<void>((resolve) => {
+    child.stdout.once("close", () => resolve());
+    child.on("error", () => resolve());
+  });
 
   let onAbort: (() => void) | undefined;
   const outcome = await new Promise<AcquireOutcome>((resolve) => {
@@ -413,7 +419,10 @@ async function spawnHelperAndAwaitAck(
     exited,
     outcome,
     stderr: () => stderr,
-    acked: () => stdout.startsWith("ok"),
+    acked: async () => {
+      await settlesWithin(stdoutClosed, RELEASE_EXIT_BOUND_MS);
+      return stdout.startsWith("ok");
+    },
     file,
   };
 }
@@ -454,6 +463,24 @@ async function lockFilePrivacyProblem(
 const releaseWakers = new Map<string, Set<() => void>>();
 /** Per-root count of releases so far: lets a sweeper detect a release that landed mid-sweep. */
 const releaseGenerations = new Map<string, number>();
+/**
+ * #205: slots an in-process run OCCUPIES — added on acquire, removed only by
+ * that run's release(), never by the helper's exit. A LOST slot (helper died,
+ * kernel lock gone, run still executing as that slot's account) therefore
+ * stays reserved until its run ends: the kernel alone would hand it to the
+ * next admission, which would run as the same uid as the live run and its
+ * admission reap would `kill -9 -- -1` it (ADR-007 I4's premise broken). The
+ * sweep and the park skip occupied slots; one worker process runs a box, so
+ * this set sees every holder.
+ */
+const occupiedSlots = new Map<string, Set<number>>();
+
+function occupied(root: string): Set<number> {
+  const key = path.resolve(root);
+  const set = occupiedSlots.get(key) ?? new Set<number>();
+  occupiedSlots.set(key, set);
+  return set;
+}
 
 function releaseGeneration(root: string): number {
   return releaseGenerations.get(path.resolve(root)) ?? 0;
@@ -497,6 +524,7 @@ function heldLock(
 ): BoxLock {
   const { child, exited, stderr } = session;
   const tag = slotTag(slot, slots);
+  if (root !== undefined) occupied(root).add(slot);
   let released = false;
   let lost = false;
   void (async () => {
@@ -523,9 +551,12 @@ function heldLock(
         exitedInTime ? "" : `, SIGKILLed after ${RELEASE_EXIT_BOUND_MS}ms`
       }${tag})`,
     );
-    // The helper has exited, so the kernel has freed the slot: wake parked
-    // in-process waiters (#205).
-    if (root !== undefined) notifySlotReleased(root);
+    // The run is done with the slot (not merely the helper): free it in the
+    // occupancy set, then wake parked in-process waiters (#205).
+    if (root !== undefined) {
+      occupied(root).delete(slot);
+      notifySlotReleased(root);
+    }
   };
   const release = (): Promise<void> => {
     releasing ??= doRelease();
@@ -577,7 +608,7 @@ export async function acquireBoxLock({
     // parked sibling must not idle beside. A helper still blocked in flock(2)
     // held nothing — notifying then would wake every parked waiter into a
     // sweep against a still-full budget, each wake-up re-notifying (#205).
-    if (session.acked()) notifySlotReleased(root);
+    if (await session.acked()) notifySlotReleased(root);
     throw abortError();
   }
 
@@ -640,6 +671,9 @@ export async function acquireBoxSlot({
     for (let k = 0; k < slots; k++) {
       if (signal?.aborted) throw abortError();
       const slot = (start + k) % slots;
+      // A slot an in-process run still occupies is never tried: its kernel
+      // lock may already be free (LOST helper) while the run is live.
+      if (occupied(root).has(slot)) continue;
       const lock = await tryAcquireBoxLock({
         root,
         holder,
@@ -656,15 +690,24 @@ export async function acquireBoxSlot({
       }
     }
     if (releaseGeneration(root) !== generation) continue;
+    // Park on the first slot from the rotation that no in-process run
+    // occupies — a kernel wait on an occupied slot could be granted the
+    // instant its LOST helper's lock is gone, with the run still live. Every
+    // slot occupied in-process ⇒ nothing to wait on in the kernel; wait for a
+    // release wake-up alone.
+    const parkOn = Array.from(
+      { length: slots },
+      (_, k) => (start + k) % slots,
+    ).find((slot) => !occupied(root).has(slot));
     if (!parked) {
       parked = true;
       log?.(
-        `box budget full (${slots} slots held) — ${holder} waits on slot ${start}`,
+        `box budget full (${slots} slots held) — ${holder} waits on ${parkOn === undefined ? "a release" : `slot ${parkOn}`}`,
       );
     }
-    // Park on the rotated slot, but let an in-process release of ANY slot (or
-    // the caller's abort) end the wait: the wait's own signal is a child of
-    // both. A wake-up re-sweeps; the caller's abort wins and throws.
+    // Let an in-process release of ANY slot (or the caller's abort) end the
+    // wait: the wait's own signal is a child of both. A wake-up re-sweeps; the
+    // caller's abort wins and throws.
     const wake = new AbortController();
     const onCallerAbort = () => wake.abort();
     signal?.addEventListener("abort", onCallerAbort, { once: true });
@@ -673,12 +716,20 @@ export async function acquireBoxSlot({
       // A cancel that landed during the last try: the listener above was
       // added to an already-aborted signal and will never fire.
       if (signal?.aborted) throw abortError();
+      if (parkOn === undefined) {
+        await new Promise<void>((_resolve, reject) => {
+          wake.signal.addEventListener("abort", () => reject(abortError()), {
+            once: true,
+          });
+        });
+        continue;
+      }
       const lock = await acquireBoxLock({
         root,
         holder,
         signal: wake.signal,
         log,
-        slot: start,
+        slot: parkOn,
         slots,
       });
       // The wait saw only its own signal; a cancelled run never gets a slot.
