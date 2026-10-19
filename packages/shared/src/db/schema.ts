@@ -12,6 +12,7 @@ import {
   numeric,
   bigint,
   foreignKey,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { DBMessage, DBUserMessage } from "./db-message";
@@ -2450,5 +2451,234 @@ export const selfHealAdminLog = pgTable(
       table.organizationId,
       table.createdAt,
     ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Knowledge plane (M1: governed-truth slice, docs/designs/knowledge-governed-truth-slice.md)
+//
+// MULTI-TENANT: every table carries `organization_id` (ADR-001). apps/www is the
+// only writer; the worker's reconcile/apply jobs reach these rows over HTTP.
+//
+//   knowledge_claim ──< knowledge_pin
+//         │
+//         └──< knowledge_op ──< knowledge_decision      (append-only)
+//   knowledge_cursor        one per (org, repo): default-branch progress
+//   knowledge_usage_window  one per (org, month): the model-call cap
+// ---------------------------------------------------------------------------
+
+export type KnowledgeClaimState =
+  | "current"
+  | "source_pending"
+  | "source_disagrees"
+  | "retracted";
+
+/**
+ * One approved (or owner-confirmed) fact. `version` is the compare-and-swap
+ * token: an op records the version it was made against (`base_version`) and
+ * applies only while the claim still has it, so a delayed approval can never
+ * overwrite a newer statement.
+ */
+export const knowledgeClaim = pgTable(
+  "knowledge_claim",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    repoFullName: text("repo_full_name").notNull(),
+    page: text("page").notNull(),
+    statement: text("statement").notNull(),
+    version: integer("version").notNull().default(1),
+    state: text("state")
+      .$type<KnowledgeClaimState>()
+      .notNull()
+      .default("current"),
+    ownerUserId: text("owner_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    approvedByUserId: text("approved_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    approvedAt: timestamp("approved_at", { mode: "date" }),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("knowledge_claim_org_repo_page_index").on(
+      table.organizationId,
+      table.repoFullName,
+      table.page,
+    ),
+  ],
+);
+
+/** One evidence pin of a claim: a logical URI, its content hash and the revision it was observed at. */
+export const knowledgePin = pgTable(
+  "knowledge_pin",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    claimId: text("claim_id")
+      .notNull()
+      .references(() => knowledgeClaim.id, { onDelete: "cascade" }),
+    uri: text("uri").notNull(),
+    hash: text("hash").notNull(),
+    observedRev: text("observed_rev").notNull(),
+  },
+  (table) => [
+    uniqueIndex("knowledge_pin_claim_uri_unique").on(table.claimId, table.uri),
+  ],
+);
+
+export type KnowledgeOpState =
+  | "proposed"
+  | "applied"
+  | "rejected"
+  | "superseded"
+  | "reopened";
+
+/**
+ * A proposed change to a claim. `id` is the engine's op key
+ * (`op:<page>/<claim>@<merge-rev>`, see @terragon/knowledge op-key), so a crash
+ * replay of the same reconcile is an idempotent insert. Leaving `proposed` or
+ * `reopened` is a one-way move to a terminal state.
+ */
+export const knowledgeOp = pgTable(
+  "knowledge_op",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    claimId: text("claim_id")
+      .notNull()
+      .references(() => knowledgeClaim.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    baseVersion: integer("base_version").notNull(),
+    state: text("state")
+      .$type<KnowledgeOpState>()
+      .notNull()
+      .default("proposed"),
+    proposal: jsonb("proposal").notNull(),
+    mergeRev: text("merge_rev").notNull(),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("knowledge_op_org_state_created_index").on(
+      table.organizationId,
+      table.state,
+      table.createdAt,
+    ),
+    index("knowledge_op_claim_index").on(table.claimId),
+  ],
+);
+
+export type KnowledgeDecisionRoute = "platform" | "org";
+export type KnowledgeDecisionChoice =
+  | "approve"
+  | "reject_keep"
+  | "edit"
+  | "retract"
+  | "choose_source";
+
+/**
+ * Append-only record of who decided an op, from which Slack route. `route`
+ * labels provenance: on the org route an org admin holds the app's signing
+ * secret and could assert any Slack user (route-fence.ts), so an org-route
+ * decision is weaker evidence than a platform-route one.
+ */
+export const knowledgeDecision = pgTable(
+  "knowledge_decision",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    opId: text("op_id")
+      .notNull()
+      .references(() => knowledgeOp.id, { onDelete: "cascade" }),
+    actorUserId: text("actor_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    slackUserId: text("slack_user_id"),
+    route: text("route").$type<KnowledgeDecisionRoute>().notNull(),
+    choice: text("choice").$type<KnowledgeDecisionChoice>().notNull(),
+    decidedAt: timestamp("decided_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [index("knowledge_decision_op_index").on(table.opId)],
+);
+
+/**
+ * Reconcile progress on the repo's default branch: `last_sha` is the newest
+ * commit reconciled, `observed_head_sha` the newest head seen. While they
+ * differ, claims for the repo are served as unverified.
+ */
+export const knowledgeCursor = pgTable(
+  "knowledge_cursor",
+  {
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    repoFullName: text("repo_full_name").notNull(),
+    defaultBranch: text("default_branch").notNull(),
+    lastSha: text("last_sha"),
+    observedHeadSha: text("observed_head_sha"),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    primaryKey({
+      name: "knowledge_cursor_pk",
+      columns: [table.organizationId, table.repoFullName],
+    }),
+  ],
+);
+
+/**
+ * The per-org monthly cap on knowledge-plane model calls. Amounts are integer
+ * micro-USD. A call first reserves its estimate with one conditional UPDATE
+ * (reserved + spent + estimate <= cap) and settles the actual cost afterwards,
+ * so concurrent jobs and retries cannot overrun the cap.
+ */
+export const knowledgeUsageWindow = pgTable(
+  "knowledge_usage_window",
+  {
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    windowStart: timestamp("window_start", { mode: "date" }).notNull(),
+    capMicroUsd: bigint("cap_micro_usd", { mode: "number" }).notNull(),
+    reservedMicroUsd: bigint("reserved_micro_usd", { mode: "number" })
+      .notNull()
+      .default(0),
+    spentMicroUsd: bigint("spent_micro_usd", { mode: "number" })
+      .notNull()
+      .default(0),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    primaryKey({
+      name: "knowledge_usage_window_pk",
+      columns: [table.organizationId, table.windowStart],
+    }),
   ],
 );
