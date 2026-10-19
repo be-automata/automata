@@ -495,6 +495,42 @@ describe("runSupersedeSweep rule (iii) — failed-unreported runs (#380)", () =>
     expect(row?.status).toBe("terminal");
   });
 
+  it("rule (i) generation guard applies to EVERY status: a CANCELLED (user-stopped) stale row on a resumed, booting thread is retired; the thread and the new run's token are untouched", async () => {
+    const resumed = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 45,
+      externalId: "r-stopped-attempt",
+      ageMs: T + 60_000,
+      repoFullName: "be-automata/automata",
+      status: "booting",
+    });
+    // The resume under a new attempt: a later thread write + the new token.
+    await db
+      .update(threadTable)
+      .set({ updatedAt: new Date() })
+      .where(eq(threadTable.id, resumed.threadId));
+    const name = daemonRunKey(resumed);
+    await auth.api.createApiKey({
+      body: { name, userId: user.id, metadata: { tokenType: "daemon" } },
+    });
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({ "r-stopped-attempt": "CANCELLED" }),
+      listRuns: async () => [],
+    });
+    expect(report.terminals).toEqual([]);
+    expect((await threadRow(resumed.threadId)).status).toBe("booting");
+    expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(true);
+    const [row] = await db
+      .select({ status: hatchetRunTable.status })
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.externalId, "r-stopped-attempt"));
+    expect(row?.status).toBe("terminal");
+  });
+
   it("a thread WITH a run row is rule (i)'s: never listed by rule (iii), and rule (i)'s FAILED terminal revokes its daemon token too", async () => {
     const { threadId, threadChatId } = await createTestRemoteRun({
       db,

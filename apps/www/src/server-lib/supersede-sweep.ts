@@ -140,6 +140,26 @@ async function decide(
   status: AgentRunStatus,
   run: SweepCandidate,
 ): Promise<Decision> {
+  // #380 generation guard, BEFORE any status is read: a row that belongs to
+  // an OLDER attempt of a thread that moved on — the thread's stamped active
+  // run is a different run (a newer review dispatch restamped it, whatever
+  // the thread's status now), or the thread is booting again after a write
+  // well past this row's dispatch (a non-review resume, which does not
+  // restamp; dispatch and its bookkeeping writes land within seconds of the
+  // row's createdAt) — is stale evidence whatever the engine says about it
+  // (FAILED, CANCELLED by a user stop, pruned). The terminal CAS checks only
+  // that the thread is reapable, not WHICH attempt is live, so the row is
+  // retired here without a terminal and the live attempt, and its daemon
+  // token, are left alone.
+  if (
+    (run.threadActiveRunExternalId !== null &&
+      run.threadActiveRunExternalId !== run.externalId) ||
+    (run.threadBooting &&
+      run.threadUpdatedAt.getTime() >
+        run.createdAt.getTime() + STALE_ROW_RESUME_MARGIN_MS)
+  ) {
+    return { kind: "stale-row" };
+  }
   switch (status) {
     case "CANCELLED":
     case "NOT_FOUND": {
@@ -183,27 +203,6 @@ async function decide(
       // an admission throw): the same reconcile class as rule (iii), with
       // the same cause, so every lane reads alike. FAILED after the daemon
       // was up stays the daemon's failure.
-      //
-      // Generation guard: the terminal CAS checks only that the thread is
-      // reapable, not WHICH attempt is live. A booting thread whose last
-      // write is well past this run's dispatch was RESUMED under a newer
-      // attempt (dispatch and its bookkeeping writes land within seconds of
-      // the row's createdAt); this row is stale evidence, so it is retired
-      // without a terminal and the live attempt is left to its own run.
-      // Two signals, either suffices: the thread's stamped active run is a
-      // DIFFERENT run (a newer review dispatch restamped it — whatever the
-      // thread's status now), or the thread is booting again after a write
-      // well past this row's dispatch (a non-review resume, which does not
-      // restamp).
-      if (
-        (run.threadActiveRunExternalId !== null &&
-          run.threadActiveRunExternalId !== run.externalId) ||
-        (run.threadBooting &&
-          run.threadUpdatedAt.getTime() >
-            run.createdAt.getTime() + STALE_ROW_RESUME_MARGIN_MS)
-      ) {
-        return { kind: "stale-row" };
-      }
       return {
         kind: "terminal",
         cause: run.threadBooting ? "run-failed-unreported" : "daemon-failed",
