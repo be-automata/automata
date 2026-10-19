@@ -1,6 +1,5 @@
-import { readFileSync } from "node:fs";
-
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
 import { BOX_SLOTS_MAX } from "./box-lock";
@@ -47,7 +46,8 @@ export async function assertSlotAccountsExist(
   const uids = results.map((r) => (r.status === "fulfilled" ? r.value : -1));
   const seen = new Map<number, string>();
   uids.forEach((uid, i) => {
-    const user = users[i]!;
+    // `uids` was built from `users` index for index; the slot is always there.
+    const user = users[i] ?? `slot ${i}`;
     if (uid === 0) {
       throw new Error(
         `slot account ${JSON.stringify(user)} is uid 0; refusing`,

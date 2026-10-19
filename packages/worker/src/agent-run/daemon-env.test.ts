@@ -923,13 +923,19 @@ describe("harness battery env (gstack, gsd, ruflo)", () => {
       GIT_CONFIG_KEY_0: "safe.directory",
       GIT_CONFIG_VALUE_0: "/w",
     };
-    appendGitConfig(env, gitProxyAuthConfig("http://run:x@127.0.0.1:1"));
-    expect(env.GIT_CONFIG_COUNT).toBe("2");
-    expect(env.GIT_CONFIG_KEY_1).toBe("http.proxyAuthMethod");
-    expect(env.GIT_CONFIG_VALUE_1).toBe("basic");
+    const out = appendGitConfig(
+      env,
+      gitProxyAuthConfig("http://run:x@127.0.0.1:1"),
+    );
+    expect(out.GIT_CONFIG_COUNT).toBe("2");
+    expect(out.GIT_CONFIG_KEY_1).toBe("http.proxyAuthMethod");
+    expect(out.GIT_CONFIG_VALUE_1).toBe("basic");
+    // The input is not mutated.
+    expect(env.GIT_CONFIG_COUNT).toBe("1");
+    expect(env.GIT_CONFIG_KEY_1).toBeUndefined();
     // Nothing to add ⇒ env untouched (no GIT_CONFIG_COUNT conjured).
     const empty: NodeJS.ProcessEnv = {};
-    appendGitConfig(empty, []);
+    expect(appendGitConfig(empty, [])).toBe(empty);
     expect(empty).toEqual({});
   });
 

@@ -261,21 +261,22 @@ export function gitProxyAuthConfig(
     : [];
 }
 
-/** Append GIT_CONFIG_* entries to `env` after whatever GIT_CONFIG_COUNT it already carries. Returns `env`. */
+/** GIT_CONFIG_* entries appended after whatever GIT_CONFIG_COUNT `env` carries — a new object; `env` is not mutated (nothing to add ⇒ `env` itself). */
 export function appendGitConfig(
   env: NodeJS.ProcessEnv,
   entries: ReadonlyArray<[string, string]>,
 ): NodeJS.ProcessEnv {
   if (entries.length === 0) return env;
+  const out: NodeJS.ProcessEnv = { ...env };
   const parsed = Number.parseInt(env.GIT_CONFIG_COUNT ?? "0", 10);
   let count = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
   for (const [key, value] of entries) {
-    env[`GIT_CONFIG_KEY_${count}`] = key;
-    env[`GIT_CONFIG_VALUE_${count}`] = value;
+    out[`GIT_CONFIG_KEY_${count}`] = key;
+    out[`GIT_CONFIG_VALUE_${count}`] = value;
     count += 1;
   }
-  env.GIT_CONFIG_COUNT = String(count);
-  return env;
+  out.GIT_CONFIG_COUNT = String(count);
+  return out;
 }
 
 /** Whether a proxy URL carries a credential in its userinfo (#205, N > 1). */

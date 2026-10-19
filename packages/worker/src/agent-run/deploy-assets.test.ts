@@ -2663,6 +2663,107 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
       );
     });
 
+    it("nft-preflight.sh RUNS: a matching tcp/udp set loads and records the marker; a udp set missing a slot uid, a slot account outside the set, and a failed load each refuse — and leave no marker", () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "nft-preflight-"));
+      const bin = path.join(tmp, "bin");
+      fs.mkdirSync(bin);
+      // `id` answers root for the caller and fixed uids for the accounts; `nft`
+      // parses nothing and fails the load only when told to.
+      fs.writeFileSync(
+        path.join(bin, "id"),
+        [
+          "#!/bin/sh",
+          'case "$*" in',
+          '  "-u") echo 0 ;;',
+          '  "-u automata") echo 1000 ;;',
+          '  "-u automata-agent") echo 999 ;;',
+          '  "-u automata-agent-1") echo 2001 ;;',
+          '  *) echo "id: no such user" >&2; exit 1 ;;',
+          "esac",
+        ].join("\n") + "\n",
+        { mode: 0o755 },
+      );
+      fs.writeFileSync(
+        path.join(bin, "nft"),
+        [
+          "#!/bin/sh",
+          'case "$1" in',
+          '  list) printf "a\\nb\\nc\\n" ;;',
+          "  -c) exit 0 ;;",
+          '  -f) [ -n "${NFT_FAIL_LOAD:-}" ] && exit 1; exit 0 ;;',
+          "esac",
+        ].join("\n") + "\n",
+        { mode: 0o755 },
+      );
+      const marker = path.join(tmp, "egress-fence.uids");
+      const run = (
+        conf: string,
+        env: Record<string, string> = {},
+      ): { status: number | null; err: string; marker: string | null } => {
+        const confPath = path.join(tmp, "egress-nft.conf");
+        fs.writeFileSync(confPath, conf);
+        const r = spawnSync(
+          "bash",
+          [
+            path.join(workerRoot, "deploy", "linux", "nft-preflight.sh"),
+            confPath,
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              PATH: `${bin}:${process.env.PATH ?? ""}`,
+              FENCE_UIDS_FILE: marker,
+              WORKER_USER: "automata",
+              ...env,
+            },
+          },
+        );
+        return {
+          status: r.status,
+          err: r.stderr + r.stdout,
+          marker: fs.existsSync(marker)
+            ? fs.readFileSync(marker, "utf8")
+            : null,
+        };
+      };
+      const conf = (tcp: string, udp: string) =>
+        `table inet automata_egress {\n  chain out {\n    type filter hook output priority 0;\n    oif "lo" accept\n    meta skuid ${tcp} tcp dport { 80, 443 } counter reject\n    meta skuid ${udp} udp dport { 80, 443 } counter reject\n  }\n}\n`;
+
+      const ok = run(conf("{ 999, 2001 }", "{ 2001, 999 }"), {
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_BOX_SLOTS: "2",
+      });
+      expect(ok.err).toContain("[nft-preflight] OK");
+      expect(ok.status).toBe(0);
+      expect(ok.marker?.trim()).toBe("999 2001");
+
+      const differ = run(conf("{ 999, 2001 }", "999"));
+      expect(differ.status).toBe(1);
+      expect(differ.err).toMatch(/differ between rules/);
+      expect(differ.marker).toBeNull();
+
+      const uncovered = run(conf("999", "999"), {
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_BOX_SLOTS: "2",
+      });
+      expect(uncovered.status).toBe(1);
+      expect(uncovered.err).toMatch(
+        /slot account automata-agent-1 \(uid 2001\) is not in the skuid set/,
+      );
+      expect(uncovered.marker).toBeNull();
+
+      // A stale marker from an earlier boot never vouches: it is removed first,
+      // and a failed load writes none.
+      fs.writeFileSync(marker, "999 2001\n");
+      const failed = run(conf("{ 999, 2001 }", "{ 999, 2001 }"), {
+        NFT_FAIL_LOAD: "1",
+      });
+      expect(failed.status).toBe(1);
+      expect(failed.err).toMatch(/load failed/);
+      expect(failed.marker).toBeNull();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    });
+
     it("both nft scripts read EVERY skuid rule's set (scalar or set, tcp AND udp), refuse sets that differ between rules, and check every uid", () => {
       for (const name of ["nft-preflight.sh", "nft-verify.sh"]) {
         const sh = deployFile("linux", name);

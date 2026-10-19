@@ -69,8 +69,11 @@ write_files:
       # #205: how many agent runs the box admits at once (WORKER_BOX_SLOTS). Slot 0
       # is $AGENT_USER; slot i > 0 is ${AGENT_USER}-i with an EXPLICIT uid from 2000
       # up — never --system, whose range descends from 999 and collided with the
-      # engine's Postgres (#210). Render AGENT_SLOTS=N into this file for an N-slot
-      # box; 1 is today's single account.
+      # engine's Postgres (#210). AGENT_SLOTS=N creates the N accounts and NOTHING
+      # else: the sudoers Runas list, the nft uid set + /etc/automata/egress.env,
+      # the workdir-root traverse ACL and the /proc hidepid remount are
+      # AGENT-UID-PROVISIONING.md §6 steps 2–4, done by hand — the worker's
+      # N > 1 boot checks refuse a box that skipped them. 1 is today's account.
       AGENT_SLOTS="${AGENT_SLOTS:-1}"
       AGENT_SLOT_UID_BASE=2000
       # Exact, not a floor: the harness batteries (ruflo's better-sqlite3 and

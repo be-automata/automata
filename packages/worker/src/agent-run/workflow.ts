@@ -547,8 +547,10 @@ export async function runSelfHealAuditStep({
         env.GIT_CONFIG_VALUE_0 = workdir;
       }
       if (egressProxyUrl) {
-        env = buildRunProxyEnv(egressProxyUrl, env);
-        appendGitConfig(env, gitProxyAuthConfig(egressProxyUrl));
+        env = appendGitConfig(
+          buildRunProxyEnv(egressProxyUrl, env),
+          gitProxyAuthConfig(egressProxyUrl),
+        );
       }
       results = await deps.runChecks({
         checks: requested,
@@ -787,7 +789,7 @@ export async function runSelfHealFixStep({
         env.GIT_CONFIG_VALUE_0 = workdir;
       }
       // #205: same proxy-auth entry as the agent's git (one helper, one rule).
-      appendGitConfig(env, gitProxyAuthConfig(egressProxyUrl));
+      const checkEnv = appendGitConfig(env, gitProxyAuthConfig(egressProxyUrl));
       report = await deps.runCheck({
         fix: selfHeal,
         pushedSha,
@@ -795,7 +797,9 @@ export async function runSelfHealFixStep({
         workdir,
         agentUser,
         run: runAsAgent,
-        env: egressProxyUrl ? buildRunProxyEnv(egressProxyUrl, env) : env,
+        env: egressProxyUrl
+          ? buildRunProxyEnv(egressProxyUrl, checkEnv)
+          : checkEnv,
         deadlineAt: fixCheckDeadline(now(), runStartedAt),
         signal,
         now,
@@ -1029,10 +1033,16 @@ async function runAgentInner(
   const abandon = async (
     ...closers: Array<{ close(): Promise<void> } | null>
   ) => {
-    for (const c of closers) await closeQuietly(c);
-    await materialised?.cleanup();
-    await cleanupWorkdir(run.runDir, workdirCleanup);
-    await boxLock?.release();
+    try {
+      for (const c of closers) await closeQuietly(c);
+      await materialised?.cleanup();
+      await cleanupWorkdir(run.runDir, workdirCleanup);
+    } finally {
+      // Cleanup BEFORE the release (I2), but the release ALWAYS happens: a
+      // cleanup step that threw must not leave the slot held (and occupied)
+      // until the worker restarts — the box would quietly run with N − 1.
+      await boxLock?.release();
+    }
   };
   try {
     // #184 (#152 Stage B2): uid-wide scan UNDER the slot lock, BEFORE any
@@ -1415,13 +1425,17 @@ async function runAgentInner(
       await reportSelfHealFixAborted({ input, step });
     }
     await closeQuietly(egressEvents);
-    // Wipe the delivered credential before the workdir goes, so a cleanup
-    // failure on the workdir can never leave a live token behind.
-    await materialised.cleanup();
-    await cleanupWorkdir(run.runDir, workdirCleanup);
-    // The box lock goes last (ADR-007 I2): the next run may start only once
-    // this one's daemon is dead and its disk footprint is gone.
-    await boxLock?.release();
+    try {
+      // Wipe the delivered credential before the workdir goes, so a cleanup
+      // failure on the workdir can never leave a live token behind.
+      await materialised.cleanup();
+      await cleanupWorkdir(run.runDir, workdirCleanup);
+    } finally {
+      // The box lock goes last (ADR-007 I2): the next run may start only once
+      // this one's daemon is dead and its disk footprint is gone — and it
+      // goes whatever the cleanup did, or the slot stays held until a restart.
+      await boxLock?.release();
+    }
   }
 }
 
