@@ -361,13 +361,28 @@ export function assessHeadroomSupport(opts: {
   // to run without it is the inert rollback (floor 0, fraction 1.0). The
   // per-admission fail-open in `admit` covers only a transient read AFTER boot
   // proved the file readable.
+  let reading: MeminfoReading;
   try {
-    parseMeminfo((opts.readMeminfo ?? readProcMeminfo)());
+    reading = parseMeminfo((opts.readMeminfo ?? readProcMeminfo)());
   } catch (e) {
     throw new Error(
       `the memory headroom check is configured but /proc/meminfo cannot be read or parsed: ${
         e instanceof Error ? e.message : String(e)
       } — set WORKER_HEADROOM_FLOOR=0 and WORKER_HEADROOM_COMMIT_FRACTION=1.0 to run without it`,
+    );
+  }
+  // The knobs against the BOX: a run commit above fraction × CommitLimit can
+  // never pass the commit arm (Committed_AS ≥ 0), so every dispatched run would
+  // hold its engine slot for the whole deferral budget and fail final — the
+  // silent "every run fails" a boot check exists to refuse up front (an
+  // oversized WORKER_RUN_MEMORY_MAX on a small box, or a typo such as 50G).
+  const commitCeiling = opts.policy.commitFraction * reading.commitLimit;
+  if (
+    opts.policy.commitFraction < 1 &&
+    opts.policy.runCommitBytes > commitCeiling
+  ) {
+    throw new Error(
+      `the memory headroom check can never admit a run on this box: run commit ${mib(opts.policy.runCommitBytes)} (WORKER_HEADROOM_RUN_COMMIT, default WORKER_RUN_MEMORY_MAX) exceeds ${opts.policy.commitFraction} × CommitLimit ${mib(reading.commitLimit)} = ${mib(commitCeiling)} — lower the run commit or the ceiling, raise WORKER_HEADROOM_COMMIT_FRACTION, or set floor 0 and fraction 1.0 to run without the check`,
     );
   }
   return { enabled: true };

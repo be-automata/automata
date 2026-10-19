@@ -85,7 +85,7 @@ are in `AGENT-UID-PROVISIONING.md`. Two things that will otherwise bite:
 WORKER_HEADROOM_FLOOR` (default `1G`; `0` = inert) AND `Committed_AS +
 reserved + WORKER_HEADROOM_RUN_COMMIT ≤ WORKER_HEADROOM_COMMIT_FRACTION ×
 CommitLimit` (fraction default `0.9`; `1.0` = inert on that arm; run commit
-  defaults to `WORKER_RUN_MEMORY_MAX`, else `1300M`). A refusal gives the slot
+  defaults to `WORKER_RUN_MEMORY_MAX`, else `1300M`; boot refuses a run commit above fraction × the box's `CommitLimit`, which no idle box could admit). A refusal gives the slot
   back and the run WAITS IN PROCESS (backoff ×2 from 2 s, capped at 120 s), then
   takes a slot and asks again, up to `WORKER_ADMISSION_MAX_DEFERRALS` times
   (default 8 = 366 s; the whole budget must fit the 12-minute deferral window —

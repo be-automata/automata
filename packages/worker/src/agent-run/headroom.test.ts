@@ -330,6 +330,42 @@ describe("assessHeadroomSupport (boot)", () => {
     });
   });
 
+  it("a run commit above fraction × the box's CommitLimit can NEVER be admitted: boot refuses, naming both values and the rollback; one that fits is on", () => {
+    const commitLimit = parseMeminfo(MEMINFO).commitLimit;
+    expect(() =>
+      assessHeadroomSupport({
+        policy: {
+          ...POLICY,
+          commitFraction: 0.9,
+          runCommitBytes: Math.ceil(0.9 * commitLimit) + 1,
+        },
+        platform: "linux",
+        readMeminfo: () => MEMINFO,
+      }),
+    ).toThrow(
+      /can never admit a run on this box: run commit \d+M .* exceeds 0\.9 × CommitLimit \d+M = \d+M .*fraction 1\.0/,
+    );
+    expect(
+      assessHeadroomSupport({
+        policy: {
+          ...POLICY,
+          commitFraction: 0.9,
+          runCommitBytes: Math.floor(0.9 * commitLimit),
+        },
+        platform: "linux",
+        readMeminfo: () => MEMINFO,
+      }),
+    ).toEqual({ enabled: true });
+    // fraction 1.0 makes the commit arm inert, so the box check does not apply.
+    expect(
+      assessHeadroomSupport({
+        policy: { ...POLICY, commitFraction: 1, runCommitBytes: 50 * GIB },
+        platform: "linux",
+        readMeminfo: () => MEMINFO,
+      }),
+    ).toEqual({ enabled: true });
+  });
+
   it("linux with a readable meminfo ⇒ on; unreadable or unparseable ⇒ THROWS (the boot refuses, never a silent OFF for the process life)", () => {
     expect(
       assessHeadroomSupport({
