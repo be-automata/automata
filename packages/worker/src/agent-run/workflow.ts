@@ -6,8 +6,8 @@ import {
   type AgentRunVariantName,
   type PerPrStrategy,
 } from "./definition";
-import { loadWorkerConfig } from "./config";
-import { acquireBoxLock, type BoxLock } from "./box-lock";
+import { configForSlot, loadWorkerConfig } from "./config";
+import { acquireBoxSlot, type BoxLock } from "./box-lock";
 import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { reapAgentUidEscapees } from "./uid-reaper";
 import { runAsAgent } from "./agent-command";
@@ -59,12 +59,19 @@ import {
 } from "./egress-proxy";
 import { startGitBroker, type GitBroker } from "./git-broker";
 import { startGhBroker, type GhBroker } from "./gh-broker";
-import { buildRunProxyEnv, type BrokerHandoff } from "./daemon-env";
+import {
+  appendGitConfig,
+  buildRunProxyEnv,
+  gitProxyAuthConfig,
+  type BrokerHandoff,
+} from "./daemon-env";
 import { runPathsForRepo } from "./run-owned-paths";
 import {
   ensureRunNamespace,
+  ensureSlotNamespace,
   getProcessWorkerId,
   runGhSocketPath,
+  slotFor,
 } from "./run-namespace";
 import {
   materialiseAgentCredentials,
@@ -539,7 +546,12 @@ export async function runSelfHealAuditStep({
         env.GIT_CONFIG_KEY_0 = "safe.directory";
         env.GIT_CONFIG_VALUE_0 = workdir;
       }
-      if (egressProxyUrl) env = buildRunProxyEnv(egressProxyUrl, env);
+      if (egressProxyUrl) {
+        env = appendGitConfig(
+          buildRunProxyEnv(egressProxyUrl, env),
+          gitProxyAuthConfig(egressProxyUrl),
+        );
+      }
       results = await deps.runChecks({
         checks: requested,
         run: runAsAgent,
@@ -776,6 +788,8 @@ export async function runSelfHealFixStep({
         env.GIT_CONFIG_KEY_0 = "safe.directory";
         env.GIT_CONFIG_VALUE_0 = workdir;
       }
+      // #205: same proxy-auth entry as the agent's git (one helper, one rule).
+      const checkEnv = appendGitConfig(env, gitProxyAuthConfig(egressProxyUrl));
       report = await deps.runCheck({
         fix: selfHeal,
         pushedSha,
@@ -783,7 +797,9 @@ export async function runSelfHealFixStep({
         workdir,
         agentUser,
         run: runAsAgent,
-        env: egressProxyUrl ? buildRunProxyEnv(egressProxyUrl, env) : env,
+        env: egressProxyUrl
+          ? buildRunProxyEnv(egressProxyUrl, checkEnv)
+          : checkEnv,
         deadlineAt: fixCheckDeadline(now(), runStartedAt),
         signal,
         now,
@@ -849,107 +865,29 @@ async function runAgentInner(
     );
   }
 
-  // Provision: clone into a per-run workdir keyed on threadId. threadId is unique
-  // per thread; threadChatId is the shared legacy sentinel when
-  // enableThreadChatCreation is off, so it would collide every run onto one dir.
-  const run = await provisionWorkdir({
-    repoFullName: input.repoFullName,
-    branch: input.branch,
-    baseBranch: input.baseBranch,
-    workBranch: input.workBranch,
-    installationToken: input.installationToken,
-    workdirRoot: config.workdirRoot,
-    runId: input.threadId,
-    // #108: empty (the default) ⇒ no ACLs are touched at all.
-    agentUser: config.agentUser,
-  });
-  const workdir = run.repo;
-  step(
-    `clone complete: ${input.repoFullName}@${input.branch}` +
-      (input.baseBranch ? ` (base ${input.baseBranch} fetched)` : "") +
-      (input.workBranch ? ` (work branch ${input.workBranch})` : ""),
-  );
-  // GATE-01: the fix check diffs the pushed commit against the base as it was
-  // cloned. Pinned now, by the worker, because the agent can rewrite its own
-  // remote-tracking refs. Never throws; null makes the check report error.
-  const fixBaseSha =
-    input.selfHeal?.kind === "fix"
-      ? await pinFixBaseSha({
-          workdir,
-          baseBranch: input.selfHeal.baseBranch,
-        })
-      : null;
-  if (input.selfHeal?.kind === "fix" && fixBaseSha === null) {
-    step("self-heal fix-check: base branch not pinned (check will error)");
-  }
-
-  // D1: resolve HOW this run authenticates to the model provider, BEFORE the
-  // child env is built (the credential fixes HOME, and the env is built once).
-  //
-  // "shared" box: never pull, never write a provider credential to this disk.
-  // "owner" box: pull the run's own credential and materialise it under a
-  // per-run HOME, so the run spends the USER's subscription / API key exactly
-  // like an in-sandbox run does.
-  // A "shared" box never asks for a credential; it still gets a fresh HOME,
-  // because an inherited one lets the agent CLI authenticate as the BOX OWNER
-  // out of the macOS Keychain — no file, no env var, no trace.
-  //
-  // These two steps sit BETWEEN the clone and the try/finally that owns
-  // cleanupWorkdir, and both can throw: the pull is a fetch (network error, or
-  // the run's AbortSignal firing on cancel/scheduleTimeout) and materialise
-  // does fs mkdir/writeFile. Without this guard such a throw escapes before
-  // the try is ever entered, and the cloned workdir is stranded on the box's
-  // disk for good. Cleaning the workdir also removes the per-run HOME beneath
-  // it, so a half-written credential cannot survive either.
-  // Phase 5: bounds-check the review shape BEFORE seeding, so a rejected
-  // orchestrated run seeds AND runs classic, and its `batteries:` line says
-  // what actually runs. Numbers/field names only (H2).
-  const reviewAgentGate = reviewAgentForRun(input.reviewAgent);
-  const runReviewAgent = reviewAgentGate.reviewAgent;
-  if (reviewAgentGate.rejected) {
-    step(
-      `review agent: bounds-rejected (${reviewAgentGate.rejected}) → classic`,
-    );
-  }
-  // Phase 7: task-run packs, shape-gated BEFORE seeding (reason only, H2).
-  // The review lane never takes task packs, whatever the input carries.
-  const lane = resolveRunLane(input);
-  const taskGate = taskAgentForRun(input.taskAgent, lane);
-  if (taskGate.kind === "rejected") {
-    step(
-      taskGate.reason === "review-lane"
-        ? "task agent: ignored (review-lane)"
-        : `task agent: rejected (${taskGate.reason})`,
-    );
-  }
-  const batterySeed = batterySeedForRun(runReviewAgent, taskGate);
-  const foregroundOnly = foregroundOnlyForRun(lane, batterySeed);
-
   let boxLock: BoxLock | null = null;
-  let materialised: MaterialisedCredentials;
+  let run: Awaited<ReturnType<typeof provisionWorkdir>>;
   // Hoisted above the try so the main finally (#184 teardown uid-scan) can
   // log through the same prefix as the admission steps.
   const admissionLog = (m: string) =>
     ctx.log(`[agent-run ${input.threadId}] ${m}`);
-  // Every cleanupWorkdir below: agent-uid mode hands the agent's files back
-  // before the rm, and a workdir that still survives is logged, not swallowed.
-  const workdirCleanup = { agentUser: config.agentUser, log: admissionLog };
   try {
-    // #183 (#152 Stage B1): the box's ONE agent-run lock (box-lock.ts) — a
-    // kernel flock(2) held by a helper child, so the kernel drops it the
-    // instant the holder dies (no staleness threshold, no liveness beat). The
-    // engine's "global" key is per workflow, so the budget is enforced here.
-    // Taken AFTER the clone (network/disk, not memory) and BEFORE any
-    // credential touches disk, so a long wait never widens the on-disk
-    // credential window; a cancel while waiting throws into this catch and
-    // the clone is cleaned up. Released in the finally below, after teardown.
+    // #183 (#152 Stage B1) / #205: the box budget — N kernel flock(2) slot
+    // locks (box-lock.ts), each held by a helper child, so the kernel drops a
+    // slot the instant its holder dies (no staleness threshold, no liveness
+    // beat). The engine's "global" key is per workflow, so the budget is
+    // enforced here. Taken BEFORE the clone since #205: the clone's ACL grant
+    // needs the slot's account, which is known only once the slot is held.
+    // Credentials still touch disk only after the slot AND the admission
+    // scan, so the on-disk credential window is unchanged; a cancel while
+    // waiting throws into this catch with nothing on disk to clean.
     // #152 Stage A admission reap, BEFORE the lock: (a) a dead sibling
     // worker's orphans die now, not at the next boot; (b) any prior attempt
     // of THIS run (engine redelivery after a worker death) is SIGKILLed by
-    // its recorded process-group pid — the zombie can never share the box
-    // with its own redelivery. Both are best-effort and never throw; the
-    // safety argument for the no-engine-read own-thread kill lives on
-    // reapOwnThreadAttempts.
+    // its recorded process-group pid — as the account its slot dir names
+    // (#205) — so the zombie can never share the box with its own redelivery.
+    // Both are best-effort and never throw; the safety argument for the
+    // no-engine-read own-thread kill lives on reapOwnThreadAttempts.
     // Re-assert the cross-uid namespace grant BEFORE anything writes into the
     // dir or binds a socket in it. The boot-time claim is not enough: the
     // default root lives under /tmp, macOS reaps /tmp entries untouched for
@@ -960,6 +898,7 @@ async function runAgentInner(
       root: config.runNamespaceRoot,
       workerId: getProcessWorkerId(),
       agentUser: config.agentUser,
+      agentUsers: config.agentUsers,
     });
     reclaimDeadWorkerRuns({
       root: config.runNamespaceRoot,
@@ -973,19 +912,163 @@ async function runAgentInner(
       agentUser: config.agentUser,
       log: admissionLog,
     });
-    boxLock = await acquireBoxLock({
+    boxLock = await acquireBoxSlot({
       root: config.runNamespaceRoot,
+      slots: config.boxSlots,
       holder: input.threadId,
       signal,
       log: admissionLog,
     });
     step("box lock acquired");
-    // #184 (#152 Stage B2): uid-wide scan UNDER the lock, BEFORE any
+    // #205: from here on this run IS slot `boxLock.slot`, running as that
+    // slot's account (configForSlot); its per-run artefacts live in the slot's
+    // own subdir. Parameters are rebindable, and every later read of `config`
+    // — clone grants, credential HOME, brokers, daemon, reaps, cleanup — means
+    // the slot's config.
+    config = configForSlot(config, boxLock.slot);
+    if (config.boxSlots > 1) {
+      await ensureSlotNamespace({
+        root: config.runNamespaceRoot,
+        workerId: getProcessWorkerId(),
+        slot: boxLock.slot,
+        agentUser: config.agentUser,
+      });
+      step(
+        `box slot ${boxLock.slot}/${config.boxSlots} as ${config.agentUser}`,
+      );
+    }
+    // Provision: clone into a per-run workdir keyed on threadId. threadId is
+    // unique per thread; threadChatId is the shared legacy sentinel when
+    // enableThreadChatCreation is off, so it would collide every run onto one
+    // dir. Under the slot (#205): a failed clone cleans itself up
+    // (provisionWorkdir) and the catch below gives the slot straight back.
+    run = await provisionWorkdir({
+      repoFullName: input.repoFullName,
+      branch: input.branch,
+      baseBranch: input.baseBranch,
+      workBranch: input.workBranch,
+      installationToken: input.installationToken,
+      workdirRoot: config.workdirRoot,
+      runId: input.threadId,
+      // #108: empty (the default) ⇒ no ACLs are touched at all. #205: the
+      // SLOT's account, so a sibling slot cannot read this run's HOME.
+      agentUser: config.agentUser,
+    });
+  } catch (err) {
+    await boxLock?.release();
+    throw err;
+  }
+  let materialised: MaterialisedCredentials;
+  // Every cleanupWorkdir below: agent-uid mode hands the agent's files back
+  // before the rm (as the slot's account, #205), and a workdir that still
+  // survives is logged, not swallowed.
+  const workdirCleanup = { agentUser: config.agentUser, log: admissionLog };
+  // The one unwind for every pre-daemon failure: close what was opened, wipe
+  // the credential, remove the workdir, and ONLY THEN give the slot back
+  // (ADR-007 I2, the same order as the finally) — at N > 1 a parked waiter
+  // takes a freed slot immediately, and its admission reap as this slot's
+  // account would kill a hand-back still in flight.
+  const abandon = async (
+    ...closers: Array<{ close(): Promise<void> } | null>
+  ) => {
+    try {
+      for (const c of closers) await closeQuietly(c);
+      await materialised?.cleanup();
+      await cleanupWorkdir(run.runDir, workdirCleanup);
+    } finally {
+      // Cleanup BEFORE the release (I2), but the release ALWAYS happens: a
+      // cleanup step that threw must not leave the slot held (and occupied)
+      // until the worker restarts — the box would quietly run with N − 1.
+      await boxLock?.release();
+    }
+  };
+  // From here to the daemon's own try/finally the slot is HELD: every exit
+  // goes through abandon(), or a throw would leak the slot's helper (and its
+  // reservation) for the life of the worker — a wedged box at N = 1, a box
+  // quietly running N − 1 slots above. The calls in this stretch do not throw
+  // today; the guard is what keeps that from mattering.
+  const workdir = run.repo;
+  let fixBaseSha: string | null;
+  let runReviewAgent: ReturnType<typeof reviewAgentForRun>["reviewAgent"];
+  let lane: ReturnType<typeof resolveRunLane>;
+  let taskGate: ReturnType<typeof taskAgentForRun>;
+  let batterySeed: ReturnType<typeof batterySeedForRun>;
+  let foregroundOnly: ReturnType<typeof foregroundOnlyForRun>;
+  try {
+    step(
+      `clone complete: ${input.repoFullName}@${input.branch}` +
+        (input.baseBranch ? ` (base ${input.baseBranch} fetched)` : "") +
+        (input.workBranch ? ` (work branch ${input.workBranch})` : ""),
+    );
+    // GATE-01: the fix check diffs the pushed commit against the base as it was
+    // cloned. Pinned now, by the worker, because the agent can rewrite its own
+    // remote-tracking refs. Never throws; null makes the check report error.
+    fixBaseSha =
+      input.selfHeal?.kind === "fix"
+        ? await pinFixBaseSha({
+            workdir,
+            baseBranch: input.selfHeal.baseBranch,
+          })
+        : null;
+    if (input.selfHeal?.kind === "fix" && fixBaseSha === null) {
+      step("self-heal fix-check: base branch not pinned (check will error)");
+    }
+
+    // D1: resolve HOW this run authenticates to the model provider, BEFORE the
+    // child env is built (the credential fixes HOME, and the env is built once).
+    //
+    // "shared" box: never pull, never write a provider credential to this disk.
+    // "owner" box: pull the run's own credential and materialise it under a
+    // per-run HOME, so the run spends the USER's subscription / API key exactly
+    // like an in-sandbox run does.
+    // A "shared" box never asks for a credential; it still gets a fresh HOME,
+    // because an inherited one lets the agent CLI authenticate as the BOX OWNER
+    // out of the macOS Keychain — no file, no env var, no trace.
+    //
+    // These two steps sit BETWEEN the clone and the try/finally that owns
+    // cleanupWorkdir, and both can throw: the pull is a fetch (network error, or
+    // the run's AbortSignal firing on cancel/scheduleTimeout) and materialise
+    // does fs mkdir/writeFile. Without this guard such a throw escapes before
+    // the try is ever entered, and the cloned workdir is stranded on the box's
+    // disk for good. Cleaning the workdir also removes the per-run HOME beneath
+    // it, so a half-written credential cannot survive either.
+    // Phase 5: bounds-check the review shape BEFORE seeding, so a rejected
+    // orchestrated run seeds AND runs classic, and its `batteries:` line says
+    // what actually runs. Numbers/field names only (H2).
+    const reviewAgentGate = reviewAgentForRun(input.reviewAgent);
+    runReviewAgent = reviewAgentGate.reviewAgent;
+    if (reviewAgentGate.rejected) {
+      step(
+        `review agent: bounds-rejected (${reviewAgentGate.rejected}) → classic`,
+      );
+    }
+    // Phase 7: task-run packs, shape-gated BEFORE seeding (reason only, H2).
+    // The review lane never takes task packs, whatever the input carries.
+    lane = resolveRunLane(input);
+    taskGate = taskAgentForRun(input.taskAgent, lane);
+    if (taskGate.kind === "rejected") {
+      step(
+        taskGate.reason === "review-lane"
+          ? "task agent: ignored (review-lane)"
+          : `task agent: rejected (${taskGate.reason})`,
+      );
+    }
+    batterySeed = batterySeedForRun(runReviewAgent, taskGate);
+    foregroundOnly = foregroundOnlyForRun(lane, batterySeed);
+  } catch (err) {
+    await abandon();
+    throw err;
+  }
+
+  try {
+    // #184 (#152 Stage B2): uid-wide scan UNDER the slot lock, BEFORE any
     // credential touches disk and BEFORE this run spawns its daemon. ADR-007
-    // I2/I4: with the lock held no agent-uid process belongs to a live run, so
-    // everything the scan finds is an escapee (a detached `bash -lc | claude`
-    // subtree a worker-driven teardown could not reach by pgid) and is killed
-    // as one set. Never throws; on a disabled agent uid it is a no-op.
+    // I2/I4: with the slot held no process of THIS slot's account belongs to a
+    // live run, so everything the scan finds is an escapee (a detached
+    // `bash -lc | claude` subtree a worker-driven teardown could not reach by
+    // pgid) and is killed as one set — kill(2) bounds `-1` to the issuing
+    // account, so a sibling slot's live run is out of reach (#205). Never
+    // throws; on a disabled agent uid it is a no-op.
     await reapAgentUidEscapees({
       agentUser: config.agentUser,
       phase: "admission",
@@ -1018,8 +1101,7 @@ async function runAgentInner(
       batteries: { log: admissionLog },
     });
   } catch (err) {
-    await boxLock?.release();
-    await cleanupWorkdir(run.runDir, workdirCleanup);
+    await abandon();
     throw err;
   }
   // #209 item 1: capture WHICH credential path this run took, once, here —
@@ -1087,17 +1169,19 @@ async function runAgentInner(
         policy: input.egressPolicy ?? { level: "none", allowlist: [] },
         mode: egressMode,
         onEvent: (e) => batcher.add(e),
+        // #205: at N > 1 a sibling slot could otherwise use this run's loopback
+        // proxy (its allowlist, its audit trail). N = 1 stays credential-less.
+        credential:
+          config.boxSlots > 1
+            ? { user: "run", secret: randomBytes(24).toString("hex") }
+            : undefined,
       });
       // A2, BLOCKING: a proxy that does not answer turns the run into a silent
       // 90s hang with no output that the agent cannot report. Prove the
       // listener before anything is pointed at it.
       await assertEgressProxyReachable({ url: egressProxy.url });
     } catch (err) {
-      await closeQuietly(egressProxy);
-      await closeQuietly(egressEvents);
-      await materialised.cleanup();
-      await boxLock?.release();
-      await cleanupWorkdir(run.runDir, workdirCleanup);
+      await abandon(egressProxy, egressEvents);
       throw err;
     }
     step(
@@ -1138,6 +1222,8 @@ async function runAgentInner(
           config.runNamespaceRoot,
           getProcessWorkerId(),
           input.threadId,
+          // #205: in the slot's own subdir, reachable by this slot alone.
+          slotFor(config),
         ),
       });
       broker = {
@@ -1147,13 +1233,7 @@ async function runAgentInner(
         repoFullName: input.repoFullName,
       };
     } catch (err) {
-      await closeQuietly(gitBroker);
-      await closeQuietly(ghBroker);
-      await closeQuietly(egressProxy);
-      await closeQuietly(egressEvents);
-      await materialised.cleanup();
-      await boxLock?.release();
-      await cleanupWorkdir(run.runDir, workdirCleanup);
+      await abandon(gitBroker, ghBroker, egressProxy, egressEvents);
       throw err;
     }
     step(
@@ -1342,6 +1422,13 @@ async function runAgentInner(
     // #66: close the egress proxy after the daemon is dead (no more child
     // traffic), then flush the last audit batch. Both are best-effort — an
     // audit/proxy teardown hiccup must never mask the run's real outcome.
+    // #205: the proxy-auth audit is capped; the total lands in the step log.
+    const refused = egressProxy?.unauthenticatedRequests() ?? 0;
+    if (refused > 0) {
+      step(
+        `egress proxy: ${refused} request(s) answered 407 (proxy-auth) — a client authenticating after the challenge (Chromium via gstack browse does), or a caller without the run credential`,
+      );
+    }
     await closeQuietly(egressProxy);
     // #81: close both credential brokers after the daemon is dead (no more
     // child git/gh traffic). Best-effort, like the egress proxy — the token
@@ -1354,13 +1441,17 @@ async function runAgentInner(
       await reportSelfHealFixAborted({ input, step });
     }
     await closeQuietly(egressEvents);
-    // Wipe the delivered credential before the workdir goes, so a cleanup
-    // failure on the workdir can never leave a live token behind.
-    await materialised.cleanup();
-    await cleanupWorkdir(run.runDir, workdirCleanup);
-    // The box lock goes last (ADR-007 I2): the next run may start only once
-    // this one's daemon is dead and its disk footprint is gone.
-    await boxLock?.release();
+    try {
+      // Wipe the delivered credential before the workdir goes, so a cleanup
+      // failure on the workdir can never leave a live token behind.
+      await materialised.cleanup();
+      await cleanupWorkdir(run.runDir, workdirCleanup);
+    } finally {
+      // The box lock goes last (ADR-007 I2): the next run may start only once
+      // this one's daemon is dead and its disk footprint is gone — and it
+      // goes whatever the cleanup did, or the slot stays held until a restart.
+      await boxLock?.release();
+    }
   }
 }
 

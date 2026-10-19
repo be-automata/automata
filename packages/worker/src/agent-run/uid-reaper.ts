@@ -3,9 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { settlesWithin, tryAcquireBoxLock, type BoxLock } from "./box-lock";
+import {
+  releaseAll,
+  settlesWithin,
+  tryAcquireAllBoxSlots,
+  tryAcquireBoxLock,
+  type BoxLock,
+} from "./box-lock";
 import { writeSnapshotAtomic } from "./scheduling-maintenance";
 import {
+  agentUserForSlot,
   assertAgentUser,
   buildKillAllAsAgentInvocation,
   type Invocation,
@@ -118,8 +125,31 @@ export type BootUidScanOutcome =
 
 export interface BootUidScanOpts {
   root: string;
+  /** The base agent account (slot 0). */
   agentUser: string;
+  /**
+   * #205: how many box slots exist. 1 (the default) is byte-identical to the
+   * exclusive-lock scan. Above 1 the scan takes EVERY slot non-blocking — with
+   * all N held no run can be live — and reaps each slot's own account in turn,
+   * because `kill -9 -- -1` as slot i's account reaches only slot i's processes.
+   */
+  slots?: number;
+  /**
+   * #205: slot accounts provisioned on this box ABOVE the current N (a box that
+   * ran N = 2 and went back to 1 keeps `automata-agent-1`). No live slot lock
+   * guards them any more, so an escapee there would never be scanned again;
+   * each is reaped at boot too — under a non-blocking take of ITS OWN slot
+   * file, because the crash-relaunch overlap after N was lowered can still
+   * have the old worker's helper on `box.lock.<i>` with a live run behind it.
+   * Their errors are reported apart from the live slots' result and never
+   * fail the scan (sudoers may have been re-rendered without them). Found by
+   * `retiredSlotAccounts` (box-slots-boot.ts).
+   */
+  retiredSlots?: ReadonlyArray<{ slot: number; account: string }>;
   log: (line: string) => void;
+  /** Injected for tests; defaults to `tryAcquireAllBoxSlots` (at N = 1: the one try-lock). */
+  tryAcquireAll?: typeof tryAcquireAllBoxSlots;
+  /** Injected for tests; the retired slots' own non-blocking take. */
   tryAcquire?: typeof tryAcquireBoxLock;
   reap?: typeof reapAgentUidEscapees;
 }
@@ -128,6 +158,10 @@ export interface BootUidScanResult {
   outcome: BootUidScanOutcome;
   result?: ReapAgentUidResult;
   error?: string;
+  /** #205: the retired slots' scan, summed — apart from the live slots' result. */
+  retired?: ReapAgentUidResult;
+  /** #205: retired-slot failures; informational, never the scan's outcome. */
+  retiredErrors?: string[];
 }
 
 export const BOX_BUDGET_FILENAME = "box-budget.json";
@@ -328,7 +362,8 @@ export async function listProcessesViaPs(): Promise<ProcRow[]> {
   return parsePsOutput(stdout);
 }
 
-async function resolveUidViaId(agentUser: string): Promise<number> {
+/** `id -u <account>` with the 2 s bound; exported for the boot slot-account check (#205). */
+export async function resolveUidViaId(agentUser: string): Promise<number> {
   const { stdout } = await execFileAsync(ID_BIN, ["-u", agentUser], {
     timeout: ENUMERATE_TIMEOUT_MS,
     killSignal: "SIGKILL",
@@ -651,7 +686,10 @@ export async function bootUidScan(
   const {
     root,
     agentUser,
+    slots = 1,
+    retiredSlots = [],
     log,
+    tryAcquireAll = tryAcquireAllBoxSlots,
     tryAcquire = tryAcquireBoxLock,
     reap = reapAgentUidEscapees,
   } = opts;
@@ -661,9 +699,13 @@ export async function bootUidScan(
     return { outcome: "disabled" };
   }
 
-  let lock: BoxLock | null;
+  // Every slot or none: with all N held no run can be live, so every slot's
+  // account is scanned; any busy slot means a live run owns part of the box and
+  // its own teardown scan reclaims. At N = 1 this is exactly the old single
+  // try-lock (same helper spawn, same log lines).
+  let locks: BoxLock[] | null;
   try {
-    lock = await tryAcquire({ root, holder: "boot uid scan", log });
+    locks = await tryAcquireAll({ root, slots, holder: "boot uid scan", log });
   } catch (e) {
     // Typically a BoxLockUnavailableError: a helper that vanished after the
     // boot assert, or a spawn failure. Hygiene, not admission — continue.
@@ -671,19 +713,25 @@ export async function bootUidScan(
     log(`boot uid scan failed: ${error}`);
     return { outcome: "error", error };
   }
-  if (lock === null) {
+  if (locks === null) {
     log("box lock held by a live worker — boot uid scan skipped");
     return { outcome: "skipped-busy" };
   }
 
-  let result: ReapAgentUidResult;
+  // Slot by slot, as that slot's own account: the uid-wide kill is bounded by
+  // kill(2) to the account issuing it. Results are summed; a per-slot error
+  // surfaces as the error of the whole scan.
+  let result: ReapAgentUidResult | null = null;
   try {
-    result = await reap({
-      agentUser,
-      phase: "boot",
-      runNamespaceRoot: root,
-      log,
-    });
+    for (let slot = 0; slot < slots; slot++) {
+      const slotResult = await reap({
+        agentUser: agentUserForSlot(agentUser, slot),
+        phase: "boot",
+        runNamespaceRoot: root,
+        log,
+      });
+      result = result ? mergeReapResults(result, slotResult) : slotResult;
+    }
   } catch (e) {
     // `reap` never throws by contract; this wrapper's own contract is the
     // one `main()` relies on, so an injected/edited reaper that does throw
@@ -692,14 +740,112 @@ export async function bootUidScan(
     log(`boot uid scan failed: ${error}`);
     return { outcome: "error", error };
   } finally {
+    await releaseAll(locks, (l) => log(`boot uid scan: ${l}`));
+  }
+  if (result === null) {
+    return { outcome: "error", error: "no slot was scanned" };
+  }
+  const retired = await scanRetiredSlots({
+    root,
+    retiredSlots,
+    log,
+    tryAcquire,
+    reap,
+  });
+  if (result.error !== undefined) {
+    return { outcome: "error", result, error: result.error, ...retired };
+  }
+  return { outcome: "scanned", result, ...retired };
+}
+
+/**
+ * #205: the retired slots' scan (see BootUidScanOpts.retiredSlots). Each slot
+ * under a non-blocking take of its own lock file; held ⇒ skipped (a run may
+ * be live behind it). Never throws; its failures are reported, not fatal.
+ */
+async function scanRetiredSlots(opts: {
+  root: string;
+  retiredSlots: ReadonlyArray<{ slot: number; account: string }>;
+  log: (line: string) => void;
+  tryAcquire: typeof tryAcquireBoxLock;
+  reap: typeof reapAgentUidEscapees;
+}): Promise<Pick<BootUidScanResult, "retired" | "retiredErrors">> {
+  const { root, retiredSlots, log, tryAcquire, reap } = opts;
+  if (retiredSlots.length === 0) return {};
+  let retired: ReapAgentUidResult | undefined;
+  const retiredErrors: string[] = [];
+  const scanned: string[] = [];
+  for (const { slot, account } of retiredSlots) {
+    let lock: BoxLock | null;
     try {
-      await lock.release();
+      lock = await tryAcquire({
+        root,
+        holder: "boot uid scan (retired slot)",
+        log,
+        slot,
+        slots: slot + 1,
+      });
     } catch (e) {
-      log(`boot uid scan: lock release failed: ${errorMessage(e)}`);
+      retiredErrors.push(`${account}: ${errorMessage(e)}`);
+      continue;
+    }
+    if (lock === null) {
+      log(
+        `boot uid scan: retired slot ${slot} (${account}) is still held — skipped`,
+      );
+      continue;
+    }
+    try {
+      const r = await reap({
+        agentUser: account,
+        phase: "boot",
+        runNamespaceRoot: root,
+        log,
+      });
+      if (r.error !== undefined) {
+        retiredErrors.push(`${account}: ${r.error}`);
+      } else {
+        scanned.push(account);
+        retired = retired ? mergeReapResults(retired, r) : r;
+      }
+    } catch (e) {
+      retiredErrors.push(`${account}: ${errorMessage(e)}`);
+    } finally {
+      await lock.release();
     }
   }
-  if (result.error !== undefined) {
-    return { outcome: "error", result, error: result.error };
+  if (scanned.length > 0) {
+    log(
+      `boot uid scan: retired slot account(s) above WORKER_BOX_SLOTS scanned too: ${scanned.join(", ")}`,
+    );
   }
-  return { outcome: "scanned", result };
+  if (retiredErrors.length > 0) {
+    log(
+      `boot uid scan: retired slot account(s) NOT scanned (not fatal): ${retiredErrors.join("; ")}`,
+    );
+  }
+  return {
+    ...(retired ? { retired } : {}),
+    ...(retiredErrors.length > 0 ? { retiredErrors } : {}),
+  };
+}
+
+/** Sum two per-slot reap results into one (#205 boot scan over N slots). */
+function mergeReapResults(
+  a: ReapAgentUidResult,
+  b: ReapAgentUidResult,
+): ReapAgentUidResult {
+  return {
+    skipped: a.skipped && b.skipped,
+    scanned: a.scanned + b.scanned,
+    groups: a.groups + b.groups,
+    helpers: a.helpers + b.helpers,
+    killed: a.killed + b.killed,
+    residual: a.residual + b.residual,
+    failed: a.failed + b.failed,
+    durationMs: a.durationMs + b.durationMs,
+    ...(a.error !== undefined || b.error !== undefined
+      ? { error: [a.error, b.error].filter(Boolean).join("; ") }
+      : {}),
+  };
 }

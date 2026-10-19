@@ -124,6 +124,68 @@ describe("cleanupWorkdir", () => {
     expect(lines).toEqual([]);
   });
 
+  it("#205 agentUsers: hands back as EACH slot account in order (a stale dir may belong to any slot), then rm", async () => {
+    const seen: string[] = [];
+    const runAsAgent = vi.fn<RunAsAgent>(async (inv) => {
+      seen.push(inv.args[2] ?? "");
+      return { code: 0, signal: null };
+    });
+    const gone = await cleanupWorkdir(workdir, {
+      agentUser: AGENT,
+      agentUsers: [AGENT, `${AGENT}-1`, `${AGENT}-2`],
+      log,
+      platform: "linux",
+      runAsAgent,
+    });
+    expect(seen).toEqual([AGENT, `${AGENT}-1`, `${AGENT}-2`]);
+    expect(gone).toBe(true);
+    expect(lines).toEqual([]);
+  });
+
+  it("#205 agentUsers: a non-owning account's refused pass is expected and silent once ANY account's pass succeeded; the others still run", async () => {
+    const runAsAgent = vi.fn<RunAsAgent>(async (inv) =>
+      inv.args[2] === `${AGENT}-1`
+        ? { code: 0, signal: null }
+        : { code: 1, signal: null, stderrTail: "find: Permission denied" },
+    );
+    await cleanupWorkdir(workdir, {
+      agentUser: AGENT,
+      agentUsers: [AGENT, `${AGENT}-1`, `${AGENT}-2`],
+      log,
+      platform: "linux",
+      runAsAgent,
+    });
+    expect(runAsAgent).toHaveBeenCalledTimes(3);
+    expect(lines).toEqual([]);
+  });
+
+  it("#205 agentUsers: when NO account's pass succeeds, every failure is logged naming its account", async () => {
+    const runAsAgent = vi.fn<RunAsAgent>(async () => ({
+      code: 1,
+      signal: null,
+      stderrTail: "sudo: a password is required",
+    }));
+    await cleanupWorkdir(workdir, {
+      agentUser: AGENT,
+      agentUsers: [AGENT, `${AGENT}-1`],
+      log,
+      platform: "linux",
+      runAsAgent,
+    });
+    expect(lines).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `workdir hand-back incomplete: .* \\(${AGENT}: exit 1: sudo: a password is required\\)`,
+        ),
+      ),
+      expect.stringMatching(
+        new RegExp(
+          `workdir hand-back incomplete: .* \\(${AGENT}-1: exit 1: sudo: a password is required\\)`,
+        ),
+      ),
+    ]);
+  });
+
   it("darwin: no hand-back (a macOS allow-ACE survives 0700), rm only", async () => {
     const runAsAgent = vi.fn<RunAsAgent>();
     const gone = await cleanupWorkdir(workdir, {
@@ -174,7 +236,7 @@ describe("cleanupWorkdir", () => {
     });
     expect(gone).toBe(true);
     expect(lines).toEqual([
-      `workdir hand-back failed: ${workdir} (spawn /usr/bin/sudo ENOENT)`,
+      `workdir hand-back failed: ${workdir} (${AGENT}: spawn /usr/bin/sudo ENOENT)`,
     ]);
   });
 
@@ -191,7 +253,7 @@ describe("cleanupWorkdir", () => {
       runAsAgent,
     });
     expect(lines).toEqual([
-      `workdir hand-back incomplete: ${workdir} (exit 1: sudo: a password is required)`,
+      `workdir hand-back incomplete: ${workdir} (${AGENT}: exit 1: sudo: a password is required)`,
     ]);
   });
 

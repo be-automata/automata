@@ -11,7 +11,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { DaemonProcess, writeDaemonMessage } from "./daemon-process";
-import { loadWorkerConfig } from "./config";
+import { configForSlot, loadWorkerConfig } from "./config";
 import { getProcessWorkerId, runPidPath, runSocketPath } from "./run-namespace";
 import type { AgentRunInput } from "./types";
 
@@ -645,6 +645,62 @@ setInterval(() => {}, 1000);
     ]);
     // sudo may fork a setsid'd monitor, so child.pid (9001) is NOT the group.
     expect(daemon.pid).toBe(4242);
+  });
+
+  describe("#205: the slot layout", () => {
+    it("N > 1 without the per-run boxSlot override is refused at construction (never writes into the shared dir)", () => {
+      const { root, workdir, input } = fixture();
+      const config = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_AGENT_USER: "_automata-agent",
+        WORKER_WORKDIR_ROOT: workdir,
+        WORKER_BOX_SLOTS: "2",
+        WORKER_RUN_MEMORY_MAX: "1500M",
+      });
+      expect(() => new DaemonProcess(config, input, workdir)).toThrow(
+        /invariant.*boxSlot/,
+      );
+    });
+
+    it("N > 1 with the slot override puts the run's artefacts under s<i>/ and runs as the slot's account", async () => {
+      const { root, workdir, input } = fixture();
+      const base = loadWorkerConfig({
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_DAEMON_DIST: "/opt/daemon/index.js",
+        WORKER_AGENT_USER: "_automata-agent",
+        WORKER_WORKDIR_ROOT: workdir,
+        WORKER_BOX_SLOTS: "2",
+        WORKER_RUN_MEMORY_MAX: "1500M",
+      });
+      const config = configForSlot(base, 1);
+      expect(config.agentUser).toBe("_automata-agent-1");
+      const recorded: Recorded[] = [];
+      const daemon = new DaemonProcess(
+        config,
+        input,
+        workdir,
+        null,
+        null,
+        null,
+        {
+          aceExec: async () => {},
+          spawnFn: fakeSpawn({ recorded, wrapperPgid: 4242 }),
+          platform: "darwin",
+        },
+      );
+      daemons.push(daemon);
+      // The ceiling is on, so start() dies at the cgroup step on this platform —
+      // AFTER the slot dir was prepared, which is the layout under test.
+      await expect(daemon.start()).rejects.toThrow(/memory ceiling/);
+      const slotDir = path.dirname(
+        runPidPath(root, getProcessWorkerId(), input.threadId, 1),
+      );
+      expect(slotDir).toMatch(/\/s1$/);
+      expect(fs.existsSync(slotDir)).toBe(true);
+      expect(recorded).toEqual([]);
+      daemon.teardown();
+    });
   });
 
   it("teardown shells out to sudo /bin/kill -9 -- -<pgid> when agentUser is set", async () => {

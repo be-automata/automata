@@ -19,6 +19,17 @@ import {
 } from "../agent-run/engine-liveness";
 import { harnessDoctorLine } from "../agent-run/batteries-seed";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
+import {
+  EGRESS_FENCE_UIDS_FILE,
+  assertFenceCoversSlotUids,
+  assertProcHidepid,
+  assertSlotAccountsExist,
+  assertSlotAccountsOutsideGroup,
+  assertSlotSudoGrants,
+  assertSlotWorkdirTraverse,
+  retiredSlotAccounts,
+  warnIfSlotsExceedMemory,
+} from "../agent-run/box-slots-boot";
 import { sweepStaleRunDirs } from "../agent-run/provision";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
 import { bootUidScan } from "../agent-run/uid-reaper";
@@ -46,17 +57,21 @@ const execFileAsync = promisify(execFile);
  * confirmed dead — a live worker's daemons are never touched (safe for ≥2 workers).
  */
 async function claimNamespaceAndReclaim(): Promise<void> {
-  const root = loadWorkerConfig().runNamespaceRoot;
+  const cfg = loadWorkerConfig();
+  const root = cfg.runNamespaceRoot;
   const workerId = getProcessWorkerId();
   try {
     // #108 F2: this ALSO applies the cross-uid ACEs, on the empty dir, before
     // anything is created inside it. macOS applies ACE inheritance at create
     // time, so a grant added later (per-run, inside DaemonProcess.start())
     // never reaches the gh-broker socket workflow.ts already bound.
+    // #205: at N > 1 every slot account gets traverse here; the inheritable
+    // grant lands on each slot's own subdir at admission (ensureSlotNamespace).
     await claimRunNamespace({
       root,
       workerId,
-      agentUser: loadWorkerConfig().agentUser,
+      agentUser: cfg.agentUser,
+      agentUsers: cfg.agentUsers,
     });
   } catch (err) {
     // A worker that can't claim its dir would leak every run's resources — fail loud.
@@ -155,6 +170,25 @@ async function main() {
       console.log(
         `[worker-boot] agent-uid mode: ${cfg.agentUser}; node env-proxy floor OK`,
       );
+      // #205, N > 1 only — N = 1 boots exactly as it always has (no new fatal
+      // check, no new line; a missing account still surfaces at the first run,
+      // as before). Above 1: every slot account must exist with its own
+      // non-root, non-worker uid; sudo must let the worker run as each (a
+      // Runas list not re-rendered for the new slots); and the kernel fence
+      // must provably cover every slot uid (the preflight's marker, written
+      // only after a successful `nft -f`). A box that fails any of these would
+      // otherwise register N slots of capacity it does not have.
+      if (cfg.boxSlots > 1) {
+        const slotUids = await assertSlotAccountsExist(cfg.agentUsers);
+        await assertSlotSudoGrants(cfg.agentUsers);
+        await assertSlotWorkdirTraverse(cfg.agentUsers, cfg.workdirRoot);
+        assertFenceCoversSlotUids({ uids: slotUids });
+        const exemptGid = assertProcHidepid();
+        await assertSlotAccountsOutsideGroup(cfg.agentUsers, exemptGid);
+        console.log(
+          `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")}; uids ${slotUids.join(", ")}); egress fence covers every slot uid (${EGRESS_FENCE_UIDS_FILE})`,
+        );
+      }
     }
   } catch (err) {
     console.error(
@@ -170,8 +204,12 @@ async function main() {
   // that cannot take the lock would admit runs with no box-wide budget at all.
   try {
     const { file } = await assertBoxLockHelperAvailable();
+    const lockCfg = loadWorkerConfig();
     console.log(
-      `[worker-boot] box lock helper OK: ${file}; lock file ${boxLockPath(loadWorkerConfig().runNamespaceRoot)}`,
+      `[worker-boot] box lock helper OK: ${file}; lock file ${boxLockPath(lockCfg.runNamespaceRoot)}` +
+        (lockCfg.boxSlots > 1
+          ? ` (+ ${lockCfg.boxSlots - 1} slot file(s) box.lock.<i>, #205)`
+          : ""),
     );
   } catch (err) {
     console.error(
@@ -196,23 +234,38 @@ async function main() {
   // Never throws: fail-open on the scan (the box is still single-flight
   // without it); the helper assert above stays fail-closed.
   const bootUidScanConfig = loadWorkerConfig();
+  // #205: slot accounts a higher N left behind. No live slot guards them, so
+  // the boot scan takes each one's own lock file and reaps it too, and the
+  // stale-dir sweep hands back their dirs.
+  const retiredSlots = await retiredSlotAccounts(
+    bootUidScanConfig.agentUser,
+    bootUidScanConfig.boxSlots,
+  );
   await bootUidScan({
     root: bootUidScanConfig.runNamespaceRoot,
     agentUser: bootUidScanConfig.agentUser,
+    // #205: every slot held, every slot's account scanned — or skipped whole.
+    slots: bootUidScanConfig.boxSlots,
+    retiredSlots,
     log: (m) => console.log(`[worker-boot] ${m}`),
   });
 
-  // Remove run dirs older than 24h that earlier teardowns could not (the box
-  // runs one agent at a time and runs are hard-capped at 30 min, so none of
-  // them can belong to a live run). AFTER the uid scan, so no escapee is still
-  // writing into them; BEFORE registration, so the hand-back's own agent-uid
-  // processes are not mistaken for escapees by a first run's admission scan.
-  // Never throws, and the catch is belt and braces: residue must never stop a
-  // boot.
+  // Remove run dirs older than 24h that earlier teardowns could not (every run
+  // is hard-capped at 30 min, so a dir that old cannot belong to a live run on
+  // any slot). AFTER the uid scan, so no escapee is still writing into them;
+  // BEFORE registration, so the hand-back's own agent-uid processes are not
+  // mistaken for escapees by a first run's admission scan. Never throws, and the
+  // catch is belt and braces: residue must never stop a boot.
   try {
     await sweepStaleRunDirs({
       workdirRoot: bootUidScanConfig.workdirRoot,
       agentUser: bootUidScanConfig.agentUser,
+      // #205: a stale dir may belong to any slot's account — including a slot
+      // retired by a lower N; each hands back its own.
+      agentUsers: [
+        ...bootUidScanConfig.agentUsers,
+        ...retiredSlots.map((r) => r.account),
+      ],
       log: (m) => console.log(`[worker-boot] ${m}`),
     });
   } catch (err) {
@@ -231,7 +284,8 @@ async function main() {
   // name — the reapers key on getProcessWorkerId(), a separate per-process uuid
   // — so changing it costs an extra stale row after the first restart and
   // nothing else.
-  const boxId = loadWorkerConfig().boxId;
+  const registrationConfig = loadWorkerConfig();
+  const boxId = registrationConfig.boxId;
   console.log(`[worker-boot] box id: ${boxId}`);
 
   // #204: prepare the delegated cgroup subtree once, at boot, before any run.
@@ -260,15 +314,18 @@ async function main() {
   // probes for a row with exactly this name (namespaced), so a second literal
   // here could drift from it and leave the box silently unguarded.
   const workerName = `automata-worker-${boxId}`;
+  const boxSlots = registrationConfig.boxSlots;
+  warnIfSlotsExceedMemory(registrationConfig);
   const worker = await hatchet.worker(workerName, {
     workflows,
-    // #125 C4 / #183: ONE slot per worker process and ONE unit per box:
-    // `slots: 1` is the engine-native cross-workflow cap (the engine's global
-    // concurrency key is per workflow — docs/uat/hatchet-lite-v0.94.10-observed.md
-    // §5); the kernel box lock (box-lock.ts) covers the crash-relaunch overlap.
-    // Everything else stays QUEUED on the engine, where a cancel/supersede is
-    // free and no timeout clock is running.
-    slots: 1,
+    // #125 C4 / #183 / #205: ONE unit per box and `slots` = WORKER_BOX_SLOTS,
+    // the engine-native cross-workflow cap (the engine's global concurrency key
+    // is per workflow — docs/uat/hatchet-lite-v0.94.10-observed.md §5), equal to
+    // the number of kernel slot locks the box holds (box-lock.ts), which cover
+    // the crash-relaunch overlap. Everything else stays QUEUED on the engine,
+    // where a cancel/supersede is free and no timeout clock is running. The
+    // engine caps in definition.ts must agree with this value (#372).
+    slots: boxSlots,
   });
 
   // #215: in-process engine-liveness watchdog. OFF unless WORKER_LIVENESS_STALE_S is

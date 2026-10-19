@@ -153,6 +153,33 @@ const defaultExec: AceExec = async (file, args) => {
   await execFileAsync(file, args);
 };
 
+/**
+ * #205: ACL edits are read-modify-write on the inode (`setfacl -m`, `chmod +a`),
+ * and at N > 1 two admissions on different slots grant the SAME shared dirs
+ * (the namespace root, the worker dir, the workdir root) concurrently from one
+ * process — so one slot's entry could be dropped and that run would die at
+ * clone or at its pidfile write. Every ACL exec in this module therefore runs
+ * under a per-path mutex; the cost is a few milliseconds per admission.
+ */
+const aclLocks = new Map<string, Promise<void>>();
+async function withAclLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  // Keyed by the target path: only edits to the SAME inode can race, so two
+  // slots granting their own subdirs never wait on each other.
+  const previous = aclLocks.get(dir) ?? Promise.resolve();
+  let unlock: () => void = () => {};
+  const mine = new Promise<void>((resolve) => {
+    unlock = resolve;
+  });
+  aclLocks.set(dir, mine);
+  try {
+    await previous;
+    return await fn();
+  } finally {
+    unlock();
+    if (aclLocks.get(dir) === mine) aclLocks.delete(dir);
+  }
+}
+
 async function applyAces(opts: {
   dir: string;
   users: string[];
@@ -192,7 +219,7 @@ async function applyAces(opts: {
       // without ACL support, and a silently-missing grant surfaces later as a
       // 15s "daemon socket not ready", or as a run that dies on an unwritable
       // pidfile, with nothing pointing at the cause. Fail loud, here.
-      await exec(inv.file, inv.args);
+      await withAclLock(dir, () => exec(inv.file, inv.args));
     }
   }
 }
@@ -271,6 +298,62 @@ export async function applyRunNamespaceAces(opts: {
   await applyTraverseAce({ dir: root, users: [agentUser], exec, platform });
   await applyInheritableAces({
     dir: runDir,
+    users: [agentUser, workerLogin],
+    exec,
+    platform,
+  });
+}
+
+/**
+ * #205, N > 1: the grants on the SHARED worker dir when the box runs several
+ * slots. Every slot account gets traverse on the root AND on the worker dir —
+ * nothing inheritable, anywhere shared. The inheritable grant moves to each
+ * slot's own subdir (applySlotDirAces), so a socket bound in slot i's subdir is
+ * connectable by slot i's account and the worker, and by nobody else. The
+ * worker owns the shared dir and needs no ACE on it.
+ */
+export async function applySlotLayoutAces(opts: {
+  root: string;
+  runDir: string;
+  agentUsers: string[];
+  exec?: AceExec;
+  platform?: NodeJS.Platform;
+}): Promise<void> {
+  const { root, runDir, agentUsers, exec, platform } = opts;
+  const users = agentUsers.filter(Boolean);
+  if (users.length === 0) {
+    return;
+  }
+  await applyTraverseAce({ dir: root, users, exec, platform });
+  await applyTraverseAce({ dir: runDir, users, exec, platform });
+}
+
+/**
+ * #205: the grant on ONE slot's subdir — strip whatever extended ACL the subdir
+ * inherited or accumulated (`setfacl -b`), then the inheritable pair for the
+ * slot account and the worker login. The strip is what makes the subdir's
+ * reach exactly those two: a default entry inherited from the parent for
+ * another account would otherwise propagate onto every socket created here.
+ * Linux-only by construction (N > 1 requires the cgroup ceiling); on any other
+ * platform the strip is skipped and the inheritable pair is applied as usual.
+ */
+export async function applySlotDirAces(opts: {
+  dir: string;
+  agentUser: string;
+  workerLogin: string;
+  exec?: AceExec;
+  platform?: NodeJS.Platform;
+}): Promise<void> {
+  const { dir, agentUser, workerLogin, platform } = opts;
+  if (!agentUser) {
+    return;
+  }
+  const exec = opts.exec ?? defaultExec;
+  if ((platform ?? process.platform) === "linux") {
+    await withAclLock(dir, () => exec("/usr/bin/setfacl", ["-b", dir]));
+  }
+  await applyInheritableAces({
+    dir,
     users: [agentUser, workerLogin],
     exec,
     platform,

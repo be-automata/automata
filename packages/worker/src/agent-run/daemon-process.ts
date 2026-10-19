@@ -18,7 +18,8 @@ import {
   getProcessWorkerId,
   runPidPath,
   runSocketPath,
-  workerRunDir,
+  slotFor,
+  slotRunDir,
 } from "./run-namespace";
 import {
   assessCgroupSupport,
@@ -142,16 +143,22 @@ export class DaemonProcess {
     } = {},
   ) {
     const workerId = getProcessWorkerId();
-    this.runDir = workerRunDir(config.runNamespaceRoot, workerId);
+    // #205: at N > 1 every per-run artefact lives in the slot's own subdir
+    // (`slotFor` throws if the workflow forgot the per-run slot override, since
+    // writing into the shared dir would re-open the cross-slot socket reach).
+    const slot = slotFor(config);
+    this.runDir = slotRunDir(config.runNamespaceRoot, workerId, slot);
     this.socketPath = runSocketPath(
       config.runNamespaceRoot,
       workerId,
       input.threadId,
+      slot,
     );
     this.pidFilePath = runPidPath(
       config.runNamespaceRoot,
       workerId,
       input.threadId,
+      slot,
     );
   }
 
@@ -328,6 +335,12 @@ export class DaemonProcess {
     // own stale socket/pid (a prior crashed run of the SAME threadId under this
     // worker). Cross-worker orphans are handled by boot-reclaim (reclaim.ts), never
     // here — this method must never touch another run's or worker's resources.
+    // `recursive` so the flat layout's worker dir is made if missing. At N > 1
+    // the slot subdir was created and GRANTED by ensureSlotNamespace moments
+    // ago (workflow.ts, right after the slot acquire); recreating a removed one
+    // here would give the daemon a dir with no grant and an EACCES at the
+    // pidfile write — the same class as the /tmp-reap failure that motivated
+    // ensureRunNamespace — so this mkdir is a backstop, not the grant.
     fs.mkdirSync(this.runDir, { recursive: true });
     this.cleanOwnStaleFiles();
 

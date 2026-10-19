@@ -210,6 +210,110 @@ EOF
 default root is `os.tmpdir()`, which on macOS is a 0700 directory owned by the
 worker's own uid and untraversable by any other, so every run would die at clone.
 
+## 6. Several box slots (#205)
+
+`WORKER_BOX_SLOTS=N` lets the box admit N agent runs at once. **Each slot runs
+as its own account**: slot 0 is `WORKER_AGENT_USER`, slot i is
+`${WORKER_AGENT_USER}-i`. A uid is the only fence the kernel gives two
+concurrent runs (a run's credential HOME, broker sockets and `/proc/<pid>/environ`
+are all readable by any process of the same uid), and the uid-wide reap
+`kill -9 -- -1` issued AS slot i's account reaches only slot i's processes, so it
+stays legal at every N. The worker refuses to boot with N > 1 unless the per-run
+memory ceiling (`WORKER_RUN_MEMORY_MAX`, #204) is on and every slot account
+resolves (`id -u`).
+
+Linux only (the ceiling is a cgroup). On a box that already runs N = 1, in this
+order, with **no run in flight**:
+
+```bash
+# 1. One more role account per extra slot — explicit uid from 2000 up, never
+#    --system (its range descends from 999, the engine-Postgres collision, #210).
+sudo useradd --uid 2001 --create-home --home-dir /home/automata-agent-1 \
+  --shell /usr/sbin/nologin automata-agent-1
+sudo chmod 750 /home/automata-agent-1
+
+# 2. sudoers: the Runas list names every slot account (validate on a copy first).
+#    Runas_Alias AGENT = automata-agent, automata-agent-1
+sudo visudo -cf /etc/sudoers.d/automata
+
+# 3. nftables: render __AGENT_UID__ as the comma-separated uid set and re-load
+#    through the preflight, which checks every uid in the set AND that every
+#    slot account's uid is in it (it reads the slot accounts from
+#    /etc/automata/egress.env, which the automata-egress unit also loads).
+#    meta skuid { 999, 2001 } tcp dport { 80, 443 } counter reject with tcp reset
+printf 'WORKER_AGENT_USER=automata-agent\nWORKER_BOX_SLOTS=2\n' | sudo tee /etc/automata/egress.env
+sudo env WORKER_AGENT_USER=automata-agent WORKER_BOX_SLOTS=2 ./linux/nft-preflight.sh /etc/automata/egress-nft.conf \
+  && sudo env WORKER_AGENT_USER=automata-agent WORKER_BOX_SLOTS=2 ./linux/nft-verify.sh
+
+# 4. The runtime tree: traverse for every slot account on the workdir root (the
+#    per-run dir is granted to its own slot by the worker at clone time).
+sudo setfacl -m u:automata-agent-1:--x /usr/local/automata/runs
+
+# 5. Worker env, then restart the unit.
+#    WORKER_BOX_SLOTS=2
+```
+
+What the worker then does on its own: takes slot locks `box.lock` and
+`box.lock.1` under the run-namespace root, grants every slot account traverse on
+the shared `<root>/<workerId>/` dir and an inheritable grant on that slot's own
+`<root>/<workerId>/s<i>/` subdir (so one slot's daemon socket is never
+connectable by another), keeps each run's pidfile under its slot's subdir so a
+reclaim kills a dead group as that slot's account, and scans each slot's uid at
+boot only once it holds every slot. The boot log shows
+`box slots: 2 (automata-agent, automata-agent-1; uids 999, 2001); egress fence
+covers every slot uid (/run/automata/egress-fence.uids)` — grep for the
+`box slots: 2 (` prefix.
+
+Rollback: `WORKER_BOX_SLOTS=1` and restart. The extra accounts, sudoers entries
+and nft set may stay; they fence nothing while unused, and the boot uid scan
+still reaps every provisioned slot account above N — each under a non-blocking
+take of its own `box.lock.<i>` (`retired slot account(s) ... scanned too` in
+the boot log) — and the stale-dir sweep hands back their dirs, so an escapee
+from the N = 2 period cannot outlive the rollback. Keep those accounts in the
+sudoers Runas list; without them the boot log reports them as `NOT scanned (not
+fatal)`.
+
+`/proc` visibility (N > 1): the run's proxy credential rides in the agent
+children's `HTTPS_PROXY`; the worker keeps it out of every argv it writes, but a
+tool the agent runs may copy it into one (`--proxy-server=$HTTPS_PROXY`), and
+`/proc/<pid>/cmdline` is world-readable. Before raising N, mount `/proc` with
+`hidepid=invisible` and exempt the worker's group (the reaper and the ceiling
+read their runs' `/proc`):
+
+```
+WORKER_GID="$(id -g automata)"
+sudo mount -o remount,hidepid=invisible,gid="$WORKER_GID" /proc
+grep -q hidepid= /etc/fstab || printf 'proc /proc proc defaults,hidepid=invisible,gid=%s 0 0\n' "$WORKER_GID" | sudo tee -a /etc/fstab
+sudo -u automata-agent-1 ps -eo user | sort -u   # must list only automata-agent-1
+```
+
+The worker checks this at boot (N > 1, Linux) and refuses to start without it —
+and without a `gid=` naming one of its own groups: a hidepid that also hides the
+slot accounts from the worker would silently blind the escapee reaper. The boot
+also probes each slot account's traverse on the workdir root (step 4) through
+the sudo grant.
+
+Caveat, checked before trusting it: `hidepid` also hides processes from
+`systemd-logind`/polkit sessions of unprivileged logins; on a box with an
+interactive operator login, add that login to the exempt group or use
+`hidepid=ptraceable`. Not applied by cloud-init — a live box is remounted by hand
+at the N > 1 step and the UAT drill records it.
+
+Fence coverage, two layers. (1) `nft-preflight.sh` and `nft-verify.sh` read
+`WORKER_AGENT_USER=<base> WORKER_BOX_SLOTS=<N>` (or `AGENT_USERS="<a> <a>-1"`)
+from the environment — the unit loads `/etc/automata/egress.env` — and refuse a
+skuid set that misses any slot account's uid, saying `slot-coverage check
+skipped` when given neither. (2) Fail-closed regardless of (1): a successful
+preflight records the fenced uids in `/run/automata/egress-fence.uids`, and at
+`WORKER_BOX_SLOTS > 1` the worker refuses to boot unless `automata-egress.service`
+is active AND that file exists and lists every slot uid (`egress fence coverage unproven` / `does not cover slot
+uid(s)` in the boot log). The boot also refuses two slot logins that alias one
+uid, a slot at uid 0, or a slot at the worker's own uid, and at N > 1 probes
+`sudo -n -u <slot> kill -l` for every slot account — a Runas list that was not
+re-rendered fails the boot (`sudo does not permit the worker to run as slot
+account(s) ...`) instead of the first run on that slot. Both nft scripts read
+every `meta skuid` rule (tcp and udp) and refuse a conf whose sets differ.
+
 ---
 
 ## Verification gates

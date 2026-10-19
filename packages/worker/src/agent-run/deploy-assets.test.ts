@@ -2614,8 +2614,207 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
     // udp/443 is HTTP-3. A tcp-only rule leaves an https path that never meets
     // the cooperative proxy.
     const conf = deployFile("linux", "egress-nft.conf");
-    expect(conf).toMatch(/meta skuid __AGENT_UID__ tcp dport \{ 80, 443 \}/);
-    expect(conf).toMatch(/meta skuid __AGENT_UID__ udp dport \{ 80, 443 \}/);
+    // #205: an anonymous set, so one rule fences every slot account's uid.
+    expect(conf).toMatch(
+      /meta skuid \{ __AGENT_UID__ \} tcp dport \{ 80, 443 \}/,
+    );
+    expect(conf).toMatch(
+      /meta skuid \{ __AGENT_UID__ \} udp dport \{ 80, 443 \}/,
+    );
+  });
+
+  describe("#205: one agent account per box slot", () => {
+    it("both nft scripts refuse a set that misses a slot account's uid (AGENT_USERS or WORKER_AGENT_USER + WORKER_BOX_SLOTS), and say so when they cannot check", () => {
+      for (const name of ["nft-preflight.sh", "nft-verify.sh"]) {
+        const sh = deployFile("linux", name);
+        expect(sh).toMatch(/expected_slot_users\(\)/);
+        expect(sh).toMatch(/WORKER_BOX_SLOTS:-1/);
+        expect(sh).toMatch(/\$WORKER_AGENT_USER-\$i/);
+        expect(sh).toMatch(/is not in the skuid set/);
+        expect(sh).toMatch(/slot-coverage check skipped/);
+      }
+      const pre = deployFile("linux", "nft-preflight.sh");
+      expect(pre).toMatch(/check_slot_coverage "\$UIDS_IN_CONF"/);
+      // Coverage is checked BEFORE the kernel is touched.
+      expect(pre.indexOf("check_slot_coverage")).toBeLessThan(
+        pre.indexOf("nft -c -f"),
+      );
+      const verify = deployFile("linux", "nft-verify.sh");
+      expect(verify).toMatch(/check_slot_coverage "\$FENCED"/);
+      // The unit feeds the preflight the slot accounts at boot.
+      const unit = deployFile("linux", "automata-egress.service");
+      expect(unit).toMatch(/^EnvironmentFile=-\/etc\/automata\/egress\.env$/m);
+      // The worker's fail-closed proof: the covered uids are recorded only
+      // AFTER a successful load, where the worker's boot check reads them.
+      expect(pre).toMatch(/\/run\/automata\/egress-fence\.uids/);
+      expect(pre.indexOf("nft -f ")).toBeLessThan(
+        pre.indexOf('> "$FENCE_UIDS_FILE"'),
+      );
+      // ...and a stale marker never vouches: removed before any check, and by
+      // the unit when the fence is dropped or a start fails.
+      expect(pre.indexOf('rm -f "$FENCE_UIDS_FILE"')).toBeLessThan(
+        pre.indexOf("nft -c -f"),
+      );
+      expect(unit).toMatch(
+        /^ExecStop=.*rm -f \/run\/automata\/egress-fence\.uids;.*nft delete table/m,
+      );
+      expect(unit).toMatch(
+        /^ExecStopPost=\/bin\/rm -f \/run\/automata\/egress-fence\.uids$/m,
+      );
+    });
+
+    it("nft-preflight.sh RUNS: a matching tcp/udp set loads and records the marker; a udp set missing a slot uid, a slot account outside the set, and a failed load each refuse — and leave no marker", () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "nft-preflight-"));
+      const bin = path.join(tmp, "bin");
+      fs.mkdirSync(bin);
+      // `id` answers root for the caller and fixed uids for the accounts; `nft`
+      // parses nothing and fails the load only when told to.
+      fs.writeFileSync(
+        path.join(bin, "id"),
+        [
+          "#!/bin/sh",
+          'case "$*" in',
+          '  "-u") echo 0 ;;',
+          '  "-u automata") echo 1000 ;;',
+          '  "-u automata-agent") echo 999 ;;',
+          '  "-u automata-agent-1") echo 2001 ;;',
+          '  *) echo "id: no such user" >&2; exit 1 ;;',
+          "esac",
+        ].join("\n") + "\n",
+        { mode: 0o755 },
+      );
+      fs.writeFileSync(
+        path.join(bin, "nft"),
+        [
+          "#!/bin/sh",
+          'case "$1" in',
+          '  list) printf "a\\nb\\nc\\n" ;;',
+          "  -c) exit 0 ;;",
+          '  -f) [ -n "${NFT_FAIL_LOAD:-}" ] && exit 1; exit 0 ;;',
+          "esac",
+        ].join("\n") + "\n",
+        { mode: 0o755 },
+      );
+      const marker = path.join(tmp, "egress-fence.uids");
+      const run = (
+        conf: string,
+        env: Record<string, string> = {},
+      ): { status: number | null; err: string; marker: string | null } => {
+        const confPath = path.join(tmp, "egress-nft.conf");
+        fs.writeFileSync(confPath, conf);
+        const r = spawnSync(
+          "bash",
+          [
+            path.join(workerRoot, "deploy", "linux", "nft-preflight.sh"),
+            confPath,
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              PATH: `${bin}:${process.env.PATH ?? ""}`,
+              FENCE_UIDS_FILE: marker,
+              WORKER_USER: "automata",
+              ...env,
+            },
+          },
+        );
+        return {
+          status: r.status,
+          err: r.stderr + r.stdout,
+          marker: fs.existsSync(marker)
+            ? fs.readFileSync(marker, "utf8")
+            : null,
+        };
+      };
+      const conf = (tcp: string, udp: string) =>
+        `table inet automata_egress {\n  chain out {\n    type filter hook output priority 0;\n    oif "lo" accept\n    meta skuid ${tcp} tcp dport { 80, 443 } counter reject\n    meta skuid ${udp} udp dport { 80, 443 } counter reject\n  }\n}\n`;
+
+      const ok = run(conf("{ 999, 2001 }", "{ 2001, 999 }"), {
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_BOX_SLOTS: "2",
+      });
+      expect(ok.err).toContain("[nft-preflight] OK");
+      expect(ok.status).toBe(0);
+      expect(ok.marker?.trim()).toBe("999 2001");
+
+      const differ = run(conf("{ 999, 2001 }", "999"));
+      expect(differ.status).toBe(1);
+      expect(differ.err).toMatch(/differ between rules/);
+      expect(differ.marker).toBeNull();
+
+      const uncovered = run(conf("999", "999"), {
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_BOX_SLOTS: "2",
+      });
+      expect(uncovered.status).toBe(1);
+      expect(uncovered.err).toMatch(
+        /slot account automata-agent-1 \(uid 2001\) is not in the skuid set/,
+      );
+      expect(uncovered.marker).toBeNull();
+
+      // A stale marker from an earlier boot never vouches: it is removed first,
+      // and a failed load writes none.
+      fs.writeFileSync(marker, "999 2001\n");
+      const failed = run(conf("{ 999, 2001 }", "{ 999, 2001 }"), {
+        NFT_FAIL_LOAD: "1",
+      });
+      expect(failed.status).toBe(1);
+      expect(failed.err).toMatch(/load failed/);
+      expect(failed.marker).toBeNull();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    });
+
+    it("both nft scripts read EVERY skuid rule's set (scalar or set, tcp AND udp), refuse sets that differ between rules, and check every uid", () => {
+      for (const name of ["nft-preflight.sh", "nft-verify.sh"]) {
+        const sh = deployFile("linux", name);
+        // One extractor for every rule; `head -1` (tcp only) is gone.
+        expect(sh).toMatch(/skuid_sets\(\)/);
+        expect(sh).toMatch(
+          /meta skuid \(\\\{ \?\[0-9, \]\+ \?\\\}\|\[0-9\]\+\)/,
+        );
+        expect(sh).not.toMatch(/meta skuid[^\n]*head -1/);
+        expect(sh).toMatch(/differ between rules/);
+      }
+      const pre = deployFile("linux", "nft-preflight.sh");
+      expect(pre).toMatch(/for UID_IN_CONF in \$UIDS_IN_CONF/);
+      expect(pre).toMatch(/fencing uid\(s\)/);
+      const verify = deployFile("linux", "nft-verify.sh");
+      expect(verify).toMatch(/for u in \$FENCED/);
+    });
+
+    it("the Linux sudoers template documents the comma-separated Runas list at N > 1 and still never names root", () => {
+      const sudoers = deployFile("linux", "sudoers.d-automata");
+      expect(sudoers).toMatch(/WORKER_BOX_SLOTS=1/);
+      expect(sudoers).toMatch(/automata-agent, automata-agent-1/);
+      expect(sudoers).not.toMatch(/Runas_Alias AGENT = .*root/);
+    });
+
+    it("cloud-init creates one extra role account per slot with an EXPLICIT uid from 2000, never --system", () => {
+      const ci = deployFile("linux", "cloud-init.yaml");
+      expect(ci).toMatch(/AGENT_SLOTS="\$\{AGENT_SLOTS:-1\}"/);
+      expect(ci).toMatch(/AGENT_SLOT_UID_BASE=2000/);
+      const loop = ci.slice(
+        ci.indexOf("for i in $(seq 1 $((AGENT_SLOTS - 1))); do"),
+      );
+      expect(loop).toMatch(/useradd --uid "\$SLOT_UID" --create-home/);
+      expect(loop).not.toMatch(/useradd --system[^\n]*\$SLOT_USER/);
+      expect(loop).toMatch(/--shell \/usr\/sbin\/nologin "\$SLOT_USER"/);
+      // And the provisioned sentinel is withheld when a slot account is missing.
+      expect(ci).toMatch(
+        /FATAL: slot account \$\{AGENT_USER\}-\$\{i\} missing/,
+      );
+    });
+
+    it("the provisioning doc carries the live-box steps for several slots", () => {
+      const doc = deployFile("AGENT-UID-PROVISIONING.md");
+      expect(doc).toMatch(/## 6\. Several box slots \(#205\)/);
+      expect(doc).toMatch(/WORKER_BOX_SLOTS/);
+      expect(doc).toMatch(/useradd --uid 2001/);
+      expect(doc).toMatch(
+        /Runas_Alias AGENT = automata-agent, automata-agent-1/,
+      );
+      expect(doc).toMatch(/meta skuid \{ 999, 2001 \}/);
+    });
   });
 
   it("accepts loopback and never sets a drop policy on output", () => {
@@ -3370,19 +3569,84 @@ describe("harness batteries (PR3): lockfiles, installer stages, doctor", () => {
     expect(doctor).toContain("TEST CONTAINER ONLY: --no-sandbox");
   });
 
-  it("the MCP wrapper clears the env and passes only proxy settings through", () => {
+  it("the MCP wrapper scrubs the env in place (unset) and lets only PATH/HOME/LANG and the proxy settings through — never an `env -i NAME=value` argv (#205: HTTPS_PROXY carries the run credential)", () => {
     const wrapper = body("write_mcp_wrapper");
-    expect(wrapper).toContain("exec /usr/bin/env -i PATH=");
+    expect(wrapper).not.toContain("exec /usr/bin/env -i");
+    expect(wrapper).not.toMatch(/"HTTPS_PROXY=\$HTTPS_PROXY"/);
+    expect(wrapper).toMatch(/unset "\$__v"/);
     for (const name of [
       "HTTPS_PROXY",
       "HTTP_PROXY",
       "NO_PROXY",
       "NODE_USE_ENV_PROXY",
     ]) {
-      expect(wrapper, name).toContain(name);
+      expect(wrapper, name).toMatch(new RegExp(`\\|${name}[|)]`));
     }
+    expect(wrapper).toContain("PATH=%s; export PATH");
     expect(wrapper).toContain("lib/mcp-filter.mjs");
     expect(wrapper).toContain("etc/tool-allowlist.json");
+    // mcpServe.env keys land in shell code: identifier-checked, never a
+    // reserved name, and listed for the filter's exhaustive allowlist.
+    expect(wrapper).toMatch(/\^\[A-Za-z_\]\[A-Za-z0-9_\]\*\$/);
+    expect(wrapper).toContain("mcpServe.env may not set");
+    expect(wrapper).toContain(
+      "AUTOMATA_MCP_ENV_KEYS='%s'; export AUTOMATA_MCP_ENV_KEYS",
+    );
+  });
+
+  it("the filter builds the server's env from the allowlist alone: a secret, an ambient variable and a non-identifier name never reach the server; a declared pack key does", () => {
+    const server =
+      "process.stdin.resume(); process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { env: Object.keys(process.env).sort() } }) + '\\n');";
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-filter-env-"));
+    const allowlist = path.join(tmp, "allow.json");
+    fs.writeFileSync(allowlist, JSON.stringify([]));
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(workerRoot, "deploy", "linux", "harness-mcp-filter.mjs"),
+        allowlist,
+        "--",
+        process.execPath,
+        "-e",
+        server,
+      ],
+      {
+        input: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }) + "\n",
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: "/h",
+          HTTPS_PROXY: "http://run:s3cret@127.0.0.1:1",
+          NODE_USE_ENV_PROXY: "1",
+          AUTOMATA_MCP_ENV_KEYS: "CLAUDE_FLOW_MODE, not-an-identifier",
+          CLAUDE_FLOW_MODE: "online",
+          GITHUB_TOKEN: "ghs_secret",
+          "BASH_FUNC_x%%": "() { :; }",
+          "not-an-identifier": "1",
+        },
+        timeout: 20_000,
+      },
+    );
+    fs.rmSync(tmp, { recursive: true, force: true });
+    const reply = result.stdout
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as { id: number; result?: { env: string[] } })
+      .find((m) => m.id === 1);
+    // macOS's libSystem injects __CF_USER_TEXT_ENCODING into every child; it
+    // is not ours and carries nothing.
+    const received = (reply?.result?.env ?? []).filter(
+      (k) => k !== "__CF_USER_TEXT_ENCODING",
+    );
+    expect(received).toEqual(
+      [
+        "CLAUDE_FLOW_MODE",
+        "HOME",
+        "HTTPS_PROXY",
+        "NODE_USE_ENV_PROXY",
+        "PATH",
+      ].sort(),
+    );
   });
 
   it("the filter proxy drops non-allowlisted tools from tools/list and refuses their calls", () => {

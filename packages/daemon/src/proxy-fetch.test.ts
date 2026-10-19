@@ -6,6 +6,7 @@ import {
   postJson,
   resolveProxyForUrl,
   shouldBypassProxy,
+  proxyAuthorizationFor,
 } from "./proxy-fetch";
 
 /** Every proxying case requires the worker's explicit opt-in (#108 F5). */
@@ -225,6 +226,28 @@ describe("postJson", () => {
     expect(result).toEqual({ status: 200 });
     expect(proxiedUrl?.startsWith("http://origin.invalid:")).toBe(true);
     expect(originHit).toBe(false);
+  });
+
+  it("#205: a proxy URL with userinfo sends Proxy-Authorization (Basic) to the PROXY on the absolute-form request", async () => {
+    let seenAuth: string | string[] | undefined;
+    const proxyPort = await listen(
+      createServer((req, res) => {
+        seenAuth = req.headers["proxy-authorization"];
+        req.resume();
+        req.on("end", () => res.writeHead(200).end());
+      }),
+    );
+    const result = await postJson({
+      url: "http://origin.invalid:8080/api/daemon-event",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+      env: { ...ON, HTTP_PROXY: `http://run:s3cr%3Dt@127.0.0.1:${proxyPort}` },
+    });
+    expect(result).toEqual({ status: 200 });
+    expect(seenAuth).toBe(
+      `Basic ${Buffer.from("run:s3cr=t").toString("base64")}`,
+    );
+    expect(proxyAuthorizationFor(new URL("http://127.0.0.1:1"))).toBeNull();
   });
 
   it("issues CONNECT host:443 to the proxy for an https target", async () => {

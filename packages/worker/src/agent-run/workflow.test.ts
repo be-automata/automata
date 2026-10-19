@@ -10,7 +10,17 @@ vi.mock("./reclaim", () => ({
   reapOwnThreadAttempts: vi.fn().mockReturnValue(0),
 }));
 vi.mock("./box-lock", () => ({
-  acquireBoxLock: vi.fn(async () => ({ release: vi.fn() })),
+  acquireBoxLock: vi.fn(async () => ({
+    release: vi.fn(),
+    lost: false,
+    slot: 0,
+  })),
+  // #205: the workflow takes a slot; at N = 1 that is the exclusive lock.
+  acquireBoxSlot: vi.fn(async () => ({
+    release: vi.fn(),
+    lost: false,
+    slot: 0,
+  })),
 }));
 // #184: the real reaper's default spawnKill is a REAL `sudo kill -9 -- -1`
 // as the agent uid — on the pilot box that is lethal to live work. The mock

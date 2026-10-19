@@ -59,8 +59,40 @@ if (!Array.isArray(parsed) || !parsed.every((t) => typeof t === "string")) {
 }
 const allowed = new Set(parsed);
 
+// The server's environment is built HERE, exhaustively, from an allowlist —
+// never inherited. The wrapper's shell scrub is belt and braces: `unset`
+// cannot remove a variable whose name is not a shell identifier (`BASH_FUNC_x%%`,
+// names with `-` or `.`), and such entries pass straight through an exec. Only
+// PATH/HOME/LANG, the proxy settings (#205: HTTPS_PROXY carries the run's proxy
+// credential at N > 1, which is why none of this ever goes through an argv) and
+// the pack's own mcpServe.env names (AUTOMATA_MCP_ENV_KEYS, comma-separated,
+// written by install-batteries.sh) reach the server.
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const BASE_ENV_NAMES = [
+  "PATH",
+  "HOME",
+  "LANG",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY",
+  "https_proxy",
+  "http_proxy",
+  "no_proxy",
+  "NODE_USE_ENV_PROXY",
+];
+const packEnvNames = (process.env.AUTOMATA_MCP_ENV_KEYS ?? "")
+  .split(",")
+  .map((k) => k.trim())
+  .filter((k) => k !== "" && ENV_NAME.test(k));
+const childEnv = {};
+for (const name of [...BASE_ENV_NAMES, ...packEnvNames]) {
+  const value = process.env[name];
+  if (value !== undefined) childEnv[name] = value;
+}
+
 const child = spawn(command, commandArgs, {
   stdio: ["pipe", "pipe", "inherit"],
+  env: childEnv,
 });
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const refuse = (id, code, message) => {

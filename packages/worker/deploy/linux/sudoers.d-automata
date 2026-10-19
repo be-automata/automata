@@ -52,6 +52,10 @@
 #   install -o root -g root -m 0440 /tmp/automata.sudoers /etc/sudoers.d/automata
 #   grep -q includedir /etc/sudoers || echo "MISSING @includedir /etc/sudoers.d"
 
+# __AGENT_USER__ renders as the ONE agent account (WORKER_BOX_SLOTS=1), or as every
+# slot account comma-separated at N > 1 (#205): `automata-agent, automata-agent-1`.
+# sudoers reads a Runas_Alias list as "any of these", which is exactly the grant:
+# the worker may run the daemon wrapper and kill AS any slot account, never root.
 Runas_Alias AGENT = __AGENT_USER__
 Cmnd_Alias AUTOMATA_DAEMON = /usr/bin/sh
 Cmnd_Alias AUTOMATA_KILL   = /usr/bin/kill

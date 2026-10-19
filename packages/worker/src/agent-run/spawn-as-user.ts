@@ -35,6 +35,8 @@
  * ever interpolated into the `sh -c` string.
  */
 
+import { assertSlotIndex } from "./box-lock";
+
 export const SUDO_BIN = "/usr/bin/sudo";
 export const KILL_BIN = "/bin/kill";
 export const SH_BIN = "/bin/sh";
@@ -118,6 +120,41 @@ export function assertAgentUser(agentUser: string): void {
       )}`,
     );
   }
+}
+
+/**
+ * The agent account for one box slot (#205).
+ *
+ * WHY ONE UID PER SLOT. A uid is the only fence the kernel gives two concurrent
+ * runs on the same host: a run's per-run HOME (credential file), its broker
+ * sockets and its `/proc/<pid>/environ` are all readable by any process of the
+ * SAME uid, so N > 1 runs under one agent account would be a cross-run — and
+ * under per-org 2, a cross-org — credential exposure that no counting lock can
+ * close. Slot i therefore runs as its own account, and the uid-wide kill
+ * (`kill -9 -- -1` AS that account) stays legal at every N: kill(2) bounds it to
+ * that slot's processes and nothing of a sibling's.
+ *
+ * Slot 0 keeps the configured base name so N = 1 is byte-identical to today;
+ * slot i > 0 is `${base}-${i}`. The result is validated as a login name because
+ * a base near the 31-character limit plus a suffix would otherwise produce a
+ * name sudo rejects at the first run of that slot rather than at boot.
+ */
+export function agentUserForSlot(base: string, slot: number): string {
+  if (!base) {
+    return "";
+  }
+  assertSlotIndex(slot, "agentUserForSlot");
+  const user = slot === 0 ? base : `${base}-${slot}`;
+  assertAgentUser(user);
+  return user;
+}
+
+/** Every slot's agent account, slot 0 first. Empty when agent-uid mode is off. */
+export function slotAgentUsers(base: string, slots: number): string[] {
+  if (!base) {
+    return [];
+  }
+  return Array.from({ length: slots }, (_, i) => agentUserForSlot(base, i));
 }
 
 /**

@@ -16,13 +16,67 @@ echo "$RULES" | grep -q 'hook output' \
   || fail "no output-hook chain — meta skuid is meaningless anywhere else"
 echo "$RULES" | grep -q 'oif "lo" accept' \
   || fail "loopback is not accepted first: the per-run proxy and brokers would be fenced too"
-echo "$RULES" | grep -qE 'meta skuid [0-9]+ tcp dport' \
+# One uid, or an anonymous set at N > 1 (#205). nft prints a single-element
+# set back as the bare scalar, so both shapes are legitimate here.
+SKUID='meta skuid (\{ ?[0-9, ]+ ?\}|[0-9]+)'
+echo "$RULES" | grep -qE "$SKUID tcp dport" \
   || fail "no tcp skuid rule"
-echo "$RULES" | grep -qE 'meta skuid [0-9]+ udp dport' \
+echo "$RULES" | grep -qE "$SKUID udp dport" \
   || fail "no udp skuid rule — QUIC/HTTP-3 would bypass the fence over udp/443"
 
-FENCED="$(echo "$RULES" | grep -oE 'meta skuid [0-9]+' | head -1 | awk '{print $3}')"
-[ "$FENCED" = "0" ] && fail "uid 0 is fenced"
+# Every `meta skuid` set in the text on stdin — one uid (`999`) or an anonymous
+# set (`{ 999, 2001 }`, #205) — normalized (sorted, space-separated), one line
+# per DISTINCT set. The tcp and the udp rule must fence the same uids: a conf
+# whose udp set misses a slot would otherwise pass on the tcp set alone and
+# leave that slot's QUIC/udp-443 egress with no kernel backstop.
+skuid_sets() {
+  grep -oE 'meta skuid (\{ ?[0-9, ]+ ?\}|[0-9]+)' \
+    | sed -E 's/meta skuid //; s/[{}]//g; s/,/ /g' \
+    | while IFS= read -r set; do
+        printf '%s\n' "$set" | tr ' ' '\n' | grep . | sort -n | tr '\n' ' ' | sed 's/ $//'
+        printf '\n'
+      done | grep . | sort -u
+}
+
+SETS="$(printf '%s\n' "$RULES" | skuid_sets)"
+[ "$(printf '%s\n' "$SETS" | grep -c .)" = 1 ] \
+  || fail "the skuid sets differ between rules (tcp vs udp): $(printf '%s' "$SETS" | tr '\n' ';')"
+FENCED="$SETS"
+for u in $FENCED; do
+  [ "$u" = "0" ] && fail "uid 0 is fenced"
+done
+
+# #205: every slot account's uid must be in the set, or that slot's agent egresses
+# around the cooperative proxy with no kernel backstop while the box boots clean.
+# Expected accounts: AGENT_USERS (space-separated) or WORKER_AGENT_USER (+
+# WORKER_BOX_SLOTS, default 1 → <user>, <user>-1, ...). Neither set ⇒ the check
+# is skipped, and says so.
+expected_slot_users() {
+  if [ -n "${AGENT_USERS:-}" ]; then
+    echo "$AGENT_USERS"
+  elif [ -n "${WORKER_AGENT_USER:-}" ]; then
+    local n="${WORKER_BOX_SLOTS:-1}" i=1 out="$WORKER_AGENT_USER"
+    while [ "$i" -lt "$n" ]; do out="$out $WORKER_AGENT_USER-$i"; i=$((i + 1)); done
+    echo "$out"
+  fi
+}
+check_slot_coverage() { # $1 = space-separated uids in the fence, $2 = tag
+  local users; users="$(expected_slot_users)"
+  if [ -z "$users" ]; then
+    echo "[$2] note: AGENT_USERS / WORKER_AGENT_USER unset — slot-coverage check skipped" >&2
+    return 0
+  fi
+  local u want
+  for u in $users; do
+    id -u "$u" >/dev/null 2>&1 || fail "slot account $u does not exist on this box"
+    want="$(id -u "$u")"
+    case " $1 " in
+      *" $want "*) ;;
+      *) fail "slot account $u (uid $want) is not in the skuid set {$1}: its agent would egress around the proxy with no kernel backstop — re-render egress-nft.conf (AGENT-UID-PROVISIONING.md §6)" ;;
+    esac
+  done
+}
+check_slot_coverage "$FENCED" nft-verify
 
 # The fence must not have cost the box its container networking.
 DOCKER_CHAINS="$(nft list ruleset 2>/dev/null | grep -cE 'DOCKER|docker' || true)"
@@ -33,4 +87,4 @@ DOCKER_CHAINS="$(nft list ruleset 2>/dev/null | grep -cE 'DOCKER|docker' || true
 # cooperative proxy, which is the one thing this backstop exists to catch.
 HITS="$(echo "$RULES" | grep -oE 'counter packets [0-9]+' | awk '{s+=$3} END {print s+0}')"
 
-echo "[nft-verify] OK — uid ${FENCED} fenced on tcp+udp 80/443, loopback open, ${DOCKER_CHAINS} docker rules intact, ${HITS} blocked packet(s) so far"
+echo "[nft-verify] OK — uid(s) ${FENCED} fenced on tcp+udp 80/443, loopback open, ${DOCKER_CHAINS} docker rules intact, ${HITS} blocked packet(s) so far"

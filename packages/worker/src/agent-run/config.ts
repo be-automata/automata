@@ -1,8 +1,13 @@
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { BOX_SLOTS_MAX } from "./box-lock";
 import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
-import { assertAgentUser } from "./spawn-as-user";
+import {
+  agentUserForSlot,
+  assertAgentUser,
+  slotAgentUsers,
+} from "./spawn-as-user";
 
 /**
  * Execution-plane worker box configuration (ADR-003). Unlike the control plane
@@ -69,6 +74,34 @@ export interface WorkerConfig {
    * package still typechecks and tests on any platform.
    */
   agentUser: string;
+  /**
+   * #205: how many agent runs this box admits at once — the counting box
+   * budget. 1 (the DEFAULT) is byte-for-byte today's exclusive lock on
+   * `box.lock` under the one `WORKER_AGENT_USER`. N > 1 takes slot files
+   * `box.lock.<i>` and runs slot i as `${WORKER_AGENT_USER}-${i}`
+   * (`agentUserForSlot`), because a uid is the only fence between two
+   * concurrent runs on one host. N > 1 REQUIRES the per-run memory ceiling
+   * (#204): without a cgroup per run there is no bounded blast radius for a
+   * sibling and no `cgroup.kill` reach for its teardown. Both requirements are
+   * enforced by the loader, so a box cannot boot — or run — half-configured.
+   * Must equal the worker's engine `slots` and the engine global cap (#372).
+   */
+  boxSlots: number;
+  /**
+   * #205: every slot's agent account, slot 0 first — `[agentUser]` at N = 1,
+   * `[]` with agent-uid mode off. The one list every box-wide operation (the
+   * shared namespace grants, the boot scan, the stale-dir sweep) iterates.
+   */
+  agentUsers: string[];
+  /**
+   * #205: WHICH slot the current run holds — a per-run override the workflow
+   * sets on its copy of the config after the slot acquire, together with the
+   * slot's `agentUser`. Never read from env and undefined at boot. With
+   * `boxSlots > 1` every per-run namespace path (daemon socket, pidfile,
+   * gh-broker socket) lives under the slot's own subdir, so a run can reach
+   * only its own sockets; with `boxSlots === 1` the flat layout is unchanged.
+   */
+  boxSlot?: number;
   /**
    * #204: per-run memory ceiling in bytes. 0 (the DEFAULT) = off, and the spawn
    * is byte-for-byte what it is today. Requires agent-uid mode and a delegated
@@ -285,6 +318,28 @@ export function parseMemoryMax(raw: string | undefined): number {
   return bytes;
 }
 
+/** Upper bound on `WORKER_BOX_SLOTS`; a typo like `30` must not mint 30 accounts' worth of lock files. */
+export { BOX_SLOTS_MAX };
+
+/**
+ * Parse `WORKER_BOX_SLOTS` (#205). Unset or empty = 1 = today's exclusive lock.
+ * Anything present but not an integer in [1, BOX_SLOTS_MAX] THROWS: a box told
+ * to run N slots must never quietly run a different N.
+ */
+export function parseBoxSlots(raw: string | undefined): number {
+  const v = (raw ?? "").trim();
+  if (!v) {
+    return 1;
+  }
+  const n = Number(v);
+  if (!/^\d+$/.test(v) || !Number.isInteger(n) || n < 1 || n > BOX_SLOTS_MAX) {
+    throw new Error(
+      `WORKER_BOX_SLOTS must be an integer between 1 and ${BOX_SLOTS_MAX}, got ${JSON.stringify(v)}`,
+    );
+  }
+  return n;
+}
+
 /** Parse `WORKER_RUN_TASKS_MAX`; unset ⇒ a generous default, since it is a runaway guard, not a budget. */
 export function parseTasksMax(raw: string | undefined): number {
   const v = (raw ?? "").trim();
@@ -429,8 +484,37 @@ export function loadWorkerConfig(
         "Set WORKER_AGENT_USER, or unset WORKER_RUN_MEMORY_MAX.",
     );
   }
+  // #205. Parsed after the ceiling and the uid drop because N > 1 depends on
+  // both: the slot accounts are what fence concurrent runs from each other,
+  // and the per-run cgroup is what bounds a sibling's blast radius and gives
+  // its teardown a kill that cannot reach the others. A box asking for N > 1
+  // without either is a misconfiguration, not a degraded mode — refuse here,
+  // at boot AND at every run, since every caller loads this config.
+  const boxSlots = parseBoxSlots(env.WORKER_BOX_SLOTS);
+  if (boxSlots > 1 && !agentUser) {
+    throw new Error(
+      `WORKER_BOX_SLOTS=${boxSlots} but WORKER_AGENT_USER is empty: concurrent ` +
+        "runs are fenced from each other by running each slot as its own agent " +
+        "account, which needs the uid drop. Set WORKER_AGENT_USER, or set " +
+        "WORKER_BOX_SLOTS=1.",
+    );
+  }
+  if (boxSlots > 1 && memoryMaxBytes <= 0) {
+    throw new Error(
+      `WORKER_BOX_SLOTS=${boxSlots} but WORKER_RUN_MEMORY_MAX is unset: more than ` +
+        "one run at a time needs the per-run memory ceiling (#204) — without a " +
+        "cgroup per run a sibling has no bounded blast radius and no cgroup.kill. " +
+        "Set WORKER_RUN_MEMORY_MAX, or set WORKER_BOX_SLOTS=1.",
+    );
+  }
+  // Every slot's account name must be a valid login NOW, not at the first run
+  // of that slot: a base near the 31-character limit plus `-<i>` is refused by
+  // assertAgentUser, and that refusal belongs at boot.
+  const agentUsers = slotAgentUsers(agentUser, boxSlots);
   return {
     agentUser,
+    boxSlots,
+    agentUsers,
     boxId: resolveBoxId(env.WORKER_BOX_ID),
     memoryMaxBytes,
     tasksMax,
@@ -491,6 +575,19 @@ export function loadWorkerConfig(
         ? n
         : null;
     })(),
+  };
+}
+
+/**
+ * #205: the config one run uses once it holds slot `slot` — the same box config
+ * with the slot's own agent account and index. At slot 0 the account is the
+ * base name, so N = 1 is unchanged.
+ */
+export function configForSlot(cfg: WorkerConfig, slot: number): WorkerConfig {
+  return {
+    ...cfg,
+    agentUser: agentUserForSlot(cfg.agentUser, slot),
+    boxSlot: slot,
   };
 }
 

@@ -380,3 +380,119 @@ describe("reapOwnThreadAttempts (#152 Stage A admission reap)", () => {
     expect(fs.existsSync(file)).toBe(true);
   });
 });
+
+describe("#205: the kill account is the slot the pidfile lives in", () => {
+  function deadKill(lockPid: number) {
+    return vi.fn((pid: number) => {
+      if (pid === lockPid) {
+        const err = new Error("no such process") as NodeJS.ErrnoException;
+        err.code = "ESRCH";
+        throw err;
+      }
+    });
+  }
+  const killUser = (spawnKill: ReturnType<typeof vi.fn>, i = 0) =>
+    (spawnKill.mock.calls[i]?.[0] as { args: string[] }).args[2];
+  const killTarget = (spawnKill: ReturnType<typeof vi.fn>, i = 0) =>
+    (spawnKill.mock.calls[i]?.[0] as { args: string[] }).args.at(-1);
+
+  it("reclaimDeadWorkerRuns kills a flat-layout group as the base account and an s<i>/ group as slot i's account, then removes the dir", () => {
+    const root = tmpRoot();
+    const dir = makeWorkerDir(root, "w-dead", {
+      lockPid: "111",
+      daemonPids: [222],
+    });
+    fs.mkdirSync(path.join(dir, "s1"));
+    fs.writeFileSync(path.join(dir, "s1", "thr_a.pid"), "444");
+    const spawnKill = vi.fn();
+    reclaimDeadWorkerRuns({
+      root,
+      selfWorkerId: "w-self",
+      agentUser: "automata-agent",
+      kill: deadKill(111),
+      spawnKill,
+    });
+    const byTarget = Object.fromEntries(
+      spawnKill.mock.calls.map((_c, i) => [
+        killTarget(spawnKill, i),
+        killUser(spawnKill, i),
+      ]),
+    );
+    expect(byTarget).toEqual({
+      "-222": "automata-agent",
+      "-444": "automata-agent-1",
+    });
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  it("reapOwnThreadAttempts finds a prior attempt in a slot subdir, kills it as that slot's account, and removes the pidfile", () => {
+    const root = tmpRoot();
+    const dir = makeWorkerDir(root, "w-live", { lockPid: String(process.pid) });
+    fs.mkdirSync(path.join(dir, "s2"));
+    fs.writeFileSync(path.join(dir, "s2", "thr_x.pid"), "555");
+    const spawnKill = vi.fn();
+    const reaped = reapOwnThreadAttempts({
+      root,
+      threadId: "thr_x",
+      agentUser: "automata-agent",
+      spawnKill,
+    });
+    expect(reaped).toBe(1);
+    expect(killUser(spawnKill)).toBe("automata-agent-2");
+    expect(killTarget(spawnKill)).toBe("-555");
+    expect(fs.existsSync(path.join(dir, "s2", "thr_x.pid"))).toBe(false);
+    // The live sibling's dir itself is untouched.
+    expect(fs.existsSync(dir)).toBe(true);
+  });
+
+  it("a dir the agent could have dropped in the shared worker dir (`s` + 200 digits, `s99`) is not a slot: never scanned, never a throw, at admission or at reclaim", () => {
+    const root = tmpRoot();
+    const live = makeWorkerDir(root, "w-live", {
+      lockPid: String(process.pid),
+    });
+    const dead = makeWorkerDir(root, "w-dead", { lockPid: "111" });
+    for (const dir of [live, dead]) {
+      // 200 digits: past MAX_SAFE_INTEGER (Number() → 1e200), within NAME_MAX.
+      for (const hostile of [`s${"9".repeat(200)}`, "s99", "s01"]) {
+        fs.mkdirSync(path.join(dir, hostile));
+        fs.writeFileSync(path.join(dir, hostile, "thr_h.pid"), "777");
+      }
+    }
+    const spawnKill = vi.fn();
+    expect(() =>
+      reapOwnThreadAttempts({
+        root,
+        threadId: "thr_h",
+        agentUser: "automata-agent",
+        spawnKill,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      reclaimDeadWorkerRuns({
+        root,
+        selfWorkerId: "w-live",
+        agentUser: "automata-agent",
+        kill: deadKill(111),
+        spawnKill,
+      }),
+    ).not.toThrow();
+    // Nothing in a non-slot dir was ever treated as a run.
+    expect(
+      spawnKill.mock.calls.map((c) => (c[0] as { args: string[] }).args.at(-1)),
+    ).not.toContain("-777");
+    // The dead worker's dir is still removed as a whole.
+    expect(fs.existsSync(dead)).toBe(false);
+  });
+
+  it("agentUser empty (uid drop off): a slot subdir changes nothing — process.kill(-pgid) as before", () => {
+    const root = tmpRoot();
+    const dir = makeWorkerDir(root, "w-live", { lockPid: String(process.pid) });
+    fs.mkdirSync(path.join(dir, "s1"));
+    fs.writeFileSync(path.join(dir, "s1", "thr_y.pid"), "666");
+    const kill = vi.fn();
+    const spawnKill = vi.fn();
+    reapOwnThreadAttempts({ root, threadId: "thr_y", kill, spawnKill });
+    expect(spawnKill).not.toHaveBeenCalled();
+    expect(kill).toHaveBeenCalledWith(-666, "SIGKILL");
+  });
+});

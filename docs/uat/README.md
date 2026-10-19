@@ -8,6 +8,9 @@ onboarding, and after the phase-2 single-writer emit_review integration lands.
 The cases live in [`adr-036-effect-intent.md`](./adr-036-effect-intent.md). This file is the
 **preamble**: parameters, preflight, conventions. Read it first, run the preflight, then execute cases.
 
+Production evidence for epic #193 (Phase 2 concurrency) lives per ticket under
+[`deploy/uat/`](../../deploy/uat/README.md) — box drills and engine rows, not automated cases.
+
 > Provenance: distilled from the live parity run recorded in `docs/triage/UAT-VALIDATION-MATRIX.md`
 > (2026-07-18). Every recipe here was actually executed; the matrix has the raw evidence.
 

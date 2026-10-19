@@ -8,8 +8,10 @@ import { loadWorkerConfig } from "./config";
 import { DaemonProcess } from "./daemon-process";
 import {
   AGENT_PATH_PREPEND_ENV,
+  appendGitConfig,
   buildDaemonEnv,
   buildRunProxyEnv,
+  gitProxyAuthConfig,
   isReservedRepoEnvKey,
   SAFE_ENV_KEYS,
 } from "./daemon-env";
@@ -883,6 +885,81 @@ describe("harness battery env (gstack, gsd, ruflo)", () => {
     expect(
       buildDaemonEnv({ ...base, browseProxy: true }).BROWSE_PROXY_URL,
     ).toBeUndefined();
+  });
+
+  it("#205 browse proxy with a per-run credential: the URL never carries userinfo; the credential goes to BROWSE_PROXY_USER/PASS", () => {
+    const proxy = "http://run:s3cr%40t@127.0.0.1:9999";
+    const env = buildDaemonEnv({
+      ...base,
+      egressProxyUrl: proxy,
+      browseProxy: true,
+    });
+    expect(env.BROWSE_PROXY_URL).toBe("http://127.0.0.1:9999");
+    expect(env.BROWSE_PROXY_URL).not.toContain("@");
+    expect(env.BROWSE_PROXY_USER).toBe("run");
+    expect(env.BROWSE_PROXY_PASS).toBe("s3cr@t");
+    // The agent CLI's own proxy env keeps the credentialed URL (undici/curl/git
+    // read userinfo); only Chromium's path is split.
+    expect(env.HTTPS_PROXY).toBe(proxy);
+    // Credential-less (N = 1): no BROWSE_PROXY_USER/PASS at all — byte-identical.
+    const plain = buildDaemonEnv({
+      ...base,
+      egressProxyUrl: "http://127.0.0.1:9999",
+      browseProxy: true,
+    });
+    expect(plain.BROWSE_PROXY_USER).toBeUndefined();
+    expect(plain.BROWSE_PROXY_PASS).toBeUndefined();
+  });
+
+  it("#205 gitProxyAuthConfig/appendGitConfig: the one rule the check runner and fix-check env share with the agent's git", () => {
+    expect(gitProxyAuthConfig("http://run:s3cret@127.0.0.1:9999")).toEqual([
+      ["http.proxyAuthMethod", "basic"],
+    ]);
+    expect(gitProxyAuthConfig("http://127.0.0.1:9999")).toEqual([]);
+    expect(gitProxyAuthConfig(null)).toEqual([]);
+    expect(gitProxyAuthConfig("not a url")).toEqual([]);
+    const env: NodeJS.ProcessEnv = {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "safe.directory",
+      GIT_CONFIG_VALUE_0: "/w",
+    };
+    const out = appendGitConfig(
+      env,
+      gitProxyAuthConfig("http://run:x@127.0.0.1:1"),
+    );
+    expect(out.GIT_CONFIG_COUNT).toBe("2");
+    expect(out.GIT_CONFIG_KEY_1).toBe("http.proxyAuthMethod");
+    expect(out.GIT_CONFIG_VALUE_1).toBe("basic");
+    // The input is not mutated.
+    expect(env.GIT_CONFIG_COUNT).toBe("1");
+    expect(env.GIT_CONFIG_KEY_1).toBeUndefined();
+    // Nothing to add ⇒ env untouched (no GIT_CONFIG_COUNT conjured).
+    const empty: NodeJS.ProcessEnv = {};
+    expect(appendGitConfig(empty, [])).toBe(empty);
+    expect(empty).toEqual({});
+  });
+
+  it("#205 a credentialed run proxy makes git send Basic proxy auth up front (no 407 round-trip, no false deny); a plain proxy adds nothing", () => {
+    const gitEntries = (env: NodeJS.ProcessEnv) => {
+      const out = new Map<string, string>();
+      for (let i = 0; i < Number(env.GIT_CONFIG_COUNT); i++) {
+        out.set(env[`GIT_CONFIG_KEY_${i}`]!, env[`GIT_CONFIG_VALUE_${i}`]!);
+      }
+      return out;
+    };
+    const withCred = buildDaemonEnv({
+      ...base,
+      egressProxyUrl: "http://run:s3cret@127.0.0.1:9999",
+    });
+    expect(gitEntries(withCred).get("http.proxyAuthMethod")).toBe("basic");
+    const plain = buildDaemonEnv({
+      ...base,
+      egressProxyUrl: "http://127.0.0.1:9999",
+    });
+    expect(gitEntries(plain).has("http.proxyAuthMethod")).toBe(false);
+    expect(gitEntries(buildDaemonEnv(base)).has("http.proxyAuthMethod")).toBe(
+      false,
+    );
   });
 
   it("hands the seeded packs' PATH dirs to the daemon, never PATH itself", () => {

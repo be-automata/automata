@@ -245,6 +245,77 @@ export interface BuildDaemonEnvOpts {
 }
 
 /**
+ * #205: the git config a CREDENTIALED run proxy (N > 1) needs, for every git
+ * that runs under it — the agent's (buildDaemonEnv), the self-heal check
+ * runner's and the fix-check's (workflow.ts). The proxy challenges with 407
+ * and audits it; libcurl's default proxy auth is "anyauth" — first request
+ * bare, then retry — so every git call over the proxy would log a false deny
+ * first. Basic up front: one request, no challenge. github.com itself goes to
+ * the loopback broker (NO_PROXY), so this covers other remotes. [] otherwise.
+ */
+export function gitProxyAuthConfig(
+  egressProxyUrl: string | null | undefined,
+): Array<[string, string]> {
+  return egressProxyUrl && proxyUrlHasCredential(egressProxyUrl)
+    ? [["http.proxyAuthMethod", "basic"]]
+    : [];
+}
+
+/** GIT_CONFIG_* entries appended after whatever GIT_CONFIG_COUNT `env` carries — a new object; `env` is not mutated (nothing to add ⇒ `env` itself). */
+export function appendGitConfig(
+  env: NodeJS.ProcessEnv,
+  entries: ReadonlyArray<[string, string]>,
+): NodeJS.ProcessEnv {
+  if (entries.length === 0) return env;
+  const out: NodeJS.ProcessEnv = { ...env };
+  const parsed = Number.parseInt(env.GIT_CONFIG_COUNT ?? "0", 10);
+  let count = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  for (const [key, value] of entries) {
+    out[`GIT_CONFIG_KEY_${count}`] = key;
+    out[`GIT_CONFIG_VALUE_${count}`] = value;
+    count += 1;
+  }
+  out.GIT_CONFIG_COUNT = String(count);
+  return out;
+}
+
+/** Whether a proxy URL carries a credential in its userinfo (#205, N > 1). */
+export function proxyUrlHasCredential(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return Boolean(u.username || u.password);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * gstack's browse server hands BROWSE_PROXY_URL to chromium.launch({ proxy })
+ * — a `server` string Chromium takes NO credentials from, and which lands in
+ * Chromium's argv (readable by every account via `ps`). #205: at N > 1 the
+ * run proxy's URL carries the per-run credential in its userinfo, so the
+ * browse URL is the credential-less form and the credential travels as
+ * BROWSE_PROXY_USER / BROWSE_PROXY_PASS, which gstack maps to Playwright's
+ * proxy.username / proxy.password (its policy: creds in the URL OR the env,
+ * never both). A credential-less proxy (N = 1) sets the URL alone, as before.
+ */
+export function buildBrowseProxyEnv(egressProxyUrl: string): NodeJS.ProcessEnv {
+  const u = new URL(egressProxyUrl);
+  if (!u.username && !u.password) {
+    return { BROWSE_PROXY_URL: egressProxyUrl };
+  }
+  const user = decodeURIComponent(u.username);
+  const pass = decodeURIComponent(u.password);
+  u.username = "";
+  u.password = "";
+  return {
+    BROWSE_PROXY_URL: u.toString().replace(/\/$/, ""),
+    BROWSE_PROXY_USER: user,
+    BROWSE_PROXY_PASS: pass,
+  };
+}
+
+/**
  * The proxy subset of the run env: HTTP(S)_PROXY (both cases), a loopback
  * NO_PROXY and node's env-proxy switch. Shared by the daemon env and the
  * self-heal check env so both route through the same per-run egress proxy.
@@ -435,7 +506,7 @@ export function buildDaemonEnv({
       env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY = "1";
     }
     if (browseProxy) {
-      env.BROWSE_PROXY_URL = egressProxyUrl;
+      Object.assign(env, buildBrowseProxyEnv(egressProxyUrl));
     }
   }
   // Credential env (Amp). After the whitelist so SECRET_KEY_PATTERN cannot drop it.
@@ -528,6 +599,7 @@ export function buildDaemonEnv({
     ...(agentUser && workdir
       ? ([["safe.directory", workdir]] as Array<[string, string]>)
       : []),
+    ...gitProxyAuthConfig(egressProxyUrl),
   ];
   env.GIT_CONFIG_COUNT = String(gitConfig.length);
   gitConfig.forEach(([key, value], i) => {

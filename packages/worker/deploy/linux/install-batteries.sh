@@ -2850,14 +2850,51 @@ write_mcp_wrapper() {
     printf '# Written by install-batteries.sh (harness MCP wrapper). Do not edit.\n'
     printf '# Only PATH, HOME, LANG and the proxy settings reach the server; the\n'
     printf '# filter proxy enforces etc/tool-allowlist.json on tools/list and tools/call.\n'
-    printf 'exec /usr/bin/env -i PATH=%s HOME="$HOME" LANG=C.UTF-8 \\\n' "'$BUILD_PATH'"
-    for entry in HTTPS_PROXY HTTP_PROXY NO_PROXY https_proxy http_proxy no_proxy NODE_USE_ENV_PROXY; do
-      printf '  ${%s+"%s=$%s"} \\\n' "$entry" "$entry" "$entry"
-    done
-    while IFS= read -r entry; do
-      [ -n "$entry" ] && printf "  '%s' \\\\\n" "$entry"
-    done < <(jq -r --argjson i "$i" '.packs[$i].mcpServe.env | to_entries[] | "\(.key)=\(.value)"' "$HARNESS")
-    printf "  '%s' '%s' '%s' -- \\\\\n" "$NODE_BIN" "$target/lib/mcp-filter.mjs" "$target/etc/tool-allowlist.json"
+    printf '# The environment is scrubbed IN PLACE (unset), never rebuilt through\n'
+    printf '# `env -i NAME=value`: at WORKER_BOX_SLOTS > 1 HTTPS_PROXY carries the run'"'"'s\n'
+    printf '# proxy credential, and an argv is world-readable in /proc (#205).\n'
+    printf 'for __v in $(env | sed -n '"'"'s/^\\([A-Za-z_][A-Za-z0-9_]*\\)=.*/\\1/p'"'"'); do\n'
+    printf '  case "$__v" in\n'
+    printf '    PATH|HOME|HTTPS_PROXY|HTTP_PROXY|NO_PROXY|https_proxy|http_proxy|no_proxy|NODE_USE_ENV_PROXY) ;;\n'
+    printf '    *) unset "$__v" 2>/dev/null ;;\n'
+    printf '  esac\n'
+    printf 'done\n'
+    printf 'unset __v\n'
+    printf 'PATH=%s; export PATH\n' "'$BUILD_PATH'"
+    printf 'LANG=C.UTF-8; export LANG\n'
+    local env_keys=""
+    # NUL-delimited: one entry is always one assignment, whatever the value
+    # holds; a value with a control character (a newline would otherwise split
+    # into a second, silently exported variable) is refused outright.
+    while IFS= read -r -d '' entry; do
+      [ -n "$entry" ] || continue
+      case "$entry" in
+        *"'"*) STEP_ERROR="mcpServe.env entry contains a single quote"; return 1 ;;
+      esac
+      [[ "$entry" =~ [[:cntrl:]] ]] && {
+        STEP_ERROR="mcpServe.env entry contains a control character: ${entry%%=*}"
+        return 1
+      }
+      local key="${entry%%=*}"
+      # The key is written into shell code unquoted: it must be a shell
+      # identifier, and never one of the names the wrapper or the filter own.
+      [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
+        STEP_ERROR="mcpServe.env key is not a shell identifier: $key"
+        return 1
+      }
+      case "$key" in
+        PATH|HOME|LANG|HTTPS_PROXY|HTTP_PROXY|NO_PROXY|https_proxy|http_proxy|no_proxy|NODE_USE_ENV_PROXY|AUTOMATA_MCP_ENV_KEYS)
+          STEP_ERROR="mcpServe.env may not set $key"
+          return 1
+          ;;
+      esac
+      printf "%s='%s'; export %s\n" "$key" "${entry#*=}" "$key"
+      env_keys="${env_keys:+$env_keys,}$key"
+    done < <(jq -j --argjson i "$i" '.packs[$i].mcpServe.env | to_entries[] | "\(.key)=\(.value)\u0000"' "$HARNESS")
+    # The filter builds the server's env from this list (plus PATH/HOME/LANG and
+    # the proxy names) — the exhaustive allowlist; the scrub above is belt and braces.
+    printf "AUTOMATA_MCP_ENV_KEYS='%s'; export AUTOMATA_MCP_ENV_KEYS\n" "$env_keys"
+    printf "exec '%s' '%s' '%s' -- \\\\\n" "$NODE_BIN" "$target/lib/mcp-filter.mjs" "$target/etc/tool-allowlist.json"
     printf "  '%s' '%s'" "$NODE_BIN" "$target/$(hfield "$i" .mcpServe.entrypoint)"
     while IFS= read -r entry; do
       printf " '%s'" "$entry"
