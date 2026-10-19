@@ -6,11 +6,22 @@ import {
   assertNotReexecuting,
   deferralsRecorded,
   forgetRun,
+  LEDGER_TTL_MS,
+  ledgerSize,
   recordDeferral,
 } from "./reexecution-guard";
 
 describe("re-execution guard (#371): only a recorded deferral may be retried", () => {
   beforeEach(() => _resetReexecutionGuardForTests());
+
+  it("is bounded: an entry whose retry never came back ages out after the TTL (budget + one scheduleTimeout)", () => {
+    const t0 = 1_000_000;
+    recordDeferral("stale", t0);
+    recordDeferral("fresh", t0 + LEDGER_TTL_MS + 1);
+    expect(ledgerSize()).toBe(1);
+    expect(deferralsRecorded("stale")).toBe(0);
+    expect(deferralsRecorded("fresh")).toBe(1);
+  });
 
   it("attempt 0 always passes; attempt n passes only with n deferrals recorded", () => {
     expect(() => assertNotReexecuting("t", 0)).not.toThrow();
@@ -37,7 +48,7 @@ describe("re-execution guard (#371): only a recorded deferral may be retried", (
     );
   });
 
-  it("forgetRun drops the ledger; threads are independent", () => {
+  it("forgetRun drops the ledger; runs are independent (keyed by the workflow run, never the thread)", () => {
     recordDeferral("a");
     recordDeferral("b");
     forgetRun("a");

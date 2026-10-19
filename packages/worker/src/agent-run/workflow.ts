@@ -500,8 +500,17 @@ async function runAgent(
     return output;
   } catch (err) {
     if (err instanceof AdmissionDeferredError) {
-      deferred = true;
-      recordDeferral(runKey);
+      // The engine retries this one — unless it was the last attempt allowed,
+      // or the run was cancelled meanwhile (then no retry returns here, and the
+      // entry would only age out). Keep the ledger exact in both cases.
+      const attempt = ctx.retryCount?.() ?? 0;
+      const retryWillCome =
+        attempt < config.admissionMaxDeferrals &&
+        !(ctx.cancelled || ctx.abortController?.signal.aborted);
+      if (retryWillCome) {
+        deferred = true;
+        recordDeferral(runKey);
+      }
       throw err;
     }
     // An engine cancel ends the task whatever we throw; let its abort error

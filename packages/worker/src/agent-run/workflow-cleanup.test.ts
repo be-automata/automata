@@ -2194,6 +2194,33 @@ Committed_AS:   12000000 kB
     expect(daemonCtorArgs).toHaveLength(0);
   });
 
+  it("re-execution guard: the LAST allowed deferral records nothing (no retry comes back), so the ledger stays exact", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    const {
+      _resetReexecutionGuardForTests,
+      deferralsRecorded,
+      recordDeferral,
+    } = await import("./reexecution-guard");
+    _resetReexecutionGuardForTests();
+    _setAdmissionControllerForTests(
+      new AdmissionController(POLICY, () => STARVED),
+    );
+    const { loadWorkerConfig } = await import("./config");
+    const max = loadWorkerConfig().admissionMaxDeferrals;
+    for (let i = 0; i < max; i++) recordDeferral("wfr-last");
+    const ctx = {
+      cancelled: false,
+      log: vi.fn(),
+      retryCount: () => max,
+      workflowRunId: () => "wfr-last",
+    };
+    await expect(runFn(INPUT, ctx)).rejects.toSatisfy(
+      (e: Error) => e.name === "AdmissionDeferredError",
+    );
+    expect(deferralsRecorded("wfr-last")).toBe(0);
+  });
+
   it("re-execution guard: the ledger is keyed by the workflow run — a sibling run of the same thread starts clean, and a run keeps its own count across the retry", async () => {
     const { _setAdmissionControllerForTests } = await import("./workflow");
     const { AdmissionController } = await import("./headroom");
