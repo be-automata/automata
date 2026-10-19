@@ -272,6 +272,25 @@ describe("the deferral budget vs the control plane's 75-minute stalled cutoff", 
   });
 });
 
+describe("reservations are keyed by the workflow run, not the thread (#371)", () => {
+  it("a supersede sibling of the same thread keeps counting; only the same run's earlier attempt is excluded", () => {
+    const c = new AdmissionController(
+      { ...POLICY, runCommitBytes: 1 * GIB },
+      () => MEMINFO,
+    );
+    c.admit({ runId: "run-1", threadId: "t", attempt: 0 });
+    expect(c.reservedBytes()).toBe(1 * GIB);
+    // Same thread, a different run: it must see run-1's reservation.
+    expect(() =>
+      c.admit({ runId: "run-2", threadId: "t", attempt: 0 }),
+    ).not.toThrow();
+    expect(c.reservedBytes()).toBe(2 * GIB);
+    // The same run's retry excludes only its own entry (replaced, not added).
+    c.admit({ runId: "run-2", threadId: "t", attempt: 1 });
+    expect(c.reservedBytes()).toBe(2 * GIB);
+  });
+});
+
 describe("Reservation.observe (#371: lifetime reservation, minus what the kernel already charges)", () => {
   it("counts the whole runCommit until a probe is attached, then runCommit − memory.current floored at 0; release still drops it", () => {
     const c = new AdmissionController(POLICY, () => MEMINFO);

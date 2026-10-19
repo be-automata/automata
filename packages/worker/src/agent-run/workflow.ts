@@ -414,44 +414,51 @@ async function runAgent(
   // free but must not be the one plain Error the engine retries 8× (#371).
   let config: ReturnType<typeof loadWorkerConfig>;
   let wwwOpts: WwwClientOpts;
+  // #371: the ledger and the headroom reservation are keyed by the WORKFLOW
+  // RUN, which is stable across its retries and distinct for every run of the
+  // same thread (supersede siblings, re-reviews) — a thread key would let one
+  // run's leftover deferral count admit a sibling's engine-retried timeout.
+  const runKey = ctx.workflowRunId?.() ?? input.threadId;
   try {
     // #371 RE-EXECUTION GUARD, before anything else: an attempt this worker's
     // deferral ledger does not account for came from an engine-side failure
     // (an execution timeout is retried by the engine) — never re-run the agent.
-    assertNotReexecuting(input.threadId, ctx.retryCount?.() ?? 0);
+    assertNotReexecuting(runKey, ctx.retryCount?.() ?? 0);
     config = loadWorkerConfig();
     wwwOpts = wwwOptsFor(input, ctx);
   } catch (err) {
+    forgetRun(runKey);
     throw fenceNonRetryable(err);
   }
   const runExternalId = wwwOpts.runExternalId ?? "";
-  // Under complete-run·queue a run may have waited behind an older one while
-  // newer commits landed. Ask www FIRST; if a newer run is already recorded,
-  // skip with a typed terminal — no clone, no daemon, no credits. Fails open.
-  if (input.supersedePolicy === "complete-run-queue" && runExternalId) {
-    const stale = await checkRunStaleness(
-      wwwOpts,
-      { runExternalId },
-      ctx.abortController?.signal,
-    );
-    if (stale) {
-      const result = await postRunTerminal(wwwOpts, {
-        runExternalId,
-        cause: "stale-skipped",
-        policy: input.supersedePolicy,
-      });
-      ctx.log(
-        `[agent-run ${input.threadId}] stale-skipped (newer run queued for this PR) → terminal: ${result}`,
-      );
-      return {
-        threadId: input.threadId,
-        threadChatId: input.threadChatId,
-        outcome: "stale-skipped",
-      };
-    }
-  }
   let deferred = false;
   try {
+    // Under complete-run·queue a run may have waited behind an older one while
+    // newer commits landed. Ask www FIRST; if a newer run is already recorded,
+    // skip with a typed terminal — no clone, no daemon, no credits. Fails open.
+    // Inside the try so the finally drops this run's ledger entry too.
+    if (input.supersedePolicy === "complete-run-queue" && runExternalId) {
+      const stale = await checkRunStaleness(
+        wwwOpts,
+        { runExternalId },
+        ctx.abortController?.signal,
+      );
+      if (stale) {
+        const result = await postRunTerminal(wwwOpts, {
+          runExternalId,
+          cause: "stale-skipped",
+          policy: input.supersedePolicy,
+        });
+        ctx.log(
+          `[agent-run ${input.threadId}] stale-skipped (newer run queued for this PR) → terminal: ${result}`,
+        );
+        return {
+          threadId: input.threadId,
+          threadChatId: input.threadChatId,
+          outcome: "stale-skipped",
+        };
+      }
+    }
     // #371 EXACTLY-ONCE FENCE. The run task now carries `retries` so the engine
     // can re-queue an admission deferral; that makes every PLAIN error thrown in
     // here retryable — and a retried agent run re-executes the agent. So every
@@ -465,6 +472,7 @@ async function runAgent(
       config,
       wwwOpts,
       runStartedAt,
+      runKey,
     );
     if (output.outcome === "stopped") {
       // A user Stop put the thread in `stopping`. The daemon never observes
@@ -493,7 +501,7 @@ async function runAgent(
   } catch (err) {
     if (err instanceof AdmissionDeferredError) {
       deferred = true;
-      recordDeferral(input.threadId);
+      recordDeferral(runKey);
       throw err;
     }
     // An engine cancel ends the task whatever we throw; let its abort error
@@ -504,7 +512,7 @@ async function runAgent(
     throw fenceNonRetryable(err);
   } finally {
     // Any end but a deferral is the run's last word on this worker.
-    if (!deferred) forgetRun(input.threadId);
+    if (!deferred) forgetRun(runKey);
     if (ctx.cancelled || ctx.abortController?.signal.aborted) {
       await postSuperseded(input, ctx, wwwOpts);
     }
@@ -947,6 +955,8 @@ async function runAgentInner(
   config: ReturnType<typeof loadWorkerConfig>,
   wwwOpts: WwwClientOpts,
   runStartedAt: number,
+  /** #371: the workflow run's stable identity (reservation key); see runAgent. */
+  runKey: string,
 ): Promise<AgentRunOutput> {
   // Cancellation signal (Hatchet cancel: scheduleTimeout/executionTimeout). Used
   // to abort in-flight pulls/polls so the finally-block daemon teardown runs
@@ -1063,6 +1073,7 @@ async function runAgentInner(
     // the anonymous memory the kernel already charges the run (daemon.start() below).
     reservation =
       getAdmissionController(config)?.admit({
+        runId: runKey,
         threadId: input.threadId,
         attempt: ctx.retryCount?.() ?? 0,
         log: admissionLog,

@@ -2194,6 +2194,40 @@ Committed_AS:   12000000 kB
     expect(daemonCtorArgs).toHaveLength(0);
   });
 
+  it("re-execution guard: the ledger is keyed by the workflow run — a sibling run of the same thread starts clean, and a run keeps its own count across the retry", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    const { _resetReexecutionGuardForTests, deferralsRecorded } = await import(
+      "./reexecution-guard"
+    );
+    _resetReexecutionGuardForTests();
+    _setAdmissionControllerForTests(
+      new AdmissionController(POLICY, () => STARVED),
+    );
+    const runA = {
+      cancelled: false,
+      log: vi.fn(),
+      retryCount: () => 0,
+      workflowRunId: () => "wfr-A",
+    };
+    await expect(runFn(INPUT, runA)).rejects.toSatisfy(
+      (e: Error) => e.name === "AdmissionDeferredError",
+    );
+    expect(deferralsRecorded("wfr-A")).toBe(1);
+    expect(deferralsRecorded("wfr-B")).toBe(0);
+    // Sibling run B of the same thread at attempt 1 with no deferral of its
+    // own: refused (that attempt came from an engine-side failure).
+    const runB = {
+      cancelled: false,
+      log: vi.fn(),
+      retryCount: () => 1,
+      workflowRunId: () => "wfr-B",
+    };
+    await expect(runFn(INPUT, runB)).rejects.toBeInstanceOf(NonRetryableError);
+    // A's own retry is still accounted for.
+    expect(deferralsRecorded("wfr-A")).toBe(1);
+  });
+
   it("re-execution guard: the retry of a recorded deferral is admitted (deferred once as attempt 0, admitted as attempt 1), and the ledger is dropped when the run ends", async () => {
     const { _setAdmissionControllerForTests } = await import("./workflow");
     const { AdmissionController } = await import("./headroom");

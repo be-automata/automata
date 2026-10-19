@@ -200,7 +200,7 @@ const NO_RESERVATION: Reservation = { release: () => {}, observe: () => {} };
  * admission is byte-for-byte today's.
  */
 export class AdmissionController {
-  /** threadId → the live reservation: expected commit, its identity (a stale generation's release cannot drop a newer one), and the run's own anonymous-memory probe once it has one. */
+  /** run id (the workflow run; a thread's supersede siblings are distinct runs) → the live reservation: expected commit, its identity (a stale generation's release cannot drop a newer one), and the run's own anonymous-memory probe once it has one. */
   private reserved = new Map<
     string,
     { bytes: number; token: symbol; current?: () => number | null }
@@ -216,10 +216,10 @@ export class AdmissionController {
     return this.reservedBytesExcept(null);
   }
 
-  private reservedBytesExcept(threadId: string | null): number {
+  private reservedBytesExcept(runId: string | null): number {
     let sum = 0;
     for (const [id, v] of this.reserved) {
-      if (id === threadId) continue;
+      if (id === runId) continue;
       sum += Math.max(0, v.bytes - (v.current?.() ?? 0));
     }
     return sum;
@@ -232,10 +232,13 @@ export class AdmissionController {
    * returned reservation is released.
    */
   admit(opts: {
+    /** The reservation key: the WORKFLOW RUN (stable across its retries, distinct per run of a thread). Defaults to threadId. */
+    runId?: string;
     threadId: string;
     attempt: number;
     log?: (line: string) => void;
   }): Reservation {
+    const runId = opts.runId ?? opts.threadId;
     // FAIL-OPEN on an unreadable kernel: a check that cannot read
     // /proc/meminfo at this instant admits with one loud line rather than
     // failing the run (the fence would make that failure final). Boot already
@@ -253,14 +256,14 @@ export class AdmissionController {
       );
       return NO_RESERVATION;
     }
-    // A retried attempt of the same thread must not count its own earlier
-    // reservation — but the table is left untouched until the decision: a
-    // refusal must not drop a live sibling attempt's entry (a supersede whose
-    // old attempt is still tearing down on another slot).
+    // A retried attempt of the same RUN must not count its own earlier
+    // reservation; a sibling run of the same thread (a supersede whose old
+    // attempt is still tearing down on another slot) keeps counting. The table
+    // is left untouched until the decision: a refusal drops nothing.
     const verdict = evaluateHeadroom(
       reading,
       this.policy,
-      this.reservedBytesExcept(opts.threadId),
+      this.reservedBytesExcept(runId),
     );
     const fields = JSON.stringify({
       threadId: opts.threadId,
@@ -277,18 +280,18 @@ export class AdmissionController {
       );
     }
     opts.log?.(`box.headroom_ok ${fields}`);
-    const token = Symbol(opts.threadId);
+    const token = Symbol(runId);
     const entry = { bytes: this.policy.runCommitBytes, token };
-    this.reserved.set(opts.threadId, entry);
-    const mine = () => this.reserved.get(opts.threadId)?.token === token;
+    this.reserved.set(runId, entry);
+    const mine = () => this.reserved.get(runId)?.token === token;
     return {
       release: () => {
         // Only this generation's entry: an older attempt's late release must
         // not drop a re-admitted attempt's reservation.
-        if (mine()) this.reserved.delete(opts.threadId);
+        if (mine()) this.reserved.delete(runId);
       },
       observe: (current) => {
-        if (mine()) this.reserved.set(opts.threadId, { ...entry, current });
+        if (mine()) this.reserved.set(runId, { ...entry, current });
       },
     };
   }
