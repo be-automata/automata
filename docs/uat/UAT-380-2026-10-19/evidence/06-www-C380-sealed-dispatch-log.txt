@@ -1,0 +1,4 @@
+## automata-www `wrangler tail --format json`, captured 16:41–16:56Z after the cutover — every `[hatchet] run secrets sealed` event
+## columns: event time (UTC) | scriptVersion | threadId | threadChatId | kid
+16:45:16 | 5158f74e | 6c7f6bed-936d-461c-8898-a6cc56482ab7 | legacy-thread-chat-id | plane-2026-10
+## sealed-dispatch events in the captured window: 1 (the PR #397 review dispatch; www logs this line only for the sealed shape — a legacy dispatch logs nothing here)
