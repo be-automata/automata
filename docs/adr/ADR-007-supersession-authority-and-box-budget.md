@@ -165,9 +165,14 @@ releases the slot (nothing of the run is on disk) and throws `AdmissionDeferredE
 ONE plain error the run task lets escape: the engine re-queues the attempt (QUEUED, never
 FAILED or CANCELLED) with `retries` = `WORKER_ADMISSION_MAX_DEFERRALS` and exponential
 backoff, and the whole deferral budget must fit the www stalled cutoff (boot refuses a
-budget that does not). **Exactly-once is preserved by construction**: every error thrown
-after admission is rethrown as `NonRetryableError` (`fenceNonRetryable`), so a retry can
-only ever re-run the admission, never the agent. A cancel during backoff is the engine's
+budget that does not). **Exactly-once is preserved by construction**, on two sides: every error thrown
+after admission is rethrown as `NonRetryableError` (`fenceNonRetryable`), and — because the
+engine ALSO retries failures it decides itself (measured on hatchet-lite v0.94.10: an
+`executionTimeout` is retried under the task's policy) — a **re-execution guard** runs first
+in every attempt: the worker counts the deferrals it threw per run, and an attempt number
+above that count is refused as `NonRetryableError` before any side effect. A retry can only
+ever re-run the admission, never the agent; a worker restart between attempts forgets the
+ledger and refuses the next attempt (fail-closed). A cancel during backoff is the engine's
 cancel of a QUEUED attempt — no worker code runs. The check is inert (`floor 0` and
 `fraction 1.0`, or no `/proc/meminfo`) without a deploy; the retries stay registered on every
 host, and with the check inert nothing ever throws the deferral, so they are never used. An

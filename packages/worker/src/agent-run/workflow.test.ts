@@ -147,8 +147,11 @@ describe("agentRunWorkflow registration shape", () => {
     // Registered the same on every host: where the gate is OFF (macOS, inert
     // values) nothing ever throws the deferral, so the retries are never used.
     // The same source the module reads at import: process.env.
-    expect(run.retries).toBe(loadWorkerConfig().admissionMaxDeferrals);
-    expect(run.backoff).toEqual({ factor: 2, maxSeconds: 120 });
+    const deferrals = loadWorkerConfig().admissionMaxDeferrals;
+    expect(run.retries).toBe(deferrals);
+    expect(run.backoff).toEqual(
+      deferrals > 0 ? { factor: 2, maxSeconds: 120 } : undefined,
+    );
     expect(run.scheduleTimeout).toBe("30m");
     expect(run.executionTimeout).toBe("30m");
   });

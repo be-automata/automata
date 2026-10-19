@@ -2174,6 +2174,47 @@ Committed_AS:   12000000 kB
     releaseMock.mockClear();
   });
 
+  it("re-execution guard: an attempt above the recorded deferrals (an engine-retried timeout) is refused FIRST — final, nothing touched", async () => {
+    const { _resetReexecutionGuardForTests } = await import(
+      "./reexecution-guard"
+    );
+    _resetReexecutionGuardForTests();
+    const ctx = { cancelled: false, log: vi.fn(), retryCount: () => 1 };
+    let caught: unknown;
+    try {
+      await runFn(INPUT, ctx);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(NonRetryableError);
+    expect((caught as Error).message).toMatch(/never re-executes/);
+    expect(ensureRunNamespace).not.toHaveBeenCalled();
+    expect(releaseMock).not.toHaveBeenCalled();
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+    expect(daemonCtorArgs).toHaveLength(0);
+  });
+
+  it("re-execution guard: the retry of a recorded deferral is admitted (deferred once as attempt 0, admitted as attempt 1), and the ledger is dropped when the run ends", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    const { _resetReexecutionGuardForTests, deferralsRecorded } = await import(
+      "./reexecution-guard"
+    );
+    _resetReexecutionGuardForTests();
+    let meminfo = STARVED;
+    _setAdmissionControllerForTests(
+      new AdmissionController(POLICY, () => meminfo),
+    );
+    await expect(
+      runFn(INPUT, { cancelled: false, log: vi.fn(), retryCount: () => 0 }),
+    ).rejects.toSatisfy((e: Error) => e.name === "AdmissionDeferredError");
+    expect(deferralsRecorded(INPUT.threadId)).toBe(1);
+    meminfo = ROOMY;
+    await runFn(INPUT, { cancelled: false, log: vi.fn(), retryCount: () => 1 });
+    expect(provisionWorkdir).toHaveBeenCalledTimes(1);
+    expect(deferralsRecorded(INPUT.threadId)).toBe(0);
+  });
+
   it("a deferral releases the slot, clones nothing, and escapes as AdmissionDeferredError (plain, retryable)", async () => {
     const { _setAdmissionControllerForTests } = await import("./workflow");
     const { AdmissionController, AdmissionDeferredError } = await import(
@@ -2182,6 +2223,12 @@ Committed_AS:   12000000 kB
     _setAdmissionControllerForTests(
       new AdmissionController(POLICY, () => STARVED),
     );
+    // Attempt 4 is legitimate only after three recorded deferrals.
+    const { _resetReexecutionGuardForTests, recordDeferral } = await import(
+      "./reexecution-guard"
+    );
+    _resetReexecutionGuardForTests();
+    for (let i = 0; i < 3; i++) recordDeferral(INPUT.threadId);
     const ctx = { cancelled: false, log: vi.fn(), retryCount: () => 3 };
     let caught: unknown;
     try {

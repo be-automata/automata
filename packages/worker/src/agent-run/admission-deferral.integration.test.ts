@@ -7,6 +7,7 @@ import {
 } from "@hatchet-dev/typescript-sdk";
 import { AGENT_RUN_VARIANTS, buildAgentRunDefinition } from "./definition";
 import { AdmissionDeferredError } from "./headroom";
+import { assertNotReexecuting, recordDeferral } from "./reexecution-guard";
 import { fenceNonRetryable } from "./retry-classification";
 import {
   REST,
@@ -35,7 +36,10 @@ const Status = APIContracts.V1TaskStatus;
 type Status = APIContracts.V1TaskStatus;
 const TERMINAL: Status[] = [Status.COMPLETED, Status.CANCELLED, Status.FAILED];
 
-type StubInput = { label: string; mode: "defer-once" | "fail-after-admission" };
+type StubInput = {
+  label: string;
+  mode: "defer-once" | "fail-after-admission" | "timeout";
+};
 
 const itEnabled = process.env.HATCHET_IT === "1";
 vi.setConfig({ testTimeout: 120_000 });
@@ -51,18 +55,40 @@ describe.skipIf(!itEnabled)(
     /** label → the retryCount the engine handed each attempt, in order. */
     const attempts = new Map<string, number[]>();
     const WORKFLOW = "agent-run";
+    const TIMEOUT_WORKFLOW = "agent-run-newest";
 
     async function stubRun(
       input: StubInput,
       ctx: { retryCount?: () => number },
     ): Promise<{ label: string }> {
       const attempt = ctx.retryCount?.() ?? 0;
+      // Mirrors runAgent: the guard runs FIRST, before the attempt counts as
+      // executed (a refused attempt is recorded as -(attempt + 1)).
+      try {
+        assertNotReexecuting(input.label, attempt);
+      } catch (e) {
+        attempts.set(input.label, [
+          ...(attempts.get(input.label) ?? []),
+          -(attempt + 1),
+        ]);
+        throw e;
+      }
       attempts.set(input.label, [
         ...(attempts.get(input.label) ?? []),
         attempt,
       ]);
+      if (input.mode === "timeout") {
+        // Outlive the 3 s executionTimeout of the timeout workflow.
+        const c = ctx as { cancelled?: boolean };
+        for (let i = 0; i < 100 && !c.cancelled; i++) {
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        return { label: input.label };
+      }
       if (input.mode === "defer-once" && attempt === 0) {
-        // Exactly what the headroom check throws: plain Error subclass.
+        // Exactly what the headroom check throws: plain Error subclass —
+        // recorded like runAgent records it, so attempt 1 passes the guard.
+        recordDeferral(input.label);
         throw new AdmissionDeferredError(
           "mem-available-below-floor",
           {
@@ -89,6 +115,7 @@ describe.skipIf(!itEnabled)(
 
     async function dispatch(
       o: StubInput,
+      workflowName: string = WORKFLOW,
     ): Promise<{ id: string; label: string }> {
       const label = uid(o.label);
       const res = await fetch(
@@ -100,7 +127,7 @@ describe.skipIf(!itEnabled)(
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            workflowName: WORKFLOW,
+            workflowName,
             input: {
               ...o,
               label,
@@ -150,8 +177,21 @@ describe.skipIf(!itEnabled)(
       expect(def.task.backoff).toBeDefined();
       const wf = hatchet.workflow<StubInput>(def.workflow);
       wf.task({ ...def.task, fn: stubRun });
+      // A second shipped variant with a 3 s executionTimeout: the engine-side
+      // failure the worker's fence never sees.
+      const timeoutDef = buildAgentRunDefinition(
+        TIMEOUT_WORKFLOW,
+        AGENT_RUN_VARIANTS[TIMEOUT_WORKFLOW],
+        { admissionRetries: 2 },
+      );
+      const timeoutWf = hatchet.workflow<StubInput>(timeoutDef.workflow);
+      timeoutWf.task({
+        ...timeoutDef.task,
+        executionTimeout: "3s",
+        fn: stubRun,
+      });
       worker = await hatchet.worker("it-admission-worker", {
-        workflows: [wf],
+        workflows: [wf, timeoutWf],
         slots: 4,
       });
       void worker.start();
@@ -193,6 +233,26 @@ describe.skipIf(!itEnabled)(
         `QUEUED between the attempts; saw ${JSON.stringify(seen)}`,
       ).toBe(true);
       expect(attempts.get(label)).toEqual([0, 1]);
+    });
+
+    it("exactly-once against the ENGINE: an executionTimeout IS retried by hatchet-lite (measured: attempts 0,1,2 without the guard) — the re-execution guard refuses attempt 1 up front, so the agent ran once and the run FAILS final", async () => {
+      const { id, label } = await dispatch(
+        { label: "timeout", mode: "timeout" },
+        TIMEOUT_WORKFLOW,
+      );
+      const final = await pollUntil(
+        `${label} terminal`,
+        () => statusOf(id),
+        (s) => TERMINAL.includes(s),
+        110_000,
+        250,
+      );
+      // The engine dispatched a second attempt (its retry policy covers its
+      // own timeout) and the guard refused it before it executed: -2 marks a
+      // refused attempt 1. No third attempt follows a NonRetryableError.
+      await new Promise((r) => setTimeout(r, 6_000));
+      expect(attempts.get(label)).toEqual([0, -2]);
+      expect(final).toBe(Status.FAILED);
     });
 
     it("exactly-once: a plain error after admission is fenced non-retryable — the run FAILS once and never re-executes, even with retries registered", async () => {

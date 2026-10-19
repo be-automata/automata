@@ -213,8 +213,13 @@ export class AdmissionController {
 
   /** Sum over live runs of what each still owes: `runCommit − anon` (0 when fully charged), the whole runCommit before its probe exists or when it reads nothing. */
   reservedBytes(): number {
+    return this.reservedBytesExcept(null);
+  }
+
+  private reservedBytesExcept(threadId: string | null): number {
     let sum = 0;
-    for (const v of this.reserved.values()) {
+    for (const [id, v] of this.reserved) {
+      if (id === threadId) continue;
       sum += Math.max(0, v.bytes - (v.current?.() ?? 0));
     }
     return sum;
@@ -248,14 +253,14 @@ export class AdmissionController {
       );
       return NO_RESERVATION;
     }
-    // A redelivered attempt of the same thread must not count its own stale
-    // reservation (a crashed worker never releases; the map dies with it, but
-    // an in-process retry of the same threadId could).
-    this.reserved.delete(opts.threadId);
+    // A retried attempt of the same thread must not count its own earlier
+    // reservation — but the table is left untouched until the decision: a
+    // refusal must not drop a live sibling attempt's entry (a supersede whose
+    // old attempt is still tearing down on another slot).
     const verdict = evaluateHeadroom(
       reading,
       this.policy,
-      this.reservedBytes(),
+      this.reservedBytesExcept(opts.threadId),
     );
     const fields = JSON.stringify({
       threadId: opts.threadId,

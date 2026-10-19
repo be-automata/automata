@@ -90,7 +90,9 @@ CommitLimit` (fraction default `0.9`; `1.0` = inert on that arm; run commit
   (`retries` = `WORKER_ADMISSION_MAX_DEFERRALS`, default 8, backoff ×2 capped
   at 120 s; the whole budget must fit the deferral window — boot refuses
   otherwise); the run shows QUEUED between attempts, never FAILED. Every other
-  error after admission is non-retryable (exactly-once). Journal lines
+  error after admission is non-retryable, and an attempt the worker's deferral
+  ledger does not account for (the engine retries its own execution timeouts)
+  is refused before any side effect — exactly-once on both sides. Journal lines
   `box.headroom_rejected` / `box.headroom_ok` carry the three memory values.
   Rollback without a deploy: `WORKER_HEADROOM_FLOOR=0` and
   `WORKER_HEADROOM_COMMIT_FRACTION=1.0`.

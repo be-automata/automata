@@ -45,9 +45,15 @@ import {
 } from "./admission-retry";
 import {
   AdmissionController,
+  AdmissionDeferredError,
   assessHeadroomSupport,
   type Reservation,
 } from "./headroom";
+import {
+  assertNotReexecuting,
+  forgetRun,
+  recordDeferral,
+} from "./reexecution-guard";
 import {
   pollUntilTerminal,
   postEgressEvents,
@@ -409,6 +415,10 @@ async function runAgent(
   let config: ReturnType<typeof loadWorkerConfig>;
   let wwwOpts: WwwClientOpts;
   try {
+    // #371 RE-EXECUTION GUARD, before anything else: an attempt this worker's
+    // deferral ledger does not account for came from an engine-side failure
+    // (an execution timeout is retried by the engine) — never re-run the agent.
+    assertNotReexecuting(input.threadId, ctx.retryCount?.() ?? 0);
     config = loadWorkerConfig();
     wwwOpts = wwwOptsFor(input, ctx);
   } catch (err) {
@@ -440,13 +450,15 @@ async function runAgent(
       };
     }
   }
+  let deferred = false;
   try {
     // #371 EXACTLY-ONCE FENCE. The run task now carries `retries` so the engine
     // can re-queue an admission deferral; that makes every PLAIN error thrown in
     // here retryable — and a retried agent run re-executes the agent. So every
     // error is rethrown non-retryable except the one deferral the engine is
-    // meant to retry (fenceNonRetryable). `finally` below still posts the
-    // superseded terminal on a cancel, unchanged.
+    // meant to retry (fenceNonRetryable); the deferral is recorded so the
+    // guard above lets exactly its retry through. `finally` below still posts
+    // the superseded terminal on a cancel, unchanged.
     const output = await runAgentInner(
       input,
       ctx,
@@ -479,6 +491,11 @@ async function runAgent(
     }
     return output;
   } catch (err) {
+    if (err instanceof AdmissionDeferredError) {
+      deferred = true;
+      recordDeferral(input.threadId);
+      throw err;
+    }
     // An engine cancel ends the task whatever we throw; let its abort error
     // through untouched so the journal names it. Everything else is fenced.
     if (ctx.cancelled || ctx.abortController?.signal.aborted) {
@@ -486,6 +503,8 @@ async function runAgent(
     }
     throw fenceNonRetryable(err);
   } finally {
+    // Any end but a deferral is the run's last word on this worker.
+    if (!deferred) forgetRun(input.threadId);
     if (ctx.cancelled || ctx.abortController?.signal.aborted) {
       await postSuperseded(input, ctx, wwwOpts);
     }
