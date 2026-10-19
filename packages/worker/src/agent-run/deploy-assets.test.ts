@@ -281,6 +281,18 @@ describe("packages/worker/docker-compose.hatchet.prod.yml (#192)", () => {
     expect(overlay).toContain("docker-compose.hatchet.yml");
     expect(overlay).not.toContain("image:");
   });
+
+  it("restricts dashboard sign-up and login to the operator's domain, and warns to rename the seed admin first", () => {
+    // hatchet-lite ships with open self-registration; behind the public tunnel
+    // that was a public login to the production engine (2026-10-18). The same
+    // knob refuses an out-of-domain seed admin's login, so the doc order is
+    // part of the control: rename, then apply.
+    expect(overlay).toMatch(
+      /SERVER_AUTH_RESTRICTED_EMAIL_DOMAINS:\s*beautomata\.com/,
+    );
+    expect(overlay).toMatch(/rename.*seed admin/i);
+    expect(overlay).not.toMatch(/SERVER_AUTH_BASIC_AUTH_ENABLED/);
+  });
 });
 
 describe("packages/worker/deploy/linux/cloud-init.yaml (#192)", () => {

@@ -42,6 +42,21 @@
 # Raise these together with the RAM tier if the box is resized; they are part of
 # the {global cap, worker slots, per-run MemoryMax, swap} tuple that must move
 # as one.
+#
+# ── 3. Dashboard sign-up is restricted to the operator's domain ─────────────
+#
+# hatchet-lite ships with open self-registration and a seeded admin
+# (`admin@example.com`). Behind the public tunnel that was a public login to the
+# production engine as tenant OWNER (found and rotated 2026-10-18; epic #193).
+# `SERVER_AUTH_RESTRICTED_EMAIL_DOMAINS` makes the engine refuse both
+# registration AND login for any address outside the listed domain(s) — verified
+# on a throwaway stack: out-of-domain register → 500, in-domain → 200; the
+# out-of-domain seed admin's login → 400.
+#
+# ⚠ That last line is the trap: apply this ONLY after the seed admin has been
+# renamed into the domain (deploy/README.md, "Engine dashboard hygiene"), or
+# the operator locks themselves out of the dashboard. API tokens (www, worker)
+# are unaffected — they are not email logins.
 
 services:
   postgres:
@@ -55,3 +70,6 @@ services:
       - "127.0.0.1:7077:7077" # engine gRPC, loopback only
     mem_limit: 512m
     memswap_limit: 512m
+    environment:
+      # See note 3 above — rename the seed admin into this domain FIRST.
+      SERVER_AUTH_RESTRICTED_EMAIL_DOMAINS: beautomata.com
