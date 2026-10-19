@@ -10,13 +10,16 @@ import {
 } from "@terragon/shared/model/hatchet-run";
 import {
   findOrphanRemoteThreads,
+  findUnreportedRemoteThreads,
   markThreadTerminal,
 } from "@terragon/shared/model/threads";
+import { revokeDaemonTokensForThread } from "@/lib/daemon-token";
 import type { TerminalCause } from "@terragon/shared/model/terminal-cause";
 import { assertNever } from "@terragon/shared/utils";
 import { maybeRecheckOnComplete } from "./supersede-recheck";
 import {
   getAgentRunStatus,
+  listAgentRunsForThread,
   type AgentRunLookupHint,
   type AgentRunStatus,
 } from "@/agent/hatchet/transport";
@@ -33,12 +36,26 @@ import {
  *       (org, repo, PR), else `user-cancelled`; engine NOT_FOUND (pruned, or
  *       the trigger never landed) → `superseded` with a newer sibling, else
  *       `plane-offline`; engine FAILED → `daemon-failed` (onFailure normally
- *       posts this; the sweep is the backstop); engine COMPLETED while the
+ *       posts this; the sweep is the backstop), or `run-failed-unreported`
+ *       (#380) when the thread never left `booting`; engine COMPLETED while the
  *       thread is still reapable → the run row is retired (www missed the
  *       finish; the stalled watchdog owns the thread) so it is not re-read
  *       every tick; QUEUED/RUNNING → left alone, lease pushed out.
  *  (ii) a remote thread dispatched > N ago with NO recorded run at all →
  *       `plane-offline`.
+ *  (iii) (#380) a remote thread of ANY lane still `booting` > N after its
+ *       last write, with no run row, whose engine runs (listed by threadId
+ *       metadata) have ALL FAILED → `run-failed-unreported`. This is the
+ *       reconcile for a run that died before it could post back — an
+ *       unsealable payload, a clone failure, a worker death at admission.
+ *       Only review runs have a row (rule (i)); task, mention and self-heal
+ *       runs had no reconcile at all before this rule. A run still QUEUED
+ *       or RUNNING, or one the listing cannot see, is left alone.
+ *
+ * Every terminal the sweep writes ALSO revokes the thread's remote daemon
+ * token(s) (#380): the run is dead, the token is useless, and while it lives
+ * the double-dispatch guard silently skips every retry for the token's
+ * 1-day backstop TTL.
  *
  * Exactly-once by construction: the batch is CLAIMED with one compare-and-set
  * lease UPDATE (`claimSweepLeases`) before any engine read or write — two
@@ -69,6 +86,10 @@ export type SweepDeps = {
     externalId: string,
     hint: AgentRunLookupHint,
   ) => Promise<AgentRunStatus>;
+  /** Rule (iii): the thread's runs by metadata; injected for tests. */
+  listRuns?: (
+    hint: AgentRunLookupHint,
+  ) => Promise<Array<{ externalId: string; status: AgentRunStatus }>>;
   cancelledAfterMs?: number;
   orphanAfterMs?: number;
 };
@@ -78,6 +99,8 @@ export type SweepReport = {
   claimed: number;
   terminals: { threadId: string; cause: TerminalCause }[];
   orphans: string[];
+  /** Rule (iii): threads marked `run-failed-unreported` this tick. */
+  unreported: string[];
   /** Per-candidate failures — the tick never aborts on one bad row. */
   errors: { externalId: string; message: string }[];
 };
@@ -103,16 +126,48 @@ function newerSibling(run: SweepCandidate) {
 type Decision =
   | { kind: "terminal"; cause: TerminalCause; supersededByThreadId?: string }
   | { kind: "retire" }
+  /** #380: the row belongs to an earlier attempt of a resumed thread — retire it, touch nothing else. */
+  | { kind: "stale-row" }
   | { kind: "live" };
+
+/** Rule (iii)'s engine listing half-width: covers any dispatch of a thread still inside the watchdog's reach. */
+export const RULE_III_LOOKUP_WINDOW_MS = 2 * 60 * 60 * 1000;
+/** A thread written this long after a run's dispatch, and booting again, is a later attempt. */
+export const STALE_ROW_RESUME_MARGIN_MS = 60 * 1000;
 
 /** The exhaustive rule (i) table; a new engine status fails compilation here. */
 async function decide(
   status: AgentRunStatus,
   run: SweepCandidate,
 ): Promise<Decision> {
+  // #380 generation guard: a row that belongs to an OLDER attempt of a
+  // thread that moved on — the thread's stamped active run is a different
+  // run (a newer review dispatch restamped it, whatever the thread's status
+  // now), or, for an UNSTAMPED thread, it is booting again after a write
+  // well past this row's dispatch (a non-review resume, which does not
+  // restamp; dispatch and its bookkeeping writes land within seconds of the
+  // row's createdAt) — is stale evidence whatever the engine says about it
+  // (FAILED, CANCELLED by a user stop, pruned). The terminal CAS checks only
+  // that the thread is reapable, not WHICH attempt is live, so such a row is
+  // retired without a terminal and the live attempt, and its daemon token,
+  // are left alone. A thread whose stamp IS this run is this run's: the
+  // updatedAt heuristic never applies to it.
+  // The guard decides ONLY the branches that write a terminal (and revoke
+  // tokens). A QUEUED/RUNNING row is left live and a COMPLETED one retired
+  // regardless: neither writes a terminal, and a CURRENT-generation run that
+  // waited behind the box slot while its thread was written again must not
+  // be mistaken for a stale one.
+  const staleRow =
+    (run.threadActiveRunExternalId !== null &&
+      run.threadActiveRunExternalId !== run.externalId) ||
+    (run.threadActiveRunExternalId === null &&
+      run.threadBooting &&
+      run.threadUpdatedAt.getTime() >
+        run.createdAt.getTime() + STALE_ROW_RESUME_MARGIN_MS);
   switch (status) {
     case "CANCELLED":
     case "NOT_FOUND": {
+      if (staleRow) return { kind: "stale-row" };
       const newer = await newerSibling(run);
       // Under complete-run-discard the engine CANCELs the NEWEST run
       // (CANCEL_NEWEST) while an OLDER one stays live; the worker never sees
@@ -148,7 +203,16 @@ async function decide(
       };
     }
     case "FAILED":
-      return { kind: "terminal", cause: "daemon-failed" };
+      if (staleRow) return { kind: "stale-row" };
+      // #380: FAILED while the thread never left `booting` = the run died
+      // before it could post back (an unsealable payload, a clone failure,
+      // an admission throw): the same reconcile class as rule (iii), with
+      // the same cause, so every lane reads alike. FAILED after the daemon
+      // was up stays the daemon's failure.
+      return {
+        kind: "terminal",
+        cause: run.threadBooting ? "run-failed-unreported" : "daemon-failed",
+      };
     case "COMPLETED":
       return { kind: "retire" };
     case "QUEUED":
@@ -184,6 +248,7 @@ export async function runSupersedeSweep(
     claimed: 0,
     terminals: [],
     orphans: [],
+    unreported: [],
     errors: [],
   };
   if (!env.SUPERSEDE_SWEEP_ENABLED) return report;
@@ -196,18 +261,18 @@ export async function runSupersedeSweep(
     deps.orphanAfterMs ??
     msFromEnv(env.SUPERSEDE_SWEEP_ORPHAN_AFTER_MS) ??
     SWEEP_ORPHAN_AFTER_MS_DEFAULT;
+  const hatchetConfig = {
+    apiUrl: env.HATCHET_API_URL,
+    tenantId: env.HATCHET_TENANT_ID,
+    apiToken: env.HATCHET_API_TOKEN,
+  };
+  const listRuns =
+    deps.listRuns ??
+    ((hint: AgentRunLookupHint) => listAgentRunsForThread(hint, hatchetConfig));
   const readStatus =
     deps.readStatus ??
     ((externalId: string, hint: AgentRunLookupHint) =>
-      getAgentRunStatus(
-        externalId,
-        {
-          apiUrl: env.HATCHET_API_URL,
-          tenantId: env.HATCHET_TENANT_ID,
-          apiToken: env.HATCHET_API_TOKEN,
-        },
-        hint,
-      ));
+      getAgentRunStatus(externalId, hatchetConfig, hint));
 
   // Rule (i): claim the batch in ONE compare-and-set, then read the engine
   // with bounded concurrency; every terminal pair is idempotent.
@@ -265,6 +330,13 @@ export async function runSupersedeSweep(
             until: new Date(now.getTime() + LIVE_RECHECK_MS),
           });
           return;
+        case "stale-row":
+          await retireHatchetRun({ db, key: { id: run.id }, as: "terminal" });
+          console.log("[supersede-sweep] stale row retired (thread resumed)", {
+            threadId: run.threadId,
+            externalId: run.externalId,
+          });
+          return;
         case "retire":
           // Engine COMPLETED but www never saw the finish: the run row is
           // retired — and the discard·recheck promise must still be honoured
@@ -294,9 +366,9 @@ export async function runSupersedeSweep(
           // once it has. If the thread write fails the row stays in_flight
           // and the next tick retries — retiring first would drop the row
           // from findSweepCandidates while the thread never terminated.
-          const applied = await markThreadTerminal({
-            db,
+          const applied = await sweepTerminal({
             threadId: run.threadId,
+            userId: run.threadUserId,
             cause: decision.cause,
             supersededByThreadId: decision.supersededByThreadId,
           });
@@ -346,19 +418,33 @@ export async function runSupersedeSweep(
     }
   });
 
-  // Rule (ii)
-  const orphans = await findOrphanRemoteThreads({
-    db,
-    olderThanMs: orphanAfterMs,
-    now,
-    // Same gate as hatchetDispatchEnabled(): with HATCHET_ENABLED every review
-    // thread is remote regardless of its (local-default) provider column.
-    remoteProviderOnly: !env.HATCHET_ENABLED,
-  });
-  for (const t of orphans) {
-    const applied = await markThreadTerminal({
+  // Rules (ii) and (iii): both reads are independent of rule (i)'s writes and
+  // of each other; only the WRITES are ordered ((ii) first, so a PR-review
+  // orphan keeps its `plane-offline` cause).
+  // Same gate as hatchetDispatchEnabled(): with HATCHET_ENABLED every review
+  // thread is remote regardless of its (local-default) provider column.
+  const remoteProviderOnly = !env.HATCHET_ENABLED;
+  const [orphans, unreported] = await Promise.all([
+    findOrphanRemoteThreads({
       db,
+      olderThanMs: orphanAfterMs,
+      now,
+      remoteProviderOnly,
+    }),
+    findUnreportedRemoteThreads({
+      db,
+      olderThanMs: orphanAfterMs,
+      now,
+      remoteProviderOnly,
+      // Older than the listing window ⇒ the stalled watchdog's, not ours.
+      maxAgeMs: RULE_III_LOOKUP_WINDOW_MS,
+    }),
+  ]);
+  // Rule (ii)
+  for (const t of orphans) {
+    const applied = await sweepTerminal({
       threadId: t.id,
+      userId: t.userId,
       cause: "plane-offline",
     });
     if (applied) {
@@ -369,5 +455,114 @@ export async function runSupersedeSweep(
       });
     }
   }
+
+  // Rule (iii) (#380), written after rule (ii). A thread rule (ii) just
+  // terminalised is no longer booting, so its sweepTerminal CAS is a no-op.
+  await mapLimit(unreported, ENGINE_READ_CONCURRENCY, async (t) => {
+    let runs: Array<{ externalId: string; status: AgentRunStatus }>;
+    try {
+      // The anchor is the thread's LAST write, not the trigger itself: a
+      // later bookkeeping write would move a ±10 min window off the real
+      // dispatch, so the window is as wide as a thread can stay booting
+      // before the stalled watchdog owns it.
+      runs = await listRuns({
+        createdAt: t.dispatchedAt,
+        threadId: t.id,
+        windowMs: RULE_III_LOOKUP_WINDOW_MS,
+      });
+    } catch (error) {
+      console.error(
+        "[supersede-sweep] rule (iii) engine list failed (retry next tick)",
+        {
+          threadId: t.id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
+      return;
+    }
+    // Fail toward "leave it": a live run, a finished one www missed (the
+    // stalled watchdog owns it) or an empty listing (the trigger never
+    // landed, or the window missed it) is not this rule's to terminate.
+    // CANCELLED predecessors (a superseded earlier attempt) do not count;
+    // every remaining run must have FAILED.
+    const live = runs.filter((r) => r.status !== "CANCELLED");
+    if (live.length === 0 || !live.every((r) => r.status === "FAILED")) {
+      return;
+    }
+    try {
+      // Fenced on the candidate's own anchor: a thread re-dispatched between
+      // the read and this write (booting again, a fresh token, a run the
+      // listing did not see) is left for the next tick.
+      const applied = await sweepTerminal({
+        threadId: t.id,
+        userId: t.userId,
+        cause: "run-failed-unreported",
+        unchangedSince: t.dispatchedAt,
+      });
+      if (applied) {
+        report.unreported.push(t.id);
+        console.log("[supersede-sweep] unreported failure → terminal", {
+          threadId: t.id,
+          externalIds: runs.map((r) => r.externalId),
+          dispatchedAt: t.dispatchedAt.toISOString(),
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[supersede-sweep] rule (iii) candidate failed", {
+        threadId: t.id,
+        error: message,
+      });
+      report.errors.push({ externalId: runs[0]?.externalId ?? "", message });
+    }
+  });
   return report;
+}
+
+/**
+ * The ONE way the sweep writes a terminal (#380): the thread's typed
+ * terminal, and — ONLY when that compare-and-set applied — the thread's
+ * remote daemon tokens, because a terminal the sweep wrote means the run is
+ * dead and a live token would make the double-dispatch guard skip every
+ * retry for a day. A CAS that lost (the thread went terminal between the
+ * read and this write) must not touch tokens. The CAS checks the thread's
+ * status, NOT which attempt is live: a thread resumed under a newer run is
+ * booting again and the write WOULD apply — that case is kept out of this
+ * function by rule (i)'s generation guard (`stale-row` in decide) and by
+ * rule (iii)'s all-FAILED listing, because the `${threadId}:` prefix would
+ * hit the new run's token too (the S12 class of sibling kill). The revoke
+ * is best-effort — a failure never undoes the terminal (the token still
+ * expires); it is logged.
+ */
+async function sweepTerminal({
+  threadId,
+  userId,
+  cause,
+  supersededByThreadId,
+  unchangedSince,
+}: {
+  threadId: string;
+  userId: string;
+  cause: TerminalCause;
+  supersededByThreadId?: string;
+  /** The thread's updatedAt at candidate-read time: a write since then wins (markThreadsTerminal). */
+  unchangedSince?: Date;
+}): Promise<boolean> {
+  const applied = await markThreadTerminal({
+    db,
+    threadId,
+    cause,
+    supersededByThreadId,
+    unchangedSince,
+  });
+  if (!applied) return false;
+  try {
+    await revokeDaemonTokensForThread({ userId, threadId });
+  } catch (error) {
+    console.error("[supersede-sweep] daemon token revoke failed", {
+      threadId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return true;
 }

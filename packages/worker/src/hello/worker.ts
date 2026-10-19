@@ -18,6 +18,7 @@ import {
   startEngineLivenessWatchdog,
 } from "../agent-run/engine-liveness";
 import { harnessDoctorLine } from "../agent-run/batteries-seed";
+import { loadPlaneKeysAtBoot } from "../agent-run/payload-seal-keys";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import {
   EGRESS_FENCE_UIDS_FILE,
@@ -221,6 +222,32 @@ async function main() {
   } catch (err) {
     console.error(
       "[worker-boot] FATAL: box lock helper unavailable — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
+
+  // #380: the plane's seal key ring. Rollout step 1: an absent file is
+  // logged and tolerated (legacy plain-text inputs only); a file that is
+  // present but unparseable, or holds a key that fails its own seal→unseal
+  // probe, refuses boot BEFORE registration — a worker that registered with a
+  // broken ring would fail every sealed run at its first step. Step 4 (PR 2)
+  // flips `required` to true. The kid list printed here is what rollout step
+  // 3 compares against the kid www logs at dispatch.
+  try {
+    const { payloadSealKeyFile } = loadWorkerConfig();
+    const ring = await loadPlaneKeysAtBoot({
+      path: payloadSealKeyFile,
+      required: false,
+    });
+    console.log(
+      ring.present
+        ? `[worker-boot] payload seal: ${ring.kids.length} key(s) usable (${ring.kids.join(", ")}) from ${payloadSealKeyFile}`
+        : `[worker-boot] payload seal: no key file at ${payloadSealKeyFile} — legacy plain-text inputs only (rollout step 1)`,
+    );
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: payload seal key file is unusable — refusing to start",
       err,
     );
     process.exit(1);

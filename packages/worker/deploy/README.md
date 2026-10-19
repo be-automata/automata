@@ -148,6 +148,46 @@ into the same verdict every `RestartSec` until the engine expired the row. The
 grace is bounded by one threshold window: a process older than that which is
 still reading a stale heartbeat does exit.
 
+## Payload seal key (#380)
+
+Every run's secrets — the GitHub installation token, the optional read-only
+token, the daemon token, the owner's repo environment variables (`repoEnv`)
+and the self-heal check/gate token — arrive in the Hatchet input **sealed** to
+this plane's X25519 public key (AAD = a SHA-256 of the whole persisted input,
+so a copied envelope cannot be re-triggered with any field changed), so the
+engine's Postgres, its backups and the run API hold ciphertext only (ADR-003
+F4, resolved). A key mismatch or a lost ring therefore blocks ALL of them: a
+task run without its repo env is not a degraded run, it does not start. The private half is the ring in
+`WORKER_PAYLOAD_SEAL_KEY_FILE` (default `/etc/automata/payload-seal.key`,
+`{"keys":[…]}`, mode 0400, owned by the service user).
+
+```bash
+# On the box, as root (the worker must be idle — no run in flight):
+cd /opt/automata-platform/packages/worker   # the checkout run-worker.sh uses
+pnpm exec tsx scripts/gen-payload-seal-key.ts          # prints <kid>:<base64url>
+systemctl restart automata-worker                      # boot log: "payload seal: 1 key(s) usable (<kid>)"
+# Then on www:
+wrangler secret put HATCHET_PAYLOAD_SEAL_KEY          # paste the printed line
+```
+
+The worker refuses to boot when the file is present but unparseable or any key
+fails its own seal→unseal probe. During rollout step 1 an **absent** file is
+tolerated (the worker then reads only the legacy plain-text input); strict mode
+(PR 2) makes it mandatory and refuses plain-text inputs.
+
+**Rotation, in this order:** (1) `gen-payload-seal-key.ts --rotate` adds a new
+key at the FRONT of the ring and keeps the old one; (2) restart the worker with
+no run in flight — the ring is read ONCE per process — and confirm the boot
+line lists the new kid; (3) only then switch www's `HATCHET_PAYLOAD_SEAL_KEY`
+to the printed line (a dispatch sealed to a kid the running worker has not
+loaded fails `unknown-kid`); (4) retire the old entry only when ≥24h have
+passed since the switch and no `hatchetRun` row dispatched before it belongs
+to a non-terminal thread — edit the file and restart again. Compare the `kid`
+www logs at dispatch (`run secrets sealed`) with the kid list in the boot line:
+a mismatch shows up as `unseal failed (reason=unknown-kid|tag)` on the first
+run and is reconciled by the sweep (`run-failed-unreported`). Every run also
+journals `token.revoke {"kind":"installation"|"read","status":204}` at its end.
+
 ## Install
 
 ```bash

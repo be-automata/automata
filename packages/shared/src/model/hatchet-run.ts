@@ -12,9 +12,11 @@ import {
   lt,
   ne,
   or,
+  sql,
 } from "drizzle-orm";
 import { thread as threadTable } from "../db/schema";
 import { reapableThreadStatuses, threadEffectiveStatusIn } from "./threads";
+import { threadLastWriteAt } from "./thread-effective-status";
 import { normalizeRepo, type SupersedeSnapshot } from "./repo-review-settings";
 
 /**
@@ -134,18 +136,30 @@ export async function retireHatchetRun({
   db,
   key,
   as,
+  onlyInFlight = false,
 }: {
   db: DB;
-  key: { id: string } | { externalId: string };
+  /** By row id, or by the engine's external id — optionally fenced to one thread's rows. */
+  key: { id: string } | { externalId: string; threadId?: string };
   as: "superseded" | "terminal";
+  /** #380: never rewrite a row already `superseded` (the daemon-event path). */
+  onlyInFlight?: boolean;
 }): Promise<void> {
   await db
     .update(hatchetRun)
     .set({ status: as, sweepLeaseUntil: null })
     .where(
-      "id" in key
-        ? eq(hatchetRun.id, key.id)
-        : eq(hatchetRun.externalId, key.externalId),
+      and(
+        "id" in key
+          ? eq(hatchetRun.id, key.id)
+          : and(
+              eq(hatchetRun.externalId, key.externalId),
+              key.threadId !== undefined
+                ? eq(hatchetRun.threadId, key.threadId)
+                : undefined,
+            ),
+        onlyInFlight ? eq(hatchetRun.status, "in_flight") : undefined,
+      ),
     );
 }
 
@@ -189,6 +203,19 @@ export async function findSweepCandidates({
       threadGithubPRNumber: threadTable.githubPRNumber,
       threadRepoFullName: threadTable.githubRepoFullName,
       threadOrganizationId: threadTable.organizationId,
+      // #380: a run the engine reports FAILED while its thread never left
+      // `booting` died before it could post back (an unsealable payload, a
+      // clone failure) — the sweep names that `run-failed-unreported`, not
+      // `daemon-failed`. Read in the same join: zero extra reads.
+      threadBooting: sql<boolean>`coalesce((${threadEffectiveStatusIn(["booting"])}), false)`,
+      // #380: the thread's last write. A thread written well after this
+      // run was created, and booting again, belongs to a LATER attempt
+      // (a resume) — this row is stale, not evidence about that attempt.
+      // The EFFECTIVE last write (chat-mode resumes touch the chat row first).
+      threadUpdatedAt: threadLastWriteAt(),
+      // #380: the thread's stamped active run (review dispatches restamp it).
+      // A row whose externalId is not the stamp belongs to an OLDER attempt.
+      threadActiveRunExternalId: threadTable.activeRunExternalId,
     })
     .from(hatchetRun)
     .innerJoin(threadTable, eq(threadTable.id, hatchetRun.threadId))

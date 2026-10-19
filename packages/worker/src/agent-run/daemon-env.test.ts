@@ -17,6 +17,9 @@ import {
 } from "./daemon-env";
 import type { AgentRunInput } from "./types";
 
+/** #380: the unsealed run secrets DaemonProcess now receives explicitly. */
+const TEST_SECRETS = { installationToken: "inst", daemonToken: "daemon" };
+
 const INSTALL_TOKEN = "ghs_installationtoken123";
 
 function build(overrides: Record<string, string | undefined> = {}) {
@@ -651,8 +654,6 @@ describe("GATE-01: a fix run's gate token never reaches the daemon/agent env (09
       repoFullName: "o/r",
       branch: "main",
       daemonCallbackUrl: "http://localhost:3999",
-      installationToken: "inst",
-      daemonToken: "daemon",
       orgId: "org-1",
       selfHeal: {
         kind: "fix",
@@ -676,6 +677,7 @@ describe("GATE-01: a fix run's gate token never reaches the daemon/agent env (09
         bearer: "bearer",
         repoFullName: "o/r",
       },
+      { secrets: TEST_SECRETS },
     );
     const internals = daemon as unknown as {
       ensureEnv(): Promise<NodeJS.ProcessEnv>;
@@ -1020,9 +1022,11 @@ describe("harness battery env: the DaemonProcess call site wires it", () => {
       repoFullName: "o/r",
       branch: "main",
       daemonCallbackUrl: "http://localhost:3999",
-      installationToken: "inst",
-      daemonToken: "daemon",
       orgId: "org-1",
+    };
+    // #380: the owner's env now arrives inside the sealed secrets.
+    const harnessSecrets = {
+      ...TEST_SECRETS,
       repoEnv: { PLAYWRIGHT_BROWSERS_PATH: "/evil" },
     };
     const packDir = "/usr/local/lib/automata-batteries/gstack@x";
@@ -1055,6 +1059,8 @@ describe("harness battery env: the DaemonProcess call site wires it", () => {
         },
       },
       "http://127.0.0.1:4242",
+      null,
+      { secrets: harnessSecrets },
     );
     const internals = daemon as unknown as {
       ensureEnv(): Promise<NodeJS.ProcessEnv>;

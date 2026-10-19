@@ -9,12 +9,16 @@ import {
 } from "@terragon/shared/model/test-helpers";
 import {
   thread as threadTable,
+  threadChat as threadChatTable,
   hatchetRun as hatchetRunTable,
 } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 import { User } from "@terragon/shared";
 import { runSupersedeSweep } from "./supersede-sweep";
 import type { AgentRunStatus } from "@/agent/hatchet/transport";
+import { auth } from "@/lib/auth";
+import { daemonRunKey, hasActiveDaemonToken } from "@/lib/daemon-token";
+import { vi } from "vitest";
 
 /**
  * #125 C4 sweep rules against the real DB with an injected engine status
@@ -269,6 +273,527 @@ describe("runSupersedeSweep (#125 C4)", () => {
     expect(report.orphans).toContain(orphan.threadId);
     expect((await threadRow(orphan.threadId)).terminalCause).toBe(
       "plane-offline",
+    );
+  });
+});
+
+/**
+ * #380 sweep rule (iii) + token revocation on every sweep terminal.
+ * Cards:
+ *  - (iii) FAILED: protects=a run that died before posting back (any
+ *    lane, no run row) is terminalised `run-failed-unreported` after N and
+ *    its daemon token revoked so a retry is not skipped; fails_when=the
+ *    thread stays booting, the token stays live, or a younger thread is
+ *    touched; no_claim=the engine listing (injected).
+ *  - (iii) RUNNING / empty: protects=a live or invisible run is left
+ *    alone; fails_when=it is terminalised; no_claim=none.
+ *  - (iii) row ⇒ rule (i): protects=a thread WITH a run row is never
+ *    listed by rule (iii) (rule (i) owns it) and rule (i)'s own FAILED
+ *    terminal ALSO revokes the token; fails_when=listRuns is consulted for
+ *    a row-bearing thread or the token survives rule (i); no_claim=none.
+ */
+describe("runSupersedeSweep rule (iii) — failed-unreported runs (#380)", () => {
+  let user: User;
+  let orgId: string;
+  const T = 10 * 60 * 1000;
+  const N = 15 * 60 * 1000;
+
+  beforeEach(async () => {
+    user = (await createTestUser({ db })).user;
+    orgId = await createTestOrg({ db });
+  });
+
+  /** A non-review (task) thread dispatched remotely, booting for `ageMs`, with its daemon token minted. */
+  async function bootingTaskThread(ageMs: number) {
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        organizationId: orgId,
+        sandboxProvider: "hatchet-remote",
+        githubRepoFullName: "be-automata/automata",
+      },
+    });
+    const stamp = new Date(Date.now() - ageMs);
+    await db
+      .update(threadTable)
+      .set({ status: "booting", createdAt: stamp, updatedAt: stamp })
+      .where(eq(threadTable.id, t.threadId));
+    // As in production: nothing writes the chat row after the dispatch
+    // either, so the thread's EFFECTIVE last write is the dispatch.
+    await db
+      .update(threadChatTable)
+      .set({ updatedAt: stamp })
+      .where(eq(threadChatTable.threadId, t.threadId));
+    const name = daemonRunKey(t);
+    await auth.api.createApiKey({
+      body: { name, userId: user.id, metadata: { tokenType: "daemon" } },
+    });
+    return { ...t, name };
+  }
+  const threadRow = async (id: string) =>
+    (
+      await db.query.thread.findMany({ where: (t, { eq: e }) => e(t.id, id) })
+    )[0]!;
+  const reader = (map: Record<string, AgentRunStatus>) => async (id: string) =>
+    map[id] ?? "NOT_FOUND";
+
+  it("every engine run FAILED + older than N ⇒ run-failed-unreported, token revoked; younger / RUNNING / unlisted ⇒ untouched", async () => {
+    const dead = await bootingTaskThread(N + 60_000);
+    const young = await bootingTaskThread(N - 60_000);
+    const live = await bootingTaskThread(N + 60_000);
+    const unseen = await bootingTaskThread(N + 60_000);
+    const listRuns = vi.fn(async (hint: { threadId: string }) => {
+      if (hint.threadId === dead.threadId)
+        return [{ externalId: "r-dead", status: "FAILED" as const }];
+      if (hint.threadId === live.threadId)
+        return [
+          { externalId: "r-live-1", status: "FAILED" as const },
+          { externalId: "r-live-2", status: "RUNNING" as const },
+        ];
+      return [];
+    });
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns,
+    });
+    expect(report.unreported).toEqual([dead.threadId]);
+    expect(listRuns.mock.calls.map(([h]) => h.threadId).sort()).toEqual(
+      [dead.threadId, live.threadId, unseen.threadId].sort(),
+    );
+    const deadRow = await threadRow(dead.threadId);
+    expect(deadRow.terminalCause).toBe("run-failed-unreported");
+    expect(deadRow.status).toBe("complete");
+    expect(
+      await hasActiveDaemonToken({ userId: user.id, name: dead.name }),
+    ).toBe(false);
+    for (const t of [young, live, unseen]) {
+      expect((await threadRow(t.threadId)).status).toBe("booting");
+      expect(
+        await hasActiveDaemonToken({ userId: user.id, name: t.name }),
+      ).toBe(true);
+    }
+    // Idempotent: a second tick finds nothing new.
+    const again = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns,
+    });
+    expect(again.unreported).toEqual([]);
+  });
+
+  it("rule (i): a review run FAILED while its thread is still booting (unsealable payload) ⇒ run-failed-unreported; FAILED after the daemon was up stays daemon-failed", async () => {
+    const booting = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 41,
+      externalId: "r-boot-failed",
+      ageMs: T + 60_000,
+      repoFullName: "be-automata/automata",
+      status: "booting",
+    });
+    const working = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 42,
+      externalId: "r-work-failed",
+      ageMs: T + 60_000,
+      repoFullName: "be-automata/automata",
+    });
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({
+        "r-boot-failed": "FAILED",
+        "r-work-failed": "FAILED",
+      }),
+      listRuns: async () => [],
+    });
+    expect(report.terminals).toEqual(
+      expect.arrayContaining([
+        { threadId: booting.threadId, cause: "run-failed-unreported" },
+        { threadId: working.threadId, cause: "daemon-failed" },
+      ]),
+    );
+    expect((await threadRow(booting.threadId)).terminalCause).toBe(
+      "run-failed-unreported",
+    );
+    expect((await threadRow(working.threadId)).terminalCause).toBe(
+      "daemon-failed",
+    );
+  });
+
+  it("rule (i) generation guard: a FAILED row whose thread was RESUMED later (booting again, written well after the dispatch) is retired as stale — no terminal, token kept", async () => {
+    const resumed = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 43,
+      externalId: "r-stale-attempt",
+      ageMs: T + 60_000,
+      repoFullName: "be-automata/automata",
+      status: "booting",
+    });
+    // The resume: a later write on the thread (minutes after the row).
+    await db
+      .update(threadTable)
+      .set({ updatedAt: new Date() })
+      .where(eq(threadTable.id, resumed.threadId));
+    const name = daemonRunKey(resumed);
+    await auth.api.createApiKey({
+      body: { name, userId: user.id, metadata: { tokenType: "daemon" } },
+    });
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({ "r-stale-attempt": "FAILED" }),
+      listRuns: async () => [],
+    });
+    expect(report.terminals).toEqual([]);
+    expect((await threadRow(resumed.threadId)).status).toBe("booting");
+    expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(true);
+    const [row] = await db
+      .select({ status: hatchetRunTable.status })
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.externalId, "r-stale-attempt"));
+    expect(row?.status).toBe("terminal");
+  });
+
+  it("rule (i) generation guard: a FAILED row whose thread is stamped with a DIFFERENT active run (already working) is retired as stale — no terminal, token kept", async () => {
+    const { setThreadActiveRun } = await import(
+      "@terragon/shared/model/threads"
+    );
+    const older = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 44,
+      externalId: "r-older-attempt",
+      ageMs: T + 60_000,
+      repoFullName: "be-automata/automata",
+    });
+    await setThreadActiveRun({
+      db,
+      threadId: older.threadId,
+      externalId: "r-newer-attempt",
+    });
+    const name = daemonRunKey(older);
+    await auth.api.createApiKey({
+      body: { name, userId: user.id, metadata: { tokenType: "daemon" } },
+    });
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({ "r-older-attempt": "FAILED" }),
+      listRuns: async () => [],
+    });
+    expect(report.terminals).toEqual([]);
+    expect((await threadRow(older.threadId)).status).toBe("working");
+    expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(true);
+    const [row] = await db
+      .select({ status: hatchetRunTable.status })
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.externalId, "r-older-attempt"));
+    expect(row?.status).toBe("terminal");
+  });
+
+  it("the generation guard covers every TERMINAL branch: a CANCELLED (user-stopped) stale row on a resumed, booting thread is retired; the thread and the new run's token are untouched", async () => {
+    const resumed = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 45,
+      externalId: "r-stopped-attempt",
+      ageMs: T + 60_000,
+      repoFullName: "be-automata/automata",
+      status: "booting",
+    });
+    // The resume under a new attempt: a later thread write + the new token.
+    await db
+      .update(threadTable)
+      .set({ updatedAt: new Date() })
+      .where(eq(threadTable.id, resumed.threadId));
+    const name = daemonRunKey(resumed);
+    await auth.api.createApiKey({
+      body: { name, userId: user.id, metadata: { tokenType: "daemon" } },
+    });
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({ "r-stopped-attempt": "CANCELLED" }),
+      listRuns: async () => [],
+    });
+    expect(report.terminals).toEqual([]);
+    expect((await threadRow(resumed.threadId)).status).toBe("booting");
+    expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(true);
+    const [row] = await db
+      .select({ status: hatchetRunTable.status })
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.externalId, "r-stopped-attempt"));
+    expect(row?.status).toBe("terminal");
+  });
+
+  it("the guard never touches a LIVE current-generation row: QUEUED behind the box slot, thread booting with a late write, stamp == this run ⇒ stays in_flight, lease pushed", async () => {
+    const { setThreadActiveRun } = await import(
+      "@terragon/shared/model/threads"
+    );
+    const queued = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 46,
+      externalId: "r-queued-current",
+      ageMs: T + 60_000,
+      repoFullName: "be-automata/automata",
+      status: "booting",
+    });
+    await setThreadActiveRun({
+      db,
+      threadId: queued.threadId,
+      externalId: "r-queued-current",
+    });
+    // A bookkeeping write long after dispatch (the stamp above just did one).
+    await db
+      .update(threadTable)
+      .set({ updatedAt: new Date() })
+      .where(eq(threadTable.id, queued.threadId));
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({ "r-queued-current": "QUEUED" }),
+      listRuns: async () => [],
+    });
+    expect(report.terminals).toEqual([]);
+    expect((await threadRow(queued.threadId)).status).toBe("booting");
+    const [row] = await db
+      .select({
+        status: hatchetRunTable.status,
+        lease: hatchetRunTable.sweepLeaseUntil,
+      })
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.externalId, "r-queued-current"));
+    expect(row?.status).toBe("in_flight");
+    // The lease is a wall-clock contract: the sweep must push it more than
+    // ten minutes ahead of now, so the bound IS the claim.
+    // gstack-timing-ok: the lease bound is the contract under test
+    expect(row?.lease?.getTime()).toBeGreaterThan(Date.now() + 10 * 60 * 1000);
+  });
+
+  it("a thread WITH a run row is rule (i)'s: never listed by rule (iii), and rule (i)'s FAILED terminal revokes its daemon token too", async () => {
+    const { threadId, threadChatId } = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 31,
+      externalId: "r-row-failed",
+      ageMs: T + 60_000,
+      repoFullName: "be-automata/automata",
+    });
+    const name = daemonRunKey({ threadId, threadChatId });
+    await auth.api.createApiKey({
+      body: { name, userId: user.id, metadata: { tokenType: "daemon" } },
+    });
+    const listRuns = vi.fn(async (_hint: { threadId: string }) => []);
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({ "r-row-failed": "FAILED" }),
+      listRuns,
+    });
+    expect(report.terminals).toEqual([{ threadId, cause: "daemon-failed" }]);
+    expect(report.unreported).toEqual([]);
+    expect(listRuns.mock.calls.map(([h]) => h.threadId)).not.toContain(
+      threadId,
+    );
+    expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(false);
+  });
+
+  it("a thread whose only run row is RETIRED (a re-run of a thread that once had a review) is rule (iii)'s again", async () => {
+    const { retireHatchetRun } = await import(
+      "@terragon/shared/model/hatchet-run"
+    );
+    const old = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 51,
+      externalId: "r-retired",
+      ageMs: N + 120_000,
+      repoFullName: "be-automata/automata",
+      status: "booting",
+    });
+    await retireHatchetRun({
+      db,
+      key: { externalId: "r-retired" },
+      as: "terminal",
+    });
+    const stamp = new Date(Date.now() - N - 60_000);
+    await db
+      .update(threadTable)
+      .set({ updatedAt: stamp })
+      .where(eq(threadTable.id, old.threadId));
+    const name = daemonRunKey(old);
+    await auth.api.createApiKey({
+      body: { name, userId: user.id, metadata: { tokenType: "daemon" } },
+    });
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns: async (hint) =>
+        hint.threadId === old.threadId
+          ? [{ externalId: "r-rerun", status: "FAILED" as const }]
+          : [],
+    });
+    expect(report.unreported).toContain(old.threadId);
+    expect((await threadRow(old.threadId)).terminalCause).toBe(
+      "run-failed-unreported",
+    );
+    expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(false);
+  });
+
+  it("rule (iii) race: a thread re-dispatched between the listing and the write (a later updatedAt) is left alone — no terminal, new token kept", async () => {
+    const t = await bootingTaskThread(N + 60_000);
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns: async (hint) => {
+        if (hint.threadId === t.threadId) {
+          // The resume lands while the engine is being asked.
+          await db
+            .update(threadTable)
+            .set({ updatedAt: new Date() })
+            .where(eq(threadTable.id, t.threadId));
+          return [{ externalId: "r-before-resume", status: "FAILED" as const }];
+        }
+        return [];
+      },
+    });
+    expect(report.unreported).not.toContain(t.threadId);
+    expect((await threadRow(t.threadId)).status).toBe("booting");
+    expect(await hasActiveDaemonToken({ userId: user.id, name: t.name })).toBe(
+      true,
+    );
+  });
+
+  /**
+   * Chat-mode threads (enableThreadChatCreation) move to `booting` through
+   * the threadChat row; the thread row keeps its creation status and its
+   * old updatedAt. Cards:
+   *  - anchor: protects=rule (iii) ages a chat-mode thread by its chat row's
+   *    write (the dispatch), never by the stale thread row; fails_when=the
+   *    age anchor reads thread.updatedAt only (a thread re-dispatched moments
+   *    ago, whose previous run FAILED, is terminalised and its new token
+   *    revoked); no_claim=none.
+   *  - fence: protects=a chat-row write between the listing and the terminal
+   *    refuses the write; fails_when=the fence reads the thread row only;
+   *    no_claim=none.
+   *  - both rows: protects=a terminal applied to a chat-mode thread lands on
+   *    the chat row (live status) AND the thread row (typed cause);
+   *    fails_when=either is skipped; no_claim=none.
+   */
+  it("chat-mode: rule (iii) ages the thread by its chat row's write — a thread re-dispatched moments ago (old thread row) is untouched; one booting since N is terminal on both rows; a chat-row write mid-tick is fenced", async () => {
+    const chatThread = async (chatAgeMs: number, threadAgeMs: number) => {
+      const t = await createTestThread({
+        db,
+        userId: user.id,
+        overrides: {
+          organizationId: orgId,
+          sandboxProvider: "hatchet-remote",
+          githubRepoFullName: "be-automata/automata",
+        },
+        chatOverrides: { status: "booting" },
+        enableThreadChatCreation: true,
+      });
+      await db
+        .update(threadTable)
+        .set({
+          createdAt: new Date(Date.now() - threadAgeMs),
+          updatedAt: new Date(Date.now() - threadAgeMs),
+        })
+        .where(eq(threadTable.id, t.threadId));
+      await db
+        .update(threadChatTable)
+        .set({ updatedAt: new Date(Date.now() - chatAgeMs) })
+        .where(eq(threadChatTable.threadId, t.threadId));
+      // No daemon token here: a chat-mode run key exceeds the auth key-name
+      // cap (the known v1 dispatch blocker), so the revoke leg is proven by
+      // the legacy cases above; this case proves the anchor and the fence.
+      return t;
+    };
+    const chatRow = async (threadId: string) =>
+      (
+        await db
+          .select()
+          .from(threadChatTable)
+          .where(eq(threadChatTable.threadId, threadId))
+      )[0]!;
+    // Re-dispatched 1 min ago through the chat row; thread row untouched
+    // since the FAILED attempt 20 min ago.
+    const resumed = await chatThread(60_000, N + 5 * 60_000);
+    // Booting since N + 1 min on both rows.
+    const stale = await chatThread(N + 60_000, N + 60_000);
+    // Other tests' booting threads share the database: answer only for ours.
+    const mine = new Set([resumed.threadId, stale.threadId]);
+    const listRuns = async (hint: { threadId: string }) =>
+      mine.has(hint.threadId)
+        ? [{ externalId: "r-failed", status: "FAILED" as const }]
+        : [];
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns,
+    });
+    expect(report.unreported).toEqual([stale.threadId]);
+    expect((await chatRow(resumed.threadId)).status).toBe("booting");
+    expect((await threadRow(resumed.threadId)).terminalCause).toBeNull();
+    const staleChat = await chatRow(stale.threadId);
+    expect(staleChat.status).toBe("complete");
+    expect(staleChat.terminalCause).toBe("run-failed-unreported");
+    expect((await threadRow(stale.threadId)).terminalCause).toBe(
+      "run-failed-unreported",
+    );
+
+    // The fence: a chat-row write between the listing and the terminal.
+    const racing = await chatThread(N + 60_000, N + 60_000);
+    const raced = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns: async (hint) => {
+        if (hint.threadId !== racing.threadId) return [];
+        await db
+          .update(threadChatTable)
+          .set({ updatedAt: new Date() })
+          .where(eq(threadChatTable.threadId, racing.threadId));
+        return [{ externalId: "r-failed", status: "FAILED" as const }];
+      },
+    });
+    expect(raced.unreported).not.toContain(racing.threadId);
+    expect((await chatRow(racing.threadId)).status).toBe("booting");
+  });
+
+  it("a listing failure leaves the thread for the next tick (no terminal, token kept)", async () => {
+    const t = await bootingTaskThread(N + 60_000);
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns: async () => {
+        throw new Error("engine 503");
+      },
+    });
+    expect(report.unreported).toEqual([]);
+    expect((await threadRow(t.threadId)).status).toBe("booting");
+    expect(await hasActiveDaemonToken({ userId: user.id, name: t.name })).toBe(
+      true,
     );
   });
 });

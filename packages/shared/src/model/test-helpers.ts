@@ -317,7 +317,7 @@ export async function createTestRemoteRun({
   repoFullName?: string;
   /** Chat-mode thread: the live status sits on the threadChat row. */
   enableThreadChatCreation?: boolean;
-  status?: "working" | "complete";
+  status?: "working" | "complete" | "booting";
   reviewedSha?: string;
   automationId?: string;
   snapshot?: SupersedeSnapshot;
@@ -357,10 +357,27 @@ export async function createTestRemoteRun({
     snapshot,
   });
   if (ageMs > 0) {
+    const dispatchedAt = new Date(Date.now() - ageMs);
     await db
       .update(schema.hatchetRun)
-      .set({ createdAt: new Date(Date.now() - ageMs) })
+      .set({ createdAt: dispatchedAt })
       .where(eq(schema.hatchetRun.id, run.id));
+    // A dispatched thread's last write IS its dispatch (the active-run stamp
+    // lands seconds after the trigger): age the thread row with the run, as
+    // production would look, so the sweep's generation guard (#380) sees a
+    // thread that was NOT written again after this run — a test that models
+    // a later resume bumps `updatedAt` itself.
+    await db
+      .update(schema.thread)
+      .set({ updatedAt: dispatchedAt })
+      .where(eq(schema.thread.id, threadId));
+    // The chat row too: the sweep reads the thread's EFFECTIVE last write
+    // (the later of both rows), and nothing writes the chat row after the
+    // dispatch in production either.
+    await db
+      .update(schema.threadChat)
+      .set({ updatedAt: dispatchedAt })
+      .where(eq(schema.threadChat.threadId, threadId));
   }
   return { threadId, threadChatId, runId: run.id };
 }

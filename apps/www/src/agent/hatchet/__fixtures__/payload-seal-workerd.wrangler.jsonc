@@ -1,0 +1,9 @@
+// Test-only wrangler config for payload-seal.workerd.test.ts: runs the
+// payload-seal fixture worker under workerd with www's exact compatibility
+// settings (see apps/www/wrangler.jsonc). Never deployed.
+{
+  "name": "payload-seal-workerd-it",
+  "main": "payload-seal-workerd.worker.ts",
+  "compatibility_date": "2026-06-05",
+  "compatibility_flags": ["nodejs_compat"],
+}

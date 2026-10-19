@@ -156,7 +156,10 @@ export function readTokenForRun({
   lane: RunLane;
   taskGate: TaskAgentGate;
   seeded: SeedBatteriesResult | undefined;
-  input: Pick<AgentRunInput, "githubReadToken" | "githubReadTokenExpiresAt">;
+  /** The expiry from the input plus the token from the unsealed RunSecrets (#380). */
+  input: Pick<AgentRunInput, "githubReadTokenExpiresAt"> & {
+    githubReadToken?: string;
+  };
   /** The run's credential brokers are on (config.credentialBroker). */
   brokered: boolean;
   now: number;

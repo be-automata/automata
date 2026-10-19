@@ -123,6 +123,12 @@ export const env = envsafe({
   HATCHET_API_URL: str({ default: "", allowEmpty: true }),
   HATCHET_TENANT_ID: str({ default: "", allowEmpty: true }),
   HATCHET_API_TOKEN: str({ default: "", allowEmpty: true }),
+  // #380: the execution plane's PUBLIC seal key, `<kid>:<base64url raw X25519>`
+  // (printed by packages/worker/scripts/gen-payload-seal-key.ts). When set,
+  // dispatch seals the per-run GitHub + daemon tokens to it, so the engine's
+  // Postgres and backups hold ciphertext only (closes ADR-003 F4). Empty =
+  // the legacy plain-text payload (rollout step 1; strict mode is PR 2).
+  HATCHET_PAYLOAD_SEAL_KEY: str({ default: "", allowEmpty: true }),
   // #125 C4 supersede sweep timing (ms). Unset = the sweep's own defaults
   // (10 min before consulting the engine about an in_flight run; 15 min
   // before a run-less remote thread is `plane-offline`).
